@@ -185,12 +185,22 @@ function SummaryCard({ label, paise }: { label: string; paise: number | string }
 /** Deposit-upload guidance: which FY a deposit counts for. */
 function DepositForMonthHint() {
   return (
-    <p data-testid="deposit-for-month-hint">
-      Each deposit counts for the financial year of the <strong>month whose TDS it pays</strong> — fill the
-      optional <strong>TDS for month</strong> column (e.g. <code>2026-03</code> or <code>Mar-2026</code>). Left blank:
-      a deposit made on the 1st–7th counts for the previous month, one made 8–30 April counts for March,
-      otherwise its own month. So March TDS deposited in April stays in the March financial year.
-    </p>
+    <div data-testid="deposit-for-month-hint" className="space-y-1">
+      <p>
+        Each deposit counts for the financial year of the <strong>month whose TDS it pays</strong> — fill the
+        optional <strong>TDS for month</strong> column (e.g. <code>2026-03</code> or <code>Mar-2026</code>). Left blank:
+        a deposit made on the 1st–7th counts for the previous month, one made 8–30 April counts for March,
+        otherwise its own month. So March TDS deposited in April stays in the March financial year.
+        Dates are read day-first (<code>07/04/2026</code> = 7 April 2026).
+      </p>
+      <p data-testid="deposit-upload-warnings">
+        <strong>Do not upload TDS that Gifsy already withheld from payouts</strong> (the &ldquo;deduct&rdquo;
+        method) — it is already counted as withheld, so uploading it again counts it twice.{' '}
+        <strong>An uploaded deposit cannot be edited or deleted</strong> — check every row in the preview
+        before you apply. A deposit already uploaded (same PAN, date and amount) is skipped, or rejected if
+        its TDS for month differs.
+      </p>
+    </div>
   );
 }
 

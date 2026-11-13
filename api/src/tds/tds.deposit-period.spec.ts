@@ -27,6 +27,8 @@ import {
   formatForPeriod,
   parseDepositUpload,
   parseForPeriodCell,
+  parseDateCell,
+  parseOffPlatformUpload,
   fyLabelForPeriod,
   type ParsedDepositRow,
 } from './tds.helpers';
@@ -605,5 +607,215 @@ describe('TdsService.uploadDeposit — stores forPeriod; dedup is per (…, forP
     const res = await service.uploadDeposit('194R', CLIENT, 'u1', multer(ab), true);
     expect(res.skipped).toBe(1);
     expect(mockPrisma.tdsDeposit.createMany).not.toHaveBeenCalled();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Audit fixes: day-first dates, header variants, month sanity, cross-upload duplicates
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('parseDateCell — Indian day-first text dates, never new Date(string)', () => {
+  const APR7 = new Date(Date.UTC(2026, 3, 7)).toISOString();
+  it.each(['07/04/2026', '7/4/2026', '07-04-2026', '07.04.2026', '07/04/26', '07-Apr-2026', '7 April 2026', '07 apr 26', '2026-04-07'])(
+    '%s → 7 April 2026',
+    (s) => {
+      expect(parseDateCell(s)?.toISOString()).toBe(APR7);
+    },
+  );
+
+  it('13/04/2026 → 13 April 2026', () => {
+    expect(parseDateCell('13/04/2026')?.toISOString()).toBe(new Date(Date.UTC(2026, 3, 13)).toISOString());
+  });
+
+  it('a zone-less time is India time: "2026-04-30 20:00" = 14:30 UTC, still 30 April → March TDS', () => {
+    const d = parseDateCell('2026-04-30 20:00')!;
+    expect(d.toISOString()).toBe('2026-04-30T14:30:00.000Z');
+    expect(defaultDepositForPeriod(d)).toBe('2026-03');
+    expect(parseDateCell('30/04/2026 20:00')!.toISOString()).toBe('2026-04-30T14:30:00.000Z');
+  });
+
+  it('an explicit zone is honoured: "2026-04-30T20:00:00Z" = 1 May 01:30 IST → April TDS', () => {
+    const d = parseDateCell('2026-04-30T20:00:00Z')!;
+    expect(d.toISOString()).toBe('2026-04-30T20:00:00.000Z');
+    expect(defaultDepositForPeriod(d)).toBe('2026-04');
+    expect(parseDateCell('2026-04-30T20:00+05:30')!.toISOString()).toBe('2026-04-30T14:30:00.000Z');
+  });
+
+  it.each(['04/31/2026', '31/02/2026', '13/13/2026', 'April 7, 2026', 'Apr 7 2026', '2026/04/07', '7th April 2026', 'yesterday', '07/04/2026 25:00'])(
+    'rejects %s',
+    (s) => {
+      expect(parseDateCell(s)).toBeNull();
+    },
+  );
+
+  it('an Excel date serial still works', () => {
+    const serial = Math.round((Date.UTC(2026, 3, 7) - Date.UTC(1899, 11, 30)) / 86_400_000);
+    expect(parseDateCell(serial)?.toISOString()).toBe(APR7);
+  });
+
+  it('parseForPeriodCell reads a full date day-first too (07/04/2026 → April, not July)', () => {
+    expect(parseForPeriodCell('07/04/2026')).toEqual({ period: '2026-04' });
+    expect(parseForPeriodCell('2026-04-30 20:00')).toEqual({ period: '2026-04' });
+    expect(parseForPeriodCell('07-Apr-2026')).toEqual({ period: '2026-04' });
+  });
+
+  it('both upload parsers read "07/04/<year>" as 7 April', () => {
+    const y = curFyStart; // this FY's April — already started, never in the future
+    const dep = parseDepositUpload(xlsxAb([['Date', 'Outlet Code', 'PAN', 'Amount (₹)'], [`07/04/${y}`, '', 'ABCDE1234F', 1000]]));
+    expect(dep.rows[0].depositDate.toISOString()).toBe(new Date(Date.UTC(y, 3, 7)).toISOString());
+    expect(dep.rows[0].forPeriod).toBe(`${y}-03`);
+    const off = parseOffPlatformUpload(xlsxAb([['Date', 'PAN', 'Outlet Code', 'Amount (₹)'], [`07/04/${y}`, 'ABCDE1234F', '', 1000]]));
+    expect(off.rows[0].entryDate.toISOString()).toBe(new Date(Date.UTC(y, 3, 7)).toISOString());
+  });
+});
+
+describe('deposit parser — header variants, month sanity checks', () => {
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  const depAug = iso(ymd(Y, 8, 20));
+
+  it.each(['TDS for month', 'TDS for Month (YYYY-MM)', 'For month', 'Period', '  tds  FOR   month ', 'PERIOD'])(
+    'header "%s" is the TDS-for-month column',
+    (h) => {
+      const { rows } = parseDepositUpload(xlsxAb([['Date', 'Outlet Code', 'PAN', 'Amount (₹)', h], [depAug, '', 'ABCDE1234F', 1000, `${Y}-07`]]));
+      expect(rows[0]).toMatchObject({ forPeriod: `${Y}-07`, forPeriodExplicit: true });
+    },
+  );
+
+  it('an extra month-like column is ignored with a warning', () => {
+    const { rows, result } = parseDepositUpload(
+      xlsxAb([['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'TDS for month', 'Payment Month'], [depAug, '', 'ABCDE1234F', 1000, `${Y}-07`, `${Y}-06`]]),
+    );
+    expect(rows[0].forPeriod).toBe(`${Y}-07`);
+    expect(result.warnings).toEqual([expect.objectContaining({ row: 1, message: expect.stringContaining('"Payment Month" was ignored') })]);
+  });
+
+  it('an unrecognised month-like column → warning, and the default rule applies', () => {
+    const { rows, result } = parseDepositUpload(
+      xlsxAb([['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'Month of TDS'], [depAug, '', 'ABCDE1234F', 1000, `${Y}-07`]]),
+    );
+    expect(rows[0]).toMatchObject({ forPeriod: `${Y}-08`, forPeriodExplicit: false });
+    expect(result.warnings?.[0].message).toMatch(/"Month of TDS" looks like a month column but was not recognised/);
+  });
+
+  it('a month more than 12 months before the deposit → row error; exactly 12 months is allowed', () => {
+    const d = ymd(Y, 8, 20);
+    const thirteen = `${Y - 1}-07`;
+    const twelve = `${Y - 1}-08`;
+    const { rows, result } = parseDepositUpload(
+      xlsxAb([['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'TDS for month'], [iso(d), '', 'ABCDE1234F', 1000, thirteen], [iso(d), '', 'ABCDE1234F', 1000, twelve]]),
+    );
+    expect(result.errors).toEqual([expect.objectContaining({ row: 2, message: expect.stringMatching(/more than 12 months before/) })]);
+    expect(rows.map((r) => r.forPeriod)).toEqual([twelve]);
+  });
+
+  it('an explicit month in a DIFFERENT FY than the default → allowed with a preview warning; same FY → no warning', () => {
+    const { rows, result } = parseDepositUpload(
+      xlsxAb([
+        ['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'TDS for month'],
+        [iso(ymd(Y + 1, 4, 7)), '', 'ABCDE1234F', 1000, APRIL_NEXT], // default March (FY Y) → given April (FY Y+1)
+        [depAug, '', 'ABCDE1234F', 1000, `${Y}-07`], // same FY
+      ]),
+    );
+    expect(rows).toHaveLength(2);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings![0]).toMatchObject({ row: 2 });
+    expect(result.warnings![0].message).toContain(`FY ${NEXT_FY}, not FY ${FY}`);
+  });
+});
+
+describe('TdsService.uploadDeposit — cross-upload duplicates (any earlier file / batch)', () => {
+  let service: TdsService;
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        TdsService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+      ],
+    }).compile();
+    service = module.get(TdsService);
+    for (const m of Object.values(mockPrisma)) m.findMany.mockResolvedValue([]);
+    mockPrisma.tdsDeposit.createMany.mockResolvedValue({ count: 0 });
+  });
+
+  const header = ['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'TDS for month'];
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  const D = ymd(Y, 9, 15);
+  const stored = (over: Partial<Record<string, unknown>> = {}) => ({
+    clientId: CLIENT,
+    panNumber: 'ABCDE1234F',
+    depositDate: D,
+    amountPaise: 100_000n,
+    outletCode: null,
+    forPeriod: `${Y}-09`,
+    ...over,
+  });
+
+  it('same deposit already stored by ANOTHER file (same month) → skipped on preview AND apply; nothing inserted', async () => {
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([stored()]);
+    const ab = xlsxAb([header, [iso(D), '', 'abcde1234f', 1000, '']]);
+    const preview = await service.uploadDeposit('194R', CLIENT, 'u1', multer(ab), false);
+    expect(preview).toMatchObject({ succeeded: 0, skipped: 1, failed: 0 });
+    expect(preview.errors[0].message).toMatch(/duplicate entry \(this deposit was already uploaded\)/);
+
+    const applied = await service.uploadDeposit('194R', CLIENT, 'u1', multer(ab), true);
+    expect(applied.skipped).toBe(1);
+    expect(mockPrisma.tdsDeposit.createMany).not.toHaveBeenCalled();
+    const where = mockPrisma.tdsDeposit.findMany.mock.calls[0][0].where;
+    expect(where).toMatchObject({ section: 'SEC_194R', clientId: CLIENT, panNumber: { in: ['ABCDE1234F'] } });
+    expect(where).not.toHaveProperty('uploadBatchId'); // not limited to this file's batch
+  });
+
+  it('a stored copy with NO forPeriod (older build) still matches via the default rule', async () => {
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([stored({ forPeriod: null })]);
+    const res = await service.uploadDeposit('194R', CLIENT, 'u1', multer(xlsxAb([header, [iso(D), '', 'ABCDE1234F', 1000, '']])), true);
+    expect(res.skipped).toBe(1);
+    expect(mockPrisma.tdsDeposit.createMany).not.toHaveBeenCalled();
+  });
+
+  it('same deposit, only the TDS for month differs → conflict row error, not inserted', async () => {
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([stored()]);
+    const res = await service.uploadDeposit(
+      '194R', CLIENT, 'u1', multer(xlsxAb([header, [iso(D), '', 'ABCDE1234F', 1000, `${Y}-08`]])), true,
+    );
+    expect(res).toMatchObject({ succeeded: 0, failed: 1 });
+    expect(res.errors[0].message).toContain(`already uploaded with TDS for month ${formatForPeriod(`${Y}-09`)}`);
+    expect(mockPrisma.tdsDeposit.createMany).not.toHaveBeenCalled();
+  });
+
+  it('a different amount / date / outlet is a different deposit → inserted', async () => {
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([stored()]);
+    const res = await service.uploadDeposit(
+      '194R', CLIENT, 'u1',
+      multer(xlsxAb([header, [iso(D), '', 'ABCDE1234F', 1001, ''], [iso(ymd(Y, 9, 16)), '', 'ABCDE1234F', 1000, ''], [iso(D), 'OUT9', 'ABCDE1234F', 1000, '']])),
+      true,
+    );
+    expect(res).toMatchObject({ succeeded: 3, skipped: 0, failed: 0 });
+    expect(mockPrisma.tdsDeposit.createMany.mock.calls[0][0].data).toHaveLength(3);
+  });
+
+  it('matching is one-to-one: 1 stored copy + 2 identical rows in the file → 1 skipped, 1 inserted', async () => {
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([stored()]);
+    const res = await service.uploadDeposit(
+      '194R', CLIENT, 'u1', multer(xlsxAb([header, [iso(D), '', 'ABCDE1234F', 1000, ''], [iso(D), '', 'ABCDE1234F', 1000, '']])), true,
+    );
+    expect(res).toMatchObject({ succeeded: 1, skipped: 1 });
+    expect(mockPrisma.tdsDeposit.createMany.mock.calls[0][0].data).toHaveLength(1);
+  });
+
+  it('two identical rows in ONE file (nothing stored) → the second is reported as a duplicate of the first', async () => {
+    const res = await service.uploadDeposit(
+      '194R', CLIENT, 'u1', multer(xlsxAb([header, [iso(D), '', 'ABCDE1234F', 1000, ''], [iso(D), '', 'ABCDE1234F', 1000, '']])), true,
+    );
+    expect(res).toMatchObject({ succeeded: 1, skipped: 1 });
+    expect(res.errors[0].message).toMatch(/Row 3: skipped — duplicate entry \(same as row 2 of this file\)/);
+  });
+
+  it('194C: platform-wide query (no clientId filter); a stored platform PAN deposit is detected', async () => {
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([stored({ clientId: null })]);
+    const res = await service.uploadDeposit('194C', null, 'u1', multer(xlsxAb([header, [iso(D), '', 'ABCDE1234F', 1000, '']])), true);
+    expect(res.skipped).toBe(1);
+    expect(mockPrisma.tdsDeposit.findMany.mock.calls[0][0].where).not.toHaveProperty('clientId');
   });
 });

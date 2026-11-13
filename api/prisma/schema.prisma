@@ -2034,7 +2034,7 @@ model TdsDeposit {
   // the optional "TDS for month" column, else the default rule (tds.helpers
   // defaultDepositForPeriod): deposit day ≤ 7 → previous month; 8–30 April → March of the same
   // year; otherwise the deposit's own month. Existing rows backfilled with the same rule
-  // (20261114120000_tds_deposit_for_period). Nullable only for a row written by an older build —
+  // (20261114130000_tds_deposit_for_period). Nullable only for a row written by an older build —
   // the reports then apply the same default rule.
   forPeriod     String?
   // FILE-LEVEL re-upload dedup (same model as TdsOffPlatformEntry): uploadBatchId is a

@@ -1327,66 +1327,18 @@ export class TdsService {
 
     const parsed = parseDepositUpload(ab);
     const result = parsed.result;
-    const rows = await this.validateNoPanUploadRows(parsed.rows, result, { clientId, section });
+    const validated = await this.validateNoPanUploadRows(parsed.rows, result, { clientId, section });
+    // Cross-upload duplicate check — runs on PREVIEW too, so what Apply will skip is visible first.
+    const toInsert = await this.dropAlreadyUploadedDeposits(validated, result, section, clientId);
 
-    if (!apply || rows.length === 0) {
+    if (!apply || toInsert.length === 0) {
       return result;
     }
 
     const prismaSection = sectionParamToEnum(section);
     const depositorType = section === '194R' ? 'CLIENT' : 'GIFSY';
-    const uploadBatchId = depositFileHash(rows);
-
-    // Rows already present for this file's batch id (same file re-upload → all). A 194C no-PAN row
-    // stores the outlet's TENANT (resolved on upload), so 194C dedup is not scoped by clientId.
-    const existing = await this.prisma.tdsDeposit.findMany({
-      where: {
-        section: prismaSection,
-        ...(section === '194C' ? {} : { clientId: clientId ?? null }),
-        uploadBatchId,
-      },
-      select: {
-        panNumber: true,
-        depositDate: true,
-        amountPaise: true,
-        outletCode: true,
-        forPeriod: true,
-      },
-    });
-    const existingKeys = new Set(
-      existing.map((e) =>
-        this.depositDedupKey(
-          e.panNumber,
-          e.depositDate,
-          e.amountPaise,
-          e.outletCode ?? null,
-          depositPeriodOf(e),
-        ),
-      ),
-    );
-
-    const toInsert: typeof rows = [];
-    rows.forEach((r, idx) => {
-      const key = this.depositDedupKey(
-        r.panNumber,
-        r.depositDate,
-        r.amountPaise,
-        r.outletCode ?? null,
-        r.forPeriod,
-      );
-      if (existingKeys.has(key)) {
-        result.skipped += 1;
-        result.succeeded -= 1;
-        // The parser's REAL sheet row (error rows before this one are not in `rows`, so idx is off).
-        const sheetRow = this.sheetRowOf(r) || idx + 2;
-        result.errors.push({
-          row: sheetRow,
-          message: `Row ${sheetRow}: skipped — duplicate entry (already uploaded in this file)`,
-        });
-      } else {
-        toInsert.push(r);
-      }
-    });
+    // Hash of the whole (validated) file — the DB partial-unique index stays the race safety-net.
+    const uploadBatchId = depositFileHash(validated);
 
     if (toInsert.length > 0) {
       await this.prisma.tdsDeposit.createMany({
@@ -1411,21 +1363,94 @@ export class TdsService {
     return result;
   }
 
-  /** Natural-key string mirroring the tds_deposits_dedup_unique index. */
-  private depositDedupKey(
-    panNumber: string,
-    depositDate: Date,
-    amountPaise: bigint,
-    outletCode: string | null,
-    forPeriod: string | null,
-  ): string {
-    return [
-      panNumber,
-      depositDate.toISOString(),
-      amountPaise.toString(),
-      outletCode ?? '',
-      forPeriod ?? '',
-    ].join('|');
+  /**
+   * Cross-upload duplicate guard for deposits. A deposit is "the same deposit" when it matches an
+   * already-stored one on (tenant, section, PAN / no-PAN marker, Outlet Code if any, deposit date,
+   * amount) — REGARDLESS of which file/batch stored it or its "TDS for month" (there is no challan
+   * number column to tell two such deposits apart). Per row:
+   *   - same deposit, same TDS for month      → skipped ("duplicate entry — already uploaded");
+   *   - same deposit, DIFFERENT TDS for month → row error (conflict; never a second deposit — a
+   *     stored deposit cannot be edited, so re-uploading with a corrected month must not add one);
+   *   - identical to an EARLIER row of this file (incl. the month) → skipped.
+   * Matching is one-to-one: N stored copies absorb at most N incoming rows. 194R is scoped to the
+   * tenant by the query; 194C compares the stored tenant (a no-PAN row records its outlet's tenant).
+   * Counts in `result` are adjusted. Returns the rows still to insert.
+   */
+  private async dropAlreadyUploadedDeposits<
+    R extends {
+      panNumber: string;
+      outletCode: string | null;
+      depositDate: Date;
+      amountPaise: bigint;
+      forPeriod: string;
+      resolvedClientId?: string;
+    },
+  >(rows: R[], result: UploadResult, section: '194R' | '194C', clientId: string | null): Promise<R[]> {
+    if (rows.length === 0) return rows;
+    const tenantOf = (cid: string | null | undefined) => (section === '194C' ? (cid ?? '') : '');
+    const keyOf = (cid: string | null | undefined, pan: string, outlet: string | null | undefined, date: Date, amt: bigint) =>
+      [tenantOf(cid), pan.trim().toUpperCase(), (outlet ?? '').trim().toUpperCase(), date.toISOString(), amt.toString()].join('|');
+
+    const existing = await this.prisma.tdsDeposit.findMany({
+      where: {
+        section: sectionParamToEnum(section),
+        ...(section === '194C' ? {} : { clientId: clientId ?? null }),
+        panNumber: { in: [...new Set(rows.map((r) => r.panNumber))] },
+        depositDate: { in: [...new Map(rows.map((r) => [r.depositDate.getTime(), r.depositDate])).values()] },
+      },
+      select: { clientId: true, panNumber: true, depositDate: true, amountPaise: true, outletCode: true, forPeriod: true },
+    });
+    // natural key → the TDS-for-month of each stored copy (consumed one-to-one below)
+    const stored = new Map<string, string[]>();
+    for (const e of existing) {
+      const k = keyOf(e.clientId, e.panNumber, e.outletCode, e.depositDate, e.amountPaise);
+      const list = stored.get(k) ?? [];
+      list.push(depositPeriodOf(e) ?? '');
+      stored.set(k, list);
+    }
+
+    const seenInFile = new Map<string, number>(); // key + month → first sheet row
+    const out: R[] = [];
+    rows.forEach((r, idx) => {
+      const sheetRow = this.sheetRowOf(r) || idx + 2;
+      const k = keyOf(r.resolvedClientId ?? clientId, r.panNumber, r.outletCode, r.depositDate, r.amountPaise);
+      const list = stored.get(k);
+      if (list && list.length) {
+        const same = list.indexOf(r.forPeriod);
+        if (same >= 0) {
+          list.splice(same, 1);
+          result.skipped += 1;
+          result.succeeded -= 1;
+          result.errors.push({
+            row: sheetRow,
+            message: `Row ${sheetRow}: skipped — duplicate entry (this deposit was already uploaded)`,
+          });
+        } else {
+          const prev = list.shift()!;
+          result.failed += 1;
+          result.succeeded -= 1;
+          result.errors.push({
+            row: sheetRow,
+            message: `Row ${sheetRow}: this deposit (same PAN, date and amount) was already uploaded with TDS for month ${prev ? formatForPeriod(prev) : '(none)'} — this row says ${formatForPeriod(r.forPeriod)}. Not added: an uploaded deposit cannot be changed or re-dated.`,
+          });
+        }
+        return;
+      }
+      const fk = `${k}|${r.forPeriod}`;
+      const first = seenInFile.get(fk);
+      if (first !== undefined) {
+        result.skipped += 1;
+        result.succeeded -= 1;
+        result.errors.push({
+          row: sheetRow,
+          message: `Row ${sheetRow}: skipped — duplicate entry (same as row ${first} of this file)`,
+        });
+        return;
+      }
+      seenInFile.set(fk, sheetRow);
+      out.push(r);
+    });
+    return out;
   }
 
   /**

@@ -63,5 +63,10 @@ describe('TDS page — deposit "TDS for month"', () => {
     expect(hint.textContent).toMatch(/TDS for month/);
     expect(hint.textContent).toMatch(/1st–7th counts for the previous month/);
     expect(hint.textContent).toMatch(/8–30 April counts for March/);
+    expect(hint.textContent).toMatch(/07\/04\/2026 = 7 April 2026/);
+    // Never re-upload TDS Gifsy already withheld (deduct) + deposits can't be edited after upload.
+    const warn = screen.getAllByTestId('deposit-upload-warnings')[0];
+    expect(warn.textContent).toMatch(/Do not upload TDS that Gifsy already withheld from payouts/);
+    expect(warn.textContent).toMatch(/cannot be edited or deleted/);
   });
 });
