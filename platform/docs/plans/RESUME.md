@@ -12,6 +12,30 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 📍 STATE 2026-11-11 — read this FIRST
 
+> **📍 2026-11-13 — WHAT'S IN FLIGHT (supersedes the 11-12 block below where they differ):**
+> 1. ✅ **Applies-to (KPI + visibility scope) LIVE ON STAGING** — develop `7a78bc26`; Bajaj staging role test PASSED
+>    (admin scope form + live count, template Program/Sub-Program + N/A, upload ignoredOutOfScope, Unnati partner hides
+>    SAMT-only LINES, SAMT partner sees it; temp scope reverted). Still to check on staging: sales-rep views + visibility editor.
+> 2. ✅ **Bajaj prod imports done:** outlets/KYC/docs, visibility history (51,123 / 61,779 photos), wholesaler points
+>    (2,281 wallets = vendor 11-Nov closing, Σ 67,27,723; 8 NEGATIVE wallets kept) — `BAJAJ-PROD-OUTLET-IMPORT.md` §8, §9b.
+>    ⏸ Payout history (48,086 / ₹2.89 cr) dry-run PASS → runs AFTER the release (§9). Partial vendor TDS (119 wholesalers)
+>    approved → after payout history (§10).
+> 3. 🔧 **Release `feat/payout-without-pan`** (no-PAN payouts · rounding · TDS deposit-only rows + deposit "TDS for month"
+>    + day-first dates + cross-upload dedup + 194C withheld-only/entity type · KYC labels · wallet: never-adds-points clamp
+>    + INTERIM reversal rules (points reversals refused on wallets carrying debt; payout reversals whole-entry, exact
+>    subset, never consumed twice)) — dual audits done; last fix round → push (gates) → staging → owner prod deploy.
+>    ⚠️ **PREPARE MAIN = `git revert e8c3f46` EXPLICITLY** (re-adds the 194R VENDOR_IMPORT exclusion — owner 2026-11-12:
+>    ship the rule before the payout-history import). A plain merge does NOT undo the revert (audit 2026-11-13). After
+>    preparing, verify `git grep VENDOR_IMPORT <main> -- api/src/tds` hits BOTH tds.service.ts and its spec. This REPLACES
+>    the old "keep TDS revert" rule.
+> 4. ⏸ **Wallet reversal engine = FAST FOLLOW-UP AFTER GO-LIVE** (owner 2026-11-13). Branch `feat/wallet-reversal-engine`
+>    (pushed), complete record + resume checklist in `WALLET-REVERSAL-ENGINE-DESIGN.md` on that branch.
+> 5. Next go-live work: targets/achievement import (need file + column→prod KPI mapping) · client training deck.
+> 6. Open owner decision (non-blocking, pre-existing): 194C "Outstanding" = liability − deposited − withheld double-counts
+>    once Gifsy uploads deposits for withheld DEDUCT TDS (guide now says don't upload withheld TDS as a deposit). Prod has 0
+>    deposits/deductions today.
+> 7. Process rule: staging role tests — log in myself with FIXED_OTP 123456; prod logins stay with the owner.
+
 > **📍 2026-11-12 (afternoon) — WHAT'S IN FLIGHT (read first):**
 > 1. ✅ **Bajaj outlet/KYC/document import LIVE on prod + verified** (6,491 outlets, 22,621 docs in our storage, 19 owner
 >    groups) — full record + correction runbook: `BAJAJ-PROD-OUTLET-IMPORT.md`. Correction file sent to owner for Bajaj.
@@ -143,7 +167,7 @@ UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration
 - Pre-existing, noted by reviewers: admin/vendor `transitionOrder` have no status guard (stale-read race); OTP-send-failure
   cleanup deletes a concurrent redeem's fresh OTP; My Orders page fetches only the newest 20 orders; wallet payout list caps
   at 100 rows.
-- **TDS 194R:** `e8c3f463` reverted the VENDOR_IMPORT exclusion on `main` only — still present on `develop`. Standing rule (2026-11-10): every "prepare main" KEEPS the revert (`git diff <prev-main> HEAD -- api/src/tds/` empty).
+- **TDS 194R:** `e8c3f463` reverted the VENDOR_IMPORT exclusion on `main` only — still present on `develop`. ~~Standing rule (2026-11-10): every "prepare main" KEEPS the revert.~~ **SUPERSEDED 2026-11-12/13 (owner): the next prepare-main must `git revert e8c3f46` explicitly** so the exclusion reaches prod before the Bajaj payout-history import; verify with `git grep VENDOR_IMPORT`.
 - **OTP hardening deploy note (this release):** KYC consent OTPs are now bound to the submission (stored with its id + the owner's
   normalised phone). Consent OTPs already sent before the deploy have no submission id → verifying them returns "OTP not found or
   expired"; the rep taps **Resend** (OTPs expire in 10 min, so the window is tiny). Login now only accepts LOGIN-purpose OTPs; the hourly
