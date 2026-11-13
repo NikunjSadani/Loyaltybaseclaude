@@ -126,7 +126,8 @@ release (the report is computed live, so the payout-history import does not wait
   = v1 + `MAX_MONTH` env; manifest `migrations/bajaj-prod-targets-manifest-2026-10.json`; job env reset to DRY_RUN=true) →
   verifier PASS (`bajaj-prod-targets-oct-verify.js`: every KPI value per row = file, 0 missing/extra/orphan). Builder
   `scratchpad/prodimport/tgt_oct_build.js`.
-- ⚠️ **Never run a points compute for 2026-10** without the owner — October rewards are an open decision.
+- ⚠️ **Never run a points compute for 2026-10** — owner 2026-11-13: October rewards come from the client as a SEPARATE
+  file (to be imported when received, like §9/§9b), not computed on the platform.
 
 ## 10. TDS already deducted by the vendor (FY 2026-27) — APPROVED as a PARTIAL import (owner 2026-11-12)
 - ✅ **DONE on prod 2026-11-13** (owner: vendor TDS was PAID BY BAJAJ ON TOP → gross-up; import as-is). 212 TdsOffPlatformEntry

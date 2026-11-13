@@ -45,8 +45,8 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 >    the old "keep TDS revert" rule.
 > 4. ⏸ **Wallet reversal engine = FAST FOLLOW-UP AFTER GO-LIVE** (owner 2026-11-13). Branch `feat/wallet-reversal-engine`
 >    (pushed), complete record + resume checklist in `WALLET-REVERSAL-ENGINE-DESIGN.md` on that branch.
-> 5. ✅ Historical targets/achievements imported on prod (§9c) + ✅ October 2026 (§9d, 6,387 rows; rewards NOT imported —
->    owner decision pending; never compute points for Oct). Next go-live work: Sales Import prod infra (owner OK needed)
+> 5. ✅ Historical targets/achievements imported on prod (§9c) + ✅ October 2026 (§9d, 6,387 rows; October rewards will
+>    come from the client as a SEPARATE file → import when received; never compute points for Oct). Next go-live work: Sales Import prod infra (owner OK needed)
 >    for November achievements · client training deck.
 > 5b. FAST FOLLOW-UP after the release (owner 2026-11-13): Bajaj-only setting — imported payouts from FY 2026-27 count in
 >    194R (retailer TDS liability visible; FY 25-26 imports stay excluded; deposits subtract; no auto-recovery). See
