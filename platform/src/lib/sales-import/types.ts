@@ -559,6 +559,8 @@ export interface FocusBlocker {
 export interface MonthFocusKpi {
   kpiCode: string;
   label: string;
+  /** The KPI's measure, so the screen formats `achieved` in the right unit (₹ / cases / products). */
+  measure: SalesKpiMeasure;
   names: FocusNameSummary[];
   /** In the KPI's scope, a numeric target for this KPI this month, but no name → FOCUS_MISSING_NAME. */
   missingName: { outlets: number; sampleOutletCodes: string[] };
@@ -566,7 +568,7 @@ export interface MonthFocusKpi {
 
 export interface MonthTargetsSummary {
   /** Importer-owned KPIs only. */
-  kpis: Array<{ kpiCode: string; label: string; outletsWithTarget: number; totalTarget: number }>;
+  kpis: Array<{ kpiCode: string; label: string; outletsWithTarget: number; totalTarget: number; measure: SalesKpiMeasure }>;
   /** Latest target upload batch for the month (ISO), null = no targets uploaded for the month. */
   targetUploadedAt: string | null;
   /**
@@ -616,6 +618,12 @@ export interface TargetUploadFocusCheck {
   /** false = nothing to check against yet (no TARGET_NAMES definition, or no stored product list yet). */
   checked: boolean;
   reason?: string;
+  /**
+   * Why the check did not run (checked:false): NO_TARGET_NAMES_KPI = nothing to check (stay silent);
+   * NO_PRODUCT_LIST = no stored product list yet; CHECK_FAILED = the check errored. The last two are shown to the
+   * operator as a grey note so a skipped check is never silent.
+   */
+  reasonCode?: 'NO_TARGET_NAMES_KPI' | 'NO_PRODUCT_LIST' | 'CHECK_FAILED';
   months: Array<{ month: string; blockers: FocusBlocker[] }>;
 }
 
