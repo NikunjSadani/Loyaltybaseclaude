@@ -1665,10 +1665,10 @@ describe('AdminCoreService', () => {
   });
 
   describe('reportRecipients (platform store)', () => {
-    it('getReportRecipients returns empty lists when no row exists', async () => {
+    it('getReportRecipients returns an empty list when no row exists', async () => {
       mockPrisma.programSetting.findFirst.mockResolvedValue(null);
       const { recipients } = await service.getReportRecipients();
-      expect(recipients).toEqual({ creditsPayouts: [], kycActionables: [] });
+      expect(recipients).toEqual({ dailyDigest: [] });
       // Read from the platform (gifsy) row, not the caller's tenant.
       expect(mockPrisma.programSetting.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({ where: { clientId: 'gifsy', settingKey: 'reportRecipients' } }),
@@ -1677,28 +1677,29 @@ describe('AdminCoreService', () => {
 
     it('getReportRecipients normalizes, lowercases, de-dups and drops invalid emails', async () => {
       mockPrisma.programSetting.findFirst.mockResolvedValue({
+        settingValue: { dailyDigest: ['Ops@Gifsy.in', 'ops@gifsy.in', 'not-an-email', ''] },
+      });
+      const { recipients } = await service.getReportRecipients();
+      expect(recipients).toEqual({ dailyDigest: ['ops@gifsy.in'] });
+    });
+
+    it('getReportRecipients falls back to the UNION of the legacy lists when dailyDigest is absent', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue({
         settingValue: {
-          creditsPayouts: ['Finance@Gifsy.in', 'finance@gifsy.in', 'not-an-email', ''],
-          kycActionables: ['Ops@Gifsy.in'],
+          creditsPayouts: ['Finance@Gifsy.in', 'ops@gifsy.in'],
+          kycActionables: ['OPS@gifsy.in', 'kyc@gifsy.in'],
         },
       });
       const { recipients } = await service.getReportRecipients();
-      expect(recipients).toEqual({
-        creditsPayouts: ['finance@gifsy.in'],
-        kycActionables: ['ops@gifsy.in'],
-      });
+      expect(recipients).toEqual({ dailyDigest: ['finance@gifsy.in', 'ops@gifsy.in', 'kyc@gifsy.in'] });
     });
 
     it('setReportRecipients (GIFSY) normalizes and upserts the platform row', async () => {
       mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'ps' });
       const { recipients } = await service.setReportRecipients(gifsy, {
-        creditsPayouts: ['  Finance@Gifsy.in ', 'finance@gifsy.in', 'bad'],
-        kycActionables: ['Ops@Gifsy.in'],
+        dailyDigest: ['  Finance@Gifsy.in ', 'finance@gifsy.in', 'bad'],
       });
-      expect(recipients).toEqual({
-        creditsPayouts: ['finance@gifsy.in'],
-        kycActionables: ['ops@gifsy.in'],
-      });
+      expect(recipients).toEqual({ dailyDigest: ['finance@gifsy.in'] });
       const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
       expect(call.where).toEqual({
         clientId_settingKey: { clientId: 'gifsy', settingKey: 'reportRecipients' },
@@ -1708,12 +1709,16 @@ describe('AdminCoreService', () => {
       expect(call.update.settingValue).toEqual(recipients);
     });
 
+    it('setReportRecipients stores an explicit empty list (no legacy fallback after a save)', async () => {
+      mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'ps' });
+      const { recipients } = await service.setReportRecipients(gifsy, { dailyDigest: [] });
+      expect(recipients).toEqual({ dailyDigest: [] });
+      expect(mockPrisma.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({ dailyDigest: [] });
+    });
+
     it('setReportRecipients forbids a non-GIFSY caller', async () => {
       await expect(
-        service.setReportRecipients(clientAdmin, {
-          creditsPayouts: ['finance@gifsy.in'],
-          kycActionables: [],
-        }),
+        service.setReportRecipients(clientAdmin, { dailyDigest: ['finance@gifsy.in'] }),
       ).rejects.toThrow(/Gifsy Admin only/);
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
     });

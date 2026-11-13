@@ -1,63 +1,183 @@
 /**
- * Shared contract for the scheduled INTERNAL Gifsy email reports (daily Mon–Sat).
+ * Shared contract for the scheduled INTERNAL Gifsy email — the Daily Operations Digest
+ * (owner-approved 2026-11-13, replaces the earlier separate "Credits/Payouts summary" and
+ * "KYC actionables digest" emails). See platform/docs/plans/DAILY-OPS-DIGEST.md.
  *
- * Design (owner-locked 2026-08): two separate all-tenant reports emailed to a Gifsy-configured
- * recipient list — #1 Credits/Payouts summary (suppress-if-empty) and #3 KYC actionables digest
- * (always sent). The RUNNER (scheduled-reports.service.ts) does all the Prisma + assembles the
- * per-report ReportContext, then calls each pure-ish builder, which returns a rendered
- * ReportResult. This seam keeps each builder in its own file (no cross-file contention) and its
- * HTML deterministic + unit-testable.
+ * Seam: the RUNNER (scheduled-reports.service.ts) does ALL the Prisma, per tenant, per section
+ * (each section in its own try/catch), and hands the PURE builder (daily-ops-digest-report.ts)
+ * these plain structs. The builder never touches the DB or the clock — every value it renders
+ * comes from here, so its HTML is deterministic and unit-testable.
  */
 
-import type { PrismaService } from '../../prisma/prisma.service';
-import type { KycSlaTargets } from '../../common/kyc-sla-stage';
+/** Stable report key — also the key the recipient list is stored under (reportRecipients). */
+export type ReportKey = 'dailyDigest';
 
-/** Stable report keys — also the keys under which recipient lists are stored (reportRecipients). */
-export type ReportKey = 'creditsPayouts' | 'kycActionables';
+/** The reporting window: [startMs, endMs) in UTC-ms (computed in IST by digestWindow). */
+export interface DigestWindow {
+  startMs: number;
+  endMs: number;
+  /** Human window label, e.g. "Sat 08 Nov, 09:30 → Mon 10 Nov, 09:30 IST". */
+  label: string;
+}
 
-/** Per-run context the runner assembles once and hands to every builder. */
-export interface ReportContext {
-  /** UTC-ms of IST-midnight today — inclusive lower bound of the "today IST" window. */
-  startIst: number;
-  /** UTC-ms of the next IST-midnight — exclusive upper bound. */
-  endIst: number;
-  /** Human date the report covers, e.g. "11 Aug 2026" (IST). */
+/** A section either loaded, or failed (rendered as "couldn't load this section" — never omitted). */
+export type SectionResult<T> = { ok: true; data: T } | { ok: false; error: string };
+
+/** One SLA stage bucket: pending rows, split by how they sit against the stage's business-hours target. */
+export interface SlaBucket {
+  pending: number;
+  /** age < 75% of the target. */
+  within: number;
+  /** 75% of the target ≤ age ≤ target — about to breach. */
+  nearing: number;
+  /** age > target. */
+  breached: number;
+}
+
+export interface KycSection {
+  /** KycSubmission.submittedAt in the window. */
+  submitted: number;
+  /** status APPROVED with approvedAt in the window. */
+  approved: number;
+  /** KycStatusHistory → REJECTED / RE_UPLOAD_REQUIRED / RESUBMISSION_REQUIRED in the window. */
+  rejected: number;
+  /** Pending in the field chain (submitted → reaching Gifsy). */
+  field: SlaBucket;
+  /** Pending at Gifsy (PENDING_GIFSY). */
+  gifsy: SlaBucket;
+}
+
+export interface PointsSection {
+  /** Σ PointsLedger EARN points in the window. */
+  credited: number;
+  /** |Σ PointsLedger REDEEM points| in the window. */
+  redeemed: number;
+  /** |Σ PointsLedger EXPIRE points| in the window. */
+  expired: number;
+  /** Wallets with redeemablePoints < 0 right now. */
+  negativeWallets: number;
+}
+
+export interface FailedRedemptionRow {
+  outlet: string;
+  reward: string;
+  reason: string;
+}
+
+export interface RedemptionsSection {
+  /** RedemptionOrder.createdAt in the window. */
+  requested: number;
+  /** RedemptionStatusHistory → DELIVERED in the window. */
+  completed: number;
+  /** RedemptionStatusHistory → FAILED in the window. */
+  failed: number;
+  /** The most recent failures (≤ 10). */
+  failedRows: FailedRedemptionRow[];
+}
+
+export interface VouchersSection {
+  /** Hubble orders → DELIVERED in the window. */
+  issued: number;
+  /** Hubble orders → FAILED in the window. */
+  failed: number;
+  /** Hubble orders sitting in PROCESSING for more than 30 minutes right now. */
+  stuckProcessing: number;
+  /** Orders with an open hubbleNeedsReconcile flag right now. */
+  needsReconcile: number;
+}
+
+export interface PayoutsSection {
+  /** Credit batches confirmed in the window (CreditBatch.confirmedAt). */
+  batchesConfirmed: number;
+  /** Σ totalPoints of those batches. */
+  batchPoints: number;
+  /** Σ totalPayoutPaise of those batches (money committed). */
+  batchPayoutPaise: bigint;
+  /** Credit payouts marked PAID (CreditPayoutEntry.paidAt in the window). */
+  creditPaid: number;
+  creditPaidPaise: bigint;
+  /** Redemption payouts SUCCESS (PayoutTransaction.completedAt in the window). */
+  redemptionPaid: number;
+  redemptionPaidPaise: bigint;
+  /** Credit entries → FAILED + payout transactions → FAILED/REVERSED in the window. */
+  failedOrReturned: number;
+  /** Credit entries downloaded for the bank file and waiting for the UTR upload (PROCESSING, now). */
+  awaitingUtr: number;
+  awaitingUtrPaise: bigint;
+}
+
+export interface MessagesSection {
+  /** OtpCode.deliveryStatus FAILED, flagged in the window. */
+  otpFailed: number;
+  /** MessageDeliveryReceipt channel SMS, status FAILED, flagged in the window. */
+  smsFailed: number;
+  /** MessageDeliveryReceipt channel WHATSAPP, status FAILED, flagged in the window. */
+  whatsappFailed: number;
+  /** WhatsappBroadcastRecipient status FAILED, flagged in the window. */
+  broadcastFailed: number;
+}
+
+export interface VisibilitySection {
+  /** VisibilityCaptureSubmission rows created in the window (incl. re-submissions). */
+  submitted: number;
+  /** Captures reviewed APPROVED in the window. */
+  approved: number;
+  /** Captures reviewed REJECTED / CHANGES_REQUESTED in the window. */
+  rejected: number;
+  /** Captures awaiting review (SUBMITTED) right now. */
+  pending: number;
+}
+
+export interface SalesOpenMonth {
+  /** 'YYYY-MM'. */
+  month: string;
+  /** SalesMonthStatus.lastAppliedAt (UTC-ms) or null when never applied. */
+  lastAppliedAtMs: number | null;
+  /** Targets written after the last apply (same rule as SalesMonthsService). */
+  targetsChangedSinceApply: boolean;
+}
+
+export interface SalesImportSection {
+  /** Imports that reached READY in the window (finishedAt). */
+  processed: number;
+  /** Imports that went FAILED in the window. */
+  failed: number;
+  /** OPEN months (last 6, not future), newest first. */
+  openMonths: SalesOpenMonth[];
+}
+
+export interface TenantDigest {
+  clientId: string;
+  name: string;
+  kyc: SectionResult<KycSection>;
+  points: SectionResult<PointsSection>;
+  redemptions: SectionResult<RedemptionsSection>;
+  /** Present ONLY for tenants with features.hubbleVoucherEnabled. */
+  vouchers?: SectionResult<VouchersSection>;
+  payouts: SectionResult<PayoutsSection>;
+  messages: SectionResult<MessagesSection>;
+  /** Present ONLY for tenants with the visibilityEnabled setting ON. */
+  visibility?: SectionResult<VisibilitySection>;
+  /** Present ONLY for tenants with features.salesImport. */
+  salesImport?: SectionResult<SalesImportSection>;
+}
+
+export interface DigestInput {
+  window: DigestWindow;
+  /** Date the digest is sent, e.g. "13 Nov 2026" (IST). */
   dateLabel: string;
-  /** "now" for SLA age math — passed in (not Date.now()) so builders are pure + deterministic in tests. */
-  nowMs: number;
-  /** clientId → human tenant/brand name (branding.displayName ?? internalName). */
-  tenantNames: Map<string, string>;
-  /** clientIds of all ACTIVE tenants (Client.status === 'ACTIVE'). */
-  activeTenantIds: string[];
+  tenants: TenantDigest[];
+  /** OTP delivery failures in the window that carry no user (pre-login) — no tenant to attach them to. */
+  unattributedOtpFailed?: SectionResult<number>;
 }
 
-/** A rendered report ready to send. `empty` lets the runner suppress send for suppress-if-empty reports. */
-export interface ReportResult {
+/** The rendered digest. */
+export interface DigestResult {
   key: ReportKey;
-  /** Email subject line (already includes the date). */
   subject: string;
-  /** Full email HTML body. */
   html: string;
-  /** true when there was nothing material to report (no activity / nothing pending). */
-  empty: boolean;
+  /** Tenants with at least one "needs attention" item. */
+  tenantsNeedingAttention: number;
+  /** Total "needs attention" items across tenants. */
+  attentionItems: number;
 }
-
-/**
- * Builder signatures the runner calls. Builders MUST be defensive (never throw into the runner —
- * a failure in one report must not block the other) and MUST HTML-escape every dynamic value
- * (see email-html.ts `esc`).
- *
- *  - Credits/Payouts (#1): day-scoped to [ctx.startIst, ctx.endIst) via CreditBatch.confirmedAt +
- *    PayoutTransaction.completedAt (SUCCESS). empty = no batches AND no payouts today.
- *  - KYC actionables (#3): all-tenant pending-KYC roll-up by stage, business-hours SLA
- *    (businessHoursBetween + the holiday set), per-tenant slaTargetHours. empty = zero pending.
- */
-export type CreditsPayoutsBuilder = (prisma: PrismaService, ctx: ReportContext) => Promise<ReportResult>;
-
-export type KycActionablesBuilder = (
-  prisma: PrismaService,
-  ctx: ReportContext,
-  holidays: Set<string>,
-  /** clientId → { fieldHrs, gifsyHrs } — the two-stage SLA targets; missing tenants default to 24/96. */
-  slaTargets: Map<string, KycSlaTargets>,
-) => Promise<ReportResult>;

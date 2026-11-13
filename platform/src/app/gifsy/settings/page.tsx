@@ -8,7 +8,7 @@ import {
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { getStoredUser } from '@/lib/auth-client';
 import { fetchHolidays, saveHolidays, type Holiday } from '@/lib/holidays';
-import { fetchReportRecipients, saveReportRecipients, type ReportRecipients } from '@/lib/report-recipients';
+import { fetchReportRecipients, saveReportRecipients } from '@/lib/report-recipients';
 
 const INPUT_CLS =
   'w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/30';
@@ -113,15 +113,13 @@ export default function GifsySettingsPage() {
     setTimeout(() => setHolidaysSaved(false), 3000);
   };
 
-  // ── Report recipients (per-report email distribution lists for the daily Mon–Sat operator
-  // digests) ── GET/PUT /api/admin/settings/report-recipients via fetch/saveReportRecipients. Both
-  // GET and PUT are GIFSY_ADMIN-only, so we skip the fetch for anyone else. `recipientsLoaded` gates
-  // Save so we never PUT before the fetch. Each row must be a valid email (mirrors the backend).
+  // ── Report recipients (the ONE internal Daily Operations Digest list, Mon–Sat) ──
+  // GET/PUT /api/admin/settings/report-recipients via fetch/saveReportRecipients. Both GET and PUT
+  // are GIFSY_ADMIN-only, so we skip the fetch for anyone else. `recipientsLoaded` gates Save so we
+  // never PUT before the fetch. Each row must be a valid email (mirrors the backend).
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  type RecipientList = keyof ReportRecipients; // 'creditsPayouts' | 'kycActionables'
 
-  const [creditsPayouts,   setCreditsPayouts]   = useState<string[]>([]);
-  const [kycActionables,   setKycActionables]   = useState<string[]>([]);
+  const [dailyDigest,      setDailyDigest]      = useState<string[]>([]);
   const [recipientsLoaded, setRecipientsLoaded] = useState(false);
   const [recipientsSaved,  setRecipientsSaved]  = useState(false);
   const [recipientsError,  setRecipientsError]  = useState<string | null>(null);
@@ -129,49 +127,32 @@ export default function GifsySettingsPage() {
   useEffect(() => {
     if (!isGifsyAdmin) return;
     fetchReportRecipients()
-      .then(({ creditsPayouts, kycActionables }) => {
-        setCreditsPayouts(creditsPayouts);
-        setKycActionables(kycActionables);
-      })
+      .then(({ dailyDigest }) => setDailyDigest(dailyDigest))
       .finally(() => setRecipientsLoaded(true));
   }, [isGifsyAdmin]);
 
-  // Every row of BOTH lists must be a valid, non-empty email for a save to be allowed.
-  const recipientsValid =
-    [...creditsPayouts, ...kycActionables].every((e) => EMAIL_RE.test(e.trim()));
+  // Every row must be a valid, non-empty email for a save to be allowed.
+  const recipientsValid = dailyDigest.every((e) => EMAIL_RE.test(e.trim()));
 
-  const setRecipientList = (which: RecipientList, next: string[]) => {
-    if (which === 'creditsPayouts') setCreditsPayouts(next); else setKycActionables(next);
-  };
-  const updateRecipient = (which: RecipientList, index: number, value: string) => {
-    const list = which === 'creditsPayouts' ? creditsPayouts : kycActionables;
-    setRecipientList(which, list.map((e, i) => (i === index ? value : e)));
-  };
-  const addRecipientRow = (which: RecipientList) => {
-    const list = which === 'creditsPayouts' ? creditsPayouts : kycActionables;
-    setRecipientList(which, [...list, '']);
-  };
-  const removeRecipientRow = (which: RecipientList, index: number) => {
-    const list = which === 'creditsPayouts' ? creditsPayouts : kycActionables;
-    setRecipientList(which, list.filter((_, i) => i !== index));
-  };
+  const updateRecipient = (index: number, value: string) =>
+    setDailyDigest(dailyDigest.map((e, i) => (i === index ? value : e)));
+  const addRecipientRow = () => setDailyDigest([...dailyDigest, '']);
+  const removeRecipientRow = (index: number) => setDailyDigest(dailyDigest.filter((_, i) => i !== index));
 
   const handleRecipientsSave = async () => {
     setRecipientsError(null);
-    const cleanCredits = creditsPayouts.map((e) => e.trim());
-    const cleanKyc     = kycActionables.map((e) => e.trim());
-    const bad = [...cleanCredits, ...cleanKyc].find((e) => !EMAIL_RE.test(e));
+    const clean = dailyDigest.map((e) => e.trim());
+    const bad = clean.find((e) => !EMAIL_RE.test(e));
     if (bad !== undefined) {
       setRecipientsError(bad === '' ? 'Every recipient row needs an email address.' : `"${bad}" is not a valid email address.`);
       return;
     }
-    const ok = await saveReportRecipients({ creditsPayouts: cleanCredits, kycActionables: cleanKyc });
+    const ok = await saveReportRecipients({ dailyDigest: clean });
     if (!ok) {
       setRecipientsError('Could not save the report recipients — please try again.');
       return;
     }
-    setCreditsPayouts(cleanCredits);
-    setKycActionables(cleanKyc);
+    setDailyDigest(clean);
     setRecipientsSaved(true);
     setTimeout(() => setRecipientsSaved(false), 3000);
   };
@@ -253,8 +234,9 @@ export default function GifsySettingsPage() {
       <SettingSection icon={Mail} title="Report Recipients">
         <div data-testid="report-recipients-card" className="space-y-4">
           <PlatformNote>
-            One internal Gifsy distribution list for the daily reports (Mon–Sat). Applies to
-            all tenants — not per-tenant. Only a Gifsy Admin can change it.
+            One internal Gifsy distribution list for the Daily Operations Digest (Mon–Sat, 09:30 IST):
+            an all-tenant summary plus one section per tenant. Internal Gifsy recipients only — not
+            clients. Only a Gifsy Admin can change it.
           </PlatformNote>
 
           {!isGifsyAdmin ? (
@@ -263,46 +245,41 @@ export default function GifsySettingsPage() {
             <p className="text-sm text-white/40">Loading recipients…</p>
           ) : (
             <>
-              {([
-                ['creditsPayouts', 'Credits & Payouts summary', creditsPayouts] as const,
-                ['kycActionables', 'KYC actionables digest',    kycActionables] as const,
-              ]).map(([which, title, list]) => (
-                <div key={which} data-testid={`recipients-group-${which}`}>
-                  <p className="text-xs font-medium text-white/50 mb-2">{title}</p>
-                  {list.length === 0 ? (
-                    <p className="text-xs text-white/30 italic mb-2">No recipients yet — add one below.</p>
-                  ) : (
-                    <div className="space-y-2 mb-2">
-                      {list.map((email, i) => (
-                        <div key={i} data-testid={`recipient-row-${which}`} className="flex items-center gap-2">
-                          <input
-                            type="email"
-                            data-testid={`recipient-input-${which}`}
-                            aria-label={`${title} recipient email`}
-                            value={email}
-                            onChange={(e) => updateRecipient(which, i, e.target.value)}
-                            placeholder="name@example.com"
-                            className={INPUT_CLS}
-                          />
-                          <button
-                            type="button"
-                            aria-label={`Remove ${email || 'recipient'}`}
-                            onClick={() => removeRecipientRow(which, i)}
-                            className="text-white/40 hover:text-red-400 transition-colors shrink-0"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <RowAddButton
-                    data-testid={`recipient-add-${which}`}
-                    onClick={() => addRecipientRow(which)}
-                    label="Add recipient"
-                  />
-                </div>
-              ))}
+              <div data-testid="recipients-group-dailyDigest">
+                <p className="text-xs font-medium text-white/50 mb-2">Daily Operations Digest</p>
+                {dailyDigest.length === 0 ? (
+                  <p className="text-xs text-white/30 italic mb-2">No recipients yet — add one below. Nobody gets the digest until you do.</p>
+                ) : (
+                  <div className="space-y-2 mb-2">
+                    {dailyDigest.map((email, i) => (
+                      <div key={i} data-testid="recipient-row-dailyDigest" className="flex items-center gap-2">
+                        <input
+                          type="email"
+                          data-testid="recipient-input-dailyDigest"
+                          aria-label="Daily Operations Digest recipient email"
+                          value={email}
+                          onChange={(e) => updateRecipient(i, e.target.value)}
+                          placeholder="name@gifsy.in"
+                          className={INPUT_CLS}
+                        />
+                        <button
+                          type="button"
+                          aria-label={`Remove ${email || 'recipient'}`}
+                          onClick={() => removeRecipientRow(i)}
+                          className="text-white/40 hover:text-red-400 transition-colors shrink-0"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <RowAddButton
+                  data-testid="recipient-add-dailyDigest"
+                  onClick={addRecipientRow}
+                  label="Add recipient"
+                />
+              </div>
               {recipientsError && <p className="text-xs text-red-400">{recipientsError}</p>}
               <SaveRow
                 data-testid="recipients-save"

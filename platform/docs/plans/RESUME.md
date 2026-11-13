@@ -39,7 +39,8 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 >   columns (⚠️ PLATFORM-WIDE, owner-approved 2026-11-13: 'Outlet Code' on PAN rows, 'Outlet Type', 'Outlet Name' —
 >   display-only, §9.3) + these docs. **Then** the Bajaj points rule + sales-import config; **then** the Daily Operations
 >   Digest (⚠️ PLATFORM-WIDE, owner approved option A, branch `feat/daily-ops-digest`, worktree
->   `.claude/worktrees/ops-digest` — approved but NOT started).
+>   `.claude/worktrees/ops-digest` — BUILT on the branch, not yet pushed/merged; design `DAILY-OPS-DIGEST.md`, sample
+  `samples/daily-ops-digest-sample.html`; recipients fall back to the union of the two old lists until the new card is saved).
 > - 🧰 Trap: gcloud on the owner's machine currently defaults to account `nikunj.sadani28@gmail.com` / project
 >   `gifsy-posm` (changed by another session) — platform work must pass
 >   `--account=gifsy-deployer@gifsy-platform.iam.gserviceaccount.com --project=gifsy-platform` explicitly.
@@ -300,7 +301,8 @@ UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration
      main session; then the **sales-import config** (column mapping + sales KPI definitions) and the November sales file
      (upload/aggregate first, apply after).
   3. **Daily Operations Digest** (⚠️ PLATFORM-WIDE, owner approved option A; branch `feat/daily-ops-digest`, worktree
-     `.claude/worktrees/ops-digest`) — approved, not started.
+     `.claude/worktrees/ops-digest`) — BUILT on the branch (not pushed/merged): replaces the two daily emails; see
+     `DAILY-OPS-DIGEST.md` + `runbooks/email-reports-activation.md`.
 - _(historical)_ **📍 STATE 2026-11-11** (release LIVE on staging `7c85d9fd` → owner staging UAT → owner creates prod Hubble secrets → decide prod Sales Import infra → prepare main → manual prod deploy + post-deploy checks → Bajaj October points).
 - 🔧 **FAST FOLLOW-UPS #1 KPI↔Program/Sub-Program + #2 KPI outlet-type multi-select + #3 Visibility by Program/Sub-Program — BUILDING since 2026-11-12 (owner asked to run in parallel; all ★ decisions approved), branch `feat/applies-to`, plan `APPLIES-TO-TARGETING-PLAN.md`. Original #1 note:**
   Today `KpiDef` is tenant-wide (only an optional `outletType` tag); there is NO program link. Interim workaround = upload

@@ -146,10 +146,10 @@ export class AdminSettingsController {
   }
 
   /**
-   * GET /v1/admin/settings/report-recipients — the PLATFORM-global per-report recipient lists
-   * (which email addresses receive each Gifsy-configured scheduled report). GIFSY_ADMIN or
-   * CLIENT_ADMIN may read. Returns { recipients: { creditsPayouts: [], kycActionables: [] } } —
-   * the stored value normalized, else empty lists when unset.
+   * GET /v1/admin/settings/report-recipients — the PLATFORM-global recipient list of the internal
+   * Daily Operations Digest. Returns { recipients: { dailyDigest: [] } } — the EFFECTIVE list
+   * (stored dailyDigest, else the union of the legacy creditsPayouts + kycActionables lists),
+   * normalized; empty when unset.
    */
   // GIFSY-only on BOTH read and write: the recipient list is Gifsy's internal ops distribution
   // list, with no tenant-admin relevance (unlike the holiday calendar, which tenant admins read
@@ -162,10 +162,9 @@ export class AdminSettingsController {
   }
 
   /**
-   * PUT /v1/admin/settings/report-recipients — replace the platform report-recipient lists.
+   * PUT /v1/admin/settings/report-recipients — replace the digest recipient list.
    * GIFSY_ADMIN only (it is platform-level operator config, not per-tenant). Body:
-   * { creditsPayouts: string[], kycActionables: string[] }. Returns the saved, lowercased,
-   * de-duped lists.
+   * { dailyDigest: string[] }. Returns the saved, lowercased, de-duped list.
    */
   @Put('report-recipients')
   @Roles('GIFSY_ADMIN')

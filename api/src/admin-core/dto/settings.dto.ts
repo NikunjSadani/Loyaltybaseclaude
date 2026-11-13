@@ -119,18 +119,14 @@ export class SetHolidaysDto {
 }
 
 /**
- * DTO for PUT /v1/admin/settings/report-recipients — the platform-global per-report recipient
- * lists (GIFSY_ADMIN only). Replaces the whole store. Each list is capped at 50 addresses and must
- * contain only valid emails. The service further lowercases + de-dups before storing.
+ * DTO for PUT /v1/admin/settings/report-recipients — the platform-global recipient list of the
+ * internal Daily Operations Digest (GIFSY_ADMIN only). Replaces the whole store (the legacy
+ * per-report lists are dropped on save). Capped at 50 addresses; each must be a valid email. The
+ * service further lowercases + de-dups before storing.
  */
 export class SetReportRecipientsDto {
   @IsArray()
   @ArrayMaxSize(50)
   @IsEmail({}, { each: true })
-  creditsPayouts!: string[];
-
-  @IsArray()
-  @ArrayMaxSize(50)
-  @IsEmail({}, { each: true })
-  kycActionables!: string[];
+  dailyDigest!: string[];
 }

@@ -1179,14 +1179,15 @@ export class AdminCoreService {
   }
 
   // ── Report recipients (platform-global) ────────────────────────────────────
-  // Per Gifsy-configured scheduled report, the list of email addresses that receive it. Storage +
+  // The email addresses that receive the internal Daily Operations Digest (with the legacy
+  // creditsPayouts ∪ kycActionables fallback when no dailyDigest list was ever saved). Storage +
   // defaults + normalizer live in the shared common/report-recipients module (used identically by
   // the scheduled-report runner), so the configured list and the send logic can never drift.
   // GIFSY_ADMIN edits it; CLIENT_ADMIN can read it.
 
   /**
-   * The platform report-recipient lists, for the settings UI. Returns the stored value normalized
-   * (valid, lowercased, de-duped emails), else empty lists when no row exists.
+   * The platform digest recipient list, for the settings UI. Returns the EFFECTIVE list (stored
+   * dailyDigest, else the legacy-lists union), normalized; empty when no row exists.
    */
   async getReportRecipients(): Promise<{ recipients: ReportRecipients }> {
     const row = await this.prisma.programSetting.findFirst({
@@ -1197,9 +1198,9 @@ export class AdminCoreService {
   }
 
   /**
-   * Replace the platform report-recipient lists. GIFSY_ADMIN only (role-enforced on the controller;
-   * re-checked here). Normalizes each list (valid, lowercased, de-duped emails) and upserts the
-   * single platform row.
+   * Replace the platform digest recipient list. GIFSY_ADMIN only (role-enforced on the controller;
+   * re-checked here). Normalizes it (valid, lowercased, de-duped emails) and upserts the single
+   * platform row as `{ dailyDigest }` (the legacy per-report keys are dropped).
    */
   async setReportRecipients(
     user: JwtPayload,

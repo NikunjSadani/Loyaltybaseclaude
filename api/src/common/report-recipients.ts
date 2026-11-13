@@ -1,14 +1,20 @@
 /**
- * The platform-global "report recipients" store — the single source of truth for which email
- * addresses receive each Gifsy-configured scheduled report. Shared by the settings UI (admin-core
+ * The platform-global "report recipients" store — the single source of truth for who receives the
+ * internal Gifsy Daily Operations Digest. Shared by the settings UI (admin-core
  * getReportRecipients/setReportRecipients) and the scheduled-report runner so the configured list
  * and the send logic can never drift.
  *
  * Storage: ONE programSetting row under the operator client (REPORTS_CLIENT_ID), key
- * REPORT_RECIPIENTS_KEY, value = ReportRecipients. Platform-level, not per-tenant: one recipient
- * map for all reports. GIFSY_ADMIN edits it from the admin settings page; CLIENT_ADMIN reads it.
+ * REPORT_RECIPIENTS_KEY, value = `{ dailyDigest: string[] }`. Platform-level, not per-tenant.
+ * GIFSY_ADMIN edits it; CLIENT_ADMIN can read it.
  *
- * There is no code default — an unset row means "no recipients yet" (each key defaults to []).
+ * LEGACY FALLBACK (owner-approved 2026-11-13): before the digest there were two emails with their
+ * own lists (`creditsPayouts`, `kycActionables`). If the stored row has NO `dailyDigest` key, the
+ * digest goes to the UNION of those two legacy lists — so whoever got today's emails keeps getting
+ * the digest without anyone re-entering addresses. Once a `dailyDigest` list is saved (even an
+ * empty one — an explicit "nobody") it is used as-is and the legacy keys are ignored.
+ *
+ * There is no code default — an unset row means "no recipients yet".
  */
 
 import type { PrismaService } from '../prisma/prisma.service';
@@ -17,13 +23,12 @@ import type { PrismaService } from '../prisma/prisma.service';
 export const REPORTS_CLIENT_ID = 'gifsy';
 export const REPORT_RECIPIENTS_KEY = 'reportRecipients';
 
-/** Stable report keys — identical to report.types.ts ReportKey (the reports the runner sends). */
-export type ReportKey = 'creditsPayouts' | 'kycActionables';
+/** Stable report key — identical to report.types.ts ReportKey. */
+export type ReportKey = 'dailyDigest';
 
-/** Per-report recipient lists. Each key holds a de-duped list of lowercased email addresses. */
+/** The digest recipient list: de-duped, lowercased, valid email addresses. */
 export interface ReportRecipients {
-  creditsPayouts: string[];
-  kycActionables: string[];
+  dailyDigest: string[];
 }
 
 /** A simple, tolerant email shape check — enough to drop obvious junk before storing. */
@@ -42,21 +47,20 @@ function cleanEmails(raw: unknown): string[] {
 }
 
 /**
- * Normalize a stored settingValue into a clean ReportRecipients. Tolerant: accepts an object with
- * the two array keys; keeps only valid, lowercased, de-duped email strings; defaults each key to
- * `[]`. A non-object (absent/blank row) yields two empty lists.
+ * Normalize a stored settingValue into the effective ReportRecipients. `dailyDigest` present (an
+ * array) → that list, cleaned. Absent → the union of the legacy `creditsPayouts` + `kycActionables`
+ * lists (cleaned, de-duped, creditsPayouts order first). A non-object (absent/blank row) → [].
  */
 export function normalizeReportRecipients(raw: unknown): ReportRecipients {
-  const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-  return {
-    creditsPayouts: cleanEmails(obj.creditsPayouts),
-    kycActionables: cleanEmails(obj.kycActionables),
-  };
+  const obj = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  if (Array.isArray(obj.dailyDigest)) return { dailyDigest: cleanEmails(obj.dailyDigest) };
+  const legacy = [...cleanEmails(obj.creditsPayouts), ...cleanEmails(obj.kycActionables)];
+  return { dailyDigest: [...new Set(legacy)] };
 }
 
 /**
- * The per-report recipient lists. Reads the single platform row and falls back to empty lists.
- * Fully defensive — a read failure yields empty lists, never throws into the report runner.
+ * The effective digest recipients. Reads the single platform row (with the legacy fallback).
+ * Fully defensive — a read failure yields an empty list, never throws into the report runner.
  */
 export async function loadReportRecipients(prisma: PrismaService): Promise<ReportRecipients> {
   let raw: unknown;
@@ -67,7 +71,7 @@ export async function loadReportRecipients(prisma: PrismaService): Promise<Repor
     });
     raw = row?.settingValue;
   } catch {
-    raw = undefined; // read failure → empty lists (never let it break the runner)
+    raw = undefined; // read failure → empty list (never let it break the runner)
   }
   return normalizeReportRecipients(raw);
 }

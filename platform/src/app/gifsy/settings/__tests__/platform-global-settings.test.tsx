@@ -8,7 +8,9 @@
  * role from getStoredUser() and only loads/edits the cards for a Gifsy Admin.
  *
  * P1: both cards render for a GIFSY_ADMIN
- * P2: adding a KYC-actionables recipient + Save calls saveReportRecipients with the new address
+ * P2: adding a Daily Operations Digest recipient + Save calls saveReportRecipients({ dailyDigest })
+ * P2b: removing a row + Save sends the shorter list; a save failure shows an error
+ * P2c: an empty list shows the "nobody gets the digest" hint; the retired per-report groups are gone
  * P3: Save is disabled until the data has loaded AND is valid
  * P4: adding a holiday row + Save calls saveHolidays with the row
  * P5: a non-GIFSY_ADMIN operator sees neither editable card (read-only note, no fetch)
@@ -70,8 +72,7 @@ describe('Operator settings — platform-global cards', () => {
     vi.clearAllMocks();
     mockRole = 'GIFSY_ADMIN';
     asMock(fetchReportRecipients).mockResolvedValue({
-      creditsPayouts: ['finance@acme.test', 'ops@acme.test'],
-      kycActionables: ['kyc@acme.test'],
+      dailyDigest: ['finance@acme.test', 'ops@acme.test'],
     });
     asMock(saveReportRecipients).mockResolvedValue(true);
     asMock(fetchHolidays).mockResolvedValue([]);
@@ -82,36 +83,57 @@ describe('Operator settings — platform-global cards', () => {
     render(<GifsySettingsPage />);
     expect(screen.getByTestId('report-recipients-card')).toBeInTheDocument();
     expect(screen.getByTestId('holiday-calendar-card')).toBeInTheDocument();
-    // The fetched credits recipients hydrate into editable inputs.
+    // The fetched digest recipients hydrate into editable inputs.
     await waitFor(() => {
-      const credits = screen.getAllByTestId('recipient-input-creditsPayouts') as HTMLInputElement[];
-      expect(credits.map((el) => el.value)).toEqual(['finance@acme.test', 'ops@acme.test']);
+      const inputs = screen.getAllByTestId('recipient-input-dailyDigest') as HTMLInputElement[];
+      expect(inputs.map((el) => el.value)).toEqual(['finance@acme.test', 'ops@acme.test']);
     });
+    expect(screen.getByText('Daily Operations Digest')).toBeInTheDocument();
+    expect(screen.getAllByText(/Platform-wide · applies to all tenants\./).length).toBeGreaterThan(0);
   });
 
-  it('P2: adding a KYC recipient + Save calls saveReportRecipients with the new address', async () => {
+  it('P2: adding a digest recipient + Save calls saveReportRecipients with the new address', async () => {
     render(<GifsySettingsPage />);
     await waitFor(() =>
-      expect(screen.getAllByTestId('recipient-input-kycActionables')).toHaveLength(1),
+      expect(screen.getAllByTestId('recipient-input-dailyDigest')).toHaveLength(2),
     );
 
-    fireEvent.click(screen.getByTestId('recipient-add-kycActionables'));
-    const kycInputs = screen.getAllByTestId('recipient-input-kycActionables') as HTMLInputElement[];
-    expect(kycInputs).toHaveLength(2);
-    fireEvent.change(kycInputs[1], { target: { value: 'new@kyc.test' } });
+    fireEvent.click(screen.getByTestId('recipient-add-dailyDigest'));
+    const inputs = screen.getAllByTestId('recipient-input-dailyDigest') as HTMLInputElement[];
+    expect(inputs).toHaveLength(3);
+    fireEvent.change(inputs[2], { target: { value: ' New@Ops.test ' } });
 
     fireEvent.click(screen.getByTestId('recipients-save'));
     await waitFor(() => {
       expect(saveReportRecipients).toHaveBeenCalledWith({
-        creditsPayouts: ['finance@acme.test', 'ops@acme.test'],
-        kycActionables: ['kyc@acme.test', 'new@kyc.test'],
+        dailyDigest: ['finance@acme.test', 'ops@acme.test', 'New@Ops.test'],
       });
     });
   });
 
+  it('P2b: removing a row + Save sends the shorter list; a failed save shows an error', async () => {
+    asMock(saveReportRecipients).mockResolvedValue(false);
+    render(<GifsySettingsPage />);
+    await waitFor(() => expect(screen.getAllByTestId('recipient-input-dailyDigest')).toHaveLength(2));
+    fireEvent.click(screen.getByLabelText('Remove finance@acme.test'));
+    expect(screen.getAllByTestId('recipient-input-dailyDigest')).toHaveLength(1);
+    fireEvent.click(screen.getByTestId('recipients-save'));
+    await waitFor(() => expect(saveReportRecipients).toHaveBeenCalledWith({ dailyDigest: ['ops@acme.test'] }));
+    expect(await screen.findByText('Could not save the report recipients — please try again.')).toBeInTheDocument();
+  });
+
+  it('P2c: an empty list shows the hint; the retired per-report groups are gone', async () => {
+    asMock(fetchReportRecipients).mockResolvedValue({ dailyDigest: [] });
+    render(<GifsySettingsPage />);
+    expect(await screen.findByText(/Nobody gets the digest until you do/)).toBeInTheDocument();
+    expect(screen.queryByTestId('recipients-group-creditsPayouts')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('recipients-group-kycActionables')).not.toBeInTheDocument();
+    expect(screen.queryByText('Credits & Payouts summary')).not.toBeInTheDocument();
+  });
+
   it('P3: Save is disabled until data is loaded AND valid', async () => {
     // Hold the recipients fetch unresolved so the card stays in its loading state.
-    let resolveFetch!: (v: { creditsPayouts: string[]; kycActionables: string[] }) => void;
+    let resolveFetch!: (v: { dailyDigest: string[] }) => void;
     asMock(fetchReportRecipients).mockReturnValue(
       new Promise((res) => { resolveFetch = res; }),
     );
@@ -121,12 +143,12 @@ describe('Operator settings — platform-global cards', () => {
     expect(screen.queryByTestId('recipients-save')).not.toBeInTheDocument();
 
     // Resolve → the editable card + Save appear, enabled (loaded + valid).
-    resolveFetch({ creditsPayouts: ['finance@acme.test'], kycActionables: [] });
+    resolveFetch({ dailyDigest: ['finance@acme.test'] });
     const save = await screen.findByTestId('recipients-save');
     await waitFor(() => expect(save).not.toBeDisabled());
 
     // Add an empty recipient row → invalid → Save disabled again.
-    fireEvent.click(screen.getByTestId('recipient-add-creditsPayouts'));
+    fireEvent.click(screen.getByTestId('recipient-add-dailyDigest'));
     await waitFor(() => expect(screen.getByTestId('recipients-save')).toBeDisabled());
   });
 
@@ -150,7 +172,7 @@ describe('Operator settings — platform-global cards', () => {
     render(<GifsySettingsPage />);
     // The card containers still render (with a read-only note), but no inputs / Save / fetch.
     await screen.findByTestId('report-recipients-card');
-    expect(screen.queryByTestId('recipient-input-creditsPayouts')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('recipient-input-dailyDigest')).not.toBeInTheDocument();
     expect(screen.queryByTestId('recipients-save')).not.toBeInTheDocument();
     expect(screen.queryByTestId('holiday-add')).not.toBeInTheDocument();
     expect(screen.queryByTestId('holiday-save')).not.toBeInTheDocument();
