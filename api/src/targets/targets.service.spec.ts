@@ -24,6 +24,14 @@ import { BadRequestException, ConflictException, NotFoundException } from '@nest
 import { Prisma } from '@prisma/client';
 import * as XLSX from 'xlsx';
 import { TargetsService } from './targets.service';
+import type { AnyExportKind } from '../exports/export-kinds';
+import {
+  ACHIEVEMENTS_EXPORT_KIND,
+  ACHIEVEMENTS_TEMPLATE_KIND,
+  TARGETS_EXPORT_KIND,
+  TARGETS_TEMPLATE_KIND,
+} from '../exports/kinds/batch2/targets.kinds';
+import { ctxFor, renderKind } from '../exports/kinds/batch2/parity.support-spec';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -37,6 +45,17 @@ import {
   ListAchievementsQueryDto,
   PaceQueryDto,
 } from './dto/targets.dto';
+
+// Template / final-targets / sales-data downloads are export kinds (exports/kinds/batch2/targets.kinds.ts); these
+// shims render them exactly as the endpoints do (parseParams → run into the streaming writer) so the tests below keep
+// asserting the same queries and cells.
+async function dl(kind: AnyExportKind, raw: Record<string, unknown>): Promise<Buffer> {
+  return (await renderKind(kind, ctxFor(admin, mockPrisma), kind.parseParams(raw, admin))).buffer;
+}
+const getTemplateBuffer = (_u: JwtPayload, q: TemplateQueryDto) => dl(TARGETS_TEMPLATE_KIND, { ...q });
+const exportTargetsBuffer = (_u: JwtPayload, month: string) => dl(TARGETS_EXPORT_KIND, { month });
+const exportAchievementsBuffer = (_u: JwtPayload, month: string) => dl(ACHIEVEMENTS_EXPORT_KIND, { month });
+const buildAchievementTemplate = (_u: JwtPayload, month: string) => dl(ACHIEVEMENTS_TEMPLATE_KIND, { month });
 
 // ─── Mock Prisma ──────────────────────────────────────────────────────────────
 
@@ -504,7 +523,7 @@ describe('TargetsService', () => {
         { outletCode: 'O001', name: 'Outlet One', outletType: { code: 'RETAIL' } },
       ]);
 
-      await service.getTemplateBuffer(admin, { months: '2026-07' } as TemplateQueryDto);
+      await getTemplateBuffer(admin, { months: '2026-07' } as TemplateQueryDto);
 
       const arg = mockPrisma.outlet.findMany.mock.calls[0][0];
       // Tenant-scoped + only soft-deleted excluded; NO isActive (approval) gate.
@@ -519,7 +538,7 @@ describe('TargetsService', () => {
         { outletCode: 'PENDING1', name: 'Pending Outlet', outletType: { code: 'RETAIL' } },
       ]);
 
-      const buf = await service.getTemplateBuffer(admin, {
+      const buf = await getTemplateBuffer(admin, {
         months: '2026-07',
       } as TemplateQueryDto);
 
@@ -804,14 +823,14 @@ describe('TargetsService', () => {
     const XLSX = require('xlsx');
 
     it('rejects a non-YYYY-MM month', async () => {
-      await expect(service.exportTargetsBuffer(admin, 'July')).rejects.toThrow(
+      await expect(exportTargetsBuffer(admin, 'July')).rejects.toThrow(
         BadRequestException,
       );
     });
 
     it('rejects when the tenant has no enabled KPIs', async () => {
       mockPrisma.kpiDef.findMany.mockResolvedValue([]);
-      await expect(service.exportTargetsBuffer(admin, '2026-07')).rejects.toThrow(
+      await expect(exportTargetsBuffer(admin, '2026-07')).rejects.toThrow(
         BadRequestException,
       );
     });
@@ -831,7 +850,7 @@ describe('TargetsService', () => {
         { outletCode: 'RT-2', programName: 'Gold Programme', outletType: { code: 'SSS' } },
       ]);
 
-      const buf = await service.exportTargetsBuffer(admin, '2026-07');
+      const buf = await exportTargetsBuffer(admin, '2026-07');
 
       // Tenant + month scoped read.
       const where = mockPrisma.outletTarget.findMany.mock.calls.at(-1)[0].where;
@@ -861,14 +880,14 @@ describe('TargetsService', () => {
     const XLSX = require('xlsx');
 
     it('rejects a non-YYYY-MM month', async () => {
-      await expect(service.exportAchievementsBuffer(admin, 'July')).rejects.toThrow(
+      await expect(exportAchievementsBuffer(admin, 'July')).rejects.toThrow(
         BadRequestException,
       );
     });
 
     it('rejects when the tenant has no enabled KPIs', async () => {
       mockPrisma.kpiDef.findMany.mockResolvedValue([]);
-      await expect(service.exportAchievementsBuffer(admin, '2026-07')).rejects.toThrow(
+      await expect(exportAchievementsBuffer(admin, '2026-07')).rejects.toThrow(
         BadRequestException,
       );
     });
@@ -878,7 +897,7 @@ describe('TargetsService', () => {
       mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
       mockPrisma.outlet.findMany.mockResolvedValue([]);
 
-      await service.exportAchievementsBuffer(admin, '2026-07');
+      await exportAchievementsBuffer(admin, '2026-07');
 
       const where = mockPrisma.outletSalesRecord.findMany.mock.calls.at(-1)[0].where;
       expect(where).toEqual({ clientId: 'deoleo', month: '2026-07' });
@@ -899,7 +918,7 @@ describe('TargetsService', () => {
         { outletCode: 'RT-2', programName: null, outletType: { code: 'SSS' } }, // unset programName → blank cell
       ]);
 
-      const buf = await service.exportAchievementsBuffer(admin, '2026-07');
+      const buf = await exportAchievementsBuffer(admin, '2026-07');
 
       // Outlet join is tenant-scoped, excludes soft-deleted, and is BOUNDED to only
       // the outletCodes being exported (mirrors exportTargetsBuffer).
@@ -1435,7 +1454,7 @@ describe('TargetsService — Sales Import ownership (K-7)', () => {
     });
 
     it('buildAchievementTemplate: every enabled KPI keeps its column', async () => {
-      const buf = await service.buildAchievementTemplate(admin, WRITABLE_MONTH.ym);
+      const buf = await buildAchievementTemplate(admin, WRITABLE_MONTH.ym);
       const wb = XLSX.read(buf);
       const aoa = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[wb.SheetNames[0]], { header: 1 });
       expect(aoa[1]).toEqual(expect.arrayContaining(['Month Target', 'Focus Pack - 1']));
@@ -1496,7 +1515,7 @@ describe('TargetsService — Sales Import ownership (K-7)', () => {
     });
 
     it('template excludes the owned column', async () => {
-      const buf = await service.buildAchievementTemplate(admin, WRITABLE_MONTH.ym);
+      const buf = await buildAchievementTemplate(admin, WRITABLE_MONTH.ym);
       const wb = XLSX.read(buf);
       const aoa = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[wb.SheetNames[0]], { header: 1 });
       expect(aoa[1]).toContain('Month Target');

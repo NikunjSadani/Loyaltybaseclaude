@@ -35,7 +35,6 @@ import {
 import {
   ListKpisQueryDto,
   UpsertKpiDefDto,
-  TemplateQueryDto,
   ListBatchesQueryDto,
   ListTargetsQueryDto,
   ListAchievementBatchesQueryDto,
@@ -43,15 +42,12 @@ import {
   PaceQueryDto,
 } from './dto/targets.dto';
 import {
-  generateTargetTemplateBuffer,
-  buildResolvedTargetsBuffer,
-  buildSalesDataBuffer,
   parseTargetUploadBuffer,
+  targetUploadRowsEcho,
   currentMonthKey,
   isMonthLocked,
   kpiCodeKeys,
   KpiDefLike,
-  OutletLike,
 } from './targets.helpers';
 import { SQL_NOW_UTC } from '../sales-import/sql-time';
 import { targetUploadFocusCheck } from '../sales-import/kpi/focus-upload-check';
@@ -566,244 +562,8 @@ export class TargetsService {
     return new Map(kpiRows.map((k) => [k.code, kpiAppliesTo(k)]));
   }
 
-  // ─── Template download ──────────────────────────────────────────────────────
-
-  /**
-   * Build and return an xlsx template buffer.
-   * Columns = enabled KpiDefs × months; rows = all non-deleted outlets
-   * (targets can be set for any outlet regardless of KYC/active state).
-   */
-  async getTemplateBuffer(user: JwtPayload, q: TemplateQueryDto): Promise<Buffer> {
-    // Parse months
-    const months = q.months
-      .split(',')
-      .map((m) => m.trim())
-      .filter((m) => /^\d{4}-\d{2}$/.test(m));
-
-    if (months.length === 0) {
-      throw new BadRequestException(
-        'At least one valid YYYY-MM month is required in the "months" query param',
-      );
-    }
-
-    // Fetch enabled KPIs for the tenant
-    const kpiRows = await this.prisma.kpiDef.findMany({
-      where: { clientId: user.clientId, enabled: true },
-      orderBy: [{ order: 'asc' }, { code: 'asc' }],
-    });
-
-    if (kpiRows.length === 0) {
-      throw new BadRequestException(
-        'No enabled KPIs found for this tenant. Seed KPIs first via POST /v1/admin/kpis/seed-defaults.',
-      );
-    }
-
-    // Fetch all non-deleted outlets — targets/achievements can be set for any
-    // outlet regardless of KYC/active state (only soft-deleted are excluded).
-    const outlets = await this.prisma.outlet.findMany({
-      where: {
-        clientId: user.clientId,
-        deletedAt: null,
-      },
-      include: { outletType: { select: { code: true } } },
-      orderBy: { outletCode: 'asc' },
-    });
-
-    const kpis: KpiDefLike[] = kpiRows.map((k) => ({
-      code: k.code,
-      label: k.label,
-      isPrimary: k.isPrimary,
-      hasNameOverride: k.hasNameOverride,
-      nameOverrideLabel: k.nameOverrideLabel ?? null,
-      order: k.order,
-      enabled: k.enabled,
-    }));
-
-    const outletList: OutletLike[] = outlets.map((o) => ({
-      outletCode: o.outletCode,
-      name: o.name,
-      outletType: o.outletType.code,
-    }));
-
-    // APPLIES-TO D2: only a tenant with an enforced KPI scope gets the scoped layout; every other
-    // tenant (Deoleo: all unscoped) takes the unchanged 3-arg call → byte-identical template.
-    if (kpiScopeEnforced(kpiRows)) {
-      return this.scopedTemplate(kpiRows, kpis, months, outlets);
-    }
-    return generateTargetTemplateBuffer(kpis, months, outletList);
-  }
-
-  /** D2 scoped template: Program / Sub-Program info columns + `N/A` in out-of-scope value cells. */
-  private scopedTemplate(
-    kpiRows: ReadonlyArray<KpiScopeLike & { code: string }>,
-    kpis: KpiDefLike[],
-    months: string[],
-    outlets: ReadonlyArray<{
-      outletCode: string;
-      name: string;
-      programName: string | null;
-      programCategory: string | null;
-      outletType: { code: string };
-    }>,
-  ): Buffer {
-    const scopes = TargetsService.kpiScopeMap(kpiRows);
-    const outletList: OutletLike[] = outlets.map((o) => ({
-      outletCode: o.outletCode,
-      name: o.name,
-      outletType: o.outletType.code,
-      program: o.programName ?? null,
-      subProgram: o.programCategory ?? null,
-    }));
-    return generateTargetTemplateBuffer(kpis, months, outletList, {
-      scope: {
-        isInScope: (o, code) => {
-          const sc = scopes.get(code);
-          return !sc || appliesToOutlet(sc, { outletType: o.outletType, program: o.program, subProgram: o.subProgram });
-        },
-      },
-    });
-  }
-
-  /**
-   * GET /v1/admin/targets/export?month=YYYY-MM — "final targets" export.
-   * Dumps the stored OutletTarget.targetValues per outlet for the month, verbatim
-   * (no compute/resolution). Tenant-scoped. Blank cell = KPI not configured.
-   */
-  async exportTargetsBuffer(user: JwtPayload, month: string): Promise<Buffer> {
-    if (!/^\d{4}-\d{2}$/.test(month)) {
-      throw new BadRequestException('A valid YYYY-MM "month" query param is required');
-    }
-
-    const kpiRows = await this.prisma.kpiDef.findMany({
-      where: { clientId: user.clientId, enabled: true },
-      orderBy: [{ order: 'asc' }, { code: 'asc' }],
-    });
-    if (kpiRows.length === 0) {
-      throw new BadRequestException('No enabled KPIs found for this tenant.');
-    }
-
-    const targetRows = await this.prisma.outletTarget.findMany({
-      where: { clientId: user.clientId, month },
-      orderBy: { outletCode: 'asc' },
-      select: {
-        outletCode: true,
-        outletName: true,
-        targetValues: true,
-      },
-    });
-
-    // Program name is NOT denormalized on OutletTarget — join Outlet by (clientId, outletCode)
-    // to source it (matches the outlet-master report). Adds a "Program Name" column for analysis/
-    // filtering; the export stays re-uploadable (the column sits after the identity cols and the
-    // upload parser resolves fixed cols by NAME + KPI cols by label, ignoring unknown columns).
-    const codes = targetRows.map((r) => r.outletCode);
-    const outletsForProgram = codes.length
-      ? await this.prisma.outlet.findMany({
-          where: { clientId: user.clientId, outletCode: { in: codes }, deletedAt: null },
-          // outletType resolves from the AUTHORITATIVE Outlet.outletType.code (Phase 1 root-fix),
-          // NOT the stale OutletTarget.outletType snapshot. Matches the sales-export twin.
-          select: { outletCode: true, programName: true, outletType: { select: { code: true } } },
-        })
-      : [];
-    const programByCode = new Map(outletsForProgram.map((o) => [o.outletCode, o.programName ?? '']));
-    const outletTypeByCode = new Map(outletsForProgram.map((o) => [o.outletCode, o.outletType?.code]));
-    const rowsWithProgram = targetRows.map((r) => ({
-      ...r,
-      // Always the current authoritative Outlet.outletType.code; blank when the outlet is
-      // absent from the roster join (e.g. soft-deleted) — matches the achievements-export +
-      // getPace twins, never the stale OutletTarget.outletType snapshot (Phase 1 root-fix).
-      outletType: outletTypeByCode.get(r.outletCode) ?? '',
-      programName: programByCode.get(r.outletCode) ?? '',
-    }));
-
-    const kpis: KpiDefLike[] = kpiRows.map((k) => ({
-      code: k.code,
-      label: k.label,
-      isPrimary: k.isPrimary,
-      hasNameOverride: k.hasNameOverride,
-      nameOverrideLabel: k.nameOverrideLabel ?? null,
-      order: k.order,
-      enabled: k.enabled,
-    }));
-
-    return buildResolvedTargetsBuffer(month, kpis, rowsWithProgram);
-  }
-
-  /**
-   * GET /v1/admin/achievements/export?month=YYYY-MM — "Download Sales Data".
-   *
-   * The achievement-side twin of exportTargetsBuffer: dumps the stored
-   * OutletSalesRecord.kpiValues per outlet for the month, verbatim (no compute),
-   * in the SAME month-group 2-row layout the achievement UPLOAD parser expects,
-   * PLUS a "Program Name" column. Tenant-scoped. Blank cell = KPI not configured.
-   *
-   * Program Name is NOT denormalized on OutletSalesRecord, so it is sourced by
-   * joining Outlet on (clientId, outletCode, deletedAt:null) — the same roster
-   * query the achievement template/upload use — and looked up by outletCode. The
-   * extra column sits BEFORE the month block, so the produced file re-uploads
-   * cleanly through uploadAchievements (the parser ignores it — see
-   * buildSalesDataBuffer's re-upload-safety note).
-   */
-  async exportAchievementsBuffer(user: JwtPayload, month: string): Promise<Buffer> {
-    // Strict YYYY-MM (01-12) — a loose \d{2} accepts 2026-13 and yields a corrupt
-    // "undefined 'YY Target" header instead of a clean 400.
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
-      throw new BadRequestException('A valid YYYY-MM "month" query param is required');
-    }
-
-    const kpiRows = await this.prisma.kpiDef.findMany({
-      where: { clientId: user.clientId, enabled: true },
-      orderBy: [{ order: 'asc' }, { code: 'asc' }],
-    });
-    if (kpiRows.length === 0) {
-      throw new BadRequestException('No enabled KPIs found for this tenant.');
-    }
-
-    const salesRows = await this.prisma.outletSalesRecord.findMany({
-      where: { clientId: user.clientId, month },
-      orderBy: { outletCode: 'asc' },
-      select: {
-        outletCode: true,
-        outletName: true,
-        kpiValues: true,
-      },
-    });
-
-    // programName lives on Outlet (NOT on OutletSalesRecord). Build a
-    // code→programName map, bounded to only the outletCodes we're exporting (mirrors
-    // exportTargetsBuffer — no need to pull the whole roster when the month has few rows).
-    const codes = salesRows.map((r) => r.outletCode);
-    const outlets = codes.length
-      ? await this.prisma.outlet.findMany({
-          where: { clientId: user.clientId, outletCode: { in: codes }, deletedAt: null },
-          // outletType resolves from the AUTHORITATIVE Outlet.outletType.code (Phase 1 root-fix),
-          // NOT the stale OutletSalesRecord.outletType snapshot.
-          select: { outletCode: true, programName: true, outletType: { select: { code: true } } },
-        })
-      : [];
-    const programNameByCode = new Map(outlets.map((o) => [o.outletCode, o.programName]));
-    const outletTypeByCode = new Map(outlets.map((o) => [o.outletCode, o.outletType?.code]));
-
-    const kpis: KpiDefLike[] = kpiRows.map((k) => ({
-      code: k.code,
-      label: k.label,
-      isPrimary: k.isPrimary,
-      hasNameOverride: k.hasNameOverride,
-      nameOverrideLabel: k.nameOverrideLabel ?? null,
-      order: k.order,
-      enabled: k.enabled,
-    }));
-
-    const rows = salesRows.map((r) => ({
-      outletCode: r.outletCode,
-      outletName: r.outletName,
-      outletType: outletTypeByCode.get(r.outletCode) ?? '',
-      programName: programNameByCode.get(r.outletCode) ?? null,
-      kpiValues: r.kpiValues,
-    }));
-
-    return buildSalesDataBuffer(month, kpis, rows);
-  }
+  // Template + final-targets / sales-data downloads are export kinds (exports/kinds/batch2/targets.kinds.ts),
+  // streamed in pages or prepared on the Downloads page — see the Downloads page design.
 
   // ─── Target upload ──────────────────────────────────────────────────────────
 
@@ -1015,7 +775,9 @@ export class TargetsService {
       // the confirmation message reports — `acceptedCount` can be higher because it
       // counts parse-valid rows for LOCKED past months too, which are not written.
       savedCount:    targetOps.length,
-      rows:          parseResult.rows,
+      // Memory-safety (2026-11-13): only the rejected rows + the ignored-value warning rows come back
+      // (each capped at 500, slimmed to row/outlet/status/remarks) — not every parsed row with its values.
+      ...targetUploadRowsEcho(parseResult.rows),
       focusCheck,
     };
   }
@@ -1066,85 +828,6 @@ export class TargetsService {
     const carriedNames = ownedSubsetSql(Prisma.sql`COALESCE(${column}->'__names', '{}'::jsonb)`, carry);
     return Prisma.sql`CASE WHEN ${carriedNames} = '{}'::jsonb THEN ${base}
       ELSE ${base} || jsonb_build_object('__names', ${carriedNames} || COALESCE(${incoming}->'__names', '{}'::jsonb)) END`;
-  }
-
-  // ─── Achievement template download ──────────────────────────────────────────
-
-  /**
-   * GET /v1/admin/achievements/template?month=YYYY-MM
-   *
-   * Build the achievement (sales) upload template. It is byte-for-byte the SAME
-   * month-group 2-row layout that the TARGET template uses (so the file the admin
-   * fills in parses cleanly back through parseTargetUploadBuffer on upload). This
-   * makes ONE source of truth for the upload format — the old FE generateSalesTemplate
-   * (12-col MOCK_OUTLETS, incompatible parser) is retired.
-   *
-   * Reuses the exact KPI + REAL tenant-scoped outlet-roster queries from
-   * getTemplateBuffer (NO mock outlets). Single month wrapped into the [months]
-   * array that generateTargetTemplateBuffer expects. Tenant-scoped by clientId.
-   */
-  async buildAchievementTemplate(user: JwtPayload, month: string): Promise<Buffer> {
-    if (!/^\d{4}-\d{2}$/.test(month)) {
-      throw new BadRequestException('A valid YYYY-MM "month" query param is required');
-    }
-
-    // Enabled KPIs for the tenant — same query as the target template path.
-    let kpiRows = await this.prisma.kpiDef.findMany({
-      where: { clientId: user.clientId, enabled: true },
-      orderBy: [{ order: 'asc' }, { code: 'asc' }],
-    });
-
-    if (kpiRows.length === 0) {
-      throw new BadRequestException(
-        'No enabled KPIs found for this tenant. Seed KPIs first via POST /v1/admin/kpis/seed-defaults.',
-      );
-    }
-
-    // Sales Import source ownership (§7.4): importer-owned KPIs get no column in the manual template.
-    // A tenant with no SalesKpiDefinition (Deoleo, every tenant today) → [] → this block never runs.
-    const owned = await importerOwnedKpiCodes(this.prisma, user.clientId);
-    if (owned.length > 0) {
-      kpiRows = kpiRows.filter((k) => !owned.includes(k.code));
-      if (kpiRows.length === 0) {
-        throw new BadRequestException(
-          'Every enabled KPI is fed by Sales Import, so there is nothing to upload manually.',
-        );
-      }
-    }
-
-    // All non-deleted outlets — identical query to getTemplateBuffer (no mocks).
-    // Achievements can be set for any outlet regardless of KYC/active state
-    // (only soft-deleted are excluded).
-    const outlets = await this.prisma.outlet.findMany({
-      where: {
-        clientId: user.clientId,
-        deletedAt: null,
-      },
-      include: { outletType: { select: { code: true } } },
-      orderBy: { outletCode: 'asc' },
-    });
-
-    const kpis: KpiDefLike[] = kpiRows.map((k) => ({
-      code: k.code,
-      label: k.label,
-      isPrimary: k.isPrimary,
-      hasNameOverride: k.hasNameOverride,
-      nameOverrideLabel: k.nameOverrideLabel ?? null,
-      order: k.order,
-      enabled: k.enabled,
-    }));
-
-    const outletList: OutletLike[] = outlets.map((o) => ({
-      outletCode: o.outletCode,
-      name: o.name,
-      outletType: o.outletType.code,
-    }));
-
-    // APPLIES-TO D2 — same rule as the target template (unscoped tenant → unchanged 3-arg call).
-    if (kpiScopeEnforced(kpiRows)) {
-      return this.scopedTemplate(kpiRows, kpis, [month], outlets);
-    }
-    return generateTargetTemplateBuffer(kpis, [month], outletList);
   }
 
   // ─── Achievement upload ─────────────────────────────────────────────────────
@@ -1345,7 +1028,9 @@ export class TargetsService {
       // APPLIES-TO D1: numeric values dropped as out of the KPI's scope — present ONLY for a tenant
       // with a scoped KPI (an all-unscoped tenant's response stays byte-identical).
       ...(scopeEnforced ? { ignoredOutOfScope: parseResult.summary.ignoredOutOfScope } : {}),
-      rows:          parseResult.rows,
+      // Memory-safety (2026-11-13): only the rejected rows + the ignored-value warning rows come back
+      // (each capped at 500, slimmed to row/outlet/status/remarks) — not every parsed row with its values.
+      ...targetUploadRowsEcho(parseResult.rows),
       // Additive, ONLY for tenants with importer-owned KPIs (absent otherwise → Deoleo response unchanged).
       ...(skippedImporterOwnedKpis !== undefined ? { skippedImporterOwnedKpis } : {}),
     };

@@ -20,15 +20,22 @@ import {
   mergeScopeOptions,
 } from './targets.service';
 import {
-  generateTargetTemplateBuffer,
+  targetTemplateLayout,
   parseTargetUploadBuffer,
   KpiDefLike,
   OutletLike,
   OUT_OF_SCOPE_CELL,
+  TemplateScopeOptions,
 } from './targets.helpers';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { ACHIEVEMENTS_TEMPLATE_KIND, TARGETS_TEMPLATE_KIND } from '../exports/kinds/batch2/targets.kinds';
+import { ctxFor, expectSameWorkbook, renderKind, renderLayoutSync } from '../exports/kinds/batch2/parity.support-spec';
 
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
+
+/** The template layout through the old SheetJS rendering (byte-comparable with the pre-APPLIES-TO golden). */
+const generateTargetTemplateBuffer = (kpis: KpiDefLike[], months: string[], outlets: OutletLike[], opts?: { scope?: TemplateScopeOptions }) =>
+  renderLayoutSync(targetTemplateLayout(kpis, months, opts), outlets);
 
 // ── Golden fixture (identical to the capture run against the PRE-change code at 7b3bb712) ──────────
 const KPIS: KpiDefLike[] = [
@@ -236,25 +243,36 @@ function makeService() {
   return { service, prisma, tx, settings };
 }
 
-describe('TargetsService — APPLIES-TO templates (D2 golden + scoped)', () => {
-  it('GOLDEN: an UNSCOPED tenant (Deoleo) target + achievement templates are byte-identical', async () => {
-    const { service, prisma } = makeService();
+describe('Template export kinds — APPLIES-TO templates (D2 golden + scoped)', () => {
+  // The templates are now the 'targets-template' / 'achievements-template' export kinds (streamed). The streamed bytes
+  // differ from SheetJS's, so the golden is pinned in two steps: the layout renders byte-identically to the
+  // pre-APPLIES-TO golden (test above), and the streamed file is cell-for-cell identical to that render.
+  const targetTemplate = async (prisma: unknown, months: string) =>
+    (await renderKind(TARGETS_TEMPLATE_KIND, ctxFor(admin, prisma), TARGETS_TEMPLATE_KIND.parseParams({ months }, admin))).buffer;
+  const achievementTemplate = async (prisma: unknown, month: string) =>
+    (await renderKind(ACHIEVEMENTS_TEMPLATE_KIND, ctxFor(admin, prisma), ACHIEVEMENTS_TEMPLATE_KIND.parseParams({ month }, admin))).buffer;
+
+  it('GOLDEN: an UNSCOPED tenant (Deoleo) target + achievement templates are cell-identical to the golden layout', async () => {
+    const { prisma } = makeService();
     prisma.kpiDef.findMany.mockResolvedValue(KPIS.map((k) => kpiRow(k)));
     prisma.outlet.findMany.mockResolvedValue(OUTLETS.map(outletRow));
-    expect(sha(await service.getTemplateBuffer(admin, { months: '2025-07,2025-08' }))).toBe(GOLDEN_TARGET_2M);
-    expect(sha(await service.buildAchievementTemplate(admin, '2025-06'))).toBe(GOLDEN_ACH_1M);
+    const goldenTarget = generateTargetTemplateBuffer(KPIS, ['2025-07', '2025-08'], OUTLETS);
+    const goldenAch = generateTargetTemplateBuffer(KPIS, ['2025-06'], OUTLETS);
+    expect(sha(goldenTarget)).toBe(GOLDEN_TARGET_2M);
+    expect(sha(goldenAch)).toBe(GOLDEN_ACH_1M);
+    expectSameWorkbook(await targetTemplate(prisma, '2025-07,2025-08'), goldenTarget);
+    expectSameWorkbook(await achievementTemplate(prisma, '2025-06'), goldenAch);
   });
 
   it('LEGACY single-outlet-type tenant is ENFORCED: scoped layout + N/A on out-of-type cells (target + achievement)', async () => {
-    const { service, prisma } = makeService();
+    const { prisma } = makeService();
     prisma.kpiDef.findMany.mockResolvedValue([
       kpiRow(KPIS[0]),
       kpiRow(KPIS[1], { outletType: 'SSS', outletTypes: ['SSS'] }), // post-backfill shape
       kpiRow(KPIS[2], { outletType: 'WHOLESALER' }), // pre-backfill shape (arrays empty)
     ]);
     prisma.outlet.findMany.mockResolvedValue(OUTLETS.map((o) => outletRow({ ...o, program: 'Gold', subProgram: 'Tier A' })));
-    const tpl = await service.getTemplateBuffer(admin, { months: '2025-07' });
-    expect(sha(tpl)).not.toBe(GOLDEN_TARGET_2M);
+    const tpl = await targetTemplate(prisma, '2025-07');
     const aoa = readAoa(tpl);
     expect(aoa[1]).toEqual([
       'Outlet ID', 'Outlet Name', 'Outlet Type', 'Program', 'Sub-Program',
@@ -264,13 +282,13 @@ describe('TargetsService — APPLIES-TO templates (D2 golden + scoped)', () => {
     expect(aoa[2]).toEqual(['O1', 'Alpha Stores', 'RETAILER', 'Gold', 'Tier A', null, 'N/A', null, 'N/A']);
     expect(aoa[3]).toEqual(['O2', 'Beta Wholesale', 'WHOLESALER', 'Gold', 'Tier A', null, 'N/A', null, null]);
     expect(aoa[4]).toEqual(['O3', 'Gamma', 'SSS', 'Gold', 'Tier A', null, null, null, 'N/A']);
-    const ach = readAoa(await service.buildAchievementTemplate(admin, '2025-06'));
+    const ach = readAoa(await achievementTemplate(prisma, '2025-06'));
     expect(ach[1].slice(3, 5)).toEqual(['Program', 'Sub-Program']);
     expect(ach[2]).toEqual(['O1', 'Alpha Stores', 'RETAILER', 'Gold', 'Tier A', null, 'N/A', null, 'N/A']);
   });
 
   it('SCOPED tenant: info columns + N/A from the outlet CURRENT facets', async () => {
-    const { service, prisma } = makeService();
+    const { prisma } = makeService();
     prisma.kpiDef.findMany.mockResolvedValue([
       kpiRow(KPIS[0]),
       kpiRow(KPIS[1], { programs: ['Gold'] }),
@@ -280,7 +298,7 @@ describe('TargetsService — APPLIES-TO templates (D2 golden + scoped)', () => {
       outletRow({ ...OUTLETS[0], program: 'GOLD', subProgram: 'Tier A' }), // RETAILER
       outletRow({ ...OUTLETS[2], program: null, subProgram: 'Tier A' }), // SSS
     ]);
-    const aoa = readAoa(await service.getTemplateBuffer(admin, { months: '2025-07' }));
+    const aoa = readAoa(await targetTemplate(prisma, '2025-07'));
     expect(aoa[1].slice(0, 5)).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Program', 'Sub-Program']);
     // O1: FOCUS in (program ci), CONSISTENCY out (type)
     expect(aoa[2]).toEqual(['O1', 'Alpha Stores', 'RETAILER', 'GOLD', 'Tier A', null, null, null, 'N/A']);
