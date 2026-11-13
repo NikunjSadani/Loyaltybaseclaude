@@ -8,14 +8,16 @@
  */
 import { PaymentsReportController } from './payments-report.controller';
 import { PaymentsReportService } from './payments-report.service';
+import { ExportsService } from '../exports/exports.service';
+import { PAYMENTS_REPORT_KIND } from '../exports/kinds/batch2/payments-report.kind';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const svc = {
   paymentReport: jest.fn().mockResolvedValue({ rows: [] }),
-  paymentReportXlsx: jest.fn().mockResolvedValue({ buffer: Buffer.from(''), filename: 'x.xlsx' }),
 };
+const exportsSvc = { respond: jest.fn().mockResolvedValue({ exportRequestId: 'x', message: 'm' }) };
 
 const GIFSY: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9', name: 'Op' };
 const CLIENT: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '8', name: 'CA' };
@@ -30,7 +32,7 @@ describe('PaymentsReportController', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    controller = new PaymentsReportController(svc as unknown as PaymentsReportService);
+    controller = new PaymentsReportController(svc as unknown as PaymentsReportService, exportsSvc as unknown as ExportsService);
   });
 
   describe('scoping', () => {
@@ -54,9 +56,11 @@ describe('PaymentsReportController', () => {
       expect(svc.paymentReport).toHaveBeenCalledWith({ clientId: undefined, from: undefined, to: undefined, status: undefined });
     });
 
-    it('export resolves scope identically and sets the attachment header', async () => {
-      await controller.paymentsReportExport(CLIENT, { clientId: 'other-tenant' }, fakeRes());
-      expect(svc.paymentReportXlsx).toHaveBeenCalledWith({ clientId: 'deoleo', from: undefined, to: undefined, status: undefined });
+    it('export hands the query to the payments-report export kind (which pins the scope — see its spec)', async () => {
+      const res = fakeRes();
+      await controller.paymentsReportExport(CLIENT, { clientId: 'other-tenant' }, res);
+      expect(exportsSvc.respond).toHaveBeenCalledWith(res, CLIENT, 'payments-report', { clientId: 'other-tenant' });
+      expect(PAYMENTS_REPORT_KIND.parseParams({ clientId: 'other-tenant' }, CLIENT).clientId).toBe('deoleo');
     });
   });
 

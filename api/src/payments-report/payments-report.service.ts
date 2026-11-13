@@ -1,8 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { CreditEntryStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { buildXlsx } from '../common/xlsx';
-import { istDayRangeFilter, istDateKey } from '../common/ist-date';
+import { istDayRangeFilter } from '../common/ist-date';
 
 /**
  * Payments Report service — a READ-ONLY report of all payout PAYMENTS in a date range, across
@@ -47,8 +46,8 @@ interface SalesNode {
 
 @Injectable()
 export class PaymentsReportService {
-  /** Hard cap on rows returned/exported — bounds memory (query + in-memory xlsx). Overflow → `truncated`. */
-  private static readonly MAX_ROWS = 10000;
+  /** Hard cap on rows returned/exported (JSON + the 'payments-report' export kind). Overflow → `truncated`. */
+  static readonly MAX_ROWS = 10000;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -283,56 +282,6 @@ export class PaymentsReportService {
     };
   }
 
-  async paymentReportXlsx(
-    scope: PaymentsReportScope,
-  ): Promise<{ buffer: Buffer; filename: string }> {
-    const report = await this.paymentReport(scope);
-    const sheetRows = report.rows.map((r, i) => ({
-      'S.No': i + 1,
-      'Client': r.clientId,
-      // Format the stored UTC instant as the IST calendar day (raw ISO would print UTC — off-by-one
-      // in the 00:00–05:30 IST window). The JSON envelope keeps raw ISO for the FE to format.
-      'Payment Date': r.paymentDate ? istDateKey(new Date(r.paymentDate)) : '',
-      'Outlet Code': r.outletCode ?? '',
-      'Outlet Name': r.outletName,
-      'Business Name': r.businessName ?? '',
-      'Owner Name': r.ownerName ?? '',
-      'Zone': r.zone ?? '',
-      'State': r.state ?? '',
-      'City': r.city ?? '',
-      'Sales Rep Code': r.salesRepCode ?? '',
-      'Sales Rep Name': r.salesRepName ?? '',
-      'Sales Rep Role': r.salesRepRole ?? '',
-      'Reporting Chain': r.reportingChain ?? '',
-      'Amount (₹)': r.amount.inr,
-      'UTR': r.utr ?? '',
-      'Status': r.status,
-      'Payout Header': r.payoutHeader ?? '',
-      'Group Type': r.groupType ?? '',
-      'Payout Field': r.payoutField,
-      'Remarks': r.remarks ?? '',
-      'Failure Reason': r.failureReason ?? '',
-      'Period': r.period,
-      'TDS Section': r.tdsSection ?? '',
-      'TDS Methodology': r.tdsMethodology ?? '',
-      'TDS Deducted (₹)': r.tdsDeducted.inr,
-      'Invoice No.': r.invoiceNumber ?? '',
-      'GST Reg Type': r.gstRegistrationType ?? '',
-      'PAN': r.panNumber ?? '',
-      'Phone': r.phone ?? '',
-    }));
-    const summaryRows = [
-      { Metric: 'Rows', Value: report.count },
-      { Metric: 'Total Amount (₹)', Value: report.totals.amount.inr },
-      ...(report.truncated
-        ? [{ Metric: `TRUNCATED — showing first ${report.maxRows}; narrow the date range for a complete report`, Value: 'YES' }]
-        : []),
-    ];
-    const buffer = buildXlsx([
-      { name: 'Payments', rows: sheetRows },
-      { name: 'Summary', rows: summaryRows },
-    ]);
-    const suffix = scope.clientId ? scope.clientId : 'all';
-    return { buffer, filename: `payments-report-${suffix}.xlsx` };
-  }
+  // The .xlsx twin (GET …/payments-report/export) is the 'payments-report' export kind
+  // (exports/kinds/batch2/payments-report.kind.ts): the same rows/columns, streamed page by page.
 }

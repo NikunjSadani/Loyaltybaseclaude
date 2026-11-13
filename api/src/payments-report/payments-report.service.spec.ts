@@ -2,14 +2,12 @@
  * Unit tests for PaymentsReportService — READ-ONLY cross-stream payments report. Mock Prisma, no I/O.
  * Covers: ALL streams included (NO tdsSection filter in the where); paidAt not-null + [from,to]
  * range; optional status filter; batched lookups (findMany call counts — no N+1); the sales chain
- * built from the assignment + reportingTo up-walk (cycle-safe); BigInt → {paise,inr} serialisation;
- * and the xlsx cellSafe formula-injection guard.
+ * built from the assignment + reportingTo up-walk (cycle-safe); BigInt → {paise,inr} serialisation.
  * Run: npx jest src/payments-report/payments-report.service.spec.ts
  */
 import { PaymentsReportService } from './payments-report.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { startOfIstDay, endOfIstDay } from '../common/ist-date';
-import * as XLSX from 'xlsx';
 
 const mockPrisma = {
   creditPayoutEntry: { findMany: jest.fn() },
@@ -17,14 +15,6 @@ const mockPrisma = {
   salesUserAssignment: { findMany: jest.fn() },
   salesUser: { findMany: jest.fn() },
 };
-
-/** Read a built workbook Buffer back into per-sheet array-of-objects. */
-function readWorkbook(buffer: Buffer): Record<string, Record<string, unknown>[]> {
-  const wb = XLSX.read(buffer, { type: 'buffer' });
-  const out: Record<string, Record<string, unknown>[]> = {};
-  for (const name of wb.SheetNames) out[name] = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
-  return out;
-}
 
 const OUTLET = {
   id: 'outlet-pk-1',
@@ -343,36 +333,6 @@ describe('PaymentsReportService', () => {
       expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
       expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
       expect(mockPrisma.salesUser.findMany).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('paymentReportXlsx', () => {
-    it('emits Payments + Summary sheets and escapes a formula-injection cell', async () => {
-      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
-        {
-          ...twoStreamEntries()[0],
-          outletId: '=HYPERLINK("evil")',
-          outletName: '=cmd()|calc',
-          narration: '@SUM(A1)',
-        },
-      ]);
-      mockPrisma.outlet.findMany.mockResolvedValue([]); // no enrichment; focus on the cell guard
-
-      const { buffer, filename } = await service.paymentReportXlsx({ clientId: 'deoleo' });
-      expect(filename).toBe('payments-report-deoleo.xlsx');
-
-      const wb = readWorkbook(buffer);
-      expect(Object.keys(wb)).toEqual(['Payments', 'Summary']);
-      const row = wb['Payments'][0];
-      expect(String(row['Outlet Code'])).toBe("'=HYPERLINK(\"evil\")");
-      expect(String(row['Outlet Name'])).toBe("'=cmd()|calc");
-      expect(String(row['Remarks'])).toBe("'@SUM(A1)");
-      expect(wb['Summary'][0]).toEqual({ Metric: 'Rows', Value: 1 });
-    });
-
-    it('platform-wide export filename is "all"', async () => {
-      const { filename } = await service.paymentReportXlsx({});
-      expect(filename).toBe('payments-report-all.xlsx');
     });
   });
 });
