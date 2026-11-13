@@ -42,7 +42,6 @@ vi.mock('@/lib/admin-session', async (importOriginal) => {
     ...mod,
     useAdminSession: vi.fn(() => ({
       role:             'CLIENT_ADMIN',
-      clientId:         'deoleo',
       name:             'Test Admin',
       canManageSchemes: false,
     })),
@@ -149,7 +148,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
   mockUseAdminSession.mockReturnValue({
     role:             'CLIENT_ADMIN',
-    clientId:         'deoleo',
     name:             'Test Admin',
     userId:           '',
     canManageSchemes: false,
@@ -222,7 +220,6 @@ describe('TDS — Admin TDS page API wiring', () => {
   it('TDS5: 194C tab NOT rendered for CLIENT_ADMIN', async () => {
     mockUseAdminSession.mockReturnValue({
       role:             'CLIENT_ADMIN',
-      clientId:         'deoleo',
       name:             'Test Admin',
       userId:           '',
       canManageSchemes: false,
@@ -237,7 +234,6 @@ describe('TDS — Admin TDS page API wiring', () => {
   it('TDS6: 194C tab visible for GIFSY_ADMIN', async () => {
     mockUseAdminSession.mockReturnValue({
       role:             'GIFSY_ADMIN',
-      clientId:         'gifsy',
       name:             'Gifsy Platform Admin',
       userId:           '',
       canManageSchemes: true,
