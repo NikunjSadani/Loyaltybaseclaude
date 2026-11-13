@@ -63,6 +63,14 @@ Correction list sent to the owner: `…\Files received\2026.11.04\Bajaj - data c
 - **BLOCKER (owner decision 2026-11-12): import only AFTER the 194R `VENDOR_IMPORT` exclusion (`f6b0cf0`, reverted on main by `e8c3f46` at cutover #56) is back on prod** — ship it in the next prod release (do NOT keep the TDS revert when preparing main). Job refuses LIVE unless `TDS_RULE_LIVE=true`.
 - Job `bajaj-prod-payout-history` (guards EXPECTED_DB/CONFIRM_TENANT/EXPECTED_ROWS=48086/EXPECTED_PAISE=2890956070; idempotent per month), manifest `gs://gifsy-platform-files/migrations/bajaj-prod-payout-rlp-manifest-2026-11-12.json`. After release: backup → `DRY_RUN=false TDS_RULE_LIVE=true` → verify (counts/Σ per month, UTRs, 0 TDS rows, partner wallet "Lifetime payout").
 
+### 9.1 Retailer TDS on the imported payouts — owner decision 2026-11-13
+Bajaj confirmed **no TDS has been deposited for retailers so far**. Decision (recommended option): a **Bajaj-only setting**
+makes imported (VENDOR_IMPORT) payouts **dated from 1 Apr 2026 (FY 2026-27)** count in the 194R report, so each retailer's
+liability (₹20k threshold, 10% / 20% no-PAN) is visible; **FY 2025-26 imports stay excluded** (closed year — Bajaj's CA
+handles late payment outside the platform); deposits made later are uploaded with "TDS for month" and subtract; **no
+automatic recovery from future payouts** until Bajaj's CA decides who bears it. Build = small fast follow-up AFTER this
+release (the report is computed live, so the payout-history import does not wait for it).
+
 ## 9b. Wholesaler points (Earn & Burn) — ✅ DONE on prod 2026-11-12 (night), verified
 - Sources: File 1 `…\2026.11.04\Earn  Burn Points of 25 to 26  Expire points data Year 25.xlsx` (sheet "File", history Apr 2025 → 31 Oct 2026, 103 cols = staging layout + 16–31 Oct burn) + File 2 `…\2026.11.04\12.11\WholesalerCumulativePointsReport2026-2027 (1).xls` (vendor FY26-27 monthly report to 11 Nov). Files agree at 31 Oct (2,331/2,333 within 1 pt); File 2 adds only 1–11 Nov redemptions (25 outlets, 1,24,691 pts). Vendor stopped redemptions on 11 Nov (owner) → this is the FINAL balance.
 - Owner rule: **every closing balance = vendor's 11-Nov closing (File 2 ClosingPoints, rounded)** → 2,281 wallets, Σ **67,27,723**; 0 mismatches. 50270366/50293463: vendor recovered pre-Apr-25 over-redemption from FY25-26 earnings → shown as "Last year's over-redemption recovered" (ADJUST, 1 Apr 2025) (staging had excluded it; corrected on prod).
@@ -71,6 +79,23 @@ Correction list sent to the owner: `…\Files received\2026.11.04\Bajaj - data c
 - 8 wallets end NEGATIVE (sales returns, owner: keep) — the wallet fix "never credit points when debiting a negative wallet" ships in the next release; **no credit-batch reversal on these before it**.
 - Not imported: 408 File-1 outlets not on prod (52 of them Active, 66,916 pts — not CISPL-approved; import their balance if onboarded later); 59 prod wholesalers with zero in both files. No Oct/Nov 2026 EARN exists in either vendor file → those earnings come via our own pipeline.
 - Backup `1794502277650` → job `bajaj-prod-earnburn` (manifest `migrations/bajaj-prod-earnburn-manifest-2026-11-12-v3.json`) → LIVE 2,281 outlets / 29,283 events / 0 dirty → verifier PASS (redeemable/counters/row counts/FIFO/balance chain per wallet; 0 other-tenant rows). Builder `scratchpad/prodimport/eb_build_prod_spljun.js`. Independent money audit done before live.
+
+## 9c. Historical targets + achievements — ✅ DONE on prod 2026-11-13, verified
+- Source: `…\Files received\Final UAT data upload\Retailer payout earning april 25 to sept 26.xlsx` (same file as staging) —
+  sheets "RLP" (retailers) + "BSC25-26" (wholesalers); WOA pivot sheets ignored. Apr 2025 → Sep 2026. October file to come
+  (same import); November targets entered by the owner on the platform; November achievements via Sales Import.
+- Owner decisions (2026-11-13, all recommended): RLP → TOTAL ← Month Target/Month Achievement · ADHO ← ADHO Target/ACHV ·
+  NON ADHO ← Non ADHO Target/ACHV · FOCUS BRAND ← FB Target/ACHV · LINES ← Line Target/Line Ach · FOCUS BRAND 2 ← nothing;
+  BSC → TOTAL only (FB1/FB4/ADHO 100/CNO case counts have no target → not imported); prod outlets only (3,634 skipped,
+  listed in scratchpad `targets-skipped-not-on-prod.json`); 21 sheet/type mismatches imported (out-of-scope KPIs stay
+  hidden); 2 decimals; negatives kept (442 achievement cells); 5 duplicate outlet-months imported once (first wins):
+  50799828 Jul-25 (RLP×2), 50193574 Jan-26 (BSC×2), 50911506 / 50912500 / 50857270 May-25 (in both sheets → RLP row kept).
+  RLP check: Month Target = ADHO + Non ADHO on every sampled row.
+- Result: **102,591 OutletTarget + 102,591 OutletSalesRecord rows** (6,379 outlets, 18 months), one target + one sales
+  upload batch per month for provenance; ON CONFLICT DO NOTHING (prod had none). Σ TOTAL target ₹334.97 cr / achieved
+  ₹309.97 cr. Backup `1794546891138` → job `bajaj-prod-targets` → verifier PASS (every KPI value per row = file).
+- ⚠️ **Points engine is ON for Bajaj prod: NEVER run a points compute for Apr 2025 – Sep 2026** — those months were already
+  paid by the vendor (points imported via Earn & Burn §9b; payouts via §9). Same for the October file once imported.
 
 ## 10. TDS already deducted by the vendor (FY 2026-27) — APPROVED as a PARTIAL import (owner 2026-11-12)
 - Source: `…\Files received\2026.11.04\TDS Calculation FY 2026-27.xlsx` — 124 outlet rows, all wholesaler points TDS (119 on prod = WHOLESALER/BSC; 5 not on prod: 16069, 27618, 451278 not in the master; 50333738, 50781620 CISPL blank). Monthly APR–SEP TDS per outlet, Σ ₹6,50,166; challans per month (no./value/date) Σ ₹10,47,030.
