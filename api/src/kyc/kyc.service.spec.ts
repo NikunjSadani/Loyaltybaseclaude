@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 // Unit tests for KycService — ported from platform/src/app/api/kyc/*.
 // Covers tenant scoping, the multi-level approval transitions, and role gates.
 // Run: npx jest src/kyc/kyc.service.spec.ts
@@ -155,7 +156,7 @@ const mockStorage = {
   uploadFile: jest.fn().mockResolvedValue('https://storage.googleapis.com/bucket/key'),
   getSignedUrl: jest.fn(),
   downloadAsDataUrl: jest.fn(),
-  downloadBytes: jest.fn(),
+  openBoundedObject: jest.fn(),
   publicUrl: jest.fn((k: string) => `https://storage.googleapis.com/bucket/${k}`),
   deleteFile: jest.fn(),
 };
@@ -7984,12 +7985,12 @@ describe('KycService', () => {
         kycSubmission: { user: { clientId: 'deoleo' } },
       });
       const bytes = Buffer.from('PDFDATA');
-      mockStorage.downloadBytes.mockResolvedValueOnce({ bytes, contentType: 'application/octet-stream' });
+      mockStorage.openBoundedObject.mockResolvedValueOnce({ stream: Readable.from([bytes]), size: bytes.length, contentType: 'application/octet-stream' });
 
       const res = await service.viewDocument('valid.token');
       // mimeType on the doc wins over the storage content-type; pdf is safe → inline.
-      expect(res).toEqual({ bytes, contentType: 'application/pdf', inline: true });
-      expect(mockStorage.downloadBytes).toHaveBeenCalledWith('kyc/2026-06/x-gst.pdf');
+      expect(res).toEqual({ stream: expect.anything(), size: bytes.length, contentType: 'application/pdf', inline: true });
+      expect(mockStorage.openBoundedObject).toHaveBeenCalledWith('kyc/2026-06/x-gst.pdf');
     });
 
     it('stored-XSS guard: an unsafe client-supplied mime is served as octet-stream, NOT inline', async () => {
@@ -8000,10 +8001,10 @@ describe('KycService', () => {
         kycSubmission: { user: { clientId: 'deoleo' } },
       });
       const bytes = Buffer.from('<svg onload=alert(1)>');
-      mockStorage.downloadBytes.mockResolvedValueOnce({ bytes, contentType: 'image/svg+xml' });
+      mockStorage.openBoundedObject.mockResolvedValueOnce({ stream: Readable.from([bytes]), size: bytes.length, contentType: 'image/svg+xml' });
 
       const res = await service.viewDocument('valid.token');
-      expect(res).toEqual({ bytes, contentType: 'application/octet-stream', inline: false });
+      expect(res).toEqual({ stream: expect.anything(), size: bytes.length, contentType: 'application/octet-stream', inline: false });
     });
 
     it('expired / invalid signature → 404 (verify throws)', async () => {
@@ -8030,7 +8031,7 @@ describe('KycService', () => {
         kycSubmission: { user: { clientId: 'other' } },
       });
       await expect(service.viewDocument('valid.token')).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('missing token → 404', async () => {
@@ -8045,7 +8046,7 @@ describe('KycService', () => {
         mimeType: 'application/pdf',
         kycSubmission: { user: { clientId: 'deoleo' } },
       });
-      mockStorage.downloadBytes.mockResolvedValueOnce(null);
+      mockStorage.openBoundedObject.mockResolvedValueOnce(null);
       await expect(service.viewDocument('valid.token')).rejects.toBeInstanceOf(NotFoundException);
     });
   });

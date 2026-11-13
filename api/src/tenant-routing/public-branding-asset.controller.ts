@@ -11,6 +11,7 @@ import {
 } from '../storage/branding-asset';
 import { BrandingAssetCache } from './branding-asset-cache';
 import { TenantRoutingService } from './tenant-routing.service';
+import { streamErrorHandler, type StreamErrorResponse } from '../common/stream-object';
 
 /** Objects at or below this size are buffered + cached; larger ones are streamed. */
 const CACHEABLE_MAX_BYTES = 512 * 1024;
@@ -28,41 +29,9 @@ export const BRANDING_CACHE_OPTIONS = {
 /** Enough leading bytes for every signature sniffFileType checks (WEBP/HEIC need 12). */
 const SNIFF_HEAD_BYTES = 16;
 
-/**
- * Mid-stream GCS failure on the large-object path. Nest's default StreamableFile handler
- * answers 400 with the raw storage error text (bucket name, object path) while the image,
- * length and 1-year immutable cache headers are already set. Instead:
- *  - headers not yet sent → drop the image/length/cache headers, `no-store`, bare 404 with
- *    the API's generic error envelope — never the storage message;
- *  - headers already sent → destroy the socket so the client sees a FAILED transfer (a
- *    short body under the declared Content-Length), never a "complete" truncated image.
- * The error itself is still logged server-side by StreamableFile's error logger.
- */
-/** The Express response members the handler uses (Nest types it as a narrower shape). */
-interface StreamErrorResponse {
-  headersSent: boolean;
-  destroyed: boolean;
-  statusCode: number;
-  removeHeader(name: string): void;
-  setHeader(name: string, value: string): void;
-  end(body?: string): void;
-  destroy(): void;
-}
-
-export function streamErrorHandler(_err: Error, res: StreamErrorResponse): void {
-  if (res.destroyed) return;
-  if (res.headersSent) {
-    res.destroy();
-    return;
-  }
-  for (const h of ['Content-Type', 'Content-Length', 'Content-Disposition', 'Cache-Control']) {
-    res.removeHeader(h);
-  }
-  res.statusCode = 404;
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.end(JSON.stringify({ success: false, error: 'Not found' }));
-}
+// streamErrorHandler moved to common/stream-object.ts (shared with every media proxy);
+// re-exported here so existing imports keep working.
+export { streamErrorHandler };
 
 /**
  * GET /v1/public/branding-assets?key=branding/<slug>/<yyyy-mm>/<uuid>-<name>.<ext>

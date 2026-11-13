@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 // Unit tests for SchemeReportService (Wave-0 scheme reports/export, D26/D30).
 // Covers: report aggregation (counts, coverage %, breakdowns; standalone bucket),
 // the tenant read-only row list (no raw media), the pure export row builder
@@ -401,7 +402,7 @@ const mockPrisma = {
 };
 const mockJwt = { sign: jest.fn(() => 'TESTTOKEN'), verify: jest.fn() };
 const mockConfig = { get: jest.fn(() => 'test-secret') };
-const mockStorage = { downloadBytes: jest.fn() };
+const mockStorage = { openBoundedObject: jest.fn() };
 
 describe('SchemeReportService', () => {
   let service: SchemeReportService;
@@ -715,19 +716,19 @@ describe('SchemeReportService', () => {
     it('streams the tenant-verified object inline for a valid token', async () => {
       mockJwt.verify.mockReturnValue(goodPayload);
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(liveEnrollment);
-      mockStorage.downloadBytes.mockResolvedValue({ bytes: Buffer.from([0xff, 0xd8, 0xff]), contentType: 'image/jpeg' });
+      mockStorage.openBoundedObject.mockResolvedValue({ stream: Readable.from([Buffer.from([0xff, 0xd8, 0xff])]), size: (Buffer.from([0xff, 0xd8, 0xff])).length, contentType: 'image/jpeg' });
 
       const res = await service.viewMediaByToken('tok');
-      expect(res).toEqual({ bytes: expect.any(Buffer), contentType: 'image/jpeg', inline: true });
+      expect(res).toEqual({ stream: expect.anything(), size: expect.any(Number), contentType: 'image/jpeg', inline: true });
       // Verify pins HS256; the object key is resolved server-side (never from the token).
       expect(mockJwt.verify).toHaveBeenCalledWith('tok', expect.objectContaining({ algorithms: ['HS256'] }));
-      expect(mockStorage.downloadBytes).toHaveBeenCalledWith('scheme-media/deoleo/shop.jpg');
+      expect(mockStorage.openBoundedObject).toHaveBeenCalledWith('scheme-media/deoleo/shop.jpg');
     });
 
     it('serves an unsafe mime as an octet-stream attachment (never inline)', async () => {
       mockJwt.verify.mockReturnValue(goodPayload);
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(liveEnrollment);
-      mockStorage.downloadBytes.mockResolvedValue({ bytes: Buffer.from('x'), contentType: 'text/html' });
+      mockStorage.openBoundedObject.mockResolvedValue({ stream: Readable.from([Buffer.from('x')]), size: (Buffer.from('x')).length, contentType: 'text/html' });
 
       const res = await service.viewMediaByToken('tok');
       expect(res).toMatchObject({ contentType: 'application/octet-stream', inline: false });
@@ -753,14 +754,14 @@ describe('SchemeReportService', () => {
       mockJwt.verify.mockReturnValue(goodPayload);
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(null);
       await expect(service.viewMediaByToken('tok')).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('404s a soft-deleted enrollment', async () => {
       mockJwt.verify.mockReturnValue(goodPayload);
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue({ ...liveEnrollment, deletedAt: new Date() });
       await expect(service.viewMediaByToken('tok')).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('404s when the roster row was REMOVED (schemeOutlet soft-deleted → media fails closed)', async () => {
@@ -770,14 +771,14 @@ describe('SchemeReportService', () => {
         schemeOutlet: { deletedAt: new Date() },
       });
       await expect(service.viewMediaByToken('tok')).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('404s a cross-tenant token (enrollment tenant ≠ token clientId)', async () => {
       mockJwt.verify.mockReturnValue(goodPayload);
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue({ ...liveEnrollment, scheme: { clientId: 'other' } });
       await expect(service.viewMediaByToken('tok')).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('404s when the resolved key is not this tenant\'s scheme-media object', async () => {
@@ -787,14 +788,14 @@ describe('SchemeReportService', () => {
         formValues: { f_photo: 'scheme-media/other/steal.jpg' },
       });
       await expect(service.viewMediaByToken('tok')).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('404s when the field id holds no object key', async () => {
       mockJwt.verify.mockReturnValue({ ...goodPayload, fieldId: 'f_missing' });
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(liveEnrollment);
       await expect(service.viewMediaByToken('tok')).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
   });
 });

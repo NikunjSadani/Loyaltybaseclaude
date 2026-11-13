@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { INestApplication } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
@@ -26,8 +27,8 @@ jest.setTimeout(30_000);
 describe('tokenized viewers are not throttled (L3)', () => {
   let app: INestApplication;
   const bytes = Buffer.from('img');
-  const kyc = { viewDocument: jest.fn().mockResolvedValue({ bytes, contentType: 'image/png', inline: true }) };
-  const reports = { viewMediaByToken: jest.fn().mockResolvedValue({ bytes, contentType: 'image/png', inline: true }) };
+  const kyc = { viewDocument: jest.fn().mockImplementation(async () => ({ stream: Readable.from([bytes]), size: bytes.length, contentType: 'image/png', inline: true })) };
+  const reports = { viewMediaByToken: jest.fn().mockImplementation(async () => ({ stream: Readable.from([bytes]), size: bytes.length, contentType: 'image/png', inline: true })) };
 
   beforeEach(async () => {
     process.env.JWT_SECRET = process.env.JWT_SECRET ?? 'test-secret';

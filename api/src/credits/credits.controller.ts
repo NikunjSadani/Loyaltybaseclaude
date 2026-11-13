@@ -16,6 +16,7 @@ import {
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
+import { streamObjectResponse } from '../common/stream-object';
 import { CreditsService } from './credits.service';
 import { CreditEvidenceService } from './credit-evidence.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -141,13 +142,13 @@ export class CreditsController {
     @Param('id') id: string,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { bytes, contentType, fileName, inline } = await this.evidence.viewEvidence(user, id);
+    const { stream, size, contentType, fileName, inline } = await this.evidence.viewEvidence(user, id);
     // Private audit-proof media (may contain PII) — never cache in the browser or a shared proxy.
     // Mirrors the sibling KYC / scheme / visibility doc-view endpoints.
     res.setHeader('Cache-Control', 'no-store');
     // Sanitise the filename for the header (strip anything that could break/inject it).
     const safeName = (fileName || 'evidence').replace(/[^\w.\- ]+/g, '_').slice(0, 120);
-    return new StreamableFile(bytes, {
+    return streamObjectResponse(res, { stream, size }, {
       type: contentType,
       disposition: `${inline ? 'inline' : 'attachment'}; filename="${safeName}"`,
     });

@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream';
 import {
   BadRequestException,
   ConflictException,
@@ -2058,7 +2059,7 @@ export class SchemeEnrollmentService {
    * GIFSY_ADMIN is the cross-tenant operator; every other caller is pinned to its own
    * tenant. Any failure → bare 404 (no enumeration / info leak).
    */
-  async viewMedia(user: JwtPayload, key: string): Promise<{ bytes: Buffer; contentType: string; inline: boolean }> {
+  async viewMedia(user: JwtPayload, key: string): Promise<{ stream: Readable; size: number; contentType: string; inline: boolean }> {
     const deny = () => new NotFoundException();
     if (!key || typeof key !== 'string' || !key.startsWith('scheme-media/')) throw deny();
 
@@ -2068,12 +2069,12 @@ export class SchemeEnrollmentService {
     // operator — is pinned to its (assumed) tenant folder.
     if (!platformWide(user) && keyClientId !== user.clientId) throw deny();
 
-    const file = await this.storage.downloadBytes(key);
+    const file = await this.storage.openBoundedObject(key);
     if (!file) throw deny();
 
     const rawMime = (file.contentType || '').toLowerCase();
     const inline = INLINE_SAFE_MIME.has(rawMime);
-    return { bytes: file.bytes, contentType: inline ? rawMime : 'application/octet-stream', inline };
+    return { stream: file.stream, size: file.size, contentType: inline ? rawMime : 'application/octet-stream', inline };
   }
 }
 

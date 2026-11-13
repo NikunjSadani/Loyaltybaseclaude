@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream';
 import {
   BadRequestException,
   ConflictException,
@@ -306,7 +307,7 @@ export class KycService {
    * document's real tenant (KycDocument → kycSubmission → user.clientId) — there
    * is no logged-in user on this public route, so the token IS the authority.
    */
-  async viewDocument(token: string): Promise<{ bytes: Buffer; contentType: string; inline: boolean }> {
+  async viewDocument(token: string): Promise<{ stream: Readable; size: number; contentType: string; inline: boolean }> {
     const deny = () => new NotFoundException();
 
     if (!token || typeof token !== 'string') throw deny();
@@ -344,7 +345,7 @@ export class KycService {
     if (!docClientId || docClientId !== tokenClientId) throw deny();
     if (!doc.fileKey) throw deny();
 
-    const file = await this.storage.downloadBytes(doc.fileKey);
+    const file = await this.storage.openBoundedObject(doc.fileKey);
     if (!file) throw deny();
 
     // Stored-XSS guard: a KYC document's mimeType is CLIENT-supplied at upload, and
@@ -359,7 +360,8 @@ export class KycService {
     const inline  = SAFE.has(rawMime);
 
     return {
-      bytes: file.bytes,
+      stream: file.stream,
+      size: file.size,
       contentType: inline ? rawMime : 'application/octet-stream',
       inline,
     };

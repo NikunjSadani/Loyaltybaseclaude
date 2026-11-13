@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 /**
  * scheme-enrollment.service.spec.ts — Scheme Data-Collection (Wave-0/W1)
  *
@@ -70,7 +71,7 @@ const mockPrisma = {
   $queryRaw: jest.fn(),
 };
 
-const mockStorage = { generateKey: jest.fn(), uploadFile: jest.fn(), downloadBytes: jest.fn() };
+const mockStorage = { generateKey: jest.fn(), uploadFile: jest.fn(), openBoundedObject: jest.fn() };
 const mockMsg91 = { sendOtp: jest.fn(), sendWhatsappTemplate: jest.fn() };
 
 /** Flush the fire-and-forget WhatsApp-confirm IIFE (a short chain of resolved promises). */
@@ -1273,21 +1274,21 @@ describe('SchemeEnrollmentService', () => {
   describe('viewMedia (tenant-from-key) — assumed operator is pinned', () => {
     const assumedGifsy: JwtPayload = { sub: 'u-admin', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '', assumed: true };
 
-    it('404s a cross-tenant key for an ASSUMED operator (no downloadBytes)', async () => {
+    it('404s a cross-tenant key for an ASSUMED operator (no openBoundedObject)', async () => {
       await expect(
         service.viewMedia(assumedGifsy, 'scheme-media/other-tenant/2026-07/a.jpg'),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('serves the assumed tenant’s own media to an ASSUMED operator', async () => {
-      mockStorage.downloadBytes.mockResolvedValue({ bytes: Buffer.from([0xff, 0xd8, 0xff]), contentType: 'image/jpeg' });
+      mockStorage.openBoundedObject.mockResolvedValue({ stream: Readable.from([Buffer.from([0xff, 0xd8, 0xff])]), size: (Buffer.from([0xff, 0xd8, 0xff])).length, contentType: 'image/jpeg' });
       const out = await service.viewMedia(assumedGifsy, 'scheme-media/deoleo/2026-07/a.jpg');
       expect(out.contentType).toBe('image/jpeg');
     });
 
     it('lets an un-assumed GIFSY read any tenant key (cross-tenant operator)', async () => {
-      mockStorage.downloadBytes.mockResolvedValue({ bytes: Buffer.from([0xff, 0xd8, 0xff]), contentType: 'image/jpeg' });
+      mockStorage.openBoundedObject.mockResolvedValue({ stream: Readable.from([Buffer.from([0xff, 0xd8, 0xff])]), size: (Buffer.from([0xff, 0xd8, 0xff])).length, contentType: 'image/jpeg' });
       const out = await service.viewMedia(adminUser, 'scheme-media/other-tenant/2026-07/a.jpg');
       expect(out.contentType).toBe('image/jpeg');
     });

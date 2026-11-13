@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream';
 import {
   BadRequestException,
   Injectable,
@@ -188,7 +189,7 @@ export class CreditEvidenceService {
   async viewEvidence(
     user: JwtPayload,
     attachmentId: string,
-  ): Promise<{ bytes: Buffer; contentType: string; fileName: string; inline: boolean }> {
+  ): Promise<{ stream: Readable; size: number; contentType: string; fileName: string; inline: boolean }> {
     const deny = () => new NotFoundException();
 
     const row = await this.prisma.creditBatchAttachment.findUnique({
@@ -201,7 +202,7 @@ export class CreditEvidenceService {
     if (row.clientId !== user.clientId) throw deny();
     if (!row.fileKey.startsWith(`${CreditEvidenceService.FOLDER_PREFIX}${user.clientId}/`)) throw deny();
 
-    const file = await this.storage.downloadBytes(row.fileKey);
+    const file = await this.storage.openBoundedObject(row.fileKey);
     if (!file) throw deny();
 
     const mime = (row.contentType || '').toLowerCase();
@@ -210,7 +211,8 @@ export class CreditEvidenceService {
     // with embedded JS can't execute in the app's same origin; anything unexpected → octet-stream.
     const inline = safe && mime.startsWith('image/');
     return {
-      bytes: file.bytes,
+      stream: file.stream,
+      size: file.size,
       contentType: safe ? mime : 'application/octet-stream',
       fileName: row.fileName,
       inline,

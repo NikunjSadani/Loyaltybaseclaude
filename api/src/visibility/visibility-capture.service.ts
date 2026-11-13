@@ -1219,8 +1219,12 @@ export class VisibilityCaptureService {
     }
     const hashes: string[] = [];
     for (const key of keys) {
-      const file = await this.storage.downloadBytes(key);
-      if (file) hashes.push(this.media.computeImageHash(file.bytes));
+      // Streamed into the hash (memory-safety): the photo is never held whole in memory.
+      // Missing / oversize / unreadable object → skipped, exactly as before.
+      const file = await this.storage.openBoundedObject(key);
+      if (!file) continue;
+      const hash = await this.media.computeImageHashFromStream(file.stream);
+      if (hash) hashes.push(hash);
     }
     return hashes;
   }

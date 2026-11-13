@@ -15,6 +15,7 @@ import {
 } from '@nestjs/common';
 import { timingSafeEqual } from 'crypto';
 import type { Response } from 'express';
+import { streamObjectResponse } from '../common/stream-object';
 import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { SkipThrottle } from '@nestjs/throttler';
 import { KycService } from './kyc.service';
@@ -71,7 +72,7 @@ export class KycController {
     @Query('token') token: string,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { bytes, contentType, inline } = await this.kyc.viewDocument(token);
+    const { stream, size, contentType, inline } = await this.kyc.viewDocument(token);
     // Only image/PDF are served inline; an unsafe (client-supplied) mime is forced
     // to an octet-stream attachment so the browser downloads — never executes — it.
     const disposition = inline ? 'inline' : 'attachment; filename="document"';
@@ -81,7 +82,7 @@ export class KycController {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     // Private PII — never let an intermediary cache the document bytes.
     res.setHeader('Cache-Control', 'no-store');
-    return new StreamableFile(bytes, { type: contentType, disposition });
+    return streamObjectResponse(res, { stream, size }, { type: contentType, disposition });
   }
 
   @Get()

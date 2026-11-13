@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
+import { streamObjectResponse } from '../common/stream-object';
 import { VisibilityAdminService } from './visibility-admin.service';
 import { VisibilityMediaService } from './visibility-media.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -65,13 +66,13 @@ export class VisibilityAdminController {
     @Query('key') key: string,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { bytes, contentType, inline } = await this.media.viewMedia(user, key);
+    const { stream, size, contentType, inline } = await this.media.viewMedia(user, key);
     const disposition = inline ? 'inline' : 'attachment; filename="media"';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', disposition);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'no-store');
-    return new StreamableFile(bytes, { type: contentType, disposition });
+    return streamObjectResponse(res, { stream, size }, { type: contentType, disposition });
   }
 
   // ── Config ───────────────────────────────────────────────────────────────────
