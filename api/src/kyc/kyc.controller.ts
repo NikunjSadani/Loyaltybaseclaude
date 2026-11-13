@@ -15,7 +15,7 @@ import {
 } from '@nestjs/common';
 import { timingSafeEqual } from 'crypto';
 import type { Response } from 'express';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { SkipThrottle } from '@nestjs/throttler';
 import { KycService } from './kyc.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -99,7 +99,7 @@ export class KycController {
 
   @Post('documents')
   @RequirePermission('kyc:initiate')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(LimitedFileInterceptor('file', MEDIA_UPLOAD_MAX_BYTES))
   uploadDocument(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
@@ -208,7 +208,7 @@ export class KycController {
   @Post('bulk-verify')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('kyc:gifsy_approve')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES))
   bulkVerify(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,

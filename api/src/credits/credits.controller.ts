@@ -13,7 +13,8 @@ import {
   UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
+import { FilesInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
 import { CreditsService } from './credits.service';
 import { CreditEvidenceService } from './credit-evidence.service';
@@ -243,7 +244,7 @@ export class CreditsController {
   @Post('payout-downloads/:id/utr')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('credits:mark_paid')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES))
   uploadUtr(
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,

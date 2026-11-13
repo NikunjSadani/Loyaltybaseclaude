@@ -13,7 +13,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
 import { SchemeEnrollmentService } from './scheme-enrollment.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -128,7 +128,7 @@ export class SchemeEnrollmentController {
   @Post(':id/enrollment/media')
   @Roles(...ENROLLER_ROLES)
   @RequirePermission('schemes:read')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(LimitedFileInterceptor('file', MEDIA_UPLOAD_MAX_BYTES))
   uploadMedia(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,

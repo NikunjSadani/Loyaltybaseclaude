@@ -28,7 +28,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
 import { TdsService } from './tds.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -190,7 +190,7 @@ export class TdsController {
    */
   @Post('off-platform/upload')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES))
   async uploadOffPlatform(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
@@ -230,7 +230,7 @@ export class TdsController {
    */
   @Post('deposits/upload')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES))
   async uploadDeposit(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,

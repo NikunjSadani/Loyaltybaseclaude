@@ -39,7 +39,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
 import { TargetsService } from './targets.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -194,8 +194,7 @@ export class TargetsController {
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('targets:upload')
   @UseInterceptors(
-    FileInterceptor('file', {
-      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB ceiling — bound memory on parse
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
       fileFilter: (_req, file, cb) =>
         /\.(xlsx|xls)$/i.test(file.originalname)
           ? cb(null, true)
@@ -303,8 +302,7 @@ export class AchievementsController {
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('targets:upload')
   @UseInterceptors(
-    FileInterceptor('file', {
-      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB ceiling
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
       fileFilter: (_req, file, cb) =>
         /\.(xlsx|xls)$/i.test(file.originalname)
           ? cb(null, true)

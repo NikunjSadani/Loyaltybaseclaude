@@ -10,7 +10,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
 import { VisibilityAdminService } from './visibility-admin.service';
 import { VisibilityMediaService } from './visibility-media.service';
@@ -110,7 +110,7 @@ export class VisibilityAdminController {
   // ── Media upload (multipart) — magic-byte guarded, returns the stored key ───────
   @Post('media')
   @RequirePermission('visibility:write')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(LimitedFileInterceptor('file', MEDIA_UPLOAD_MAX_BYTES))
   uploadMedia(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
