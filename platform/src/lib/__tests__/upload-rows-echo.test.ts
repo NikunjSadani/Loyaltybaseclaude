@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 import { describe, it, expect } from 'vitest';
-import { normalizeRowsEcho } from '../upload-rows-echo';
+import { normalizeRowsEcho, type EchoRow, type RowsEcho } from '../upload-rows-echo';
 
 describe('normalizeRowsEcho (memory-safety upload echo)', () => {
   it('passes the new API shape through unchanged', () => {
@@ -34,7 +34,8 @@ describe('normalizeRowsEcho (memory-safety upload echo)', () => {
   });
 
   it('defaults missing lists to empty (never crashes a screen)', () => {
-    const out = normalizeRowsEcho({ totalRows: 0 } as { totalRows: number });
+    const empty: Partial<RowsEcho<EchoRow>> & { rows?: EchoRow[]; totalRows: number } = { totalRows: 0 };
+    const out = normalizeRowsEcho(empty);
     expect(out.problemRows).toEqual([]);
     expect(out.warningRows).toEqual([]);
     expect(out.problemRowsTruncated).toBe(false);
