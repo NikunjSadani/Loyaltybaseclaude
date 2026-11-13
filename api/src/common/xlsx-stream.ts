@@ -1,0 +1,100 @@
+/**
+ * Streaming .xlsx writer (Downloads page design, platform/docs/plans/DOWNLOADS-PAGE.md).
+ *
+ * Writes rows straight into a Writable (an HTTP response, or a storage upload stream) with exceljs'
+ * streaming WorkbookWriter: each row is committed as it is added, so memory stays flat whatever the row
+ * count — unlike `buildXlsx` (common/xlsx.ts), which holds the whole workbook (≈ 4 copies of the data).
+ *
+ * Cell safety is identical to `buildXlsx`: every string cell AND header goes through `cellSafe` (spreadsheet
+ * formula-injection guard); a `HyperlinkCell` renders a real link whose DISPLAY text is cellSafe'd.
+ * No shared-strings table and no styles (both would be held in memory until the end).
+ */
+import { once } from 'node:events';
+import type { Writable } from 'node:stream';
+import ExcelJS from 'exceljs';
+import { cellSafe, isHyperlinkCell, type HyperlinkCell } from './xlsx';
+
+export type XlsxCell = string | number | boolean | Date | null | undefined | HyperlinkCell;
+
+export interface XlsxStreamSheet {
+  /** Append one data row (cells in header order). Await it: it yields to backpressure. */
+  addRow(cells: readonly XlsxCell[]): Promise<void>;
+  /** Data rows written to this sheet so far. */
+  readonly rowCount: number;
+}
+
+export interface XlsxStreamWriter {
+  /** Start a new sheet with a header row. The previous sheet is committed first. */
+  addSheet(name: string, headers: readonly string[], opts?: { widths?: readonly number[] }): Promise<XlsxStreamSheet>;
+  /** Commit everything and end the destination stream. Call exactly once. */
+  finish(): Promise<void>;
+  /** Data rows written across all sheets. */
+  readonly rowCount: number;
+}
+
+/** Excel's sheet-name rules: ≤ 31 chars, none of : \ / ? * [ ]. */
+function safeSheetName(name: string): string {
+  const cleaned = name.replace(/[:\\/?*[\]]/g, ' ').trim() || 'Sheet';
+  return cleaned.slice(0, 31);
+}
+
+function toCellValue(v: XlsxCell): ExcelJS.CellValue {
+  if (v === undefined || v === null) return null;
+  if (typeof v === 'string') return cellSafe(v);
+  if (isHyperlinkCell(v)) return { text: cellSafe(v.text), hyperlink: v.target };
+  return v as ExcelJS.CellValue;
+}
+
+/** Yield to the event loop every this many rows so a long export never starves other requests. */
+const YIELD_EVERY = 500;
+
+export function createXlsxStreamWriter(dest: Writable): XlsxStreamWriter {
+  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: dest, useSharedStrings: false, useStyles: false });
+  let current: ExcelJS.Worksheet | null = null;
+  let total = 0;
+  let finished = false;
+  const usedNames = new Set<string>();
+
+  const waitForDrain = async () => {
+    if ((dest as Writable & { writableNeedDrain?: boolean }).writableNeedDrain) await once(dest, 'drain');
+  };
+
+  return {
+    get rowCount() {
+      return total;
+    },
+    async addSheet(name, headers, opts) {
+      if (finished) throw new Error('xlsx-stream: addSheet after finish');
+      if (current) current.commit();
+      let sheetName = safeSheetName(name);
+      for (let i = 2; usedNames.has(sheetName.toLowerCase()); i++) sheetName = safeSheetName(`${name.slice(0, 27)} (${i})`);
+      usedNames.add(sheetName.toLowerCase());
+      const ws = wb.addWorksheet(sheetName);
+      if (opts?.widths) ws.columns = headers.map((_, i) => ({ width: opts.widths?.[i] ?? 14 }));
+      ws.addRow(headers.map((h) => cellSafe(String(h)))).commit();
+      current = ws;
+      let sheetRows = 0;
+      return {
+        get rowCount() {
+          return sheetRows;
+        },
+        async addRow(cells) {
+          if (current !== ws) throw new Error('xlsx-stream: addRow on a sheet that is no longer current');
+          ws.addRow(cells.map(toCellValue)).commit();
+          sheetRows++;
+          total++;
+          if (total % YIELD_EVERY === 0) {
+            await waitForDrain();
+            await new Promise<void>((r) => setImmediate(r));
+          }
+        },
+      };
+    },
+    async finish() {
+      if (finished) return;
+      finished = true;
+      if (current) current.commit();
+      await wb.commit(); // ends `dest`
+    },
+  };
+}
