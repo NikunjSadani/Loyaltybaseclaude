@@ -13,6 +13,11 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ## 📍 STATE 2026-11-11 — read this FIRST
 
 > **📍 2026-11-13 (evening) — CURRENT STATE (supersedes everything below where they differ):**
+> - 🧰 **IN PROGRESS on `feat/memory-safety` (not pushed): Downloads page** (⚠️ platform-wide, owner-approved) — heavy
+>   report files built by a new Cloud Run job `gifsy-exports(-staging)` and listed on a Downloads page. Engine (lane A)
+>   committed: `ExportRequest` table (migration `20261116120000_export_requests`), `api/src/exports/`, worker
+>   `dist/exports/worker.main.js`, deploy steps (no new secrets). ⚠️ After the first deploy the owner must grant
+>   `roles/run.jobsExecutor` to gifsy-api-sa on the new job (runbook: `DOWNLOADS-PAGE.md` § Runbook).
 > - 🚀 **PROD = `ad01ace5`** (api + frontend images both `ad01ace51abc18eb2fdabe99805667d2dcf15bf1`; `/health` 200) — the
 >   retailer-TDS release (`feat/tds-count-imports`) is LIVE. Owner saved Bajaj `tdsImportedPayouts =
 >   {"countFrom":"2026-04-01"}` at 10:06 UTC (AuditLog `TdsImportedPayouts`/`bajaj`, null → that value) — verified it
