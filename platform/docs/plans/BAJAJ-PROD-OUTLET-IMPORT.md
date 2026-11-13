@@ -99,6 +99,15 @@ release (the report is computed live, so the payout-history import does not wait
   paid by the vendor (points imported via Earn & Burn §9b; payouts via §9). Same for the October file once imported.
 
 ## 10. TDS already deducted by the vendor (FY 2026-27) — APPROVED as a PARTIAL import (owner 2026-11-12)
+- ✅ **DONE on prod 2026-11-13** (owner: vendor TDS was PAID BY BAJAJ ON TOP → gross-up; import as-is). 212 TdsOffPlatformEntry
+  (194R benefit value per outlet-month, Σ ₹50,53,115 = vendor "Outlet Points"; monthly split from TDS/rate scaled to the
+  total) + 212 TdsDeposit (vendor TDS per outlet-month, Σ ₹6,25,285, depositDate = that month's challan date (first of
+  a pair), forPeriod = the month, depositorType CLIENT). **Every row stores panNumber '' + outletCode** → the report
+  resolves the outlet owner's CURRENT PAN at read time, so PANs added later (corrections) switch 20% → 10% automatically —
+  no re-import (owner reminder 2026-11-13). Expected report effect for these 119 deductees at import time: liability ₹8,84,251
+  (gross-up 10/90 · 20/80, >₹20k) / deposited ₹6,25,285 / outstanding ₹2,58,966 (vendor deducted at flat 10/20%; 25 outlets
+  10%-vs-20% until PANs land; 2 outlets taxed at exactly ₹20k). Backup `1794553985636` → job `bajaj-prod-vendor-tds`
+  (batch `bajaj-vendor-tds-fy2627-2026-11-13`, refuses re-run) → verifier PASS (row-by-row, 0 other-tenant rows).
 - Source: `…\Files received\2026.11.04\TDS Calculation FY 2026-27.xlsx` — 124 outlet rows, all wholesaler points TDS (119 on prod = WHOLESALER/BSC; 5 not on prod: 16069, 27618, 451278 not in the master; 50333738, 50781620 CISPL blank). Monthly APR–SEP TDS per outlet, Σ ₹6,50,166; challans per month (no./value/date) Σ ₹10,47,030.
 - PAN on prod: 59 have it; 25 vendor-has-PAN but missing on prod (in the corrections list); 35 no PAN (20%) → needs the no-PAN TDS keys from the no-PAN release.
 - Plan: AFTER next release (no-PAN + 194R vendor-import rule) → payout history (§9) → Earn & Burn points → import per-outlet monthly TDS deducted for the 119, each tied to that month's challan. Left OUT until Bajaj sends retailer TDS: the ₹3.97 L challan remainder (likely retailer payout TDS) + the 5 outlets. Check before relying on it: re-keying no-PAN TDS rows to the PAN once corrections land.
