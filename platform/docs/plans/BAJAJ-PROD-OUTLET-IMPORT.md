@@ -86,6 +86,42 @@ release (the report is computed live, so the payout-history import does not wait
   Withholding/gross-up/auto-invoice/recovery paths are untouched: they read only visibility fieldIds or entries with a
   frozen `tdsSection` (imported rows: `tdsSection` NULL, fieldId `historical-incentive-payout`).
 
+### 9.1a LIVE on prod 2026-11-13 — release + setting saved, verified
+- **prod serves `ad01ace5`** (api + frontend images both `ad01ace51abc18eb2fdabe99805667d2dcf15bf1`; `/health` 200).
+- Owner saved the setting on the TDS Treatment screen: ProgramSetting `clientId='bajaj'`, `settingKey='tdsImportedPayouts'`,
+  value `{"countFrom":"2026-04-01"}`, updatedAt 2026-11-13T10:06:07Z. AuditLog entityType `TdsImportedPayouts`,
+  entityId `bajaj`, old `null` → new `{"countFrom":"2026-04-01"}`. **Verified it landed on BAJAJ, not `gifsy`** — the F1
+  wrong-tenant toggle bug did not bite this card.
+- Left behind by the earlier F1 bug: a stray **`gifsy`-tenant `tdsPolicy` row** `{SEC_194R, GROSS_UP}`
+  (updatedAt 2026-11-13T08:14:54Z). Harmless — no tenant reads it; reset it when convenient (decisions log §7a F1).
+
+### 9.2 194R position for FY 2026-27 on prod — verified 2026-11-13
+Direct DB aggregation mirroring `compute194R`: per-deductee key = PAN, else per-partner; >₹20,000 FY threshold;
+gross-up 10% with PAN / 20% without. **Report-only: no withholding, no invoice, no payout changed.**
+- Imported retailer payouts now counted (paid on/after 2026-04-01): **₹95,72,989.43** (17,873 entries, 3,869 outlets).
+  Still excluded (paid before 2026-04-01, FY 2025-26): ₹1,93,36,571.27 (30,213 entries).
+- **Retailers:** 3,863 deductees, 392 with PAN, base ₹95,72,989 — **only 1 crosses ₹20,000** (base ₹42,390.98, NO PAN →
+  20% gross-up) → liability ₹10,597.75, deposits ₹0, outstanding ₹10,597.75. If that PAN is supplied → ~₹4,710.
+- **Wholesalers:** 119 deductees, 59 with PAN, base ₹50,53,115, 117 over threshold → liability ₹8,84,251.28,
+  deposited ₹6,25,285, outstanding ₹2,58,966.28.
+- No deductee mixes retail + wholesale outlets.
+- **Combined:** liability ₹8,94,849.03 · deposited ₹6,25,285 · outstanding ₹2,69,564.03; 3,982 deductees, 451 with PAN,
+  118 over threshold.
+- The liability GROWS as more FY 2026-27 months are paid; PAN additions reduce it automatically (rows key on
+  `outletCode` → the outlet owner's current PAN).
+
+### 9.3 194R Excel export columns — owner-approved 2026-11-13, ⚠️ PLATFORM-WIDE, BUILD IN THE NEXT RELEASE
+Raised by the owner from the downloaded Excel: in `export194R` (`api/src/tds/tds.service.ts`) the **'Outlet Code'** column
+is added only when a per-deductee no-PAN row exists, and is populated ONLY from `r.noPanDeductee.outletCodes` — so **PAN
+rows show a blank outlet code**. On Bajaj, 451 PAN deductees cover 457 outlets (445 own exactly 1 outlet, 6 own 2), so the
+column can be filled for nearly everyone. Approved changes (**display-only on the Excel export — no change to rate,
+threshold, amounts or any money path**; affects Deoleo too, owner gave explicit platform-wide approval 2026-11-13):
+  a) Populate **'Outlet Code'** on PAN rows too (comma-separated when a deductee owns several).
+  b) Add **'Outlet Type'** (Retailer / Wholesaler / SSS TOT, from `Outlet.outletTypeId` → `outlet_types.code`/`name`);
+     comma-joined if a deductee mixes types.
+  c) Add **'Outlet Name'**.
+  d) **NOT approved / deliberately skipped:** 'Entity Type' derived from the PAN's 4th character.
+
 ## 9b. Wholesaler points (Earn & Burn) — ✅ DONE on prod 2026-11-12 (night), verified
 - Sources: File 1 `…\2026.11.04\Earn  Burn Points of 25 to 26  Expire points data Year 25.xlsx` (sheet "File", history Apr 2025 → 31 Oct 2026, 103 cols = staging layout + 16–31 Oct burn) + File 2 `…\2026.11.04\12.11\WholesalerCumulativePointsReport2026-2027 (1).xls` (vendor FY26-27 monthly report to 11 Nov). Files agree at 31 Oct (2,331/2,333 within 1 pt); File 2 adds only 1–11 Nov redemptions (25 outlets, 1,24,691 pts). Vendor stopped redemptions on 11 Nov (owner) → this is the FINAL balance.
 - Owner rule: **every closing balance = vendor's 11-Nov closing (File 2 ClosingPoints, rounded)** → 2,281 wallets, Σ **67,27,723**; 0 mismatches. 50270366/50293463: vendor recovered pre-Apr-25 over-redemption from FY25-26 earnings → shown as "Last year's over-redemption recovered" (ADJUST, 1 Apr 2025) (staging had excluded it; corrected on prod).
@@ -144,6 +180,22 @@ release (the report is computed live, so the payout-history import does not wait
 - Plan: AFTER next release (no-PAN + 194R vendor-import rule) → payout history (§9) → Earn & Burn points → import per-outlet monthly TDS deducted for the 119, each tied to that month's challan. Left OUT until Bajaj sends retailer TDS: the ₹3.97 L challan remainder (likely retailer payout TDS) + the 5 outlets. Check before relying on it: re-keying no-PAN TDS rows to the PAN once corrections land.
 - Asked of Bajaj/vendor: outlet-wise TDS deducted + deposited Apr–Oct 2026 for retailer payouts AND wholesaler points (PAN + challan per outlet); confirm rows taxed on exactly 20,000 points (threshold is "exceeds").
 
-## 11. Still to do
-- Import the other files (targets/achievements history → Earn & Burn wallet), each check → rehearsal → owner OK → run → verify. Watch: rows for the 1,587 non-approved outlets have no outlet (count points on them).
-- Then bulk Re-KYC flag (67 + flagged) and send Bajaj the correction file.
+## 11. Still to do (as of 2026-11-13 evening)
+- ~~Import the other files (targets/achievements history → Earn & Burn wallet)~~ — all done (§8–§10). Watch: rows for the
+  1,587 non-approved outlets have no outlet (count points on them).
+- October 2026 **rewards** file (separate client file, §9d) — import when received.
+- November 2026 achievements via Sales Import — file received 2026-11-13 (§12); needs the per-tenant column mapping +
+  sales KPI definitions on prod before preview/apply.
+- Points rule for Bajaj prod (`points_rules` is EMPTY on prod for every tenant) — owner has the KPI codes/rule content.
+- Bulk Re-KYC flag (67 + flagged) and send Bajaj the correction file.
+- Retailer TDS deposits (if/when Bajaj makes them) → upload as **deposits only** (§9.1), never as off-platform benefits.
+- 194R export columns (§9.3) in the next release.
+
+## 12. November 2026 sales file — RECEIVED 2026-11-13 (not yet uploaded)
+- Owner file: `C:\Users\nikun\Downloads\Sales data  13 nov.xlsx` (97 MB, single sheet "Sheet1", DMS invoice-line format).
+- Header row 1 matches the staging-verified layout, including: ERP CUSTOMER CODE · SAP CUSTOMER CODE · CUSTOMER CODE ·
+  CUSTOMER · INVOICE DATE · CODE · CLUB SKU · PRODUCT · QTY (CASES) · QTY (PACKS) · NET AMT · PROGRAM · SUB PROGRAM · ISR CODE.
+- **Agreed sequencing:** upload + aggregation do NOT need KPI definitions (they are consumed at preview/apply —
+  `sales-apply.service.ts` checks `expectedDefinitionsHash`), so the file can be **uploaded and aggregated first**, with
+  preview/apply blocked until the Bajaj **sales KPI definitions** (and the column mapping) are configured on prod.
+- Prod Sales Import infra already exists (see `BAJAJ-PROD-GO-LIVE-CHECKLIST.md` E4) — what is missing is per-tenant config.

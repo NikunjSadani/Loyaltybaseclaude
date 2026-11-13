@@ -9,7 +9,8 @@
 ## 1. Releases & process
 | Date | Decision | Rejected alternative | Where |
 |---|---|---|---|
-| 2026-11-13 | **Retailer-TDS setting ships as its own small release** after the main release. | Hold the main release for it | branch `feat/tds-count-imports` |
+| 2026-11-13 | **ONE tenant-sectioned "Daily Operations Digest"** (health, KYC, points, redemptions, Hubble vouchers, payouts, message failures, visibility, needs-attention) **replaces** the two existing daily emails (KYC actionables + credits/payouts). ⚠️ PLATFORM-WIDE, owner approved **option A**. NOT yet started. | Keep two separate emails / add a third | branch `feat/daily-ops-digest`, worktree `.claude/worktrees/ops-digest` |
+| 2026-11-13 | **Retailer-TDS setting ships as its own small release** after the main release. ✅ **LIVE on prod `ad01ace5`** (api + frontend `ad01ace51abc18eb2fdabe99805667d2dcf15bf1`, `/health` 200); owner saved Bajaj `tdsImportedPayouts = {countFrom: 2026-04-01}` at 10:06 UTC — landed on BAJAJ, not `gifsy`. | Hold the main release for it | prod `ad01ace5`; §9.1a |
 | 2026-11-13 | **Release first, reversal engine later** — ship no-PAN / rounding / TDS / applies-to with SAFE INTERIM reversal rules; engine = fast follow-up after go-live. | Ship together (~1–1½ day delay) | prod `247fae4b`; engine branch |
 | 2026-11-13 | **Wallet reversal engine paused** until after go-live (not needed for go-live or imports); fully documented for resumption. | Build now | `WALLET-REVERSAL-ENGINE-DESIGN.md` |
 | 2026-11-13 | **Two staging deploys** (applies-to first, then the money release) instead of one batched deploy, to go faster. | One batched deploy | develop `7a78bc26` → `2be10c5d` |
@@ -30,6 +31,7 @@
 ## 3. Bajaj prod data imports (all: dry run → owner OK → backup → import → verifier PASS)
 | Date | Decision | Where |
 |---|---|---|
+| 2026-11-13 | **November sales file** (`Sales data  13 nov.xlsx`, 97 MB, sheet "Sheet1", header row 1 = the staging-verified DMS layout): **upload + aggregate first, preview/apply only after the Bajaj sales KPI definitions + column mapping exist on prod** — upload/aggregation never reads KPI definitions (they are consumed at preview/apply via `expectedDefinitionsHash`). | Wait for the KPI config before touching the file | §12 |
 | 2026-11-13 | **Partial vendor TDS (FY 2026-27, 119 wholesalers):** vendor TDS was PAID BY BAJAJ ON TOP (gross-up) → import as-is: monthly benefit value (off-platform, Σ = "Outlet Points") + vendor deposits (challan date, "TDS for month"); rows keyed by OUTLET with blank PAN so PANs added later recalculate automatically (owner reminder). Report shows the gross-up difference (~₹2.59 L) for Bajaj's CA. ₹3.97 L unallocated challan money + 5 outlets not on prod left out. | §10 |
 | 2026-11-13 | **Retailer TDS:** Bajaj confirmed no TDS deposited for retailers → Bajaj-only setting counts imported payouts from **1 Apr 2026** (FY 2026-27) in the 194R report as LIABILITY ONLY; FY 2025-26 excluded (CA handles outside); deposits subtract later; no automatic deduction/recovery (Bajaj is gross-up → payer-borne). | §9.1, branch `feat/tds-count-imports` |
 | 2026-11-13 | **Payout history** imported only AFTER the 194R vendor-import rule was live on prod. Done rows only, Apr 2025+, prod outlets only; placeholder references ("Same Bank does not provide Utr No.") stored as UTR = NULL with the text in narration; amounts kept to the paisa (history, not the whole-rupee rule). "UTR no. awaited" rows excluded pending Bajaj status. | §9 |
@@ -42,6 +44,7 @@
 ## 4. TDS
 | Date | Decision | Where |
 |---|---|---|
+| 2026-11-13 | **194R Excel export gets three display-only columns** (approved, build in the NEXT release): 'Outlet Code' populated on PAN rows too (comma-separated for multi-outlet deductees), new 'Outlet Type' (Retailer / Wholesaler / SSS TOT) and new 'Outlet Name'. Today 'Outlet Code' appears only when a no-PAN row exists and is filled only from `noPanDeductee.outletCodes`, so PAN rows export blank — the owner spotted it in the downloaded Excel. No change to rate, threshold, amounts or any money path. ⚠️ PLATFORM-WIDE (shared export, Deoleo too) — explicit owner approval 2026-11-13. | 'Entity Type' derived from the PAN's 4th character (deliberately skipped) | §9.3 |
 | 2026-11-13 | Bajaj follows **GROSS_UP**; owner saves TDS Config explicitly. **Corrected fact (code-verified 2026-11-13):** the method is recorded on every credit-upload ₹ payout but only CHANGES visibility payouts (Deduct = TDS taken out of the bank line; Gross-up = paid in full + TDS invoice). Incentive payouts are never deducted and raise no TDS invoice; the 194R report always shows the gross-up liability. Section applies only to visibility (incentive always 194R). Points redemptions never deducted (194R report only). Screen copy fixed to say exactly this. | TDS Config screen |
 | 2026-11-13 | **TDS deposits count in the FY of the month they pay for** ("TDS for month" column; default: deposit day ≤ 7 → previous month; 8–30 April → March; else own month). ⚠️ platform-wide. | prod `247fae4b` |
 | 2026-11-12 | **Deposit-only rows for ANY PAN** (a deposit never drops out of the totals). ⚠️ platform-wide. | prod `247fae4b` |
@@ -72,12 +75,23 @@
 | F5 | Optional platform-wide decision: should INCENTIVE payouts raise a TDS invoice under gross-up (today only visibility does; incentive TDS shows as 194R liability only)? | Owner decision |
 | F6 | 194C "Outstanding" double-count when deposits for withheld DEDUCT TDS are uploaded (§4 open item). | Owner decision |
 | F7 | Staging clean-up: test redemptions/batch `PB-1794549226921`, two 10-pt test credit batches, order BAJAJ-26-000031, earlier UAT data ("ZZ PIN test card", Sai Trader order). | Staging |
-| F1 status | ✅ Fixed `63201b39` (server pins assumed operator; screen saves to the loaded client + re-reads; audit: no other page affected). Ships in the next small release. | — |
-| F9 | Root cause of F1: `platform/src/lib/admin-session.ts` hard-codes `clientId: 'deoleo'` for every client admin/MIS user → `session.clientId` is wrong for Bajaj admins too. Fix: derive from auth/me or remove from the session type. | In progress, same follow-up release |
+| F1 status | ✅ Fixed `63201b39` (server pins assumed operator; screen saves to the loaded client + re-reads; audit: no other page affected). Ships in the next small release. The stray `gifsy` `tdsPolicy` row {SEC_194R, GROSS_UP} (updatedAt 2026-11-13T08:14:54Z) is still on prod — **cleanup when convenient**, no tenant reads it. | — |
+| F9 | Root cause of F1: `platform/src/lib/admin-session.ts` hard-codes `clientId: 'deoleo'` for every client admin/MIS user → `session.clientId` is wrong for Bajaj admins too. Fix: derive from auth/me or remove from the session type. ✅ Fixed `801c48d3`; ships with F1. | Next release |
 | F8 | 194R export takes ~23 s for ~3,900 retailers — consider streaming/caching if it grows. | Perf |
+| F10 | **194R Excel export columns** (§4 / §9.3): 'Outlet Code' on PAN rows, new 'Outlet Type' + 'Outlet Name'. ⚠️ PLATFORM-WIDE, approved 2026-11-13. | Build in the NEXT release |
+| F11 | **Daily Operations Digest** — one tenant-sectioned digest replacing the two daily emails. ⚠️ PLATFORM-WIDE, owner approved option A. | **Approved, NOT started**; branch `feat/daily-ops-digest`, worktree `.claude/worktrees/ops-digest` |
+| F12 | **Bajaj prod points rule + sales-import config** — `points_rules`, `sales_import_profiles` and `sales_kpi_definitions` are all EMPTY on prod (§ checklist "Prod readiness audit"). Owner has the KPI codes/rule content and will do the points rule before end-November; a test run with the main session is planned. | Owner + main session |
 
-## 7. Pending owner actions (as of 2026-11-13)
-- Prod settings for Bajaj: no-PAN payouts ON · TDS Config GROSS_UP saved explicitly · (after the next release) imported-payouts count from 2026-04-01.
+## 7. Pending owner actions (as of 2026-11-13 evening)
+- Prod settings for Bajaj: no-PAN payouts ON · TDS Config GROSS_UP saved explicitly · ✅ imported-payouts counting from
+  **2026-04-01 saved 2026-11-13** on the BAJAJ tenant (§9.1a).
 - Spot-check a KYC "OTHER" document shows its real name on prod.
-- Files: October targets/achievements · November sales file + OK to create Sales Import prod infra · Bajaj PAN/GST corrections · retailer TDS deposits (if/when made) · status of "UTR no. awaited" payouts.
-- Hubble prod voucher whitelisting (vendor).
+- **Bajaj prod points rule** (prod `points_rules` is empty) — owner before end-November, then a test run with the main session.
+- **Bajaj sales-import config on prod**: column mapping (`sales_import_profiles` empty) + sales KPI definitions
+  (`sales_kpi_definitions` empty). Prod Sales Import **infra already exists** — no owner infra OK needed any more.
+- Files: ✅ October targets/achievements received + imported · October **rewards** file (separate, awaited) ·
+  ✅ November sales file received 2026-11-13 · Bajaj PAN/GST corrections · retailer TDS deposits (if/when made) ·
+  status of "UTR no. awaited" payouts.
+- ✅ Hubble prod voucher whitelisting DONE (vendor, 2026-11-13; prod VPC egress 34.96.40.72 → HTTP 200 + token) →
+  catalogue step unblocked.
+- ✅ Client training deck done (2026-11-13), now incl. 7 install / allow-location slides (checklist I).
