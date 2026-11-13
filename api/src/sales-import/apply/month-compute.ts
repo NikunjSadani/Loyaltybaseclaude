@@ -10,7 +10,10 @@ import { rosterIndexOf, type AggregatePager, type RosterOutlet } from '../kpi/sa
 export interface MonthOutletRow {
   outletCode: string;
   outletName: string;
-  /** kpiCode → value for every IN-SCOPE owned KPI (out-of-scope keys omitted; no lines → 0). */
+  /**
+   * kpiCode → value for every IN-SCOPE owned KPI (out-of-scope keys omitted; no lines → 0). FOCUS-FROM-TARGETS: a
+   * per-outlet (TARGET_NAMES) KPI whose outletFilter gives no filter for the outlet is omitted too.
+   */
   values: Record<string, number>;
   /** The outlet had no aggregate line at all this month (every value is a zero-fill). */
   zeroFilled: boolean;
@@ -43,6 +46,8 @@ export interface MonthComputation {
   stats: MonthKpiStat[];
   zeroFillOutlets: number;
   split: MonthRosterSplit;
+  /** ROSTER outlet codes with at least one sales line this month (in an owned KPI's scope or not) — reconciliation gaps. */
+  matchedOutletCodes: ReadonlySet<string>;
 }
 
 /**
@@ -98,6 +103,7 @@ export async function computeMonthRows(
     const values: Record<string, number> = {};
     defs.forEach((d, i) => {
       if (!outletInScope(d, meta)) return;
+      if (acc.keyOmitted(code, i)) return; // FOCUS-FROM-TARGETS: no name for this KPI → no key, not counted in stats
       const raw = acc.rawSum(code, i);
       const units = storedUnits(raw, d.measure);
       values[d.kpiCode] = unitsToNumber(units, d.measure);
@@ -113,7 +119,7 @@ export async function computeMonthRows(
   // Real-DB finding 2: the total is the sum of the per-outlet values that are actually STORED (each rounded once), so a
   // re-apply of identical data shows Δ 0 and the audit "after" total equals what OutletSalesRecord holds.
   defs.forEach((d, i) => (stats[i].total = unitsToNumber(storedSums[i], d.measure)));
-  return { rows, stats, zeroFillOutlets, split };
+  return { rows, stats, zeroFillOutlets, split, matchedOutletCodes: matched };
 }
 
 /**

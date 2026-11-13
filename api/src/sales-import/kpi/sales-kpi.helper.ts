@@ -234,20 +234,48 @@ export function measureToNumber(sum: bigint, measure: SalesKpiMeasure): number {
 }
 
 /**
- * `computeOutletKpis(aggsForOutlet, defs, outletMeta)` — the values written for ONE outlet × month:
- * key per in-scope definition (sum, or 0 when no line matches); out-of-scope definitions are omitted.
+ * FOCUS-FROM-TARGETS: the filter a definition uses for one ROSTER outlet — `def.filter` for a FILTER definition,
+ * `def.outletFilter(outletCode)` for one carrying per-outlet filters. `undefined` = the outlet gets NO key for it.
+ */
+export function filterForOutlet(
+  def: Pick<KpiDefLite, 'filter' | 'outletFilter' | 'kpiCode'>,
+  outletCode: string | undefined,
+): SalesKpiFilter | undefined {
+  if (!def.outletFilter) return def.filter;
+  if (outletCode === undefined) {
+    throw new Error(`Sales KPI ${def.kpiCode} has per-outlet products; the outlet code is required to evaluate it.`);
+  }
+  return def.outletFilter(outletCode);
+}
+
+/**
+ * `computeOutletKpis(aggsForOutlet, defs, outletMeta, outletCode?)` — the values written for ONE outlet × month:
+ * key per in-scope definition (sum, or 0 when no line matches); out-of-scope definitions are omitted, and so are
+ * per-outlet (TARGET_NAMES) definitions whose `outletFilter` gives no filter for the outlet. `outletCode` (the ROSTER
+ * code) is required only when a definition has `outletFilter`.
  */
 export function computeOutletKpis(
   aggsForOutlet: readonly KpiAgg[],
   defs: readonly KpiDefLite[],
   meta: OutletScopeMeta,
+  outletCode?: string,
 ): Record<string, number> {
   const out: Record<string, number> = {};
   for (const def of defs) {
     if (!outletInScope(def, meta)) continue;
-    out[def.kpiCode] = measureToNumber(sumMeasure(aggsForOutlet, def), def.measure);
+    const filter = filterForOutlet(def, outletCode);
+    if (filter === undefined) continue;
+    out[def.kpiCode] = measureToNumber(sumMeasure(aggsForOutlet, { measure: def.measure, filter }), def.measure);
   }
   return out;
+}
+
+/** Cached stableStringify of a filter OBJECT (per-outlet filters are shared by every outlet carrying the same name). */
+const filterSigCache = new WeakMap<object, string>();
+function filterSignature(f: SalesKpiFilter): string {
+  let s = filterSigCache.get(f);
+  if (s === undefined) filterSigCache.set(f, (s = stableStringify(f)));
+  return s;
 }
 
 /**
@@ -268,19 +296,74 @@ export class OutletKpiAccumulator {
   private readonly productNet: Map<string, Map<string, bigint>> | null;
   matchedLines = 0; // Σ lines of aggregates matching ≥ 1 definition (scope NOT applied)
 
+  // ── FOCUS-FROM-TARGETS: definitions with a per-outlet filter (`outletFilter`). Empty for FILTER-only defs, so the
+  // fast path below is untouched. Their slot in `matchCache` is always false (so a cache shared across months with
+  // different per-outlet filters stays valid); their match is decided per outlet, cached per filter signature × product.
+  private readonly perOutletIdx: number[];
+  /** outlet → per definition index: the outlet's filter signature, null = no filter (key omitted). FILTER defs: null. */
+  private readonly outletSigs = new Map<string, Array<string | null>>();
+  private readonly sigFilters = new Map<string, SalesKpiFilter>();
+  /** `${filterSignature}|${dimKey}` → does that product match that filter. */
+  private readonly sigMatch = new Map<string, boolean>();
+
   constructor(
     readonly defs: readonly KpiDefLite[],
     private readonly matchCache: Map<string, boolean[]> = new Map(),
   ) {
     this.productNet = defs.some((d) => d.measure === 'PRODUCT_COUNT') ? new Map() : null;
+    this.perOutletIdx = [];
+    defs.forEach((d, i) => {
+      if (d.outletFilter) this.perOutletIdx.push(i);
+    });
+  }
+
+  /** Per-outlet filter signatures (computed once per outlet; `outletFilter` is not called per aggregate). */
+  private sigsFor(outletCode: string): Array<string | null> {
+    let sigs = this.outletSigs.get(outletCode);
+    if (!sigs) {
+      sigs = this.defs.map(() => null);
+      for (const i of this.perOutletIdx) {
+        const f = this.defs[i].outletFilter!(outletCode);
+        if (f === undefined) continue;
+        const sig = filterSignature(f);
+        if (!this.sigFilters.has(sig)) this.sigFilters.set(sig, f);
+        sigs[i] = sig;
+      }
+      this.outletSigs.set(outletCode, sigs);
+    }
+    return sigs;
+  }
+
+  /** A per-outlet filter vs a product (dims known at add time; at read time the cached answer is used). */
+  private perOutletMatch(sig: string | null, key: string, dims?: Record<string, string>): boolean {
+    if (sig === null) return false;
+    const ck = `${sig}|${key}`;
+    let hit = this.sigMatch.get(ck);
+    if (hit === undefined) {
+      if (!dims) return false;
+      hit = lineMatches(dims, this.sigFilters.get(sig)!);
+      this.sigMatch.set(ck, hit);
+    }
+    return hit;
+  }
+
+  /** FOCUS-FROM-TARGETS: does definition `i` give this outlet NO key (per-outlet filter undefined)? Scope NOT applied. */
+  keyOmitted(outletCode: string, i: number): boolean {
+    if (!this.defs[i]?.outletFilter) return false;
+    return this.sigsFor(outletCode)[i] === null;
   }
 
   add(outletCode: string, agg: KpiAgg, dimKey?: string): void {
     const key = dimKey ?? stableStringify(agg.dims);
     let match = this.matchCache.get(key);
     if (!match) {
-      match = this.defs.map((d) => lineMatches(agg.dims, d.filter));
+      match = this.defs.map((d) => (d.outletFilter ? false : lineMatches(agg.dims, d.filter)));
       this.matchCache.set(key, match);
+    }
+    if (this.perOutletIdx.length > 0) {
+      const sigs = this.sigsFor(outletCode);
+      match = match.slice();
+      for (const i of this.perOutletIdx) match[i] = this.perOutletMatch(sigs[i], key, agg.dims);
     }
     let arr = this.sums.get(outletCode);
     if (!arr) {
@@ -334,6 +417,12 @@ export class OutletKpiAccumulator {
     const net = this.productNet?.get(outletCode);
     if (!net) return 0n;
     let n = 0n;
+    if (this.defs[i].outletFilter) {
+      const sig = this.sigsFor(outletCode)[i];
+      if (sig === null) return 0n;
+      for (const [key, v] of net) if (v > 0n && this.perOutletMatch(sig, key)) n++;
+      return n;
+    }
     for (const [key, v] of net) {
       if (v > 0n && this.matchCache.get(key)?.[i] === true) n++;
     }
@@ -345,6 +434,7 @@ export class OutletKpiAccumulator {
     const out: Record<string, number> = {};
     this.defs.forEach((def, i) => {
       if (!outletInScope(def, meta)) return;
+      if (this.keyOmitted(outletCode, i)) return;
       out[def.kpiCode] = measureToNumber(this.rawSum(outletCode, i), def.measure);
     });
     return out;
@@ -499,7 +589,8 @@ export function stableStringify(v: unknown): string {
 
 /**
  * §6.2 `definitionsHash` = sha256 of the stable JSON of the ENABLED definitions sorted by kpiCode, id-free.
- * Only the fields that change what gets written are hashed (kpiCode, measure, filter, scope incl. the KPI's own type).
+ * Only the fields that change what gets written are hashed (kpiCode, measure, filter, scope incl. the KPI's own type,
+ * productSource when TARGET_NAMES).
  */
 export function definitionsHash(
   defs: ReadonlyArray<KpiDefLite & { enabled?: boolean }>,
@@ -516,6 +607,8 @@ export function definitionsHash(
       // unchanged), exactly one type & no programs → the legacy `kpiOutletType: TYPE` (every type-tagged hash is
       // unchanged), anything else → `kpiScope: {sorted, UPPERCASED}`.
       ...canonicalScopeKey(kpiOwnScope(d)),
+      // FOCUS-FROM-TARGETS: only when per-outlet — every FILTER definition's hash is unchanged.
+      ...(d.productSource === 'TARGET_NAMES' ? { productSource: 'TARGET_NAMES' } : {}),
     }))
     .sort((a, b) => (a.kpiCode < b.kpiCode ? -1 : a.kpiCode > b.kpiCode ? 1 : 0));
   return createHash('sha256').update(stableStringify(canon)).digest('hex');

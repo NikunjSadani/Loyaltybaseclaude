@@ -321,3 +321,115 @@ describe('PRODUCT_COUNT (LINES = distinct products with net amount > 0, owner 20
     );
   });
 });
+
+describe('FOCUS-FROM-TARGETS: per-outlet filters (outletFilter)', () => {
+  const P = (brand: string, sku: string, amountPaise: bigint, qtyMicro = 1_000000n): KpiAgg => agg({ brand, sku }, amountPaise, qtyMicro);
+  const lines = [P('CNO', '50', 1000n, 2_000000n), P('ADHO', '500', 2000n, 3_000000n), P('ADHO', '50', 4000n, 5_000000n)];
+  const byOutlet: Record<string, SalesKpiFilter | undefined> = {
+    R1: { anyOf: [{ brand: 'CNO' }, { brand: 'ADHO', sku: '500' }] },
+    W1: { anyOf: [{ brand: 'ADHO', sku: '50' }] },
+    N1: undefined,
+  };
+  const perOutlet = (code: string, measure: SalesKpiMeasure): KpiDefLite =>
+    def(code, measure, {}, { productSource: 'TARGET_NAMES', outletFilter: (o) => byOutlet[o] });
+
+  it.each<[SalesKpiMeasure, Record<string, number>, Record<string, number>]>([
+    ['AMOUNT', { F: 30 }, { F: 40 }],
+    ['QUANTITY', { F: 5 }, { F: 5 }],
+    ['PRODUCT_COUNT', { F: 2 }, { F: 1 }],
+  ])('%s: two outlets with different names get different values from the same lines; undefined → key omitted', (m, r1, w1) => {
+    const d = perOutlet('F', m);
+    const acc = new OutletKpiAccumulator([d]);
+    for (const o of ['R1', 'W1', 'N1']) for (const a of lines) acc.add(o, a);
+    expect(acc.valuesFor('R1', ALL_META)).toEqual(r1);
+    expect(acc.valuesFor('W1', ALL_META)).toEqual(w1);
+    expect(acc.valuesFor('N1', ALL_META)).toEqual({});
+    expect(acc.keyOmitted('N1', 0)).toBe(true);
+    expect(acc.keyOmitted('R1', 0)).toBe(false);
+    expect(acc.valuesFor('NOLINES', ALL_META)).toEqual({}); // undefined filter, no lines
+    // computeOutletKpis agrees
+    expect(computeOutletKpis(lines, [d], ALL_META, 'R1')).toEqual(r1);
+    expect(computeOutletKpis(lines, [d], ALL_META, 'W1')).toEqual(w1);
+    expect(computeOutletKpis(lines, [d], ALL_META, 'N1')).toEqual({});
+  });
+
+  it('computeOutletKpis requires the outlet code for a per-outlet definition', () => {
+    expect(() => computeOutletKpis(lines, [perOutlet('F', 'AMOUNT')], ALL_META)).toThrow(/outlet code is required/);
+  });
+
+  it('scope still wins (out of scope → omitted even with a filter)', () => {
+    const d = def('F', 'AMOUNT', {}, { outletTypes: ['WS'], outletFilter: (o) => byOutlet[o] });
+    const acc = new OutletKpiAccumulator([d]);
+    acc.add('W1', lines[2]);
+    expect(acc.valuesFor('W1', { outletType: 'RETAIL', program: null })).toEqual({});
+    expect(acc.valuesFor('W1', { outletType: 'WS', program: null })).toEqual({ F: 40 });
+  });
+
+  it('mixed FILTER + per-outlet defs leave FILTER values identical', () => {
+    const base = [def('A', 'AMOUNT', { anyOf: [{ brand: 'ADHO' }] }), def('L', 'PRODUCT_COUNT', {}), def('Q', 'QUANTITY', {})];
+    const mixed = [base[0], perOutlet('F', 'PRODUCT_COUNT'), base[1], perOutlet('G', 'AMOUNT'), base[2]];
+    const accBase = new OutletKpiAccumulator(base);
+    const accMixed = new OutletKpiAccumulator(mixed);
+    for (const o of ['R1', 'W1', 'N1']) {
+      for (const a of lines) {
+        accBase.add(o, a);
+        accMixed.add(o, a);
+      }
+    }
+    for (const o of ['R1', 'W1', 'N1']) {
+      const vb = accBase.valuesFor(o, ALL_META);
+      const vm = accMixed.valuesFor(o, ALL_META);
+      expect({ A: vm.A, L: vm.L, Q: vm.Q }).toEqual(vb);
+    }
+    expect(accMixed.valuesFor('R1', ALL_META)).toMatchObject({ F: 2, G: 30 });
+    expect(accMixed.valuesFor('N1', ALL_META)).not.toHaveProperty('F');
+    expect(accMixed.matchedLines).toBe(accBase.matchedLines); // every line matches Q {} in both
+  });
+
+  it('a shared match cache keeps the per-outlet slot false (valid across months with other names)', () => {
+    const mixed = [def('A', 'AMOUNT', {}), perOutlet('F', 'AMOUNT')];
+    const cache = new Map<string, boolean[]>();
+    const nov = new OutletKpiAccumulator(mixed, cache);
+    nov.add('R1', lines[0]);
+    expect([...cache.values()][0]).toEqual([true, false]);
+    const dec = new OutletKpiAccumulator([mixed[0], def('F', 'AMOUNT', {}, { outletFilter: () => ({ anyOf: [{ brand: 'ADHO' }] }) })], cache);
+    dec.add('R1', lines[0]);
+    dec.add('R1', lines[1]);
+    expect(nov.valuesFor('R1', ALL_META)).toEqual({ A: 10, F: 10 });
+    expect(dec.valuesFor('R1', ALL_META)).toEqual({ A: 30, F: 20 });
+  });
+
+  it('outletFilter is called once per outlet, not per line', () => {
+    let calls = 0;
+    const d = def('F', 'AMOUNT', {}, {
+      outletFilter: (o) => {
+        calls++;
+        return byOutlet[o];
+      },
+    });
+    const acc = new OutletKpiAccumulator([d]);
+    for (let i = 0; i < 50; i++) for (const a of lines) acc.add('R1', a);
+    expect(acc.valuesFor('R1', ALL_META)).toEqual({ F: 1500 });
+    expect(calls).toBe(1);
+  });
+
+  it('definitionsHash: productSource hashed only when TARGET_NAMES; a FILTER hash is pinned', () => {
+    const f = def('FB', 'QUANTITY', { anyOf: [{ brand: 'ADHO', sku: '500' }] }, { outletTypes: ['WS'], programs: ['GOLD'] });
+    const pinned = createHash('sha256')
+      .update(
+        '[{"filter":{"anyOf":[{"brand":"ADHO","sku":"500"}]},"kpiCode":"FB","measure":"QUANTITY","outletTypes":["WS"],"programs":["GOLD"]}]',
+      )
+      .digest('hex');
+    expect(definitionsHash([f])).toBe(pinned);
+    expect(definitionsHash([{ ...f, productSource: 'FILTER' }])).toBe(pinned);
+    const tn = { ...f, filter: {}, productSource: 'TARGET_NAMES' as const };
+    expect(definitionsHash([tn])).not.toBe(definitionsHash([{ ...f, filter: {} }]));
+    expect(definitionsHash([tn])).toBe(
+      createHash('sha256')
+        .update('[{"filter":{},"kpiCode":"FB","measure":"QUANTITY","outletTypes":["WS"],"productSource":"TARGET_NAMES","programs":["GOLD"]}]')
+        .digest('hex'),
+    );
+    // outletFilter (a function) never affects the hash
+    expect(definitionsHash([{ ...tn, outletFilter: () => undefined }])).toBe(definitionsHash([tn]));
+  });
+});

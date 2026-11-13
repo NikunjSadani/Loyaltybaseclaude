@@ -110,3 +110,46 @@ describe('computeMonthRows — PRODUCT_COUNT (LINES = distinct products with net
     expect(mixed.stats[2]).toMatchObject({ total: 1, outletsNegative: 0 });
   });
 });
+
+describe('computeMonthRows — FOCUS-FROM-TARGETS per-outlet definitions', () => {
+  const line = (id: number, code: string, brand: string, amountPaise: bigint): AggRow => {
+    const dims = { brand };
+    return { id: BigInt(id), month: '2026-11', outletCode: code, dims, dimKey: JSON.stringify(dims), amountPaise, qtyPico: 0n, lines: 1 };
+  };
+  const filters: Record<string, { anyOf: Array<Record<string, string>> } | undefined> = {
+    O1: { anyOf: [{ brand: 'CNO' }] },
+    O2: { anyOf: [{ brand: 'ADHO' }] },
+  };
+  const F = {
+    kpiCode: 'F', measure: 'AMOUNT' as const, filter: {}, outletTypes: [], programs: [],
+    productSource: 'TARGET_NAMES' as const, outletFilter: (o: string) => filters[o],
+  };
+  const roster3 = new Map<string, RosterOutlet>([...roster, ['O3', { id: 'i3', name: 'Three', outletType: null, program: null }]]);
+  const rows = [line(1, 'O1', 'CNO', 100n), line(2, 'O1', 'ADHO', 200n), line(3, 'O2', 'CNO', 100n), line(4, 'O2', 'ADHO', 200n), line(5, 'O3', 'CNO', 400n)];
+
+  it('per-outlet values; an omitted key is absent and not counted in stats; FILTER values unchanged', async () => {
+    const base = await computeMonthRows(pager(rows), defs, roster3);
+    const comp = await computeMonthRows(pager(rows), [...defs, F], roster3);
+    expect(comp.rows.map((r) => [r.outletCode, r.values])).toEqual([
+      ['O1', { Q: 0, A: 3, F: 1 }],
+      ['O2', { Q: 0, A: 3, F: 2 }],
+      ['O3', { Q: 0, A: 4 }],
+    ]);
+    expect(comp.stats[2]).toMatchObject({ kpiCode: 'F', total: 3, totalRaw: 300n, outletsNonZero: 2 });
+    expect(comp.stats.slice(0, 2)).toEqual(base.stats);
+    expect(comp.rows.map((r) => ({ Q: r.values.Q, A: r.values.A }))).toEqual(base.rows.map((r) => r.values));
+    expect(comp.split).toEqual(base.split);
+    expect([...comp.matchedOutletCodes].sort()).toEqual(['O1', 'O2', 'O3']);
+  });
+
+  it('an outlet whose ONLY owned KPI is omitted still gets a row (so a stale key is rewritten away)', async () => {
+    const comp = await computeMonthRows(pager(rows), [F], roster3);
+    expect(comp.rows.find((r) => r.outletCode === 'O3')).toMatchObject({ values: {}, zeroFilled: false });
+    expect(comp.stats[0]).toMatchObject({ total: 3, outletsNonZero: 2 });
+  });
+
+  it('matchedOutletCodes excludes unmatched customers and outlets without lines', async () => {
+    const comp = await computeMonthRows(pager([line(1, 'O1', 'CNO', 1n), line(2, 'ZZ', 'CNO', 1n)]), defs, roster3);
+    expect([...comp.matchedOutletCodes]).toEqual(['O1']);
+  });
+});
