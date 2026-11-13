@@ -12,7 +12,22 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 📍 STATE 2026-11-11 — read this FIRST
 
-> **📍 2026-11-13 — WHAT'S IN FLIGHT (supersedes the 11-12 block below where they differ):**
+> **📍 2026-11-13 (afternoon) — CURRENT STATE (supersedes everything below where they differ):**
+> - 🚀 **PROD = `247fae4b`** (deployed by owner 2026-11-13; migrations ran): no-PAN payouts (flag OFF until owner enables
+>   for Bajaj) · whole-unit rounding · TDS deposit "TDS for month" + deposit-only rows + day-first dates + cross-upload
+>   dedup + 194C withheld-only/entity type · applies-to (KPI + visibility scope) · wallet never-adds-points + INTERIM
+>   reversal rules · KYC OTHER doc labels · 194R VENDOR_IMPORT exclusion restored (explicit revert of e8c3f46).
+>   Pre-deploy Bajaj staging money test PASSED (no-PAN OFF/ON, UTR PAID/FAILED/refund, "paid outside" refusals, debt-wallet
+>   reversal refused, normal reversal OK, TDS deposit preview, ₹199.50 refused).
+> - ✅ **Bajaj prod data complete except October:** outlets/KYC/docs · visibility · points · targets+achievements (to Sep 26)
+>   · payout history (48,086 / ₹2.89 cr) · partial vendor TDS (119 wholesalers) — all verified; `BAJAJ-PROD-OUTLET-IMPORT.md`.
+> - 🔧 **Next small release `feat/tds-count-imports`** (owner approved): Bajaj-only setting counting imported payouts from
+>   2026-04-01 in 194R (liability only) + TDS Config copy fix (method applies to visibility AND incentive payouts) →
+>   dual audit → full gates → staging → owner deploy → owner sets the date on TDS Config.
+> - 📒 **All owner decisions:** `BAJAJ-GO-LIVE-DECISIONS-LOG.md` (new) — read with this file.
+> - Owner to-dos + waiting files: see the decisions log §7.
+>
+> **📍 2026-11-13 (morning) — WHAT'S IN FLIGHT (historical):**
 > 1. ✅ **Applies-to (KPI + visibility scope) LIVE ON STAGING** — develop `7a78bc26`; Bajaj staging role test PASSED
 >    (admin scope form + live count, template Program/Sub-Program + N/A, upload ignoredOutOfScope, Unnati partner hides
 >    SAMT-only LINES, SAMT partner sees it; temp scope reverted). Still to check on staging: sales-rep views + visibility editor.

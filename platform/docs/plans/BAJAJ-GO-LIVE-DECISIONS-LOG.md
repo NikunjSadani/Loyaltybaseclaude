@@ -1,0 +1,68 @@
+# Bajaj go-live — owner decisions log (Nov 2026)
+
+> One place for every owner decision taken during the Bajaj go-live (11–13 Nov 2026): what was decided, the
+> alternative rejected, and where it is implemented/recorded. Newest first within each section. When a decision changes,
+> strike it through and add the new one with its date — never delete history.
+> Related records: `BAJAJ-PROD-OUTLET-IMPORT.md` (every prod import, step by step) · `RESUME.md` (current state) ·
+> `WALLET-REVERSAL-ENGINE-DESIGN.md` (on branch `feat/wallet-reversal-engine`) · `APPLIES-TO-TARGETING-PLAN.md`.
+
+## 1. Releases & process
+| Date | Decision | Rejected alternative | Where |
+|---|---|---|---|
+| 2026-11-13 | **Retailer-TDS setting ships as its own small release** after the main release. | Hold the main release for it | branch `feat/tds-count-imports` |
+| 2026-11-13 | **Release first, reversal engine later** — ship no-PAN / rounding / TDS / applies-to with SAFE INTERIM reversal rules; engine = fast follow-up after go-live. | Ship together (~1–1½ day delay) | prod `247fae4b`; engine branch |
+| 2026-11-13 | **Wallet reversal engine paused** until after go-live (not needed for go-live or imports); fully documented for resumption. | Build now | `WALLET-REVERSAL-ENGINE-DESIGN.md` |
+| 2026-11-13 | **Two staging deploys** (applies-to first, then the money release) instead of one batched deploy, to go faster. | One batched deploy | develop `7a78bc26` → `2be10c5d` |
+| 2026-11-13 | **Prepare-main must `git revert e8c3f46` explicitly** (re-adds the 194R VENDOR_IMPORT exclusion) — a plain merge does not undo the revert. Supersedes "keep the TDS revert". | Keep revert | main `247fae4b` (`e3669142`) |
+| 2026-11-13 | **Staging role tests: Claude logs in itself** with FIXED_OTP 123456 + staging test accounts. Prod logins stay with the owner. | Owner logs in for every test | memory `test-on-bajaj-staging` |
+| 2026-11-13 | **Approval requests list every recommendation in full** (plain words + recommendation + alternative) — never "approve all N" by reference. | — | memory `show-recommendations-before-approval` |
+| 2026-11-13 | Training deck: owner builds it on another laptop. | Claude builds | — |
+
+## 2. Wallet reversals
+| Date | Decision | Rejected | Where |
+|---|---|---|---|
+| 2026-11-13 | **Interim (until the engine is live for a tenant):** points reversals on a wallet carrying debt (negative, or credit landed on a negative balance) are REFUSED with a clear message; otherwise floor 0 as before; never debit a wallet that didn't receive the credit; cap = actually credited. PAYOUT reversals: whole entries of the same batch only, exact match, never consumed twice, cancel unpaid entries before creating a receivable, PROCESSING refused. | Patched negative-floor logic (order bugs) | prod `247fae4b` |
+| 2026-11-13 | **Long-term engine design approved — 14 choices (all recommended):** Q1 a reversal on a debt wallet may go below 0 down to the debt it restores (never on never-negative wallets); Q2 first approved recovers first; Q3 fungibility on positive wallets as today; Q4 debit the wallet that received the credit; Q5 unattributable legacy credits refused until Gifsy maps them; Q6 expiry clamp as today; Q7 reversal removes the credit's own lot first; Q8 don't show debt to partners; Q9 whole payout entries only; Q10 pending payout reversal holds the entry out of bank files; Q11 PAID payouts → receivable only; Q12 credits repay debt first; Q13 historical reversals kept as recorded; Q14 interim refusal on debt wallets. | — | `WALLET-REVERSAL-ENGINE-DESIGN.md` §12 |
+| 2026-11-13 | Owner: "the correct long-term solution … this is real money related points" → stop patching, design the engine properly. | Simple rule + flag | engine branch |
+| 2026-11-13 | A reversal FULLY UNDOES a credit that landed on a negative wallet (−841 +500 → −341 → reverse → −841). | Stay at −341, note shortfall | engine Q1 / R1 |
+| 2026-11-12 | 8 negative Bajaj wallets (sales returns) are KEPT negative; fix "debit never adds points" shipped. | Write off to 0 | prod `247fae4b` |
+
+## 3. Bajaj prod data imports (all: dry run → owner OK → backup → import → verifier PASS)
+| Date | Decision | Where |
+|---|---|---|
+| 2026-11-13 | **Partial vendor TDS (FY 2026-27, 119 wholesalers):** vendor TDS was PAID BY BAJAJ ON TOP (gross-up) → import as-is: monthly benefit value (off-platform, Σ = "Outlet Points") + vendor deposits (challan date, "TDS for month"); rows keyed by OUTLET with blank PAN so PANs added later recalculate automatically (owner reminder). Report shows the gross-up difference (~₹2.59 L) for Bajaj's CA. ₹3.97 L unallocated challan money + 5 outlets not on prod left out. | §10 |
+| 2026-11-13 | **Retailer TDS:** Bajaj confirmed no TDS deposited for retailers → Bajaj-only setting counts imported payouts from **1 Apr 2026** (FY 2026-27) in the 194R report as LIABILITY ONLY; FY 2025-26 excluded (CA handles outside); deposits subtract later; no automatic deduction/recovery (Bajaj is gross-up → payer-borne). | §9.1, branch `feat/tds-count-imports` |
+| 2026-11-13 | **Payout history** imported only AFTER the 194R vendor-import rule was live on prod. Done rows only, Apr 2025+, prod outlets only; placeholder references ("Same Bank does not provide Utr No.") stored as UTR = NULL with the text in narration; amounts kept to the paisa (history, not the whole-rupee rule). "UTR no. awaited" rows excluded pending Bajaj status. | §9 |
+| 2026-11-13 | **Historical targets + achievements** (file to Sep 2026; October file to follow; November targets entered by owner; November achievements via Sales Import): RLP → TOTAL/ADHO/NON ADHO/FOCUS BRAND/LINES, FOCUS BRAND 2 none; BSC → TOTAL only (case counts not imported); prod outlets only; sheet/type mismatches imported (out-of-scope KPIs hidden); 2 decimals; negatives kept; duplicates once (first wins). **Never run points compute for imported months.** | §9c |
+| 2026-11-13 | **Wholesaler points:** final balance must equal the vendor's 11-Nov closing; vendor stopped redemptions on 11 Nov (final balance); 2 outlets show "Last year's over-redemption recovered" to match the vendor; scratch payouts dated 30 Jun 2025 (their column position), MAH-Sept 25 Sep 2025, Bottle QPS 25 Nov 2025. | §9b |
+| 2026-11-12 | **Visibility history:** only "Approved CISPL Status = Approved"; November 2026 included; photos copied to OUR storage. | §8 |
+| 2026-11-12 | **Outlets/KYC/docs:** CISPL_Approval = Approved only (6,491); nothing from staging; owner groups → approved parents; fill blanks from group; shared bank across different owners → blank on all; city/pincode from ADDRESS when blank; non-approved profileStatus → Re-KYC after all data lands; docs copied to OUR storage (vendor links expire); rehearsal on a prod clone. | §1–§7 |
+
+## 4. TDS
+| Date | Decision | Where |
+|---|---|---|
+| 2026-11-13 | Bajaj follows **GROSS_UP**; owner saves TDS Config explicitly. **Corrected fact (code-verified 2026-11-13):** the method is recorded on every credit-upload ₹ payout but only CHANGES visibility payouts (Deduct = TDS taken out of the bank line; Gross-up = paid in full + TDS invoice). Incentive payouts are never deducted and raise no TDS invoice; the 194R report always shows the gross-up liability. Section applies only to visibility (incentive always 194R). Points redemptions never deducted (194R report only). Screen copy fixed to say exactly this. | TDS Config screen |
+| 2026-11-13 | **TDS deposits count in the FY of the month they pay for** ("TDS for month" column; default: deposit day ≤ 7 → previous month; 8–30 April → March; else own month). ⚠️ platform-wide. | prod `247fae4b` |
+| 2026-11-12 | **Deposit-only rows for ANY PAN** (a deposit never drops out of the totals). ⚠️ platform-wide. | prod `247fae4b` |
+| open | 194C "Outstanding" = liability − deposited − withheld can double-count once Gifsy uploads deposits for withheld DEDUCT TDS (guide says don't upload withheld TDS as a deposit). Owner decision pending (non-blocking; prod has 0 such rows). | RESUME |
+
+## 5. Payouts, credits, rounding
+| Date | Decision | Where |
+|---|---|---|
+| 2026-11-12 | **Rounding:** points AND ₹ payouts credited in WHOLE units, rounded half-up once (₹199.5 → ₹200); uploads accept decimals and show "typed → credited". ⚠️ platform-wide (Deoleo: ₹150.5 now credits ₹151). | prod `247fae4b` |
+| 2026-11-12 | **No-PAN payouts:** Bajaj-only flag `allowPayoutWithoutPan` (default OFF); per-partner no-PAN 194R / per-outlet 194C keys at 20%. Owner turns it ON for Bajaj prod. | prod `247fae4b` |
+| 2026-11-12 | **UTR upload:** only processed payments can be marked PAID, but payments made OUTSIDE the platform are never blocked → "Paid outside platform (Y/N)" + note; never on bank-sent rows or refunded orders. | prod `247fae4b` |
+| 2026-11-12 | Deoleo: all outlets have PAN (owner). | — |
+
+## 6. Applies-to (KPI + visibility scope)
+| Date | Decision | Where |
+|---|---|---|
+| 2026-11-12/13 | Build fast follow-ups #1 KPI ↔ Program/Sub-Program, #2 KPI multi outlet-type, #3 Visibility by Program/Sub-Program together; all ★ decisions D1–D12 approved. ⚠️ platform-wide (Deoleo unchanged — no scoped KPIs). | `APPLIES-TO-TARGETING-PLAN.md`, prod `247fae4b` |
+| 2026-11-13 | **Single-outlet-type KPIs are enforced everywhere** (template N/A, uploads ignore, every screen/report/points agree; raw exports keep stored values). | prod |
+| 2026-11-13 | **Re-uploads and batch deletes never delete stored out-of-scope values** (kept, hidden on screens, in exports). | prod |
+
+## 7. Pending owner actions (as of 2026-11-13)
+- Prod settings for Bajaj: no-PAN payouts ON · TDS Config GROSS_UP saved explicitly · (after the next release) imported-payouts count from 2026-04-01.
+- Spot-check a KYC "OTHER" document shows its real name on prod.
+- Files: October targets/achievements · November sales file + OK to create Sales Import prod infra · Bajaj PAN/GST corrections · retailer TDS deposits (if/when made) · status of "UTR no. awaited" payouts.
+- Hubble prod voucher whitelisting (vendor).
