@@ -48,7 +48,14 @@ const mockWalletService = {
   creditEarn: jest.fn().mockResolvedValue({ transactionId: 'wt1', newRedeemable: 50, ledgerId: 'l1' }),
   clawbackAward: jest.fn().mockResolvedValue({ transactionId: 'wt2', newRedeemable: 0, ledgerId: 'l2', shortfall: 0 }),
   // POINTS reversal cap = points ACTUALLY credited; default: the stored rows were all credited.
-  creditedPointsForBatchRow: jest.fn(async (_tx: unknown, a: { storedRowsAmount: bigint }) => a.storedRowsAmount),
+  creditedPointsForBatchRow: jest.fn(
+    async (tx: { creditBatch: { findFirst: (a?: unknown) => Promise<{ rows?: any[] } | null> } }, a: { outletCode: string; fieldId: string }) => {
+      const batch = await tx.creditBatch.findFirst();
+      return (batch?.rows ?? [])
+        .filter((r) => r.outletId === a.outletCode && r.fieldId === a.fieldId && r.awardType === 'POINTS' && r.status === 'OK' && r.amount > 0)
+        .reduce((s: bigint, r) => s + BigInt(r.amount), 0n);
+    },
+  ),
   // Interim POINTS-reversal gate (no debt, exact credit on the receiving wallet); default: allowed.
   assertPointsReversalAllowed: jest.fn(),
 };
@@ -943,7 +950,7 @@ describe('CreditsService', () => {
       await expect(service.createReversal(admin, 'b1', dto)).rejects.toThrow(/Nothing was credited/);
       expect(mockWalletService.creditedPointsForBatchRow).toHaveBeenCalledWith(
         mockTx,
-        { batchId: 'b1', clientId: 'deoleo', outletCode: 'O1', fieldId: 'f1', storedRowsAmount: 300n },
+        { batchId: 'b1', clientId: 'deoleo', outletCode: 'O1', fieldId: 'f1' },
       );
       expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
     });
@@ -1321,6 +1328,33 @@ describe('CreditsService', () => {
         const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
         expect(mockTx.creditReversal.updateMany.mock.calls[0][0].data.consumedPayoutEntryIds).toEqual(['pe-paid-later']);
         expect(res.clawbackShortfall).toBe(30000);
+      });
+
+      it('entry choice: PAID 500 + PENDING 300 + PENDING 200, reverse ₹500 → cancels the two PENDING (no receivable)', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(50000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'pe-paid500', status: 'PAID', amountPaise: 50000n, tdsDeductedPaise: 0n, createdAt: T0 },
+          { id: 'pe-pend300', status: 'PENDING', amountPaise: 30000n, tdsDeductedPaise: 0n, createdAt: T0 },
+          { id: 'pe-pend200', status: 'PENDING', amountPaise: 20000n, tdsDeductedPaise: 0n, createdAt: T0 },
+        ]);
+        priorApprovals([]);
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
+        expect(mockTx.creditReversal.updateMany.mock.calls[0][0].data.consumedPayoutEntryIds).toEqual(['pe-pend300', 'pe-pend200']);
+        expect(res.clawbackShortfall).toBe(0);
+      });
+
+      it('entry choice: PROCESSING 500 + PENDING 300 + PENDING 200, reverse ₹500 → cancels the PENDING pair (not refused)', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(50000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'pe-proc500', status: 'PROCESSING', amountPaise: 50000n, tdsDeductedPaise: 0n, createdAt: T0 },
+          { id: 'pe-pend300', status: 'PENDING', amountPaise: 30000n, tdsDeductedPaise: 0n, createdAt: T0 },
+          { id: 'pe-pend200', status: 'PENDING', amountPaise: 20000n, tdsDeductedPaise: 0n, createdAt: T0 },
+        ]);
+        priorApprovals([]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
+        expect(mockTx.creditReversal.updateMany.mock.calls[0][0].data.consumedPayoutEntryIds).toEqual(['pe-pend300', 'pe-pend200']);
+        const touched = mockTx.creditPayoutEntry.updateMany.mock.calls.map((c: any[]) => c[0].where.id);
+        expect(touched).toEqual(['pe-pend300', 'pe-pend200']);
       });
 
       describe('create: the request must be an exact fit of whole open entries', () => {

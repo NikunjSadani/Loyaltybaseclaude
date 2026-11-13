@@ -996,64 +996,53 @@ export class WalletService {
   }
 
   /**
-   * The credit a reversal undoes, or a refusal: 400 when this wallet never received it / it can't
-   * be attributed, 409 when it (or, for an ambiguous legacy batch, ANY of this batch's credits on
-   * this wallet) landed on a negative balance.
+   * The credit a reversal undoes, or a refusal: 400 when this wallet never received it or (legacy
+   * batch) its receipt can't be confirmed, 409 when it landed on a negative balance.
    */
   private async requireReversibleCredit(
     tx: Prisma.TransactionClient,
     walletId: string,
     partnerId: string,
     ref: { batchId: string; outletCode: string; fieldId: string },
-  ): Promise<{ id: string | null }> {
+  ): Promise<{ id: string }> {
     const r = await this.findOriginalBatchCredit(tx, walletId, partnerId, ref);
     if (r === 'not found') {
       throw new BadRequestException(
         `Cannot claw back: this partner's wallet has no credit from batch ${ref.batchId} for outlet ${ref.outletCode} / field ${ref.fieldId} (outlet relinked or row not credited) — settle it off-platform and reject this reversal`,
       );
     }
+    if (r === 'unconfirmed') throw new BadRequestException(this.unconfirmedLegacyCreditMessage(ref.batchId));
     if (r.minBalanceBefore < 0) throw new ConflictException(DEBT_REVERSAL_PAUSED_MESSAGE);
     return { id: r.id };
+  }
+
+  private unconfirmedLegacyCreditMessage(batchId: string): string {
+    return `Cannot reverse: can't confirm this wallet received this credit (batch ${batchId} predates per-credit tracking and its credits don't line up with the partner's current outlets) — contact Gifsy`;
   }
 
   /**
    * The EXACT credit-batch credit a reversal undoes — the CREDIT_POINTS_EARNED WalletTransaction(s)
    * this wallet received from batch `batchId` for the reversal's (outletCode, fieldId).
-   * Returns { id (first match), minBalanceBefore (lowest balanceBefore among the matches) } or
-   * 'not found' (the caller REFUSES — never debit a wallet that didn't receive the credit).
+   * Returns { id (first match), minBalanceBefore (lowest balanceBefore among the matches) },
+   * 'not found' or 'unconfirmed' (the caller REFUSES both — never debit a wallet that didn't
+   * provably receive the credit).
    *
    * Identification, in order:
    *  1. metadata — credits posted since 2026-11-12 carry { fieldId, outletCode } (confirmBatch).
-   *  2. legacy rows (no metadata) — replay the batch's stored `rows` exactly as confirmBatch
-   *     credited them: POINTS rows, status OK, amount > 0, for this partner's outlet code(s), in
-   *     row order; the k-th credit (createdAt, id order) is the k-th row. Accepted only when none
-   *     of the partner's outlets changed since the batch was confirmed, the counts match and every
-   *     pair's amount agrees.
-   *  3. legacy replay inconclusive — this wallet DID receive credits from the batch but they can't
-   *     be paired to rows: id null and minBalanceBefore = the lowest balanceBefore over ALL of the
-   *     batch's credits on this wallet (so any of them landing on debt refuses). This keeps the
-   *     pre-existing behaviour for non-negative wallets (Deoleo), where it can't matter which credit.
+   *  2. legacy rows (no metadata) — pairLegacyBatchCredits: an exact fit of this wallet's credits
+   *     to the batch's POINTS rows of the partner's current outlets, else 'unconfirmed'.
    */
   private async findOriginalBatchCredit(
     tx: Prisma.TransactionClient,
     walletId: string,
     partnerId: string,
     ref: { batchId: string; outletCode: string; fieldId: string },
-  ): Promise<{ id: string | null; minBalanceBefore: number } | 'not found'> {
-    const credits = await tx.walletTransaction.findMany({
-      where: {
-        walletId,
-        transactionType: 'CREDIT_POINTS_EARNED',
-        referenceType: 'CREDIT_BATCH',
-        referenceId: ref.batchId,
-      },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      select: { id: true, createdAt: true, balanceBefore: true, points: true, metadata: true },
-    });
+  ): Promise<{ id: string; minBalanceBefore: number } | 'not found' | 'unconfirmed'> {
+    const credits = await this.walletBatchCredits(tx, walletId, ref.batchId);
     if (credits.length === 0) return 'not found';
 
-    const summarise = (ms: typeof credits, id: string | null) => ({
-      id,
+    const summarise = (ms: typeof credits) => ({
+      id: ms[0].id,
       minBalanceBefore: Math.min(...ms.map((c) => c.balanceBefore)),
     });
     const metaOf = (m: Prisma.JsonValue | null | undefined) =>
@@ -1064,29 +1053,52 @@ export class WalletService {
         const m = metaOf(c.metadata)!;
         return m.fieldId === ref.fieldId && (m.outletCode == null || m.outletCode === ref.outletCode);
       });
-      return matches.length === 0 ? 'not found' : summarise(matches, matches[0].id);
+      return matches.length === 0 ? 'not found' : summarise(matches);
     }
 
-    const inconclusive = summarise(credits, null);
-    const batch = await tx.creditBatch.findFirst({
-      where: { id: ref.batchId },
-      select: { clientId: true, rows: true, confirmedAt: true },
+    const pairs = await this.pairLegacyBatchCredits(tx, partnerId, ref.batchId, credits);
+    if (pairs === 'unconfirmed') return 'unconfirmed';
+    const matches = pairs
+      .filter((p) => p.row.fieldId === ref.fieldId && p.row.outletId === ref.outletCode)
+      .map((p) => p.credit);
+    return matches.length === 0 ? 'not found' : summarise(matches);
+  }
+
+  /** This wallet's CREDIT_POINTS_EARNED rows from credit batch `batchId`, in posting order. */
+  private walletBatchCredits(tx: Prisma.TransactionClient, walletId: string, batchId: string) {
+    return tx.walletTransaction.findMany({
+      where: { walletId, transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: batchId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, createdAt: true, balanceBefore: true, points: true, metadata: true },
     });
-    const confirmedAt = batch?.confirmedAt ?? null;
-    if (!batch || !Array.isArray(batch.rows) || !confirmedAt) return inconclusive;
+  }
+
+  /**
+   * Legacy credits (no metadata): pair a wallet's credits from a batch with the batch's stored
+   * rows exactly as confirmBatch credited them — POINTS rows, status OK, amount > 0, for the
+   * partner's CURRENT outlet codes, in row order; the k-th credit (createdAt, id order) is the k-th
+   * row. Returned ONLY on an exact fit (same count, every amount equal); anything else — a row
+   * skipped at confirm, an outlet linked to / away from this partner since, a missing batch — is
+   * 'unconfirmed' and every caller refuses (e.g. rows O1 500 + O2 300, the partner received only
+   * O2's 300, O1 linked to the partner later → 2 rows vs 1 credit → never debit them for O1).
+   */
+  private async pairLegacyBatchCredits<C extends { points: number }>(
+    tx: Prisma.TransactionClient,
+    partnerId: string,
+    batchId: string,
+    credits: C[],
+  ): Promise<{ credit: C; row: { outletId: string; fieldId?: string } }[] | 'unconfirmed'> {
+    const batch = await tx.creditBatch.findFirst({ where: { id: batchId }, select: { clientId: true, rows: true } });
+    if (!batch || !Array.isArray(batch.rows)) return 'unconfirmed';
     const outlets = await tx.outlet.findMany({
       where: { clientId: batch.clientId, partnerId },
-      select: { outletCode: true, updatedAt: true },
+      select: { outletCode: true },
     });
-    // The replay maps rows by the partner's CURRENT outlets; that equals the confirm-time mapping
-    // only if none of those outlets changed since the batch was confirmed (a relink bumps
-    // Outlet.updatedAt).
-    if (outlets.some((o) => o.updatedAt.getTime() > confirmedAt.getTime())) return inconclusive;
     const codes = new Set(outlets.map((o) => o.outletCode));
     type Row = { outletId?: string; fieldId?: string; amount?: number; awardType?: string; status?: string };
     const credited = (batch.rows as Row[]).filter(
-      (r) =>
-        r &&
+      (r): r is Row & { outletId: string } =>
+        !!r &&
         r.awardType === 'POINTS' &&
         r.status === 'OK' &&
         typeof r.amount === 'number' &&
@@ -1094,13 +1106,9 @@ export class WalletService {
         typeof r.outletId === 'string' &&
         codes.has(r.outletId),
     );
-    if (credited.length !== credits.length) return inconclusive;
-    if (credited.some((r, k) => r.amount !== credits[k].points)) return inconclusive;
-    const matches = credits.filter(
-      (_c, k) => credited[k].fieldId === ref.fieldId && credited[k].outletId === ref.outletCode,
-    );
-    if (matches.length === 0) return codes.has(ref.outletCode) ? 'not found' : inconclusive;
-    return summarise(matches, matches[0].id);
+    if (credited.length !== credits.length) return 'unconfirmed';
+    if (credited.some((r, k) => r.amount !== credits[k].points)) return 'unconfirmed';
+    return credits.map((credit, k) => ({ credit, row: credited[k] }));
   }
 
   /**
@@ -1109,12 +1117,14 @@ export class WalletService {
    * outlet was unknown / unlinked credited nothing).
    *  - Batches confirmed since credit metadata exists: Σ points of the batch's CREDIT_POINTS_EARNED
    *    rows whose metadata is { fieldId, outletCode } (any wallet).
-   *  - Legacy batches (no credit metadata): `storedRowsAmount` only if the outlet's CURRENT partner's
-   *    wallet received at least one credit from this batch, else 0 (cannot attribute → refuse).
+   *  - Legacy batches (no credit metadata): Σ of the outlet's CURRENT partner's credits paired to
+   *    (outletCode, fieldId) by pairLegacyBatchCredits; 0 when that partner has no wallet / no
+   *    credit from the batch; 400 when the pairing is not an exact fit (receipt unconfirmed) —
+   *    the same rule the clawback applies, so cap and clawback always agree.
    */
   async creditedPointsForBatchRow(
     tx: Prisma.TransactionClient,
-    a: { batchId: string; clientId: string; outletCode: string; fieldId: string; storedRowsAmount: bigint },
+    a: { batchId: string; clientId: string; outletCode: string; fieldId: string },
   ): Promise<bigint> {
     const credits = await tx.walletTransaction.findMany({
       where: { transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: a.batchId },
@@ -1135,8 +1145,15 @@ export class WalletService {
     });
     if (!outlet?.partnerId) return 0n;
     const wallet = await tx.wallet.findFirst({ where: { partnerId: outlet.partnerId }, select: { id: true } });
-    if (!wallet || !credits.some((c) => c.walletId === wallet.id)) return 0n;
-    return a.storedRowsAmount;
+    if (!wallet) return 0n;
+    const walletCredits = await this.walletBatchCredits(tx, wallet.id, a.batchId);
+    if (walletCredits.length === 0) return 0n;
+    const pairs = await this.pairLegacyBatchCredits(tx, outlet.partnerId, a.batchId, walletCredits);
+    if (pairs === 'unconfirmed') throw new BadRequestException(this.unconfirmedLegacyCreditMessage(a.batchId));
+    return pairs.reduce(
+      (s, p) => (p.row.outletId === a.outletCode && p.row.fieldId === a.fieldId ? s + BigInt(p.credit.points) : s),
+      0n,
+    );
   }
 
   // ─── Expiry sweep ────────────────────────────────────────────────────────────

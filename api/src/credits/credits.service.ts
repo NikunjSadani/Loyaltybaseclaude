@@ -1410,6 +1410,9 @@ export class CreditsService {
       where: { id: batchId, clientId },
       select: { rows: true },
     });
+    if (awardType === 'POINTS') {
+      return this.walletService.creditedPointsForBatchRow(tx, { batchId, clientId, outletCode: outletId, fieldId });
+    }
     const rows = (Array.isArray(batch?.rows) ? batch!.rows : []) as Array<{
       outletId?: string; fieldId?: string; amount?: number; awardType?: string; status?: string;
     }>;
@@ -1421,11 +1424,6 @@ export class CreditsService {
       ) {
         total += toPaiseBigInt(r.amount);
       }
-    }
-    if (awardType === 'POINTS') {
-      return this.walletService.creditedPointsForBatchRow(tx, {
-        batchId, clientId, outletCode: outletId, fieldId, storedRowsAmount: total,
-      });
     }
     return total;
   }
@@ -1519,8 +1517,9 @@ export class CreditsService {
    * of the same outlet + field created on or before that approval — the old approval turned every
    * then-existing entry into REVERSED or (if PAID) a receivable. REVERSED entries never qualify.
    *
-   * Choice among fitting subsets: fewest entries, then none still with the bank (PROCESSING), then
-   * the least already-PAID cash (cancelling an unpaid entry beats raising a receivable), then oldest.
+   * Choice among fitting subsets: none still with the bank (PROCESSING) if possible, then the least
+   * already-PAID cash (cancelling an unpaid entry beats raising a receivable), then the fewest
+   * entries, then the oldest.
    * Callers hold the batch row lock (lockBatchCreditedAmount), which serialises every reversal
    * create/approve of this batch, so two approvals can never pick the same entry.
    */
@@ -1596,7 +1595,9 @@ export class CreditsService {
         if (open[i].status === 'PAID') paid += open[i].amountPaise;
       }
       if (sum !== amount) continue;
-      const key = [count, processing, Number(paid), ...idx];
+      // Never pick an entry already with the bank if avoidable, then prefer cancelling unpaid
+      // entries over raising receivables, then the fewest entries, then the oldest.
+      const key = [processing, Number(paid), count, ...idx];
       const better =
         !best ||
         (() => {

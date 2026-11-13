@@ -1661,7 +1661,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
           await expect(claw(h, 500, 'b1', 'f1')).rejects.toThrow(DEBT);
         });
 
-        it('LEGACY-2 (Deoleo parity): replay inconclusive (outlet changed since confirm) on a never-negative wallet → floor-0 reversal as before', async () => {
+        it('LEGACY-2: an outlet edited since confirm is fine when the credits still fit the rows exactly → floor-0 reversal as before', async () => {
           const h = buildHarness({
             wallet: { redeemablePoints: 0 },
             batches: [{ id: 'b1', clientId: 'deoleo', rows: [rowsB1[0]], confirmedAt: CONFIRMED }],
@@ -1677,15 +1677,16 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
           );
         });
 
-        it('LEGACY-3: replay inconclusive (amounts differ) and one of the batch credits landed on debt → REFUSED', async () => {
+        it('LEGACY-3: credits don\'t fit the rows (amounts differ) → receipt unconfirmed → REFUSED (400), wallet untouched', async () => {
           const h = buildHarness({
-            wallet: { redeemablePoints: -100 },
+            wallet: { redeemablePoints: 0 },
             batches: [{ id: 'b1', clientId: 'deoleo', rows: [{ ...rowsB1[0], amount: 499 }], confirmedAt: CONFIRMED }],
             outlets: outletsUnchanged,
           });
-          await legacyEarn(h, 500, 'b1'); // landed on −100 → 400
-          await expect(claw(h, 100, 'b1', 'f1')).rejects.toThrow(DEBT);
-          expect(h.wallet.redeemablePoints).toBe(400);
+          await legacyEarn(h, 500, 'b1');
+          await expect(claw(h, 100, 'b1', 'f1')).rejects.toThrow(/can't confirm this wallet received this credit/);
+          expect(h.wallet.redeemablePoints).toBe(500);
+          expect(clawbacks(h)).toHaveLength(0);
         });
 
         it('LEGACY-4: replay resolves and the outlet\'s field was never credited to this wallet → REFUSED (400)', async () => {
@@ -1696,6 +1697,59 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
           });
           await legacyEarn(h, 500, 'b1');
           await expect(claw(h, 100, 'b1', 'f2')).rejects.toBeInstanceOf(BadRequestException);
+        });
+
+        // Audit scenario: rows O1 500 + O2 300; this partner (P2) received only O2's 300 (O1 was
+        // skipped at confirm or credited to P1); O1 was linked to P2 LATER. Reversing O1's 500 must
+        // never debit P2 — at the gate, the clawback, or the cap.
+        describe('WRONG-WALLET: outlet linked to the partner after the legacy batch', () => {
+          const rows = [
+            { outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 500 },
+            { outletId: 'O2', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 },
+          ];
+          const setup = async () => {
+            const h = buildHarness({
+              wallet: { redeemablePoints: 0 },
+              batches: [{ id: 'b1', clientId: 'deoleo', rows, confirmedAt: CONFIRMED }],
+              outlets: [
+                { outletCode: 'O1', partnerId: 'cp1', clientId: 'deoleo', updatedAt: new Date(CONFIRMED.getTime() + 1000) }, // relinked
+                { outletCode: 'O2', partnerId: 'cp1', clientId: 'deoleo', updatedAt: new Date(CONFIRMED.getTime() - 1000) },
+              ],
+            });
+            await legacyEarn(h, 300, 'b1'); // P2 received O2's 300 only
+            return h;
+          };
+          const ref = { clientId: 'deoleo', batchId: 'b1', fieldId: 'f1' };
+
+          it('gate refuses O1 (400, unconfirmed) — and O2 too, since the receipt can\'t be paired', async () => {
+            const h = await setup();
+            await expect(h.service.assertPointsReversalAllowed(h.store as any, { ...ref, outletCode: 'O1' })).rejects.toThrow(
+              /can't confirm this wallet received this credit/,
+            );
+            await expect(h.service.assertPointsReversalAllowed(h.store as any, { ...ref, outletCode: 'O2' })).rejects.toBeInstanceOf(
+              BadRequestException,
+            );
+          });
+
+          it('clawback refuses O1 and the wallet is untouched', async () => {
+            const h = await setup();
+            let err: unknown;
+            await h.store.$transaction(async (tx: any) => {
+              await h.service
+                .clawbackAward('cp1', 500, { originalCredit: { batchId: 'b1', outletCode: 'O1', fieldId: 'f1' } }, tx)
+                .catch((e: unknown) => (err = e));
+            });
+            expect(err).toBeInstanceOf(BadRequestException);
+            expect(h.wallet.redeemablePoints).toBe(300);
+            expect(clawbacks(h)).toHaveLength(0);
+          });
+
+          it('cap refuses too (never returns the stored row amount)', async () => {
+            const h = await setup();
+            await expect(
+              h.service.creditedPointsForBatchRow(h.store as any, { batchId: 'b1', clientId: 'deoleo', outletCode: 'O1', fieldId: 'f1' }),
+            ).rejects.toThrow(/can't confirm this wallet received this credit/);
+          });
         });
       });
 
@@ -1734,8 +1788,8 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
       });
 
       describe('creditedPointsForBatchRow (POINTS reversal cap)', () => {
-        const call = (h: ReturnType<typeof buildHarness>, fieldId: string, outletCode = 'OC1', stored = 999n) =>
-          h.service.creditedPointsForBatchRow(h.store as any, { batchId: 'b1', clientId: 'deoleo', outletCode, fieldId, storedRowsAmount: stored });
+        const call = (h: ReturnType<typeof buildHarness>, fieldId: string, outletCode = 'OC1') =>
+          h.service.creditedPointsForBatchRow(h.store as any, { batchId: 'b1', clientId: 'deoleo', outletCode, fieldId });
 
         it('metadata-era batch: Σ of the credits actually posted for (outlet, field)', async () => {
           const h = buildHarness({ wallet: { redeemablePoints: 0 } });
@@ -1747,13 +1801,20 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
           expect(await call(h, 'f1', 'OTHER')).toBe(0n); // skipped / other outlet → nothing credited
         });
 
-        it('legacy batch: stored rows only when the outlet\'s current partner received credits from it; else 0', async () => {
+        it('legacy batch: Σ of the current partner\'s credits paired EXACTLY to (outlet, field); 0 when it has none', async () => {
+          const legacyRows = [
+            { outletId: 'OC1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 500 },
+            { outletId: 'OC1', fieldId: 'f2', awardType: 'POINTS', status: 'OK', amount: 200 },
+          ];
           const withOutlet = buildHarness({
             wallet: { redeemablePoints: 0 },
+            batches: [{ id: 'b1', clientId: 'deoleo', rows: legacyRows }],
             outlets: [{ outletCode: 'OC1', partnerId: 'cp1', clientId: 'deoleo' }],
           });
           await withOutlet.service.creditEarn('cp1', 'deoleo', 500, { referenceType: 'CREDIT_BATCH', referenceId: 'b1' });
-          expect(await call(withOutlet, 'f1')).toBe(999n);
+          await withOutlet.service.creditEarn('cp1', 'deoleo', 200, { referenceType: 'CREDIT_BATCH', referenceId: 'b1' });
+          expect(await call(withOutlet, 'f1')).toBe(500n);
+          expect(await call(withOutlet, 'f2')).toBe(200n);
           const unlinked = buildHarness({ wallet: { redeemablePoints: 0 }, outlets: [] });
           await unlinked.service.creditEarn('cp1', 'deoleo', 500, { referenceType: 'CREDIT_BATCH', referenceId: 'b1' });
           expect(await call(unlinked, 'f1')).toBe(0n);
