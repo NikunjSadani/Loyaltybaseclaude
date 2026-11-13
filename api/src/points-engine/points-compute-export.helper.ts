@@ -1,9 +1,9 @@
 /**
- * Points Compute Engine — Wave 1 EXPORT helpers (PURE; no Nest/Prisma/DB).
+ * Points Compute Engine — EXPORT writers (PURE layouts; no Nest/Prisma/DB). They write a read-only
+ * {@link ComputePreview} into the streaming xlsx writer; the 'points-*' export kinds
+ * (exports/kinds/batch2/points-compute.kinds.ts) run the compute and call them — in the background worker.
  *
- * Two outputs are produced from a read-only {@link ComputePreview}:
- *
- *  1. buildCreditUploadXlsx — the machine file the operator re-uploads, UNCHANGED, through the
+ *  1. writeCreditUploadXlsx — the machine file the operator re-uploads, UNCHANGED, through the
  *     EXISTING credits-upload flow after the client approves the preview offline. It therefore
  *     reproduces the EXACT sheet shape that `generateCreditTemplate` emits and
  *     `parseCreditUpload` reads (platform/src/lib/credits-payouts-template.ts +
@@ -21,20 +21,19 @@
  *     engine computes WHOLE POINTS (no ×100) — so every value cell is a whole points count and the
  *     target CreditField must be POINTS-classified for the outlet types involved.
  *
- *  2. buildPreviewReportXlsx — the full human review report (POINTS) the operator shares with the client
+ *  2. writePreviewReportXlsx — the full human review report (POINTS) the operator shares with the client
  *     offline: one row per preview row (every status, with the math explanation) + a summary.
  *
- *  3. buildPayoutReportXlsx — the PAYOUT report (report-only; the engine never credits/pays a payout —
+ *  3. writePayoutReportXlsx — the PAYOUT report (report-only; the engine never credits/pays a payout —
  *     owner directive 2026-10-21, PAYOUT-COMPUTE-REPORT.md): one row per PAYOUT row with the amount in
  *     WHOLE INR on OK rows + a payout summary. Shared with the client for offline approval; the final
  *     payment status is then uploaded through the existing payout flow, not through the engine.
  *
- * All return a Buffer for a Nest StreamableFile (the controller streams it). Sanitisation (cellSafe) is
- * inherited from the shared xlsx helpers.
+ * Sanitisation (cellSafe) is applied by the streaming writer to every string cell and header.
  */
 
-import * as XLSX from 'xlsx';
-import { aoaToSheetSafe, buildXlsx } from '../common/xlsx';
+import type { XlsxStreamWriter } from '../common/xlsx-stream';
+import { JsonSheet } from '../exports/kinds/batch2/kind-support';
 import type { ComputePreview, ComputePreviewRow } from './points-compute.types';
 
 // ─── Headers the credits upload parser REQUIRES verbatim ───────────────────────
@@ -62,12 +61,13 @@ function fieldHeader(row: ComputePreviewRow): string {
 }
 
 /**
- * Build the operator-reuploadable credit-upload xlsx from the preview's OK rows ONLY.
+ * Write the operator-reuploadable credit-upload xlsx from the preview's OK rows ONLY.
  * Rows that are not OK, or carry no numeric points, or have no resolvable credit field, are excluded
  * (they can never credit). Multiple OK rows for the SAME (outlet × field) are SUMMED into the one cell
  * the wide template allows (which also side-steps the parser's in-file duplicate-row ERROR).
+ * Returns the number of outlet rows written.
  */
-export function buildCreditUploadXlsx(preview: ComputePreview): Buffer {
+export async function writeCreditUploadXlsx(preview: ComputePreview, out: XlsxStreamWriter): Promise<number> {
   const okRows = preview.rows.filter(
     (r) =>
       r.status === 'OK' &&
@@ -110,17 +110,14 @@ export function buildCreditUploadXlsx(preview: ComputePreview): Buffer {
     byField.set(header, (byField.get(header) ?? 0) + (r.points as number));
   }
 
-  // Header row: fixed cols + value cols + narration cols (value cols THEN narration cols, as template).
-  const headers: string[] = [
-    OUTLET_ID_HEADER,
-    OUTLET_NAME_HEADER,
-    ...fieldOrder,
-    ...fieldOrder.map((f) => `${f}${NARRATION_SUFFIX}`),
-  ];
+  // Row 0 is the TITLE and row 1 the header — the exact layout parseCreditUpload expects (it reads headers at
+  // index 1, data at index 2+). Header row: fixed cols + value cols + narration cols (value cols THEN narration).
+  const sheet = await out.addSheet(CREDIT_SHEET_NAME, [`Credits & Payouts Data — ${monthLabel(preview.period)}`]);
+  await sheet.addRow([OUTLET_ID_HEADER, OUTLET_NAME_HEADER, ...fieldOrder, ...fieldOrder.map((f) => `${f}${NARRATION_SUFFIX}`)]);
 
   // Data rows: one per outlet. Value = whole points (blank when this outlet has no such field).
   // Narration cells are present but blank — the parser treats them as optional display text.
-  const dataRows: (string | number)[][] = outletOrder.map((code) => {
+  for (const code of outletOrder) {
     const byField = cell.get(code) ?? new Map<string, number>();
     const row: (string | number)[] = [code, outletName.get(code) ?? code];
     for (const f of fieldOrder) {
@@ -128,21 +125,9 @@ export function buildCreditUploadXlsx(preview: ComputePreview): Buffer {
       row.push(v === undefined ? '' : v);
     }
     for (let i = 0; i < fieldOrder.length; i++) row.push('');
-    return row;
-  });
-
-  // aoa (NOT json_to_sheet) so row 0 is the TITLE and row 1 is the header — the exact layout
-  // parseCreditUpload expects (it reads headers at index 1, data at index 2+).
-  const wsData: (string | number)[][] = [
-    [`Credits & Payouts Data — ${monthLabel(preview.period)}`],
-    headers,
-    ...dataRows,
-  ];
-
-  const ws = aoaToSheetSafe(wsData);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, CREDIT_SHEET_NAME);
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    await sheet.addRow(row);
+  }
+  return outletOrder.length;
 }
 
 // ─── Preview report (human review) ─────────────────────────────────────────────
@@ -179,62 +164,66 @@ function num(v: number | null | undefined): number | string {
   return typeof v === 'number' && Number.isFinite(v) ? v : '';
 }
 
-/**
- * Build the full human-readable preview report: a "Preview Rows" sheet (one row per preview row, EVERY
- * status, with the math explanation) + a "Summary" sheet (the run's counts + total points + the
- * engine-disabled flag). This is what the operator shares with the client offline for approval before
- * re-uploading the credit-upload file.
- */
-export function buildPreviewReportXlsx(preview: ComputePreview): Buffer {
-  // POINTS report: exclude PAYOUT rows (they live in the payout report). NO_RULE rows carry no award type
-  // and belong here (the primary view). Keeping this symmetric with buildPayoutReportXlsx means the counts
-  // reconcile — a mixed run no longer shows PAYOUT outlets as OK/blank-points with a summary that counts
-  // them in OK but not in Total Points.
-  const pointsRows = preview.rows.filter((r) => r.awardType !== 'PAYOUT');
-
-  const rows: Record<string, unknown>[] = pointsRows.map((r) => ({
-    'Outlet Code': r.outletCode,
-    'Outlet Name': (r.outletName && r.outletName.trim()) || '',
-    Program: (r.program && r.program.trim()) || '',
-    'KPI Code': r.kpiCode,
-    Achievement: num(r.achievement),
-    Target: num(r.target),
-    Status: r.status,
-    // Whole points only on OK rows; blank otherwise (no points to show).
-    Points: r.status === 'OK' ? num(r.points) : '',
-    // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation`.
-    'Reason / Explanation': r.reason ?? r.explanation ?? '',
-    'Rule ID': r.ruleId ?? '',
-    'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
-  }));
-
-  // Points-only counts (the preview counts cover ALL rows, points + payout).
+function statusCounts(rows: ComputePreviewRow[]) {
   const counts = { ok: 0, skip: 0, error: 0, noRule: 0 };
-  for (const r of pointsRows) {
+  for (const r of rows) {
     if (r.status === 'OK') counts.ok++;
     else if (r.status === 'SKIP') counts.skip++;
     else if (r.status === 'ERROR') counts.error++;
     else counts.noRule++;
   }
+  return counts;
+}
 
-  const summary: Record<string, unknown>[] = [
-    {
-      Client: preview.clientId,
-      Period: preview.period,
-      Total: pointsRows.length,
-      OK: counts.ok,
-      Skip: counts.skip,
-      Error: counts.error,
-      'No Rule': counts.noRule,
-      'Total Points': preview.totalPoints,
-      'Engine Disabled': preview.engineDisabled,
-    },
-  ];
+/**
+ * Write the full human-readable preview report: a "Preview Rows" sheet (one row per preview row, EVERY
+ * status, with the math explanation) + a "Summary" sheet (the run's counts + total points + the
+ * engine-disabled flag). This is what the operator shares with the client offline for approval before
+ * re-uploading the credit-upload file. Returns the number of preview rows written.
+ */
+export async function writePreviewReportXlsx(preview: ComputePreview, out: XlsxStreamWriter): Promise<number> {
+  // POINTS report: exclude PAYOUT rows (they live in the payout report). NO_RULE rows carry no award type
+  // and belong here (the primary view). Keeping this symmetric with the payout report means the counts
+  // reconcile — a mixed run no longer shows PAYOUT outlets as OK/blank-points with a summary that counts
+  // them in OK but not in Total Points.
+  const pointsRows = preview.rows.filter((r) => r.awardType !== 'PAYOUT');
 
-  return buildXlsx([
-    { name: 'Preview Rows', rows },
-    { name: 'Summary', rows: summary },
-  ]);
+  const sheet = new JsonSheet(out, 'Preview Rows');
+  for (const r of pointsRows) {
+    await sheet.add({
+      'Outlet Code': r.outletCode,
+      'Outlet Name': (r.outletName && r.outletName.trim()) || '',
+      Program: (r.program && r.program.trim()) || '',
+      'KPI Code': r.kpiCode,
+      Achievement: num(r.achievement),
+      Target: num(r.target),
+      Status: r.status,
+      // Whole points only on OK rows; blank otherwise (no points to show).
+      Points: r.status === 'OK' ? num(r.points) : '',
+      // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation`.
+      'Reason / Explanation': r.reason ?? r.explanation ?? '',
+      'Rule ID': r.ruleId ?? '',
+      'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
+    });
+  }
+  const written = await sheet.end();
+
+  // Points-only counts (the preview counts cover ALL rows, points + payout).
+  const counts = statusCounts(pointsRows);
+  const summary = new JsonSheet(out, 'Summary');
+  await summary.add({
+    Client: preview.clientId,
+    Period: preview.period,
+    Total: pointsRows.length,
+    OK: counts.ok,
+    Skip: counts.skip,
+    Error: counts.error,
+    'No Rule': counts.noRule,
+    'Total Points': preview.totalPoints,
+    'Engine Disabled': preview.engineDisabled,
+  });
+  await summary.end();
+  return written;
 }
 
 // ─── Payout report (report-only; NEVER credited) ─────────────────────────────────
@@ -267,7 +256,7 @@ export const PAYOUT_SUMMARY_COLUMNS = [
 ] as const;
 
 /**
- * Build the PAYOUT report the operator shares with the client offline.
+ * Write the PAYOUT report the operator shares with the client offline.
  *
  * PAYOUT is COMPUTE-TO-REPORT only (owner directive 2026-10-21 — PAYOUT-COMPUTE-REPORT.md): the engine
  * never credits or pays it. This report lists every PAYOUT row (one per outlet × PAYOUT rule, every
@@ -276,50 +265,44 @@ export const PAYOUT_SUMMARY_COLUMNS = [
  *
  * Only rows whose resolved rule output is a PAYOUT award are included (the engine sets `payoutRupees` and
  * clears `points` for those). POINTS rows live in the credit-upload file + preview report, not here.
+ * Returns the number of payout rows written.
  */
-export function buildPayoutReportXlsx(preview: ComputePreview): Buffer {
+export async function writePayoutReportXlsx(preview: ComputePreview, out: XlsxStreamWriter): Promise<number> {
   const payoutRows = preview.rows.filter((r) => r.awardType === 'PAYOUT');
 
-  const rows: Record<string, unknown>[] = payoutRows.map((r) => ({
-    'Outlet Code': r.outletCode,
-    'Outlet Name': (r.outletName && r.outletName.trim()) || '',
-    Program: (r.program && r.program.trim()) || '',
-    'KPI Code': r.kpiCode,
-    Achievement: num(r.achievement),
-    Target: num(r.target),
-    Status: r.status,
-    // Whole INR only on OK rows; blank otherwise (no amount to pay).
-    'Payout (INR)': r.status === 'OK' ? num(r.payoutRupees) : '',
-    // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation`.
-    'Reason / Explanation': r.reason ?? r.explanation ?? '',
-    'Rule ID': r.ruleId ?? '',
-    'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
-  }));
+  const sheet = new JsonSheet(out, 'Payout Rows');
+  for (const r of payoutRows) {
+    await sheet.add({
+      'Outlet Code': r.outletCode,
+      'Outlet Name': (r.outletName && r.outletName.trim()) || '',
+      Program: (r.program && r.program.trim()) || '',
+      'KPI Code': r.kpiCode,
+      Achievement: num(r.achievement),
+      Target: num(r.target),
+      Status: r.status,
+      // Whole INR only on OK rows; blank otherwise (no amount to pay).
+      'Payout (INR)': r.status === 'OK' ? num(r.payoutRupees) : '',
+      // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation`.
+      'Reason / Explanation': r.reason ?? r.explanation ?? '',
+      'Rule ID': r.ruleId ?? '',
+      'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
+    });
+  }
+  const written = await sheet.end();
 
   // Payout-specific counts (the preview counts cover ALL rows, points + payout).
-  const counts = { ok: 0, skip: 0, error: 0, noRule: 0 };
-  for (const r of payoutRows) {
-    if (r.status === 'OK') counts.ok++;
-    else if (r.status === 'SKIP') counts.skip++;
-    else if (r.status === 'ERROR') counts.error++;
-    else counts.noRule++;
-  }
-
-  const summary: Record<string, unknown>[] = [
-    {
-      Client: preview.clientId,
-      Period: preview.period,
-      'Payout Rows': payoutRows.length,
-      OK: counts.ok,
-      Skip: counts.skip,
-      Error: counts.error,
-      'No Rule': counts.noRule,
-      'Total Payout (INR)': preview.totalPayoutRupees,
-    },
-  ];
-
-  return buildXlsx([
-    { name: 'Payout Rows', rows },
-    { name: 'Summary', rows: summary },
-  ]);
+  const counts = statusCounts(payoutRows);
+  const summary = new JsonSheet(out, 'Summary');
+  await summary.add({
+    Client: preview.clientId,
+    Period: preview.period,
+    'Payout Rows': payoutRows.length,
+    OK: counts.ok,
+    Skip: counts.skip,
+    Error: counts.error,
+    'No Rule': counts.noRule,
+    'Total Payout (INR)': preview.totalPayoutRupees,
+  });
+  await summary.end();
+  return written;
 }
