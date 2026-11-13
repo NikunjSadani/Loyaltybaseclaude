@@ -2,10 +2,17 @@ import { Test } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { claimNextExport, hasClaimableExports } from './exports-claim';
 import { EXPORT_STALE_HEARTBEAT_MINUTES } from './exports-engine.constants';
-import { ExportsProcessorService } from './exports-processor.service';
+import { SchedulerRegistry } from '@nestjs/schedule';
+import { KycService } from '../kyc/kyc.service';
+import { PointsComputeService } from '../points-engine/points-compute.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
+import { EXPORT_KIND_REGISTRY, ExportsProcessorService } from './exports-processor.service';
 import { exportsRunnerConfigured, exportsRunnerMode } from './exports-runner.config';
 import { ExportsRunnerService } from './exports-runner.service';
-import { ExportsWorkerModule } from './exports-worker.module';
+import { ExportsWorkerModule, WORKER_EXPORTS_SERVICE_MESSAGE } from './exports-worker.module';
+import { ExportsService } from './exports.service';
+import { EXPORT_KINDS } from './kinds';
 
 function sqlText(s: Prisma.Sql): string {
   return s.sql.replace(/\s+/g, ' ');
@@ -52,10 +59,58 @@ describe('exports runner config', () => {
 });
 
 describe('ExportsWorkerModule (the gifsy-exports job context)', () => {
-  it('resolves every dependency of the engine (and of EXPORT_WORKER_FEATURE_MODULES) without the AppModule', async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [ExportsWorkerModule] }).compile();
-    expect(moduleRef.get(ExportsProcessorService)).toBeInstanceOf(ExportsProcessorService);
-    expect(moduleRef.get(ExportsRunnerService)).toBeInstanceOf(ExportsRunnerService);
-    await moduleRef.close();
-  });
+  /**
+   * The job loads ExportsWorkerModule + EXPORT_WORKER_FEATURE_MODULES, never AppModule. This compiles AND initialises
+   * it exactly like worker.main.ts (createApplicationContext → onModuleInit hooks run) with Prisma/Storage stubbed, so:
+   *  - a feature module whose controller/provider injects ExportsService still resolves (worker stub),
+   *  - every service a registered kind resolves through ctx.moduleRef is present,
+   *  - init starts no timers / scheduled workers (no ScheduleModule.forRoot in the job) and makes no DB call.
+   */
+  it('compiles + initialises with every feature module, resolves kind services, starts no timers, cannot recurse', async () => {
+    process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+    const prismaCalls: string[] = [];
+    const prismaStub = new Proxy(
+      {},
+      {
+        get: (_t, prop) => {
+          // Nest probes the value for lifecycle hooks / thenable — that is not a DB call.
+          if (typeof prop === 'symbol' || prop === 'then' || /^(on|before)[A-Z]/.test(prop)) return undefined;
+          prismaCalls.push(String(prop));
+          return () => {
+            throw new Error(`worker init must not touch the DB (${String(prop)})`);
+          };
+        },
+      },
+    );
+    const intervalSpy = jest.spyOn(global, 'setInterval');
+    const moduleRef = await Test.createTestingModule({ imports: [ExportsWorkerModule] })
+      .overrideProvider(PrismaService)
+      .useValue(prismaStub)
+      .overrideProvider(StorageService)
+      .useValue({})
+      .compile();
+    const app = moduleRef;
+    await app.init(); // runs every onModuleInit, like createApplicationContext in worker.main.ts
+    try {
+      expect(intervalSpy).not.toHaveBeenCalled();
+      expect(prismaCalls).toEqual([]);
+      expect(app.get(ExportsProcessorService)).toBeInstanceOf(ExportsProcessorService);
+      expect(app.get(ExportsRunnerService)).toBeInstanceOf(ExportsRunnerService);
+      // Services the registered kinds resolve via ctx.moduleRef.get(X, { strict: false }).
+      expect(app.get(KycService, { strict: false })).toBeDefined();
+      expect(app.get(PointsComputeService, { strict: false })).toBeDefined();
+      // No scheduler in the job → @Interval/@Cron workers of pulled-in modules are inert.
+      expect(() => app.get(SchedulerRegistry, { strict: false })).toThrow();
+      // The API surface is a stub inside the job: no self-kick, no second build path.
+      const svc = app.get(ExportsService, { strict: false });
+      expect(() => svc.request({} as never, 'x', {})).toThrow(WORKER_EXPORTS_SERVICE_MESSAGE);
+      expect(() => svc.respond({} as never, {} as never, 'x', {})).toThrow(WORKER_EXPORTS_SERVICE_MESSAGE);
+      // Every registered kind is reachable from the job's registry.
+      const registry = app.get<ReadonlyMap<string, unknown>>(EXPORT_KIND_REGISTRY);
+      expect([...registry.keys()].sort()).toEqual([...EXPORT_KINDS.keys()].sort());
+    } finally {
+      intervalSpy.mockRestore();
+      await app.close();
+    }
+  }, 120_000);
 });

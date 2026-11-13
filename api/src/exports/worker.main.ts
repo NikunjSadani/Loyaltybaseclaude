@@ -45,7 +45,9 @@ async function main(): Promise<void> {
   const retention = stop.requested ? null : await proc.sweep();
   await app.close();
   console.log(JSON.stringify({ msg: 'exports worker done', ...drained, retention, stoppedBy: stop.reason }));
-  if (stop.requested) process.exit(WORKER_STOP_EXIT_CODE);
+  // Exit explicitly: the feature modules the job loads (notifications, credits, admin-core, …) can leave handles open
+  // (the worker-module spec needs --forceExit), and a job that never exits would run until its 1 h task timeout.
+  process.exit(stop.requested ? WORKER_STOP_EXIT_CODE : 0);
 }
 
 main().catch((e: unknown) => {

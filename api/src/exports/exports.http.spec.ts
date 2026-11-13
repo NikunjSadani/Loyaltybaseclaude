@@ -30,7 +30,7 @@ const kind: AnyExportKind = {
   parseParams: (raw) => {
     const r = raw as Record<string, unknown>;
     if (r.months !== undefined && !/^\d+$/.test(String(r.months))) throw new BadRequestException('Months must be a number.');
-    return { months: Number(r.months ?? 1) };
+    return { months: Number(r.months ?? 1), requestOrigin: r.requestOrigin };
   },
   isHeavy: (p: { months: number }) => p.months > 3,
   describeParams: (p: { months: number }) => `${p.months} months`,
@@ -135,6 +135,23 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
     const forbidden = await request(app.getHttpServer()).get('/admin/reports/demo').set(ROLE_HEADER, 'SALES_USER');
     expect(forbidden.status).toBe(403);
     expect(forbidden.body.success).toBe(false);
+  });
+
+  it('server-set requestOrigin comes from the forwarded host on BOTH the report endpoint and the generic POST', async () => {
+    created.length = 0;
+    await request(app.getHttpServer())
+      .post('/admin/exports')
+      .set('x-forwarded-proto', 'https')
+      .set('x-forwarded-host', 'api.gifsy.in')
+      .send({ kind: 'demo', params: { months: '12', requestOrigin: 'https://evil.example' } });
+    await request(app.getHttpServer())
+      .get('/admin/reports/demo?months=6&requestOrigin=https://evil.example')
+      .set('x-forwarded-proto', 'https')
+      .set('x-forwarded-host', 'api-staging.gifsy.in');
+    expect(created.map((d) => (d as { params: { requestOrigin: string } }).params.requestOrigin)).toEqual([
+      'https://api.gifsy.in',
+      'https://api-staging.gifsy.in',
+    ]);
   });
 
   it('GET admin/exports → own list envelope', async () => {
