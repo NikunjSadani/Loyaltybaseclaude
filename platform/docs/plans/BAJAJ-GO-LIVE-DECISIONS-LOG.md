@@ -61,6 +61,20 @@
 | 2026-11-13 | **Single-outlet-type KPIs are enforced everywhere** (template N/A, uploads ignore, every screen/report/points agree; raw exports keep stored values). | prod |
 | 2026-11-13 | **Re-uploads and batch deletes never delete stored out-of-scope values** (kept, hidden on screens, in exports). | prod |
 
+## 7a. FOLLOW-UP LIST (owner 2026-11-13: not blocking go-live; pick up after the current releases)
+| # | Item | Status / where |
+|---|---|---|
+| F1 | **TDS Treatment toggle saves to the wrong tenant** — a Gifsy admin working inside a brand saves to the HOME account ('gifsy'), so the brand keeps the default (owner saw "Saved" then 194C). Fix: server pins assumed operator to the assumed tenant; screen saves to the client it loaded; audit other admin screens for the same pattern. Bajaj meanwhile = default 194C + GROSS_UP (correct behaviour). Prod has a stray `gifsy` tdsPolicy row = 194R/GROSS_UP (harmless; can be reset). | Fix in progress on `feat/tds-count-imports` → next small release |
+| F2 | Wallet reversal engine (WP2–WP8). | Paused; `WALLET-REVERSAL-ENGINE-DESIGN.md` on branch `feat/wallet-reversal-engine` |
+| F3 | CI "Tests & Type-check" failure email (2026-11-13) — most likely the paused engine backup branch push; its API suite passes locally (5,951/5,951) → check the run log for the failing job and fix or note. | Investigate |
+| F4 | Applies-to staging checks not yet done: sales-rep views (team view filters) + visibility editor Programs/Sub-Programs. | Staging |
+| F5 | Optional platform-wide decision: should INCENTIVE payouts raise a TDS invoice under gross-up (today only visibility does; incentive TDS shows as 194R liability only)? | Owner decision |
+| F6 | 194C "Outstanding" double-count when deposits for withheld DEDUCT TDS are uploaded (§4 open item). | Owner decision |
+| F7 | Staging clean-up: test redemptions/batch `PB-1794549226921`, two 10-pt test credit batches, order BAJAJ-26-000031, earlier UAT data ("ZZ PIN test card", Sai Trader order). | Staging |
+| F1 status | ✅ Fixed `63201b39` (server pins assumed operator; screen saves to the loaded client + re-reads; audit: no other page affected). Ships in the next small release. | — |
+| F9 | Root cause of F1: `platform/src/lib/admin-session.ts` hard-codes `clientId: 'deoleo'` for every client admin/MIS user → `session.clientId` is wrong for Bajaj admins too. Fix: derive from auth/me or remove from the session type. | In progress, same follow-up release |
+| F8 | 194R export takes ~23 s for ~3,900 retailers — consider streaming/caching if it grows. | Perf |
+
 ## 7. Pending owner actions (as of 2026-11-13)
 - Prod settings for Bajaj: no-PAN payouts ON · TDS Config GROSS_UP saved explicitly · (after the next release) imported-payouts count from 2026-04-01.
 - Spot-check a KYC "OTHER" document shows its real name on prod.
