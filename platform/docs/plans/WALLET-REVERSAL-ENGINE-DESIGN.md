@@ -1,6 +1,6 @@
 # Wallet Reversal Engine — Long-Term Design (POINTS + PAYOUT reversals)
 
-**Status:** ✅ APPROVED by owner 2026-11-13 — all 14 recommended choices (Q1–Q14 = A), platform-wide approved in-session. BUILDING. **⚠️ PLATFORM-WIDE** (shared `WalletService.applyMovement`,
+**Status:** ✅ APPROVED by owner 2026-11-13 (Q1–Q14 = A, platform-wide). ⏸ PAUSED 2026-11-13 by owner — FAST FOLLOW-UP AFTER BAJAJ GO-LIVE. Done: design (679ed4c2), WP1 schema+migration (f5677f1e, holdings CHECK deferred to post-backfill migration), WP0 reference model + property tests (7d64ab55). Next on resume: WP2+3 (applyMovement v2 + reversal engine + LEGACY|SHADOW|V2 flag), WP6 backfill+verify, WP5 payout allocations (after the release interim payout fix is merged in), WP4, WP7, dual audit, staging, prod. Meanwhile the release ships the interim rule (Q14): points reversals refused on wallets carrying debt. **⚠️ PLATFORM-WIDE** (shared `WalletService.applyMovement`,
 `wallets` / `wallet_transactions` / `points_ledger` schema, credit-reversal approval) → reaches every tenant incl. LIVE
 Deoleo. Build starts ONLY on the owner's explicit YES.
 **Why:** owner 2026-11-13 — "real money related points; I need the correct long-term solution so the engine does not
