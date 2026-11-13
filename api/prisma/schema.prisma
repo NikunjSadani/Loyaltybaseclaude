@@ -1432,8 +1432,18 @@ model Wallet {
   lifetimeRedeemed  Int       @default(0)
   lifetimeExpired   Int       @default(0)
   lastTransactionAt DateTime?
+  // Wallet Reversal Engine (WALLET-REVERSAL-ENGINE-DESIGN.md §1.1/§2). debtPoints = D: outstanding debt
+  // not offset by any credit (D ≥ 0; holdings H = redeemablePoints + debtPoints ≥ 0). Always 0 on a wallet
+  // that never went negative (I5 — every Deoleo wallet). movementSeq = last per-wallet movement seq handed
+  // out (WalletTransaction.seq), incremented under the wallet row lock. SQL CHECKs (D ≥ 0, movementSeq ≥ 0) in
+  // migration 20261115120000_wallet_reversal_engine; the H ≥ 0 CHECK is added by the post-backfill migration
+  // (rollout step 6) — adding it earlier would reject writes to today's negative wallets (D still 0).
+  debtPoints        Int       @default(0)
+  movementSeq       Int       @default(0)
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+
+  creditPositions WalletCreditPosition[]
 
   partner      ChannelPartner      @relation(fields: [partnerId], references: [id], onDelete: Cascade)
   // Restrict (not SetNull): a funded wallet's account must never be deletable out from under
@@ -1459,13 +1469,36 @@ model WalletTransaction {
   description     String?
   metadata        Json?
   createdAt       DateTime              @default(now())
+  // ── Wallet Reversal Engine (WALLET-REVERSAL-ENGINE-DESIGN.md §2) — all nullable/additive ──
+  // seq: per-wallet total order of movements (1, 2, 3 … from Wallet.movementSeq under the wallet lock).
+  // Unique per wallet; NULL until the backfill assigns it (Postgres unique treats NULLs as distinct), then
+  // made NOT NULL (rollout step 6). Replaces createdAt as the ordering key.
+  seq                Int?
+  // pointsDelta: the ACTUAL signed change to redeemablePoints (may differ from ±points when clamped).
+  pointsDelta        Int?
+  // reversedCreditTxId: on a reversal clawback, the credit WalletTransaction it reverses.
+  reversedCreditTxId String?
+  // creditReversalId: on a reversal clawback, the CreditReversal that produced it.
+  creditReversalId   String?
+  // pointsLedgerId: the PointsLedger row written for this movement (1:1).
+  pointsLedgerId     String?               @unique
 
   wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  // NoAction (checked at end of statement) — not Restrict — so a whole-wallet cascade that deletes both
+  // sides in one statement still works; a stand-alone delete of a referenced row is still refused.
+  reversedCreditTx WalletTransaction?    @relation("WalletTxReversedCredit", fields: [reversedCreditTxId], references: [id], onDelete: NoAction)
+  reversalTxs      WalletTransaction[]   @relation("WalletTxReversedCredit")
+  creditReversal   CreditReversal?       @relation(fields: [creditReversalId], references: [id], onDelete: Restrict)
+  pointsLedger     PointsLedger?         @relation(fields: [pointsLedgerId], references: [id], onDelete: NoAction)
+  creditPosition   WalletCreditPosition?
 
+  @@unique([walletId, seq])
   @@index([walletId])
   @@index([transactionType])
   @@index([referenceType, referenceId])
   @@index([createdAt])
+  @@index([reversedCreditTxId])
+  @@index([creditReversalId])
   @@map("wallet_transactions")
 }
 
@@ -1494,6 +1527,10 @@ model PointsLedger {
 
   wallet Wallet  @relation(fields: [walletId], references: [id], onDelete: Cascade)
   scheme Scheme? @relation(fields: [schemeId], references: [id], onDelete: SetNull)
+
+  // Wallet Reversal Engine back-relations (WALLET-REVERSAL-ENGINE-DESIGN.md §2/§4).
+  walletTransaction WalletTransaction?
+  creditPosition    WalletCreditPosition?
 
   @@index([walletId])
   @@index([schemeId])
@@ -3452,9 +3489,10 @@ model CreditBatch {
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
-  payoutEntries CreditPayoutEntry[]
-  reversals     CreditReversal[]
-  attachments   CreditBatchAttachment[]
+  payoutEntries   CreditPayoutEntry[]
+  reversals       CreditReversal[]
+  attachments     CreditBatchAttachment[]
+  creditPositions WalletCreditPosition[]
 
   @@index([clientId])
   @@unique([clientId, batchCode], name: "clientId_batchCode")
@@ -3522,6 +3560,8 @@ model CreditPayoutEntry {
   download    CreditPayoutDownload? @relation(fields: [downloadId], references: [id])
   autoInvoice AutoInvoice?          @relation(fields: [autoInvoiceId], references: [id], onDelete: SetNull)
 
+  reversalAllocations PayoutReversalAllocation[]
+
   @@index([clientId])
   @@index([batchId])
   @@index([outletId])
@@ -3585,11 +3625,115 @@ model CreditReversal {
 
   batch CreditBatch @relation(fields: [batchId], references: [id])
 
+  // Wallet Reversal Engine (WALLET-REVERSAL-ENGINE-DESIGN.md §2/§3/§5).
+  walletTransactions WalletTransaction[]
+  creditAllocations  CreditReversalAllocation[]
+  payoutAllocations  PayoutReversalAllocation[]
+
   @@index([clientId])
   @@index([batchId])
   @@index([outletId])
   @@index([status])
   @@map("credit_reversals")
+}
+
+// ─── Wallet Reversal Engine (WALLET-REVERSAL-ENGINE-DESIGN.md §2) ─────────────────────────────
+// Additive. Money rows → every FK is onDelete: Restrict (a referenced wallet / credit / reversal /
+// payout entry can never be deleted out from under its reversal accounting). SQL CHECK constraints +
+// the partial unique index on payout allocations live in migration 20261115120000_wallet_reversal_engine
+// (Prisma does not model CHECKs / partial indexes).
+
+/// How a WalletCreditPosition was attributed to its (batch, outlet, field) credit.
+/// EXACT = from the credit's own metadata (runtime v2 or backfill with metadata); LEGACY_REPLAY = offline
+/// replay of a legacy credit; MANUAL = mapped by an operator; UNRESOLVED = not attributable → reversals
+/// against it are refused until mapped (Q5).
+enum CreditAttribution {
+  EXACT
+  LEGACY_REPLAY
+  MANUAL
+  UNRESOLVED
+}
+
+/// One per reversible credit-batch POINTS credit (§1.1: a_X = amount, O_X = offsetPoints, ρ_X = reversedPoints).
+/// Invariants (SQL CHECK): amount > 0; 0 ≤ offsetPoints ≤ amount; 0 ≤ reversedPoints ≤ amount; a non-UNRESOLVED
+/// position carries outletCode + fieldId.
+model WalletCreditPosition {
+  id             String            @id @default(cuid())
+  walletId       String // the wallet that RECEIVED the credit (Q4 — never the outlet's current owner)
+  creditTxId     String            @unique // the credit WalletTransaction
+  lotId          String?           @unique // the credit's PointsLedger lot (null only if unresolvable)
+  batchId        String
+  outletCode     String? // CreditBatch row outletId (= credit metadata.outletCode)
+  fieldId        String? // CreditField id (= credit metadata.fieldId)
+  amount         Int // a_X
+  offsetPoints   Int               @default(0) // O_X: how much of this credit currently pays off debt
+  reversedPoints Int               @default(0) // ρ_X: total reversal approved against this credit
+  attribution    CreditAttribution
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  wallet      Wallet                     @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  creditTx    WalletTransaction          @relation(fields: [creditTxId], references: [id], onDelete: Restrict)
+  lot         PointsLedger?              @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  batch       CreditBatch                @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  allocations CreditReversalAllocation[]
+
+  @@index([walletId])
+  @@index([batchId, outletCode, fieldId])
+  @@index([attribution])
+  @@map("wallet_credit_positions")
+}
+
+/// One per (POINTS CreditReversal × position) — §1.2: requested r = debtRestored p + recovered c + shortfall
+/// (SQL CHECK; all ≥ 0, requested > 0). Unique per (reversal, position) → an approval can't double-apply.
+model CreditReversalAllocation {
+  id               String   @id @default(cuid())
+  creditReversalId String
+  positionId       String
+  requested        Int // r
+  debtRestored     Int // p = min(r, O_X)
+  recovered        Int // c = min(r − p, H)
+  shortfall        Int // r − p − c (points already spent — R4)
+  createdAt        DateTime @default(now())
+
+  creditReversal CreditReversal       @relation(fields: [creditReversalId], references: [id], onDelete: Restrict)
+  position       WalletCreditPosition @relation(fields: [positionId], references: [id], onDelete: Restrict)
+
+  @@unique([creditReversalId, positionId])
+  @@index([positionId])
+  @@map("credit_reversal_allocations")
+}
+
+/// PAYOUT (₹) reversal allocation state (§5). RESERVED = held at create (entry skipped by bank downloads);
+/// APPLIED_CANCELLED = approved on a PENDING/FAILED entry (entry → REVERSED); APPLIED_RECEIVABLE = approved on a
+/// PAID entry (receivable); RELEASED = reversal rejected → entry free again. The first three are "live".
+enum PayoutAllocationState {
+  RESERVED
+  APPLIED_CANCELLED
+  APPLIED_RECEIVABLE
+  RELEASED
+}
+
+/// One per (PAYOUT CreditReversal × whole payout entry) (§5, Q9 whole entries only). Partial unique index
+/// `payout_reversal_allocations_payoutEntryId_live_key` on payoutEntryId WHERE state is live ⇒ an entry is never
+/// consumed by two reversals. SQL CHECK: amountPaise > 0, tdsOffsetPaise ≥ 0.
+model PayoutReversalAllocation {
+  id               String                @id @default(cuid())
+  creditReversalId String
+  payoutEntryId    String
+  amountPaise      BigInt
+  state            PayoutAllocationState @default(RESERVED)
+  tdsOffsetPaise   BigInt                @default(0) // withholding offset applied once on approve (P4)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  creditReversal CreditReversal    @relation(fields: [creditReversalId], references: [id], onDelete: Restrict)
+  payoutEntry    CreditPayoutEntry @relation(fields: [payoutEntryId], references: [id], onDelete: Restrict)
+
+  @@unique([creditReversalId, payoutEntryId])
+  @@index([payoutEntryId])
+  @@index([state])
+  @@map("payout_reversal_allocations")
 }
 
 // ─── MODULE: WhatsApp Broadcasts (Gifsy-operator only) ──────────────────────
