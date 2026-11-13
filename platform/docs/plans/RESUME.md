@@ -30,7 +30,11 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 >    the old "keep TDS revert" rule.
 > 4. ⏸ **Wallet reversal engine = FAST FOLLOW-UP AFTER GO-LIVE** (owner 2026-11-13). Branch `feat/wallet-reversal-engine`
 >    (pushed), complete record + resume checklist in `WALLET-REVERSAL-ENGINE-DESIGN.md` on that branch.
-> 5. Next go-live work: targets/achievement import (need file + column→prod KPI mapping) · client training deck.
+> 5. ✅ Historical targets/achievements imported on prod (§9c). Next go-live work: October targets file · Sales Import prod
+>    infra (owner OK needed) for November achievements · client training deck.
+> 5b. FAST FOLLOW-UP after the release (owner 2026-11-13): Bajaj-only setting — imported payouts from FY 2026-27 count in
+>    194R (retailer TDS liability visible; FY 25-26 imports stay excluded; deposits subtract; no auto-recovery). See
+>    `BAJAJ-PROD-OUTLET-IMPORT.md` §9.1.
 > 6. Open owner decision (non-blocking, pre-existing): 194C "Outstanding" = liability − deposited − withheld double-counts
 >    once Gifsy uploads deposits for withheld DEDUCT TDS (guide now says don't upload withheld TDS as a deposit). Prod has 0
 >    deposits/deductions today.
