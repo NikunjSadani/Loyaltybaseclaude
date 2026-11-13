@@ -1,5 +1,6 @@
-import { Controller, Get, Query, Res, StreamableFile } from '@nestjs/common';
+import { Controller, Get, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
+import { ExportsService } from '../exports/exports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { NotificationDeliveryReportService } from './notification-delivery-report.service';
@@ -21,7 +22,10 @@ import {
 @Controller('admin/notification-delivery')
 @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
 export class NotificationDeliveryReportController {
-  constructor(private readonly svc: NotificationDeliveryReportService) {}
+  constructor(
+    private readonly svc: NotificationDeliveryReportService,
+    private readonly exports: ExportsService,
+  ) {}
 
   @Get('summary')
   summary(
@@ -31,13 +35,14 @@ export class NotificationDeliveryReportController {
     return this.svc.summary(user, q);
   }
 
+  /** 'delivery-status' export kind: one tenant ≤ 31 days streams now; longer / open-ended / all tenants → Downloads. */
   @Get('export')
-  async export(
+  export(
     @CurrentUser() user: JwtPayload,
     @Query() q: NotificationDeliverySummaryQueryDto,
-    @Res({ passthrough: true }) _res: Response,
-  ): Promise<StreamableFile> {
-    return this.svc.export(user, q);
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.exports.respond(res, user, 'delivery-status', q);
   }
 
   @Get()

@@ -2,24 +2,17 @@
 // Verifies (isolation-critical): CLIENT_ADMIN is force-scoped to their own clientId; a smuggled
 // clientId on the query is ignored (scope comes only from the JWT); an un-assumed GIFSY_ADMIN is
 // platform-wide (no clientId filter) while an assumed operator is pinned. Also: summary funnel math,
-// OTP indicative flag, list pagination + shape, export builds a StreamableFile, and the retention
+// OTP indicative flag, list pagination + shape, and the retention
 // prune deletes ONLY >90d rows and only when its env flag is on.
 // Run: npx jest src/notifications/notification-delivery-report.service.spec.ts
 
-import { ForbiddenException, StreamableFile } from '@nestjs/common';
+import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../prisma/prisma.service';
 import { MessageDeliveryStatusService } from './message-delivery-status.service';
 import { NotificationDeliveryReportService } from './notification-delivery-report.service';
 import { NotificationDeliveryRetentionWorker } from './notification-delivery-retention.worker';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { buildXlsx } from '../common/xlsx';
-
-// M3: mock the workbook builder so export tests can inspect the exact rows handed to it (a real
-// xlsx buffer is opaque). Returns a Buffer so `new StreamableFile(...)` still succeeds.
-jest.mock('../common/xlsx', () => ({
-  buildXlsx: jest.fn(() => Buffer.from('xlsx')),
-}));
 
 const CLIENT_ADMIN: JwtPayload = {
   sub: 'u1',
@@ -322,76 +315,8 @@ describe('NotificationDeliveryReportService', () => {
     });
   });
 
-  // ── EXPORT ─────────────────────────────────────────────────────────────
-
-  describe('export', () => {
-    it('builds a StreamableFile (xlsx) scoped to the tenant', async () => {
-      mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValue([
-        {
-          id: 'r1',
-          channel: 'WHATSAPP',
-          eventKey: 'REWARD_CREDITED',
-          recipientPhone: '6289864191',
-          status: 'READ',
-          sentAt: new Date('2026-02-01T10:00:00.000Z'),
-          deliveredAt: new Date('2026-02-01T10:00:05.000Z'),
-          readAt: new Date('2026-02-01T10:01:00.000Z'),
-          failureReason: null,
-          createdAt: new Date('2026-02-01T09:59:59.000Z'),
-        },
-      ]);
-      const res = await service.export(CLIENT_ADMIN, {});
-      expect(res).toBeInstanceOf(StreamableFile);
-      const where = mockPrisma.messageDeliveryReceipt.findMany.mock.calls[0][0].where;
-      expect(where.clientId).toBe('deoleo');
-    });
-
-    it('still builds a (header-only) workbook when there are no rows', async () => {
-      mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValue([]);
-      const res = await service.export(OPERATOR_UNASSUMED, {});
-      expect(res).toBeInstanceOf(StreamableFile);
-    });
-
-    it('M3: appends a truncation-notice row when the export hits the row cap', async () => {
-      const cap = (
-        NotificationDeliveryReportService as unknown as { MAX_EXPORT_ROWS: number }
-      ).MAX_EXPORT_ROWS;
-      // findMany returns exactly the cap → the result was (potentially) clipped.
-      mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValue(
-        Array.from({ length: cap }, () => ({})),
-      );
-      await service.export(OPERATOR_UNASSUMED, {});
-
-      const sheets = (buildXlsx as jest.Mock).mock.calls[0][0];
-      const rows = sheets[0].rows as Array<{ Channel: string }>;
-      // cap data rows + 1 notice row.
-      expect(rows).toHaveLength(cap + 1);
-      expect(rows[rows.length - 1].Channel).toContain('truncated');
-    });
-
-    it('M3: no truncation notice when the result is below the cap', async () => {
-      mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValue([
-        {
-          id: 'r1',
-          channel: 'SMS',
-          eventKey: null,
-          recipientPhone: null,
-          status: 'SENT',
-          sentAt: null,
-          deliveredAt: null,
-          readAt: null,
-          failureReason: null,
-          createdAt: null,
-        },
-      ]);
-      await service.export(OPERATOR_UNASSUMED, {});
-
-      const sheets = (buildXlsx as jest.Mock).mock.calls[0][0];
-      const rows = sheets[0].rows as Array<{ Channel: string }>;
-      expect(rows).toHaveLength(1);
-      expect(rows.some((r) => r.Channel.includes('truncated'))).toBe(false);
-    });
-  });
+  // The Excel export (scoping, header-only file, truncation notice) is the 'delivery-status' export kind —
+  // exports/kinds/batch2/delivery-status.kind.spec.ts.
 
   // ── INFO-2 (isolation defence-in-depth) ────────────────────────────────────
 
@@ -409,9 +334,6 @@ describe('NotificationDeliveryReportService', () => {
         ForbiddenException,
       );
       await expect(service.list(EMPTY_SCOPE_ADMIN, {})).rejects.toBeInstanceOf(
-        ForbiddenException,
-      );
-      await expect(service.export(EMPTY_SCOPE_ADMIN, {})).rejects.toBeInstanceOf(
         ForbiddenException,
       );
       // Fail-closed BEFORE any query is issued — no unscoped read ever reaches the DB.
