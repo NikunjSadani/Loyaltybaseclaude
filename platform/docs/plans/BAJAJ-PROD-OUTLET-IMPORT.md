@@ -56,7 +56,8 @@ Correction list sent to the owner: `…\Files received\2026.11.04\Bajaj - data c
 - Rollback = delete bajaj `visibility_captures` whose formValues reference this batch prefix (never delete the photo objects).
 - Scripts: scratchpad `prodimport/bajaj-prod-vis-*.job.js`; manifest `gs://gifsy-platform-files/migrations/bajaj-prod-visibility-manifest-2026-11-12.json`.
 
-## 9. Retailer payout history — ⏸ PREPARED + DRY-RUN PASSED 2026-11-12, LIVE WAITS FOR THE TDS RULE
+## 9. Retailer payout history — ✅ DONE on prod 2026-11-13 (after release `247fae4b` put the 194R VENDOR_IMPORT rule live), verified
+- Result: backup `1794552515663` → `bajaj-prod-payout-history` (DRY_RUN=false, TDS_RULE_LIVE=true) → **48,086 PAID entries / 18 monthly batches, Σ ₹2,89,09,560.70**; verifier PASS (every row = file by outlet/month/amount/UTR; status PAID; sourceKind VENDOR_IMPORT; no TDS fields; 0 TDS deduction rows and 0 wallet movements created).
 - Source: `…\Files received\2026.11.04\Payout RLP.xlsx` (21 monthly sheets; Jan–Mar 2025 sheets excluded — **Apr 2025 onward only**, owner). Same model as staging: **Done rows only** → one PAID `CreditPayoutEntry` per row ("Incentive Payout", fieldId `historical-incentive-payout`), one CONFIRMED `CreditBatch` per month (`sourceKind=VENDOR_IMPORT`, `sourceKey=bajaj-prod-payout-rlp-<YYYY-MM>`), paidAt = payout date, no wallet/invoice/TDS/disbursement.
 - Prod scope: **48,086 rows / 3,964 outlets / 18 months / ₹2,89,09,560.70** (amounts kept to the paisa, half-up — history of money already paid, NOT the whole-rupee rule for new credits; raw file Σ ₹2,89,09,556.20). Skipped: 1,045 outlets not on prod (₹27.7 L); Failed/Rejected/Reversed 579; "UTR no. awaited" 843 (ask Bajaj for final status).
 - Differences vs staging (owner-agreed): 228 placeholder references ("Same Bank does not provide Utr No.", "-", …) stored as `utr = NULL` with the text in narration (staging stored the text as the UTR); amounts to the paisa.
