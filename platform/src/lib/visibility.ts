@@ -19,6 +19,7 @@
  */
 
 import { api, type ApiResponse } from '@/lib/api-client';
+import { downloadOrQueue } from '@/lib/exports/download';
 import type {
   OutletStatusResponse,
   Pagination,
@@ -274,38 +275,22 @@ export const visibilityApi = {
   exportUrl(windowKey?: string): string {
     return `${BASE}/report/export${qs({ windowKey })}`;
   },
-  /** Fetch the xlsx export as a blob and trigger a browser download. */
+  /**
+   * Download the xlsx export: a small one saves straight away; a big one (HTTP 202) is prepared in
+   * the background and returned as `queued` — the screen points the person to the Downloads page.
+   */
   async downloadExport(
     windowKey?: string,
-  ): Promise<{ success: true } | { success: false; error: string }> {
-    try {
-      const res = await fetch(this.exportUrl(windowKey));
-      if (!res.ok) {
-        let error = res.statusText;
-        try {
-          const body = await res.json();
-          error = body?.error ?? error;
-        } catch {
-          /* non-JSON error body */
-        }
-        return { success: false, error };
-      }
-      const blob = await res.blob();
-      const disposition = res.headers.get('Content-Disposition') ?? '';
-      const match = /filename="?([^"]+)"?/.exec(disposition);
-      const filename = match?.[1] ?? `visibility_captures${windowKey ? `_${windowKey}` : ''}.xlsx`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : 'Download failed' };
-    }
+  ): Promise<
+    | { success: true; queued?: { message: string; exportRequestId: string } }
+    | { success: false; error: string }
+  > {
+    const out = await downloadOrQueue(this.exportUrl(windowKey), {
+      fallbackFileName: `visibility_captures${windowKey ? `_${windowKey}` : ''}.xlsx`,
+    });
+    if (out.kind === 'queued') return { success: true, queued: { message: out.message, exportRequestId: out.exportRequestId } };
+    if (out.kind === 'error') return { success: false, error: out.message };
+    return { success: true };
   },
 };
 

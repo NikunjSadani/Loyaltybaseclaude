@@ -102,4 +102,30 @@ describe('Download Outlet Master — reliable blob save', () => {
 
     clickSpy.mockRestore();
   });
+
+  it('a big outlet master (202) says it is being prepared, links to Downloads and saves nothing', async () => {
+    baseFetch((url) =>
+      url.includes('/api/admin/reports/outlet-master')
+        ? Promise.resolve({
+          ok: true,
+          status: 202,
+          json: () => Promise.resolve({ success: true, data: { exportRequestId: 'exp-1', message: "We're preparing your file — it will appear under Downloads (usually 1–5 minutes)." } }),
+          blob: () => Promise.resolve(new Blob(['{"json":"not a file"}'])),
+        })
+        : undefined,
+    );
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    render(<OutletsPage />);
+    await waitFor(() => expect(screen.getByTestId('download-outlet-master')).toBeEnabled());
+    fireEvent.click(screen.getByTestId('download-outlet-master'));
+
+    const note = await screen.findByTestId('download-queued');
+    expect(note).toHaveTextContent(/preparing your file/i);
+    expect(screen.getByRole('link', { name: /open downloads/i })).toHaveAttribute('href', '/admin/downloads');
+    expect(clickSpy).not.toHaveBeenCalled(); // the 202 JSON body is never saved as a file
+    expect(screen.queryByTestId('download-outlet-master-error')).not.toBeInTheDocument();
+
+    clickSpy.mockRestore();
+  });
 });

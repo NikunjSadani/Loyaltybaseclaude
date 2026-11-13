@@ -33,7 +33,8 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton'
-import { downloadBlob } from '@/lib/download'
+import { useDownloadAction } from '@/lib/exports/use-download-action'
+import { DownloadActionStatus } from '@/components/exports/download-action-status'
 import { usePermissions } from '@/lib/use-permissions'
 import { UpiCaptureMethodBadge, asUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge'
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section'
@@ -267,8 +268,8 @@ export default function KycApprovalsPage() {
   const [commitError, setCommitError] = useState<string | null>(null)
 
   // ── Export ─────────────────────────────────────────────────────────────────
-  const [exportLoading, setExportLoading] = useState(false)
-  const [exportError, setExportError] = useState<string | null>(null)
+  const exportAction = useDownloadAction()
+  const exportLoading = exportAction.busy
 
   // ── Portal-field remark inputs (keyed submissionId+fieldKey) ───────────────
   const [remarkInputs, setRemarkInputs] = useState<Record<string, string>>({})
@@ -306,20 +307,13 @@ export default function KycApprovalsPage() {
   }, [])
 
   // ── Export review dump ─────────────────────────────────────────────────────
-  const handleExport = useCallback(async () => {
-    setExportLoading(true)
-    setExportError(null)
-    try {
-      const res = await fetch('/api/kyc/review-dump')
-      if (!res.ok) throw new Error(`Export failed (${res.status})`)
-      const blob = await res.blob()
-      downloadBlob(blob, `kyc-review-dump-${new Date().toISOString().slice(0, 10)}.xlsx`)
-    } catch (err) {
-      setExportError(err instanceof Error ? err.message : 'Export failed.')
-    } finally {
-      setExportLoading(false)
-    }
-  }, [])
+  // 200 → saves straight away; 202 → prepared in the background (Downloads page).
+  const runExport = exportAction.run
+  const handleExport = useCallback(() => {
+    void runExport('/api/kyc/review-dump', {
+      fallbackFileName: `kyc-review-dump-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    })
+  }, [runExport])
 
   // ── Upload + validate (bulk-verify dry-run preview, apply=false) ───────────
   const handleValidate = useCallback(async () => {
@@ -479,11 +473,7 @@ export default function KycApprovalsPage() {
                 : <><Download className="h-3 w-3" />Export Review Dump (.xlsx)</>}
             </Button>
             <span className="text-xs text-gray-400">Download full dump — fill verification cols offline.</span>
-            {exportError && (
-              <span className="text-xs text-red-600 font-medium flex items-center gap-1">
-                <AlertTriangle className="h-3 w-3" />{exportError}
-              </span>
-            )}
+            <DownloadActionStatus action={exportAction} className="basis-full" />
           </div>
 
           {/* Step 2 — Upload + Preview */}

@@ -47,6 +47,8 @@ import type {
 } from '@/lib/points-engine/types';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import type { DownloadOutcome } from '@/lib/exports/download';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -316,6 +318,13 @@ export default function PointsComputePage() {
   const [exportingPayout, setExportingPayout] = useState(false);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  /** A big file is prepared in the background (HTTP 202) → this note + a Downloads link. */
+  const [exportQueued, setExportQueued] = useState<string | null>(null);
+  const showOutcome = (out: DownloadOutcome, doneMsg: string) => {
+    if (out.kind === 'error') setExportError(out.message);
+    else if (out.kind === 'queued') setExportQueued(out.message);
+    else setExportMsg(doneMsg);
+  };
 
   // COMMIT (direct credit)
   const [committing, setCommitting] = useState(false);
@@ -331,6 +340,7 @@ export default function PointsComputePage() {
     setCommitError(null);
     setExportMsg(null);
     setExportError(null);
+    setExportQueued(null);
 
     const filter: AppliedFilter = {
       period,
@@ -354,9 +364,8 @@ export default function PointsComputePage() {
     setExportingFile(true);
     setExportMsg(null);
     setExportError(null);
-    const err = await downloadExport(applied);
-    if (err) setExportError(err);
-    else setExportMsg('Credit-upload file downloaded.');
+    setExportQueued(null);
+    showOutcome(await downloadExport(applied), 'Credit-upload file downloaded.');
     setExportingFile(false);
   };
 
@@ -365,9 +374,8 @@ export default function PointsComputePage() {
     setExportingReport(true);
     setExportMsg(null);
     setExportError(null);
-    const err = await downloadPreviewReport(applied);
-    if (err) setExportError(err);
-    else setExportMsg('Review report downloaded.');
+    setExportQueued(null);
+    showOutcome(await downloadPreviewReport(applied), 'Review report downloaded.');
     setExportingReport(false);
   };
 
@@ -376,9 +384,8 @@ export default function PointsComputePage() {
     setExportingPayout(true);
     setExportMsg(null);
     setExportError(null);
-    const err = await downloadPayoutReport(applied);
-    if (err) setExportError(err);
-    else setExportMsg('Payout report downloaded.');
+    setExportQueued(null);
+    showOutcome(await downloadPayoutReport(applied), 'Payout report downloaded.');
     setExportingPayout(false);
   };
 
@@ -411,6 +418,7 @@ export default function PointsComputePage() {
     setPreviewError(null);
     setExportMsg(null);
     setExportError(null);
+    setExportQueued(null);
     setCommitResult(null);
     setCommitError(null);
   };
@@ -713,9 +721,14 @@ export default function PointsComputePage() {
                 </p>
               )}
               {exportError && (
-                <p className="inline-flex items-center gap-1 text-xs font-medium text-red-700">
+                <p role="alert" className="inline-flex items-center gap-1 text-xs font-medium text-red-700">
                   <AlertTriangle className="h-3.5 w-3.5" /> {exportError}
                 </p>
+              )}
+              {exportQueued && (
+                <DownloadActionStatus
+                  action={{ status: 'queued', message: exportQueued, reset: () => setExportQueued(null) }}
+                />
               )}
             </div>
 

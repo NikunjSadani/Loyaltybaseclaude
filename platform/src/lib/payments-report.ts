@@ -16,7 +16,8 @@
  * no-op kept for call-site compatibility). Money fields are `{ paise, inr }`.
  */
 
-import { api, authHeader, type ApiResponse } from '@/lib/api-client';
+import { api, type ApiResponse } from '@/lib/api-client';
+import { downloadOrQueue, type DownloadOutcome } from '@/lib/exports/download';
 
 /** Every money field: integer paise (as a string) + a pre-computed rupee number. */
 export interface Money {
@@ -105,36 +106,10 @@ export function paymentsExportUrl(params: PaymentsReportParams = {}): string {
   return `${BASE}/export${buildQuery(params)}`;
 }
 
-/** Fetch the xlsx export as a blob and trigger a browser download. */
-export async function downloadPaymentsExport(
-  params: PaymentsReportParams = {},
-): Promise<{ success: true } | { success: false; error: string }> {
-  try {
-    const res = await fetch(paymentsExportUrl(params), { headers: authHeader() });
-    if (!res.ok) {
-      let error = res.statusText;
-      try {
-        const body = await res.json();
-        error = body?.error ?? error;
-      } catch {
-        /* non-JSON error body */
-      }
-      return { success: false, error };
-    }
-    const blob = await res.blob();
-    const disposition = res.headers.get('Content-Disposition') ?? '';
-    const match = /filename="?([^"]+)"?/.exec(disposition);
-    const filename = match?.[1] ?? 'payments-report.xlsx';
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : 'Download failed' };
-  }
+/**
+ * Download the xlsx export: a small one saves straight away (200); a big one (202) is prepared in
+ * the background — `kind: 'queued'` — and appears on the Downloads page.
+ */
+export function downloadPaymentsExport(params: PaymentsReportParams = {}): Promise<DownloadOutcome> {
+  return downloadOrQueue(paymentsExportUrl(params), { fallbackFileName: 'payments-report.xlsx' });
 }

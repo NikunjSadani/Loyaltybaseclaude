@@ -13,8 +13,8 @@
  * tenant). The FE just renders whatever scoped payload it gets.
  */
 
-import { api, authHeader, type ApiResponse } from '@/lib/api-client';
-import { downloadBlob } from '@/lib/download';
+import { api, type ApiResponse } from '@/lib/api-client';
+import { downloadOrQueue, type DownloadOutcome } from '@/lib/exports/download';
 
 export type DeliveryChannel = 'SMS' | 'WHATSAPP';
 
@@ -130,31 +130,14 @@ export function fetchDeliveryList(
 }
 
 /**
- * Download the xlsx export. Uses raw fetch (NOT api.get — api.get parses JSON and would corrupt
- * the binary body), reads the filename from Content-Disposition, then downloadBlob. Throws on a
- * non-OK response so the caller can surface an error.
+ * Download the xlsx export (raw fetch — NOT api.get, which would parse the binary body as JSON).
+ * 200 → saves the file (name from Content-Disposition); 202 → `kind: 'queued'`, the file is prepared
+ * in the background and appears on the Downloads page; anything else → `kind: 'error'`. Never throws.
  */
-export async function downloadDeliveryExport(f: DeliveryFilters): Promise<void> {
-  const res = await fetch(
-    `/api/admin/notification-delivery/export${buildDeliveryQuery(f)}`,
-    { headers: authHeader() },
-  );
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { error?: string };
-      msg = j.error ?? msg;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(msg);
-  }
-  const cd = res.headers.get('Content-Disposition') ?? '';
-  const match = cd.match(/filename="?([^"]+)"?/);
-  const filename =
-    match?.[1] ?? `notification-delivery-${new Date().toISOString().slice(0, 10)}.xlsx`;
-  const blob = await res.blob();
-  downloadBlob(blob, filename);
+export function downloadDeliveryExport(f: DeliveryFilters): Promise<DownloadOutcome> {
+  return downloadOrQueue(`/api/admin/notification-delivery/export${buildDeliveryQuery(f)}`, {
+    fallbackFileName: `notification-delivery-${new Date().toISOString().slice(0, 10)}.xlsx`,
+  });
 }
 
 // ── pure display helpers ──────────────────────────────────────────────────

@@ -39,6 +39,8 @@ import {
   type PaymentsReportParams,
   type Money,
 } from '@/lib/payments-report';
+import { useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 /** Format a `{ paise, inr }` money field via its rupee value (₹, en-IN). */
 function formatInr(m: Money): string {
@@ -106,8 +108,9 @@ export default function AdminPaymentsReportPage() {
   const [status, setStatus] = useState<StatusFilter>('ALL');
   const [clientId, setClientId] = useState(''); // GIFSY only
 
-  const [exporting, setExporting] = useState(false);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const exportAction = useDownloadAction();
+  const exporting = exportAction.busy;
+  const exportError = exportAction.status === 'error' ? exportAction.message : null;
 
   // Build the query params from the current filters (drops empty values;
   // CLIENT_ADMIN never contributes a clientId — the server pins its scope).
@@ -143,12 +146,9 @@ export default function AdminPaymentsReportPage() {
   }, [fetchReport]);
 
   // ── Export (honours the active filters; server-side xlsx blob download) ──────
-  const handleExport = async () => {
-    setExporting(true);
-    setExportError(null);
-    const res = await downloadPaymentsExport(buildParams());
-    setExporting(false);
-    if (!res.success) setExportError(res.error);
+  // 200 → saves straight away; 202 → prepared in the background (Downloads page).
+  const handleExport = () => {
+    void exportAction.run(() => downloadPaymentsExport(buildParams()));
   };
 
   // Full-screen spinner / error only before the first result is in hand; a refetch
@@ -201,11 +201,12 @@ export default function AdminPaymentsReportPage() {
       </div>
 
       {/* Export error banner */}
+      {exportAction.status === 'queued' && <DownloadActionStatus action={exportAction} />}
       {exportError && (
-        <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs text-red-700 flex items-center gap-2">
+        <div role="alert" className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs text-red-700 flex items-center gap-2">
           <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
           {exportError}
-          <button onClick={() => setExportError(null)} className="ml-auto text-red-400 hover:text-red-600">
+          <button onClick={exportAction.reset} aria-label="Dismiss" className="ml-auto text-red-400 hover:text-red-600">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>

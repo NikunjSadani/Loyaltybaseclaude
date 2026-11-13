@@ -27,6 +27,8 @@ import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportBut
 import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
 import { TargetFocusCheckNotice } from '@/components/admin/target-focus-check-notice';
 import type { TargetUploadFocusCheck } from '@/lib/sales-import/types';
+import { downloadOrQueue, type DownloadOutcome } from '@/lib/exports/download';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -61,15 +63,6 @@ interface UploadResult {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Trigger a browser download from a Blob */
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: filename });
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -91,6 +84,8 @@ export default function TargetUploadPage() {
   // Template download state
   const [downloading,   setDownloading]   = useState(false);
   const [downloadError, setDownloadError] = useState('');
+  /** Set when a big template/export is prepared in the background (202 → Downloads page). */
+  const [downloadQueued, setDownloadQueued] = useState<string | null>(null);
 
   // KPI count hint (fetched once on mount)
   const [kpiCount, setKpiCount] = useState<number | null>(null);
@@ -162,34 +157,19 @@ export default function TargetUploadPage() {
 
     setDownloading(true);
     setDownloadError('');
+    setDownloadQueued(null);
+    const qs = months.join(',');
+    // 200 → the template saves straight away; 202 (a long range) → prepared in the background
+    // and shown on the Downloads page.
+    showDownloadOutcome(await downloadOrQueue(`/api/admin/targets/template?months=${encodeURIComponent(qs)}`, {
+      fallbackFileName: `targets_template_${months[0]}_to_${months[months.length - 1]}.xlsx`,
+    }));
+    setDownloading(false);
+  }
 
-    try {
-      const qs       = months.join(',');
-      const filename = `targets_template_${months[0]}_to_${months[months.length - 1]}.xlsx`;
-
-      const res = await fetch(`/api/admin/targets/template?months=${encodeURIComponent(qs)}`, {
-        headers: authHeader(),
-      });
-
-      if (!res.ok) {
-        // Try to parse an error message from JSON (backend sends { success: false, error })
-        let msg = `HTTP ${res.status}`;
-        try {
-          const j = await res.json() as { error?: string; message?: string };
-          msg = j.error ?? j.message ?? msg;
-        } catch { /* ignore */ }
-        setDownloadError(msg);
-        return;
-      }
-
-      // SUCCESS — the response body is raw xlsx binary
-      const blob = await res.blob();
-      downloadBlob(blob, filename);
-    } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : 'Download failed');
-    } finally {
-      setDownloading(false);
-    }
+  function showDownloadOutcome(out: DownloadOutcome) {
+    if (out.kind === 'error') setDownloadError(out.message);
+    else if (out.kind === 'queued') setDownloadQueued(out.message);
   }
 
   // ── Download Final Targets (export stored targets for the From month) ───────
@@ -198,27 +178,11 @@ export default function TargetUploadPage() {
     if (!fromMonth) return;
     setDownloading(true);
     setDownloadError('');
-    try {
-      const res = await fetch(
-        `/api/admin/targets/export?month=${encodeURIComponent(fromMonth)}`,
-        { headers: authHeader() },
-      );
-      if (!res.ok) {
-        let msg = `HTTP ${res.status}`;
-        try {
-          const j = (await res.json()) as { error?: string; message?: string };
-          msg = j.error ?? j.message ?? msg;
-        } catch { /* ignore */ }
-        setDownloadError(msg);
-        return;
-      }
-      const blob = await res.blob();
-      downloadBlob(blob, `final_targets_${fromMonth}.xlsx`);
-    } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : 'Download failed');
-    } finally {
-      setDownloading(false);
-    }
+    setDownloadQueued(null);
+    showDownloadOutcome(await downloadOrQueue(`/api/admin/targets/export?month=${encodeURIComponent(fromMonth)}`, {
+      fallbackFileName: `final_targets_${fromMonth}.xlsx`,
+    }));
+    setDownloading(false);
   }
 
   // ── Upload ─────────────────────────────────────────────────────────────────
@@ -406,6 +370,11 @@ export default function TargetUploadPage() {
           <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
             <XCircle className="w-4 h-4 shrink-0" /> {downloadError}
           </div>
+        )}
+        {downloadQueued && (
+          <DownloadActionStatus
+            action={{ status: 'queued', message: downloadQueued, reset: () => setDownloadQueued(null) }}
+          />
         )}
       </div>
 

@@ -31,37 +31,11 @@ import {
   X,
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
-import { api, authHeader } from '@/lib/api-client';
+import { api } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
 import { useAdminSession } from '@/lib/admin-session';
-
-/** Trigger a browser download of an xlsx blob from a backend endpoint. */
-async function downloadXlsx(url: string, fallbackName: string): Promise<string | null> {
-  try {
-    const res = await fetch(url, { headers: authHeader() });
-    if (!res.ok) {
-      try {
-        const j = (await res.json()) as { error?: string; message?: string };
-        return j.error ?? j.message ?? `HTTP ${res.status}`;
-      } catch {
-        return `HTTP ${res.status}`;
-      }
-    }
-    const cd = res.headers.get('Content-Disposition') ?? '';
-    const match = cd.match(/filename="?([^"]+)"?/);
-    const filename = match?.[1] ?? fallbackName;
-    const blob = await res.blob();
-    const objectUrl = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement('a'), { href: objectUrl, download: filename });
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(objectUrl);
-    return null;
-  } catch (err) {
-    return err instanceof Error ? err.message : 'Download failed';
-  }
-}
+import { useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 // ── Backend shape (money = { paise: string, inr: number }) ────────────────────
 interface Money {
@@ -141,8 +115,9 @@ export default function AdminTdsPayoutsPage() {
   const [clientFilter, setClientFilter] = useState('ALL'); // GIFSY only
   const [page, setPage] = useState(1);
 
-  const [exporting, setExporting] = useState(false);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const exportAction = useDownloadAction();
+  const exporting = exportAction.busy;
+  const exportError = exportAction.status === 'error' ? exportAction.message : null;
 
   // ── Fetch the full scoped report once. CLIENT_ADMIN is pinned to its tenant by
   //    the API; GIFSY fetches platform-wide and filters client-side. Sending no
@@ -205,16 +180,13 @@ export default function AdminTdsPayoutsPage() {
   const totalTdsPaise = filtered.reduce((s, r) => s + Number(r.tdsDeducted.paise), 0);
 
   // ── Export (honours active period + GIFSY client filter; server-side xlsx) ──
-  const handleExport = async () => {
-    setExporting(true);
-    setExportError(null);
+  const handleExport = () => {
     const params = new URLSearchParams();
     if (periodFilter !== 'ALL') params.set('period', periodFilter);
     if (isGifsy && clientFilter !== 'ALL') params.set('clientId', clientFilter);
     const qs = params.toString() ? `?${params.toString()}` : '';
-    const err = await downloadXlsx(`/api/admin/tds-reports/payouts/export${qs}`, 'tds-payouts.xlsx');
-    setExporting(false);
-    if (err) setExportError(err);
+    // 200 → saves straight away; 202 → prepared in the background (Downloads page).
+    void exportAction.run(`/api/admin/tds-reports/payouts/export${qs}`, { fallbackFileName: 'tds-payouts.xlsx' });
   };
 
   if (loading) {
@@ -263,14 +235,15 @@ export default function AdminTdsPayoutsPage() {
 
       {/* Export error banner */}
       {exportError && (
-        <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs text-red-700 flex items-center gap-2">
+        <div role="alert" className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs text-red-700 flex items-center gap-2">
           <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
           {exportError}
-          <button onClick={() => setExportError(null)} className="ml-auto text-red-400 hover:text-red-600">
+          <button onClick={exportAction.reset} aria-label="Dismiss" className="ml-auto text-red-400 hover:text-red-600">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
+      {exportAction.status === 'queued' && <DownloadActionStatus action={exportAction} />}
 
       {/* Summary strip (filtered set) */}
       <div className="grid grid-cols-3 gap-3">

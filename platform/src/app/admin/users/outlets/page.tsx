@@ -39,6 +39,8 @@ import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useAuthClientId } from '@/lib/platform/use-auth-tenant';
 import { leafIdHeaderForTenant } from '@/lib/employee-hierarchy';
 import { downloadBlob } from '@/lib/download';
+import { useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 import { chunkArray } from '@/lib/chunk';
 import type { HierarchyEmployee } from '@/types';
 import type {
@@ -725,8 +727,9 @@ export default function OutletsPage() {
   const [unparkResult, setUnparkResult] = useState<ParkResult | null>(null);
 
   // "Download Outlet Master" (server export) state — surfaced so a failure is
-  // visible instead of the button silently doing nothing.
-  const [masterDownloadState, setMasterDownloadState] = useState<'idle' | 'loading' | 'error'>('idle');
+  // visible instead of the button silently doing nothing. A big outlet master is
+  // prepared in the background (202) and shows up on the Downloads page.
+  const masterDownload = useDownloadAction();
   // "Download Parked Outlets" (Parked/Removed tab) state.
   const [parkedDownloadState, setParkedDownloadState] = useState<'idle' | 'loading' | 'error'>('idle');
 
@@ -1228,30 +1231,26 @@ export default function OutletsPage() {
             <div>
               <h2 className="text-sm font-semibold text-gray-700">Outlet Master</h2>
               <p className="text-xs text-gray-400 mt-0.5">Complete outlet dump with KYC, banking, hierarchy, and lifecycle data</p>
-              {masterDownloadState === 'error' && (
-                <p data-testid="download-outlet-master-error" className="text-xs text-red-600 mt-1 flex items-center gap-1">
-                  <AlertCircle className="w-3.5 h-3.5" /> Could not download the outlet master. Please try again.
+              {masterDownload.status === 'error' && (
+                <p data-testid="download-outlet-master-error" role="alert" className="text-xs text-red-600 mt-1 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" /> {masterDownload.message ?? 'Could not download the outlet master. Please try again.'}
                 </p>
               )}
             </div>
             <button
               data-testid="download-outlet-master"
-              disabled={masterDownloadState === 'loading'}
-              onClick={async () => {
-                setMasterDownloadState('loading');
-                try {
-                  const res = await fetch('/api/admin/reports/outlet-master');
-                  if (!res.ok) { setMasterDownloadState('error'); return; }
-                  const blob = await res.blob();
-                  downloadBlob(blob, `outlet-master-${new Date().toISOString().split('T')[0]}.xlsx`);
-                  setMasterDownloadState('idle');
-                } catch { setMasterDownloadState('error'); }
+              disabled={masterDownload.busy}
+              onClick={() => {
+                void masterDownload.run('/api/admin/reports/outlet-master', {
+                  fallbackFileName: `outlet-master-${new Date().toISOString().split('T')[0]}.xlsx`,
+                });
               }}
               className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-semibold rounded-lg hover:bg-emerald-700 disabled:opacity-60 transition-colors shrink-0"
             >
-              <Download className="w-4 h-4" /> {masterDownloadState === 'loading' ? 'Preparing…' : 'Download Outlet Master'}
+              <Download className="w-4 h-4" /> {masterDownload.busy ? 'Preparing…' : 'Download Outlet Master'}
             </button>
           </div>
+          {masterDownload.status === 'queued' && <DownloadActionStatus action={masterDownload} />}
 
           {/* Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">

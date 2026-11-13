@@ -29,6 +29,8 @@ import { authHeader } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
 import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label';
 import { formatCountFrom } from '@/components/operator/tds-imported-payouts-card';
+import { useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -495,7 +497,7 @@ export default function AdminTdsPage() {
   const [r194Loading, setR194Loading] = useState(false);
   const [r194Error,   setR194Error]   = useState('');
   const [r194,        setR194]        = useState<Tds194RResponse | null>(null);
-  const [dlR194Err,   setDlR194Err]   = useState('');
+  const dl194R = useDownloadAction();
 
   const fetch194R = useCallback(async () => {
     setR194Loading(true);
@@ -519,7 +521,7 @@ export default function AdminTdsPage() {
   const [r194cLoading, setR194cLoading] = useState(false);
   const [r194cError,   setR194cError]   = useState('');
   const [r194c,        setR194c]        = useState<Tds194CResponse | null>(null);
-  const [dlR194cErr,   setDlR194cErr]   = useState('');
+  const dl194C = useDownloadAction();
 
   const fetch194C = useCallback(async () => {
     if (!isGifsy) return;
@@ -552,22 +554,18 @@ export default function AdminTdsPage() {
     if (isGifsy) fetch194C();
   }, [fetch194C, isGifsy]);
 
-  async function handleDownload194R() {
-    setDlR194Err('');
-    const err = await downloadXlsx(
-      `/api/admin/tds/194r/export?fy=${encodeURIComponent(fy)}`,
-      `tds-194r-${fy}.xlsx`,
-    );
-    if (err) setDlR194Err(err);
+  // 194R / 194C ledger exports: 200 → saves straight away; 202 → prepared in the background
+  // and shown on the Downloads page.
+  function handleDownload194R() {
+    void dl194R.run(`/api/admin/tds/194r/export?fy=${encodeURIComponent(fy)}`, {
+      fallbackFileName: `tds-194r-${fy}.xlsx`,
+    });
   }
 
-  async function handleDownload194C() {
-    setDlR194cErr('');
-    const err = await downloadXlsx(
-      `/api/admin/tds/194c/export?fy=${encodeURIComponent(fy)}`,
-      `tds-194c-${fy}.xlsx`,
-    );
-    if (err) setDlR194cErr(err);
+  function handleDownload194C() {
+    void dl194C.run(`/api/admin/tds/194c/export?fy=${encodeURIComponent(fy)}`, {
+      fallbackFileName: `tds-194c-${fy}.xlsx`,
+    });
   }
 
   const tabs = [
@@ -655,16 +653,20 @@ export default function AdminTdsPage() {
                 <p className="text-xs text-gray-500 mt-0.5">Section 194R: TDS on perquisites / gifts</p>
               </div>
               <div className="flex items-center gap-2">
-                {dlR194Err && <p className="text-xs text-red-600">{dlR194Err}</p>}
+                {dl194R.status === 'error' && <p role="alert" className="text-xs text-red-600">{dl194R.message}</p>}
                 <button
                   onClick={handleDownload194R}
-                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50"
+                  disabled={dl194R.busy}
+                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-60"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  Download 194R Excel
+                  {dl194R.busy ? 'Preparing…' : 'Download 194R Excel'}
                 </button>
               </div>
             </div>
+            {dl194R.status === 'queued' && (
+              <div className="px-5 pt-3"><DownloadActionStatus action={dl194R} /></div>
+            )}
 
             {r194Loading && (
               <div className="flex items-center justify-center py-12" aria-label="Loading">
@@ -762,16 +764,20 @@ export default function AdminTdsPage() {
                 <p className="text-xs text-gray-500 mt-0.5">Section 194C: TDS on contractor payments</p>
               </div>
               <div className="flex items-center gap-2">
-                {dlR194cErr && <p className="text-xs text-red-600">{dlR194cErr}</p>}
+                {dl194C.status === 'error' && <p role="alert" className="text-xs text-red-600">{dl194C.message}</p>}
                 <button
                   onClick={handleDownload194C}
-                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50"
+                  disabled={dl194C.busy}
+                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-60"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  Download 194C Excel
+                  {dl194C.busy ? 'Preparing…' : 'Download 194C Excel'}
                 </button>
               </div>
             </div>
+            {dl194C.status === 'queued' && (
+              <div className="px-5 pt-3"><DownloadActionStatus action={dl194C} /></div>
+            )}
 
             {r194cLoading && (
               <div className="flex items-center justify-center py-12" aria-label="Loading">
