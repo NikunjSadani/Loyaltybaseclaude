@@ -26,7 +26,7 @@ const FY_START = currentFyStart()
 const EARLIER = `${parseInt(FY_START.slice(0, 4), 10) - 2}-06-15`
 
 function stub(
-  initial: { clientId: string; countFrom: string | null },
+  initial: { clientId: string; countFrom: string | null; malformed?: boolean; raw?: unknown },
   opts: { putFails?: boolean; getFails?: boolean; getFailsOnce?: boolean } = {},
 ) {
   const puts: unknown[] = []
@@ -130,6 +130,42 @@ describe('TdsImportedPayoutsCard', () => {
     expect(screen.getByTestId('tds-imported-date-error')).toHaveAttribute('role', 'alert')
     expect(screen.getByTestId('tds-imported-save')).toBeDisabled()
     expect(puts).toHaveLength(0)
+  })
+
+  it('malformed stored value: opens with the "invalid" banner; switching off clears it (PUT null)', async () => {
+    const { puts } = stub({ clientId: 'bajaj', countFrom: null, malformed: true, raw: { countFrom: 'soon' } })
+    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    const banner = await screen.findByTestId('tds-imported-malformed')
+    expect(banner).toHaveAttribute('role', 'alert')
+    expect(banner).toHaveTextContent('The stored value is invalid')
+    expect(banner).toHaveTextContent('{"countFrom":"soon"}')
+    expect(banner).toHaveTextContent('Re-save a date below or switch this off.')
+    expect(screen.getByTestId('tds-imported-status')).toHaveTextContent(/Invalid/)
+    fireEvent.click(screen.getByTestId('tds-imported-malformed-off'))
+    await waitFor(() => expect(puts).toEqual([{ clientId: 'bajaj', countFrom: null }]))
+    await waitFor(() => expect(screen.queryByTestId('tds-imported-malformed')).not.toBeInTheDocument())
+    expect(screen.getByTestId('tds-imported-status')).toHaveTextContent(/Off/)
+  })
+
+  it('malformed stored value: re-saving a valid date repairs it', async () => {
+    const { puts } = stub({ clientId: 'bajaj', countFrom: null, malformed: true, raw: 42 })
+    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    await screen.findByTestId('tds-imported-malformed')
+    fireEvent.change(screen.getByTestId('tds-imported-date'), { target: { value: FY_START } })
+    const save = screen.getByTestId('tds-imported-save')
+    expect(save).toHaveTextContent('Save date')
+    fireEvent.click(save)
+    await waitFor(() => expect(puts).toEqual([{ clientId: 'bajaj', countFrom: FY_START }]))
+    await waitFor(() => expect(screen.queryByTestId('tds-imported-malformed')).not.toBeInTheDocument())
+    expect(screen.getByTestId('tds-imported-status')).toHaveTextContent(/On/)
+  })
+
+  it('malformed stored value, tenant admin: banner asks a Gifsy Admin; no repair controls', async () => {
+    stub({ clientId: 'bajaj', countFrom: null, malformed: true, raw: 'x' })
+    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy={false} />)
+    expect(await screen.findByTestId('tds-imported-malformed')).toHaveTextContent('Ask a Gifsy Admin')
+    expect(screen.queryByTestId('tds-imported-malformed-off')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('tds-imported-date')).not.toBeInTheDocument()
   })
 
   it('tenant admin: read-only status, no editor, never PUTs', async () => {

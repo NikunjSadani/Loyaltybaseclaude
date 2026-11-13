@@ -20,7 +20,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const adminCore = { upsertSetting: jest.fn().mockResolvedValue({}) };
 const tenantSettings = { resolveTdsPolicy: jest.fn() };
-const tds = { importedPayoutsCountFrom: jest.fn(), clientExists: jest.fn() };
+const tds = { importedPayoutsSettingForEdit: jest.fn(), clientExists: jest.fn() };
 
 const GIFSY: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9', name: 'Op' };
 const CLIENT: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '8', name: 'CA' };
@@ -38,7 +38,7 @@ describe('TdsConfigController', () => {
       tds as unknown as TdsService,
     );
     tenantSettings.resolveTdsPolicy.mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' });
-    tds.importedPayoutsCountFrom.mockResolvedValue(null);
+    tds.importedPayoutsSettingForEdit.mockResolvedValue({ countFrom: null, malformed: false });
     tds.clientExists.mockResolvedValue(true);
   });
 
@@ -46,7 +46,7 @@ describe('TdsConfigController', () => {
     it('GET: unknown tenant → 404 (setting never read)', async () => {
       tds.clientExists.mockResolvedValue(false);
       await expect(controller.getImportedPayouts(GIFSY, { clientId: 'nope' })).rejects.toThrow(NotFoundException);
-      expect(tds.importedPayoutsCountFrom).not.toHaveBeenCalled();
+      expect(tds.importedPayoutsSettingForEdit).not.toHaveBeenCalled();
     });
 
     it('SET: unknown tenant → 404, nothing written', async () => {
@@ -80,14 +80,20 @@ describe('TdsConfigController', () => {
   describe('imported-payouts (count VENDOR_IMPORT payouts in the 194R report)', () => {
     it('GET: tenant admin pinned to own tenant; returns countFrom (null = OFF)', async () => {
       const res = await controller.getImportedPayouts(CLIENT, { clientId: 'other-tenant' });
-      expect(tds.importedPayoutsCountFrom).toHaveBeenCalledWith('deoleo');
-      expect(res).toEqual({ clientId: 'deoleo', countFrom: null });
+      expect(tds.importedPayoutsSettingForEdit).toHaveBeenCalledWith('deoleo');
+      expect(res).toEqual({ clientId: 'deoleo', countFrom: null, malformed: false });
+    });
+
+    it('GET: a malformed stored value comes back FLAGGED (not thrown) so the card can repair it', async () => {
+      tds.importedPayoutsSettingForEdit.mockResolvedValue({ countFrom: null, malformed: true, raw: { countFrom: 'soon' } });
+      const res = await controller.getImportedPayouts(GIFSY, { clientId: 'bajaj' });
+      expect(res).toEqual({ clientId: 'bajaj', countFrom: null, malformed: true, raw: { countFrom: 'soon' } });
     });
 
     it('GET: an un-assumed GIFSY may read another tenant', async () => {
-      tds.importedPayoutsCountFrom.mockResolvedValue('2026-04-01');
+      tds.importedPayoutsSettingForEdit.mockResolvedValue({ countFrom: '2026-04-01', malformed: false });
       const res = await controller.getImportedPayouts(GIFSY, { clientId: 'bajaj' });
-      expect(res).toEqual({ clientId: 'bajaj', countFrom: '2026-04-01' });
+      expect(res).toEqual({ clientId: 'bajaj', countFrom: '2026-04-01', malformed: false });
     });
 
     it('SET: writes { countFrom } via upsertSetting(allowPlatformOnlyKey) under the target tenant', async () => {

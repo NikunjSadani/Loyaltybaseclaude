@@ -84,7 +84,7 @@ Payout history imported from a client's previous vendor (already paid off-platfo
 - **Retailer TDS paid later must be uploaded as deposits only** (TDS → Deposit Upload, with **TDS for month**) — **never as off-platform benefits**: the imported payouts are already in the base, so an off-platform upload would count them twice.
 - Wherever a 194R figure includes them — the **194R** screen, the 194R **Excel export** (Summary sheet), the liability tracker and the **Finance dashboard** 194R tile — it says **"Includes imported (vendor) payouts paid on/after <date>"**. The note appears only for a financial year the date reaches into (a 1 Apr 2026 date shows nothing on FY 2025-26).
 - The date must be between **1 Jan 2000** and **one year from today**. A date before the **current** financial year also counts earlier years, so the screen warns and asks you to confirm; **Switch off** asks to confirm too.
-- Switching it off (or never switching it on — the default for every client) leaves the report exactly as before. Every change is audit-logged. If the stored setting can't be read, the 194R report shows an error instead of silently leaving the imported payouts out.
+- Switching it off (or never switching it on — the default for every client) leaves the report exactly as before. Every change is audit-logged. If the stored setting can't be read or is invalid, the 194R report shows an error instead of silently leaving the imported payouts out; the TDS Treatment screen still opens with a red "stored value is invalid" banner so a Gifsy Admin can re-save a date or switch it off.
 
 ![194R report — per-PAN base, liability, deposited, outstanding](/guides/tds/194r-report.png)
 

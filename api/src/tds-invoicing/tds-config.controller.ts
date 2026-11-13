@@ -84,7 +84,8 @@ export class TdsConfigController {
     if (!(await this.tds.clientExists(clientId))) {
       throw new NotFoundException(`Client "${clientId}" does not exist.`);
     }
-    return { clientId, countFrom: await this.tds.importedPayoutsCountFrom(clientId) };
+    // Editor read: a malformed stored value comes back FLAGGED (not thrown) so the card can repair it.
+    return { clientId, ...(await this.tds.importedPayoutsSettingForEdit(clientId)) };
   }
 
   /**

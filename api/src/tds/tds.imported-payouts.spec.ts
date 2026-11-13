@@ -140,6 +140,25 @@ describe('TdsService — imported (VENDOR_IMPORT) payouts in 194R', () => {
       },
     );
 
+    it('EDITOR read: a malformed value is returned flagged (not thrown) while the REPORT stays fail-closed', async () => {
+      setting({ countFrom: 'soon' });
+      expect(await service.importedPayoutsSettingForEdit(CLIENT)).toEqual({
+        countFrom: null,
+        malformed: true,
+        raw: { countFrom: 'soon' },
+      });
+      await expect(service.report194R(CLIENT, '2026-27')).rejects.toThrow(InternalServerErrorException);
+    });
+
+    it('EDITOR read: valid / absent values are returned unflagged; a failed read still throws', async () => {
+      setting({ countFrom: '2026-04-01' });
+      expect(await service.importedPayoutsSettingForEdit(CLIENT)).toEqual({ countFrom: '2026-04-01', malformed: false });
+      setting(undefined);
+      expect(await service.importedPayoutsSettingForEdit(CLIENT)).toEqual({ countFrom: null, malformed: false });
+      mockPrisma.programSetting.findUnique.mockRejectedValue(new Error('db down'));
+      await expect(service.importedPayoutsSettingForEdit(CLIENT)).rejects.toThrow(InternalServerErrorException);
+    });
+
     it('a failed setting read THROWS (no silent fallback to OFF)', async () => {
       mockPrisma.programSetting.findUnique.mockRejectedValue(new Error('db down'));
       await expect(service.report194R(CLIENT, '2026-27')).rejects.toThrow(InternalServerErrorException);

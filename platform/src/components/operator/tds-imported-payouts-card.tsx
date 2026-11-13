@@ -54,6 +54,17 @@ export function currentFyStart(now: Date = new Date()): string {
   return `${y}-04-01`
 }
 
+/** Compact, length-capped rendering of an invalid stored value for the repair banner. */
+function safeJson(v: unknown): string {
+  let s: string
+  try {
+    s = JSON.stringify(v) ?? String(v)
+  } catch {
+    s = String(v)
+  }
+  return s.length > 120 ? `${s.slice(0, 117)}…` : s
+}
+
 /** A real calendar date (rejects 2026-02-30). */
 function isRealDate(iso: string): boolean {
   if (!ISO_DATE.test(iso)) return false
@@ -76,17 +87,23 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
   const [saved, setSaved] = useState(false)
   const [earlierFyConfirmed, setEarlierFyConfirmed] = useState(false)
   const [confirmingOff, setConfirmingOff] = useState(false)
+  // The stored value is unusable (GET returns it flagged, not thrown) — the 194R report fails
+  // closed until a Gifsy Admin re-saves a date or switches it off here.
+  const [malformed, setMalformed] = useState(false)
+  const [malformedRaw, setMalformedRaw] = useState<unknown>(undefined)
 
   const load = useCallback(() => {
     let cancelled = false
     setLoading(true)
     setLoadError(null)
     api
-      .get<{ clientId: string; countFrom: string | null }>(ENDPOINT)
+      .get<{ clientId: string; countFrom: string | null; malformed?: boolean; raw?: unknown }>(ENDPOINT)
       .then((res) => {
         if (cancelled) return
         if (res.success && res.data) {
           setTenantId(res.data.clientId || clientId)
+          setMalformed(!!res.data.malformed)
+          setMalformedRaw(res.data.malformed ? res.data.raw : undefined)
           setStored(res.data.countFrom ?? null)
           setDraft(res.data.countFrom ?? '')
           setTouched(false)
@@ -121,6 +138,8 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
       return
     }
     const value = res.data?.countFrom ?? next
+    setMalformed(false)
+    setMalformedRaw(undefined)
     setStored(value)
     setDraft(value ?? '')
     setTouched(false)
@@ -182,8 +201,39 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
 
         {loaded && (
           <>
+            {malformed && (
+              <div
+                data-testid="tds-imported-malformed"
+                role="alert"
+                className="text-sm text-red-800 bg-red-50 border border-red-200 rounded-lg px-3 py-2 space-y-2"
+              >
+                <p>
+                  <strong>The stored value is invalid</strong>
+                  {malformedRaw !== undefined && (
+                    <> (<code className="text-xs break-all">{safeJson(malformedRaw)}</code>)</>
+                  )}{' '}
+                  — the 194R report can&apos;t be produced until it is fixed.{' '}
+                  {isGifsy ? 'Re-save a date below or switch this off.' : 'Ask a Gifsy Admin to re-save it or switch it off.'}
+                </p>
+                {isGifsy && (
+                  <button
+                    type="button"
+                    data-testid="tds-imported-malformed-off"
+                    disabled={saving}
+                    onClick={() => void save(null)}
+                    className="px-3 py-1.5 rounded-md text-sm font-medium border border-red-300 text-red-800 bg-white disabled:opacity-50"
+                  >
+                    Switch off (clear the invalid value)
+                  </button>
+                )}
+              </div>
+            )}
             <p data-testid="tds-imported-status" role="status" className="text-sm text-gray-900">
-              {stored ? (
+              {malformed ? (
+                <>
+                  <span className="font-semibold text-red-700">Invalid</span> — no valid date is stored.
+                </>
+              ) : stored ? (
                 <>
                   <span className="font-semibold text-emerald-700">On</span> — count imported (vendor) payouts paid on/after{' '}
                   <strong>{formatCountFrom(stored)}</strong> in the 194R report — liability only, no deduction.
@@ -224,7 +274,7 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
                     onClick={() => void save(draft)}
                     className="px-4 py-2 rounded-md text-sm font-medium bg-[var(--brand-primary)] text-white disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {stored ? 'Save date' : 'Switch on'}
+                    {stored || malformed ? 'Save date' : 'Switch on'}
                   </button>
                   {stored && !confirmingOff && (
                     <button

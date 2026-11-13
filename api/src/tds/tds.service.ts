@@ -315,6 +315,30 @@ export class TdsService {
     return countFrom;
   }
 
+  /**
+   * EDITOR read of the setting (GET /v1/admin/tds/config/imported-payouts only): unlike
+   * importedPayoutsCountFrom, a MALFORMED stored value does NOT throw — it is returned flagged
+   * ({ countFrom: null, malformed: true, raw }) so the TDS Treatment card can open and repair it.
+   * A failed READ still throws (nothing to show). The REPORT paths stay fail-closed.
+   */
+  async importedPayoutsSettingForEdit(
+    clientId: string,
+  ): Promise<{ countFrom: string | null; malformed: boolean; raw?: unknown }> {
+    let raw: unknown;
+    try {
+      const row = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId, settingKey: TDS_IMPORTED_PAYOUTS_SETTING_KEY } },
+        select: { settingValue: true },
+      });
+      raw = row?.settingValue ?? null;
+    } catch (e) {
+      this.logger.error(`${TDS_IMPORTED_PAYOUTS_SETTING_KEY} read failed for ${clientId}: ${e}`);
+      throw new InternalServerErrorException('Could not read the imported-payouts TDS setting. Please retry.');
+    }
+    const { countFrom, malformed } = parseImportedPayoutsSetting(raw);
+    return malformed ? { countFrom: null, malformed: true, raw } : { countFrom, malformed: false };
+  }
+
   /** True when a tenant (Client row, id = slug) exists — used to 404 config reads/writes for unknown tenants. */
   async clientExists(clientId: string): Promise<boolean> {
     const c = await this.prisma.client.findUnique({ where: { id: clientId }, select: { id: true } });
