@@ -833,6 +833,54 @@ export function istDayStartInstant(isoDate: string): Date {
   return new Date(Date.UTC(y, mo - 1, d) - IST_OFFSET_MS);
 }
 
+/**
+ * The ONLY imported-payout kind the setting may sweep into 194R: the vendor RLP incentive-payout
+ * history (CreditPayoutEntry.fieldId on VENDOR_IMPORT batches). Any FUTURE vendor-import batch of a
+ * different kind is NOT counted automatically — it needs its own explicit decision + code change.
+ */
+export const IMPORTED_INCENTIVE_PAYOUT_FIELD_ID = 'historical-incentive-payout';
+
+/**
+ * The countFrom date to DISCLOSE for a given FY: returned only when it actually reaches into that
+ * FY (00:00 IST on countFrom is before the FY's end), else null. E.g. countFrom 2026-04-01 →
+ * FY 2025-26: null (no imported payout of that FY is counted); FY 2026-27: '2026-04-01'.
+ */
+export function importedCountFromForFy(countFrom: string | null, fyLabel: string): string | null {
+  if (!countFrom) return null;
+  return istDayStartInstant(countFrom) < fyFromLabel(fyLabel).endExclusive ? countFrom : null;
+}
+
+/** 'YYYY-MM-DD' → '1 Apr 2026' (falls back to the raw string). */
+export function formatIsoDateShort(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return iso;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${parseInt(m[3], 10)} ${months[parseInt(m[2], 10) - 1] ?? ''} ${m[1]}`;
+}
+
+/** Earliest countFrom accepted by the setting (inclusive). */
+export const IMPORTED_COUNT_FROM_MIN = '2000-01-01';
+
+/**
+ * The accepted countFrom window: [2000-01-01, today(IST) + 1 year] as 'YYYY-MM-DD' strings
+ * (lexicographic compare is valid for this fixed-width format). `now` injectable for tests.
+ */
+export function importedCountFromBounds(now: Date = new Date()): { min: string; max: string } {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS);
+  const y = ist.getUTCFullYear() + 1;
+  const mo = ist.getUTCMonth();
+  // 29 Feb + 1y → 28 Feb (clamp to the month's last day).
+  const lastDay = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+  const d = Math.min(ist.getUTCDate(), lastDay);
+  const max = `${y}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  return { min: IMPORTED_COUNT_FROM_MIN, max };
+}
+
+/** The disclosure line shown wherever a 194R figure includes imported payouts. */
+export function importedPayoutsNote(countFrom: string): string {
+  return `Includes imported (vendor) payouts paid on/after ${formatIsoDateShort(countFrom)}`;
+}
+
 /** Returns FyInfo for the current system date (UTC). */
 export function fyOfToday(): FyInfo {
   return financialYear(new Date());

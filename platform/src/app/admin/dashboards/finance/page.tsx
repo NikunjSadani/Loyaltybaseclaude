@@ -27,6 +27,8 @@ interface TdsSection {
   liabilityRupees: number;
   depositedRupees: number;
   outstandingRupees: number;
+  /** 194R only — present when imported (vendor) payouts are counted in this FY's figure. */
+  importedPayoutsNote?: string;
 }
 
 interface FinanceDashboardData {
@@ -141,6 +143,11 @@ function TdsBlock({
           <dd className={`font-bold ${outstandingColor}`}>{fmtRs(section.outstandingRupees)}</dd>
         </div>
       </dl>
+      {section.importedPayoutsNote && (
+        <p data-testid="finance-tds-imported-note" role="note" className="mt-2 text-[11px] text-amber-800">
+          {section.importedPayoutsNote} — liability only, nothing was withheld.
+        </p>
+      )}
     </div>
   );
 }

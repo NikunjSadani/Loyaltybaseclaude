@@ -16,6 +16,8 @@ import { DEFAULT_RESOLVED_TDS_STATUTORY } from './tds.helpers';
 const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
 
 const mockPrisma = {
+  // tdsImportedPayouts setting read (fail-closed): no row → OFF.
+  programSetting: { findUnique: jest.fn(), findMany: jest.fn() }, // findMany: the loops below reset every model's findMany
   creditPayoutEntry: { findMany: jest.fn() },
   creditField: { findMany: jest.fn() },
   outlet: { findMany: jest.fn() },

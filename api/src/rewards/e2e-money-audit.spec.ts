@@ -182,6 +182,8 @@ describe('B. backfillSellingValuePaise — ÷rate, rounding, scale, idempotency 
 describe('C. compute194R Source-2 — RedemptionOrder.valuePaise cumulation', () => {
   const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
   const mockPrisma = {
+    // tdsImportedPayouts setting read (fail-closed): no row → OFF.
+    programSetting: { findUnique: jest.fn() },
     creditPayoutEntry: { findMany: jest.fn() },
     creditField: { findMany: jest.fn() },
     outlet: { findMany: jest.fn() },

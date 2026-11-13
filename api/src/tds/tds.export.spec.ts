@@ -27,6 +27,8 @@ const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_T
 // ─── Mock Prisma ─────────────────────────────────────────────────────────────
 
 const mockPrisma = {
+  // tdsImportedPayouts setting read (fail-closed): no row → OFF.
+  programSetting: { findUnique: jest.fn() },
   creditPayoutEntry: { findMany: jest.fn() },
   creditField: { findMany: jest.fn() },
   outlet: { findMany: jest.fn() },

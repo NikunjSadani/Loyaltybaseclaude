@@ -39,7 +39,7 @@ Thresholds are strict "greater than", measured on the **cumulative total per PAN
 
 ## The two options (who bears the tax)
 
-Set per client on **TDS Config** (default **194C + Gross-up**). What each part of that setting actually reaches:
+Set per client on the **TDS Treatment** screen (default **194C + Gross-up**). What each part of that setting actually reaches:
 
 - **Methodology (Deduct / Gross-up)** — recorded on **every credit-upload ₹ payout** (visibility **and** incentive), but it only changes what is paid on **visibility** payouts:
   - **Deduct** — tax is **withheld from the payout**; the **outlet bears** it (receives amount − TDS). Formula: \`TDS = base × rate ÷ 100\`.
@@ -77,11 +77,14 @@ Then **Deposits** (194R tax the client actually paid the government, uploaded) a
 
 ### Imported (vendor) payout history — per-client setting
 
-Payout history imported from a client's previous vendor (already paid off-platform) is **left out of 194R by default**. A Gifsy Admin can switch on **"Count imported (vendor) payouts in the 194R report"** for one client on **TDS Config**, with a **from date** (e.g. \`2026-04-01\`):
+Payout history imported from a client's previous vendor (already paid off-platform) is **left out of 194R by default**. A Gifsy Admin can switch on **"Count imported (vendor) payouts in the 194R report"** for one client on the **TDS Treatment** screen, with a **from date** (e.g. \`2026-04-01\`):
 
-- Imported payouts **paid on or after that date** are added to each retailer's 194R total exactly like a platform payout — same PAN / no-PAN deductee (no PAN → its own row at 20%), same ₹20,000 threshold, and **deposits** uploaded with **TDS for month** subtract as usual. Imported payouts **before** the date stay excluded (e.g. a closed financial year).
-- It is **report / liability only**. Nothing is deducted from any future payout, no TDS invoice is raised and nothing is recovered automatically — the retailers were already paid in full. The liability is **payer-borne**: for a **gross-up** client the tax is borne on top of the amount paid (that's why the report grosses it up); who finally bears it is settled outside the platform.
-- Switching it off (or never switching it on — the default for every client) leaves the report exactly as before. Every change is audit-logged.
+- Imported vendor **incentive payouts** **paid on or after that date** are added to each retailer's 194R total exactly like a platform payout — same PAN / no-PAN deductee (no PAN → its own row at 20%), same ₹20,000 threshold, and **deposits** uploaded with **TDS for month** subtract as usual. Imported payouts **before** the date stay excluded (e.g. a closed financial year). Other kinds of imported history are never counted automatically.
+- It is **report / liability only**. Nothing is deducted from any future payout, no TDS invoice is raised and nothing is recovered automatically — the retailers were already paid in full. Because nothing was withheld from those payouts, the liability is **payer-borne for every client** (whatever its Deduct / Gross-up setting); who finally bears it is settled outside the platform.
+- **Retailer TDS paid later must be uploaded as deposits only** (TDS → Deposit Upload, with **TDS for month**) — **never as off-platform benefits**: the imported payouts are already in the base, so an off-platform upload would count them twice.
+- Wherever a 194R figure includes them — the **194R** screen, the 194R **Excel export** (Summary sheet), the liability tracker and the **Finance dashboard** 194R tile — it says **"Includes imported (vendor) payouts paid on/after <date>"**. The note appears only for a financial year the date reaches into (a 1 Apr 2026 date shows nothing on FY 2025-26).
+- The date must be between **1 Jan 2000** and **one year from today**. A date before the **current** financial year also counts earlier years, so the screen warns and asks you to confirm; **Switch off** asks to confirm too.
+- Switching it off (or never switching it on — the default for every client) leaves the report exactly as before. Every change is audit-logged. If the stored setting can't be read, the 194R report shows an error instead of silently leaving the imported payouts out.
 
 ![194R report — per-PAN base, liability, deposited, outstanding](/guides/tds/194r-report.png)
 
@@ -117,8 +120,8 @@ The statutory **rates and thresholds are editable at the platform level** (they'
 |---|---|
 | See 194R / 194C liability + download the CA export | **TDS** |
 | Upload off-platform 194R benefits / record deposits | **TDS** (194R tab) |
-| Set a client's treatment (section for visibility; deduct/gross-up for all credit-upload payouts) | **TDS Config** |
-| Count a client's imported (vendor) payouts in 194R from a date (Gifsy Admin) | **TDS Config** |
+| Set a client's treatment (section for visibility; deduct/gross-up for all credit-upload payouts) | **TDS Treatment** |
+| Count a client's imported (vendor) payouts in 194R from a date (Gifsy Admin) | **TDS Treatment** |
 | Set the statutory rates & thresholds (owner only) | **Gifsy → TDS Statutory** |
 | Per-payout TDS report (frozen section/option) | **TDS Payouts** |
 | Gross-up recovery / attribution | **TDS Recovery** |

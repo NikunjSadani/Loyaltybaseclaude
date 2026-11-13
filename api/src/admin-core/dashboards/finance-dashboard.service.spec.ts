@@ -23,7 +23,7 @@ const mockPrisma = {
 const mockTenant = { resolveClient: jest.fn() };
 const mockTenantSettings = { getConversionRate: jest.fn() };
 const mockPayouts = { getFundSummary: jest.fn() };
-const mockTds = { summary194R: jest.fn(), summary194C: jest.fn() };
+const mockTds = { report194R: jest.fn(), summary194C: jest.fn() };
 
 const admin: JwtPayload = {
   sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '',
@@ -49,14 +49,14 @@ function primeDefaults() {
   mockPrisma.pointsLedger.aggregate
     .mockResolvedValueOnce({ _sum: { points: 2_000 } })   // EXPIRE
     .mockResolvedValueOnce({ _sum: { points: 40_000 } }); // EARN
-  mockTds.summary194R.mockResolvedValue({
+  mockTds.report194R.mockResolvedValue({ importedPayoutsCountedFrom: null, importedPayoutsNote: null, rows: [], summary: {
     fyLabel: '2025-26', clientId: 'deoleo',
     totalBasePaise: 100_000_00n,
     totalLiabilityPaise: 10_000_00n,   // ₹10,000
     totalDepositedPaise: 4_000_00n,    // ₹4,000
     totalOutstandingPaise: 6_000_00n,  // ₹6,000
     rowCount: 3,
-  });
+  } });
   mockTds.summary194C.mockResolvedValue({
     fyLabel: '2025-26',
     totalBasePaise: 500_000_00n,
@@ -139,7 +139,7 @@ describe('FinanceDashboardService', () => {
       outstandingRupees: 20_000,
     });
     // 194R is called tenant-scoped; 194C is platform-wide (no clientId arg).
-    expect(mockTds.summary194R).toHaveBeenCalledWith('deoleo', expect.any(String));
+    expect(mockTds.report194R).toHaveBeenCalledWith('deoleo', expect.any(String));
     expect(mockTds.summary194C).toHaveBeenCalledWith(expect.any(String));
   });
 
@@ -154,7 +154,7 @@ describe('FinanceDashboardService', () => {
       liabilityRupees: 10_000, depositedRupees: 4_000, outstandingRupees: 6_000,
     });
     expect(mockTds.summary194C).not.toHaveBeenCalled();
-    expect(mockTds.summary194R).toHaveBeenCalledWith('deoleo', expect.any(String));
+    expect(mockTds.report194R).toHaveBeenCalledWith('deoleo', expect.any(String));
   });
 
   it('C1: OMITS the platform 194C figure for an ASSUMED GIFSY operator (assumed:true)', async () => {
@@ -171,6 +171,20 @@ describe('FinanceDashboardService', () => {
       liabilityRupees: 25_000, depositedRupees: 5_000, outstandingRupees: 20_000,
     });
     expect(mockTds.summary194C).toHaveBeenCalledWith(expect.any(String));
+  });
+
+  it('194R tile carries the imported-payouts note ONLY when it applies to the FY', async () => {
+    const base = (await mockTds.report194R()) as Record<string, unknown>;
+    mockTds.report194R.mockResolvedValueOnce({
+      ...base,
+      importedPayoutsCountedFrom: '2026-04-01',
+      importedPayoutsNote: 'Includes imported (vendor) payouts paid on/after 1 Apr 2026',
+    });
+    const on = await service.finance(admin);
+    expect((on.tds.sec194R as Record<string, unknown>).importedPayoutsNote).toBe(
+      'Includes imported (vendor) payouts paid on/after 1 Apr 2026',
+    );
+    // OFF / not in this FY → no key at all (the C1 tests above assert the exact 3-field tile).
   });
 
   it('maps the fund reconciliation summary (already ₹) through', async () => {
@@ -190,7 +204,7 @@ describe('FinanceDashboardService', () => {
     expect(out.scope.fy).toBe('2024-25');
     expect(out.tds.fy).toBe('2024-25');
     expect(out.scope.tenant).toBe('deoleo');
-    expect(mockTds.summary194R).toHaveBeenCalledWith('deoleo', '2024-25');
+    expect(mockTds.report194R).toHaveBeenCalledWith('deoleo', '2024-25');
   });
 
   it('scopes every wallet/ledger query by the caller tenant (partner.clientId)', async () => {

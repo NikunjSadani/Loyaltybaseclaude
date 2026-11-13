@@ -73,10 +73,16 @@ automatic recovery from future payouts** until Bajaj's CA decides who bears it. 
 release (the report is computed live, so the payout-history import does not wait for it).
 - **Built 2026-11-13 on `feat/tds-count-imports`** (not yet pushed/deployed): ProgramSetting `tdsImportedPayouts` =
   `{ countFrom: 'YYYY-MM-DD' | null }` (absent/null = OFF for every tenant → report byte-identical). Edited ONLY by a
-  Gifsy Admin on **TDS Config** (`PUT /v1/admin/tds/config/imported-payouts`; generic settings PUT refuses the key;
-  audit `TdsImportedPayouts` old→new). ON → `compute194R` adds VENDOR_IMPORT entries with paidAt ≥ that IST date
-  (clamped to the FY) — report/liability only; the 194R screen shows an "Includes imported payouts…" note.
-  **After the release ships: a Gifsy Admin sets Bajaj's date to 2026-04-01 on TDS Config** (no SQL needed).
+  Gifsy Admin on the **TDS Treatment** screen (`PUT /v1/admin/tds/config/imported-payouts`; generic settings PUT
+  refuses the key; 404 for an unknown tenant; date 2000-01-01…today+1y; audit `TdsImportedPayouts` old→new). ON →
+  `compute194R` adds entries on a VENDOR_IMPORT batch **and** fieldId `historical-incentive-payout` (other import kinds
+  never swept in) with paidAt ≥ that IST date (clamped to the FY) — report/liability only, payer-borne for every client.
+  The setting is read ONCE per request (`report194R`; one ProgramSetting read when OFF) and fails CLOSED (a failed read
+  or malformed value → 500, never silently OFF). "Includes imported (vendor) payouts paid on/after <date>" is shown on
+  the 194R screen, the 194R export Summary sheet, `GET /v1/admin/tds/liability` and the Finance dashboard 194R tile —
+  only for an FY the date reaches into (FY 2025-26 with 2026-04-01 → no note). Retailer TDS paid later is uploaded as
+  **deposits only**, never as off-platform benefits (that would double-count the imported payouts).
+  **After the release ships: a Gifsy Admin sets Bajaj's date to 2026-04-01 on TDS Treatment** (no SQL needed).
   Withholding/gross-up/auto-invoice/recovery paths are untouched: they read only visibility fieldIds or entries with a
   frozen `tdsSection` (imported rows: `tdsSection` NULL, fieldId `historical-incentive-payout`).
 

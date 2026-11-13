@@ -1,8 +1,8 @@
-import { BadRequestException, Controller, ForbiddenException, Get, Put, Body, Query } from '@nestjs/common';
+import { BadRequestException, Controller, ForbiddenException, Get, NotFoundException, Put, Body, Query } from '@nestjs/common';
 import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TdsService } from '../tds/tds.service';
-import { TDS_IMPORTED_PAYOUTS_SETTING_KEY, parseIsoCalendarDate } from '../tds/tds.helpers';
+import { TDS_IMPORTED_PAYOUTS_SETTING_KEY, importedCountFromBounds, parseIsoCalendarDate } from '../tds/tds.helpers';
 import { UpsertSettingDto } from '../admin-core/dto/settings.dto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
@@ -81,6 +81,9 @@ export class TdsConfigController {
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   async getImportedPayouts(@CurrentUser() user: JwtPayload, @Query() q: GetTdsConfigQueryDto) {
     const clientId = platformWide(user) && q.clientId ? q.clientId : user.clientId;
+    if (!(await this.tds.clientExists(clientId))) {
+      throw new NotFoundException(`Client "${clientId}" does not exist.`);
+    }
     return { clientId, countFrom: await this.tds.importedPayoutsCountFrom(clientId) };
   }
 
@@ -101,6 +104,15 @@ export class TdsConfigController {
     const countFrom = dto.countFrom === null ? null : parseIsoCalendarDate(dto.countFrom);
     if (dto.countFrom !== null && countFrom === null) {
       throw new BadRequestException('countFrom must be a real calendar date (YYYY-MM-DD), or null to turn it off.');
+    }
+    if (countFrom !== null) {
+      const { min, max } = importedCountFromBounds();
+      if (countFrom < min || countFrom > max) {
+        throw new BadRequestException(`countFrom must be between ${min} and ${max} (today + 1 year).`);
+      }
+    }
+    if (!(await this.tds.clientExists(dto.clientId))) {
+      throw new NotFoundException(`Client "${dto.clientId}" does not exist.`);
     }
     const settingDto: UpsertSettingDto = {
       key: TDS_IMPORTED_PAYOUTS_SETTING_KEY,

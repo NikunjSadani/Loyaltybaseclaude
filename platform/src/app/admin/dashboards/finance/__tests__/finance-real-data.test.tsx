@@ -91,6 +91,27 @@ describe('Admin Finance Dashboard — real data', () => {
     expect(screen.getByText('Platform')).toBeInTheDocument();
   });
 
+  it('RD3b: the 194R tile shows the imported-payouts note only when the API sends it', async () => {
+    mockFetchOk();
+    const { unmount } = render(<FinanceDashboardPage />);
+    await screen.findByText('Section 194R');
+    expect(screen.queryByTestId('finance-tds-imported-note')).not.toBeInTheDocument();
+    unmount();
+
+    const withNote = {
+      ...PAYLOAD,
+      tds: {
+        ...PAYLOAD.tds,
+        sec194R: { ...PAYLOAD.tds.sec194R, importedPayoutsNote: 'Includes imported (vendor) payouts paid on/after 1 Apr 2026' },
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(withNote) }));
+    render(<FinanceDashboardPage />);
+    expect(await screen.findByTestId('finance-tds-imported-note')).toHaveTextContent(
+      'Includes imported (vendor) payouts paid on/after 1 Apr 2026 — liability only, nothing was withheld.',
+    );
+  });
+
   it('RD4: renders a fund balance value', async () => {
     mockFetchOk();
     render(<FinanceDashboardPage />);

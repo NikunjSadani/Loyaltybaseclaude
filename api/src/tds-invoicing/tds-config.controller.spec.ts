@@ -5,7 +5,7 @@
  * under the target tenant's scope), RBAC (SET is GIFSY-only), and DTO enum validate/reject.
  * Run: npx jest src/tds-invoicing/tds-config.controller.spec.ts
  */
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
@@ -20,7 +20,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const adminCore = { upsertSetting: jest.fn().mockResolvedValue({}) };
 const tenantSettings = { resolveTdsPolicy: jest.fn() };
-const tds = { importedPayoutsCountFrom: jest.fn() };
+const tds = { importedPayoutsCountFrom: jest.fn(), clientExists: jest.fn() };
 
 const GIFSY: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9', name: 'Op' };
 const CLIENT: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '8', name: 'CA' };
@@ -39,6 +39,42 @@ describe('TdsConfigController', () => {
     );
     tenantSettings.resolveTdsPolicy.mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' });
     tds.importedPayoutsCountFrom.mockResolvedValue(null);
+    tds.clientExists.mockResolvedValue(true);
+  });
+
+  describe('imported-payouts — tenant existence + date bounds', () => {
+    it('GET: unknown tenant → 404 (setting never read)', async () => {
+      tds.clientExists.mockResolvedValue(false);
+      await expect(controller.getImportedPayouts(GIFSY, { clientId: 'nope' })).rejects.toThrow(NotFoundException);
+      expect(tds.importedPayoutsCountFrom).not.toHaveBeenCalled();
+    });
+
+    it('SET: unknown tenant → 404, nothing written', async () => {
+      tds.clientExists.mockResolvedValue(false);
+      await expect(
+        controller.setImportedPayouts(GIFSY, { clientId: 'nope', countFrom: '2026-04-01' }),
+      ).rejects.toThrow(NotFoundException);
+      expect(adminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('SET: a date before 2000-01-01 or after today + 1 year → 400, nothing written', async () => {
+      const far = new Date();
+      far.setUTCFullYear(far.getUTCFullYear() + 2);
+      const farIso = far.toISOString().slice(0, 10);
+      for (const bad of ['1999-12-31', farIso]) {
+        await expect(
+          controller.setImportedPayouts(GIFSY, { clientId: 'bajaj', countFrom: bad }),
+        ).rejects.toThrow(BadRequestException);
+      }
+      expect(adminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('SET: 2000-01-01 and today are accepted', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      await controller.setImportedPayouts(GIFSY, { clientId: 'bajaj', countFrom: '2000-01-01' });
+      await controller.setImportedPayouts(GIFSY, { clientId: 'bajaj', countFrom: today });
+      expect(adminCore.upsertSetting).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('imported-payouts (count VENDOR_IMPORT payouts in the 194R report)', () => {

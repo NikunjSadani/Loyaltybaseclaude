@@ -17,7 +17,9 @@
  *   1. Non-visibility CreditPayoutEntry (status PAID, paidAt in FY, field NOT isSeparatePayout)
  *      → PAN via Outlet→ChannelPartner. Imported history (batch.sourceKind = VENDOR_IMPORT) is
  *      EXCLUDED — unless the tenant's `tdsImportedPayouts.countFrom` date is set, in which case
- *      imported payouts paid on/after that IST date count like any other (report/liability only).
+ *      imported incentive payouts (fieldId historical-incentive-payout only) paid on/after that IST
+ *      date count like any other (report/liability only). The setting is read once per request
+ *      (report194R) and fails CLOSED (throws) on a read failure or malformed value.
  *   2. RedemptionOrder.valuePaise for DELIVERED/FULFILLED redemptions (deliveredAt in FY)
  *      → PAN via ChannelPartner
  *   3. TdsOffPlatformEntry (section=SEC_194R, clientId, entryDate in FY)
@@ -35,7 +37,7 @@
  * Deposited: SUM TdsDeposit (section=SEC_194C, panNumber) by "TDS for month" FY — platform-wide.
  */
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   fyFromLabel,
@@ -57,8 +59,11 @@ import {
   formatForPeriod,
   cellSafe,
   TDS_IMPORTED_PAYOUTS_SETTING_KEY,
+  IMPORTED_INCENTIVE_PAYOUT_FIELD_ID,
   parseImportedPayoutsSetting,
   istDayStartInstant,
+  importedCountFromForFy,
+  importedPayoutsNote,
 } from './tds.helpers';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { withholdingTdsPaise } from './tds-methodology.helper';
@@ -279,12 +284,15 @@ export class TdsService {
 
   /**
    * The tenant's "count imported (VENDOR_IMPORT) payouts in the 194R report from" date
-   * ('YYYY-MM-DD', IST day), or null when OFF. Read UNCACHED from ProgramSetting
-   * `tdsImportedPayouts` ({ countFrom }). Absent row, null, a malformed value or a read failure →
-   * null (OFF = the long-standing exclusion; the report is never widened by a bad value).
+   * ('YYYY-MM-DD', IST day), or null when OFF. ONE uncached ProgramSetting read
+   * (`tdsImportedPayouts` = { countFrom }). Absent row / explicit null → null (OFF, the default).
+   *
+   * FAIL CLOSED: a failed read or a malformed stored value THROWS (a visible 500) — a statutory
+   * report must never silently drop to OFF and under-state liability. Callers read this ONCE per
+   * request and pass it into compute194R/summary194R (see report194R).
    */
   async importedPayoutsCountFrom(clientId: string): Promise<string | null> {
-    let raw: unknown = null;
+    let raw: unknown;
     try {
       const row = await this.prisma.programSetting.findUnique({
         where: { clientId_settingKey: { clientId, settingKey: TDS_IMPORTED_PAYOUTS_SETTING_KEY } },
@@ -292,19 +300,50 @@ export class TdsService {
       });
       raw = row?.settingValue ?? null;
     } catch (e) {
-      this.logger.warn(`${TDS_IMPORTED_PAYOUTS_SETTING_KEY} read failed for ${clientId}; treating as OFF: ${e}`);
-      return null;
+      this.logger.error(`${TDS_IMPORTED_PAYOUTS_SETTING_KEY} read failed for ${clientId}: ${e}`);
+      throw new InternalServerErrorException(
+        'Could not read the imported-payouts TDS setting — the 194R report was not produced. Please retry.',
+      );
     }
     const { countFrom, malformed } = parseImportedPayoutsSetting(raw);
     if (malformed) {
-      this.logger.warn(`${TDS_IMPORTED_PAYOUTS_SETTING_KEY} for ${clientId} is malformed; treating as OFF`);
+      this.logger.error(`${TDS_IMPORTED_PAYOUTS_SETTING_KEY} for ${clientId} is malformed`);
+      throw new InternalServerErrorException(
+        'The imported-payouts TDS setting for this client is invalid — re-save it on the TDS Treatment screen. The 194R report was not produced.',
+      );
     }
     return countFrom;
   }
 
-  private async importedPayoutsCountFromInstant(clientId: string): Promise<Date | null> {
-    const date = await this.importedPayoutsCountFrom(clientId);
-    return date ? istDayStartInstant(date) : null;
+  /** True when a tenant (Client row, id = slug) exists — used to 404 config reads/writes for unknown tenants. */
+  async clientExists(clientId: string): Promise<boolean> {
+    const c = await this.prisma.client.findUnique({ where: { id: clientId }, select: { id: true } });
+    return !!c;
+  }
+
+  /**
+   * 194R rows + summary + the imported-payouts disclosure for ONE request — the setting is read
+   * exactly once and passed into compute194R (rows computed once; summary derived from them).
+   * `importedPayoutsCountedFrom` is non-null only when the date reaches into THIS FY.
+   */
+  async report194R(
+    clientId: string,
+    fyLabel: string,
+  ): Promise<{
+    rows: TdsRow194R[];
+    summary: TdsSummary194R;
+    importedPayoutsCountedFrom: string | null;
+    importedPayoutsNote: string | null;
+  }> {
+    const countFrom = await this.importedPayoutsCountFrom(clientId);
+    const rows = await this.compute194R(clientId, fyLabel, countFrom);
+    const disclosed = importedCountFromForFy(countFrom, fyLabel);
+    return {
+      rows,
+      summary: { fyLabel, clientId, ...summariseRows(rows) },
+      importedPayoutsCountedFrom: disclosed,
+      importedPayoutsNote: disclosed ? importedPayoutsNote(disclosed) : null,
+    };
   }
 
   // ─── 194R ───────────────────────────────────────────────────────────────────
@@ -314,7 +353,14 @@ export class TdsService {
    * Aggregates all three sources, applies the retroactive threshold, and
    * subtracts actual deposits to produce outstanding.
    */
-  async compute194R(clientId: string, fyLabel: string): Promise<TdsRow194R[]> {
+  async compute194R(
+    clientId: string,
+    fyLabel: string,
+    /** The tenant's imported-payouts countFrom, already read for this request (undefined → read it here). */
+    importedCountFrom?: string | null,
+  ): Promise<TdsRow194R[]> {
+    const countFromDate =
+      importedCountFrom !== undefined ? importedCountFrom : await this.importedPayoutsCountFrom(clientId);
     const cfg = await this.statutory.getForFy(fyLabel);
     const fy = fyFromLabel(fyLabel);
     const { start, endExclusive } = fy;
@@ -370,11 +416,13 @@ export class TdsService {
       select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
     });
     // Per-tenant opt-in (ProgramSetting `tdsImportedPayouts.countFrom`, default OFF → this query is
-    // never issued and the report is byte-identical): imported VENDOR_IMPORT payouts whose paidAt is
-    // on/after the configured IST date are counted like any other paid incentive — same PAN /
-    // per-deductee no-PAN keys, same FY threshold, deposits subtract. Before that date they stay
-    // excluded. REPORT-ONLY: nothing on the payout/withholding path reads compute194R.
-    const importCountFrom = await this.importedPayoutsCountFromInstant(clientId);
+    // never issued and the rows are byte-identical; the setting itself costs ONE ProgramSetting read
+    // per request, done by the caller): imported vendor INCENTIVE payouts (VENDOR_IMPORT batch AND
+    // fieldId historical-incentive-payout — other future import kinds are never swept in) whose
+    // paidAt is on/after the configured IST date are counted like any other paid incentive — same
+    // PAN / per-deductee no-PAN keys, same FY threshold, deposits subtract. Before that date they
+    // stay excluded. REPORT-ONLY: nothing on the payout/withholding path reads compute194R.
+    const importCountFrom = countFromDate ? istDayStartInstant(countFromDate) : null;
     const importedEntries =
       importCountFrom && importCountFrom < endExclusive
         ? await this.prisma.creditPayoutEntry.findMany({
@@ -382,6 +430,7 @@ export class TdsService {
               clientId,
               status: 'PAID',
               paidAt: { gte: importCountFrom > start ? importCountFrom : start, lt: endExclusive },
+              fieldId: IMPORTED_INCENTIVE_PAYOUT_FIELD_ID,
               batch: { sourceKind: 'VENDOR_IMPORT' },
             },
             select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
@@ -677,8 +726,13 @@ export class TdsService {
   }
 
   /** Summary for 194R: totals across all PAN rows. */
-  async summary194R(clientId: string, fyLabel: string): Promise<TdsSummary194R> {
-    const rows = await this.compute194R(clientId, fyLabel);
+  async summary194R(
+    clientId: string,
+    fyLabel: string,
+    /** Already-read imported-payouts countFrom (undefined → read once here). */
+    importedCountFrom?: string | null,
+  ): Promise<TdsSummary194R> {
+    const rows = await this.compute194R(clientId, fyLabel, importedCountFrom);
     return { fyLabel, clientId, ...summariseRows(rows) };
   }
 
@@ -1603,7 +1657,7 @@ export class TdsService {
     clientId: string,
     fyLabel: string,
   ): Promise<{ buffer: Buffer; filename: string }> {
-    const rows = await this.compute194R(clientId, fyLabel);
+    const { rows, importedPayoutsNote: importedNote } = await this.report194R(clientId, fyLabel);
 
     // Resolve PAN → name from ChannelPartner (tenant-scoped)
     const onPlatformPans = rows
@@ -1689,6 +1743,11 @@ export class TdsService {
         'Field': 'FY',
         'Value': fyLabel,
       },
+      // Disclosure — only when the tenant counts imported (vendor) payouts in THIS FY (else the
+      // workbook is unchanged).
+      ...(importedNote
+        ? [{ 'Field': 'Imported (vendor) payouts', 'Value': `${importedNote} — liability only, nothing was withheld` }]
+        : []),
     ];
 
     const buffer = buildXlsx([
@@ -1823,6 +1882,9 @@ export class TdsService {
   ): Promise<{
     section: string;
     fyLabel: string;
+    /** 194R only — present when imported (vendor) payouts are counted in THIS FY. */
+    importedPayoutsCountedFrom?: string;
+    importedPayoutsNote?: string;
     rows: Array<{
       panNumber: string;
       noPanDeductee?: NoPanDeductee;
@@ -1847,14 +1909,21 @@ export class TdsService {
     };
   }> {
     if (section === '194R') {
-      const rows = await this.compute194R(clientId, fyLabel);
+      const report = await this.report194R(clientId, fyLabel);
+      const rows = report.rows;
       const totalLiability = rows.reduce((s, r) => s + r.liabilityPaise, 0n);
       const totalDeposited = rows.reduce((s, r) => s + r.depositedPaise, 0n);
-      const totalOutstanding = summariseRows(rows).totalOutstandingPaise;
+      const totalOutstanding = report.summary.totalOutstandingPaise;
 
       return {
         section: '194R',
         fyLabel,
+        ...(report.importedPayoutsCountedFrom && report.importedPayoutsNote
+          ? {
+              importedPayoutsCountedFrom: report.importedPayoutsCountedFrom,
+              importedPayoutsNote: report.importedPayoutsNote,
+            }
+          : {}),
         rows: rows.map((r) => ({
           panNumber: r.panNumber,
           ...(r.noPanDeductee ? { noPanDeductee: r.noPanDeductee } : {}),

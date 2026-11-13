@@ -5,7 +5,9 @@
  * incentive (PAN / per-deductee no-PAN keys, FY threshold, deposits subtract). REPORT-ONLY.
  * Run: npx jest src/tds/tds.imported-payouts.spec.ts
  */
+import { InternalServerErrorException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import * as XLSX from 'xlsx';
 import { TdsService } from './tds.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
@@ -15,6 +17,8 @@ import {
   rate194RFrom,
   parseImportedPayoutsSetting,
   istDayStartInstant,
+  importedCountFromForFy,
+  importedCountFromBounds,
 } from './tds.helpers';
 
 const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
@@ -105,24 +109,90 @@ describe('TdsService — imported (VENDOR_IMPORT) payouts in 194R', () => {
       expect(rows[0].liabilityPaise).toBe(0n);
     });
 
-    it('OFF output is IDENTICAL to a service whose Prisma has no programSetting at all (legacy)', async () => {
+    it('OFF output is IDENTICAL to a service whose Prisma has no programSetting at all (legacy, countFrom passed as null)', async () => {
       payoutEntries([entry('R1', 2_500_000n), entry('R2', 2_100_000n)], [entry('R1', 9_000_000n)]);
       const off = await service.compute194R(CLIENT, '2026-27');
 
       const legacyPrisma = { ...mockPrisma } as Record<string, unknown>;
       delete legacyPrisma.programSetting;
       const legacy = new TdsService(legacyPrisma as unknown as PrismaService, mockStatutory as unknown as TdsStatutoryConfigService);
-      const legacyRows = await legacy.compute194R(CLIENT, '2026-27');
+      const legacyRows = await legacy.compute194R(CLIENT, '2026-27', null);
       expect(off).toEqual(legacyRows);
       expect(importedCalls()).toHaveLength(0);
     });
 
-    it('explicit { countFrom: null } and malformed values resolve to OFF', async () => {
-      for (const v of [{ countFrom: null }, '2026-04-01', { countFrom: '2026-02-30' }, { countFrom: 'soon' }, [], 42]) {
+    it('explicit { countFrom: null } resolves to OFF', async () => {
+      setting({ countFrom: null });
+      expect(await service.importedPayoutsCountFrom(CLIENT)).toBeNull();
+    });
+  });
+
+  // ── FAIL CLOSED ────────────────────────────────────────────────────────────
+  describe('fail closed (never silently OFF)', () => {
+    it.each([['a bare string', '2026-04-01'], ['an impossible date', { countFrom: '2026-02-30' }], ['junk', { countFrom: 'soon' }], ['an array', []], ['a number', 42]])(
+      'a malformed stored value (%s) THROWS — the report is not produced',
+      async (_label, v) => {
         setting(v);
-        expect(await service.importedPayoutsCountFrom(CLIENT)).toBeNull();
-      }
-      expect(importedCalls()).toHaveLength(0);
+        await expect(service.importedPayoutsCountFrom(CLIENT)).rejects.toThrow(InternalServerErrorException);
+        await expect(service.compute194R(CLIENT, '2026-27')).rejects.toThrow(InternalServerErrorException);
+        await expect(service.report194R(CLIENT, '2026-27')).rejects.toThrow(InternalServerErrorException);
+        expect(importedCalls()).toHaveLength(0);
+      },
+    );
+
+    it('a failed setting read THROWS (no silent fallback to OFF)', async () => {
+      mockPrisma.programSetting.findUnique.mockRejectedValue(new Error('db down'));
+      await expect(service.report194R(CLIENT, '2026-27')).rejects.toThrow(InternalServerErrorException);
+      await expect(service.export194R(CLIENT, '2026-27')).rejects.toThrow(InternalServerErrorException);
+      await expect(service.getLiability('194R', '2026-27', CLIENT)).rejects.toThrow(InternalServerErrorException);
+    });
+  });
+
+  // ── ONE read per request + FY-scoped disclosure ────────────────────────────
+  describe('report194R (one read per request) + disclosure', () => {
+    beforeEach(() => setting({ countFrom: '2026-04-01' }));
+
+    it('reads the setting ONCE and computes rows ONCE; summary is derived from the same rows', async () => {
+      payoutEntries([entry('R1', 1_000_000n)], [entry('R1', 1_500_000n)]);
+      const r = await service.report194R(CLIENT, '2026-27');
+      expect(mockPrisma.programSetting.findUnique).toHaveBeenCalledTimes(1);
+      expect(importedCalls()).toHaveLength(1);
+      expect(r.summary.totalBasePaise).toBe(2_500_000n);
+      expect(r.summary.rowCount).toBe(r.rows.length);
+    });
+
+    it('FY 2026-27 (date inside the FY) → importedPayoutsCountedFrom + note', async () => {
+      const r = await service.report194R(CLIENT, '2026-27');
+      expect(r.importedPayoutsCountedFrom).toBe('2026-04-01');
+      expect(r.importedPayoutsNote).toBe('Includes imported (vendor) payouts paid on/after 1 Apr 2026');
+    });
+
+    it('FY 2025-26 with countFrom 2026-04-01 (on/after the FY end) → NO note', async () => {
+      const r = await service.report194R(CLIENT, '2025-26');
+      expect(r.importedPayoutsCountedFrom).toBeNull();
+      expect(r.importedPayoutsNote).toBeNull();
+    });
+
+    it('getLiability 194R carries the note only when it applies to the FY', async () => {
+      const on = await service.getLiability('194R', '2026-27', CLIENT);
+      expect(on.importedPayoutsCountedFrom).toBe('2026-04-01');
+      expect(on.importedPayoutsNote).toBe('Includes imported (vendor) payouts paid on/after 1 Apr 2026');
+      const off = await service.getLiability('194R', '2025-26', CLIENT);
+      expect(off).not.toHaveProperty('importedPayoutsCountedFrom');
+      expect(off).not.toHaveProperty('importedPayoutsNote');
+    });
+
+    it('export194R Summary sheet states the note only when it applies to the FY', async () => {
+      const summaryRows = async (fy: string) => {
+        const { buffer } = await service.export194R(CLIENT, fy);
+        const wb = XLSX.read(buffer, { type: 'buffer' });
+        return XLSX.utils.sheet_to_json<{ Field: string; Value: unknown }>(wb.Sheets['Summary']);
+      };
+      const on = await summaryRows('2026-27');
+      const note = on.find((r) => r.Field === 'Imported (vendor) payouts');
+      expect(String(note?.Value)).toContain('Includes imported (vendor) payouts paid on/after 1 Apr 2026');
+      const off = await summaryRows('2025-26');
+      expect(off.find((r) => r.Field === 'Imported (vendor) payouts')).toBeUndefined();
     });
   });
 
@@ -137,7 +207,14 @@ describe('TdsService — imported (VENDOR_IMPORT) payouts in 194R', () => {
       const calls = importedCalls();
       expect(calls).toHaveLength(1);
       const where = calls[0][0].where;
-      expect(where).toMatchObject({ clientId: CLIENT, status: 'PAID', batch: { sourceKind: 'VENDOR_IMPORT' } });
+      // BOTH filters: VENDOR_IMPORT batch AND the vendor incentive-payout fieldId — a future
+      // vendor-import batch of another kind is never swept in automatically.
+      expect(where).toMatchObject({
+        clientId: CLIENT,
+        status: 'PAID',
+        fieldId: 'historical-incentive-payout',
+        batch: { sourceKind: 'VENDOR_IMPORT' },
+      });
       expect(where.paidAt.gte.toISOString()).toBe('2026-03-31T18:30:00.000Z');
       expect(where.paidAt.lt.toISOString()).toBe('2027-03-31T18:30:00.000Z');
 
@@ -255,6 +332,20 @@ describe('TdsService — imported (VENDOR_IMPORT) payouts in 194R', () => {
     });
     it('istDayStartInstant = 00:00 IST', () => {
       expect(istDayStartInstant('2026-04-01').toISOString()).toBe('2026-03-31T18:30:00.000Z');
+    });
+    it('importedCountFromForFy: disclosed only when the date is before the FY end', () => {
+      expect(importedCountFromForFy(null, '2026-27')).toBeNull();
+      expect(importedCountFromForFy('2026-04-01', '2025-26')).toBeNull();
+      expect(importedCountFromForFy('2026-03-31', '2025-26')).toBe('2026-03-31');
+      expect(importedCountFromForFy('2026-04-01', '2026-27')).toBe('2026-04-01');
+      expect(importedCountFromForFy('2024-04-01', '2026-27')).toBe('2024-04-01');
+    });
+    it('importedCountFromBounds: [2000-01-01, today(IST) + 1 year]', () => {
+      expect(importedCountFromBounds(new Date('2026-11-13T10:00:00Z'))).toEqual({ min: '2000-01-01', max: '2027-11-13' });
+      // 23:00 UTC on 31 Dec = 1 Jan IST
+      expect(importedCountFromBounds(new Date('2026-12-31T23:00:00Z')).max).toBe('2028-01-01');
+      // 29 Feb + 1y → 28 Feb
+      expect(importedCountFromBounds(new Date('2028-02-29T06:00:00Z')).max).toBe('2029-02-28');
     });
   });
 });

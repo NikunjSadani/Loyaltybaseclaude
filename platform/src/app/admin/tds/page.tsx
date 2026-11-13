@@ -628,10 +628,11 @@ export default function AdminTdsPage() {
           {r194?.importedPayoutsCountedFrom && (
             <p
               data-testid="tds-194r-imported-note"
+              role="note"
               className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2"
             >
               Includes imported (vendor) payouts paid on/after {formatCountFrom(r194.importedPayoutsCountedFrom)} — liability
-              only, no deduction (set on TDS Config).
+              only, payer-borne (nothing was withheld from those payouts). Set on the TDS Treatment screen.
             </p>
           )}
           {/* Summary cards */}

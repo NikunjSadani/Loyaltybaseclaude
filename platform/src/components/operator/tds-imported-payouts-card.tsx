@@ -6,20 +6,25 @@
  *   GET /api/admin/tds/config/imported-payouts  → { success, data: { clientId, countFrom } }
  *   PUT /api/admin/tds/config/imported-payouts  { clientId, countFrom: 'YYYY-MM-DD' | null }  (GIFSY_ADMIN)
  *
- * OFF (countFrom null) is the default for every tenant: imported VENDOR_IMPORT payout history stays
+ * OFF (countFrom null) is the default for every tenant: imported vendor incentive-payout history stays
  * out of 194R. ON: imported payouts paid on/after the date count in the 194R report base —
- * REPORT / LIABILITY ONLY (no deduction, no TDS invoice, no recovery). Non-Gifsy viewers see it
- * read-only. The editor stays hidden until the stored value has loaded, so a stale on-screen
- * default can never overwrite it.
+ * REPORT / LIABILITY ONLY (no deduction, no TDS invoice, no recovery); the liability is payer-borne
+ * for every client because nothing was withheld. Non-Gifsy viewers see it read-only. The editor
+ * stays hidden until the stored value has loaded, so a stale on-screen default can never overwrite it.
+ *
+ * Guard rails (mirrors the API): date 2000-01-01 … today(IST)+1 year; a date before the CURRENT
+ * FY's start also counts earlier financial years → explicit confirm; "Switch off" asks to confirm.
  */
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { History, Loader2 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { api } from '@/lib/api-client'
 
 const ENDPOINT = '/api/admin/tds/config/imported-payouts'
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000
+export const IMPORTED_MIN_DATE = '2000-01-01'
 
 /** 'YYYY-MM-DD' → '1 Apr 2026' (falls back to the raw string). */
 export function formatCountFrom(iso: string): string {
@@ -29,32 +34,79 @@ export function formatCountFrom(iso: string): string {
   return `${d} ${months[m - 1] ?? ''} ${y}`
 }
 
+function pad(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
+/** Today (IST) + 1 year as 'YYYY-MM-DD' (29 Feb → 28 Feb) — the API's upper bound. */
+export function importedMaxDate(now: Date = new Date()): string {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS)
+  const y = ist.getUTCFullYear() + 1
+  const mo = ist.getUTCMonth()
+  const lastDay = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate()
+  return `${y}-${pad(mo + 1)}-${pad(Math.min(ist.getUTCDate(), lastDay))}`
+}
+
+/** 1 April of the CURRENT Indian financial year (IST) as 'YYYY-MM-DD'. */
+export function currentFyStart(now: Date = new Date()): string {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS)
+  const y = ist.getUTCMonth() >= 3 ? ist.getUTCFullYear() : ist.getUTCFullYear() - 1
+  return `${y}-04-01`
+}
+
+/** A real calendar date (rejects 2026-02-30). */
+function isRealDate(iso: string): boolean {
+  if (!ISO_DATE.test(iso)) return false
+  const [y, m, d] = iso.split('-').map((s) => parseInt(s, 10))
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d
+}
+
 export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string; isGifsy: boolean }) {
   // The tenant the stored value was LOADED for — the save always targets that same tenant.
   const [tenantId, setTenantId] = useState(clientId)
   const [stored, setStored] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  const [touched, setTouched] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const [earlierFyConfirmed, setEarlierFyConfirmed] = useState(false)
+  const [confirmingOff, setConfirmingOff] = useState(false)
 
-  useEffect(() => {
+  const load = useCallback(() => {
     let cancelled = false
-    api.get<{ clientId: string; countFrom: string | null }>(ENDPOINT).then((res) => {
-      if (cancelled) return
-      if (res.success && res.data) {
-        setTenantId(res.data.clientId || clientId)
-        setStored(res.data.countFrom ?? null)
-        setDraft(res.data.countFrom ?? '')
-        setLoaded(true)
-      } else {
-        setLoadError('Could not load this setting. Please retry — nothing has been changed.')
-      }
-    })
+    setLoading(true)
+    setLoadError(null)
+    api
+      .get<{ clientId: string; countFrom: string | null }>(ENDPOINT)
+      .then((res) => {
+        if (cancelled) return
+        if (res.success && res.data) {
+          setTenantId(res.data.clientId || clientId)
+          setStored(res.data.countFrom ?? null)
+          setDraft(res.data.countFrom ?? '')
+          setTouched(false)
+          setLoaded(true)
+        } else {
+          setLoadError(
+            (!res.success && res.error) || 'Could not load this setting. Please retry — nothing has been changed.',
+          )
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError('Could not load this setting. Please retry — nothing has been changed.')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
     return () => { cancelled = true }
-  }, [])
+  }, [clientId])
+
+  useEffect(() => load(), [load])
 
   async function save(next: string | null) {
     if (!isGifsy || !loaded || saving) return
@@ -63,6 +115,7 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
     setSaved(false)
     const res = await api.put<{ clientId: string; countFrom: string | null }>(ENDPOINT, { clientId: tenantId, countFrom: next })
     setSaving(false)
+    setConfirmingOff(false)
     if (!res.success) {
       setSaveError(res.error || 'Could not save — only a Gifsy Admin can change this setting.')
       return
@@ -70,12 +123,22 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
     const value = res.data?.countFrom ?? next
     setStored(value)
     setDraft(value ?? '')
+    setTouched(false)
+    setEarlierFyConfirmed(false)
     setSaved(true)
     setTimeout(() => setSaved(false), 3000)
   }
 
-  const draftValid = ISO_DATE.test(draft)
+  const maxDate = importedMaxDate()
+  const fyStart = currentFyStart()
+  const validationError = !draft
+    ? 'Choose the date from which imported payouts count.'
+    : !isRealDate(draft) || draft < IMPORTED_MIN_DATE || draft > maxDate
+      ? `Enter a date between ${formatCountFrom(IMPORTED_MIN_DATE)} and ${formatCountFrom(maxDate)}.`
+      : null
   const draftChanged = draft !== (stored ?? '')
+  const beforeCurrentFy = !validationError && draft < fyStart
+  const canSave = !saving && !validationError && draftChanged && (!beforeCurrentFy || earlierFyConfirmed)
 
   return (
     <Card data-testid="tds-imported-card">
@@ -88,23 +151,38 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
           imported payouts <strong>paid on or after the date below</strong> are counted in each retailer&apos;s 194R
           total (PAN or no-PAN at 20%, ₹20,000 threshold, deposits subtract) — <strong>liability only, no
           deduction</strong>: nothing is withheld from future payouts, no TDS invoice is raised and nothing is
-          recovered automatically. For a gross-up client this liability is payer-borne. Earlier imported payouts
-          stay excluded.
+          recovered automatically. Because nothing was withheld from those payouts, this liability is{' '}
+          <strong>payer-borne</strong> for every client. Earlier imported payouts stay excluded. Retailer TDS paid
+          later must be uploaded as <strong>deposits</strong> only — never as off-platform benefits (that would
+          count the imported payouts twice).
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {loadError && <p data-testid="tds-imported-load-error" className="text-sm text-red-600">{loadError}</p>}
+        {loadError && (
+          <div className="flex flex-wrap items-center gap-3">
+            <p data-testid="tds-imported-load-error" role="alert" className="text-sm text-red-600">{loadError}</p>
+            <button
+              type="button"
+              data-testid="tds-imported-retry"
+              disabled={loading}
+              onClick={() => load()}
+              className="px-3 py-1.5 rounded-md text-sm font-medium border border-gray-300 text-gray-700 disabled:opacity-50"
+            >
+              {loading ? 'Retrying…' : 'Retry'}
+            </button>
+          </div>
+        )}
 
         {!loaded && !loadError && (
-          <div data-testid="tds-imported-loading" className="flex items-center gap-2 text-gray-400">
-            <Loader2 className="h-4 w-4 animate-spin" aria-label="Loading" />
+          <div data-testid="tds-imported-loading" role="status" className="flex items-center gap-2 text-gray-400">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
             <span className="text-sm">Loading…</span>
           </div>
         )}
 
         {loaded && (
           <>
-            <p data-testid="tds-imported-status" className="text-sm text-gray-900">
+            <p data-testid="tds-imported-status" role="status" className="text-sm text-gray-900">
               {stored ? (
                 <>
                   <span className="font-semibold text-emerald-700">On</span> — count imported (vendor) payouts paid on/after{' '}
@@ -118,40 +196,97 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
             </p>
 
             {isGifsy ? (
-              <div className="flex flex-wrap items-end gap-3">
-                <label className="text-sm text-gray-700 flex flex-col gap-1">
-                  Count from (date paid)
-                  <input
-                    type="date"
-                    data-testid="tds-imported-date"
-                    value={draft}
-                    disabled={saving}
-                    onChange={(e) => setDraft(e.target.value)}
-                    className="border border-gray-300 rounded-md px-3 py-2 text-sm disabled:opacity-60"
-                  />
-                </label>
-                <button
-                  type="button"
-                  data-testid="tds-imported-save"
-                  disabled={saving || !draftValid || !draftChanged}
-                  onClick={() => void save(draft)}
-                  className="px-4 py-2 rounded-md text-sm font-medium bg-[var(--brand-primary)] text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {stored ? 'Save date' : 'Switch on'}
-                </button>
-                {stored && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="text-sm text-gray-700 flex flex-col gap-1">
+                    Count from (date paid)
+                    <input
+                      type="date"
+                      data-testid="tds-imported-date"
+                      value={draft}
+                      min={IMPORTED_MIN_DATE}
+                      max={maxDate}
+                      disabled={saving}
+                      aria-invalid={touched && !!validationError}
+                      aria-describedby="tds-imported-date-hint"
+                      onChange={(e) => {
+                        setDraft(e.target.value)
+                        setTouched(true)
+                        setEarlierFyConfirmed(false)
+                      }}
+                      className="border border-gray-300 rounded-md px-3 py-2 text-sm disabled:opacity-60"
+                    />
+                  </label>
                   <button
                     type="button"
-                    data-testid="tds-imported-off"
-                    disabled={saving}
-                    onClick={() => void save(null)}
-                    className="px-4 py-2 rounded-md text-sm font-medium border border-gray-300 text-gray-700 disabled:opacity-50"
+                    data-testid="tds-imported-save"
+                    disabled={!canSave}
+                    onClick={() => void save(draft)}
+                    className="px-4 py-2 rounded-md text-sm font-medium bg-[var(--brand-primary)] text-white disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Switch off
+                    {stored ? 'Save date' : 'Switch on'}
                   </button>
-                )}
-                {saved && (
-                  <span data-testid="tds-imported-saved" className="text-xs font-semibold text-emerald-600">✓ Saved</span>
+                  {stored && !confirmingOff && (
+                    <button
+                      type="button"
+                      data-testid="tds-imported-off"
+                      disabled={saving}
+                      onClick={() => setConfirmingOff(true)}
+                      className="px-4 py-2 rounded-md text-sm font-medium border border-gray-300 text-gray-700 disabled:opacity-50"
+                    >
+                      Switch off
+                    </button>
+                  )}
+                  {saved && (
+                    <span data-testid="tds-imported-saved" role="status" className="text-xs font-semibold text-emerald-600">✓ Saved</span>
+                  )}
+                </div>
+
+                <div id="tds-imported-date-hint">
+                  {touched && validationError && (
+                    <p data-testid="tds-imported-date-error" role="alert" className="text-xs text-red-600">{validationError}</p>
+                  )}
+                  {beforeCurrentFy && draftChanged && (
+                    <div data-testid="tds-imported-earlier-fy-warning" role="alert" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 space-y-2">
+                      <p>
+                        {formatCountFrom(draft)} is before the current financial year (starts {formatCountFrom(fyStart)}) —
+                        this will also count imported payouts in earlier financial years.
+                      </p>
+                      <label className="flex items-center gap-2 font-medium">
+                        <input
+                          type="checkbox"
+                          data-testid="tds-imported-earlier-fy-confirm"
+                          checked={earlierFyConfirmed}
+                          onChange={(e) => setEarlierFyConfirmed(e.target.checked)}
+                        />
+                        Yes, count imported payouts in earlier financial years too
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                {confirmingOff && (
+                  <div data-testid="tds-imported-off-confirm" role="alert" className="flex flex-wrap items-center gap-3 text-sm text-gray-800 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                    <span>Switch off? Imported payouts will no longer be counted in the 194R report.</span>
+                    <button
+                      type="button"
+                      data-testid="tds-imported-off-yes"
+                      disabled={saving}
+                      onClick={() => void save(null)}
+                      className="px-3 py-1.5 rounded-md text-sm font-medium bg-red-600 text-white disabled:opacity-50"
+                    >
+                      Yes, switch off
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="tds-imported-off-cancel"
+                      disabled={saving}
+                      onClick={() => setConfirmingOff(false)}
+                      className="px-3 py-1.5 rounded-md text-sm font-medium border border-gray-300 text-gray-700 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 )}
               </div>
             ) : (
@@ -159,7 +294,7 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
                 This is a Gifsy-operated setting — only a Gifsy Admin can change it.
               </p>
             )}
-            {saveError && <p data-testid="tds-imported-save-error" className="text-xs text-red-600">{saveError}</p>}
+            {saveError && <p data-testid="tds-imported-save-error" role="alert" className="text-xs text-red-600">{saveError}</p>}
           </>
         )}
       </CardContent>
