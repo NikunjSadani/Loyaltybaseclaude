@@ -137,3 +137,69 @@ describe('HeavyOpInterceptor', () => {
     expect(l.inUse).toBe(0);
   });
 });
+
+describe('@HeavyOp() through a real Nest HTTP stack (DI + exception filter)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { Controller, Get } = require('@nestjs/common');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { Test } = require('@nestjs/testing');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const request = require('supertest');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { AllExceptionsFilter } = require('./filters/all-exceptions.filter');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { HeavyOp, heavyOpLimiter } = require('./heavy-op-limiter');
+
+  let gate!: () => void;
+  const blocked = new Promise<void>((r) => { gate = r; });
+
+  class SlowController {
+    async slow() {
+      await blocked;
+      return { ok: true };
+    }
+    fast() {
+      return { ok: true };
+    }
+  }
+  Controller('h')(SlowController);
+  const d1 = Object.getOwnPropertyDescriptor(SlowController.prototype, 'slow')!;
+  Get('slow')(SlowController.prototype, 'slow', d1);
+  HeavyOp()(SlowController.prototype, 'slow', d1);
+  const d2 = Object.getOwnPropertyDescriptor(SlowController.prototype, 'fast')!;
+  Get('fast')(SlowController.prototype, 'fast', d2);
+  HeavyOp()(SlowController.prototype, 'fast', d2);
+
+  it('2 heavy requests run, the 3rd gets 503 + Retry-After: 30 + the busy message; slots free afterwards', async () => {
+    const mod = await Test.createTestingModule({ controllers: [SlowController] }).compile();
+    const app = mod.createNestApplication();
+    app.useGlobalFilters(new AllExceptionsFilter());
+    await app.init();
+    const server = app.getHttpServer();
+    const base = heavyOpLimiter.inUse;
+    try {
+      const p1 = request(server).get('/h/slow');
+      const p2 = request(server).get('/h/slow');
+      const r1 = p1.then((x: unknown) => x);
+      const r2 = p2.then((x: unknown) => x);
+      // wait until both hold a slot
+      for (let i = 0; i < 100 && heavyOpLimiter.inUse < base + 2; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(heavyOpLimiter.inUse).toBe(base + 2);
+
+      const busy = await request(server).get('/h/fast');
+      expect(busy.status).toBe(503);
+      expect(busy.headers['retry-after']).toBe('30');
+      expect(busy.body).toEqual({ success: false, error: HEAVY_OP_BUSY_MESSAGE });
+
+      gate();
+      expect(((await r1) as { status: number }).status).toBe(200);
+      expect(((await r2) as { status: number }).status).toBe(200);
+      for (let i = 0; i < 100 && heavyOpLimiter.inUse > base; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(heavyOpLimiter.inUse).toBe(base);
+      expect((await request(server).get('/h/fast')).status).toBe(200);
+    } finally {
+      gate();
+      await app.close();
+    }
+  });
+});

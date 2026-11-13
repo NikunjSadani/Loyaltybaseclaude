@@ -4,9 +4,11 @@ import {
   ExecutionContext,
   HttpException,
   HttpStatus,
+  Inject,
   Injectable,
   Logger,
   NestInterceptor,
+  Optional,
   UseInterceptors,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
@@ -101,6 +103,9 @@ export class HeavyOpLimiter {
   }
 }
 
+/** Optional DI token for overriding the limiter (tests); unset in the app. */
+export const HEAVY_OP_LIMITER = Symbol('HEAVY_OP_LIMITER');
+
 /** The single per-instance limiter shared by every heavy route and job. */
 export const heavyOpLimiter = new HeavyOpLimiter();
 
@@ -116,7 +121,13 @@ export function heavyOpBusyException(): HttpException {
  */
 @Injectable()
 export class HeavyOpInterceptor implements NestInterceptor {
-  constructor(private readonly limiter: HeavyOpLimiter = heavyOpLimiter) {}
+  private readonly limiter: HeavyOpLimiter;
+
+  // Nest instantiates this per route via DI: the token is never provided, so @Optional()
+  // resolves `undefined` → the shared per-instance limiter. Tests pass their own limiter.
+  constructor(@Optional() @Inject(HEAVY_OP_LIMITER) limiter?: HeavyOpLimiter) {
+    this.limiter = limiter ?? heavyOpLimiter;
+  }
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const http = context.switchToHttp();

@@ -63,6 +63,7 @@ import {
   AchievementTemplateQueryDto,
   KpiScopeCountQueryDto,
 } from './dto/targets.dto';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 // ─── KPI CRUD ─────────────────────────────────────────────────────────────────
 
@@ -206,6 +207,7 @@ export class TargetsController {
           : cb(new BadRequestException('Only .xlsx/.xls files are accepted'), false),
     }),
   )
+  @HeavyOp()
   uploadTargets(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
@@ -313,6 +315,7 @@ export class AchievementsController {
           : cb(new BadRequestException('Only .xlsx/.xls files are accepted'), false),
     }),
   )
+  @HeavyOp()
   uploadAchievements(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,

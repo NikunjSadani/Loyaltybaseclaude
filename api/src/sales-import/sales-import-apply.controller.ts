@@ -8,6 +8,7 @@ import { SalesPreviewService } from './apply/sales-preview.service';
 import { SalesApplyService } from './apply/sales-apply.service';
 import { assertSalesImportAccess } from './sales-import-access';
 import type { ApplyRequest, ApplyResult, SalesImportPreview } from './sales-import.contract';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 /**
  * Sales Import PREVIEW / APPLY routes (plan §5.2):
@@ -28,6 +29,7 @@ export class SalesImportApplyController {
 
   @Get(':id/preview')
   @RequirePermission('targets:read')
+  @HeavyOp()
   async getPreview(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportPreview> {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: false });
     return this.preview.preview(user.clientId, id);
@@ -36,6 +38,7 @@ export class SalesImportApplyController {
   @Post(':id/apply')
   @HttpCode(200)
   @RequirePermission('targets:upload')
+  @HeavyOp()
   async postApply(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() body: ApplyRequest): Promise<ApplyResult> {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
     return this.apply.apply(user, id, body);

@@ -36,6 +36,7 @@ import { platformWide } from '../common/tenant-scope';
 import { Roles } from '../common/decorators/roles.decorator';
 import { fyOfToday } from './tds.helpers';
 import { DepositUploadQueryDto, LiabilityQueryDto, UploadQueryDto } from './dto/tds.dto';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 @Controller('admin/tds')
 export class TdsController {
@@ -121,6 +122,7 @@ export class TdsController {
    */
   @Get('194r/export')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @HeavyOp()
   async export194R(
     @CurrentUser() user: JwtPayload,
     @Query('fy') fy?: string,
@@ -149,6 +151,7 @@ export class TdsController {
    */
   @Get('194c/export')
   @Roles('GIFSY_ADMIN')
+  @HeavyOp()
   async export194C(
     @CurrentUser() user: JwtPayload,
     @Query('fy') fy?: string,

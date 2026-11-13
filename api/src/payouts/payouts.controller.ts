@@ -24,6 +24,7 @@ import {
   ReceiveFundDto,
   ReconciliationQueryDto,
 } from './dto/payouts.dto';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 /**
  * Credits & Payouts API — re-homed from platform/src/app/api/payouts/* onto /v1.
@@ -140,6 +141,7 @@ export class PayoutsController {
   @Get('reconciliation')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('payouts:reconcile')
+  @HeavyOp()
   async reconciliation(
     @CurrentUser() user: JwtPayload,
     @Query() query: ReconciliationQueryDto,

@@ -26,6 +26,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import { CommitComputeDto, PreviewComputeDto, SimulateComputeDto } from './dto/points-compute.dto';
 import { ExportsService } from '../exports/exports.service';
 import { POINTS_ENGINE_DISABLED_MESSAGE } from '../exports/kinds/batch2/points-compute.kinds';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 @Controller('admin/points-compute')
 export class PointsComputeController {
@@ -39,6 +40,7 @@ export class PointsComputeController {
   @Post('preview')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('points_rules:read')
+  @HeavyOp()
   preview(@CurrentUser() user: JwtPayload, @Body() dto: PreviewComputeDto) {
     return this.compute.previewCompute(user, {
       period: dto.period,
@@ -57,6 +59,7 @@ export class PointsComputeController {
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('credits:upload')
   @UseGuards(SalesMonthClosedGuard) // D-1: 409 while the month is OPEN in Sales Import (inert unless features.salesImport)
+  @HeavyOp()
   commit(@CurrentUser() user: JwtPayload, @Body() dto: CommitComputeDto) {
     return this.compute.commitCompute(user, {
       period: dto.period,

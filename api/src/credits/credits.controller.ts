@@ -35,6 +35,7 @@ import {
   PatchReversalDto,
   UtrUploadQueryDto,
 } from './dto/credits.dto';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 /**
  * Awards & Credits (§12a) — re-homed from
@@ -225,6 +226,7 @@ export class CreditsController {
   @Post('payout-downloads')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('credits:download_bank_file')
+  @HeavyOp()
   async createPayoutDownload(
     @CurrentUser() user: JwtPayload,
     @Body() dto: CreatePayoutDownloadDto,
