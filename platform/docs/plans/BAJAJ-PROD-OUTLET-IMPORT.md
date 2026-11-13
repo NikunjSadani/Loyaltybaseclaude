@@ -110,7 +110,23 @@ release (the report is computed live, so the payout-history import does not wait
   upload batch per month for provenance; ON CONFLICT DO NOTHING (prod had none). Σ TOTAL target ₹334.97 cr / achieved
   ₹309.97 cr. Backup `1794546891138` → job `bajaj-prod-targets` → verifier PASS (every KPI value per row = file).
 - ⚠️ **Points engine is ON for Bajaj prod: NEVER run a points compute for Apr 2025 – Sep 2026** — those months were already
-  paid by the vendor (points imported via Earn & Burn §9b; payouts via §9). Same for the October file once imported.
+  paid by the vendor (points imported via Earn & Burn §9b; payouts via §9). Same for October 2026 (§9d).
+
+## 9d. October 2026 targets + achievements — ✅ DONE on prod 2026-11-13, verified
+- Source: `C:\Users\nikun\Downloads\Book1 (5).xlsx` (owner: "sales, target and achievement for October month") — sheet
+  "RLP CALCU" (header row 1, code col "Customer Code") + "BSC Calcu" (header row 3, code col "CODE"). September-style
+  labels in some headers treated as leftovers; month = **2026-10**.
+- Owner decision 2026-11-13: **targets/achievements only — rewards NOT imported** (the file's payout/points columns, ~₹18.8 L,
+  stay out until the owner decides). Same mapping/rules as §9c: RLP TOTAL ← Total Target/Total Ach · ADHO ← ADHO Target/ACHV ·
+  NON ADHO ← Non ADHO Target/ACHV · FOCUS BRAND ← FB Target/ACHV · LINES ← Line Target/Line Ach; BSC → TOTAL ← Target/Ach;
+  prod outlets only (222 skipped: 122 RLP + 100 BSC); 2 decimals; 64 negative achievements kept; 3 outlets in BOTH sheets
+  (50399987, 50400211, 50400219 — all SSS on prod; identical achievement, slightly different target) → RLP row kept.
+- Result: **6,387 OutletTarget + 6,387 OutletSalesRecord** (4,067 RLP + 2,320 BSC). Σ TOTAL target ₹22,38,37,447.83 /
+  achieved ₹18,12,04,757.94. Backup `1794560683079` → job `bajaj-prod-targets` (script `migrations/jobs/bajaj-prod-targets-v2.js`
+  = v1 + `MAX_MONTH` env; manifest `migrations/bajaj-prod-targets-manifest-2026-10.json`; job env reset to DRY_RUN=true) →
+  verifier PASS (`bajaj-prod-targets-oct-verify.js`: every KPI value per row = file, 0 missing/extra/orphan). Builder
+  `scratchpad/prodimport/tgt_oct_build.js`.
+- ⚠️ **Never run a points compute for 2026-10** without the owner — October rewards are an open decision.
 
 ## 10. TDS already deducted by the vendor (FY 2026-27) — APPROVED as a PARTIAL import (owner 2026-11-12)
 - ✅ **DONE on prod 2026-11-13** (owner: vendor TDS was PAID BY BAJAJ ON TOP → gross-up; import as-is). 212 TdsOffPlatformEntry
