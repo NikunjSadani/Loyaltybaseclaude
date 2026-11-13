@@ -35,6 +35,7 @@ import {
   type DimMatch,
   type SalesKpiFilter,
   type SalesKpiMeasure,
+  type SalesKpiProductSource,
 } from '../sales-import.contract';
 
 export const SALES_KPI_MEASURES: readonly SalesKpiMeasure[] = ['AMOUNT', 'QUANTITY', 'PRODUCT_COUNT'];
@@ -70,6 +71,13 @@ export interface KpiDefLite {
   kpiOutletType?: string | null;
   /** APPLIES-TO scope of the target KPI (KpiDef outletTypes / programs / subPrograms). Wins over `kpiOutletType` when non-empty. */
   kpiScope?: Partial<AppliesTo> | null;
+  /** FOCUS-FROM-TARGETS: absent / 'FILTER' = `filter` for every outlet; 'TARGET_NAMES' = per-outlet products (see below). */
+  productSource?: SalesKpiProductSource;
+  /**
+   * FOCUS-FROM-TARGETS (set by attachOutletFilters, only on TARGET_NAMES definitions): the filter to use for a ROSTER
+   * outlet code; `undefined` → the outlet gets NO key for this KPI (omitted, not 0). Absent → `filter` for every outlet.
+   */
+  outletFilter?: (outletCode: string) => SalesKpiFilter | undefined;
 }
 
 /** Outlet facets used for scope (Outlet.outletType.code, Outlet.programName, Outlet.programCategory). */

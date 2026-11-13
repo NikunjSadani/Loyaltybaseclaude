@@ -114,6 +114,8 @@ export interface SalesKpiDefinitionDto {
   kpiCode: string;
   measure: SalesKpiMeasure;
   filter: SalesKpiFilter;
+  /** Absent = 'FILTER'. TARGET_NAMES -> `filter` must be {} (see SalesKpiProductSource). */
+  productSource?: SalesKpiProductSource;
   outletTypes: string[];
   programs: string[];
   enabled: boolean;
@@ -354,6 +356,8 @@ export interface MonthPreview extends MonthSummary {
   kpis: MonthPreviewKpi[];
   /** lastInvoiceDate = that import's latest invoice date in this month (compare with this file's lastDate). */
   lastApplied: { importId: string; at: string; byName: string; lastInvoiceDate: string | null } | null;
+  /** Targets, focus products, blockers and gaps for this month: the one place to check before applying. */
+  reconciliation: MonthReconciliation;
 }
 
 export interface SalesImportPreview {
@@ -375,6 +379,8 @@ export interface ApplyRequest {
   processingVersion: number;
   acknowledgePartialMonths?: string[];       // required for months with STARTS_AFTER_FIRST/ENDS_BEFORE_MONTH_END
   acknowledgeOlderThanLastApplied?: boolean; // required if any month has OLDER_THAN_LAST_APPLIED (re-checked under the month lock)
+  /** month -> MonthReconciliation.focusFingerprint reviewed; required for every month whose fingerprint is non-empty (409 on mismatch). */
+  expectedFocusFingerprints?: Record<string, string>;
 }
 export interface ApplyMonthResult {
   month: string;
@@ -418,6 +424,12 @@ export interface SalesMonthRow {
    * POST admin/sales-months/:month/rebuild-product-list rebuilds it (it changes no figures). True without history.
    */
   productListCurrent: boolean;
+  /**
+   * FOCUS-FROM-TARGETS: targets for this month were uploaded after its last apply, so the applied achievements may be
+   * out of date (e.g. focus KPIs computed before the focus names existed). The Months tab shows "Targets changed —
+   * recalculate". false when never applied.
+   */
+  targetsChangedSinceApply: boolean;
 }
 
 /**
@@ -443,12 +455,15 @@ export interface SalesMonthRecalcPreview {
   outletsAffected: number;    // OutletSalesRecord rows whose owned KPI values would change (incl. keys removed)
   warnings: SalesMonthWarning[]; // NEGATIVE_VALUES / REPLACES_MANUAL_VALUES
   kpis: MonthPreviewKpi[];
+  reconciliation: MonthReconciliation;
 }
 
 /** POST admin/sales-months/:month/recalculate body (targets:upload; month OPEN; 409 when either token is stale). */
 export interface SalesMonthRecalcRequest {
   expectedDefinitionsHash: string;
   expectedHistoryAppliedAt: string;
+  /** SalesMonthRecalcPreview.reconciliation.focusFingerprint (required when non-empty; 409 on mismatch). */
+  expectedFocusFingerprint?: string;
 }
 /** POST admin/sales-months/:month/recalculate response (recorded as a SalesImportApply with source HISTORY). */
 export type SalesMonthRecalcResult = ApplyMonthResult;
@@ -482,3 +497,133 @@ export interface SalesImportDrainResult {
 export interface AchievementUploadOwnershipExtension {
   skippedImporterOwnedKpis?: string[];
 }
+
+// ─── Focus products from the target file (FOCUS-FROM-TARGETS — owner-approved 2026-11-13) ─────────────────────
+// Design: platform/docs/plans/FOCUS-FROM-TARGETS-DESIGN.md. ONE place to enter focus products (the month's target
+// file, the per-outlet name column of the KPI), ONE place to reconcile (the month preview = MonthReconciliation).
+
+/**
+ * Where a Sales Import KPI's products come from.
+ *  - FILTER       = the definition's own `filter` (one product list for every outlet in scope) — the original behaviour.
+ *  - TARGET_NAMES = per outlet, the product names written for this KPI in THAT MONTH's target file
+ *                   (OutletTarget.targetValues.__names[kpiCode], e.g. "CNO & ADHO500"); `filter` must be {}.
+ * Absent on a request = FILTER.
+ */
+export type SalesKpiProductSource = 'FILTER' | 'TARGET_NAMES';
+
+/** How one written product name (a token between `&` / `,`) was read against the tenant's known products. */
+export type FocusTokenStatus = 'MATCHED' | 'UNMATCHED' | 'AMBIGUOUS';
+export interface FocusTokenResolution {
+  /** As written in the target file (trimmed), e.g. "ADHO500". */
+  token: string;
+  /** focusKey(token): UPPERCASE, all whitespace removed — the acceptance key. */
+  key: string;
+  status: FocusTokenStatus;
+  /** MATCHED: e.g. {brand:'ADHO', skuGroup:'500'}, or {brand:'CNO'} = the whole brand. */
+  product?: DimMatch;
+  /** AMBIGUOUS: every product the token could mean. */
+  candidates?: DimMatch[];
+  /** UNMATCHED that an operator accepted as "not sold yet" for this month + KPI (counts as 0, no longer blocks). */
+  accepted?: { byName: string; at: string };
+}
+
+/** One distinct focus name of a KPI in the month, across the outlets that carry it. */
+export interface FocusNameSummary {
+  /** The most common spelling as written. */
+  name: string;
+  /** Tokens' keys sorted and joined with '&' — identifies the name regardless of spelling/order. */
+  key: string;
+  outlets: number;
+  /** Outlet type code → outlets ('' = outlet without a type). */
+  outletsByType: Record<string, number>;
+  tokens: FocusTokenResolution[];
+  /** This month, over the outlets carrying the name, in the KPI's own measure (₹ / cases / products). */
+  achieved: { total: number; outletsZero: number };
+}
+
+export type FocusBlockerCode = 'FOCUS_UNMATCHED' | 'FOCUS_AMBIGUOUS' | 'FOCUS_MISSING_NAME';
+/** Anything here blocks applying the month (canApply false). */
+export interface FocusBlocker {
+  code: FocusBlockerCode;
+  kpiCode: string;
+  /** UNMATCHED / AMBIGUOUS: the token as written + its key. */
+  token?: string;
+  key?: string;
+  outlets: number;
+  /** ≤ 20 stored outlet codes. */
+  sampleOutletCodes: string[];
+  /** Plain English for the screen. */
+  message: string;
+}
+
+export interface MonthFocusKpi {
+  kpiCode: string;
+  label: string;
+  names: FocusNameSummary[];
+  /** In the KPI's scope, a numeric target for this KPI this month, but no name → FOCUS_MISSING_NAME. */
+  missingName: { outlets: number; sampleOutletCodes: string[] };
+}
+
+export interface MonthTargetsSummary {
+  /** Importer-owned KPIs only. */
+  kpis: Array<{ kpiCode: string; label: string; outletsWithTarget: number; totalTarget: number }>;
+  /** Latest target upload batch for the month (ISO), null = no targets uploaded for the month. */
+  targetUploadedAt: string | null;
+  /**
+   * The month's targets were uploaded AFTER the month was last applied (sales first, targets later is normal): the
+   * applied achievements do not reflect them yet -> re-apply / Recalculate. false when never applied or no targets.
+   */
+  newerThanLastApply: boolean;
+}
+
+/** The single reconciliation view of a month (import preview AND recalculate preview). */
+export interface MonthReconciliation {
+  targets: MonthTargetsSummary;
+  /** One entry per enabled TARGET_NAMES definition ([] when none). */
+  focus: MonthFocusKpi[];
+  /** Non-empty → canApply false. */
+  blockers: FocusBlocker[];
+  gaps: {
+    /** Roster outlets with a numeric target for an owned KPI this month but no sales line. */
+    targetNoSales: { outlets: number; sampleOutletCodes: string[] };
+    /** Roster outlets with sales lines this month but no target row for the month. */
+    salesNoTarget: { outlets: number; sampleOutletCodes: string[] };
+  };
+  /**
+   * Fingerprint of everything the focus KPIs depend on for this month (per-outlet names, how each name resolved,
+   * acceptances, missing names). '' when the tenant has no enabled TARGET_NAMES definition. Send it back on apply;
+   * a changed target file / acceptance / product list since the preview → 409 "refresh the preview".
+   */
+  focusFingerprint: string;
+}
+
+/** POST admin/sales-months/:month/focus-acceptances (targets:upload; month OPEN): accept an UNMATCHED token as "not sold yet". */
+export interface FocusAcceptanceRequest {
+  kpiCode: string;
+  key: string;
+}
+/** DELETE admin/sales-months/:month/focus-acceptances?kpiCode=&key= removes it. Both return the month's acceptances. */
+export interface FocusAcceptanceList {
+  month: string;
+  acceptances: Array<{ kpiCode: string; key: string; byName: string; at: string }>;
+}
+
+/**
+ * Early, NON-blocking check returned by the target upload (TargetsService upload response `focusCheck`), so a typo is
+ * seen on the day targets are uploaded. The month preview re-checks and is the one that blocks.
+ */
+export interface TargetUploadFocusCheck {
+  /** false = nothing to check against yet (no TARGET_NAMES definition, or no stored product list yet). */
+  checked: boolean;
+  reason?: string;
+  months: Array<{ month: string; blockers: FocusBlocker[] }>;
+}
+
+/** A reconciliation with nothing in it (no targets, no focus KPIs, no blockers, no gaps). */
+export const EMPTY_MONTH_RECONCILIATION: MonthReconciliation = {
+  targets: { kpis: [], targetUploadedAt: null, newerThanLastApply: false },
+  focus: [],
+  blockers: [],
+  gaps: { targetNoSales: { outlets: 0, sampleOutletCodes: [] }, salesNoTarget: { outlets: 0, sampleOutletCodes: [] } },
+  focusFingerprint: '',
+};

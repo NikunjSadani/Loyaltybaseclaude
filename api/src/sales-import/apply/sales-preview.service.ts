@@ -3,6 +3,7 @@ import type { SalesImport } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { currentMonthKey } from '../../targets/targets.helpers';
 import {
+  EMPTY_MONTH_RECONCILIATION,
   SALES_IMPORT_BATCH_STATUS,
   type MonthPreview,
   type MonthSummary,
@@ -171,6 +172,7 @@ export class SalesPreviewService {
         };
       }),
       lastApplied,
+      reconciliation: EMPTY_MONTH_RECONCILIATION, // lane B2 replaces with buildMonthReconciliation
     };
   }
 }

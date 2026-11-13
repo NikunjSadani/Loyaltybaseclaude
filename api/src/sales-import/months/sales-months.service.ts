@@ -297,6 +297,7 @@ export class SalesMonthsService {
       historySourceImportId: history?.sourceImportId ?? null,
       historyAppliedAt: history ? history.appliedAt.toISOString() : null,
       productListCurrent: !history || ['current', 'empty'].includes(classifyMonthSummaries([{ month, ...history }]).get(month)!),
+      targetsChangedSinceApply: false, // lane B2 computes (latest target batch for the month > last apply)
     };
   }
 

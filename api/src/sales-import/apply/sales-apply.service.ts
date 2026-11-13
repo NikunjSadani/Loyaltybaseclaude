@@ -9,6 +9,7 @@ import {
   SALES_IMPORT_BATCH_STATUS,
   type ApplyMonthResult,
   type ApplyRequest,
+  EMPTY_MONTH_RECONCILIATION,
   type ApplyResult,
   type MonthSummary,
   type SalesColumnMapping,
@@ -427,6 +428,7 @@ export class SalesApplyService {
     );
     return {
       month,
+      reconciliation: EMPTY_MONTH_RECONCILIATION, // lane B2 replaces with buildMonthReconciliation
       monthState: state.state,
       canApply: blockedReason === null,
       ...(blockedReason ? { blockedReason } : {}),

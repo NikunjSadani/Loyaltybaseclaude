@@ -8,14 +8,14 @@ import {
   applyBlockers, monthLabel, dayLabel, warningText, formatSigned, formatRupees, formatBytes, sentence, formatCases,
   formatKpiValue, formatProducts, measureUnitLabel,
 } from '../format';
-import type { MonthPreview } from '../types';
+import { EMPTY_MONTH_RECONCILIATION, type MonthPreview } from '../types';
 
 function month(over: Partial<MonthPreview>): MonthPreview {
   return {
     month: '2026-05', firstDate: '2026-05-01', lastDate: '2026-05-31', lines: 10, matchedOutlets: 2,
     unmatchedCustomers: 1, matchedAmountRupees: 100, matchedQuantity: 1, unmatchedAmountRupees: 5,
     unmatchedQuantity: 0, monthState: 'OPEN', canApply: true, warnings: [], zeroFillOutlets: 0, kpis: [],
-    lastApplied: null, ...over,
+    lastApplied: null, reconciliation: EMPTY_MONTH_RECONCILIATION, ...over,
   };
 }
 

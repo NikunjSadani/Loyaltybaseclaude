@@ -7,7 +7,7 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import type { MonthPreview, SalesImportDetail, SalesImportPreview } from '@/lib/sales-import/types';
+import { EMPTY_MONTH_RECONCILIATION, type MonthPreview, type SalesImportDetail, type SalesImportPreview } from '@/lib/sales-import/types';
 
 const push = vi.fn();
 vi.mock('next/navigation', () => ({
@@ -50,7 +50,7 @@ function month(over: Partial<MonthPreview> = {}): MonthPreview {
     unmatchedCustomers: 2, matchedAmountRupees: 1200, matchedQuantity: 4.5, unmatchedAmountRupees: 30,
     unmatchedQuantity: 0.2, monthState: 'OPEN', canApply: true, warnings: [], zeroFillOutlets: 1,
     kpis: [{ kpiCode: 'KPI_X', label: 'KPI X', measure: 'AMOUNT', newTotal: 1200, currentTotal: 1000, delta: 200, outletsNonZero: 3, outletsNegative: 0 }],
-    lastApplied: null, ...over,
+    lastApplied: null, reconciliation: EMPTY_MONTH_RECONCILIATION, ...over,
   };
 }
 
