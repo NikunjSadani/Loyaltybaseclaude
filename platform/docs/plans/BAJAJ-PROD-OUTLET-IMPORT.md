@@ -56,7 +56,8 @@ Correction list sent to the owner: `…\Files received\2026.11.04\Bajaj - data c
 - Rollback = delete bajaj `visibility_captures` whose formValues reference this batch prefix (never delete the photo objects).
 - Scripts: scratchpad `prodimport/bajaj-prod-vis-*.job.js`; manifest `gs://gifsy-platform-files/migrations/bajaj-prod-visibility-manifest-2026-11-12.json`.
 
-## 9. Retailer payout history — ⏸ PREPARED + DRY-RUN PASSED 2026-11-12, LIVE WAITS FOR THE TDS RULE
+## 9. Retailer payout history — ✅ DONE on prod 2026-11-13 (after release `247fae4b` put the 194R VENDOR_IMPORT rule live), verified
+- Result: backup `1794552515663` → `bajaj-prod-payout-history` (DRY_RUN=false, TDS_RULE_LIVE=true) → **48,086 PAID entries / 18 monthly batches, Σ ₹2,89,09,560.70**; verifier PASS (every row = file by outlet/month/amount/UTR; status PAID; sourceKind VENDOR_IMPORT; no TDS fields; 0 TDS deduction rows and 0 wallet movements created).
 - Source: `…\Files received\2026.11.04\Payout RLP.xlsx` (21 monthly sheets; Jan–Mar 2025 sheets excluded — **Apr 2025 onward only**, owner). Same model as staging: **Done rows only** → one PAID `CreditPayoutEntry` per row ("Incentive Payout", fieldId `historical-incentive-payout`), one CONFIRMED `CreditBatch` per month (`sourceKind=VENDOR_IMPORT`, `sourceKey=bajaj-prod-payout-rlp-<YYYY-MM>`), paidAt = payout date, no wallet/invoice/TDS/disbursement.
 - Prod scope: **48,086 rows / 3,964 outlets / 18 months / ₹2,89,09,560.70** (amounts kept to the paisa, half-up — history of money already paid, NOT the whole-rupee rule for new credits; raw file Σ ₹2,89,09,556.20). Skipped: 1,045 outlets not on prod (₹27.7 L); Failed/Rejected/Reversed 579; "UTR no. awaited" 843 (ask Bajaj for final status).
 - Differences vs staging (owner-agreed): 228 placeholder references ("Same Bank does not provide Utr No.", "-", …) stored as `utr = NULL` with the text in narration (staging stored the text as the UTR); amounts to the paisa.
@@ -106,6 +107,15 @@ release (the report is computed live, so the payout-history import does not wait
   paid by the vendor (points imported via Earn & Burn §9b; payouts via §9). Same for the October file once imported.
 
 ## 10. TDS already deducted by the vendor (FY 2026-27) — APPROVED as a PARTIAL import (owner 2026-11-12)
+- ✅ **DONE on prod 2026-11-13** (owner: vendor TDS was PAID BY BAJAJ ON TOP → gross-up; import as-is). 212 TdsOffPlatformEntry
+  (194R benefit value per outlet-month, Σ ₹50,53,115 = vendor "Outlet Points"; monthly split from TDS/rate scaled to the
+  total) + 212 TdsDeposit (vendor TDS per outlet-month, Σ ₹6,25,285, depositDate = that month's challan date (first of
+  a pair), forPeriod = the month, depositorType CLIENT). **Every row stores panNumber '' + outletCode** → the report
+  resolves the outlet owner's CURRENT PAN at read time, so PANs added later (corrections) switch 20% → 10% automatically —
+  no re-import (owner reminder 2026-11-13). Expected report effect for these 119 deductees at import time: liability ₹8,84,251
+  (gross-up 10/90 · 20/80, >₹20k) / deposited ₹6,25,285 / outstanding ₹2,58,966 (vendor deducted at flat 10/20%; 25 outlets
+  10%-vs-20% until PANs land; 2 outlets taxed at exactly ₹20k). Backup `1794553985636` → job `bajaj-prod-vendor-tds`
+  (batch `bajaj-vendor-tds-fy2627-2026-11-13`, refuses re-run) → verifier PASS (row-by-row, 0 other-tenant rows).
 - Source: `…\Files received\2026.11.04\TDS Calculation FY 2026-27.xlsx` — 124 outlet rows, all wholesaler points TDS (119 on prod = WHOLESALER/BSC; 5 not on prod: 16069, 27618, 451278 not in the master; 50333738, 50781620 CISPL blank). Monthly APR–SEP TDS per outlet, Σ ₹6,50,166; challans per month (no./value/date) Σ ₹10,47,030.
 - PAN on prod: 59 have it; 25 vendor-has-PAN but missing on prod (in the corrections list); 35 no PAN (20%) → needs the no-PAN TDS keys from the no-PAN release.
 - Plan: AFTER next release (no-PAN + 194R vendor-import rule) → payout history (§9) → Earn & Burn points → import per-outlet monthly TDS deducted for the 119, each tied to that month's challan. Left OUT until Bajaj sends retailer TDS: the ₹3.97 L challan remainder (likely retailer payout TDS) + the 5 outlets. Check before relying on it: re-keying no-PAN TDS rows to the PAN once corrections land.
