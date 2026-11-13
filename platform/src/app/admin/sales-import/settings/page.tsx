@@ -158,7 +158,11 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
                     {!d.enabled && <span className="text-[10px] font-semibold text-gray-500">Not imported (manual upload)</span>}
                   </td>
                   <td className="px-3 py-2 text-gray-700">{measureUnitLabel(d.measure)}</td>
-                  <td className="px-3 py-2 text-gray-700 max-w-md">{describeFilter(d.filter, mapping.dimensions)}</td>
+                  <td className="px-3 py-2 text-gray-700 max-w-md">
+                    {d.productSource === 'TARGET_NAMES'
+                      ? <span data-testid={`kpi-products-${d.kpiCode}`}>From the target file<span className="block text-[11px] text-gray-500">per outlet, each month</span></span>
+                      : describeFilter(d.filter, mapping.dimensions)}
+                  </td>
                   <td className="px-3 py-2 text-gray-600 text-xs">
                     {d.outletTypes.length || d.programs.length
                       ? [d.outletTypes.length ? `Types: ${d.outletTypes.join(', ')}` : '', d.programs.length ? `Programmes: ${d.programs.join(', ')}` : ''].filter(Boolean).join(' · ')

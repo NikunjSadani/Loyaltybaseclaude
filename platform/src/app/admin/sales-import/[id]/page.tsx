@@ -21,16 +21,19 @@ import { Spinner } from '@/components/ui/spinner';
 import { downloadBlob } from '@/lib/download';
 import { fetchDownload, salesImportApi } from '@/lib/sales-import/api';
 import {
-  STATUS_CHIP, STATUS_LABEL, WARNING_SHORT, applyBlockers, dateTimeLabel, dayLabel, formatBytes, formatCases,
-  formatCount, formatKpiValue, formatRupees, formatSigned, isActiveStatus, isPartialMonth, monthLabel, sentence,
-  warningText,
+  STATUS_CHIP, STATUS_LABEL, WARNING_SHORT, applyBlockers, dateTimeLabel, dayLabel, focusBlockedMonths,
+  focusFingerprintsFor, formatBytes, formatCases, formatCount, formatKpiValue, formatRupees, formatSigned,
+  isActiveStatus, isPartialMonth, monthLabel, sentence, warningText,
 } from '@/lib/sales-import/format';
 import { getUploadState, subscribeUpload } from '@/lib/sales-import/upload-store';
 import { usePermissions } from '@/lib/use-permissions';
 import {
   SALES_IMPORT_ABANDONED_UPLOAD_HOURS, SALES_IMPORT_MAX_DIM_VALUE_CHARS, SALES_IMPORT_STALE_HEARTBEAT_MINUTES,
-  type ApplyMonthResult, type MonthPreview, type SalesImportDetail, type SalesImportPreview,
+  type ApplyMonthResult, type MonthPreview, type SalesDimensionMapping, type SalesImportDetail, type SalesImportPreview,
 } from '@/lib/sales-import/types';
+import {
+  MonthReconciliationPanel, reconciliationNeedsAttention, useDimensionLabels,
+} from '../_components/month-reconciliation-panel';
 
 const POLL_MS = 2000;
 const UPLOADING_POLL_MS = 5000;
@@ -249,15 +252,20 @@ function LastAppliedRange({ m }: { m: MonthPreview }) {
 }
 
 function MonthRow({
-  m, selected, onToggle, partialAck, onPartialAck, importId, onDownloadError, canAct,
+  m, selected, onToggle, partialAck, onPartialAck, importId, onDownloadError, canAct, dims, onRefresh,
 }: {
   m: MonthPreview; selected: boolean; onToggle(): void; partialAck: boolean; onPartialAck(v: boolean): void;
   importId: string; onDownloadError(msg: string): void; canAct: boolean;
+  dims: SalesDimensionMapping[];
+  /** Re-fetch the preview (after Accept / Undo of a focus product name); true when it landed. */
+  onRefresh(): Promise<boolean>;
 }) {
   const [open, setOpen] = useState(false);
   const partial = isPartialMonth(m);
   const label = monthLabel(m.month);
-  const showDetail = open || m.warnings.length > 0;
+  const attention = reconciliationNeedsAttention(m.reconciliation);
+  const showDetail = open || m.warnings.length > 0 || attention;
+  const measures = Object.fromEntries(m.kpis.map((k) => [k.kpiCode, k.measure]));
   return (
     <>
       <tr className="border-b border-gray-100 align-top" data-testid={`month-row-${m.month}`}>
@@ -314,6 +322,8 @@ function MonthRow({
         <tr className="border-b border-gray-100 bg-gray-50/50">
           <td />
           <td colSpan={8} className="px-3 py-3 space-y-3">
+            <MonthReconciliationPanel month={m.month} reconciliation={m.reconciliation} measures={measures} dims={dims}
+              canAct={canAct} monthOpen={m.monthState === 'OPEN'} expanded={open} onRefresh={onRefresh} />
             {m.warnings.length > 0 && (
               <ul className="space-y-1" data-testid={`month-warnings-${m.month}`}>
                 {m.warnings.map((w) => (
@@ -400,6 +410,7 @@ function PreviewSection({
   const seqRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
+  const dims = useDimensionLabels();
 
   /** Loads the preview; resolves true only when THIS load landed successfully (stale / failed → false). */
   const loadPreview = useCallback(async (): Promise<boolean> => {
@@ -440,6 +451,9 @@ function PreviewSection({
     ...(noKpis ? ['No KPIs are set up for Sales Import yet, so there is nothing to apply. Add them under Settings first.'] : []),
     ...applyBlockers(months, selected, partialAcks, olderAck),
   ];
+  // Months held back by focus-product problems cannot be ticked; say why next to Apply even when nothing is ticked.
+  const heldBack = focusBlockedMonths(months, selected);
+  const shownBlockers = [...blockers, ...heldBack.filter((b) => !blockers.includes(b))];
   const anyOlder = months.some((m) => selected.has(m.month) && m.warnings.includes('OLDER_THAN_LAST_APPLIED'));
   const kpiNames = Array.from(new Set(months.flatMap((m) => m.kpis.map((k) => k.label || k.kpiCode))));
 
@@ -466,12 +480,14 @@ function PreviewSection({
     setNotice(null);
     setResults(null);
     const partialMonths = picked.filter(isPartialMonth).map((m) => m.month);
+    const fingerprints = focusFingerprintsFor(months, selected);
     const r = await salesImportApi.apply(importId, {
       months: picked.map((m) => m.month),
       expectedDefinitionsHash: preview.definitionsHash,
       processingVersion: preview.processingVersion,
       ...(partialMonths.length ? { acknowledgePartialMonths: partialMonths } : {}),
       ...(anyOlder ? { acknowledgeOlderThanLastApplied: true } : {}),
+      ...(Object.keys(fingerprints).length ? { expectedFocusFingerprints: fingerprints } : {}),
     });
     if (!r.success) {
       if (r.status === 401) {
@@ -596,6 +612,8 @@ function PreviewSection({
                     return next;
                   })}
                   onDownloadError={setDownloadError}
+                  dims={dims}
+                  onRefresh={loadPreview}
                 />
               ))}
             </tbody>
@@ -619,9 +637,9 @@ function PreviewSection({
           <Button variant="primary" onClick={apply} disabled={blockers.length > 0} loading={applying} data-testid="sales-import-apply">
             Apply {selected.size > 0 ? `${selected.size} month${selected.size > 1 ? 's' : ''}` : ''}
           </Button>
-          {(selected.size > 0 || noKpis) && blockers.length > 0 && (
+          {(((selected.size > 0 || noKpis) && blockers.length > 0) || heldBack.length > 0) && (
             <ul className="text-xs text-gray-600 list-disc pl-4" data-testid="sales-import-apply-blockers">
-              {blockers.map((b) => <li key={b}>{b}</li>)}
+              {((selected.size > 0 || noKpis) ? shownBlockers : heldBack).map((b) => <li key={b}>{b}</li>)}
             </ul>
           )}
         </div>

@@ -7,6 +7,8 @@ import { api, authHeader, type ApiResponse } from '@/lib/api-client';
 import type {
   ApplyRequest,
   ApplyResult,
+  FocusAcceptanceList,
+  FocusAcceptanceRequest,
   SalesColumnMapping,
   SalesHistoryCombos,
   SalesImportCombos,
@@ -98,6 +100,16 @@ export const salesImportApi = {
     api.post<SalesMonthRecalcResult>(`${MONTHS}/${id(month)}/recalculate`, body),
   reopenMonth: (month: string, body: SalesMonthReopenRequest = {}) =>
     api.post<SalesMonthReopenResult>(`${MONTHS}/${id(month)}/reopen`, body),
+
+  // Focus products from the target file (FOCUS-FROM-TARGETS §5): accept an UNMATCHED name as "not sold yet" / undo.
+  /** Accept one UNMATCHED focus product name (month + KPI + token key) as "not sold yet" — it then counts as 0. */
+  acceptFocusToken: (month: string, body: FocusAcceptanceRequest) =>
+    api.post<FocusAcceptanceList>(`${MONTHS}/${id(month)}/focus-acceptances`, body),
+  /** Removes that acceptance (the name blocks applying again until it is matched or accepted). */
+  undoFocusAcceptance: (month: string, kpiCode: string, key: string) =>
+    api.del<FocusAcceptanceList>(
+      `${MONTHS}/${id(month)}/focus-acceptances?${new URLSearchParams({ kpiCode, key }).toString()}`,
+    ),
 };
 
 /** Fetches a binary download (csv/xlsx) and returns the Blob, or an error message from the JSON envelope. */

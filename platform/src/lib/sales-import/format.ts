@@ -202,10 +202,41 @@ export function applyBlockers(
   if (picked.length === 0) out.push('Tick at least one month.');
   for (const m of picked) {
     if (!m.canApply) out.push(`${monthLabel(m.month)} cannot be applied${m.blockedReason ? `: ${sentence(m.blockedReason)}.` : '.'}`);
+    // FOCUS-FROM-TARGETS: the server sets canApply false for any blocker; never let one through if it ever did not.
+    else if ((m.reconciliation?.blockers.length ?? 0) > 0) out.push(focusBlockedText(m));
     if (isPartialMonth(m) && !partialAcks.has(m.month)) out.push(`Confirm the partial-month replacement for ${monthLabel(m.month)}.`);
   }
   if (picked.some((m) => m.warnings.includes('OLDER_THAN_LAST_APPLIED')) && !olderAck) {
     out.push("Confirm that you want to roll a month back to this file's older data.");
+  }
+  return out;
+}
+
+/** "November 2026 cannot be applied: <reason>." for a month with focus-product blockers. */
+function focusBlockedText(m: Pick<MonthPreview, 'month' | 'blockedReason' | 'reconciliation'>): string {
+  const n = m.reconciliation?.blockers.length ?? 0;
+  const why = m.blockedReason
+    ? sentence(m.blockedReason)
+    : `${n} focus product problem${n === 1 ? '' : 's'} in the target file — see Focus brands`;
+  return `${monthLabel(m.month)} cannot be applied: ${why}.`;
+}
+
+/**
+ * Months NOT ticked that are held back by focus-product blockers (they cannot be ticked, so applyBlockers never sees
+ * them): shown next to the Apply button so the reason is visible without opening each month.
+ */
+export function focusBlockedMonths(months: MonthPreview[], selected: Set<string>): string[] {
+  return months
+    .filter((m) => !selected.has(m.month) && (m.reconciliation?.blockers.length ?? 0) > 0)
+    .map(focusBlockedText);
+}
+
+/** month → focusFingerprint for the ticked months whose fingerprint is non-empty (ApplyRequest.expectedFocusFingerprints). */
+export function focusFingerprintsFor(months: MonthPreview[], selected: Set<string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of months) {
+    const fp = m.reconciliation?.focusFingerprint;
+    if (selected.has(m.month) && fp) out[m.month] = fp;
   }
   return out;
 }

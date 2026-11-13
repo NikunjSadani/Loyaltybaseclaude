@@ -25,6 +25,8 @@ import { authHeader } from '@/lib/api-client';
 import { buildMonthRange, formatMonth } from '@/lib/targets';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
+import { TargetFocusCheckNotice } from '@/components/admin/target-focus-check-notice';
+import type { TargetUploadFocusCheck } from '@/lib/sales-import/types';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -52,6 +54,8 @@ interface UploadResult {
   savedCount?:   number;
   /** APPLIES-TO D1: values ignored because the KPI does not apply to that outlet (absent on older API builds). */
   ignoredOutOfScope?: number;
+  /** FOCUS-FROM-TARGETS §7: early, NON-blocking check of the focus product names (absent on older API builds). */
+  focusCheck?:   TargetUploadFocusCheck;
   rows:          UploadRow[];
 }
 
@@ -531,6 +535,8 @@ export default function TargetUploadPage() {
               .filter(r => r.status === 'accepted' || r.status === 'updated')
               .map(r => ({ rowIndex: r.rowIndex, outletCode: r.outletCode ?? r.outletId, remarks: r.remarks }))}
           />
+
+          <TargetFocusCheckNotice check={result.focusCheck} />
 
           {/* Past-month lock notice */}
           {result.skippedLockedMonths && result.skippedLockedMonths.length > 0 && (

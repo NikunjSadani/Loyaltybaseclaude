@@ -4,6 +4,8 @@
  * Sales Import KPI definition editor (SALES-IMPORT-PIPELINE-PLAN §6.2, §6.2a, §11 F-6): which KPI, rupees / cases /
  * number of products bought (PRODUCT_COUNT, §6.2b),
  * which products (Product set builder), optional outlet scope, and a "Test against latest import" button.
+ * FOCUS-FROM-TARGETS: "Which products count" = picked here (productSource FILTER, the builder) or from the target file
+ * per outlet (TARGET_NAMES: no builder, saves `filter: {}`; the month preview reconciles the names).
  */
 import React, { useState } from 'react';
 import { AlertTriangle, FlaskConical, Info } from 'lucide-react';
@@ -12,8 +14,8 @@ import { salesImportApi } from '@/lib/sales-import/api';
 import { entryKey, listOf, validateFilter } from '@/lib/sales-import/product-set';
 import { formatCases, formatCount, formatProducts, formatRupees, monthLabel } from '@/lib/sales-import/format';
 import type {
-  SalesColumnMapping, SalesImportCombos, SalesKpiDefinitionDto, SalesKpiFilter, SalesKpiMeasure, SalesKpiTestResult,
-  SalesSegmentOptions,
+  SalesColumnMapping, SalesImportCombos, SalesKpiDefinitionDto, SalesKpiFilter, SalesKpiMeasure,
+  SalesKpiProductSource, SalesKpiTestResult, SalesSegmentOptions,
 } from '@/lib/sales-import/types';
 import { ProductSetBuilder } from './product-set-builder';
 import { ScopeMultiSelect, sameScopeValue } from '@/components/admin/scope-multi-select';
@@ -28,6 +30,9 @@ export interface TenantKpi {
   outletTypes?: string[];
   programs?: string[];
   subPrograms?: string[];
+  /** KpiDef's per-outlet name column in the target file (needed for "From the target file"). Absent on older payloads. */
+  hasNameOverride?: boolean;
+  nameOverrideLabel?: string | null;
 }
 
 type KpiScopeSource = Pick<TenantKpi, 'code' | 'outletType' | 'outletTypes' | 'programs' | 'subPrograms'>;
@@ -96,6 +101,15 @@ const MEASURE_OPTIONS: ReadonlyArray<{ value: SalesKpiMeasure; label: string }> 
   { value: 'PRODUCT_COUNT', label: 'Number of products bought (lines)' },
 ];
 
+/** "Which products count" choices (FOCUS-FROM-TARGETS). */
+const PRODUCT_SOURCE_OPTIONS: ReadonlyArray<{ value: SalesKpiProductSource; label: string }> = [
+  { value: 'FILTER', label: 'Pick products here' },
+  { value: 'TARGET_NAMES', label: 'From the target file, per outlet' },
+];
+
+export const TARGET_NAMES_HELP =
+  "Each outlet counts the products written for this KPI in that month's target file (the KPI's name column), e.g. 'CNO & ADHO500'. Write each product as brand + SKU group (ADHO500) or just the brand (CNO); separate several with &.";
+
 const PRODUCT_COUNT_HELP =
   "Counts each different product (combination of the product columns, e.g. Brand + SKU group) the outlet bought in the month, where the outlet's net amount for that product is above zero. Returns cancel purchases.";
 
@@ -154,6 +168,8 @@ export function KpiEditor({
   const [testError, setTestError] = useState<string | null>(null);
 
   const editing = Boolean(initial.id);
+  const productSource: SalesKpiProductSource = def.productSource ?? 'FILTER';
+  const fromTargets = productSource === 'TARGET_NAMES';
   const dims = mapping.dimensions;
   const hasAmount = Boolean(mapping.amount);
   const hasQty = Boolean(mapping.quantity);
@@ -180,7 +196,8 @@ export function KpiEditor({
     else noOptionsText = 'Every enabled KPI already comes from Sales Import. Create a new KPI under Targets first.';
   }
 
-  const blockers: string[] = [...validation.errors];
+  // From the target file: the picked-product list is not used (saved as {}), so its errors don't block.
+  const blockers: string[] = fromTargets ? [] : [...validation.errors];
   if (!def.kpiCode) blockers.push('Choose a KPI.');
   if (def.measure === 'AMOUNT' && !hasAmount) blockers.push('The column mapping has no amount column, so a rupee KPI is not possible.');
   if (def.measure === 'QUANTITY' && !hasQty) blockers.push('The column mapping has no quantity column, so a cases KPI is not possible.');
@@ -203,7 +220,13 @@ export function KpiEditor({
     if (!canEdit || blockers.length || saving) return;
     setSaving(true);
     setSaveError(null);
-    const { id, ...body } = def;
+    const { id, productSource: _src, ...rest } = def;
+    void _src;
+    // productSource is sent when it is TARGET_NAMES, or when the definition already carried one (so switching back to
+    // "Pick products here" is saved); a plain FILTER definition is sent exactly as before.
+    const body: SalesKpiDefinitionDto = fromTargets
+      ? { ...rest, productSource: 'TARGET_NAMES', filter: {} }
+      : initial.productSource !== undefined ? { ...rest, productSource: 'FILTER' } : rest;
     const r = id ? await salesImportApi.patchKpi(id, body) : await salesImportApi.createKpi(body);
     setSaving(false);
     if (!r.success) { setSaveError(r.error); return; }
@@ -256,16 +279,49 @@ export function KpiEditor({
         </fieldset>
       </div>
 
-      <div>
-        <p className="text-xs font-medium text-gray-700 mb-2">Which products</p>
-        <ProductSetBuilder
-          filter={def.filter}
-          onChange={(f) => setDef((d) => ({ ...d, filter: f }))}
-          dims={dims}
-          combos={combos}
-          warnings={freshTest ? { unmatched: freshTest.unmatchedEntries, redundant: freshTest.redundantEntries } : null}
-        />
-      </div>
+      <fieldset>
+        <legend className="text-xs font-medium text-gray-700">Which products count</legend>
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+          {PRODUCT_SOURCE_OPTIONS.map(({ value, label }) => (
+            <label key={value} className="flex items-center gap-1.5">
+              <input type="radio" name="productSource" checked={productSource === value}
+                onChange={() => setDef((d) => ({ ...d, productSource: value }))} />
+              {label}
+            </label>
+          ))}
+        </div>
+        {fromTargets ? (
+          <div className="mt-2 space-y-2" data-testid="product-source-target-names">
+            <p className="text-[11px] text-gray-600">{TARGET_NAMES_HELP}</p>
+            {selectedKpi?.hasNameOverride && selectedKpi.nameOverrideLabel && (
+              <p className="text-[11px] text-gray-600">
+                Name column for {def.kpiCode} in the target file: <strong>{selectedKpi.nameOverrideLabel}</strong>.
+              </p>
+            )}
+            {selectedKpi && selectedKpi.hasNameOverride === false && (
+              <p role="status" data-testid="product-source-no-name-column"
+                className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                The KPI {def.kpiCode} has no per-outlet name column yet. Turn it on for this KPI under Targets → KPI
+                settings first, so the target file can carry the product names.
+              </p>
+            )}
+            <p className="text-[11px] text-gray-500">
+              Check how each name was read — and any name that could not be matched — in the month preview of an import
+              (or Months → Recalculate) before applying.
+            </p>
+          </div>
+        ) : (
+          <div className="mt-2">
+            <ProductSetBuilder
+              filter={def.filter}
+              onChange={(f) => setDef((d) => ({ ...d, filter: f }))}
+              dims={dims}
+              combos={combos}
+              warnings={freshTest ? { unmatched: freshTest.unmatchedEntries, redundant: freshTest.redundantEntries } : null}
+            />
+          </div>
+        )}
+      </fieldset>
 
       <div className="grid gap-4 sm:grid-cols-2">
         {segments && segments.outletTypes.length > 0 ? (
@@ -298,7 +354,8 @@ export function KpiEditor({
       )}
       </fieldset>
 
-      {/* Test */}
+      {/* Test — only for a picked product list: per-outlet names are checked in the month preview. */}
+      {!fromTargets && (
       <div className="rounded-lg border border-gray-200 p-3 space-y-2">
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" type="button" onClick={runTest} loading={testing} disabled={validation.errors.length > 0}>
@@ -333,6 +390,7 @@ export function KpiEditor({
           </div>
         )}
       </div>
+      )}
 
       <div className="flex items-start gap-2 text-xs text-blue-800 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
         <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -360,8 +418,8 @@ export function KpiEditor({
           <Button variant="ghost" type="button" onClick={() => {
             if (!window.confirm('Start a new cases KPI with the same products? Unsaved changes to this KPI are discarded — save it first if you changed it.')) return;
             onDuplicateAsCases({
-            kpiCode: '', measure: 'QUANTITY', filter: def.filter, outletTypes: def.outletTypes, programs: def.programs,
-              enabled: true, order: def.order + 1,
+            kpiCode: '', measure: 'QUANTITY', filter: fromTargets ? {} : def.filter, outletTypes: def.outletTypes, programs: def.programs,
+              enabled: true, order: def.order + 1, ...(fromTargets ? { productSource: 'TARGET_NAMES' as const } : {}),
             });
           }}>
             Duplicate as cases KPI

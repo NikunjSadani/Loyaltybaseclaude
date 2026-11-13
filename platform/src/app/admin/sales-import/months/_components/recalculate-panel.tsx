@@ -16,6 +16,7 @@ import {
   dateTimeLabel, formatCount, formatKpiValue, formatRupees, formatSigned, monthLabel, sentence, warningText,
 } from '@/lib/sales-import/format';
 import type { SalesMonthRecalcPreview, SalesMonthRecalcResult } from '@/lib/sales-import/types';
+import { MonthReconciliationPanel, useDimensionLabels } from '../../_components/month-reconciliation-panel';
 
 export function RecalculatePanel({ month, onClose, onApplied }: {
   month: string;
@@ -32,6 +33,7 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
   const seqRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
+  const dims = useDimensionLabels();
 
   const load = useCallback(async (): Promise<boolean> => {
     const seq = ++seqRef.current;
@@ -59,6 +61,7 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
     const r = await salesImportApi.recalculate(month, {
       expectedDefinitionsHash: preview.definitionsHash,
       expectedHistoryAppliedAt: preview.historyAppliedAt,
+      ...(preview.reconciliation?.focusFingerprint ? { expectedFocusFingerprint: preview.reconciliation.focusFingerprint } : {}),
     });
     if (!mountedRef.current) return;
     if (!r.success) {
@@ -125,6 +128,9 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
               <span><strong>{label} cannot be recalculated:</strong> {sentence(preview.blockedReason)}.</span>
             </div>
           )}
+          <MonthReconciliationPanel month={month} reconciliation={preview.reconciliation}
+            measures={Object.fromEntries(preview.kpis.map((k) => [k.kpiCode, k.measure]))} dims={dims}
+            canAct monthOpen={preview.monthState === 'OPEN'} onRefresh={load} />
           {preview.warnings.length > 0 && (
             <ul className="space-y-1" data-testid="recalc-warnings">
               {preview.warnings.map((w) => (
