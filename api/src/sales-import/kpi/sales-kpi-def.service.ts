@@ -9,6 +9,7 @@ import type {
   SalesKpiDefinitionPatch,
   SalesKpiFilter,
   SalesKpiMeasure,
+  SalesKpiProductSource,
   SalesKpiTestRequest,
   SalesKpiTestResult,
   SalesSegmentOptions,
@@ -36,12 +37,27 @@ export const KPI_TEST_MAX_COMBOS = 100_000;
 
 const MEASURE_ERROR = `measure must be one of ${SALES_KPI_MEASURES.join(', ')}.`;
 
+/** FOCUS-FROM-TARGETS: where a definition's products come from (absent = FILTER). */
+export const SALES_KPI_PRODUCT_SOURCES: readonly SalesKpiProductSource[] = ['FILTER', 'TARGET_NAMES'];
+export const TARGET_NAMES_NEEDS_NAME_COLUMN =
+  'Turn on the per-outlet name column for this KPI in KPI settings first, so the target file can carry the product names.';
+export const TARGET_NAMES_FILTER_MUST_BE_EMPTY =
+  "A KPI whose products come from the target file can't also have its own product list. Clear the product list first.";
+export const TARGET_NAMES_TEST_MESSAGE =
+  "Test a 'from the target file' KPI on the month screen: its products differ per outlet and per month, so they are checked against each month's targets there.";
+
+/** Stored productSource → the contract value (anything but TARGET_NAMES reads as FILTER). */
+export function productSourceOf(v: unknown): SalesKpiProductSource {
+  return v === 'TARGET_NAMES' ? 'TARGET_NAMES' : 'FILTER';
+}
+
 export function toDto(row: SalesKpiDefinition): SalesKpiDefinitionDto {
   return {
     id: row.id,
     kpiCode: row.kpiCode,
     measure: row.measure as SalesKpiMeasure,
     filter: (row.filter ?? {}) as SalesKpiFilter,
+    productSource: productSourceOf(row.productSource),
     outletTypes: row.outletTypes,
     programs: row.programs,
     enabled: row.enabled,
@@ -54,13 +70,15 @@ export function toDto(row: SalesKpiDefinition): SalesKpiDefinitionDto {
  * `kpiOutletType` and the APPLIES-TO `kpiScope`; `kpiOwnScope` resolves them exactly like `kpiAppliesTo`.
  */
 export function toLite(
-  row: Pick<SalesKpiDefinition, 'kpiCode' | 'measure' | 'filter' | 'outletTypes' | 'programs'>,
+  row: Pick<SalesKpiDefinition, 'kpiCode' | 'measure' | 'filter' | 'outletTypes' | 'programs'> & { productSource?: string | null },
   kpi: KpiScopeLike | null = null,
 ): KpiDefLite {
   return {
     kpiCode: row.kpiCode,
     measure: row.measure as SalesKpiMeasure,
     filter: (row.filter ?? {}) as SalesKpiFilter,
+    // FOCUS-FROM-TARGETS: only a TARGET_NAMES definition carries the field (FILTER lites stay exactly as before).
+    ...(productSourceOf(row.productSource) === 'TARGET_NAMES' ? { productSource: 'TARGET_NAMES' as const } : {}),
     outletTypes: row.outletTypes ?? [],
     programs: row.programs ?? [],
     kpiOutletType: (kpi?.outletType ?? '').trim() || null,
@@ -175,7 +193,7 @@ export class SalesKpiDefService {
     if (!kpiCode) throw new BadRequestException('kpiCode is required.');
     const kpi = await this.prisma.kpiDef.findFirst({
       where: { clientId, code: kpiCode, enabled: true },
-      select: { code: true },
+      select: { code: true, hasNameOverride: true, nameOverrideLabel: true },
     });
     if (!kpi) throw new BadRequestException(`"${kpiCode}" is not an enabled KPI of this tenant. Create it in KPI settings first.`);
 
@@ -195,6 +213,20 @@ export class SalesKpiDefService {
     const fv = validateAndNormalizeFilter(dto.filter ?? {}, profile.dimensions.map((d) => d.key));
     if (fv.errors.length > 0) throw new BadRequestException(fv.errors.join(' '));
 
+    // FOCUS-FROM-TARGETS (design §9): absent = FILTER; TARGET_NAMES needs an empty product list and the KPI's per-outlet
+    // name column (that is where the target file carries the product names).
+    const rawSource = dto.productSource === undefined || dto.productSource === null ? 'FILTER' : dto.productSource;
+    if (!SALES_KPI_PRODUCT_SOURCES.includes(rawSource as SalesKpiProductSource)) {
+      throw new BadRequestException(`productSource must be one of ${SALES_KPI_PRODUCT_SOURCES.join(', ')}.`);
+    }
+    const productSource = rawSource as SalesKpiProductSource;
+    if (productSource === 'TARGET_NAMES') {
+      if ((fv.filter.anyOf?.length ?? 0) > 0 || (fv.filter.noneOf?.length ?? 0) > 0) {
+        throw new BadRequestException(TARGET_NAMES_FILTER_MUST_BE_EMPTY);
+      }
+      if (!kpi.hasNameOverride || !(kpi.nameOverrideLabel ?? '').trim()) throw new BadRequestException(TARGET_NAMES_NEEDS_NAME_COLUMN);
+    }
+
     const order = dto.order === undefined || dto.order === null ? 0 : Number(dto.order);
     if (!Number.isInteger(order)) throw new BadRequestException('order must be a whole number.');
     if (dto.enabled !== undefined && typeof dto.enabled !== 'boolean') throw new BadRequestException('enabled must be true/false.');
@@ -202,7 +234,8 @@ export class SalesKpiDefService {
     return {
       kpiCode,
       measure,
-      filter: fv.filter,
+      filter: productSource === 'TARGET_NAMES' ? {} : fv.filter,
+      productSource,
       outletTypes: strList(dto.outletTypes, 'outletTypes').map((s) => s.toUpperCase()),
       programs: strList(dto.programs, 'programs'),
       enabled: dto.enabled ?? true,
@@ -217,6 +250,7 @@ export class SalesKpiDefService {
     const data = {
       measure: v.measure,
       filter: v.filter as Prisma.InputJsonValue,
+      productSource: v.productSource,
       outletTypes: v.outletTypes,
       programs: v.programs,
       enabled: v.enabled,
@@ -262,6 +296,7 @@ export class SalesKpiDefService {
           kpiCode: v.kpiCode,
           measure: v.measure,
           filter: v.filter as Prisma.InputJsonValue,
+          productSource: v.productSource,
           outletTypes: v.outletTypes,
           programs: v.programs,
           enabled: v.enabled,
@@ -314,6 +349,9 @@ export class SalesKpiDefService {
   async test(user: JwtPayload, req: SalesKpiTestRequest): Promise<SalesKpiTestResult> {
     const clientId = user.clientId;
     if (!req || typeof req !== 'object' || !req.definition) throw new BadRequestException('importId and definition are required.');
+    // FOCUS-FROM-TARGETS: a TARGET_NAMES draft has no product list of its own — its products come per outlet from each
+    // month's target file, which the month screen's reconciliation checks (and shows the per-name results of).
+    if (productSourceOf(req.definition.productSource) === 'TARGET_NAMES') throw new BadRequestException(TARGET_NAMES_TEST_MESSAGE);
     const imp = await resolveReadyImport(this.prisma, clientId, String(req.importId ?? ''));
     const profile = await this.profile(clientId);
     const measure = req.definition.measure as SalesKpiMeasure;

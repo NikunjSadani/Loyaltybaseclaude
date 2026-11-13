@@ -54,6 +54,7 @@ import {
   OutletLike,
 } from './targets.helpers';
 import { SQL_NOW_UTC } from '../sales-import/sql-time';
+import { targetUploadFocusCheck } from '../sales-import/kpi/focus-upload-check';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import {
   AppliesTo,
@@ -985,6 +986,15 @@ export class TargetsService {
     }
     await this.salesNotifications.targetsUploaded(user.clientId, [...notifiedCodes]);
 
+    // FOCUS-FROM-TARGETS §7: early, NON-blocking check of the focus product names this upload wrote (never throws;
+    // `checked: false` for a tenant without a "from the target file" Sales Import KPI). The month preview re-checks.
+    const focusCheck = await targetUploadFocusCheck(
+      this.prisma,
+      user.clientId,
+      parseResult.acceptedTargets as Record<string, Record<string, unknown>>,
+      writableMonths,
+    );
+
     return {
       batchId:       batch.id,
       month:         batchMonth,
@@ -1004,6 +1014,7 @@ export class TargetsService {
       // counts parse-valid rows for LOCKED past months too, which are not written.
       savedCount:    targetOps.length,
       rows:          parseResult.rows,
+      focusCheck,
     };
   }
 

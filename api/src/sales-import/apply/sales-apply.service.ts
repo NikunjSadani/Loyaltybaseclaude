@@ -9,7 +9,6 @@ import {
   SALES_IMPORT_BATCH_STATUS,
   type ApplyMonthResult,
   type ApplyRequest,
-  EMPTY_MONTH_RECONCILIATION,
   type ApplyResult,
   type MonthSummary,
   type SalesColumnMapping,
@@ -40,6 +39,16 @@ import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
 import { insertMonthCombosSql } from '../kpi/month-combos';
+import { hasTargetNamesDef, kpiLabelsOf, loadFocusCatalogue } from '../kpi/focus-data';
+import {
+  FOCUS_CHANGED_MESSAGE,
+  focusBlockedReason,
+  focusFingerprintMatches,
+  lazyCatalogue,
+  reconcileMonth,
+  runMonthFocus,
+  type MonthFocusRun,
+} from './month-focus';
 
 /**
  * Interactive-transaction timeout of a month write (apply / recalculate): the OutletSalesRecord merge plus the month
@@ -113,6 +122,22 @@ export class SalesApplyService {
       throw new BadRequestException('This file is older than the one last applied to a selected month. Acknowledge it to continue.');
     }
 
+    // FOCUS-FROM-TARGETS (design §5): every month whose focus fingerprint is non-empty must come back with the one the
+    // admin reviewed (409 before ANY write; re-checked per month under the month lock). Tenants without a TARGET_NAMES
+    // definition skip this entirely (fingerprint '' -> not required).
+    if (hasTargetNamesDef(defs)) {
+      const roster = await loadRosterMeta(this.prisma, clientId);
+      const labelOf = await kpiLabelsOf(this.prisma, clientId, defs.map((d) => d.kpiCode));
+      const catalogue = lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId, { importId: imp.id }));
+      for (const month of req.months) {
+        if (!summaries.has(month)) continue;
+        const run = await runMonthFocus(this.prisma, { clientId, month, defs, roster, labelOf, catalogue });
+        if (!focusFingerprintMatches(run.resolution.fingerprint, req.expectedFocusFingerprints[month])) {
+          throw new ConflictException(FOCUS_CHANGED_MESSAGE);
+        }
+      }
+    }
+
     const results: ApplyMonthResult[] = [];
     for (const month of req.months) {
       const summary = summaries.get(month);
@@ -147,12 +172,17 @@ export class SalesApplyService {
     if (!Array.isArray(ack) || ack.some((m) => typeof m !== 'string')) {
       throw new BadRequestException('acknowledgePartialMonths must be a list of months.');
     }
+    const fps: unknown = body.expectedFocusFingerprints ?? {};
+    if (!fps || typeof fps !== 'object' || Array.isArray(fps) || Object.values(fps).some((v) => typeof v !== 'string')) {
+      throw new BadRequestException('expectedFocusFingerprints must map months to the fingerprints from the preview.');
+    }
     return {
       months: [...months].sort(),
       expectedDefinitionsHash: body.expectedDefinitionsHash,
       processingVersion: body.processingVersion,
       acknowledgePartialMonths: ack,
       acknowledgeOlderThanLastApplied: body.acknowledgeOlderThanLastApplied === true,
+      expectedFocusFingerprints: fps as Record<string, string>,
     };
   }
 
@@ -163,6 +193,7 @@ export class SalesApplyService {
     req: Pick<ApplyRequest, 'expectedDefinitionsHash' | 'processingVersion'> & {
       acknowledgePartialMonths: string[];
       acknowledgeOlderThanLastApplied: boolean;
+      expectedFocusFingerprints: Record<string, string>;
     },
   ): Promise<ApplyMonthResult> {
     const clientId = user.clientId;
@@ -199,7 +230,17 @@ export class SalesApplyService {
           );
         }
         const roster = await loadRosterMeta(tx, clientId);
-        const comp = await computeMonthRows(importPager(tx, importId, month), defs, roster);
+        // FOCUS-FROM-TARGETS: re-resolve the focus products under the lock (targets / acceptances / product list may have
+        // changed since the preview) - refuse on any blocker or a changed fingerprint; evaluate exactly like the preview.
+        const focus = await this.focusUnderLock(tx, clientId, month, defs, roster, importId);
+        if (focus) {
+          const why = focusBlockedReason(month, focus.resolution.blockers);
+          if (why) throw new MonthApplyError(why);
+          if (!focusFingerprintMatches(focus.resolution.fingerprint, req.expectedFocusFingerprints[month])) {
+            throw new MonthApplyError(FOCUS_CHANGED_MESSAGE);
+          }
+        }
+        const comp = await computeMonthRows(importPager(tx, importId, month), focus?.evalDefs ?? defs, roster);
         const snap = await tx.salesImport.findFirst({ where: { id: importId, clientId }, select: { mappingSnapshot: true } });
         return this.writeMonth(tx, user, {
           month,
@@ -212,6 +253,7 @@ export class SalesApplyService {
           state,
           roster,
           comp,
+          focusFingerprint: focus?.resolution.fingerprint ?? '',
           mapping: {
             fingerprint: imp.mappingFingerprint,
             dimensionKeys: ((snap?.mappingSnapshot as unknown as SalesColumnMapping | null)?.dimensions ?? []).map((d) => d.key),
@@ -242,6 +284,8 @@ export class SalesApplyService {
       state: ReturnType<typeof resolveMonthState>;
       roster: Map<string, RosterOutlet>;
       comp: MonthComputation;
+      /** FOCUS-FROM-TARGETS: the focus fingerprint written with (recorded on the audit row only when non-empty). */
+      focusFingerprint?: string;
       /** IMPORT only: the mapping the lines were parsed with (stored on the history set header). */
       mapping?: { fingerprint: string | null; dimensionKeys: string[] };
     },
@@ -385,6 +429,7 @@ export class SalesApplyService {
           outletsWritten: comp.rows.length,
           outletsZeroFilled,
           totals,
+          ...(w.focusFingerprint ? { focusFingerprint: w.focusFingerprint } : {}),
         } as Prisma.InputJsonValue,
         metadata: { clientId, applyId: applyRow.id, batchId: batch.id, source: w.source },
       },
@@ -407,8 +452,14 @@ export class SalesApplyService {
     const roster = await loadRosterMeta(this.prisma, clientId);
     const override = await this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
     const state = resolveMonthState(month, currentMonthKey(), override);
-    const comp = await computeMonthRows(historyPager(this.prisma, clientId, month), defs, roster);
     const owned = defs.map((d) => d.kpiCode);
+    const labels = await kpiLabelsOf(this.prisma, clientId, owned);
+    // FOCUS-FROM-TARGETS: the same resolution + evaluation recalculate re-runs under the month lock.
+    const focus = await runMonthFocus(this.prisma, {
+      clientId, month, defs, roster, labelOf: labels,
+      catalogue: lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId)),
+    });
+    const comp = await computeMonthRows(historyPager(this.prisma, clientId, month), focus.evalDefs, roster);
     const existing = await this.prisma.outletSalesRecord.findMany({
       where: { clientId, month },
       select: { outletCode: true, kpiValues: true, batch: { select: { status: true, createdAt: true } } },
@@ -422,13 +473,13 @@ export class SalesApplyService {
     }
     const set = historySetCheck(meta, defs, await this.currentFingerprint(clientId));
     if (set.mappingChanged) warnings.push('MAPPING_CHANGED');
-    const blockedReason = blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state }) ?? set.blocked;
-    const labels = new Map(
-      (await this.prisma.kpiDef.findMany({ where: { clientId, code: { in: owned } }, select: { code: true, label: true } })).map((k) => [k.code, k.label]),
-    );
+    const blockedReason =
+      blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state }) ??
+      set.blocked ??
+      focusBlockedReason(month, focus.resolution.blockers);
     return {
       month,
-      reconciliation: EMPTY_MONTH_RECONCILIATION, // lane B2 replaces with buildMonthReconciliation
+      reconciliation: reconcileMonth(focus, comp, owned, last?.at ?? null),
       monthState: state.state,
       canApply: blockedReason === null,
       ...(blockedReason ? { blockedReason } : {}),
@@ -489,7 +540,15 @@ export class SalesApplyService {
           historySetCheck(meta, defs, null).blocked;
         if (blocked) throw new ConflictException(blocked);
         const roster = await loadRosterMeta(tx, clientId);
-        const comp = await computeMonthRows(historyPager(tx, clientId, month), defs, roster);
+        const focus = await this.focusUnderLock(tx, clientId, month, defs, roster, null);
+        if (focus) {
+          const why = focusBlockedReason(month, focus.resolution.blockers);
+          if (why) throw new ConflictException(why);
+          if (!focusFingerprintMatches(focus.resolution.fingerprint, body.expectedFocusFingerprint)) {
+            throw new ConflictException(FOCUS_CHANGED_MESSAGE);
+          }
+        }
+        const comp = await computeMonthRows(historyPager(tx, clientId, month), focus?.evalDefs ?? defs, roster);
         return this.writeMonth(tx, user, {
           month,
           source: 'HISTORY',
@@ -501,10 +560,36 @@ export class SalesApplyService {
           state,
           roster,
           comp,
+          focusFingerprint: focus?.resolution.fingerprint ?? '',
         });
       },
       { timeout: APPLY_TX_TIMEOUT_MS, maxWait: 10_000 },
     );
+  }
+
+  /**
+   * FOCUS-FROM-TARGETS inside the month lock: null when the tenant has no enabled TARGET_NAMES definition (the write path
+   * is then exactly the original one). `importId` = the import being applied (its products join the catalogue, like the
+   * import preview); null for recalculate (stored months only, like the recalculate preview).
+   */
+  private async focusUnderLock(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    month: string,
+    defs: KpiDefLite[],
+    roster: Map<string, RosterOutlet>,
+    importId: string | null,
+  ): Promise<MonthFocusRun | null> {
+    if (!hasTargetNamesDef(defs)) return null;
+    const labelOf = await kpiLabelsOf(tx, clientId, defs.map((d) => d.kpiCode));
+    return runMonthFocus(tx, {
+      clientId,
+      month,
+      defs,
+      roster,
+      labelOf,
+      catalogue: () => loadFocusCatalogue(tx, clientId, importId ? { importId } : {}),
+    });
   }
 
   private async currentFingerprint(clientId: string): Promise<string | null> {

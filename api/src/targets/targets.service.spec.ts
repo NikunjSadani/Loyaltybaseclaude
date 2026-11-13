@@ -588,6 +588,32 @@ describe('TargetsService', () => {
       expect(stored['FOCUS_PACK_1']).toBe(67);
     });
 
+    it('FOCUS-FROM-TARGETS: a tenant without a "from the target file" KPI gets focusCheck {checked:false} only', async () => {
+      const file = {
+        buffer: buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 5]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+      const result = await service.uploadTargets(admin, file);
+      expect(result.focusCheck).toEqual({ checked: false, reason: expect.stringMatching(/No Sales Import KPI/), months: [] });
+    });
+
+    it('FOCUS-FROM-TARGETS: the focus check NEVER blocks the upload (a failing check → checked:false, rows still saved)', async () => {
+      mockPrisma.salesKpiDefinition.findMany.mockResolvedValueOnce([
+        { id: 'd1', clientId: 'deoleo', kpiCode: 'FOCUS_PACK_1', measure: 'AMOUNT', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0, productSource: 'TARGET_NAMES' },
+      ]);
+      const file = {
+        buffer: buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 5]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+      // the mock Prisma has no sales-import profile / history tables → the check fails internally
+      const result = await service.uploadTargets(admin, file);
+      expect(result.savedCount).toBe(1);
+      expect(mockTx.outletTarget.upsert).toHaveBeenCalledTimes(1);
+      expect(result.focusCheck).toEqual(expect.objectContaining({ checked: false, months: [] }));
+    });
+
     it('CRITICAL: blank cell → key OMITTED — upsert does not store null/0 for blank', async () => {
       // O001: MONTH_TGT=100, FOCUS_PACK_1=blank
       const file = {

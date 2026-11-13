@@ -5,6 +5,8 @@ import type { JwtPayload } from '../../common/decorators/current-user.decorator'
 import { lockSalesMonth } from '../../common/sales-kpi-ownership';
 import { currentMonthKey } from '../../targets/targets.helpers';
 import type {
+  FocusAcceptanceList,
+  FocusAcceptanceRequest,
   SalesMonthRebuildProductListResult,
   SalesMonthReopenRequest,
   SalesMonthReopenResult,
@@ -13,6 +15,11 @@ import type {
 import { SALES_MONTH_HISTORY_RETENTION_YEARS } from '../sales-import.contract';
 import { classifyMonthSummaries, insertMonthCombosSql } from '../kpi/month-combos';
 import { isMonthKey, monthLabel, resolveMonthState, shiftMonthKey } from './month-state';
+import { latestTargetUploadByMonth, listFocusAcceptances, targetsNewerThanApply } from '../kpi/focus-data';
+import { focusKey } from '../kpi/focus-products';
+
+/** Longest acceptance key accepted (a focus token key; real ones are a few characters). */
+export const FOCUS_ACCEPTANCE_MAX_KEY = 200;
 
 /** Max months one list call returns. */
 export const MAX_MONTH_RANGE = 36;
@@ -114,11 +121,14 @@ export class SalesMonthsService {
     const rows = await this.prisma.salesMonthStatus.findMany({ where: { clientId, month: { in: months } } });
     const byMonth = new Map(rows.map((r) => [r.month, r]));
     const names = await this.userNames(rows.map((r) => r.closedById));
-    const [downstream, history] = await Promise.all([
+    const [downstream, history, targetTimes] = await Promise.all([
       downstreamArtifacts(this.prisma, clientId, months),
       historyMetaByMonth(this.prisma, clientId, months),
+      latestTargetUploadByMonth(this.prisma, clientId, months),
     ]);
-    return months.reverse().map((m) => this.toRow(m, current, byMonth.get(m) ?? null, names, downstream.get(m), history.get(m)));
+    return months
+      .reverse()
+      .map((m) => this.toRow(m, current, byMonth.get(m) ?? null, names, downstream.get(m), history.get(m), targetTimes.get(m)));
   }
 
   async close(user: JwtPayload, month: string): Promise<SalesMonthRow> {
@@ -156,7 +166,8 @@ export class SalesMonthsService {
     );
     const downstream = (await downstreamArtifacts(this.prisma, clientId, [month])).get(month);
     const history = (await historyMetaByMonth(this.prisma, clientId, [month])).get(month);
-    return this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream, history);
+    const targetAt = (await latestTargetUploadByMonth(this.prisma, clientId, [month])).get(month);
+    return this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream, history, targetAt);
   }
 
   /**
@@ -208,7 +219,8 @@ export class SalesMonthsService {
       { timeout: 30_000, maxWait: 10_000 },
     );
     const history = (await historyMetaByMonth(this.prisma, clientId, [month])).get(month);
-    return { ...this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream, history), warnings };
+    const targetAt = (await latestTargetUploadByMonth(this.prisma, clientId, [month])).get(month);
+    return { ...this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream, history, targetAt), warnings };
   }
 
   /**
@@ -264,12 +276,116 @@ export class SalesMonthsService {
       }
       throw e;
     }
-    const [row, downstream, history] = await Promise.all([
+    const [row, downstream, history, targetTimes] = await Promise.all([
       this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } }),
       downstreamArtifacts(this.prisma, clientId, [month]),
       historyMetaByMonth(this.prisma, clientId, [month]),
+      latestTargetUploadByMonth(this.prisma, clientId, [month]),
     ]);
-    return this.toRow(month, currentMonthKey(), row, await this.userNames([row?.closedById]), downstream.get(month), history.get(month));
+    return this.toRow(
+      month, currentMonthKey(), row, await this.userNames([row?.closedById]), downstream.get(month), history.get(month), targetTimes.get(month),
+    );
+  }
+
+  // ─── FOCUS-FROM-TARGETS: "Accept — not sold yet" (design §5) ──────────────────────────────────────────────────
+
+  /** The month's accepted UNMATCHED focus tokens. */
+  async listAcceptances(clientId: string, month: string): Promise<FocusAcceptanceList> {
+    if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
+    return { month, acceptances: await listFocusAcceptances(this.prisma, clientId, month) };
+  }
+
+  /**
+   * POST admin/sales-months/:month/focus-acceptances — accept an UNMATCHED focus token of a TARGET_NAMES KPI as "not sold
+   * yet" for this month (it then counts as 0 and no longer blocks). Under the month lock; month must be OPEN (409);
+   * kpiCode must be an enabled TARGET_NAMES definition (400); the key is normalized with focusKey. Idempotent (an
+   * existing acceptance is kept as it is, no second audit row). Audited.
+   */
+  async accept(user: JwtPayload, month: string, body: FocusAcceptanceRequest): Promise<FocusAcceptanceList> {
+    const { kpiCode, key } = await this.acceptanceArgs(user.clientId, month, body?.kpiCode, body?.key);
+    const clientId = user.clientId;
+    await this.prisma.$transaction(
+      async (tx) => {
+        await this.lockOpenMonth(tx, clientId, month);
+        const existing = await tx.salesFocusAcceptance.findUnique({ where: { clientId_month_kpiCode_key: { clientId, month, kpiCode, key } } });
+        if (existing) return;
+        const row = await tx.salesFocusAcceptance.create({ data: { clientId, month, kpiCode, key, acceptedById: user.sub } });
+        await tx.auditLog.create({
+          data: {
+            action: 'CREATE',
+            entityType: 'SALES_FOCUS_ACCEPTANCE',
+            entityId: row.id,
+            actorId: user.sub,
+            newValues: { month, kpiCode, key, acceptedAt: row.acceptedAt.toISOString() },
+            metadata: { clientId, month, kpiCode, key, action: 'accept-not-sold-yet' },
+          },
+        });
+      },
+      { timeout: 30_000, maxWait: 10_000 },
+    );
+    return this.listAcceptances(clientId, month);
+  }
+
+  /** DELETE admin/sales-months/:month/focus-acceptances?kpiCode=&key= — remove an acceptance (idempotent). Audited. */
+  async unaccept(user: JwtPayload, month: string, rawKpiCode: unknown, rawKey: unknown): Promise<FocusAcceptanceList> {
+    const clientId = user.clientId;
+    const { kpiCode, key } = await this.acceptanceArgs(clientId, month, rawKpiCode, rawKey, { requireDefinition: false });
+    await this.prisma.$transaction(
+      async (tx) => {
+        await this.lockOpenMonth(tx, clientId, month);
+        const existing = await tx.salesFocusAcceptance.findUnique({ where: { clientId_month_kpiCode_key: { clientId, month, kpiCode, key } } });
+        if (!existing) return;
+        await tx.salesFocusAcceptance.delete({ where: { id: existing.id } });
+        await tx.auditLog.create({
+          data: {
+            action: 'DELETE',
+            entityType: 'SALES_FOCUS_ACCEPTANCE',
+            entityId: existing.id,
+            actorId: user.sub,
+            oldValues: {
+              month, kpiCode, key, acceptedById: existing.acceptedById, acceptedAt: existing.acceptedAt.toISOString(),
+            },
+            metadata: { clientId, month, kpiCode, key, action: 'undo-accept-not-sold-yet' },
+          },
+        });
+      },
+      { timeout: 30_000, maxWait: 10_000 },
+    );
+    return this.listAcceptances(clientId, month);
+  }
+
+  private async acceptanceArgs(
+    clientId: string,
+    month: string,
+    rawKpiCode: unknown,
+    rawKey: unknown,
+    opts: { requireDefinition: boolean } = { requireDefinition: true },
+  ): Promise<{ kpiCode: string; key: string }> {
+    if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
+    const kpiCode = typeof rawKpiCode === 'string' ? rawKpiCode.trim() : '';
+    if (!kpiCode) throw new BadRequestException('kpiCode is required.');
+    if (typeof rawKey !== 'string') throw new BadRequestException('key is required.');
+    const key = focusKey(rawKey);
+    if (!key) throw new BadRequestException('key is required.');
+    if (key.length > FOCUS_ACCEPTANCE_MAX_KEY || /[&,]/.test(key)) {
+      throw new BadRequestException('key must be ONE focus product as written in the target file (not a list).');
+    }
+    if (opts.requireDefinition) {
+      const def = await this.prisma.salesKpiDefinition.findFirst({
+        where: { clientId, kpiCode, enabled: true, productSource: 'TARGET_NAMES' },
+        select: { id: true },
+      });
+      if (!def) throw new BadRequestException(`"${kpiCode}" is not a Sales Import KPI whose products come from the target file.`);
+    }
+    return { kpiCode, key };
+  }
+
+  /** Month lock + the month must be OPEN (acceptances change what an apply / recalculate of the month would write). */
+  private async lockOpenMonth(tx: Prisma.TransactionClient, clientId: string, month: string): Promise<void> {
+    await lockSalesMonth(tx, clientId, month);
+    const override = await tx.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
+    const st = resolveMonthState(month, currentMonthKey(), override);
+    if (st.state !== 'OPEN') throw new ConflictException(`${monthLabel(month)} is CLOSED. Only Gifsy can reopen it.`);
   }
 
   private toRow(
@@ -279,6 +395,8 @@ export class SalesMonthsService {
     names: Map<string, string>,
     downstream: Downstream = NO_DOWNSTREAM,
     history?: HistoryMeta,
+    /** Latest target upload for the month (latestTargetUploadByMonth). */
+    targetUploadedAt?: Date,
   ): SalesMonthRow {
     const st = resolveMonthState(month, current, row);
     const closedExplicit = st.state === 'CLOSED' && !st.implicit;
@@ -297,7 +415,8 @@ export class SalesMonthsService {
       historySourceImportId: history?.sourceImportId ?? null,
       historyAppliedAt: history ? history.appliedAt.toISOString() : null,
       productListCurrent: !history || ['current', 'empty'].includes(classifyMonthSummaries([{ month, ...history }]).get(month)!),
-      targetsChangedSinceApply: false, // lane B2 computes (latest target batch for the month > last apply)
+      // FOCUS-FROM-TARGETS §11: targets uploaded after the month's last apply (apply or recalculate) → "recalculate".
+      targetsChangedSinceApply: targetsNewerThanApply(targetUploadedAt ?? null, row?.lastAppliedAt ?? null),
     };
   }
 

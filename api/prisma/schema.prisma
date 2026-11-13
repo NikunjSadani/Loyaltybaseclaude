@@ -3076,6 +3076,9 @@ model SalesKpiDefinition {
   filter      Json // SalesKpiFilter (plan §6.2)
   outletTypes String[] @default([]) // optional scope by Outlet.outletType.code; [] = all
   programs    String[] @default([]) // optional scope by Outlet.programName; [] = all
+  // FOCUS-FROM-TARGETS: 'FILTER' = `filter` for every outlet (original behaviour, every existing row);
+  // 'TARGET_NAMES' = per outlet, the month's target-file names for this KPI (filter must be {}).
+  productSource String @default("FILTER")
   enabled     Boolean  @default(true)
   order       Int      @default(0)
   updatedById String
@@ -3265,6 +3268,22 @@ model SalesMonthStatus {
 
   @@unique([clientId, month])
   @@map("sales_month_statuses")
+}
+
+/// FOCUS-FROM-TARGETS (design §5/§8): an operator accepted an UNMATCHED focus product token as "not sold yet" for one
+/// month + KPI (it then counts as 0 and no longer blocks applying). `key` = focusKey(token). Removable (row deleted).
+model SalesFocusAcceptance {
+  id           String   @id @default(cuid())
+  clientId     String
+  month        String // YYYY-MM
+  kpiCode      String
+  key          String
+  acceptedById String
+  acceptedAt   DateTime @default(now())
+
+  @@unique([clientId, month, kpiCode, key])
+  @@index([clientId, month])
+  @@map("sales_focus_acceptances")
 }
 
 // ─── MODULE: OFFER TILES — per-tenant "This month's offers" content (display-only) ───

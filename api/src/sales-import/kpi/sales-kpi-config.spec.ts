@@ -103,7 +103,10 @@ describe('SalesKpiDefService (K-2)', () => {
   it('create: validates against an ENABLED KpiDef of THIS tenant, normalises the filter, audits', async () => {
     const db = txDb();
     const out = await new SalesKpiDefService(db as never).create(user, dto());
-    expect(db.kpiDef.findFirst).toHaveBeenCalledWith({ where: { clientId: 't1', code: 'K_SET', enabled: true }, select: { code: true } });
+    expect(db.kpiDef.findFirst).toHaveBeenCalledWith({
+      where: { clientId: 't1', code: 'K_SET', enabled: true },
+      select: { code: true, hasNameOverride: true, nameOverrideLabel: true },
+    });
     expect(db.salesKpiDefinition.create.mock.calls[0][0].data).toEqual(
       expect.objectContaining({ clientId: 't1', kpiCode: 'K_SET', filter: { anyOf: [{ dimA: 'P' }] }, outletTypes: ['WHOLESALER'] }),
     );
@@ -400,5 +403,83 @@ describe('KPI tester totals = sum of per-outlet STORED values (audit L2)', () =>
       definition: { kpiCode: 'K', measure: 'QUANTITY', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0 } as never,
     });
     expect(r.months).toEqual([{ month: '2026-09', totalAmountRupees: 0, totalQuantity: 0.002, outletsNonZero: 2 }]);
+  });
+});
+
+// ─── FOCUS-FROM-TARGETS: productSource on save (design §9) ─────────────────────────────────────────────────────
+
+describe('SalesKpiDefService — productSource (FOCUS-FROM-TARGETS)', () => {
+  const named = (where: { code: string }) =>
+    where.code.startsWith('K') ? { code: where.code, hasNameOverride: where.code !== 'K_NONAME', nameOverrideLabel: where.code === 'K_NONAME' ? null : 'Focus Brand 1' } : null;
+  const dto = (over: Record<string, unknown> = {}) => ({
+    kpiCode: 'K_FB', measure: 'AMOUNT', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0, ...over,
+  });
+
+  it('absent = FILTER (stored + returned); unknown value → 400', async () => {
+    const db = txDb();
+    db.kpiDef.findFirst.mockImplementation(async ({ where }: { where: { code: string } }) => named(where));
+    const out = await new SalesKpiDefService(db as never).create(user, dto() as never);
+    expect(db.salesKpiDefinition.create.mock.calls[0][0].data.productSource).toBe('FILTER');
+    expect(out.productSource).toBe('FILTER');
+    await expect(new SalesKpiDefService(db as never).create(user, dto({ productSource: 'NAMES' }) as never)).rejects.toThrow(/productSource must be one of FILTER, TARGET_NAMES/);
+  });
+
+  it('TARGET_NAMES: saved with filter {} when the KPI has a per-outlet name column', async () => {
+    const db = txDb();
+    db.kpiDef.findFirst.mockImplementation(async ({ where }: { where: { code: string } }) => named(where));
+    const out = await new SalesKpiDefService(db as never).create(user, dto({ productSource: 'TARGET_NAMES', filter: { anyOf: [] } }) as never);
+    expect(db.salesKpiDefinition.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ productSource: 'TARGET_NAMES', filter: {} }));
+    expect(out).toEqual(expect.objectContaining({ productSource: 'TARGET_NAMES', filter: {} }));
+  });
+
+  it('TARGET_NAMES refuses a product list of its own, and a KPI without the per-outlet name column (design §9 message)', async () => {
+    const db = txDb();
+    db.kpiDef.findFirst.mockImplementation(async ({ where }: { where: { code: string } }) => named(where));
+    const s = new SalesKpiDefService(db as never);
+    await expect(s.create(user, dto({ productSource: 'TARGET_NAMES', filter: { anyOf: [{ dimA: 'P' }] } }) as never)).rejects.toThrow(/can't also have its own product list/);
+    await expect(s.create(user, dto({ productSource: 'TARGET_NAMES', filter: { noneOf: [{ dimA: 'P' }] } }) as never)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(s.create(user, dto({ kpiCode: 'K_NONAME', productSource: 'TARGET_NAMES' }) as never)).rejects.toThrow(
+      'Turn on the per-outlet name column for this KPI in KPI settings first, so the target file can carry the product names.',
+    );
+    expect(db.salesKpiDefinition.create).not.toHaveBeenCalled();
+  });
+
+  it('patch keeps the stored productSource unless changed; switching back to FILTER is allowed', async () => {
+    const db = txDb();
+    db.kpiDef.findFirst.mockImplementation(async ({ where }: { where: { code: string } }) => named(where));
+    const stored = { id: 'd1', clientId: 't1', kpiCode: 'K_FB', measure: 'AMOUNT', filter: {}, productSource: 'TARGET_NAMES', outletTypes: [], programs: [], enabled: true, order: 0 };
+    db.salesKpiDefinition.findFirst.mockResolvedValue(stored);
+    const s = new SalesKpiDefService(db as never);
+    await s.patch(user, 'd1', { order: 3 });
+    expect(db.salesKpiDefinition.update.mock.calls[0][0].data.productSource).toBe('TARGET_NAMES');
+    await s.patch(user, 'd1', { productSource: 'FILTER', filter: { anyOf: [{ dimA: 'P' }] } });
+    expect(db.salesKpiDefinition.update.mock.calls[1][0].data).toEqual(expect.objectContaining({ productSource: 'FILTER', filter: { anyOf: [{ dimA: 'P' }] } }));
+  });
+
+  it('list returns productSource; the hash moves only for TARGET_NAMES (FILTER hashes unchanged)', async () => {
+    const row = { id: 'd1', clientId: 't1', kpiCode: 'K1', measure: 'AMOUNT', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0 };
+    const db1 = txDb();
+    db1.salesKpiDefinition.findMany.mockResolvedValue([row]);
+    const db2 = txDb();
+    db2.salesKpiDefinition.findMany.mockResolvedValue([{ ...row, productSource: 'FILTER' }]);
+    const db3 = txDb();
+    db3.salesKpiDefinition.findMany.mockResolvedValue([{ ...row, productSource: 'TARGET_NAMES' }]);
+    const [l1, l2, l3] = await Promise.all([db1, db2, db3].map((d) => new SalesKpiDefService(d as never).list('t1')));
+    expect(l2.definitionsHash).toBe(l1.definitionsHash);
+    expect(l3.definitionsHash).not.toBe(l1.definitionsHash);
+    expect(l1.definitions[0].productSource).toBe('FILTER');
+    expect(l3.definitions[0].productSource).toBe('TARGET_NAMES');
+    const en = await new SalesKpiDefService(db3 as never).enabled('t1');
+    expect(en.defs[0].productSource).toBe('TARGET_NAMES');
+    const en1 = await new SalesKpiDefService(db1 as never).enabled('t1');
+    expect(en1.defs[0]).not.toHaveProperty('productSource');
+  });
+
+  it('the KPI tester refuses a TARGET_NAMES draft with a pointer to the month screen', async () => {
+    const db = txDb();
+    await expect(
+      new SalesKpiDefService(db as never).test(user, { importId: 'latest', definition: dto({ productSource: 'TARGET_NAMES' }) as never }),
+    ).rejects.toThrow(/on the month screen/);
+    expect(db.salesImport.findFirst).not.toHaveBeenCalled();
   });
 });

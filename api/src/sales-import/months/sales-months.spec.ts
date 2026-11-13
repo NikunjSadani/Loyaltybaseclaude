@@ -24,7 +24,19 @@ const AT = new Date();
 const clientAdmin: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'CA' };
 const gifsyAssumed: JwtPayload = { sub: 'ga', role: 'GIFSY_ADMIN', clientId: 't1', phone: '', name: 'GA', assumed: true };
 
-function db(rows: Array<Record<string, unknown>> = [], downstream: { batches?: Array<{ period: string; n: number }>; exports?: Array<{ month: string; n: number }>; history?: Array<Record<string, unknown>> } = {}) {
+function db(
+  rows: Array<Record<string, unknown>> = [],
+  downstream: {
+    batches?: Array<{ period: string; n: number }>;
+    exports?: Array<{ month: string; n: number }>;
+    history?: Array<Record<string, unknown>>;
+    /** FOCUS-FROM-TARGETS: OutletTarget (month, batchId) pairs + the batches' upload times. */
+    targets?: Array<{ month: string; batchId: string; clientId?: string }>;
+    targetBatches?: Array<{ id: string; createdAt: Date; clientId?: string }>;
+    acceptances?: Array<Record<string, unknown>>;
+    focusDefs?: Array<Record<string, unknown>>;
+  } = {},
+) {
   const log: string[] = [];
   const d: Record<string, any> = {
     log,
@@ -45,10 +57,49 @@ function db(rows: Array<Record<string, unknown>> = [], downstream: { batches?: A
     // the LINE table must never be read for month lists (final check H1)
     salesMonthHistory: { findMany: jest.fn(() => { throw new Error('month lists must not read history lines'); }) },
     user: { findMany: jest.fn(async () => [{ id: 'ca', name: 'Client Admin' }]) },
+    outletTarget: {
+      groupBy: jest.fn(async ({ where }: { where: { clientId: string; month: { in: string[] } } }) =>
+        (downstream.targets ?? [])
+          .filter((t) => (t.clientId ?? 't1') === where.clientId && where.month.in.includes(t.month))
+          .map((t) => ({ month: t.month, batchId: t.batchId }))),
+    },
+    targetUploadBatch: {
+      findMany: jest.fn(async ({ where }: { where: { clientId: string; id: { in: string[] } } }) =>
+        (downstream.targetBatches ?? []).filter((b) => (b.clientId ?? 't1') === where.clientId && where.id.in.includes(b.id))),
+    },
+    salesKpiDefinition: {
+      findFirst: jest.fn(async ({ where }: { where: Record<string, unknown> }) =>
+        (downstream.focusDefs ?? []).find((f) => Object.entries(where).every(([k, v]) => f[k] === v)) ?? null),
+    },
+    salesFocusAcceptance: acceptanceTable(downstream.acceptances ?? [], log),
     $executeRaw: jest.fn(async (q: Prisma.Sql) => { log.push(`lock:${q.values[0]}`); return 1; }),
   };
   d.$transaction = jest.fn(async (cb: (tx: unknown) => unknown) => cb(d));
   return d;
+}
+
+/** In-memory sales_focus_acceptances (FOCUS-FROM-TARGETS accept / undo). */
+function acceptanceTable(rows: Array<Record<string, unknown>>, log: string[]) {
+  let n = rows.length;
+  const match = (r: Record<string, unknown>, w: Record<string, unknown>) => Object.entries(w).every(([k, v]) => r[k] === v);
+  return {
+    rows,
+    findMany: jest.fn(async ({ where }: { where: Record<string, unknown> }) =>
+      rows.filter((r) => match(r, where)).sort((a, b) => `${a.kpiCode}|${a.key}`.localeCompare(`${b.kpiCode}|${b.key}`))),
+    findUnique: jest.fn(async ({ where }: { where: { clientId_month_kpiCode_key: Record<string, unknown> } }) =>
+      rows.find((r) => match(r, where.clientId_month_kpiCode_key)) ?? null),
+    create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
+      log.push('acceptance.create');
+      const row = { id: `fa${++n}`, acceptedAt: AT, ...data };
+      rows.push(row);
+      return row;
+    }),
+    delete: jest.fn(async ({ where }: { where: { id: string } }) => {
+      log.push('acceptance.delete');
+      const i = rows.findIndex((r) => r.id === where.id);
+      return rows.splice(i, 1)[0];
+    }),
+  };
 }
 
 // Timed out at jest's 5 s default under full-suite CPU load (2026-11-10; passes alone in ~13 s for the file).
@@ -428,5 +479,101 @@ describe('Rebuild product list (§10c) + productListCurrent', () => {
     const never = new Proxy({}, { get: () => () => { throw new Error('service must not be reached'); } });
     await expect(new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).rebuildProductList(clientAdmin, PREV))
       .rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+// ─── FOCUS-FROM-TARGETS: targetsChangedSinceApply + "Accept — not sold yet" ─────────────────────────────────────
+
+describe('FOCUS-FROM-TARGETS: months list flag + focus acceptances', () => {
+  const BEFORE = new Date(AT.getTime() - 3_600_000);
+  const AFTER = new Date(AT.getTime() + 3_600_000);
+  const FOCUS_DEF = { clientId: 't1', kpiCode: 'FB1', enabled: true, productSource: 'TARGET_NAMES' };
+
+  it('targetsChangedSinceApply: a target upload newer than the last apply → true; older → false; never applied → false (batched, no N+1)', async () => {
+    const OLDER = shiftMonthKey(CUR, -2);
+    const d = db(
+      [
+        { month: PREV, state: 'OPEN', lastAppliedAt: AT, lastAppliedImportId: 'i1' },
+        { month: OLDER, state: 'OPEN', lastAppliedAt: AT, lastAppliedImportId: 'i1' },
+      ],
+      {
+        targets: [
+          { month: PREV, batchId: 'b-old' }, { month: PREV, batchId: 'b-new' }, // multi-batch month: the NEWEST counts
+          { month: OLDER, batchId: 'b-old' },
+          { month: CUR, batchId: 'b-new' }, // never applied
+          { month: PREV, batchId: 'b-foreign', clientId: 't2' }, // another tenant's rows never count
+        ],
+        targetBatches: [
+          { id: 'b-old', createdAt: BEFORE }, { id: 'b-new', createdAt: AFTER }, { id: 'b-foreign', createdAt: AFTER, clientId: 't2' },
+        ],
+      },
+    );
+    const rows = await new SalesMonthsService(d as never).list('t1', OLDER, CUR);
+    const by = Object.fromEntries(rows.map((r) => [r.month, r.targetsChangedSinceApply]));
+    expect(by).toEqual({ [CUR]: false, [PREV]: true, [OLDER]: false });
+    expect(d.outletTarget.groupBy).toHaveBeenCalledTimes(1);
+    expect(d.targetUploadBatch.findMany).toHaveBeenCalledTimes(1);
+    expect(d.outletTarget.groupBy.mock.calls[0][0].where).toEqual({ clientId: 't1', month: { in: [OLDER, PREV, CUR] } });
+  });
+
+  it('accept: OPEN month, enabled TARGET_NAMES KPI, key normalized; month lock; audited once (idempotent); returns the list', async () => {
+    const d = db([], { focusDefs: [FOCUS_DEF] });
+    const s = new SalesMonthsService(d as never);
+    const out = await s.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: ' adho 500 ' });
+    expect(out).toEqual({ month: PREV, acceptances: [{ kpiCode: 'FB1', key: 'ADHO500', byName: 'Client Admin', at: AT.toISOString() }] });
+    expect(d.log).toEqual([`lock:sales-month:t1:${PREV}`, 'acceptance.create', 'audit']);
+    expect(d.salesFocusAcceptance.create.mock.calls[0][0].data).toEqual({ clientId: 't1', month: PREV, kpiCode: 'FB1', key: 'ADHO500', acceptedById: 'ca' });
+    expect(d.auditLog.create.mock.calls[0][0].data).toEqual(expect.objectContaining({
+      action: 'CREATE', entityType: 'SALES_FOCUS_ACCEPTANCE', actorId: 'ca', newValues: expect.objectContaining({ month: PREV, kpiCode: 'FB1', key: 'ADHO500' }),
+    }));
+    await s.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: 'ADHO500' }); // again → no second row / audit
+    expect(d.salesFocusAcceptance.create).toHaveBeenCalledTimes(1);
+    expect(d.auditLog.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('accept refuses: CLOSED month (409), not a TARGET_NAMES KPI (400), bad key / month (400)', async () => {
+    const closed = db([], { focusDefs: [FOCUS_DEF] });
+    await expect(new SalesMonthsService(closed as never).accept(clientAdmin, OLD, { kpiCode: 'FB1', key: 'X' })).rejects.toBeInstanceOf(ConflictException);
+    expect(closed.salesFocusAcceptance.create).not.toHaveBeenCalled();
+    const s = new SalesMonthsService(db([], { focusDefs: [FOCUS_DEF, { clientId: 't1', kpiCode: 'TOTAL', enabled: true, productSource: 'FILTER' }] }) as never);
+    await expect(s.accept(clientAdmin, PREV, { kpiCode: 'TOTAL', key: 'X' })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(s.accept(clientAdmin, PREV, { kpiCode: 'NOPE', key: 'X' })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(s.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: '  ' })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(s.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: 'CNO & ADHO500' })).rejects.toThrow(/ONE focus product/);
+    await expect(s.accept(clientAdmin, 'bad', { kpiCode: 'FB1', key: 'X' })).rejects.toBeInstanceOf(BadRequestException);
+    // another tenant's definition does not make the KPI acceptable here
+    const foreign = new SalesMonthsService(db([], { focusDefs: [{ ...FOCUS_DEF, clientId: 't2' }] }) as never);
+    await expect(foreign.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: 'X' })).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('undo: removes only THIS tenant row, audited with the old values; idempotent; CLOSED month → 409', async () => {
+    const rows = [
+      { id: 'fa1', clientId: 't1', month: PREV, kpiCode: 'FB1', key: 'ZZZ', acceptedById: 'ca', acceptedAt: AT },
+      { id: 'fa2', clientId: 't2', month: PREV, kpiCode: 'FB1', key: 'ZZZ', acceptedById: 'x', acceptedAt: AT },
+    ];
+    const d = db([], { focusDefs: [FOCUS_DEF], acceptances: rows });
+    const s = new SalesMonthsService(d as never);
+    expect((await s.listAcceptances('t1', PREV)).acceptances).toHaveLength(1);
+    const out = await s.unaccept(clientAdmin, PREV, 'FB1', 'zzz');
+    expect(out).toEqual({ month: PREV, acceptances: [] });
+    expect(d.salesFocusAcceptance.rows.map((r: { id: string }) => r.id)).toEqual(['fa2']); // the other tenant's row stays
+    expect(d.auditLog.create.mock.calls[0][0].data).toEqual(expect.objectContaining({
+      action: 'DELETE', entityType: 'SALES_FOCUS_ACCEPTANCE', entityId: 'fa1', actorId: 'ca', oldValues: expect.objectContaining({ key: 'ZZZ', acceptedById: 'ca' }),
+    }));
+    await s.unaccept(clientAdmin, PREV, 'FB1', 'ZZZ');
+    expect(d.auditLog.create).toHaveBeenCalledTimes(1);
+    await expect(s.unaccept(clientAdmin, OLD, 'FB1', 'ZZZ')).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('routes: POST / DELETE :month/focus-acceptances need targets:upload and pass the access gate first', async () => {
+    const meta = (m: string) => Reflect.getMetadata(PERMISSION_KEY, (SalesMonthsController.prototype as unknown as Record<string, object>)[m]);
+    expect(meta('acceptFocus')).toBe('targets:upload');
+    expect(meta('unacceptFocus')).toBe('targets:upload');
+    const tenant = { resolveClient: jest.fn(async () => ({ features: {} })) };
+    const prisma = { client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: {} })) } };
+    const never = new Proxy({}, { get: () => () => { throw new Error('service must not be reached'); } });
+    const c = new SalesMonthsController(never as never, tenant as never, prisma as never, never as never);
+    await expect(c.acceptFocus(clientAdmin, PREV, { kpiCode: 'FB1', key: 'X' })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(c.unacceptFocus(clientAdmin, PREV, 'FB1', 'X')).rejects.toBeInstanceOf(ForbiddenException);
   });
 });

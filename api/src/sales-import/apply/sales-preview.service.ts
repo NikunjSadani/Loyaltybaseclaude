@@ -3,7 +3,6 @@ import type { SalesImport } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { currentMonthKey } from '../../targets/targets.helpers';
 import {
-  EMPTY_MONTH_RECONCILIATION,
   SALES_IMPORT_BATCH_STATUS,
   type MonthPreview,
   type MonthSummary,
@@ -25,6 +24,9 @@ import { paiseToRupees } from '../ingest/normalize';
 import { monthLabel, resolveMonthState } from '../months/month-state';
 import { computeMonthRows, sumOwnedValues, unitsToNumber } from './month-compute';
 import { loadLastApplied } from './last-applied';
+import { loadFocusCatalogue } from '../kpi/focus-data';
+import { focusBlockedReason, lazyCatalogue, reconcileMonth, runMonthFocus } from './month-focus';
+import type { FocusCatalogue } from '../kpi/focus-products';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 
 /** Why a month cannot be applied (null = it can). Shared by preview and apply. */
@@ -76,6 +78,8 @@ export class SalesPreviewService {
 
     const statuses = await this.prisma.salesMonthStatus.findMany({ where: { clientId, month: { in: months } } });
     const statusOf = new Map(statuses.map((s) => [s.month, s]));
+    // FOCUS-FROM-TARGETS: one catalogue (stored months + this import's products) for every month of the preview.
+    const catalogue = lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId, { importId: imp.id }));
 
     const out: MonthPreview[] = [];
     for (const summary of summaries) {
@@ -83,6 +87,7 @@ export class SalesPreviewService {
         await this.previewMonth(clientId, imp, summary, defs, roster, mappingChanged, current, {
           status: statusOf.get(summary.month) ?? null,
           labelOf,
+          catalogue,
         }),
       );
     }
@@ -107,13 +112,16 @@ export class SalesPreviewService {
     ctx: {
       status: { state: string } | null;
       labelOf: Map<string, string>;
+      catalogue: () => Promise<FocusCatalogue>;
     },
   ): Promise<MonthPreview> {
     const month = summary.month;
     const owned = defs.map((d) => d.kpiCode);
     const state = resolveMonthState(month, current, ctx.status);
 
-    const comp = await computeMonthRows(importPager(this.prisma, imp.id, month), defs, roster);
+    // FOCUS-FROM-TARGETS: the SAME resolution + evaluation apply re-runs under the month lock (so it writes these values).
+    const focus = await runMonthFocus(this.prisma, { clientId, month, defs, roster, labelOf: ctx.labelOf, catalogue: ctx.catalogue });
+    const comp = await computeMonthRows(importPager(this.prisma, imp.id, month), focus.evalDefs, roster);
     const existing = await this.prisma.outletSalesRecord.findMany({
       where: { clientId, month },
       select: { outletCode: true, kpiValues: true, batch: { select: { status: true, createdAt: true } } },
@@ -135,7 +143,8 @@ export class SalesPreviewService {
     }
     if (comp.stats.some((s) => s.outletsNegative > 0)) warnings.push('NEGATIVE_VALUES');
 
-    const blockedReason = blockedReasonFor({ month, defsCount: defs.length, mappingChanged, state });
+    const blockedReason =
+      blockedReasonFor({ month, defsCount: defs.length, mappingChanged, state }) ?? focusBlockedReason(month, focus.resolution.blockers);
 
     let lastApplied: MonthPreview['lastApplied'] = null;
     if (last) {
@@ -172,7 +181,7 @@ export class SalesPreviewService {
         };
       }),
       lastApplied,
-      reconciliation: EMPTY_MONTH_RECONCILIATION, // lane B2 replaces with buildMonthReconciliation
+      reconciliation: reconcileMonth(focus, comp, owned, last?.at ?? null),
     };
   }
 }
