@@ -1441,7 +1441,8 @@ describe('TargetsService — Sales Import ownership (K-7)', () => {
       const values = sqlValues(call);
       // kpiValues written = manual keys only (owned value 999 NOT written) …
       expect(values).toContain(JSON.stringify({ MONTH_TGT: 10 }));
-      expect(values.some((v) => typeof v === 'string' && v.includes('999'))).toBe(false);
+      // Only the JSON kpiValues payloads matter — the row id is a random UUID that can contain "999" by chance.
+      expect(values.some((v) => typeof v === 'string' && v.startsWith('{') && v.includes('999'))).toBe(false);
       // … and the owned list drives the carry-over of the existing row's owned keys.
       expect(values).toContainEqual(['FOCUS_PACK_1']);
       expect(values).toContain('deoleo');
