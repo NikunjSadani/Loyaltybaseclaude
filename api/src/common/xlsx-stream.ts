@@ -23,9 +23,21 @@ export interface XlsxStreamSheet {
   readonly rowCount: number;
 }
 
+/** A merged cell range, 0-based sheet coordinates (row 0 = the header row) — SheetJS `!merges` shape. */
+export interface XlsxMergeRange {
+  s: { r: number; c: number };
+  e: { r: number; c: number };
+}
+
+export interface XlsxStreamSheetOptions {
+  widths?: readonly number[];
+  /** Merged ranges on the HEADER row only (s.r = e.r = 0), e.g. a month-group header spanning its KPI columns. */
+  merges?: readonly XlsxMergeRange[];
+}
+
 export interface XlsxStreamWriter {
   /** Start a new sheet with a header row. The previous sheet is committed first. */
-  addSheet(name: string, headers: readonly string[], opts?: { widths?: readonly number[] }): Promise<XlsxStreamSheet>;
+  addSheet(name: string, headers: readonly string[], opts?: XlsxStreamSheetOptions): Promise<XlsxStreamSheet>;
   /** Commit everything and end the destination stream. Call exactly once. */
   finish(): Promise<void>;
   /** Data rows written across all sheets. */
@@ -71,7 +83,14 @@ export function createXlsxStreamWriter(dest: Writable): XlsxStreamWriter {
       usedNames.add(sheetName.toLowerCase());
       const ws = wb.addWorksheet(sheetName);
       if (opts?.widths) ws.columns = headers.map((_, i) => ({ width: opts.widths?.[i] ?? 14 }));
-      ws.addRow(headers.map((h) => cellSafe(String(h)))).commit();
+      const headerRow = ws.addRow(headers.map((h) => cellSafe(String(h))));
+      // Merges are applied while the header row is still open: exceljs' mergeCells touches every cell of the
+      // range, so a merge below the header would create rows ahead of addRow (shifting the data) — header only.
+      for (const m of opts?.merges ?? []) {
+        if (m.s.r !== 0 || m.e.r !== 0) throw new Error('xlsx-stream: merges are supported on the header row only');
+        ws.mergeCells(1, m.s.c + 1, 1, m.e.c + 1);
+      }
+      headerRow.commit();
       current = ws;
       let sheetRows = 0;
       return {

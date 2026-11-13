@@ -54,6 +54,31 @@ describe('createXlsxStreamWriter', () => {
     expect(names[1]).not.toBe(names[0]);
   });
 
+  it('emits merged ranges (read back as SheetJS !merges) and keeps every cell value', async () => {
+    const buf = await collect(async (w) => {
+      const s = await w.addSheet('T', ['', '', "Jul '26 Target", '', ''], {
+        merges: [{ s: { r: 0, c: 2 }, e: { r: 0, c: 4 } }],
+      });
+      await s.addRow(['Outlet ID', 'Outlet Name', 'A', 'B', 'C']);
+      await s.addRow(['O1', 'Shop', '', '', '']);
+      await w.finish();
+    });
+    const ws = XLSX.read(buf, { type: 'buffer' }).Sheets.T;
+    expect(ws['!merges']).toEqual([{ s: { r: 0, c: 2 }, e: { r: 0, c: 4 } }]);
+    expect(XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' })).toEqual([
+      ['', '', "Jul '26 Target", '', ''],
+      ['Outlet ID', 'Outlet Name', 'A', 'B', 'C'],
+      ['O1', 'Shop', '', '', ''],
+    ]);
+  });
+
+  it('rejects a merge below the header row (it would shift the data rows)', async () => {
+    const w = createXlsxStreamWriter(new PassThrough());
+    await expect(w.addSheet('T', ['a', 'b'], { merges: [{ s: { r: 1, c: 0 }, e: { r: 1, c: 1 } }] })).rejects.toThrow(
+      /header row only/,
+    );
+  });
+
   it('streams 20,000 rows without holding them (row count + readable output)', async () => {
     const buf = await collect(async (w) => {
       const s = await w.addSheet('Big', ['i', 'label']);
