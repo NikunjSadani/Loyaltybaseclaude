@@ -1,16 +1,35 @@
 'use client';
 
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Info } from 'lucide-react';
 import { monthLabel, sentence } from '@/lib/sales-import/format';
 import type { TargetUploadFocusCheck } from '@/lib/sales-import/types';
 
 /**
  * FOCUS-FROM-TARGETS §7: focus product names in this file that will block applying sales for a month until fixed.
  * The upload itself already succeeded; this is an early warning (the month preview re-checks and is the one that
- * blocks). Nothing is shown when the check did not run (no "from the target file" KPI, or no product list yet).
+ * blocks). A check that was SKIPPED (no stored product list yet, or the check failed) says so in a grey note — never
+ * silent. Nothing is shown only when there is nothing to check (no "from the target file" KPI) or nothing was found.
  */
 export function TargetFocusCheckNotice({ check }: { check: TargetUploadFocusCheck | undefined }) {
-  if (!check || !check.checked) return null;
+  if (!check) return null;
+  if (!check.checked) {
+    if (check.reasonCode !== 'NO_PRODUCT_LIST' && check.reasonCode !== 'CHECK_FAILED') return null;
+    // Our own wording per code: the server's `reason` sentence already ends with its own "checked on the month
+    // preview" clause, which would repeat the next sentence.
+    const why = check.reasonCode === 'NO_PRODUCT_LIST'
+      ? 'no sales month has been applied yet, so there is no product list to check them against'
+      : 'the check could not run this time';
+    return (
+      <div role="status" data-testid="target-focus-check-skipped"
+        className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-xs text-gray-700 flex items-start gap-1.5">
+        <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+        <p>
+          Focus product names weren&apos;t checked yet: {why}. They will be checked on the Sales Import month screen
+          before anything is applied.
+        </p>
+      </div>
+    );
+  }
   const months = check.months.filter(m => m.blockers.length > 0);
   if (months.length === 0) return null;
   return (
@@ -23,8 +42,9 @@ export function TargetFocusCheckNotice({ check }: { check: TargetUploadFocusChec
           </p>
           <ul className="list-disc pl-6 space-y-1">
             {m.blockers.map((b, i) => (
-              <li key={`${b.code}-${b.kpiCode}-${b.key ?? i}`} className="text-xs text-amber-800">
-                {sentence(b.message)}. ({b.outlets.toLocaleString('en-IN')} outlet{b.outlets === 1 ? '' : 's'})
+              <li key={`${b.code}-${b.kpiCode}-${b.key ?? i}`} className="text-xs text-amber-800 [overflow-wrap:anywhere]">
+                {/* The server's message already says how many outlets: nothing is appended here. */}
+                {sentence(b.message)}.
                 {b.sampleOutletCodes.length > 0 && (
                   <details className="mt-0.5">
                     <summary className="cursor-pointer text-[11px] underline decoration-dotted">Show outlet codes</summary>

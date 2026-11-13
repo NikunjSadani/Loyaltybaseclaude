@@ -40,7 +40,7 @@ describe('target upload — focusCheck', () => {
         checked: true,
         months: [{
           month: '2026-11',
-          blockers: [{ code: 'FOCUS_UNMATCHED', kpiCode: 'FB1', token: 'ADH0500', key: 'ADH0500', outlets: 12, sampleOutletCodes: ['R1', 'R2'], message: 'ADH0500 (Focus Brand 1) is not in the sales data.' }],
+          blockers: [{ code: 'FOCUS_UNMATCHED', kpiCode: 'FB1', token: 'ADH0500', key: 'ADH0500', outlets: 12, sampleOutletCodes: ['R1', 'R2'], message: '"ADH0500" in Focus Brand 1 is not a product in the sales data (12 outlets). Fix the target file, or accept it as not sold yet.' }],
         }],
       },
     }));
@@ -48,17 +48,41 @@ describe('target upload — focusCheck', () => {
     await upload();
     const panel = await screen.findByTestId('target-focus-check');
     expect(panel).toHaveTextContent('These focus product names will block applying sales for November 2026 until fixed:');
-    expect(panel).toHaveTextContent('ADH0500 (Focus Brand 1) is not in the sales data. (12 outlets)');
+    expect(panel).toHaveTextContent('"ADH0500" in Focus Brand 1 is not a product in the sales data (12 outlets). Fix the target file, or accept it as not sold yet.');
+    // M5: the server message already carries the count — nothing appended.
+    expect(panel.textContent).not.toContain('yet. (12 outlets)');
+    expect(panel.textContent!.match(/12 outlets/g)).toHaveLength(1);
     expect(panel).toHaveTextContent('R1, R2');
     expect(screen.getByText('Targets submitted successfully')).toBeInTheDocument();
   });
 
-  it('checked: false (nothing to check yet) → no panel', async () => {
-    stub(result({ focusCheck: { checked: false, reason: 'No KPI takes its products from the target file.', months: [] } }));
+  it('checked: false because no KPI takes names from the target file → silent', async () => {
+    stub(result({ focusCheck: { checked: false, reasonCode: 'NO_TARGET_NAMES_KPI', reason: 'No KPI takes its products from the target file.', months: [] } }));
     render(<TargetUploadPage />);
     await upload();
     expect(await screen.findByText('Upload Result')).toBeInTheDocument();
     expect(screen.queryByTestId('target-focus-check')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('target-focus-check-skipped')).not.toBeInTheDocument();
+  });
+
+  it('M4: checked: false because there is no product list yet → grey note with the reason (never silent)', async () => {
+    stub(result({ focusCheck: { checked: false, reasonCode: 'NO_PRODUCT_LIST', reason: 'No sales month has been applied yet.', months: [] } }));
+    render(<TargetUploadPage />);
+    await upload();
+    const note = await screen.findByTestId('target-focus-check-skipped');
+    expect(note).toHaveTextContent(
+      "Focus product names weren't checked yet: no sales month has been applied yet, so there is no product list to check them against. They will be checked on the Sales Import month screen before anything is applied.",
+    );
+    expect(screen.queryByTestId('target-focus-check')).not.toBeInTheDocument();
+  });
+
+  it('M4: checked: false because the check failed → grey note with the reason', async () => {
+    stub(result({ focusCheck: { checked: false, reasonCode: 'CHECK_FAILED', reason: 'The focus product check could not run.', months: [] } }));
+    render(<TargetUploadPage />);
+    await upload();
+    expect(await screen.findByTestId('target-focus-check-skipped')).toHaveTextContent(
+      "Focus product names weren't checked yet: the check could not run this time. They will be checked on the Sales Import month screen before anything is applied.",
+    );
   });
 
   it('checked with no blockers → no panel', async () => {

@@ -166,6 +166,8 @@ export function KpiEditor({
   const [testing, setTesting] = useState(false);
   const [test, setTest] = useState<{ sig: string; result: SalesKpiTestResult } | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
+  /** L1: explicit "this KPI counts ALL products" for a saved from-the-target-file KPI switched to an empty pick list. */
+  const [allProductsOk, setAllProductsOk] = useState(false);
 
   const editing = Boolean(initial.id);
   const productSource: SalesKpiProductSource = def.productSource ?? 'FILTER';
@@ -203,6 +205,17 @@ export function KpiEditor({
   if (def.measure === 'QUANTITY' && !hasQty) blockers.push('The column mapping has no quantity column, so a cases KPI is not possible.');
   if (def.measure === 'PRODUCT_COUNT' && !hasAmount) blockers.push('The column mapping has no amount column, so a products-bought KPI is not possible (products are counted by their net amount).');
   if (def.measure === 'PRODUCT_COUNT' && dims.length === 0) blockers.push('The column mapping has no product columns, so products cannot be told apart.');
+  // L2: "From the target file" needs the KPI's per-outlet name column, or every outlet would count nothing.
+  if (fromTargets && selectedKpi?.hasNameOverride === false) {
+    blockers.push(`Turn on the per-outlet name column for ${selectedKpi.label || def.kpiCode} under Targets → KPI settings first, or pick the products here.`);
+  }
+  // L1: a KPI that took its products from the target file, switched to "Pick products here" with nothing picked, would
+  // silently count EVERY product. Ask for an explicit choice instead.
+  const emptyPickList = listOf(def.filter, 'anyOf').length === 0 && listOf(def.filter, 'noneOf').length === 0;
+  const needsAllProductsTick = !fromTargets && initial.productSource === 'TARGET_NAMES' && emptyPickList;
+  if (needsAllProductsTick && !allProductsOk) {
+    blockers.push('No products are picked, so this KPI would count ALL products. Pick the products it counts, or tick “This KPI counts ALL products”.');
+  }
   const measureAvailable = (m: SalesKpiMeasure): boolean =>
     m === 'AMOUNT' ? hasAmount : m === 'QUANTITY' ? hasQty : hasAmount && dims.length > 0;
 
@@ -311,7 +324,17 @@ export function KpiEditor({
             </p>
           </div>
         ) : (
-          <div className="mt-2">
+          <div className="mt-2 space-y-2">
+            {needsAllProductsTick && (
+              <label className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+                data-testid="kpi-all-products-confirm">
+                <input type="checkbox" className="mt-0.5" checked={allProductsOk} onChange={(e) => setAllProductsOk(e.target.checked)} />
+                <span>
+                  <strong>This KPI counts ALL products.</strong> No products are picked below, so every product in the
+                  sales file counts — not the focus products from the target file any more.
+                </span>
+              </label>
+            )}
             <ProductSetBuilder
               filter={def.filter}
               onChange={(f) => setDef((d) => ({ ...d, filter: f }))}
@@ -370,7 +393,7 @@ export function KpiEditor({
             <p className="text-xs text-gray-600">{formatCount(freshTest.matchedLines)} invoice lines match.</p>
             {freshTest.months.length > 0 && (
               <table className="text-xs">
-                <thead><tr className="text-left text-gray-500"><th className="pr-4">Month</th><th className="pr-4 text-right">₹</th><th className="pr-4 text-right">Cases</th>{showProducts && <th className="pr-4 text-right">Products (Σ outlets)</th>}<th className="text-right">Outlets &gt; 0</th></tr></thead>
+                <thead><tr className="text-left text-gray-500"><th className="pr-4">Month</th><th className="pr-4 text-right">₹</th><th className="pr-4 text-right">Cases</th>{showProducts && <th className="pr-4 text-right">Products (all outlets added up)</th>}<th className="text-right">Outlets &gt; 0</th></tr></thead>
                 <tbody>
                   {freshTest.months.map((m) => (
                     <tr key={m.month}>

@@ -625,7 +625,9 @@ describe('KPI editor — PRODUCT_COUNT ("Number of products bought (lines)")', (
     renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', measure: 'PRODUCT_COUNT' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Test against latest import/ })); });
     const result = await screen.findByTestId('kpi-test-result');
-    expect(result).toHaveTextContent('Products (Σ outlets)');
+    // L3: plain words for operators (no Σ).
+    expect(result).toHaveTextContent('Products (all outlets added up)');
+    expect(result).not.toHaveTextContent('Σ');
     expect(result).toHaveTextContent('1,234');
     expect(result).not.toHaveTextContent('1,234.');
   });

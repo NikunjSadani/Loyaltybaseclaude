@@ -9,7 +9,7 @@
  * parent to refresh its preview (the reconciliation, canApply and the focus fingerprint all change). Nothing is shown
  * as done until the server said so and the refreshed preview landed.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Info, Undo2, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { salesImportApi } from '@/lib/sales-import/api';
@@ -18,6 +18,31 @@ import type {
   DimMatch, FocusBlocker, FocusNameSummary, FocusTokenResolution, MonthFocusKpi, MonthReconciliation,
   SalesDimensionMapping, SalesKpiMeasure,
 } from '@/lib/sales-import/types';
+
+/** Outlet type code -> display name. */
+export type OutletTypeNames = Record<string, string>;
+
+/** Loads the tenant's outlet type display names. Never throws; {} when unavailable (the codes are shown instead). */
+export async function loadOutletTypeNames(): Promise<OutletTypeNames> {
+  try {
+    const r = await salesImportApi.segmentOptions();
+    if (!r?.success || !r.data) return {};
+    return Object.fromEntries(r.data.outletTypes.filter((t) => t.code && t.name).map((t) => [t.code, t.name]));
+  } catch {
+    return {};
+  }
+}
+
+/** The outlet type display names, loaded once per mounted screen. */
+export function useOutletTypeNames(): OutletTypeNames {
+  const [names, setNames] = useState<OutletTypeNames>({});
+  useEffect(() => {
+    let cancelled = false;
+    void loadOutletTypeNames().then((n) => { if (!cancelled) setNames(n); });
+    return () => { cancelled = true; };
+  }, []);
+  return names;
+}
 
 /** Loads the column mapping's product columns (for "SKU group 500" wording). Never throws; [] when unavailable. */
 export async function loadDimensionLabels(): Promise<SalesDimensionMapping[]> {
@@ -67,9 +92,14 @@ function plural(n: number, one: string, many = `${one}s`): string {
   return `${formatCount(n)} ${n === 1 ? one : many}`;
 }
 
-/** A plain number with Indian grouping (targets carry the KPI's own unit, which the preview does not restate). */
-function formatTarget(v: number): string {
+/** A plain number with Indian grouping — only when the payload does not say the KPI's measure (older server). */
+function formatPlain(v: number): string {
   return v.toLocaleString('en-IN', { maximumFractionDigits: 3 });
+}
+
+/** A value in the KPI's own unit (₹ / cases / products); a plain number when the measure is missing. */
+function formatInMeasure(v: number, measure: SalesKpiMeasure | undefined): string {
+  return measure ? formatKpiValue(v, measure) : formatPlain(v);
 }
 
 function SampleCodes({ codes, total, label }: { codes: string[]; total: number; label: string }) {
@@ -101,10 +131,23 @@ function Notice({ tone, children, testId }: { tone: 'amber' | 'red' | 'gray'; ch
 
 type AcceptAction = { kind: 'accept' | 'undo'; kpiCode: string; key: string };
 
+/** "XYZ (Focus Brand 2)" — the token with its KPI, so a screen reader can tell same-named buttons apart. */
+function tokenWithKpi(token: string, kpiLabel: string): string {
+  return `${token} (${kpiLabel})`;
+}
+
+/** Attributes that let the panel find a token's chip again after a refresh (to put keyboard focus back on it). */
+function chipAttrs(kpiCode: string, key: string) {
+  return { 'data-focus-chip': '', 'data-focus-kpi': kpiCode, 'data-focus-key': key, tabIndex: -1 } as const;
+}
+
+/** Long names / products wrap anywhere instead of widening the table (M7). */
+const CHIP_TEXT = 'min-w-0 [overflow-wrap:anywhere]';
+
 function TokenChip({
-  t, kpiCode, dims, canChange, pending, onAction,
+  t, kpiCode, kpiLabel, dims, canChange, pending, onAction,
 }: {
-  t: FocusTokenResolution; kpiCode: string; dims: SalesDimensionMapping[]; canChange: boolean;
+  t: FocusTokenResolution; kpiCode: string; kpiLabel: string; dims: SalesDimensionMapping[]; canChange: boolean;
   pending: AcceptAction | null; onAction(a: AcceptAction): void;
 }) {
   const busy = pending !== null;
@@ -113,7 +156,7 @@ function TokenChip({
   if (t.status === 'MATCHED') {
     return (
       <span data-testid={testId} data-status="MATCHED"
-        className="inline-flex items-center text-[11px] rounded border px-1.5 py-0.5 bg-emerald-50 text-emerald-800 border-emerald-200">
+        className={`inline-flex items-center text-[11px] rounded border px-1.5 py-0.5 bg-emerald-50 text-emerald-800 border-emerald-200 ${CHIP_TEXT}`}>
         <strong className="font-semibold">{t.token}</strong>&nbsp;→ {t.product ? describeProduct(t.product, dims) : 'a known product'}
       </span>
     );
@@ -122,7 +165,7 @@ function TokenChip({
     const options = (t.candidates ?? []).map((c) => describeProduct(c, dims));
     return (
       <span data-testid={testId} data-status="AMBIGUOUS"
-        className="inline-flex flex-wrap items-center text-[11px] rounded border px-1.5 py-0.5 bg-red-50 text-red-800 border-red-200">
+        className={`inline-flex flex-wrap items-center text-[11px] rounded border px-1.5 py-0.5 bg-red-50 text-red-800 border-red-200 ${CHIP_TEXT}`}>
         <XCircle className="w-3 h-3 mr-0.5" />
         <strong className="font-semibold">{t.token}</strong>&nbsp;could mean more than one product
         {options.length > 0 ? `: ${options.join(' · or ')}` : ''}. Fix the name in the target file.
@@ -131,8 +174,8 @@ function TokenChip({
   }
   if (t.accepted) {
     return (
-      <span data-testid={testId} data-status="ACCEPTED"
-        className="inline-flex flex-wrap items-center gap-1 text-[11px] rounded border px-1.5 py-0.5 bg-gray-100 text-gray-700 border-gray-200">
+      <span data-testid={testId} data-status="ACCEPTED" {...chipAttrs(kpiCode, t.key)}
+        className={`inline-flex flex-wrap items-center gap-1 text-[11px] rounded border px-1.5 py-0.5 bg-gray-100 text-gray-700 border-gray-200 ${CHIP_TEXT}`}>
         <span>
           <strong className="font-semibold">{t.token}</strong> — accepted as not sold yet by {t.accepted.byName} on{' '}
           {dateTimeLabel(t.accepted.at)} (counts as 0)
@@ -140,7 +183,7 @@ function TokenChip({
         {canChange && (
           <Button size="sm" variant="ghost" className="!px-1.5 !py-0 text-[11px]" disabled={busy} loading={mine}
             onClick={() => onAction({ kind: 'undo', kpiCode, key: t.key })}
-            aria-label={`Undo accepting ${t.token} as not sold yet`}>
+            aria-label={`Undo accepting ${tokenWithKpi(t.token, kpiLabel)} as not sold yet`}>
             <Undo2 className="w-3 h-3" /> Undo
           </Button>
         )}
@@ -148,13 +191,13 @@ function TokenChip({
     );
   }
   return (
-    <span data-testid={testId} data-status="UNMATCHED"
-      className="inline-flex flex-wrap items-center gap-1 text-[11px] rounded border px-1.5 py-0.5 bg-red-50 text-red-800 border-red-200">
+    <span data-testid={testId} data-status="UNMATCHED" {...chipAttrs(kpiCode, t.key)}
+      className={`inline-flex flex-wrap items-center gap-1 text-[11px] rounded border px-1.5 py-0.5 bg-red-50 text-red-800 border-red-200 ${CHIP_TEXT}`}>
       <span><XCircle className="inline w-3 h-3 mr-0.5 -mt-0.5" /><strong className="font-semibold">{t.token}</strong> — not found in sales data</span>
       {canChange && (
         <Button size="sm" variant="outline" className="!px-1.5 !py-0 text-[11px] bg-white" disabled={busy} loading={mine}
           onClick={() => onAction({ kind: 'accept', kpiCode, key: t.key })}
-          aria-label={`Accept ${t.token} as not sold yet`}>
+          aria-label={`Accept ${tokenWithKpi(t.token, kpiLabel)} as not sold yet`}>
           Accept — not sold yet
         </Button>
       )}
@@ -162,67 +205,71 @@ function TokenChip({
   );
 }
 
-function outletsByTypeText(n: FocusNameSummary): string {
+/** "4,079 Retailer · 38 outlets without a type" — display names where known, else the code. */
+export function outletsByTypeText(n: Pick<FocusNameSummary, 'outletsByType'>, typeNames: OutletTypeNames = {}): string {
   const parts = Object.entries(n.outletsByType)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([type, count]) => `${formatCount(count)} ${type || 'no type'}`);
+    .map(([type, count]) => (type
+      ? `${formatCount(count)} ${typeNames[type] || type}`
+      : `${formatCount(count)} ${count === 1 ? 'outlet' : 'outlets'} without a type`));
   return parts.join(' · ');
 }
 
 function FocusKpiSection({
-  k, measure, dims, canChange, pending, onAction,
+  k, fallbackMeasure, dims, typeNames, canChange, pending, onAction,
 }: {
-  k: MonthFocusKpi; measure: SalesKpiMeasure | undefined; dims: SalesDimensionMapping[]; canChange: boolean;
+  k: MonthFocusKpi; fallbackMeasure: SalesKpiMeasure | undefined; dims: SalesDimensionMapping[];
+  typeNames: OutletTypeNames; canChange: boolean;
   pending: AcceptAction | null; onAction(a: AcceptAction): void;
 }) {
-  const fmt = (v: number) => (measure ? formatKpiValue(v, measure) : formatTarget(v));
+  const measure = k.measure ?? fallbackMeasure;
+  const kpiLabel = k.label || k.kpiCode;
   return (
-    <div className="space-y-1.5" data-testid={`focus-kpi-${k.kpiCode}`}>
-      <p className="text-xs font-semibold text-gray-800">
-        {k.label || k.kpiCode} <span className="font-normal text-gray-500 font-mono">{k.kpiCode}</span>
-      </p>
+    <div className="space-y-1.5 min-w-0" data-testid={`focus-kpi-${k.kpiCode}`}>
+      <p className="text-xs font-semibold text-gray-800" data-testid={`focus-kpi-title-${k.kpiCode}`}>{kpiLabel}</p>
       {k.names.length === 0 ? (
         <p className="text-xs text-gray-500">No outlet has a product name for this KPI in the target file this month.</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="text-xs w-full min-w-[32rem]">
-            <thead>
-              <tr className="text-left text-gray-500">
-                <th className="py-1 pr-3 font-medium">Name in the target file</th>
-                <th className="py-1 pr-3 font-medium">Outlets</th>
-                <th className="py-1 pr-3 font-medium">Products it counts</th>
-                <th className="py-1 pr-3 font-medium text-right">Achieved</th>
-                <th className="py-1 font-medium text-right">Outlets at 0</th>
+        // table-fixed + w-full: the table takes the width it is given and wraps inside it, so it never widens the
+        // month row (or the page) — long names and chips wrap instead (M7).
+        <table className="text-xs w-full table-fixed" data-testid={`focus-table-${k.kpiCode}`}>
+          <thead>
+            <tr className="text-left text-gray-500">
+              <th className="py-1 pr-2 font-medium w-[24%]">Name in the target file</th>
+              <th className="py-1 pr-2 font-medium w-[18%]">Outlets</th>
+              <th className="py-1 pr-2 font-medium">Products it counts</th>
+              <th className="py-1 pr-2 font-medium text-right w-[16%]">Achieved</th>
+              <th className="py-1 font-medium text-right w-[12%]">Outlets at 0</th>
+            </tr>
+          </thead>
+          <tbody>
+            {k.names.map((n) => (
+              <tr key={n.key} className="border-t border-gray-100 align-top" data-testid={`focus-name-${k.kpiCode}-${n.key}`}>
+                <td className="py-1 pr-2 font-medium text-gray-900 max-w-[16rem] break-words [overflow-wrap:anywhere]"
+                  data-testid="focus-name-cell">{n.name}</td>
+                <td className="py-1 pr-2 text-gray-700 break-words">
+                  {formatCount(n.outlets)}
+                  {Object.keys(n.outletsByType).length > 0 && (
+                    <span className="block text-[11px] text-gray-500">{outletsByTypeText(n, typeNames)}</span>
+                  )}
+                </td>
+                <td className="py-1 pr-2 min-w-0">
+                  <div className="flex flex-wrap gap-1 min-w-0">
+                    {n.tokens.map((t) => (
+                      <TokenChip key={t.key} t={t} kpiCode={k.kpiCode} kpiLabel={kpiLabel} dims={dims} canChange={canChange}
+                        pending={pending} onAction={onAction} />
+                    ))}
+                  </div>
+                </td>
+                <td className="py-1 pr-2 text-right [overflow-wrap:anywhere]">{formatInMeasure(n.achieved.total, measure)}</td>
+                <td className="py-1 text-right">{formatCount(n.achieved.outletsZero)}</td>
               </tr>
-            </thead>
-            <tbody>
-              {k.names.map((n) => (
-                <tr key={n.key} className="border-t border-gray-100 align-top" data-testid={`focus-name-${k.kpiCode}-${n.key}`}>
-                  <td className="py-1 pr-3 font-medium text-gray-900 whitespace-nowrap">{n.name}</td>
-                  <td className="py-1 pr-3 text-gray-700">
-                    {formatCount(n.outlets)}
-                    {Object.keys(n.outletsByType).length > 0 && (
-                      <span className="block text-[11px] text-gray-500">{outletsByTypeText(n)}</span>
-                    )}
-                  </td>
-                  <td className="py-1 pr-3">
-                    <div className="flex flex-wrap gap-1">
-                      {n.tokens.map((t) => (
-                        <TokenChip key={t.key} t={t} kpiCode={k.kpiCode} dims={dims} canChange={canChange}
-                          pending={pending} onAction={onAction} />
-                      ))}
-                    </div>
-                  </td>
-                  <td className="py-1 pr-3 text-right whitespace-nowrap">{fmt(n.achieved.total)}</td>
-                  <td className="py-1 text-right">{formatCount(n.achieved.outletsZero)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+            ))}
+          </tbody>
+        </table>
       )}
       {k.missingName.outlets > 0 && (
-        <div className="text-xs text-red-700" role="alert" data-testid={`focus-missing-name-${k.kpiCode}`}>
+        <div className="text-xs text-red-700" data-testid={`focus-missing-name-${k.kpiCode}`}>
           <p className="flex gap-1"><XCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             {plural(k.missingName.outlets, 'outlet has', 'outlets have')} a target for this KPI but no product name in the
             target file. Add the names and upload the target file again.
@@ -234,9 +281,16 @@ function FocusKpiSection({
   );
 }
 
-function BlockerList({ month, blockers }: { month: string; blockers: FocusBlocker[] }) {
+function BlockerList({
+  month, blockers, kpiLabels, canChange, pending, onAction,
+}: {
+  month: string; blockers: FocusBlocker[]; kpiLabels: Record<string, string>; canChange: boolean;
+  pending: AcceptAction | null; onAction(a: AcceptAction): void;
+}) {
+  const busy = pending !== null;
+  // role="status" (polite), not "alert": a preview with N blocked months must not fire N assertive announcements.
   return (
-    <div role="alert" data-testid={`recon-blockers-${month}`}
+    <div role="status" data-testid={`recon-blockers-${month}`}
       className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 space-y-1.5">
       <p className="font-semibold flex gap-1.5">
         <XCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
@@ -244,8 +298,18 @@ function BlockerList({ month, blockers }: { month: string; blockers: FocusBlocke
       </p>
       <ul className="space-y-1 pl-5 list-disc">
         {blockers.map((b, i) => (
-          <li key={`${b.code}-${b.kpiCode}-${b.key ?? i}`} data-testid="recon-blocker">
-            {sentence(b.message)}. <span className="text-red-700">({plural(b.outlets, 'outlet')})</span>
+          <li key={`${b.code}-${b.kpiCode}-${b.key ?? i}`} data-testid="recon-blocker" className="[overflow-wrap:anywhere]">
+            {/* The server's message already says how many outlets: nothing is appended here. */}
+            {sentence(b.message)}.
+            {canChange && b.code === 'FOCUS_UNMATCHED' && b.key && (
+              <Button size="sm" variant="outline" className="ml-1.5 !px-1.5 !py-0 text-[11px] bg-white" disabled={busy}
+                loading={pending?.kpiCode === b.kpiCode && pending.key === b.key}
+                onClick={() => onAction({ kind: 'accept', kpiCode: b.kpiCode, key: b.key! })}
+                data-testid={`recon-blocker-accept-${b.kpiCode}-${b.key}`}
+                aria-label={`Accept ${tokenWithKpi(b.token ?? b.key, kpiLabels[b.kpiCode] || b.kpiCode)} as not sold yet`}>
+                Accept — not sold yet
+              </Button>
+            )}
             <SampleCodes codes={b.sampleOutletCodes} total={b.outlets} label="Show outlet codes" />
           </li>
         ))}
@@ -255,14 +319,22 @@ function BlockerList({ month, blockers }: { month: string; blockers: FocusBlocke
 }
 
 export function MonthReconciliationPanel({
-  month, reconciliation: r, measures, dims = [], canAct, monthOpen, expanded = true, onRefresh,
+  month, reconciliation: r, measures = {}, dims = [], typeNames = {}, canAct, monthOpen, expanded = true, onRefresh,
+  refreshHint = 'press Refresh preview before applying',
 }: {
   month: string;
   reconciliation: MonthReconciliation | null | undefined;
-  /** kpiCode → measure (from the preview's KPI list) so achieved totals use the KPI's own unit. */
-  measures: Record<string, SalesKpiMeasure>;
+  /**
+   * Fallback only, for an older server: kpiCode -> measure. The payload's own `MonthFocusKpi.measure` and
+   * `targets.kpis[].measure` are used whenever present.
+   */
+  measures?: Record<string, SalesKpiMeasure>;
   /** The mapping's product columns, for "ADHO, SKU group 500" wording. */
   dims?: SalesDimensionMapping[];
+  /** Outlet type code -> display name ("Retailer" instead of RETAILER). */
+  typeNames?: OutletTypeNames;
+  /** What to do when the refresh after Accept / Undo did not land, e.g. "press Refresh preview before applying". */
+  refreshHint?: string;
   /** Holds targets:upload (may accept / undo). */
   canAct: boolean;
   /** Acceptances can only change for an OPEN month. */
@@ -274,12 +346,31 @@ export function MonthReconciliationPanel({
 }) {
   const [pending, setPending] = useState<AcceptAction | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** After Accept / Undo: the token whose (replaced) chip gets keyboard focus once the refreshed preview rendered. */
+  const [focusAfter, setFocusAfter] = useState<{ kpiCode: string; key: string } | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!focusAfter) return;
+    const root = rootRef.current;
+    setFocusAfter(null);
+    if (!root) return;
+    const chip = Array.from(root.querySelectorAll<HTMLElement>('[data-focus-chip]'))
+      .find((el) => el.dataset.focusKpi === focusAfter.kpiCode && el.dataset.focusKey === focusAfter.key);
+    const button = chip?.querySelector<HTMLButtonElement>('button:not([disabled])');
+    (button ?? chip ?? root).focus();
+  }, [focusAfter, r]);
+
   if (!r) return null;
 
   const hasFocus = r.focus.length > 0;
   const canChange = canAct && monthOpen;
   const { targets, gaps } = r;
   const noTargets = targets.targetUploadedAt === null;
+  // Blockers are never hidden behind a collapsed row, and neither is the section that resolves them.
+  const showFocus = hasFocus && (expanded || reconciliationNeedsAttention(r));
+  const kpiLabels: Record<string, string> = {};
+  for (const k of [...targets.kpis, ...r.focus]) if (k.label) kpiLabels[k.kpiCode] = k.label;
 
   async function act(a: AcceptAction) {
     if (pending) return;
@@ -288,19 +379,39 @@ export function MonthReconciliationPanel({
     const res = a.kind === 'accept'
       ? await salesImportApi.acceptFocusToken(month, { kpiCode: a.kpiCode, key: a.key })
       : await salesImportApi.undoFocusAcceptance(month, a.kpiCode, a.key);
-    if (!res.success) {
-      // Refresh anyway: the refusal (month closed, token now matched, …) usually means the screen is out of date.
-      await onRefresh();
-      setPending(null);
-      setError(`${a.kind === 'accept' ? 'Not accepted' : 'Not undone'}: ${sentence(res.error) || 'the request failed'}. The preview has been reloaded.`);
-      return;
-    }
+    // Refresh either way: after a refusal (month closed, token now matched, …) the screen is usually out of date.
+    // Only say it was reloaded when the reload actually landed.
     const refreshed = await onRefresh();
     setPending(null);
+    setFocusAfter({ kpiCode: a.kpiCode, key: a.key });
+    if (!res.success) {
+      setError(`${a.kind === 'accept' ? 'Not accepted' : 'Not undone'}: ${sentence(res.error) || 'the request failed'}. ` +
+        (refreshed ? 'The preview has been reloaded.' : `The preview could not be refreshed — ${refreshHint}.`));
+      return;
+    }
     if (!refreshed) {
-      setError(`${a.kind === 'accept' ? 'Accepted' : 'Undone'}, but the preview could not be refreshed — press Refresh preview before applying.`);
+      setError(`${a.kind === 'accept' ? 'Accepted' : 'Undone'}, but the preview could not be refreshed — ${refreshHint}.`);
     }
   }
+  const onAction = (a: AcceptAction) => { void act(a); };
+
+  const focusSection = showFocus && (
+    <div className="space-y-3 min-w-0" data-testid={`recon-focus-${month}`}>
+      <div>
+        <p className="text-xs font-semibold text-gray-800">Focus brands</p>
+        <p className="text-[11px] text-gray-500">
+          Each outlet counts the products written for the KPI in this month&apos;s target file.
+          {canChange
+            ? ' A name that is not in the sales data blocks applying; if the product simply has not sold yet, accept it — it then counts as 0.'
+            : ''}
+        </p>
+      </div>
+      {r.focus.map((k) => (
+        <FocusKpiSection key={k.kpiCode} k={k} fallbackMeasure={measures[k.kpiCode]} dims={dims} typeNames={typeNames}
+          canChange={canChange} pending={pending} onAction={onAction} />
+      ))}
+    </div>
+  );
 
   const noticeNoTargets = hasFocus && noTargets && (
     <Notice tone="amber" testId="recon-no-targets">
@@ -314,8 +425,11 @@ export function MonthReconciliationPanel({
   );
 
   return (
-    <div className="space-y-3 min-w-0" data-testid={`month-recon-${month}`}>
-      {r.blockers.length > 0 && <BlockerList month={month} blockers={r.blockers} />}
+    <div className="space-y-3 min-w-0 outline-none" data-testid={`month-recon-${month}`} ref={rootRef} tabIndex={-1}>
+      {r.blockers.length > 0 && (
+        <BlockerList month={month} blockers={r.blockers} kpiLabels={kpiLabels} canChange={canChange}
+          pending={pending} onAction={onAction} />
+      )}
       {noticeNoTargets}
       {noticeNewer}
       {error && <Notice tone="red" testId="recon-action-error">{error}</Notice>}
@@ -334,7 +448,7 @@ export function MonthReconciliationPanel({
                     {targets.kpis.map((k) => (
                       <li key={k.kpiCode} data-testid={`recon-target-${k.kpiCode}`}>
                         <span className="font-medium">{k.label || k.kpiCode}</span>: targets for{' '}
-                        {plural(k.outletsWithTarget, 'outlet')} (total {formatTarget(k.totalTarget)})
+                        {plural(k.outletsWithTarget, 'outlet')} (total {formatInMeasure(k.totalTarget, k.measure ?? measures[k.kpiCode])})
                       </li>
                     ))}
                   </ul>
@@ -343,23 +457,7 @@ export function MonthReconciliationPanel({
             )}
           </div>
 
-          {hasFocus && (
-            <div className="space-y-3" data-testid={`recon-focus-${month}`}>
-              <div>
-                <p className="text-xs font-semibold text-gray-800">Focus brands</p>
-                <p className="text-[11px] text-gray-500">
-                  Each outlet counts the products written for the KPI in this month&apos;s target file.
-                  {canChange
-                    ? ' A name that is not in the sales data blocks applying; if the product simply has not sold yet, accept it — it then counts as 0.'
-                    : ''}
-                </p>
-              </div>
-              {r.focus.map((k) => (
-                <FocusKpiSection key={k.kpiCode} k={k} measure={measures[k.kpiCode]} dims={dims} canChange={canChange}
-                  pending={pending} onAction={(a) => { void act(a); }} />
-              ))}
-            </div>
-          )}
+          {focusSection}
 
           {(gaps.targetNoSales.outlets > 0 || gaps.salesNoTarget.outlets > 0) && (
             <div className="space-y-1 text-xs text-gray-600" data-testid={`recon-gaps-${month}`}>
@@ -380,6 +478,7 @@ export function MonthReconciliationPanel({
           )}
         </>
       )}
+      {!expanded && focusSection}
     </div>
   );
 }

@@ -7,7 +7,7 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import {
   EMPTY_MONTH_RECONCILIATION,
   type MonthPreview, type MonthReconciliation, type SalesImportDetail, type SalesImportPreview,
@@ -28,7 +28,7 @@ const apiMock = vi.hoisted(() => ({
   get: vi.fn(), preview: vi.fn(), apply: vi.fn(), reprocess: vi.fn(), remove: vi.fn(), cancel: vi.fn(), reprocessAsNew: vi.fn(),
   getProfile: vi.fn(), acceptFocusToken: vi.fn(), undoFocusAcceptance: vi.fn(),
   months: vi.fn(), closeMonth: vi.fn(), reopenMonth: vi.fn(), recalcPreview: vi.fn(), recalculate: vi.fn(), rebuildProductList: vi.fn(),
-  createKpi: vi.fn(), patchKpi: vi.fn(), testKpi: vi.fn(),
+  createKpi: vi.fn(), patchKpi: vi.fn(), testKpi: vi.fn(), segmentOptions: vi.fn(),
   unmatchedCsvUrl: (id: string) => `/u/${id}`, errorsXlsxUrl: (id: string) => `/e/${id}`,
 }));
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock, fetchDownload: vi.fn() }));
@@ -48,11 +48,11 @@ const DIMS = [{ key: 'brand', label: 'Brand', header: 'BRAND' }, { key: 'skuGrou
 function recon(over: Partial<MonthReconciliation> = {}): MonthReconciliation {
   return {
     targets: {
-      kpis: [{ kpiCode: 'FB1', label: 'Focus Brand 1', outletsWithTarget: 4079, totalTarget: 125000 }],
+      kpis: [{ kpiCode: 'FB1', label: 'Focus Brand 1', outletsWithTarget: 4079, totalTarget: 125000, measure: 'AMOUNT' }],
       targetUploadedAt: '2026-11-06T05:00:00.000Z', newerThanLastApply: false,
     },
     focus: [{
-      kpiCode: 'FB1', label: 'Focus Brand 1',
+      kpiCode: 'FB1', label: 'Focus Brand 1', measure: 'AMOUNT',
       names: [{
         name: 'CNO & ADHO500', key: 'ADHO500&CNO', outlets: 4079, outletsByType: { RETAILER: 4079 },
         tokens: [
@@ -72,7 +72,7 @@ function recon(over: Partial<MonthReconciliation> = {}): MonthReconciliation {
 
 const UNMATCHED_RECON = recon({
   focus: [{
-    kpiCode: 'FB2', label: 'Focus Brand 2',
+    kpiCode: 'FB2', label: 'Focus Brand 2', measure: 'QUANTITY',
     names: [{
       name: 'ADHO50 & XYZ', key: 'ADHO50&XYZ', outlets: 2338, outletsByType: { WHOLESALER: 2300, '': 38 },
       tokens: [
@@ -84,8 +84,8 @@ const UNMATCHED_RECON = recon({
     missingName: { outlets: 3, sampleOutletCodes: ['W1', 'W2', 'W3'] },
   }],
   blockers: [
-    { code: 'FOCUS_UNMATCHED', kpiCode: 'FB2', token: 'XYZ', key: 'XYZ', outlets: 2338, sampleOutletCodes: ['W1'], message: 'XYZ (Focus Brand 2) is not in the sales data.' },
-    { code: 'FOCUS_MISSING_NAME', kpiCode: 'FB2', outlets: 3, sampleOutletCodes: ['W1', 'W2', 'W3'], message: '3 outlets have a Focus Brand 2 target but no product name' },
+    { code: 'FOCUS_UNMATCHED', kpiCode: 'FB2', token: 'XYZ', key: 'XYZ', outlets: 2338, sampleOutletCodes: ['W1'], message: '"XYZ" in Focus Brand 2 is not a product in the sales data (2,338 outlets). Fix the target file, or accept it as not sold yet.' },
+    { code: 'FOCUS_MISSING_NAME', kpiCode: 'FB2', outlets: 3, sampleOutletCodes: ['W1', 'W2', 'W3'], message: '3 outlets have a Focus Brand 2 target but no product name in the target file.' },
   ],
   focusFingerprint: 'fp-blocked',
 });
@@ -93,6 +93,9 @@ const UNMATCHED_RECON = recon({
 beforeEach(() => {
   Object.values(apiMock).forEach((f) => typeof f === 'function' && 'mockReset' in f && (f as ReturnType<typeof vi.fn>).mockReset());
   apiMock.getProfile.mockResolvedValue(ok({ dimensions: DIMS }));
+  apiMock.segmentOptions.mockResolvedValue(ok({
+    outletTypes: [{ code: 'RETAILER', name: 'Retailer' }, { code: 'WHOLESALER', name: 'Wholesaler' }], programs: [], subPrograms: [],
+  }));
   perms.granted = true;
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
@@ -103,7 +106,7 @@ afterEach(() => vi.restoreAllMocks());
 function renderPanel(r: MonthReconciliation | null, over: Partial<React.ComponentProps<typeof MonthReconciliationPanel>> = {}) {
   const onRefresh = vi.fn(async () => true);
   render(
-    <MonthReconciliationPanel month="2026-11" reconciliation={r} measures={{ FB1: 'AMOUNT', FB2: 'QUANTITY' }} dims={DIMS}
+    <MonthReconciliationPanel month="2026-11" reconciliation={r} dims={DIMS}
       canAct monthOpen onRefresh={onRefresh} {...over} />,
   );
   return { onRefresh };
@@ -117,7 +120,7 @@ describe('MonthReconciliationPanel', () => {
   });
 
   it('no targets for the month + a focus KPI → amber notice', () => {
-    renderPanel(recon({ targets: { kpis: [], targetUploadedAt: null, newerThanLastApply: false }, focus: [{ kpiCode: 'FB1', label: 'Focus Brand 1', names: [], missingName: { outlets: 0, sampleOutletCodes: [] } }] }));
+    renderPanel(recon({ targets: { kpis: [], targetUploadedAt: null, newerThanLastApply: false }, focus: [{ kpiCode: 'FB1', label: 'Focus Brand 1', measure: 'AMOUNT', names: [], missingName: { outlets: 0, sampleOutletCodes: [] } }] }));
     expect(screen.getByTestId('recon-no-targets')).toHaveTextContent(
       'No targets uploaded for this month yet — focus KPIs are not calculated. Upload targets, then recalculate.',
     );
@@ -139,7 +142,7 @@ describe('MonthReconciliationPanel', () => {
 
   it('targets per KPI and MATCHED chips in words, achieved in the KPI measure', () => {
     renderPanel(recon());
-    expect(screen.getByTestId('recon-target-FB1')).toHaveTextContent('Focus Brand 1: targets for 4,079 outlets (total 1,25,000)');
+    expect(screen.getByTestId('recon-target-FB1')).toHaveTextContent('Focus Brand 1: targets for 4,079 outlets (total ₹1,25,000)');
     expect(screen.getByTestId('focus-token-FB1-ADHO500')).toHaveTextContent('ADHO500 → ADHO, SKU group 500');
     expect(screen.getByTestId('focus-token-FB1-CNO')).toHaveTextContent('CNO → all CNO products');
     const row = screen.getByTestId('focus-name-FB1-ADHO500&CNO');
@@ -154,7 +157,7 @@ describe('MonthReconciliationPanel', () => {
     const unmatched = screen.getByTestId('focus-token-FB2-XYZ');
     expect(unmatched).toHaveAttribute('data-status', 'UNMATCHED');
     expect(unmatched).toHaveTextContent('XYZ — not found in sales data');
-    expect(within(unmatched).getByRole('button', { name: 'Accept XYZ as not sold yet' })).toBeInTheDocument();
+    expect(within(unmatched).getByRole('button', { name: 'Accept XYZ (Focus Brand 2) as not sold yet' })).toBeInTheDocument();
     const ambiguous = screen.getByTestId('focus-token-FB2-ADHO50');
     expect(ambiguous).toHaveTextContent('could mean more than one product: ADHO, SKU group 50 · or ADHO5, SKU group 0');
     expect(within(ambiguous).queryByRole('button')).not.toBeInTheDocument();
@@ -163,7 +166,9 @@ describe('MonthReconciliationPanel', () => {
     const blockers = screen.getByTestId('recon-blockers-2026-11');
     expect(blockers).toHaveTextContent("November 2026 can't be applied until these are fixed:");
     expect(within(blockers).getAllByTestId('recon-blocker')).toHaveLength(2);
-    expect(blockers).toHaveTextContent('XYZ (Focus Brand 2) is not in the sales data. (2,338 outlets)');
+    expect(blockers).toHaveTextContent('"XYZ" in Focus Brand 2 is not a product in the sales data (2,338 outlets). Fix the target file, or accept it as not sold yet.');
+    // M5: the server message already has the count; the screen appends nothing.
+    expect(blockers.textContent!.match(/2,338 outlets/g)).toHaveLength(1);
     expect(within(blockers).getByText('W1, W2, W3')).toBeInTheDocument();
   });
 
@@ -171,10 +176,11 @@ describe('MonthReconciliationPanel', () => {
     let resolve!: (v: unknown) => void;
     apiMock.acceptFocusToken.mockReturnValue(new Promise((r) => { resolve = r; }));
     const { onRefresh } = renderPanel(UNMATCHED_RECON);
-    const btn = screen.getByRole('button', { name: 'Accept XYZ as not sold yet' });
+    const btn = within(screen.getByTestId('focus-token-FB2-XYZ')).getByRole('button', { name: 'Accept XYZ (Focus Brand 2) as not sold yet' });
     fireEvent.click(btn);
     expect(apiMock.acceptFocusToken).toHaveBeenCalledWith('2026-11', { kpiCode: 'FB2', key: 'XYZ' });
     expect(btn).toBeDisabled();
+    expect(screen.getByTestId('recon-blocker-accept-FB2-XYZ')).toBeDisabled();
     await act(async () => { resolve(ok({ month: '2026-11', acceptances: [] })); });
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
     expect(screen.queryByTestId('recon-action-error')).not.toBeInTheDocument();
@@ -183,8 +189,17 @@ describe('MonthReconciliationPanel', () => {
   it('Accept refused → error shown, never optimistic', async () => {
     apiMock.acceptFocusToken.mockResolvedValue({ success: false, error: 'The month is closed.', status: 409 });
     renderPanel(UNMATCHED_RECON);
-    fireEvent.click(screen.getByRole('button', { name: 'Accept XYZ as not sold yet' }));
+    fireEvent.click(screen.getByTestId('recon-blocker-accept-FB2-XYZ'));
     expect(await screen.findByTestId('recon-action-error')).toHaveTextContent('Not accepted: The month is closed. The preview has been reloaded.');
+  });
+
+  it('M2: Accept refused AND the reload failed → never claims the preview was reloaded', async () => {
+    apiMock.acceptFocusToken.mockResolvedValue({ success: false, error: 'The month is closed.', status: 409 });
+    renderPanel(UNMATCHED_RECON, { onRefresh: vi.fn(async () => false) });
+    fireEvent.click(screen.getByTestId('recon-blocker-accept-FB2-XYZ'));
+    const err = await screen.findByTestId('recon-action-error');
+    expect(err).toHaveTextContent('Not accepted: The month is closed. The preview could not be refreshed — press Refresh preview before applying.');
+    expect(err).not.toHaveTextContent('has been reloaded');
   });
 
   it('accepted chip is grey with who / when, and Undo calls DELETE then refreshes', async () => {
@@ -203,7 +218,7 @@ describe('MonthReconciliationPanel', () => {
     const chip = screen.getByTestId('focus-token-FB2-XYZ');
     expect(chip).toHaveAttribute('data-status', 'ACCEPTED');
     expect(chip).toHaveTextContent('XYZ — accepted as not sold yet by Asha on');
-    fireEvent.click(within(chip).getByRole('button', { name: 'Undo accepting XYZ as not sold yet' }));
+    fireEvent.click(within(chip).getByRole('button', { name: 'Undo accepting XYZ (Focus Brand 2) as not sold yet' }));
     await waitFor(() => expect(onRefresh).toHaveBeenCalled());
     expect(apiMock.undoFocusAcceptance).toHaveBeenCalledWith('2026-11', 'FB2', 'XYZ');
   });
@@ -220,10 +235,126 @@ describe('MonthReconciliationPanel', () => {
     expect(screen.getByText('R1, R2')).toBeInTheDocument();
   });
 
-  it('collapsed (expanded=false) shows only blockers and notices', () => {
+  it('M1: collapsed with blockers → blockers AND the Focus brands section show; Accept is on the blocker line', () => {
     renderPanel(UNMATCHED_RECON, { expanded: false });
-    expect(screen.getByTestId('recon-blockers-2026-11')).toBeInTheDocument();
+    const blockers = screen.getByTestId('recon-blockers-2026-11');
+    expect(within(blockers).getByRole('button', { name: 'Accept XYZ (Focus Brand 2) as not sold yet' })).toBeInTheDocument();
+    // Only UNMATCHED lines get the button (a missing name is fixed in the target file).
+    expect(within(blockers).getAllByRole('button', { name: /^Accept/ })).toHaveLength(1);
+    expect(screen.getByTestId('recon-focus-2026-11')).toBeInTheDocument();
+    expect(screen.queryByTestId('recon-targets-2026-11')).not.toBeInTheDocument();
+  });
+
+  it('collapsed without anything needing attention → no Focus brands section', () => {
+    renderPanel(recon(), { expanded: false });
     expect(screen.queryByTestId('recon-focus-2026-11')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('recon-targets-2026-11')).not.toBeInTheDocument();
+  });
+
+  it('M1: the blocker-line Accept calls the API and refreshes', async () => {
+    apiMock.acceptFocusToken.mockResolvedValue(ok({ month: '2026-11', acceptances: [] }));
+    const { onRefresh } = renderPanel(UNMATCHED_RECON, { expanded: false });
+    fireEvent.click(screen.getByTestId('recon-blocker-accept-FB2-XYZ'));
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+    expect(apiMock.acceptFocusToken).toHaveBeenCalledWith('2026-11', { kpiCode: 'FB2', key: 'XYZ' });
+  });
+
+  it('no blocker-line Accept for a viewer who cannot change the month', () => {
+    renderPanel(UNMATCHED_RECON, { canAct: false });
+    expect(screen.queryByTestId('recon-blocker-accept-FB2-XYZ')).not.toBeInTheDocument();
+  });
+
+  it('M7: long names wrap — no nowrap on the name cell, a fixed-layout table, no forced minimum width', () => {
+    const long = 'SUPERLONGFOCUSPRODUCTNAMEWITHOUTANYSPACESATALL & ANOTHER VERY LONG PRODUCT NAME THAT GOES ON AND ON';
+    renderPanel(recon({ focus: [{ ...recon().focus[0], names: [{ ...recon().focus[0].names[0], name: long }] }] }));
+    const cell = screen.getAllByTestId('focus-name-cell')[0];
+    expect(cell).toHaveTextContent(long);
+    expect(cell.className).not.toMatch(/whitespace-nowrap/);
+    expect(cell.className).toMatch(/break-words/);
+    expect(cell.className).toMatch(/max-w-/);
+    const table = screen.getByTestId('focus-table-FB1');
+    expect(table.className).toMatch(/table-fixed/);
+    expect(table.className).not.toMatch(/min-w-/);
+    // Nothing in the panel sets a minimum width or turns wrapping off.
+    const panel = screen.getByTestId('month-recon-2026-11');
+    expect(panel.querySelectorAll('[class*="min-w-["], [class*="whitespace-nowrap"]')).toHaveLength(0);
+  });
+
+  it('L3: the KPI label (not the raw code) heads the section; outlet types by display name; never "no type"', () => {
+    renderPanel(UNMATCHED_RECON, { typeNames: { WHOLESALER: 'Wholesaler' } });
+    expect(screen.getByTestId('focus-kpi-title-FB2').textContent).toBe('Focus Brand 2');
+    const row = screen.getByTestId('focus-name-FB2-ADHO50&XYZ');
+    expect(row).toHaveTextContent('2,300 Wholesaler · 38 outlets without a type');
+    expect(row).not.toHaveTextContent('no type');
+  });
+
+  it('L3: an outlet type without a display name falls back to its code; one untyped outlet reads naturally', () => {
+    renderPanel(recon({ focus: [{ ...recon().focus[0], names: [{ ...recon().focus[0].names[0], outletsByType: { RETAILER: 5, '': 1 } }] }] }));
+    expect(screen.getByTestId('focus-name-FB1-ADHO500&CNO')).toHaveTextContent('5 RETAILER · 1 outlet without a type');
+  });
+
+  it('L4: achieved and target totals use the measure on the payload (no lookup prop needed)', () => {
+    renderPanel(recon({
+      targets: { ...recon().targets, kpis: [{ kpiCode: 'FB1', label: 'Focus Brand 1', outletsWithTarget: 10, totalTarget: 42.5, measure: 'QUANTITY' }] },
+      focus: [{ ...recon().focus[0], measure: 'PRODUCT_COUNT', names: [{ ...recon().focus[0].names[0], achieved: { total: 17, outletsZero: 0 } }] }],
+    }));
+    expect(screen.getByTestId('recon-target-FB1')).toHaveTextContent('(total 42.5 cases)');
+    const row = screen.getByTestId('focus-name-FB1-ADHO500&CNO');
+    expect(row).toHaveTextContent('17');
+    expect(row).not.toHaveTextContent('₹17');
+  });
+
+  it('L4: measure missing on an older payload → the measures prop, else a plain number', () => {
+    const r = recon();
+    const noMeasure = {
+      ...r,
+      targets: { ...r.targets, kpis: r.targets.kpis.map(({ measure: _m, ...k }) => k) },
+      focus: r.focus.map(({ measure: _m, ...k }) => k),
+    } as unknown as MonthReconciliation;
+    renderPanel(noMeasure);
+    expect(screen.getByTestId('recon-target-FB1')).toHaveTextContent('(total 1,25,000)');
+    expect(screen.getByTestId('focus-name-FB1-ADHO500&CNO')).toHaveTextContent('54,321.5');
+    cleanup();
+    renderPanel(noMeasure, { measures: { FB1: 'AMOUNT' } });
+    expect(screen.getByTestId('focus-name-FB1-ADHO500&CNO')).toHaveTextContent('₹54,321.50');
+  });
+
+  it('L5: blockers are a polite status (no alert), so N blocked months do not fire N alerts', () => {
+    renderPanel(UNMATCHED_RECON);
+    expect(screen.getByTestId('recon-blockers-2026-11')).toHaveAttribute('role', 'status');
+    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+  });
+
+  it('L5: after Accept, keyboard focus moves to the replacing chip\'s Undo button; after Undo, back to Accept', async () => {
+    apiMock.acceptFocusToken.mockResolvedValue(ok({ month: '2026-11', acceptances: [] }));
+    apiMock.undoFocusAcceptance.mockResolvedValue(ok({ month: '2026-11', acceptances: [] }));
+    const accepted = recon({
+      focus: [{
+        ...UNMATCHED_RECON.focus[0],
+        names: [{
+          ...UNMATCHED_RECON.focus[0].names[0],
+          tokens: [{ token: 'XYZ', key: 'XYZ', status: 'UNMATCHED', accepted: { byName: 'Asha', at: '2026-11-07T06:30:00.000Z' } }],
+        }],
+        missingName: { outlets: 0, sampleOutletCodes: [] },
+      }],
+    });
+    let current: MonthReconciliation = UNMATCHED_RECON;
+    const view = (rr: MonthReconciliation) => (
+      <MonthReconciliationPanel month="2026-11" reconciliation={rr} dims={DIMS} canAct monthOpen onRefresh={onRefresh} />
+    );
+    const onRefresh = vi.fn(async () => {
+      current = current === UNMATCHED_RECON ? accepted : UNMATCHED_RECON;
+      rerender(view(current));
+      return true;
+    });
+    const { rerender } = render(view(current));
+    fireEvent.click(screen.getByTestId('recon-blocker-accept-FB2-XYZ'));
+    const undo = await screen.findByRole('button', { name: 'Undo accepting XYZ (Focus Brand 2) as not sold yet' });
+    await waitFor(() => expect(undo).toHaveFocus());
+    fireEvent.click(undo);
+    const accept = await within(await screen.findByTestId('focus-token-FB2-XYZ'))
+      .findByRole('button', { name: 'Accept XYZ (Focus Brand 2) as not sold yet' });
+    await waitFor(() => expect(accept).toHaveFocus());
   });
 });
 
@@ -278,7 +409,7 @@ describe('import preview — focus reconciliation', () => {
     expect(apiMock.apply.mock.calls[0][1]).not.toHaveProperty('expectedFocusFingerprints');
   });
 
-  it('a blocked month shows its blockers without expanding, cannot be ticked, and Apply says why', async () => {
+  it('a blocked month shows its blockers without expanding, cannot be ticked, and says why under "Not available:"', async () => {
     apiMock.get.mockResolvedValue(ok(detail()));
     apiMock.preview.mockResolvedValue(ok(preview([month({
       canApply: false, blockedReason: '2 focus product names in the November target file could not be matched — see Focus brands.',
@@ -288,24 +419,70 @@ describe('import preview — focus reconciliation', () => {
     expect(await screen.findByTestId('recon-blockers-2026-11')).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Apply November 2026' })).toBeDisabled();
     expect(screen.getByTestId('sales-import-apply')).toBeDisabled();
-    expect(screen.getByTestId('sales-import-apply-blockers')).toHaveTextContent(
+    const unavailable = screen.getByTestId('sales-import-unavailable-months');
+    expect(unavailable).toHaveTextContent('Not available:');
+    expect(unavailable).toHaveTextContent(
       'November 2026 cannot be applied: 2 focus product names in the November target file could not be matched — see Focus brands.',
     );
   });
 
-  it('Accept in the preview refreshes it; the month becomes tickable', async () => {
+  it('M1: Accept is reachable without expanding the month; the preview refreshes and the month becomes tickable', async () => {
     apiMock.get.mockResolvedValue(ok(detail()));
     apiMock.preview
       .mockResolvedValueOnce(ok(preview([month({ canApply: false, blockedReason: 'blocked', reconciliation: UNMATCHED_RECON })])))
       .mockResolvedValue(ok(preview([month()])));
     apiMock.acceptFocusToken.mockResolvedValue(ok({ month: '2026-11', acceptances: [] }));
     render(<ImportPage />);
-    // Open the month so the Focus brands section (with the Accept button) shows.
-    fireEvent.click(await screen.findByRole('button', { name: 'November 2026' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Accept XYZ as not sold yet' }));
+    const blockers = await screen.findByTestId('recon-blockers-2026-11');
+    // The Focus brands section shows too, without opening the month.
+    expect(screen.getByTestId('recon-focus-2026-11')).toBeInTheDocument();
+    fireEvent.click(within(blockers).getByRole('button', { name: 'Accept XYZ (Focus Brand 2) as not sold yet' }));
     await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Apply November 2026' })).not.toBeDisabled());
     expect(apiMock.preview).toHaveBeenCalledTimes(2);
     expect(screen.queryByTestId('recon-blockers-2026-11')).not.toBeInTheDocument();
+    // The row stays open after acting, so what was just changed is still on screen.
+    expect(screen.getByTestId('month-detail-2026-11')).toBeInTheDocument();
+  });
+
+  it('L5: the month toggle\'s aria-expanded follows the visible detail row', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([
+      month({ canApply: false, blockedReason: 'blocked', reconciliation: UNMATCHED_RECON }),
+      month({ month: '2026-10', firstDate: '2026-10-01', lastDate: '2026-10-31', reconciliation: EMPTY_MONTH_RECONCILIATION }),
+    ])));
+    render(<ImportPage />);
+    const nov = await screen.findByRole('button', { name: 'November 2026' });
+    expect(screen.getByTestId('month-detail-2026-11')).toBeInTheDocument();
+    expect(nov).toHaveAttribute('aria-expanded', 'true');
+    expect(nov).toHaveAttribute('aria-controls', 'month-detail-2026-11');
+    const oct = screen.getByRole('button', { name: 'October 2026' });
+    expect(screen.queryByTestId('month-detail-2026-10')).not.toBeInTheDocument();
+    expect(oct).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(oct);
+    expect(screen.getByTestId('month-detail-2026-10')).toBeInTheDocument();
+    expect(oct).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('L6: a ticked good month has no blockers; a blocked month is listed separately under "Not available:"', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([
+      month({ canApply: false, blockedReason: 'Focus names could not be matched', reconciliation: UNMATCHED_RECON }),
+      month({ month: '2026-10', firstDate: '2026-10-01', lastDate: '2026-10-31', reconciliation: EMPTY_MONTH_RECONCILIATION }),
+    ])));
+    render(<ImportPage />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    expect(screen.getByTestId('sales-import-apply')).not.toBeDisabled();
+    expect(screen.queryByTestId('sales-import-apply-blockers')).not.toBeInTheDocument();
+    const unavailable = screen.getByTestId('sales-import-unavailable-months');
+    expect(unavailable).toHaveTextContent('Not available:');
+    expect(unavailable).toHaveTextContent('November 2026 cannot be applied: Focus names could not be matched.');
+  });
+
+  it('outlet type display names are loaded for the focus table', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month({ canApply: false, blockedReason: 'blocked', reconciliation: UNMATCHED_RECON })])));
+    render(<ImportPage />);
+    await waitFor(() => expect(screen.getByTestId('focus-name-FB2-ADHO50&XYZ')).toHaveTextContent('2,300 Wholesaler · 38 outlets without a type'));
   });
 });
 
@@ -365,9 +542,52 @@ describe('months — targets changed badge + recalculate', () => {
     fireEvent.click(await screen.findByTestId('recalc-open-2026-11'));
     expect(await screen.findByTestId('recon-blockers-2026-11')).toBeInTheDocument();
     expect(screen.getByTestId('recalc-apply')).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Accept XYZ as not sold yet' }));
+    fireEvent.click(screen.getByTestId('recon-blocker-accept-FB2-XYZ'));
     await waitFor(() => expect(screen.getByTestId('recalc-apply')).not.toBeDisabled());
     expect(apiMock.recalcPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it('M6: after a successful recalculation the preview reloads, so "apply again / recalculate" disappears', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ targetsChangedSinceApply: true })]));
+    apiMock.recalcPreview
+      .mockResolvedValueOnce(ok(recalc({ reconciliation: recon({ targets: { ...recon().targets, newerThanLastApply: true } }) })))
+      .mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValue(ok({ month: '2026-11', ok: true, outletsWritten: 5, outletsZeroFilled: 0 }));
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-11'));
+    expect(await screen.findByTestId('recon-targets-newer')).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+    expect(await screen.findByTestId('recalc-result')).toHaveTextContent('November 2026 recalculated');
+    await waitFor(() => expect(screen.queryByTestId('recon-targets-newer')).not.toBeInTheDocument());
+    expect(apiMock.recalcPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it('M6: if the reload after recalculating fails, the stale reconciliation is hidden (not shown as current)', async () => {
+    apiMock.months.mockResolvedValue(ok([row()]));
+    apiMock.recalcPreview
+      .mockResolvedValueOnce(ok(recalc({ reconciliation: recon({ targets: { ...recon().targets, newerThanLastApply: true } }) })))
+      .mockResolvedValue({ success: false, error: 'Server busy', status: 503 });
+    apiMock.recalculate.mockResolvedValue(ok({ month: '2026-11', ok: true, outletsWritten: 5, outletsZeroFilled: 0 }));
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-11'));
+    expect(await screen.findByTestId('recon-targets-newer')).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+    expect(await screen.findByTestId('recalc-recon-stale')).toHaveTextContent('could not be reloaded');
+    expect(screen.queryByTestId('recon-targets-newer')).not.toBeInTheDocument();
+  });
+
+  it('M2: Accept in Recalculate whose reload failed says how to recover on THIS screen', async () => {
+    apiMock.months.mockResolvedValue(ok([row()]));
+    apiMock.recalcPreview
+      .mockResolvedValueOnce(ok(recalc({ canApply: false, blockedReason: 'blocked', reconciliation: UNMATCHED_RECON })))
+      .mockResolvedValue({ success: false, error: 'Server busy', status: 503 });
+    apiMock.acceptFocusToken.mockResolvedValue({ success: false, error: 'The month is closed.', status: 409 });
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-11'));
+    fireEvent.click(await screen.findByTestId('recon-blocker-accept-FB2-XYZ'));
+    expect(await screen.findByTestId('recon-action-error')).toHaveTextContent(
+      'Not accepted: The month is closed. The preview could not be refreshed — close the recalculation and open it again before recalculating.',
+    );
   });
 });
 
@@ -405,12 +625,25 @@ describe('KPI editor — products from the target file', () => {
     expect(onSaved).toHaveBeenCalled();
   });
 
-  it('a KPI without a name column warns, and the API refusal is shown', async () => {
-    apiMock.createKpi.mockResolvedValue({ success: false, error: 'Turn on the per-outlet name column for this KPI in KPI settings first, so the target file can carry the product names.', status: 400 });
+  it('L2: a KPI without a name column warns AND blocks Save (no round-trip to be refused)', async () => {
     renderEditor();
     fireEvent.change(screen.getByRole('combobox', { name: 'KPI' }), { target: { value: 'FB9' } });
     fireEvent.click(screen.getByRole('radio', { name: 'From the target file, per outlet' }));
     expect(screen.getByTestId('product-source-no-name-column')).toBeInTheDocument();
+    expect(screen.getByTestId('kpi-editor-blockers')).toHaveTextContent(
+      'Turn on the per-outlet name column for No names under Targets → KPI settings first, or pick the products here.',
+    );
+    const save = screen.getByRole('button', { name: 'Save KPI' });
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    expect(apiMock.createKpi).not.toHaveBeenCalled();
+  });
+
+  it('L2: the API refusal is still shown if the server refuses anyway', async () => {
+    apiMock.createKpi.mockResolvedValue({ success: false, error: 'Turn on the per-outlet name column for this KPI in KPI settings first.', status: 400 });
+    renderEditor();
+    fireEvent.change(screen.getByRole('combobox', { name: 'KPI' }), { target: { value: 'FB1' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'From the target file, per outlet' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save KPI' })); });
     expect(await screen.findByRole('alert')).toHaveTextContent('Turn on the per-outlet name column');
   });
@@ -425,13 +658,30 @@ describe('KPI editor — products from the target file', () => {
     expect(apiMock.createKpi.mock.calls[0][0].filter).toEqual({ anyOf: [{ brand: 'P' }] });
   });
 
-  it('switching an existing TARGET_NAMES definition back to "Pick products here" saves FILTER', async () => {
+  it('L1: switching a saved TARGET_NAMES KPI to "Pick products here" with NO products blocks Save until "ALL products" is ticked', async () => {
     apiMock.patchKpi.mockImplementation(async (_id: string, d: SalesKpiDefinitionDto) => ok({ ...d, id: 'k1' }));
     renderEditor({ ...NEW, id: 'k1', kpiCode: 'FB1', productSource: 'TARGET_NAMES', filter: {} });
     expect(screen.getByTestId('product-source-target-names')).toBeInTheDocument();
+    expect(screen.queryByTestId('kpi-all-products-confirm')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('radio', { name: 'Pick products here' }));
     expect(screen.queryByTestId('product-source-target-names')).not.toBeInTheDocument();
+    const save = screen.getByRole('button', { name: 'Save KPI' });
+    expect(save).toBeDisabled();
+    expect(screen.getByTestId('kpi-editor-blockers')).toHaveTextContent(
+      'No products are picked, so this KPI would count ALL products. Pick the products it counts, or tick “This KPI counts ALL products”.',
+    );
+    fireEvent.click(screen.getByRole('checkbox', { name: /This KPI counts ALL products/ }));
+    expect(save).not.toBeDisabled();
+    await act(async () => { fireEvent.click(save); });
+    expect(apiMock.patchKpi).toHaveBeenCalledWith('k1', expect.objectContaining({ productSource: 'FILTER', filter: {} }));
+  });
+
+  it('L1: switching a saved TARGET_NAMES KPI back with products picked needs no tick', async () => {
+    apiMock.patchKpi.mockImplementation(async (_id: string, d: SalesKpiDefinitionDto) => ok({ ...d, id: 'k1' }));
+    renderEditor({ ...NEW, id: 'k1', kpiCode: 'FB1', productSource: 'TARGET_NAMES', filter: { anyOf: [{ brand: 'P' }] } });
+    fireEvent.click(screen.getByRole('radio', { name: 'Pick products here' }));
+    expect(screen.queryByTestId('kpi-all-products-confirm')).not.toBeInTheDocument();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save KPI' })); });
-    expect(apiMock.patchKpi).toHaveBeenCalledWith('k1', expect.objectContaining({ productSource: 'FILTER' }));
+    expect(apiMock.patchKpi).toHaveBeenCalledWith('k1', expect.objectContaining({ productSource: 'FILTER', filter: { anyOf: [{ brand: 'P' }] } }));
   });
 });
