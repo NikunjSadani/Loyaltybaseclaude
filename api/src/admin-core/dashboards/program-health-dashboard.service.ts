@@ -6,6 +6,8 @@ import { TenantSettingsService } from '../../tenant/tenant-settings.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
 import { kpiCodeKeys, lastNMonths } from '../../targets/targets.helpers';
 import { istMonthBounds, istMonthKey } from '../../common/ist-date';
+import { AppliesToOutletFacets } from '../../common/applies-to/applies-to';
+import { scopedKpiPredicates } from '../../sales/outlet-kpi-scope.helper';
 
 /**
  * ProgramHealthDashboardService — REAL, tenant-scoped "program health" aggregation
@@ -272,16 +274,44 @@ export class ProgramHealthDashboardService {
     // across ALL addressable outlets for the period, keyed by outletCode. We restrict the
     // target/achievement rows to addressable outletCodes so a deactivated/NOT_INTERESTED
     // outlet's stale numbers never inflate the rollup.
-    const [kpiDefs, addressableOutletRows] = await Promise.all([
-      this.prisma.kpiDef.findMany({
-        where: { clientId, enabled: true },
-        orderBy: { order: 'asc' },
-        select: { code: true, label: true, unit: true, isPrimary: true },
-      }),
-      this.prisma.outlet.findMany({ where: addressableWhere, select: { outletCode: true } }),
-    ]);
+    const kpiDefs = await this.prisma.kpiDef.findMany({
+      where: { clientId, enabled: true },
+      orderBy: { order: 'asc' },
+      select: {
+        code: true, label: true, unit: true, isPrimary: true,
+        outletType: true, outletTypes: true, programs: true, subPrograms: true,
+      },
+    });
+    // APPLIES-TO: a stored value whose (outlet, KPI) pair is OUT of the KPI's scope (incl. a legacy
+    // single-outlet-type KPI) is excluded from the rollup — the same rule the sales / partner / points
+    // readers apply, so every screen gives the same totals. `scopePreds` is null for an all-unscoped
+    // tenant (Deoleo) → the outlet load stays `{ outletCode }` only and nothing is skipped.
+    const scopePreds = scopedKpiPredicates(kpiDefs);
+    const addressableOutletRows: Array<{
+      outletCode: string;
+      programName?: string | null;
+      programCategory?: string | null;
+      outletType?: { code: string } | null;
+    }> = scopePreds
+      ? await this.prisma.outlet.findMany({
+          where: addressableWhere,
+          select: { outletCode: true, programName: true, programCategory: true, outletType: { select: { code: true } } },
+        })
+      : await this.prisma.outlet.findMany({ where: addressableWhere, select: { outletCode: true } });
 
     const addressableCodes = new Set(addressableOutletRows.map((o) => o.outletCode));
+    const facetsByCode = new Map<string, AppliesToOutletFacets>(
+      scopePreds
+        ? addressableOutletRows.map((o) => [
+            o.outletCode,
+            { outletType: o.outletType?.code ?? null, program: o.programName ?? null, subProgram: o.programCategory ?? null },
+          ])
+        : [],
+    );
+    const inScope = (outletCode: string, kpiCode: string): boolean => {
+      const p = scopePreds?.get(kpiCode);
+      return !p || p(facetsByCode.get(outletCode) ?? {});
+    };
 
     const [targetRows, salesRows] = await Promise.all([
       this.prisma.outletTarget.findMany({
@@ -305,6 +335,7 @@ export class ProgramHealthDashboardService {
         if (!addressableCodes.has(r.outletCode)) continue; // only addressable outlets
         const vals = (r.values ?? {}) as Record<string, unknown>;
         for (const code of kpiCodeKeys(vals)) {
+          if (!inScope(r.outletCode, code)) continue; // KPI not applicable to this outlet
           const v = vals[code];
           if (typeof v === 'number' && Number.isFinite(v)) {
             into.set(code, (into.get(code) ?? 0) + v);

@@ -27,6 +27,7 @@ import {
   OfferValueType,
 } from './offers.types';
 import { CopyMonthDto, CreateOfferTileDto, UpdateOfferTileDto } from './dto/offers.dto';
+import { intersectAppliesTo, isUnscoped, kpiAppliesTo } from '../common/applies-to/applies-to';
 
 const ENTITY = 'OFFER_TILE';
 
@@ -162,6 +163,29 @@ export class OffersAdminService {
     }
   }
 
+  /**
+   * APPLIES-TO (plan §1 "Offers"): a NON-BLOCKING warning when the tile's audience (programNames ×
+   * outletTypeCodes) can never overlap its linked KPI's scope — the tile would show a KPI that does
+   * not apply to any outlet that sees it. Returns [] for an unscoped KPI / no KPI / any overlap, so
+   * the response shape is unchanged (`warnings` is only added when non-empty).
+   */
+  private async scopeWarnings(clientId: string, input: NormalizedOfferTileInput): Promise<string[]> {
+    if (!input.kpiCode) return [];
+    const kpi = await this.prisma.kpiDef.findFirst({
+      where: { clientId, code: input.kpiCode },
+      select: { code: true, outletType: true, outletTypes: true, programs: true, subPrograms: true },
+    });
+    if (!kpi) return [];
+    const kpiScope = kpiAppliesTo(kpi);
+    if (isUnscoped(kpiScope)) return [];
+    const tileScope = { outletTypes: input.outletTypeCodes, programs: input.programNames };
+    if (intersectAppliesTo(tileScope, kpiScope) !== null) return [];
+    return [
+      `KPI ${kpi.code} does not apply to any outlet this offer targets (KPI scope vs the offer's ` +
+        'programs / outlet types) — the tile will show a KPI that is not applicable to its audience.',
+    ];
+  }
+
   private async findOwned(clientId: string, id: string): Promise<OfferTile> {
     const existing = await this.prisma.offerTile.findFirst({ where: { id, clientId, deletedAt: null } });
     if (!existing) throw new NotFoundException('Offer tile not found');
@@ -216,6 +240,7 @@ export class OffersAdminService {
     assertNoNulls(dto);
     const input = validateTileInput(dto as OfferTileInput);
     await this.assertRefs(user.clientId, input, { kpi: true, outletTypes: true });
+    const warnings = await this.scopeWarnings(user.clientId, input);
     return this.prisma.$transaction(async (tx) => {
       const created = await tx.offerTile.create({
         data: { ...toDbFields(input), clientId: user.clientId, createdById: user.sub },
@@ -230,7 +255,7 @@ export class OffersAdminService {
           metadata: { clientId: user.clientId },
         },
       });
-      return { tile: toAdminView(created) };
+      return { tile: toAdminView(created), ...(warnings.length ? { warnings } : {}) };
     });
   }
 
@@ -254,6 +279,11 @@ export class OffersAdminService {
       kpi: publishing || 'kpiCode' in patch,
       outletTypes: publishing || 'outletTypeCodes' in patch,
     });
+    // Scope-overlap warning only when the KPI link or the audience is (re)set, or on publish.
+    const warnings =
+      publishing || 'kpiCode' in patch || 'outletTypeCodes' in patch || 'programNames' in patch
+        ? await this.scopeWarnings(user.clientId, input)
+        : [];
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.offerTile.update({
         where: { id: existing.id },
@@ -270,7 +300,7 @@ export class OffersAdminService {
           metadata: { clientId: user.clientId },
         },
       });
-      return { tile: toAdminView(updated) };
+      return { tile: toAdminView(updated), ...(warnings.length ? { warnings } : {}) };
     });
   }
 

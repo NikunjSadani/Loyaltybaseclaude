@@ -529,7 +529,10 @@ export interface GifsySettings {
    *   - frequencyPerMonth:  captures required per month (1..4).
    *   - allowedSalesLevels: SalesHierarchyLevel.code list allowed to capture (e.g. ['XSR','SO']).
    *   - geoFence:           { enabled, radiusMeters (1..5000, default 50) }.
-   * Default: { outletScope: [], frequencyPerMonth: 1, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 } }.
+   *   - programs / subPrograms (APPLIES-TO, optional): narrow by Outlet.programName / programCategory;
+   *     [] = every program / sub-program. An absent key is carried over by the backend (stale-tab safety).
+   * Default: { outletScope: [], frequencyPerMonth: 1, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 },
+   *            programs: [], subPrograms: [] }.
    */
   visibilityConfig?: {
     outletScope:        string[];
@@ -539,6 +542,8 @@ export interface GifsySettings {
       enabled:      boolean;
       radiusMeters: number;
     };
+    programs?:          string[];
+    subPrograms?:       string[];
   };
   /**
    * Per-tenant identity/payout uniqueness policy. GIFSY_ADMIN-only write. REPLACE-WHOLE nested

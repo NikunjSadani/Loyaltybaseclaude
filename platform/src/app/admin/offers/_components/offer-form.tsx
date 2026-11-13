@@ -10,6 +10,7 @@ import {
   type OfferGroup, type OfferValueType, type OfferTileAdmin, type OfferTileInput,
   type OfferSegmentOptions, type OfferOutletTypeOption, type OfferKpiOption, type OfferTilePartner,
 } from '@/lib/offers';
+import { FACET_NOUN, scopeMismatches } from '@/lib/kpi-scope-core';
 
 const INPUT =
   'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-[var(--brand-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)]';
@@ -195,6 +196,16 @@ export function OfferForm({
 
   const isText = f.valueType === 'TEXT';
   const kpi = kpis.find((k) => k.code === f.kpiCode) ?? null;
+  // APPLIES-TO: the progress KPI may not apply to every outlet this tile targets (non-blocking).
+  const kpiScopeWarning = useMemo(() => {
+    if (!kpi?.scope) return null;
+    const mm = scopeMismatches(kpi.scope, { programs: f.programNames, outletTypes: f.outletTypeCodes });
+    if (!mm.length) return null;
+    const what = mm.map((m) => `${FACET_NOUN[m.facet]}${m.outside.length > 1 ? 's' : ''} ${m.outside.join(', ')}`).join(' and ');
+    return mm.some((m) => m.disjoint)
+      ? `${kpi.label} doesn't apply to ${what}, so outlets in this audience get no target or achievement values for it and won't see progress.`
+      : `${kpi.label} doesn't apply to ${what}, so those outlets get no values for it and won't see progress (the tile itself still shows).`;
+  }, [kpi, f.programNames, f.outletTypeCodes]);
 
   // Live preview — EXACTLY the partner tile component, with illustrative progress.
   const preview: OfferTilePartner = useMemo(() => {
@@ -352,6 +363,12 @@ export function OfferForm({
               {kpis.map((k) => <option key={k.code} value={k.code}>{k.label}</option>)}
               {f.kpiCode && !kpi && <option value={f.kpiCode}>{f.kpiCode}</option>}
             </select>
+            {kpiScopeWarning && (
+              <p role="status" data-testid="offer-kpi-scope-warning"
+                className="mt-1 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+                {kpiScopeWarning}
+              </p>
+            )}
           </div>
 
           <div className="space-y-3">

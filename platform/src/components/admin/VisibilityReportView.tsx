@@ -132,7 +132,12 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
               <Legend color="bg-red-400" label={`Rejected ${report.summary.rejected}`} />
               <Legend color="bg-gray-200" label={`Missed / not started ${report.summary.missed}`} />
             </div>
-            <p className="text-[11px] text-gray-400 mt-2">Scope: {report.outletScope.length ? report.outletScope.join(', ') : '—'} · {report.frequencyPerMonth}× per month</p>
+            <p className="text-[11px] text-gray-400 mt-2">
+              Scope: {report.outletScope.length ? report.outletScope.join(', ') : '—'}
+              {report.programs?.length ? ` · Programs: ${report.programs.join(', ')}` : ''}
+              {report.subPrograms?.length ? ` · Sub-Programs: ${report.subPrograms.join(', ')}` : ''}
+              {' · '}{report.frequencyPerMonth}× per month
+            </p>
           </div>
         </>
       )}

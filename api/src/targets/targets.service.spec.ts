@@ -47,6 +47,8 @@ const mockTx = {
   salesUploadBatch:   { create: jest.fn(), findFirst: jest.fn(), delete: jest.fn() },
   outletSalesRecord:  { upsert: jest.fn(), findMany: jest.fn(), count: jest.fn() },
   $executeRaw:        jest.fn(),
+  // APPLIES-TO: upsertKpi writes an AuditLog row (in the same tx) when a KPI's scope changes.
+  auditLog:           { create: jest.fn() },
 };
 
 const mockPrisma = {
@@ -1398,9 +1400,12 @@ describe('TargetsService — Sales Import ownership (K-7)', () => {
       expect(mockPrisma.$executeRaw).not.toHaveBeenCalled();
       expect(mockPrisma.outletSalesRecord.findMany).not.toHaveBeenCalled();
       expect(Object.keys(result).sort()).toEqual(
+        // Byte-identical for an all-unscoped tenant: APPLIES-TO `ignoredOutOfScope` is ABSENT unless the
+        // tenant has a scoped KPI (mirrors the conditional `skippedImporterOwnedKpis`).
         ['acceptedCount', 'batchId', 'month', 'monthsInBatch', 'rejectedCount', 'rows', 'totalRows'].sort(),
       );
       expect('skippedImporterOwnedKpis' in result).toBe(false);
+      expect('ignoredOutOfScope' in result).toBe(false);
     });
 
     it('buildAchievementTemplate: every enabled KPI keeps its column', async () => {
@@ -1436,7 +1441,8 @@ describe('TargetsService — Sales Import ownership (K-7)', () => {
       const values = sqlValues(call);
       // kpiValues written = manual keys only (owned value 999 NOT written) …
       expect(values).toContain(JSON.stringify({ MONTH_TGT: 10 }));
-      expect(values.some((v) => typeof v === 'string' && v.includes('999'))).toBe(false);
+      // Only the JSON kpiValues payloads matter — the row id is a random UUID that can contain "999" by chance.
+      expect(values.some((v) => typeof v === 'string' && v.startsWith('{') && v.includes('999'))).toBe(false);
       // … and the owned list drives the carry-over of the existing row's owned keys.
       expect(values).toContainEqual(['FOCUS_PACK_1']);
       expect(values).toContain('deoleo');

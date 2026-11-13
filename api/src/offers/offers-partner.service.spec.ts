@@ -198,6 +198,60 @@ describe('OffersPartnerService', () => {
     expect(res.tiles[0].progress).toBeNull();
   });
 
+  describe('audit #2 — KPI APPLIES-TO scope in tile progress', () => {
+    const scoped = (s: Record<string, unknown>) => ({
+      code: 'ADHO50', label: 'ADHO 50 ml', unit: 'cases',
+      outletType: null, outletTypes: [], programs: [], subPrograms: [], ...s,
+    });
+    beforeEach(() => {
+      // Tile segment = every outlet; both outlets carry stored ADHO50 values.
+      mockPrisma.offerTile.findMany.mockResolvedValue([tile({ id: 'k', kpiCode: 'ADHO50' })]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { ...OUTLETS[0], programCategory: 'Urban' },
+        { ...OUTLETS[1], programCategory: 'Rural' },
+      ]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', targetValues: { ADHO50: 100 } },
+        { outletCode: 'O2', targetValues: { ADHO50: 900 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', kpiValues: { ADHO50: 50 } },
+        { outletCode: 'O2', kpiValues: { ADHO50: 800 } },
+      ]);
+    });
+
+    it('sums only the segment outlets where the KPI applies (program scope, case-insensitive)', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scoped({ programs: ['gold'] })]);
+      const res = await service.listForPartner(partner);
+      expect(res.tiles[0].progress).toMatchObject({ target: 100, achieved: 50, pct: 50 });
+      // Scope fields are read with the KPI meta (no extra query).
+      expect(mockPrisma.kpiDef.findMany.mock.calls[0][0].select).toMatchObject({
+        outletType: true, outletTypes: true, programs: true, subPrograms: true,
+      });
+      expect(mockPrisma.outlet.findMany.mock.calls[0][0].select).toMatchObject({ programCategory: true });
+    });
+
+    it('sub-program scope and legacy single outlet type are enforced too', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scoped({ subPrograms: ['Rural'] })]);
+      let res = await service.listForPartner(partner);
+      expect(res.tiles[0].progress).toMatchObject({ target: 900, achieved: 800 });
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scoped({ outletType: 'WHOLESALER' })]);
+      res = await service.listForPartner(partner);
+      // KPI applies to none of the segment outlets → no progress (tile still shown).
+      expect(res.tiles).toHaveLength(1);
+      expect(res.tiles[0].progress).toBeNull();
+    });
+
+    it('UNSCOPED KPI → identical to the pre-scope sum over every segment outlet', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'ADHO50', label: 'ADHO 50 ml', unit: 'cases' }]);
+      const baseline = await service.listForPartner(partner);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scoped({})]);
+      const unscoped = await service.listForPartner(partner);
+      expect(unscoped).toEqual(baseline);
+      expect(unscoped.tiles[0].progress).toMatchObject({ target: 1000, achieved: 850 });
+    });
+  });
+
   it('6b. no KPI-linked tile → no target/achievement/kpi queries; progress null', async () => {
     mockPrisma.offerTile.findMany.mockResolvedValue([tile()]);
     const res = await service.listForPartner(partner);

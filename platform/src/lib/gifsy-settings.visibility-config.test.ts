@@ -37,7 +37,22 @@ describe('gifsy-settings visibilityConfig contract', () => {
       frequencyPerMonth:  1,
       allowedSalesLevels: [],
       geoFence:           { enabled: false, radiusMeters: 50 },
+      programs:           [],
+      subPrograms:        [],
     });
+  });
+
+  it('APPLIES-TO: programs / subPrograms round-trip through the type and the REPLACE-WHOLE save', async () => {
+    const value: NonNullable<GifsySettings['visibilityConfig']> = {
+      outletScope:        ['SSS'],
+      frequencyPerMonth:  1,
+      allowedSalesLevels: ['SO'],
+      geoFence:           { enabled: false, radiusMeters: 50 },
+      programs:           ['Unnati'],
+      subPrograms:        ['Lite'],
+    };
+    expect(await saveGifsySettings({ visibilityConfig: value })).toBe(true);
+    expect(putMock).toHaveBeenCalledWith('/api/admin/settings', { key: 'visibilityConfig', value });
   });
 
   it('the GifsySettings type exposes visibilityConfig with the expected sub-fields', () => {

@@ -1742,4 +1742,82 @@ describe('PartnerService', () => {
       expect(mockStorage.uploadFile).not.toHaveBeenCalled();
     });
   });
+
+  // ─── APPLIES-TO D6: partner outlet cards are single-outlet views ─────────────────────────────
+  describe('getTargets / getTargetTrend — APPLIES-TO KPI scope', () => {
+    const u = { outletType: null, outletTypes: [], programs: [], subPrograms: [] };
+    function prime(kpis: unknown[]) {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O1', programName: 'RLP', programCategory: null, outletType: { code: 'SSS' } },
+        { outletCode: 'O2', programName: 'BSC', programCategory: 'Rural', outletType: { code: 'SSS' } },
+      ]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', outletName: 'One', targetValues: { PRI: 100, B: 10 } },
+        { outletCode: 'O2', outletName: 'Two', targetValues: { PRI: 100, B: 10 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue(kpis);
+    }
+
+    it('hides an out-of-scope KPI on that outlet and falls back the primary to its first in-scope KPI', async () => {
+      prime([
+        { code: 'PRI', label: 'Pri', unit: '', isPrimary: true, order: 1, ...u, programs: ['rlp'] },
+        { code: 'B', label: 'B', unit: '', isPrimary: false, order: 2, ...u },
+      ]);
+      const res: any = await service.getTargets(partner, { period: '2026-05' });
+      const o1 = res.outlets.find((o: any) => o.outletCode === 'O1');
+      const o2 = res.outlets.find((o: any) => o.outletCode === 'O2');
+      expect(o1.kpis.map((k: any) => [k.code, k.isPrimary])).toEqual([['PRI', true], ['B', false]]);
+      expect(o2.kpis.map((k: any) => [k.code, k.isPrimary])).toEqual([['B', true]]);
+    });
+
+    it('UNSCOPED tenant → identical rows/flags on every outlet (Deoleo byte-identical)', async () => {
+      prime([
+        { code: 'PRI', label: 'Pri', unit: '', isPrimary: true, order: 1, ...u },
+        { code: 'B', label: 'B', unit: '', isPrimary: false, order: 2, ...u },
+      ]);
+      const res: any = await service.getTargets(partner, { period: '2026-05' });
+      for (const o of res.outlets) expect(o.kpis.map((k: any) => [k.code, k.isPrimary])).toEqual([['PRI', true], ['B', false]]);
+    });
+
+    it('trend: a tenant primary that applies to none of the partner outlets falls back to an in-scope KPI', async () => {
+      prime([
+        { code: 'A_PRI', label: 'Pri', unit: '', isPrimary: true, order: 1, ...u, programs: ['GOLD'] },
+        { code: 'B', label: 'B', unit: 'cases', isPrimary: false, order: 2, ...u },
+      ]);
+      const res = await service.getTargetTrend(partner, 3);
+      expect(res.kpiCode).toBe('B');
+      prime([
+        { code: 'A_PRI', label: 'Pri', unit: '', isPrimary: true, order: 1, ...u },
+        { code: 'B', label: 'B', unit: 'cases', isPrimary: false, order: 2, ...u },
+      ]);
+      expect((await service.getTargetTrend(partner, 3)).kpiCode).toBe('A_PRI'); // unscoped unchanged
+    });
+
+    it('primary fallback never picks a DISABLED KPI (audit #7)', async () => {
+      prime([
+        { code: 'PRI', label: 'Pri', unit: '', isPrimary: true, order: 1, enabled: true, ...u, programs: ['rlp'] },
+        { code: 'DIS', label: 'Dis', unit: '', isPrimary: false, order: 0, enabled: false, ...u },
+        { code: 'B', label: 'B', unit: '', isPrimary: false, order: 2, enabled: true, ...u },
+      ]);
+      const res: any = await service.getTargets(partner, { period: '2026-05' });
+      const o2 = res.outlets.find((o: any) => o.outletCode === 'O2');
+      expect(o2.kpis.map((k: any) => [k.code, k.isPrimary])).toEqual([['B', true]]);
+    });
+
+    it('trend sums a legacy single-type KPI only over the outlets it applies to; unscoped → every outlet', async () => {
+      prime([{ code: 'S', label: 'S', unit: '', isPrimary: true, order: 1, ...u, outletType: 'SSS' }]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O1', programName: null, programCategory: null, outletType: { code: 'SSS' } },
+        { outletCode: 'O2', programName: null, programCategory: null, outletType: { code: 'WHOLESALER' } },
+      ]);
+      await service.getTargetTrend(partner, 3);
+      expect(mockPrisma.outletTarget.findMany.mock.calls.at(-1)![0].where.outletCode).toEqual({ in: ['O1'] });
+      expect(mockPrisma.outletSalesRecord.findMany.mock.calls.at(-1)![0].where.outletCode).toEqual({ in: ['O1'] });
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'S', label: 'S', unit: '', isPrimary: true, order: 1, ...u }]);
+      await service.getTargetTrend(partner, 3);
+      expect(mockPrisma.outletTarget.findMany.mock.calls.at(-1)![0].where.outletCode).toEqual({ in: ['O1', 'O2'] });
+    });
+  });
 });

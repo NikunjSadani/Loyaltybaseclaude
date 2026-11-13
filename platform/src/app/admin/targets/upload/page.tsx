@@ -24,6 +24,7 @@ import {
 import { authHeader } from '@/lib/api-client';
 import { buildMonthRange, formatMonth } from '@/lib/targets';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
+import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -49,6 +50,8 @@ interface UploadResult {
   rejectedCount: number;
   /** Ground truth: outlet-month targets actually written to the backend this upload. */
   savedCount?:   number;
+  /** APPLIES-TO D1: values ignored because the KPI does not apply to that outlet (absent on older API builds). */
+  ignoredOutOfScope?: number;
   rows:          UploadRow[];
 }
 
@@ -521,6 +524,13 @@ export default function TargetUploadPage() {
             <StatCard label="Rejected"    value={result.rejectedCount} color={result.rejectedCount > 0 ? 'red' : 'gray'} />
             <StatCard label="Months"      value={result.monthsInBatch.length} color="gray" />
           </div>
+
+          <IgnoredOutOfScopeNotice
+            count={result.ignoredOutOfScope}
+            rows={result.rows
+              .filter(r => r.status === 'accepted' || r.status === 'updated')
+              .map(r => ({ rowIndex: r.rowIndex, outletCode: r.outletCode ?? r.outletId, remarks: r.remarks }))}
+          />
 
           {/* Past-month lock notice */}
           {result.skippedLockedMonths && result.skippedLockedMonths.length > 0 && (

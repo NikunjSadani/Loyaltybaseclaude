@@ -2440,10 +2440,19 @@ describe('SalesService', () => {
       expect(res.kpis.find((k: { isPrimary: boolean; code: string }) => k.isPrimary)?.code).toBe('SHARED');
     });
 
-    it('PER-TYPE KPI SET: omitted outletType → ALL tenant KpiDefs shown (Deoleo byte-identical)', async () => {
+    it('omitted outletType → a legacy type-tagged KPI\'s stored value on an OUT-of-scope outlet is excluded (owner 2026-11-12)', async () => {
       primeTypeSet();
       const res = await service.getTargets(caller, '2026-05'); // no type
+      // O1 is SSS: the WHOLESALER-only BSC value stored on it is out of scope → not summed / surfaced.
+      expect(res.kpis.map((k: { code: string }) => k.code).sort()).toEqual(['RLP', 'SHARED']);
+    });
+
+    it('omitted outletType + ALL-unscoped KpiDefs → every code in the data shown (Deoleo byte-identical)', async () => {
+      primeTypeSet();
+      mockPrisma.kpiDef.findMany.mockResolvedValue(typeSetKpiDefs.map((k) => ({ ...k, outletType: null })));
+      const res = await service.getTargets(caller, '2026-05'); // no type
       expect(res.kpis.map((k: { code: string }) => k.code).sort()).toEqual(['BSC', 'RLP', 'SHARED']);
+      expect(res.kpis.find((k: { code: string }) => k.code === 'BSC')).toMatchObject({ target: 100, achieved: 60 });
     });
   });
 

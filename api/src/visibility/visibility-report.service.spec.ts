@@ -209,4 +209,43 @@ describe('VisibilityReportService', () => {
     const file = await service.exportCaptures(gifsy);
     expect(file).toBeInstanceOf(StreamableFile);
   });
+
+  // ── APPLIES-TO (D9/D12): numerator and denominator narrow TOGETHER ─────────────────────────
+  it('APPLIES-TO: the program narrowing lands on BOTH the denominator and the numerator outlet filter', async () => {
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, programs: ['RLP'], subPrograms: [] } });
+    await service.gifsyReport(gifsy, '2026-07-P1');
+    const denWhere = mockPrisma.outlet.count.mock.calls[0][0].where;
+    const numWhere = mockPrisma.visibilityCapture.groupBy.mock.calls[0][0].where.outlet;
+    expect(numWhere).toEqual(denWhere); // the invariant: same outlet universe on both sides
+    expect(denWhere.AND[1]).toEqual({ AND: [{ OR: [{ programName: { equals: 'RLP', mode: 'insensitive' } }] }] });
+    expect(denWhere.AND[0].outletType).toEqual({ code: { in: ['SSS'] } });
+  });
+
+  it('APPLIES-TO: empty programs/subPrograms → the exact pre-scope where on both sides', async () => {
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, programs: [], subPrograms: [] } });
+    await service.gifsyReport(gifsy, '2026-07-P1');
+    const denWhere = mockPrisma.outlet.count.mock.calls[0][0].where;
+    expect(denWhere).toEqual({
+      clientId: 't1', deletedAt: null, deactivatedAt: null,
+      OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+      outletType: { code: { in: ['SSS'] } },
+    });
+    expect(mockPrisma.visibilityCapture.groupBy.mock.calls[0][0].where.outlet).toEqual(denWhere);
+  });
+
+  it('APPLIES-TO: report carries programs / subPrograms ONLY when non-empty (unscoped response unchanged)', async () => {
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, programs: [], subPrograms: [] } });
+    const plain = await service.tenantReport(clientAdmin, '2026-07-P1');
+    expect(Object.keys(plain).sort()).toEqual(['frequencyPerMonth', 'outletScope', 'summary', 'windowClosed', 'windowKey']);
+
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, programs: ['RLP'], subPrograms: [] } });
+    const scoped = await service.tenantReport(clientAdmin, '2026-07-P1');
+    expect(scoped).toMatchObject({ outletScope: ['SSS'], programs: ['RLP'] });
+    expect(scoped).not.toHaveProperty('subPrograms');
+
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, subPrograms: ['Urban'] } });
+    const sub = await service.tenantReport(clientAdmin, '2026-07-P1');
+    expect(sub).toMatchObject({ subPrograms: ['Urban'] });
+    expect(sub).not.toHaveProperty('programs');
+  });
 });

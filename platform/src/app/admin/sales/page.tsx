@@ -10,6 +10,7 @@ import { DEOLEO_DEFAULT_KPIS } from '@/lib/platform/tenant-kpi-config';
 import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
 import { formatMonth } from '@/lib/targets';
 import { SALES_IMPORT_BATCH_STATUS } from '@/lib/sales-import/types';
+import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -62,6 +63,8 @@ interface UploadResult {
   rows:          UploadResultRow[];
   /** Sales Import: KPI columns in the file that are importer-owned and were NOT written (absent for most tenants). */
   skippedImporterOwnedKpis?: string[];
+  /** APPLIES-TO D1: values ignored because the KPI does not apply to that outlet (absent on older API builds). */
+  ignoredOutOfScope?: number;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -142,6 +145,10 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
       if (res.ok && body.success) {
         setBatches(prev => prev.filter(b => b.id !== batchId));
         setDeleteError(null);
+      } else if (res.status === 409 && typeof body.error === 'string' && body.error) {
+        // A business refusal (e.g. the batch is the last one holding values for out-of-scope KPIs, or it
+        // belongs to Sales Import) — retrying won't help, so show the server's reason verbatim.
+        setDeleteError(body.error);
       } else {
         setDeleteError('Could not delete this upload — please try again.');
       }
@@ -719,6 +726,11 @@ export default function SalesUploadPage() {
               </span>
             </div>
           )}
+
+          <IgnoredOutOfScopeNotice
+            count={uploadResult.ignoredOutOfScope}
+            rows={uploadResult.rows.filter(r => r.status === 'accepted')}
+          />
 
           {/* Skipped / rejected rows from backend */}
           {uploadResult.rows.filter(r => r.status !== 'accepted').length > 0 && (

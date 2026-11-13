@@ -11,7 +11,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import ComputePage from '../page';
 import {
@@ -421,5 +421,38 @@ describe('Points Engine compute page', () => {
     expect(previewMock).toHaveBeenCalledWith(
       expect.objectContaining({ program: null, kpiCode: null }),
     );
+  });
+
+  it('PE-C15 (APPLIES-TO D5): a KPI-scope SKIP row shows its reason and the SKIP group counts scope skips', async () => {
+    const scopeSkip = (code: string): ComputePreviewRow => ({
+      outletCode: code, outletName: 'Store', kpiCode: 'UNNATI_VOL', status: 'SKIP',
+      reason: 'KPI not applicable to this outlet (KPI scope)',
+    });
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        counts: { total: 3, ok: 0, skip: 3, error: 0, noRule: 0 },
+        rows: [scopeSkip('OUT-7'), scopeSkip('OUT-8'), { outletCode: 'OUT-9', kpiCode: 'CASES_SOLD', status: 'SKIP', reason: 'Target is zero' }],
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    const group = await screen.findByTestId('group-SKIP');
+    expect(within(group).getAllByText(/KPI not applicable to this outlet \(KPI scope\)/)).toHaveLength(2);
+    expect(within(group).getByTestId('skip-kpi-scope-count')).toHaveTextContent("2 because the KPI doesn't apply to that outlet (KPI scope)");
+  });
+
+  it('PE-C16: no scope-skip line when no SKIP row is a KPI-scope skip', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        counts: { total: 1, ok: 0, skip: 1, error: 0, noRule: 0 },
+        rows: [{ outletCode: 'OUT-9', kpiCode: 'CASES_SOLD', status: 'SKIP', reason: 'Target is zero' }],
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    await screen.findByTestId('group-SKIP');
+    expect(screen.queryByTestId('skip-kpi-scope-count')).not.toBeInTheDocument();
   });
 });
