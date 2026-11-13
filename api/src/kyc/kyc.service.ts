@@ -109,9 +109,8 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { KYC_FIELD_KEYS, BridgeResult, requiredFieldKeys } from './kyc-verification.helper';
 import { evaluateSubmission } from './kyc-verification.helper';
+import { mintDocViewToken } from './doc-view-token';
 import {
-  generateKycReviewDumpExcel,
-  generateRejectedKycExcel,
   KycReviewDumpEntry,
   KycReviewDumpFieldState,
   RejectedKycRow,
@@ -253,6 +252,23 @@ type CommitOutcome = BulkVerifySubmissionResult & { notification?: CommitNotifyI
  * KycDocument.fileUrl (no multipart upload happens on this path — the form posts
  * JSON with base64/url document references), so no StorageService upload is used.
  */
+/** Keyset position of a KYC export page (submissions ordered by createdAt, id ascending). */
+export interface KycExportCursor {
+  createdAt: Date;
+  id: string;
+}
+
+/** Submissions strictly after `c` in (createdAt, id) ascending order. */
+function kycExportAfter(c: KycExportCursor): Prisma.KycSubmissionWhereInput {
+  return { OR: [{ createdAt: { gt: c.createdAt } }, { createdAt: c.createdAt, id: { gt: c.id } }] };
+}
+
+/** The cursor after a page — null when the page was not full (the last page). */
+function kycExportNext(page: { createdAt: Date; id: string }[], take: number): KycExportCursor | null {
+  const last = page[page.length - 1];
+  return page.length === take && last ? { createdAt: last.createdAt, id: last.id } : null;
+}
+
 /** Shared empty display-name map (per-tenant fallback) so `labelFor` always receives a Map. */
 const EMPTY_TYPE_DISPLAY: ReadonlyMap<string, string> = new Map<string, string>();
 
@@ -284,10 +300,7 @@ export class KycService {
    * document links in the Outlet Master export.
    */
   signDocViewToken(docId: string, clientId: string): string {
-    return this.jwt.sign(
-      { sub: docId, clientId, typ: 'docview' },
-      { secret: this.config.get('JWT_SECRET'), expiresIn: '30d' },
-    );
+    return mintDocViewToken(this.jwt, this.config.get('JWT_SECRET'), docId, clientId);
   }
 
   /**
@@ -5766,18 +5779,25 @@ export class KycService {
     return { entries };
   }
 
-  // ─── GET /v1/kyc/review-dump ─────────────────────────────────────────────────
+  // ─── GET /v1/kyc/review-dump (export kind `kyc-review-dump`) ─────────────────
   /**
-   * Lane A export: one xlsx of all PENDING_GIFSY submissions for this tenant, with
-   * every filled field, signed document hyperlinks, and the per-field Decision/Remark
-   * columns reflecting current verification state (so re-export round-trips). Pure
-   * layout in kyc-review-dump.ts; this assembles entries from real data.
+   * Lane A export, ONE PAGE: PENDING_GIFSY submissions in this caller's scope (kycTenantFilter — un-assumed Gifsy =
+   * every tenant), oldest first, keyset (createdAt, id) after `after`, with every filled field, signed document links
+   * and the per-field Decision/Remark state (so re-export round-trips). The `kyc-review-dump` export kind
+   * (exports/kinds/batch1/kyc-dumps.ts) pages through this and streams kycReviewDumpCells() rows; `next` = the
+   * keyset of the last row when the page was full, else null.
    */
-  async reviewDump(user: JwtPayload): Promise<Buffer> {
+  async reviewDumpPage(
+    user: JwtPayload,
+    after: KycExportCursor | null,
+    take: number,
+  ): Promise<{ entries: KycReviewDumpEntry[]; next: KycExportCursor | null }> {
     if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
+    const base: Prisma.KycSubmissionWhereInput = { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) };
     const submissions = await this.prisma.kycSubmission.findMany({
-      where: { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
+      where: after ? { AND: [base, kycExportAfter(after)] } : base,
+      take,
       include: {
         user: { select: { name: true, phone: true, clientId: true } },
         partner: {
@@ -5820,7 +5840,7 @@ export class KycService {
         documents: { select: { documentType: true, fileUrl: true, fileKey: true, fileName: true } },
         verificationItems: { select: { fieldKey: true, decision: true, remark: true, source: true } },
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
 
     // Per-tenant outlet-type display labels, scoped to each row's own tenant (Gifsy = cross-tenant).
@@ -5871,12 +5891,13 @@ export class KycService {
       });
     }
 
-    return generateKycReviewDumpExcel(entries);
+    return { entries, next: kycExportNext(submissions, take) };
   }
 
-  // ─── GET /v1/kyc/rejected-export ─────────────────────────────────────────────
+  // ─── GET /v1/kyc/rejected-export (export kind `kyc-rejected`) ────────────────
   /**
-   * "Rejected outlets" export: one xlsx row per REJECTED submission, with the full
+   * "Rejected outlets" export, ONE PAGE (keyset (createdAt, id) after `after`; `holidays` = loadHolidaySet, read once
+   * per export by the caller): one row per REJECTED submission, with the full
    * KYC payload PLUS exactly which fields the Gifsy admin rejected and the per-field
    * remark. Scoped EXACTLY like the on-screen list (`kycTenantFilter`) so the rows
    * match what the admin sees on the Rejected filter (Gifsy = cross-tenant; a tenant
@@ -5886,16 +5907,21 @@ export class KycService {
    * toStatus = REJECTED (the most recent such transition); the actor name is resolved
    * from changedByUserId. Overall reason = KycSubmission.rejectionReason.
    */
-  async rejectedExport(user: JwtPayload): Promise<Buffer> {
+  async rejectedExportPage(
+    user: JwtPayload,
+    after: KycExportCursor | null,
+    take: number,
+    holidays: Awaited<ReturnType<typeof loadHolidaySet>>,
+  ): Promise<{ rows: RejectedKycRow[]; next: KycExportCursor | null }> {
     if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
-    // The "SLA Age (hrs)" column counts BUSINESS hours (Mon–Fri minus the national holiday
+    // `holidays`: the "SLA Age (hrs)" column counts BUSINESS hours (Mon–Fri minus the national holiday
     // calendar), matching the KYC list badge + slaMetrics — otherwise the export would disagree
     // with every other SLA surface by the excluded weekend.
-    const holidays = await loadHolidaySet(this.prisma);
-
+    const base: Prisma.KycSubmissionWhereInput = { status: 'REJECTED', ...this.kycTenantFilter(user) };
     const submissions = await this.prisma.kycSubmission.findMany({
-      where: { status: 'REJECTED', ...this.kycTenantFilter(user) },
+      where: after ? { AND: [base, kycExportAfter(after)] } : base,
+      take,
       include: {
         user: { select: { name: true, phone: true } },
         partner: {
@@ -5944,7 +5970,7 @@ export class KycService {
           select: { createdAt: true, changedByUserId: true },
         },
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
 
     // Resolve the rejecter names in one round-trip (avoid an N+1 user lookup).
@@ -6005,7 +6031,7 @@ export class KycService {
       };
     });
 
-    return generateRejectedKycExcel(rows);
+    return { rows, next: kycExportNext(submissions, take) };
   }
 
   /**

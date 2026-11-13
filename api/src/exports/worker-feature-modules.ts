@@ -7,6 +7,10 @@
  * so a missing dependency fails a test instead of a job run.
  */
 import type { Type } from '@nestjs/common';
+import { KycExportWorkerModule } from './kinds/batch1/kyc-export-worker.module';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const EXPORT_WORKER_FEATURE_MODULES: Array<Type<any>> = [];
+export const EXPORT_WORKER_FEATURE_MODULES: Array<Type<any>> = [
+  // Lane B — the KYC review dump / rejected kinds resolve KycService (worker-only module: no HTTP controllers).
+  KycExportWorkerModule,
+];

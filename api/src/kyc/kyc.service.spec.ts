@@ -526,12 +526,12 @@ describe('KycService', () => {
     });
   });
 
-  describe('reviewDump (Lane A export)', () => {
+  describe('reviewDumpPage (Lane A export, paged for the kyc-review-dump export kind)', () => {
     it('rejects a non-Gifsy caller', async () => {
-      await expect(service.reviewDump(so)).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(service.reviewDumpPage(so, null, 2000)).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('queries PENDING_GIFSY cross-tenant (Gifsy, #38) and returns an xlsx buffer', async () => {
+    it('queries PENDING_GIFSY cross-tenant (Gifsy, #38), oldest first, and returns the page entries', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
         {
           id: 'KYC-1',
@@ -579,18 +579,46 @@ describe('KycService', () => {
       ]);
       mockStorage.getSignedUrl.mockResolvedValueOnce('https://signed/gst');
 
-      const buf = await service.reviewDump(gifsy);
+      const page = await service.reviewDumpPage(gifsy, null, 2000);
 
-      expect(Buffer.isBuffer(buf)).toBe(true);
-      expect(buf.length).toBeGreaterThan(0);
-      const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
-      expect(where.status).toBe('PENDING_GIFSY');
-      expect(where.user).toBeUndefined(); // GIFSY is cross-tenant (#38) — no caller-tenant filter
+      expect(page.entries).toHaveLength(1);
+      expect(page.entries[0]).toMatchObject({ submissionId: 'KYC-1', outletCode: 'OUT-1', nameMismatch: true });
+      expect(page.entries[0].documents.gstCertificateUrl).toBe('https://signed/gst');
+      expect(page.next).toBeNull(); // short page → last page
+      const args = mockPrisma.kycSubmission.findMany.mock.calls[0][0];
+      expect(args.where.status).toBe('PENDING_GIFSY');
+      expect(args.where.user).toBeUndefined(); // GIFSY is cross-tenant (#38) — no caller-tenant filter
+      expect(args.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }]);
+      expect(args.take).toBe(2000);
       expect(mockStorage.getSignedUrl).toHaveBeenCalledWith('key');
+    });
+
+    it('pages by keyset: a full page returns the last row as the cursor; the next call reads strictly after it', async () => {
+      const at = new Date('2026-06-01T00:00:00Z');
+      const sub = (id: string) => ({
+        id, createdAt: at, boardPhotoLat: null, boardPhotoLng: null, user: { name: 'A', phone: '1', clientId: 't1' },
+        partner: null, documents: [], verificationItems: [],
+      });
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([sub('a'), sub('b')]);
+      const first = await service.reviewDumpPage(gifsy, null, 2);
+      expect(first.next).toEqual({ createdAt: at, id: 'b' });
+
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([sub('c')]);
+      const second = await service.reviewDumpPage(gifsy, first.next, 2);
+      expect(second.next).toBeNull();
+      const where = mockPrisma.kycSubmission.findMany.mock.calls[1][0].where;
+      expect(where.AND[0].status).toBe('PENDING_GIFSY');
+      expect(where.AND[1]).toEqual({ OR: [{ createdAt: { gt: at } }, { createdAt: at, id: { gt: 'b' } }] });
+    });
+
+    it('an assumed Gifsy operator is pinned to the assumed tenant', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
+      await service.reviewDumpPage({ ...gifsy, assumed: true }, null, 2000);
+      expect(mockPrisma.kycSubmission.findMany.mock.calls[0][0].where.user).toEqual({ clientId: gifsy.clientId });
     });
   });
 
-  describe('rejectedExport (Rejected outlets export)', () => {
+  describe('rejectedExportPage (Rejected outlets export, paged for the kyc-rejected export kind)', () => {
     const rejectedSub = () => ({
       id: 'KYC-R1',
       // Mon 22 Jun → Tue 23 Jun 2026 = 24 BUSINESS hours (weekday span, no weekend to exclude),
@@ -633,26 +661,21 @@ describe('KycService', () => {
       statusHistory: [{ createdAt: new Date('2026-06-23T00:00:00Z'), changedByUserId: 'admin1' }],
     });
 
-    const parseSheet = (buf: Buffer) => {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const XLSX = require('xlsx');
-      const wb = XLSX.read(buf, { type: 'buffer' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      return XLSX.utils.sheet_to_json(ws, { defval: '', raw: false, header: 1 }) as string[][];
-    };
+    const noHolidays = new Set<string>();
+    // The per-row layout (headers/verdict cells) is pinned in kyc-review-dump.spec.ts; here: the assembled rows.
+    const rowsOf = async (user: typeof gifsy) => (await service.rejectedExportPage(user, null, 2000, noHolidays)).rows;
 
     it('rejects a non-Gifsy caller', async () => {
-      await expect(service.rejectedExport(so)).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(service.rejectedExportPage(so, null, 2000, noHolidays)).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('queries status:REJECTED cross-tenant (Gifsy) and returns an xlsx buffer', async () => {
+    it('queries status:REJECTED cross-tenant (Gifsy) and returns the page rows', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([rejectedSub()]);
       mockPrisma.user.findMany.mockResolvedValueOnce([{ id: 'admin1', name: 'Gifsy Admin' }]);
 
-      const buf = await service.rejectedExport(gifsy);
+      const rows = await rowsOf(gifsy);
 
-      expect(Buffer.isBuffer(buf)).toBe(true);
-      expect(buf.length).toBeGreaterThan(0);
+      expect(rows).toHaveLength(1);
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
       expect(where.status).toBe('REJECTED');
       expect(where.user).toBeUndefined(); // GIFSY is cross-tenant — no caller-tenant filter
@@ -660,7 +683,7 @@ describe('KycService', () => {
 
     it('scopes the rejected-date source to the REJECTED status-history transition', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
-      await service.rejectedExport(gifsy);
+      await rowsOf(gifsy);
       const args = mockPrisma.kycSubmission.findMany.mock.calls[0][0];
       expect(args.include.statusHistory.where).toMatchObject({ toStatus: 'REJECTED' });
       expect(args.include.statusHistory.orderBy).toMatchObject({ createdAt: 'desc' });
@@ -672,33 +695,24 @@ describe('KycService', () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([rejectedSub()]);
       mockPrisma.user.findMany.mockResolvedValueOnce([{ id: 'admin1', name: 'Gifsy Admin' }]);
 
-      const rows = parseSheet(await service.rejectedExport(gifsy));
-      const header = rows[0];
-      const data = rows[1];
+      const [r] = await rowsOf(gifsy);
 
       // Identity / outcome
-      expect(data[header.indexOf('Outlet ID')]).toBe('OUT-1');
-      expect(data[header.indexOf('Owner Name')]).toBe('Suresh');
-      expect(data[header.indexOf('Sales Rep')]).toBe('Rep A');
-      expect(data[header.indexOf('Rejected By')]).toBe('Gifsy Admin');
-      expect(data[header.indexOf('Overall Rejection Reason')]).toBe('GST mismatch');
-      // Rejected-fields summary lists the GST Document label.
-      expect(data[header.indexOf('Rejected Fields')]).toContain('GST Document');
-
-      // Per-field verdict + remark for the rejected field.
-      expect(data[header.indexOf('GST Document — Verdict')]).toBe('REJECTED');
-      expect(data[header.indexOf('GST Document — Remark')]).toBe('illegible');
-      // An approved field reads OK; an untouched one reads PENDING.
-      expect(data[header.indexOf('Payment (Bank/UPI) — Verdict')]).toBe('OK');
-      expect(data[header.indexOf('Owner Photo — Verdict')]).toBe('PENDING');
-
+      expect(r).toMatchObject({
+        outletCode: 'OUT-1',
+        ownerName: 'Suresh',
+        salesRep: 'Rep A',
+        rejectedBy: 'Gifsy Admin',
+        rejectionReason: 'GST mismatch',
+      });
+      // Per-field decision + remark for the rejected field; an approved field and an untouched one.
+      expect(r.fields.GST_DOCUMENT).toEqual({ decision: 'REJECTED', remark: 'illegible' });
+      expect(r.fields.PAYMENT.decision).toBe('APPROVED');
+      expect(r.fields.OWNER_PHOTO.decision).toBe('PENDING');
       // KYC values
-      expect(data[header.indexOf('GST Number')]).toBe('27ABCDE1234F1ZK');
-      expect(data[header.indexOf('PAN')]).toBe('ABCDE1234F');
-      expect(data[header.indexOf('Address')]).toBe('12 SV Road');
-      expect(data[header.indexOf('IFSC')]).toBe('HDFC0001');
-      // SLA age = 24h (submitted → rejected, one day apart).
-      expect(data[header.indexOf('SLA Age (hrs)')]).toBe('24');
+      expect(r).toMatchObject({ gstNumber: '27ABCDE1234F1ZK', panNumber: 'ABCDE1234F', address: '12 SV Road', ifscCode: 'HDFC0001' });
+      // SLA age = 24 business hours (submitted → rejected, one weekday apart).
+      expect(r.slaAgeHrs).toBe(24);
     });
   });
 
@@ -7080,11 +7094,8 @@ describe('KycService', () => {
         proposedPartner: { payoutRail: 'upi', paymentMode: 'upi', upiId: 'proposed@upi' },
       };
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([row]);
-      const buf = await service.rejectedExport(gifsy);
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const XLSX = require('xlsx');
-      const wb = XLSX.read(buf, { type: 'buffer' });
-      const cells = JSON.stringify(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 }));
+      const { rows } = await service.rejectedExportPage(gifsy, null, 2000, new Set<string>());
+      const cells = JSON.stringify(rows);
       expect(cells).toContain('proposed@upi');
       expect(cells).not.toContain('kumar@upi'); // live self-captured UPI stays hidden
       expect(cells).not.toContain('50100');     // live self-captured account stays hidden

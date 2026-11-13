@@ -6,6 +6,7 @@ import { Test } from '@nestjs/testing';
 import { ThrottlerModule } from '@nestjs/throttler';
 import request from 'supertest';
 import { KycController } from '../../kyc/kyc.controller';
+import { ExportsService } from '../../exports/exports.service';
 import { KycService } from '../../kyc/kyc.service';
 import { SchemeReportController } from '../../schemes/scheme-report.controller';
 import { SchemeReportService } from '../../schemes/scheme-report.service';
@@ -40,6 +41,8 @@ describe('tokenized viewers are not throttled (L3)', () => {
       controllers: [KycController, SchemeReportController],
       providers: [
         { provide: KycService, useValue: kyc },
+        // KycController's export endpoints (review-dump / rejected-export) go through ExportsService.
+        { provide: ExportsService, useValue: {} },
         { provide: SchemeReportService, useValue: reports },
         { provide: SchemeNotifyService, useValue: {} },
         { provide: APP_GUARD, useClass: IdentityThrottlerGuard },

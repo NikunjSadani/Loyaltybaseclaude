@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, StreamableFile } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
@@ -7,11 +7,7 @@ import {
   VisibilityConfigSettings,
 } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { buildXlsx } from '../common/xlsx';
-import { istDateTimeCell } from '../common/ist-date';
 import { currentWindowKey, isWindowClosed } from './visibility-window.helper';
-import { readMediaValue } from './visibility-form.helper';
-import { evaluatePhotoFence, haversineMeters } from './geo-fence.helper';
 import { isGifsyOperator } from '../common/tenant-scope';
 import { VisibilityProgramScopeLike, visibilityProgramScope, withVisibilityProgramWhere } from './visibility-scope.helper';
 
@@ -20,8 +16,8 @@ import { VisibilityProgramScopeLike, visibilityProgramScope, withVisibilityProgr
  * design D15). Coverage per WINDOW: denominator = addressable in-scope outlets (the
  * program-health `addressableWhere` mirror + outletType.code ∈ scope); numerator =
  * distinct outlets with an APPROVED capture at that window. Exposes the GIFSY report,
- * the CLIENT_ADMIN read-only tenant report (same shape), and an xlsx export with
- * auth-gated media links.
+ * the CLIENT_ADMIN read-only tenant report (same shape). The xlsx captures export is the
+ * `visibility-captures` export kind (exports/kinds/batch1/visibility-captures.ts).
  */
 @Injectable()
 export class VisibilityReportService {
@@ -31,7 +27,8 @@ export class VisibilityReportService {
     private readonly tenantSettings: TenantSettingsService,
   ) {}
 
-  private async assertEnabled(clientId: string): Promise<void> {
+  /** 403 unless the tenant's Visibility master switch is on (also used by the captures export endpoint). */
+  async assertEnabled(clientId: string): Promise<void> {
     if (!(await this.tenant.resolveVisibilityEnabled(clientId))) {
       throw new ForbiddenException('Visibility is not enabled for this tenant.');
     }
@@ -148,247 +145,5 @@ export class VisibilityReportService {
   async tenantReport(user: JwtPayload, windowKey?: string) {
     await this.assertEnabled(user.clientId);
     return this.computeCoverage(user.clientId, windowKey);
-  }
-
-  /**
-   * Excel export of captures (a window, or all when omitted). Each media field renders
-   * as an auth-gated view link (D15). Columns: outletCode/outletName/window/status/rep/
-   * geoFenceOk/distanceMeters/capturedAt/accuracy/dupFlag/reason (+ photo links).
-   */
-  async exportCaptures(user: JwtPayload, windowKey?: string): Promise<StreamableFile> {
-    await this.assertEnabled(user.clientId);
-    const clientId = user.clientId;
-
-    const where: Prisma.VisibilityCaptureWhereInput = { clientId };
-    if (windowKey && windowKey.trim()) where.windowKey = windowKey;
-
-    const captures = await this.prisma.visibilityCapture.findMany({
-      where,
-      select: {
-        id: true,
-        outletId: true,
-        outletCode: true,
-        outletName: true,
-        windowKey: true,
-        status: true,
-        geoFenceOk: true,
-        distanceMeters: true,
-        captureAccuracy: true,
-        capturedAt: true,
-        receivedAt: true,
-        rejectionReasonCode: true,
-        rejectionReason: true,
-        formValues: true,
-        formVersion: true,
-        submittedBy: { select: { employeeCode: true } },
-      },
-      orderBy: [{ windowKey: 'asc' }, { outletCode: 'asc' }],
-    });
-
-    // Which captures carry a photo that appears on a DIFFERENT capture (dup flag).
-    const dupCaptureIds = await this.duplicateCaptureIds(clientId, captures.map((c) => c.id));
-
-    // M5 — batch the DISTINCT form-version snapshots ONCE (was findUnique per row = N+1).
-    const versions = [...new Set(captures.map((c) => c.formVersion))];
-    const snaps =
-      versions.length > 0
-        ? await this.prisma.visibilityFormVersion.findMany({
-            where: { clientId, version: { in: versions } },
-            select: { version: true, formSchema: true },
-          })
-        : [];
-    const schemaByVersion = new Map<number, { fields?: Array<{ id: string; type: string }> }>();
-    for (const s of snaps) {
-      schemaByVersion.set(s.version, s.formSchema as unknown as { fields?: Array<{ id: string; type: string }> });
-    }
-
-    // Per-photo geotag: resolve the tenant fence radius + each outlet's reference geo (the
-    // SAME source the aggregate fence uses) so each photo gets its own geo/distance/status.
-    const config = await this.getConfig(clientId);
-    const radiusMeters = config.geoFence.radiusMeters;
-    const referenceByOutletId = await this.referenceGeoByOutletId(
-      clientId,
-      captures.map((c) => c.outletId),
-    );
-
-    // Media view links per capture — resolve each form snapshot's CAMERA field keys.
-    const rows: Record<string, unknown>[] = [];
-    for (const c of captures) {
-      const reference = referenceByOutletId.get(c.outletId) ?? null;
-      const photos = this.capturePhotos(
-        c.formValues,
-        schemaByVersion.get(c.formVersion),
-        reference,
-        radiusMeters,
-      );
-      rows.push({
-        'Outlet Code': c.outletCode,
-        'Outlet Name': c.outletName,
-        Window: c.windowKey,
-        Status: c.status,
-        Rep: c.submittedBy?.employeeCode ?? '',
-        'Geo-fence OK': c.geoFenceOk === null ? 'UNVERIFIABLE' : c.geoFenceOk ? 'YES' : 'NO',
-        'Distance (m)': c.distanceMeters != null ? String(c.distanceMeters) : '',
-        'Captured At': c.capturedAt ? istDateTimeCell(c.capturedAt) : '',
-        'Received At': istDateTimeCell(c.receivedAt),
-        'Accuracy (m)': c.captureAccuracy != null ? String(c.captureAccuracy) : '',
-        'Duplicate Photo': dupCaptureIds.has(c.id) ? 'YES' : '',
-        'Reject Reason': c.rejectionReasonCode ?? '',
-        'Reject Detail': c.rejectionReason ?? '',
-        Photos: photos.map((p) => p.link).join(' | '),
-        // Per-photo geotag columns (empty per photo when a photo carries no geo → a
-        // legacy bare-string capture reads exactly as before, just an empty cell).
-        'Photo Geo': photos.map((p) => p.geo).join(' | '),
-        'Photo Distance (m)': photos.map((p) => p.distance).join(' | '),
-        'Photo Status': photos.map((p) => p.status).join(' | '),
-      });
-    }
-
-    // buildXlsx derives the header from the first row's keys — guarantee a header even
-    // when there are no captures.
-    const sheetRows =
-      rows.length > 0
-        ? rows
-        : [
-            {
-              'Outlet Code': '',
-              'Outlet Name': '',
-              Window: '',
-              Status: '',
-              Rep: '',
-              'Geo-fence OK': '',
-              'Distance (m)': '',
-              'Captured At': '',
-              'Received At': '',
-              'Accuracy (m)': '',
-              'Duplicate Photo': '',
-              'Reject Reason': '',
-              'Reject Detail': '',
-              Photos: '',
-              'Photo Geo': '',
-              'Photo Distance (m)': '',
-              'Photo Status': '',
-            },
-          ];
-
-    const buffer = buildXlsx([{ name: 'Captures', rows: sheetRows }]);
-    const suffix = windowKey && windowKey.trim() ? windowKey : 'all';
-    const filename = `visibility_captures_${suffix}_${new Date().toISOString().split('T')[0]}.xlsx`;
-    return new StreamableFile(buffer, {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="${filename}"`,
-    });
-  }
-
-  /** Capture ids (within the given set) whose photo hash appears on a different capture. */
-  private async duplicateCaptureIds(clientId: string, captureIds: string[]): Promise<Set<string>> {
-    if (captureIds.length === 0) return new Set();
-    const hashes = await this.prisma.visibilityImageHash.findMany({
-      where: { clientId },
-      select: { hash: true, captureId: true },
-    });
-    const captureIdsByHash = new Map<string, Set<string>>();
-    for (const h of hashes) {
-      const s = captureIdsByHash.get(h.hash) ?? new Set<string>();
-      s.add(h.captureId);
-      captureIdsByHash.set(h.hash, s);
-    }
-    const inSet = new Set(captureIds);
-    const dup = new Set<string>();
-    for (const [, ids] of captureIdsByHash) {
-      if (ids.size > 1) for (const id of ids) if (inSet.has(id)) dup.add(id);
-    }
-    return dup;
-  }
-
-  /**
-   * Per-photo export data for one capture's CAMERA fields, using a pre-fetched form-version
-   * snapshot (M5 — the snapshots are batched once by the caller, so this is pure/synchronous
-   * with no per-row DB read). Each photo carries:
-   *   - link      — the auth-gated media view path.
-   *   - geo       — `lat, lng (±Nm)` when the value is `{ key, geo }`, else '' (bare-string key).
-   *   - distance  — metres from the outlet reference geo (haversine), '' when either is absent.
-   *   - status    — inside / outside / unverifiable via the shared `evaluatePhotoFence`.
-   * A photo with no per-photo geo yields empty geo/distance/status (renders as before).
-   */
-  private capturePhotos(
-    formValues: Prisma.JsonValue | null,
-    schema: { fields?: Array<{ id: string; type: string }> } | undefined,
-    reference: { lat: number; lng: number } | null,
-    radiusMeters: number,
-  ): Array<{ link: string; geo: string; distance: string; status: string }> {
-    if (!formValues || typeof formValues !== 'object') return [];
-    if (!schema?.fields) return [];
-    const vals = formValues as Record<string, unknown>;
-    const photos: Array<{ link: string; geo: string; distance: string; status: string }> = [];
-    for (const f of schema.fields) {
-      if (f.type !== 'CAMERA') continue;
-      const { key, geo } = readMediaValue(vals[f.id]);
-      if (!key) continue;
-      const link = `/v1/visibility/captures/media?key=${encodeURIComponent(key)}`;
-      if (geo) {
-        const acc = geo.accuracy != null ? ` (±${Math.round(geo.accuracy)}m)` : '';
-        const geoStr = `${geo.lat}, ${geo.lng}${acc}`;
-        const status = evaluatePhotoFence(geo, reference, radiusMeters);
-        const distance =
-          reference != null
-            ? String(Math.round(haversineMeters(geo, reference) * 100) / 100)
-            : '';
-        photos.push({ link, geo: geoStr, distance, status });
-      } else {
-        photos.push({ link, geo: '', distance: '', status: '' });
-      }
-    }
-    return photos;
-  }
-
-  /**
-   * Batch-resolve each outlet's reference geo (outletId → {lat,lng}) — the SAME source the
-   * aggregate capture-time fence uses: the outlet owner-partner's latest APPROVED KYC
-   * board-photo geo (`Outlet.partnerId` → ChannelPartner.kycSubmissions.boardPhotoLat/Lng).
-   * Two batched queries (outlets, then partners) — no per-row N+1. Outlets with no partner
-   * or no approved board geo are simply absent from the map (→ photos read 'unverifiable').
-   */
-  private async referenceGeoByOutletId(
-    clientId: string,
-    outletIds: string[],
-  ): Promise<Map<string, { lat: number; lng: number }>> {
-    const map = new Map<string, { lat: number; lng: number }>();
-    const ids = [...new Set(outletIds.filter((id): id is string => !!id))];
-    if (ids.length === 0) return map;
-
-    const outlets = await this.prisma.outlet.findMany({
-      where: { id: { in: ids }, clientId },
-      select: { id: true, partnerId: true },
-    });
-    const partnerIds = [
-      ...new Set(outlets.map((o) => o.partnerId).filter((p): p is string => !!p)),
-    ];
-    if (partnerIds.length === 0) return map;
-
-    const partners = await this.prisma.channelPartner.findMany({
-      where: { id: { in: partnerIds }, clientId },
-      select: {
-        id: true,
-        kycSubmissions: {
-          where: { status: 'APPROVED', boardPhotoLat: { not: null }, boardPhotoLng: { not: null } },
-          orderBy: { createdAt: 'desc' },
-          take: 1,
-          select: { boardPhotoLat: true, boardPhotoLng: true },
-        },
-      },
-    });
-    const geoByPartner = new Map<string, { lat: number; lng: number }>();
-    for (const p of partners) {
-      const sub = p.kycSubmissions?.[0];
-      if (sub && sub.boardPhotoLat != null && sub.boardPhotoLng != null) {
-        geoByPartner.set(p.id, { lat: Number(sub.boardPhotoLat), lng: Number(sub.boardPhotoLng) });
-      }
-    }
-    for (const o of outlets) {
-      const g = o.partnerId ? geoByPartner.get(o.partnerId) : undefined;
-      if (g) map.set(o.id, g);
-    }
-    return map;
   }
 }

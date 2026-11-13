@@ -105,15 +105,7 @@ describe('ReportsService', () => {
       });
     });
 
-    it('returns an xlsx buffer when format=xlsx', async () => {
-      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
-      const res = await service.visibilityStatus(gifsy, { format: ReportFormat.XLSX });
-      expect(res.kind).toBe('xlsx');
-      if (res.kind === 'xlsx') {
-        expect(res.filename).toBe('visibility-status.xlsx');
-        expect(Buffer.isBuffer(res.buffer)).toBe(true);
-      }
-    });
+    // format=xlsx is the `visibility-status` export kind (exports/kinds/batch1/visibility-status.spec.ts).
   });
 
   describe('schemePerformance', () => {
@@ -433,16 +425,7 @@ describe('ReportsService', () => {
       expect(where).toEqual({ clientId: 'deoleo', deletedAt: null });
     });
 
-    it('empty tenant → valid xlsx buffer, no throw', async () => {
-      mockPrisma.outlet.findMany.mockResolvedValue([]);
-      const res = await service.kycStatus(gifsy, { format: ReportFormat.XLSX });
-      expect(res.kind).toBe('xlsx');
-      if (res.kind === 'xlsx') {
-        expect(res.filename).toBe('kyc-status.xlsx');
-        expect(Buffer.isBuffer(res.buffer)).toBe(true);
-        expect(res.buffer.length).toBeGreaterThan(0);
-      }
-    });
+    // format=xlsx is the `kyc-status` export kind (exports/kinds/batch1/kyc-status.spec.ts, incl. the empty tenant).
 
     // Parity: the report's Status for an in-pipeline outlet (no lifecycle overlay) is
     // EXACTLY the shared canonical derivation deriveKycStage(latest status).

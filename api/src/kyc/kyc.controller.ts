@@ -19,6 +19,7 @@ import { streamObjectResponse } from '../common/stream-object';
 import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { SkipThrottle } from '@nestjs/throttler';
 import { KycService } from './kyc.service';
+import { ExportsService } from '../exports/exports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Public, Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -50,7 +51,10 @@ import {
  */
 @Controller('kyc')
 export class KycController {
-  constructor(private readonly kyc: KycService) {}
+  constructor(
+    private readonly kyc: KycService,
+    private readonly exports: ExportsService,
+  ) {}
 
   /**
    * GET /v1/kyc/documents/view?token=<jwt> — PUBLIC tokenized document view.
@@ -169,12 +173,9 @@ export class KycController {
   @Get('review-dump')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('kyc:read')
-  async reviewDump(@CurrentUser() user: JwtPayload): Promise<StreamableFile> {
-    const buffer = await this.kyc.reviewDump(user);
-    return new StreamableFile(buffer, {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: 'attachment; filename="kyc-review-dump.xlsx"',
-    });
+  reviewDump(@CurrentUser() user: JwtPayload, @Res({ passthrough: true }) res: Response) {
+    // The 'kyc-review-dump' export kind — streamed now (200), paged from the DB.
+    return this.exports.respond(res, user, 'kyc-review-dump', {});
   }
 
   /**
@@ -198,12 +199,9 @@ export class KycController {
   @Get('rejected-export')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('kyc:read')
-  async rejectedExport(@CurrentUser() user: JwtPayload): Promise<StreamableFile> {
-    const buffer = await this.kyc.rejectedExport(user);
-    return new StreamableFile(buffer, {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: 'attachment; filename="kyc-rejected.xlsx"',
-    });
+  rejectedExport(@CurrentUser() user: JwtPayload, @Res({ passthrough: true }) res: Response) {
+    // The 'kyc-rejected' export kind — every rejection ever, so it is prepared in the background (202 → Downloads).
+    return this.exports.respond(res, user, 'kyc-rejected', {});
   }
 
   @Post('bulk-verify')

@@ -1,5 +1,5 @@
-import { Controller, Get, Query, Req, Res } from '@nestjs/common';
-import type { Request, Response } from 'express';
+import { Controller, Get, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { ReportsService } from './reports.service';
 import { ExportsService } from '../exports/exports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -12,7 +12,8 @@ import { PointsLedgerQueryDto, ReportFormat, TargetVsSalesQueryDto, TicketAgingQ
  * platform/src/app/api/admin/reports/* onto /v1.
  *
  * points-ledger and ticket-aging default to JSON and return an xlsx
- * StreamableFile download when `format=xlsx`. outlet-master is always xlsx.
+ * StreamableFile download when `format=xlsx`. outlet-master is always xlsx and is
+ * prepared in the background (Downloads page).
  */
 @Controller('admin/reports')
 export class ReportsController {
@@ -24,8 +25,13 @@ export class ReportsController {
   @Get('outlet-master')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('reports:export')
-  outletMaster(@CurrentUser() user: JwtPayload, @Req() req: Request) {
-    return this.reports.outletMaster(user, req);
+  outletMaster(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: Record<string, unknown>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // The 'outlet-master' export kind: always prepared in the background (202 → Downloads page).
+    return this.exports.respond(res, user, 'outlet-master', query);
   }
 
   @Get('points-ledger')

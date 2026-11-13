@@ -1,6 +1,7 @@
-import { Controller, Get, Query, Res, StreamableFile } from '@nestjs/common';
+import { Controller, Get, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { VisibilityReportService } from './visibility-report.service';
+import { ExportsService } from '../exports/exports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -15,7 +16,10 @@ import { VisibilityReportQueryDto } from './dto/visibility-capture.dto';
  */
 @Controller('visibility')
 export class VisibilityReportController {
-  constructor(private readonly report: VisibilityReportService) {}
+  constructor(
+    private readonly report: VisibilityReportService,
+    private readonly exports: ExportsService,
+  ) {}
 
   // ── GIFSY coverage report ──────────────────────────────────────────────────
   @Get('report')
@@ -34,6 +38,8 @@ export class VisibilityReportController {
   }
 
   // ── xlsx export (auth-gated media links) ───────────────────────────────────
+  // The 'visibility-captures' export kind: one window streams now (200); no window = every capture → queued
+  // (202 → Downloads page). The master switch is checked first so a disabled tenant still gets a plain 403.
   @Get('report/export')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('visibility:read')
@@ -41,12 +47,8 @@ export class VisibilityReportController {
     @CurrentUser() user: JwtPayload,
     @Query() query: VisibilityReportQueryDto,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<StreamableFile> {
-    const file = await this.report.exportCaptures(user, query.windowKey);
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    );
-    return file;
+  ) {
+    await this.report.assertEnabled(user.clientId);
+    return this.exports.respond(res, user, 'visibility-captures', query);
   }
 }
