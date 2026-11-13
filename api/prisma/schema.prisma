@@ -2029,11 +2029,20 @@ model TdsDeposit {
   panNumber     String
   outletCode    String?
   amountPaise   BigInt
+  // "TDS for month" (YYYY-MM): the month whose TDS this deposit pays. The 194R/194C reports
+  // assign each deposit to the FY of THIS month (not the deposit date's FY). Set on upload from
+  // the optional "TDS for month" column, else the default rule (tds.helpers
+  // defaultDepositForPeriod): deposit day ≤ 7 → previous month; 8–30 April → March of the same
+  // year; otherwise the deposit's own month. Existing rows backfilled with the same rule
+  // (20261114120000_tds_deposit_for_period). Nullable only for a row written by an older build —
+  // the reports then apply the same default rule.
+  forPeriod     String?
   // FILE-LEVEL re-upload dedup (same model as TdsOffPlatformEntry): uploadBatchId is a
   // deterministic hash of the file's rows; DB-level PARTIAL unique on
   // (COALESCE(clientId,''), section, panNumber, depositDate, amountPaise,
-  // COALESCE(outletCode,''), uploadBatchId) WHERE uploadBatchId IS NOT NULL. clientId is
-  // nullable (194C = platform) so it is COALESCEd. Migration-only; service catches P2002.
+  // COALESCE(outletCode,''), COALESCE(forPeriod,''), uploadBatchId) WHERE uploadBatchId IS NOT
+  // NULL. clientId is nullable (194C = platform) so it is COALESCEd. Migration-only; service
+  // catches P2002.
   uploadBatchId String?
   uploadedBy    String?
   createdAt     DateTime         @default(now())
@@ -2041,6 +2050,7 @@ model TdsDeposit {
   @@index([section, panNumber])
   @@index([clientId, section, panNumber])
   @@index([depositDate])
+  @@index([section, forPeriod])
   @@map("tds_deposits")
 }
 

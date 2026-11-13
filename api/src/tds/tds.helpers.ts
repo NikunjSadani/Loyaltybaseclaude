@@ -79,6 +79,10 @@ export function depositFileHash(rows: ParsedDepositRow[]): string {
         r.panNumber,
         r.amountPaise.toString(),
         r.outletCode ?? '',
+        // An EXPLICIT "TDS for month" cell is part of the file content. A defaulted one is not, so a
+        // file without the column hashes exactly as before (re-uploading an older file still collides
+        // with its earlier rows, so it is skipped, never double-counted).
+        ...(r.forPeriodExplicit ? [r.forPeriod] : []),
       ].join(''),
     )
     .join('');
@@ -98,14 +102,25 @@ export function buildOffPlatformTemplate(): Buffer {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
 
+/** Header of the optional deposit-upload column naming the month whose TDS a deposit pays. */
+export const DEPOSIT_FOR_MONTH_HEADER = 'TDS for month';
+
 /**
  * Build a blank .xlsx template for the TDS deposit upload.
- * Columns: Date · Outlet Code · PAN · Amount (₹)  (+ optional "Client" for the 194C template — the
- * client slug that disambiguates a no-PAN row's Outlet Code across tenants).
+ * Columns: Date · Outlet Code · PAN · Amount (₹) · TDS for month (optional — e.g. 2026-03 / Mar-2026;
+ * blank → the default rule, see defaultDepositForPeriod)  (+ optional "Client" for the 194C template
+ * — the client slug that disambiguates a no-PAN row's Outlet Code across tenants).
  */
 export function buildDepositTemplate(section: '194R' | '194C' = '194R'): Buffer {
   const wb = XLSX.utils.book_new();
-  const cols = ['Date', 'Outlet Code', 'PAN', 'Amount (₹)', ...(section === '194C' ? ['Client'] : [])];
+  const cols = [
+    'Date',
+    'Outlet Code',
+    'PAN',
+    'Amount (₹)',
+    DEPOSIT_FOR_MONTH_HEADER,
+    ...(section === '194C' ? ['Client'] : []),
+  ];
   const header = XLSX.utils.aoa_to_sheet([cols]);
   XLSX.utils.book_append_sheet(wb, header, 'TDS Deposits');
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
@@ -127,6 +142,10 @@ export interface ParsedDepositRow {
   outletCode: string | null;
   panNumber: string;
   amountPaise: bigint;
+  /** "TDS for month" (YYYY-MM) — explicit cell, else defaultDepositForPeriod(depositDate). */
+  forPeriod: string;
+  /** True when the row's "TDS for month" cell was filled (false = the default rule applied). */
+  forPeriodExplicit: boolean;
   /** Optional "Client" column (client slug) — 194C no-PAN rows only. */
   clientSlug?: string | null;
   /** Sheet row number (header = row 1) — for row-level upload messages. */
@@ -329,8 +348,14 @@ export function parseOffPlatformUpload(ab: ArrayBufferLike): {
  *     and needs an Outlet Code. No PAN column at all → the whole file is rejected.
  *   - Outlet Code: optional
  *   - Amount (₹): required, positive number → paise
+ *   - TDS for month: optional (see parseForPeriodCell). Blank / column absent → the default rule
+ *     (defaultDepositForPeriod). Rejected per row: an unreadable/impossible month, a month in the
+ *     future (after the current IST month), or a month after the deposit date's own month (a
+ *     deposit cannot pay TDS for a month that has not happened yet).
+ *
+ * `now` is injectable for tests (the "future month" check).
  */
-export function parseDepositUpload(ab: ArrayBufferLike): {
+export function parseDepositUpload(ab: ArrayBufferLike, now: Date = new Date()): {
   result: UploadResult;
   rows: ParsedDepositRow[];
 } {
@@ -349,9 +374,15 @@ export function parseDepositUpload(ab: ArrayBufferLike): {
   const colAmount = header.findIndex((h) => h.includes('amount'));
   // Optional "Client" (client slug) — used by 194C no-PAN rows to pick the outlet's tenant.
   const colClient = header.findIndex((h) => h === 'client' || h === 'client slug');
+  // Optional "TDS for month" — the month whose TDS the deposit pays (decides the report FY).
+  const colForPeriod = header.findIndex((h) =>
+    /^(tds )?for (the )?month$|^tds month$|^for period$|^tds for period$/.test(h.replace(/\s+/g, ' ')),
+  );
+  const currentMonth = istMonthOf(now);
   if (colPan === -1) return { result: wholeFileError(data.length - 1, PAN_COLUMN_MISSING_ERROR), rows: [] };
 
   const errors: UploadRowError[] = [];
+  const warnings: UploadRowError[] = [];
   const accepted: ParsedDepositRow[] = [];
   let skipped = 0;
 
@@ -389,8 +420,55 @@ export function parseDepositUpload(ab: ArrayBufferLike): {
       continue;
     }
 
+    // TDS for month — explicit (validated) or the default rule.
+    const rawFor = colForPeriod >= 0 ? row[colForPeriod] : undefined;
+    const forRead = parseForPeriodCell(rawFor);
+    let forPeriod: string;
+    let forPeriodExplicit = false;
+    if ('error' in forRead) {
+      errors.push({ row: rowNum, message: `Row ${rowNum}: invalid TDS for month — ${forRead.error}` });
+      continue;
+    } else if ('period' in forRead) {
+      const depositMonth = istMonthOf(depositDate);
+      if (forRead.period > currentMonth) {
+        errors.push({
+          row: rowNum,
+          message: `Row ${rowNum}: TDS for month ${formatForPeriod(forRead.period)} is in the future`,
+        });
+        continue;
+      }
+      if (forRead.period > depositMonth) {
+        errors.push({
+          row: rowNum,
+          message: `Row ${rowNum}: TDS for month ${formatForPeriod(forRead.period)} is after the deposit date's month (${formatForPeriod(depositMonth)}) — a deposit can only pay TDS for its own or an earlier month`,
+        });
+        continue;
+      }
+      forPeriod = forRead.period;
+      forPeriodExplicit = true;
+    } else {
+      forPeriod = defaultDepositForPeriod(depositDate);
+      // Say so when the default rule puts the deposit in an EARLIER FY than its date (April deposits).
+      const fyOfPeriod = fyLabelForPeriod(forPeriod);
+      if (fyOfPeriod !== financialYear(depositDate).fyLabel) {
+        warnings.push({
+          row: rowNum,
+          message: `Row ${rowNum}: no TDS for month given — the ${istMonthOf(depositDate)}-${String(istParts(depositDate).d).padStart(2, '0')} deposit is counted for ${formatForPeriod(forPeriod)} (FY ${fyOfPeriod}). Fill "TDS for month" to override.`,
+        });
+      }
+    }
+
     const amountPaise = toPaiseBigInt(rupeesToPaise(amountRupees));
-    accepted.push({ depositDate, outletCode, panNumber: rawPan, amountPaise, clientSlug, rowNum });
+    accepted.push({
+      depositDate,
+      outletCode,
+      panNumber: rawPan,
+      amountPaise,
+      forPeriod,
+      forPeriodExplicit,
+      clientSlug,
+      rowNum,
+    });
   }
 
   return {
@@ -400,6 +478,7 @@ export function parseDepositUpload(ab: ArrayBufferLike): {
       skipped,
       failed: errors.length,
       errors,
+      ...(warnings.length ? { warnings } : {}),
     },
     rows: accepted,
   };
@@ -649,6 +728,104 @@ export function fyLabelForPeriod(period: string): string {
   const [y, m] = period.split('-').map((s) => parseInt(s, 10));
   const startYear = m >= 4 ? y : y - 1;
   return `${startYear}-${String((startYear + 1) % 100).padStart(2, '0')}`;
+}
+
+const pad2 = (n: number): string => String(n).padStart(2, '0');
+
+/** The IST wall-clock calendar parts of an instant. */
+function istParts(date: Date): { y: number; m: number; d: number } {
+  const ist = new Date(date.getTime() + IST_OFFSET_MS);
+  return { y: ist.getUTCFullYear(), m: ist.getUTCMonth() + 1, d: ist.getUTCDate() };
+}
+
+/** "YYYY-MM" of an instant's IST calendar month. */
+export function istMonthOf(date: Date): string {
+  const { y, m } = istParts(date);
+  return `${y}-${pad2(m)}`;
+}
+
+/**
+ * DEFAULT "TDS for month" of a deposit (owner rule, used when the upload gives none and to
+ * backfill older rows — the migration SQL implements the identical rule), on the IST date:
+ *   - deposit day 1–7          → the PREVIOUS month (TDS is due by the 7th of the next month)
+ *   - deposit dated 8–30 April → MARCH of the same year (March TDS is due by 30 April)
+ *   - otherwise                → the deposit's own month
+ */
+export function defaultDepositForPeriod(depositDate: Date): string {
+  const { y, m, d } = istParts(depositDate);
+  if (d <= 7) return m === 1 ? `${y - 1}-12` : `${y}-${pad2(m - 1)}`;
+  if (m === 4) return `${y}-03`;
+  return `${y}-${pad2(m)}`;
+}
+
+/** The "TDS for month" a stored deposit counts for: its own value, else the default rule. */
+export function depositPeriodOf(d: { forPeriod?: string | null; depositDate?: Date | null }): string | null {
+  if (d.forPeriod) return d.forPeriod;
+  return d.depositDate ? defaultDepositForPeriod(d.depositDate) : null;
+}
+
+/** "2026-03" → "Mar-2026" (report display). Anything else is returned unchanged. */
+export function formatForPeriod(period: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(period);
+  if (!m) return period;
+  const idx = parseInt(m[2], 10) - 1;
+  return idx >= 0 && idx < 12 ? `${MONTH_ABBR[idx]}-${m[1]}` : period;
+}
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH_FULL = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+
+/** Month index (1–12) of an English month name or abbreviation ("Mar", "March", "Sept"), else 0. */
+function monthFromName(name: string): number {
+  const n = name.toLowerCase();
+  const full = MONTH_FULL.indexOf(n);
+  if (full >= 0) return full + 1;
+  if (n === 'sept') return 9;
+  const abbr = MONTH_ABBR.findIndex((a) => a.toLowerCase() === n);
+  return abbr >= 0 ? abbr + 1 : 0;
+}
+
+/**
+ * Parse a "TDS for month" upload cell. Accepted: YYYY-MM (or YYYY/MM), MM-YYYY (or MM/YYYY),
+ * Mon-YYYY / Month YYYY ("Mar-2026", "March 2026"), MMM-YY ("Mar-26"), a full date
+ * (YYYY-MM-DD or DD/MM/YYYY — its month is used) or an Excel date cell (serial number).
+ *   → { period: "YYYY-MM" } · { blank: true } for an empty cell · { error } otherwise.
+ * Range checks against the deposit date / today are done by the caller.
+ */
+export function parseForPeriodCell(raw: unknown): { period: string } | { blank: true } | { error: string } {
+  if (raw == null || (typeof raw === 'string' && raw.trim() === '')) return { blank: true };
+  const ok = (y: number, m: number): { period: string } | { error: string } => {
+    if (!Number.isInteger(m) || m < 1 || m > 12) return { error: `"${String(raw)}" is not a valid month` };
+    if (!Number.isInteger(y) || y < 2000 || y > 2100) return { error: `"${String(raw)}" has an impossible year` };
+    return { period: `${y}-${pad2(m)}` };
+  };
+  if (raw instanceof Date) {
+    if (isNaN(raw.getTime())) return { error: 'invalid date' };
+    const { y, m } = istParts(raw);
+    return ok(y, m);
+  }
+  if (typeof raw === 'number') {
+    // An Excel date cell (serial day number). Anything outside 2000-01-01 … 2100-12-31 is not a month.
+    if (!Number.isFinite(raw) || raw < 36526 || raw > 73415) return { error: `"${raw}" is not a month` };
+    const [y, m] = XLSX.SSF.format('yyyy-mm', raw).split('-').map((s) => parseInt(s, 10));
+    return ok(y, m);
+  }
+  const s = String(raw).trim();
+  let mt: RegExpExecArray | null;
+  if ((mt = /^(\d{4})[-/.](\d{1,2})$/.exec(s))) return ok(+mt[1], +mt[2]);
+  if ((mt = /^(\d{1,2})[-/.](\d{4})$/.exec(s))) return ok(+mt[2], +mt[1]);
+  if ((mt = /^([A-Za-z]{3,9})[\s\-/.']*(\d{4}|\d{2})$/.exec(s))) {
+    const m = monthFromName(mt[1]);
+    if (!m) return { error: `"${s}" is not a valid month` };
+    const y = mt[2].length === 2 ? 2000 + parseInt(mt[2], 10) : parseInt(mt[2], 10);
+    return ok(y, m);
+  }
+  if ((mt = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s].*)?$/.exec(s))) return ok(+mt[1], +mt[2]);
+  if ((mt = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/.exec(s))) return ok(+mt[3], +mt[2]);
+  return { error: `"${s}" is not a recognised month — use e.g. 2026-03 or Mar-2026` };
 }
 
 /**

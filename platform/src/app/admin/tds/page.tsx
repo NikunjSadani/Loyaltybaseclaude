@@ -39,6 +39,8 @@ interface Tds194RRow {
   liabilityPaise:   number | string;
   depositedPaise:   number | string;
   outstandingPaise: number | string;
+  /** "TDS for month" (YYYY-MM) of the deposits counted on this row. */
+  depositForPeriods?: string[];
 }
 
 interface Tds194RResponse {
@@ -64,6 +66,7 @@ interface Tds194CRow {
   liabilityNoThresholdPaise: number | string;
   depositedPaise:          number | string;
   outstandingPaise:        number | string;
+  depositForPeriods?:      string[];
 }
 
 interface Tds194CResponse {
@@ -139,7 +142,29 @@ async function downloadXlsx(url: string, filename: string): Promise<string | nul
   }
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "2026-03" → "Mar-2026" (anything else unchanged). */
+function formatForPeriod(period: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(period);
+  const idx = m ? Number(m[2]) - 1 : -1;
+  return m && idx >= 0 && idx < 12 ? `${MONTHS[idx]}-${m[1]}` : period;
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
+
+/** Deposited amount + the "TDS for month" the counted deposits pay for. */
+function DepositedCell({ paise, periods }: { paise: number | string; periods?: string[] }) {
+  return (
+    <>
+      <span>{formatINR(p(paise))}</span>
+      {periods && periods.length > 0 && (
+        <span className="block text-[11px] text-gray-400" title="TDS for month of the deposits counted here">
+          for {periods.map(formatForPeriod).join(', ')}
+        </span>
+      )}
+    </>
+  );
+}
 
 function OutstandingCell({ paise }: { paise: number | string }) {
   const v = p(paise);
@@ -157,6 +182,18 @@ function SummaryCard({ label, paise }: { label: string; paise: number | string }
   );
 }
 
+/** Deposit-upload guidance: which FY a deposit counts for. */
+function DepositForMonthHint() {
+  return (
+    <p data-testid="deposit-for-month-hint">
+      Each deposit counts for the financial year of the <strong>month whose TDS it pays</strong> — fill the
+      optional <strong>TDS for month</strong> column (e.g. <code>2026-03</code> or <code>Mar-2026</code>). Left blank:
+      a deposit made on the 1st–7th counts for the previous month, one made 8–30 April counts for March,
+      otherwise its own month. So March TDS deposited in April stays in the March financial year.
+    </p>
+  );
+}
+
 /** Two-step upload panel: template download → pick file → preview (apply=false) → confirm (apply=true) */
 function UploadPanel({
   title,
@@ -164,8 +201,11 @@ function UploadPanel({
   templateFilename,
   uploadUrlFn,
   onApplied,
+  hint,
 }: {
   title:             string;
+  /** Optional guidance shown under the title (e.g. the deposit "TDS for month" column). */
+  hint?:             React.ReactNode;
   templateUrl:       string;
   templateFilename:  string;
   /** Returns the upload URL with the correct apply=true|false param */
@@ -280,6 +320,7 @@ function UploadPanel({
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
       <h3 className="font-semibold text-gray-900 text-sm">{title}</h3>
+      {hint && <div className="text-xs text-gray-500 leading-relaxed">{hint}</div>}
 
       {/* Template download */}
       <div className="flex items-center gap-3">
@@ -636,7 +677,7 @@ export default function AdminTdsPage() {
                             <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.baseFyTotalPaise))}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>
-                            <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.depositedPaise))}</td>
+                            <td className="px-4 py-3 text-right text-gray-700"><DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} /></td>
                             <td className="px-4 py-3 text-right">
                               <OutstandingCell paise={row.outstandingPaise} />
                             </td>
@@ -670,6 +711,7 @@ export default function AdminTdsPage() {
               `/api/admin/tds/deposits/upload?section=194R&apply=${apply}`
             }
             onApplied={fetch194R}
+            hint={<DepositForMonthHint />}
           />
         </div>
       )}
@@ -752,7 +794,7 @@ export default function AdminTdsPage() {
                                 ? <CheckCircle className="w-4 h-4 text-emerald-500 mx-auto" />
                                 : <span className="text-gray-400 text-xs">No</span>}
                             </td>
-                            <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.depositedPaise))}</td>
+                            <td className="px-4 py-3 text-right text-gray-700"><DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} /></td>
                             <td className="px-4 py-3 text-right">
                               <OutstandingCell paise={row.outstandingPaise} />
                             </td>
@@ -795,6 +837,7 @@ export default function AdminTdsPage() {
                 `/api/admin/tds/deposits/upload?section=${depositSection}&apply=${apply}`
               }
               onApplied={depositSection === '194R' ? fetch194R : fetch194C}
+              hint={<DepositForMonthHint />}
             />
           </div>
         </div>

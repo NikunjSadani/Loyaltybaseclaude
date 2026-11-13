@@ -21,7 +21,8 @@
  *   3. TdsOffPlatformEntry (section=SEC_194R, clientId, entryDate in FY)
  *      → PAN on the row
  * Threshold: fyTotal > 2,000,000 paise (₹20,000) → liability on WHOLE fyTotal (retroactive).
- * Deposited: SUM TdsDeposit (section=SEC_194R, clientId, depositDate in FY, panNumber).
+ * Deposited: SUM TdsDeposit (section=SEC_194R, clientId, panNumber) whose "TDS for month"
+ * (forPeriod) is in the FY — a deposit counts for the FY of the MONTH IT PAYS FOR, not its deposit date.
  *
  * ── 194C (platform-wide, per FY) ────────────────────────────────────────────
  * Sources summed per PAN:
@@ -29,7 +30,7 @@
  *   → PAN via Outlet→ChannelPartner; entityType too.
  * Threshold: maxSingle > 3,000,000 paise OR fyTotal > 10,000,000 paise.
  * Two columns: (a) with-threshold, (b) no-threshold (TDS on everything).
- * Deposited: SUM TdsDeposit (section=SEC_194C, panNumber, FY) — clientId null.
+ * Deposited: SUM TdsDeposit (section=SEC_194C, panNumber) by "TDS for month" FY — platform-wide.
  */
 
 import { Injectable, Logger } from '@nestjs/common';
@@ -50,6 +51,8 @@ import {
   buildDepositTemplate,
   offPlatformFileHash,
   depositFileHash,
+  depositPeriodOf,
+  formatForPeriod,
   cellSafe,
 } from './tds.helpers';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
@@ -127,6 +130,30 @@ function summariseRows(
   };
 }
 
+/**
+ * Collects the "TDS for month" of the deposits counted on each report row. `fieldFor` returns
+ * `{ depositForPeriods }` (sorted, de-duplicated) — or nothing for a row with no dated deposit, so a
+ * row without deposits is shaped exactly as before.
+ */
+class DepositPeriods {
+  private readonly byKey = new Map<string, Set<string>>();
+  note(key: string, period: string | null): void {
+    if (!period) return;
+    const set = this.byKey.get(key) ?? new Set<string>();
+    set.add(period);
+    this.byKey.set(key, set);
+  }
+  fieldFor(key: string): { depositForPeriods?: string[] } {
+    const set = this.byKey.get(key);
+    return set && set.size ? { depositForPeriods: [...set].sort() } : {};
+  }
+}
+
+/** Export cell for a row's deposit months, e.g. "Mar-2026, Apr-2026" (blank when none). */
+function depositMonthsCell(periods: string[] | undefined): string {
+  return (periods ?? []).map(formatForPeriod).join(', ');
+}
+
 /** Identity of a per-deductee no-PAN row (absent on PAN rows and on the unattributed bucket). */
 export interface NoPanDeductee {
   partnerId: string | null;
@@ -149,6 +176,8 @@ export interface TdsRow194R {
   liabilityPaise: bigint;
   depositedPaise: bigint;
   outstandingPaise: bigint;
+  /** "TDS for month" (YYYY-MM, ascending) of the deposits counted on this row — absent when none. */
+  depositForPeriods?: string[];
 }
 
 /** GROSS-UP "in lieu of TDS" recovery attributed to one contributing tenant (report-only). */
@@ -179,6 +208,8 @@ export interface TdsRow194C {
   withheldPaise: bigint;   // DEDUCT: sum of TdsDeductionEntry.tdsDeductedThisPaise (already collected)
   recoveredPaise: bigint;  // GROSS-UP: sum of TdsRecoveryEntry.tenantSharePaise (report-only attribution)
   recoveryByTenant: TdsRecoveryAttribution[]; // GROSS-UP per-tenant recovery split (report-only)
+  /** See TdsRow194R.depositForPeriods. */
+  depositForPeriods?: string[];
 }
 
 export interface TdsSummary194R {
@@ -388,15 +419,8 @@ export class TdsService {
       select: { panNumber: true, amountPaise: true, outletCode: true },
     });
 
-    // ── Deposited: SUM TdsDeposit (section=SEC_194R, clientId, depositDate in FY) ──
-    const deposits = await this.prisma.tdsDeposit.findMany({
-      where: {
-        section: 'SEC_194R',
-        clientId,
-        depositDate: { gte: start, lt: endExclusive },
-      },
-      select: { panNumber: true, amountPaise: true, outletCode: true },
-    });
+    // ── Deposited: SUM TdsDeposit (section=SEC_194R, clientId, "TDS for month" in FY) ──
+    const deposits = await this.depositsForFy('SEC_194R', fyLabel, clientId);
 
     // No-PAN off-platform entries AND deposits are attributed to their deductee via the row's
     // Outlet Code (matched case-insensitively within the tenant; outlet → owner partner). One
@@ -425,27 +449,26 @@ export class TdsService {
     }
 
     const deposited = new Map<string, bigint>();
+    const depositPeriods = new DepositPeriods();
     let unlinkedNoPanDepositPaise = 0n;
-    // PANs with a deposit in this FY but NO base this FY (e.g. March's TDS deposited in April of the
-    // next FY, nothing else paid) — whether the deposit names the PAN directly or is a no-PAN-marker
-    // deposit attributed to an owner PAN. They still get ONE row (base 0, outstanding −deposit) so
-    // the deposit never drops out of the rows or the totals. A PAN that also has a base this FY is
-    // never added here (its deposit lands on its normal row → no duplicate).
+    // Deductees with a deposit FOR this FY but NO base this FY (e.g. a deposit whose "TDS for month"
+    // is in this FY for a PAN paid nothing else) — a deposit naming the PAN directly, a no-PAN-marker
+    // deposit attributed to an owner PAN, or one attributed to a known no-PAN deductee. They still get
+    // ONE row (base 0, outstanding −deposit) so the deposit never drops out of the rows or the
+    // totals. A key that also has a base this FY is never added here (no duplicate).
     const depositOnlyPanKeys = new Set<string>();
     for (const d of deposits) {
-      if (!isNoPanCell(d.panNumber)) {
-        const key = d.panNumber.trim().toUpperCase();
-        deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
-        if (!accum.has(key)) depositOnlyPanKeys.add(key);
+      // PAN deposit → that PAN. No-PAN deposit → the owner's PAN, else its own no-PAN deductee key
+      // (resolved via the Outlet Code); unresolvable (no / unknown / ambiguous code) → "Earlier" row.
+      const key = !isNoPanCell(d.panNumber) ? d.panNumber.trim().toUpperCase() : keyForCode(d.outletCode);
+      if (!key) {
+        unlinkedNoPanDepositPaise += d.amountPaise;
+        depositPeriods.note(UNLINKED_NO_PAN_DEPOSIT_KEY, d.period);
         continue;
       }
-      // No-PAN deposit: the owner's PAN row (like any PAN deposit), or its no-PAN deductee's row when
-      // it has one this FY; otherwise (no Outlet Code / unknown code / no base) → "Earlier" row.
-      const key = keyForCode(d.outletCode);
-      if (key && (!isNoPanKey(key) || accum.has(key))) {
-        deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
-        if (!isNoPanKey(key) && !accum.has(key)) depositOnlyPanKeys.add(key);
-      } else unlinkedNoPanDepositPaise += d.amountPaise;
+      deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
+      depositPeriods.note(key, d.period);
+      if (!accum.has(key)) depositOnlyPanKeys.add(key);
     }
 
     // ── Build result rows ──
@@ -466,6 +489,7 @@ export class TdsService {
         liabilityPaise,
         depositedPaise,
         outstandingPaise,
+        ...depositPeriods.fieldFor(key),
       });
     }
     for (const key of depositOnlyPanKeys) {
@@ -477,6 +501,7 @@ export class TdsService {
         liabilityPaise: 0n,
         depositedPaise,
         outstandingPaise: -depositedPaise,
+        ...depositPeriods.fieldFor(key),
       });
     }
     if (unlinkedNoPanDepositPaise > 0n) {
@@ -488,6 +513,7 @@ export class TdsService {
         depositedPaise: unlinkedNoPanDepositPaise,
         outstandingPaise: -unlinkedNoPanDepositPaise,
         unlinkedNoPanDeposit: true as const,
+        ...depositPeriods.fieldFor(UNLINKED_NO_PAN_DEPOSIT_KEY),
       });
     }
     await this.attachNoPanDeductees(rows, clientId);
@@ -503,6 +529,76 @@ export class TdsService {
     });
 
     return rows;
+  }
+
+  /**
+   * Upper-cased PAN → the entity type (INDIVIDUAL / HUF / COMPANY …) of a non-parent ChannelPartner
+   * holding it, platform-wide (case-insensitive PAN match). When several partners share the PAN the
+   * oldest-id one with an entity type wins (deterministic). No query for an empty list.
+   */
+  private async entityTypesByPan(pans: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const uniq = [...new Set(pans.map((p) => p.trim().toUpperCase()).filter(Boolean))];
+    if (!uniq.length) return out;
+    const partners = await this.prisma.channelPartner.findMany({
+      where: {
+        isParent: false,
+        entityType: { not: null },
+        OR: uniq.map((p) => ({ panNumber: { equals: p, mode: 'insensitive' as const } })),
+      },
+      select: { panNumber: true, entityType: true },
+      orderBy: { id: 'asc' },
+    });
+    for (const p of partners) {
+      const k = p.panNumber?.trim().toUpperCase();
+      if (k && uniq.includes(k) && p.entityType && !out.has(k)) out.set(k, String(p.entityType));
+    }
+    return out;
+  }
+
+  /**
+   * TdsDeposit rows that belong to `fyLabel` — assigned by the FY of the MONTH EACH DEPOSIT PAYS FOR
+   * ("TDS for month", `forPeriod`), NOT the FY of its deposit date: March TDS deposited on 7 April
+   * counts against the March FY. A row with no forPeriod (written by an older build) gets the
+   * default rule (defaultDepositForPeriod), which only ever moves a deposit EARLIER (≤ 30 April of
+   * the next FY), so the fallback window is [FY start, FY end + 30 days) re-checked in code.
+   * `clientId` scopes 194R; omitted for 194C (platform-wide). Each row carries its `period`.
+   */
+  private async depositsForFy(
+    section: 'SEC_194R' | 'SEC_194C',
+    fyLabel: string,
+    clientId?: string,
+  ): Promise<
+    Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null }>
+  > {
+    const { startPeriod, endPeriod } = periodWindowForFy(fyLabel);
+    const { start, endExclusive } = fyFromLabel(fyLabel);
+    const fallbackEnd = new Date(endExclusive.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const found = await this.prisma.tdsDeposit.findMany({
+      where: {
+        section,
+        ...(clientId !== undefined ? { clientId } : {}),
+        OR: [
+          { forPeriod: { gte: startPeriod, lte: endPeriod } },
+          { forPeriod: null, depositDate: { gte: start, lt: fallbackEnd } },
+        ],
+      },
+      select: { panNumber: true, amountPaise: true, outletCode: true, clientId: true, forPeriod: true, depositDate: true },
+    });
+    const out: Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null }> = [];
+    for (const d of found) {
+      const period = depositPeriodOf(d);
+      // period null only when neither column is present (not possible for a stored row) → trust the query.
+      if (period !== null && fyLabelForPeriod(period) !== fyLabel) continue;
+      out.push({
+        panNumber: d.panNumber,
+        amountPaise: d.amountPaise,
+        outletCode: d.outletCode ?? null,
+        clientId: d.clientId ?? null,
+        period,
+      });
+    }
+    return out;
   }
 
   /**
@@ -557,9 +653,7 @@ export class TdsService {
     // 194C entries are visibility-regime (INCENTIVE is always 194R), so the whole source uses
     // the period window.
     const { startPeriod, endPeriod } = periodWindowForFy(fyLabel);
-    // Deposits keep their own depositDate anchor (a deposit MADE in the FY), independent of
-    // the payout period anchor above.
-    const { start, endExclusive } = fyFromLabel(fyLabel);
+    // Deposits are anchored by THEIR "TDS for month" (forPeriod) FY too — see depositsForFy.
 
     // Accumulate per PAN (platform-wide)
     const accum = new Map<string, PanAccum194C>();
@@ -677,14 +771,8 @@ export class TdsService {
       }
     }
 
-    // ── Deposited: SUM TdsDeposit (section=SEC_194C, depositDate in FY) — clientId null (platform) ──
-    const deposits = await this.prisma.tdsDeposit.findMany({
-      where: {
-        section: 'SEC_194C',
-        depositDate: { gte: start, lt: endExclusive },
-      },
-      select: { panNumber: true, amountPaise: true, outletCode: true, clientId: true },
-    });
+    // ── Deposited: SUM TdsDeposit (section=SEC_194C, "TDS for month" in FY) — platform-wide ──
+    const deposits = await this.depositsForFy('SEC_194C', fyLabel);
 
     // A no-PAN 194C deposit is attributed via its Outlet Code (case-insensitive) to that outlet's
     // per-outlet key. 194C is platform-wide (deposit clientId null) and an outletCode is unique only
@@ -696,29 +784,33 @@ export class TdsService {
     );
     const ownerPans194C = await this.ownerPansOf(outletsByCode);
     const deposited = new Map<string, bigint>();
+    const depositPeriods = new DepositPeriods();
     let unlinkedNoPanDepositPaise = 0n;
-    // PANs with a deposit in this FY but NO base this FY — direct PAN deposits and no-PAN-marker
-    // deposits attributed to an owner PAN alike (see 194R). One row each, never a duplicate.
+    // Deductees with a deposit FOR this FY but NO base this FY — direct PAN deposits, no-PAN-marker
+    // deposits attributed to an owner PAN, and ones attributed to a known no-PAN outlet alike (see
+    // 194R). One row each (built below with every other base-less key), never a duplicate.
     const depositOnlyPanKeys = new Set<string>();
     for (const d of deposits) {
+      let key: string | null = null;
       if (!isNoPanCell(d.panNumber)) {
-        const key = d.panNumber.trim().toUpperCase();
-        deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
-        if (!accum.has(key)) depositOnlyPanKeys.add(key);
+        key = d.panNumber.trim().toUpperCase();
+      } else {
+        const oc = d.outletCode?.trim();
+        const candidates = oc ? (outletsByCode.get(oc.toUpperCase()) ?? []) : [];
+        const scoped = d.clientId ? candidates.filter((c) => c.clientId === d.clientId) : candidates;
+        if (scoped.length === 1) {
+          const o = scoped[0];
+          key = (o.partnerId ? ownerPans194C.get(o.partnerId) : undefined) ?? noPanOutletKey(o.clientId, o.outletCode);
+        }
+      }
+      if (!key) {
+        unlinkedNoPanDepositPaise += d.amountPaise;
+        depositPeriods.note(UNLINKED_NO_PAN_DEPOSIT_KEY, d.period);
         continue;
       }
-      const oc = d.outletCode?.trim();
-      const candidates = oc ? (outletsByCode.get(oc.toUpperCase()) ?? []) : [];
-      const scoped = d.clientId ? candidates.filter((c) => c.clientId === d.clientId) : candidates;
-      let key: string | null = null;
-      if (scoped.length === 1) {
-        const o = scoped[0];
-        key = (o.partnerId ? ownerPans194C.get(o.partnerId) : undefined) ?? noPanOutletKey(o.clientId, o.outletCode);
-      }
-      if (key && (!isNoPanKey(key) || accum.has(key))) {
-        deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
-        if (!isNoPanKey(key) && !accum.has(key)) depositOnlyPanKeys.add(key);
-      } else unlinkedNoPanDepositPaise += d.amountPaise;
+      deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
+      depositPeriods.note(key, d.period);
+      if (!accum.has(key)) depositOnlyPanKeys.add(key);
     }
 
     // ── DEDUCT already-collected: SUM TdsDeductionEntry.tdsDeductedThisPaise (section 194C, FY) ──
@@ -773,6 +865,17 @@ export class TdsService {
       }
       tenantMap.set(r.clientId, (tenantMap.get(r.clientId) ?? 0n) + r.tenantSharePaise);
     }
+    /** Per-tenant recovery split for a key, largest share first. */
+    const sortedRecoveryList = (key: string): TdsRecoveryAttribution[] => {
+      const tenantMap = recoveryByTenant.get(key);
+      return tenantMap
+        ? [...tenantMap.entries()]
+            .map(([clientId, tenantSharePaise]) => ({ clientId, tenantSharePaise }))
+            .sort((x, y) =>
+              y.tenantSharePaise > x.tenantSharePaise ? 1 : y.tenantSharePaise < x.tenantSharePaise ? -1 : 0,
+            )
+        : [];
+    };
 
     // ── Build result rows ──
     const rows: TdsRow194C[] = [];
@@ -809,14 +912,7 @@ export class TdsService {
       const methodology: TdsMethodologyLabel =
         methSet.size === 0 ? null : methSet.size === 1 ? [...methSet][0] : 'MIXED';
 
-      const tenantMap = recoveryByTenant.get(key);
-      const recoveryList: TdsRecoveryAttribution[] = tenantMap
-        ? [...tenantMap.entries()]
-            .map(([clientId, tenantSharePaise]) => ({ clientId, tenantSharePaise }))
-            .sort((x, y) =>
-              y.tenantSharePaise > x.tenantSharePaise ? 1 : y.tenantSharePaise < x.tenantSharePaise ? -1 : 0,
-            )
-        : [];
+      const recoveryList = sortedRecoveryList(key);
 
       rows.push({
         panNumber: a.panNumber,
@@ -833,15 +929,23 @@ export class TdsService {
         withheldPaise,
         recoveredPaise,
         recoveryByTenant: recoveryList,
+        ...depositPeriods.fieldFor(key),
       });
     }
-    // Recovery is report-only; a no-PAN outlet's recovery with no base this FY was previously only
-    // visible inside the pooled bucket — keep it visible (outstanding 0) whenever any no-PAN row exists.
-    if (rows.some((r) => isNoPanKey(r.panNumber))) {
-      for (const [key, rec] of recovered) {
-        if (!isNoPanKey(key) || accum.has(key)) continue;
-        const tenantMap = recoveryByTenant.get(key);
-        rows.push({
+    // ── Base-less deductees: no base this FY, but a deposit FOR this FY, a DEDUCT withholding, or a
+    // (no-PAN) recovery. Each key gets exactly ONE row (base 0, outstanding = −deposit − withheld)
+    // so no amount ever drops out of the rows or the totals:
+    //   - deposit-only keys (real PAN, owner PAN of a no-PAN deposit, or a known no-PAN outlet);
+    //   - WITHHELD-only keys — real PANs AND no-PAN keys alike (FIX B: a real PAN's withholding used
+    //     to appear only when it also had a deposit);
+    //   - recovery (report-only, outstanding unaffected): carried on any base-less row of the same
+    //     key; a no-PAN key with nothing but a recovery keeps its own row whenever a no-PAN row with a
+    //     base exists (unchanged rule).
+    const baseLess = new Map<string, TdsRow194C>();
+    const baseLessRow = (key: string): TdsRow194C => {
+      let r = baseLess.get(key);
+      if (!r) {
+        r = {
           panNumber: key,
           entityType: 'OTHERS',
           fyLabel,
@@ -854,66 +958,34 @@ export class TdsService {
           outstandingPaise: 0n,
           methodology: null,
           withheldPaise: 0n,
-          recoveredPaise: rec,
-          recoveryByTenant: tenantMap
-            ? [...tenantMap.entries()].map(([clientId, tenantSharePaise]) => ({ clientId, tenantSharePaise }))
-            : [],
-        });
+          recoveredPaise: 0n,
+          recoveryByTenant: [],
+        };
+        baseLess.set(key, r);
       }
+      return r;
+    };
+    const withheldOnlyKeys = [...withheld.keys()].filter((k) => !accum.has(k));
+    const anyNoPanBaseRow = rows.some((r) => isNoPanKey(r.panNumber));
+    const hasBaseLessAmount = (key: string) => depositOnlyPanKeys.has(key) || withheldOnlyKeys.includes(key);
+    for (const [key, rec] of recovered) {
+      if (accum.has(key)) continue;
+      if (!hasBaseLessAmount(key) && !(isNoPanKey(key) && anyNoPanBaseRow)) continue;
+      const r = baseLessRow(key);
+      r.recoveredPaise = rec;
+      r.recoveryByTenant = sortedRecoveryList(key);
     }
-    // WITHHELD-only no-PAN keys (legacy blank-PAN deduction rows) keep their own row so a withheld
-    // amount never drops out (outstanding = −withheld). When the recovery-only loop above already
-    // emitted a row for the SAME key (e.g. the bare `__NO_PAN__` bucket), MERGE into it — never two
-    // rows for one key, and the recovered amount is counted once.
-    for (const [key, w] of withheld) {
-      if (!isNoPanKey(key) || accum.has(key)) continue;
-      const existing = rows.find((r) => r.panNumber === key && !r.unlinkedNoPanDeposit);
-      if (existing) {
-        existing.withheldPaise += w;
-        existing.outstandingPaise -= w;
-        continue;
-      }
-      rows.push({
-        panNumber: key,
-        entityType: 'OTHERS',
-        fyLabel,
-        baseFyTotalPaise: 0n,
-        maxSinglePaise: 0n,
-        thresholdMet: false,
-        liabilityPaise: 0n,
-        liabilityNoThresholdPaise: 0n,
-        depositedPaise: 0n,
-        outstandingPaise: -w,
-        methodology: null,
-        withheldPaise: w,
-        recoveredPaise: recovered.get(key) ?? 0n,
-        recoveryByTenant: [],
-      });
-    }
-    // Deposit-only PANs (a deposit in this FY — direct or via a no-PAN marker's owner — with no base
-    // this FY) → base 0, outstanding −deposit, so the deposit never drops out of the totals.
-    for (const key of depositOnlyPanKeys) {
-      const depositedPaise = deposited.get(key) ?? 0n;
-      const withheldPaise = withheld.get(key) ?? 0n;
-      const tenantMap = recoveryByTenant.get(key);
-      rows.push({
-        panNumber: key,
-        entityType: 'OTHERS',
-        fyLabel,
-        baseFyTotalPaise: 0n,
-        maxSinglePaise: 0n,
-        thresholdMet: false,
-        liabilityPaise: 0n,
-        liabilityNoThresholdPaise: 0n,
-        depositedPaise,
-        outstandingPaise: -depositedPaise - withheldPaise,
-        methodology: null,
-        withheldPaise,
-        recoveredPaise: recovered.get(key) ?? 0n,
-        recoveryByTenant: tenantMap
-          ? [...tenantMap.entries()].map(([clientId, tenantSharePaise]) => ({ clientId, tenantSharePaise }))
-          : [],
-      });
+    for (const key of withheldOnlyKeys) baseLessRow(key).withheldPaise = withheld.get(key) ?? 0n;
+    for (const key of depositOnlyPanKeys) baseLessRow(key).depositedPaise = deposited.get(key) ?? 0n;
+    // FIX D: a real PAN's base-less row carries that PAN's REAL entity type (it decides the 1% / 2%
+    // rate shown in the export) — looked up only when such a row exists; unknown PAN → OTHERS.
+    const entityTypes = await this.entityTypesByPan([...baseLess.keys()].filter((k) => !isNoPanKey(k)));
+    for (const [key, r] of baseLess) {
+      r.outstandingPaise = -r.depositedPaise - r.withheldPaise;
+      if (!isNoPanKey(key)) r.entityType = entityTypes.get(key) ?? 'OTHERS';
+      const periods = depositPeriods.fieldFor(key);
+      if (periods.depositForPeriods) r.depositForPeriods = periods.depositForPeriods;
+      rows.push(r);
     }
     if (unlinkedNoPanDepositPaise > 0n) {
       rows.push({
@@ -932,6 +1004,7 @@ export class TdsService {
         recoveredPaise: 0n,
         recoveryByTenant: [],
         unlinkedNoPanDeposit: true as const,
+        ...depositPeriods.fieldFor(UNLINKED_NO_PAN_DEPOSIT_KEY),
       });
     }
     await this.attachNoPanDeductees(rows, null);
@@ -1277,6 +1350,7 @@ export class TdsService {
         depositDate: true,
         amountPaise: true,
         outletCode: true,
+        forPeriod: true,
       },
     });
     const existingKeys = new Set(
@@ -1286,6 +1360,7 @@ export class TdsService {
           e.depositDate,
           e.amountPaise,
           e.outletCode ?? null,
+          depositPeriodOf(e),
         ),
       ),
     );
@@ -1297,6 +1372,7 @@ export class TdsService {
         r.depositDate,
         r.amountPaise,
         r.outletCode ?? null,
+        r.forPeriod,
       );
       if (existingKeys.has(key)) {
         result.skipped += 1;
@@ -1324,6 +1400,7 @@ export class TdsService {
           panNumber: r.panNumber,
           outletCode: r.outletCode ?? undefined,
           amountPaise: r.amountPaise,
+          forPeriod: r.forPeriod,
           uploadBatchId,
           uploadedBy,
         })),
@@ -1340,12 +1417,14 @@ export class TdsService {
     depositDate: Date,
     amountPaise: bigint,
     outletCode: string | null,
+    forPeriod: string | null,
   ): string {
     return [
       panNumber,
       depositDate.toISOString(),
       amountPaise.toString(),
       outletCode ?? '',
+      forPeriod ?? '',
     ].join('|');
   }
 
@@ -1492,6 +1571,7 @@ export class TdsService {
         'TDS Rate %': tdsRatePct,
         'TDS Amount (₹)': moneyCell(r.liabilityPaise),
         'Already Deposited (₹)': moneyCell(r.depositedPaise),
+        'Deposits — TDS for Month(s)': depositMonthsCell(r.depositForPeriods),
         'Outstanding (₹)': moneyCell(r.outstandingPaise),
         FY: fyLabel,
       };
@@ -1615,6 +1695,7 @@ export class TdsService {
         'TDS — No Threshold (₹)': moneyCell(r.liabilityNoThresholdPaise),
         'Threshold Met (Y/N)': r.thresholdMet ? 'Y' : 'N',
         'Already Deposited (₹)': moneyCell(r.depositedPaise),
+        'Deposits — TDS for Month(s)': depositMonthsCell(r.depositForPeriods),
         'TDS Withheld (Deduct) (₹)': moneyCell(r.withheldPaise),
         'TDS Recovered (Gross-Up) (₹)': moneyCell(r.recoveredPaise),
         'Outstanding (₹)': moneyCell(r.outstandingPaise),
@@ -1669,6 +1750,7 @@ export class TdsService {
       liabilityPaise: string;
       depositedPaise: string;
       outstandingPaise: string;
+      depositForPeriods?: string[];
       // 194C only — methodology-aware split (undefined for 194R):
       methodology?: TdsMethodologyLabel;
       withheldPaise?: string;
@@ -1700,6 +1782,7 @@ export class TdsService {
           liabilityPaise: r.liabilityPaise.toString(),
           depositedPaise: r.depositedPaise.toString(),
           outstandingPaise: r.outstandingPaise.toString(),
+          ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
         })),
         totals: {
           liabilityPaise: totalLiability.toString(),
@@ -1727,6 +1810,7 @@ export class TdsService {
         liabilityPaise: r.liabilityPaise.toString(),
         depositedPaise: r.depositedPaise.toString(),
         outstandingPaise: r.outstandingPaise.toString(),
+        ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
         methodology: r.methodology,
         withheldPaise: r.withheldPaise.toString(),
         recoveredPaise: r.recoveredPaise.toString(),

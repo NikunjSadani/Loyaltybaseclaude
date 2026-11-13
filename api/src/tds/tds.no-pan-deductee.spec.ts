@@ -315,13 +315,13 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(pan['TDS Rate %']).toBe(10);
   });
 
-  it('export194R: PAN-only tenant → exact legacy column set (no Outlet Code column)', async () => {
+  it('export194R: PAN-only tenant → legacy column set + the deposit-month column (no Outlet Code column)', async () => {
     wire([{ id: 'cp1', pan: 'ABCDE1234F', owner: 'A', outlets: ['O1'] }]);
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('O1', 'f1', 2_100_000n)]);
     const { buffer } = await service.export194R(CLIENT, FY);
     expect(headers(buffer)).toEqual([
       'S.No', 'Deductee Name', 'PAN', 'Section', 'Amount Paid (₹)', 'TDS Rate %',
-      'TDS Amount (₹)', 'Already Deposited (₹)', 'Outstanding (₹)', 'FY',
+      'TDS Amount (₹)', 'Already Deposited (₹)', 'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'FY',
     ]);
   });
 
@@ -379,7 +379,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([
       { panNumber: '__NO_PAN__', outletCode: 'oa', clientId: null, amountPaise: 1_000_000n }, // unique → OA
       { panNumber: '__NO_PAN__', outletCode: 'DUP', clientId: null, amountPaise: 500_000n },  // 2 tenants → unlinked
-      { panNumber: '__NO_PAN__', outletCode: 'DUP', clientId: 'other', amountPaise: 70_000n }, // tenant given → other:DUP (no base) → unlinked
+      { panNumber: '__NO_PAN__', outletCode: 'DUP', clientId: 'other', amountPaise: 70_000n }, // tenant given → other:DUP (no base) → its own deposit-only row (fix D)
     ]);
     const rows = await service.compute194C(FY);
     const oa = rows.find((r) => r.panNumber === `__NO_PAN__:outlet:${CLIENT}:OA`)!;
@@ -387,7 +387,10 @@ describe('TdsService — per-deductee no-PAN', () => {
     const dup = rows.find((r) => r.panNumber === `__NO_PAN__:outlet:${CLIENT}:DUP`)!;
     expect(dup.depositedPaise).toBe(0n);
     const earlier = rows.find((r) => r.unlinkedNoPanDeposit)!;
-    expect(earlier).toMatchObject({ depositedPaise: 570_000n, outstandingPaise: -570_000n });
+    expect(earlier).toMatchObject({ depositedPaise: 500_000n, outstandingPaise: -500_000n });
+    const otherDup = rows.find((r) => r.panNumber === `__NO_PAN__:outlet:other:DUP`)!;
+    expect(otherDup).toMatchObject({ baseFyTotalPaise: 0n, depositedPaise: 70_000n, outstandingPaise: -70_000n });
+    expect(otherDup.unlinkedNoPanDeposit).toBeUndefined();
     const sum = await service.summary194C(FY);
     expect(sum.totalOutstandingPaise).toBe(sum.totalLiabilityPaise - sum.totalDepositedPaise - sum.totalWithheldPaise);
   });

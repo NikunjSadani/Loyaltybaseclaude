@@ -72,6 +72,15 @@ Then **Deposits** (194R tax the client actually paid the government, uploaded) a
 
 ![194R report — per-PAN base, liability, deposited, outstanding](/guides/tds/194r-report.png)
 
+## Recording deposits — "TDS for month"
+
+Every deposit counts against the **financial year of the month whose TDS it pays**, not the year of the deposit date — so March's TDS deposited on 7 April (or by 30 April) reduces **March's** year, not the next one.
+
+- The deposit template (TDS → Deposit Upload → **Download Template**) has an optional **TDS for month** column. Accepted: \`2026-03\`, \`03/2026\`, \`Mar-2026\`, \`March 2026\`, \`Mar-26\`, or an Excel date (its month is used).
+- **Left blank**, the month is decided by the deposit date: deposited on the **1st–7th** → the **previous month**; deposited **8–30 April** → **March** of that year; otherwise the deposit's **own month**. The upload preview notes every deposit this puts in an earlier financial year.
+- A row is rejected (with its row number) if the month can't be read, is in the **future**, or is **after** the deposit date's month.
+- The 194R/194C reports and Excel exports show the **TDS for month(s)** of the deposits counted on each row. A PAN whose deposit belongs to a year in which it was paid nothing still appears in that year (base 0, outstanding negative = the deposit), so totals always equal the sum of the rows.
+
 ## Invoicing, GST & recovery (visibility payouts)
 
 - **Self-billed invoice:** for a visibility service the platform raises the invoice *for* the outlet — seller = the outlet, buyer = TGSL. It locks once the payout UTR is recorded.
@@ -105,5 +114,6 @@ The statutory **rates and thresholds are editable at the platform level** (they'
 2. **Gross-up liability is ~11%, not 10%** — it's grossed up (\`× 10/90\`) because the platform pays the tax *on top*, not out of the outlet's amount.
 3. **The threshold is on the year's total per PAN**, not per payout — a small payout can still cross it once the running total does.
 4. **Section/option are frozen at confirm** — changing a client's treatment never re-prices already-confirmed payouts.
-5. **194C is platform-wide** (one outlet PAN aggregated across all clients); **194R is per-client**.`,
+5. **194C is platform-wide** (one outlet PAN aggregated across all clients); **194R is per-client**.
+6. **A deposit belongs to the year of the month it pays for** — an April deposit of March's TDS shows in the *previous* year's report. Use the **TDS for month** column to say exactly which month a deposit covers.`,
 };
