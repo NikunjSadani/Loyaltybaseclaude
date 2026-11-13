@@ -1,10 +1,11 @@
-import { Controller, Get, Query, Req } from '@nestjs/common';
-import type { Request } from 'express';
+import { Controller, Get, Query, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { ReportsService } from './reports.service';
+import { ExportsService } from '../exports/exports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { PointsLedgerQueryDto, TargetVsSalesQueryDto, TicketAgingQueryDto } from './dto/reports.dto';
+import { PointsLedgerQueryDto, ReportFormat, TargetVsSalesQueryDto, TicketAgingQueryDto } from './dto/reports.dto';
 
 /**
  * Reports admin — re-homed from
@@ -15,7 +16,10 @@ import { PointsLedgerQueryDto, TargetVsSalesQueryDto, TicketAgingQueryDto } from
  */
 @Controller('admin/reports')
 export class ReportsController {
-  constructor(private readonly reports: ReportsService) {}
+  constructor(
+    private readonly reports: ReportsService,
+    private readonly exports: ExportsService,
+  ) {}
 
   @Get('outlet-master')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
@@ -47,7 +51,13 @@ export class ReportsController {
   @Get('target-vs-sales')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('targets:read')
-  targetVsSales(@CurrentUser() user: JwtPayload, @Query() query: TargetVsSalesQueryDto) {
+  targetVsSales(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: TargetVsSalesQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // xlsx → the 'target-vs-sales' export kind: ≤ 3 months streams now (200), longer ranges are queued (202 → Downloads).
+    if (query.format === ReportFormat.XLSX) return this.exports.respond(res, user, 'target-vs-sales', query);
     return this.reports.targetVsSales(user, query);
   }
 }

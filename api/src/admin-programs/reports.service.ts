@@ -11,6 +11,7 @@ import { rungIdHeader, rungNameHeader, rungPhoneHeader } from '../common/hierarc
 import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import { TargetsService } from '../targets/targets.service';
 import { PointsLedgerQueryDto, TargetVsSalesQueryDto, TicketAgingQueryDto, ReportFormat } from './dto/reports.dto';
+import { TARGET_VS_SALES_INSTANT_MAX_MONTHS } from '../exports/kinds/batch2/target-vs-sales.kind';
 import {
   aggregateLedgerToRow,
   buildTargetVsSalesRows,
@@ -21,7 +22,6 @@ import {
   pointsLedgerXlsxRows,
   ReportMonth,
   summarizeAging,
-  targetVsSalesHeaderKeys,
   targetVsSalesMonthList,
   TicketAgingRow,
   ticketAgingXlsxRows,
@@ -773,9 +773,9 @@ export class ReportsService {
 
   // ── Target vs Sales Performance ───────────────────────────────────────────────
   /**
-   * GET /v1/admin/reports/target-vs-sales — json (default, on-screen preview) or
-   * xlsx download. One row per (outlet × month) across an inclusive fromMonth→
-   * toMonth range (max 15 months). For each enabled KpiDef the sheet carries
+   * GET /v1/admin/reports/target-vs-sales — the json on-screen preview (≤ 3 months; the xlsx download of up to 15
+   * months is the 'target-vs-sales' export kind, routed by the controller). One row per (outlet × month) across an
+   * inclusive fromMonth→toMonth range. For each enabled KpiDef the sheet carries
    * three columns: Target, Achieved, Pace %.
    *
    * The target↔actual join is NOT re-implemented: it delegates to
@@ -812,6 +812,19 @@ export class ReportsService {
       throw new BadRequestException(msg);
     }
 
+    // The xlsx download is the 'target-vs-sales' export kind (Downloads page — streamed, or prepared in the background
+    // for > 3 months); the controller routes format=xlsx there. This method is the on-screen JSON preview only, held
+    // in memory, so it is capped at the same 3 months.
+    if (format === ReportFormat.XLSX) {
+      throw new BadRequestException('Use the report download for the Excel file.');
+    }
+    if (months.length > TARGET_VS_SALES_INSTANT_MAX_MONTHS) {
+      throw new BadRequestException(
+        `The on-screen preview covers up to ${TARGET_VS_SALES_INSTANT_MAX_MONTHS} months (you chose ${months.length}). ` +
+          'Use Download Excel for a longer range — it will be prepared on the Downloads page.',
+      );
+    }
+
     // KPI columns = the tenant's ENABLED KpiDef catalogue, in KpiDef order.
     const kpiDefs = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
@@ -827,20 +840,6 @@ export class ReportsService {
     }
 
     const { rows, kpis } = buildTargetVsSalesRows(months, kpiDefs, paceResults);
-
-    if (format === ReportFormat.XLSX) {
-      // Seed an all-blank row so an empty result still carries every header column.
-      const headerKeys = targetVsSalesHeaderKeys(kpiDefs);
-      const sheetRows = rows.length
-        ? rows
-        : [Object.fromEntries(headerKeys.map((h) => [h, '']))];
-      const buffer = buildXlsx([{ name: 'Target vs Sales', rows: sheetRows }]);
-      return new StreamableFile(buffer, {
-        type: XLSX_TYPE,
-        disposition: `attachment; filename="target-vs-sales-${fromMonth}-to-${toMonth}.xlsx"`,
-      });
-    }
-
     return { fromMonth, toMonth, months, kpis, rows };
   }
 }
