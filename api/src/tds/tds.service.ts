@@ -159,6 +159,14 @@ class DepositPeriods {
   }
 }
 
+/**
+ * A multi-outlet export cell: values ", "-joined POSITIONALLY (aligned 1:1 with the Outlet Code
+ * cell, so a blank stays a blank slot); all-blank → an empty cell.
+ */
+function alignedCell(values: string[]): string {
+  return values.some((v) => v) ? values.join(', ') : '';
+}
+
 /** Export cell for a row's deposit months, e.g. "Mar-2026, Apr-2026" (blank when none). */
 function depositMonthsCell(periods: string[] | undefined): string {
   return (periods ?? []).map(formatForPeriod).join(', ');
@@ -189,6 +197,13 @@ export interface TdsRow194R {
   /** "TDS for month" (YYYY-MM, ascending) of the deposits counted on this row — absent when none. */
   depositForPeriods?: string[];
 }
+
+/**
+ * DISPLAY-ONLY side channel of compute194R: row key (TdsRow194R.panNumber) → the outlet codes whose
+ * payouts make up that row's base. Kept OFF the row type so the rows every other consumer reads
+ * (on-screen report, liability, finance dashboard) stay byte-identical.
+ */
+export type ContributingOutlets194R = Map<string, Set<string>>;
 
 /** GROSS-UP "in lieu of TDS" recovery attributed to one contributing tenant (report-only). */
 export interface TdsRecoveryAttribution {
@@ -353,6 +368,8 @@ export class TdsService {
   async report194R(
     clientId: string,
     fyLabel: string,
+    /** DISPLAY-ONLY sink, passed through to compute194R (see there). Only export194R supplies it. */
+    contributingOutlets?: ContributingOutlets194R,
   ): Promise<{
     rows: TdsRow194R[];
     summary: TdsSummary194R;
@@ -360,7 +377,7 @@ export class TdsService {
     importedPayoutsNote: string | null;
   }> {
     const countFrom = await this.importedPayoutsCountFrom(clientId);
-    const rows = await this.compute194R(clientId, fyLabel, countFrom);
+    const rows = await this.compute194R(clientId, fyLabel, countFrom, contributingOutlets);
     const disclosed = importedCountFromForFy(countFrom, fyLabel);
     return {
       rows,
@@ -382,7 +399,22 @@ export class TdsService {
     fyLabel: string,
     /** The tenant's imported-payouts countFrom, already read for this request (undefined → read it here). */
     importedCountFrom?: string | null,
+    /**
+     * DISPLAY-ONLY sink (export194R's Outlet columns): when given, every outlet code whose payout
+     * forms a row's base is recorded under that row's key — on-platform CreditPayoutEntry rows
+     * (incl. imported VENDOR_IMPORT ones when counted) and off-platform entries carrying an Outlet
+     * Code. Deposits and redemptions add nothing. It never changes a row, an amount or a query —
+     * the returned rows are byte-identical with or without it.
+     */
+    contributingOutlets?: ContributingOutlets194R,
   ): Promise<TdsRow194R[]> {
+    const noteOutlet = (key: string, code: string | null | undefined) => {
+      const c = code?.trim();
+      if (!contributingOutlets || !c) return;
+      const set = contributingOutlets.get(key) ?? new Set<string>();
+      set.add(c);
+      contributingOutlets.set(key, set);
+    };
     const countFromDate =
       importedCountFrom !== undefined ? importedCountFrom : await this.importedPayoutsCountFrom(clientId);
     const cfg = await this.statutory.getForFy(fyLabel);
@@ -397,7 +429,8 @@ export class TdsService {
 
     // `noPanKey` = the per-deductee key to use when this amount has NO PAN (see noPanPartnerKey /
     // noPanOutletKey). Omitted → the unattributed bucket (legacy behaviour for identity-less rows).
-    const addToPan = (pan: string | null | undefined, amountPaise: bigint, noPanKey?: string) => {
+    // Returns the row key the amount was added to (used only by the display-only outlet sink).
+    const addToPan = (pan: string | null | undefined, amountPaise: bigint, noPanKey?: string): string => {
       const key = isNoPanCell(pan) ? (noPanKey ?? NO_PAN_KEY) : pan!.trim().toUpperCase();
       const hasPan = !isNoPanKey(key);
       const existing = accum.get(key);
@@ -406,6 +439,7 @@ export class TdsService {
       } else {
         accum.set(key, { panNumber: key, hasPan, totalPaise: amountPaise });
       }
+      return key;
     };
 
     // Visibility field IDs (the explicit classifier) — needed both to widen the query by
@@ -509,11 +543,12 @@ export class TdsService {
       const partnerId = outletToPartnerId.get(entry.outletId) ?? null;
       const pan = partnerId ? (partnerToPan.get(partnerId) ?? null) : null;
       // No PAN → this partner is its OWN deductee (an owner-less outlet keys by tenant+outlet).
-      addToPan(
+      const key = addToPan(
         pan,
         entry.amountPaise,
         partnerId ? noPanPartnerKey(partnerId) : noPanOutletKey(clientId, entry.outletId),
       );
+      noteOutlet(key, entry.outletId); // entry.outletId IS the outletCode
     }
 
     // ── Source 2: RedemptionOrder.valuePaise for fulfilled redemptions ──
@@ -573,7 +608,13 @@ export class TdsService {
 
     for (const e of offPlatform) {
       // No-PAN off-platform benefit → the outlet owner's PAN / own deductee key (bare bucket if unlinkable).
-      addToPan(e.panNumber, e.amountPaise, isNoPanCell(e.panNumber) ? (keyForCode(e.outletCode) ?? undefined) : undefined);
+      const key = addToPan(e.panNumber, e.amountPaise, isNoPanCell(e.panNumber) ? (keyForCode(e.outletCode) ?? undefined) : undefined);
+      if (contributingOutlets && e.outletCode?.trim()) {
+        // A no-PAN entry's code was resolved case-insensitively above → record the stored code;
+        // a PAN entry's code is recorded as uploaded (export194R resolves it within the tenant).
+        const m = isNoPanCell(e.panNumber) ? outletsByCode.get(e.outletCode.trim().toUpperCase()) : undefined;
+        noteOutlet(key, m && m.length === 1 ? m[0].outletCode : e.outletCode);
+      }
     }
 
     const deposited = new Map<string, bigint>();
@@ -1662,16 +1703,130 @@ export class TdsService {
   // ─── 6.5c: Excel reference exports ──────────────────────────────────────────
 
   /**
+   * DISPLAY-ONLY Outlet Code / Name / Type per 194R export row (see export194R for the rules).
+   * Row key → outlets sorted by code. Batched, tenant-scoped lookups (no N+1):
+   *   1. outlets by exact code (contributing codes + no-PAN deductee codes) — skipped when none;
+   *   2. case-insensitive retry ONLY for codes not found exactly (an off-platform upload's code);
+   *   3. PAN fallback: outlets of the non-parent partners holding the PAN — ONLY for PAN rows with
+   *      no contributing outlet. `panPartners` = export194R's PAN→name lookup (clientId-scoped,
+   *      isParent:false — a parent shares its group's PAN and owns no outlets).
+   * A code with no outlet in this tenant is still shown (name/type blank) — it is what was paid.
+   */
+  private async outletColumns194R(
+    clientId: string,
+    rows: TdsRow194R[],
+    contributing: ContributingOutlets194R,
+    panPartners: Array<{ id?: string; panNumber: string | null }>,
+  ): Promise<Map<string, Array<{ code: string; name: string; type: string }>>> {
+    type OutletInfo = { code: string; name: string; type: string };
+    const out = new Map<string, OutletInfo[]>();
+    const toInfo = (o: { outletCode: string; name?: string | null; outletType?: { name?: string | null } | null }): OutletInfo => ({
+      code: o.outletCode,
+      name: o.name ?? '',
+      type: o.outletType?.name ?? '',
+    });
+    const outletSelect = { outletCode: true, name: true, partnerId: true, outletType: { select: { name: true } } } as const;
+
+    // Codes wanted per row (PAN rows: contributing; per-deductee no-PAN rows: their own codes).
+    const codesByRow = new Map<string, string[]>();
+    for (const r of rows) {
+      if (r.unlinkedNoPanDeposit) continue;
+      if (!isNoPanKey(r.panNumber)) {
+        const set = contributing.get(r.panNumber);
+        if (set?.size) codesByRow.set(r.panNumber, [...set]);
+      } else if (r.noPanDeductee?.outletCodes.length) {
+        codesByRow.set(r.panNumber, [...r.noPanDeductee.outletCodes]);
+      }
+    }
+
+    // 1 + 2: resolve every wanted code within the tenant.
+    const wanted = [...new Set([...codesByRow.values()].flat())];
+    const byExact = new Map<string, OutletInfo>();
+    if (wanted.length) {
+      const found = await this.prisma.outlet.findMany({
+        where: { clientId, outletCode: { in: wanted } },
+        select: outletSelect,
+      });
+      for (const o of found) if (o.outletCode) byExact.set(o.outletCode, toInfo(o));
+    }
+    const missing = wanted.filter((c) => !byExact.has(c));
+    const byUpper = new Map<string, OutletInfo[]>();
+    if (missing.length) {
+      const upper = [...new Set(missing.map((c) => c.toUpperCase()))];
+      const found = await this.prisma.outlet.findMany({
+        where: { clientId, OR: upper.map((c) => ({ outletCode: { equals: c, mode: 'insensitive' as const } })) },
+        select: outletSelect,
+      });
+      for (const o of found) {
+        if (!o.outletCode) continue;
+        const k = o.outletCode.toUpperCase();
+        const list = byUpper.get(k) ?? [];
+        if (!list.some((x) => x.code === o.outletCode)) list.push(toInfo(o));
+        byUpper.set(k, list);
+      }
+    }
+    const resolve = (code: string): OutletInfo => {
+      const exact = byExact.get(code);
+      if (exact) return exact;
+      const ci = byUpper.get(code.toUpperCase());
+      return ci && ci.length === 1 ? ci[0] : { code, name: '', type: '' };
+    };
+    const finish = (list: OutletInfo[]): OutletInfo[] => {
+      const byCode = new Map<string, OutletInfo>();
+      for (const o of list) if (!byCode.has(o.code)) byCode.set(o.code, o);
+      return [...byCode.values()].sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+    };
+    for (const [key, codes] of codesByRow) out.set(key, finish(codes.map(resolve)));
+
+    // 3: PAN rows with no contributing outlet → the PAN holders' (non-parent) outlets.
+    const fallbackPans = new Set(
+      rows.filter((r) => !r.unlinkedNoPanDeposit && !isNoPanKey(r.panNumber) && !out.has(r.panNumber)).map((r) => r.panNumber),
+    );
+    const partnerIdsByPan = new Map<string, string[]>();
+    for (const p of panPartners) {
+      if (!p.id || !p.panNumber || !fallbackPans.has(p.panNumber)) continue;
+      partnerIdsByPan.set(p.panNumber, [...(partnerIdsByPan.get(p.panNumber) ?? []), p.id]);
+    }
+    const fallbackIds = [...new Set([...partnerIdsByPan.values()].flat())];
+    if (fallbackIds.length) {
+      const owned = await this.prisma.outlet.findMany({
+        where: { clientId, partnerId: { in: fallbackIds } },
+        select: outletSelect,
+      });
+      const byPartner = new Map<string, OutletInfo[]>();
+      for (const o of owned) {
+        if (!o.partnerId || !o.outletCode) continue;
+        byPartner.set(o.partnerId, [...(byPartner.get(o.partnerId) ?? []), toInfo(o)]);
+      }
+      for (const [pan, ids] of partnerIdsByPan) {
+        const list = finish(ids.flatMap((id) => byPartner.get(id) ?? []));
+        if (list.length) out.set(pan, list);
+      }
+    }
+    return out;
+  }
+
+  /**
    * Build the 194R reference Excel for a given clientId + FY.
    *
    * One row per PAN. Name resolution (CA-ready, mirroring 26Q deductee sheet):
    *   - On-platform PAN → ChannelPartner (clientId-scoped) → ownerName or businessName
-   *   - per-deductee no-PAN row → "<owner name> (NO PAN ON FILE)" + an Outlet Code column
-   *     (the column appears only when such a row exists); unattributed '__NO_PAN__' → "NO PAN ON FILE"
+   *   - per-deductee no-PAN row → "<owner name> (NO PAN ON FILE)"; unattributed '__NO_PAN__' → "NO PAN ON FILE"
    *   - Unknown / off-platform PAN → blank name
    *
-   * Columns: S.No · Deductee Name · PAN · Section · Amount Paid (₹) · TDS Rate %
-   *          · TDS Amount (₹) · Already Deposited (₹) · Outstanding (₹) · FY
+   * Outlet Code / Outlet Name / Outlet Type (DISPLAY ONLY — always present; owner-approved 2026-11-13):
+   *   - PAN row → the outlets whose payouts make up that row's FY base (paid credits incl. counted
+   *     imported vendor payouts, and off-platform entries carrying an Outlet Code; deposits and
+   *     redemptions add none). None (e.g. an off-platform PAN-only entry, or redemptions only) →
+   *     the outlets of this tenant's NON-PARENT partners holding the PAN; still none → blank.
+   *   - per-deductee no-PAN row → that deductee's outlets (noPanDeductee.outletCodes, as before).
+   *   - unattributed '__NO_PAN__' and "Earlier no-PAN deposits" rows → blank.
+   *   Several outlets → ", "-joined, sorted by code; names and types in the SAME order as the codes.
+   *   Type = the outlet type's name (blank when unknown). Nothing numeric is affected.
+   *
+   * Columns: S.No · Deductee Name · PAN · Outlet Code · Outlet Name · Outlet Type · Section
+   *          · Amount Paid (₹) · TDS Rate % · TDS Amount (₹) · Already Deposited (₹)
+   *          · Deposits — TDS for Month(s) · Outstanding (₹) · FY
    *
    * A second "Summary" sheet provides totals.
    *
@@ -1681,7 +1836,8 @@ export class TdsService {
     clientId: string,
     fyLabel: string,
   ): Promise<{ buffer: Buffer; filename: string }> {
-    const { rows, importedPayoutsNote: importedNote } = await this.report194R(clientId, fyLabel);
+    const contributing: ContributingOutlets194R = new Map();
+    const { rows, importedPayoutsNote: importedNote } = await this.report194R(clientId, fyLabel, contributing);
 
     // Resolve PAN → name from ChannelPartner (tenant-scoped)
     const onPlatformPans = rows
@@ -1698,7 +1854,7 @@ export class TdsService {
             // (docs/plans/PARTNER-MULTI-OUTLET.md §9).
             isParent: false,
           },
-          select: { panNumber: true, ownerName: true, businessName: true },
+          select: { id: true, panNumber: true, ownerName: true, businessName: true },
         })
       : [];
 
@@ -1711,19 +1867,20 @@ export class TdsService {
       }
     }
 
-    // The Outlet Code identifier column appears ONLY when a per-deductee no-PAN row exists, so a
-    // tenant with no no-PAN deductee gets the exact same workbook as before.
-    const withOutletCol = rows.some((r) => r.noPanDeductee);
+    const outletCols = await this.outletColumns194R(clientId, rows, contributing, partners);
     const detailRows = rows.map((r, i) => {
       const hasPan = !isNoPanKey(r.panNumber);
       const tdsRatePct = hasPan ? 10 : 20;
       const deducteeName = hasPan ? (panToName.get(r.panNumber) ?? '') : noPanDeducteeName(r.noPanDeductee, r.unlinkedNoPanDeposit);
+      const outlets = outletCols.get(r.panNumber) ?? [];
 
       return {
         'S.No': i + 1,
         'Deductee Name': cellSafe(deducteeName),
         PAN: cellSafe(hasPan ? r.panNumber : ''),
-        ...(withOutletCol ? { 'Outlet Code': cellSafe(r.noPanDeductee?.outletCodes.join(', ') ?? '') } : {}),
+        'Outlet Code': cellSafe(alignedCell(outlets.map((o) => o.code))),
+        'Outlet Name': cellSafe(alignedCell(outlets.map((o) => o.name))),
+        'Outlet Type': cellSafe(alignedCell(outlets.map((o) => o.type))),
         Section: '194R',
         'Amount Paid (₹)': moneyCell(r.baseFyTotalPaise),
         'TDS Rate %': tdsRatePct,
