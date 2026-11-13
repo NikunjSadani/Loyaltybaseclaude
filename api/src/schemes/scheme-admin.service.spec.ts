@@ -557,6 +557,11 @@ describe('SchemeAdminService', () => {
       // Resurrect-on-re-upload: the update branch clears deletedAt so re-uploading a
       // previously-removed outletRef brings the roster row back.
       expect(mockPrisma.schemeOutlet.upsert.mock.calls[0][0].update.deletedAt).toBeNull();
+      // Memory-safety: only the problem row (standalone OUT999) is echoed, not the clean match.
+      expect(res).not.toHaveProperty('rows');
+      expect(res.problemRows.map((r) => r.outletRef)).toEqual(['OUT999']);
+      expect(res.problemRowCount).toBe(1);
+      expect(res.problemRowsTruncated).toBe(false);
     });
 
     it('reports blankNameCount = UNMATCHED rows with an empty/whitespace name (matched blanks excluded)', async () => {

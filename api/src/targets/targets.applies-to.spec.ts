@@ -376,7 +376,9 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
     );
     expect(r.ignoredOutOfScope).toBe(1);
     expect(r.acceptedCount).toBe(2);
-    expect(r.rows.find((x) => x.outletCode === 'O2')!.remarks).toMatch(/CONSISTENCY/);
+    // The ignored-value remark comes back as a WARNING row (memory-safety: accepted rows are not echoed).
+    expect(r.warningRows.find((x) => x.outletCode === 'O2')!.remarks).toMatch(/CONSISTENCY/);
+    expect(r.warningRows.find((x) => x.outletCode === 'O1')).toBeUndefined();
     // O1 (everything in scope) → the plain upsert, unchanged.
     const writes = Object.fromEntries(
       prisma.outletTarget.upsert.mock.calls.map((c: [{ create: { outletCode: string; targetValues: unknown } }]) => [c[0].create.outletCode, c[0].create.targetValues]),

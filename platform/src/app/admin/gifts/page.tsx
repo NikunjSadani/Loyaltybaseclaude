@@ -51,6 +51,7 @@ import type { GifsySettings } from '@/types';
 import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product';
 import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
 import { MaskedPin } from '@/components/operator/masked-pin';
+import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
 
@@ -130,7 +131,9 @@ interface FulfilmentUploadResult {
   succeeded: number;
   skipped: number;
   failed: number;
+  /** Capped at 500 rows (memory-safety 2026-11-13); `failed` is the true total. */
   errors: { row: number; orderNumber?: string; message: string }[];
+  errorsTruncated?: boolean;
 }
 
 /* ─── Constants ──────────────────────────────────────────────────────────────── */
@@ -2488,6 +2491,7 @@ function FulfilmentQueue({
                     {er.message}
                   </p>
                 ))}
+                <UploadTruncationNote shown={result.errors.length} total={result.failed} truncated={result.errorsTruncated} noun="row errors" />
               </div>
             )}
             {result.errors.length === 0 && (

@@ -9,7 +9,8 @@
  *                        → RAW xlsx binary (NOT JSON-wrapped) → browser download
  *     Upload:            POST /api/admin/targets/upload (FormData, field "file")
  *                        → { success: true, data: { batchId, month, monthsInBatch,
- *                             totalRows, acceptedCount, rejectedCount, rows } }
+ *                             totalRows, acceptedCount, rejectedCount,
+ *                             problemRows, warningRows (+ counts / truncated flags) } }
  *
  * The client-side xlsx parsing path is REMOVED. The backend parses now.
  * UI shell / styling is preserved; only the data layer changes.
@@ -29,6 +30,8 @@ import { TargetFocusCheckNotice } from '@/components/admin/target-focus-check-no
 import type { TargetUploadFocusCheck } from '@/lib/sales-import/types';
 import { downloadOrQueue, type DownloadOutcome } from '@/lib/exports/download';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
+import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+import { normalizeRowsEcho } from '@/lib/upload-rows-echo';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -38,7 +41,8 @@ interface UploadRow {
   outletCode?: string;
   outletId?:   string;
   month?:      string;
-  status:      'accepted' | 'rejected' | 'skipped' | 'updated' | 'error';
+  /** Backend RowStatus: accepted · rejected_outlet · rejected_kpi · skipped_blank. */
+  status:      string;
   remarks?:    string;
   [key: string]: unknown;
 }
@@ -58,7 +62,18 @@ interface UploadResult {
   ignoredOutOfScope?: number;
   /** FOCUS-FROM-TARGETS §7: early, NON-blocking check of the focus product names (absent on older API builds). */
   focusCheck?:   TargetUploadFocusCheck;
-  rows:          UploadRow[];
+  /**
+   * Memory-safety (2026-11-13): the API no longer echoes every parsed row. It returns the
+   * REJECTED rows (problemRows) and the saved rows whose values were partly ignored
+   * (warningRows), each capped at 500 with the true totals; blank template rows are counted.
+   */
+  problemRows:          UploadRow[];
+  problemRowCount:      number;
+  problemRowsTruncated: boolean;
+  warningRows:          UploadRow[];
+  warningRowCount:      number;
+  warningRowsTruncated: boolean;
+  skippedBlankCount?:   number;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -210,7 +225,7 @@ export default function TargetUploadPage() {
         return;
       }
 
-      setResult(json.data!);
+      setResult(normalizeRowsEcho(json.data! as UploadResult & { rows?: UploadRow[] }));
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
@@ -466,7 +481,8 @@ export default function TargetUploadPage() {
                 <p className="text-xs text-emerald-700">
                   {savedCount.toLocaleString()} outlet-month target{savedCount !== 1 ? 's' : ''} saved
                   to the system{savedMonths > 0 ? ` across ${savedMonths} month${savedMonths !== 1 ? 's' : ''}` : ''}
-                  {result.rejectedCount > 0 ? ` · ${result.rejectedCount} row${result.rejectedCount !== 1 ? 's' : ''} skipped (see below)` : ''}.
+                  {result.rejectedCount > 0 ? ` · ${result.rejectedCount} row${result.rejectedCount !== 1 ? 's' : ''} rejected (see below)` : ''}
+                  {(result.skippedBlankCount ?? 0) > 0 ? ` · ${result.skippedBlankCount} blank row${result.skippedBlankCount !== 1 ? 's' : ''} skipped` : ''}.
                   You can confirm anytime with <span className="font-semibold">Download Final Targets</span> above.
                 </p>
               </div>
@@ -500,8 +516,7 @@ export default function TargetUploadPage() {
 
           <IgnoredOutOfScopeNotice
             count={result.ignoredOutOfScope}
-            rows={result.rows
-              .filter(r => r.status === 'accepted' || r.status === 'updated')
+            rows={result.warningRows
               .map(r => ({ rowIndex: r.rowIndex, outletCode: r.outletCode ?? r.outletId, remarks: r.remarks }))}
           />
 
@@ -519,13 +534,11 @@ export default function TargetUploadPage() {
             </div>
           )}
 
-          {/* Rejected rows preview */}
-          {result.rows.filter(r => r.status === 'rejected' || r.status === 'error' || r.status === 'skipped').length > 0 && (
+          {/* Rejected rows — every one the API returned (≤ 500), scrollable; the download has them all too. */}
+          {result.problemRows.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
-              <p className="text-xs font-semibold text-amber-700 mb-2">Skipped / Rejected rows</p>
-              {result.rows
-                .filter(r => r.status !== 'accepted' && r.status !== 'updated')
-                .slice(0, 20)
+              <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows ({result.problemRowCount.toLocaleString('en-IN')})</p>
+              {result.problemRows
                 .map((r, i) => (
                   <p key={i} className="text-xs text-amber-700">
                     <span className="font-mono font-semibold">
@@ -535,14 +548,16 @@ export default function TargetUploadPage() {
                     {r.remarks ?? String(r.status)}
                   </p>
                 ))}
-              {result.rows.filter(r => r.status !== 'accepted' && r.status !== 'updated').length > 20 && (
-                <p className="text-xs text-amber-500">…{result.rows.filter(r => r.status !== 'accepted' && r.status !== 'updated').length - 20} more rows not shown</p>
-              )}
+              <UploadTruncationNote
+                shown={result.problemRows.length}
+                total={result.problemRowCount}
+                truncated={result.problemRowsTruncated}
+                noun="rejected rows"
+              />
               <div className="pt-2">
                 <DownloadErrorReportButton
                   columns={['Row', 'Outlet Code', 'Month', 'Status']}
-                  rows={result.rows
-                    .filter(r => r.status !== 'accepted' && r.status !== 'updated')
+                  rows={result.problemRows
                     .map(r => ({
                       Row:          r.rowIndex,
                       'Outlet Code': r.outletCode ?? r.outletId ?? '',

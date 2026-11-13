@@ -35,7 +35,16 @@ import {
 import { useAdminSession } from '@/lib/admin-session';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { downloadBlob } from '@/lib/download';
-import type { UtrParseResult } from '@/types';
+import type { UtrParseResult, UtrUploadRow } from '@/types';
+import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+
+/** UTR preview (apply=false) — memory-safety 2026-11-13: the API echoes ONLY the ERROR rows
+ *  (capped at 500) instead of every parsed row; the counts stay in summary. */
+type UtrPreviewResult = Omit<UtrParseResult, 'rows'> & {
+  problemRows: UtrUploadRow[];
+  problemRowCount: number;
+  problemRowsTruncated: boolean;
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -151,7 +160,7 @@ function PayoutPageInner() {
   const [utrDownloadId,  setUtrDownloadId]  = useState('');
   const [utrFile,        setUtrFile]        = useState<File | null>(null);
   const [utrParsing,     setUtrParsing]     = useState(false);
-  const [utrResult,      setUtrResult]      = useState<UtrParseResult | null>(null);
+  const [utrResult,      setUtrResult]      = useState<UtrPreviewResult | null>(null);
   const [utrApplying,    setUtrApplying]    = useState(false);
   const [utrApplied,     setUtrApplied]     = useState(false);
   const [utrApplyResult, setUtrApplyResult] = useState<{ paidCount: number; failedCount: number; skippedCount: number } | null>(null);
@@ -558,19 +567,19 @@ function PayoutPageInner() {
                 )}
 
                 {/* Row details toggle */}
-                {utrResult.rows.length > 0 && (
+                {utrResult.problemRows.length > 0 && (
                   <button
                     onClick={() => setExpandedUtr((v) => !v)}
                     className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800"
                   >
                     {expandedUtr ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                    {expandedUtr ? 'Hide' : 'Show'} row details
+                    {expandedUtr ? 'Hide' : 'Show'} problem rows ({utrResult.problemRowCount})
                   </button>
                 )}
 
                 {expandedUtr && (
                   <div className="max-h-52 overflow-y-auto border border-gray-100 rounded-xl divide-y divide-gray-50">
-                    {utrResult.rows.map((r, i) => (
+                    {utrResult.problemRows.map((r, i) => (
                       <div key={i} className={`flex items-center justify-between px-4 py-2.5 text-xs
                         ${r.status === 'ERROR' ? 'bg-red-50' : r.status === 'SKIP' ? 'bg-gray-50' : ''}`}
                       >
@@ -594,6 +603,11 @@ function PayoutPageInner() {
                     ))}
                   </div>
                 )}
+                <UploadTruncationNote
+                  shown={utrResult.problemRows.length}
+                  total={utrResult.problemRowCount}
+                  truncated={utrResult.problemRowsTruncated}
+                />
 
                 {/* Apply / Reset */}
                 <div className="flex gap-3">
@@ -616,7 +630,7 @@ function PayoutPageInner() {
                   </button>
                   <DownloadErrorReportButton
                     columns={['Row', 'Outlet ID', 'Batch ID', 'UTR', 'Status']}
-                    rows={utrResult.rows
+                    rows={utrResult.problemRows
                       .filter(r => r.errors.length > 0)
                       .map(r => ({
                         Row:        r.rowNum,

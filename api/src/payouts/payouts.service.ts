@@ -7,6 +7,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { PayoutStatus, PaymentDetailsStatus, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { problemRowsEcho } from '../common/upload-echo';
 import { WalletService } from '../wallet/wallet.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
@@ -818,7 +819,13 @@ export class PayoutsService {
 
     // Preview unless apply=true.
     if (!apply) {
-      return { parseResult, batchCode: batch.batchCode };
+      // Memory-safety (2026-11-13): echo ONLY the ERROR rows (capped at 500), not every parsed row.
+      // apply=true re-parses the uploaded file, so nothing relies on the echoed rows.
+      const { rows, ...rest } = parseResult;
+      return {
+        parseResult: { ...rest, ...problemRowsEcho(rows, (r) => r.status === 'ERROR') },
+        batchCode: batch.batchCode,
+      };
     }
 
     if (!parseResult.canProceed) {

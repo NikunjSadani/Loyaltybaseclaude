@@ -1867,6 +1867,34 @@ describe('CreditsService', () => {
       expect(res.parseResult.canProceed).toBe(true);
       expect(res.parseResult.summary.paidCount).toBe(1);
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      // Memory-safety: an all-OK preview echoes no rows (only ERROR rows come back).
+      expect(res.parseResult).not.toHaveProperty('rows');
+      expect(res.parseResult).toMatchObject({ problemRows: [], problemRowCount: 0, problemRowsTruncated: false });
+    });
+
+    it('memory-safety: the preview echoes ONLY the ERROR rows, with the true count', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1',
+        downloadCode,
+        period: '2026-05',
+        downloadedBy: 'g1',
+        entries: [
+          { id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) },
+          { id: 'e2', outletId: 'O2', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) },
+        ],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+
+      const file = buildUtrFile([
+        [downloadCode, 'O1', 'UTR123456', 'Success', ''],
+        [downloadCode, 'O2', '', 'Success', ''], // missing UTR → ERROR
+      ]);
+      const res = (await service.uploadUtr(gifsy, 'd1', file, false)) as {
+        parseResult: { problemRows: Array<{ outletId: string; status: string }>; problemRowCount: number; summary: { errors: number } };
+      };
+      expect(res.parseResult.problemRows.map((r) => r.outletId)).toEqual(['O2']);
+      expect(res.parseResult.problemRows[0].status).toBe('ERROR');
+      expect(res.parseResult.problemRowCount).toBe(res.parseResult.summary.errors);
     });
 
     it('applies PAID, sets the download to PAID, and sends the payout WhatsApp (Flow A)', async () => {

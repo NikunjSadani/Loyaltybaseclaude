@@ -107,6 +107,7 @@ import {
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
+import { problemRowsEcho, type ProblemRowsEcho } from '../common/upload-echo';
 import { KYC_FIELD_KEYS, BridgeResult, requiredFieldKeys } from './kyc-verification.helper';
 import { evaluateSubmission } from './kyc-verification.helper';
 import { mintDocViewToken } from './doc-view-token';
@@ -197,10 +198,14 @@ export interface BulkVerifySubmissionResult {
   detail?: string;
 }
 
-export interface BulkVerifyResult {
+export interface BulkVerifyResult extends ProblemRowsEcho<BulkVerifySubmissionResult> {
   committed: boolean;
-  results: BulkVerifySubmissionResult[];
+  // Memory-safety (2026-11-13): per-submission outcomes are no longer echoed in full —
+  // only the 'error' outcomes come back (problemRows, capped); the counts live in summary.
+  /** Parse errors, capped at UPLOAD_ECHO_MAX_ROWS (errorCount = true total). */
   errors: KycVerifyParseResult['errors'];
+  errorCount: number;
+  errorsTruncated: boolean;
   summary: {
     rowsParsed: number;
     fieldsSet: number;
@@ -213,10 +218,25 @@ export interface BulkVerifyResult {
   };
 }
 
+/** Parse errors are already problem-only; cap the list (memory-safety) and report the true total. */
+function cappedParseErrors(errors: KycVerifyParseResult['errors']): {
+  errors: KycVerifyParseResult['errors'];
+  errorCount: number;
+  errorsTruncated: boolean;
+} {
+  const e = problemRowsEcho(errors, () => true);
+  return { errors: e.problemRows, errorCount: e.problemRowCount, errorsTruncated: e.problemRowsTruncated };
+}
+
 export interface BulkVerifyDryRunResult {
   committed: false;
+  /** One entry per PENDING_GIFSY submission in the file — bounded by the tenant's pending queue;
+   *  the review screen merges these decisions into its in-memory state, so they stay. */
   updates: KycVerifyUpdate[];
+  /** Parse errors, capped at UPLOAD_ECHO_MAX_ROWS (errorCount = true total). */
   errors: KycVerifyParseResult['errors'];
+  errorCount: number;
+  errorsTruncated: boolean;
   summary: KycVerifyParseResult['summary'];
 }
 
@@ -4749,7 +4769,7 @@ export class KycService {
       return {
         committed: false,
         updates: parseResult.updates,
-        errors: parseResult.errors,
+        ...cappedParseErrors(parseResult.errors),
         summary: parseResult.summary,
       };
     }
@@ -4790,8 +4810,8 @@ export class KycService {
 
     return {
       committed: true,
-      results,
-      errors: parseResult.errors,
+      ...problemRowsEcho(results, (r) => r.outcome === 'error'),
+      ...cappedParseErrors(parseResult.errors),
       summary: {
         rowsParsed: parseResult.summary.rowsParsed,
         fieldsSet: parseResult.summary.fieldsSet,

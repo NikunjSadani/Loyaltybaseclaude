@@ -32,6 +32,7 @@ import {
 import { downloadRosterReport } from '@/lib/scheme-roster-report';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
+import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
 import type { AudienceConfig, AudienceFilter, AudienceMode } from '@/lib/scheme-types';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -923,6 +924,13 @@ function RosterUploadPanel({ schemeId, schemeName, onUploaded }: { schemeId: str
             {result.duplicateRefs.length === 0 && result.unmatchedEmployeeCodes.length === 0 && (result.blankNameCount ?? 0) === 0 && (
               <p className="flex items-center gap-1.5 text-green-600"><CheckCircle className="w-3.5 h-3.5" /> No duplicates, unmatched employees, or missing names.</p>
             )}
+            {/* The report's Problem Rows sheet holds at most 500 rows (memory-safety). */}
+            <UploadTruncationNote
+              shown={result.problemRows?.length ?? 0}
+              total={result.problemRowCount}
+              truncated={result.problemRowsTruncated}
+              noun="problem rows in the upload report"
+            />
           </div>
         </div>
       )}

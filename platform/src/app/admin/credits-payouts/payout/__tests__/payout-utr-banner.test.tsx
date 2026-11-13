@@ -42,9 +42,12 @@ const DOWNLOAD = {
 };
 
 // A preview parse result the UI accepts (canProceed → Apply button shows).
+// Memory-safety shape: only ERROR rows are echoed (problemRows), capped at 500.
 const PREVIEW = {
   headerError: null,
-  rows: [],
+  problemRows: [] as unknown[],
+  problemRowCount: 0,
+  problemRowsTruncated: false,
   hasErrors: false,
   canProceed: true,
   summary: { total: 1, ok: 1, skipped: 0, errors: 0, paidCount: 0, failedCount: 1 },
@@ -61,7 +64,10 @@ function asGifsyAdmin() {
 }
 
 /** Install a fetch router. `applyData` is the body of the apply=true response. */
-function mockFetch(applyData: { paidCount: number; failedCount: number; skippedCount: number }) {
+function mockFetch(
+  applyData: { paidCount: number; failedCount: number; skippedCount: number },
+  preview: unknown = PREVIEW,
+) {
   const json = (payload: unknown) =>
     Promise.resolve({ ok: true, json: async () => payload, blob: async () => new Blob() });
 
@@ -77,7 +83,7 @@ function mockFetch(applyData: { paidCount: number; failedCount: number; skippedC
       return json({ success: true, data: applyData });
     }
     if (url.includes('/utr')) {
-      return json({ success: true, data: { parseResult: PREVIEW } });
+      return json({ success: true, data: { parseResult: preview } });
     }
     if (url.includes('/payout-downloads')) {
       return json({ success: true, data: [DOWNLOAD] });
@@ -136,5 +142,40 @@ describe('Payout UTR-apply result banner', () => {
     const bannerDiv = heading.closest('div.rounded-xl') as HTMLElement;
     expect(bannerDiv.className).toMatch(/emerald/);
     expect(bannerDiv.className).not.toMatch(/amber/);
+  });
+});
+
+describe('Payout UTR preview — problem rows only (memory-safety)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    asGifsyAdmin();
+  });
+
+  it('lists the echoed ERROR rows and says when the list was capped', async () => {
+    const badRow = {
+      rowNum: 3, outletId: 'O-BAD', batchId: 'PD-2026-06-001', utr: '', success: true,
+      remarks: '', status: 'ERROR', errors: ['UTR is required'],
+    };
+    mockFetch({ paidCount: 0, failedCount: 0, skippedCount: 0 }, {
+      headerError: null,
+      problemRows: [badRow],
+      problemRowCount: 720,
+      problemRowsTruncated: true,
+      hasErrors: true,
+      canProceed: false,
+      summary: { total: 900, ok: 180, skipped: 0, errors: 720, paidCount: 180, failedCount: 0 },
+    });
+    const { container } = render(<PayoutDownloadPage />);
+    const select = await screen.findByRole('combobox');
+    fireEvent.change(select, { target: { value: 'd1' } });
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [new File([new Uint8Array([1])], 'utr.xlsx')] } });
+
+    fireEvent.click(await screen.findByText(/Show problem rows \(720\)/));
+    expect(await screen.findByText('O-BAD')).toBeTruthy();
+    expect(screen.getByText('UTR is required')).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toMatch(/first 1 of 720 problem rows/);
+    // Errors block the apply.
+    expect(screen.queryByText('Apply UTR Results')).toBeNull();
   });
 });

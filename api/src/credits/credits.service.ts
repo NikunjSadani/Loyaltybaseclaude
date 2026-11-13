@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { CreditEntryStatus, Prisma, TdsMethodology, TdsSection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { problemRowsEcho } from '../common/upload-echo';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -2382,7 +2383,14 @@ export class CreditsService {
 
     // Preview unless apply=true.
     if (!apply) {
-      return { parseResult, downloadCode: download.downloadCode };
+      // Memory-safety (2026-11-13): the preview no longer echoes every parsed row — only the
+      // ERROR rows (capped at 500) the operator must fix. apply=true re-parses the file itself,
+      // so nothing downstream needs the echoed rows.
+      const { rows, ...rest } = parseResult;
+      return {
+        parseResult: { ...rest, ...problemRowsEcho(rows, (r) => r.status === 'ERROR') },
+        downloadCode: download.downloadCode,
+      };
     }
 
     if (!parseResult.canProceed) {

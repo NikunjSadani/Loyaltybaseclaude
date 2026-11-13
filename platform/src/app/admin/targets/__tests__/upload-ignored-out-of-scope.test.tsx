@@ -15,10 +15,10 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 const result = (extra: Record<string, unknown> = {}) => ({
   batchId: 'batch-000001', month: '2026-11', monthsInBatch: ['2026-11'], totalRows: 2, acceptedCount: 2, rejectedCount: 0,
   savedCount: 2,
-  rows: [
-    { rowIndex: 3, outletCode: 'O1', status: 'accepted', remarks: 'Ignored (KPI not applicable): UNNATI_VOL' },
-    { rowIndex: 4, outletCode: 'O2', status: 'accepted', remarks: '' },
-  ],
+  // Memory-safety (2026-11-13): the API echoes only rejected rows + warning rows (capped), not every row.
+  problemRows: [], problemRowCount: 0, problemRowsTruncated: false,
+  warningRows: [{ rowIndex: 3, outletCode: 'O1', status: 'accepted', remarks: 'Ignored (KPI not applicable): UNNATI_VOL' }],
+  warningRowCount: 1, warningRowsTruncated: false, skippedBlankCount: 0,
   ...extra,
 });
 
@@ -59,5 +59,32 @@ describe('target upload — ignoredOutOfScope', () => {
     await upload();
     expect(await screen.findByText('Upload Result')).toBeInTheDocument();
     expect(screen.queryByTestId('ignored-out-of-scope')).not.toBeInTheDocument();
+  });
+
+  it('older API build that still sends rows → the saved row with the remark is still listed', async () => {
+    stub({
+      batchId: 'batch-000001', month: '2026-11', monthsInBatch: ['2026-11'], totalRows: 2, acceptedCount: 2, rejectedCount: 0,
+      ignoredOutOfScope: 1,
+      rows: [
+        { rowIndex: 3, outletCode: 'O1', status: 'accepted', remarks: 'Ignored (KPI not applicable): UNNATI_VOL' },
+        { rowIndex: 4, outletCode: 'O2', status: 'accepted', remarks: '' },
+      ],
+    });
+    render(<TargetUploadPage />);
+    await upload();
+    expect(await screen.findByTestId('ignored-out-of-scope')).toHaveTextContent('Row 3 — O1');
+  });
+
+  it('rejected rows: lists every returned row and says when the API capped the list', async () => {
+    stub(result({
+      rejectedCount: 700, acceptedCount: 0, savedCount: 0,
+      problemRows: Array.from({ length: 500 }, (_, i) => ({ rowIndex: i + 3, outletCode: 'X' + i, status: 'rejected_outlet', remarks: 'not found' })),
+      problemRowCount: 700, problemRowsTruncated: true,
+    }));
+    render(<TargetUploadPage />);
+    await upload();
+    expect(await screen.findByText('Rejected rows (700)')).toBeInTheDocument();
+    expect(screen.getByText(/Row 502 — X499/)).toBeInTheDocument();
+    expect(screen.getByText(/Showing the first 500 of 700 rejected rows/)).toBeInTheDocument();
   });
 });

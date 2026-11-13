@@ -15,8 +15,10 @@
  * Every sheet is built through `aoaToSheetSafe` / `jsonToSheetSafe` so a hostile
  * outlet-id / employee-code cell can never be a formula-injection sink (AF-5b).
  *
- * This is the "quick summary" report (Phase 1). A per-row disposition report
- * (Phase 2) needs the backend to return each input row's outcome.
+ *   • Problem Rows  — per-row disposition of the rows to look at (dropped duplicates,
+ *                     standalone rows, tagged employee codes not found). The backend
+ *                     echoes at most 500 of them (memory-safety); the sheet says so when
+ *                     the list was cut.
  */
 
 import * as XLSX from 'xlsx';
@@ -51,10 +53,10 @@ export function buildRosterReportWorkbook(
   ];
   XLSX.utils.book_append_sheet(wb, aoaToSheetSafe(summary), 'Summary');
 
-  // Full per-row disposition (Phase 2) — every input row with its outcome. Present
-  // only when the backend returned `rows`; older backends omit it (Summary-only file).
-  if (result.rows && result.rows.length) {
-    const rows = result.rows.map((r) => ({
+  // Per-row disposition of the PROBLEM rows only (memory-safety: the backend no longer echoes
+  // every file row; at most 500 problem rows). Omitted when there are none.
+  if (result.problemRows && result.problemRows.length) {
+    const rows = result.problemRows.map((r) => ({
       'Row #': r.rowIndex,
       'Outlet ID': r.outletRef,
       'Outlet Name': r.outletName,
@@ -64,7 +66,15 @@ export function buildRosterReportWorkbook(
       'Tagged Employee Found':
         r.taggedEmployeeFound === null ? '—' : r.taggedEmployeeFound ? 'Yes' : 'No (not tagged)',
     }));
-    XLSX.utils.book_append_sheet(wb, jsonToSheetSafe(rows), 'Rows');
+    const sheet = jsonToSheetSafe(rows);
+    if (result.problemRowsTruncated) {
+      XLSX.utils.sheet_add_aoa(
+        sheet,
+        [[`Showing the first ${result.problemRows.length} of ${result.problemRowCount ?? result.problemRows.length} problem rows — fix these and re-upload to see the rest.`]],
+        { origin: -1 },
+      );
+    }
+    XLSX.utils.book_append_sheet(wb, sheet, 'Problem Rows');
   }
 
   // Always include the issue sheets (empty-but-headed when there are none) so the

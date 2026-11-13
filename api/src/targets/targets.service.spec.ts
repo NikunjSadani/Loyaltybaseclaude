@@ -705,9 +705,10 @@ describe('TargetsService', () => {
 
       const result = await service.uploadTargets(admin, file);
 
-      const pendingRow = result.rows.find((r) => r.outletCode === 'PENDING1')!;
-      expect(pendingRow.status).toBe('accepted');
-      expect(pendingRow.status).not.toBe('rejected_outlet');
+      // Accepted rows are counted, not echoed (memory-safety) — PENDING1 is NOT among the rejected rows.
+      expect(result.acceptedCount).toBe(1);
+      expect(result.problemRows.find((r) => r.outletCode === 'PENDING1')).toBeUndefined();
+      expect(result.problemRowCount).toBe(0);
       // And the target is actually written for the pending outlet.
       expect(mockTx.outletTarget.upsert).toHaveBeenCalledTimes(1);
     });
@@ -1070,9 +1071,10 @@ describe('TargetsService', () => {
 
       const result = await service.uploadAchievements(admin, file);
 
-      const pendingRow = result.rows.find((r) => r.outletCode === 'PENDING1')!;
-      expect(pendingRow.status).toBe('accepted');
-      expect(pendingRow.status).not.toBe('rejected_outlet');
+      // Accepted rows are counted, not echoed (memory-safety) — PENDING1 is NOT among the rejected rows.
+      expect(result.acceptedCount).toBe(1);
+      expect(result.problemRows.find((r) => r.outletCode === 'PENDING1')).toBeUndefined();
+      expect(result.problemRowCount).toBe(0);
       expect(mockTx.outletSalesRecord.upsert).toHaveBeenCalledTimes(1);
     });
 
@@ -1447,7 +1449,13 @@ describe('TargetsService — Sales Import ownership (K-7)', () => {
       expect(Object.keys(result).sort()).toEqual(
         // Byte-identical for an all-unscoped tenant: APPLIES-TO `ignoredOutOfScope` is ABSENT unless the
         // tenant has a scoped KPI (mirrors the conditional `skippedImporterOwnedKpis`).
-        ['acceptedCount', 'batchId', 'month', 'monthsInBatch', 'rejectedCount', 'rows', 'totalRows'].sort(),
+        // Memory-safety (2026-11-13, owner-approved platform-wide): `rows` (every parsed row) was replaced
+        // by the capped problem/warning echo + skippedBlankCount.
+        [
+          'acceptedCount', 'batchId', 'month', 'monthsInBatch', 'rejectedCount', 'totalRows',
+          'problemRows', 'problemRowCount', 'problemRowsTruncated',
+          'warningRows', 'warningRowCount', 'warningRowsTruncated', 'skippedBlankCount',
+        ].sort(),
       );
       expect('skippedImporterOwnedKpis' in result).toBe(false);
       expect('ignoredOutOfScope' in result).toBe(false);

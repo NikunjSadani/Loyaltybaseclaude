@@ -38,6 +38,7 @@ import { DownloadActionStatus } from '@/components/exports/download-action-statu
 import { usePermissions } from '@/lib/use-permissions'
 import { UpiCaptureMethodBadge, asUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge'
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section'
+import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote'
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -104,15 +105,24 @@ interface KycVerifyUpdate {
 interface KycVerifyPreviewResult {
   committed: false
   updates: KycVerifyUpdate[]
+  /** Capped at 500 (memory-safety); errorCount = true total, errorsTruncated when cut. */
   errors: { rowNumber: number; submissionId: string; message: string }[]
+  errorCount?: number
+  errorsTruncated?: boolean
   summary: { rowsParsed: number; fieldsSet: number; errors: number }
 }
 
 /** Commit response (apply=true). */
 interface KycVerifyCommitResult {
   committed: true
-  results: { submissionId: string; outcome: string; detail?: string }[]
+  /** Only the submissions whose commit FAILED (outcome 'error'), capped at 500 — successful
+   *  outcomes are counted in summary, not echoed (memory-safety 2026-11-13). */
+  problemRows: { submissionId: string; outcome: string; detail?: string }[]
+  problemRowCount: number
+  problemRowsTruncated: boolean
   errors: { rowNumber: number; submissionId: string; message: string }[]
+  errorCount?: number
+  errorsTruncated?: boolean
   summary: {
     rowsParsed: number
     fieldsSet: number
@@ -565,6 +575,12 @@ export default function KycApprovalsPage() {
               {previewResult.errors.length > 0 && (
                 <ErrorTable errors={previewResult.errors} filename="kyc-bulk-verify-preview-errors.xlsx" />
               )}
+              <UploadTruncationNote
+                shown={previewResult.errors.length}
+                total={previewResult.errorCount}
+                truncated={previewResult.errorsTruncated}
+                noun="errors"
+              />
             </div>
           )}
 
@@ -586,6 +602,21 @@ export default function KycApprovalsPage() {
               {commitResult.errors.length > 0 && (
                 <ErrorTable errors={commitResult.errors} filename="kyc-bulk-verify-commit-errors.xlsx" />
               )}
+              <UploadTruncationNote
+                shown={commitResult.errors.length}
+                total={commitResult.errorCount}
+                truncated={commitResult.errorsTruncated}
+                noun="errors"
+              />
+              {(commitResult.problemRows?.length ?? 0) > 0 && (
+                <CommitFailureTable rows={commitResult.problemRows} />
+              )}
+              <UploadTruncationNote
+                shown={commitResult.problemRows?.length ?? 0}
+                total={commitResult.problemRowCount}
+                truncated={commitResult.problemRowsTruncated}
+                noun="failed submissions"
+              />
             </div>
           )}
         </CardContent>
@@ -977,6 +1008,32 @@ function ErrorTable({ errors, filename = 'kyc-bulk-verify-errors.xlsx' }: { erro
         filename={filename}
         sheetName="KYC Errors"
       />
+    </div>
+  )
+}
+
+// ─── Commit failures (submissions whose commit errored) ──────────────────────────
+
+function CommitFailureTable({ rows }: { rows: { submissionId: string; outcome: string; detail?: string }[] }) {
+  return (
+    <div className="overflow-x-auto rounded border border-red-200">
+      <table className="text-xs border-collapse w-full" aria-label="Failed submissions">
+        <thead>
+          <tr className="bg-red-50 border-b border-red-200 text-red-700">
+            {['Submission ID', 'Commit error'].map(h => (
+              <th key={h} className="px-3 py-1.5 font-medium text-left">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={`fail-${r.submissionId}-${i}`} className="border-b border-red-100">
+              <td className="px-3 py-1.5 font-mono text-gray-700 whitespace-nowrap">{r.submissionId}</td>
+              <td className="px-3 py-1.5 text-gray-700">{r.detail ?? 'Commit failed'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

@@ -43,6 +43,7 @@ import {
   fmtValuePaise,
   fmtPoints,
 } from '@/lib/gift-orders';
+import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
 
 interface TenantOption {
   clientId: string;
@@ -54,7 +55,9 @@ interface FulfilmentUploadResult {
   succeeded: number;
   skipped: number;
   failed: number;
+  /** Capped at 500 rows (memory-safety 2026-11-13); `failed` is the true total. */
   errors: { row: number; orderNumber?: string; message: string }[];
+  errorsTruncated?: boolean;
 }
 
 /** Backend list pagination envelope (when present on the response). */
@@ -583,6 +586,7 @@ function BulkFulfilment({ onUploaded }: { onUploaded: () => void }) {
                   {er.message}
                 </p>
               ))}
+              <UploadTruncationNote shown={result.errors.length} total={result.failed} truncated={result.errorsTruncated} noun="row errors" />
             </div>
           ) : (
             <div className="flex items-center gap-2 text-sm text-emerald-700">

@@ -454,8 +454,11 @@ describe('G — admin/targets/upload/page.tsx: structure', () => {
     expect(code).toMatch(/toMonth/);
   });
 
-  it('G9: shows updated and skipped counts after upload', () => {
-    expect(code).toMatch(/updated/i);
+  // Memory-safety (2026-11-13): the API reports saved / rejected / blank-skipped COUNTS (it no longer
+  // echoes every row with an 'updated' status), so the page shows those counts.
+  it('G9: shows saved and skipped counts after upload', () => {
+    expect(code).toMatch(/saved/i);
+    expect(code).toMatch(/skippedBlankCount/);
     expect(code).toMatch(/skipped/i);
   });
 

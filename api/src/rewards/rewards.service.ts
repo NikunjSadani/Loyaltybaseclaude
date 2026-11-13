@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { GiftFulfilmentChannel, PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { problemRowsEcho } from '../common/upload-echo';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { claimOtpAttempt, markOtpUsed, refundOtpAttempt, whyOtpClaimRefused } from '../common/otp-attempt';
@@ -352,6 +353,12 @@ const REACHED_CONFIRMED_STATUSES: RedemptionStatus[] = [
   RedemptionStatus.RETURNED,
   RedemptionStatus.FAILED,
 ];
+
+/** Cap a problem-only error list at UPLOAD_ECHO_MAX_ROWS (memory-safety). */
+function cappedFulfilmentErrors<T>(errors: T[]): { errors: T[]; errorsTruncated: boolean } {
+  const e = problemRowsEcho(errors, () => true);
+  return { errors: e.problemRows, errorsTruncated: e.problemRowsTruncated };
+}
 
 @Injectable()
 export class RewardsService {
@@ -3382,7 +3389,8 @@ export class RewardsService {
       succeeded,
       skipped,
       failed: errors.length,
-      errors,
+      // Memory-safety (2026-11-13): the error list is capped at 500 (failed = true total).
+      ...cappedFulfilmentErrors(errors),
     };
   }
 

@@ -277,8 +277,14 @@ export interface RosterUploadResult {
   unmatchedEmployeeCodes: string[];
   /** Non-blank rows dropped for a missing outlet id (accounted for in the report). */
   skippedRows?: number;
-  /** Per-input-row disposition (every file row) — drives the full report sheet. */
-  rows?: RosterRowReport[];
+  /**
+   * Per-row disposition of ONLY the rows to look at — dropped duplicates, rows not linked to a
+   * tenant outlet, tagged employee codes not found — capped at 500 (memory-safety 2026-11-13:
+   * the API no longer echoes every file row). Drives the report's "Problem Rows" sheet.
+   */
+  problemRows?: RosterRowReport[];
+  problemRowCount?: number;
+  problemRowsTruncated?: boolean;
 }
 
 export interface AudienceResult {

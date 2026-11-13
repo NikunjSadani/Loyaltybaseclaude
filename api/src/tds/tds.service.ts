@@ -64,6 +64,7 @@ import {
   istDayStartInstant,
   importedCountFromForFy,
   importedPayoutsNote,
+  capUploadResult,
 } from './tds.helpers';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { withholdingTdsPaise } from './tds-methodology.helper';
@@ -1385,7 +1386,7 @@ export class TdsService {
     const rows = await this.validateNoPanUploadRows(parsed.rows, result, { clientId, section: '194R' });
 
     if (!apply || rows.length === 0) {
-      return result;
+      return capUploadResult(result);
     }
 
     // Deterministic file-level batch id → same file re-upload = same id = full collision.
@@ -1455,7 +1456,7 @@ export class TdsService {
       });
     }
 
-    return result;
+    return capUploadResult(result);
   }
 
   /** Natural-key string mirroring the tds_off_platform_entries_dedup_unique index. */
@@ -1506,7 +1507,7 @@ export class TdsService {
     const toInsert = await this.dropAlreadyUploadedDeposits(validated, result, section, clientId);
 
     if (!apply || toInsert.length === 0) {
-      return result;
+      return capUploadResult(result);
     }
 
     const prismaSection = sectionParamToEnum(section);
@@ -1534,7 +1535,7 @@ export class TdsService {
       });
     }
 
-    return result;
+    return capUploadResult(result);
   }
 
   /**

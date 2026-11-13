@@ -45,6 +45,7 @@ import {
   isBlockedError,
 } from '@/lib/vendor';
 import { useVendorMe } from '@/lib/vendor-context';
+import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
 
 type Toast = { msg: string; type: 'success' | 'error' };
 
@@ -616,12 +617,20 @@ function Field({
 
 /* ─── Excel bulk upload (mirrors the admin bulk-fulfilment UX) ─────────────────── */
 
+/**
+ * POST /v1/vendor/catalogue/upload response (vendor-portal.service uploadCatalogue).
+ * Memory-safety 2026-11-13: only the FAILED rows come back (problemRows, capped at 500).
+ * (This type previously described the fulfilment-upload shape — processed/succeeded/errors —
+ * which this endpoint never returned, so the result panel read undefined fields.)
+ */
 interface CatalogueUploadResult {
-  processed: number;
-  succeeded: number;
-  skipped: number;
+  total: number;
+  created: number;
   failed: number;
-  errors: { row: number; name?: string; message: string }[];
+  moderationStatus?: string;
+  problemRows: { rowIndex: number; error?: string }[];
+  problemRowCount: number;
+  problemRowsTruncated: boolean;
 }
 
 function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
@@ -746,11 +755,10 @@ function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
 
       {result && (
         <div className="space-y-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             {[
-              { label: 'Processed', value: result.processed, color: 'bg-gray-50 border-gray-200 text-gray-800' },
-              { label: 'Succeeded', value: result.succeeded, color: 'bg-green-50 border-green-200 text-green-700' },
-              { label: 'Skipped', value: result.skipped, color: 'bg-amber-50 border-amber-200 text-amber-700' },
+              { label: 'Processed', value: result.total, color: 'bg-gray-50 border-gray-200 text-gray-800' },
+              { label: 'Created', value: result.created, color: 'bg-green-50 border-green-200 text-green-700' },
               {
                 label: 'Failed',
                 value: result.failed,
@@ -763,17 +771,21 @@ function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
               </div>
             ))}
           </div>
-          {result.errors.length > 0 ? (
+          {(result.problemRows?.length ?? 0) > 0 ? (
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1 max-h-44 overflow-y-auto" data-testid="bulk-errors">
               <p className="text-xs font-semibold text-amber-700 mb-2">Row errors</p>
-              {result.errors.map((er, i) => (
+              {result.problemRows.map((er, i) => (
                 <p key={i} className="text-xs text-amber-700">
-                  <span className="font-mono font-semibold">
-                    Row {er.row}{er.name ? ` — ${er.name}` : ''}:{' '}
-                  </span>
-                  {er.message}
+                  <span className="font-mono font-semibold">Row {er.rowIndex}:{' '}</span>
+                  {er.error ?? 'Row failed'}
                 </p>
               ))}
+              <UploadTruncationNote
+                shown={result.problemRows.length}
+                total={result.problemRowCount}
+                truncated={result.problemRowsTruncated}
+                noun="failed rows"
+              />
             </div>
           ) : (
             <div className="flex items-center gap-2 text-sm text-emerald-700">

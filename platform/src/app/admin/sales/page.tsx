@@ -6,6 +6,8 @@ import {
   CheckCircle2, Info, Trash2, History, AlertTriangle, BarChart3,
 } from 'lucide-react';
 import { buildAchievementReportBuffer } from '@/lib/achievement-report';
+import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+import { normalizeRowsEcho } from '@/lib/upload-rows-echo';
 import { DEOLEO_DEFAULT_KPIS } from '@/lib/platform/tenant-kpi-config';
 import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
 import { formatMonth } from '@/lib/targets';
@@ -60,7 +62,17 @@ interface UploadResult {
   totalRows:     number;
   acceptedCount: number;
   rejectedCount: number;
-  rows:          UploadResultRow[];
+  /**
+   * Memory-safety (2026-11-13): only REJECTED rows (problemRows) and saved rows with an
+   * ignored-value remark (warningRows) come back — each capped at 500 with true totals.
+   */
+  problemRows:          UploadResultRow[];
+  problemRowCount:      number;
+  problemRowsTruncated: boolean;
+  warningRows:          UploadResultRow[];
+  warningRowCount:      number;
+  warningRowsTruncated: boolean;
+  skippedBlankCount?:   number;
   /** Sales Import: KPI columns in the file that are importer-owned and were NOT written (absent for most tenants). */
   skippedImporterOwnedKpis?: string[];
   /** APPLIES-TO D1: values ignored because the KPI does not apply to that outlet (absent on older API builds). */
@@ -496,7 +508,7 @@ export default function SalesUploadPage() {
       const body = await res.json();
 
       if (res.ok && body.success) {
-        setUploadResult(body.data as UploadResult);
+        setUploadResult(normalizeRowsEcho(body.data as UploadResult & { rows?: UploadResultRow[] }));
         setSaved(true);
         setHistoryKey(k => k + 1);
       } else {
@@ -524,10 +536,17 @@ export default function SalesUploadPage() {
 
   function handleDownloadReport() {
     if (!uploadResult) return;
-    // Built from the AUTHORITATIVE backend response (uploadResult.rows), not a
-    // local re-parse — the backend is the single source of truth for what stored.
+    // Built from the AUTHORITATIVE backend response, not a local re-parse. Memory-safety
+    // (2026-11-13): the report lists the rows to act on (rejected + partly-ignored), not every
+    // saved row — the saved/skipped totals are on the screen tiles.
     downloadBuffer(
-      buildAchievementReportBuffer(uploadResult.rows),
+      buildAchievementReportBuffer(
+        [...uploadResult.problemRows, ...uploadResult.warningRows].sort((a, b) => a.rowIndex - b.rowIndex),
+        {
+          truncated: uploadResult.problemRowsTruncated || uploadResult.warningRowsTruncated,
+          totals: { problem: uploadResult.problemRowCount, warning: uploadResult.warningRowCount },
+        },
+      ),
       `sales_upload_report_${salesMonth}.xlsx`,
     );
   }
@@ -729,32 +748,32 @@ export default function SalesUploadPage() {
 
           <IgnoredOutOfScopeNotice
             count={uploadResult.ignoredOutOfScope}
-            rows={uploadResult.rows.filter(r => r.status === 'accepted')}
+            rows={uploadResult.warningRows}
           />
 
           {/* Skipped / rejected rows from backend */}
-          {uploadResult.rows.filter(r => r.status !== 'accepted').length > 0 && (
+          {uploadResult.problemRows.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
-              <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows</p>
-              {uploadResult.rows
-                .filter(r => r.status !== 'accepted')
-                .slice(0, 20)
+              <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows ({uploadResult.problemRowCount.toLocaleString('en-IN')})</p>
+              {uploadResult.problemRows
                 .map(r => (
                   <p key={r.rowIndex} className="text-xs text-amber-700">
                     <span className="font-mono font-semibold">Row {r.rowIndex} — {r.outletCode}:</span>{' '}
                     {r.remarks}
                   </p>
                 ))}
-              {uploadResult.rows.filter(r => r.status !== 'accepted').length > 20 && (
-                <p className="text-xs text-amber-500">…download the report for full details</p>
-              )}
+              <UploadTruncationNote
+                shown={uploadResult.problemRows.length}
+                total={uploadResult.problemRowCount}
+                truncated={uploadResult.problemRowsTruncated}
+                noun="rejected rows"
+              />
             </div>
           )}
 
           {/* Actions */}
           <div className="flex items-center gap-3 flex-wrap">
-            {/* Report is built from the authoritative backend uploadResult.rows,
-                which is guaranteed present inside this block. */}
+            {/* Report is built from the authoritative backend problem + warning rows. */}
             <button
               onClick={handleDownloadReport}
               className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors"

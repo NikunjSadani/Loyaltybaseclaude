@@ -5174,6 +5174,16 @@ describe('RewardsService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
+    it('memory-safety: caps the error list at 500 (failed keeps the true total)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null); // every row: order not found
+      const rows = Array.from({ length: 510 }, (_, i) => ({ orderNumber: `RDM-${i}` }));
+      const fill = Object.fromEntries(rows.map((_, i) => [i, { 'New Status': 'PROCESSING' }]));
+      const res = await service.uploadFulfilment(gifsy, fileFromRows(rows, fill));
+      expect(res.failed).toBe(510);
+      expect(res.errors).toHaveLength(500);
+      expect(res.errorsTruncated).toBe(true);
+    });
+
     it('matches orderNumber and calls transitionOrder per row with the row voucher + New Status', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'oid-1' });
       const spy = jest
@@ -5197,7 +5207,7 @@ describe('RewardsService', () => {
         toStatus: 'PROCESSING',
         voucherCode: 'GC-XYZ',
       }));
-      expect(res).toEqual({ processed: 1, succeeded: 1, skipped: 0, failed: 0, errors: [] });
+      expect(res).toEqual({ processed: 1, succeeded: 1, skipped: 0, failed: 0, errors: [], errorsTruncated: false });
       spy.mockRestore();
     });
 
@@ -5237,7 +5247,7 @@ describe('RewardsService', () => {
       const res = await service.uploadFulfilment(gifsy, file);
 
       expect(uSpy).not.toHaveBeenCalled();
-      expect(res).toEqual({ processed: 1, succeeded: 0, skipped: 1, failed: 0, errors: [] });
+      expect(res).toEqual({ processed: 1, succeeded: 0, skipped: 1, failed: 0, errors: [], errorsTruncated: false });
       uSpy.mockRestore();
     });
 
