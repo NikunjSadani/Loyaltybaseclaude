@@ -14,6 +14,17 @@ import { TenantRoutingService } from './tenant-routing.service';
 
 /** Objects at or below this size are buffered + cached; larger ones are streamed. */
 const CACHEABLE_MAX_BYTES = 512 * 1024;
+/**
+ * In-process positive cache bounds. Was 50 entries / 20 MB per instance; lowered to
+ * 5 MB (memory-safety 2026-11-13) — every real logo/favicon is a few KB, so 5 MB still
+ * holds every tenant's set while freeing ~15 MB of permanently-held heap.
+ */
+export const BRANDING_CACHE_OPTIONS = {
+  maxEntries: 50,
+  maxBytes: 5 * 1024 * 1024,
+  missTtlMs: 30_000,
+  maxMisses: 500,
+} as const;
 /** Enough leading bytes for every signature sniffFileType checks (WEBP/HEIC need 12). */
 const SNIFF_HEAD_BYTES = 16;
 
@@ -76,7 +87,7 @@ export function streamErrorHandler(_err: Error, res: StreamErrorResponse): void 
  *    the frontend's `/api` → `/v1` rewrite, so the global IP throttler (no trust-proxy) would
  *    key ALL users on the frontend's egress IP and 429 logos platform-wide. Load is bounded
  *    instead by the strict key shape, the size cap, the immutable browser/CDN cache and the
- *    in-process cache below (positive LRU 50 entries / 20 MB; misses remembered 30 s).
+ *    in-process cache below (positive LRU 50 entries / 5 MB; misses remembered 30 s).
  *  - `Cache-Control: public, max-age=1y, immutable` — keys embed a fresh uuid per upload,
  *    so an object's bytes never change under the same URL.
  *  - Keys whose slug segment is not an existing tenant 404 (negative-cached) before any
@@ -87,12 +98,7 @@ export function streamErrorHandler(_err: Error, res: StreamErrorResponse): void 
  */
 @Controller('public/branding-assets')
 export class PublicBrandingAssetController {
-  private readonly cache = new BrandingAssetCache({
-    maxEntries: 50,
-    maxBytes: 20 * 1024 * 1024,
-    missTtlMs: 30_000,
-    maxMisses: 500,
-  });
+  private readonly cache = new BrandingAssetCache(BRANDING_CACHE_OPTIONS);
 
   constructor(
     private readonly storage: StorageService,
