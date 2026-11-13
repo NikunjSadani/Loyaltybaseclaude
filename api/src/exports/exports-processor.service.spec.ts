@@ -119,7 +119,8 @@ describe('ExportsProcessorService.processClaimed', () => {
     expect(seen!.clientId).toBe('bajaj');
     expect(seen!.user).toMatchObject({ sub: 'u1', role: 'GIFSY_ADMIN', clientId: 'bajaj', assumed: true });
     expect(seen!.now).toEqual(claimed().createdAt);
-  });
+    // Real exceljs stream → upload → SheetJS read-back of 2,500 rows: explicit headroom for a loaded full-suite run.
+  }, 30_000);
 
   it('a failing report → FAILED with a plain message; partial file deleted', async () => {
     const { proc, prisma, storage } = setup(makeKind(async () => { throw new Error('relation "x" does not exist'); }));

@@ -304,6 +304,9 @@ function old_buildPayoutReportXlsx(preview: ComputePreview): Buffer {
 
 // ═══ Fixture ═════════════════════════════════════════════════════════════════════════════════════════════════
 
+/** Real exceljs build + SheetJS read-backs: explicit headroom for a loaded full-suite run (alone: well under 1 s). */
+const XLSX_TIMEOUT = 30_000;
+
 const ADMIN = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '', name: 'A' } as JwtPayload;
 
 function row(i: number, over: Partial<ComputePreviewRow> = {}): ComputePreviewRow {
@@ -366,7 +369,9 @@ const params = (raw: Record<string, unknown> = { period: '2026-07' }) => POINTS_
 
 describe('points-* export kinds', () => {
   it('parity: credit-upload file (title row, header row, OK rows summed per outlet × field, names) — and it re-reads like the parser', async () => {
-    const p = preview(3000);
+    // 1,200 rows: outlet codes cycle every 900 rows (fieldId every 3), so 300 outlet × field pairs carry two OK/skip
+    // rows each — the summing path — plus every status/award/name/NaN variant the generator cycles through.
+    const p = preview(1200);
     const { ctx, compute } = setup(p);
     const { buffer, rowCount } = await renderKind(POINTS_CREDIT_UPLOAD_KIND, ctx, params({ period: '2026-07', program: 'Gold', kpiCode: 'VOL' }));
     expectSameWorkbook(buffer, old_buildCreditUploadXlsx(p));
@@ -374,10 +379,10 @@ describe('points-* export kinds', () => {
     const aoa = XLSX.utils.sheet_to_json<unknown[]>(XLSX.read(buffer, { type: 'buffer' }).Sheets['Credits & Payouts'], { header: 1, defval: '' });
     expect(aoa[1].slice(0, 2)).toEqual(['Outlet ID', 'Outlet Name']);
     expect(rowCount).toBe(aoa.length - 2);
-  });
+  }, XLSX_TIMEOUT);
 
   it('parity: preview report + payout report (Rows + Summary), formula guard, NaN/absent numbers blank', async () => {
-    const p = preview(2500);
+    const p = preview(1000); // every generator variant (cycles ≤ 17 rows; '=evil()' at 11, '@12' at 12)
     const { ctx } = setup(p);
     const pr = await renderKind(POINTS_PREVIEW_REPORT_KIND, ctx, params());
     expectSameWorkbook(pr.buffer, old_buildPreviewReportXlsx(p));
@@ -385,7 +390,7 @@ describe('points-* export kinds', () => {
     const po = await renderKind(POINTS_PAYOUT_REPORT_KIND, ctx, params());
     expectSameWorkbook(po.buffer, old_buildPayoutReportXlsx(p));
     expect(po.rowCount).toBe(p.rows.filter((r) => r.awardType === 'PAYOUT').length);
-  });
+  }, XLSX_TIMEOUT);
 
   it('parity: empty preview → header-less row sheets + summary; empty credit file keeps title + header', async () => {
     const p = preview(0, { totalPoints: 0, totalPayoutRupees: 0, engineDisabled: true });
@@ -393,7 +398,7 @@ describe('points-* export kinds', () => {
     expectSameWorkbook((await renderKind(POINTS_PREVIEW_REPORT_KIND, ctx, params())).buffer, old_buildPreviewReportXlsx(p));
     expectSameWorkbook((await renderKind(POINTS_PAYOUT_REPORT_KIND, ctx, params())).buffer, old_buildPayoutReportXlsx(p));
     expectSameWorkbook((await renderKind(POINTS_CREDIT_UPLOAD_KIND, ctx, params())).buffer, old_buildCreditUploadXlsx(p));
-  });
+  }, XLSX_TIMEOUT);
 
   it('gates re-checked at build time: engine disabled → 403 (credit file only), OPEN Sales-Import month → 409; export recorded', async () => {
     const off = setup(preview(10), { engineEnabled: false });
@@ -413,7 +418,7 @@ describe('points-* export kinds', () => {
     expect(ok.prisma.auditLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ action: 'EXPORT', entityType: 'SALES_MONTH', actorId: 'u1', newValues: { route: 'previewReport', period: '2026-07' } }),
     });
-  });
+  }, XLSX_TIMEOUT);
 
   it('always heavy (whole-tenant compute in the worker); access, validation, names', () => {
     for (const k of [POINTS_CREDIT_UPLOAD_KIND, POINTS_PREVIEW_REPORT_KIND, POINTS_PAYOUT_REPORT_KIND]) {

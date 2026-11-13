@@ -201,5 +201,6 @@ describe('@HeavyOp() through a real Nest HTTP stack (DI + exception filter)', ()
       gate();
       await app.close();
     }
-  });
+    // Boots a real Nest app + 5 HTTP round trips: explicit headroom for a loaded full-suite run (alone: ~0.3 s).
+  }, 30_000);
 });

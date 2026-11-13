@@ -45,6 +45,8 @@ async function oldDownload(prisma: { messageDeliveryReceipt: { findMany: (a: unk
 }
 
 const BASE = Date.UTC(2026, 9, 1);
+/** Real exceljs build + SheetJS read-backs: explicit headroom for a loaded full-suite run (alone: well under 1 s). */
+const XLSX_TIMEOUT = 30_000;
 function receipt(i: number, over: Row = {}): Row {
   return {
     id: `r${String(i).padStart(7, '0')}`,
@@ -76,7 +78,7 @@ describe('delivery-status export kind', () => {
     expect(rowCount).toBe(500 - Math.ceil(500 / 9));
     const sms = DELIVERY_STATUS_KIND.parseParams({ ...q, channel: 'SMS', event: 'OTP' }, CLIENT);
     expectSameWorkbook((await renderKind(DELIVERY_STATUS_KIND, ctxFor(CLIENT, prisma), sms)).buffer, await oldDownload(prisma, CLIENT, { ...q, channel: 'SMS', event: 'OTP' }, 100_000));
-  }, 30_000);
+  }, XLSX_TIMEOUT);
 
   it('parity: platform-wide across > 2,000 rows (paged ≤ 2,000) and the truncation notice at the cap', async () => {
     const rows = Array.from({ length: 2100 }, (_, i) => receipt(i));
@@ -90,24 +92,26 @@ describe('delivery-status export kind', () => {
     expectSameWorkbook(buffer, expected);
     expect(await maxPage(prisma.messageDeliveryReceipt)).toBeLessThanOrEqual(2000);
 
-    // Truncation at the cap (cap lowered for the test; the production cap is 100,000).
+    // Truncation at the cap (cap lowered for the test; the production cap is 100,000). 150 < one page, like 1,500 was —
+    // the truncation rule is the same at any cap below the row count, at a tenth of the render + read-back cost.
     const real = NotificationDeliveryReportService.MAX_EXPORT_ROWS;
-    (NotificationDeliveryReportService as unknown as { MAX_EXPORT_ROWS: number }).MAX_EXPORT_ROWS = 1500;
+    (NotificationDeliveryReportService as unknown as { MAX_EXPORT_ROWS: number }).MAX_EXPORT_ROWS = 150;
     try {
       const capped = await renderKind(DELIVERY_STATUS_KIND, ctxFor(GIFSY, prisma), params);
-      expect(capped.rowCount).toBe(1500);
-      expectSameWorkbook(capped.buffer, await oldDownload(prisma, GIFSY, {}, 1500));
-      expect(readBook(capped.buffer).sheets.Delivery.aoa.at(-1)?.[0]).toMatch(/truncated at 1,500 rows/);
+      expect(capped.rowCount).toBe(150);
+      expectSameWorkbook(capped.buffer, await oldDownload(prisma, GIFSY, {}, 150));
+      expect(readBook(capped.buffer).sheets.Delivery.aoa.at(-1)?.[0]).toMatch(/truncated at 150 rows/);
     } finally {
       (NotificationDeliveryReportService as unknown as { MAX_EXPORT_ROWS: number }).MAX_EXPORT_ROWS = real;
     }
-  }, 30_000);
+    expect(NotificationDeliveryReportService.MAX_EXPORT_ROWS).toBe(100_000);
+  }, 60_000);
 
   it('parity: no rows → header + one blank row', async () => {
     const prisma = { messageDeliveryReceipt: fakeModel([]) };
     const params = DELIVERY_STATUS_KIND.parseParams({ from: '2026-10-01', to: '2026-10-02' }, CLIENT);
     expectSameWorkbook((await renderKind(DELIVERY_STATUS_KIND, ctxFor(CLIENT, prisma), params)).buffer, await oldDownload(prisma, CLIENT, { from: '2026-10-01', to: '2026-10-02' }, 100_000));
-  });
+  }, XLSX_TIMEOUT);
 
   it('isolation + params: no clientId param exists; a tenant-less non-owner is refused; heavy rule; access', () => {
     expect(() => DELIVERY_STATUS_KIND.parseParams({ clientId: 'other' }, CLIENT)).toThrow(BadRequestException);
@@ -128,5 +132,5 @@ describe('delivery-status export kind', () => {
     const params = { ...DELIVERY_STATUS_KIND.parseParams({}, assumed), platformWide: true }; // tampered flag
     await renderKind(DELIVERY_STATUS_KIND, ctxFor(assumed, prisma), params);
     for (const call of prisma.messageDeliveryReceipt.findMany.mock.calls) expect(call[0].where.clientId).toBe('bajaj');
-  });
+  }, XLSX_TIMEOUT);
 });

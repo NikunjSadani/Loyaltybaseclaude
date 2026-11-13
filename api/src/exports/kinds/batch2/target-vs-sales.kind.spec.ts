@@ -11,6 +11,9 @@ import {
 import { TARGET_VS_SALES_KIND } from './target-vs-sales.kind';
 import { ctxFor, expectSameWorkbook, fakeModel, maxPage, readBook, renderKind } from './parity.support-spec';
 
+/** Real exceljs build + SheetJS read-backs: explicit headroom for a loaded full-suite run (alone: well under 1 s). */
+const XLSX_TIMEOUT = 30_000;
+
 const ADMIN = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '', name: 'A' } as JwtPayload;
 
 type Row = Record<string, unknown>;
@@ -95,7 +98,7 @@ describe('target-vs-sales export kind', () => {
     // Deleted outlet name keeps the formula guard; numbers stay numbers.
     expect(s.aoa.find((r) => r[0] === 'DEL')?.[1]).toBe("'+Deleted shop");
     expect(s.aoa.find((r) => r[0] === 'b10' && r[3] === '2026-01')?.slice(4, 7)).toEqual([100, 87.53, 87.5]);
-  });
+  }, XLSX_TIMEOUT);
 
   it('parity: APPLIES-TO scoped tenant (out-of-scope KPI blank) and duplicate KPI labels', async () => {
     const prisma = db({
@@ -116,7 +119,7 @@ describe('target-vs-sales export kind', () => {
     const expected = await oldDownload(prisma, ADMIN, '2026-05', '2026-05');
     const params = TARGET_VS_SALES_KIND.parseParams({ fromMonth: '2026-05', toMonth: '2026-05' }, ADMIN);
     expectSameWorkbook((await renderKind(TARGET_VS_SALES_KIND, ctxFor(ADMIN, prisma), params)).buffer, expected);
-  });
+  }, XLSX_TIMEOUT);
 
   it('parity: no data → header + one blank row', async () => {
     const prisma = db({ kpis: KPIS, outlets: [], targets: [], sales: [] });
@@ -125,7 +128,7 @@ describe('target-vs-sales export kind', () => {
     const { buffer, rowCount } = await renderKind(TARGET_VS_SALES_KIND, ctxFor(ADMIN, prisma), params);
     expectSameWorkbook(buffer, expected);
     expect(rowCount).toBe(0);
-  });
+  }, XLSX_TIMEOUT);
 
   it('pages: 2,100 outlets × 3 months — identical output, no read returns more than 2,000 rows', async () => {
     const outlets: Row[] = [];
@@ -150,7 +153,9 @@ describe('target-vs-sales export kind', () => {
     expectSameWorkbook(buffer, expected);
     expect(prisma.outletTarget.findMany.mock.calls.length).toBeGreaterThan(1);
     for (const m of [prisma.outletTarget, prisma.outletSalesRecord, prisma.outlet]) expect(await maxPage(m)).toBeLessThanOrEqual(2000);
-  });
+    // 2,100 outlets = one full 2,000-row page + a partial one (the smallest fixture that crosses it); 3 months of
+    // old-path getPace + the streamed build + two read-backs — explicit headroom for a loaded full-suite run.
+  }, 60_000);
 
   it('params: same validation as the endpoint; > 3 months is heavy; range ≤ 15', () => {
     const p = (raw: unknown) => TARGET_VS_SALES_KIND.parseParams(raw, ADMIN);

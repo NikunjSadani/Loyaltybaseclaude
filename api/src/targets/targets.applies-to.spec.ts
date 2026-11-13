@@ -418,7 +418,13 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
       expect(sql).toContain(`COALESCE("outlet_targets"."targetValues"->'__names', '{}'::jsonb)`);
       expect(sql).toContain(`jsonb_build_object('__names'`);
       // the ignored 99 is never written
-      expect(sqlValues(call).some((v) => typeof v === 'string' && v.includes('99'))).toBe(false);
+      // Exact checks — NOT a substring over every bound string: values[0] is a random UUID, which contains
+      // "99" ~10% of the time (same flake class as the UUID-'999' fix in targets.service.spec).
+      const bound = sqlValues(call);
+      expect(bound).not.toContain(99);
+      expect(bound).not.toContain('99');
+      const jsonParams = bound.filter((v): v is string => typeof v === 'string' && v.startsWith('{')).map((v) => JSON.parse(v));
+      expect(jsonParams).toEqual([{ MONTH_TGT: 3 }]);
       expect(rawWrites(prisma)).toEqual([{ table: 'outlet_targets', outletCode: 'O2', values: { MONTH_TGT: 3 }, carry: ['CONSISTENCY'] }]);
     });
 

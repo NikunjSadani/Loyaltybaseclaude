@@ -417,6 +417,11 @@ function roster(): Row[] {
   ];
 }
 
+/** Real exceljs build + SheetJS read-backs: explicit headroom for a loaded full-suite run (alone: well under 1 s). */
+const XLSX_TIMEOUT = 30_000;
+/** Paging tests: 2,100 rows = one full 2,000-row page + a partial one — the smallest fixture that crosses the boundary. */
+const PAGING_TIMEOUT = 60_000;
+
 async function render(kind: any, prisma: unknown, raw: Row) {
   return renderKind(kind, ctxFor(ADMIN, prisma), kind.parseParams(raw, ADMIN));
 }
@@ -431,7 +436,7 @@ describe('targets-template / achievements-template export kinds', () => {
     const s = readBook(buffer).sheets.Targets;
     expect(s.merges).toEqual([{ s: { r: 0, c: 3 }, e: { r: 0, c: 6 } }, { s: { r: 0, c: 7 }, e: { r: 0, c: 10 } }]);
     expect(s.aoa[3][1]).toBe("'+Beta"); // cellSafe
-  });
+  }, XLSX_TIMEOUT);
 
   it('parity (scoped tenant): Program / Sub-Program + N/A cells; achievement template drops importer-owned KPIs', async () => {
     const kpis = [KPIS[0], { ...KPIS[1], programs: ['Gold'] }, { ...KPIS[2], outletTypes: ['SSS'] }];
@@ -441,7 +446,7 @@ describe('targets-template / achievements-template export kinds', () => {
     expectSameWorkbook(ach, await oldTemplate(prisma, ADMIN, ['2026-06'], true));
     expect(readBook(ach).sheets.Targets.aoa[1]).not.toContain('Volume');
     expect(readBook(ach).sheets.Targets.aoa.flat()).toContain(OUT_OF_SCOPE_CELL);
-  });
+  }, XLSX_TIMEOUT);
 
   it('round trip: a filled streamed template parses back through the upload parser', async () => {
     const prisma = db({ kpis: KPIS.slice(0, 2), outlets: roster() });
@@ -455,19 +460,19 @@ describe('targets-template / achievements-template export kinds', () => {
     XLSX.utils.book_append_sheet(out, XLSX.utils.aoa_to_sheet(aoa), 'Targets');
     const parsed = parseTargetUploadBuffer(XLSX.write(out, { type: 'buffer', bookType: 'xlsx' }), KPIS.slice(0, 2).map((k) => ({ enabled: true, isPrimary: false, hasNameOverride: false, nameOverrideLabel: null, ...k }) as any), new Set(['A1', 'B2', 'C3']));
     expect(parsed.acceptedTargets['2026-06'].A1).toEqual({ VOL: 10, FP1: 5, __names: { FP1: 'Diwali' } });
-  });
+  }, XLSX_TIMEOUT);
 
-  it('pages: 4,500 outlets — identical, ≤ 2,000 rows per read', async () => {
-    const outlets: Row[] = Array.from({ length: 4500 }, (_, i) => ({ outletCode: `O${String(i).padStart(5, '0')}`, name: `Shop ${i}`, outletType: { code: 'RETAIL' } }));
+  it('pages: 2,100 outlets — identical, ≤ 2,000 rows per read (one full page + a partial one)', async () => {
+    const outlets: Row[] = Array.from({ length: 2100 }, (_, i) => ({ outletCode: `O${String(i).padStart(5, '0')}`, name: `Shop ${i}`, outletType: { code: 'RETAIL' } }));
     const prisma = db({ kpis: KPIS, outlets });
     const expected = await oldTemplate(prisma, ADMIN, ['2026-07'], false);
     prisma.outlet.findMany.mockClear();
     const { buffer, rowCount } = await render(TARGETS_TEMPLATE_KIND, prisma, { months: '2026-07' });
-    expect(rowCount).toBe(4500);
+    expect(rowCount).toBe(2100);
     expectSameWorkbook(buffer, expected);
-    expect(prisma.outlet.findMany.mock.calls.length).toBe(3);
+    expect(prisma.outlet.findMany.mock.calls.length).toBe(2);
     expect(await maxPage(prisma.outlet)).toBeLessThanOrEqual(2000);
-  });
+  }, PAGING_TIMEOUT);
 
   it('params, heavy rule, access, names; no-KPI 400s (pre-flight + run)', async () => {
     const p = (raw: Row) => TARGETS_TEMPLATE_KIND.parseParams(raw, ADMIN);
@@ -489,7 +494,7 @@ describe('targets-template / achievements-template export kinds', () => {
     const allOwned = db({ kpis: KPIS.slice(0, 1), outlets: roster(), owned: ['VOL'] });
     await expect(assertTargetsDownloadable(allOwned as any, 'bajaj', 'achievements-template')).rejects.toThrow(/fed by Sales Import/);
     await expect(assertTargetsDownloadable(allOwned as any, 'bajaj', 'targets-template')).resolves.toBeUndefined();
-  });
+  }, XLSX_TIMEOUT);
 });
 
 describe('targets-export / achievements-export export kinds', () => {
@@ -514,25 +519,25 @@ describe('targets-export / achievements-export export kinds', () => {
     expectSameWorkbook(buffer, await oldExport(prisma, ADMIN, '2026-07', false));
     expect(rowCount).toBe(3);
     expect(readBook(buffer).names).toEqual(['Final Targets 2026-07']);
-  });
+  }, XLSX_TIMEOUT);
 
   it('parity: sales data', async () => {
     const prisma = db({ kpis: KPIS, outlets: roster(), ...stored() });
     const { buffer, rowCount } = await render(ACHIEVEMENTS_EXPORT_KIND, prisma, { month: '2026-07' });
     expectSameWorkbook(buffer, await oldExport(prisma, ADMIN, '2026-07', true));
     expect(rowCount).toBe(2);
-  });
+  }, XLSX_TIMEOUT);
 
   it('parity: empty month → the two header rows only', async () => {
     const prisma = db({ kpis: KPIS, outlets: roster() });
     expectSameWorkbook((await render(TARGETS_EXPORT_KIND, prisma, { month: '2026-01' })).buffer, await oldExport(prisma, ADMIN, '2026-01', false));
     expectSameWorkbook((await render(ACHIEVEMENTS_EXPORT_KIND, prisma, { month: '2026-01' })).buffer, await oldExport(prisma, ADMIN, '2026-01', true));
-  });
+  }, XLSX_TIMEOUT);
 
-  it('pages: 5,000 stored rows — identical, ≤ 2,000 per read (rows AND the outlet join)', async () => {
+  it('pages: 2,100 stored rows — identical, ≤ 2,000 per read (rows AND the outlet join), more than one read', async () => {
     const outlets: Row[] = [];
     const targets: Row[] = [];
-    for (let i = 0; i < 5000; i++) {
+    for (let i = 0; i < 2100; i++) {
       const code = `O${String(i).padStart(5, '0')}`;
       outlets.push({ outletCode: code, name: `S${i}`, outletType: { code: 'RETAIL' }, programName: `P${i % 7}` });
       targets.push({ outletCode: code, month: '2026-07', outletName: `S${i}`, targetValues: { VOL: i } });
@@ -542,11 +547,13 @@ describe('targets-export / achievements-export export kinds', () => {
     prisma.outletTarget.findMany.mockClear();
     prisma.outlet.findMany.mockClear();
     const { buffer, rowCount } = await render(TARGETS_EXPORT_KIND, prisma, { month: '2026-07' });
-    expect(rowCount).toBe(5000);
+    expect(rowCount).toBe(2100);
     expectSameWorkbook(buffer, expected);
+    expect(prisma.outletTarget.findMany.mock.calls.length).toBeGreaterThan(1);
+    expect(prisma.outlet.findMany.mock.calls.length).toBeGreaterThan(1);
     expect(await maxPage(prisma.outletTarget)).toBeLessThanOrEqual(2000);
     expect(await maxPage(prisma.outlet)).toBeLessThanOrEqual(2000);
-  });
+  }, PAGING_TIMEOUT);
 
   it('params: loose month for targets (as before), strict for sales; other query params ignored', () => {
     expect(() => TARGETS_EXPORT_KIND.parseParams({ month: 'July' }, ADMIN)).toThrow('A valid YYYY-MM "month" query param is required');

@@ -79,14 +79,19 @@ describe('createXlsxStreamWriter', () => {
     );
   });
 
-  it('streams 20,000 rows without holding them (row count + readable output)', async () => {
+  // 2,600 rows crosses the writer's every-500-rows yield / drain point five times — what this test exercises — at an
+  // eighth of the old 20,000-row cost (row commit is per row, so the count beyond a few yields adds nothing).
+  it('streams 2,600 rows across several yield/drain points (row count, first + last rows read back)', async () => {
+    const N = 2_600;
     const buf = await collect(async (w) => {
       const s = await w.addSheet('Big', ['i', 'label']);
-      for (let i = 0; i < 20_000; i++) await s.addRow([i, `row ${i}`]);
+      for (let i = 0; i < N; i++) await s.addRow([i, `row ${i}`]);
+      expect(w.rowCount).toBe(N);
       await w.finish();
     });
     const a = XLSX.utils.sheet_to_json(XLSX.read(buf, { type: 'buffer' }).Sheets.Big, { header: 1 }) as unknown[][];
-    expect(a.length).toBe(20_001);
-    expect(a[20_000]).toEqual([19_999, 'row 19999']);
-  });
+    expect(a.length).toBe(N + 1);
+    expect(a[1]).toEqual([0, 'row 0']);
+    expect(a[N]).toEqual([N - 1, `row ${N - 1}`]);
+  }, 30_000);
 });

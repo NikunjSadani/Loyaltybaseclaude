@@ -60,6 +60,9 @@ class FakeAuth implements CanActivate {
   }
 }
 
+/** One Nest app per file (beforeAll); each test is a few real HTTP round trips — explicit headroom for a loaded full-suite run. */
+const HTTP_TIMEOUT = 30_000;
+
 describe('Downloads — HTTP contract through the Nest stack', () => {
   let app: INestApplication;
   const created: unknown[] = [];
@@ -95,8 +98,8 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
     }).compile();
     app = moduleRef.createNestApplication();
     await app.init();
-  });
-  afterAll(async () => app?.close());
+  }, HTTP_TIMEOUT);
+  afterAll(async () => app?.close(), HTTP_TIMEOUT);
 
   it('light → 200 raw xlsx attachment (not JSON-wrapped)', async () => {
     const res = await request(app.getHttpServer())
@@ -112,7 +115,7 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
     expect(res.headers['content-disposition']).toContain('demo.xlsx');
     const rows = XLSX.utils.sheet_to_json(XLSX.read(res.body as Buffer, { type: 'buffer' }).Sheets.Demo, { header: 1 });
     expect(rows).toEqual([['A', 'B'], ['x', 1]]);
-  });
+  }, HTTP_TIMEOUT);
 
   it('heavy → 202 { success, data: { exportRequestId, message } }', async () => {
     const res = await request(app.getHttpServer()).get('/admin/reports/demo?months=6');
@@ -121,7 +124,7 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
       success: true,
       data: { exportRequestId: 'exp-http-1', message: expect.stringContaining('Downloads') },
     });
-  });
+  }, HTTP_TIMEOUT);
 
   it('generic POST admin/exports → 202; bad body → 400; wrong role → 403 (envelope kept)', async () => {
     const ok = await request(app.getHttpServer()).post('/admin/exports').send({ kind: 'demo', params: { months: '12' } });
@@ -135,7 +138,7 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
     const forbidden = await request(app.getHttpServer()).get('/admin/reports/demo').set(ROLE_HEADER, 'SALES_USER');
     expect(forbidden.status).toBe(403);
     expect(forbidden.body.success).toBe(false);
-  });
+  }, HTTP_TIMEOUT);
 
   it('server-set requestOrigin comes from the forwarded host on BOTH the report endpoint and the generic POST', async () => {
     created.length = 0;
@@ -152,11 +155,11 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
       'https://api.gifsy.in',
       'https://api-staging.gifsy.in',
     ]);
-  });
+  }, HTTP_TIMEOUT);
 
   it('GET admin/exports → own list envelope', async () => {
     const res = await request(app.getHttpServer()).get('/admin/exports');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: { items: [], nextCursor: null } });
-  });
+  }, HTTP_TIMEOUT);
 });

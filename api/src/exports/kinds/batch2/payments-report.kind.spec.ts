@@ -59,6 +59,8 @@ async function oldDownload(prisma: unknown, scope: PaymentsReportScope): Promise
 }
 
 const BASE = Date.UTC(2026, 5, 1);
+/** Real exceljs build + SheetJS read-backs: explicit headroom for a loaded full-suite run (alone: well under 1 s). */
+const XLSX_TIMEOUT = 30_000;
 
 function entry(i: number, over: Row = {}): Row {
   const paid = i % 7 !== 0;
@@ -123,7 +125,7 @@ describe('payments-report export kind', () => {
     expect(p.aoa[0]).toHaveLength(29 + 1); // S.No + 29 report columns
     expect(p.aoa.flat()).toContain("'=cmd()");
     expect(p.aoa.flat()).not.toContain('FOREIGN');
-  });
+  }, XLSX_TIMEOUT);
 
   it('parity: non-PAID status filter (attemptedAt ↓ nulls last) and a date range', async () => {
     const prisma = world(300);
@@ -132,26 +134,39 @@ describe('payments-report export kind', () => {
       (await renderKind(PAYMENTS_REPORT_KIND, ctxFor(CLIENT, prisma), params)).buffer,
       await oldDownload(prisma, { clientId: 'bajaj', status: 'FAILED' as never, from: '2026-06-02', to: '2026-06-10' }),
     );
-  });
+  }, XLSX_TIMEOUT);
 
-  it('parity at the cap: 10,001+ rows → first 10,000 + TRUNCATED notice; paged ≤ 2,000 per read', async () => {
-    const prisma = world(12_000); // ≈ 10,285 PAID rows
-    const expected = await oldDownload(prisma, {});
-    prisma.creditPayoutEntry.findMany.mockClear();
-    const params = PAYMENTS_REPORT_KIND.parseParams({}, GIFSY);
-    expect(params.clientId).toBeNull();
-    const { buffer, rowCount } = await renderKind(PAYMENTS_REPORT_KIND, ctxFor(GIFSY, prisma), params);
-    expect(rowCount).toBe(10_000);
-    expectSameWorkbook(buffer, expected);
-    expect(readBook(buffer).sheets.Summary.aoa[3][0]).toMatch(/^TRUNCATED/);
-    expect(await maxPage(prisma.creditPayoutEntry)).toBeLessThanOrEqual(2000);
-  }, 120_000);
+  it('parity at the cap: cap+1 rows → first `cap` + TRUNCATED notice; the cap read crosses a page; paged ≤ 2,000 per read', async () => {
+    // Production cap is 10,000 (kept in sync with the on-screen report). Both the kind and the old service read
+    // PaymentsReportService.MAX_ROWS at call time, so the cap is lowered for this test to 2,100: still > one 2,000-row
+    // page, so the over-the-cap read spans two pages (2,000 + 101), at a fraction of the 12,000-row fixture's cost.
+    expect(PaymentsReportService.MAX_ROWS).toBe(10_000);
+    const CAP = 2_100;
+    const cap = jest.replaceProperty(PaymentsReportService as { MAX_ROWS: number }, 'MAX_ROWS', CAP);
+    try {
+      const prisma = world(2_600); // 2,228 PAID rows > CAP + 1
+      const expected = await oldDownload(prisma, {});
+      prisma.creditPayoutEntry.findMany.mockClear();
+      const params = PAYMENTS_REPORT_KIND.parseParams({}, GIFSY);
+      expect(params.clientId).toBeNull();
+      const { buffer, rowCount } = await renderKind(PAYMENTS_REPORT_KIND, ctxFor(GIFSY, prisma), params);
+      expect(rowCount).toBe(CAP);
+      expectSameWorkbook(buffer, expected);
+      expect(readBook(buffer).sheets.Summary.aoa[3][0]).toMatch(/^TRUNCATED — showing first 2100;/);
+      // Paged by OFFSET: 2,000 then the remaining 101 (CAP + 1 − 2,000) — never more than 2,000 per read.
+      expect(prisma.creditPayoutEntry.findMany.mock.calls.map((c) => [c[0].skip, c[0].take])).toEqual([[0, 2000], [2000, 101]]);
+      expect(await maxPage(prisma.creditPayoutEntry)).toBeLessThanOrEqual(2000);
+    } finally {
+      cap.restore();
+    }
+    expect(PaymentsReportService.MAX_ROWS).toBe(10_000);
+  }, 60_000);
 
   it('parity: no rows → header-less Payments sheet + zero Summary', async () => {
     const prisma = world(0);
     const params = PAYMENTS_REPORT_KIND.parseParams({}, CLIENT);
     expectSameWorkbook((await renderKind(PAYMENTS_REPORT_KIND, ctxFor(CLIENT, prisma), params)).buffer, await oldDownload(prisma, { clientId: 'bajaj' }));
-  });
+  }, XLSX_TIMEOUT);
 
   it('params / access / light rule / names', () => {
     expect(PAYMENTS_REPORT_KIND.access).toEqual({ roles: ['GIFSY_ADMIN', 'CLIENT_ADMIN'], permission: 'reports:read' });
