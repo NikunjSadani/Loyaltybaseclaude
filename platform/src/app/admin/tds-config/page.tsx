@@ -24,6 +24,7 @@ import { Loader2, Percent } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useAdminSession } from '@/lib/admin-session'
 import { api } from '@/lib/api-client'
+import { TdsImportedPayoutsCard } from '@/components/operator/tds-imported-payouts-card'
 
 // ── Local mirror of the Prisma enums (no shared-lib edits; kept in-sync with the DTO). ──
 type TdsSection = 'SEC_194R' | 'SEC_194C'
@@ -250,6 +251,9 @@ export default function TdsConfigPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Separate per-tenant setting with its own load/save (report-only; independent of the policy above). */}
+      <TdsImportedPayoutsCard clientId={session.clientId} isGifsy={isGifsy} />
     </div>
   )
 }

@@ -25,6 +25,7 @@ const summary194R = {
 
 const svc = {
   compute194R: jest.fn().mockResolvedValue([]),
+  importedPayoutsCountFrom: jest.fn().mockResolvedValue(null),
   summary194R: jest.fn().mockResolvedValue(summary194R),
   export194R: jest.fn().mockResolvedValue({ buffer: Buffer.from(''), filename: 'tds-194r.xlsx' }),
   compute194C: jest.fn().mockResolvedValue([]),

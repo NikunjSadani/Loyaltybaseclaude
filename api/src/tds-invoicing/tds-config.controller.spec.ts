@@ -5,20 +5,22 @@
  * under the target tenant's scope), RBAC (SET is GIFSY-only), and DTO enum validate/reject.
  * Run: npx jest src/tds-invoicing/tds-config.controller.spec.ts
  */
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
 import { TdsConfigController } from './tds-config.controller';
 import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { TdsService } from '../tds/tds.service';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
-import { SetTdsConfigDto } from './dto/tds-config.dto';
+import { SetImportedPayoutsConfigDto, SetTdsConfigDto } from './dto/tds-config.dto';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const adminCore = { upsertSetting: jest.fn().mockResolvedValue({}) };
 const tenantSettings = { resolveTdsPolicy: jest.fn() };
+const tds = { importedPayoutsCountFrom: jest.fn() };
 
 const GIFSY: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9', name: 'Op' };
 const CLIENT: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '8', name: 'CA' };
@@ -33,8 +35,72 @@ describe('TdsConfigController', () => {
     controller = new TdsConfigController(
       adminCore as unknown as AdminCoreService,
       tenantSettings as unknown as TenantSettingsService,
+      tds as unknown as TdsService,
     );
     tenantSettings.resolveTdsPolicy.mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' });
+    tds.importedPayoutsCountFrom.mockResolvedValue(null);
+  });
+
+  describe('imported-payouts (count VENDOR_IMPORT payouts in the 194R report)', () => {
+    it('GET: tenant admin pinned to own tenant; returns countFrom (null = OFF)', async () => {
+      const res = await controller.getImportedPayouts(CLIENT, { clientId: 'other-tenant' });
+      expect(tds.importedPayoutsCountFrom).toHaveBeenCalledWith('deoleo');
+      expect(res).toEqual({ clientId: 'deoleo', countFrom: null });
+    });
+
+    it('GET: an un-assumed GIFSY may read another tenant', async () => {
+      tds.importedPayoutsCountFrom.mockResolvedValue('2026-04-01');
+      const res = await controller.getImportedPayouts(GIFSY, { clientId: 'bajaj' });
+      expect(res).toEqual({ clientId: 'bajaj', countFrom: '2026-04-01' });
+    });
+
+    it('SET: writes { countFrom } via upsertSetting(allowPlatformOnlyKey) under the target tenant', async () => {
+      const res = await controller.setImportedPayouts(GIFSY, { clientId: 'bajaj', countFrom: '2026-04-01' });
+      expect(adminCore.upsertSetting).toHaveBeenCalledTimes(1);
+      const [payload, settingDto, opts] = adminCore.upsertSetting.mock.calls[0];
+      expect(payload.clientId).toBe('bajaj');
+      expect(payload.sub).toBe('op');
+      expect(settingDto.key).toBe('tdsImportedPayouts');
+      expect(settingDto.value).toEqual({ countFrom: '2026-04-01' });
+      expect(opts).toEqual({ allowPlatformOnlyKey: true });
+      expect(res).toEqual({ clientId: 'bajaj', countFrom: '2026-04-01' });
+    });
+
+    it('SET: null turns it OFF (stored as { countFrom: null })', async () => {
+      await controller.setImportedPayouts(GIFSY, { clientId: 'bajaj', countFrom: null });
+      expect(adminCore.upsertSetting.mock.calls[0][1].value).toEqual({ countFrom: null });
+    });
+
+    it('SET: an impossible calendar date → 400, nothing written', async () => {
+      await expect(
+        controller.setImportedPayouts(GIFSY, { clientId: 'bajaj', countFrom: '2026-02-30' }),
+      ).rejects.toThrow(BadRequestException);
+      expect(adminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('SET: an ASSUMED operator cannot write a different tenant (403)', async () => {
+      await expect(
+        controller.setImportedPayouts(ASSUMED, { clientId: 'bajaj', countFrom: '2026-04-01' }),
+      ).rejects.toThrow(ForbiddenException);
+      expect(adminCore.upsertSetting).not.toHaveBeenCalled();
+      await controller.setImportedPayouts(ASSUMED, { clientId: 'deoleo', countFrom: '2026-04-01' });
+      expect(adminCore.upsertSetting).toHaveBeenCalledTimes(1);
+    });
+
+    it('SET is GIFSY_ADMIN-only', () => {
+      expect(Reflect.getMetadata(ROLES_KEY, TdsConfigController.prototype.setImportedPayouts)).toEqual(['GIFSY_ADMIN']);
+    });
+
+    it('DTO: accepts a YYYY-MM-DD string or null; rejects missing / wrong format', async () => {
+      const ok1 = plainToInstance(SetImportedPayoutsConfigDto, { clientId: 'bajaj', countFrom: '2026-04-01' });
+      const ok2 = plainToInstance(SetImportedPayoutsConfigDto, { clientId: 'bajaj', countFrom: null });
+      expect(await validate(ok1)).toHaveLength(0);
+      expect(await validate(ok2)).toHaveLength(0);
+      for (const bad of [{ clientId: 'bajaj' }, { clientId: 'bajaj', countFrom: '01-04-2026' }, { clientId: 'bajaj', countFrom: 20260401 }]) {
+        const errs = await validate(plainToInstance(SetImportedPayoutsConfigDto, bad));
+        expect(errs.map((e) => e.property)).toContain('countFrom');
+      }
+    });
   });
 
   describe('GET', () => {

@@ -1,18 +1,23 @@
-import { Controller, Get, Put, Body, Query } from '@nestjs/common';
+import { BadRequestException, Controller, ForbiddenException, Get, Put, Body, Query } from '@nestjs/common';
 import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { TdsService } from '../tds/tds.service';
+import { TDS_IMPORTED_PAYOUTS_SETTING_KEY, parseIsoCalendarDate } from '../tds/tds.helpers';
 import { UpsertSettingDto } from '../admin-core/dto/settings.dto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import { Roles } from '../common/decorators/roles.decorator';
-import { GetTdsConfigQueryDto, SetTdsConfigDto } from './dto/tds-config.dto';
+import { GetTdsConfigQueryDto, SetImportedPayoutsConfigDto, SetTdsConfigDto } from './dto/tds-config.dto';
 
 /**
  * Gifsy per-tenant TDS-policy config — Wave 1 Stream C, §5 portal split.
  *
  *   PUT /v1/admin/tds/config   { clientId, section, methodology }   — GIFSY_ADMIN-only SET
  *   GET /v1/admin/tds/config?clientId=                              — GIFSY (any) / tenant (own)
+ *   PUT /v1/admin/tds/config/imported-payouts { clientId, countFrom } — GIFSY_ADMIN-only SET
+ *   GET /v1/admin/tds/config/imported-payouts?clientId=              — GIFSY (any) / tenant (own)
  *
+
  * SET is GIFSY-only (Gifsy governs TGSL's deduct/deposit/recovery per tenant — D2/D3). The write
  * goes through the EXISTING settings write path (AdminCoreService.upsertSetting with
  * settingKey='tdsPolicy') so the W0-C config-change AuditLog fires and the TenantSettingsService
@@ -27,6 +32,7 @@ export class TdsConfigController {
   constructor(
     private readonly adminCore: AdminCoreService,
     private readonly tenantSettings: TenantSettingsService,
+    private readonly tds: TdsService,
   ) {}
 
   /**
@@ -64,5 +70,48 @@ export class TdsConfigController {
     await this.adminCore.upsertSetting({ ...user, clientId: dto.clientId }, settingDto);
 
     return { clientId: dto.clientId, section: dto.section, methodology: dto.methodology };
+  }
+
+  /**
+   * GET the per-tenant "count imported (vendor) payouts in the 194R report from" date.
+   * Same scoping as GET above (tenant admin / assumed operator pinned; un-assumed GIFSY may pass
+   * ?clientId=). `countFrom` null = OFF (the default — imported payouts excluded from 194R).
+   */
+  @Get('imported-payouts')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  async getImportedPayouts(@CurrentUser() user: JwtPayload, @Query() q: GetTdsConfigQueryDto) {
+    const clientId = platformWide(user) && q.clientId ? q.clientId : user.clientId;
+    return { clientId, countFrom: await this.tds.importedPayoutsCountFrom(clientId) };
+  }
+
+  /**
+   * SET the per-tenant imported-payouts date (GIFSY_ADMIN-only). REPORT/LIABILITY-ONLY: it widens
+   * the 194R report base (TdsService.compute194R) and nothing else — no withholding, TDS invoice or
+   * recovery reads it. Written via upsertSetting with allowPlatformOnlyKey (the generic settings PUT
+   * is fenced off for this key), which appends the generic + a dedicated `TdsImportedPayouts`
+   * AuditLog (old→new) and busts the settings cache. An ASSUMED operator may only set the tenant
+   * they are assumed into.
+   */
+  @Put('imported-payouts')
+  @Roles('GIFSY_ADMIN')
+  async setImportedPayouts(@CurrentUser() user: JwtPayload, @Body() dto: SetImportedPayoutsConfigDto) {
+    if (!platformWide(user) && dto.clientId !== user.clientId) {
+      throw new ForbiddenException('You can only change this setting for the tenant you are working in.');
+    }
+    const countFrom = dto.countFrom === null ? null : parseIsoCalendarDate(dto.countFrom);
+    if (dto.countFrom !== null && countFrom === null) {
+      throw new BadRequestException('countFrom must be a real calendar date (YYYY-MM-DD), or null to turn it off.');
+    }
+    const settingDto: UpsertSettingDto = {
+      key: TDS_IMPORTED_PAYOUTS_SETTING_KEY,
+      value: { countFrom },
+      category: 'tds',
+      description:
+        'Count imported (vendor) payouts paid on/after countFrom in the 194R report — liability only, no deduction.',
+    };
+    await this.adminCore.upsertSetting({ ...user, clientId: dto.clientId }, settingDto, {
+      allowPlatformOnlyKey: true,
+    });
+    return { clientId: dto.clientId, countFrom };
   }
 }

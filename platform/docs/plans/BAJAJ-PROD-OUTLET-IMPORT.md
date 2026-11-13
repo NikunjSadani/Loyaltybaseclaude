@@ -70,6 +70,14 @@ liability (₹20k threshold, 10% / 20% no-PAN) is visible; **FY 2025-26 imports 
 handles late payment outside the platform); deposits made later are uploaded with "TDS for month" and subtract; **no
 automatic recovery from future payouts** until Bajaj's CA decides who bears it. Build = small fast follow-up AFTER this
 release (the report is computed live, so the payout-history import does not wait for it).
+- **Built 2026-11-13 on `feat/tds-count-imports`** (not yet pushed/deployed): ProgramSetting `tdsImportedPayouts` =
+  `{ countFrom: 'YYYY-MM-DD' | null }` (absent/null = OFF for every tenant → report byte-identical). Edited ONLY by a
+  Gifsy Admin on **TDS Config** (`PUT /v1/admin/tds/config/imported-payouts`; generic settings PUT refuses the key;
+  audit `TdsImportedPayouts` old→new). ON → `compute194R` adds VENDOR_IMPORT entries with paidAt ≥ that IST date
+  (clamped to the FY) — report/liability only; the 194R screen shows an "Includes imported payouts…" note.
+  **After the release ships: a Gifsy Admin sets Bajaj's date to 2026-04-01 on TDS Config** (no SQL needed).
+  Withholding/gross-up/auto-invoice/recovery paths are untouched: they read only visibility fieldIds or entries with a
+  frozen `tdsSection` (imported rows: `tdsSection` NULL, fieldId `historical-incentive-payout`).
 
 ## 9b. Wholesaler points (Earn & Burn) — ✅ DONE on prod 2026-11-12 (night), verified
 - Sources: File 1 `…\2026.11.04\Earn  Burn Points of 25 to 26  Expire points data Year 25.xlsx` (sheet "File", history Apr 2025 → 31 Oct 2026, 103 cols = staging layout + 16–31 Oct burn) + File 2 `…\2026.11.04\12.11\WholesalerCumulativePointsReport2026-2027 (1).xls` (vendor FY26-27 monthly report to 11 Nov). Files agree at 31 Oct (2,331/2,333 within 1 pt); File 2 adds only 1–11 Nov redemptions (25 outlets, 1,24,691 pts). Vendor stopped redemptions on 11 Nov (owner) → this is the FINAL balance.

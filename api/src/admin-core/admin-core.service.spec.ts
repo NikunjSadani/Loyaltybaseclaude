@@ -1375,6 +1375,31 @@ describe('AdminCoreService', () => {
       expect(tdsAudit.oldValues).toBeUndefined();
       expect(tdsAudit.newValues).toEqual(next);
     });
+
+    it('BLOCKS a generic tdsImportedPayouts write (dedicated GIFSY_ADMIN endpoint only) — nothing written', async () => {
+      await expect(
+        service.upsertSetting(gifsy, { key: 'tdsImportedPayouts', value: { countFrom: '2026-04-01' } }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('tdsImportedPayouts via the dedicated path: persists + a dedicated TdsImportedPayouts audit (old→new)', async () => {
+      mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { countFrom: null } });
+      await service.upsertSetting(
+        gifsy,
+        { key: 'tdsImportedPayouts', value: { countFrom: '2026-04-01' } },
+        { allowPlatformOnlyKey: true },
+      );
+      expect(mockPrisma.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({ countFrom: '2026-04-01' });
+      const audit = mockPrisma.auditLog.create.mock.calls
+        .map((c) => c[0].data)
+        .find((d) => d.entityType === 'TdsImportedPayouts');
+      expect(audit).toBeDefined();
+      expect(audit.entityId).toBe('deoleo');
+      expect(audit.oldValues).toEqual({ countFrom: null });
+      expect(audit.newValues).toEqual({ countFrom: '2026-04-01' });
+      expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+    });
   });
 
   describe('saveGiftConfig', () => {

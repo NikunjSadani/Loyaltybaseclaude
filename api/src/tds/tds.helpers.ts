@@ -789,6 +789,50 @@ export function financialYear(date: Date): FyInfo {
   return { fyLabel, start, endExclusive };
 }
 
+// ─── Imported (vendor) payouts in the 194R report — per-tenant setting ─────────
+
+/**
+ * ProgramSetting key holding the per-tenant "count imported (VENDOR_IMPORT) payouts in the 194R
+ * report from this date" setting. Value: `{ countFrom: 'YYYY-MM-DD' | null }` (an IST calendar
+ * day). Absent row / `countFrom: null` = OFF — the default for every tenant (imported payouts stay
+ * excluded). Written ONLY via the dedicated GIFSY_ADMIN endpoint PUT /v1/admin/tds/config/imported-payouts.
+ */
+export const TDS_IMPORTED_PAYOUTS_SETTING_KEY = 'tdsImportedPayouts';
+
+/**
+ * Read a stored `tdsImportedPayouts` value → `{ countFrom, malformed }`. Anything that is not
+ * `{ countFrom: <valid YYYY-MM-DD> }` resolves to countFrom = null (OFF); `malformed` is true when a
+ * value was present but unusable (so the caller can log it), false for absent / explicit null.
+ */
+export function parseImportedPayoutsSetting(raw: unknown): { countFrom: string | null; malformed: boolean } {
+  if (raw === null || raw === undefined) return { countFrom: null, malformed: false };
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { countFrom: null, malformed: true };
+  const v = (raw as Record<string, unknown>).countFrom;
+  if (v === null || v === undefined) return { countFrom: null, malformed: false };
+  const date = parseIsoCalendarDate(v);
+  return { countFrom: date, malformed: date === null };
+}
+
+/**
+ * Strict 'YYYY-MM-DD' calendar-date parse: returns the same string when it is a real date
+ * (rejects 2026-02-30, '2026-4-1', timestamps, non-strings), else null.
+ */
+export function parseIsoCalendarDate(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return null;
+  const [y, mo, d] = [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
+  return value;
+}
+
+/** The UTC instant of 00:00 IST on a 'YYYY-MM-DD' calendar date (caller validates the string). */
+export function istDayStartInstant(isoDate: string): Date {
+  const [y, mo, d] = isoDate.split('-').map((s) => parseInt(s, 10));
+  return new Date(Date.UTC(y, mo - 1, d) - IST_OFFSET_MS);
+}
+
 /** Returns FyInfo for the current system date (UTC). */
 export function fyOfToday(): FyInfo {
   return financialYear(new Date());

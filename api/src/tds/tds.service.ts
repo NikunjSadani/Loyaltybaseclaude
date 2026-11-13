@@ -15,7 +15,9 @@
  * ── 194R (per clientId, per FY) ──────────────────────────────────────────────
  * Sources summed per PAN:
  *   1. Non-visibility CreditPayoutEntry (status PAID, paidAt in FY, field NOT isSeparatePayout)
- *      → PAN via Outlet→ChannelPartner
+ *      → PAN via Outlet→ChannelPartner. Imported history (batch.sourceKind = VENDOR_IMPORT) is
+ *      EXCLUDED — unless the tenant's `tdsImportedPayouts.countFrom` date is set, in which case
+ *      imported payouts paid on/after that IST date count like any other (report/liability only).
  *   2. RedemptionOrder.valuePaise for DELIVERED/FULFILLED redemptions (deliveredAt in FY)
  *      → PAN via ChannelPartner
  *   3. TdsOffPlatformEntry (section=SEC_194R, clientId, entryDate in FY)
@@ -54,6 +56,9 @@ import {
   depositPeriodOf,
   formatForPeriod,
   cellSafe,
+  TDS_IMPORTED_PAYOUTS_SETTING_KEY,
+  parseImportedPayoutsSetting,
+  istDayStartInstant,
 } from './tds.helpers';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { withholdingTdsPaise } from './tds-methodology.helper';
@@ -270,6 +275,38 @@ export class TdsService {
     private readonly statutory: TdsStatutoryConfigService,
   ) {}
 
+  // ─── Imported (vendor) payouts setting ──────────────────────────────────────
+
+  /**
+   * The tenant's "count imported (VENDOR_IMPORT) payouts in the 194R report from" date
+   * ('YYYY-MM-DD', IST day), or null when OFF. Read UNCACHED from ProgramSetting
+   * `tdsImportedPayouts` ({ countFrom }). Absent row, null, a malformed value or a read failure →
+   * null (OFF = the long-standing exclusion; the report is never widened by a bad value).
+   */
+  async importedPayoutsCountFrom(clientId: string): Promise<string | null> {
+    let raw: unknown = null;
+    try {
+      const row = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId, settingKey: TDS_IMPORTED_PAYOUTS_SETTING_KEY } },
+        select: { settingValue: true },
+      });
+      raw = row?.settingValue ?? null;
+    } catch (e) {
+      this.logger.warn(`${TDS_IMPORTED_PAYOUTS_SETTING_KEY} read failed for ${clientId}; treating as OFF: ${e}`);
+      return null;
+    }
+    const { countFrom, malformed } = parseImportedPayoutsSetting(raw);
+    if (malformed) {
+      this.logger.warn(`${TDS_IMPORTED_PAYOUTS_SETTING_KEY} for ${clientId} is malformed; treating as OFF`);
+    }
+    return countFrom;
+  }
+
+  private async importedPayoutsCountFromInstant(clientId: string): Promise<Date | null> {
+    const date = await this.importedPayoutsCountFrom(clientId);
+    return date ? istDayStartInstant(date) : null;
+  }
+
   // ─── 194R ───────────────────────────────────────────────────────────────────
 
   /**
@@ -332,6 +369,24 @@ export class TdsService {
       },
       select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
     });
+    // Per-tenant opt-in (ProgramSetting `tdsImportedPayouts.countFrom`, default OFF → this query is
+    // never issued and the report is byte-identical): imported VENDOR_IMPORT payouts whose paidAt is
+    // on/after the configured IST date are counted like any other paid incentive — same PAN /
+    // per-deductee no-PAN keys, same FY threshold, deposits subtract. Before that date they stay
+    // excluded. REPORT-ONLY: nothing on the payout/withholding path reads compute194R.
+    const importCountFrom = await this.importedPayoutsCountFromInstant(clientId);
+    const importedEntries =
+      importCountFrom && importCountFrom < endExclusive
+        ? await this.prisma.creditPayoutEntry.findMany({
+            where: {
+              clientId,
+              status: 'PAID',
+              paidAt: { gte: importCountFrom > start ? importCountFrom : start, lt: endExclusive },
+              batch: { sourceKind: 'VENDOR_IMPORT' },
+            },
+            select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
+          })
+        : [];
     const periodVisEntries = visFieldIdArr.length
       ? await this.prisma.creditPayoutEntry.findMany({
           where: {
@@ -345,7 +400,7 @@ export class TdsService {
       : [];
 
     const unionById = new Map<string, (typeof paidAtEntries)[number]>();
-    for (const e of [...paidAtEntries, ...periodVisEntries]) unionById.set(e.id, e);
+    for (const e of [...paidAtEntries, ...importedEntries, ...periodVisEntries]) unionById.set(e.id, e);
 
     const section194REntries = [...unionById.values()].filter((e) => {
       const isVis = visibilityFieldIds.has(e.fieldId);

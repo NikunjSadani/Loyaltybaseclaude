@@ -28,6 +28,7 @@ import { useAdminSession } from '@/lib/admin-session';
 import { authHeader } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
 import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label';
+import { formatCountFrom } from '@/components/operator/tds-imported-payouts-card';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,6 +47,8 @@ interface Tds194RRow {
 interface Tds194RResponse {
   section:  string;
   fyLabel:  string;
+  /** Per-tenant setting: imported (vendor) payouts paid on/after this date are in the base (null/absent = OFF). */
+  importedPayoutsCountedFrom?: string | null;
   summary: {
     baseFyTotalPaise: number | string;
     liabilityPaise:   number | string;
@@ -622,6 +625,15 @@ export default function AdminTdsPage() {
       {/* ── 194R Tab ─────────────────────────────────────────────────────────── */}
       {activeTab === '194R' && (
         <div className="space-y-5">
+          {r194?.importedPayoutsCountedFrom && (
+            <p
+              data-testid="tds-194r-imported-note"
+              className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2"
+            >
+              Includes imported (vendor) payouts paid on/after {formatCountFrom(r194.importedPayoutsCountedFrom)} — liability
+              only, no deduction (set on TDS Config).
+            </p>
+          )}
           {/* Summary cards */}
           {r194 && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

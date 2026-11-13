@@ -59,15 +59,19 @@ export class TdsController {
       platformWide(user) && queryClientId ? queryClientId : user.clientId;
 
     const fyLabel = fy ?? fyOfToday().fyLabel;
-    const [rows, summary] = await Promise.all([
+    const [rows, summary, importedFrom] = await Promise.all([
       this.tds.compute194R(clientId, fyLabel),
       this.tds.summary194R(clientId, fyLabel),
+      this.tds.importedPayoutsCountFrom(clientId),
     ]);
 
     return {
       section: '194R',
       fyLabel,
       clientId,
+      // Per-tenant setting: imported (vendor) payouts paid on/after this date are counted in the
+      // base (report/liability only). null = OFF (imported payouts excluded) — the default.
+      importedPayoutsCountedFrom: importedFrom,
       summary: serializeSummary194R(summary),
       rows: rows.map(serializeRow194R),
     };
