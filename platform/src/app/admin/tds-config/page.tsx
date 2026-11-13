@@ -1,7 +1,10 @@
 'use client'
 
 /**
- * TDS Treatment — per-tenant TDS-policy config for VISIBILITY-led payouts.
+ * TDS Treatment — per-tenant TDS-policy config for credit-upload ₹ payouts.
+ * Code truth (credits.service confirm → deriveFrozenSection): methodology is frozen on EVERY
+ * credit-upload payout entry but only the VISIBILITY bank-file engine acts on it (194R report
+ * always grosses up); section applies to VISIBILITY only (INCENTIVE is always 194R).
  * Wave 2 Stream D (design §5 portal placement — Gifsy config UI).
  *
  * Round-trips the per-tenant `tdsPolicy` via the backend contract:
@@ -164,7 +167,7 @@ export default function TdsConfigPage() {
         <div>
           <h1 className="text-2xl font-bold text-[#1A1A2E]">TDS Treatment</h1>
           <p className="text-sm text-gray-500 mt-1">
-            How TGSL treats this tenant&apos;s <strong>Visibility payouts</strong> for tax withholding.
+            How TGSL treats tax on this tenant&apos;s <strong>credit-upload ₹ payouts</strong> (visibility and incentive).
           </p>
         </div>
         {saved && (
@@ -199,15 +202,24 @@ export default function TdsConfigPage() {
         <Card data-testid="tds-config-card">
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
-              <Percent className="h-4 w-4 text-[var(--brand-primary)]" /> TDS treatment for Visibility payouts
+              <Percent className="h-4 w-4 text-[var(--brand-primary)]" /> TDS treatment for credit-upload payouts
             </CardTitle>
-            <CardDescription className="mt-1">
-              This governs how TGSL withholds tax on this tenant&apos;s Visibility-stream payouts.
-              Under <strong>194C</strong> the payout is treated as a visibility service — TGSL raises
-              a self-billed invoice and applies TDS; <strong>194R</strong> treats it as an
-              incentive/benefit. <strong>Deduct-then-pay</strong> withholds the TDS from the
-              retailer&apos;s payout; <strong>Gross-up</strong> pays the retailer in full while TGSL
-              deposits the TDS and recovers it from the tenant.
+            <CardDescription className="mt-1" data-testid="tds-config-scope">
+              The <strong>methodology</strong> is recorded on every credit-upload ₹ payout (visibility
+              and incentive), but it only changes what is paid on <strong>visibility</strong> payouts:{' '}
+              <strong>Deduct-then-pay</strong> withholds the TDS from the retailer&apos;s bank line;{' '}
+              <strong>Gross-up</strong> pays the retailer in full while TGSL raises a TDS invoice,
+              deposits the TDS and recovers it from the tenant. <strong>Incentive</strong> payouts are
+              never deducted — the 194R report shows their gross-up liability, and no TDS invoice is
+              raised for them. The <strong>section</strong> applies only to visibility payouts
+              (<strong>194C</strong> = visibility service with a self-billed invoice;{' '}
+              <strong>194R</strong> = incentive/benefit); incentive payouts are always 194R. Points
+              redemptions are never deducted from the partner — they count only towards the 194R
+              report liability.
+              <span data-testid="tds-set-before-first-batch" className="block mt-2 font-medium text-gray-700">
+                Each payout records the method when its batch is confirmed — set this before the first
+                live payout batch.
+              </span>
               {isGifsy ? (
                 <> Changes apply to new payouts — orders already confirmed keep their treatment.</>
               ) : (
@@ -217,7 +229,9 @@ export default function TdsConfigPage() {
           </CardHeader>
           <CardContent className="space-y-6">
             <div>
-              <p className="text-sm font-medium text-gray-900 mb-2">TDS section</p>
+              <p className="text-sm font-medium text-gray-900 mb-2">
+                TDS section <span className="font-normal text-gray-500">— visibility payouts only (incentive payouts are always 194R)</span>
+              </p>
               <Segmented
                 ariaLabel="TDS section"
                 options={SECTION_OPTIONS}
@@ -229,7 +243,9 @@ export default function TdsConfigPage() {
             </div>
 
             <div>
-              <p className="text-sm font-medium text-gray-900 mb-2">Methodology</p>
+              <p className="text-sm font-medium text-gray-900 mb-2">
+                Methodology <span className="font-normal text-gray-500">— recorded on all credit-upload payouts; changes the amount paid on visibility payouts only</span>
+              </p>
               <Segmented
                 ariaLabel="TDS methodology"
                 options={METHODOLOGY_OPTIONS}

@@ -39,10 +39,15 @@ Thresholds are strict "greater than", measured on the **cumulative total per PAN
 
 ## The two options (who bears the tax)
 
-Set per client (default **194C + Gross-up**):
+Set per client on **TDS Config** (default **194C + Gross-up**). What each part of that setting actually reaches:
 
-- **Deduct** — tax is **withheld from the payout**; the **outlet bears** it (receives amount − TDS). Formula: \`TDS = base × rate ÷ 100\`.
-- **Gross-up** — the outlet is **paid in full**; the **platform bears** the tax on top, deposits it against the outlet's PAN, raises a separate **TDS invoice**, and recovers it pro-rata from the contributing clients. Formula: \`TDS = base × rate ÷ (100 − rate)\` (so the outlet nets the full base).
+- **Methodology (Deduct / Gross-up)** — recorded on **every credit-upload ₹ payout** (visibility **and** incentive), but it only changes what is paid on **visibility** payouts:
+  - **Deduct** — tax is **withheld from the payout**; the **outlet bears** it (receives amount − TDS). Formula: \`TDS = base × rate ÷ 100\`.
+  - **Gross-up** — the outlet is **paid in full**; the **platform bears** the tax on top, deposits it against the outlet's PAN, raises a separate **TDS invoice**, and recovers it pro-rata from the contributing clients. Formula: \`TDS = base × rate ÷ (100 − rate)\` (so the outlet nets the full base).
+- **Incentive payouts are never deducted**, whichever methodology is set — the **194R report** shows their **gross-up liability**, and **no TDS invoice** is raised for them.
+- **Section (194C / 194R)** — applies **only to visibility payouts**. Incentive payouts are **always 194R**.
+- **Points redemptions** are **never deducted from the partner** — they only count towards the client's **194R report liability**.
+- **Each payout records the method when its batch is confirmed — set this before the first live payout batch.**
 
 ## How it calculates
 
@@ -50,12 +55,12 @@ Set per client (default **194C + Gross-up**):
 - **Rounding:** to the nearest whole rupee.
 - **No PAN:** rate is 20%; on the live payout path a no-PAN outlet is **paid in full** and it becomes a report-only reconciliation item. Each no-PAN recipient is its **own deductee** — the threshold and the 20% apply to *that recipient's* yearly total, never to all no-PAN partners added together: **194R** per partner, **194C** per outlet (the same unit the payout tax step uses). On the **TDS screen** such a row reads **"NO PAN ON FILE · Partner Name (outlet codes)"**; in the **Excel export** the Deductee Name is **"Partner Name (NO PAN ON FILE)"**, PAN is blank and an **Outlet Code** column is added. To record a deposit (or an off-platform 194R benefit) for one, write **PANNOTAVBL** (or PANAPPLIED / PANINVALID / NA / N/A) in the PAN column **and** the partner's **Outlet Code** (any letter case) — the code must exist for that client. A **blank PAN is rejected** ("PAN is required — enter the PAN, or PANNOTAVBL if the deductee has none"), and a file without a PAN column is rejected as a whole. If that outlet's owner turns out to have a PAN on file, the row is counted under that PAN and the upload says so. For **194C** deposits, add the **Client** column (client slug) when the same Outlet Code exists in more than one client. A no-PAN deposit that can't be matched to a recipient — e.g. older deposits uploaded without an Outlet Code — appears on its own row **"Earlier no-PAN deposits (not linked to a partner)"**, with the deposit shown as a negative outstanding (a credit); the totals are always the sum of the rows.
 - **Redemption payouts without PAN (per-client switch):** by default a partner with no PAN on file is **excluded** from a Redemption Payouts batch. A Gifsy admin can switch on **"Allow payouts without PAN"** for a client (client settings → Behaviour flags): those partners are then paid the full amount, and the TDS at the no-PAN rate is a **company-borne** liability shown in the TDS reports as "NO PAN ON FILE".
-- **194R is report-only at payout:** an incentive (194R) payout has **nothing withheld** from it — the platform *reports* what's due per PAN for the client's filing, and the client deposits it (recorded via a deposit upload). Actual withholding at payout only happens for **visibility (194C)** payouts.
+- **194R is report-only at payout:** an incentive (194R) payout has **nothing withheld** from it — the platform *reports* what's due per PAN for the client's filing, and the client deposits it (recorded via a deposit upload). Actual withholding at payout only happens for **visibility** payouts on the **Deduct** methodology.
 
 ## When it fires (trigger points)
 
-1. **At Confirm** (of the monthly credits batch): each visibility payout is **frozen** with its section + option (so a later config change can't rewrite it), and a **self-billed service invoice** is raised. *No tax withheld yet.*
-2. **At Generate Bank File** (payout download): the tax is **computed and applied** — either deducted from the bank line, or grossed-up with a TDS invoice raised.
+1. **At Confirm** (of the monthly credits batch): every payout is **frozen** with its section + option (incentive → always 194R) (so a later config change can't rewrite it), and a **self-billed service invoice** is raised. *No tax withheld yet.*
+2. **At Generate Bank File** (payout download): for **visibility** payouts only, the tax is **computed and applied** — either deducted from the bank line, or grossed-up with a TDS invoice raised.
 3. **Reports / CA export**: recomputed **on demand** whenever a report is opened — always current.
 
 ## What cumulates for 194R (the three inputs)
@@ -102,7 +107,7 @@ Every deposit counts against the **financial year of the month whose TDS it pays
 
 ## Setting the rates & thresholds
 
-The statutory **rates and thresholds are editable at the platform level** (they're the same for every client), on the **owner-only** *TDS Statutory* screen in the Gifsy console. They are **effective by financial year** — you add a new FY's values when the law changes, and closed years stay locked (past filings never move). The per-client choice (which section, deduct vs gross-up) is a separate, per-client *TDS Treatment* setting.
+The statutory **rates and thresholds are editable at the platform level** (they're the same for every client), on the **owner-only** *TDS Statutory* screen in the Gifsy console. They are **effective by financial year** — you add a new FY's values when the law changes, and closed years stay locked (past filings never move). The per-client choice (which section for visibility payouts, deduct vs gross-up for credit-upload payouts) is a separate, per-client *TDS Treatment* setting.
 
 ![TDS Statutory editor — rates & thresholds by financial year (owner only)](/guides/tds/tds-statutory.png)
 
@@ -112,7 +117,7 @@ The statutory **rates and thresholds are editable at the platform level** (they'
 |---|---|
 | See 194R / 194C liability + download the CA export | **TDS** |
 | Upload off-platform 194R benefits / record deposits | **TDS** (194R tab) |
-| Set a client's treatment (section + deduct/gross-up) | **TDS Config** |
+| Set a client's treatment (section for visibility; deduct/gross-up for all credit-upload payouts) | **TDS Config** |
 | Count a client's imported (vendor) payouts in 194R from a date (Gifsy Admin) | **TDS Config** |
 | Set the statutory rates & thresholds (owner only) | **Gifsy → TDS Statutory** |
 | Per-payout TDS report (frozen section/option) | **TDS Payouts** |
@@ -126,7 +131,7 @@ The statutory **rates and thresholds are editable at the platform level** (they'
 1. **194R is reported, not withheld at payout** — the client deposits it; the platform only computes and reports it.
 2. **Gross-up liability is ~11%, not 10%** — it's grossed up (\`× 10/90\`) because the platform pays the tax *on top*, not out of the outlet's amount.
 3. **The threshold is on the year's total per PAN**, not per payout — a small payout can still cross it once the running total does.
-4. **Section/option are frozen at confirm** — changing a client's treatment never re-prices already-confirmed payouts.
+4. **Section/option are frozen at confirm** — changing a client's treatment never re-prices already-confirmed payouts, so set it before the first live payout batch.
 5. **194C is platform-wide** (one outlet PAN aggregated across all clients); **194R is per-client**.
 6. **A deposit belongs to the year of the month it pays for** — an April deposit of March's TDS shows in the *previous* year's report. Use the **TDS for month** column to say exactly which month a deposit covers.`,
 };

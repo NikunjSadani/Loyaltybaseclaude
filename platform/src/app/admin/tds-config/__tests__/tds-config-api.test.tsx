@@ -149,6 +149,31 @@ describe('TDS Treatment config page', () => {
     expect(puts).toHaveLength(0) // no PUT happened during seeding
   })
 
+  it('describes the real scope: methodology on all credit-upload payouts, section visibility-only, set before first batch', async () => {
+    stubFetch({ clientId: 'gifsy', section: 'SEC_194C', methodology: 'GROSS_UP' })
+    render(<TdsConfigPage />)
+
+    const scope = await screen.findByTestId('tds-config-scope')
+    const text = scope.textContent ?? ''
+    // Methodology is recorded on every credit-upload payout (visibility AND incentive)...
+    expect(text).toMatch(/recorded on every credit-upload ₹ payout \(visibility\s+and incentive\)/)
+    // ...but only changes the amount paid on visibility payouts; incentive never deducted.
+    expect(text).toMatch(/only changes what is paid on visibility payouts/)
+    expect(text).toMatch(/Incentive payouts are\s+never deducted/)
+    expect(text).toMatch(/194R report shows their gross-up liability, and no TDS invoice is\s+raised for them/)
+    // Section is visibility-only; incentive always 194R.
+    expect(text).toMatch(/section applies only to visibility payouts/)
+    expect(text).toMatch(/incentive payouts are always 194R/)
+    // Points redemptions are report-only.
+    expect(text).toMatch(/Points\s+redemptions are never deducted from the partner/)
+    // The owner-requested timing line.
+    expect(screen.getByTestId('tds-set-before-first-batch')).toHaveTextContent(
+      'Each payout records the method when its batch is confirmed — set this before the first live payout batch.',
+    )
+    // No longer framed as Visibility-only.
+    expect(screen.queryByText(/TDS treatment for Visibility payouts/)).not.toBeInTheDocument()
+  })
+
   it('shows an explicit error card when the seed fetch fails (never fabricates a value)', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('network down'))))
     render(<TdsConfigPage />)
