@@ -569,7 +569,7 @@ export interface MonthFocusKpi {
 export interface MonthTargetsSummary {
   /** Importer-owned KPIs only. */
   kpis: Array<{ kpiCode: string; label: string; outletsWithTarget: number; totalTarget: number; measure: SalesKpiMeasure }>;
-  /** Latest target upload batch for the month (ISO), null = no targets uploaded for the month. */
+  /** When the month's target rows were last written (MAX OutletTarget.updatedAt, ISO); null = no targets for the month. */
   targetUploadedAt: string | null;
   /**
    * The month's targets were uploaded AFTER the month was last applied (sales first, targets later is normal): the

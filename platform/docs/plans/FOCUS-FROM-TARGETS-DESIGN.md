@@ -74,7 +74,13 @@ Measures: AMOUNT, QUANTITY and PRODUCT_COUNT all work with TARGET_NAMES (same ne
 
 ## 6. Reconciliation (`MonthReconciliation`, in `MonthPreview` and `SalesMonthRecalcPreview`)
 
-- `targets`: per owned KPI, outlets with a numeric target + Σ target; latest target batch time for the month.
+- `targets`: per owned KPI (with its measure), outlets with a numeric target + Σ target; when the month's target rows were
+  last written (`MAX(outlet_targets.updatedAt)`). `newerThanLastApply` / `SalesMonthRow.targetsChangedSinceApply` compare
+  that time with the month's last apply and are true ONLY for a tenant with an enabled TARGET_NAMES definition (targets
+  change no figure otherwise). Residual (audit 2026-11-13): a target upload commits in chunks, so an apply that reads targets
+  while one chunk is in flight can miss that chunk's rows without the flag rising; the window is one chunk, needs two
+  operators acting on the same month in the same second, and self-heals on the month's next apply / recalculate (every
+  apply recomputes from the targets present). Closing it fully = target upload takes the sales-month lock (not done).
 - `focus`: per TARGET_NAMES KPI, every distinct name (by key) with outlets (+ by outlet type), each token's resolution,
   and `achieved` (Σ of the KPI's per-outlet values over those outlets, outlets at 0); plus the missing-name count.
 - `blockers`: as §5, ≤ 20 sample outlet codes each.
@@ -86,9 +92,9 @@ Measures: AMOUNT, QUANTITY and PRODUCT_COUNT all work with TARGET_NAMES (same ne
 ## 7. Early warning at target upload (non-blocking)
 
 The target upload response gets `focusCheck: TargetUploadFocusCheck` — the same token resolution (§3, catalogue (a)
-only) + FOCUS_MISSING_NAME per month in the file, for KPIs that have an enabled TARGET_NAMES definition. Never blocks
-the upload. `checked: false` (+ `reason`) when there is no TARGET_NAMES definition or no stored product list yet. The
-target upload page shows it.
+only, the month's acceptances applied) + FOCUS_MISSING_NAME per month the upload actually wrote, for KPIs that have an enabled TARGET_NAMES definition. Never blocks
+the upload. `checked: false` + `reason` + `reasonCode` (NO_TARGET_NAMES_KPI = silent; NO_PRODUCT_LIST / CHECK_FAILED = a
+grey note on the target upload page, so a skipped check is never silent).
 
 ## 8. Data model (one additive migration)
 
@@ -127,3 +133,16 @@ automatically. Nothing here requires targets first:
   the same reconciliation + blockers. The next sales file of the month does the same automatically when applied.
 - An automated sales upload (future) only ingests + processes; applying stays a deliberate step on the reconciliation
   screen, so blockers are always seen before achievements change.
+
+## 12. Audit follow-ups (2026-11-13, dual audit + UI/UX lane — no CRITICAL/HIGH)
+
+- Product columns are frozen (400) while an enabled PRODUCT_COUNT or TARGET_NAMES KPI exists (they define "one product");
+  TARGET_NAMES needs ≥ 1 product column.
+- Apply loads the focus catalogue ONCE per request (stored lists at request start ∪ the import's products) and reuses it
+  under the lock, so applying an earlier month can't unmatch a later month's names mid-request.
+- A non-blank name with no product in it (e.g. "&") is a FOCUS_MISSING_NAME blocker (no Accept offered).
+- "Accept — not sold yet" only for a key that is a token of that month's target names for that KPI (400 otherwise).
+- No empty OutletSalesRecord is inserted for an outlet with no KPI values (existing rows still lose owned keys).
+- Migration: `20261115130000_focus_from_targets` (unique timestamp), no redundant index.
+- Known limitations (no Bajaj instance today): a brand whose name contains `&` or `,` can't be written as a focus name; a
+  token that genuinely matches two different products (AMBIGUOUS) can only be fixed in the target file.
