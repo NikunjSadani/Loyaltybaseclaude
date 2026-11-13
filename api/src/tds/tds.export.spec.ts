@@ -226,13 +226,13 @@ describe('TdsService — export194R (P6.5c)', () => {
     const rows = parseXlsx(buffer, 0);
 
     // baseFyTotalPaise = 2,100,000 → ₹21,000.00
-    expect(rows[0]['Amount Paid (₹)']).toBe('21000.00');
+    expect(rows[0]['Amount Paid (₹)']).toBe(21000);
     // liabilityPaise = 233,300 → ₹2,333.00
-    expect(rows[0]['TDS Amount (₹)']).toBe('2333.00');
+    expect(rows[0]['TDS Amount (₹)']).toBe(2333);
     // depositedPaise = 100,000 → ₹1,000.00
-    expect(rows[0]['Already Deposited (₹)']).toBe('1000.00');
+    expect(rows[0]['Already Deposited (₹)']).toBe(1000);
     // outstandingPaise = 133,300 → ₹1,333.00
-    expect(rows[0]['Outstanding (₹)']).toBe('1333.00');
+    expect(rows[0]['Outstanding (₹)']).toBe(1333);
   });
 
   it('sets TDS Rate % = 10 for PAN holder', async () => {
@@ -417,11 +417,11 @@ describe('TdsService — export194C (P6.5c)', () => {
     const rows = parseXlsx(buffer, 0);
 
     // liabilityPaise = 63,300 → ₹633.00
-    expect(rows[0]['TDS — With Threshold (₹)']).toBe('633.00');
+    expect(rows[0]['TDS — With Threshold (₹)']).toBe(633);
     // liabilityNoThresholdPaise = 63,300 → ₹633.00
-    expect(rows[0]['TDS — No Threshold (₹)']).toBe('633.00');
+    expect(rows[0]['TDS — No Threshold (₹)']).toBe(633);
     // Amount Paid: 3,100,000 → ₹31,000.00
-    expect(rows[0]['Amount Paid (₹)']).toBe('31000.00');
+    expect(rows[0]['Amount Paid (₹)']).toBe(31000);
   });
 
   it('sets TDS Rate % = 1 for INDIVIDUAL', async () => {
@@ -513,9 +513,9 @@ describe('TdsService — export194C (P6.5c)', () => {
     const rows = parseXlsx(buffer, 0);
 
     // depositedPaise = 50,000 → ₹500.00
-    expect(rows[0]['Already Deposited (₹)']).toBe('500.00');
+    expect(rows[0]['Already Deposited (₹)']).toBe(500);
     // outstandingPaise = 13,300 → ₹133.00
-    expect(rows[0]['Outstanding (₹)']).toBe('133.00');
+    expect(rows[0]['Outstanding (₹)']).toBe(133);
   });
 
   it('handles empty rows gracefully (no-op buffer)', async () => {
@@ -560,13 +560,13 @@ describe('TdsService — export194C (P6.5c)', () => {
     const { buffer } = await service.export194C(FY);
     const rows = parseXlsx(buffer, 0);
     // DEDUCT row: withheld ₹500, recovered ₹0, outstanding ₹949 (244900 − 100000 − 50000)
-    expect(rows[0]['TDS Withheld (Deduct) (₹)']).toBe('500.00');
-    expect(rows[0]['TDS Recovered (Gross-Up) (₹)']).toBe('0.00');
-    expect(rows[0]['Outstanding (₹)']).toBe('949.00');
+    expect(rows[0]['TDS Withheld (Deduct) (₹)']).toBe(500);
+    expect(rows[0]['TDS Recovered (Gross-Up) (₹)']).toBe(0);
+    expect(rows[0]['Outstanding (₹)']).toBe(949);
     // GROSS-UP row: withheld ₹0, recovered ₹2,449, outstanding UNCHANGED at ₹2,449
-    expect(rows[1]['TDS Withheld (Deduct) (₹)']).toBe('0.00');
-    expect(rows[1]['TDS Recovered (Gross-Up) (₹)']).toBe('2449.00');
-    expect(rows[1]['Outstanding (₹)']).toBe('2449.00');
+    expect(rows[1]['TDS Withheld (Deduct) (₹)']).toBe(0);
+    expect(rows[1]['TDS Recovered (Gross-Up) (₹)']).toBe(2449);
+    expect(rows[1]['Outstanding (₹)']).toBe(2449);
   });
 
   it('emits a "Gross-Up Recovery by Tenant" sheet with per-tenant attribution', async () => {
@@ -582,9 +582,9 @@ describe('TdsService — export194C (P6.5c)', () => {
     const recRows = parseXlsx(buffer, wb.SheetNames.indexOf('Gross-Up Recovery by Tenant'));
     expect(recRows).toHaveLength(2);
     expect(recRows[0]['Recovered From (Client)']).toBe('deoleo');
-    expect(recRows[0]['Recovery Amount (₹)']).toBe('1500.00');
+    expect(recRows[0]['Recovery Amount (₹)']).toBe(1500);
     expect(recRows[1]['Recovered From (Client)']).toBe('britannia');
-    expect(recRows[1]['Recovery Amount (₹)']).toBe('949.00');
+    expect(recRows[1]['Recovery Amount (₹)']).toBe(949);
     expect(recRows[0]['PAN']).toBe('GRS0044444D');
   });
 });

@@ -51,6 +51,8 @@ const mockPrisma = {
   },
   fundReceipt: { aggregate: jest.fn() },
   fundLedger: { findFirst: jest.fn() },
+  // processBatch reads the tenant's features (allowPayoutWithoutPan). Default (undefined) = flag OFF.
+  client: { findUnique: jest.fn() },
   tdsRecord: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   // Flow-B payout WhatsApp batch-reads the partner owner (ownerName+phone) + the
@@ -86,6 +88,8 @@ describe('PayoutsService', () => {
     // Default: the guarded atomic claim in processBatch succeeds (count 1).
     // Individual tests override to exercise the 0-count bad-state path.
     mockPrisma.payoutBatch.updateMany.mockResolvedValue({ count: 1 });
+    // processBatch's PENDING→INITIATED compare-and-set wins by default.
+    mockTx.payoutTransaction.updateMany.mockResolvedValue({ count: 1 });
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PayoutsService,
@@ -295,8 +299,9 @@ describe('PayoutsService', () => {
       expect(res.steps.disbursement.flagged).toBe(1);
       expect(res.status).toBe('SUBMITTED');
       // The disbursement + finalisation run inside the $transaction.
-      expect(mockTx.payoutTransaction.update).toHaveBeenCalledWith({
-        where: { id: 't1' },
+      // Guarded compare-and-set: only a still-PENDING row moves to INITIATED.
+      expect(mockTx.payoutTransaction.updateMany).toHaveBeenCalledWith({
+        where: { id: 't1', status: 'PENDING' },
         data: { status: 'INITIATED' },
       });
       expect(mockPrisma.auditLog.create).toHaveBeenCalled();
@@ -339,6 +344,123 @@ describe('PayoutsService', () => {
       expect(res.steps.disbursement.flagged).toBe(0); // invalid tx excluded
       // Even with zero valid transactions, the batch finalises SUBMITTED (no gate).
       expect(res.status).toBe('SUBMITTED');
+    });
+
+    // ── allowPayoutWithoutPan (per-tenant behaviour flag, default OFF) ──────────
+
+    const noPanTx = (over: Record<string, unknown> = {}) => ({
+      id: 't-nopan', partnerId: 'p-nopan', amountPaise: 150000,
+      payoutMode: 'UPI', upiId: 'nopan@upi', bankAccountNumber: null, ifscCode: null,
+      partner: {
+        panNumber: null, isActive: true, deletedAt: null,
+        kycSubmissions: [{ status: 'APPROVED' }],
+      },
+      ...over,
+    });
+
+    it('allowPayoutWithoutPan ABSENT: no-PAN tx is excluded with the exact legacy error (regression)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { soDeclarationKyc: true } });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([noPanTx()]);
+
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.errors).toEqual(['No PAN for partner p-nopan']);
+      expect(res.steps.validation.status).toBe('PASSED_WITH_WARNINGS');
+      expect(res.steps.disbursement.flagged).toBe(0);
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+      // The flag is read for THIS batch's tenant only.
+      expect(mockPrisma.client.findUnique).toHaveBeenCalledWith({
+        where: { id: 'deoleo' },
+        select: { features: true },
+      });
+    });
+
+    it('allowPayoutWithoutPan=false / non-boolean / null features: still excluded (only strict true enables)', async () => {
+      for (const features of [{ allowPayoutWithoutPan: false }, { allowPayoutWithoutPan: 'true' }, null]) {
+        jest.clearAllMocks();
+        mockPrisma.payoutBatch.updateMany.mockResolvedValue({ count: 1 });
+        mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+        mockPrisma.client.findUnique.mockResolvedValue({ features });
+        mockPrisma.payoutTransaction.findMany.mockResolvedValue([noPanTx()]);
+        const res = await service.processBatch(gifsy, 'b1');
+        expect(res.steps.validation.errors).toEqual(['No PAN for partner p-nopan']);
+        expect(res.steps.disbursement.flagged).toBe(0);
+      }
+    });
+
+    it('allowPayoutWithoutPan ON: no-PAN tx is valid and flagged INITIATED alongside a PAN tx', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { allowPayoutWithoutPan: true } });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        noPanTx(),
+        noPanTx({ id: 't-blankpan', partnerId: 'p-blank', partner: {
+          panNumber: '', isActive: true, deletedAt: null, kycSubmissions: [{ status: 'APPROVED' }],
+        } }),
+        noPanTx({ id: 't-pan', partnerId: 'p-pan', partner: {
+          panNumber: 'ABCDE1234F', isActive: true, deletedAt: null, kycSubmissions: [{ status: 'APPROVED' }],
+        } }),
+      ]);
+
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.errors).toEqual([]);
+      expect(res.steps.validation.status).toBe('PASSED');
+      expect(res.steps.disbursement.flagged).toBe(3);
+      expect(res.status).toBe('SUBMITTED');
+      const flaggedIds = mockTx.payoutTransaction.updateMany.mock.calls.map((c) => c[0].where.id);
+      expect(flaggedIds).toEqual(['t-nopan', 't-blankpan', 't-pan']);
+      // Payouts still never withhold TDS (the TDS engine buckets no-PAN under __NO_PAN__).
+      expect(mockPrisma.tdsRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('allowPayoutWithoutPan ON: every OTHER validation still excludes a no-PAN tx', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { allowPayoutWithoutPan: true } });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        noPanTx({ id: 't-amt', partnerId: 'p-amt', amountPaise: 0 }),
+        noPanTx({ id: 't-kyc', partnerId: 'p-kyc', partner: {
+          panNumber: null, isActive: true, deletedAt: null, kycSubmissions: [{ status: 'PENDING_ASM_APPROVAL' }],
+        } }),
+        noPanTx({ id: 't-inactive', partnerId: 'p-inactive', partner: {
+          panNumber: null, isActive: false, deletedAt: null, kycSubmissions: [{ status: 'APPROVED' }],
+        } }),
+        noPanTx({ id: 't-upi', partnerId: 'p-upi', upiId: null }),
+        noPanTx({ id: 't-bank', partnerId: 'p-bank', payoutMode: 'BANK_TRANSFER', upiId: null, ifscCode: 'HDFC0001234' }),
+      ]);
+
+      const res = await service.processBatch(gifsy, 'b1');
+      const errs = res.steps.validation.errors;
+      expect(errs.some((e) => /No PAN/.test(e))).toBe(false);
+      expect(errs).toEqual(expect.arrayContaining([
+        'Invalid amount for tx t-amt',
+        expect.stringMatching(/p-kyc KYC is not approved/),
+        expect.stringMatching(/p-inactive is ineligible \(PARTNER_INACTIVE\)/),
+        'Missing upiId for UPI transaction t-upi',
+        expect.stringMatching(/\[bankAccountNumber\] for BANK_TRANSFER transaction t-bank/),
+      ]));
+      expect(res.steps.disbursement.flagged).toBe(0);
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('RACE: a tx recorded as paid off-platform meanwhile (CAS count 0) is skipped, never overwritten', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: {} });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        noPanTx({ id: 't-raced', partnerId: 'p1', partner: {
+          panNumber: 'ABCDE1234F', isActive: true, deletedAt: null, kycSubmissions: [{ status: 'APPROVED' }],
+        } }),
+        noPanTx({ id: 't-ok', partnerId: 'p2', partner: {
+          panNumber: 'ABCDE1234G', isActive: true, deletedAt: null, kycSubmissions: [{ status: 'APPROVED' }],
+        } }),
+      ]);
+      mockTx.payoutTransaction.updateMany
+        .mockResolvedValueOnce({ count: 0 }) // t-raced: already SUCCESS (off-platform upload won)
+        .mockResolvedValueOnce({ count: 1 });
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.disbursement.flagged).toBe(1);
+      expect(mockTx.payoutTransaction.update).not.toHaveBeenCalled();
+      for (const c of mockTx.payoutTransaction.updateMany.mock.calls) {
+        expect(c[0].where.status).toBe('PENDING');
+      }
     });
 
     it('resets a claimed batch to FAILED if a step throws (never strands it in PROCESSING)', async () => {
@@ -705,6 +827,26 @@ describe('PayoutsService', () => {
       expect(res.filename).toBe('payout-utr-PB-1.xlsx');
     });
 
+    it("a no-PAN partner's transaction (allowPayoutWithoutPan ON) appears in the UTR template, PAN = N/A", async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-2' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 'txn-nopan', amountPaise: 150000, payoutMode: 'UPI', status: 'INITIATED',
+          partner: { businessName: 'No Pan Traders', panNumber: null },
+          beneficiaryName: 'Owner', bankAccountNumber: null, ifscCode: null, bankName: null, upiId: 'nopan@upi',
+        },
+      ]);
+      const res = await service.buildPayoutUtrTemplate(gifsy, 'b1');
+      expect(res.recordCount).toBe(1);
+      const wb = XLSX.read(res.buffer, { type: 'buffer' });
+      const rows = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+      expect(rows[0]['Transaction ID']).toBe('txn-nopan');
+      expect(rows[0]['Partner Name']).toBe('No Pan Traders');
+      expect(rows[0].PAN).toBe('N/A');
+      expect(rows[0]['Amount (₹)']).toBe('1500.00');
+      expect(rows[0]['UPI ID']).toBe('nopan@upi');
+    });
+
     it('export carries ALL beneficiary columns from the PayoutTransaction snapshot (blank where missing)', async () => {
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
@@ -866,6 +1008,515 @@ describe('PayoutsService', () => {
         }),
       );
       expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    // ── PROCESS-FIRST guard + "Paid outside platform" (owner-approved 2026-11-12) ─────────────
+    function buildOffPlatformUpload(
+      rows: { txnId: string; utr?: string; status: string; off?: string; note?: string }[],
+    ): Express.Multer.File {
+      const aoa: (string | number)[][] = [
+        ['Transaction ID', 'Partner Name', 'PAN', 'Amount (₹)', 'Mode', 'UTR', 'Status', 'Paid outside platform (Y/N)', 'Off-platform note'],
+        ...rows.map((r) => [r.txnId, '', '', '', '', r.utr ?? '', r.status, r.off ?? '', r.note ?? '']),
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'UTR Upload');
+      return { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+    }
+    const pendingTxn = (over: Record<string, unknown> = {}) => ({
+      id: 'txnP', status: 'PENDING', amountPaise: 150000n, providerRefId: null, payoutMode: 'UPI',
+      partnerId: 'p1', redemptionOrderId: 'o1', ...over,
+    });
+
+    it('GUARD: PAID on a PENDING (unprocessed) tx without the off-platform flag → preview row error, apply refused, nothing written', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+      const preview = (await service.uploadPayoutUtr(
+        gifsy, 'b1', buildOffPlatformUpload([{ txnId: 'txnP', utr: 'UTR12345678', status: 'PAID' }]), false,
+      )) as { parseResult: { canProceed: boolean; rows: Array<{ status: string; errors: string[] }> } };
+      expect(preview.parseResult.canProceed).toBe(false);
+      expect(preview.parseResult.rows[0].status).toBe('ERROR');
+      expect(preview.parseResult.rows[0].errors).toContain(
+        "This payment wasn't processed in a batch — process the batch first, or mark it 'Paid outside platform' if it was paid outside Gifsy.",
+      );
+
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+      await expect(
+        service.uploadPayoutUtr(gifsy, 'b1', buildOffPlatformUpload([{ txnId: 'txnP', utr: 'UTR12345678', status: 'PAID', off: 'N' }]), true),
+      ).rejects.toThrow(/Row 2: This payment wasn't processed in a batch/);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('GUARD: legacy template (no off-platform columns) — PAID on a PENDING tx is refused the same way', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+      await expect(
+        service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txnP', utr: 'UTR12345678', status: 'PAID' }]), true),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('OFF-PLATFORM: PAID + "Y" on a PENDING tx → SUCCESS flagged paidOffPlatform (+note), AuditLog row, order DELIVERED', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+
+      const res = await service.uploadPayoutUtr(
+        gifsy, 'b1',
+        buildOffPlatformUpload([{ txnId: 'txnP', utr: 'NEFT98765432', status: 'PAID', off: 'Y', note: 'Paid by cheque at depot' }]),
+        true,
+      );
+
+      expect(res).toMatchObject({ applied: true, paidCount: 1, offPlatformCount: 1, skipped: [] });
+      const claim = mockTx.payoutTransaction.updateMany.mock.calls[0][0];
+      expect(claim.where).toEqual({ id: 'txnP', status: 'PENDING' });
+      expect(claim.data).toMatchObject({
+        status: 'SUCCESS',
+        providerRefId: 'NEFT98765432',
+        providerResponse: {
+          paidOffPlatform: true, note: 'Paid by cheque at depot', recordedById: 'admin1', previousStatus: 'PENDING',
+        },
+      });
+      expect(mockTx.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'admin1',
+          action: 'UPDATE',
+          entityType: 'PayoutTransaction',
+          entityId: 'txnP',
+          oldValues: { status: 'PENDING' },
+          newValues: { status: 'SUCCESS', paidOffPlatform: true, providerRefId: 'NEFT98765432', note: 'Paid by cheque at depot' },
+          metadata: {
+            batchId: 'b1', batchCode: 'PB-1', source: 'PAYOUT_UTR_UPLOAD', paidOffPlatform: true,
+            // Gates bypassed by design are recorded (partner p1 here: no PAN, no KYC submission).
+            bypassedGates: ['noPan', 'kycNotApproved:NO_SUBMISSION', 'notProcessed', 'missingBeneficiaryFields'],
+          },
+        },
+      });
+      // Same downstream as a normal PAID: the linked redemption completes (→ 194R), no reversal.
+      expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'DELIVERED' }) }),
+      );
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('OFF-PLATFORM: "Y" still needs a valid UTR/reference and a positive amount', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([pendingTxn(), pendingTxn({ id: 'txnZero', amountPaise: 0n })])
+        .mockResolvedValueOnce([]);
+      const preview = (await service.uploadPayoutUtr(
+        gifsy, 'b1',
+        buildOffPlatformUpload([
+          { txnId: 'txnP', status: 'PAID', off: 'Y' },
+          { txnId: 'txnZero', utr: 'UTR55554444', status: 'PAID', off: 'Y' },
+        ]),
+        false,
+      )) as { parseResult: { canProceed: boolean; rows: Array<{ errors: string[] }> } };
+      expect(preview.parseResult.canProceed).toBe(false);
+      expect(preview.parseResult.rows[0].errors).toContain('UTR is required for a PAID transaction.');
+      expect(preview.parseResult.rows[1].errors).toContain(
+        'Cannot record an off-platform payment for a transaction with no valid amount.',
+      );
+    });
+
+    it('PROCESSED: PAID on an INITIATED tx with blank flag applies exactly as before (no flag, no audit row)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([pendingTxn({ id: 'txnI', status: 'INITIATED' })])
+        .mockResolvedValueOnce([]);
+      const res = await service.uploadPayoutUtr(
+        gifsy, 'b1', buildOffPlatformUpload([{ txnId: 'txnI', utr: 'UTR12345678', status: 'PAID' }]), true,
+      );
+      expect(res).toMatchObject({ applied: true, paidCount: 1, offPlatformCount: 0 });
+      const claim = mockTx.payoutTransaction.updateMany.mock.calls[0][0];
+      expect(claim.data).not.toHaveProperty('providerResponse');
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('FAILED on a PENDING tx is unaffected by the guard (still refunds once)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+      const res = await service.uploadPayoutUtr(
+        gifsy, 'b1', buildOffPlatformUpload([{ txnId: 'txnP', status: 'FAILED' }]), true,
+      );
+      expect(res).toMatchObject({ applied: true, failedCount: 1, paidCount: 0 });
+      expect(mockTx.payoutTransaction.updateMany.mock.calls[0][0].data).toMatchObject({ status: 'FAILED' });
+    });
+
+    // ── Off-platform hardening (audit of a020e8d7) ──────────────────────────────────
+    function buildOff2(
+      rows: { txnId: string; utr?: string; status: string; off?: string; amt?: string | number }[],
+    ): Express.Multer.File {
+      const aoa: (string | number)[][] = [
+        ['Transaction ID', 'UTR', 'Status', 'Paid outside platform (Y/N)', 'Off-platform note', 'Amount paid (₹)'],
+        ...rows.map((r) => [r.txnId, r.utr ?? '', r.status, r.off ?? '', '', r.amt ?? '']),
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'UTR Upload');
+      return { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+    }
+    type Preview = { parseResult: { canProceed: boolean; rows: Array<{ txnId: string; status: string; errors: string[] }> } };
+    async function preview(
+      txns: Array<Record<string, unknown>>,
+      history: Array<{ providerRefId: string; partnerId: string; providerResponse?: unknown }>,
+      rows: Parameters<typeof buildOff2>[0],
+      orders: Array<Record<string, unknown>> = [],
+    ): Promise<Preview['parseResult']> {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce(txns).mockResolvedValueOnce(history);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce(orders);
+      const res = (await service.uploadPayoutUtr(gifsy, 'b1', buildOff2(rows), false)) as Preview;
+      return res.parseResult;
+    }
+    const errorsOf = (r: Preview['parseResult'], id: string) => r.rows.find((x) => x.txnId === id)!.errors;
+
+    it('OFF-1: a "Y" row accepts a free-form reference (cheque no. / CASH 12-Nov / NEFT/HDFC/123); a non-Y row keeps the strict UTR rule', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a' }), pendingTxn({ id: 'b', partnerId: 'p2' }), pendingTxn({ id: 'c', partnerId: 'p3' }),
+          pendingTxn({ id: 'd', status: 'INITIATED', partnerId: 'p4' })],
+        [],
+        [
+          { txnId: 'a', utr: '004521', status: 'PAID', off: 'Y' },
+          { txnId: 'b', utr: 'CASH 12-Nov', status: 'PAID', off: 'Y' },
+          { txnId: 'c', utr: 'NEFT/HDFC/123', status: 'PAID', off: 'Y' },
+          { txnId: 'd', utr: 'CASH 12-Nov2', status: 'PAID' },
+        ],
+      );
+      expect(errorsOf(r, 'a')).toEqual([]);
+      expect(errorsOf(r, 'b')).toEqual([]);
+      expect(errorsOf(r, 'c')).toEqual([]);
+      expect(errorsOf(r, 'd').join(' ')).toMatch(/not valid \(must be 8–22 alphanumeric/);
+    });
+
+    it('OFF-1: a "Y" reference over 60 chars or with other symbols is rejected', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a' }), pendingTxn({ id: 'b', partnerId: 'p2' })],
+        [],
+        [
+          { txnId: 'a', utr: 'X'.repeat(61), status: 'PAID', off: 'Y' },
+          { txnId: 'b', utr: 'CASH<script>', status: 'PAID', off: 'Y' },
+        ],
+      );
+      expect(errorsOf(r, 'a').join(' ')).toMatch(/1–60 characters/);
+      expect(errorsOf(r, 'b').join(' ')).toMatch(/1–60 characters/);
+    });
+
+    it('OFF-2: same reference allowed for the SAME partner (history + this upload), rejected across partners', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a', partnerId: 'p1' }), pendingTxn({ id: 'b', partnerId: 'p1' }), pendingTxn({ id: 'c', partnerId: 'p2' })],
+        [{ providerRefId: 'CHQ 777', partnerId: 'p1', providerResponse: { paidOffPlatform: true } }],
+        [
+          { txnId: 'a', utr: 'chq 777', status: 'PAID', off: 'Y' },
+          { txnId: 'b', utr: 'CHQ 777', status: 'PAID', off: 'Y' },
+          { txnId: 'c', utr: 'CHQ 777', status: 'PAID', off: 'Y' },
+        ],
+      );
+      expect(errorsOf(r, 'c').join(' ')).toMatch(/already been used for a different partner/);
+      // a + b share p1 but c (p2) uses the same reference in this upload → a/b flagged too.
+      expect(errorsOf(r, 'a').join(' ')).toMatch(/more than once in this upload for a different partner/);
+
+      const ok = await preview(
+        [pendingTxn({ id: 'a', partnerId: 'p1' }), pendingTxn({ id: 'b', partnerId: 'p1' })],
+        [{ providerRefId: 'CHQ 777', partnerId: 'p1', providerResponse: { paidOffPlatform: true } }],
+        [
+          { txnId: 'a', utr: 'CHQ 777', status: 'PAID', off: 'Y' },
+          { txnId: 'b', utr: 'chq-777', status: 'PAID', off: 'Y' }, // normalised → same reference
+        ],
+      );
+      expect(ok.canProceed).toBe(true);
+    });
+
+    it('OFF-3: "Amount paid (₹)" must equal the payout amount on a Y row; blank = full amount; non-Y rows ignore it', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a', partnerId: 'p1' }), pendingTxn({ id: 'b', partnerId: 'p2' }), pendingTxn({ id: 'c', partnerId: 'p3' }),
+          pendingTxn({ id: 'd', status: 'INITIATED', partnerId: 'p4' })],
+        [],
+        [
+          { txnId: 'a', utr: 'REF-A', status: 'PAID', off: 'Y', amt: 1500 },        // = ₹1,500.00
+          { txnId: 'b', utr: 'REF-B', status: 'PAID', off: 'Y', amt: '1,499.99' },
+          { txnId: 'c', utr: 'REF-C', status: 'PAID', off: 'Y' },                   // blank → full
+          { txnId: 'd', utr: 'UTR12345678', status: 'PAID', amt: 1 },               // non-Y → ignored
+        ],
+      );
+      expect(errorsOf(r, 'a')).toEqual([]);
+      expect(errorsOf(r, 'b')).toEqual(["Amount paid doesn't match the payout amount"]);
+      expect(errorsOf(r, 'c')).toEqual([]);
+      expect(errorsOf(r, 'd')).toEqual([]);
+    });
+
+    it('OFF-4: an off-platform PAID never verify-stamps the partner\'s captured bank/UPI', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([pendingTxn({ upiId: 'p1@upi' })])
+        .mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([{ id: 'o1', status: 'CONFIRMED', pointsDeducted: 500 }]);
+      await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 1', status: 'PAID', off: 'Y' }]), true);
+      expect(mockTx.payoutTransaction.updateMany).toHaveBeenCalled();
+      expect(mockTx.channelPartner.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('OFF-5: a Y row is rejected when the linked redemption was cancelled/returned/failed or refunded', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a', redemptionOrderId: 'oC' }), pendingTxn({ id: 'b', partnerId: 'p2', redemptionOrderId: 'oR' }),
+          pendingTxn({ id: 'c', partnerId: 'p3', redemptionOrderId: 'oOk' })],
+        [],
+        [
+          { txnId: 'a', utr: 'REF-A', status: 'PAID', off: 'Y' },
+          { txnId: 'b', utr: 'REF-B', status: 'PAID', off: 'Y' },
+          { txnId: 'c', utr: 'REF-C', status: 'PAID', off: 'Y' },
+        ],
+        [
+          { id: 'oC', status: 'CANCELLED', pointsDeducted: 500 },
+          { id: 'oR', status: 'CONFIRMED', pointsDeducted: 0 }, // points refunded (M2 claim)
+          { id: 'oOk', status: 'CONFIRMED', pointsDeducted: 500 },
+        ],
+      );
+      const msg = "This redemption was cancelled and its points refunded — it can't be marked paid";
+      expect(errorsOf(r, 'a')).toEqual([msg]);
+      expect(errorsOf(r, 'b')).toEqual([msg]);
+      expect(errorsOf(r, 'c')).toEqual([]);
+    });
+
+    it('OFF-5: a refund landing between preview and apply is caught inside the tx (row skipped, nothing written)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([{ id: 'o1', status: 'CONFIRMED', pointsDeducted: 500 }]);
+      mockTx.redemptionOrder.findFirst.mockResolvedValueOnce({ status: 'CANCELLED', pointsDeducted: 0 });
+      const res = await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 1', status: 'PAID', off: 'Y' }]), true);
+      expect(res).toMatchObject({ paidCount: 0, offPlatformCount: 0 });
+      expect((res as { skipped: Array<{ reason: string }> }).skipped[0].reason).toMatch(/can't be marked paid/);
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('OFF-6: the audit row records every gate the off-platform payment bypassed', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([]);
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { id: 'p1', panNumber: null, isActive: false, deletedAt: new Date(), kycSubmissions: [
+          { id: 'k1', status: 'REJECTED', createdAt: new Date(), updatedAt: new Date() },
+        ] },
+      ]);
+      await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 1', status: 'PAID', off: 'Y' }]), true);
+      const meta = mockTx.auditLog.create.mock.calls[0][0].data.metadata;
+      expect(meta.bypassedGates).toEqual([
+        'noPan', 'kycNotApproved:REJECTED', 'partnerInactive', 'partnerDeleted', 'notProcessed', 'missingBeneficiaryFields',
+      ]);
+      // a clean partner records an empty list
+      jest.clearAllMocks();
+      mockTx.payoutTransaction.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn({ upiId: 'p1@upi' })]).mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([]);
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { id: 'p1', panNumber: 'ABCDE1234F', isActive: true, deletedAt: null, kycSubmissions: [
+          { id: 'k1', status: 'APPROVED', createdAt: new Date(), updatedAt: new Date() },
+        ] },
+      ]);
+      await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 2', status: 'PAID', off: 'Y' }]), true);
+      // clean partner + UPI present → only the inherent "notProcessed" (a Y row is by definition unprocessed)
+      expect(mockTx.auditLog.create.mock.calls[0][0].data.metadata.bypassedGates).toEqual(['notProcessed']);
+    });
+
+    // ── Round-3 audit ──────────────────────────────────────────────────────────────
+    it('R3-5: "Y" on a tx already sent to the bank (INITIATED) is rejected, naming the batch', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a', status: 'INITIATED' }), pendingTxn({ id: 'b', status: 'PROCESSING', partnerId: 'p2' })],
+        [],
+        [
+          { txnId: 'a', utr: 'CASH 1', status: 'PAID', off: 'Y' },
+          { txnId: 'b', utr: 'CASH 2', status: 'PAID', off: 'Y' },
+        ],
+      );
+      const msg = "This payment was already sent to the bank in batch PB-1 and its outcome isn't recorded yet. Record the bank result first: if the bank payment failed or was returned, upload it as FAILED. After that it can be marked 'Paid outside platform' = Y — unless its points were refunded when it failed.";
+      expect(errorsOf(r, 'a')).toEqual([msg]);
+      expect(errorsOf(r, 'b')).toEqual([msg]);
+    });
+
+    // ── Final audit of cc4d11be ────────────────────────────────────────────────────
+    const REFUNDED_MSG = "Points for this redemption were already refunded — it can't also be marked paid";
+
+    it('FA-1: "Y" on a FAILED/REVERSED tx — refunded order → explicit per-row error; unrefunded / no order → OK', async () => {
+      const r = await preview(
+        [
+          pendingTxn({ id: 'fRef', status: 'FAILED', redemptionOrderId: 'oF' }),                    // order FAILED → refunded
+          pendingTxn({ id: 'rRef', status: 'REVERSED', partnerId: 'p2', redemptionOrderId: 'oZ' }), // points 0 → refunded
+          pendingTxn({ id: 'fVch', status: 'FAILED', partnerId: 'p3', redemptionOrderId: 'oV' }),   // voucher-blocked, unrefunded
+          pendingTxn({ id: 'fNone', status: 'FAILED', partnerId: 'p4', redemptionOrderId: null }),  // no linked order
+        ],
+        [],
+        [
+          { txnId: 'fRef', utr: 'CASH A', status: 'PAID', off: 'Y' },
+          { txnId: 'rRef', utr: 'CASH B', status: 'PAID', off: 'Y' },
+          { txnId: 'fVch', utr: 'CASH C', status: 'PAID', off: 'Y' },
+          { txnId: 'fNone', utr: 'CASH D', status: 'PAID', off: 'Y' },
+        ],
+        [
+          { id: 'oF', status: 'FAILED', pointsDeducted: 500 },
+          { id: 'oZ', status: 'CONFIRMED', pointsDeducted: 0 },
+          { id: 'oV', status: 'PROCESSING', pointsDeducted: 500 },
+        ],
+      );
+      expect(errorsOf(r, 'fRef')).toEqual([REFUNDED_MSG]);
+      expect(errorsOf(r, 'rRef')).toEqual([REFUNDED_MSG]);
+      expect(errorsOf(r, 'fVch')).toEqual([]);
+      expect(errorsOf(r, 'fNone')).toEqual([]);
+      expect(r.rows.find((x) => x.txnId === 'fVch')!.status).toBe('OK');
+    });
+
+    it('FA-1: "Y" on a FAILED tx (unrefunded) APPLIES → SUCCESS with audit bypassedGates incl. previouslyFailed (never silently dropped)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([pendingTxn({ status: 'FAILED', upiId: 'p1@upi' })])
+        .mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([{ id: 'o1', status: 'PROCESSING', pointsDeducted: 500 }]);
+      mockTx.redemptionOrder.findFirst.mockResolvedValueOnce({ status: 'PROCESSING', pointsDeducted: 500 });
+      const res = await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 9', status: 'PAID', off: 'Y' }]), true);
+      expect(res).toMatchObject({ applied: true, paidCount: 1, offPlatformCount: 1, skipped: [] });
+      const claim = mockTx.payoutTransaction.updateMany.mock.calls[0][0];
+      expect(claim.where).toEqual({ id: 'txnP', status: 'FAILED' });
+      expect(claim.data).toMatchObject({ status: 'SUCCESS', providerResponse: { paidOffPlatform: true, previousStatus: 'FAILED' } });
+      const meta = mockTx.auditLog.create.mock.calls[0][0].data.metadata;
+      expect(meta.bypassedGates).toContain('previouslyFailed');
+      expect(meta.bypassedGates).not.toContain('notProcessed');
+    });
+
+    it('FA-1: a refund landing between preview and apply on a FAILED tx is reported in skipped with the refunded message', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn({ status: 'FAILED' })]).mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([{ id: 'o1', status: 'PROCESSING', pointsDeducted: 500 }]);
+      mockTx.redemptionOrder.findFirst.mockResolvedValueOnce({ status: 'FAILED', pointsDeducted: 0 });
+      const res = await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 9', status: 'PAID', off: 'Y' }]), true);
+      expect((res as { skipped: Array<{ reason: string }> }).skipped).toEqual([
+        expect.objectContaining({ rowNum: 2, reason: REFUNDED_MSG }),
+      ]);
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('FA-1: on a FAILED tx a bank UTR (no Y) is an explicit error and a FAILED row is a visible notice', async () => {
+      const r = (await preview(
+        [pendingTxn({ id: 'a', status: 'FAILED' }), pendingTxn({ id: 'b', status: 'REVERSED', partnerId: 'p2' })],
+        [],
+        [
+          { txnId: 'a', utr: 'UTR12345678', status: 'PAID' },
+          { txnId: 'b', status: 'FAILED' },
+        ],
+      )) as unknown as Preview['parseResult'] & {
+        alreadyPaid: Array<{ txnId: string; notice: string }>;
+        noChange: Array<{ rowNum: number; txnId: string; notice: string }>;
+      };
+      expect(errorsOf(r, 'a').join(' ')).toMatch(/already recorded as failed — a bank UTR can't be applied/);
+      expect(r.rows.find((x) => x.txnId === 'b')!.status).toBe('SKIP');
+      // Informational no-op → its own `noChange` category, never the double-payment `alreadyPaid` list.
+      expect(r.noChange).toEqual([{ rowNum: 3, txnId: 'b', notice: 'Already recorded as reversed — no change' }]);
+      expect(r.alreadyPaid).toEqual([]);
+    });
+
+    it('FA-1b: apply — a FAILED row on an already-FAILED tx is returned in noChange (not alreadyPaid), nothing written', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([pendingTxn({ id: 'f1', status: 'FAILED' })])
+        .mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([]);
+      const res = (await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'f1', status: 'FAILED' }]), true)) as {
+        alreadyPaid: unknown[]; noChange: Array<{ rowNum: number; txnId: string; notice: string }>;
+      };
+      expect(res.noChange).toEqual([{ rowNum: 2, txnId: 'f1', notice: 'Already recorded as failed — no change' }]);
+      expect(res.alreadyPaid).toEqual([]);
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('FA-5: a bank UTR collides only with GENUINE bank UTRs, not with a normalised off-platform reference', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a', status: 'INITIATED' }), pendingTxn({ id: 'b', status: 'INITIATED', partnerId: 'p2' })],
+        [
+          { providerRefId: 'CHQ-123456', partnerId: 'p9', providerResponse: { paidOffPlatform: true } }, // off-platform ref
+          { providerRefId: 'UTR99990000', partnerId: 'p8' },                                            // genuine bank UTR
+        ],
+        [
+          { txnId: 'a', utr: 'CHQ123456', status: 'PAID' },
+          { txnId: 'b', utr: 'utr99990000', status: 'PAID' },
+        ],
+      );
+      expect(errorsOf(r, 'a')).toEqual([]);
+      expect(errorsOf(r, 'b')).toEqual(['UTR "utr99990000" has already been used.']);
+    });
+
+    it('R3-6: a row for an already-SUCCESS tx is a visible notice (preview + apply result), never applied', async () => {
+      const paidAt = new Date(Date.now() - 3 * 86_400_000);
+      const success = pendingTxn({ id: 's1', status: 'SUCCESS', completedAt: paidAt, providerResponse: { paidOffPlatform: true } });
+      const r = (await preview([success], [], [{ txnId: 's1', utr: 'UTR99998888', status: 'PAID' }])) as unknown as {
+        canProceed: boolean; alreadyPaid: Array<{ notice: string }>; rows: Array<{ status: string }>;
+      };
+      expect(r.rows[0].status).toBe('SKIP');
+      expect(r.alreadyPaid[0].notice).toMatch(/^Already marked paid on \d{4}-\d{2}-\d{2} \(off-platform\) — check for a double payment$/);
+      expect(r.canProceed).toBe(true); // a no-op re-upload stays applicable (idempotent)
+
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([pendingTxn({ id: 's1', status: 'SUCCESS', completedAt: paidAt, providerResponse: null })])
+        .mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([]);
+      const res = (await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 's1', status: 'FAILED' }]), true)) as {
+        alreadyPaid: Array<{ notice: string }>;
+      };
+      expect(res.alreadyPaid[0].notice).toMatch(/\(bank\) — check for a double payment$/);
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('R3-7: references are compared normalised; a Y row may not reuse a genuine bank UTR (any partner)', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a', partnerId: 'p1' }), pendingTxn({ id: 'b', status: 'INITIATED', partnerId: 'p2' })],
+        [{ providerRefId: 'UTR12345678', partnerId: 'p1', providerResponse: null }],
+        [
+          { txnId: 'a', utr: 'utr-1234 5678', status: 'PAID', off: 'Y' }, // same partner, but it was a bank UTR
+          { txnId: 'b', utr: 'utr12345678', status: 'PAID' },              // non-Y duplicate (case-insensitive)
+        ],
+      );
+      expect(errorsOf(r, 'a').join(' ')).toMatch(/already used as a bank UTR/);
+      expect(errorsOf(r, 'b').join(' ')).toMatch(/has already been used/);
+    });
+
+    it('R3-8: "Amount paid (₹)" accepts ₹ / Rs / Rs. / INR prefixes and commas; unknown headers are listed as ignored', async () => {
+      const txns = ['a', 'b', 'c', 'd'].map((id, i) => pendingTxn({ id, partnerId: `p${i}` }));
+      const r = await preview(txns, [], [
+        { txnId: 'a', utr: 'R-A', status: 'PAID', off: 'Y', amt: 'Rs 1,500' },
+        { txnId: 'b', utr: 'R-B', status: 'PAID', off: 'Y', amt: 'Rs. 1500.00' },
+        { txnId: 'c', utr: 'R-C', status: 'PAID', off: 'Y', amt: 'INR 1,500' },
+        { txnId: 'd', utr: 'R-D', status: 'PAID', off: 'Y', amt: '₹1,500' },
+      ]);
+      for (const id of ['a', 'b', 'c', 'd']) expect(errorsOf(r, id)).toEqual([]);
+
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([]);
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['Transaction ID', 'UTR', 'Status', 'Paid outside platfrom (Y/N)'], // typo'd header
+        ['txnP', 'UTR12345678', 'FAILED', 'Y'],
+      ]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'UTR Upload');
+      const res = (await service.uploadPayoutUtr(
+        gifsy, 'b1', { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File, false,
+      )) as { parseResult: { warnings: string[] } };
+      expect(res.parseResult.warnings).toEqual(['Ignored columns (not recognised): "Paid outside platfrom (Y/N)"']);
+    });
+
+    it('template carries the three optional off-platform columns, blank', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        { id: 't1', amountPaise: 100000, payoutMode: 'UPI', partner: { businessName: 'A', panNumber: null } },
+      ]);
+      const res = await service.buildPayoutUtrTemplate(gifsy, 'b1');
+      const wb = XLSX.read(res.buffer, { type: 'buffer' });
+      const aoa = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' });
+      expect(aoa[0].slice(-5)).toEqual(['UTR', 'Status', 'Paid outside platform (Y/N)', 'Off-platform note', 'Amount paid (₹)']);
+      expect(aoa[1].slice(-3)).toEqual(['', '', '']);
     });
 
     // capture-bank-at-redemption: a PAID payout verifies the partner ONLY when the current rail still

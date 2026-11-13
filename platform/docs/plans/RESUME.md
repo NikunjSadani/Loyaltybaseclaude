@@ -12,7 +12,75 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 📍 STATE 2026-11-11 — read this FIRST
 
-> **⏸ STOP-OVER 2026-11-11 night (owner asleep) — resume here.** Branch `feat/sales-import` (worktree
+> **📍 2026-11-13 — WHAT'S IN FLIGHT (supersedes the 11-12 block below where they differ):**
+> 1. ✅ **Applies-to (KPI + visibility scope) LIVE ON STAGING** — develop `7a78bc26`; Bajaj staging role test PASSED
+>    (admin scope form + live count, template Program/Sub-Program + N/A, upload ignoredOutOfScope, Unnati partner hides
+>    SAMT-only LINES, SAMT partner sees it; temp scope reverted). Still to check on staging: sales-rep views + visibility editor.
+> 2. ✅ **Bajaj prod imports done:** outlets/KYC/docs, visibility history (51,123 / 61,779 photos), wholesaler points
+>    (2,281 wallets = vendor 11-Nov closing, Σ 67,27,723; 8 NEGATIVE wallets kept) — `BAJAJ-PROD-OUTLET-IMPORT.md` §8, §9b.
+>    ⏸ Payout history (48,086 / ₹2.89 cr) dry-run PASS → runs AFTER the release (§9). Partial vendor TDS (119 wholesalers)
+>    approved → after payout history (§10).
+> 3. 🔧 **Release `feat/payout-without-pan`** (no-PAN payouts · rounding · TDS deposit-only rows + deposit "TDS for month"
+>    + day-first dates + cross-upload dedup + 194C withheld-only/entity type · KYC labels · wallet: never-adds-points clamp
+>    + INTERIM reversal rules (points reversals refused on wallets carrying debt; payout reversals whole-entry, exact
+>    subset, never consumed twice)) — dual audits done; last fix round → push (gates) → staging → owner prod deploy.
+>    ⚠️ **PREPARE MAIN = `git revert e8c3f46` EXPLICITLY** (re-adds the 194R VENDOR_IMPORT exclusion — owner 2026-11-12:
+>    ship the rule before the payout-history import). A plain merge does NOT undo the revert (audit 2026-11-13). After
+>    preparing, verify `git grep VENDOR_IMPORT <main> -- api/src/tds` hits BOTH tds.service.ts and its spec. This REPLACES
+>    the old "keep TDS revert" rule.
+> 4. ⏸ **Wallet reversal engine = FAST FOLLOW-UP AFTER GO-LIVE** (owner 2026-11-13). Branch `feat/wallet-reversal-engine`
+>    (pushed), complete record + resume checklist in `WALLET-REVERSAL-ENGINE-DESIGN.md` on that branch.
+> 5. Next go-live work: targets/achievement import (need file + column→prod KPI mapping) · client training deck.
+> 6. Open owner decision (non-blocking, pre-existing): 194C "Outstanding" = liability − deposited − withheld double-counts
+>    once Gifsy uploads deposits for withheld DEDUCT TDS (guide now says don't upload withheld TDS as a deposit). Prod has 0
+>    deposits/deductions today.
+> 7. Process rule: staging role tests — log in myself with FIXED_OTP 123456; prod logins stay with the owner.
+
+> **📍 2026-11-12 (afternoon) — WHAT'S IN FLIGHT (read first):**
+> 1. ✅ **Bajaj outlet/KYC/document import LIVE on prod + verified** (6,491 outlets, 22,621 docs in our storage, 19 owner
+>    groups) — full record + correction runbook: `BAJAJ-PROD-OUTLET-IMPORT.md`. Correction file sent to owner for Bajaj.
+> 2. 🔧 **Next release (branch `feat/payout-without-pan`, worktree `.claude/worktrees/payout-no-pan`, NOT pushed):**
+>    Bajaj-only flag `allowPayoutWithoutPan` (processBatch no-PAN exclusion gated); UTR upload "Paid outside platform (Y/N)"
+>    + note + optional amount (free-form refs, never on bank-sent rows, never for refunded orders, no bank-detail verify);
+>    process-first rule (all tenants, owner-approved); per-partner no-PAN 194R / per-outlet 194C TDS; strict PAN on TDS
+>    uploads (blank rejected; PANNOTAVBL etc. + Outlet Code); features audit log + confirm dialog; KYC review labels for
+>    OTHER docs ("Counter photo" etc.); **credits upload rounds points AND ₹ payouts half-up to WHOLE units** (owner rule).
+>    4 dual-audit rounds; last nit round in progress → full gates → Bajaj staging role test → owner deploys.
+> 3. 🔧 **Fast follow-ups #1+#2+#3 building in parallel** (branch `feat/applies-to`, worktree `.claude/worktrees/applies-to`):
+>    one shared "applies-to" scope {outletTypes[], programs[], subPrograms[]} for KPIs (multi-type + program/sub-program)
+>    and Visibility (program/sub-program). Owner approved ALL ★ decisions — plan `APPLIES-TO-TARGETING-PLAN.md`
+>    (on that branch). WP-0 contract in progress → WP-A/B/C parallel → audit → gates → Deoleo no-change proof → Bajaj staging.
+> 4. **Owner prod setup for Bajaj (UI):** steps 1–9 done (flags, sub-programs incl. TOT, settings, points engine ON, 2 client
+>    admins, KPIs = TOTAL(primary)/ADHO/NON ADHO/FOCUS BRAND/FOCUS BRAND 2/LINES — note: NOT staging's codes, visibility).
+>    Owner renaming credit field "Target Achievement" → "Monthly Achievement" (deactivate + recreate; no rename feature).
+>    Remaining: credit fields (10), points rule with prod KPI codes (11), sales-import mapping (12), catalogue fixes after
+>    Hubble whitelist (13), offers (14). Hubble prod: owner says dynamic IP allowed, but login still 401 "not whitelisted"
+>    (request id 01M777QKR7CCTB2VHQXGX2WZZ2) → chase Hubble.
+> 5. **Rounding rule (owner):** cases/values may be decimal; points and ₹ payouts are credited in WHOLE units, rounded
+>    half-up ONCE at the end. Points engine already does this; credits upload fixed in (2).
+> 6. Staging leftovers: Bajaj order BAJAJ-26-000031 held (Hubble sandbox was 502 — reconcile/cancel); Deoleo staging
+>    "ZZ PIN test card" + Sai Trader order kept on purpose (owner).
+
+> **🚀 2026-11-12 ~09:10 IST: PROD CUTOVER #59 DONE — prod = `a18cc932`** (main = develop `dd27888b` + TDS revert kept; full
+> gates 5,456 / 3,706 green on that SHA; on-demand prod DB backup `1794452768704` taken first). api + frontend + `gifsy-sales-import`
+> job all serve `a18cc932`; owner dispatched the deploy. Post-deploy DONE: `run.jobsExecutor` on `gifsy-sales-import` for
+> gifsy-api-sa; Scheduler `sales-import-drain` (*/10 IST, 170 s, x-drain-secret) created — test run 200, no-secret 403;
+> per-number OTP throttle PROVEN on prod (same number: 6th → 429; 8 different numbers from same IP → none throttled);
+> no ERROR logs post-deploy; deoleo / deoleoloyalty / bajajloyalty hosts serve the right login. **Still open:** Hubble prod IP
+> allow-list removal (Hubble) → re-run read-only prod lookup → "Load from Hubble" on prod; Hubble SANDBOX 502 → reconcile Bajaj
+> staging order BAJAJ-26-000031; Bajaj prod flags (offerTiles/outletMasterGeo/soDeclarationKyc) via console = owner; Bajaj KPI
+> config → October points. Then FAST FOLLOW-UP #1 (KPI↔Program link).
+>
+> **✅ 2026-11-12: release `dd27888b` PUSHED + LIVE ON STAGING** (api + frontend serving `dd27888b`; full gates 5,457 / 3,706 green).
+> Real-login API matrix on staging PASSED (Deoleo): ₹750.5 → 400 "Enter a whole-rupee amount"; card no. issued then PIN added
+> once (same PIN = no-op, different = 400, 65 chars = 400); partner list/detail show code+PIN, track has no PIN; SALES_ISR list
+> empty + detail/track 403; CLIENT_ADMIN code/pin null + "issued"; Gifsy detail + dispatch show both; bell re-sent "card no. and
+> PIN are in My Orders", no PIN stored in any notification. ⚠️ TEST DATA LEFT FOR OWNER UAT (clean up after): temp reward
+> `cmwcybras000e01s6wb2zvzur` "ZZ PIN test card (staging, temporary)" + Sai Trader (9000000300) order in `pin-state.json`
+> (PROCESSING, card TESTCARD…, PIN 0042, 250 pts debited) → cleanup = voucher-cancelled → CANCELLED (refund) → reward DISCONTINUED.
+> On-screen checks DONE 2026-11-12 (owner said go ahead): Deoleo partner My Orders shows Card no.+PIN w/ Copy; Gifsy dispatch PIN masked → Show/Hide PIN; Bajaj SO catalogue "750.5" → "Check the amount — whole rupees only", Send OTP sends nothing, "1,250" → 1250; Bajaj physical order BAJAJ-26-000026 fulfilment save (Gifsy warehouse + TESTTRK12345) → 200 (old 400 bug fixed). Owner: LEAVE the Deoleo test data. ⚠️ Bajaj order BAJAJ-26-000031 (Boat ₹500, pera sakti canteen, placed by SO 8058006912, owner-approved outlet) is HUBBLE_INDETERMINATE: Hubble SANDBOX (api.dev.myhubble.money) auth returned 502 — Hubble-side outage; points held. When the sandbox is back → Gifsy reconcile it → see whether Boat returns card+PIN.
+>
+> **⏸ STOP-OVER 2026-11-11 night (owner asleep) — superseded by the line above.** Branch `feat/sales-import` (worktree
 > `.claude/worktrees/sales-import`) HEAD = merge `defc6087` = everything below + the **Hubble per-brand amounts + whole-rupee
 > amounts + GIFT-CARD PIN** work (branch `feat/hubble-denominations` up to `2549e593`; 4 dual-audit rounds, all findings fixed;
 > owner-approved platform-wide). **NOT pushed** (push to develop needs the owner at the keyboard for the platform-wide hook).
@@ -99,7 +167,7 @@ UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration
 - Pre-existing, noted by reviewers: admin/vendor `transitionOrder` have no status guard (stale-read race); OTP-send-failure
   cleanup deletes a concurrent redeem's fresh OTP; My Orders page fetches only the newest 20 orders; wallet payout list caps
   at 100 rows.
-- **TDS 194R:** `e8c3f463` reverted the VENDOR_IMPORT exclusion on `main` only — still present on `develop`. Standing rule (2026-11-10): every "prepare main" KEEPS the revert (`git diff <prev-main> HEAD -- api/src/tds/` empty).
+- **TDS 194R:** `e8c3f463` reverted the VENDOR_IMPORT exclusion on `main` only — still present on `develop`. ~~Standing rule (2026-11-10): every "prepare main" KEEPS the revert.~~ **SUPERSEDED 2026-11-12/13 (owner): the next prepare-main must `git revert e8c3f46` explicitly** so the exclusion reaches prod before the Bajaj payout-history import; verify with `git grep VENDOR_IMPORT`.
 - **OTP hardening deploy note (this release):** KYC consent OTPs are now bound to the submission (stored with its id + the owner's
   normalised phone). Consent OTPs already sent before the deploy have no submission id → verifying them returns "OTP not found or
   expired"; the rep taps **Resend** (OTPs expire in 10 min, so the window is tiny). Login now only accepts LOGIN-purpose OTPs; the hourly
@@ -163,7 +231,7 @@ UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration
 
 ## ▶▶ WHAT'S NEXT
 - **Live next steps = 📍 STATE 2026-11-11 at the top** (release LIVE on staging `7c85d9fd` → owner staging UAT → owner creates prod Hubble secrets → decide prod Sales Import infra → prepare main → manual prod deploy + post-deploy checks → Bajaj October points).
-- 🔜 **FAST FOLLOW-UP #1 (owner 2026-11-11 — build ONLY after this release is on prod and closed): KPI ↔ Program / Sub-Program link.**
+- 🔧 **FAST FOLLOW-UPS #1 KPI↔Program/Sub-Program + #2 KPI outlet-type multi-select + #3 Visibility by Program/Sub-Program — BUILDING since 2026-11-12 (owner asked to run in parallel; all ★ decisions approved), branch `feat/applies-to`, plan `APPLIES-TO-TARGETING-PLAN.md`. Original #1 note:**
   Today `KpiDef` is tenant-wide (only an optional `outletType` tag); there is NO program link. Interim workaround = upload
   targets only for that program's outlets (blank cells = no target, excluded from achieved counts; compute rules +
   dashboards already filter by Program/Sub-Program). Proposed (⚠️ PLATFORM-WIDE — owner approved the idea, not yet the build):

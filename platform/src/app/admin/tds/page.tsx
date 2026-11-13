@@ -27,15 +27,20 @@ import {
 import { useAdminSession } from '@/lib/admin-session';
 import { authHeader } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
+import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface Tds194RRow {
   panNumber:        string;
+  noPanDeductee?:   NoPanDeductee;
+  unlinkedNoPanDeposit?: boolean;
   baseFyTotalPaise: number | string;
   liabilityPaise:   number | string;
   depositedPaise:   number | string;
   outstandingPaise: number | string;
+  /** "TDS for month" (YYYY-MM) of the deposits counted on this row. */
+  depositForPeriods?: string[];
 }
 
 interface Tds194RResponse {
@@ -52,6 +57,8 @@ interface Tds194RResponse {
 
 interface Tds194CRow {
   panNumber:               string;
+  noPanDeductee?:          NoPanDeductee;
+  unlinkedNoPanDeposit?: boolean;
   entityType:              string;
   maxSinglePaise:          number | string;
   thresholdMet:            boolean;
@@ -59,6 +66,7 @@ interface Tds194CRow {
   liabilityNoThresholdPaise: number | string;
   depositedPaise:          number | string;
   outstandingPaise:        number | string;
+  depositForPeriods?:      string[];
 }
 
 interface Tds194CResponse {
@@ -73,13 +81,20 @@ interface Tds194CResponse {
   rows: Tds194CRow[];
 }
 
+/** Backend row messages are `{ row, message }` objects (older builds: plain strings). */
+type UploadRowMessage = string | { row: number; message: string };
+
 interface UploadResult {
   processed: number;
   succeeded: number;
   skipped:   number;
   failed:    number;
-  errors:    string[];
+  errors:    UploadRowMessage[];
+  /** Non-blocking notices, e.g. "PAN found on file for outlet X — counted under that PAN". */
+  warnings?: UploadRowMessage[];
 }
+
+const rowMessageText = (m: UploadRowMessage): string => (typeof m === 'string' ? m : m.message);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -127,7 +142,29 @@ async function downloadXlsx(url: string, filename: string): Promise<string | nul
   }
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "2026-03" → "Mar-2026" (anything else unchanged). */
+function formatForPeriod(period: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(period);
+  const idx = m ? Number(m[2]) - 1 : -1;
+  return m && idx >= 0 && idx < 12 ? `${MONTHS[idx]}-${m[1]}` : period;
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
+
+/** Deposited amount + the "TDS for month" the counted deposits pay for. */
+function DepositedCell({ paise, periods }: { paise: number | string; periods?: string[] }) {
+  return (
+    <>
+      <span>{formatINR(p(paise))}</span>
+      {periods && periods.length > 0 && (
+        <span className="block text-[11px] text-gray-400" title="TDS for month of the deposits counted here">
+          for {periods.map(formatForPeriod).join(', ')}
+        </span>
+      )}
+    </>
+  );
+}
 
 function OutstandingCell({ paise }: { paise: number | string }) {
   const v = p(paise);
@@ -145,6 +182,28 @@ function SummaryCard({ label, paise }: { label: string; paise: number | string }
   );
 }
 
+/** Deposit-upload guidance: which FY a deposit counts for. */
+function DepositForMonthHint() {
+  return (
+    <div data-testid="deposit-for-month-hint" className="space-y-1">
+      <p>
+        Each deposit counts for the financial year of the <strong>month whose TDS it pays</strong> — fill the
+        optional <strong>TDS for month</strong> column (e.g. <code>2026-03</code> or <code>Mar-2026</code>). Left blank:
+        a deposit made on the 1st–7th counts for the previous month, one made 8–30 April counts for March,
+        otherwise its own month. So March TDS deposited in April stays in the March financial year.
+        Dates are read day-first (<code>07/04/2026</code> = 7 April 2026).
+      </p>
+      <p data-testid="deposit-upload-warnings">
+        <strong>Do not upload TDS that Gifsy already withheld from payouts</strong> (the &ldquo;deduct&rdquo;
+        method) — it is already counted as withheld, so uploading it again counts it twice.{' '}
+        <strong>An uploaded deposit cannot be edited or deleted</strong> — check every row in the preview
+        before you apply. A deposit already uploaded (same PAN, date and amount) is skipped, or rejected if
+        its TDS for month differs.
+      </p>
+    </div>
+  );
+}
+
 /** Two-step upload panel: template download → pick file → preview (apply=false) → confirm (apply=true) */
 function UploadPanel({
   title,
@@ -152,8 +211,11 @@ function UploadPanel({
   templateFilename,
   uploadUrlFn,
   onApplied,
+  hint,
 }: {
   title:             string;
+  /** Optional guidance shown under the title (e.g. the deposit "TDS for month" column). */
+  hint?:             React.ReactNode;
   templateUrl:       string;
   templateFilename:  string;
   /** Returns the upload URL with the correct apply=true|false param */
@@ -268,6 +330,7 @@ function UploadPanel({
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
       <h3 className="font-semibold text-gray-900 text-sm">{title}</h3>
+      {hint && <div className="text-xs text-gray-500 leading-relaxed">{hint}</div>}
 
       {/* Template download */}
       <div className="flex items-center gap-3">
@@ -350,7 +413,16 @@ function UploadPanel({
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 max-h-40 overflow-y-auto space-y-1">
               <p className="text-xs font-semibold text-amber-800">Errors ({preview.errors.length})</p>
               {preview.errors.slice(0, 20).map((e, i) => (
-                <p key={i} className="text-xs text-amber-700">• {e}</p>
+                <p key={i} className="text-xs text-amber-700">• {rowMessageText(e)}</p>
+              ))}
+            </div>
+          )}
+
+          {(preview.warnings?.length ?? 0) > 0 && (
+            <div data-testid="tds-upload-warnings" className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 max-h-40 overflow-y-auto space-y-1">
+              <p className="text-xs font-semibold text-blue-800">Notes ({preview.warnings!.length})</p>
+              {preview.warnings!.slice(0, 20).map((w, i) => (
+                <p key={i} className="text-xs text-blue-700">• {rowMessageText(w)}</p>
               ))}
             </div>
           )}
@@ -612,10 +684,10 @@ export default function AdminTdsPage() {
                       <tbody className="divide-y divide-gray-100">
                         {r194.rows.map((row, i) => (
                           <tr key={i} className="hover:bg-gray-50 transition-colors">
-                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{row.panNumber || '—'}</td>
+                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.baseFyTotalPaise))}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>
-                            <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.depositedPaise))}</td>
+                            <td className="px-4 py-3 text-right text-gray-700"><DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} /></td>
                             <td className="px-4 py-3 text-right">
                               <OutstandingCell paise={row.outstandingPaise} />
                             </td>
@@ -649,6 +721,7 @@ export default function AdminTdsPage() {
               `/api/admin/tds/deposits/upload?section=194R&apply=${apply}`
             }
             onApplied={fetch194R}
+            hint={<DepositForMonthHint />}
           />
         </div>
       )}
@@ -721,7 +794,7 @@ export default function AdminTdsPage() {
                       <tbody className="divide-y divide-gray-100">
                         {r194c.rows.map((row, i) => (
                           <tr key={i} className="hover:bg-gray-50 transition-colors">
-                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{row.panNumber || '—'}</td>
+                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
                             <td className="px-4 py-3 text-xs text-gray-700">{row.entityType}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.maxSinglePaise))}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>
@@ -731,7 +804,7 @@ export default function AdminTdsPage() {
                                 ? <CheckCircle className="w-4 h-4 text-emerald-500 mx-auto" />
                                 : <span className="text-gray-400 text-xs">No</span>}
                             </td>
-                            <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.depositedPaise))}</td>
+                            <td className="px-4 py-3 text-right text-gray-700"><DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} /></td>
                             <td className="px-4 py-3 text-right">
                               <OutstandingCell paise={row.outstandingPaise} />
                             </td>
@@ -768,12 +841,13 @@ export default function AdminTdsPage() {
             <UploadPanel
               key={depositSection} // remount when section changes so state resets
               title={`Deposit Upload — ${depositSection}`}
-              templateUrl="/api/admin/tds/deposits/template"
+              templateUrl={`/api/admin/tds/deposits/template?section=${depositSection}`}
               templateFilename={`tds-deposits-${depositSection.toLowerCase()}-template.xlsx`}
               uploadUrlFn={(apply) =>
                 `/api/admin/tds/deposits/upload?section=${depositSection}&apply=${apply}`
               }
               onApplied={depositSection === '194R' ? fetch194R : fetch194C}
+              hint={<DepositForMonthHint />}
             />
           </div>
         </div>

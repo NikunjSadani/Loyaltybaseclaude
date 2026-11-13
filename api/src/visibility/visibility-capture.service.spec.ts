@@ -718,4 +718,63 @@ describe('VisibilityCaptureService', () => {
     expect(haversineMeters(12.9, 77.5, 12.9001, 77.5001)).toBeGreaterThan(5);
     expect(haversineMeters(12.9, 77.5, 12.9001, 77.5001)).toBeLessThan(50);
   });
+
+
+  // ── APPLIES-TO (D9/D12): visibility programs / subPrograms narrow the type scope ─────────────
+  describe('APPLIES-TO program scope', () => {
+    const scopedCfg = (vc: Record<string, unknown>) =>
+      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, ...vc } });
+
+    it('submit 403s an in-type outlet whose program is outside visibility programs (live attrs)', async () => {
+      scopedCfg({ programs: ['RLP'], subPrograms: [] });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programName: 'BSC', programCategory: null });
+      await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }))
+        .rejects.toThrow('This outlet is not in the visibility scope.');
+      expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+    });
+
+    it('submit 403s on a sub-program mismatch, incl. a BLANK outlet sub-program (D4)', async () => {
+      scopedCfg({ programs: [], subPrograms: ['Urban'] });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programName: 'RLP', programCategory: null });
+      await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }))
+        .rejects.toThrow('This outlet is not in the visibility scope.');
+    });
+
+    it('submit succeeds when the program matches case-insensitively', async () => {
+      scopedCfg({ programs: ['rlp'], subPrograms: [] });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programName: 'RLP', programCategory: null });
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues });
+      expect(res.version).toBe(1);
+    });
+
+    it('getSalesEligible ANDs the program where onto the unchanged base where; unscoped → base only', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+      scopedCfg({ programs: ['RLP'], subPrograms: [] });
+      await service.getSalesEligible(user);
+      const scopedWhere = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      expect(scopedWhere.AND[0]).toMatchObject({ clientId: 't1', outletType: { code: { in: ['SSS'] } } });
+      expect(scopedWhere.AND[1]).toEqual({ AND: [{ OR: [{ programName: { equals: 'RLP', mode: 'insensitive' } }] }] });
+
+      mockPrisma.outlet.findMany.mockClear();
+      scopedCfg({ programs: [], subPrograms: [] });
+      await service.getSalesEligible(user);
+      const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      expect(where).not.toHaveProperty('AND');
+      expect(where.outletType).toEqual({ code: { in: ['SSS'] } });
+    });
+
+    it('getOutletStatus: inScope/canCapture false when the program is excluded; true when unscoped', async () => {
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.findFirst.mockResolvedValue({ id: 'o1', outletCode: 'OC1', name: 'Shop 1', programName: 'BSC', programCategory: null, outletType: { code: 'SSS', name: 'R' } });
+      scopedCfg({ programs: ['RLP'], subPrograms: [] });
+      const scoped = await service.getOutletStatus(user, 'o1');
+      expect(scoped.inScope).toBe(false);
+      expect(scoped.canCapture).toBe(false);
+      expect(scoped.outlet).toEqual({ outletId: 'o1', outletCode: 'OC1', outletName: 'Shop 1', outletType: { code: 'SSS', name: 'R' } });
+      scopedCfg({});
+      const unscoped = await service.getOutletStatus(user, 'o1');
+      expect(unscoped.inScope).toBe(true);
+    });
+  });
 });

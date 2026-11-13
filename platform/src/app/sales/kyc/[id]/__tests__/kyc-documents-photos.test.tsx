@@ -151,6 +151,20 @@ describe('SKDP — Sales KYC detail documents + photos', () => {
     expect(screen.queryByText(/Tier/i)).not.toBeInTheDocument();
   });
 
+  it('SKDP6: OTHER docs with metadata.label show it; OTHER without one renders "Other Document" as before', async () => {
+    stubFetch([
+      { id: 'k1', documentType: 'PAN_CARD', status: 'PENDING', fileName: 'pan-scan.jpg', viewUrl: 'https://signed/pan' },
+      { id: 'k2', documentType: 'OTHER', status: 'PENDING', fileName: 'ID proof (Driving licence).jpg', viewUrl: 'https://signed/o1' },
+      { id: 'k3', documentType: 'OTHER', status: 'PENDING', fileName: 'x.pdf', metadata: { label: 'Counter photo' }, viewUrl: 'https://signed/o2' },
+    ]);
+    await renderAndExpand();
+    await waitFor(() => expect(screen.getByText('PAN Card')).toBeInTheDocument());
+    expect(screen.getByText('Counter photo')).toBeInTheDocument();
+    expect(screen.getByText('Other Document')).toBeInTheDocument(); // pre-existing label kept
+    expect(screen.queryByText('ID proof (Driving licence)')).not.toBeInTheDocument(); // fileName never used
+    expect(screen.queryByText('x')).not.toBeInTheDocument();
+  });
+
   it('SKDP5: honest empty states when nothing was uploaded', async () => {
     stubFetch([]);
     await renderAndExpand();

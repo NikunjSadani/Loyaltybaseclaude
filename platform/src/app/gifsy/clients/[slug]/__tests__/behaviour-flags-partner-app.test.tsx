@@ -5,6 +5,8 @@
  *
  * BF1: toggling outletMasterGeo PATCHes ONLY { features: { outletMasterGeo: true } } and flips ON
  * BF2: soDeclarationKyc reflects the stored value; a failed PATCH keeps it and shows the error
+ * BF3: allowPayoutWithoutPan renders with its label + help text; switching ON needs a confirm (Cancel
+ *      saves nothing), OFF saves immediately; PATCHes ONLY its own key
  * PA1: partner-app tabs show EFFECTIVE values; the leaderboard switch PATCHes ONLY
  *      { features: { partnerApp: { showLeaderboard: true } } } and the sibling values stay shown
  * PA2: the tab keys no partner screen reads are read-only (no switch offered)
@@ -36,7 +38,7 @@ function makeConfig(features: Record<string, unknown>) {
       salesTeamApp: false, walletModule: true, referralModule: false,
       selfEnrollmentAllowed: false, nonKycOutletCampaigns: false, multiLevelApproval: false,
       rbacEnforcement: false, hubbleVoucherEnabled: false,
-      outletMasterGeo: false, soDeclarationKyc: false,
+      outletMasterGeo: false, soDeclarationKyc: false, allowPayoutWithoutPan: false,
       // Effective values as the backend detail projects them (defaults when unset).
       partnerApp: { showSchemes: true, showInvoices: false, showWallet: true, showTeam: true, showLeaderboard: false },
       ...features,
@@ -111,6 +113,92 @@ describe('Behaviour flags (B2)', () => {
 
     await waitFor(() => expect(screen.getByTestId('behaviour-flags-error')).toBeInTheDocument());
     expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+  });
+});
+
+describe('Behaviour flags — allowPayoutWithoutPan (BF3)', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('BF3: renders label + help text OFF, toggling PATCHes only that key, siblings untouched', async () => {
+    const patchSpy = vi.fn();
+    vi.stubGlobal('fetch', mockFetch(makeConfig({ soDeclarationKyc: true }), (body) => {
+      patchSpy(body);
+      return { status: 200, ok: true, json: async () => ({ success: true, data: { id: 'bajaj', internalName: 'Bajaj Consumer Care Ltd', status: 'ACTIVE' } }) };
+    }));
+
+    await renderPage();
+    const row = await screen.findByTestId('behaviour-flag-allowPayoutWithoutPan');
+    expect(within(row).getByText('Allow payouts without PAN')).toBeInTheDocument();
+    expect(
+      within(row).getByText(
+        "Partners with no PAN on file can still be paid. They are paid the full amount; the TDS at the no-PAN rate is a company-borne liability shown in the TDS reports as 'NO PAN ON FILE'.",
+      ),
+    ).toBeInTheDocument();
+    const toggle = within(row).getByRole('switch');
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(toggle).toHaveAttribute('aria-label', 'Allow payouts without PAN');
+    fireEvent.click(toggle);
+
+    // Switching ON asks first: nothing is saved until the confirm button is pressed.
+    const dialog = await screen.findByTestId('behaviour-flag-confirm');
+    expect(screen.getByText('Allow payouts without PAN?')).toBeInTheDocument();
+    expect(within(dialog).getByText(/paid the FULL amount/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/batches that haven't been paid yet \(draft, submitted or failed\) will be included the next time/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/company-borne liability/)).toBeInTheDocument();
+    expect(patchSpy).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, allow payouts without PAN' }));
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
+    expect(patchSpy.mock.calls[0][0]).toEqual({ features: { allowPayoutWithoutPan: true } });
+    await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
+    await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true'));
+    expect(within(screen.getByTestId('behaviour-flag-soDeclarationKyc')).getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+    expect(within(screen.getByTestId('behaviour-flag-outletMasterGeo')).getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('BF3: Cancel on the confirm dialog saves nothing and leaves the switch OFF', async () => {
+    const patchSpy = vi.fn();
+    vi.stubGlobal('fetch', mockFetch(makeConfig({}), (body) => {
+      patchSpy(body);
+      return { status: 200, ok: true, json: async () => ({ success: true, data: {} }) };
+    }));
+    await renderPage();
+    const row = await screen.findByTestId('behaviour-flag-allowPayoutWithoutPan');
+    fireEvent.click(within(row).getByRole('switch'));
+    const dialog = await screen.findByTestId('behaviour-flag-confirm');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
+    expect(patchSpy).not.toHaveBeenCalled();
+    expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('BF3: other behaviour flags still save immediately with no confirm dialog', async () => {
+    const patchSpy = vi.fn();
+    vi.stubGlobal('fetch', mockFetch(makeConfig({}), (body) => {
+      patchSpy(body);
+      return { status: 200, ok: true, json: async () => ({ success: true, data: {} }) };
+    }));
+    await renderPage();
+    const row = await screen.findByTestId('behaviour-flag-soDeclarationKyc');
+    fireEvent.click(within(row).getByRole('switch'));
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+  });
+
+  it('BF3: a stored ON value shows ON; switching OFF PATCHes { allowPayoutWithoutPan: false } with NO confirm', async () => {
+    const patchSpy = vi.fn();
+    vi.stubGlobal('fetch', mockFetch(makeConfig({ allowPayoutWithoutPan: true }), (body) => {
+      patchSpy(body);
+      return { status: 200, ok: true, json: async () => ({ success: true, data: { id: 'bajaj', internalName: 'Bajaj Consumer Care Ltd', status: 'ACTIVE' } }) };
+    }));
+    await renderPage();
+    const row = await screen.findByTestId('behaviour-flag-allowPayoutWithoutPan');
+    expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(within(row).getByRole('switch'));
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+    expect(patchSpy.mock.calls[0][0]).toEqual({ features: { allowPayoutWithoutPan: false } });
+    await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'false'));
   });
 });
 

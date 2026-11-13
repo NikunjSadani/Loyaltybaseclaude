@@ -64,6 +64,7 @@ import {
 } from './hierarchy-persistence';
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { UpdateEmployeeDto } from './dto/sales-users.dto';
+import { resolveVisibilityProgramLists } from '../visibility/visibility-scope.helper';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_MAX_ATTEMPTS,
@@ -1372,6 +1373,44 @@ export class AdminCoreService {
       }
       if (turnsUpiUniquenessOff && prev.salesApp.upiManualEntry) {
         throw new BadRequestException('Turn off UPI Manual Entry first');
+      }
+    }
+
+    // APPLIES-TO (plan §4): the generic writer REPLACES the whole visibilityConfig blob, so a stale
+    // editor that predates `programs` / `subPrograms` would silently wipe them. ABSENT keys carry over
+    // the stored lists; PRESENT keys are validated + canonicalised (400 on an unknown value) by the
+    // same resolver the dedicated visibility setConfig uses. dto.value is only touched when a list is
+    // present or a non-empty stored list must be carried — a tenant that never sets them (Deoleo)
+    // persists exactly the value it sent.
+    if (dto.key === 'visibilityConfig' && isPlainObj(dto.value)) {
+      const v = dto.value;
+      const hasPrograms = v.programs !== undefined && v.programs !== null;
+      const hasSubPrograms = v.subPrograms !== undefined && v.subPrograms !== null;
+      const stored = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId, settingKey: 'visibilityConfig' } },
+        select: { settingValue: true },
+      });
+      const storedCfg = isPlainObj(stored?.settingValue)
+        ? (stored!.settingValue as { programs?: string[]; subPrograms?: string[] })
+        : null;
+      const needsCarry =
+        (!hasPrograms && (storedCfg?.programs?.length ?? 0) > 0) ||
+        (!hasSubPrograms && (storedCfg?.subPrograms?.length ?? 0) > 0);
+      if (hasPrograms || hasSubPrograms || needsCarry) {
+        this.tenantSettings.invalidate(clientId);
+        const lists = await resolveVisibilityProgramLists(
+          this.prisma,
+          clientId,
+          await this.tenantSettings.getEffectiveSettings(clientId),
+          { programs: v.programs, subPrograms: v.subPrograms },
+          storedCfg,
+        );
+        const next: Record<string, unknown> = { ...v };
+        delete next.programs;
+        delete next.subPrograms;
+        if (lists.programs.length || hasPrograms) next.programs = lists.programs;
+        if (lists.subPrograms.length || hasSubPrograms) next.subPrograms = lists.subPrograms;
+        dto.value = next as typeof dto.value;
       }
     }
 

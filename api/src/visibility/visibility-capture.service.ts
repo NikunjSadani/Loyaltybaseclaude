@@ -46,6 +46,7 @@ import {
   OUTLET_MASTER_GEOFENCE_RADIUS_M,
 } from './geo-fence.helper';
 import { SubmitCaptureDto, ResubmitCaptureDto } from './dto/visibility-capture.dto';
+import { visibilityProgramMatches, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 /** Object-key tenant folder for all visibility media (mirrors VisibilityMediaService). */
 const MEDIA_FOLDER_PREFIX = 'visibility-media/';
@@ -291,14 +292,18 @@ export class VisibilityCaptureService {
     }
 
     const outlets = await this.prisma.outlet.findMany({
-      where: {
-        clientId: user.clientId,
-        id: { in: [...reach] },
-        deletedAt: null,
-        deactivatedAt: null,
-        isActive: true,
-        outletType: { code: { in: config.outletScope } },
-      },
+      // APPLIES-TO (D12): programs/subPrograms narrow the type scope (no-op when neither is set).
+      where: withVisibilityProgramWhere(
+        {
+          clientId: user.clientId,
+          id: { in: [...reach] },
+          deletedAt: null,
+          deactivatedAt: null,
+          isActive: true,
+          outletType: { code: { in: config.outletScope } },
+        },
+        config,
+      ),
       select: {
         id: true,
         outletCode: true,
@@ -382,6 +387,9 @@ export class VisibilityCaptureService {
         id: true,
         outletCode: true,
         name: true,
+        // APPLIES-TO program facets (visibility programs/subPrograms) — not returned.
+        programName: true,
+        programCategory: true,
         outletType: { select: { code: true, name: true } },
       },
     });
@@ -392,7 +400,9 @@ export class VisibilityCaptureService {
     const month = currentWindowKey(now, freq).slice(0, 7); // 'YYYY-MM'
     const windowKeys = windowsForMonth(month, freq);
     const levelAllowed = config.allowedSalesLevels.includes(caller.levelCode);
-    const inScope = config.outletScope.includes(outlet.outletType.code);
+    const inScope =
+      config.outletScope.includes(outlet.outletType.code) &&
+      visibilityProgramMatches(config, { program: outlet.programName, subProgram: outlet.programCategory });
 
     const captures = await this.prisma.visibilityCapture.findMany({
       where: { clientId: user.clientId, outletId, windowKey: { in: windowKeys } },
@@ -542,11 +552,18 @@ export class VisibilityCaptureService {
         // Sub-program (Design B) — the authoritative outlet attribute that drives
         // conditional capture fields (e.g. a `requiredWhen __subProgram__ == X` 2nd photo).
         programCategory: true,
+        // APPLIES-TO program facet (visibility `programs` narrowing).
+        programName: true,
         outletType: { select: { code: true } },
       },
     });
     if (!outlet) throw new NotFoundException('Outlet not found.');
-    if (!config.outletScope.includes(outlet.outletType.code)) {
+    // Type scope AND (D12) the optional program / sub-program narrowing, evaluated LIVE on the
+    // outlet's current attributes (D9) — the same predicate as the listing + coverage denominator.
+    if (
+      !config.outletScope.includes(outlet.outletType.code) ||
+      !visibilityProgramMatches(config, { program: outlet.programName, subProgram: outlet.programCategory })
+    ) {
       throw new ForbiddenException('This outlet is not in the visibility scope.');
     }
     return outlet;

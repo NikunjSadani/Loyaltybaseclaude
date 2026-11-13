@@ -29,6 +29,9 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { api } from '@/lib/api-client';
 import { useOutletTypeLabels, type OutletTypeOption } from '@/lib/platform/use-outlet-type-labels';
+import type { AppliesTo } from '@/lib/applies-to';
+import { kpiScopeOf, scopeChipText, scopeDescription, scopeKey } from '@/lib/kpi-scope-core';
+import { KpiAppliesToFields } from '@/components/admin/applies-to-fields';
 
 /* ─── Types (mirror backend KpiDef) ─────────────────────────────────────────── */
 
@@ -45,9 +48,13 @@ export interface KpiDef {
    *  that met their own target. Absent on older payloads → treated as 'SUM'. */
   rollup?:           'SUM' | 'OUTLET_COUNT';
   enabled:           boolean;
-  /** Per-outlet-TYPE tag: null = applies to ALL outlet types (every existing KPI); a code = that
-   *  type only (used by the RLP/BSC sales views). Absent on older payloads → treated as null. */
+  /** DEPRECATED (one release) per-outlet-TYPE tag, dual-written by the backend from `outletTypes`. Read only as a
+   *  fallback when `outletTypes` is absent; never sent by this form any more. */
   outletType?:       string | null;
+  /** APPLIES-TO scope (APPLIES-TO-TARGETING-PLAN §0): AND across facets, OR within; empty facet = all. */
+  outletTypes?:      string[];
+  programs?:         string[];
+  subPrograms?:      string[];
 }
 
 type UpsertPayload = Omit<KpiDef, 'id'>;
@@ -56,9 +63,7 @@ type UpsertPayload = Omit<KpiDef, 'id'>;
  * The exact body POST /api/admin/kpis accepts. The backend ValidationPipe is forbidNonWhitelisted,
  * so the edit form must NEVER echo the row's own id / clientId / timestamps (that 400s the save).
  */
-function toUpsertBody(f: UpsertPayload, original?: UpsertPayload): UpsertPayload {
-  const outletType = f.outletType ? f.outletType : null;
-  const originalOutletType = original ? (original.outletType ? original.outletType : null) : undefined;
+function toUpsertBody(f: UpsertPayload, scope?: AppliesTo): UpsertPayload {
   return {
     code:              f.code,
     label:             f.label,
@@ -69,9 +74,9 @@ function toUpsertBody(f: UpsertPayload, original?: UpsertPayload): UpsertPayload
     order:             f.order,
     rollup:            f.rollup ?? 'SUM',
     enabled:           f.enabled,
-    // Omitted on an EDIT that did not change it (the backend then leaves the stored value alone and does
-    // not re-validate it); sent on create and whenever the operator changed it.
-    ...(original && outletType === originalOutletType ? {} : { outletType }),
+    // Scope arrays are sent ONLY when the operator changed the scope (omitted = unchanged on the backend, and an
+    // unchanged resend is not re-validated). The legacy single `outletType` is never sent: arrays win server-side.
+    ...(scope ? { outletTypes: scope.outletTypes, programs: scope.programs, subPrograms: scope.subPrograms } : {}),
   };
 }
 
@@ -94,7 +99,7 @@ function blankForm(order: number): UpsertPayload {
 
 /** The tenant's display label for an outlet-type code (falls back to the raw code). */
 function outletTypeLabel(code: string, types: OutletTypeOption[]): string {
-  return types.find((t) => t.code === code)?.label ?? code;
+  return types.find((t) => t.code.toUpperCase() === code.toUpperCase())?.label ?? code;
 }
 
 /* ─── KPI row ────────────────────────────────────────────────────────────────── */
@@ -147,8 +152,21 @@ function KpiRow({
         )}
       </td>
       <td className="py-2.5 px-2 text-xs text-gray-400">{kpi.unit}</td>
-      <td className="py-2.5 px-2 text-xs text-gray-500" data-testid={`kpi-outlet-type-${kpi.code}`}>
-        {kpi.outletType ? outletTypeLabel(kpi.outletType, outletTypes) : 'All'}
+      <td className="py-2.5 px-2 text-xs text-gray-500">
+        {(() => {
+          const scope = kpiScopeOf(kpi);
+          const label = (c: string) => outletTypeLabel(c, outletTypes);
+          const all = scope.outletTypes.length + scope.programs.length + scope.subPrograms.length === 0;
+          return (
+            <span
+              data-testid={`kpi-scope-${kpi.code}`}
+              title={scopeDescription(scope, label)}
+              className={all ? '' : 'inline-block rounded-full bg-indigo-50 text-indigo-700 px-2 py-0.5 text-[10px] font-semibold'}
+            >
+              {scopeChipText(scope, label)}
+            </span>
+          );
+        })()}
       </td>
       <td className="py-2.5 px-2 text-xs text-center">
         <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${kpi.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>
@@ -189,13 +207,18 @@ function KpiForm({
   outletTypes,
 }: {
   initial: UpsertPayload & { id?: string };
-  onSave:  (payload: UpsertPayload) => void;
+  /** `scope` is passed ONLY when the operator changed it (send-only-when-changed). */
+  onSave:  (payload: UpsertPayload, scope?: AppliesTo) => void;
   onCancel: () => void;
   saving: boolean;
   error: string;
   outletTypes: OutletTypeOption[];
 }) {
   const [form, setForm] = useState<UpsertPayload>({ ...initial });
+  // Applies-to scope: a legacy single outletType (no outletTypes) opens as a one-type scope.
+  const [initialScope] = useState<AppliesTo>(() => kpiScopeOf(initial));
+  const [scope, setScope] = useState<AppliesTo>(initialScope);
+  const scopeChanged = scopeKey(scope) !== scopeKey(initialScope);
 
   const set = <K extends keyof UpsertPayload>(k: K, v: UpsertPayload[K]) =>
     setForm(f => ({ ...f, [k]: v }));
@@ -273,32 +296,12 @@ function KpiForm({
         </p>
       </div>
 
-      {/* Outlet type (E1) — null = every outlet type (all existing KPIs); a code = that type only. */}
-      <div>
-        <label htmlFor="kpi-outlet-type" className="block text-xs font-semibold text-gray-500 mb-1">Outlet type</label>
-        <select
-          id="kpi-outlet-type"
-          data-testid="kpi-outlet-type-select"
-          value={form.outletType ?? ''}
-          onChange={e => set('outletType', e.target.value || null)}
-          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
-        >
-          <option value="">All outlet types</option>
-          {outletTypes.map(t => (
-            <option key={t.code} value={t.code}>{t.label}</option>
-          ))}
-          {/* Keep a stored code selectable even if that type is no longer enabled, so opening the
-              form never silently changes it (the backend re-validates on save). */}
-          {form.outletType && !outletTypes.some(t => t.code === form.outletType) && (
-            <option value={form.outletType}>{form.outletType} (not enabled)</option>
-          )}
-        </select>
-        <p className="text-[11px] text-gray-400 mt-1">
-          {form.outletType
-            ? 'Shown only when this outlet type is selected in the sales RLP/BSC views. Shared KPIs always show too.'
-            : 'Applies to every outlet type (the usual choice).'}
-        </p>
-      </div>
+      {/* Applies to (APPLIES-TO-TARGETING-PLAN §6) — empty everywhere = every outlet (the usual choice). */}
+      <KpiAppliesToFields
+        value={scope}
+        onChange={setScope}
+        fallbackTypes={outletTypes.map(t => ({ code: t.code, label: t.label }))}
+      />
 
       {/* Checkboxes — Primary is NOT set here; it is a single-select chosen via
           the radio in the KPI list (set-primary endpoint + DB constraint). */}
@@ -348,7 +351,7 @@ function KpiForm({
           variant="primary"
           loading={saving}
           disabled={!form.code.trim() || !form.label.trim()}
-          onClick={() => onSave(form)}
+          onClick={() => onSave(form, scopeChanged ? scope : undefined)}
         >
           <CheckCircle className="h-4 w-4" />
           {isEdit ? 'Save Changes' : 'Add KPI'}
@@ -399,10 +402,10 @@ export default function AdminTargetsPage() {
 
   /* ── Upsert ───────────────────────────────────────────────────────────────── */
 
-  const handleSave = async (payload: UpsertPayload) => {
+  const handleSave = async (payload: UpsertPayload, scope?: AppliesTo) => {
     setSaving(true);
     setSaveError('');
-    const res = await api.post<KpiDef>('/api/admin/kpis', toUpsertBody(payload, editing ?? undefined));
+    const res = await api.post<KpiDef>('/api/admin/kpis', toUpsertBody(payload, scope));
     if (res.success) {
       setFormOpen(false);
       setEditing(null);
@@ -576,6 +579,7 @@ export default function AdminTargetsPage() {
 
       {editing && (
         <KpiForm
+          key={editing.id}
           initial={{ ...editing }}
           onSave={handleSave}
           onCancel={() => { setEditing(null); setSaveError(''); }}
@@ -644,7 +648,7 @@ export default function AdminTargetsPage() {
                   <th className="py-2.5 pl-2 pr-2">Code</th>
                   <th className="py-2.5 px-2">Label</th>
                   <th className="py-2.5 px-2">Unit</th>
-                  <th className="py-2.5 px-2">Outlet type</th>
+                  <th className="py-2.5 px-2">Applies to</th>
                   <th className="py-2.5 px-2 text-center">Status</th>
                   <th className="py-2.5 px-2 text-right">Order</th>
                   <th className="py-2.5 pl-2 pr-4" />

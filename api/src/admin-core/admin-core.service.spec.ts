@@ -1008,6 +1008,55 @@ describe('AdminCoreService', () => {
       expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
     });
 
+    // ── APPLIES-TO (plan §4): generic visibilityConfig writer carries over absent program lists ──
+    describe('visibilityConfig programs/subPrograms carry-over', () => {
+      const base = { outletScope: ['SSS'], frequencyPerMonth: 1, allowedSalesLevels: ['SO'], geoFence: { enabled: false, radiusMeters: 50 } };
+      const written = () => mockPrisma.programSetting.upsert.mock.calls[0][0].update.settingValue;
+
+      it('ABSENT keys carry the stored non-empty lists over (stale tab never wipes them)', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { ...base, programs: ['RLP'], subPrograms: ['Urban'] } });
+        mockTenantSettings.getEffectiveSettings.mockResolvedValueOnce({ outletPrograms: ['RLP'], outletCategories: ['Urban'] });
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, frequencyPerMonth: 2 } });
+        expect(written()).toEqual({ ...base, frequencyPerMonth: 2, programs: ['RLP'], subPrograms: ['Urban'] });
+      });
+
+      it('PRESENT keys are validated + canonicalised; unknown → 400 and nothing written', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+        mockTenantSettings.getEffectiveSettings.mockResolvedValue({ outletPrograms: ['RLP'], outletCategories: [] });
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, programs: ['rlp'] } });
+        expect(written().programs).toEqual(['RLP']);
+        mockPrisma.programSetting.upsert.mockClear();
+        (mockPrisma as unknown as { outlet: { groupBy?: jest.Mock } }).outlet.groupBy = jest.fn().mockResolvedValue([]);
+        await expect(service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, programs: ['Nope'] } }))
+          .rejects.toThrow(/Unknown program: Nope/);
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
+
+      it('a STALE stored value is NOT re-validated (no 400); a case-only edit of it applies (submitted spelling)', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { ...base, programs: ['Old Prog'] } });
+        mockTenantSettings.getEffectiveSettings.mockResolvedValueOnce({ outletPrograms: ['RLP'], outletCategories: [] });
+        const groupBy = jest.fn().mockResolvedValue([]);
+        (mockPrisma as unknown as { outlet: { groupBy?: jest.Mock } }).outlet.groupBy = groupBy;
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, programs: ['OLD PROG'] } });
+        // audit #7: no canonical spelling exists anywhere (stale) → the submitted spelling is stored (never a silent no-op).
+        expect(written().programs).toEqual(['OLD PROG']);
+      });
+
+      it('audit #7: a stored value is re-canonicalised to the settings spelling on a case-only edit', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { ...base, programs: ['rlp'] } });
+        mockTenantSettings.getEffectiveSettings.mockResolvedValueOnce({ outletPrograms: ['RLP'], outletCategories: [] });
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, programs: ['Rlp'] } });
+        expect(written().programs).toEqual(['RLP']);
+      });
+
+      it('UNSCOPED tenant (nothing stored, nothing sent) → the value is persisted exactly as sent', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: base });
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: base });
+        expect(written()).toBe(base); // same object, untouched
+        expect(mockTenantSettings.getEffectiveSettings).not.toHaveBeenCalled();
+      });
+    });
+
     // ── VPA safeguard: manual UPI entry requires STORED UPI-ID uniqueness ──
     describe('salesApp.upiManualEntry guard', () => {
       const stored = (upi: boolean, upiManualEntry = false) =>

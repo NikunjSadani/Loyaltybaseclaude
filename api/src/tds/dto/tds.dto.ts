@@ -55,4 +55,6 @@ export interface UploadResult {
   skipped: number;
   failed: number;
   errors: UploadRowError[];
+  /** Non-blocking notices, e.g. "PAN found on file for outlet X — counted under that PAN". */
+  warnings?: UploadRowError[];
 }

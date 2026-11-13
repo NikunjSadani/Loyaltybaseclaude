@@ -202,14 +202,18 @@ export class TdsController {
   // ─── P6.5b: TDS deposit upload ────────────────────────────────────────────
 
   /**
-   * GET /v1/admin/tds/deposits/template
-   * Returns a blank .xlsx with columns: Date · Outlet Code · PAN · Amount (₹)
+   * GET /v1/admin/tds/deposits/template[?section=194C]
+   * Returns a blank .xlsx with columns: Date · Outlet Code · PAN · Amount (₹); the 194C template
+   * adds an optional "Client" column (client slug — disambiguates a no-PAN row's Outlet Code).
    * Roles: CLIENT_ADMIN or GIFSY_ADMIN.
    */
   @Get('deposits/template')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
-  getDepositTemplate(@Res({ passthrough: true }) res: Response): StreamableFile {
-    const buffer = this.tds.depositTemplate();
+  getDepositTemplate(
+    @Res({ passthrough: true }) res: Response,
+    @Query('section') section?: string,
+  ): StreamableFile {
+    const buffer = this.tds.depositTemplate(section === '194C' ? '194C' : '194R');
     res.setHeader('Content-Disposition', 'attachment; filename="tds-deposit-template.xlsx"');
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -282,17 +286,24 @@ export class TdsController {
 function serializeRow194R(r: import('./tds.service').TdsRow194R) {
   return {
     panNumber: r.panNumber,
+    // Per-deductee no-PAN identity (name + outlet codes) — only present on such rows.
+    ...(r.noPanDeductee ? { noPanDeductee: r.noPanDeductee } : {}),
+    ...(r.unlinkedNoPanDeposit ? { unlinkedNoPanDeposit: true } : {}),
     fyLabel: r.fyLabel,
     baseFyTotalPaise: r.baseFyTotalPaise.toString(),
     liabilityPaise: r.liabilityPaise.toString(),
     depositedPaise: r.depositedPaise.toString(),
     outstandingPaise: r.outstandingPaise.toString(),
+    // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
+    ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
   };
 }
 
 function serializeRow194C(r: import('./tds.service').TdsRow194C) {
   return {
     panNumber: r.panNumber,
+    ...(r.noPanDeductee ? { noPanDeductee: r.noPanDeductee } : {}),
+    ...(r.unlinkedNoPanDeposit ? { unlinkedNoPanDeposit: true } : {}),
     entityType: r.entityType,
     fyLabel: r.fyLabel,
     baseFyTotalPaise: r.baseFyTotalPaise.toString(),
@@ -302,6 +313,8 @@ function serializeRow194C(r: import('./tds.service').TdsRow194C) {
     liabilityNoThresholdPaise: r.liabilityNoThresholdPaise.toString(),
     depositedPaise: r.depositedPaise.toString(),
     outstandingPaise: r.outstandingPaise.toString(),
+    // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
+    ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
   };
 }
 

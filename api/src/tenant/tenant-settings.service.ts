@@ -140,6 +140,13 @@ export interface VisibilityConfigSettings {
   allowedSalesLevels: string[];
   /** Geo-fence policy on capture (D10). */
   geoFence:           GeoFenceSettings;
+  /**
+   * APPLIES-TO narrowing (APPLIES-TO-TARGETING-PLAN §0/D12): Outlet.programName values; EMPTY = all
+   * programs. Narrows `outletScope` further (AND); `outletScope` keeps its own "empty = NONE" meaning.
+   */
+  programs:           string[];
+  /** Outlet.programCategory values; EMPTY = all sub-programs (independent of `programs`, D11). */
+  subPrograms:        string[];
 }
 
 /**
@@ -375,6 +382,8 @@ export class TenantSettingsService {
         frequencyPerMonth:  1,
         allowedSalesLevels: [],
         geoFence:           { enabled: false, radiusMeters: 50 },
+        programs:           [],
+        subPrograms:        [],
       },
       // TDS policy — DEFAULT-ON (owner decision W0-E): a tenant with no explicit tdsPolicy
       // row applies 194C + gross-up at confirm. (A present-but-malformed row throws — see
@@ -570,6 +579,8 @@ export class TenantSettingsService {
         outletScope:        [...base.visibilityConfig.outletScope],
         allowedSalesLevels: [...base.visibilityConfig.allowedSalesLevels],
         geoFence:           { ...base.visibilityConfig.geoFence },
+        programs:           [...base.visibilityConfig.programs],
+        subPrograms:        [...base.visibilityConfig.subPrograms],
       },
       tdsPolicy:          { ...base.tdsPolicy },
     };
@@ -702,6 +713,9 @@ export class TenantSettingsService {
                 // Radius = positive integer 1..5000 else default (50).
                 radiusMeters: this.intInRange(geo.radiusMeters, 1, 5000, d.geoFence.radiusMeters),
               },
+              // APPLIES-TO narrowing: empty = ALL. An older stored config without these keys → [].
+              programs:           this.stringList(v.programs,    []),
+              subPrograms:        this.stringList(v.subPrograms, []),
             };
           }
           break;

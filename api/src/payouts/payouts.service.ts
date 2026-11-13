@@ -14,7 +14,45 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { rupeesToPaise } from '../common/money';
 import { monthYearIST, formatDateIST, istDayRangeFilter, istDateKey } from '../common/ist-date';
-import { parsePayoutUtrUpload } from './payout-utr.helpers';
+import {
+  parsePayoutUtrUpload,
+  NOT_PROCESSED_ERROR,
+  ORDER_REFUNDED_ERROR,
+  POINTS_ALREADY_REFUNDED_ERROR,
+  alreadySentToBankError,
+  normaliseRef,
+  type KnownRefUse,
+  type PayoutUtrTxnInfo,
+} from './payout-utr.helpers';
+
+/** Redemption states in which an order can no longer be "paid" (its points went back). */
+const ORDER_REFUNDED_STATUSES: RedemptionStatus[] = [
+  RedemptionStatus.CANCELLED,
+  RedemptionStatus.RETURNED,
+  RedemptionStatus.FAILED,
+];
+/** providerResponse.paidOffPlatform === true (set when a payment was recorded as paid outside Gifsy). */
+function isPaidOffPlatform(providerResponse: unknown): boolean {
+  return (
+    !!providerResponse &&
+    typeof providerResponse === 'object' &&
+    (providerResponse as Record<string, unknown>).paidOffPlatform === true
+  );
+}
+
+/** The mode-required beneficiary fields are missing on the frozen snapshot. */
+function missingBeneficiary(t: { payoutMode: string; upiId: string | null; bankAccountNumber: string | null; ifscCode: string | null }): boolean {
+  if (t.payoutMode === 'UPI') return !t.upiId;
+  if (t.payoutMode === 'BANK_TRANSFER') return !t.bankAccountNumber || !t.ifscCode;
+  return false;
+}
+
+/** True when the linked order is cancelled/returned/failed or its points were refunded (M2 claim → 0). */
+function isOrderRefunded(o: { status?: RedemptionStatus | string | null; pointsDeducted?: number | null } | null | undefined): boolean {
+  if (!o) return false;
+  if (o.status && (ORDER_REFUNDED_STATUSES as string[]).includes(o.status)) return true;
+  return o.pointsDeducted === 0;
+}
 import {
   noIssuedVoucherGuard,
   hasIssuedVoucher,
@@ -425,9 +463,21 @@ export class PayoutsService {
       steps.validation.count = transactions.length;
       const validTransactions: typeof transactions = [];
 
+      // Per-tenant behaviour flag (clients.features.allowPayoutWithoutPan, default OFF): when ON,
+      // a partner with no PAN on file is NOT excluded. They are paid the full amount; the TDS at the
+      // no-PAN rate is a company-borne liability (the 194R engine keys it per no-PAN deductee) shown
+      // in the TDS reports as "NO PAN ON FILE". Every other check below stays.
+      // Absent/false → the missing-PAN exclusion is byte-identical to before (e.g. Deoleo).
+      const batchClient = await this.prisma.client.findUnique({
+        where: { id: clientId },
+        select: { features: true },
+      });
+      const allowPayoutWithoutPan =
+        (batchClient?.features as Record<string, unknown> | null)?.allowPayoutWithoutPan === true;
+
       for (const tx of transactions) {
         const errors: string[] = [];
-        if (!tx.partner?.panNumber) {
+        if (!allowPayoutWithoutPan && !tx.partner?.panNumber) {
           errors.push(`No PAN for partner ${tx.partnerId}`);
         }
         // amountPaise is BigInt from Prisma; compare as Number.
@@ -493,11 +543,14 @@ export class PayoutsService {
       // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
       await this.prisma.$transaction(async (tx) => {
         for (const vt of validTransactions) {
-          await tx.payoutTransaction.update({
-            where: { id: vt.id },
+          // Compare-and-set: only a row STILL PENDING moves to INITIATED. A concurrent UTR upload
+          // may have recorded it as paid off-platform (SUCCESS) since the read above — never
+          // overwrite that; a 0-count claim simply skips the row.
+          const res = await tx.payoutTransaction.updateMany({
+            where: { id: vt.id, status: 'PENDING' },
             data: { status: 'INITIATED' },
           });
-          flagged++;
+          if (res.count > 0) flagged++;
         }
 
         await tx.payoutBatch.update({
@@ -615,6 +668,13 @@ export class PayoutsService {
       'UPI ID': t.upiId ?? '',
       UTR: '',
       Status: '',
+      // Optional: Y = this payment was made OUTSIDE Gifsy and is only being recorded here (the
+      // only way to mark a not-yet-processed PENDING transaction PAID). Blank/N = paid via the
+      // processed batch.
+      'Paid outside platform (Y/N)': '',
+      'Off-platform note': '',
+      // Optional, Y rows only: must equal the payout amount if filled (blank = paid in full).
+      'Amount paid (₹)': '',
     }));
 
     return {
@@ -636,6 +696,14 @@ export class PayoutsService {
    *             points change.
    *   - FAILED → PayoutTransaction FAILED (failureReason); linked RedemptionOrder
    *              points reversed ONCE (M2 claim) then → FAILED.
+   *
+   * PROCESS-FIRST guard (owner-approved, all tenants): PAID is accepted only for a transaction
+   * that went through processBatch (INITIATED/PROCESSING). A still-PENDING/HOLD transaction is
+   * rejected per row UNLESS the row sets "Paid outside platform (Y/N)" = Y — a payment made
+   * OUTSIDE Gifsy whose outcome is recorded here is never blocked: it still needs a valid UTR and
+   * a positive amount, is flagged in providerResponse { paidOffPlatform, note, … } and gets an
+   * AuditLog row in the same tx. FAILED rows are unaffected. (Historical VENDOR_IMPORT data lives on
+   * the CREDITS rail — CreditBatch.sourceKind — and never passes through this upload.)
    *
    * Idempotency: terminal PayoutTransactions (SUCCESS/FAILED/REVERSED) are skipped,
    * and the FAILED refund uses the exact M2 claim
@@ -667,6 +735,7 @@ export class PayoutsService {
       select: {
         id: true,
         status: true,
+        amountPaise: true,
         providerRefId: true,
         payoutMode: true,
         partnerId: true,
@@ -677,6 +746,9 @@ export class PayoutsService {
         upiId: true,
         bankAccountNumber: true,
         ifscCode: true,
+        // For the "already marked paid on <date> (<off-platform|bank>)" notice.
+        completedAt: true,
+        providerResponse: true,
       },
     });
 
@@ -691,15 +763,58 @@ export class PayoutsService {
     // detection), upper-cased to match the parser's normalisation.
     const usedUtrs = await this.prisma.payoutTransaction.findMany({
       where: { batch: { clientId: user.clientId }, providerRefId: { not: null } },
-      select: { providerRefId: true },
+      select: { providerRefId: true, partnerId: true, providerResponse: true },
     });
     const knownUtrs = new Set<string>(
       usedUtrs
         .filter((t) => t.providerRefId != null)
         .map((t) => t.providerRefId!.toUpperCase()),
     );
+    // NORMALISED reference → every past use (partner + was it an off-platform record?). A Y row may
+    // reuse only its own partner's off-platform references, never a genuine bank UTR.
+    const knownRefs = new Map<string, KnownRefUse[]>();
+    for (const t of usedUtrs) {
+      if (t.providerRefId == null) continue;
+      const k = normaliseRef(t.providerRefId);
+      const list = knownRefs.get(k) ?? [];
+      list.push({ partnerId: t.partnerId ?? null, offPlatform: isPaidOffPlatform(t.providerResponse) });
+      knownRefs.set(k, list);
+    }
 
-    const parseResult = parsePayoutUtrUpload(ab, { batchTxnIds, knownUtrs });
+    // Linked redemption state — an off-platform PAID must never "pay" an order whose points were
+    // already refunded (cancelled / returned / failed) — that would be a double benefit.
+    const orderIds = [...new Set(transactions.map((t) => t.redemptionOrderId).filter((x): x is string => !!x))];
+    const orders = orderIds.length
+      ? await this.prisma.redemptionOrder.findMany({
+          where: { id: { in: orderIds } },
+          select: { id: true, status: true, pointsDeducted: true },
+        })
+      : [];
+    const orderById = new Map(orders.map((o) => [o.id, o]));
+
+    // txnInfo turns on the PROCESS-FIRST guard: PAID only for a processed (INITIATED/PROCESSING)
+    // transaction, unless the row is marked "Paid outside platform" = Y (recorded off-platform
+    // payment — never blocked). Surfaced as per-row errors in the preview AND enforced on apply.
+    const txnInfo = new Map<string, PayoutUtrTxnInfo>(
+      transactions.map((t) => [
+        t.id,
+        {
+          status: t.status,
+          amountPaise: t.amountPaise,
+          partnerId: t.partnerId,
+          orderRefunded: t.redemptionOrderId ? isOrderRefunded(orderById.get(t.redemptionOrderId)) : false,
+          paidOn: t.completedAt ? istDateKey(t.completedAt) : undefined,
+          paidOffPlatform: isPaidOffPlatform(t.providerResponse),
+        },
+      ]),
+    );
+    const parseResult = parsePayoutUtrUpload(ab, {
+      batchTxnIds,
+      knownUtrs,
+      txnInfo,
+      knownRefs,
+      batchRef: batch.batchCode ?? batchId,
+    });
 
     // Preview unless apply=true.
     if (!apply) {
@@ -707,12 +822,65 @@ export class PayoutsService {
     }
 
     if (!parseResult.canProceed) {
+      // Name the failing rows (sheet row + reason, first 10) so the admin can fix the file — e.g.
+      // the PROCESS-FIRST guard's "This payment wasn't processed in a batch …" message.
+      const rowErrors = parseResult.rows
+        .filter((r) => r.status === 'ERROR')
+        .map((r) => `Row ${r.rowNum}: ${r.errors.join(' ')}`);
+      const detail = parseResult.headerError
+        ? ` ${parseResult.headerError}`
+        : rowErrors.length
+          ? ` ${rowErrors.slice(0, 10).join(' | ')}${rowErrors.length > 10 ? ` (+${rowErrors.length - 10} more)` : ''}`
+          : '';
       throw new BadRequestException(
-        'Cannot apply — parse result has errors or no valid rows',
+        `Cannot apply — parse result has errors or no valid rows.${detail}`,
       );
     }
 
     const txnMap = new Map(transactions.map((t) => [t.id, t]));
+
+    // Off-platform (Y) rows bypass the processing gates BY DESIGN (the money already left outside
+    // Gifsy) — but which gates WOULD have failed is recorded on each audit row for review.
+    const offPlatformPartnerIds = [
+      ...new Set(
+        parseResult.rows
+          .filter((r) => r.status === 'OK' && r.outcome === 'PAID' && r.paidOffPlatform)
+          .map((r) => txnMap.get(r.txnId)?.partnerId)
+          .filter((x): x is string => !!x),
+      ),
+    ];
+    const bypassedGatesByPartner = new Map<string, string[]>();
+    if (offPlatformPartnerIds.length) {
+      const gatePartners = await this.prisma.channelPartner.findMany({
+        where: { id: { in: offPlatformPartnerIds } },
+        select: {
+          id: true,
+          panNumber: true,
+          isActive: true,
+          deletedAt: true,
+          kycSubmissions: {
+            orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }, { id: 'desc' }],
+            select: { id: true, status: true, createdAt: true, updatedAt: true },
+          },
+        },
+      });
+      for (const gp of gatePartners as Array<{
+        id: string;
+        panNumber?: string | null;
+        isActive?: boolean | null;
+        deletedAt?: Date | null;
+        kycSubmissions?: Parameters<typeof resolveEffectiveKycStatus>[0];
+      }>) {
+        const gates: string[] = [];
+        if (!gp.panNumber || !String(gp.panNumber).trim()) gates.push('noPan');
+        const kyc = resolveEffectiveKycStatus(gp.kycSubmissions ?? []);
+        if (kyc !== 'APPROVED') gates.push(`kycNotApproved:${kyc ?? 'NO_SUBMISSION'}`);
+        if (gp.isActive === false) gates.push('partnerInactive');
+        if (gp.deletedAt != null) gates.push('partnerDeleted');
+        bypassedGatesByPartner.set(gp.id, gates);
+      }
+    }
+
     const TERMINAL_PAYOUT: PayoutStatus[] = [
       PayoutStatus.SUCCESS,
       PayoutStatus.FAILED,
@@ -723,6 +891,8 @@ export class PayoutsService {
     let paidCount = 0;
     let failedCount = 0;
     let reversedCount = 0;
+    // PAID rows recorded as paid OUTSIDE the platform ("Paid outside platform" = Y).
+    let offPlatformCount = 0;
     // Rows whose compare-and-set claim lost to an overlapping upload (see the claim below).
     const skipped: Array<{
       rowNum: number;
@@ -765,9 +935,25 @@ export class PayoutsService {
         const txn = txnMap.get(row.txnId);
         if (!txn) continue;
 
-        // Idempotency: never re-process a payout transaction already in a terminal
-        // state. A re-upload of the same report falls through here as a no-op.
-        if (TERMINAL_PAYOUT.includes(txn.status)) continue;
+        // A payout whose bank payment FAILED / was REVERSED may still be recorded as paid OUTSIDE the
+        // platform ("Paid outside platform" = Y) — the parser already rejected it when the
+        // redemption's points were refunded (re-checked below inside the tx).
+        const previouslyFailed =
+          txn.status === PayoutStatus.FAILED || txn.status === PayoutStatus.REVERSED;
+        const offPlatformOnFailed = previouslyFailed && row.outcome === 'PAID' && row.paidOffPlatform;
+
+        // Idempotency: never re-process a payout transaction already in a terminal state. The parser
+        // turns such rows into notices/errors; anything still reaching here is reported in `skipped`
+        // (never dropped silently).
+        if (TERMINAL_PAYOUT.includes(txn.status) && !offPlatformOnFailed) {
+          skipped.push({
+            rowNum: row.rowNum,
+            txnId: txn.id,
+            outcome: row.outcome,
+            reason: `Payout is already ${String(txn.status).toLowerCase()} — no change`,
+          });
+          continue;
+        }
 
         // CONCURRENCY CLAIM (compare-and-set): the terminal check above is from a read taken
         // BEFORE this tx, so an overlapping upload (e.g. PAID vs FAILED for the same payout)
@@ -777,11 +963,60 @@ export class PayoutsService {
         // (count 0) skips the row with a row-level result and runs NONE of its side effects
         // (refund, order status, partner verify/demote, WhatsApp gather) — every side effect
         // below runs only for the winner, after its claim.
+        // Defence-in-depth for the PROCESS-FIRST guard (the parser already rejects it): a PAID
+        // row on a still-unprocessed transaction is only ever applied as an OFF-PLATFORM payment.
+        const unprocessed = txn.status === PayoutStatus.PENDING || txn.status === PayoutStatus.HOLD;
+        if (row.outcome === 'PAID' && unprocessed && !row.paidOffPlatform) {
+          skipped.push({ rowNum: row.rowNum, txnId: txn.id, outcome: row.outcome, reason: NOT_PROCESSED_ERROR });
+          continue;
+        }
+        const offPlatform = row.outcome === 'PAID' && row.paidOffPlatform;
+        if (offPlatform && !unprocessed && !previouslyFailed) {
+          skipped.push({
+            rowNum: row.rowNum,
+            txnId: txn.id,
+            outcome: row.outcome,
+            reason: alreadySentToBankError(batch.batchCode ?? batchId),
+          });
+          continue;
+        }
+        if (offPlatform && txn.redemptionOrderId) {
+          const order = await tx.redemptionOrder.findFirst({
+            where: { id: txn.redemptionOrderId },
+            select: { status: true, pointsDeducted: true },
+          });
+          if (isOrderRefunded(order)) {
+            skipped.push({
+              rowNum: row.rowNum,
+              txnId: txn.id,
+              outcome: row.outcome,
+              reason: previouslyFailed ? POINTS_ALREADY_REFUNDED_ERROR : ORDER_REFUNDED_ERROR,
+            });
+            continue;
+          }
+        }
+
         const claim = await tx.payoutTransaction.updateMany({
           where: { id: txn.id, status: txn.status },
           data:
             row.outcome === 'PAID'
-              ? { status: PayoutStatus.SUCCESS, providerRefId: row.utr, completedAt: now }
+              ? {
+                  status: PayoutStatus.SUCCESS,
+                  providerRefId: row.utr,
+                  completedAt: now,
+                  // Off-platform flag lives in the existing providerResponse JSON (no schema change).
+                  ...(offPlatform
+                    ? {
+                        providerResponse: {
+                          paidOffPlatform: true,
+                          note: row.offPlatformNote || null,
+                          recordedById: user.sub,
+                          recordedAt: now.toISOString(),
+                          previousStatus: txn.status,
+                        },
+                      }
+                    : {}),
+                }
               : {
                   status: PayoutStatus.FAILED,
                   failureReason: row.remarks || 'UTR report: FAILED',
@@ -800,6 +1035,40 @@ export class PayoutsService {
         if (row.outcome === 'PAID') {
           paidCount++;
 
+          // Off-platform payment recorded on the platform → explicit audit row (who, which payout,
+          // prior status, reference, note) — written in the SAME tx as the status change.
+          if (offPlatform) {
+            offPlatformCount++;
+            await tx.auditLog.create({
+              data: {
+                actorId: user.sub,
+                action: 'UPDATE',
+                entityType: 'PayoutTransaction',
+                entityId: txn.id,
+                oldValues: { status: txn.status },
+                newValues: {
+                  status: PayoutStatus.SUCCESS,
+                  paidOffPlatform: true,
+                  providerRefId: row.utr,
+                  note: row.offPlatformNote || null,
+                },
+                metadata: {
+                  batchId,
+                  batchCode: batch.batchCode,
+                  source: 'PAYOUT_UTR_UPLOAD',
+                  paidOffPlatform: true,
+                  // Processing gates this payment bypassed because it was paid outside Gifsy.
+                  bypassedGates: [
+                    ...(bypassedGatesByPartner.get(txn.partnerId) ?? []),
+                    ...(unprocessed ? ['notProcessed'] : []),
+                    ...(previouslyFailed ? ['previouslyFailed'] : []),
+                    ...(missingBeneficiary(txn) ? ['missingBeneficiaryFields'] : []),
+                  ],
+                },
+              },
+            });
+          }
+
           // Capture-bank-at-redemption: a COMPLETED payout verifies the partner's self-captured
           // bank/UPI so they surface in Store Information (docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md).
           // Two guards (audit-hardened):
@@ -814,12 +1083,16 @@ export class PayoutsService {
           //    compiles to ILIKE and would treat `_`/`%` in a VPA as wildcards). The update then
           //    CAS-guards on the EXACT upiId value just read, so a concurrent re-capture between the
           //    read and the write still cannot be promoted to VERIFIED.
-          await this.updatePartnerIfSnapshotRailMatches(
-            tx,
-            txn,
-            { in: [PaymentDetailsStatus.UNVERIFIED, PaymentDetailsStatus.NEEDS_RECAPTURE] },
-            { paymentDetailsStatus: PaymentDetailsStatus.VERIFIED, bankVerifiedAt: now },
-          );
+          // NOT for an off-platform payment: the money did not go to the captured bank/UPI rail
+          // through Gifsy, so it proves nothing about those details — they stay unverified.
+          if (!offPlatform) {
+            await this.updatePartnerIfSnapshotRailMatches(
+              tx,
+              txn,
+              { in: [PaymentDetailsStatus.UNVERIFIED, PaymentDetailsStatus.NEEDS_RECAPTURE] },
+              { paymentDetailsStatus: PaymentDetailsStatus.VERIFIED, bankVerifiedAt: now },
+            );
+          }
 
           // Gather (do NO reads here) the payout-credit WhatsApp payload: push only the
           // ids already on the txn — the partner/order rows are batch-read AFTER commit
@@ -1024,7 +1297,20 @@ export class PayoutsService {
       }
     }
 
-    return { applied: true, paidCount, failedCount, reversedCount, skipped, blockedOrders };
+    return {
+      applied: true,
+      paidCount,
+      failedCount,
+      reversedCount,
+      offPlatformCount,
+      skipped,
+      blockedOrders,
+      // Rows for already-SUCCESS transactions — reported (possible double payment), never applied.
+      alreadyPaid: parseResult.alreadyPaid,
+      // Informational no-op rows (FAILED row on an already failed/reversed payout) — never applied.
+      noChange: parseResult.noChange,
+      warnings: parseResult.warnings,
+    };
   }
 
   // ───────────────────────────────────────────────────────────────────────────

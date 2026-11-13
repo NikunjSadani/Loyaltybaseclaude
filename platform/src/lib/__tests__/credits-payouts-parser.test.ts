@@ -152,7 +152,7 @@ describe('B — Valid upload', () => {
     expect(okRow?.narration).toBe('Great performance');
   });
 
-  it('B5: 1 decimal place is accepted (e.g. 100.5)', async () => {
+  it('B5: a decimal amount is accepted and rounded half-up to whole points (100.5 → 101)', async () => {
     const { parseCreditUpload } = await import('../credits-payouts-parser');
     const buf = buildXlsx(
       makeHeaders([FIELD_VOL]),
@@ -160,7 +160,8 @@ describe('B — Valid upload', () => {
     );
     const result = parseCreditUpload(buf, DEFAULT_OPTS);
     const okRow = result.rows.find((r) => r.status === 'OK');
-    expect(okRow?.amount).toBe(100.5);
+    expect(okRow?.amount).toBe(101);
+    expect(okRow?.originalAmount).toBe(100.5);
   });
 });
 
@@ -218,16 +219,17 @@ describe('D — Amount validation', () => {
     expect(errRow!.errors.join(' ')).toMatch(/negative/i);
   });
 
-  it('D2: more than 1 decimal place → ERROR (e.g. 100.55)', async () => {
+  it('D2: any number of decimals is accepted (100.55 → 101) — no "decimal" error any more', async () => {
     const { parseCreditUpload } = await import('../credits-payouts-parser');
     const buf = buildXlsx(
       makeHeaders([FIELD_VOL]),
       [['WS-001', 'Anand Wholesale', 100.55, '']],
     );
     const result = parseCreditUpload(buf, DEFAULT_OPTS);
-    const errRow = result.rows.find((r) => r.outletId === 'WS-001' && r.status === 'ERROR');
-    expect(errRow).toBeDefined();
-    expect(errRow!.errors.join(' ')).toMatch(/decimal/i);
+    const row = result.rows.find((r) => r.outletId === 'WS-001');
+    expect(row?.status).toBe('OK');
+    expect(row?.amount).toBe(101);
+    expect(row?.errors.join(' ')).not.toMatch(/decimal/i);
   });
 
   it('D3: amount exceeding points safety cap → ERROR', async () => {
@@ -499,5 +501,197 @@ describe('G — Summary totals', () => {
     const result = parseCreditUpload(buf, DEFAULT_OPTS);
     expect(result.summary.totalPoints).toBe(0);
     expect(result.summary.totalPayoutPaise).toBe(0);
+  });
+});
+
+// ─── H — Whole-unit rounding (owner rule 2026-11-12) ─────────────────────────
+
+describe('H — Whole-unit rounding (half-up)', () => {
+  it('H1: POINTS 199.5 → 200 and 199.4 → 199; totals use rounded values', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['WS-001', 'Anand Wholesale', 199.5, 199.4, '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    const vol = result.rows.find((r) => r.fieldId === 'f_vol')!;
+    const vis = result.rows.find((r) => r.fieldId === 'f_vis')!;
+    expect(vol.status).toBe('OK');
+    expect(vol.amount).toBe(200);
+    expect(vol.originalAmount).toBe(199.5);
+    expect(vis.amount).toBe(199);
+    expect(vis.originalAmount).toBe(199.4);
+    expect(result.summary.totalPoints).toBe(399);
+    expect(result.summary.rounded).toBe(2);
+  });
+
+  it('H2: PAYOUT ₹199.5 → ₹200 = 20000 paise (always whole rupees); ₹199.4 → 19900', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['RT-001', 'Sharma Store', 199.5, 199.4, '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    const vol = result.rows.find((r) => r.fieldId === 'f_vol')!;
+    const vis = result.rows.find((r) => r.fieldId === 'f_vis')!;
+    expect(vol.awardType).toBe('PAYOUT');
+    expect(vol.amount).toBe(20000);
+    expect(vol.originalAmount).toBe(199.5);
+    expect(vis.amount).toBe(19900);
+    expect(result.summary.totalPayoutPaise).toBe(39900);
+    expect(result.rows.every((r) => r.awardType !== 'PAYOUT' || r.amount % 100 === 0)).toBe(true);
+  });
+
+  it('H3: the safety cap applies to the ROUNDED value', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['WS-001', 'Anand Wholesale', 1000.4, 1000.5, '', '']],
+    );
+    const result = parseCreditUpload(buf, { ...DEFAULT_OPTS, safetyCapPoints: 1000 });
+    const under = result.rows.find((r) => r.fieldId === 'f_vol')!;   // 1000.4 → 1000 = at cap → OK
+    const over  = result.rows.find((r) => r.fieldId === 'f_vis')!;   // 1000.5 → 1001 > cap → ERROR
+    expect(under.status).toBe('OK');
+    expect(under.amount).toBe(1000);
+    expect(over.status).toBe('ERROR');
+    expect(over.errors.join(' ')).toMatch(/rounds to 1001.*safety cap of 1000/);
+  });
+
+  it('H4: a positive amount that rounds to 0 is SKIPPED (nothing to credit), not an error', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL]),
+      [['WS-001', 'Anand Wholesale', 0.4, '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    expect(result.rows[0].status).toBe('SKIP');
+    expect(result.rows[0].skipReason).toMatch(/rounds to 0/);
+    expect(result.summary.errors).toBe(0);
+    expect(result.canProceed).toBe(false);
+  });
+
+  it('H5: negatives and non-numbers are still rejected', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['WS-001', 'Anand Wholesale', -0.4, 'abc', '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    expect(result.rows.map((r) => r.status)).toEqual(['ERROR', 'ERROR']);
+  });
+
+  it('H6: whole-number (Deoleo-style) uploads are byte-identical — no originalAmount key, rounded = 0', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL]),
+      [['WS-001', 'Anand Wholesale', 500, 'May'], ['RT-001', 'Sharma Store', 250, '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    expect(result.summary.rounded).toBe(0);
+    expect(result.rows.map((r) => JSON.stringify(r))).toEqual([
+      JSON.stringify({ rowNum: 3, outletId: 'WS-001', outletName: 'Anand Wholesale', fieldId: 'f_vol', fieldName: 'Volume',
+        amount: 500, narration: 'May', awardType: 'POINTS', status: 'OK', errors: [] }),
+      JSON.stringify({ rowNum: 4, outletId: 'RT-001', outletName: 'Sharma Store', fieldId: 'f_vol', fieldName: 'Volume',
+        amount: 25000, narration: '', awardType: 'PAYOUT', status: 'OK', errors: [] }),
+    ]);
+    expect(result.summary.totalPoints).toBe(500);
+    expect(result.summary.totalPayoutPaise).toBe(25000);
+  });
+
+  it('H7: the old "Maximum 1 decimal allowed" rule is gone from the parser', () => {
+    const code = src('lib/credits-payouts-parser.ts');
+    expect(code).not.toMatch(/Maximum 1 decimal/);
+    expect(code).not.toMatch(/moreThanOneDecimal/);
+  });
+});
+
+// ─── I — Float noise trimmed before half-up rounding (audit of 0f5e9395) ─────
+
+describe('I — Excel float noise before half-up rounding', () => {
+  // Raw doubles as Excel formula cells deliver them (e.g. =116*12.5/100 → 14.499999999999998).
+  const NOISY: Array<[number, number, number]> = [
+    // [raw cell value, clean typed value, rounded whole]
+    [14.499999999999998, 14.5, 15],      // =116*12.5/100
+    [180 * 0.175, 31.5, 32],              // 31.499999999999996
+    [61.49999999999999, 61.5, 62],        // =410*0.15
+    [660 * 0.175, 115.5, 116],            // 115.49999999999999
+    [0.145 * 100, 14.5, 15],              // 14.499999999999998 (2.675-style decimal)
+    [1.005 * 1000, 1005, 1005],           // 1004.9999999999999 — noise only, nothing to round
+  ];
+
+  it('I1: roundHalfUpWhole / trimFloatNoise on noisy doubles', async () => {
+    const { roundHalfUpWhole, trimFloatNoise } = await import('../credits-payouts-parser');
+    for (const [raw, clean, whole] of NOISY) {
+      expect(trimFloatNoise(raw)).toBe(clean);
+      expect(roundHalfUpWhole(raw)).toBe(whole);
+    }
+    expect(roundHalfUpWhole(2.675)).toBe(3);
+    expect(roundHalfUpWhole(0.5)).toBe(1);
+    expect(roundHalfUpWhole(0.49)).toBe(0);
+  });
+
+  it('I2: edge values pass through trimFloatNoise unchanged (negatives, integers, huge, non-finite)', async () => {
+    const { trimFloatNoise } = await import('../credits-payouts-parser');
+    for (const v of [-14.499999999999998, -0.4, 0, 500, 1e11 + 0.5, 123456789012.345, 1e300,
+      Infinity, -Infinity, Number.MAX_SAFE_INTEGER]) {
+      expect(trimFloatNoise(v)).toBe(v);
+    }
+    expect(Number.isNaN(trimFloatNoise(NaN))).toBe(true);
+  });
+
+  it('I3: POINTS formula cell 14.499999999999998 → 15 pts, originalAmount shown as 14.5', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['WS-001', 'Anand Wholesale', 14.499999999999998, 660 * 0.175, '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    const vol = result.rows.find((r) => r.fieldId === 'f_vol')!;
+    const vis = result.rows.find((r) => r.fieldId === 'f_vis')!;
+    expect(vol.status).toBe('OK');
+    expect(vol.amount).toBe(15);
+    expect(vol.originalAmount).toBe(14.5);
+    expect(vis.amount).toBe(116);
+    expect(vis.originalAmount).toBe(115.5);
+    expect(result.summary.totalPoints).toBe(131);
+  });
+
+  it('I4: PAYOUT formula cells round half-up to whole rupees (₹31.5 → ₹32, ₹61.5 → ₹62)', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['RT-001', 'Sharma Store', 180 * 0.175, 61.49999999999999, '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    const vol = result.rows.find((r) => r.fieldId === 'f_vol')!;
+    const vis = result.rows.find((r) => r.fieldId === 'f_vis')!;
+    expect(vol.awardType).toBe('PAYOUT');
+    expect(vol.amount).toBe(3200);
+    expect(vol.originalAmount).toBe(31.5);
+    expect(vis.amount).toBe(6200);
+    expect(vis.originalAmount).toBe(61.5);
+    expect(result.summary.totalPayoutPaise).toBe(9400);
+  });
+
+  it('I5: 0.5 → 1 (OK); 0.49 → 0 (SKIP); a noise-only whole value records no originalAmount', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [
+        ['WS-001', 'Anand Wholesale', 0.5, 0.49, '', ''],
+        ['WS-002', 'Bharat Traders', 1.005 * 1000, '', '', ''],
+      ],
+    );
+    const result = parseCreditUpload(buf, { ...DEFAULT_OPTS, outlets: [...DEFAULT_OPTS.outlets, { ...DEFAULT_OPTS.outlets[0], id: 'WS-002', name: 'Bharat Traders' }] });
+    const half = result.rows.find((r) => r.outletId === 'WS-001' && r.fieldId === 'f_vol')!;
+    const low = result.rows.find((r) => r.outletId === 'WS-001' && r.fieldId === 'f_vis')!;
+    const noise = result.rows.find((r) => r.outletId === 'WS-002' && r.fieldId === 'f_vol')!;
+    expect(half.status).toBe('OK');
+    expect(half.amount).toBe(1);
+    expect(low.status).toBe('SKIP');
+    expect(low.skipReason).toMatch(/0\.49 rounds to 0/);
+    expect(noise.status).toBe('OK');
+    expect(noise.amount).toBe(1005);
+    expect('originalAmount' in noise).toBe(false);
   });
 });

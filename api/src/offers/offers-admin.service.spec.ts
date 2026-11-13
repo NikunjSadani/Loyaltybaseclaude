@@ -400,4 +400,40 @@ describe('OffersAdminService', () => {
       states: ['Gujarat', 'Maharashtra'],
     });
   });
+
+  // ── APPLIES-TO: non-blocking KPI-scope overlap warning ─────────────────────────────────────
+  describe('APPLIES-TO scope-overlap warning', () => {
+    const scoped = (s: Record<string, unknown>) => ({ code: 'ADHO50', outletType: null, outletTypes: [], programs: [], subPrograms: [], ...s });
+
+    it('create: a KPI whose scope never overlaps the tile audience → saved + `warnings` (non-blocking)', async () => {
+      mockPrisma.kpiDef.findFirst.mockResolvedValue(scoped({ programs: ['Silver'] }));
+      const res: any = await service.create(admin, body); // tile programNames ['Gold']
+      expect(mockPrisma.offerTile.create).toHaveBeenCalledTimes(1);
+      expect(res.warnings).toHaveLength(1);
+      expect(res.warnings[0]).toContain('ADHO50');
+    });
+
+    it('create: overlapping (ci) or outlet-type-compatible scope → no `warnings` key', async () => {
+      mockPrisma.kpiDef.findFirst.mockResolvedValue(scoped({ programs: ['GOLD'], outletTypes: ['WHOLESALER', 'SSS'] }));
+      const res: any = await service.create(admin, body);
+      expect(res).not.toHaveProperty('warnings');
+    });
+
+    it('create: disjoint outlet types also warn; an UNSCOPED KPI never adds the key (shape unchanged)', async () => {
+      mockPrisma.kpiDef.findFirst.mockResolvedValue(scoped({ outletTypes: ['SSS'] }));
+      expect(((await service.create(admin, body)) as any).warnings).toHaveLength(1);
+      mockPrisma.kpiDef.findFirst.mockResolvedValue(scoped({}));
+      const res = await service.create(admin, body);
+      expect(Object.keys(res)).toEqual(['tile']);
+    });
+
+    it('update: re-checked only when the KPI/audience changes', async () => {
+      mockPrisma.offerTile.findFirst.mockResolvedValue(row({ kpiCode: 'ADHO50', programNames: ['Gold'] }));
+      mockPrisma.kpiDef.findFirst.mockResolvedValue(scoped({ programs: ['Silver'] }));
+      const untouched: any = await service.update(admin, 't1', { label: 'New label' } as never);
+      expect(untouched).not.toHaveProperty('warnings');
+      const changed: any = await service.update(admin, 't1', { programNames: ['Gold'] } as never);
+      expect(changed.warnings).toHaveLength(1);
+    });
+  });
 });

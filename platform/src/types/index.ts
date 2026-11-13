@@ -529,7 +529,10 @@ export interface GifsySettings {
    *   - frequencyPerMonth:  captures required per month (1..4).
    *   - allowedSalesLevels: SalesHierarchyLevel.code list allowed to capture (e.g. ['XSR','SO']).
    *   - geoFence:           { enabled, radiusMeters (1..5000, default 50) }.
-   * Default: { outletScope: [], frequencyPerMonth: 1, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 } }.
+   *   - programs / subPrograms (APPLIES-TO, optional): narrow by Outlet.programName / programCategory;
+   *     [] = every program / sub-program. An absent key is carried over by the backend (stale-tab safety).
+   * Default: { outletScope: [], frequencyPerMonth: 1, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 },
+   *            programs: [], subPrograms: [] }.
    */
   visibilityConfig?: {
     outletScope:        string[];
@@ -539,6 +542,8 @@ export interface GifsySettings {
       enabled:      boolean;
       radiusMeters: number;
     };
+    programs?:          string[];
+    subPrograms?:       string[];
   };
   /**
    * Per-tenant identity/payout uniqueness policy. GIFSY_ADMIN-only write. REPLACE-WHOLE nested
@@ -984,6 +989,11 @@ export interface CreditUploadRow {
    * POINTS rows: whole points (a count, NOT money — no ×100).
    */
   amount:    number;
+  /**
+   * The amount exactly as typed (points, or RUPEES for PAYOUT rows) — present ONLY when the
+   * parser rounded it half-up to a whole unit (e.g. 199.5 → amount 200 / 20000 paise). Display-only.
+   */
+  originalAmount?: number;
   narration: string;
   awardType: 'POINTS' | 'PAYOUT';
   status:    'OK' | 'ERROR' | 'SKIP';
@@ -1006,6 +1016,8 @@ export interface CreditParseResult {
     totalPoints:       number;
     /** Total payout in integer paise (e.g. 1000000 = ₹10,000.00). */
     totalPayoutPaise:  number;
+    /** OK rows whose typed amount was rounded half-up to a whole unit. */
+    rounded:           number;
   };
 }
 

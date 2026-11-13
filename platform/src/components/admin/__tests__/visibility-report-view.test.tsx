@@ -67,4 +67,23 @@ describe('VISRPT — VisibilityReportView', () => {
     expect(getReport).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /export excel/i })).not.toBeInTheDocument();
   });
+
+  const scopeLine = () =>
+    screen.getByText((_, el) => el?.tagName === 'P' && (el.textContent ?? '').startsWith('Scope:')).textContent;
+
+  it('VISRPT4: scope caption is unchanged when no program narrowing is set', async () => {
+    render(<VisibilityReportView variant="tenant" />);
+    await screen.findByText('60%');
+    expect(scopeLine()).toBe('Scope: SSS, SSS_TOT · 2× per month');
+  });
+
+  it('VISRPT5: scope caption shows programs / sub-programs when set', async () => {
+    getTenantReport.mockResolvedValue({
+      success: true,
+      data: { ...REPORT, programs: ['RLP', 'BSC'], subPrograms: ['Urban'] },
+    });
+    render(<VisibilityReportView variant="tenant" />);
+    await screen.findByText('60%');
+    expect(scopeLine()).toBe('Scope: SSS, SSS_TOT · Programs: RLP, BSC · Sub-Programs: Urban · 2× per month');
+  });
 });

@@ -30,6 +30,38 @@ import { NodeCard } from './NodeCard';
 import { SimulatorPanel } from './SimulatorPanel';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import { intersectAppliesTo, isUnscoped, type AppliesTo } from '@/lib/applies-to';
+import {
+  FACET_NOUN, kpiScopeOf, ruleScopeOf, scopeMismatches, type KpiScopeFieldsLike, type RuleAudienceLike,
+} from '@/lib/kpi-scope-core';
+
+/**
+ * APPLIES-TO D5: mirrors the backend publish gate (points-engine.service assertKpiCodesExist), which checks ONLY the
+ * rule's ATTACHED KPI (bonus-input KPIs are never checked). The rule's audience is computed exactly like the
+ * backend `ruleAppliesTo` — attachment program / sub-program PLUS every HARD (`onFail: zero`) segmentFilter on
+ * outlet type / program / sub-program (shared logic: `ruleScopeOf` in kpi-scope-core).
+ *   • DISJOINT from the KPI scope → the backend refuses to publish (compute would SKIP every outlet).
+ *   • PARTIAL overlap → publish is allowed, but outlets outside the KPI scope are skipped in compute.
+ * Case-only spelling is NOT hinted here: the backend checks it against the LIVE outlet spellings (which this
+ * builder does not have) and its 400 names the exact spelling to use — a hint from the settings-list / KPI-scope
+ * spelling could point at the wrong one.
+ * Non-blocking warning text, or null when the backend would accept it without skips.
+ */
+export function ruleKpiScopeWarning(
+  kpiCode: string,
+  kpiScope: AppliesTo | undefined,
+  rule: RuleAudienceLike,
+): string | null {
+  if (!kpiScope || isUnscoped(kpiScope)) return null;
+  const ruleScope = ruleScopeOf(rule);
+  const mm = scopeMismatches(kpiScope, ruleScope);
+  if (mm.length === 0) return null;
+  const parts = mm.map((m) => `${FACET_NOUN[m.facet]} "${m.outside.join(', ')}" (the KPI applies only to ${m.kpiValues.join(', ')})`);
+  if (intersectAppliesTo(ruleScope, kpiScope) === null) {
+    return `KPI ${kpiCode} does not apply to this rule's ${parts.join(' or ')}. Outlets there are skipped in compute, and publishing will be refused until the rule and the KPI scope overlap.`;
+  }
+  return `KPI ${kpiCode} does not apply to this rule's ${parts.join(' or ')}. Outlets there are skipped in compute; the rest can earn.`;
+}
 
 // Node types grouped by disclosure level for the "Add step" menu.
 const LEVEL_ORDER = ['Basic', 'Tiered', 'Conditional', 'Clamp', 'Advanced'] as const;
@@ -194,6 +226,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
   // editing an existing rule whose stored value is no longer in the list still shows + keeps it.
   const settings = useGifsySettings();
   const [kpiCodes, setKpiCodes] = useState<string[]>([]);
+  const [kpiScopes, setKpiScopes] = useState<Record<string, AppliesTo>>({});
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -201,11 +234,9 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
         const res = await fetch('/api/admin/kpis');
         const json = await res.json();
         if (!cancelled && json?.success && Array.isArray(json.data)) {
-          setKpiCodes(
-            (json.data as Array<{ code: string; enabled?: boolean }>)
-              .filter((k) => k.enabled !== false)
-              .map((k) => k.code),
-          );
+          const rows = json.data as Array<{ code: string; enabled?: boolean } & KpiScopeFieldsLike>;
+          setKpiCodes(rows.filter((k) => k.enabled !== false).map((k) => k.code));
+          setKpiScopes(Object.fromEntries(rows.map((k) => [k.code, kpiScopeOf(k)])));
         }
       } catch {
         /* leave empty — KPI falls back to the draft's current value only */
@@ -219,6 +250,10 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
   const programOptions = uniqOpts([...(settings.outletPrograms ?? []), draft.attachsTo.program]);
   const categoryOptions = uniqOpts([...(settings.outletCategories ?? []), draft.attachsTo.programCategory]);
   const kpiOptions = uniqOpts([...kpiCodes, draft.attachsTo.kpiCode]);
+  const kpiScopeWarning = ruleKpiScopeWarning(draft.attachsTo.kpiCode, kpiScopes[draft.attachsTo.kpiCode], {
+    ...draft.attachsTo,
+    pipeline: draft.pipeline,
+  });
 
   // ── draft mutators ────────────────────────────────────────────────────────────
   const patch = (p: Partial<RuleConfigDraft>) => {
@@ -610,6 +645,12 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                 </Field>
               </div>
             </div>
+            {kpiScopeWarning && (
+              <div role="status" data-testid="rule-kpi-scope-warning"
+                className="mt-3 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /> {kpiScopeWarning}
+              </div>
+            )}
           </SectionCard>
 
           {/* Inputs */}

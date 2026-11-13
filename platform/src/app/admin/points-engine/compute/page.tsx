@@ -110,11 +110,17 @@ const GROUP_STYLES: Record<
   },
 };
 
+/** APPLIES-TO D5: the backend SKIPs an (outlet, KPI) pair outside the KPI's scope with the reason
+ *  "KPI not applicable to this outlet (KPI scope)" — the row itself shows that reason verbatim. */
+const isKpiScopeSkip = (r: ComputePreviewRow) => (r.reason ?? '').includes('(KPI scope)');
+
 /** ERROR / SKIP / NO_RULE non-OK groups rendered as a reasoned panel list. */
 function NonOkGroup({ status, rows }: { status: Exclude<PreviewRowStatus, 'OK'>; rows: ComputePreviewRow[] }) {
   if (rows.length === 0) return null;
   const s = GROUP_STYLES[status];
   const shown = rows.slice(0, ROWS_PER_GROUP);
+  // The full count (shown rows are capped), so an operator sees how many skips are just the KPI scope at work.
+  const scopeSkips = status === 'SKIP' ? rows.filter(isKpiScopeSkip).length : 0;
   return (
     <div className={`overflow-hidden rounded-xl border bg-white ${s.card}`} data-testid={`group-${status}`}>
       <div className={`flex items-center gap-2 border-b px-4 py-3 ${s.head}`}>
@@ -122,6 +128,11 @@ function NonOkGroup({ status, rows }: { status: Exclude<PreviewRowStatus, 'OK'>;
         <p className="text-xs font-semibold">
           {rows.length.toLocaleString('en-IN')} {s.label.toLowerCase()} row{rows.length !== 1 ? 's' : ''}
         </p>
+        {scopeSkips > 0 && (
+          <p className="text-xs font-normal" data-testid="skip-kpi-scope-count">
+            · {scopeSkips.toLocaleString('en-IN')} because the KPI doesn&apos;t apply to that outlet (KPI scope) — expected, nothing to fix
+          </p>
+        )}
       </div>
       <div className="max-h-72 divide-y divide-gray-100 overflow-y-auto">
         {shown.map((r, i) => (

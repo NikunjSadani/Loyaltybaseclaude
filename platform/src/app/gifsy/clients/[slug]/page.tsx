@@ -13,6 +13,7 @@ import type { ClientConfig, FeatureKey, FeatureFlags } from '@/lib/platform/clie
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
 import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
+import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feature metadata — label + description for each toggle
@@ -1165,7 +1166,7 @@ function LiveSwitchRow({
 // Behaviour flags section (B2) — runtime flags that are NOT console modules
 // ─────────────────────────────────────────────────────────────────────────────
 
-// outletMasterGeo / soDeclarationKyc are deliberately excluded from FeatureKey (they change how an
+// outletMasterGeo / soDeclarationKyc / allowPayoutWithoutPan are deliberately excluded from FeatureKey (they change how an
 // existing flow behaves rather than switching a module on), so they get their own section. Same
 // REAL persistence as the module toggles: PATCH { features: { <key>: bool } } — the backend merges
 // one key at a time (every other stored flag survives). A failed save leaves the switch unchanged.
@@ -1178,8 +1179,10 @@ function BehaviourFlagsSection({
 }) {
   const [pendingKey, setPendingKey] = useState<BehaviourFlagKey | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A flag with `confirmOn` meta asks before switching ON (never before switching OFF).
+  const [confirmKey, setConfirmKey] = useState<BehaviourFlagKey | null>(null);
 
-  const toggle = async (key: BehaviourFlagKey, next: boolean) => {
+  const save = async (key: BehaviourFlagKey, next: boolean) => {
     if (saving) return;
     setPendingKey(key);
     setError(null);
@@ -1191,10 +1194,19 @@ function BehaviourFlagsSection({
     }
   };
 
+  const toggle = async (key: BehaviourFlagKey, next: boolean) => {
+    if (saving) return;
+    if (next && BEHAVIOUR_FLAG_META[key].confirmOn) {
+      setConfirmKey(key);
+      return;
+    }
+    await save(key, next);
+  };
+
   return (
     <div className="pt-2 space-y-2">
       <p className="text-xs text-white/40 px-1">
-        These change how an existing flow behaves for this tenant. Both are OFF unless switched on here.
+        These change how an existing flow behaves for this tenant. Each is OFF unless switched on here.
       </p>
       {BEHAVIOUR_FLAG_KEYS.map((key) => {
         const enabled = config.features[key] === true;
@@ -1217,6 +1229,16 @@ function BehaviourFlagsSection({
       <p className="text-xs text-white/30 pt-1 px-1">
         Changes save immediately and apply to this tenant only. Other tenants are unaffected.
       </p>
+      <BehaviourFlagConfirm
+        flagKey={confirmKey}
+        tenantLabel={`Tenant: ${config.internalName}`}
+        busy={saving}
+        onCancel={() => setConfirmKey(null)}
+        onConfirm={(key) => {
+          setConfirmKey(null);
+          void save(key, true);
+        }}
+      />
     </div>
   );
 }

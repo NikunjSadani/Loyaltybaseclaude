@@ -394,6 +394,8 @@ describe('TenantSettingsService', () => {
         frequencyPerMonth:  1,
         allowedSalesLevels: [],
         geoFence:           { enabled: false, radiusMeters: 50 },
+        programs:           [],
+        subPrograms:        [],
       });
     });
 
@@ -415,6 +417,8 @@ describe('TenantSettingsService', () => {
         frequencyPerMonth:  4,
         allowedSalesLevels: ['XSR', 'SO', 'ASM'],
         geoFence:           { enabled: true, radiusMeters: 200 },
+        programs:           [],
+        subPrograms:        [],
       });
     });
 
@@ -431,6 +435,48 @@ describe('TenantSettingsService', () => {
       const s = await svc.getEffectiveSettings('deoleo');
       expect(s.visibilityConfig.outletScope).toEqual(['SSS', 'SSS_TOT']);
       expect(s.visibilityConfig.allowedSalesLevels).toEqual([]);
+    });
+
+    it('APPLIES-TO: an OLD stored config without programs/subPrograms keys → [] for both', async () => {
+      const s = await new TenantSettingsService(makePrisma([
+        {
+          settingKey: 'visibilityConfig',
+          settingValue: {
+            outletScope:        ['SSS'],
+            frequencyPerMonth:  2,
+            allowedSalesLevels: ['XSR'],
+            geoFence:           { enabled: true, radiusMeters: 75 },
+          },
+        },
+      ])).getEffectiveSettings('deoleo');
+      expect(s.visibilityConfig.programs).toEqual([]);
+      expect(s.visibilityConfig.subPrograms).toEqual([]);
+      expect(s.visibilityConfig.outletScope).toEqual(['SSS']);
+    });
+
+    it('APPLIES-TO: overlays programs/subPrograms (trim, drop blanks/non-strings, dedupe); non-array → []', async () => {
+      const s = await new TenantSettingsService(makePrisma([
+        {
+          settingKey: 'visibilityConfig',
+          settingValue: {
+            outletScope: ['SSS'],
+            programs:    [' Gold ', 'Gold', '', 7, 'Silver'],
+            subPrograms: 'Tier A',
+          },
+        },
+      ])).getEffectiveSettings('deoleo');
+      expect(s.visibilityConfig.programs).toEqual(['Gold', 'Silver']);
+      expect(s.visibilityConfig.subPrograms).toEqual([]);
+    });
+
+    it('APPLIES-TO: default programs/subPrograms arrays are copies, never the cached default reference', async () => {
+      const svc = new TenantSettingsService(makePrisma([]));
+      const a = await svc.getEffectiveSettings('deoleo');
+      a.visibilityConfig.programs.push('MUTATED');
+      a.visibilityConfig.subPrograms.push('MUTATED');
+      const b = await new TenantSettingsService(makePrisma([])).getEffectiveSettings('deoleo');
+      expect(b.visibilityConfig.programs).toEqual([]);
+      expect(b.visibilityConfig.subPrograms).toEqual([]);
     });
 
     it('rejects frequencyPerMonth 0 and 5 → default 1; accepts 1..4', async () => {
@@ -485,6 +531,8 @@ describe('TenantSettingsService', () => {
         frequencyPerMonth:  2,
         allowedSalesLevels: [],
         geoFence:           { enabled: false, radiusMeters: 50 },
+        programs:           [],
+        subPrograms:        [],
       });
     });
 
@@ -497,6 +545,8 @@ describe('TenantSettingsService', () => {
         frequencyPerMonth:  1,
         allowedSalesLevels: [],
         geoFence:           { enabled: false, radiusMeters: 50 },
+        programs:           [],
+        subPrograms:        [],
       });
     });
   });

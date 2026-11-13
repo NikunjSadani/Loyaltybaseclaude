@@ -11,7 +11,7 @@ import {
   NotFoundException,
   ConflictException,
 } from '@nestjs/common';
-import { GifsyService } from './gifsy.service';
+import { GifsyService, diffFeatureKeys } from './gifsy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { AdminCoreService } from '../admin-core/admin-core.service';
@@ -24,7 +24,7 @@ const mockPrisma = {
   client: { findMany: jest.fn(), findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
   outletType: { findMany: jest.fn(), findFirst: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn(), upsert: jest.fn() },
-  auditLog: { count: jest.fn(), findMany: jest.fn() },
+  auditLog: { count: jest.fn(), findMany: jest.fn(), create: jest.fn() },
   clientDomain: {
     findFirst: jest.fn(),
     findMany: jest.fn(),
@@ -33,6 +33,8 @@ const mockPrisma = {
     update: jest.fn(),
   },
   $transaction: jest.fn(),
+  // updateClient takes a row lock (SELECT … FOR UPDATE) before merging features.
+  $executeRaw: jest.fn(),
 };
 
 const mockStorage = {
@@ -501,12 +503,13 @@ describe('GifsyService', () => {
       });
 
       it('switching OFF, and re-sending ON for a tenant already ON, are never blocked (other toggles keep working)', async () => {
-        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true }));
+        // updateClient reads the row twice: a pre-check read + the locked re-read inside the tx.
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true })).mockResolvedValueOnce(tenant({ salesImport: true }));
         echoUpdate();
         const off = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: false } });
         expect((off.features as unknown as Record<string, boolean>).salesImport).toBe(false);
 
-        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true }));
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true })).mockResolvedValueOnce(tenant({ salesImport: true }));
         echoUpdate();
         const again = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true, walletModule: true } });
         expect((again.features as unknown as Record<string, boolean>).salesImport).toBe(true);
@@ -641,6 +644,165 @@ describe('GifsyService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.client.update).not.toHaveBeenCalled();
       expect(mockPrisma.client.create).not.toHaveBeenCalled();
+    });
+
+    it('allowPayoutWithoutPan: PATCH merges ONE key, every other stored flag survives, response echoes it', async () => {
+      const stored = {
+        walletModule: true,
+        outletMasterGeo: true,
+        soDeclarationKyc: true,
+        captureBankAtRedemption: true,
+        partnerApp: { showLeaderboard: true },
+        visibilityCaptureMode: 'PHOTO_APPROVAL',
+      };
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: stored,
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+
+      const res = await service.updateClient(gifsy, 'bajaj', { features: { allowPayoutWithoutPan: true } });
+
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({ ...stored, allowPayoutWithoutPan: true });
+      const feats = res.features as Record<string, unknown>;
+      expect(feats.allowPayoutWithoutPan).toBe(true);
+      expect(feats.outletMasterGeo).toBe(true);
+      expect(feats.soDeclarationKyc).toBe(true);
+      expect(feats.captureBankAtRedemption).toBe(true);
+    });
+
+    it('allowPayoutWithoutPan: absent → projected OFF; a non-boolean value → 400 (nothing written)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true }, ...data,
+      }));
+      const res = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
+      expect((res.features as Record<string, unknown>).allowPayoutWithoutPan).toBe(false);
+
+      mockPrisma.client.update.mockClear();
+      for (const v of ['true', 1, null]) {
+        await expect(
+          service.updateClient(gifsy, 'deoleo', { features: { allowPayoutWithoutPan: v } } as never),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      expect(mockPrisma.client.update).not.toHaveBeenCalled();
+    });
+
+    // ── Feature-change audit trail (log-only) ───────────────────────────────────
+    const bajajRow = (features: Record<string, unknown>) => ({
+      id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+      branding: {}, features,
+    });
+
+    it('AUDIT: switching allowPayoutWithoutPan ON writes ONE AuditLog row (actor, slug, before→after)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(bajajRow({ walletModule: true, soDeclarationKyc: true }));
+      mockPrisma.client.update.mockImplementation(async ({ data }) => bajajRow(data.features));
+      mockPrisma.auditLog.create.mockResolvedValue({});
+
+      await service.updateClient(gifsy, 'bajaj', { features: { allowPayoutWithoutPan: true } });
+
+      expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.auditLog.create.mock.calls[0][0]).toEqual({
+        data: {
+          actorId: 'admin1',
+          action: 'UPDATE',
+          entityType: 'ClientFeatures',
+          entityId: 'bajaj',
+          oldValues: { allowPayoutWithoutPan: null },
+          newValues: { allowPayoutWithoutPan: true },
+          metadata: { slug: 'bajaj', changedKeys: ['allowPayoutWithoutPan'], actorRole: 'GIFSY_ADMIN' },
+        },
+      });
+    });
+
+    it('AUDIT: generic — a module toggle OFF and a nested partnerApp key are each logged per key', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(bajajRow({ walletModule: true, partnerApp: { showTeam: true } }));
+      mockPrisma.client.update.mockImplementation(async ({ data }) => bajajRow(data.features));
+      mockPrisma.auditLog.create.mockResolvedValue({});
+
+      await service.updateClient(gifsy, 'bajaj', {
+        features: { walletModule: false, partnerApp: { showLeaderboard: true } } as never,
+      });
+
+      const { oldValues, newValues, metadata } = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(oldValues).toEqual({ walletModule: true, 'partnerApp.showLeaderboard': null });
+      expect(newValues).toEqual({ walletModule: false, 'partnerApp.showLeaderboard': true });
+      expect(metadata.changedKeys.sort()).toEqual(['partnerApp.showLeaderboard', 'walletModule']);
+    });
+
+    it('AUDIT: no row when nothing actually changed, or the PATCH carries no features', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(bajajRow({ allowPayoutWithoutPan: true }));
+      mockPrisma.client.update.mockImplementation(async ({ data }) => bajajRow(data.features ?? { allowPayoutWithoutPan: true }));
+      await service.updateClient(gifsy, 'bajaj', { features: { allowPayoutWithoutPan: true } });
+      await service.updateClient(gifsy, 'bajaj', { status: 'ACTIVE' });
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('AUDIT: a failed audit write never fails the PATCH (log-only)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(bajajRow({}));
+      mockPrisma.client.update.mockImplementation(async ({ data }) => bajajRow(data.features));
+      mockPrisma.auditLog.create.mockRejectedValue(new Error('db down'));
+      const res = await service.updateClient(gifsy, 'bajaj', { features: { allowPayoutWithoutPan: true } });
+      expect((res.features as Record<string, unknown>).allowPayoutWithoutPan).toBe(true);
+    });
+
+    it('AUDIT (16): before/after come from the row LOCKED inside the update tx (a concurrent PATCH that landed after the pre-read is respected)', async () => {
+      // Pre-read sees {} but by the time the lock is taken another PATCH has set walletModule=true.
+      mockPrisma.client.findFirst
+        .mockResolvedValueOnce(bajajRow({}))
+        .mockResolvedValueOnce(bajajRow({ walletModule: true }));
+      mockPrisma.client.update.mockImplementation(async ({ data }) => bajajRow(data.features));
+      mockPrisma.auditLog.create.mockResolvedValue({});
+
+      await service.updateClient(gifsy, 'bajaj', { features: { allowPayoutWithoutPan: true } });
+
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+      expect(mockPrisma.$executeRaw).toHaveBeenCalled(); // SELECT … FOR UPDATE
+      // the concurrent key survives the merge …
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({ walletModule: true, allowPayoutWithoutPan: true });
+      // … and the audit shows ONLY this PATCH's change
+      const { oldValues, newValues } = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(oldValues).toEqual({ allowPayoutWithoutPan: null });
+      expect(newValues).toEqual({ allowPayoutWithoutPan: true });
+    });
+
+    it('AUDIT (13): createClient writes one AuditLog row with the initial features', async () => {
+      mockPrisma.client.create.mockImplementation(async ({ data }) => ({
+        id: data.id, internalName: data.internalName, status: 'ONBOARDING', onboardedAt: new Date(), branding: {}, features: data.features,
+      }));
+      mockPrisma.auditLog.create.mockResolvedValue({});
+      mockPrisma.client.findUnique.mockResolvedValue(null);
+      mockPrisma.client.findMany.mockResolvedValue([]);
+      mockPrisma.outletType.findMany.mockResolvedValue([]);
+      mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
+      await service.createClient(gifsy, { slug: 'newco', internalName: 'NewCo', features: { walletModule: true, allowPayoutWithoutPan: true } } as never);
+      const call = mockPrisma.auditLog.create.mock.calls.find((c) => c[0].data.entityType === 'ClientFeatures');
+      expect(call).toBeDefined();
+      expect(call![0].data).toMatchObject({
+        actorId: 'admin1',
+        action: 'CREATE',
+        entityId: 'newco',
+        newValues: { walletModule: true, allowPayoutWithoutPan: true },
+        metadata: { slug: 'newco', actorRole: 'GIFSY_ADMIN' },
+      });
+    });
+
+    it('diffFeatureKeys: only changed keys, absent ↔ null, nested partnerApp per sub-key', () => {
+      expect(diffFeatureKeys({ a: true, b: 1, partnerApp: { x: true } }, { a: true, b: 2, c: false, partnerApp: { x: false, y: true } }))
+        .toEqual({
+          b: { before: 1, after: 2 },
+          c: { before: null, after: false },
+          'partnerApp.x': { before: true, after: false },
+          'partnerApp.y': { before: null, after: true },
+        });
+      expect(diffFeatureKeys({ a: true }, { a: true })).toEqual({});
     });
 
     it('B3: a partial partnerApp PATCH (showLeaderboard only) keeps the stored sibling tab keys', async () => {

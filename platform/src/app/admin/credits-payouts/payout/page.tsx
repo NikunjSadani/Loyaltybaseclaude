@@ -327,12 +327,10 @@ function PayoutPageInner() {
     setRevMsg('');
 
     const body: Record<string, unknown> = { action: revAction.action };
-    if (revAction.action === 'approve' && revAmount) {
-      const rev = reversals.find((r) => r.id === revAction.id);
-      // User enters rupees for PAYOUT reversals; convert to paise for the API DTO.
-      body.approvedPaise = rev?.awardType === 'PAYOUT'
-        ? Math.round(Number(revAmount) * 100)
-        : Number(revAmount);
+    const actionRev = reversals.find((r) => r.id === revAction.id);
+    // PAYOUT reversals are approved in full (whole payout entries) — no amount is sent.
+    if (revAction.action === 'approve' && revAmount && actionRev?.awardType !== 'PAYOUT') {
+      body.approvedPaise = Number(revAmount);
     }
     if (revRemarks) body.remarks = revRemarks;
 
@@ -723,21 +721,28 @@ function PayoutPageInner() {
                 {revAction?.id === rev.id ? (
                   <div className="bg-white rounded-xl p-3 space-y-3 border border-gray-200">
                     <p className="text-xs font-semibold text-gray-800 capitalize">{revAction.action} Reversal</p>
-                    {revAction.action === 'approve' && (
+                    {revAction.action === 'approve' && rev.awardType === 'PAYOUT' && (
+                      // Interim whole-entry rule: the request was matched to whole payout entries
+                      // when it was raised, so a payout reversal is approved in full or rejected.
+                      <p className="text-xs text-gray-600">
+                        Payout reversals are approved for the full requested amount (
+                        {`₹${(Number(rev.requestedPaise) / 100).toLocaleString('en-IN')}`}) — whole payout entries only.
+                        Unpaid entries are cancelled; an already-paid entry becomes a receivable to recover off-platform.
+                        To change the amount, reject this request and raise a new one.
+                      </p>
+                    )}
+                    {revAction.action === 'approve' && rev.awardType !== 'PAYOUT' && (
                       <div className="space-y-1">
                         <label className="text-xs text-gray-600">
-                          Approved Amount {rev.awardType === 'PAYOUT' ? '(₹, leave blank for full amount)' : '(pts, leave blank for full amount)'}
+                          Approved Amount (pts, leave blank for full amount)
                         </label>
                         <input
                           type="number"
                           value={revAmount}
                           onChange={(e) => setRevAmount(e.target.value)}
-                          placeholder={rev.awardType === 'PAYOUT'
-                            // requestedPaise is integer paise; show rupees in the placeholder
-                            ? String(Number(rev.requestedPaise) / 100)
-                            : String(Number(rev.requestedPaise))}
-                          max={rev.awardType === 'PAYOUT' ? Number(rev.requestedPaise) / 100 : Number(rev.requestedPaise)}
-                          min={rev.awardType === 'PAYOUT' ? 0.01 : 1}
+                          placeholder={String(Number(rev.requestedPaise))}
+                          max={Number(rev.requestedPaise)}
+                          min={1}
                           className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none"
                         />
                       </div>

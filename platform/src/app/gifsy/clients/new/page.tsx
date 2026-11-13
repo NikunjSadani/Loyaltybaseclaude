@@ -7,6 +7,7 @@ import { validateNewClientSlug, validateTenantDomain, normalizeTenantDomain } fr
 import type { FeatureKey } from '@/lib/platform/client-config';
 import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
+import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Step types
@@ -105,7 +106,7 @@ export default function OnboardClientPage() {
     supportPhone:  '',
     invoicePrefix: 'TGSL-',
     features:      { ...DEFAULT_FEATURES },
-    behaviourFlags: { outletMasterGeo: false, soDeclarationKyc: false },
+    behaviourFlags: { outletMasterGeo: false, soDeclarationKyc: false, allowPayoutWithoutPan: false },
   });
 
   const [slugErrors, setSlugErrors] = useState<string[]>([]);
@@ -482,6 +483,20 @@ function FeaturesStep({
   const toggle = (key: FeatureKey, value: boolean) =>
     onChange({ features: { ...form.features, [key]: value } });
 
+  // A behaviour flag with `confirmOn` meta (allowPayoutWithoutPan) asks before switching ON — the
+  // same dialog as the client page. Switching OFF never asks.
+  const [confirmKey, setConfirmKey] = useState<BehaviourFlagKey | null>(null);
+  const setFlag = (key: BehaviourFlagKey, value: boolean) =>
+    onChange({ behaviourFlags: { ...form.behaviourFlags, [key]: value } });
+  const flipFlag = (key: BehaviourFlagKey) => {
+    const next = !form.behaviourFlags[key];
+    if (next && BEHAVIOUR_FLAG_META[key].confirmOn) {
+      setConfirmKey(key);
+      return;
+    }
+    setFlag(key, next);
+  };
+
   const enabledCount = Object.values(form.features).filter(Boolean).length;
 
   return (
@@ -532,11 +547,11 @@ function FeaturesStep({
                 className={`flex items-center gap-4 px-4 py-3 rounded-xl border transition-colors cursor-pointer ${
                   on ? 'bg-white/5 border-white/15' : 'bg-transparent border-white/5 hover:border-white/10'
                 }`}
-                onClick={() => onChange({ behaviourFlags: { ...form.behaviourFlags, [key]: !on } })}
+                onClick={() => flipFlag(key)}
                 onKeyDown={(e) => {
                   if (e.key === ' ' || e.key === 'Enter') {
                     e.preventDefault();
-                    onChange({ behaviourFlags: { ...form.behaviourFlags, [key]: !on } });
+                    flipFlag(key);
                   }
                 }}
               >
@@ -550,6 +565,15 @@ function FeaturesStep({
           })}
         </div>
       </div>
+      <BehaviourFlagConfirm
+        flagKey={confirmKey}
+        tenantLabel={`New client: ${form.internalName || form.slug || 'unnamed'}`}
+        onCancel={() => setConfirmKey(null)}
+        onConfirm={(key) => {
+          setConfirmKey(null);
+          setFlag(key, true);
+        }}
+      />
     </div>
   );
 }

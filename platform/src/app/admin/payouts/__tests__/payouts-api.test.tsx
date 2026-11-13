@@ -143,6 +143,54 @@ describe('PAY — UTR upload skipped rows', () => {
     await screen.findByText(/UTR applied:/);
   }
 
+  it('PAY-DUP: lists rows for already-paid transactions (possible double payment) and ignored columns', async () => {
+    stubUtrFlow({
+      applied: true, paidCount: 0, failedCount: 0, reversedCount: 0, offPlatformCount: 0,
+      skipped: [], blockedOrders: [],
+      alreadyPaid: [{ rowNum: 4, txnId: 'txn-z', notice: 'Already marked paid on 2026-11-09 (bank) — check for a double payment' }],
+      warnings: ['Ignored columns (not recognised): "Paid outside platfrom (Y/N)"'],
+    });
+    await uploadFile();
+    const box = await screen.findByTestId('utr-already-paid');
+    expect(within(box).getByText(/Already marked paid on 2026-11-09 \(bank\) — check for a double payment/)).toBeInTheDocument();
+    expect(within(box).getByText('Ignored columns (not recognised): "Paid outside platfrom (Y/N)"')).toBeInTheDocument();
+  });
+
+  it('PAY-NOCHG: "already recorded as failed" rows are shown neutrally (role=status), never in the red alert', async () => {
+    stubUtrFlow({
+      applied: true, paidCount: 0, failedCount: 0, reversedCount: 0, offPlatformCount: 0,
+      skipped: [], blockedOrders: [], alreadyPaid: [], warnings: [],
+      noChange: [{ rowNum: 3, txnId: 'txn-f', notice: 'Already recorded as failed — no change' }],
+    });
+    await uploadFile();
+    const box = await screen.findByTestId('utr-no-change');
+    expect(box).toHaveAttribute('role', 'status');
+    expect(box.className).not.toMatch(/red/);
+    expect(within(box).getByText('1 row already up to date — nothing changed')).toBeInTheDocument();
+    expect(within(box).getByText(/Already recorded as failed — no change/)).toBeInTheDocument();
+    expect(screen.queryByTestId('utr-already-paid')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('PAY-NOCHG-2: an older API response without noChange renders no neutral panel', async () => {
+    stubUtrFlow({
+      applied: true, paidCount: 1, failedCount: 0, reversedCount: 0, skipped: [], blockedOrders: [],
+    });
+    await uploadFile();
+    expect(screen.queryByTestId('utr-no-change')).not.toBeInTheDocument();
+  });
+
+  it('PAY-OFF: shows how many PAID rows were recorded as paid outside the platform', async () => {
+    stubUtrFlow({
+      applied: true, paidCount: 3, failedCount: 1, reversedCount: 0, offPlatformCount: 2,
+      skipped: [], blockedOrders: [],
+    });
+    await uploadFile();
+    expect(
+      screen.getByText('UTR applied: 3 paid (2 recorded as paid outside the platform), 1 failed.'),
+    ).toBeInTheDocument();
+  });
+
   it('PAY5: lists each skipped row (row number + reason) alongside the applied counts', async () => {
     stubUtrFlow({
       applied: true, paidCount: 1, failedCount: 0, reversedCount: 0,

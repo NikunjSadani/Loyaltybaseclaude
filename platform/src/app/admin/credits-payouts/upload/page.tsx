@@ -18,6 +18,7 @@ import { parseCreditUpload }      from '@/lib/credits-payouts-parser';
 import { getGifsySettings }       from '@/lib/gifsy-settings';
 import { jsonToSheetSafe }        from '@/lib/xlsx-safe';
 import { downloadBlob }           from '@/lib/download';
+import { RoundedAmountsPanel }     from './_components/rounded-amounts-panel';
 import type { CreditField, CreditParseResult } from '@/types';
 import type { TemplateOutlet } from '@/lib/credits-payouts-template';
 
@@ -236,10 +237,14 @@ export default function CreditsPayoutsUploadPage() {
   function handleDownloadReport() {
     if (!parseResult) return;
     import('xlsx').then((XLSX) => {
+      // "Typed Amount" appears only when something was rounded (whole-number uploads keep
+      // the exact previous report layout).
+      const anyRounded = parseResult.rows.some((r) => r.originalAmount !== undefined);
       const rows = parseResult.rows.map((r) => ({
         'Outlet ID':   r.outletId,
         'Outlet Name': r.outletName,
         'Field':       r.fieldName,
+        ...(anyRounded ? { 'Typed Amount': r.originalAmount ?? '' } : {}),
         'Amount':      r.amount || '',
         'Award Type':  r.awardType,
         'Status':      r.status,
@@ -430,6 +435,8 @@ export default function CreditsPayoutsUploadPage() {
               </p>
             </div>
           )}
+
+          <RoundedAmountsPanel rows={parseResult.rows} />
 
           {parseResult.hasErrors && (
             <div className="bg-white rounded-xl border border-red-200 overflow-hidden">

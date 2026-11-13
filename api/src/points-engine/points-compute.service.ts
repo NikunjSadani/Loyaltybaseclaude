@@ -44,12 +44,17 @@ import type {
 import type { ComputeCommitResult, ComputePreview, ComputePreviewRow } from './points-compute.types';
 import type { PointsRule } from '@prisma/client';
 import { UploadRowDto, UploadRowStatus } from '../credits/dto/credits.dto';
+import type { AppliesToOutletFacets } from '../common/applies-to/applies-to';
+import { kpiOutletPredicate } from '../sales/outlet-kpi-scope.helper';
 
 /** The reserved non-KPI key inside a targetValues/kpiValues JSON (custom display names). */
 const NAMES_KEY = '__names';
 
 /** CreditBatch.sourceKind tag for batches created by the direct-credit path (idempotency + provenance). */
 const POINTS_ENGINE_SOURCE = 'POINTS_ENGINE';
+
+/** APPLIES-TO D5: SKIP reason for an (outlet, KPI) pair outside the KPI's scope (exact owner wording). */
+export const KPI_SCOPE_SKIP_REASON = 'KPI not applicable to this outlet (KPI scope)';
 
 @Injectable()
 export class PointsComputeService {
@@ -150,6 +155,39 @@ export class PointsComputeService {
         select: { outletCode: true, targetValues: true },
       }),
     ]);
+    // APPLIES-TO scope (D5) of EVERY KPI a rule could reference: the active (attached) KPIs plus every
+    // KPI code present in this period's stored achievement / target values (a rule's bonus inputs —
+    // kpiCode / achievement: / target: / pct: — can only ever read one of those keys). One query.
+    const referencedKpiCodes = new Set<string>(activeKpiCodes);
+    for (const r of salesRows) for (const k of Object.keys(normalizeValues(r.kpiValues))) referencedKpiCodes.add(k);
+    for (const r of targetRows) for (const k of Object.keys(normalizeValues(r.targetValues))) referencedKpiCodes.add(k);
+    const kpiScopeRows = await this.prisma.kpiDef.findMany({
+      where: { clientId, code: { in: [...referencedKpiCodes] } },
+      select: { code: true, outletType: true, outletTypes: true, programs: true, subPrograms: true },
+    });
+    // kpiCode → per-outlet scope predicate; absent for unscoped (or unknown) KPIs → never SKIPs/masks, so
+    // an unscoped tenant's preview is byte-identical. Uses the outlet's CURRENT attributes (D9/D10).
+    const kpiScopePred = new Map<string, (o: AppliesToOutletFacets) => boolean>();
+    for (const k of kpiScopeRows ?? []) {
+      const p = kpiOutletPredicate(k);
+      if (p) kpiScopePred.set(k.code, p);
+    }
+    // Owner rule: every reader honours KPI scope. A rule's bonus input that reads a KPI OUT of scope for
+    // this outlet must see it as ABSENT (→ the input's nullAs), never the stored out-of-scope value. So
+    // the per-outlet achievement/target maps are masked by each KPI's own scope. No scoped KPI → the
+    // original maps are passed through untouched (identity), keeping unscoped tenants byte-identical.
+    const maskByScope = <T,>(values: Record<string, T>, facets: AppliesToOutletFacets): Record<string, T> => {
+      if (kpiScopePred.size === 0) return values;
+      let masked: Record<string, T> | null = null;
+      for (const code of Object.keys(values)) {
+        const pred = kpiScopePred.get(code);
+        if (pred && !pred(facets)) {
+          if (!masked) masked = { ...values };
+          delete masked[code];
+        }
+      }
+      return masked ?? values;
+    };
 
     const salesByCode = new Map(
       salesRows.map((r) => [r.outletCode, normalizeValues(r.kpiValues)]),
@@ -190,14 +228,16 @@ export class PointsComputeService {
     for (const outlet of outlets) {
       const program = outlet.programName ?? null;
       const programCategory = outlet.programCategory ?? null;
-      const achievements = salesByCode.get(outlet.outletCode) ?? {};
-      const targets = targetsByCode.get(outlet.outletCode) ?? {};
       const segment = {
         program,
         programCategory,
         outletType: outlet.outletType?.code ?? null,
         metro: outlet.metro ?? null,
       };
+      const facets: AppliesToOutletFacets = { outletType: segment.outletType, program, subProgram: programCategory };
+      // Masked by each KPI's own scope for THIS outlet (out-of-scope KPI values read as absent).
+      const achievements = maskByScope(salesByCode.get(outlet.outletCode) ?? {}, facets);
+      const targets = maskByScope(targetsByCode.get(outlet.outletCode) ?? {}, facets);
 
       for (const kpiCode of activeKpiCodes) {
         const achievement = toNumOrNull(achievements[kpiCode]);
@@ -212,6 +252,13 @@ export class PointsComputeService {
           achievement,
           target,
         };
+
+        // D5: an (outlet, KPI) pair outside the KPI's APPLIES-TO scope is never computed.
+        const inScope = kpiScopePred.get(kpiCode);
+        if (inScope && !inScope(facets)) {
+          rows.push({ ...base, status: 'SKIP', reason: KPI_SCOPE_SKIP_REASON });
+          continue;
+        }
 
         const rule = await resolveRule(program, programCategory, kpiCode);
         if (!rule) {

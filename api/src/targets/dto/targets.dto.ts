@@ -1,4 +1,5 @@
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Min } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Min } from 'class-validator';
 
 // ─── KpiDef DTOs ──────────────────────────────────────────────────────────────
 
@@ -47,6 +48,59 @@ export class UpsertKpiDefDto {
   @IsString()
   @IsOptional()
   outletType?: string | null;
+
+  /**
+   * APPLIES-TO scope (plan §4). Each facet: omitted → unchanged (create → []); [] → every value of
+   * that facet. AND across facets, OR within. `outletTypes` WINS over the legacy `outletType`.
+   * Validated in TargetsService.upsertKpi (only when the scope actually changes): outletTypes ⊆ the
+   * tenant's enabled outlet types; programs / subPrograms ⊆ settings list ∪ live outlet values (ci,
+   * canonicalised) → 400 listing allowed values otherwise.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  outletTypes?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  programs?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  subPrograms?: string[];
+}
+
+/**
+ * A repeated query param (`programs=A&programs=B`) arrives as string[]; a single one as a string.
+ * Always an array afterwards. Values are NEVER split on ',' (a program name may contain a comma).
+ */
+export const toQueryArray = ({ value }: { value: unknown }): unknown =>
+  value === undefined || value === null ? undefined : Array.isArray(value) ? value : [value];
+
+/**
+ * GET /v1/admin/kpis/scope-count query — each facet is a REPEATED param
+ * (`?outletTypes=SSS&outletTypes=WS&programs=Gold`); absent / blank = all.
+ */
+export class KpiScopeCountQueryDto {
+  @IsOptional()
+  @Transform(toQueryArray)
+  @IsArray()
+  @IsString({ each: true })
+  outletTypes?: string[];
+
+  @IsOptional()
+  @Transform(toQueryArray)
+  @IsArray()
+  @IsString({ each: true })
+  programs?: string[];
+
+  @IsOptional()
+  @Transform(toQueryArray)
+  @IsArray()
+  @IsString({ each: true })
+  subPrograms?: string[];
 }
 
 export class ListKpisQueryDto {

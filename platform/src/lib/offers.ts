@@ -8,6 +8,8 @@
 ─────────────────────────────────────────────────────────────────────────────── */
 
 import { api, type ApiResponse } from '@/lib/api-client';
+import type { AppliesTo } from '@/lib/applies-to';
+import { kpiScopeOf, type KpiScopeFieldsLike } from '@/lib/kpi-scope-core';
 
 // ── §3.1 shared types (verbatim from the contract) ────────────────────────────
 
@@ -305,13 +307,21 @@ export async function getOfferOutletTypes(): Promise<OfferOutletTypeOption[]> {
 }
 
 /** Tenant's enabled KPIs for the "show progress on" select (existing GET /admin/kpis). */
-export interface OfferKpiOption { code: string; label: string; unit: string }
+export interface OfferKpiOption {
+  code: string; label: string; unit: string;
+  /** APPLIES-TO scope of the KPI (only for the form's overlap warning); absent = every outlet. */
+  scope?: AppliesTo;
+}
 export async function getOfferKpis(): Promise<OfferKpiOption[]> {
-  const r = await api.get<Array<{ code: string; label: string; unit: string; enabled?: boolean }>>(
+  const r = await api.get<Array<{ code: string; label: string; unit: string; enabled?: boolean } & KpiScopeFieldsLike>>(
     '/api/admin/kpis?enabledOnly=true',
   );
   if (!r.success || !Array.isArray(r.data)) return [];
   return r.data
     .filter((k) => k.enabled !== false)
-    .map((k) => ({ code: k.code, label: k.label || k.code, unit: k.unit ?? '' }));
+    .map((k) => {
+      const scope = kpiScopeOf(k);
+      const scoped = scope.outletTypes.length + scope.programs.length + scope.subPrograms.length > 0;
+      return { code: k.code, label: k.label || k.code, unit: k.unit ?? '', ...(scoped ? { scope } : {}) };
+    });
 }

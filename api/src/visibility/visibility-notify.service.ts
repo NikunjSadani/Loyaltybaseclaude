@@ -5,6 +5,7 @@ import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { currentWindowKey, windowBoundsForKey } from './visibility-window.helper';
+import { withVisibilityProgramWhere } from './visibility-scope.helper';
 
 export interface WeeklyReminderResult {
   /** Eligible tenants examined (visibilityEnabled AND capture mode PHOTO_APPROVAL). */
@@ -106,16 +107,20 @@ export class VisibilityNotifyService {
     // We load each outlet's single active assignment → its capturing rep (level + login userId).
     const allowedLevels = new Set(allowedSalesLevels ?? []);
     const pendingOutlets = await this.prisma.outlet.findMany({
-      where: {
-        clientId,
-        deletedAt: null,
-        deactivatedAt: null,
-        // Don't nudge a rep about a NOT_INTERESTED (declined) or PARKED (admin-removed) outlet.
-        // notIn drops NULLs → the {null} branch keeps normal pending outlets.
-        OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
-        outletType: { code: { in: outletScope } },
-        NOT: { visibilityCaptures: { some: { windowKey, status: 'APPROVED' } } },
-      } as Prisma.OutletWhereInput,
+      // APPLIES-TO (D12): programs/subPrograms narrow the type scope (no-op when neither is set).
+      where: withVisibilityProgramWhere(
+        {
+          clientId,
+          deletedAt: null,
+          deactivatedAt: null,
+          // Don't nudge a rep about a NOT_INTERESTED (declined) or PARKED (admin-removed) outlet.
+          // notIn drops NULLs → the {null} branch keeps normal pending outlets.
+          OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+          outletType: { code: { in: outletScope } },
+          NOT: { visibilityCaptures: { some: { windowKey, status: 'APPROVED' } } },
+        } as Prisma.OutletWhereInput,
+        config,
+      ),
       select: {
         id: true,
         salesAssignments: {

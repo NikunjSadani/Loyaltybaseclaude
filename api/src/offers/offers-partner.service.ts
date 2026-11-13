@@ -7,6 +7,8 @@ import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { istDateKey, istMonthKey } from '../common/ist-date';
 import { NAMES_KEY } from '../targets/targets.helpers';
+import { kpiOutletPredicate } from '../sales/outlet-kpi-scope.helper';
+import type { AppliesToOutletFacets } from '../common/applies-to/applies-to';
 import {
   computeProgress,
   dateToIstDay,
@@ -77,12 +79,19 @@ export class OffersPartnerService {
       select: {
         outletCode: true,
         programName: true,
+        programCategory: true,
         zone: true,
         state: true,
         outletType: { select: { code: true } },
       },
     });
     if (outlets.length === 0) return empty;
+    const facetsByCode = new Map<string, AppliesToOutletFacets>(
+      outlets.map((o) => [
+        o.outletCode,
+        { outletType: o.outletType?.code ?? null, program: o.programName, subProgram: o.programCategory },
+      ]),
+    );
 
     // Per tile: the partner's outlets inside its segment; drop tiles with no match (D4: ANY).
     const kept: { tile: OfferTile; codes: string[] }[] = [];
@@ -106,6 +115,8 @@ export class OffersPartnerService {
     const targetsByOutlet = new Map<string, Record<string, unknown>>();
     const achievedByOutlet = new Map<string, Record<string, unknown>>();
     const kpiMeta = new Map<string, { label: string; unit: string }>();
+    // APPLIES-TO: KPI code → per-outlet scope predicate; absent for an unscoped KPI (pre-scope path).
+    const kpiScopePred = new Map<string, (o: AppliesToOutletFacets) => boolean>();
     if (kpiTiles.length > 0) {
       const codeUnion = [...new Set(kpiTiles.flatMap((k) => k.codes))];
       const kpiCodes = [...new Set(kpiTiles.map((k) => k.tile.kpiCode as string))];
@@ -116,18 +127,38 @@ export class OffersPartnerService {
         this.prisma.kpiDef.findMany({
           // DISABLED KPIs are ignored: a tile pointing at one shows no progress (below).
           where: { clientId: user.clientId, code: { in: kpiCodes }, enabled: true },
-          select: { code: true, label: true, unit: true },
+          select: {
+            code: true,
+            label: true,
+            unit: true,
+            outletType: true,
+            outletTypes: true,
+            programs: true,
+            subPrograms: true,
+          },
         }),
       ]);
       for (const r of targetRows) targetsByOutlet.set(r.outletCode, (r.targetValues ?? {}) as Record<string, unknown>);
       for (const r of salesRows) achievedByOutlet.set(r.outletCode, (r.kpiValues ?? {}) as Record<string, unknown>);
-      for (const k of kpiRows) kpiMeta.set(k.code, { label: k.label, unit: k.unit });
+      for (const k of kpiRows) {
+        kpiMeta.set(k.code, { label: k.label, unit: k.unit });
+        const pred = kpiOutletPredicate(k);
+        if (pred) kpiScopePred.set(k.code, pred);
+      }
     }
 
     const progressFor = (kpiCode: string, codes: string[]) => {
       if (kpiCode === NAMES_KEY) return null; // never a KPI
       const meta = kpiMeta.get(kpiCode);
       if (!meta) return null; // KPI deleted or disabled since the tile was saved → no progress
+      // Owner rule (every reader honours KPI scope): only the segment outlets where the KPI APPLIES
+      // contribute. If it applies to none of them there is no progress to show. Unscoped KPI → all
+      // segment outlets, exactly as before (Deoleo byte-identical).
+      const inScope = kpiScopePred.get(kpiCode);
+      if (inScope) {
+        codes = codes.filter((c) => inScope(facetsByCode.get(c) ?? {}));
+        if (codes.length === 0) return null;
+      }
       let target: number | null = null;
       let achieved = 0;
       for (const c of codes) {

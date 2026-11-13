@@ -37,6 +37,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import { validateRule } from './points-engine.helper';
+import {
+  AppliesTo,
+  intersectAppliesTo,
+  isUnscoped,
+  kpiAppliesTo,
+  normalizeAppliesTo,
+} from '../common/applies-to/applies-to';
 import type {
   AwardType,
   PipelineNode,
@@ -377,7 +384,7 @@ export class PointsEngineService {
     if (refs.length === 0) return;
     const defs = await this.prisma.kpiDef.findMany({
       where: { clientId, enabled: true, code: { in: refs } },
-      select: { code: true },
+      select: { code: true, outletType: true, outletTypes: true, programs: true, subPrograms: true },
     });
     const known = new Set(defs.map((d) => d.code));
     const missing = refs.filter((c) => !known.has(c));
@@ -387,6 +394,94 @@ export class PointsEngineService {
           'Use existing KPI codes from the Target Field Configuration — a typo would silently credit 0.',
       );
     }
+
+    // APPLIES-TO D5: only the rule's ATTACHED KPI decides which outlets the rule pays (compute SKIPs
+    // an outlet where the attached KPI is out of scope). Bonus inputs (pct:/target:/achievement:/
+    // kpiCode) are just values read per outlet — a disjoint input scope is legitimate: compute masks
+    // each input KPI's values by THAT KPI's scope for the outlet (points-compute.service maskByScope),
+    // so an out-of-scope input reads as absent → the input's nullAs. They are NOT checked here. An
+    // unscoped attached KPI or an any-program rule always passes → unscoped tenants (Deoleo) are unaffected.
+    const attached = defs.find((d) => d.code === config.attachsTo?.kpiCode);
+    if (!attached) return;
+    const kpiScope = kpiAppliesTo(attached);
+    if (isUnscoped(kpiScope)) return;
+
+    // Case-only mismatch: the engine matches rule segments to OUTLET values EXACTLY (case-sensitive),
+    // while the KPI scope (and the overlap check below) match case-insensitively. So a rule value that
+    // matches NO live outlet value exactly but matches one ignoring case would pass the overlap check
+    // yet never pay → reject, naming the LIVE outlet spelling(s) (what the engine actually compares
+    // against — not the KPI-scope / settings-list spelling, which may differ). A value that exactly
+    // matches a live outlet value is never rejected. Checked on the facets the KPI scopes.
+    const segs = ruleSegmentValues(config).filter((s) => s.values.length > 0 && kpiScope[s.facet].length > 0);
+    if (segs.length > 0) {
+      const live = await this.liveOutletSpellings(clientId, new Set(segs.map((s) => s.facet)));
+      const caseIssues: string[] = [];
+      for (const { facet, label, values } of segs) {
+        const liveVals = live[facet];
+        for (const v of values) {
+          const t = v.trim();
+          if (liveVals.includes(t)) continue;
+          const ci = liveVals.filter((s) => s.toUpperCase() === t.toUpperCase());
+          if (ci.length > 0) {
+            caseIssues.push(
+              `Rule segment ${label} "${v}" must be spelled exactly ${ci.map((s) => `"${s}"`).join(' or ')}`,
+            );
+          }
+        }
+      }
+      if (caseIssues.length > 0) {
+        throw new BadRequestException(
+          `${caseIssues.join('; ')} (as stored on this tenant's outlets) — rule segments are matched to outlet values case-sensitively, so KPI ${attached.code}'s outlets would never earn.`,
+        );
+      }
+    }
+
+    // Disjoint: the rule's program / programCategory (and hard outlet-type / program filters) can never
+    // overlap the attached KPI's scope → every outlet would be SKIPPED at compute time.
+    if (intersectAppliesTo(ruleAppliesTo(config), kpiScope) === null) {
+      const parts = [
+        kpiScope.outletTypes.length ? `outlet types ${kpiScope.outletTypes.join('/')}` : '',
+        kpiScope.programs.length ? `programs ${kpiScope.programs.join('/')}` : '',
+        kpiScope.subPrograms.length ? `sub-programs ${kpiScope.subPrograms.join('/')}` : '',
+      ].filter(Boolean);
+      throw new BadRequestException(
+        `This rule's program / sub-program / outlet type never overlaps the scope of its KPI ${attached.code} (applies to ${parts.join('; ')}). ` +
+          'No outlet could ever earn under it — change the rule attachment or the KPI scope.',
+      );
+    }
+  }
+
+  /**
+   * Distinct LIVE (non-deleted) outlet spellings per facet for a tenant — what the engine's exact
+   * segment match compares against: outlet type code, programName, programCategory. Only the requested
+   * facets are queried (one DISTINCT query each).
+   */
+  private async liveOutletSpellings(
+    clientId: string,
+    facets: Set<keyof AppliesTo>,
+  ): Promise<Record<keyof AppliesTo, string[]>> {
+    const out: Record<keyof AppliesTo, string[]> = { outletTypes: [], programs: [], subPrograms: [] };
+    const base = { clientId, deletedAt: null };
+    const uniq = (xs: Array<string | null | undefined>) =>
+      [...new Set(xs.map((x) => (x ?? '').trim()).filter(Boolean))];
+    await Promise.all([
+      facets.has('outletTypes')
+        ? this.prisma.outlet
+            .findMany({ where: base, distinct: ['outletTypeId'], select: { outletType: { select: { code: true } } } })
+            .then((rows) => { out.outletTypes = uniq(rows.map((r) => r.outletType?.code)); })
+        : null,
+      facets.has('programs')
+        ? this.prisma.outlet
+            .findMany({ where: base, distinct: ['programName'], select: { programName: true } })
+            .then((rows) => { out.programs = uniq(rows.map((r) => r.programName)); })
+        : null,
+      facets.has('subPrograms')
+        ? this.prisma.outlet
+            .findMany({ where: base, distinct: ['programCategory'], select: { programCategory: true } })
+            .then((rows) => { out.subPrograms = uniq(rows.map((r) => r.programCategory)); })
+        : null,
+    ]);
+    return out;
   }
 
   /** Build a PointsRuleConfig from server-owned identity + a create/update DTO. */
@@ -482,6 +577,64 @@ function formatDate(d: Date): string {
  * or `achievement:CODE`), `target:CODE`, and `pct:CODE`. Mirrors the evaluator's source parsing
  * (points-engine.helper resolveRaw). `segment:*` is an outlet attribute, not a KPI, so it is excluded.
  */
+/**
+ * The outlets a rule can EVER pay, as an AppliesTo (APPLIES-TO D5): its attachment program /
+ * programCategory (null = any), narrowed by any HARD (`onFail: 'zero'`) segmentFilter on
+ * `outletType` / `program` / `programCategory` (a soft skipNode/passthrough filter restricts nothing).
+ * Several hard filters on one field intersect. Used only for the publish-time disjointness check.
+ */
+export function ruleAppliesTo(config: PointsRuleConfig): AppliesTo {
+  let scope: AppliesTo = normalizeAppliesTo({
+    programs: config.attachsTo?.program ? [config.attachsTo.program] : [],
+    subPrograms: config.attachsTo?.programCategory ? [config.attachsTo.programCategory] : [],
+  });
+  const facetOf: Record<string, keyof AppliesTo> = {
+    outlettype: 'outletTypes',
+    program: 'programs',
+    programcategory: 'subPrograms',
+  };
+  for (const node of config.pipeline ?? []) {
+    if (node.type !== 'segmentFilter' || node.onFail !== 'zero') continue;
+    const facet = facetOf[String(node.field ?? '').trim().toLowerCase()];
+    if (!facet || !Array.isArray(node.allow) || node.allow.length === 0) continue;
+    const filterScope: Partial<AppliesTo> = { [facet]: node.allow };
+    const next = intersectAppliesTo(scope, filterScope);
+    // A self-contradictory rule (its own filters disjoint) is not this check's concern — keep the
+    // last non-empty scope so the KPI check still runs on something meaningful.
+    if (next) scope = next;
+  }
+  return scope;
+}
+
+/**
+ * The raw (un-normalised) segment values a rule matches outlets on, per AppliesTo facet — the same
+ * sources ruleAppliesTo reads: attachment program / programCategory + every HARD segmentFilter allow
+ * list on outletType / program / programCategory. Used for the publish-time case-only check.
+ */
+export function ruleSegmentValues(
+  config: PointsRuleConfig,
+): Array<{ facet: keyof AppliesTo; label: string; values: string[] }> {
+  const out: Record<keyof AppliesTo, string[]> = { outletTypes: [], programs: [], subPrograms: [] };
+  if (config.attachsTo?.program) out.programs.push(config.attachsTo.program);
+  if (config.attachsTo?.programCategory) out.subPrograms.push(config.attachsTo.programCategory);
+  const facetOf: Record<string, keyof AppliesTo> = {
+    outlettype: 'outletTypes',
+    program: 'programs',
+    programcategory: 'subPrograms',
+  };
+  for (const node of config.pipeline ?? []) {
+    if (node.type !== 'segmentFilter' || node.onFail !== 'zero') continue;
+    const facet = facetOf[String(node.field ?? '').trim().toLowerCase()];
+    if (!facet || !Array.isArray(node.allow)) continue;
+    for (const v of node.allow) if (typeof v === 'string' && v.trim()) out[facet].push(v);
+  }
+  return [
+    { facet: 'outletTypes', label: 'outlet type', values: out.outletTypes },
+    { facet: 'programs', label: 'program', values: out.programs },
+    { facet: 'subPrograms', label: 'sub-program', values: out.subPrograms },
+  ];
+}
+
 function collectKpiRefs(config: PointsRuleConfig): string[] {
   const out = new Set<string>();
   if (config.attachsTo?.kpiCode) out.add(config.attachsTo.kpiCode);

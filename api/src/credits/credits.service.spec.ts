@@ -47,6 +47,17 @@ jest.mock('../common/reward-account.helper', () => ({
 const mockWalletService = {
   creditEarn: jest.fn().mockResolvedValue({ transactionId: 'wt1', newRedeemable: 50, ledgerId: 'l1' }),
   clawbackAward: jest.fn().mockResolvedValue({ transactionId: 'wt2', newRedeemable: 0, ledgerId: 'l2', shortfall: 0 }),
+  // POINTS reversal cap = points ACTUALLY credited; default: the stored rows were all credited.
+  creditedPointsForBatchRow: jest.fn(
+    async (tx: { creditBatch: { findFirst: (a?: unknown) => Promise<{ rows?: any[] } | null> } }, a: { outletCode: string; fieldId: string }) => {
+      const batch = await tx.creditBatch.findFirst();
+      return (batch?.rows ?? [])
+        .filter((r) => r.outletId === a.outletCode && r.fieldId === a.fieldId && r.awardType === 'POINTS' && r.status === 'OK' && r.amount > 0)
+        .reduce((s: bigint, r) => s + BigInt(r.amount), 0n);
+    },
+  ),
+  // Interim POINTS-reversal gate (no debt, exact credit on the receiving wallet); default: allowed.
+  assertPointsReversalAllowed: jest.fn(),
 };
 
 // ─── Mock Prisma TX ───────────────────────────────────────────────────────────
@@ -63,14 +74,19 @@ const mockTx = {
     count: jest.fn().mockResolvedValue(0),
     create: jest.fn(),
   },
-  creditPayoutEntry: { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  creditPayoutEntry: { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn() },
   // downloadCode is now generated INSIDE the download tx (tx.creditPayoutDownload.count) under PDLOCK.
   creditPayoutDownload: { create: jest.fn(), update: jest.fn(), count: jest.fn().mockResolvedValue(0) },
   creditReversal: {
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     findFirst: jest.fn(),
     update: jest.fn().mockResolvedValue({}),
+    // Over-reversal cap: live reversals for (batch, outlet, field) + reversal create in-tx.
+    findMany: jest.fn().mockResolvedValue([]),
+    create: jest.fn(),
   },
+  // Row locks (SELECT … FOR UPDATE) — batch row for the reversal cap.
+  $queryRaw: jest.fn().mockResolvedValue([]),
   // FIX-8: the visibility TDS plan now reads INSIDE the download $transaction (tx), so the
   // cross-tenant PAN aggregation runs behind the per-PAN advisory lock (tx.$executeRaw).
   outlet: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
@@ -171,7 +187,19 @@ describe('CreditsService', () => {
     };
     // Restore default resolved values that tests may override.
     mockTx.creditBatch.updateMany.mockResolvedValue({ count: 1 });
-    mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED' });
+    // Stored rows give the reversal cap something to check against: O1/f1 credited generously
+    // for both award types, so the legacy reversal tests are unaffected by the cap.
+    mockTx.creditBatch.findFirst.mockResolvedValue({
+      id: 'b1',
+      status: 'CONFIRMED',
+      rows: [
+        { outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 100_000_000 },
+        { outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 1_000_000 },
+      ],
+    });
+    mockTx.creditReversal.findMany.mockResolvedValue([]);
+    mockWalletService.assertPointsReversalAllowed.mockResolvedValue({ partnerId: 'p1', walletId: 'w1' });
+    mockTx.$queryRaw.mockResolvedValue([]);
     mockTx.creditReversal.updateMany.mockResolvedValue({ count: 1 });
     mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
     mockTx.creditReversal.update.mockResolvedValue({});
@@ -504,6 +532,8 @@ describe('CreditsService', () => {
           sourceType: 'CREDIT_FIELD',
           sourceId: 'f1',
           description: 'May bonus',
+          // Identifies the EXACT credit for a later per-(batch, outlet, field) reversal.
+          metadata: { fieldId: 'f1', outletCode: 'O1' },
         },
         mockTx,   // same tx — atomicity guaranteed
       );
@@ -815,24 +845,38 @@ describe('CreditsService', () => {
 
     it('blocks a duplicate pending reversal for the same outlet+field', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
-      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r-existing' });
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r-existing' });
       const dto: CreateReversalDto = {
         outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
         awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
       };
       await expect(service.createReversal(admin, 'b1', dto)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
     });
 
-    it('creates the reversal scoped to tenant + requester', async () => {
+    it('creates the reversal scoped to tenant + requester; originalPaise is SERVER-derived from the stored batch rows', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
-      mockPrisma.creditReversal.findFirst.mockResolvedValue(null);
-      mockPrisma.creditReversal.create.mockResolvedValue({ id: 'r1' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        rows: [
+          { outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 10000 },
+          { outletId: 'O1', fieldId: 'f2', awardType: 'PAYOUT', status: 'OK', amount: 99999 }, // other field
+          { outletId: 'O2', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 99999 }, // other outlet
+          { outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'ERROR', amount: 99999 }, // not credited
+        ],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      mockTx.creditReversal.create.mockResolvedValue({ id: 'r1' });
+      // Whole-entry rule: the ₹50 request matches one ₹50 payout entry of this batch.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ id: 'pe1', status: 'PENDING', amountPaise: 5000n }]);
       const dto: CreateReversalDto = {
         outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
         awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
       };
       await service.createReversal(admin, 'b1', dto);
-      const data = mockPrisma.creditReversal.create.mock.calls[0][0].data;
+      // The batch row is locked before the cap is evaluated.
+      expect(mockTx.$queryRaw).toHaveBeenCalled();
+      const data = mockTx.creditReversal.create.mock.calls[0][0].data;
       expect(data.clientId).toBe('deoleo');
       expect(data.requestedBy).toBe('admin1');
       expect(data.period).toBe('2026-05');
@@ -841,17 +885,102 @@ describe('CreditsService', () => {
       expect(data.requestedPaise).toBe(BigInt(5000));
     });
 
+    it('ignores an inflated client originalPaise — cap is the stored credited amount', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 5000, requestedPaise: 400, // only 300 was credited
+      };
+      await expect(service.createReversal(admin, 'b1', dto)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a SECOND reversal of an already-approved credit (double clawback)', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null); // no PENDING one…
+      mockTx.creditReversal.findMany.mockResolvedValue([
+        { status: 'APPROVED', requestedPaise: 300n, approvedPaise: 300n }, // …but 300 already approved
+      ]);
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 300, requestedPaise: 300,
+      };
+      await expect(service.createReversal(admin, 'b1', dto)).rejects.toThrow(/exceeds the amount credited/);
+      expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
+    });
+
+    it('allows a second PARTIAL reversal while Σ stays within the credited amount', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      mockTx.creditReversal.findMany.mockResolvedValue([{ status: 'PARTIAL', requestedPaise: 300n, approvedPaise: 100n }]);
+      mockTx.creditReversal.create.mockResolvedValue({ id: 'r2' });
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 300, requestedPaise: 200,
+      };
+      await service.createReversal(admin, 'b1', dto);
+      expect(mockTx.creditReversal.create).toHaveBeenCalledTimes(1);
+      // The live-reversal query covers pending + approved + partial for this exact key.
+      expect(mockTx.creditReversal.findMany.mock.calls[0][0].where).toMatchObject({
+        batchId: 'b1', outletId: 'O1', fieldId: 'f1', status: { in: ['PENDING_GIFSY', 'APPROVED', 'PARTIAL'] },
+      });
+    });
+
+    it('POINTS cap = points ACTUALLY credited: a row skipped at confirm (outlet unknown/unlinked) can never be reversed', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      mockWalletService.creditedPointsForBatchRow.mockResolvedValueOnce(0n);
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 300, requestedPaise: 100,
+      };
+      await expect(service.createReversal(admin, 'b1', dto)).rejects.toThrow(/Nothing was credited/);
+      expect(mockWalletService.creditedPointsForBatchRow).toHaveBeenCalledWith(
+        mockTx,
+        { batchId: 'b1', clientId: 'deoleo', outletCode: 'O1', fieldId: 'f1' },
+      );
+      expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
+    });
+
+    it('POINTS cap message uses pts', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 500, requestedPaise: 400, // client-inflated original
+      };
+      await expect(service.createReversal(admin, 'b1', dto)).rejects.toThrow(
+        'credited 300 pts, already reversed or pending 0 pts, requested 400 pts',
+      );
+    });
+
     it('translates a DB P2002 (pending-reversal unique index) into a clean 400', async () => {
       // The fast-path pre-check passes (no existing pending), but a concurrent
       // request already inserted one — the partial-unique index
       // `credit_reversals_pending_unique` rejects with P2002.
       mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
-      mockPrisma.creditReversal.findFirst.mockResolvedValue(null);
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
       const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: 'test',
       });
-      mockPrisma.creditReversal.create.mockRejectedValue(p2002);
+      mockTx.creditReversal.create.mockRejectedValue(p2002);
       const dto: CreateReversalDto = {
         outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
         awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
@@ -870,23 +999,20 @@ describe('CreditsService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('marks PARTIAL when approved amount is below requested', async () => {
-      // requestedPaise stored as BigInt in Prisma
-      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(10000), awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1' });
+    it('marks PARTIAL when approved amount is below requested (POINTS)', async () => {
+      // requestedPaise stored as BigInt in Prisma (whole points for POINTS reversals)
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(100), awardType: 'POINTS', outletId: 'O1', fieldId: 'f1', batchId: 'b1' });
       // tx.creditReversal.findFirst returns the updated row
       mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PARTIAL' });
-      // PAYOUT reversal calls tx.creditPayoutEntry.findMany for the GLM-1 multi-entry path.
-      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
-        { id: 'pe1', status: 'PENDING', amountPaise: BigInt(4000) },
-      ]);
 
-      const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 4000 });
+      const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 40 });
       expect(res).toMatchObject({ id: 'r1', status: 'PARTIAL' });
 
       const updateManyCall = mockTx.creditReversal.updateMany.mock.calls[0][0];
       expect(updateManyCall.data.status).toBe('PARTIAL');
       // approvedPaise written as BigInt
-      expect(updateManyCall.data.approvedPaise).toBe(BigInt(4000));
+      expect(updateManyCall.data.approvedPaise).toBe(BigInt(40));
+      expect(mockWalletService.clawbackAward).toHaveBeenCalledWith('p1', 40, expect.anything(), mockTx);
     });
 
     it('rejects when approved amount exceeds requested', async () => {
@@ -914,6 +1040,7 @@ describe('CreditsService', () => {
         awardType: 'POINTS',
         outletId: 'O1',
         fieldId: 'f1',
+        batchId: 'b1',
       });
       mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
       // Outlet + wallet exist.
@@ -931,9 +1058,43 @@ describe('CreditsService', () => {
           referenceId: 'r1',
           sourceType: 'CREDIT_FIELD',
           sourceId: 'f1',
+          // The EXACT original credit (batch + outlet + field) sets the floor.
+          originalCredit: { batchId: 'b1', outletCode: 'O1', fieldId: 'f1' },
         }),
         mockTx,   // same tx — atomic with status flip
       );
+    });
+
+    it('approve re-validates the cap server-side: refuses when Σ other approved + this > credited (no claim, no clawback)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r2', status: 'PENDING_GIFSY', requestedPaise: BigInt(300), awardType: 'POINTS',
+        outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+      });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      // r1 (another reversal of the same credit) already approved for the full 300.
+      mockTx.creditReversal.findMany.mockResolvedValue([{ status: 'APPROVED', requestedPaise: 300n, approvedPaise: 300n }]);
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+
+      await expect(
+        service.patchReversal(gifsy, 'r2', { action: ReversalAction.approve }),
+      ).rejects.toThrow(/exceeds the amount credited/);
+      expect(mockTx.creditReversal.updateMany).not.toHaveBeenCalled();
+      expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
+      // The other-reversals sum excludes THIS reversal.
+      expect(mockTx.creditReversal.findMany.mock.calls[0][0].where.id).toEqual({ not: 'r2' });
+    });
+
+    it('reject is never blocked by the cap', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r2', status: 'PENDING_GIFSY', requestedPaise: BigInt(300), awardType: 'POINTS',
+        outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+      });
+      mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', rows: [] });
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r2', status: 'REJECTED' });
+      await expect(service.patchReversal(gifsy, 'r2', { action: ReversalAction.reject })).resolves.toMatchObject({ status: 'REJECTED' });
     });
 
     it('does NOT call clawbackAward for PAYOUT reversal approval', async () => {
@@ -956,14 +1117,14 @@ describe('CreditsService', () => {
 
       await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 10000 });
 
-      // The new PAYOUT-reversal path marks entries REVERSED via creditPayoutEntry.update —
+      // The PAYOUT-reversal path marks entries REVERSED (guarded on the status read) —
       // it does NOT call walletService.clawbackAward (that is POINTS-only).
       expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
-      // Verify the entry was marked REVERSED with downloadId=null.
-      expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
-        where: { id: 'pe1' },
+      expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+        where: { id: 'pe1', status: 'PENDING' },
         data: { status: 'REVERSED', downloadId: null },
       });
+      expect(mockTx.creditPayoutEntry.update).not.toHaveBeenCalled();
     });
 
     it('does NOT call clawbackAward when action is reject (POINTS type)', async () => {
@@ -982,71 +1143,374 @@ describe('CreditsService', () => {
       expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
     });
 
-    it('skips clawback silently when partner has no wallet on POINTS reversal', async () => {
+    it('REFUSES a POINTS approval when the outlet has no partner wallet holding the credit (was: silent no-op)', async () => {
       mockPrisma.creditReversal.findFirst.mockResolvedValue({
-        id: 'r1',
-        status: 'PENDING_GIFSY',
-        requestedPaise: BigInt(50),
-        awardType: 'POINTS',
-        outletId: 'O1',
-        fieldId: 'f1',
+        id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(50), awardType: 'POINTS',
+        outletId: 'O1', fieldId: 'f1', batchId: 'b1',
       });
-      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
-      // Outlet found but no wallet.
-      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
-      mockTx.wallet.findFirst.mockResolvedValue(null);
-
-      // Should not throw — reversal lands cleanly.
+      mockWalletService.assertPointsReversalAllowed.mockRejectedValueOnce(
+        new BadRequestException('Cannot reverse: outlet O1 is not linked to a partner wallet that received this credit — settle it off-platform'),
+      );
       await expect(
         service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 50 }),
-      ).resolves.not.toThrow();
+      ).rejects.toThrow(/not linked to a partner wallet/);
+      expect(mockTx.creditReversal.updateMany).not.toHaveBeenCalled();
       expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
     });
 
-    // ── GLM-1: multi-entry PAYOUT reversal (new behavior) ────────────────────
+    // ── Interim rule Q14: POINTS reversals on a wallet with debt are refused (create AND approve) ──
+    const DEBT = 'This wallet carries debt; reversals on it are paused until the new reversal engine is live — contact Gifsy';
 
-    it('GLM-1: PAYOUT reversal marks ALL matching PENDING/PROCESSING/FAILED entries REVERSED and sums PAID receivable', async () => {
-      // Three entries for the same outlet+field:
-      //   pe-pending  → status PENDING  → should be REVERSED
-      //   pe-proc     → status PROCESSING → should be REVERSED
-      //   pe-paid     → status PAID     → cash already left; contributes to receivable
+    it('Q14 approve: the receiving wallet carries debt (or the credit landed on debt) → 409, no claim, no clawback', async () => {
       mockPrisma.creditReversal.findFirst.mockResolvedValue({
-        id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(30000),
-        awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1',
+        id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(500), awardType: 'POINTS',
+        outletId: 'O1', fieldId: 'f1', batchId: 'b1',
       });
-      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
-      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
-        { id: 'pe-pending',  status: 'PENDING',    amountPaise: BigInt(10000) },
-        { id: 'pe-proc',     status: 'PROCESSING', amountPaise: BigInt(10000) },
-        { id: 'pe-paid',     status: 'PAID',       amountPaise: BigInt(10000) },
-      ]);
+      mockWalletService.assertPointsReversalAllowed.mockRejectedValueOnce(new ConflictException(DEBT));
+      await expect(service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve })).rejects.toBeInstanceOf(ConflictException);
+      expect(mockWalletService.assertPointsReversalAllowed).toHaveBeenCalledWith(mockTx, {
+        clientId: 'deoleo', batchId: 'b1', outletCode: 'O1', fieldId: 'f1',
+      });
+      expect(mockTx.creditReversal.updateMany).not.toHaveBeenCalled();
+      expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
+    });
 
+    it('Q14 create: a POINTS reversal on a wallet with debt is refused at request time (409), nothing created', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      mockWalletService.assertPointsReversalAllowed.mockRejectedValueOnce(new ConflictException(DEBT));
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 500, requestedPaise: 500,
+      };
+      await expect(service.createReversal(admin, 'b1', dto)).rejects.toThrow(DEBT);
+      expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
+    });
+
+    it('Q14 create: a POINTS reversal on a debt-free wallet is gated then created', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      mockTx.creditReversal.create.mockResolvedValue({ id: 'r9' });
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 500, requestedPaise: 500,
+      };
+      await service.createReversal(admin, 'b1', dto);
+      expect(mockWalletService.assertPointsReversalAllowed).toHaveBeenCalledWith(mockTx, {
+        clientId: 'deoleo', batchId: 'b1', outletCode: 'O1', fieldId: 'f1',
+      });
+      expect(mockTx.creditReversal.create).toHaveBeenCalledTimes(1);
+    });
+
+    // ── GLM-1: PAYOUT reversal — this batch only, up to the approved amount ──────────
+    const payoutRev = (approved: number) => ({
+      id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(approved),
+      awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+    });
+
+    it('GLM-1: reverses THIS batch\'s PENDING + FAILED entries, records PAID as receivable (oldest first)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(30000));
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'pe-pending', status: 'PENDING', amountPaise: 10000n, tdsDeductedPaise: 0n },
+        { id: 'pe-failed', status: 'FAILED', amountPaise: 10000n, tdsDeductedPaise: 0n },
+        { id: 'pe-paid', status: 'PAID', amountPaise: 10000n, tdsDeductedPaise: 0n },
+      ]);
       const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 30000 });
 
-      // PENDING and PROCESSING entries must be marked REVERSED + downloadId=null.
-      expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
-        where: { id: 'pe-pending' },
-        data: { status: 'REVERSED', downloadId: null },
+      // Scoped to the reversal's batch (never another batch's top-up), oldest first.
+      expect(mockTx.creditPayoutEntry.findMany.mock.calls[0][0]).toMatchObject({
+        where: { clientId: 'deoleo', batchId: 'b1', outletId: 'O1', fieldId: 'f1' },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       });
-      expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
-        where: { id: 'pe-proc' },
-        data: { status: 'REVERSED', downloadId: null },
+      expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+        where: { id: 'pe-pending', status: 'PENDING' }, data: { status: 'REVERSED', downloadId: null },
       });
-      // PAID entry is NOT mutated; instead its amount is reported as receivable.
-      const updateCalls = mockTx.creditPayoutEntry.update.mock.calls.map(
-        (c: unknown[]) => (c[0] as { where: { id: string } }).where.id,
-      );
-      expect(updateCalls).not.toContain('pe-paid');
-
-      // walletService.clawbackAward must NOT be called for PAYOUT reversals.
+      expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+        where: { id: 'pe-failed', status: 'FAILED' }, data: { status: 'REVERSED', downloadId: null },
+      });
+      const touched = mockTx.creditPayoutEntry.updateMany.mock.calls.map((c: any[]) => c[0].where.id);
+      expect(touched).not.toContain('pe-paid');
       expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
-
-      // clawbackShortfall in the result equals the PAID entry amount (₹100 = 10000 paise).
       expect(res.clawbackShortfall).toBe(10000);
-      // The shortfall is persisted on the reversal record.
-      expect(mockTx.creditReversal.update).toHaveBeenCalledWith({
-        where: { id: 'r1' },
-        data: { shortfallPaise: BigInt(10000) },
+      expect(mockTx.creditReversal.update).toHaveBeenCalledWith({ where: { id: 'r1' }, data: { shortfallPaise: BigInt(10000) } });
+    });
+
+    it('GLM-1b: a PAYOUT reversal cannot be approved for a different amount (approve in full or reject)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(20000));
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'pe-old', status: 'PENDING', amountPaise: 10000n, tdsDeductedPaise: 0n },
+        { id: 'pe-new', status: 'PENDING', amountPaise: 10000n, tdsDeductedPaise: 0n },
+      ]);
+      await expect(
+        service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 10000 }),
+      ).rejects.toThrow('A payout reversal is approved in full or rejected — approve ₹200.00 or reject it');
+      expect(mockTx.creditReversal.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('GLM-1c: approving with the exact requested amount (or no amount) is accepted and records the consumed entries', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(20000));
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'pe-old', status: 'PENDING', amountPaise: 10000n, tdsDeductedPaise: 0n },
+        { id: 'pe-new', status: 'PENDING', amountPaise: 10000n, tdsDeductedPaise: 0n },
+      ]);
+      await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
+      const claim = mockTx.creditReversal.updateMany.mock.calls[0][0];
+      expect(claim.data).toMatchObject({ status: 'APPROVED', approvedPaise: 20000n, consumedPayoutEntryIds: ['pe-old', 'pe-new'] });
+      const touched = mockTx.creditPayoutEntry.updateMany.mock.calls.map((c: any[]) => c[0].where.id);
+      expect(touched).toEqual(['pe-old', 'pe-new']);
+    });
+
+    // ── Whole-entry rule: an entry is consumed by at most ONE reversal ─────────────
+    describe('payout entries are never consumed twice (interim rule Q9)', () => {
+      const T0 = new Date('2026-05-02T00:00:00.000Z');
+      const paid = { id: 'pe-paid', status: 'PAID', amountPaise: 30000n, tdsDeductedPaise: 0n, createdAt: T0 };
+      const pending = { id: 'pe-pend', status: 'PENDING', amountPaise: 30000n, tdsDeductedPaise: 0n, createdAt: new Date(T0.getTime() + 1) };
+      // creditReversal.findMany serves two queries: the consumed-entries lookup (APPROVED/PARTIAL
+      // PAYOUT reversals of this outlet+field) and reversedSoFar (the Σ cap).
+      const priorApprovals = (rows: any[]) =>
+        mockTx.creditReversal.findMany.mockImplementation(async (arg: any) => {
+          const st: string[] = arg?.where?.status?.in ?? [];
+          if (!st.includes('PENDING_GIFSY')) return rows; // consumed-entries lookup
+          return rows.map((r) => ({ status: 'APPROVED', requestedPaise: r.approvedPaise, approvedPaise: r.approvedPaise }));
+        });
+      afterEach(() => {
+        mockTx.creditReversal.findMany.mockReset();
+        mockTx.creditReversal.findMany.mockResolvedValue([]);
+      });
+
+      it('first ₹300 reversal of [₹300 PAID, ₹300 PENDING] cancels the unpaid entry (no receivable)', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(30000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([paid, pending]);
+        priorApprovals([]);
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
+        expect(mockTx.creditReversal.updateMany.mock.calls[0][0].data.consumedPayoutEntryIds).toEqual(['pe-pend']);
+        expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+          where: { id: 'pe-pend', status: 'PENDING' }, data: { status: 'REVERSED', downloadId: null },
+        });
+        expect(res.clawbackShortfall).toBe(0);
+      });
+
+      it('second ₹300 reversal after the PAID entry was consumed (receivable) → consumes the PENDING one, never the PAID again', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(30000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([paid, pending]); // PAID stays PAID after its receivable
+        priorApprovals([{ consumedPayoutEntryIds: ['pe-paid'], approvedAt: new Date(T0.getTime() + 5), approvedPaise: 30000n }]);
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
+        expect(mockTx.creditReversal.updateMany.mock.calls[0][0].data.consumedPayoutEntryIds).toEqual(['pe-pend']);
+        expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+          where: { id: 'pe-pend', status: 'PENDING' }, data: { status: 'REVERSED', downloadId: null },
+        });
+        expect(res.clawbackShortfall).toBe(0); // no second receivable for the PAID entry
+      });
+
+      it('second ₹300 reversal after the PENDING one was consumed → the PAID entry becomes the (only) receivable', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(30000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([paid]); // pe-pend is REVERSED now → not listed
+        priorApprovals([{ consumedPayoutEntryIds: ['pe-pend'], approvedAt: new Date(T0.getTime() + 5), approvedPaise: 30000n }]);
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
+        expect(mockTx.creditReversal.updateMany.mock.calls[0][0].data.consumedPayoutEntryIds).toEqual(['pe-paid']);
+        expect(res.clawbackShortfall).toBe(30000);
+      });
+
+      it('a third reversal when every entry is consumed is refused at approval (nothing claimed)', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(30000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([paid]);
+        priorApprovals([{ consumedPayoutEntryIds: ['pe-paid'], approvedAt: new Date(T0.getTime() + 5), approvedPaise: 30000n }]);
+        await expect(service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve })).rejects.toThrow(/No payout entries left to reverse/);
+        expect(mockTx.creditReversal.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('legacy approval (before consumedPayoutEntryIds existed) consumed every PAID entry created by its approvedAt', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(30000));
+        const laterPaid = { ...paid, id: 'pe-paid-later', createdAt: new Date(T0.getTime() + 10) };
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([paid, laterPaid]);
+        priorApprovals([{ consumedPayoutEntryIds: null, approvedAt: new Date(T0.getTime() + 5), approvedPaise: 30000n }]);
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
+        expect(mockTx.creditReversal.updateMany.mock.calls[0][0].data.consumedPayoutEntryIds).toEqual(['pe-paid-later']);
+        expect(res.clawbackShortfall).toBe(30000);
+      });
+
+      it('entry choice: PAID 500 + PENDING 300 + PENDING 200, reverse ₹500 → cancels the two PENDING (no receivable)', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(50000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'pe-paid500', status: 'PAID', amountPaise: 50000n, tdsDeductedPaise: 0n, createdAt: T0 },
+          { id: 'pe-pend300', status: 'PENDING', amountPaise: 30000n, tdsDeductedPaise: 0n, createdAt: T0 },
+          { id: 'pe-pend200', status: 'PENDING', amountPaise: 20000n, tdsDeductedPaise: 0n, createdAt: T0 },
+        ]);
+        priorApprovals([]);
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
+        expect(mockTx.creditReversal.updateMany.mock.calls[0][0].data.consumedPayoutEntryIds).toEqual(['pe-pend300', 'pe-pend200']);
+        expect(res.clawbackShortfall).toBe(0);
+      });
+
+      it('entry choice: PROCESSING 500 + PENDING 300 + PENDING 200, reverse ₹500 → cancels the PENDING pair (not refused)', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(50000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'pe-proc500', status: 'PROCESSING', amountPaise: 50000n, tdsDeductedPaise: 0n, createdAt: T0 },
+          { id: 'pe-pend300', status: 'PENDING', amountPaise: 30000n, tdsDeductedPaise: 0n, createdAt: T0 },
+          { id: 'pe-pend200', status: 'PENDING', amountPaise: 20000n, tdsDeductedPaise: 0n, createdAt: T0 },
+        ]);
+        priorApprovals([]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve });
+        expect(mockTx.creditReversal.updateMany.mock.calls[0][0].data.consumedPayoutEntryIds).toEqual(['pe-pend300', 'pe-pend200']);
+        const touched = mockTx.creditPayoutEntry.updateMany.mock.calls.map((c: any[]) => c[0].where.id);
+        expect(touched).toEqual(['pe-pend300', 'pe-pend200']);
+      });
+
+      describe('create: the request must be an exact fit of whole open entries', () => {
+        const create = (requestedPaise: number) =>
+          service.createReversal(admin, 'b1', {
+            outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+            awardType: CreditAwardType.PAYOUT, originalPaise: 80000, requestedPaise,
+          });
+        beforeEach(() => {
+          mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+          mockTx.creditReversal.findFirst.mockResolvedValue(null);
+          mockTx.creditReversal.create.mockResolvedValue({ id: 'r-new' });
+          mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+            { id: 'pe-300', status: 'PENDING', amountPaise: 30000n, createdAt: T0 },
+            { id: 'pe-500', status: 'PAID', amountPaise: 50000n, createdAt: T0 },
+          ]);
+          priorApprovals([]);
+        });
+
+        it('[₹300, ₹500] reverse ₹500 → accepted', async () => {
+          await create(50000);
+          expect(mockTx.creditReversal.create).toHaveBeenCalledTimes(1);
+        });
+
+        it('[₹300, ₹500] reverse ₹800 (both) → accepted', async () => {
+          await create(80000);
+          expect(mockTx.creditReversal.create).toHaveBeenCalledTimes(1);
+        });
+
+        it('[₹300, ₹500] reverse ₹400 → 400 listing the entry amounts, nothing created', async () => {
+          await expect(create(40000)).rejects.toThrow(
+            'A payout reversal must equal whole payout entries — open entries for this outlet and field in this batch: ₹300.00, ₹500.00. Request one of these amounts or a sum of them.',
+          );
+          expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
+        });
+
+        it('an entry already consumed by an approved reversal is not offered again', async () => {
+          priorApprovals([{ consumedPayoutEntryIds: ['pe-500'], approvedAt: new Date(T0.getTime() + 5), approvedPaise: 50000n }]);
+          await expect(create(50000)).rejects.toThrow(/open entries for this outlet and field in this batch: ₹300\.00\./);
+          expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
+        });
+      });
+    });
+
+    it('GLM-1d: an entry already with the bank (PROCESSING) → the approval is refused, nothing reversed or offset', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'pe1', status: 'PROCESSING', outletId: 'O1', amountPaise: 2_000_000n, tdsDeductedPaise: 40_000n, tdsSection: 'SEC_194C', period: '2026-05' },
+      ]);
+      await expect(
+        service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 }),
+      ).rejects.toThrow(/already sent to the bank.*record the UTR or the failure first/);
+      expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+    });
+
+    it('GLM-1e: error messages show ₹ for PAYOUT caps (not raw paise)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(30000));
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 20000 }],
+      });
+      await expect(
+        service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 30000 }),
+      ).rejects.toThrow('credited ₹200.00, already reversed ₹0.00, approving ₹300.00');
+    });
+
+    it('reversedSoFar filters by awardType (points and paise never mix)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(10000));
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ id: 'pe1', status: 'PENDING', amountPaise: 10000n, tdsDeductedPaise: 0n }]);
+      await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 10000 });
+      expect(mockTx.creditReversal.findMany.mock.calls[0][0].where).toMatchObject({ awardType: 'PAYOUT' });
+    });
+
+    // ── Withheld TDS on reversal: only for PENDING/FAILED (never PROCESSING — see GLM-1d) ──
+    describe('withheld-TDS offset on reversal (mirrors the uploadUtr FAILED path)', () => {
+      const failedWithStamp = {
+        id: 'pe1', status: 'FAILED', outletId: 'O1', amountPaise: 2_000_000n,
+        tdsDeductedPaise: 40_000n, tdsSection: 'SEC_194C', period: '2026-05',
+      };
+
+      it('₹400 stamp still on an unpaid entry: REVERSED with the stamp cleared AND a −₹400 TdsDeductionEntry under the ORIGINAL PAN', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 40_000n }]);
+
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+
+        expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+          where: { id: 'pe1', status: 'FAILED', tdsDeductedPaise: 40_000n },
+          data: { status: 'REVERSED', downloadId: null, tdsDeductedPaise: 0n },
+        });
+        expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1);
+        const [row] = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data;
+        expect(row).toMatchObject({
+          clientId: 'deoleo', panNumber: 'ABCDE1234F', section: 'SEC_194C',
+          creditPayoutEntryId: 'pe1', outletCode: 'O1', tdsDeductedThisPaise: -40_000n,
+        });
+        expect(res.clawbackShortfall).toBe(0);
+        expect(res.payoutClawbackNote).toContain('withheld TDS ₹400.00 offset');
+      });
+
+      it('idempotent: withholding ALREADY offset in the ledger (net 0) → no second offset', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([
+          { panNumber: null, tdsDeductedThisPaise: -40_000n },
+          { panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 40_000n },
+        ]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+      });
+
+      it('race: a bank-file download took the PENDING entry meanwhile (guarded flip count 0 → PROCESSING) → approval refused', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(10000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ id: 'pe1', status: 'PENDING', amountPaise: 10000n, tdsDeductedPaise: 0n }]);
+        mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
+        mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'PROCESSING', amountPaise: 10000n, tdsDeductedPaise: 400n });
+        await expect(
+          service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 10000 }),
+        ).rejects.toThrow(/already sent to the bank/);
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+      });
+
+      it('race: the entry was PAID meanwhile → recorded as a receivable, not REVERSED, no offset', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]);
+        mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
+        mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'PAID', amountPaise: 2_000_000n, tdsDeductedPaise: 40_000n });
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+        expect(res.clawbackShortfall).toBe(2_000_000);
+      });
+
+      it('race: FAILED→(re-read) still FAILED with the stamp cleared by a concurrent UTR apply → reversed once, NO offset', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]);
+        mockTx.creditPayoutEntry.updateMany
+          .mockResolvedValueOnce({ count: 0 }) // stamp no longer 40_000
+          .mockResolvedValueOnce({ count: 1 });
+        mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'FAILED', amountPaise: 2_000_000n, tdsDeductedPaise: 0n });
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenLastCalledWith({
+          where: { id: 'pe1', status: 'FAILED' }, data: { status: 'REVERSED', downloadId: null },
+        });
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+      });
+
+      it('Deoleo parity: an unpaid entry with NO withholding → guarded REVERSED only, no ledger read/write', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ ...failedWithStamp, status: 'PENDING', tdsDeductedPaise: 0n }]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+          where: { id: 'pe1', status: 'PENDING' }, data: { status: 'REVERSED', downloadId: null },
+        });
+        expect(mockTx.tdsDeductionEntry.findMany).not.toHaveBeenCalled();
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
       });
     });
   });
@@ -1689,6 +2153,48 @@ describe('CreditsService', () => {
         const dto = batchDto('2026-06', CreditAwardType.POINTS, 999999); // over cap…
         (dto.rows[0] as unknown as { status: string }).status = 'ERROR'; // …but not OK
         await expect(service.createBatch(admin, dto)).resolves.toBeDefined();
+      });
+    });
+
+    // ── Whole-unit amounts (owner rule 2026-11-12: points + ₹ credited in whole units) ──
+
+    describe('whole-unit amounts', () => {
+      beforeEach(() => {
+        mockCreditsPayouts.safetyCapPoints = 50000;
+        mockCreditsPayouts.safetyCapInr = 100000;
+        mockTx.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        pinDate('2026-06-10T08:00:00.000Z');
+      });
+
+      it('rejects a PAYOUT row that is not whole rupees (₹199.50 = 19950 paise)', async () => {
+        const dto = batchDto('2026-06', CreditAwardType.PAYOUT, 19950);
+        await expect(service.createBatch(admin, dto)).rejects.toThrow(/Payout amounts must be whole rupees/);
+        expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
+      });
+
+      it('accepts a whole-rupee PAYOUT row (₹200 = 20000 paise)', async () => {
+        await expect(service.createBatch(admin, batchDto('2026-06', CreditAwardType.PAYOUT, 20000))).resolves.toBeDefined();
+      });
+
+      it('rejects a fractional POINTS row on the service path (engine/direct callers bypass the DTO pipe)', async () => {
+        const dto = batchDto('2026-06', CreditAwardType.POINTS, 199.5);
+        await expect(service.createBatch(admin, dto)).rejects.toThrow(/Points must be whole numbers/);
+      });
+
+      it('ignores non-OK rows', async () => {
+        const dto = batchDto('2026-06', CreditAwardType.PAYOUT, 19950);
+        (dto.rows[0] as unknown as { status: string }).status = 'ERROR';
+        await expect(service.createBatch(admin, dto)).resolves.toBeDefined();
+      });
+
+      it('confirmBatch refuses a legacy PENDING batch holding fractional-rupee paise (before any write)', async () => {
+        mockPrisma.creditBatch.findFirst.mockResolvedValue({
+          id: 'b1', status: 'PENDING_CONFIRM', period: '2026-06', uploadedBy: 'admin1',
+          totalOutlets: 1, totalPoints: 0, totalPayoutPaise: BigInt(19950),
+          rows: [{ outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F', amount: 19950, narration: '', awardType: 'PAYOUT', status: 'OK' }],
+        });
+        await expect(service.confirmBatch(admin, 'b1')).rejects.toThrow(/Payout amounts must be whole rupees/);
+        expect(mockTx.creditPayoutEntry.createMany).not.toHaveBeenCalled();
       });
     });
 

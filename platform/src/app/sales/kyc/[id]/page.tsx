@@ -34,6 +34,7 @@ import { RejectionModal } from './RejectionModal';
 import { UpiCaptureMethodBadge, effectiveUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge';
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { REMOVED_RAIL_NOTICE, asPayoutRail, isRemovalConsistent, type PayoutRail } from '@/lib/payout-rail';
+import { kycDocDisplayLabel } from '@/lib/kyc-doc-label';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -172,11 +173,16 @@ const REQUIRED_PAYMENT_LABELS: Record<string, string> = {
  *  KycDocument.status off its PENDING default, so a status tag ("Pending") on an
  *  already-approved outlet was misleading noise. Approval is tracked at the submission
  *  level (KYC status), not per document. */
-function mapDoc(d: { id?: string; documentType: string; viewUrl?: string | null }): KYCDoc {
+function mapDoc(d: {
+  id?: string; documentType: string; viewUrl?: string | null;
+  fileName?: string | null; metadata?: unknown;
+}): KYCDoc {
   return {
     id: d.id ?? d.documentType,
     documentType: d.documentType,
-    label: docLabel(d.documentType),
+    // OTHER with a non-blank metadata.label (e.g. imported Bajaj docs) → that label; every
+    // other case renders docLabel(documentType) exactly as before.
+    label: kycDocDisplayLabel(d, docLabel),
     viewUrl: d.viewUrl ?? null,
   };
 }
@@ -229,7 +235,8 @@ interface ApiSalesKYC {
     addressLine1?: string | null; addressLine2?: string | null;
     city?: string | null; state?: string | null; pincode?: string | null;
   } | null;
-  documents?: { id?: string; documentType: string; status?: string; viewUrl?: string | null }[];
+  documents?: { id?: string; documentType: string; status?: string; viewUrl?: string | null;
+    fileName?: string | null; metadata?: unknown }[];
 }
 
 /** Mimes safe to RENDER in a top-level tab. A doc's mime is client-supplied at upload,

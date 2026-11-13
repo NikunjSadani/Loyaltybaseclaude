@@ -10,9 +10,19 @@
  */
 import type { FeatureFlags } from './client-config';
 
-export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc'>;
+export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan'>;
 
-export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, { label: string; description: string }> = {
+export interface BehaviourFlagMeta {
+  label: string;
+  description: string;
+  /**
+   * When set, switching the flag ON (console) first asks for explicit confirmation with this copy.
+   * Switching it OFF never asks. Used for flags that change who gets paid / what tax the company bears.
+   */
+  confirmOn?: { title: string; points: string[]; confirmLabel: string };
+}
+
+export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = {
   outletMasterGeo: {
     label: 'Outlet master Lat/Long + 200 m geo-fence',
     description:
@@ -22,6 +32,20 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, { label: string; desc
     label: 'SO-declaration KYC',
     description:
       "Offers the SO-declaration KYC variant: the full enrollment is still captured, but PAN/GST/GST certificate/address proof become optional and the SO and ASM sign a declaration instead (for owners who won't share documents).",
+  },
+  allowPayoutWithoutPan: {
+    label: 'Allow payouts without PAN',
+    description:
+      "Partners with no PAN on file can still be paid. They are paid the full amount; the TDS at the no-PAN rate is a company-borne liability shown in the TDS reports as 'NO PAN ON FILE'.",
+    confirmOn: {
+      title: 'Allow payouts without PAN?',
+      points: [
+        'Partners with no PAN on file will be paid the FULL amount — nothing is withheld from them.',
+        "Pending no-PAN payments in batches that haven't been paid yet (draft, submitted or failed) will be included the next time those batches are processed.",
+        "The TDS at the no-PAN rate is a company-borne liability — it is shown in the TDS reports as 'NO PAN ON FILE' and has to be deposited by the company.",
+      ],
+      confirmLabel: 'Yes, allow payouts without PAN',
+    },
   },
 };
 

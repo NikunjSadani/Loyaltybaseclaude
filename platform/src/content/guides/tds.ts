@@ -48,7 +48,8 @@ Set per client (default **194C + Gross-up**):
 
 - **Per-PAN, per-year cumulative:** all of an outlet-owner's benefits for the year add into one running total; the threshold applies to that **total**. Once crossed, TDS is due on the **whole** total (retroactive), and later payouts carry the catch-up.
 - **Rounding:** to the nearest whole rupee.
-- **No PAN:** rate is 20%; on the live payout path a no-PAN outlet is **paid in full** and it becomes a report-only reconciliation item.
+- **No PAN:** rate is 20%; on the live payout path a no-PAN outlet is **paid in full** and it becomes a report-only reconciliation item. Each no-PAN recipient is its **own deductee** — the threshold and the 20% apply to *that recipient's* yearly total, never to all no-PAN partners added together: **194R** per partner, **194C** per outlet (the same unit the payout tax step uses). On the **TDS screen** such a row reads **"NO PAN ON FILE · Partner Name (outlet codes)"**; in the **Excel export** the Deductee Name is **"Partner Name (NO PAN ON FILE)"**, PAN is blank and an **Outlet Code** column is added. To record a deposit (or an off-platform 194R benefit) for one, write **PANNOTAVBL** (or PANAPPLIED / PANINVALID / NA / N/A) in the PAN column **and** the partner's **Outlet Code** (any letter case) — the code must exist for that client. A **blank PAN is rejected** ("PAN is required — enter the PAN, or PANNOTAVBL if the deductee has none"), and a file without a PAN column is rejected as a whole. If that outlet's owner turns out to have a PAN on file, the row is counted under that PAN and the upload says so. For **194C** deposits, add the **Client** column (client slug) when the same Outlet Code exists in more than one client. A no-PAN deposit that can't be matched to a recipient — e.g. older deposits uploaded without an Outlet Code — appears on its own row **"Earlier no-PAN deposits (not linked to a partner)"**, with the deposit shown as a negative outstanding (a credit); the totals are always the sum of the rows.
+- **Redemption payouts without PAN (per-client switch):** by default a partner with no PAN on file is **excluded** from a Redemption Payouts batch. A Gifsy admin can switch on **"Allow payouts without PAN"** for a client (client settings → Behaviour flags): those partners are then paid the full amount, and the TDS at the no-PAN rate is a **company-borne** liability shown in the TDS reports as "NO PAN ON FILE".
 - **194R is report-only at payout:** an incentive (194R) payout has **nothing withheld** from it — the platform *reports* what's due per PAN for the client's filing, and the client deposits it (recorded via a deposit upload). Actual withholding at payout only happens for **visibility (194C)** payouts.
 
 ## When it fires (trigger points)
@@ -70,6 +71,19 @@ Everything below, for the **same PAN**, adds into that PAN's yearly 194R total:
 Then **Deposits** (194R tax the client actually paid the government, uploaded) are **subtracted** → the **outstanding** amount. Below ₹20,000 total → no liability; once crossed → 10% (with PAN), grossed-up on the whole total.
 
 ![194R report — per-PAN base, liability, deposited, outstanding](/guides/tds/194r-report.png)
+
+## Recording deposits — "TDS for month"
+
+Every deposit counts against the **financial year of the month whose TDS it pays**, not the year of the deposit date — so March's TDS deposited on 7 April (or by 30 April) reduces **March's** year, not the next one.
+
+- The deposit template (TDS → Deposit Upload → **Download Template**) has an optional **TDS for month** column. Accepted: \`2026-03\`, \`03/2026\`, \`Mar-2026\`, \`March 2026\`, \`Mar-26\`, or an Excel date (its month is used).
+- **Left blank**, the month is decided by the deposit date: deposited on the **1st–7th** → the **previous month**; deposited **8–30 April** → **March** of that year; otherwise the deposit's **own month**. The upload preview notes every deposit this puts in an earlier financial year.
+- The month column may be headed **TDS for month**, **TDS for Month (YYYY-MM)**, **For month** or **Period**. Any other month-like column is ignored, and the preview says so.
+- A row is rejected (with its row number) if the month can't be read, is in the **future**, is **after** the deposit date's month, or is **more than 12 months before** it. A month that puts the deposit in a different financial year than the deposit date normally would is allowed but flagged in the preview.
+- **Dates are read day-first** (Indian format): \`07/04/2026\` is **7 April 2026**. Accepted: \`DD/MM/YYYY\`, \`DD-MM-YYYY\`, \`DD-Mon-YYYY\` (\`07-Apr-2026\`), \`YYYY-MM-DD\`, or an Excel date. A time without a zone is read as India time. Anything else is rejected.
+- **Do not upload TDS that Gifsy already withheld from a payout** (the *deduct* method). It is already counted as **withheld** on the 194C report, so uploading it as a deposit counts it twice.
+- **An uploaded deposit cannot be edited or deleted**, so check the preview before you apply. A deposit that was already uploaded (same PAN, outlet, date and amount, from any earlier file) is **skipped**; if the earlier upload had a different TDS for month, the row is **rejected** rather than added a second time.
+- The 194R/194C reports and Excel exports show the **TDS for month(s)** of the deposits counted on each row. A PAN whose deposit belongs to a year in which it was paid nothing still appears in that year (base 0, outstanding negative = the deposit), so totals always equal the sum of the rows.
 
 ## Invoicing, GST & recovery (visibility payouts)
 
@@ -104,5 +118,6 @@ The statutory **rates and thresholds are editable at the platform level** (they'
 2. **Gross-up liability is ~11%, not 10%** — it's grossed up (\`× 10/90\`) because the platform pays the tax *on top*, not out of the outlet's amount.
 3. **The threshold is on the year's total per PAN**, not per payout — a small payout can still cross it once the running total does.
 4. **Section/option are frozen at confirm** — changing a client's treatment never re-prices already-confirmed payouts.
-5. **194C is platform-wide** (one outlet PAN aggregated across all clients); **194R is per-client**.`,
+5. **194C is platform-wide** (one outlet PAN aggregated across all clients); **194R is per-client**.
+6. **A deposit belongs to the year of the month it pays for** — an April deposit of March's TDS shows in the *previous* year's report. Use the **TDS for month** column to say exactly which month a deposit covers.`,
 };

@@ -59,6 +59,22 @@ export class SetVisibilityConfigDto {
   @ValidateNested()
   @Type(() => GeoFenceDto)
   geoFence!: GeoFenceDto;
+
+  /**
+   * APPLIES-TO (D12): Outlet.programName values that narrow `outletScope` further; empty = all
+   * programs. OPTIONAL — an ABSENT key carries over the stored list (stale-tab safety, plan §4).
+   * Validated ⊆ (tenant outletPrograms ∪ live values), case-insensitive, by the service.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  programs?: string[];
+
+  /** Outlet.programCategory values (independent of `programs`, D11). Same rules as `programs`. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  subPrograms?: string[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

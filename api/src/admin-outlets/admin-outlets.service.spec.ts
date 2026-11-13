@@ -900,6 +900,18 @@ describe('AdminOutletsService', () => {
       expect(mockTx.outlet.upsert.mock.calls[0][0].create.requiredPaymentType).toBe('ANY');
     });
 
+    it('APPLIES-TO trim guarantee: bulk upload stores programName / programCategory TRIMMED (blank → null)', async () => {
+      enableType();
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+      await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', programName: '  RLP ', programCategory: '  ' }],
+      });
+      const args = mockTx.outlet.upsert.mock.calls[0][0];
+      expect(args.create).toMatchObject({ programName: 'RLP', programCategory: null });
+      expect(args.update).toMatchObject({ programName: 'RLP', programCategory: null });
+    });
+
     it('CREATE parses the Payout Method case-insensitively ("any" → ANY)', async () => {
       enableType();
       mockTx.outlet.findUnique.mockResolvedValue(null);
@@ -1706,6 +1718,15 @@ describe('AdminOutletsService', () => {
       expect(audit.newValues).toEqual({ name: 'New Name', city: 'New City', beat: null });
       // Returns the SAME shape list() renders (via the shared mapper).
       expect(res).toMatchObject({ outletId: 'OUT-1', outletName: 'New Name', city: 'New City' });
+    });
+
+    it('APPLIES-TO trim guarantee: programName / programCategory are stored TRIMMED (blank → null)', async () => {
+      // appliesToOutletWhere compares the stored value untrimmed; equivalence with the in-memory
+      // matcher (which trims) relies on every writer storing trimmed values.
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce(existingRow()).mockResolvedValueOnce(detailRow());
+      mockTx.outlet.update.mockResolvedValue({ id: 'o1' });
+      await service.updateOne(admin, 'OUT-1', { programName: '  RLP  ', programCategory: '   ' });
+      expect(mockTx.outlet.update.mock.calls[0][0].data).toEqual({ programName: 'RLP', programCategory: null });
     });
 
     it('404s an unknown / cross-tenant outletCode (scoped by clientId + deletedAt:null), no write', async () => {

@@ -35,6 +35,11 @@ export interface FeatureFlags {
   // download template (written to the existing Outlet.latitude/longitude). Bajaj-only; runtime
   // behaviour flag, NOT a console module toggle (excluded from FeatureKey below).
   outletMasterGeo: boolean;
+  // Redemption Payouts: when ON, a partner with no PAN on file is NOT excluded from a payout batch.
+  // They are paid the full amount; the TDS at the no-PAN rate is a company-borne liability shown in
+  // the TDS reports as "NO PAN ON FILE". Bajaj-only; runtime behaviour flag, NOT a console module
+  // toggle (excluded from FeatureKey below).
+  allowPayoutWithoutPan: boolean;
   selfEnrollmentAllowed: boolean;   // Partners can self-accept schemes
   nonKycOutletCampaigns: boolean;   // Campaigns can target non-KYC outlets
   multiLevelApproval: boolean;      // ≥2 approval levels in hierarchy
@@ -97,7 +102,7 @@ export interface FeatureFlags {
 // The gifsy-console module toggles. Excludes `partnerApp` (nested) and
 // `kycAddressProofWaiver` (a runtime KYC behaviour flag set via clients.features, not a
 // console module) so the console's exhaustive feature Records stay to the module set.
-export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProofWaiver' | 'soDeclarationKyc' | 'outletMasterGeo'>;
+export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProofWaiver' | 'soDeclarationKyc' | 'outletMasterGeo' | 'allowPayoutWithoutPan'>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Branding

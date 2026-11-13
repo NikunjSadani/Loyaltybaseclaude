@@ -517,9 +517,14 @@ export default function PayoutStatusPage() {
                     value={revAmount}
                     onChange={(e) => setRevAmount(e.target.value)}
                     max={revTarget.awardType === 'PAYOUT' ? revTarget.originalPaise / 100 : revTarget.originalPaise}
-                    min={revTarget.awardType === 'PAYOUT' ? 0.01 : 1}
+                    min={1}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
                   />
+                  <p className="text-xs text-gray-500">
+                    {revTarget.awardType === 'PAYOUT'
+                      ? 'Payout reversals cover whole payout entries only: enter the full amount of one or more entries for this outlet and field. Unpaid entries are cancelled; a paid one becomes a receivable to recover off-platform.'
+                      : 'Points are removed from the outlet’s wallet (never below 0; points already redeemed are reported as a shortfall). While a wallet carries a negative balance, reversals on it are paused — contact Gifsy.'}
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-medium text-gray-700">Remarks (optional)</label>

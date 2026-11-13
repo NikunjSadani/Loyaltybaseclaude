@@ -146,7 +146,7 @@ describe('TdsService', () => {
   // ─── 194R: no-PAN 20% ────────────────────────────────────────────────────
 
   describe('compute194R — no-PAN bucket', () => {
-    it('groups null-PAN entries into __NO_PAN__ and applies 20/80', async () => {
+    it('keys a null-PAN partner as its OWN deductee (__NO_PAN__:<partnerId>) and applies 20/80', async () => {
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
         mkEntry('outlet1', 'field1', 2_100_000n),
       ]);
@@ -157,12 +157,12 @@ describe('TdsService', () => {
       const rows = await service.compute194R(CLIENT_ID, FY);
 
       expect(rows).toHaveLength(1);
-      expect(rows[0].panNumber).toBe('__NO_PAN__');
+      expect(rows[0].panNumber).toBe('__NO_PAN__:cp1');
       // 2100000 * 20 = 42000000; 42000000 / 80 = 525000; round(525000) = 525000
       expect(rows[0].liabilityPaise).toBe(525000n);
     });
 
-    it('groups outlet-with-no-partner into __NO_PAN__ correctly', async () => {
+    it('keys an outlet-with-no-partner by tenant + outlet (__NO_PAN__:outlet:<client>:<code>)', async () => {
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
         mkEntry('outlet1', 'field1', 2_500_000n),
       ]);
@@ -170,7 +170,7 @@ describe('TdsService', () => {
       mockPrisma.channelPartner.findMany.mockResolvedValue([]);
 
       const rows = await service.compute194R(CLIENT_ID, FY);
-      expect(rows[0].panNumber).toBe('__NO_PAN__');
+      expect(rows[0].panNumber).toBe('__NO_PAN__:outlet:deoleo:outlet1');
       expect(rows[0].liabilityPaise).toBeGreaterThan(0n);
     });
   });
@@ -391,7 +391,8 @@ describe('TdsService', () => {
 
       const rows = await service.compute194C(FY);
 
-      expect(rows[0].panNumber).toBe('__NO_PAN__');
+      // 194C no-PAN is keyed per OUTLET (credits-rail granularity).
+      expect(rows[0].panNumber).toMatch(/^__NO_PAN__:outlet:.*:outlet1$/);
       // 12000000 * 20 / 80 = 3000000; round(3000000) = 3000000
       expect(rows[0].liabilityPaise).toBe(3_000_000n);
       expect(rows[0].liabilityNoThresholdPaise).toBe(3_000_000n);

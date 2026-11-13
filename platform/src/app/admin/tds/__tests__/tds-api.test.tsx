@@ -289,6 +289,27 @@ describe('TDS — Admin TDS page API wiring', () => {
     });
   });
 
+  it('TDS8b: upload preview renders backend { row, message } errors and the warnings (notes) block', async () => {
+    const preview = {
+      success: true,
+      data: {
+        processed: 2, succeeded: 1, skipped: 0, failed: 1,
+        errors: [{ row: 2, message: 'Row 2: PAN is required — enter the PAN, or PANNOTAVBL if the deductee has none' }],
+        warnings: [{ row: 3, message: 'Row 3: PAN found on file for outlet OUT1 — counted under that PAN' }],
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve(url.includes('/api/admin/tds/194r') ? MOCK_194R : preview) }),
+    ));
+    render(<AdminTdsPage />);
+    await screen.findByText('194R Liability — 2025-26');
+    const input = document.querySelectorAll('input[type="file"]')[0] as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [new File(['x'], 't.xlsx')] } });
+    expect(await screen.findByText(/Row 2: PAN is required — enter the PAN, or PANNOTAVBL/)).toBeInTheDocument();
+    const notes = await screen.findByTestId('tds-upload-warnings');
+    expect(notes.textContent).toMatch(/PAN found on file for outlet OUT1 — counted under that PAN/);
+  });
+
   // TDS9 — 194R export download button
   it('TDS9: "Download 194R Excel" button targets /api/admin/tds/194r/export?fy=...', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {

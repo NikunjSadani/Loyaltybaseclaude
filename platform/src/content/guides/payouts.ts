@@ -63,6 +63,7 @@ On top of those, the platform has a **tax & invoicing layer** (TDS, self-billed 
 
 **Step 1 — Upload the spreadsheet** *(Credits & Payouts → Upload Credits)*
 - **The operator does:** Download the template, fill in each outlet and amount, and upload it.
+- **Whole units only:** points and ₹ payouts are credited in whole units. A decimal amount is rounded **half-up** (199.5 → 200, 199.4 → 199; ₹199.50 → ₹200). The preview lists every rounded amount ("199.5 → 200") before you confirm; an amount that rounds to 0 is skipped.
 - **The system does:** Creates a **batch** marked **Pending confirm**. Nothing is paid or credited yet — this is just a draft.
 
 ![Upload Credits screen](/guides/payouts/upload.png)
@@ -104,12 +105,23 @@ You can watch each batch's state on **Payout Status** (Confirmed = credited/paid
 - **The system does:** Debits their wallet points, freezes the rupee value, and creates a **payout transaction** marked **Pending**.
 
 **Step 2 — Batch and process** — **The operator does:** Create a batch, add the pending transactions, and **process** it.
-- **The system does:** Checks each one has KYC-approved status, a PAN, and bank details. Valid ones become **Initiated**; the rest are excluded until fixed.
+- **The system does:** Checks each one has KYC-approved status, a PAN, and bank details. Valid ones become **Initiated**; the rest are excluded until fixed. *(Exception: if the client has **"Allow payouts without PAN"** switched on — Gifsy console → client → Behaviour flags — a missing PAN no longer excludes the transaction. That partner is paid the full amount; the TDS at the no-PAN rate is a company-borne liability shown in the TDS reports as "NO PAN ON FILE".)*
 
 **Step 3 — Pay at the bank (offline)** — same as Flow A: the transfers happen at the bank.
 
-**Step 4 — Record the UTRs** — **The operator does:** Upload the UTRs.
+**Step 4 — Record the UTRs** — **The operator does:** Download the batch's UTR template, fill **UTR** + **Status** (PAID / FAILED), upload it.
 - **The system does:** Flips each to **Success** or **Failed**.
+- **Process first:** a row can be marked **PAID** only if that transaction was **processed** in the batch (status **Initiated**). A still-**Pending** transaction is refused with *"This payment wasn't processed in a batch — process the batch first, or mark it 'Paid outside platform' if it was paid outside Gifsy."*
+- **Already paid?** A row for a transaction that is already marked paid is never applied again — the result lists it as *"Already marked paid on DATE (bank / off-platform) — check for a double payment"*. Columns the system doesn't recognise (e.g. a mistyped header) are listed as ignored.
+- **Paid outside Gifsy?** If the money genuinely went out another way (cheque, cash, a manual bank transfer, …) and you are only recording it, put **Y** in **"Paid outside platform (Y/N)"** (plus an optional **"Off-platform note"**). Rules for a **Y** row:
+  - For a payment that is still **Pending** (not yet processed), or one whose bank payment already **Failed** / was **Reversed**.
+  - A payment sent to the bank in a processed batch (**Initiated**) whose outcome isn't recorded yet can't be marked paid outside. Record the bank result first: if the bank payment failed or was returned, upload it as **FAILED**. After that it can be marked **Y** — unless its points were refunded when it failed (then the row is refused with *"Points for this redemption were already refunded — it can't also be marked paid"*). In practice that means a failed payment can be marked paid outside only when it has no linked redemption, or its redemption holds an issued voucher (those aren't auto-refunded).
+  - A bank UTR (no **Y**) can't be applied to a payment already recorded as failed, and a FAILED row for an already-failed payment is listed as *"Already recorded as failed — no change"*. Every row ends up applied, refused with a reason, or listed as a notice — none is dropped silently.
+  - **Reference** — any reference up to 60 characters (letters, digits, spaces and / - . _ : #), e.g. *004521*, *CASH 12-Nov*, *NEFT/HDFC/123*. References are compared ignoring case, spaces and those separators. The same reference can be used for several off-platform payments **of the same partner**, never for a different partner and never one that was already used as a real bank UTR.
+  - **"Amount paid (₹)"** (optional) — if you fill it (₹ / Rs / INR and commas are fine), it must equal the payout amount exactly; leave it blank to mean "paid in full".
+  - A payment whose redemption was **cancelled and its points refunded** can't be marked paid.
+  - The partner's bank/UPI details are **not** marked verified by an off-platform payment.
+  - It is accepted even if the partner has no PAN / KYC isn't approved (the money already went out), and the audit trail records which of those checks it skipped.
 
 ✅ **Done** = the transaction shows **Success**.
 
@@ -165,6 +177,8 @@ This layer runs **only** for payout columns marked as **visibility payouts**. Or
 5. **Failed can be retried; Reversed cannot.**
    - **Failed** = the bank rejected it. It goes back into the pool and can be included in a later bank file.
    - **Reversed** = it was deliberately clawed back (through an approved reversal request). It will **never** be paid again.
+   - A **payout reversal** covers **whole payout entries only** — request the full amount of one or more entries for that outlet and field (a part of an entry is refused, and the request is approved in full or rejected). An unpaid entry is cancelled; an already **Paid** one is recorded as a receivable to recover off-platform, and can never be reversed a second time. An entry already in a downloaded bank file (**Processing**) can't be reversed until its UTR or failure is recorded.
+   - A **points reversal** removes points from the outlet's wallet (never below 0 — points already redeemed are reported as a shortfall). While a wallet has a **negative balance**, points reversals on it are paused — contact Gifsy.
 6. **Preview before apply.** When uploading UTRs, always preview first — the system flags duplicate UTRs and errors before anything changes.
 7. **TDS is automatic.** If a payout is a visibility payout, tax and invoicing happen on their own — you don't hand-calculate them.
 

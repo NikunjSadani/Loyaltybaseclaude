@@ -232,7 +232,11 @@ describe('SalesKpiDefService (K-2)', () => {
       const d = { kpiCode: 'K', measure: 'AMOUNT' as const, filter: {}, outletTypes: [] as string[], programs: [], enabled: true, order: 0 };
       const res = await new SalesKpiDefService(db as never).test(user, { importId: 'imp1', definition: d });
       expect(res.months.map((m) => [m.month, m.totalAmountRupees])).toEqual([['2026-09', 40]]); // O2 (RETAIL) only
-      expect(db.kpiDef.findMany).toHaveBeenCalledWith({ where: { clientId: 't1', code: { in: ['K'] } }, select: { code: true, outletType: true } });
+      // APPLIES-TO: the KPI's full scope (legacy outletType + outletTypes / programs / subPrograms) is read.
+      expect(db.kpiDef.findMany).toHaveBeenCalledWith({
+        where: { clientId: 't1', code: { in: ['K'] } },
+        select: { code: true, outletType: true, outletTypes: true, programs: true, subPrograms: true },
+      });
       const disjoint = await new SalesKpiDefService(db as never).test(user, { importId: 'imp1', definition: { ...d, outletTypes: ['WHOLESALER'] } });
       expect(disjoint.months).toEqual([]);
     });
@@ -258,11 +262,17 @@ describe('SalesKpiDefService (K-2)', () => {
     db.outlet.groupBy = jest
       .fn()
       .mockResolvedValueOnce([{ outletTypeId: 'ty1' }, { outletTypeId: 'ty2' }, { outletTypeId: null }])
-      .mockResolvedValueOnce([{ programName: 'Gold ' }, { programName: 'Bronze' }, { programName: '' }]);
+      .mockResolvedValueOnce([{ programName: 'Gold ' }, { programName: 'Bronze' }, { programName: '' }])
+      .mockResolvedValueOnce([{ programCategory: 'Tier B' }, { programCategory: ' Tier A' }, { programCategory: '' }]);
     db.outletType = { findMany: jest.fn(async () => [{ code: 'WHOLESALER', name: 'Wholesaler' }, { code: 'RETAIL', name: 'Retail' }]) };
     const r = await new SalesKpiDefService(db as never).segmentOptions('t1');
-    expect(r).toEqual({ outletTypes: [{ code: 'RETAIL', name: 'Retail' }, { code: 'WHOLESALER', name: 'Wholesaler' }], programs: ['Bronze', 'Gold'] });
-    expect(db.outlet.groupBy.mock.calls.map((c: Array<{ by: string[] }>) => c[0].by)).toEqual([['outletTypeId'], ['programName']]);
+    // APPLIES-TO: + subPrograms (Outlet.programCategory), same GROUP BY / trim / sort rules.
+    expect(r).toEqual({
+      outletTypes: [{ code: 'RETAIL', name: 'Retail' }, { code: 'WHOLESALER', name: 'Wholesaler' }],
+      programs: ['Bronze', 'Gold'],
+      subPrograms: ['Tier A', 'Tier B'],
+    });
+    expect(db.outlet.groupBy.mock.calls.map((c: Array<{ by: string[] }>) => c[0].by)).toEqual([['outletTypeId'], ['programName'], ['programCategory']]);
     for (const c of db.outlet.groupBy.mock.calls) expect(c[0].where).toEqual(expect.objectContaining({ clientId: 't1', deletedAt: null }));
     expect(db.outletType.findMany).toHaveBeenCalledWith({ where: { id: { in: ['ty1', 'ty2'] } }, select: { code: true, name: true } });
     expect(db.outlet.findMany).not.toHaveBeenCalled();
