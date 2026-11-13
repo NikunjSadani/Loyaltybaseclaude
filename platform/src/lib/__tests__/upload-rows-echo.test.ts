@@ -34,7 +34,7 @@ describe('normalizeRowsEcho (memory-safety upload echo)', () => {
   });
 
   it('defaults missing lists to empty (never crashes a screen)', () => {
-    const out = normalizeRowsEcho({ totalRows: 0 });
+    const out = normalizeRowsEcho({ totalRows: 0 } as { totalRows: number });
     expect(out.problemRows).toEqual([]);
     expect(out.warningRows).toEqual([]);
     expect(out.problemRowsTruncated).toBe(false);
