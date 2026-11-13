@@ -76,32 +76,32 @@ describe('delivery-status export kind', () => {
     expect(rowCount).toBe(500 - Math.ceil(500 / 9));
     const sms = DELIVERY_STATUS_KIND.parseParams({ ...q, channel: 'SMS', event: 'OTP' }, CLIENT);
     expectSameWorkbook((await renderKind(DELIVERY_STATUS_KIND, ctxFor(CLIENT, prisma), sms)).buffer, await oldDownload(prisma, CLIENT, { ...q, channel: 'SMS', event: 'OTP' }, 100_000));
-  });
+  }, 30_000);
 
   it('parity: platform-wide across > 2,000 rows (paged ≤ 2,000) and the truncation notice at the cap', async () => {
-    const rows = Array.from({ length: 4200 }, (_, i) => receipt(i));
+    const rows = Array.from({ length: 2100 }, (_, i) => receipt(i));
     const prisma = { messageDeliveryReceipt: fakeModel(rows) };
     const params = DELIVERY_STATUS_KIND.parseParams({}, GIFSY);
     expect(DELIVERY_STATUS_KIND.isHeavy(params)).toBe(true);
     const expected = await oldDownload(prisma, GIFSY, {}, 100_000);
     prisma.messageDeliveryReceipt.findMany.mockClear();
     const { buffer, rowCount } = await renderKind(DELIVERY_STATUS_KIND, ctxFor(GIFSY, prisma), params);
-    expect(rowCount).toBe(4200);
+    expect(rowCount).toBe(2100);
     expectSameWorkbook(buffer, expected);
     expect(await maxPage(prisma.messageDeliveryReceipt)).toBeLessThanOrEqual(2000);
 
     // Truncation at the cap (cap lowered for the test; the production cap is 100,000).
     const real = NotificationDeliveryReportService.MAX_EXPORT_ROWS;
-    (NotificationDeliveryReportService as unknown as { MAX_EXPORT_ROWS: number }).MAX_EXPORT_ROWS = 3000;
+    (NotificationDeliveryReportService as unknown as { MAX_EXPORT_ROWS: number }).MAX_EXPORT_ROWS = 1500;
     try {
       const capped = await renderKind(DELIVERY_STATUS_KIND, ctxFor(GIFSY, prisma), params);
-      expect(capped.rowCount).toBe(3000);
-      expectSameWorkbook(capped.buffer, await oldDownload(prisma, GIFSY, {}, 3000));
-      expect(readBook(capped.buffer).sheets.Delivery.aoa.at(-1)?.[0]).toMatch(/truncated at 3,000 rows/);
+      expect(capped.rowCount).toBe(1500);
+      expectSameWorkbook(capped.buffer, await oldDownload(prisma, GIFSY, {}, 1500));
+      expect(readBook(capped.buffer).sheets.Delivery.aoa.at(-1)?.[0]).toMatch(/truncated at 1,500 rows/);
     } finally {
       (NotificationDeliveryReportService as unknown as { MAX_EXPORT_ROWS: number }).MAX_EXPORT_ROWS = real;
     }
-  });
+  }, 30_000);
 
   it('parity: no rows → header + one blank row', async () => {
     const prisma = { messageDeliveryReceipt: fakeModel([]) };

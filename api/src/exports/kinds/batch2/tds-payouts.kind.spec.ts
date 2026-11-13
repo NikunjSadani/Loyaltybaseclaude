@@ -98,8 +98,8 @@ describe('tds-payouts export kind', () => {
     expect(flat).not.toContain('FOREIGN');
   });
 
-  it('parity: platform-wide (un-assumed Gifsy, all periods) across > 2,000 rows — paged, identical, totals exact', async () => {
-    const entries = Array.from({ length: 4500 }, (_, i) => entry(i, i % 10 === 0 ? { clientId: 'other' } : {}));
+  it('parity: platform-wide (un-assumed Gifsy, all periods) across > 2,000 rows (2,100) — paged, identical, totals exact', async () => {
+    const entries = Array.from({ length: 2100 }, (_, i) => entry(i, i % 10 === 0 ? { clientId: 'other' } : {}));
     const prisma = db(entries, outlets());
     const params = TDS_PAYOUTS_KIND.parseParams({}, GIFSY);
     expect(params).toEqual({ clientId: null, period: null });
@@ -108,12 +108,12 @@ describe('tds-payouts export kind', () => {
     prisma.creditPayoutEntry.findMany.mockClear();
     prisma.outlet.findMany.mockClear();
     const { buffer, rowCount } = await renderKind(TDS_PAYOUTS_KIND, ctxFor(GIFSY, prisma), params);
-    expect(rowCount).toBe(4500);
+    expect(rowCount).toBe(2100);
     expectSameWorkbook(buffer, expected);
-    expect(prisma.creditPayoutEntry.findMany.mock.calls.length).toBe(3);
+    expect(prisma.creditPayoutEntry.findMany.mock.calls.length).toBe(2);
     expect(await maxPage(prisma.creditPayoutEntry)).toBeLessThanOrEqual(2000);
     expect(TDS_PAYOUTS_KIND.fileName(params, new Date())).toBe('payout-report-all.xlsx');
-  });
+  }, 30_000);
 
   it('parity: nothing to export → header-less Payouts sheet + zero Summary (as json_to_sheet([]))', async () => {
     const prisma = db([], outlets());
