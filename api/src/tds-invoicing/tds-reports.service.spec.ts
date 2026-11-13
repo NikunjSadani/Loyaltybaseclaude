@@ -1,13 +1,11 @@
 /**
  * Unit tests for TdsReportsService — Wave 1 Stream C (§6). Mock Prisma, no I/O.
  * Covers: payout report (GST reg type + frozen TDS treatment, BigInt serialisation, tenant
- * scoping), unregistered/RCM report (filters to UNREGISTERED partners), recovery report shape,
- * and the xlsx cellSafe formula-injection guard on a malicious cell.
+ * scoping), unregistered/RCM report (filters to UNREGISTERED partners), recovery report shape.
  * Run: npx jest src/tds-invoicing/tds-reports.service.spec.ts
  */
 import { TdsReportsService } from './tds-reports.service';
 import { PrismaService } from '../prisma/prisma.service';
-import * as XLSX from 'xlsx';
 
 const mockPrisma = {
   creditPayoutEntry: { findMany: jest.fn() },
@@ -16,14 +14,6 @@ const mockPrisma = {
   channelPartner: { findMany: jest.fn() },
   tdsRecoveryEntry: { findMany: jest.fn() },
 };
-
-/** Read a built workbook Buffer back into per-sheet array-of-objects. */
-function readWorkbook(buffer: Buffer): Record<string, Record<string, unknown>[]> {
-  const wb = XLSX.read(buffer, { type: 'buffer' });
-  const out: Record<string, Record<string, unknown>[]> = {};
-  for (const name of wb.SheetNames) out[name] = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
-  return out;
-}
 
 describe('TdsReportsService', () => {
   let service: TdsReportsService;
@@ -93,37 +83,7 @@ describe('TdsReportsService', () => {
         expect.objectContaining({ where: { tdsSection: { not: null } } }),
       );
     });
-
-    it('xlsx export escapes a formula-injection cell (cellSafe via buildXlsx)', async () => {
-      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
-        {
-          id: 'e1',
-          clientId: 'deoleo',
-          // FIX-E: outletId is the outlet CODE — the malicious value flows through as the code cell.
-          outletId: '=HYPERLINK("evil")',
-          outletName: '=cmd()|calc',
-          fieldName: 'Visibility',
-          period: '2026-06',
-          amountPaise: 100n,
-          tdsSection: 'SEC_194C',
-          tdsMethodology: 'DEDUCT',
-          tdsDeductedPaise: 0n,
-          autoInvoiceId: null,
-          autoInvoice: null,
-        },
-      ]);
-      mockPrisma.outlet.findMany.mockResolvedValue([
-        { clientId: 'deoleo', outletCode: '=HYPERLINK("evil")', partner: null },
-      ]);
-
-      const { buffer, filename } = await service.payoutReportXlsx({ clientId: 'deoleo' });
-      expect(filename).toBe('payout-report-deoleo.xlsx');
-      const wb = readWorkbook(buffer);
-      const row = wb['Payouts'][0];
-      // Both the malicious outlet code and outlet name are neutralised with a leading apostrophe.
-      expect(String(row['Outlet Code'])).toBe("'=HYPERLINK(\"evil\")");
-      expect(String(row['Outlet Name'])).toBe("'=cmd()|calc");
-    });
+    // The xlsx export (incl. the cellSafe guard) is the 'tds-payouts' export kind — exports/kinds/batch2/tds-payouts.kind.spec.ts.
   });
 
   describe('unregisteredReport', () => {

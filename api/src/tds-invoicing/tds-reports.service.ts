@@ -138,37 +138,8 @@ export class TdsReportsService {
     };
   }
 
-  async payoutReportXlsx(scope: ReportScope): Promise<{ buffer: Buffer; filename: string }> {
-    const report = await this.payoutReport(scope);
-    const sheetRows = report.rows.map((r, i) => ({
-      'S.No': i + 1,
-      'Client': r.clientId,
-      'Outlet Code': r.outletCode ?? '',
-      'Outlet Name': r.outletName,
-      'Business Name': r.businessName ?? '',
-      'PAN': r.panNumber ?? '',
-      'GST Reg Type': r.gstRegistrationType ?? '',
-      'Entity Type': r.entityType ?? '',
-      'Payout Field': r.fieldName,
-      'Period': r.period,
-      'Amount (₹)': r.amount.inr,
-      'TDS Section': r.tdsSection ?? '',
-      'TDS Methodology': r.tdsMethodology ?? '',
-      'TDS Deducted (₹)': r.tdsDeducted.inr,
-      'Invoice No.': r.invoiceNumber ?? '',
-    }));
-    const summaryRows = [
-      { Metric: 'Rows', Value: report.count },
-      { Metric: 'Total Amount (₹)', Value: report.totals.amount.inr },
-      { Metric: 'Total TDS Deducted (₹)', Value: report.totals.tdsDeducted.inr },
-    ];
-    const buffer = buildXlsx([
-      { name: 'Payouts', rows: sheetRows },
-      { name: 'Summary', rows: summaryRows },
-    ]);
-    const suffix = scope.clientId ? scope.clientId : 'all';
-    return { buffer, filename: `payout-report-${suffix}.xlsx` };
-  }
+  // The .xlsx twin (GET …/payouts/export) is the 'tds-payouts' export kind (exports/kinds/batch2/tds-payouts.kind.ts):
+  // the same columns, streamed in pages or prepared on the Downloads page.
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 2. UNREGISTERED-RETAILER / RCM REPORT — invoice numbers (GIFSY-only)
