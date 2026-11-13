@@ -294,6 +294,8 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
     liabilityPaise: r.liabilityPaise.toString(),
     depositedPaise: r.depositedPaise.toString(),
     outstandingPaise: r.outstandingPaise.toString(),
+    // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
+    ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
   };
 }
 
@@ -311,6 +313,8 @@ function serializeRow194C(r: import('./tds.service').TdsRow194C) {
     liabilityNoThresholdPaise: r.liabilityNoThresholdPaise.toString(),
     depositedPaise: r.depositedPaise.toString(),
     outstandingPaise: r.outstandingPaise.toString(),
+    // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
+    ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
   };
 }
 

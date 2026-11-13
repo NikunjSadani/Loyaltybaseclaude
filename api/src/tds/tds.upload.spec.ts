@@ -589,8 +589,8 @@ describe('TdsService — uploadDeposit', () => {
       const wb = XLSX.read(b, { type: 'buffer' });
       return XLSX.utils.sheet_to_json<string[]>(wb.Sheets[wb.SheetNames[0]], { header: 1 })[0];
     };
-    expect(read(service.depositTemplate('194C'))).toEqual(['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'Client']);
-    expect(read(service.depositTemplate())).toEqual(['Date', 'Outlet Code', 'PAN', 'Amount (₹)']);
+    expect(read(service.depositTemplate('194C'))).toEqual(['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'TDS for month', 'Client']);
+    expect(read(service.depositTemplate())).toEqual(['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'TDS for month']);
   });
 
   it('deposit uploadBatchId differs for DIFFERENT files, matches for IDENTICAL files', async () => {
