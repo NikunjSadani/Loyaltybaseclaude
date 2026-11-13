@@ -74,8 +74,9 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 >    admins, KPIs = TOTAL(primary)/ADHO/NON ADHO/FOCUS BRAND/FOCUS BRAND 2/LINES — note: NOT staging's codes, visibility).
 >    Owner renaming credit field "Target Achievement" → "Monthly Achievement" (deactivate + recreate; no rename feature).
 >    Remaining: credit fields (10), points rule with prod KPI codes (11), sales-import mapping (12), catalogue fixes after
->    Hubble whitelist (13), offers (14). Hubble prod: owner says dynamic IP allowed, but login still 401 "not whitelisted"
->    (request id 01M777QKR7CCTB2VHQXGX2WZZ2) → chase Hubble.
+>    Hubble whitelist (13), offers (14). ✅ Hubble prod whitelist DONE (vendor confirmed 2026-11-13; verified: login from the prod
+>    VPC egress 34.96.40.72 → 200 + token, previously 401 "not whitelisted"). Catalogue fixes (13) now unblocked.
+>    ✅ Client training deck done (owner, 2026-11-13).
 > 5. **Rounding rule (owner):** cases/values may be decimal; points and ₹ payouts are credited in WHOLE units, rounded
 >    half-up ONCE at the end. Points engine already does this; credits upload fixed in (2).
 > 6. Staging leftovers: Bajaj order BAJAJ-26-000031 held (Hubble sandbox was 502 — reconcile/cancel); Deoleo staging
