@@ -4,7 +4,10 @@
  * Run: npx vitest run src/lib/sales-import/__tests__/format.test.ts
  */
 import { describe, it, expect } from 'vitest';
-import { applyBlockers, monthLabel, dayLabel, warningText, formatSigned, formatRupees, formatBytes, sentence, formatCases } from '../format';
+import {
+  applyBlockers, monthLabel, dayLabel, warningText, formatSigned, formatRupees, formatBytes, sentence, formatCases,
+  formatKpiValue, formatProducts, measureUnitLabel,
+} from '../format';
 import type { MonthPreview } from '../types';
 
 function month(over: Partial<MonthPreview>): MonthPreview {
@@ -81,5 +84,26 @@ describe('applyBlockers', () => {
   it('a blocked month is refused with its reason', () => {
     const ms = [month({ canApply: false, blockedReason: 'Month is CLOSED' })];
     expect(applyBlockers(ms, new Set(['2026-05']), none, false)[0]).toMatch(/Month is CLOSED/);
+  });
+});
+
+describe('PRODUCT_COUNT formatting (plain integers: no ₹, no "cases", no decimals)', () => {
+  it('formatKpiValue per measure', () => {
+    expect(formatKpiValue(1234, 'PRODUCT_COUNT')).toBe('1,234');
+    expect(formatKpiValue(7, 'PRODUCT_COUNT')).toBe('7');
+    expect(formatKpiValue(0, 'PRODUCT_COUNT')).toBe('0');
+    expect(formatKpiValue(12.5, 'QUANTITY')).toBe('12.5 cases'); // unchanged
+    expect(formatKpiValue(12.5, 'AMOUNT')).toBe(formatRupees(12.5)); // unchanged
+  });
+  it('formatProducts: whole numbers, typographic minus for a negative delta', () => {
+    expect(formatProducts(123456)).toBe('1,23,456');
+    expect(formatProducts(-3)).toBe('−3');
+    expect(formatSigned(-3, (n) => formatKpiValue(n, 'PRODUCT_COUNT'))).toBe('−3');
+    expect(formatSigned(4, (n) => formatKpiValue(n, 'PRODUCT_COUNT'))).toBe('+4');
+  });
+  it('measureUnitLabel', () => {
+    expect(measureUnitLabel('AMOUNT')).toBe('₹');
+    expect(measureUnitLabel('QUANTITY')).toBe('Cases');
+    expect(measureUnitLabel('PRODUCT_COUNT')).toBe('Products (lines)');
   });
 });

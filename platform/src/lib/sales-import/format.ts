@@ -2,7 +2,9 @@
  * Sales Import — display helpers (plain-English warning text, status chips, number formatting). Pure; no Date
  * reads at module scope (hydration lesson #58: pages call these only after data has loaded).
  */
-import { SALES_KPI_QUANTITY_DECIMALS, type MonthPreview, type SalesImportStatus, type SalesMonthWarning } from './types';
+import {
+  SALES_KPI_QUANTITY_DECIMALS, type MonthPreview, type SalesImportStatus, type SalesKpiMeasure, type SalesMonthWarning,
+} from './types';
 
 export const ACTIVE_STATUSES: readonly SalesImportStatus[] = ['QUEUED', 'PROCESSING'];
 
@@ -105,8 +107,42 @@ export function formatBytes(b: number): string {
   return `${(b / MB).toFixed(1)} MB`;
 }
 
-export function formatKpiValue(v: number, measure: 'AMOUNT' | 'QUANTITY'): string {
-  return measure === 'AMOUNT' ? formatRupees(v) : `${formatCases(v)} cases`;
+/** A KPI value in its measure's unit: ₹ / "n cases" / a plain whole number of products (PRODUCT_COUNT). */
+export function formatKpiValue(v: number, measure: SalesKpiMeasure): string {
+  switch (measure) {
+    case 'AMOUNT':
+      return formatRupees(v);
+    case 'QUANTITY':
+      return `${formatCases(v)} cases`;
+    case 'PRODUCT_COUNT':
+      return formatProducts(v);
+    default: {
+      const never: never = measure;
+      return String(never);
+    }
+  }
+}
+
+/** A product count (PRODUCT_COUNT): a whole number, no unit, no decimals; typographic minus like formatCases. */
+export function formatProducts(v: number): string {
+  const text = Math.abs(Math.round(v)).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+  return v < 0 && text !== '0' ? `−${text}` : text;
+}
+
+/** Short unit name of a measure (KPI list column, editor copy). */
+export function measureUnitLabel(measure: SalesKpiMeasure): string {
+  switch (measure) {
+    case 'AMOUNT':
+      return '₹';
+    case 'QUANTITY':
+      return 'Cases';
+    case 'PRODUCT_COUNT':
+      return 'Products (lines)';
+    default: {
+      const never: never = measure;
+      return String(never);
+    }
+  }
 }
 
 /** Plain-English text for a month warning chip (the "why" an admin needs before applying). */

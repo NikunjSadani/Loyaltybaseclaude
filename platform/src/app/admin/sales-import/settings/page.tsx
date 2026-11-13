@@ -15,6 +15,7 @@ import { api } from '@/lib/api-client';
 import { salesImportApi } from '@/lib/sales-import/api';
 import { usePermissions } from '@/lib/use-permissions';
 import { describeFilter } from '@/lib/sales-import/product-set';
+import { measureUnitLabel } from '@/lib/sales-import/format';
 import type {
   SalesColumnMapping, SalesImportCombos, SalesKpiDefinitionDto, SalesSegmentOptions,
 } from '@/lib/sales-import/types';
@@ -156,7 +157,7 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
                     <span className="block text-[11px] text-gray-500 font-mono">{d.kpiCode}</span>
                     {!d.enabled && <span className="text-[10px] font-semibold text-gray-500">Not imported (manual upload)</span>}
                   </td>
-                  <td className="px-3 py-2 text-gray-700">{d.measure === 'AMOUNT' ? '₹' : 'Cases'}</td>
+                  <td className="px-3 py-2 text-gray-700">{measureUnitLabel(d.measure)}</td>
                   <td className="px-3 py-2 text-gray-700 max-w-md">{describeFilter(d.filter, mapping.dimensions)}</td>
                   <td className="px-3 py-2 text-gray-600 text-xs">
                     {d.outletTypes.length || d.programs.length

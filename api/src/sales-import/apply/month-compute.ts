@@ -3,7 +3,7 @@
  * numbers apply writes (same function, same aggregates, same definitions).
  */
 import type { Prisma } from '@prisma/client';
-import { OutletKpiAccumulator, outletInScope, type KpiDefLite } from '../kpi/sales-kpi.helper';
+import { OutletKpiAccumulator, assertNeverMeasure, outletInScope, type KpiDefLite } from '../kpi/sales-kpi.helper';
 import { QTY_SCALE, divRoundHalfAway } from '../ingest/normalize';
 import { rosterIndexOf, type AggregatePager, type RosterOutlet } from '../kpi/sales-import-data';
 
@@ -18,7 +18,7 @@ export interface MonthOutletRow {
 
 export interface MonthKpiStat {
   kpiCode: string;
-  totalRaw: bigint; // paise / pico-cases
+  totalRaw: bigint; // paise / pico-cases / Σ product counts (PRODUCT_COUNT)
   total: number;
   outletsNonZero: number;
   outletsNegative: number;
@@ -116,12 +116,33 @@ export async function computeMonthRows(
   return { rows, stats, zeroFillOutlets, split };
 }
 
-/** A raw BigInt sum → the integer units the STORED value has: paise (₹, exact) or thousandths of a case (rounded once). */
+/**
+ * A raw BigInt value → the integer units the STORED value has: paise (₹, exact), thousandths of a case (rounded
+ * once), or the product count itself (PRODUCT_COUNT — already an integer).
+ */
 export function storedUnits(raw: bigint, measure: KpiDefLite['measure']): bigint {
-  return measure === 'AMOUNT' ? raw : divRoundHalfAway(raw, QTY_SCALE / 1000n);
+  switch (measure) {
+    case 'AMOUNT':
+      return raw;
+    case 'QUANTITY':
+      return divRoundHalfAway(raw, QTY_SCALE / 1000n);
+    case 'PRODUCT_COUNT':
+      return raw;
+    default:
+      return assertNeverMeasure(measure);
+  }
 }
 export function unitsToNumber(units: bigint, measure: KpiDefLite['measure']): number {
-  return Number(units) / (measure === 'AMOUNT' ? 100 : 1000);
+  switch (measure) {
+    case 'AMOUNT':
+      return Number(units) / 100;
+    case 'QUANTITY':
+      return Number(units) / 1000;
+    case 'PRODUCT_COUNT':
+      return Number(units);
+    default:
+      return assertNeverMeasure(measure);
+  }
 }
 
 /** Σ of the owned keys across the month's CURRENT OutletSalesRecord rows (numeric values only). */

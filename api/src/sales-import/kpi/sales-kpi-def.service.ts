@@ -34,6 +34,8 @@ import type { KpiScopeLike } from '../../common/applies-to/applies-to';
  */
 export const KPI_TEST_MAX_COMBOS = 100_000;
 
+const MEASURE_ERROR = `measure must be one of ${SALES_KPI_MEASURES.join(', ')}.`;
+
 export function toDto(row: SalesKpiDefinition): SalesKpiDefinitionDto {
   return {
     id: row.id,
@@ -178,10 +180,17 @@ export class SalesKpiDefService {
     if (!kpi) throw new BadRequestException(`"${kpiCode}" is not an enabled KPI of this tenant. Create it in KPI settings first.`);
 
     const measure = dto.measure as SalesKpiMeasure;
-    if (!SALES_KPI_MEASURES.includes(measure)) throw new BadRequestException('measure must be AMOUNT or QUANTITY.');
+    if (!SALES_KPI_MEASURES.includes(measure)) throw new BadRequestException(MEASURE_ERROR);
     const profile = await this.profile(clientId);
     if (measure === 'AMOUNT' && !profile.amount) throw new BadRequestException('The column mapping has no amount column, so an AMOUNT KPI cannot be computed.');
     if (measure === 'QUANTITY' && !profile.quantity) throw new BadRequestException('The column mapping has no quantity column, so a QUANTITY KPI cannot be computed.');
+    // PRODUCT_COUNT counts products by their NET amount, and a product = a combination of the dimension columns.
+    if (measure === 'PRODUCT_COUNT' && !profile.amount) {
+      throw new BadRequestException('The column mapping has no amount column, so a PRODUCT_COUNT KPI (products with net amount above zero) cannot be computed.');
+    }
+    if (measure === 'PRODUCT_COUNT' && profile.dimensions.length === 0) {
+      throw new BadRequestException('The column mapping has no product (dimension) columns, so a PRODUCT_COUNT KPI cannot tell products apart.');
+    }
 
     const fv = validateAndNormalizeFilter(dto.filter ?? {}, profile.dimensions.map((d) => d.key));
     if (fv.errors.length > 0) throw new BadRequestException(fv.errors.join(' '));
@@ -299,7 +308,7 @@ export class SalesKpiDefService {
 
   /**
    * POST kpis/test — evaluate a DRAFT definition against a READY import (no write; §6.2a). Per month: ₹ / cases totals
-   * over in-scope roster outlets + outletsNonZero. Also: anyOf/noneOf entries that match no line of the import
+   * (+ Σ product counts for a PRODUCT_COUNT draft) over in-scope roster outlets + outletsNonZero (on the draft's measure). Also: anyOf/noneOf entries that match no line of the import
    * (unmatchedEntries) and anyOf entries covered by another entry (redundantEntries).
    */
   async test(user: JwtPayload, req: SalesKpiTestRequest): Promise<SalesKpiTestResult> {
@@ -308,7 +317,7 @@ export class SalesKpiDefService {
     const imp = await resolveReadyImport(this.prisma, clientId, String(req.importId ?? ''));
     const profile = await this.profile(clientId);
     const measure = req.definition.measure as SalesKpiMeasure;
-    if (!SALES_KPI_MEASURES.includes(measure)) throw new BadRequestException('measure must be AMOUNT or QUANTITY.');
+    if (!SALES_KPI_MEASURES.includes(measure)) throw new BadRequestException(MEASURE_ERROR);
     const fv = validateAndNormalizeFilter(req.definition.filter ?? {}, profile.dimensions.map((d) => d.key));
     if (fv.errors.length > 0) throw new BadRequestException(fv.errors.join(' '));
 
@@ -329,11 +338,13 @@ export class SalesKpiDefService {
       kpiScope: own.kpiScope,
     };
     // Both measures over the SAME set, so the author sees ₹ and cases together (§6.2a "Duplicate as cases KPI").
+    // A PRODUCT_COUNT draft adds a third (index 2) so the per-product net maps are only built when they are shown.
     const defs: KpiDefLite[] = [
       { kpiCode: 'AMOUNT', measure: 'AMOUNT', filter: fv.filter, ...scope },
       { kpiCode: 'QUANTITY', measure: 'QUANTITY', filter: fv.filter, ...scope },
     ];
-    const measureIdx = measure === 'AMOUNT' ? 0 : 1;
+    if (measure === 'PRODUCT_COUNT') defs.push({ kpiCode: 'PRODUCT_COUNT', measure: 'PRODUCT_COUNT', filter: fv.filter, ...scope });
+    const measureIdx = measure === 'AMOUNT' ? 0 : measure === 'QUANTITY' ? 1 : 2;
     const roster = await loadRosterMeta(this.prisma, clientId);
     const index = rosterIndexOf(roster); // M6: file code → CURRENT roster outlet
 
@@ -374,17 +385,20 @@ export class SalesKpiDefService {
       // and "non-zero" is judged on the stored (rounded) value.
       let paise = 0n;
       let thousandths = 0n;
+      let products = 0n;
       let nonZero = 0;
       for (const code of acc.outletCodes()) {
-        const units = [storedUnits(acc.rawSum(code, 0), 'AMOUNT'), storedUnits(acc.rawSum(code, 1), 'QUANTITY')];
+        const units = defs.map((d, i) => storedUnits(acc.rawSum(code, i), d.measure));
         paise += units[0];
         thousandths += units[1];
+        if (units.length > 2) products += units[2];
         if (units[measureIdx] !== 0n) nonZero++;
       }
       months.push({
         month,
         totalAmountRupees: unitsToNumber(paise, 'AMOUNT'),
         totalQuantity: unitsToNumber(thousandths, 'QUANTITY'),
+        ...(measure === 'PRODUCT_COUNT' ? { totalProducts: unitsToNumber(products, 'PRODUCT_COUNT') } : {}),
         outletsNonZero: nonZero,
       });
     }

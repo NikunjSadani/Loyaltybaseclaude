@@ -96,7 +96,11 @@ export interface SalesColumnMapping {
 
 // ─── KPI definitions (SalesKpiDefinition) ───────────────────────────────────────
 
-export type SalesKpiMeasure = 'AMOUNT' | 'QUANTITY';
+/**
+ * AMOUNT = Σ ₹ (net amount) · QUANTITY = Σ cases · PRODUCT_COUNT ("LINES", owner 2026-11-13) = number of DISTINCT
+ * products (combination of the dimension columns) the outlet bought in the month whose NET amount is > 0 (an integer).
+ */
+export type SalesKpiMeasure = 'AMOUNT' | 'QUANTITY' | 'PRODUCT_COUNT';
 /** Every listed dim must equal (normalized). Keys ⊆ the profile's dimension keys. */
 export type DimMatch = Record<string, string>;
 /** `{}` = all lines. A line is IN iff (anyOf empty OR it matches ≥1 anyOf entry) AND it matches no noneOf entry. */
@@ -133,7 +137,8 @@ export interface SalesKpiTestRequest {
 
 /** POST admin/sales-import/kpis/test response (§6.2a). Indexes point into the request's anyOf/noneOf. */
 export interface SalesKpiTestResult {
-  months: Array<{ month: string; totalAmountRupees: number; totalQuantity: number; outletsNonZero: number }>;
+  /** `totalProducts` (Σ per-outlet product counts) is present only when the draft's measure is PRODUCT_COUNT. */
+  months: Array<{ month: string; totalAmountRupees: number; totalQuantity: number; totalProducts?: number; outletsNonZero: number }>;
   unmatchedEntries: { anyOf: number[]; noneOf: number[] };
   redundantEntries: { anyOf: number[] };
   matchedLines: number;

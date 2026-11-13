@@ -170,7 +170,10 @@ export class SalesProfileService {
     const col = (h: string | null | undefined) => (h ? normalizeHeader(h) : '');
     const measureClash: string[] = [];
     for (const [measure, field, label] of [['AMOUNT', 'amount', 'amount'], ['QUANTITY', 'quantity', 'quantity']] as const) {
-      const users = measures.filter((d) => d.measure === measure).map((d) => d.kpiCode);
+      // PRODUCT_COUNT counts products by their NET AMOUNT, so it depends on the amount column too.
+      const users = measures
+        .filter((d) => d.measure === measure || (measure === 'AMOUNT' && d.measure === 'PRODUCT_COUNT'))
+        .map((d) => d.kpiCode);
       if (users.length === 0) continue;
       const was = col(old?.[field]);
       const now = col(mapping[field]);

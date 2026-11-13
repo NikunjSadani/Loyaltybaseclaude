@@ -417,6 +417,26 @@ Generic examples (fixtures use `dimA`/`dimB`):
 
 `definitionsHash` = sha256 of the stable JSON of enabled definitions sorted by kpiCode (id-free).
 
+### 6.2b Third measure: PRODUCT_COUNT ("LINES" — owner-approved 2026-11-13, net basis)
+A definition with `measure: 'PRODUCT_COUNT'` (editor label **"Number of products bought (lines)"**) writes, for ONE outlet × ONE
+month, the number of **distinct products** the outlet bought, where a product = one distinct combination of the profile's
+dimension columns (the aggregate `dimKey`; for Bajaj: Brand = file `CODE` + SKU group = `CLUB SKU`).
+- **Net basis:** a product counts only when Σ `amountPaise` over every MATCHING aggregate of that outlet × product in the month is
+  **> 0**. Returns net off purchases: bought and fully returned → not counted; only zero-value (free) lines → not counted;
+  negative-only → not counted. The value is never negative (`outletsNegative` stays 0).
+- The normal filter (anyOf / noneOf) and outlet scope apply exactly as for ₹ / cases: only matching aggregates are considered;
+  out-of-scope outlets are omitted; an in-scope outlet with no qualifying product → 0.
+- **Implementation:** `OutletKpiAccumulator` keeps, only when a PRODUCT_COUNT definition exists, one per-outlet
+  `Map<dimKey, net paise>` of products matching ≥ 1 PRODUCT_COUNT definition; `rawSum` counts the entries with net > 0 that match
+  THAT definition (so the same product arriving in several aggregates / pages / history rows is netted, then counted once).
+  AMOUNT / QUANTITY keep their BigInt fast path unchanged. Stored units = the count itself (integer; no ÷100 / ÷1000); the month
+  total = Σ per-outlet counts. Every measure switch is exhaustive (`assertNeverMeasure`), so a future measure cannot silently fall
+  into the cases branch.
+- **Save rules:** needs the amount column (net amount) and ≥ 1 dimension column. The profile H2 guard also protects the amount
+  column while an enabled PRODUCT_COUNT KPI exists. No migration (`SalesKpiDefinition.measure` is a plain String).
+- Tester: for a PRODUCT_COUNT draft `POST kpis/test` also returns `months[].totalProducts` (Σ per-outlet counts) and judges
+  "outlets > 0" on the count. FE shows PRODUCT_COUNT values as plain integers (no ₹, no "cases", no decimals).
+
 ### 6.2a Multi-combination (focus SKU set) KPIs (owner addition)
 A focus KPI can be **any SET of attribute combinations summed together**, e.g. "ADHO 500 + ADHO 200 + ADHO 150", optionally mixed
 with whole-brand entries and exclusions. The §6.2 model expresses this directly; no extra node type is needed:
@@ -445,7 +465,7 @@ with whole-brand entries and exclusions. The §6.2 model expresses this directly
   file. Check spelling or size.") are returned by `POST kpis/test` as `unmatchedEntries: number[]` (indexes into anyOf/noneOf).
   Entries **fully covered by another entry** ("ADHO 500 is already included by ADHO (all sizes)") come back as `redundantEntries`.
   Blocking errors: an unknown dimension key, an empty entry, > 200 entries.
-- The contract change: `POST admin/sales-import/kpis/test` → `{months:[{month,totalAmountRupees,totalQuantity,outletsNonZero}],
+- The contract change: `POST admin/sales-import/kpis/test` → `{months:[{month,totalAmountRupees,totalQuantity,totalProducts?,outletsNonZero}],
   unmatchedEntries:{anyOf:number[],noneOf:number[]}, redundantEntries:{anyOf:number[]}, matchedLines:number}`.
 
 ### 6.3 Month summary warnings

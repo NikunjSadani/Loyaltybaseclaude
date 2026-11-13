@@ -113,7 +113,9 @@ describe('SalesKpiDefService (K-2)', () => {
 
   it.each([
     ['not an enabled KpiDef', { kpiCode: 'NOPE' }, /not an enabled KPI/],
-    ['bad measure', { measure: 'CASES' }, /AMOUNT or QUANTITY/],
+    ['bad measure', { measure: 'CASES' }, /measure must be one of AMOUNT, QUANTITY, PRODUCT_COUNT/],
+    ['garbage measure (lower-case)', { measure: 'product_count' }, /measure must be one of/],
+    ['missing measure', { measure: undefined }, /measure must be one of/],
     ['filter on an unmapped dim', { filter: { anyOf: [{ brand: 'X' }] } }, /unknown dimension "brand"/],
     ['empty anyOf entry', { filter: { anyOf: [{}] } }, /empty/],
   ])('create: %s → 400', async (_n, over, re) => {
@@ -127,6 +129,31 @@ describe('SalesKpiDefService (K-2)', () => {
     const db2 = txDb();
     db2.salesImportProfile.findUnique.mockResolvedValue({ columnMapping: { ...MAPPING, quantity: null } });
     await expect(new SalesKpiDefService(db2 as never).create(user, dto({ measure: 'QUANTITY' }))).rejects.toThrow(/no quantity column/);
+  });
+
+  it('create: PRODUCT_COUNT is accepted and saved as-is', async () => {
+    const db = txDb();
+    const out = await new SalesKpiDefService(db as never).create(user, dto({ measure: 'PRODUCT_COUNT' }));
+    expect(db.salesKpiDefinition.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ measure: 'PRODUCT_COUNT' }));
+    expect(out.measure).toBe('PRODUCT_COUNT');
+  });
+
+  it('create: PRODUCT_COUNT needs the amount column (net basis) and at least one product column', async () => {
+    const noAmt = txDb();
+    noAmt.salesImportProfile.findUnique.mockResolvedValue({ columnMapping: { ...MAPPING, amount: null } });
+    await expect(new SalesKpiDefService(noAmt as never).create(user, dto({ measure: 'PRODUCT_COUNT' }))).rejects.toThrow(/no amount column/);
+    const noDims = txDb();
+    noDims.salesImportProfile.findUnique.mockResolvedValue({ columnMapping: { ...MAPPING, dimensions: [] } });
+    await expect(new SalesKpiDefService(noDims as never).create(user, dto({ measure: 'PRODUCT_COUNT', filter: {} }))).rejects.toThrow(/no product \(dimension\) columns/);
+  });
+
+  it('profile H2: the amount column used by an enabled PRODUCT_COUNT KPI cannot be removed or changed', async () => {
+    const db = txDb();
+    db.salesKpiDefinition.findMany.mockImplementation(async ({ select }: { select: Record<string, boolean> }) =>
+      select.measure ? [{ kpiCode: 'K_LINES', measure: 'PRODUCT_COUNT' }] : []);
+    await expect(new SalesProfileService(db as never).put(user, { ...MAPPING, amount: 'GROSS AMT' })).rejects.toThrow(/amount column is used by K_LINES/);
+    await expect(new SalesProfileService(db as never).put(user, { ...MAPPING, amount: null })).rejects.toThrow(/amount column is used by K_LINES/);
+    expect(db.salesImportProfile.upsert).not.toHaveBeenCalled();
   });
 
   it('create: 409 when the kpiCode is already owned by an ENABLED definition', async () => {
@@ -216,6 +243,24 @@ describe('SalesKpiDefService (K-2)', () => {
       expect(res.unmatchedEntries).toEqual({ anyOf: [2], noneOf: [0] });
       expect(res.redundantEntries).toEqual({ anyOf: [0, 2] }); // both are covered by the whole-P entry
       expect(res.matchedLines).toBe(4);
+    });
+
+    it('PRODUCT_COUNT draft: adds totalProducts (Σ per-outlet counts) and judges "outlets > 0" on the count', async () => {
+      const db = testDb();
+      const rows = [
+        agg(1, '2026-09', 'O1', { dimA: 'P', dimB: '500' }, 10000n, 1_000000n),
+        agg(2, '2026-09', 'O1', { dimA: 'P', dimB: '500' }, -10000n, 0n), // fully returned → not counted
+        agg(3, '2026-09', 'O1', { dimA: 'P', dimB: '200' }, 500n, 0n),
+        agg(4, '2026-09', 'O2', { dimA: 'P', dimB: '200' }, 4000n, 500000n),
+        agg(5, '2026-09', 'O2', { dimA: 'Q', dimB: '200' }, 4000n, 0n), // filtered out
+      ];
+      db.salesImportAggregate.findMany.mockImplementation(async ({ where, take }: { where: { id?: { gt: bigint } }; take: number }) =>
+        rows.filter((r) => !where.id || r.id > where.id.gt).slice(0, take));
+      const res = await new SalesKpiDefService(db as never).test(user, {
+        importId: 'imp1',
+        definition: { kpiCode: 'K', measure: 'PRODUCT_COUNT', filter: { anyOf: [{ dimA: 'P' }] }, outletTypes: [], programs: [], enabled: true, order: 0 },
+      });
+      expect(res.months).toEqual([{ month: '2026-09', totalAmountRupees: 45, totalQuantity: 1.5, totalProducts: 2, outletsNonZero: 2 }]);
     });
 
     it('outlet-type scope restricts the totals', async () => {

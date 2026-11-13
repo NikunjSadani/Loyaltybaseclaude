@@ -1,7 +1,8 @@
 'use client';
 
 /**
- * Sales Import KPI definition editor (SALES-IMPORT-PIPELINE-PLAN §6.2, §6.2a, §11 F-6): which KPI, rupees or cases,
+ * Sales Import KPI definition editor (SALES-IMPORT-PIPELINE-PLAN §6.2, §6.2a, §11 F-6): which KPI, rupees / cases /
+ * number of products bought (PRODUCT_COUNT, §6.2b),
  * which products (Product set builder), optional outlet scope, and a "Test against latest import" button.
  */
 import React, { useState } from 'react';
@@ -9,7 +10,7 @@ import { AlertTriangle, FlaskConical, Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { salesImportApi } from '@/lib/sales-import/api';
 import { entryKey, listOf, validateFilter } from '@/lib/sales-import/product-set';
-import { formatCases, formatCount, formatRupees, monthLabel } from '@/lib/sales-import/format';
+import { formatCases, formatCount, formatProducts, formatRupees, monthLabel } from '@/lib/sales-import/format';
 import type {
   SalesColumnMapping, SalesImportCombos, SalesKpiDefinitionDto, SalesKpiFilter, SalesKpiMeasure, SalesKpiTestResult,
   SalesSegmentOptions,
@@ -77,13 +78,26 @@ function describeKpiScope(s: AppliesTo): string | null {
 }
 
 /** Everything a Test result depends on: the product set AND the outlet-type / programme scope. */
-function testSignature(d: Pick<SalesKpiDefinitionDto, 'filter' | 'outletTypes' | 'programs'>): string {
+function testSignature(d: Pick<SalesKpiDefinitionDto, 'filter' | 'outletTypes' | 'programs' | 'measure'>): string {
   const norm = (xs: string[]) => [...new Set(xs.map((x) => x.trim().toUpperCase()))].sort();
   return JSON.stringify([
     listOf(d.filter, 'anyOf').map(entryKey), listOf(d.filter, 'noneOf').map(entryKey),
     norm(d.outletTypes), norm(d.programs),
+    // ₹ and cases are always tested together; the product count only when the draft is PRODUCT_COUNT, so switching
+    // to / from it needs a fresh test. (Appended only then, so the AMOUNT/QUANTITY signature is unchanged.)
+    ...(d.measure === 'PRODUCT_COUNT' ? ['PRODUCT_COUNT'] : []),
   ]);
 }
+
+/** The "Count" choices, in display order. */
+const MEASURE_OPTIONS: ReadonlyArray<{ value: SalesKpiMeasure; label: string }> = [
+  { value: 'AMOUNT', label: 'Rupees (₹)' },
+  { value: 'QUANTITY', label: 'Cases (quantity)' },
+  { value: 'PRODUCT_COUNT', label: 'Number of products bought (lines)' },
+];
+
+const PRODUCT_COUNT_HELP =
+  "Counts each different product (combination of the product columns, e.g. Brand + SKU group) the outlet bought in the month, where the outlet's net amount for that product is above zero. Returns cancel purchases.";
 
 function TokenInput({ label, values, onChange, placeholder }: { label: string; values: string[]; onChange(v: string[]): void; placeholder: string }) {
   const [draft, setDraft] = useState('');
@@ -146,6 +160,7 @@ export function KpiEditor({
   const validation = validateFilter(def.filter, dims.map((d) => d.key));
   const sig = testSignature(def);
   const freshTest = test && test.sig === sig && test.result;
+  const showProducts = def.measure === 'PRODUCT_COUNT';
 
   const options = tenantKpis.filter((k) => k.enabled && (k.code === def.kpiCode || !ownedCodes.includes(k.code)));
   const selectedKpi = tenantKpis.find((k) => k.code === def.kpiCode);
@@ -169,6 +184,10 @@ export function KpiEditor({
   if (!def.kpiCode) blockers.push('Choose a KPI.');
   if (def.measure === 'AMOUNT' && !hasAmount) blockers.push('The column mapping has no amount column, so a rupee KPI is not possible.');
   if (def.measure === 'QUANTITY' && !hasQty) blockers.push('The column mapping has no quantity column, so a cases KPI is not possible.');
+  if (def.measure === 'PRODUCT_COUNT' && !hasAmount) blockers.push('The column mapping has no amount column, so a products-bought KPI is not possible (products are counted by their net amount).');
+  if (def.measure === 'PRODUCT_COUNT' && dims.length === 0) blockers.push('The column mapping has no product columns, so products cannot be told apart.');
+  const measureAvailable = (m: SalesKpiMeasure): boolean =>
+    m === 'AMOUNT' ? hasAmount : m === 'QUANTITY' ? hasQty : hasAmount && dims.length > 0;
 
   async function runTest() {
     if (validation.errors.length) return;
@@ -191,7 +210,7 @@ export function KpiEditor({
     onSaved(r.data);
   }
 
-  const measureLabel = def.measure === 'AMOUNT' ? '₹' : 'cases';
+  const measureLabel = def.measure === 'AMOUNT' ? '₹' : def.measure === 'QUANTITY' ? 'cases' : 'number of products bought';
 
   return (
     <div className="rounded-xl border border-gray-300 bg-white p-5 space-y-5" data-testid="kpi-editor">
@@ -222,15 +241,18 @@ export function KpiEditor({
         </div>
         <fieldset>
           <legend className="text-xs font-medium text-gray-700">Count</legend>
-          <div className="mt-1 flex gap-4 text-sm">
-            {(['AMOUNT', 'QUANTITY'] as SalesKpiMeasure[]).map((m) => (
-              <label key={m} className={`flex items-center gap-1.5 ${(m === 'AMOUNT' ? hasAmount : hasQty) ? '' : 'opacity-50'}`}>
-                <input type="radio" name="measure" checked={def.measure === m} disabled={m === 'AMOUNT' ? !hasAmount : !hasQty}
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+            {MEASURE_OPTIONS.map(({ value: m, label }) => (
+              <label key={m} className={`flex items-center gap-1.5 ${measureAvailable(m) ? '' : 'opacity-50'}`}>
+                <input type="radio" name="measure" checked={def.measure === m} disabled={!measureAvailable(m)}
                   onChange={() => setDef((d) => ({ ...d, measure: m }))} />
-                {m === 'AMOUNT' ? 'Rupees (₹)' : 'Cases (quantity)'}
+                {label}
               </label>
             ))}
           </div>
+          {def.measure === 'PRODUCT_COUNT' && (
+            <p className="mt-1 text-[11px] text-gray-500" data-testid="measure-product-count-help">{PRODUCT_COUNT_HELP}</p>
+          )}
         </fieldset>
       </div>
 
@@ -291,13 +313,14 @@ export function KpiEditor({
             <p className="text-xs text-gray-600">{formatCount(freshTest.matchedLines)} invoice lines match.</p>
             {freshTest.months.length > 0 && (
               <table className="text-xs">
-                <thead><tr className="text-left text-gray-500"><th className="pr-4">Month</th><th className="pr-4 text-right">₹</th><th className="pr-4 text-right">Cases</th><th className="text-right">Outlets &gt; 0</th></tr></thead>
+                <thead><tr className="text-left text-gray-500"><th className="pr-4">Month</th><th className="pr-4 text-right">₹</th><th className="pr-4 text-right">Cases</th>{showProducts && <th className="pr-4 text-right">Products (Σ outlets)</th>}<th className="text-right">Outlets &gt; 0</th></tr></thead>
                 <tbody>
                   {freshTest.months.map((m) => (
                     <tr key={m.month}>
                       <td className="pr-4">{monthLabel(m.month)}</td>
                       <td className={`pr-4 text-right ${def.measure === 'AMOUNT' ? 'font-semibold' : ''}`}>{formatRupees(m.totalAmountRupees)}</td>
                       <td className={`pr-4 text-right ${def.measure === 'QUANTITY' ? 'font-semibold' : ''}`}>{formatCases(m.totalQuantity)}</td>
+                      {showProducts && <td className="pr-4 text-right font-semibold">{formatProducts(m.totalProducts ?? 0)}</td>}
                       <td className="text-right">{formatCount(m.outletsNonZero)}</td>
                     </tr>
                   ))}

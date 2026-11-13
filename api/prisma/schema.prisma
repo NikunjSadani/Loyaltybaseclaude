@@ -3072,7 +3072,7 @@ model SalesKpiDefinition {
   id          String   @id @default(cuid())
   clientId    String
   kpiCode     String // MUST be an enabled KpiDef.code of this tenant (validated on save)
-  measure     String // 'AMOUNT' | 'QUANTITY'
+  measure     String // 'AMOUNT' | 'QUANTITY' | 'PRODUCT_COUNT' (distinct products with net amount > 0)
   filter      Json // SalesKpiFilter (plan §6.2)
   outletTypes String[] @default([]) // optional scope by Outlet.outletType.code; [] = all
   programs    String[] @default([]) // optional scope by Outlet.programName; [] = all

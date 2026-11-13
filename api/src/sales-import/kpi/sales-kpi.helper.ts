@@ -1,12 +1,19 @@
 /**
  * Sales Import KPI evaluation (plan §6.2 / §6.2a). PURE — no DB.
  *
- * A KPI definition = a filter over the import's normalized dimensions + a measure (AMOUNT ₹ / QUANTITY cases).
+ * A KPI definition = a filter over the import's normalized dimensions + a measure (AMOUNT ₹ / QUANTITY cases /
+ * PRODUCT_COUNT distinct products).
  *   - A line (aggregate row) is IN iff (anyOf empty OR it matches ≥1 anyOf entry) AND it matches no noneOf entry.
  *     This is a BOOLEAN per aggregate, so a line matching two anyOf entries is counted ONCE (set, not list).
  *   - An entry matches iff EVERY key it lists equals the line's (normalized) value for that key.
  *   - Sums are BigInt (paise / pico-cases, exact); conversion to a JS number happens once, at the end of the sum
  *     (₹ exact at 2 dp; cases rounded to SALES_KPI_QUANTITY_DECIMALS = 3 — H3).
+ *   - PRODUCT_COUNT ("LINES", owner-approved 2026-11-13, NET basis): for one outlet × month, the number of DISTINCT
+ *     products (one product = one distinct combination of the profile's dimension columns = the aggregate's dimKey)
+ *     among the MATCHING aggregates whose NET amount (Σ amountPaise over every matching aggregate of that product for
+ *     the outlet, returns included) is > 0. A product bought and fully returned, or with only zero-value (free) lines,
+ *     does not count. The same product arriving in several aggregates (pages, history rows) is netted, then counted
+ *     once. The value is an integer (stored units = the count). Scope rules are the same as for the sums.
  *   - Outlet scope: a definition with non-empty outletTypes/programs that does not cover the outlet → the key is
  *     OMITTED (blank ≠ 0, the engine's null policy). An in-scope outlet with no matching lines → 0 (full rewrite).
  *   - L4 / APPLIES-TO §5: the KPI's OWN scope (KpiDef outletTypes / programs / subPrograms via `kpiScope`, else the
@@ -30,7 +37,19 @@ import {
   type SalesKpiMeasure,
 } from '../sales-import.contract';
 
-export const SALES_KPI_MEASURES: readonly SalesKpiMeasure[] = ['AMOUNT', 'QUANTITY'];
+export const SALES_KPI_MEASURES: readonly SalesKpiMeasure[] = ['AMOUNT', 'QUANTITY', 'PRODUCT_COUNT'];
+
+/** Compile-time exhaustiveness guard for `switch (measure)`: a new measure that is not handled fails `tsc`. */
+export function assertNeverMeasure(m: never): never {
+  throw new Error(`Unknown sales KPI measure: ${String(m)}`);
+}
+
+/** Number of products whose net amount is > 0. */
+function countPositive(net: Iterable<bigint>): bigint {
+  let n = 0n;
+  for (const v of net) if (v > 0n) n++;
+  return n;
+}
 
 /** One aggregate row as the evaluator needs it (SalesImportAggregate minus ids). */
 export interface KpiAgg {
@@ -159,19 +178,51 @@ export function outletInScope(def: ScopeDef, meta: OutletScopeMeta): boolean {
 
 // ─── Measures ────────────────────────────────────────────────────────────────
 
-/** Raw BigInt sum of the definition's measure over the matching aggregates (scope NOT applied). */
+/**
+ * Raw BigInt value of the definition's measure over the matching aggregates (scope NOT applied): the sum of paise /
+ * pico-cases, or for PRODUCT_COUNT the number of distinct products (dims combination) with net amount > 0.
+ */
 export function sumMeasure(aggs: Iterable<KpiAgg>, def: Pick<KpiDefLite, 'measure' | 'filter'>): bigint {
-  let s = 0n;
-  for (const a of aggs) {
-    if (!lineMatches(a.dims, def.filter)) continue;
-    s += def.measure === 'AMOUNT' ? a.amountPaise : a.qtyPico;
+  const m = def.measure;
+  switch (m) {
+    case 'AMOUNT':
+    case 'QUANTITY': {
+      let s = 0n;
+      for (const a of aggs) {
+        if (!lineMatches(a.dims, def.filter)) continue;
+        s += m === 'AMOUNT' ? a.amountPaise : a.qtyPico;
+      }
+      return s;
+    }
+    case 'PRODUCT_COUNT': {
+      const net = new Map<string, bigint>();
+      for (const a of aggs) {
+        if (!lineMatches(a.dims, def.filter)) continue;
+        const k = stableStringify(a.dims);
+        net.set(k, (net.get(k) ?? 0n) + a.amountPaise);
+      }
+      return countPositive(net.values());
+    }
+    default:
+      return assertNeverMeasure(m);
   }
-  return s;
 }
 
-/** BigInt paise → rupees (2 dp) / pico-cases → cases (rounded to 3 dp). One conversion, at the end of the sum. */
+/**
+ * BigInt paise → rupees (2 dp) / pico-cases → cases (rounded to 3 dp) / product count → the integer itself.
+ * One conversion, at the end of the sum.
+ */
 export function measureToNumber(sum: bigint, measure: SalesKpiMeasure): number {
-  return measure === 'AMOUNT' ? paiseToRupees(sum) : picoToCases(sum);
+  switch (measure) {
+    case 'AMOUNT':
+      return paiseToRupees(sum);
+    case 'QUANTITY':
+      return picoToCases(sum);
+    case 'PRODUCT_COUNT':
+      return Number(sum);
+    default:
+      return assertNeverMeasure(measure);
+  }
 }
 
 /**
@@ -195,16 +246,26 @@ export function computeOutletKpis(
  * Streaming accumulator for many outlets (preview / apply / tester). Each aggregate's match vector is memoised
  * by its dimKey so 400k aggregates × N definitions cost one filter evaluation per DISTINCT combo. Accumulators over
  * the SAME definitions may share one cache (the tester keeps one accumulator per month).
+ *
+ * AMOUNT / QUANTITY definitions add into a per-outlet BigInt array (fast path, unchanged). PRODUCT_COUNT definitions
+ * instead share ONE per-outlet Map<dimKey, net paise> holding every product that matches ≥ 1 PRODUCT_COUNT definition;
+ * the count is derived at read time (`rawSum`) as the products matching THAT definition with net > 0 — so repeated,
+ * split or later negative aggregates of the same outlet × product net off before counting. The map exists only when
+ * the definitions include a PRODUCT_COUNT one.
  */
 export class OutletKpiAccumulator {
   private readonly sums = new Map<string, bigint[]>();
   private readonly lines = new Map<string, number>();
+  /** outlet → product key (dimKey) → net paise, for products matching ≥ 1 PRODUCT_COUNT definition. null = none exist. */
+  private readonly productNet: Map<string, Map<string, bigint>> | null;
   matchedLines = 0; // Σ lines of aggregates matching ≥ 1 definition (scope NOT applied)
 
   constructor(
     readonly defs: readonly KpiDefLite[],
     private readonly matchCache: Map<string, boolean[]> = new Map(),
-  ) {}
+  ) {
+    this.productNet = defs.some((d) => d.measure === 'PRODUCT_COUNT') ? new Map() : null;
+  }
 
   add(outletCode: string, agg: KpiAgg, dimKey?: string): void {
     const key = dimKey ?? stableStringify(agg.dims);
@@ -219,10 +280,29 @@ export class OutletKpiAccumulator {
       this.sums.set(outletCode, arr);
     }
     let any = false;
+    let product = false;
     for (let i = 0; i < this.defs.length; i++) {
       if (!match[i]) continue;
       any = true;
-      arr[i] += this.defs[i].measure === 'AMOUNT' ? agg.amountPaise : agg.qtyPico;
+      const m = this.defs[i].measure;
+      switch (m) {
+        case 'AMOUNT':
+          arr[i] += agg.amountPaise;
+          break;
+        case 'QUANTITY':
+          arr[i] += agg.qtyPico;
+          break;
+        case 'PRODUCT_COUNT':
+          product = true; // netted once per aggregate below, counted per definition in rawSum
+          break;
+        default:
+          assertNeverMeasure(m);
+      }
+    }
+    if (product && this.productNet) {
+      let net = this.productNet.get(outletCode);
+      if (!net) this.productNet.set(outletCode, (net = new Map()));
+      net.set(key, (net.get(key) ?? 0n) + agg.amountPaise);
     }
     if (any) this.matchedLines += agg.lines;
     this.lines.set(outletCode, (this.lines.get(outletCode) ?? 0) + agg.lines);
@@ -237,18 +317,27 @@ export class OutletKpiAccumulator {
     return [...this.sums.keys()];
   }
 
-  /** Raw BigInt sum (paise / micro-cases) of definition `i` for an outlet (scope NOT applied). */
+  /**
+   * Raw BigInt value of definition `i` for an outlet (scope NOT applied): the sum (paise / pico-cases), or for a
+   * PRODUCT_COUNT definition the number of products matching it whose net amount is > 0.
+   */
   rawSum(outletCode: string, i: number): bigint {
-    return this.sums.get(outletCode)?.[i] ?? 0n;
+    if (this.defs[i]?.measure !== 'PRODUCT_COUNT') return this.sums.get(outletCode)?.[i] ?? 0n;
+    const net = this.productNet?.get(outletCode);
+    if (!net) return 0n;
+    let n = 0n;
+    for (const [key, v] of net) {
+      if (v > 0n && this.matchCache.get(key)?.[i] === true) n++;
+    }
+    return n;
   }
 
   /** Same contract as computeOutletKpis, from the accumulated sums. */
   valuesFor(outletCode: string, meta: OutletScopeMeta): Record<string, number> {
-    const arr = this.sums.get(outletCode);
     const out: Record<string, number> = {};
     this.defs.forEach((def, i) => {
       if (!outletInScope(def, meta)) return;
-      out[def.kpiCode] = measureToNumber(arr ? arr[i] : 0n, def.measure);
+      out[def.kpiCode] = measureToNumber(this.rawSum(outletCode, i), def.measure);
     });
     return out;
   }
