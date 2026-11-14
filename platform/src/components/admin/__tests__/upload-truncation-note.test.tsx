@@ -2,7 +2,7 @@
 import React from 'react'
 import { render, screen } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
-import { UploadTruncationNote } from '../UploadTruncationNote'
+import { UploadTruncationNote, TRUNCATION_NEXT } from '../UploadTruncationNote'
 
 describe('UploadTruncationNote (memory-safety: uploads echo ≤ 500 problem rows)', () => {
   it('renders nothing when the list is complete', () => {
@@ -15,8 +15,17 @@ describe('UploadTruncationNote (memory-safety: uploads echo ≤ 500 problem rows
     expect(container.textContent).toBe('')
   })
 
-  it('says how many of how many when the API capped the list', () => {
+  it('says how many of how many when the API capped the list (preview wording by default)', () => {
     render(<UploadTruncationNote shown={500} total={1234} truncated noun="errors" />)
-    expect(screen.getByRole('status').textContent).toMatch(/Showing the first 500 of 1,234 errors/)
+    const text = screen.getByRole('status').textContent
+    expect(text).toMatch(/Showing the first 500 of 1,234 errors/)
+    expect(text).toContain(TRUNCATION_NEXT.PREVIEW)
+  })
+
+  it('partial-save uploads say re-upload ONLY the failed rows, never "re-upload the file"', () => {
+    render(<UploadTruncationNote shown={500} total={900} truncated noun="failed rows" next={TRUNCATION_NEXT.PARTIAL_SAVE} />)
+    const text = screen.getByRole('status').textContent ?? ''
+    expect(text).toMatch(/re-upload only the failed rows/i)
+    expect(text).not.toMatch(/re-upload the file/i)
   })
 })

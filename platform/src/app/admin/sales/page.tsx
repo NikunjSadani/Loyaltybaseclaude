@@ -6,7 +6,7 @@ import {
   CheckCircle2, Info, Trash2, History, AlertTriangle, BarChart3,
 } from 'lucide-react';
 import { buildAchievementReportBuffer } from '@/lib/achievement-report';
-import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 import { normalizeRowsEcho } from '@/lib/upload-rows-echo';
 import { DEOLEO_DEFAULT_KPIS } from '@/lib/platform/tenant-kpi-config';
 import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
@@ -535,19 +535,27 @@ export default function SalesUploadPage() {
   // ── Download report ────────────────────────────────────────────────────
 
   function handleDownloadReport() {
-    if (!uploadResult) return;
+    if (!uploadResult || !summary) return;
     // Built from the AUTHORITATIVE backend response, not a local re-parse. Memory-safety
-    // (2026-11-13): the report lists the rows to act on (rejected + partly-ignored), not every
-    // saved row — the saved/skipped totals are on the screen tiles.
+    // (2026-11-13): the file lists only the rows to act on (rejected + partly-ignored), with the
+    // counts on a Summary sheet — saved rows are counted, not listed.
     downloadBuffer(
       buildAchievementReportBuffer(
         [...uploadResult.problemRows, ...uploadResult.warningRows].sort((a, b) => a.rowIndex - b.rowIndex),
         {
-          truncated: uploadResult.problemRowsTruncated || uploadResult.warningRowsTruncated,
-          totals: { problem: uploadResult.problemRowCount, warning: uploadResult.warningRowCount },
+          summary: {
+            month: salesMonth,
+            total: summary.total,
+            saved: summary.saved,
+            skippedBlank: summary.skipped,
+            rejected: summary.rejected,
+            partlyIgnored: uploadResult.warningRowCount,
+          },
+          problem: { shown: uploadResult.problemRows.length, total: uploadResult.problemRowCount, truncated: uploadResult.problemRowsTruncated },
+          warning: { shown: uploadResult.warningRows.length, total: uploadResult.warningRowCount, truncated: uploadResult.warningRowsTruncated },
         },
       ),
-      `sales_upload_report_${salesMonth}.xlsx`,
+      `sales_upload_problem_rows_${salesMonth}.xlsx`,
     );
   }
 
@@ -751,37 +759,51 @@ export default function SalesUploadPage() {
             rows={uploadResult.warningRows}
           />
 
-          {/* Skipped / rejected rows from backend */}
+          {/* Skipped / rejected rows from backend — the "first N of M" note sits ABOVE the short scroll box. */}
           {uploadResult.problemRows.length > 0 && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
-              <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows ({uploadResult.problemRowCount.toLocaleString('en-IN')})</p>
-              {uploadResult.problemRows
-                .map(r => (
-                  <p key={r.rowIndex} className="text-xs text-amber-700">
-                    <span className="font-mono font-semibold">Row {r.rowIndex} — {r.outletCode}:</span>{' '}
-                    {r.remarks}
-                  </p>
-                ))}
+            <div className="space-y-1.5">
               <UploadTruncationNote
                 shown={uploadResult.problemRows.length}
                 total={uploadResult.problemRowCount}
                 truncated={uploadResult.problemRowsTruncated}
                 noun="rejected rows"
+                next={TRUNCATION_NEXT.PARTIAL_SAVE}
               />
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
+                <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows ({uploadResult.problemRowCount.toLocaleString('en-IN')})</p>
+                {uploadResult.problemRows
+                  .map(r => (
+                    <p key={r.rowIndex} className="text-xs text-amber-700">
+                      <span className="font-mono font-semibold">Row {r.rowIndex} — {r.outletCode}:</span>{' '}
+                      {r.remarks}
+                    </p>
+                  ))}
+              </div>
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex items-center gap-3 flex-wrap">
-            {/* Report is built from the authoritative backend problem + warning rows. */}
-            <button
-              onClick={handleDownloadReport}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors"
-            >
-              <Download className="w-4 h-4" />
-              Download Report
-            </button>
-          </div>
+          {/* Actions — only when there is something to act on (M5). */}
+          {(uploadResult.problemRowCount > 0 || uploadResult.warningRowCount > 0) ? (
+            <div className="space-y-1">
+              <button
+                type="button"
+                onClick={handleDownloadReport}
+                data-testid="download-problem-rows"
+                className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                Download problem rows
+              </button>
+              <p className="text-xs text-gray-500">
+                The file lists only the rows that need attention, with the counts on a Summary sheet. It no longer
+                includes every saved row — the saved total is shown above.
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500" data-testid="no-problem-rows">
+              No problem rows — every non-blank row was saved.
+            </p>
+          )}
         </div>
       )}
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import * as XLSX from 'xlsx';
-import { buildRosterReportWorkbook } from '@/lib/scheme-roster-report';
+import { buildRosterReportWorkbook, rosterHasProblems } from '@/lib/scheme-roster-report';
 import type { RosterUploadResult } from '@/lib/schemes';
 
 const base: RosterUploadResult = {
@@ -78,7 +78,17 @@ describe('buildRosterReportWorkbook', () => {
       problemRowsTruncated: true,
     });
     const aoa = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets['Problem Rows'], { header: 1 });
-    expect(String(aoa[aoa.length - 1][0])).toBe('Showing the first 1 of 812 problem rows — fix these and re-upload to see the rest.');
+    expect(String(aoa[aoa.length - 1][0])).toBe('Showing the first 1 of 812 problem rows. Fix these, then re-upload only those rows — the next upload lists any that are left.');
+    // M4/M5: the Summary sheet also says the list was cut, and that saved rows are counted, not listed.
+    const summary = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets['Summary'], { header: 1 }).map((r) => String(r[0] ?? '')).join(' | ');
+    expect(summary).toMatch(/Showing the first 1 of 812 problem rows/);
+    expect(summary).toMatch(/lists only the rows that need attention/);
+  });
+
+  it('rosterHasProblems: false only when nothing needs attention (button hidden)', () => {
+    expect(rosterHasProblems({ ...base, duplicateRefs: [], unmatchedEmployeeCodes: [], problemRows: [], problemRowCount: 0 })).toBe(false);
+    expect(rosterHasProblems(base)).toBe(true);
+    expect(rosterHasProblems({ ...base, duplicateRefs: [], unmatchedEmployeeCodes: [], problemRowCount: 3 })).toBe(true);
   });
 
   it('shows the skipped-rows line only when the backend reports skippedRows', () => {

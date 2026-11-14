@@ -13,7 +13,8 @@
  * endpoint directly: a 202 is `ok`, and its JSON body would be saved as a broken .xlsx.
  */
 import { downloadBlob } from '@/lib/download';
-import type { ExportList, ExportQueuedResponse } from '@/lib/exports/types';
+import { getStoredUser } from '@/lib/auth-client';
+import type { ExportList, ExportQueuedResponse, ExportRequestDto } from '@/lib/exports/types';
 import { EXPORT_MAX_ACTIVE_PER_USER } from '@/lib/exports/types';
 
 /** Where the Downloads page lives in the admin portal (every report button links here). */
@@ -63,13 +64,36 @@ async function serverErrorText(res: Response): Promise<string | null> {
   }
 }
 
+/** Gifsy staff / owner — the people who CAN fix server set-up, so they get the technical reason, not "contact support". */
+export function isGifsyStaffViewer(): boolean {
+  try {
+    const role = getStoredUser()?.role;
+    return role === 'GIFSY_ADMIN' || role === 'GIFSY_STAFF';
+  } catch {
+    return false;
+  }
+}
+
+/** 503 "not set up" text for Gifsy staff (never tells them to contact themselves). */
+export const NOT_SET_UP_STAFF_MESSAGE = "Downloads aren't set up on this server yet (worker job not configured).";
+
 /** Plain-English message for a failed download. The server's own text wins for 4xx (it is written for people). */
-export function downloadErrorMessage(status: number, serverText: string | null): string {
+export function downloadErrorMessage(
+  status: number,
+  serverText: string | null,
+  opts: { staff?: boolean } = {},
+): string {
   if (status === 409) {
     return serverText
       ?? `You already have ${EXPORT_MAX_ACTIVE_PER_USER} downloads being prepared. Wait for one to finish (see Downloads), then try again.`;
   }
-  if (status === 503) return serverText ?? "Downloads aren't set up on this server yet. Please contact Gifsy support.";
+  if (status === 503) {
+    const staff = opts.staff ?? isGifsyStaffViewer();
+    // A 503 is either "not set up" or "busy, try again" (heavy-operation slots). Busy text is kept as-is; the
+    // set-up text (or none) is replaced for Gifsy staff so it never says "contact Gifsy support" to Gifsy.
+    if (staff && (!serverText || /set up|configured|contact gifsy/i.test(serverText))) return NOT_SET_UP_STAFF_MESSAGE;
+    return serverText ?? "Downloads aren't set up on this server yet. Please contact Gifsy support.";
+  }
   if (status === 401) return 'Your session has expired. Please sign in again.';
   if (status === 403) return serverText ?? "You don't have permission to download this report.";
   if (status === 404) return serverText ?? 'This file is no longer available.';
@@ -172,7 +196,64 @@ export function exportFileUrl(id: string): string {
   return `${EXPORTS_BASE}/${encodeURIComponent(id)}/download`;
 }
 
-/** Save one READY file from the Downloads page. */
-export function downloadPreparedFile(id: string, fileName?: string | null): Promise<DownloadOutcome> {
-  return downloadOrQueue(exportFileUrl(id), { fallbackFileName: fileName ?? 'download.xlsx' });
+/** Let the BROWSER fetch + save a URL itself (streamed to disk — never held in page memory). */
+export function navigateToDownload(url: string, fileName?: string | null): void {
+  const a = document.createElement('a');
+  a.href = url;
+  // Same-origin + `download` → the browser saves it (no page navigation, even if the server answers an error page).
+  a.download = fileName ?? '';
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 1000);
+}
+
+/**
+ * Save one READY file from the Downloads page.
+ *
+ * Why a status pre-check + plain link (L5, 2026-11-14): prepared files can be tens of MB, so the browser must
+ * stream them straight to disk — `res.blob()` would hold the whole file in the tab's memory. A plain link alone,
+ * though, turns a gone/expired file into a cryptic browser "Failed — no file". So we first ask the API for the
+ * row (GET admin/exports/:id — small JSON, no file read; a HEAD would make the API open the storage stream and
+ * our proxy's HEAD handling is unverified) and only then hand the URL to the browser. 404 / 403 / expired /
+ * failed / not-ready come back as plain-English errors exactly as before. The only remaining gap is a file
+ * expiring in the milliseconds between the check and the click; the browser then shows its own failed-download
+ * notice and the page still refreshes.
+ */
+export async function downloadPreparedFile(id: string, fileName?: string | null): Promise<DownloadOutcome> {
+  let res: Response;
+  try {
+    res = await fetch(`${EXPORTS_BASE}/${encodeURIComponent(id)}`);
+  } catch {
+    return { kind: 'error', message: "Couldn't reach the server. Check your connection and try again." };
+  }
+  if (!res.ok) {
+    const status = typeof res.status === 'number' ? res.status : 0;
+    return { kind: 'error', status: status || undefined, message: downloadErrorMessage(status, await serverErrorText(res)) };
+  }
+  let dto: Partial<ExportRequestDto> | null = null;
+  try {
+    const body = (await res.json()) as { data?: Partial<ExportRequestDto> } & Partial<ExportRequestDto>;
+    dto = (body?.data ?? body) as Partial<ExportRequestDto>;
+  } catch {
+    dto = null;
+  }
+  if (!dto || typeof dto.status !== 'string') {
+    return { kind: 'error', message: 'The file details could not be read. Please refresh the page and try again.' };
+  }
+  const expired = dto.status === 'EXPIRED'
+    || (dto.status === 'READY' && !!dto.expiresAt && Date.parse(dto.expiresAt) <= Date.now());
+  if (expired) return { kind: 'error', status: 410, message: 'This file has expired. Please request it again.' };
+  if (dto.status === 'FAILED') {
+    return { kind: 'error', status: 409, message: dto.error || "This file couldn't be prepared. Please request it again." };
+  }
+  if (dto.status !== 'READY') return { kind: 'error', status: 409, message: "This file isn't ready yet. Please wait a little and try again." };
+  const name = dto.fileName ?? fileName ?? 'download.xlsx';
+  try {
+    navigateToDownload(exportFileUrl(id), name);
+  } catch {
+    return { kind: 'error', message: 'The download could not be started. Please try again.' };
+  }
+  return { kind: 'downloaded', fileName: name };
 }

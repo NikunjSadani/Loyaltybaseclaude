@@ -14,7 +14,11 @@ vi.mock('@/lib/exports/download', () => ({
   downloadPreparedFile: (...a: unknown[]) => downloadPreparedFile(...a),
 }));
 
-import { DownloadsPanel, DOWNLOADS_POLL_MS, displayStatus } from '../downloads-panel';
+let scope: { brandName: string | null; seenKey: string } = { brandName: 'Bajaj Consumer Care', seenKey: 'k:u1:bajaj' };
+vi.mock('@/components/exports/use-downloads-scope', () => ({ useDownloadsScope: () => scope }));
+
+import { DownloadsPanel, DOWNLOADS_POLL_MS, displayStatus, nextPollDelay, SLOW_MESSAGE } from '../downloads-panel';
+import { readSeen } from '@/lib/exports/seen';
 
 const DAY = 24 * 60 * 60 * 1000;
 const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
@@ -49,6 +53,8 @@ function setVisibility(state: 'visible' | 'hidden') {
 beforeEach(() => {
   fetchExportList.mockReset();
   downloadPreparedFile.mockReset();
+  scope = { brandName: 'Bajaj Consumer Care', seenKey: 'k:u1:bajaj' };
+  try { window.localStorage.clear(); } catch { /* ignore */ }
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
 });
 afterEach(() => { vi.useRealTimers(); });
@@ -160,6 +166,106 @@ describe('DownloadsPanel', () => {
 
     await act(async () => { setVisibility('visible'); await Promise.resolve(); });
     expect(fetchExportList).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('DownloadsPanel — UI/UX audit fixes', () => {
+  const MIN = 60_000;
+
+  it('H1: a request Waiting/Preparing > 15 min says "taking longer than usual"; a Failed one never does', async () => {
+    fetchExportList.mockImplementation(() => ok([
+      item({ id: 'slow', status: 'RUNNING', createdAt: iso(-20 * MIN), finishedAt: null, expiresAt: null }),
+      item({ id: 'slowq', status: 'QUEUED', createdAt: iso(-16 * MIN), finishedAt: null, expiresAt: null }),
+      item({ id: 'fresh', status: 'QUEUED', createdAt: iso(-5 * MIN), finishedAt: null, expiresAt: null }),
+      item({ id: 'dead', status: 'FAILED', createdAt: iso(-30 * 60 * MIN), error: "The report couldn't start. Please request it again.", expiresAt: null }),
+    ]));
+    render(<DownloadsPanel />);
+    const slow = await screen.findByTestId('download-row-slow');
+    expect(within(slow).getByTestId('download-slow')).toHaveTextContent(SLOW_MESSAGE);
+    expect(within(screen.getByTestId('download-row-slowq')).getByTestId('download-slow')).toBeInTheDocument();
+    expect(within(screen.getByTestId('download-row-fresh')).queryByTestId('download-slow')).not.toBeInTheDocument();
+    const dead = screen.getByTestId('download-row-dead');
+    expect(within(dead).queryByTestId('download-slow')).not.toBeInTheDocument();
+    expect(within(dead).getByText("The report couldn't start. Please request it again.")).toBeInTheDocument();
+  });
+
+  it('H2: names the brand; the console page explains it lists files requested outside a brand', async () => {
+    fetchExportList.mockImplementation(() => ok([]));
+    const { unmount } = render(<DownloadsPanel />);
+    expect(await screen.findByRole('heading', { name: /downloads for bajaj consumer care/i })).toBeInTheDocument();
+    expect(screen.getByTestId('downloads-scope')).toHaveTextContent(/only you can see them/i);
+    unmount();
+    scope = { brandName: null, seenKey: 'k:u1:platform' };
+    render(<DownloadsPanel tone="dark" console />);
+    expect(await screen.findByRole('heading', { name: /^downloads$/i })).toBeInTheDocument();
+    expect(screen.getByTestId('downloads-scope')).toHaveTextContent(/outside a brand/i);
+  });
+
+  it('M1: a failed auto-refresh keeps retrying with backoff, and the note says so truthfully', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    fetchExportList
+      .mockImplementationOnce(() => ok([item({ id: 'p', status: 'RUNNING', finishedAt: null, expiresAt: null })]))
+      .mockImplementationOnce(() => Promise.resolve({ ok: false, message: "Couldn't reach the server." }))
+      .mockImplementationOnce(() => Promise.resolve({ ok: false, message: "Couldn't reach the server." }))
+      .mockImplementation(() => ok([item({ id: 'p', status: 'READY' })]));
+    render(<DownloadsPanel />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId('downloads-auto-note')).toHaveTextContent(/updates by itself every 10 seconds/i);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(DOWNLOADS_POLL_MS); });
+    expect(fetchExportList).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/couldn't refresh the list/i)).toBeInTheDocument();
+    expect(screen.getByTestId('downloads-auto-note')).toHaveTextContent(/try again in about 20 seconds/i);
+
+    // Retried after the backoff (not stopped for good).
+    await act(async () => { await vi.advanceTimersByTimeAsync(nextPollDelay(1)); });
+    expect(fetchExportList).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId('downloads-auto-note')).toHaveTextContent(/about 40 seconds/i);
+    await act(async () => { await vi.advanceTimersByTimeAsync(nextPollDelay(2)); });
+    expect(fetchExportList).toHaveBeenCalledTimes(4);
+    expect(within(screen.getByTestId('download-row-p')).getByText('Ready')).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't refresh the list/i)).not.toBeInTheDocument();
+  });
+
+  it('nextPollDelay doubles per failure and caps at 2 minutes', () => {
+    expect(nextPollDelay(0)).toBe(10_000);
+    expect(nextPollDelay(1)).toBe(20_000);
+    expect(nextPollDelay(3)).toBe(80_000);
+    expect(nextPollDelay(10)).toBe(120_000);
+  });
+
+  it('L2: announces "<report> is ready" through an always-mounted live region', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    fetchExportList
+      .mockImplementationOnce(() => ok([item({ id: 'p', status: 'RUNNING', finishedAt: null, expiresAt: null })]))
+      .mockImplementation(() => ok([item({ id: 'p', status: 'READY' })]));
+    render(<DownloadsPanel />);
+    const region = screen.getByTestId('downloads-announcer');
+    expect(region).toHaveAttribute('aria-live', 'polite');
+    expect(region).toHaveTextContent('');
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(DOWNLOADS_POLL_MS); });
+    expect(screen.getByTestId('downloads-announcer')).toBe(region);
+    expect(region).toHaveTextContent('Outlet master is ready to download.');
+  });
+
+  it('M6: Ready files not seen before are marked New and recorded as seen (per user + brand)', async () => {
+    window.localStorage.setItem('k:u1:bajaj', JSON.stringify(['old']));
+    fetchExportList.mockImplementation(() => ok([item({ id: 'old', label: 'Old file' }), item({ id: 'fresh', label: 'Fresh file' })]));
+    render(<DownloadsPanel />);
+    const fresh = await screen.findByTestId('download-row-fresh');
+    await waitFor(() => expect(within(fresh).getByTestId('download-new')).toBeInTheDocument());
+    expect(within(screen.getByTestId('download-row-old')).queryByTestId('download-new')).not.toBeInTheDocument();
+    expect([...readSeen('k:u1:bajaj')].sort()).toEqual(['fresh', 'old']);
+  });
+
+  it('M6: renders correctly when storage is blocked', async () => {
+    const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    const spy2 = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
+    fetchExportList.mockImplementation(() => ok([item({ id: 'r' })]));
+    render(<DownloadsPanel />);
+    expect(await screen.findByRole('button', { name: /download outlet master/i })).toBeInTheDocument();
+    spy.mockRestore(); spy2.mockRestore();
   });
 });
 

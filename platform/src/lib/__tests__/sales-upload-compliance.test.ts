@@ -452,7 +452,8 @@ describe('G — app/admin/sales/page.tsx: UI shape', () => {
     const hasReport =
       page.includes('reportFileBase64') ||
       page.includes('handleReportDownload') ||
-      page.includes('Download Report');
+      page.includes('Download Report') ||
+      page.includes('Download problem rows');
     expect(hasReport).toBe(true);
   });
 

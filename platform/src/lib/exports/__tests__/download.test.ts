@@ -6,12 +6,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const downloadBlob = vi.fn();
 vi.mock('@/lib/download', () => ({ downloadBlob: (...a: unknown[]) => downloadBlob(...a) }));
+let storedRole: string | null = 'CLIENT_ADMIN';
+vi.mock('@/lib/auth-client', () => ({
+  getStoredUser: () => (storedRole ? { id: 'u1', name: 'U', role: storedRole, phone: '' } : null),
+}));
 
 import {
   downloadOrQueue,
   fetchExportList,
   fileNameFromDisposition,
   downloadPreparedFile,
+  downloadErrorMessage,
+  NOT_SET_UP_STAFF_MESSAGE,
   QUEUED_MESSAGE_DEFAULT,
 } from '../download';
 
@@ -29,6 +35,7 @@ const fetchMock = vi.fn();
 beforeEach(() => {
   fetchMock.mockReset();
   downloadBlob.mockReset();
+  storedRole = 'CLIENT_ADMIN';
   vi.stubGlobal('fetch', fetchMock);
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -119,10 +126,50 @@ describe('Downloads page API', () => {
     expect(await fetchExportList()).toEqual({ ok: false, status: 503, message: "Downloads aren't set up on this server yet" });
   });
 
-  it('downloadPreparedFile hits the per-file download route', async () => {
-    fetchMock.mockResolvedValue(res({ status: 200 }));
+  it('downloadPreparedFile checks the row, then lets the BROWSER stream the file (no blob in page memory)', async () => {
+    fetchMock.mockResolvedValue(res({ status: 200, json: { success: true, data: { id: 'exp 1', status: 'READY', fileName: 'Outlet Master.xlsx', expiresAt: new Date(Date.now() + 86_400_000).toISOString() } } }));
+    const clicks: { href: string; download: string }[] = [];
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      clicks.push({ href: this.getAttribute('href') ?? '', download: this.download });
+    });
     const out = await downloadPreparedFile('exp 1', 'outlet-master.xlsx');
-    expect(fetchMock).toHaveBeenCalledWith('/api/admin/exports/exp%201/download');
-    expect(out).toEqual({ kind: 'downloaded', fileName: 'outlet-master.xlsx' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/admin/exports/exp%201');
+    expect(clicks).toEqual([{ href: '/api/admin/exports/exp%201/download', download: 'Outlet Master.xlsx' }]);
+    expect(downloadBlob).not.toHaveBeenCalled();
+    expect(out).toEqual({ kind: 'downloaded', fileName: 'Outlet Master.xlsx' });
+    clickSpy.mockRestore();
+  });
+
+  it('downloadPreparedFile: expired / gone / failed / not-ready → plain errors, nothing downloaded', async () => {
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    fetchMock.mockResolvedValue(res({ status: 200, json: { data: { status: 'READY', expiresAt: new Date(Date.now() - 1000).toISOString() } } }));
+    expect(await downloadPreparedFile('a')).toEqual({ kind: 'error', status: 410, message: 'This file has expired. Please request it again.' });
+    fetchMock.mockResolvedValue(res({ status: 200, json: { data: { status: 'EXPIRED' } } }));
+    expect(await downloadPreparedFile('a')).toMatchObject({ kind: 'error', status: 410 });
+    fetchMock.mockResolvedValue(res({ status: 404, json: { message: 'Download not found.' } }));
+    expect(await downloadPreparedFile('a')).toEqual({ kind: 'error', status: 404, message: 'Download not found.' });
+    fetchMock.mockResolvedValue(res({ status: 200, json: { data: { status: 'FAILED', error: 'The worker could not start.' } } }));
+    expect(await downloadPreparedFile('a')).toMatchObject({ kind: 'error', message: 'The worker could not start.' });
+    fetchMock.mockResolvedValue(res({ status: 200, json: { data: { status: 'RUNNING' } } }));
+    expect(await downloadPreparedFile('a')).toMatchObject({ kind: 'error', status: 409 });
+    expect(clickSpy).not.toHaveBeenCalled();
+    clickSpy.mockRestore();
+  });
+});
+
+describe('503 "not set up" wording (L4)', () => {
+  it('brand users are told to contact Gifsy support; Gifsy staff/admin get the technical reason', async () => {
+    expect(downloadErrorMessage(503, null, { staff: false })).toMatch(/contact gifsy support/i);
+    expect(downloadErrorMessage(503, null, { staff: true })).toBe(NOT_SET_UP_STAFF_MESSAGE);
+    expect(downloadErrorMessage(503, "Downloads aren't set up on this server yet. Please contact Gifsy support.", { staff: true }))
+      .toBe(NOT_SET_UP_STAFF_MESSAGE);
+    // A "busy, try again" 503 is passed through for everyone.
+    expect(downloadErrorMessage(503, 'Server busy — try again in a minute.', { staff: true })).toBe('Server busy — try again in a minute.');
+    // Default reads the signed-in role.
+    storedRole = 'GIFSY_ADMIN';
+    fetchMock.mockResolvedValue(res({ status: 503 }));
+    expect(await fetchExportList()).toEqual({ ok: false, status: 503, message: NOT_SET_UP_STAFF_MESSAGE });
+    expect(NOT_SET_UP_STAFF_MESSAGE).not.toMatch(/contact/i);
   });
 });

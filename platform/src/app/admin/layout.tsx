@@ -50,6 +50,7 @@ import { useAssumedContext } from '@/lib/use-assumed-context';
 import { OperatorBanner } from '@/components/operator/operator-banner';
 import { SiteFooter } from '@/components/layout/site-footer';
 import { AdminRouteGuard } from '@/components/rbac/admin-route-guard';
+import { DownloadsNavBadge } from '@/components/exports/downloads-nav-badge';
 
 // All possible nav items — feature flags control which are visible
 const ALL_NAV_ITEMS = [
@@ -423,7 +424,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 ) : (
                   <Link
                     href={item.href}
-                    className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                    className={`relative flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
                       active
                         ? 'bg-[var(--brand-primary)] text-white'
                         : 'text-slate-300 hover:bg-[#16213E] hover:text-white'
@@ -432,6 +433,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                   >
                     <Icon className="w-4 h-4 flex-shrink-0" />
                     {!collapsed && <span>{item.label}</span>}
+                    {item.href === '/admin/downloads' && <DownloadsNavBadge collapsed={collapsed} />}
                   </Link>
                 )}
               </div>

@@ -12,6 +12,7 @@ import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
 import { BrandSwitcher } from '@/components/operator/brand-switcher';
 import { OperatorBanner } from '@/components/operator/operator-banner';
+import { DownloadsNavBadge } from '@/components/exports/downloads-nav-badge';
 
 const NAV = [
   { href: '/gifsy',               label: 'Overview',       icon: LayoutGrid  },
@@ -93,6 +94,7 @@ export default function GifsyLayout({ children }: { children: React.ReactNode })
                 }`}>
                 <Icon className="w-4 h-4 shrink-0" />
                 {label}
+                {href === '/gifsy/downloads' && <DownloadsNavBadge tone="gifsy" />}
               </Link>
             );
           })}

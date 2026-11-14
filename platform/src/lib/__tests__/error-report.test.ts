@@ -56,3 +56,24 @@ describe('buildErrorReportBuffer', () => {
     expect(aoa[0][aoa[0].length - 1]).toBe('Remarks');
   });
 });
+
+describe('M4 — a capped problem list says so inside the downloaded file', () => {
+  it('adds "Showing the first 500 of N problems." to the Errors header and a Note sheet', async () => {
+    const { cappedListNote } = await import('@/lib/error-report');
+    const note = cappedListNote(500, 1234, true);
+    expect(note).toBe('Showing the first 500 of 1,234 problems.');
+    expect(cappedListNote(3, 3, false)).toBeNull();
+    const buf = buildErrorReportBuffer(['Row'], [{ Row: 1 }], () => ['bad'], { note: note! });
+    const wb = XLSX.read(buf, { type: 'array' });
+    expect(wb.SheetNames).toEqual(['Errors', 'Note']);
+    const header = XLSX.utils.sheet_to_json<string[]>(wb.Sheets['Errors'], { header: 1 })[0];
+    expect(header[1]).toBe('Errors (Showing the first 500 of 1,234 problems.)');
+    const noteRows = XLSX.utils.sheet_to_json<string[]>(wb.Sheets['Note'], { header: 1 });
+    expect(noteRows[0][0]).toBe('Showing the first 500 of 1,234 problems.');
+  });
+
+  it('no note → unchanged single sheet', () => {
+    const wb = XLSX.read(buildErrorReportBuffer(['Row'], [{ Row: 1 }], () => ['bad']), { type: 'array' });
+    expect(wb.SheetNames).toEqual(['Errors']);
+  });
+});
