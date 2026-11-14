@@ -345,7 +345,14 @@ describe('SalesImportProcessorService — audit fix round', () => {
     for (let i = 0; i < 45_000; i++) rows.push(`03-10-2026,O1,S,P,500,1,1`);
     const { svc, prisma, row, final } = setup({ file: Buffer.from(rows.join('\n')) });
     prisma.salesImport.updateMany.mockImplementation(async (a: { data: Record<string, unknown> }) => ({ count: a.data.status ? 1 : 0 }));
-    await svc.processClaimed(row);
+    // This test is about the heartbeat, not memory: pin the heap guard so a full-suite jest worker on a small CI runner
+    // (heap limit ≈ half of a dev box) can't trip "too large" mid-parse and take the FAILED path instead (CI 2026-11-14).
+    const heap = jest.spyOn(HeapGuard.prototype, 'check').mockReturnValue(false);
+    try {
+      await expect(svc.processClaimed(row)).resolves.toBe('superseded');
+    } finally {
+      heap.mockRestore();
+    }
     expect(final()).toBeUndefined();
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
