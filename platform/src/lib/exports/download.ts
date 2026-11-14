@@ -91,7 +91,16 @@ export function downloadErrorMessage(
     const staff = opts.staff ?? isGifsyStaffViewer();
     // A 503 is either "not set up" or "busy, try again" (heavy-operation slots). Busy text is kept as-is; the
     // set-up text (or none) is replaced for Gifsy staff so it never says "contact Gifsy support" to Gifsy.
-    if (staff && (!serverText || /set up|configured|contact gifsy/i.test(serverText))) return NOT_SET_UP_STAFF_MESSAGE;
+    if (staff && (!serverText || /set up|configured/i.test(serverText))) return NOT_SET_UP_STAFF_MESSAGE;
+    if (staff && serverText && /contact gifsy/i.test(serverText)) {
+      // e.g. "Downloads couldn't start on the server. Please try again later or contact Gifsy." — Gifsy staff ARE
+      // Gifsy: keep the reason, drop the "contact Gifsy" part, and say where to look.
+      const trimmed = serverText
+        .replace(/\s*or contact gifsy( support)?/i, '')
+        .replace(/\s*please contact gifsy( support)?\.?/i, '')
+        .trim();
+      return `${trimmed} (the export worker job failed to launch — check the Cloud Run job).`.replace(/\.\s*\(/, ' (');
+    }
     return serverText ?? "Downloads aren't set up on this server yet. Please contact Gifsy support.";
   }
   if (status === 401) return 'Your session has expired. Please sign in again.';

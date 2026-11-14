@@ -164,6 +164,12 @@ describe('503 "not set up" wording (L4)', () => {
     expect(downloadErrorMessage(503, null, { staff: true })).toBe(NOT_SET_UP_STAFF_MESSAGE);
     expect(downloadErrorMessage(503, "Downloads aren't set up on this server yet. Please contact Gifsy support.", { staff: true }))
       .toBe(NOT_SET_UP_STAFF_MESSAGE);
+    // "couldn't start" 503: brand users keep the server text; staff never get "contact Gifsy".
+    const cs = "Downloads couldn't start on the server. Please try again later or contact Gifsy.";
+    expect(downloadErrorMessage(503, cs, { staff: false })).toBe(cs);
+    const staffCs = downloadErrorMessage(503, cs, { staff: true });
+    expect(staffCs).toMatch(/couldn't start on the server/);
+    expect(staffCs).not.toMatch(/contact gifsy/i);
     // A "busy, try again" 503 is passed through for everyone.
     expect(downloadErrorMessage(503, 'Server busy — try again in a minute.', { staff: true })).toBe('Server busy — try again in a minute.');
     // Default reads the signed-in role.

@@ -38,13 +38,21 @@ import { downloadBlob } from '@/lib/download';
 import type { UtrParseResult, UtrUploadRow } from '@/types';
 import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
 
-/** UTR preview (apply=false) — memory-safety 2026-11-13: the API echoes ONLY the ERROR rows
- *  (capped at 500) instead of every parsed row; the counts stay in summary. */
+/** UTR preview (apply=false). The API returns EVERY parsed row again (`rows`, file order, capped at
+ *  20,000 with rowCount/rowsTruncated) so the operator can check each OK row's outlet, UTR and payment
+ *  date — and each skipped row's reason — BEFORE applying (same as e242b1a1). `problemRows` (≤ 500) feeds
+ *  the error-report file. Older/other builds may send only one of the two lists; both are optional. */
 type UtrPreviewResult = Omit<UtrParseResult, 'rows'> & {
-  problemRows: UtrUploadRow[];
-  problemRowCount: number;
-  problemRowsTruncated: boolean;
+  rows?: UtrUploadRow[];
+  rowCount?: number;
+  rowsTruncated?: boolean;
+  problemRows?: UtrUploadRow[];
+  problemRowCount?: number;
+  problemRowsTruncated?: boolean;
 };
+
+/** Plain reason for a skipped credits UTR row — a credits SKIP always means the entry was already paid. */
+const UTR_SKIP_REASON = 'Already paid — no change';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -361,6 +369,17 @@ function PayoutPageInner() {
     }
   }
 
+  // UTR preview lists (H3): every row when the API sends them, else the problem rows only.
+  const utrRows: UtrUploadRow[] = utrResult ? (utrResult.rows ?? utrResult.problemRows ?? []) : [];
+  const utrRowTotal = utrResult
+    ? (utrResult.rows ? (utrResult.rowCount ?? utrResult.rows.length) : (utrResult.problemRowCount ?? utrRows.length))
+    : 0;
+  const utrRowsCut = !!utrResult && (utrResult.rows ? !!utrResult.rowsTruncated : !!utrResult.problemRowsTruncated);
+  const utrProblemRows: UtrUploadRow[] = utrResult
+    ? (utrResult.problemRows ?? (utrResult.rows ?? []).filter((r) => r.status === 'ERROR'))
+    : [];
+  const utrProblemsCut = !!utrResult?.problemRowsTruncated;
+
   return (
     <div className="max-w-4xl mx-auto space-y-8">
       {/* Header */}
@@ -566,48 +585,64 @@ function PayoutPageInner() {
                   </div>
                 )}
 
-                {/* Row details toggle */}
-                {utrResult.problemRows.length > 0 && (
+                {/* Row details — EVERY row (OK: outlet, UTR, payment date; Skipped: why; Error: what to fix),
+                    so the operator checks the file BEFORE "Apply UTR Results". */}
+                {utrRows.length > 0 && (
                   <button
                     onClick={() => setExpandedUtr((v) => !v)}
                     className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800"
+                    aria-expanded={expandedUtr}
                   >
                     {expandedUtr ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                    {expandedUtr ? 'Hide' : 'Show'} problem rows ({utrResult.problemRowCount})
+                    {expandedUtr ? 'Hide' : 'Show'} row details ({utrRowTotal.toLocaleString('en-IN')})
                   </button>
                 )}
 
                 {expandedUtr && (
-                  <div className="max-h-52 overflow-y-auto border border-gray-100 rounded-xl divide-y divide-gray-50">
-                    {utrResult.problemRows.map((r, i) => (
-                      <div key={i} className={`flex items-center justify-between px-4 py-2.5 text-xs
-                        ${r.status === 'ERROR' ? 'bg-red-50' : r.status === 'SKIP' ? 'bg-gray-50' : ''}`}
-                      >
-                        <div>
-                          <span className="font-mono text-gray-700">{r.outletId}</span>
-                          {r.utr && <span className="ml-2 text-gray-500">UTR: {r.utr}</span>}
-                          {r.paymentDate && (
-                            <span className="ml-2 text-gray-400">Paid: {new Date(r.paymentDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
-                          )}
-                          {r.errors.length > 0 && (
-                            <p className="text-red-600 mt-0.5">{r.errors.join(' · ')}</p>
-                          )}
+                  <div className="space-y-1.5">
+                    {/* Truncation note ABOVE the short scroll box. */}
+                    <UploadTruncationNote
+                      shown={utrRows.length}
+                      total={utrRowTotal}
+                      truncated={utrRowsCut}
+                      noun={utrResult.rows ? 'rows' : 'problem rows'}
+                      next={utrResult.rows
+                        ? 'The counts above cover the whole file. Apply still uses every row.'
+                        : 'Fix these in your file and upload it again to see the rest.'}
+                    />
+                    <div className="max-h-52 overflow-y-auto border border-gray-100 rounded-xl divide-y divide-gray-50" data-testid="utr-row-details">
+                      {utrRows.map((r, i) => (
+                        <div key={i} data-testid={`utr-row-${r.rowNum}`} className={`flex items-center justify-between gap-3 px-4 py-2.5 text-xs
+                          ${r.status === 'ERROR' ? 'bg-red-50' : r.status === 'SKIP' ? 'bg-gray-50' : ''}`}
+                        >
+                          <div className="min-w-0">
+                            <span className="text-gray-400 mr-2">Row {r.rowNum}</span>
+                            <span className="font-mono text-gray-700">{r.outletId}</span>
+                            {r.utr && <span className="ml-2 text-gray-500">UTR: {r.utr}</span>}
+                            {r.paymentDate && (
+                              <span className="ml-2 text-gray-400">Paid: {new Date(r.paymentDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
+                            )}
+                            {r.status === 'OK' && r.success === false && (
+                              <span className="ml-2 text-amber-700">Marked failed{r.remarks ? `: ${r.remarks}` : ''}</span>
+                            )}
+                            {r.errors.length > 0 && (
+                              <p className="text-red-600 mt-0.5">{r.errors.join(' · ')}</p>
+                            )}
+                            {r.status === 'SKIP' && (
+                              <p className="text-gray-500 mt-0.5">{UTR_SKIP_REASON}</p>
+                            )}
+                          </div>
+                          <span className={`shrink-0 px-2 py-0.5 rounded-full font-medium
+                            ${r.status === 'OK' ? 'bg-emerald-100 text-emerald-700'
+                             : r.status === 'ERROR' ? 'bg-red-100 text-red-700'
+                             : 'bg-gray-100 text-gray-500'}`}>
+                            {r.status === 'SKIP' ? 'Skipped' : r.status === 'ERROR' ? 'Error' : 'OK'}
+                          </span>
                         </div>
-                        <span className={`px-2 py-0.5 rounded-full font-medium
-                          ${r.status === 'OK' ? 'bg-emerald-100 text-emerald-700'
-                           : r.status === 'ERROR' ? 'bg-red-100 text-red-700'
-                           : 'bg-gray-100 text-gray-500'}`}>
-                          {r.status}
-                        </span>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
                 )}
-                <UploadTruncationNote
-                  shown={utrResult.problemRows.length}
-                  total={utrResult.problemRowCount}
-                  truncated={utrResult.problemRowsTruncated}
-                />
 
                 {/* Apply / Reset */}
                 <div className="flex gap-3">
@@ -630,7 +665,7 @@ function PayoutPageInner() {
                   </button>
                   <DownloadErrorReportButton
                     columns={['Row', 'Outlet ID', 'Batch ID', 'UTR', 'Status']}
-                    rows={utrResult.problemRows
+                    rows={utrProblemRows
                       .filter(r => r.errors.length > 0)
                       .map(r => ({
                         Row:        r.rowNum,
@@ -643,6 +678,7 @@ function PayoutPageInner() {
                     errorsByRow={(row) => (row.__errors as string[]) ?? []}
                     filename="utr-upload-errors.xlsx"
                     sheetName="UTR Errors"
+                    truncation={{ shown: utrProblemRows.filter(r => r.errors.length > 0).length, total: utrResult.problemRowCount ?? utrResult.summary.errors, truncated: utrProblemsCut, noun: 'problems' }}
                   />
                 </div>
               </div>
