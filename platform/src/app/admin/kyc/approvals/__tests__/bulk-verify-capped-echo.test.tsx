@@ -37,7 +37,10 @@ function stubFetch(commit: unknown) {
 beforeEach(() => vi.unstubAllGlobals());
 afterEach(() => vi.unstubAllGlobals());
 
-describe('KYC bulk-verify commit — capped echo', () => {
+// The first test pays the cold import of the whole approvals page; under full-suite load that exceeded the 5 s default
+// (pre-push 2026-11-14: 6.9 s). Generous suite timeout + findBy budgets — the assertions are unchanged.
+const LOAD = { timeout: 15_000 };
+describe('KYC bulk-verify commit — capped echo', { timeout: 30_000 }, () => {
   it('lists the failed submissions and notes when the API capped the list', async () => {
     stubFetch({
       committed: true,
@@ -53,9 +56,9 @@ describe('KYC bulk-verify commit — capped echo', () => {
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     await act(async () => { fireEvent.change(input, { target: { files: [new File(['x'], 'v.xlsx')] } }); });
     await act(async () => { fireEvent.click(screen.getByText(/Validate & Preview/)); });
-    await act(async () => { fireEvent.click(await screen.findByText(/Commit \(apply=true\)/)); });
+    await act(async () => { fireEvent.click(await screen.findByText(/Commit \(apply=true\)/, undefined, LOAD)); });
 
-    expect(await screen.findByRole('table', { name: 'Failed submissions' })).toBeInTheDocument();
+    expect(await screen.findByRole('table', { name: 'Failed submissions' }, LOAD)).toBeInTheDocument();
     expect(screen.getByText('sub-bad-1')).toBeInTheDocument();
     expect(screen.getByText('Submission is no longer pending')).toBeInTheDocument();
     const note = screen.getByText(/Showing the first 1 of 650 failed submissions/);
@@ -82,9 +85,9 @@ describe('KYC bulk-verify commit — capped echo', () => {
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     await act(async () => { fireEvent.change(input, { target: { files: [new File(['x'], 'v.xlsx')] } }); });
     await act(async () => { fireEvent.click(screen.getByText(/Validate & Preview/)); });
-    await act(async () => { fireEvent.click(await screen.findByText(/Commit \(apply=true\)/)); });
+    await act(async () => { fireEvent.click(await screen.findByText(/Commit \(apply=true\)/, undefined, LOAD)); });
 
-    const table = await screen.findByRole('table', { name: 'Failed submissions' });
+    const table = await screen.findByRole('table', { name: 'Failed submissions' }, LOAD);
     expect(table.textContent).toMatch(/BJ-0042 — Sharma Stores/);
     expect(table.textContent).toMatch(/7/);
     expect(table.textContent).toMatch(/Set Entity Type first/);
