@@ -21,6 +21,7 @@
  */
 
 import { api, type ApiResponse } from '@/lib/api-client';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import type {
   AudienceConfig,
   AudienceFilter,
@@ -52,15 +53,21 @@ const BASE = '/api/schemes';
  * and the proxy injects the Bearer, so no auth header is needed here. Returns the
  * same `{ success, data }` envelope shape as api-client.
  */
-async function postMultipart<T>(url: string, form: FormData): Promise<ApiResponse<T>> {
+export async function postMultipart<T>(url: string, form: FormData): Promise<ApiResponse<T>> {
+  let res: Response;
   try {
-    const res = await fetch(url, { method: 'POST', body: form });
-    const body = await res.json();
-    if (!res.ok) return { success: false, error: body?.error ?? res.statusText };
-    return body as ApiResponse<T>;
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : 'Network error' };
+    res = await fetch(url, { method: 'POST', body: form });
+  } catch {
+    return { success: false, error: networkErrorMessage(MAYBE_SAVED_NOTE) };
   }
+  // Tolerant read: a non-JSON body (proxy truncation / plain-text 5xx / edge 413) must surface a
+  // readable message, never a raw `SyntaxError: Unexpected token 'I'…`.
+  const body = await readJsonSafe(res);
+  if (!body) {
+    return { success: false, error: responseErrorMessage(res, body, MAYBE_SAVED_NOTE), status: res.status };
+  }
+  if (!res.ok) return { success: false, error: body?.error ?? res.statusText };
+  return body as ApiResponse<T>;
 }
 
 /* ─── Request payload shapes (§13.4) ─────────────────────────────────────────── */

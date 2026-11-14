@@ -19,6 +19,7 @@ import {
   Info, FileSpreadsheet, Download, Upload, ShieldAlert,
 } from 'lucide-react';
 import { api, authHeader } from '@/lib/api-client';
+import { readJsonSafe, responseErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { Button } from '@/components/ui/button';
 import { Modal } from '@/components/ui/modal';
 import { downloadBlob } from '@/lib/download';
@@ -678,11 +679,16 @@ function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
         headers: authHeader(),
         body: fd,
       });
-      const json = (await res.json()) as {
+      const json = await readJsonSafe<{
         success?: boolean;
         data?: CatalogueUploadResult;
         error?: string;
-      };
+      }>(res);
+      if (!json) {
+        // Non-JSON (proxy truncation / plain-text 5xx / edge 413) — some rows may have been saved.
+        setErr(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        return;
+      }
       if (!res.ok || json.success === false) {
         setErr(json.error ?? `Upload failed (HTTP ${res.status})`);
         return;

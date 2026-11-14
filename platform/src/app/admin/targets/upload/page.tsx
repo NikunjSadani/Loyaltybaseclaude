@@ -23,6 +23,7 @@ import {
   AlertTriangle, Info,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
+import { readJsonSafe, responseErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { buildMonthRange, formatMonth } from '@/lib/targets';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
@@ -210,7 +211,13 @@ export default function TargetUploadPage() {
         body:    formData,
       });
 
-      const json = await res.json() as { success: boolean; data?: UploadResult; error?: string };
+      const json = await readJsonSafe<{ success: boolean; data?: UploadResult; error?: string }>(res);
+
+      if (!json) {
+        // Non-JSON (proxy truncation / plain-text 5xx / edge 413): readable + honest, never a raw SyntaxError.
+        setUploadError(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        return;
+      }
 
       if (!res.ok || !json.success) {
         setUploadError(json.error ?? `Upload failed (HTTP ${res.status})`);

@@ -13,6 +13,13 @@ import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
 import { formatMonth } from '@/lib/targets';
 import { SALES_IMPORT_BATCH_STATUS } from '@/lib/sales-import/types';
 import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
+import {
+  readJsonSafe,
+  serverErrorText,
+  responseErrorMessage,
+  networkErrorMessage,
+  MAYBE_SAVED_NOTE,
+} from '@/lib/safe-response';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -390,6 +397,7 @@ export default function SalesUploadPage() {
   const [kpiDefs, setKpiDefs]       = useState<TenantKpiDef[]>(DEOLEO_DEFAULT_KPIS);
   const [fileName,    setFileName]  = useState('');
   const [uploading,   setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
   const [saved,       setSaved]     = useState(false);
   const [historyKey,  setHistoryKey] = useState(0);  // bump to refresh history
@@ -493,6 +501,7 @@ export default function SalesUploadPage() {
     setFileName(file.name);
     setUploadResult(null);
     setSaved(false);
+    setUploadError('');
 
     // Upload the raw xlsx to the backend (multipart); the backend parses + stores
     // and returns the authoritative per-row result used for the report download.
@@ -505,17 +514,26 @@ export default function SalesUploadPage() {
         method:  'POST',
         body:    formData,
       });
-      const body = await res.json();
+      const body = await readJsonSafe(res);
 
-      if (res.ok && body.success) {
+      if (res.ok && body?.success) {
         setUploadResult(normalizeRowsEcho(body.data as UploadResult & { rows?: UploadResultRow[] }));
         setSaved(true);
         setHistoryKey(k => k + 1);
       } else {
         console.error('[SALES] Upload failed:', body);
+        // Show the failure to the operator (it used to be console-only). A non-JSON body means the
+        // response was lost (proxy truncation / plain-text 5xx) — the upload may still have saved.
+        setUploadError(
+          body
+            ? (serverErrorText(body) ?? `Upload failed (HTTP ${res.status})`)
+            : responseErrorMessage(res, body, MAYBE_SAVED_NOTE),
+        );
+        setHistoryKey(k => k + 1);
       }
     } catch (e) {
       console.error('[SALES] Upload error:', e);
+      setUploadError(networkErrorMessage(MAYBE_SAVED_NOTE));
     } finally {
       setUploading(false);
     }
@@ -710,6 +728,10 @@ export default function SalesUploadPage() {
             <div className="w-4 h-4 border-2 border-gray-200 border-t-[var(--brand-primary)] rounded-full animate-spin" />
             Uploading and saving…
           </div>
+        )}
+
+        {uploadError && (
+          <p role="alert" className="text-sm text-red-600">{uploadError}</p>
         )}
       </div>
 

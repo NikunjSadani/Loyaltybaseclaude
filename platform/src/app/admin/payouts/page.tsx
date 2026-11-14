@@ -18,6 +18,14 @@ import {
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
+import { readJsonSafe, FILE_TOO_LARGE_MESSAGE } from '@/lib/safe-response';
+
+/** Shown when the UTR APPLY response is lost. Re-uploading is safe: payouts.service uploadPayoutUtr
+ *  skips terminal (SUCCESS/FAILED/REVERSED) transactions and compare-and-sets each write, so the same
+ *  report applied twice changes nothing the second time. */
+const PAYOUT_UTR_APPLY_UNCONFIRMED_MESSAGE =
+  "We couldn't confirm whether the UTR report was applied. Refresh and check this batch's transaction statuses before trying again. " +
+  'Re-uploading the same UTR report is safe — transactions that were already marked SUCCESS or FAILED are skipped, so nothing is applied twice.';
 
 /* ─── UTR upload result (payouts.service.ts uploadPayoutUtr) ───────────────── */
 
@@ -372,12 +380,24 @@ export default function PayoutsPage() {
     try {
       const form = new FormData();
       form.append('file', file);
-      const res  = await fetch(`/api/payouts/batches/${selectedBatch.id}/utr?apply=true`, {
-        method:  'POST',
-        headers: { ...authHeader() },
-        body:    form,
-      });
-      const json = await res.json();
+      let res: Response;
+      try {
+        res = await fetch(`/api/payouts/batches/${selectedBatch.id}/utr?apply=true`, {
+          method:  'POST',
+          headers: { ...authHeader() },
+          body:    form,
+        });
+      } catch {
+        // Network drop — the apply may or may not have committed.
+        setUtrUploadErr(PAYOUT_UTR_APPLY_UNCONFIRMED_MESSAGE);
+        return;
+      }
+      const json = await readJsonSafe(res);
+      if (!json) {
+        // No readable answer (proxy truncation / plain-text 5xx): never claim success OR failure.
+        setUtrUploadErr(res.status === 413 ? FILE_TOO_LARGE_MESSAGE : PAYOUT_UTR_APPLY_UNCONFIRMED_MESSAGE);
+        return;
+      }
       if (!res.ok || !json.success) {
         setUtrUploadErr(json.error ?? `HTTP ${res.status}`);
         return;

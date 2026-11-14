@@ -37,6 +37,20 @@ import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportBut
 import { downloadBlob } from '@/lib/download';
 import type { UtrParseResult, UtrUploadRow } from '@/types';
 import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+import {
+  readJsonSafe,
+  responseErrorMessage,
+  networkErrorMessage,
+  NOTHING_SAVED_NOTE,
+  FILE_TOO_LARGE_MESSAGE,
+} from '@/lib/safe-response';
+
+/** Shown when the UTR APPLY response is lost (network drop / non-JSON 5xx). The apply may or may not
+ *  have committed. Re-applying is safe: the API serialises applies per download (advisory lock) and only
+ *  flips entries still PROCESSING, so already-applied rows are skipped — no entry is paid/failed twice. */
+const UTR_APPLY_UNCONFIRMED_MESSAGE =
+  "We couldn't confirm whether the UTRs were applied. Refresh and check this payout file's status before trying again. " +
+  'Re-applying the same UTR file is safe — rows that were already applied are skipped, so nothing is marked paid twice.';
 
 /** UTR preview (apply=false). The API returns EVERY parsed row again (`rows`, file order, capped at
  *  20,000 with rowCount/rowsTruncated) so the operator can check each OK row's outlet, UTR and payment
@@ -279,14 +293,24 @@ function PayoutPageInner() {
     const fd = new FormData();
     fd.append('file', file);
 
-    const res = await fetch(
-      `/api/admin/credits/payout-downloads/${utrDownloadId}/utr`,
-      { method: 'POST', body: fd },
-    );
-    const json = await res.json();
+    // Preview only (no apply) — nothing is written server-side, so a lost response is safe to retry.
+    let res: Response;
+    try {
+      res = await fetch(
+        `/api/admin/credits/payout-downloads/${utrDownloadId}/utr`,
+        { method: 'POST', body: fd },
+      );
+    } catch {
+      setUtrParsing(false);
+      setUtrMsg(networkErrorMessage(NOTHING_SAVED_NOTE));
+      return;
+    }
+    const json = await readJsonSafe(res);
     setUtrParsing(false);
 
-    if (!json.success) {
+    if (!json) {
+      setUtrMsg(responseErrorMessage(res, json, NOTHING_SAVED_NOTE));
+    } else if (!json.success) {
       setUtrMsg(json.error ?? 'Failed to parse UTR file');
     } else {
       setUtrResult(json.data.parseResult);
@@ -296,6 +320,7 @@ function PayoutPageInner() {
   async function handleApplyUtr() {
     if (!utrResult?.canProceed || !utrDownloadId || !utrFile) return;
     setUtrApplying(true);
+    setUtrMsg('');
 
     const fd = new FormData();
     fd.append('file', utrFile);
@@ -304,14 +329,24 @@ function PayoutPageInner() {
     // apply=true MUST go in the query string — the backend reads it via @Query
     // (credits.controller uploadUtr). Sending it only in the multipart body made
     // every "Apply" silently run as a PREVIEW (nothing committed, batch stayed OPEN).
-    const res  = await fetch(
-      `/api/admin/credits/payout-downloads/${utrDownloadId}/utr?apply=true`,
-      { method: 'POST', body: fd },
-    );
-    const json = await res.json();
+    let res: Response;
+    try {
+      res = await fetch(
+        `/api/admin/credits/payout-downloads/${utrDownloadId}/utr?apply=true`,
+        { method: 'POST', body: fd },
+      );
+    } catch {
+      setUtrApplying(false);
+      setUtrMsg(UTR_APPLY_UNCONFIRMED_MESSAGE);
+      return;
+    }
+    const json = await readJsonSafe(res);
     setUtrApplying(false);
 
-    if (!json.success) {
+    if (!json) {
+      // No readable answer: the apply may or may not have committed. Never claim either way.
+      setUtrMsg(res.status === 413 ? FILE_TOO_LARGE_MESSAGE : UTR_APPLY_UNCONFIRMED_MESSAGE);
+    } else if (!json.success) {
       setUtrMsg(json.error ?? 'Failed to apply UTR results');
     } else {
       setUtrApplied(true);
@@ -641,6 +676,14 @@ function PayoutPageInner() {
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Apply failure. The message block above only renders with no preview loaded, so an
+                    apply error (incl. the "couldn't confirm" lost-response case) was previously invisible. */}
+                {utrMsg && (
+                  <div role="alert" className="bg-red-50 text-red-700 text-xs px-4 py-3 rounded-xl">
+                    {utrMsg}
                   </div>
                 )}
 

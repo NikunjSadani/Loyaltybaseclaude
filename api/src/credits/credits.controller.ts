@@ -115,7 +115,8 @@ export class CreditsController {
   @RequirePermission('credits:upload')
   @UseInterceptors(
     // Bulk path: cap files/request low so multer's in-RAM buffering is bounded (5 × 10 MB).
-    // The FE uploads in matching chunks of 5; the service re-checks size + sniffs each file.
+    // The FE (BatchEvidencePanel) sends ONE file per request — 5 × 10 MB in one body could exceed
+    // the Next proxy's body cap and be silently truncated. The service re-checks size + sniffs each file.
     FilesInterceptor('files', 5, {
       limits: { fileSize: 10 * 1024 * 1024, files: 5 },
     }),

@@ -28,6 +28,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { api, authHeader } from '@/lib/api-client';
+import { readJsonSafe, responseErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { downloadBlob } from '@/lib/download';
 import {
   type GiftOrderSummary,
@@ -482,11 +483,16 @@ function BulkFulfilment({ onUploaded }: { onUploaded: () => void }) {
         headers: authHeader(),
         body: fd,
       });
-      const json = (await res.json()) as {
+      const json = await readJsonSafe<{
         success?: boolean;
         data?: FulfilmentUploadResult;
         error?: string;
-      };
+      }>(res);
+      if (!json) {
+        // Non-JSON (proxy truncation / plain-text 5xx / edge 413) — orders may have been updated.
+        setErr(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        return;
+      }
       if (!res.ok || json.success === false) {
         setErr(json.error ?? `Upload failed (HTTP ${res.status})`);
         return;

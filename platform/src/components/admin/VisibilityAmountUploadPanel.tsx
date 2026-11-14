@@ -21,6 +21,7 @@ import {
 import { generateVisibilityTemplate, VISIBILITY_UPLOAD_HEADERS } from '@/lib/visibility-upload';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -72,12 +73,19 @@ export function VisibilityAmountUploadPanel() {
     try {
       const fd = new FormData();
       fd.append('file', uploadFile);
-      const res = await fetch('/api/admin/visibility/bulk-upload', { method: 'POST', body: fd });
-      const json = await res.json();
-      if (!res.ok) setUploadError(json.error ?? 'Upload failed');
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/visibility/bulk-upload', { method: 'POST', body: fd });
+      } catch {
+        setUploadError(networkErrorMessage(MAYBE_SAVED_NOTE));
+        return;
+      }
+      const json = await readJsonSafe(res);
+      // A non-JSON body (proxy truncation / plain-text 5xx / edge 413) used to throw here and be
+      // misreported as "Network error"; it now gets a readable, honest message.
+      if (!json) setUploadError(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+      else if (!res.ok) setUploadError(json.error ?? 'Upload failed');
       else setUploadResult(json.data as UploadResult);
-    } catch {
-      setUploadError('Network error — please try again');
     } finally {
       setUploading(false);
     }

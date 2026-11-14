@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Paperclip, UploadCloud, Trash2, FileText, X, Loader2 } from 'lucide-react';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage } from '@/lib/safe-response';
 
 /**
  * B1 — audit-evidence panel for a credit/payout batch.
@@ -29,7 +30,13 @@ const ACCEPT = 'image/jpeg,image/png,image/webp,application/pdf';
 const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_PER_BATCH = 100;
-const CHUNK = 5; // files per request — keeps each upload bounded
+// A file whose response was lost may still have landed — the list below is reloaded after the run.
+const UPLOAD_UNSURE_NOTE = 'It may or may not have been saved — check the evidence list below before re-uploading it.';
+
+interface FileFailure {
+  name: string;
+  reason: string;
+}
 
 function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -49,6 +56,9 @@ export default function BatchEvidencePanel({
   const [loadError, setLoadError] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number; current: string } | null>(null);
+  const [summary, setSummary] = useState<string | null>(null);
+  const [failures, setFailures] = useState<FileFailure[]>([]);
   const [lightbox, setLightbox] = useState<Attachment | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -85,6 +95,8 @@ export default function BatchEvidencePanel({
 
   async function handleFiles(fileList: FileList | null) {
     setError(null);
+    setSummary(null);
+    setFailures([]);
     if (!fileList || fileList.length === 0) return;
     const files = Array.from(fileList);
 
@@ -106,35 +118,43 @@ export default function BatchEvidencePanel({
     }
 
     setUploading(true);
+    setSummary(null);
+    setFailures([]);
+    const failed: FileFailure[] = [];
     let uploaded = 0;
     try {
-      // Upload in chunks so no single request carries too much.
-      for (let i = 0; i < files.length; i += CHUNK) {
-        const slice = files.slice(i, i + CHUNK);
+      // ONE file per request, sequentially: a multi-file body (up to 5 × 10 MB) can exceed the
+      // Next proxy's request-body cap and be silently truncated. A failed file is recorded and the
+      // loop moves on, so one bad file never costs the operator the others.
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        setProgress({ done: i, total: files.length, current: f.name });
         const fd = new FormData();
-        slice.forEach((f) => fd.append('files', f));
-        const res = await fetch(`/api/admin/credits/batches/${batchId}/attachments`, {
-          method: 'POST',
-          body: fd,
-        });
-        if (!res.ok) {
-          const json = await res.json().catch(() => null);
-          const reason = json?.error || json?.message || `request failed (${res.status})`;
-          // Report how many landed before the failure so the operator doesn't blindly re-upload
-          // (which would create duplicates of the files that already succeeded).
-          throw new Error(
-            uploaded > 0
-              ? `${uploaded} of ${files.length} file(s) uploaded, then ${reason}. The rest were not uploaded — re-select only the remaining files.`
-              : `Upload failed: ${reason}`,
-          );
+        fd.append('files', f);
+        try {
+          const res = await fetch(`/api/admin/credits/batches/${batchId}/attachments`, {
+            method: 'POST',
+            body: fd,
+          });
+          if (!res.ok) {
+            const json = await readJsonSafe(res);
+            failed.push({ name: f.name, reason: responseErrorMessage(res, json, UPLOAD_UNSURE_NOTE) });
+            continue;
+          }
+          uploaded += 1;
+        } catch {
+          failed.push({ name: f.name, reason: networkErrorMessage(UPLOAD_UNSURE_NOTE) });
         }
-        uploaded += slice.length;
       }
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Upload failed.');
-      await load();
     } finally {
+      setProgress(null);
+      setFailures(failed);
+      setSummary(
+        failed.length === 0
+          ? `Uploaded ${uploaded} of ${files.length} file(s).`
+          : `Uploaded ${uploaded} of ${files.length} file(s). ${failed.length} failed — re-select only the failed file(s) listed below.`,
+      );
+      await load();
       setUploading(false);
       if (inputRef.current) inputRef.current.value = '';
     }
@@ -177,7 +197,11 @@ export default function BatchEvidencePanel({
             ${uploading ? 'bg-gray-100 text-gray-400 cursor-wait' : 'bg-[var(--brand-primary)] text-white hover:opacity-90'}`}
         >
           {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
-          {uploading ? 'Uploading…' : 'Upload files'}
+          {uploading
+            ? progress && progress.total > 1
+              ? `Uploading ${progress.done + 1} of ${progress.total}…`
+              : 'Uploading…'
+            : 'Upload files'}
           <input
             ref={inputRef}
             type="file"
@@ -196,6 +220,30 @@ export default function BatchEvidencePanel({
 
       {error && (
         <div className="mb-3 rounded-lg bg-red-50 text-red-700 text-xs px-3 py-2">{error}</div>
+      )}
+
+      {progress && (
+        <p className="mb-3 text-xs text-gray-500" aria-live="polite">
+          Uploading {progress.done + 1} of {progress.total}: {progress.current}
+        </p>
+      )}
+
+      {summary && (
+        <div
+          role="status"
+          className={`mb-3 rounded-lg text-xs px-3 py-2 ${failures.length > 0 ? 'bg-amber-50 text-amber-800' : 'bg-green-50 text-green-700'}`}
+        >
+          <p>{summary}</p>
+          {failures.length > 0 && (
+            <ul className="mt-1 list-disc pl-4 space-y-0.5">
+              {failures.map((f, i) => (
+                <li key={`${f.name}-${i}`}>
+                  <span className="font-medium">{f.name}</span>: {f.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
 
       {loadError ? (

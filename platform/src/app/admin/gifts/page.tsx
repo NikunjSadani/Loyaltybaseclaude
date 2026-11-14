@@ -40,6 +40,7 @@ import {
   Truck, ChevronDown, Layers,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
+import { readJsonSafe, responseErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession } from '@/lib/admin-session';
@@ -2379,7 +2380,12 @@ function FulfilmentQueue({
         headers: authHeader(),
         body: fd,
       });
-      const json = await res.json() as { success?: boolean; data?: FulfilmentUploadResult; error?: string };
+      const json = await readJsonSafe<{ success?: boolean; data?: FulfilmentUploadResult; error?: string }>(res);
+      if (!json) {
+        // Non-JSON (proxy truncation / plain-text 5xx / edge 413) — orders may have been updated.
+        setUploadErr(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        return;
+      }
       if (!res.ok || json.success === false) {
         setUploadErr(json.error ?? `Upload failed (HTTP ${res.status})`);
         return;

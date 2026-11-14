@@ -26,6 +26,12 @@ import {
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
 import { authHeader } from '@/lib/api-client';
+import {
+  readJsonSafe,
+  responseErrorMessage,
+  NOTHING_SAVED_NOTE,
+  MAYBE_SAVED_NOTE,
+} from '@/lib/safe-response';
 import { formatINR } from '@/lib/money';
 import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label';
 import { formatCountFrom } from '@/components/operator/tds-imported-payouts-card';
@@ -269,7 +275,11 @@ function UploadPanel({
         headers: authHeader(),
         body:    form,
       });
-      const json = (await res.json()) as { success: boolean; data?: UploadResult; error?: string };
+      const json = await readJsonSafe<{ success: boolean; data?: UploadResult; error?: string }>(res);
+      if (!json) {
+        setUploadError(responseErrorMessage(res, json, NOTHING_SAVED_NOTE));
+        return;
+      }
       if (!res.ok || !json.success) {
         setUploadError(json.error ?? `Upload failed (HTTP ${res.status})`);
         return;
@@ -313,7 +323,11 @@ function UploadPanel({
         headers: authHeader(),
         body:    form,
       });
-      const json = (await res.json()) as { success: boolean; data?: UploadResult; error?: string };
+      const json = await readJsonSafe<{ success: boolean; data?: UploadResult; error?: string }>(res);
+      if (!json) {
+        setConfirmError(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        return;
+      }
       if (!res.ok || !json.success) {
         setConfirmError(json.error ?? `Apply failed (HTTP ${res.status})`);
         return;
