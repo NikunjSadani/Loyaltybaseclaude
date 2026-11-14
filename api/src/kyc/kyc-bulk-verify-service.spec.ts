@@ -115,7 +115,7 @@ const mockPrisma = {
   auditLog: { create: jest.fn() },
   user: { update: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
-  outlet: { findUnique: jest.fn(), update: jest.fn() },
+  outlet: { findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -570,10 +570,11 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
   // ── Partial-batch isolation ─────────────────────────────────────────────────
   describe('per-submission isolation', () => {
     it('one submission erroring does not prevent others from committing', async () => {
-      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
-        { id: SUB_ID },
-        { id: SUB_ID_2 },
-      ]);
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce([{ id: SUB_ID }, { id: SUB_ID_2 }])
+        // failure enrichment: submission → partner → outlet
+        .mockResolvedValueOnce([{ id: SUB_ID, partnerId: 'partner-1' }]);
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([{ partnerId: 'partner-1', outletCode: 'OC-1', name: 'Shop One' }]);
 
       // First submission: throws inside tx
       let callCount = 0;
@@ -617,6 +618,8 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
 
       // First errored, second succeeded
       const r1 = result.problemRows.find((r) => r.submissionId === SUB_ID);
+      // the failure names its spreadsheet row and outlet, so the operator can act on it
+      expect(r1).toEqual(expect.objectContaining({ rowNumber: 2, outletCode: 'OC-1', outletName: 'Shop One' }));
       const r2 = result.problemRows.find((r) => r.submissionId === SUB_ID_2);
       expect(r1?.outcome).toBe('error');
       expect(r2).toBeUndefined(); // a successful outcome is not echoed

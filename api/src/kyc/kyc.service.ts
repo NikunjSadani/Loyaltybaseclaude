@@ -196,6 +196,10 @@ export interface BulkVerifySubmissionResult {
   submissionId: string;
   outcome: 'approved' | 'reupload' | 'recorded' | 'skipped' | 'error';
   detail?: string;
+  /** Commit failures only: where the operator finds it — spreadsheet row + the partner's outlet(s). */
+  rowNumber?: number;
+  outletCode?: string;
+  outletName?: string;
 }
 
 export interface BulkVerifyResult extends ProblemRowsEcho<BulkVerifySubmissionResult> {
@@ -4804,8 +4808,47 @@ export class KycService {
           submissionId,
           outcome: 'error',
           detail: err instanceof Error ? err.message : String(err),
+          rowNumber: update.rowNumber,
         });
       }
+    }
+
+    // Commit failures name the outlet (not just the submission id) so the operator can act on them.
+    // Best-effort: a lookup failure must never lose the commit result (the submission id is still shown).
+    const failedIds = results.filter((r) => r.outcome === 'error').map((r) => r.submissionId);
+    if (failedIds.length > 0) try {
+      const subs = (await this.prisma.kycSubmission.findMany({
+        where: { id: { in: failedIds }, ...this.kycTenantFilter(user) },
+        select: { id: true, partnerId: true },
+      })) ?? [];
+      const partnerIds = [...new Set(subs.map((s) => s.partnerId).filter((x): x is string => !!x))];
+      const outlets = partnerIds.length
+        ? await this.prisma.outlet.findMany({
+            where: { partnerId: { in: partnerIds }, deletedAt: null },
+            select: { partnerId: true, outletCode: true, name: true },
+            orderBy: { outletCode: 'asc' },
+          })
+        : [];
+      const byPartner = new Map<string, { codes: string[]; names: string[] }>();
+      for (const o of outlets) {
+        if (!o.partnerId) continue;
+        const e = byPartner.get(o.partnerId) ?? { codes: [], names: [] };
+        e.codes.push(o.outletCode);
+        e.names.push(o.name);
+        byPartner.set(o.partnerId, e);
+      }
+      const partnerOf = new Map(subs.map((s) => [s.id, s.partnerId]));
+      for (const r of results) {
+        if (r.outcome !== 'error') continue;
+        const pid = partnerOf.get(r.submissionId);
+        const e = pid ? byPartner.get(pid) : undefined;
+        if (e) {
+          r.outletCode = e.codes.join(', ');
+          r.outletName = e.names.join(', ');
+        }
+      }
+    } catch (err: unknown) {
+      this.logger.warn(`bulkVerify: could not attach outlet details to ${failedIds.length} failure(s): ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return {

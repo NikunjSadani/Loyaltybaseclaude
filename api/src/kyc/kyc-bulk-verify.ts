@@ -24,6 +24,8 @@ export interface KycFieldUpdate {
 /** One row's worth of validated updates (may have 0 fieldUpdates for a fully-blank row). */
 export interface KycVerifyUpdate {
   submissionId: string;
+  /** Spreadsheet row (1 = header) — shown to the operator on a commit failure. */
+  rowNumber: number;
   fields: Partial<Record<KycFieldKey, KycFieldUpdate>>;
 }
 
@@ -125,7 +127,7 @@ export function parseKycApprovalSheet(
     const fieldsCount = Object.keys(fieldUpdates).length;
     totalFieldsSet += fieldsCount;
 
-    updates.push({ submissionId, fields: fieldUpdates });
+    updates.push({ submissionId, rowNumber, fields: fieldUpdates });
   }
 
   return {
