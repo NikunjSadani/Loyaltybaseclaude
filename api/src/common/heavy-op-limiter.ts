@@ -109,6 +109,16 @@ export const HEAVY_OP_LIMITER = Symbol('HEAVY_OP_LIMITER');
 /** The single per-instance limiter shared by every heavy route and job. */
 export const heavyOpLimiter = new HeavyOpLimiter();
 
+/**
+ * Instant (light) export streams — their OWN small per-instance limit, separate from {@link heavyOpLimiter}, so a few
+ * slow clients pulling small files can never block the heavy routes (uploads, Sales Import, …) behind them. A light
+ * stream's memory is flat (streaming writer) — the cap only bounds concurrent DB paging. The stream itself also
+ * aborts after EXPORT_INSTANT_IDLE_MS without progress (exports.service.ts), well before this safety release.
+ */
+export const INSTANT_EXPORT_MAX_CONCURRENT = 4;
+export const INSTANT_EXPORT_SAFETY_RELEASE_MS = 10 * 60 * 1000;
+export const instantExportLimiter = new HeavyOpLimiter(INSTANT_EXPORT_MAX_CONCURRENT, INSTANT_EXPORT_SAFETY_RELEASE_MS);
+
 /** 503 with the standard busy message (the global filter renders `{ success:false, error }`). */
 export function heavyOpBusyException(): HttpException {
   return new HttpException(HEAVY_OP_BUSY_MESSAGE, HttpStatus.SERVICE_UNAVAILABLE);

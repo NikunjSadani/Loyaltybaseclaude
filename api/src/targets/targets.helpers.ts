@@ -416,30 +416,6 @@ export function salesDataLayout(month: string, kpis: KpiDefLike[]): MonthBlockSh
 
 // ── parseTargetUploadBuffer ───────────────────────────────────────────────────
 
-/**
- * Parse an uploaded .xlsx target file.
- *
- * Expects the same layout as generateTargetTemplateBuffer:
- *   Row 1: month group headers ("Jul '26 Target" etc.)
- *   Row 2: column labels (fixed + KPI labels per month)
- *   Row 3+: data rows
- *
- * Blank cell contract (CRITICAL):
- *   A blank / empty cell is treated as "not configured" — the corresponding
- *   kpiCode key is OMITTED from targetValues entirely (not stored as 0).
- *   Only cells that parse to a valid finite number are recorded.
- *   Numbers are stored verbatim — NO rounding, NO computation.
- *
- * Validation:
- *   • outletCode must be in knownOutletCodes → else status = 'rejected_outlet'
- *   • KPI labels in the header must resolve to known codes → unknown labels are
- *     silently skipped (the template only emits known labels; extra user columns
- *     are ignored rather than failing the whole upload)
- *
- * @param buffer           Raw xlsx file bytes.
- * @param kpis             Enabled KpiDef rows for the tenant.
- * @param knownOutletCodes Set of valid outlet codes for the tenant.
- */
 /** One echoed upload row — WITHOUT its parsed KPI values (memory-safety upload echo). */
 export interface UploadRowEcho {
   rowIndex: number;
@@ -509,6 +485,30 @@ function readFirstSheetAoa(buffer: Buffer | ArrayBuffer): (string | number | nul
   });
 }
 
+/**
+ * Parse an uploaded .xlsx target file.
+ *
+ * Expects the same layout as generateTargetTemplateBuffer:
+ *   Row 1: month group headers ("Jul '26 Target" etc.)
+ *   Row 2: column labels (fixed + KPI labels per month)
+ *   Row 3+: data rows
+ *
+ * Blank cell contract (CRITICAL):
+ *   A blank / empty cell is treated as "not configured" — the corresponding
+ *   kpiCode key is OMITTED from targetValues entirely (not stored as 0).
+ *   Only cells that parse to a valid finite number are recorded.
+ *   Numbers are stored verbatim — NO rounding, NO computation.
+ *
+ * Validation:
+ *   • outletCode must be in knownOutletCodes → else status = 'rejected_outlet'
+ *   • KPI labels in the header must resolve to known codes → unknown labels are
+ *     silently skipped (the template only emits known labels; extra user columns
+ *     are ignored rather than failing the whole upload)
+ *
+ * @param buffer           Raw xlsx file bytes.
+ * @param kpis             Enabled KpiDef rows for the tenant.
+ * @param knownOutletCodes Set of valid outlet codes for the tenant.
+ */
 export function parseTargetUploadBuffer(
   buffer: Buffer | ArrayBuffer,
   kpis: KpiDefLike[],

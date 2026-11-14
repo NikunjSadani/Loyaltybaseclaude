@@ -95,3 +95,35 @@ describe('createXlsxStreamWriter', () => {
     expect(a[N]).toEqual([N - 1, `row ${N - 1}`]);
   }, 30_000);
 });
+
+describe('createXlsxStreamWriter — a destination that goes away never hangs the writer', () => {
+  /** Write rows into an UNREAD destination until the writer blocks on backpressure; resolves with the pending write. */
+  async function blockOnBackpressure(dest: PassThrough) {
+    const w = createXlsxStreamWriter(dest);
+    const s = await w.addSheet('S', ['A', 'B']);
+    let written = 0;
+    let blocked: Promise<void> | null = null;
+    for (let i = 0; i < 200_000 && !blocked; i++) {
+      const p = s.addRow([i, 'x'.repeat(200)]);
+      const settled = await Promise.race([p.then(() => true), new Promise<false>((r) => setTimeout(() => r(false), 50))]);
+      if (!settled) blocked = p;
+      written++;
+    }
+    return { blocked: blocked!, written };
+  }
+
+  it('destination destroyed while waiting for drain → the pending write rejects (no hang)', async () => {
+    const dest = new PassThrough({ highWaterMark: 1024 });
+    const { blocked } = await blockOnBackpressure(dest);
+    expect(blocked).toBeTruthy();
+    dest.destroy();
+    await expect(blocked).rejects.toThrow(/destination closed/);
+  }, 30_000);
+
+  it('destination errors while waiting for drain → the pending write rejects with that error', async () => {
+    const dest = new PassThrough({ highWaterMark: 1024 });
+    const { blocked } = await blockOnBackpressure(dest);
+    dest.destroy(new Error('upload failed'));
+    await expect(blocked).rejects.toThrow(/upload failed|destination closed/);
+  }, 30_000);
+});

@@ -10,7 +10,7 @@ import { ExportsRunnerService } from './exports-runner.service';
  * POST /v1/exports/drain — OPTIONAL Cloud Scheduler fallback (the Downloads list already self-heals). `@Public`,
  * header `x-drain-secret`, constant-time compare, FAIL-CLOSED when no secret is set. Secret: EXPORTS_DRAIN_SECRET when
  * set, else the EXISTING SALES_IMPORT_DRAIN_SECRET (already bound to the API in both environments) — so no new Secret
- * Manager secret is needed. Kicks the worker when something is claimable; when idle, runs the bounded retention sweep
+ * Manager secret is needed. Runs the bounded retention sweep, then kicks the worker when something is claimable — both
  * inside the request (no work outlives the response — the API runs with CPU throttling). Reveals only `kicked`.
  */
 @Controller('exports')
@@ -31,10 +31,10 @@ export class ExportsDrainController {
     const got = Buffer.from(secret ?? '');
     const want = Buffer.from(expected);
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ForbiddenException('Invalid drain secret');
-    if (!(await hasClaimableExports(this.prisma))) {
-      await this.processor.sweep();
-      return { kicked: false };
-    }
+    // Retention ALWAYS runs here (bounded, inside the request) — also when work is waiting, so a queue the worker can
+    // never pick up (missing IAM grant) still gets its QUEUED > 24 h requests FAILED and expired files deleted.
+    await this.processor.sweep();
+    if (!(await hasClaimableExports(this.prisma))) return { kicked: false };
     return { kicked: (await this.runner.kick()) !== 'none' };
   }
 }

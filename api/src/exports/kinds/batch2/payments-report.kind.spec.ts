@@ -107,12 +107,15 @@ function world(n: number, extra: Row[] = []) {
     }
   }
   outlets.push({ id: 'pkF', clientId: 'other', outletCode: 'O1', zone: 'FOREIGN', state: null, city: null, partner: null });
-  return {
+  const live = {
     creditPayoutEntry: fakeModel([...Array.from({ length: n }, (_, i) => entry(i)), ...extra]),
     outlet: fakeModel(outlets),
     salesUserAssignment: fakeModel(assignments),
     salesUser: fakeModel(users),
   };
+  // Interactive transaction over the same (live) models; the snapshot test below replaces it with a frozen copy.
+  const $transaction = jest.fn(async (cb: (tx: unknown) => Promise<unknown>, _opts?: unknown) => cb(live));
+  return Object.assign(live, { $transaction });
 }
 
 describe('payments-report export kind', () => {
@@ -160,6 +163,46 @@ describe('payments-report export kind', () => {
       cap.restore();
     }
     expect(PaymentsReportService.MAX_ROWS).toBe(10_000);
+  }, 60_000);
+
+  it('all pages read inside ONE REPEATABLE READ snapshot: a payout added / re-paid between pages never duplicates, skips or double-counts', async () => {
+    const prisma = world(2_300); // > one 2,000-row page of PAID rows (1,971 PAID)… plus FAILED; force two pages below
+    const all = prisma.creditPayoutEntry.rows as Row[];
+    // Add PAID rows so there are > 2,000 PAID entries → two page reads.
+    for (let i = 0; i < 200; i++) all.push(entry(20_000 + i, { status: 'PAID', paidAt: new Date(BASE - i * 1000), utr: `X${i}`, attemptedAt: null }));
+    const expected = await oldDownload(prisma, { clientId: 'bajaj' }); // the state when the export starts
+    prisma.creditPayoutEntry.findMany.mockClear();
+
+    // The DB snapshot the transaction sees (frozen copies taken at BEGIN).
+    const frozen = {
+      creditPayoutEntry: fakeModel(all.map((r) => ({ ...r }))),
+      outlet: fakeModel([...(prisma.outlet.rows as Row[])]),
+      salesUserAssignment: fakeModel([...(prisma.salesUserAssignment.rows as Row[])]),
+      salesUser: fakeModel([...(prisma.salesUser.rows as Row[])]),
+    };
+    // Between page 1 and page 2, the LIVE table changes: a newer payout is paid (sorts first → offset paging on the live
+    // table would shift every later row by one → a duplicate) and an old one is deleted.
+    const firstPage = frozen.creditPayoutEntry.findMany.getMockImplementation()!;
+    frozen.creditPayoutEntry.findMany.mockImplementation(async (args) => {
+      const rows = await firstPage(args);
+      if (!args?.skip) {
+        all.unshift(entry(99_999, { status: 'PAID', paidAt: new Date(BASE + 10_000 * 3_600_000), utr: 'NEW' }));
+        all.pop();
+      }
+      return rows;
+    });
+    prisma.$transaction.mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => cb(frozen));
+
+    const params = PAYMENTS_REPORT_KIND.parseParams({}, CLIENT);
+    const { buffer } = await renderKind(PAYMENTS_REPORT_KIND, ctxFor(CLIENT, prisma), params);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toMatchObject({ isolationLevel: 'RepeatableRead' });
+    expect(frozen.creditPayoutEntry.findMany.mock.calls.length).toBe(2); // two pages, both in the snapshot
+    expect(prisma.creditPayoutEntry.findMany).not.toHaveBeenCalled(); // never read outside the transaction
+    expectSameWorkbook(buffer, expected);
+    const ids = readBook(buffer).sheets.Payments.aoa.slice(1).map((r) => r[15]); // UTR column
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).not.toContain('NEW');
   }, 60_000);
 
   it('parity: no rows → header-less Payments sheet + zero Summary', async () => {

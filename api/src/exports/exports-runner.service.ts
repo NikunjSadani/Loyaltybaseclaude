@@ -39,7 +39,7 @@ export class ExportsRunnerService {
       this.logger.warn('EXPORTS_RUNNER is not configured (inline|job + EXPORTS_JOB + GCP_PROJECT); requests stay QUEUED.');
       return 'none';
     } catch (e) {
-      this.logger.warn(`Exports kick failed: ${(e as Error).message}`);
+      this.logger.error(`Exports kick failed: ${(e as Error).message}`);
       return 'none';
     }
   }
@@ -98,7 +98,7 @@ export class ExportsRunnerService {
     });
     if (!res.ok) {
       // 403 here = the one-time IAM grant (roles/run.jobsExecutor on the job) is missing — see DOWNLOADS-PAGE.md runbook.
-      this.logger.warn(`Exports kick: jobs:run HTTP ${res.status}`);
+      this.logger.error(`Exports kick: jobs:run HTTP ${res.status} — the Downloads worker could not be started`);
       return 'none';
     }
     return 'job';

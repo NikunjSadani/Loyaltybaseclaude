@@ -13,7 +13,7 @@ import { StorageService } from '../storage/storage.service';
 import { TenantService } from '../tenant/tenant.service';
 import { ExportAccessChecker } from './export-access';
 import type { AnyExportKind } from './export-kinds';
-import { EXPORT_KIND_REGISTRY } from './exports-processor.service';
+import { EXPORT_KIND_REGISTRY, ExportsProcessorService } from './exports-processor.service';
 import { ExportsRunnerService } from './exports-runner.service';
 import { ExportsController } from './exports.controller';
 import { ExportsService } from './exports.service';
@@ -72,7 +72,6 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
       $transaction: async (cb: (tx: unknown) => unknown) => cb(prisma),
       $queryRaw: async () => [],
       exportRequest: {
-        count: async () => 0,
         create: async ({ data }: { data: unknown }) => {
           created.push(data);
           return { id: 'exp-http-1' };
@@ -87,6 +86,7 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
         ExportAccessChecker,
         { provide: PrismaService, useValue: prisma },
         { provide: StorageService, useValue: {} },
+        { provide: ExportsProcessorService, useValue: { sweep: async () => ({ expired: 0, gaveUp: 0, purged: 0 }) } },
         { provide: ExportsRunnerService, useValue: { isConfigured: () => true, kick: async () => 'job' } },
         { provide: GifsyRoleService, useValue: { getPermissions: async () => new Set() } },
         { provide: TenantService, useValue: { isFeatureEnabled: async () => false } },

@@ -418,6 +418,8 @@ describe('points-* export kinds', () => {
     expect(ok.prisma.auditLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ action: 'EXPORT', entityType: 'SALES_MONTH', actorId: 'u1', newValues: { route: 'previewReport', period: '2026-07' } }),
     });
+    // Exactly ONE record per built file (the route's guard does not record the 202 that queued it).
+    expect(ok.prisma.auditLog.create).toHaveBeenCalledTimes(1);
   }, XLSX_TIMEOUT);
 
   it('always heavy (whole-tenant compute in the worker); access, validation, names', () => {

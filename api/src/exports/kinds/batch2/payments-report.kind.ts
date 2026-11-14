@@ -5,12 +5,13 @@
  * report and its banner).
  *
  * Paging: the same where/order as the report (paidAt ↓ or, for a non-PAID status filter, attemptedAt ↓ NULLS LAST;
- * then createdAt ↓; id ↓ as the tiebreak) read in pages of ≤ 2,000 by OFFSET — attemptedAt is nullable, which a
+ * then createdAt ↓; id ↓ as the tiebreak) read in pages of ≤ 2,000 by OFFSET, all inside ONE REPEATABLE READ
+ * transaction (one consistent snapshot: concurrent payout changes can't duplicate / skip rows or double-count) — attemptedAt is nullable, which a
  * keyset cursor cannot page correctly, and the 10,000-row cap bounds it to ≤ 6 reads. Each page's outlet, partner and
  * active-assignment lookups cover that page only; the tenant's SalesUser tree (≈ 1k small rows per tenant, needed to
  * walk any rep's reporting chain) is loaded once per tenant seen. Totals are summed in BigInt paise while streaming.
  */
-import { CreditEntryStatus, type Prisma } from '@prisma/client';
+import { CreditEntryStatus, Prisma } from '@prisma/client';
 import { istDateKey, istDayRangeFilter } from '../../../common/ist-date';
 import { platformWide } from '../../../common/tenant-scope';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
@@ -59,8 +60,28 @@ function reportingChain(startId: string, nodes: Map<string, SalesNode>): string 
 
 const inr = (paise: bigint) => Number(paise) / 100;
 
+/** Snapshot window for one export (≤ 6 page reads of ≤ 2,000 rows + their lookups, streamed as written). */
+export const PAYMENTS_EXPORT_TX_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * Every read runs inside ONE REPEATABLE READ transaction, so all pages (and their outlet / assignment / sales-tree
+ * lookups) see the same snapshot: a payout inserted, re-paid or deleted while the export is streaming can never shift
+ * the OFFSET pages — no row duplicated or skipped, and the Summary total is exactly the sum of the rows written.
+ */
 async function run(ctx: ExportRunContext, p: PaymentsReportParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
-  const { prisma } = ctx;
+  return ctx.prisma.$transaction((tx) => runIn(tx, ctx, p, out), {
+    isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+    maxWait: 10_000,
+    timeout: PAYMENTS_EXPORT_TX_TIMEOUT_MS,
+  });
+}
+
+async function runIn(
+  prisma: Prisma.TransactionClient,
+  ctx: ExportRunContext,
+  p: PaymentsReportParams,
+  out: XlsxStreamWriter,
+): Promise<{ rowCount: number }> {
   const clientId = scopeOf(ctx.user, p.clientId);
   const range = istDayRangeFilter(p.from ?? undefined, p.to ?? undefined);
 

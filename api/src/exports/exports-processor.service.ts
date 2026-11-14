@@ -77,10 +77,14 @@ export function abortableWriter(inner: XlsxStreamWriter, abortedBy: () => Error 
   };
 }
 
-/** GCS key of a prepared file. One folder per request, so a reclaim / retry overwrites its own object only. */
-export function exportStorageKey(row: Pick<ExportRequest, 'clientId' | 'id'>, fileName: string): string {
+/**
+ * GCS key of a prepared file: one folder per request AND per attempt (the claim token is random per claim), so a
+ * superseded worker that cleans up its own object can never delete the file a newer attempt wrote and marked READY.
+ */
+export function exportStorageKey(row: Pick<ExportRequest, 'clientId' | 'id' | 'claimToken'>, fileName: string): string {
   const safe = fileName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'export.xlsx';
-  return `exports/${row.clientId}/${row.id}/${safe}`;
+  const attempt = (row.claimToken ?? '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 64) || 'a';
+  return `exports/${row.clientId}/${row.id}/${attempt}/${safe}`;
 }
 
 /**
@@ -124,7 +128,8 @@ export class ExportsProcessorService {
     let fileName: string;
     let params: unknown;
     try {
-      // Params were validated when the request was made; parse again so the run sees the normalised shape.
+      // row.params holds the RAW request params (+ server-set requestOrigin) — exactly what the API validated with
+      // this same parseParams when the request was made. Parsed once here (never a parse of parsed output).
       params = def.parseParams(row.params, user);
       fileName = def.fileName(params, row.createdAt);
     } catch (e) {
@@ -146,15 +151,21 @@ export class ExportsProcessorService {
     // stream inside uploadStream — no half-open upload is left behind.
     pipeline(sink, counter, () => undefined);
     const upload = this.storage.uploadStream(key, counter, XLSX_CONTENT_TYPE);
-    // Never an unhandled rejection: the outcome is awaited (or deliberately dropped) below.
-    upload.catch(() => undefined);
 
-    const state: { aborted: RunAborted | null } = { aborted: null };
+    const state: { aborted: RunAborted | null; uploadFailed: Error | null } = { aborted: null, uploadFailed: null };
     const abort = (why: 'superseded' | 'stopping') => {
       if (state.aborted) return;
       state.aborted = new RunAborted(why);
       sink.destroy(state.aborted);
     };
+    // The storage upload failed (GCS error, network): stop the writer NOW — destroying the sink wakes a writer waiting
+    // on backpressure and the report's next row throws — so the run ends FAILED promptly instead of sitting RUNNING
+    // until the job's task timeout. Also: never an unhandled rejection (the outcome is awaited or dropped below).
+    upload.catch((e: unknown) => {
+      if (state.aborted || state.uploadFailed) return;
+      state.uploadFailed = e instanceof Error ? e : new Error(String(e));
+      sink.destroy(state.uploadFailed);
+    });
     const offStop = stop?.onStop(() => abort('stopping')) ?? (() => undefined);
     const beat = setInterval(() => {
       void this.heartbeat(row)
@@ -166,7 +177,7 @@ export class ExportsProcessorService {
     (beat as { unref?: () => void }).unref?.();
 
     try {
-      const out = abortableWriter(createXlsxStreamWriter(sink), () => state.aborted);
+      const out = abortableWriter(createXlsxStreamWriter(sink), () => state.aborted ?? state.uploadFailed);
       const { rowCount } = await def.run(
         { prisma: this.prisma, moduleRef: this.moduleRef, clientId: row.clientId, user, now: row.createdAt },
         params,

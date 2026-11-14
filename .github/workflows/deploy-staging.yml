@@ -166,10 +166,10 @@ jobs:
       # (EXPORTS_RUNNER=job) and, as a fallback, on any Downloads-page poll that sees a stuck request.
       #   • Secrets: only EXISTING ones. JWT_SECRET is needed because some reports (Outlet Master) embed signed
       #     document-view links. NO new secret is required by this job.
-      #   • ONE-TIME infra (owner-gated, NOT done by this workflow): roles/run.jobsExecutor for gifsy-api-sa ON THIS
-      #     JOB (after the first deploy creates it). Without it the API's kick 403s and requests stay QUEUED (the
-      #     Downloads page shows "Waiting to start"); the API itself is never affected. Optional Cloud Scheduler
-      #     drain → POST /v1/exports/drain (x-drain-secret = the SALES_IMPORT_DRAIN_SECRET value) — see the runbook.
+      #   • IAM: the NEXT step grants roles/run.jobsExecutor for gifsy-api-sa ON THIS JOB (idempotent). Without it the
+      #     API's kick 403s and every heavy request FAILS at once ("Downloads couldn't start on the server…"); the API
+      #     itself is never affected. Optional Cloud Scheduler drain → POST /v1/exports/drain (x-drain-secret = the
+      #     SALES_IMPORT_DRAIN_SECRET value) — see the runbook.
       - name: Deploy Downloads worker job (staging)
         run: |
           gcloud run jobs deploy gifsy-exports-staging \
@@ -189,6 +189,18 @@ jobs:
             --vpc-egress=private-ranges-only \
             --set-cloudsql-instances=${{ env.SQL_INSTANCE }} \
             --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com
+
+      # ⚠️ OWNER APPROVAL REQUIRED before this lands (IAM change on GCP): lets the API (gifsy-api-sa) START executions
+      # of the Downloads job — and nothing else (scoped to THIS job only; mirrors the grant already on
+      # gifsy-sales-import-staging). Idempotent (re-adding an existing binding is a no-op); the deployer holds
+      # roles/run.admin, which includes run.jobs.setIamPolicy.
+      - name: Allow the API to start the Downloads worker job (staging)
+        run: |
+          gcloud run jobs add-iam-policy-binding gifsy-exports-staging \
+            --region=${{ env.REGION }} \
+            --member=serviceAccount:gifsy-api-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --role=roles/run.jobsExecutor \
+            --quiet
 
       # SALES IMPORT (API side): SALES_IMPORT_RUNNER=job + SALES_IMPORT_JOB + GCP_PROJECT (read by
       # api/src/sales-import/ingest/sales-import-runner.service.ts; GCP_REGION is already set) and

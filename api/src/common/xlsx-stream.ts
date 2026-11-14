@@ -67,8 +67,25 @@ export function createXlsxStreamWriter(dest: Writable): XlsxStreamWriter {
   let finished = false;
   const usedNames = new Set<string>();
 
+  // Wait for backpressure to clear — but never forever: a destination that is destroyed / closed / errors while we
+  // wait (client went away, upload failed) rejects instead of leaving the export hanging on a 'drain' that never comes.
   const waitForDrain = async () => {
-    if ((dest as Writable & { writableNeedDrain?: boolean }).writableNeedDrain) await once(dest, 'drain');
+    const d = dest as Writable & { writableNeedDrain?: boolean };
+    if (d.destroyed || d.closed) throw new Error('xlsx-stream: destination closed');
+    if (!d.writableNeedDrain) return;
+    const ac = new AbortController();
+    try {
+      await Promise.race([
+        once(d, 'drain', { signal: ac.signal }),
+        once(d, 'close', { signal: ac.signal }).then(() => {
+          throw new Error('xlsx-stream: destination closed');
+        }),
+        // once() rejects with the 'error' payload.
+        once(d, 'error', { signal: ac.signal }),
+      ]);
+    } finally {
+      ac.abort(); // detach the losing listeners (their AbortError rejections are already settled by the race)
+    }
   };
 
   return {

@@ -103,7 +103,7 @@ describe('ExportsProcessorService.processClaimed', () => {
     expect(await proc.processClaimed(claimed())).toBe('finished');
 
     const key = exportStorageKey(claimed(), 'k report.xlsx');
-    expect(key).toBe('exports/bajaj/exp1/k_report.xlsx');
+    expect(key).toBe('exports/bajaj/exp1/tok-1/k_report.xlsx');
     const buf = uploads.get(key)!;
     const rows = XLSX.utils.sheet_to_json<unknown[]>(XLSX.read(buf, { type: 'buffer' }).Sheets.Data, { header: 1 });
     expect(rows.length).toBe(2501);
@@ -126,7 +126,7 @@ describe('ExportsProcessorService.processClaimed', () => {
     const { proc, prisma, storage } = setup(makeKind(async () => { throw new Error('relation "x" does not exist'); }));
     expect(await proc.processClaimed(claimed())).toBe('finished');
     expect(prisma.exportRequest.updateMany.mock.calls.at(-1)![0].data).toMatchObject({ status: 'FAILED', error: EXPORT_FAILED_MESSAGE });
-    expect(storage.deleteFile).toHaveBeenCalledWith('exports/bajaj/exp1/k_report.xlsx');
+    expect(storage.deleteFile).toHaveBeenCalledWith('exports/bajaj/exp1/tok-1/k_report.xlsx');
   });
 
   it('unknown kind → FAILED; attempts over the limit → FAILED (gave up), report never run', async () => {
@@ -199,7 +199,69 @@ describe('ExportsProcessorService.processClaimed', () => {
     });
     const { proc, storage } = setup(kind, { finishCount: 0 });
     expect(await proc.processClaimed(claimed())).toBe('superseded');
-    expect(storage.deleteFile).toHaveBeenCalledWith('exports/bajaj/exp1/k_report.xlsx');
+    expect(storage.deleteFile).toHaveBeenCalledWith('exports/bajaj/exp1/tok-1/k_report.xlsx');
+  });
+
+  it('a superseded attempt deletes ONLY its own object — never the file a newer attempt wrote and marked READY', async () => {
+    const kind = makeKind(async (_c, _p, out) => {
+      await (await out.addSheet('S', ['A'])).addRow([1]);
+      return { rowCount: 1 };
+    });
+    // Attempt B (newer claim) finishes READY first.
+    const b = setup(kind);
+    expect(await b.proc.processClaimed(claimed({ claimToken: 'tok-B', attempts: 2 }))).toBe('finished');
+    const readyKey = b.prisma.exportRequest.updateMany.mock.calls.at(-1)![0].data.storagePath as string;
+    // Attempt A (old, stale claim) reaches its final write → superseded → cleans up.
+    const a = setup(kind, { finishCount: 0 });
+    expect(await a.proc.processClaimed(claimed({ claimToken: 'tok-A' }))).toBe('superseded');
+    const deleted = a.storage.deleteFile.mock.calls.map((c) => (c as unknown as [string])[0]);
+    expect(readyKey).toBe('exports/bajaj/exp1/tok-B/k_report.xlsx');
+    expect(deleted).toEqual(['exports/bajaj/exp1/tok-A/k_report.xlsx']);
+    expect(deleted).not.toContain(readyKey);
+  });
+
+  it('the storage upload fails mid-run → the writer stops at once and the request is FAILED promptly (not RUNNING until timeout)', async () => {
+    let rows = 0;
+    const kind = makeKind(async (_c, _p, out) => {
+      const s = await out.addSheet('S', ['A', 'B']);
+      for (let i = 0; i < 200_000; i++) {
+        await s.addRow([i, 'x'.repeat(50)]);
+        rows++;
+      }
+      return { rowCount: rows };
+    });
+    const { proc, prisma, storage } = setup(kind);
+    storage.uploadStream.mockImplementation(async (_key: string, source: Readable) => {
+      await new Promise((r) => source.once('data', r)); // GCS accepted the first bytes…
+      throw new Error('GCS 503 backend error'); // …then the upload broke
+    });
+    const t0 = Date.now();
+    expect(await proc.processClaimed(claimed())).toBe('finished');
+    expect(Date.now() - t0).toBeLessThan(20_000);
+    expect(rows).toBeLessThan(200_000);
+    expect(prisma.exportRequest.updateMany.mock.calls.at(-1)![0].data).toMatchObject({ status: 'FAILED', error: EXPORT_FAILED_MESSAGE });
+    expect(storage.deleteFile).toHaveBeenCalledWith('exports/bajaj/exp1/tok-1/k_report.xlsx');
+  }, 30_000);
+
+  it('parses the STORED RAW params exactly once (a strict kind that refuses its own parsed output still runs)', async () => {
+    const seen: unknown[] = [];
+    const strict: AnyExportKind = {
+      ...makeKind(async (_c, p, out) => {
+        seen.push(p);
+        await out.addSheet('S', ['A']);
+        return { rowCount: 0 };
+      }),
+      // Accepts only the raw input shape; its output carries a key it would itself refuse.
+      parseParams: (raw) => {
+        const r = raw as Record<string, unknown>;
+        if ('platformWide' in r) throw new Error('unknown field platformWide');
+        return { months: Number(r.months), platformWide: true };
+      },
+    };
+    const { proc, prisma } = setup(strict);
+    expect(await proc.processClaimed(claimed({ params: { months: '6', requestOrigin: 'https://api.gifsy.in' } }))).toBe('finished');
+    expect(seen).toEqual([{ months: 6, platformWide: true }]);
+    expect(prisma.exportRequest.updateMany.mock.calls.at(-1)![0].data.status).toBe('READY');
   });
 });
 

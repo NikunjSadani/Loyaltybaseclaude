@@ -11,6 +11,7 @@ import { EXPORT_KIND_REGISTRY, ExportsProcessorService } from './exports-process
 import { exportsRunnerConfigured, exportsRunnerMode } from './exports-runner.config';
 import { ExportsRunnerService } from './exports-runner.service';
 import { ExportsWorkerModule, WORKER_EXPORTS_SERVICE_MESSAGE } from './exports-worker.module';
+import { ExportsDrainController } from './exports-drain.controller';
 import { ExportsService } from './exports.service';
 import { EXPORT_KINDS } from './kinds';
 
@@ -113,4 +114,36 @@ describe('ExportsWorkerModule (the gifsy-exports job context)', () => {
       await app.close();
     }
   }, 120_000);
+});
+
+describe('ExportsDrainController (POST /v1/exports/drain)', () => {
+  const make = (claimable: number) => {
+    const order: string[] = [];
+    const runner = { kick: jest.fn(async () => (order.push('kick'), 'job')) };
+    const processor = { sweep: jest.fn(async () => (order.push('sweep'), { expired: 0, gaveUp: 0, purged: 0 })) };
+    const prisma = { $queryRaw: jest.fn(async () => [{ n: claimable }]) };
+    const ctl = new ExportsDrainController(runner as never, prisma as never, processor as never);
+    return { ctl, runner, processor, order };
+  };
+  beforeEach(() => {
+    process.env.EXPORTS_DRAIN_SECRET = 's3cret';
+  });
+  afterEach(() => {
+    delete process.env.EXPORTS_DRAIN_SECRET;
+  });
+
+  it('runs the retention sweep EVEN WHEN work is waiting (a queue the job can never start still gets FAILED), then kicks', async () => {
+    const { ctl, order } = make(3);
+    await expect(ctl.drain('s3cret')).resolves.toEqual({ kicked: true });
+    expect(order).toEqual(['sweep', 'kick']);
+  });
+
+  it('idle → sweep only, no kick; wrong secret → 403, nothing run', async () => {
+    const idle = make(0);
+    await expect(idle.ctl.drain('s3cret')).resolves.toEqual({ kicked: false });
+    expect(idle.order).toEqual(['sweep']);
+    const bad = make(3);
+    await expect(bad.ctl.drain('nope!!')).rejects.toThrow('Invalid drain secret');
+    expect(bad.order).toEqual([]);
+  });
 });
