@@ -1867,12 +1867,45 @@ describe('CreditsService', () => {
       expect(res.parseResult.canProceed).toBe(true);
       expect(res.parseResult.summary.paidCount).toBe(1);
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
-      // Memory-safety: an all-OK preview echoes no rows (only ERROR rows come back).
-      expect(res.parseResult).not.toHaveProperty('rows');
-      expect(res.parseResult).toMatchObject({ problemRows: [], problemRowCount: 0, problemRowsTruncated: false });
+      // The preview precedes an irreversible apply: the OK row the operator is about to mark PAID is shown.
+      expect(res.parseResult).toMatchObject({
+        rows: [expect.objectContaining({ outletId: 'O1', utr: 'UTR123456', status: 'OK', success: true })],
+        rowCount: 1,
+        rowsTruncated: false,
+        problemRows: [],
+        problemRowCount: 0,
+        problemRowsTruncated: false,
+      });
     });
 
-    it('memory-safety: the preview echoes ONLY the ERROR rows, with the true count', async () => {
+    it('UTR preview shows EVERY row (OK with UTR + payment date, SKIP already-paid, ERROR with reason) in file order', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1',
+        downloadCode,
+        period: '2026-05',
+        downloadedBy: 'g1',
+        entries: [
+          { id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) },
+          { id: 'e2', outletId: 'O2', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) },
+          { id: 'e3', outletId: 'O3', status: 'PAID', utr: 'UTROLD999', amountPaise: BigInt(10000) },
+        ],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      const file = buildUtrFile([
+        [downloadCode, 'O1', 'UTR123456', 'Success', ''],
+        [downloadCode, 'O2', '', 'Success', ''], // missing UTR → ERROR
+        [downloadCode, 'O3', 'UTROLD999', 'Success', ''], // already PAID → SKIP
+      ]);
+      const res = (await service.uploadUtr(gifsy, 'd1', file, false)) as {
+        parseResult: { rows: Array<{ outletId: string; status: string; utr: string; errors: string[] }>; rowCount: number; rowsTruncated: boolean };
+      };
+      expect(res.parseResult.rows.map((r) => [r.outletId, r.status])).toEqual([['O1', 'OK'], ['O2', 'ERROR'], ['O3', 'SKIP']]);
+      expect(res.parseResult.rows[0].utr).toBe('UTR123456');
+      expect(res.parseResult.rows[1].errors.length).toBeGreaterThan(0);
+      expect(res.parseResult).toMatchObject({ rowCount: 3, rowsTruncated: false });
+    });
+
+    it('the preview also carries the ERROR-row summary, with the true count', async () => {
       mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
         id: 'd1',
         downloadCode,

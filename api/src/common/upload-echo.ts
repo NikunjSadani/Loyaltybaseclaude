@@ -35,3 +35,27 @@ export function problemRowsEcho<T>(
   }
   return { problemRows, problemRowCount, problemRowsTruncated: problemRowCount > problemRows.length };
 }
+
+/**
+ * Previews that precede an IRREVERSIBLE apply (UTR uploads → "Apply UTR Results" marks entries PAID / FAILED) must show
+ * the operator EVERY row about to be applied — not only the problem rows. These keep the full parsed row list (OK rows
+ * with outlet / UTR / payment date, SKIP rows with their notice, ERROR rows with their errors), in file order, bounded
+ * by a generous cap so a pathological file can't balloon the response.
+ *
+ * Wire shape (spread into the preview's parseResult):
+ *   rows:          T[]      — the first ≤ cap parsed rows (exactly the pre-2026-11-13 `rows`)
+ *   rowCount:      number   — how many rows the file parsed to in total
+ *   rowsTruncated: boolean  — true when rowCount > rows.length
+ */
+export const PREVIEW_FULL_ROWS_MAX = 20_000;
+
+export interface FullRowsEcho<T> {
+  rows: T[];
+  rowCount: number;
+  rowsTruncated: boolean;
+}
+
+export function fullRowsEcho<T>(rows: readonly T[], max: number = PREVIEW_FULL_ROWS_MAX): FullRowsEcho<T> {
+  const kept = rows.length > max ? rows.slice(0, max) : [...rows];
+  return { rows: kept, rowCount: rows.length, rowsTruncated: rows.length > kept.length };
+}

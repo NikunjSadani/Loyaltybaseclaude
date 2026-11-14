@@ -978,10 +978,16 @@ describe('PayoutsService', () => {
       );
       expect((res as { parseResult: unknown }).parseResult).toBeDefined();
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
-      // Memory-safety: no full-row echo — a clean file returns no problem rows.
+      // The preview precedes an irreversible apply: EVERY row is shown (here the one OK row), plus the problem summary.
       const pr = (res as { parseResult: Record<string, unknown> }).parseResult;
-      expect(pr).not.toHaveProperty('rows');
-      expect(pr).toMatchObject({ problemRows: [], problemRowCount: 0, problemRowsTruncated: false });
+      expect(pr).toMatchObject({
+        rows: [expect.objectContaining({ txnId: 'txn1', utr: 'UTR12345678', status: 'OK', outcome: 'PAID' })],
+        rowCount: 1,
+        rowsTruncated: false,
+        problemRows: [],
+        problemRowCount: 0,
+        problemRowsTruncated: false,
+      });
     });
 
     it('PAID → marks payout SUCCESS (UTR) and the order DELIVERED, no reversal', async () => {
@@ -1414,7 +1420,11 @@ describe('PayoutsService', () => {
         noChange: Array<{ rowNum: number; txnId: string; notice: string }>;
       };
       expect(errorsOf(r, 'a').join(' ')).toMatch(/already recorded as failed — a bank UTR can't be applied/);
-      expect(r.problemRows.find((x) => x.txnId === 'b')).toBeUndefined(); // SKIP rows are not echoed
+      expect(r.problemRows.find((x) => x.txnId === 'b')).toBeUndefined(); // a SKIP row is not a problem row…
+      // …but it IS in the full preview list, with its reason (the operator sees every row before applying).
+      const full = (r as unknown as { rows: Array<{ txnId: string; status: string; notice?: string }> }).rows;
+      expect(full.map((x) => [x.txnId, x.status])).toEqual([['a', 'ERROR'], ['b', 'SKIP']]);
+      expect(full[1].notice).toBe('Already recorded as reversed — no change');
       // Informational no-op → its own `noChange` category, never the double-payment `alreadyPaid` list.
       expect(r.noChange).toEqual([{ rowNum: 3, txnId: 'b', notice: 'Already recorded as reversed — no change' }]);
       expect(r.alreadyPaid).toEqual([]);

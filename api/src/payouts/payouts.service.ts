@@ -7,7 +7,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { PayoutStatus, PaymentDetailsStatus, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { problemRowsEcho } from '../common/upload-echo';
+import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
 import { WalletService } from '../wallet/wallet.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
@@ -819,11 +819,12 @@ export class PayoutsService {
 
     // Preview unless apply=true.
     if (!apply) {
-      // Memory-safety (2026-11-13): echo ONLY the ERROR rows (capped at 500), not every parsed row.
-      // apply=true re-parses the uploaded file, so nothing relies on the echoed rows.
+      // This preview precedes the IRREVERSIBLE apply (transactions → SUCCESS / FAILED), so the operator
+      // must see EVERY row: the full parsed `rows` (as before 2026-11-13), bounded at
+      // PREVIEW_FULL_ROWS_MAX with `rowsTruncated`; plus the ERROR-row summary fields.
       const { rows, ...rest } = parseResult;
       return {
-        parseResult: { ...rest, ...problemRowsEcho(rows, (r) => r.status === 'ERROR') },
+        parseResult: { ...rest, ...fullRowsEcho(rows), ...problemRowsEcho(rows, (r) => r.status === 'ERROR') },
         batchCode: batch.batchCode,
       };
     }

@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { CreditEntryStatus, Prisma, TdsMethodology, TdsSection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { problemRowsEcho } from '../common/upload-echo';
+import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -2383,12 +2383,12 @@ export class CreditsService {
 
     // Preview unless apply=true.
     if (!apply) {
-      // Memory-safety (2026-11-13): the preview no longer echoes every parsed row — only the
-      // ERROR rows (capped at 500) the operator must fix. apply=true re-parses the file itself,
-      // so nothing downstream needs the echoed rows.
+      // This preview precedes the IRREVERSIBLE "Apply UTR Results" (entries → PAID / FAILED), so the
+      // operator must see EVERY row about to be applied: the full parsed `rows` (as before 2026-11-13),
+      // bounded at PREVIEW_FULL_ROWS_MAX with `rowsTruncated`; plus the ERROR-row summary fields.
       const { rows, ...rest } = parseResult;
       return {
-        parseResult: { ...rest, ...problemRowsEcho(rows, (r) => r.status === 'ERROR') },
+        parseResult: { ...rest, ...fullRowsEcho(rows), ...problemRowsEcho(rows, (r) => r.status === 'ERROR') },
         downloadCode: download.downloadCode,
       };
     }
