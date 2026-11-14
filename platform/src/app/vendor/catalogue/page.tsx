@@ -45,7 +45,7 @@ import {
   isBlockedError,
 } from '@/lib/vendor';
 import { useVendorMe } from '@/lib/vendor-context';
-import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 
 type Toast = { msg: string; type: 'success' | 'error' };
 
@@ -772,6 +772,14 @@ function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
             ))}
           </div>
           {(result.problemRows?.length ?? 0) > 0 ? (
+            <div className="space-y-1.5">
+            <UploadTruncationNote
+              shown={result.problemRows.length}
+              total={result.problemRowCount}
+              truncated={result.problemRowsTruncated}
+              noun="failed rows"
+              next={TRUNCATION_NEXT.PARTIAL_SAVE}
+            />
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1 max-h-44 overflow-y-auto" data-testid="bulk-errors">
               <p className="text-xs font-semibold text-amber-700 mb-2">Row errors</p>
               {result.problemRows.map((er, i) => (
@@ -780,12 +788,7 @@ function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
                   {er.error ?? 'Row failed'}
                 </p>
               ))}
-              <UploadTruncationNote
-                shown={result.problemRows.length}
-                total={result.problemRowCount}
-                truncated={result.problemRowsTruncated}
-                noun="failed rows"
-              />
+            </div>
             </div>
           ) : (
             <div className="flex items-center gap-2 text-sm text-emerald-700">

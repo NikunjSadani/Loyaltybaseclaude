@@ -30,7 +30,7 @@ import { TargetFocusCheckNotice } from '@/components/admin/target-focus-check-no
 import type { TargetUploadFocusCheck } from '@/lib/sales-import/types';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
-import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 import { normalizeRowsEcho } from '@/lib/upload-rows-echo';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -77,6 +77,11 @@ interface UploadResult {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Blank template rows: the API count, else what is left of Total after Accepted + Rejected (older API). */
+function blankRowCount(r: Pick<UploadResult, 'totalRows' | 'acceptedCount' | 'rejectedCount' | 'skippedBlankCount'>): number {
+  return r.skippedBlankCount ?? Math.max(0, r.totalRows - r.acceptedCount - r.rejectedCount);
+}
 
 
 // ── Page ──────────────────────────────────────────────────────────────────────
@@ -489,10 +494,12 @@ export default function TargetUploadPage() {
           </div>
 
           {/* Summary stat cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {/* Total = Accepted + Rejected + Blank (L1) — blank template rows are counted, not saved. */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             <StatCard label="Total rows"  value={result.totalRows}     color="gray"  />
             <StatCard label="Accepted"    value={result.acceptedCount} color="green" />
             <StatCard label="Rejected"    value={result.rejectedCount} color={result.rejectedCount > 0 ? 'red' : 'gray'} />
+            <StatCard label="Blank"       value={blankRowCount(result)} color="gray" />
             <StatCard label="Months"      value={result.monthsInBatch.length} color="gray" />
           </div>
 
@@ -516,43 +523,45 @@ export default function TargetUploadPage() {
             </div>
           )}
 
-          {/* Rejected rows — every one the API returned (≤ 500), scrollable; the download has them all too. */}
+          {/* Rejected rows — the "first N of M" note sits ABOVE the short scroll box; the download is below it. */}
           {result.problemRows.length > 0 && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
-              <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows ({result.problemRowCount.toLocaleString('en-IN')})</p>
-              {result.problemRows
-                .map((r, i) => (
-                  <p key={i} className="text-xs text-amber-700">
-                    <span className="font-mono font-semibold">
-                      Row {r.rowIndex ?? i + 1}
-                      {r.outletCode ? ` — ${r.outletCode}` : r.outletId ? ` — ${r.outletId}` : ''}:{' '}
-                    </span>
-                    {r.remarks ?? String(r.status)}
-                  </p>
-                ))}
+            <div className="space-y-2">
               <UploadTruncationNote
                 shown={result.problemRows.length}
                 total={result.problemRowCount}
                 truncated={result.problemRowsTruncated}
                 noun="rejected rows"
+                next={TRUNCATION_NEXT.PARTIAL_SAVE}
               />
-              <div className="pt-2">
-                <DownloadErrorReportButton
-                  columns={['Row', 'Outlet Code', 'Month', 'Status']}
-                  rows={result.problemRows
-                    .map(r => ({
-                      Row:          r.rowIndex,
-                      'Outlet Code': r.outletCode ?? r.outletId ?? '',
-                      Month:        r.month ?? '',
-                      Status:       r.status,
-                      __errors:     [r.remarks ?? String(r.status)],
-                    }))}
-                  errorsByRow={(row) => (row.__errors as string[]) ?? []}
-                  filename={`target-upload-errors-${result.batchId || 'batch'}.xlsx`}
-                  sheetName="Upload Report"
-                  errorHeader="Remarks"
-                />
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
+                <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows ({result.problemRowCount.toLocaleString('en-IN')})</p>
+                {result.problemRows
+                  .map((r, i) => (
+                    <p key={i} className="text-xs text-amber-700">
+                      <span className="font-mono font-semibold">
+                        Row {r.rowIndex ?? i + 1}
+                        {r.outletCode ? ` — ${r.outletCode}` : r.outletId ? ` — ${r.outletId}` : ''}:{' '}
+                      </span>
+                      {r.remarks ?? String(r.status)}
+                    </p>
+                  ))}
               </div>
+              <DownloadErrorReportButton
+                columns={['Row', 'Outlet Code', 'Month', 'Status']}
+                rows={result.problemRows
+                  .map(r => ({
+                    Row:          r.rowIndex,
+                    'Outlet Code': r.outletCode ?? r.outletId ?? '',
+                    Month:        r.month ?? '',
+                    Status:       r.status,
+                    __errors:     [r.remarks ?? String(r.status)],
+                  }))}
+                errorsByRow={(row) => (row.__errors as string[]) ?? []}
+                filename={`target-upload-errors-${result.batchId || 'batch'}.xlsx`}
+                sheetName="Upload Report"
+                errorHeader="Remarks"
+                truncation={{ shown: result.problemRows.length, total: result.problemRowCount, truncated: result.problemRowsTruncated, noun: 'problems' }}
+              />
             </div>
           )}
 

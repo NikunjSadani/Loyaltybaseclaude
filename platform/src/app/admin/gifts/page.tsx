@@ -51,7 +51,7 @@ import type { GifsySettings } from '@/types';
 import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product';
 import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
 import { MaskedPin } from '@/components/operator/masked-pin';
-import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
 
@@ -2480,6 +2480,7 @@ function FulfilmentQueue({
               ))}
             </div>
 
+            <UploadTruncationNote shown={result.errors.length} total={result.failed} truncated={result.errorsTruncated} noun="row errors" next={TRUNCATION_NEXT.PARTIAL_SAVE} />
             {result.errors.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto" data-testid="fulfilment-errors">
                 <p className="text-xs font-semibold text-amber-700 mb-2">Row errors</p>
@@ -2491,7 +2492,6 @@ function FulfilmentQueue({
                     {er.message}
                   </p>
                 ))}
-                <UploadTruncationNote shown={result.errors.length} total={result.failed} truncated={result.errorsTruncated} noun="row errors" />
               </div>
             )}
             {result.errors.length === 0 && (

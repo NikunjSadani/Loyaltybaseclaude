@@ -38,7 +38,7 @@ import { DownloadActionStatus } from '@/components/exports/download-action-statu
 import { usePermissions } from '@/lib/use-permissions'
 import { UpiCaptureMethodBadge, asUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge'
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section'
-import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote'
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote'
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -112,12 +112,23 @@ interface KycVerifyPreviewResult {
   summary: { rowsParsed: number; fieldsSet: number; errors: number }
 }
 
+/** One failed submission on commit. outletCode / outletName / rowNumber are shown when the API sends them
+ *  (operators recognise outlets, not submission UUIDs); the submission id is always kept for support. */
+interface CommitFailureRow {
+  submissionId: string
+  outcome: string
+  detail?: string
+  outletCode?: string | null
+  outletName?: string | null
+  rowNumber?: number | null
+}
+
 /** Commit response (apply=true). */
 interface KycVerifyCommitResult {
   committed: true
   /** Only the submissions whose commit FAILED (outcome 'error'), capped at 500 — successful
    *  outcomes are counted in summary, not echoed (memory-safety 2026-11-13). */
-  problemRows: { submissionId: string; outcome: string; detail?: string }[]
+  problemRows: CommitFailureRow[]
   problemRowCount: number
   problemRowsTruncated: boolean
   errors: { rowNumber: number; submissionId: string; message: string }[]
@@ -571,15 +582,22 @@ export default function KycApprovalsPage() {
                   <span className="text-green-700 font-semibold">0 errors</span>
                 )}
               </p>
-              {previewResult.errors.length > 0 && (
-                <ErrorTable errors={previewResult.errors} filename="kyc-bulk-verify-preview-errors.xlsx" />
-              )}
+              {/* "First N of M" note ABOVE the list (M7); nothing is saved on a preview (M3). */}
               <UploadTruncationNote
                 shown={previewResult.errors.length}
                 total={previewResult.errorCount}
                 truncated={previewResult.errorsTruncated}
                 noun="errors"
+                next={TRUNCATION_NEXT.PREVIEW}
               />
+              {previewResult.errors.length > 0 && (
+                <ErrorTable
+                  errors={previewResult.errors}
+                  filename="kyc-bulk-verify-preview-errors.xlsx"
+                  total={previewResult.errorCount}
+                  truncated={previewResult.errorsTruncated}
+                />
+              )}
             </div>
           )}
 
@@ -598,24 +616,32 @@ export default function KycApprovalsPage() {
                   <span className="text-green-700 font-semibold">0 commit errors</span>
                 )}
               </p>
-              {commitResult.errors.length > 0 && (
-                <ErrorTable errors={commitResult.errors} filename="kyc-bulk-verify-commit-errors.xlsx" />
-              )}
+              {/* Notes ABOVE each list (M7). The other rows were committed, so fix + re-upload ONLY these (M3). */}
               <UploadTruncationNote
                 shown={commitResult.errors.length}
                 total={commitResult.errorCount}
                 truncated={commitResult.errorsTruncated}
                 noun="errors"
+                next={TRUNCATION_NEXT.PARTIAL_SAVE}
               />
-              {(commitResult.problemRows?.length ?? 0) > 0 && (
-                <CommitFailureTable rows={commitResult.problemRows} />
+              {commitResult.errors.length > 0 && (
+                <ErrorTable
+                  errors={commitResult.errors}
+                  filename="kyc-bulk-verify-commit-errors.xlsx"
+                  total={commitResult.errorCount}
+                  truncated={commitResult.errorsTruncated}
+                />
               )}
               <UploadTruncationNote
                 shown={commitResult.problemRows?.length ?? 0}
                 total={commitResult.problemRowCount}
                 truncated={commitResult.problemRowsTruncated}
                 noun="failed submissions"
+                next={TRUNCATION_NEXT.PARTIAL_SAVE}
               />
+              {(commitResult.problemRows?.length ?? 0) > 0 && (
+                <CommitFailureTable rows={commitResult.problemRows} />
+              )}
             </div>
           )}
         </CardContent>
@@ -972,7 +998,18 @@ export default function KycApprovalsPage() {
 
 // ─── Error table (shared by preview + commit) ─────────────────────────────────
 
-function ErrorTable({ errors, filename = 'kyc-bulk-verify-errors.xlsx' }: { errors: { rowNumber: number; submissionId: string; message: string }[]; filename?: string }) {
+function ErrorTable({
+  errors,
+  filename = 'kyc-bulk-verify-errors.xlsx',
+  total,
+  truncated,
+}: {
+  errors: { rowNumber: number; submissionId: string; message: string }[]
+  filename?: string
+  /** True error count + capped flag → the downloaded file says "Showing the first N of M problems" (M4). */
+  total?: number
+  truncated?: boolean
+}) {
   return (
     <div className="space-y-2">
     <div className="overflow-x-auto rounded border border-red-200">
@@ -1006,6 +1043,7 @@ function ErrorTable({ errors, filename = 'kyc-bulk-verify-errors.xlsx' }: { erro
         errorsByRow={(row) => (row.__errors as string[]) ?? []}
         filename={filename}
         sheetName="KYC Errors"
+        truncation={{ shown: errors.length, total, truncated, noun: 'problems' }}
       />
     </div>
   )
@@ -1013,22 +1051,34 @@ function ErrorTable({ errors, filename = 'kyc-bulk-verify-errors.xlsx' }: { erro
 
 // ─── Commit failures (submissions whose commit errored) ──────────────────────────
 
-function CommitFailureTable({ rows }: { rows: { submissionId: string; outcome: string; detail?: string }[] }) {
+function CommitFailureTable({ rows }: { rows: CommitFailureRow[] }) {
   return (
     <div className="overflow-x-auto rounded border border-red-200">
       <table className="text-xs border-collapse w-full" aria-label="Failed submissions">
         <thead>
           <tr className="bg-red-50 border-b border-red-200 text-red-700">
-            {['Submission ID', 'Commit error'].map(h => (
+            {['Row', 'Outlet', 'Commit error', 'Submission ID'].map(h => (
               <th key={h} className="px-3 py-1.5 font-medium text-left">{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={`fail-${r.submissionId}-${i}`} className="border-b border-red-100">
-              <td className="px-3 py-1.5 font-mono text-gray-700 whitespace-nowrap">{r.submissionId}</td>
+            <tr key={`fail-${r.submissionId}-${i}`} className="border-b border-red-100 align-top">
+              <td className="px-3 py-1.5 font-mono text-red-600 whitespace-nowrap">{r.rowNumber ?? '—'}</td>
+              <td className="px-3 py-1.5 text-gray-800">
+                {r.outletCode || r.outletName ? (
+                  <>
+                    {r.outletCode && <span className="font-mono font-semibold">{r.outletCode}</span>}
+                    {r.outletCode && r.outletName && ' — '}
+                    {r.outletName && <span>{r.outletName}</span>}
+                  </>
+                ) : (
+                  <span className="text-gray-400">Outlet not returned — use the submission ID</span>
+                )}
+              </td>
               <td className="px-3 py-1.5 text-gray-700">{r.detail ?? 'Commit failed'}</td>
+              <td className="px-3 py-1.5 font-mono text-gray-400 whitespace-nowrap">{r.submissionId}</td>
             </tr>
           ))}
         </tbody>

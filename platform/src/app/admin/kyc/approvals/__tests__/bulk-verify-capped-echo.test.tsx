@@ -58,6 +58,35 @@ describe('KYC bulk-verify commit — capped echo', () => {
     expect(await screen.findByRole('table', { name: 'Failed submissions' })).toBeInTheDocument();
     expect(screen.getByText('sub-bad-1')).toBeInTheDocument();
     expect(screen.getByText('Submission is no longer pending')).toBeInTheDocument();
-    expect(screen.getByText(/Showing the first 1 of 650 failed submissions/)).toBeInTheDocument();
+    const note = screen.getByText(/Showing the first 1 of 650 failed submissions/);
+    // M3: the other rows were committed → re-upload only the failed rows. M7: note above the list.
+    expect(note.textContent).toMatch(/re-upload only the failed rows/i);
+    const table = screen.getByRole('table', { name: 'Failed submissions' });
+    expect(note.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Older API without outlet details → says so instead of an empty cell.
+    expect(screen.getByText(/Outlet not returned/)).toBeInTheDocument();
+  });
+
+  it('L7: shows the outlet code + name (and row) of a failed submission when the API sends them', async () => {
+    stubFetch({
+      committed: true,
+      problemRows: [{ submissionId: 'sub-bad-2', outcome: 'error', detail: 'Set Entity Type first', outletCode: 'BJ-0042', outletName: 'Sharma Stores', rowNumber: 7 }],
+      problemRowCount: 1,
+      problemRowsTruncated: false,
+      errors: [],
+      errorCount: 0,
+      errorsTruncated: false,
+      summary: { rowsParsed: 3, fieldsSet: 3, submissionsTouched: 3, approved: 2, rejected: 0, stillPending: 0, errored: 1 },
+    });
+    render(<KycApprovalsPage />);
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await act(async () => { fireEvent.change(input, { target: { files: [new File(['x'], 'v.xlsx')] } }); });
+    await act(async () => { fireEvent.click(screen.getByText(/Validate & Preview/)); });
+    await act(async () => { fireEvent.click(await screen.findByText(/Commit \(apply=true\)/)); });
+
+    const table = await screen.findByRole('table', { name: 'Failed submissions' });
+    expect(table.textContent).toMatch(/BJ-0042 — Sharma Stores/);
+    expect(table.textContent).toMatch(/7/);
+    expect(table.textContent).toMatch(/Set Entity Type first/);
   });
 });

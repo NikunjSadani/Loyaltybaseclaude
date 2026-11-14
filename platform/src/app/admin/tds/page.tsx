@@ -31,7 +31,7 @@ import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label'
 import { formatCountFrom } from '@/components/operator/tds-imported-payouts-card';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
-import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -420,23 +420,23 @@ function UploadPanel({
             ))}
           </div>
 
+          <UploadTruncationNote shown={preview.errors.length} total={preview.failed} truncated={preview.errorsTruncated} noun="errors" next={TRUNCATION_NEXT.PREVIEW} />
           {preview.errors.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 max-h-40 overflow-y-auto space-y-1">
               <p className="text-xs font-semibold text-amber-800">Errors ({preview.errorsTruncated ? preview.failed : preview.errors.length})</p>
               {preview.errors.map((e, i) => (
                 <p key={i} className="text-xs text-amber-700">• {rowMessageText(e)}</p>
               ))}
-              <UploadTruncationNote shown={preview.errors.length} total={preview.failed} truncated={preview.errorsTruncated} noun="errors" />
             </div>
           )}
 
+          <UploadTruncationNote shown={preview.warnings?.length ?? 0} total={preview.warningCount} truncated={preview.warningsTruncated} noun="notes" next="Notes don't block the upload; the counts above cover every row." />
           {(preview.warnings?.length ?? 0) > 0 && (
             <div data-testid="tds-upload-warnings" className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 max-h-40 overflow-y-auto space-y-1">
               <p className="text-xs font-semibold text-blue-800">Notes ({preview.warningCount ?? preview.warnings!.length})</p>
               {preview.warnings!.map((w, i) => (
                 <p key={i} className="text-xs text-blue-700">• {rowMessageText(w)}</p>
               ))}
-              <UploadTruncationNote shown={preview.warnings!.length} total={preview.warningCount} truncated={preview.warningsTruncated} noun="notes" />
             </div>
           )}
 

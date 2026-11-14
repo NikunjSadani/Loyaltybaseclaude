@@ -85,6 +85,32 @@ describe('target upload — ignoredOutOfScope', () => {
     await upload();
     expect(await screen.findByText('Rejected rows (700)')).toBeInTheDocument();
     expect(screen.getByText(/Row 502 — X499/)).toBeInTheDocument();
-    expect(screen.getByText(/Showing the first 500 of 700 rejected rows/)).toBeInTheDocument();
+    const note = screen.getByText(/Showing the first 500 of 700 rejected rows/);
+    // M3: partial save → re-upload only the failed rows (never "re-upload the file").
+    expect(note.textContent).toMatch(/re-upload only the failed rows/i);
+    // M7: the note sits ABOVE the short scroll box, not inside it.
+    const box = screen.getByText('Rejected rows (700)').parentElement as HTMLElement;
+    expect(box.contains(note)).toBe(false);
+    expect(note.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('L1: a Blank tile makes Total = Accepted + Rejected + Blank visible', async () => {
+    stub(result({ totalRows: 10, acceptedCount: 6, savedCount: 6, rejectedCount: 1, skippedBlankCount: 3 }));
+    render(<TargetUploadPage />);
+    await upload();
+    const tile = (label: string) => (screen.getByText(label, { selector: 'p' }).parentElement as HTMLElement).textContent;
+    expect(await screen.findByText('Blank', { selector: 'p' })).toBeInTheDocument();
+    expect(tile('Total rows')).toMatch(/^10/);
+    expect(tile('Accepted')).toMatch(/^6/);
+    expect(tile('Rejected')).toMatch(/^1/);
+    expect(tile('Blank')).toMatch(/^3/);
+  });
+
+  it('L1: older API without skippedBlankCount → Blank = Total − Accepted − Rejected', async () => {
+    stub(result({ totalRows: 9, acceptedCount: 5, savedCount: 5, rejectedCount: 2, skippedBlankCount: undefined }));
+    render(<TargetUploadPage />);
+    await upload();
+    await screen.findByText('Blank', { selector: 'p' });
+    expect((screen.getByText('Blank', { selector: 'p' }).parentElement as HTMLElement).textContent).toMatch(/^2/);
   });
 });

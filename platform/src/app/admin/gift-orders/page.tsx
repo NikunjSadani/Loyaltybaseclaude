@@ -43,7 +43,7 @@ import {
   fmtValuePaise,
   fmtPoints,
 } from '@/lib/gift-orders';
-import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 
 interface TenantOption {
   clientId: string;
@@ -576,6 +576,8 @@ function BulkFulfilment({ onUploaded }: { onUploaded: () => void }) {
             ))}
           </div>
           {result.errors.length > 0 ? (
+            <div className="space-y-1.5">
+            <UploadTruncationNote shown={result.errors.length} total={result.failed} truncated={result.errorsTruncated} noun="row errors" next={TRUNCATION_NEXT.PARTIAL_SAVE} />
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1 max-h-44 overflow-y-auto" data-testid="bulk-errors">
               <p className="text-xs font-semibold text-amber-700 mb-2">Row errors</p>
               {result.errors.map((er, i) => (
@@ -586,7 +588,7 @@ function BulkFulfilment({ onUploaded }: { onUploaded: () => void }) {
                   {er.message}
                 </p>
               ))}
-              <UploadTruncationNote shown={result.errors.length} total={result.failed} truncated={result.errorsTruncated} noun="row errors" />
+            </div>
             </div>
           ) : (
             <div className="flex items-center gap-2 text-sm text-emerald-700">
