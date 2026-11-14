@@ -4201,8 +4201,12 @@ export class RewardsService {
   ): Promise<string> {
     const status = (body.status ?? '').toUpperCase();
     if (status === 'SUCCESS') {
-      await this.storeHubbleSuccess(order, body, actorId);
-      return this.HUBBLE_OUTCOME.DELIVERED;
+      // DELIVERED only when the order now really holds a delivered code. A SUCCESS that could not
+      // be stored (no code in the payload / a manual code already on the order) was left pending
+      // reconcile — report that, so the confirm never tells the member "issued" for a code they
+      // can't see.
+      const delivered = await this.storeHubbleSuccess(order, body, actorId);
+      return delivered ? this.HUBBLE_OUTCOME.DELIVERED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
     }
     if (status === 'PROCESSING') {
       await this.markHubbleProcessing(order, body, actorId);
@@ -4230,12 +4234,17 @@ export class RewardsService {
    * confirm issuance can only win once. Card data is stored on the order
    * (voucherCode) + metadata; the response contract is unchanged (the partner/rep UI
    * already renders voucherCode for GIFT_CARD fulfilment).
+   *
+   * @returns true when the order is now DELIVERED with a code (this call won the claim, or a
+   *   concurrent apply already delivered it); false when the SUCCESS could NOT be stored and the
+   *   order was left pending (no code in the payload, a manual code already on the open order, or
+   *   any other lost claim) — the caller must not report "issued" then.
    */
   private async storeHubbleSuccess(
     order: HubbleLoadedOrder,
     body: HubbleOrderResult,
     actorId?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const voucher = (body.vouchers ?? [])[0];
     const { code: voucherCode, pin: voucherPin } = hubbleVoucherCredentials(voucher);
     if (!voucherCode) {
@@ -4245,7 +4254,7 @@ export class RewardsService {
         `[hubble] order ${order.orderNumber} SUCCESS but no voucher code in payload — left pending`,
       );
       await this.markHubblePendingReconcile(order.id, 'HUBBLE_SUCCESS_NO_CODE');
-      return;
+      return false;
     }
 
     const now = new Date();
@@ -4297,10 +4306,14 @@ export class RewardsService {
           `[hubble] order ${order.orderNumber}: Hubble SUCCESS but a manual voucher code is already on the order — NOT overwritten; flagged for ops (possible double issuance)`,
         );
         await this.markHubblePendingReconcile(order.id, 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT');
+        return false;
       }
-      return;
+      // A concurrent apply already delivered it (with a code) → genuinely delivered. Anything
+      // else (e.g. the order was refunded/cancelled meanwhile) is NOT a delivered voucher.
+      return !!now2 && now2.status === RedemptionStatus.DELIVERED && hasIssuedVoucher(now2.voucherCode);
     }
     this.logger.log(`[hubble] order ${order.orderNumber} voucher issued + marked DELIVERED`);
+    return true;
   }
 
   /** PROCESSING — mark the order PROCESSING (pending external); the webhook completes it. */

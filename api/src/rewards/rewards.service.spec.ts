@@ -6022,6 +6022,92 @@ describe('RewardsService', () => {
         expect(flag.data.metadata).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT' });
       });
 
+      // ── Honest DELIVERED (audit M1): the outcome is DELIVERED only when the order really holds
+      // a delivered code — a SUCCESS that was left pending must not tell the member "issued". ──
+      const confirmVia = () =>
+        (service as unknown as {
+          finishHubbleConfirm: (o: unknown, c: unknown) => Promise<{ status: string; message: string }>;
+        }).finishHubbleConfirm(
+          { id: 'o1', orderNumber: 'RDM-x' },
+          { clientId: 'deoleo', actorId: 'actor1', notifyUserId: 'u1', recipientPhone: null, ownerName: 'O', rewardName: 'Amazon Voucher', points: 500 },
+        );
+
+      it('M1: SUCCESS with NO voucher code → PENDING_RECONCILE outcome; confirm status is NOT DELIVERED and never says "issued"', async () => {
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(loadedOrder())       // loadHubbleOrder
+          .mockResolvedValueOnce({ metadata: {} });   // markHubblePendingReconcile
+        mockHubble.placeOrder.mockResolvedValue({ status: 'SUCCESS', id: 'hub-1', vouchers: [] });
+
+        const res = await confirmVia();
+
+        expect(res.status).toBe('CONFIRMED');
+        expect(res.status).not.toBe('DELIVERED');
+        expect(res.message).not.toMatch(/has been issued/);
+        expect(res.message).toMatch(/being issued/);
+        // No DELIVERED claim was even attempted; flagged for reconcile.
+        expect(
+          mockPrisma.redemptionOrder.updateMany.mock.calls.some(([a]) => (a as { data?: { status?: string } })?.data?.status === 'DELIVERED'),
+        ).toBe(false);
+        const flag = mockPrisma.redemptionOrder.update.mock.calls.at(-1)![0];
+        expect(flag.data.metadata).toMatchObject({ hubbleReconcileReason: 'HUBBLE_SUCCESS_NO_CODE' });
+      });
+
+      it('M1: SUCCESS but a MANUAL code is already on the open order (claim lost) → outcome PENDING_RECONCILE; confirm NOT DELIVERED', async () => {
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(loadedOrder())
+          .mockResolvedValueOnce({ status: 'CONFIRMED', voucherCode: 'MANUAL-CODE-1', voucherProvider: 'Gifsy' })
+          .mockResolvedValueOnce({ metadata: {} });
+        mockHubble.placeOrder.mockResolvedValue({
+          status: 'SUCCESS', id: 'hub-1', vouchers: [{ cardNumber: 'CARD-1', cardType: 'CARD_NUMBER_SECURED' }],
+        });
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+
+        const res = await confirmVia();
+
+        expect(res.status).toBe('CONFIRMED');
+        expect(res.message).not.toMatch(/has been issued/);
+      });
+
+      it('M1: issueHubbleVoucherForOrder reports PENDING_RECONCILE (not DELIVERED) for the manual-code-present lost claim', async () => {
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(loadedOrder())
+          .mockResolvedValueOnce({ status: 'PROCESSING', voucherCode: 'MANUAL-CODE-1', voucherProvider: 'Gifsy' })
+          .mockResolvedValueOnce({ metadata: {} });
+        mockHubble.placeOrder.mockResolvedValue({
+          status: 'SUCCESS', id: 'hub-1', vouchers: [{ cardNumber: 'CARD-1', cardType: 'CARD_NUMBER_SECURED' }],
+        });
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+        expect(await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1')).toBe('PENDING_RECONCILE');
+      });
+
+      it('M1: a lost claim because a CONCURRENT apply already delivered it (DELIVERED + code) is still DELIVERED', async () => {
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(loadedOrder())
+          .mockResolvedValueOnce({ status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble' });
+        mockHubble.placeOrder.mockResolvedValue({
+          status: 'SUCCESS', id: 'hub-1', vouchers: [{ cardNumber: 'CARD-1', cardType: 'CARD_NUMBER_SECURED' }],
+        });
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+        expect(await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1')).toBe('DELIVERED');
+      });
+
+      it('M1: normal SUCCESS with a code → confirm status DELIVERED + the "issued" message', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
+        mockHubble.placeOrder.mockResolvedValue({
+          status: 'SUCCESS', id: 'hub-1', vouchers: [{ cardNumber: 'CARD-1', cardType: 'CARD_NUMBER_SECURED' }],
+        });
+        const notify = jest
+          .spyOn(service as unknown as { notifyVoucherIssued: (a: string, b: string) => Promise<void> }, 'notifyVoucherIssued')
+          .mockResolvedValue(undefined);
+
+        const res = await confirmVia();
+
+        expect(res.status).toBe('DELIVERED');
+        expect(res.message).toMatch(/has been issued/);
+        expect(notify).toHaveBeenCalledWith('o1', 'deoleo');
+        notify.mockRestore();
+      });
+
       it('FAILED / not-found-on-recovery never refunds an order holding a code (guarded claims) and flags ops', async () => {
         mockPrisma.redemptionOrder.findFirst
           .mockResolvedValueOnce(loadedOrder())                                         // loadHubbleOrder

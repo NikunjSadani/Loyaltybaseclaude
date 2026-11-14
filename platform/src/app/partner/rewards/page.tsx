@@ -750,6 +750,7 @@ function VoucherRedeemSheet({
   const [success,    setSuccess]    = useState(false);
   // True when confirm returned DELIVERED (Hubble instant issue — the code is already in Orders).
   const [issued,     setIssued]     = useState(false);
+  const [logoFailed, setLogoFailed] = useState(false);
   const [orderId,    setOrderId]    = useState<string | null>(null);
   // Vendor-PII consent (decision #15) — default UNTICKED; blocks redeem for vendor items.
   const [consent,    setConsent]    = useState(false);
@@ -785,7 +786,10 @@ function VoucherRedeemSheet({
     : { min: minFreeAmount, max: null as number | null };
   const minAmt = band.min;
   const maxAmt = band.max;
-  const aboveMax = !isFixed && maxAmt != null && freeAmt > maxAmt;
+  // An empty band (₹ max below ₹ min — the tenant floor above the item max, a band narrower than
+  // one rupee, or a huge rate): no amount can ever pass, so say so instead of "(min ₹500, max ₹300)".
+  const unredeemable = !isFixed && !amountOptions && maxAmt != null && maxAmt < minAmt;
+  const aboveMax = !isFixed && !unredeemable && maxAmt != null && freeAmt > maxAmt;
   const canAfford = myBalance >= ptsNeeded && (isFixed || (freeAmt >= minAmt && !aboveMax));
 
   // Client-side UX validation for FREE_AMOUNT (server is authoritative).
@@ -898,10 +902,12 @@ function VoucherRedeemSheet({
           {/* Voucher header — the item's real name + its image/brand logo (same data as the
               catalogue tile); the gradient emoji is only the fallback for an item with no image. */}
           <div className="flex items-center gap-3">
-            {voucher.imageDataUrl ? (
+            {voucher.imageDataUrl && !logoFailed ? (
               <div className="w-14 h-14 shrink-0 rounded-2xl border border-gray-100 bg-white flex items-center justify-center overflow-hidden">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={voucher.imageDataUrl} alt={`${displayName} logo`} className="max-h-full max-w-full object-contain p-1.5" />
+                <img src={voucher.imageDataUrl} alt={`${displayName} logo`} className="max-h-full max-w-full object-contain p-1.5"
+                  // A broken logo URL falls back to the emoji tile (never a broken-image icon).
+                  onError={() => setLogoFailed(true)} />
               </div>
             ) : (
               <div className="w-14 h-14 shrink-0 rounded-2xl flex items-center justify-center text-3xl"
@@ -981,10 +987,18 @@ function VoucherRedeemSheet({
           {!isFixed && !amountOptions && (
             <div>
               <label className="text-xs font-medium text-gray-600 block mb-1">
-                Amount to redeem * <span className="text-gray-400 font-normal" data-testid="voucher-amount-band">
-                  ({maxAmt != null ? `min ${fmtInr(minAmt)}, max ${fmtInr(maxAmt)}` : `min ${fmtInr(minAmt)}`})
-                </span>
+                Amount to redeem *{' '}
+                {!unredeemable && (
+                  <span id="voucher-amount-band" className="text-gray-400 font-normal" data-testid="voucher-amount-band">
+                    ({maxAmt != null ? `min ${fmtInr(minAmt)}, max ${fmtInr(maxAmt)}` : `min ${fmtInr(minAmt)}`})
+                  </span>
+                )}
               </label>
+              {unredeemable && (
+                <p id="voucher-amount-unavailable" data-testid="voucher-unredeemable" className="text-xs text-red-500 mb-1 flex items-center gap-1">
+                  <AlertCircle className="h-3 w-3" />This voucher can&apos;t be redeemed right now
+                </p>
+              )}
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-bold text-gray-500">₹</span>
                 <input
@@ -997,9 +1011,16 @@ function VoucherRedeemSheet({
                   // Whole rupees only: "750.5" / "750,5" / a pasted decimal stay visible → "Check the amount" on commit.
                   {...amountField.inputProps}
                   // Locked once the OTP is sent — the order already carries this amount.
-                  disabled={otpSent}
+                  // …and locked when no amount can pass the band.
+                  disabled={otpSent || unredeemable}
                   aria-invalid={amtInvalidShown || !!amountHint ? true : undefined}
-                  aria-describedby={amtInvalidShown ? 'voucher-amount-error' : amountHint ? 'voucher-amount-hint' : undefined}
+                  // The band ("min ₹X, max ₹Y") always describes the field; an error/hint is added to it.
+                  aria-describedby={
+                    unredeemable
+                      ? 'voucher-amount-unavailable'
+                      : ['voucher-amount-band', amtInvalidShown ? 'voucher-amount-error' : amountHint ? 'voucher-amount-hint' : null]
+                          .filter(Boolean).join(' ')
+                  }
                   aria-label="Voucher amount"
                 />
               </div>
@@ -1044,9 +1065,11 @@ function VoucherRedeemSheet({
               <Button variant="primary" className="w-full" loading={submitting}
                 // An INVALID amount text never disables the button (it can't say why): the tap
                 // commits and shows "Check the amount" instead of sending.
-                disabled={!amtInvalid && (!canAfford || !!amountHint || (!isFixed && freeAmt < minAmt) || aboveMax || (!!amountOptions && !amountOptions.includes(freeAmt)) || (needConsent && !consent))}
+                disabled={unredeemable || (!amtInvalid && (!canAfford || !!amountHint || (!isFixed && freeAmt < minAmt) || aboveMax || (!!amountOptions && !amountOptions.includes(freeAmt)) || (needConsent && !consent)))}
                 onClick={handleSendOtp}>
-                {amtInvalidShown
+                {unredeemable
+                  ? 'Not available'
+                  : amtInvalidShown
                   ? WHOLE_RUPEE_INVALID_MESSAGE
                   : amountOptions && !amountOptions.includes(freeAmt)
                   ? 'Choose an amount'

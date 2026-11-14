@@ -8,7 +8,7 @@
  *   3. the success copy follows the confirm status (DELIVERED = ready; else processing).
  */
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
@@ -127,14 +127,40 @@ describe('VB — admin band on the voucher sheet', () => {
     expect(screen.getByRole('button', { name: 'Min ₹250 required' })).toBeDisabled();
   });
 
-  it('VB3: an item with no max shows only the min (and never blocks a high amount on max)', async () => {
-    stub([{ ...AMAZON, voucherType: 'FREE_AMOUNT', minRedemptionPoints: 100, maxRedemptionPoints: null }]);
+  // (A min-only band is not a real case: the server's FREE_AMOUNT needs BOTH bounds and the admin
+  // save requires both — the no-max branch only arises at an unknown rate, see the unit tests.)
+  it('VB3: a wide band (Deoleo-style ₹100–₹50,000, floor ₹250) — a high in-band amount is allowed; the band describes the input', async () => {
+    stub([{ ...AMAZON, name: 'Flexi Voucher', imageUrls: [], minRedemptionPoints: 100, maxRedemptionPoints: 50_000 }]);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await openSheet(user, 'Flexi Voucher');
+    expect(screen.getByTestId('voucher-amount-band')).toHaveTextContent('(min ₹250, max ₹50,000)');
+    const input = screen.getByLabelText(/voucher amount/i);
+    // L4: the band is the field's description in the normal state…
+    expect(input).toHaveAttribute('aria-describedby', 'voucher-amount-band');
+    await user.type(input, '40000');
+    expect(screen.getByRole('button', { name: /send otp/i })).toBeEnabled();
+    // …and stays alongside the hint when one shows.
+    await user.clear(input);
+    await user.type(input, '60000');
+    expect(input).toHaveAttribute('aria-describedby', 'voucher-amount-band voucher-amount-hint');
+  });
+
+  it('VB3b (L1): an empty band (tenant floor ₹250 above the item max ₹200) says it can\'t be redeemed and locks the input + button', async () => {
+    const fetchMock = stub([{ ...AMAZON, minRedemptionPoints: 100, maxRedemptionPoints: 200 }]);
     render(<RewardsPage />);
     const user = userEvent.setup();
     await openSheet(user, 'Amazon Voucher');
-    expect(screen.getByTestId('voucher-amount-band')).toHaveTextContent(/^\(min ₹250\)$/);
-    await user.type(screen.getByLabelText(/voucher amount/i), '40000');
-    expect(screen.getByRole('button', { name: /send otp/i })).toBeEnabled();
+    expect(screen.getByTestId('voucher-unredeemable')).toHaveTextContent("This voucher can't be redeemed right now");
+    expect(screen.queryByTestId('voucher-amount-band')).toBeNull(); // never "(min ₹250, max ₹200)"
+    expect(screen.queryByText(/max ₹200/)).toBeNull();
+    const input = screen.getByLabelText(/voucher amount/i);
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute('aria-describedby', 'voucher-amount-unavailable');
+    const btn = screen.getByRole('button', { name: 'Not available' });
+    expect(btn).toBeDisabled();
+    await user.click(btn);
+    expect(redeemCalls(fetchMock)).toHaveLength(0);
   });
 
   it('VB4: fixed denominations — only the listed amounts are offered (no text input, no band label); one below the floor is disabled', async () => {
@@ -161,6 +187,16 @@ describe('VB — brand on the sheet', () => {
     expect(screen.getByAltText('Amazon Voucher logo')).toHaveAttribute('src', 'https://cdn.example/amazon.png');
     expect(screen.queryByText('Voucher — Any Amount')).toBeNull();
     expect(screen.getByText('Any amount')).toBeInTheDocument();
+  });
+
+  it('VB5b (L5): a broken logo URL falls back to the emoji tile', async () => {
+    stub([AMAZON]);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await openSheet(user, 'Amazon Voucher');
+    fireEvent.error(screen.getByAltText('Amazon Voucher logo'));
+    expect(screen.queryByAltText('Amazon Voucher logo')).toBeNull();
+    expect(screen.getByTestId('voucher-sheet-name')).toHaveTextContent('Amazon Voucher');
   });
 
   it('VB6: an item with no image falls back to the emoji tile (and still shows its name)', async () => {
