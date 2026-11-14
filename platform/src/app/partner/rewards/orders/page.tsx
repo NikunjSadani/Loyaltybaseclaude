@@ -334,8 +334,14 @@ export default function OrdersPage() {
     <div className="space-y-5 fade-in">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">My Orders</h1>
-        {/* The TRUE total (backend count), not just the loaded page — falls back to the loaded count. */}
-        <span data-testid="orders-count" className="text-sm text-gray-500">{total ?? orders.length} orders</span>
+        {/* The TRUE total (backend count), not just the loaded page — falls back to the loaded count.
+            Shown only once the list request has RESOLVED: while loading (or after a failed load)
+            there is no honest count, so a "0 orders" never flashes ahead of the real list. */}
+        {loading ? (
+          <span data-testid="orders-count-loading" className="text-sm text-gray-400">Loading…</span>
+        ) : !error ? (
+          <span data-testid="orders-count" className="text-sm text-gray-500">{total ?? orders.length} orders</span>
+        ) : null}
       </div>
 
       {loading ? (
