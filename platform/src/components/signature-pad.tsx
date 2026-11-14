@@ -27,14 +27,17 @@ interface SignaturePadProps {
   /** Hint shown faint in the empty pad. */
   placeholder?: string;
   className?: string;
+  /** Fires when a stroke begins — lets the page pin its height so rows below can't move the pad (SIG-2). */
+  onStrokeStart?: () => void;
 }
 
 export const SignaturePad = forwardRef<SignaturePadHandle, SignaturePadProps>(function SignaturePad(
-  { onInkedChange, ariaLabel = 'Signature pad — draw your signature here', placeholder = 'Sign here', className },
+  { onInkedChange, onStrokeStart, ariaLabel = 'Signature pad — draw your signature here', placeholder = 'Sign here', className },
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
+  const strokeDrew = useRef(false);
   const [hasSigned, setHasSigned] = useState(false);
 
   const setInked = (v: boolean) => {
@@ -58,7 +61,11 @@ export const SignaturePad = forwardRef<SignaturePadHandle, SignaturePadProps>(fu
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
     if (!canvas || !ctx) return;
+    // A second finger / palm while a stroke is in progress is ignored (it must not reset the stroke).
+    if (drawing.current || ('touches' in e && e.touches.length > 1)) return;
+    onStrokeStart?.();
     drawing.current = true;
+    strokeDrew.current = false;
     const p = pos(canvas, e);
     ctx.beginPath();
     ctx.moveTo(p.x, p.y);
@@ -78,10 +85,18 @@ export const SignaturePad = forwardRef<SignaturePadHandle, SignaturePadProps>(fu
     ctx.stroke();
     ctx.beginPath();
     ctx.moveTo(p.x, p.y);
-    if (!hasSigned) setInked(true);
+    strokeDrew.current = true; // inked flips on stroke END, never mid-stroke (SIG-2)
   };
 
-  const end = () => { drawing.current = false; };
+  // SIG-2 (2026-11-14): flipping "inked" on the first segment re-rendered the parent mid-stroke; when that
+  // removed hint/validation rows below the pad (page scrolled to the bottom) the pad jumped under the finger
+  // and the stroke broke. Report it when the stroke ends instead.
+  const end = () => {
+    const drew = drawing.current && strokeDrew.current;
+    drawing.current = false;
+    strokeDrew.current = false;
+    if (drew && !hasSigned) setInked(true);
+  };
 
   useImperativeHandle(ref, () => ({
     isEmpty: () => !hasSigned,
@@ -132,6 +147,7 @@ export const SignaturePad = forwardRef<SignaturePadHandle, SignaturePadProps>(fu
           onTouchStart={start}
           onTouchMove={move}
           onTouchEnd={end}
+          onTouchCancel={end}
         />
       </div>
     </div>
