@@ -14,7 +14,7 @@ import { Sidebar } from '@/components/layout/sidebar';
 import { SiteFooter } from '@/components/layout/site-footer';
 import type { NavItem } from '@/components/layout/nav-bottom';
 import type { SidebarSection } from '@/components/layout/sidebar';
-import { usePartnerIdentity } from '@/lib/partner-identity';
+import { usePartnerIdentity, announceActivePartnerChanged } from '@/lib/partner-identity';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
@@ -122,6 +122,8 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
   const handleGroupOverview: React.MouseEventHandler<HTMLAnchorElement> = async (e) => {
     e.preventDefault();
     await setActivePartner(null);
+    // The layout stays mounted across router.push — refresh its header/nav to the OWN outlet.
+    announceActivePartnerChanged();
     router.push('/partner/group');
   };
 

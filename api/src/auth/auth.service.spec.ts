@@ -160,6 +160,55 @@ describe('AuthService', () => {
       expect((result as any).conversionRate).toBe(2);
     });
 
+    // ── /auth/me re-hydrate carries the partner-shell header identity (one rule with the login reply) ──
+    describe('partner display identity on /auth/me', () => {
+      // Restore the shared outlet stub shape other blocks rely on.
+      afterEach(() => { (mockPrisma as any).outlet = { count: jest.fn() }; });
+      const stubBase = () => {
+        (mockPrisma as any).user.findUnique = jest.fn().mockResolvedValue({ name: 'VIKRAM SINGH', phone: '99' });
+        (mockPrisma as any).channelPartner.findUnique.mockResolvedValue(null);
+        (mockPrisma as any).salesUser.findUnique.mockResolvedValue(null);
+      };
+
+      it('adds businessName + primary-outlet outletName for a partner role', async () => {
+        stubBase();
+        (mockPrisma as any).channelPartner.findFirst = jest.fn()
+          .mockResolvedValueOnce({ id: 'cp1', groupId: null })              // resolveActivePartnerId (own)
+          .mockResolvedValueOnce({ businessName: 'Chakradhar Traders' });   // display row
+        (mockPrisma as any).outlet = { findMany: jest.fn().mockResolvedValue([{ name: 'Chakradhar Marketing' }]) };
+
+        const result = await service.getMe({ ...partnerUser, role: 'WHOLESALER' });
+
+        expect(result.user).toMatchObject({ businessName: 'Chakradhar Traders', outletName: 'Chakradhar Marketing' });
+        expect((mockPrisma as any).outlet.findMany).toHaveBeenCalledWith(expect.objectContaining({
+          where: { clientId: 'deoleo', partnerId: 'cp1', deletedAt: null },
+          orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+        }));
+      });
+
+      it('non-partner role: no display lookup and no new keys (response unchanged)', async () => {
+        stubBase();
+        (mockPrisma as any).channelPartner.findFirst = jest.fn();
+        (mockPrisma as any).outlet = { findMany: jest.fn() };
+
+        const result = await service.getMe({ ...partnerUser, role: 'SALES_ASM' });
+
+        expect((mockPrisma as any).channelPartner.findFirst).not.toHaveBeenCalled();
+        expect((mockPrisma as any).outlet.findMany).not.toHaveBeenCalled();
+        expect(result.user).not.toHaveProperty('businessName');
+        expect(result.user).not.toHaveProperty('outletName');
+      });
+
+      it('a display-lookup failure never fails /auth/me', async () => {
+        stubBase();
+        (mockPrisma as any).channelPartner.findFirst = jest.fn().mockRejectedValue(new Error('db blip'));
+
+        const result = await service.getMe({ ...partnerUser, role: 'SSS' });
+        expect(result.user.id).toBe('u1');
+        expect(result.user).not.toHaveProperty('outletName');
+      });
+    });
+
     it('JOB B: returns the RAW beneficiary + paymentDetailsStatus even when UNVERIFIED (rewards flow needs the raw fields)', async () => {
       // The redemption flow reads the raw bank/upi to decide "has beneficiary" and create the payout,
       // so /auth/me must NOT hide them — it only ADDS paymentDetailsStatus so the FE profile can hide.
@@ -541,6 +590,89 @@ describe('AuthService', () => {
       expect(mockPrisma.outlet.count).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ partnerId: 'cp1', isActive: true, deletedAt: null }) }),
       );
+    });
+
+    // ── Partner-shell header identity in the login reply (outlet name from first paint) ──
+    describe('login reply carries the partner display identity', () => {
+      const partnerLogin = (role = 'WHOLESALER') => {
+        mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+        mockPrisma.otpCode.update.mockResolvedValue({});
+        mockPrisma.user.findFirst.mockResolvedValue({
+          id: 'user_1', role, clientId, status: 'ACTIVE', name: 'VIKRAM SINGH', phone,
+        });
+        mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
+      };
+
+      it('adds businessName + the PRIMARY outlet master name (same rule as /partner/me)', async () => {
+        partnerLogin();
+        // gate lookup, resolveActivePartnerId (own), then the display partner row.
+        mockPrisma.channelPartner.findFirst
+          .mockResolvedValueOnce({ id: 'cp1', isActive: true })
+          .mockResolvedValueOnce({ id: 'cp1', groupId: null })
+          .mockResolvedValueOnce({ businessName: 'Chakradhar Traders' });
+        mockPrisma.outlet.count.mockResolvedValue(1);
+        (mockPrisma as any).outlet.findMany = jest.fn().mockResolvedValue([{ name: 'Chakradhar Marketing' }]);
+
+        const result = await service.verifyOtp(phone, '1234', clientId);
+
+        expect(result.user).toMatchObject({
+          id: 'user_1', name: 'VIKRAM SINGH',
+          businessName: 'Chakradhar Traders', outletName: 'Chakradhar Marketing',
+        });
+        // Primary-outlet selection identical to resolvePartnerActivity (isPrimary desc, createdAt asc).
+        expect((mockPrisma as any).outlet.findMany).toHaveBeenCalledWith(expect.objectContaining({
+          where: { clientId, partnerId: 'cp1', deletedAt: null },
+          orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+        }));
+        // The default (own) outlet — never a switched sibling at login.
+        expect((mockPrisma.channelPartner.findFirst as jest.Mock).mock.calls[1][0].where)
+          .toMatchObject({ userId: 'user_1', clientId, isParent: false });
+      });
+
+      it('outletName is null when the partner has no outlet (FE falls back to businessName)', async () => {
+        partnerLogin();
+        mockPrisma.channelPartner.findFirst
+          .mockResolvedValueOnce({ id: 'cp1', isActive: true })
+          .mockResolvedValueOnce({ id: 'cp1', groupId: null })
+          .mockResolvedValueOnce({ businessName: 'Biz Only' });
+        mockPrisma.outlet.count.mockResolvedValue(1);
+        (mockPrisma as any).outlet.findMany = jest.fn().mockResolvedValue([]);
+
+        const result = await service.verifyOtp(phone, '1234', clientId);
+        expect(result.user).toMatchObject({ businessName: 'Biz Only', outletName: null });
+      });
+
+      it('a non-partner login reply is unchanged (no businessName/outletName keys)', async () => {
+        partnerLogin();
+        mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+
+        const result = await service.verifyOtp(phone, '1234', clientId);
+        expect(Object.keys(result.user).sort()).toEqual(['id', 'name', 'phone', 'role']);
+      });
+
+      it('a non-partner ROLE never runs the display lookup (only the existing deactivation gate query)', async () => {
+        partnerLogin('SALES_ASM');
+        mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+        (mockPrisma as any).outlet.findMany = jest.fn();
+
+        const result = await service.verifyOtp(phone, '1234', clientId);
+        expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledTimes(1); // the gate, not the display
+        expect((mockPrisma as any).outlet.findMany).not.toHaveBeenCalled();
+        expect(Object.keys(result.user).sort()).toEqual(['id', 'name', 'phone', 'role']);
+      });
+
+      it('a display-lookup failure never blocks the login (legacy reply)', async () => {
+        partnerLogin();
+        mockPrisma.channelPartner.findFirst
+          .mockResolvedValueOnce({ id: 'cp1', isActive: true })
+          .mockRejectedValueOnce(new Error('db blip'));
+        mockPrisma.outlet.count.mockResolvedValue(1);
+
+        const result = await service.verifyOtp(phone, '1234', clientId);
+        expect(result.accessToken).toBe('mock.jwt.token');
+        expect(result.user).not.toHaveProperty('outletName');
+        expect(result.user).not.toHaveProperty('businessName');
+      });
     });
 
     it('does not gate a non-partner login (sales/admin have no ChannelPartner)', async () => {

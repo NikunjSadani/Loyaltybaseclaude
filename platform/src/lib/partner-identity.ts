@@ -2,8 +2,10 @@
    Sources the logged-in partner's real identity from GET /api/partner/me (the
    channel-partner record), replacing the demo persona in lib/partner-session
    (DEMO_SESSIONS — "Rajesh Kumar / Kumar General Store / Gold") for shell/header
-   display. Falls back to the JWT user name while loading or if the caller has no
-   channel-partner row — NEVER the demo persona, so no flash-of-demo. Client-only.
+   display. While loading it shows the OUTLET identity stored from the login reply
+   (outletName/businessName), so the header title never flashes the person's name; a
+   pre-deploy stored login without those fields (or a caller with no channel-partner row)
+   falls back to the JWT user name — NEVER the demo persona, so no flash-of-demo. Client-only.
 ─────────────────────────────────────────────────────────────────────────────── */
 
 'use client';
@@ -173,27 +175,53 @@ export function usePartnerIdentity(): PartnerIdentity {
   // (fire-once, no loop) explicit and robust against any future re-fetch.
   const healedRef = useRef(false);
 
-  // Seed the cached display name AFTER mount — not during render (that localStorage read
+  // Seed the cached display identity AFTER mount — not during render (that localStorage read
   // during the initial render is what caused the React #418 hydration mismatch). Post-
   // hydration SSR and the first client paint agree (both empty), then this fills the name
   // on the first post-mount commit (≤1 frame later), well before /partner/me resolves. The
   // old code filled it during the first paint but at the cost of the app-wide hydration error.
+  //
+  // The header TITLE is seeded from the OUTLET identity the login reply carries (outletName /
+  // businessName — the same values /partner/me returns for the login's default outlet), never
+  // the person's user.name, so the title no longer flips person → outlet on every load. The
+  // person name still seeds ownerName (the sub-line). A stored login from BEFORE the backend
+  // added those fields has neither → legacy behaviour (person name as the provisional title).
   useEffect(() => {
-    const stored = getStoredUser()?.name ?? '';
+    const stored = getStoredUser();
     if (!stored) return;
-    setIdentity((prev) => ({
-      ...prev,
-      businessName: prev.businessName || stored,
-      ownerName: prev.ownerName || stored,
-    }));
+    const personName = stored.name ?? '';
+    const loginOutletName = stored.outletName || null;
+    const loginTitle = loginOutletName || stored.businessName || '';
+    if (!personName && !loginTitle) return;
+    setIdentity((prev) => {
+      // /partner/me already settled — its (authoritative) values win; nothing to seed.
+      if (!prev.loading) return prev;
+      return {
+        ...prev,
+        businessName: prev.businessName || (loginTitle ? stored.businessName || loginTitle : personName),
+        outletName: prev.outletName ?? loginOutletName,
+        ownerName: prev.ownerName || personName,
+      };
+    });
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/partner/me', { headers: { ...authHeader() } })
-      .then((r) => (r.ok ? r.json() : null))
+    // Monotonic request id: a refetch (after an outlet pick) must never be overwritten by an
+    // older in-flight response for the previously-active outlet.
+    let seq = 0;
+    const load = () => {
+      const mine = ++seq;
+      fetch('/api/partner/me', { headers: { ...authHeader() } })
+      // A non-OK reply is a FAILURE (→ .catch keeps the seeded outlet title), not a resolved
+      // "no channel partner" — previously it fell through with d=null and replaced the title
+      // with the person's name. (A 200 with data:null is still the resolved no-partner state.)
+      .then((r) => {
+        if (!r.ok) throw new Error(`partner/me ${r.status}`);
+        return r.json();
+      })
       .then((res) => {
-        if (cancelled) return;
+        if (cancelled || mine !== seq) return;
         const d = res?.data;
         const name = getStoredUser()?.name ?? '';
         // Self-heal: the backend degraded to the login's own outlet because the
@@ -228,13 +256,35 @@ export function usePartnerIdentity(): PartnerIdentity {
         }));
       })
       .catch(() => {
-        // Keep the JWT-name fallback, but settle loading so gates can resolve.
-        if (!cancelled) setIdentity((prev) => ({ ...prev, loading: false }));
+        // Keep the seeded (login-reply / JWT-name) fallback, but settle loading so gates can resolve.
+        if (!cancelled && mine === seq) setIdentity((prev) => ({ ...prev, loading: false }));
       });
+    };
+    load();
+    // The active outlet is an httpOnly cookie the client can't observe, and the partner LAYOUT
+    // stays mounted across a client-side router.push — so a pick on /partner/select would leave
+    // the shell header/nav on the pre-pick outlet until a full reload. Callers that change the
+    // selection announce it; we re-read /partner/me (now carrying the new cookie).
+    const onChanged = () => load();
+    window.addEventListener(ACTIVE_PARTNER_CHANGED_EVENT, onChanged);
     return () => {
       cancelled = true;
+      window.removeEventListener(ACTIVE_PARTNER_CHANGED_EVENT, onChanged);
     };
   }, []);
 
   return identity;
+}
+
+/** Window event fired after the `active_partner_id` selection changes without a full reload. */
+export const ACTIVE_PARTNER_CHANGED_EVENT = 'gifsy:active-partner-changed';
+
+/**
+ * Tell every mounted usePartnerIdentity() (notably the partner layout's header/nav) that the
+ * active outlet changed, so it re-fetches /partner/me. Call AFTER `await setActivePartner(...)`
+ * when navigating client-side (router.push); a full-page navigation doesn't need it.
+ */
+export function announceActivePartnerChanged(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event(ACTIVE_PARTNER_CHANGED_EVENT));
 }

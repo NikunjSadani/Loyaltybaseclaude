@@ -25,7 +25,7 @@ vi.mock('@/components/layout/nav-bottom', () => ({ NavBottom: () => null }));
 vi.mock('@/components/layout/sidebar', () => ({ Sidebar: () => null }));
 vi.mock('@/components/layout/site-footer', () => ({ SiteFooter: () => null }));
 vi.mock('@/components/auth/require-auth', () => ({ RequireAuth: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
-vi.mock('@/lib/partner-identity', () => ({ usePartnerIdentity: () => ({}) }));
+vi.mock('@/lib/partner-identity', () => ({ usePartnerIdentity: () => ({}), announceActivePartnerChanged: vi.fn() }));
 vi.mock('@/lib/platform/client-config-context', () => ({ useClientConfig: () => ({ branding: {} }) }));
 vi.mock('@/lib/auth-client', () => ({ logout: vi.fn(), PORTAL_ROLES: { partner: [] } }));
 

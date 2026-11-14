@@ -35,6 +35,36 @@ export interface StoredUser {
   name: string;
   role: string;
   phone: string;
+  /**
+   * Partner logins only (OTP-login reply): the default outlet's display identity — the same
+   * businessName / outletName GET /partner/me returns — so the partner header paints the outlet
+   * name from the first frame. Absent for non-partner logins and for sessions stored before the
+   * backend added them (the header then falls back to the legacy person-name seed).
+   */
+  businessName?: string | null;
+  outletName?: string | null;
+}
+
+/**
+ * Build the stored `user` from a GET /auth/me reply (the login page's live-cookie re-hydrate).
+ * Mirrors what the post-OTP path persists — id/name/role/phone, plus the partner header identity
+ * (businessName/outletName) when /auth/me carries it, so that session also paints the OUTLET name
+ * from the first frame. Never the token (AF-6). The outlet keys are omitted when absent, exactly
+ * like a non-partner OTP login.
+ */
+export function storedUserFromAuthMe(data: {
+  role: string;
+  user?: { id?: string; name?: string; phone?: string | null; businessName?: string | null; outletName?: string | null };
+}): StoredUser {
+  const u = data.user ?? {};
+  return {
+    id: u.id ?? '',
+    name: u.name ?? '',
+    role: data.role,
+    phone: u.phone ?? '',
+    ...('businessName' in u ? { businessName: u.businessName ?? null } : {}),
+    ...('outletName' in u ? { outletName: u.outletName ?? null } : {}),
+  };
 }
 
 export function getStoredUser(): StoredUser | null {

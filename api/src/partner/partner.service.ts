@@ -36,6 +36,7 @@ import {
 } from '../common/payment-type.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { pickDeliveryDefaults, DeliveryDefaults } from './delivery-defaults.helper';
+import { PRIMARY_OUTLET_ORDER_BY, partnerOutletsWhere, pickPrimaryOutletName } from './partner-display.helper';
 import { AppliesToOutletFacets } from '../common/applies-to/applies-to';
 import { kpiAppliesToOutlet, outletPrimaryFallback } from '../sales/outlet-kpi-scope.helper';
 
@@ -224,9 +225,11 @@ export class PartnerService {
     // NB: CreditPayoutEntry.outletId stores the outlet CODE (not the Outlet PK) — it is a
     // bare string set from the uploaded "Outlet ID", resolved elsewhere via outletCode
     // (credits.service confirmBatch). So the credit-payout scope MUST key on outletCode.
+    // Primary-outlet rule shared with the OTP-login reply (partner-display.helper) so the header
+    // name painted at login is the SAME one /partner/me later confirms.
     const outlets = await this.prisma.outlet.findMany({
-      where: { clientId, partnerId, deletedAt: null },
-      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+      where: partnerOutletsWhere(clientId, partnerId),
+      orderBy: PRIMARY_OUTLET_ORDER_BY,
       select: {
         name: true,
         outletCode: true,
@@ -244,7 +247,7 @@ export class PartnerService {
     // The ACTIVE outlet's MASTER name (the admin-roster Outlet.name) for the partner-shell header,
     // resolved from the SAME primary-outlet selection as outletType. Null when the partner has no
     // outlet — the FE then falls back to businessName so the header never shows blank.
-    const outletName = outlets[0]?.name ?? null;
+    const outletName = pickPrimaryOutletName(outlets);
     const outletCodes = outlets.map((o) => o.outletCode);
     // Redeem-form address pre-fill from the SAME primary-outlet row (outlet address only).
     const deliveryDefaults = pickDeliveryDefaults(outlets[0] ?? null);

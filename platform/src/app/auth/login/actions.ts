@@ -17,7 +17,8 @@ interface VerifyOTPResult {
   role?: string;
   /** JWT access token — the client stores this in localStorage (api-client reads it for Bearer auth). */
   token?: string;
-  user?: { id: string; name: string; role: string; phone: string };
+  /** Partner logins also carry businessName/outletName (header identity) — stored as-is by the login page. */
+  user?: { id: string; name: string; role: string; phone: string; businessName?: string | null; outletName?: string | null };
   error?: string;
 }
 

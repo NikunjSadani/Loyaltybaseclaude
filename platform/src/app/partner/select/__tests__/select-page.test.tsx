@@ -32,8 +32,10 @@ vi.mock('@/lib/active-partner-actions', () => ({
 
 // The picker reads identity via usePartnerIdentity (which fetches /partner/me).
 let mockIdentity: PartnerIdentity;
+const announceMock = vi.fn();
 vi.mock('@/lib/partner-identity', () => ({
   usePartnerIdentity: () => mockIdentity,
+  announceActivePartnerChanged: () => announceMock(),
 }));
 
 import PartnerSelectPage from '../page';
@@ -75,6 +77,7 @@ beforeEach(() => {
   replaceMock.mockClear();
   pushMock.mockClear();
   setActivePartnerMock.mockClear();
+  announceMock.mockClear();
 });
 
 describe('PS — outlet picker', () => {
@@ -118,6 +121,9 @@ describe('PS — outlet picker', () => {
     await user.click(screen.getByText('Kumar Wholesale'));
     await waitFor(() => expect(setActivePartnerMock).toHaveBeenCalledWith('p-sib'));
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith('/partner/dashboard'));
+    // The mounted partner layout is told to re-read /partner/me AFTER the cookie is written.
+    expect(announceMock).toHaveBeenCalledTimes(1);
+    expect(setActivePartnerMock.mock.invocationCallOrder[0]).toBeLessThan(announceMock.mock.invocationCallOrder[0]);
   });
 
   it('PS4: selecting Group Overview clears the cookie and navigates to /partner/group', async () => {
