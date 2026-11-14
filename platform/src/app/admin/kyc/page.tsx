@@ -24,7 +24,7 @@ import {
   type KycSlaResult,
 } from '@/lib/kyc-sla-stage';
 import { fetchHolidayDateSet } from '@/lib/holidays';
-import { useDownloadAction } from '@/lib/exports/use-download-action';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
@@ -147,7 +147,6 @@ export default function KYCPage() {
   const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL' | 'AWAITING_GIFSY'>('ALL');
   const [programFilter, setProgramFilter] = useState('');
   const exportAction = useDownloadAction();
-  const exportLoading = exportAction.busy;
 
   useEffect(() => {
     // Fetch the SLA targets + holiday calendar alongside the list so the stage-aware
@@ -217,12 +216,8 @@ export default function KYCPage() {
   const rejectedMode = statusFilter === 'REJECTED';
   const gifsyCount = useMemo(() => kycList.filter((k) => k.awaitingGifsy).length, [kycList]);
   const exportEmpty = rejectedMode ? stats.rejected === 0 : gifsyCount === 0;
-  const exportDisabled = exportLoading || exportEmpty;
-  const exportLabel = exportLoading
-    ? 'Exporting…'
-    : rejectedMode
-    ? 'Export Rejected Outlets'
-    : 'Export Gifsy Review Sheet';
+  const exportDisabled = exportAction.blocked || exportEmpty;
+  const exportLabel = downloadButtonLabel(exportAction, rejectedMode ? 'Export Rejected Outlets' : 'Export Gifsy Review Sheet');
   const exportTitle = rejectedMode
     ? 'Download the Rejected-outlets report — full KYC + which fields were rejected + remarks.'
     : 'Download the Gifsy-stage review worksheet — submissions awaiting your final Gifsy decision (PENDING_GIFSY), to verify offline and re-upload. It does NOT export the whole on-screen list.';
@@ -342,7 +337,7 @@ export default function KYCPage() {
                 <Download className="w-4 h-4" />
                 {exportLabel}
               </button>
-              {!exportLoading && exportEmpty && (
+              {!exportAction.busy && exportEmpty && (
                 <span className="text-xs text-gray-400">{exportEmptyHint}</span>
               )}
               <DownloadActionStatus action={exportAction} className="max-w-xs" />

@@ -18,7 +18,7 @@ import { Download, Loader2, BarChart3 } from 'lucide-react';
 import { visibilityApi } from '@/lib/visibility';
 import type { VisibilityReport } from '@/lib/visibility-types';
 import { windowOptions } from '@/lib/visibility-window';
-import { useDownloadAction } from '@/lib/exports/use-download-action';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 type Variant = 'admin' | 'tenant';
@@ -35,7 +35,6 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const exportAction = useDownloadAction();
-  const exporting = exportAction.busy;
 
   const fetcher = variant === 'admin' ? visibilityApi.getReport : visibilityApi.getTenantReport;
 
@@ -93,10 +92,10 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
         </div>
         {variant === 'admin' && (
           <div className="flex flex-col items-end gap-1">
-            <button onClick={handleExport} disabled={exporting}
+            <button onClick={handleExport} disabled={exportAction.blocked}
               className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
-              {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-              {exporting ? 'Exporting…' : 'Export Excel'}
+              {exportAction.busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              {downloadButtonLabel(exportAction, 'Export Excel')}
             </button>
             <DownloadActionStatus action={exportAction} className="mt-1 max-w-sm" />
           </div>

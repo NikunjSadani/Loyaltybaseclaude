@@ -39,7 +39,7 @@ import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useAuthClientId } from '@/lib/platform/use-auth-tenant';
 import { leafIdHeaderForTenant } from '@/lib/employee-hierarchy';
 import { downloadBlob } from '@/lib/download';
-import { useDownloadAction } from '@/lib/exports/use-download-action';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
 import { chunkArray } from '@/lib/chunk';
 import type { HierarchyEmployee } from '@/types';
@@ -1231,15 +1231,11 @@ export default function OutletsPage() {
             <div>
               <h2 className="text-sm font-semibold text-gray-700">Outlet Master</h2>
               <p className="text-xs text-gray-400 mt-0.5">Complete outlet dump with KYC, banking, hierarchy, and lifecycle data</p>
-              {masterDownload.status === 'error' && (
-                <p data-testid="download-outlet-master-error" role="alert" className="text-xs text-red-600 mt-1 flex items-center gap-1">
-                  <AlertCircle className="w-3.5 h-3.5" /> {masterDownload.message ?? 'Could not download the outlet master. Please try again.'}
-                </p>
-              )}
             </div>
+            <div className="flex flex-col items-end gap-1.5 max-w-xs">
             <button
               data-testid="download-outlet-master"
-              disabled={masterDownload.busy}
+              disabled={masterDownload.blocked}
               onClick={() => {
                 void masterDownload.run('/api/admin/reports/outlet-master', {
                   fallbackFileName: `outlet-master-${new Date().toISOString().split('T')[0]}.xlsx`,
@@ -1247,10 +1243,12 @@ export default function OutletsPage() {
               }}
               className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-semibold rounded-lg hover:bg-emerald-700 disabled:opacity-60 transition-colors shrink-0"
             >
-              <Download className="w-4 h-4" /> {masterDownload.busy ? 'Preparing…' : 'Download Outlet Master'}
+              <Download className="w-4 h-4" /> {downloadButtonLabel(masterDownload, 'Download Outlet Master')}
             </button>
+            {/* Queued / error message — directly below the button. */}
+            <DownloadActionStatus action={masterDownload} />
+            </div>
           </div>
-          {masterDownload.status === 'queued' && <DownloadActionStatus action={masterDownload} />}
 
           {/* Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">

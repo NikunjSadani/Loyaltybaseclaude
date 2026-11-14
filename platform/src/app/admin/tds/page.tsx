@@ -29,7 +29,7 @@ import { authHeader } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
 import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label';
 import { formatCountFrom } from '@/components/operator/tds-imported-payouts-card';
-import { useDownloadAction } from '@/lib/exports/use-download-action';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
 import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
 
@@ -660,21 +660,19 @@ export default function AdminTdsPage() {
                 </h3>
                 <p className="text-xs text-gray-500 mt-0.5">Section 194R: TDS on perquisites / gifts</p>
               </div>
-              <div className="flex items-center gap-2">
-                {dl194R.status === 'error' && <p role="alert" className="text-xs text-red-600">{dl194R.message}</p>}
+              <div className="flex flex-col items-end gap-1.5 max-w-xs">
                 <button
                   onClick={handleDownload194R}
-                  disabled={dl194R.busy}
+                  disabled={dl194R.blocked}
                   className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-60"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  {dl194R.busy ? 'Preparing…' : 'Download 194R Excel'}
+                  {downloadButtonLabel(dl194R, 'Download 194R Excel')}
                 </button>
+                {/* Queued / error message — directly below the button. */}
+                <DownloadActionStatus action={dl194R} />
               </div>
             </div>
-            {dl194R.status === 'queued' && (
-              <div className="px-5 pt-3"><DownloadActionStatus action={dl194R} /></div>
-            )}
 
             {r194Loading && (
               <div className="flex items-center justify-center py-12" aria-label="Loading">
@@ -771,21 +769,19 @@ export default function AdminTdsPage() {
                 </h3>
                 <p className="text-xs text-gray-500 mt-0.5">Section 194C: TDS on contractor payments</p>
               </div>
-              <div className="flex items-center gap-2">
-                {dl194C.status === 'error' && <p role="alert" className="text-xs text-red-600">{dl194C.message}</p>}
+              <div className="flex flex-col items-end gap-1.5 max-w-xs">
                 <button
                   onClick={handleDownload194C}
-                  disabled={dl194C.busy}
+                  disabled={dl194C.blocked}
                   className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-60"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  {dl194C.busy ? 'Preparing…' : 'Download 194C Excel'}
+                  {downloadButtonLabel(dl194C, 'Download 194C Excel')}
                 </button>
+                {/* Queued / error message — directly below the button. */}
+                <DownloadActionStatus action={dl194C} />
               </div>
             </div>
-            {dl194C.status === 'queued' && (
-              <div className="px-5 pt-3"><DownloadActionStatus action={dl194C} /></div>
-            )}
 
             {r194cLoading && (
               <div className="flex items-center justify-center py-12" aria-label="Loading">

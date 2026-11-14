@@ -33,7 +33,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton'
-import { useDownloadAction } from '@/lib/exports/use-download-action'
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
 import { DownloadActionStatus } from '@/components/exports/download-action-status'
 import { usePermissions } from '@/lib/use-permissions'
 import { UpiCaptureMethodBadge, asUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge'
@@ -474,13 +474,12 @@ export default function KycApprovalsPage() {
             <span className="text-xs font-bold text-gray-500 w-20">Step 1</span>
             <Button
               onClick={handleExport}
-              disabled={exportLoading}
+              disabled={exportAction.blocked}
               size="sm"
               className="flex items-center gap-1.5 bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white"
             >
-              {exportLoading
-                ? <><RefreshCw className="h-3 w-3 animate-spin" />Exporting…</>
-                : <><Download className="h-3 w-3" />Export Review Dump (.xlsx)</>}
+              {exportLoading ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+              {downloadButtonLabel(exportAction, 'Export Review Dump (.xlsx)')}
             </Button>
             <span className="text-xs text-gray-400">Download full dump — fill verification cols offline.</span>
             <DownloadActionStatus action={exportAction} className="basis-full" />

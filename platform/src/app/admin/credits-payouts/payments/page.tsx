@@ -28,7 +28,6 @@ import {
   Banknote,
   Loader2,
   AlertTriangle,
-  X,
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { useAdminSession } from '@/lib/admin-session';
@@ -39,7 +38,7 @@ import {
   type PaymentsReportParams,
   type Money,
 } from '@/lib/payments-report';
-import { useDownloadAction } from '@/lib/exports/use-download-action';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 /** Format a `{ paise, inr }` money field via its rupee value (₹, en-IN). */
@@ -109,8 +108,6 @@ export default function AdminPaymentsReportPage() {
   const [clientId, setClientId] = useState(''); // GIFSY only
 
   const exportAction = useDownloadAction();
-  const exporting = exportAction.busy;
-  const exportError = exportAction.status === 'error' ? exportAction.message : null;
 
   // Build the query params from the current filters (drops empty values;
   // CLIENT_ADMIN never contributes a clientId — the server pins its scope).
@@ -190,27 +187,19 @@ export default function AdminPaymentsReportPage() {
             </p>
           </div>
         </div>
-        <button
-          onClick={handleExport}
-          disabled={exporting}
-          className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-60"
-        >
-          {exporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-          Export Excel
-        </button>
-      </div>
-
-      {/* Export error banner */}
-      {exportAction.status === 'queued' && <DownloadActionStatus action={exportAction} />}
-      {exportError && (
-        <div role="alert" className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs text-red-700 flex items-center gap-2">
-          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
-          {exportError}
-          <button onClick={exportAction.reset} aria-label="Dismiss" className="ml-auto text-red-400 hover:text-red-600">
-            <X className="w-3.5 h-3.5" />
+        <div className="flex flex-col items-end gap-1.5 max-w-xs">
+          <button
+            onClick={handleExport}
+            disabled={exportAction.blocked}
+            className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-60"
+          >
+            {exportAction.busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {downloadButtonLabel(exportAction, 'Export Excel')}
           </button>
+          {/* Queued / error message — directly below the button (one placement on every report screen). */}
+          <DownloadActionStatus action={exportAction} />
         </div>
-      )}
+      </div>
 
       {/* Refetch error banner (a filter change failed but prior rows still show) */}
       {error && report && (

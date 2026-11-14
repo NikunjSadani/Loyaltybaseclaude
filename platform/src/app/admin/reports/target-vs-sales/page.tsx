@@ -21,7 +21,7 @@ import { useState, useCallback } from 'react'
 import { Download, RefreshCw, TableIcon } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { useDownloadAction } from '@/lib/exports/use-download-action'
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
 import { DownloadActionStatus } from '@/components/exports/download-action-status'
 import { formatMonth } from '@/lib/targets'
 
@@ -193,13 +193,12 @@ export default function TargetVsSalesPage() {
 
             <Button
               onClick={handleExport}
-              disabled={actionsDisabled || loading || exportAction.busy}
+              disabled={actionsDisabled || loading || exportAction.blocked}
               size="sm"
               className="flex items-center gap-1.5 bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white"
             >
-              {exportAction.busy
-                ? <><RefreshCw className="h-3 w-3 animate-spin" />Preparing…</>
-                : <><Download className="h-3 w-3" />Download Excel</>}
+              {exportAction.busy ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+              {downloadButtonLabel(exportAction, 'Download Excel')}
             </Button>
           </div>
           <DownloadActionStatus action={exportAction} />

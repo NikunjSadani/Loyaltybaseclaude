@@ -97,7 +97,7 @@ describe('Download Outlet Master — reliable blob save', () => {
     await waitFor(() => expect(screen.getByTestId('download-outlet-master')).toBeEnabled());
     fireEvent.click(screen.getByTestId('download-outlet-master'));
 
-    await waitFor(() => expect(screen.getByTestId('download-outlet-master-error')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('download-error')).toBeInTheDocument());
     expect(clickSpy).not.toHaveBeenCalled(); // no download attempted on failure
 
     clickSpy.mockRestore();
@@ -124,7 +124,13 @@ describe('Download Outlet Master — reliable blob save', () => {
     expect(note).toHaveTextContent(/preparing your file/i);
     expect(screen.getByRole('link', { name: /open downloads/i })).toHaveAttribute('href', '/admin/downloads');
     expect(clickSpy).not.toHaveBeenCalled(); // the 202 JSON body is never saved as a file
-    expect(screen.queryByTestId('download-outlet-master-error')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('download-error')).not.toBeInTheDocument();
+    // M2: the button can't ask again until the message is dismissed.
+    expect(screen.getByTestId('download-outlet-master')).toBeDisabled();
+    expect(screen.getByTestId('download-outlet-master')).toHaveTextContent('Being prepared — see Downloads');
+    fireEvent.click(screen.getByRole('button', { name: /dismiss message/i }));
+    expect(screen.getByTestId('download-outlet-master')).toBeEnabled();
+    expect(screen.getByTestId('download-outlet-master')).toHaveTextContent('Download Outlet Master');
 
     clickSpy.mockRestore();
   });

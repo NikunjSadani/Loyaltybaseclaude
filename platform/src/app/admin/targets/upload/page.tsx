@@ -19,7 +19,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Download, ChevronDown, ChevronUp,
-  CheckCircle2, XCircle, FileSpreadsheet,
+  CheckCircle2, FileSpreadsheet,
   AlertTriangle, Info,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
@@ -28,7 +28,7 @@ import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportBut
 import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
 import { TargetFocusCheckNotice } from '@/components/admin/target-focus-check-notice';
 import type { TargetUploadFocusCheck } from '@/lib/sales-import/types';
-import { downloadOrQueue, type DownloadOutcome } from '@/lib/exports/download';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
 import { UploadTruncationNote } from '@/components/admin/UploadTruncationNote';
 import { normalizeRowsEcho } from '@/lib/upload-rows-echo';
@@ -97,10 +97,10 @@ export default function TargetUploadPage() {
   const [result,      setResult]      = useState<UploadResult | null>(null);
 
   // Template download state
-  const [downloading,   setDownloading]   = useState(false);
-  const [downloadError, setDownloadError] = useState('');
-  /** Set when a big template/export is prepared in the background (202 → Downloads page). */
-  const [downloadQueued, setDownloadQueued] = useState<string | null>(null);
+  // One shared button state per download (useDownloadAction): "Preparing…", queued (202 → Downloads page,
+  // button stays disabled until the message is dismissed) or a plain error under the buttons.
+  const templateAction = useDownloadAction();
+  const finalAction    = useDownloadAction();
 
   // KPI count hint (fetched once on mount)
   const [kpiCount, setKpiCount] = useState<number | null>(null);
@@ -170,34 +170,21 @@ export default function TargetUploadPage() {
     const months = selectedMonths();
     if (months.length === 0) return;
 
-    setDownloading(true);
-    setDownloadError('');
-    setDownloadQueued(null);
     const qs = months.join(',');
     // 200 → the template saves straight away; 202 (a long range) → prepared in the background
     // and shown on the Downloads page.
-    showDownloadOutcome(await downloadOrQueue(`/api/admin/targets/template?months=${encodeURIComponent(qs)}`, {
+    await templateAction.run(`/api/admin/targets/template?months=${encodeURIComponent(qs)}`, {
       fallbackFileName: `targets_template_${months[0]}_to_${months[months.length - 1]}.xlsx`,
-    }));
-    setDownloading(false);
-  }
-
-  function showDownloadOutcome(out: DownloadOutcome) {
-    if (out.kind === 'error') setDownloadError(out.message);
-    else if (out.kind === 'queued') setDownloadQueued(out.message);
+    });
   }
 
   // ── Download Final Targets (export stored targets for the From month) ───────
 
   async function handleDownloadFinal() {
     if (!fromMonth) return;
-    setDownloading(true);
-    setDownloadError('');
-    setDownloadQueued(null);
-    showDownloadOutcome(await downloadOrQueue(`/api/admin/targets/export?month=${encodeURIComponent(fromMonth)}`, {
+    await finalAction.run(`/api/admin/targets/export?month=${encodeURIComponent(fromMonth)}`, {
       fallbackFileName: `final_targets_${fromMonth}.xlsx`,
-    }));
-    setDownloading(false);
+    });
   }
 
   // ── Upload ─────────────────────────────────────────────────────────────────
@@ -353,22 +340,24 @@ export default function TargetUploadPage() {
           </div>
           <button
             onClick={handleDownloadTemplate}
-            disabled={chosenMonths.length === 0 || downloading}
+            disabled={chosenMonths.length === 0 || templateAction.blocked}
             className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-xl hover:opacity-90 disabled:opacity-40 transition-opacity"
           >
-            {downloading
+            {templateAction.busy
               ? <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
               : <Download className="w-4 h-4" />}
-            Download Template
+            {downloadButtonLabel(templateAction, 'Download Template')}
           </button>
           <button
             onClick={handleDownloadFinal}
-            disabled={!fromMonth || downloading}
+            disabled={!fromMonth || finalAction.blocked}
             title="Export the stored (final) targets for the From month"
             className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-700 text-sm font-semibold rounded-xl hover:border-gray-400 disabled:opacity-40 transition-colors"
           >
-            <Download className="w-4 h-4" />
-            Download Final Targets
+            {finalAction.busy
+              ? <div className="w-4 h-4 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
+              : <Download className="w-4 h-4" />}
+            {downloadButtonLabel(finalAction, 'Download Final Targets')}
           </button>
         </div>
 
@@ -381,16 +370,9 @@ export default function TargetUploadPage() {
           </p>
         )}
 
-        {downloadError && (
-          <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
-            <XCircle className="w-4 h-4 shrink-0" /> {downloadError}
-          </div>
-        )}
-        {downloadQueued && (
-          <DownloadActionStatus
-            action={{ status: 'queued', message: downloadQueued, reset: () => setDownloadQueued(null) }}
-          />
-        )}
+        {/* Queued / error messages — directly below the download buttons. */}
+        <DownloadActionStatus action={templateAction} />
+        <DownloadActionStatus action={finalAction} />
       </div>
 
       {/* ── Section 3: Upload ───────────────────────────────────────────────── */}

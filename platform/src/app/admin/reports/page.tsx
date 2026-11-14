@@ -6,7 +6,7 @@ import { FileSpreadsheet, Download, RefreshCw, ExternalLink } from 'lucide-react
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { useDownloadAction } from '@/lib/exports/use-download-action'
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
 import { DownloadActionStatus } from '@/components/exports/download-action-status'
 
 interface ReportConfig {
@@ -104,8 +104,9 @@ function ReportCard({ report }: { report: ReportConfig }) {
             </Button>
           </Link>
         ) : (
-          <Button onClick={handleExport} disabled={loading} size="sm" className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-xs">
-            {loading ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Generating...</> : <><Download className="h-3 w-3 mr-1" />Export Excel</>}
+          <Button onClick={handleExport} disabled={dl.blocked} size="sm" className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-xs">
+            {loading ? <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> : <Download className="h-3 w-3 mr-1" />}
+            {downloadButtonLabel(dl, 'Export Excel')}
           </Button>
         )}
         <DownloadActionStatus action={dl} />

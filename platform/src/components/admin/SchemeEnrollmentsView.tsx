@@ -195,7 +195,7 @@ export default function SchemeEnrollmentsView({
             <button onClick={handleExport} disabled={exporting}
               className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
               {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-              {exporting ? 'Exporting…' : 'Export Excel'}
+              {exporting ? 'Preparing…' : 'Export Excel'}
             </button>
           </div>
           {exportError && <p className="text-xs text-red-500 flex items-center gap-1 mt-1"><AlertCircle className="w-3 h-3" />{exportError}</p>}

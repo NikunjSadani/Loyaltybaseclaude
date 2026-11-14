@@ -687,7 +687,7 @@ export default function PayoutsPage() {
                         className="flex items-center gap-2 px-3 py-2 border border-gray-300 text-gray-700 text-xs rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
                       >
                         {utrDownloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                        {utrDownloading ? 'Downloading…' : 'UTR Template'}
+                        {utrDownloading ? 'Preparing…' : 'UTR Template'}
                       </button>
                       <label className={`flex items-center gap-2 px-3 py-2 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer ${utrUploading ? 'bg-gray-400 pointer-events-none' : 'bg-[var(--brand-primary)] hover:bg-[var(--brand-primary-dark)]'}`}>
                         {utrUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
