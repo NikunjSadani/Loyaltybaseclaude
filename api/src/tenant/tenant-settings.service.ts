@@ -44,6 +44,17 @@ export interface OutletTypeOption {
  * calls `invalidate(clientId)` after persisting. @Global so any module can inject it.
  */
 
+/**
+ * Per-tenant POINTS reversal engine (WALLET-REVERSAL-ENGINE-DESIGN.md §9 step 5). Stored as the
+ * program_settings row `reversalEngine`; absent ⇒ LEGACY.
+ *  - LEGACY: today's floor-0 clawback + the Q14 interim refusal on debt wallets (byte-identical balances).
+ *  - SHADOW: LEGACY is applied; the v2 result is computed alongside and the diff is recorded (audit log).
+ *  - V2:     the position-based engine (applyCreditReversal).
+ */
+export const REVERSAL_ENGINE_MODES = ['LEGACY', 'SHADOW', 'V2'] as const;
+export type ReversalEngineMode = (typeof REVERSAL_ENGINE_MODES)[number];
+export const REVERSAL_ENGINE_SETTING_KEY = 'reversalEngine';
+
 export interface RedemptionChannels {
   physicalGifts: boolean;
   vouchers:      boolean;
@@ -551,6 +562,29 @@ export class TenantSettingsService {
       this.logger.warn(`kycGstinRequired read failed for ${clientId}; treating as REQUIRED: ${e}`);
       return true;
     }
+  }
+
+  /**
+   * UNCACHED read of the per-tenant reversal engine mode (WALLET-REVERSAL-ENGINE-DESIGN.md §9 step 5) — the
+   * program_settings row `reversalEngine` holding the string 'LEGACY' | 'SHADOW' | 'V2'.
+   *  - ABSENT row → 'LEGACY' (the default for every tenant: Deoleo and Bajaj keep today's reversal behaviour).
+   *  - A present but malformed value THROWS (fail closed on the money path: a typo must never silently pick an
+   *    engine). A read error propagates for the same reason — the reversal is refused, never run on a guess.
+   * Uncached like getPointsEngineFlagsUncached: a rollout / rollback flip must take effect fleet-wide at once.
+   */
+  async getReversalEngineModeUncached(clientId: string): Promise<ReversalEngineMode> {
+    const row = await this.prisma.programSetting.findUnique({
+      where: { clientId_settingKey: { clientId, settingKey: REVERSAL_ENGINE_SETTING_KEY } },
+      select: { settingValue: true },
+    });
+    if (!row) return 'LEGACY';
+    const v = row.settingValue;
+    if (typeof v === 'string' && (REVERSAL_ENGINE_MODES as readonly string[]).includes(v)) {
+      return v as ReversalEngineMode;
+    }
+    throw new BadRequestException(
+      `Invalid reversalEngine setting for this tenant (${JSON.stringify(v)}); expected one of ${REVERSAL_ENGINE_MODES.join(' | ')} — contact Gifsy`,
+    );
   }
 
   /** Bust the cache for a tenant — called by AdminCoreService.upsertSetting after a write. */

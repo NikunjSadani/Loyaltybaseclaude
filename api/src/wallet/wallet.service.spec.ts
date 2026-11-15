@@ -13,12 +13,18 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { AdjustType } from './dto/wallet.dto';
 
 // Plain object (NOT jest.fn) so the per-tenant rate survives jest.resetAllMocks() in beforeEach.
-const mockTenantSettings = { getConversionRate: async () => 1 };
+const mockTenantSettings = {
+  getConversionRate: async () => 1,
+  // Reversal engine flag (WP2/WP3): every tenant in these suites is on the default LEGACY engine.
+  getReversalEngineModeUncached: async () => 'LEGACY' as const,
+};
 
 // The transaction client mock — every mutation composes through this inside $transaction.
 const mockTx = {
   wallet: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
-  walletTransaction: { create: jest.fn() },
+  // findFirst: applyMovement asks whether the wallet is tracked by the reversal engine (any prior row →
+  // not pristine → the LEGACY write path these jest.fn tests pin). Default set in beforeEach.
+  walletTransaction: { create: jest.fn(), findFirst: jest.fn() },
   // findMany/findUnique added for the FIFO change: consumeFifoLots lists spendable lots and
   // the expiry sweep re-reads the claimed lot's frozen remainingPoints.
   pointsLedger: {
@@ -64,6 +70,10 @@ describe('WalletService', () => {
     mockTx.pointsLedger.updateMany.mockResolvedValue({ count: 1 });
     // consumeFifoLots lists spendable lots inside a debit; default = no lot mirror to touch.
     mockTx.pointsLedger.findMany.mockResolvedValue([]);
+    // Reversal engine (WP2): an existing passbook row → the wallet is NOT engine-tracked → legacy write path.
+    mockTx.walletTransaction.findFirst.mockResolvedValue({ id: 'legacy-row' });
+    // movementPath resolves the wallet's tenant (-> reversal engine flag, LEGACY here).
+    mockTx.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', clientId: 'deoleo' });
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         WalletService,
@@ -268,6 +278,10 @@ describe('WalletService', () => {
   });
 
   describe('adjust', () => {
+    // applyMovement locks + re-reads the wallet through the TX client (WP2 lock-first) — mirror the pre-tx read.
+    beforeEach(() => {
+      mockTx.wallet.findFirst.mockImplementation(() => mockPrisma.wallet.findFirst.mock.results[0]?.value ?? null);
+    });
     it('throws NotFound when the partner wallet is outside the tenant', async () => {
       mockPrisma.wallet.findFirst.mockResolvedValue(null);
       await expect(
@@ -1056,7 +1070,16 @@ function buildHarness(initial: InitialState = {}) {
     lifetimeEarned: 0,
     lifetimeRedeemed: 0,
     lifetimeExpired: 0,
+    // Reversal engine columns (schema defaults).
+    debtPoints: 0,
+    movementSeq: 0,
     ...(initial.wallet ?? {}),
+  };
+  const positions: AnyRow[] = [];
+  const allocations: AnyRow[] = [];
+  const positionView = (p: AnyRow) => {
+    const c = walletTxns.find((t) => t.id === p.creditTxId);
+    return { ...p, creditTx: { seq: c?.seq ?? null, createdAt: c?.createdAt ?? NOW } };
   };
   const walletTxns: AnyRow[] = [];
   const rawWalletTxCreates: AnyRow[] = [];
@@ -1108,6 +1131,28 @@ function buildHarness(initial: InitialState = {}) {
     },
     creditReversal: {
       findFirst: async ({ where }: any) => (initial.reversals ?? []).find((r) => matchWhere(r, where ?? {})) ?? null,
+    },
+    walletCreditPosition: {
+      create: async ({ data }: any) => {
+        const row = { id: `pos${++seq}`, offsetPoints: 0, reversedPoints: 0, ...data };
+        positions.push(row);
+        return row;
+      },
+      findMany: async ({ where }: any = {}) => positions.filter((p) => matchWhere(p, where ?? {})).map(positionView),
+      findFirst: async ({ where }: any = {}) => positions.find((p) => matchWhere(p, where ?? {})) ?? null,
+      count: async ({ where }: any = {}) => positions.filter((p) => matchWhere(p, where ?? {})).length,
+      updateMany: async ({ where, data }: any) => {
+        const rows = positions.filter((p) => matchWhere(p, where));
+        rows.forEach((r) => applyData(r, data));
+        return { count: rows.length };
+      },
+    },
+    creditReversalAllocation: {
+      create: async ({ data }: any) => {
+        const row = { id: `alloc${++seq}`, ...data };
+        allocations.push(row);
+        return row;
+      },
     },
     pointsLedger: {
       create: async ({ data }: any) => {
@@ -1182,6 +1227,8 @@ function buildHarness(initial: InitialState = {}) {
     walletTxns,
     rawWalletTxCreates,
     auditLogs,
+    positions,
+    allocations,
     lot: (id: string) => ledger.find((r) => r.id === id),
     spendableLots: () => ledger.filter((r) => SPENDABLE.includes(r.transactionType) && !r.isExpired),
     rowsOfType: (t: string) => ledger.filter((r) => r.transactionType === t),
