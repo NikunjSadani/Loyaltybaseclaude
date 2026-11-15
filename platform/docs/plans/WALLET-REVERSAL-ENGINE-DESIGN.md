@@ -9,8 +9,8 @@
 | **Status** | ⏸ **PAUSED 2026-11-13 by owner — FAST FOLLOW-UP AFTER BAJAJ GO-LIVE.** Design approved; foundations built; engine not built. |
 | **Approval** | ✅ Owner approved 2026-11-13: the full design + all 14 decisions (Q1–Q14 = recommended A). ⚠️ PLATFORM-WIDE (approved in-session). |
 | **Why paused** | Not needed for go-live or any data import (§11). Release ships a safe interim rule instead (§10). Machine/bandwidth prioritised for go-live: release → imports → targets/achievement import → client training deck. |
-| **Built** | `679ed4c2` design doc · `f5677f1e` WP1 schema + migration · `7d64ab55` WP0 reference model (oracle) + 30 tests incl. property tests · `6fed2005` WP6 backfill + verify jobs (not yet run on any DB) · `bd131860` WP2 movement v2 + WP3 reversal engine & flag (credits.service not wired yet — WP4) |
-| **Not built** | WP4 credits caps + wiring of the WP3 dispatcher · WP5 payout allocations · WP7 concurrency e2e · WP8 rollout |
+| **Built** | `679ed4c2` design doc · `f5677f1e` WP1 schema + migration · `7d64ab55` WP0 reference model (oracle) + 30 tests incl. property tests · `6fed2005` WP6 backfill + verify jobs (not yet run on any DB) · `bd131860` WP2 movement v2 + WP3 reversal engine & flag (credits.service not wired yet — WP4) · `4187cb6d` WP5 PAYOUT allocations/reservations (SHADOW/V2) |
+| **Not built** | WP4 credits caps + wiring of the WP3 dispatcher · WP7 concurrency e2e · WP8 rollout · WP6 wiring of the WP5 payout backfill planner |
 | **Remaining effort** | ~7–8 h wall-clock with parallel agents (§13) |
 
 ---
@@ -163,7 +163,7 @@ Lot mirror becomes `Σ remaining(non-expired) = H = B + D` (today's `= B` is the
 oldest lot is burnt and the reversed credit's own lot survives (extends expiry of reversed points). Expiry keeps today's
 clamp; excess is reclassified as debt repayment. Redemption refund is a credit (repays debt first).
 
-## 8. PAYOUT (₹) reversals (WP5, NOT built)
+## 8. PAYOUT (₹) reversals (WP5 ✅ `4187cb6d` — SHADOW/V2 tenants; LEGACY keeps the §10 interim rule)
 Bugs found by audit in the patched code (fixed only by WP5; the release's interim rule mitigates — §10):
 (1) a PAID entry stays PAID after a reversal records its receivable → a second reversal re-consumes it (double
 receivable) while another entry still gets paid; (2) greedy oldest-first refuses valid exact subsets ([₹300, ₹500],
@@ -175,6 +175,34 @@ entries (Q10). **P4** approve (batch lock → entries FOR UPDATE ascending): PEN
 → APPLIED_CANCELLED; PROCESSING (legacy only) → refuse; PAID → APPLIED_RECEIVABLE (entry stays PAID, unreachable to
 others). **P5** cap structural. **P6** shortfall = Σ receivables; receivable ledger + TDS correction out of scope (Q11).
 Backfill existing PAYOUT reversals; ambiguous → flagged.
+
+**As built (WP5, `api/src/credits/payout-reversal-v2.ts`):**
+- Create (`createReversal`): flag SHADOW or V2 → `payoutEntryIds` required, Σ = requestedPaise, each a selectable entry of
+  the (batch, outlet, field) (not REVERSED, not held by a live allocation, not consumed by an interim/legacy approval —
+  same `consumedPayoutEntryIds` + pre-column cutoff rule as §10); entries locked FOR UPDATE ascending → RESERVED rows
+  + audit row. LEGACY → the interim exact-subset path, byte-identical; `payoutEntryIds` refused there and for POINTS.
+  PROCESSING entries may be reserved (approval refused until the UTR / failure is recorded). SHADOW = V2 for PAYOUT
+  (no money math to shadow) — owner question.
+- Approve / reject (`patchReversal`) dispatch on the reversal's allocation rows, NOT the flag (a rollback to LEGACY
+  never strands a reservation; a pending reversal raised under LEGACY keeps the interim path). Approve also writes
+  `consumedPayoutEntryIds` so the interim selector stays correct after a flag rollback.
+- Downloads: `reversalAllocations: none RESERVED` on the read + a post-claim re-check in the download tx (race →
+  409, rolled back, retry). Held entries are reported: `X-Reversal-Held-Count/-Paise` headers → amber notice on the
+  payout screen, suffix on the "nothing payable" refusal, audit row `PAYOUT_DOWNLOAD_REVERSAL_HOLD`.
+- Call-outs (owner rule 2026-11-15, no silent pass-throughs): picker shows every entry + why it's blocked; pending
+  card lists held entries + what approval will do; approve/reject result (`payoutOutcome`: cancelled / receivable /
+  TDS offset or why not / released) shown on the payout screen; receivable = "Pending" in Processed Reversals; audit
+  rows `PAYOUT_REVERSAL_ALLOCATION` (CREATE/APPROVE/REJECT) for every step.
+- Backfill: `planPayoutAllocationBackfill` (pure) — consumed ids → APPLIED_* rows; pre-column approvals derived only
+  when all / exactly one subset of settled entries fits (WARNING `DERIVED_LEGACY`), else `AMBIGUOUS_LEGACY`
+  (BLOCKING); `DOUBLE_CONSUMPTION`, `ENTRY_MISSING`, `ENTRY_NOT_SETTLED`, `AMOUNT_MISMATCH` (BLOCKING),
+  `SHORTFALL_MISMATCH` (WARNING), `PENDING_LEGACY` (INFO). Never writes entries/reversals/money; re-runs skip
+  reversals that already have rows. **Not yet wired into the WP6 runner** (WP6 must load the tenant's PAYOUT
+  reversals + their entries + existing allocations, print the flags in the anomaly list, and `createMany` the rows
+  in APPLY). V2 is correct without it (create excludes legacy-consumed entries itself); it completes V9/reporting.
+- Tests: `payout-reversal-v2.spec.ts` (in-memory Prisma fake with rollback + the live partial unique index):
+  T-pay1..5, reservation-vs-download (skip + race), lock order, double approval, flag rollback, backfill, call-outs;
+  platform `status-payout-reversal-entries.test.tsx`, `payout-reversal-held-entries.test.tsx`.
 
 ## 9. One-off backfill (WP6, NOT built) + rollout
 **Backfill** (per wallet, own tx, advisory lock + wallet FOR UPDATE, resumable: skip wallets with movementSeq > 0):
@@ -278,7 +306,7 @@ credit batches on prod yet. Worth doing properly once Bajaj runs monthly credits
 | WP2 | `applyMovement` v2 (lock-first, seq, pointsDelta, D/O, ledger link, positions, expiry reclassification) calling WP0 | ✅ `bd131860` — `WalletService.movementPath` rollout guard: movementSeq > 0 → v2 maintenance (any flag); movementSeq = 0 + LEGACY → pre-engine path byte-identical; SHADOW/V2 → v2 only for a pristine wallet, un-backfilled history → 409. Expiry with e = 0 writes no row (D/O only). Tests `wallet.reversal-engine.spec.ts` | WP0, WP1 | — |
 | WP3 | Reversal engine `applyCreditReversal` §6; own-lot-first; LEGACY/SHADOW/V2 flag; delete legacy floor helpers | ✅ `bd131860` — `applyCreditReversal`, `v2PointsReversalCap`, `reverseCreditBatchPoints` (flag `program_settings.reversalEngine`, absent → LEGACY, malformed → refused; SHADOW diff → audit_logs `REVERSAL_ENGINE_SHADOW`). Legacy floor helpers kept: LEGACY still needs them (removal = rollout step 7). `patchReversal` still calls the LEGACY pair directly → switch to the dispatcher in WP4 | WP2 | — |
 | WP4 | credits.service POINTS: position-based caps at create/approve, wallet from position, allocations, shortfall totals, SHADOW | ⬜ | WP3 | ~1 h |
-| WP5 | PAYOUT allocations §8: entry-selection DTO + UI, reservation, download/re-bank hold, approve rules, backfill of existing PAYOUT reversals | ⬜ | WP1 + release branch merged in | ~2 h (parallel with WP2/3) |
+| WP5 | PAYOUT allocations §8: entry-selection DTO + UI, reservation, download/re-bank hold, approve rules, backfill of existing PAYOUT reversals | ✅ `4187cb6d` — SHADOW/V2 only; LEGACY byte-identical (existing credits spec unchanged but for 3 mock lines). Backfill = pure planner, WP6 wiring pending (§8 "As built") | WP1 + release branch merged in | — |
 | WP6 | Backfill job §9 (pure module using WP0 `replay()` + Cloud Run job script, DRY_RUN default, resumable) + verify job V0–V9 + draft post-backfill migration | ✅ `6fed2005` — `api/src/wallet/backfill/` (planner, runner, Prisma store, `backfill.main.ts`, `verify.main.ts`) + 30 fixture tests; draft `platform/docs/plans/sql/wallet-reversal-post-backfill.DRAFT.sql`. Not yet run on any DB (runbook §9.1) | WP0, WP1 | — |
 | WP7 | Postgres e2e concurrency tests (concurrent credits, reversal vs redeem, double approval, reservation vs download) | ⬜ | WP2–WP5 | ~1 h |
 | WP8 | Flag rollout, shadow-diff report, docs sweep, prod runbook | ⬜ | all | with staging |
