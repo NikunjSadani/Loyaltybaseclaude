@@ -334,8 +334,9 @@ describe('GIFVC — voucher handling', () => {
 
   it.each([
     ['REFUNDED_NO_HUBBLE_ORDER', /Hubble confirmed it has no order for this redemption — points refunded/],
-    ['PENDING_NO_HUBBLE_ORDER_TOO_RECENT', /retry later \(orders must be at least 30 minutes old\)/],
+    ['PENDING_NO_HUBBLE_ORDER_TOO_RECENT', /retry later \(orders must be at least 2 hours old\)/],
     ['NO_HUBBLE_ORDER_NOT_REFUNDABLE', /can’t be refunded automatically/],
+    ['NO_HUBBLE_ORDER_UNVERIFIED', /couldn’t confirm that answer against a known Hubble order — not refunded/],
     ['SOME_FUTURE_OUTCOME', /Hubble: SOME_FUTURE_OUTCOME/],
   ])('GIFVC11b: retry outcome %s is shown in plain words', async (outcome, text) => {
     installFetch(
@@ -370,6 +371,16 @@ describe('GIFVC — voucher handling', () => {
       expect(body).toEqual({ note: 'Checked Hubble — no voucher' });
       const updated = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
       await waitFor(() => expect(within(updated).queryByTestId('hubble-needs-reconcile')).toBeNull());
+    },
+  );
+
+  it.each(['FAILED', 'CANCELLED', 'RETURNED'])(
+    'GIFVC11e: a leftover open-order flag on a %s (points returned) order offers Acknowledge, not Retry',
+    async (status) => {
+      installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status, voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_CLAIM_LOST' }]);
+      const row = await openRow('RDM-1');
+      expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
+      expect(within(row).getByRole('button', { name: /acknowledge — resolved/i })).toBeInTheDocument();
     },
   );
 

@@ -103,10 +103,27 @@ export interface HubbleProduct {
  * FAILED `status`, no `vouchers`, top-level or under `data`/`order`). An empty / non-JSON (HTML, gateway, proxy) / array / order-shaped 404 body is NOT
  * proof and is treated as indeterminate. OWNER-VERIFY against Hubble's API reference (the exact
  * error id / code for an unknown referenceId) and tighten this to that code when known.
+ *
+ * Generic FRAMEWORK / GATEWAY JSON 404s (a wrong route, a wrong base path, an API-gateway miss) are
+ * also rejected — they say nothing about the order: a bare `message` of "Not Found" / "Missing
+ * Authentication Token" / "Cannot GET …" / "no route …", a Spring-style body (numeric `status`, an
+ * `error` of "Not Found", or `timestamp` + `path`). Because the not-found body is still not pinned to
+ * a documented Hubble code, the ops refund additionally runs a CANARY lookup of a known-good order
+ * (RewardsService.verifyHubbleNotFoundCanary) before it trusts a null.
  */
 export function isHubbleNotFoundBody(json: unknown): boolean {
   if (!json || typeof json !== 'object' || Array.isArray(json)) return false;
   const b = json as Record<string, unknown>;
+  // Generic framework / gateway 404 shapes → NOT Hubble's own answer.
+  if (typeof b.status === 'number') return false; // Spring Boot / many gateways: { status: 404, error, path, timestamp }
+  if (typeof b.error === 'string' && /^\s*not\s*found\s*$/i.test(b.error)) return false;
+  if ('timestamp' in b && 'path' in b) return false;
+  if (
+    typeof b.message === 'string' &&
+    /^\s*(not\s*found|missing authentication token|cannot (get|post) .*|no route .*|route not found|resource not found)\s*\.?\s*$/i.test(b.message)
+  ) {
+    return false;
+  }
   // Order-shaped (an order status / vouchers, top-level or nested like normaliseOrderBody reads) → not a not-found.
   const looksLikeOrder = (o: unknown): boolean => {
     if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
@@ -116,6 +133,49 @@ export function isHubbleNotFoundBody(json: unknown): boolean {
   if (looksLikeOrder(b) || looksLikeOrder(b.data) || looksLikeOrder(b.order)) return false;
   const nonEmpty = (v: unknown) => typeof v === 'string' && v.trim() !== '';
   return nonEmpty(b.id) || nonEmpty(b.code) || nonEmpty(b.message);
+}
+
+/**
+ * Does an account fingerprint recorded on an order (at place time) match the one configured now?
+ * Two recorded formats exist:
+ *  - CURRENT  `<host><base path>#<hash>` (e.g. `api.myhubble.money/partner-api#…`; a path-less base
+ *    URL has an empty path, so it reads `<host>#<hash>`);
+ *  - LEGACY   `<host>#<hash>` (orders placed before the base path was included).
+ * A recorded value without a `/` before the `#` may be LEGACY, so it is compared on host + hash only
+ * (never strands an order recorded in the old format). A recorded value WITH a path must match exactly.
+ * null / empty current → never matches.
+ */
+export function hubbleAccountFingerprintMatches(recorded: string, current: string | null): boolean {
+  if (!current) return false;
+  if (recorded === current) return true;
+  const split = (fp: string) => {
+    const i = fp.lastIndexOf('#');
+    const loc = i >= 0 ? fp.slice(0, i) : fp;
+    const hash = i >= 0 ? fp.slice(i + 1) : '';
+    const slash = loc.indexOf('/');
+    return { host: slash >= 0 ? loc.slice(0, slash) : loc, hasPath: slash >= 0, hash };
+  };
+  const r = split(recorded);
+  if (r.hasPath) return false; // current-format with a path → exact match only (checked above)
+  const c = split(current);
+  return r.host.toLowerCase() === c.host.toLowerCase() && r.hash !== '' && r.hash === c.hash;
+}
+
+/**
+ * placeOrder got a DEFINITIVE rejection from Hubble: HTTP 400 / 422 with Hubble's own JSON error body
+ * (isHubbleNotFoundBody's error shape — not an order, not a generic framework/gateway body). Hubble
+ * read the request and refused it (e.g. product inactive, invalid amount), so the order was not
+ * created. Every OTHER placeOrder failure (timeout, abort, network, 5xx, 401/403/404/408/409/429, an
+ * unrecognised body) is INDETERMINATE — Hubble may still create the order — and throws a plain Error.
+ */
+export class HubblePlaceOrderRejectedError extends Error {
+  constructor(
+    readonly httpStatus: number,
+    readonly hubbleCode: string | null,
+  ) {
+    super(`Hubble placeOrder rejected (HTTP ${httpStatus}${hubbleCode ? ` ${hubbleCode}` : ''})`);
+    this.name = 'HubblePlaceOrderRejectedError';
+  }
 }
 
 /** Hubble credentials are not present in this environment. */
@@ -206,21 +266,24 @@ export class HubbleService {
   }
 
   /**
-   * NON-SECRET fingerprint of the Hubble account this instance talks to: `<api host>#<first 16
-   * hex of sha256(clientId)>`. Stamped on an order at place time so a later "no order for this
-   * reference" is only trusted against the SAME account (a different base URL / client would of
-   * course not know the order). null when not configured.
+   * NON-SECRET fingerprint of the Hubble account this instance talks to: `<api host><base path>#<first
+   * 16 hex of sha256(clientId)>` (base path without a trailing slash; empty for a path-less base URL,
+   * which keeps the original `<host>#<hash>` form). Stamped on an order at place time so a later "no
+   * order for this reference" is only trusted against the SAME account + API base (a different base URL
+   * / path / client would of course not know the order). null when not configured. Compare with
+   * hubbleAccountFingerprintMatches (it accepts the legacy host-only format on host + hash).
    */
   accountFingerprint(): string | null {
     const clientId = this.clientId();
     if (!clientId || !this.clientSecret()) return null;
-    let host: string;
+    let loc: string;
     try {
-      host = new URL(this.baseUrl()).host.toLowerCase();
+      const u = new URL(this.baseUrl());
+      loc = `${u.host.toLowerCase()}${u.pathname.replace(/\/+$/, '')}`;
     } catch {
-      host = this.baseUrl().toLowerCase();
+      loc = this.baseUrl().toLowerCase();
     }
-    return `${host}#${createHash('sha256').update(clientId).digest('hex').slice(0, 16)}`;
+    return `${loc}#${createHash('sha256').update(clientId).digest('hex').slice(0, 16)}`;
   }
 
   /** Force the next call to re-authenticate (used after a 401). */
@@ -331,6 +394,11 @@ export class HubbleService {
     });
 
     if (status < 200 || status >= 300) {
+      if ((status === 400 || status === 422) && isHubbleNotFoundBody(json)) {
+        const b = json as Record<string, unknown>;
+        const code = [b.id, b.code].find((v) => typeof v === 'string' && v.trim() !== '') as string | undefined;
+        throw new HubblePlaceOrderRejectedError(status, code ?? null);
+      }
       throw new Error(`Hubble placeOrder non-success HTTP ${status}`);
     }
     return this.normaliseOrderBody(json);

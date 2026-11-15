@@ -1577,6 +1577,8 @@ const HUBBLE_REASON_LABEL: Record<string, string> = {
 
 /** Flags on an ALREADY-REFUNDED order (late Hubble webhook): only "Acknowledge — resolved" applies. */
 const HUBBLE_POST_REFUND_FLAGS = new Set(['HUBBLE_ISSUED_AFTER_REFUND', 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND']);
+/** Terminal, points-returned order statuses: any Hubble flag on one is cleared by "Acknowledge". */
+const TERMINAL_REFUND_STATUSES = new Set(['FAILED', 'CANCELLED', 'RETURNED']);
 const hubbleReasonLabel = (r?: string | null) =>
   !r ? 'Needs review' : HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown Hubble status' : r);
 
@@ -1589,9 +1591,11 @@ const HUBBLE_RETRY_OUTCOME_LABEL: Record<string, string> = {
   SKIPPED: 'Nothing to do — the order is already resolved',
   REFUNDED_NO_HUBBLE_ORDER: 'Hubble confirmed it has no order for this redemption — points refunded',
   PENDING_NO_HUBBLE_ORDER_TOO_RECENT:
-    'Hubble has no order yet — too recent to refund; retry later (orders must be at least 30 minutes old)',
+    'Hubble has no order yet — too recent to refund; retry later (orders must be at least 2 hours old)',
   NO_HUBBLE_ORDER_NOT_REFUNDABLE:
     'Hubble has no order for this redemption, but it can’t be refunded automatically (Hubble acknowledged it earlier, or its state is unclear) — review manually',
+  NO_HUBBLE_ORDER_UNVERIFIED:
+    'Hubble says it has no order, but we couldn’t confirm that answer against a known Hubble order — not refunded. Check the order in Hubble’s portal or retry later',
   ALREADY_REFUNDED_FLAGGED:
     'Already refunded — but flagged for review: Hubble contacted us after the refund. Check the order in Hubble’s portal',
 };
@@ -1651,7 +1655,11 @@ function OrderRow({
   // (not configured / invalid amount); those keep refund + "Fulfil manually".
   // A post-refund review flag (points already refunded; a Hubble webhook arrived later): retry and
   // manual fulfilment don't apply — ops check Hubble's portal and "Acknowledge — resolved".
-  const postRefundFlag = needsReconcile && HUBBLE_POST_REFUND_FLAGS.has(order.hubbleReconcileReason ?? '');
+  // Any flag left on an order that is already terminal (FAILED / CANCELLED / RETURNED — points returned)
+  // is treated the same way: Retry can't act on it, so Acknowledge is the exit (the backend agrees).
+  const postRefundFlag =
+    needsReconcile &&
+    (HUBBLE_POST_REFUND_FLAGS.has(order.hubbleReconcileReason ?? '') || TERMINAL_REFUND_STATUSES.has(order.status));
   const canRetryHubble =
     needsReconcile && !postRefundFlag && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
   const [ackOpen, setAckOpen] = useState(false);
