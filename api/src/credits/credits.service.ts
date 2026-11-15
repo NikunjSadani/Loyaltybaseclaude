@@ -1048,6 +1048,12 @@ export class CreditsService {
     const pointsRows = rows.filter(
       (r) => r.awardType === 'POINTS' && r.status === 'OK' && r.amount > 0,
     );
+    // Wallet Reversal Engine (WP4): resolve the tenant's reversal-engine mode ONCE per batch and pass it to every
+    // credit (instead of 2 reads — partner + flag — per credited row inside WalletService.movementPath). Only when
+    // there is a POINTS row to credit, so a PAYOUT-only batch reads nothing new. Fail-closed exactly as before: a
+    // malformed flag aborts the confirm before any write (it used to abort at the first credited row).
+    const reversalEngineMode =
+      pointsRows.length > 0 ? await this.tenantSettings.getReversalEngineModeUncached(user.clientId) : undefined;
 
     // Rows that genuinely cannot be credited, WITH a reason surfaced to the admin
     // (never dropped silently). The only remaining skip causes are an unresolvable
@@ -1194,6 +1200,8 @@ export class CreditsService {
             description: r.narration ?? null,
             // Identifies this EXACT credit for a later per-(batch, outlet, field) reversal.
             metadata: { fieldId: r.fieldId, outletCode: r.outletId },
+            // The batch-level mode (above): the partner came from a tenant-scoped outlet lookup → same tenant.
+            reversalEngineMode,
           },
           tx,
         );
@@ -1309,8 +1317,15 @@ export class CreditsService {
       );
     }
 
+    // Wallet Reversal Engine (WP4): POINTS reversals follow the tenant's engine mode (LEGACY default / SHADOW /
+    // V2), resolved once per request. PAYOUT reversals never read it.
+    const pointsEngine =
+      dto.awardType === 'POINTS' ? await this.tenantSettings.getReversalEngineModeUncached(user.clientId) : null;
+
     try {
       return await this.prisma.$transaction(async (tx) => {
+        if (pointsEngine === 'V2') return this.createPointsReversalV2(tx, user, id, batch.period, dto);
+
         // Serialise every reversal create/approve for this batch (batch row lock) so the
         // Σ-reversed cap below can't be raced past by a concurrent create or approval.
         const credited = await this.lockBatchCreditedAmount(
@@ -1351,6 +1366,12 @@ export class CreditsService {
         // Interim rules (WALLET-REVERSAL-ENGINE-DESIGN.md Q14 / Q9) — refused at create AND approve:
         //  POINTS: the receiving wallet must hold the exact credit and carry no debt.
         //  PAYOUT: the amount must equal whole, not-yet-reversed payout entries of this batch.
+        // SHADOW (WP4): what the v2 position-based create cap would have said — read-only, computed before the
+        // create (its pending sum must not include this request), recorded after it. LEGACY decides.
+        const shadowCap =
+          pointsEngine === 'SHADOW'
+            ? await this.v2PointsCreateCapSnapshot(tx, { batchId: id, outletCode: dto.outletId, fieldId: dto.fieldId })
+            : null;
         if (dto.awardType === 'POINTS') {
           await this.walletService.assertPointsReversalAllowed(tx, {
             clientId: user.clientId, batchId: id, outletCode: dto.outletId, fieldId: dto.fieldId,
@@ -1364,7 +1385,7 @@ export class CreditsService {
         // The DB partial-unique index `credit_reversals_pending_unique` on
         // (batchId,outletId,fieldId) WHERE status='PENDING_GIFSY' remains the authoritative
         // duplicate-pending guard — its P2002 is translated into the same clean 400 below.
-        return await tx.creditReversal.create({
+        const created = await tx.creditReversal.create({
           data: {
             clientId: user.clientId,
             batchId: id,
@@ -1381,6 +1402,13 @@ export class CreditsService {
             requestedBy: user.sub,
           },
         });
+        if (shadowCap) {
+          await this.recordShadowCreateCap(tx, user, created.id, shadowCap, {
+            credited, alreadyReversed, requested,
+            key: { batchId: id, outletCode: dto.outletId, fieldId: dto.fieldId },
+          });
+        }
+        return created;
       });
     } catch (e) {
       if (
@@ -1392,6 +1420,149 @@ export class CreditsService {
         );
       }
       throw e;
+    }
+  }
+
+  // ─── Wallet Reversal Engine (WP4) — POINTS reversals on SHADOW / V2 tenants ──────────────────
+  // WALLET-REVERSAL-ENGINE-DESIGN.md §6 / §9 step 5. LEGACY (the default for every tenant) never reaches these.
+
+  /**
+   * V2 create (§6 "create cap"): the reversal is capped by the credit POSITIONS of (batch, outlet, field) —
+   * Σ(amount − reversedPoints) − Σ pending requested — on whichever wallet(s) received the credit (Q4: an outlet
+   * relinked since is irrelevant). No position, or any UNRESOLVED credit in the batch → 400 (Q5). No debt refusal
+   * (Q1/Q14 apply to LEGACY only). Same batch row lock + duplicate-pending guard as the legacy create.
+   */
+  private async createPointsReversalV2(
+    tx: Prisma.TransactionClient,
+    user: JwtPayload,
+    batchId: string,
+    period: string,
+    dto: CreateReversalDto,
+  ) {
+    await tx.$queryRaw`SELECT id FROM credit_batches WHERE id = ${batchId} FOR UPDATE`;
+    const existingPending = await tx.creditReversal.findFirst({
+      where: { batchId, clientId: user.clientId, outletId: dto.outletId, fieldId: dto.fieldId, status: 'PENDING_GIFSY' },
+    });
+    if (existingPending) {
+      throw new BadRequestException('A pending reversal already exists for this outlet and field in this batch');
+    }
+    const snap = await this.v2PointsCreateCapSnapshot(
+      tx, { batchId, outletCode: dto.outletId, fieldId: dto.fieldId }, { raise: true },
+    );
+    if ('refused' in snap) throw new BadRequestException(snap.refused); // unreachable with raise: true
+    const requested = toPaiseBigInt(dto.requestedPaise);
+    if (requested <= 0n) throw new BadRequestException('Reversal amount must be a positive whole number of points');
+    if (snap.pending + requested > snap.reversible) {
+      throw new BadRequestException(
+        `Reversal exceeds the amount still reversible for this outlet and field in this batch (credited ${snap.credited} pts, already reversed ${snap.credited - snap.reversible} pts, pending ${snap.pending} pts, requested ${requested} pts)`,
+      );
+    }
+    return tx.creditReversal.create({
+      data: {
+        clientId: user.clientId,
+        batchId,
+        outletId: dto.outletId,
+        outletName: dto.outletName,
+        fieldId: dto.fieldId,
+        fieldName: dto.fieldName,
+        period,
+        awardType: dto.awardType,
+        // Σ amount of the credit positions = what wallets ACTUALLY received for (batch, outlet, field).
+        originalPaise: snap.credited,
+        requestedPaise: requested,
+        requestedBy: user.sub,
+      },
+    });
+  }
+
+  /**
+   * The v2 create-cap figures for (batch, outlet, field), read-only: credited = Σ position amount, reversible =
+   * Σ(amount − reversedPoints), pending = Σ requested of PENDING POINTS reversals. A v2 refusal (no position /
+   * UNRESOLVED credit — WalletService.v2PointsReversalCap) is raised when `raise`, else returned (SHADOW records it).
+   */
+  private async v2PointsCreateCapSnapshot(
+    tx: Prisma.TransactionClient,
+    key: { batchId: string; outletCode: string; fieldId: string },
+    opts: { raise?: boolean } = {},
+  ): Promise<{ credited: bigint; reversible: bigint; pending: bigint } | { refused: string }> {
+    let cap: { cap: number; positions: { amount: number }[] };
+    try {
+      cap = await this.walletService.v2PointsReversalCap(tx, key);
+    } catch (e) {
+      if (opts.raise || !(e instanceof BadRequestException || e instanceof ConflictException)) throw e;
+      return { refused: e.message };
+    }
+    const pendingRows = await tx.creditReversal.findMany({
+      where: {
+        batchId: key.batchId, outletId: key.outletCode, fieldId: key.fieldId, awardType: 'POINTS', status: 'PENDING_GIFSY',
+      },
+      select: { requestedPaise: true },
+    });
+    return {
+      credited: BigInt(cap.positions.reduce((s, p) => s + p.amount, 0)),
+      reversible: BigInt(cap.cap),
+      pending: pendingRows.reduce((s, r) => s + r.requestedPaise, 0n),
+    };
+  }
+
+  /**
+   * SHADOW create: LEGACY decided (and created the reversal); record what the v2 cap would have said next to it
+   * (audit_logs entityType REVERSAL_ENGINE_SHADOW, phase CREATE — the approve-time diff is written by
+   * WalletService.reverseCreditBatchPoints). Never changes the outcome.
+   */
+  private async recordShadowCreateCap(
+    tx: Prisma.TransactionClient,
+    user: JwtPayload,
+    reversalId: string,
+    v2: { credited: bigint; reversible: bigint; pending: bigint } | { refused: string },
+    legacy: {
+      credited: bigint; alreadyReversed: bigint; requested: bigint;
+      key: { batchId: string; outletCode: string; fieldId: string };
+    },
+  ): Promise<void> {
+    // Remaining headroom BEFORE this request: LEGACY = credited − (approved + pending); v2 = reversible − pending.
+    const legacyHeadroom = legacy.credited - legacy.alreadyReversed;
+    const v2Headroom = 'refused' in v2 ? null : v2.reversible - v2.pending;
+    const differs = 'refused' in v2 || v2.credited !== legacy.credited || v2Headroom !== legacyHeadroom;
+    await tx.auditLog.create({
+      data: {
+        action: 'CREATE',
+        entityType: 'REVERSAL_ENGINE_SHADOW',
+        entityId: reversalId,
+        actorId: user.sub,
+        metadata: {
+          phase: 'CREATE',
+          ...legacy.key,
+          requested: Number(legacy.requested),
+          differs,
+          legacy: { credited: Number(legacy.credited), headroom: Number(legacyHeadroom) },
+          v2:
+            'refused' in v2
+              ? { refused: v2.refused }
+              : { credited: Number(v2.credited), headroom: Number(v2Headroom), pending: Number(v2.pending) },
+        } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  /**
+   * V2 approve gate (before the guarded flip): lock the batch row (same lock as the legacy cap), then cap the
+   * approval by the positions' Σ(amount − reversedPoints) (§6 approve cap). No position / UNRESOLVED → 400 (Q5).
+   * applyCreditReversal re-checks the same cap under the wallet + position locks.
+   */
+  private async assertV2PointsApproval(
+    tx: Prisma.TransactionClient,
+    key: { batchId: string; outletCode: string; fieldId: string },
+    approving: bigint,
+  ): Promise<void> {
+    await tx.$queryRaw`SELECT id FROM credit_batches WHERE id = ${key.batchId} FOR UPDATE`;
+    if (approving <= 0n) return;
+    const { cap, positions } = await this.walletService.v2PointsReversalCap(tx, key);
+    if (approving > BigInt(cap)) {
+      const credited = positions.reduce((s, p) => s + p.amount, 0);
+      throw new BadRequestException(
+        `Approval exceeds the amount still reversible for this outlet and field in this batch (credited ${credited} pts, already reversed ${credited - cap} pts, approving ${approving} pts)`,
+      );
     }
   }
 
@@ -2891,12 +3062,25 @@ export class CreditsService {
         ? toPaiseBigInt(approvedPaise ?? requestedPaiseNum)
         : null;
 
+    // Wallet Reversal Engine (WP4): an approved POINTS reversal follows the tenant's engine mode (LEGACY default /
+    // SHADOW / V2), resolved once per request and passed down. Reject / PAYOUT never read it.
+    const pointsEngine =
+      action === ReversalAction.approve && reversal.awardType === 'POINTS'
+        ? await this.tenantSettings.getReversalEngineModeUncached(user.clientId)
+        : null;
+    const pointsKey = { batchId: reversal.batchId, outletCode: reversal.outletId, fieldId: reversal.fieldId };
+
     return this.prisma.$transaction(async (tx) => {
+      // V2: position-based approve cap (batch row lock, Σ(amount − reversedPoints), Q5 refusal) — replaces the
+      // legacy stored-rows cap and the interim current-partner / debt gate below.
+      if (pointsEngine === 'V2') {
+        await this.assertV2PointsApproval(tx, pointsKey, finalApprovedPaise ?? 0n);
+      }
       // ── Over-reversal guard (approve) ─────────────────────────────────────
       // Re-validated server-side at approval against the STORED batch rows, under the batch
       // row lock (serialises concurrent approvals/creates for this batch): Σ other live
       // reversals for (batch, outlet, field) + this approval ≤ the amount actually credited.
-      if (action === ReversalAction.approve) {
+      if (action === ReversalAction.approve && pointsEngine !== 'V2') {
         const credited = await this.lockBatchCreditedAmount(
           tx, reversal.batchId, user.clientId, reversal.outletId, reversal.fieldId, reversal.awardType,
         );
@@ -2920,7 +3104,10 @@ export class CreditsService {
       // POINTS: refuse unless the receiving wallet holds the exact credit and carries no debt
       // (clawbackAward re-checks under the wallet row lock).
       let pointsTarget: { partnerId: string; walletId: string } | null = null;
-      if (action === ReversalAction.approve && reversal.awardType === 'POINTS' && (finalApprovedPaise ?? 0n) > 0n) {
+      if (
+        action === ReversalAction.approve && reversal.awardType === 'POINTS' && (finalApprovedPaise ?? 0n) > 0n &&
+        pointsEngine !== 'V2'
+      ) {
         pointsTarget = await this.walletService.assertPointsReversalAllowed(tx, {
           clientId: user.clientId, batchId: reversal.batchId, outletCode: reversal.outletId, fieldId: reversal.fieldId,
         });
@@ -2957,7 +3144,25 @@ export class CreditsService {
 
       // ── POINTS reversal → wallet clawback (#16 reversal) ─────────────────
       let clawbackShortfall = 0;
-      if (pointsTarget) {
+      if (
+        (pointsEngine === 'V2' && (finalApprovedPaise ?? 0n) > 0n) ||
+        (pointsEngine === 'SHADOW' && pointsTarget)
+      ) {
+        // WP4: V2 → the position engine (receiving wallet(s), allocations, own-lot-first, debt restored);
+        // SHADOW → LEGACY applied on pointsTarget (already gated above) + the v2 diff written to audit_logs.
+        const res = await this.walletService.reverseCreditBatchPoints(tx, {
+          ...pointsKey,
+          clientId: user.clientId,
+          creditReversalId: id,
+          points: Number(finalApprovedPaise ?? 0n),
+          actorId: user.sub,
+          description: `Clawback for reversal ${id} — batch POINTS reversal`,
+          mode: pointsEngine,
+          legacyTarget: pointsTarget,
+        });
+        clawbackShortfall = res.shortfall;
+      } else if (pointsTarget) {
+        // LEGACY (default): today's floor-0 clawback on the outlet's current partner's wallet — unchanged.
         // approvedPaise field holds approved whole points for POINTS-type reversals.
         const cb = await this.walletService.clawbackAward(
           pointsTarget.partnerId,

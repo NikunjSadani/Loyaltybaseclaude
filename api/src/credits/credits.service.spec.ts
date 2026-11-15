@@ -149,6 +149,8 @@ const mockTenantSettings = {
   getEffectiveSettings: jest.fn(async () => ({ creditsPayouts: mockCreditsPayouts })),
   // Per-tenant TDS policy resolved once at confirm + frozen onto each entry (W0-B).
   resolveTdsPolicy: jest.fn(async () => ({ section: 'SEC_194C', methodology: 'GROSS_UP' })),
+  // Wallet Reversal Engine flag (WP4): absent row → LEGACY, the default for every tenant.
+  getReversalEngineModeUncached: jest.fn(async () => 'LEGACY'),
 };
 
 // Stream B: SERVICE invoice-at-confirm + gross-up TDS invoice-at-download are delegated here.
@@ -535,6 +537,8 @@ describe('CreditsService', () => {
           description: 'May bonus',
           // Identifies the EXACT credit for a later per-(batch, outlet, field) reversal.
           metadata: { fieldId: 'f1', outletCode: 'O1' },
+          // WP4: the tenant's reversal-engine mode, resolved once per batch (LEGACY = default).
+          reversalEngineMode: 'LEGACY',
         },
         mockTx,   // same tx — atomicity guaranteed
       );
