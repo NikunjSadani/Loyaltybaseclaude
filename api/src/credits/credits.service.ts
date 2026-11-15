@@ -2498,7 +2498,18 @@ export class CreditsService {
     // call already flipped). amountPaise = Σ of the entries THIS call flipped to PAID.
     // notify=false when the outlet already had a PAID sibling on this bank line (a heal of a stuck
     // entry — the outlet was already told it was credited).
-    const flippedPaid: Array<{ outletId: string; utr: string; paymentDate: Date; amountPaise: bigint; notify: boolean }> = [];
+    // bankCreditedPaise = Σ(amountPaise − tdsDeductedPaise) of those same entries = the cash that
+    // actually reached the bank (the bank-file line is built NET of DEDUCT-method TDS; GROSS-UP /
+    // INCENTIVE entries carry tdsDeductedPaise=0, so for them it equals amountPaise). Floored at 0
+    // per entry. This — not the gross — is what the "payout credited" message states.
+    const flippedPaid: Array<{
+      outletId: string;
+      utr: string;
+      paymentDate: Date;
+      amountPaise: bigint;
+      bankCreditedPaise: bigint;
+      notify: boolean;
+    }> = [];
     let flippedFailedCount = 0; // outlets (rows) with ≥1 entry flipped to FAILED by this call
     // OK rows whose outlet had NO entry still PROCESSING inside the tx (a concurrent/prior apply
     // already recorded it). Reported separately — never folded into "Already applied".
@@ -2620,6 +2631,12 @@ export class CreditsService {
             utr: row.utr ?? '',
             paymentDate: paidAt,
             amountPaise: pending.reduce((s, e) => s + e.amountPaise, 0n),
+            // In-tx tdsDeductedPaise (fresh read under the UTR lock) = what THIS bank line withheld.
+            // Floor the OUTLET total once (not each entry) so the message mirrors the bank line exactly.
+            bankCreditedPaise: (() => {
+              const net = pending.reduce((s, e) => s + e.amountPaise - (e.tdsDeductedPaise ?? 0n), 0n);
+              return net > 0n ? net : 0n;
+            })(),
             notify: !paidSibling,
           });
         } else {
@@ -2744,10 +2761,15 @@ export class CreditsService {
           // owner WhatsApp (no bell/push row), so keep it paid-channel-only (behaviour-neutral).
           // For a WHATSAPP_KYC tenant the WhatsApp default reproduces today's `deoleo_payout_credit`:
           //   {{1}} ownerName · {{2}} points · {{3}} UTR · {{4}} date of payment · {{5}} month
-          // pointsPaid = paid amount as a whole number (Deoleo: 1 point = ₹1 → paise ÷ 100;
-          // assumes a 1:1 conversion rate, which the Deoleo tenant runs).
+          // pointsPaid = the amount ACTUALLY CREDITED TO THE BANK, in whole rupees (owner rule
+          // 2026-11-15): gross minus any DEDUCT-method TDS withheld on this bank line; equals the
+          // gross when nothing was withheld (GROSS-UP / INCENTIVE). The var is labelled "points"
+          // in the pre-approved template; the value is rupees (Deoleo runs 1 point = ₹1).
           const ownerName = outlet?.partner?.ownerName?.trim() || 'Partner';
-          const pointsPaid = Math.round(Number(paid.amountPaise) / 100);
+          const pointsPaid = Math.round(Number(paid.bankCreditedPaise) / 100);
+          // Never tell a retailer "₹0 credited" (a line fully absorbed by withholding) — mirrors the
+          // redemption sender's `points <= 0` skip.
+          if (pointsPaid <= 0) continue;
           await this.notifications
             .notifyUserWithChannels({
               clientId: user.clientId,

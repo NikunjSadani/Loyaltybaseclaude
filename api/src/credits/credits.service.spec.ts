@@ -2022,6 +2022,81 @@ describe('CreditsService', () => {
       }
     });
 
+    // Owner rule 2026-11-15: the "payout credited" message states the amount ACTUALLY CREDITED TO
+    // THE BANK = Σ(amountPaise − tdsDeductedPaise) of the entries this apply flipped to PAID.
+    describe('payout-credited amount = bank-credited (net of DEDUCT TDS)', () => {
+      const applyWith = async (
+        fresh: Array<{ id: string; amountPaise: bigint; tdsDeductedPaise: bigint }>,
+      ) => {
+        mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+          id: 'd1',
+          downloadCode,
+          period: '2026-05',
+          downloadedBy: 'g1',
+          entries: fresh.map((e) => ({ id: e.id, outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: e.amountPaise })),
+        });
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue(
+          fresh.map((e) => ({
+            id: e.id,
+            outletId: 'O1',
+            status: 'PROCESSING',
+            amountPaise: e.amountPaise,
+            tdsDeductedPaise: e.tdsDeductedPaise,
+            tdsSection: e.tdsDeductedPaise > 0n ? 'SEC_194C' : null,
+            period: '2026-05',
+          })),
+        );
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          { outletCode: 'O1', name: 'A', partnerId: 'p1', partner: { ownerName: 'Ravi Traders', phone: '9900000041' } },
+        ]);
+        await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', 'UTR123456', 'Success', '']]), true);
+      };
+
+      it('DEDUCT: states the NET bank credit, not the gross (₹10,000 − ₹200 TDS → 9800)', async () => {
+        await applyWith([{ id: 'e1', amountPaise: 1_000_000n, tdsDeductedPaise: 20_000n }]);
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+        const call = mockNotifications.notifyUserWithChannels.mock.calls[0][0];
+        expect(call.vars.points).toBe(9800);
+        expect(call.body).toBe('Your payout of 9800 points has been credited.');
+      });
+
+      it('GROSS-UP / no TDS withheld: unchanged — states the gross (₹10,000 → 10000)', async () => {
+        await applyWith([{ id: 'e1', amountPaise: 1_000_000n, tdsDeductedPaise: 0n }]);
+        expect(mockNotifications.notifyUserWithChannels.mock.calls[0][0].vars.points).toBe(10000);
+      });
+
+      it('multi-entry outlet: sums every flipped entry net of its own withholding (one message)', async () => {
+        // (₹5,000 − ₹100) + (₹3,000 − ₹0) + (₹2,000.50 − ₹40) = ₹9,860.50 → rounds to 9861
+        await applyWith([
+          { id: 'e1', amountPaise: 500_000n, tdsDeductedPaise: 10_000n },
+          { id: 'e2', amountPaise: 300_000n, tdsDeductedPaise: 0n },
+          { id: 'e3', amountPaise: 200_050n, tdsDeductedPaise: 4_000n },
+        ]);
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+        expect(mockNotifications.notifyUserWithChannels.mock.calls[0][0].vars.points).toBe(9861);
+      });
+
+      it('mirrors the bank line: the OUTLET total (Σ amount − Σ tds) is floored once, never per entry', async () => {
+        // e1 corrupt (tds > amount): (100 − 500) + (1,000 − 0) = ₹600 — exactly what the bank line pays.
+        await applyWith([
+          { id: 'e1', amountPaise: 10_000n, tdsDeductedPaise: 50_000n },
+          { id: 'e2', amountPaise: 100_000n, tdsDeductedPaise: 0n },
+        ]);
+        expect(mockNotifications.notifyUserWithChannels.mock.calls[0][0].vars.points).toBe(600);
+      });
+
+      it('never negative: an outlet whose total withholding exceeds its total sends no message', async () => {
+        await applyWith([{ id: 'e1', amountPaise: 10_000n, tdsDeductedPaise: 50_000n }]);
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      });
+
+      it('a line fully absorbed by withholding sends NO "₹0 credited" message', async () => {
+        await applyWith([{ id: 'e1', amountPaise: 20_000n, tdsDeductedPaise: 20_000n }]);
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      });
+    });
+
     it('refuses to apply when the parse result has errors', async () => {
       mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
         id: 'd1',

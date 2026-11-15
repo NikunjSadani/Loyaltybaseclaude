@@ -1257,6 +1257,12 @@ export class PayoutsService {
           const paymentDate = formatDateIST(now);
           for (const w of payoutWhatsapps) {
             const phone = partnerMap.get(w.partnerId)?.phone?.trim();
+            // Owner rule 2026-11-15 ("payout credited" = amount actually credited to the bank):
+            // a redemption cash-out NEVER withholds TDS — the PayoutTransaction is created with
+            // tdsPaise=0 / netAmountPaise=amountPaise (rewards confirmRedeem*) and nothing here
+            // nets it (194R is a payer-borne liability in src/tds). The bank line is therefore the
+            // full amountPaise = pointsDeducted × conversion rate, which for this Deoleo-only
+            // template (1 point = ₹1) equals pointsDeducted. No net-of-TDS adjustment applies.
             const points = w.redemptionOrderId
               ? orderMap.get(w.redemptionOrderId)?.pointsDeducted ?? 0
               : 0;
