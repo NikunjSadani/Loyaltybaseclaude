@@ -3,7 +3,7 @@
  * `.spec.ts`, so jest does not run it on its own).
  *  - renderKind: run a kind into createXlsxStreamWriter and return the .xlsx bytes;
  *  - readBook / expectSameWorkbook: read both files back with SheetJS and compare sheet names, every cell and merges;
- *  - fakeModel: a tiny in-memory Prisma delegate (where / orderBy / take / skip / cursor / groupBy) so paging across
+ *  - fakeModel: a tiny in-memory Prisma delegate (where / orderBy / take / skip / cursor / groupBy / aggregate) so paging across
  *    > 2,000 rows and tenant isolation are exercised against real query semantics, not call counts.
  */
 import { PassThrough } from 'node:stream';
@@ -183,6 +183,7 @@ export interface FakeModel {
   findFirst: jest.Mock;
   groupBy: jest.Mock;
   count: jest.Mock;
+  aggregate: jest.Mock;
 }
 
 /** Rows are returned whole (select is ignored) — store nested relations already shaped as the code selects them. */
@@ -203,6 +204,22 @@ export function fakeModel(rows: Row[]): FakeModel {
     findMany: jest.fn(async (args?: Parameters<typeof query>[0]) => query(args)),
     findFirst: jest.fn(async (args?: Parameters<typeof query>[0]) => query({ ...args, take: 1 })[0] ?? null),
     count: jest.fn(async (args?: { where?: Row }) => rows.filter((r) => matches(r, args?.where)).length),
+    // `_count: { _all }` + `_sum` over numeric / BigInt fields (Postgres: SUM of no rows is NULL).
+    aggregate: jest.fn(async (args: { where?: Row; _count?: { _all?: boolean }; _sum?: Record<string, boolean> }) => {
+      const list = rows.filter((r) => matches(r, args.where));
+      const out: Row = {};
+      if (args._count?._all) out._count = { _all: list.length };
+      if (args._sum) {
+        const sums: Row = {};
+        for (const k of Object.keys(args._sum)) {
+          if (!list.length) sums[k] = null;
+          else if (typeof list[0][k] === 'bigint') sums[k] = list.reduce((s, r) => s + (r[k] as bigint), 0n);
+          else sums[k] = list.reduce((s, r) => s + Number(r[k] ?? 0), 0);
+        }
+        out._sum = sums;
+      }
+      return out;
+    }),
     groupBy: jest.fn(async (args: { by: string[]; where?: Row }) => {
       const seen = new Map<string, Row>();
       for (const r of rows.filter((x) => matches(x, args.where))) {

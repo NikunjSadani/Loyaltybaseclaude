@@ -1,22 +1,34 @@
 /**
- * Payments Report — GET /v1/admin/payments-report/export as an export kind (Downloads page design). Output identical
- * to the old PaymentsReportService.paymentReportXlsx: sheet "Payments" (29 columns) + sheet "Summary" (Rows, Total
- * Amount, and the TRUNCATED notice when the 10,000-row cap is hit — the cap is kept so the file matches the on-screen
- * report and its banner).
+ * Payments Report — GET /v1/admin/payments-report/export as an export kind (Downloads page design). Sheet "Payments"
+ * (29 columns) + sheet "Summary" (Rows, Total Amount, Total TDS Deducted).
  *
- * Paging: the same where/order as the report (paidAt ↓ or, for a non-PAID status filter, attemptedAt ↓ NULLS LAST;
- * then createdAt ↓; id ↓ as the tiebreak) read in pages of ≤ 2,000 by OFFSET, all inside ONE REPEATABLE READ
- * transaction (one consistent snapshot: concurrent payout changes can't duplicate / skip rows or double-count) — attemptedAt is nullable, which a
- * keyset cursor cannot page correctly, and the 10,000-row cap bounds it to ≤ 6 reads. Each page's outlet, partner and
- * active-assignment lookups cover that page only; the tenant's SalesUser tree (≈ 1k small rows per tenant, needed to
- * walk any rep's reporting chain) is loaded once per tenant seen. Totals are summed in BigInt paise while streaming.
+ * UNCAPPED: every entry matching the filters is written (the old 10,000-row cap and its TRUNCATED notice are gone —
+ * the screen is paged, so there is no longer a "first 10,000 on screen" to match).
+ *
+ * Same row set, order and totals as the screen, by construction: WHERE / ORDER BY / SELECT and the totals aggregate
+ * all come from payments-report/payments-report.query.ts (order ends in id ↓, so it is total and identical to the
+ * screen's page boundaries). The Summary numbers are the DATABASE aggregate (paymentsTotals) — the same call the
+ * screen's totals card uses — and are cross-checked against the rows actually streamed.
+ *
+ * Paging / memory: pages of ≤ 2,000 by OFFSET (attemptedAt is nullable, which a keyset cursor cannot page correctly),
+ * all inside ONE REPEATABLE READ transaction (one consistent snapshot: concurrent payout changes can't duplicate /
+ * skip rows, and the aggregate sees exactly the rows written). Each page is written to the streaming xlsx writer and
+ * dropped before the next is read, so at most one page (+ its outlet / partner / assignment lookups) is in memory;
+ * the tenant's SalesUser tree (≈ 1k small rows per tenant, needed to walk any rep's reporting chain) is loaded once
+ * per tenant seen. Ranges over 31 days / open-ended are heavy → prepared in the background on the Downloads page.
  */
 import { CreditEntryStatus, Prisma } from '@prisma/client';
-import { istDateKey, istDayRangeFilter } from '../../../common/ist-date';
+import { istDateKey } from '../../../common/ist-date';
 import { platformWide } from '../../../common/tenant-scope';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import { PaymentsReportQueryDto } from '../../../payments-report/dto/payments-report.dto';
-import { PaymentsReportService } from '../../../payments-report/payments-report.service';
+import {
+  PAYMENT_ENTRY_SELECT,
+  paymentsOrderBy,
+  paymentsTotals,
+  paymentsWhere,
+} from '../../../payments-report/payments-report.query';
+import { isBoundedRange } from '../batch1/common';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { EXPORT_PAGE_SIZE, JsonSheet, parseQueryDto } from './kind-support';
@@ -60,13 +72,13 @@ function reportingChain(startId: string, nodes: Map<string, SalesNode>): string 
 
 const inr = (paise: bigint) => Number(paise) / 100;
 
-/** Snapshot window for one export (≤ 6 page reads of ≤ 2,000 rows + their lookups, streamed as written). */
+/** Snapshot window for one export (pages of ≤ 2,000 rows + their lookups, streamed as written; ~48k rows ≈ 25 pages). */
 export const PAYMENTS_EXPORT_TX_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * Every read runs inside ONE REPEATABLE READ transaction, so all pages (and their outlet / assignment / sales-tree
  * lookups) see the same snapshot: a payout inserted, re-paid or deleted while the export is streaming can never shift
- * the OFFSET pages — no row duplicated or skipped, and the Summary total is exactly the sum of the rows written.
+ * the OFFSET pages — no row duplicated or skipped, and the Summary aggregate covers exactly the rows written.
  */
 async function run(ctx: ExportRunContext, p: PaymentsReportParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
   return ctx.prisma.$transaction((tx) => runIn(tx, ctx, p, out), {
@@ -83,68 +95,24 @@ async function runIn(
   out: XlsxStreamWriter,
 ): Promise<{ rowCount: number }> {
   const clientId = scopeOf(ctx.user, p.clientId);
-  const range = istDayRangeFilter(p.from ?? undefined, p.to ?? undefined);
+  const filter = { clientId, from: p.from, to: p.to, status: p.status };
+  const where = paymentsWhere(filter);
+  const orderBy = paymentsOrderBy(filter);
 
-  const where: Prisma.CreditPayoutEntryWhereInput = {};
-  if (clientId) where.clientId = clientId;
-  if (p.status) where.status = p.status;
-  const nonPaidStatus = !!p.status && p.status !== CreditEntryStatus.PAID;
-  if (nonPaidStatus) {
-    if (range?.gte || range?.lte) {
-      const attemptedAt: Prisma.DateTimeNullableFilter = {};
-      if (range.gte) attemptedAt.gte = range.gte;
-      if (range.lte) attemptedAt.lte = range.lte;
-      where.attemptedAt = attemptedAt;
-    }
-  } else {
-    const paidAt: Prisma.DateTimeNullableFilter = { not: null };
-    if (range?.gte) paidAt.gte = range.gte;
-    if (range?.lte) paidAt.lte = range.lte;
-    where.paidAt = paidAt;
-  }
-  const orderBy: Prisma.CreditPayoutEntryOrderByWithRelationInput[] = nonPaidStatus
-    ? [{ attemptedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }, { id: 'desc' }]
-    : [{ paidAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }];
-
-  const max = PaymentsReportService.MAX_ROWS;
   const salesByTenant = new Map<string, Map<string, SalesNode>>();
   const sheet = new JsonSheet(out, 'Payments');
   let written = 0;
-  let fetched = 0;
-  let total = 0n;
+  let streamedAmount = 0n;
+  let streamedTds = 0n;
 
   for (;;) {
-    // Read one row past the cap so a truncated report is detected exactly like the old `take: MAX_ROWS + 1`.
-    const take = Math.min(EXPORT_PAGE_SIZE, max + 1 - fetched);
-    if (take <= 0) break;
-    const page = await prisma.creditPayoutEntry.findMany({
+    const entries = await prisma.creditPayoutEntry.findMany({
       where,
       orderBy,
-      skip: fetched,
-      take,
-      select: {
-        id: true,
-        clientId: true,
-        outletId: true,
-        outletName: true,
-        fieldName: true,
-        period: true,
-        amountPaise: true,
-        narration: true,
-        status: true,
-        utr: true,
-        paidAt: true,
-        attemptedAt: true,
-        failureReason: true,
-        tdsSection: true,
-        tdsMethodology: true,
-        tdsDeductedPaise: true,
-        download: { select: { downloadCode: true, groupType: true } },
-        autoInvoice: { select: { invoiceNumber: true } },
-      },
+      skip: written,
+      take: EXPORT_PAGE_SIZE,
+      select: PAYMENT_ENTRY_SELECT,
     });
-    fetched += page.length;
-    const entries = page.slice(0, Math.max(0, max - written));
     if (entries.length) {
       const codes = [...new Set(entries.map((e) => e.outletId))];
       const outlets = await prisma.outlet.findMany({
@@ -197,7 +165,8 @@ async function runIn(
         const repId = o ? repByOutletPk.get(o.id) : undefined;
         const rep = repId ? nodes?.get(repId) : undefined;
         const displayDate = e.paidAt ?? e.attemptedAt;
-        total += e.amountPaise;
+        streamedAmount += e.amountPaise;
+        streamedTds += e.tdsDeductedPaise;
         await sheet.add({
           'S.No': ++written,
           Client: e.clientId,
@@ -233,17 +202,24 @@ async function runIn(
         });
       }
     }
-    if (page.length < take) break;
+    if (entries.length < EXPORT_PAGE_SIZE) break;
   }
   const rowCount = await sheet.end();
-  const truncated = fetched > max;
+
+  // Summary = the SAME database aggregate the screen's totals card shows (same WHERE), read in the same snapshot.
+  const totals = await paymentsTotals(prisma, where);
+  if (totals.count !== written || totals.amountPaise !== streamedAmount || totals.tdsDeductedPaise !== streamedTds) {
+    // Cannot happen inside one REPEATABLE READ snapshot with a shared WHERE — fail loudly rather than hand out a
+    // financial file whose Summary disagrees with its own rows.
+    throw new Error(
+      `payments-report export: streamed ${written} rows / ${streamedAmount} paise but the aggregate is ${totals.count} / ${totals.amountPaise}`,
+    );
+  }
 
   const summary = new JsonSheet(out, 'Summary');
-  await summary.add({ Metric: 'Rows', Value: written });
-  await summary.add({ Metric: 'Total Amount (₹)', Value: inr(total) });
-  if (truncated) {
-    await summary.add({ Metric: `TRUNCATED — showing first ${max}; narrow the date range for a complete report`, Value: 'YES' });
-  }
+  await summary.add({ Metric: 'Rows', Value: totals.count });
+  await summary.add({ Metric: 'Total Amount (₹)', Value: inr(totals.amountPaise) });
+  await summary.add({ Metric: 'Total TDS Deducted (₹)', Value: inr(totals.tdsDeductedPaise) });
   await summary.end();
   return { rowCount };
 }
@@ -257,8 +233,9 @@ export const PAYMENTS_REPORT_KIND: ExportKindDef<PaymentsReportParams> = {
     const q = parseQueryDto(PaymentsReportQueryDto, raw);
     return { clientId: scopeOf(user, q.clientId), from: q.from ?? null, to: q.to ?? null, status: q.status ?? null };
   },
-  // Capped at 10,000 rows (as the on-screen report) and streamed with flat memory → always instant.
-  isHeavy: () => false,
+  // Uncapped (every matching row). A range of ≤ 31 days streams instantly (one tenant OR all tenants, as before); an
+  // open-ended or longer range is prepared in the background (Downloads page). Memory is flat either way.
+  isHeavy: (p) => !isBoundedRange(p.from ?? undefined, p.to ?? undefined),
   describeParams: (p) =>
     [p.from || p.to ? `${p.from ?? '…'} – ${p.to ?? '…'}` : 'All dates', p.status ?? 'Paid', p.clientId ?? 'All tenants'].join(' · '),
   fileName: (p) => `payments-report-${p.clientId ? p.clientId : 'all'}.xlsx`,

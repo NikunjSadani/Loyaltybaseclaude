@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { CreditEntryStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { istDayRangeFilter } from '../common/ist-date';
+import { PAYMENT_ENTRY_SELECT, paymentsOrderBy, paymentsTotals, paymentsWhere } from './payments-report.query';
+import { PAYMENTS_DEFAULT_PAGE_SIZE, PAYMENTS_MAX_PAGE_SIZE } from './dto/payments-report.dto';
 
 /**
  * Payments Report service — a READ-ONLY report of all payout PAYMENTS in a date range, across
@@ -32,6 +33,10 @@ export interface PaymentsReportScope {
   to?: string;
   /** Optional payment-status filter. */
   status?: CreditEntryStatus;
+  /** 1-based page (default 1). */
+  page?: number;
+  /** Rows per page (default 50, clamped to 1..200). */
+  pageSize?: number;
 }
 
 /** A tenant-scoped SalesUser node used to build the reporting chain (cycle-safe up-walk). */
@@ -46,9 +51,6 @@ interface SalesNode {
 
 @Injectable()
 export class PaymentsReportService {
-  /** Hard cap on rows returned/exported (JSON + the 'payments-report' export kind). Overflow → `truncated`. */
-  static readonly MAX_ROWS = 10000;
-
   constructor(private readonly prisma: PrismaService) {}
 
   private money(paise: bigint): { paise: string; inr: number } {
@@ -78,84 +80,40 @@ export class PaymentsReportService {
   }
 
   /**
-   * All payout payments (paidAt not null) in the scope's [from,to] range, across ALL streams,
-   * enriched (batched, no N+1) with the payout batch header, outlet geography, the owning
-   * ChannelPartner, the frozen invoice number, and the outlet's tagged sales rep + full reporting
-   * chain.
+   * ONE PAGE of payout payments (paidAt not null by default) in the scope's [from,to] range, across ALL streams,
+   * enriched (batched, no N+1) with the payout batch header, outlet geography, the owning ChannelPartner, the frozen
+   * invoice number, and the outlet's tagged sales rep + full reporting chain.
+   *
+   * MEMORY: only `pageSize` (≤ 200) entries are ever loaded per request, and only THEIR outlets / assignments are
+   * joined. The totals are a DATABASE aggregate over every matching entry (paymentsTotals), so they cover the whole
+   * range regardless of page. The order is total (… id ↓), identical to the Excel export's.
    */
   async paymentReport(scope: PaymentsReportScope) {
-    // A date-only from/to (YYYY-MM-DD from <input type="date">) is interpreted as a FULL INCLUSIVE
-    // IST day via the shared istDayRangeFilter — otherwise a naive `new Date("YYYY-MM-DD")` (= 05:30
-    // IST) skips the first 5.5h of `from` AND truncates almost all of `to` (same trap the roster /
-    // gift / reports / payout date filters fix). A full ISO datetime is used as-given.
-    const range = istDayRangeFilter(scope.from, scope.to);
+    const requestedPage = Math.max(1, Math.floor(scope.page ?? 1));
+    const pageSize = Math.min(PAYMENTS_MAX_PAGE_SIZE, Math.max(1, Math.floor(scope.pageSize ?? PAYMENTS_DEFAULT_PAGE_SIZE)));
+    const where = paymentsWhere(scope);
+    const orderBy = paymentsOrderBy(scope);
 
-    const where: Prisma.CreditPayoutEntryWhereInput = {};
-    if (scope.clientId) where.clientId = scope.clientId;
-    if (scope.status) where.status = scope.status;
-    // NOTE: intentionally NO tdsSection filter — that is the TDS report's job and would drop
-    // every incentive/standard-stream payment from this cross-stream payments report.
-
-    // By default a "payment" is an actually-PAID entry: paidAt is constrained not-null and the
-    // [from,to] range narrows it. This is the report's long-standing behaviour and keeps it
-    // byte-identical for every tenant (incl. live Deoleo) when no status / a PAID status is asked.
-    // To let an admin audit NON-SUCCESS payouts (bank-rejected FAILED / REVERSED — whose paidAt is
-    // null, so the not-null floor would hide them), a non-PAID status filter RELAXES that floor and
-    // the range then bounds attemptedAt (the uploaded failure date) instead.
-    const nonPaidStatus = !!scope.status && scope.status !== CreditEntryStatus.PAID;
-    if (nonPaidStatus) {
-      if (range?.gte || range?.lte) {
-        const attemptedAt: Prisma.DateTimeNullableFilter = {};
-        if (range.gte) attemptedAt.gte = range.gte;
-        if (range.lte) attemptedAt.lte = range.lte;
-        where.attemptedAt = attemptedAt;
-      }
-    } else {
-      const paidAt: Prisma.DateTimeNullableFilter = { not: null };
-      if (range?.gte) paidAt.gte = range.gte;
-      if (range?.lte) paidAt.lte = range.lte;
-      where.paidAt = paidAt;
-    }
-
-    // Default/PAID: newest PAYMENT first (byte-identical). Non-PAID audit: newest FAILURE first by
-    // the uploaded attempt date (nulls last so reason-less rows sink), then createdAt as a tiebreak.
-    const orderBy: Prisma.CreditPayoutEntryOrderByWithRelationInput[] = nonPaidStatus
-      ? [{ attemptedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }]
-      : [{ paidAt: 'desc' }, { createdAt: 'desc' }];
-
-    // Bound the result set: a huge date range (or platform-wide + no filters) could otherwise load
-    // every paid entry across all tenants + build the whole xlsx in memory (OOM on a capped pod).
-    // Fetch MAX_ROWS+1; if we overflow, flag `truncated` so the caller shows a "narrow the range"
-    // banner rather than a silently-partial financial report. take + orderBy return the most-recent.
-    const rawEntries = await this.prisma.creditPayoutEntry.findMany({
-      where,
-      orderBy,
-      take: PaymentsReportService.MAX_ROWS + 1,
-      select: {
-        id: true,
-        clientId: true,
-        outletId: true, // the outlet CODE (join key), not the PK
-        outletName: true,
-        fieldName: true,
-        period: true,
-        amountPaise: true,
-        narration: true,
-        status: true,
-        utr: true,
-        paidAt: true,
-        attemptedAt: true,
-        failureReason: true,
-        tdsSection: true,
-        tdsMethodology: true,
-        tdsDeductedPaise: true,
-        // Payout header/batch (STANDARD/SEPARATE) via the download relation — batched in this query.
-        download: { select: { downloadCode: true, groupType: true } },
-        // Frozen invoice number via the AutoInvoice relation — batched in this query.
-        autoInvoice: { select: { invoiceNumber: true } },
+    // The totals and the page are read in ONE REPEATABLE READ snapshot, so the cards (totals) and the pager
+    // ("Showing 1–50 of N") always describe the same set of rows even while payouts are being written. The page is
+    // CLAMPED to the last page (a page past the end — e.g. the range shrank — returns the last page, never an empty
+    // page with non-zero totals); the effective page is returned so the client can follow.
+    const { totals, page, entries } = await this.prisma.$transaction(
+      async (tx) => {
+        const t = await paymentsTotals(tx, where);
+        const lastPage = Math.max(1, Math.ceil(t.count / pageSize));
+        const p = Math.min(requestedPage, lastPage);
+        const rows = await tx.creditPayoutEntry.findMany({
+          where,
+          orderBy,
+          skip: (p - 1) * pageSize,
+          take: pageSize,
+          select: PAYMENT_ENTRY_SELECT,
+        });
+        return { totals: t, page: p, entries: rows };
       },
-    });
-    const truncated = rawEntries.length > PaymentsReportService.MAX_ROWS;
-    const entries = truncated ? rawEntries.slice(0, PaymentsReportService.MAX_ROWS) : rawEntries;
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
 
     // ── Outlets by (clientId, outletCode) — ONE findMany, with the partner nested (no N+1). ──
     const outletCodes = [...new Set(entries.map((e) => e.outletId))];
@@ -264,24 +222,30 @@ export class PaymentsReportService {
       };
     });
 
-    const totalAmountPaise = entries.reduce((s, e) => s + e.amountPaise, 0n);
-
     return {
       scope: {
         clientId: scope.clientId ?? null,
         from: scope.from ?? null,
         to: scope.to ?? null,
       },
-      count: rows.length,
-      totals: { amount: this.money(totalAmountPaise) },
-      // `truncated` = the query hit MAX_ROWS; the caller must show a "narrow the date range for a
-      // complete report" banner (totals then reflect the shown rows only, not the full range).
-      truncated,
-      maxRows: PaymentsReportService.MAX_ROWS,
+      page,
+      pageSize,
+      /** Every entry matching the filters (all pages). */
+      totalRows: totals.count,
+      totalPages: Math.ceil(totals.count / pageSize),
+      /** Same as totalRows — kept for callers of the pre-paging envelope (it was "rows matching the filters"). */
+      count: totals.count,
+      // Whole-range totals (DB aggregate over every matching entry), NOT a sum of this page.
+      totals: {
+        count: totals.count,
+        amount: this.money(totals.amountPaise),
+        tdsDeducted: this.money(totals.tdsDeductedPaise),
+      },
       rows,
     };
   }
 
   // The .xlsx twin (GET …/payments-report/export) is the 'payments-report' export kind
-  // (exports/kinds/batch2/payments-report.kind.ts): the same rows/columns, streamed page by page.
+  // (exports/kinds/batch2/payments-report.kind.ts): EVERY matching row (same WHERE + order), streamed page by page,
+  // with a Summary from the same paymentsTotals aggregate.
 }

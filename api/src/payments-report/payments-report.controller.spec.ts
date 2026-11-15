@@ -13,6 +13,9 @@ import { PAYMENTS_REPORT_KIND } from '../exports/kinds/batch2/payments-report.ki
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { plainToInstance } from 'class-transformer';
+import { validateSync } from 'class-validator';
+import { PaymentsReportPageQueryDto } from './dto/payments-report.dto';
 
 const svc = {
   paymentReport: jest.fn().mockResolvedValue({ rows: [] }),
@@ -73,6 +76,28 @@ describe('PaymentsReportController', () => {
         expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual(['GIFSY_ADMIN', 'CLIENT_ADMIN']);
         expect(Reflect.getMetadata(PERMISSION_KEY, handler)).toBe('reports:read');
       }
+    });
+  });
+
+  describe('paging query validation (global ValidationPipe semantics)', () => {
+    const errs = (q: Record<string, unknown>) =>
+      validateSync(plainToInstance(PaymentsReportPageQueryDto, q, { enableImplicitConversion: true }) as object, {
+        whitelist: true,
+        forbidNonWhitelisted: true,
+      }).map((e) => e.property);
+    it('accepts page / pageSize within bounds (query strings convert to numbers)', () => {
+      expect(errs({ page: '3', pageSize: '200' })).toEqual([]);
+      expect(errs({ page: '100000' })).toEqual([]);
+    });
+    it('rejects page > 100,000, page < 1, pageSize > 200 and non-integers', () => {
+      expect(errs({ page: '100001' })).toEqual(['page']);
+      expect(errs({ page: '0' })).toEqual(['page']);
+      expect(errs({ pageSize: '201' })).toEqual(['pageSize']);
+      expect(errs({ page: '1.5' })).toEqual(['page']);
+    });
+    it('passes page / pageSize through to the service', async () => {
+      await controller.paymentsReport(CLIENT, { page: 4, pageSize: 100 } as never);
+      expect(svc.paymentReport).toHaveBeenCalledWith({ clientId: 'deoleo', from: undefined, to: undefined, status: undefined, page: 4, pageSize: 100 });
     });
   });
 });

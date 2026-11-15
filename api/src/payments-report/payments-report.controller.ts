@@ -6,7 +6,7 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { platformWide } from '../common/tenant-scope';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { PaymentsReportQueryDto } from './dto/payments-report.dto';
+import { PaymentsReportPageQueryDto, PaymentsReportQueryDto } from './dto/payments-report.dto';
 
 /**
  * Payments Report controller — a READ-ONLY report of all payout PAYMENTS in a date range, across
@@ -39,12 +39,15 @@ export class PaymentsReportController {
   @Get()
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('reports:read')
-  paymentsReport(@CurrentUser() user: JwtPayload, @Query() q: PaymentsReportQueryDto) {
+  paymentsReport(@CurrentUser() user: JwtPayload, @Query() q: PaymentsReportPageQueryDto) {
+    // One page (?page=&pageSize=, default 1 / 50, max 200) + whole-range DB totals — see PaymentsReportService.
     const scope: PaymentsReportScope = {
       clientId: this.resolveClientId(user, q.clientId),
       from: q.from,
       to: q.to,
       status: q.status,
+      ...(q.page !== undefined ? { page: q.page } : {}),
+      ...(q.pageSize !== undefined ? { pageSize: q.pageSize } : {}),
     };
     return this.reports.paymentReport(scope);
   }
@@ -57,7 +60,8 @@ export class PaymentsReportController {
     @Query() q: PaymentsReportQueryDto,
     @Res({ passthrough: true }) res: Response,
   ) {
-    // 'payments-report' export kind — same scope rule (resolved from the JWT inside the kind), streamed page by page.
+    // 'payments-report' export kind — same scope rule (resolved from the JWT inside the kind); EVERY matching row,
+    // streamed page by page (ranges over 31 days / open-ended → 202, prepared on the Downloads page).
     return this.exports.respond(res, user, 'payments-report', q);
   }
 }
