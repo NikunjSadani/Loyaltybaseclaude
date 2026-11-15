@@ -412,6 +412,23 @@ describe('GIFVC — voucher handling', () => {
     expect(sent[1]).toEqual({ note: 'short — portal shows no voucher', force: true });
   });
 
+  it('GIFVC11i: a newer recorded reason shows as "Newer: …"; an Acknowledge that re-raises it keeps the row flagged', async () => {
+    installFetch(
+      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL', hubbleLatestReason: 'HUBBLE_SUCCESS_NO_CODE' }],
+      (url, init) => (url === '/api/rewards/orders/o1/hubble-acknowledge' && init?.method === 'POST'
+        ? jsonOk({ order: { id: 'o1', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_NO_CODE', hubbleLatestReason: null } })
+        : undefined),
+    );
+    const row = await openRow('RDM-1');
+    expect(within(row).getByTestId('hubble-latest-reason')).toHaveTextContent('Newer: Hubble succeeded without a code');
+    await userEvent.click(within(row).getByRole('button', { name: /acknowledge — resolved/i }));
+    await userEvent.type(screen.getByLabelText('Note *'), 'one voucher used');
+    await userEvent.click(screen.getByRole('button', { name: /^acknowledge — resolved$/i }));
+    const updated = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
+    await waitFor(() => expect(within(updated).getByTestId('hubble-needs-reconcile')).toHaveTextContent(/Hubble succeeded without a code/));
+    expect(within(updated).queryByTestId('hubble-latest-reason')).toBeNull();
+  });
+
   it('GIFVC11f: a flagged DELIVERED order (possible double issuance) hides Retry and offers Acknowledge', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' }]);
     const row = await openRow('RDM-1');

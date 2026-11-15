@@ -122,6 +122,8 @@ interface OrderItem {
   hubbleReconcileReason?: string | null;
   /** Why Hubble's last "no order" answer was not trusted (it couldn't be checked against a known Hubble order). */
   hubbleNoOrderUnverifiedWhy?: string | null;
+  /** A newer reason recorded beside the open flag (Acknowledge re-raises it). */
+  hubbleLatestReason?: string | null;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -1558,7 +1560,7 @@ interface TransitionDraft {
 type OrderPatch = Pick<OrderItem, 'id'> &
   Partial<Pick<OrderItem,
     'status' | 'voucherCode' | 'voucherPin' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'
-    | 'hubbleNeedsReconcile' | 'hubbleReconcileReason'>>;
+    | 'hubbleNeedsReconcile' | 'hubbleReconcileReason' | 'hubbleLatestReason'>>;
 
 /** Human copy for the backend's Hubble reconcile reasons (fallback: the raw code). */
 const HUBBLE_REASON_LABEL: Record<string, string> = {
@@ -1710,7 +1712,7 @@ function OrderRow({
       setAckOpen(false);
       setAckForce(false);
       setAckUnreachable(false);
-      onTransitioned(res?.order?.id ? res.order : { id: order.id, hubbleNeedsReconcile: false, hubbleReconcileReason: null });
+      onTransitioned(res?.order?.id ? res.order : { id: order.id, hubbleNeedsReconcile: false, hubbleReconcileReason: null, hubbleLatestReason: null });
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Could not acknowledge the flag';
       if (/could not be checked/i.test(msg)) setAckUnreachable(true);
@@ -1867,6 +1869,11 @@ function OrderRow({
               title={order.hubbleReconcileReason ?? undefined}
             >
               Needs reconcile · {hubbleReasonLabel(order.hubbleReconcileReason)}
+            </span>
+          )}
+          {needsReconcile && order.hubbleLatestReason && order.hubbleLatestReason !== order.hubbleReconcileReason && (
+            <span className="block mt-0.5 text-[10px] text-amber-700" data-testid="hubble-latest-reason" title={order.hubbleLatestReason}>
+              Newer: {hubbleReasonLabel(order.hubbleLatestReason)}
             </span>
           )}
           {needsReconcile && order.hubbleNoOrderUnverifiedWhy && (
@@ -2454,7 +2461,7 @@ function FulfilmentQueue({
     const filter = statusRef.current;
     const leaves = filter !== 'all' && updated.status != null && updated.status !== filter;
     const patch: Partial<OrderItem> = {};
-    for (const k of ['status', 'voucherCode', 'voucherPin', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason'] as const) {
+    for (const k of ['status', 'voucherCode', 'voucherPin', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason', 'hubbleLatestReason'] as const) {
       if (updated[k] !== undefined) (patch as Record<string, unknown>)[k] = updated[k];
     }
     // `voucherFillable` (may the set-once PIN be added?) is SERVER-derived (canFillStoredVoucher)

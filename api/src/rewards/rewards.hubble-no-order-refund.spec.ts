@@ -90,15 +90,31 @@ const mockPrisma = {
     const id = vals[vals.length - 1] as string;
     const now = vals[vals.length - 2] as Date;
     if (id !== row.id) return 0;
-    if (sql.includes("IN ('CONFIRMED', 'PROCESSING', 'PENDING')") && !['CONFIRMED', 'PROCESSING', 'PENDING'].includes(row.status as string)) return 0;
     const base = (row.metadata && typeof row.metadata === 'object' ? row.metadata : {}) as Row;
-    let patch = JSON.parse(vals[0] as string) as Row;
-    if (vals.length === 4) {
-      // [latestJson, json, now, id]: latest when an OPEN double-issuance flag is present.
-      const di = ['HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_PROCESSING_AFTER_MANUAL', 'HUBBLE_FAILED_VOUCHER_PRESENT'];
-      patch = base.hubbleNeedsReconcile === true && di.includes(base.hubbleReconcileReason as string)
-        ? (JSON.parse(vals[0] as string) as Row)
-        : (JSON.parse(vals[1] as string) as Row);
+    const st = row.status as string;
+    const terminal = ['FAILED', 'CANCELLED', 'RETURNED'].includes(st);
+    const openStatus = ['CONFIRMED', 'PROCESSING', 'PENDING'].includes(st);
+    const di = ['HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_PROCESSING_AFTER_MANUAL', 'HUBBLE_FAILED_VOUCHER_PRESENT'];
+    const flagged = base.hubbleNeedsReconcile === true;
+    let patch: Row;
+    if (vals.length === 7) {
+      // atomicFlagOrder: [issuedOnTerminal, terminalJson, latestJson, terminalJson, openJson, now, id]
+      const [issued, terminalJson, latestJson, , openJson] = vals as [boolean, string, string, string, string];
+      if (terminal && flagged && base.hubbleReconcileReason === 'HUBBLE_ISSUED_AFTER_REFUND') patch = {};
+      else if (terminal && issued) {
+        patch = {
+          ...JSON.parse(terminalJson),
+          ...(flagged ? { hubbleSupersededReason: base.hubbleReconcileReason ?? null } : {}),
+          ...(flagged && di.includes(base.hubbleReconcileReason as string) ? { hubbleDoubleIssueSeen: true } : {}),
+        };
+      } else if (flagged && di.includes(base.hubbleReconcileReason as string)) patch = JSON.parse(latestJson);
+      else if (terminal) patch = JSON.parse(terminalJson);
+      else if (openStatus) patch = JSON.parse(openJson);
+      else patch = {};
+    } else {
+      // atomicMergeOrderMetadata: [json, now, id]
+      if (sql.includes("IN ('CONFIRMED', 'PROCESSING', 'PENDING')") && !openStatus) return 0;
+      patch = JSON.parse(vals[0] as string) as Row;
     }
     row.metadata = { ...base, ...patch };
     row.updatedAt = now;
@@ -812,7 +828,7 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
     it.each(['HUBBLE_ISSUED_AFTER_REFUND', 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND'])('GIFSY_ADMIN clears %s with a note (audited)', async (reason) => {
       row = flagged(reason);
       const res = await service.acknowledgeHubbleFlag(gifsy, 'o1', '  Checked Hubble portal — no voucher  ');
-      expect(res).toEqual({ order: { id: 'o1', hubbleNeedsReconcile: false, hubbleReconcileReason: null } });
+      expect(res).toEqual({ order: { id: 'o1', hubbleNeedsReconcile: false, hubbleReconcileReason: null, hubbleLatestReason: null } });
       expect(meta()).toMatchObject({
         hubbleNeedsReconcile: false,
         hubbleAcknowledged: { by: 'admin1', note: 'Checked Hubble portal — no voucher', reason },
@@ -1175,6 +1191,91 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       expect(meta()).toMatchObject({
         hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL', hubbleLatestReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD',
       });
+    });
+
+    it('R6-M1: on a REFUNDED order a "Hubble has an order" reason supersedes an open double-issuance flag → HUBBLE_ISSUED_AFTER_REFUND', async () => {
+      row = stuckRow({
+        status: 'FAILED', pointsDeducted: 0,
+        metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_FAILED_VOUCHER_PRESENT', hubbleReconcileResolution: 'FAILED_REFUNDED' },
+      });
+      await (service as unknown as { markHubblePendingReconcile: (id: string, r: string) => Promise<void> })
+        .markHubblePendingReconcile('o1', 'HUBBLE_SUCCESS_NO_CODE');
+      expect(meta()).toMatchObject({
+        hubbleNeedsReconcile: true,
+        hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND',
+        hubbleSupersededReason: 'HUBBLE_FAILED_VOUCHER_PRESENT',
+        hubbleDoubleIssueSeen: true,
+      });
+      expect(meta().hubbleLatestReason).toBeUndefined();
+    });
+
+    it('R6-M1: …but a lower-severity unknown reason on that refunded order keeps the double-issuance flag (newer stored)', async () => {
+      row = stuckRow({
+        status: 'FAILED', pointsDeducted: 0,
+        metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_FAILED_VOUCHER_PRESENT' },
+      });
+      await (service as unknown as { markHubblePendingReconcile: (id: string, r: string) => Promise<void> })
+        .markHubblePendingReconcile('o1', 'HUBBLE_WEBHOOK_BUT_NOT_FOUND');
+      expect(meta()).toMatchObject({
+        hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_FAILED_VOUCHER_PRESENT', hubbleLatestReason: 'HUBBLE_WEBHOOK_BUT_NOT_FOUND',
+      });
+    });
+
+    it('R6-M1: the CAS-exhausted single-statement fallback applies the SAME terminal rule (ISSUED wins)', async () => {
+      const realUpdate = mockPrisma.redemptionOrder.update.getMockImplementation()!;
+      mockPrisma.redemptionOrder.update.mockImplementation(async () => { throw new Error('P2025'); });
+      row = stuckRow({
+        status: 'FAILED', pointsDeducted: 0,
+        metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL', keep: 1 },
+      });
+      try {
+        await (service as unknown as { markHubblePendingReconcile: (id: string, r: string) => Promise<void> })
+          .markHubblePendingReconcile('o1', 'HUBBLE_UNKNOWN_STATUS:ON_HOLD');
+      } finally {
+        mockPrisma.redemptionOrder.update.mockImplementation(realUpdate);
+      }
+      expect(meta()).toMatchObject({
+        keep: 1,
+        hubbleNeedsReconcile: true,
+        hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND',
+        hubbleSupersededReason: 'HUBBLE_PROCESSING_AFTER_MANUAL',
+        hubbleDoubleIssueSeen: true,
+      });
+      const sql = (mockPrisma.$executeRaw.mock.calls[0][0] as TemplateStringsArray).join('?');
+      expect(sql).toMatch(/WHERE "id" = \?$/); // terminal orders are no longer excluded by a status filter
+    });
+
+    it('R6-M1: Acknowledge of FAILED_VOUCHER_PRESENT on a refunded order re-checks Hubble first (voucher → ISSUED + 409)', async () => {
+      row = stuckRow({
+        status: 'FAILED', pointsDeducted: 0,
+        metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_FAILED_VOUCHER_PRESENT' },
+      });
+      o1Lookup.mockResolvedValue({ status: 'SUCCESS', id: 'h', vouchers: [{ cardNumber: 'C' }] });
+      await expect(service.acknowledgeHubbleFlag(gifsy, 'o1', 'checked')).rejects.toBeInstanceOf(ConflictException);
+      expect(mockHubble.getOrderByReference).toHaveBeenCalledWith('o1');
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND' });
+    });
+
+    it('R6-M2: acknowledging the double-issuance flag RE-RAISES the newer recorded reason (not cleared), audited; the next ack clears', async () => {
+      row = stuckRow({
+        status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble',
+        metadata: {
+          hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL',
+          hubbleLatestReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD', hubbleLatestReasonAt: 'x',
+        },
+      });
+      expect(hubbleReconcileFlags(row.metadata)).toMatchObject({ hubbleLatestReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD' });
+
+      const res = await service.acknowledgeHubbleFlag(gifsy, 'o1', 'one voucher used');
+      expect(res).toEqual({ order: { id: 'o1', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD', hubbleLatestReason: null } });
+      expect(meta()).toMatchObject({
+        hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD', hubbleLatestReason: null,
+        hubbleAcknowledged: { reason: 'HUBBLE_PROCESSING_AFTER_MANUAL' },
+      });
+      expect(auditsOf('HUBBLE_FLAG_ACKNOWLEDGED')[0][0].data.metadata).toMatchObject({ reRaised: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD' });
+
+      await service.acknowledgeHubbleFlag(gifsy, 'o1', 'status resolved in portal');
+      expect(meta().hubbleNeedsReconcile).toBe(false);
     });
 
     it('acknowledge on a DELIVERED order with any leftover flag is accepted', async () => {

@@ -208,6 +208,8 @@ export function hubbleReconcileFlags(metadata: unknown): {
   hubbleReconcileReason: string | null;
   /** Why Hubble's last "no order" answer was not trusted (canary), while the flag is open. */
   hubbleNoOrderUnverifiedWhy?: string | null;
+  /** A newer reason recorded beside an open (double-issuance) flag — re-raised on Acknowledge. */
+  hubbleLatestReason?: string | null;
 } {
   const m = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
     ? (metadata as Record<string, unknown>)
@@ -224,6 +226,7 @@ export function hubbleReconcileFlags(metadata: unknown): {
     hubbleNeedsReconcile: needs,
     hubbleReconcileReason: needs && typeof m.hubbleReconcileReason === 'string' ? m.hubbleReconcileReason : null,
     ...(unverifiedWhy ? { hubbleNoOrderUnverifiedWhy: unverifiedWhy } : {}),
+    ...(needs && typeof m.hubbleLatestReason === 'string' && m.hubbleLatestReason ? { hubbleLatestReason: m.hubbleLatestReason } : {}),
   };
 }
 
@@ -5420,7 +5423,7 @@ export class RewardsService {
     let current: { metadata: Prisma.JsonValue; updatedAt: Date } = { metadata: order.metadata, updatedAt: order.updatedAt };
     let recheck: string | null = null;
     let forced = false;
-    if (this.isTerminalRefundStatus(order.status) && HUBBLE_HAS_ORDER_REASON.test(reason)) {
+    if (this.isTerminalRefundStatus(order.status) && (HUBBLE_HAS_ORDER_REASON.test(reason) || HUBBLE_DOUBLE_ISSUE_REASONS.has(reason))) {
       const { check } = await this.checkLateWebhookAfterNoOrderRefund(order, 'ACK');
       recheck = check.status;
       if (check.status === 'LOOKUP_FAILED') {
@@ -5443,12 +5446,21 @@ export class RewardsService {
       current = re;
     }
     const at = new Date();
+    // A NEWER reason was recorded beside the acknowledged one (an open double-issuance flag is never
+    // overwritten — see markHubblePendingReconcile): acknowledging the old one re-raises the newer one as
+    // the open reason instead of clearing the flag.
+    const latestRaw = this.metaOf({ metadata: current.metadata }).hubbleLatestReason;
+    const next = typeof latestRaw === 'string' && latestRaw && latestRaw !== reason ? latestRaw : null;
     try {
       await this.prisma.redemptionOrder.update({
         where: { id: order.id, updatedAt: current.updatedAt },
         data: {
           metadata: this.mergeOrderMetadata(current.metadata, {
-            hubbleNeedsReconcile: false,
+            ...(next
+              ? { hubbleNeedsReconcile: true, hubbleReconcileReason: next, hubbleReconcileAt: at.toISOString() }
+              : { hubbleNeedsReconcile: false }),
+            hubbleLatestReason: null,
+            hubbleLatestReasonAt: null,
             hubbleAcknowledged: {
               by: user.sub,
               at: at.toISOString(),
@@ -5476,10 +5488,15 @@ export class RewardsService {
           note: text.slice(0, 500),
           ...(recheck ? { recheck } : {}),
           ...(forced ? { forced: true } : {}),
+          ...(next ? { reRaised: next } : {}),
         },
       },
     });
-    return { order: { id: order.id, hubbleNeedsReconcile: false, hubbleReconcileReason: null } };
+    if (next) {
+      this.logger.warn(`[hubble] order ${order.orderNumber}: ${reason} acknowledged — newer reason ${next} re-raised for ops`);
+      return { order: { id: order.id, hubbleNeedsReconcile: true, hubbleReconcileReason: next, hubbleLatestReason: null } };
+    }
+    return { order: { id: order.id, hubbleNeedsReconcile: false, hubbleReconcileReason: null, hubbleLatestReason: null } };
   }
 
   /** Flag an order as needing reconcile (money held pending webhook / ops), no status flip. */
@@ -5494,32 +5511,36 @@ export class RewardsService {
   private async markHubblePendingReconcile(orderId: string, reason: string): Promise<void> {
     const at = new Date().toISOString();
     const doubleIssue = HUBBLE_DOUBLE_ISSUE_REASONS.has(reason);
+    const hubbleHasOrder = HUBBLE_HAS_ORDER_REASON.test(reason);
+    const latestPatch = { hubbleLatestReason: reason, hubbleLatestReasonAt: at, ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}) };
     const written = await this.patchOrderMetadata(orderId, (cur) => {
       const m = this.metaOf(cur);
-      // An OPEN double-issuance flag is never overwritten by a later reason (ops must still see it): keep
-      // it and record the newer reason beside it.
-      if (
-        m.hubbleNeedsReconcile === true &&
-        typeof m.hubbleReconcileReason === 'string' &&
-        HUBBLE_DOUBLE_ISSUE_REASONS.has(m.hubbleReconcileReason) &&
-        m.hubbleReconcileReason !== reason
-      ) {
-        return { hubbleLatestReason: reason, hubbleLatestReasonAt: at, ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}) };
-      }
+      const open = m.hubbleNeedsReconcile === true;
+      const curReason = typeof m.hubbleReconcileReason === 'string' ? m.hubbleReconcileReason : null;
+      const curDoubleIssue = open && !!curReason && HUBBLE_DOUBLE_ISSUE_REASONS.has(curReason);
+      // Terminal (points returned) FIRST: a reason implying Hubble holds an order ALWAYS becomes
+      // HUBBLE_ISSUED_AFTER_REFUND (it supersedes even an open double-issuance flag, which is kept in
+      // history); ISSUED is never downgraded.
       if (this.isTerminalRefundStatus(cur.status)) {
-        if (m.hubbleNeedsReconcile === true && m.hubbleReconcileReason === 'HUBBLE_ISSUED_AFTER_REFUND') return null;
-        const hubbleHasOrder = /^HUBBLE_(SUCCESS|PROCESSING|UNKNOWN_STATUS)/.test(reason);
+        if (open && curReason === 'HUBBLE_ISSUED_AFTER_REFUND') return null;
+        const mapped = hubbleHasOrder ? 'HUBBLE_ISSUED_AFTER_REFUND' : 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND';
+        // A lower-severity unknown flag never replaces an open double-issuance one — keep it, note the newer.
+        if (curDoubleIssue && mapped !== 'HUBBLE_ISSUED_AFTER_REFUND') return latestPatch;
         this.logger.error(
-          `[hubble] order ${orderId}: ${reason} raised on an order already ${cur.status} (points returned) — recorded as a post-refund review flag`,
+          `[hubble] order ${orderId}: ${reason} raised on an order already ${cur.status} (points returned) — recorded as ${mapped}`,
         );
         return {
           hubbleNeedsReconcile: true,
-          hubbleReconcileReason: hubbleHasOrder ? 'HUBBLE_ISSUED_AFTER_REFUND' : 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND',
+          hubbleReconcileReason: mapped,
           hubbleReconcileAt: at,
           hubbleRaceReason: reason,
-          ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}),
+          ...(open && curReason ? { hubbleSupersededReason: curReason } : {}),
+          ...(doubleIssue || curDoubleIssue ? { hubbleDoubleIssueSeen: true } : {}),
         };
       }
+      // An OPEN double-issuance flag is never overwritten by a later reason (ops must still see it): keep
+      // it and record the newer reason beside it (Acknowledge re-raises it).
+      if (curDoubleIssue && curReason !== reason) return latestPatch;
       return {
         hubbleNeedsReconcile: true,
         hubbleReconcileReason: reason,
@@ -5528,32 +5549,55 @@ export class RewardsService {
       };
     });
     if (written === 'CONFLICT') {
-      // Never leave an OPEN order unflagged after losing the CAS: ONE atomic jsonb statement that adds only
-      // the flag keys while the order is still open — and, if an OPEN double-issuance flag is already
-      // there, keeps it and records this reason as hubbleLatestReason instead.
-      const ok = await this.atomicFlagOpenOrder(
+      // Never leave an order unflagged after losing the CAS: ONE atomic jsonb statement with the SAME rules
+      // as above (terminal → post-refund flag, ISSUED wins and is never downgraded; an open
+      // double-issuance flag is otherwise kept and this reason recorded as hubbleLatestReason).
+      const mapped = hubbleHasOrder ? 'HUBBLE_ISSUED_AFTER_REFUND' : 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND';
+      const ok = await this.atomicFlagOrder(
         orderId,
+        hubbleHasOrder,
+        {
+          hubbleNeedsReconcile: true,
+          hubbleReconcileReason: mapped,
+          hubbleReconcileAt: at,
+          hubbleRaceReason: reason,
+          ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}),
+        },
+        latestPatch,
         { hubbleNeedsReconcile: true, hubbleReconcileReason: reason, hubbleReconcileAt: at, ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}) },
-        { hubbleLatestReason: reason, hubbleLatestReasonAt: at, ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}) },
       );
       if (!ok) this.logger.error(`[hubble] failed to flag order ${orderId} for reconcile (${reason})`);
     }
   }
 
   /**
-   * markHubblePendingReconcile's last resort (see there): one statement; `patch` normally, `latestPatch`
-   * when an OPEN double-issuance flag is present; only while the order is open. Never throws.
+   * markHubblePendingReconcile's last resort (see there) — ONE statement, same rules:
+   *  - terminal order with an open HUBBLE_ISSUED_AFTER_REFUND → unchanged;
+   *  - terminal order + a "Hubble has an order" reason → `terminalPatch` (ISSUED), superseding any open
+   *    reason (kept as hubbleSupersededReason; a double-issuance one also sets hubbleDoubleIssueSeen);
+   *  - terminal or open order with an open double-issuance flag → `latestPatch`;
+   *  - terminal otherwise → `terminalPatch`; open otherwise → `openPatch`.
+   * Never throws.
    */
-  private async atomicFlagOpenOrder(
+  private async atomicFlagOrder(
     orderId: string,
-    patch: Record<string, unknown>,
+    issuedOnTerminal: boolean,
+    terminalPatch: Record<string, unknown>,
     latestPatch: Record<string, unknown>,
+    openPatch: Record<string, unknown>,
   ): Promise<boolean> {
     try {
-      const json = JSON.stringify(patch);
+      const terminalJson = JSON.stringify(terminalPatch);
       const latestJson = JSON.stringify(latestPatch);
+      const openJson = JSON.stringify(openPatch);
       const now = new Date();
-      const n = await this.prisma.$executeRaw`UPDATE "redemption_orders" SET "metadata" = (CASE WHEN jsonb_typeof("metadata") = 'object' THEN "metadata" ELSE '{}'::jsonb END) || (CASE WHEN jsonb_typeof("metadata") = 'object' AND "metadata"->>'hubbleNeedsReconcile' = 'true' AND "metadata"->>'hubbleReconcileReason' IN ('HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_PROCESSING_AFTER_MANUAL', 'HUBBLE_FAILED_VOUCHER_PRESENT') THEN ${latestJson}::jsonb ELSE ${json}::jsonb END), "updatedAt" = ${now} WHERE "id" = ${orderId} AND "status"::text IN ('CONFIRMED', 'PROCESSING', 'PENDING')`;
+      const n = await this.prisma.$executeRaw`UPDATE "redemption_orders" SET "metadata" = (CASE WHEN jsonb_typeof("metadata") = 'object' THEN "metadata" ELSE '{}'::jsonb END) || (CASE
+          WHEN "status"::text IN ('FAILED', 'CANCELLED', 'RETURNED') AND jsonb_typeof("metadata") = 'object' AND "metadata"->>'hubbleNeedsReconcile' = 'true' AND "metadata"->>'hubbleReconcileReason' = 'HUBBLE_ISSUED_AFTER_REFUND' THEN '{}'::jsonb
+          WHEN "status"::text IN ('FAILED', 'CANCELLED', 'RETURNED') AND ${issuedOnTerminal} THEN ${terminalJson}::jsonb || (CASE WHEN jsonb_typeof("metadata") = 'object' AND "metadata"->>'hubbleNeedsReconcile' = 'true' THEN jsonb_build_object('hubbleSupersededReason', "metadata"->'hubbleReconcileReason') || (CASE WHEN "metadata"->>'hubbleReconcileReason' IN ('HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_PROCESSING_AFTER_MANUAL', 'HUBBLE_FAILED_VOUCHER_PRESENT') THEN '{"hubbleDoubleIssueSeen":true}'::jsonb ELSE '{}'::jsonb END) ELSE '{}'::jsonb END)
+          WHEN jsonb_typeof("metadata") = 'object' AND "metadata"->>'hubbleNeedsReconcile' = 'true' AND "metadata"->>'hubbleReconcileReason' IN ('HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_PROCESSING_AFTER_MANUAL', 'HUBBLE_FAILED_VOUCHER_PRESENT') THEN ${latestJson}::jsonb
+          WHEN "status"::text IN ('FAILED', 'CANCELLED', 'RETURNED') THEN ${terminalJson}::jsonb
+          WHEN "status"::text IN ('CONFIRMED', 'PROCESSING', 'PENDING') THEN ${openJson}::jsonb
+          ELSE '{}'::jsonb END), "updatedAt" = ${now} WHERE "id" = ${orderId}`;
       return n > 0;
     } catch (e) {
       this.logger.error(`[hubble] atomic reconcile flag failed on order ${orderId}: ${e}`);
