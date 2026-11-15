@@ -510,10 +510,19 @@ export default function SalesUploadPage() {
       const formData = new FormData();
       formData.append('file', file, file.name);
 
-      const res  = await fetch('/api/admin/achievements/upload', {
-        method:  'POST',
-        body:    formData,
-      });
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/achievements/upload', {
+          method:  'POST',
+          body:    formData,
+        });
+      } catch (e) {
+        // Only a rejected fetch() is a network error — the upload may have reached the API and saved.
+        console.error('[SALES] Upload network error:', e);
+        setUploadError(networkErrorMessage(MAYBE_SAVED_NOTE));
+        setHistoryKey(k => k + 1);
+        return;
+      }
       const body = await readJsonSafe(res);
 
       if (res.ok && body?.success) {
@@ -532,8 +541,10 @@ export default function SalesUploadPage() {
         setHistoryKey(k => k + 1);
       }
     } catch (e) {
+      // Not a network error (handled above) — e.g. the result couldn't be shown after the server answered.
       console.error('[SALES] Upload error:', e);
-      setUploadError(networkErrorMessage(MAYBE_SAVED_NOTE));
+      setUploadError(`Something went wrong showing the upload result. ${MAYBE_SAVED_NOTE}`);
+      setHistoryKey(k => k + 1);
     } finally {
       setUploading(false);
     }

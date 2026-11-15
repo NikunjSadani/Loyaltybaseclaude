@@ -23,7 +23,7 @@ import {
   AlertTriangle, Info,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
-import { readJsonSafe, responseErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { buildMonthRange, formatMonth } from '@/lib/targets';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
@@ -205,11 +205,18 @@ export default function TargetUploadPage() {
       const formData = new FormData();
       formData.append('file', file);
 
-      const res = await fetch('/api/admin/targets/upload', {
-        method:  'POST',
-        headers: authHeader(), // Do NOT add Content-Type — let the browser set multipart boundary
-        body:    formData,
-      });
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/targets/upload', {
+          method:  'POST',
+          headers: authHeader(), // Do NOT add Content-Type — let the browser set multipart boundary
+          body:    formData,
+        });
+      } catch {
+        // The request may have reached the API and applied before the connection dropped.
+        setUploadError(networkErrorMessage(MAYBE_SAVED_NOTE));
+        return;
+      }
 
       const json = await readJsonSafe<{ success: boolean; data?: UploadResult; error?: string }>(res);
 
@@ -225,8 +232,9 @@ export default function TargetUploadPage() {
       }
 
       setResult(normalizeRowsEcho(json.data! as UploadResult & { rows?: UploadRow[] }));
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+    } catch {
+      // Not a network error (that is handled above) — e.g. an unexpected response shape.
+      setUploadError('Something went wrong showing the upload result. Refresh and check the targets before uploading again.');
     } finally {
       setUploading(false);
     }

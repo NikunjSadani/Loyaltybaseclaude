@@ -6,9 +6,14 @@
  * `SyntaxError: Unexpected token 'I'…` was passed up as the error text.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { postMultipart as schemesPost } from '@/lib/schemes';
-import { postMultipart as visibilityPost } from '@/lib/visibility';
-import { FILE_TOO_LARGE_MESSAGE } from '@/lib/safe-response';
+import { postMultipart as schemesPost, schemeApi } from '@/lib/schemes';
+import { postMultipart as visibilityPost, visibilityApi } from '@/lib/visibility';
+import {
+  FILE_TOO_LARGE_MESSAGE,
+  MAYBE_SAVED_NOTE,
+  NOTHING_SAVED_NOTE,
+  PHOTO_UPLOAD_RETRY_NOTE,
+} from '@/lib/safe-response';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -59,5 +64,61 @@ describe.each([
     expect(r.success).toBe(false);
     if (r.success) return;
     expect(r.error).toMatch(/Couldn't reach the server/);
+  });
+
+  it('uses the caller-supplied failureNote for network and unreadable-response failures', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+    const a = await postMultipart('/api/x', form(), PHOTO_UPLOAD_RETRY_NOTE);
+    expect(a).toMatchObject({ success: false, error: `Couldn't reach the server (network error). ${PHOTO_UPLOAD_RETRY_NOTE}` });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Internal Server Error', { status: 502 })));
+    const b = await postMultipart('/api/x', form(), NOTHING_SAVED_NOTE);
+    expect(b).toMatchObject({ success: false, error: `The server didn't respond properly (HTTP 502). ${NOTHING_SAVED_NOTE}` });
+  });
+
+  it('prefers the Nest `message` over a generic `error` phrase for a JSON 4xx', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ statusCode: 400, error: 'Bad Request', message: 'file must be an image' }), { status: 400 }),
+    ));
+    expect(await postMultipart('/api/x', form())).toEqual({ success: false, error: 'file must be an image' });
+  });
+});
+
+/* ─── Each real caller passes the note that matches what its request does ─── */
+describe('postMultipart callers — failure note per request type', () => {
+  const file = () => new File([new Uint8Array([1])], 'f.jpg', { type: 'image/jpeg' });
+  const rejectFetch = () => vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+
+  it.each([
+    ['visibility sales capture photo', () => visibilityApi.uploadSalesMedia(file(), 'f.jpg')],
+    ['visibility admin sample image', () => visibilityApi.uploadMedia(file())],
+    ['scheme enrollment photo', () => schemeApi.uploadMedia('s1', file(), 'f.jpg')],
+  ])('%s → photo-retry note (never "refresh")', async (_n, call) => {
+    rejectFetch();
+    const r = await call();
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    expect(r.error).toContain(PHOTO_UPLOAD_RETRY_NOTE);
+    expect(r.error).not.toMatch(/refresh|may have been saved/i);
+  });
+
+  it('roster remove DRY RUN → nothing-saved note', async () => {
+    rejectFetch();
+    const r = await schemeApi.removeRosterByUpload('s1', file(), { dryRun: true });
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    expect(r.error).toContain(NOTHING_SAVED_NOTE);
+    expect(r.error).not.toContain(MAYBE_SAVED_NOTE);
+  });
+
+  it.each([
+    ['roster remove (apply)', () => schemeApi.removeRosterByUpload('s1', file(), { dryRun: false })],
+    ['roster upload', () => schemeApi.uploadRoster('s1', file())],
+  ])('%s → may-have-been-saved note', async (_n, call) => {
+    rejectFetch();
+    const r = await call();
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    expect(r.error).toContain(MAYBE_SAVED_NOTE);
   });
 });

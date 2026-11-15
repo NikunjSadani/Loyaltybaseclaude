@@ -40,7 +40,7 @@ import {
   Truck, ChevronDown, Layers,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
-import { readJsonSafe, responseErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession } from '@/lib/admin-session';
@@ -2375,11 +2375,18 @@ function FulfilmentQueue({
       const fd = new FormData();
       fd.append('file', file);
       // Do NOT set Content-Type — the browser sets the multipart boundary.
-      const res = await fetch('/api/admin/rewards/fulfilment/upload', {
-        method: 'POST',
-        headers: authHeader(),
-        body: fd,
-      });
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/rewards/fulfilment/upload', {
+          method: 'POST',
+          headers: authHeader(),
+          body: fd,
+        });
+      } catch {
+        // The upload updates orders — a dropped connection leaves the outcome unknown.
+        setUploadErr(networkErrorMessage(MAYBE_SAVED_NOTE));
+        return;
+      }
       const json = await readJsonSafe<{ success?: boolean; data?: FulfilmentUploadResult; error?: string }>(res);
       if (!json) {
         // Non-JSON (proxy truncation / plain-text 5xx / edge 413) — orders may have been updated.
@@ -2391,9 +2398,10 @@ function FulfilmentQueue({
         return;
       }
       setResult(json.data ?? null);
-      await refreshOrders();
-    } catch (e) {
-      setUploadErr(e instanceof Error ? e.message : 'Upload failed');
+      // The upload itself succeeded; a failed list refresh must not read as a failed upload.
+      try { await refreshOrders(); } catch { /* best-effort — the Refresh button retries */ }
+    } catch {
+      setUploadErr(`Something went wrong showing the upload result. ${MAYBE_SAVED_NOTE}`);
     } finally {
       setUploading(false);
     }

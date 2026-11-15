@@ -19,7 +19,14 @@
  */
 
 import { api, type ApiResponse } from '@/lib/api-client';
-import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
+import {
+  readJsonSafe,
+  responseErrorMessage,
+  networkErrorMessage,
+  serverErrorText,
+  MAYBE_SAVED_NOTE,
+  PHOTO_UPLOAD_RETRY_NOTE,
+} from '@/lib/safe-response';
 import { downloadOrQueue } from '@/lib/exports/download';
 import type {
   OutletStatusResponse,
@@ -46,21 +53,29 @@ const BASE = '/api/visibility';
  * adds the multipart boundary. Same-origin fetch carries the auth cookie, and the proxy
  * injects the Bearer, so no auth header is needed here. Returns the same `{ success, data }`
  * envelope shape as api-client.
+ *
+ * `failureNote` is appended when the outcome is unknown (network drop / unreadable response) and
+ * must match what the request does. Every caller here is a photo/media upload → pass
+ * PHOTO_UPLOAD_RETRY_NOTE (never "refresh", which would lose the rep's captured photos/GPS).
  */
-export async function postMultipart<T>(url: string, form: FormData): Promise<ApiResponse<T>> {
+export async function postMultipart<T>(
+  url: string,
+  form: FormData,
+  failureNote: string = MAYBE_SAVED_NOTE,
+): Promise<ApiResponse<T>> {
   let res: Response;
   try {
     res = await fetch(url, { method: 'POST', body: form });
   } catch {
-    return { success: false, error: networkErrorMessage(MAYBE_SAVED_NOTE) };
+    return { success: false, error: networkErrorMessage(failureNote) };
   }
   // Tolerant read: a non-JSON body (proxy truncation / plain-text 5xx / edge 413) must surface a
   // readable message, never a raw `SyntaxError: Unexpected token 'I'…`.
   const body = await readJsonSafe(res);
   if (!body) {
-    return { success: false, error: responseErrorMessage(res, body, MAYBE_SAVED_NOTE), status: res.status };
+    return { success: false, error: responseErrorMessage(res, body, failureNote), status: res.status };
   }
-  if (!res.ok) return { success: false, error: body?.error ?? res.statusText };
+  if (!res.ok) return { success: false, error: serverErrorText(body) ?? res.statusText };
   return body as ApiResponse<T>;
 }
 
@@ -210,7 +225,7 @@ export const visibilityApi = {
   uploadMedia(file: File | Blob, filename?: string) {
     const form = new FormData();
     form.append('file', file, filename ?? (file instanceof File ? file.name : 'capture'));
-    return postMultipart<MediaUploadResult>(`${BASE}/media`, form);
+    return postMultipart<MediaUploadResult>(`${BASE}/media`, form, PHOTO_UPLOAD_RETRY_NOTE);
   },
 
   // ── Sales capture (front-line sales roles) ─────────────────────────────────
@@ -218,7 +233,7 @@ export const visibilityApi = {
   uploadSalesMedia(file: File | Blob, filename?: string) {
     const form = new FormData();
     form.append('file', file, filename ?? (file instanceof File ? file.name : 'capture'));
-    return postMultipart<MediaUploadResult>(`${BASE}/sales/media`, form);
+    return postMultipart<MediaUploadResult>(`${BASE}/sales/media`, form, PHOTO_UPLOAD_RETRY_NOTE);
   },
   /** In-scope downline outlets + current-window status (reach + level scoped). */
   getSalesEligible() {

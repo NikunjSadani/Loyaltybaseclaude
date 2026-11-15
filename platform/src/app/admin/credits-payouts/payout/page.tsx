@@ -46,27 +46,62 @@ import {
 } from '@/lib/safe-response';
 
 /** Shown when the UTR APPLY response is lost (network drop / non-JSON 5xx). The apply may or may not
- *  have committed. Re-applying is safe: the API serialises applies per download (advisory lock) and only
- *  flips entries still PROCESSING, so already-applied rows are skipped — no entry is paid/failed twice. */
+ *  have committed. Re-applying the same file is safe: the API serialises applies per download, only
+ *  flips entries still PROCESSING (money is never paid twice), notifies only the entries it actually
+ *  flipped in that call, derives the file status from the live entry statuses, and treats an
+ *  all-already-applied file as a no-op. Still, the operator checks the status first, and Apply stays
+ *  disabled until the file is previewed again (the fresh preview shows what a re-apply would change). */
 const UTR_APPLY_UNCONFIRMED_MESSAGE =
-  "We couldn't confirm whether the UTRs were applied. Refresh and check this payout file's status before trying again. " +
-  'Re-applying the same UTR file is safe — rows that were already applied are skipped, so nothing is marked paid twice.';
+  "We couldn't confirm whether the UTRs were applied. Refresh and check this payout file's status first — " +
+  'if it shows Paid, it went through. If you still need to apply, upload the file again to re-check it; ' +
+  're-applying the same file is safe (rows already applied are skipped and no one is notified twice).';
+
+/** Preview of a file whose rows are all already applied (API `noop: true`). */
+const UTR_NOOP_PREVIEW_NOTE = 'This file has already been applied — nothing will change.';
+
+/** Shown next to the disabled Apply button after an unconfirmed apply. */
+const UTR_APPLY_PAUSED_HINT =
+  'Apply is paused until you upload the file again to re-check it.';
 
 /** UTR preview (apply=false). The API returns EVERY parsed row again (`rows`, file order, capped at
  *  20,000 with rowCount/rowsTruncated) so the operator can check each OK row's outlet, UTR and payment
  *  date — and each skipped row's reason — BEFORE applying (same as e242b1a1). `problemRows` (≤ 500) feeds
  *  the error-report file. Older/other builds may send only one of the two lists; both are optional. */
+/** A preview row; newer API builds add a plain `notice` on SKIP rows ("Already paid — no change."). */
+type UtrPreviewRow = UtrUploadRow & { notice?: string };
+
+/** An OK row the apply could not record (newer API builds), e.g. the payout was already recorded. */
+interface UtrNotAppliedRow {
+  outletId: string;
+  rowNum?: number;
+  reason: string;
+}
+
 type UtrPreviewResult = Omit<UtrParseResult, 'rows'> & {
-  rows?: UtrUploadRow[];
+  rows?: UtrPreviewRow[];
   rowCount?: number;
   rowsTruncated?: boolean;
-  problemRows?: UtrUploadRow[];
+  problemRows?: UtrPreviewRow[];
   problemRowCount?: number;
   problemRowsTruncated?: boolean;
+  /** Every row is already applied — an apply would change nothing (newer API builds). */
+  noop?: boolean;
 };
 
-/** Plain reason for a skipped credits UTR row — a credits SKIP always means the entry was already paid. */
+/** Fallback reason for a skipped credits UTR row when the API sends no `notice` (older builds). */
 const UTR_SKIP_REASON = 'Already paid — no change';
+
+/** Tolerant read of the apply response's `notApplied` list (absent on older API builds). */
+function readNotApplied(v: unknown): UtrNotAppliedRow[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object')
+    .map((r) => ({
+      outletId: String(r.outletId ?? ''),
+      rowNum: typeof r.rowNum === 'number' ? r.rowNum : undefined,
+      reason: typeof r.reason === 'string' && r.reason.trim() ? r.reason : 'Not applied',
+    }));
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -185,9 +220,20 @@ function PayoutPageInner() {
   const [utrResult,      setUtrResult]      = useState<UtrPreviewResult | null>(null);
   const [utrApplying,    setUtrApplying]    = useState(false);
   const [utrApplied,     setUtrApplied]     = useState(false);
-  const [utrApplyResult, setUtrApplyResult] = useState<{ paidCount: number; failedCount: number; skippedCount: number } | null>(null);
+  const [utrApplyResult, setUtrApplyResult] = useState<{
+    paidCount: number;
+    failedCount: number;
+    skippedCount: number;
+    /** The API changed nothing (every row already applied) — show its `message`, not a "paid" banner. */
+    noop?: boolean;
+    message?: string;
+    /** OK rows the apply could not record — always shown in amber, never behind a green banner. */
+    notApplied: UtrNotAppliedRow[];
+  } | null>(null);
   const [utrMsg,         setUtrMsg]         = useState('');
   const [expandedUtr,    setExpandedUtr]    = useState(false);
+  /** True after an apply whose outcome we couldn't confirm — Apply stays disabled until a fresh preview. */
+  const [utrApplyUnconfirmed, setUtrApplyUnconfirmed] = useState(false);
 
   // Reversal state
   const [revAction,          setRevAction]          = useState<{ id: string; action: 'approve' | 'reject' } | null>(null);
@@ -289,6 +335,8 @@ function PayoutPageInner() {
     setUtrResult(null);
     setUtrApplied(false);
     setUtrMsg('');
+    // A fresh preview is the re-check that re-enables Apply after an unconfirmed apply.
+    setUtrApplyUnconfirmed(false);
 
     const fd = new FormData();
     fd.append('file', file);
@@ -317,8 +365,17 @@ function PayoutPageInner() {
     }
   }
 
+  /** The apply's outcome is unknown: pause Apply until the file is previewed again, clear the file
+   *  input so re-picking the SAME file fires onChange, and refresh the status list for the operator. */
+  function markApplyUnconfirmed() {
+    setUtrApplyUnconfirmed(true);
+    setUtrMsg(UTR_APPLY_UNCONFIRMED_MESSAGE);
+    if (utrFileRef.current) utrFileRef.current.value = '';
+    loadAll().catch(() => { /* status refresh is best-effort */ });
+  }
+
   async function handleApplyUtr() {
-    if (!utrResult?.canProceed || !utrDownloadId || !utrFile) return;
+    if (!utrResult?.canProceed || !utrDownloadId || !utrFile || utrApplyUnconfirmed) return;
     setUtrApplying(true);
     setUtrMsg('');
 
@@ -337,7 +394,7 @@ function PayoutPageInner() {
       );
     } catch {
       setUtrApplying(false);
-      setUtrMsg(UTR_APPLY_UNCONFIRMED_MESSAGE);
+      markApplyUnconfirmed();
       return;
     }
     const json = await readJsonSafe(res);
@@ -345,17 +402,28 @@ function PayoutPageInner() {
 
     if (!json) {
       // No readable answer: the apply may or may not have committed. Never claim either way.
-      setUtrMsg(res.status === 413 ? FILE_TOO_LARGE_MESSAGE : UTR_APPLY_UNCONFIRMED_MESSAGE);
+      // (A 413 never reached the API, so nothing was applied — Apply stays available.)
+      if (res.status === 413) setUtrMsg(FILE_TOO_LARGE_MESSAGE);
+      else markApplyUnconfirmed();
     } else if (!json.success) {
       setUtrMsg(json.error ?? 'Failed to apply UTR results');
     } else {
       setUtrApplied(true);
+      const noop = json.data?.noop === true;
+      const serverMsg = typeof json.data?.message === 'string' && json.data.message.trim() ? json.data.message : undefined;
       setUtrApplyResult({
         paidCount:    Number(json.data.paidCount)    || 0,
         failedCount:  Number(json.data.failedCount)  || 0,
         skippedCount: Number(json.data.skippedCount) || 0,
+        noop,
+        message: serverMsg,
+        notApplied: readNotApplied(json.data?.notApplied),
       });
-      setUtrMsg(`Applied: ${json.data.paidCount} paid, ${json.data.failedCount} failed, ${json.data.skippedCount} skipped.`);
+      setUtrMsg(
+        noop
+          ? (serverMsg ?? 'Already applied — nothing to change')
+          : `Applied: ${json.data.paidCount} paid, ${json.data.failedCount} failed, ${json.data.skippedCount} skipped.`,
+      );
       loadAll();
     }
   }
@@ -368,6 +436,7 @@ function PayoutPageInner() {
     setUtrApplyResult(null);
     setUtrMsg('');
     setExpandedUtr(false);
+    setUtrApplyUnconfirmed(false);
     if (utrFileRef.current) utrFileRef.current.value = '';
   }
 
@@ -405,7 +474,7 @@ function PayoutPageInner() {
   }
 
   // UTR preview lists (H3): every row when the API sends them, else the problem rows only.
-  const utrRows: UtrUploadRow[] = utrResult ? (utrResult.rows ?? utrResult.problemRows ?? []) : [];
+  const utrRows: UtrPreviewRow[] = utrResult ? (utrResult.rows ?? utrResult.problemRows ?? []) : [];
   const utrRowTotal = utrResult
     ? (utrResult.rows ? (utrResult.rowCount ?? utrResult.rows.length) : (utrResult.problemRowCount ?? utrRows.length))
     : 0;
@@ -603,6 +672,16 @@ function PayoutPageInner() {
                   ))}
                 </div>
 
+                {utrResult.noop && (
+                  <div
+                    role="status"
+                    data-testid="utr-noop-preview"
+                    className="bg-gray-50 border border-gray-200 text-gray-700 text-xs px-4 py-3 rounded-xl"
+                  >
+                    {UTR_NOOP_PREVIEW_NOTE}
+                  </div>
+                )}
+
                 {/* Errors block the apply — prominent warning so a green summary
                     grid can't be mistaken for "all good". No entry is changed
                     until every row is valid (the entry stays PROCESSING). */}
@@ -664,7 +743,7 @@ function PayoutPageInner() {
                               <p className="text-red-600 mt-0.5">{r.errors.join(' · ')}</p>
                             )}
                             {r.status === 'SKIP' && (
-                              <p className="text-gray-500 mt-0.5">{UTR_SKIP_REASON}</p>
+                              <p className="text-gray-500 mt-0.5">{r.notice?.trim() || UTR_SKIP_REASON}</p>
                             )}
                           </div>
                           <span className={`shrink-0 px-2 py-0.5 rounded-full font-medium
@@ -686,14 +765,20 @@ function PayoutPageInner() {
                     {utrMsg}
                   </div>
                 )}
+                {utrApplyUnconfirmed && utrResult.canProceed && (
+                  <p id="utr-apply-paused-hint" data-testid="utr-apply-paused-hint" className="text-xs text-gray-600">
+                    {UTR_APPLY_PAUSED_HINT}
+                  </p>
+                )}
 
                 {/* Apply / Reset */}
                 <div className="flex gap-3">
                   {utrResult.canProceed && (
                     <button
                       onClick={handleApplyUtr}
-                      disabled={utrApplying}
-                      className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40"
+                      disabled={utrApplying || utrApplyUnconfirmed}
+                      aria-describedby={utrApplyUnconfirmed ? 'utr-apply-paused-hint' : undefined}
+                      className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <BadgeCheck className="w-4 h-4" />
                       {utrApplying ? 'Applying…' : 'Apply UTR Results'}
@@ -727,11 +812,49 @@ function PayoutPageInner() {
               </div>
             )}
 
-            {utrApplied && utrApplyResult && (() => {
+            {utrApplied && utrApplyResult && utrApplyResult.notApplied.length > 0 && (
+              <div
+                role="alert"
+                data-testid="utr-not-applied"
+                className="rounded-xl p-4 border bg-amber-50 border-amber-200 space-y-1.5"
+              >
+                <p className="text-sm font-semibold text-amber-800 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                  These rows were not applied:
+                </p>
+                <ul className="max-h-52 overflow-y-auto list-disc pl-6 space-y-0.5 text-xs text-amber-800">
+                  {utrApplyResult.notApplied.map((r, i) => (
+                    <li key={`${r.outletId}-${r.rowNum ?? i}`}>
+                      {r.rowNum != null && <span className="text-amber-600">Row {r.rowNum} · </span>}
+                      <span className="font-mono">{r.outletId}</span> — {r.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {utrApplied && utrApplyResult?.noop && (
+              // Nothing changed (every row was already applied) — a neutral note with the server's own
+              // message, never the green "UTR results applied · 0 paid · 0 failed · N skipped" banner.
+              <div
+                role="status"
+                data-testid="utr-apply-noop"
+                className="rounded-xl p-4 flex items-center gap-3 border bg-gray-50 border-gray-200"
+              >
+                <CheckCircle className="w-5 h-5 text-gray-500 flex-shrink-0" />
+                <p className="text-sm text-gray-700">{utrApplyResult.message ?? 'Already applied — nothing to change'}</p>
+                <button onClick={resetUtrForm} className="ml-auto text-xs text-gray-600 hover:underline">
+                  Upload another
+                </button>
+              </div>
+            )}
+
+            {utrApplied && utrApplyResult && !utrApplyResult.noop && (() => {
               // Amber (not green) whenever some rows were marked FAILED — a bank
               // bounce is a real-money outcome the operator must see, never a
               // green "success" banner. Green ONLY when every applied row paid.
-              const hasIssues = utrApplyResult.failedCount > 0;
+              // Rows the apply could NOT record are an issue too — never a green banner alone.
+              const hasIssues = utrApplyResult.failedCount > 0 || utrApplyResult.notApplied.length > 0;
               return (
                 <div className={`rounded-xl p-4 flex items-center gap-3 border ${
                   hasIssues ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50 border-emerald-200'

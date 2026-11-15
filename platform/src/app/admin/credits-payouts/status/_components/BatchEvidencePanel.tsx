@@ -30,12 +30,31 @@ const ACCEPT = 'image/jpeg,image/png,image/webp,application/pdf';
 const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_PER_BATCH = 100;
-// A file whose response was lost may still have landed — the list below is reloaded after the run.
+// A file whose response was lost (network error / 5xx) may still have landed — the server does not
+// de-duplicate evidence, so re-selecting it blindly can attach it twice. The list is reloaded after the run.
 const UPLOAD_UNSURE_NOTE = 'It may or may not have been saved — check the evidence list below before re-uploading it.';
+// A readable 4xx (incl. 413) is a definite rejection — nothing was stored.
+const UPLOAD_REJECTED_NOTE = "It wasn't saved.";
 
 interface FileFailure {
   name: string;
   reason: string;
+  /** true = the outcome is unknown (network error / 5xx) — the file may have landed. */
+  unsure: boolean;
+}
+
+/** The run's summary line. Only DEFINITE failures (a readable 4xx/413) are "re-select" files. */
+export function evidenceUploadSummary(uploaded: number, total: number, failures: FileFailure[]): string {
+  const rejected = failures.filter((f) => !f.unsure).length;
+  const unsure = failures.length - rejected;
+  let s = `Uploaded ${uploaded} of ${total} file(s).`;
+  if (rejected > 0) s += ` ${rejected} failed and ${rejected === 1 ? "wasn't" : "weren't"} saved — re-select only ${rejected === 1 ? 'that file' : 'those files'}.`;
+  if (unsure > 0) {
+    s += unsure === 1
+      ? " 1 may or may not have been saved — check the evidence list below first; re-select it only if it's missing."
+      : ` ${unsure} may or may not have been saved — check the evidence list below first; re-select only the ones that are missing.`;
+  }
+  return s;
 }
 
 function fmtSize(bytes: number): string {
@@ -47,10 +66,13 @@ function fmtSize(bytes: number): string {
 export default function BatchEvidencePanel({
   batchId,
   canDelete,
+  onUploadingChange,
 }: {
   batchId: string;
   /** Delete allowed only while the batch is PENDING_CONFIRM (add-only after confirm). */
   canDelete: boolean;
+  /** Told when an upload run starts/ends, so the parent can keep this panel mounted meanwhile. */
+  onUploadingChange?: (uploading: boolean) => void;
 }) {
   const [items, setItems] = useState<Attachment[] | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -62,11 +84,43 @@ export default function BatchEvidencePanel({
   const [lightbox, setLightbox] = useState<Attachment | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Unmount safety: the upload loop must stop (abort the in-flight request) and never setState
+  // after the panel is gone.
+  const mountedRef = useRef(true);
+  const abortRef = useRef<AbortController | null>(null);
+  const onUploadingChangeRef = useRef(onUploadingChange);
+  useEffect(() => {
+    onUploadingChangeRef.current = onUploadingChange;
+  }, [onUploadingChange]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+        onUploadingChangeRef.current?.(false);
+      }
+    };
+  }, []);
+
+  // Warn before leaving / reloading the page mid-upload (the remaining files would not be sent).
+  useEffect(() => {
+    if (!uploading) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [uploading]);
 
   const load = useCallback(async () => {
     try {
       const res = await fetch(`/api/admin/credits/batches/${batchId}/attachments`);
       const json = await res.json().catch(() => null);
+      if (!mountedRef.current) return;
       if (res.ok && json?.data) {
         setItems(json.data.attachments ?? []);
         setLoadError(false);
@@ -75,7 +129,7 @@ export default function BatchEvidencePanel({
         setLoadError(true);
       }
     } catch {
-      setLoadError(true);
+      if (mountedRef.current) setLoadError(true);
     }
   }, [batchId]);
 
@@ -94,6 +148,7 @@ export default function BatchEvidencePanel({
   }, [lightbox]);
 
   async function handleFiles(fileList: FileList | null) {
+    if (abortRef.current) return; // a run is already in progress
     setError(null);
     setSummary(null);
     setFailures([]);
@@ -117,7 +172,10 @@ export default function BatchEvidencePanel({
       return;
     }
 
+    const controller = new AbortController();
+    abortRef.current = controller;
     setUploading(true);
+    onUploadingChangeRef.current?.(true);
     setSummary(null);
     setFailures([]);
     const failed: FileFailure[] = [];
@@ -127,6 +185,7 @@ export default function BatchEvidencePanel({
       // Next proxy's request-body cap and be silently truncated. A failed file is recorded and the
       // loop moves on, so one bad file never costs the operator the others.
       for (let i = 0; i < files.length; i++) {
+        if (controller.signal.aborted) return; // unmounted — stop, touch no state
         const f = files[i];
         setProgress({ done: i, total: files.length, current: f.name });
         const fd = new FormData();
@@ -135,28 +194,40 @@ export default function BatchEvidencePanel({
           const res = await fetch(`/api/admin/credits/batches/${batchId}/attachments`, {
             method: 'POST',
             body: fd,
+            signal: controller.signal,
           });
           if (!res.ok) {
             const json = await readJsonSafe(res);
-            failed.push({ name: f.name, reason: responseErrorMessage(res, json, UPLOAD_UNSURE_NOTE) });
+            // A 4xx (incl. 413) is a definite rejection; a 5xx may have stored the file first.
+            const definite = res.status >= 400 && res.status < 500;
+            failed.push({
+              name: f.name,
+              reason: responseErrorMessage(res, json, definite ? UPLOAD_REJECTED_NOTE : UPLOAD_UNSURE_NOTE),
+              unsure: !definite,
+            });
             continue;
           }
           uploaded += 1;
         } catch {
-          failed.push({ name: f.name, reason: networkErrorMessage(UPLOAD_UNSURE_NOTE) });
+          if (controller.signal.aborted) return;
+          failed.push({ name: f.name, reason: networkErrorMessage(UPLOAD_UNSURE_NOTE), unsure: true });
         }
       }
     } finally {
-      setProgress(null);
-      setFailures(failed);
-      setSummary(
-        failed.length === 0
-          ? `Uploaded ${uploaded} of ${files.length} file(s).`
-          : `Uploaded ${uploaded} of ${files.length} file(s). ${failed.length} failed — re-select only the failed file(s) listed below.`,
-      );
-      await load();
-      setUploading(false);
-      if (inputRef.current) inputRef.current.value = '';
+      if (!controller.signal.aborted && mountedRef.current) {
+        setProgress(null);
+        setFailures(failed);
+        setSummary(evidenceUploadSummary(uploaded, files.length, failed));
+        await load();
+      }
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        onUploadingChangeRef.current?.(false);
+      }
+      if (mountedRef.current) {
+        setUploading(false);
+        if (inputRef.current) inputRef.current.value = '';
+      }
     }
   }
 
@@ -219,25 +290,30 @@ export default function BatchEvidencePanel({
       </p>
 
       {error && (
-        <div className="mb-3 rounded-lg bg-red-50 text-red-700 text-xs px-3 py-2">{error}</div>
+        <div role="alert" className="mb-3 rounded-lg bg-red-50 text-red-700 text-xs px-3 py-2">{error}</div>
       )}
 
-      {progress && (
-        <p className="mb-3 text-xs text-gray-500" aria-live="polite">
-          Uploading {progress.done + 1} of {progress.total}: {progress.current}
-        </p>
-      )}
+      {/* Permanently mounted live region — screen readers only announce changes to a region that
+          already exists, so it must not mount together with its first message. */}
+      <p
+        aria-live="polite"
+        data-testid="evidence-upload-progress"
+        className={progress ? 'mb-3 text-xs text-gray-500' : 'sr-only'}
+      >
+        {progress ? `Uploading ${progress.done + 1} of ${progress.total}: ${progress.current}` : ''}
+      </p>
 
       {summary && (
         <div
-          role="status"
+          role={failures.length > 0 ? 'alert' : 'status'}
+          data-testid="evidence-upload-summary"
           className={`mb-3 rounded-lg text-xs px-3 py-2 ${failures.length > 0 ? 'bg-amber-50 text-amber-800' : 'bg-green-50 text-green-700'}`}
         >
           <p>{summary}</p>
           {failures.length > 0 && (
             <ul className="mt-1 list-disc pl-4 space-y-0.5">
               {failures.map((f, i) => (
-                <li key={`${f.name}-${i}`}>
+                <li key={`${f.name}-${i}`} data-unsure={f.unsure ? 'true' : 'false'}>
                   <span className="font-medium">{f.name}</span>: {f.reason}
                 </li>
               ))}

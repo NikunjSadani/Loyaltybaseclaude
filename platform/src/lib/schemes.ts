@@ -21,7 +21,15 @@
  */
 
 import { api, type ApiResponse } from '@/lib/api-client';
-import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
+import {
+  readJsonSafe,
+  responseErrorMessage,
+  networkErrorMessage,
+  serverErrorText,
+  MAYBE_SAVED_NOTE,
+  NOTHING_SAVED_NOTE,
+  PHOTO_UPLOAD_RETRY_NOTE,
+} from '@/lib/safe-response';
 import type {
   AudienceConfig,
   AudienceFilter,
@@ -52,21 +60,30 @@ const BASE = '/api/schemes';
  * browser adds the multipart boundary. Same-origin fetch carries the auth cookie,
  * and the proxy injects the Bearer, so no auth header is needed here. Returns the
  * same `{ success, data }` envelope shape as api-client.
+ *
+ * `failureNote` is appended when the outcome is unknown (network drop / unreadable response) and
+ * must match what the request does: an in-form photo upload → PHOTO_UPLOAD_RETRY_NOTE (never
+ * "refresh", which would lose the rep's captured photos/GPS); a dry run → NOTHING_SAVED_NOTE; a
+ * write → MAYBE_SAVED_NOTE (the default).
  */
-export async function postMultipart<T>(url: string, form: FormData): Promise<ApiResponse<T>> {
+export async function postMultipart<T>(
+  url: string,
+  form: FormData,
+  failureNote: string = MAYBE_SAVED_NOTE,
+): Promise<ApiResponse<T>> {
   let res: Response;
   try {
     res = await fetch(url, { method: 'POST', body: form });
   } catch {
-    return { success: false, error: networkErrorMessage(MAYBE_SAVED_NOTE) };
+    return { success: false, error: networkErrorMessage(failureNote) };
   }
   // Tolerant read: a non-JSON body (proxy truncation / plain-text 5xx / edge 413) must surface a
   // readable message, never a raw `SyntaxError: Unexpected token 'I'…`.
   const body = await readJsonSafe(res);
   if (!body) {
-    return { success: false, error: responseErrorMessage(res, body, MAYBE_SAVED_NOTE), status: res.status };
+    return { success: false, error: responseErrorMessage(res, body, failureNote), status: res.status };
   }
-  if (!res.ok) return { success: false, error: body?.error ?? res.statusText };
+  if (!res.ok) return { success: false, error: serverErrorText(body) ?? res.statusText };
   return body as ApiResponse<T>;
 }
 
@@ -595,6 +612,8 @@ export const schemeApi = {
     return postMultipart<RosterRemoveUploadPreview | RosterRemoveUploadResult>(
       `${BASE}/${schemeId}/roster/remove-upload`,
       form,
+      // A dry run never writes; only the real remove may have partly applied.
+      opts.dryRun ? NOTHING_SAVED_NOTE : MAYBE_SAVED_NOTE,
     );
   },
   /** GIFSY admin restores soft-deleted roster rows (and any enrollment reached through them). */
@@ -779,7 +798,7 @@ export const schemeApi = {
   uploadMedia(schemeId: string, file: File | Blob, filename?: string) {
     const form = new FormData();
     form.append('file', file, filename ?? (file instanceof File ? file.name : 'capture'));
-    return postMultipart<MediaUploadResult>(`${BASE}/${schemeId}/enrollment/media`, form);
+    return postMultipart<MediaUploadResult>(`${BASE}/${schemeId}/enrollment/media`, form, PHOTO_UPLOAD_RETRY_NOTE);
   },
 
   // ── Enrollee: enroll + resubmit (versioned) ────────────────────────────────

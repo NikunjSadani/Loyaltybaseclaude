@@ -28,7 +28,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { api, authHeader } from '@/lib/api-client';
-import { readJsonSafe, responseErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { downloadBlob } from '@/lib/download';
 import {
   type GiftOrderSummary,
@@ -478,11 +478,18 @@ function BulkFulfilment({ onUploaded }: { onUploaded: () => void }) {
       const fd = new FormData();
       fd.append('file', file);
       // Do NOT set Content-Type — the browser sets the multipart boundary.
-      const res = await fetch('/api/admin/rewards/fulfilment/upload', {
-        method: 'POST',
-        headers: authHeader(),
-        body: fd,
-      });
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/rewards/fulfilment/upload', {
+          method: 'POST',
+          headers: authHeader(),
+          body: fd,
+        });
+      } catch {
+        // The upload updates orders — a dropped connection leaves the outcome unknown.
+        setErr(networkErrorMessage(MAYBE_SAVED_NOTE));
+        return;
+      }
       const json = await readJsonSafe<{
         success?: boolean;
         data?: FulfilmentUploadResult;
@@ -499,8 +506,8 @@ function BulkFulfilment({ onUploaded }: { onUploaded: () => void }) {
       }
       setResult(json.data ?? null);
       onUploaded();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Upload failed');
+    } catch {
+      setErr(`Something went wrong showing the upload result. ${MAYBE_SAVED_NOTE}`);
     } finally {
       setUploading(false);
     }

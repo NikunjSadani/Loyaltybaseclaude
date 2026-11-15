@@ -29,9 +29,13 @@ import { authHeader } from '@/lib/api-client';
 import {
   readJsonSafe,
   responseErrorMessage,
+  networkErrorMessage,
   NOTHING_SAVED_NOTE,
-  MAYBE_SAVED_NOTE,
 } from '@/lib/safe-response';
+
+/** TDS apply (off-platform / deposits) is ONE insert — all-or-nothing — and a re-upload of the same rows
+ *  is de-duplicated server-side, so a lost response means "the whole file may have been saved", never "some". */
+const TDS_APPLY_MAYBE_NOTE = 'It may have been saved — refresh and check before uploading again.';
 import { formatINR } from '@/lib/money';
 import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label';
 import { formatCountFrom } from '@/components/operator/tds-imported-payouts-card';
@@ -270,11 +274,18 @@ function UploadPanel({
     try {
       const form = new FormData();
       form.append('file', file);
-      const res  = await fetch(uploadUrlFn(false), {
-        method:  'POST',
-        headers: authHeader(),
-        body:    form,
-      });
+      let res: Response;
+      try {
+        res = await fetch(uploadUrlFn(false), {
+          method:  'POST',
+          headers: authHeader(),
+          body:    form,
+        });
+      } catch {
+        // Preview only (apply=false) — nothing is written, so a dropped connection is safe to retry.
+        setUploadError(networkErrorMessage(NOTHING_SAVED_NOTE));
+        return;
+      }
       const json = await readJsonSafe<{ success: boolean; data?: UploadResult; error?: string }>(res);
       if (!json) {
         setUploadError(responseErrorMessage(res, json, NOTHING_SAVED_NOTE));
@@ -285,8 +296,8 @@ function UploadPanel({
         return;
       }
       setPreview(json.data!);
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+    } catch {
+      setUploadError('Something went wrong showing the preview. Nothing was saved — please try again.');
     } finally {
       setUploading(false);
     }
@@ -318,14 +329,20 @@ function UploadPanel({
     try {
       const form = new FormData();
       form.append('file', file);
-      const res  = await fetch(uploadUrlFn(true), {
-        method:  'POST',
-        headers: authHeader(),
-        body:    form,
-      });
+      let res: Response;
+      try {
+        res = await fetch(uploadUrlFn(true), {
+          method:  'POST',
+          headers: authHeader(),
+          body:    form,
+        });
+      } catch {
+        setConfirmError(networkErrorMessage(TDS_APPLY_MAYBE_NOTE));
+        return;
+      }
       const json = await readJsonSafe<{ success: boolean; data?: UploadResult; error?: string }>(res);
       if (!json) {
-        setConfirmError(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        setConfirmError(responseErrorMessage(res, json, TDS_APPLY_MAYBE_NOTE));
         return;
       }
       if (!res.ok || !json.success) {
@@ -335,8 +352,8 @@ function UploadPanel({
       setDone(true);
       pendingFileRef.current = null;
       onApplied();
-    } catch (err) {
-      setConfirmError(err instanceof Error ? err.message : 'Apply failed');
+    } catch {
+      setConfirmError(`Something went wrong showing the result. ${TDS_APPLY_MAYBE_NOTE}`);
     } finally {
       setConfirming(false);
     }

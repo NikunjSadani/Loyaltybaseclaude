@@ -47,6 +47,17 @@ describe('serverErrorText', () => {
     expect(serverErrorText(null)).toBeNull();
     expect(serverErrorText({ success: false })).toBeNull();
   });
+
+  it('prefers a meaningful `message` when `error` is only a generic HTTP phrase (Nest default body)', () => {
+    expect(serverErrorText({ statusCode: 400, error: 'Bad Request', message: 'Header row missing' })).toBe('Header row missing');
+    expect(serverErrorText({ statusCode: 400, error: 'Bad Request', message: ['a', 'b'] })).toBe('a; b');
+    expect(serverErrorText({ statusCode: 413, error: 'Payload Too Large', message: 'File exceeds 10 MB' })).toBe('File exceeds 10 MB');
+    // Generic phrase with no (or the same) message → keep the phrase.
+    expect(serverErrorText({ statusCode: 404, error: 'Not Found' })).toBe('Not Found');
+    expect(serverErrorText({ error: 'Forbidden', message: 'Forbidden' })).toBe('Forbidden');
+    // A specific `error` still wins over `message`.
+    expect(serverErrorText({ error: 'Row 3: bad UTR', message: 'Bad Request' })).toBe('Row 3: bad UTR');
+  });
 });
 
 describe('responseErrorMessage', () => {

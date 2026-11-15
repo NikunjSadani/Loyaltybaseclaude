@@ -86,6 +86,9 @@ export function VisibilityAmountUploadPanel() {
       if (!json) setUploadError(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
       else if (!res.ok) setUploadError(json.error ?? 'Upload failed');
       else setUploadResult(json.data as UploadResult);
+    } catch {
+      // Anything that isn't the fetch itself (handled above) must not escape as an unhandled rejection.
+      setUploadError(`Something went wrong showing the upload result. ${MAYBE_SAVED_NOTE}`);
     } finally {
       setUploading(false);
     }
