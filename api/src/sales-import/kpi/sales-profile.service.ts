@@ -127,6 +127,14 @@ export function validateColumnMapping(raw: unknown): SalesColumnMapping {
 }
 
 /**
+ * The identity of the product-column list: ORDER + each column's key + normalized heading (labels excluded — a label
+ * is display-only). Two mappings with the same signature define products the same way.
+ */
+export function productColumnsSignature(dims: readonly SalesDimensionMapping[] | null | undefined): string {
+  return JSON.stringify((dims ?? []).map((d) => [d.key, normalizeHeader(d.header ?? '')]));
+}
+
+/**
  * Per-tenant column mapping CRUD (GET/PUT admin/sales-import/profile; plan §5.2, task K-1). OWNER: Lane K.
  * Callers have already passed assertSalesImportAccess; every query is keyed by the caller's clientId.
  */
@@ -170,7 +178,10 @@ export class SalesProfileService {
     const col = (h: string | null | undefined) => (h ? normalizeHeader(h) : '');
     const measureClash: string[] = [];
     for (const [measure, field, label] of [['AMOUNT', 'amount', 'amount'], ['QUANTITY', 'quantity', 'quantity']] as const) {
-      const users = measures.filter((d) => d.measure === measure).map((d) => d.kpiCode);
+      // PRODUCT_COUNT counts products by their NET AMOUNT, so it depends on the amount column too.
+      const users = measures
+        .filter((d) => d.measure === measure || (measure === 'AMOUNT' && d.measure === 'PRODUCT_COUNT'))
+        .map((d) => d.kpiCode);
       if (users.length === 0) continue;
       const was = col(old?.[field]);
       const now = col(mapping[field]);
@@ -179,6 +190,31 @@ export class SalesProfileService {
     }
     if (measureClash.length > 0) {
       throw new BadRequestException(`${measureClash.join('; ')}. Disable those KPIs first (or create new ones for the new column).`);
+    }
+
+    // Audit follow-up: the product columns (dimensions) DEFINE what one product is for a PRODUCT_COUNT ("Lines") KPI
+    // and for a "from the target file" (TARGET_NAMES) KPI — adding / removing / reordering a column, or changing its key
+    // or heading, silently changes every such figure (and every focus name's match). Refuse while any is enabled; a
+    // label-only change is harmless.
+    const sameColumns = productColumnsSignature(old?.dimensions) === productColumnsSignature(mapping.dimensions);
+    if (!sameColumns) {
+      const users = await this.prisma.salesKpiDefinition.findMany({
+        where: { clientId, enabled: true, OR: [{ measure: 'PRODUCT_COUNT' }, { productSource: 'TARGET_NAMES' }] },
+        select: { kpiCode: true },
+        orderBy: { kpiCode: 'asc' },
+      });
+      if (users.length > 0) {
+        const codes = users.map((u) => u.kpiCode);
+        const labels = await this.prisma.kpiDef.findMany({ where: { clientId, code: { in: codes } }, select: { code: true, label: true } });
+        const labelOf = new Map(labels.map((k) => [k.code, (k.label ?? '').trim()]));
+        const names = codes.map((c) => {
+          const l = labelOf.get(c);
+          return l && l !== c ? `'${l}' (${c})` : `'${c}'`;
+        });
+        throw new BadRequestException(
+          `Product columns can't be changed while ${names.join(', ')} ${names.length === 1 ? 'uses' : 'use'} them — they define what counts as one product (for 'Lines' and 'from the target file' KPIs). Disable those KPIs first.`,
+        );
+      }
     }
 
     await this.prisma.$transaction(async (tx) => {

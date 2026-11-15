@@ -21,16 +21,19 @@ import { Spinner } from '@/components/ui/spinner';
 import { downloadBlob } from '@/lib/download';
 import { fetchDownload, salesImportApi } from '@/lib/sales-import/api';
 import {
-  STATUS_CHIP, STATUS_LABEL, WARNING_SHORT, applyBlockers, dateTimeLabel, dayLabel, formatBytes, formatCases,
-  formatCount, formatKpiValue, formatRupees, formatSigned, isActiveStatus, isPartialMonth, monthLabel, sentence,
-  warningText,
+  STATUS_CHIP, STATUS_LABEL, WARNING_SHORT, applyBlockers, dateTimeLabel, dayLabel, focusBlockedMonths,
+  focusFingerprintsFor, formatBytes, formatCases, formatCount, formatKpiValue, formatRupees, formatSigned,
+  isActiveStatus, isPartialMonth, monthLabel, sentence, warningText,
 } from '@/lib/sales-import/format';
 import { getUploadState, subscribeUpload } from '@/lib/sales-import/upload-store';
 import { usePermissions } from '@/lib/use-permissions';
 import {
   SALES_IMPORT_ABANDONED_UPLOAD_HOURS, SALES_IMPORT_MAX_DIM_VALUE_CHARS, SALES_IMPORT_STALE_HEARTBEAT_MINUTES,
-  type ApplyMonthResult, type MonthPreview, type SalesImportDetail, type SalesImportPreview,
+  type ApplyMonthResult, type MonthPreview, type SalesDimensionMapping, type SalesImportDetail, type SalesImportPreview,
 } from '@/lib/sales-import/types';
+import {
+  MonthReconciliationPanel, reconciliationNeedsAttention, useDimensionLabels, useOutletTypeNames, type OutletTypeNames,
+} from '../_components/month-reconciliation-panel';
 
 const POLL_MS = 2000;
 const UPLOADING_POLL_MS = 5000;
@@ -249,15 +252,26 @@ function LastAppliedRange({ m }: { m: MonthPreview }) {
 }
 
 function MonthRow({
-  m, selected, onToggle, partialAck, onPartialAck, importId, onDownloadError, canAct,
+  m, selected, onToggle, partialAck, onPartialAck, importId, onDownloadError, canAct, dims, typeNames, onRefresh,
 }: {
   m: MonthPreview; selected: boolean; onToggle(): void; partialAck: boolean; onPartialAck(v: boolean): void;
   importId: string; onDownloadError(msg: string): void; canAct: boolean;
+  dims: SalesDimensionMapping[];
+  typeNames: OutletTypeNames;
+  /** Re-fetch the preview (after Accept / Undo of a focus product name); true when it landed. */
+  onRefresh(): Promise<boolean>;
 }) {
   const [open, setOpen] = useState(false);
   const partial = isPartialMonth(m);
   const label = monthLabel(m.month);
-  const showDetail = open || m.warnings.length > 0;
+  const attention = reconciliationNeedsAttention(m.reconciliation);
+  const showDetail = open || m.warnings.length > 0 || attention;
+  const detailId = `month-detail-${m.month}`;
+  // Fallback only (older server without MonthFocusKpi.measure / targets.kpis[].measure).
+  const measures = Object.fromEntries(m.kpis.map((k) => [k.kpiCode, k.measure]));
+  // After Accept / Undo the row opens fully, so the replacing chip (and its Undo / Accept button) stays on screen
+  // even when the month no longer needs attention — keyboard focus is put back on it.
+  const refreshOpen = useCallback(async () => { setOpen(true); return onRefresh(); }, [onRefresh]);
   return (
     <>
       <tr className="border-b border-gray-100 align-top" data-testid={`month-row-${m.month}`}>
@@ -273,7 +287,8 @@ function MonthRow({
           />
         </td>
         <td className="px-3 py-2">
-          <button type="button" onClick={() => setOpen((v) => !v)} className="flex items-center gap-1 font-medium text-gray-900" aria-expanded={open}>
+          <button type="button" onClick={() => setOpen((v) => !v)} className="flex items-center gap-1 font-medium text-gray-900"
+            aria-expanded={showDetail} aria-controls={showDetail ? detailId : undefined}>
             {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
             {label}
           </button>
@@ -311,9 +326,12 @@ function MonthRow({
         </td>
       </tr>
       {showDetail && (
-        <tr className="border-b border-gray-100 bg-gray-50/50">
+        <tr className="border-b border-gray-100 bg-gray-50/50" id={detailId} data-testid={detailId}>
           <td />
           <td colSpan={8} className="px-3 py-3 space-y-3">
+            <MonthReconciliationPanel month={m.month} reconciliation={m.reconciliation} measures={measures} dims={dims}
+              typeNames={typeNames} canAct={canAct} monthOpen={m.monthState === 'OPEN'} expanded={open}
+              onRefresh={refreshOpen} />
             {m.warnings.length > 0 && (
               <ul className="space-y-1" data-testid={`month-warnings-${m.month}`}>
                 {m.warnings.map((w) => (
@@ -400,6 +418,8 @@ function PreviewSection({
   const seqRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
+  const dims = useDimensionLabels();
+  const typeNames = useOutletTypeNames();
 
   /** Loads the preview; resolves true only when THIS load landed successfully (stale / failed → false). */
   const loadPreview = useCallback(async (): Promise<boolean> => {
@@ -440,6 +460,10 @@ function PreviewSection({
     ...(noKpis ? ['No KPIs are set up for Sales Import yet, so there is nothing to apply. Add them under Settings first.'] : []),
     ...applyBlockers(months, selected, partialAcks, olderAck),
   ];
+  // Months held back by focus-product problems cannot be ticked; say why next to Apply even when nothing is ticked —
+  // under their own "Not available:" heading, so they never read as the reason a ticked good month can't be applied.
+  const heldBack = focusBlockedMonths(months, selected).filter((b) => !blockers.includes(b));
+  const showBlockers = (selected.size > 0 || noKpis) && blockers.length > 0;
   const anyOlder = months.some((m) => selected.has(m.month) && m.warnings.includes('OLDER_THAN_LAST_APPLIED'));
   const kpiNames = Array.from(new Set(months.flatMap((m) => m.kpis.map((k) => k.label || k.kpiCode))));
 
@@ -466,12 +490,14 @@ function PreviewSection({
     setNotice(null);
     setResults(null);
     const partialMonths = picked.filter(isPartialMonth).map((m) => m.month);
+    const fingerprints = focusFingerprintsFor(months, selected);
     const r = await salesImportApi.apply(importId, {
       months: picked.map((m) => m.month),
       expectedDefinitionsHash: preview.definitionsHash,
       processingVersion: preview.processingVersion,
       ...(partialMonths.length ? { acknowledgePartialMonths: partialMonths } : {}),
       ...(anyOlder ? { acknowledgeOlderThanLastApplied: true } : {}),
+      ...(Object.keys(fingerprints).length ? { expectedFocusFingerprints: fingerprints } : {}),
     });
     if (!r.success) {
       if (r.status === 401) {
@@ -596,6 +622,9 @@ function PreviewSection({
                     return next;
                   })}
                   onDownloadError={setDownloadError}
+                  dims={dims}
+                  typeNames={typeNames}
+                  onRefresh={loadPreview}
                 />
               ))}
             </tbody>
@@ -615,14 +644,22 @@ function PreviewSection({
       )}
 
       {canAct ? (
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-start gap-3">
           <Button variant="primary" onClick={apply} disabled={blockers.length > 0} loading={applying} data-testid="sales-import-apply">
             Apply {selected.size > 0 ? `${selected.size} month${selected.size > 1 ? 's' : ''}` : ''}
           </Button>
-          {(selected.size > 0 || noKpis) && blockers.length > 0 && (
+          {showBlockers && (
             <ul className="text-xs text-gray-600 list-disc pl-4" data-testid="sales-import-apply-blockers">
               {blockers.map((b) => <li key={b}>{b}</li>)}
             </ul>
+          )}
+          {heldBack.length > 0 && (
+            <div className="text-xs text-gray-600 min-w-0" data-testid="sales-import-unavailable-months">
+              <p className="font-medium text-gray-700">Not available:</p>
+              <ul className="list-disc pl-4">
+                {heldBack.map((b) => <li key={b}>{b}</li>)}
+              </ul>
+            </div>
           )}
         </div>
       ) : (

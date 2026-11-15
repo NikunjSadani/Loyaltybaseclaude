@@ -19,14 +19,16 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 // ── Mock the role source (admin session) — the page gates the form by session.role ──
 // userId defaults to a value that matches NO row in USERS, so the Deactivate button
 // renders for every row in the existing assertions. Individual tests override userId.
-const mockSession = { role: 'GIFSY_ADMIN', clientId: 'gifsy', name: 'Op', userId: 'self-op', canManageSchemes: true };
+// No clientId: the admin session no longer carries one (it was hard-coded 'deoleo' for every tenant admin).
+const mockSession = { role: 'GIFSY_ADMIN', name: 'Op', userId: 'self-op', canManageSchemes: true };
 vi.mock('@/lib/admin-session', () => ({
   useAdminSession: () => mockSession,
 }));
 
 // ── Mock tenant context sources ──
+let mockDisplayName = 'Deoleo India';
 vi.mock('@/lib/platform/client-config-context', () => ({
-  useClientConfig: () => ({ branding: { displayName: 'Deoleo India' } }),
+  useClientConfig: () => ({ branding: { displayName: mockDisplayName } }),
 }));
 // getAssumedBrand is controllable per-test: null = platform (gifsy) context,
 // a brand string = the GIFSY operator has assumed that tenant.
@@ -75,6 +77,7 @@ beforeEach(() => {
   mockSession.role = 'GIFSY_ADMIN';
   mockSession.userId = 'self-op';
   mockGetAssumedBrand.mockReturnValue(null); // default: platform (gifsy) context
+  mockDisplayName = 'Deoleo India';
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -130,6 +133,36 @@ describe('Admin User Accounts page', () => {
     const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
     expect(options).toEqual(['MIS_USER']);
   });
+
+  it.each([['Deoleo India'], ['Bajaj Consumer Care']])(
+    'AU3a-tenants: a CLIENT_ADMIN of %s sees ONLY MIS_USER (no client-side clientId involved)',
+    async (tenant) => {
+      mockSession.role = 'CLIENT_ADMIN';
+      mockDisplayName = tenant;
+      installFetch();
+      render(<AdminUsersPage />);
+      await screen.findByText('Priya Sharma');
+      await userEvent.click(screen.getByRole('button', { name: /create user/i }));
+      const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
+      const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
+      expect(options).toEqual(['MIS_USER']);
+    },
+  );
+
+  it.each([['Deoleo India'], ['Bajaj Consumer Care']])(
+    'AU3c-tenants: a GIFSY_ADMIN assumed into %s sees CLIENT_ADMIN + MIS_USER (never GIFSY_ADMIN)',
+    async (tenant) => {
+      mockSession.role = 'GIFSY_ADMIN';
+      mockGetAssumedBrand.mockReturnValue(tenant);
+      installFetch();
+      render(<AdminUsersPage />);
+      await screen.findByText('Priya Sharma');
+      await userEvent.click(screen.getByRole('button', { name: /create user/i }));
+      const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
+      const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
+      expect(options).toEqual(['CLIENT_ADMIN', 'MIS_USER']);
+    },
+  );
 
   it('AU3b: a GIFSY_ADMIN caller in PLATFORM (gifsy) context sees all three admin roles', async () => {
     mockSession.role = 'GIFSY_ADMIN';

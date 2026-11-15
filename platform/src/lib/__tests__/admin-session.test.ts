@@ -66,10 +66,11 @@ describe('B — getAdminSession()', () => {
     expect(getAdminSession().canManageSchemes).toBe(false);
   });
 
-  it('B5: session includes clientId (tenant scoping)', () => {
-    const session = getAdminSession();
-    expect(session).toHaveProperty('clientId');
-    expect(typeof session.clientId).toBe('string');
+  it('B5: the session carries NO clientId (it was a hard-coded guess — never a write target)', () => {
+    for (const role of ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'] as const) {
+      setDemoAdminRole(role);
+      expect(getAdminSession()).not.toHaveProperty('clientId');
+    }
   });
 });
 
@@ -99,13 +100,25 @@ describe('D — getAdminSession() resolves the REAL logged-in user (no demo pers
     expect(adminRoleLabel(s.role)).toBe('MIS User');
   });
 
-  it('D3: a real GIFSY_ADMIN keeps platform scope (canManageSchemes + clientId gifsy)', () => {
+  it('D3: a real GIFSY_ADMIN keeps platform scope (canManageSchemes) — and no clientId guess', () => {
     login('GIFSY_ADMIN', 'Operator One');
     const s = getAdminSession();
     expect(s.role).toBe('GIFSY_ADMIN');
     expect(s.canManageSchemes).toBe(true);
-    expect(s.clientId).toBe('gifsy');
+    expect(s).not.toHaveProperty('clientId');
   });
+
+  it.each([['Deoleo Client Admin'], ['Bajaj Client Admin']])(
+    'D3b: a real CLIENT_ADMIN (%s) gets no hard-coded tenant (previously always "deoleo")',
+    (name) => {
+      login('CLIENT_ADMIN', name);
+      const s = getAdminSession();
+      expect(s.role).toBe('CLIENT_ADMIN');
+      expect(s.name).toBe(name);
+      expect(s).not.toHaveProperty('clientId');
+      expect(JSON.stringify(s)).not.toContain('deoleo');
+    },
+  );
 
   it('D4: a stored non-admin role falls back safely (no crash, an admin role)', () => {
     login('WHOLESALER', 'Some Partner');

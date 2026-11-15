@@ -41,6 +41,7 @@ import {
 } from '../common/kyc-sla-stage';
 import { isGifsyOperator } from '../common/tenant-scope';
 import { NOTIFICATION_TEMPLATES_SETTING_KEY } from '../notification-templates/notification-templates.config';
+import { TDS_IMPORTED_PAYOUTS_SETTING_KEY } from '../tds/tds.helpers';
 import {
   BulkEditUsersDto,
   CreateUserDto,
@@ -1305,6 +1306,16 @@ export class AdminCoreService {
       );
     }
 
+    // GIFSY-ADMIN-ONLY report config at the DATA boundary: tdsImportedPayouts (count imported vendor
+    // payouts in the 194R report from a date) must ONLY be written through the dedicated, strictly-
+    // validated GIFSY_ADMIN endpoint PUT /v1/admin/tds/config/imported-payouts (allowPlatformOnlyKey).
+    // Blocking it here stops the generic PUT /v1/admin/settings from writing an unvalidated value.
+    if (dto.key === TDS_IMPORTED_PAYOUTS_SETTING_KEY && !opts?.allowPlatformOnlyKey) {
+      throw new ForbiddenException(
+        'Imported-payout TDS counting can only be changed by a Gifsy Admin on the TDS Treatment screen.',
+      );
+    }
+
     // Key-specific guard: the two KYC review-SLA targets drive the breach buckets on the
     // KYC dashboard (kycDashboard()). A non-integer / out-of-range value would poison those
     // metrics, so reject anything outside KYC_SLA_MIN_HOURS–KYC_SLA_MAX_HOURS business hours
@@ -1417,7 +1428,10 @@ export class AdminCoreService {
     // For the TDS policy (a money-path config), capture the PRIOR value BEFORE the write so
     // the dedicated audit row below records the exact old→new transition (W0-C).
     const isTdsPolicyWrite =
-      dto.key === 'tdsPolicy' || dto.key === 'tds' || dto.key === 'tdsStatutory';
+      dto.key === 'tdsPolicy' ||
+      dto.key === 'tds' ||
+      dto.key === 'tdsStatutory' ||
+      dto.key === TDS_IMPORTED_PAYOUTS_SETTING_KEY;
     let priorTdsPolicyValue: unknown = null;
     if (isTdsPolicyWrite) {
       const prior = await this.prisma.programSetting.findUnique({
@@ -1457,7 +1471,12 @@ export class AdminCoreService {
       await this.prisma.auditLog.create({
         data: {
           action: 'UPDATE',
-          entityType: dto.key === 'tdsStatutory' ? 'TdsStatutory' : 'TdsPolicy',
+          entityType:
+            dto.key === 'tdsStatutory'
+              ? 'TdsStatutory'
+              : dto.key === TDS_IMPORTED_PAYOUTS_SETTING_KEY
+                ? 'TdsImportedPayouts'
+                : 'TdsPolicy',
           entityId: clientId,
           actorId: user.sub,
           oldValues: (priorTdsPolicyValue ?? undefined) as Prisma.InputJsonValue | undefined,

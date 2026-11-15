@@ -16,6 +16,9 @@ import {
   dateTimeLabel, formatCount, formatKpiValue, formatRupees, formatSigned, monthLabel, sentence, warningText,
 } from '@/lib/sales-import/format';
 import type { SalesMonthRecalcPreview, SalesMonthRecalcResult } from '@/lib/sales-import/types';
+import {
+  MonthReconciliationPanel, useDimensionLabels, useOutletTypeNames,
+} from '../../_components/month-reconciliation-panel';
 
 export function RecalculatePanel({ month, onClose, onApplied }: {
   month: string;
@@ -29,9 +32,13 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
   const [notice, setNotice] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
   const [result, setResult] = useState<SalesMonthRecalcResult | null>(null);
+  /** Recalculated, but the follow-up preview reload failed: the reconciliation shown predates the recalculation. */
+  const [staleAfterApply, setStaleAfterApply] = useState(false);
   const seqRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
+  const dims = useDimensionLabels();
+  const typeNames = useOutletTypeNames();
 
   const load = useCallback(async (): Promise<boolean> => {
     const seq = ++seqRef.current;
@@ -59,6 +66,7 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
     const r = await salesImportApi.recalculate(month, {
       expectedDefinitionsHash: preview.definitionsHash,
       expectedHistoryAppliedAt: preview.historyAppliedAt,
+      ...(preview.reconciliation?.focusFingerprint ? { expectedFocusFingerprint: preview.reconciliation.focusFingerprint } : {}),
     });
     if (!mountedRef.current) return;
     if (!r.success) {
@@ -81,7 +89,13 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
     }
     setApplying(false);
     setResult(r.data);
-    if (r.data.ok) onApplied();
+    if (r.data.ok) {
+      onApplied();
+      // Reload the preview so "targets were uploaded after the last apply — recalculate" and the like disappear
+      // now that the month has been recalculated. If the reload fails, hide the (now stale) reconciliation instead.
+      const refreshed = await load();
+      if (mountedRef.current && !refreshed) setStaleAfterApply(true);
+    }
   }
 
   return (
@@ -125,7 +139,18 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
               <span><strong>{label} cannot be recalculated:</strong> {sentence(preview.blockedReason)}.</span>
             </div>
           )}
-          {preview.warnings.length > 0 && (
+          {staleAfterApply ? (
+            <p role="status" className="text-xs text-gray-600" data-testid="recalc-recon-stale">
+              {label} was recalculated, but its targets and focus-brand check could not be reloaded — close the
+              recalculation and open it again to see them.
+            </p>
+          ) : (
+            <MonthReconciliationPanel month={month} reconciliation={preview.reconciliation}
+              measures={Object.fromEntries(preview.kpis.map((k) => [k.kpiCode, k.measure]))} dims={dims} typeNames={typeNames}
+              canAct monthOpen={preview.monthState === 'OPEN'} onRefresh={load}
+              refreshHint="close the recalculation and open it again before recalculating" />
+          )}
+          {!staleAfterApply && preview.warnings.length > 0 && (
             <ul className="space-y-1" data-testid="recalc-warnings">
               {preview.warnings.map((w) => (
                 <li key={w} className="text-xs text-amber-800 flex gap-1.5">

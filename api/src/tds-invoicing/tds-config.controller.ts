@@ -1,18 +1,23 @@
-import { Controller, Get, Put, Body, Query } from '@nestjs/common';
+import { BadRequestException, Controller, ForbiddenException, Get, NotFoundException, Put, Body, Query } from '@nestjs/common';
 import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { TdsService } from '../tds/tds.service';
+import { TDS_IMPORTED_PAYOUTS_SETTING_KEY, importedCountFromBounds, parseIsoCalendarDate } from '../tds/tds.helpers';
 import { UpsertSettingDto } from '../admin-core/dto/settings.dto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import { Roles } from '../common/decorators/roles.decorator';
-import { GetTdsConfigQueryDto, SetTdsConfigDto } from './dto/tds-config.dto';
+import { GetTdsConfigQueryDto, SetImportedPayoutsConfigDto, SetTdsConfigDto } from './dto/tds-config.dto';
 
 /**
  * Gifsy per-tenant TDS-policy config — Wave 1 Stream C, §5 portal split.
  *
  *   PUT /v1/admin/tds/config   { clientId, section, methodology }   — GIFSY_ADMIN-only SET
  *   GET /v1/admin/tds/config?clientId=                              — GIFSY (any) / tenant (own)
+ *   PUT /v1/admin/tds/config/imported-payouts { clientId, countFrom } — GIFSY_ADMIN-only SET
+ *   GET /v1/admin/tds/config/imported-payouts?clientId=              — GIFSY (any) / tenant (own)
  *
+
  * SET is GIFSY-only (Gifsy governs TGSL's deduct/deposit/recovery per tenant — D2/D3). The write
  * goes through the EXISTING settings write path (AdminCoreService.upsertSetting with
  * settingKey='tdsPolicy') so the W0-C config-change AuditLog fires and the TenantSettingsService
@@ -27,6 +32,7 @@ export class TdsConfigController {
   constructor(
     private readonly adminCore: AdminCoreService,
     private readonly tenantSettings: TenantSettingsService,
+    private readonly tds: TdsService,
   ) {}
 
   /**
@@ -53,16 +59,98 @@ export class TdsConfigController {
   @Put()
   @Roles('GIFSY_ADMIN')
   async set(@CurrentUser() user: JwtPayload, @Body() dto: SetTdsConfigDto) {
+    // PROD BUG FIX: an operator ASSUMED into a tenant always writes THAT tenant (the FE used to
+    // send its home clientId 'gifsy', so the save landed on 'gifsy' while GET read the tenant).
+    const clientId = await this.resolveWriteTarget(user, dto.clientId);
     const settingDto: UpsertSettingDto = {
       key: 'tdsPolicy',
       value: { section: dto.section, methodology: dto.methodology },
       category: 'tds',
-      description: 'Per-tenant TDS treatment for visibility-stream payouts (section + methodology).',
+      description: 'Per-tenant TDS treatment (section for visibility payouts; methodology for credit-upload payouts).',
     };
 
     // Write under the target tenant's scope; operator identity is preserved for the audit.
-    await this.adminCore.upsertSetting({ ...user, clientId: dto.clientId }, settingDto);
+    await this.adminCore.upsertSetting({ ...user, clientId }, settingDto);
 
-    return { clientId: dto.clientId, section: dto.section, methodology: dto.methodology };
+    return { clientId, section: dto.section, methodology: dto.methodology };
+  }
+
+  /**
+   * The tenant a per-tenant TDS config WRITE targets:
+   *  - ASSUMED operator (not platformWide) → ALWAYS the assumed tenant (user.clientId); a body
+   *    clientId that differs → 403 (never silently written elsewhere).
+   *  - un-assumed GIFSY → body clientId is REQUIRED (400 if missing).
+   * Either way the tenant must exist (404).
+   */
+  private async resolveWriteTarget(user: JwtPayload, bodyClientId: string | undefined): Promise<string> {
+    let clientId: string;
+    if (!platformWide(user)) {
+      if (bodyClientId && bodyClientId !== user.clientId) {
+        throw new ForbiddenException(
+          `You are working in "${user.clientId}" — this setting can only be changed for that tenant.`,
+        );
+      }
+      clientId = user.clientId;
+    } else {
+      if (!bodyClientId) {
+        throw new BadRequestException('clientId is required — choose the tenant to change.');
+      }
+      clientId = bodyClientId;
+    }
+    if (!(await this.tds.clientExists(clientId))) {
+      throw new NotFoundException(`Client "${clientId}" does not exist.`);
+    }
+    return clientId;
+  }
+
+  /**
+   * GET the per-tenant "count imported (vendor) payouts in the 194R report from" date.
+   * Same scoping as GET above (tenant admin / assumed operator pinned; un-assumed GIFSY may pass
+   * ?clientId=). `countFrom` null = OFF (the default — imported payouts excluded from 194R).
+   */
+  @Get('imported-payouts')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  async getImportedPayouts(@CurrentUser() user: JwtPayload, @Query() q: GetTdsConfigQueryDto) {
+    const clientId = platformWide(user) && q.clientId ? q.clientId : user.clientId;
+    if (!(await this.tds.clientExists(clientId))) {
+      throw new NotFoundException(`Client "${clientId}" does not exist.`);
+    }
+    // Editor read: a malformed stored value comes back FLAGGED (not thrown) so the card can repair it.
+    return { clientId, ...(await this.tds.importedPayoutsSettingForEdit(clientId)) };
+  }
+
+  /**
+   * SET the per-tenant imported-payouts date (GIFSY_ADMIN-only). REPORT/LIABILITY-ONLY: it widens
+   * the 194R report base (TdsService.compute194R) and nothing else — no withholding, TDS invoice or
+   * recovery reads it. Written via upsertSetting with allowPlatformOnlyKey (the generic settings PUT
+   * is fenced off for this key), which appends the generic + a dedicated `TdsImportedPayouts`
+   * AuditLog (old→new) and busts the settings cache. An ASSUMED operator may only set the tenant
+   * they are assumed into.
+   */
+  @Put('imported-payouts')
+  @Roles('GIFSY_ADMIN')
+  async setImportedPayouts(@CurrentUser() user: JwtPayload, @Body() dto: SetImportedPayoutsConfigDto) {
+    const countFrom = dto.countFrom === null ? null : parseIsoCalendarDate(dto.countFrom);
+    if (dto.countFrom !== null && countFrom === null) {
+      throw new BadRequestException('countFrom must be a real calendar date (YYYY-MM-DD), or null to turn it off.');
+    }
+    if (countFrom !== null) {
+      const { min, max } = importedCountFromBounds();
+      if (countFrom < min || countFrom > max) {
+        throw new BadRequestException(`countFrom must be between ${min} and ${max} (today + 1 year).`);
+      }
+    }
+    const clientId = await this.resolveWriteTarget(user, dto.clientId);
+    const settingDto: UpsertSettingDto = {
+      key: TDS_IMPORTED_PAYOUTS_SETTING_KEY,
+      value: { countFrom },
+      category: 'tds',
+      description:
+        'Count imported (vendor) payouts paid on/after countFrom in the 194R report — liability only, no deduction.',
+    };
+    await this.adminCore.upsertSetting({ ...user, clientId }, settingDto, {
+      allowPlatformOnlyKey: true,
+    });
+    return { clientId, countFrom };
   }
 }

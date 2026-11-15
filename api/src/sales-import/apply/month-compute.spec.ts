@@ -43,3 +43,113 @@ describe('computeMonthRows — matched / unmatched quantity rounded per outlet /
     expect(comp.split.matchedPico).toBe(1_000_000_000n); // raw kept for reference
   });
 });
+
+describe('computeMonthRows — PRODUCT_COUNT (LINES = distinct products with net amount > 0)', () => {
+  const prod = (id: number, code: string, brand: string, sku: string, amountPaise: bigint): AggRow => {
+    const dims = { brand, sku };
+    return { id: BigInt(id), month: '2026-10', outletCode: code, dims, dimKey: JSON.stringify(dims), amountPaise, qtyPico: 1_000_000_000_000n, lines: 1 };
+  };
+  const pages = (...ps: AggRow[][]) => async (onPage: (r: AggRow[]) => void | Promise<void>) => {
+    for (const p of ps) await onPage(p);
+  };
+  const L = { kpiCode: 'L', measure: 'PRODUCT_COUNT' as const, filter: {}, outletTypes: [], programs: [] };
+
+  it('the same outlet × product split across pages / rows nets first, then counts once; a full return cancels', async () => {
+    const comp = await computeMonthRows(
+      pages(
+        [prod(1, 'O1', 'ADHO', '50', 500n), prod(2, 'O1', 'ADHO', '100', 300n)],
+        [prod(3, 'O1', 'ADHO', '50', 200n), prod(4, 'O1', 'ADHO', '100', -300n), prod(5, 'O2', 'ALMD', '50', 0n)],
+      ),
+      [L],
+      roster,
+    );
+    expect(comp.rows.map((r) => [r.outletCode, r.values])).toEqual([['O1', { L: 1 }], ['O2', { L: 0 }]]);
+    expect(comp.stats[0]).toMatchObject({ total: 1, totalRaw: 1n, outletsNonZero: 1, outletsNegative: 0 });
+  });
+
+  it('file codes are mapped onto the CURRENT roster outlet before counting (stored "77.0" ← file "77"), product counted once', async () => {
+    const r = new Map<string, RosterOutlet>([['77.0', { id: 'i77', name: 'Seventy-seven', outletType: null, program: null }]]);
+    const comp = await computeMonthRows(
+      pages([prod(1, '77', 'ADHO', '50', 500n)], [prod(2, '77', 'ADHO', '50', 100n), prod(3, '77', 'ALMD', '50', 100n)]),
+      [L],
+      r,
+    );
+    expect(comp.rows).toEqual([{ outletCode: '77.0', outletName: 'Seventy-seven', values: { L: 2 }, zeroFilled: false }]);
+  });
+
+  it('filter, scope, stats: total = Σ per-outlet counts; out-of-scope outlets omitted; in-scope with nothing → 0', async () => {
+    const r = new Map<string, RosterOutlet>([
+      ['W1', { id: 'w1', name: 'W1', outletType: 'WHOLESALER', program: null }],
+      ['W2', { id: 'w2', name: 'W2', outletType: 'WHOLESALER', program: null }],
+      ['W3', { id: 'w3', name: 'W3', outletType: 'WHOLESALER', program: null }],
+      ['R1', { id: 'r1', name: 'R1', outletType: 'RETAIL', program: null }],
+    ]);
+    const LW = { ...L, filter: { noneOf: [{ brand: 'ALMD' }] }, outletTypes: ['WHOLESALER'] };
+    const comp = await computeMonthRows(
+      pages([
+        prod(1, 'W1', 'ADHO', '50', 100n), prod(2, 'W1', 'ADHO', '100', 100n), prod(3, 'W1', 'ALMD', '50', 100n),
+        prod(4, 'W2', 'ADHO', '50', 100n), prod(5, 'W2', 'ADHO', '50', -150n),
+        prod(6, 'R1', 'ADHO', '50', 100n),
+        prod(7, 'W3', 'ALMD', '50', 100n),
+      ]),
+      [LW],
+      r,
+    );
+    expect(Object.fromEntries(comp.rows.map((x) => [x.outletCode, x.values]))).toEqual({ W1: { L: 2 }, W2: { L: 0 }, W3: { L: 0 } });
+    expect(comp.stats[0]).toMatchObject({ total: 2, totalRaw: 2n, outletsNonZero: 1, outletsNegative: 0 });
+  });
+
+  it('mixed AMOUNT + QUANTITY + PRODUCT_COUNT: AMOUNT / QUANTITY rows and stats identical to without PRODUCT_COUNT', async () => {
+    const rows = [prod(1, 'O1', 'ADHO', '50', 12345n), prod(2, 'O1', 'ADHO', '50', -12345n), prod(3, 'O2', 'ALMD', '50', 999n), prod(4, 'O2', 'ALMD', '100', -5n)];
+    const base = await computeMonthRows(pages(rows), defs, roster);
+    const mixed = await computeMonthRows(pages(rows), [...defs, L], roster);
+    expect(mixed.rows.map((x) => ({ Q: x.values.Q, A: x.values.A }))).toEqual(base.rows.map((x) => x.values));
+    expect(mixed.stats.slice(0, 2)).toEqual(base.stats);
+    expect(mixed.split).toEqual(base.split);
+    expect(mixed.rows.map((x) => x.values.L)).toEqual([0, 1]);
+    expect(mixed.stats[2]).toMatchObject({ total: 1, outletsNegative: 0 });
+  });
+});
+
+describe('computeMonthRows — FOCUS-FROM-TARGETS per-outlet definitions', () => {
+  const line = (id: number, code: string, brand: string, amountPaise: bigint): AggRow => {
+    const dims = { brand };
+    return { id: BigInt(id), month: '2026-11', outletCode: code, dims, dimKey: JSON.stringify(dims), amountPaise, qtyPico: 0n, lines: 1 };
+  };
+  const filters: Record<string, { anyOf: Array<Record<string, string>> } | undefined> = {
+    O1: { anyOf: [{ brand: 'CNO' }] },
+    O2: { anyOf: [{ brand: 'ADHO' }] },
+  };
+  const F = {
+    kpiCode: 'F', measure: 'AMOUNT' as const, filter: {}, outletTypes: [], programs: [],
+    productSource: 'TARGET_NAMES' as const, outletFilter: (o: string) => filters[o],
+  };
+  const roster3 = new Map<string, RosterOutlet>([...roster, ['O3', { id: 'i3', name: 'Three', outletType: null, program: null }]]);
+  const rows = [line(1, 'O1', 'CNO', 100n), line(2, 'O1', 'ADHO', 200n), line(3, 'O2', 'CNO', 100n), line(4, 'O2', 'ADHO', 200n), line(5, 'O3', 'CNO', 400n)];
+
+  it('per-outlet values; an omitted key is absent and not counted in stats; FILTER values unchanged', async () => {
+    const base = await computeMonthRows(pager(rows), defs, roster3);
+    const comp = await computeMonthRows(pager(rows), [...defs, F], roster3);
+    expect(comp.rows.map((r) => [r.outletCode, r.values])).toEqual([
+      ['O1', { Q: 0, A: 3, F: 1 }],
+      ['O2', { Q: 0, A: 3, F: 2 }],
+      ['O3', { Q: 0, A: 4 }],
+    ]);
+    expect(comp.stats[2]).toMatchObject({ kpiCode: 'F', total: 3, totalRaw: 300n, outletsNonZero: 2 });
+    expect(comp.stats.slice(0, 2)).toEqual(base.stats);
+    expect(comp.rows.map((r) => ({ Q: r.values.Q, A: r.values.A }))).toEqual(base.rows.map((r) => r.values));
+    expect(comp.split).toEqual(base.split);
+    expect([...comp.matchedOutletCodes].sort()).toEqual(['O1', 'O2', 'O3']);
+  });
+
+  it('an outlet whose ONLY owned KPI is omitted still gets a row (so a stale key is rewritten away)', async () => {
+    const comp = await computeMonthRows(pager(rows), [F], roster3);
+    expect(comp.rows.find((r) => r.outletCode === 'O3')).toMatchObject({ values: {}, zeroFilled: false });
+    expect(comp.stats[0]).toMatchObject({ total: 3, outletsNonZero: 2 });
+  });
+
+  it('matchedOutletCodes excludes unmatched customers and outlets without lines', async () => {
+    const comp = await computeMonthRows(pager([line(1, 'O1', 'CNO', 1n), line(2, 'ZZ', 'CNO', 1n)]), defs, roster3);
+    expect([...comp.matchedOutletCodes]).toEqual(['O1']);
+  });
+});

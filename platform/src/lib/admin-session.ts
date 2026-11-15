@@ -32,8 +32,10 @@ export function adminRoleLabel(role: AdminRole): string {
 
 export interface AdminSession {
   role:              AdminRole;
-  /** The tenant this admin belongs to. GIFSY_ADMIN has clientId = 'gifsy'. */
-  clientId:          string;
+  // NOTE: deliberately NO `clientId`. The client cannot know the effective tenant reliably (it
+  // used to be hard-coded 'deoleo' for EVERY tenant admin and 'gifsy' for an operator even while
+  // assumed into a tenant — a prod bug wrote Bajaj's TDS policy onto 'gifsy'). Pages that need the
+  // tenant use the clientId returned by their own API GET (or let the API pin it from the JWT).
   name:              string;
   /** The signed-in user's own id (from the stored JWT user). Empty before hydration
    *  or when no real user is present. Drives self-deactivate button-hiding only —
@@ -63,21 +65,18 @@ export function canManageSchemes(role: AdminRole | string | null): boolean {
 const DEMO_SESSIONS: Record<AdminRole, AdminSession> = {
   GIFSY_ADMIN: {
     role:             'GIFSY_ADMIN',
-    clientId:         'gifsy',
     name:             'Gifsy Platform Admin',
     userId:           '',
     canManageSchemes: true,
   },
   CLIENT_ADMIN: {
     role:             'CLIENT_ADMIN',
-    clientId:         'deoleo',
     name:             'Rahul Agarwal',
     userId:           '',
     canManageSchemes: false,
   },
   MIS_USER: {
     role:             'MIS_USER',
-    clientId:         'deoleo',
     name:             'MIS User',
     userId:           '',
     canManageSchemes: false,
@@ -86,7 +85,6 @@ const DEMO_SESSIONS: Record<AdminRole, AdminSession> = {
   // JWT user (this is only the pre-hydration / not-logged-in placeholder, never a live persona).
   GIFSY_STAFF: {
     role:             'GIFSY_STAFF',
-    clientId:         'gifsy',
     name:             'Gifsy Staff',
     userId:           '',
     canManageSchemes: true,
@@ -100,7 +98,6 @@ const ADMIN_SESSION_KEY = 'admin_role_demo';
 // mismatch); the real user is filled in on mount by useAdminSession's effect.
 const LOADING_SESSION: AdminSession = {
   role:             'CLIENT_ADMIN',
-  clientId:         'deoleo',
   name:             '',
   userId:           '',
   canManageSchemes: false,
@@ -119,10 +116,7 @@ export function getAdminSession(): AdminSession {
     const role = user.role as AdminRole;
     return {
       role,
-      // clientId is not carried on the JWT user; GIFSY operates platform-wide,
-      // every other admin is tenant-scoped (the real brand resolves via the
-      // client-config/brand context, not from here). Display uses name + role.
-      clientId: role === 'GIFSY_ADMIN' ? 'gifsy' : DEMO_SESSIONS[role].clientId,
+      // No clientId here (see AdminSession) — the tenant comes from the API / brand context.
       name: user.name,
       // The stored JWT user carries a real `id` (StoredUser.id from auth-client);
       // fall back to `sub` then '' so the field is never a fabricated value.

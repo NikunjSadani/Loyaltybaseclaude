@@ -42,7 +42,6 @@ type Role = 'GIFSY_ADMIN' | 'CLIENT_ADMIN'
 function asRole(role: Role) {
   vi.mocked(useAdminSession).mockReturnValue({
     role,
-    clientId: role === 'GIFSY_ADMIN' ? 'gifsy' : 'deoleo',
     name: 'Test Admin',
     userId: '',
     canManageSchemes: role === 'GIFSY_ADMIN',

@@ -2,7 +2,9 @@
  * Sales Import — display helpers (plain-English warning text, status chips, number formatting). Pure; no Date
  * reads at module scope (hydration lesson #58: pages call these only after data has loaded).
  */
-import { SALES_KPI_QUANTITY_DECIMALS, type MonthPreview, type SalesImportStatus, type SalesMonthWarning } from './types';
+import {
+  SALES_KPI_QUANTITY_DECIMALS, type MonthPreview, type SalesImportStatus, type SalesKpiMeasure, type SalesMonthWarning,
+} from './types';
 
 export const ACTIVE_STATUSES: readonly SalesImportStatus[] = ['QUEUED', 'PROCESSING'];
 
@@ -105,8 +107,42 @@ export function formatBytes(b: number): string {
   return `${(b / MB).toFixed(1)} MB`;
 }
 
-export function formatKpiValue(v: number, measure: 'AMOUNT' | 'QUANTITY'): string {
-  return measure === 'AMOUNT' ? formatRupees(v) : `${formatCases(v)} cases`;
+/** A KPI value in its measure's unit: ₹ / "n cases" / a plain whole number of products (PRODUCT_COUNT). */
+export function formatKpiValue(v: number, measure: SalesKpiMeasure): string {
+  switch (measure) {
+    case 'AMOUNT':
+      return formatRupees(v);
+    case 'QUANTITY':
+      return `${formatCases(v)} cases`;
+    case 'PRODUCT_COUNT':
+      return formatProducts(v);
+    default: {
+      const never: never = measure;
+      return String(never);
+    }
+  }
+}
+
+/** A product count (PRODUCT_COUNT): a whole number, no unit, no decimals; typographic minus like formatCases. */
+export function formatProducts(v: number): string {
+  const text = Math.abs(Math.round(v)).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+  return v < 0 && text !== '0' ? `−${text}` : text;
+}
+
+/** Short unit name of a measure (KPI list column, editor copy). */
+export function measureUnitLabel(measure: SalesKpiMeasure): string {
+  switch (measure) {
+    case 'AMOUNT':
+      return '₹';
+    case 'QUANTITY':
+      return 'Cases';
+    case 'PRODUCT_COUNT':
+      return 'Products (lines)';
+    default: {
+      const never: never = measure;
+      return String(never);
+    }
+  }
 }
 
 /** Plain-English text for a month warning chip (the "why" an admin needs before applying). */
@@ -166,10 +202,41 @@ export function applyBlockers(
   if (picked.length === 0) out.push('Tick at least one month.');
   for (const m of picked) {
     if (!m.canApply) out.push(`${monthLabel(m.month)} cannot be applied${m.blockedReason ? `: ${sentence(m.blockedReason)}.` : '.'}`);
+    // FOCUS-FROM-TARGETS: the server sets canApply false for any blocker; never let one through if it ever did not.
+    else if ((m.reconciliation?.blockers.length ?? 0) > 0) out.push(focusBlockedText(m));
     if (isPartialMonth(m) && !partialAcks.has(m.month)) out.push(`Confirm the partial-month replacement for ${monthLabel(m.month)}.`);
   }
   if (picked.some((m) => m.warnings.includes('OLDER_THAN_LAST_APPLIED')) && !olderAck) {
     out.push("Confirm that you want to roll a month back to this file's older data.");
+  }
+  return out;
+}
+
+/** "November 2026 cannot be applied: <reason>." for a month with focus-product blockers. */
+function focusBlockedText(m: Pick<MonthPreview, 'month' | 'blockedReason' | 'reconciliation'>): string {
+  const n = m.reconciliation?.blockers.length ?? 0;
+  const why = m.blockedReason
+    ? sentence(m.blockedReason)
+    : `${n} focus product problem${n === 1 ? '' : 's'} in the target file — see Focus brands`;
+  return `${monthLabel(m.month)} cannot be applied: ${why}.`;
+}
+
+/**
+ * Months NOT ticked that are held back by focus-product blockers (they cannot be ticked, so applyBlockers never sees
+ * them): shown next to the Apply button so the reason is visible without opening each month.
+ */
+export function focusBlockedMonths(months: MonthPreview[], selected: Set<string>): string[] {
+  return months
+    .filter((m) => !selected.has(m.month) && (m.reconciliation?.blockers.length ?? 0) > 0)
+    .map(focusBlockedText);
+}
+
+/** month → focusFingerprint for the ticked months whose fingerprint is non-empty (ApplyRequest.expectedFocusFingerprints). */
+export function focusFingerprintsFor(months: MonthPreview[], selected: Set<string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of months) {
+    const fp = m.reconciliation?.focusFingerprint;
+    if (selected.has(m.month) && fp) out[m.month] = fp;
   }
   return out;
 }

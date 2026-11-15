@@ -10,15 +10,20 @@
  * Prisma enums so a malformed value can never reach the money-path store.
  */
 
-import { IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsEnum, IsOptional, IsString, Matches, MinLength, ValidateIf } from 'class-validator';
 import { TdsMethodology, TdsSection } from '@prisma/client';
 
 /** PUT body — the per-tenant TDS treatment for VISIBILITY-stream payouts. */
 export class SetTdsConfigDto {
-  /** The tenant this policy applies to (per-tenant config; Gifsy sets it for a tenant). */
+  /**
+   * The tenant this policy applies to. An ASSUMED operator is always pinned to the assumed tenant
+   * (omit it, or it must equal that tenant — else 403); an un-assumed GIFSY operator MUST pass it.
+   * Enforced in the controller (resolveWriteTarget).
+   */
+  @IsOptional()
   @IsString()
   @MinLength(1)
-  clientId!: string;
+  clientId?: string;
 
   /** SEC_194R (incentive/benefit) | SEC_194C (visibility service). */
   @IsEnum(TdsSection, {
@@ -31,6 +36,25 @@ export class SetTdsConfigDto {
     message: `methodology must be one of ${Object.values(TdsMethodology).join(', ')}`,
   })
   methodology!: TdsMethodology;
+}
+
+/**
+ * PUT /v1/admin/tds/config/imported-payouts body — per-tenant "count imported (vendor) payouts in
+ * the 194R report from this date". `countFrom` is REQUIRED in the body: a 'YYYY-MM-DD' IST calendar
+ * date turns it ON from that day; an explicit `null` turns it OFF. (The real-date check — e.g.
+ * rejecting 2026-02-30 — happens in the controller via parseIsoCalendarDate.)
+ */
+export class SetImportedPayoutsConfigDto {
+  /** Same pinning as SetTdsConfigDto.clientId (controller resolveWriteTarget). */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  clientId?: string;
+
+  @ValidateIf((o: SetImportedPayoutsConfigDto) => o.countFrom !== null)
+  @IsString()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'countFrom must be a date in YYYY-MM-DD format, or null to turn it off' })
+  countFrom!: string | null;
 }
 
 /** GET query — optional tenant scope (GIFSY only; CLIENT_ADMIN is pinned to their own tenant). */

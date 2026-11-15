@@ -39,6 +39,17 @@ import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
 import { insertMonthCombosSql } from '../kpi/month-combos';
+import { hasTargetNamesDef, kpiLabelsOf, loadFocusCatalogue } from '../kpi/focus-data';
+import type { FocusCatalogue } from '../kpi/focus-products';
+import {
+  FOCUS_CHANGED_MESSAGE,
+  focusBlockedReason,
+  focusFingerprintMatches,
+  lazyCatalogue,
+  reconcileMonth,
+  runMonthFocus,
+  type MonthFocusRun,
+} from './month-focus';
 
 /**
  * Interactive-transaction timeout of a month write (apply / recalculate): the OutletSalesRecord merge plus the month
@@ -112,6 +123,24 @@ export class SalesApplyService {
       throw new BadRequestException('This file is older than the one last applied to a selected month. Acknowledge it to continue.');
     }
 
+    // FOCUS-FROM-TARGETS (design §5): every month whose focus fingerprint is non-empty must come back with the one the
+    // admin reviewed (409 before ANY write; re-checked per month under the month lock). Tenants without a TARGET_NAMES
+    // definition skip this entirely (fingerprint '' -> not required).
+    // ONE catalogue for the whole request (stored product lists as they are NOW ∪ this import's products), reused by
+    // every month incl. the under-lock re-check — see lazyCatalogue for why it must not be re-read per month.
+    const catalogue = lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId, { importId: imp.id }));
+    if (hasTargetNamesDef(defs)) {
+      const roster = await loadRosterMeta(this.prisma, clientId);
+      const labelOf = await kpiLabelsOf(this.prisma, clientId, defs.map((d) => d.kpiCode));
+      for (const month of req.months) {
+        if (!summaries.has(month)) continue;
+        const run = await runMonthFocus(this.prisma, { clientId, month, defs, roster, labelOf, catalogue });
+        if (!focusFingerprintMatches(run.resolution.fingerprint, req.expectedFocusFingerprints[month])) {
+          throw new ConflictException(FOCUS_CHANGED_MESSAGE);
+        }
+      }
+    }
+
     const results: ApplyMonthResult[] = [];
     for (const month of req.months) {
       const summary = summaries.get(month);
@@ -120,7 +149,7 @@ export class SalesApplyService {
         continue;
       }
       try {
-        results.push(await this.applyMonth(user, imp.id, summary, req));
+        results.push(await this.applyMonth(user, imp.id, summary, req, catalogue));
       } catch (e) {
         const msg = e instanceof MonthApplyError ? e.message : 'Apply failed for this month. Nothing was changed for it.';
         if (!(e instanceof MonthApplyError)) this.log.error(`apply ${imp.id} ${month} failed: ${(e as Error)?.message}`);
@@ -146,12 +175,17 @@ export class SalesApplyService {
     if (!Array.isArray(ack) || ack.some((m) => typeof m !== 'string')) {
       throw new BadRequestException('acknowledgePartialMonths must be a list of months.');
     }
+    const fps: unknown = body.expectedFocusFingerprints ?? {};
+    if (!fps || typeof fps !== 'object' || Array.isArray(fps) || Object.values(fps).some((v) => typeof v !== 'string')) {
+      throw new BadRequestException('expectedFocusFingerprints must map months to the fingerprints from the preview.');
+    }
     return {
       months: [...months].sort(),
       expectedDefinitionsHash: body.expectedDefinitionsHash,
       processingVersion: body.processingVersion,
       acknowledgePartialMonths: ack,
       acknowledgeOlderThanLastApplied: body.acknowledgeOlderThanLastApplied === true,
+      expectedFocusFingerprints: fps as Record<string, string>,
     };
   }
 
@@ -162,7 +196,10 @@ export class SalesApplyService {
     req: Pick<ApplyRequest, 'expectedDefinitionsHash' | 'processingVersion'> & {
       acknowledgePartialMonths: string[];
       acknowledgeOlderThanLastApplied: boolean;
+      expectedFocusFingerprints: Record<string, string>;
     },
+    /** The request-scoped focus catalogue (see lazyCatalogue). */
+    catalogue: () => Promise<FocusCatalogue>,
   ): Promise<ApplyMonthResult> {
     const clientId = user.clientId;
     const month = summary.month;
@@ -198,7 +235,17 @@ export class SalesApplyService {
           );
         }
         const roster = await loadRosterMeta(tx, clientId);
-        const comp = await computeMonthRows(importPager(tx, importId, month), defs, roster);
+        // FOCUS-FROM-TARGETS: re-resolve the focus products under the lock (targets / acceptances / product list may have
+        // changed since the preview) - refuse on any blocker or a changed fingerprint; evaluate exactly like the preview.
+        const focus = await this.focusUnderLock(tx, clientId, month, defs, roster, catalogue);
+        if (focus) {
+          const why = focusBlockedReason(month, focus.resolution.blockers);
+          if (why) throw new MonthApplyError(why);
+          if (!focusFingerprintMatches(focus.resolution.fingerprint, req.expectedFocusFingerprints[month])) {
+            throw new MonthApplyError(FOCUS_CHANGED_MESSAGE);
+          }
+        }
+        const comp = await computeMonthRows(importPager(tx, importId, month), focus?.evalDefs ?? defs, roster);
         const snap = await tx.salesImport.findFirst({ where: { id: importId, clientId }, select: { mappingSnapshot: true } });
         return this.writeMonth(tx, user, {
           month,
@@ -211,6 +258,7 @@ export class SalesApplyService {
           state,
           roster,
           comp,
+          focusFingerprint: focus?.resolution.fingerprint ?? '',
           mapping: {
             fingerprint: imp.mappingFingerprint,
             dimensionKeys: ((snap?.mappingSnapshot as unknown as SalesColumnMapping | null)?.dimensions ?? []).map((d) => d.key),
@@ -241,6 +289,8 @@ export class SalesApplyService {
       state: ReturnType<typeof resolveMonthState>;
       roster: Map<string, RosterOutlet>;
       comp: MonthComputation;
+      /** FOCUS-FROM-TARGETS: the focus fingerprint written with (recorded on the audit row only when non-empty). */
+      focusFingerprint?: string;
       /** IMPORT only: the mapping the lines were parsed with (stored on the history set header). */
       mapping?: { fingerprint: string | null; dimensionKeys: string[] };
     },
@@ -248,6 +298,10 @@ export class SalesApplyService {
     const clientId = user.clientId;
     const { month, comp, defs } = w;
     const owned = defs.map((d) => d.kpiCode);
+    // Audit follow-up: an outlet with NO owned value (e.g. only TARGET_NAMES KPIs and no focus name this month) is not
+    // written: an INSERT would create an empty record. It is left out of `written`, so step 3 still strips the owned keys
+    // from an EXISTING record of it (full-rewrite semantics). FILTER KPIs always give a value → unchanged for them.
+    const rowsToWrite = comp.rows.filter((r) => Object.keys(r.values).length > 0);
 
     // Before-totals (inside the lock, so they are what this write replaces).
     const before = sumOwnedValues(
@@ -262,15 +316,15 @@ export class SalesApplyService {
         uploadedById: user.sub,
         month,
         status: SALES_IMPORT_BATCH_STATUS,
-        totalRows: comp.rows.length,
-        acceptedCount: comp.rows.length,
+        totalRows: rowsToWrite.length,
+        acceptedCount: rowsToWrite.length,
         rejectedCount: 0,
       },
     });
 
     // 2. Bulk merge (owned keys only). Existing rows keep their batchId and outletName.
-    for (let i = 0; i < comp.rows.length; i += APPLY_CHUNK) {
-      const chunk = comp.rows.slice(i, i + APPLY_CHUNK);
+    for (let i = 0; i < rowsToWrite.length; i += APPLY_CHUNK) {
+      const chunk = rowsToWrite.slice(i, i + APPLY_CHUNK);
       const ids = chunk.map(() => randomUUID());
       const codes = chunk.map((r) => r.outletCode);
       const names = chunk.map((r) => r.outletName);
@@ -286,7 +340,7 @@ export class SalesApplyService {
 
     // 3. Full rewrite: every OTHER row of the month (off-roster, or now out of every owned KPI's scope) loses its
     //    owned keys. Non-owned keys are untouched.
-    const written = comp.rows.map((r) => r.outletCode);
+    const written = rowsToWrite.map((r) => r.outletCode);
     await tx.$executeRaw(Prisma.sql`
       UPDATE "outlet_sales_records"
          SET "kpiValues" = "kpiValues" - ${owned}::text[], "updatedAt" = ${SQL_NOW_UTC}
@@ -348,7 +402,7 @@ export class SalesApplyService {
     // 5. Apply record + month pointer + audit.
     const totals: Record<string, { before: number; after: number }> = {};
     defs.forEach((d, i) => (totals[d.kpiCode] = { before: before[d.kpiCode] ?? 0, after: comp.stats[i].total }));
-    const outletsZeroFilled = comp.rows.filter((r) => r.zeroFilled).length;
+    const outletsZeroFilled = rowsToWrite.filter((r) => r.zeroFilled).length;
     const applyRow = await tx.salesImportApply.create({
       data: {
         importId: w.sourceImportId,
@@ -358,7 +412,7 @@ export class SalesApplyService {
         batchId: batch.id,
         definitionsHash: w.hash,
         definitionsSnapshot: w.defRows.map(toDto) as unknown as Prisma.InputJsonValue,
-        outletsWritten: comp.rows.length,
+        outletsWritten: rowsToWrite.length,
         outletsZeroFilled,
         totals: totals as unknown as Prisma.InputJsonValue,
         source: w.source,
@@ -381,15 +435,16 @@ export class SalesApplyService {
           importId: w.sourceImportId,
           processingVersion: w.processingVersion,
           definitionsHash: w.hash,
-          outletsWritten: comp.rows.length,
+          outletsWritten: rowsToWrite.length,
           outletsZeroFilled,
           totals,
+          ...(w.focusFingerprint ? { focusFingerprint: w.focusFingerprint } : {}),
         } as Prisma.InputJsonValue,
         metadata: { clientId, applyId: applyRow.id, batchId: batch.id, source: w.source },
       },
     });
 
-    return { month, ok: true, applyId: applyRow.id, outletsWritten: comp.rows.length, outletsZeroFilled };
+    return { month, ok: true, applyId: applyRow.id, outletsWritten: rowsToWrite.length, outletsZeroFilled };
   }
 
   // ─── Recalculate a month from its stored history (owner decision 2026-11-10) ─────────────────────────────────
@@ -406,8 +461,14 @@ export class SalesApplyService {
     const roster = await loadRosterMeta(this.prisma, clientId);
     const override = await this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
     const state = resolveMonthState(month, currentMonthKey(), override);
-    const comp = await computeMonthRows(historyPager(this.prisma, clientId, month), defs, roster);
     const owned = defs.map((d) => d.kpiCode);
+    const labels = await kpiLabelsOf(this.prisma, clientId, owned);
+    // FOCUS-FROM-TARGETS: the same resolution + evaluation recalculate re-runs under the month lock.
+    const focus = await runMonthFocus(this.prisma, {
+      clientId, month, defs, roster, labelOf: labels,
+      catalogue: lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId)),
+    });
+    const comp = await computeMonthRows(historyPager(this.prisma, clientId, month), focus.evalDefs, roster);
     const existing = await this.prisma.outletSalesRecord.findMany({
       where: { clientId, month },
       select: { outletCode: true, kpiValues: true, batch: { select: { status: true, createdAt: true } } },
@@ -421,12 +482,13 @@ export class SalesApplyService {
     }
     const set = historySetCheck(meta, defs, await this.currentFingerprint(clientId));
     if (set.mappingChanged) warnings.push('MAPPING_CHANGED');
-    const blockedReason = blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state }) ?? set.blocked;
-    const labels = new Map(
-      (await this.prisma.kpiDef.findMany({ where: { clientId, code: { in: owned } }, select: { code: true, label: true } })).map((k) => [k.code, k.label]),
-    );
+    const blockedReason =
+      blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state }) ??
+      set.blocked ??
+      focusBlockedReason(month, focus.resolution.blockers);
     return {
       month,
+      reconciliation: reconcileMonth(focus, comp, owned, last?.at ?? null),
       monthState: state.state,
       canApply: blockedReason === null,
       ...(blockedReason ? { blockedReason } : {}),
@@ -487,7 +549,15 @@ export class SalesApplyService {
           historySetCheck(meta, defs, null).blocked;
         if (blocked) throw new ConflictException(blocked);
         const roster = await loadRosterMeta(tx, clientId);
-        const comp = await computeMonthRows(historyPager(tx, clientId, month), defs, roster);
+        const focus = await this.focusUnderLock(tx, clientId, month, defs, roster, () => loadFocusCatalogue(tx, clientId));
+        if (focus) {
+          const why = focusBlockedReason(month, focus.resolution.blockers);
+          if (why) throw new ConflictException(why);
+          if (!focusFingerprintMatches(focus.resolution.fingerprint, body.expectedFocusFingerprint)) {
+            throw new ConflictException(FOCUS_CHANGED_MESSAGE);
+          }
+        }
+        const comp = await computeMonthRows(historyPager(tx, clientId, month), focus?.evalDefs ?? defs, roster);
         return this.writeMonth(tx, user, {
           month,
           source: 'HISTORY',
@@ -499,10 +569,37 @@ export class SalesApplyService {
           state,
           roster,
           comp,
+          focusFingerprint: focus?.resolution.fingerprint ?? '',
         });
       },
       { timeout: APPLY_TX_TIMEOUT_MS, maxWait: 10_000 },
     );
+  }
+
+  /**
+   * FOCUS-FROM-TARGETS inside the month lock: null when the tenant has no enabled TARGET_NAMES definition (the write path
+   * is then exactly the original one). `catalogue` = apply: the request-scoped catalogue (stored lists at request start ∪
+   * the import's products, like the import preview); recalculate: the stored lists (like the recalculate preview).
+   * Targets and acceptances are always re-read here, under the lock.
+   */
+  private async focusUnderLock(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    month: string,
+    defs: KpiDefLite[],
+    roster: Map<string, RosterOutlet>,
+    catalogue: () => Promise<FocusCatalogue>,
+  ): Promise<MonthFocusRun | null> {
+    if (!hasTargetNamesDef(defs)) return null;
+    const labelOf = await kpiLabelsOf(tx, clientId, defs.map((d) => d.kpiCode));
+    return runMonthFocus(tx, {
+      clientId,
+      month,
+      defs,
+      roster,
+      labelOf,
+      catalogue,
+    });
   }
 
   private async currentFingerprint(clientId: string): Promise<string | null> {
@@ -562,7 +659,7 @@ export function outletsAffected(
     const a = before.get(code);
     const b = after.get(code) ?? {};
     if (a === undefined) {
-      n++; // a new row is created
+      if (Object.keys(b).length > 0) n++; // a new row is created (an outlet with no owned value gets none — writeMonth)
       continue;
     }
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);

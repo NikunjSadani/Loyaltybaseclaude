@@ -187,7 +187,7 @@ jobs:
             --service-account=gifsy-api-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
             --allow-unauthenticated \
             --port=4000 \
-            --memory=512Mi \
+            --memory=1Gi \
             --cpu=1 \
             --min-instances=0 \
             --max-instances=3 \

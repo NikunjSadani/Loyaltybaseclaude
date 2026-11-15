@@ -16,6 +16,8 @@ import { DEFAULT_RESOLVED_TDS_STATUTORY } from './tds.helpers';
 const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
 
 const mockPrisma = {
+  // tdsImportedPayouts setting read (fail-closed): no row → OFF.
+  programSetting: { findUnique: jest.fn(), findMany: jest.fn() }, // findMany: the loops below reset every model's findMany
   creditPayoutEntry: { findMany: jest.fn() },
   creditField: { findMany: jest.fn() },
   outlet: { findMany: jest.fn() },
@@ -311,18 +313,20 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(small['TDS Amount (₹)']).toBe(0);
     const pan = rows.find((r) => r.PAN === 'ABCDE1234F')!;
     expect(pan['Deductee Name']).toBe('Pan Owner');
-    expect(pan['Outlet Code']).toBe('');
+    // 2026-11-13: PAN rows carry their contributing outlet too (was blank before).
+    expect(pan['Outlet Code']).toBe('P1');
     expect(pan['TDS Rate %']).toBe(10);
   });
 
-  it('export194R: PAN-only tenant → legacy column set + the deposit-month column (no Outlet Code column)', async () => {
+  it('export194R: PAN-only tenant → Outlet Code / Name / Type columns are ALWAYS present (2026-11-13)', async () => {
     wire([{ id: 'cp1', pan: 'ABCDE1234F', owner: 'A', outlets: ['O1'] }]);
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('O1', 'f1', 2_100_000n)]);
     const { buffer } = await service.export194R(CLIENT, FY);
     expect(headers(buffer)).toEqual([
-      'S.No', 'Deductee Name', 'PAN', 'Section', 'Amount Paid (₹)', 'TDS Rate %',
+      'S.No', 'Deductee Name', 'PAN', 'Outlet Code', 'Outlet Name', 'Outlet Type', 'Section', 'Amount Paid (₹)', 'TDS Rate %',
       'TDS Amount (₹)', 'Already Deposited (₹)', 'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'FY',
     ]);
+    expect(parseSheet(buffer)[0]['Outlet Code']).toBe('O1');
   });
 
   // ─── 194C ──────────────────────────────────────────────────────────────────

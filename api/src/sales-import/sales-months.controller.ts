@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -8,6 +8,8 @@ import { SalesMonthsService } from './months/sales-months.service';
 import { SalesApplyService } from './apply/sales-apply.service';
 import { assertSalesImportAccess } from './sales-import-access';
 import type {
+  FocusAcceptanceList,
+  FocusAcceptanceRequest,
   SalesMonthRebuildProductListResult,
   SalesMonthRecalcPreview,
   SalesMonthRecalcRequest,
@@ -28,6 +30,9 @@ import type {
  *   POST admin/sales-months/:month/recalculate           targets:upload → SalesMonthRecalcResult (month OPEN, month lock)
  *   POST admin/sales-months/:month/rebuild-product-list  targets:upload → SalesMonthRow (OPEN or CLOSED; month lock;
  *                                                        rebuilds the stored product list only — no figures change; §10c)
+ *   POST   admin/sales-months/:month/focus-acceptances   targets:upload → FocusAcceptanceList (FOCUS-FROM-TARGETS: accept an
+ *                                                        UNMATCHED focus token as "not sold yet"; month OPEN; month lock)
+ *   DELETE admin/sales-months/:month/focus-acceptances?kpiCode=&key=   targets:upload → FocusAcceptanceList (undo)
  * OWNER: Lane K.
  */
 @Controller('admin/sales-months')
@@ -76,6 +81,31 @@ export class SalesMonthsController {
   async rebuildProductList(@CurrentUser() user: JwtPayload, @Param('month') month: string): Promise<SalesMonthRebuildProductListResult> {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
     return this.months.rebuildProductList(user, month);
+  }
+
+  @Post(':month/focus-acceptances')
+  @HttpCode(200)
+  @RequirePermission('targets:upload')
+  async acceptFocus(
+    @CurrentUser() user: JwtPayload,
+    @Param('month') month: string,
+    @Body() body: FocusAcceptanceRequest,
+  ): Promise<FocusAcceptanceList> {
+    await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
+    return this.months.accept(user, month, body);
+  }
+
+  @Delete(':month/focus-acceptances')
+  @HttpCode(200)
+  @RequirePermission('targets:upload')
+  async unacceptFocus(
+    @CurrentUser() user: JwtPayload,
+    @Param('month') month: string,
+    @Query('kpiCode') kpiCode?: string,
+    @Query('key') key?: string,
+  ): Promise<FocusAcceptanceList> {
+    await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
+    return this.months.unaccept(user, month, kpiCode, key);
   }
 
   @Post(':month/close')

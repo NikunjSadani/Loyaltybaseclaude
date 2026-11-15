@@ -134,10 +134,11 @@ export class FinanceDashboardService {
     // cross-tenant figure, so we skip the aggregate entirely and emit a zeroed block
     // (keeps the DTO shape → FE renders ₹0.00 instead of crashing on a null section).
     const isPlatform = platformWide(user);
-    const [summary194R, summary194C] = await Promise.all([
-      this.tds.summary194R(clientId, fyLabel),
+    const [report194R, summary194C] = await Promise.all([
+      this.tds.report194R(clientId, fyLabel),
       isPlatform ? this.tds.summary194C(fyLabel) : Promise.resolve(null),
     ]);
+    const summary194R = report194R.summary;
     const sec194C = isPlatform && summary194C
       ? {
           liabilityRupees: FinanceDashboardService.round2(paiseToRupees(summary194C.totalLiabilityPaise)),
@@ -171,6 +172,8 @@ export class FinanceDashboardService {
           liabilityRupees: FinanceDashboardService.round2(paiseToRupees(summary194R.totalLiabilityPaise)),
           depositedRupees: FinanceDashboardService.round2(paiseToRupees(summary194R.totalDepositedPaise)),
           outstandingRupees: FinanceDashboardService.round2(paiseToRupees(summary194R.totalOutstandingPaise)),
+          // Disclosure — only when imported (vendor) payouts are counted in THIS FY.
+          ...(report194R.importedPayoutsNote ? { importedPayoutsNote: report194R.importedPayoutsNote } : {}),
         },
         sec194C,
       },

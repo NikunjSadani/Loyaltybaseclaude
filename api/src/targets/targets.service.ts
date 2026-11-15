@@ -54,6 +54,7 @@ import {
   OutletLike,
 } from './targets.helpers';
 import { SQL_NOW_UTC } from '../sales-import/sql-time';
+import { targetUploadFocusCheck } from '../sales-import/kpi/focus-upload-check';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import {
   AppliesTo,
@@ -915,8 +916,10 @@ export class TargetsService {
       },
     });
 
-    // Build one OutletTarget upsert per (outletCode, month) with non-blank values.
-    const targetOps: Prisma.PrismaPromise<unknown>[] = [];
+    // Build one OutletTarget upsert per (outletCode, month) with non-blank values. Each op is a THUNK built when its
+    // chunk runs, so every row's updatedAt is stamped at its chunk's write time (not when the list was built): Sales
+    // Import's "targets changed since the last apply" reads MAX(updatedAt) of the month's rows (FOCUS-FROM-TARGETS).
+    const targetOps: Array<() => Prisma.PrismaPromise<unknown>> = [];
     for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
       if (isMonthLocked(month, currentMonth)) continue; // past month — not editable
       for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
@@ -930,7 +933,7 @@ export class TargetsService {
         const carry = parseScope ? parseScope.outOfScopeCodes(outletCode) : [];
         if (carry.length > 0) {
           const col = Prisma.sql`"outlet_targets"."targetValues"`;
-          targetOps.push(
+          targetOps.push(() =>
             this.prisma.$executeRaw(Prisma.sql`
               INSERT INTO "outlet_targets"
                 ("id","clientId","outletCode","outletName","month","targetValues","batchId","createdAt","updatedAt")
@@ -945,7 +948,7 @@ export class TargetsService {
           continue;
         }
 
-        targetOps.push(
+        targetOps.push(() =>
           this.prisma.outletTarget.upsert({
             where: {
               clientId_outletCode_month: { clientId: user.clientId, outletCode, month },
@@ -970,7 +973,7 @@ export class TargetsService {
     }
 
     for (let i = 0; i < targetOps.length; i += TargetsService.UPLOAD_CHUNK) {
-      await this.prisma.$transaction(targetOps.slice(i, i + TargetsService.UPLOAD_CHUNK));
+      await this.prisma.$transaction(targetOps.slice(i, i + TargetsService.UPLOAD_CHUNK).map((op) => op()));
     }
 
     // Notify the assigned rep (XSR) + their manager (SO) for every outlet that got a
@@ -984,6 +987,15 @@ export class TargetsService {
       }
     }
     await this.salesNotifications.targetsUploaded(user.clientId, [...notifiedCodes]);
+
+    // FOCUS-FROM-TARGETS §7: early, NON-blocking check of the focus product names this upload wrote (never throws;
+    // `checked: false` for a tenant without a "from the target file" Sales Import KPI). The month preview re-checks.
+    const focusCheck = await targetUploadFocusCheck(
+      this.prisma,
+      user.clientId,
+      parseResult.acceptedTargets as Record<string, Record<string, unknown>>,
+      writableMonths,
+    );
 
     return {
       batchId:       batch.id,
@@ -1004,6 +1016,7 @@ export class TargetsService {
       // counts parse-valid rows for LOCKED past months too, which are not written.
       savedCount:    targetOps.length,
       rows:          parseResult.rows,
+      focusCheck,
     };
   }
 

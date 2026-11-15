@@ -3109,10 +3109,13 @@ model SalesKpiDefinition {
   id          String   @id @default(cuid())
   clientId    String
   kpiCode     String // MUST be an enabled KpiDef.code of this tenant (validated on save)
-  measure     String // 'AMOUNT' | 'QUANTITY'
+  measure     String // 'AMOUNT' | 'QUANTITY' | 'PRODUCT_COUNT' (distinct products with net amount > 0)
   filter      Json // SalesKpiFilter (plan §6.2)
   outletTypes String[] @default([]) // optional scope by Outlet.outletType.code; [] = all
   programs    String[] @default([]) // optional scope by Outlet.programName; [] = all
+  // FOCUS-FROM-TARGETS: 'FILTER' = `filter` for every outlet (original behaviour, every existing row);
+  // 'TARGET_NAMES' = per outlet, the month's target-file names for this KPI (filter must be {}).
+  productSource String @default("FILTER")
   enabled     Boolean  @default(true)
   order       Int      @default(0)
   updatedById String
@@ -3302,6 +3305,21 @@ model SalesMonthStatus {
 
   @@unique([clientId, month])
   @@map("sales_month_statuses")
+}
+
+/// FOCUS-FROM-TARGETS (design §5/§8): an operator accepted an UNMATCHED focus product token as "not sold yet" for one
+/// month + KPI (it then counts as 0 and no longer blocks applying). `key` = focusKey(token). Removable (row deleted).
+model SalesFocusAcceptance {
+  id           String   @id @default(cuid())
+  clientId     String
+  month        String // YYYY-MM
+  kpiCode      String
+  key          String
+  acceptedById String
+  acceptedAt   DateTime @default(now())
+
+  @@unique([clientId, month, kpiCode, key]) // its leading (clientId, month) serves the per-month reads
+  @@map("sales_focus_acceptances")
 }
 
 // ─── MODULE: OFFER TILES — per-tenant "This month's offers" content (display-only) ───
@@ -3614,6 +3632,11 @@ model CreditReversal {
   // (partner already redeemed them). reversed = approvedPaise - shortfallPaise.
   // The client settles `pending` off-platform; the platform does nothing with it.
   shortfallPaise BigInt               @default(0)
+  // PAYOUT reversals approved from 2026-11-13 (interim whole-entry rule): JSON array of the
+  // CreditPayoutEntry ids this reversal consumed (REVERSED, or PAID → receivable). No later
+  // reversal may consume them again. NULL = POINTS, not approved yet, or approved before the
+  // column existed (then every PAID entry of the outlet+field created by approvedAt counts).
+  consumedPayoutEntryIds Json?
   requestedBy    String
   requestedAt    DateTime             @default(now())
   approvedBy     String?

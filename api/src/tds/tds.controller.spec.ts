@@ -24,8 +24,7 @@ const summary194R = {
 };
 
 const svc = {
-  compute194R: jest.fn().mockResolvedValue([]),
-  summary194R: jest.fn().mockResolvedValue(summary194R),
+  report194R: jest.fn().mockResolvedValue({ rows: [], summary: summary194R, importedPayoutsCountedFrom: null, importedPayoutsNote: null }),
   export194R: jest.fn().mockResolvedValue({ buffer: Buffer.from(''), filename: 'tds-194r.xlsx' }),
   compute194C: jest.fn().mockResolvedValue([]),
   summary194C: jest.fn().mockResolvedValue({ fyLabel: '2025-26', totalBasePaise: 0n, totalLiabilityPaise: 0n, totalLiabilityNoThresholdPaise: 0n, totalDepositedPaise: 0n, totalOutstandingPaise: 0n, totalWithheldPaise: 0n, totalRecoveredPaise: 0n, rowCount: 0 }),
@@ -48,23 +47,31 @@ describe('TdsController — 194R tenant scoping', () => {
   describe('get194R', () => {
     it('CLIENT_ADMIN is pinned to their own tenant (ignores ?clientId=)', async () => {
       await controller.get194R(CLIENT, '2025-26', 'other-tenant');
-      expect(svc.compute194R).toHaveBeenCalledWith('deoleo', '2025-26');
-      expect(svc.summary194R).toHaveBeenCalledWith('deoleo', '2025-26');
+      expect(svc.report194R).toHaveBeenCalledWith('deoleo', '2025-26');
     });
 
     it('an ASSUMED GIFSY operator is pinned to the assumed tenant (ignores ?clientId=)', async () => {
       await controller.get194R(ASSUMED, '2025-26', 'other-tenant');
-      expect(svc.compute194R).toHaveBeenCalledWith('deoleo', '2025-26');
+      expect(svc.report194R).toHaveBeenCalledWith('deoleo', '2025-26');
     });
 
     it('an un-assumed GIFSY may cross-scope via ?clientId=', async () => {
       await controller.get194R(GIFSY, '2025-26', 'deoleo');
-      expect(svc.compute194R).toHaveBeenCalledWith('deoleo', '2025-26');
+      expect(svc.report194R).toHaveBeenCalledWith('deoleo', '2025-26');
     });
 
     it('an un-assumed GIFSY with no ?clientId= falls back to its own JWT clientId', async () => {
       await controller.get194R(GIFSY, '2025-26', undefined);
-      expect(svc.compute194R).toHaveBeenCalledWith('gifsy', '2025-26');
+      expect(svc.report194R).toHaveBeenCalledWith('gifsy', '2025-26');
+    });
+
+    it('returns importedPayoutsCountedFrom from the single report194R call (one read per request)', async () => {
+      svc.report194R.mockResolvedValueOnce({
+        rows: [], summary: summary194R, importedPayoutsCountedFrom: '2026-04-01', importedPayoutsNote: 'x',
+      });
+      const res = await controller.get194R(CLIENT, '2026-27', undefined);
+      expect(svc.report194R).toHaveBeenCalledTimes(1);
+      expect(res.importedPayoutsCountedFrom).toBe('2026-04-01');
     });
   });
 

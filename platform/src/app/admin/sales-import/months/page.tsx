@@ -12,9 +12,11 @@
  * "Stored month(s)" source) is not current (productListCurrent false) — OPEN or CLOSED; it changes no figures.
  * `?from=YYYY-MM[&to=YYYY-MM]` (link from the KPI picker) lists that range so every month it names is shown (read after
  * mount, never in render; `to` is clamped at the current IST month).
+ * FOCUS-FROM-TARGETS: `targetsChangedSinceApply` → a "Targets changed — recalculate" badge that opens the Recalculate
+ * panel for that month (a plain badge when the month can't be recalculated here).
  */
 import React, { useCallback, useEffect, useState } from 'react';
-import { Calculator, Lock, LockOpen, RefreshCw, RotateCcw } from 'lucide-react';
+import { AlertTriangle, Calculator, Lock, LockOpen, RefreshCw, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { useAdminSession } from '@/lib/admin-session';
@@ -178,7 +180,24 @@ export default function SalesMonthsPage() {
                 const label = monthLabel(row.month);
                 return (
                   <tr key={row.month} className="border-b border-gray-100" data-testid={`sales-month-${row.month}`}>
-                    <td className="px-4 py-2 font-medium text-gray-900">{label}</td>
+                    <td className="px-4 py-2 font-medium text-gray-900">
+                      {label}
+                      {row.targetsChangedSinceApply && (
+                        canClose && row.hasHistory && row.state === 'OPEN' ? (
+                          <button type="button" onClick={() => setRecalcMonth(row.month)}
+                            data-testid={`targets-changed-${row.month}`}
+                            aria-label={`Targets for ${label} changed after it was applied — recalculate`}
+                            className="mt-1 flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-500">
+                            <AlertTriangle className="w-3 h-3" /> Targets changed — recalculate
+                          </button>
+                        ) : (
+                          <span data-testid={`targets-changed-${row.month}`}
+                            className="mt-1 flex w-fit items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border bg-amber-50 text-amber-800 border-amber-200">
+                            <AlertTriangle className="w-3 h-3" /> Targets changed after the last apply
+                          </span>
+                        )
+                      )}
+                    </td>
                     <td className="px-4 py-2">
                       <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
                         row.state === 'CLOSED' ? 'bg-gray-100 text-gray-700 border-gray-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>

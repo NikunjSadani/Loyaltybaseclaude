@@ -1,0 +1,530 @@
+/**
+ * FOCUS-FROM-TARGETS (platform/docs/plans/FOCUS-FROM-TARGETS-DESIGN.md) — PURE, no DB.
+ *
+ * Reads the per-outlet focus product names a month's target file carries (OutletTarget.targetValues.__names[kpiCode],
+ * e.g. "CNO & ADHO500") against the tenant's known products, decides per outlet which products a TARGET_NAMES KPI
+ * counts, lists every blocker (no silent failures) and builds the month's reconciliation view.
+ *
+ * Signatures were fixed by the lead's contract stub; extra exported helpers are additive.
+ */
+import { createHash } from 'node:crypto';
+import { normalizeDim } from '../ingest/normalize';
+import type {
+  DimMatch,
+  FocusBlocker,
+  FocusNameSummary,
+  FocusTokenResolution,
+  MonthFocusKpi,
+  MonthReconciliation,
+  SalesKpiFilter,
+} from '../sales-import.contract';
+import { outletInScope, stableStringify, type KpiDefLite } from './sales-kpi.helper';
+import type { RosterOutlet } from './sales-import-data';
+import type { MonthComputation } from '../apply/month-compute';
+
+/** Max sample outlet codes on a blocker / gap. */
+export const FOCUS_SAMPLE_LIMIT = 20;
+
+/** normalizeDim(s) with ALL whitespace removed (UPPERCASE, trimmed). The token / acceptance key. */
+export function focusKey(s: unknown): string {
+  return normalizeDim(s).replace(/\s+/g, '');
+}
+
+/** Split a written name on `&` or `,`; trim; drop empties; de-duplicate by focusKey (first spelling kept). */
+export function splitFocusName(raw: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of String(raw ?? '').split(/[&,]/)) {
+    const t = part.trim();
+    if (t === '') continue;
+    const k = focusKey(t);
+    if (k === '' || seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
+}
+
+/** A name's identity regardless of spelling / order: its tokens' keys sorted and joined with '&' ('' = no tokens). */
+export function focusNameKey(raw: string): string {
+  return splitFocusName(raw)
+    .map(focusKey)
+    .sort()
+    .join('&');
+}
+
+/** Every known product combination, indexed by the focusKey of each dims PREFIX (design §3). */
+export interface FocusCatalogue {
+  /** The profile's dimension keys IN PROFILE ORDER (Bajaj: ['brand', 'skuGroup']). */
+  dimensionKeys: string[];
+  /** prefix key → the DISTINCT DimMatches it can mean (1 = MATCHED, >1 = AMBIGUOUS). */
+  byKey: ReadonlyMap<string, DimMatch[]>;
+  /** Number of distinct combos the catalogue was built from (0 = nothing to check against). */
+  size: number;
+}
+
+/** Build the catalogue from normalized dims records (aggregate / history-combo `dims`). */
+export function buildFocusCatalogue(dimensionKeys: string[], combos: Iterable<Record<string, string>>): FocusCatalogue {
+  const keys = [...dimensionKeys];
+  const seenCombos = new Set<string>();
+  const byKeySig = new Map<string, Map<string, DimMatch>>();
+  for (const combo of combos) {
+    const values = keys.map((k) => normalizeDim(combo?.[k]));
+    const comboSig = JSON.stringify(values);
+    if (seenCombos.has(comboSig)) continue;
+    seenCombos.add(comboSig);
+    let key = '';
+    const match: DimMatch = {};
+    for (let i = 0; i < keys.length; i++) {
+      const v = values[i];
+      if (v === '') break; // a blank value ends the prefix
+      key += focusKey(v);
+      match[keys[i]] = v;
+      let set = byKeySig.get(key);
+      if (!set) byKeySig.set(key, (set = new Map()));
+      const m = { ...match };
+      set.set(stableStringify(m), m);
+    }
+  }
+  const byKey = new Map<string, DimMatch[]>();
+  for (const [k, set] of byKeySig) {
+    byKey.set(
+      k,
+      [...set.entries()].sort((a, b) => cmp(a[0], b[0])).map(([, m]) => m),
+    );
+  }
+  // No product columns → no product can be named (every combo would be the empty prefix): an EMPTY catalogue, so the
+  // upload check reports NO_PRODUCT_LIST instead of "checked" with every token unmatched.
+  return { dimensionKeys: keys, byKey, size: keys.length === 0 ? 0 : seenCombos.size };
+}
+
+/** Resolve one token (no acceptance applied). */
+export function resolveFocusToken(token: string, catalogue: FocusCatalogue): FocusTokenResolution {
+  const t = String(token ?? '').trim();
+  const key = focusKey(t);
+  const found = key === '' ? [] : (catalogue.byKey.get(key) ?? []);
+  if (found.length === 1) return { token: t, key, status: 'MATCHED', product: { ...found[0] } };
+  if (found.length === 0) return { token: t, key, status: 'UNMATCHED' };
+  return { token: t, key, status: 'AMBIGUOUS', candidates: found.map((m) => ({ ...m })) };
+}
+
+/** One month's target row for an outlet, keyed by the ROSTER (stored) outlet code. */
+export interface MonthTargetRow {
+  /** kpiCode → numeric target (non-numeric / blank cells absent). */
+  values: Record<string, number>;
+  /** kpiCode → name as written (from targetValues.__names). */
+  names: Record<string, string>;
+}
+
+export interface FocusAcceptanceInfo {
+  byName: string;
+  at: string; // ISO
+}
+
+export interface MonthFocusInput {
+  month: string;
+  /** The ENABLED definitions (TARGET_NAMES ones have productSource === 'TARGET_NAMES'). */
+  defs: readonly KpiDefLite[];
+  /** kpiCode → display label. */
+  labelOf: ReadonlyMap<string, string>;
+  /** Stored outlet code → meta (loadRosterMeta). */
+  roster: ReadonlyMap<string, RosterOutlet>;
+  /** ROSTER outlet code → the month's target row (already mapped through the normalized roster index). */
+  targets: ReadonlyMap<string, MonthTargetRow>;
+  catalogue: FocusCatalogue;
+  /** `${kpiCode}|${key}` → who accepted the UNMATCHED token as "not sold yet" for this month. */
+  acceptances: ReadonlyMap<string, FocusAcceptanceInfo>;
+}
+
+export interface MonthFocusResolution {
+  /** TARGET_NAMES kpiCode → roster outlet code → the filter to use for that outlet. Outlet ABSENT = key omitted. */
+  outletFilters: ReadonlyMap<string, ReadonlyMap<string, SalesKpiFilter>>;
+  /** TARGET_NAMES kpiCode → roster outlet code → the name key the outlet carries (for achieved-by-name). */
+  outletNameKeys: ReadonlyMap<string, ReadonlyMap<string, string>>;
+  blockers: FocusBlocker[];
+  /** Focus summaries with `achieved` zeroed (buildMonthReconciliation fills it from the computed rows). */
+  focus: MonthFocusKpi[];
+  /** design §5; '' when no enabled TARGET_NAMES definition. */
+  fingerprint: string;
+}
+
+/** The acceptance key of an UNMATCHED token for a KPI (SalesFocusAcceptance kpiCode + key). */
+export function focusAcceptanceKey(kpiCode: string, key: string): string {
+  return `${kpiCode}|${key}`;
+}
+
+/** Is the definition per-outlet (products from the target file)? */
+export function isTargetNamesDef(def: Pick<KpiDefLite, 'productSource'>): boolean {
+  return def.productSource === 'TARGET_NAMES';
+}
+
+/** A filter no real line matches (all of a name's tokens accepted as "not sold yet" → value 0, never ALL lines). */
+export function matchNothingFilter(dimensionKeys: readonly string[]): SalesKpiFilter {
+  return { anyOf: [{ [dimensionKeys[0] ?? '__none']: '\u0000NO_PRODUCT' }] };
+}
+
+/** "Focus Brand 1 (FOCUS BRAND)" — or just the code when the label is the code. */
+export function focusKpiDisplay(kpiCode: string, labelOf: ReadonlyMap<string, string>): string {
+  const label = (labelOf.get(kpiCode) ?? '').trim();
+  return label === '' || label === kpiCode ? kpiCode : `${label} (${kpiCode})`;
+}
+
+/** "brand AB + SKU group C" for the screen. */
+export function describeDimMatch(m: DimMatch): string {
+  return Object.keys(m)
+    .map((k) => `${humanDim(k)} ${m[k]}`)
+    .join(' + ');
+}
+
+function humanDim(k: string): string {
+  return k
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .toLowerCase()
+    .replace(/\bsku\b/g, 'SKU');
+}
+
+function cmp(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
+const outletsText = (n: number) => `${n} ${plural(n, 'outlet', 'outlets')}`;
+
+function orList(parts: string[]): string {
+  if (parts.length <= 1) return parts.join('');
+  return `${parts.slice(0, -1).join(', ')}, or ${parts[parts.length - 1]}`;
+}
+
+function sample(codes: Iterable<string>): string[] {
+  return [...codes].sort(cmp).slice(0, FOCUS_SAMPLE_LIMIT);
+}
+
+interface NameGroup {
+  key: string;
+  tokenKeys: string[];
+  spellings: Map<string, number>;
+  outlets: string[];
+  byType: Record<string, number>;
+  filter: SalesKpiFilter;
+}
+
+/** design §3–§5 for one month. Deterministic (sorted output) so the fingerprint is stable. */
+export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution {
+  const tnDefs = input.defs.filter(isTargetNamesDef);
+  if (tnDefs.length === 0) {
+    return { outletFilters: new Map(), outletNameKeys: new Map(), blockers: [], focus: [], fingerprint: '' };
+  }
+  const { catalogue } = input;
+  const resolutionCache = new Map<string, FocusTokenResolution>();
+  const resolveKey = (token: string): FocusTokenResolution => {
+    const k = focusKey(token);
+    let r = resolutionCache.get(k);
+    if (!r) resolutionCache.set(k, (r = resolveFocusToken(token, catalogue)));
+    return r;
+  };
+  const noMatch = matchNothingFilter(catalogue.dimensionKeys);
+  const rosterSorted = [...input.roster.entries()].sort((a, b) => cmp(a[0], b[0]));
+
+  const outletFilters = new Map<string, Map<string, SalesKpiFilter>>();
+  const outletNameKeys = new Map<string, Map<string, string>>();
+  const blockers: FocusBlocker[] = [];
+  const focus: MonthFocusKpi[] = [];
+  const fpPerOutlet: Array<[string, string, string]> = [];
+  const fpMissing: Array<[string, string]> = [];
+  const fpBlankNames: Array<[string, string, string]> = [];
+  const fpAccepted = new Set<string>();
+  const fpResolutions = new Map<string, unknown>(); // name key → its token resolutions
+
+  for (const def of [...tnDefs].sort((a, b) => cmp(a.kpiCode, b.kpiCode))) {
+    const kpiCode = def.kpiCode;
+    const filters = new Map<string, SalesKpiFilter>();
+    const nameKeys = new Map<string, string>();
+    const groups = new Map<string, NameGroup>();
+    const unmatched = new Map<string, { token: string; outlets: Set<string> }>();
+    const ambiguous = new Map<string, { token: string; candidates: DimMatch[]; outlets: Set<string> }>();
+    const missing: string[] = [];
+    const separatorOnly = new Map<string, Set<string>>(); // name as written → outlets
+
+    for (const [code, meta] of rosterSorted) {
+      if (!outletInScope(def, meta)) continue;
+      const row = input.targets.get(code);
+      const rawName = row?.names?.[kpiCode];
+      const name = typeof rawName === 'string' ? rawName.trim() : '';
+      const t = row?.values?.[kpiCode];
+      const hasTarget = typeof t === 'number' && Number.isFinite(t);
+      const tokens = name === '' ? [] : splitFocusName(name);
+      if (tokens.length === 0 && name !== '') {
+        // Audit follow-up: a written name made only of separators ("&", ",", " & ") is NOT "no name" — the operator
+        // wrote something that names no product. Always a blocker (target or not); key omitted.
+        let s = separatorOnly.get(name);
+        if (!s) separatorOnly.set(name, (s = new Set()));
+        s.add(code);
+        fpBlankNames.push([kpiCode, code, name]);
+        continue;
+      }
+      if (tokens.length === 0) {
+        // §4 rows 3–4: no name → key omitted; with a numeric target it is a blocker.
+        if (hasTarget) {
+          missing.push(code);
+          fpMissing.push([kpiCode, code]);
+        }
+        continue;
+      }
+      const tokenKeys = tokens.map(focusKey);
+      const nameKey = [...tokenKeys].sort().join('&');
+      let g = groups.get(nameKey);
+      if (!g) {
+        const products = new Map<string, DimMatch>();
+        for (const tok of tokens) {
+          const r = resolveKey(tok);
+          if (r.status === 'MATCHED' && r.product) products.set(stableStringify(r.product), r.product);
+        }
+        g = {
+          key: nameKey,
+          tokenKeys,
+          spellings: new Map(),
+          outlets: [],
+          byType: {},
+          filter: products.size > 0 ? { anyOf: [...products.values()].map((p) => ({ ...p })) } : noMatch,
+        };
+        groups.set(nameKey, g);
+      }
+      g.spellings.set(name, (g.spellings.get(name) ?? 0) + 1);
+      g.outlets.push(code);
+      const type = meta.outletType ?? '';
+      g.byType[type] = (g.byType[type] ?? 0) + 1;
+
+      for (const tok of tokens) {
+        const r = resolveKey(tok);
+        if (r.status === 'UNMATCHED') {
+          const ak = focusAcceptanceKey(kpiCode, r.key);
+          if (input.acceptances.has(ak)) {
+            fpAccepted.add(ak);
+            continue;
+          }
+          let u = unmatched.get(r.key);
+          if (!u) unmatched.set(r.key, (u = { token: tok.trim(), outlets: new Set() }));
+          u.outlets.add(code);
+        } else if (r.status === 'AMBIGUOUS') {
+          let a = ambiguous.get(r.key);
+          if (!a) ambiguous.set(r.key, (a = { token: tok.trim(), candidates: r.candidates ?? [], outlets: new Set() }));
+          a.outlets.add(code);
+        }
+      }
+      // Blocked outlets still get their (matched-tokens) filter so the preview shows numbers; the blocker stops apply.
+      filters.set(code, g.filter);
+      nameKeys.set(code, nameKey);
+      fpPerOutlet.push([code, kpiCode, nameKey]);
+    }
+
+    outletFilters.set(kpiCode, filters);
+    outletNameKeys.set(kpiCode, nameKeys);
+
+    const display = focusKpiDisplay(kpiCode, input.labelOf);
+    const label = (input.labelOf.get(kpiCode) ?? '').trim() || kpiCode;
+    for (const [key, u] of [...unmatched.entries()].sort((a, b) => cmp(a[0], b[0]))) {
+      const n = u.outlets.size;
+      blockers.push({
+        code: 'FOCUS_UNMATCHED',
+        kpiCode,
+        token: u.token,
+        key,
+        outlets: n,
+        sampleOutletCodes: sample(u.outlets),
+        message: `"${u.token}" in ${display} is not a product in the sales data (${outletsText(n)}). Fix the target file, or accept it as not sold yet.`,
+      });
+    }
+    for (const [key, a] of [...ambiguous.entries()].sort((x, y) => cmp(x[0], y[0]))) {
+      const n = a.outlets.size;
+      blockers.push({
+        code: 'FOCUS_AMBIGUOUS',
+        kpiCode,
+        token: a.token,
+        key,
+        outlets: n,
+        sampleOutletCodes: sample(a.outlets),
+        message: `"${a.token}" in ${display} could mean more than one product: ${orList(a.candidates.map(describeDimMatch))}. Write it so only one product matches (${outletsText(n)}).`,
+      });
+    }
+    if (missing.length > 0) {
+      const n = missing.length;
+      blockers.push({
+        code: 'FOCUS_MISSING_NAME',
+        kpiCode,
+        outlets: n,
+        sampleOutletCodes: sample(missing),
+        message: `${outletsText(n)} ${plural(n, 'has', 'have')} a ${label} target but no product name in the target file.`,
+      });
+    }
+    // Same code (FOCUS_MISSING_NAME — cleared only by fixing the target file), its own message per name as written.
+    for (const [written, outlets] of [...separatorOnly.entries()].sort((a, b) => cmp(a[0], b[0]))) {
+      const n = outlets.size;
+      blockers.push({
+        code: 'FOCUS_MISSING_NAME',
+        kpiCode,
+        outlets: n,
+        sampleOutletCodes: sample(outlets),
+        message: `"${written}" in ${display} for ${outletsText(n)} has no product in it. Write the product name(s) in the target file.`,
+      });
+    }
+
+    const names: FocusNameSummary[] = [...groups.values()].map((g) => {
+      const name = [...g.spellings.entries()].sort((a, b) => b[1] - a[1] || cmp(a[0], b[0]))[0][0];
+      const tokens = splitFocusName(name).map((tok) => {
+        const r = resolveKey(tok);
+        const out: FocusTokenResolution = { ...r, token: tok.trim() };
+        if (r.status === 'UNMATCHED') {
+          const acc = input.acceptances.get(focusAcceptanceKey(kpiCode, r.key));
+          if (acc) out.accepted = { byName: acc.byName, at: acc.at };
+        }
+        return out;
+      });
+      return {
+        name,
+        key: g.key,
+        outlets: g.outlets.length,
+        outletsByType: g.byType,
+        tokens,
+        achieved: { total: 0, outletsZero: 0 },
+      };
+    });
+    names.sort((a, b) => b.outlets - a.outlets || cmp(a.key, b.key));
+    for (const g of groups.values()) {
+      if (!fpResolutions.has(g.key)) {
+        fpResolutions.set(
+          g.key,
+          [...g.tokenKeys].sort(cmp).map((k) => {
+            const r = resolutionCache.get(k)!;
+            return [k, r.status, r.product ?? null, r.candidates ?? null];
+          }),
+        );
+      }
+    }
+    focus.push({
+      kpiCode,
+      label,
+      measure: def.measure,
+      names,
+      missingName: { outlets: missing.length, sampleOutletCodes: sample(missing) },
+    });
+  }
+
+  const tupleCmp = (a: string[], b: string[]) => {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+      const c = cmp(a[i], b[i]);
+      if (c !== 0) return c;
+    }
+    return a.length - b.length;
+  };
+  const fingerprint = createHash('sha256')
+    .update(
+      stableStringify({
+        month: input.month,
+        perOutlet: [...fpPerOutlet].sort(tupleCmp),
+        resolutions: [...fpResolutions.entries()].sort((a, b) => cmp(a[0], b[0])),
+        accepted: [...fpAccepted].sort(cmp),
+        missing: [...fpMissing].sort(tupleCmp),
+        blankNames: [...fpBlankNames].sort(tupleCmp),
+      }),
+    )
+    .digest('hex');
+
+  return { outletFilters, outletNameKeys, blockers, focus, fingerprint };
+}
+
+/**
+ * The definitions to evaluate the month with: every TARGET_NAMES definition gets `outletFilter` from the resolution;
+ * FILTER definitions are returned AS THE SAME OBJECTS (their scope caches stay warm, values byte-identical).
+ */
+export function attachOutletFilters(defs: readonly KpiDefLite[], res: MonthFocusResolution): KpiDefLite[] {
+  return defs.map((def) => {
+    if (!isTargetNamesDef(def)) return def;
+    const filters = res.outletFilters.get(def.kpiCode);
+    return { ...def, outletFilter: (code: string) => filters?.get(code) };
+  });
+}
+
+const round = (x: number, dp: number) => {
+  const f = 10 ** dp;
+  return Math.round(x * f) / f;
+};
+
+/** design §6: the month's MonthReconciliation from the resolution + the computed rows. */
+export function buildMonthReconciliation(args: {
+  input: MonthFocusInput;
+  resolution: MonthFocusResolution;
+  comp: MonthComputation;
+  /** Latest target upload batch time for the month (null = none). */
+  targetUploadedAt: Date | null;
+  /** Importer-owned KPI codes (all enabled definitions). */
+  ownedKpiCodes: readonly string[];
+}): MonthReconciliation {
+  const { input, resolution, comp, targetUploadedAt, ownedKpiCodes } = args;
+  const numeric = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  const measureOf = new Map(input.defs.map((d) => [d.kpiCode, d.measure]));
+
+  const kpis = ownedKpiCodes.map((kpiCode) => {
+    let outlets = 0;
+    let total = 0;
+    for (const row of input.targets.values()) {
+      const v = row.values?.[kpiCode];
+      if (!numeric(v)) continue;
+      outlets++;
+      total += v;
+    }
+    return {
+      kpiCode,
+      label: (input.labelOf.get(kpiCode) ?? '').trim() || kpiCode,
+      outletsWithTarget: outlets,
+      totalTarget: round(total, 2),
+      // Owned KPIs are exactly the enabled definitions, so the measure is always known ('AMOUNT' is unreachable).
+      measure: measureOf.get(kpiCode) ?? 'AMOUNT',
+    };
+  });
+
+  const valuesOf = new Map(comp.rows.map((r) => [r.outletCode, r.values]));
+  const focus: MonthFocusKpi[] = resolution.focus.map((f) => {
+    const nameKeys = resolution.outletNameKeys.get(f.kpiCode);
+    const achieved = new Map<string, { total: number; outletsZero: number }>();
+    for (const [code, key] of nameKeys ?? []) {
+      let a = achieved.get(key);
+      if (!a) achieved.set(key, (a = { total: 0, outletsZero: 0 }));
+      const v = valuesOf.get(code)?.[f.kpiCode];
+      if (numeric(v)) a.total += v;
+      if (!numeric(v) || v === 0) a.outletsZero++;
+    }
+    return {
+      ...f,
+      names: f.names.map((n) => {
+        const a = achieved.get(n.key) ?? { total: 0, outletsZero: 0 };
+        return { ...n, achieved: { total: round(a.total, 6), outletsZero: a.outletsZero } };
+      }),
+    };
+  });
+
+  const owned = [...ownedKpiCodes];
+  const targetNoSales: string[] = [];
+  const salesNoTarget: string[] = [];
+  for (const code of input.roster.keys()) {
+    const row = input.targets.get(code);
+    const hasSales = comp.matchedOutletCodes.has(code);
+    if (!hasSales && row && owned.some((k) => numeric(row.values?.[k]))) targetNoSales.push(code);
+    if (hasSales && !row) salesNoTarget.push(code);
+  }
+
+  return {
+    targets: {
+      kpis,
+      targetUploadedAt: targetUploadedAt ? targetUploadedAt.toISOString() : null,
+      newerThanLastApply: false,
+    },
+    focus,
+    blockers: resolution.blockers,
+    gaps: {
+      targetNoSales: { outlets: targetNoSales.length, sampleOutletCodes: sample(targetNoSales) },
+      salesNoTarget: { outlets: salesNoTarget.length, sampleOutletCodes: sample(salesNoTarget) },
+    },
+    focusFingerprint: resolution.fingerprint,
+  };
+}

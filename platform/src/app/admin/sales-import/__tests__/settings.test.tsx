@@ -5,7 +5,7 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type {
   SalesColumnMapping, SalesImportCombos, SalesKpiDefinitionDto,
 } from '@/lib/sales-import/types';
@@ -545,6 +545,21 @@ describe('settings page', () => {
     expect(apiMock.disableKpi).toHaveBeenCalledWith('k1');
   });
 
+  it('the KPI list names each measure: ₹ / Cases / Products (lines)', async () => {
+    apiMock.getProfile.mockResolvedValue(ok(MAPPING));
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    apiMock.listKpis.mockResolvedValue(ok({ definitionsHash: 'h', definitions: [
+      { id: 'k1', kpiCode: 'KPI_X', measure: 'AMOUNT', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0 },
+      { id: 'k2', kpiCode: 'KPI_Y', measure: 'PRODUCT_COUNT', filter: {}, outletTypes: [], programs: [], enabled: true, order: 1 },
+    ] }));
+    clientApi.get.mockResolvedValue(ok(KPIS));
+    apiMock.combos.mockResolvedValue({ success: false, error: 'No READY import', status: 404 });
+    apiMock.segmentOptions.mockResolvedValue(ok({ outletTypes: [], programs: [] }));
+    render(<SettingsPage />);
+    expect(await screen.findByText('Products (lines)')).toBeInTheDocument();
+    expect(screen.getByText('₹')).toBeInTheDocument();
+  });
+
   it('loads segment-options and passes them to the KPI editor', async () => {
     apiMock.getProfile.mockResolvedValue(ok(MAPPING));
     apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
@@ -573,5 +588,60 @@ describe('settings page', () => {
     const note = await screen.findByTestId('kpi-saved-fill-past');
     expect(note).toHaveTextContent('KPI_X is saved');
     expect(within(note).getByRole('link', { name: /Recalculate from stored history/ })).toHaveAttribute('href', '/admin/sales-import/months');
+  });
+});
+
+describe('KPI editor — PRODUCT_COUNT ("Number of products bought (lines)")', () => {
+  it('offers the option with help text and saves measure PRODUCT_COUNT', async () => {
+    apiMock.createKpi.mockImplementation(async (d: SalesKpiDefinitionDto) => ok({ ...d, id: 'k1' }));
+    const p = renderEditor();
+    fireEvent.change(screen.getByRole('combobox', { name: 'KPI' }), { target: { value: 'KPI_X' } });
+    const radio = screen.getByRole('radio', { name: 'Number of products bought (lines)' });
+    expect(radio).toBeEnabled();
+    expect(screen.queryByTestId('measure-product-count-help')).not.toBeInTheDocument();
+    fireEvent.click(radio);
+    expect(await screen.findByTestId('measure-product-count-help')).toHaveTextContent('Returns cancel purchases.');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save KPI' })); });
+    expect(apiMock.createKpi).toHaveBeenCalledWith(expect.objectContaining({ kpiCode: 'KPI_X', measure: 'PRODUCT_COUNT' }));
+    await waitFor(() => expect(p.onSaved).toHaveBeenCalled());
+  });
+
+  it('is disabled without an amount column (products are counted by net amount) or without product columns', () => {
+    renderEditor({ mapping: { ...MAPPING, amount: null } });
+    expect(screen.getByRole('radio', { name: 'Number of products bought (lines)' })).toBeDisabled();
+  });
+
+  it('blocks save on a PRODUCT_COUNT definition when the mapping has no product columns', () => {
+    renderEditor({ mapping: { ...MAPPING, dimensions: [] }, initial: { ...NEW, kpiCode: 'KPI_X', measure: 'PRODUCT_COUNT' } });
+    expect(screen.getByTestId('kpi-editor-blockers')).toHaveTextContent('no product columns');
+    expect(screen.getByRole('button', { name: 'Save KPI' })).toBeDisabled();
+  });
+
+  it('Test shows the summed product count as a plain integer', async () => {
+    apiMock.testKpi.mockResolvedValue(ok({
+      months: [{ month: '2026-10', totalAmountRupees: 165, totalQuantity: 1.75, totalProducts: 1234, outletsNonZero: 3 }],
+      unmatchedEntries: { anyOf: [], noneOf: [] }, redundantEntries: { anyOf: [] }, matchedLines: 9,
+    }));
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', measure: 'PRODUCT_COUNT' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Test against latest import/ })); });
+    const result = await screen.findByTestId('kpi-test-result');
+    // L3: plain words for operators (no Σ).
+    expect(result).toHaveTextContent('Products (all outlets added up)');
+    expect(result).not.toHaveTextContent('Σ');
+    expect(result).toHaveTextContent('1,234');
+    expect(result).not.toHaveTextContent('1,234.');
+  });
+
+  it('switching to PRODUCT_COUNT after a ₹ test marks the test stale (the count was not computed)', async () => {
+    apiMock.testKpi.mockResolvedValue(ok({
+      months: [{ month: '2026-10', totalAmountRupees: 165, totalQuantity: 1.75, outletsNonZero: 3 }],
+      unmatchedEntries: { anyOf: [], noneOf: [] }, redundantEntries: { anyOf: [] }, matchedLines: 9,
+    }));
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Test against latest import/ })); });
+    expect(await screen.findByTestId('kpi-test-result')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: 'Number of products bought (lines)' }));
+    await waitFor(() => expect(screen.queryByTestId('kpi-test-result')).not.toBeInTheDocument());
+    expect(screen.getByText(/test again/)).toBeInTheDocument();
   });
 });

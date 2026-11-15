@@ -6,7 +6,7 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import type { SalesMonthRecalcPreview, SalesMonthRow } from '@/lib/sales-import/types';
+import { EMPTY_MONTH_RECONCILIATION, type SalesMonthRecalcPreview, type SalesMonthRow } from '@/lib/sales-import/types';
 
 const roleRef = { current: 'CLIENT_ADMIN' };
 vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => ({ role: roleRef.current }) }));
@@ -25,7 +25,7 @@ function row(over: Partial<SalesMonthRow>): SalesMonthRow {
   return {
     month: '2026-10', state: 'OPEN', implicit: true, closedAt: null, closedBy: null, lastAppliedAt: '2026-11-02T05:00:00.000Z',
     lastAppliedImportId: 'i1', canClose: true, canReopen: false, downstream: { creditBatches: 0, exports: 0 },
-    hasHistory: false, historySourceImportId: null, historyAppliedAt: null, productListCurrent: true, ...over,
+    hasHistory: false, historySourceImportId: null, historyAppliedAt: null, productListCurrent: true, targetsChangedSinceApply: false, ...over,
   };
 }
 const ok = <T,>(data: T) => ({ success: true as const, data });
@@ -36,7 +36,7 @@ function recalc(over: Partial<SalesMonthRecalcPreview> = {}): SalesMonthRecalcPr
     historyAppliedAt: '2026-11-02T05:00:00.000Z', matchedOutlets: 3, unmatchedCustomers: 1, matchedAmountRupees: 1200,
     matchedQuantity: 4, unmatchedAmountRupees: 30, unmatchedQuantity: 0, zeroFillOutlets: 2, outletsAffected: 5,
     warnings: [], kpis: [{ kpiCode: 'KPI_NEW', label: 'New KPI', measure: 'AMOUNT', newTotal: 900, currentTotal: 0, delta: 900, outletsNonZero: 3, outletsNegative: 0 }],
-    ...over,
+    reconciliation: EMPTY_MONTH_RECONCILIATION, ...over,
   };
 }
 

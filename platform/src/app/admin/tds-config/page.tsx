@@ -1,7 +1,10 @@
 'use client'
 
 /**
- * TDS Treatment — per-tenant TDS-policy config for VISIBILITY-led payouts.
+ * TDS Treatment — per-tenant TDS-policy config for credit-upload ₹ payouts.
+ * Code truth (credits.service confirm → deriveFrozenSection): methodology is frozen on EVERY
+ * credit-upload payout entry but only the VISIBILITY bank-file engine acts on it (194R report
+ * always grosses up); section applies to VISIBILITY only (INCENTIVE is always 194R).
  * Wave 2 Stream D (design §5 portal placement — Gifsy config UI).
  *
  * Round-trips the per-tenant `tdsPolicy` via the backend contract:
@@ -24,6 +27,7 @@ import { Loader2, Percent } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useAdminSession } from '@/lib/admin-session'
 import { api } from '@/lib/api-client'
+import { TdsImportedPayoutsCard } from '@/components/operator/tds-imported-payouts-card'
 
 // ── Local mirror of the Prisma enums (no shared-lib edits; kept in-sync with the DTO). ──
 type TdsSection = 'SEC_194R' | 'SEC_194C'
@@ -94,28 +98,37 @@ export default function TdsConfigPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  // The tenant the policy was LOADED for (GET → data.clientId — the ASSUMED tenant for an assumed
+  // operator). Every save targets exactly this tenant — NEVER session.clientId, which is the
+  // operator's HOME 'gifsy' while assumed (prod bug: a Bajaj save landed on 'gifsy').
+  const [tenantId, setTenantId] = useState<string | null>(null)
+
+  /** GET the stored effective policy (null on any failure). */
+  async function fetchPolicy(): Promise<TdsConfigDto | null> {
+    try {
+      const r = await fetch('/api/admin/tds/config')
+      const json = (await r.json()) as { success?: boolean; data?: TdsConfigDto }
+      return json?.success && json.data ? json.data : null
+    } catch {
+      return null
+    }
+  }
 
   // ── Seed the effective policy. `loaded` unlocks the toggles ONLY after the real stored
   // value has been applied, so a GIFSY admin can't stomp it with the on-screen default. ──
   useEffect(() => {
     let cancelled = false
-    fetch('/api/admin/tds/config')
-      .then((r) => r.json())
-      .then((json: { success?: boolean; data?: TdsConfigDto }) => {
-        if (cancelled) return
-        if (json?.success && json.data) {
-          setSection(json.data.section)
-          setMethodology(json.data.methodology)
-          setLoaded(true)
-        } else {
-          setLoadError('Could not load the TDS configuration. Please retry — no value has been changed.')
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setLoadError('Could not load the TDS configuration. Please retry — no value has been changed.')
-        }
-      })
+    void fetchPolicy().then((data) => {
+      if (cancelled) return
+      if (data) {
+        setTenantId(data.clientId)
+        setSection(data.section)
+        setMethodology(data.methodology)
+        setLoaded(true)
+      } else {
+        setLoadError('Could not load the TDS configuration. Please retry — no value has been changed.')
+      }
+    })
     return () => { cancelled = true }
   }, [])
 
@@ -125,17 +138,31 @@ export default function TdsConfigPage() {
   }
 
   // A single PUT always carries BOTH fields (the contract requires section + methodology
-  // together). Optimistic local update; revert on a non-success response.
+  // together) and targets the LOADED tenant. Optimistic local update; revert on failure. After a
+  // successful save the stored value is RE-FETCHED and shown, so the screen never claims a value
+  // that is not actually stored for this tenant.
   async function persist(nextSection: TdsSection, nextMethodology: TdsMethodology, revert: () => void) {
     setSaveError(null)
-    const res = await api.put('/api/admin/tds/config', {
-      clientId: session.clientId,
+    const res = await api.put<TdsConfigDto>('/api/admin/tds/config', {
+      ...(tenantId ? { clientId: tenantId } : {}),
       section: nextSection,
       methodology: nextMethodology,
     })
     if (!res.success) {
       revert()
-      setSaveError('Could not save — TDS treatment can only be changed by a Gifsy Admin.')
+      setSaveError(res.error || 'Could not save — TDS treatment can only be changed by a Gifsy Admin.')
+      return
+    }
+    const stored = await fetchPolicy()
+    if (!stored) {
+      setSaveError('Saved, but the stored value could not be re-read. Reload the page to confirm it.')
+      return
+    }
+    setTenantId(stored.clientId)
+    setSection(stored.section)
+    setMethodology(stored.methodology)
+    if (stored.section !== nextSection || stored.methodology !== nextMethodology) {
+      setSaveError('The change did not take effect — the screen now shows the value actually stored.')
       return
     }
     flashSaved()
@@ -163,7 +190,7 @@ export default function TdsConfigPage() {
         <div>
           <h1 className="text-2xl font-bold text-[#1A1A2E]">TDS Treatment</h1>
           <p className="text-sm text-gray-500 mt-1">
-            How TGSL treats this tenant&apos;s <strong>Visibility payouts</strong> for tax withholding.
+            How TGSL treats tax on this tenant&apos;s <strong>credit-upload ₹ payouts</strong> (visibility and incentive).
           </p>
         </div>
         {saved && (
@@ -198,15 +225,24 @@ export default function TdsConfigPage() {
         <Card data-testid="tds-config-card">
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
-              <Percent className="h-4 w-4 text-[var(--brand-primary)]" /> TDS treatment for Visibility payouts
+              <Percent className="h-4 w-4 text-[var(--brand-primary)]" /> TDS treatment for credit-upload payouts
             </CardTitle>
-            <CardDescription className="mt-1">
-              This governs how TGSL withholds tax on this tenant&apos;s Visibility-stream payouts.
-              Under <strong>194C</strong> the payout is treated as a visibility service — TGSL raises
-              a self-billed invoice and applies TDS; <strong>194R</strong> treats it as an
-              incentive/benefit. <strong>Deduct-then-pay</strong> withholds the TDS from the
-              retailer&apos;s payout; <strong>Gross-up</strong> pays the retailer in full while TGSL
-              deposits the TDS and recovers it from the tenant.
+            <CardDescription className="mt-1" data-testid="tds-config-scope">
+              The <strong>methodology</strong> is recorded on every credit-upload ₹ payout (visibility
+              and incentive), but it only changes what is paid on <strong>visibility</strong> payouts:{' '}
+              <strong>Deduct-then-pay</strong> withholds the TDS from the retailer&apos;s bank line;{' '}
+              <strong>Gross-up</strong> pays the retailer in full while TGSL raises a TDS invoice,
+              deposits the TDS and recovers it from the tenant. <strong>Incentive</strong> payouts are
+              never deducted — the 194R report shows their gross-up liability, and no TDS invoice is
+              raised for them. The <strong>section</strong> applies only to visibility payouts
+              (<strong>194C</strong> = visibility service with a self-billed invoice;{' '}
+              <strong>194R</strong> = incentive/benefit); incentive payouts are always 194R. Points
+              redemptions are never deducted from the partner — they count only towards the 194R
+              report liability.
+              <span data-testid="tds-set-before-first-batch" className="block mt-2 font-medium text-gray-700">
+                Each payout records the method when its batch is confirmed — set this before the first
+                live payout batch.
+              </span>
               {isGifsy ? (
                 <> Changes apply to new payouts — orders already confirmed keep their treatment.</>
               ) : (
@@ -215,8 +251,15 @@ export default function TdsConfigPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
+            {tenantId && (
+              <p data-testid="tds-config-tenant" className="text-xs text-gray-500">
+                Applies to client: <strong className="text-gray-800">{tenantId}</strong>
+              </p>
+            )}
             <div>
-              <p className="text-sm font-medium text-gray-900 mb-2">TDS section</p>
+              <p className="text-sm font-medium text-gray-900 mb-2">
+                TDS section <span className="font-normal text-gray-500">— visibility payouts only (incentive payouts are always 194R)</span>
+              </p>
               <Segmented
                 ariaLabel="TDS section"
                 options={SECTION_OPTIONS}
@@ -228,7 +271,9 @@ export default function TdsConfigPage() {
             </div>
 
             <div>
-              <p className="text-sm font-medium text-gray-900 mb-2">Methodology</p>
+              <p className="text-sm font-medium text-gray-900 mb-2">
+                Methodology <span className="font-normal text-gray-500">— recorded on all credit-upload payouts; changes the amount paid on visibility payouts only</span>
+              </p>
               <Segmented
                 ariaLabel="TDS methodology"
                 options={METHODOLOGY_OPTIONS}
@@ -250,6 +295,9 @@ export default function TdsConfigPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Separate per-tenant setting with its own load/save (report-only; independent of the policy above). */}
+      <TdsImportedPayoutsCard isGifsy={isGifsy} />
     </div>
   )
 }

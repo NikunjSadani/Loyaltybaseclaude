@@ -42,12 +42,12 @@ const PAGE_SIZE = 20;
  * disallowed role regardless of what the form sends. Sales/partner roles are intentionally
  * excluded here; they have their own flows (/admin/sales + KYC).
  *
- * `clientId` is the caller's effective context: 'gifsy' at the platform level, or the
- * tenant slug when a GIFSY operator has assumed a brand.
+ * `platformContext` is true only for an UN-assumed GIFSY operator (platform level). It never needs
+ * a tenant id — so no client-side clientId (which the admin session does not reliably know) is used.
  */
-function assignableRoles(callerRole: AdminRole | string, clientId: string): string[] {
+function assignableRoles(callerRole: AdminRole | string, platformContext: boolean): string[] {
   if (callerRole === 'GIFSY_ADMIN') {
-    return clientId === 'gifsy'
+    return platformContext
       ? ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'] // platform context
       : ['CLIENT_ADMIN', 'MIS_USER'];               // assumed into a tenant — no GIFSY_ADMIN
   }
@@ -249,19 +249,15 @@ export default function AdminUsersPage() {
   useEffect(() => { setAssumedBrand(getAssumedBrand()); }, []);
   const tenantLabel = assumedBrand ?? clientConfig.branding.displayName;
 
-  // The caller's EFFECTIVE clientId for role-gating. session.clientId is 'gifsy' for any
-  // GIFSY_ADMIN regardless of assumed brand, so it can't distinguish platform vs assumed-
-  // tenant context on its own. A GIFSY operator who has assumed a brand (assumedBrand set)
-  // is in a TENANT context — mirror the backend JWT clientId (the tenant slug) so the
-  // GIFSY_ADMIN option is hidden there. Non-GIFSY admins are always tenant-scoped.
-  const effectiveClientId =
-    session.role === 'GIFSY_ADMIN'
-      ? (assumedBrand ? 'tenant' : 'gifsy')
-      : session.clientId;
+  // Role-gating context: only an UN-assumed GIFSY operator is at the platform level. A GIFSY
+  // operator who has assumed a brand (assumedBrand set) is in a TENANT context, so the
+  // GIFSY_ADMIN option is hidden there. Non-GIFSY admins (any tenant — Deoleo, Bajaj, …) are
+  // always tenant-scoped; their tenant id is irrelevant to the role list.
+  const platformContext = session.role === 'GIFSY_ADMIN' && !assumedBrand;
 
   const roles = useMemo(
-    () => assignableRoles(session.role, effectiveClientId),
-    [session.role, effectiveClientId],
+    () => assignableRoles(session.role, platformContext),
+    [session.role, platformContext],
   );
   const canCreate = roles.length > 0;
 
