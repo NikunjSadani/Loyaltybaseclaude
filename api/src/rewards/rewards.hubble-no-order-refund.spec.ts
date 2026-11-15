@@ -7,9 +7,15 @@
 // Run: npx jest src/rewards/rewards.hubble-no-order-refund.spec.ts
 
 import { createHmac } from 'node:crypto';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { HUBBLE_NO_ORDER_REFUND_MIN_AGE_MS, HUBBLE_NO_ORDER_REFUND_REASON, RewardsService } from './rewards.service';
+import {
+  HUBBLE_NO_ORDER_REFUND_MIN_AGE_MS,
+  HUBBLE_NO_ORDER_REFUND_REASON,
+  HUBBLE_PENDING_MEMBER_COPY,
+  RewardsService,
+  hubbleReconcileFlags,
+} from './rewards.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -555,6 +561,56 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
     });
 
+    it('5: confirm-time canary is capped at 2 candidates → fails closed into PENDING_INDETERMINATE (ops retry still tries 5)', async () => {
+      canaryRows = ['k1', 'k2', 'k3'].map((id) => canaryRow({ id, supplierOrderRef: `hub-${id}` }));
+      canaryLookup.mockImplementation(async (ref: string) => (ref === 'k3' ? { status: 'SUCCESS', id: 'hub-k3', referenceId: 'k3' } : null));
+      mockHubble.placeOrder.mockRejectedValue(new HubblePlaceOrderRejectedError(400, 'E102'));
+      o1Lookup.mockResolvedValue(null);
+      expect(await service.issueHubbleVoucherForOrder('o1', 'bajaj', 'u1')).toBe('PENDING_INDETERMINATE');
+      expect(canaryLookup.mock.calls.map((c) => c[0])).toEqual(['k1', 'k2']);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+      expect(meta()).toMatchObject({ hubbleReconcileReason: 'HUBBLE_INDETERMINATE', hubbleNoOrderUnverified: { source: 'CONFIRM' } });
+    });
+
+    it('5: confirm-time canary has a ~20 s total budget → a hung lookup fails closed (no refund)', async () => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+      try {
+        canaryLookup.mockImplementation(() => new Promise(() => undefined)); // never answers
+        mockHubble.placeOrder.mockRejectedValue(new HubblePlaceOrderRejectedError(400, 'E102'));
+        o1Lookup.mockResolvedValue(null);
+        const run = service.issueHubbleVoucherForOrder('o1', 'bajaj', 'u1');
+        await jest.advanceTimersByTimeAsync(21_000);
+        expect(await run).toBe('PENDING_INDETERMINATE');
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        expect(String((meta().hubbleNoOrderUnverified as Row).why)).toMatch(/budget/);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('4: confirm copy — PROCESSING keeps "shortly"; a stuck state (not configured) gets the pending copy', async () => {
+      mockHubble.placeOrder.mockResolvedValue({ status: 'PROCESSING', id: 'hub-7' });
+      expect((await confirmVia()).message).toBe('Redemption confirmed. Your voucher is being issued and will appear shortly.');
+
+      row = stuckRow({ createdAt: new Date(), updatedAt: new Date(), metadata: { sellingValuePaise: 50000 } });
+      mockHubble.isConfigured.mockReturnValue(false);
+      const res = await confirmVia();
+      expect(res).toEqual({ orderId: 'o1', status: 'CONFIRMED', message: HUBBLE_PENDING_MEMBER_COPY });
+      expect(res.message).not.toMatch(/shortly/);
+    });
+
+    it('4: a SKIPPED confirm reports the REAL state — refunded → FAILED copy; delivered → issued copy', async () => {
+      row = stuckRow({ status: 'FAILED', pointsDeducted: 0, metadata: {} });
+      expect(await confirmVia()).toMatchObject({ status: 'FAILED', message: expect.stringMatching(/points have been refunded/) });
+
+      row = stuckRow({ status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble', metadata: {} });
+      const notify = jest
+        .spyOn(service as unknown as { notifyVoucherIssued: (a: string, b: string) => Promise<void> }, 'notifyVoucherIssued')
+        .mockResolvedValue(undefined);
+      expect(await confirmVia()).toMatchObject({ status: 'DELIVERED', message: expect.stringMatching(/has been issued/) });
+      notify.mockRestore();
+    });
+
     it('placeOrder responds (PROCESSING) → responded + Hubble order id recorded; the PROCESSING claim still wins (row version kept in step)', async () => {
       mockHubble.placeOrder.mockResolvedValue({ status: 'PROCESSING', id: 'hub-7' });
 
@@ -624,7 +680,7 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND' });
     });
 
-    it('lookup fails → HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND; a later webhook where Hubble says FAILED / not-found clears it automatically', async () => {
+    it('lookup fails → HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND; a signed webhook + "not found" is a contradiction (kept); only Hubble FAILED clears it', async () => {
       await refundFirst();
       o1Lookup.mockRejectedValueOnce(new Error('Hubble getOrderByReference HTTP 503'));
       expect((await send()).outcome).toBe('SKIPPED');
@@ -632,19 +688,51 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
         hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND', hubbleLateWebhookCheck: { status: 'LOOKUP_FAILED' },
       });
 
+      // A signed webhook but Hubble's lookup says "no order" → NOT cleared.
       o1Lookup.mockResolvedValueOnce(null);
       await send();
-      expect(meta()).toMatchObject({ hubbleNeedsReconcile: false, hubbleLateWebhookCheck: { status: 'NOT_FOUND', voucherExists: false } });
+      expect(meta()).toMatchObject({
+        hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND', hubbleLateWebhookCheck: { status: 'NOT_FOUND', voucherExists: false },
+      });
 
-      // FAILED clears too (re-flag first).
-      o1Lookup.mockRejectedValueOnce(new Error('down'));
-      await send();
-      expect(meta().hubbleNeedsReconcile).toBe(true);
+      // Hubble's own FAILED clears it.
       o1Lookup.mockResolvedValueOnce({ status: 'FAILED', id: 'hub-x' });
       await send();
       expect(meta()).toMatchObject({ hubbleNeedsReconcile: false, hubbleLateWebhookCheck: { status: 'FAILED', hubbleOrderId: 'hub-x' } });
       expect(mockWallet.reverse).not.toHaveBeenCalled();
       expect(row).toMatchObject({ status: 'FAILED', pointsDeducted: 0 });
+    });
+
+    it('a signed webhook + "not found" on an UNFLAGGED refunded order RAISES the unknown flag (contradiction)', async () => {
+      await refundFirst();
+      o1Lookup.mockResolvedValueOnce(null);
+      await send();
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND' });
+    });
+
+    it('6: an order refunded on Hubble\'s OWN FAILED body — a FAILED webhook needs no lookup; an unreachable Hubble is only logged', async () => {
+      row = stuckRow({
+        status: 'FAILED', pointsDeducted: 0,
+        metadata: { hubbleReconcileResolution: 'FAILED_REFUNDED', hubbleRefund: { source: 'HUBBLE_FAILED', reason: 'x' } },
+      });
+      expect((await send({ referenceId: 'o1', status: 'FAILED' })).outcome).toBe('SKIPPED');
+      expect(mockHubble.getOrderByReference).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+
+      // Another webhook (no status) + Hubble down → recorded, NOT flagged.
+      o1Lookup.mockRejectedValueOnce(new Error('HTTP 503'));
+      await send();
+      expect(meta()).toMatchObject({ hubbleLateWebhookCheck: { status: 'LOOKUP_FAILED' } });
+      expect(meta().hubbleNeedsReconcile).toBeUndefined();
+
+      // …but a REJECTED-placement refund is still flagged when Hubble can't be checked.
+      row = stuckRow({
+        status: 'FAILED', pointsDeducted: 0,
+        metadata: { hubbleReconcileResolution: 'FAILED_REFUNDED', hubbleRefund: { source: 'REJECTED', reason: 'x' } },
+      });
+      o1Lookup.mockRejectedValueOnce(new Error('HTTP 503'));
+      await send({ referenceId: 'o1', status: 'FAILED' });
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND' });
     });
 
     it('a webhook for ANY refunded Hubble order (even legacy, unstamped) is re-checked — never silently skipped', async () => {
@@ -695,9 +783,39 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
     });
 
     it('a legacy open-order flag left on a FAILED (refunded) order is acknowledgeable (Retry can\'t clear it)', async () => {
-      row = flagged('HUBBLE_PROCESSING_CLAIM_LOST');
+      row = flagged('HUBBLE_INDETERMINATE');
       await service.acknowledgeHubbleFlag(gifsy, 'o1', 'checked portal');
       expect(meta().hubbleNeedsReconcile).toBe(false);
+      expect(mockHubble.getOrderByReference).not.toHaveBeenCalled(); // no "Hubble has an order" reason → no pre-check
+    });
+
+    it.each(['HUBBLE_PROCESSING_CLAIM_LOST', 'HUBBLE_SUCCESS_NO_CODE', 'HUBBLE_UNKNOWN_STATUS:ON_HOLD'])(
+      '7: %s on a refunded order → Hubble re-checked first: FAILED / not found → acknowledged',
+      async (reason) => {
+        row = flagged(reason);
+        o1Lookup.mockResolvedValue({ status: 'FAILED', id: 'hub-x' });
+        await service.acknowledgeHubbleFlag(gifsy, 'o1', 'checked portal');
+        expect(mockHubble.getOrderByReference).toHaveBeenCalledWith('o1');
+        expect(meta()).toMatchObject({ hubbleNeedsReconcile: false, hubbleAcknowledged: { reason } });
+      },
+    );
+
+    it('7: …Hubble reports an order (voucher) → flag becomes HUBBLE_ISSUED_AFTER_REFUND and the acknowledge is refused (409)', async () => {
+      row = flagged('HUBBLE_PROCESSING_CLAIM_LOST');
+      o1Lookup.mockResolvedValue({ status: 'SUCCESS', id: 'hub-x', vouchers: [{ cardNumber: 'C' }] });
+      await expect(service.acknowledgeHubbleFlag(gifsy, 'o1', 'checked')).rejects.toBeInstanceOf(ConflictException);
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND' });
+      expect(auditsOf('HUBBLE_FLAG_ACKNOWLEDGED')).toHaveLength(0);
+      // Ops now acknowledge the ISSUED flag itself.
+      await service.acknowledgeHubbleFlag(gifsy, 'o1', 'voucher cancelled with Hubble');
+      expect(meta().hubbleNeedsReconcile).toBe(false);
+    });
+
+    it('7: …Hubble unreachable → refused (409), flag untouched', async () => {
+      row = flagged('HUBBLE_SUCCESS_NO_CODE');
+      o1Lookup.mockRejectedValue(new Error('HTTP 503'));
+      await expect(service.acknowledgeHubbleFlag(gifsy, 'o1', 'x')).rejects.toBeInstanceOf(ConflictException);
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_NO_CODE' });
     });
 
     it('rejects a non-GIFSY_ADMIN, a blank note, and any other flag (e.g. an open INDETERMINATE order)', async () => {
@@ -915,6 +1033,79 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       });
       await service.reconcileHubbleOrder('o1');
       expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND' });
+    });
+  });
+
+  describe('1: a Hubble delivery closes pending-type flags (a DELIVERED order is never stuck flagged)', () => {
+    const SUCCESS = { status: 'SUCCESS', id: 'hub-ok', vouchers: [{ cardNumber: 'CARD-OK' }] };
+
+    it.each(['HUBBLE_INDETERMINATE', 'HUBBLE_UNEXPECTED', 'HUBBLE_WEBHOOK_BUT_NOT_FOUND', 'HUBBLE_SUCCESS_NO_CODE', 'HUBBLE_PROCESSING_CLAIM_LOST'])(
+      'flagged %s → Hubble SUCCESS webhook delivers it AND clears the flag (resolution DELIVERED)',
+      async (reason) => {
+        row = stuckRow({ metadata: INDET({ hubbleReconcileReason: reason }) });
+        o1Lookup.mockResolvedValue(SUCCESS);
+        expect(await service.reconcileHubbleOrder('o1')).toBe('DELIVERED');
+        expect(row).toMatchObject({ status: 'DELIVERED', voucherCode: 'CARD-OK' });
+        expect(meta()).toMatchObject({
+          hubbleNeedsReconcile: false, hubbleReconcileResolution: 'DELIVERED', hubbleResolvedPreviousReason: reason,
+        });
+        expect(hubbleReconcileFlags(row.metadata).hubbleNeedsReconcile).toBe(false);
+      },
+    );
+
+    it('a double-issuance flag (PROCESSING_AFTER_MANUAL) stays on the delivered order; Retry skips it, Acknowledge clears it', async () => {
+      row = stuckRow({ metadata: INDET({ hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' }) });
+      o1Lookup.mockResolvedValue(SUCCESS);
+      expect(await service.reconcileHubbleOrder('o1')).toBe('DELIVERED');
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' });
+      expect((await service.retryHubbleReconcile(gifsy, 'o1')).outcome).toBe('SKIPPED');
+      await service.acknowledgeHubbleFlag(gifsy, 'o1', 'only one voucher was used');
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: false, hubbleAcknowledged: { reason: 'HUBBLE_PROCESSING_AFTER_MANUAL' } });
+    });
+
+    it('acknowledge on a DELIVERED order with any leftover flag is accepted', async () => {
+      row = stuckRow({ status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble', metadata: INDET() });
+      await service.acknowledgeHubbleFlag(gifsy, 'o1', 'delivered fine');
+      expect(meta().hubbleNeedsReconcile).toBe(false);
+    });
+  });
+
+  describe('projection + low-level guards', () => {
+    it('10: the console projection carries WHY a "no order" was not trusted, only while flagged', () => {
+      const m = { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE', hubbleNoOrderUnverified: { why: 'no canary verified (2 tried)' } };
+      expect(hubbleReconcileFlags(m)).toEqual({
+        hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE', hubbleNoOrderUnverifiedWhy: 'no canary verified (2 tried)',
+      });
+      expect(hubbleReconcileFlags({ ...m, hubbleNeedsReconcile: false })).toEqual({ hubbleNeedsReconcile: false, hubbleReconcileReason: null });
+    });
+
+    it('8: the atomic merge treats a non-object metadata as {} (CASE WHEN jsonb_typeof)', async () => {
+      const realUpdate = mockPrisma.redemptionOrder.update.getMockImplementation()!;
+      mockPrisma.redemptionOrder.update.mockImplementation(async () => { throw new Error('P2025'); });
+      mockHubble.placeOrder.mockRejectedValue(new Error('Hubble request failed: Hubble did not respond within 15s'));
+      mockHubble.getProduct.mockResolvedValue({ productId: 'amz-1', name: 'A', denominationType: 'FLEXIBLE', denominations: [], minValue: 1, maxValue: 100000, maxVouchersPerOrder: 1 });
+      o1Lookup.mockRejectedValue(new Error('down'));
+      try {
+        await service.issueHubbleVoucherForOrder('o1', 'bajaj', 'u1');
+      } finally {
+        mockPrisma.redemptionOrder.update.mockImplementation(realUpdate);
+      }
+      const sql = (mockPrisma.$executeRaw.mock.calls[0][0] as TemplateStringsArray).join('?');
+      expect(sql).toMatch(/CASE WHEN jsonb_typeof\("metadata"\) = 'object' THEN "metadata" ELSE '\{\}'::jsonb END/);
+    });
+
+    it('9: the canary query requires deliveredAt and puts the account fingerprint (current + legacy host-only form) in SQL', async () => {
+      mockHubble.accountFingerprint.mockReturnValue('api.dev.myhubble.money/partner#0123456789abcdef');
+      canaryRows = [canaryRow()];
+      o1Lookup.mockResolvedValue(null);
+      await service.retryHubbleReconcile(gifsy, 'o1');
+      const where = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+      expect(where.deliveredAt).toEqual({ not: null });
+      expect(where.OR).toEqual([
+        { metadata: { path: ['hubbleAccount'], equals: 'api.dev.myhubble.money/partner#0123456789abcdef' } },
+        { metadata: { path: ['hubbleAccount'], equals: 'api.dev.myhubble.money#0123456789abcdef' } },
+        { partner: { clientId: 'bajaj' } },
+      ]);
     });
   });
 

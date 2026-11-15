@@ -116,6 +116,7 @@ export function isHubbleNotFoundBody(json: unknown): boolean {
   const b = json as Record<string, unknown>;
   // Generic framework / gateway 404 shapes → NOT Hubble's own answer.
   if (typeof b.status === 'number') return false; // Spring Boot / many gateways: { status: 404, error, path, timestamp }
+  if (typeof b.statusCode === 'number') return false; // NestJS / Fastify / API-gateway style: { statusCode, message, error }
   if (typeof b.error === 'string' && /^\s*not\s*found\s*$/i.test(b.error)) return false;
   if ('timestamp' in b && 'path' in b) return false;
   if (
@@ -162,6 +163,14 @@ export function hubbleAccountFingerprintMatches(recorded: string, current: strin
 }
 
 /**
+ * A 400/422 whose code / id / message hints at a TRANSIENT or "the order may exist" condition (a
+ * duplicate / already-existing reference, in progress, retry, timeout, internal error, unavailable,
+ * rate limit) is NOT a definitive rejection — Hubble may hold (or still create) the order.
+ */
+const HUBBLE_NON_DEFINITIVE_REJECTION =
+  /duplicate|already|exist|in.?progress|processing|retry|timeout|timed.?out|internal|unavailable|rate|limit|try again/i;
+
+/**
  * placeOrder got a DEFINITIVE rejection from Hubble: HTTP 400 / 422 with Hubble's own JSON error body
  * (isHubbleNotFoundBody's error shape — not an order, not a generic framework/gateway body). Hubble
  * read the request and refused it (e.g. product inactive, invalid amount), so the order was not
@@ -176,6 +185,15 @@ export class HubblePlaceOrderRejectedError extends Error {
     super(`Hubble placeOrder rejected (HTTP ${httpStatus}${hubbleCode ? ` ${hubbleCode}` : ''})`);
     this.name = 'HubblePlaceOrderRejectedError';
   }
+}
+
+/** A Hubble error body whose wording is transient / "may already exist" (see HUBBLE_NON_DEFINITIVE_REJECTION). */
+function isNonDefinitiveRejection(json: unknown): boolean {
+  const b = (json ?? {}) as Record<string, unknown>;
+  const text = [b.id, b.code, b.message, b.error, b.errorCode]
+    .filter((v): v is string => typeof v === 'string')
+    .join(' ');
+  return HUBBLE_NON_DEFINITIVE_REJECTION.test(text);
 }
 
 /** Hubble credentials are not present in this environment. */
@@ -394,7 +412,7 @@ export class HubbleService {
     });
 
     if (status < 200 || status >= 300) {
-      if ((status === 400 || status === 422) && isHubbleNotFoundBody(json)) {
+      if ((status === 400 || status === 422) && isHubbleNotFoundBody(json) && !isNonDefinitiveRejection(json)) {
         const b = json as Record<string, unknown>;
         const code = [b.id, b.code].find((v) => typeof v === 'string' && v.trim() !== '') as string | undefined;
         throw new HubblePlaceOrderRejectedError(status, code ?? null);

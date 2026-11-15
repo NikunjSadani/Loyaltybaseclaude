@@ -384,6 +384,20 @@ describe('GIFVC — voucher handling', () => {
     },
   );
 
+  it('GIFVC11f: a flagged DELIVERED order (possible double issuance) hides Retry and offers Acknowledge', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
+    expect(within(row).getByRole('button', { name: /acknowledge — resolved/i })).toBeInTheDocument();
+  });
+
+  it('GIFVC11g: the row shows WHY Hubble\'s "no order" was not trusted', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE', hubbleNoOrderUnverifiedWhy: 'no delivered Hubble order on this Hubble account to verify against' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).getByTestId('hubble-no-order-unverified')).toHaveTextContent(/not trusted: no delivered Hubble order on this Hubble account/);
+    expect(within(row).getByRole('button', { name: /retry with hubble/i })).toBeInTheDocument();
+  });
+
   it('GIFVC11d: an open-order flag (HUBBLE_WEBHOOK_BUT_NOT_FOUND) keeps Retry and offers no Acknowledge', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_BUT_NOT_FOUND' }]);
     const row = await openRow('RDM-1');

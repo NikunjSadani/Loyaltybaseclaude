@@ -231,6 +231,10 @@ describe('HubbleService', () => {
     await expect(svc.getOrderByReference('r1')).rejects.toThrow(/HTTP 503/);
   });
 
+  it('isHubbleNotFoundBody screens a numeric statusCode like status', () => {
+    expect(isHubbleNotFoundBody({ statusCode: 404, message: 'Order not found' })).toBe(false);
+  });
+
   it('isHubbleNotFoundBody: the Hubble E-style error is accepted, generic framework bodies are not', () => {
     expect(isHubbleNotFoundBody({ id: 'E102', code: 'OPERATION_NOT_ALLOWED', message: 'Brand is not active' })).toBe(true);
     expect(isHubbleNotFoundBody({ message: 'Not Found' })).toBe(false);
@@ -315,6 +319,13 @@ describe('HubbleService', () => {
     ['429', 429, { id: 'E429', message: 'slow down' }],
     ['400 with a generic framework body', 400, { timestamp: 't', status: 400, error: 'Bad Request', path: '/v1/partners/orders' }],
     ['400 with no body', 400, undefined],
+    ['400 duplicate reference', 400, { id: 'E201', code: 'DUPLICATE_REFERENCE', message: 'Order with this referenceId already exists' }],
+    ['422 order in progress', 422, { code: 'ORDER_IN_PROGRESS', message: 'Order is being processed' }],
+    ['400 internal error', 400, { id: 'E500', code: 'INTERNAL_ERROR', message: 'Something went wrong' }],
+    ['400 retry later', 400, { code: 'E1', message: 'Please try again later' }],
+    ['400 rate limited', 400, { code: 'RATE_LIMITED', message: 'Too many requests' }],
+    ['400 provider unavailable', 400, { code: 'E9', message: 'Brand provider unavailable' }],
+    ['400 with a NestJS-style statusCode body', 400, { statusCode: 400, message: 'Bad Request' }],
   ])('placeOrder %s → a plain (INDETERMINATE) Error, never a definitive rejection', async (_n, status, body) => {
     const svc = makeService();
     fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce(jsonRes(status, body));

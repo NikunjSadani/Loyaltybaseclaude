@@ -6037,7 +6037,8 @@ describe('RewardsService', () => {
 
         const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
 
-        expect(out).toBe('NO_HUBBLE_ORDER_UNVERIFIED');
+        // Fail closed into the same pending state as an indeterminate placement (ops retry may refund later).
+        expect(out).toBe('PENDING_INDETERMINATE');
         expect(mockWallet.reverse).not.toHaveBeenCalled();
         // No refund claim / FAILED flip at all.
         expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
@@ -6147,7 +6148,9 @@ describe('RewardsService', () => {
         expect(res.status).toBe('CONFIRMED');
         expect(res.status).not.toBe('DELIVERED');
         expect(res.message).not.toMatch(/has been issued/);
-        expect(res.message).toMatch(/being issued/);
+        // A stuck state: the owner's pending copy — never "shortly".
+        expect(res.message).toMatch(/taking longer than usual/);
+        expect(res.message).not.toMatch(/shortly/);
         // No DELIVERED claim was even attempted; flagged for reconcile.
         expect(
           mockPrisma.redemptionOrder.updateMany.mock.calls.some(([a]) => (a as { data?: { status?: string } })?.data?.status === 'DELIVERED'),
@@ -6321,7 +6324,7 @@ describe('RewardsService', () => {
             metadata: expect.objectContaining({
               hubbleNeedsReconcile: false,
               hubbleReconcileResolution: 'FAILED_REFUNDED',
-              hubbleRefund: expect.objectContaining({ reason: 'wallet empty', by: 'actor1' }),
+              hubbleRefund: expect.objectContaining({ reason: 'wallet empty', by: 'actor1', source: 'HUBBLE_FAILED' }),
             }),
           },
         });

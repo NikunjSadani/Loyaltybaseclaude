@@ -53,8 +53,20 @@ export class HubbleWebhookController {
 
     // The reconcile is fully idempotent + self-contained (get-by-reference → apply
     // terminal transition). It never throws into the HTTP layer.
-    const outcome = await this.rewards.reconcileHubbleOrder(referenceId);
+    const outcome = await this.rewards.reconcileHubbleOrder(referenceId, { webhookStatus: this.extractStatus(payload) });
     return { ok: true, reconciled: true, outcome };
+  }
+
+  /** The order status the webhook reports (top-level, or under `data` / `order`), upper-cased; null if none. */
+  private extractStatus(payload: unknown): string | null {
+    if (!payload || typeof payload !== 'object') return null;
+    const p = payload as Record<string, unknown>;
+    for (const src of [p, p.data, p.order]) {
+      if (src && typeof src === 'object' && typeof (src as Record<string, unknown>).status === 'string') {
+        return ((src as Record<string, unknown>).status as string).trim().toUpperCase() || null;
+      }
+    }
+    return null;
   }
 
   /**

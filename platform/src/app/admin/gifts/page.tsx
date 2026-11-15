@@ -120,6 +120,8 @@ interface OrderItem {
   /** Operator view: the order was sent to Hubble and needs ops (retry or manual fulfilment). */
   hubbleNeedsReconcile?: boolean;
   hubbleReconcileReason?: string | null;
+  /** Why Hubble's last "no order" answer was not trusted (it couldn't be checked against a known Hubble order). */
+  hubbleNoOrderUnverifiedWhy?: string | null;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -1656,10 +1658,13 @@ function OrderRow({
   // A post-refund review flag (points already refunded; a Hubble webhook arrived later): retry and
   // manual fulfilment don't apply — ops check Hubble's portal and "Acknowledge — resolved".
   // Any flag left on an order that is already terminal (FAILED / CANCELLED / RETURNED — points returned)
-  // is treated the same way: Retry can't act on it, so Acknowledge is the exit (the backend agrees).
+  // or DELIVERED (e.g. a possible double issuance) is treated the same way: Retry can't act on it, so
+  // Acknowledge is the exit (the backend accepts exactly these).
   const postRefundFlag =
     needsReconcile &&
-    (HUBBLE_POST_REFUND_FLAGS.has(order.hubbleReconcileReason ?? '') || TERMINAL_REFUND_STATUSES.has(order.status));
+    (HUBBLE_POST_REFUND_FLAGS.has(order.hubbleReconcileReason ?? '') ||
+      TERMINAL_REFUND_STATUSES.has(order.status) ||
+      order.status === 'DELIVERED');
   const canRetryHubble =
     needsReconcile && !postRefundFlag && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
   const [ackOpen, setAckOpen] = useState(false);
@@ -1855,6 +1860,17 @@ function OrderRow({
               title={order.hubbleReconcileReason ?? undefined}
             >
               Needs reconcile · {hubbleReasonLabel(order.hubbleReconcileReason)}
+            </span>
+          )}
+          {needsReconcile && order.hubbleNoOrderUnverifiedWhy && (
+            <span
+              className="block mt-0.5 text-[10px] text-amber-700"
+              data-testid="hubble-no-order-unverified"
+              title={order.hubbleNoOrderUnverifiedWhy}
+            >
+              Hubble said “no order”, not trusted: {order.hubbleNoOrderUnverifiedWhy.length > 120
+                ? `${order.hubbleNoOrderUnverifiedWhy.slice(0, 120)}…`
+                : order.hubbleNoOrderUnverifiedWhy}
             </span>
           )}
         </td>
