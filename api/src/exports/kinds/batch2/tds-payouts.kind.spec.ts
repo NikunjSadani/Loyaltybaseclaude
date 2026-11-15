@@ -119,7 +119,7 @@ describe('tds-payouts export kind', () => {
     const prisma = db([], outlets());
     const params = TDS_PAYOUTS_KIND.parseParams({ period: '2026-01' }, CLIENT);
     expectSameWorkbook((await renderKind(TDS_PAYOUTS_KIND, ctxFor(CLIENT, prisma), params)).buffer, await oldDownload(prisma, { clientId: 'bajaj', period: '2026-01' }));
-  });
+  }, 30_000); // xlsx build + parity read is slow under full-suite load (timed out at 5 s on 2026-11-15)
 
   it('scope: assumed operator pinned; un-assumed Gifsy may pick a tenant; heavy rule; access; validation', () => {
     expect(TDS_PAYOUTS_KIND.parseParams({ clientId: 'other' }, ASSUMED)).toEqual({ clientId: 'bajaj', period: null });
