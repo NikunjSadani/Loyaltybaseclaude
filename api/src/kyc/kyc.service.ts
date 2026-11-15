@@ -30,6 +30,7 @@ import { sniffFileType } from '../common/file-signature';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { isActivePhoneConflict } from '../common/phone-conflict';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
+import { isPartnerLoginRole } from '../partner/partner-display.helper';
 // Outlet-master geo-fence (Bajaj-only). REUSE the pure visibility haversine + validity helpers
 // and the shared radius constant — never re-implement the distance math (per the design).
 import {
@@ -3982,9 +3983,8 @@ export class KycService {
     // Intra-tenant read leak fix: a partner could read ANY submission's wallet
     // ledger in their tenant (PII). Restrict partner callers to their own
     // submission; admins + sales stay tenant-wide (mirrors list()).
-    const PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
     const where: Prisma.KycSubmissionWhereInput = { id, ...this.kycTenantFilter(user) };
-    if (PARTNER_ROLES.includes(user.role)) where.userId = user.sub; // a partner may only read their own KYC
+    if (isPartnerLoginRole(user.role)) where.userId = user.sub; // a partner may only read their own KYC
 
     const submission = await this.prisma.kycSubmission.findFirst({
       where,

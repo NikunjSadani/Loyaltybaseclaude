@@ -166,6 +166,12 @@ export async function verifyOTP(
     if (refreshToken) {
       cookieStore.set('refresh_token', refreshToken, { ...cookieBase, maxAge: REFRESH_MAX_AGE });
     }
+    // A fresh login always starts on the login's OWN outlet: drop any leftover multi-outlet
+    // selection (`active_partner_id`, 30-day, set by the picker/switcher — see
+    // lib/active-partner-actions.ts). Without this a previous session's sibling pick would survive
+    // the login, so the stored login-reply outlet name (always the OWN outlet) would paint first and
+    // then flip to the sibling once /partner/me resolved. Non-partner logins have no such cookie.
+    cookieStore.delete('active_partner_id');
 
     return { success: true, role: user?.role, token, user };
   } catch {

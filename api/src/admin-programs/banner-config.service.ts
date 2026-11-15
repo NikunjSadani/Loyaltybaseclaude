@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { UpdateBannerConfigDto } from './dto/banner-config.dto';
+import { isPartnerLoginRole } from '../partner/partner-display.helper';
 
 const SETTING_KEY = 'banner_config';
 
@@ -20,12 +21,10 @@ const SETTING_KEY = 'banner_config';
 export class BannerConfigService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Partner roles are the audience, not the managers — blocked from reading config. */
-  private static readonly PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
-
   /** GET /v1/admin/banner-config */
   async get(user: JwtPayload) {
-    if (BannerConfigService.PARTNER_ROLES.includes(user.role)) {
+    // Partner roles are the audience, not the managers — blocked from reading config.
+    if (isPartnerLoginRole(user.role)) {
       throw new ForbiddenException('Forbidden');
     }
     const setting = await this.prisma.programSetting.findFirst({

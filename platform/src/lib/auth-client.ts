@@ -79,6 +79,32 @@ export function getStoredUser(): StoredUser | null {
 }
 
 /**
+ * Overwrite ONLY the partner header display identity (businessName / outletName) on the stored
+ * `user`, keeping every other field (id/name/role/phone) as-is. Called with the authoritative values
+ * from each successful GET /partner/me (and just before an outlet pick navigates), so the NEXT mount
+ * paints the ACTIVE outlet's name from the first frame — not the login's own outlet after a sibling
+ * switch, nor a pre-rename name. No stored user (logged out) → no-op: this never creates a session.
+ * Display state only — no token is (or ever was) in this object (AF-6).
+ */
+export function updateStoredPartnerDisplay(display: {
+  businessName: string | null;
+  outletName: string | null;
+}): void {
+  if (typeof window === 'undefined') return;
+  const current = getStoredUser();
+  if (!current) return;
+  if (current.businessName === display.businessName && current.outletName === display.outletName) return;
+  try {
+    localStorage.setItem(
+      USER_KEY,
+      JSON.stringify({ ...current, businessName: display.businessName, outletName: display.outletName }),
+    );
+  } catch {
+    /* storage full / blocked — display hint only; the live /partner/me value still renders */
+  }
+}
+
+/**
  * Client-side "is there a session?" check. Based on the NON-sensitive stored user
  * (the real credential is the httpOnly cookie + backend verification). A guard that
  * passes here but has no valid cookie still gets a 401 from the backend → the

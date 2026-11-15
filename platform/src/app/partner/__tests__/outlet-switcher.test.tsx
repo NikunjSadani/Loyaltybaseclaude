@@ -25,7 +25,12 @@ vi.mock('@/components/layout/nav-bottom', () => ({ NavBottom: () => null }));
 vi.mock('@/components/layout/sidebar', () => ({ Sidebar: () => null }));
 vi.mock('@/components/layout/site-footer', () => ({ SiteFooter: () => null }));
 vi.mock('@/components/auth/require-auth', () => ({ RequireAuth: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
-vi.mock('@/lib/partner-identity', () => ({ usePartnerIdentity: () => ({}), announceActivePartnerChanged: vi.fn() }));
+const rememberMock = vi.fn();
+vi.mock('@/lib/partner-identity', () => ({
+  usePartnerIdentity: () => ({}),
+  announceActivePartnerChanged: vi.fn(),
+  rememberActiveOutletDisplay: (o: unknown) => rememberMock(o),
+}));
 vi.mock('@/lib/platform/client-config-context', () => ({ useClientConfig: () => ({ branding: {} }) }));
 vi.mock('@/lib/auth-client', () => ({ logout: vi.fn(), PORTAL_ROLES: { partner: [] } }));
 
@@ -83,6 +88,9 @@ describe('OS — outlet switcher', () => {
     await user.click(screen.getByRole('button'));
     await user.click(screen.getByRole('menuitem', { name: /kumar wholesale/i }));
     await waitFor(() => expect(setActivePartnerMock).toHaveBeenCalledWith('p-sib'));
+    // The picked outlet's names are stored BEFORE the hard reload, so the reloaded header paints it.
+    await waitFor(() => expect(rememberMock).toHaveBeenCalledWith(SIB));
+    expect(window.location.href).toBe('/partner/dashboard');
   });
 
   it('OS4: clicking the already-active outlet does NOT re-set the cookie', async () => {

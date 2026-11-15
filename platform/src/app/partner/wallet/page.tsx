@@ -11,6 +11,7 @@ import { PayoutStatementRow } from '@/components/wallet/payout-statement-row';
 import { TransactionType, WalletBucket, type WalletBalance, type WalletTransaction } from '@/types';
 import type { PayoutLedgerEntry } from '@/types';
 import { usePartnerIdentity } from '@/lib/partner-identity';
+import { statementOutlet } from '@/lib/wallet-statement/statement-outlet';
 import { authHeader } from '@/lib/api-client';
 
 
@@ -360,10 +361,14 @@ export default function WalletPage() {
     const res = await fetch(`/api/wallet/statement?from=${activeFrom}&to=${activeTo}`, { headers: { ...authHeader() } });
     const json = await res.json();
     if (!res.ok || !json?.success || !Array.isArray(json.data?.rows)) throw new Error('statement unavailable');
-    const api = json.data as StatementApiResponse & { outletCode?: string };
+    const api = json.data as StatementApiResponse & { outletCode?: string; outletName?: string | null };
+    // Name AND code from the SAME outlet: the statement response's own pair (never the shell
+    // identity's possibly-stale/seeded name next to the response's code). Throws — the button
+    // shows its error state — rather than build a mixed-outlet statement.
+    const outlet = statementOutlet(api, identity);
     return buildStatementDoc(api, payouts, {
-      outletName: identity.outletName || identity.businessName,
-      outletCode: api.outletCode ?? outletCode,
+      outletName: outlet.outletName,
+      outletCode: outlet.outletCode,
       from: activeFrom,
       to: activeTo,
     });

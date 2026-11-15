@@ -2,8 +2,10 @@
    Sources the logged-in partner's real identity from GET /api/partner/me (the
    channel-partner record), replacing the demo persona in lib/partner-session
    (DEMO_SESSIONS — "Rajesh Kumar / Kumar General Store / Gold") for shell/header
-   display. While loading it shows the OUTLET identity stored from the login reply
-   (outletName/businessName), so the header title never flashes the person's name; a
+   display. While loading it shows the OUTLET identity stored in the `user` object
+   (outletName/businessName — from the login reply, then overwritten by every successful
+   /partner/me and by an outlet pick, so it names the last-known ACTIVE outlet even after a
+   sibling switch or an admin rename), so the header title never flashes the person's name; a
    pre-deploy stored login without those fields (or a caller with no channel-partner row)
    falls back to the JWT user name — NEVER the demo persona, so no flash-of-demo. Client-only.
 ─────────────────────────────────────────────────────────────────────────────── */
@@ -12,7 +14,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { authHeader } from '@/lib/api-client';
-import { getStoredUser } from '@/lib/auth-client';
+import { getStoredUser, updateStoredPartnerDisplay } from '@/lib/auth-client';
 import { setActivePartner } from '@/lib/active-partner-actions';
 import type { FeatureFlags } from '@/lib/platform/client-config';
 import { DEFAULT_FEATURES, normalizeFeatures } from '@/lib/tenant-features';
@@ -131,21 +133,18 @@ export interface PartnerIdentity {
    * gate/empty state to a partner who actually has points.
    */
   loading: boolean;
+  /**
+   * True only once a SUCCESSFUL GET /partner/me has settled for the CURRENT active-outlet selection
+   * (false while loading, after a failure, and while a post-pick refetch is in flight). Unlike
+   * `loading`, a failure does NOT make this true — so a consumer that must name the ACTIVE outlet
+   * (e.g. the wallet statement download) can tell a confirmed identity from the stored/seeded one.
+   */
+  resolved: boolean;
 }
 
-/**
- * Returns the real partner identity. Resolves synchronously to the JWT user name
- * (real) and upgrades to the channel-partner record once /partner/me responds.
- */
-export function usePartnerIdentity(): PartnerIdentity {
-  // The initial render must NOT read client-only storage (getStoredUser → localStorage):
-  // during SSR it returns '' and on the client's first paint it returns the cached name,
-  // so the shell header text differs server↔client → a hydration mismatch (React #418,
-  // app-wide). Start empty so SSR and the first client paint agree, then seed the cached
-  // name in the post-mount effect below — it fills on the first post-mount commit (a ≤1-frame
-  // blank name is the accepted tradeoff for removing the app-wide hydration error).
-  const [identity, setIdentity] = useState<PartnerIdentity>({
-    businessName: '',
+/** The pre-/partner/me defaults (also what a failed post-pick refetch resets to — see load()). */
+const INITIAL_IDENTITY: PartnerIdentity = {
+  businessName: '',
     outletName: null,
     ownerName: '',
     partnerCode: null,
@@ -168,7 +167,62 @@ export function usePartnerIdentity(): PartnerIdentity {
     activeSelectorInvalid: false,
     deliveryDefaults: null,
     loading: true,
-  });
+    resolved: false,
+};
+
+/**
+ * Overlay the stored display identity (getStoredUser) onto `base`'s empty name fields. The header
+ * TITLE comes from the stored OUTLET identity (outletName / businessName — the login reply's own
+ * outlet, then overwritten by every successful /partner/me and by an outlet pick, so it names the
+ * last-known ACTIVE outlet), never the person's user.name, so the title doesn't flip person → outlet
+ * on every load. The person name still seeds ownerName (the sub-line). A stored login from BEFORE the
+ * backend added those fields has neither → legacy behaviour (person name as the provisional title).
+ */
+function withStoredSeed(base: PartnerIdentity): PartnerIdentity {
+  const stored = getStoredUser();
+  if (!stored) return base;
+  const personName = stored.name ?? '';
+  const loginOutletName = stored.outletName || null;
+  const loginTitle = loginOutletName || stored.businessName || '';
+  if (!personName && !loginTitle) return base;
+  return {
+    ...base,
+    businessName: base.businessName || (loginTitle ? stored.businessName || loginTitle : personName),
+    outletName: base.outletName ?? loginOutletName,
+    ownerName: base.ownerName || personName,
+  };
+}
+
+/** Persist /partner/me's (or a picked outlet's) display names into the stored user for the next paint. */
+function rememberDisplay(src: { businessName?: unknown; outletName?: unknown }): void {
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
+  updateStoredPartnerDisplay({ businessName: str(src.businessName), outletName: str(src.outletName) });
+}
+
+/**
+ * Record the outlet the login is about to ACT AS (picker / switcher / Group Overview → own outlet)
+ * in the stored user BEFORE navigating, so the very next paint — including the switcher's hard
+ * reload, and the header after a failed post-pick refetch — names the picked outlet, not the
+ * previous one. No-op for a missing outlet. /partner/me's own write-back then confirms it.
+ */
+export function rememberActiveOutletDisplay(
+  outlet: Pick<OperableOutlet, 'businessName' | 'outletName'> | null | undefined,
+): void {
+  if (outlet) rememberDisplay(outlet);
+}
+
+/**
+ * Returns the real partner identity. Resolves synchronously to the JWT user name
+ * (real) and upgrades to the channel-partner record once /partner/me responds.
+ */
+export function usePartnerIdentity(): PartnerIdentity {
+  // The initial render must NOT read client-only storage (getStoredUser → localStorage):
+  // during SSR it returns '' and on the client's first paint it returns the cached name,
+  // so the shell header text differs server↔client → a hydration mismatch (React #418,
+  // app-wide). Start empty so SSR and the first client paint agree, then seed the cached
+  // name in the post-mount effect below — it fills on the first post-mount commit (a ≤1-frame
+  // blank name is the accepted tradeoff for removing the app-wide hydration error).
+  const [identity, setIdentity] = useState<PartnerIdentity>(INITIAL_IDENTITY);
 
   // Guards the self-heal so the stale `active_partner_id` cookie is cleared AT MOST ONCE
   // per component mount — clearing it triggers no refetch here, but this makes the intent
@@ -180,29 +234,10 @@ export function usePartnerIdentity(): PartnerIdentity {
   // hydration SSR and the first client paint agree (both empty), then this fills the name
   // on the first post-mount commit (≤1 frame later), well before /partner/me resolves. The
   // old code filled it during the first paint but at the cost of the app-wide hydration error.
-  //
-  // The header TITLE is seeded from the OUTLET identity the login reply carries (outletName /
-  // businessName — the same values /partner/me returns for the login's default outlet), never
-  // the person's user.name, so the title no longer flips person → outlet on every load. The
-  // person name still seeds ownerName (the sub-line). A stored login from BEFORE the backend
-  // added those fields has neither → legacy behaviour (person name as the provisional title).
+  // See withStoredSeed for which stored fields seed which identity fields.
   useEffect(() => {
-    const stored = getStoredUser();
-    if (!stored) return;
-    const personName = stored.name ?? '';
-    const loginOutletName = stored.outletName || null;
-    const loginTitle = loginOutletName || stored.businessName || '';
-    if (!personName && !loginTitle) return;
-    setIdentity((prev) => {
-      // /partner/me already settled — its (authoritative) values win; nothing to seed.
-      if (!prev.loading) return prev;
-      return {
-        ...prev,
-        businessName: prev.businessName || (loginTitle ? stored.businessName || loginTitle : personName),
-        outletName: prev.outletName ?? loginOutletName,
-        ownerName: prev.ownerName || personName,
-      };
-    });
+    // /partner/me already settled — its (authoritative) values win; nothing to seed.
+    setIdentity((prev) => (prev.loading ? withStoredSeed(prev) : prev));
   }, []);
 
   useEffect(() => {
@@ -210,8 +245,15 @@ export function usePartnerIdentity(): PartnerIdentity {
     // Monotonic request id: a refetch (after an outlet pick) must never be overwritten by an
     // older in-flight response for the previously-active outlet.
     let seq = 0;
-    const load = () => {
+    // `afterPick` = a refetch fired by announceActivePartnerChanged (the cookie now names a
+    // DIFFERENT outlet than the current state); `retried` = this is that refetch's one retry.
+    const load = (afterPick = false, retried = false) => {
       const mine = ++seq;
+      // The current state describes the PREVIOUS outlet until this refetch succeeds — it is no
+      // longer a confirmed identity for the active selection.
+      if (afterPick && !retried) {
+        setIdentity((prev) => (prev.resolved ? { ...prev, resolved: false } : prev));
+      }
       fetch('/api/partner/me', { headers: { ...authHeader() } })
       // A non-OK reply is a FAILURE (→ .catch keeps the seeded outlet title), not a resolved
       // "no channel partner" — previously it fell through with d=null and replaced the title
@@ -232,6 +274,11 @@ export function usePartnerIdentity(): PartnerIdentity {
           healedRef.current = true;
           void setActivePartner(null);
         }
+        // Write the ACTIVE outlet's authoritative display names back into the stored user, so the
+        // next mount/reload paints THIS outlet from the first frame (a sibling selection survives
+        // reloads via the 30-day cookie; an admin rename lands here too). Only for a real partner
+        // row — a resolved "no channel partner" (d null) leaves the stored user untouched.
+        if (d && typeof d === 'object') rememberDisplay(d);
         // Settle loading regardless — a caller with no channel-partner row (d null) is a
         // resolved "no activity" state, not an eternal load.
         setIdentity((prev) => ({
@@ -253,11 +300,25 @@ export function usePartnerIdentity(): PartnerIdentity {
           activeSelectorInvalid: d?.activeSelectorInvalid === true,
           deliveryDefaults: isDeliveryDefaults(d?.deliveryDefaults) ? d.deliveryDefaults : null,
           loading: false,
+          resolved: true,
         }));
       })
       .catch(() => {
-        // Keep the seeded (login-reply / JWT-name) fallback, but settle loading so gates can resolve.
-        if (!cancelled && mine === seq) setIdentity((prev) => ({ ...prev, loading: false }));
+        if (cancelled || mine !== seq) return;
+        if (!afterPick) {
+          // Initial load: keep the seeded (stored / JWT-name) fallback, but settle loading so gates resolve.
+          setIdentity((prev) => ({ ...prev, loading: false }));
+          return;
+        }
+        // After a pick the state still holds the PREVIOUS outlet (nav flags, activity, outlets, active
+        // id) while the cookie names the new one. Retry once; if that fails too, never present the old
+        // outlet's state as the new one's — reset to the defaults + the stored title (which the pick
+        // already set to the picked outlet via rememberActiveOutletDisplay).
+        if (!retried) {
+          load(true, true);
+          return;
+        }
+        setIdentity(withStoredSeed({ ...INITIAL_IDENTITY, loading: false }));
       });
     };
     load();
@@ -265,7 +326,7 @@ export function usePartnerIdentity(): PartnerIdentity {
     // stays mounted across a client-side router.push — so a pick on /partner/select would leave
     // the shell header/nav on the pre-pick outlet until a full reload. Callers that change the
     // selection announce it; we re-read /partner/me (now carrying the new cookie).
-    const onChanged = () => load();
+    const onChanged = () => load(true);
     window.addEventListener(ACTIVE_PARTNER_CHANGED_EVENT, onChanged);
     return () => {
       cancelled = true;

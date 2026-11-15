@@ -32,8 +32,9 @@ type Db = Pick<Prisma.TransactionClient, 'channelPartner' | 'outlet'>;
 
 /**
  * The login roles that can own a ChannelPartner / reach the partner shell — mirrors the FE
- * `PORTAL_ROLES.partner` and the backend's existing PARTNER_ROLES lists. Used to skip the
- * display lookup entirely for sales/admin/Gifsy/vendor logins.
+ * `PORTAL_ROLES.partner`. Used to skip the display lookup entirely for sales/admin/Gifsy/vendor
+ * logins, and (via isPartnerLoginRole) by the banner-config / admin-visibility / KYC partner gates,
+ * which previously each kept their own copy of this list.
  */
 export const PARTNER_LOGIN_ROLES: readonly string[] = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
 
@@ -50,9 +51,13 @@ export interface PartnerDisplayIdentity {
 
 /**
  * Resolve the display identity of the login's DEFAULT (own) outlet — exactly what GET /partner/me
- * returns as businessName/outletName when no `active_partner_id` selector is sent (the selector
- * cookie is cleared at login). Returns null when the login has no channel partner (sales/admin/
- * vendor logins, parent-only phones), so non-partner logins are unchanged.
+ * returns as businessName/outletName when no `active_partner_id` selector is sent. The FE OTP-login
+ * server action (platform verifyOTP) deletes that cookie on every successful login, so a fresh login
+ * starts on its own outlet and this matches the first /partner/me. GET /auth/me (the login page's
+ * live-session re-hydrate) does NOT clear it, so there a still-selected sibling can differ from this
+ * value — the FE then overwrites the stored name from every successful /partner/me. Returns null
+ * when the login has no channel partner (sales/admin/vendor logins, parent-only phones), so
+ * non-partner logins are unchanged.
  */
 export async function resolveLoginPartnerDisplay(
   db: Db,

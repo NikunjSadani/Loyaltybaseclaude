@@ -44,7 +44,7 @@ import { announceActivePartnerChanged } from '@/lib/partner-identity';
 const PERSON = 'VIKRAM SINGH';
 
 function storeUser(extra: Record<string, unknown> = {}) {
-  localStorage.setItem('user', JSON.stringify({ id: 'u1', name: PERSON, role: 'RETAILER', phone: '9', ...extra }));
+  localStorage.setItem('user', JSON.stringify({ id: 'u1', name: PERSON, role: 'WHOLESALER', phone: '9', ...extra }));
 }
 
 type Deferred = { resolve: (v: unknown) => void; promise: Promise<unknown> };
@@ -140,5 +140,27 @@ describe('HOT — partner header title from first paint', () => {
     });
     await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
     expect(title(container)).toBe('Kumar WS');
+  });
+
+  it('HOT7: /partner/me (sibling B active) is written back — the NEXT mount paints B from the first frame', async () => {
+    // The login reply stored the OWN outlet A; the 30-day selection cookie names sibling B.
+    storeUser({ businessName: 'Kumar General Store', outletName: 'Kumar GS' });
+    const first = renderShell();
+    await waitFor(() => expect(title(first.container)).toBe('Kumar GS'));
+    await act(async () => {
+      pending[0].resolve(okMe({ businessName: 'Kumar Wholesale', outletName: 'Kumar WS', activePartnerId: 'p-sib' }));
+    });
+    await waitFor(() => expect(title(first.container)).toBe('Kumar WS'));
+    first.unmount();
+
+    // Reload: /partner/me is pending again — the header must already say B (no A→B flip).
+    const second = renderShell();
+    await waitFor(() => expect(title(second.container)).toBe('Kumar WS'));
+    expect(pending).toHaveLength(2);
+    expect(title(second.container)).not.toBe('Kumar GS');
+    // Only the display fields changed — the session fields are untouched.
+    expect(JSON.parse(localStorage.getItem('user') ?? '{}')).toEqual({
+      id: 'u1', name: PERSON, role: 'WHOLESALER', phone: '9', businessName: 'Kumar Wholesale', outletName: 'Kumar WS',
+    });
   });
 });
