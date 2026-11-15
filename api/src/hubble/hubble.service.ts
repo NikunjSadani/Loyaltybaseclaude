@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 /**
  * Hubble Money integration — the thin HTTP client for the vendor's Partner API.
@@ -92,6 +92,32 @@ export interface HubbleProduct {
   maxVouchersPerOrder: number | null;
 }
 
+/**
+ * The "no order for this reference" contract we rely on (getOrderByReference → null).
+ *
+ * ⚠️ NOT documented in this repo: the owner-supplied spec covers the by-reference route but not its
+ * 404 body. The only Hubble error body seen in practice (staging, products endpoint, 2026-11-11) is
+ * JSON `{ id: 'E102', code: 'OPERATION_NOT_ALLOWED', message: 'Brand is not active' }`. So a 404
+ * counts as Hubble's own "not found" ONLY when the body is a JSON OBJECT in that error shape —
+ * a non-empty string `id`, `code` or `message` — and is not order-shaped (no SUCCESS/PROCESSING/
+ * FAILED `status`, no `vouchers`, top-level or under `data`/`order`). An empty / non-JSON (HTML, gateway, proxy) / array / order-shaped 404 body is NOT
+ * proof and is treated as indeterminate. OWNER-VERIFY against Hubble's API reference (the exact
+ * error id / code for an unknown referenceId) and tighten this to that code when known.
+ */
+export function isHubbleNotFoundBody(json: unknown): boolean {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return false;
+  const b = json as Record<string, unknown>;
+  // Order-shaped (an order status / vouchers, top-level or nested like normaliseOrderBody reads) → not a not-found.
+  const looksLikeOrder = (o: unknown): boolean => {
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
+    const r = o as Record<string, unknown>;
+    return Array.isArray(r.vouchers) || (typeof r.status === 'string' && /^(SUCCESS|PROCESSING|FAILED)$/i.test(r.status.trim()));
+  };
+  if (looksLikeOrder(b) || looksLikeOrder(b.data) || looksLikeOrder(b.order)) return false;
+  const nonEmpty = (v: unknown) => typeof v === 'string' && v.trim() !== '';
+  return nonEmpty(b.id) || nonEmpty(b.code) || nonEmpty(b.message);
+}
+
 /** Hubble credentials are not present in this environment. */
 export class HubbleNotConfiguredError extends Error {
   constructor() {
@@ -177,6 +203,24 @@ export class HubbleService {
    */
   isConfigured(): boolean {
     return !!this.clientId() && !!this.clientSecret();
+  }
+
+  /**
+   * NON-SECRET fingerprint of the Hubble account this instance talks to: `<api host>#<first 16
+   * hex of sha256(clientId)>`. Stamped on an order at place time so a later "no order for this
+   * reference" is only trusted against the SAME account (a different base URL / client would of
+   * course not know the order). null when not configured.
+   */
+  accountFingerprint(): string | null {
+    const clientId = this.clientId();
+    if (!clientId || !this.clientSecret()) return null;
+    let host: string;
+    try {
+      host = new URL(this.baseUrl()).host.toLowerCase();
+    } catch {
+      host = this.baseUrl().toLowerCase();
+    }
+    return `${host}#${createHash('sha256').update(clientId).digest('hex').slice(0, 16)}`;
   }
 
   /** Force the next call to re-authenticate (used after a 401). */
@@ -293,16 +337,21 @@ export class HubbleService {
   }
 
   /**
-   * Recover/poll an order by OUR referenceId. Returns null on a 404 (Hubble has no
-   * such order — definitively never placed), the parsed result otherwise. A non-404
-   * error status THROWS (indeterminate — the caller must not assume "not placed").
+   * Recover/poll an order by OUR referenceId. Returns null ONLY on Hubble's own "no such order"
+   * answer (see isHubbleNotFoundBody), the parsed result on 2xx. Everything else THROWS
+   * (indeterminate — the caller must not assume "not placed"): a non-2xx other than 404, and a
+   * 404 whose body is not a Hubble JSON error (an HTML / gateway / proxy / empty 404 — e.g. a
+   * wrong base URL or a route change — proves nothing about the order).
    */
   async getOrderByReference(referenceId: string): Promise<HubbleOrderResult | null> {
     const { status, json } = await this.authedFetch(
       'GET',
       `/v1/partners/orders/by-reference/${encodeURIComponent(referenceId)}`,
     );
-    if (status === 404) return null;
+    if (status === 404) {
+      if (isHubbleNotFoundBody(json)) return null;
+      throw new Error('Hubble getOrderByReference HTTP 404 with an unrecognised body (not a Hubble error) — indeterminate');
+    }
     if (status < 200 || status >= 300) {
       throw new Error(`Hubble getOrderByReference HTTP ${status}`);
     }

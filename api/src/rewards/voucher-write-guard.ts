@@ -196,6 +196,11 @@ export function hasHubbleMarkers(order: { voucherProvider?: string | null; metad
  * HUBBLE_SUCCESS_MANUAL_CODE_PRESENT, and HUBBLE_UNEXPECTED (the catch-all can fire AFTER a
  * successful placement, e.g. a DB error while storing the voucher). HUBBLE_FAILED_VOUCHER_PRESENT
  * is resolved separately: cancelling its manual code releases the flag (voucherCancelledWithVendor).
+ * HUBBLE_INDETERMINATE (and HUBBLE_UNEXPECTED only with a recorded place attempt that never got a
+ * response — metadata.hubblePlaceAttemptAt + hubblePlaceResponded:false) have a separate, automatic
+ * exit instead: an ops "Retry with Hubble" that gets Hubble's own not-found after the safety margin
+ * fails + refunds the order (RewardsService.resolveNoHubbleOrder / HUBBLE_NO_ORDER_REFUNDABLE_REASONS).
+ * They stay OUT of this set: this set allows a MANUAL refund with no Hubble lookup at all.
  */
 export const HUBBLE_NEVER_PLACED_REASONS: ReadonlySet<string> = new Set([
   'HUBBLE_NOT_CONFIGURED',

@@ -108,6 +108,7 @@ const mockMsg91 = {
 // legacy confirm tests (isHubbleEligible short-circuits on a missing productId).
 const mockHubble = {
   isConfigured: jest.fn().mockReturnValue(true),
+  accountFingerprint: jest.fn().mockReturnValue('api.dev.myhubble.money#0000000000000000'),
   placeOrder: jest.fn(),
   getOrderByReference: jest.fn(),
   // Per-brand amounts: issuance re-checks a FIXED brand's denominations. Default = a
@@ -4679,7 +4680,7 @@ describe('RewardsService', () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({ id: 'o1', orderNumber: 'R', status: 'PROCESSING', metadata: { hubbleReconcileReason: 'HUBBLE_INDETERMINATE' } });
       const spy = jest.spyOn(service, 'reconcileHubbleOrder').mockResolvedValue('DELIVERED');
       const res = await service.retryHubbleReconcile(gifsy, 'o1');
-      expect(spy).toHaveBeenCalledWith('o1');
+      expect(spy).toHaveBeenCalledWith('o1', { actorId: 'admin1', source: 'OPS_RETRY' });
       expect(res).toEqual({ orderId: 'o1', outcome: 'DELIVERED' });
       expect(mockPrisma.auditLog.create.mock.calls[0][0].data.metadata).toMatchObject({
         event: 'HUBBLE_RECONCILE_RETRY', outcome: 'DELIVERED', reconcileReasonBefore: 'HUBBLE_INDETERMINATE',
@@ -6153,7 +6154,12 @@ describe('RewardsService', () => {
         mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
         await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
         const claim = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
-        expect(claim.where).toMatchObject({ status: 'CONFIRMED', updatedAt: at, OR: [{ voucherCode: null }, { voucherCode: '' }] });
+        // The place-attempt evidence writes are CAS'd on the loaded version (`at`) and stamp a known
+        // new version; the PROCESSING claim pins THAT version (our own writes must not make it lose).
+        const evidence = mockPrisma.redemptionOrder.update.mock.calls.slice(0, 2).map((c) => c[0]);
+        expect(evidence[0].where).toMatchObject({ id: 'o1', updatedAt: at });
+        expect(evidence[1].where).toMatchObject({ id: 'o1', updatedAt: evidence[0].data.updatedAt });
+        expect(claim.where).toMatchObject({ status: 'CONFIRMED', updatedAt: evidence[1].data.updatedAt, OR: [{ voucherCode: null }, { voucherCode: '' }] });
         expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
         const flag = mockPrisma.redemptionOrder.update.mock.calls.at(-1)![0];
         expect(flag.data.metadata).toMatchObject({ hubbleReconcileReason: 'HUBBLE_PROCESSING_CLAIM_LOST' });

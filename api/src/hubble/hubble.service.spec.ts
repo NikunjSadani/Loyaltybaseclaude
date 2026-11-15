@@ -60,7 +60,7 @@ describe('HubbleService', () => {
 
   it('F3: the neutral names WIN over the *_STAGING ones at login', async () => {
     fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
-    fetchMock.mockResolvedValueOnce(jsonRes(404, undefined));
+    fetchMock.mockResolvedValueOnce(jsonRes(404, { message: 'not found' }));
     const svc = makeService({ HUBBLE_CLIENT_ID: 'prod-cid', HUBBLE_CLIENT_SECRET: 'prod-secret' });
     await svc.getOrderByReference('ref-1');
     const loginBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
@@ -86,7 +86,7 @@ describe('HubbleService', () => {
 
   it('F3: blank neutral names fall back to *_STAGING (staging keeps working unchanged)', async () => {
     fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
-    fetchMock.mockResolvedValueOnce(jsonRes(404, undefined));
+    fetchMock.mockResolvedValueOnce(jsonRes(404, { message: 'not found' }));
     const svc = makeService({ HUBBLE_CLIENT_ID: '  ', HUBBLE_CLIENT_SECRET: '' });
     expect(svc.isConfigured()).toBe(true);
     await svc.getOrderByReference('ref-2');
@@ -173,6 +173,56 @@ describe('HubbleService', () => {
 
     const res = await svc.getOrderByReference('r-unknown');
     expect(res).toBeNull();
+  });
+
+  // Only a Hubble-shaped JSON error 404 is "no order"; any other 404 is indeterminate (throws).
+  it.each([
+    ['the E102-style error body', { id: 'E404', code: 'NOT_FOUND', message: 'Order not found' }],
+    ['a code-only error body', { code: 'RESOURCE_NOT_FOUND' }],
+    ['an error body that also carries a numeric HTTP status', { status: 404, message: 'Not Found' }],
+  ])('getOrderByReference: 404 with %s → null', async (_n, body) => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce(jsonRes(404, body));
+    await expect(svc.getOrderByReference('r1')).resolves.toBeNull();
+  });
+
+  it.each([
+    ['an empty body', undefined],
+    ['a JSON array', ['not found']],
+    ['an empty object', {}],
+    ['blank fields', { message: '   ', code: '' }],
+    ['an order-shaped body', { status: 'PROCESSING', message: 'x' }],
+    ['a nested order body', { data: { status: 'SUCCESS', vouchers: [] }, message: 'x' }],
+  ])('getOrderByReference: 404 with %s → THROWS (indeterminate)', async (_n, body) => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce(jsonRes(404, body));
+    await expect(svc.getOrderByReference('r1')).rejects.toThrow(/404 with an unrecognised body/);
+  });
+
+  it('getOrderByReference: an HTML (gateway / proxy) 404 → THROWS (indeterminate)', async () => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce({
+      ok: false, status: 404, text: async () => '<html><body>404 Not Found</body></html>',
+    } as unknown as Response);
+    await expect(svc.getOrderByReference('r1')).rejects.toThrow(/indeterminate/);
+  });
+
+  it('getOrderByReference: auth failure / 5xx still THROW (never null)', async () => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(502, { message: 'bad gateway' }));
+    await expect(svc.getOrderByReference('r1')).rejects.toThrow(/auth failed \(HTTP 502\)/);
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce(jsonRes(503, { message: 'down' }));
+    await expect(svc.getOrderByReference('r1')).rejects.toThrow(/HTTP 503/);
+  });
+
+  it('accountFingerprint: host + client-id hash, never the raw id/secret; changes with host or client', () => {
+    const fp = makeService().accountFingerprint();
+    expect(fp).toMatch(/^api\.dev\.myhubble\.money#[0-9a-f]{16}$/);
+    expect(fp).not.toContain('cid-123');
+    expect(fp).not.toContain('secret-xyz');
+    expect(makeService({ HUBBLE_BASE_URL: 'https://api.myhubble.money' }).accountFingerprint()).not.toBe(fp);
+    expect(makeService({ HUBBLE_CLIENT_ID_STAGING: 'other' }).accountFingerprint()).not.toBe(fp);
+    expect(makeService({ HUBBLE_CLIENT_ID_STAGING: undefined }).accountFingerprint()).toBeNull();
   });
 
   it('getOrderByReference returns the normalised body on 200', async () => {

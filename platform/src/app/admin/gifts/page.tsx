@@ -1570,9 +1570,31 @@ const HUBBLE_REASON_LABEL: Record<string, string> = {
   HUBBLE_FAILED_VOUCHER_PRESENT: 'Hubble failed but a code is on the order',
   HUBBLE_PROCESSING_AFTER_MANUAL: 'Hubble processing after a manual takeover',
   HUBBLE_PROCESSING_CLAIM_LOST: 'Order changed while Hubble was processing',
+  HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND: 'Hubble webhook arrived after the points were refunded — check the order in Hubble’s portal',
+  HUBBLE_ISSUED_AFTER_REFUND: 'Hubble may have issued a voucher for refunded points — check the order in Hubble’s portal',
+  HUBBLE_WEBHOOK_BUT_NOT_FOUND: 'Hubble sent a webhook but has no order for this reference — check the order in Hubble’s portal',
 };
+
+/** Flags on an ALREADY-REFUNDED order (late Hubble webhook): only "Acknowledge — resolved" applies. */
+const HUBBLE_POST_REFUND_FLAGS = new Set(['HUBBLE_ISSUED_AFTER_REFUND', 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND']);
 const hubbleReasonLabel = (r?: string | null) =>
   !r ? 'Needs review' : HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown Hubble status' : r);
+
+/** Human copy for the "Retry with Hubble" outcome (fallback: the raw outcome code). */
+const HUBBLE_RETRY_OUTCOME_LABEL: Record<string, string> = {
+  DELIVERED: 'Voucher issued',
+  PROCESSING: 'Hubble is still processing the order',
+  FAILED_REFUNDED: 'Hubble reported the order failed — points refunded',
+  PENDING_RECONCILE: 'Still unresolved — Hubble could not confirm the order state',
+  SKIPPED: 'Nothing to do — the order is already resolved',
+  REFUNDED_NO_HUBBLE_ORDER: 'Hubble confirmed it has no order for this redemption — points refunded',
+  PENDING_NO_HUBBLE_ORDER_TOO_RECENT:
+    'Hubble has no order yet — too recent to refund; retry later (orders must be at least 30 minutes old)',
+  NO_HUBBLE_ORDER_NOT_REFUNDABLE:
+    'Hubble has no order for this redemption, but it can’t be refunded automatically (Hubble acknowledged it earlier, or its state is unclear) — review manually',
+  ALREADY_REFUNDED_FLAGGED:
+    'Already refunded — but flagged for review: Hubble contacted us after the refund. Check the order in Hubble’s portal',
+};
 
 const FORWARD_VOUCHER_TARGETS = new Set(['PROCESSING', 'DISPATCHED', 'DELIVERED']);
 
@@ -1627,7 +1649,15 @@ function OrderRow({
   const needsReconcile = order.hubbleNeedsReconcile === true;
   // "Retry with Hubble" only re-reads an EXISTING Hubble order — pointless when none was ever placed
   // (not configured / invalid amount); those keep refund + "Fulfil manually".
-  const canRetryHubble = needsReconcile && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
+  // A post-refund review flag (points already refunded; a Hubble webhook arrived later): retry and
+  // manual fulfilment don't apply — ops check Hubble's portal and "Acknowledge — resolved".
+  const postRefundFlag = needsReconcile && HUBBLE_POST_REFUND_FLAGS.has(order.hubbleReconcileReason ?? '');
+  const canRetryHubble =
+    needsReconcile && !postRefundFlag && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
+  const [ackOpen, setAckOpen] = useState(false);
+  const [ackNote, setAckNote] = useState('');
+  const [ackBusy, setAckBusy] = useState(false);
+  const [ackErr, setAckErr] = useState('');
   const [retryBusy, setRetryBusy] = useState(false);
   const [retryMsg, setRetryMsg] = useState('');
   const [manualOpen, setManualOpen] = useState(false);
@@ -1642,12 +1672,31 @@ function OrderRow({
     setRetryBusy(true); setRetryMsg('');
     try {
       const res = await apiJson<{ outcome?: string } | null>(`/api/rewards/orders/${order.id}/hubble-reconcile`, { method: 'POST' });
-      setRetryMsg(`Hubble: ${res?.outcome ?? 'done'}`);
+      const outcome = res?.outcome ?? '';
+      setRetryMsg(`Hubble: ${HUBBLE_RETRY_OUTCOME_LABEL[outcome] ?? (outcome || 'done')}`);
       onTransitioned(null); // the outcome may move status / code → re-fetch the window
     } catch (e) {
       setRetryMsg(e instanceof Error ? e.message : 'Retry failed');
     } finally {
       setRetryBusy(false);
+    }
+  };
+
+  const acknowledgeFlag = async () => {
+    const note = ackNote.trim();
+    if (!note) { setAckErr('Enter what you checked in Hubble and concluded.'); return; }
+    setAckBusy(true); setAckErr('');
+    try {
+      const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}/hubble-acknowledge`, {
+        method: 'POST',
+        body: JSON.stringify({ note }),
+      });
+      setAckOpen(false);
+      onTransitioned(res?.order?.id ? res.order : { id: order.id, hubbleNeedsReconcile: false, hubbleReconcileReason: null });
+    } catch (e) {
+      setAckErr(e instanceof Error ? e.message : 'Could not acknowledge the flag');
+    } finally {
+      setAckBusy(false);
     }
   };
 
@@ -1834,12 +1883,20 @@ function OrderRow({
                       {retryBusy ? 'Retrying…' : 'Retry with Hubble'}
                     </button>
                   )}
-                  {!voucherIssued && (
+                  {!voucherIssued && !postRefundFlag && (
                     <button
                       onClick={() => { setManualOpen((o) => !o); setManualErr(''); }}
                       className="text-[10px] font-semibold text-amber-700 hover:underline"
                     >
                       Fulfil manually…
+                    </button>
+                  )}
+                  {postRefundFlag && (
+                    <button
+                      onClick={() => { setAckOpen((o) => !o); setAckErr(''); }}
+                      className="text-[10px] font-semibold text-red-700 hover:underline"
+                    >
+                      Acknowledge — resolved…
                     </button>
                   )}
                   {retryMsg && <span className="text-[10px] text-gray-500" role="status">{retryMsg}</span>}
@@ -1849,7 +1906,45 @@ function OrderRow({
           </td>
         )}
       </tr>
-      {canManage && canCancelVoucher && needsReconcile && manualOpen && (
+      {canManage && canCancelVoucher && postRefundFlag && ackOpen && (
+        <tr>
+          <td colSpan={7} className="px-4 py-4 bg-red-50/50">
+            <div className="space-y-2 max-w-2xl">
+              <p className="text-xs text-gray-700">
+                This order was already refunded because Hubble said it had no order. Check the order in Hubble&apos;s
+                portal, then record what you found. This clears the flag only — the order stays refunded.
+              </p>
+              <label className="text-xs font-medium text-gray-700" htmlFor={`ack-note-${order.id}`}>Note *</label>
+              <input
+                id={`ack-note-${order.id}`}
+                value={ackNote}
+                onChange={(e) => setAckNote(e.target.value)}
+                maxLength={500}
+                placeholder="e.g. Checked Hubble portal — no voucher issued for this reference"
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+              />
+              {ackErr && <p className="text-xs text-red-600" role="alert">{ackErr}</p>}
+              <div className="flex gap-2">
+                <button
+                  onClick={acknowledgeFlag}
+                  disabled={ackBusy || !ackNote.trim()}
+                  aria-busy={ackBusy}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-gray-900 text-white disabled:opacity-50"
+                >
+                  {ackBusy ? 'Saving…' : 'Acknowledge — resolved'}
+                </button>
+                <button
+                  onClick={() => setAckOpen(false)}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+      {canManage && canCancelVoucher && needsReconcile && !postRefundFlag && manualOpen && (
         <tr>
           <td colSpan={7} className="px-4 py-4 bg-amber-50/50">
             <div className="space-y-2 max-w-2xl">

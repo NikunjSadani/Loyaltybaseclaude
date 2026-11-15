@@ -65,6 +65,7 @@ const mockNotifications = {
 const mockMsg91 = { sendOtp: jest.fn().mockResolvedValue(undefined) };
 const mockHubble = {
   isConfigured: jest.fn().mockReturnValue(true),
+  accountFingerprint: jest.fn().mockReturnValue('api.dev.myhubble.money#0000000000000000'),
   placeOrder: jest.fn(),
   getOrderByReference: jest.fn(),
   getProduct: jest.fn(),
