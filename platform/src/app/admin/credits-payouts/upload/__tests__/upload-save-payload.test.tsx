@@ -20,6 +20,9 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+
+// CUP1 builds + parses a real 6,517-outlet workbook (~4.4 s under full-suite load vs the 5 s default).
+vi.setConfig({ testTimeout: 60_000 });
 import * as XLSX from 'xlsx';
 import type { CreditField } from '@/types';
 import type { TemplateOutlet } from '@/lib/credits-payouts-template';
