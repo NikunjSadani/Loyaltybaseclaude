@@ -76,7 +76,8 @@ const mockTx = {
   },
   creditPayoutEntry: { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn() },
   // downloadCode is now generated INSIDE the download tx (tx.creditPayoutDownload.count) under PDLOCK.
-  creditPayoutDownload: { create: jest.fn(), update: jest.fn(), count: jest.fn().mockResolvedValue(0) },
+  // uploadUtr writes the download status via a CONDITIONAL updateMany (status: { not: next }).
+  creditPayoutDownload: { create: jest.fn(), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }), count: jest.fn().mockResolvedValue(0) },
   creditReversal: {
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     findFirst: jest.fn(),
@@ -1940,10 +1941,12 @@ describe('CreditsService', () => {
         entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) }],
       });
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
-      // FIX-C: entries re-read inside the tx.
-      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
-        { id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: BigInt(10000), tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05' },
-      ]);
+      // FIX-C: entries re-read inside the tx (pre-flip), then re-read AFTER the flips for the status.
+      mockTx.creditPayoutEntry.findMany
+        .mockResolvedValueOnce([
+          { id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: BigInt(10000), tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05' },
+        ])
+        .mockResolvedValueOnce([{ id: 'e1', status: 'PAID' }]);
       // FIX C: the recipient is now the KYC-verified partner phone, not outlet.phone.
       mockPrisma.outlet.findMany.mockResolvedValue([
         { outletCode: 'O1', name: 'A', partnerId: 'p1', partner: { ownerName: 'Ravi Traders', phone: '9900000041' } },
@@ -1958,10 +1961,13 @@ describe('CreditsService', () => {
       expect(res.paidCount).toBe(1);
       // FIX-C: the flip is a GUARDED updateMany (status:'PROCESSING'), not an unconditional update.
       expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
-        where: { id: 'e1', status: 'PROCESSING' },
+        where: { id: { in: ['e1'] }, status: 'PROCESSING' },
         data: { status: 'PAID', utr: 'UTR123456', paidAt: expect.any(Date) },
       });
-      expect(mockTx.creditPayoutDownload.update.mock.calls[0][0].data.status).toBe('PAID');
+      expect(mockTx.creditPayoutDownload.updateMany.mock.calls[0][0]).toEqual({
+        where: { id: 'd1', clientId: 'deoleo', status: { not: 'PAID' } },
+        data: { status: 'PAID' },
+      });
       // The config-driven PAYOUT_CREDITED fan-out fires once (paid-channel-only); the old dead
       // WHATSAPP enqueue is gone — the notify() queue never drained non-PUSH.
       expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
@@ -2070,9 +2076,537 @@ describe('CreditsService', () => {
       // (2) Behavioural: the SUCCESS row was NOT rejected as a duplicate — it applied as PAID.
       expect(res.applied).toBe(true);
       expect(res.paidCount).toBe(1);
-      const flip = mockTx.creditPayoutEntry.updateMany.mock.calls.find(([a]) => a.where.id === 'e1')![0];
+      const flip = mockTx.creditPayoutEntry.updateMany.mock.calls.find(([a]) => a.where.id?.in?.includes('e1'))![0];
       expect(flip.data.status).toBe('PAID');
       expect(flip.data.utr).toBe('UTR123456');
+    });
+
+    // ── Re-apply idempotency (retry after a proxy timeout / concurrent double-apply) ────────────
+    // A small STATEFUL fake of the DB: entries + the download row. Guarded flips and the
+    // conditional download-status write mutate it exactly as Postgres would, so a second apply
+    // sees what the first one committed.
+    describe('re-apply idempotency (notifications + download status follow ACTUAL flips)', () => {
+      type Ent = {
+        id: string; outletId: string; status: string; utr: string | null; amountPaise: bigint;
+        tdsDeductedPaise: bigint; tdsSection: string | null; period: string; paidAt?: Date | null;
+      };
+      let entries: Ent[];
+      let dl: { status: string };
+
+      const snapshot = () => ({
+        id: 'd1', downloadCode, period: '2026-05', downloadedBy: 'g1', status: dl.status,
+        entries: entries.map((e) => ({ ...e })),
+      });
+
+      function setupDb(initial: Ent[], downloadStatus = 'OPEN') {
+        entries = initial.map((e) => ({ ...e }));
+        dl = { status: downloadStatus };
+        mockPrisma.creditPayoutDownload.findFirst.mockImplementation(async () => snapshot());
+        // used-UTR dedup query (PAID entries carrying a UTR)
+        mockPrisma.creditPayoutEntry.findMany.mockImplementation(async () =>
+          entries.filter((e) => e.status === 'PAID' && e.utr).map((e) => ({ utr: e.utr, outletId: e.outletId })),
+        );
+        mockPrisma.outlet.findMany.mockResolvedValue(
+          entries.map((e) => ({
+            outletCode: e.outletId, name: e.outletId, partnerId: `p-${e.outletId}`,
+            partner: { ownerName: `Owner ${e.outletId}`, phone: `99000000${e.outletId.slice(1).padStart(2, '0')}`, bankAccountNumber: `ACC-${e.outletId}` },
+          })),
+        );
+        mockTx.creditPayoutEntry.findMany.mockImplementation(async () => entries.map((e) => ({ ...e })));
+        mockTx.creditPayoutEntry.updateMany.mockImplementation(
+          async (arg: { where: { id: { in: string[] }; status: string }; data: Record<string, unknown> }) => {
+            let count = 0;
+            for (const e of entries) {
+              if (arg.where.id.in.includes(e.id) && e.status === arg.where.status) {
+                Object.assign(e, arg.data);
+                count++;
+              }
+            }
+            return { count };
+          },
+        );
+        mockTx.creditPayoutDownload.updateMany.mockImplementation(
+          async (arg: { where: { status: { not: string } }; data: { status: string } }) => {
+            if (dl.status === arg.where.status.not) return { count: 0 };
+            dl.status = arg.data.status;
+            return { count: 1 };
+          },
+        );
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'e2', panNumber: 'PAN2' }]);
+      }
+
+      const ent = (id: string, outletId: string, over: Partial<Ent> = {}): Ent => ({
+        id, outletId, status: 'PROCESSING', utr: null, amountPaise: 10000n,
+        tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05', ...over,
+      });
+      const notifiedPhones = () =>
+        mockNotifications.notifyUserWithChannels.mock.calls.map((c) => c[0].recipientPhone as string);
+
+      // O1 paid, O2 bank-FAILED (carried a DEDUCT withholding → reversed on FAILED).
+      const mixedFile = () => buildUtrFile([
+        [downloadCode, 'O1', 'UTR11112222', 'Success', ''],
+        [downloadCode, 'O2', '', 'Failed', 'Account closed'],
+      ]);
+
+      it('first apply notifies exactly once per flipped PAID entry; re-applying the SAME file is a no-op', async () => {
+        setupDb([ent('e1', 'O1'), ent('e2', 'O2', { tdsDeductedPaise: 50000n, tdsSection: 'SEC_194C' })]);
+
+        const first = await service.uploadUtr(gifsy, 'd1', mixedFile(), true);
+        expect(first).toMatchObject({ applied: true, noop: false, paidCount: 1, failedCount: 1, skippedCount: 0 });
+        expect(notifiedPhones()).toEqual(['9900000001']); // only the PAID outlet, once
+        expect(dl.status).toBe('PAID'); // every entry settled (PAID + FAILED)
+        expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1); // FAILED reversal once
+        expect(mockTx.autoInvoice.updateMany).toHaveBeenCalledTimes(1);
+
+        // Retry of the identical file (the admin re-clicks after a proxy timeout). O1 parses as SKIP,
+        // O2 (FAILED) parses OK but its guarded flip matches nothing.
+        const again = await service.uploadUtr(gifsy, 'd1', mixedFile(), true);
+        expect(again).toMatchObject({
+          applied: true, noop: true, paidCount: 0, failedCount: 0, skippedCount: 2,
+          message: 'Already applied — nothing to change',
+        });
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1); // no duplicate message
+        expect(dl.status).toBe('PAID'); // NOT flipped to PARTIALLY_PAID by the FAILED/SKIP rows
+        expect(mockTx.creditPayoutDownload.updateMany.mock.calls.at(-1)![0].where.status).toEqual({ not: 'PAID' });
+        expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1); // reversal NOT repeated
+        expect(mockTx.autoInvoice.updateMany).toHaveBeenCalledTimes(1); // no re-lock attempt
+        expect(entries.map((e) => e.status)).toEqual(['PAID', 'FAILED']);
+      });
+
+      it('an all-already-applied file applies as a no-op (no entry writes, no notifications) and previews as noop', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' }), ent('e2', 'O2', { status: 'PAID', utr: 'UTR33334444' })], 'PAID');
+        const file = () => buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''],
+          [downloadCode, 'O2', 'UTR33334444', 'Success', ''],
+        ]);
+
+        const preview = (await service.uploadUtr(gifsy, 'd1', file(), false)) as {
+          parseResult: { canProceed: boolean; noop: boolean; summary: { ok: number; skipped: number; errors: number } };
+        };
+        expect(preview.parseResult).toMatchObject({ canProceed: true, noop: true, summary: { ok: 0, skipped: 2, errors: 0 } });
+
+        const res = await service.uploadUtr(gifsy, 'd1', file(), true);
+        expect(res).toEqual({
+          applied: true, noop: true, paidCount: 0, failedCount: 0, skippedCount: 2, notApplied: [],
+          notices: [
+            { outletId: 'O1', rowNum: 3, notice: 'Already paid — no change.' },
+            { outletId: 'O2', rowNum: 4, notice: 'Already paid — no change.' },
+          ],
+          message: 'Already applied — nothing to change',
+        });
+        // Only the locked, conditional status recompute runs — already PAID → nothing written.
+        expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+        expect(mockTx.$executeRaw).toHaveBeenCalledTimes(1); // the same UTR advisory lock
+        expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+        expect(mockTx.autoInvoice.updateMany).not.toHaveBeenCalled();
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+        expect(dl.status).toBe('PAID');
+      });
+
+      it('a no-op re-upload repairs a download stuck at PARTIALLY_PAID (old rule) when every entry is settled', async () => {
+        // Stuck by the old parse-row rule: entries all settled, download still PARTIALLY_PAID.
+        setupDb(
+          [ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' }), ent('e2', 'O2', { status: 'FAILED' })],
+          'PARTIALLY_PAID',
+        );
+        const res = await service.uploadUtr(gifsy, 'd1', buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''],
+          [downloadCode, 'O2', '', 'Failed', 'Account closed'],
+        ]), true);
+        expect(res).toMatchObject({ noop: true, paidCount: 0, failedCount: 0, skippedCount: 2 });
+        expect(dl.status).toBe('PAID');
+        expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+        expect(mockTx.autoInvoice.updateMany).not.toHaveBeenCalled();
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+        expect(entries.map((e) => e.status)).toEqual(['PAID', 'FAILED']);
+      });
+
+      it('a Success row for an already-FAILED entry is an ERROR (never a silent skip / false "already applied")', async () => {
+        setupDb([ent('e1', 'O1', { status: 'FAILED' })], 'PAID');
+        const file = () => buildUtrFile([[downloadCode, 'O1', 'UTR11112222', 'Success', '']]);
+
+        const preview = (await service.uploadUtr(gifsy, 'd1', file(), false)) as {
+          parseResult: { canProceed: boolean; noop: boolean; rows: Array<{ status: string; errors: string[] }> };
+        };
+        expect(preview.parseResult.canProceed).toBe(false);
+        expect(preview.parseResult.noop).toBe(false);
+        expect(preview.parseResult.rows[0].status).toBe('ERROR');
+        expect(preview.parseResult.rows[0].errors.join(' ')).toMatch(/marked FAILED and will be re-banked in the next payout file/);
+
+        await expect(service.uploadUtr(gifsy, 'd1', file(), true)).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+        expect(entries[0].status).toBe('FAILED');
+      });
+
+      it('a REVERSED entry is an ERROR row', async () => {
+        setupDb([ent('e2', 'O2', { status: 'REVERSED' })]);
+        const preview = (await service.uploadUtr(gifsy, 'd1', buildUtrFile([
+          [downloadCode, 'O2', 'UTR33334444', 'Success', ''],
+        ]), false)) as { parseResult: { canProceed: boolean; rows: Array<{ status: string; errors: string[] }> } };
+        expect(preview.parseResult.canProceed).toBe(false);
+        expect(preview.parseResult.rows[0].status).toBe('ERROR');
+        expect(preview.parseResult.rows[0].errors.join(' ')).toMatch(/has been reversed/);
+      });
+
+      it('a Failed row on an all-PAID outlet is a NON-blocking notice (reversal hint), never a write', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' })], 'PAID');
+        const file = () => buildUtrFile([[downloadCode, 'O1', '', 'Failed', 'bounced']]);
+        const preview = (await service.uploadUtr(gifsy, 'd1', file(), false)) as {
+          parseResult: { canProceed: boolean; noop: boolean; rows: Array<{ status: string; notice?: string }> };
+        };
+        expect(preview.parseResult).toMatchObject({ canProceed: true, noop: true });
+        expect(preview.parseResult.rows[0]).toMatchObject({
+          status: 'SKIP',
+          notice: "Already marked PAID — no change. If the bank returned this payment, don't raise a reversal — contact Gifsy ops to correct it.",
+        });
+        const res = await service.uploadUtr(gifsy, 'd1', file(), true);
+        // NOT "Already applied" — the row disagrees with the record, so it is flagged for review.
+        expect(res).toMatchObject({ noop: true, paidCount: 0, failedCount: 0, skippedCount: 1, message: 'Nothing changed — 1 row has a notice to review.' });
+        expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+        expect(entries[0].status).toBe('PAID');
+      });
+
+      it('a Success row on an all-PAID outlet with a DIFFERENT UTR is a SKIP naming both UTRs', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' })], 'PAID');
+        const res = await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', 'UTR99998888', 'Success', '']]), true);
+        expect(res).toMatchObject({
+          noop: true,
+          notices: [{ outletId: 'O1', notice: 'Already paid with UTR UTR11112222 — no change (file has UTR99998888).' }],
+          message: 'Nothing changed — 1 row has a notice to review.',
+        });
+        expect(entries[0]).toMatchObject({ status: 'PAID', utr: 'UTR11112222' });
+      });
+
+      it('partly-settled outlet: a row CONTRADICTING the settled sibling is an ERROR (both directions)', async () => {
+        // FAILED + PROCESSING with a Success row → would pay the rest while the failed part is re-banked.
+        setupDb([ent('e1', 'O1', { status: 'FAILED' }), ent('e2', 'O1')]);
+        const a = (await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', 'UTR11112222', 'Success', '']]), false)) as {
+          parseResult: { canProceed: boolean; rows: Array<{ status: string; errors: string[] }> };
+        };
+        expect(a.parseResult.canProceed).toBe(false);
+        expect(a.parseResult.rows[0].errors.join(' ')).toMatch(/already partly marked FAILED/);
+        await expect(
+          service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', 'UTR11112222', 'Success', '']]), true),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(entries.map((e) => e.status)).toEqual(['FAILED', 'PROCESSING']);
+
+        // PAID + PROCESSING with a Failed row → one bank line both paid and failed.
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' }), ent('e2', 'O1')]);
+        const b = (await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', '', 'Failed', 'bounced']]), false)) as {
+          parseResult: { canProceed: boolean; rows: Array<{ status: string; errors: string[] }> };
+        };
+        expect(b.parseResult.canProceed).toBe(false);
+        expect(b.parseResult.rows[0].errors.join(' ')).toMatch(/already partly marked PAID/);
+        await expect(
+          service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', '', 'Failed', 'bounced']]), true),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(entries.map((e) => e.status)).toEqual(['PAID', 'PROCESSING']);
+        expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('partly-settled outlet: a CONSISTENT Failed row heals FAILED + PROCESSING (rest → FAILED)', async () => {
+        setupDb([ent('e1', 'O1', { status: 'FAILED' }), ent('e2', 'O1')], 'PARTIALLY_PAID');
+        const res = await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', '', 'Failed', 'bounced']]), true);
+        expect(res).toMatchObject({ failedCount: 1, paidCount: 0, noop: false });
+        expect(entries.map((e) => e.status)).toEqual(['FAILED', 'FAILED']);
+        expect(dl.status).toBe('PAID');
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      });
+
+      it('partly-settled outlet: a consistent Success row with a DIFFERENT UTR heals PAID + PROCESSING, with a notice', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222', amountPaise: 40000n }), ent('e2', 'O1', { amountPaise: 60000n })], 'PARTIALLY_PAID');
+        const res = await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', 'UTR99998888', 'Success', '']]), true);
+        expect(res).toMatchObject({
+          paidCount: 1, noop: false,
+          notices: [{ outletId: 'O1', notice: "Part of this outlet's payout was already paid with UTR UTR11112222; the rest will be recorded with UTR99998888." }],
+        });
+        expect(entries.map((e) => [e.status, e.utr])).toEqual([['PAID', 'UTR11112222'], ['PAID', 'UTR99998888']]);
+        // The outlet was already told it was credited when the sibling flipped → no second message.
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+        expect(dl.status).toBe('PAID');
+      });
+
+      it('a duplicate row for the same outlet (Failed then Success) is an ERROR and blocks the apply', async () => {
+        setupDb([ent('e1', 'O1'), ent('e2', 'O2')]);
+        const file = () => buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''],
+          [downloadCode, 'O2', '', 'Failed', 'bounced'],
+          [downloadCode, 'O2', 'UTR33334444', 'Success', ''],
+        ]);
+        const preview = (await service.uploadUtr(gifsy, 'd1', file(), false)) as {
+          parseResult: { canProceed: boolean; rows: Array<{ outletId: string; status: string; errors: string[] }> };
+        };
+        expect(preview.parseResult.canProceed).toBe(false);
+        expect(preview.parseResult.rows.map((r) => r.status)).toEqual(['OK', 'OK', 'ERROR']);
+        expect(preview.parseResult.rows[2].errors[0]).toMatch(/appears more than once/);
+
+        await expect(service.uploadUtr(gifsy, 'd1', file(), true)).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+        expect(entries.map((e) => e.status)).toEqual(['PROCESSING', 'PROCESSING']);
+      });
+
+      it('real parse errors are still rejected even when the other rows are already applied', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' }), ent('e2', 'O2')]);
+        const file = buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''], // SKIP
+          [downloadCode, 'O2', 'X1', 'Success', ''], // bad UTR → ERROR
+        ]);
+        await expect(service.uploadUtr(gifsy, 'd1', file, true)).rejects.toBeInstanceOf(BadRequestException);
+        const unknown = buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''], // SKIP
+          [downloadCode, 'O9', 'UTR55556666', 'Success', ''], // outlet not in batch → ERROR
+        ]);
+        await expect(service.uploadUtr(gifsy, 'd1', unknown, true)).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      });
+
+      it('a mixed file (some already applied, some new) notifies ONLY the newly flipped entries', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' }), ent('e2', 'O2'), ent('e3', 'O3')], 'PARTIALLY_PAID');
+        const file = buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''], // already applied → SKIP
+          [downloadCode, 'O2', 'UTR33334444', 'Success', ''], // new PAID
+          [downloadCode, 'O3', 'UTR55556666', 'Success', ''], // new PAID
+        ]);
+        const res = await service.uploadUtr(gifsy, 'd1', file, true);
+        expect(res).toMatchObject({ noop: false, paidCount: 2, failedCount: 0, skippedCount: 1 });
+        expect(res).not.toHaveProperty('message');
+        expect(notifiedPhones().sort()).toEqual(['9900000002', '9900000003']);
+        expect(dl.status).toBe('PAID');
+        expect(mockTx.autoInvoice.updateMany.mock.calls[0][0].where.outletCode.in).toEqual(['O2', 'O3']);
+      });
+
+      it('concurrent double-apply (second call parsed a stale pre-commit snapshot) sends ONE notification set total', async () => {
+        setupDb([ent('e1', 'O1'), ent('e2', 'O2', { tdsDeductedPaise: 50000n, tdsSection: 'SEC_194C' })]);
+        const stale = snapshot(); // both callers read the download while every entry was PROCESSING
+
+        await service.uploadUtr(gifsy, 'd1', mixedFile(), true); // first commits
+        // Second caller: its pre-tx read happened BEFORE the first commit (rows parse OK, not SKIP),
+        // then it waited on the advisory lock; inside the tx it sees the committed state.
+        mockPrisma.creditPayoutDownload.findFirst.mockResolvedValueOnce(stale);
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValueOnce([]);
+        const second = await service.uploadUtr(gifsy, 'd1', mixedFile(), true);
+
+        // The stale-parsed OK rows flipped nothing → listed as notApplied (NOT "Already applied").
+        expect(second).toMatchObject({ noop: true, paidCount: 0, failedCount: 0, skippedCount: 0 });
+        expect((second as { notApplied: Array<{ outletId: string }> }).notApplied.map((n) => n.outletId)).toEqual(['O1', 'O2']);
+        expect((second as { message: string }).message).toMatch(/^Nothing changed — 2 rows were not applied/);
+        expect(notifiedPhones()).toEqual(['9900000001']);
+        expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1);
+        expect(dl.status).toBe('PAID');
+        expect(mockTx.autoInvoice.updateMany).toHaveBeenCalledTimes(1);
+      });
+
+      it('multi-entry outlet (₹600 + ₹400): one Success row flips BOTH, ONE notification of ₹1,000, download PAID; re-apply no-op', async () => {
+        setupDb([ent('e1', 'O1', { amountPaise: 60000n }), ent('e2', 'O1', { amountPaise: 40000n })]);
+        const file = () => buildUtrFile([[downloadCode, 'O1', 'UTR11112222', 'Success', '']]);
+
+        const res = await service.uploadUtr(gifsy, 'd1', file(), true);
+        expect(res).toMatchObject({ noop: false, paidCount: 1, failedCount: 0, skippedCount: 0, notApplied: [] });
+        expect(entries.map((e) => e.status)).toEqual(['PAID', 'PAID']);
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+        expect(mockNotifications.notifyUserWithChannels.mock.calls[0][0].vars.points).toBe(1000);
+        expect(dl.status).toBe('PAID');
+
+        const again = await service.uploadUtr(gifsy, 'd1', file(), true);
+        expect(again).toMatchObject({ noop: true, paidCount: 0, skippedCount: 1, message: 'Already applied — nothing to change' });
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+      });
+
+      it('multi-entry outlet: a Failed row flips BOTH entries and reverses EACH entry\'s withholding once', async () => {
+        setupDb([
+          ent('e1', 'O1', { amountPaise: 60000n, tdsDeductedPaise: 600n, tdsSection: 'SEC_194C' }),
+          ent('e2', 'O1', { amountPaise: 40000n, tdsDeductedPaise: 400n, tdsSection: 'SEC_194C' }),
+        ]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([
+          { creditPayoutEntryId: 'e1', panNumber: 'PAN1' },
+          { creditPayoutEntryId: 'e2', panNumber: 'PAN1' },
+        ]);
+        const file = () => buildUtrFile([[downloadCode, 'O1', '', 'Failed', 'Account closed']]);
+
+        const res = await service.uploadUtr(gifsy, 'd1', file(), true);
+        expect(res).toMatchObject({ paidCount: 0, failedCount: 1, noop: false });
+        expect(entries.map((e) => [e.status, e.tdsDeductedPaise])).toEqual([['FAILED', 0n], ['FAILED', 0n]]);
+        const rev = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data as Array<{ creditPayoutEntryId: string; tdsDeductedThisPaise: bigint }>;
+        expect(rev.map((r) => [r.creditPayoutEntryId, r.tdsDeductedThisPaise])).toEqual([['e1', -600n], ['e2', -400n]]);
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+        expect(dl.status).toBe('PAID'); // all settled
+
+        // Re-apply: the outlet's group is all FAILED + a Failed row → genuine SKIP notice, no-op.
+        const preview = (await service.uploadUtr(gifsy, 'd1', file(), false)) as {
+          parseResult: { noop: boolean; rows: Array<{ status: string; notice?: string }> };
+        };
+        expect(preview.parseResult.noop).toBe(true);
+        expect(preview.parseResult.rows[0]).toMatchObject({ status: 'SKIP', notice: 'Already marked failed — no change.' });
+        await service.uploadUtr(gifsy, 'd1', file(), true);
+        expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1); // no second reversal
+      });
+
+      it('heals a multi-entry outlet left half-flipped by the old last-entry-wins bug (PAID + PROCESSING)', async () => {
+        const siblingPaidAt = new Date('2026-06-02T06:30:00.000Z');
+        setupDb([ent('e1', 'O1', { amountPaise: 60000n }), ent('e2', 'O1', { status: 'PAID', utr: 'UTR11112222', amountPaise: 40000n, paidAt: siblingPaidAt })], 'PARTIALLY_PAID');
+        // Group is still PENDING (e1 awaiting) → the row is OK, the re-apply exemption covers the UTR.
+        const res = await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', 'UTR11112222', 'Success', '']]), true);
+        expect(res).toMatchObject({ paidCount: 1, noop: false });
+        expect(entries.map((e) => e.status)).toEqual(['PAID', 'PAID']);
+        // Blank Payment Date → the healed entry takes the PAID sibling's paidAt (the line's real date).
+        expect(entries[0].paidAt).toEqual(siblingPaidAt);
+        // No second "credited" message for a heal (the sibling's flip already notified the outlet).
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+        // The SERVICE invoice is still locked for the healed outlet (idempotent lockedAt:null guard).
+        expect(mockTx.autoInvoice.updateMany.mock.calls[0][0].where.outletCode.in).toEqual(['O1']);
+        expect(dl.status).toBe('PAID');
+      });
+
+      it('one guarded updateMany per outlet (bank line), not one round-trip per entry', async () => {
+        setupDb([ent('e1', 'O1'), ent('e2', 'O1'), ent('e3', 'O1'), ent('e4', 'O2')]);
+        await service.uploadUtr(gifsy, 'd1', buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''],
+          [downloadCode, 'O2', 'UTR33334444', 'Success', ''],
+        ]), true);
+        const flips = mockTx.creditPayoutEntry.updateMany.mock.calls.map((c) => c[0].where);
+        expect(flips).toEqual([
+          { id: { in: ['e1', 'e2', 'e3'] }, status: 'PROCESSING' },
+          { id: { in: ['e4'] }, status: 'PROCESSING' },
+        ]);
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(2);
+      });
+
+      // Former outlets: in this download's bankSnapshots but no longer holding an entry here. Their
+      // fate is classified from the DB (entries for the outlet + period), never assumed.
+      function withFormer(
+        snapshotIds: string[],
+        formerEntries: Array<{ outletId: string; status: string; downloadId: string | null }>,
+      ) {
+        mockPrisma.creditPayoutDownload.findFirst.mockImplementation(async () => ({
+          ...snapshot(),
+          bankSnapshots: snapshotIds.map((outletId) => ({ outletId })),
+        }));
+        const dedup = mockPrisma.creditPayoutEntry.findMany.getMockImplementation()!;
+        mockPrisma.creditPayoutEntry.findMany.mockImplementation(
+          async (arg: { where: { outletId?: { in: string[] }; period?: string } }) =>
+            arg?.where?.outletId
+              ? formerEntries.filter((e) => arg.where.outletId!.in.includes(e.outletId))
+              : dedup(arg),
+        );
+      }
+      const formerFile = (outcome: 'Success' | 'Failed') =>
+        buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''],
+          [downloadCode, 'O2', outcome === 'Success' ? 'UTR55556666' : '', outcome, ''],
+        ]);
+      const previewRow = async (outcome: 'Success' | 'Failed') =>
+        ((await service.uploadUtr(gifsy, 'd1', formerFile(outcome), false)) as {
+          parseResult: { canProceed: boolean; rows: Array<{ outletId: string; status: string; errors: string[]; notice?: string }> };
+        }).parseResult;
+
+      it('former outlet classification query is tenant + outlet + period scoped', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' })], 'PAID');
+        withFormer(['O1', 'O2'], [{ outletId: 'O2', status: 'PROCESSING', downloadId: 'd2' }]);
+        await previewRow('Failed');
+        const q = mockPrisma.creditPayoutEntry.findMany.mock.calls.find(([a]) => a?.where?.outletId)![0];
+        expect(q.where).toEqual({ clientId: 'deoleo', outletId: { in: ['O2'] }, period: '2026-05' });
+      });
+
+      it('re-banked outlet: Failed row → non-blocking "Re-banked" notice; Success row → blocking ERROR', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' })], 'PAID');
+        withFormer(['O1', 'O2'], [{ outletId: 'O2', status: 'PROCESSING', downloadId: 'd2' }]);
+
+        const res = await service.uploadUtr(gifsy, 'd1', formerFile('Failed'), true);
+        expect(res).toMatchObject({
+          noop: true, skippedCount: 2,
+          notices: [
+            { outletId: 'O1', notice: 'Already paid — no change.' },
+            { outletId: 'O2', notice: 'Re-banked in a later payout file — no change.' },
+          ],
+          message: 'Nothing changed — 1 row has a notice to review.',
+        });
+        expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+
+        const p = await previewRow('Success');
+        expect(p.canProceed).toBe(false);
+        expect(p.rows[1]).toMatchObject({
+          status: 'ERROR',
+          errors: ['This payout was re-banked in a later file and may be paid again — remove this row and contact Gifsy ops.'],
+        });
+        await expect(service.uploadUtr(gifsy, 'd1', formerFile('Success'), true)).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('reversed outlet: Failed row → non-blocking "Reversed" notice; Success row → blocking ERROR', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' })], 'PAID');
+        withFormer(['O1', 'O2'], [{ outletId: 'O2', status: 'REVERSED', downloadId: null }]);
+
+        const f = await previewRow('Failed');
+        expect(f.canProceed).toBe(true);
+        expect(f.rows[1]).toMatchObject({ status: 'SKIP', notice: 'Reversed — no change.' });
+
+        const p = await previewRow('Success');
+        expect(p.canProceed).toBe(false);
+        expect(p.rows[1].status).toBe('ERROR');
+        expect(p.rows[1].errors[0]).toMatch(/was reversed — it can't be marked paid/);
+      });
+
+      it('outlet HELD at download (PENDING, no download) → blocking ERROR for ANY row, never a silent skip', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' })], 'PAID');
+        withFormer(['O1', 'O2'], [{ outletId: 'O2', status: 'PENDING', downloadId: null }]);
+        const heldMsg =
+          'This outlet was held at download (e.g. KYC) — it was not in this bank file. Remove this row; if it was paid by hand, contact Gifsy ops before it is released.';
+        for (const outcome of ['Success', 'Failed'] as const) {
+          const p = await previewRow(outcome);
+          expect(p.canProceed).toBe(false);
+          expect(p.rows[1]).toMatchObject({ status: 'ERROR', errors: [heldMsg] });
+          await expect(service.uploadUtr(gifsy, 'd1', formerFile(outcome), true)).rejects.toBeInstanceOf(BadRequestException);
+        }
+        expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      });
+
+      it('a former outlet with no classifiable entry, or an outlet in neither list, stays a "not found" ERROR', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' })], 'PAID');
+        withFormer(['O1', 'O2'], []); // O2 in the snapshot but no entry for this period
+        const p = await previewRow('Failed');
+        expect(p.rows[1].status).toBe('ERROR');
+        expect(p.rows[1].errors.join(' ')).toMatch(/not found in batch/);
+
+        await expect(service.uploadUtr(gifsy, 'd1', buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''],
+          [downloadCode, 'O9', 'UTR55556666', 'Success', ''],
+        ]), true)).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('every outlet moved out of the download → still parses (notices), not "No payout entries found"', async () => {
+        setupDb([], 'PAID');
+        withFormer(['O2'], [{ outletId: 'O2', status: 'FAILED', downloadId: 'd2' }]);
+        const res = await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O2', '', 'Failed', 'bounced']]), true);
+        expect(res).toMatchObject({ noop: true, skippedCount: 1, paidCount: 0 });
+      });
+
+      it('a settled outlet that is partly PAID and partly FAILED is an ERROR row (MIXED)', async () => {
+        setupDb([ent('e1', 'O1', { status: 'PAID', utr: 'UTR11112222' }), ent('e2', 'O1', { status: 'FAILED' })]);
+        const preview = (await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', 'UTR11112222', 'Success', '']]), false)) as {
+          parseResult: { canProceed: boolean; rows: Array<{ status: string; errors: string[] }> };
+        };
+        expect(preview.parseResult.canProceed).toBe(false);
+        expect(preview.parseResult.rows[0].status).toBe('ERROR');
+        expect(preview.parseResult.rows[0].errors.join(' ')).toMatch(/partly PAID and partly FAILED/);
+      });
+
+      it('download status follows LIVE entry statuses: partial file → PARTIALLY_PAID, rest → PAID', async () => {
+        setupDb([ent('e1', 'O1'), ent('e2', 'O2')]);
+        await service.uploadUtr(gifsy, 'd1', buildUtrFile([[downloadCode, 'O1', 'UTR11112222', 'Success', '']]), true);
+        expect(dl.status).toBe('PARTIALLY_PAID'); // e2 still PROCESSING
+
+        // Second file carries BOTH rows (O1 now SKIP) — O1 must not keep it partial.
+        const res = await service.uploadUtr(gifsy, 'd1', buildUtrFile([
+          [downloadCode, 'O1', 'UTR11112222', 'Success', ''],
+          [downloadCode, 'O2', 'UTR33334444', 'Success', ''],
+        ]), true);
+        expect(res).toMatchObject({ paidCount: 1, skippedCount: 1, noop: false });
+        expect(dl.status).toBe('PAID');
+        expect(notifiedPhones()).toEqual(['9900000001', '9900000002']); // each outlet exactly once
+      });
     });
   });
 
@@ -2743,7 +3277,7 @@ describe('CreditsService', () => {
       // withheld nothing → tdsDeductedPaise cleared. The bank reason ("bounced" from the file's
       // Remarks cell) is captured into failureReason; no payment date / UTR in this file → both null.
       expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
-        where: { id: 'e1', status: 'PROCESSING' },
+        where: { id: { in: ['e1'] }, status: 'PROCESSING' },
         data: {
           status: 'FAILED', utr: null, paidAt: null, tdsDeductedPaise: 0n,
           failureReason: 'bounced', attemptedAt: null,
@@ -2830,8 +3364,8 @@ describe('CreditsService', () => {
       };
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]); // used-UTR dedup (both applies)
       mockTx.creditPayoutEntry.findMany.mockImplementation(async () => [{ ...store }]);
-      mockTx.creditPayoutEntry.updateMany.mockImplementation(async (arg: { where: { id: string; status: string }; data: Record<string, unknown> }) => {
-        if (arg.where.id === store.id && store.status === arg.where.status) {
+      mockTx.creditPayoutEntry.updateMany.mockImplementation(async (arg: { where: { id: { in: string[] }; status: string }; data: Record<string, unknown> }) => {
+        if (arg.where.id.in.includes(store.id) && store.status === arg.where.status) {
           Object.assign(store, arg.data);
           return { count: 1 };
         }
@@ -2865,7 +3399,7 @@ describe('CreditsService', () => {
       await service.uploadUtr(gifsy, 'd1', buildFailFile(), true);
 
       const lastFlip = mockTx.creditPayoutEntry.updateMany.mock.calls.at(-1)![0];
-      expect(lastFlip.where).toEqual({ id: 'e1', status: 'PROCESSING' }); // guard unchanged
+      expect(lastFlip.where).toEqual({ id: { in: ['e1'] }, status: 'PROCESSING' }); // guard unchanged
       expect(store.failureReason).toBe('Account Closed'); // unchanged (single value, no accretion)
       expect(store.status).toBe('FAILED');
       expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1); // no second reversal
@@ -2892,11 +3426,14 @@ describe('CreditsService', () => {
       XLSX.utils.book_append_sheet(wb, ws, 'Payout');
       const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
 
-      await service.uploadUtr(gifsy, 'd1', file, true);
+      // The in-tx read (under the lock) said PROCESSING but the guarded flip moved nothing → the
+      // state changed under us → the WHOLE apply rolls back (Conflict) — never a partial apply.
+      await expect(service.uploadUtr(gifsy, 'd1', file, true)).rejects.toBeInstanceOf(ConflictException);
 
       // The advisory lock was taken and the flip attempted, but count=0 → NO compensating reversal.
       expect(mockTx.$executeRaw).toHaveBeenCalled();
       expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
     });
 
     // ── FIX-7: guarded PROCESSING claim ──────────────────────────────────────────
