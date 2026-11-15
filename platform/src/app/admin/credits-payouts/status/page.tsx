@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Clock,
   CheckCircle,
@@ -93,6 +93,34 @@ interface ReversalTarget {
   originalPaise: number;
 }
 
+/** WP5 — a payout entry a PAYOUT reversal may pick (reversal engine SHADOW/V2 only). */
+interface PayoutReversalEntry {
+  id:          string;
+  /** Integer paise. */
+  amountPaise: number;
+  status:      'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED' | 'REVERSED' | string;
+  period:      string;
+  createdAt:   string;
+  selectable:  boolean;
+  blockedBy:   'REVERSED' | 'RESERVED' | 'CONSUMED' | 'ZERO' | null;
+}
+
+const ENTRY_STATUS_TEXT: Record<string, string> = {
+  PENDING:    'Not yet sent to the bank — will be cancelled',
+  FAILED:     'Bank payment failed — will be cancelled',
+  PROCESSING: 'With the bank now — approval waits for the bank result',
+  PAID:       'Already paid — becomes a receivable to recover off-platform',
+};
+
+const ENTRY_BLOCK_TEXT: Record<string, string> = {
+  REVERSED: 'Already reversed',
+  RESERVED: 'Held by another pending reversal',
+  CONSUMED: 'Already covered by an approved reversal',
+  ZERO:     'No amount',
+};
+
+const inr = (paise: number) => `₹${(paise / 100).toLocaleString('en-IN')}`;
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function PayoutStatusPage() {
@@ -118,6 +146,10 @@ export default function PayoutStatusPage() {
   const [revRemarks, setRevRemarks] = useState('');
   const [revMsg,     setRevMsg]     = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [revLoading, setRevLoading] = useState(false);
+  // WP5 entry picker: set only when the tenant's reversal engine is SHADOW/V2 (LEGACY keeps the amount form).
+  const [revEntries,  setRevEntries]  = useState<PayoutReversalEntry[] | null>(null);
+  const [revSelected, setRevSelected] = useState<string[]>([]);
+  const revRequestRef = useRef(0);
 
   // Period options for the filter dropdown. Derived from the UNFILTERED first page so
   // selecting a period does not collapse the dropdown to that single option. Grows as
@@ -220,17 +252,81 @@ export default function PayoutStatusPage() {
     setRevAmount(row.awardType === 'PAYOUT' ? String(row.amount / 100) : String(row.amount));
     setRevRemarks('');
     setRevMsg(null);
+    setRevEntries(null);
+    setRevSelected([]);
+    const reqId = ++revRequestRef.current;
+    if (row.awardType === 'PAYOUT') void loadPayoutEntries(batch.id, row.outletId, row.fieldId, reqId);
+  }
+
+  /** WP5: under the SHADOW/V2 reversal engine a payout reversal picks whole entries; LEGACY → nothing changes. */
+  async function loadPayoutEntries(batchId: string, outletId: string, fieldId: string, reqId: number) {
+    try {
+      const params = new URLSearchParams({ outletId, fieldId });
+      const res  = await fetch(`/api/admin/credits/batches/${batchId}/payout-reversal-entries?${params.toString()}`);
+      const json = await res.json();
+      if (reqId !== revRequestRef.current) return; // the modal moved on
+      const data = json?.success ? json.data : null;
+      if (!data || data.mode === 'LEGACY' || !Array.isArray(data.entries)) return;
+      const entries = data.entries as PayoutReversalEntry[];
+      setRevEntries(entries);
+      setRevSelected(entries.filter((e) => e.selectable).map((e) => e.id));
+    } catch {
+      // Keep the amount form; the server refuses a submission without entries on a SHADOW/V2 program.
+    }
   }
 
   function closeReversal() {
+    revRequestRef.current++;
     setRevTarget(null);
     setRevAmount('');
     setRevRemarks('');
     setRevMsg(null);
+    setRevEntries(null);
+    setRevSelected([]);
+  }
+
+  const revPickedPaise = (revEntries ?? [])
+    .filter((e) => revSelected.includes(e.id))
+    .reduce((s, e) => s + e.amountPaise, 0);
+
+  async function submitPayoutEntryReversal() {
+    if (!revTarget || !revEntries) return;
+    if (revSelected.length === 0) {
+      setRevMsg({ type: 'err', text: 'Select at least one payout entry to reverse.' });
+      return;
+    }
+    setRevLoading(true);
+    try {
+      const res = await fetch(`/api/admin/credits/batches/${revTarget.batchId}/reversals`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          outletId:       revTarget.outletId,
+          outletName:     revTarget.outletName,
+          fieldId:        revTarget.fieldId,
+          fieldName:      revTarget.fieldName,
+          awardType:      revTarget.awardType,
+          originalPaise:  revTarget.originalPaise,
+          requestedPaise: revPickedPaise,
+          payoutEntryIds: revSelected,
+        }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setRevMsg({ type: 'err', text: json.error ?? 'Failed to submit reversal' });
+      } else {
+        setRevMsg({ type: 'ok', text: `Reversal request for ${inr(revPickedPaise)} submitted — the selected entries are held out of bank files until Gifsy approves or rejects it.` });
+        fetchBatches();
+      }
+    } catch (e) {
+      setRevMsg({ type: 'err', text: String(e) });
+    }
+    setRevLoading(false);
   }
 
   async function submitReversal() {
     if (!revTarget) return;
+    if (revEntries) return submitPayoutEntryReversal();
     const inputAmt = Number(revAmount);
     if (!inputAmt || inputAmt <= 0) {
       setRevMsg({ type: 'err', text: 'Please enter a valid amount.' });
@@ -529,6 +625,50 @@ export default function PayoutStatusPage() {
 
             {!revMsg && (
               <>
+                {revEntries ? (
+                <fieldset className="space-y-2" data-testid="payout-entry-picker">
+                  <legend className="text-xs font-medium text-gray-700">Payout entries to reverse</legend>
+                  {revEntries.length === 0 ? (
+                    <p className="text-xs text-gray-500">No payout entries exist for this outlet and field in this batch.</p>
+                  ) : (
+                    <ul className="max-h-56 overflow-y-auto divide-y divide-gray-100 border border-gray-200 rounded-lg">
+                      {revEntries.map((e) => {
+                        const checked = revSelected.includes(e.id);
+                        return (
+                          <li key={e.id} className={`px-3 py-2 ${e.selectable ? '' : 'bg-gray-50'}`}>
+                            <label className={`flex items-start gap-2 text-xs ${e.selectable ? 'cursor-pointer' : 'cursor-not-allowed text-gray-400'}`}>
+                              <input
+                                type="checkbox"
+                                className="mt-0.5"
+                                checked={checked}
+                                disabled={!e.selectable || revLoading}
+                                onChange={() =>
+                                  setRevSelected((cur) => (cur.includes(e.id) ? cur.filter((x) => x !== e.id) : [...cur, e.id]))
+                                }
+                                aria-label={`Payout entry ${inr(e.amountPaise)} (${e.status})`}
+                              />
+                              <span className="flex-1">
+                                <span className={`font-medium ${e.selectable ? 'text-gray-800' : ''}`}>{inr(e.amountPaise)}</span>
+                                <span className="block text-gray-500">
+                                  {e.selectable
+                                    ? (ENTRY_STATUS_TEXT[e.status] ?? e.status)
+                                    : (ENTRY_BLOCK_TEXT[e.blockedBy ?? ''] ?? 'Not available')}
+                                </span>
+                              </span>
+                            </label>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  <p className="text-xs text-gray-700" aria-live="polite">
+                    Reversal amount: <strong>{inr(revPickedPaise)}</strong> ({revSelected.length} of {revEntries.filter((e) => e.selectable).length} available entries)
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Payout reversals cover whole payout entries. Selected entries are held out of bank files until Gifsy approves or rejects the request.
+                  </p>
+                </fieldset>
+                ) : (
                 <div className="space-y-2">
                   <label className="text-xs font-medium text-gray-700">
                     Reversal Amount {revTarget.awardType === 'PAYOUT' ? '(₹)' : '(pts)'}
@@ -547,6 +687,7 @@ export default function PayoutStatusPage() {
                       : 'Points are removed from the outlet’s wallet (never below 0; points already redeemed are reported as a shortfall). While a wallet carries a negative balance, reversals on it are paused — contact Gifsy.'}
                   </p>
                 </div>
+                )}
                 <div className="space-y-2">
                   <label className="text-xs font-medium text-gray-700">Remarks (optional)</label>
                   <textarea
@@ -560,7 +701,7 @@ export default function PayoutStatusPage() {
                 <div className="flex gap-3 pt-2">
                   <button
                     onClick={submitReversal}
-                    disabled={revLoading}
+                    disabled={revLoading || (!!revEntries && revSelected.length === 0)}
                     className="flex-1 py-2.5 bg-amber-600 text-white rounded-xl text-sm font-semibold hover:bg-amber-700 disabled:opacity-50"
                   >
                     {revLoading ? 'Submitting…' : 'Submit Reversal Request'}

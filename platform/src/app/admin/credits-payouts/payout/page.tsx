@@ -170,7 +170,56 @@ interface Reversal {
   approvedAt?:    string;
   status:         string;
   remarks?:       string;
+  /**
+   * WP5 — present only for a PAYOUT reversal raised under the SHADOW/V2 reversal engine: the whole entries it
+   * holds (RESERVED while pending) or consumed. Absent for every LEGACY-engine reversal.
+   */
+  payoutEntries?: Array<{
+    payoutEntryId:   string;
+    /** Integer paise. */
+    amountPaise:     number;
+    allocationState: 'RESERVED' | 'APPLIED_CANCELLED' | 'APPLIED_RECEIVABLE' | 'RELEASED' | string;
+    entryStatus:     string;
+  }>;
 }
+
+/** WP5: the approve/reject result of an engine payout reversal (PATCH response `payoutOutcome`). */
+interface PayoutOutcome {
+  cancelled:       Array<{ entryId: string; amountPaise: number; wasStatus: string; tdsOffsetPaise: number; tdsNote: string }>;
+  receivable:      Array<{ entryId: string; amountPaise: number; tdsNote: string }>;
+  receivablePaise: number;
+  released:        Array<{ entryId: string; amountPaise: number }>;
+}
+
+const rupees = (paise: number) => `₹${(paise / 100).toLocaleString('en-IN')}`;
+
+function describePayoutOutcome(o: PayoutOutcome, rev?: { outletName: string; fieldName: string }): { title: string; lines: string[] } {
+  const who = rev ? ` — ${rev.outletName} / ${rev.fieldName}` : '';
+  if (o.released.length > 0 && o.cancelled.length === 0 && o.receivable.length === 0) {
+    return {
+      title: `Reversal rejected${who}`,
+      lines: o.released.map((r) => `${rupees(r.amountPaise)} entry released — it goes into the next bank file again.`),
+    };
+  }
+  return {
+    title: `Reversal approved${who}`,
+    lines: [
+      ...o.cancelled.map((c) => `${rupees(c.amountPaise)} entry (${c.wasStatus === 'FAILED' ? 'bank payment had failed' : 'not yet sent to the bank'}) cancelled — ${c.tdsNote}.`),
+      ...o.receivable.map((r) => `${rupees(r.amountPaise)} entry was already PAID — recorded as a receivable to recover off-platform; ${r.tdsNote}.`),
+      ...(o.receivablePaise > 0
+        ? [`Total receivable ${rupees(o.receivablePaise)} — shown as "Pending" in Processed Reversals below.`]
+        : []),
+    ],
+  };
+}
+
+/** What approving does to a held entry, by its current bank status (WP5 P4). */
+const HELD_ENTRY_OUTCOME: Record<string, string> = {
+  PENDING:    'not yet sent → will be cancelled',
+  FAILED:     'bank payment failed → will be cancelled',
+  PROCESSING: 'with the bank now → approval refused until the UTR / failure is recorded',
+  PAID:       'already paid → recorded as a receivable',
+};
 
 interface Pagination {
   page:  number;
@@ -212,6 +261,10 @@ function PayoutPageInner() {
   const [reversals, setReversals] = useState<Reversal[]>([]);
   const [generating, setGenerating] = useState(false);
   const [genError,   setGenError]   = useState('');
+  // WP5: entries a pending payout reversal kept out of the last bank file (never a silent skip).
+  const [genHeldNotice, setGenHeldNotice] = useState('');
+  // WP5: what approving / rejecting an engine payout reversal did (cancelled / receivable / TDS / released).
+  const [revOutcome, setRevOutcome] = useState<{ title: string; lines: string[] } | null>(null);
 
   // UTR upload state
   const [utrDownloadId,  setUtrDownloadId]  = useState('');
@@ -293,6 +346,7 @@ function PayoutPageInner() {
   async function handleGeneratePayoutFile() {
     setGenerating(true);
     setGenError('');
+    setGenHeldNotice('');
     try {
       const body: Record<string, unknown> = { period, groupType };
       if (groupType === 'SEPARATE' && fieldId) {
@@ -311,6 +365,16 @@ function PayoutPageInner() {
         const json = await res.json().catch(() => ({ error: 'Request failed' }));
         setGenError(json.error ?? `HTTP ${res.status}`);
         return;
+      }
+
+      const heldCount = Number(res.headers?.get?.('X-Reversal-Held-Count') ?? 0);
+      if (heldCount > 0) {
+        const heldPaise = Number(res.headers.get('X-Reversal-Held-Paise') ?? 0);
+        setGenHeldNotice(
+          `${heldCount} payout entr${heldCount === 1 ? 'y' : 'ies'} (₹${(heldPaise / 100).toLocaleString('en-IN')}) ` +
+          `${heldCount === 1 ? 'was' : 'were'} held out of this bank file because a reversal request is pending — ` +
+          'see Pending Reversal Requests below. Approve or reject each request; a rejected request releases its entries into the next file.',
+        );
       }
 
       // Binary response — trigger download
@@ -466,6 +530,8 @@ function PayoutPageInner() {
     if (!json.success) {
       setRevMsg(json.error ?? 'Failed to process reversal');
     } else {
+      const o = json.data?.payoutOutcome as PayoutOutcome | undefined;
+      setRevOutcome(o ? describePayoutOutcome(o, actionRev) : null);
       setRevAction(null);
       setRevAmount('');
       setRevRemarks('');
@@ -559,6 +625,13 @@ function PayoutPageInner() {
             {generating ? 'Generating…' : 'Generate & Download'}
           </button>
         </div>
+
+        {genHeldNotice && (
+          <div role="status" data-testid="reversal-held-notice" className="flex items-start gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            {genHeldNotice}
+          </div>
+        )}
 
         {genError && (
           <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 rounded-xl px-4 py-3">
@@ -895,6 +968,18 @@ function PayoutPageInner() {
           )}
         </h3>
 
+        {revOutcome && (
+          <div role="status" data-testid="reversal-outcome" className="text-xs text-gray-800 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 space-y-1">
+            <div className="flex items-start justify-between gap-2">
+              <p className="font-semibold">{revOutcome.title}</p>
+              <button onClick={() => setRevOutcome(null)} className="text-gray-500 hover:text-gray-800" aria-label="Dismiss">×</button>
+            </div>
+            <ul className="list-disc pl-4 space-y-0.5">
+              {revOutcome.lines.map((l, i) => <li key={i}>{l}</li>)}
+            </ul>
+          </div>
+        )}
+
         {reversals.length === 0 ? (
           <p className="text-xs text-gray-400 text-center py-4">No pending reversal requests.</p>
         ) : (
@@ -933,6 +1018,21 @@ function PayoutPageInner() {
                     <p className="font-medium text-gray-800">{new Date(rev.requestedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</p>
                   </div>
                 </div>
+
+                {rev.payoutEntries && rev.payoutEntries.length > 0 && (
+                  <div className="text-xs" data-testid={`held-entries-${rev.id}`}>
+                    <p className="text-gray-500">Payout entries held for this request (kept out of bank files)</p>
+                    <ul className="mt-1 space-y-0.5">
+                      {rev.payoutEntries.map((pe) => (
+                        <li key={pe.payoutEntryId} className="text-gray-800">
+                          <span className="font-medium">₹{(pe.amountPaise / 100).toLocaleString('en-IN')}</span>
+                          {' — '}
+                          <span className="text-gray-600">{HELD_ENTRY_OUTCOME[pe.entryStatus] ?? pe.entryStatus}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
 
                 {revAction?.id === rev.id ? (
                   <div className="bg-white rounded-xl p-3 space-y-3 border border-gray-200">

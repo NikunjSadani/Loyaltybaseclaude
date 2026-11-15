@@ -99,6 +99,8 @@ const mockTx = {
   autoInvoice: { updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   // FIX-8 advisory lock — pg_advisory_xact_lock(hashtextextended(...)).
   $executeRaw: jest.fn().mockResolvedValue(0),
+  // WP5: engine PAYOUT allocations — none on a LEGACY tenant (approve/reject + download race check read them).
+  payoutReversalAllocation: { findMany: jest.fn().mockResolvedValue([]) },
 };
 
 const mockPrisma = {
@@ -118,6 +120,8 @@ const mockPrisma = {
   // Visibility-payout TDS reads (cross-tenant PAN aggregation + carry-forward + one-per-PAN/FY).
   tdsDeductionEntry: { findMany: jest.fn() },
   autoInvoice: { findMany: jest.fn() },
+  // WP5: listReversals attaches engine PAYOUT allocations — none on a LEGACY tenant.
+  payoutReversalAllocation: { findMany: jest.fn().mockResolvedValue([]) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
@@ -149,6 +153,8 @@ const mockTenantSettings = {
   getEffectiveSettings: jest.fn(async () => ({ creditsPayouts: mockCreditsPayouts })),
   // Per-tenant TDS policy resolved once at confirm + frozen onto each entry (W0-B).
   resolveTdsPolicy: jest.fn(async () => ({ section: 'SEC_194C', methodology: 'GROSS_UP' })),
+  // Reversal engine flag (absent row → LEGACY): every test here exercises today's (LEGACY) behaviour.
+  getReversalEngineModeUncached: jest.fn(async () => 'LEGACY' as const),
 };
 
 // Stream B: SERVICE invoice-at-confirm + gross-up TDS invoice-at-download are delegated here.

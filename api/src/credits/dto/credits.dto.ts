@@ -1,7 +1,11 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  ArrayUnique,
   IsArray,
   IsBoolean,
+  IsNotEmpty,
   IsEnum,
   IsInt,
   IsNumber,
@@ -284,6 +288,29 @@ export class CreateReversalDto {
   @IsInt()
   @IsPositive()
   requestedPaise!: number;
+
+  /**
+   * WP5 (reversal engine SHADOW/V2 only): the WHOLE payout entries this PAYOUT reversal covers; requestedPaise
+   * must equal their sum. Refused for POINTS and for a tenant on the LEGACY engine (which matches entries itself).
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(500)
+  @ArrayUnique()
+  @IsString({ each: true })
+  payoutEntryIds?: string[];
+}
+
+/** GET /admin/credits/batches/:id/payout-reversal-entries — the entries a PAYOUT reversal may select (WP5). */
+export class PayoutReversalEntriesQueryDto {
+  @IsString()
+  @IsNotEmpty()
+  outletId!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  fieldId!: string;
 }
 
 /** Reversal approve/reject action. */

@@ -33,6 +33,7 @@ import {
   ListReversalsQueryDto,
   PatchFieldDto,
   PatchReversalDto,
+  PayoutReversalEntriesQueryDto,
   UtrUploadQueryDto,
 } from './dto/credits.dto';
 import { HeavyOp } from '../common/heavy-op-limiter';
@@ -102,6 +103,18 @@ export class CreditsController {
     @Body() dto: CreateReversalDto,
   ) {
     return this.credits.createReversal(user, id, dto);
+  }
+
+  // WP5: entries a PAYOUT reversal may select (+ the tenant's reversal engine mode, which picks the form).
+  @Get('batches/:id/payout-reversal-entries')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:request_reversal')
+  listPayoutReversalEntries(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Query() query: PayoutReversalEntriesQueryDto,
+  ) {
+    return this.credits.listPayoutReversalEntries(user, id, query);
   }
 
   // ─── Batch audit-evidence attachments (B1) ─────────────────────────────────
@@ -233,12 +246,18 @@ export class CreditsController {
     @Body() dto: CreatePayoutDownloadDto,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { buffer, downloadCode, downloadId } = await this.credits.createPayoutDownload(
+    const { buffer, downloadCode, downloadId, reversalHeld } = await this.credits.createPayoutDownload(
       user,
       dto,
     );
     res.setHeader('X-Download-Code', downloadCode);
     res.setHeader('X-Download-Id', downloadId);
+    // WP5: entries left out because a pending reversal holds them → the screen tells the admin (never silent).
+    // Only sent when there are any (never on a LEGACY-engine tenant → response unchanged there).
+    if (reversalHeld.length > 0) {
+      res.setHeader('X-Reversal-Held-Count', String(reversalHeld.length));
+      res.setHeader('X-Reversal-Held-Paise', String(reversalHeld.reduce((n, h) => n + h.amountPaise, 0)));
+    }
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="payout-${downloadCode}.xlsx"`,

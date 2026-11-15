@@ -1,0 +1,757 @@
+// WP5 — PAYOUT (₹) reversals under the Wallet Reversal Engine (WALLET-REVERSAL-ENGINE-DESIGN.md §8, §15 T-pay1..5).
+// Runs CreditsService end-to-end against an in-memory Prisma fake WITH transaction rollback and the partial unique
+// index on live payout allocations, so each test asserts the persisted state (entries, allocations, reversals, TDS
+// ledger, downloads), not mock call shapes. LEGACY (default) behaviour is covered here at the dispatch level and,
+// byte-for-byte, by the untouched assertions of credits.service.spec.ts.
+// Run: npx jest src/credits/payout-reversal-v2.spec.ts
+
+import { BadRequestException, ConflictException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { CreditsService } from './credits.service';
+import { CreateReversalDto, PayoutGroupType, ReversalAction } from './dto/credits.dto';
+import {
+  classifyPayoutCandidates,
+  planPayoutAllocationBackfill,
+  reservePayoutEntries,
+  BackfillPayoutEntry,
+  BackfillPayoutReversal,
+} from './payout-reversal-v2';
+import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { DEFAULT_RESOLVED_TDS_STATUTORY } from '../tds/tds.helpers';
+
+jest.mock('../common/reward-account.helper', () => ({ ensureOutletAccount: jest.fn().mockResolvedValue('acc-x') }));
+
+// ─── In-memory Prisma fake ─────────────────────────────────────────────────────────────────────────────────────
+type Row = Record<string, any>;
+
+const LIVE = ['RESERVED', 'APPLIED_CANCELLED', 'APPLIED_RECEIVABLE'];
+
+function same(a: unknown, b: unknown): boolean {
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  return a === b;
+}
+
+class FakeDb {
+  tables: Record<string, Row[]> = {};
+  seq = 0;
+  /** SQL text + values of every $queryRaw (row locks). */
+  rawCalls: { sql: string; values: unknown[] }[] = [];
+  /** Test hook: runs right after the download record is created inside the download tx (before the claim). */
+  onDownloadCreate: (() => void) | null = null;
+
+  t(name: string): Row[] {
+    return (this.tables[name] ??= []);
+  }
+  nextId(p: string) {
+    return `${p}${++this.seq}`;
+  }
+
+  matchVal(v: unknown, c: any): boolean {
+    if (c === undefined) return true;
+    if (c !== null && typeof c === 'object' && !(c instanceof Date)) {
+      if ('in' in c) return (c.in as unknown[]).some((x) => same(v, x));
+      if ('not' in c) return !this.matchVal(v, c.not);
+      if ('startsWith' in c) return String(v).startsWith(c.startsWith);
+      throw new Error(`fake: unsupported condition ${Object.keys(c).join(',')}`);
+    }
+    return same(v, c);
+  }
+
+  match(table: string, row: Row, where: any): boolean {
+    if (!where) return true;
+    for (const [k, c] of Object.entries(where)) {
+      if (c === undefined) continue;
+      if (k === 'NOT') {
+        if (c && this.match(table, row, c)) return false;
+        continue;
+      }
+      if (k === 'payoutEntry' && table === 'payoutReversalAllocation') {
+        const e = this.t('creditPayoutEntry').find((x) => x.id === row.payoutEntryId);
+        if (!e || !this.match('creditPayoutEntry', e, c)) return false;
+        continue;
+      }
+      if (k === 'reversalAllocations') {
+        const allocs = this.t('payoutReversalAllocation').filter((a) => a.payoutEntryId === row.id);
+        const rc = c as any;
+        if (rc.none && allocs.some((a) => this.match('payoutReversalAllocation', a, rc.none))) return false;
+        if (rc.some && !allocs.some((a) => this.match('payoutReversalAllocation', a, rc.some))) return false;
+        continue;
+      }
+      if (!this.matchVal(row[k], c)) return false;
+    }
+    return true;
+  }
+
+  project(table: string, row: Row, args: any): Row {
+    const out: Row = { ...row };
+    const rel = { ...(args?.include ?? {}), ...(args?.select ?? {}) };
+    if (table === 'creditPayoutEntry' && rel.batch) {
+      out.batch = { ...this.t('creditBatch').find((b) => b.id === row.batchId) };
+    }
+    if (table === 'payoutReversalAllocation' && rel.payoutEntry) {
+      out.payoutEntry = { ...this.t('creditPayoutEntry').find((e) => e.id === row.payoutEntryId) };
+    }
+    return out;
+  }
+
+  sort(rows: Row[], orderBy: any): Row[] {
+    const keys: [string, 'asc' | 'desc'][] = (Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : []).flatMap(
+      (o: Row) => Object.entries(o) as [string, 'asc' | 'desc'][],
+    );
+    return [...rows].sort((a, b) => {
+      for (const [k, dir] of keys) {
+        const av = a[k] instanceof Date ? a[k].getTime() : a[k];
+        const bv = b[k] instanceof Date ? b[k].getTime() : b[k];
+        if (av < bv) return dir === 'asc' ? -1 : 1;
+        if (av > bv) return dir === 'asc' ? 1 : -1;
+      }
+      return 0;
+    });
+  }
+
+  uniqueCheck(table: string, row: Row) {
+    if (table !== 'payoutReversalAllocation') return;
+    const rows = this.t(table);
+    const dupPair = rows.some(
+      (r) => r !== row && r.creditReversalId === row.creditReversalId && r.payoutEntryId === row.payoutEntryId,
+    );
+    const dupLive =
+      LIVE.includes(row.state) && rows.some((r) => r !== row && r.payoutEntryId === row.payoutEntryId && LIVE.includes(r.state));
+    if (dupPair || dupLive) {
+      throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'fake' });
+    }
+    if (!(row.amountPaise > 0n) || row.tdsOffsetPaise < 0n) throw new Error('CHECK payout_reversal_allocations_amounts_chk');
+  }
+
+  defaults(table: string, data: Row): Row {
+    const now = new Date();
+    const base: Row = { id: data.id ?? this.nextId(table.slice(0, 3)), createdAt: now, updatedAt: now };
+    if (table === 'creditReversal') {
+      Object.assign(base, {
+        status: 'PENDING_GIFSY',
+        shortfallPaise: 0n,
+        consumedPayoutEntryIds: null,
+        approvedPaise: null,
+        approvedAt: null,
+        approvedBy: null,
+        remarks: null,
+        requestedAt: now,
+      });
+    }
+    if (table === 'payoutReversalAllocation') Object.assign(base, { state: 'RESERVED', tdsOffsetPaise: 0n });
+    return { ...base, ...data };
+  }
+
+  model(table: string) {
+    return {
+      findMany: async (args: any = {}) => {
+        let rows = this.t(table).filter((r) => this.match(table, r, args.where));
+        rows = this.sort(rows, args.orderBy);
+        if (args.skip) rows = rows.slice(args.skip);
+        if (args.take) rows = rows.slice(0, args.take);
+        return rows.map((r) => this.project(table, r, args));
+      },
+      findFirst: async (args: any = {}) => {
+        const rows = this.sort(this.t(table).filter((r) => this.match(table, r, args.where)), args.orderBy);
+        return rows[0] ? this.project(table, rows[0], args) : null;
+      },
+      findUnique: async (args: any = {}) => {
+        const r = this.t(table).find((x) => this.match(table, x, args.where));
+        return r ? this.project(table, r, args) : null;
+      },
+      count: async (args: any = {}) => this.t(table).filter((r) => this.match(table, r, args.where)).length,
+      create: async (args: any) => {
+        const row = this.defaults(table, args.data);
+        this.t(table).push(row);
+        this.uniqueCheck(table, row);
+        if (table === 'creditPayoutDownload') this.onDownloadCreate?.();
+        return { ...row };
+      },
+      createMany: async (args: any) => {
+        for (const d of args.data) {
+          const row = this.defaults(table, d);
+          this.t(table).push(row);
+          this.uniqueCheck(table, row);
+        }
+        return { count: args.data.length };
+      },
+      updateMany: async (args: any) => {
+        const rows = this.t(table).filter((r) => this.match(table, r, args.where));
+        for (const r of rows) {
+          Object.assign(r, args.data, { updatedAt: new Date() });
+          this.uniqueCheck(table, r);
+        }
+        return { count: rows.length };
+      },
+      update: async (args: any) => {
+        const r = this.t(table).find((x) => this.match(table, x, args.where));
+        if (!r) throw new Error(`fake: ${table}.update no row`);
+        Object.assign(r, args.data, { updatedAt: new Date() });
+        return { ...r };
+      },
+      upsert: async () => ({}),
+      deleteMany: async () => ({ count: 0 }),
+    };
+  }
+
+  client(): any {
+    const db = this;
+    const target: Row = {
+      $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        db.rawCalls.push({ sql: strings.join('?'), values });
+        return [];
+      },
+      $executeRaw: async () => 0,
+      $transaction: async (cb: (tx: any) => Promise<unknown>) => {
+        const snapshot = structuredClone(db.tables);
+        try {
+          return await cb(proxy);
+        } catch (e) {
+          db.tables = snapshot; // rollback
+          throw e;
+        }
+      },
+    };
+    const proxy: any = new Proxy(target, {
+      get(t, prop: string) {
+        if (prop in t) return t[prop];
+        if (typeof prop !== 'string' || prop === 'then') return undefined;
+        return db.model(prop);
+      },
+    });
+    return proxy;
+  }
+}
+
+// ─── Fixture ───────────────────────────────────────────────────────────────────────────────────────────────────
+const TENANT = 'bajaj';
+const admin: JwtPayload = { sub: 'client-admin', role: 'CLIENT_ADMIN', clientId: TENANT, phone: '', name: '' };
+const gifsy: JwtPayload = { sub: 'gifsy-admin', role: 'GIFSY_ADMIN', clientId: TENANT, phone: '', name: '' };
+
+function entry(id: string, amountPaise: bigint, status: string, extra: Row = {}): Row {
+  return {
+    id,
+    clientId: TENANT,
+    batchId: 'b1',
+    downloadId: status === 'PROCESSING' || status === 'PAID' ? 'dl-old' : null,
+    outletId: 'O1',
+    outletName: 'Outlet One',
+    fieldId: 'f1',
+    fieldName: 'Volume',
+    period: '2026-10',
+    amountPaise,
+    narration: '',
+    status,
+    utr: null,
+    paidAt: null,
+    tdsSection: null,
+    tdsMethodology: null,
+    tdsDeductedPaise: 0n,
+    createdAt: new Date('2026-11-01T00:00:00Z'),
+    ...extra,
+  };
+}
+
+function setup(mode: 'LEGACY' | 'SHADOW' | 'V2' = 'V2') {
+  const db = new FakeDb();
+  db.t('creditBatch').push({
+    id: 'b1',
+    clientId: TENANT,
+    batchCode: 'CB-2026-10-001',
+    period: '2026-10',
+    status: 'CONFIRMED',
+    rows: [
+      { outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 80_000 },
+      { outletId: 'O2', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 20_000 },
+    ],
+  });
+  // T-pay2 shape: [₹300 PAID, ₹500 PENDING] for O1/f1 — plus an unrelated O2 entry for downloads.
+  db.t('creditPayoutEntry').push(
+    entry('pe-a', 30_000n, 'PAID', { createdAt: new Date('2026-11-01T00:00:00Z') }),
+    entry('pe-b', 50_000n, 'PENDING', { createdAt: new Date('2026-11-02T00:00:00Z') }),
+    entry('pe-c', 20_000n, 'PENDING', { outletId: 'O2', outletName: 'Outlet Two' }),
+  );
+  const partner = (id: string) => ({
+    id,
+    userId: `u-${id}`,
+    bankName: 'HDFC',
+    bankAccountNumber: '123',
+    bankAccountHolder: 'X',
+    ifscCode: 'HDFC0001',
+    upiId: '',
+    isActive: true,
+    deletedAt: null,
+    panNumber: null,
+    phone: '9900000000',
+    kycSubmissions: [{ id: `k-${id}`, status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+  });
+  db.t('outlet').push(
+    { clientId: TENANT, outletCode: 'O1', name: 'Outlet One', isActive: true, state: null, phone: null, partner: partner('p1') },
+    { clientId: TENANT, outletCode: 'O2', name: 'Outlet Two', isActive: true, state: null, phone: null, partner: partner('p2') },
+  );
+  const settings = {
+    mode: mode as 'LEGACY' | 'SHADOW' | 'V2',
+    getReversalEngineModeUncached: jest.fn(async () => settings.mode),
+    getEffectiveSettings: jest.fn(async () => ({
+      creditsPayouts: { monthCutoffDay: 31, safetyCapPoints: 1e6, safetyCapInr: 1e7, fourEyesEnabled: false, notifyEmails: [] },
+    })),
+    resolveTdsPolicy: jest.fn(async () => ({ section: 'SEC_194C', methodology: 'GROSS_UP' })),
+  };
+  const wallet = { assertPointsReversalAllowed: jest.fn(), creditedPointsForBatchRow: jest.fn(async () => 0n) };
+  const service = new CreditsService(
+    db.client(),
+    { enqueue: jest.fn().mockResolvedValue({}), writeInApp: jest.fn(), notifyUser: jest.fn(), notifyUserWithChannels: jest.fn() } as any,
+    { sendWhatsappTemplate: jest.fn().mockResolvedValue(undefined) } as any,
+    wallet as any,
+    settings as any,
+    { generateForBatch: jest.fn(), createTdsInvoice: jest.fn() } as any,
+    { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) } as any,
+  );
+  const e = (id: string) => db.t('creditPayoutEntry').find((x) => x.id === id)!;
+  const allocs = (reversalId?: string) =>
+    db.t('payoutReversalAllocation').filter((a) => !reversalId || a.creditReversalId === reversalId);
+  const reversal = (id: string) => db.t('creditReversal').find((r) => r.id === id)!;
+  return { db, service, settings, wallet, e, allocs, reversal };
+}
+
+function req(amount: number, payoutEntryIds?: string[], outletId = 'O1'): CreateReversalDto {
+  return {
+    outletId,
+    outletName: 'Outlet One',
+    fieldId: 'f1',
+    fieldName: 'Volume',
+    awardType: 'PAYOUT' as any,
+    originalPaise: 80_000,
+    requestedPaise: amount,
+    ...(payoutEntryIds ? { payoutEntryIds } : {}),
+  };
+}
+
+const approve = (s: ReturnType<typeof setup>, id: string) =>
+  s.service.patchReversal(gifsy, id, { action: ReversalAction.approve });
+const reject = (s: ReturnType<typeof setup>, id: string) =>
+  s.service.patchReversal(gifsy, id, { action: ReversalAction.reject, remarks: 'no' });
+const download = (s: ReturnType<typeof setup>) =>
+  s.service.createPayoutDownload(gifsy, { period: '2026-10', groupType: PayoutGroupType.STANDARD });
+
+// ─── LEGACY dispatch ───────────────────────────────────────────────────────────────────────────────────────────
+describe('WP5 — LEGACY tenant (default) keeps the interim behaviour', () => {
+  it('lists no entries (amount form), refuses an entry selection, and creates/approves exactly as the interim rule', async () => {
+    const s = setup('LEGACY');
+    await expect(s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' })).resolves.toEqual({
+      mode: 'LEGACY',
+      entries: [],
+    });
+    await expect(s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']))).rejects.toThrow(/not enabled/);
+
+    const r = await s.service.createReversal(admin, 'b1', req(50_000));
+    expect(s.allocs()).toHaveLength(0); // no reservation under LEGACY
+    expect(r).not.toHaveProperty('payoutEntries');
+    const done = (await approve(s, r.id)) as Row;
+    expect(s.e('pe-b').status).toBe('REVERSED'); // interim exact-subset pick
+    expect(s.reversal(r.id).consumedPayoutEntryIds).toEqual(['pe-b']);
+    expect(s.allocs()).toHaveLength(0);
+    expect(done.clawbackShortfall).toBe(0);
+    // listReversals: a LEGACY reversal is returned exactly as stored (no payoutEntries key).
+    const list = await s.service.listReversals(gifsy, {} as any);
+    expect(list.reversals[0]).not.toHaveProperty('payoutEntries');
+    expect(done).not.toHaveProperty('payoutOutcome');
+    const dl = await download(s);
+    expect(dl.reversalHeld).toEqual([]);
+    expect(s.db.t('auditLog')).toHaveLength(0);
+  });
+
+  it('refuses payoutEntryIds on a POINTS reversal (any mode)', async () => {
+    const s = setup('V2');
+    s.wallet.creditedPointsForBatchRow.mockResolvedValue(1_000n);
+    await expect(
+      s.service.createReversal(admin, 'b1', { ...req(10, ['pe-b']), awardType: 'POINTS' as any }),
+    ).rejects.toThrow(/PAYOUT reversals only/);
+  });
+
+  it('DTO: payoutEntryIds must be a non-empty unique string array', async () => {
+    const bad = async (v: unknown) =>
+      (await validate(plainToInstance(CreateReversalDto, { ...req(1), payoutEntryIds: v }))).length > 0;
+    expect(await bad([])).toBe(true);
+    expect(await bad(['a', 'a'])).toBe(true);
+    expect(await bad([1])).toBe(true);
+    expect(await bad(['a', 'b'])).toBe(false);
+  });
+});
+
+// ─── V2 / SHADOW ───────────────────────────────────────────────────────────────────────────────────────────────
+describe.each(['V2', 'SHADOW'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversals', (mode) => {
+  it('candidates: every entry of the (batch, outlet, field) with why it can or cannot be picked', async () => {
+    const s = setup(mode);
+    s.db.t('creditPayoutEntry').push(entry('pe-x', 10_000n, 'REVERSED', { createdAt: new Date('2026-11-03T00:00:00Z') }));
+    const res = await s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' });
+    expect(res.mode).toBe(mode);
+    expect(res.entries.map((c) => [c.id, c.amountPaise, c.selectable, c.blockedBy])).toEqual([
+      ['pe-a', 30_000, true, null],
+      ['pe-b', 50_000, true, null],
+      ['pe-x', 10_000, false, 'REVERSED'],
+    ]);
+  });
+
+  it('T-pay2 exact subset: [₹300 PAID, ₹500 PENDING] — reversing the ₹500 entry is accepted and cancels it', async () => {
+    const s = setup(mode);
+    const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
+    expect(s.allocs(r.id)).toMatchObject([{ payoutEntryId: 'pe-b', amountPaise: 50_000n, state: 'RESERVED' }]);
+    const done = (await approve(s, r.id)) as Row;
+    expect(s.e('pe-b')).toMatchObject({ status: 'REVERSED', downloadId: null });
+    expect(s.e('pe-a').status).toBe('PAID');
+    expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_CANCELLED', tdsOffsetPaise: 0n }]);
+    expect(s.reversal(r.id)).toMatchObject({ status: 'APPROVED', approvedPaise: 50_000n, shortfallPaise: 0n });
+    expect(s.reversal(r.id).consumedPayoutEntryIds).toEqual(['pe-b']); // mirror for the interim selector
+    expect(done.clawbackShortfall).toBe(0);
+    expect(done.payoutOutcome).toEqual({
+      cancelled: [{ entryId: 'pe-b', amountPaise: 50_000, wasStatus: 'PENDING', tdsOffsetPaise: 0, tdsNote: 'no TDS withheld' }],
+      receivable: [],
+      receivablePaise: 0,
+      released: [],
+    });
+    // audit trail: reserve (CREATE) then apply (APPROVE), with the entries
+    const audits = s.db.t('auditLog').filter((a) => a.entityId === r.id);
+    expect(audits.map((a) => [a.action, a.entityType, a.actorId])).toEqual([
+      ['CREATE', 'PAYOUT_REVERSAL_ALLOCATION', 'client-admin'],
+      ['APPROVE', 'PAYOUT_REVERSAL_ALLOCATION', 'gifsy-admin'],
+    ]);
+    expect(audits[0].metadata).toMatchObject({ step: 'RESERVED', totalPaise: '50000', entries: [{ entryId: 'pe-b', amountPaise: '50000', status: 'PENDING' }] });
+    expect(audits[1].metadata).toMatchObject({ step: 'APPLIED', cancelled: [{ entryId: 'pe-b' }], receivablePaise: 0 });
+  });
+
+  it('T-pay1 double consumption: a PAID entry becomes a receivable ONCE and is unreachable to a later reversal', async () => {
+    const s = setup(mode);
+    const r1 = await s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']));
+    const d1 = (await approve(s, r1.id)) as Row;
+    expect(s.e('pe-a').status).toBe('PAID'); // Q11: entry stays PAID
+    expect(s.allocs(r1.id)).toMatchObject([{ state: 'APPLIED_RECEIVABLE' }]);
+    expect(s.reversal(r1.id).shortfallPaise).toBe(30_000n);
+    expect(d1.clawbackShortfall).toBe(30_000);
+    expect(d1.payoutOutcome).toMatchObject({ receivable: [{ entryId: 'pe-a', amountPaise: 30_000, tdsNote: 'no TDS withheld' }], receivablePaise: 30_000 });
+
+    await expect(s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']))).rejects.toThrow(/already taken/);
+    const c = await s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' });
+    expect(c.entries.find((x) => x.id === 'pe-a')).toMatchObject({ selectable: false, blockedBy: 'CONSUMED' });
+    // …and if the tenant is switched back to LEGACY, the interim selector sees it as consumed too.
+    s.settings.mode = 'LEGACY';
+    await expect(s.service.createReversal(admin, 'b1', req(30_000))).rejects.toThrow(/whole payout entries/);
+    // The live-allocation index holds exactly one row for the entry.
+    expect(s.allocs().filter((a) => a.payoutEntryId === 'pe-a' && LIVE.includes(a.state))).toHaveLength(1);
+  });
+
+  it('P1: the request must equal the selected entries, which must belong to this outlet + field', async () => {
+    const s = setup(mode);
+    await expect(s.service.createReversal(admin, 'b1', req(50_000))).rejects.toThrow(/Select the payout entries/);
+    await expect(s.service.createReversal(admin, 'b1', req(40_000, ['pe-b']))).rejects.toThrow(/must equal the selected/);
+    await expect(s.service.createReversal(admin, 'b1', req(20_000, ['pe-c']))).rejects.toThrow(/not an entry of this outlet/);
+    await expect(s.service.createReversal(admin, 'b1', req(80_000, ['pe-a', 'pe-b']))).resolves.toBeDefined();
+    expect(s.allocs().map((a) => a.payoutEntryId).sort()).toEqual(['pe-a', 'pe-b']);
+    // nothing was written by the refused attempts (rolled back)
+    expect(s.db.t('creditReversal')).toHaveLength(1);
+  });
+
+  it('P2: an entry held by a pending reversal cannot be selected again; a rejection releases it', async () => {
+    const s = setup(mode);
+    // Only one pending reversal can exist per (batch, outlet, field), so the hold is proven via the candidates view
+    // (the index backstop has its own test below), then released by a rejection.
+    const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
+    const c = await s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' });
+    expect(c.entries.find((x) => x.id === 'pe-b')).toMatchObject({ selectable: false, blockedBy: 'RESERVED' });
+    const rj = (await reject(s, r.id)) as Row;
+    expect(rj.payoutOutcome).toMatchObject({ released: [{ entryId: 'pe-b', amountPaise: 50_000 }] });
+    expect(rj.payoutClawbackNote).toMatch(/released — eligible for the next bank file/);
+    expect(s.db.t('auditLog').find((a) => a.action === 'REJECT')).toMatchObject({ entityId: r.id, metadata: { step: 'RELEASED' } });
+    expect(s.reversal(r.id).status).toBe('REJECTED');
+    expect(s.allocs(r.id)).toMatchObject([{ state: 'RELEASED' }]);
+    expect(s.e('pe-b').status).toBe('PENDING');
+    const r2 = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
+    expect(s.allocs(r2.id)).toMatchObject([{ state: 'RESERVED' }]);
+  });
+
+  it('T-pay3 reservation vs download: a RESERVED entry is skipped by the bank file and re-enters it after a rejection', async () => {
+    const s = setup(mode);
+    const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
+    const d1 = await download(s);
+    expect(s.e('pe-c')).toMatchObject({ status: 'PROCESSING', downloadId: d1.downloadId });
+    expect(s.e('pe-b')).toMatchObject({ status: 'PENDING', downloadId: null }); // held out of the file
+    // …and reported, never silent: returned to the screen + an audit row on the download.
+    expect(d1.reversalHeld).toEqual([
+      { entryId: 'pe-b', outletId: 'O1', outletName: 'Outlet One', fieldName: 'Volume', amountPaise: 50_000, status: 'PENDING', creditReversalId: r.id },
+    ]);
+    expect(s.db.t('auditLog').find((a) => a.entityType === 'PAYOUT_DOWNLOAD_REVERSAL_HOLD')).toMatchObject({
+      entityId: d1.downloadId, action: 'EXPORT', metadata: { heldCount: 1, heldPaise: '50000' },
+    });
+    // a file with nothing else payable says why
+    s.e('pe-c').status = 'PAID';
+    await expect(download(s)).rejects.toThrow(/1 entry \(₹500\.00\) is held out of bank files because a reversal request is pending/);
+    s.e('pe-c').status = 'PROCESSING';
+    await reject(s, r.id);
+    const d2 = await download(s);
+    expect(d2.reversalHeld).toEqual([]);
+    expect(s.e('pe-b')).toMatchObject({ status: 'PROCESSING', downloadId: d2.downloadId });
+  });
+
+  it('T-pay3 race: a reservation committed between the download read and its claim rolls the download back', async () => {
+    const s = setup(mode);
+    let fired = false;
+    s.db.onDownloadCreate = () => {
+      if (fired) return;
+      fired = true; // the reversal tx commits here (between the read and the claim)
+      s.db.t('payoutReversalAllocation').push({
+        id: 'al-race', creditReversalId: 'rev-race', payoutEntryId: 'pe-b', amountPaise: 50_000n, state: 'RESERVED', tdsOffsetPaise: 0n,
+      });
+    };
+    await expect(download(s)).rejects.toBeInstanceOf(ConflictException);
+    // rolled back: nothing claimed, no download row, the reservation (committed by the other tx) is intact
+    expect(s.e('pe-b')).toMatchObject({ status: 'PENDING', downloadId: null });
+    expect(s.e('pe-c')).toMatchObject({ status: 'PENDING', downloadId: null });
+    expect(s.db.t('creditPayoutDownload')).toHaveLength(0);
+    // simulate the other tx's commit surviving our rollback, then the retry skips the reserved entry
+    s.db.t('payoutReversalAllocation').push({
+      id: 'al-race', creditReversalId: 'rev-race', payoutEntryId: 'pe-b', amountPaise: 50_000n, state: 'RESERVED', tdsOffsetPaise: 0n,
+    });
+    await download(s);
+    expect(s.e('pe-b').status).toBe('PENDING');
+    expect(s.e('pe-c').status).toBe('PROCESSING');
+  });
+
+  it('T-pay4 PROCESSING: reservable, but approval is refused (nothing changes) until the bank result is recorded', async () => {
+    const s = setup(mode);
+    s.e('pe-b').status = 'PROCESSING';
+    const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
+    await expect(approve(s, r.id)).rejects.toThrow(/already sent to the bank/);
+    expect(s.reversal(r.id).status).toBe('PENDING_GIFSY');
+    expect(s.allocs(r.id)).toMatchObject([{ state: 'RESERVED' }]);
+    expect(s.e('pe-b').status).toBe('PROCESSING');
+    // UTR upload records a bank failure → FAILED; the RESERVED hold keeps it out of the re-bank, approval now cancels it.
+    Object.assign(s.e('pe-b'), { status: 'FAILED' });
+    await download(s); // re-bank run: pe-c only
+    expect(s.e('pe-b').status).toBe('FAILED');
+    await approve(s, r.id);
+    expect(s.e('pe-b').status).toBe('REVERSED');
+    expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_CANCELLED' }]);
+  });
+
+  it('T-pay5 TDS offset: an unpaid entry’s withholding is offset ONCE; a PAID entry gets none (receivable only)', async () => {
+    const s = setup(mode);
+    Object.assign(s.e('pe-b'), { status: 'FAILED', tdsSection: 'SEC_194C', tdsDeductedPaise: 1_000n });
+    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194C', tdsDeductedPaise: 600n });
+    s.db.t('tdsDeductionEntry').push(
+      { id: 't1', creditPayoutEntryId: 'pe-b', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 1_000n, createdAt: new Date('2026-11-03') },
+      { id: 't2', creditPayoutEntryId: 'pe-a', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 600n, createdAt: new Date('2026-11-03') },
+    );
+    const r = await s.service.createReversal(admin, 'b1', req(80_000, ['pe-a', 'pe-b']));
+    await approve(s, r.id);
+    const ledger = (id: string) =>
+      s.db.t('tdsDeductionEntry').filter((t) => t.creditPayoutEntryId === id).reduce((n, t) => n + t.tdsDeductedThisPaise, 0n);
+    expect(ledger('pe-b')).toBe(0n); // offset exactly once
+    expect(s.db.t('tdsDeductionEntry').filter((t) => t.tdsDeductedThisPaise < 0n)).toHaveLength(1);
+    expect(s.e('pe-b')).toMatchObject({ status: 'REVERSED', tdsDeductedPaise: 0n });
+    expect(ledger('pe-a')).toBe(600n); // PAID → no offset
+    expect(s.allocs(r.id).find((a) => a.payoutEntryId === 'pe-b')).toMatchObject({ state: 'APPLIED_CANCELLED', tdsOffsetPaise: 1_000n });
+    expect(s.allocs(r.id).find((a) => a.payoutEntryId === 'pe-a')).toMatchObject({ state: 'APPLIED_RECEIVABLE', tdsOffsetPaise: 0n });
+    expect(s.reversal(r.id).shortfallPaise).toBe(30_000n);
+  });
+
+  it('T-pay5 call-outs: the approval result names each TDS outcome (offset / not reversed on a paid entry)', async () => {
+    const s = setup(mode);
+    Object.assign(s.e('pe-b'), { status: 'FAILED', tdsSection: 'SEC_194C', tdsDeductedPaise: 1_000n });
+    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194C', tdsDeductedPaise: 600n });
+    s.db.t('tdsDeductionEntry').push({ id: 't1', creditPayoutEntryId: 'pe-b', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 1_000n, createdAt: new Date('2026-11-03') });
+    const r = await s.service.createReversal(admin, 'b1', req(80_000, ['pe-a', 'pe-b']));
+    const done = (await approve(s, r.id)) as Row;
+    expect(done.payoutOutcome.cancelled[0].tdsNote).toMatch(/withheld TDS ₹10\.00 offset in the TDS ledger/);
+    expect(done.payoutOutcome.receivable[0].tdsNote).toMatch(/TDS ₹6\.00 withheld on this paid entry is NOT reversed/);
+  });
+
+  it('T-pay5 already offset (ledger net 0, stamp left) → no second offset row', async () => {
+    const s = setup(mode);
+    Object.assign(s.e('pe-b'), { status: 'FAILED', tdsSection: 'SEC_194C', tdsDeductedPaise: 1_000n });
+    s.db.t('tdsDeductionEntry').push(
+      { id: 't1', creditPayoutEntryId: 'pe-b', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 1_000n, createdAt: new Date('2026-11-03') },
+      { id: 't2', creditPayoutEntryId: 'pe-b', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: -1_000n, createdAt: new Date('2026-11-04') },
+    );
+    const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
+    await approve(s, r.id);
+    expect(s.db.t('tdsDeductionEntry')).toHaveLength(2);
+    expect(s.allocs(r.id)).toMatchObject([{ tdsOffsetPaise: 0n }]);
+  });
+
+  it('approve is whole-or-nothing and locks the entries in ascending id order', async () => {
+    const s = setup(mode);
+    const r = await s.service.createReversal(admin, 'b1', req(80_000, ['pe-b', 'pe-a']));
+    await expect(
+      s.service.patchReversal(gifsy, r.id, { action: ReversalAction.approve, approvedPaise: 50_000 }),
+    ).rejects.toThrow(/approved in full or rejected/);
+    s.db.rawCalls = [];
+    await approve(s, r.id);
+    const lock = s.db.rawCalls.find((c) => c.sql.includes('credit_payout_entries') && c.sql.includes('FOR UPDATE'))!;
+    expect((lock.values[1] as Prisma.Sql).values).toEqual(['pe-a', 'pe-b']);
+    const batchLockIdx = s.db.rawCalls.findIndex((c) => c.sql.includes('credit_batches'));
+    expect(batchLockIdx).toBeGreaterThanOrEqual(0);
+    expect(batchLockIdx).toBeLessThan(s.db.rawCalls.indexOf(lock)); // credit_batches → credit_payout_entries
+  });
+
+  it('a second approval of the same reversal is refused and changes nothing', async () => {
+    const s = setup(mode);
+    const r = await s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']));
+    await approve(s, r.id);
+    await expect(approve(s, r.id)).rejects.toThrow(/already APPROVED/);
+    expect(s.reversal(r.id).shortfallPaise).toBe(30_000n);
+    expect(s.allocs()).toHaveLength(1);
+  });
+
+  it('listReversals shows the held entries of an engine reversal (only)', async () => {
+    const s = setup(mode);
+    const r = await s.service.createReversal(admin, 'b1', req(80_000, ['pe-a', 'pe-b']));
+    const list = await s.service.listReversals(gifsy, {} as any);
+    const got = list.reversals.find((x) => x.id === r.id) as Row;
+    expect(got.payoutEntries).toEqual([
+      expect.objectContaining({ payoutEntryId: 'pe-a', amountPaise: 30_000, allocationState: 'RESERVED', entryStatus: 'PAID' }),
+      expect.objectContaining({ payoutEntryId: 'pe-b', amountPaise: 50_000, allocationState: 'RESERVED', entryStatus: 'PENDING' }),
+    ]);
+  });
+});
+
+describe('WP5 — engine reversal approved after the flag goes back to LEGACY', () => {
+  it('is decided by its allocation rows, not the flag: approval still applies the reservation', async () => {
+    const s = setup('V2');
+    const r = await s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']));
+    s.settings.mode = 'LEGACY';
+    await approve(s, r.id);
+    expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_RECEIVABLE' }]);
+    expect(s.reversal(r.id).shortfallPaise).toBe(30_000n);
+  });
+});
+
+describe('WP5 — partial unique index backstop', () => {
+  it('reservePayoutEntries maps the live-allocation unique violation to a clean 400', async () => {
+    const db = new FakeDb();
+    db.t('payoutReversalAllocation').push({ id: 'x', creditReversalId: 'r0', payoutEntryId: 'pe-b', amountPaise: 1n, state: 'RESERVED', tdsOffsetPaise: 0n });
+    await expect(
+      reservePayoutEntries(db.client(), 'r1', [{ id: 'pe-b', amountPaise: 1n, status: 'PENDING' }], {
+        clientId: TENANT, batchId: 'b1', outletId: 'O1', fieldId: 'f1', actorId: 'u',
+      }),
+    ).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
+});
+
+// ─── Pure functions ────────────────────────────────────────────────────────────────────────────────────────────
+describe('classifyPayoutCandidates (pure)', () => {
+  const E = (id: string, status: string, amount = 100n, created = '2026-11-01') => ({
+    id, amountPaise: amount, status, period: '2026-10', createdAt: new Date(created), tdsDeductedPaise: 0n, tdsSection: null, outletId: 'O1',
+  });
+  it('blocks REVERSED, RESERVED, CONSUMED (allocation / consumed ids / pre-column cutoff), ZERO', () => {
+    const out = classifyPayoutCandidates(
+      [E('a', 'REVERSED'), E('b', 'PENDING'), E('c', 'PAID'), E('d', 'PAID'), E('e', 'PAID', 100n, '2026-11-01'), E('f', 'PAID', 100n, '2026-12-01'), E('g', 'PENDING', 0n), E('h', 'FAILED')],
+      [
+        { payoutEntryId: 'b', creditReversalId: 'r1', state: 'RESERVED' },
+        { payoutEntryId: 'c', creditReversalId: 'r2', state: 'APPLIED_RECEIVABLE' },
+        { payoutEntryId: 'h', creditReversalId: 'r3', state: 'RELEASED' }, // released → free
+      ],
+      [
+        { consumedPayoutEntryIds: ['d'], approvedAt: new Date('2026-11-05'), approvedPaise: 100n },
+        { consumedPayoutEntryIds: null, approvedAt: new Date('2026-11-10'), approvedPaise: 100n }, // pre-column
+      ],
+    );
+    expect(out.map((c) => [c.id, c.blockedBy])).toEqual([
+      ['a', 'REVERSED'], ['b', 'RESERVED'], ['c', 'CONSUMED'], ['d', 'CONSUMED'], ['e', 'CONSUMED'], ['f', null], ['g', 'ZERO'], ['h', null],
+    ]);
+    expect(out.find((c) => c.id === 'b')!.heldByReversalId).toBe('r1');
+  });
+});
+
+describe('planPayoutAllocationBackfill (pure)', () => {
+  const R = (id: string, o: Partial<BackfillPayoutReversal>): BackfillPayoutReversal => ({
+    id, clientId: TENANT, batchId: 'b1', outletId: 'O1', fieldId: 'f1', status: 'APPROVED', awardType: 'PAYOUT',
+    approvedPaise: 0n, shortfallPaise: 0n, approvedAt: new Date('2026-11-10'), consumedPayoutEntryIds: null, ...o,
+  });
+  const E = (id: string, amount: bigint, status: string, created = '2026-11-01', o: Partial<BackfillPayoutEntry> = {}): BackfillPayoutEntry => ({
+    id, clientId: TENANT, batchId: 'b1', outletId: 'O1', fieldId: 'f1', amountPaise: amount, status, createdAt: new Date(created), ...o,
+  });
+
+  it('consumed ids → APPLIED_CANCELLED / APPLIED_RECEIVABLE with the booked TDS offset', () => {
+    const plan = planPayoutAllocationBackfill({
+      reversals: [R('r1', { approvedPaise: 800n, shortfallPaise: 300n, consumedPayoutEntryIds: ['a', 'b'] })],
+      entries: [E('a', 300n, 'PAID'), E('b', 500n, 'REVERSED')],
+      existingAllocations: [],
+      tdsOffsetByEntry: new Map([['b', 20n]]),
+    });
+    expect(plan.flags).toEqual([]);
+    expect(plan.allocations).toEqual([
+      { creditReversalId: 'r1', payoutEntryId: 'a', amountPaise: 300n, state: 'APPLIED_RECEIVABLE', tdsOffsetPaise: 0n },
+      { creditReversalId: 'r1', payoutEntryId: 'b', amountPaise: 500n, state: 'APPLIED_CANCELLED', tdsOffsetPaise: 20n },
+    ]);
+  });
+
+  it('flags double consumption (first approved wins), a missing / unsettled entry and an amount mismatch — no rows for them', () => {
+    const plan = planPayoutAllocationBackfill({
+      reversals: [
+        R('r2', { approvedPaise: 300n, shortfallPaise: 300n, consumedPayoutEntryIds: ['a'], approvedAt: new Date('2026-11-12') }),
+        R('r1', { approvedPaise: 300n, shortfallPaise: 300n, consumedPayoutEntryIds: ['a'], approvedAt: new Date('2026-11-11') }),
+        R('r3', { approvedPaise: 100n, consumedPayoutEntryIds: ['zz'] }),
+        R('r4', { approvedPaise: 500n, consumedPayoutEntryIds: ['p'] }),
+        R('r5', { approvedPaise: 999n, consumedPayoutEntryIds: ['c'] }),
+      ],
+      entries: [E('a', 300n, 'PAID'), E('p', 500n, 'PENDING'), E('c', 100n, 'REVERSED')],
+      existingAllocations: [],
+    });
+    expect(plan.allocations.map((a) => a.creditReversalId)).toEqual(['r1']);
+    expect(plan.flags.map((f) => [f.creditReversalId, f.code, f.severity])).toEqual([
+      ['r3', 'ENTRY_MISSING', 'BLOCKING'],
+      ['r4', 'ENTRY_NOT_SETTLED', 'BLOCKING'],
+      ['r5', 'AMOUNT_MISMATCH', 'BLOCKING'],
+      ['r2', 'DOUBLE_CONSUMPTION', 'BLOCKING'],
+    ]);
+  });
+
+  it('pre-column approvals: derived when all / exactly one subset of settled entries fits, ambiguous otherwise', () => {
+    const plan = planPayoutAllocationBackfill({
+      reversals: [
+        R('all', { approvedPaise: 800n, shortfallPaise: 300n, outletId: 'O1' }),
+        R('uniq', { approvedPaise: 500n, outletId: 'O2' }),
+        R('amb', { approvedPaise: 500n, outletId: 'O3' }),
+        R('none', { approvedPaise: 700n, outletId: 'O4' }),
+      ],
+      entries: [
+        E('a', 300n, 'PAID'), E('b', 500n, 'REVERSED'),
+        E('c', 300n, 'PAID', '2026-11-01', { outletId: 'O2' }), E('d', 500n, 'REVERSED', '2026-11-01', { outletId: 'O2' }),
+        E('late', 999n, 'REVERSED', '2026-12-01', { outletId: 'O2' }), // created after the approval → never a candidate
+        E('e', 250n, 'REVERSED', '2026-11-01', { outletId: 'O3' }), E('f', 250n, 'REVERSED', '2026-11-01', { outletId: 'O3' }), E('g', 250n, 'PAID', '2026-11-01', { outletId: 'O3' }),
+        E('h', 300n, 'REVERSED', '2026-11-01', { outletId: 'O4' }),
+      ],
+      existingAllocations: [],
+    });
+    expect(plan.allocations.map((a) => `${a.creditReversalId}:${a.payoutEntryId}`)).toEqual(['all:a', 'all:b', 'uniq:d']);
+    expect(plan.flags.map((f) => [f.creditReversalId, f.code])).toEqual([
+      ['all', 'DERIVED_LEGACY'],
+      ['amb', 'AMBIGUOUS_LEGACY'],
+      ['none', 'AMBIGUOUS_LEGACY'],
+      ['uniq', 'DERIVED_LEGACY'],
+    ]);
+  });
+
+  it('skips reversals that already have rows (re-run = no-op), flags pending ones, ignores rejected / POINTS, warns on a shortfall mismatch', () => {
+    const plan = planPayoutAllocationBackfill({
+      reversals: [
+        R('done', { approvedPaise: 300n, consumedPayoutEntryIds: ['a'] }),
+        R('pend', { status: 'PENDING_GIFSY', approvedAt: null }),
+        R('rej', { status: 'REJECTED' }),
+        R('pts', { awardType: 'POINTS', approvedPaise: 5n }),
+        R('sf', { approvedPaise: 500n, shortfallPaise: 0n, consumedPayoutEntryIds: ['b'] }),
+      ],
+      entries: [E('a', 300n, 'PAID'), E('b', 500n, 'PAID')],
+      existingAllocations: [{ creditReversalId: 'done', payoutEntryId: 'a', state: 'APPLIED_RECEIVABLE' }],
+    });
+    expect(plan.allocations.map((a) => a.creditReversalId)).toEqual(['sf']);
+    expect(plan.flags.map((f) => [f.creditReversalId, f.code, f.severity])).toEqual([
+      ['sf', 'SHORTFALL_MISMATCH', 'WARNING'],
+      ['pend', 'PENDING_LEGACY', 'INFO'],
+    ]);
+  });
+});

@@ -50,6 +50,16 @@ import {
   PayoutBatch,
   PayoutBatchRow,
 } from './credits.helpers';
+import {
+  heldForReversal,
+  reversalHeldSuffix,
+  ReversalHeldEntry,
+  loadPayoutReversalCandidates,
+  patchPayoutReversalV2,
+  reservedAmong,
+  reservePayoutEntries,
+  selectPayoutEntriesV2,
+} from './payout-reversal-v2';
 
 /**
  * Awards & Credits (§12a) — ported from platform/src/app/api/admin/credits/*
@@ -1351,20 +1361,35 @@ export class CreditsService {
         // Interim rules (WALLET-REVERSAL-ENGINE-DESIGN.md Q14 / Q9) — refused at create AND approve:
         //  POINTS: the receiving wallet must hold the exact credit and carry no debt.
         //  PAYOUT: the amount must equal whole, not-yet-reversed payout entries of this batch.
+        // WP5 (reversal engine SHADOW/V2): PAYOUT reversals name their whole entries and RESERVE them.
+        let payoutReservation: Awaited<ReturnType<typeof selectPayoutEntriesV2>> | null = null;
+        if (dto.payoutEntryIds !== undefined && dto.awardType !== 'PAYOUT') {
+          throw new BadRequestException('payoutEntryIds applies to PAYOUT reversals only');
+        }
         if (dto.awardType === 'POINTS') {
           await this.walletService.assertPointsReversalAllowed(tx, {
             clientId: user.clientId, batchId: id, outletCode: dto.outletId, fieldId: dto.fieldId,
           });
         } else if (dto.awardType === 'PAYOUT') {
-          await this.selectPayoutEntriesForReversal(
-            tx, user.clientId, { batchId: id, outletId: dto.outletId, fieldId: dto.fieldId }, requested,
-          );
+          if ((await this.tenantSettings.getReversalEngineModeUncached(user.clientId)) !== 'LEGACY') {
+            payoutReservation = await selectPayoutEntriesV2(
+              tx, { clientId: user.clientId, batchId: id, outletId: dto.outletId, fieldId: dto.fieldId },
+              dto.payoutEntryIds, requested,
+            );
+          } else {
+            if (dto.payoutEntryIds !== undefined) {
+              throw new BadRequestException('Selecting payout entries is not enabled for this program');
+            }
+            await this.selectPayoutEntriesForReversal(
+              tx, user.clientId, { batchId: id, outletId: dto.outletId, fieldId: dto.fieldId }, requested,
+            );
+          }
         }
 
         // The DB partial-unique index `credit_reversals_pending_unique` on
         // (batchId,outletId,fieldId) WHERE status='PENDING_GIFSY' remains the authoritative
         // duplicate-pending guard — its P2002 is translated into the same clean 400 below.
-        return await tx.creditReversal.create({
+        const created = await tx.creditReversal.create({
           data: {
             clientId: user.clientId,
             batchId: id,
@@ -1381,6 +1406,12 @@ export class CreditsService {
             requestedBy: user.sub,
           },
         });
+        if (payoutReservation) {
+          await reservePayoutEntries(tx, created.id, payoutReservation, {
+            clientId: user.clientId, batchId: id, outletId: dto.outletId, fieldId: dto.fieldId, actorId: user.sub,
+          });
+        }
+        return created;
       });
     } catch (e) {
       if (
@@ -1812,6 +1843,8 @@ export class CreditsService {
       reason: string;
       entryIds: string[];
     }>;
+    /** WP5: entries left out of this file because a pending reversal holds them (empty on LEGACY tenants). */
+    reversalHeld: ReversalHeldEntry[];
   }> {
     const { period, groupType, fieldId, fieldName } = dto;
 
@@ -1832,6 +1865,9 @@ export class CreditsService {
       clientId: user.clientId,
       period,
       status: { in: ['PENDING', 'FAILED'] },
+      // WP5 P3/Q10: an entry RESERVED by a pending reversal stays out of every bank file (and re-bank) until the
+      // reversal is rejected. No RESERVED rows exist for a LEGACY-engine tenant → same entries as before.
+      reversalAllocations: { none: { state: 'RESERVED' } },
     };
 
     // GLM-2: baseWhere now carries `status: { in: ['PENDING','FAILED'] }` so that
@@ -1855,11 +1891,16 @@ export class CreditsService {
       include: { batch: { select: { batchCode: true } } },
     });
 
+    // WP5 — never a silent skip: the entries this file leaves out because a reversal holds them (same scope as
+    // the file, minus the hold filter). Returned to the screen + audited; none on a LEGACY-engine tenant.
+    const { reversalAllocations: _hold, ...scopeWhere } = entryWhere;
+    const reversalHeld = await heldForReversal(this.prisma, scopeWhere);
+
     if (entries.length === 0) {
       throw new BadRequestException(
         `No PENDING or FAILED payout entries found for period ${period}${
           fieldId ? ` / field ${fieldId}` : ''
-        }.`,
+        }.` + reversalHeldSuffix(reversalHeld),
       );
     }
 
@@ -2042,7 +2083,8 @@ export class CreditsService {
     // Abort if every entry is held and nothing is payable.
     if (payableCodes.length === 0) {
       throw new BadRequestException(
-        `No payable entries for period ${period}: all ${heldEntries.length} outlet(s) are held (KYC not approved or partner inactive/deleted).`,
+        `No payable entries for period ${period}: all ${heldEntries.length} outlet(s) are held (KYC not approved or partner inactive/deleted).` +
+          reversalHeldSuffix(reversalHeld),
       );
     }
 
@@ -2133,6 +2175,14 @@ export class CreditsService {
             throw new ConflictException(
               `Payout claim race for period ${period}: expected ${payableEntryIds.length} ` +
                 `entries but claimed ${claimed.count}. Rolled back — retry the download.`,
+            );
+          }
+          // WP5 P3 race half: a reversal that reserved one of these entries after the read above → roll back.
+          const raced = await reservedAmong(tx, payableEntryIds);
+          if (raced.length > 0) {
+            throw new ConflictException(
+              `Payout claim race for period ${period}: ${raced.length} entr${raced.length === 1 ? 'y was' : 'ies were'} ` +
+                `just reserved by a reversal request. Rolled back — retry the download.`,
             );
           }
         }
@@ -2230,6 +2280,25 @@ export class CreditsService {
           });
         }
 
+        // WP5: the reversal hold is part of the download record's audit trail (who, which file, which entries).
+        if (reversalHeld.length > 0) {
+          await tx.auditLog.create({
+            data: {
+              action: 'EXPORT',
+              entityType: 'PAYOUT_DOWNLOAD_REVERSAL_HOLD',
+              entityId: rec.id,
+              actorId: user.sub,
+              metadata: {
+                clientId: user.clientId,
+                downloadCode,
+                period,
+                heldCount: reversalHeld.length,
+                heldPaise: String(reversalHeld.reduce((n, h) => n + h.amountPaise, 0)),
+                entries: reversalHeld,
+              } as unknown as Prisma.InputJsonValue,
+            },
+          });
+        }
         return { rec, deductionByOutlet: tdsPlan.deductionByOutlet };
       },
       { timeout: 180_000, maxWait: 20_000 },
@@ -2284,7 +2353,7 @@ export class CreditsService {
 
     const buffer = generatePayoutFileBuffer(payoutBatch);
 
-    return { buffer, downloadCode: download.downloadCode, downloadId: download.id, heldEntries };
+    return { buffer, downloadCode: download.downloadCode, downloadId: download.id, heldEntries, reversalHeld };
   }
 
   /**
@@ -2846,7 +2915,77 @@ export class CreditsService {
       this.prisma.creditReversal.count({ where }),
     ]);
 
-    return { reversals, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+    return {
+      reversals: await this.withPayoutAllocations(reversals),
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
+  }
+
+  /**
+   * WP5: attach `payoutEntries` (the whole entries an engine PAYOUT reversal holds / consumed) to the reversals that
+   * HAVE allocation rows. Reversals without rows (every LEGACY-engine reversal) come back exactly as before.
+   */
+  private async withPayoutAllocations<T extends { id: string; awardType: string }>(reversals: T[]) {
+    const ids = reversals.filter((r) => r.awardType === 'PAYOUT').map((r) => r.id);
+    if (ids.length === 0) return reversals;
+    const rows = await this.prisma.payoutReversalAllocation.findMany({
+      where: { creditReversalId: { in: ids } },
+      orderBy: [{ creditReversalId: 'asc' }, { payoutEntryId: 'asc' }],
+      select: {
+        creditReversalId: true,
+        payoutEntryId: true,
+        amountPaise: true,
+        state: true,
+        tdsOffsetPaise: true,
+        payoutEntry: { select: { status: true, period: true, createdAt: true } },
+      },
+    });
+    if (rows.length === 0) return reversals;
+    const by = new Map<string, Array<Record<string, unknown>>>();
+    for (const r of rows) {
+      const list = by.get(r.creditReversalId) ?? [];
+      list.push({
+        payoutEntryId: r.payoutEntryId,
+        amountPaise: Number(r.amountPaise),
+        allocationState: r.state,
+        tdsOffsetPaise: Number(r.tdsOffsetPaise),
+        entryStatus: r.payoutEntry.status,
+        period: r.payoutEntry.period,
+        createdAt: r.payoutEntry.createdAt,
+      });
+      by.set(r.creditReversalId, list);
+    }
+    return reversals.map((r) => (by.has(r.id) ? { ...r, payoutEntries: by.get(r.id)! } : r));
+  }
+
+  // ─── GET /v1/admin/credits/batches/:id/payout-reversal-entries ─────────────
+  /**
+   * WP5 P1: the payout entries of (batch, outlet, field) a PAYOUT reversal may select, with why the others can't
+   * be. `mode` tells the screen which form to show: LEGACY → the amount form (entries not listed — the interim
+   * rule matches them itself); SHADOW/V2 → the entry picker.
+   */
+  async listPayoutReversalEntries(user: JwtPayload, batchId: string, q: { outletId: string; fieldId: string }) {
+    const batch = await this.prisma.creditBatch.findFirst({ where: { id: batchId, clientId: user.clientId } });
+    if (!batch) throw new NotFoundException('Batch not found');
+    const mode = await this.tenantSettings.getReversalEngineModeUncached(user.clientId);
+    const candidates =
+      mode === 'LEGACY'
+        ? []
+        : await loadPayoutReversalCandidates(this.prisma, {
+            clientId: user.clientId, batchId, outletId: q.outletId, fieldId: q.fieldId,
+          });
+    return {
+      mode,
+      entries: candidates.map((c) => ({
+        id: c.id,
+        amountPaise: Number(c.amountPaise),
+        status: c.status,
+        period: c.period,
+        createdAt: c.createdAt,
+        selectable: c.selectable,
+        blockedBy: c.blockedBy,
+      })),
+    };
   }
 
   // ─── PATCH /v1/admin/credits/reversals/:id ─────────────────────────────────
@@ -2909,6 +3048,21 @@ export class CreditsService {
             `Approval exceeds the amount credited for this outlet and field in this batch (credited ${f(credited)}, already reversed ${f(others)}, approving ${f(finalApprovedPaise ?? 0n)})`,
           );
         }
+      }
+
+      // ── WP5: a PAYOUT reversal raised under the reversal engine holds RESERVED allocations → engine path
+      // (P2 release / P4). Decided by the data, not the flag; none → the interim path below, unchanged.
+      if (reversal.awardType === 'PAYOUT') {
+        const v2 = await patchPayoutReversalV2(
+          tx,
+          { offsetWithholding: (e) => this.offsetWithholdingOnReversal(tx, user.clientId, e) },
+          reversal,
+          {
+            action: action === ReversalAction.approve ? 'approve' : 'reject',
+            newStatus, finalApprovedPaise, remarks: remarks ?? null, actorId: user.sub,
+          },
+        );
+        if (v2) return v2;
       }
 
       const sentToBank = () =>
