@@ -1233,11 +1233,12 @@ describe('PartnerService', () => {
       mockTenant.resolveClient.mockResolvedValue({ features: { partnerDashboardV2: true } });
       const res = await service.getTargetTrend(partner, 3);
       // Jun: target 1,000 (O1) → achieved 500 (O1 only), NOT 2,500 — agrees with the v2 hero/card.
-      expect(res.trend.find((t) => t.month === '2026-06')).toEqual({ month: '2026-06', target: 1000, achieved: 500 });
-      // May: no outlet has a target → plain sum (a "so far" figure).
-      expect(res.trend.find((t) => t.month === '2026-05')).toEqual({ month: '2026-05', target: null, achieved: 400 });
+      // achievedAll = the ALL-outlet total (2,500) for the "Change vs last month" sales comparison.
+      expect(res.trend.find((t) => t.month === '2026-06')).toEqual({ month: '2026-06', target: 1000, achieved: 500, achievedAll: 2500 });
+      // May: no outlet has a target → plain sum (a "so far" figure); achievedAll equals it.
+      expect(res.trend.find((t) => t.month === '2026-05')).toEqual({ month: '2026-05', target: null, achieved: 400, achievedAll: 400 });
       // Apr: only a ZERO target → no targeted outlet → plain sum.
-      expect(res.trend.find((t) => t.month === '2026-04')).toEqual({ month: '2026-04', target: 0, achieved: 50 });
+      expect(res.trend.find((t) => t.month === '2026-04')).toEqual({ month: '2026-04', target: 0, achieved: 50, achievedAll: 50 });
       // outletCode is selected so the per-outlet rule can apply.
       expect(mockPrisma.outletTarget.findMany.mock.calls.at(-1)![0].select).toEqual({ month: true, outletCode: true, targetValues: true });
     });
@@ -1251,6 +1252,8 @@ describe('PartnerService', () => {
         { month: '2026-05', target: null, achieved: 400 },
         { month: '2026-06', target: 1000, achieved: 2500 },
       ]);
+      // Response shape unchanged: NO achievedAll key at all when the flag is OFF.
+      for (const t of res.trend) expect(Object.keys(t).sort()).toEqual(['achieved', 'month', 'target']);
       // Query shape unchanged (no outletCode in the select).
       expect(mockPrisma.outletTarget.findMany.mock.calls.at(-1)![0].select).toEqual({ month: true, targetValues: true });
       expect(mockPrisma.outletSalesRecord.findMany.mock.calls.at(-1)![0].select).toEqual({ month: true, kpiValues: true });
@@ -1261,6 +1264,30 @@ describe('PartnerService', () => {
       mockTenant.resolveClient.mockRejectedValue(new Error('db blip'));
       const res = await service.getTargetTrend(partner, 3);
       expect(res.trend.find((t) => t.month === '2026-06')!.achieved).toBe(2500);
+      expect(res.trend.every((t) => !('achievedAll' in t))).toBe(true);
+    });
+
+    it('partnerDashboardV2 ON: targeted set changes month to month → achievedAll keeps the true total (A/B example)', async () => {
+      // Last month (May): no targets → ₹2,500 across A+B. This month (Jun): only A targeted → achieved
+      // ₹500 (A), but total sales are still ₹2,500 → achievedAll lets the card show 0% change, not −80%.
+      jest.useFakeTimers().setSystemTime(new Date('2026-06-15T00:00:00Z'));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'A' }, { outletCode: 'B' }]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'VOL', label: 'Sales', unit: 'INR', isPrimary: true }]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([{ month: '2026-06', outletCode: 'A', targetValues: { VOL: 1000 } }]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { month: '2026-05', outletCode: 'A', kpiValues: { VOL: 500 } },
+        { month: '2026-05', outletCode: 'B', kpiValues: { VOL: 2000 } },
+        { month: '2026-06', outletCode: 'A', kpiValues: { VOL: 500 } },
+        { month: '2026-06', outletCode: 'B', kpiValues: { VOL: 2000 } },
+      ]);
+      mockTenant.resolveClient.mockResolvedValue({ features: { partnerDashboardV2: true } });
+      const res = await service.getTargetTrend(partner, 3);
+      expect(res.trend).toEqual([
+        { month: '2026-04', target: null, achieved: null, achievedAll: null }, // honest gap on both
+        { month: '2026-05', target: null, achieved: 2500, achievedAll: 2500 },
+        { month: '2026-06', target: 1000, achieved: 500, achievedAll: 2500 },
+      ]);
     });
 
     it('returns an empty trend when the caller has no partner', async () => {

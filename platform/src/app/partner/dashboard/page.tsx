@@ -293,18 +293,37 @@ export interface MonthComparison {
   pctChange: number | null;    // round((delta/previous)*100); null when previous is 0/absent
 }
 
-export function computeMonthComparison(trend: TrendPoint[]): MonthComparison {
+export function computeMonthComparison(
+  trend: TrendPoint[],
+  pick: (p: TrendPoint) => number | null | undefined = (p) => p.achieved,
+): MonthComparison {
   const n = trend.length;
   const cur  = n >= 1 ? trend[n - 1] : null;
   const prev = n >= 2 ? trend[n - 2] : null;
-  const current  = cur  ? (cur.achieved  ?? 0) : null;
-  const previous = prev ? (prev.achieved ?? 0) : null;
+  const current  = cur  ? (pick(cur)  ?? 0) : null;
+  const previous = prev ? (pick(prev) ?? 0) : null;
   const delta = current !== null && previous !== null ? current - previous : null;
   const pctChange =
     delta !== null && previous !== null && previous > 0
       ? Math.round((delta / previous) * 100)
       : null;
   return { current, previous, delta, pctChange };
+}
+
+/** The Performance card's "Change vs last month" — a TRUE SALES comparison. When the trend
+ *  carries `achievedAll` (partnerDashboardV2: the all-outlet total) on the months compared, the
+ *  delta uses it, so a change in WHICH outlets are targeted can't masquerade as a sales swing
+ *  (owner 2026-11-15). Otherwise (flag OFF / older payload) it is exactly computeMonthComparison.
+ *  `totalSalesLabel` is true when the compared totals differ from the targeted-only "so far"
+ *  figures shown above it in either month, so the label must say "total sales". Same month
+ *  positions (latest vs prior row) as computeMonthComparison — month-to-date logic unchanged. PURE. */
+export function computeSalesChange(trend: TrendPoint[]): MonthComparison & { totalSalesLabel: boolean } {
+  const n = trend.length;
+  const compared = trend.slice(Math.max(0, n - 2));
+  const hasAll = compared.length > 0 && compared.every((p) => p.achievedAll !== undefined);
+  if (!hasAll) return { ...computeMonthComparison(trend), totalSalesLabel: false };
+  const totalSalesLabel = compared.some((p) => (p.achievedAll ?? 0) !== (p.achieved ?? 0));
+  return { ...computeMonthComparison(trend, (p) => p.achievedAll), totalSalesLabel };
 }
 
 /** Format a KPI value the way the hero does: compact ₹ for INR units, else points + unit suffix. */
@@ -326,7 +345,10 @@ function fmtKpiValue(value: number, unit: string): string {
        (GET /api/wallet/points-credited?month=…) — NOT the paginated passbook, so an
        active wholesaler's last-month earn is never missed past page 1. Payout is summed
        from the (≤100-per-partner) credit-payout statement by paidAt.
-     • Change vs last month — current − previous, the SAME delta the old card showed.
+     • Change vs last month — current − previous TOTAL SALES across ALL the partner's outlets
+       (the trend's v2 `achievedAll`, via computeSalesChange), so a change in which outlets are
+       targeted can't fake a swing; labelled "Change in total sales vs last month" whenever those
+       totals differ from the targeted-only figures shown above. No achievedAll → the old delta.
 
    All of it reuses the SAME GET /api/partner/targets/trend series (computeMonthComparison
    for achieved + delta; lastMonthFromTrend matched by month KEY for the per-month targets)
@@ -431,6 +453,8 @@ function PerformanceCard({
   const rows = trend?.trend ?? [];
   // Achieved (both months) + the change delta — the exact figures the old comparison card showed.
   const cmp  = computeMonthComparison(rows);
+  // "Change vs last month" — total sales across ALL outlets when the v2 payload carries it.
+  const chg  = computeSalesChange(rows);
   // Per-month TARGETS matched by month KEY (rollover-safe); the backend series is contiguous and
   // ends at the current month, so these rows line up with cmp's current/previous.
   const thisRow = lastMonthFromTrend(rows, thisKey);
@@ -455,7 +479,7 @@ function PerformanceCard({
     );
   }
 
-  const deltaUp = cmp.delta !== null && cmp.delta >= 0;
+  const deltaUp = chg.delta !== null && chg.delta >= 0;
 
   const thisHasTarget = thisRow.target !== null && thisRow.target > 0;
   const thisPct       = thisHasTarget ? pct(cmp.current ?? 0, thisRow.target ?? 0) : null;
@@ -511,17 +535,19 @@ function PerformanceCard({
           </div>
         </div>
 
-        {/* Change vs last month — the same delta the former comparison card showed */}
+        {/* Change vs last month — a sales comparison (all-outlet totals when v2 provides them) */}
         <div className="mt-2.5 flex items-center justify-between text-xs">
-          <span className="text-gray-400">Change vs last month</span>
-          {cmp.delta === null ? (
+          <span className="text-gray-400">
+            {chg.totalSalesLabel ? 'Change in total sales vs last month' : 'Change vs last month'}
+          </span>
+          {chg.delta === null ? (
             <span className="font-semibold text-gray-400">n/a</span>
           ) : (
             <span className={`font-bold ${deltaUp ? 'text-emerald-600' : 'text-red-600'}`}>
-              {deltaUp ? '+' : '-'}{fmtKpiValue(Math.abs(cmp.delta), unit)}
-              {cmp.pctChange !== null && (
+              {deltaUp ? '+' : '-'}{fmtKpiValue(Math.abs(chg.delta), unit)}
+              {chg.pctChange !== null && (
                 <span className="ml-1 text-[11px] font-semibold">
-                  ({deltaUp ? '+' : '-'}{Math.abs(cmp.pctChange)}%)
+                  ({deltaUp ? '+' : '-'}{Math.abs(chg.pctChange)}%)
                 </span>
               )}
             </span>

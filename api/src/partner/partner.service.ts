@@ -537,7 +537,9 @@ export class PartnerService {
     kpiCode: string | null;
     kpiName: string | null;
     unit: string | null;
-    trend: Array<{ month: string; target: number | null; achieved: number | null }>;
+    /** `achievedAll` (partnerDashboardV2 only — absent when the flag is OFF): the month's
+     *  achieved summed over ALL the partner's in-scope outlets, targeted or not. */
+    trend: Array<{ month: string; target: number | null; achieved: number | null; achievedAll?: number | null }>;
   }> {
     const span = Math.min(Math.max(Math.trunc(months) || 0, 1), 36);
 
@@ -632,10 +634,15 @@ export class PartnerService {
         }
       }
     }
+    // v2 only: the month's TOTAL across ALL the partner's (in-scope) outlets, targeted or not —
+    // feeds the Performance card's "Change vs last month", a true sales comparison that must not
+    // swing just because the targeted outlet set changed month to month (owner 2026-11-15).
+    const achievedAllByMonth = new Map<string, number>();
     for (const r of achievementRows) {
       const v = (r.kpiValues as Record<string, unknown>)?.[code];
       if (typeof v !== 'number') continue;
       if (targetedOnly) {
+        achievedAllByMonth.set(r.month, (achievedAllByMonth.get(r.month) ?? 0) + v);
         const targeted = targetedOutletsByMonth.get(r.month);
         const oc = (r as { outletCode?: string }).outletCode;
         if (targeted && targeted.size > 0 && (!oc || !targeted.has(oc))) continue; // untargeted outlet's sales
@@ -643,11 +650,16 @@ export class PartnerService {
       achievedByMonth.set(r.month, (achievedByMonth.get(r.month) ?? 0) + v);
     }
 
-    const trend = monthKeys.map((m) => ({
-      month: m,
-      target: targetByMonth.has(m) ? targetByMonth.get(m)! : null,
-      achieved: achievedByMonth.has(m) ? achievedByMonth.get(m)! : null,
-    }));
+    const trend = monthKeys.map((m) => {
+      const row: { month: string; target: number | null; achieved: number | null; achievedAll?: number | null } = {
+        month: m,
+        target: targetByMonth.has(m) ? targetByMonth.get(m)! : null,
+        achieved: achievedByMonth.has(m) ? achievedByMonth.get(m)! : null,
+      };
+      // Flag OFF → no achievedAll key at all (response shape byte-identical for Deoleo).
+      if (targetedOnly) row.achievedAll = achievedAllByMonth.has(m) ? achievedAllByMonth.get(m)! : null;
+      return row;
+    });
 
     return { kpiCode: code, kpiName: primary.label, unit: primary.unit ?? '', trend };
   }

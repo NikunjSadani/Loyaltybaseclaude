@@ -8,7 +8,9 @@
  *   • LAST MONTH · <Mon>  — previous-month achieved + target verdict (✓ target met /
  *     below target / No target set) + reward CREDITED last month (points OR payout,
  *     BOTH when the outlet has both)
- *   • Change vs last month — the same delta the old comparison card showed
+ *   • Change vs last month — TOTAL sales across all outlets when the v2 trend carries
+ *     `achievedAll` ("Change in total sales vs last month" when it differs from the
+ *     targeted-only figures), else the same delta the old comparison card showed
  *
  * Reuses the SAME /api/partner/targets/trend series (computeMonthComparison for achieved
  * + delta; lastMonthFromTrend by month KEY for targets) and the EXACT points-vs-payout
@@ -52,6 +54,8 @@ const identityRef: { current: unknown } = { current: null };
 vi.mock('@/lib/partner-identity', () => ({ usePartnerIdentity: () => identityRef.current }));
 
 import PartnerDashboardPage, {
+  computeMonthComparison,
+  computeSalesChange,
   lastMonthFromTrend,
   previousMonthKey,
   sumPayoutCreditedInMonth,
@@ -68,7 +72,7 @@ function identity(opts: { points: boolean; payout: boolean; v2?: boolean; outlet
   };
 }
 
-type TrendRow = { month: string; target: number | null; achieved: number | null };
+type TrendRow = { month: string; target: number | null; achieved: number | null; achievedAll?: number | null };
 type Payout = { id?: string; period: string; status: string; payoutAmountPaise: number; paidAt?: string };
 
 // Date-relative month keys (IST), matching how the card derives them.
@@ -137,6 +141,17 @@ describe('Performance — pure helpers', () => {
     ];
     expect(sumPayoutCreditedInMonth(payouts as never, PREV)).toBe(5000);
   });
+  it('computeSalesChange — uses achievedAll when present (A/B → 0%, total-sales label)', () => {
+    const ab = [
+      { month: PREV, target: null, achieved: 2500, achievedAll: 2500 },
+      { month: CUR,  target: 1000, achieved: 500,  achievedAll: 2500 },
+    ];
+    expect(computeSalesChange(ab)).toEqual({ current: 2500, previous: 2500, delta: 0, pctChange: 0, totalSalesLabel: true });
+  });
+  it('computeSalesChange — no achievedAll (flag OFF payload) → identical to computeMonthComparison, old label', () => {
+    expect(computeSalesChange(TREND)).toEqual({ ...computeMonthComparison(TREND), totalSalesLabel: false });
+    expect(computeSalesChange([])).toEqual({ current: null, previous: null, delta: null, pctChange: null, totalSalesLabel: false });
+  });
 });
 
 /* ─── Rendering ───────────────────────────────────────────────────────────────── */
@@ -164,6 +179,48 @@ describe('Performance card — rendering', () => {
     // Change vs last month: 1000 − 800 = +200 (+25%)
     expect(screen.getByText('Change vs last month')).toBeInTheDocument();
     expect(screen.getByText(/\+25%/)).toBeInTheDocument();
+    // No achievedAll in the payload → old label, old delta.
+    expect(screen.queryByText('Change in total sales vs last month')).not.toBeInTheDocument();
+  });
+
+  it('A/B example — targeted set changes month to month → change uses ALL-outlet sales (0%, no red), honest label', async () => {
+    // Last month: no targets → 2,500 across A+B. This month: only A targeted → targeted-only 500,
+    // but total sales still 2,500. Old behaviour showed −80%; the change line must read 0%.
+    identityRef.current = identity({ points: true, payout: false });
+    const ab = [
+      { month: PREV, target: null, achieved: 2500, achievedAll: 2500 },
+      { month: CUR,  target: 1000, achieved: 500,  achievedAll: 2500 },
+    ];
+    vi.stubGlobal('fetch', stubFetch({ trend: ab as TrendRow[], pointsCredited: 0, walletPts: 1200 }));
+    render(<PartnerDashboardPage />);
+
+    // Await a trend-driven element first (the card shell renders before the trend fetch lands).
+    expect(await screen.findByText('Change in total sales vs last month')).toBeInTheDocument();
+    // The "so far" / target figures stay targeted-only.
+    expect(screen.getByText('50% of 1,000 cases target')).toBeInTheDocument();
+    expect(screen.getByText('2,500 cases')).toBeInTheDocument();
+    // Change line = total sales comparison, labelled as such.
+    expect(screen.getByText('Change in total sales vs last month')).toBeInTheDocument();
+    expect(screen.queryByText('Change vs last month')).not.toBeInTheDocument();
+    const pctEl = screen.getByText(/\+0%/);
+    expect(screen.queryByText(/-80%/)).not.toBeInTheDocument();
+    expect(pctEl.closest('.text-red-600')).toBeNull();
+    expect(pctEl.closest('.text-emerald-600')).not.toBeNull();
+  });
+
+  it('achievedAll equals the targeted figure in both months → old label kept', async () => {
+    identityRef.current = identity({ points: true, payout: false });
+    const same = [
+      { month: PREV, target: 1000, achieved: 800,  achievedAll: 800 },
+      { month: CUR,  target: 1000, achieved: 1000, achievedAll: 1000 },
+    ];
+    vi.stubGlobal('fetch', stubFetch({ trend: same as TrendRow[], pointsCredited: 0, walletPts: 1200 }));
+    render(<PartnerDashboardPage />);
+
+    // Await the trend-driven delta (the label alone renders before the trend fetch lands).
+    expect(await screen.findByText(/\+25%/)).toBeInTheDocument();
+    expect(screen.getByText('Change vs last month')).toBeInTheDocument();
+    expect(screen.queryByText('Change in total sales vs last month')).not.toBeInTheDocument();
   });
 
   it('BLOCKER regression — points come from the month aggregate, NOT page-1 of the passbook', async () => {
