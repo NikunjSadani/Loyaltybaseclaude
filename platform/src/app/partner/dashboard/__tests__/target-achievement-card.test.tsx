@@ -143,20 +143,64 @@ describe('Target Achievement card', () => {
     expect(perf.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('guards a target-0 / achieved KPI → "—" and 0% (no NaN/Infinity)', async () => {
+  it('a KPI with NO target shows a neutral "so far" figure — no %, no red "— · 0%", no NaN', async () => {
     identityRef.current = identity();
     const zeroKpis: ApiKpi[] = [
-      { code: 'MONTH', name: 'Month Target', target: 1000, achieved: 500, unit: 'cases', isPrimary: true },
-      { code: 'ZERO',  name: 'No Target KPI', target: 0,   achieved: 0,   unit: 'cases', isPrimary: false },
+      { code: 'MONTH', name: 'Month Target', target: 1000, achieved: 500,     unit: 'cases', isPrimary: true },
+      { code: 'ZERO',  name: 'No Target KPI', target: 0,   achieved: 0,       unit: 'cases', isPrimary: false },
+      // Bajaj SAMT: NON ADHO has sales but no target (the gate KPI) → "₹2.8K so far".
+      { code: 'NONADHO', name: 'NON ADHO',    target: 0,   achieved: 2755.12, unit: 'INR',   isPrimary: false },
+      { code: 'NEG',   name: 'Returns KPI',   target: 0,   achieved: -1500,   unit: 'INR',   isPrimary: false },
     ];
     vi.stubGlobal('fetch', stubFetch({ kpis: zeroKpis, trend: TREND }));
     render(<PartnerDashboardPage />);
 
-    const card = await screen.findByTestId('target-achievement-card');
+    const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
     const inCard = within(card);
     expect(inCard.getByText('No Target KPI')).toBeInTheDocument();
-    expect(inCard.getByText('— · 0%')).toBeInTheDocument();
-  });
+    expect(inCard.getByText('0 cases so far')).toBeInTheDocument();
+    expect(inCard.getByText('NON ADHO')).toBeInTheDocument();
+    expect(inCard.getByText('₹2.8K so far')).toBeInTheDocument();
+    expect(inCard.getByText('-₹1.5K so far')).toBeInTheDocument();
+    // No percentage / dash pairing for target-less rows, and no NaN/Infinity anywhere.
+    expect(inCard.queryByText(/— · 0%/)).not.toBeInTheDocument();
+    expect(within(inCard.getByTestId('kpi-no-target-NONADHO')).queryByText(/%/)).not.toBeInTheDocument();
+    expect(card.textContent).not.toMatch(/NaN|Infinity/);
+    // The targeted row is unchanged.
+    expect(inCard.getByText('500/1,000 cases · 50%')).toBeInTheDocument();
+  }, 20000);
+
+  it('footer never says "target met" for a KPI without a target — falls back to the first targeted KPI', async () => {
+    identityRef.current = identity();
+    const kpis: ApiKpi[] = [
+      // Primary KPI has NO target (sales only) → must not produce "NON ADHO target met 🎉".
+      { code: 'NONADHO', name: 'NON ADHO', target: 0,  achieved: 2755.12, unit: 'INR', isPrimary: true  },
+      { code: 'LINES',   name: 'Lines',    target: 8,  achieved: 7,       unit: 'SKU', isPrimary: false },
+      // No sales data at all (null) → "—", not a stated zero.
+      { code: 'FB',      name: 'Focus Brand 1', target: 0, achieved: null as unknown as number, unit: 'INR', isPrimary: false },
+    ];
+    vi.stubGlobal('fetch', stubFetch({ kpis, trend: TREND }));
+    render(<PartnerDashboardPage />);
+
+    const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
+    const inCard = within(card);
+    expect(inCard.queryByText(/NON ADHO target met/)).not.toBeInTheDocument();
+    expect(inCard.getByText(/1 SKU to go · \d+ days? left/)).toBeInTheDocument();
+    expect(within(inCard.getByTestId('kpi-no-target-FB')).getByText('—')).toBeInTheDocument();
+  }, 20000);
+
+  it('footer is a neutral note when NO KPI has a target', async () => {
+    identityRef.current = identity();
+    const kpis: ApiKpi[] = [
+      { code: 'NONADHO', name: 'NON ADHO', target: 0, achieved: 400, unit: 'INR', isPrimary: true },
+    ];
+    vi.stubGlobal('fetch', stubFetch({ kpis, trend: TREND }));
+    render(<PartnerDashboardPage />);
+
+    const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
+    expect(within(card).getByText('No targets set this month')).toBeInTheDocument();
+    expect(within(card).queryByText(/target met/)).not.toBeInTheDocument();
+  }, 20000);
 
   it('renders NOTHING when the outlet has no targets (empty aggKpis)', async () => {
     identityRef.current = identity();

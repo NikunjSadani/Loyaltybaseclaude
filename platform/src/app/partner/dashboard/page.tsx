@@ -67,6 +67,8 @@ interface AggKpi {
   isPrimary: boolean;
   target:    number;
   achieved:  number;
+  /** At least one outlet reported a (non-null) achieved value — false = no sales data yet, shown as "—". */
+  hasAchieved?: boolean;
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
@@ -461,17 +463,24 @@ function TargetAchievementCard({ aggKpis }: { aggKpis: AggKpi[] }) {
 
   // Footer derives from the PRIMARY KPI — the SAME remaining/unit the hero's "to go" banner
   // uses (kpiView: remaining = max(0, target − achieved)); daysLeft is the shared computePace().
-  const primary       = aggKpis.find((k) => k.isPrimary) ?? aggKpis[0];
-  const primaryPct    = pct(primary.achieved, primary.target);
-  const primaryLeft   = Math.max(0, primary.target - primary.achieved);
-  const paceStatus    = primaryLeft === 0
-    ? 'green'
-    : classifyPaceGap(timePct - primaryPct, timePct, getGifsySettings().paceAmberThreshold ?? 10);
-  const paceBg        = paceStatus === 'green' ? 'bg-emerald-50' : paceStatus === 'amber' ? 'bg-amber-50' : 'bg-red-50';
-  const paceTextColor = paceStatus === 'green' ? 'text-emerald-700' : paceStatus === 'amber' ? 'text-amber-700' : 'text-red-600';
-  const footerText    = primaryLeft === 0
-    ? `${primary.name} target met 🎉`
-    : `${fmtKpiValue(primaryLeft, primary.unit)} to go · ${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`;
+  // A KPI WITHOUT a target can never be "met" (max(0, 0 − achieved) = 0 would falsely read "target met 🎉"):
+  // fall back to the first KPI that HAS a target; with none at all, the footer is a neutral note.
+  const primaryRaw    = aggKpis.find((k) => k.isPrimary) ?? aggKpis[0];
+  const primary       = primaryRaw.target > 0 ? primaryRaw : aggKpis.find((k) => k.target > 0);
+  const primaryPct    = primary ? pct(primary.achieved, primary.target) : 0;
+  const primaryLeft   = primary ? Math.max(0, primary.target - primary.achieved) : 0;
+  const paceStatus    = !primary
+    ? 'neutral'
+    : primaryLeft === 0
+      ? 'green'
+      : classifyPaceGap(timePct - primaryPct, timePct, getGifsySettings().paceAmberThreshold ?? 10);
+  const paceBg        = paceStatus === 'neutral' ? 'bg-gray-50' : paceStatus === 'green' ? 'bg-emerald-50' : paceStatus === 'amber' ? 'bg-amber-50' : 'bg-red-50';
+  const paceTextColor = paceStatus === 'neutral' ? 'text-gray-600' : paceStatus === 'green' ? 'text-emerald-700' : paceStatus === 'amber' ? 'text-amber-700' : 'text-red-600';
+  const footerText    = !primary
+    ? 'No targets set this month'
+    : primaryLeft === 0
+      ? `${primary.name} target met 🎉`
+      : `${fmtKpiValue(primaryLeft, primary.unit)} to go · ${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`;
 
   return (
     <Card data-testid="target-achievement-card">
@@ -493,16 +502,32 @@ function TargetAchievementCard({ aggKpis }: { aggKpis: AggKpi[] }) {
       <CardContent className="space-y-2.5">
         {aggKpis.map((k) => {
           const hasTarget = k.target > 0;
+          const isInrKpi  = isInrUnit(k.unit);
+          // A KPI with sales but NO target this month (e.g. Bajaj SAMT's NON ADHO gate KPI) is shown as a
+          // neutral "so far" figure — no %, no bar, no red: there is nothing to be behind on. A red "— · 0%"
+          // read as "you have done nothing" even when the outlet had sales (owner 2026-11-15).
+          if (!hasTarget) {
+            // No sales data yet (every outlet's achieved was null) → "—", never a stated zero.
+            const v = Math.abs(k.achieved) < 0.5 ? 0 : k.achieved; // no "-₹0" for tiny negatives
+            const soFar = k.hasAchieved === false
+              ? '—'
+              : isInrKpi
+                ? `${formatInrCompact(v)} so far`
+                : `${v.toLocaleString('en-IN', { maximumFractionDigits: 1 })}${k.unit ? ` ${k.unit}` : ''} so far`;
+            return (
+              <div key={k.code} className="flex items-center gap-2" data-testid={`kpi-no-target-${k.code}`}>
+                <p className="text-xs font-medium text-gray-700 flex-1 truncate">{k.name}</p>
+                <span className="text-[11px] font-semibold shrink-0 text-gray-500">{soFar}</span>
+              </div>
+            );
+          }
           // pct() already guards target===0 → 0 (never NaN/Infinity).
           const p         = pct(k.achieved, k.target);
-          const isInrKpi  = isInrUnit(k.unit);
-          // Paired achieved/target: "—" when there is no target; compact ₹ for INR units;
-          // en-IN grouped with the unit suffix otherwise (same rules as the sales card).
-          const paired = !hasTarget
-            ? '—'
-            : isInrKpi
-              ? `${formatCompact(k.achieved)}/${formatCompact(k.target)}`
-              : `${k.achieved.toLocaleString('en-IN')}/${k.target.toLocaleString('en-IN')}${k.unit ? ` ${k.unit}` : ''}`;
+          // Paired achieved/target: compact ₹ for INR units; en-IN grouped with the unit suffix otherwise
+          // (same rules as the sales card).
+          const paired = isInrKpi
+            ? `${formatCompact(k.achieved)}/${formatCompact(k.target)}`
+            : `${k.achieved.toLocaleString('en-IN')}/${k.target.toLocaleString('en-IN')}${k.unit ? ` ${k.unit}` : ''}`;
           return (
             <div key={k.code} className="space-y-1">
               <div className="flex items-center gap-2">
@@ -961,6 +986,7 @@ export default function PartnerDashboard() {
               existing.target   += k.target   ?? 0;
               existing.achieved += k.achieved ?? 0;
               existing.isPrimary = existing.isPrimary || k.isPrimary;
+              existing.hasAchieved = existing.hasAchieved || (k.achieved !== null && k.achieved !== undefined);
             } else {
               order.push(k.code);
               byCode.set(k.code, {
@@ -970,6 +996,7 @@ export default function PartnerDashboard() {
                 isPrimary: k.isPrimary,
                 target:    k.target   ?? 0,
                 achieved:  k.achieved ?? 0,
+                hasAchieved: k.achieved !== null && k.achieved !== undefined,
               });
             }
           }
