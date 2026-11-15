@@ -27,6 +27,8 @@ import { renderSoDeclarationPdf, type SoDeclarationData } from '@/lib/so-declara
 import { getStoredUser } from '@/lib/auth-client';
 import { pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
 import { istMonthKey } from '@/lib/ist-date';
+import { formatKpiSoFar } from '@/lib/format-inr';
+import { useTenantFeatures } from '@/lib/tenant-features';
 import { fetchTargetTrend, type TargetTrendResult } from '@/lib/sales-trend';
 import { TargetTrendChart } from '@/components/target-trend-chart';
 import { OutletTrendComparisonCard } from '@/components/sales/OutletTrendComparisonCard';
@@ -1008,6 +1010,11 @@ const fmtTgtNum = (n: number | null | undefined) => (n === null || n === undefin
 function TargetAchievementCard({ outletCode }: { outletCode: string }) {
   const [cols, setCols] = useState<OutletKpiCol[] | null>(null);
   const [kpis, setKpis] = useState<Record<string, OutletKpiVal>>({});
+  // partnerDashboardV2 (Bajaj, tenant-scoped) — DB-backed tenant flag from the authenticated /sales/me
+  // features (the same seam the sales KYC/visibility screens read). Gates the neutral "so far" rendering of
+  // target-less KPIs; OFF (Deoleo) → today's card. The card waits for it so v2 never flashes a red 0%.
+  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
+  const v2 = features.partnerDashboardV2;
 
   useEffect(() => {
     if (!outletCode) { setCols(null); return; }
@@ -1026,7 +1033,7 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
     return () => { cancelled = true; };
   }, [outletCode]);
 
-  if (!cols) return null;
+  if (!cols || featuresLoading) return null;
   // Hide entirely when this outlet has no target/achieved for any KPI this month.
   const hasAny = cols.some((c) => {
     const k = kpis[c.code];
@@ -1034,12 +1041,22 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
   });
   if (!hasAny) return null;
 
-  const primary = getPrimaryParam(cols);
+  // v2: headline the first TARGETED KPI (flagged primary first) — same pick as the partner dashboard/Targets page,
+  // so the rep and the retailer see the same headline. Flag OFF: unchanged getPrimaryParam.
+  const targeted = (c: { code: string }) => { const k = kpis[c.code]; return k?.target != null && k.target > 0; };
+  const primary = v2
+    ? (cols.find((c) => c.isPrimary && targeted(c)) ?? cols.find(targeted) ?? getPrimaryParam(cols))
+    : getPrimaryParam(cols);
   // Exclude the ACTUAL headline KPI by code (not by isPrimary): getPrimaryParam falls back to
   // cols[0] when no KPI is flagged primary, so filtering on !isPrimary would render cols[0] twice.
   const others  = cols.filter((c) => c.code !== primary?.code);
   const pk      = primary ? kpis[primary.code] : undefined;
   const pPct    = primary && pk?.target ? pct(pk.achieved ?? 0, pk.target) : 0;
+  // A KPI with NO target this month (null / ≤ 0 — e.g. Bajaj SAMT's NON ADHO eligibility-gate KPI) has
+  // nothing to be behind on: it renders a neutral grey "₹2.8K so far" (or "—" with no sales data) — no
+  // "/–", no % pill, no bar. A red "0%" read as "you have done nothing" (owner 2026-11-15). v2 ONLY —
+  // flag OFF treats every KPI as targeted, i.e. the original "x /– · 0%" rendering, unchanged.
+  const hasTgt  = (k: OutletKpiVal | undefined) => !v2 || (k?.target != null && k.target > 0);
 
   return (
     <Card data-testid="target-achievement-card">
@@ -1049,7 +1066,13 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
         </CardTitle>
       </CardHeader>
       <CardContent className="pt-0 pb-3">
-        {primary && pk && (
+        {primary && pk && !hasTgt(pk) && (
+          <div className="pb-2.5 flex items-center justify-between" data-testid={`kpi-no-target-${primary.code}`}>
+            <span className="text-[11px] font-semibold text-gray-600">{primary.name}</span>
+            <span className="text-[13px] font-semibold text-gray-500">{formatKpiSoFar(pk.achieved, primary.unit)}</span>
+          </div>
+        )}
+        {primary && pk && hasTgt(pk) && (
           <div className="pb-2.5">
             <div className="flex items-center justify-between mb-1">
               <span className="text-[11px] font-semibold text-gray-600">{primary.name}</span>
@@ -1069,6 +1092,14 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
           <div className={`grid grid-cols-2 gap-x-3 gap-y-3 ${primary && pk ? 'border-t border-gray-100 pt-2.5' : ''}`}>
             {others.map((c) => {
               const k  = kpis[c.code];
+              if (!hasTgt(k)) {
+                return (
+                  <div key={c.code} className="border-l-[3px] border-gray-200 pl-2" data-testid={`kpi-no-target-${c.code}`}>
+                    <p className="text-[11px] font-semibold text-gray-600 truncate leading-tight">{c.name}</p>
+                    <p className="text-[13px] font-semibold text-gray-500 leading-tight mt-0.5">{formatKpiSoFar(k?.achieved ?? null, c.unit)}</p>
+                  </div>
+                );
+              }
               const pp = k?.target ? pct(k.achieved ?? 0, k.target) : 0;
               return (
                 <div key={c.code} className="border-l-[3px] border-gray-200 pl-2">

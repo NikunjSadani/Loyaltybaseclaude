@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatInrCompact, formatCompact, formatInrExact, isInrUnit } from '@/lib/format-inr';
+import { formatInrCompact, formatCompact, formatInrExact, isInrUnit, formatInrWhole, formatKpiAmount, formatKpiSoFar } from '@/lib/format-inr';
 
 describe('formatCompact (no ₹ symbol — paired achieved/target displays)', () => {
   it('matches the compact scale without the ₹ prefix', () => {
@@ -102,5 +102,30 @@ describe('isInrUnit', () => {
     expect(isInrUnit('')).toBe(false);
     expect(isInrUnit(undefined)).toBe(false);
     expect(isInrUnit(null)).toBe(false);
+  });
+});
+
+describe('formatInrWhole (Targets page Achieved/Target for INR KPIs)', () => {
+  it('rounds to whole rupees with Indian grouping; sign before ₹; never -₹0', () => {
+    expect(formatInrWhole(10414.4)).toBe('₹10,414');
+    expect(formatInrWhole(10000)).toBe('₹10,000');
+    expect(formatInrWhole(250000)).toBe('₹2,50,000');
+    expect(formatInrWhole(999.5)).toBe('₹1,000');
+    expect(formatInrWhole(-1500.2)).toBe('-₹1,500');
+    expect(formatInrWhole(-0.4)).toBe('₹0');
+    expect(formatInrWhole(0)).toBe('₹0');
+    expect(formatInrWhole(Number.NaN)).toBe('₹0');
+  });
+});
+
+describe('formatKpiAmount / formatKpiSoFar (no-target KPI figures)', () => {
+  it('compact ₹ for INR, en-IN + unit otherwise; null → "—"', () => {
+    expect(formatKpiAmount(2755.12, 'INR')).toBe('₹2.8K');
+    expect(formatKpiAmount(-1500, 'INR')).toBe('-₹1.5K');
+    expect(formatKpiAmount(-0.3, 'INR')).toBe('₹0');
+    expect(formatKpiAmount(2755.12, 'cases')).toBe('2,755.1 cases');
+    expect(formatKpiSoFar(2755.12, 'INR')).toBe('₹2.8K so far');
+    expect(formatKpiSoFar(null, 'INR')).toBe('—');
+    expect(formatKpiSoFar(undefined, 'INR')).toBe('—');
   });
 });

@@ -592,27 +592,55 @@ export class PartnerService {
       month: { in: monthKeys },
     };
 
+    // partnerDashboardV2 (Bajaj, tenant-scoped): a month's ACHIEVED counts only the outlets whose
+    // target for that month is > 0, so sales at a partner's outlet WITHOUT this target never fill
+    // another outlet's target — the same rule the v2 dashboard hero + Target Achievement card apply
+    // (owner 2026-11-15). A month where NO outlet has a target keeps the plain sum (a "so far" figure).
+    // Flag OFF (Deoleo) → the plain per-month sums below, byte-identical to before.
+    const features = await resolveTenantFeatures(this.tenant, user.clientId);
+    const targetedOnly = features.partnerDashboardV2 === true;
+
     const [targetRows, achievementRows] = await Promise.all([
       this.prisma.outletTarget.findMany({
         where: whereBase,
-        select: { month: true, targetValues: true },
+        select: targetedOnly
+          ? { month: true, outletCode: true, targetValues: true }
+          : { month: true, targetValues: true },
       }),
       this.prisma.outletSalesRecord.findMany({
         where: whereBase,
-        select: { month: true, kpiValues: true },
+        select: targetedOnly
+          ? { month: true, outletCode: true, kpiValues: true }
+          : { month: true, kpiValues: true },
       }),
     ]);
 
     const code = primary.code;
     const targetByMonth = new Map<string, number>();
     const achievedByMonth = new Map<string, number>();
+    // v2 only: outlets with a target > 0 for the trended KPI, per month ("YYYY-MM" → outletCodes).
+    const targetedOutletsByMonth = new Map<string, Set<string>>();
     for (const r of targetRows) {
       const v = (r.targetValues as Record<string, unknown>)?.[code];
       if (typeof v === 'number') targetByMonth.set(r.month, (targetByMonth.get(r.month) ?? 0) + v);
+      if (targetedOnly && typeof v === 'number' && v > 0) {
+        const oc = (r as { outletCode?: string }).outletCode;
+        if (oc) {
+          const set = targetedOutletsByMonth.get(r.month) ?? new Set<string>();
+          set.add(oc);
+          targetedOutletsByMonth.set(r.month, set);
+        }
+      }
     }
     for (const r of achievementRows) {
       const v = (r.kpiValues as Record<string, unknown>)?.[code];
-      if (typeof v === 'number') achievedByMonth.set(r.month, (achievedByMonth.get(r.month) ?? 0) + v);
+      if (typeof v !== 'number') continue;
+      if (targetedOnly) {
+        const targeted = targetedOutletsByMonth.get(r.month);
+        const oc = (r as { outletCode?: string }).outletCode;
+        if (targeted && targeted.size > 0 && (!oc || !targeted.has(oc))) continue; // untargeted outlet's sales
+      }
+      achievedByMonth.set(r.month, (achievedByMonth.get(r.month) ?? 0) + v);
     }
 
     const trend = monthKeys.map((m) => ({
