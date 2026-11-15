@@ -51,6 +51,7 @@ export function VisibilityAmountUploadPanel() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [recMonth, setRecMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [downloadingReport, setDownloadingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   const handleTemplateDownload = () => {
     const raw = generateVisibilityTemplate();
@@ -101,11 +102,25 @@ export function VisibilityAmountUploadPanel() {
 
   const handleReportDownload = useCallback(async () => {
     setDownloadingReport(true);
+    setReportError(null);
     try {
-      const res = await fetch(`/api/admin/visibility/records?month=${recMonth}&limit=10000`);
-      if (!res.ok) return;
-      const json = await res.json();
-      const rows: VisibilityRecord[] = json.data?.records ?? [];
+      // The records API caps `limit` at 100 (a larger value is a 400) — page through until `total` is read.
+      // The old single `limit=10000` request always failed and the button silently did nothing.
+      const PAGE = 100;
+      const rows: VisibilityRecord[] = [];
+      for (let page = 1; ; page++) {
+        const res = await fetch(`/api/admin/visibility/records?month=${encodeURIComponent(recMonth)}&limit=${PAGE}&page=${page}`);
+        if (!res.ok) {
+          setReportError(`Couldn't download the report (error ${res.status}). Please try again.`);
+          return;
+        }
+        const json = await res.json();
+        const batch: VisibilityRecord[] = json.data?.records ?? [];
+        rows.push(...batch);
+        // A short page always ends it; `total` (when present) ends it early. Hard stop at 1,000 pages.
+        const total = typeof json.data?.total === 'number' ? (json.data.total as number) : Infinity;
+        if (batch.length < PAGE || rows.length >= total || page >= 1000) break;
+      }
       const XLSX = await import('xlsx');
       const sheetData = [
         ['Outlet Code', 'Month', 'Status', 'Capture Date', 'Approved By', 'Source File', 'Uploaded At'],
@@ -124,6 +139,8 @@ export function VisibilityAmountUploadPanel() {
       XLSX.utils.book_append_sheet(wb, ws, 'Visibility Records');
       const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
       downloadBlob(new Blob([buf], { type: XLSX_MIME }), `visibility_records_${recMonth}.xlsx`);
+    } catch {
+      setReportError("Couldn't download the report — check your connection and try again.");
     } finally {
       setDownloadingReport(false);
     }
@@ -250,6 +267,9 @@ export function VisibilityAmountUploadPanel() {
             </button>
           </div>
         </div>
+        {reportError && (
+          <p role="alert" className="mt-3 text-xs text-red-600" data-testid="visibility-report-error">{reportError}</p>
+        )}
       </div>
     </div>
   );
