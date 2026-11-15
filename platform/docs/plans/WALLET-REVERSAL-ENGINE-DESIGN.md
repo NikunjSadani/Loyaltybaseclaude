@@ -97,7 +97,7 @@ H. A private draw leaves H unchanged. (i) For one credit, total private draw = `
 order-free. ∎ The *split* of shortfall between reversals depends on order only when H binds (cases a, c); per-wallet
 totals don't (Q2).
 
-## 4. Data model (WP1 ✅ built — `f5677f1e`, migration `api/prisma/migrations/20261115120000_wallet_reversal_engine`)
+## 4. Data model (WP1 ✅ built — `f5677f1e`, migration `api/prisma/migrations/20261117120000_wallet_reversal_engine`)
 Purely additive; existing code keeps working.
 - **`Wallet`**: `debtPoints Int @default(0)`, `movementSeq Int @default(0)`, relation `creditPositions`.
 - **`WalletTransaction`**: `seq Int?` (unique `(walletId, seq)`; NULLs allowed pre-backfill), `pointsDelta Int?` (actual
