@@ -384,6 +384,34 @@ describe('GIFVC — voucher handling', () => {
     },
   );
 
+  it('GIFVC11h: Hubble unreachable on Acknowledge → offers "acknowledge anyway" (≥ 20-char note) and sends force', async () => {
+    let attempt = 0;
+    const calls = installFetch(
+      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'FAILED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_NO_CODE' }],
+      (url, init) => {
+        if (url !== '/api/rewards/orders/o1/hubble-acknowledge' || init?.method !== 'POST') return undefined;
+        attempt += 1;
+        return attempt === 1
+          ? Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ success: false, error: 'Hubble could not be checked right now — try again in a few minutes.' }) })
+          : jsonOk({ order: { id: 'o1', hubbleNeedsReconcile: false, hubbleReconcileReason: null } });
+      },
+    );
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /acknowledge — resolved/i }));
+    await userEvent.type(screen.getByLabelText('Note *'), 'short');
+    await userEvent.click(screen.getByRole('button', { name: /^acknowledge — resolved$/i }));
+    const force = await screen.findByRole('checkbox', { name: /hubble unreachable — acknowledge anyway/i });
+    await userEvent.click(force);
+    const confirm = screen.getByRole('button', { name: /^acknowledge — resolved$/i });
+    expect(confirm).toBeDisabled(); // note < 20 chars
+    await userEvent.type(screen.getByLabelText('Note *'), ' — portal shows no voucher');
+    await userEvent.click(confirm);
+    await waitFor(() => expect(attempt).toBe(2));
+    const sent = calls.filter((c) => c.url.endsWith('/hubble-acknowledge')).map((c) => JSON.parse(String(c.init!.body)));
+    expect(sent[0]).toEqual({ note: 'short' });
+    expect(sent[1]).toEqual({ note: 'short — portal shows no voucher', force: true });
+  });
+
   it('GIFVC11f: a flagged DELIVERED order (possible double issuance) hides Retry and offers Acknowledge', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' }]);
     const row = await openRow('RDM-1');

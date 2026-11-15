@@ -104,6 +104,14 @@ export class HubbleAcknowledgeDto {
   @IsString()
   @Length(1, 500)
   note!: string;
+
+  /**
+   * Acknowledge although the pre-check could not reach Hubble ("Hubble unreachable") — only honoured
+   * with a note of at least 20 characters; recorded as forced + audited.
+   */
+  @IsOptional()
+  @IsBoolean()
+  force?: boolean;
 }
 
 /** Hard cap on GET /v1/rewards/orders `limit` (one request never reads more rows than this). */

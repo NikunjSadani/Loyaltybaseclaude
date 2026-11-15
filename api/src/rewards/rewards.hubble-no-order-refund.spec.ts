@@ -85,11 +85,22 @@ const mockPrisma = {
   },
   redemptionStatusHistory: { create: jest.fn().mockResolvedValue({}) },
   // Last-resort ATOMIC jsonb merge (`metadata || patch`) — values: [json, now, id]; OPEN = still open.
-  $executeRaw: jest.fn(async (strings: TemplateStringsArray, json: string, now: Date, id: string) => {
+  $executeRaw: jest.fn(async (strings: TemplateStringsArray, ...vals: unknown[]) => {
     const sql = strings.join('?');
+    const id = vals[vals.length - 1] as string;
+    const now = vals[vals.length - 2] as Date;
     if (id !== row.id) return 0;
     if (sql.includes("IN ('CONFIRMED', 'PROCESSING', 'PENDING')") && !['CONFIRMED', 'PROCESSING', 'PENDING'].includes(row.status as string)) return 0;
-    row.metadata = { ...((row.metadata as Row) ?? {}), ...JSON.parse(json) };
+    const base = (row.metadata && typeof row.metadata === 'object' ? row.metadata : {}) as Row;
+    let patch = JSON.parse(vals[0] as string) as Row;
+    if (vals.length === 4) {
+      // [latestJson, json, now, id]: latest when an OPEN double-issuance flag is present.
+      const di = ['HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_PROCESSING_AFTER_MANUAL', 'HUBBLE_FAILED_VOUCHER_PRESENT'];
+      patch = base.hubbleNeedsReconcile === true && di.includes(base.hubbleReconcileReason as string)
+        ? (JSON.parse(vals[0] as string) as Row)
+        : (JSON.parse(vals[1] as string) as Row);
+    }
+    row.metadata = { ...base, ...patch };
     row.updatedAt = now;
     return 1;
   }),
@@ -719,20 +730,48 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       expect(mockHubble.getOrderByReference).not.toHaveBeenCalled();
       expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
 
-      // Another webhook (no status) + Hubble down → recorded, NOT flagged.
-      o1Lookup.mockRejectedValueOnce(new Error('HTTP 503'));
-      await send();
-      expect(meta()).toMatchObject({ hubbleLateWebhookCheck: { status: 'LOOKUP_FAILED' } });
-      expect(meta().hubbleNeedsReconcile).toBeUndefined();
-
-      // …but a REJECTED-placement refund is still flagged when Hubble can't be checked.
+      // Any refund + a FAILED webhook + Hubble down → only logged (the signed webhook itself says FAILED).
       row = stuckRow({
         status: 'FAILED', pointsDeducted: 0,
         metadata: { hubbleReconcileResolution: 'FAILED_REFUNDED', hubbleRefund: { source: 'REJECTED', reason: 'x' } },
       });
       o1Lookup.mockRejectedValueOnce(new Error('HTTP 503'));
       await send({ referenceId: 'o1', status: 'FAILED' });
-      expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND' });
+      expect(meta()).toMatchObject({ hubbleLateWebhookCheck: { status: 'LOOKUP_FAILED' } });
+      expect(meta().hubbleNeedsReconcile).toBeUndefined();
+    });
+
+    describe('R5-1: a non-FAILED webhook on a refunded order is NEVER quiet when Hubble can\'t be checked', () => {
+      const failedBodyRefund = () =>
+        stuckRow({
+          status: 'FAILED', pointsDeducted: 0,
+          metadata: { hubbleReconcileResolution: 'FAILED_REFUNDED', hubbleRefund: { source: 'HUBBLE_FAILED', reason: 'x' } },
+        });
+
+      it.each(['SUCCESS', 'PROCESSING'])('Hubble-FAILED refund → signed %s webhook → lookup throws → HUBBLE_ISSUED_AFTER_REFUND', async (st) => {
+        row = failedBodyRefund();
+        o1Lookup.mockRejectedValue(new Error('Hubble request failed: Hubble did not respond within 15s'));
+        expect((await send({ referenceId: 'o1', status: st })).outcome).toBe('SKIPPED');
+        expect(meta()).toMatchObject({
+          hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND',
+          hubbleLateWebhookCheck: { status: `${st}_(WEBHOOK)` },
+        });
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+
+      it('Hubble not configured + a SUCCESS webhook → ISSUED too', async () => {
+        row = failedBodyRefund();
+        mockHubble.isConfigured.mockReturnValue(false);
+        await send({ referenceId: 'o1', status: 'SUCCESS' });
+        expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND' });
+      });
+
+      it('a webhook with NO status + lookup throws → HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND (flagged, never quiet)', async () => {
+        row = failedBodyRefund();
+        o1Lookup.mockRejectedValue(new Error('HTTP 503'));
+        await send({ referenceId: 'o1' });
+        expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND' });
+      });
     });
 
     it('a webhook for ANY refunded Hubble order (even legacy, unstamped) is re-checked — never silently skipped', async () => {
@@ -816,6 +855,36 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       o1Lookup.mockRejectedValue(new Error('HTTP 503'));
       await expect(service.acknowledgeHubbleFlag(gifsy, 'o1', 'x')).rejects.toBeInstanceOf(ConflictException);
       expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_NO_CODE' });
+    });
+
+    it('R5-2: …Hubble unreachable + force → needs a ≥ 20-char note; then acknowledged, recorded as forced + audited', async () => {
+      row = flagged('HUBBLE_SUCCESS_NO_CODE');
+      o1Lookup.mockRejectedValue(new Error('HTTP 503'));
+      await expect(service.acknowledgeHubbleFlag(gifsy, 'o1', 'too short', { force: true })).rejects.toBeInstanceOf(BadRequestException);
+      expect(meta().hubbleNeedsReconcile).toBe(true);
+
+      await service.acknowledgeHubbleFlag(gifsy, 'o1', 'Hubble down all day; portal shows no voucher', { force: true });
+      expect(meta()).toMatchObject({
+        hubbleNeedsReconcile: false,
+        hubbleAcknowledged: { forced: true, forcedBecause: 'Hubble unreachable', recheck: 'LOOKUP_FAILED', reason: 'HUBBLE_SUCCESS_NO_CODE' },
+      });
+      expect(auditsOf('HUBBLE_FLAG_ACKNOWLEDGED')[0][0].data.metadata).toMatchObject({ forced: true, recheck: 'LOOKUP_FAILED' });
+    });
+
+    it('R5-2: …force never bypasses a Hubble that REPORTS an order (still 409 + ISSUED)', async () => {
+      row = flagged('HUBBLE_SUCCESS_NO_CODE');
+      o1Lookup.mockResolvedValue({ status: 'SUCCESS', id: 'h', vouchers: [{ cardNumber: 'C' }] });
+      await expect(
+        service.acknowledgeHubbleFlag(gifsy, 'o1', 'Hubble down all day; portal shows no voucher', { force: true }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND' });
+    });
+
+    it('R5-2: …Hubble NOT CONFIGURED in this environment → acknowledged, recorded recheck NOT_CONFIGURED', async () => {
+      row = flagged('HUBBLE_PROCESSING_CLAIM_LOST');
+      mockHubble.isConfigured.mockReturnValue(false);
+      await service.acknowledgeHubbleFlag(gifsy, 'o1', 'checked');
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: false, hubbleAcknowledged: { recheck: 'NOT_CONFIGURED' } });
     });
 
     it('rejects a non-GIFSY_ADMIN, a blank note, and any other flag (e.g. an open INDETERMINATE order)', async () => {
@@ -1061,6 +1130,51 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       expect((await service.retryHubbleReconcile(gifsy, 'o1')).outcome).toBe('SKIPPED');
       await service.acknowledgeHubbleFlag(gifsy, 'o1', 'only one voucher was used');
       expect(meta()).toMatchObject({ hubbleNeedsReconcile: false, hubbleAcknowledged: { reason: 'HUBBLE_PROCESSING_AFTER_MANUAL' } });
+    });
+
+    it.each([
+      ['a MANUAL_OVERRIDE takeover', { hubbleStatus: 'MANUAL_OVERRIDE' }],
+      ['a RELEASED order', { hubbleStatus: 'RELEASED' }],
+      ['an earlier double-issuance reason (sticky marker)', { hubbleDoubleIssueSeen: true }],
+      ['an acknowledged double-issuance reason', { hubbleAcknowledged: { reason: 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT' } }],
+    ])('R5-3: a delivery does NOT close the flag on %s', async (_n, extra) => {
+      row = stuckRow({ metadata: INDET({ ...extra }) });
+      o1Lookup.mockResolvedValue(SUCCESS);
+      expect(await service.reconcileHubbleOrder('o1')).toBe('DELIVERED');
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' });
+    });
+
+    it('R5-3: a later reason never overwrites an OPEN double-issuance flag (kept; newer one stored as hubbleLatestReason)', async () => {
+      row = stuckRow({ metadata: INDET({ hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' }) });
+      o1Lookup.mockResolvedValue({ status: 'ON_HOLD', id: 'h' }); // → HUBBLE_UNKNOWN_STATUS:ON_HOLD
+      await service.reconcileHubbleOrder('o1');
+      expect(meta()).toMatchObject({
+        hubbleNeedsReconcile: true,
+        hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL',
+        hubbleLatestReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD',
+      });
+    });
+
+    it('R5-3: raising a double-issuance reason sets the sticky hubbleDoubleIssueSeen marker', async () => {
+      row = stuckRow({ status: 'CONFIRMED', voucherCode: 'MANUAL-1', metadata: {} });
+      o1Lookup.mockResolvedValue({ status: 'SUCCESS', id: 'h', vouchers: [{ cardNumber: 'HUB-1' }] });
+      await service.reconcileHubbleOrder('o1'); // claim refused (code on the order) → SUCCESS_MANUAL_CODE_PRESENT
+      expect(meta()).toMatchObject({ hubbleReconcileReason: 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', hubbleDoubleIssueSeen: true });
+    });
+
+    it('R5-3: the CAS-exhausted fallback also keeps an open double-issuance reason', async () => {
+      const realUpdate = mockPrisma.redemptionOrder.update.getMockImplementation()!;
+      mockPrisma.redemptionOrder.update.mockImplementation(async () => { throw new Error('P2025'); });
+      row = stuckRow({ metadata: INDET({ hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' }) });
+      o1Lookup.mockResolvedValue({ status: 'ON_HOLD', id: 'h' });
+      try {
+        await service.reconcileHubbleOrder('o1');
+      } finally {
+        mockPrisma.redemptionOrder.update.mockImplementation(realUpdate);
+      }
+      expect(meta()).toMatchObject({
+        hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL', hubbleLatestReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD',
+      });
     });
 
     it('acknowledge on a DELIVERED order with any leftover flag is accepted', async () => {

@@ -1671,6 +1671,9 @@ function OrderRow({
   const [ackNote, setAckNote] = useState('');
   const [ackBusy, setAckBusy] = useState(false);
   const [ackErr, setAckErr] = useState('');
+  // Offered only after the server says Hubble could not be checked: acknowledge anyway (≥ 20-char note).
+  const [ackUnreachable, setAckUnreachable] = useState(false);
+  const [ackForce, setAckForce] = useState(false);
   const [retryBusy, setRetryBusy] = useState(false);
   const [retryMsg, setRetryMsg] = useState('');
   const [manualOpen, setManualOpen] = useState(false);
@@ -1702,12 +1705,16 @@ function OrderRow({
     try {
       const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}/hubble-acknowledge`, {
         method: 'POST',
-        body: JSON.stringify({ note }),
+        body: JSON.stringify(ackForce ? { note, force: true } : { note }),
       });
       setAckOpen(false);
+      setAckForce(false);
+      setAckUnreachable(false);
       onTransitioned(res?.order?.id ? res.order : { id: order.id, hubbleNeedsReconcile: false, hubbleReconcileReason: null });
     } catch (e) {
-      setAckErr(e instanceof Error ? e.message : 'Could not acknowledge the flag');
+      const msg = e instanceof Error ? e.message : 'Could not acknowledge the flag';
+      if (/could not be checked/i.test(msg)) setAckUnreachable(true);
+      setAckErr(msg);
     } finally {
       setAckBusy(false);
     }
@@ -1935,8 +1942,8 @@ function OrderRow({
           <td colSpan={7} className="px-4 py-4 bg-red-50/50">
             <div className="space-y-2 max-w-2xl">
               <p className="text-xs text-gray-700">
-                This order was already refunded because Hubble said it had no order. Check the order in Hubble&apos;s
-                portal, then record what you found. This clears the flag only — the order stays refunded.
+                Retry can&apos;t act on this order any more. Check the order in Hubble&apos;s portal, then record what you
+                found. This clears the review flag only — nothing else on the order changes.
               </p>
               <label className="text-xs font-medium text-gray-700" htmlFor={`ack-note-${order.id}`}>Note *</label>
               <input
@@ -1948,10 +1955,16 @@ function OrderRow({
                 className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
               />
               {ackErr && <p className="text-xs text-red-600" role="alert">{ackErr}</p>}
+              {ackUnreachable && (
+                <label className="flex items-center gap-2 text-xs text-gray-700">
+                  <input type="checkbox" checked={ackForce} onChange={(e) => setAckForce(e.target.checked)} />
+                  Hubble unreachable — acknowledge anyway (note of at least 20 characters; recorded as forced)
+                </label>
+              )}
               <div className="flex gap-2">
                 <button
                   onClick={acknowledgeFlag}
-                  disabled={ackBusy || !ackNote.trim()}
+                  disabled={ackBusy || !ackNote.trim() || (ackForce && ackNote.trim().length < 20)}
                   aria-busy={ackBusy}
                   className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-gray-900 text-white disabled:opacity-50"
                 >

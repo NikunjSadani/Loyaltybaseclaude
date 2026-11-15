@@ -260,6 +260,6 @@ export class RewardsController {
     @Param('id') id: string,
     @Body() dto: HubbleAcknowledgeDto,
   ) {
-    return this.rewards.acknowledgeHubbleFlag(user, id, dto.note);
+    return this.rewards.acknowledgeHubbleFlag(user, id, dto.note, { force: dto.force === true });
   }
 }

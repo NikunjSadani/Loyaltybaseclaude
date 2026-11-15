@@ -411,6 +411,9 @@ export const HUBBLE_DOUBLE_ISSUE_REASONS: ReadonlySet<string> = new Set([
   'HUBBLE_FAILED_VOUCHER_PRESENT',
 ]);
 
+/** Minimum note length for an Acknowledge forced while Hubble is unreachable (the recheck failed). */
+export const HUBBLE_FORCED_ACK_MIN_NOTE = 20;
+
 /** Reasons that imply Hubble HOLDS an order (Acknowledge on a refunded order re-checks Hubble first). */
 const HUBBLE_HAS_ORDER_REASON = /^HUBBLE_(SUCCESS|PROCESSING|UNKNOWN_STATUS)/;
 
@@ -4263,7 +4266,7 @@ export class RewardsService {
               this.logger.log(`[hubble] order ${order.orderNumber}: FAILED webhook for a Hubble-FAILED refunded order — nothing to do`);
               return this.HUBBLE_OUTCOME.SKIPPED;
             }
-            return (await this.checkLateWebhookAfterNoOrderRefund(order, 'WEBHOOK')).outcome;
+            return (await this.checkLateWebhookAfterNoOrderRefund(order, 'WEBHOOK', opts.webhookStatus ?? undefined)).outcome;
           }
           // Ops retry on such an order: say it is refunded AND still under review — not "nothing to do".
           if (this.metaOf(order).hubbleNeedsReconcile === true) {
@@ -4531,11 +4534,21 @@ export class RewardsService {
     // WEBHOOK_BUT_NOT_FOUND, SUCCESS_NO_CODE, CLAIM_LOST, …) — otherwise a DELIVERED order would stay
     // flagged forever (Retry skips a delivered order). Double-issuance flags stay for ops (and are
     // acknowledgeable on a DELIVERED order). CAS on the re-read row: never clears a flag raised since.
+    const loadedMeta = this.metaOf(order);
     await this.patchOrderMetadata(order.id, (cur) => {
       const m = this.metaOf(cur);
       const reason = typeof m.hubbleReconcileReason === 'string' ? m.hubbleReconcileReason : null;
       if (cur.status !== RedemptionStatus.DELIVERED || m.hubbleNeedsReconcile !== true) return null;
-      if (reason && HUBBLE_DOUBLE_ISSUE_REASONS.has(reason)) return null;
+      // Ops took this order over (manual override / release) or it ever carried a double-issuance
+      // reason → a Hubble delivery does NOT prove it's resolved; leave the flag for ops.
+      if (
+        loadedMeta.hubbleStatus === 'MANUAL_OVERRIDE' ||
+        loadedMeta.hubbleStatus === 'RELEASED' ||
+        this.hasDoubleIssueHistory(loadedMeta) ||
+        this.hasDoubleIssueHistory(m)
+      ) {
+        return null;
+      }
       return {
         hubbleNeedsReconcile: false,
         hubbleReconcileResolution: this.HUBBLE_OUTCOME.DELIVERED,
@@ -5208,9 +5221,10 @@ export class RewardsService {
   private async checkLateWebhookAfterNoOrderRefund(
     order: Pick<HubbleLoadedOrder, 'id' | 'orderNumber' | 'metadata'>,
     /**
-     * WEBHOOK: a signed Hubble webhook. RACE: a claim lost to a refund while Hubble had just answered
-     * with an order body (`knownStatus`). ACK: the pre-check before an ops Acknowledge (never clears,
-     * never raises an unknown flag — only ISSUED when Hubble reports an order).
+     * WEBHOOK: a signed Hubble webhook (`knownStatus` = the status the webhook itself reports, if any).
+     * RACE: a claim lost to a refund while Hubble had just answered with an order body (`knownStatus`).
+     * ACK: the pre-check before an ops Acknowledge (never clears, never raises an unknown flag — only
+     * ISSUED when Hubble reports an order).
      */
     mode: 'WEBHOOK' | 'RACE' | 'ACK',
     knownStatus?: string,
@@ -5235,17 +5249,25 @@ export class RewardsService {
         check = { at, status: 'LOOKUP_FAILED', hubbleOrderId: null, voucherExists: null };
       }
     }
+    const known = (knownStatus ?? '').toUpperCase();
+    const knownHasOrder = known === 'SUCCESS' || known === 'PROCESSING';
     // RACE: Hubble JUST answered with an order body — a failed / contradicting re-check can't undo that.
-    if (mode === 'RACE' && knownStatus && ['NOT_FOUND', 'LOOKUP_FAILED', 'NOT_CONFIGURED'].includes(check.status)) {
-      check = { ...check, status: `${knownStatus}_(RACE)` };
+    if (mode === 'RACE' && known && ['NOT_FOUND', 'LOOKUP_FAILED', 'NOT_CONFIGURED'].includes(check.status)) {
+      check = { ...check, status: `${known}_(RACE)` };
+    }
+    // WEBHOOK: a SIGNED webhook saying SUCCESS / PROCESSING is Hubble telling us it holds the order — if
+    // the re-check can't be made, trust the webhook (→ ISSUED), never go quiet.
+    if (mode === 'WEBHOOK' && knownHasOrder && ['LOOKUP_FAILED', 'NOT_CONFIGURED'].includes(check.status)) {
+      check = { ...check, status: `${known}_(WEBHOOK)` };
     }
     const issued = !['NOT_FOUND', 'FAILED', 'LOOKUP_FAILED', 'NOT_CONFIGURED'].includes(check.status);
     const unknown = check.status === 'LOOKUP_FAILED' || check.status === 'NOT_CONFIGURED';
     // A signed webhook (or a Hubble body) + a lookup "not found" is a CONTRADICTION, not proof nothing was
     // issued: keep / raise the unknown flag. Only Hubble's own FAILED clears it.
     const contradiction = check.status === 'NOT_FOUND' && mode !== 'ACK';
-    // An order Hubble itself reported FAILED (we refunded on that body): an unreachable Hubble is just logged.
-    const quietOnUnknown = unknown && this.refundSourceOf(order) === 'HUBBLE_FAILED';
+    // Quiet (log only) on an unreachable Hubble ONLY when the signed webhook itself says FAILED (Hubble
+    // told us nothing was issued). A webhook with no status / an order status is never quiet.
+    const quietOnUnknown = unknown && mode === 'WEBHOOK' && known === 'FAILED';
     // The patch is computed from the RE-READ row inside a compare-and-set (patchOrderMetadata), never
     // from `order` as loaded: a concurrent webhook may have raised HUBBLE_ISSUED_AFTER_REFUND since, and
     // that flag must NEVER be cleared or downgraded automatically.
@@ -5300,6 +5322,18 @@ export class RewardsService {
     return { outcome: this.HUBBLE_OUTCOME.SKIPPED, check };
   }
 
+  /**
+   * The order ever carried a double-issuance reason: the current / latest reason, an acknowledged one,
+   * a race-mapped one, or the sticky `hubbleDoubleIssueSeen` marker (set whenever one is raised).
+   */
+  private hasDoubleIssueHistory(m: Record<string, unknown>): boolean {
+    if (m.hubbleDoubleIssueSeen === true) return true;
+    const ack = m.hubbleAcknowledged && typeof m.hubbleAcknowledged === 'object' ? (m.hubbleAcknowledged as Record<string, unknown>).reason : null;
+    return [m.hubbleReconcileReason, m.hubbleLatestReason, m.hubbleRaceReason, m.hubbleResolvedPreviousReason, ack].some(
+      (r) => typeof r === 'string' && HUBBLE_DOUBLE_ISSUE_REASONS.has(r),
+    );
+  }
+
   /** How a refunded Hubble order was refunded (hubbleRefund.source), when recorded. */
   private refundSourceOf(order: { metadata: Prisma.JsonValue | null }): string | null {
     const m = this.metaOf(order);
@@ -5352,7 +5386,7 @@ export class RewardsService {
    * compare-and-set on the row version (a concurrent change → 409). Audited. Nothing else changes —
    * the order stays FAILED + refunded.
    */
-  async acknowledgeHubbleFlag(user: JwtPayload, id: string, note: string) {
+  async acknowledgeHubbleFlag(user: JwtPayload, id: string, note: string, opts: { force?: boolean } = {}) {
     if (user.role !== 'GIFSY_ADMIN') {
       throw new ForbiddenException('Only a Gifsy admin can acknowledge a Hubble review flag.');
     }
@@ -5379,14 +5413,30 @@ export class RewardsService {
     // A reason implying Hubble HOLDS an order, on a refunded order: re-check Hubble FIRST. If Hubble
     // reports an order, the flag becomes HUBBLE_ISSUED_AFTER_REFUND and this acknowledge is refused (ops
     // must review THAT). If Hubble can't be reached, refuse too (retry later).
+    //  - NOT_CONFIGURED (no Hubble client in this environment — a re-check can never succeed): allowed,
+    //    recorded as recheck NOT_CONFIGURED.
+    //  - LOOKUP_FAILED (transient): 409 — unless the admin explicitly forces it ("Hubble unreachable")
+    //    with a note of at least HUBBLE_FORCED_ACK_MIN_NOTE characters; recorded as forced + audited.
     let current: { metadata: Prisma.JsonValue; updatedAt: Date } = { metadata: order.metadata, updatedAt: order.updatedAt };
+    let recheck: string | null = null;
+    let forced = false;
     if (this.isTerminalRefundStatus(order.status) && HUBBLE_HAS_ORDER_REASON.test(reason)) {
       const { check } = await this.checkLateWebhookAfterNoOrderRefund(order, 'ACK');
-      if (!['NOT_FOUND', 'FAILED'].includes(check.status)) {
-        const why = ['LOOKUP_FAILED', 'NOT_CONFIGURED'].includes(check.status)
-          ? 'Hubble could not be checked right now — try again in a few minutes.'
-          : 'Hubble reports an order for this refunded redemption — it is now flagged "Hubble may have issued a voucher for refunded points". Check Hubble’s portal and acknowledge that flag.';
-        throw new ConflictException(why);
+      recheck = check.status;
+      if (check.status === 'LOOKUP_FAILED') {
+        if (!opts.force) {
+          throw new ConflictException(
+            `Hubble could not be checked right now — try again in a few minutes. If Hubble stays unreachable, tick “Hubble unreachable — acknowledge anyway” and write a note of at least ${HUBBLE_FORCED_ACK_MIN_NOTE} characters.`,
+          );
+        }
+        if (text.length < HUBBLE_FORCED_ACK_MIN_NOTE) {
+          throw new BadRequestException(`Acknowledging without a Hubble check needs a note of at least ${HUBBLE_FORCED_ACK_MIN_NOTE} characters.`);
+        }
+        forced = true;
+      } else if (!['NOT_FOUND', 'FAILED', 'NOT_CONFIGURED'].includes(check.status)) {
+        throw new ConflictException(
+          'Hubble reports an order for this refunded redemption — it is now flagged "Hubble may have issued a voucher for refunded points". Check Hubble’s portal and acknowledge that flag.',
+        );
       }
       const re = await this.prisma.redemptionOrder.findFirst({ where: { id: order.id }, select: { metadata: true, updatedAt: true } });
       if (!re) throw new NotFoundException('Order not found');
@@ -5399,7 +5449,14 @@ export class RewardsService {
         data: {
           metadata: this.mergeOrderMetadata(current.metadata, {
             hubbleNeedsReconcile: false,
-            hubbleAcknowledged: { by: user.sub, at: at.toISOString(), note: text.slice(0, 500), reason },
+            hubbleAcknowledged: {
+              by: user.sub,
+              at: at.toISOString(),
+              note: text.slice(0, 500),
+              reason,
+              ...(recheck ? { recheck } : {}),
+              ...(forced ? { forced: true, forcedBecause: 'Hubble unreachable' } : {}),
+            },
           }),
         },
       });
@@ -5412,7 +5469,14 @@ export class RewardsService {
         action: 'UPDATE',
         entityType: 'REDEMPTION_ORDER',
         entityId: order.id,
-        metadata: { event: 'HUBBLE_FLAG_ACKNOWLEDGED', orderNumber: order.orderNumber, reason, note: text.slice(0, 500) },
+        metadata: {
+          event: 'HUBBLE_FLAG_ACKNOWLEDGED',
+          orderNumber: order.orderNumber,
+          reason,
+          note: text.slice(0, 500),
+          ...(recheck ? { recheck } : {}),
+          ...(forced ? { forced: true } : {}),
+        },
       },
     });
     return { order: { id: order.id, hubbleNeedsReconcile: false, hubbleReconcileReason: null } };
@@ -5429,9 +5493,20 @@ export class RewardsService {
   // HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND. HUBBLE_ISSUED_AFTER_REFUND is never downgraded.
   private async markHubblePendingReconcile(orderId: string, reason: string): Promise<void> {
     const at = new Date().toISOString();
+    const doubleIssue = HUBBLE_DOUBLE_ISSUE_REASONS.has(reason);
     const written = await this.patchOrderMetadata(orderId, (cur) => {
+      const m = this.metaOf(cur);
+      // An OPEN double-issuance flag is never overwritten by a later reason (ops must still see it): keep
+      // it and record the newer reason beside it.
+      if (
+        m.hubbleNeedsReconcile === true &&
+        typeof m.hubbleReconcileReason === 'string' &&
+        HUBBLE_DOUBLE_ISSUE_REASONS.has(m.hubbleReconcileReason) &&
+        m.hubbleReconcileReason !== reason
+      ) {
+        return { hubbleLatestReason: reason, hubbleLatestReasonAt: at, ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}) };
+      }
       if (this.isTerminalRefundStatus(cur.status)) {
-        const m = this.metaOf(cur);
         if (m.hubbleNeedsReconcile === true && m.hubbleReconcileReason === 'HUBBLE_ISSUED_AFTER_REFUND') return null;
         const hubbleHasOrder = /^HUBBLE_(SUCCESS|PROCESSING|UNKNOWN_STATUS)/.test(reason);
         this.logger.error(
@@ -5442,19 +5517,47 @@ export class RewardsService {
           hubbleReconcileReason: hubbleHasOrder ? 'HUBBLE_ISSUED_AFTER_REFUND' : 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND',
           hubbleReconcileAt: at,
           hubbleRaceReason: reason,
+          ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}),
         };
       }
-      return { hubbleNeedsReconcile: true, hubbleReconcileReason: reason, hubbleReconcileAt: at };
+      return {
+        hubbleNeedsReconcile: true,
+        hubbleReconcileReason: reason,
+        hubbleReconcileAt: at,
+        ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}),
+      };
     });
     if (written === 'CONFLICT') {
-      // Never leave an OPEN order unflagged after losing the CAS: atomic jsonb merge of ONLY the flag keys,
-      // and only while the order is still open (a terminal order is handled by the mapping above).
-      const ok = await this.atomicMergeOrderMetadata(
+      // Never leave an OPEN order unflagged after losing the CAS: ONE atomic jsonb statement that adds only
+      // the flag keys while the order is still open — and, if an OPEN double-issuance flag is already
+      // there, keeps it and records this reason as hubbleLatestReason instead.
+      const ok = await this.atomicFlagOpenOrder(
         orderId,
-        { hubbleNeedsReconcile: true, hubbleReconcileReason: reason, hubbleReconcileAt: at },
-        'OPEN',
+        { hubbleNeedsReconcile: true, hubbleReconcileReason: reason, hubbleReconcileAt: at, ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}) },
+        { hubbleLatestReason: reason, hubbleLatestReasonAt: at, ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}) },
       );
       if (!ok) this.logger.error(`[hubble] failed to flag order ${orderId} for reconcile (${reason})`);
+    }
+  }
+
+  /**
+   * markHubblePendingReconcile's last resort (see there): one statement; `patch` normally, `latestPatch`
+   * when an OPEN double-issuance flag is present; only while the order is open. Never throws.
+   */
+  private async atomicFlagOpenOrder(
+    orderId: string,
+    patch: Record<string, unknown>,
+    latestPatch: Record<string, unknown>,
+  ): Promise<boolean> {
+    try {
+      const json = JSON.stringify(patch);
+      const latestJson = JSON.stringify(latestPatch);
+      const now = new Date();
+      const n = await this.prisma.$executeRaw`UPDATE "redemption_orders" SET "metadata" = (CASE WHEN jsonb_typeof("metadata") = 'object' THEN "metadata" ELSE '{}'::jsonb END) || (CASE WHEN jsonb_typeof("metadata") = 'object' AND "metadata"->>'hubbleNeedsReconcile' = 'true' AND "metadata"->>'hubbleReconcileReason' IN ('HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_PROCESSING_AFTER_MANUAL', 'HUBBLE_FAILED_VOUCHER_PRESENT') THEN ${latestJson}::jsonb ELSE ${json}::jsonb END), "updatedAt" = ${now} WHERE "id" = ${orderId} AND "status"::text IN ('CONFIRMED', 'PROCESSING', 'PENDING')`;
+      return n > 0;
+    } catch (e) {
+      this.logger.error(`[hubble] atomic reconcile flag failed on order ${orderId}: ${e}`);
+      return false;
     }
   }
 
