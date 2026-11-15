@@ -9,8 +9,8 @@
 | **Status** | ⏸ **PAUSED 2026-11-13 by owner — FAST FOLLOW-UP AFTER BAJAJ GO-LIVE.** Design approved; foundations built; engine not built. |
 | **Approval** | ✅ Owner approved 2026-11-13: the full design + all 14 decisions (Q1–Q14 = recommended A). ⚠️ PLATFORM-WIDE (approved in-session). |
 | **Why paused** | Not needed for go-live or any data import (§11). Release ships a safe interim rule instead (§10). Machine/bandwidth prioritised for go-live: release → imports → targets/achievement import → client training deck. |
-| **Built** | `679ed4c2` design doc · `f5677f1e` WP1 schema + migration · `7d64ab55` WP0 reference model (oracle) + 30 tests incl. property tests |
-| **Not built** | WP2 movement v2 · WP3 reversal engine · WP4 credits caps · WP5 payout allocations · WP6 backfill · WP7 concurrency e2e · WP8 rollout |
+| **Built** | `679ed4c2` design doc · `f5677f1e` WP1 schema + migration · `7d64ab55` WP0 reference model (oracle) + 30 tests incl. property tests · `6fed2005` WP6 backfill + verify jobs (not yet run on any DB) |
+| **Not built** | WP2 movement v2 · WP3 reversal engine · WP4 credits caps · WP5 payout allocations · WP7 concurrency e2e · WP8 rollout |
 | **Remaining effort** | ~7–8 h wall-clock with parallel agents (§13) |
 
 ---
@@ -223,6 +223,22 @@ SELECT id, "redeemablePoints", "debtPoints" FROM wallets WHERE "redeemablePoints
 -- V9 no payout entry in two live reversals (GROUP BY payoutEntryId HAVING count(*) > 1 on live states)
 ```
 
+### 9.1 WP6 backfill / verify runbook (`6fed2005` — NOT yet run on any DB)
+Same API image, Cloud Run Job, `--command=node`. Every DB step needs the owner's OK; prod also needs a fresh backup.
+1. **DRY_RUN** (default; reads only): `EXPECTED_DB=gifsy_staging TENANTS=bajaj,deoleo` → args `dist/wallet/backfill/backfill.main.js`.
+   Prints per tenant: planned/noop/done/BLOCKED counts, rows to sequence, positions by attribution, allocations, every
+   debt wallet (`B → D (H)`), every anomaly (BLOCKING = that wallet gets no writes; WARNING = written + flagged). The
+   anomaly list goes to the owner. Save the `V0` numbers it is about to print in APPLY.
+2. **APPLY**: add `BACKFILL_APPLY=true BACKFILL_CONFIRM="APPLY gifsy_staging"` (exact). A tenant with BLOCKED wallets is
+   refused (exit 3) unless `ALLOW_BLOCKED=true`. Optional staging: `MAX_WALLETS=n`, `RESUME_AFTER_WALLET=<id>`. Re-runs
+   are safe (done wallets skipped). Exit 4 = V0 changed during the run → stop, investigate (concurrent traffic / bug).
+   Run with POINTS reversal approvals paused (a clawback committed mid-run on a backfilled wallet shows up in V1).
+3. **VERIFY** (read-only): args `dist/wallet/backfill/verify.main.js`, env `EXPECTED_DB`, `TENANTS`,
+   `V0_BASELINE_JSON='[…the "V0 before" objects APPLY printed…]'`, `NEVER_NEGATIVE_TENANTS=deoleo` (default),
+   prod only: `EXPECTED_NEGATIVE_BALANCES='{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}'`. Exit 0 = all PASS, 5 = a FAIL.
+4. Only after 1–3 pass for every tenant AND WP2 is live on every write path: ship
+   `platform/docs/plans/sql/wallet-reversal-post-backfill.DRAFT.sql` as a real migration (instructions in its header).
+
 ## 10. Interim rule shipped in the release (until V2 is live for a tenant) — decision Q14
 Built on `feat/payout-without-pan` (release track, 2026-11-13): POINTS reversals use the simple pre-patch semantics
 (floor 0, never adds points, shortfall recorded) **and are refused on any wallet that currently carries debt or where the
@@ -263,7 +279,7 @@ credit batches on prod yet. Worth doing properly once Bajaj runs monthly credits
 | WP3 | Reversal engine `applyCreditReversal` §6; own-lot-first; LEGACY/SHADOW/V2 flag; delete legacy floor helpers | ⬜ | WP2 (same files → same agent) | (with WP2) |
 | WP4 | credits.service POINTS: position-based caps at create/approve, wallet from position, allocations, shortfall totals, SHADOW | ⬜ | WP3 | ~1 h |
 | WP5 | PAYOUT allocations §8: entry-selection DTO + UI, reservation, download/re-bank hold, approve rules, backfill of existing PAYOUT reversals | ⬜ | WP1 + release branch merged in | ~2 h (parallel with WP2/3) |
-| WP6 | Backfill job §9 (pure module using WP0 `replay()` + Cloud Run job script, DRY_RUN default, resumable) + verify job V0–V9 + draft post-backfill migration | ⬜ | WP0, WP1 | ~2 h (parallel) |
+| WP6 | Backfill job §9 (pure module using WP0 `replay()` + Cloud Run job script, DRY_RUN default, resumable) + verify job V0–V9 + draft post-backfill migration | ✅ `6fed2005` — `api/src/wallet/backfill/` (planner, runner, Prisma store, `backfill.main.ts`, `verify.main.ts`) + 30 fixture tests; draft `platform/docs/plans/sql/wallet-reversal-post-backfill.DRAFT.sql`. Not yet run on any DB (runbook §9.1) | WP0, WP1 | — |
 | WP7 | Postgres e2e concurrency tests (concurrent credits, reversal vs redeem, double approval, reservation vs download) | ⬜ | WP2–WP5 | ~1 h |
 | WP8 | Flag rollout, shadow-diff report, docs sweep, prod runbook | ⬜ | all | with staging |
 | — | Dual independent money audit + fix round; full `scripts/gates.sh`; staging (migration, backfill, V0–V9, one Bajaj negative wallet + one Deoleo wallet with real logins) | ⬜ | all | ~3 h |
