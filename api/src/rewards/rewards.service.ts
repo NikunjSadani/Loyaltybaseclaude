@@ -3176,6 +3176,8 @@ export class RewardsService {
         ? ({
             ...meta,
             hubbleNeedsReconcile: false,
+            hubbleLatestReason: null,
+            hubbleLatestReasonAt: null,
             hubbleStatus: 'RELEASED',
             hubbleReleasedAt: new Date().toISOString(),
             hubbleReleasedBy: user.sub,
@@ -4554,6 +4556,8 @@ export class RewardsService {
       }
       return {
         hubbleNeedsReconcile: false,
+        hubbleLatestReason: null,
+        hubbleLatestReasonAt: null,
         hubbleReconcileResolution: this.HUBBLE_OUTCOME.DELIVERED,
         hubbleResolvedPreviousReason: reason,
       };
@@ -4716,6 +4720,8 @@ export class RewardsService {
           notes: `Hubble issuance failed: ${reason}`.slice(0, 500),
           metadata: this.mergeOrderMetadata(curMeta, {
             hubbleNeedsReconcile: false,
+            hubbleLatestReason: null,
+            hubbleLatestReasonAt: null,
             hubbleReconcileResolution: this.HUBBLE_OUTCOME.FAILED_REFUNDED,
             hubbleRefund: {
               at: new Date().toISOString(),
@@ -5111,6 +5117,8 @@ export class RewardsService {
           notes: `Hubble issuance failed: ${HUBBLE_NO_ORDER_REFUND_REASON}`.slice(0, 500),
           metadata: this.mergeOrderMetadata(cur.metadata, {
             hubbleNeedsReconcile: false,
+            hubbleLatestReason: null,
+            hubbleLatestReasonAt: null,
             hubbleReconcileResolution: this.HUBBLE_OUTCOME.REFUNDED_NO_HUBBLE_ORDER,
             hubbleNoOrderRefund: {
               at,
