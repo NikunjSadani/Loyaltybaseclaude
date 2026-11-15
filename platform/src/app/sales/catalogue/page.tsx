@@ -15,6 +15,9 @@ import { isDeliveryDefaults, type DeliveryDefaults } from '@/lib/partner-identit
 import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
 import { WHOLE_RUPEE_INVALID_MESSAGE, isWholeRupeeInvalid, wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
 import { pointsForAmount } from '@/lib/hubble-product';
+import { voucherAmountBand } from '@/lib/voucher-band';
+
+const fmtInr = (n: number) => `₹${n.toLocaleString('en-IN')}`;
 
 type GiftItem = GiftCatalogueItem;
 
@@ -93,6 +96,12 @@ function isFreeAmountGift(g: GiftItem | null): boolean {
   return !!g && g.points === 0 && g.minRedemptionPoints != null && g.maxRedemptionPoints != null;
 }
 
+/** A cash (UPI / bank-transfer) reward — the server floors it at minBankTransferAmount, not the
+ *  voucher minimum (rewards.service redeemForOutlet). */
+function isCashGift(g: GiftItem): boolean {
+  return g.redemptionMode === 'UPI' || g.redemptionMode === 'BANK_TRANSFER';
+}
+
 /* ─── Gift image display ─────────────────────────────────────────────────────── */
 
 function GiftImage({
@@ -145,10 +154,35 @@ function CatalogueInner() {
   const [selectedGift, setSelectedGift] = useState<GiftItem | null>(null);
   const [sheetStep,    setSheetStep]    = useState<SheetStep | null>(null);
   const [redeem,       setRedeem]       = useState<RedeemState>({ ...INITIAL_REDEEM, outlet: null });
-  // Tenant points-per-₹ + minimum voucher amount (from /me) — only loaded when a "choose from
-  // amounts" item exists (amounts below the minimum are shown greyed out, like the partner sheet).
+  // Tenant points-per-₹ + minimum voucher / bank-transfer amount (from /me) — loaded on catalogue
+  // load when a "choose from amounts" item exists (amounts below the minimum are shown greyed
+  // out), else on demand when a variable-amount item is opened (its ₹ min/max band needs them).
+  // A catalogue without either never requests /me.
   const [conversionRate, setConversionRate] = useState<number | null>(null);
   const [minVoucherAmount, setMinVoucherAmount] = useState(0);
+  const [minBankTransferAmount, setMinBankTransferAmount] = useState(0);
+  // 'idle' (never requested) → 'loading' → 'loaded' (a usable rate) | 'error' (the read failed or
+  // returned no usable rate — a typed amount's limits can't be computed; the rep can retry).
+  const [settingsStatus, setSettingsStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  const settingsRequested = useRef(false);
+  const loadSettings = () => {
+    if (settingsRequested.current) return;
+    settingsRequested.current = true;
+    setSettingsStatus('loading');
+    const failed = () => { settingsRequested.current = false; setSettingsStatus('error'); };
+    api.get<{ conversionRate?: number; settings?: { minVoucherFreeAmount?: number; minBankTransferAmount?: number } }>('/api/auth/me')
+      .then((me) => {
+        const r = me.success ? me.data?.conversionRate : undefined;
+        if (!(typeof r === 'number' && Number.isFinite(r) && r > 0)) { failed(); return; }
+        setConversionRate(r);
+        const floor = me.success ? me.data?.settings?.minVoucherFreeAmount : undefined;
+        if (typeof floor === 'number' && Number.isFinite(floor) && floor > 0) setMinVoucherAmount(floor);
+        const bankFloor = me.success ? me.data?.settings?.minBankTransferAmount : undefined;
+        if (typeof bankFloor === 'number' && Number.isFinite(bankFloor) && bankFloor > 0) setMinBankTransferAmount(bankFloor);
+        setSettingsStatus('loaded');
+      })
+      .catch(failed);
+  };
 
   const preOutlet = useMemo(
     () => preselectedId ? outlets.find((o) => o.kycId === preselectedId || o.id === preselectedId) ?? null : null,
@@ -233,16 +267,7 @@ function CatalogueInner() {
           setGifts(mapped);
           // Points per listed amount need the tenant rate — fetched ONLY when the catalogue has a
           // "choose from amounts" item (never for a tenant without one).
-          if (mapped.some((g) => g.amountOptions?.length)) {
-            api.get<{ conversionRate?: number; settings?: { minVoucherFreeAmount?: number } }>('/api/auth/me')
-              .then((me) => {
-                const r = me.success ? me.data?.conversionRate : undefined;
-                if (typeof r === 'number' && Number.isFinite(r) && r > 0) setConversionRate(r);
-                const floor = me.success ? me.data?.settings?.minVoucherFreeAmount : undefined;
-                if (typeof floor === 'number' && Number.isFinite(floor) && floor > 0) setMinVoucherAmount(floor);
-              })
-              .catch(() => {});
-          }
+          if (mapped.some((g) => g.amountOptions?.length)) loadSettings();
         } else {
           setGifts([]);
         }
@@ -285,6 +310,8 @@ function CatalogueInner() {
     setSelectedGift(gift);
     setRedeem({ ...INITIAL_REDEEM, outlet: preOutlet });
     setSheetStep('detail');
+    // The ₹ min/max band of a variable-amount item needs the tenant rate + floors.
+    if (isFreeAmountGift(gift)) loadSettings();
   };
 
   const closeSheet = () => {
@@ -323,6 +350,30 @@ function CatalogueInner() {
       addrTyped: { ...r.addrTyped, [key]: value },
     }));
 
+  // The ₹ band of a TYPED variable-amount item (same rule as the partner voucher sheet): the
+  // ADMIN's per-item band (min/max points → whole rupees at the tenant rate, server rounding)
+  // with the tenant floor (voucher minimum; bank-transfer minimum for a cash item) as a lower
+  // bound. A choose-from-amounts item skips it (the listed amounts ARE the band). Until /me has
+  // answered with a usable rate the limits are UNKNOWN: no band text, Send disabled ("Loading
+  // limits…", or a retry after a failed read) — never a "(min ₹0)" that enforces nothing.
+  // Server validation is unchanged (defence in depth).
+  const typedAmountGift = !!selectedGift && isFreeAmountGift(selectedGift) && !selectedGift.amountOptions?.length;
+  const limitsLoading = typedAmountGift && (settingsStatus === 'idle' || settingsStatus === 'loading');
+  const limitsFailed = typedAmountGift && settingsStatus === 'error';
+  const band = typedAmountGift && selectedGift && settingsStatus === 'loaded' && conversionRate != null
+    ? voucherAmountBand(selectedGift, isCashGift(selectedGift) ? minBankTransferAmount : minVoucherAmount, conversionRate)
+    : null;
+  // An empty band (₹ max below ₹ min): no amount can ever pass — say so and lock the field.
+  const amountUnredeemable = !!band && band.max != null && band.max < band.min;
+  const typedAmount = wholeRupeeAmount(redeem.amount); // null = invalid text (handled separately)
+  const belowMin = !!band && !amountUnredeemable && typedAmount != null && typedAmount > 0 && typedAmount < band.min;
+  const aboveMax = !!band && !amountUnredeemable && band.max != null && typedAmount != null && typedAmount > band.max;
+  const amountHint = belowMin
+    ? `Minimum redemption is ${fmtInr(band!.min)}`
+    : aboveMax
+    ? `Maximum redemption is ${fmtInr(band!.max ?? 0)}`
+    : '';
+
   // Sales-assisted redeem (B1): create the PENDING order; the backend sends the
   // OTP to the OUTLET's registered mobile. The rep enters the code the outlet shares.
   const sendOtp = async () => {
@@ -350,6 +401,22 @@ function CatalogueInner() {
     if (freeAmount && (!Number.isInteger(amountNum) || amountNum <= 0)) {
       setRedeem((r) => ({ ...r, error: 'Enter a whole-rupee amount (₹) to redeem for this outlet.' }));
       return;
+    }
+    // Limits unknown / outside the ₹ band → never sent (the button is disabled too; this guards
+    // any other path) — with the reason, never a silent no-op.
+    if (typedAmountGift && !redeem.otpSent) {
+      const reason = limitsLoading
+        ? 'Redemption limits are still loading — please wait.'
+        : limitsFailed || !band
+        ? 'Couldn’t load redemption limits — try again.'
+        : amountUnredeemable
+        ? 'This voucher can’t be redeemed right now.'
+        : amountNum < band.min
+        ? `Minimum redemption is ${fmtInr(band.min)}`
+        : band.max != null && amountNum > band.max
+        ? `Maximum redemption is ${fmtInr(band.max)}`
+        : '';
+      if (reason) { setRedeem((r) => ({ ...r, error: reason })); return; }
     }
     // PHYSICAL_GIFT: the backend REQUIRES a full deliveryAddress (else 400). Same rules as the
     // partner redeem sheet; the phone is the outlet's registered mobile (as the partner's is).
@@ -592,8 +659,14 @@ function CatalogueInner() {
                     {/* Name + meta */}
                     <div>
                       <div className="flex items-center gap-2 flex-wrap mt-1 mb-1">
-                        <span className="text-xs text-gray-400 font-medium">{selectedGift.brand}</span>
-                        <span className="text-gray-200">·</span>
+                        {/* The real catalogue sends no brand (it is '' unless a static ref has one) —
+                            never a lone "·" before the category. */}
+                        {selectedGift.brand && (
+                          <>
+                            <span className="text-xs text-gray-400 font-medium">{selectedGift.brand}</span>
+                            <span className="text-gray-200">·</span>
+                          </>
+                        )}
                         <span className="text-xs text-gray-400">{selectedGift.category}</span>
                         {selectedGift.popular && (
                           <span className="text-[10px] font-bold bg-amber-100 text-amber-600 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
@@ -788,6 +861,27 @@ function CatalogueInner() {
                   ) : isFreeAmountGift(selectedGift) ? (
                     <div className="bg-gray-50 rounded-xl p-4 space-y-2">
                       <label className="block text-xs text-gray-500" htmlFor="redeem-amount">Amount to redeem (₹)</label>
+                      {band && !amountUnredeemable && (
+                        <p id="redeem-amount-band" className="text-xs text-gray-400" data-testid="redeem-amount-band">
+                          ({band.max != null ? `min ${fmtInr(band.min)}, max ${fmtInr(band.max)}` : `min ${fmtInr(band.min)}`})
+                        </p>
+                      )}
+                      {limitsLoading && (
+                        <p id="redeem-amount-limits" className="text-xs text-gray-400" data-testid="redeem-limits-loading">
+                          Loading redemption limits…
+                        </p>
+                      )}
+                      {limitsFailed && (
+                        <p id="redeem-amount-limits" role="alert" className="text-xs text-red-500 flex items-center gap-1 flex-wrap" data-testid="redeem-limits-error">
+                          <AlertTriangle className="h-3 w-3" />Couldn&apos;t load redemption limits —{' '}
+                          <button type="button" onClick={loadSettings} className="font-medium underline">try again</button>
+                        </p>
+                      )}
+                      {amountUnredeemable && (
+                        <p id="redeem-amount-unavailable" data-testid="redeem-unredeemable" className="text-xs text-red-500 flex items-center gap-1">
+                          <AlertTriangle className="h-3 w-3" />This voucher can&apos;t be redeemed right now
+                        </p>
+                      )}
                       <input
                         id="redeem-amount"
                         value={redeem.amount}
@@ -797,19 +891,30 @@ function CatalogueInner() {
                           (v) => setRedeem((r) => ({ ...r, amount: v, amountFlagged: false, error: '' })),
                           { onCommit: (bad) => setRedeem((r) => ({ ...r, amountFlagged: bad })), value: redeem.amount },
                         )}
-                        // Locked once the OTP is sent — the order already carries this amount.
-                        disabled={redeem.otpSent}
-                        aria-invalid={amountInvalidShown ? true : undefined}
-                        aria-describedby={amountInvalidShown ? 'redeem-amount-error' : undefined}
+                        // Locked once the OTP is sent — the order already carries this amount —
+                        // and when no amount can pass the band.
+                        disabled={redeem.otpSent || amountUnredeemable}
+                        aria-invalid={amountInvalidShown || !!amountHint ? true : undefined}
+                        // The band ("min ₹X, max ₹Y") always describes the field; an error/hint is added to it.
+                        aria-describedby={
+                          amountUnredeemable
+                            ? 'redeem-amount-unavailable'
+                            : [band ? 'redeem-amount-band' : limitsLoading || limitsFailed ? 'redeem-amount-limits' : null, amountInvalidShown ? 'redeem-amount-error' : amountHint ? 'redeem-amount-hint' : null]
+                                .filter(Boolean).join(' ') || undefined
+                        }
                         placeholder="Enter ₹ amount"
-                        className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] ${amountInvalidShown ? 'border-red-300' : 'border-gray-300'}`}
+                        className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] ${amountInvalidShown || amountHint ? 'border-red-300' : 'border-gray-300'}`}
                       />
                       {amountInvalidShown && (
                         <p id="redeem-amount-error" role="alert" className="text-xs text-red-500">{WHOLE_RUPEE_INVALID_MESSAGE}</p>
                       )}
+                      <div aria-live="polite">
+                        {amountHint && !amountInvalidShown && (
+                          <p id="redeem-amount-hint" className="text-xs text-red-500">{amountHint}</p>
+                        )}
+                      </div>
                       <p className="text-[11px] text-gray-400">
-                        Points are calculated from this amount at the tenant conversion rate on confirmation
-                        (subject to the reward’s min/max limits).
+                        Points are calculated from this amount at the tenant conversion rate on confirmation.
                       </p>
                       <div className="flex items-center justify-between pt-1">
                         <span className="text-xs text-gray-500">Current balance</span>
@@ -894,14 +999,26 @@ function CatalogueInner() {
                     // An INVALID amount text never disables the button (it can't say why): the tap
                     // commits and shows "Check the amount" instead of sending.
                     disabled={
-                      isFreeAmountGift(selectedGift) &&
+                      // Limits unknown (/me pending or failed) → nothing can be checked → disabled.
+                      limitsLoading || limitsFailed || amountUnredeemable || belowMin || aboveMax ||
+                      (isFreeAmountGift(selectedGift) &&
                       (selectedGift.amountOptions?.length
                         ? !selectedGift.amountOptions.includes(Number(redeem.amount))
-                        : !isWholeRupeeInvalid(redeem.amount) && !((wholeRupeeAmount(redeem.amount) ?? 0) > 0))
+                        : !isWholeRupeeInvalid(redeem.amount) && !((wholeRupeeAmount(redeem.amount) ?? 0) > 0)))
                     }
                     onClick={sendOtp}
                   >
-                    Send OTP &amp; Proceed
+                    {limitsLoading
+                      ? 'Loading limits…'
+                      : limitsFailed
+                      ? 'Limits unavailable'
+                      : amountUnredeemable
+                      ? 'Not available'
+                      : belowMin
+                      ? `Min ${fmtInr(band!.min)} required`
+                      : aboveMax
+                      ? `Max ${fmtInr(band!.max ?? 0)} allowed`
+                      : <>Send OTP &amp; Proceed</>}
                   </Button>
 
                   {!preOutlet && (

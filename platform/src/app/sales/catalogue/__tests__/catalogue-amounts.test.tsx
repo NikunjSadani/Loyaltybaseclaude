@@ -92,6 +92,7 @@ describe('sales catalogue — redemption amounts', () => {
   it('SA2: free-amount ₹ input is whole-rupee only and posts an integer', async () => {
     const { posts } = mockFetch([FREE_ITEM]);
     await openConfirm(/Amazon Any/);
+    await screen.findByTestId('redeem-amount-band'); // limits loaded (Send is disabled until then)
     const input = screen.getByLabelText('Amount to redeem (₹)') as HTMLInputElement;
     expect(input).toHaveAttribute('inputmode', 'numeric');
 
@@ -137,9 +138,12 @@ describe('sales catalogue — redemption amounts', () => {
       }
       if (url.includes('/api/rewards/catalog')) return ok({ items: [FREE_ITEM] });
       if (url.includes('/api/sales/outlets')) return ok({ outlets: [OUTLET] });
+      // The typed-amount ₹ limits need the tenant rate (Send stays disabled until it loads).
+      if (url.includes('/api/auth/me')) return ok({ conversionRate: 2, settings: { minVoucherFreeAmount: 500 } });
       return ok({});
     }));
     await openConfirm(/Amazon Any/);
+    await screen.findByTestId('redeem-amount-band');
     const user = userEvent.setup();
     await user.type(screen.getByLabelText('Amount to redeem (₹)'), '1234');
     fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
@@ -156,6 +160,7 @@ describe('sales catalogue — redemption amounts', () => {
   it('SA4: after the OTP is sent the ORDER amount is shown; "Change amount" returns to an unlocked field', async () => {
     const { posts } = mockFetch([FREE_ITEM]);
     await openConfirm(/Amazon Any/);
+    await screen.findByTestId('redeem-amount-band');
     const user = userEvent.setup();
     await user.type(screen.getByLabelText('Amount to redeem (₹)'), '900');
     fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
