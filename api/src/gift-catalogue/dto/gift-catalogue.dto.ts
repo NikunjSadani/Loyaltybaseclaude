@@ -11,6 +11,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { PAGE_SIZE_MAX } from '../../common/validators/page-size';
 import { GiftAmountType, GiftFulfilmentChannel, GiftMasterStatus, PayoutMode } from '@prisma/client';
 import { IsImageRef } from '../../common/validators/is-image-ref.validator';
 
@@ -260,6 +261,7 @@ export class ListGiftMastersQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(PAGE_SIZE_MAX)
   limit?: number = 50;
 }
 

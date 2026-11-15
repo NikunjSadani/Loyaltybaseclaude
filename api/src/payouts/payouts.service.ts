@@ -7,6 +7,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { PayoutStatus, PaymentDetailsStatus, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
 import { WalletService } from '../wallet/wallet.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
@@ -818,7 +819,14 @@ export class PayoutsService {
 
     // Preview unless apply=true.
     if (!apply) {
-      return { parseResult, batchCode: batch.batchCode };
+      // This preview precedes the IRREVERSIBLE apply (transactions → SUCCESS / FAILED), so the operator
+      // must see EVERY row: the full parsed `rows` (as before 2026-11-13), bounded at
+      // PREVIEW_FULL_ROWS_MAX with `rowsTruncated`; plus the ERROR-row summary fields.
+      const { rows, ...rest } = parseResult;
+      return {
+        parseResult: { ...rest, ...fullRowsEcho(rows), ...problemRowsEcho(rows, (r) => r.status === 'ERROR') },
+        batchCode: batch.batchCode,
+      };
     }
 
     if (!parseResult.canProceed) {
@@ -1249,6 +1257,12 @@ export class PayoutsService {
           const paymentDate = formatDateIST(now);
           for (const w of payoutWhatsapps) {
             const phone = partnerMap.get(w.partnerId)?.phone?.trim();
+            // Owner rule 2026-11-15 ("payout credited" = amount actually credited to the bank):
+            // a redemption cash-out NEVER withholds TDS — the PayoutTransaction is created with
+            // tdsPaise=0 / netAmountPaise=amountPaise (rewards confirmRedeem*) and nothing here
+            // nets it (194R is a payer-borne liability in src/tds). The bank line is therefore the
+            // full amountPaise = pointsDeducted × conversion rate, which for this Deoleo-only
+            // template (1 point = ₹1) equals pointsDeducted. No net-of-TDS adjustment applies.
             const points = w.redemptionOrderId
               ? orderMap.get(w.redemptionOrderId)?.pointsDeducted ?? 0
               : 0;

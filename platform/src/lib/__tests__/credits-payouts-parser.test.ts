@@ -12,7 +12,12 @@
  *   G — Summary totals
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// Parses real xlsx workbooks; the first test also pays the cold import. Under full-suite load (next to the
+// 6,517-outlet credits-upload test) B1 took 5.08 s against the 5 s default (pre-push 2026-11-15). Generous
+// per-file timeout; assertions unchanged.
+vi.setConfig({ testTimeout: 30_000 });
 import { readFileSync } from 'fs';
 import { resolve }      from 'path';
 import * as XLSX        from 'xlsx';

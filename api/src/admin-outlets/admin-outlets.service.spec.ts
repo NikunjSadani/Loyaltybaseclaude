@@ -6,7 +6,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { AdminOutletsService, deriveKycStatus } from './admin-outlets.service';
+import { AdminOutletsService, deriveKycStatus, LIST_IDS_CHUNK } from './admin-outlets.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
@@ -43,6 +43,8 @@ const mockPrisma = {
   salesUser: { findUnique: jest.fn() },
   salesUserAssignment: { updateMany: jest.fn() },
   kycSubmission: { findMany: jest.fn() },
+  // listIds: latest submission per partner via DISTINCT ON (memory-safety).
+  $queryRaw: jest.fn(),
   // Owner-group (Parent ID) paths read parents + run the uniqueness helper against this model.
   channelPartner: { findMany: jest.fn(), findUnique: jest.fn() },
   // upsert reads the tenant's clients.features (outletMasterGeo gate) once per batch.
@@ -512,26 +514,32 @@ describe('AdminOutletsService', () => {
   });
 
   describe('listIds', () => {
-    it('returns the FULL tenant list UNPAGINATED, scoped by clientId + deletedAt null, projected to the 3 FE fields', async () => {
-      mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'OUT-1', isActive: true, partnerId: null, reKycFlags: null, kycIntent: null },
-        { outletCode: 'OUT-2', isActive: false, partnerId: null, reKycFlags: null, kycIntent: null },
+    const SELECT = {
+      id: true,
+      outletCode: true,
+      isActive: true,
+      partnerId: true,
+      reKycFlags: true,
+      kycIntent: true,
+    };
+
+    it('returns the FULL tenant list, scoped by clientId + deletedAt null, projected to the 3 FE fields', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        { id: 'a1', outletCode: 'OUT-1', isActive: true, partnerId: null, reKycFlags: null, kycIntent: null },
+        { id: 'a2', outletCode: 'OUT-2', isActive: false, partnerId: null, reKycFlags: null, kycIntent: null },
       ]);
       const res = await service.listIds(admin);
 
-      // (a) only the caller's clientId rows + deletedAt null, no skip/take (unpaginated).
+      // Only the caller's clientId rows + deletedAt null; keyset-chunked (ordered by id, bounded take).
       const args = mockPrisma.outlet.findMany.mock.calls[0][0];
       expect(args.where).toEqual({ deletedAt: null, clientId: TENANT_A });
+      expect(args.orderBy).toEqual({ id: 'asc' });
+      expect(args.take).toBe(LIST_IDS_CHUNK);
       expect(args.skip).toBeUndefined();
-      expect(args.take).toBeUndefined();
-      // (b) projection is ONLY the fields the derivation + FE need.
-      expect(args.select).toEqual({
-        outletCode: true,
-        isActive: true,
-        partnerId: true,
-        reKycFlags: true,
-        kycIntent: true,
-      });
+      // Projection is ONLY the fields the derivation + FE need (+ id for the keyset cursor).
+      expect(args.select).toEqual(SELECT);
+      // A short first chunk ends the scan — one query.
+      expect(mockPrisma.outlet.findMany).toHaveBeenCalledTimes(1);
       // Response maps outletCode→outletId and carries only the 3 consumed fields.
       expect(res.outlets).toEqual([
         { outletId: 'OUT-1', isActive: true, kycStatus: 'NOT_STARTED' },
@@ -539,36 +547,69 @@ describe('AdminOutletsService', () => {
       ]);
     });
 
+    it('memory-safety: pages through every chunk with an id keyset (tenant larger than one chunk)', async () => {
+      const chunk1 = Array.from({ length: LIST_IDS_CHUNK }, (_, i) => ({
+        id: `id-${String(i).padStart(5, '0')}`,
+        outletCode: `C1-${i}`,
+        isActive: true,
+        partnerId: null,
+        reKycFlags: null,
+        kycIntent: null,
+      }));
+      const chunk2 = [{ id: 'id-99999', outletCode: 'LAST', isActive: true, partnerId: null, reKycFlags: null, kycIntent: null }];
+      mockPrisma.outlet.findMany.mockResolvedValueOnce(chunk1).mockResolvedValueOnce(chunk2);
+
+      const res = await service.listIds(admin);
+      expect(res.outlets).toHaveLength(LIST_IDS_CHUNK + 1);
+      expect(res.outlets[LIST_IDS_CHUNK].outletId).toBe('LAST');
+      expect(mockPrisma.outlet.findMany).toHaveBeenCalledTimes(2);
+      expect(mockPrisma.outlet.findMany.mock.calls[1][0].where).toEqual({
+        deletedAt: null,
+        clientId: TENANT_A,
+        id: { gt: chunk1[chunk1.length - 1].id },
+      });
+    });
+
     it('derives RE_KYC_REQUIRED for a bulk-reKyc\'d outlet (reKycFlags set even though the submission is APPROVED)', async () => {
       // The admin re-KYC upload writes a non-empty reKycFlags WITHOUT flipping the
       // latest submission (still APPROVED). deriveKycStatus priority 1 must win.
-      mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'OUT-RE', isActive: true, partnerId: 'cp1', reKycFlags: { ownerPhoto: true }, kycIntent: null },
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        { id: 'r1', outletCode: 'OUT-RE', isActive: true, partnerId: 'cp1', reKycFlags: { ownerPhoto: true }, kycIntent: null },
       ]);
-      mockPrisma.kycSubmission.findMany.mockResolvedValue([{ partnerId: 'cp1', status: 'APPROVED' }]);
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ partnerId: 'cp1', status: 'APPROVED' }]);
 
       const res = await service.listIds(admin);
       expect(res.outlets[0]).toEqual({ outletId: 'OUT-RE', isActive: true, kycStatus: 'RE_KYC_REQUIRED' });
-      // Latest-submission lookup is scoped to the owned partnerIds only.
-      expect(mockPrisma.kycSubmission.findMany.mock.calls[0][0].where).toEqual({ partnerId: { in: ['cp1'] } });
+      // Latest-submission lookup: ONE row per partner (DISTINCT ON), scoped to the chunk's partnerIds only.
+      const sql = mockPrisma.$queryRaw.mock.calls[0][0] as Prisma.Sql;
+      expect(sql.sql).toContain('DISTINCT ON (s."partnerId")');
+      expect(sql.sql).toContain('ORDER BY s."partnerId", s."createdAt" DESC');
+      expect(sql.values).toEqual(['cp1']);
+      expect(mockPrisma.kycSubmission.findMany).not.toHaveBeenCalled();
     });
 
     it('derives APPROVED from the latest submission when no reKycFlags are set', async () => {
-      mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'OUT-OK', isActive: true, partnerId: 'cp2', reKycFlags: null, kycIntent: null },
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        { id: 'o1', outletCode: 'OUT-OK', isActive: true, partnerId: 'cp2', reKycFlags: null, kycIntent: null },
       ]);
-      mockPrisma.kycSubmission.findMany.mockResolvedValue([{ partnerId: 'cp2', status: 'APPROVED' }]);
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ partnerId: 'cp2', status: 'APPROVED' }]);
 
       const res = await service.listIds(admin);
       expect(res.outlets[0].kycStatus).toBe('APPROVED');
     });
 
     it('skips the submission lookup entirely when no outlet has a partner', async () => {
-      mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'OUT-1', isActive: true, partnerId: null, reKycFlags: null, kycIntent: null },
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        { id: 'o1', outletCode: 'OUT-1', isActive: true, partnerId: null, reKycFlags: null, kycIntent: null },
       ]);
       await service.listIds(admin);
-      expect(mockPrisma.kycSubmission.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('an empty tenant returns an empty list after one query', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([]);
+      await expect(service.listIds(admin)).resolves.toEqual({ outlets: [] });
+      expect(mockPrisma.outlet.findMany).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -42,6 +42,8 @@ import {
   statusLabel,
   statusPillClass,
 } from '@/lib/notification-delivery';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 const SELECT_CLS =
   'bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-700 focus:outline-none focus:border-[var(--brand-primary)]';
@@ -64,8 +66,8 @@ export default function NotificationDeliveryPage() {
   const [listError, setListError] = useState<string | null>(null);
   const [listLoading, setListLoading] = useState(true);
 
-  const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const downloadAction = useDownloadAction();
+  const downloading = downloadAction.busy;
 
   const loadSummary = useCallback(async (f: DeliveryFilters) => {
     setSummaryLoading(true);
@@ -104,16 +106,9 @@ export default function NotificationDeliveryPage() {
     setPage(1);
   }
 
-  async function handleDownload() {
-    setDownloadError(null);
-    setDownloading(true);
-    try {
-      await downloadDeliveryExport(applied);
-    } catch (e) {
-      setDownloadError(e instanceof Error ? e.message : 'Download failed');
-    } finally {
-      setDownloading(false);
-    }
+  // 200 → saves straight away; 202 → prepared in the background (Downloads page).
+  function handleDownload() {
+    void downloadAction.run(() => downloadDeliveryExport(applied));
   }
 
   const rows = listPage?.items ?? [];
@@ -136,19 +131,23 @@ export default function NotificationDeliveryPage() {
               : 'Per-message delivery status for SMS, transactional WhatsApp, and OTP sent to your recipients.'}
           </p>
         </div>
-        <Button
-          variant="outline"
-          onClick={handleDownload}
-          disabled={downloading || listLoading || total === 0}
-          data-testid="download-delivery-btn"
-        >
-          {downloading ? (
-            <Loader2 className="w-4 h-4 animate-spin" aria-label="Preparing" />
-          ) : (
-            <Download className="w-4 h-4" />
-          )}
-          Download Excel
-        </Button>
+        <div className="flex flex-col items-end gap-1.5 max-w-xs">
+          <Button
+            variant="outline"
+            onClick={handleDownload}
+            disabled={downloadAction.blocked || listLoading || total === 0}
+            data-testid="download-delivery-btn"
+          >
+            {downloading ? (
+              <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            {downloadButtonLabel(downloadAction, 'Download Excel')}
+          </Button>
+          {/* Queued / error message — directly below the button. */}
+          <DownloadActionStatus action={downloadAction} />
+        </div>
       </div>
 
       {/* Funnel cards */}
@@ -304,13 +303,6 @@ export default function NotificationDeliveryPage() {
         >
           <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
           From date is after To date — no results possible.
-        </p>
-      )}
-
-      {downloadError && (
-        <p className="flex items-start gap-1.5 text-xs text-red-600" role="alert">
-          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-          {downloadError}
         </p>
       )}
 

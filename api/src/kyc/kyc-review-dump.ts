@@ -8,15 +8,14 @@
  *
  * Ported from platform/src/lib/kyc-review-dump.ts — the 40-column layout is kept
  * verbatim so the approvals UI round-trips it unchanged (owner: keep the columns).
- * No DB/I/O here; KycService assembles entries (real query + signed URLs) and
- * calls generateKycReviewDumpExcel(). Field keys come from the shared bridge
+ * No DB/I/O here; KycService assembles entries (real query + signed URLs) page by
+ * page and the `kyc-review-dump` export kind streams kycReviewDumpCells() rows. Field keys come from the shared bridge
  * helper so the 7 fields are defined once.
  */
 
-import * as XLSX from 'xlsx';
 import { KycFieldKey, KycFieldDecision, KycFieldSource } from '@prisma/client';
 import { KYC_FIELD_KEYS } from './kyc-verification.helper';
-import { aoaToSheetSafe } from '../common/xlsx';
+import type { XlsxCell } from '../common/xlsx-stream';
 
 // ─── Field order (7, fixed) — key + the human label used in the column header ───
 const FIELD_LABELS: Record<KycFieldKey, string> = {
@@ -122,95 +121,65 @@ export interface KycReviewDumpEntry {
   fields: Record<KycFieldKey, KycReviewDumpFieldState>;
 }
 
-/**
- * Generate the 40-column workbook. Document cells carry .l hyperlinks; a field
- * Decision is '' for PENDING, 'APPROVE'/'REJECT' for terminal states (reflecting
- * prior Excel/portal work so re-export is a faithful round-trip). Returns a
- * Node Buffer (the controller hands it to a StreamableFile).
- */
-export function generateKycReviewDumpExcel(entries: KycReviewDumpEntry[]): Buffer {
+/** The 40 header strings in order: 20 context + 6 document + 14 per-field Decision/Remark. */
+export function kycReviewDumpHeaders(): string[] {
   const perFieldHeaders: string[] = [];
   for (const { label } of KYC_FIELD_ORDER) {
     perFieldHeaders.push(kycFieldDecisionHeader(label));
     perFieldHeaders.push(kycFieldRemarkHeader(label));
   }
+  return [...KYC_DUMP_CONTEXT_HEADERS, ...KYC_DUMP_DOC_HEADERS, ...perFieldHeaders];
+}
 
-  const headerRow: string[] = [
-    ...KYC_DUMP_CONTEXT_HEADERS,
-    ...KYC_DUMP_DOC_HEADERS,
-    ...perFieldHeaders,
+/** Column widths (characters): header length + 2, at least 14. */
+export function kycDumpColumnWidths(headers: readonly string[]): number[] {
+  return headers.map((label) => Math.max(label.length + 2, 14));
+}
+
+/**
+ * One review-dump row (40 cells). A document cell is a real hyperlink showing "Open" ('' when there is no document);
+ * a field Decision is '' for PENDING, 'APPROVE'/'REJECT' for terminal states (reflecting prior Excel/portal work so
+ * re-export is a faithful round-trip). Written by the `kyc-review-dump` export kind (exports/kinds/batch1/kyc-dumps.ts).
+ */
+export function kycReviewDumpCells(e: KycReviewDumpEntry): XlsxCell[] {
+  const link = (url?: string): XlsxCell => (url ? { __hyperlink: true, text: 'Open', target: url } : '');
+  const row: XlsxCell[] = [
+    e.submissionId,
+    e.outletCode,
+    e.outletName,
+    e.ownerName,
+    e.mobile,
+    e.outletType,
+    e.gstNumber,
+    e.panNumber,
+    e.address,
+    e.city,
+    e.state,
+    e.pincode,
+    e.paymentMode,
+    e.bankName ?? '',
+    e.accountHolderName ?? '',
+    e.accountNumber ?? '',
+    e.ifscCode ?? '',
+    e.upiId ?? '',
+    e.boardGeo ? `${e.boardGeo.lat},${e.boardGeo.lng}` : '',
+    e.nameMismatch ? 'Yes' : 'No',
+    link(e.documents.gstCertificateUrl),
+    link(e.documents.addressDocUrl),
+    link(e.documents.selfDeclarationUrl),
+    link(e.documents.boardPhotoUrl),
+    link(e.documents.ownerPhotoUrl),
+    link(e.documents.chequeUrl),
   ];
-
-  const dataRows: unknown[][] = entries.map((e) => {
-    const row: unknown[] = [
-      e.submissionId,
-      e.outletCode,
-      e.outletName,
-      e.ownerName,
-      e.mobile,
-      e.outletType,
-      e.gstNumber,
-      e.panNumber,
-      e.address,
-      e.city,
-      e.state,
-      e.pincode,
-      e.paymentMode,
-      e.bankName ?? '',
-      e.accountHolderName ?? '',
-      e.accountNumber ?? '',
-      e.ifscCode ?? '',
-      e.upiId ?? '',
-      e.boardGeo ? `${e.boardGeo.lat},${e.boardGeo.lng}` : '',
-      e.nameMismatch ? 'Yes' : 'No',
-      // Doc columns (6) — placeholder text; hyperlinks applied post-process.
-      e.documents.gstCertificateUrl ? 'Open' : '',
-      e.documents.addressDocUrl ? 'Open' : '',
-      e.documents.selfDeclarationUrl ? 'Open' : '',
-      e.documents.boardPhotoUrl ? 'Open' : '',
-      e.documents.ownerPhotoUrl ? 'Open' : '',
-      e.documents.chequeUrl ? 'Open' : '',
-    ];
-
-    for (const { key } of KYC_FIELD_ORDER) {
-      const fs = e.fields[key];
-      const decision =
-        fs.decision === 'PENDING' ? '' : fs.decision === 'APPROVED' ? 'APPROVE' : 'REJECT';
-      row.push(decision);
-      // A REJECT must carry a remark or the bulk-verify parser rejects the row on
-      // re-import; emit a placeholder if one is somehow missing (write paths enforce it).
-      row.push(decision === 'REJECT' ? fs.remark || 'Rejected (no remark on file)' : (fs.remark ?? ''));
-    }
-
-    return row;
-  });
-
-  const ws = aoaToSheetSafe([headerRow, ...dataRows]);
-
-  // Apply hyperlinks to the 6 doc cells (0-based columns 20–25).
-  const DOC_URLS: (keyof KycReviewDumpEntry['documents'])[] = [
-    'gstCertificateUrl',
-    'addressDocUrl',
-    'selfDeclarationUrl',
-    'boardPhotoUrl',
-    'ownerPhotoUrl',
-    'chequeUrl',
-  ];
-  entries.forEach((e, rowIdx) => {
-    DOC_URLS.forEach((docKey, colOffset) => {
-      const url = e.documents[docKey];
-      if (!url) return;
-      const cellAddr = XLSX.utils.encode_cell({ r: rowIdx + 1, c: 20 + colOffset });
-      const cell = ws[cellAddr];
-      if (cell) cell.l = { Target: url };
-    });
-  });
-
-  ws['!cols'] = headerRow.map((label) => ({ wch: Math.max(label.length + 2, 14) }));
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'KYC Review Dump');
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  for (const { key } of KYC_FIELD_ORDER) {
+    const fs = e.fields[key];
+    const decision = fs.decision === 'PENDING' ? '' : fs.decision === 'APPROVED' ? 'APPROVE' : 'REJECT';
+    row.push(decision);
+    // A REJECT must carry a remark or the bulk-verify parser rejects the row on re-import; emit a placeholder if one
+    // is somehow missing (write paths enforce it).
+    row.push(decision === 'REJECT' ? fs.remark || 'Rejected (no remark on file)' : (fs.remark ?? ''));
+  }
+  return row;
 }
 
 // ─── Rejected-outlets export ────────────────────────────────────────────────────
@@ -221,8 +190,8 @@ export function generateKycReviewDumpExcel(entries: KycReviewDumpEntry[]): Buffe
  * re-import), so there are no APPROVE/REJECT verb cells and no doc hyperlinks — it
  * carries human-readable verdicts (OK / REJECTED / PENDING) and remarks.
  *
- * Pure & deterministic (no DB / I/O); KycService.rejectedExport assembles the rows.
- * Every string cell routes through the same AF-5 safe path (`aoaToSheetSafe` →
+ * Pure & deterministic (no DB / I/O); KycService.rejectedExportPage assembles the rows.
+ * Every string cell routes through the same AF-5 safe path (the streaming writer's
  * `cellSafe`) — KYC values are user-supplied, so this export is a formula-injection
  * sink and must be neutralised like every other workbook in this codebase.
  */
@@ -300,66 +269,52 @@ function verdictLabel(d: KycFieldDecision): string {
   return d === 'APPROVED' ? 'OK' : d === 'REJECTED' ? 'REJECTED' : 'PENDING';
 }
 
-export function generateRejectedKycExcel(rows: RejectedKycRow[]): Buffer {
+/** The rejected-outlets header strings in order: identity + per-field Verdict/Remark + KYC values. */
+export function rejectedKycHeaders(): string[] {
   const perFieldHeaders: string[] = [];
   for (const { label } of KYC_FIELD_ORDER) {
     perFieldHeaders.push(rejectedFieldVerdictHeader(label));
     perFieldHeaders.push(rejectedFieldRemarkHeader(label));
   }
+  return [...REJECTED_KYC_IDENTITY_HEADERS, ...perFieldHeaders, ...REJECTED_KYC_VALUE_HEADERS];
+}
 
-  const headerRow: string[] = [
-    ...REJECTED_KYC_IDENTITY_HEADERS,
-    ...perFieldHeaders,
-    ...REJECTED_KYC_VALUE_HEADERS,
+/** One rejected-outlets row (written by the `kyc-rejected` export kind). */
+export function rejectedKycCells(r: RejectedKycRow): XlsxCell[] {
+  // Comma-joined human list of the fields the admin rejected.
+  const rejectedFields = KYC_FIELD_ORDER.filter(({ key }) => r.fields[key]?.decision === 'REJECTED')
+    .map(({ label }) => label)
+    .join(', ');
+  const row: XlsxCell[] = [
+    r.outletCode,
+    r.outletName,
+    r.ownerName,
+    r.mobile,
+    r.salesRep,
+    r.submittedDate,
+    r.rejectedDate,
+    r.rejectedBy,
+    r.rejectionReason,
+    rejectedFields,
   ];
-
-  const dataRows: unknown[][] = rows.map((r) => {
-    // Comma-joined human list of the fields the admin rejected.
-    const rejectedFields = KYC_FIELD_ORDER.filter(({ key }) => r.fields[key]?.decision === 'REJECTED')
-      .map(({ label }) => label)
-      .join(', ');
-
-    const row: unknown[] = [
-      r.outletCode,
-      r.outletName,
-      r.ownerName,
-      r.mobile,
-      r.salesRep,
-      r.submittedDate,
-      r.rejectedDate,
-      r.rejectedBy,
-      r.rejectionReason,
-      rejectedFields,
-    ];
-
-    for (const { key } of KYC_FIELD_ORDER) {
-      const fs = r.fields[key];
-      row.push(verdictLabel(fs?.decision ?? 'PENDING'));
-      row.push(fs?.remark ?? '');
-    }
-
-    row.push(
-      r.gstNumber,
-      r.panNumber,
-      r.address,
-      r.city,
-      r.state,
-      r.pincode,
-      r.bankName ?? '',
-      r.accountHolderName ?? '',
-      r.accountNumber ?? '',
-      r.ifscCode ?? '',
-      r.upiId ?? '',
-      r.slaAgeHrs != null ? String(r.slaAgeHrs) : '',
-    );
-
-    return row;
-  });
-
-  const ws = aoaToSheetSafe([headerRow, ...dataRows]);
-  ws['!cols'] = headerRow.map((label) => ({ wch: Math.max(label.length + 2, 14) }));
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Rejected Outlets');
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  for (const { key } of KYC_FIELD_ORDER) {
+    const fs = r.fields[key];
+    row.push(verdictLabel(fs?.decision ?? 'PENDING'));
+    row.push(fs?.remark ?? '');
+  }
+  row.push(
+    r.gstNumber,
+    r.panNumber,
+    r.address,
+    r.city,
+    r.state,
+    r.pincode,
+    r.bankName ?? '',
+    r.accountHolderName ?? '',
+    r.accountNumber ?? '',
+    r.ifscCode ?? '',
+    r.upiId ?? '',
+    r.slaAgeHrs != null ? String(r.slaAgeHrs) : '',
+  );
+  return row;
 }

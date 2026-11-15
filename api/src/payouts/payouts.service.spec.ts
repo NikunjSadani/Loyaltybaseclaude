@@ -978,6 +978,16 @@ describe('PayoutsService', () => {
       );
       expect((res as { parseResult: unknown }).parseResult).toBeDefined();
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      // The preview precedes an irreversible apply: EVERY row is shown (here the one OK row), plus the problem summary.
+      const pr = (res as { parseResult: Record<string, unknown> }).parseResult;
+      expect(pr).toMatchObject({
+        rows: [expect.objectContaining({ txnId: 'txn1', utr: 'UTR12345678', status: 'OK', outcome: 'PAID' })],
+        rowCount: 1,
+        rowsTruncated: false,
+        problemRows: [],
+        problemRowCount: 0,
+        problemRowsTruncated: false,
+      });
     });
 
     it('PAID → marks payout SUCCESS (UTR) and the order DELIVERED, no reversal', async () => {
@@ -1033,10 +1043,10 @@ describe('PayoutsService', () => {
       mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
       const preview = (await service.uploadPayoutUtr(
         gifsy, 'b1', buildOffPlatformUpload([{ txnId: 'txnP', utr: 'UTR12345678', status: 'PAID' }]), false,
-      )) as { parseResult: { canProceed: boolean; rows: Array<{ status: string; errors: string[] }> } };
+      )) as { parseResult: { canProceed: boolean; problemRows: Array<{ status: string; errors: string[] }> } };
       expect(preview.parseResult.canProceed).toBe(false);
-      expect(preview.parseResult.rows[0].status).toBe('ERROR');
-      expect(preview.parseResult.rows[0].errors).toContain(
+      expect(preview.parseResult.problemRows[0].status).toBe('ERROR');
+      expect(preview.parseResult.problemRows[0].errors).toContain(
         "This payment wasn't processed in a batch — process the batch first, or mark it 'Paid outside platform' if it was paid outside Gifsy.",
       );
 
@@ -1111,10 +1121,10 @@ describe('PayoutsService', () => {
           { txnId: 'txnZero', utr: 'UTR55554444', status: 'PAID', off: 'Y' },
         ]),
         false,
-      )) as { parseResult: { canProceed: boolean; rows: Array<{ errors: string[] }> } };
+      )) as { parseResult: { canProceed: boolean; problemRows: Array<{ errors: string[] }> } };
       expect(preview.parseResult.canProceed).toBe(false);
-      expect(preview.parseResult.rows[0].errors).toContain('UTR is required for a PAID transaction.');
-      expect(preview.parseResult.rows[1].errors).toContain(
+      expect(preview.parseResult.problemRows[0].errors).toContain('UTR is required for a PAID transaction.');
+      expect(preview.parseResult.problemRows[1].errors).toContain(
         'Cannot record an off-platform payment for a transaction with no valid amount.',
       );
     });
@@ -1156,7 +1166,7 @@ describe('PayoutsService', () => {
       XLSX.utils.book_append_sheet(wb, ws, 'UTR Upload');
       return { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
     }
-    type Preview = { parseResult: { canProceed: boolean; rows: Array<{ txnId: string; status: string; errors: string[] }> } };
+    type Preview = { parseResult: { canProceed: boolean; problemRows: Array<{ txnId: string; status: string; errors: string[] }> } };
     async function preview(
       txns: Array<Record<string, unknown>>,
       history: Array<{ providerRefId: string; partnerId: string; providerResponse?: unknown }>,
@@ -1169,7 +1179,8 @@ describe('PayoutsService', () => {
       const res = (await service.uploadPayoutUtr(gifsy, 'b1', buildOff2(rows), false)) as Preview;
       return res.parseResult;
     }
-    const errorsOf = (r: Preview['parseResult'], id: string) => r.rows.find((x) => x.txnId === id)!.errors;
+    // Memory-safety: the preview echoes only ERROR rows — a row absent from problemRows has no errors.
+    const errorsOf = (r: Preview['parseResult'], id: string) => r.problemRows.find((x) => x.txnId === id)?.errors ?? [];
 
     it('OFF-1: a "Y" row accepts a free-form reference (cheque no. / CASH 12-Nov / NEFT/HDFC/123); a non-Y row keeps the strict UTR rule', async () => {
       const r = await preview(
@@ -1364,7 +1375,7 @@ describe('PayoutsService', () => {
       expect(errorsOf(r, 'rRef')).toEqual([REFUNDED_MSG]);
       expect(errorsOf(r, 'fVch')).toEqual([]);
       expect(errorsOf(r, 'fNone')).toEqual([]);
-      expect(r.rows.find((x) => x.txnId === 'fVch')!.status).toBe('OK');
+      expect(r.problemRows.find((x) => x.txnId === 'fVch')).toBeUndefined(); // OK rows are not echoed
     });
 
     it('FA-1: "Y" on a FAILED tx (unrefunded) APPLIES → SUCCESS with audit bypassedGates incl. previouslyFailed (never silently dropped)', async () => {
@@ -1409,7 +1420,11 @@ describe('PayoutsService', () => {
         noChange: Array<{ rowNum: number; txnId: string; notice: string }>;
       };
       expect(errorsOf(r, 'a').join(' ')).toMatch(/already recorded as failed — a bank UTR can't be applied/);
-      expect(r.rows.find((x) => x.txnId === 'b')!.status).toBe('SKIP');
+      expect(r.problemRows.find((x) => x.txnId === 'b')).toBeUndefined(); // a SKIP row is not a problem row…
+      // …but it IS in the full preview list, with its reason (the operator sees every row before applying).
+      const full = (r as unknown as { rows: Array<{ txnId: string; status: string; notice?: string }> }).rows;
+      expect(full.map((x) => [x.txnId, x.status])).toEqual([['a', 'ERROR'], ['b', 'SKIP']]);
+      expect(full[1].notice).toBe('Already recorded as reversed — no change');
       // Informational no-op → its own `noChange` category, never the double-payment `alreadyPaid` list.
       expect(r.noChange).toEqual([{ rowNum: 3, txnId: 'b', notice: 'Already recorded as reversed — no change' }]);
       expect(r.alreadyPaid).toEqual([]);
@@ -1450,9 +1465,9 @@ describe('PayoutsService', () => {
       const paidAt = new Date(Date.now() - 3 * 86_400_000);
       const success = pendingTxn({ id: 's1', status: 'SUCCESS', completedAt: paidAt, providerResponse: { paidOffPlatform: true } });
       const r = (await preview([success], [], [{ txnId: 's1', utr: 'UTR99998888', status: 'PAID' }])) as unknown as {
-        canProceed: boolean; alreadyPaid: Array<{ notice: string }>; rows: Array<{ status: string }>;
+        canProceed: boolean; alreadyPaid: Array<{ notice: string }>; problemRows: Array<{ status: string }>;
       };
-      expect(r.rows[0].status).toBe('SKIP');
+      expect(r.problemRows).toEqual([]); // the SKIP row is not a problem row (memory-safety)
       expect(r.alreadyPaid[0].notice).toMatch(/^Already marked paid on \d{4}-\d{2}-\d{2} \(off-platform\) — check for a double payment$/);
       expect(r.canProceed).toBe(true); // a no-op re-upload stays applicable (idempotent)
 

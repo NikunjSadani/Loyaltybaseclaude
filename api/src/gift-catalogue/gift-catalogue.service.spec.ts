@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { GiftCatalogueService } from './gift-catalogue.service';
@@ -24,7 +25,7 @@ const mockTenantSettings = { getConversionRate: jest.fn(async () => rate) };
 const mockStorage = {
   generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-09/uuid-${name}`),
   uploadFile: jest.fn(async (_buf: Buffer, key: string) => `https://storage.googleapis.com/gifsy-platform-files/${key}`),
-  downloadBytes: jest.fn(async (_key: string) => ({ bytes: PNG_BYTES, contentType: 'image/png' })),
+  openBoundedObject: jest.fn(async (_key: string) => ({ stream: Readable.from([PNG_BYTES]), size: (PNG_BYTES).length, contentType: 'image/png' })),
 };
 
 /** Minimal valid image bytes (PNG magic) for the sniff-passing upload tests. */
@@ -102,7 +103,7 @@ describe('GiftCatalogueService', () => {
       const res = await service.serveGiftImage(partner, 'gift-catalogue/_platform/2026-09/uuid-gift.png');
       expect(res.contentType).toBe('image/png');
       expect(res.cachePublic).toBe(true);
-      expect(mockStorage.downloadBytes).toHaveBeenCalledWith('gift-catalogue/_platform/2026-09/uuid-gift.png', 5 * 1024 * 1024);
+      expect(mockStorage.openBoundedObject).toHaveBeenCalledWith('gift-catalogue/_platform/2026-09/uuid-gift.png', 5 * 1024 * 1024);
     });
 
     it('streams a tenant image to its OWN tenant (NOT cacheable)', async () => {
@@ -120,7 +121,7 @@ describe('GiftCatalogueService', () => {
       ]) {
         await expect(service.serveGiftImage(gifsy, bad)).rejects.toBeInstanceOf(NotFoundException);
       }
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('lets an un-assumed GIFSY operator read any tenant image', async () => {
@@ -132,25 +133,25 @@ describe('GiftCatalogueService', () => {
       await expect(
         service.serveGiftImage(otherAdmin, 'gift-catalogue/deoleo/2026-09/uuid-gift.png'),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('404s any key outside the gift-catalogue prefix (no arbitrary-object read)', async () => {
       await expect(
         service.serveGiftImage(gifsy, 'kyc/deoleo/2026-09/pan.jpg'),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('404s a missing object', async () => {
-      mockStorage.downloadBytes.mockResolvedValueOnce(null as never);
+      mockStorage.openBoundedObject.mockResolvedValueOnce(null as never);
       await expect(
         service.serveGiftImage(gifsy, 'gift-catalogue/_platform/2026-09/uuid-missing.png'),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('404s a stored object whose type is not renderable', async () => {
-      mockStorage.downloadBytes.mockResolvedValueOnce({ bytes: PNG_BYTES, contentType: 'application/pdf' } as never);
+      mockStorage.openBoundedObject.mockResolvedValueOnce({ stream: Readable.from([PNG_BYTES]), size: (PNG_BYTES).length, contentType: 'application/pdf' } as never);
       await expect(
         service.serveGiftImage(gifsy, 'gift-catalogue/_platform/2026-09/uuid-x.pdf'),
       ).rejects.toBeInstanceOf(NotFoundException);

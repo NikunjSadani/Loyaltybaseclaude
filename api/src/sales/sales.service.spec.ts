@@ -658,7 +658,7 @@ describe('SalesService', () => {
 
       // The partner select must now include bankAccountHolder (fallback source).
       const include = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].include;
-      expect(include.outlet.include.partner.select.bankAccountHolder).toBe(true);
+      expect(include.outlet.select.partner.select.bankAccountHolder).toBe(true);
 
       const existingKyc = res.outlets[0].existingKyc!;
       expect(existingKyc).not.toBeNull();
@@ -1012,7 +1012,7 @@ describe('SalesService', () => {
       expect(res.outlets[0].ownerName).toBe('Asha Patil');
       // Read from the EXISTING assignment query (no extra outlet query) — partner.ownerName selected.
       const include = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].include;
-      expect(include.outlet.include.partner.select.ownerName).toBe(true);
+      expect(include.outlet.select.partner.select.ownerName).toBe(true);
       expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
     });
 

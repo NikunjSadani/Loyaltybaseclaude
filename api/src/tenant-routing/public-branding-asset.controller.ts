@@ -11,47 +11,27 @@ import {
 } from '../storage/branding-asset';
 import { BrandingAssetCache } from './branding-asset-cache';
 import { TenantRoutingService } from './tenant-routing.service';
+import { streamErrorHandler, type StreamErrorResponse } from '../common/stream-object';
 
 /** Objects at or below this size are buffered + cached; larger ones are streamed. */
 const CACHEABLE_MAX_BYTES = 512 * 1024;
+/**
+ * In-process positive cache bounds. Was 50 entries / 20 MB per instance; lowered to
+ * 5 MB (memory-safety 2026-11-13) — every real logo/favicon is a few KB, so 5 MB still
+ * holds every tenant's set while freeing ~15 MB of permanently-held heap.
+ */
+export const BRANDING_CACHE_OPTIONS = {
+  maxEntries: 50,
+  maxBytes: 5 * 1024 * 1024,
+  missTtlMs: 30_000,
+  maxMisses: 500,
+} as const;
 /** Enough leading bytes for every signature sniffFileType checks (WEBP/HEIC need 12). */
 const SNIFF_HEAD_BYTES = 16;
 
-/**
- * Mid-stream GCS failure on the large-object path. Nest's default StreamableFile handler
- * answers 400 with the raw storage error text (bucket name, object path) while the image,
- * length and 1-year immutable cache headers are already set. Instead:
- *  - headers not yet sent → drop the image/length/cache headers, `no-store`, bare 404 with
- *    the API's generic error envelope — never the storage message;
- *  - headers already sent → destroy the socket so the client sees a FAILED transfer (a
- *    short body under the declared Content-Length), never a "complete" truncated image.
- * The error itself is still logged server-side by StreamableFile's error logger.
- */
-/** The Express response members the handler uses (Nest types it as a narrower shape). */
-interface StreamErrorResponse {
-  headersSent: boolean;
-  destroyed: boolean;
-  statusCode: number;
-  removeHeader(name: string): void;
-  setHeader(name: string, value: string): void;
-  end(body?: string): void;
-  destroy(): void;
-}
-
-export function streamErrorHandler(_err: Error, res: StreamErrorResponse): void {
-  if (res.destroyed) return;
-  if (res.headersSent) {
-    res.destroy();
-    return;
-  }
-  for (const h of ['Content-Type', 'Content-Length', 'Content-Disposition', 'Cache-Control']) {
-    res.removeHeader(h);
-  }
-  res.statusCode = 404;
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.end(JSON.stringify({ success: false, error: 'Not found' }));
-}
+// streamErrorHandler moved to common/stream-object.ts (shared with every media proxy);
+// re-exported here so existing imports keep working.
+export { streamErrorHandler };
 
 /**
  * GET /v1/public/branding-assets?key=branding/<slug>/<yyyy-mm>/<uuid>-<name>.<ext>
@@ -76,7 +56,7 @@ export function streamErrorHandler(_err: Error, res: StreamErrorResponse): void 
  *    the frontend's `/api` → `/v1` rewrite, so the global IP throttler (no trust-proxy) would
  *    key ALL users on the frontend's egress IP and 429 logos platform-wide. Load is bounded
  *    instead by the strict key shape, the size cap, the immutable browser/CDN cache and the
- *    in-process cache below (positive LRU 50 entries / 20 MB; misses remembered 30 s).
+ *    in-process cache below (positive LRU 50 entries / 5 MB; misses remembered 30 s).
  *  - `Cache-Control: public, max-age=1y, immutable` — keys embed a fresh uuid per upload,
  *    so an object's bytes never change under the same URL.
  *  - Keys whose slug segment is not an existing tenant 404 (negative-cached) before any
@@ -87,12 +67,7 @@ export function streamErrorHandler(_err: Error, res: StreamErrorResponse): void 
  */
 @Controller('public/branding-assets')
 export class PublicBrandingAssetController {
-  private readonly cache = new BrandingAssetCache({
-    maxEntries: 50,
-    maxBytes: 20 * 1024 * 1024,
-    missTtlMs: 30_000,
-    maxMisses: 500,
-  });
+  private readonly cache = new BrandingAssetCache(BRANDING_CACHE_OPTIONS);
 
   constructor(
     private readonly storage: StorageService,

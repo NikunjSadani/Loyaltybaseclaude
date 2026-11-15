@@ -14,7 +14,9 @@ import {
   ValidateNested,
   Length,
   ValidateIf,
+  Max,
 } from 'class-validator';
+import { KYC_LIST_MAX_LIMIT } from '../../common/validators/page-size';
 import { KycStatus, KycDocumentType, KycFieldKey, EntityType, GstRegistrationType } from '@prisma/client';
 
 // ─── Geo capture sub-schema ───────────────────────────────────────────────────
@@ -366,6 +368,7 @@ export class ListKycQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(KYC_LIST_MAX_LIMIT)
   limit?: number = 20;
 }
 

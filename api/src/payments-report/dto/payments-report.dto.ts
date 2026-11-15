@@ -15,7 +15,14 @@
  */
 
 import { CreditEntryStatus } from '@prisma/client';
-import { IsDateString, IsEnum, IsOptional, IsString } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsDateString, IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+
+/** Rows per page on the screen: default + hard maximum (the API never loads more than this per request). */
+export const PAYMENTS_DEFAULT_PAGE_SIZE = 50;
+export const PAYMENTS_MAX_PAGE_SIZE = 200;
+/** Upper bound on ?page= (sanity — the service also clamps to the last real page). */
+export const PAYMENTS_MAX_PAGE = 100_000;
 
 /** ?clientId=&from=&to=&status= for the payments report + its export twin. */
 export class PaymentsReportQueryDto {
@@ -40,4 +47,26 @@ export class PaymentsReportQueryDto {
     message: 'status must be one of PENDING, PROCESSING, PAID, FAILED, REVERSED',
   })
   status?: CreditEntryStatus;
+}
+
+/**
+ * The on-screen report adds paging on top of the shared filters. Deliberately NOT on the export DTO: the export is
+ * every matching row, so `?page=` on /export is still rejected (forbidNonWhitelisted) rather than silently ignored.
+ */
+export class PaymentsReportPageQueryDto extends PaymentsReportQueryDto {
+  /** 1-based page number (past the last page → the server returns the last page). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(PAYMENTS_MAX_PAGE)
+  page?: number;
+
+  /** Rows per page (default 50, max 200). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(PAYMENTS_MAX_PAGE_SIZE)
+  pageSize?: number;
 }

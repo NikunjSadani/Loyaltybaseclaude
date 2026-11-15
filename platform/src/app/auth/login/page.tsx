@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/toast';
 import { sendOTP, verifyOTP } from './actions';
 import { cn } from '@/lib/utils';
-import { clearAssumedContext } from '@/lib/auth-client';
+import { clearAssumedContext, storedUserFromAuthMe } from '@/lib/auth-client';
 import { isStaleDeploymentError, recoverFromStaleDeployment } from '@/lib/stale-deploy';
 import { api } from '@/lib/api-client';
 
@@ -69,18 +69,15 @@ export default function LoginPage() {
       try {
         const res = await api.get<{
           role?: string;
-          user?: { id?: string; name?: string; phone?: string };
+          user?: { id?: string; name?: string; phone?: string; businessName?: string | null; outletName?: string | null };
         }>('/api/auth/me');
         if (!cancelled && res.success && res.data?.role) {
           // Hydrate the NON-sensitive stored `user` (the destination portal's RequireAuth reads it,
           // NOT the httpOnly cookie) so the dashboard doesn't bounce straight back to login — a loop
           // that would otherwise hit a browser with a live cookie but no stored user. Mirrors exactly
-          // what the post-OTP path persists (id/name/role/phone only; never the token — AF-6).
-          const u = res.data.user ?? {};
-          localStorage.setItem(
-            'user',
-            JSON.stringify({ id: u.id ?? '', name: u.name ?? '', role: res.data.role, phone: u.phone ?? '' }),
-          );
+          // what the post-OTP path persists (id/name/role/phone + the partner header's
+          // businessName/outletName when present; never the token — AF-6).
+          localStorage.setItem('user', JSON.stringify(storedUserFromAuthMe({ ...res.data, role: res.data.role })));
           window.location.href = getRoleDashboard(res.data.role);
           return; // keep the loader up while the browser navigates away
         }

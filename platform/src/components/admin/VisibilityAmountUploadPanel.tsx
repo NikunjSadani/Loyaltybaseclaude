@@ -21,6 +21,7 @@ import {
 import { generateVisibilityTemplate, VISIBILITY_UPLOAD_HEADERS } from '@/lib/visibility-upload';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -50,6 +51,7 @@ export function VisibilityAmountUploadPanel() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [recMonth, setRecMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [downloadingReport, setDownloadingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   const handleTemplateDownload = () => {
     const raw = generateVisibilityTemplate();
@@ -72,12 +74,22 @@ export function VisibilityAmountUploadPanel() {
     try {
       const fd = new FormData();
       fd.append('file', uploadFile);
-      const res = await fetch('/api/admin/visibility/bulk-upload', { method: 'POST', body: fd });
-      const json = await res.json();
-      if (!res.ok) setUploadError(json.error ?? 'Upload failed');
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/visibility/bulk-upload', { method: 'POST', body: fd });
+      } catch {
+        setUploadError(networkErrorMessage(MAYBE_SAVED_NOTE));
+        return;
+      }
+      const json = await readJsonSafe(res);
+      // A non-JSON body (proxy truncation / plain-text 5xx / edge 413) used to throw here and be
+      // misreported as "Network error"; it now gets a readable, honest message.
+      if (!json) setUploadError(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+      else if (!res.ok) setUploadError(json.error ?? 'Upload failed');
       else setUploadResult(json.data as UploadResult);
     } catch {
-      setUploadError('Network error — please try again');
+      // Anything that isn't the fetch itself (handled above) must not escape as an unhandled rejection.
+      setUploadError(`Something went wrong showing the upload result. ${MAYBE_SAVED_NOTE}`);
     } finally {
       setUploading(false);
     }
@@ -90,11 +102,25 @@ export function VisibilityAmountUploadPanel() {
 
   const handleReportDownload = useCallback(async () => {
     setDownloadingReport(true);
+    setReportError(null);
     try {
-      const res = await fetch(`/api/admin/visibility/records?month=${recMonth}&limit=10000`);
-      if (!res.ok) return;
-      const json = await res.json();
-      const rows: VisibilityRecord[] = json.data?.records ?? [];
+      // The records API caps `limit` at 100 (a larger value is a 400) — page through until `total` is read.
+      // The old single `limit=10000` request always failed and the button silently did nothing.
+      const PAGE = 100;
+      const rows: VisibilityRecord[] = [];
+      for (let page = 1; ; page++) {
+        const res = await fetch(`/api/admin/visibility/records?month=${encodeURIComponent(recMonth)}&limit=${PAGE}&page=${page}`);
+        if (!res.ok) {
+          setReportError(`Couldn't download the report (error ${res.status}). Please try again.`);
+          return;
+        }
+        const json = await res.json();
+        const batch: VisibilityRecord[] = json.data?.records ?? [];
+        rows.push(...batch);
+        // A short page always ends it; `total` (when present) ends it early. Hard stop at 1,000 pages.
+        const total = typeof json.data?.total === 'number' ? (json.data.total as number) : Infinity;
+        if (batch.length < PAGE || rows.length >= total || page >= 1000) break;
+      }
       const XLSX = await import('xlsx');
       const sheetData = [
         ['Outlet Code', 'Month', 'Status', 'Capture Date', 'Approved By', 'Source File', 'Uploaded At'],
@@ -113,6 +139,8 @@ export function VisibilityAmountUploadPanel() {
       XLSX.utils.book_append_sheet(wb, ws, 'Visibility Records');
       const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
       downloadBlob(new Blob([buf], { type: XLSX_MIME }), `visibility_records_${recMonth}.xlsx`);
+    } catch {
+      setReportError("Couldn't download the report — check your connection and try again.");
     } finally {
       setDownloadingReport(false);
     }
@@ -239,6 +267,9 @@ export function VisibilityAmountUploadPanel() {
             </button>
           </div>
         </div>
+        {reportError && (
+          <p role="alert" className="mt-3 text-xs text-red-600" data-testid="visibility-report-error">{reportError}</p>
+        )}
       </div>
     </div>
   );

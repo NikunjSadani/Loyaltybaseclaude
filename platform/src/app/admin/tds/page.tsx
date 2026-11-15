@@ -26,9 +26,22 @@ import {
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
 import { authHeader } from '@/lib/api-client';
+import {
+  readJsonSafe,
+  responseErrorMessage,
+  networkErrorMessage,
+  NOTHING_SAVED_NOTE,
+} from '@/lib/safe-response';
+
+/** TDS apply (off-platform / deposits) is ONE insert — all-or-nothing — and a re-upload of the same rows
+ *  is de-duplicated server-side, so a lost response means "the whole file may have been saved", never "some". */
+const TDS_APPLY_MAYBE_NOTE = 'It may have been saved — refresh and check before uploading again.';
 import { formatINR } from '@/lib/money';
 import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label';
 import { formatCountFrom } from '@/components/operator/tds-imported-payouts-card';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -95,6 +108,11 @@ interface UploadResult {
   errors:    UploadRowMessage[];
   /** Non-blocking notices, e.g. "PAN found on file for outlet X — counted under that PAN". */
   warnings?: UploadRowMessage[];
+  /** Memory-safety (2026-11-13): errors / warnings are capped at 500 each — `failed` and
+   *  `warningCount` carry the true totals. */
+  errorsTruncated?: boolean;
+  warningCount?: number;
+  warningsTruncated?: boolean;
 }
 
 const rowMessageText = (m: UploadRowMessage): string => (typeof m === 'string' ? m : m.message);
@@ -256,19 +274,30 @@ function UploadPanel({
     try {
       const form = new FormData();
       form.append('file', file);
-      const res  = await fetch(uploadUrlFn(false), {
-        method:  'POST',
-        headers: authHeader(),
-        body:    form,
-      });
-      const json = (await res.json()) as { success: boolean; data?: UploadResult; error?: string };
+      let res: Response;
+      try {
+        res = await fetch(uploadUrlFn(false), {
+          method:  'POST',
+          headers: authHeader(),
+          body:    form,
+        });
+      } catch {
+        // Preview only (apply=false) — nothing is written, so a dropped connection is safe to retry.
+        setUploadError(networkErrorMessage(NOTHING_SAVED_NOTE));
+        return;
+      }
+      const json = await readJsonSafe<{ success: boolean; data?: UploadResult; error?: string }>(res);
+      if (!json) {
+        setUploadError(responseErrorMessage(res, json, NOTHING_SAVED_NOTE));
+        return;
+      }
       if (!res.ok || !json.success) {
         setUploadError(json.error ?? `Upload failed (HTTP ${res.status})`);
         return;
       }
       setPreview(json.data!);
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+    } catch {
+      setUploadError('Something went wrong showing the preview. Nothing was saved — please try again.');
     } finally {
       setUploading(false);
     }
@@ -300,12 +329,22 @@ function UploadPanel({
     try {
       const form = new FormData();
       form.append('file', file);
-      const res  = await fetch(uploadUrlFn(true), {
-        method:  'POST',
-        headers: authHeader(),
-        body:    form,
-      });
-      const json = (await res.json()) as { success: boolean; data?: UploadResult; error?: string };
+      let res: Response;
+      try {
+        res = await fetch(uploadUrlFn(true), {
+          method:  'POST',
+          headers: authHeader(),
+          body:    form,
+        });
+      } catch {
+        setConfirmError(networkErrorMessage(TDS_APPLY_MAYBE_NOTE));
+        return;
+      }
+      const json = await readJsonSafe<{ success: boolean; data?: UploadResult; error?: string }>(res);
+      if (!json) {
+        setConfirmError(responseErrorMessage(res, json, TDS_APPLY_MAYBE_NOTE));
+        return;
+      }
       if (!res.ok || !json.success) {
         setConfirmError(json.error ?? `Apply failed (HTTP ${res.status})`);
         return;
@@ -313,8 +352,8 @@ function UploadPanel({
       setDone(true);
       pendingFileRef.current = null;
       onApplied();
-    } catch (err) {
-      setConfirmError(err instanceof Error ? err.message : 'Apply failed');
+    } catch {
+      setConfirmError(`Something went wrong showing the result. ${TDS_APPLY_MAYBE_NOTE}`);
     } finally {
       setConfirming(false);
     }
@@ -412,19 +451,21 @@ function UploadPanel({
             ))}
           </div>
 
+          <UploadTruncationNote shown={preview.errors.length} total={preview.failed} truncated={preview.errorsTruncated} noun="errors" next={TRUNCATION_NEXT.PREVIEW} />
           {preview.errors.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 max-h-40 overflow-y-auto space-y-1">
-              <p className="text-xs font-semibold text-amber-800">Errors ({preview.errors.length})</p>
-              {preview.errors.slice(0, 20).map((e, i) => (
+              <p className="text-xs font-semibold text-amber-800">Errors ({preview.errorsTruncated ? preview.failed : preview.errors.length})</p>
+              {preview.errors.map((e, i) => (
                 <p key={i} className="text-xs text-amber-700">• {rowMessageText(e)}</p>
               ))}
             </div>
           )}
 
+          <UploadTruncationNote shown={preview.warnings?.length ?? 0} total={preview.warningCount} truncated={preview.warningsTruncated} noun="notes" next="Notes don't block the upload; the counts above cover every row." />
           {(preview.warnings?.length ?? 0) > 0 && (
             <div data-testid="tds-upload-warnings" className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 max-h-40 overflow-y-auto space-y-1">
-              <p className="text-xs font-semibold text-blue-800">Notes ({preview.warnings!.length})</p>
-              {preview.warnings!.slice(0, 20).map((w, i) => (
+              <p className="text-xs font-semibold text-blue-800">Notes ({preview.warningCount ?? preview.warnings!.length})</p>
+              {preview.warnings!.map((w, i) => (
                 <p key={i} className="text-xs text-blue-700">• {rowMessageText(w)}</p>
               ))}
             </div>
@@ -495,7 +536,7 @@ export default function AdminTdsPage() {
   const [r194Loading, setR194Loading] = useState(false);
   const [r194Error,   setR194Error]   = useState('');
   const [r194,        setR194]        = useState<Tds194RResponse | null>(null);
-  const [dlR194Err,   setDlR194Err]   = useState('');
+  const dl194R = useDownloadAction();
 
   const fetch194R = useCallback(async () => {
     setR194Loading(true);
@@ -519,7 +560,7 @@ export default function AdminTdsPage() {
   const [r194cLoading, setR194cLoading] = useState(false);
   const [r194cError,   setR194cError]   = useState('');
   const [r194c,        setR194c]        = useState<Tds194CResponse | null>(null);
-  const [dlR194cErr,   setDlR194cErr]   = useState('');
+  const dl194C = useDownloadAction();
 
   const fetch194C = useCallback(async () => {
     if (!isGifsy) return;
@@ -552,22 +593,18 @@ export default function AdminTdsPage() {
     if (isGifsy) fetch194C();
   }, [fetch194C, isGifsy]);
 
-  async function handleDownload194R() {
-    setDlR194Err('');
-    const err = await downloadXlsx(
-      `/api/admin/tds/194r/export?fy=${encodeURIComponent(fy)}`,
-      `tds-194r-${fy}.xlsx`,
-    );
-    if (err) setDlR194Err(err);
+  // 194R / 194C ledger exports: 200 → saves straight away; 202 → prepared in the background
+  // and shown on the Downloads page.
+  function handleDownload194R() {
+    void dl194R.run(`/api/admin/tds/194r/export?fy=${encodeURIComponent(fy)}`, {
+      fallbackFileName: `tds-194r-${fy}.xlsx`,
+    });
   }
 
-  async function handleDownload194C() {
-    setDlR194cErr('');
-    const err = await downloadXlsx(
-      `/api/admin/tds/194c/export?fy=${encodeURIComponent(fy)}`,
-      `tds-194c-${fy}.xlsx`,
-    );
-    if (err) setDlR194cErr(err);
+  function handleDownload194C() {
+    void dl194C.run(`/api/admin/tds/194c/export?fy=${encodeURIComponent(fy)}`, {
+      fallbackFileName: `tds-194c-${fy}.xlsx`,
+    });
   }
 
   const tabs = [
@@ -654,15 +691,17 @@ export default function AdminTdsPage() {
                 </h3>
                 <p className="text-xs text-gray-500 mt-0.5">Section 194R: TDS on perquisites / gifts</p>
               </div>
-              <div className="flex items-center gap-2">
-                {dlR194Err && <p className="text-xs text-red-600">{dlR194Err}</p>}
+              <div className="flex flex-col items-end gap-1.5 max-w-xs">
                 <button
                   onClick={handleDownload194R}
-                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50"
+                  disabled={dl194R.blocked}
+                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-60"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  Download 194R Excel
+                  {downloadButtonLabel(dl194R, 'Download 194R Excel')}
                 </button>
+                {/* Queued / error message — directly below the button. */}
+                <DownloadActionStatus action={dl194R} />
               </div>
             </div>
 
@@ -761,15 +800,17 @@ export default function AdminTdsPage() {
                 </h3>
                 <p className="text-xs text-gray-500 mt-0.5">Section 194C: TDS on contractor payments</p>
               </div>
-              <div className="flex items-center gap-2">
-                {dlR194cErr && <p className="text-xs text-red-600">{dlR194cErr}</p>}
+              <div className="flex flex-col items-end gap-1.5 max-w-xs">
                 <button
                   onClick={handleDownload194C}
-                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50"
+                  disabled={dl194C.blocked}
+                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-60"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  Download 194C Excel
+                  {downloadButtonLabel(dl194C, 'Download 194C Excel')}
                 </button>
+                {/* Queued / error message — directly below the button. */}
+                <DownloadActionStatus action={dl194C} />
               </div>
             </div>
 

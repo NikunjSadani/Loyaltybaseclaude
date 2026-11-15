@@ -74,7 +74,7 @@ const TREND: TrendRow[] = [
   { month: CUR,  target: 1000, achieved: 1000 },
 ];
 
-function stubFetch(opts: { kpis: ApiKpi[]; trend?: TrendRow[] }) {
+function stubFetch(opts: { kpis: ApiKpi[]; trend?: TrendRow[]; extraOutlets?: ApiKpi[][] }) {
   return vi.fn((url: string) => {
     const ok = (data: unknown) => Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data }) });
     if (url.includes('/api/partner/targets/trend')) {
@@ -82,7 +82,10 @@ function stubFetch(opts: { kpis: ApiKpi[]; trend?: TrendRow[] }) {
     }
     if (url.includes('/api/partner/targets')) {
       const outlets = opts.kpis.length
-        ? [{ outletCode: 'WS-1', outletName: 'Outlet 1', outletType: 'WHOLESALER', kpis: opts.kpis }]
+        ? [
+            { outletCode: 'WS-1', outletName: 'Outlet 1', outletType: 'WHOLESALER', kpis: opts.kpis },
+            ...(opts.extraOutlets ?? []).map((kpis, i) => ({ outletCode: `WS-${i + 2}`, outletName: `Outlet ${i + 2}`, outletType: 'SSS', kpis })),
+          ]
         : [];
       return ok({ period: CUR, outlets });
     }
@@ -143,20 +146,93 @@ describe('Target Achievement card', () => {
     expect(perf.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('guards a target-0 / achieved KPI → "—" and 0% (no NaN/Infinity)', async () => {
+  it('a KPI with NO target shows a neutral "so far" figure — no %, no red "— · 0%", no NaN', async () => {
     identityRef.current = identity();
     const zeroKpis: ApiKpi[] = [
-      { code: 'MONTH', name: 'Month Target', target: 1000, achieved: 500, unit: 'cases', isPrimary: true },
-      { code: 'ZERO',  name: 'No Target KPI', target: 0,   achieved: 0,   unit: 'cases', isPrimary: false },
+      { code: 'MONTH', name: 'Month Target', target: 1000, achieved: 500,     unit: 'cases', isPrimary: true },
+      { code: 'ZERO',  name: 'No Target KPI', target: 0,   achieved: 0,       unit: 'cases', isPrimary: false },
+      // Bajaj SAMT: NON ADHO has sales but no target (the gate KPI) → "₹2.8K so far".
+      { code: 'NONADHO', name: 'NON ADHO',    target: 0,   achieved: 2755.12, unit: 'INR',   isPrimary: false },
+      { code: 'NEG',   name: 'Returns KPI',   target: 0,   achieved: -1500,   unit: 'INR',   isPrimary: false },
     ];
     vi.stubGlobal('fetch', stubFetch({ kpis: zeroKpis, trend: TREND }));
     render(<PartnerDashboardPage />);
 
-    const card = await screen.findByTestId('target-achievement-card');
+    const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
     const inCard = within(card);
     expect(inCard.getByText('No Target KPI')).toBeInTheDocument();
-    expect(inCard.getByText('— · 0%')).toBeInTheDocument();
-  });
+    expect(inCard.getByText('0 cases so far')).toBeInTheDocument();
+    expect(inCard.getByText('NON ADHO')).toBeInTheDocument();
+    expect(inCard.getByText('₹2.8K so far')).toBeInTheDocument();
+    expect(inCard.getByText('-₹1.5K so far')).toBeInTheDocument();
+    // No percentage / dash pairing for target-less rows, and no NaN/Infinity anywhere.
+    expect(inCard.queryByText(/— · 0%/)).not.toBeInTheDocument();
+    expect(within(inCard.getByTestId('kpi-no-target-NONADHO')).queryByText(/%/)).not.toBeInTheDocument();
+    expect(card.textContent).not.toMatch(/NaN|Infinity/);
+    // The targeted row is unchanged.
+    expect(inCard.getByText('500/1,000 cases · 50%')).toBeInTheDocument();
+  }, 20000);
+
+  it('footer never says "target met" for a KPI without a target — falls back to the first targeted KPI', async () => {
+    identityRef.current = identity();
+    const kpis: ApiKpi[] = [
+      // Primary KPI has NO target (sales only) → must not produce "NON ADHO target met 🎉".
+      { code: 'NONADHO', name: 'NON ADHO', target: 0,  achieved: 2755.12, unit: 'INR', isPrimary: true  },
+      { code: 'LINES',   name: 'Lines',    target: 8,  achieved: 7,       unit: 'SKU', isPrimary: false },
+      // No sales data at all (null) → "—", not a stated zero.
+      { code: 'FB',      name: 'Focus Brand 1', target: 0, achieved: null as unknown as number, unit: 'INR', isPrimary: false },
+    ];
+    vi.stubGlobal('fetch', stubFetch({ kpis, trend: TREND }));
+    render(<PartnerDashboardPage />);
+
+    const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
+    const inCard = within(card);
+    expect(inCard.queryByText(/NON ADHO target met/)).not.toBeInTheDocument();
+    expect(inCard.getByText(/1 SKU to go · \d+ days? left/)).toBeInTheDocument();
+    expect(within(inCard.getByTestId('kpi-no-target-FB')).getByText('—')).toBeInTheDocument();
+  }, 20000);
+
+  it('multi-outlet: sales at an outlet WITHOUT the target never fill another outlet\'s target', async () => {
+    identityRef.current = identity();
+    // Shop A has a ₹1,000 NON ADHO target with ₹500 sales; shop B has no NON ADHO target but ₹2,000 sales.
+    const shopA: ApiKpi[] = [
+      { code: 'LINES',   name: 'Lines',    target: 8,    achieved: 4,   unit: 'SKU', isPrimary: true  },
+      { code: 'NONADHO', name: 'NON ADHO', target: 1000, achieved: 500, unit: 'INR', isPrimary: false },
+      { code: 'GATE',    name: 'Gate KPI', target: 0,    achieved: 300, unit: 'INR', isPrimary: false },
+    ];
+    const shopB: ApiKpi[] = [
+      { code: 'LINES',   name: 'Lines',    target: 8,    achieved: 6,    unit: 'SKU', isPrimary: true  },
+      { code: 'NONADHO', name: 'NON ADHO', target: 0,    achieved: 2000, unit: 'INR', isPrimary: false },
+      { code: 'GATE',    name: 'Gate KPI', target: 0,    achieved: 100,  unit: 'INR', isPrimary: false },
+    ];
+    vi.stubGlobal('fetch', stubFetch({ kpis: shopA, trend: TREND, extraOutlets: [shopB] }));
+    render(<PartnerDashboardPage />);
+
+    const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
+    const inCard = within(card);
+    // Targeted-only: 500/1,000 = 50% — NOT (500+2,000)/1,000 = 250%.
+    expect(inCard.getByText('500/1K · 50%')).toBeInTheDocument();
+    expect(inCard.queryByText(/250%/)).not.toBeInTheDocument();
+    expect(within(inCard.getByTestId('kpi-untargeted-NONADHO')).getByText(/\+₹2K\s+so far at outlets without this target/)).toBeInTheDocument();
+    // Both shops have the Lines target → summed exactly as before (4+6 of 8+8).
+    expect(inCard.getByText('10/16 SKU · 63%')).toBeInTheDocument();
+    expect(inCard.queryByTestId('kpi-untargeted-LINES')).not.toBeInTheDocument();
+    // No outlet has a target → all sales summed as "so far".
+    expect(inCard.getByText('₹400 so far')).toBeInTheDocument();
+  }, 20000);
+
+  it('footer is a neutral note when NO KPI has a target', async () => {
+    identityRef.current = identity();
+    const kpis: ApiKpi[] = [
+      { code: 'NONADHO', name: 'NON ADHO', target: 0, achieved: 400, unit: 'INR', isPrimary: true },
+    ];
+    vi.stubGlobal('fetch', stubFetch({ kpis, trend: TREND }));
+    render(<PartnerDashboardPage />);
+
+    const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
+    expect(within(card).getByText('No targets set this month')).toBeInTheDocument();
+    expect(within(card).queryByText(/target met/)).not.toBeInTheDocument();
+  }, 20000);
 
   it('renders NOTHING when the outlet has no targets (empty aggKpis)', async () => {
     identityRef.current = identity();

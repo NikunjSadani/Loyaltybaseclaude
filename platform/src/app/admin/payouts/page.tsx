@@ -18,6 +18,14 @@ import {
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
+import { readJsonSafe, FILE_TOO_LARGE_MESSAGE } from '@/lib/safe-response';
+
+/** Shown when the UTR APPLY response is lost. Re-uploading is safe: payouts.service uploadPayoutUtr
+ *  skips terminal (SUCCESS/FAILED/REVERSED) transactions and compare-and-sets each write, so the same
+ *  report applied twice changes nothing the second time. */
+const PAYOUT_UTR_APPLY_UNCONFIRMED_MESSAGE =
+  "We couldn't confirm whether the UTR report was applied. Refresh and check this batch's transaction statuses before trying again. " +
+  'Re-uploading the same UTR report is safe — transactions that were already marked SUCCESS or FAILED are skipped, so nothing is applied twice.';
 
 /* ─── UTR upload result (payouts.service.ts uploadPayoutUtr) ───────────────── */
 
@@ -372,12 +380,24 @@ export default function PayoutsPage() {
     try {
       const form = new FormData();
       form.append('file', file);
-      const res  = await fetch(`/api/payouts/batches/${selectedBatch.id}/utr?apply=true`, {
-        method:  'POST',
-        headers: { ...authHeader() },
-        body:    form,
-      });
-      const json = await res.json();
+      let res: Response;
+      try {
+        res = await fetch(`/api/payouts/batches/${selectedBatch.id}/utr?apply=true`, {
+          method:  'POST',
+          headers: { ...authHeader() },
+          body:    form,
+        });
+      } catch {
+        // Network drop — the apply may or may not have committed.
+        setUtrUploadErr(PAYOUT_UTR_APPLY_UNCONFIRMED_MESSAGE);
+        return;
+      }
+      const json = await readJsonSafe(res);
+      if (!json) {
+        // No readable answer (proxy truncation / plain-text 5xx): never claim success OR failure.
+        setUtrUploadErr(res.status === 413 ? FILE_TOO_LARGE_MESSAGE : PAYOUT_UTR_APPLY_UNCONFIRMED_MESSAGE);
+        return;
+      }
       if (!res.ok || !json.success) {
         setUtrUploadErr(json.error ?? `HTTP ${res.status}`);
         return;
@@ -687,7 +707,7 @@ export default function PayoutsPage() {
                         className="flex items-center gap-2 px-3 py-2 border border-gray-300 text-gray-700 text-xs rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
                       >
                         {utrDownloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                        {utrDownloading ? 'Downloading…' : 'UTR Template'}
+                        {utrDownloading ? 'Preparing…' : 'UTR Template'}
                       </button>
                       <label className={`flex items-center gap-2 px-3 py-2 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer ${utrUploading ? 'bg-gray-400 pointer-events-none' : 'bg-[var(--brand-primary)] hover:bg-[var(--brand-primary-dark)]'}`}>
                         {utrUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}

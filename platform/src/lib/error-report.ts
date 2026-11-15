@@ -21,14 +21,19 @@ import { downloadBlob } from '@/lib/download';
  *                     Joined with " · " into the Errors cell.
  * @param opts.sheetName    Sheet name (default 'Errors').
  * @param opts.errorHeader  Errors column header (default 'Errors').
+ * @param opts.note         A line that must travel WITH the file (e.g. "Showing the first 500 of 1,234
+ *                          problems." when the API capped the list — M4). It is added to the Errors
+ *                          column header (so it is seen without leaving the data sheet, and a re-upload
+ *                          parser that ignores unknown columns is unaffected) and as a second "Note" sheet.
  */
 export function buildErrorReportBuffer(
   columns: string[],
   rows: Record<string, unknown>[],
   errorsByRow: (row: Record<string, unknown>, idx: number) => string[],
-  opts?: { sheetName?: string; errorHeader?: string },
+  opts?: { sheetName?: string; errorHeader?: string; note?: string },
 ): ArrayBuffer {
-  const errorHeader = opts?.errorHeader ?? 'Errors';
+  const baseHeader  = opts?.errorHeader ?? 'Errors';
+  const errorHeader = opts?.note ? `${baseHeader} (${opts.note})` : baseHeader;
   const sheetName   = opts?.sheetName ?? 'Errors';
   const header      = [...columns, errorHeader];
 
@@ -46,6 +51,7 @@ export function buildErrorReportBuffer(
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  if (opts?.note) XLSX.utils.book_append_sheet(wb, aoaToSheetSafe([[opts.note]]), sheetName === 'Note' ? 'About' : 'Note');
 
   // `type:'array'` may yield an ArrayBuffer OR a Uint8Array depending on the SheetJS
   // build (0.18.5 returns an ArrayBuffer here). Normalize to a standalone ArrayBuffer
@@ -66,4 +72,16 @@ export function downloadErrorReport(buf: ArrayBuffer, filename: string): void {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
   downloadBlob(blob, filename);
+}
+
+/** The "first N of M" line for a capped problem list (M4). Null when the list is complete. */
+export function cappedListNote(
+  shown: number,
+  total: number | null | undefined,
+  truncated: boolean | null | undefined,
+  noun = 'problems',
+): string | null {
+  if (!truncated) return null;
+  const t = typeof total === 'number' ? total : shown;
+  return `Showing the first ${shown.toLocaleString('en-IN')} of ${t.toLocaleString('en-IN')} ${noun}.`;
 }

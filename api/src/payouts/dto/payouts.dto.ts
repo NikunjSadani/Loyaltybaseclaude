@@ -10,7 +10,9 @@ import {
   IsPositive,
   IsString,
   Min,
+  Max,
 } from 'class-validator';
+import { PAGE_SIZE_MAX } from '../../common/validators/page-size';
 import { PayoutMode, PayoutStatus } from '@prisma/client';
 
 /** GET /v1/payouts/transactions — filters + pagination. */
@@ -64,6 +66,7 @@ export class ListTransactionsQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(PAGE_SIZE_MAX)
   limit?: number = 20;
 }
 
@@ -79,6 +82,7 @@ export class ListBatchesQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(PAGE_SIZE_MAX)
   limit?: number = 20;
 }
 
@@ -94,6 +98,7 @@ export class BatchDetailQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(PAGE_SIZE_MAX)
   limit?: number = 50;
 }
 

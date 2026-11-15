@@ -105,6 +105,12 @@ export default function PayoutStatusPage() {
   const [page,         setPage]         = useState(1);
   const [pagination,   setPagination]   = useState<Pagination | null>(null);
   const [loading,      setLoading]      = useState(true);
+  /** The batch whose evidence upload is running. While set, nothing may unmount its panel (collapse,
+   *  switching batch, paging, filtering, or the list's loading state) — that would orphan the loop. */
+  const [uploadingBatchId, setUploadingBatchId] = useState<string | null>(null);
+  const setBatchUploading = useCallback((id: string, uploading: boolean) => {
+    setUploadingBatchId((cur) => (uploading ? id : cur === id ? null : cur));
+  }, []);
 
   // Reversal state
   const [revTarget,  setRevTarget]  = useState<ReversalTarget | null>(null);
@@ -149,6 +155,8 @@ export default function PayoutStatusPage() {
   useEffect(() => { setPage(1); }, [filterPeriod]);
 
   async function expandBatch(id: string) {
+    // Keep the uploading batch open (collapsing / switching would unmount its evidence panel mid-run).
+    if (uploadingBatchId) return;
     if (expanded === id) { setExpanded(null); return; }
     setExpanded(id);
     if (batchDetails[id]) return;
@@ -162,6 +170,9 @@ export default function PayoutStatusPage() {
   // Period filtering is now SERVER-SIDE (?period=YYYY-MM); the returned `batches` are
   // already the current page of the filtered+paginated set.
   const periods = allPeriods;
+  // A background refresh (e.g. after a reversal request) must not swap the list for the loading
+  // placeholder while an evidence upload is running — that would unmount the panel.
+  const showLoading = loading && !uploadingBatchId;
 
   // ─── Report download ────────────────────────────────────────────────────────
 
@@ -285,6 +296,8 @@ export default function PayoutStatusPage() {
           <select
             value={filterPeriod}
             onChange={(e) => setFilterPeriod(e.target.value)}
+            disabled={!!uploadingBatchId}
+            title={uploadingBatchId ? 'Wait for the evidence upload to finish' : undefined}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
           >
             <option value="">All periods</option>
@@ -296,14 +309,14 @@ export default function PayoutStatusPage() {
       )}
 
       {/* Loading */}
-      {loading && (
+      {showLoading && (
         <div className="bg-gray-50 border border-gray-200 rounded-xl p-10 text-center">
           <p className="text-sm text-gray-500 animate-pulse">Loading batches…</p>
         </div>
       )}
 
       {/* No batches */}
-      {!loading && batches.length === 0 && (
+      {!showLoading && batches.length === 0 && (
         <div className="bg-gray-50 border border-dashed border-gray-300 rounded-xl p-10 text-center">
           <BarChart2 className="w-8 h-8 text-gray-300 mx-auto mb-3" />
           <p className="text-sm text-gray-500">No upload batches found.</p>
@@ -312,7 +325,7 @@ export default function PayoutStatusPage() {
       )}
 
       {/* Batch list */}
-      {!loading && batches.length > 0 && (
+      {!showLoading && batches.length > 0 && (
         <div className="space-y-3">
           {batches.map((batch) => {
             const style      = STATUS_STYLES[batch.status] ?? STATUS_STYLES['PENDING_CONFIRM'];
@@ -323,8 +336,12 @@ export default function PayoutStatusPage() {
             return (
               <div key={batch.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
                 <div
-                  className="flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-gray-50"
+                  className={`flex items-center gap-4 px-5 py-4 hover:bg-gray-50 ${uploadingBatchId ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                   onClick={() => expandBatch(batch.id)}
+                  data-testid={`batch-header-${batch.id}`}
+                  aria-expanded={isOpen}
+                  aria-disabled={uploadingBatchId ? true : undefined}
+                  title={uploadingBatchId ? 'Wait for the evidence upload to finish' : undefined}
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3 flex-wrap">
@@ -431,7 +448,11 @@ export default function PayoutStatusPage() {
                       </div>
                     )}
 
-                    <BatchEvidencePanel batchId={batch.id} canDelete={!isConfirmed} />
+                    <BatchEvidencePanel
+                      batchId={batch.id}
+                      canDelete={!isConfirmed}
+                      onUploadingChange={(u) => setBatchUploading(batch.id, u)}
+                    />
                   </div>
                 )}
               </div>
@@ -441,7 +462,7 @@ export default function PayoutStatusPage() {
       )}
 
       {/* Pagination controls */}
-      {!loading && pagination && pagination.pages > 1 && (
+      {!showLoading && pagination && pagination.pages > 1 && (
         <div className="flex items-center justify-between gap-3 flex-wrap text-sm text-gray-500">
           <span>
             Page <strong className="text-gray-900">{pagination.page}</strong> of{' '}
@@ -451,14 +472,14 @@ export default function PayoutStatusPage() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={pagination.page <= 1}
+              disabled={pagination.page <= 1 || !!uploadingBatchId}
               className="px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               Previous
             </button>
             <button
               onClick={() => setPage((p) => p + 1)}
-              disabled={pagination.page >= pagination.pages}
+              disabled={pagination.page >= pagination.pages || !!uploadingBatchId}
               className="px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               Next

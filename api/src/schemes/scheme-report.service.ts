@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream';
 import { Injectable, NotFoundException, StreamableFile } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -546,7 +547,7 @@ export class SchemeReportService {
    * object key is NEVER taken from the token — it is resolved from the tenant-verified
    * enrollment's stored formValues for the token's fieldId.
    */
-  async viewMediaByToken(token: string): Promise<{ bytes: Buffer; contentType: string; inline: boolean }> {
+  async viewMediaByToken(token: string): Promise<{ stream: Readable; size: number; contentType: string; inline: boolean }> {
     const deny = () => new NotFoundException();
 
     if (!token || typeof token !== 'string') throw deny();
@@ -608,14 +609,14 @@ export class SchemeReportService {
     // token's fieldId pointed at a non-media field storing an arbitrary string.
     if (!key.startsWith(`scheme-media/${tokenClientId}/`)) throw deny();
 
-    const file = await this.storage.downloadBytes(key);
+    const file = await this.storage.openBoundedObject(key);
     if (!file) throw deny();
 
     // Same safe-mime inline allowlist as viewDocument: image/pdf inline, everything
     // else forced to an octet-stream attachment (downloaded, never executed).
     const rawMime = (file.contentType || '').toLowerCase();
     const inline = INLINE_SAFE_MIME.has(rawMime);
-    return { bytes: file.bytes, contentType: inline ? rawMime : 'application/octet-stream', inline };
+    return { stream: file.stream, size: file.size, contentType: inline ? rawMime : 'application/octet-stream', inline };
   }
 
   /** Loose parse of the stored audienceConfig for the coverage-denominator decision. */

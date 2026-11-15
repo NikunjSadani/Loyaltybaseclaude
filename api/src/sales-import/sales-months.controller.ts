@@ -18,6 +18,7 @@ import type {
   SalesMonthReopenResult,
   SalesMonthRow,
 } from './sales-import.contract';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 /**
  * Sales month state routes (plan §5.2, §7.3):
@@ -58,6 +59,7 @@ export class SalesMonthsController {
 
   @Get(':month/recalculate/preview')
   @RequirePermission('targets:read')
+  @HeavyOp()
   async recalcPreview(@CurrentUser() user: JwtPayload, @Param('month') month: string): Promise<SalesMonthRecalcPreview> {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: false });
     return this.apply.recalcPreview(user.clientId, month);
@@ -66,6 +68,7 @@ export class SalesMonthsController {
   @Post(':month/recalculate')
   @HttpCode(200)
   @RequirePermission('targets:upload')
+  @HeavyOp()
   async recalculate(
     @CurrentUser() user: JwtPayload,
     @Param('month') month: string,

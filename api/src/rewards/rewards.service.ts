@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { GiftFulfilmentChannel, PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { problemRowsEcho } from '../common/upload-echo';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { claimOtpAttempt, markOtpUsed, refundOtpAttempt, whyOtpClaimRefused } from '../common/otp-attempt';
@@ -48,6 +49,7 @@ import {
   lockVoucherCode,
   isHubbleIssuedCode,
   isHubbleNeverPlaced,
+  isHubbleProvider,
   planVoucherWrite,
   rethrowUnlessIdempotentPinRace,
   VOUCHER_WRITE_CONFLICT_MESSAGE,
@@ -64,7 +66,7 @@ import { derivePointsCost } from './derive-points-cost.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
 import { computeDispatchSla } from '../common/dispatch-sla';
 import { loadHolidaySet } from '../common/holiday-calendar';
-import { istDayRangeFilter } from '../common/ist-date';
+import { formatDateIST, istDayRangeFilter } from '../common/ist-date';
 import {
   AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
@@ -90,10 +92,12 @@ import {
 import {
   HubbleNotConfiguredError,
   HubbleOrderResult,
+  HubblePlaceOrderRejectedError,
   HubbleProduct,
   HubbleProductNotFoundError,
   HubbleService,
   HubbleVoucher,
+  hubbleAccountFingerprintMatches,
 } from '../hubble/hubble.service';
 import {
   extractHubbleDenominations,
@@ -202,6 +206,10 @@ export function hubbleVoucherCredentials(voucher: HubbleVoucher | undefined | nu
 export function hubbleReconcileFlags(metadata: unknown): {
   hubbleNeedsReconcile: boolean;
   hubbleReconcileReason: string | null;
+  /** Why Hubble's last "no order" answer was not trusted (canary), while the flag is open. */
+  hubbleNoOrderUnverifiedWhy?: string | null;
+  /** A newer reason recorded beside an open (double-issuance) flag — re-raised on Acknowledge. */
+  hubbleLatestReason?: string | null;
 } {
   const m = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
     ? (metadata as Record<string, unknown>)
@@ -209,9 +217,16 @@ export function hubbleReconcileFlags(metadata: unknown): {
   // A manual override sets hubbleNeedsReconcile false; a LATER flag (e.g. Hubble succeeded on top
   // of the manual code) sets it true again and must surface.
   const needs = m.hubbleNeedsReconcile === true;
+  const unv = m.hubbleNoOrderUnverified;
+  const unverifiedWhy =
+    needs && unv && typeof unv === 'object' && !Array.isArray(unv) && typeof (unv as Record<string, unknown>).why === 'string'
+      ? ((unv as Record<string, unknown>).why as string)
+      : null;
   return {
     hubbleNeedsReconcile: needs,
     hubbleReconcileReason: needs && typeof m.hubbleReconcileReason === 'string' ? m.hubbleReconcileReason : null,
+    ...(unverifiedWhy ? { hubbleNoOrderUnverifiedWhy: unverifiedWhy } : {}),
+    ...(needs && typeof m.hubbleLatestReason === 'string' && m.hubbleLatestReason ? { hubbleLatestReason: m.hubbleLatestReason } : {}),
   };
 }
 
@@ -340,8 +355,77 @@ interface HubbleLoadedOrder {
   metadata: Prisma.JsonValue;
   /** Row version as loaded — the PROCESSING claim pins it (optional: test fixtures omit it). */
   updatedAt?: Date | null;
+  /** Used by the no-Hubble-order refund age margin (absent → treated as too recent). */
+  createdAt?: Date | null;
+  voucherProvider?: string | null;
+  supplierOrderRef?: string | null;
   reward: { metadata: Prisma.JsonValue } | null;
 }
+
+/**
+ * Safety margin before a reconcile may refund an order Hubble CONFIRMED (HTTP 404) it has no order
+ * for: measured from the LATER of the order's creation and the moment the failed place attempt was
+ * flagged (metadata.hubbleReconcileAt). Shields against an in-flight / eventually-consistent
+ * placement landing after a too-early 404 (which would double a voucher with the refund).
+ * 2 HOURS (owner 2026-11-15: "wait for 2 hours before refunding").
+ */
+export const HUBBLE_NO_ORDER_REFUND_MIN_AGE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Reconcile reasons under which an ops "Retry with Hubble" that gets Hubble's "no order" may refund:
+ *  - HUBBLE_INDETERMINATE: placeOrder THREW and the recover-by-reference THREW too — Hubble never
+ *    returned an order body for the attempt (set only on that path).
+ *  - HUBBLE_UNEXPECTED: ONLY with positive evidence that placeOrder never responded — the
+ *    place-attempt record (metadata.hubblePlaceAttemptAt) exists and hubblePlaceResponded is not
+ *    true. The catch-all can otherwise fire AFTER a successful placement (voucher-write-guard.ts
+ *    HUBBLE_NEVER_PLACED_REASONS comment), so without that record it is never refundable.
+ * Everything else is EXCLUDED — Hubble acknowledged an order at some point, or the state is
+ * unknown — so a later 404 is for ops, never a refund: HUBBLE_PROCESSING_NOT_FOUND,
+ * HUBBLE_SUCCESS_NO_CODE, HUBBLE_UNKNOWN_STATUS:*, HUBBLE_SUCCESS_MANUAL_CODE_PRESENT,
+ * HUBBLE_PROCESSING_*, HUBBLE_FAILED_VOUCHER_PRESENT, HUBBLE_WEBHOOK_BUT_NOT_FOUND. The
+ * never-placed reasons (HUBBLE_NOT_CONFIGURED / HUBBLE_INVALID_AMOUNT) keep their existing
+ * ops/manual-refund path unchanged.
+ */
+export const HUBBLE_NO_ORDER_REFUNDABLE_REASONS: ReadonlySet<string> = new Set(['HUBBLE_INDETERMINATE']);
+export const HUBBLE_NO_ORDER_REFUNDABLE_WITH_PLACE_EVIDENCE: ReadonlySet<string> = new Set(['HUBBLE_UNEXPECTED']);
+
+export const HUBBLE_NO_ORDER_REFUND_REASON = 'Hubble confirmed no order for this reference — refunded';
+
+/**
+ * Post-refund review flags (set on a Hubble order whose points were already returned, when a Hubble
+ * webhook / Hubble answer arrives later). Ops clear them with "Acknowledge — resolved" only — retry /
+ * manual fulfilment do not apply to a refunded order. (Acknowledge also clears ANY flag left on a
+ * terminal FAILED / CANCELLED / RETURNED order — see acknowledgeHubbleFlag.)
+ */
+export const HUBBLE_POST_REFUND_FLAGS: ReadonlySet<string> = new Set([
+  'HUBBLE_ISSUED_AFTER_REFUND',
+  'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND',
+]);
+
+/**
+ * Reconcile reasons that signal a possible DOUBLE issuance (a manual code + a Hubble voucher). A Hubble
+ * delivery does NOT clear these (ops must look); every other open flag (INDETERMINATE, UNEXPECTED,
+ * PROCESSING_NOT_FOUND, WEBHOOK_BUT_NOT_FOUND, SUCCESS_NO_CODE, PROCESSING_CLAIM_LOST, UNKNOWN_STATUS:*, …)
+ * is closed by the delivery itself. Any flag on a DELIVERED order is acknowledgeable.
+ */
+export const HUBBLE_DOUBLE_ISSUE_REASONS: ReadonlySet<string> = new Set([
+  'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT',
+  'HUBBLE_PROCESSING_AFTER_MANUAL',
+  'HUBBLE_FAILED_VOUCHER_PRESENT',
+]);
+
+/** Minimum note length for an Acknowledge forced while Hubble is unreachable (the recheck failed). */
+export const HUBBLE_FORCED_ACK_MIN_NOTE = 20;
+
+/** Reasons that imply Hubble HOLDS an order (Acknowledge on a refunded order re-checks Hubble first). */
+const HUBBLE_HAS_ORDER_REASON = /^HUBBLE_(SUCCESS|PROCESSING|UNKNOWN_STATUS)/;
+
+/** Member copy for every stuck / unknown Hubble state at confirm (owner-approved wording). */
+export const HUBBLE_PENDING_MEMBER_COPY =
+  'Redemption confirmed. Your voucher is taking longer than usual — we’re checking with the voucher provider. It will appear in your orders once issued; our team will follow up if there’s a problem.';
+
+/** Confirm-time canary bounds (the member is waiting): ≤ 2 candidates, ≤ 20 s in total. */
+const HUBBLE_CONFIRM_CANARY = { maxTries: 2, budgetMs: 20_000 } as const;
 
 /** Statuses that prove an order got past OTP confirmation (points were deducted). */
 const REACHED_CONFIRMED_STATUSES: RedemptionStatus[] = [
@@ -352,6 +436,12 @@ const REACHED_CONFIRMED_STATUSES: RedemptionStatus[] = [
   RedemptionStatus.RETURNED,
   RedemptionStatus.FAILED,
 ];
+
+/** Cap a problem-only error list at UPLOAD_ECHO_MAX_ROWS (memory-safety). */
+function cappedFulfilmentErrors<T>(errors: T[]): { errors: T[]; errorsTruncated: boolean } {
+  const e = problemRowsEcho(errors, () => true);
+  return { errors: e.problemRows, errorsTruncated: e.problemRowsTruncated };
+}
 
 @Injectable()
 export class RewardsService {
@@ -3086,6 +3176,8 @@ export class RewardsService {
         ? ({
             ...meta,
             hubbleNeedsReconcile: false,
+            hubbleLatestReason: null,
+            hubbleLatestReasonAt: null,
             hubbleStatus: 'RELEASED',
             hubbleReleasedAt: new Date().toISOString(),
             hubbleReleasedBy: user.sub,
@@ -3166,7 +3258,10 @@ export class RewardsService {
    * POST /v1/rewards/orders/:id/hubble-reconcile — "Retry with Hubble" (GIFSY_ADMIN only): the ops
    * exit for an order flagged hubbleNeedsReconcile. Runs the EXISTING webhook reconcile
    * (get-by-reference → apply the authoritative Hubble state idempotently; never places a new
-   * Hubble order, never refunds off a miss) for this one order, and audits who ran it + the outcome.
+   * Hubble order) for this one order, and audits who ran it + the outcome. A CONFIRMED "no Hubble
+   * order" (404) on an un-acknowledged order older than HUBBLE_NO_ORDER_REFUND_MIN_AGE_MS fails +
+   * refunds it (outcome REFUNDED_NO_HUBBLE_ORDER); younger → PENDING_NO_HUBBLE_ORDER_TOO_RECENT; a
+   * not-found the canary lookup can't verify → NO_HUBBLE_ORDER_UNVERIFIED (not refunded).
    */
   async retryHubbleReconcile(user: JwtPayload, id: string) {
     if (user.role !== 'GIFSY_ADMIN') {
@@ -3179,7 +3274,7 @@ export class RewardsService {
     });
     if (!order) throw new NotFoundException('Order not found');
     const before = (order.metadata as Record<string, unknown> | null)?.hubbleReconcileReason ?? null;
-    const outcome = await this.reconcileHubbleOrder(order.id);
+    const outcome = await this.reconcileHubbleOrder(order.id, { actorId: user.sub, source: 'OPS_RETRY' });
     await this.prisma.auditLog.create({
       data: {
         actorId: user.sub,
@@ -3382,7 +3477,8 @@ export class RewardsService {
       succeeded,
       skipped,
       failed: errors.length,
-      errors,
+      // Memory-safety (2026-11-13): the error list is capped at 500 (failed = true total).
+      ...cappedFulfilmentErrors(errors),
     };
   }
 
@@ -3835,15 +3931,36 @@ export class RewardsService {
   ): Promise<{ orderId: string; status: string; message: string }> {
     const outcome = await this.issueHubbleVoucherForOrder(order.id, ctx.clientId, ctx.actorId);
 
-    // Map the outcome to a member-facing status + message + notification event.
-    const isDelivered = outcome === 'DELIVERED';
-    const isFailed = outcome === 'FAILED_REFUNDED';
+    // Map the outcome to a member-facing status + message + notification event. Only DELIVERED,
+    // PROCESSING and FAILED_REFUNDED (incl. a clean definitive-rejection refund) have their own copy;
+    // EVERY other outcome is a stuck / unknown state → the "taking longer… our team will follow up"
+    // copy (never "shortly", never a refund promise). A SKIPPED / lost-claim outcome reports the
+    // order's REAL state (re-read), never an assumed CONFIRMED.
+    let state: 'DELIVERED' | 'PROCESSING' | 'FAILED' | 'PENDING' =
+      outcome === this.HUBBLE_OUTCOME.DELIVERED
+        ? 'DELIVERED'
+        : outcome === this.HUBBLE_OUTCOME.PROCESSING
+          ? 'PROCESSING'
+          : outcome === this.HUBBLE_OUTCOME.FAILED_REFUNDED
+            ? 'FAILED'
+            : 'PENDING';
+    if (outcome === this.HUBBLE_OUTCOME.SKIPPED) {
+      const now = await this.prisma.redemptionOrder
+        .findFirst({ where: { id: order.id }, select: { status: true, voucherCode: true, pointsDeducted: true } })
+        .catch(() => null);
+      if (now?.status === RedemptionStatus.DELIVERED && hasIssuedVoucher(now.voucherCode)) state = 'DELIVERED';
+      else if (now && this.isTerminalRefundStatus(now.status) && now.pointsDeducted === 0) state = 'FAILED';
+    }
+    const isDelivered = state === 'DELIVERED';
+    const isFailed = state === 'FAILED';
     const status = isDelivered ? 'DELIVERED' : isFailed ? 'FAILED' : 'CONFIRMED';
     const message = isDelivered
       ? 'Redemption confirmed. Your voucher has been issued — view it in your orders.'
       : isFailed
         ? 'We could not issue your voucher, so your points have been refunded. Please try again.'
-        : 'Redemption confirmed. Your voucher is being issued and will appear shortly.';
+        : state === 'PROCESSING'
+          ? 'Redemption confirmed. Your voucher is being issued and will appear shortly.'
+          : HUBBLE_PENDING_MEMBER_COPY;
 
     if (isDelivered) {
       // Voucher is live — send the OWNER their CODE (in-app bell + config-driven WhatsApp via the
@@ -3913,6 +4030,27 @@ export class RewardsService {
     FAILED_REFUNDED: 'FAILED_REFUNDED',
     PENDING_RECONCILE: 'PENDING_RECONCILE',
     SKIPPED: 'SKIPPED',
+    /** Ops retry: Hubble said it holds no order for our reference → failed + refunded. */
+    REFUNDED_NO_HUBBLE_ORDER: 'REFUNDED_NO_HUBBLE_ORDER',
+    /** Ops retry: Hubble says no order, but the place attempt is younger than the safety margin → kept pending. */
+    PENDING_NO_HUBBLE_ORDER_TOO_RECENT: 'PENDING_NO_HUBBLE_ORDER_TOO_RECENT',
+    /** Hubble says no order, but the order is not provably un-placed (or it came via webhook) → ops review. */
+    NO_HUBBLE_ORDER_NOT_REFUNDABLE: 'NO_HUBBLE_ORDER_NOT_REFUNDABLE',
+    /**
+     * Ops retry: Hubble's lookup said "no order", but the canary lookup of a KNOWN Hubble order (same
+     * tenant + account) did not come back as that order — the not-found can't be trusted (wrong route /
+     * base path / gateway 404, Hubble degraded, or no canary exists yet) → NOT refunded, kept pending.
+     */
+    NO_HUBBLE_ORDER_UNVERIFIED: 'NO_HUBBLE_ORDER_UNVERIFIED',
+    /**
+     * Confirm-time: the place call ended INDETERMINATE (timeout / abort / network / 5xx / any failure
+     * that is not a definitive Hubble rejection) and Hubble had no order yet (or could not be asked) —
+     * Hubble may still create it, so NOT refunded: CONFIRMED + HUBBLE_INDETERMINATE; only the aged,
+     * canary-gated ops "Retry with Hubble" may refund it.
+     */
+    PENDING_INDETERMINATE: 'PENDING_INDETERMINATE',
+    /** Ops retry on an order already refunded (no Hubble order) that is flagged for review after a late webhook. */
+    ALREADY_REFUNDED_FLAGGED: 'ALREADY_REFUNDED_FLAGGED',
   } as const;
 
   /**
@@ -4000,6 +4138,7 @@ export class RewardsService {
           order,
           `₹${amount} is not an amount this brand can issue right now (not sent to Hubble)`,
           actorId,
+          'NOT_SENT',
         );
         return refunded ? this.HUBBLE_OUTCOME.FAILED_REFUNDED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
       }
@@ -4007,6 +4146,14 @@ export class RewardsService {
       // Place the order (referenceId = our order id = the idempotency key). On ANY
       // thrown error, recover authoritative state by referenceId before deciding.
       let body: HubbleOrderResult | null;
+      // Place-attempt evidence (read by the no-Hubble-order refund): WHEN we called Hubble, WHICH
+      // Hubble account (non-secret fingerprint), and — the moment placeOrder returns — that Hubble
+      // RESPONDED with an order body (+ its id). Best-effort, compare-and-set on the row version.
+      await this.recordHubblePlaceEvidence(order, {
+        hubblePlaceAttemptAt: new Date().toISOString(),
+        hubblePlaceResponded: false,
+        hubbleAccount: this.hubble.accountFingerprint(),
+      });
       try {
         body = await this.hubble.placeOrder({
           productId,
@@ -4015,9 +4162,18 @@ export class RewardsService {
           denominationDetails: [{ denomination: amount, quantity: 1 }],
           customerDetails: null, // B2B
         });
+        await this.recordHubblePlaceEvidence(order, {
+          hubblePlaceResponded: true,
+          hubblePlaceOrderId: body?.id ?? body?.orderId ?? null,
+        });
       } catch (placeErr) {
+        // DEFINITIVE rejection (HTTP 400/422 with Hubble's own error body — Hubble read the request and
+        // refused it) vs INDETERMINATE (timeout / abort / network / 5xx / anything else — Hubble may
+        // still create the order seconds later). Owner 2026-11-15: only a definitive rejection may be
+        // refunded at confirm time.
+        const rejected = placeErr instanceof HubblePlaceOrderRejectedError;
         this.logger.warn(
-          `[hubble] placeOrder threw for order ${order.orderNumber}; recovering by reference: ${placeErr}`,
+          `[hubble] placeOrder ${rejected ? 'REJECTED' : 'failed (indeterminate)'} for order ${order.orderNumber}; recovering by reference: ${placeErr}`,
         );
         try {
           body = await this.hubble.getOrderByReference(order.id);
@@ -4028,16 +4184,39 @@ export class RewardsService {
             `[hubble] indeterminate state for order ${order.orderNumber} (place + recover both failed): ${recoverErr}`,
           );
           await this.markHubblePendingReconcile(order.id, 'HUBBLE_INDETERMINATE');
-          return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+          return this.HUBBLE_OUTCOME.PENDING_INDETERMINATE;
+        }
+        if (body === null && !rejected) {
+          // The place call is indeterminate and Hubble has no order YET — it may not have persisted it
+          // (a 15 s timeout, a dropped connection). NEVER refund here: leave CONFIRMED +
+          // HUBBLE_INDETERMINATE; only the aged (HUBBLE_NO_ORDER_REFUND_MIN_AGE_MS), canary-gated ops
+          // "Retry with Hubble" may refund it.
+          this.logger.error(
+            `[hubble] order ${order.orderNumber}: placeOrder indeterminate and Hubble has no order yet — NOT refunded; left for the aged ops retry`,
+          );
+          await this.markHubblePendingReconcile(order.id, 'HUBBLE_INDETERMINATE');
+          return this.HUBBLE_OUTCOME.PENDING_INDETERMINATE;
         }
         if (body === null) {
-          // Definitively never placed (404 on recovery) → safe to refund.
+          // Hubble DEFINITIVELY rejected the place call and has no order → refund now, but ONLY once
+          // the CANARY proves the lookup really answers for this Hubble account (a wrong-route /
+          // gateway 404 must never refund an order Hubble may hold — see verifyHubbleNotFoundCanary).
+          // Unverified → NOT refunded: CONFIRMED + HUBBLE_INDETERMINATE, retryable by ops.
+          // Bounded at confirm (the member is waiting): ≤ 2 candidates / ≤ 20 s; exhausted → fail closed.
+          const canary = await this.verifyHubbleNotFoundCanary(order, clientId, HUBBLE_CONFIRM_CANARY);
+          if (!canary.ok) {
+            await this.markHubblePendingReconcile(order.id, 'HUBBLE_INDETERMINATE');
+            await this.recordNoOrderUnverified(order, canary, actorId, 'CONFIRM');
+            return this.HUBBLE_OUTCOME.PENDING_INDETERMINATE;
+          }
+          // Rejected + verified "no order" → refund immediately (no age gate: Hubble refused the request).
           // Blocked (a voucher code is on the order) → NOT refunded: report pending, never
           // "points refunded" to the member.
           const refunded = await this.refundAndFailHubble(
             order,
-            'Hubble order was not placed (not found on recovery)',
+            `Hubble rejected the order (${(placeErr as HubblePlaceOrderRejectedError).hubbleCode ?? `HTTP ${(placeErr as HubblePlaceOrderRejectedError).httpStatus}`}) — not placed`,
             actorId,
+            'REJECTED',
           );
           return refunded ? this.HUBBLE_OUTCOME.FAILED_REFUNDED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
         }
@@ -4059,7 +4238,11 @@ export class RewardsService {
    * authoritative Hubble state by reference and apply the terminal transition
    * idempotently. Does NOT place a new order. NEVER throws (returns an outcome string).
    */
-  async reconcileHubbleOrder(referenceId: string): Promise<string> {
+  async reconcileHubbleOrder(
+    referenceId: string,
+    opts: { actorId?: string; source?: 'WEBHOOK' | 'OPS_RETRY'; webhookStatus?: string | null } = {},
+  ): Promise<string> {
+    const source = opts.source ?? 'WEBHOOK';
     try {
       // Resolve the tenant from the order itself (the webhook carries no clientId).
       const owner = await this.prisma.redemptionOrder.findFirst({
@@ -4071,7 +4254,32 @@ export class RewardsService {
 
       const order = await this.loadHubbleOrder(referenceId, clientId);
       if (!order) return this.HUBBLE_OUTCOME.SKIPPED;
-      if (this.isHubbleOrderResolved(order)) return this.HUBBLE_OUTCOME.SKIPPED;
+      if (this.isHubbleOrderResolved(order)) {
+        // Resolved orders are NEVER re-applied (no delivery, no second refund). One exception gets a
+        // check: a Hubble WEBHOOK for ANY Hubble gift-card order whose points were refunded (no-order
+        // refund, Hubble FAILED, rejected placement, …) — Hubble may now hold a voucher for refunded
+        // points, so it is re-checked against Hubble and flagged, never SKIPPED silently (see
+        // checkLateWebhookAfterNoOrderRefund).
+        if (this.isRefundedHubbleGiftCard(order)) {
+          if (source === 'WEBHOOK') {
+            // A FAILED webhook for an order Hubble ITSELF reported FAILED (and we refunded on that body)
+            // just repeats what we know — no lookup, nothing to flag.
+            if (
+              (opts.webhookStatus ?? '').toUpperCase() === 'FAILED' &&
+              this.refundSourceOf(order) === 'HUBBLE_FAILED'
+            ) {
+              this.logger.log(`[hubble] order ${order.orderNumber}: FAILED webhook for a Hubble-FAILED refunded order — nothing to do`);
+              return this.HUBBLE_OUTCOME.SKIPPED;
+            }
+            return (await this.checkLateWebhookAfterNoOrderRefund(order, 'WEBHOOK', opts.webhookStatus ?? undefined)).outcome;
+          }
+          // Ops retry on such an order: say it is refunded AND still under review — not "nothing to do".
+          if (this.metaOf(order).hubbleNeedsReconcile === true) {
+            return this.HUBBLE_OUTCOME.ALREADY_REFUNDED_FLAGGED;
+          }
+        }
+        return this.HUBBLE_OUTCOME.SKIPPED;
+      }
 
       // AUDIT-FIX (gating asymmetry): re-assert the SAME eligibility the issue path uses
       // (GIFT_CARD + a Hubble productId on the item + tenant flag ON) before applying any
@@ -4093,12 +4301,22 @@ export class RewardsService {
         return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
       }
       if (body === null) {
-        // A webhook/reconcile for an order Hubble has no record of is anomalous — do NOT
-        // refund off a reconcile miss (a transient 404 could double with a later success).
+        // Hubble's own "no such order" (a Hubble-shaped JSON 404 after a successful auth — every
+        // transport / auth / 5xx / timeout / unrecognised-404 error THROWS above instead).
         this.logger.warn(`[hubble] reconcile: no Hubble order for reference ${referenceId}`);
-        return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+        if (source === 'WEBHOOK') {
+          // A SIGNED Hubble webhook is itself evidence Hubble holds this order; a not-found on the
+          // follow-up lookup contradicts it. NEVER refund from here — flag it for ops.
+          this.logger.error(
+            `[hubble] order ${order.orderNumber}: Hubble webhook received but get-by-reference says no order — NOT refunded; flagged for ops`,
+          );
+          await this.markHubblePendingReconcile(order.id, 'HUBBLE_WEBHOOK_BUT_NOT_FOUND');
+          return this.HUBBLE_OUTCOME.NO_HUBBLE_ORDER_NOT_REFUNDABLE;
+        }
+        // Ops retry: refund ONLY when provably safe (see resolveNoHubbleOrder).
+        return await this.resolveNoHubbleOrder(order, clientId, opts.actorId);
       }
-      return await this.applyHubbleBody(order, body);
+      return await this.applyHubbleBody(order, body, opts.actorId);
     } catch (e) {
       this.logger.error(`[hubble] reconcileHubbleOrder(${referenceId}) unexpected error: ${e}`);
       return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
@@ -4193,18 +4411,22 @@ export class RewardsService {
   ): Promise<string> {
     const status = (body.status ?? '').toUpperCase();
     if (status === 'SUCCESS') {
-      await this.storeHubbleSuccess(order, body, actorId);
-      return this.HUBBLE_OUTCOME.DELIVERED;
+      // DELIVERED only when the order now really holds a delivered code. A SUCCESS that could not
+      // be stored (no code in the payload / a manual code already on the order) was left pending
+      // reconcile — report that, so the confirm never tells the member "issued" for a code they
+      // can't see.
+      return await this.storeHubbleSuccess(order, body, actorId);
     }
     if (status === 'PROCESSING') {
-      await this.markHubbleProcessing(order, body, actorId);
-      return this.HUBBLE_OUTCOME.PROCESSING;
+      // An override outcome when the claim lost to a no-order refund (late-webhook check ran instead).
+      return (await this.markHubbleProcessing(order, body, actorId)) ?? this.HUBBLE_OUTCOME.PROCESSING;
     }
     if (status === 'FAILED') {
       const refunded = await this.refundAndFailHubble(
         order,
         body.failureReason ?? 'Hubble reported FAILED',
         actorId,
+        'HUBBLE_FAILED',
       );
       return refunded ? this.HUBBLE_OUTCOME.FAILED_REFUNDED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
     }
@@ -4222,12 +4444,18 @@ export class RewardsService {
    * confirm issuance can only win once. Card data is stored on the order
    * (voucherCode) + metadata; the response contract is unchanged (the partner/rep UI
    * already renders voucherCode for GIFT_CARD fulfilment).
+   *
+   * @returns DELIVERED when the order is now DELIVERED with a code (this call won the claim, or a
+   *   concurrent apply already delivered it); PENDING_RECONCILE when the SUCCESS could NOT be stored
+   *   and the order was left pending (no code in the payload, a manual code already on the open order,
+   *   or any other lost claim) — the caller must not report "issued" then; or, when the claim lost to
+   *   a concurrent NO-ORDER REFUND, the late-webhook check's outcome (HUBBLE_ISSUED_AFTER_REFUND flag).
    */
   private async storeHubbleSuccess(
     order: HubbleLoadedOrder,
     body: HubbleOrderResult,
     actorId?: string,
-  ): Promise<void> {
+  ): Promise<string> {
     const voucher = (body.vouchers ?? [])[0];
     const { code: voucherCode, pin: voucherPin } = hubbleVoucherCredentials(voucher);
     if (!voucherCode) {
@@ -4237,7 +4465,7 @@ export class RewardsService {
         `[hubble] order ${order.orderNumber} SUCCESS but no voucher code in payload — left pending`,
       );
       await this.markHubblePendingReconcile(order.id, 'HUBBLE_SUCCESS_NO_CODE');
-      return;
+      return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
     }
 
     const now = new Date();
@@ -4278,8 +4506,17 @@ export class RewardsService {
       // still-open order — Hubble issued a 2nd voucher. Never overwrite; flag it for ops loudly.
       const now2 = await this.prisma.redemptionOrder.findFirst({
         where: { id: order.id },
-        select: { status: true, voucherCode: true, voucherProvider: true },
+        select: { status: true, voucherCode: true, voucherProvider: true, metadata: true },
       });
+      // Lost to a REFUND / terminal move (ops no-order refund, a Hubble FAILED, a cancel…) and now
+      // Hubble reports SUCCESS: never applied — re-check Hubble and flag HUBBLE_ISSUED_AFTER_REFUND.
+      if (now2 && this.isTerminalRefundStatus(now2.status)) {
+        return (await this.checkLateWebhookAfterNoOrderRefund(
+          { id: order.id, orderNumber: order.orderNumber, metadata: now2.metadata },
+          'RACE',
+          'SUCCESS',
+        )).outcome;
+      }
       if (
         now2 &&
         hasIssuedVoucher(now2.voucherCode) &&
@@ -4289,18 +4526,55 @@ export class RewardsService {
           `[hubble] order ${order.orderNumber}: Hubble SUCCESS but a manual voucher code is already on the order — NOT overwritten; flagged for ops (possible double issuance)`,
         );
         await this.markHubblePendingReconcile(order.id, 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT');
+        return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
       }
-      return;
+      // A concurrent apply already delivered it (with a code) → genuinely delivered. Anything
+      // else (e.g. the order was refunded/cancelled meanwhile) is NOT a delivered voucher.
+      return !!now2 && now2.status === RedemptionStatus.DELIVERED && hasIssuedVoucher(now2.voucherCode)
+        ? this.HUBBLE_OUTCOME.DELIVERED
+        : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
     }
     this.logger.log(`[hubble] order ${order.orderNumber} voucher issued + marked DELIVERED`);
+    // The delivery resolves every PENDING-type flag (INDETERMINATE, UNEXPECTED, PROCESSING_NOT_FOUND,
+    // WEBHOOK_BUT_NOT_FOUND, SUCCESS_NO_CODE, CLAIM_LOST, …) — otherwise a DELIVERED order would stay
+    // flagged forever (Retry skips a delivered order). Double-issuance flags stay for ops (and are
+    // acknowledgeable on a DELIVERED order). CAS on the re-read row: never clears a flag raised since.
+    const loadedMeta = this.metaOf(order);
+    await this.patchOrderMetadata(order.id, (cur) => {
+      const m = this.metaOf(cur);
+      const reason = typeof m.hubbleReconcileReason === 'string' ? m.hubbleReconcileReason : null;
+      if (cur.status !== RedemptionStatus.DELIVERED || m.hubbleNeedsReconcile !== true) return null;
+      // Ops took this order over (manual override / release) or it ever carried a double-issuance
+      // reason → a Hubble delivery does NOT prove it's resolved; leave the flag for ops.
+      if (
+        loadedMeta.hubbleStatus === 'MANUAL_OVERRIDE' ||
+        loadedMeta.hubbleStatus === 'RELEASED' ||
+        this.hasDoubleIssueHistory(loadedMeta) ||
+        this.hasDoubleIssueHistory(m)
+      ) {
+        return null;
+      }
+      return {
+        hubbleNeedsReconcile: false,
+        hubbleLatestReason: null,
+        hubbleLatestReasonAt: null,
+        hubbleReconcileResolution: this.HUBBLE_OUTCOME.DELIVERED,
+        hubbleResolvedPreviousReason: reason,
+      };
+    });
+    return this.HUBBLE_OUTCOME.DELIVERED;
   }
 
-  /** PROCESSING — mark the order PROCESSING (pending external); the webhook completes it. */
+  /**
+   * PROCESSING — mark the order PROCESSING (pending external); the webhook completes it.
+   * @returns undefined normally (caller reports PROCESSING); an override outcome when the claim lost
+   *   to a concurrent no-order refund (the late-webhook check ran instead).
+   */
   private async markHubbleProcessing(
     order: HubbleLoadedOrder,
     body: HubbleOrderResult,
     actorId?: string,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     // Ops already took this order over (manual override / release) or a code is already on it:
     // Hubble reporting PROCESSING now must NOT re-stamp provider='Hubble' over the manual state —
     // flag it for ops (possible double issuance) instead.
@@ -4345,8 +4619,18 @@ export class RewardsService {
       // us (manual takeover, a code, a status move) — never overwrite, flag for ops.
       const now = await this.prisma.redemptionOrder.findFirst({
         where: { id: order.id },
-        select: { status: true },
+        select: { status: true, metadata: true },
       });
+      // Lost to a REFUND / terminal move: never re-stamp; re-check Hubble and flag the post-refund
+      // HUBBLE_ISSUED_AFTER_REFUND (ack-able) instead of the open-order CLAIM_LOST flag (which a FAILED
+      // order could never clear).
+      if (now && this.isTerminalRefundStatus(now.status)) {
+        return (await this.checkLateWebhookAfterNoOrderRefund(
+          { id: order.id, orderNumber: order.orderNumber, metadata: now.metadata },
+          'RACE',
+          'PROCESSING',
+        )).outcome;
+      }
       if (now?.status !== RedemptionStatus.PROCESSING && now?.status !== RedemptionStatus.DELIVERED) {
         this.logger.error(
           `[hubble] order ${order.orderNumber}: Hubble PROCESSING claim lost (order changed meanwhile) — flagged for ops`,
@@ -4367,7 +4651,9 @@ export class RewardsService {
   private async refundAndFailHubble(
     order: HubbleLoadedOrder,
     reason: string,
-    actorId?: string,
+    actorId: string | undefined,
+    /** Why: Hubble's own FAILED body / a definitive placement rejection / never sent (amount check). */
+    source: 'HUBBLE_FAILED' | 'REJECTED' | 'NOT_SENT',
   ): Promise<boolean> {
     // Returns true when THIS call moved the order to FAILED (points refunded if still debited);
     // false when it did not (already terminal, or BLOCKED by an issued voucher code).
@@ -4400,6 +4686,12 @@ export class RewardsService {
           tx,
         );
       }
+      // Metadata RE-READ inside the tx (after the refund claim row-locked the order) so the stamp
+      // below never merges onto a stale read. The stamp marks the order as refunded-on-Hubble (a late
+      // Hubble webhook is re-checked, never silently skipped) and CLOSES any open reconcile flag — a
+      // FAILED order must never carry an open-order flag that Acknowledge rejects and Retry can't clear.
+      const cur = await tx.redemptionOrder.findFirst({ where: { id: order.id }, select: { metadata: true } });
+      const curMeta = cur ? (cur.metadata ?? null) : order.metadata;
       // Flip to FAILED (from any non-terminal state) + zero the value + record the reason.
       // Shared transition: the FAILED history row is now written only when the flip wins
       // (previously unconditional → a repeat failure on an already-terminal order added a
@@ -4426,6 +4718,21 @@ export class RewardsService {
           voucherProvider: 'Hubble',
           cancelReason: reason.slice(0, 500),
           notes: `Hubble issuance failed: ${reason}`.slice(0, 500),
+          metadata: this.mergeOrderMetadata(curMeta, {
+            hubbleNeedsReconcile: false,
+            hubbleLatestReason: null,
+            hubbleLatestReasonAt: null,
+            hubbleReconcileResolution: this.HUBBLE_OUTCOME.FAILED_REFUNDED,
+            hubbleRefund: {
+              at: new Date().toISOString(),
+              by: actorId ?? null,
+              source,
+              reason: reason.slice(0, 300),
+              previousReason: this.metaOf({ metadata: curMeta }).hubbleNeedsReconcile === true
+                ? (this.metaOf({ metadata: curMeta }).hubbleReconcileReason ?? null)
+                : null,
+            },
+          }),
         },
       });
     });
@@ -4454,30 +4761,879 @@ export class RewardsService {
     return true;
   }
 
-  /** Flag an order as needing reconcile (money held pending webhook / ops), no status flip. */
-  private async markHubblePendingReconcile(orderId: string, reason: string): Promise<void> {
+  /** An order's metadata as a plain object (never null / array). */
+  private metaOf(order: { metadata: Prisma.JsonValue | null }): Record<string, unknown> {
+    const m = order.metadata;
+    return m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Merge place-attempt evidence into the order's metadata — a compare-and-set on the row version
+   * as read (`updatedAt`), stamping a KNOWN new updatedAt so the in-memory order stays the current
+   * version for the claims that follow (markHubbleProcessing pins updatedAt). Best-effort: NEVER
+   * throws (it runs right after a successful placeOrder, whose catch must not see a DB error); a
+   * lost CAS / DB error leaves the row and the in-memory order untouched and is logged.
+   */
+  private async recordHubblePlaceEvidence(
+    order: HubbleLoadedOrder,
+    patch: Record<string, unknown>,
+  ): Promise<void> {
     try {
-      const existing = await this.prisma.redemptionOrder.findFirst({
-        where: { id: orderId },
-        select: { metadata: true },
-      });
-      const prevMeta =
-        existing?.metadata && typeof existing.metadata === 'object'
-          ? (existing.metadata as Record<string, unknown>)
-          : {};
+      const now = new Date();
+      const metadata = this.mergeOrderMetadata(order.metadata, patch);
       await this.prisma.redemptionOrder.update({
-        where: { id: orderId },
+        where: { id: order.id, ...(order.updatedAt ? { updatedAt: order.updatedAt } : {}) },
+        data: { metadata, updatedAt: now },
+      });
+      order.metadata = metadata as Prisma.JsonValue;
+      order.updatedAt = now;
+    } catch (e) {
+      this.logger.error(
+        `[hubble] could not record place-attempt evidence on order ${order.orderNumber} (non-fatal): ${e}`,
+      );
+    }
+  }
+
+  /**
+   * Why an order Hubble says it has no order for may NOT be auto-refunded (null = refundable).
+   * Refundable only when the order provably never got a Hubble acknowledgement, on the SAME
+   * Hubble account it was placed with, with an exact row version to pin the claim to.
+   */
+  private whyNoOrderNotRefundable(order: HubbleLoadedOrder): string | null {
+    const meta = this.metaOf(order);
+    const reason = typeof meta.hubbleReconcileReason === 'string' ? meta.hubbleReconcileReason : null;
+    const supplierRef = typeof order.supplierOrderRef === 'string' ? order.supplierOrderRef.trim() : '';
+    if (order.status !== RedemptionStatus.CONFIRMED) return `status ${order.status}`;
+    if (hasIssuedVoucher(order.voucherCode)) return 'a voucher code is on the order';
+    if (isHubbleProvider(order.voucherProvider) || supplierRef !== '') return 'Hubble provider / order ref on the order';
+    if (meta.hubbleStatus != null || meta.hubbleOrderId != null || meta.hubbleVoucher != null) return 'Hubble acknowledged the order';
+    if (meta.hubblePlaceResponded === true || meta.hubblePlaceOrderId != null) return 'Hubble responded to the place call';
+    if (meta.hubbleNeedsReconcile !== true || !reason) return 'not flagged for reconcile';
+    const placeNeverResponded =
+      typeof meta.hubblePlaceAttemptAt === 'string' && meta.hubblePlaceResponded === false;
+    if (
+      !HUBBLE_NO_ORDER_REFUNDABLE_REASONS.has(reason) &&
+      !(HUBBLE_NO_ORDER_REFUNDABLE_WITH_PLACE_EVIDENCE.has(reason) && placeNeverResponded)
+    ) {
+      return `reason ${reason}`;
+    }
+    if (!(order.pointsDeducted > 0)) return 'no points debited';
+    if (!order.updatedAt) return 'no row version to pin the refund to';
+    // Same Hubble account the order was placed with (orders placed before this record existed carry
+    // none — accepted, see report). A different / unconfigured account can't vouch for "no order".
+    if (meta.hubbleAccount != null && !this.hubbleAccountMatchesNow(meta.hubbleAccount)) {
+      return 'placed with a different Hubble account / base URL than the one configured now';
+    }
+    return null;
+  }
+
+  /**
+   * A recorded account fingerprint (string, current or legacy host-only format) matches the account
+   * configured now. Anything non-string / unconfigured → no match.
+   */
+  private hubbleAccountMatchesNow(recorded: unknown): boolean {
+    return typeof recorded === 'string' && hubbleAccountFingerprintMatches(recorded, this.hubble.accountFingerprint());
+  }
+
+  /**
+   * CANARY for Hubble's "no order for this reference" (the not-found body is not pinned to a documented
+   * Hubble error code, so a wrong route / base path / gateway JSON 404 could look like it). Before a
+   * no-order refund, look up orders Hubble is KNOWN to hold — DELIVERED Hubble orders (voucherProvider
+   * 'Hubble' + a Hubble order ref) placed on the SAME Hubble account — through the SAME
+   * getOrderByReference. Hubble credentials are platform-wide (env), so this proves the ROUTE + ACCOUNT,
+   * not the tenant: a candidate of ANY tenant qualifies when its recorded account fingerprint matches;
+   * a legacy candidate (no fingerprint recorded) only when it is of the SAME tenant. Up to
+   * HUBBLE_CANARY_MAX_TRIES candidates, newest first; verified on the FIRST that comes back as that
+   * order with status SUCCESS (and, when present, the matching reference / Hubble order id). Fails
+   * CLOSED (no candidate, or none verified). Never throws.
+   */
+  private async verifyHubbleNotFoundCanary(
+    order: HubbleLoadedOrder,
+    clientId: string,
+    limits: { maxTries: number; budgetMs?: number } = { maxTries: 5 },
+  ): Promise<{ ok: true; canaryOrderId: string } | { ok: false; canaryOrderId: string | null; why: string }> {
+    const HUBBLE_CANARY_MAX_TRIES = limits.maxTries;
+    const deadline = limits.budgetMs ? Date.now() + limits.budgetMs : null;
+    // The fingerprints a same-account candidate may carry: the current one, and its legacy host-only form.
+    const current = this.hubble.accountFingerprint();
+    const fps = current ? [...new Set([current, current.replace(/^([^/#]*)\/[^#]*#/, '$1#')])] : [];
+    let rows: { id: string; supplierOrderRef: string | null; metadata: Prisma.JsonValue; partner?: { clientId: string } | null }[];
+    try {
+      rows = await this.prisma.redemptionOrder.findMany({
+        where: {
+          id: { not: order.id },
+          status: RedemptionStatus.DELIVERED,
+          deliveredAt: { not: null },
+          voucherProvider: { in: ['Hubble', 'hubble', 'HUBBLE'] },
+          supplierOrderRef: { not: null },
+          // Any tenant on the same Hubble account (fingerprint in SQL), or the same tenant (legacy rows
+          // without a fingerprint — re-checked below).
+          OR: [
+            ...fps.map((fp) => ({ metadata: { path: ['hubbleAccount'], equals: fp } })),
+            { partner: { clientId } },
+          ],
+        },
+        orderBy: [{ deliveredAt: 'desc' }, { updatedAt: 'desc' }],
+        take: 50,
+        select: { id: true, supplierOrderRef: true, metadata: true, partner: { select: { clientId: true } } },
+      });
+    } catch (e) {
+      return { ok: false, canaryOrderId: null, why: `canary lookup query failed: ${e}` };
+    }
+    const candidates = (rows ?? [])
+      .filter((c) => {
+        const ref = typeof c.supplierOrderRef === 'string' ? c.supplierOrderRef.trim() : '';
+        if (!ref) return false;
+        const acct = this.metaOf(c).hubbleAccount;
+        if (acct == null) return c.partner?.clientId === clientId; // legacy: same tenant only
+        return this.hubbleAccountMatchesNow(acct); // any tenant, same Hubble account
+      })
+      .slice(0, HUBBLE_CANARY_MAX_TRIES);
+    if (candidates.length === 0) {
+      return { ok: false, canaryOrderId: null, why: 'no delivered Hubble order on this Hubble account to verify against' };
+    }
+    const fails: string[] = [];
+    let tried = 0;
+    for (const canary of candidates) {
+      const left = deadline ? deadline - Date.now() : null;
+      if (left !== null && left <= 0) {
+        fails.push('time budget exhausted');
+        break;
+      }
+      tried++;
+      const why = await this.checkCanary(canary, left);
+      if (!why) return { ok: true, canaryOrderId: canary.id };
+      fails.push(`${canary.id}: ${why}`);
+    }
+    return {
+      ok: false,
+      canaryOrderId: candidates[Math.max(0, tried - 1)].id,
+      why: `no canary verified (${tried} tried) — ${fails.join('; ')}`,
+    };
+  }
+
+  /** One canary lookup: null = verified, else why not. Never throws. */
+  private async checkCanary(canary: { id: string; supplierOrderRef: string | null }, budgetMs: number | null = null): Promise<string | null> {
+    let body: HubbleOrderResult | null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const lookup = this.hubble.getOrderByReference(canary.id);
+      body = budgetMs === null
+        ? await lookup
+        : await Promise.race([
+            lookup,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error('canary time budget exhausted')), budgetMs);
+              (timer as { unref?: () => void }).unref?.();
+            }),
+          ]);
+    } catch (e) {
+      return `canary lookup failed: ${e}`;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (body === null) return 'canary lookup also returned "not found" for an order Hubble delivered';
+    const status = (body.status ?? '').toString().toUpperCase();
+    if (status !== 'SUCCESS') return `canary lookup returned status ${status || '(none)'}, not SUCCESS`;
+    if (body.referenceId != null && body.referenceId !== canary.id) return 'canary lookup returned a different reference';
+    const hubbleId = body.id ?? body.orderId ?? null;
+    const ref = (canary.supplierOrderRef ?? '').trim();
+    if (hubbleId != null && ref && String(hubbleId) !== ref) return 'canary lookup returned a different Hubble order id';
+    return null;
+  }
+
+  /**
+   * Record WHY a Hubble "no order" was not trusted (canary failed): `hubbleNoOrderUnverified` on the
+   * order (compare-and-set) + a HUBBLE_NO_ORDER_UNVERIFIED audit row. Best-effort, never throws.
+   */
+  private async recordNoOrderUnverified(
+    order: HubbleLoadedOrder,
+    canary: { canaryOrderId: string | null; why: string },
+    actorId: string | undefined,
+    source: 'CONFIRM' | 'OPS_RETRY',
+  ): Promise<void> {
+    const at = new Date().toISOString();
+    const why = canary.why.slice(0, 300);
+    this.logger.error(
+      `[hubble] order ${order.orderNumber}: Hubble says no order, but the not-found could not be verified (${why}) — NOT refunded; left for ops (${source})`,
+    );
+    await this.patchOrderMetadata(order.id, () => ({
+      hubbleNoOrderUnverified: { at, by: actorId ?? null, source, canaryOrderId: canary.canaryOrderId, why },
+    }));
+    await this.prisma.auditLog
+      .create({
         data: {
+          actorId: actorId ?? null,
+          action: 'UPDATE',
+          entityType: 'REDEMPTION_ORDER',
+          entityId: order.id,
           metadata: {
-            ...prevMeta,
-            hubbleNeedsReconcile: true,
-            hubbleReconcileReason: reason,
-            hubbleReconcileAt: new Date().toISOString(),
+            event: 'HUBBLE_NO_ORDER_UNVERIFIED',
+            orderNumber: order.orderNumber,
+            canaryOrderId: canary.canaryOrderId,
+            why,
+            source,
+          },
+        },
+      })
+      .catch((e: unknown) => this.logger.error(`[hubble] unverified-no-order audit failed for ${order.orderNumber}: ${e}`));
+  }
+
+  /**
+   * OPS "Retry with Hubble" got Hubble's "no order for this reference" (getOrderByReference → null:
+   * a Hubble-shaped JSON 404 after a successful auth). Fail + refund ONLY when provably safe
+   * (whyNoOrderNotRefundable) AND the place attempt is older than HUBBLE_NO_ORDER_REFUND_MIN_AGE_MS
+   * AND the canary lookup of a known Hubble order succeeds (verifyHubbleNotFoundCanary).
+   * Never called from the webhook path. Never throws.
+   */
+  private async resolveNoHubbleOrder(
+    order: HubbleLoadedOrder,
+    clientId: string,
+    actorId?: string,
+  ): Promise<string> {
+    const why = this.whyNoOrderNotRefundable(order);
+    if (why) {
+      this.logger.warn(
+        `[hubble] order ${order.orderNumber}: Hubble has no order for it, but it is not auto-refundable (${why}) — left for ops`,
+      );
+      return this.HUBBLE_OUTCOME.NO_HUBBLE_ORDER_NOT_REFUNDABLE;
+    }
+    const meta = this.metaOf(order);
+    const ms = (v: unknown) => (v ? new Date(v as string | Date).getTime() : NaN);
+    const createdMs = ms(order.createdAt);
+    // Latest of: order created, place attempt started, failed attempt flagged. Unknown creation
+    // time → too recent (never refund on a guess).
+    const anchorMs = Number.isFinite(createdMs)
+      ? Math.max(createdMs, ...[ms(meta.hubblePlaceAttemptAt), ms(meta.hubbleReconcileAt)].filter(Number.isFinite))
+      : NaN;
+    if (!Number.isFinite(anchorMs) || Date.now() - anchorMs < HUBBLE_NO_ORDER_REFUND_MIN_AGE_MS) {
+      this.logger.warn(
+        `[hubble] order ${order.orderNumber}: Hubble has no order yet, but the place attempt is under ${HUBBLE_NO_ORDER_REFUND_MIN_AGE_MS / 3600000} hours old — kept pending`,
+      );
+      return this.HUBBLE_OUTCOME.PENDING_NO_HUBBLE_ORDER_TOO_RECENT;
+    }
+
+    // CANARY: prove the lookup route really answers for this tenant's Hubble account before trusting
+    // its "not found" (see verifyHubbleNotFoundCanary). Unverified → no refund; record why.
+    const canary = await this.verifyHubbleNotFoundCanary(order, clientId);
+    if (!canary.ok) {
+      await this.recordNoOrderUnverified(order, canary, actorId, 'OPS_RETRY');
+      return this.HUBBLE_OUTCOME.NO_HUBBLE_ORDER_UNVERIFIED;
+    }
+
+    let refunded: { points: number } | null;
+    try {
+      refunded = await this.refundAndFailNoHubbleOrder(order, actorId, 'OPS_RETRY');
+    } catch (e) {
+      this.logger.error(`[hubble] order ${order.orderNumber}: no-Hubble-order refund rolled back: ${e}`);
+      return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+    }
+    if (!refunded) {
+      // Lost: a concurrent retry already refunded it (→ resolved), or the row changed since it was
+      // read (a new flag, a Hubble stamp, a code) → re-assess on the next retry.
+      const now = await this.prisma.redemptionOrder.findFirst({
+        where: { id: order.id },
+        select: { status: true, pointsDeducted: true },
+      });
+      return now?.status === RedemptionStatus.FAILED && now.pointsDeducted === 0
+        ? this.HUBBLE_OUTCOME.SKIPPED
+        : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+    }
+    this.logger.warn(
+      `[hubble] order ${order.orderNumber}: ${HUBBLE_NO_ORDER_REFUND_REASON} (${refunded.points} pts)`,
+    );
+    await this.notifyNoHubbleOrderRefunded(order.id, clientId, refunded.points);
+    return this.HUBBLE_OUTCOME.REFUNDED_NO_HUBBLE_ORDER;
+  }
+
+  /**
+   * The no-Hubble-order refund itself — the same primitives as refundAndFailHubble (wallet.reverse +
+   * the shared status transition + the issued-voucher block), but EXACTLY-ONCE against the row
+   * version the decision was made on:
+   *  - the refund amount and metadata are RE-READ inside the transaction, and that read must still
+   *    be the exact version decided on (updatedAt) — any write since (a concurrent reconcile flag such
+   *    as HUBBLE_SUCCESS_NO_CODE / UNKNOWN_STATUS / CLAIM_LOST, a Hubble stamp, a code) loses;
+   *  - the refund claim pins updatedAt + that exact pointsDeducted + CONFIRMED + no code / provider /
+   *    supplier ref. It row-locks the order for the rest of the tx, so the FAILED flip (from the same
+   *    re-read metadata) can't race; a lost flip throws and rolls the refund back.
+   * Does NOT stamp voucherProvider 'Hubble' (no Hubble order exists). Returns null when it lost.
+   */
+  private async refundAndFailNoHubbleOrder(
+    order: HubbleLoadedOrder,
+    actorId: string | undefined,
+    source: 'OPS_RETRY' | 'WEBHOOK',
+  ): Promise<{ points: number } | null> {
+    const at = new Date().toISOString();
+    return this.prisma.$transaction(async (tx) => {
+      const cur = await tx.redemptionOrder.findFirst({
+        where: { id: order.id },
+        select: { pointsDeducted: true, updatedAt: true, metadata: true },
+      });
+      if (
+        !cur ||
+        !order.updatedAt ||
+        !cur.updatedAt ||
+        new Date(cur.updatedAt).getTime() !== new Date(order.updatedAt).getTime() ||
+        !(cur.pointsDeducted > 0)
+      ) {
+        return null;
+      }
+      const points = cur.pointsDeducted;
+      const claim = await tx.redemptionOrder.updateMany({
+        where: {
+          id: order.id,
+          updatedAt: cur.updatedAt,
+          pointsDeducted: points,
+          status: RedemptionStatus.CONFIRMED,
+          AND: [
+            noIssuedVoucherGuard(order.voucherCode),
+            { OR: [{ voucherProvider: null }, { voucherProvider: '' }] },
+            { OR: [{ supplierOrderRef: null }, { supplierOrderRef: '' }] },
+          ],
+        },
+        data: { pointsDeducted: 0 },
+      });
+      if (claim.count === 0) return null;
+      await this.wallet.reverse(
+        order.partnerId,
+        points,
+        { referenceId: order.id, description: `Refund ${order.orderNumber} (voucher not issued)` },
+        tx,
+      );
+      const flip = await transitionOrderStatus(tx, {
+        orderId: order.id,
+        guard: {
+          status: RedemptionStatus.CONFIRMED,
+          pointsDeducted: 0,
+          ...noIssuedVoucherGuard(order.voucherCode),
+        },
+        fromStatus: RedemptionStatus.CONFIRMED,
+        toStatus: RedemptionStatus.FAILED,
+        changedById: actorId ?? null,
+        notes: `${HUBBLE_NO_ORDER_REFUND_REASON} (${points} pts)`.slice(0, 500),
+        data: {
+          valuePaise: 0n,
+          cancelReason: HUBBLE_NO_ORDER_REFUND_REASON,
+          notes: `Hubble issuance failed: ${HUBBLE_NO_ORDER_REFUND_REASON}`.slice(0, 500),
+          metadata: this.mergeOrderMetadata(cur.metadata, {
+            hubbleNeedsReconcile: false,
+            hubbleLatestReason: null,
+            hubbleLatestReasonAt: null,
+            hubbleReconcileResolution: this.HUBBLE_OUTCOME.REFUNDED_NO_HUBBLE_ORDER,
+            hubbleNoOrderRefund: {
+              at,
+              by: actorId ?? null,
+              previousReason: this.metaOf(cur).hubbleReconcileReason ?? null,
+              pointsRefunded: points,
+            },
+          }),
+        },
+      });
+      if (flip.count === 0) {
+        throw new Error('FAILED flip lost after the refund claim won — rolled back');
+      }
+      await tx.auditLog.create({
+        data: {
+          actorId: actorId ?? null,
+          action: 'UPDATE',
+          entityType: 'REDEMPTION_ORDER',
+          entityId: order.id,
+          metadata: {
+            event: 'HUBBLE_NO_ORDER_REFUNDED',
+            orderNumber: order.orderNumber,
+            reason: HUBBLE_NO_ORDER_REFUND_REASON,
+            reconcileReasonBefore: (this.metaOf(cur).hubbleReconcileReason ?? null) as Prisma.InputJsonValue,
+            pointsRefunded: points,
+            source,
           },
         },
       });
+      return { points };
+    });
+  }
+
+  /**
+   * The existing REDEMPTION_FAILED member notification (same event + channels as the confirm-time
+   * Hubble failure), to the outlet OWNER, naming the order + its date. Best-effort: never throws
+   * (the refund has already committed).
+   */
+  private async notifyNoHubbleOrderRefunded(orderId: string, clientId: string, points: number): Promise<void> {
+    try {
+      const row = await this.prisma.redemptionOrder.findFirst({
+        where: { id: orderId },
+        select: {
+          orderNumber: true,
+          createdAt: true,
+          reward: { select: { name: true } },
+          partner: { select: { userId: true, phone: true, ownerName: true } },
+        },
+      });
+      const userId = row?.partner?.userId;
+      if (!row || !userId) return;
+      const rewardName = row.reward?.name?.trim() || 'voucher';
+      const date = row.createdAt ? formatDateIST(new Date(row.createdAt)) : '';
+      const body =
+        `Your ${rewardName} redemption ${row.orderNumber}${date ? ` from ${date}` : ''} couldn't be completed. ` +
+        `${points} points have been returned to your wallet.`;
+      await this.notifications.notifyUserWithChannels({
+        clientId,
+        userId,
+        eventKey: 'REDEMPTION_FAILED' as EventKey,
+        recipientPhone: row.partner?.phone ?? null,
+        vars: {
+          ownerName: row.partner?.ownerName ?? 'Partner',
+          rewardName,
+          points,
+          orderId: row.orderNumber,
+          date,
+        },
+        subject: 'Redemption refunded',
+        body,
+        url: '/partner/rewards',
+        event: 'REDEMPTION_FAILED',
+      });
     } catch (e) {
-      this.logger.error(`[hubble] failed to flag order ${orderId} for reconcile: ${e}`);
+      this.logger.error(`[hubble] refund notification failed for order ${orderId} (non-fatal): ${e}`);
+    }
+  }
+
+  /** A terminal, points-returning status (the order can no longer be issued / retried). */
+  private isTerminalRefundStatus(status: RedemptionStatus | string | null | undefined): boolean {
+    return (
+      status === RedemptionStatus.FAILED ||
+      status === RedemptionStatus.CANCELLED ||
+      status === RedemptionStatus.RETURNED
+    );
+  }
+
+  /**
+   * A Hubble gift-card order (GIFT_CARD + a Hubble product on the item) that is terminal with its
+   * points returned — however it got there. A Hubble webhook for one is always re-checked + flagged.
+   */
+  private isRefundedHubbleGiftCard(order: HubbleLoadedOrder): boolean {
+    return (
+      this.isTerminalRefundStatus(order.status) &&
+      order.pointsDeducted === 0 &&
+      order.redemptionMode === PayoutMode.GIFT_CARD &&
+      !!this.extractHubbleProductId(order.reward?.metadata)
+    );
+  }
+
+  /**
+   * A Hubble webhook for a Hubble gift-card order whose points were already returned (no-order refund,
+   * Hubble FAILED / rejected placement refund, a cancel — see isRefundedHubbleGiftCard). NEVER applied
+   * (no delivery, no second refund). Instead re-check Hubble and record what it says (status,
+   * Hubble order id, whether a voucher exists — never the code):
+   *  - FAILED / Hubble "not found"     → nothing was issued: clear an unknown-state flag automatically;
+   *  - SUCCESS / PROCESSING / anything else → HUBBLE_ISSUED_AFTER_REFUND (high severity — Hubble may
+   *    have issued a voucher for refunded points); cleared only by ops "Acknowledge — resolved";
+   *  - lookup failed / not configured → HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND (unknown — ops check).
+   */
+  private async checkLateWebhookAfterNoOrderRefund(
+    order: Pick<HubbleLoadedOrder, 'id' | 'orderNumber' | 'metadata'>,
+    /**
+     * WEBHOOK: a signed Hubble webhook (`knownStatus` = the status the webhook itself reports, if any).
+     * RACE: a claim lost to a refund while Hubble had just answered with an order body (`knownStatus`).
+     * ACK: the pre-check before an ops Acknowledge (never clears, never raises an unknown flag — only
+     * ISSUED when Hubble reports an order).
+     */
+    mode: 'WEBHOOK' | 'RACE' | 'ACK',
+    knownStatus?: string,
+  ): Promise<{ outcome: string; check: { at: string; status: string; hubbleOrderId: string | null; voucherExists: boolean | null } }> {
+    const at = new Date().toISOString();
+    let check: { at: string; status: string; hubbleOrderId: string | null; voucherExists: boolean | null };
+    if (!this.hubble.isConfigured()) {
+      check = { at, status: 'NOT_CONFIGURED', hubbleOrderId: null, voucherExists: null };
+    } else {
+      try {
+        const body = await this.hubble.getOrderByReference(order.id);
+        check = body === null
+          ? { at, status: 'NOT_FOUND', hubbleOrderId: null, voucherExists: false }
+          : {
+              at,
+              status: (body.status ?? 'UNKNOWN').toString().toUpperCase(),
+              hubbleOrderId: body.id ?? body.orderId ?? null,
+              voucherExists: (body.vouchers ?? []).length > 0,
+            };
+      } catch (e) {
+        this.logger.error(`[hubble] late-webhook check failed for order ${order.orderNumber}: ${e}`);
+        check = { at, status: 'LOOKUP_FAILED', hubbleOrderId: null, voucherExists: null };
+      }
+    }
+    const known = (knownStatus ?? '').toUpperCase();
+    const knownHasOrder = known === 'SUCCESS' || known === 'PROCESSING';
+    // RACE: Hubble JUST answered with an order body — a failed / contradicting re-check can't undo that.
+    if (mode === 'RACE' && known && ['NOT_FOUND', 'LOOKUP_FAILED', 'NOT_CONFIGURED'].includes(check.status)) {
+      check = { ...check, status: `${known}_(RACE)` };
+    }
+    // WEBHOOK: a SIGNED webhook saying SUCCESS / PROCESSING is Hubble telling us it holds the order — if
+    // the re-check can't be made, trust the webhook (→ ISSUED), never go quiet.
+    if (mode === 'WEBHOOK' && knownHasOrder && ['LOOKUP_FAILED', 'NOT_CONFIGURED'].includes(check.status)) {
+      check = { ...check, status: `${known}_(WEBHOOK)` };
+    }
+    const issued = !['NOT_FOUND', 'FAILED', 'LOOKUP_FAILED', 'NOT_CONFIGURED'].includes(check.status);
+    const unknown = check.status === 'LOOKUP_FAILED' || check.status === 'NOT_CONFIGURED';
+    // A signed webhook (or a Hubble body) + a lookup "not found" is a CONTRADICTION, not proof nothing was
+    // issued: keep / raise the unknown flag. Only Hubble's own FAILED clears it.
+    const contradiction = check.status === 'NOT_FOUND' && mode !== 'ACK';
+    // Quiet (log only) on an unreachable Hubble ONLY when the signed webhook itself says FAILED (Hubble
+    // told us nothing was issued). A webhook with no status / an order status is never quiet.
+    const quietOnUnknown = unknown && mode === 'WEBHOOK' && known === 'FAILED';
+    // The patch is computed from the RE-READ row inside a compare-and-set (patchOrderMetadata), never
+    // from `order` as loaded: a concurrent webhook may have raised HUBBLE_ISSUED_AFTER_REFUND since, and
+    // that flag must NEVER be cleared or downgraded automatically.
+    const flagFor = (metadata: Prisma.JsonValue): Record<string, unknown> => {
+      const m = this.metaOf({ metadata });
+      const currentFlag = m.hubbleNeedsReconcile === true ? m.hubbleReconcileReason : null;
+      if (issued) {
+        return { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_ISSUED_AFTER_REFUND', hubbleReconcileAt: at };
+      }
+      if (mode === 'ACK' || quietOnUnknown) return {};
+      if (check.status === 'FAILED') {
+        // Hubble says FAILED: nothing was issued. Auto-clear ONLY the unknown-state flag — a
+        // high-severity ISSUED flag stays until ops acknowledge it.
+        return currentFlag === 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND' ? { hubbleNeedsReconcile: false } : {};
+      }
+      // unknown / contradiction → raise (never downgrade ISSUED).
+      return currentFlag === 'HUBBLE_ISSUED_AFTER_REFUND'
+        ? {}
+        : { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND', hubbleReconcileAt: at };
+    };
+    if (issued) {
+      this.logger.error(
+        `[hubble] order ${order.orderNumber}: Hubble reports ${check.status} (voucher ${check.voucherExists ? 'present' : 'absent'}) for an order whose points were REFUNDED — NOT applied; flagged HUBBLE_ISSUED_AFTER_REFUND`,
+      );
+    } else if (check.status === 'FAILED') {
+      this.logger.warn(`[hubble] order ${order.orderNumber}: ${mode} after the refund — Hubble reports FAILED; nothing issued, not applied`);
+    } else if (quietOnUnknown) {
+      this.logger.warn(`[hubble] order ${order.orderNumber}: ${mode} after a Hubble-FAILED refund; Hubble could not be checked (${check.status}) — logged only`);
+    } else if (mode !== 'ACK') {
+      this.logger.error(
+        `[hubble] order ${order.orderNumber}: ${mode} after the refund and Hubble ${contradiction ? 'says it has NO order (contradiction)' : 'could not be checked'} — NOT applied; flagged for ops`,
+      );
+    }
+    const written = await this.patchOrderMetadata(order.id, (cur) => ({ ...flagFor(cur.metadata), hubbleLateWebhookCheck: check }));
+    if (written === 'CONFLICT' && issued) {
+      // The high-severity flag must not be lost to contention: last-resort ATOMIC jsonb merge (only
+      // RAISES ISSUED — never clears anything, never overwrites other metadata keys).
+      const ok = await this.atomicMergeOrderMetadata(order.id, { ...flagFor(null), hubbleLateWebhookCheck: check }, 'ANY');
+      if (!ok) this.logger.error(`[hubble] order ${order.orderNumber}: could NOT record HUBBLE_ISSUED_AFTER_REFUND`);
+    }
+    await this.prisma.auditLog
+      .create({
+        data: {
+          actorId: null,
+          action: 'UPDATE',
+          entityType: 'REDEMPTION_ORDER',
+          entityId: order.id,
+          metadata: { event: 'HUBBLE_LATE_WEBHOOK_AFTER_NO_ORDER_REFUND', orderNumber: order.orderNumber, mode, check },
+        },
+      })
+      .catch((e: unknown) => this.logger.error(`[hubble] late-webhook audit failed for ${order.orderNumber}: ${e}`));
+    return { outcome: this.HUBBLE_OUTCOME.SKIPPED, check };
+  }
+
+  /**
+   * The order ever carried a double-issuance reason: the current / latest reason, an acknowledged one,
+   * a race-mapped one, or the sticky `hubbleDoubleIssueSeen` marker (set whenever one is raised).
+   */
+  private hasDoubleIssueHistory(m: Record<string, unknown>): boolean {
+    if (m.hubbleDoubleIssueSeen === true) return true;
+    const ack = m.hubbleAcknowledged && typeof m.hubbleAcknowledged === 'object' ? (m.hubbleAcknowledged as Record<string, unknown>).reason : null;
+    return [m.hubbleReconcileReason, m.hubbleLatestReason, m.hubbleRaceReason, m.hubbleResolvedPreviousReason, ack].some(
+      (r) => typeof r === 'string' && HUBBLE_DOUBLE_ISSUE_REASONS.has(r),
+    );
+  }
+
+  /** How a refunded Hubble order was refunded (hubbleRefund.source), when recorded. */
+  private refundSourceOf(order: { metadata: Prisma.JsonValue | null }): string | null {
+    const m = this.metaOf(order);
+    if (m.hubbleReconcileResolution !== this.HUBBLE_OUTCOME.FAILED_REFUNDED) return null;
+    const r = m.hubbleRefund;
+    return r && typeof r === 'object' && !Array.isArray(r) && typeof (r as Record<string, unknown>).source === 'string'
+      ? ((r as Record<string, unknown>).source as string)
+      : null;
+  }
+
+  /**
+   * COMPARE-AND-SET metadata patch: read the row (status + metadata + version), compute the patch FROM
+   * THAT READ, and write it pinned to that version (`updatedAt`). A concurrent write in between makes the
+   * update miss → re-read and re-evaluate (up to `attempts` times), so a patch can never be computed from
+   * — or overwrite — a stale read (e.g. clear a flag a concurrent webhook just raised). `compute`
+   * returning null = nothing to write. Best-effort: never throws.
+   * @returns 'WRITTEN' | 'NOOP' (nothing to write / no row) | 'CONFLICT' (every attempt lost / errored).
+   */
+  private async patchOrderMetadata(
+    orderId: string,
+    compute: (cur: { status: RedemptionStatus; metadata: Prisma.JsonValue }) => Record<string, unknown> | null,
+    attempts = 3,
+  ): Promise<'WRITTEN' | 'NOOP' | 'CONFLICT'> {
+    let last: unknown = null;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const cur = await this.prisma.redemptionOrder.findFirst({
+          where: { id: orderId },
+          select: { status: true, metadata: true, updatedAt: true },
+        });
+        if (!cur) return 'NOOP';
+        const patch = compute({ status: cur.status, metadata: cur.metadata ?? null });
+        if (!patch) return 'NOOP';
+        await this.prisma.redemptionOrder.update({
+          where: { id: orderId, ...(cur.updatedAt ? { updatedAt: cur.updatedAt } : {}) },
+          data: { metadata: this.mergeOrderMetadata(cur.metadata ?? null, patch) },
+        });
+        return 'WRITTEN';
+      } catch (e) {
+        last = e; // lost the CAS (P2025) or a DB error → re-read and re-evaluate
+      }
+    }
+    this.logger.error(`[hubble] metadata update on order ${orderId} lost ${attempts} compare-and-set attempts: ${last}`);
+    return 'CONFLICT';
+  }
+
+  /**
+   * POST /v1/rewards/orders/:id/hubble-acknowledge — GIFSY_ADMIN clears a post-refund Hubble review
+   * flag (HUBBLE_POST_REFUND_FLAGS) after checking Hubble's portal, with a required note. A
+   * compare-and-set on the row version (a concurrent change → 409). Audited. Nothing else changes —
+   * the order stays FAILED + refunded.
+   */
+  async acknowledgeHubbleFlag(user: JwtPayload, id: string, note: string, opts: { force?: boolean } = {}) {
+    if (user.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('Only a Gifsy admin can acknowledge a Hubble review flag.');
+    }
+    const text = (note ?? '').trim();
+    if (!text) throw new BadRequestException('A note is required to acknowledge the flag.');
+    const scope = tenantScope(user);
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      select: { id: true, orderNumber: true, status: true, metadata: true, updatedAt: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    const meta = this.metaOf(order);
+    const reason = typeof meta.hubbleReconcileReason === 'string' ? meta.hubbleReconcileReason : '';
+    // A post-refund flag, OR any flag left on a terminal (points-returned) or DELIVERED order (Retry
+    // skips both, so Acknowledge is the only exit — e.g. a double-issuance flag on a delivered order, or
+    // legacy data from before refunds / deliveries closed open flags).
+    const acknowledgeable =
+      HUBBLE_POST_REFUND_FLAGS.has(reason) ||
+      this.isTerminalRefundStatus(order.status) ||
+      order.status === RedemptionStatus.DELIVERED;
+    if (meta.hubbleNeedsReconcile !== true || !acknowledgeable) {
+      throw new BadRequestException('Only a post-refund Hubble review flag can be acknowledged here.');
+    }
+    // A reason implying Hubble HOLDS an order, on a refunded order: re-check Hubble FIRST. If Hubble
+    // reports an order, the flag becomes HUBBLE_ISSUED_AFTER_REFUND and this acknowledge is refused (ops
+    // must review THAT). If Hubble can't be reached, refuse too (retry later).
+    //  - NOT_CONFIGURED (no Hubble client in this environment — a re-check can never succeed): allowed,
+    //    recorded as recheck NOT_CONFIGURED.
+    //  - LOOKUP_FAILED (transient): 409 — unless the admin explicitly forces it ("Hubble unreachable")
+    //    with a note of at least HUBBLE_FORCED_ACK_MIN_NOTE characters; recorded as forced + audited.
+    let current: { metadata: Prisma.JsonValue; updatedAt: Date } = { metadata: order.metadata, updatedAt: order.updatedAt };
+    let recheck: string | null = null;
+    let forced = false;
+    if (this.isTerminalRefundStatus(order.status) && (HUBBLE_HAS_ORDER_REASON.test(reason) || HUBBLE_DOUBLE_ISSUE_REASONS.has(reason))) {
+      const { check } = await this.checkLateWebhookAfterNoOrderRefund(order, 'ACK');
+      recheck = check.status;
+      if (check.status === 'LOOKUP_FAILED') {
+        if (!opts.force) {
+          throw new ConflictException(
+            `Hubble could not be checked right now — try again in a few minutes. If Hubble stays unreachable, tick “Hubble unreachable — acknowledge anyway” and write a note of at least ${HUBBLE_FORCED_ACK_MIN_NOTE} characters.`,
+          );
+        }
+        if (text.length < HUBBLE_FORCED_ACK_MIN_NOTE) {
+          throw new BadRequestException(`Acknowledging without a Hubble check needs a note of at least ${HUBBLE_FORCED_ACK_MIN_NOTE} characters.`);
+        }
+        forced = true;
+      } else if (!['NOT_FOUND', 'FAILED', 'NOT_CONFIGURED'].includes(check.status)) {
+        throw new ConflictException(
+          'Hubble reports an order for this refunded redemption — it is now flagged "Hubble may have issued a voucher for refunded points". Check Hubble’s portal and acknowledge that flag.',
+        );
+      }
+      const re = await this.prisma.redemptionOrder.findFirst({ where: { id: order.id }, select: { metadata: true, updatedAt: true } });
+      if (!re) throw new NotFoundException('Order not found');
+      current = re;
+    }
+    const at = new Date();
+    // A NEWER reason was recorded beside the acknowledged one (an open double-issuance flag is never
+    // overwritten — see markHubblePendingReconcile): acknowledging the old one re-raises the newer one as
+    // the open reason instead of clearing the flag.
+    const latestRaw = this.metaOf({ metadata: current.metadata }).hubbleLatestReason;
+    const next = typeof latestRaw === 'string' && latestRaw && latestRaw !== reason ? latestRaw : null;
+    try {
+      await this.prisma.redemptionOrder.update({
+        where: { id: order.id, updatedAt: current.updatedAt },
+        data: {
+          metadata: this.mergeOrderMetadata(current.metadata, {
+            ...(next
+              ? { hubbleNeedsReconcile: true, hubbleReconcileReason: next, hubbleReconcileAt: at.toISOString() }
+              : { hubbleNeedsReconcile: false }),
+            hubbleLatestReason: null,
+            hubbleLatestReasonAt: null,
+            hubbleAcknowledged: {
+              by: user.sub,
+              at: at.toISOString(),
+              note: text.slice(0, 500),
+              reason,
+              ...(recheck ? { recheck } : {}),
+              ...(forced ? { forced: true, forcedBecause: 'Hubble unreachable' } : {}),
+            },
+          }),
+        },
+      });
+    } catch {
+      throw new ConflictException(VOUCHER_WRITE_CONFLICT_MESSAGE);
+    }
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: user.sub,
+        action: 'UPDATE',
+        entityType: 'REDEMPTION_ORDER',
+        entityId: order.id,
+        metadata: {
+          event: 'HUBBLE_FLAG_ACKNOWLEDGED',
+          orderNumber: order.orderNumber,
+          reason,
+          note: text.slice(0, 500),
+          ...(recheck ? { recheck } : {}),
+          ...(forced ? { forced: true } : {}),
+          ...(next ? { reRaised: next } : {}),
+        },
+      },
+    });
+    if (next) {
+      this.logger.warn(`[hubble] order ${order.orderNumber}: ${reason} acknowledged — newer reason ${next} re-raised for ops`);
+      return { order: { id: order.id, hubbleNeedsReconcile: true, hubbleReconcileReason: next, hubbleLatestReason: null } };
+    }
+    return { order: { id: order.id, hubbleNeedsReconcile: false, hubbleReconcileReason: null, hubbleLatestReason: null } };
+  }
+
+  /** Flag an order as needing reconcile (money held pending webhook / ops), no status flip. */
+  //
+  // Compare-and-set on the row version (patchOrderMetadata), so a flag can never be merged onto a stale
+  // read and wipe a concurrent write (e.g. the no-order refund's hubbleReconcileResolution).
+  // INVARIANT: an order already FAILED + refunded by the no-order path never gets an OPEN-order flag
+  // (which "Acknowledge" rejects and "Retry" can't clear — it would be stuck flagged forever). Such a
+  // racing flag is mapped onto the post-refund flags instead: a reason where Hubble returned an order
+  // body (SUCCESS / PROCESSING / unknown status) → HUBBLE_ISSUED_AFTER_REFUND; anything else →
+  // HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND. HUBBLE_ISSUED_AFTER_REFUND is never downgraded.
+  private async markHubblePendingReconcile(orderId: string, reason: string): Promise<void> {
+    const at = new Date().toISOString();
+    const doubleIssue = HUBBLE_DOUBLE_ISSUE_REASONS.has(reason);
+    const hubbleHasOrder = HUBBLE_HAS_ORDER_REASON.test(reason);
+    const latestPatch = { hubbleLatestReason: reason, hubbleLatestReasonAt: at, ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}) };
+    const written = await this.patchOrderMetadata(orderId, (cur) => {
+      const m = this.metaOf(cur);
+      const open = m.hubbleNeedsReconcile === true;
+      const curReason = typeof m.hubbleReconcileReason === 'string' ? m.hubbleReconcileReason : null;
+      const curDoubleIssue = open && !!curReason && HUBBLE_DOUBLE_ISSUE_REASONS.has(curReason);
+      // Terminal (points returned) FIRST: a reason implying Hubble holds an order ALWAYS becomes
+      // HUBBLE_ISSUED_AFTER_REFUND (it supersedes even an open double-issuance flag, which is kept in
+      // history); ISSUED is never downgraded.
+      if (this.isTerminalRefundStatus(cur.status)) {
+        if (open && curReason === 'HUBBLE_ISSUED_AFTER_REFUND') return null;
+        const mapped = hubbleHasOrder ? 'HUBBLE_ISSUED_AFTER_REFUND' : 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND';
+        // A lower-severity unknown flag never replaces an open double-issuance one — keep it, note the newer.
+        if (curDoubleIssue && mapped !== 'HUBBLE_ISSUED_AFTER_REFUND') return latestPatch;
+        this.logger.error(
+          `[hubble] order ${orderId}: ${reason} raised on an order already ${cur.status} (points returned) — recorded as ${mapped}`,
+        );
+        return {
+          hubbleNeedsReconcile: true,
+          hubbleReconcileReason: mapped,
+          hubbleReconcileAt: at,
+          hubbleRaceReason: reason,
+          ...(open && curReason ? { hubbleSupersededReason: curReason } : {}),
+          ...(doubleIssue || curDoubleIssue ? { hubbleDoubleIssueSeen: true } : {}),
+        };
+      }
+      // An OPEN double-issuance flag is never overwritten by a later reason (ops must still see it): keep
+      // it and record the newer reason beside it (Acknowledge re-raises it).
+      if (curDoubleIssue && curReason !== reason) return latestPatch;
+      return {
+        hubbleNeedsReconcile: true,
+        hubbleReconcileReason: reason,
+        hubbleReconcileAt: at,
+        ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}),
+      };
+    });
+    if (written === 'CONFLICT') {
+      // Never leave an order unflagged after losing the CAS: ONE atomic jsonb statement with the SAME rules
+      // as above (terminal → post-refund flag, ISSUED wins and is never downgraded; an open
+      // double-issuance flag is otherwise kept and this reason recorded as hubbleLatestReason).
+      const mapped = hubbleHasOrder ? 'HUBBLE_ISSUED_AFTER_REFUND' : 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND';
+      const ok = await this.atomicFlagOrder(
+        orderId,
+        hubbleHasOrder,
+        {
+          hubbleNeedsReconcile: true,
+          hubbleReconcileReason: mapped,
+          hubbleReconcileAt: at,
+          hubbleRaceReason: reason,
+          ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}),
+        },
+        latestPatch,
+        { hubbleNeedsReconcile: true, hubbleReconcileReason: reason, hubbleReconcileAt: at, ...(doubleIssue ? { hubbleDoubleIssueSeen: true } : {}) },
+      );
+      if (!ok) this.logger.error(`[hubble] failed to flag order ${orderId} for reconcile (${reason})`);
+    }
+  }
+
+  /**
+   * markHubblePendingReconcile's last resort (see there) — ONE statement, same rules:
+   *  - terminal order with an open HUBBLE_ISSUED_AFTER_REFUND → unchanged;
+   *  - terminal order + a "Hubble has an order" reason → `terminalPatch` (ISSUED), superseding any open
+   *    reason (kept as hubbleSupersededReason; a double-issuance one also sets hubbleDoubleIssueSeen);
+   *  - terminal or open order with an open double-issuance flag → `latestPatch`;
+   *  - terminal otherwise → `terminalPatch`; open otherwise → `openPatch`.
+   * Never throws.
+   */
+  private async atomicFlagOrder(
+    orderId: string,
+    issuedOnTerminal: boolean,
+    terminalPatch: Record<string, unknown>,
+    latestPatch: Record<string, unknown>,
+    openPatch: Record<string, unknown>,
+  ): Promise<boolean> {
+    try {
+      const terminalJson = JSON.stringify(terminalPatch);
+      const latestJson = JSON.stringify(latestPatch);
+      const openJson = JSON.stringify(openPatch);
+      const now = new Date();
+      const n = await this.prisma.$executeRaw`UPDATE "redemption_orders" SET "metadata" = (CASE WHEN jsonb_typeof("metadata") = 'object' THEN "metadata" ELSE '{}'::jsonb END) || (CASE
+          WHEN "status"::text IN ('FAILED', 'CANCELLED', 'RETURNED') AND jsonb_typeof("metadata") = 'object' AND "metadata"->>'hubbleNeedsReconcile' = 'true' AND "metadata"->>'hubbleReconcileReason' = 'HUBBLE_ISSUED_AFTER_REFUND' THEN '{}'::jsonb
+          WHEN "status"::text IN ('FAILED', 'CANCELLED', 'RETURNED') AND ${issuedOnTerminal} THEN ${terminalJson}::jsonb || (CASE WHEN jsonb_typeof("metadata") = 'object' AND "metadata"->>'hubbleNeedsReconcile' = 'true' THEN jsonb_build_object('hubbleSupersededReason', "metadata"->'hubbleReconcileReason') || (CASE WHEN "metadata"->>'hubbleReconcileReason' IN ('HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_PROCESSING_AFTER_MANUAL', 'HUBBLE_FAILED_VOUCHER_PRESENT') THEN '{"hubbleDoubleIssueSeen":true}'::jsonb ELSE '{}'::jsonb END) ELSE '{}'::jsonb END)
+          WHEN jsonb_typeof("metadata") = 'object' AND "metadata"->>'hubbleNeedsReconcile' = 'true' AND "metadata"->>'hubbleReconcileReason' IN ('HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_PROCESSING_AFTER_MANUAL', 'HUBBLE_FAILED_VOUCHER_PRESENT') THEN ${latestJson}::jsonb
+          WHEN "status"::text IN ('FAILED', 'CANCELLED', 'RETURNED') THEN ${terminalJson}::jsonb
+          WHEN "status"::text IN ('CONFIRMED', 'PROCESSING', 'PENDING') THEN ${openJson}::jsonb
+          ELSE '{}'::jsonb END), "updatedAt" = ${now} WHERE "id" = ${orderId}`;
+      return n > 0;
+    } catch (e) {
+      this.logger.error(`[hubble] atomic reconcile flag failed on order ${orderId}: ${e}`);
+      return false;
+    }
+  }
+
+  /**
+   * Last-resort ATOMIC metadata merge in ONE statement (Postgres jsonb `||` on the current row value):
+   * adds/overwrites only the given keys and never touches any other key, so it can't lose a concurrent
+   * write. `OPEN` = only while the order is CONFIRMED / PROCESSING / PENDING. Never throws.
+   */
+  private async atomicMergeOrderMetadata(
+    orderId: string,
+    patch: Record<string, unknown>,
+    when: 'ANY' | 'OPEN',
+  ): Promise<boolean> {
+    try {
+      const json = JSON.stringify(patch);
+      const now = new Date(); // a JS Date param (UTC like every Prisma write), not the DB session's NOW()
+      const n =
+        when === 'OPEN'
+          ? await this.prisma.$executeRaw`UPDATE "redemption_orders" SET "metadata" = (CASE WHEN jsonb_typeof("metadata") = 'object' THEN "metadata" ELSE '{}'::jsonb END) || ${json}::jsonb, "updatedAt" = ${now} WHERE "id" = ${orderId} AND "status"::text IN ('CONFIRMED', 'PROCESSING', 'PENDING')`
+          : await this.prisma.$executeRaw`UPDATE "redemption_orders" SET "metadata" = (CASE WHEN jsonb_typeof("metadata") = 'object' THEN "metadata" ELSE '{}'::jsonb END) || ${json}::jsonb, "updatedAt" = ${now} WHERE "id" = ${orderId}`;
+      return n > 0;
+    } catch (e) {
+      this.logger.error(`[hubble] atomic metadata merge failed on order ${orderId}: ${e}`);
+      return false;
     }
   }
 

@@ -15,7 +15,8 @@
  * fine gate @RequirePermission('points_rules:read'). Tenant scope comes from @CurrentUser().clientId.
  */
 
-import { Body, Controller, ForbiddenException, Get, Post, Query, StreamableFile, UseGuards } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Post, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { SalesMonthClosedGuard } from '../sales-import/months/sales-month-closed.guard';
 import { PointsComputeService } from './points-compute.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -23,21 +24,23 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { CommitComputeDto, PreviewComputeDto, SimulateComputeDto } from './dto/points-compute.dto';
-import { buildCreditUploadXlsx, buildPayoutReportXlsx, buildPreviewReportXlsx } from './points-compute-export.helper';
-
-const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+import { ExportsService } from '../exports/exports.service';
+import { POINTS_ENGINE_DISABLED_MESSAGE } from '../exports/kinds/batch2/points-compute.kinds';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 @Controller('admin/points-compute')
 export class PointsComputeController {
   constructor(
     private readonly compute: PointsComputeService,
     private readonly tenantSettings: TenantSettingsService,
+    private readonly exports: ExportsService,
   ) {}
 
   /** POST /v1/admin/points-compute/preview — read-only compute preview for a (tenant × period). */
   @Post('preview')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('points_rules:read')
+  @HeavyOp()
   preview(@CurrentUser() user: JwtPayload, @Body() dto: PreviewComputeDto) {
     return this.compute.previewCompute(user, {
       period: dto.period,
@@ -56,6 +59,7 @@ export class PointsComputeController {
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('credits:upload')
   @UseGuards(SalesMonthClosedGuard) // D-1: 409 while the month is OPEN in Sales Import (inert unless features.salesImport)
+  @HeavyOp()
   commit(@CurrentUser() user: JwtPayload, @Body() dto: CommitComputeDto) {
     return this.compute.commitCompute(user, {
       period: dto.period,
@@ -77,48 +81,37 @@ export class PointsComputeController {
     return this.compute.simulate(user, dto);
   }
 
-  /** GET /v1/admin/points-compute/export — OK rows as a credits-upload-format xlsx (→ offline approval → existing upload). */
+  /**
+   * GET /v1/admin/points-compute/export — OK rows as a credits-upload-format xlsx (→ offline approval → existing upload).
+   * The 'points-credit-upload' export kind: the compute runs in the background worker (202 → Downloads page).
+   */
   @Get('export')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('points_rules:read')
   @UseGuards(SalesMonthClosedGuard) // D-1: 409 while the month is OPEN in Sales Import (inert unless features.salesImport)
-  async export(@CurrentUser() user: JwtPayload, @Query() q: PreviewComputeDto): Promise<StreamableFile> {
+  async export(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: PreviewComputeDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     // The credit-upload file IS the creditable artifact (it uploads through the ordinary credits flow, which
     // knows nothing of the engine toggle), so withhold it when the engine is disabled. Read the flag UNCACHED
-    // + fail-closed — same as the commit money-gate — so a Gifsy "turn it off" takes effect immediately
-    // across the fleet (the cached getEffectiveSettings used for preview display could lag up to the TTL).
+    // + fail-closed — same as the commit money-gate. Checked here (immediate 403) AND again when the file is built.
     const flags = await this.tenantSettings.getPointsEngineFlagsUncached(user.clientId);
-    if (!flags.enabled) {
-      throw new ForbiddenException(
-        'The points engine is disabled for this tenant — enable it in settings before exporting a credit-upload file.',
-      );
-    }
-    const preview = await this.compute.previewCompute(user, {
-      period: q.period,
-      program: q.program ?? null,
-      kpiCode: q.kpiCode ?? null,
-    });
-    return new StreamableFile(buildCreditUploadXlsx(preview), {
-      type: XLSX_MIME,
-      disposition: `attachment; filename="points-credit-upload-${preview.period}.xlsx"`,
-    });
+    if (!flags.enabled) throw new ForbiddenException(POINTS_ENGINE_DISABLED_MESSAGE);
+    return this.exports.respond(res, user, 'points-credit-upload', q);
   }
 
-  /** GET /v1/admin/points-compute/preview-report — full human review xlsx (share with the client offline). */
+  /**
+   * GET /v1/admin/points-compute/preview-report — full human review xlsx (share with the client offline).
+   * The 'points-preview-report' export kind (prepared in the background).
+   */
   @Get('preview-report')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('points_rules:read')
   @UseGuards(SalesMonthClosedGuard) // D-1: 409 while the month is OPEN in Sales Import (inert unless features.salesImport)
-  async previewReport(@CurrentUser() user: JwtPayload, @Query() q: PreviewComputeDto): Promise<StreamableFile> {
-    const preview = await this.compute.previewCompute(user, {
-      period: q.period,
-      program: q.program ?? null,
-      kpiCode: q.kpiCode ?? null,
-    });
-    return new StreamableFile(buildPreviewReportXlsx(preview), {
-      type: XLSX_MIME,
-      disposition: `attachment; filename="points-preview-${preview.period}.xlsx"`,
-    });
+  previewReport(@CurrentUser() user: JwtPayload, @Query() q: PreviewComputeDto, @Res({ passthrough: true }) res: Response) {
+    return this.exports.respond(res, user, 'points-preview-report', q);
   }
 
   /**
@@ -127,20 +120,13 @@ export class PointsComputeController {
    * PAYOUT is COMPUTE-TO-REPORT only (owner directive 2026-10-21): the engine never credits or pays it,
    * so this route — like preview-report — produces a READ-ONLY report and carries NO engine fail-closed
    * gate (it mints no creditable artifact; the preview itself is allowed even when the engine is off).
+   * The 'points-payout-report' export kind (prepared in the background).
    */
   @Get('payout-report')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('points_rules:read')
   @UseGuards(SalesMonthClosedGuard) // D-1: 409 while the month is OPEN in Sales Import (inert unless features.salesImport)
-  async payoutReport(@CurrentUser() user: JwtPayload, @Query() q: PreviewComputeDto): Promise<StreamableFile> {
-    const preview = await this.compute.previewCompute(user, {
-      period: q.period,
-      program: q.program ?? null,
-      kpiCode: q.kpiCode ?? null,
-    });
-    return new StreamableFile(buildPayoutReportXlsx(preview), {
-      type: XLSX_MIME,
-      disposition: `attachment; filename="points-payout-report-${preview.period}.xlsx"`,
-    });
+  payoutReport(@CurrentUser() user: JwtPayload, @Query() q: PreviewComputeDto, @Res({ passthrough: true }) res: Response) {
+    return this.exports.respond(res, user, 'points-payout-report', q);
   }
 }

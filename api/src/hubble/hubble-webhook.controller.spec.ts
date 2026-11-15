@@ -58,7 +58,7 @@ describe('HubbleWebhookController', () => {
     const payload = { referenceId: 'ord_1c' };
     const r = req(payload);
     await controller.webhook(r, payload, sign('stg-secret', (r as { rawBody: Buffer }).rawBody));
-    expect(reconcile).toHaveBeenCalledWith('ord_1c');
+    expect(reconcile).toHaveBeenCalledWith('ord_1c', { webhookStatus: null });
   });
 
   it('F3: the neutral HUBBLE_WEBHOOK_SECRET wins over the *_STAGING fallback', async () => {
@@ -71,7 +71,7 @@ describe('HubbleWebhookController', () => {
       controller.webhook(r, payload, sign('stg-secret', (r as { rawBody: Buffer }).rawBody)),
     ).rejects.toBeInstanceOf(ForbiddenException);
     await controller.webhook(r, payload, sign('prod-secret', (r as { rawBody: Buffer }).rawBody));
-    expect(reconcile).toHaveBeenCalledWith('ord_1d');
+    expect(reconcile).toHaveBeenCalledWith('ord_1d', { webhookStatus: null });
   });
 
   it('accepts a valid X-Verify signature when the secret is set', async () => {
@@ -80,8 +80,21 @@ describe('HubbleWebhookController', () => {
     const payload = { data: { referenceId: 'ord_2' } };
     const r = req(payload);
     const res = await controller.webhook(r, payload, sign('s3cr3t', (r as { rawBody: Buffer }).rawBody));
-    expect(reconcile).toHaveBeenCalledWith('ord_2');
+    expect(reconcile).toHaveBeenCalledWith('ord_2', { webhookStatus: null });
     expect(res.reconciled).toBe(true);
+  });
+
+  it('passes the webhook\'s own order status (upper-cased, top-level or nested) to the reconcile', async () => {
+    process.env.HUBBLE_WEBHOOK_SECRET = 's3cr3t';
+    const { controller, reconcile } = make();
+    for (const [payload, status] of [
+      [{ referenceId: 'ord_s1', status: 'failed' }, 'FAILED'],
+      [{ data: { referenceId: 'ord_s2', status: 'SUCCESS' } }, 'SUCCESS'],
+    ] as const) {
+      const r = req(payload);
+      await controller.webhook(r, payload, sign('s3cr3t', (r as { rawBody: Buffer }).rawBody));
+      expect(reconcile).toHaveBeenLastCalledWith(expect.any(String), { webhookStatus: status });
+    }
   });
 
   it('rejects an invalid X-Verify signature (no reconcile)', async () => {

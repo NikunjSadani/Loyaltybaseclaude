@@ -1,14 +1,18 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
-import { KycStatus, OutletKycIntent, Prisma } from '@prisma/client';
+import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/reports.dto';
 import { buildXlsx, ReportSheet } from '../common/xlsx';
-import { platformWide } from '../common/tenant-scope';
 import { istDayRangeFilter, istDateKey } from '../common/ist-date';
-import { deriveKycStage } from '../common/kyc-rekyc.helper';
-import { salesUserRoleLabel } from '../common/hierarchy-labels';
+import {
+  VISIBILITY_STATUS_SELECT,
+  assertVisibilityStatusEnabled,
+  visibilityStatusRow,
+  visibilityStatusWhere,
+} from '../exports/kinds/batch1/visibility-status';
+import { KYC_STATUS_OUTLET_SELECT, kycStatusRows } from '../exports/kinds/batch1/kyc-status';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -37,21 +41,6 @@ export class ReportsService {
   ) {}
 
   /**
-   * Master Visibility gate (mirrors the visibility services). The visibility-status
-   * report exposes a tenant's VisibilitySubmission rows; when the tenant's master switch
-   * is OFF this must 403 for the tenant's own users (incl. MIS_USER) so residual data from
-   * a previously-enabled period is not leaked. The GIFSY operator is exempt only in true
-   * platform context (`!assumed`).
-   */
-  private async assertVisibilityEnabled(user: JwtPayload): Promise<void> {
-    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
-    if (platformWide(user)) return;
-    if (!(await this.tenant.resolveVisibilityEnabled(user.clientId))) {
-      throw new ForbiddenException('Visibility is not enabled for this tenant.');
-    }
-  }
-
-  /**
    * Parses an optional ISO date string to a Date, mirroring `new Date(...)`.
    * ONLY used by schemePerformance to filter the Scheme's own DAY-GRANULAR
    * startDate/endDate columns (both sides day-granular → no IST-day skew). Every
@@ -73,41 +62,24 @@ export class ReportsService {
   }
 
   // ── Visibility Status ───────────────────────────────────────────────────────
+  /** The report's master Visibility gate (403 when OFF; un-assumed Gifsy exempt) — also run before the xlsx export. */
+  async assertVisibilityStatusAllowed(user: JwtPayload): Promise<void> {
+    await assertVisibilityStatusEnabled(this.tenant, user);
+  }
+
+  /**
+   * JSON format only — `format=xlsx` is the `visibility-status` export kind (exports/kinds/batch1/visibility-status.ts),
+   * routed by the controller. Same select + row mapper as the kind, so the two never drift.
+   */
   async visibilityStatus(user: JwtPayload, q: ReportRangeQueryDto): Promise<ReportResult> {
-    await this.assertVisibilityEnabled(user);
-
+    await this.assertVisibilityStatusAllowed(user);
     // Visibility (POSM) captures are keyed by (outlet, window); clientId is a direct column.
-    const where: Prisma.VisibilityCaptureWhereInput = { clientId: user.clientId };
-    const createdAt = istDayRangeFilter(q.dateFrom, q.dateTo);
-    if (createdAt) where.createdAt = createdAt;
-
     const submissions = await this.prisma.visibilityCapture.findMany({
-      where,
-      include: {
-        outlet: { select: { name: true, city: true } },
-        submittedBy: { select: { employeeCode: true, user: { select: { name: true } } } },
-      },
-      orderBy: { createdAt: 'desc' },
+      where: visibilityStatusWhere(user.clientId, q.dateFrom, q.dateTo),
+      select: VISIBILITY_STATUS_SELECT,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
-
-    const data = submissions.map((s, i) => ({
-      'S.No': i + 1,
-      'Capture ID': s.id,
-      'Outlet Code': s.outletCode,
-      'Outlet Name': s.outlet?.name ?? s.outletName,
-      City: s.outlet?.city ?? '',
-      Window: s.windowKey,
-      Status: s.status,
-      'Captured By': s.submittedBy?.user?.name ?? '',
-      Latitude: s.captureLat?.toString() ?? '',
-      Longitude: s.captureLng?.toString() ?? '',
-      'Geo-fence': s.geoFenceOk === null ? 'unverifiable' : s.geoFenceOk ? 'ok' : 'outside',
-      'Submitted On': istDateKey(s.createdAt),
-    }));
-
-    if (q.format === ReportFormat.XLSX) {
-      return this.toXlsx([{ name: 'Visibility Status', rows: data }], 'visibility-status.xlsx');
-    }
+    const data = submissions.map((s, i) => visibilityStatusRow(s, i + 1));
     return this.toJson({ data, recordCount: data.length });
   }
 
@@ -388,180 +360,15 @@ export class ReportsService {
    * included (mirrors the dashboard's `kycSubmissions orderBy createdAt desc take 1`) —
    * NO N+1, one query for the whole tenant (~2,989 outlets for Deoleo, like outletMaster).
    */
-  async kycStatus(user: JwtPayload, q: ReportRangeQueryDto): Promise<ReportResult> {
-    // NOTE: no date filter — this is a full outlet snapshot. `q.dateFrom/dateTo` are ignored
-    // (only `q.format` is read, below), so passing a date range does not change the row set.
+  async kycStatus(user: JwtPayload, _q: ReportRangeQueryDto): Promise<ReportResult> {
+    // JSON format only — `format=xlsx` is the `kyc-status` export kind (exports/kinds/batch1/kyc-status.ts), routed
+    // by the controller; both use kycStatusRows. No date filter: a full outlet snapshot (dateFrom/dateTo ignored).
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId: user.clientId, deletedAt: null },
-      select: {
-        zone: true,
-        outletCode: true,
-        name: true,
-        programName: true,
-        deactivatedAt: true,
-        kycIntent: true,
-        partner: {
-          select: {
-            ownerName: true,
-            phone: true,
-            businessName: true,
-            panNumber: true,
-            // Latest submission for the owner partner (mirrors the KYC dashboard include).
-            // Rejection detail (id/reason/notes/reviewedAt + the transition INTO REJECTED)
-            // is only USED for rows whose current status is "Rejected" (see below), but is
-            // always selected so the row map can read it without a second query.
-            kycSubmissions: {
-              orderBy: { createdAt: 'desc' },
-              take: 1,
-              select: {
-                status: true,
-                submittedAt: true,
-                createdAt: true,
-                id: true,
-                rejectionReason: true,
-                reviewerNotes: true,
-                reviewedAt: true,
-                // Rejected-date + actor + pre-rejection stage: the (latest) transition into
-                // REJECTED. Mirrors kyc.service.rejectedExport's statusHistory include.
-                statusHistory: {
-                  where: { toStatus: 'REJECTED' },
-                  orderBy: { createdAt: 'desc' },
-                  take: 1,
-                  select: { createdAt: true, changedByUserId: true, fromStatus: true },
-                },
-              },
-            },
-          },
-        },
-      },
-      orderBy: { outletCode: 'asc' },
+      select: KYC_STATUS_OUTLET_SELECT,
+      orderBy: [{ outletCode: 'asc' }, { id: 'asc' }],
     });
-
-    // Batch-resolve the rejecters' name + role in ONE round-trip (no N+1), mirroring
-    // rejectedExport's actor lookup and extending it with `role` for the friendly label.
-    const actorIds = Array.from(
-      new Set(
-        outlets
-          .map((o) => o.partner?.kycSubmissions[0]?.statusHistory?.[0]?.changedByUserId)
-          .filter((v): v is string => !!v),
-      ),
-    );
-    const actors = actorIds.length
-      ? await this.prisma.user.findMany({
-          where: { id: { in: actorIds } },
-          select: { id: true, name: true, role: true },
-        })
-      : [];
-    const actorById = new Map(actors.map((a) => [a.id, a]));
-
-    // Per-outlet status: outlet-level lifecycle overlay first (states outside the KYC
-    // pipeline), then the canonical dashboard KYC stage from the latest submission.
-    const statusFor = (o: (typeof outlets)[number]): string => {
-      if (o.deactivatedAt) return 'Deactivated';
-      if (o.kycIntent === OutletKycIntent.PARKED) return 'Parked';
-      if (o.kycIntent === OutletKycIntent.NOT_INTERESTED) return 'Not Interested';
-      return deriveKycStage(o.partner?.kycSubmissions[0]?.status ?? null);
-    };
-
-    // Friendly label for a User.role (reviewer). Sales roles collapse to the hierarchy
-    // codes the field uses (SALES_STATE_HEAD → RSM, SALES_HO → NSM); the raw role is the
-    // fallback for anything unmapped.
-    // Non-sales roles are tenant-independent; the sales roles resolve through the shared
-    // tenant-aware label helper (Bajaj swaps the SALES_STATE_HEAD bucket RSM→SM; every other
-    // tenant, incl. Deoleo, is byte-identical). The coarse enum is lossy — SALES_STATE_HEAD
-    // covers both RSM and ZNM — so it mirrors the pre-existing single-label collapse.
-    const roleLabel = (role: string | null | undefined): string => {
-      if (!role) return '';
-      const nonSales: Record<string, string> = {
-        GIFSY_ADMIN: 'Gifsy Admin',
-        GIFSY_STAFF: 'Gifsy Staff',
-        CLIENT_ADMIN: 'Client Admin',
-        MIS_USER: 'MIS User',
-      };
-      return nonSales[role] ?? salesUserRoleLabel(user.clientId, role) ?? role;
-    };
-
-    // Classify a rejection as Field vs Gifsy. Prefer the shared canonical stage derivation
-    // on the pre-rejection status (fromStatus): "Pending Gifsy" → Gifsy, "Submitted (field
-    // approval)" → Field. If fromStatus is null/unmapped, fall back to the rejecter's role
-    // (GIFSY_* → Gifsy, SALES_* → Field); otherwise blank.
-    const classifyRejectStage = (
-      fromStatus: KycStatus | null | undefined,
-      actorRole: string | null | undefined,
-    ): string => {
-      const stage = deriveKycStage(fromStatus ?? null);
-      if (stage === 'Pending Gifsy') return 'Gifsy';
-      if (stage === 'Submitted (field approval)') return 'Field';
-      if (actorRole?.startsWith('GIFSY_')) return 'Gifsy';
-      if (actorRole?.startsWith('SALES_')) return 'Field';
-      return '';
-    };
-
-    const data = outlets.map((o, i) => {
-      const sub = o.partner?.kycSubmissions[0];
-      // Latest submission date; blank when the outlet has never started KYC. submittedAt
-      // is the real submit instant, falling back to the row's createdAt for a DRAFT.
-      const lastSubmittedOn = sub
-        ? istDateKey(sub.submittedAt ?? sub.createdAt)
-        : '';
-
-      // The 5 rejection-detail columns are populated ONLY when the outlet's CURRENT status
-      // is "Rejected" (statusFor === deriveKycStage's 'Rejected'); blank for every other row.
-      const isRejected = statusFor(o) === 'Rejected';
-      const hist = sub?.statusHistory?.[0];
-      const actor = hist?.changedByUserId ? actorById.get(hist.changedByUserId) : undefined;
-      const rejectedStage = isRejected ? classifyRejectStage(hist?.fromStatus, actor?.role) : '';
-      const rejectedBy = isRejected
-        ? actor?.name
-          ? actor.role
-            ? `${actor.name} (${roleLabel(actor.role)})`
-            : actor.name
-          : ''
-        : '';
-      const rejectionReason = isRejected ? (sub?.rejectionReason ?? '') : '';
-      const reviewerNotes = isRejected ? (sub?.reviewerNotes ?? '') : '';
-      const rejectedAtInstant = hist?.createdAt ?? sub?.reviewedAt;
-      const rejectedOn = isRejected
-        ? (rejectedAtInstant ? istDateKey(rejectedAtInstant) : '')
-        : '';
-
-      return {
-        'S.No': i + 1,
-        'Outlet ID': o.outletCode ?? '',
-        'Outlet Name': o.name ?? '',
-        Zone: o.zone ?? '',
-        'Program Name': o.programName ?? '',
-        'Business Name': o.partner?.businessName ?? '',
-        'Owner/User Name': o.partner?.ownerName ?? '',
-        Mobile: o.partner?.phone ?? '',
-        PAN: o.partner?.panNumber ?? '',
-        Status: statusFor(o),
-        'Last Submitted On': lastSubmittedOn,
-        'Rejected Stage': rejectedStage,
-        'Rejected By': rejectedBy,
-        'Rejection Reason': rejectionReason,
-        'Reviewer Notes': reviewerNotes,
-        'Rejected On': rejectedOn,
-      };
-    });
-
-    if (q.format === ReportFormat.XLSX) {
-      // Zero outlets → seed one all-blank row so the sheet still shows the column headers
-      // (an empty json_to_sheet yields a header-less blank sheet — the "barely any
-      // columns" confusion; mirrors the outlet-master / target-vs-sales reports).
-      const rows =
-        data.length > 0
-          ? data
-          : [
-              {
-                'S.No': '', 'Outlet ID': '', 'Outlet Name': '', Zone: '', 'Program Name': '',
-                'Business Name': '', 'Owner/User Name': '', Mobile: '', PAN: '',
-                Status: '', 'Last Submitted On': '', 'Rejected Stage': '', 'Rejected By': '',
-                'Rejection Reason': '', 'Reviewer Notes': '', 'Rejected On': '',
-              },
-            ];
-      return this.toXlsx([{ name: 'KYC Status', rows }], 'kyc-status.xlsx');
-    }
+    const data = await kycStatusRows(this.prisma, user.clientId, outlets);
     return this.toJson({ data, recordCount: data.length });
   }
 }

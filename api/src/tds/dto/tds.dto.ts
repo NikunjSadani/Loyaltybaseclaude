@@ -57,4 +57,9 @@ export interface UploadResult {
   errors: UploadRowError[];
   /** Non-blocking notices, e.g. "PAN found on file for outlet X — counted under that PAN". */
   warnings?: UploadRowError[];
+  /** Memory-safety (2026-11-13): errors / warnings are capped at 500 rows each — `failed` and
+   *  `warningCount` are the true totals; the flags say a list was cut. */
+  errorsTruncated?: boolean;
+  warningCount?: number;
+  warningsTruncated?: boolean;
 }

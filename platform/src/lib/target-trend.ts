@@ -11,6 +11,9 @@ export interface TrendPoint {
   month: string;            // 'YYYY-MM'
   target: number | null;
   achieved: number | null;
+  /** partnerDashboardV2 only (absent otherwise): the month's achieved across ALL the partner's
+   *  outlets, targeted or not — the Performance card's sales-comparison basis. */
+  achievedAll?: number | null;
 }
 
 export interface MonthlyPoint {

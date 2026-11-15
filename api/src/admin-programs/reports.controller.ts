@@ -1,27 +1,37 @@
-import { Controller, Get, Query, Req } from '@nestjs/common';
-import type { Request } from 'express';
+import { Controller, Get, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { ReportsService } from './reports.service';
+import { ExportsService } from '../exports/exports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { PointsLedgerQueryDto, TargetVsSalesQueryDto, TicketAgingQueryDto } from './dto/reports.dto';
+import { PointsLedgerQueryDto, ReportFormat, TargetVsSalesQueryDto, TicketAgingQueryDto } from './dto/reports.dto';
 
 /**
  * Reports admin — re-homed from
  * platform/src/app/api/admin/reports/* onto /v1.
  *
  * points-ledger and ticket-aging default to JSON and return an xlsx
- * StreamableFile download when `format=xlsx`. outlet-master is always xlsx.
+ * StreamableFile download when `format=xlsx`. outlet-master is always xlsx and is
+ * prepared in the background (Downloads page).
  */
 @Controller('admin/reports')
 export class ReportsController {
-  constructor(private readonly reports: ReportsService) {}
+  constructor(
+    private readonly reports: ReportsService,
+    private readonly exports: ExportsService,
+  ) {}
 
   @Get('outlet-master')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('reports:export')
-  outletMaster(@CurrentUser() user: JwtPayload, @Req() req: Request) {
-    return this.reports.outletMaster(user, req);
+  outletMaster(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: Record<string, unknown>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // The 'outlet-master' export kind: always prepared in the background (202 → Downloads page).
+    return this.exports.respond(res, user, 'outlet-master', query);
   }
 
   @Get('points-ledger')
@@ -47,7 +57,13 @@ export class ReportsController {
   @Get('target-vs-sales')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('targets:read')
-  targetVsSales(@CurrentUser() user: JwtPayload, @Query() query: TargetVsSalesQueryDto) {
+  targetVsSales(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: TargetVsSalesQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // xlsx → the 'target-vs-sales' export kind: ≤ 3 months streams now (200), longer ranges are queued (202 → Downloads).
+    if (query.format === ReportFormat.XLSX) return this.exports.respond(res, user, 'target-vs-sales', query);
     return this.reports.targetVsSales(user, query);
   }
 }

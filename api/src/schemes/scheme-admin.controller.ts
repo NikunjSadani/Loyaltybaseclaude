@@ -10,7 +10,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { Throttle } from '@nestjs/throttler';
 import { SchemeAdminService } from './scheme-admin.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -128,8 +128,7 @@ export class SchemeAdminController {
   @Roles('GIFSY_ADMIN')
   @RequirePermission('schemes:write')
   @UseInterceptors(
-    FileInterceptor('file', {
-      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB ceiling — bound parse memory
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
       fileFilter: (_req, file, cb) =>
         /\.(xlsx|xls)$/i.test(file.originalname)
           ? cb(null, true)
@@ -212,8 +211,7 @@ export class SchemeAdminController {
   @Roles('GIFSY_ADMIN')
   @RequirePermission('schemes:write')
   @UseInterceptors(
-    FileInterceptor('file', {
-      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB ceiling — bound parse memory
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
       fileFilter: (_req, file, cb) =>
         /\.(xlsx|xls)$/i.test(file.originalname)
           ? cb(null, true)

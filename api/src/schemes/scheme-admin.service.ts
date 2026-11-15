@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { problemRowsEcho } from '../common/upload-echo';
 import { buildXlsx } from '../common/xlsx';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
@@ -24,6 +25,7 @@ import {
 } from './dto/scheme-admin.dto';
 import {
   buildOutletWhereFromFilter,
+  isRosterProblemRow,
   matchRosterRows,
   parseRosterUploadBuffer,
   OutletMatch,
@@ -605,8 +607,11 @@ export class SchemeAdminService {
       // Non-blank rows dropped for a missing outlet id — surfaced so a reconciliation
       // report can account for them (they appear in no other count/sheet).
       skippedRows,
-      // Per-input-row disposition for the downloadable upload report (D-report).
-      rows: matched.rowReport,
+      // Per-input-row disposition for the downloadable upload report (D-report) — memory-safety
+      // (2026-11-13): ONLY the rows the operator should look at (dropped duplicates, rows not
+      // linked to a tenant outlet, tagged employee codes not found), capped at 500. A clean
+      // SAVED + MATCHED row is counted in the totals above, not echoed.
+      ...problemRowsEcho(matched.rowReport, isRosterProblemRow),
     };
   }
 

@@ -18,7 +18,7 @@ import {
   type Banner, type Popup,
 } from '@/lib/banner';
 import { formatPoints } from '@/lib/utils';
-import { formatInrCompact, formatCompact, isInrUnit } from '@/lib/format-inr';
+import { formatInrCompact, formatCompact, isInrUnit, formatKpiAmount, formatKpiSoFar } from '@/lib/format-inr';
 import type { PayoutLedgerEntry } from '@/types';
 import { buildCasesToGoMsg, classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
@@ -67,6 +67,99 @@ interface AggKpi {
   isPrimary: boolean;
   target:    number;
   achieved:  number;
+  /** At least one outlet reported a (non-null) achieved value — false = no sales data yet, shown as "—". */
+  hasAchieved?: boolean;
+  /**
+   * Sales at this partner's outlets that have NO target for this KPI, when at least one other outlet does.
+   * Kept OUT of `achieved` so it can't fill another outlet's target (owner 2026-11-15); shown as "so far".
+   */
+  untargetedAchieved?: number;
+}
+
+/**
+ * FLAG-OFF aggregation (partnerDashboardV2 OFF — Deoleo): each KPI's target + achieved summed across ALL
+ * outlets (null → 0). Exactly the pre-v2-aggregation code; do not change without the owner (Deoleo is live).
+ */
+function aggregateKpisPlain(outlets: ReadonlyArray<{ kpis: ApiKpi[] }>): AggKpi[] {
+  const order: string[] = [];
+  const byCode = new Map<string, AggKpi>();
+  for (const outlet of outlets) {
+    for (const k of outlet.kpis) {
+      const existing = byCode.get(k.code);
+      if (existing) {
+        existing.target   += k.target   ?? 0;
+        existing.achieved += k.achieved ?? 0;
+        existing.isPrimary = existing.isPrimary || k.isPrimary;
+        existing.hasAchieved = existing.hasAchieved || (k.achieved !== null && k.achieved !== undefined);
+      } else {
+        order.push(k.code);
+        byCode.set(k.code, {
+          code:      k.code,
+          name:      k.name,
+          unit:      k.unit ?? 'cases',
+          isPrimary: k.isPrimary,
+          target:    k.target   ?? 0,
+          achieved:  k.achieved ?? 0,
+          hasAchieved: k.achieved !== null && k.achieved !== undefined,
+        });
+      }
+    }
+  }
+  return order.map(c => byCode.get(c)!);
+}
+
+/**
+ * partnerDashboardV2 primary KPI: the first FLAGGED-primary KPI that HAS a target (> 0), else the first KPI
+ * with a target, else none (→ neutral "so far" hero). A target-less KPI is never the scored headline — a red
+ * "0 of 0 · 0%" hero contradicted the card's neutral "so far" row. Same rule as the card footer + Targets page.
+ */
+function pickTargetedPrimary(aggKpis: AggKpi[]): AggKpi | null {
+  return aggKpis.find((k) => k.isPrimary && k.target > 0) ?? aggKpis.find((k) => k.target > 0) ?? null;
+}
+
+/** v2: the "+₹2K so far at outlets without this target" figure — shown only when it is a positive amount
+ *  (net returns ≤ 0 are not surfaced as a confusing negative "extra"). */
+function positiveUntargeted(k: AggKpi | null | undefined): number | null {
+  const u = k?.untargetedAchieved;
+  return u !== undefined && u >= 0.5 ? u : null;
+}
+
+/**
+ * partnerDashboardV2 aggregation. Target AND achieved come ONLY from outlets where that KPI has a
+ * target (> 0): sales at an outlet without the target must not fill another outlet's target (A: ₹500 of ₹1,000
+ * + B: ₹2,000 untargeted ⇒ "₹500/₹1K · 50%", not "250%"). Those untargeted sales are carried separately. A KPI no
+ * outlet has a target for sums every outlet's achieved (shown as "so far"). Single-outlet partners and partners whose
+ * every outlet has the target are unchanged.
+ */
+function aggregateKpisAcrossOutlets(outlets: ReadonlyArray<{ kpis: ApiKpi[] }>): AggKpi[] {
+  const order: string[] = [];
+  const acc = new Map<string, AggKpi & { tT: number; tA: number; uA: number; uHas: boolean }>();
+  for (const outlet of outlets) {
+    for (const k of outlet.kpis) {
+      let a = acc.get(k.code);
+      if (!a) {
+        order.push(k.code);
+        a = { code: k.code, name: k.name, unit: k.unit ?? 'cases', isPrimary: k.isPrimary, target: 0, achieved: 0,
+              hasAchieved: false, tT: 0, tA: 0, uA: 0, uHas: false };
+        acc.set(k.code, a);
+      }
+      a.isPrimary = a.isPrimary || k.isPrimary;
+      const has = k.achieved !== null && k.achieved !== undefined;
+      if ((k.target ?? 0) > 0) {
+        a.tT += k.target ?? 0;
+        a.tA += k.achieved ?? 0;
+        a.hasAchieved = a.hasAchieved || has;
+      } else {
+        a.uA += k.achieved ?? 0;
+        a.uHas = a.uHas || has;
+      }
+    }
+  }
+  return order.map((c) => {
+    const { tT, tA, uA, uHas, ...k } = acc.get(c)!;
+    if (tT > 0) return { ...k, target: tT, achieved: tA, ...(uHas && uA !== 0 ? { untargetedAchieved: uA } : {}) };
+    return { ...k, target: 0, achieved: uA, hasAchieved: uHas };
+  });
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
@@ -200,18 +293,37 @@ export interface MonthComparison {
   pctChange: number | null;    // round((delta/previous)*100); null when previous is 0/absent
 }
 
-export function computeMonthComparison(trend: TrendPoint[]): MonthComparison {
+export function computeMonthComparison(
+  trend: TrendPoint[],
+  pick: (p: TrendPoint) => number | null | undefined = (p) => p.achieved,
+): MonthComparison {
   const n = trend.length;
   const cur  = n >= 1 ? trend[n - 1] : null;
   const prev = n >= 2 ? trend[n - 2] : null;
-  const current  = cur  ? (cur.achieved  ?? 0) : null;
-  const previous = prev ? (prev.achieved ?? 0) : null;
+  const current  = cur  ? (pick(cur)  ?? 0) : null;
+  const previous = prev ? (pick(prev) ?? 0) : null;
   const delta = current !== null && previous !== null ? current - previous : null;
   const pctChange =
     delta !== null && previous !== null && previous > 0
       ? Math.round((delta / previous) * 100)
       : null;
   return { current, previous, delta, pctChange };
+}
+
+/** The Performance card's "Change vs last month" — a TRUE SALES comparison. When the trend
+ *  carries `achievedAll` (partnerDashboardV2: the all-outlet total) on the months compared, the
+ *  delta uses it, so a change in WHICH outlets are targeted can't masquerade as a sales swing
+ *  (owner 2026-11-15). Otherwise (flag OFF / older payload) it is exactly computeMonthComparison.
+ *  `totalSalesLabel` is true when the compared totals differ from the targeted-only "so far"
+ *  figures shown above it in either month, so the label must say "total sales". Same month
+ *  positions (latest vs prior row) as computeMonthComparison — month-to-date logic unchanged. PURE. */
+export function computeSalesChange(trend: TrendPoint[]): MonthComparison & { totalSalesLabel: boolean } {
+  const n = trend.length;
+  const compared = trend.slice(Math.max(0, n - 2));
+  const hasAll = compared.length > 0 && compared.every((p) => p.achievedAll !== undefined);
+  if (!hasAll) return { ...computeMonthComparison(trend), totalSalesLabel: false };
+  const totalSalesLabel = compared.some((p) => (p.achievedAll ?? 0) !== (p.achieved ?? 0));
+  return { ...computeMonthComparison(trend, (p) => p.achievedAll), totalSalesLabel };
 }
 
 /** Format a KPI value the way the hero does: compact ₹ for INR units, else points + unit suffix. */
@@ -233,7 +345,10 @@ function fmtKpiValue(value: number, unit: string): string {
        (GET /api/wallet/points-credited?month=…) — NOT the paginated passbook, so an
        active wholesaler's last-month earn is never missed past page 1. Payout is summed
        from the (≤100-per-partner) credit-payout statement by paidAt.
-     • Change vs last month — current − previous, the SAME delta the old card showed.
+     • Change vs last month — current − previous TOTAL SALES across ALL the partner's outlets
+       (the trend's v2 `achievedAll`, via computeSalesChange), so a change in which outlets are
+       targeted can't fake a swing; labelled "Change in total sales vs last month" whenever those
+       totals differ from the targeted-only figures shown above. No achievedAll → the old delta.
 
    All of it reuses the SAME GET /api/partner/targets/trend series (computeMonthComparison
    for achieved + delta; lastMonthFromTrend matched by month KEY for the per-month targets)
@@ -338,6 +453,8 @@ function PerformanceCard({
   const rows = trend?.trend ?? [];
   // Achieved (both months) + the change delta — the exact figures the old comparison card showed.
   const cmp  = computeMonthComparison(rows);
+  // "Change vs last month" — total sales across ALL outlets when the v2 payload carries it.
+  const chg  = computeSalesChange(rows);
   // Per-month TARGETS matched by month KEY (rollover-safe); the backend series is contiguous and
   // ends at the current month, so these rows line up with cmp's current/previous.
   const thisRow = lastMonthFromTrend(rows, thisKey);
@@ -362,7 +479,7 @@ function PerformanceCard({
     );
   }
 
-  const deltaUp = cmp.delta !== null && cmp.delta >= 0;
+  const deltaUp = chg.delta !== null && chg.delta >= 0;
 
   const thisHasTarget = thisRow.target !== null && thisRow.target > 0;
   const thisPct       = thisHasTarget ? pct(cmp.current ?? 0, thisRow.target ?? 0) : null;
@@ -418,17 +535,19 @@ function PerformanceCard({
           </div>
         </div>
 
-        {/* Change vs last month — the same delta the former comparison card showed */}
+        {/* Change vs last month — a sales comparison (all-outlet totals when v2 provides them) */}
         <div className="mt-2.5 flex items-center justify-between text-xs">
-          <span className="text-gray-400">Change vs last month</span>
-          {cmp.delta === null ? (
+          <span className="text-gray-400">
+            {chg.totalSalesLabel ? 'Change in total sales vs last month' : 'Change vs last month'}
+          </span>
+          {chg.delta === null ? (
             <span className="font-semibold text-gray-400">n/a</span>
           ) : (
             <span className={`font-bold ${deltaUp ? 'text-emerald-600' : 'text-red-600'}`}>
-              {deltaUp ? '+' : '-'}{fmtKpiValue(Math.abs(cmp.delta), unit)}
-              {cmp.pctChange !== null && (
+              {deltaUp ? '+' : '-'}{fmtKpiValue(Math.abs(chg.delta), unit)}
+              {chg.pctChange !== null && (
                 <span className="ml-1 text-[11px] font-semibold">
-                  ({deltaUp ? '+' : '-'}{Math.abs(cmp.pctChange)}%)
+                  ({deltaUp ? '+' : '-'}{Math.abs(chg.pctChange)}%)
                 </span>
               )}
             </span>
@@ -461,17 +580,24 @@ function TargetAchievementCard({ aggKpis }: { aggKpis: AggKpi[] }) {
 
   // Footer derives from the PRIMARY KPI — the SAME remaining/unit the hero's "to go" banner
   // uses (kpiView: remaining = max(0, target − achieved)); daysLeft is the shared computePace().
-  const primary       = aggKpis.find((k) => k.isPrimary) ?? aggKpis[0];
-  const primaryPct    = pct(primary.achieved, primary.target);
-  const primaryLeft   = Math.max(0, primary.target - primary.achieved);
-  const paceStatus    = primaryLeft === 0
-    ? 'green'
-    : classifyPaceGap(timePct - primaryPct, timePct, getGifsySettings().paceAmberThreshold ?? 10);
-  const paceBg        = paceStatus === 'green' ? 'bg-emerald-50' : paceStatus === 'amber' ? 'bg-amber-50' : 'bg-red-50';
-  const paceTextColor = paceStatus === 'green' ? 'text-emerald-700' : paceStatus === 'amber' ? 'text-amber-700' : 'text-red-600';
-  const footerText    = primaryLeft === 0
-    ? `${primary.name} target met 🎉`
-    : `${fmtKpiValue(primaryLeft, primary.unit)} to go · ${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`;
+  // A KPI WITHOUT a target can never be "met" (max(0, 0 − achieved) = 0 would falsely read "target met 🎉"):
+  // fall back to the first KPI that HAS a target; with none at all, the footer is a neutral note.
+  // Same pick as the page's hero (pickTargetedPrimary) so the footer and the hero name the same KPI.
+  const primary       = pickTargetedPrimary(aggKpis);
+  const primaryPct    = primary ? pct(primary.achieved, primary.target) : 0;
+  const primaryLeft   = primary ? Math.max(0, primary.target - primary.achieved) : 0;
+  const paceStatus    = !primary
+    ? 'neutral'
+    : primaryLeft === 0
+      ? 'green'
+      : classifyPaceGap(timePct - primaryPct, timePct, getGifsySettings().paceAmberThreshold ?? 10);
+  const paceBg        = paceStatus === 'neutral' ? 'bg-gray-50' : paceStatus === 'green' ? 'bg-emerald-50' : paceStatus === 'amber' ? 'bg-amber-50' : 'bg-red-50';
+  const paceTextColor = paceStatus === 'neutral' ? 'text-gray-600' : paceStatus === 'green' ? 'text-emerald-700' : paceStatus === 'amber' ? 'text-amber-700' : 'text-red-600';
+  const footerText    = !primary
+    ? 'No targets set this month'
+    : primaryLeft === 0
+      ? `${primary.name} target met 🎉`
+      : `${fmtKpiValue(primaryLeft, primary.unit)} to go · ${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`;
 
   return (
     <Card data-testid="target-achievement-card">
@@ -493,16 +619,28 @@ function TargetAchievementCard({ aggKpis }: { aggKpis: AggKpi[] }) {
       <CardContent className="space-y-2.5">
         {aggKpis.map((k) => {
           const hasTarget = k.target > 0;
+          const isInrKpi  = isInrUnit(k.unit);
+          // A KPI with sales but NO target this month (e.g. Bajaj SAMT's NON ADHO gate KPI) is shown as a
+          // neutral "so far" figure — no %, no bar, no red: there is nothing to be behind on. A red "— · 0%"
+          // read as "you have done nothing" even when the outlet had sales (owner 2026-11-15).
+          if (!hasTarget) {
+            // No sales data yet (every outlet's achieved was null) → "—", never a stated zero (shared helper:
+            // compact ₹ / en-IN + unit; tiny |v| < 0.5 → 0, never "-₹0").
+            const soFar = formatKpiSoFar(k.hasAchieved === false ? null : k.achieved, k.unit);
+            return (
+              <div key={k.code} className="flex items-center gap-2" data-testid={`kpi-no-target-${k.code}`}>
+                <p className="text-xs font-medium text-gray-700 flex-1 truncate">{k.name}</p>
+                <span className="text-[11px] font-semibold shrink-0 text-gray-500">{soFar}</span>
+              </div>
+            );
+          }
           // pct() already guards target===0 → 0 (never NaN/Infinity).
           const p         = pct(k.achieved, k.target);
-          const isInrKpi  = isInrUnit(k.unit);
-          // Paired achieved/target: "—" when there is no target; compact ₹ for INR units;
-          // en-IN grouped with the unit suffix otherwise (same rules as the sales card).
-          const paired = !hasTarget
-            ? '—'
-            : isInrKpi
-              ? `${formatCompact(k.achieved)}/${formatCompact(k.target)}`
-              : `${k.achieved.toLocaleString('en-IN')}/${k.target.toLocaleString('en-IN')}${k.unit ? ` ${k.unit}` : ''}`;
+          // Paired achieved/target: compact ₹ for INR units; en-IN grouped with the unit suffix otherwise
+          // (same rules as the sales card).
+          const paired = isInrKpi
+            ? `${formatCompact(k.achieved)}/${formatCompact(k.target)}`
+            : `${k.achieved.toLocaleString('en-IN')}/${k.target.toLocaleString('en-IN')}${k.unit ? ` ${k.unit}` : ''}`;
           return (
             <div key={k.code} className="space-y-1">
               <div className="flex items-center gap-2">
@@ -514,6 +652,11 @@ function TargetAchievementCard({ aggKpis }: { aggKpis: AggKpi[] }) {
               <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
                 <div className={`h-full rounded-full transition-all ${pctBarColor(p)}`} style={{ width: `${Math.min(p, 100)}%` }} />
               </div>
+              {positiveUntargeted(k) !== null && (
+                <p className="text-[10px] text-gray-500" data-testid={`kpi-untargeted-${k.code}`}>
+                  +{formatKpiAmount(positiveUntargeted(k)!, k.unit)} so far at outlets without this target
+                </p>
+              )}
             </div>
           );
         })}
@@ -584,13 +727,57 @@ function kpiView(primary: AggKpi | null, daysLeft: number, timePct: number) {
   return { achieved, target, achievedPct, remaining, unit, isMet, urgencyBadge, status };
 }
 
+/* ─── v2 hero pieces (partnerDashboardV2 only) ───────────────────────────── */
+
+/**
+ * v2 hero zone when NO KPI has a target this month but the partner has KPIs (e.g. only the NON ADHO
+ * eligibility-gate KPI): a neutral "₹2.8K so far" + "No targets set this month" — no %, bar, urgency badge
+ * or "to go". Agrees with the Target Achievement card's neutral footer.
+ */
+function NeutralSoFarZone({ kpi, lastUpdatedLabel }: { kpi: AggKpi; lastUpdatedLabel?: string }) {
+  return (
+    <Link href="/partner/targets" className="block px-4 pt-4 pb-4 active:opacity-80 transition-opacity" data-testid="hero-no-target">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <p className="text-xs font-semibold text-white/70">{kpi.name}</p>
+          {lastUpdatedLabel && (
+            <p className="text-[10px] text-white/40 mt-0.5">{lastUpdatedLabel}</p>
+          )}
+        </div>
+        <span className="flex items-center gap-1 text-[10px] font-semibold text-white/50">
+          All targets <ChevronRight className="h-3 w-3" />
+        </span>
+      </div>
+      <p className="text-3xl font-extrabold text-white leading-none">
+        {formatKpiSoFar(kpi.hasAchieved === false ? null : kpi.achieved, kpi.unit)}
+      </p>
+      <p className="text-[11px] text-white/60 mt-2">No targets set this month</p>
+    </Link>
+  );
+}
+
+/** v2: the primary's sales at outlets WITHOUT its target — shown apart, never in the hero's % (agrees with the card). */
+function HeroUntargetedLine({ kpi }: { kpi: AggKpi | null }) {
+  const u = positiveUntargeted(kpi);
+  if (u === null || !kpi) return null;
+  return (
+    <p className="text-[11px] text-white/60 mt-2" data-testid={`hero-untargeted-${kpi.code}`}>
+      +{formatKpiAmount(u, kpi.unit)} so far at outlets without this target
+    </p>
+  );
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    WHOLESALER HERO — primary KPI + real wallet balance
 ══════════════════════════════════════════════════════════════════════════ */
 
 function WholesalerHero({
-  primary, walletPoints, lastUpdatedLabel, v2 = false,
-}: { primary: AggKpi | null; walletPoints: number | null; lastUpdatedLabel?: string; v2?: boolean }) {
+  primary, walletPoints, lastUpdatedLabel, v2 = false, soFarKpi = null,
+}: {
+  primary: AggKpi | null; walletPoints: number | null; lastUpdatedLabel?: string; v2?: boolean;
+  /** v2 only: set when no KPI has a target → the neutral "so far" zone replaces the scored KPI zone. */
+  soFarKpi?: AggKpi | null;
+}) {
   const { daysLeft, timePct } = computePace();
   const v = kpiView(primary, daysLeft, timePct);
   const label = primary?.name ?? 'Monthly Volume';
@@ -599,7 +786,8 @@ function WholesalerHero({
     <div className="rounded-2xl overflow-hidden"
       style={{ background: 'linear-gradient(135deg, var(--brand-primary) 0%, var(--brand-primary-dark) 50%, var(--brand-primary-dark) 100%)' }}>
 
-      {/* ── Zone 1: KPI (entire zone tappable → targets page) ──────────── */}
+      {v2 && soFarKpi ? <NeutralSoFarZone kpi={soFarKpi} lastUpdatedLabel={lastUpdatedLabel} /> : (
+      /* ── Zone 1: KPI (entire zone tappable → targets page) ──────────── */
       <Link href="/partner/targets" className="block px-4 pt-4 pb-4 active:opacity-80 transition-opacity">
 
         {/* Header row: label + chevron hint */}
@@ -644,7 +832,10 @@ function WholesalerHero({
         ) : v.target === 0 ? (
           <p className="text-[11px] text-white/40 mt-2">No targets yet</p>
         ) : null}
+
+        {v2 && <HeroUntargetedLine kpi={primary} />}
       </Link>
+      )}
 
       {/* ── Zone 2: Wallet ──────────────────────────────────────────────── */}
       <div className={`border-t border-white/10 bg-black/25 px-4 flex items-center justify-between ${v2 ? 'py-4' : 'py-3'}`}>
@@ -669,8 +860,12 @@ function WholesalerHero({
 ══════════════════════════════════════════════════════════════════════════ */
 
 function RetailerHero({
-  primary, lastUpdatedLabel, v2 = false,
-}: { primary: AggKpi | null; lastUpdatedLabel?: string; v2?: boolean }) {
+  primary, lastUpdatedLabel, v2 = false, soFarKpi = null,
+}: {
+  primary: AggKpi | null; lastUpdatedLabel?: string; v2?: boolean;
+  /** v2 only: set when no KPI has a target → the neutral "so far" zone replaces the scored KPI zone. */
+  soFarKpi?: AggKpi | null;
+}) {
   const { daysLeft, timePct } = computePace();
   const v = kpiView(primary, daysLeft, timePct);
   const label = primary?.name ?? 'Monthly Target';
@@ -679,7 +874,8 @@ function RetailerHero({
     <div className="rounded-2xl overflow-hidden"
       style={{ background: 'linear-gradient(135deg, var(--brand-primary) 0%, var(--brand-primary-dark) 50%, var(--brand-primary-dark) 100%)' }}>
 
-      {/* ── Zone 1: KPI (entire zone tappable → targets page) ──────────── */}
+      {v2 && soFarKpi ? <NeutralSoFarZone kpi={soFarKpi} lastUpdatedLabel={lastUpdatedLabel} /> : (
+      /* ── Zone 1: KPI (entire zone tappable → targets page) ──────────── */
       <Link href="/partner/targets" className="block px-4 pt-4 pb-4 active:opacity-80 transition-opacity">
 
         {/* Header row: label + "All targets ›" */}
@@ -728,7 +924,10 @@ function RetailerHero({
         ) : v.remaining > 0 ? (
           <p className="text-[11px] text-white/50 mt-2">{v.remaining} {v.unit} remaining</p>
         ) : null}
+
+        {v2 && <HeroUntargetedLine kpi={primary} />}
       </Link>
+      )}
     </div>
   );
 }
@@ -741,10 +940,14 @@ function MTHero({
   aggKpis, lastUpdatedLabel, v2 = false,
 }: { aggKpis: AggKpi[]; lastUpdatedLabel?: string; v2?: boolean }) {
   const { daysLeft, timePct } = computePace();
-  const mtPrimary = aggKpis.find(k => k.isPrimary) ?? aggKpis[0] ?? null;
+  // v2: a target-less KPI is never scored — it is a neutral "so far" row, excluded from metCount/allMet, and
+  // never the "to go" primary. Flag OFF → every KPI scored exactly as before.
+  const scored      = v2 ? aggKpis.filter(k => k.target > 0) : aggKpis;
+  const soFarKpis   = v2 ? aggKpis.filter(k => !(k.target > 0)) : [];
+  const mtPrimary   = v2 ? pickTargetedPrimary(aggKpis) : (aggKpis.find(k => k.isPrimary) ?? aggKpis[0] ?? null);
   const mtRemaining = mtPrimary ? Math.max(0, mtPrimary.target - mtPrimary.achieved) : 0;
 
-  const kpiRows = aggKpis.map((k) => {
+  const kpiRows = scored.map((k) => {
     const achievedPct = pct(k.achieved, k.target);
     const gap         = timePct - achievedPct;
     const isMet       = k.target > 0 && achievedPct >= 100;
@@ -777,7 +980,9 @@ function MTHero({
         </div>
 
         {/* Per-KPI rows — sourced from the same aggregated API data */}
-        {kpiRows.length === 0 ? (
+        {kpiRows.length === 0 && soFarKpis.length > 0 ? (
+          <p className="text-sm font-semibold text-white/70">No targets set this month</p>
+        ) : kpiRows.length === 0 ? (
           <p className="text-sm font-semibold text-white/70">No targets yet</p>
         ) : (
           <div className="space-y-3">
@@ -803,9 +1008,28 @@ function MTHero({
                   </div>
                   <ProgressBar pct={achievedPct} status={status} />
                   <p className="text-[10px] text-white/50">{kpi.achieved} of {kpi.target} {kpi.unit}</p>
+                  {v2 && positiveUntargeted(kpi) !== null && (
+                    <p className="text-[10px] text-white/60" data-testid={`mt-untargeted-${kpi.code}`}>
+                      +{formatKpiAmount(positiveUntargeted(kpi)!, kpi.unit)} so far at outlets without this target
+                    </p>
+                  )}
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* v2: target-less KPIs — neutral "so far" rows (no %, bar, badge); never counted as met/missed. */}
+        {soFarKpis.length > 0 && (
+          <div className={`space-y-1.5 ${kpiRows.length > 0 ? 'mt-3 pt-3 border-t border-white/10' : 'mt-3'}`}>
+            {soFarKpis.map((kpi) => (
+              <div key={kpi.code} className="flex items-center justify-between" data-testid={`mt-no-target-${kpi.code}`}>
+                <p className="text-xs font-semibold text-white/80">{kpi.name}</p>
+                <p className="text-xs font-semibold text-white/70">
+                  {formatKpiSoFar(kpi.hasAchieved === false ? null : kpi.achieved, kpi.unit)}
+                </p>
+              </div>
+            ))}
           </div>
         )}
 
@@ -897,7 +1121,8 @@ export default function PartnerDashboard() {
   const [lastUpdatedLabel,  setLastUpdatedLabel]  = useState<string>('');
 
   // ── Real data: aggregated targets + wallet ──────────────────────────────
-  const [aggKpis,      setAggKpis]      = useState<AggKpi[]>([]);
+  // Raw per-outlet KPIs — aggregated below once the tenant flag is known (identity.features).
+  const [targetOutlets, setTargetOutlets] = useState<ApiOutlet[]>([]);
   const [walletPoints, setWalletPoints] = useState<number | null>(null);
 
   // Outlet type is sourced from the AUTHORITATIVE /partner/me identity hook (NOT the
@@ -915,6 +1140,13 @@ export default function PartnerDashboard() {
   // partner tiles). Read from the SAME identity features as v2 (no localStorage, no extra request);
   // OFF ⇒ OffersSection is never mounted, so a flag-off tenant (Deoleo) makes ZERO offers requests.
   const offersOn = !!identity.features?.offerTiles;
+
+  // Aggregate each KPI across the partner's outlets. v2 (Bajaj): targeted-outlets-only target + achieved,
+  // untargeted sales carried apart. Flag OFF (Deoleo): the plain sums across every outlet, exactly as before.
+  const aggKpis = React.useMemo(
+    () => (v2 ? aggregateKpisAcrossOutlets(targetOutlets) : aggregateKpisPlain(targetOutlets)),
+    [v2, targetOutlets],
+  );
 
   // Touch / swipe state
   const touchStartX = React.useRef<number | null>(null);
@@ -951,30 +1183,7 @@ export default function PartnerDashboard() {
         if (cancelled || !json.success || !json.data) return;
         const outlets = json.data.outlets ?? [];
 
-        // Aggregate each KPI across ALL outlets: sum target + achieved (null → 0).
-        const order: string[] = [];
-        const byCode = new Map<string, AggKpi>();
-        for (const outlet of outlets) {
-          for (const k of outlet.kpis) {
-            const existing = byCode.get(k.code);
-            if (existing) {
-              existing.target   += k.target   ?? 0;
-              existing.achieved += k.achieved ?? 0;
-              existing.isPrimary = existing.isPrimary || k.isPrimary;
-            } else {
-              order.push(k.code);
-              byCode.set(k.code, {
-                code:      k.code,
-                name:      k.name,
-                unit:      k.unit ?? 'cases',
-                isPrimary: k.isPrimary,
-                target:    k.target   ?? 0,
-                achieved:  k.achieved ?? 0,
-              });
-            }
-          }
-        }
-        setAggKpis(order.map(c => byCode.get(c)!));
+        setTargetOutlets(outlets);
         // NOTE: outletType is NOT taken from targets here — the target-upload row's
         // denormalized string is unreliable. It comes from /partner/me (identity).
       })
@@ -1031,7 +1240,12 @@ export default function PartnerDashboard() {
     return <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>;
   }
 
-  const primary = aggKpis.find(k => k.isPrimary) ?? aggKpis[0] ?? null;
+  // Flag OFF: the flagged-primary KPI, else the first (as before). v2: the first primary/KPI that HAS a
+  // target; none → the hero shows a neutral "so far" for the would-be primary (soFarKpi) instead of a red 0%.
+  const primary  = v2
+    ? pickTargetedPrimary(aggKpis)
+    : (aggKpis.find(k => k.isPrimary) ?? aggKpis[0] ?? null);
+  const soFarKpi = v2 && !primary ? (aggKpis.find(k => k.isPrimary) ?? aggKpis[0] ?? null) : null;
 
   // AUTHORITATIVE outlet type from /partner/me (identity). Fall back to 'SSS' only
   // once identity has genuinely resolved with no outlet type. This is the fix: a
@@ -1115,9 +1329,9 @@ export default function PartnerDashboard() {
       )}
 
       {/* ── 1. CURRENT CYCLE KPI HERO (outlet-specific) ── */}
-      {isWholesaler && <WholesalerHero primary={primary} walletPoints={walletPoints} lastUpdatedLabel={lastUpdatedLabel} v2={v2} />}
+      {isWholesaler && <WholesalerHero primary={primary} walletPoints={walletPoints} lastUpdatedLabel={lastUpdatedLabel} v2={v2} soFarKpi={soFarKpi} />}
       {isMT         && <MTHero aggKpis={aggKpis} lastUpdatedLabel={lastUpdatedLabel} v2={v2} />}
-      {!isWholesaler && !isMT && <RetailerHero primary={primary} lastUpdatedLabel={lastUpdatedLabel} v2={v2} />}
+      {!isWholesaler && !isMT && <RetailerHero primary={primary} lastUpdatedLabel={lastUpdatedLabel} v2={v2} soFarKpi={soFarKpi} />}
 
       {/* ── 1b. ACTIVATIONS (SCHEMES) ENTRY — all outlet types (D22) ── */}
       <SchemesCard />
@@ -1128,7 +1342,8 @@ export default function PartnerDashboard() {
              Deoleo (flag OFF) keeps the chart → byte-identical. ── */}
       {v2
         ? <PerformanceCard
-            primary={primary}
+            // No targeted KPI → trend the SAME KPI the neutral hero shows (else the server picks its own default).
+            primary={primary ?? soFarKpi}
             hasPointsActivity={identity.hasPointsActivity}
             hasPayoutActivity={identity.hasPayoutActivity}
           />

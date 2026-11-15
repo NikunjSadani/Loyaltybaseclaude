@@ -19,6 +19,15 @@
  */
 
 import { api, type ApiResponse } from '@/lib/api-client';
+import {
+  readJsonSafe,
+  responseErrorMessage,
+  networkErrorMessage,
+  serverErrorText,
+  MAYBE_SAVED_NOTE,
+  PHOTO_UPLOAD_RETRY_NOTE,
+} from '@/lib/safe-response';
+import { downloadOrQueue } from '@/lib/exports/download';
 import type {
   OutletStatusResponse,
   Pagination,
@@ -44,16 +53,30 @@ const BASE = '/api/visibility';
  * adds the multipart boundary. Same-origin fetch carries the auth cookie, and the proxy
  * injects the Bearer, so no auth header is needed here. Returns the same `{ success, data }`
  * envelope shape as api-client.
+ *
+ * `failureNote` is appended when the outcome is unknown (network drop / unreadable response) and
+ * must match what the request does. Every caller here is a photo/media upload → pass
+ * PHOTO_UPLOAD_RETRY_NOTE (never "refresh", which would lose the rep's captured photos/GPS).
  */
-async function postMultipart<T>(url: string, form: FormData): Promise<ApiResponse<T>> {
+export async function postMultipart<T>(
+  url: string,
+  form: FormData,
+  failureNote: string = MAYBE_SAVED_NOTE,
+): Promise<ApiResponse<T>> {
+  let res: Response;
   try {
-    const res = await fetch(url, { method: 'POST', body: form });
-    const body = await res.json();
-    if (!res.ok) return { success: false, error: body?.error ?? res.statusText };
-    return body as ApiResponse<T>;
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : 'Network error' };
+    res = await fetch(url, { method: 'POST', body: form });
+  } catch {
+    return { success: false, error: networkErrorMessage(failureNote) };
   }
+  // Tolerant read: a non-JSON body (proxy truncation / plain-text 5xx / edge 413) must surface a
+  // readable message, never a raw `SyntaxError: Unexpected token 'I'…`.
+  const body = await readJsonSafe(res);
+  if (!body) {
+    return { success: false, error: responseErrorMessage(res, body, failureNote), status: res.status };
+  }
+  if (!res.ok) return { success: false, error: serverErrorText(body) ?? res.statusText };
+  return body as ApiResponse<T>;
 }
 
 /* ─── Request payload / query shapes (§6) ────────────────────────────────────── */
@@ -202,7 +225,7 @@ export const visibilityApi = {
   uploadMedia(file: File | Blob, filename?: string) {
     const form = new FormData();
     form.append('file', file, filename ?? (file instanceof File ? file.name : 'capture'));
-    return postMultipart<MediaUploadResult>(`${BASE}/media`, form);
+    return postMultipart<MediaUploadResult>(`${BASE}/media`, form, PHOTO_UPLOAD_RETRY_NOTE);
   },
 
   // ── Sales capture (front-line sales roles) ─────────────────────────────────
@@ -210,7 +233,7 @@ export const visibilityApi = {
   uploadSalesMedia(file: File | Blob, filename?: string) {
     const form = new FormData();
     form.append('file', file, filename ?? (file instanceof File ? file.name : 'capture'));
-    return postMultipart<MediaUploadResult>(`${BASE}/sales/media`, form);
+    return postMultipart<MediaUploadResult>(`${BASE}/sales/media`, form, PHOTO_UPLOAD_RETRY_NOTE);
   },
   /** In-scope downline outlets + current-window status (reach + level scoped). */
   getSalesEligible() {
@@ -274,38 +297,22 @@ export const visibilityApi = {
   exportUrl(windowKey?: string): string {
     return `${BASE}/report/export${qs({ windowKey })}`;
   },
-  /** Fetch the xlsx export as a blob and trigger a browser download. */
+  /**
+   * Download the xlsx export: a small one saves straight away; a big one (HTTP 202) is prepared in
+   * the background and returned as `queued` — the screen points the person to the Downloads page.
+   */
   async downloadExport(
     windowKey?: string,
-  ): Promise<{ success: true } | { success: false; error: string }> {
-    try {
-      const res = await fetch(this.exportUrl(windowKey));
-      if (!res.ok) {
-        let error = res.statusText;
-        try {
-          const body = await res.json();
-          error = body?.error ?? error;
-        } catch {
-          /* non-JSON error body */
-        }
-        return { success: false, error };
-      }
-      const blob = await res.blob();
-      const disposition = res.headers.get('Content-Disposition') ?? '';
-      const match = /filename="?([^"]+)"?/.exec(disposition);
-      const filename = match?.[1] ?? `visibility_captures${windowKey ? `_${windowKey}` : ''}.xlsx`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : 'Download failed' };
-    }
+  ): Promise<
+    | { success: true; queued?: { message: string; exportRequestId: string } }
+    | { success: false; error: string }
+  > {
+    const out = await downloadOrQueue(this.exportUrl(windowKey), {
+      fallbackFileName: `visibility_captures${windowKey ? `_${windowKey}` : ''}.xlsx`,
+    });
+    if (out.kind === 'queued') return { success: true, queued: { message: out.message, exportRequestId: out.exportRequestId } };
+    if (out.kind === 'error') return { success: false, error: out.message };
+    return { success: true };
   },
 };
 

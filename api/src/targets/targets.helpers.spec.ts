@@ -18,13 +18,26 @@ import * as XLSX from 'xlsx';
 import {
   parseMonthHeader,
   getEnabledKpis,
-  generateTargetTemplateBuffer,
-  buildResolvedTargetsBuffer,
-  buildSalesDataBuffer,
+  targetTemplateLayout,
+  resolvedTargetsLayout,
+  salesDataLayout,
   parseTargetUploadBuffer,
   KpiDefLike,
   OutletLike,
+  TemplateScopeOptions,
+  ResolvedTargetRow,
+  SalesDataRow,
 } from './targets.helpers';
+import { renderLayoutSync } from '../exports/kinds/batch2/parity.support-spec';
+
+// The layouts are streamed by the export kinds (exports/kinds/batch2/targets.kinds.ts — cell-for-cell parity with the
+// old builders is pinned there). These tests exercise the layouts through the old SheetJS rendering.
+const generateTargetTemplateBuffer = (kpis: KpiDefLike[], months: string[], outlets: OutletLike[], opts?: { scope?: TemplateScopeOptions }) =>
+  renderLayoutSync(targetTemplateLayout(kpis, months, opts), outlets);
+const buildResolvedTargetsBuffer = (month: string, kpis: KpiDefLike[], rows: ResolvedTargetRow[]) =>
+  renderLayoutSync(resolvedTargetsLayout(month, kpis), rows);
+const buildSalesDataBuffer = (month: string, kpis: KpiDefLike[], rows: SalesDataRow[]) =>
+  renderLayoutSync(salesDataLayout(month, kpis), rows);
 
 // ─── Fixtures ──────────────────────────────────────────────────────────────────
 

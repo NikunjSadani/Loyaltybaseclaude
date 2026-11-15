@@ -58,10 +58,13 @@ async function renderView(readOnly: boolean) {
   return render(<SchemeEnrollmentsView schemeId="s1" readOnly={readOnly} backHref="/back" />);
 }
 
-describe('SchemeEnrollmentsView — read-only tenant boundary', () => {
+// The first test pays the cold dynamic import of the view; under full-suite load that exceeded the 5 s default
+// (pre-push 2026-11-14: 5.5 s). Generous suite timeout + waitFor budget — the assertions are unchanged.
+const LOAD = { timeout: 15_000 };
+describe('SchemeEnrollmentsView — read-only tenant boundary', { timeout: 30_000 }, () => {
   it('readOnly: fetches the TENANT report (never the GIFSY-only getReport) and never lists deleted', async () => {
     await act(async () => { await renderView(true); });
-    await waitFor(() => expect(screen.getByText('67%')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('67%')).toBeInTheDocument(), LOAD);
     expect(getTenantReport).toHaveBeenCalledWith('s1');
     expect(getReport).not.toHaveBeenCalled();
     expect(listDeletedEnrollments).not.toHaveBeenCalled();
@@ -69,14 +72,14 @@ describe('SchemeEnrollmentsView — read-only tenant boundary', () => {
 
   it('readOnly: hides the write affordances (no Show-deleted) but keeps Export Excel', async () => {
     await act(async () => { await renderView(true); });
-    await waitFor(() => expect(screen.getByText('67%')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('67%')).toBeInTheDocument(), LOAD);
     expect(screen.queryByRole('button', { name: /show deleted/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /export excel/i })).toBeInTheDocument();
   });
 
   it('write mode (GIFSY): uses getReport and shows the Show-deleted recovery toggle', async () => {
     await act(async () => { await renderView(false); });
-    await waitFor(() => expect(screen.getByText('67%')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('67%')).toBeInTheDocument(), LOAD);
     expect(getReport).toHaveBeenCalledWith('s1');
     expect(getTenantReport).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /show deleted/i })).toBeInTheDocument();

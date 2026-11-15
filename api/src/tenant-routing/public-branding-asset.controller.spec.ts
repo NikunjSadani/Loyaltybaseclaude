@@ -1,7 +1,7 @@
 import { NotFoundException, StreamableFile } from '@nestjs/common';
 import { Readable } from 'node:stream';
 import { Test } from '@nestjs/testing';
-import { PublicBrandingAssetController } from './public-branding-asset.controller';
+import { BRANDING_CACHE_OPTIONS, PublicBrandingAssetController } from './public-branding-asset.controller';
 import { TenantRoutingModule } from './tenant-routing.module';
 import { TenantRoutingService } from './tenant-routing.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -248,5 +248,12 @@ describe('PublicBrandingAssetController', () => {
     const { controller, storage } = setup({ bytes: bigPdf });
     await expect(controller.get(KEY, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
     expect(storage.openReadStream).toHaveBeenCalledTimes(1); // the 16-byte head read only
+  });
+});
+
+describe('branding cache bounds (memory-safety)', () => {
+  it('holds at most 5 MB of branding bytes per instance', () => {
+    expect(BRANDING_CACHE_OPTIONS.maxBytes).toBe(5 * 1024 * 1024);
+    expect(BRANDING_CACHE_OPTIONS.maxEntries).toBeLessThanOrEqual(50);
   });
 });

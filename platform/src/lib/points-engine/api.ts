@@ -3,11 +3,12 @@
  *
  * Thin typed wrappers over the `api` client (same-origin `/api/*` → backend `/v1/*`, httpOnly cookie auth,
  * `ApiResponse<T>` envelope). Every screen uses these so paths/shapes live in one place. Binary downloads
- * (export / preview-report) use raw fetch + downloadBlob (the envelope doesn't apply to a streamed file).
+ * (export / preview-report / payout-report) go through downloadOrQueue: 200 saves the file, 202 means it is
+ * being prepared in the background (Downloads page).
  */
 
 import { api, type ApiResponse } from '../api-client';
-import { downloadBlob } from '../download';
+import { downloadOrQueue, type DownloadOutcome } from '../exports/download';
 import type {
   ComputeCommitResult,
   ComputePreview,
@@ -75,16 +76,12 @@ function computeQs(q: { period: string; program?: string | null; kpiCode?: strin
   if (q.kpiCode) params.set('kpiCode', q.kpiCode);
   return params.toString();
 }
-/** Returns null on success, or an error message. */
-async function download(url: string, filename: string): Promise<string | null> {
-  try {
-    const res = await fetch(url, { credentials: 'same-origin' });
-    if (!res.ok) return res.status === 403 ? "You don't have permission to do that" : `Download failed (${res.status})`;
-    downloadBlob(await res.blob(), filename);
-    return null;
-  } catch {
-    return 'Download failed — check your connection and try again.';
-  }
+/**
+ * 200 → saves the file; 202 → `kind: 'queued'` (prepared in the background, shown on the Downloads
+ * page); anything else → `kind: 'error'` with a plain-English message. Never throws.
+ */
+function download(url: string, filename: string): Promise<DownloadOutcome> {
+  return downloadOrQueue(url, { fallbackFileName: filename, init: { credentials: 'same-origin' } });
 }
 export const downloadExport = (q: { period: string; program?: string | null; kpiCode?: string | null }) =>
   download(`${COMPUTE}/export?${computeQs(q)}`, `points-credit-upload-${q.period}.xlsx`);

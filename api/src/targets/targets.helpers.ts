@@ -2,8 +2,8 @@
  * targets.helpers.ts — pure, unit-testable Excel parse/validate/build helpers.
  *
  * Ported from platform/src/lib/target-excel-upload.ts, adapted for the backend:
- *  • generateTargetTemplateBuffer — returns a Buffer (not ArrayBuffer) from the
- *    tenant's KpiDef rows and an outlet roster.
+ *  • targetTemplateLayout / resolvedTargetsLayout / salesDataLayout — the sheet
+ *    layouts the target/achievement export kinds stream (exports/kinds/batch2).
  *  • parseTargetUploadBuffer — parses an uploaded .xlsx, validates against
  *    KpiDef codes + outlet roster, and returns per-outlet-per-month targetValues.
  *
@@ -27,8 +27,8 @@
  */
 
 import * as XLSX from 'xlsx';
-import { aoaToSheetSafe } from '../common/xlsx';
 import { istMonthKey } from '../common/ist-date';
+import { problemRowsEcho } from '../common/upload-echo';
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -204,326 +204,286 @@ export function isMonthLocked(month: string, current: string = currentMonthKey()
 
 export const FIXED_COLS = ['Outlet ID', 'Outlet Name', 'Outlet Type'] as const;
 
-// ── generateTargetTemplateBuffer ──────────────────────────────────────────────
+// ── Sheet layouts (template + exports) ───────────────────────────────────────────
 
 /**
- * Build a downloadable .xlsx template.
+ * A two-header-row sheet: row 1 = month-group headers (merged across each month block), row 2 = column labels, rows
+ * 3+ = one row per record. Written by the target/achievement export kinds (exports/kinds/batch2/targets.kinds.ts)
+ * with the streaming xlsx writer — `monthRow` is the sheet's header row, `headerRow` the first data row.
+ * Strings are formula-guarded (cellSafe) by the writer, exactly as aoaToSheetSafe did.
+ */
+export interface MonthBlockSheetLayout<R> {
+  sheetName: string;
+  /** Row 1: month-group headers ("Jul '26 Target"), blank over the identity columns. */
+  monthRow: (string | number)[];
+  /** Row 2: identity column labels + KPI labels per month block. */
+  headerRow: string[];
+  /** Column widths in characters (SheetJS `wch`). */
+  widths: number[];
+  /** Row-1 merges: each month-group header spans its block. 0-based. */
+  merges: { s: { r: number; c: number }; e: { r: number; c: number } }[];
+  /** One data row for a record. */
+  row(record: R): (string | number)[];
+}
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "2026-07" → "Jul '26 Target" (the month-group header the upload parser reads back). */
+function monthGroupLabel(month: string): string {
+  const [year, mm] = month.split('-');
+  return `${MONTH_ABBR[Number(mm) - 1]} '${year.slice(2)} Target`;
+}
+
+/**
+ * The upload TEMPLATE layout (targets: many months; achievements: one month).
  *
- * Layout:
- *   Row 1: month group header cells (e.g. "Jul '26 Target") — one per KPI per month
+ *   Row 1: month group header cells (e.g. "Jul '26 Target") — one per month, merged across the month block
  *   Row 2: column headers (fixed cols + KPI labels for each month)
- *   Rows 3+: one pre-filled row per outlet (outletCode, outletName, outletType);
- *            the KPI target cells are left blank for the admin to fill in.
+ *   Rows 3+: one pre-filled row per outlet (outletCode, outletName, outletType); KPI cells blank for the admin.
  *
  * @param kpis    The tenant's KpiDef rows (only enabled ones are used).
  * @param months  YYYY-MM strings, e.g. ['2026-07', '2026-08'].
- * @param outlets Outlet roster for the pre-filled rows.
- * @param opts    Optional APPLIES-TO scope (D2). Absent → the layout is byte-identical to the
- *                pre-scope template. Present → `Program` / `Sub-Program` info columns follow
- *                `Outlet Type` and every out-of-scope (outlet, KPI) value cell is pre-filled `N/A`.
+ * @param opts    Optional APPLIES-TO scope (D2). Absent → the pre-scope layout. Present → `Program` / `Sub-Program`
+ *                info columns follow `Outlet Type` and every out-of-scope (outlet, KPI) value cell is pre-filled `N/A`.
  */
-export function generateTargetTemplateBuffer(
+export function targetTemplateLayout(
   kpis: KpiDefLike[],
   months: string[],
-  outlets: OutletLike[],
   opts?: { scope?: TemplateScopeOptions },
-): Buffer {
+): MonthBlockSheetLayout<OutletLike> {
   const enabled = getEnabledKpis(kpis);
   const scope = opts?.scope;
   // Identity columns: the shared FIXED_COLS, plus the D2 info columns ONLY for a scoped template.
   const fixedCols: readonly string[] = scope ? [...FIXED_COLS, ...SCOPE_INFO_COLS] : FIXED_COLS;
 
-  // A KPI emits a "name override" column (a per-outlet custom display name) ONLY
-  // when it is explicitly configured with hasNameOverride + a nameOverrideLabel.
-  // KPIs without an override keep their single value column — the template /
-  // parse round-trip is byte-identical for them.
-  const hasOverrideCol = (k: KpiDefLike): boolean =>
-    !!(k.hasNameOverride && k.nameOverrideLabel);
+  // A KPI emits a "name override" column (a per-outlet custom display name) ONLY when it is explicitly configured
+  // with hasNameOverride + a nameOverrideLabel. KPIs without an override keep their single value column.
+  const hasOverrideCol = (k: KpiDefLike): boolean => !!(k.hasNameOverride && k.nameOverrideLabel);
 
-  // Per-month block width = one value column per enabled KPI, PLUS one extra
-  // name column for each KPI that has a name override.
+  // Per-month block width = one value column per enabled KPI, PLUS one name column per KPI with an override.
   const overrideCount = enabled.filter(hasOverrideCol).length;
   const blockWidth = enabled.length + overrideCount;
 
-  // ── Row 1: month group headers ──────────────────────────────────────────────
-  const row1: (string | number)[] = Array(fixedCols.length).fill('');
+  const monthRow: (string | number)[] = Array(fixedCols.length).fill('');
   for (const month of months) {
-    const [year, mm] = month.split('-');
-    const abbr = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][
-      Number(mm) - 1
-    ];
-    const label = `${abbr} '${year.slice(2)} Target`;
-    row1.push(label);
-    for (let i = 1; i < blockWidth; i++) row1.push('');
+    monthRow.push(monthGroupLabel(month));
+    for (let i = 1; i < blockWidth; i++) monthRow.push('');
   }
 
-  // ── Row 2: column headers ────────────────────────────────────────────────────
-  // For each KPI emit its value-label column; immediately AFTER it (adjacent,
-  // value-first) emit the nameOverrideLabel header when the KPI has an override.
-  const row2: string[] = [...fixedCols];
+  // For each KPI emit its value-label column; immediately AFTER it (value-first) the nameOverrideLabel header.
+  const headerRow: string[] = [...fixedCols];
   for (let mi = 0; mi < months.length; mi++) {
     for (const kpi of enabled) {
-      row2.push(kpi.label);
-      if (hasOverrideCol(kpi)) row2.push(kpi.nameOverrideLabel as string);
+      headerRow.push(kpi.label);
+      if (hasOverrideCol(kpi)) headerRow.push(kpi.nameOverrideLabel as string);
     }
   }
 
-  // ── Data rows (pre-filled outlet info; KPI + name cells blank) ─────────────
-  const dataRows = outlets.map((o) => {
+  const widths: number[] = [16, 24, 16]; // Outlet ID, Outlet Name, Outlet Type
+  if (scope) widths.push(20, 20); // Program, Sub-Program
+  for (let mi = 0; mi < months.length; mi++) {
+    for (const kpi of enabled) {
+      widths.push(kpi.isPrimary ? 14 : 18);
+      if (hasOverrideCol(kpi)) widths.push(22); // name override column
+    }
+  }
+
+  const merges: MonthBlockSheetLayout<OutletLike>['merges'] = [];
+  let colOffset = fixedCols.length;
+  for (let mi = 0; mi < months.length; mi++) {
+    merges.push({ s: { r: 0, c: colOffset }, e: { r: 0, c: colOffset + blockWidth - 1 } });
+    colOffset += blockWidth;
+  }
+
+  const row = (o: OutletLike): (string | number)[] => {
     if (scope) {
-      // Scoped layout (D2): info columns + `N/A` in each out-of-scope VALUE cell. The adjacent
-      // name-override cell stays blank (a typed name there is ignored on upload anyway).
-      const row: (string | number)[] = [o.outletCode, o.name, o.outletType, o.program ?? '', o.subProgram ?? ''];
+      // Scoped layout (D2): info columns + `N/A` in each out-of-scope VALUE cell. The adjacent name-override cell
+      // stays blank (a typed name there is ignored on upload anyway).
+      const cells: (string | number)[] = [o.outletCode, o.name, o.outletType, o.program ?? '', o.subProgram ?? ''];
       const inScope = enabled.map((k) => scope.isInScope(o, k.code));
       for (let mi = 0; mi < months.length; mi++) {
         enabled.forEach((kpi, ki) => {
-          row.push(inScope[ki] ? '' : OUT_OF_SCOPE_CELL);
-          if (hasOverrideCol(kpi)) row.push('');
+          cells.push(inScope[ki] ? '' : OUT_OF_SCOPE_CELL);
+          if (hasOverrideCol(kpi)) cells.push('');
         });
       }
-      return row;
+      return cells;
     }
-    const row: (string | number)[] = [o.outletCode, o.name, o.outletType];
+    const cells: (string | number)[] = [o.outletCode, o.name, o.outletType];
     for (let mi = 0; mi < months.length; mi++) {
-      for (let ci = 0; ci < blockWidth; ci++) row.push('');
+      for (let ci = 0; ci < blockWidth; ci++) cells.push('');
     }
-    return row;
-  });
+    return cells;
+  };
 
-  const ws = aoaToSheetSafe([row1, row2, ...dataRows]);
-
-  // Column widths — mirror the value+name column layout per month block.
-  const colWidths: { wch: number }[] = [
-    { wch: 16 }, // Outlet ID
-    { wch: 24 }, // Outlet Name
-    { wch: 16 }, // Outlet Type
-  ];
-  if (scope) colWidths.push({ wch: 20 }, { wch: 20 }); // Program, Sub-Program
-  for (let mi = 0; mi < months.length; mi++) {
-    for (const kpi of enabled) {
-      colWidths.push({ wch: kpi.isPrimary ? 14 : 18 });
-      if (hasOverrideCol(kpi)) colWidths.push({ wch: 22 }); // name override column
-    }
-  }
-  ws['!cols'] = colWidths;
-
-  // Merge month group header cells (row 1) across the full (wider) block.
-  const merges: XLSX.Range[] = [];
-  let colOffset = fixedCols.length;
-  for (let mi = 0; mi < months.length; mi++) {
-    merges.push({
-      s: { r: 0, c: colOffset },
-      e: { r: 0, c: colOffset + blockWidth - 1 },
-    });
-    colOffset += blockWidth;
-  }
-  ws['!merges'] = merges;
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Targets');
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  return { sheetName: 'Targets', monthRow, headerRow, widths, merges, row };
 }
 
-// ── buildResolvedTargetsBuffer ────────────────────────────────────────────────
+/** A stored OutletTarget row as the "final targets" export prints it. */
+export interface ResolvedTargetRow {
+  outletCode: string;
+  outletName: string | null;
+  outletType: string | null;
+  targetValues: unknown;
+  programName?: string | null;
+}
 
 /**
- * Build a "final targets" export for ONE month — a verbatim dump of the stored
- * `OutletTarget.targetValues` per outlet (NO geo-resolution / compute; the
- * no-compute model just surfaces what was uploaded). Blank cell = the KPI was
- * never configured for that outlet-month (key omitted from targetValues).
+ * "Final targets" export for ONE month — a verbatim dump of the stored `OutletTarget.targetValues` per outlet (NO
+ * compute). Blank cell = the KPI was never configured for that outlet-month (key omitted from targetValues).
  *
- * @param month  YYYY-MM being exported.
- * @param kpis   The tenant's KpiDef rows (only enabled ones become columns).
- * @param rows   Stored OutletTarget rows for that month.
+ * Identity columns = FIXED_COLS + a read-only "Program Name" column; then the SAME two-row month-group layout the
+ * template uses, so the file re-uploads straight back through parseTargetUploadBuffer (the parser resolves fixed cols
+ * by name and KPI cols by label, ignoring unknown columns).
  */
-export function buildResolvedTargetsBuffer(
-  month: string,
-  kpis: KpiDefLike[],
-  rows: {
-    outletCode: string;
-    outletName: string | null;
-    outletType: string | null;
-    targetValues: unknown;
-    programName?: string | null;
-  }[],
-): Buffer {
+export function resolvedTargetsLayout(month: string, kpis: KpiDefLike[]): MonthBlockSheetLayout<ResolvedTargetRow> {
   const enabled = getEnabledKpis(kpis);
-
-  // Identity columns for THIS export = the shared FIXED_COLS + a read-only "Program Name" column
-  // (for filtering/analysis). Injected locally, NOT into the shared FIXED_COLS constant, so the
-  // blank-template + upload-parser paths are untouched. The upload parser resolves the fixed cols
-  // by header name and KPI cols by label (ignoring unknown columns), so this stays re-uploadable.
-  const identityCols = [...FIXED_COLS, 'Program Name'];
-
-  // CRITICAL: emit the SAME two-row month-group layout that
-  // generateTargetTemplateBuffer produces, so a downloaded Final-Targets file
-  // can be re-uploaded straight back through parseTargetUploadBuffer (which
-  // requires row 1 = month-group headers and row 2 = fixed cols + KPI labels).
-  // A single-header layout parses to 0 rows.
-
-  // ── Row 1: month group header (one merged span for the single month) ────────
-  const [year, mm] = month.split('-');
-  const abbr = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][
-    Number(mm) - 1
-  ];
-  const monthLabel = `${abbr} '${year.slice(2)} Target`;
-  const row1: (string | number)[] = Array(identityCols.length).fill('');
-  row1.push(monthLabel);
-  for (let i = 1; i < enabled.length; i++) row1.push('');
-
-  // ── Row 2: column headers ───────────────────────────────────────────────────
-  const row2: string[] = [...identityCols, ...enabled.map((k) => k.label)];
-
-  // ── Data rows (verbatim stored values; blank = KPI not configured) ──────────
-  const dataRows = rows.map((r) => {
-    const vals = (r.targetValues ?? {}) as Record<string, unknown>;
-    const out: (string | number)[] = [
-      r.outletCode,
-      r.outletName ?? '',
-      r.outletType ?? '',
-      r.programName ?? '',
-    ];
-    for (const k of enabled) {
-      const v = vals[k.code];
-      out.push(typeof v === 'number' ? v : ''); // blank = not configured
-    }
-    return out;
-  });
-
-  const ws = aoaToSheetSafe([row1, row2, ...dataRows]);
-  ws['!cols'] = [
-    { wch: 16 },
-    { wch: 24 },
-    { wch: 16 },
-    { wch: 20 }, // Program Name
-    ...enabled.map(() => ({ wch: 16 })),
-  ];
-
-  // Merge the month-group header cell across its KPI columns (row 1).
-  if (enabled.length > 0) {
-    ws['!merges'] = [
-      {
-        s: { r: 0, c: identityCols.length },
-        e: { r: 0, c: identityCols.length + enabled.length - 1 },
-      },
-    ];
-  }
-
-  const wb = XLSX.utils.book_new();
-  // Sheet names cap at 31 chars and disallow some punctuation — month is safe.
-  XLSX.utils.book_append_sheet(wb, ws, `Final Targets ${month}`);
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  const identityCols = [...FIXED_COLS, PROGRAM_NAME_COL];
+  const monthRow: (string | number)[] = Array(identityCols.length).fill('');
+  monthRow.push(monthGroupLabel(month));
+  for (let i = 1; i < enabled.length; i++) monthRow.push('');
+  return {
+    // Sheet names cap at 31 chars and disallow some punctuation — month is safe.
+    sheetName: `Final Targets ${month}`,
+    monthRow,
+    headerRow: [...identityCols, ...enabled.map((k) => k.label)],
+    widths: [16, 24, 16, 20, ...enabled.map(() => 16)],
+    merges: enabled.length > 0
+      ? [{ s: { r: 0, c: identityCols.length }, e: { r: 0, c: identityCols.length + enabled.length - 1 } }]
+      : [],
+    row: (r) => {
+      const vals = (r.targetValues ?? {}) as Record<string, unknown>;
+      const out: (string | number)[] = [r.outletCode, r.outletName ?? '', r.outletType ?? '', r.programName ?? ''];
+      for (const k of enabled) {
+        const v = vals[k.code];
+        out.push(typeof v === 'number' ? v : ''); // blank = not configured
+      }
+      return out;
+    },
+  };
 }
 
-// ── buildSalesDataBuffer ──────────────────────────────────────────────────────
-
 /**
- * Extra identity column that the "Download Sales Data" export adds and the
- * target/achievement side does NOT emit. Sits AFTER the fixed identity columns
- * and BEFORE the month block. It is sourced by joining Outlet.programName (which
- * is NOT denormalized on OutletSalesRecord) — never a KPI code.
+ * Extra identity column that the "Download Sales Data" / "Final targets" exports add and the template does NOT emit.
+ * Sits AFTER the fixed identity columns and BEFORE the month block. Sourced by joining Outlet.programName.
  */
 export const PROGRAM_NAME_COL = 'Program Name' as const;
 
+/** A stored OutletSalesRecord row as the "sales data" export prints it. */
+export interface SalesDataRow {
+  outletCode: string;
+  outletName: string | null;
+  outletType: string | null;
+  programName: string | null;
+  kpiValues: unknown;
+}
+
 /**
- * Build a "sales data" export for ONE month — a verbatim dump of the stored
- * `OutletSalesRecord.kpiValues` per outlet (NO compute), in the SAME month-group
- * 2-row layout `generateTargetTemplateBuffer` produces, PLUS a "Program Name"
- * column. This is the achievement-side twin of `buildResolvedTargetsBuffer`.
+ * "Sales data" export for ONE month — a verbatim dump of the stored `OutletSalesRecord.kpiValues` per outlet (NO
+ * compute), in the SAME month-group 2-row layout as the template, PLUS a "Program Name" column.
  *
- * RE-UPLOAD SAFETY (hard requirement): the produced file must ingest cleanly back
- * through `uploadAchievements` → `parseTargetUploadBuffer`. The parser (a) finds
- * the fixed columns by NAME (`Outlet ID`/`Outlet Name`/`Outlet Type`), (b) detects
- * month blocks from row 1 via `parseMonthHeader`, and (c) matches KPI columns by
- * LABEL within each month block's column range `[block.startCol, nextBlock.startCol)`.
- * The Program Name column is placed at column index `FIXED_COLS.length` — strictly
- * BEFORE the single month block's start column — so it is never inside a block's
- * range, is not a fixed column the parser looks up, and its "Program Name" label
- * resolves to neither a KPI nor an override → it is silently ignored on re-upload,
- * while every identity column resolves by name and every KPI column by label. Blank
- * cell = the KPI was never configured for that outlet-month (key omitted).
- *
- * @param month  YYYY-MM being exported.
- * @param kpis   The tenant's KpiDef rows (only enabled ones become columns).
- * @param rows   Stored OutletSalesRecord rows for that month, each carrying the
- *               outlet's Program Name resolved from the Outlet join.
+ * RE-UPLOAD SAFETY (hard requirement): the file must ingest cleanly back through `uploadAchievements` →
+ * `parseTargetUploadBuffer`. The parser finds the fixed columns by NAME, detects month blocks from row 1, and matches
+ * KPI columns by LABEL within each block's range. The Program Name column sits at index `FIXED_COLS.length` —
+ * strictly BEFORE the month block — so it is never inside a block and is silently ignored on re-upload.
  */
-export function buildSalesDataBuffer(
-  month: string,
-  kpis: KpiDefLike[],
-  rows: {
-    outletCode: string;
-    outletName: string | null;
-    outletType: string | null;
-    programName: string | null;
-    kpiValues: unknown;
-  }[],
-): Buffer {
+export function salesDataLayout(month: string, kpis: KpiDefLike[]): MonthBlockSheetLayout<SalesDataRow> {
   const enabled = getEnabledKpis(kpis);
-
-  // ── Row 1: month group header ───────────────────────────────────────────────
-  // Anchored at the FIRST KPI column, which now sits one column further right than
-  // the target export because of the inserted Program Name column.
-  const [year, mm] = month.split('-');
-  const abbr = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][
-    Number(mm) - 1
-  ];
-  const monthLabel = `${abbr} '${year.slice(2)} Target`;
-
-  // Identity block = the 3 fixed cols + the Program Name col. The month block
-  // begins immediately after it.
   const identityColCount = FIXED_COLS.length + 1;
-
-  const row1: (string | number)[] = Array(identityColCount).fill('');
-  row1.push(monthLabel);
-  for (let i = 1; i < enabled.length; i++) row1.push('');
-
-  // ── Row 2: column headers (identity + Program Name + KPI value labels) ───────
-  const row2: string[] = [...FIXED_COLS, PROGRAM_NAME_COL, ...enabled.map((k) => k.label)];
-
-  // ── Data rows (verbatim stored values; blank = KPI not configured) ──────────
-  const dataRows = rows.map((r) => {
-    const vals = (r.kpiValues ?? {}) as Record<string, unknown>;
-    const out: (string | number)[] = [
-      r.outletCode,
-      r.outletName ?? '',
-      r.outletType ?? '',
-      r.programName ?? '', // Program Name from the Outlet join (blank if unset)
-    ];
-    for (const k of enabled) {
-      const v = vals[k.code];
-      out.push(typeof v === 'number' ? v : ''); // blank = not configured
-    }
-    return out;
-  });
-
-  const ws = aoaToSheetSafe([row1, row2, ...dataRows]);
-  ws['!cols'] = [
-    { wch: 16 }, // Outlet ID
-    { wch: 24 }, // Outlet Name
-    { wch: 16 }, // Outlet Type
-    { wch: 22 }, // Program Name
-    ...enabled.map(() => ({ wch: 16 })),
-  ];
-
-  // Merge the month-group header cell across its KPI columns (row 1), starting at
-  // the first KPI column (immediately after the identity block).
-  if (enabled.length > 0) {
-    ws['!merges'] = [
-      {
-        s: { r: 0, c: identityColCount },
-        e: { r: 0, c: identityColCount + enabled.length - 1 },
-      },
-    ];
-  }
-
-  const wb = XLSX.utils.book_new();
-  // Sheet names cap at 31 chars — "Sales Data 2026-07" is well under.
-  XLSX.utils.book_append_sheet(wb, ws, `Sales Data ${month}`);
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  const monthRow: (string | number)[] = Array(identityColCount).fill('');
+  monthRow.push(monthGroupLabel(month));
+  for (let i = 1; i < enabled.length; i++) monthRow.push('');
+  return {
+    // Sheet names cap at 31 chars — "Sales Data 2026-07" is well under.
+    sheetName: `Sales Data ${month}`,
+    monthRow,
+    headerRow: [...FIXED_COLS, PROGRAM_NAME_COL, ...enabled.map((k) => k.label)],
+    widths: [16, 24, 16, 22, ...enabled.map(() => 16)],
+    merges: enabled.length > 0
+      ? [{ s: { r: 0, c: identityColCount }, e: { r: 0, c: identityColCount + enabled.length - 1 } }]
+      : [],
+    row: (r) => {
+      const vals = (r.kpiValues ?? {}) as Record<string, unknown>;
+      const out: (string | number)[] = [r.outletCode, r.outletName ?? '', r.outletType ?? '', r.programName ?? ''];
+      for (const k of enabled) {
+        const v = vals[k.code];
+        out.push(typeof v === 'number' ? v : ''); // blank = not configured
+      }
+      return out;
+    },
+  };
 }
 
 // ── parseTargetUploadBuffer ───────────────────────────────────────────────────
+
+/** One echoed upload row — WITHOUT its parsed KPI values (memory-safety upload echo). */
+export interface UploadRowEcho {
+  rowIndex: number;
+  outletCode: string;
+  outletName: string;
+  status: RowStatus;
+  remarks: string;
+}
+
+const isRejectedRow = (r: ParsedRow): boolean => r.status === 'rejected_outlet' || r.status === 'rejected_kpi';
+/** A saved/skipped row whose remark the operator should read (APPLIES-TO D1 ignored values). */
+const isWarningRow = (r: ParsedRow): boolean => !isRejectedRow(r) && /not applicable/i.test(r.remarks);
+
+/**
+ * Target / achievement upload response rows (memory-safety 2026-11-13). Replaces the old
+ * `rows: <every parsed row incl. its KPI values>` (~1.8 MB for 6,500 rows):
+ *  - problemRows  — REJECTED rows (unknown outlet / bad KPI), capped at 500, with the true total;
+ *  - warningRows  — saved rows carrying an "ignored, KPI not applicable" remark, capped at 500;
+ *  - skippedBlankCount — rows left blank in the template (normal; counted, not echoed).
+ */
+export function targetUploadRowsEcho(rows: readonly ParsedRow[]): {
+  problemRows: UploadRowEcho[];
+  problemRowCount: number;
+  problemRowsTruncated: boolean;
+  warningRows: UploadRowEcho[];
+  warningRowCount: number;
+  warningRowsTruncated: boolean;
+  skippedBlankCount: number;
+} {
+  const slim = (r: ParsedRow): UploadRowEcho => ({
+    rowIndex: r.rowIndex,
+    outletCode: r.outletCode,
+    outletName: r.outletName,
+    status: r.status,
+    remarks: r.remarks,
+  });
+  const rejected = problemRowsEcho(rows, isRejectedRow);
+  const warnings = problemRowsEcho(rows, isWarningRow);
+  let skippedBlankCount = 0;
+  for (const r of rows) if (r.status === 'skipped_blank') skippedBlankCount++;
+  return {
+    problemRows: rejected.problemRows.map(slim),
+    problemRowCount: rejected.problemRowCount,
+    problemRowsTruncated: rejected.problemRowsTruncated,
+    warningRows: warnings.problemRows.map(slim),
+    warningRowCount: warnings.problemRowCount,
+    warningRowsTruncated: warnings.problemRowsTruncated,
+    skippedBlankCount,
+  };
+}
+
+/**
+ * First worksheet as an array-of-arrays. Memory-safety (2026-11-13): the SheetJS workbook
+ * (the largest structure of the whole parse — every cell object + its address key) lives
+ * only inside this function, so it is collectable as soon as the AoA exists instead of
+ * staying reachable for the whole row loop of the caller.
+ */
+function readFirstSheetAoa(buffer: Buffer | ArrayBuffer): (string | number | null | undefined)[][] {
+  const wb = XLSX.read(buffer, { type: 'buffer' });
+  if (wb.SheetNames.length === 0) {
+    throw new Error('Unrecognized file: no worksheet found');
+  }
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  return XLSX.utils.sheet_to_json<(string | number | null | undefined)[]>(ws, {
+    header: 1,
+    defval: null,
+  });
+}
 
 /**
  * Parse an uploaded .xlsx target file.
@@ -575,15 +535,7 @@ export function parseTargetUploadBuffer(
     }
   }
 
-  const wb = XLSX.read(buffer, { type: 'buffer' });
-  if (wb.SheetNames.length === 0) {
-    throw new Error('Unrecognized file: no worksheet found');
-  }
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const rawAoa = XLSX.utils.sheet_to_json<(string | number | null | undefined)[]>(ws, {
-    header: 1,
-    defval: null,
-  });
+  const rawAoa = readFirstSheetAoa(buffer);
 
   // A valid template always has the two header rows (month-group row + column
   // labels). Fewer rows means the file is not a recognizable template (e.g. a

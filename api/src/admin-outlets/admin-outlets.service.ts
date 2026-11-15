@@ -29,6 +29,9 @@ import {
   UpsertOutletsDto,
 } from './dto/admin-outlets.dto';
 
+/** Outlets read per keyset chunk by listIds (memory-safety 2026-11-13). */
+export const LIST_IDS_CHUNK = 2000;
+
 /**
  * Derive the display KYC status for a single outlet from its reKycFlags / kycIntent /
  * partner + the latest KycSubmission status for that partner. SINGLE source of truth
@@ -762,47 +765,65 @@ export class AdminOutletsService {
    * module-scope fn + isReKycPending helper), so the two never diverge.
    * Envelope is applied globally by TransformInterceptor: { success, data:{ outlets } }.
    */
-  async listIds(user: JwtPayload) {
+  async listIds(user: JwtPayload): Promise<{ outlets: Array<{ outletId: string; isActive: boolean; kycStatus: string }> }> {
     const baseWhere: Prisma.OutletWhereInput = { deletedAt: null, clientId: user.clientId };
 
-    const outlets = await this.prisma.outlet.findMany({
-      where: baseWhere,
-      select: {
-        outletCode: true,
-        isActive: true,
-        // Fields needed for real KYC-status derivation (mirrors list()).
-        partnerId: true,
-        reKycFlags: true,
-        kycIntent: true,
-      },
-    });
+    // Memory-safety (2026-11-13): still the FULL list (the FE upload validators need every
+    // code), but read in keyset chunks of LIST_IDS_CHUNK outlets, each with a one-row-per-
+    // partner latest-submission lookup — instead of every outlet + EVERY submission at once.
+    const out: Array<{ outletId: string; isActive: boolean; kycStatus: string }> = [];
+    let afterId: string | null = null;
+    for (;;) {
+      const outlets: Array<{
+        id: string;
+        outletCode: string;
+        isActive: boolean;
+        partnerId: string | null;
+        reKycFlags: Prisma.JsonValue;
+        kycIntent: OutletKycIntent | null;
+      }> = await this.prisma.outlet.findMany({
+        where: afterId ? { ...baseWhere, id: { gt: afterId } } : baseWhere,
+        select: {
+          id: true,
+          outletCode: true,
+          isActive: true,
+          // Fields needed for real KYC-status derivation (mirrors list()).
+          partnerId: true,
+          reKycFlags: true,
+          kycIntent: true,
+        },
+        orderBy: { id: 'asc' },
+        take: LIST_IDS_CHUNK,
+      });
+      if (outlets.length === 0) break;
 
-    // Batched latest-submission lookup (no N+1) — mirrors list().
-    const partnerIds = [
-      ...new Set(outlets.map((o) => o.partnerId).filter((id): id is string => id !== null)),
-    ];
-    const latestSubmissions =
-      partnerIds.length > 0
-        ? await this.prisma.kycSubmission.findMany({
-            where: { partnerId: { in: partnerIds } },
-            select: { partnerId: true, status: true },
-            orderBy: { createdAt: 'desc' },
-          })
-        : [];
-    const latestStatusByPartnerId = new Map<string, KycStatus>();
-    for (const sub of latestSubmissions) {
-      if (sub.partnerId && !latestStatusByPartnerId.has(sub.partnerId)) {
-        latestStatusByPartnerId.set(sub.partnerId, sub.status);
+      const partnerIds = [
+        ...new Set(outlets.map((o) => o.partnerId).filter((id): id is string => id !== null)),
+      ];
+      const latestStatusByPartnerId = new Map<string, KycStatus>();
+      if (partnerIds.length > 0) {
+        // Latest submission per partner (newest createdAt; id breaks a tie) — same rule as
+        // list(), one row per partner instead of the partner's whole submission history.
+        const latest = await this.prisma.$queryRaw<Array<{ partnerId: string; status: KycStatus }>>(Prisma.sql`
+          SELECT DISTINCT ON (s."partnerId") s."partnerId", s."status"
+            FROM "kyc_submissions" s
+           WHERE s."partnerId" IN (${Prisma.join(partnerIds)})
+           ORDER BY s."partnerId", s."createdAt" DESC, s."id" DESC`);
+        for (const row of latest) latestStatusByPartnerId.set(row.partnerId, row.status);
       }
+
+      for (const o of outlets) {
+        out.push({
+          outletId: o.outletCode,
+          isActive: o.isActive,
+          kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId, latestStatusByPartnerId),
+        });
+      }
+      if (outlets.length < LIST_IDS_CHUNK) break;
+      afterId = outlets[outlets.length - 1].id;
     }
 
-    return {
-      outlets: outlets.map((o) => ({
-        outletId: o.outletCode,
-        isActive: o.isActive,
-        kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId, latestStatusByPartnerId),
-      })),
-    };
+    return { outlets: out };
   }
 
   /**

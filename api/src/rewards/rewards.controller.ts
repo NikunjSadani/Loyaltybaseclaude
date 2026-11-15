@@ -13,6 +13,7 @@ import {
   TransitionOrderDto,
   UpdateOrderDto,
   VoucherCancelledWithVendorDto,
+  HubbleAcknowledgeDto,
   WishlistAddDto,
 } from './dto/rewards.dto';
 
@@ -244,5 +245,21 @@ export class RewardsController {
   @RequirePermission('rewards:manage_orders')
   retryHubbleReconcile(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.rewards.retryHubbleReconcile(user, id);
+  }
+
+  /**
+   * GIFSY_ADMIN-only "Acknowledge — resolved": clears a post-refund Hubble review flag
+   * (HUBBLE_ISSUED_AFTER_REFUND / HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND) with a required note
+   * (audited). The service re-checks GIFSY_ADMIN and the flag.
+   */
+  @Post('orders/:id/hubble-acknowledge')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('rewards:manage_orders')
+  acknowledgeHubbleFlag(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: HubbleAcknowledgeDto,
+  ) {
+    return this.rewards.acknowledgeHubbleFlag(user, id, dto.note, { force: dto.force === true });
   }
 }

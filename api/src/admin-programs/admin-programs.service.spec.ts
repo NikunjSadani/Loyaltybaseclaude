@@ -278,16 +278,25 @@ describe('ReportsService — target-vs-sales', () => {
     expect(mockTargets.getPace).not.toHaveBeenCalled();
   });
 
-  it('accepts exactly 15 months', async () => {
+  it('the JSON preview accepts exactly 3 months', async () => {
     const service = await build(ReportsService);
     mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
-    // 2025-01 .. 2026-03 = 15 months
     const res = (await service.targetVsSales(gifsy, {
-      fromMonth: '2025-01',
+      fromMonth: '2026-01',
       toMonth: '2026-03',
     })) as { months: string[] };
-    expect(res.months).toHaveLength(15);
-    expect(mockTargets.getPace).toHaveBeenCalledTimes(15);
+    expect(res.months).toHaveLength(3);
+    expect(mockTargets.getPace).toHaveBeenCalledTimes(3);
+  });
+
+  it('the JSON preview rejects 4–15 months with a message pointing to the download (never computes)', async () => {
+    const service = await build(ReportsService);
+    mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
+    // 2025-01 .. 2026-03 = 15 months — valid for the download, too long for the on-screen preview.
+    const err = await service.targetVsSales(gifsy, { fromMonth: '2025-01', toMonth: '2026-03' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect((err as BadRequestException).message).toMatch(/up to 3 months .*Download Excel/);
+    expect(mockTargets.getPace).not.toHaveBeenCalled();
   });
 
   it('rejects fromMonth after toMonth', async () => {

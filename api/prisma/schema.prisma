@@ -4069,3 +4069,35 @@ model CancelledVoucherCode {
   @@index([orderId])
   @@map("cancelled_voucher_codes")
 }
+
+/// Downloads page (platform/docs/plans/DOWNLOADS-PAGE.md): a heavy report requested by a user, prepared by the
+/// `gifsy-exports` Cloud Run JOB (api/src/exports/worker.main.ts) and kept for EXPORT_RETENTION_DAYS. The file lives in
+/// GCS at `storagePath`; the row is the only index of it. `actor` is the requester's scoping snapshot (role, clientId,
+/// assumed, gifsyRoleId) taken at request time — the worker scopes the report with it, never with a live session.
+/// Claimed with FOR UPDATE SKIP LOCKED + a random claimToken, heartbeated while RUNNING (same model as sales_imports).
+model ExportRequest {
+  id            String    @id @default(cuid())
+  clientId      String // the requester's tenant (assumed tenant for an operator; 'gifsy' for an un-assumed owner)
+  requestedById String
+  kind          String // api/src/exports/export-kinds.ts
+  params        Json // validated, kind-specific
+  actor         Json // { role, clientId, assumed, gifsyRoleId } at request time
+  status        String    @default("QUEUED") // QUEUED|RUNNING|READY|FAILED|EXPIRED
+  fileName      String?
+  storagePath   String?
+  sizeBytes     BigInt?
+  rowCount      Int?
+  error         String?
+  attempts      Int       @default(0)
+  claimToken    String?
+  heartbeatAt   DateTime?
+  createdAt     DateTime  @default(now())
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  expiresAt     DateTime?
+  updatedAt     DateTime  @updatedAt
+
+  @@index([clientId, requestedById, createdAt])
+  @@index([status, createdAt])
+  @@map("export_requests")
+}

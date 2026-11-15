@@ -67,6 +67,39 @@ export function formatInrExact(rupees: number): string {
 }
 
 /**
+ * Whole-rupee display with Indian digit grouping, rounded to the nearest rupee — `₹10,414`, `-₹1,500`
+ * (the sign goes BEFORE the ₹; never `₹-1,500` or `-₹0`). Non-finite / NaN → `₹0`. Used by the partner
+ * Targets page's "Achieved / Target" line for INR-unit KPIs (owner-approved, all tenants, 2026-11-15).
+ */
+export function formatInrWhole(rupees: number): string {
+  if (!Number.isFinite(rupees)) return '₹0';
+  const r = Math.round(rupees) || 0; // `|| 0` folds -0 → 0
+  return r < 0 ? `-${formatInrExact(-r)}` : formatInrExact(r);
+}
+
+/**
+ * Neutral display of a KPI amount that has NO target (e.g. Bajaj SAMT's NON ADHO eligibility-gate KPI):
+ * compact ₹ for INR units (`₹2.8K`, `-₹1.5K`), otherwise en-IN grouped with ≤1 dp + the unit suffix
+ * (`2,755.1 cases`). Tiny |v| < 0.5 shows as 0 (never `-₹0`). Same rules as the partner-dashboard
+ * Target Achievement card's "so far" row.
+ */
+export function formatKpiAmount(value: number, unit?: string | null): string {
+  const v = Math.abs(value) < 0.5 ? 0 : value;
+  return isInrUnit(unit)
+    ? formatInrCompact(v)
+    : `${v.toLocaleString('en-IN', { maximumFractionDigits: 1 })}${unit ? ` ${unit}` : ''}`;
+}
+
+/**
+ * "So far" figure for a KPI with NO target — `₹2.8K so far` / `0 cases so far`. No sales data at all
+ * (null / undefined / non-finite) → `—`, never a stated zero.
+ */
+export function formatKpiSoFar(value: number | null | undefined, unit?: string | null): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+  return `${formatKpiAmount(value, unit)} so far`;
+}
+
+/**
  * True when a KPI's `unit` denotes Indian rupees — the signal that a KPI line should use the
  * compact ₹ formatting rather than its raw unit suffix. Volume/count units (`Litre`, `Unit`,
  * `outlets`, …) and an empty/unknown unit return false, so their displays are left untouched.

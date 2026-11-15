@@ -15,6 +15,18 @@ import { WorkerStop } from './worker-stop';
 // 105 s in the full run, 15 s alone). A red full suite skips the staging deploy, so give them real headroom.
 jest.setTimeout(30_000);
 
+// Deterministic memory backstop. HeapGuard reads the jest WORKER's real used heap, which after ~260 suites on a small
+// GitHub runner (heap limit ≈ half a dev box's) crossed the trip budget mid-parse — big-fixture tests then failed
+// "too large" (CI 2026-11-14, three different tests across two runs). Every test here sees a low, fixed used heap by
+// default; the guard tests below override it with their own spy (and restore), as before.
+const realV8 = jest.requireActual('node:v8') as typeof import('node:v8');
+const REAL_HEAP = realV8.getHeapStatistics();
+let heapPin: jest.SpyInstance | undefined;
+beforeEach(() => {
+  heapPin = jest.spyOn(realV8, 'getHeapStatistics').mockImplementation(() => ({ ...REAL_HEAP, used_heap_size: 64 * 1024 * 1024 }));
+});
+afterEach(() => heapPin?.mockRestore());
+
 // Synthetic tenant "t1", outlets O1/O2, neutral dims. Dates relative to a fixed past month are fine
 // here (they are in the past, so the today+1 window never rejects them).
 const MAPPING: SalesColumnMapping = {
@@ -345,7 +357,7 @@ describe('SalesImportProcessorService — audit fix round', () => {
     for (let i = 0; i < 45_000; i++) rows.push(`03-10-2026,O1,S,P,500,1,1`);
     const { svc, prisma, row, final } = setup({ file: Buffer.from(rows.join('\n')) });
     prisma.salesImport.updateMany.mockImplementation(async (a: { data: Record<string, unknown> }) => ({ count: a.data.status ? 1 : 0 }));
-    await svc.processClaimed(row);
+    await expect(svc.processClaimed(row)).resolves.toBe('superseded');
     expect(final()).toBeUndefined();
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });

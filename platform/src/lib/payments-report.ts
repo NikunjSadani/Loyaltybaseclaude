@@ -7,16 +7,20 @@
  *   - GIFSY_ADMIN  → platform-wide, with an optional clientId filter.
  *
  * Backend:
- *   GET /api/admin/payments-report?from=&to=&status=&clientId=
- *       → { success, data: { scope, count, totals: { amount }, rows: [...] } }
- *   GET /api/admin/payments-report/export?from=&to=&status=&clientId=  → .xlsx
+ *   GET /api/admin/payments-report?from=&to=&status=&clientId=&page=&pageSize=
+ *       → { success, data: { scope, page, pageSize, totalRows, totalPages, count,
+ *                            totals: { count, amount, tdsDeducted }, rows: [...one page...] } }
+ *     ONE page of rows (pageSize default 50, max 200); `totals` are a DB aggregate over EVERY matching
+ *     payment (all pages), never a sum of the page.
+ *   GET /api/admin/payments-report/export?from=&to=&status=&clientId=  → .xlsx (every matching row; no page params)
  *
  * The browser calls same-origin `/api/*`; the edge proxy injects the Bearer from
  * the httpOnly `token` cookie, so no auth header is needed (authHeader() is a
  * no-op kept for call-site compatibility). Money fields are `{ paise, inr }`.
  */
 
-import { api, authHeader, type ApiResponse } from '@/lib/api-client';
+import { api, type ApiResponse } from '@/lib/api-client';
+import { downloadOrQueue, type DownloadOutcome } from '@/lib/exports/download';
 
 /** Every money field: integer paise (as a string) + a pre-computed rupee number. */
 export interface Money {
@@ -63,13 +67,22 @@ export interface PaymentRow {
 
 export interface PaymentsReport {
   scope: { clientId: string | null } & Record<string, unknown>;
+  /** 1-based page these rows are. */
+  page: number;
+  pageSize: number;
+  /** Every payment matching the filters (all pages). */
+  totalRows: number;
+  totalPages: number;
+  /** Same as totalRows (pre-paging field name). */
   count: number;
-  totals: { amount: Money };
-  /** True when the query hit the server row cap — totals reflect only the shown rows; narrow the range. */
-  truncated?: boolean;
-  maxRows?: number;
+  /** Whole-range totals over ALL matching payments (every page) — not a sum of `rows`. */
+  totals: { count: number; amount: Money; tdsDeducted: Money };
+  /** This page's rows only. */
   rows: PaymentRow[];
 }
+
+/** Rows-per-page choices (the API caps pageSize at 200). */
+export const PAYMENTS_PAGE_SIZES = [50, 100, 200] as const;
 
 /** Query params for both the report and the export. */
 export interface PaymentsReportParams {
@@ -86,7 +99,7 @@ export interface PaymentsReportParams {
 const BASE = '/api/admin/payments-report';
 
 /** Build a query string, dropping undefined/null/empty values. */
-function buildQuery(params: PaymentsReportParams): string {
+function buildQuery(params: Record<string, string | number | undefined>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null || v === '') continue;
@@ -95,46 +108,32 @@ function buildQuery(params: PaymentsReportParams): string {
   return parts.length ? `?${parts.join('&')}` : '';
 }
 
-/** Fetch the (role-scoped) payments report for the given filters. */
-export function paymentsReport(params: PaymentsReportParams = {}): Promise<ApiResponse<PaymentsReport>> {
-  return api.get<PaymentsReport>(`${BASE}${buildQuery(params)}`);
+/** Paging for the on-screen report only (the export is every matching row and rejects page params). */
+export interface PaymentsReportPage {
+  page?: number;
+  pageSize?: number;
+}
+
+/** Fetch ONE page of the (role-scoped) payments report for the given filters, plus whole-range totals. */
+export function paymentsReport(
+  params: PaymentsReportParams = {},
+  paging: PaymentsReportPage = {},
+): Promise<ApiResponse<PaymentsReport>> {
+  const q: Record<string, string | number | undefined> = { ...params, page: paging.page, pageSize: paging.pageSize };
+  return api.get<PaymentsReport>(`${BASE}${buildQuery(q)}`);
 }
 
 /** Browser-facing URL of the xlsx export (auth-gated; fetch as blob to download). */
 export function paymentsExportUrl(params: PaymentsReportParams = {}): string {
-  return `${BASE}/export${buildQuery(params)}`;
+  // Only the filters — never page/pageSize (the export is the whole range; the API 400s on page params there).
+  const { from, to, status, clientId } = params;
+  return `${BASE}/export${buildQuery({ from, to, status, clientId })}`;
 }
 
-/** Fetch the xlsx export as a blob and trigger a browser download. */
-export async function downloadPaymentsExport(
-  params: PaymentsReportParams = {},
-): Promise<{ success: true } | { success: false; error: string }> {
-  try {
-    const res = await fetch(paymentsExportUrl(params), { headers: authHeader() });
-    if (!res.ok) {
-      let error = res.statusText;
-      try {
-        const body = await res.json();
-        error = body?.error ?? error;
-      } catch {
-        /* non-JSON error body */
-      }
-      return { success: false, error };
-    }
-    const blob = await res.blob();
-    const disposition = res.headers.get('Content-Disposition') ?? '';
-    const match = /filename="?([^"]+)"?/.exec(disposition);
-    const filename = match?.[1] ?? 'payments-report.xlsx';
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : 'Download failed' };
-  }
+/**
+ * Download the xlsx export: a small one saves straight away (200); a big one (202) is prepared in
+ * the background — `kind: 'queued'` — and appears on the Downloads page.
+ */
+export function downloadPaymentsExport(params: PaymentsReportParams = {}): Promise<DownloadOutcome> {
+  return downloadOrQueue(paymentsExportUrl(params), { fallbackFileName: 'payments-report.xlsx' });
 }

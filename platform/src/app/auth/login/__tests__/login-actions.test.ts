@@ -31,7 +31,30 @@ function jwtWithExp(expSecs: number): string {
 const nowSecs = () => Math.floor(Date.now() / 1000);
 const setOf = (name: string) => setCalls.filter((c) => c.name === name).at(-1);
 
-beforeEach(() => { setCalls.length = 0; cookieStore.set.mockClear(); });
+beforeEach(() => { setCalls.length = 0; cookieStore.set.mockClear(); cookieStore.delete.mockClear(); });
+
+describe('verifyOTP — multi-outlet selection reset', () => {
+  it('a successful login deletes the leftover active_partner_id cookie (fresh login = own outlet)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        data: { accessToken: jwtWithExp(nowSecs() + 3600), refreshToken: 'r', user: { id: 'u1', name: 'A', role: 'WHOLESALER', phone: '9', outletName: 'Own Store' } },
+      }),
+    }));
+    const res = await verifyOTP('9830011252', '123456');
+    expect(res.success).toBe(true);
+    expect(cookieStore.delete).toHaveBeenCalledWith('active_partner_id');
+    // Never set (only cleared) at login.
+    expect(setCalls.some((c) => c.name === 'active_partner_id')).toBe(false);
+  });
+
+  it('a FAILED login leaves the selection cookie alone (no session change)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401, json: () => Promise.resolve({ error: 'Invalid OTP' }) }));
+    const res = await verifyOTP('9830011252', '000000');
+    expect(res.success).toBe(false);
+    expect(cookieStore.delete).not.toHaveBeenCalled();
+  });
+});
 
 describe('verifyOTP — cookie TTLs', () => {
   it('sets refresh_token cookie maxAge = 30d (2592000) and token cookie ≈ access TTL', async () => {

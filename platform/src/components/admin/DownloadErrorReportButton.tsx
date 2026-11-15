@@ -1,7 +1,7 @@
 'use client';
 
 import { Download } from 'lucide-react';
-import { buildErrorReportBuffer, downloadErrorReport } from '@/lib/error-report';
+import { buildErrorReportBuffer, cappedListNote, downloadErrorReport } from '@/lib/error-report';
 
 interface DownloadErrorReportButtonProps {
   /** Source column headers, in order. */
@@ -17,6 +17,11 @@ interface DownloadErrorReportButtonProps {
   /** Errors column header override (default 'Errors'). */
   errorHeader?: string;
   className?: string;
+  /**
+   * When the API capped the problem list (memory-safety: ≤ 500), say so INSIDE the file (M4):
+   * "Showing the first 500 of N problems." Omit / truncated:false for a complete list.
+   */
+  truncation?: { shown: number; total: number | null | undefined; truncated: boolean | null | undefined; noun?: string };
 }
 
 /**
@@ -32,6 +37,7 @@ export default function DownloadErrorReportButton({
   sheetName,
   errorHeader,
   className,
+  truncation,
 }: DownloadErrorReportButtonProps) {
   const hasErrors = rows.some((row, idx) => errorsByRow(row, idx).length > 0);
   if (!hasErrors) return null;
@@ -40,6 +46,9 @@ export default function DownloadErrorReportButton({
     const buf = buildErrorReportBuffer(columns, rows, errorsByRow, {
       sheetName,
       errorHeader,
+      note: truncation
+        ? cappedListNote(truncation.shown, truncation.total, truncation.truncated, truncation.noun) ?? undefined
+        : undefined,
     });
     downloadErrorReport(buf, filename);
   };

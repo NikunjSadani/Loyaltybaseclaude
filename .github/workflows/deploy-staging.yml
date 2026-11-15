@@ -160,6 +160,48 @@ jobs:
             --set-cloudsql-instances=${{ env.SQL_INSTANCE }} \
             --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com
 
+      # DOWNLOADS worker (platform/docs/plans/DOWNLOADS-PAGE.md) — prepares heavy report files in the background.
+      # Mirrors the Sales Import worker job above EXACTLY (same image tag, network, Cloud SQL, SA, 2Gi + heap 1700),
+      # deploy-only (NO --execute-now): the API starts executions via `jobs/gifsy-exports-staging:run`
+      # (EXPORTS_RUNNER=job) and, as a fallback, on any Downloads-page poll that sees a stuck request.
+      #   • Secrets: only EXISTING ones. JWT_SECRET is needed because some reports (Outlet Master) embed signed
+      #     document-view links. NO new secret is required by this job.
+      #   • IAM: the NEXT step grants roles/run.jobsExecutor for gifsy-api-sa ON THIS JOB (idempotent). Without it the
+      #     API's kick 403s and every heavy request FAILS at once ("Downloads couldn't start on the server…"); the API
+      #     itself is never affected. Optional Cloud Scheduler drain → POST /v1/exports/drain (x-drain-secret = the
+      #     SALES_IMPORT_DRAIN_SECRET value) — see the runbook.
+      - name: Deploy Downloads worker job (staging)
+        run: |
+          gcloud run jobs deploy gifsy-exports-staging \
+            --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging-${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --command=node \
+            --args=--max-old-space-size=1700,dist/exports/worker.main.js \
+            --memory=2Gi \
+            --cpu=1 \
+            --task-timeout=3600 \
+            --max-retries=1 \
+            --tasks=1 \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},NODE_OPTIONS=--max-old-space-size=1700" \
+            --set-secrets="DATABASE_URL=DATABASE_URL_STAGING:latest,GCS_BUCKET=GCS_BUCKET:latest,GCP_PROJECT_ID=GCP_PROJECT_ID:latest,JWT_SECRET=JWT_SECRET_STAGING:latest" \
+            --network=gifsy-vpc \
+            --subnet=gifsy-subnet-asia-south1 \
+            --vpc-egress=private-ranges-only \
+            --set-cloudsql-instances=${{ env.SQL_INSTANCE }} \
+            --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com
+
+      # ⚠️ OWNER APPROVAL REQUIRED before this lands (IAM change on GCP): lets the API (gifsy-api-sa) START executions
+      # of the Downloads job — and nothing else (scoped to THIS job only; mirrors the grant already on
+      # gifsy-sales-import-staging). Idempotent (re-adding an existing binding is a no-op); the deployer holds
+      # roles/run.admin, which includes run.jobs.setIamPolicy.
+      - name: Allow the API to start the Downloads worker job (staging)
+        run: |
+          gcloud run jobs add-iam-policy-binding gifsy-exports-staging \
+            --region=${{ env.REGION }} \
+            --member=serviceAccount:gifsy-api-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --role=roles/run.jobsExecutor \
+            --quiet
+
       # SALES IMPORT (API side): SALES_IMPORT_RUNNER=job + SALES_IMPORT_JOB + GCP_PROJECT (read by
       # api/src/sales-import/ingest/sales-import-runner.service.ts; GCP_REGION is already set) and
       # SALES_IMPORT_DRAIN_SECRET (read by sales-import-drain.controller.ts; fail-closed 403 when unset).
@@ -198,7 +240,7 @@ jobs:
             --subnet=gifsy-subnet-asia-south1 \
             --vpc-egress=private-ranges-only \
             --startup-probe=httpGet.path=/health/ready,httpGet.port=4000,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=3,failureThreshold=30 \
-            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.dev.myhubble.money,SALES_IMPORT_RUNNER=job,SALES_IMPORT_JOB=gifsy-sales-import-staging,GCP_PROJECT=${{ env.PROJECT_ID }}" \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.dev.myhubble.money,SALES_IMPORT_RUNNER=job,SALES_IMPORT_JOB=gifsy-sales-import-staging,EXPORTS_RUNNER=job,EXPORTS_JOB=gifsy-exports-staging,GCP_PROJECT=${{ env.PROJECT_ID }}" \
             --set-secrets="\
               DATABASE_URL=DATABASE_URL_STAGING:latest,\
               JWT_SECRET=JWT_SECRET_STAGING:latest,\

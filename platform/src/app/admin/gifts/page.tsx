@@ -40,6 +40,7 @@ import {
   Truck, ChevronDown, Layers,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession } from '@/lib/admin-session';
@@ -51,6 +52,7 @@ import type { GifsySettings } from '@/types';
 import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product';
 import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
 import { MaskedPin } from '@/components/operator/masked-pin';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
 
@@ -118,6 +120,10 @@ interface OrderItem {
   /** Operator view: the order was sent to Hubble and needs ops (retry or manual fulfilment). */
   hubbleNeedsReconcile?: boolean;
   hubbleReconcileReason?: string | null;
+  /** Why Hubble's last "no order" answer was not trusted (it couldn't be checked against a known Hubble order). */
+  hubbleNoOrderUnverifiedWhy?: string | null;
+  /** A newer reason recorded beside the open flag (Acknowledge re-raises it). */
+  hubbleLatestReason?: string | null;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -130,7 +136,9 @@ interface FulfilmentUploadResult {
   succeeded: number;
   skipped: number;
   failed: number;
+  /** Capped at 500 rows (memory-safety 2026-11-13); `failed` is the true total. */
   errors: { row: number; orderNumber?: string; message: string }[];
+  errorsTruncated?: boolean;
 }
 
 /* ─── Constants ──────────────────────────────────────────────────────────────── */
@@ -1552,7 +1560,7 @@ interface TransitionDraft {
 type OrderPatch = Pick<OrderItem, 'id'> &
   Partial<Pick<OrderItem,
     'status' | 'voucherCode' | 'voucherPin' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'
-    | 'hubbleNeedsReconcile' | 'hubbleReconcileReason'>>;
+    | 'hubbleNeedsReconcile' | 'hubbleReconcileReason' | 'hubbleLatestReason'>>;
 
 /** Human copy for the backend's Hubble reconcile reasons (fallback: the raw code). */
 const HUBBLE_REASON_LABEL: Record<string, string> = {
@@ -1566,9 +1574,35 @@ const HUBBLE_REASON_LABEL: Record<string, string> = {
   HUBBLE_FAILED_VOUCHER_PRESENT: 'Hubble failed but a code is on the order',
   HUBBLE_PROCESSING_AFTER_MANUAL: 'Hubble processing after a manual takeover',
   HUBBLE_PROCESSING_CLAIM_LOST: 'Order changed while Hubble was processing',
+  HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND: 'Hubble webhook arrived after the points were refunded — check the order in Hubble’s portal',
+  HUBBLE_ISSUED_AFTER_REFUND: 'Hubble may have issued a voucher for refunded points — check the order in Hubble’s portal',
+  HUBBLE_WEBHOOK_BUT_NOT_FOUND: 'Hubble sent a webhook but has no order for this reference — check the order in Hubble’s portal',
 };
+
+/** Flags on an ALREADY-REFUNDED order (late Hubble webhook): only "Acknowledge — resolved" applies. */
+const HUBBLE_POST_REFUND_FLAGS = new Set(['HUBBLE_ISSUED_AFTER_REFUND', 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND']);
+/** Terminal, points-returned order statuses: any Hubble flag on one is cleared by "Acknowledge". */
+const TERMINAL_REFUND_STATUSES = new Set(['FAILED', 'CANCELLED', 'RETURNED']);
 const hubbleReasonLabel = (r?: string | null) =>
   !r ? 'Needs review' : HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown Hubble status' : r);
+
+/** Human copy for the "Retry with Hubble" outcome (fallback: the raw outcome code). */
+const HUBBLE_RETRY_OUTCOME_LABEL: Record<string, string> = {
+  DELIVERED: 'Voucher issued',
+  PROCESSING: 'Hubble is still processing the order',
+  FAILED_REFUNDED: 'Hubble reported the order failed — points refunded',
+  PENDING_RECONCILE: 'Still unresolved — Hubble could not confirm the order state',
+  SKIPPED: 'Nothing to do — the order is already resolved',
+  REFUNDED_NO_HUBBLE_ORDER: 'Hubble confirmed it has no order for this redemption — points refunded',
+  PENDING_NO_HUBBLE_ORDER_TOO_RECENT:
+    'Hubble has no order yet — too recent to refund; retry later (orders must be at least 2 hours old)',
+  NO_HUBBLE_ORDER_NOT_REFUNDABLE:
+    'Hubble has no order for this redemption, but it can’t be refunded automatically (Hubble acknowledged it earlier, or its state is unclear) — review manually',
+  NO_HUBBLE_ORDER_UNVERIFIED:
+    'Hubble says it has no order, but we couldn’t confirm that answer against a known Hubble order — not refunded. Check the order in Hubble’s portal or retry later',
+  ALREADY_REFUNDED_FLAGGED:
+    'Already refunded — but flagged for review: Hubble contacted us after the refund. Check the order in Hubble’s portal',
+};
 
 const FORWARD_VOUCHER_TARGETS = new Set(['PROCESSING', 'DISPATCHED', 'DELIVERED']);
 
@@ -1623,7 +1657,25 @@ function OrderRow({
   const needsReconcile = order.hubbleNeedsReconcile === true;
   // "Retry with Hubble" only re-reads an EXISTING Hubble order — pointless when none was ever placed
   // (not configured / invalid amount); those keep refund + "Fulfil manually".
-  const canRetryHubble = needsReconcile && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
+  // A post-refund review flag (points already refunded; a Hubble webhook arrived later): retry and
+  // manual fulfilment don't apply — ops check Hubble's portal and "Acknowledge — resolved".
+  // Any flag left on an order that is already terminal (FAILED / CANCELLED / RETURNED — points returned)
+  // or DELIVERED (e.g. a possible double issuance) is treated the same way: Retry can't act on it, so
+  // Acknowledge is the exit (the backend accepts exactly these).
+  const postRefundFlag =
+    needsReconcile &&
+    (HUBBLE_POST_REFUND_FLAGS.has(order.hubbleReconcileReason ?? '') ||
+      TERMINAL_REFUND_STATUSES.has(order.status) ||
+      order.status === 'DELIVERED');
+  const canRetryHubble =
+    needsReconcile && !postRefundFlag && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
+  const [ackOpen, setAckOpen] = useState(false);
+  const [ackNote, setAckNote] = useState('');
+  const [ackBusy, setAckBusy] = useState(false);
+  const [ackErr, setAckErr] = useState('');
+  // Offered only after the server says Hubble could not be checked: acknowledge anyway (≥ 20-char note).
+  const [ackUnreachable, setAckUnreachable] = useState(false);
+  const [ackForce, setAckForce] = useState(false);
   const [retryBusy, setRetryBusy] = useState(false);
   const [retryMsg, setRetryMsg] = useState('');
   const [manualOpen, setManualOpen] = useState(false);
@@ -1638,12 +1690,35 @@ function OrderRow({
     setRetryBusy(true); setRetryMsg('');
     try {
       const res = await apiJson<{ outcome?: string } | null>(`/api/rewards/orders/${order.id}/hubble-reconcile`, { method: 'POST' });
-      setRetryMsg(`Hubble: ${res?.outcome ?? 'done'}`);
+      const outcome = res?.outcome ?? '';
+      setRetryMsg(`Hubble: ${HUBBLE_RETRY_OUTCOME_LABEL[outcome] ?? (outcome || 'done')}`);
       onTransitioned(null); // the outcome may move status / code → re-fetch the window
     } catch (e) {
       setRetryMsg(e instanceof Error ? e.message : 'Retry failed');
     } finally {
       setRetryBusy(false);
+    }
+  };
+
+  const acknowledgeFlag = async () => {
+    const note = ackNote.trim();
+    if (!note) { setAckErr('Enter what you checked in Hubble and concluded.'); return; }
+    setAckBusy(true); setAckErr('');
+    try {
+      const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}/hubble-acknowledge`, {
+        method: 'POST',
+        body: JSON.stringify(ackForce ? { note, force: true } : { note }),
+      });
+      setAckOpen(false);
+      setAckForce(false);
+      setAckUnreachable(false);
+      onTransitioned(res?.order?.id ? res.order : { id: order.id, hubbleNeedsReconcile: false, hubbleReconcileReason: null, hubbleLatestReason: null });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Could not acknowledge the flag';
+      if (/could not be checked/i.test(msg)) setAckUnreachable(true);
+      setAckErr(msg);
+    } finally {
+      setAckBusy(false);
     }
   };
 
@@ -1796,6 +1871,22 @@ function OrderRow({
               Needs reconcile · {hubbleReasonLabel(order.hubbleReconcileReason)}
             </span>
           )}
+          {needsReconcile && order.hubbleLatestReason && order.hubbleLatestReason !== order.hubbleReconcileReason && (
+            <span className="block mt-0.5 text-[10px] text-amber-700" data-testid="hubble-latest-reason" title={order.hubbleLatestReason}>
+              Newer: {hubbleReasonLabel(order.hubbleLatestReason)}
+            </span>
+          )}
+          {needsReconcile && order.hubbleNoOrderUnverifiedWhy && (
+            <span
+              className="block mt-0.5 text-[10px] text-amber-700"
+              data-testid="hubble-no-order-unverified"
+              title={order.hubbleNoOrderUnverifiedWhy}
+            >
+              Hubble said “no order”, not trusted: {order.hubbleNoOrderUnverifiedWhy.length > 120
+                ? `${order.hubbleNoOrderUnverifiedWhy.slice(0, 120)}…`
+                : order.hubbleNoOrderUnverifiedWhy}
+            </span>
+          )}
         </td>
         {canManage && (
           <td className="px-4 py-3 text-right">
@@ -1830,12 +1921,20 @@ function OrderRow({
                       {retryBusy ? 'Retrying…' : 'Retry with Hubble'}
                     </button>
                   )}
-                  {!voucherIssued && (
+                  {!voucherIssued && !postRefundFlag && (
                     <button
                       onClick={() => { setManualOpen((o) => !o); setManualErr(''); }}
                       className="text-[10px] font-semibold text-amber-700 hover:underline"
                     >
                       Fulfil manually…
+                    </button>
+                  )}
+                  {postRefundFlag && (
+                    <button
+                      onClick={() => { setAckOpen((o) => !o); setAckErr(''); }}
+                      className="text-[10px] font-semibold text-red-700 hover:underline"
+                    >
+                      Acknowledge — resolved…
                     </button>
                   )}
                   {retryMsg && <span className="text-[10px] text-gray-500" role="status">{retryMsg}</span>}
@@ -1845,7 +1944,51 @@ function OrderRow({
           </td>
         )}
       </tr>
-      {canManage && canCancelVoucher && needsReconcile && manualOpen && (
+      {canManage && canCancelVoucher && postRefundFlag && ackOpen && (
+        <tr>
+          <td colSpan={7} className="px-4 py-4 bg-red-50/50">
+            <div className="space-y-2 max-w-2xl">
+              <p className="text-xs text-gray-700">
+                Retry can&apos;t act on this order any more. Check the order in Hubble&apos;s portal, then record what you
+                found. This clears the review flag only — nothing else on the order changes.
+              </p>
+              <label className="text-xs font-medium text-gray-700" htmlFor={`ack-note-${order.id}`}>Note *</label>
+              <input
+                id={`ack-note-${order.id}`}
+                value={ackNote}
+                onChange={(e) => setAckNote(e.target.value)}
+                maxLength={500}
+                placeholder="e.g. Checked Hubble portal — no voucher issued for this reference"
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+              />
+              {ackErr && <p className="text-xs text-red-600" role="alert">{ackErr}</p>}
+              {ackUnreachable && (
+                <label className="flex items-center gap-2 text-xs text-gray-700">
+                  <input type="checkbox" checked={ackForce} onChange={(e) => setAckForce(e.target.checked)} />
+                  Hubble unreachable — acknowledge anyway (note of at least 20 characters; recorded as forced)
+                </label>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={acknowledgeFlag}
+                  disabled={ackBusy || !ackNote.trim() || (ackForce && ackNote.trim().length < 20)}
+                  aria-busy={ackBusy}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-gray-900 text-white disabled:opacity-50"
+                >
+                  {ackBusy ? 'Saving…' : 'Acknowledge — resolved'}
+                </button>
+                <button
+                  onClick={() => setAckOpen(false)}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+      {canManage && canCancelVoucher && needsReconcile && !postRefundFlag && manualOpen && (
         <tr>
           <td colSpan={7} className="px-4 py-4 bg-amber-50/50">
             <div className="space-y-2 max-w-2xl">
@@ -2318,7 +2461,7 @@ function FulfilmentQueue({
     const filter = statusRef.current;
     const leaves = filter !== 'all' && updated.status != null && updated.status !== filter;
     const patch: Partial<OrderItem> = {};
-    for (const k of ['status', 'voucherCode', 'voucherPin', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason'] as const) {
+    for (const k of ['status', 'voucherCode', 'voucherPin', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason', 'hubbleLatestReason'] as const) {
       if (updated[k] !== undefined) (patch as Record<string, unknown>)[k] = updated[k];
     }
     // `voucherFillable` (may the set-once PIN be added?) is SERVER-derived (canFillStoredVoucher)
@@ -2371,20 +2514,33 @@ function FulfilmentQueue({
       const fd = new FormData();
       fd.append('file', file);
       // Do NOT set Content-Type — the browser sets the multipart boundary.
-      const res = await fetch('/api/admin/rewards/fulfilment/upload', {
-        method: 'POST',
-        headers: authHeader(),
-        body: fd,
-      });
-      const json = await res.json() as { success?: boolean; data?: FulfilmentUploadResult; error?: string };
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/rewards/fulfilment/upload', {
+          method: 'POST',
+          headers: authHeader(),
+          body: fd,
+        });
+      } catch {
+        // The upload updates orders — a dropped connection leaves the outcome unknown.
+        setUploadErr(networkErrorMessage(MAYBE_SAVED_NOTE));
+        return;
+      }
+      const json = await readJsonSafe<{ success?: boolean; data?: FulfilmentUploadResult; error?: string }>(res);
+      if (!json) {
+        // Non-JSON (proxy truncation / plain-text 5xx / edge 413) — orders may have been updated.
+        setUploadErr(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        return;
+      }
       if (!res.ok || json.success === false) {
         setUploadErr(json.error ?? `Upload failed (HTTP ${res.status})`);
         return;
       }
       setResult(json.data ?? null);
-      await refreshOrders();
-    } catch (e) {
-      setUploadErr(e instanceof Error ? e.message : 'Upload failed');
+      // The upload itself succeeded; a failed list refresh must not read as a failed upload.
+      try { await refreshOrders(); } catch { /* best-effort — the Refresh button retries */ }
+    } catch {
+      setUploadErr(`Something went wrong showing the upload result. ${MAYBE_SAVED_NOTE}`);
     } finally {
       setUploading(false);
     }
@@ -2477,6 +2633,7 @@ function FulfilmentQueue({
               ))}
             </div>
 
+            <UploadTruncationNote shown={result.errors.length} total={result.failed} truncated={result.errorsTruncated} noun="row errors" next={TRUNCATION_NEXT.PARTIAL_SAVE} />
             {result.errors.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto" data-testid="fulfilment-errors">
                 <p className="text-xs font-semibold text-amber-700 mb-2">Row errors</p>

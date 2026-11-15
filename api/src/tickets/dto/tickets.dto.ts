@@ -10,7 +10,9 @@ import {
   MaxLength,
   Min,
   MinLength,
+  Max,
 } from 'class-validator';
+import { PAGE_SIZE_MAX } from '../../common/validators/page-size';
 import { TicketCategory, TicketPriority, TicketStatus } from '@prisma/client';
 
 export class CreateTicketDto {
@@ -85,5 +87,6 @@ export class ListTicketsQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(PAGE_SIZE_MAX)
   limit?: number = 20;
 }

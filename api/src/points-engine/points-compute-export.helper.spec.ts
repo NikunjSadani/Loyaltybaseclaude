@@ -1,12 +1,19 @@
 import * as XLSX from 'xlsx';
 import {
-  buildCreditUploadXlsx,
-  buildPayoutReportXlsx,
-  buildPreviewReportXlsx,
+  writeCreditUploadXlsx,
+  writePayoutReportXlsx,
+  writePreviewReportXlsx,
   PAYOUT_REPORT_COLUMNS,
   PREVIEW_REPORT_COLUMNS,
 } from './points-compute-export.helper';
 import type { ComputePreview } from './points-compute.types';
+import { collectXlsx } from '../exports/kinds/batch2/parity.support-spec';
+
+// The writers stream into the xlsx writer (the points-* export kinds run them in the background worker); render them
+// to a Buffer so the read-back assertions below are unchanged.
+const buildCreditUploadXlsx = (p: ComputePreview) => collectXlsx(async (w) => void (await writeCreditUploadXlsx(p, w)));
+const buildPreviewReportXlsx = (p: ComputePreview) => collectXlsx(async (w) => void (await writePreviewReportXlsx(p, w)));
+const buildPayoutReportXlsx = (p: ComputePreview) => collectXlsx(async (w) => void (await writePayoutReportXlsx(p, w)));
 
 /**
  * These tests pin the EXACT contract the existing credits upload parser expects
@@ -152,8 +159,8 @@ function samplePreview(overrides: Partial<ComputePreview> = {}): ComputePreview 
 }
 
 describe('buildCreditUploadXlsx — round-trips through the credits upload parser', () => {
-  it('emits the EXACT header row the parser expects (Outlet ID, Outlet Name, field names, narration)', () => {
-    const aoa = readCreditAoa(buildCreditUploadXlsx(samplePreview()));
+  it('emits the EXACT header row the parser expects (Outlet ID, Outlet Name, field names, narration)', async () => {
+    const aoa = readCreditAoa(await buildCreditUploadXlsx(samplePreview()));
 
     // Row 0 is a TITLE the parser skips.
     expect(String(aoa[0][0])).toContain('Credits & Payouts Data');
@@ -173,8 +180,8 @@ describe('buildCreditUploadXlsx — round-trips through the credits upload parse
     expect(header.indexOf('Outlet Name')).toBe(1);
   });
 
-  it('includes ONLY OK rows — skip/error/no-rule outlets are excluded', () => {
-    const aoa = readCreditAoa(buildCreditUploadXlsx(samplePreview()));
+  it('includes ONLY OK rows — skip/error/no-rule outlets are excluded', async () => {
+    const aoa = readCreditAoa(await buildCreditUploadXlsx(samplePreview()));
     const dataOutletIds = aoa.slice(2).map((r) => String(r[0]).trim());
     expect(dataOutletIds).toEqual(['O1', 'O2']); // O3 (SKIP), O4 (ERROR), O5 (NO_RULE) are gone
     expect(dataOutletIds).not.toContain('O3');
@@ -182,8 +189,8 @@ describe('buildCreditUploadXlsx — round-trips through the credits upload parse
     expect(dataOutletIds).not.toContain('O5');
   });
 
-  it('writes WHOLE points per (outlet × field), summing duplicate (outlet × field) rows', () => {
-    const aoa = readCreditAoa(buildCreditUploadXlsx(samplePreview()));
+  it('writes WHOLE points per (outlet × field), summing duplicate (outlet × field) rows', async () => {
+    const aoa = readCreditAoa(await buildCreditUploadXlsx(samplePreview()));
     const header = aoa[1].map((h) => String(h).trim());
     const col = (name: string) => header.indexOf(name);
 
@@ -208,7 +215,7 @@ describe('buildCreditUploadXlsx — round-trips through the credits upload parse
     expect(o1[col('Visibility Bonus Narration')]).toBe('');
   });
 
-  it('produces an empty-but-valid sheet when there are no OK rows', () => {
+  it('produces an empty-but-valid sheet when there are no OK rows', async () => {
     const preview = samplePreview({
       rows: [
         {
@@ -221,7 +228,7 @@ describe('buildCreditUploadXlsx — round-trips through the credits upload parse
       counts: { total: 1, ok: 0, skip: 1, error: 0, noRule: 0 },
       totalPoints: 0,
     });
-    const aoa = readCreditAoa(buildCreditUploadXlsx(preview));
+    const aoa = readCreditAoa(await buildCreditUploadXlsx(preview));
     // Title + header only; header still carries the two required anchors.
     const header = aoa[1].map((h) => String(h).trim());
     expect(header).toEqual(['Outlet ID', 'Outlet Name']);
@@ -230,9 +237,9 @@ describe('buildCreditUploadXlsx — round-trips through the credits upload parse
 });
 
 describe('buildPreviewReportXlsx — full human review report', () => {
-  it('emits one Preview Rows row per preview row with the full column set', () => {
+  it('emits one Preview Rows row per preview row with the full column set', async () => {
     const preview = samplePreview();
-    const rows = readSheet(buildPreviewReportXlsx(preview), 'Preview Rows');
+    const rows = readSheet(await buildPreviewReportXlsx(preview), 'Preview Rows');
     expect(rows).toHaveLength(preview.rows.length); // every status, not just OK
 
     for (const col of PREVIEW_REPORT_COLUMNS) {
@@ -240,8 +247,8 @@ describe('buildPreviewReportXlsx — full human review report', () => {
     }
   });
 
-  it('renders a known OK row with points, rule identity and the trace explanation', () => {
-    const rows = readSheet(buildPreviewReportXlsx(samplePreview()), 'Preview Rows');
+  it('renders a known OK row with points, rule identity and the trace explanation', async () => {
+    const rows = readSheet(await buildPreviewReportXlsx(samplePreview()), 'Preview Rows');
     const o1 = rows.find(
       (r) => r['Outlet Code'] === 'O1' && r['KPI Code'] === 'CASES_SOLD',
     )!;
@@ -256,17 +263,17 @@ describe('buildPreviewReportXlsx — full human review report', () => {
     expect(String(o1['Reason / Explanation'])).toContain('1,300 pts');
   });
 
-  it('renders a non-OK row with its reason and no points', () => {
-    const rows = readSheet(buildPreviewReportXlsx(samplePreview()), 'Preview Rows');
+  it('renders a non-OK row with its reason and no points', async () => {
+    const rows = readSheet(await buildPreviewReportXlsx(samplePreview()), 'Preview Rows');
     const o5 = rows.find((r) => r['Outlet Code'] === 'O5')!;
     expect(o5['Status']).toBe('NO_RULE');
     expect(o5['Points']).toBe(''); // no points on a non-OK row
     expect(String(o5['Reason / Explanation'])).toContain('No active rule');
   });
 
-  it('emits a Summary sheet with counts, total points and the engineDisabled flag', () => {
+  it('emits a Summary sheet with counts, total points and the engineDisabled flag', async () => {
     const preview = samplePreview();
-    const summaryRows = readSheet(buildPreviewReportXlsx(preview), 'Summary');
+    const summaryRows = readSheet(await buildPreviewReportXlsx(preview), 'Summary');
     expect(summaryRows).toHaveLength(1);
     const s = summaryRows[0];
     expect(s['Client']).toBe('deoleo');
@@ -280,15 +287,15 @@ describe('buildPreviewReportXlsx — full human review report', () => {
     expect(s['Engine Disabled']).toBe(false);
   });
 
-  it('reflects engineDisabled=true when the per-tenant flag is off', () => {
+  it('reflects engineDisabled=true when the per-tenant flag is off', async () => {
     const summaryRows = readSheet(
-      buildPreviewReportXlsx(samplePreview({ engineDisabled: true })),
+      await buildPreviewReportXlsx(samplePreview({ engineDisabled: true })),
       'Summary',
     );
     expect(summaryRows[0]['Engine Disabled']).toBe(true);
   });
 
-  it('EXCLUDES PAYOUT rows (they belong in the payout report) and reconciles its points-only counts', () => {
+  it('EXCLUDES PAYOUT rows (they belong in the payout report) and reconciles its points-only counts', async () => {
     const mixed = samplePreview({
       totalPoints: 1300,
       totalPayoutRupees: 5200,
@@ -305,9 +312,9 @@ describe('buildPreviewReportXlsx — full human review report', () => {
         },
       ],
     });
-    const rows = readSheet(buildPreviewReportXlsx(mixed), 'Preview Rows');
+    const rows = readSheet(await buildPreviewReportXlsx(mixed), 'Preview Rows');
     expect(rows.map((r) => r['Outlet Code'])).toEqual(['O1']); // the PAYOUT outlet O2 is excluded
-    const s = readSheet(buildPreviewReportXlsx(mixed), 'Summary')[0];
+    const s = readSheet(await buildPreviewReportXlsx(mixed), 'Summary')[0];
     expect(s['Total']).toBe(1); // points rows only
     expect(s['OK']).toBe(1); // no longer counts the PAYOUT OK row
     expect(s['Total Points']).toBe(1300);
@@ -344,8 +351,8 @@ describe('buildPayoutReportXlsx — report-only payout amounts (never credited)'
     });
   }
 
-  it('includes ONLY PAYOUT rows (POINTS rows are excluded) with the full column set', () => {
-    const rows = readSheet(buildPayoutReportXlsx(payoutPreview()), 'Payout Rows');
+  it('includes ONLY PAYOUT rows (POINTS rows are excluded) with the full column set', async () => {
+    const rows = readSheet(await buildPayoutReportXlsx(payoutPreview()), 'Payout Rows');
     expect(rows).toHaveLength(2); // the two PAYOUT rows; the POINTS row O1 is excluded
     expect(rows.map((r) => r['Outlet Code'])).toEqual(['O2', 'O3']);
     for (const col of PAYOUT_REPORT_COLUMNS) {
@@ -353,8 +360,8 @@ describe('buildPayoutReportXlsx — report-only payout amounts (never credited)'
     }
   });
 
-  it('shows the whole-INR amount on an OK payout row and blank on a non-OK one', () => {
-    const rows = readSheet(buildPayoutReportXlsx(payoutPreview()), 'Payout Rows');
+  it('shows the whole-INR amount on an OK payout row and blank on a non-OK one', async () => {
+    const rows = readSheet(await buildPayoutReportXlsx(payoutPreview()), 'Payout Rows');
     const o2 = rows.find((r) => r['Outlet Code'] === 'O2')!;
     const o3 = rows.find((r) => r['Outlet Code'] === 'O3')!;
     expect(o2['Status']).toBe('OK');
@@ -364,8 +371,8 @@ describe('buildPayoutReportXlsx — report-only payout amounts (never credited)'
     expect(String(o3['Reason / Explanation'])).toContain('not a number');
   });
 
-  it('summarises payout-only counts and the total payout (INR)', () => {
-    const summary = readSheet(buildPayoutReportXlsx(payoutPreview()), 'Summary');
+  it('summarises payout-only counts and the total payout (INR)', async () => {
+    const summary = readSheet(await buildPayoutReportXlsx(payoutPreview()), 'Summary');
     expect(summary).toHaveLength(1);
     const s = summary[0];
     expect(s['Client']).toBe('deoleo');
@@ -376,10 +383,10 @@ describe('buildPayoutReportXlsx — report-only payout amounts (never credited)'
     expect(s['Total Payout (INR)']).toBe(5200);
   });
 
-  it('produces a valid empty report when there are no payout rows', () => {
-    const rows = readSheet(buildPayoutReportXlsx(samplePreview()), 'Payout Rows'); // POINTS-only sample
+  it('produces a valid empty report when there are no payout rows', async () => {
+    const rows = readSheet(await buildPayoutReportXlsx(samplePreview()), 'Payout Rows'); // POINTS-only sample
     expect(rows).toHaveLength(0);
-    const summary = readSheet(buildPayoutReportXlsx(samplePreview()), 'Summary');
+    const summary = readSheet(await buildPayoutReportXlsx(samplePreview()), 'Summary');
     expect(summary[0]['Payout Rows']).toBe(0);
     expect(summary[0]['Total Payout (INR)']).toBe(0);
   });

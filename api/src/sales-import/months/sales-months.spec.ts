@@ -330,6 +330,22 @@ describe('SalesMonthClosedGuard (D-1)', () => {
     expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
   });
 
+  it('Downloads: a 202 (file only QUEUED) is NOT recorded by the guard — the export kind records it once when built', async () => {
+    const { guard, prisma } = guardWith({ salesImport: true });
+    await guard.canActivate(ctx(OLD, 'query', clientAdmin, 'payoutReport'));
+    lastRes.finish(202);
+    await new Promise((r) => setImmediate(r));
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    // The kind's build-time record (what points-compute.kinds.ts calls after writing the file) → exactly one row.
+    await guard.recordExport('t1', OLD, 'ca', 'payoutReport');
+    expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+    // An instant 200 download is still recorded by the guard.
+    await guard.canActivate(ctx(OLD, 'query', clientAdmin, 'previewReport'));
+    lastRes.finish(200);
+    await new Promise((r) => setImmediate(r));
+    expect(prisma.auditLog.create).toHaveBeenCalledTimes(2);
+  });
+
   it('flag ON + OPEN month (current / previous) → 409 with the month name', async () => {
     const { guard } = guardWith({ salesImport: true });
     await expect(guard.canActivate(ctx(CUR))).rejects.toBeInstanceOf(ConflictException);

@@ -28,6 +28,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { api, authHeader } from '@/lib/api-client';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { downloadBlob } from '@/lib/download';
 import {
   type GiftOrderSummary,
@@ -43,6 +44,7 @@ import {
   fmtValuePaise,
   fmtPoints,
 } from '@/lib/gift-orders';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 
 interface TenantOption {
   clientId: string;
@@ -54,7 +56,9 @@ interface FulfilmentUploadResult {
   succeeded: number;
   skipped: number;
   failed: number;
+  /** Capped at 500 rows (memory-safety 2026-11-13); `failed` is the true total. */
   errors: { row: number; orderNumber?: string; message: string }[];
+  errorsTruncated?: boolean;
 }
 
 /** Backend list pagination envelope (when present on the response). */
@@ -474,24 +478,36 @@ function BulkFulfilment({ onUploaded }: { onUploaded: () => void }) {
       const fd = new FormData();
       fd.append('file', file);
       // Do NOT set Content-Type — the browser sets the multipart boundary.
-      const res = await fetch('/api/admin/rewards/fulfilment/upload', {
-        method: 'POST',
-        headers: authHeader(),
-        body: fd,
-      });
-      const json = (await res.json()) as {
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/rewards/fulfilment/upload', {
+          method: 'POST',
+          headers: authHeader(),
+          body: fd,
+        });
+      } catch {
+        // The upload updates orders — a dropped connection leaves the outcome unknown.
+        setErr(networkErrorMessage(MAYBE_SAVED_NOTE));
+        return;
+      }
+      const json = await readJsonSafe<{
         success?: boolean;
         data?: FulfilmentUploadResult;
         error?: string;
-      };
+      }>(res);
+      if (!json) {
+        // Non-JSON (proxy truncation / plain-text 5xx / edge 413) — orders may have been updated.
+        setErr(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        return;
+      }
       if (!res.ok || json.success === false) {
         setErr(json.error ?? `Upload failed (HTTP ${res.status})`);
         return;
       }
       setResult(json.data ?? null);
       onUploaded();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Upload failed');
+    } catch {
+      setErr(`Something went wrong showing the upload result. ${MAYBE_SAVED_NOTE}`);
     } finally {
       setUploading(false);
     }
@@ -573,6 +589,8 @@ function BulkFulfilment({ onUploaded }: { onUploaded: () => void }) {
             ))}
           </div>
           {result.errors.length > 0 ? (
+            <div className="space-y-1.5">
+            <UploadTruncationNote shown={result.errors.length} total={result.failed} truncated={result.errorsTruncated} noun="row errors" next={TRUNCATION_NEXT.PARTIAL_SAVE} />
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1 max-h-44 overflow-y-auto" data-testid="bulk-errors">
               <p className="text-xs font-semibold text-amber-700 mb-2">Row errors</p>
               {result.errors.map((er, i) => (
@@ -583,6 +601,7 @@ function BulkFulfilment({ onUploaded }: { onUploaded: () => void }) {
                   {er.message}
                 </p>
               ))}
+            </div>
             </div>
           ) : (
             <div className="flex items-center gap-2 text-sm text-emerald-700">

@@ -7,7 +7,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { VisibilityCaptureService } from './visibility-capture.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -63,7 +63,7 @@ export class VisibilityCaptureController {
   // the SALES capture-photo upload. Static two-segment path — no `:id` collision.
   @Post('sales/media')
   @RequirePermission('visibility:write')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(LimitedFileInterceptor('file', MEDIA_UPLOAD_MAX_BYTES))
   uploadMedia(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,

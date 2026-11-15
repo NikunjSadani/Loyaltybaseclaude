@@ -111,9 +111,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   previewMock.mockResolvedValue({ success: true, data: makePreview() });
   commitMock.mockResolvedValue({ success: true, data: COMMIT_RESULT });
-  exportMock.mockResolvedValue(null);
-  reportMock.mockResolvedValue(null);
-  payoutReportMock.mockResolvedValue(null);
+  exportMock.mockResolvedValue({ kind: 'downloaded', fileName: 'points-credit-upload.xlsx' });
+  reportMock.mockResolvedValue({ kind: 'downloaded', fileName: 'points-preview.xlsx' });
+  payoutReportMock.mockResolvedValue({ kind: 'downloaded', fileName: 'points-payout-report.xlsx' });
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => ({
@@ -349,6 +349,27 @@ describe('Points Engine compute page', () => {
       expect.objectContaining({ period: expectedPeriod }),
     );
     expect(await screen.findByText(/payout report downloaded/i)).toBeInTheDocument();
+  });
+
+  it('PE-C9b: a big payout report (202) says it is being prepared and links to Downloads', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        filter: { program: 'TRADE', kpiCode: 'CASES_SOLD' },
+        counts: { total: 1, ok: 1, skip: 0, error: 0, noRule: 0 },
+        totalPoints: 0,
+        totalPayoutRupees: 2500,
+        rows: [PAYOUT_ROW],
+      }),
+    });
+    payoutReportMock.mockResolvedValueOnce({ kind: 'queued', message: "We're preparing your file.", exportRequestId: 'exp-1' });
+    render(<ComputePage />);
+    await runPreview();
+    fireEvent.click(await screen.findByRole('button', { name: /download payout report/i }));
+    const note = await screen.findByTestId('download-queued');
+    expect(note).toHaveTextContent("We're preparing your file.");
+    expect(screen.getByRole('link', { name: /open downloads/i })).toHaveAttribute('href', '/admin/downloads');
+    expect(screen.queryByText(/payout report downloaded/i)).not.toBeInTheDocument();
   });
 
   it('PE-C10: a PAYOUT-only preview disables the credit-upload file + offers no in-portal credit', async () => {

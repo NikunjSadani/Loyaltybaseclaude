@@ -332,6 +332,124 @@ describe('GIFVC — voucher handling', () => {
     await waitFor(() => expect(calls.filter((c) => c.url.startsWith('/api/rewards/orders?')).length).toBeGreaterThan(before));
   });
 
+  it.each([
+    ['REFUNDED_NO_HUBBLE_ORDER', /Hubble confirmed it has no order for this redemption — points refunded/],
+    ['PENDING_NO_HUBBLE_ORDER_TOO_RECENT', /retry later \(orders must be at least 2 hours old\)/],
+    ['NO_HUBBLE_ORDER_NOT_REFUNDABLE', /can’t be refunded automatically/],
+    ['NO_HUBBLE_ORDER_UNVERIFIED', /couldn’t confirm that answer against a known Hubble order — not refunded/],
+    ['SOME_FUTURE_OUTCOME', /Hubble: SOME_FUTURE_OUTCOME/],
+  ])('GIFVC11b: retry outcome %s is shown in plain words', async (outcome, text) => {
+    installFetch(
+      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' }],
+      (url, init) => (url === '/api/rewards/orders/o1/hubble-reconcile' && init?.method === 'POST' ? jsonOk({ orderId: 'o1', outcome }) : undefined),
+    );
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /retry with hubble/i }));
+    expect(await screen.findByText(text)).toBeInTheDocument();
+  });
+
+  it.each(['HUBBLE_ISSUED_AFTER_REFUND', 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND'])(
+    'GIFVC11c: a post-refund flag (%s) hides Retry + Fulfil manually and offers an audited "Acknowledge — resolved" (note required)',
+    async (reason) => {
+      const calls = installFetch(
+        [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'FAILED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: reason }],
+        (url, init) => (url === '/api/rewards/orders/o1/hubble-acknowledge' && init?.method === 'POST'
+          ? jsonOk({ order: { id: 'o1', hubbleNeedsReconcile: false, hubbleReconcileReason: null } })
+          : undefined),
+      );
+      const row = await openRow('RDM-1');
+      expect(within(row).getByTestId('hubble-needs-reconcile')).toHaveTextContent(/check the order in Hubble’s portal/);
+      expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
+      expect(within(row).queryByRole('button', { name: /fulfil manually/i })).toBeNull();
+      await userEvent.click(within(row).getByRole('button', { name: /acknowledge — resolved/i }));
+      const confirm = screen.getByRole('button', { name: /^acknowledge — resolved$/i });
+      expect(confirm).toBeDisabled();
+      await userEvent.type(screen.getByLabelText('Note *'), '  Checked Hubble — no voucher  ');
+      await userEvent.click(confirm);
+      await waitFor(() => expect(calls.some((c) => c.url.endsWith('/hubble-acknowledge'))).toBe(true));
+      const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/hubble-acknowledge'))!.init!.body));
+      expect(body).toEqual({ note: 'Checked Hubble — no voucher' });
+      const updated = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
+      await waitFor(() => expect(within(updated).queryByTestId('hubble-needs-reconcile')).toBeNull());
+    },
+  );
+
+  it.each(['FAILED', 'CANCELLED', 'RETURNED'])(
+    'GIFVC11e: a leftover open-order flag on a %s (points returned) order offers Acknowledge, not Retry',
+    async (status) => {
+      installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status, voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_CLAIM_LOST' }]);
+      const row = await openRow('RDM-1');
+      expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
+      expect(within(row).getByRole('button', { name: /acknowledge — resolved/i })).toBeInTheDocument();
+    },
+  );
+
+  it('GIFVC11h: Hubble unreachable on Acknowledge → offers "acknowledge anyway" (≥ 20-char note) and sends force', async () => {
+    let attempt = 0;
+    const calls = installFetch(
+      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'FAILED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_NO_CODE' }],
+      (url, init) => {
+        if (url !== '/api/rewards/orders/o1/hubble-acknowledge' || init?.method !== 'POST') return undefined;
+        attempt += 1;
+        return attempt === 1
+          ? Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ success: false, error: 'Hubble could not be checked right now — try again in a few minutes.' }) })
+          : jsonOk({ order: { id: 'o1', hubbleNeedsReconcile: false, hubbleReconcileReason: null } });
+      },
+    );
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /acknowledge — resolved/i }));
+    await userEvent.type(screen.getByLabelText('Note *'), 'short');
+    await userEvent.click(screen.getByRole('button', { name: /^acknowledge — resolved$/i }));
+    const force = await screen.findByRole('checkbox', { name: /hubble unreachable — acknowledge anyway/i });
+    await userEvent.click(force);
+    const confirm = screen.getByRole('button', { name: /^acknowledge — resolved$/i });
+    expect(confirm).toBeDisabled(); // note < 20 chars
+    await userEvent.type(screen.getByLabelText('Note *'), ' — portal shows no voucher');
+    await userEvent.click(confirm);
+    await waitFor(() => expect(attempt).toBe(2));
+    const sent = calls.filter((c) => c.url.endsWith('/hubble-acknowledge')).map((c) => JSON.parse(String(c.init!.body)));
+    expect(sent[0]).toEqual({ note: 'short' });
+    expect(sent[1]).toEqual({ note: 'short — portal shows no voucher', force: true });
+  });
+
+  it('GIFVC11i: a newer recorded reason shows as "Newer: …"; an Acknowledge that re-raises it keeps the row flagged', async () => {
+    installFetch(
+      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL', hubbleLatestReason: 'HUBBLE_SUCCESS_NO_CODE' }],
+      (url, init) => (url === '/api/rewards/orders/o1/hubble-acknowledge' && init?.method === 'POST'
+        ? jsonOk({ order: { id: 'o1', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_NO_CODE', hubbleLatestReason: null } })
+        : undefined),
+    );
+    const row = await openRow('RDM-1');
+    expect(within(row).getByTestId('hubble-latest-reason')).toHaveTextContent('Newer: Hubble succeeded without a code');
+    await userEvent.click(within(row).getByRole('button', { name: /acknowledge — resolved/i }));
+    await userEvent.type(screen.getByLabelText('Note *'), 'one voucher used');
+    await userEvent.click(screen.getByRole('button', { name: /^acknowledge — resolved$/i }));
+    const updated = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
+    await waitFor(() => expect(within(updated).getByTestId('hubble-needs-reconcile')).toHaveTextContent(/Hubble succeeded without a code/));
+    expect(within(updated).queryByTestId('hubble-latest-reason')).toBeNull();
+  });
+
+  it('GIFVC11f: a flagged DELIVERED order (possible double issuance) hides Retry and offers Acknowledge', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
+    expect(within(row).getByRole('button', { name: /acknowledge — resolved/i })).toBeInTheDocument();
+  });
+
+  it('GIFVC11g: the row shows WHY Hubble\'s "no order" was not trusted', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE', hubbleNoOrderUnverifiedWhy: 'no delivered Hubble order on this Hubble account to verify against' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).getByTestId('hubble-no-order-unverified')).toHaveTextContent(/not trusted: no delivered Hubble order on this Hubble account/);
+    expect(within(row).getByRole('button', { name: /retry with hubble/i })).toBeInTheDocument();
+  });
+
+  it('GIFVC11d: an open-order flag (HUBBLE_WEBHOOK_BUT_NOT_FOUND) keeps Retry and offers no Acknowledge', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_BUT_NOT_FOUND' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).getByRole('button', { name: /retry with hubble/i })).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /acknowledge/i })).toBeNull();
+  });
+
   it('GIFVC12: "Fulfil manually" needs a code + reason and PATCHes a manual override; the badge clears', async () => {
     const calls = installFetch(
       [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: null, voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_NOT_FOUND' }],

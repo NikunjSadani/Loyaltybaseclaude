@@ -19,6 +19,7 @@ import {
   Info, FileSpreadsheet, Download, Upload, ShieldAlert,
 } from 'lucide-react';
 import { api, authHeader } from '@/lib/api-client';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { Button } from '@/components/ui/button';
 import { Modal } from '@/components/ui/modal';
 import { downloadBlob } from '@/lib/download';
@@ -45,6 +46,7 @@ import {
   isBlockedError,
 } from '@/lib/vendor';
 import { useVendorMe } from '@/lib/vendor-context';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 
 type Toast = { msg: string; type: 'success' | 'error' };
 
@@ -616,12 +618,20 @@ function Field({
 
 /* ─── Excel bulk upload (mirrors the admin bulk-fulfilment UX) ─────────────────── */
 
+/**
+ * POST /v1/vendor/catalogue/upload response (vendor-portal.service uploadCatalogue).
+ * Memory-safety 2026-11-13: only the FAILED rows come back (problemRows, capped at 500).
+ * (This type previously described the fulfilment-upload shape — processed/succeeded/errors —
+ * which this endpoint never returned, so the result panel read undefined fields.)
+ */
 interface CatalogueUploadResult {
-  processed: number;
-  succeeded: number;
-  skipped: number;
+  total: number;
+  created: number;
   failed: number;
-  errors: { row: number; name?: string; message: string }[];
+  moderationStatus?: string;
+  problemRows: { rowIndex: number; error?: string }[];
+  problemRowCount: number;
+  problemRowsTruncated: boolean;
 }
 
 function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
@@ -664,24 +674,36 @@ function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
       const fd = new FormData();
       fd.append('file', file);
       // Do NOT set Content-Type — the browser sets the multipart boundary.
-      const res = await fetch('/api/vendor/catalogue/upload', {
-        method: 'POST',
-        headers: authHeader(),
-        body: fd,
-      });
-      const json = (await res.json()) as {
+      let res: Response;
+      try {
+        res = await fetch('/api/vendor/catalogue/upload', {
+          method: 'POST',
+          headers: authHeader(),
+          body: fd,
+        });
+      } catch {
+        // The upload writes rows — a dropped connection leaves the outcome unknown.
+        setErr(networkErrorMessage(MAYBE_SAVED_NOTE));
+        return;
+      }
+      const json = await readJsonSafe<{
         success?: boolean;
         data?: CatalogueUploadResult;
         error?: string;
-      };
+      }>(res);
+      if (!json) {
+        // Non-JSON (proxy truncation / plain-text 5xx / edge 413) — some rows may have been saved.
+        setErr(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        return;
+      }
       if (!res.ok || json.success === false) {
         setErr(json.error ?? `Upload failed (HTTP ${res.status})`);
         return;
       }
       setResult(json.data ?? null);
       onUploaded();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Upload failed');
+    } catch {
+      setErr(`Something went wrong showing the upload result. ${MAYBE_SAVED_NOTE}`);
     } finally {
       setUploading(false);
     }
@@ -746,11 +768,10 @@ function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
 
       {result && (
         <div className="space-y-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             {[
-              { label: 'Processed', value: result.processed, color: 'bg-gray-50 border-gray-200 text-gray-800' },
-              { label: 'Succeeded', value: result.succeeded, color: 'bg-green-50 border-green-200 text-green-700' },
-              { label: 'Skipped', value: result.skipped, color: 'bg-amber-50 border-amber-200 text-amber-700' },
+              { label: 'Processed', value: result.total, color: 'bg-gray-50 border-gray-200 text-gray-800' },
+              { label: 'Created', value: result.created, color: 'bg-green-50 border-green-200 text-green-700' },
               {
                 label: 'Failed',
                 value: result.failed,
@@ -763,17 +784,24 @@ function BulkUpload({ onUploaded }: { onUploaded: () => void }) {
               </div>
             ))}
           </div>
-          {result.errors.length > 0 ? (
+          {(result.problemRows?.length ?? 0) > 0 ? (
+            <div className="space-y-1.5">
+            <UploadTruncationNote
+              shown={result.problemRows.length}
+              total={result.problemRowCount}
+              truncated={result.problemRowsTruncated}
+              noun="failed rows"
+              next={TRUNCATION_NEXT.PARTIAL_SAVE}
+            />
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1 max-h-44 overflow-y-auto" data-testid="bulk-errors">
               <p className="text-xs font-semibold text-amber-700 mb-2">Row errors</p>
-              {result.errors.map((er, i) => (
+              {result.problemRows.map((er, i) => (
                 <p key={i} className="text-xs text-amber-700">
-                  <span className="font-mono font-semibold">
-                    Row {er.row}{er.name ? ` — ${er.name}` : ''}:{' '}
-                  </span>
-                  {er.message}
+                  <span className="font-mono font-semibold">Row {er.rowIndex}:{' '}</span>
+                  {er.error ?? 'Row failed'}
                 </p>
               ))}
+            </div>
             </div>
           ) : (
             <div className="flex items-center gap-2 text-sm text-emerald-700">

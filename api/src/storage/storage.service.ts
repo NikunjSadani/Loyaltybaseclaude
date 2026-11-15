@@ -6,6 +6,13 @@ import * as path from 'path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
+/** A private object opened for streaming, with its stored size + content-type. */
+export interface StoredObjectStream {
+  stream: Readable;
+  contentType: string;
+  size: number;
+}
+
 /**
  * GCS object storage — the Nest port of platform/src/lib/s3.ts (function
  * signatures preserved). Files are private by default; use getSignedUrl for
@@ -144,6 +151,31 @@ export class StorageService {
       return { size: Number(meta.size ?? 0), contentType: meta.contentType || 'application/octet-stream' };
     } catch (err) {
       this.logger.warn(`statObject: failed to read metadata for ${key}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Size-checked STREAM of a private object (memory-safety 2026-11-13): the streaming
+   * replacement for `downloadBytes` in every photo/document proxy. Stats first (never
+   * throws) and returns null when the object is missing or larger than `maxBytes` — the
+   * same contract as downloadBytes — but the bytes are never held in API memory: the
+   * caller pipes `stream` to the response (see common/stream-object.ts).
+   */
+  async openBoundedObject(
+    key: string,
+    maxBytes = 24 * 1024 * 1024,
+  ): Promise<StoredObjectStream | null> {
+    const meta = await this.statObject(key);
+    if (!meta) return null;
+    if (meta.size > maxBytes) {
+      this.logger.warn(`openBoundedObject: ${key} is ${meta.size}B (> ${maxBytes}B cap) — refusing`);
+      return null;
+    }
+    try {
+      return { stream: this.openReadStream(key), contentType: meta.contentType, size: meta.size };
+    } catch (err) {
+      this.logger.warn(`openBoundedObject: failed to open ${key}: ${(err as Error).message}`);
       return null;
     }
   }

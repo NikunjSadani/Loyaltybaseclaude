@@ -132,7 +132,6 @@ describe('NotificationDeliveryPage', () => {
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/admin/notification-delivery/export'),
-        expect.anything(),
       ),
     );
     await waitFor(() => expect(downloadBlob).toHaveBeenCalled());
