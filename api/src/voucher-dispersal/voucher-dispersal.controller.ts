@@ -1,0 +1,147 @@
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+  StreamableFile,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { timingSafeEqual } from 'node:crypto';
+import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
+import { Public, Roles } from '../common/decorators/roles.decorator';
+import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
+import { VoucherDispersalService } from './voucher-dispersal.service';
+import { VoucherDispersalProcessor } from './voucher-dispersal.processor';
+import {
+  ConfirmDispersalCampaignDto,
+  CreateDispersalCampaignDto,
+  ListDispersalCampaignsQueryDto,
+  ListDispersalRowsQueryDto,
+} from './dto/voucher-dispersal.dto';
+
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/**
+ * Voucher Dispersal — `/v1/admin/voucher-dispersal/*`. GIFSY_ADMIN ONLY.
+ * `@Roles('GIFSY_ADMIN')` with NO @RequirePermission → RolesGuard 403s every tenant role and every
+ * GIFSY_STAFF; the service re-checks role === 'GIFSY_ADMIN' at the data boundary. Platform-level:
+ * campaigns are not tenant-scoped (an assumed admin still sees all campaigns).
+ */
+@Controller('admin/voucher-dispersal')
+@Roles('GIFSY_ADMIN')
+export class VoucherDispersalController {
+  constructor(private readonly svc: VoucherDispersalService) {}
+
+  @Get('brands')
+  brands(@CurrentUser() user: JwtPayload) {
+    return this.svc.brands(user);
+  }
+
+  @Get('template.xlsx')
+  async template(@CurrentUser() user: JwtPayload): Promise<StreamableFile> {
+    const buf = await this.svc.template(user);
+    return new StreamableFile(buf, { type: XLSX_TYPE, disposition: 'attachment; filename="voucher-dispersal-template.xlsx"' });
+  }
+
+  @Post('campaigns')
+  create(@CurrentUser() user: JwtPayload, @Body() dto: CreateDispersalCampaignDto) {
+    return this.svc.createCampaign(user, dto);
+  }
+
+  @Get('campaigns')
+  list(@CurrentUser() user: JwtPayload, @Query() q: ListDispersalCampaignsQueryDto) {
+    return this.svc.list(user, q);
+  }
+
+  @Get('campaigns/:id')
+  detail(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.svc.detail(user, id);
+  }
+
+  @Post('campaigns/:id/upload')
+  @UseInterceptors(
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
+      fileFilter: (_req, file, cb) =>
+        /\.xlsx$/i.test(file.originalname)
+          ? cb(null, true)
+          : cb(new BadRequestException('Only .xlsx files are accepted — download the template and fill it in.'), false),
+    }),
+  )
+  upload(@CurrentUser() user: JwtPayload, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+    return this.svc.upload(user, id, file);
+  }
+
+  @Post('campaigns/:id/confirm')
+  @HttpCode(200)
+  confirm(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: ConfirmDispersalCampaignDto) {
+    return this.svc.confirm(user, id, dto);
+  }
+
+  /** Bounded in-request processing pass (the UI calls it while the campaign page is open). */
+  @Post('campaigns/:id/process')
+  @HttpCode(200)
+  process(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.svc.process(user, id);
+  }
+
+  @Get('campaigns/:id/rows')
+  rows(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Query() q: ListDispersalRowsQueryDto) {
+    return this.svc.rows(user, id, q);
+  }
+
+  @Get('campaigns/:id/report.xlsx')
+  async report(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<StreamableFile> {
+    const { buffer, fileName } = await this.svc.report(user, id);
+    return new StreamableFile(buffer, { type: XLSX_TYPE, disposition: `attachment; filename="${fileName}"` });
+  }
+
+  @Post('campaigns/:id/rows/:rowId/resend')
+  @HttpCode(200)
+  resend(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('rowId') rowId: string) {
+    return this.svc.resend(user, id, rowId);
+  }
+
+  @Post('campaigns/:id/rows/:rowId/retry-buy')
+  @HttpCode(200)
+  retryBuy(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('rowId') rowId: string) {
+    return this.svc.retryBuy(user, id, rowId);
+  }
+
+  @Post('campaigns/:id/cancel')
+  @HttpCode(200)
+  cancel(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.svc.cancel(user, id);
+  }
+}
+
+/**
+ * POST /v1/voucher-dispersal/drain — Cloud Scheduler driver (restart-proof). `@Public`, header
+ * `x-drain-secret`, constant-time compare, FAIL-CLOSED when no secret is configured. Secret:
+ * VOUCHER_DISPERSAL_DRAIN_SECRET when set, else the existing PUSH_DRAIN_SECRET (bound in both
+ * environments). The pass runs INSIDE the request (Cloud Run gives CPU only during a request).
+ * Reveals only counts — never row data.
+ */
+@Controller('voucher-dispersal')
+export class VoucherDispersalDrainController {
+  constructor(private readonly processor: VoucherDispersalProcessor) {}
+
+  @Public()
+  @Post('drain')
+  @HttpCode(200)
+  async drain(@Headers('x-drain-secret') secret?: string) {
+    const clean = (v?: string) => v?.replace(/^﻿/, '').trim() || undefined;
+    const expected = clean(process.env.VOUCHER_DISPERSAL_DRAIN_SECRET) ?? clean(process.env.PUSH_DRAIN_SECRET);
+    if (!expected) throw new ForbiddenException('Drain disabled');
+    const got = Buffer.from(secret ?? '');
+    const want = Buffer.from(expected);
+    if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ForbiddenException('Invalid drain secret');
+    return this.processor.drain({ budgetMs: 45_000 });
+  }
+}

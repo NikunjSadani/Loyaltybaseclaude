@@ -54,6 +54,7 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
 import { OffersModule }       from './offers/offers.module';
 import { SalesImportModule }  from './sales-import/sales-import.module';
 import { ExportsModule }      from './exports/exports.module';
+import { VoucherDispersalModule } from './voucher-dispersal/voucher-dispersal.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -126,6 +127,8 @@ import { ExportsModule }      from './exports/exports.module';
     // Downloads page (heavy report files prepared by the gifsy-exports job) — platform/docs/plans/DOWNLOADS-PAGE.md.
     // @Global: report controllers inject ExportsService.respond(...) without importing it.
     ExportsModule,
+    // Voucher Dispersal — platform-level Gifsy admin tool (Excel → Hubble vouchers → WhatsApp). platform/docs/plans/VOUCHER-DISPERSAL.md.
+    VoucherDispersalModule,
   ],
   controllers: [AppController],
   providers: [
