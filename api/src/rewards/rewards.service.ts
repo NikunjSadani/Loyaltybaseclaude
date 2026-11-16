@@ -99,6 +99,8 @@ import {
   HubbleVoucher,
   hubbleAccountFingerprintMatches,
 } from '../hubble/hubble.service';
+import { checkHubbleCanaryOrder } from '../hubble/hubble-canary';
+import { hubbleVoucherCredentials } from '../hubble/hubble-voucher';
 import {
   extractHubbleDenominations,
   isAmountIssuable,
@@ -186,21 +188,10 @@ export function isSalesViewer(role: string | null | undefined): boolean {
 }
 
 /**
- * The member-facing credentials of a Hubble voucher:
- *  - code = card number if present, else the PIN (a PIN-only card's PIN IS its code);
- *  - pin  = the PIN ONLY when BOTH a card number and a PIN are present (card+PIN products such as
- *           CARD_AND_PIN_NO_SECURED) — otherwise null (number-only / PIN-only: unchanged).
- * Values are trimmed; blank counts as absent.
+ * The member-facing credentials of a Hubble voucher — now shared from hubble/hubble-voucher.ts
+ * (Voucher Dispersal uses the same rule); re-exported here so existing imports keep working.
  */
-export function hubbleVoucherCredentials(voucher: HubbleVoucher | undefined | null): {
-  code: string | null;
-  pin: string | null;
-} {
-  if (!voucher) return { code: null, pin: null };
-  const num = (voucher.cardNumber ?? '').toString().trim();
-  const pin = (voucher.cardPin ?? '').toString().trim();
-  return { code: num || pin || null, pin: num && pin ? pin : null };
-}
+export { hubbleVoucherCredentials };
 
 /** Operator-console projection of an order's Hubble reconcile state (from metadata). */
 export function hubbleReconcileFlags(metadata: unknown): {
@@ -4914,32 +4905,12 @@ export class RewardsService {
 
   /** One canary lookup: null = verified, else why not. Never throws. */
   private async checkCanary(canary: { id: string; supplierOrderRef: string | null }, budgetMs: number | null = null): Promise<string | null> {
-    let body: HubbleOrderResult | null;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const lookup = this.hubble.getOrderByReference(canary.id);
-      body = budgetMs === null
-        ? await lookup
-        : await Promise.race([
-            lookup,
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error('canary time budget exhausted')), budgetMs);
-              (timer as { unref?: () => void }).unref?.();
-            }),
-          ]);
-    } catch (e) {
-      return `canary lookup failed: ${e}`;
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-    if (body === null) return 'canary lookup also returned "not found" for an order Hubble delivered';
-    const status = (body.status ?? '').toString().toUpperCase();
-    if (status !== 'SUCCESS') return `canary lookup returned status ${status || '(none)'}, not SUCCESS`;
-    if (body.referenceId != null && body.referenceId !== canary.id) return 'canary lookup returned a different reference';
-    const hubbleId = body.id ?? body.orderId ?? null;
-    const ref = (canary.supplierOrderRef ?? '').trim();
-    if (hubbleId != null && ref && String(hubbleId) !== ref) return 'canary lookup returned a different Hubble order id';
-    return null;
+    // Shared with Voucher Dispersal (hubble-canary.ts) — one implementation of the canary check.
+    return checkHubbleCanaryOrder(
+      this.hubble,
+      { referenceId: canary.id, hubbleOrderRef: canary.supplierOrderRef },
+      budgetMs,
+    );
   }
 
   /**
