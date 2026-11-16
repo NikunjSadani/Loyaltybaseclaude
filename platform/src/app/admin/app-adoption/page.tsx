@@ -6,12 +6,17 @@
    Shows (1) Web Push notification opt-in (users / devices, by role + by OS) and
    (2) home-screen installs (users, by platform). Auth follows the same authHeader()
    + fetch + useEffect/useState pattern as the dashboard pages.
+   (3) "Download installed users (Excel)" → GET /api/push/adoption/installed-users
+   (backend /v1/push/adoption/installed-users, export kind 'app-installed-users'),
+   via the shared downloadOrQueue/useDownloadAction button state machine.
 ──────────────────────────────────────────────────────────────────────────────────── */
 
 import React, { useEffect, useState } from 'react';
-import { Bell, Smartphone, Loader2, AlertCircle } from 'lucide-react';
+import { Bell, Smartphone, Loader2, AlertCircle, Download } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 const DARK_NAVY = '#1A1A2E';
 
@@ -58,6 +63,88 @@ function BreakdownList({
         </ul>
       )}
     </div>
+  );
+}
+
+/* ─── Installed-users download ───────────────────────────────────────────────── */
+
+const INSTALLED_USERS_URL = '/api/push/adoption/installed-users';
+
+type RoleGroup = '' | 'sales' | 'partner' | 'admin';
+
+/** URL for the installed-users Excel, with only the filters that were chosen. */
+function installedUsersUrl(roleGroup: RoleGroup, since: string): string {
+  const q = new URLSearchParams();
+  if (roleGroup) q.set('roleGroup', roleGroup);
+  if (since) q.set('since', since);
+  const qs = q.toString();
+  return qs ? `${INSTALLED_USERS_URL}?${qs}` : INSTALLED_USERS_URL;
+}
+
+function InstalledUsersDownload() {
+  const action = useDownloadAction();
+  const [roleGroup, setRoleGroup] = useState<RoleGroup>('');
+  const [since, setSince] = useState('');
+
+  const onDownload = () => {
+    void action.run(installedUsersUrl(roleGroup, since), {
+      fallbackFileName: 'app-installed-users.xlsx',
+      init: { headers: { ...authHeader() } },
+    });
+  };
+
+  return (
+    <Card className="border border-gray-100 shadow-sm rounded-2xl" data-testid="installed-users-download">
+      <CardContent className="py-4 space-y-2">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-xs font-semibold text-gray-500">
+            Who
+            <select
+              aria-label="Role group"
+              className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-gray-800 bg-white"
+              value={roleGroup}
+              onChange={(e) => setRoleGroup(e.target.value as RoleGroup)}
+              disabled={action.busy}
+            >
+              <option value="">All users</option>
+              <option value="sales">Sales team</option>
+              <option value="partner">Partners (outlets)</option>
+              <option value="admin">Admins</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-xs font-semibold text-gray-500">
+            Installed since (optional)
+            <input
+              type="date"
+              aria-label="Installed since"
+              className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-gray-800 bg-white"
+              value={since}
+              onChange={(e) => setSince(e.target.value)}
+              disabled={action.busy}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={onDownload}
+            disabled={action.blocked}
+            aria-busy={action.busy}
+            className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            style={{ backgroundColor: DARK_NAVY }}
+          >
+            {action.busy ? (
+              <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <Download className="w-4 h-4" aria-hidden="true" />
+            )}
+            {downloadButtonLabel(action, 'Download installed users (Excel)')}
+          </button>
+        </div>
+        <p className="text-xs text-gray-400">
+          Includes everyone who opened the app as an installed app.
+        </p>
+        <DownloadActionStatus action={action} />
+      </CardContent>
+    </Card>
   );
 }
 
@@ -147,6 +234,9 @@ export default function AdminAppAdoptionPage() {
           Push notification opt-ins &amp; home-screen installs across this brand
         </p>
       </div>
+
+      {/* ── Installed-users Excel download ── */}
+      <InstalledUsersDownload />
 
       {/* ── Empty state ── */}
       {nothingYet ? (

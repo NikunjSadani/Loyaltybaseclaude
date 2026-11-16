@@ -4,6 +4,7 @@
  * OWNED BY LANE C — only lane C edits this file. Each kind lives in kinds/batch2/*.
  */
 import type { AnyExportKind } from '../export-kinds';
+import { APP_INSTALLED_USERS_KIND } from './batch2/app-installed-users.kind';
 import { DELIVERY_STATUS_KIND } from './batch2/delivery-status.kind';
 import { PAYMENTS_REPORT_KIND } from './batch2/payments-report.kind';
 import { POINTS_COMPUTE_KINDS } from './batch2/points-compute.kinds';
@@ -18,4 +19,5 @@ export const BATCH2_EXPORT_KINDS: readonly AnyExportKind[] = [
   PAYMENTS_REPORT_KIND,
   DELIVERY_STATUS_KIND,
   ...POINTS_COMPUTE_KINDS,
+  APP_INSTALLED_USERS_KIND,
 ];

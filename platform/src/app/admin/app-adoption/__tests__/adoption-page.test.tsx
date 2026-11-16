@@ -8,12 +8,17 @@
  *  - AD3: installed user count + a platform breakdown row render
  *  - AD4: empty state ("No installs or subscriptions yet") when all zeros
  *  - AD5: on fetch failure an explicit error state shows (no fabricated numbers)
+ *  - AD6–AD9: "Download installed users (Excel)" — button + note, filters in the URL, loading
+ *    state while the request is in flight, file saved on 200, readable error on 4xx / network failure
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import AppAdoptionPage from '../page';
+
+const downloadBlob = vi.fn();
+vi.mock('@/lib/download', () => ({ downloadBlob: (...a: unknown[]) => downloadBlob(...a) }));
 
 const PAYLOAD = {
   clientId: 'deoleo',
@@ -97,5 +102,76 @@ describe('Admin App Adoption page — real data', () => {
     expect(screen.queryByText('128')).not.toBeInTheDocument();
     expect(screen.queryByText('64')).not.toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  });
+
+  /** Adoption payload for GET /api/push/adoption; `download` answers the installed-users request. */
+  function mockFetchRoutes(download: (url: string) => Promise<unknown>) {
+    const fetchMock = vi.fn((url: string) =>
+      String(url).startsWith('/api/push/adoption/installed-users')
+        ? download(String(url))
+        : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(PAYLOAD) }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  const fileResponse = () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (h: string) => (h === 'Content-Disposition' ? 'attachment; filename="app-installed-users-2026-11-16.xlsx"' : null) },
+    blob: () => Promise.resolve(new Blob(['x'])),
+  });
+
+  it('AD6: shows the download button and the "installed app" note', async () => {
+    mockFetchRoutes(() => Promise.resolve(fileResponse()));
+    render(<AppAdoptionPage />);
+    expect(await screen.findByRole('button', { name: /Download installed users \(Excel\)/ })).toBeEnabled();
+    expect(screen.getByText('Includes everyone who opened the app as an installed app.')).toBeInTheDocument();
+  });
+
+  it('AD7: sends the chosen filters, shows a loading state, then saves the file', async () => {
+    let resolveDownload: (v: unknown) => void = () => {};
+    const fetchMock = mockFetchRoutes(() => new Promise((r) => { resolveDownload = r; }));
+    render(<AppAdoptionPage />);
+    const button = await screen.findByRole('button', { name: /Download installed users/ });
+
+    fireEvent.change(screen.getByLabelText('Role group'), { target: { value: 'partner' } });
+    fireEvent.change(screen.getByLabelText('Installed since'), { target: { value: '2026-11-01' } });
+    fireEvent.click(button);
+
+    // Loading: busy label + disabled while the request is in flight.
+    expect(await screen.findByRole('button', { name: /Preparing/ })).toBeDisabled();
+    const call = fetchMock.mock.calls.find((c) => String(c[0]).includes('installed-users'))!;
+    expect(call[0]).toBe('/api/push/adoption/installed-users?roleGroup=partner&since=2026-11-01');
+
+    resolveDownload(fileResponse());
+    await waitFor(() => expect(downloadBlob).toHaveBeenCalledWith(expect.any(Blob), 'app-installed-users-2026-11-16.xlsx'));
+    expect(await screen.findByRole('button', { name: /Download installed users/ })).toBeEnabled();
+    expect(screen.queryByTestId('download-error')).not.toBeInTheDocument();
+  });
+
+  it('AD8: a server refusal shows a readable error (never silent) and no file is saved', async () => {
+    mockFetchRoutes(() =>
+      Promise.resolve({
+        ok: false,
+        status: 403,
+        json: () => Promise.resolve({ success: false, error: 'Access denied. Required: GIFSY_ADMIN or CLIENT_ADMIN or MIS_USER.' }),
+      }),
+    );
+    render(<AppAdoptionPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Download installed users/ }));
+    const err = await screen.findByTestId('download-error');
+    expect(err).toHaveTextContent('Access denied');
+    expect(err).toHaveAttribute('role', 'alert');
+    expect(downloadBlob).not.toHaveBeenCalled();
+    // The adoption numbers stay on screen.
+    expect(screen.getByText('128')).toBeInTheDocument();
+  });
+
+  it('AD9: a network failure shows a readable error', async () => {
+    mockFetchRoutes(() => Promise.reject(new Error('offline')));
+    render(<AppAdoptionPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Download installed users/ }));
+    expect(await screen.findByTestId('download-error')).toHaveTextContent("Couldn't reach the server");
   });
 });
