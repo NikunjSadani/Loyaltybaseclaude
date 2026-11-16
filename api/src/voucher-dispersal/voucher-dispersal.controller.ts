@@ -123,10 +123,10 @@ export class VoucherDispersalController {
 
 /**
  * POST /v1/voucher-dispersal/drain — Cloud Scheduler driver (restart-proof). `@Public`, header
- * `x-drain-secret`, constant-time compare, FAIL-CLOSED when no secret is configured. Secret:
- * VOUCHER_DISPERSAL_DRAIN_SECRET when set, else the existing PUSH_DRAIN_SECRET (bound in both
- * environments). The pass runs INSIDE the request (Cloud Run gives CPU only during a request).
- * Reveals only counts — never row data.
+ * `x-drain-secret`, constant-time compare, FAIL-CLOSED when VOUCHER_DISPERSAL_DRAIN_SECRET is unset.
+ * A DEDICATED secret (no fallback to another drain's secret): this endpoint spends money, so holding
+ * the push-drain secret must not be enough to trigger it. Create it per environment (runbook).
+ * The pass runs INSIDE the request (Cloud Run gives CPU only during a request). Reveals only counts.
  */
 @Controller('voucher-dispersal')
 export class VoucherDispersalDrainController {
@@ -137,7 +137,7 @@ export class VoucherDispersalDrainController {
   @HttpCode(200)
   async drain(@Headers('x-drain-secret') secret?: string) {
     const clean = (v?: string) => v?.replace(/^﻿/, '').trim() || undefined;
-    const expected = clean(process.env.VOUCHER_DISPERSAL_DRAIN_SECRET) ?? clean(process.env.PUSH_DRAIN_SECRET);
+    const expected = clean(process.env.VOUCHER_DISPERSAL_DRAIN_SECRET);
     if (!expected) throw new ForbiddenException('Drain disabled');
     const got = Buffer.from(secret ?? '');
     const want = Buffer.from(expected);

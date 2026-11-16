@@ -4042,6 +4042,8 @@ model VoucherDispersalRow {
   note                 String?
   status               VoucherDispersalRowStatus
   invalidReason        String?
+  /// Preview warning (not blocking), e.g. the phone already got a voucher in another campaign recently.
+  warning              String?
   /// Our Hubble idempotency key — assigned at upload (BEFORE any Hubble call) and reused on every
   /// indeterminate retry. Replaced only after a DEFINITIVE failure proven by Hubble (old one kept below).
   hubbleReferenceId    String?                   @unique
@@ -4050,6 +4052,10 @@ model VoucherDispersalRow {
   hubbleAccount        String?
   hubbleOrderId        String?
   placeAttemptAt       DateTime?
+  /// When the CURRENT reference was first handed to Hubble (placeOrder called). Null = this reference
+  /// never reached Hubble. A failed row whose reference reached Hubble keeps counting against the budget
+  /// and stays in the reconcile sweep (Hubble may still hold an order for it).
+  referenceSentAt      DateTime?
   placeResponded       Boolean?
   claimToken           String?
   buyingAt             DateTime?

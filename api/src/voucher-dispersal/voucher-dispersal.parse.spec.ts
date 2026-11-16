@@ -105,14 +105,37 @@ describe('validateDispersalRows', () => {
       BRANDS,
     );
     expect(out[0]).toMatchObject({ status: 'INVALID', dedupePhone: '9876543210' });
-    expect(out[1]).toMatchObject({ status: 'DUPLICATE', dedupePhone: null, invalidReason: expect.stringMatching(/Same phone as row 2/) });
+    expect(out[1]).toMatchObject({
+      status: 'DUPLICATE',
+      dedupePhone: null,
+      invalidReason: 'Same phone as row 2 (that row is invalid — fix it to send to this number)',
+    });
     expect(out[2]).toMatchObject({ status: 'DUPLICATE', dedupePhone: null });
   });
 
-  it('a FIXED brand whose list Hubble did not return falls back to min/max', () => {
+  it('a FIXED brand whose list Hubble did not return is INVALID (never guessed)', () => {
     const unknownList: DispersalBrandLimits = { ...BRANDS[1], product: { ...fixed, denominations: [] } };
-    const [r] = validateDispersalRows([row(2, { phone: '9876543210', name: 'A', amount: 777, brand: 'Flipkart' })], [unknownList]);
-    expect(r.status).toBe('VALID');
+    const [r] = validateDispersalRows([row(2, { phone: '9876543210', name: 'A', amount: 300, brand: 'Flipkart' })], [unknownList]);
+    expect(r.status).toBe('INVALID');
+    expect(r.invalidReason).toMatch(/Hubble didn't return Flipkart's fixed amounts — try the upload again later/);
+  });
+
+  it('a later duplicate of a VALID row says so; a note over 200 chars is INVALID (no silent truncation)', () => {
+    const out = validateDispersalRows(
+      [
+        row(2, { phone: '9876543210', name: 'A', amount: 1000, brand: 'Amazon Pay' }),
+        row(3, { phone: '9876543210', name: 'B', amount: 1000, brand: 'Amazon Pay' }),
+        row(4, { phone: '9876543211', name: 'C', amount: 1000, brand: 'Amazon Pay', note: 'x'.repeat(201) }),
+      ],
+      BRANDS,
+    );
+    expect(out[1].invalidReason).toBe('Same phone as row 2 — only one voucher per phone per campaign');
+    expect(out[2]).toMatchObject({ status: 'INVALID', invalidReason: expect.stringMatching(/Note is longer than 200/) });
+  });
+
+  it('amount outside the LIVE range states the allowed range', () => {
+    const [r] = validateDispersalRows([row(2, { phone: '9876543210', name: 'A', amount: 499, brand: 'Amazon Pay' })], BRANDS);
+    expect(r.invalidReason).toBe('₹499 is not issuable for Amazon Pay (whole rupees from ₹500 to ₹10,000)');
   });
 });
 
@@ -125,12 +148,32 @@ describe('readDispersalSheet', () => {
       [9876543211, 'Ravi', '₹500', 'Flipkart', null],
     ]);
     const out = readDispersalSheet(buf);
-    expect(out.map((r) => r.rowNumber)).toEqual([2, 4]);
-    expect(out[1].cells).toMatchObject({ phone: 9876543211, name: 'Ravi', amount: '₹500', brand: 'Flipkart' });
+    expect(out.rows.map((r) => r.rowNumber)).toEqual([2, 4]);
+    expect(out.rows[1].cells).toMatchObject({ phone: 9876543211, name: 'Ravi', amount: '₹500', brand: 'Flipkart' });
+    expect(out).toMatchObject({ skippedBlank: 1, skippedFormulaOnly: 0, hiddenIncluded: 0 });
+  });
+
+  it('counts formula-only rows (no saved values) and hidden rows — never silent', () => {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['Phone', 'Name', 'Amount', 'Brand'],
+      ['9876543210', 'A', 1000, 'Amazon Pay'],
+      ['9876543211', 'B', 1000, 'Amazon Pay'],
+    ]);
+    ws['A4'] = { t: 'n', f: 'A2+1' } as XLSX.CellObject; // a formula Excel never calculated
+    ws['!ref'] = 'A1:D4';
+    ws['!rows'] = [{}, {}, { hidden: true }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Recipients');
+    const out = readDispersalSheet(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', cellStyles: true }) as Buffer);
+    expect(out.rows.length).toBe(2);
+    expect(out.hiddenIncluded).toBe(1);
+    expect(out.skippedFormulaOnly).toBe(1);
   });
 
   it('refuses a file missing a required column', () => {
-    expect(() => readDispersalSheet(xlsx([['Phone', 'Name', 'Brand'], ['9876543210', 'A', 'Amazon Pay']]))).toThrow(/Missing column\(s\): Amount/);
+    expect(() => readDispersalSheet(xlsx([['Phone', 'Name', 'Brand'], ['9876543210', 'A', 'Amazon Pay']]))).toThrow(
+      /Missing column\(s\): Amount \(₹\)\. Expected columns: Phone, Name, Amount \(₹\), Brand, Note \(optional\)/,
+    );
   });
 
   it('refuses garbage, an empty sheet and too many rows', () => {
@@ -161,5 +204,9 @@ describe('brand registry', () => {
     expect(parseBrandOverride('[{"key":"x","label":"","productId":"1"}]')).toBeNull();
     expect(parseBrandOverride('not json')).toBeNull();
     expect(configuredDispersalBrands({ VOUCHER_DISPERSAL_BRANDS: 'oops' } as never).length).toBe(2);
+    // One brand's key equal to another's label is ambiguous for an upload cell → rejected.
+    expect(parseBrandOverride('[{"key":"AJIO","label":"Ajio","productId":"1"},{"key":"X","label":"ajio","productId":"2"}]')).toBeNull();
+    expect(parseBrandOverride('[{"key":"FLIPKART","label":"Amazon","productId":"1"},{"key":"AMAZON","label":"Amazon Pay","productId":"2"}]')).toBeNull();
+    expect(parseBrandOverride('[{"key":"AJIO","label":"AJIO","productId":"1"}]')).toEqual([{ key: 'AJIO', label: 'AJIO', productId: '1' }]);
   });
 });

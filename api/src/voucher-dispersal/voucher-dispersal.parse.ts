@@ -97,18 +97,29 @@ function headerKey(h: unknown): HeaderKey | null {
   return null;
 }
 
-/** Read the first worksheet into a header map + raw data rows (blank rows skipped, row numbers kept). */
-export function readDispersalSheet(buffer: Buffer): { rowNumber: number; cells: Record<HeaderKey, unknown> }[] {
+export interface DispersalSheet {
+  rows: { rowNumber: number; cells: Record<HeaderKey, unknown> }[];
+  /** Rows between the header and the last data row with no values at all (skipped). */
+  skippedBlank: number;
+  /** Rows whose only content is formulas without a cached value (skipped — Excel didn't save results). */
+  skippedFormulaOnly: number;
+  /** Rows hidden in Excel that were INCLUDED (the admin may not have noticed them). */
+  hiddenIncluded: number;
+}
+
+/** Read the first worksheet into a header map + raw data rows (row numbers kept; skips counted, never silent). */
+export function readDispersalSheet(buffer: Buffer): DispersalSheet {
   let wb: XLSX.WorkBook;
   try {
-    wb = XLSX.read(buffer, { type: 'buffer' });
+    wb = XLSX.read(buffer, { type: 'buffer', cellStyles: true });
   } catch {
     throw new DispersalFileError('The file could not be read as an Excel workbook. Download the template and fill it in.');
   }
   // The template's first sheet is "Recipients"; fall back to the first sheet.
   const sheetName = wb.SheetNames.find((n) => n.trim().toLowerCase() === 'recipients') ?? wb.SheetNames[0];
   if (!sheetName) throw new DispersalFileError('The workbook has no worksheet.');
-  const aoa = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheetName], { header: 1, defval: null, raw: true });
+  const ws = wb.Sheets[sheetName];
+  const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: null, raw: true, blankrows: true });
   if (aoa.length === 0) throw new DispersalFileError('The sheet is empty. Download the template and fill it in.');
   const header = (aoa[0] ?? []) as unknown[];
   const col: Partial<Record<HeaderKey, number>> = {};
@@ -117,12 +128,32 @@ export function readDispersalSheet(buffer: Buffer): { rowNumber: number; cells: 
     if (k && col[k] === undefined) col[k] = i;
   });
   const missing = (['phone', 'name', 'amount', 'brand'] as HeaderKey[]).filter((k) => col[k] === undefined);
+  const range = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']) : null;
+  const rowMeta = (ws['!rows'] ?? []) as ({ hidden?: boolean } | undefined)[];
+  const rowHasFormulaOnly = (sheetRow0: number): boolean => {
+    if (!range) return false;
+    let formula = false;
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cell = ws[XLSX.utils.encode_cell({ r: sheetRow0, c })] as XLSX.CellObject | undefined;
+      if (!cell) continue;
+      // A formula Excel never calculated is read as a stub ('z') — it has no value.
+      const noValue = cell.t === 'z' || cell.v === undefined || cell.v === null || cell.v === '';
+      if (cell.f && noValue) formula = true;
+      else if (!noValue && String(cell.v).trim() !== '') return false;
+    }
+    return formula;
+  };
   if (missing.length) {
     throw new DispersalFileError(
       `Missing column(s): ${missing.map((m) => ({ phone: 'Phone', name: 'Name', amount: 'Amount (₹)', brand: 'Brand', note: 'Note' })[m]).join(', ')}. Expected columns: Phone, Name, Amount (₹), Brand, Note (optional) — download the template.`,
     );
   }
   const out: { rowNumber: number; cells: Record<HeaderKey, unknown> }[] = [];
+  const blanks: { formulaOnly: boolean }[] = [];
+  let skippedBlank = 0;
+  let skippedFormulaOnly = 0;
+  let hiddenIncluded = 0;
+  const headerRow0 = range ? range.s.r : 0;
   for (let ri = 1; ri < aoa.length; ri++) {
     const r = (aoa[ri] ?? []) as unknown[];
     const cells = {
@@ -132,15 +163,25 @@ export function readDispersalSheet(buffer: Buffer): { rowNumber: number; cells: 
       brand: r[col.brand!],
       note: col.note !== undefined ? r[col.note] : null,
     } as Record<HeaderKey, unknown>;
+    const sheetRow0 = headerRow0 + ri;
     const blank = Object.values(cells).every((v) => v === null || v === undefined || String(v).trim() === '');
-    if (blank) continue;
-    out.push({ rowNumber: ri + 1, cells });
+    if (blank) {
+      // Counted only if a data row follows (trailing formatted-but-empty rows are not "skipped rows").
+      blanks.push({ formulaOnly: rowHasFormulaOnly(sheetRow0) });
+      continue;
+    }
+    for (const b of blanks) (b.formulaOnly ? skippedFormulaOnly++ : skippedBlank++);
+    blanks.length = 0;
+    if (rowMeta[sheetRow0]?.hidden) hiddenIncluded++;
+    out.push({ rowNumber: sheetRow0 + 1, cells });
   }
+  // Trailing formula-only rows ARE reported (they look like data the admin expected to send).
+  skippedFormulaOnly += blanks.filter((b) => b.formulaOnly).length;
   if (out.length === 0) throw new DispersalFileError('No recipient rows found under the header.');
   if (out.length > DISPERSAL_MAX_ROWS) {
     throw new DispersalFileError(`Too many rows (${out.length}). The limit is ${DISPERSAL_MAX_ROWS} per campaign — split the file.`);
   }
-  return out;
+  return { rows: out, skippedBlank, skippedFormulaOnly, hiddenIncluded };
 }
 
 /**
@@ -160,7 +201,7 @@ export function validateDispersalRows(
     byKey.set(b.key.toLowerCase(), b);
     byKey.set(b.label.toLowerCase(), b);
   }
-  const owner = new Map<string, number>();
+  const owner = new Map<string, { rowNumber: number; invalid: boolean }>();
   return raw.map(({ rowNumber, cells }) => {
     const reasons: string[] = [];
     const rawPhone = cells.phone === null || cells.phone === undefined
@@ -182,6 +223,8 @@ export function validateDispersalRows(
     else if (!brand) reasons.push(`Unknown brand "${brandRaw}" — use one from the template dropdown`);
     else if (!brand.available || !brand.product) {
       reasons.push(`Brand ${brand.label} limits could not be loaded from Hubble (${brand.unavailableReason ?? 'unavailable'}) — upload again later`);
+    } else if (brand.product.denominationType === 'FIXED' && brand.product.denominations.length === 0) {
+      reasons.push(`Hubble didn't return ${brand.label}'s fixed amounts — try the upload again later`);
     }
 
     const amountIn = parseRupees(cells.amount);
@@ -195,12 +238,14 @@ export function validateDispersalRows(
       reasons.push('Amount must be whole rupees (no paise)');
     } else {
       amountRupees = amountIn;
-      if (brand?.available && brand.product && !isAmountIssuable(brand.product, amountIn)) {
+      const fixedUnknown = brand?.product?.denominationType === 'FIXED' && brand.product.denominations.length === 0;
+      if (brand?.available && brand.product && !fixedUnknown && !isAmountIssuable(brand.product, amountIn)) {
         reasons.push(`${fmtRupees(amountIn)} is not issuable for ${brand.label} (${describeBrandAmounts(brand.product)})`);
       }
     }
 
     const noteRaw = cells.note === null || cells.note === undefined ? '' : whatsappSafeVar(String(cells.note));
+    if (noteRaw.length > DISPERSAL_NOTE_MAX) reasons.push(`Note is longer than ${DISPERSAL_NOTE_MAX} characters`);
     const note = noteRaw ? noteRaw.slice(0, DISPERSAL_NOTE_MAX) : null;
 
     let status: ParsedRowStatus = reasons.length ? 'INVALID' : 'VALID';
@@ -209,11 +254,13 @@ export function validateDispersalRows(
     if (phone) {
       const first = owner.get(phone);
       if (first === undefined) {
-        owner.set(phone, rowNumber);
+        owner.set(phone, { rowNumber, invalid: status === 'INVALID' });
         dedupePhone = phone;
       } else {
         status = 'DUPLICATE';
-        invalidReason = `Same phone as row ${first} — only one voucher per phone per campaign`;
+        invalidReason = first.invalid
+          ? `Same phone as row ${first.rowNumber} (that row is invalid — fix it to send to this number)`
+          : `Same phone as row ${first.rowNumber} — only one voucher per phone per campaign`;
       }
     }
 

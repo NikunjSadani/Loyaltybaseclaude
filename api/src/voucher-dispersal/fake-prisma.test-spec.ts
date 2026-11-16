@@ -37,6 +37,7 @@ export function matches(rec: Rec, where: Rec | undefined): boolean {
       if ('notIn' in cond && (cond.notIn as any[]).some((x) => eq(v, x))) return false;
       if ('not' in cond && eq(v, cond.not)) return false;
       if ('lt' in cond && !(v != null && v < cond.lt)) return false;
+      if ('gte' in cond && !(v != null && v >= cond.gte)) return false;
       if ('has' in cond && !(Array.isArray(v) && v.includes(cond.has))) return false;
       if ('equals' in cond && !eq(v, cond.equals)) return false;
       continue;

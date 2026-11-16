@@ -1,5 +1,7 @@
 import ExcelJS from 'exceljs';
-import { buildXlsx, cellSafe } from '../common/xlsx';
+import * as XLSX from 'xlsx';
+import { istDateTimeCell } from '../common/ist-date';
+import { cellSafe } from '../common/xlsx';
 import { DISPERSAL_MAX_ROWS, DISPERSAL_NAME_MAX, DispersalBrandLimits, describeBrandAmounts } from './voucher-dispersal.parse';
 
 /**
@@ -87,28 +89,46 @@ export interface DispersalReportRow {
   messageFailureReason: string | null;
 }
 
-const iso = (d: Date | null) => (d ? d.toISOString() : '');
+/** Times in IST ("YYYY-MM-DD HH:mm"), the header says so. */
+const ist = (d: Date | null) => (d ? istDateTimeCell(new Date(d)) : '');
+
+/**
+ * A phone cell: a value made only of digits / spaces / + - ( ) . is written AS-IS (an xlsx string cell is
+ * never evaluated, and "+91 98765…" must read naturally); anything else goes through cellSafe like every
+ * other text cell, so a formula-looking value (= + - @ followed by non-phone text) is still neutralised.
+ */
+export function phoneCell(v: string): string {
+  return /^[+\d\s\-().]*$/.test(v) ? v : cellSafe(v);
+}
+
+const REPORT_HEADERS = [
+  'Row', 'Phone', 'Name', 'Amount', 'Brand', 'Voucher status', 'Hubble order ref', 'Bought at (IST)', 'Failure reason',
+  'WhatsApp status', 'Sent at (IST)', 'Delivered at (IST)', 'Read at (IST)', 'Message failure reason',
+];
 
 export function buildDispersalReport(rows: DispersalReportRow[]): Buffer {
-  return buildXlsx([
-    {
-      name: 'Delivery report',
-      rows: rows.map((r) => ({
-        Row: r.rowNumber,
-        Phone: r.phone,
-        Name: r.name,
-        Amount: r.amountRupees ?? '',
-        Brand: r.brand ?? '',
-        'Voucher status': r.voucherStatus,
-        'Hubble order ref': r.hubbleReference ?? '',
-        'Bought at': iso(r.boughtAt),
-        'Failure reason': r.failureReason ?? '',
-        'WhatsApp status': r.whatsappStatus,
-        'Sent at': iso(r.sentAt),
-        'Delivered at': iso(r.deliveredAt),
-        'Read at': iso(r.readAt),
-        'Message failure reason': r.messageFailureReason ?? '',
-      })),
-    },
-  ]);
+  const safe = (v: string | null | undefined) => cellSafe(v ?? '');
+  const aoa: unknown[][] = [
+    REPORT_HEADERS,
+    ...rows.map((r) => [
+      r.rowNumber,
+      phoneCell(r.phone),
+      safe(r.name),
+      r.amountRupees ?? '',
+      safe(r.brand),
+      r.voucherStatus,
+      safe(r.hubbleReference),
+      ist(r.boughtAt),
+      safe(r.failureReason),
+      r.whatsappStatus,
+      ist(r.sentAt),
+      ist(r.deliveredAt),
+      ist(r.readAt),
+      safe(r.messageFailureReason),
+    ]),
+  ];
+  const wb = XLSX.utils.book_new();
+  // Every string cell above is already cellSafe'd (or a phone-only value), so the raw aoa_to_sheet is safe.
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Delivery report');
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }

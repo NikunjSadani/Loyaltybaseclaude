@@ -43,14 +43,14 @@ or not) sees every campaign. `GIFSY_STAFF` and every tenant role are refused (co
 | `GET /brands` | — | `[{ key, label, productId, minAmount, maxAmount, denominations \| null, denominationType, available, unavailableReason }]` — limits read LIVE from Hubble (never hard-coded) |
 | `GET /template.xlsx` | — | template (Recipients sheet, Brand dropdown, Phone as text, Instructions sheet with each brand's live amount rule) |
 | `POST /campaigns` | `{ name, programLabel, billedToClientId?, note?, budgetRupees }` | campaign (DRAFT) |
-| `POST /campaigns/:id/upload` | multipart `file` (.xlsx) | `{ previewId, campaign, rows:[{rowNumber, phone, name, amount, brand, brandKey, note, status, invalidReason}], summary:{ total, valid, invalid, duplicates, totalRupees, budgetRupees, overBudget, perBrand:[{brandKey, brand, count, totalRupees}] } }` — re-upload replaces rows while DRAFT/PREVIEWED; every upload gets a NEW `previewId` |
+| `POST /campaigns/:id/upload` | multipart `file` (.xlsx) | `{ previewId, campaign, rows:[{rowNumber, phone, name, amount, brand, brandKey, note, status, invalidReason, warning}], summary:{ total, valid, invalid, duplicates, totalRupees, budgetRupees, overBudget, perBrand:[{brandKey, brand, count, totalRupees}], warningCount, skippedBlankRows, skippedFormulaRows, skippedNote, hiddenRowsIncluded, hiddenNote } }` — re-upload replaces rows while DRAFT/PREVIEWED; every upload gets a NEW `previewId` |
 | `POST /campaigns/:id/confirm` | `{ previewId, expectedValidCount, expectedTotalRupees }` | campaign. Refuses: Hubble not configured (503), 0 valid / over budget (400), previewId not current or numbers changed (409). **Idempotent**: repeating a confirm with the already-confirmed previewId returns the campaign (200) — nothing queued or bought again |
 | `POST /campaigns/:id/process` | — | `{ pass, campaign, hubbleConfigured, summary }` — a bounded in-request processing pass (≤ 25 s, ≤ 25 buys). *Addition to the brief* — see §5 |
 | `GET /campaigns` | `?page=` (50 per page) | `[{ ...campaign, summary:{ total, valid, invalid, duplicates, queued, pending, bought, buyFailed, cancelled, spentRupees } }]` newest first |
 | `GET /campaigns/:id` | — | `{ campaign, hubbleConfigured, summary:{ total, valid, invalid, duplicates, totalRupees, budgetRupees, overBudget, perBrand, queued, buying, pendingReconcile, pending, bought, buyFailed, cancelled, spentRupees, committedRupees, messageSent, delivered, read, messageFailed, messageNotSent } }` |
 | `GET /campaigns/:id/rows` | `?status=&page=` (100 per page) | `{ rows, total, page, pageSize }` |
 | `GET /campaigns/:id/report.xlsx` | — | Row, Phone, Name, Amount, Brand, Voucher status, Hubble order ref, Bought at, Failure reason, WhatsApp status, Sent at, Delivered at, Read at, Message failure reason (**no codes**) |
-| `POST /campaigns/:id/rows/:rowId/resend` | — | row — re-sends the WhatsApp for a BOUGHT row (new receipt); never buys |
+| `POST /campaigns/:id/rows/:rowId/resend` | — | row — re-sends the WhatsApp for a BOUGHT row (new receipt); never buys; only after the first send has an outcome; max 3 per row |
 | `POST /campaigns/:id/rows/:rowId/retry-buy` | — | `{ message, row }` — rules in §4; idempotent |
 | `POST /campaigns/:id/cancel` | — | `{ campaign, cancelledRows, stillWithHubble, alreadyBought }` |
 
@@ -61,16 +61,21 @@ updatedAt, **canCancel**.
 
 **Row fields:** id, rowNumber, phone, name, amount, brand, brandKey, note, status, invalidReason, pendingReason,
 lastReconcileAt/Result, hubbleReferenceId, hubbleOrderId, boughtAt, buyFailureReason/Source, **voucherCodeMasked**
-(`••••` + last 4 when the code is ≥ 10 chars, else `••••`), hasPin, **messageStatus** (`SENT|DELIVERED|READ|FAILED|null`),
-messageSentAt, messageDeliveredAt, messageReadAt, messageFailedAt, messageError, `whatsapp` (detailed view), attempts,
-resendCount, **canResend** (BOUGHT and the first WhatsApp has an outcome), **canRetryBuy** (BUY_FAILED, or
+(the audit rule `maskVoucherCodeForAudit`: `••••` + last 4 only for a 12+ char code, else `••••`), hasPin, **messageStatus** (`SENT|DELIVERED|READ|FAILED|null`),
+messageSentAt, messageDeliveredAt, messageReadAt, messageFailedAt, messageError, `whatsapp` (detailed view), warning,
+attempts, resendCount, **canResend** (BOUGHT, the WhatsApp has an outcome, < 3 resends), **canRetryBuy** (BUY_FAILED, or
 PENDING_RECONCILE ≥ 2 h after the last attempt; never on a CANCELLED campaign), retryAvailableAt.
 
 Validation (each a visible `invalidReason`): phone = 10-digit Indian mobile (+91 / 0 stripped); name required, ≤ 60
 chars, single line; brand = a configured brand (key or label); amount = whole rupees, within the brand's LIVE min/max, on
-its fixed list when Hubble returns one (the reason states the allowed range / list); a brand whose limits Hubble could
-not return → its rows INVALID ("upload again later"); second+ row with the same phone → DUPLICATE ("Same phone as row N").
-≤ 5,000 rows; missing columns → 400 naming the expected columns.
+its fixed list (the reason states the allowed range / list); a FIXED brand whose amounts Hubble did not return → INVALID
+("try later" — never guessed); a brand whose limits Hubble could not return → its rows INVALID ("upload again later");
+note ≤ 200 chars (longer → INVALID, never truncated); second+ row with the same phone → DUPLICATE ("Same phone as row N",
+or "…that row is invalid — fix it to send to this number"). ≤ 5,000 rows; missing columns → 400 naming the expected
+columns. Blank rows and formula-only rows (no saved values) between data rows are counted in `skippedNote`; hidden rows
+are included and counted in `hiddenNote`. **Cross-campaign warning (not a block):** a phone that got a voucher in any
+other campaign in the last 30 days gets `warning` "Already got a ₹X <brand> voucher on <date> in campaign <name>" and is
+counted in `warningCount`; confirm is still allowed.
 
 Brands: default registry Amazon Pay `01HDRPKWFE2SMVM54TWD8S1927` + Flipkart `01GMMNJECTDZAG2YS61K58HVG8`
 (`voucher-dispersal.brands.ts`); override per environment with `VOUCHER_DISPERSAL_BRANDS` = JSON
@@ -96,14 +101,26 @@ Brands: default registry Amazon Pay `01HDRPKWFE2SMVM54TWD8S1927` + Flipkart `01G
      canary-verified "no order" → re-queued with the **SAME** reference.
    - Repeated while queued / buying / bought → returns that state (idempotent).
 5. **Budget can never be exceeded**: checked at upload (overBudget), at confirm under the campaign row lock, and again
-   under that lock before EVERY buy (Σ BUYING + PENDING_RECONCILE + BOUGHT + this row ≤ budget; else BUY_FAILED `BUDGET`).
+   under that lock before EVERY buy: Σ(BUYING + PENDING_RECONCILE + BOUGHT + every BUY_FAILED row whose CURRENT reference
+   reached Hubble — `referenceSentAt` set) + this row ≤ budget, else BUY_FAILED `BUDGET`. A failed row whose reference
+   reached Hubble keeps counting (Hubble may still complete it); a retry releases it only by re-queueing it, and the claim
+   re-checks. A local failure (`BUDGET` / `NOT_SENT`) on a row whose reference reached Hubble EARLIER stays in the
+   reconcile sweep (and a retry of it follows the indeterminate rules: 2 h + Hubble asked + canary, same reference).
 6. **Codes**: stored on the row; never logged (WhatsApp failure reasons are scrubbed via `secretValues`), audited masked
    only, never in an admin response or report.xlsx.
 7. **Defence in depth**: before each place, the brand's live product is re-read; an amount it can't issue now → BUY_FAILED
    `NOT_SENT` (nothing reached Hubble). A product-lookup error never blocks (Hubble validates).
 8. **Stale claim**: a BUYING row older than 5 min (worker died mid-call) → PENDING_RECONCILE `STALE_BUYING` (lookup only).
-9. **Late webhook for a superseded reference** reporting SUCCESS/PROCESSING → error log + audit
-   `VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY` (possible second voucher — ops review).
+9. **Late webhook / lookup SUCCESS for a superseded reference** (or a SUCCESS that could not be stored on the row) →
+   error log + audit `VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY` (possible second voucher — ops review).
+10. **Campaign status under the lock:** retry's re-queue + re-open (→ PROCESSING) run in ONE transaction under the campaign
+   row lock (a CANCELLED campaign refuses inside it), and the finish / re-settle (COMPLETED ↔ COMPLETED_WITH_ERRORS,
+   counting BUY_FAILED rows and bought rows whose WhatsApp is FAILED / UNKNOWN) runs under the same lock — after each
+   pass, after a resend and after a status-mirror change.
+11. **Messages:** a send records its outcome only while its message-claim timestamp is still current (a resend's newer
+   claim is never overwritten); a claim with no outcome after 30 min becomes `UNKNOWN — use Resend`. A resend detaches
+   the old receipt FIRST, so a failed resend never hides behind an old DELIVERED; the status mirror never overwrites a
+   newer send. A receipt stuck QUEUED after a successful send still reads SENT.
 
 ## 5. Processing (background) — drivers
 
@@ -113,7 +130,8 @@ buy QUEUED rows (300 ms apart, time-boxed) → mirror WhatsApp statuses → fini
 
 1. **`POST /campaigns/:id/process`** — the UI calls it while the campaign page is open (in-request, reliable).
 2. **`POST /v1/voucher-dispersal/drain`** — Cloud Scheduler (restart-proof). `@Public`, header `x-drain-secret` =
-   `VOUCHER_DISPERSAL_DRAIN_SECRET` if set, else the existing `PUSH_DRAIN_SECRET` (bound in both environments); fail-closed.
+   a DEDICATED `VOUCHER_DISPERSAL_DRAIN_SECRET` (no fallback to another drain's secret — this endpoint spends money);
+   fail-closed (403) when unset.
 3. `@Interval(30 s)` per instance (best-effort; `VOUCHER_DISPERSAL_WORKER_ENABLED=false` turns it off).
 4. A best-effort kick after confirm / retry.
 5. The **Hubble webhook** (`/v1/hubble/webhook`) routes `vd<24 hex>` references to the dispersal reconcile (lookup only).
@@ -124,25 +142,32 @@ All state lives in the DB, so a restart loses nothing; every transition is a gua
 
 `voucher_code` template, vars `{{1}}` Name, `{{2}}` `₹N`, `{{3}}` programLabel, `{{4}}` brand label, `{{5}}` code (or
 `code | PIN: pin`), via the new `NotificationsService.sendTrackedWhatsappTemplate` (receipt QUEUED → send with crqid →
-SENT/FAILED; billing-safe; never throws). Receipt `clientId` = `billedToClientId`, else the platform tenant `'gifsy'`
-(never empty), `eventKey` = `VOUCHER_DISPERSAL` — so dispersal messages appear in that tenant's delivery report and are
-distinguishable. Tracking requires `DELIVERY_RECEIPTS_ENABLED=true` (on in prod); when off, messages are `SENT`
+SENT/FAILED; billing-safe; never throws). Receipt `clientId` is ALWAYS the platform tenant `'gifsy'` (coordinator decision
+2026-11-16 — never the billed client: client admins must not see these phone numbers in their tenant delivery report nor
+count them in tenant WhatsApp stats), `eventKey` = `VOUCHER_DISPERSAL`. Tracking requires `DELIVERY_RECEIPTS_ENABLED=true` (on in prod); when off, messages are `SENT`
 (untracked). The row mirrors the receipt status so it survives the 90-day receipt retention.
+
+Report (`report.xlsx`): all times in IST ("YYYY-MM-DD HH:mm", headers say "(IST)"); a phone-like value (digits, spaces,
+`+ - ( ) .`) is printed as-is; every other text cell keeps the formula-injection guard (a leading `= + - @` gets a quote).
 
 ## 7. Audit (AuditLog)
 
 Campaign (`entityType VOUCHER_DISPERSAL_CAMPAIGN`, actor = admin): CREATED, UPLOADED (counts), CONFIRMED, CANCELLED,
-REPORT_DOWNLOADED, FINISHED (system). Row (`VOUCHER_DISPERSAL_ROW`): BOUGHT (masked code), BUY_FAILED, PENDING,
-NO_ORDER_UNVERIFIED, MESSAGE_FAILED (system); RESENT, RETRY_BUY (+ outcome incl. refusals) (actor = admin).
+REPORT_DOWNLOADED, STATUS (system: every COMPLETED / COMPLETED_WITH_ERRORS / re-open change). Row (`VOUCHER_DISPERSAL_ROW`): BOUGHT (masked code), BUY_FAILED, PENDING,
+NO_ORDER_UNVERIFIED, MESSAGE_FAILED, SUPERSEDED_REFERENCE_ACTIVITY (system); RESENT, RETRY_BUY (+ outcome incl.
+refusals) (actor = admin).
 
 ## 8. Runbook
 
 - **Before first use on an environment:** apply the migration (in-VPC migrate job); confirm Hubble creds
   (`HUBBLE_CLIENT_ID/SECRET`) + `HUBBLE_WEBHOOK_SECRET`; `DELIVERY_RECEIPTS_ENABLED=true` + MSG91 callbacks for statuses;
   optionally `VOUCHER_DISPERSAL_BRANDS`.
+- **Drain secret (owner infra, one-time per env):** create Secret Manager secret `VOUCHER_DISPERSAL_DRAIN_SECRET`
+  (staging: `VOUCHER_DISPERSAL_DRAIN_SECRET_STAGING`), bind it to the API service as env `VOUCHER_DISPERSAL_DRAIN_SECRET`
+  (deploy workflow `--set-secrets` + the prod secrets preflight list). Until it exists the drain answers 403 (fail-closed).
 - **Cloud Scheduler (owner infra, one-time per env):** job `voucher-dispersal-drain`, every 2 min, `POST
-  https://<api-host>/v1/voucher-dispersal/drain` with header `x-drain-secret: <PUSH_DRAIN_SECRET value>`. Without it,
-  campaigns still progress while the admin keeps the page open (process endpoint) and on the timer while CPU is available.
+  https://<api-host>/v1/voucher-dispersal/drain` with header `x-drain-secret: <that secret>`. Without it, campaigns still
+  progress while the admin keeps the page open (process endpoint) and on the timer while CPU is available.
 - **A row stuck PENDING_RECONCILE:** it is looked up automatically every 2 min. After 2 h the admin may Retry; a refusal
   states why (Hubble unreachable / "no order" unverified). Check Hubble's dashboard for the reference before forcing
   anything; never edit rows by SQL.

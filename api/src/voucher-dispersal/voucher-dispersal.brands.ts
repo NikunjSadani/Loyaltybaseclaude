@@ -39,9 +39,10 @@ export function parseBrandOverride(raw: string | undefined | null): DispersalBra
       const label = typeof o.label === 'string' ? o.label.trim() : '';
       const productId = typeof o.productId === 'string' ? o.productId.trim() : '';
       if (!/^[A-Z0-9_]{1,40}$/.test(key) || !label || !/^[A-Za-z0-9_-]{1,64}$/.test(productId)) return null;
-      if (seen.has(key) || seen.has(label.toLowerCase())) return null;
-      seen.add(key);
-      seen.add(label.toLowerCase());
+      // Keys and labels share ONE namespace (an upload cell may hold either), case-insensitively.
+      if (seen.has(key.toLowerCase()) || seen.has(label.toLowerCase())) return null;
+      seen.add(key.toLowerCase());
+      if (label.toLowerCase() !== key.toLowerCase()) seen.add(label.toLowerCase());
       out.push({ key, label, productId });
     }
     return out;

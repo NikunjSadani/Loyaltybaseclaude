@@ -43,19 +43,40 @@ import { VARIABLE_CONTRACTS, whatsappTemplateDefault } from '../notification-tem
  *  - a post-confirm kick (best-effort).
  */
 
-/** Statuses whose amount counts against the budget (money committed or possibly committed). */
-export const BUDGET_COMMITTED: RS[] = [RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT];
+/**
+ * Rows whose amount counts against the budget — money committed or POSSIBLY committed: BUYING,
+ * PENDING_RECONCILE, BOUGHT, and any BUY_FAILED row whose CURRENT reference reached Hubble (Hubble may
+ * still hold — or later complete — an order for it). A retry releases such a row only by re-queueing it,
+ * and the claim re-checks the budget.
+ */
+export function budgetCommittedWhere(campaignId: string): Prisma.VoucherDispersalRowWhereInput {
+  return {
+    campaignId,
+    OR: [
+      { status: { in: [RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT] } },
+      { status: RS.BUY_FAILED, referenceSentAt: { not: null } },
+    ],
+  };
+}
+/** BUY_FAILED sources that are decided by US (not by Hubble) — when the reference reached Hubble earlier, the row stays in the reconcile sweep. */
+export const LOCAL_FAILURE_SOURCES = ['BUDGET', 'NOT_SENT'];
 /** A BUYING claim older than this is treated as "the worker died mid-call" → reconcile by lookup only. */
 export const STALE_BUYING_MS = 5 * 60 * 1000;
 /** Minimum gap between automatic reconcile lookups of one pending row. */
 export const RECONCILE_EVERY_MS = 2 * 60 * 1000;
 /** A message claim with no recorded outcome after this is surfaced as "unknown — use Resend". */
-export const STALE_MESSAGE_CLAIM_MS = 10 * 60 * 1000;
+export const STALE_MESSAGE_CLAIM_MS = 30 * 60 * 1000;
+/** Owner/coordinator rule: at most this many manual resends per row. */
+export const MAX_RESENDS = 3;
 /** Owner rule: an indeterminate row may be manually re-placed only this long after its last attempt. */
 export const DISPERSAL_RETRY_MIN_AGE_MS = 2 * 60 * 60 * 1000;
 /** Throttle between Hubble place calls inside one pass. */
 export const BUY_GAP_MS = 300;
-/** The platform (Gifsy) tenant id — receipts of a campaign with no billed client are scoped here. */
+/**
+ * The platform (Gifsy) tenant id. ALL dispersal WhatsApp receipts are filed here — never under the
+ * billed client (coordinator decision 2026-11-16: client admins must not see these phone numbers in
+ * their tenant delivery report, nor count them in tenant WhatsApp stats).
+ */
 export const GIFSY_PLATFORM_CLIENT_ID = 'gifsy';
 export const DISPERSAL_EVENT_KEY = 'VOUCHER_DISPERSAL';
 
@@ -128,7 +149,9 @@ export class VoucherDispersalProcessor {
       s.staleRecovered = await this.step('stale', () => this.recoverStaleBuying(opts.campaignId), 0);
       s.reconciled = await this.step('reconcile', () => this.reconcilePending(opts.campaignId, deadline), 0);
       s.messagesSent += await this.step('messages', () => this.sendPendingMessages(opts.campaignId, deadline), 0);
-      await this.step('stale-messages', () => this.surfaceStaleMessageClaims(opts.campaignId), 0);
+      const touched = new Set<string>();
+      const staleMsg = await this.step('stale-messages', () => this.surfaceStaleMessageClaims(opts.campaignId), [] as string[]);
+      staleMsg.forEach((id) => touched.add(id));
       const buys = await this.step('buy', () => this.buyQueued(opts.campaignId, deadline, opts.maxBuys ?? 50), null);
       if (buys) {
         s.bought = buys.bought;
@@ -136,8 +159,9 @@ export class VoucherDispersalProcessor {
         s.failed = buys.failed;
         s.messagesSent += buys.messagesSent;
       }
-      await this.step('mirror', () => this.mirrorMessageStatuses(opts.campaignId), 0);
-      s.campaignsFinished = await this.step('finish', () => this.finishCampaigns(opts.campaignId), 0);
+      const mirrored = await this.step('mirror', () => this.mirrorMessageStatuses(opts.campaignId), [] as string[]);
+      mirrored.forEach((id) => touched.add(id));
+      s.campaignsFinished = await this.step('finish', () => this.finishCampaigns(opts.campaignId, [...touched]), 0);
     } finally {
       this.running = false;
     }
@@ -184,8 +208,17 @@ export class VoucherDispersalProcessor {
     const cutoff = new Date(Date.now() - RECONCILE_EVERY_MS);
     const rows = await this.prisma.voucherDispersalRow.findMany({
       where: {
-        status: RS.PENDING_RECONCILE,
-        OR: [{ lastReconcileAt: null }, { lastReconcileAt: { lt: cutoff } }],
+        AND: [
+          {
+            OR: [
+              { status: RS.PENDING_RECONCILE },
+              // A local failure (budget / not issuable) on a row whose reference reached Hubble EARLIER:
+              // Hubble may still complete that earlier order — keep looking.
+              { status: RS.BUY_FAILED, referenceSentAt: { not: null }, buyFailureSource: { in: LOCAL_FAILURE_SOURCES } },
+            ],
+          },
+          { OR: [{ lastReconcileAt: null }, { lastReconcileAt: { lt: cutoff } }] },
+        ],
         ...(campaignId ? { campaignId } : {}),
       },
       orderBy: { updatedAt: 'asc' },
@@ -300,8 +333,24 @@ export class VoucherDispersalProcessor {
         },
       });
       if (won.count === 0) {
-        const now = await this.prisma.voucherDispersalRow.findFirst({ where: { id: row.id }, select: { status: true } });
-        return now?.status === RS.BOUGHT ? 'BOUGHT' : 'SKIPPED';
+        const now = await this.prisma.voucherDispersalRow.findFirst({
+          where: { id: row.id },
+          select: { status: true, hubbleReferenceId: true, rowNumber: true, campaignId: true },
+        });
+        if (now?.status === RS.BOUGHT && now.hubbleReferenceId === row.hubbleReferenceId) return 'BOUGHT';
+        // Hubble holds a PAID voucher for a reference this row no longer uses (superseded) or for a row we
+        // could not store it on — possible second voucher / stranded money. Never silent.
+        this.logger.error(
+          `[dispersal] Hubble SUCCESS for reference ${row.hubbleReferenceId} not applied (campaign ${now?.campaignId} row ${now?.rowNumber}, row status ${now?.status}, current reference ${now?.hubbleReferenceId === row.hubbleReferenceId ? 'same' : 'different'}) — ops review`,
+        );
+        await this.audit(row.id, 'VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY', {
+          referenceId: row.hubbleReferenceId,
+          hubbleStatus: 'SUCCESS',
+          hubbleOrderId,
+          rowStatus: now?.status ?? null,
+          referenceSuperseded: now ? now.hubbleReferenceId !== row.hubbleReferenceId : null,
+        });
+        return 'SKIPPED';
       }
       this.logger.log(`[dispersal] row ${row.id} voucher bought`);
       await this.audit(row.id, 'VOUCHER_DISPERSAL_BOUGHT', {
@@ -318,8 +367,18 @@ export class VoucherDispersalProcessor {
     }
     if (status === 'FAILED') {
       const reason = (body.failureReason ?? 'Hubble reported FAILED').toString().slice(0, 300);
+      const alreadyHubbleFailed = row.status === RS.BUY_FAILED && !LOCAL_FAILURE_SOURCES.includes(row.buyFailureSource ?? '');
+      if (alreadyHubbleFailed) return 'BUY_FAILED';
       const res = await this.prisma.voucherDispersalRow.updateMany({
-        where: { id: row.id, hubbleReferenceId: row.hubbleReferenceId, status: { in: [RS.BUYING, RS.PENDING_RECONCILE] }, voucherCode: null },
+        where: {
+          id: row.id,
+          hubbleReferenceId: row.hubbleReferenceId,
+          voucherCode: null,
+          OR: [
+            { status: { in: [RS.BUYING, RS.PENDING_RECONCILE] } },
+            { status: RS.BUY_FAILED, buyFailureSource: { in: LOCAL_FAILURE_SOURCES } },
+          ],
+        },
         data: {
           status: RS.BUY_FAILED,
           buyFailureSource: 'HUBBLE_FAILED',
@@ -427,7 +486,7 @@ export class VoucherDispersalProcessor {
         });
         if (camp.status !== CS.PROCESSING) return 'LOST' as const;
         const agg = await tx.voucherDispersalRow.aggregate({
-          where: { campaignId: row.campaignId, status: { in: BUDGET_COMMITTED } },
+          where: budgetCommittedWhere(row.campaignId),
           _sum: { amountPaise: true },
         });
         const committed = BigInt(agg._sum.amountPaise ?? 0n);
@@ -504,6 +563,13 @@ export class VoucherDispersalProcessor {
       if (res.count === 1) await this.audit(row.id, 'VOUCHER_DISPERSAL_BUY_FAILED', { source: 'NOT_SENT', reason: notSent });
       return 'BUY_FAILED';
     }
+
+    // From here on Hubble may hold an order for this reference: record it BEFORE the call (a failure to
+    // record aborts the place — the outer catch leaves the row pending, never re-placed blindly).
+    await this.prisma.voucherDispersalRow.updateMany({
+      where: { id: row.id, claimToken: row.claimToken, referenceSentAt: null },
+      data: { referenceSentAt: new Date() },
+    });
 
     let body: HubbleOrderResult | null;
     try {
@@ -645,20 +711,22 @@ export class VoucherDispersalProcessor {
    * @returns true when this call sent (or attempted) the message.
    */
   async sendMessage(rowId: string): Promise<boolean> {
+    const claimedAt = new Date();
     const claim = await this.prisma.voucherDispersalRow.updateMany({
       where: { id: rowId, status: RS.BOUGHT, messageClaimedAt: null, voucherCode: { not: null } },
-      data: { messageClaimedAt: new Date() },
+      data: { messageClaimedAt: claimedAt },
     });
     if (claim.count !== 1) return false;
-    await this.deliver(rowId);
+    await this.deliver(rowId, claimedAt);
     return true;
   }
 
   /**
-   * Perform the WhatsApp send for a row whose message claim the caller holds, and record the outcome
-   * (receipt id / sent time / failure). Returns the outcome. Never throws.
+   * Perform the WhatsApp send for a row whose message claim (`claimedAt`) the caller holds, and record
+   * the outcome (receipt id / sent time / failure) ONLY while that claim is still the row's current one —
+   * a newer claim (resend) or the stale sweep is never overwritten. Returns the outcome. Never throws.
    */
-  async deliver(rowId: string): Promise<{ receiptId: string | null; error: string | null }> {
+  async deliver(rowId: string, claimedAt: Date): Promise<{ receiptId: string | null; error: string | null }> {
     try {
       const row = await this.prisma.voucherDispersalRow.findFirst({
         where: { id: rowId },
@@ -666,6 +734,9 @@ export class VoucherDispersalProcessor {
       });
       if (!row || row.status !== RS.BOUGHT || !row.voucherCode || !row.phone) {
         return { receiptId: null, error: 'Row is not a bought voucher with a phone' };
+      }
+      if (!row.messageClaimedAt || row.messageClaimedAt.getTime() !== claimedAt.getTime()) {
+        return { receiptId: null, error: 'Another send for this row took over' };
       }
       const code = row.voucherCode;
       const pin = row.voucherPin?.trim() || null;
@@ -679,7 +750,7 @@ export class VoucherDispersalProcessor {
       };
       const order = VARIABLE_CONTRACTS.VOUCHER_ISSUED.whatsapp;
       const res = await this.notifications.sendTrackedWhatsappTemplate({
-        clientId: row.campaign.billedToClientId?.trim() || GIFSY_PLATFORM_CLIENT_ID,
+        clientId: GIFSY_PLATFORM_CLIENT_ID,
         eventKey: DISPERSAL_EVENT_KEY,
         phone: row.phone,
         templateName: whatsappTemplateDefault(GIFSY_PLATFORM_CLIENT_ID, 'VOUCHER_ISSUED'),
@@ -689,7 +760,7 @@ export class VoucherDispersalProcessor {
           : [...new Set([code, whatsappSafeVar(code)])],
       });
       await this.prisma.voucherDispersalRow.updateMany({
-        where: { id: rowId },
+        where: { id: rowId, messageClaimedAt: claimedAt },
         data: {
           whatsappReceiptId: res.receiptId,
           sentAt: res.error ? null : new Date(),
@@ -706,15 +777,19 @@ export class VoucherDispersalProcessor {
       const msg = `Send could not be recorded: ${String(e).slice(0, 200)}`;
       this.logger.error(`[dispersal] message send for row ${rowId} failed: ${msg}`);
       await this.prisma.voucherDispersalRow
-        .updateMany({ where: { id: rowId }, data: { messageError: msg, messageStatus: 'FAILED' } })
+        .updateMany({ where: { id: rowId, messageClaimedAt: claimedAt, sentAt: null }, data: { messageError: msg, messageStatus: 'FAILED' } })
         .catch(() => undefined);
       return { receiptId: null, error: msg };
     }
   }
 
-  /** A message claim with no recorded outcome (worker died mid-send) → visible "unknown", never silent. */
-  async surfaceStaleMessageClaims(campaignId?: string): Promise<number> {
-    const res = await this.prisma.voucherDispersalRow.updateMany({
+  /**
+   * A message claim with no recorded outcome after STALE_MESSAGE_CLAIM_MS (worker died mid-send) →
+   * visible "unknown — use Resend", never silent. Guarded on the claim timestamp it saw, so a send that
+   * is still running under a NEWER claim is never marked. Returns the campaigns touched.
+   */
+  async surfaceStaleMessageClaims(campaignId?: string): Promise<string[]> {
+    const rows = await this.prisma.voucherDispersalRow.findMany({
       where: {
         status: RS.BOUGHT,
         messageClaimedAt: { lt: new Date(Date.now() - STALE_MESSAGE_CLAIM_MS) },
@@ -723,87 +798,154 @@ export class VoucherDispersalProcessor {
         whatsappReceiptId: null,
         ...(campaignId ? { campaignId } : {}),
       },
-      data: { messageError: 'Send outcome unknown (the worker stopped mid-send) — use Resend', messageStatus: 'UNKNOWN' },
+      select: { id: true, campaignId: true, messageClaimedAt: true },
+      take: 200,
     });
-    return res.count;
+    const touched = new Set<string>();
+    for (const r of rows) {
+      const res = await this.prisma.voucherDispersalRow.updateMany({
+        where: { id: r.id, messageClaimedAt: r.messageClaimedAt, sentAt: null, messageError: null, whatsappReceiptId: null },
+        data: { messageError: 'Send outcome unknown (the worker stopped mid-send) — use Resend', messageStatus: 'UNKNOWN' },
+      });
+      if (res.count === 1) touched.add(r.campaignId);
+    }
+    return [...touched];
   }
 
-  /** Copy receipt statuses onto the row mirror (survives the 90-day receipt retention). */
-  async mirrorMessageStatuses(campaignId?: string): Promise<number> {
+  /**
+   * Copy receipt statuses onto the row mirror (survives the 90-day receipt retention). Guarded on the
+   * receipt id it read — a resend clears/replaces the receipt id, so an OLD receipt can never overwrite
+   * a newer send's state. A receipt still QUEUED (its SENT write blipped) never downgrades the row.
+   * Returns the campaigns touched (their completed status is re-settled).
+   */
+  async mirrorMessageStatuses(campaignId?: string): Promise<string[]> {
     const rows = await this.prisma.voucherDispersalRow.findMany({
       where: {
         whatsappReceiptId: { not: null },
         OR: [{ messageStatus: null }, { messageStatus: { in: ['QUEUED', 'SENT', 'DELIVERED'] } }],
         ...(campaignId ? { campaignId } : {}),
       },
-      select: { id: true, whatsappReceiptId: true, messageStatus: true, messageDeliveredAt: true, messageReadAt: true },
+      select: { id: true, campaignId: true, whatsappReceiptId: true, messageStatus: true, messageDeliveredAt: true, messageReadAt: true },
       take: 500,
     });
-    if (rows.length === 0) return 0;
+    if (rows.length === 0) return [];
     const receipts = await this.prisma.messageDeliveryReceipt.findMany({
       where: { id: { in: rows.map((r) => r.whatsappReceiptId!) } },
       select: { id: true, status: true, deliveredAt: true, readAt: true, failureReason: true },
     });
     const byId = new Map(receipts.map((r) => [r.id, r]));
-    let n = 0;
+    const touched = new Set<string>();
     for (const row of rows) {
       const rc = byId.get(row.whatsappReceiptId!);
       if (!rc) continue;
       const st = String(rc.status);
+      if (st === 'QUEUED') continue;
       if (st === row.messageStatus && (rc.deliveredAt?.getTime() ?? null) === (row.messageDeliveredAt?.getTime() ?? null) && (rc.readAt?.getTime() ?? null) === (row.messageReadAt?.getTime() ?? null)) continue;
-      await this.prisma.voucherDispersalRow.updateMany({
+      const res = await this.prisma.voucherDispersalRow.updateMany({
         where: { id: row.id, whatsappReceiptId: row.whatsappReceiptId },
         data: { messageStatus: st, messageDeliveredAt: rc.deliveredAt, messageReadAt: rc.readAt, messageFailureReason: rc.failureReason },
       });
-      n++;
+      if (res.count === 1) touched.add(row.campaignId);
     }
-    return n;
+    return [...touched];
   }
 
   // ─── 5. Finish ────────────────────────────────────────────────────────────────
 
-  /** PROCESSING campaigns with nothing in flight → COMPLETED / COMPLETED_WITH_ERRORS. */
-  async finishCampaigns(campaignId?: string): Promise<number> {
+  /** Settle every PROCESSING campaign (and the `alsoIds` touched by late message changes). */
+  async finishCampaigns(campaignId?: string, alsoIds: string[] = []): Promise<number> {
     const camps = await this.prisma.voucherDispersalCampaign.findMany({
       where: { status: CS.PROCESSING, ...(campaignId ? { id: campaignId } : {}) },
       select: { id: true },
       take: 50,
     });
+    const ids = new Set([...camps.map((c) => c.id), ...alsoIds]);
     let n = 0;
-    for (const c of camps) {
-      const inFlight = await this.prisma.voucherDispersalRow.count({
-        where: { campaignId: c.id, status: { in: [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE] } },
-      });
-      if (inFlight > 0) continue;
-      const unsent = await this.prisma.voucherDispersalRow.count({
-        where: { campaignId: c.id, status: RS.BOUGHT, messageClaimedAt: null },
-      });
-      if (unsent > 0) continue;
-      const failed = await this.prisma.voucherDispersalRow.count({ where: { campaignId: c.id, status: RS.BUY_FAILED } });
-      const msgFailed = await this.prisma.voucherDispersalRow.count({
-        where: { campaignId: c.id, status: RS.BOUGHT, messageError: { not: null } },
-      });
-      const status = failed > 0 || msgFailed > 0 ? CS.COMPLETED_WITH_ERRORS : CS.COMPLETED;
-      const res = await this.prisma.voucherDispersalCampaign.updateMany({
-        where: { id: c.id, status: CS.PROCESSING },
-        data: { status, completedAt: new Date() },
-      });
-      if (res.count === 1) {
-        n++;
-        await this.prisma.auditLog
-          .create({
-            data: {
-              actorId: null,
-              action: 'UPDATE',
-              entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
-              entityId: c.id,
-              metadata: { event: 'VOUCHER_DISPERSAL_CAMPAIGN_FINISHED', status, buyFailed: failed, messageFailed: msgFailed },
-            },
-          })
-          .catch((e: unknown) => this.logger.error(`[dispersal] finish audit failed for ${c.id}: ${e}`));
-      }
+    for (const id of ids) {
+      if (await this.settleCampaign(id)) n++;
     }
     return n;
+  }
+
+  /**
+   * Re-derive a campaign's terminal status UNDER THE CAMPAIGN ROW LOCK (the same lock retry's re-queue
+   * takes, so a retry can never be stranded QUEUED on a COMPLETED campaign):
+   *  - PROCESSING with nothing queued / buying / pending and every bought row messaged → COMPLETED, or
+   *    COMPLETED_WITH_ERRORS when any row is BUY_FAILED or any bought row's WhatsApp is FAILED / UNKNOWN;
+   *  - COMPLETED ↔ COMPLETED_WITH_ERRORS both ways as late WhatsApp statuses / resends change;
+   *  - a terminal campaign that has work in flight again → back to PROCESSING.
+   * @returns true when the status changed.
+   */
+  async settleCampaign(id: string): Promise<boolean> {
+    const done: CS[] = [CS.COMPLETED, CS.COMPLETED_WITH_ERRORS];
+    const r = await this.prisma.$transaction(async (tx) => {
+      const camp = await tx.voucherDispersalCampaign
+        .update({ where: { id }, data: { updatedAt: new Date() }, select: { status: true } })
+        .catch(() => null);
+      if (!camp || (camp.status !== CS.PROCESSING && !done.includes(camp.status))) return null;
+      const inFlight = await tx.voucherDispersalRow.count({
+        where: { campaignId: id, status: { in: [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE] } },
+      });
+      if (inFlight > 0) {
+        if (camp.status === CS.PROCESSING) return null;
+        await tx.voucherDispersalCampaign.update({ where: { id }, data: { status: CS.PROCESSING, completedAt: null } });
+        return { from: camp.status, to: CS.PROCESSING, failed: 0, msgFailed: 0 };
+      }
+      if (camp.status === CS.PROCESSING) {
+        const unsent = await tx.voucherDispersalRow.count({ where: { campaignId: id, status: RS.BOUGHT, messageClaimedAt: null } });
+        if (unsent > 0) return null;
+      }
+      const failed = await tx.voucherDispersalRow.count({ where: { campaignId: id, status: RS.BUY_FAILED } });
+      const msgFailed = await tx.voucherDispersalRow.count({
+        where: { campaignId: id, status: RS.BOUGHT, messageStatus: { in: ['FAILED', 'UNKNOWN'] } },
+      });
+      const to = failed > 0 || msgFailed > 0 ? CS.COMPLETED_WITH_ERRORS : CS.COMPLETED;
+      if (to === camp.status) return null;
+      await tx.voucherDispersalCampaign.update({
+        where: { id },
+        data: { status: to, ...(camp.status === CS.PROCESSING ? { completedAt: new Date() } : {}) },
+      });
+      return { from: camp.status, to, failed, msgFailed };
+    });
+    if (!r) return false;
+    await this.prisma.auditLog
+      .create({
+        data: {
+          actorId: null,
+          action: 'UPDATE',
+          entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+          entityId: id,
+          metadata: { event: 'VOUCHER_DISPERSAL_CAMPAIGN_STATUS', from: r.from, to: r.to, buyFailed: r.failed, messageFailed: r.msgFailed },
+        },
+      })
+      .catch((e: unknown) => this.logger.error(`[dispersal] campaign status audit failed for ${id}: ${e}`));
+    return true;
+  }
+
+  /**
+   * Re-queue a row (manual retry) and re-open its campaign in ONE transaction under the campaign row
+   * lock. Refuses a CANCELLED (or not-yet-confirmed) campaign inside the transaction.
+   */
+  async requeueUnderLock(
+    campaignId: string,
+    where: Prisma.VoucherDispersalRowWhereInput,
+    data: Prisma.VoucherDispersalRowUpdateManyMutationInput,
+  ): Promise<'OK' | 'LOST' | 'CAMPAIGN_CLOSED'> {
+    return this.prisma.$transaction(async (tx) => {
+      const camp = await tx.voucherDispersalCampaign.update({
+        where: { id: campaignId },
+        data: { updatedAt: new Date() },
+        select: { status: true },
+      });
+      const open: CS[] = [CS.PROCESSING, CS.COMPLETED, CS.COMPLETED_WITH_ERRORS];
+      if (!open.includes(camp.status)) return 'CAMPAIGN_CLOSED' as const;
+      const res = await tx.voucherDispersalRow.updateMany({ where: { ...where, campaignId }, data: { ...data, status: RS.QUEUED } });
+      if (res.count !== 1) return 'LOST' as const;
+      if (camp.status !== CS.PROCESSING) {
+        await tx.voucherDispersalCampaign.update({ where: { id: campaignId }, data: { status: CS.PROCESSING, completedAt: null } });
+      }
+      return 'OK' as const;
+    });
   }
 
   /** System audit row for a row event (codes masked by the caller — never in clear). Never throws. */

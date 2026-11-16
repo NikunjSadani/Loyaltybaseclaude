@@ -25,7 +25,14 @@ import {
   validateDispersalRows,
 } from './voucher-dispersal.parse';
 import { buildDispersalReport, buildDispersalTemplate, DispersalReportRow } from './voucher-dispersal.xlsx';
-import { DISPERSAL_RETRY_MIN_AGE_MS, VoucherDispersalProcessor } from './voucher-dispersal.processor';
+import { formatDateIST } from '../common/ist-date';
+import {
+  DISPERSAL_RETRY_MIN_AGE_MS,
+  LOCAL_FAILURE_SOURCES,
+  MAX_RESENDS,
+  VoucherDispersalProcessor,
+} from './voucher-dispersal.processor';
+import { maskVoucherCodeForAudit } from '../rewards/voucher-issuance';
 import {
   ConfirmDispersalCampaignDto,
   CreateDispersalCampaignDto,
@@ -49,7 +56,9 @@ const ROWS_PAGE_SIZE = 100;
 const CAMPAIGNS_PAGE_SIZE = 50;
 const CREATE_CHUNK = 1000;
 const PREVIEW_STATUSES: RS[] = [RS.VALID, RS.INVALID, RS.DUPLICATE];
-const NOT_VALID: RS[] = [RS.INVALID, RS.DUPLICATE];
+const NOT_VALID: RS[] = [RS.INVALID, RS.DUPLICATE, RS.CANCELLED];
+/** Cross-campaign warning window (coordinator decision: warn, never block). */
+const RECENT_VOUCHER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 const rupees = (paise: bigint | number | null | undefined) => (paise == null ? 0 : Number(paise) / 100);
 
@@ -65,9 +74,11 @@ export function messageView(row: Pick<DbRow, 'status' | 'whatsappReceiptId' | 's
   const base = { receiptId: row.whatsappReceiptId ?? null, sentAt: row.sentAt ?? null };
   if (row.status !== RS.BOUGHT) return { ...base, status: 'NOT_APPLICABLE', deliveredAt: null, readAt: null, failureReason: null };
   if (receipt) {
+    // L10: the send succeeded (row.sentAt) but the receipt's SENT write blipped → still SENT.
+    const st = receipt.status === 'QUEUED' && row.sentAt ? 'SENT' : receipt.status;
     return {
       ...base,
-      status: receipt.status,
+      status: st,
       sentAt: receipt.sentAt ?? row.sentAt ?? null,
       deliveredAt: receipt.deliveredAt,
       readAt: receipt.readAt,
@@ -91,13 +102,12 @@ export function messageView(row: Pick<DbRow, 'status' | 'whatsappReceiptId' | 's
 const MSG_SENT = new Set(['SENT', 'SENT_UNTRACKED', 'DELIVERED', 'READ']);
 
 /**
- * Admin-response mask for a voucher code (UI contract): "••••" + the last 4 characters when the code is
- * 10+ characters, else fully "••••". The full code is never returned to an admin, never in report.xlsx.
+ * Admin-response mask for a voucher code — the SAME rule as audit rows (maskVoucherCodeForAudit): "••••" +
+ * the last 4 characters only for a 12+ char code, else fully "••••". The full code is never returned to
+ * an admin, never in report.xlsx.
  */
 export function maskDispersalCode(code: string | null | undefined): string | null {
-  const t = typeof code === 'string' ? code.trim() : '';
-  if (!t) return null;
-  return t.length >= 10 ? `••••${t.slice(-4)}` : '••••';
+  return typeof code === 'string' && code.trim() ? maskVoucherCodeForAudit(code) : null;
 }
 
 /** The first WhatsApp has an outcome (sent, failed or unknown) — only then may an admin resend. */
@@ -211,14 +221,16 @@ export class VoucherDispersalService {
     }
     if (!file?.buffer?.length) throw new BadRequestException('Attach the filled template (.xlsx) as "file".');
     let parsed: ParsedDispersalRow[];
+    let sheet: ReturnType<typeof readDispersalSheet>;
     try {
-      const raw = readDispersalSheet(file.buffer);
-      parsed = validateDispersalRows(raw, await this.resolveBrandLimits());
+      sheet = readDispersalSheet(file.buffer);
+      parsed = validateDispersalRows(sheet.rows, await this.resolveBrandLimits());
     } catch (e) {
       if (e instanceof DispersalFileError) throw new BadRequestException(e.message);
       throw e;
     }
 
+    const warnings = await this.recentVoucherWarnings(id, parsed);
     const data: Prisma.VoucherDispersalRowCreateManyInput[] = parsed.map((r) => ({
       campaignId: id,
       rowNumber: r.rowNumber,
@@ -233,6 +245,7 @@ export class VoucherDispersalService {
       note: r.note,
       status: r.status as RS,
       invalidReason: r.invalidReason?.slice(0, 500) ?? null,
+      warning: r.phone && r.status === 'VALID' ? warnings.get(r.phone) ?? null : null,
       // The Hubble idempotency key is fixed NOW — before anything can reach Hubble.
       hubbleReferenceId: r.status === 'VALID' ? `vd${randomBytes(12).toString('hex')}` : null,
     }));
@@ -266,7 +279,32 @@ export class VoucherDispersalService {
       })),
       updated.budgetPaise,
     );
+    const warningCount = data.filter((d) => d.warning).length;
+    const skippedRows = sheet.skippedBlank + sheet.skippedFormulaOnly;
+    const skippedNote = skippedRows
+      ? `${skippedRows} row${skippedRows === 1 ? '' : 's'} skipped: ${[
+          sheet.skippedBlank ? `${sheet.skippedBlank} blank` : '',
+          sheet.skippedFormulaOnly ? `${sheet.skippedFormulaOnly} with formulas but no saved values (open the file in Excel, save, and upload again)` : '',
+        ]
+          .filter(Boolean)
+          .join('; ')}`
+      : null;
+    const hiddenNote = sheet.hiddenIncluded
+      ? `${sheet.hiddenIncluded} hidden row${sheet.hiddenIncluded === 1 ? '' : 's'} included (they are hidden in Excel but will be sent)`
+      : null;
+    const fullSummary = {
+      ...summary,
+      warningCount,
+      skippedBlankRows: sheet.skippedBlank,
+      skippedFormulaRows: sheet.skippedFormulaOnly,
+      skippedNote,
+      hiddenRowsIncluded: sheet.hiddenIncluded,
+      hiddenNote,
+    };
     await this.auditCampaign(user, id, 'IMPORT', 'VOUCHER_DISPERSAL_UPLOADED', {
+      warningCount,
+      skippedRows,
+      hiddenRowsIncluded: sheet.hiddenIncluded,
       fileName,
       total: summary.total,
       valid: summary.valid,
@@ -288,9 +326,36 @@ export class VoucherDispersalService {
         note: r.note,
         status: r.status,
         invalidReason: r.invalidReason,
+        warning: r.phone && r.status === 'VALID' ? warnings.get(r.phone) ?? null : null,
       })),
-      summary,
+      summary: fullSummary,
     };
+  }
+
+  /**
+   * Cross-campaign warning (coordinator decision — warn, never block): a phone that got a voucher (BOUGHT)
+   * in ANY other campaign in the last 30 days. Returns phone → "Already got a ₹X <brand> voucher on
+   * <date> in campaign <name>" (the most recent one).
+   */
+  private async recentVoucherWarnings(campaignId: string, parsed: ParsedDispersalRow[]): Promise<Map<string, string>> {
+    const phones = [...new Set(parsed.filter((r) => r.phone && r.status === 'VALID').map((r) => r.phone!))];
+    const out = new Map<string, string>();
+    const since = new Date(Date.now() - RECENT_VOUCHER_WINDOW_MS);
+    for (let i = 0; i < phones.length; i += 1000) {
+      const hits = await this.prisma.voucherDispersalRow.findMany({
+        where: { phone: { in: phones.slice(i, i + 1000) }, status: RS.BOUGHT, boughtAt: { gte: since }, campaignId: { not: campaignId } },
+        orderBy: { boughtAt: 'desc' },
+        include: { campaign: { select: { name: true } } },
+      });
+      for (const h of hits) {
+        if (!h.phone || out.has(h.phone)) continue;
+        out.set(
+          h.phone,
+          `Already got a ₹${rupees(h.amountPaise).toLocaleString('en-IN')} ${h.brandLabel ?? ''} voucher on ${h.boughtAt ? formatDateIST(h.boughtAt) : '?'} in campaign "${h.campaign.name}"`.replace(/\s+/g, ' '),
+        );
+      }
+    }
+    return out;
   }
 
   /** Preview / budget summary over rows (VALID-or-later rows are the ones that will be bought). */
@@ -545,6 +610,7 @@ export class VoucherDispersalService {
       note: r.note,
       status: r.status,
       invalidReason: r.invalidReason,
+      warning: r.warning,
       pendingReason: r.status === RS.PENDING_RECONCILE ? r.pendingReason : null,
       lastReconcileAt: r.lastReconcileAt,
       lastReconcileResult: r.lastReconcileResult,
@@ -560,10 +626,11 @@ export class VoucherDispersalService {
       ...this.flatMessage(r, m, receipt),
       attempts: r.attempts,
       resendCount: r.resendCount,
-      canResend: r.status === RS.BOUGHT && !!r.voucherCode && firstSendSettled(r),
+      canResend: r.status === RS.BOUGHT && !!r.voucherCode && firstSendSettled(r) && r.resendCount < MAX_RESENDS,
       canRetryBuy:
         campaignStatus !== CS.CANCELLED &&
-        (r.status === RS.BUY_FAILED || (r.status === RS.PENDING_RECONCILE && retryAt !== null && retryAt.getTime() <= Date.now())),
+        ((r.status === RS.BUY_FAILED && !(LOCAL_FAILURE_SOURCES.includes(r.buyFailureSource ?? '') && r.referenceSentAt && (retryAt === null || retryAt.getTime() > Date.now()))) ||
+          (r.status === RS.PENDING_RECONCILE && retryAt !== null && retryAt.getTime() <= Date.now())),
       retryAvailableAt: r.status === RS.PENDING_RECONCILE ? retryAt : null,
     };
   }
@@ -632,7 +699,12 @@ export class VoucherDispersalService {
 
   // ─── Row actions ──────────────────────────────────────────────────────────────
 
-  /** Re-send the WhatsApp for a BOUGHT row — never buys. A NEW receipt is created. */
+  /**
+   * Re-send the WhatsApp for a BOUGHT row — never buys. Only after the first send has an outcome, at most
+   * MAX_RESENDS times per row. The previous receipt is detached at the START (a failed resend can never
+   * hide behind an old DELIVERED); a successful resend gets a NEW receipt. The campaign's completed status
+   * is re-settled afterwards (COMPLETED ↔ COMPLETED_WITH_ERRORS).
+   */
   async resend(user: JwtPayload, id: string, rowId: string) {
     this.assertAdmin(user);
     const row = await this.getRowOr404(id, rowId);
@@ -640,27 +712,42 @@ export class VoucherDispersalService {
       throw new ConflictException(`Only a bought voucher can be re-sent (row status ${row.status}).`);
     }
     if (!firstSendSettled(row)) {
-      throw new ConflictException('The first WhatsApp for this voucher is still being sent — wait for its result before resending.');
+      throw new ConflictException('The WhatsApp for this voucher is still being sent — wait for its result before resending.');
     }
+    if (row.resendCount >= MAX_RESENDS) {
+      throw new ConflictException(`This voucher has already been re-sent ${MAX_RESENDS} times — the limit per recipient.`);
+    }
+    const claimedAt = new Date();
     const claim = await this.prisma.voucherDispersalRow.updateMany({
-      where: { id: row.id, status: RS.BOUGHT, updatedAt: row.updatedAt },
-      data: { messageClaimedAt: new Date(), resendCount: { increment: 1 } },
+      where: { id: row.id, status: RS.BOUGHT, updatedAt: row.updatedAt, resendCount: row.resendCount },
+      data: {
+        messageClaimedAt: claimedAt,
+        resendCount: { increment: 1 },
+        whatsappReceiptId: null,
+        sentAt: null,
+        messageError: null,
+        messageStatus: null,
+        messageDeliveredAt: null,
+        messageReadAt: null,
+        messageFailureReason: null,
+      },
     });
     if (claim.count !== 1) throw new ConflictException('This row changed meanwhile — refresh and try again.');
-    const res = await this.processor.deliver(row.id);
+    const res = await this.processor.deliver(row.id, claimedAt);
     await this.processor.audit(
       row.id,
       'VOUCHER_DISPERSAL_RESENT',
-      { campaignId: id, previousReceiptId: row.whatsappReceiptId, receiptId: res.receiptId, error: res.error },
+      { campaignId: id, resendNumber: row.resendCount + 1, previousReceiptId: row.whatsappReceiptId, receiptId: res.receiptId, error: res.error },
       user.sub,
     );
+    await this.processor.settleCampaign(id).catch((e: unknown) => this.logger.error(`[dispersal] settle after resend failed: ${e}`));
     const fresh = await this.prisma.voucherDispersalRow.findFirstOrThrow({ where: { id: row.id } });
     const rc = await this.receiptsFor([fresh.whatsappReceiptId]);
     const camp = await this.getCampaignOr404(id);
     return this.rowView(fresh, fresh.whatsappReceiptId ? rc.get(fresh.whatsappReceiptId) : null, camp.status);
   }
 
-  /** When a PENDING_RECONCILE row may be manually re-placed (2 h after its last place attempt / flag). */
+  /** When an indeterminate row may be manually re-placed (2 h after its last place attempt / flag). */
   retryAvailableAt(r: Pick<DbRow, 'placeAttemptAt' | 'pendingSince' | 'createdAt'>): Date | null {
     const anchors = [r.placeAttemptAt, r.pendingSince].filter((d): d is Date => !!d).map((d) => new Date(d).getTime());
     if (anchors.length === 0) return null;
@@ -669,14 +756,17 @@ export class VoucherDispersalService {
 
   /**
    * Manual retry of a row that did not get a voucher. Same Hubble safety rules as the engine:
-   *  - BUY_FAILED, never sent (NOT_SENT / BUDGET): re-queued with the SAME (unused) reference.
+   *  - BUY_FAILED locally (NOT_SENT / BUDGET) and the reference NEVER reached Hubble → re-queued with the
+   *    SAME (unused) reference.
+   *  - BUY_FAILED locally but the reference DID reach Hubble on an earlier attempt → treated like an
+   *    indeterminate row (2 h rule, Hubble asked, canary) → re-queued with the SAME reference.
    *  - BUY_FAILED by Hubble (FAILED / REJECTED): Hubble is asked again first. It now holds a voucher →
    *    delivered, NOT bought again. FAILED, or a canary-verified "no order" → re-queued with a NEW
    *    reference (the old one is kept in previousReferenceIds; Hubble may refuse to reuse a failed one).
    *  - PENDING_RECONCILE: only ≥ 2 h after the last place attempt, and only when Hubble — asked now —
-   *    has no order AND the canary verifies that answer → re-queued with the SAME reference (if the
-   *    original ever lands, Hubble dedups it). A Hubble answer with an order is applied instead.
-   * Every outcome is audited; refusals are 409 with the reason.
+   *    has no order AND the canary verifies that answer → re-queued with the SAME reference.
+   * The re-queue and the campaign re-open happen in ONE transaction under the campaign lock (a CANCELLED
+   * campaign is refused inside it). Idempotent: repeated while queued / buying / bought → current state.
    */
   async retryBuy(user: JwtPayload, id: string, rowId: string) {
     this.assertAdmin(user);
@@ -692,62 +782,25 @@ export class VoucherDispersalService {
     const audit = (outcome: string, extra: Record<string, unknown> = {}) =>
       this.processor.audit(row.id, 'VOUCHER_DISPERSAL_RETRY_BUY', { campaignId: id, fromStatus: row.status, outcome, ...extra }, user.sub);
 
-    if (row.status === RS.BUY_FAILED) {
-      const neverSent = row.buyFailureSource === 'NOT_SENT' || row.buyFailureSource === 'BUDGET';
-      let newRef: string | null = null;
-      if (!neverSent) {
-        const look = await this.lookup(row.hubbleReferenceId!);
-        if (look.kind === 'ERROR') {
-          await audit('REFUSED_LOOKUP_FAILED', { why: look.why });
-          throw new ConflictException(`Could not reach Hubble to check the previous attempt (${look.why}). Try again later.`);
-        }
-        if (look.kind === 'ORDER') {
-          const st = String(look.body.status ?? '').toUpperCase();
-          if (st !== 'FAILED') {
-            const outcome = await this.processor.applyBody(row, look.body);
-            await audit(`HUBBLE_HAS_ORDER_${st || 'UNKNOWN'}`, { applied: outcome });
-            if (outcome === 'BOUGHT') await this.processor.sendMessage(row.id);
-            return this.retryResult(row.id, `Hubble already holds an order for this row (${st}) — applied, nothing bought again.`);
-          }
-        } else {
-          const canary = await this.processor.verifyNotFoundCanary(row.hubbleReferenceId!);
-          if (!canary.ok) {
-            await audit('REFUSED_NO_ORDER_UNVERIFIED', { why: canary.why.slice(0, 300) });
-            throw new ConflictException(`Hubble says it has no order for this row, but that answer could not be verified (${canary.why.slice(0, 200)}). Not retried.`);
-          }
-        }
-        newRef = `vd${randomBytes(12).toString('hex')}`;
-      }
-      const res = await this.prisma.voucherDispersalRow.updateMany({
-        where: { id: row.id, status: RS.BUY_FAILED, updatedAt: row.updatedAt, voucherCode: null },
-        data: {
-          status: RS.QUEUED,
-          buyFailureReason: null,
-          buyFailureSource: null,
-          claimToken: null,
-          ...(newRef
-            ? { hubbleReferenceId: newRef, previousReferenceIds: { push: row.hubbleReferenceId! }, hubbleOrderId: null, placeResponded: null }
-            : {}),
-        },
-      });
-      if (res.count !== 1) {
-        const inflight = await this.retryInFlight(row.id);
-        if (inflight) return inflight;
-        throw new ConflictException('This row changed meanwhile — refresh and try again.');
-      }
-      await this.reopenCampaign(id);
-      await audit('REQUEUED', { newReference: !!newRef, previousFailure: row.buyFailureSource });
-      this.processor.kick(id);
-      return this.retryResult(row.id, 'Queued for purchase again.');
+    const localFailure = row.status === RS.BUY_FAILED && LOCAL_FAILURE_SOURCES.includes(row.buyFailureSource ?? '');
+    const indeterminate = row.status === RS.PENDING_RECONCILE || (localFailure && !!row.referenceSentAt);
+    if (row.status !== RS.BUY_FAILED && row.status !== RS.PENDING_RECONCILE) {
+      throw new ConflictException(`Retry is only for a failed or long-pending row (row status ${row.status}).`);
     }
 
-    if (row.status === RS.PENDING_RECONCILE) {
-      const at = this.retryAvailableAt(row);
-      if (!at || at.getTime() > Date.now()) {
-        await audit('REFUSED_TOO_RECENT', { availableAt: at?.toISOString() ?? null });
-        throw new ConflictException(
-          `Hubble may still create this order. A retry is allowed 2 hours after the last attempt${at ? ` (from ${at.toISOString()})` : ''}; until then it keeps being checked automatically.`,
-        );
+    let newRef: string | null = null;
+    let canaryRef: string | null = null;
+    if (localFailure && !row.referenceSentAt) {
+      // Never reached Hubble with this reference → nothing to check; reuse it.
+    } else {
+      if (indeterminate) {
+        const at = this.retryAvailableAt(row);
+        if (!at || at.getTime() > Date.now()) {
+          await audit('REFUSED_TOO_RECENT', { availableAt: at?.toISOString() ?? null });
+          throw new ConflictException(
+            `Hubble may still create this order. A retry is allowed 2 hours after the last attempt${at ? ` (from ${at.toISOString()})` : ''}; until then it keeps being checked automatically.`,
+          );
+        }
       }
       const look = await this.lookup(row.hubbleReferenceId!);
       if (look.kind === 'ERROR') {
@@ -755,32 +808,62 @@ export class VoucherDispersalService {
         throw new ConflictException(`Could not reach Hubble to check this row (${look.why}). Try again later.`);
       }
       if (look.kind === 'ORDER') {
-        const outcome = await this.processor.applyBody(row, look.body);
-        await audit(`HUBBLE_HAS_ORDER_${String(look.body.status ?? '').toUpperCase() || 'UNKNOWN'}`, { applied: outcome });
-        if (outcome === 'BOUGHT') await this.processor.sendMessage(row.id);
-        return this.retryResult(row.id, `Hubble answered for this row (${look.body.status}) — applied, nothing bought again.`);
+        const st = String(look.body.status ?? '').toUpperCase();
+        if (st !== 'FAILED') {
+          const outcome = await this.processor.applyBody(row, look.body);
+          await audit(`HUBBLE_HAS_ORDER_${st || 'UNKNOWN'}`, { applied: outcome });
+          if (outcome === 'BOUGHT') await this.processor.sendMessage(row.id);
+          return this.retryResult(row.id, `Hubble already holds an order for this row (${st}) — applied, nothing bought again.`);
+        }
+        // Hubble DEFINITIVELY failed this reference → a new reference for the new attempt.
+        newRef = `vd${randomBytes(12).toString('hex')}`;
+      } else {
+        const canary = await this.processor.verifyNotFoundCanary(row.hubbleReferenceId!);
+        if (!canary.ok) {
+          await audit('REFUSED_NO_ORDER_UNVERIFIED', { why: canary.why.slice(0, 300) });
+          throw new ConflictException(`Hubble says it has no order for this row, but that answer could not be verified (${canary.why.slice(0, 200)}). Not retried.`);
+        }
+        canaryRef = canary.canaryRef;
+        // Indeterminate → SAME reference (if the original ever lands, Hubble dedups it).
+        // Definitively failed by Hubble (FAILED / REJECTED) and verified gone → a new reference.
+        if (!indeterminate) newRef = `vd${randomBytes(12).toString('hex')}`;
       }
-      const canary = await this.processor.verifyNotFoundCanary(row.hubbleReferenceId!);
-      if (!canary.ok) {
-        await audit('REFUSED_NO_ORDER_UNVERIFIED', { why: canary.why.slice(0, 300) });
-        throw new ConflictException(`Hubble says it has no order for this row, but that answer could not be verified (${canary.why.slice(0, 200)}). Not retried.`);
-      }
-      const res = await this.prisma.voucherDispersalRow.updateMany({
-        where: { id: row.id, status: RS.PENDING_RECONCILE, updatedAt: row.updatedAt, voucherCode: null },
-        data: { status: RS.QUEUED, claimToken: null, pendingReason: null },
-      });
-      if (res.count !== 1) {
-        const inflight = await this.retryInFlight(row.id);
-        if (inflight) return inflight;
-        throw new ConflictException('This row changed meanwhile — refresh and try again.');
-      }
-      await this.reopenCampaign(id);
-      await audit('REQUEUED_SAME_REFERENCE', { canaryRef: canary.canaryRef });
-      this.processor.kick(id);
-      return this.retryResult(row.id, 'Hubble confirmed it has no order — queued again with the same reference.');
     }
 
-    throw new ConflictException(`Retry is only for a failed or long-pending row (row status ${row.status}).`);
+    const r = await this.processor.requeueUnderLock(
+      id,
+      { id: row.id, status: row.status, updatedAt: row.updatedAt, voucherCode: null },
+      {
+        buyFailureReason: null,
+        buyFailureSource: null,
+        claimToken: null,
+        pendingReason: null,
+        ...(newRef
+          ? {
+              hubbleReferenceId: newRef,
+              previousReferenceIds: { push: row.hubbleReferenceId! },
+              hubbleOrderId: null,
+              placeResponded: null,
+              referenceSentAt: null,
+            }
+          : {}),
+      },
+    );
+    if (r === 'CAMPAIGN_CLOSED') {
+      await audit('REFUSED_CAMPAIGN_CLOSED');
+      throw new ConflictException('The campaign was cancelled meanwhile — nothing re-queued.');
+    }
+    if (r === 'LOST') {
+      const inflight = await this.retryInFlight(row.id);
+      if (inflight) return inflight;
+      throw new ConflictException('This row changed meanwhile — refresh and try again.');
+    }
+    await audit(newRef ? 'REQUEUED_NEW_REFERENCE' : 'REQUEUED_SAME_REFERENCE', { previousFailure: row.buyFailureSource ?? row.pendingReason, canaryRef });
+    this.processor.kick(id);
+    return this.retryResult(
+      row.id,
+      newRef ? 'Queued for purchase again (new Hubble reference).' : 'Queued for purchase again with the same Hubble reference.',
+    );
   }
 
   private async lookup(ref: string): Promise<{ kind: 'ORDER'; body: HubbleOrderResult } | { kind: 'NONE' } | { kind: 'ERROR'; why: string }> {
@@ -811,13 +894,6 @@ export class VoucherDispersalService {
     return m ? this.retryResult(rowId, m) : null;
   }
 
-  private async reopenCampaign(id: string): Promise<void> {
-    await this.prisma.voucherDispersalCampaign.updateMany({
-      where: { id, status: { in: [CS.COMPLETED, CS.COMPLETED_WITH_ERRORS] } },
-      data: { status: CS.PROCESSING, completedAt: null },
-    });
-  }
-
   // ─── Cancel ───────────────────────────────────────────────────────────────────
 
   /**
@@ -832,8 +908,9 @@ export class VoucherDispersalService {
       if (!camp) throw new NotFoundException('Campaign not found.');
       const from = camp.status;
       if (from === CS.DRAFT || from === CS.PREVIEWED) {
+        // Only VALID rows are cancelled — INVALID / DUPLICATE rows keep their status + reason (visible).
         const r = await tx.voucherDispersalRow.updateMany({
-          where: { campaignId: id, status: { in: PREVIEW_STATUSES } },
+          where: { campaignId: id, status: RS.VALID },
           data: { status: RS.CANCELLED },
         });
         const c = await tx.voucherDispersalCampaign.update({

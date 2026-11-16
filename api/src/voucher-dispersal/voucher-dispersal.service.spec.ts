@@ -202,7 +202,8 @@ describe('buying', () => {
     const send = t.notifications.sendTrackedWhatsappTemplate.mock.calls[0][0] as never as {
       clientId: string; templateName: string; bodyValues: string[]; secretValues: string[]; phone: string; eventKey: string;
     };
-    expect(send).toMatchObject({ clientId: 'bajaj', templateName: 'voucher_code', phone: '9876543210', eventKey: 'VOUCHER_DISPERSAL' });
+    // Receipts are ALWAYS filed under the platform tenant — never the billed client's delivery report.
+    expect(send).toMatchObject({ clientId: 'gifsy', templateName: 'voucher_code', phone: '9876543210', eventKey: 'VOUCHER_DISPERSAL' });
     expect(send.bodyValues).toEqual(['Asha', '₹1,000', 'Bajaj Loyalty', 'Amazon Pay', CODE]);
     expect(send.secretValues).toContain(CODE);
     // A second pass buys nothing more.
@@ -520,8 +521,9 @@ describe('reads: masking + delivery-status join', () => {
     const page = await t.svc.rows(ADMIN, id, {});
     expect(JSON.stringify(page)).not.toContain(CODE);
     expect(page.rows[0]).toMatchObject({ voucherCodeMasked: '••••9999', messageStatus: 'DELIVERED', canRetryBuy: false, canResend: true });
-    expect(maskDispersalCode('ABCDEFGHIJ')).toBe('••••GHIJ');
-    expect(maskDispersalCode('ABCDEFGHI')).toBe('••••');
+    // Same rule as audit rows: last 4 only for a 12+ char code.
+    expect(maskDispersalCode('ABCDEFGHIJKL')).toBe('••••IJKL');
+    expect(maskDispersalCode('ABCDEFGHIJK')).toBe('••••');
     expect(page).toMatchObject({ total: 1, page: 1, pageSize: 100 });
 
     const d = await t.svc.detail(ADMIN, id);
@@ -550,5 +552,211 @@ describe('reads: masking + delivery-status join', () => {
     expect((await t.svc.detail(ADMIN, id)).summary.messageFailed).toBe(1);
     expect(t.audits.some((a) => a.metadata.event === 'VOUCHER_DISPERSAL_MESSAGE_FAILED')).toBe(true);
     expect(t.campaigns[0].status).toBe('COMPLETED_WITH_ERRORS');
+  });
+});
+
+describe('audit fix round', () => {
+  it('BUYING M1: a Hubble-failed row whose reference reached Hubble still counts against the budget', async () => {
+    const t = setup();
+    const id = await confirmed(t, [['9876543210', 'A', 1000, 'Amazon Pay'], ['9876543211', 'B', 1000, 'Amazon Pay']], 2000);
+    t.hubble.placeOrder.mockResolvedValueOnce({ id: 'H1', status: 'FAILED' });
+    await t.processor.drain({ campaignId: id });
+    expect(t.rows[0]).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'HUBBLE_FAILED' });
+    expect(t.rows[0].referenceSentAt).toBeTruthy();
+    expect(t.rows[1].status).toBe('BOUGHT');
+    // Tighten the budget: the failed row's ₹1,000 is still "possibly committed" → a re-queued attempt
+    // is refused at the claim (BUDGET), never bought over the ceiling.
+    t.campaigns[0].budgetPaise = 150000n;
+    t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H1', status: 'FAILED' });
+    await t.svc.retryBuy(ADMIN, id, t.rows[0].id);
+    expect(t.rows[0].status).toBe('QUEUED');
+    await t.processor.drain({ campaignId: id });
+    expect(t.rows[0]).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'BUDGET' });
+    expect(t.hubble.placeOrder).toHaveBeenCalledTimes(2);
+  });
+
+  it('BUYING M1: a BUDGET failure on a row whose reference was sent earlier stays in the reconcile sweep', async () => {
+    const t = setup();
+    const id = await confirmed(t, [['9876543210', 'A', 1000, 'Amazon Pay']]);
+    const ref = t.rows[0].hubbleReferenceId;
+    Object.assign(t.rows[0], {
+      status: 'BUY_FAILED',
+      buyFailureSource: 'BUDGET',
+      referenceSentAt: new Date(Date.now() - 60_000),
+      placeAttemptAt: new Date(Date.now() - 60_000),
+    });
+    t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H1', status: 'SUCCESS', vouchers: [{ cardNumber: CODE }] });
+    await t.processor.drain({ campaignId: id });
+    expect(t.hubble.getOrderByReference).toHaveBeenCalledWith(ref);
+    expect(t.rows[0].status).toBe('BOUGHT');
+    expect(t.hubble.placeOrder).not.toHaveBeenCalled();
+  });
+
+  it('BUYING L-M2: retry re-queue + re-open run under the campaign lock; a cancelled campaign refuses inside it', async () => {
+    const t = setup();
+    const id = await confirmed(t, [['9876543210', 'A', 300, 'Flipkart']]);
+    t.hubble.getProduct.mockResolvedValueOnce({ productId: 'P_FK', name: 'Flipkart', denominationType: 'FIXED', denominations: [1250], minValue: 100, maxValue: 10000, maxVouchersPerOrder: 1 });
+    await t.processor.drain({ campaignId: id });
+    expect(t.campaigns[0].status).toBe('COMPLETED_WITH_ERRORS');
+    await t.svc.retryBuy(ADMIN, id, t.rows[0].id);
+    expect(t.rows[0].status).toBe('QUEUED');
+    expect(t.campaigns[0]).toMatchObject({ status: 'PROCESSING', completedAt: null });
+
+    const t2 = setup();
+    const id2 = await confirmed(t2, [['9876543210', 'A', 300, 'Flipkart']]);
+    t2.hubble.getProduct.mockResolvedValueOnce({ productId: 'P_FK', name: 'Flipkart', denominationType: 'FIXED', denominations: [1250], minValue: 100, maxValue: 10000, maxVouchersPerOrder: 1 });
+    await t2.processor.drain({ campaignId: id2 });
+    // The campaign is cancelled between the service's pre-check and the re-queue transaction.
+    const orig = t2.processor.requeueUnderLock.bind(t2.processor);
+    jest.spyOn(t2.processor, 'requeueUnderLock').mockImplementation(async (...a) => {
+      t2.campaigns[0].status = 'CANCELLED';
+      return orig(...a);
+    });
+    await expect(t2.svc.retryBuy(ADMIN, id2, t2.rows[0].id)).rejects.toThrow(/cancelled meanwhile/);
+    expect(t2.rows[0].status).toBe('BUY_FAILED');
+  });
+
+  it('BUYING L3: a Hubble SUCCESS for a superseded reference is audited + logged, never silent', async () => {
+    const t = setup();
+    const id = await confirmed(t, [['9876543210', 'A', 1000, 'Amazon Pay']]);
+    const stale = { ...t.rows[0], status: 'PENDING_RECONCILE' };
+    t.rows[0].hubbleReferenceId = 'vdnewreference000000000000';
+    const out = await t.processor.applyBody(stale as never, { id: 'H9', status: 'SUCCESS', vouchers: [{ cardNumber: CODE }] });
+    expect(out).toBe('SKIPPED');
+    expect(t.rows[0].voucherCode).toBeNull();
+    const a = t.audits.find((x) => x.metadata.event === 'VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY');
+    expect(a?.metadata).toMatchObject({ referenceSuperseded: true, hubbleOrderId: 'H9' });
+    expect(JSON.stringify(a)).not.toContain(CODE);
+    void id;
+  });
+
+  it('BUYING L4: the drain needs its OWN secret (no fallback to PUSH_DRAIN_SECRET)', async () => {
+    const { VoucherDispersalDrainController } = await import('./voucher-dispersal.controller');
+    const t = setup();
+    const ctl = new VoucherDispersalDrainController(t.processor);
+    const prev = { v: process.env.VOUCHER_DISPERSAL_DRAIN_SECRET, p: process.env.PUSH_DRAIN_SECRET };
+    delete process.env.VOUCHER_DISPERSAL_DRAIN_SECRET;
+    process.env.PUSH_DRAIN_SECRET = 'push-secret';
+    await expect(ctl.drain('push-secret')).rejects.toBeInstanceOf(ForbiddenException);
+    process.env.VOUCHER_DISPERSAL_DRAIN_SECRET = 'vd-secret';
+    await expect(ctl.drain('push-secret')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(ctl.drain('vd-secret')).resolves.toMatchObject({ bought: 0 });
+    process.env.VOUCHER_DISPERSAL_DRAIN_SECRET = prev.v;
+    process.env.PUSH_DRAIN_SECRET = prev.p;
+    if (prev.v === undefined) delete process.env.VOUCHER_DISPERSAL_DRAIN_SECRET;
+    if (prev.p === undefined) delete process.env.PUSH_DRAIN_SECRET;
+  });
+
+  it('BUYING L5: a send whose claim was taken over never writes; the stale sweep waits 30 min', async () => {
+    const t = setup();
+    const id = await confirmed(t, [['9876543210', 'A', 1000, 'Amazon Pay']]);
+    await t.processor.buyRow({ ...t.rows[0] } as never);
+    const old = new Date(Date.now() - 20 * 60 * 1000);
+    t.rows[0].messageClaimedAt = old;
+    expect(await t.processor.surfaceStaleMessageClaims(id)).toEqual([]); // 20 min < 30 min
+    t.rows[0].messageClaimedAt = new Date(); // a newer claim (resend) took over
+    const r = await t.processor.deliver(t.rows[0].id, old);
+    expect(r.error).toMatch(/took over/);
+    expect(t.notifications.sendTrackedWhatsappTemplate).not.toHaveBeenCalled();
+    t.rows[0].messageClaimedAt = new Date(Date.now() - 31 * 60 * 1000);
+    expect(await t.processor.surfaceStaleMessageClaims(id)).toEqual([id]);
+    expect(t.rows[0]).toMatchObject({ messageStatus: 'UNKNOWN' });
+  });
+
+  it('DATA M1+M2: a failed resend is never hidden behind the old DELIVERED, and the campaign flips both ways', async () => {
+    const t = setup();
+    const id = await confirmed(t, [['9876543210', 'A', 1000, 'Amazon Pay']]);
+    await t.processor.drain({ campaignId: id });
+    const first = t.receipts.find((r) => r.id === t.rows[0].whatsappReceiptId)!;
+    Object.assign(first, { status: 'DELIVERED', deliveredAt: new Date() });
+    await t.processor.drain({ campaignId: id });
+    expect(t.campaigns[0].status).toBe('COMPLETED');
+
+    t.notifications.sendTrackedWhatsappTemplate.mockResolvedValueOnce({ receiptId: null as never, requestId: null as never, error: 'MSG91 down' });
+    const v = await t.svc.resend(ADMIN, id, t.rows[0].id);
+    expect(v).toMatchObject({ messageStatus: 'FAILED', messageError: 'MSG91 down' });
+    expect(t.rows[0].whatsappReceiptId).toBeNull();
+    expect(t.campaigns[0].status).toBe('COMPLETED_WITH_ERRORS');
+    await t.processor.mirrorMessageStatuses(id); // the old DELIVERED receipt must not overwrite it
+    expect(t.rows[0].messageStatus).toBe('FAILED');
+
+    const ok = await t.svc.resend(ADMIN, id, t.rows[0].id);
+    expect(ok.messageStatus).toBe('SENT');
+    expect(t.campaigns[0].status).toBe('COMPLETED');
+
+    // A late WhatsApp failure (via the receipt) flips it back.
+    const rc = t.receipts.find((r) => r.id === t.rows[0].whatsappReceiptId)!;
+    Object.assign(rc, { status: 'FAILED', failureReason: 'number not on WhatsApp' });
+    await t.processor.drain({ campaignId: id });
+    expect(t.campaigns[0].status).toBe('COMPLETED_WITH_ERRORS');
+  });
+
+  it('DATA L10: a receipt stuck QUEUED after a successful send still reads SENT', async () => {
+    const t = setup();
+    t.notifications.sendTrackedWhatsappTemplate.mockImplementationOnce(async () => {
+      const r = await t.prisma.messageDeliveryReceipt.create({ data: { clientId: 'gifsy', channel: 'WHATSAPP', crqid: 'q', status: 'QUEUED' } });
+      return { receiptId: r.id, requestId: 'x', error: null };
+    });
+    const id = await confirmed(t, [['9876543210', 'A', 1000, 'Amazon Pay']]);
+    await t.processor.drain({ campaignId: id });
+    expect((await t.svc.rows(ADMIN, id, {})).rows[0].messageStatus).toBe('SENT');
+    expect(t.rows[0].messageStatus).toBe('SENT');
+  });
+
+  it('DATA L11: resend is capped at 3 per row', async () => {
+    const t = setup();
+    const id = await confirmed(t, [['9876543210', 'A', 1000, 'Amazon Pay']]);
+    await t.processor.drain({ campaignId: id });
+    for (let i = 0; i < 3; i++) await t.svc.resend(ADMIN, id, t.rows[0].id);
+    expect((await t.svc.rows(ADMIN, id, {})).rows[0].canResend).toBe(false);
+    await expect(t.svc.resend(ADMIN, id, t.rows[0].id)).rejects.toThrow(/3 times/);
+    expect(t.hubble.placeOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it('DATA L11: a phone that got a voucher in another campaign in the last 30 days is WARNED (not blocked)', async () => {
+    const t = setup();
+    const first = await confirmed(t, [['9876543210', 'Asha', 1000, 'Amazon Pay']]);
+    await t.processor.drain({ campaignId: first });
+    const c = await t.svc.createCampaign(ADMIN, { name: 'Second', programLabel: 'P', budgetRupees: 5000 });
+    const p = await t.svc.upload(ADMIN, c.id, file([['9876543210', 'Asha', 500, 'Amazon Pay'], ['9876543211', 'Ravi', 500, 'Amazon Pay']]));
+    expect(p.summary.warningCount).toBe(1);
+    expect(p.rows[0].warning).toMatch(/^Already got a ₹1,000 Amazon Pay voucher on \d{2} \w{3} \d{4} in campaign "Diwali"$/);
+    expect(p.rows[0].status).toBe('VALID');
+    expect((await t.svc.rows(ADMIN, c.id, {})).rows[0].warning).toMatch(/Already got/);
+    await expect(t.svc.confirm(ADMIN, c.id, { previewId: p.previewId, expectedValidCount: 2, expectedTotalRupees: 1000 })).resolves.toMatchObject({ status: 'PROCESSING' });
+  });
+
+  it('DATA L6: cancelling before confirm keeps INVALID / DUPLICATE reasons; valid counts stay consistent', async () => {
+    const t = setup();
+    const c = await t.svc.createCampaign(ADMIN, { name: 'x', programLabel: 'P', budgetRupees: 5000 });
+    await t.svc.upload(ADMIN, c.id, file([['9876543210', 'A', 1000, 'Amazon Pay'], ['9876543210', 'B', 1000, 'Amazon Pay'], ['12', 'C', 1000, 'Amazon Pay']]));
+    await t.svc.cancel(ADMIN, c.id);
+    expect(t.rows.map((r) => r.status)).toEqual(['CANCELLED', 'DUPLICATE', 'INVALID']);
+    expect(t.rows[1].invalidReason).toMatch(/Same phone/);
+    const [listed] = await t.svc.list(ADMIN, {});
+    const d = await t.svc.detail(ADMIN, c.id);
+    expect(listed.summary).toMatchObject({ valid: 0, invalid: 1, duplicates: 1, cancelled: 1 });
+    expect(d.summary).toMatchObject({ valid: 0, invalid: 1, duplicates: 1, cancelled: 1 });
+  });
+
+  it('DATA L8: the preview reports skipped blank rows', async () => {
+    const t = setup();
+    const c = await t.svc.createCampaign(ADMIN, { name: 'x', programLabel: 'P', budgetRupees: 5000 });
+    const p = await t.svc.upload(ADMIN, c.id, file([['9876543210', 'A', 1000, 'Amazon Pay'], [null, null, null, null], ['9876543211', 'B', 1000, 'Amazon Pay']]));
+    expect(p.summary).toMatchObject({ skippedBlankRows: 1, skippedNote: '1 row skipped: 1 blank', hiddenRowsIncluded: 0 });
+  });
+
+  it('DATA L12: report times are IST and a raw invalid phone is printed without an escape quote', async () => {
+    const t = setup();
+    const id = await confirmed(t, [['9876543210', 'A', 1000, 'Amazon Pay'], ['+91 12345', 'B', 1000, 'Amazon Pay'], ['=HYPERLINK("x")', 'C', 1000, 'Amazon Pay']]);
+    await t.processor.drain({ campaignId: id });
+    t.rows[0].boughtAt = new Date('2026-11-16T20:00:00Z'); // 01:30 IST next day
+    const rep = await t.svc.report(ADMIN, id);
+    const wb = XLSX.read(rep.buffer, { type: 'buffer' });
+    const sheet = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]]);
+    expect(sheet[0]['Bought at (IST)']).toBe('2026-11-17 01:30');
+    expect(sheet[1].Phone).toBe('+91 12345');
+    expect(sheet[2].Phone).toBe(`'=HYPERLINK("x")`);
+    expect(JSON.stringify(sheet)).not.toContain(CODE);
   });
 });
