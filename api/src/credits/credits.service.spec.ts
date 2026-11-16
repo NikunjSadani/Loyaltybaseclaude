@@ -541,6 +541,8 @@ describe('CreditsService', () => {
           description: 'May bonus',
           // Identifies the EXACT credit for a later per-(batch, outlet, field) reversal.
           metadata: { fieldId: 'f1', outletCode: 'O1' },
+          // WP4: the tenant's reversal-engine mode, resolved once per batch (LEGACY = default).
+          reversalEngineMode: 'LEGACY',
         },
         mockTx,   // same tx — atomicity guaranteed
       );

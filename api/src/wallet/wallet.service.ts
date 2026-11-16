@@ -70,6 +70,12 @@ interface MovementParams {
   /** A reversal clawback: the credit WalletTransaction it reverses / the CreditReversal that produced it. */
   reversedCreditTxId?: string | null;
   creditReversalId?: string | null;
+  /**
+   * The wallet's tenant reversal-engine mode, when the CALLER already resolved it for this wallet's tenant
+   * (e.g. confirmBatch: once per batch). Lets movementPath skip its per-movement partner + flag reads.
+   * Omitted → movementPath resolves it itself (unchanged behaviour).
+   */
+  engineMode?: ReversalEngineMode;
 }
 
 /** The (batch, outlet, field) key a POINTS reversal targets. */
@@ -250,7 +256,7 @@ export class WalletService {
     // v2 step 1 (WALLET-REVERSAL-ENGINE-DESIGN.md §5): LOCK the wallet row first, then read B / D / movementSeq.
     // Callers that already locked (expiry sweep, clawback) re-acquire their own lock — a no-op in Postgres.
     const wallet = await this.lockWallet(tx, params.wallet.id);
-    if ((await this.movementPath(tx, wallet)) === 'LEGACY') {
+    if ((await this.movementPath(tx, wallet, params.engineMode)) === 'LEGACY') {
       // LEGACY tenant on a never-sequenced wallet: today's write path, unchanged (no seq / D / positions).
       return this.applyMovementLegacy(tx, { ...params, wallet });
     }
@@ -270,15 +276,21 @@ export class WalletService {
    *     for the backfill to sequence); a wallet WITH un-sequenced history that the backfill has not applied
    *     (e.g. an anomaly wallet) is REFUSED (409) rather than given a mixed history.
    * Call under the wallet row lock (the backfill takes the same lock).
+   * `knownMode`: the tenant's mode, already resolved by a caller that KNOWS this wallet's tenant (confirmBatch
+   * resolves it once per batch) — skips the per-movement partner + flag reads; the decision is otherwise identical.
    */
   async movementPath(
     tx: Prisma.TransactionClient,
     w: Pick<Wallet, 'id' | 'partnerId' | 'redeemablePoints'> & Partial<Wallet>,
+    knownMode?: ReversalEngineMode,
   ): Promise<'LEGACY' | 'V2'> {
     if ((w.movementSeq ?? 0) > 0) return 'V2';
-    const partner = await tx.channelPartner.findFirst({ where: { id: w.partnerId }, select: { clientId: true } });
-    if (!partner) throw new NotFoundException('Wallet owner not found');
-    const mode = await this.tenantSettings.getReversalEngineModeUncached(partner.clientId);
+    let mode = knownMode;
+    if (mode === undefined) {
+      const partner = await tx.channelPartner.findFirst({ where: { id: w.partnerId }, select: { clientId: true } });
+      if (!partner) throw new NotFoundException('Wallet owner not found');
+      mode = await this.tenantSettings.getReversalEngineModeUncached(partner.clientId);
+    }
     if (mode === 'LEGACY') return 'LEGACY';
     if (await this.isWalletPristine(tx, w)) return 'V2';
     throw new ConflictException(WALLET_NOT_BACKFILLED_MESSAGE);
@@ -1272,6 +1284,9 @@ export class WalletService {
       // Stored on the WalletTransaction (credit-batch confirm passes { fieldId, outletCode } so a
       // reversal can find the EXACT credit it undoes). Omitted → nothing stored.
       metadata?: Prisma.InputJsonValue;
+      // The tenant's reversal-engine mode, resolved ONCE by a bulk caller (confirmBatch) for `clientId` — the
+      // caller guarantees the partner belongs to that tenant. Saves movementPath's 2 reads per credit.
+      reversalEngineMode?: ReversalEngineMode;
     } = {},
     tx?: Prisma.TransactionClient,
   ) {
@@ -1309,6 +1324,7 @@ export class WalletService {
         sourceId: opts.sourceId ?? null,
         description: opts.description ?? null,
         ...(opts.metadata !== undefined ? { metadata: opts.metadata } : {}),
+        ...(opts.reversalEngineMode !== undefined ? { engineMode: opts.reversalEngineMode } : {}),
       });
     });
   }
@@ -1692,8 +1708,23 @@ export class WalletService {
     }
     const positions = await this.findPositions(tx, key);
     if (positions.length === 0) {
+      // Error path only: tell "nothing was credited" apart from "credited, but the receiving wallet has no position
+      // yet" (a wallet the WP6 backfill has not prepared / blocked as an anomaly — or a legacy credit without
+      // per-credit metadata, which cannot be told apart here).
+      const credits = await tx.walletTransaction.findMany({
+        where: { transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: key.batchId },
+        select: { metadata: true },
+      });
+      const meta = (m: Prisma.JsonValue | null | undefined) =>
+        m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : null;
+      const untracked = credits.some((c) => {
+        const m = meta(c.metadata);
+        return !m || typeof m.fieldId !== 'string' || (m.fieldId === key.fieldId && m.outletCode === key.outletCode);
+      });
       throw new BadRequestException(
-        `Cannot reverse: no wallet received a credit from batch ${key.batchId} for outlet ${key.outletCode} / field ${key.fieldId} — settle it off-platform`,
+        untracked
+          ? `Cannot reverse yet: batch ${key.batchId} has credits for outlet ${key.outletCode} / field ${key.fieldId} (or old credits that can't be matched to an outlet) that the reversal engine does not track yet — Gifsy must prepare / map them first`
+          : `Cannot reverse: no wallet received a credit from batch ${key.batchId} for outlet ${key.outletCode} / field ${key.fieldId} — settle it off-platform`,
       );
     }
     const cap = positions.reduce((s, p) => s + (p.amount - p.reversedPoints), 0);
@@ -1811,6 +1842,9 @@ export class WalletService {
    *    written to audit_logs (entityType REVERSAL_ENGINE_SHADOW). A v2 refusal is recorded, never raised.
    *  - V2: applyCreditReversal.
    * The caller holds the credit_batches lock and has flipped the CreditReversal status (guarded).
+   * `mode` / `legacyTarget`: already resolved by the caller in this transaction (credits approve resolves the
+   * mode once per request and, for LEGACY/SHADOW, runs assertPointsReversalAllowed before the flip) — passed
+   * so neither is read twice. Omitted → resolved here.
    */
   async reverseCreditBatchPoints(
     tx: Prisma.TransactionClient,
@@ -1820,9 +1854,11 @@ export class WalletService {
       points: number;
       actorId?: string | null;
       description?: string | null;
+      mode?: ReversalEngineMode;
+      legacyTarget?: { partnerId: string; walletId: string } | null;
     },
   ): Promise<{ mode: ReversalEngineMode; shortfall: number; walletIds: string[] }> {
-    const mode = await this.tenantSettings.getReversalEngineModeUncached(a.clientId);
+    const mode = a.mode ?? (await this.tenantSettings.getReversalEngineModeUncached(a.clientId));
     const description = a.description ?? `Clawback for reversal ${a.creditReversalId} — batch POINTS reversal`;
 
     if (mode === 'V2') {
@@ -1847,7 +1883,7 @@ export class WalletService {
       return cb;
     };
 
-    const target = await this.assertPointsReversalAllowed(tx, a);
+    const target = a.legacyTarget ?? (await this.assertPointsReversalAllowed(tx, a));
     if (mode === 'LEGACY') {
       const cb = await legacy(target);
       return { mode, shortfall: cb.shortfall, walletIds: [target.walletId] };
