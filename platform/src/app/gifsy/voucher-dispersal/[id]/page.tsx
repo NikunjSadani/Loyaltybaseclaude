@@ -9,6 +9,10 @@
    purchase (server `canRetryBuy`): a refusal is shown word-for-word; a network error / 5xx means the
    outcome is UNKNOWN → the dialog closes, the page refreshes and says so, and the action stays locked
    until that refresh lands. Nothing here claims "sent" before the server says so.
+   While the campaign is live (or in the 30-min settling window) each refresh also nudges the server
+   with POST /process (a bounded processing pass — Cloud Run only gives CPU during a request; the drain
+   scheduler is the backup). Single-flight (never two at once), paced by the same backoff, paused while
+   hidden; 4xx are ignored quietly, repeated 5xx / network failures show a non-blocking note.
 ──────────────────────────────────────────────────────────────────────────────────────────────── */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -17,9 +21,10 @@ import { useParams } from 'next/navigation';
 import { ArrowLeft, Download, Loader2, RefreshCw, X } from 'lucide-react';
 import {
   CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE, PENDING_RECONCILE_NOTE, POLL_START_MS,
-  ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, billedToText, campaignStatusText, canCancelCampaign, canResendRow,
-  canRetryRow, formatCount, formatRupees, formatWhen, isLiveCampaign, isSetupCampaign, isUncertainFailure, nextPollDelay,
-  pollPhase, rowStatusText, vdApi, vdReportUrl,
+  PROCESS_FAILURES_BEFORE_NOTE, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, billedToText, campaignStatusText,
+  canCancelCampaign, canResendRow, canRetryRow, formatCount, formatRupees, formatWhen, isLiveCampaign, isProcessInFlight,
+  isSetupCampaign, isUncertainFailure, nextPollDelay, nextProcessFailures, plural, pollPhase, rowStatusText,
+  shouldNudgeProcessing, vdApi, vdReportUrl,
   type CampaignStatus, type RowStatus, type VdListItem, type VdRow, type VdRowsPage,
 } from '@/lib/voucher-dispersal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
@@ -63,10 +68,17 @@ function VoucherCell({ row }: { row: VdRow }) {
         : row.status === 'UNKNOWN' ? 'This status is not recognised by this screen — check the report or ask engineering.'
           : null);
   const reasonTone = row.status === 'BUY_FAILED' || row.status === 'INVALID' ? 'text-red-200' : 'text-amber-200';
+  const retryAt = row.status === 'PENDING_RECONCILE' && row.retryAvailableAt && !row.canRetryBuy ? formatWhen(row.retryAvailableAt) : null;
   return (
     <div className="space-y-1">
       <StatusChip label={rowStatusText(row)} tone={ROW_STATUS_TONE[row.status]} testId={`vd-row-status-${row.id}`} />
       {reason && <p className={`text-xs break-words ${reasonTone}`}>{reason}</p>}
+      {retryAt && retryAt !== '—' && <p className="text-[11px] text-white/50">Retry available from {retryAt}.</p>}
+      {row.warning && (
+        <p className="text-xs break-words text-amber-200" data-testid={`vd-row-warning-${row.id}`}>
+          <span className="font-semibold">Note:</span> {row.warning}
+        </p>
+      )}
     </div>
   );
 }
@@ -98,6 +110,8 @@ export default function VoucherCampaignDetailPage() {
   const [tick, setTick] = useState(0);
   const [notice, setNotice] = useState<Notice>(null);
   const [hidden, setHidden] = useState(false);
+  const [processNote, setProcessNote] = useState<string | null>(null);
+  const processFailures = useRef(0);
   const delayRef = useRef(POLL_START_MS);
   const seqRef = useRef(0);
   // When THIS page saw the campaign go from live to completed — the 30-min window's start when the
@@ -161,6 +175,19 @@ export default function VoucherCampaignDetailPage() {
   }, [polling, hidden, tick, refresh]);
   useEffect(() => { if (!polling) delayRef.current = POLL_START_MS; }, [polling]);
 
+  // Nudge server-side processing alongside polling: once per completed refresh (so it follows the same
+  // backoff), only while live / settling and visible, never while one is still in flight.
+  const nudge = shouldNudgeProcessing(phase);
+  useEffect(() => {
+    if (!nudge || hidden || !id || isProcessInFlight(id)) return;
+    void vdApi.process(id).then((res) => {
+      if (!mounted.current) return;
+      processFailures.current = nextProcessFailures(processFailures.current, res);
+      if (res.ok) setProcessNote(null);
+      else if (processFailures.current >= PROCESS_FAILURES_BEFORE_NOTE) setProcessNote(res.error);
+    });
+  }, [nudge, hidden, tick, id]);
+
   // ── dialogs ──
   const [dialog, setDialog] = useState<DialogState>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
@@ -190,15 +217,21 @@ export default function VoucherCampaignDetailPage() {
     }
     setDialog(null);
     if (res.ok) {
-      setNotice({
-        tone: 'info',
-        text:
-          d.kind === 'resend'
-            ? `Resend requested for row ${formatCount(d.row.rowNumber)}. The WhatsApp status below updates when WhatsApp reports back.`
-            : d.kind === 'retry'
-              ? `Purchase retry requested for row ${formatCount(d.row.rowNumber)}. The voucher status below updates as the server works on it.`
-              : 'Cancel requested. The campaign status below shows what the server did.',
-      });
+      let text: string;
+      if (d.kind === 'resend') {
+        text = `Resend requested for row ${formatCount(d.row.rowNumber)}. The WhatsApp status below updates when WhatsApp reports back.`;
+      } else if (d.kind === 'retry') {
+        const msg = (res.data as { message: string | null }).message;
+        text = `Row ${formatCount(d.row.rowNumber)}: ${msg ?? 'purchase retry requested.'} The voucher status below updates as the server works on it.`;
+      } else {
+        const r = res.data as { cancelledRows: number | null; stillWithHubble: number | null; alreadyBought: number | null };
+        const parts: string[] = [];
+        if (r.cancelledRows !== null) parts.push(`${plural(r.cancelledRows, 'row')} will not be bought`);
+        if (r.stillWithHubble !== null && r.stillWithHubble > 0) parts.push(`${plural(r.stillWithHubble, 'purchase')} already with Hubble may still complete`);
+        if (r.alreadyBought !== null && r.alreadyBought > 0) parts.push(`${plural(r.alreadyBought, 'voucher')} already bought stay bought`);
+        text = `Campaign cancelled${parts.length ? `: ${parts.join('; ')}` : ''}.`;
+      }
+      setNotice({ tone: 'info', text });
     } else {
       const what = d.kind === 'resend' ? 'the resend' : d.kind === 'retry' ? 'the purchase retry' : 'the cancel';
       const where = d.kind === 'cancel' ? 'the campaign status' : `row ${formatCount(d.row.rowNumber)}`;
@@ -272,6 +305,16 @@ export default function VoucherCampaignDetailPage() {
       </div>
 
       <p className="text-xs text-white/60" role="status" data-testid="vd-live">{liveText(phase, c, hidden)}</p>
+      {item.hubbleConfigured === false && !isSetupCampaign(c.status) && (
+        <p role="alert" data-testid="vd-hubble-off" className="text-xs text-amber-200">
+          Hubble is not configured on this server, so nothing can be bought right now. Rows stay queued / pending until it is.
+        </p>
+      )}
+      {processNote && (
+        <p role="status" data-testid="vd-process-note" className="text-xs text-amber-200">
+          Couldn&apos;t nudge processing from this page ({processNote}). The server&apos;s scheduler keeps working in the background — the numbers below still refresh.
+        </p>
+      )}
       {pollError && (
         <p role="alert" data-testid="vd-poll-error" className="text-xs text-amber-200">
           The last automatic refresh failed ({pollError}). Still retrying — the numbers below may be out of date.
@@ -346,7 +389,7 @@ export default function VoucherCampaignDetailPage() {
                       <td className="px-3 py-2 text-white whitespace-nowrap">{formatRupees(r.amount)}<p className="text-xs text-white/60">{r.brand || '—'}</p></td>
                       <td className="px-3 py-2 min-w-[12rem]"><VoucherCell row={r} /></td>
                       <td className="px-3 py-2 font-mono text-xs text-white/70">{r.hubbleRef ?? '—'}</td>
-                      <td className="px-3 py-2 font-mono text-xs text-white/70">{r.voucherCode ?? '—'}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-white/70">{r.voucherCodeMasked ?? '—'}</td>
                       <td className="px-3 py-2 min-w-[11rem]"><MessageCell row={r} /></td>
                       <td className="px-3 py-2">
                         <div className="flex flex-col gap-1.5">

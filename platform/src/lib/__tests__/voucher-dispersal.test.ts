@@ -3,18 +3,19 @@
  * Voucher Dispersal — pure rules + normalisers (src/lib/voucher-dispersal.ts).
  * Run: npx vitest run src/lib/__tests__/voucher-dispersal.test.ts
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   billedToText, campaignStatusText, canCancelCampaign, canResendRow, canRetryRow, checkUploadFile, confirmBlock,
   confirmDialogTitle, confirmPayload, defaultProgramLabel, formatCount, formatRupees, isOverBudget, isSetupCampaign,
-  isUncertainFailure, maskVoucherCode, nextPollDelay, normalizeClients, normalizeListItem, normalizePreview, normalizeRow,
-  normalizeRowsPage, plural, pollPhase, rowStatusText, validateCreateForm, POLL_AFTER_COMPLETE_MS, POLL_MAX_MS,
+  isProcessInFlight, isUncertainFailure, maskVoucherCode, nextPollDelay, nextProcessFailures, normalizeBrand, normalizeClients,
+  normalizeDetail, normalizeListItem, normalizePreview, normalizeRow, normalizeRowsPage, pendingReasonText, plural, pollPhase,
+  rowStatusText, shouldNudgeProcessing, validateCreateForm, vdApi, PENDING_RECONCILE_NOTE, POLL_AFTER_COMPLETE_MS, POLL_MAX_MS,
   type VdPreview, type VdPreviewSummary,
 } from '@/lib/voucher-dispersal';
 
 const summary = (o: Partial<VdPreviewSummary> = {}): VdPreviewSummary => ({
   total: 4, valid: 2, invalid: 1, duplicates: 1, totalRupees: 1500, budgetRupees: 5000,
-  overBudget: false, perBrand: [], ...o,
+  overBudget: false, perBrand: [], warningCount: 0, skippedNote: null, hiddenNote: null, ...o,
 });
 const preview = (o: Partial<VdPreviewSummary> = {}, previewId: string | null = 'pv-1'): Pick<VdPreview, 'previewId' | 'summary'> =>
   ({ previewId, summary: summary(o) });
@@ -122,26 +123,63 @@ describe('voucher-dispersal rules', () => {
     expect(Object.keys(e).sort()).toEqual(['budgetRupees', 'name', 'programLabel']);
     expect(validateCreateForm({ name: 'A', programLabel: 'B', billedToClientId: '', note: '', budgetRupees: '10' })).toEqual({});
     expect(defaultProgramLabel('Bajaj')).toBe('Bajaj Loyalty');
+    // Server DTO limits: whole rupees <= 1 crore; name <= 120; programme <= 60; note <= 500.
+    const base = { name: 'A', programLabel: 'B', billedToClientId: '', note: '', budgetRupees: '10' };
+    expect(validateCreateForm({ ...base, budgetRupees: '10.5' }).budgetRupees).toMatch(/whole rupees/);
+    expect(validateCreateForm({ ...base, budgetRupees: '10000001' }).budgetRupees).toMatch(/at most/);
+    expect(validateCreateForm({ ...base, budgetRupees: '10000000' })).toEqual({});
+    expect(validateCreateForm({ ...base, name: 'x'.repeat(121) }).name).toMatch(/120/);
+    expect(validateCreateForm({ ...base, programLabel: 'x'.repeat(61) }).programLabel).toMatch(/60/);
+    expect(validateCreateForm({ ...base, note: 'x'.repeat(501) }).note).toMatch(/500/);
   });
 
-  it('client-side file check: type, empty, size', () => {
-    expect(checkUploadFile({ name: 'a.pdf', size: 10 })).toMatch(/Excel/);
+  it('client-side file check: .xlsx only (the server refuses anything else), empty, size', () => {
+    expect(checkUploadFile({ name: 'a.pdf', size: 10 })).toMatch(/\.xlsx/);
+    expect(checkUploadFile({ name: 'a.csv', size: 10 })).toMatch(/\.xlsx/);
+    expect(checkUploadFile({ name: 'a.xls', size: 10 })).toMatch(/\.xlsx/);
     expect(checkUploadFile({ name: 'a.xlsx', size: 0 })).toBe('That file is empty.');
     expect(checkUploadFile({ name: 'a.xlsx', size: 11 * 1024 * 1024 })).toMatch(/over 10 MB/);
-    expect(checkUploadFile({ name: 'a.CSV', size: 10 })).toBeNull();
+    expect(checkUploadFile({ name: 'a.XLSX', size: 10 })).toBeNull();
+  });
+
+  it('pending reasons: server codes in plain words; unknown code keeps the raw value', () => {
+    expect(pendingReasonText(null)).toBe(PENDING_RECONCILE_NOTE);
+    expect(pendingReasonText('STALE_BUYING')).toMatch(/interrupted/);
+    expect(pendingReasonText('HUBBLE_INDETERMINATE')).toMatch(/clear answer/);
+    expect(pendingReasonText('HUBBLE_UNKNOWN_STATUS:ON_HOLD')).toMatch(/unexpected status \(ON_HOLD\)/);
+    expect(pendingReasonText('SOMETHING_NEW')).toMatch(/\(SOMETHING_NEW\)$/);
+  });
+
+  it('process nudge: only while live / settling; 4xx ignored, 5xx / network counted, success resets', () => {
+    expect(shouldNudgeProcessing('live')).toBe(true);
+    expect(shouldNudgeProcessing('settling')).toBe(true);
+    expect(shouldNudgeProcessing('unknown')).toBe(false);
+    expect(shouldNudgeProcessing('off')).toBe(false);
+    expect(nextProcessFailures(1, { ok: false, error: 'x', status: 409 })).toBe(1);
+    expect(nextProcessFailures(1, { ok: false, error: 'x', status: 502 })).toBe(2);
+    expect(nextProcessFailures(1, { ok: false, error: 'x' })).toBe(2);
+    expect(nextProcessFailures(3, { ok: true, data: null })).toBe(0);
   });
 });
 
-describe('voucher-dispersal normalisers', () => {
-  it('list item: nested {campaign, summary} and flat campaign-with-summary; missing counts stay null', () => {
-    const a = normalizeListItem({ campaign: { id: 'c1', status: 'processing', billedToClient: { displayName: 'Bajaj' } }, summary: { bought: 3 } });
+describe('voucher-dispersal normalisers (exact server field names)', () => {
+  it('list item: campaign fields + summary (purchase counts only); WhatsApp counts stay null', () => {
+    const a = normalizeListItem({ id: 'c1', status: 'processing', billedToClient: { id: 'bajaj', name: 'Bajaj' }, summary: { bought: 3, valid: 4 } });
     expect(a.campaign.status).toBe('PROCESSING');
+    expect(a.campaign.billedToClientId).toBe('bajaj');
     expect(a.campaign.billedToClientName).toBe('Bajaj');
-    expect(a.summary.bought).toBe(3);
-    expect(a.summary.delivered).toBeNull();
-    const b = normalizeListItem({ id: 'c2', status: 'COMPLETED', summary: { delivered: 5 } });
-    expect(b.summary.delivered).toBe(5);
-    expect(b.campaign.budgetRupees).toBeNull();
+    expect(a.summary).toMatchObject({ bought: 3, valid: 4, pending: null, delivered: null });
+    expect(a.hubbleConfigured).toBeNull();
+    expect(normalizeListItem({ id: 'c2', status: 'COMPLETED', billedToClient: null, summary: {} }).campaign.budgetRupees).toBeNull();
+  });
+
+  it('detail: {campaign, hubbleConfigured, summary}', () => {
+    const d = normalizeDetail({ campaign: { id: 'c1', status: 'COMPLETED', completedAt: '2026-11-16T10:00:00Z', canCancel: false }, hubbleConfigured: false, summary: { delivered: 5 } });
+    expect(d.campaign.completedAt).toBe('2026-11-16T10:00:00Z');
+    expect(d.campaign.canCancel).toBe(false);
+    expect(d.hubbleConfigured).toBe(false);
+    expect(d.summary.delivered).toBe(5);
+    expect(d.summary.bought).toBeNull();
   });
 
   it('unknown statuses become UNKNOWN with the raw value — never INVALID, never setup', () => {
@@ -156,32 +194,70 @@ describe('voucher-dispersal normalisers', () => {
     expect(p.rows[0].status).toBe('UNKNOWN');
   });
 
-  it('preview: previewId, perBrand as object or array, missing totals null', () => {
-    const p = normalizePreview({ previewId: 'pv-9', summary: { valid: 1, perBrand: { AMAZON: { count: 1, totalRupees: 500 } } }, rows: [{ rowNumber: 2, status: 'VALID' }] });
+  it('preview: previewId, perBrand array, warning + skipped / hidden notes, missing totals null', () => {
+    const p = normalizePreview({
+      previewId: 'pv-9',
+      summary: { valid: 1, perBrand: [{ brandKey: 'AMAZON_PAY', brand: 'Amazon Pay', count: 1, totalRupees: 500 }], warningCount: 1, skippedNote: '1 row skipped: 1 blank', hiddenNote: null },
+      rows: [{ rowNumber: 2, status: 'VALID', warning: 'Already got a ₹500 Amazon Pay voucher' }],
+    });
     expect(p.previewId).toBe('pv-9');
-    expect(p.summary.perBrand).toEqual([{ brand: 'AMAZON', count: 1, rupees: 500 }]);
+    expect(p.summary.perBrand).toEqual([{ brand: 'Amazon Pay', count: 1, rupees: 500 }]);
     expect(p.summary.totalRupees).toBeNull();
-    expect(p.rows[0].status).toBe('VALID');
+    expect(p.summary).toMatchObject({ warningCount: 1, skippedNote: '1 row skipped: 1 blank', hiddenNote: null });
+    expect(p.rows[0]).toMatchObject({ status: 'VALID', warning: 'Already got a ₹500 Amazon Pay voucher' });
   });
 
-  it('row: aliases, masked code, lower-cased message status, canResend', () => {
-    const r = normalizeRow({ id: 'r', status: 'BOUGHT', hubbleOrderId: 'H-1', voucherCode: 'SECRETCODE9876', messageStatus: 'DELIVERED', deliveredAt: '2026-11-16T10:00:00Z', canResend: true });
+  it('row: server-masked code kept, re-masked if ever raw; upper-case message status; order id else reference; reasons', () => {
+    const r = normalizeRow({ id: 'r', status: 'BOUGHT', hubbleOrderId: 'H-1', hubbleReferenceId: 'vd1', voucherCodeMasked: '••••9876', messageStatus: 'DELIVERED', messageDeliveredAt: '2026-11-16T10:00:00Z', canResend: true, warning: 'w' });
     expect(r.hubbleRef).toBe('H-1');
-    expect(r.voucherCode).toBe('••••9876');
+    expect(r.voucherCodeMasked).toBe('••••9876');
     expect(r.messageStatus).toBe('delivered');
     expect(r.messageDeliveredAt).toBe('2026-11-16T10:00:00Z');
     expect(r.canResend).toBe(true);
+    expect(r.warning).toBe('w');
     expect(r.rowNumber).toBeNull();
+    expect(normalizeRow({ voucherCodeMasked: 'SECRETCODE9876' }).voucherCodeMasked).toBe('••••9876');
+    expect(normalizeRow({ status: 'QUEUED', hubbleOrderId: null, hubbleReferenceId: 'vdabc' }).hubbleRef).toBe('vdabc');
+    expect(normalizeRow({ status: 'BUY_FAILED', invalidReason: null, buyFailureReason: 'Out of stock' }).reason).toBe('Out of stock');
+    const pend = normalizeRow({ status: 'PENDING_RECONCILE', pendingReason: 'HUBBLE_PROCESSING', retryAvailableAt: '2026-11-16T12:00:00Z' });
+    expect(pend.reason).toMatch(/still processing/);
+    expect(pend.retryAvailableAt).toBe('2026-11-16T12:00:00Z');
   });
 
-  it('rows page: bare array or {rows,total,pageSize}; missing total null', () => {
-    expect(normalizeRowsPage([{ id: 'a' }], 1).total).toBe(1);
-    expect(normalizeRowsPage({ rows: [{ id: 'a' }], total: 120, pageSize: 50, page: 2 }, 2)).toMatchObject({ total: 120, pageSize: 50, page: 2 });
+  it('rows page: {rows,total,page,pageSize}; missing total null', () => {
+    expect(normalizeRowsPage({ rows: [{ id: 'a' }], total: 120, pageSize: 100, page: 2 }, 2)).toMatchObject({ total: 120, pageSize: 100, page: 2 });
     expect(normalizeRowsPage({ rows: [] }, 1).total).toBeNull();
   });
 
-  it('clients: {clients:[…]} with slug ids, sorted by name', () => {
-    expect(normalizeClients({ clients: [{ slug: 'z', internalName: 'Zed' }, { slug: 'b', displayName: 'Bajaj' }] }))
+  it('brand: live limits + availability', () => {
+    expect(normalizeBrand({ key: 'FK', label: 'Flipkart', productId: 'p', minAmount: null, maxAmount: null, denominations: null, denominationType: null, available: false, unavailableReason: 'Hubble timeout' }))
+      .toMatchObject({ available: false, unavailableReason: 'Hubble timeout', denominationType: null });
+  });
+
+  it('clients: {clients:[…]} → Client.id (= slug), sorted by name', () => {
+    expect(normalizeClients({ clients: [{ id: 'z', slug: 'z', internalName: 'Zed' }, { id: 'b', slug: 'b', displayName: 'Bajaj' }] }))
       .toEqual([{ id: 'b', name: 'Bajaj' }, { id: 'z', name: 'Zed' }]);
+  });
+});
+
+describe('vdApi.process — single-flight per campaign', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('shares one request between callers until it settles, then allows the next', async () => {
+    let release: (v: unknown) => void = () => {};
+    const fetchMock = vi.fn(() => new Promise((res) => { release = res; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const a = vdApi.process('c1');
+    const b = vdApi.process('c1');
+    expect(a).toBe(b);
+    expect(isProcessInFlight('c1')).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]).toEqual(['/api/admin/voucher-dispersal/campaigns/c1/process', expect.objectContaining({ method: 'POST' })]);
+    release({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data: { pass: {}, campaign: { id: 'c1', status: 'PROCESSING' }, hubbleConfigured: true, summary: { bought: 1 } } }) });
+    const r = await a;
+    expect(r.ok && r.data.summary.bought).toBe(1);
+    expect(isProcessInFlight('c1')).toBe(false);
+    void vdApi.process('c1');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

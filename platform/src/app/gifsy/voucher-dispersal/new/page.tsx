@@ -7,6 +7,8 @@
    attempt ended in a network error / 5xx: then the outcome is unknown, the "nothing bought" copy is
    withdrawn, Buy stays disabled, and the campaign is re-fetched to find out what actually happened.
    After create the URL becomes ?campaign=<id>, so refresh / back resumes the same draft.
+   A successful confirm also fires ONE POST /process (single-flight, not awaited) so buying starts at
+   once on Cloud Run; the campaign page keeps nudging while it is open.
 ──────────────────────────────────────────────────────────────────────────────────────── */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -16,7 +18,7 @@ import { ArrowLeft, FileSpreadsheet, Loader2, Upload } from 'lucide-react';
 import {
   ROW_STATUS_TONE, billedToText, checkUploadFile, confirmBlock, confirmDialogTitle, confirmPayload, defaultProgramLabel,
   fetchBillableClients, formatCount, formatRupees, isOverBudget, isSetupCampaign, isUncertainFailure, plural, rowStatusText,
-  validateCreateForm, vdApi,
+  validateCreateForm, vdApi, VD_NAME_MAX, VD_NOTE_MAX, VD_PROGRAM_LABEL_MAX,
   type CreateForm, type RowStatus, type VdBrand, type VdCampaign, type VdClient, type VdPreview,
 } from '@/lib/voucher-dispersal';
 import { ConfirmDialog, ErrorPanel, LoadingBlock, StatusChip, TemplateDownloadButton } from '@/components/voucher-dispersal/vd-ui';
@@ -31,7 +33,7 @@ const STEPS: { key: Step; label: string }[] = [
 /** After a confirm attempt: idle · checking (re-fetching after an unknown outcome) · uncertain (re-fetch failed) · clear (re-fetch proved still in setup). */
 type ConfirmState = 'idle' | 'checking' | 'uncertain' | 'clear';
 
-const ACCEPT = '.xlsx,.xls,.csv';
+const ACCEPT = '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const PAGE_SIZE = 50;
 
 const NOTHING_SPENT = 'Nothing has been bought or sent yet — vouchers are only bought after you confirm.';
@@ -73,11 +75,15 @@ function BrandsHelp({ brands, error, onRetry }: { brands: VdBrand[] | null; erro
       <summary className="cursor-pointer font-semibold text-white/80">Brands you can use in the file ({brands.length})</summary>
       <ul className="mt-2 space-y-1">
         {brands.map((b) => (
-          <li key={b.key}>
+          <li key={b.key} data-testid={`vd-brand-${b.key}`}>
             <span className="font-mono text-white">{b.key}</span> — {b.label}:{' '}
-            {b.denominations && b.denominations.length > 0
-              ? `only ${b.denominations.map((d) => formatRupees(d)).join(', ')}`
-              : `${formatRupees(b.minAmount)} to ${formatRupees(b.maxAmount)}`}
+            {b.available === false
+              ? <span className="text-amber-300">not available right now ({b.unavailableReason ?? 'Hubble did not return its limits'}) — rows for it will be invalid; upload again later.</span>
+              : b.denominations && b.denominations.length > 0
+                ? `only ${b.denominations.map((d) => formatRupees(d)).join(', ')}`
+                : b.denominationType === 'FIXED'
+                  ? <span className="text-amber-300">fixed amounts, but Hubble did not list them — rows for it will be invalid; try later.</span>
+                  : `${formatRupees(b.minAmount)} to ${formatRupees(b.maxAmount)}`}
           </li>
         ))}
       </ul>
@@ -268,6 +274,8 @@ function NewCampaignFlow() {
     setConfirming(false);
     if (r.ok) {
       setDialogOpen(false);
+      // Nudge processing right away (single-flight; the result is not awaited — the campaign page shows progress).
+      void vdApi.process(campaign.id);
       router.push(`/gifsy/voucher-dispersal/${encodeURIComponent(campaign.id)}`);
       return;
     }
@@ -316,7 +324,7 @@ function NewCampaignFlow() {
           <form onSubmit={onCreate} noValidate className="grid gap-4 max-w-xl">
             <div>
               <label htmlFor="vd-name" className="block text-xs font-semibold text-white/70 mb-1">Campaign name</label>
-              <input id="vd-name" className={inputCls} value={form.name} disabled={creating}
+              <input id="vd-name" className={inputCls} value={form.name} disabled={creating} maxLength={VD_NAME_MAX}
                 aria-invalid={showErrors && !!errors.name} aria-describedby={showErrors && errors.name ? 'vd-name-err' : undefined}
                 onChange={(e) => setForm({ ...form, name: e.target.value })} />
               <FieldError id="vd-name-err" msg={showErrors ? errors.name : undefined} />
@@ -337,7 +345,7 @@ function NewCampaignFlow() {
             </div>
             <div>
               <label htmlFor="vd-program" className="block text-xs font-semibold text-white/70 mb-1">Programme name shown in the WhatsApp message</label>
-              <input id="vd-program" className={inputCls} value={form.programLabel} disabled={creating} placeholder="e.g. Bajaj Loyalty"
+              <input id="vd-program" className={inputCls} value={form.programLabel} disabled={creating} placeholder="e.g. Bajaj Loyalty" maxLength={VD_PROGRAM_LABEL_MAX}
                 aria-invalid={showErrors && !!errors.programLabel}
                 aria-describedby={`vd-program-help${showErrors && errors.programLabel ? ' vd-program-err' : ''}`}
                 onChange={(e) => { setLabelTouched(true); setForm({ ...form, programLabel: e.target.value }); }} />
@@ -346,17 +354,19 @@ function NewCampaignFlow() {
             </div>
             <div>
               <label htmlFor="vd-budget" className="block text-xs font-semibold text-white/70 mb-1">Budget (₹)</label>
-              <input id="vd-budget" className={inputCls} inputMode="decimal" value={form.budgetRupees} disabled={creating}
+              <input id="vd-budget" className={inputCls} inputMode="numeric" value={form.budgetRupees} disabled={creating}
                 aria-invalid={showErrors && !!errors.budgetRupees}
                 aria-describedby={`vd-budget-help${showErrors && errors.budgetRupees ? ' vd-budget-err' : ''}`}
-                onChange={(e) => setForm({ ...form, budgetRupees: e.target.value.replace(/[^\d.]/g, '') })} />
-              <p id="vd-budget-help" className="text-[11px] text-white/40 mt-1">The purchase is blocked if the valid rows add up to more than this.</p>
+                onChange={(e) => setForm({ ...form, budgetRupees: e.target.value.replace(/[^\d]/g, '') })} />
+              <p id="vd-budget-help" className="text-[11px] text-white/40 mt-1">Whole rupees. The purchase is blocked if the valid rows add up to more than this.</p>
               <FieldError id="vd-budget-err" msg={showErrors ? errors.budgetRupees : undefined} />
             </div>
             <div>
               <label htmlFor="vd-note" className="block text-xs font-semibold text-white/70 mb-1">Note (optional, internal)</label>
-              <textarea id="vd-note" rows={2} className={inputCls} value={form.note} disabled={creating}
+              <textarea id="vd-note" rows={2} className={inputCls} value={form.note} disabled={creating} maxLength={VD_NOTE_MAX}
+                aria-invalid={showErrors && !!errors.note} aria-describedby={showErrors && errors.note ? 'vd-note-err' : undefined}
                 onChange={(e) => setForm({ ...form, note: e.target.value })} />
+              <FieldError id="vd-note-err" msg={showErrors ? errors.note : undefined} />
             </div>
             {createError && <ErrorPanel message={createError} testId="vd-create-error" />}
             <div>
@@ -430,7 +440,8 @@ function NewCampaignFlow() {
               <div><dt className="text-[11px] uppercase text-white/50">Valid</dt><dd className="font-bold text-emerald-300" data-testid="vd-sum-valid">{formatCount(s.valid)}</dd></div>
               <div><dt className="text-[11px] uppercase text-white/50">Invalid</dt><dd className={`font-bold ${(s.invalid ?? 0) > 0 ? 'text-red-300' : 'text-white'}`} data-testid="vd-sum-invalid">{formatCount(s.invalid)}</dd></div>
               <div><dt className="text-[11px] uppercase text-white/50">Duplicates</dt><dd className={`font-bold ${(s.duplicates ?? 0) > 0 ? 'text-amber-300' : 'text-white'}`} data-testid="vd-sum-dupes">{formatCount(s.duplicates)}</dd></div>
-              <div className="col-span-2">
+              <div><dt className="text-[11px] uppercase text-white/50">Warnings</dt><dd className={`font-bold ${(s.warningCount ?? 0) > 0 ? 'text-amber-300' : 'text-white'}`} data-testid="vd-sum-warncount">{formatCount(s.warningCount)}</dd></div>
+              <div className="col-span-2 sm:col-span-1">
                 <dt className="text-[11px] uppercase text-white/50">Total vs budget</dt>
                 <dd className={`font-bold break-words ${over ? 'text-red-300' : 'text-white'}`} data-testid="vd-sum-total">
                   {formatRupees(s.totalRupees)} / {formatRupees(s.budgetRupees)}
@@ -442,6 +453,13 @@ function NewCampaignFlow() {
                 By brand: {s.perBrand.map((b) => `${b.brand} ${formatCount(b.count)}${b.rupees !== null ? ` (${formatRupees(b.rupees)})` : ''}`).join(' · ')}
               </p>
             )}
+            {s.warningCount !== null && s.warningCount > 0 && (
+              <p className="text-xs text-amber-200 mt-2" data-testid="vd-sum-warnings">
+                {plural(s.warningCount, 'valid row')} {s.warningCount === 1 ? 'is a phone that' : 'are phones that'} already got a voucher in another campaign in the last 30 days — see the note on each row. This does not block buying.
+              </p>
+            )}
+            {s.skippedNote && <p className="text-xs text-white/70 mt-2" data-testid="vd-sum-skipped">{s.skippedNote}.</p>}
+            {s.hiddenNote && <p className="text-xs text-amber-200 mt-2" data-testid="vd-sum-hidden">{s.hiddenNote}.</p>}
             {skipped > 0 && (
               <p className="text-xs text-amber-200 mt-2">
                 {plural(s.invalid ?? 0, 'invalid row')} and {plural(s.duplicates ?? 0, 'duplicate row')} will NOT get a voucher. Each one is listed below with the reason.
@@ -486,6 +504,11 @@ function NewCampaignFlow() {
                     <td className="px-3 py-2">
                       <StatusChip label={rowStatusText(r)} tone={ROW_STATUS_TONE[r.status]} />
                       {r.invalidReason && <p className="text-xs text-red-200 mt-1 break-words">{r.invalidReason}</p>}
+                      {r.warning && (
+                        <p className="text-xs text-amber-200 mt-1 break-words" data-testid={`vd-prow-warning-${r.rowNumber ?? `i${i}`}`}>
+                          <span className="font-semibold">Note:</span> {r.warning}
+                        </p>
+                      )}
                       {!r.invalidReason && (r.status === 'INVALID' || r.status === 'DUPLICATE') && (
                         <p className="text-xs text-amber-200 mt-1">
                           {r.status === 'DUPLICATE' ? 'Same phone appears earlier in the file.' : 'The server gave no reason.'}

@@ -39,13 +39,14 @@ import GifsyLayout from '../../layout';
 const ok = (data: unknown) => ({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data }) });
 const fail = (status: number, error: string) => ({ ok: false, status, json: () => Promise.resolve({ success: false, error }) });
 
+// GET /campaigns as built: a plain array of campaigns, each carrying `summary` (purchase counts only).
 const CAMPAIGNS = [
   {
-    campaign: { id: 'c1', name: 'Diwali thank-you', programLabel: 'Bajaj Loyalty', billedToClientName: 'Bajaj', status: 'COMPLETED_WITH_ERRORS', budgetRupees: 10000, createdAt: '2026-11-10T10:00:00Z' },
-    summary: { bought: 18, pending: 0, buyFailed: 2, messageSent: 18, delivered: 16, read: 9, messageFailed: 2, spentRupees: 9000 },
+    id: 'c1', name: 'Diwali thank-you', programLabel: 'Bajaj Loyalty', billedToClient: { id: 'bajaj', name: 'Bajaj' }, status: 'COMPLETED_WITH_ERRORS', budgetRupees: 10000, createdAt: '2026-11-10T10:00:00Z',
+    summary: { total: 22, valid: 20, invalid: 1, duplicates: 1, queued: 0, pending: 0, bought: 18, buyFailed: 2, cancelled: 0, spentRupees: 9000 },
   },
   {
-    campaign: { id: 'c2', name: 'Draft one', programLabel: 'Gifsy Rewards', billedToClientId: null, status: 'PREVIEWED', budgetRupees: 500 },
+    id: 'c2', name: 'Draft one', programLabel: 'Gifsy Rewards', billedToClient: null, status: 'PREVIEWED', budgetRupees: 500,
     summary: {},
   },
 ];
@@ -58,12 +59,15 @@ describe('Voucher Dispersal list', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<ListPage />);
     expect(await screen.findByText('Diwali thank-you')).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith('/api/admin/voucher-dispersal/campaigns', {});
+    expect(fetchMock).toHaveBeenCalledWith('/api/admin/voucher-dispersal/campaigns?page=1', {});
     expect(screen.getByTestId('vd-status-c1')).toHaveTextContent('Completed with errors');
     const c1 = screen.getByTestId('vd-campaign-c1');
     expect(c1).toHaveTextContent('Programme: Bajaj Loyalty · Billed to: Bajaj');
+    expect(c1).toHaveTextContent('Valid rows20');
     expect(c1).toHaveTextContent('Buy failed2');
-    expect(c1).toHaveTextContent('Msg failed2');
+    // The list endpoint sends no WhatsApp counts → none are shown here (they are on the campaign page).
+    expect(c1).not.toHaveTextContent('Delivered');
+    expect(c1).not.toHaveTextContent('Msg failed');
     expect(c1).toHaveTextContent('₹9,000 / ₹10,000');
     // Unconfirmed campaign: honest "nothing bought" + resume link, billed-to dash.
     const c2 = screen.getByTestId('vd-campaign-c2');
@@ -75,7 +79,7 @@ describe('Voucher Dispersal list', () => {
 
   it('unknown status shows the raw value (no setup wording); missing numbers show "—"; billed-to id fallback', { timeout: 20000 }, async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([
-      { campaign: { id: 'c3', name: 'Odd one', programLabel: 'X', billedToClientId: 'bajaj', status: 'PAUSED' }, summary: { bought: 4 } },
+      { id: 'c3', name: 'Odd one', programLabel: 'X', billedToClient: { id: 'bajaj', name: null }, status: 'PAUSED', summary: { bought: 4 } },
     ]))));
     render(<ListPage />);
     const c3 = await screen.findByTestId('vd-campaign-c3');
@@ -83,7 +87,7 @@ describe('Voucher Dispersal list', () => {
     expect(c3).not.toHaveTextContent('nothing has been bought');
     expect(c3).toHaveTextContent('Billed to: bajaj');
     expect(c3).toHaveTextContent('Bought4');
-    expect(c3).toHaveTextContent('Delivered—');
+    expect(c3).toHaveTextContent('Pending—');
     expect(c3).toHaveTextContent('— / —');
   });
 
@@ -96,6 +100,20 @@ describe('Voucher Dispersal list', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Refresh' }));
     expect(await screen.findByTestId('vd-refresh-error')).toHaveTextContent('Bad gateway');
     expect(screen.getByText('Diwali thank-you')).toBeInTheDocument();
+  });
+
+  it('pages through ?page= (50 per page): Next only when the page is full', { timeout: 20000 }, async () => {
+    const full = Array.from({ length: 50 }, (_, i) => ({ ...CAMPAIGNS[0], id: `p${i}`, name: `Campaign ${i}` }));
+    const fetchMock = vi.fn((url: string) => Promise.resolve(ok(url.endsWith('page=1') ? full : [CAMPAIGNS[0]])));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<ListPage />);
+    await screen.findByText('Campaign 0');
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(await screen.findByText('Diwali thank-you')).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/admin/voucher-dispersal/campaigns?page=2', {});
+    expect(screen.getByText('Page 2')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
   });
 
   it('empty state', { timeout: 20000 }, async () => {

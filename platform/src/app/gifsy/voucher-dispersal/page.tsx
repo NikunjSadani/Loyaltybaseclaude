@@ -3,7 +3,8 @@
 /* ─── Voucher Dispersal — campaign list (/gifsy/voucher-dispersal) ──────────────────
    Platform-level Gifsy-owner tool. Every number on this page comes from
    GET /api/admin/voucher-dispersal/campaigns — nothing is computed or invented here
-   (a number the server did not send shows as "—").
+   (a number the server did not send shows as "—"). The list carries purchase counts only — WhatsApp
+   delivered / read counts are on each campaign's page. 50 campaigns per page (server `?page=`).
 ──────────────────────────────────────────────────────────────────────────────────── */
 
 import React, { useCallback, useEffect, useState } from 'react';
@@ -11,7 +12,7 @@ import Link from 'next/link';
 import { Plus, Ticket, RefreshCw } from 'lucide-react';
 import {
   CAMPAIGN_STATUS_TONE, billedToText, campaignStatusText, formatCount, formatRupees, formatWhen,
-  isSetupCampaign, vdApi, type VdListItem,
+  isSetupCampaign, vdApi, VD_CAMPAIGNS_PAGE_SIZE, type VdListItem,
 } from '@/lib/voucher-dispersal';
 import { ErrorPanel, LoadingBlock, StatusChip, TemplateDownloadButton } from '@/components/voucher-dispersal/vd-ui';
 
@@ -31,15 +32,19 @@ export default function VoucherDispersalListPage() {
   const [items, setItems] = useState<VdListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const seq = React.useRef(0);
 
   const load = useCallback(async () => {
+    const mine = ++seq.current;
     setLoading(true);
     setError(null);
-    const res = await vdApi.listCampaigns();
+    const res = await vdApi.listCampaigns(page);
+    if (mine !== seq.current) return; // a newer page / refresh superseded this reply
     if (res.ok) setItems(res.data);
     else setError(res.error);
     setLoading(false);
-  }, []);
+  }, [page]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -88,7 +93,9 @@ export default function VoucherDispersalListPage() {
               {loading ? 'Refreshing…' : 'Refresh'}
             </button>
           </div>
-          {items.length === 0 ? (
+          {items.length === 0 && page > 1 ? (
+            <p data-testid="vd-empty-page" className="text-sm text-white/60">No more campaigns on this page.</p>
+          ) : items.length === 0 ? (
             <div data-testid="vd-empty" className="rounded-xl border border-white/10 bg-white/5 px-6 py-12 text-center">
               <p className="text-sm font-semibold text-white/80">No campaigns yet</p>
               <p className="text-xs text-white/50 mt-1">Download the template, fill it in, then start a new campaign.</p>
@@ -120,12 +127,11 @@ export default function VoucherDispersalListPage() {
                       </p>
                     ) : (
                       <dl className="mt-3 grid grid-cols-3 sm:grid-cols-8 gap-3">
+                        <Count label="Valid rows" value={formatCount(s.valid)} />
                         <Count label="Bought" value={formatCount(s.bought)} />
                         <Count label="Pending" value={formatCount(s.pending)} alert={gt0(s.pending) ? 'warning' : undefined} />
                         <Count label="Buy failed" value={formatCount(s.buyFailed)} alert={gt0(s.buyFailed) ? 'danger' : undefined} />
-                        <Count label="Delivered" value={formatCount(s.delivered)} />
-                        <Count label="Read" value={formatCount(s.read)} />
-                        <Count label="Msg failed" value={formatCount(s.messageFailed)} alert={gt0(s.messageFailed) ? 'danger' : undefined} />
+                        <Count label="Cancelled" value={formatCount(s.cancelled)} />
                         <Count label="Spent / budget" value={`${formatRupees(s.spentRupees)} / ${formatRupees(c.budgetRupees)}`} wide />
                       </dl>
                     )}
@@ -133,6 +139,13 @@ export default function VoucherDispersalListPage() {
                 );
               })}
             </ul>
+          )}
+          {(page > 1 || items.length >= VD_CAMPAIGNS_PAGE_SIZE) && (
+            <nav aria-label="Campaign pages" className="flex items-center gap-3 text-xs text-white/70">
+              <button type="button" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)} className="rounded border border-white/15 px-2 py-1 disabled:opacity-40">Previous</button>
+              <span>Page {page}</span>
+              <button type="button" disabled={items.length < VD_CAMPAIGNS_PAGE_SIZE || loading} onClick={() => setPage(page + 1)} className="rounded border border-white/15 px-2 py-1 disabled:opacity-40">Next</button>
+            </nav>
           )}
         </>
       )}

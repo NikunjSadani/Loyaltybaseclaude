@@ -4,7 +4,9 @@
  * Tiles + rows (reasons, masked codes, "—" for missing numbers) · resend gated by canResend ·
  * retry refusal verbatim · unknown outcome (5xx / network) locks the action until a refresh lands ·
  * only the latest response is applied · unknown status keeps polling · 30-min post-completion
- * polling window · paused while the tab is hidden · refresh errors are shown.
+ * polling window · paused while the tab is hidden · refresh errors are shown · POST /process nudge
+ * (single-flight, 4xx quiet, repeated 5xx → non-blocking note) · cross-campaign warnings · pending codes.
+ * Row / campaign fixtures use the server's exact field names (rowView / campaignView).
  * Run: npx vitest run "src/app/gifsy/voucher-dispersal/[id]/__tests__/detail-page.test.tsx"
  */
 import React from 'react';
@@ -28,26 +30,31 @@ const ok = (data: unknown) => ({ ok: true, status: 200, json: () => Promise.reso
 const fail = (status: number, error: string) => ({ ok: false, status, json: () => Promise.resolve({ success: false, error }) });
 
 const campaign = (status: string, extra: Record<string, unknown> = {}) => ({
-  campaign: { id: 'c1', name: 'Diwali', programLabel: 'Bajaj Loyalty', billedToClientName: 'Bajaj', status, budgetRupees: 5000, note: 'Q3 thank-you', ...extra },
+  campaign: { id: 'c1', name: 'Diwali', programLabel: 'Bajaj Loyalty', billedToClient: { id: 'bajaj', name: 'Bajaj' }, status, budgetRupees: 5000, note: 'Q3 thank-you', ...extra },
+  hubbleConfigured: true,
   summary: { bought: 2, pending: 1, buyFailed: 1, messageSent: 2, delivered: 1, read: 0, messageFailed: 1, spentRupees: 1000 },
 });
 const ROWS = {
   total: 4, page: 1, pageSize: 50,
   rows: [
-    { id: 'r1', rowNumber: 2, phone: '9876543210', name: 'Asha', amount: 500, brand: 'AMAZON', status: 'BOUGHT', hubbleRef: 'HB-001', voucherCode: 'ABCD-EFGH-1234', messageStatus: 'delivered', messageSentAt: '2026-11-16T10:00:00Z', messageDeliveredAt: '2026-11-16T10:01:00Z', canResend: true },
-    { id: 'r2', rowNumber: 3, phone: '9876543211', name: 'Ravi', amount: 500, brand: 'AMAZON', status: 'BUY_FAILED', invalidReason: null, buyError: 'Hubble: product out of stock' },
-    { id: 'r3', rowNumber: 4, phone: '9876543212', name: 'Meera', amount: 500, brand: 'AMAZON', status: 'PENDING_RECONCILE' },
-    { id: 'r4', rowNumber: 5, phone: '9876543213', name: 'Kiran', amount: 500, brand: 'AMAZON', status: 'BOUGHT', hubbleRef: 'HB-004', voucherCode: '****9999', messageStatus: 'failed', messageFailedAt: '2026-11-16T10:02:00Z', messageError: 'Number not on WhatsApp', canResend: true },
-    { id: 'r5', rowNumber: 6, phone: '9876543214', name: 'Dev', amount: 500, brand: 'AMAZON', status: 'BOUGHT', voucherCode: 'SHORT1', canResend: false },
+    // r1 / r5 carry RAW codes in voucherCodeMasked on purpose: the UI re-masks defensively.
+    { id: 'r1', rowNumber: 2, phone: '9876543210', name: 'Asha', amount: 500, brand: 'AMAZON', status: 'BOUGHT', hubbleOrderId: 'HB-001', hubbleReferenceId: 'vd001', voucherCodeMasked: 'ABCD-EFGH-1234', messageStatus: 'DELIVERED', messageSentAt: '2026-11-16T10:00:00Z', messageDeliveredAt: '2026-11-16T10:01:00Z', canResend: true, warning: 'Already got a ₹500 Amazon Pay voucher on 01 Nov 2026 in campaign "Earlier"' },
+    { id: 'r2', rowNumber: 3, phone: '9876543211', name: 'Ravi', amount: 500, brand: 'AMAZON', status: 'BUY_FAILED', invalidReason: null, buyFailureReason: 'Hubble: product out of stock', canRetryBuy: true },
+    { id: 'r3', rowNumber: 4, phone: '9876543212', name: 'Meera', amount: 500, brand: 'AMAZON', status: 'PENDING_RECONCILE', canRetryBuy: false },
+    { id: 'r4', rowNumber: 5, phone: '9876543213', name: 'Kiran', amount: 500, brand: 'AMAZON', status: 'BOUGHT', hubbleOrderId: 'HB-004', voucherCodeMasked: '••••9999', messageStatus: 'FAILED', messageFailedAt: '2026-11-16T10:02:00Z', messageError: 'Number not on WhatsApp', canResend: true },
+    { id: 'r5', rowNumber: 6, phone: '9876543214', name: 'Dev', amount: 500, brand: 'AMAZON', status: 'BOUGHT', voucherCodeMasked: 'SHORT1', canResend: false },
+    { id: 'r6', rowNumber: 7, phone: '9876543215', name: 'Nila', amount: 500, brand: 'AMAZON', status: 'PENDING_RECONCILE', pendingReason: 'STALE_BUYING', retryAvailableAt: '2026-11-16T12:00:00Z', canRetryBuy: false },
   ],
 };
 
 let campaignQueue: unknown[];
 let rowsHandler: (url: string) => Promise<unknown>;
 let actionResponse: unknown | (() => Promise<unknown>);
+let processResponse: unknown | (() => Promise<unknown>);
 let fetchMock: ReturnType<typeof vi.fn>;
 const callsTo = (pred: (u: string) => boolean) => fetchMock.mock.calls.filter((c) => pred(String(c[0])));
 const campaignCalls = () => callsTo((u) => u === BASE).length;
+const processCalls = () => callsTo((u) => u === `${BASE}/process`).length;
 
 function installFetch() {
   fetchMock = vi.fn((url: string) => {
@@ -56,6 +63,9 @@ function installFetch() {
       return Promise.resolve(next);
     }
     if (url.startsWith(`${BASE}/rows?`)) return rowsHandler(url);
+    if (url === `${BASE}/process`) {
+      return typeof processResponse === 'function' ? (processResponse as () => Promise<unknown>)() : Promise.resolve(processResponse);
+    }
     if (url.endsWith('/resend') || url.endsWith('/retry-buy') || url.endsWith('/cancel')) {
       return typeof actionResponse === 'function' ? (actionResponse as () => Promise<unknown>)() : Promise.resolve(actionResponse);
     }
@@ -68,6 +78,7 @@ beforeEach(() => {
   campaignQueue = [ok(campaign('COMPLETED_WITH_ERRORS'))];
   rowsHandler = () => Promise.resolve(ok(ROWS));
   actionResponse = ok({});
+  processResponse = ok({ pass: {}, ...campaign('PROCESSING') });
   installFetch();
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
@@ -97,6 +108,11 @@ describe('Voucher campaign detail', () => {
     expect(screen.getByTestId('vd-row-r2')).toHaveTextContent('Hubble: product out of stock');
     expect(screen.getByTestId('vd-row-r3')).toHaveTextContent('Hubble has not confirmed whether this purchase went through');
     expect(screen.getByTestId('vd-row-r4')).toHaveTextContent('Number not on WhatsApp');
+    // Server pending code in plain words + when Retry opens; cross-campaign warning as an amber note.
+    expect(screen.getByTestId('vd-row-r6')).toHaveTextContent('The purchase call was interrupted before Hubble answered');
+    expect(screen.getByTestId('vd-row-r6')).toHaveTextContent('Retry available from');
+    expect(screen.getByTestId('vd-row-r6')).not.toHaveTextContent('STALE_BUYING');
+    expect(screen.getByTestId('vd-row-warning-r1')).toHaveTextContent('Already got a ₹500 Amazon Pay voucher on 01 Nov 2026 in campaign "Earlier"');
 
     // Resend follows the server's canResend; retry only on BUY_FAILED.
     expect(screen.getByTestId('vd-resend-r1')).toBeInTheDocument();
@@ -108,6 +124,22 @@ describe('Voucher campaign detail', () => {
     // Completed (no completedAt, never seen live here) → no cancel, not refreshing.
     expect(screen.queryByTestId('vd-cancel')).not.toBeInTheDocument();
     expect(screen.getByTestId('vd-live')).toHaveTextContent('Not refreshing automatically');
+    // Not live / not in the settling window → no processing nudge.
+    expect(processCalls()).toBe(0);
+  });
+
+  it('retry purchase success shows the server\'s own message', { timeout: 20000 }, async () => {
+    actionResponse = ok({ message: 'Re-queued with the same reference — it will be bought shortly.', row: ROWS.rows[1] });
+    render(<DetailPage />);
+    fireEvent.click(await screen.findByTestId('vd-retry-r2'));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByTestId('vd-dialog-confirm'));
+    expect(await screen.findByTestId('vd-notice')).toHaveTextContent('Row 3: Re-queued with the same reference — it will be bought shortly.');
+  });
+
+  it('Hubble not configured on a live campaign → amber note', { timeout: 20000 }, async () => {
+    campaignQueue = [ok({ ...campaign('PROCESSING'), hubbleConfigured: false })];
+    render(<DetailPage />);
+    expect(await screen.findByTestId('vd-hubble-off')).toHaveTextContent('Hubble is not configured on this server');
   });
 
   it('missing numbers show "—", never 0', { timeout: 20000 }, async () => {
@@ -200,6 +232,17 @@ describe('Voucher campaign detail', () => {
     fireEvent.click(within(dialog).getByTestId('vd-dialog-confirm'));
     await waitFor(() => expect(callsTo((u) => u.endsWith('/c1/cancel'))).toHaveLength(1));
     expect(await screen.findByTestId('vd-campaign-status')).toHaveTextContent('Cancelled');
+    expect(screen.getByTestId('vd-notice')).toHaveTextContent('Campaign cancelled.');
+  });
+
+  it('cancel reply counts are reported honestly', { timeout: 20000 }, async () => {
+    campaignQueue = [ok(campaign('PROCESSING')), ok(campaign('CANCELLED'))];
+    actionResponse = ok({ campaign: campaign('CANCELLED').campaign, cancelledRows: 5, stillWithHubble: 1, alreadyBought: 2 });
+    render(<DetailPage />);
+    fireEvent.click(await screen.findByTestId('vd-cancel'));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByTestId('vd-dialog-confirm'));
+    expect(await screen.findByTestId('vd-notice'))
+      .toHaveTextContent('Campaign cancelled: 5 rows will not be bought; 1 purchase already with Hubble may still complete; 2 vouchers already bought stay bought.');
   });
 
   it('unknown campaign / row status: raw value shown, never "Invalid" or setup wording, keeps refreshing', { timeout: 20000 }, async () => {
@@ -320,6 +363,62 @@ describe('Voucher campaign detail — polling', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(4500); });
     expect(campaignCalls()).toBe(3);
     expect(screen.queryByTestId('vd-poll-error')).not.toBeInTheDocument();
+  });
+
+  it('nudges POST /process alongside polling while PROCESSING — never two in flight', { timeout: 20000 }, async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    campaignQueue = [ok(campaign('PROCESSING'))];
+    let releaseProcess: () => void = () => {};
+    processResponse = () => new Promise((res) => { releaseProcess = () => res(ok({ pass: {}, ...campaign('PROCESSING') })); });
+    render(<DetailPage />);
+    await flush();
+    expect(processCalls()).toBe(1);
+    // Two more polls while the first /process is still running → no second /process.
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(4500); });
+    expect(campaignCalls()).toBe(3);
+    expect(processCalls()).toBe(1);
+    await act(async () => { releaseProcess(); });
+    // The next poll nudges again.
+    await act(async () => { await vi.advanceTimersByTimeAsync(6750); });
+    expect(processCalls()).toBe(2);
+    // Settle it: the single-flight slot is shared per tab (module state) — never leak it into the next test.
+    await act(async () => { releaseProcess(); });
+  });
+
+  it('/process: 4xx is ignored quietly; repeated 5xx shows a non-blocking note; success clears it', { timeout: 20000 }, async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    campaignQueue = [ok(campaign('PROCESSING'))];
+    const replies = [fail(409, 'Campaign is not processing'), fail(409, 'Campaign is not processing'), fail(502, 'Bad gateway'), fail(503, 'Unavailable'), ok({ pass: {}, ...campaign('PROCESSING') })];
+    processResponse = () => Promise.resolve(replies.length > 1 ? replies.shift() : replies[0]);
+    render(<DetailPage />);
+    await flush();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(processCalls()).toBe(2);
+    expect(screen.queryByTestId('vd-process-note')).not.toBeInTheDocument(); // two 4xx → quiet
+    await act(async () => { await vi.advanceTimersByTimeAsync(4500); });
+    expect(screen.queryByTestId('vd-process-note')).not.toBeInTheDocument(); // one 5xx → still quiet
+    await act(async () => { await vi.advanceTimersByTimeAsync(6750); });
+    expect(screen.getByTestId('vd-process-note')).toHaveTextContent('Unavailable');
+    expect(screen.getByTestId('vd-process-note')).toHaveTextContent("scheduler keeps working");
+    expect(screen.getByTestId('vd-row-r1')).toBeInTheDocument(); // non-blocking
+    await act(async () => { await vi.advanceTimersByTimeAsync(10125); });
+    expect(screen.queryByTestId('vd-process-note')).not.toBeInTheDocument();
+  });
+
+  it('nudges during the 30-min settling window, not after it', { timeout: 20000 }, async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(new Date('2026-11-16T10:10:00Z'));
+    campaignQueue = [ok(campaign('COMPLETED', { completedAt: '2026-11-16T10:00:00Z' }))];
+    const { unmount } = render(<DetailPage />);
+    await flush();
+    expect(processCalls()).toBe(1);
+    unmount();
+    vi.setSystemTime(new Date('2026-11-16T10:40:00Z'));
+    fetchMock.mockClear();
+    render(<DetailPage />);
+    await flush();
+    expect(processCalls()).toBe(0);
   });
 
   it('pauses while the tab is hidden and resumes when visible', { timeout: 20000 }, async () => {

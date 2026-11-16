@@ -6,23 +6,27 @@
  * lives in the /gifsy console and never depends on an assumed tenant. A campaign may optionally
  * be billed to a client (billedToClientId) — that only labels it.
  *
- * Contract (all GIFSY_ADMIN only; proxied /api/admin/voucher-dispersal/* → /v1/admin/voucher-dispersal/*):
- *   GET  /brands                                   → VdBrand[]
+ * Contract AS BUILT (api/src/voucher-dispersal — see platform/docs/plans/VOUCHER-DISPERSAL.md §3).
+ * All GIFSY_ADMIN only; proxied /api/admin/voucher-dispersal/* → /v1/admin/voucher-dispersal/*;
+ * every JSON reply is the `{ success, data }` envelope (errors `{ success:false, error }`):
+ *   GET  /brands                                   → brand[]
  *   GET  /template.xlsx                            → file
  *   POST /campaigns {name, programLabel, billedToClientId?, note?, budgetRupees} → campaign
- *   POST /campaigns/:id/upload (multipart `file`)  → { campaign, rows, summary, previewId }
+ *   POST /campaigns/:id/upload (multipart `file`, .xlsx only) → { previewId, campaign, rows, summary }
  *   POST /campaigns/:id/confirm {previewId, expectedValidCount, expectedTotalRupees} → campaign
  *        (the preview version + numbers the admin saw; the server refuses if its preview differs → re-upload)
- *   GET  /campaigns                                → list with summary counts
- *   GET  /campaigns/:id                            → campaign + delivery summary
- *   GET  /campaigns/:id/rows?status=&page=         → rows (voucher code masked; optional canResend / canRetryBuy)
+ *   POST /campaigns/:id/process                    → { pass, campaign, hubbleConfigured, summary } (bounded pass)
+ *   GET  /campaigns?page=                          → campaign[] (each carrying `summary`), 50 per page, newest first
+ *   GET  /campaigns/:id                            → { campaign, hubbleConfigured, summary }
+ *   GET  /campaigns/:id/rows?status=&page=         → { rows, total, page, pageSize } (code masked by the server)
  *   GET  /campaigns/:id/report.xlsx                → file
- *   POST /campaigns/:id/rows/:rowId/resend
- *   POST /campaigns/:id/rows/:rowId/retry-buy
- *   POST /campaigns/:id/cancel
+ *   POST /campaigns/:id/rows/:rowId/resend         → row
+ *   POST /campaigns/:id/rows/:rowId/retry-buy      → { message, row }
+ *   POST /campaigns/:id/cancel                     → { campaign, cancelledRows, stillWithHubble, alreadyBought }
  *
- * The normalisers are tolerant of small shape differences (envelope vs bare body, nested vs flat
- * summary, a few field-name aliases) but they NEVER invent data:
+ * The normalisers read the server's field names EXACTLY (no aliases) — the contract test
+ * (src/lib/__tests__/voucher-dispersal.contract.test.ts) runs them over a fixture produced by the real
+ * server code and fails if any field they read is missing. They NEVER invent data:
  *   - a number the server did not send is `null` and renders as "—" (never 0);
  *   - a status the server sent that this UI does not know is UNKNOWN and renders as
  *     "Unknown status: X" (never "Invalid", never setup / nothing-spent wording) and keeps polling.
@@ -125,6 +129,23 @@ export const MESSAGE_STATUS_TONE: Record<MessageStatus, Tone> = {
 export const PENDING_RECONCILE_NOTE =
   'Hubble has not confirmed whether this purchase went through. It is not counted as bought or failed until it is reconciled.';
 
+/**
+ * The server's `pendingReason` is a code (processor `markPending`). Plain words for each; an unknown
+ * code still shows the generic note plus the raw code (never hidden).
+ */
+export function pendingReasonText(code: string | null): string {
+  if (!code) return PENDING_RECONCILE_NOTE;
+  const c = code.toUpperCase();
+  const tail = ' It is checked with Hubble automatically and is not counted as bought or failed until then.';
+  if (c === 'STALE_BUYING') return `The purchase call was interrupted before Hubble answered.${tail}`;
+  if (c === 'HUBBLE_PROCESSING') return `Hubble is still processing this order.${tail}`;
+  if (c === 'HUBBLE_SUCCESS_NO_CODE') return `Hubble reported success but has not returned the voucher code yet.${tail}`;
+  if (c === 'HUBBLE_INDETERMINATE' || c === 'UNEXPECTED') return `Hubble did not give a clear answer (timeout or server error).${tail}`;
+  if (c === 'HUBBLE_REJECTED_UNVERIFIED') return `Hubble refused the order, but we could not yet verify that no order exists.${tail}`;
+  if (c.startsWith('HUBBLE_UNKNOWN_STATUS')) return `Hubble returned an unexpected status (${code.split(':').slice(1).join(':') || 'none'}).${tail}`;
+  return `${PENDING_RECONCILE_NOTE} (${code})`;
+}
+
 // ─── Shapes ─────────────────────────────────────────────────────────────────────
 
 export interface VdBrand {
@@ -134,6 +155,11 @@ export interface VdBrand {
   minAmount: number | null;
   maxAmount: number | null;
   denominations: number[] | null;
+  /** FIXED / FLEXIBLE as Hubble reports it LIVE; null when Hubble could not be asked. */
+  denominationType: string | null;
+  /** false = Hubble could not return this brand's limits → its rows are INVALID until it can. */
+  available: boolean | null;
+  unavailableReason: string | null;
 }
 
 export interface VdCampaign {
@@ -147,28 +173,38 @@ export interface VdCampaign {
   status: CampaignStatus;
   /** The status exactly as the server sent it (shown when UNKNOWN). */
   rawStatus: string;
+  sourceFileName: string | null;
   createdAt: string | null;
   confirmedAt: string | null;
+  cancelledAt: string | null;
   completedAt: string | null;
   /** Server's own verdict, when it sends one; otherwise the status rule below decides. */
   canCancel: boolean | null;
 }
 
-/** Every count is `null` when the server did not send it (rendered "—", never 0). */
+/**
+ * Every count is `null` when the server did not send it (rendered "—", never 0). The LIST endpoint
+ * sends purchase counts only (no WhatsApp counts) — those stay null for list items.
+ */
 export interface VdDeliverySummary {
+  valid: number | null;
   bought: number | null;
   pending: number | null;
   buyFailed: number | null;
+  cancelled: number | null;
   messageSent: number | null;
   delivered: number | null;
   read: number | null;
   messageFailed: number | null;
+  messageNotSent: number | null;
   spentRupees: number | null;
 }
 
 export interface VdListItem {
   campaign: VdCampaign;
   summary: VdDeliverySummary;
+  /** Detail / process only: false = Hubble is not configured on this server (nothing can be bought). */
+  hubbleConfigured: boolean | null;
 }
 
 export interface VdPreviewRow {
@@ -180,6 +216,8 @@ export interface VdPreviewRow {
   status: RowStatus;
   rawStatus: string;
   invalidReason: string | null;
+  /** Cross-campaign warning (does not block): "Already got a ₹X … voucher on <date> in campaign …". */
+  warning: string | null;
 }
 
 export interface VdPerBrand {
@@ -197,6 +235,12 @@ export interface VdPreviewSummary {
   budgetRupees: number | null;
   overBudget: boolean;
   perBrand: VdPerBrand[];
+  /** Valid rows whose phone got a voucher in another campaign in the last 30 days (warning only). */
+  warningCount: number | null;
+  /** Server text for skipped blank / formula-only rows (null when none). */
+  skippedNote: string | null;
+  /** Server text for hidden rows that ARE included (null when none). */
+  hiddenNote: string | null;
 }
 
 export interface VdPreview {
@@ -216,11 +260,14 @@ export interface VdRow {
   brand: string;
   status: RowStatus;
   rawStatus: string;
-  /** Validation / purchase-failure / reconcile reason (server text). */
+  /** Validation / purchase-failure / reconcile reason, in plain words. */
   reason: string | null;
+  /** Cross-campaign warning from the upload (amber note; never blocked anything). */
+  warning: string | null;
+  /** Hubble order id when known, else our Hubble reference. */
   hubbleRef: string | null;
-  /** Always masked before display (see maskVoucherCode). */
-  voucherCode: string | null;
+  /** Masked by the server (`••••` + last 4 of a 12+ char code, else `••••`); re-masked defensively. */
+  voucherCodeMasked: string | null;
   messageStatus: MessageStatus | null;
   messageSentAt: string | null;
   messageDeliveredAt: string | null;
@@ -229,6 +276,8 @@ export interface VdRow {
   messageError: string | null;
   canResend: boolean | null;
   canRetryBuy: boolean | null;
+  /** PENDING_RECONCILE: when Retry becomes available (2 h after the last attempt). */
+  retryAvailableAt: string | null;
 }
 
 export interface VdRowsPage {
@@ -241,6 +290,13 @@ export interface VdRowsPage {
 export interface VdClient {
   id: string;
   name: string;
+}
+
+export interface VdCancelResult {
+  campaign: VdCampaign;
+  cancelledRows: number | null;
+  stillWithHubble: number | null;
+  alreadyBought: number | null;
 }
 
 // ─── Small coercers ─────────────────────────────────────────────────────────────
@@ -271,13 +327,15 @@ function asRowStatus(v: unknown): { status: RowStatus; rawStatus: string } {
   return { status: (ROW_STATUSES as readonly string[]).includes(s) ? (s as RowStatus) : 'UNKNOWN', rawStatus: raw };
 }
 
+/** Server sends SENT | DELIVERED | READ | FAILED | null. */
 function asMessageStatus(v: unknown): MessageStatus | null {
   const s = String(v ?? '').toLowerCase();
   return s === 'sent' || s === 'delivered' || s === 'read' || s === 'failed' ? s : null;
 }
 
-// ─── Normalisers ────────────────────────────────────────────────────────────────
+// ─── Normalisers (exact server field names) ─────────────────────────────────────
 
+/** Server `campaignView`. */
 export function normalizeCampaign(raw: unknown): VdCampaign {
   const o = isObj(raw) ? raw : {};
   const billed = isObj(o.billedToClient) ? o.billedToClient : null;
@@ -285,61 +343,82 @@ export function normalizeCampaign(raw: unknown): VdCampaign {
     id: str(o.id) ?? '',
     name: str(o.name) ?? '',
     programLabel: str(o.programLabel) ?? '',
-    billedToClientId: str(o.billedToClientId) ?? (billed ? str(pick(billed, 'id', 'slug')) : null),
-    billedToClientName:
-      str(o.billedToClientName)
-      ?? (billed ? str(pick(billed, 'displayName', 'name', 'internalName')) : null)
-      ?? null,
+    billedToClientId: billed ? str(billed.id) : null,
+    billedToClientName: billed ? str(billed.name) : null,
     note: str(o.note),
     budgetRupees: num(o.budgetRupees),
     ...asCampaignStatus(o.status),
+    sourceFileName: str(o.sourceFileName),
     createdAt: str(o.createdAt),
     confirmedAt: str(o.confirmedAt),
-    completedAt: str(pick(o, 'completedAt', 'finishedAt')),
+    cancelledAt: str(o.cancelledAt),
+    completedAt: str(o.completedAt),
     canCancel: bool(o.canCancel),
   };
 }
 
-export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
+/** GET /campaigns item summary — purchase counts only (no WhatsApp counts on the list). */
+export function normalizeListSummary(raw: unknown): VdDeliverySummary {
   const o = isObj(raw) ? raw : {};
   return {
+    valid: num(o.valid),
     bought: num(o.bought),
     pending: num(o.pending),
     buyFailed: num(o.buyFailed),
-    messageSent: num(o.messageSent),
-    delivered: num(o.delivered),
-    read: num(o.read),
-    messageFailed: num(o.messageFailed),
+    cancelled: num(o.cancelled),
+    messageSent: null,
+    delivered: null,
+    read: null,
+    messageFailed: null,
+    messageNotSent: null,
     spentRupees: num(o.spentRupees),
   };
 }
 
-/** One list item or detail body: `{campaign, summary}`, or a campaign carrying `summary` / flat counts. */
+/** GET /campaigns/:id (and POST /process) summary — purchase + WhatsApp counts. */
+export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
+  const o = isObj(raw) ? raw : {};
+  return {
+    valid: num(o.valid),
+    bought: num(o.bought),
+    pending: num(o.pending),
+    buyFailed: num(o.buyFailed),
+    cancelled: num(o.cancelled),
+    messageSent: num(o.messageSent),
+    delivered: num(o.delivered),
+    read: num(o.read),
+    messageFailed: num(o.messageFailed),
+    messageNotSent: num(o.messageNotSent),
+    spentRupees: num(o.spentRupees),
+  };
+}
+
+/** One GET /campaigns item: the campaign's own fields + `summary`. */
 export function normalizeListItem(raw: unknown): VdListItem {
   const o = isObj(raw) ? raw : {};
-  const campaignRaw = isObj(o.campaign) ? o.campaign : o;
-  const summaryRaw = isObj(o.summary) ? o.summary : isObj(campaignRaw.summary) ? campaignRaw.summary : campaignRaw;
-  return { campaign: normalizeCampaign(campaignRaw), summary: normalizeDeliverySummary(summaryRaw) };
+  return { campaign: normalizeCampaign(o), summary: normalizeListSummary(o.summary), hubbleConfigured: null };
+}
+
+/** GET /campaigns/:id and POST /campaigns/:id/process: `{ campaign, hubbleConfigured, summary }`. */
+export function normalizeDetail(raw: unknown): VdListItem {
+  const o = isObj(raw) ? raw : {};
+  return {
+    campaign: normalizeCampaign(o.campaign),
+    summary: normalizeDeliverySummary(o.summary),
+    hubbleConfigured: bool(o.hubbleConfigured),
+  };
 }
 
 function normalizePerBrand(raw: unknown): VdPerBrand[] {
-  if (Array.isArray(raw)) {
-    return raw.filter(isObj).map((b) => ({
-      brand: str(pick(b, 'label', 'brand', 'key')) ?? '—',
-      count: num(pick(b, 'count', 'rows', 'valid')),
-      rupees: num(pick(b, 'rupees', 'totalRupees', 'amount')),
-    }));
-  }
-  if (isObj(raw)) {
-    return Object.entries(raw).map(([brand, v]) =>
-      isObj(v)
-        ? { brand, count: num(pick(v, 'count', 'rows', 'valid')), rupees: num(pick(v, 'rupees', 'totalRupees', 'amount')) }
-        : { brand, count: num(v), rupees: null },
-    );
-  }
-  return [];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isObj).map((b) => ({
+    brand: str(b.brand) ?? '—',
+    count: num(b.count),
+    rupees: num(b.totalRupees),
+  }));
 }
 
+/** One upload preview row. */
 export function normalizePreviewRow(raw: unknown): VdPreviewRow {
   const o = isObj(raw) ? raw : {};
   return {
@@ -350,9 +429,11 @@ export function normalizePreviewRow(raw: unknown): VdPreviewRow {
     brand: str(o.brand) ?? '',
     ...asRowStatus(o.status),
     invalidReason: str(o.invalidReason),
+    warning: str(o.warning),
   };
 }
 
+/** POST /campaigns/:id/upload: `{ previewId, campaign, rows, summary }`. */
 export function normalizePreview(raw: unknown): VdPreview {
   const o = isObj(raw) ? raw : {};
   const s = isObj(o.summary) ? o.summary : {};
@@ -368,13 +449,27 @@ export function normalizePreview(raw: unknown): VdPreview {
       budgetRupees: num(s.budgetRupees),
       overBudget: s.overBudget === true,
       perBrand: normalizePerBrand(s.perBrand),
+      warningCount: num(s.warningCount),
+      skippedNote: str(s.skippedNote),
+      hiddenNote: str(s.hiddenNote),
     },
-    previewId: str(o.previewId) ?? str(s.previewId),
+    previewId: str(o.previewId),
   };
 }
 
+/** Server `rowView` (GET rows, resend reply, retry-buy reply's `row`). */
 export function normalizeRow(raw: unknown): VdRow {
   const o = isObj(raw) ? raw : {};
+  const st = asRowStatus(o.status);
+  const invalidReason = str(o.invalidReason);
+  const buyFailureReason = str(o.buyFailureReason);
+  const pendingReason = str(o.pendingReason);
+  const hubbleOrderId = str(o.hubbleOrderId);
+  const hubbleReferenceId = str(o.hubbleReferenceId);
+  const reason =
+    invalidReason
+    ?? buyFailureReason
+    ?? (st.status === 'PENDING_RECONCILE' ? pendingReasonText(pendingReason) : null);
   return {
     id: str(o.id) ?? '',
     rowNumber: num(o.rowNumber),
@@ -382,28 +477,27 @@ export function normalizeRow(raw: unknown): VdRow {
     name: str(o.name) ?? '',
     amount: num(o.amount),
     brand: str(o.brand) ?? '',
-    ...asRowStatus(o.status),
-    reason: str(pick(o, 'invalidReason', 'buyError', 'failureReason', 'buyFailureReason', 'reconcileNote', 'error')),
-    hubbleRef: str(pick(o, 'hubbleRef', 'hubbleOrderId', 'hubbleReference', 'hubbleOrderRef')),
-    voucherCode: maskVoucherCode(str(pick(o, 'voucherCode', 'voucherCodeMasked', 'codeMasked', 'maskedCode'))),
+    ...st,
+    reason,
+    warning: str(o.warning),
+    hubbleRef: hubbleOrderId ?? hubbleReferenceId,
+    voucherCodeMasked: maskVoucherCode(str(o.voucherCodeMasked)),
     messageStatus: asMessageStatus(o.messageStatus),
-    messageSentAt: str(pick(o, 'messageSentAt', 'sentAt')),
-    messageDeliveredAt: str(pick(o, 'messageDeliveredAt', 'deliveredAt')),
-    messageReadAt: str(pick(o, 'messageReadAt', 'readAt')),
-    messageFailedAt: str(pick(o, 'messageFailedAt', 'failedAt')),
-    messageError: str(pick(o, 'messageError', 'messageFailureReason', 'messageFailReason')),
+    messageSentAt: str(o.messageSentAt),
+    messageDeliveredAt: str(o.messageDeliveredAt),
+    messageReadAt: str(o.messageReadAt),
+    messageFailedAt: str(o.messageFailedAt),
+    messageError: str(o.messageError),
     canResend: bool(o.canResend),
     canRetryBuy: bool(o.canRetryBuy),
+    retryAvailableAt: str(o.retryAvailableAt),
   };
 }
 
+/** GET /campaigns/:id/rows: `{ rows, total, page, pageSize }`. */
 export function normalizeRowsPage(raw: unknown, requestedPage: number): VdRowsPage {
-  if (Array.isArray(raw)) {
-    return { rows: raw.map(normalizeRow), total: raw.length, page: requestedPage, pageSize: raw.length || 1 };
-  }
   const o = isObj(raw) ? raw : {};
-  const list = Array.isArray(o.rows) ? o.rows : Array.isArray(o.items) ? o.items : [];
-  const rows = list.map(normalizeRow);
+  const rows = Array.isArray(o.rows) ? o.rows.map(normalizeRow) : [];
   return {
     rows,
     total: num(o.total),
@@ -412,6 +506,7 @@ export function normalizeRowsPage(raw: unknown, requestedPage: number): VdRowsPa
   };
 }
 
+/** GET /brands item. */
 export function normalizeBrand(raw: unknown): VdBrand {
   const o = isObj(raw) ? raw : {};
   return {
@@ -421,16 +516,38 @@ export function normalizeBrand(raw: unknown): VdBrand {
     minAmount: num(o.minAmount),
     maxAmount: num(o.maxAmount),
     denominations: Array.isArray(o.denominations) ? o.denominations.map(num).filter((d): d is number => d !== null) : null,
+    denominationType: str(o.denominationType),
+    available: bool(o.available),
+    unavailableReason: str(o.unavailableReason),
   };
 }
 
+/** POST /campaigns/:id/cancel. */
+export function normalizeCancelResult(raw: unknown): VdCancelResult {
+  const o = isObj(raw) ? raw : {};
+  return {
+    campaign: normalizeCampaign(o.campaign),
+    cancelledRows: num(o.cancelledRows),
+    stillWithHubble: num(o.stillWithHubble),
+    alreadyBought: num(o.alreadyBought),
+  };
+}
+
+/** POST /campaigns/:id/rows/:rowId/retry-buy: `{ message, row }`. */
+export function normalizeRetryResult(raw: unknown): { message: string | null; row: VdRow | null } {
+  const o = isObj(raw) ? raw : {};
+  return { message: str(o.message), row: isObj(o.row) ? normalizeRow(o.row) : null };
+}
+
+/** GET /v1/gifsy/clients → `{ clients: [{ id, slug (= id), internalName, displayName, … }] }`. */
 export function normalizeClients(raw: unknown): VdClient[] {
   const list = Array.isArray(raw) ? raw : isObj(raw) && Array.isArray(raw.clients) ? raw.clients : [];
   return list
     .filter(isObj)
     .map((c) => ({
-      id: str(pick(c, 'slug', 'id')) ?? '',
-      name: str(pick(c, 'displayName', 'internalName', 'name')) ?? str(pick(c, 'slug', 'id')) ?? '',
+      // `billedToClientId` must be Client.id (the server looks it up by id; id IS the tenant slug).
+      id: str(pick(c, 'id', 'slug')) ?? '',
+      name: str(pick(c, 'displayName', 'internalName', 'name')) ?? str(pick(c, 'id', 'slug')) ?? '',
     }))
     .filter((c) => c.id !== '')
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -605,19 +722,31 @@ export interface CreateForm {
   budgetRupees: string;
 }
 
+/** Server DTO limits (CreateDispersalCampaignDto). */
+export const VD_NAME_MAX = 120;
+export const VD_PROGRAM_LABEL_MAX = 60;
+export const VD_NOTE_MAX = 500;
+export const VD_BUDGET_MAX_RUPEES = 10_000_000;
+
 export function validateCreateForm(f: CreateForm): Partial<Record<keyof CreateForm, string>> {
   const errors: Partial<Record<keyof CreateForm, string>> = {};
   if (!f.name.trim()) errors.name = 'Enter a campaign name.';
+  else if (f.name.trim().length > VD_NAME_MAX) errors.name = `Keep the campaign name to ${VD_NAME_MAX} characters.`;
   if (!f.programLabel.trim()) errors.programLabel = 'Enter the programme name shown in the WhatsApp message.';
-  const b = Number(f.budgetRupees);
-  if (f.budgetRupees.trim() === '' || !Number.isFinite(b) || b <= 0) errors.budgetRupees = 'Enter a budget in rupees greater than 0.';
+  else if (f.programLabel.trim().length > VD_PROGRAM_LABEL_MAX) errors.programLabel = `Keep the programme name to ${VD_PROGRAM_LABEL_MAX} characters.`;
+  if (f.note.trim().length > VD_NOTE_MAX) errors.note = `Keep the note to ${VD_NOTE_MAX} characters.`;
+  const raw = f.budgetRupees.trim();
+  const b = Number(raw);
+  if (raw === '' || !Number.isFinite(b) || b <= 0) errors.budgetRupees = 'Enter a budget in rupees greater than 0.';
+  else if (!/^\d+$/.test(raw)) errors.budgetRupees = 'Enter the budget in whole rupees (no paise).';
+  else if (b > VD_BUDGET_MAX_RUPEES) errors.budgetRupees = `The budget can be at most ${formatRupees(VD_BUDGET_MAX_RUPEES)} per campaign.`;
   return errors;
 }
 
-/** Client-side file check before upload (the server re-validates everything). */
+/** Client-side file check before upload (the server re-validates everything; it accepts .xlsx only). */
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 export function checkUploadFile(f: { name: string; size: number }): string | null {
-  if (!/\.(xlsx|xls|csv)$/i.test(f.name)) return 'Choose an Excel (.xlsx / .xls) or .csv file.';
+  if (!/\.xlsx$/i.test(f.name)) return 'Choose an Excel .xlsx file — download the template and fill it in.';
   if (f.size === 0) return 'That file is empty.';
   if (f.size > MAX_UPLOAD_BYTES) return 'That file is over 10 MB. Split the list into smaller files.';
   return null;
@@ -658,7 +787,7 @@ async function vdRequest<T>(path: string, init: RequestInit, map: (data: unknown
   if (res.status !== 204) {
     try { body = await res.json(); } catch { body = null; }
   }
-  // Envelope `{success, data}` or a bare body.
+  // The `{success, data}` envelope (TransformInterceptor) — a bare body is tolerated.
   if (isObj(body) && 'success' in body) {
     if (body.success === false) {
       const e = typeof body.error === 'string' && body.error ? body.error : 'The server refused this request.';
@@ -681,20 +810,21 @@ const json = (body: unknown): RequestInit => ({
 
 const cid = (id: string) => encodeURIComponent(id);
 
+/** GET /campaigns page size (server CAMPAIGNS_PAGE_SIZE). A full page means there may be another. */
+export const VD_CAMPAIGNS_PAGE_SIZE = 50;
+
+const asArray = (d: unknown): unknown[] => (Array.isArray(d) ? d : []);
+
 export const vdApi = {
-  brands: () =>
-    vdRequest('/brands', {}, (d) => (Array.isArray(d) ? d : isObj(d) && Array.isArray(d.brands) ? d.brands : []).map(normalizeBrand)),
+  brands: () => vdRequest('/brands', {}, (d) => asArray(d).map(normalizeBrand)),
 
-  listCampaigns: () =>
-    vdRequest('/campaigns', {}, (d) => {
-      const list = Array.isArray(d) ? d : isObj(d) && Array.isArray(d.campaigns) ? d.campaigns : isObj(d) && Array.isArray(d.items) ? d.items : [];
-      return list.map(normalizeListItem);
-    }),
+  listCampaigns: (page = 1) =>
+    vdRequest(`/campaigns?page=${encodeURIComponent(String(page))}`, {}, (d) => asArray(d).map(normalizeListItem)),
 
-  getCampaign: (id: string) => vdRequest(`/campaigns/${cid(id)}`, {}, normalizeListItem),
+  getCampaign: (id: string) => vdRequest(`/campaigns/${cid(id)}`, {}, normalizeDetail),
 
   createCampaign: (body: { name: string; programLabel: string; billedToClientId?: string; note?: string; budgetRupees: number }) =>
-    vdRequest('/campaigns', json(body), (d) => normalizeCampaign(isObj(d) && isObj(d.campaign) ? d.campaign : d)),
+    vdRequest('/campaigns', json(body), normalizeCampaign),
 
   upload: (id: string, file: File) => {
     const fd = new FormData();
@@ -703,8 +833,23 @@ export const vdApi = {
     return vdRequest(`/campaigns/${cid(id)}/upload`, { method: 'POST', body: fd }, normalizePreview);
   },
 
-  confirm: (id: string, body: ConfirmBody) =>
-    vdRequest(`/campaigns/${cid(id)}/confirm`, json(body), (d) => normalizeCampaign(isObj(d) && isObj(d.campaign) ? d.campaign : d)),
+  confirm: (id: string, body: ConfirmBody) => vdRequest(`/campaigns/${cid(id)}/confirm`, json(body), normalizeCampaign),
+
+  /**
+   * POST /process — a bounded processing pass (≤ 25 s) that nudges buying / sending while an admin
+   * watches (Cloud Run gives CPU only during a request; the drain scheduler is the backup). SINGLE-FLIGHT
+   * per campaign across the whole tab: a call made right after confirm and the detail page's poll-time
+   * calls share one request — never two in flight for the same campaign.
+   */
+  process: (id: string): Promise<VdResult<VdListItem>> => {
+    const cur = processInFlight.get(id);
+    if (cur) return cur;
+    const p = vdRequest(`/campaigns/${cid(id)}/process`, json({}), normalizeDetail).finally(() => {
+      processInFlight.delete(id);
+    });
+    processInFlight.set(id, p);
+    return p;
+  },
 
   rows: (id: string, opts: { status?: string; page?: number }) => {
     const q = new URLSearchParams();
@@ -714,12 +859,34 @@ export const vdApi = {
     return vdRequest(`/campaigns/${cid(id)}/rows?${q.toString()}`, {}, (d) => normalizeRowsPage(d, page));
   },
 
-  resend: (id: string, rowId: string) => vdRequest(`/campaigns/${cid(id)}/rows/${cid(rowId)}/resend`, json({}), () => true),
+  resend: (id: string, rowId: string) => vdRequest(`/campaigns/${cid(id)}/rows/${cid(rowId)}/resend`, json({}), normalizeRow),
 
-  retryBuy: (id: string, rowId: string) => vdRequest(`/campaigns/${cid(id)}/rows/${cid(rowId)}/retry-buy`, json({}), () => true),
+  retryBuy: (id: string, rowId: string) =>
+    vdRequest(`/campaigns/${cid(id)}/rows/${cid(rowId)}/retry-buy`, json({}), normalizeRetryResult),
 
-  cancel: (id: string) => vdRequest(`/campaigns/${cid(id)}/cancel`, json({}), () => true),
+  cancel: (id: string) => vdRequest(`/campaigns/${cid(id)}/cancel`, json({}), normalizeCancelResult),
 };
+
+const processInFlight = new Map<string, Promise<VdResult<VdListItem>>>();
+/** True while a POST /process for this campaign is outstanding (any caller in this tab). */
+export function isProcessInFlight(id: string): boolean {
+  return processInFlight.has(id);
+}
+
+/**
+ * Detail-page bookkeeping for the /process nudge: 4xx are ignored quietly (e.g. campaign not
+ * processable); a non-blocking note appears only after REPEATED 5xx / network failures.
+ */
+export const PROCESS_FAILURES_BEFORE_NOTE = 2;
+export function nextProcessFailures(prev: number, res: VdResult<unknown>): number {
+  if (res.ok) return 0;
+  return isUncertainFailure(res.status) ? prev + 1 : prev;
+}
+
+/** Whether the detail page should nudge processing: while live (CONFIRMED / PROCESSING) or in the 30-min settling window. */
+export function shouldNudgeProcessing(phase: PollPhase): boolean {
+  return phase === 'live' || phase === 'settling';
+}
 
 /** Tenant list for the optional "Bill to client" picker (GET /api/gifsy/clients). */
 export async function fetchBillableClients(): Promise<VdResult<VdClient[]>> {

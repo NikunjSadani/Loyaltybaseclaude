@@ -28,14 +28,20 @@ const BASE = '/api/admin/voucher-dispersal';
 const ok = (data: unknown) => ({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data }) });
 const fail = (status: number, error: string) => ({ ok: false, status, json: () => Promise.resolve({ success: false, error }) });
 
-const CAMPAIGN = { id: 'c1', name: 'Diwali', programLabel: 'Bajaj Loyalty', billedToClientId: 'bajaj', budgetRupees: 5000, status: 'DRAFT' };
+// Server field names (campaignView / upload reply).
+const CAMPAIGN = { id: 'c1', name: 'Diwali', programLabel: 'Bajaj Loyalty', billedToClient: { id: 'bajaj', name: 'Bajaj' }, budgetRupees: 5000, status: 'DRAFT' };
 const ROWS = [
-  { rowNumber: 2, phone: '9876543210', name: 'Asha', amount: 500, brand: 'AMAZON', status: 'VALID', invalidReason: null },
+  { rowNumber: 2, phone: '9876543210', name: 'Asha', amount: 500, brand: 'AMAZON', status: 'VALID', invalidReason: null, warning: 'Already got a ₹1,000 Amazon Pay voucher on 01 Nov 2026 in campaign "Earlier"' },
   { rowNumber: 3, phone: '9876543211', name: 'Ravi', amount: 1000, brand: 'FLIPKART', status: 'VALID', invalidReason: null },
   { rowNumber: 4, phone: '12345', name: 'Bad', amount: 500, brand: 'AMAZON', status: 'INVALID', invalidReason: 'Phone must be a 10-digit Indian mobile' },
   { rowNumber: 5, phone: '9876543210', name: 'Asha again', amount: 500, brand: 'AMAZON', status: 'DUPLICATE', invalidReason: 'Duplicate of row 2' },
 ];
-const SUMMARY = { total: 4, valid: 2, invalid: 1, duplicates: 1, totalRupees: 1500, budgetRupees: 5000, overBudget: false, perBrand: { AMAZON: { count: 1, totalRupees: 500 }, FLIPKART: { count: 1, totalRupees: 1000 } } };
+const SUMMARY = {
+  total: 4, valid: 2, invalid: 1, duplicates: 1, totalRupees: 1500, budgetRupees: 5000, overBudget: false,
+  perBrand: [{ brandKey: 'AMAZON', brand: 'AMAZON', count: 1, totalRupees: 500 }, { brandKey: 'FLIPKART', brand: 'FLIPKART', count: 1, totalRupees: 1000 }],
+  warningCount: 1, skippedBlankRows: 2, skippedFormulaRows: 0, skippedNote: '2 rows skipped: 2 blank', hiddenRowsIncluded: 1,
+  hiddenNote: '1 hidden row included (they are hidden in Excel but will be sent)',
+};
 
 type Handler = (url: string, init?: RequestInit) => unknown;
 let uploadResponse: unknown;
@@ -48,8 +54,12 @@ function installFetch(extra?: Handler) {
   fetchMock = vi.fn((url: string, init?: RequestInit) => {
     const hit = extra?.(url, init);
     if (hit) return Promise.resolve(hit);
-    if (url === `${BASE}/brands`) return Promise.resolve(ok([{ key: 'AMAZON', label: 'Amazon Pay', productId: 'p1', minAmount: 100, maxAmount: 10000, denominations: null }]));
-    if (url === '/api/gifsy/clients') return Promise.resolve(ok({ clients: [{ slug: 'bajaj', internalName: 'Bajaj Consumer Care', displayName: 'Bajaj', status: 'ACTIVE' }] }));
+    if (url === `${BASE}/brands`) return Promise.resolve(ok([
+      { key: 'AMAZON', label: 'Amazon Pay', productId: 'p1', minAmount: 100, maxAmount: 10000, denominations: null, denominationType: 'FLEXIBLE', available: true, unavailableReason: null },
+      { key: 'FLIPKART', label: 'Flipkart', productId: 'p2', minAmount: null, maxAmount: null, denominations: null, denominationType: null, available: false, unavailableReason: 'Hubble timeout' },
+    ]));
+    if (url === '/api/gifsy/clients') return Promise.resolve(ok({ clients: [{ id: 'bajaj', slug: 'bajaj', internalName: 'Bajaj Consumer Care', displayName: 'Bajaj', status: 'ACTIVE' }] }));
+    if (url === `${BASE}/campaigns/c1/process`) return Promise.resolve(ok({ pass: {}, campaign: { ...CAMPAIGN, status: 'PROCESSING' }, hubbleConfigured: true, summary: {} }));
     if (url === `${BASE}/campaigns` && init?.method === 'POST') return Promise.resolve(createResponse);
     if (url === `${BASE}/campaigns/c1/upload`) return Promise.resolve(uploadResponse);
     if (url === `${BASE}/campaigns/c1/confirm`) {
@@ -108,7 +118,7 @@ describe('New voucher campaign', () => {
     expect(await screen.findByText('Enter a campaign name.')).toBeInTheDocument();
     expect(screen.getByText('Enter the programme name shown in the WhatsApp message.')).toBeInTheDocument();
     expect(screen.getByText('Enter a budget in rupees greater than 0.')).toBeInTheDocument();
-    expect(screen.getByText('The purchase is blocked if the valid rows add up to more than this.')).toBeInTheDocument();
+    expect(screen.getByText('Whole rupees. The purchase is blocked if the valid rows add up to more than this.')).toBeInTheDocument();
     expect(callsTo('/campaigns')).toHaveLength(0);
     expect(screen.getByTestId('vd-nothing-spent')).toHaveTextContent('Nothing has been bought or sent yet');
   });
@@ -119,6 +129,9 @@ describe('New voucher campaign', () => {
       .toEqual({ name: 'Diwali', programLabel: 'Bajaj Loyalty', billedToClientId: 'bajaj', budgetRupees: 5000 });
     expect(replace).toHaveBeenCalledWith('/gifsy/voucher-dispersal/new?campaign=c1');
 
+    // Brand help reflects the LIVE limits, including a brand Hubble could not answer for.
+    expect(screen.getByTestId('vd-brand-AMAZON')).toHaveTextContent('₹100 to ₹10,000');
+    expect(screen.getByTestId('vd-brand-FLIPKART')).toHaveTextContent('not available right now (Hubble timeout)');
     await uploadFile();
     expect(callsTo('/campaigns/c1/upload')[0][1]!.body).toBeInstanceOf(FormData);
 
@@ -128,6 +141,13 @@ describe('New voucher campaign', () => {
     expect(screen.getByTestId('vd-sum-dupes')).toHaveTextContent('1');
     expect(screen.getByTestId('vd-sum-total')).toHaveTextContent('₹1,500 / ₹5,000');
     expect(screen.getByTestId('vd-summary')).toHaveTextContent('1 invalid row and 1 duplicate row will NOT get a voucher');
+    // New server data: warning count (does not block), skipped / hidden notes, per-row amber warning.
+    expect(screen.getByTestId('vd-sum-warncount')).toHaveTextContent('1');
+    expect(screen.getByTestId('vd-sum-warnings')).toHaveTextContent('This does not block buying');
+    expect(screen.getByTestId('vd-sum-skipped')).toHaveTextContent('2 rows skipped: 2 blank');
+    expect(screen.getByTestId('vd-sum-hidden')).toHaveTextContent('1 hidden row included');
+    expect(screen.getByTestId('vd-prow-warning-2')).toHaveTextContent('Already got a ₹1,000 Amazon Pay voucher on 01 Nov 2026 in campaign "Earlier"');
+    expect(screen.getByTestId('vd-buy-send')).toBeEnabled();
     // Every invalid / duplicate row visible with its reason
     expect(within(screen.getByTestId('vd-prow-4')).getByText('Phone must be a 10-digit Indian mobile')).toBeInTheDocument();
     expect(within(screen.getByTestId('vd-prow-5')).getByText('Duplicate of row 2')).toBeInTheDocument();
@@ -149,6 +169,9 @@ describe('New voucher campaign', () => {
     expect(callsTo('/campaigns/c1/confirm')).toHaveLength(1);
     expect(JSON.parse(String(callsTo('/campaigns/c1/confirm')[0][1]!.body)))
       .toEqual({ previewId: 'pv-42', expectedValidCount: 2, expectedTotalRupees: 1500 });
+    // One processing nudge right after a successful confirm.
+    expect(callsTo('/campaigns/c1/process')).toHaveLength(1);
+    expect(callsTo('/campaigns/c1/process')[0][1]).toMatchObject({ method: 'POST' });
   });
 
   it('Cancel in the confirm dialog buys nothing', { timeout: 20000 }, async () => {

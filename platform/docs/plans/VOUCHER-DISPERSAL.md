@@ -66,6 +66,16 @@ messageSentAt, messageDeliveredAt, messageReadAt, messageFailedAt, messageError,
 attempts, resendCount, **canResend** (BOUGHT, the WhatsApp has an outcome, < 3 resends), **canRetryBuy** (BUY_FAILED, or
 PENDING_RECONCILE ≥ 2 h after the last attempt; never on a CANCELLED campaign), retryAvailableAt.
 
+**UI ⇄ server contract test.** `platform/src/lib/voucher-dispersal.ts` reads these field names EXACTLY (no aliases).
+`api/src/voucher-dispersal/voucher-dispersal.contract.spec.ts` drives the real service and fails if any reply's key
+shape drifts from `platform/src/lib/__tests__/fixtures/voucher-dispersal-server-contract.json`;
+`platform/src/lib/__tests__/voucher-dispersal.contract.test.ts` runs the UI normalisers over that fixture and fails
+if the UI reads a field the server does not send, or if a server field is neither read nor listed as deliberately
+ignored. After an intended server change: `UPDATE_VD_CONTRACT=1 npx jest src/voucher-dispersal/voucher-dispersal.contract.spec.ts`
+(in `api/`), then fix the platform test / UI. The UI shows `warning` as an amber row note + the preview's warning
+count (never blocks Buy), `skippedNote` / `hiddenNote` in the preview, `pendingReason` codes in plain words, and the
+list page shows purchase counts only (the list sends no WhatsApp counts).
+
 Validation (each a visible `invalidReason`): phone = 10-digit Indian mobile (+91 / 0 stripped); name required, ≤ 60
 chars, single line; brand = a configured brand (key or label); amount = whole rupees, within the brand's LIVE min/max, on
 its fixed list (the reason states the allowed range / list); a FIXED brand whose amounts Hubble did not return → INVALID
@@ -128,7 +138,11 @@ Cloud Run gives the API CPU only during a request, so work is driven by requests
 pass (`VoucherDispersalProcessor.drain`: stale claims → reconcile pending (every ≥ 2 min/row) → send unsent messages →
 buy QUEUED rows (300 ms apart, time-boxed) → mirror WhatsApp statuses → finish campaigns):
 
-1. **`POST /campaigns/:id/process`** — the UI calls it while the campaign page is open (in-request, reliable).
+1. **`POST /campaigns/:id/process`** — the UI calls it while the campaign page is open (in-request, reliable):
+   once after each refresh while the campaign is CONFIRMED / PROCESSING or within 30 min of `completedAt` (same
+   backoff as polling, paused while the tab is hidden), single-flight per campaign per tab (`vdApi.process`), plus
+   one call right after a successful confirm. 4xx are ignored quietly; ≥ 2 consecutive 5xx / network failures show a
+   non-blocking note.
 2. **`POST /v1/voucher-dispersal/drain`** — Cloud Scheduler (restart-proof). `@Public`, header `x-drain-secret` =
    a DEDICATED `VOUCHER_DISPERSAL_DRAIN_SECRET` (no fallback to another drain's secret — this endpoint spends money);
    fail-closed (403) when unset.
