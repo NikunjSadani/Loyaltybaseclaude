@@ -72,6 +72,12 @@ export interface BfWalletHistory {
   currentOutletCodes: string[];
   /** wallet_credit_positions rows that already exist for this wallet */
   existingPositionCount: number;
+  /**
+   * Cheap re-run (owner Q5): for a wallet already sequenced (movementSeq > 0) the store may load only these counts
+   * (plus its clawback rows in `txs`, for the tenant-level attribution) instead of the full history. The planner
+   * then decides DONE / SEQ_STATE_MIXED from the counts.
+   */
+  sequencedSummary?: { txCount: number; sequencedCount: number; maxSeq: number };
 }
 
 export interface BfBatch {
@@ -145,7 +151,10 @@ export interface AllocationInsert {
   creditTxId: string;
   requested: number;
   debtRestored: number;
+  /** points actually taken from what the wallet HELD (never the part that went beyond holdings — Q4) */
   recovered: number;
+  /** Q4: the part of a historical clawback that went beyond holdings and was booked as debt ("owed") */
+  owed: number;
   shortfall: number;
 }
 
@@ -507,12 +516,16 @@ export function planWallet(h: BfWalletHistory, ctx: BfTenantContext, adj?: Tenan
   // ── resume / pre-state ──
   const sequenced = h.txs.filter((t) => t.seq !== null);
   if (w.movementSeq > 0) {
-    const maxSeq = sequenced.reduce((m, t) => Math.max(m, t.seq!), 0);
-    if (sequenced.length === h.txs.length && maxSeq === h.txs.length && maxSeq === w.movementSeq) {
+    const sum = h.sequencedSummary ?? {
+      txCount: h.txs.length,
+      sequencedCount: sequenced.length,
+      maxSeq: sequenced.reduce((m, t) => Math.max(m, t.seq!), 0),
+    };
+    if (sum.sequencedCount === sum.txCount && sum.maxSeq === sum.txCount && sum.maxSeq === w.movementSeq) {
       plan.status = 'DONE';
       return plan;
     }
-    add('SEQ_STATE_MIXED', 'BLOCKING', `movementSeq ${w.movementSeq} but ${sequenced.length}/${h.txs.length} rows sequenced (max seq ${maxSeq})`);
+    add('SEQ_STATE_MIXED', 'BLOCKING', `movementSeq ${w.movementSeq} but ${sum.sequencedCount}/${sum.txCount} rows sequenced (max seq ${sum.maxSeq})`);
     return block();
   }
   if (sequenced.length > 0) {
@@ -749,12 +762,23 @@ export function planWallet(h: BfWalletHistory, ctx: BfTenantContext, adj?: Tenan
     if (!target) continue;
     const cl = clsById.get(t.id)!;
     const requested = -t.points;
-    const moved = Math.abs(cl.pointsDelta); // |δ| = p + c (+ any CLAWBACK_BEYOND_HOLDINGS excess, flagged above); abs ⇒ never −0
-    const recovered = moved - cl.debtRestored;
+    const moved = Math.abs(cl.pointsDelta); // |δ| = p + c + owed; abs ⇒ never −0
+    // Q4 (owner 2026-11-16): c is what the wallet actually HELD (WP0 caps it at holdings); anything the recorded
+    // clawback took beyond that was booked as debt — "owed", never counted as recovered.
+    const recovered = cl.recovered;
+    const owed = moved - cl.debtRestored - recovered;
     const shortfall = requested - moved;
-    if (requested <= 0 || recovered < 0 || shortfall < 0) {
-      add('ALLOCATION_INVALID', 'BLOCKING', `requested ${requested} moved ${moved} restored ${cl.debtRestored}`, t.id);
+    if (requested <= 0 || recovered < 0 || owed < 0 || shortfall < 0) {
+      add('ALLOCATION_INVALID', 'BLOCKING', `requested ${requested} moved ${moved} restored ${cl.debtRestored} recovered ${recovered}`, t.id);
       continue;
+    }
+    if (owed > 0) {
+      add(
+        'CLAWBACK_OWED',
+        'WARNING',
+        `historical clawback for reversal ${target.reversal.id}: recovered ${recovered}, owed ${owed} (booked as debt), debt restored ${cl.debtRestored}, shortfall ${shortfall}`,
+        t.id,
+      );
     }
     plan.allocations.push({
       creditReversalId: target.reversal.id,
@@ -762,6 +786,7 @@ export function planWallet(h: BfWalletHistory, ctx: BfTenantContext, adj?: Tenan
       requested,
       debtRestored: cl.debtRestored,
       recovered,
+      owed,
       shortfall,
     });
   }
@@ -778,6 +803,7 @@ export function planWallet(h: BfWalletHistory, ctx: BfTenantContext, adj?: Tenan
   for (const a of plan.allocations) {
     a.debtRestored = z(a.debtRestored);
     a.recovered = z(a.recovered);
+    a.owed = z(a.owed);
     a.shortfall = z(a.shortfall);
   }
   return plan;
@@ -841,6 +867,19 @@ export interface TenantSummary {
   totalDebt: number;
   neverNegativeWallets: number;
   anomalies: { BLOCKING: Record<string, number>; WARNING: Record<string, number> };
+  /** Q2: every BLOCKED wallet with its reason (persisted to wallets.backfillBlockedReason on APPLY) */
+  blockedWallets: { walletId: string; reason: string }[];
+  /** Q4: historical clawbacks classified in this run — "recovered X, owed Y" (owed never counted as recovered) */
+  historicalClawbacks: { count: number; requested: number; debtRestored: number; recovered: number; owed: number; shortfall: number };
+}
+
+/** The reason a BLOCKED wallet carries (wallets.backfillBlockedReason + the reversal refusal + the attention list). */
+export function blockedReasonOf(p: WalletPlan): string {
+  const parts = p.anomalies
+    .filter((a) => a.severity === 'BLOCKING')
+    .map((a) => `${a.code}: ${a.detail}${a.txId ? ` (tx ${a.txId})` : ''}`);
+  const text = parts.length ? parts.join('; ') : 'blocked by the wallet backfill';
+  return text.length > 1000 ? `${text.slice(0, 997)}...` : text;
 }
 
 export function summarizeTenant(tp: TenantPlan): TenantSummary {
@@ -854,16 +893,30 @@ export function summarizeTenant(tp: TenantPlan): TenantSummary {
     totalDebt: 0,
     neverNegativeWallets: 0,
     anomalies: { BLOCKING: {}, WARNING: {} },
+    blockedWallets: [],
+    historicalClawbacks: { count: 0, requested: 0, debtRestored: 0, recovered: 0, owed: 0, shortfall: 0 },
   };
   for (const p of tp.wallets) {
     if (p.status === 'PLANNED') s.wallets.planned++;
     else if (p.status === 'NOOP') s.wallets.noop++;
     else if (p.status === 'DONE') s.wallets.done++;
-    else s.wallets.blocked++;
+    else {
+      s.wallets.blocked++;
+      s.blockedWallets.push({ walletId: p.walletId, reason: blockedReasonOf(p) });
+    }
     if (p.status === 'PLANNED') {
       s.rowsToSequence += p.txUpdates.length;
       for (const pos of p.positions) s.positions[pos.attribution]++;
       s.allocations += p.allocations.length;
+      for (const a of p.allocations) {
+        const h = s.historicalClawbacks;
+        h.count++;
+        h.requested += a.requested;
+        h.debtRestored += a.debtRestored;
+        h.recovered += a.recovered;
+        h.owed += a.owed;
+        h.shortfall += a.shortfall;
+      }
       if (p.debtPoints > 0 || p.redeemablePoints < 0) {
         s.debtWallets.push({ walletId: p.walletId, redeemablePoints: p.redeemablePoints, debtPoints: p.debtPoints, holdings: p.redeemablePoints + p.debtPoints });
       }

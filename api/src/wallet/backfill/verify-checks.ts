@@ -6,6 +6,8 @@
  * unit-tested on fixtures. Each check returns PASS / FAIL (or INFO) per tenant with the offending ids.
  */
 import { createHash } from 'node:crypto';
+import { planPayoutAllocationBackfill } from '../../credits/payout-reversal-v2';
+import type { PayoutBackfillInput } from './backfill-runner';
 
 export interface VWallet {
   id: string;
@@ -19,6 +21,8 @@ export interface VWallet {
   lifetimeRedeemed: number;
   lifetimeExpired: number;
   lockedPoints: number;
+  /** wallets.backfillStatus (policy round A): 'BLOCKED' wallets are excluded from V1/V2/V3/V7 and listed by V10 */
+  backfillStatus?: string | null;
 }
 
 export interface VTx {
@@ -47,6 +51,9 @@ export interface VAllocation {
   positionId: string;
   creditReversalId: string;
   requested: number;
+  recovered?: number;
+  /** Q4: historical clawback beyond holdings, booked as debt */
+  owed?: number;
 }
 
 export interface VPayoutAllocation {
@@ -62,6 +69,8 @@ export interface VerifySnapshot {
   positions: VPosition[];
   allocations: VAllocation[];
   payoutAllocations: VPayoutAllocation[];
+  /** WP5 payout planner input — V9b re-runs the planner read-only (absent → V9b skipped) */
+  payoutBackfill?: PayoutBackfillInput;
 }
 
 /** V0 — tenant totals + a digest over EVERY wallet's balance and counters (equal digest ⇔ no wallet changed). */
@@ -122,7 +131,8 @@ export function diffV0(before: V0Snapshot, after: V0Snapshot): string[] {
   return out;
 }
 
-export type CheckStatus = 'PASS' | 'FAIL' | 'INFO' | 'SKIP';
+/** WARN = passes, but something needs GIFSY's attention (owner rule: never silent) — printed, counted, exit 0. */
+export type CheckStatus = 'PASS' | 'FAIL' | 'INFO' | 'SKIP' | 'WARN';
 
 export interface CheckResult {
   check: string;
@@ -161,6 +171,9 @@ export function isReversibleCreditTx(t: Pick<VTx, 'transactionType' | 'reference
 export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): CheckResult[] {
   const c = snap.clientId;
   const out: CheckResult[] = [];
+  // Policy round A (Q1/Q2): a wallet the backfill BLOCKED (still un-sequenced) is not backfilled BY DESIGN — it keeps
+  // today's rules and is listed by V10 with its reason; the sequencing checks V1/V2/V3/V7 run on every other wallet.
+  const blocked = new Set(snap.wallets.filter((w) => w.backfillStatus === 'BLOCKED' && w.movementSeq === 0).map((w) => w.id));
   const txByWallet = new Map<string, VTx[]>();
   for (const t of snap.txs) {
     const g = txByWallet.get(t.walletId);
@@ -181,6 +194,7 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
   // V1 — seq contiguity: max(seq) = count(rows) = movementSeq; no NULL seq.
   const v1: string[] = [];
   for (const w of snap.wallets) {
+    if (blocked.has(w.id)) continue;
     const ts = txByWallet.get(w.id) ?? [];
     const seqs = ts.map((t) => t.seq);
     const nulls = seqs.filter((s) => s === null).length;
@@ -192,7 +206,8 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
 
   // V2 — chain integrity: balanceAfter = previous balanceAfter (0 for the first) + pointsDelta.
   const v2: string[] = [];
-  for (const ts of txByWallet.values()) {
+  for (const [walletId, ts] of txByWallet) {
+    if (blocked.has(walletId)) continue;
     let prev = 0;
     for (const t of ts) {
       if (t.pointsDelta === null || t.balanceAfter !== prev + t.pointsDelta) v2.push(t.id);
@@ -204,6 +219,7 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
   // V3 — last row's balanceAfter = wallet balance (wallets with history).
   const v3: string[] = [];
   for (const w of snap.wallets) {
+    if (blocked.has(w.id)) continue;
     const ts = txByWallet.get(w.id) ?? [];
     const last = ts[ts.length - 1];
     if (last ? last.balanceAfter !== w.redeemablePoints : w.redeemablePoints !== 0) v3.push(w.id);
@@ -254,7 +270,7 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
   const txById = new Map(snap.txs.map((t) => [t.id, t]));
   const v7: string[] = [];
   for (const t of snap.txs) {
-    if (!isReversibleCreditTx(t)) continue;
+    if (!isReversibleCreditTx(t) || blocked.has(t.walletId)) continue;
     const p = posByCredit.get(t.id);
     if (!p || p.walletId !== t.walletId || p.amount !== t.points) v7.push(t.id);
   }
@@ -273,7 +289,17 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
   const allocSum = new Map<string, number>();
   for (const a of snap.allocations) allocSum.set(a.positionId, (allocSum.get(a.positionId) ?? 0) + a.requested);
   const v8 = snap.positions.filter((p) => p.reversedPoints !== (allocSum.get(p.id) ?? 0) || p.reversedPoints > p.amount).map((p) => p.id);
-  out.push(result('V8 reversedPoints = Σ allocations ≤ amount', c, v8, `${snap.allocations.length} allocation(s) reconcile`, 'position(s) mismatch'));
+  const owed = snap.allocations.reduce((s, a) => s + (a.owed ?? 0), 0);
+  const recovered = snap.allocations.reduce((s, a) => s + (a.recovered ?? 0), 0);
+  out.push(
+    result(
+      'V8 reversedPoints = Σ allocations ≤ amount',
+      c,
+      v8,
+      `${snap.allocations.length} allocation(s) reconcile; recovered ${recovered}, owed ${owed}${owed > 0 ? ' (historical clawbacks beyond holdings, booked as debt — not recovered)' : ''}`,
+      'position(s) mismatch',
+    ),
+  );
 
   // V9 — no payout entry in two live reversals.
   const live = new Set(['RESERVED', 'APPLIED_CANCELLED', 'APPLIED_RECEIVABLE']);
@@ -281,6 +307,42 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
   for (const a of snap.payoutAllocations) if (live.has(a.state)) cnt.set(a.payoutEntryId, (cnt.get(a.payoutEntryId) ?? 0) + 1);
   const v9 = [...cnt].filter(([, n]) => n > 1).map(([id]) => id);
   out.push(result('V9 payout entry in ≤ 1 live reversal', c, v9, `${snap.payoutAllocations.length} payout allocation(s)`, 'payout entr(y/ies) in two live reversals'));
+
+  // V9b — the WP5 payout backfill planner, re-run read-only: an approved PAYOUT reversal it would STILL give rows (the
+  // backfill was not applied for it — e.g. approved under LEGACY since) or that it flags (ambiguous / double
+  // consumption / …) needs Gifsy. WARN, never silent.
+  if (snap.payoutBackfill) {
+    const pp = planPayoutAllocationBackfill(snap.payoutBackfill);
+    const pendingRows = [...new Set(pp.allocations.map((a) => a.creditReversalId))];
+    const flagged = pp.flags.filter((f) => f.severity !== 'INFO');
+    const bad = [...pendingRows, ...flagged.map((f) => f.creditReversalId)];
+    out.push({
+      check: 'V9b payout reversal allocations backfilled',
+      clientId: c,
+      status: bad.length ? 'WARN' : 'PASS',
+      detail: bad.length
+        ? `${pendingRows.length} approved PAYOUT reversal(s) still without allocation rows (re-run the backfill); ${flagged.length} flag(s): ${flagged
+            .map((f) => `${f.creditReversalId} ${f.severity} ${f.code} — ${f.detail}`)
+            .join('; ')}`
+        : `${snap.payoutBackfill.reversals.length} PAYOUT reversal(s): every approved one has its allocation rows`,
+      ids: [...new Set(bad)].slice(0, CAP),
+    });
+  } else {
+    out.push({ check: 'V9b payout reversal allocations backfilled', clientId: c, status: 'SKIP', detail: 'payout input not loaded', ids: [] });
+  }
+
+  // V10 — wallets needing Gifsy attention (Q1/Q2): BLOCKED by the backfill, with the reason. They keep today's rules;
+  // POINTS reversals on them are refused until Gifsy fixes the history and re-runs the backfill.
+  const blockedRows = snap.wallets.filter((w) => blocked.has(w.id));
+  out.push({
+    check: 'V10 wallets needing Gifsy attention',
+    clientId: c,
+    status: blockedRows.length ? 'WARN' : 'PASS',
+    detail: blockedRows.length
+      ? `${blockedRows.length} wallet(s) BLOCKED by the backfill — earn/redeem on today's rules, points reversals refused (reasons: GET /v1/admin/credits/reversal-engine/attention or the backfill ATTENTION block)`
+      : 'none',
+    ids: blockedRows.map((w) => w.id).slice(0, CAP),
+  });
 
   return out;
 }

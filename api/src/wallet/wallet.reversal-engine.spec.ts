@@ -12,8 +12,8 @@ import {
   planV2Reversal,
   WalletService,
   DEBT_REVERSAL_PAUSED_MESSAGE,
-  WALLET_NOT_BACKFILLED_MESSAGE,
 } from './wallet.service';
+import { ReversalAttentionException } from './reversal-policy';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReversalEngineMode, TenantSettingsService } from '../tenant/tenant-settings.service';
 import {
@@ -103,7 +103,8 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[]; mode?: ReversalEngine
   const allocations: Row[] = [];
   const auditLogs: Row[] = [];
   const outlets: Row[] = opts.outlets ?? [];
-  const settings = { mode: opts.mode ?? ('LEGACY' as ReversalEngineMode), modeReads: 0 };
+  const batches: Row[] = [];
+  const settings = { mode: opts.mode ?? ('LEGACY' as ReversalEngineMode), modeReads: 0, modeDbs: [] as unknown[] };
   const positionView = (p: Row) => {
     const c = walletTxns.find((t) => t.id === p.creditTxId);
     return { ...p, creditTx: { seq: c?.seq ?? null, createdAt: c?.createdAt ?? NOW } };
@@ -211,7 +212,7 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[]; mode?: ReversalEngine
       findFirst: async ({ where }: any) => outlets.find((o) => matchWhere(o, where ?? {})) ?? null,
       findMany: async ({ where }: any) => outlets.filter((o) => matchWhere(o, where ?? {})),
     },
-    creditBatch: { findFirst: async () => null },
+    creditBatch: { findFirst: async ({ where }: any = {}) => batches.find((b) => b.id === where?.id) ?? null },
     pointExpiryConfig: { findFirst: async () => null },
     channelPartner: { findFirst: async ({ where }: any) => ({ id: where?.id, clientId: 'bajaj' }) },
     $queryRaw: jest.fn(async () => []),
@@ -219,13 +220,14 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[]; mode?: ReversalEngine
   };
   const tenantSettings = {
     getConversionRate: async () => 1,
-    getReversalEngineModeUncached: async () => {
+    getReversalEngineModeUncached: async (_clientId: string, db?: unknown) => {
       settings.modeReads++;
+      settings.modeDbs.push(db);
       return settings.mode;
     },
   };
   const service = new WalletService(models as unknown as PrismaService, tenantSettings as unknown as TenantSettingsService);
-  return { service, models, wallets, walletTxns, ledger, positions, allocations, auditLogs, outlets, settings };
+  return { service, models, wallets, walletTxns, ledger, positions, allocations, auditLogs, outlets, settings, batches };
 }
 type H = ReturnType<typeof harness>;
 
@@ -577,16 +579,35 @@ describe('rollout guard - which write path a movement takes (movementPath)', () 
     expect(h.positions).toHaveLength(0);
   });
 
-  it('SHADOW / V2 tenant, wallet WITH un-sequenced history (backfill not applied) -> refused (409), nothing written', async () => {
+  it('policy Q1: SHADOW / V2 tenant, wallet WITH un-sequenced history (BLOCKED or not yet backfilled) -> keeps TODAY\'s rules (legacy path), never refused', async () => {
     for (const mode of ['SHADOW', 'V2'] as const) {
-      const h = harness({ wallets: [withHistory()], mode });
-      seedRow(h);
-      await expect(batchCredit(h, 50)).rejects.toThrow(WALLET_NOT_BACKFILLED_MESSAGE);
-      await expect(h.service.debitRedeem('cp1', 10, {})).rejects.toBeInstanceOf(ConflictException);
-      expect(h.wallets[0]).toMatchObject({ redeemablePoints: 100, movementSeq: 0 });
-      expect(h.walletTxns).toHaveLength(1);
-      expect(h.ledger).toHaveLength(0);
+      for (const extra of [{}, { backfillStatus: 'BLOCKED', backfillBlockedReason: 'CHAIN_BROKEN: …' }]) {
+        const h = harness({ wallets: [{ ...withHistory(), ...extra }], mode });
+        seedRow(h);
+        await batchCredit(h, 50); // earn works
+        await h.service.debitRedeem('cp1', 10, {}); // redeem works
+        expect(h.wallets[0]).toMatchObject({ redeemablePoints: 140, movementSeq: 0, debtPoints: 0 });
+        // legacy write path: no seq / pointsDelta / position (no mixed history)
+        expect(h.walletTxns.slice(1).every((t) => t.seq === undefined && t.pointsDelta === undefined)).toBe(true);
+        expect(h.positions).toHaveLength(0);
+        expect(h.walletTxns).toHaveLength(3);
+      }
     }
+  });
+
+  it('policy Q1: expiry on a BLOCKED wallet of a V2 tenant also runs on today’s clamp (legacy path)', async () => {
+    const h = harness({ wallets: [{ ...withHistory(), backfillStatus: 'BLOCKED', backfillBlockedReason: 'x' }], mode: 'V2' });
+    seedRow(h);
+    h.ledger.push({ id: 'L1', walletId: 'w1', transactionType: 'EARN', points: 100, remainingPoints: 60, isExpired: false, expiresAt: later(-10), createdAt: later(-9000) });
+    await expect(h.service.expireDuePoints({ now: NOW })).resolves.toEqual({ expiredLots: 1, expiredPoints: 60 });
+    expect(h.wallets[0]).toMatchObject({ redeemablePoints: 40, movementSeq: 0, debtPoints: 0 });
+  });
+
+  it('WP7 pool fix: movementPath reads the tenant flag through the CALLER\'s tx (never a second pool connection)', async () => {
+    const h = harness({ mode: 'V2' });
+    await batchCredit(h, 50);
+    expect(h.settings.modeReads).toBe(1);
+    expect(h.settings.modeDbs[0]).toBe(h.models); // the tx client handed to the $transaction callback
   });
 
   it('SHADOW / V2 tenant, pristine wallet -> v2 from its first movement (seq 1)', async () => {
@@ -605,12 +626,13 @@ describe('rollout guard - which write path a movement takes (movementPath)', () 
     expect(h.wallets[0]).toMatchObject({ redeemablePoints: 120, earnedPoints: 150, redeemedPoints: 30, movementSeq: 3 });
   });
 
-  it('the expiry sweep follows the same guard (V2 tenant, un-backfilled wallet -> refused, balance untouched)', async () => {
+  it('policy Q1: the expiry sweep follows the same guard (V2 tenant, un-backfilled wallet -> today’s clamp, legacy row)', async () => {
     const h = harness({ wallets: [withHistory()], mode: 'V2' });
     seedRow(h);
     h.ledger.push({ id: 'L1', walletId: 'w1', transactionType: 'EARN', points: 100, remainingPoints: 100, isExpired: false, expiresAt: later(-10), createdAt: later(-9000) });
-    await expect(h.service.expireDuePoints({ now: NOW })).rejects.toBeInstanceOf(ConflictException);
-    expect(h.wallets[0].redeemablePoints).toBe(100);
+    await expect(h.service.expireDuePoints({ now: NOW })).resolves.toEqual({ expiredLots: 1, expiredPoints: 100 });
+    expect(h.wallets[0]).toMatchObject({ redeemablePoints: 0, movementSeq: 0 });
+    expect(h.walletTxns[1].seq).toBeUndefined();
   });
 });
 
@@ -721,7 +743,7 @@ describe('applyCreditReversal (WP3) — R5 / Q4 / Q5', () => {
     await expect(reverse(h, 10)).rejects.toBeInstanceOf(BadRequestException);
     await credit(h, 'cp1', 'O1', 300);
     h.positions.push({ id: 'u1', walletId: 'w1', batchId: 'B1', outletCode: null, fieldId: null, amount: 5, offsetPoints: 0, reversedPoints: 0, attribution: 'UNRESOLVED', creditTxId: 'x' });
-    await expect(reverse(h, 10)).rejects.toThrow(/map them first/);
+    await expect(reverse(h, 10)).rejects.toThrow(/couldn't be identified — Gifsy must map it first/);
     h.positions.pop();
     await expect(reverse(h, 301)).rejects.toBeInstanceOf(BadRequestException);
     expect(h.wallets[0]).toMatchObject({ redeemablePoints: 300, movementSeq: 1 });
@@ -822,7 +844,7 @@ describe('reverseCreditBatchPoints — per-tenant flag', () => {
     expect(h.auditLogs[0].metadata.v2).toMatchObject({ removed: 300, shortfall: 0 });
   });
 
-  it('SHADOW: an un-backfilled wallet (history, movementSeq 0) is refused before anything is written', async () => {
+  it('SHADOW: an un-backfilled wallet (history, movementSeq 0) → LEGACY applies (today\'s rules); the v2 refusal names the wallet problem', async () => {
     const h = harness({
       outlets: linked,
       mode: 'SHADOW',
@@ -832,9 +854,22 @@ describe('reverseCreditBatchPoints — per-tenant flag', () => {
       id: 'old', walletId: 'w1', transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: 'B1',
       points: 500, balanceBefore: 0, balanceAfter: 500, metadata: { fieldId: 'F1', outletCode: 'O1' }, createdAt: later(-9000),
     });
-    await expect(dispatch(h, 200)).rejects.toThrow(WALLET_NOT_BACKFILLED_MESSAGE);
-    expect(h.wallets[0].redeemablePoints).toBe(500);
-    expect(h.auditLogs).toHaveLength(0);
+    await dispatch(h, 200);
+    expect(h.wallets[0]).toMatchObject({ redeemablePoints: 300, movementSeq: 0 });
+    expect(h.auditLogs[0].metadata).toMatchObject({
+      differs: true,
+      v2: { refused: expect.stringMatching(/^Can't reverse: the wallet that received this credit for outlet O1 needs Gifsy attention \(not yet prepared by the wallet backfill\)/) },
+    });
+  });
+
+  it('WP7 pool fix: the dispatcher reads the flag through the caller\'s tx when the caller did not pass it', async () => {
+    const h = harness({ outlets: linked, mode: 'LEGACY' });
+    await credit(h, 100);
+    h.settings.modeDbs.length = 0;
+    await h.service.reverseCreditBatchPoints(h.models as any, {
+      batchId: 'B1', outletCode: 'O1', fieldId: 'F1', clientId: 'bajaj', creditReversalId: 'R1', points: 10,
+    });
+    expect(h.settings.modeDbs[0]).toBe(h.models);
   });
 
   it('SHADOW: a v2 refusal (UNRESOLVED credit in the batch, Q5) is recorded as a diff; LEGACY still applied', async () => {
@@ -855,7 +890,10 @@ describe('reverseCreditBatchPoints — per-tenant flag', () => {
     });
     await dispatch(h, 200);
     expect(h.wallets[0]).toMatchObject({ redeemablePoints: 300, movementSeq: 2 });
-    expect(h.auditLogs[0].metadata).toMatchObject({ differs: true, v2: { refused: expect.stringMatching(/map them first/) } });
+    expect(h.auditLogs[0].metadata).toMatchObject({
+      differs: true,
+      v2: { refused: "Can't reverse: the original credit for outlet O1 in this batch couldn't be identified — Gifsy must map it first." },
+    });
   });
 
   it('V2: the position engine runs (debt wallet R1: −841 +500 → reverse → −841); LEGACY helpers are not consulted', async () => {
@@ -906,5 +944,72 @@ describe('TenantSettingsService.getReversalEngineModeUncached', () => {
     await expect(svc({ settingValue: 'V2' }).getReversalEngineModeUncached('t')).resolves.toBe('V2');
     await expect(svc({ settingValue: 'v2' }).getReversalEngineModeUncached('t')).rejects.toBeInstanceOf(BadRequestException);
     await expect(svc({ settingValue: true }).getReversalEngineModeUncached('t')).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ───────────────────────── policy round A: v2 refusals name the reason (Q1 / Q3) ─────────────────────────
+
+describe('policy round A — v2PointsReversalCap refusals (owner 2026-11-16)', () => {
+  const key = { batchId: 'B1', outletCode: 'O1', fieldId: 'F1' };
+  const tracked = (extra: Row = {}) => blankWallet('w1', 'cp1', { redeemablePoints: 300, movementSeq: 1, ...extra });
+  const pos = (id: string, extra: Row) => ({
+    id, walletId: 'w1', creditTxId: `t-${id}`, lotId: null, batchId: 'B1', amount: 300, offsetPoints: 0, reversedPoints: 0,
+    attribution: 'EXACT', outletCode: 'O1', fieldId: 'F1', ...extra,
+  });
+  const err = async (p: Promise<unknown>) => {
+    try {
+      await p;
+      return null;
+    } catch (e) {
+      return e as ReversalAttentionException;
+    }
+  };
+
+  it('Q3: an UNRESOLVED credit of ANOTHER outlet line does not block this one (narrowed from whole-batch)', async () => {
+    const h = harness({ wallets: [tracked()], mode: 'V2' });
+    h.positions.push(pos('p1', {}), pos('u-other', { attribution: 'UNRESOLVED', outletCode: 'O2', fieldId: 'F1', amount: 50 }));
+    const r = await h.service.v2PointsReversalCap(h.models as any, key);
+    expect(r.cap).toBe(300);
+    expect(r.positions.map((p) => p.id)).toEqual(['p1']);
+  });
+
+  it('Q3: an UNRESOLVED credit that COULD be this line\'s → refused with the owner\'s wording, only for this line', async () => {
+    const h = harness({ wallets: [tracked()], mode: 'V2' });
+    h.positions.push(pos('u1', { attribution: 'UNRESOLVED', outletCode: null, fieldId: null, amount: 300 }));
+    h.batches.push({ id: 'B1', rows: [{ outletId: 'O1', fieldId: 'F1', amount: 300, awardType: 'POINTS', status: 'OK' }, { outletId: 'O2', fieldId: 'F1', amount: 80, awardType: 'POINTS', status: 'OK' }] });
+    const e = await err(h.service.v2PointsReversalCap(h.models as any, key));
+    expect(e).toBeInstanceOf(ReversalAttentionException);
+    expect(e!.code).toBe('CREDIT_UNMAPPED');
+    expect(e!.message).toBe("Can't reverse: the original credit for outlet O1 in this batch couldn't be identified — Gifsy must map it first.");
+    expect(e!.getStatus()).toBe(409);
+    // the batch's OTHER outlet line (fully identified by its resolved position) stays reversible
+    h.positions.push(pos('p2', { outletCode: 'O2', amount: 80 }));
+    await expect(h.service.v2PointsReversalCap(h.models as any, { ...key, outletCode: 'O2' })).resolves.toMatchObject({ cap: 80 });
+  });
+
+  it('Q3: an UNRESOLVED position carrying EXACTLY this key (backfill downgrade) is never drawn on and always blocks', async () => {
+    const h = harness({ wallets: [tracked()], mode: 'V2' });
+    h.positions.push(pos('p1', {}), pos('u1', { attribution: 'UNRESOLVED', amount: 100 }));
+    const e = await err(h.service.v2PointsReversalCap(h.models as any, key));
+    expect(e!.code).toBe('CREDIT_UNMAPPED');
+  });
+
+  it('Q1: no position because the receiving wallet is BLOCKED → refused naming the wallet\'s reason and what to do', async () => {
+    const h = harness({ wallets: [blankWallet('w1', 'cp1', { redeemablePoints: 300, backfillStatus: 'BLOCKED', backfillBlockedReason: 'CHAIN_BROKEN: no row continues' })], mode: 'V2' });
+    h.walletTxns.push({ id: 'c', walletId: 'w1', transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: 'B1', points: 300, metadata: { fieldId: 'F1', outletCode: 'O1' }, createdAt: later(-1) });
+    const e = await err(h.service.v2PointsReversalCap(h.models as any, key));
+    expect(e!.code).toBe('WALLET_NEEDS_ATTENTION');
+    expect(e!.message).toMatch(/^Can't reverse: the wallet that received this credit for outlet O1 needs Gifsy attention \(CHAIN_BROKEN: no row continues\)\. Gifsy must fix that wallet's points history and re-run the wallet backfill — earning and redeeming on it keep working meanwhile\.$/);
+    expect(e!.detail).toMatchObject({ walletId: 'w1', backfillStatus: 'BLOCKED' });
+  });
+
+  it('a pre-engine credit with no per-credit metadata and no position → CREDIT_UNMAPPED; nothing credited → 400 settle off-platform', async () => {
+    const h = harness({ wallets: [tracked()], mode: 'V2' });
+    h.walletTxns.push({ id: 'c', walletId: 'w1', transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: 'B1', points: 300, metadata: null, createdAt: later(-1) });
+    expect((await err(h.service.v2PointsReversalCap(h.models as any, key)))!.code).toBe('CREDIT_UNMAPPED');
+    const none = harness({ wallets: [tracked()], mode: 'V2' });
+    const e = await err(none.service.v2PointsReversalCap(none.models as any, key));
+    expect(e).toBeInstanceOf(BadRequestException);
+    expect(e!.message).toMatch(/settle it off-platform/);
   });
 });

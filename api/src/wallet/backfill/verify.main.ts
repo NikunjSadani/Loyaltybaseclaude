@@ -77,11 +77,17 @@ export async function runVerify(src: VerifySource, cfg: VerifyConfig, log: (l: s
       neverNegativeTenant: cfg.neverNegativeTenants.has(clientId),
       expectedNegativeBalances: cfg.expectedNegatives.get(clientId),
     });
-    for (const r of rs) log(`[${clientId}] ${r.status.padEnd(4)} ${r.check} — ${r.detail}${r.ids.length && r.status === 'FAIL' ? ` [${r.ids.join(', ')}]` : ''}`);
+    for (const r of rs) {
+      const listIds = r.ids.length && (r.status === 'FAIL' || r.status === 'WARN');
+      log(`[${clientId}] ${r.status.padEnd(4)} ${r.check} — ${r.detail}${listIds ? ` [${r.ids.join(', ')}]` : ''}`);
+    }
     results.push(...rs);
   }
   const failed = results.filter((r) => r.status === 'FAIL').length;
+  const warned = results.filter((r) => r.status === 'WARN').length;
   log(failed ? `VERIFY: ❌ ${failed} check(s) FAILED` : 'VERIFY: ✅ all checks passed');
+  // Owner rule (no silent pass-throughs): WARN items pass the gate but are always called out.
+  if (warned) log(`VERIFY: ⚠ ${warned} check(s) need Gifsy attention (WARN lines above — blocked wallets / payout reversal flags)`);
   return { exitCode: failed ? 5 : 0, results };
 }
 

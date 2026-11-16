@@ -1440,6 +1440,13 @@ model Wallet {
   // (rollout step 6) — adding it earlier would reject writes to today's negative wallets (D still 0).
   debtPoints        Int       @default(0)
   movementSeq       Int       @default(0)
+  // WP6 backfill outcome (policy round A, owner Q1 2026-11-16). NULL = the backfill has not looked at this wallet
+  // yet; DONE = sequenced (movementSeq > 0 or nothing to sequence); BLOCKED = its history could not be reconstructed
+  // (reason in backfillBlockedReason) → the wallet keeps TODAY's (LEGACY) earn/redeem/expiry rules even on a V2
+  // tenant and only POINTS reversals on it are refused until Gifsy fixes it and re-runs the backfill.
+  backfillStatus        WalletBackfillStatus?
+  backfillBlockedReason String?
+  backfillCheckedAt     DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -1453,7 +1460,14 @@ model Wallet {
   pointsLedger PointsLedger[]
 
   @@index([partnerId])
+  @@index([backfillStatus])
   @@map("wallets")
+}
+
+/// WP6 backfill outcome per wallet (see Wallet.backfillStatus).
+enum WalletBackfillStatus {
+  DONE
+  BLOCKED
 }
 
 model WalletTransaction {
@@ -3707,7 +3721,7 @@ model WalletCreditPosition {
   @@map("wallet_credit_positions")
 }
 
-/// One per (POINTS CreditReversal × position) — §1.2: requested r = debtRestored p + recovered c + shortfall
+/// One per (POINTS CreditReversal × position) — §1.2: requested r = debtRestored p + recovered c + owed + shortfall
 /// (SQL CHECK; all ≥ 0, requested > 0). Unique per (reversal, position) → an approval can't double-apply.
 model CreditReversalAllocation {
   id               String   @id @default(cuid())
@@ -3715,8 +3729,11 @@ model CreditReversalAllocation {
   positionId       String
   requested        Int // r
   debtRestored     Int // p = min(r, O_X)
-  recovered        Int // c = min(r − p, H)
-  shortfall        Int // r − p − c (points already spent — R4)
+  recovered        Int // c = min(r − p, H) — points actually taken from what the wallet HELD
+  // owed: a HISTORICAL clawback (backfill, Q13/Q4) that debited more than the wallet held — the excess was booked as
+  // debt ("recovered X, owed Y"), never counted as recovered. Always 0 for engine (v2) reversals.
+  owed             Int      @default(0)
+  shortfall        Int // r − p − c − owed (points already spent — R4)
   createdAt        DateTime @default(now())
 
   creditReversal CreditReversal       @relation(fields: [creditReversalId], references: [id], onDelete: Restrict)

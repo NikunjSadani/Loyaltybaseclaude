@@ -14,9 +14,11 @@ import {
   planIdentity,
   planTenant,
   planWallet,
+  summarizeTenant,
   WalletPlan,
 } from './backfill-plan';
-import { ApplyOutcome, BackfillStore, runBackfill, BackfillConfig } from './backfill-runner';
+import { ApplyOutcome, BackfillStore, runBackfill, BackfillConfig, PausePriorState, PayoutBackfillInput } from './backfill-runner';
+import type { PlannedPayoutAllocation } from '../../credits/payout-reversal-v2';
 import { computeV0, runVerifyChecks, V0Snapshot, VerifySnapshot, VWallet } from './verify-checks';
 import { runVerify, verifyConfigFromEnv } from './verify.main';
 import { configFromEnv } from './backfill.main';
@@ -267,8 +269,16 @@ interface MemTenant {
 class MemStore implements BackfillStore {
   tenants = new Map<string, MemTenant>();
   positions: { id: string; walletId: string; creditTxId: string; amount: number; offsetPoints: number; reversedPoints: number; attribution: string; clientId: string }[] = [];
-  allocations: { positionId: string; creditReversalId: string; requested: number; clientId: string }[] = [];
-  payoutAllocations: { payoutEntryId: string; creditReversalId: string; state: string; clientId: string }[] = [];
+  allocations: { positionId: string; creditReversalId: string; requested: number; recovered: number; owed: number; clientId: string }[] = [];
+  payoutAllocations: { payoutEntryId: string; creditReversalId: string; state: string; clientId: string; amountPaise?: bigint }[] = [];
+  /** policy round A: wallets.backfillStatus / reason */
+  status = new Map<string, { status: 'DONE' | 'BLOCKED'; reason: string | null }>();
+  /** Q5 pause switch per tenant + a log of every set / drain, in order */
+  pause = new Map<string, PausePriorState>();
+  pauseLog: string[] = [];
+  /** WP5 payout planner input per tenant */
+  payoutInput = new Map<string, Omit<PayoutBackfillInput, 'existingAllocations'>>();
+  beforePayoutApply: (() => void) | null = null;
   writes = 0;
   applyCalls = 0;
   failOnApplyCall: number | null = null;
@@ -317,8 +327,50 @@ class MemStore implements BackfillStore {
       redeemablePoints: h.wallet.redeemablePoints,
       debtPoints: h.wallet.debtPoints,
       movementSeq: h.wallet.movementSeq,
+      backfillStatus: this.status.get(h.wallet.id)?.status ?? null,
       ...t.counters.get(h.wallet.id)!,
     }));
+  }
+  async markWalletsBlocked(clientId: string, items: { walletId: string; reason: string }[]) {
+    let n = 0;
+    for (const it of items) {
+      const h = this.tenants.get(clientId)!.histories.get(it.walletId);
+      if (!h || h.wallet.movementSeq !== 0) continue;
+      this.status.set(it.walletId, { status: 'BLOCKED', reason: it.reason });
+      n++;
+    }
+    return n;
+  }
+  async getPointsReversalPause(clientId: string): Promise<PausePriorState> {
+    return this.pause.get(clientId) ?? { paused: false, since: null };
+  }
+  async setPointsReversalPause(clientId: string, paused: boolean) {
+    this.pause.set(clientId, { paused, since: paused ? 'T' : null });
+    this.pauseLog.push(`${clientId}:${paused ? 'ON' : 'OFF'}`);
+  }
+  async drainPointsReversals(clientId: string) {
+    this.pauseLog.push(`${clientId}:DRAIN`);
+  }
+  private payoutOf(clientId: string): PayoutBackfillInput {
+    const pin = this.payoutInput.get(clientId) ?? { reversals: [], entries: [] };
+    return {
+      reversals: pin.reversals.map((r) => ({ ...r })),
+      entries: pin.entries.map((e) => ({ ...e })),
+      existingAllocations: this.payoutAllocations.filter((a) => a.clientId === clientId).map((a) => ({ creditReversalId: a.creditReversalId, payoutEntryId: a.payoutEntryId, state: a.state })),
+    };
+  }
+  async loadPayoutBackfillInput(clientId: string) {
+    return this.payoutOf(clientId);
+  }
+  async applyPayoutPlan(clientId: string, decide: (fresh: PayoutBackfillInput) => PlannedPayoutAllocation[] | null) {
+    this.beforePayoutApply?.();
+    const rows = decide(this.payoutOf(clientId));
+    if (!rows) return { outcome: 'CHANGED' as const, inserted: 0 };
+    for (const r of rows) {
+      this.payoutAllocations.push({ payoutEntryId: r.payoutEntryId, creditReversalId: r.creditReversalId, state: r.state, clientId, amountPaise: r.amountPaise });
+      this.writes++;
+    }
+    return { outcome: 'APPLIED' as const, inserted: rows.length };
   }
   async snapshotV0(clientId: string): Promise<V0Snapshot> {
     return computeV0(clientId, this.wallets(clientId));
@@ -350,11 +402,12 @@ class MemStore implements BackfillStore {
     }
     for (const a of plan.allocations) {
       if (this.allocations.some((x) => x.creditReversalId === a.creditReversalId && x.positionId === `P-${a.creditTxId}`)) throw new Error('unique');
-      this.allocations.push({ positionId: `P-${a.creditTxId}`, creditReversalId: a.creditReversalId, requested: a.requested, clientId });
+      this.allocations.push({ positionId: `P-${a.creditTxId}`, creditReversalId: a.creditReversalId, requested: a.requested, recovered: a.recovered, owed: a.owed, clientId });
       this.writes++;
     }
     live.wallet.debtPoints = plan.debtPoints;
     live.wallet.movementSeq = plan.movementSeq;
+    this.status.set(walletId, { status: 'DONE', reason: null });
     this.writes++;
     return 'APPLIED';
   }
@@ -367,17 +420,21 @@ class MemStore implements BackfillStore {
       positions: this.positions.filter((p) => p.clientId === clientId),
       allocations: this.allocations.filter((a) => a.clientId === clientId),
       payoutAllocations: this.payoutAllocations.filter((a) => a.clientId === clientId),
+      payoutBackfill: this.payoutOf(clientId),
     };
   }
   /** full observable state, for run-twice / resume equality */
   state(): string {
     const ts = [...this.tenants.entries()].map(([c, t]) => [c, [...t.histories.values()].map((h) => ({ w: h.wallet, t: h.txs.map((x) => [x.id, x.seq, x.pointsDelta, x.pointsLedgerId, x.reversedCreditTxId, x.creditReversalId]) }))]);
-    return JSON.stringify({ ts, p: this.positions, a: this.allocations });
+    return JSON.stringify(
+      { ts, p: this.positions, a: this.allocations, s: [...this.status.entries()].sort(), pa: this.payoutAllocations },
+      (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v),
+    );
   }
 }
 
 const silent = () => undefined;
-const cfg = (over: Partial<BackfillConfig> = {}): BackfillConfig => ({ expectedDb: 'gifsy_test', apply: false, confirm: undefined, allowBlocked: false, ...over });
+const cfg = (over: Partial<BackfillConfig> = {}): BackfillConfig => ({ expectedDb: 'gifsy_test', apply: false, confirm: undefined, ...over });
 const applyCfg = (over: Partial<BackfillConfig> = {}) => cfg({ apply: true, confirm: 'APPLY gifsy_test', ...over });
 
 function fullStore(): MemStore {
@@ -408,7 +465,7 @@ describe('WP6 backfill planner', () => {
       { walletId: 'W-D1', creditTxId: 'd1c1', lotId: 'L-d1c1', batchId: 'B1', outletCode: 'O1', fieldId: 'F1', amount: 500, offsetPoints: 0, reversedPoints: 500, attribution: 'EXACT' },
       { walletId: 'W-D1', creditTxId: 'd1c2', lotId: 'L-d1c2', batchId: 'B1', outletCode: 'O2', fieldId: 'F1', amount: 300, offsetPoints: 0, reversedPoints: 0, attribution: 'EXACT' },
     ]);
-    expect(p.allocations).toEqual([{ creditReversalId: 'R1', creditTxId: 'd1c1', requested: 500, debtRestored: 0, recovered: 200, shortfall: 300 }]);
+    expect(p.allocations).toEqual([{ creditReversalId: 'R1', creditTxId: 'd1c1', requested: 500, debtRestored: 0, recovered: 200, owed: 0, shortfall: 300 }]);
   });
 
   it('never writes balances: the plan carries no balance / counter / lot field, and redeemablePoints is only a guard', () => {
@@ -477,7 +534,7 @@ describe('WP6 backfill planner', () => {
     expect(p.redeemablePoints).toBe(-341);
     expect(p.txUpdates[3]).toMatchObject({ pointsDelta: 0, reversedCreditTxId: 'r2c', creditReversalId: 'R9' });
     expect(p.positions[0]).toMatchObject({ offsetPoints: 500, reversedPoints: 500 });
-    expect(p.allocations).toEqual([{ creditReversalId: 'R9', creditTxId: 'r2c', requested: 500, debtRestored: 0, recovered: 0, shortfall: 500 }]);
+    expect(p.allocations).toEqual([{ creditReversalId: 'R9', creditTxId: 'r2c', requested: 500, debtRestored: 0, recovered: 0, owed: 0, shortfall: 500 }]);
     expect(p.debtPoints).toBe(341);
     // no −0 anywhere in the persisted write-set
     const nums = [p.debtPoints, ...p.txUpdates.map((u) => u.pointsDelta), ...p.positions.flatMap((x) => [x.offsetPoints, x.reversedPoints]), ...p.allocations.flatMap((a) => [a.debtRestored, a.recovered, a.shortfall])];
@@ -509,7 +566,7 @@ describe('WP6 backfill planner', () => {
       ['l1', 'LEGACY_REPLAY', 'O1', 'F1', 120],
       ['l2', 'LEGACY_REPLAY', 'O3', 'F2', 0],
     ]);
-    expect(p.allocations).toEqual([{ creditReversalId: 'RL', creditTxId: 'l1', requested: 120, debtRestored: 0, recovered: 120, shortfall: 0 }]);
+    expect(p.allocations).toEqual([{ creditReversalId: 'RL', creditTxId: 'l1', requested: 120, debtRestored: 0, recovered: 120, owed: 0, shortfall: 0 }]);
     expect(p.txUpdates[2].reversedCreditTxId).toBe('l1');
   });
 
@@ -768,18 +825,225 @@ describe('WP6 backfill runner', () => {
     expect(s.tenants.get('bajaj')!.histories.get('W-BP')!.wallet.movementSeq).toBe(3);
   });
 
-  it('a tenant with BLOCKED wallets is refused (exit 3) unless ALLOW_BLOCKED; blocked wallets are never written', async () => {
+  it('Q2: BLOCKED wallets never stop the clean ones — every clean wallet is backfilled, each BLOCKED one is marked with its reason and listed', async () => {
     const s = new MemStore().add('t', ctxOf('t'), [
       { id: 'W-ok', clientId: 't', steps: [{ k: 'credit', id: 'ok1', pts: 10 }] },
       { id: 'W-bad', clientId: 't', steps: [{ k: 'credit', id: 'bad1', pts: 10 }, { k: 'raw', id: 'bad2', pts: 5, balanceAfter: 999, type: 'CREDIT_BONUS' }] },
     ]);
-    const r = await runBackfill(s, applyCfg(), silent);
-    expect(r.exitCode).toBe(3);
-    expect(s.writes).toBe(0);
-    const r2 = await runBackfill(s, applyCfg({ allowBlocked: true }), silent);
-    expect(r2.exitCode).toBe(0);
+    const lines: string[] = [];
+    const r = await runBackfill(s, applyCfg(), (l) => lines.push(l));
+    expect(r.exitCode).toBe(0); // blocked wallets are ATTENTION, not a failed run
     expect(s.tenants.get('t')!.histories.get('W-ok')!.wallet.movementSeq).toBe(1);
+    expect(s.status.get('W-ok')).toEqual({ status: 'DONE', reason: null });
     expect(s.tenants.get('t')!.histories.get('W-bad')!.wallet.movementSeq).toBe(0);
+    expect(s.status.get('W-bad')!.status).toBe('BLOCKED');
+    expect(s.status.get('W-bad')!.reason).toMatch(/^CHAIN_BROKEN: no row within/);
+    const t = r.tenants[0];
+    expect(t.markedBlocked).toBe(1);
+    expect(t.attention.blockedWallets).toEqual([{ walletId: 'W-bad', reason: s.status.get('W-bad')!.reason }]);
+    expect(lines.some((l) => l.includes('ATTENTION — 1 wallet(s) need Gifsy'))).toBe(true);
+    expect(lines.some((l) => l.includes("WALLET W-bad BLOCKED — keeps today's earn/redeem/expiry rules"))).toBe(true);
+    // ALLOW_BLOCKED is gone (ignored if still set)
+    expect(configFromEnv({ EXPECTED_DB: 'x', ALLOW_BLOCKED: 'true' })).not.toHaveProperty('allowBlocked');
+  });
+
+  it('Q2: DRY_RUN lists the blocked wallets with reasons but marks nothing', async () => {
+    const s = new MemStore().add('t', ctxOf('t'), [
+      { id: 'W-bad', clientId: 't', steps: [{ k: 'raw', id: 'b', pts: 5, balanceAfter: 999, type: 'CREDIT_BONUS' }] },
+    ]);
+    const r = await runBackfill(s, cfg(), silent);
+    expect(r.tenants[0].attention.blockedWallets.map((w) => w.walletId)).toEqual(['W-bad']);
+    expect(s.status.size).toBe(0);
+    expect(s.pauseLog).toEqual([]);
+  });
+
+  it('Q1: a previously BLOCKED wallet that Gifsy fixed is backfilled on the next run and becomes DONE (reason cleared)', async () => {
+    const s = new MemStore().add('t', ctxOf('t'), [
+      { id: 'W-bad', clientId: 't', steps: [{ k: 'credit', id: 'b1', pts: 10 }, { k: 'raw', id: 'b2', pts: 5, balanceAfter: 999, type: 'CREDIT_BONUS' }] },
+    ]);
+    await runBackfill(s, applyCfg(), silent);
+    expect(s.status.get('W-bad')!.status).toBe('BLOCKED');
+    // Gifsy repairs the row (balanceAfter 15) and re-runs
+    const h = s.tenants.get('t')!.histories.get('W-bad')!;
+    h.txs[1].balanceAfter = 15;
+    h.wallet.redeemablePoints = 15;
+    await runBackfill(s, applyCfg(), silent);
+    expect(s.status.get('W-bad')).toEqual({ status: 'DONE', reason: null });
+    expect(h.wallet.movementSeq).toBe(2);
+  });
+
+  it('Q5: APPLY pauses POINTS reversal approvals, drains in-flight ones, and resumes at the end; DRY_RUN never touches the switch', async () => {
+    const s = fullStore();
+    await runBackfill(s, cfg(), silent);
+    expect(s.pauseLog).toEqual([]);
+    const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
+    expect(s.pauseLog).toEqual(['bajaj:ON', 'bajaj:DRAIN', 'bajaj:OFF']);
+    expect(r.tenants[0].pause).toEqual({ pausedByRun: true, leftPaused: false, priorSince: null });
+    expect(s.pause.get('bajaj')!.paused).toBe(false);
+  });
+
+  it('Q5: KEEP_POINTS_REVERSALS_PAUSED leaves it on; a pause that was already on is never lifted by the run; a crash still resumes', async () => {
+    const s = fullStore();
+    expect(configFromEnv({ EXPECTED_DB: 'x', KEEP_POINTS_REVERSALS_PAUSED: 'true' }).keepPaused).toBe(true);
+    await runBackfill(s, applyCfg({ tenants: ['bajaj'], keepPaused: true }), silent);
+    expect(s.pause.get('bajaj')!.paused).toBe(true);
+    s.pauseLog = [];
+    const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent); // already paused (manual / kept)
+    expect(s.pauseLog).toEqual(['bajaj:DRAIN']);
+    expect(s.pause.get('bajaj')!.paused).toBe(true);
+    expect(r.tenants[0].pause).toMatchObject({ pausedByRun: false, priorSince: 'T' });
+
+    const c = fullStore();
+    c.failOnApplyCall = 2;
+    await expect(runBackfill(c, applyCfg({ tenants: ['bajaj'] }), silent)).rejects.toThrow('simulated crash');
+    expect(c.pauseLog).toEqual(['bajaj:ON', 'bajaj:DRAIN', 'bajaj:OFF']);
+  });
+
+  it('Q5: a re-run right before the V2 flip only works on what is new (already-sequenced wallets: counts only, no writes)', async () => {
+    const s = fullStore();
+    await runBackfill(s, applyCfg(), silent);
+    const writes = s.writes;
+    // a NEW wallet with legacy history appears after the first run
+    const extra = build({ id: 'W-NEW', clientId: 'bajaj', steps: [{ k: 'credit', id: 'n1', pts: 70 }] });
+    s.tenants.get('bajaj')!.histories.set('W-NEW', extra.history);
+    s.tenants.get('bajaj')!.counters.set('W-NEW', extra.counters);
+    const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
+    expect(r.tenants[0].summary.wallets).toMatchObject({ planned: 1, done: 9 });
+    expect(r.tenants[0].applied).toBe(1);
+    expect(s.writes - writes).toBe(2); // 1 row sequenced + the wallet row
+    // and the planner decides DONE from counts alone (what the Prisma store loads for sequenced wallets)
+    const summaryOnly: BfWalletHistory = {
+      wallet: { id: 'W-S', partnerId: 'P', clientId: 'bajaj', redeemablePoints: 5, debtPoints: 0, movementSeq: 3 },
+      txs: [],
+      ledgers: [],
+      currentOutletCodes: [],
+      existingPositionCount: 0,
+      sequencedSummary: { txCount: 3, sequencedCount: 3, maxSeq: 3 },
+    };
+    expect(planWallet(summaryOnly, ctxOf('bajaj')).status).toBe('DONE');
+    expect(planWallet({ ...summaryOnly, sequencedSummary: { txCount: 4, sequencedCount: 3, maxSeq: 3 } }, ctxOf('bajaj')).status).toBe('BLOCKED');
+  });
+});
+
+// ───────────────────────────── Q4: historical clawbacks beyond holdings ─────────────────────────────
+
+describe('policy Q4 — historical clawback that exceeded holdings: "recovered X, owed Y", owed never counted as recovered', () => {
+  it('a recorded clawback that took 300 from a wallet holding 100 → recovered 100, owed 200 (debt), shortfall = requested − moved', () => {
+    const ctx = ctxOf('t', [{ id: 'BQ', clientId: 't', rows: [row('OQ', 'F1', 400)] }], [rev('RQ', 't', 'BQ', 'OQ', 'F1', 400)]);
+    const h = build({
+      id: 'W-Q',
+      clientId: 't',
+      steps: [
+        { k: 'credit', id: 'q1', pts: 400, batch: 'BQ', meta: { fieldId: 'F1', outletCode: 'OQ' } },
+        { k: 'redeem', id: 'q2', pts: 300 },
+        // a pre-engine patched clawback recorded −300 on a wallet holding 100 (pushed it to −200)
+        { k: 'raw', id: 'q3', pts: -400, balanceAfter: -200, type: 'DEBIT_ADJUSTMENT' },
+      ],
+    }).history;
+    Object.assign(h.txs[2], { referenceType: 'CREDIT_REVERSAL', referenceId: 'RQ', metadata: { reversedCreditTxId: 'q1' } });
+    const p = planWallet(h, ctx);
+    expect(p.status).toBe('PLANNED');
+    expect(p.allocations).toEqual([
+      { creditReversalId: 'RQ', creditTxId: 'q1', requested: 400, debtRestored: 0, recovered: 100, owed: 200, shortfall: 100 },
+    ]);
+    expect(p.debtPoints).toBe(200);
+    const a = p.anomalies.find((x) => x.code === 'CLAWBACK_OWED')!;
+    expect(a.detail).toMatch(/recovered 100, owed 200/);
+    expect(p.anomalies.find((x) => x.code === 'CLAWBACK_BEYOND_HOLDINGS')!.detail).toMatch(/recovered 100, owed 200 \(booked as debt\)/);
+    const sum = summarizeTenant({ clientId: 't', wallets: [p], adjustments: { downgradeKeys: new Set() }, anomalies: [] });
+    expect(sum.historicalClawbacks).toEqual({ count: 1, requested: 400, debtRestored: 0, recovered: 100, owed: 200, shortfall: 100 });
+  });
+
+  it('the run report and verify V8 say "recovered X, owed Y"', async () => {
+    const ctx = ctxOf('t', [{ id: 'BQ', clientId: 't', rows: [row('OQ', 'F1', 400)] }], [rev('RQ', 't', 'BQ', 'OQ', 'F1', 400)]);
+    const s = new MemStore().add('t', ctx, [
+      {
+        id: 'W-Q',
+        clientId: 't',
+        steps: [
+          { k: 'credit', id: 'q1', pts: 400, batch: 'BQ', meta: { fieldId: 'F1', outletCode: 'OQ' } },
+          { k: 'redeem', id: 'q2', pts: 300 },
+          { k: 'raw', id: 'q3', pts: -400, balanceAfter: -200, type: 'DEBIT_ADJUSTMENT' },
+        ],
+      },
+    ]);
+    Object.assign(s.tenants.get('t')!.histories.get('W-Q')!.txs[2], { referenceType: 'CREDIT_REVERSAL', referenceId: 'RQ', metadata: { reversedCreditTxId: 'q1' } });
+    const lines: string[] = [];
+    const r = await runBackfill(s, applyCfg(), (l) => lines.push(l));
+    expect(r.tenants[0].attention.owedClawbacks).toEqual({ owed: 200, recovered: 100, count: 1 });
+    expect(lines.some((l) => l.includes('= debt restored 0 + recovered 100 + owed 200 + shortfall 100'))).toBe(true);
+    expect(lines.some((l) => l.includes('historical clawbacks: recovered 100, owed 200 (booked as debt — not recovered)'))).toBe(true);
+    const v8 = runVerifyChecks(await s.loadVerifySnapshot('t'), { neverNegativeTenant: false }).find((c) => c.check.startsWith('V8'))!;
+    expect(v8.status).toBe('PASS');
+    expect(v8.detail).toContain('recovered 100, owed 200');
+  });
+});
+
+// ───────────────────────────── WP5 payout planner wired into the backfill (WP6) ─────────────────────────────
+
+describe('WP6 × WP5 — PAYOUT reversal allocation backfill', () => {
+  const T1 = new Date(T0 + 50_000);
+  const entry = (id: string, amount: number, status: string, outletId = 'O1') => ({
+    id, clientId: 'bajaj', batchId: 'PB', outletId, fieldId: 'F', amountPaise: BigInt(amount), status, createdAt: new Date(T0),
+  });
+  const prev = (id: string, approved: number, consumed: unknown, extra: Record<string, unknown> = {}) => ({
+    id, clientId: 'bajaj', batchId: 'PB', outletId: 'O1', fieldId: 'F', status: 'APPROVED', awardType: 'PAYOUT',
+    approvedPaise: BigInt(approved), shortfallPaise: 0n, approvedAt: T1, consumedPayoutEntryIds: consumed, ...extra,
+  });
+  const store = () => {
+    const s = fullStore();
+    s.payoutInput.set('bajaj', {
+      reversals: [
+        prev('PR1', 30000, ['E1']), // clean: E1 REVERSED → APPLIED_CANCELLED
+        prev('PR2', 50000, null), // pre-column: E2 + E3 both settled, no unique subset of 50000 among [30000, 30000] → AMBIGUOUS
+        prev('PR3', 10000, null, { status: 'PENDING_GIFSY', approvedPaise: null, approvedAt: null }),
+      ],
+      entries: [entry('E1', 30000, 'REVERSED'), entry('E2', 30000, 'PAID'), entry('E3', 30000, 'PAID')],
+    });
+    return s;
+  };
+
+  it('DRY_RUN prints the planner flags in the anomaly list and inserts nothing', async () => {
+    const s = store();
+    const lines: string[] = [];
+    const r = await runBackfill(s, cfg({ tenants: ['bajaj'] }), (l) => lines.push(l));
+    const p = r.tenants[0].payout!;
+    expect(p).toMatchObject({ planned: 1, inserted: 0, outcome: 'DRY_RUN' });
+    expect(p.flags.map((f) => [f.creditReversalId, f.code])).toEqual([['PR2', 'AMBIGUOUS_LEGACY'], ['PR3', 'PENDING_LEGACY']]);
+    expect(lines.some((l) => l.includes('BLOCKING PAYOUT_AMBIGUOUS_LEGACY reversal PR2'))).toBe(true);
+    expect(r.tenants[0].attention.payoutReversals.map((f) => f.creditReversalId)).toEqual(['PR2']);
+    expect(s.payoutAllocations).toEqual([]);
+  });
+
+  it('APPLY inserts the planned rows (never for a BLOCKING-flagged reversal); a re-run inserts nothing; verify V9/V9b', async () => {
+    const s = store();
+    const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
+    expect(r.exitCode).toBe(0);
+    expect(r.tenants[0].payout).toMatchObject({ planned: 1, inserted: 1, outcome: 'APPLIED' });
+    expect(s.payoutAllocations).toEqual([{ payoutEntryId: 'E1', creditReversalId: 'PR1', state: 'APPLIED_CANCELLED', clientId: 'bajaj', amountPaise: 30000n }]);
+    const r2 = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
+    expect(r2.tenants[0].payout).toMatchObject({ planned: 0, outcome: 'NONE' });
+    expect(s.payoutAllocations).toHaveLength(1);
+    const rs = runVerifyChecks(await s.loadVerifySnapshot('bajaj'), { neverNegativeTenant: false });
+    expect(rs.find((c) => c.check.startsWith('V9 '))!.status).toBe('PASS');
+    const v9b = rs.find((c) => c.check.startsWith('V9b'))!;
+    expect(v9b.status).toBe('WARN'); // PR2 is ambiguous → called out, never silent
+    expect(v9b.ids).toEqual(['PR2']);
+    expect(v9b.detail).toMatch(/AMBIGUOUS_LEGACY/);
+  });
+
+  it('a reversal approved between planning and the locked insert → CHANGED: nothing inserted, exit 3, the next run inserts', async () => {
+    const s = store();
+    s.beforePayoutApply = () => {
+      s.payoutInput.get('bajaj')!.reversals.push(prev('PR4', 30000, ['E3']));
+      s.beforePayoutApply = null;
+    };
+    const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
+    expect(r.tenants[0].payout!.outcome).toBe('CHANGED');
+    expect(r.exitCode).toBe(3);
+    expect(s.payoutAllocations).toEqual([]);
+    await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
+    expect(s.payoutAllocations.map((a) => a.creditReversalId).sort()).toEqual(['PR1', 'PR4']);
   });
 });
 
@@ -832,6 +1096,23 @@ describe('WP6 verify V0–V9', () => {
     s.positions = s.positions.filter((p) => p.creditTxId !== 'd1c2');
     const rd = Object.fromEntries(runVerifyChecks(await s.loadVerifySnapshot('deoleo'), opts('deoleo')).map((r) => [r.check.split(' ')[0], r.status]));
     expect(rd).toMatchObject({ V5: 'FAIL', V7: 'FAIL', V8: 'FAIL' });
+  });
+
+  it('V10 / Q2: a BLOCKED wallet is excluded from V1/V2/V3/V7 and listed as WARN (never silent); the run still passes', async () => {
+    const s = new MemStore().add('t', ctxOf('t'), [
+      { id: 'W-ok', clientId: 't', steps: [{ k: 'credit', id: 'ok1', pts: 10 }] },
+      { id: 'W-bad', clientId: 't', steps: [{ k: 'credit', id: 'bad1', pts: 10 }, { k: 'raw', id: 'bad2', pts: 5, balanceAfter: 999, type: 'CREDIT_BONUS' }] },
+    ]);
+    await runBackfill(s, applyCfg(), silent);
+    const rs = runVerifyChecks(await s.loadVerifySnapshot('t'), { neverNegativeTenant: false });
+    const st = Object.fromEntries(rs.map((r) => [r.check.split(' ')[0], r.status]));
+    expect(st).toMatchObject({ V1: 'PASS', V2: 'PASS', V3: 'PASS', V7: 'PASS', V10: 'WARN' });
+    expect(rs.find((r) => r.check.startsWith('V10'))!.ids).toEqual(['W-bad']);
+    const lines: string[] = [];
+    const out = await runVerify(s, verifyConfigFromEnv({ EXPECTED_DB: 'gifsy_test', NEVER_NEGATIVE_TENANTS: 'none' }), (l) => lines.push(l));
+    expect(out.exitCode).toBe(0);
+    expect(lines.some((l) => l.includes('WARN V10 wallets needing Gifsy attention') && l.includes('[W-bad]'))).toBe(true);
+    expect(lines.some((l) => l.startsWith('VERIFY: ⚠ 1 check(s) need Gifsy attention'))).toBe(true);
   });
 
   it('verify job: guard + env parsing + exit codes (0 pass, 5 fail)', async () => {

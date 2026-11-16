@@ -55,6 +55,26 @@ export const REVERSAL_ENGINE_MODES = ['LEGACY', 'SHADOW', 'V2'] as const;
 export type ReversalEngineMode = (typeof REVERSAL_ENGINE_MODES)[number];
 export const REVERSAL_ENGINE_SETTING_KEY = 'reversalEngine';
 
+/**
+ * Per-tenant "POINTS reversal approvals paused" switch (WALLET-REVERSAL-ENGINE-DESIGN.md §9.1, owner Q5 2026-11-16):
+ * the program_settings row `pointsReversalApprovalsPaused` = `{ paused: boolean, since?: ISO, by?: string,
+ * reason?: string }`. The WP6 backfill turns it on for the APPLY window; while on, POINTS reversal create / approve
+ * are refused. Absent ⇒ not paused. A malformed value FAILS CLOSED (treated as paused — money path).
+ */
+export const POINTS_REVERSAL_PAUSE_SETTING_KEY = 'pointsReversalApprovalsPaused';
+
+export interface PointsReversalPause {
+  paused: boolean;
+  since: string | null;
+  by: string | null;
+  reason: string | null;
+  /** the stored value could not be read → treated as paused */
+  malformed?: boolean;
+}
+
+/** The DB handle a settings read runs on: the service's own client, or the CALLER's interactive transaction. */
+export type SettingsReader = Pick<PrismaService, 'programSetting'>;
+
 export interface RedemptionChannels {
   physicalGifts: boolean;
   vouchers:      boolean;
@@ -571,9 +591,12 @@ export class TenantSettingsService {
    *  - A present but malformed value THROWS (fail closed on the money path: a typo must never silently pick an
    *    engine). A read error propagates for the same reason — the reversal is refused, never run on a guess.
    * Uncached like getPointsEngineFlagsUncached: a rollout / rollback flip must take effect fleet-wide at once.
+   * `db`: pass the CALLER's transaction when the caller holds row locks (e.g. a wallet FOR UPDATE) — reading on
+   * this service's own client would take a SECOND pool connection while the first is held, and ≥ pool-size
+   * concurrent lock holders then starve each other (WP7 pool test). Omitted → this service's client.
    */
-  async getReversalEngineModeUncached(clientId: string): Promise<ReversalEngineMode> {
-    const row = await this.prisma.programSetting.findUnique({
+  async getReversalEngineModeUncached(clientId: string, db: SettingsReader = this.prisma): Promise<ReversalEngineMode> {
+    const row = await db.programSetting.findUnique({
       where: { clientId_settingKey: { clientId, settingKey: REVERSAL_ENGINE_SETTING_KEY } },
       select: { settingValue: true },
     });
@@ -585,6 +608,19 @@ export class TenantSettingsService {
     throw new BadRequestException(
       `Invalid reversalEngine setting for this tenant (${JSON.stringify(v)}); expected one of ${REVERSAL_ENGINE_MODES.join(' | ')} — contact Gifsy`,
     );
+  }
+
+  /**
+   * UNCACHED read of the POINTS-reversal pause switch (owner Q5). Absent row ⇒ not paused; `{ paused: false }` ⇒ not
+   * paused; `{ paused: true, … }` ⇒ paused; anything else ⇒ paused + `malformed` (fail closed). Pass the caller's
+   * `tx` (same reason as getReversalEngineModeUncached).
+   */
+  async getPointsReversalPauseUncached(clientId: string, db: SettingsReader = this.prisma): Promise<PointsReversalPause> {
+    const row = await db.programSetting.findUnique({
+      where: { clientId_settingKey: { clientId, settingKey: POINTS_REVERSAL_PAUSE_SETTING_KEY } },
+      select: { settingValue: true },
+    });
+    return parsePointsReversalPause(row ? row.settingValue : undefined);
   }
 
   /** Bust the cache for a tenant — called by AdminCoreService.upsertSetting after a write. */
@@ -878,4 +914,17 @@ export class TenantSettingsService {
   private isObj(v: unknown): v is Record<string, unknown> {
     return typeof v === 'object' && v !== null && !Array.isArray(v);
   }
+}
+
+/** PURE parser of the `pointsReversalApprovalsPaused` value (see getPointsReversalPauseUncached). */
+export function parsePointsReversalPause(v: unknown): PointsReversalPause {
+  const off: PointsReversalPause = { paused: false, since: null, by: null, reason: null };
+  if (v === undefined || v === null) return off;
+  if (typeof v === 'object' && !Array.isArray(v)) {
+    const r = v as Record<string, unknown>;
+    const str = (x: unknown) => (typeof x === 'string' && x.trim() ? x : null);
+    if (r.paused === false) return off;
+    if (r.paused === true) return { paused: true, since: str(r.since), by: str(r.by), reason: str(r.reason) };
+  }
+  return { paused: true, since: null, by: null, reason: `unreadable setting value ${JSON.stringify(v)}`, malformed: true };
 }
