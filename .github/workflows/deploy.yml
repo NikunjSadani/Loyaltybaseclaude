@@ -119,7 +119,7 @@ jobs:
       - name: Preflight — required Secret Manager secrets exist (metadata only)
         run: |
           missing=0
-          for s in HUBBLE_CLIENT_ID HUBBLE_CLIENT_SECRET HUBBLE_WEBHOOK_SECRET SALES_IMPORT_DRAIN_SECRET NOTIFICATIONS_STATUS_SECRET; do
+          for s in HUBBLE_CLIENT_ID HUBBLE_CLIENT_SECRET HUBBLE_WEBHOOK_SECRET SALES_IMPORT_DRAIN_SECRET NOTIFICATIONS_STATUS_SECRET VOUCHER_DISPERSAL_DRAIN_SECRET; do
             state="$(gcloud secrets versions describe latest --secret="$s" --project="${{ env.PROJECT_ID }}" --format='value(state)' 2>/dev/null || true)"
             if [ "$state" != "ENABLED" ]; then
               echo "::error::Secret Manager secret '$s' is missing, has no ENABLED latest version, or is not visible to the deployer SA (needs roles/secretmanager.viewer). Create it (owner, console) BEFORE deploying — see BAJAJ-PROD-GO-LIVE-CHECKLIST.md § F3 runbook. Nothing was deployed or migrated."
@@ -283,7 +283,8 @@ jobs:
               HUBBLE_CLIENT_SECRET=HUBBLE_CLIENT_SECRET:latest,\
               HUBBLE_WEBHOOK_SECRET=HUBBLE_WEBHOOK_SECRET:latest,\
               SALES_IMPORT_DRAIN_SECRET=SALES_IMPORT_DRAIN_SECRET:latest,\
-              NOTIFICATIONS_STATUS_SECRET=NOTIFICATIONS_STATUS_SECRET:latest"
+              NOTIFICATIONS_STATUS_SECRET=NOTIFICATIONS_STATUS_SECRET:latest,\
+              VOUCHER_DISPERSAL_DRAIN_SECRET=VOUCHER_DISPERSAL_DRAIN_SECRET:latest"
 
   # ── Build & Deploy Frontend ──────────────────────────────────────────────────
   deploy-frontend:
