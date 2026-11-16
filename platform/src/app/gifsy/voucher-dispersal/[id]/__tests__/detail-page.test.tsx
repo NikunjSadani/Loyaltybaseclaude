@@ -156,8 +156,18 @@ describe('Voucher campaign detail', () => {
 describe('Voucher campaign detail — polling', () => {
   const flush = () => act(async () => { await vi.advanceTimersByTimeAsync(0); });
 
-  it('polls while PROCESSING with backoff and stops once COMPLETED', { timeout: 20000 }, async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const MIN = 60_000;
+  /** Advance in 1s act() steps so React can commit + re-arm the next poll timer between ticks. */
+  const advanceInSteps = async (ms: number) => {
+    for (let t = 0; t < ms; t += 1000) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    }
+  };
+
+  it('polls while PROCESSING with backoff, keeps going 30 min after COMPLETED, then stops', { timeout: 20000 }, async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(new Date('2026-11-16T10:00:00Z'));
+    // No server completedAt → the window starts when this page sees it finish.
     campaignQueue = [ok(campaign('PROCESSING')), ok(campaign('PROCESSING')), ok(campaign('COMPLETED'))];
     render(<DetailPage />);
     await flush();
@@ -171,10 +181,44 @@ describe('Voucher campaign detail — polling', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     expect(campaignCalls()).toBe(3);
     expect(screen.getByTestId('vd-campaign-status')).toHaveTextContent('Completed');
+    expect(screen.getByTestId('vd-live')).toHaveTextContent('still refreshing automatically for 30 minutes');
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(120000); });
-    expect(campaignCalls()).toBe(3); // stopped
+    // Still polling (≤30s apart) for late delivered / read updates…
+    const before = campaignCalls();
+    await advanceInSteps(5 * MIN);
+    expect(campaignCalls()).toBeGreaterThan(before + 5);
+
+    // …and stops once 30 minutes have passed since completion.
+    await advanceInSteps(26 * MIN);
+    const atStop = campaignCalls();
     expect(screen.getByTestId('vd-live')).toHaveTextContent('Not refreshing automatically');
+    await advanceInSteps(60 * MIN);
+    expect(campaignCalls()).toBe(atStop);
+  });
+
+  it('server completedAt drives the window: completed 10 min ago → polls; 40 min ago → does not', { timeout: 20000 }, async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(new Date('2026-11-16T10:40:00Z'));
+    const done = (completedAt: string) => {
+      const c = campaign('COMPLETED');
+      return ok({ ...c, campaign: { ...c.campaign, completedAt } });
+    };
+    campaignQueue = [done('2026-11-16T10:00:00Z')];
+    const { unmount } = render(<DetailPage />);
+    await flush();
+    expect(screen.getByTestId('vd-live')).toHaveTextContent('Not refreshing automatically');
+    await act(async () => { await vi.advanceTimersByTimeAsync(10 * MIN); });
+    expect(campaignCalls()).toBe(1);
+    unmount();
+
+    vi.setSystemTime(new Date('2026-11-16T10:10:00Z'));
+    fetchMock.mockClear();
+    campaignQueue = [done('2026-11-16T10:00:00Z')];
+    render(<DetailPage />);
+    await flush();
+    expect(screen.getByTestId('vd-live')).toHaveTextContent('still refreshing automatically');
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(campaignCalls()).toBe(2);
   });
 
   it('a failed poll is shown and polling continues', { timeout: 20000 }, async () => {

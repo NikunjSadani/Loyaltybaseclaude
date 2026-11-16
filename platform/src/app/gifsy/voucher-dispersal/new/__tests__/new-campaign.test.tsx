@@ -120,21 +120,33 @@ describe('New voucher campaign', () => {
     expect(screen.getByTestId('vd-prow-4')).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('vd-to-confirm'));
-    await screen.findByRole('heading', { name: '4. Confirm and issue' });
-    const phrase = 'Issue 2 vouchers · ₹1,500';
-    expect(screen.getByTestId('vd-phrase')).toHaveTextContent(phrase);
-    const btn = screen.getByTestId('vd-confirm');
-    expect(btn).toBeDisabled();
-    const input = screen.getByLabelText('Confirmation phrase');
-    fireEvent.change(input, { target: { value: 'Issue 2 vouchers' } });
-    expect(btn).toBeDisabled();
-    fireEvent.change(input, { target: { value: phrase } });
-    expect(btn).toBeEnabled();
+    await screen.findByRole('heading', { name: '4. Buy and send' });
+    expect(screen.getByTestId('vd-nothing-spent')).toHaveTextContent('Nothing has been bought or sent yet');
+    // Opening the dialog sends nothing.
+    fireEvent.click(screen.getByRole('button', { name: 'Buy & send vouchers' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('Buy and send 2 vouchers · ₹1,500 total?');
+    expect(dialog).toHaveTextContent('Nothing can be undone once vouchers are bought.');
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+    expect(callsTo('/campaigns/c1/confirm')).toHaveLength(0);
+    const btn = within(dialog).getByRole('button', { name: 'Buy & send' });
     fireEvent.click(btn);
     fireEvent.click(btn); // double-click must not double-confirm
     await waitFor(() => expect(push).toHaveBeenCalledWith('/gifsy/voucher-dispersal/c1'));
     expect(callsTo('/campaigns/c1/confirm')).toHaveLength(1);
-    expect(JSON.parse(String(callsTo('/campaigns/c1/confirm')[0][1]!.body))).toEqual({ confirmText: phrase });
+    expect(JSON.parse(String(callsTo('/campaigns/c1/confirm')[0][1]!.body))).toEqual({ expectedValidCount: 2, expectedTotalRupees: 1500 });
+  });
+
+  it('Cancel in the confirm dialog buys nothing', { timeout: 20000 }, async () => {
+    await fillAndCreate();
+    await uploadFile();
+    fireEvent.click(await screen.findByTestId('vd-to-confirm'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Buy & send vouchers' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(callsTo('/campaigns/c1/confirm')).toHaveLength(0);
+    expect(push).not.toHaveBeenCalled();
   });
 
   it('over budget → red reason and confirm is blocked', { timeout: 20000 }, async () => {
@@ -154,15 +166,22 @@ describe('New voucher campaign', () => {
     expect(screen.queryByRole('heading', { name: '3. Check the preview' })).not.toBeInTheDocument();
   });
 
-  it('confirm refusal is shown verbatim and the user stays on the step', { timeout: 20000 }, async () => {
-    confirmResponse = fail(400, 'Confirmation text does not match.');
+  it('confirm refusal (preview changed) is shown verbatim; re-upload is offered', { timeout: 20000 }, async () => {
+    const refusal = 'The preview changed since you checked it (3 valid rows, ₹2,000). Upload the file again.';
+    confirmResponse = fail(409, refusal);
     await fillAndCreate();
     await uploadFile();
     fireEvent.click(await screen.findByTestId('vd-to-confirm'));
-    fireEvent.change(await screen.findByLabelText('Confirmation phrase'), { target: { value: 'Issue 2 vouchers · ₹1,500' } });
-    fireEvent.click(screen.getByTestId('vd-confirm'));
-    expect(await screen.findByTestId('vd-confirm-error')).toHaveTextContent('Confirmation text does not match.');
+    fireEvent.click(await screen.findByRole('button', { name: 'Buy & send vouchers' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Buy & send' }));
+    expect(await within(dialog).findByTestId('vd-dialog-error')).toHaveTextContent(refusal);
     expect(push).not.toHaveBeenCalled();
+    // Closing the dialog keeps the refusal visible on the step with a way to re-upload.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByTestId('vd-confirm-error')).toHaveTextContent(refusal);
+    fireEvent.click(screen.getByRole('button', { name: 'Upload the file again' }));
+    expect(await screen.findByRole('heading', { name: '2. Upload the list' })).toBeInTheDocument();
   });
 
   it('create failure shows the server text', { timeout: 20000 }, async () => {

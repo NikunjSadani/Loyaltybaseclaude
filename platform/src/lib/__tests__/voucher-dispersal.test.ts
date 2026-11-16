@@ -5,32 +5,34 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  canCancelCampaign, canResendRow, canRetryRow, confirmBlock, confirmPhrase, defaultProgramLabel, maskVoucherCode,
-  nextPollDelay, normalizeClients, normalizeListItem, normalizePreview, normalizeRow, normalizeRowsPage, phraseMatches,
-  previewConfirmPhrase, validateCreateForm, POLL_MAX_MS, type VdPreviewSummary,
+  canCancelCampaign, canResendRow, canRetryRow, confirmBlock, confirmDialogTitle, confirmPayload, defaultProgramLabel,
+  maskVoucherCode, nextPollDelay, normalizeClients, normalizeListItem, normalizePreview, normalizeRow, normalizeRowsPage,
+  pollPhase, validateCreateForm, POLL_AFTER_COMPLETE_MS, POLL_MAX_MS, type VdPreviewSummary,
 } from '@/lib/voucher-dispersal';
 
 const summary = (o: Partial<VdPreviewSummary> = {}): VdPreviewSummary => ({
   total: 4, valid: 2, invalid: 1, duplicates: 1, totalRupees: 1500, budgetRupees: 5000,
-  overBudget: false, perBrand: [], confirmPhrase: null, ...o,
+  overBudget: false, perBrand: [], ...o,
 });
 
 describe('voucher-dispersal rules', () => {
-  it('builds the exact confirm phrase with Indian grouping', () => {
-    expect(confirmPhrase(2, 1500)).toBe('Issue 2 vouchers · ₹1,500');
-    expect(confirmPhrase(1200, 1234567)).toBe('Issue 1200 vouchers · ₹12,34,567');
+  it('confirm dialog title + payload carry the previewed numbers', () => {
+    expect(confirmDialogTitle(summary())).toBe('Buy and send 2 vouchers · ₹1,500 total?');
+    expect(confirmDialogTitle(summary({ valid: 1200, totalRupees: 1234567 }))).toBe('Buy and send 1200 vouchers · ₹12,34,567 total?');
+    expect(confirmPayload(summary())).toEqual({ expectedValidCount: 2, expectedTotalRupees: 1500 });
   });
 
-  it('prefers the server phrase when one is sent', () => {
-    expect(previewConfirmPhrase(summary({ confirmPhrase: 'Issue 2 vouchers · ₹1500' }))).toBe('Issue 2 vouchers · ₹1500');
-    expect(previewConfirmPhrase(summary())).toBe('Issue 2 vouchers · ₹1,500');
-  });
-
-  it('phrase must match exactly (outer spaces ignored, nothing else)', () => {
-    const p = 'Issue 2 vouchers · ₹1,500';
-    expect(phraseMatches(`  ${p} `, p)).toBe(true);
-    expect(phraseMatches('issue 2 vouchers · ₹1,500', p)).toBe(false);
-    expect(phraseMatches('Issue 2 vouchers . ₹1,500', p)).toBe(false);
+  it('poll phase: live while processing; settling 30 min after completion; then off', () => {
+    const t0 = Date.parse('2026-11-16T10:00:00Z');
+    const done = { status: 'COMPLETED' as const, completedAt: '2026-11-16T10:00:00Z' };
+    expect(pollPhase({ status: 'PROCESSING', completedAt: null }, t0, null)).toBe('live');
+    expect(pollPhase(done, t0 + 29 * 60_000, null)).toBe('settling');
+    expect(pollPhase(done, t0 + POLL_AFTER_COMPLETE_MS, null)).toBe('off');
+    // No server timestamp: the page's own observation starts the window; unknown → off.
+    expect(pollPhase({ status: 'COMPLETED_WITH_ERRORS', completedAt: null }, t0 + 60_000, t0)).toBe('settling');
+    expect(pollPhase({ status: 'COMPLETED_WITH_ERRORS', completedAt: null }, t0, null)).toBe('off');
+    expect(pollPhase({ status: 'CANCELLED', completedAt: null }, t0, t0)).toBe('off');
+    expect(pollPhase({ status: 'PREVIEWED', completedAt: null }, t0, null)).toBe('off');
   });
 
   it('blocks confirm when over budget (flag or arithmetic) or no valid rows', () => {

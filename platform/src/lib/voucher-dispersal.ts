@@ -1,7 +1,7 @@
 /* ─── Voucher Dispersal — types, pure rules, and the API adapter ─────────────────
  *
  * A GENERIC, PLATFORM-LEVEL Gifsy tool (owner-approved 2026-11-16): a GIFSY_ADMIN uploads a
- * list of phone + name + amount + brand, previews it, types an exact confirmation phrase, and
+ * list of phone + name + amount + brand, previews it, confirms in a dialog, and
  * the server buys one Hubble voucher per valid row and sends it on WhatsApp. It is NOT a tenant
  * feature — it lives in the /gifsy console and never depends on an assumed tenant. A campaign
  * may optionally be billed to a client (billedToClientId) — that only labels it.
@@ -11,7 +11,8 @@
  *   GET  /template.xlsx                            → file
  *   POST /campaigns {name, programLabel, billedToClientId?, note?, budgetRupees} → campaign
  *   POST /campaigns/:id/upload (multipart `file`)  → { campaign, rows, summary }
- *   POST /campaigns/:id/confirm {confirmText}      → campaign   (confirmText must equal the phrase exactly)
+ *   POST /campaigns/:id/confirm {expectedValidCount, expectedTotalRupees} → campaign
+ *        (the numbers shown on the preview; the server refuses if its preview differs → re-upload)
  *   GET  /campaigns                                → list with summary counts
  *   GET  /campaigns/:id                            → campaign + delivery summary
  *   GET  /campaigns/:id/rows?status=&page=         → rows (voucher code masked)
@@ -132,6 +133,7 @@ export interface VdCampaign {
   status: CampaignStatus;
   createdAt: string | null;
   confirmedAt: string | null;
+  completedAt: string | null;
   /** Server's own verdict, when it sends one; otherwise the status rule below decides. */
   canCancel: boolean | null;
 }
@@ -179,8 +181,6 @@ export interface VdPreviewSummary {
   budgetRupees: number;
   overBudget: boolean;
   perBrand: VdPerBrand[];
-  /** The exact confirmation phrase, when the server provides it (preferred over our own). */
-  confirmPhrase: string | null;
 }
 
 export interface VdPreview {
@@ -273,6 +273,7 @@ export function normalizeCampaign(raw: unknown): VdCampaign {
     status: asCampaignStatus(o.status),
     createdAt: str(o.createdAt),
     confirmedAt: str(o.confirmedAt),
+    completedAt: str(pick(o, 'completedAt', 'finishedAt')),
     canCancel: typeof o.canCancel === 'boolean' ? o.canCancel : null,
   };
 }
@@ -346,7 +347,6 @@ export function normalizePreview(raw: unknown): VdPreview {
       budgetRupees: n0(s.budgetRupees),
       overBudget: s.overBudget === true,
       perBrand: normalizePerBrand(s.perBrand),
-      confirmPhrase: str(pick(s, 'confirmPhrase', 'confirmText')) ?? str(pick(o, 'confirmPhrase', 'confirmText')),
     },
   };
 }
@@ -416,14 +416,14 @@ export function normalizeClients(raw: unknown): VdClient[] {
 
 // ─── Business rules (pure) ──────────────────────────────────────────────────────
 
-/** The exact phrase the server requires on confirm: `Issue <validCount> vouchers · ₹<total>`. */
-export function confirmPhrase(validCount: number, totalRupees: number): string {
-  return `Issue ${validCount} vouchers · ${formatInrExact(totalRupees)}`;
+/** Confirm-dialog title: `Buy and send N vouchers · ₹X total?` */
+export function confirmDialogTitle(s: Pick<VdPreviewSummary, 'valid' | 'totalRupees'>): string {
+  return `Buy and send ${s.valid} vouchers · ${formatInrExact(s.totalRupees)} total?`;
 }
 
-/** The phrase to show/require for a preview — the server's own phrase wins when it sends one. */
-export function previewConfirmPhrase(s: VdPreviewSummary): string {
-  return s.confirmPhrase ?? confirmPhrase(s.valid, s.totalRupees);
+/** Confirm body: the exact numbers shown on the preview, so the server can refuse if its preview differs. */
+export function confirmPayload(s: Pick<VdPreviewSummary, 'valid' | 'totalRupees'>): { expectedValidCount: number; expectedTotalRupees: number } {
+  return { expectedValidCount: s.valid, expectedTotalRupees: s.totalRupees };
 }
 
 export type ConfirmBlock = { blocked: true; reason: string } | { blocked: false };
@@ -438,11 +438,6 @@ export function confirmBlock(s: VdPreviewSummary): ConfirmBlock {
   }
   if (s.valid <= 0) return { blocked: true, reason: 'There are no valid rows to issue. Fix the file and upload again.' };
   return { blocked: false };
-}
-
-/** The typed text matches the phrase exactly (surrounding spaces ignored). */
-export function phraseMatches(typed: string, phrase: string): boolean {
-  return typed.trim() === phrase;
 }
 
 /** Live campaigns (money moving / messages going out) — the detail view auto-refreshes while live. */
@@ -476,6 +471,31 @@ export const POLL_START_MS = 3_000;
 export const POLL_MAX_MS = 30_000;
 export function nextPollDelay(prev: number): number {
   return Math.min(POLL_MAX_MS, Math.round(Math.max(prev, POLL_START_MS) * 1.5));
+}
+
+/** After a campaign completes, keep refreshing this long for late WhatsApp delivered / read updates. */
+export const POLL_AFTER_COMPLETE_MS = 30 * 60 * 1000;
+
+export type PollPhase = 'live' | 'settling' | 'off';
+
+/**
+ * Whether the detail view should auto-refresh:
+ *  - 'live'     while CONFIRMED / PROCESSING;
+ *  - 'settling' for 30 minutes after COMPLETED / COMPLETED_WITH_ERRORS — measured from the server's
+ *               `completedAt`, or (when the server sends none) from the moment this page saw it finish;
+ *  - 'off'      otherwise (setup, cancelled, or the 30-minute window has passed / is unknown).
+ */
+export function pollPhase(
+  c: Pick<VdCampaign, 'status' | 'completedAt'>,
+  now: number,
+  observedCompletedAt: number | null,
+): PollPhase {
+  if (isLiveCampaign(c.status)) return 'live';
+  if (c.status !== 'COMPLETED' && c.status !== 'COMPLETED_WITH_ERRORS') return 'off';
+  const serverAt = c.completedAt ? new Date(c.completedAt).getTime() : NaN;
+  const from = Number.isFinite(serverAt) ? serverAt : observedCompletedAt;
+  if (from === null) return 'off';
+  return now - from < POLL_AFTER_COMPLETE_MS ? 'settling' : 'off';
 }
 
 /** Never show a full voucher code — keep anything already masked, otherwise show only the last 4. */
@@ -600,8 +620,8 @@ export const vdApi = {
     return vdRequest(`/campaigns/${cid(id)}/upload`, { method: 'POST', body: fd }, normalizePreview);
   },
 
-  confirm: (id: string, confirmText: string) =>
-    vdRequest(`/campaigns/${cid(id)}/confirm`, json({ confirmText }), (d) => normalizeCampaign(isObj(d) && isObj(d.campaign) ? d.campaign : d)),
+  confirm: (id: string, body: { expectedValidCount: number; expectedTotalRupees: number }) =>
+    vdRequest(`/campaigns/${cid(id)}/confirm`, json(body), (d) => normalizeCampaign(isObj(d) && isObj(d.campaign) ? d.campaign : d)),
 
   rows: (id: string, opts: { status?: string; page?: number }) => {
     const q = new URLSearchParams();

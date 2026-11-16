@@ -1,7 +1,8 @@
 'use client';
 
 /* ─── Voucher Dispersal — new campaign (/gifsy/voucher-dispersal/new[?campaign=<id>]) ─────
-   One page, four steps: ① details → create  ② upload file  ③ preview  ④ confirm (typed phrase).
+   One page, four steps: ① details → create  ② upload file  ③ preview  ④ "Buy & send vouchers" → confirm dialog
+   (sends the previewed valid count + ₹ total; the server refuses verbatim if its preview differs).
    NOTHING is bought before ④ succeeds — the copy says so at every step. A DRAFT / PREVIEWED
    campaign can be resumed with ?campaign=<id> (the preview is re-run by uploading the file again).
 ──────────────────────────────────────────────────────────────────────────────────────── */
@@ -11,11 +12,11 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeft, FileSpreadsheet, Loader2, Upload } from 'lucide-react';
 import {
-  ROW_STATUS_LABEL, ROW_STATUS_TONE, confirmBlock, defaultProgramLabel, fetchBillableClients, formatRupees,
-  isSetupCampaign, phraseMatches, previewConfirmPhrase, validateCreateForm, vdApi,
+  ROW_STATUS_LABEL, ROW_STATUS_TONE, confirmBlock, confirmDialogTitle, confirmPayload, defaultProgramLabel,
+  fetchBillableClients, formatRupees, isSetupCampaign, validateCreateForm, vdApi,
   type CreateForm, type RowStatus, type VdBrand, type VdCampaign, type VdClient, type VdPreview,
 } from '@/lib/voucher-dispersal';
-import { ErrorPanel, LoadingBlock, StatusChip, TemplateDownloadButton } from '@/components/voucher-dispersal/vd-ui';
+import { ConfirmDialog, ErrorPanel, LoadingBlock, StatusChip, TemplateDownloadButton } from '@/components/voucher-dispersal/vd-ui';
 
 type Step = 'details' | 'upload' | 'preview' | 'confirm';
 const STEPS: { key: Step; label: string }[] = [
@@ -199,7 +200,6 @@ function NewCampaignFlow() {
     if (r.data.campaign.id) setCampaign(r.data.campaign);
     setFilter('ALL');
     setPage(1);
-    setTyped('');
     setConfirmError(null);
     setStep('preview');
   };
@@ -220,22 +220,22 @@ function NewCampaignFlow() {
   }, [preview]);
 
   // ── ④ confirm ──
-  const [typed, setTyped] = useState('');
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
-  const phrase = preview ? previewConfirmPhrase(preview.summary) : '';
   const block = preview ? confirmBlock(preview.summary) : ({ blocked: true, reason: 'Upload a file first.' } as const);
-  const matches = phraseMatches(typed, phrase);
 
   const onConfirm = async () => {
-    if (!campaign || block.blocked || !matches || inFlight.current) return;
+    if (!campaign || !preview || block.blocked || inFlight.current) return;
     inFlight.current = true;
     setConfirming(true);
     setConfirmError(null);
-    const r = await vdApi.confirm(campaign.id, typed.trim());
+    // Send the exact numbers shown on the preview — the server refuses if its own preview differs.
+    const r = await vdApi.confirm(campaign.id, confirmPayload(preview.summary));
     inFlight.current = false;
     setConfirming(false);
     if (!r.ok) { setConfirmError(r.error); return; }
+    setDialogOpen(false);
     router.push(`/gifsy/voucher-dispersal/${encodeURIComponent(campaign.id)}`);
   };
 
@@ -474,43 +474,45 @@ function NewCampaignFlow() {
       {/* ④ Confirm */}
       {step === 'confirm' && preview && s && (
         <section aria-labelledby="vd-step-heading" className="space-y-4 max-w-xl">
-          <h2 id="vd-step-heading" ref={headingRef} tabIndex={-1} className="text-base font-semibold text-white outline-none">4. Confirm and issue</h2>
+          <h2 id="vd-step-heading" ref={headingRef} tabIndex={-1} className="text-base font-semibold text-white outline-none">4. Buy and send</h2>
           <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 space-y-1">
-            <p>Confirming buys <strong>{s.valid}</strong> Hubble vouchers worth <strong>{formatRupees(s.totalRupees)}</strong> and sends each one on WhatsApp. Bought vouchers cannot be taken back.</p>
+            <p>This buys <strong>{s.valid}</strong> Hubble vouchers worth <strong>{formatRupees(s.totalRupees)}</strong> and sends each one on WhatsApp. Bought vouchers cannot be taken back.</p>
             {(s.invalid > 0 || s.duplicates > 0) && <p>{s.invalid + s.duplicates} invalid / duplicate rows are skipped.</p>}
             <p>{NOTHING_SPENT}</p>
           </div>
-          {block.blocked ? (
-            <p role="alert" className="text-sm font-semibold text-red-200">{block.reason}</p>
-          ) : (
-            <>
-              <div>
-                <p className="text-xs text-white/70">Type this exactly to confirm:</p>
-                <p className="mt-1 select-all rounded-lg bg-white/10 px-3 py-2 font-mono text-sm text-white" data-testid="vd-phrase">{phrase}</p>
-              </div>
-              <div>
-                <label htmlFor="vd-confirm-text" className="block text-xs font-semibold text-white/70 mb-1">Confirmation phrase</label>
-                <input id="vd-confirm-text" className={inputCls} value={typed} disabled={confirming} autoComplete="off" spellCheck={false}
-                  aria-describedby="vd-confirm-hint" onChange={(e) => { setTyped(e.target.value); setConfirmError(null); }} />
-                <p id="vd-confirm-hint" className="text-[11px] text-white/40 mt-1" aria-live="polite">
-                  {typed === '' ? 'The button unlocks when the text matches.' : matches ? 'Matches.' : 'Does not match yet.'}
-                </p>
-              </div>
-            </>
+          {block.blocked && <p role="alert" className="text-sm font-semibold text-red-200">{block.reason}</p>}
+          {confirmError && !dialogOpen && (
+            <div className="space-y-2">
+              <ErrorPanel message={confirmError} testId="vd-confirm-error" />
+              <button type="button" onClick={() => { setFile(null); setConfirmError(null); setStep('upload'); }}
+                className="rounded-lg border border-white/20 px-3 py-2 text-sm text-white/80 hover:bg-white/10">
+                Upload the file again
+              </button>
+            </div>
           )}
-          {confirmError && <ErrorPanel message={confirmError} testId="vd-confirm-error" />}
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => setStep('preview')} disabled={confirming}
               className="rounded-lg border border-white/20 px-3 py-2 text-sm text-white/80 hover:bg-white/10 disabled:opacity-60">
               Back to preview
             </button>
-            <button type="button" onClick={() => void onConfirm()} disabled={block.blocked || !matches || confirming}
-              aria-busy={confirming} data-testid="vd-confirm"
-              className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50">
-              {confirming && <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />}
-              {confirming ? 'Confirming…' : `Issue ${s.valid} vouchers`}
+            <button type="button" onClick={() => { setConfirmError(null); setDialogOpen(true); }} disabled={block.blocked || confirming}
+              data-testid="vd-buy-send"
+              className="rounded-lg bg-[var(--brand-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
+              Buy &amp; send vouchers
             </button>
           </div>
+          <ConfirmDialog
+            open={dialogOpen}
+            title={confirmDialogTitle(s)}
+            description="Nothing can be undone once vouchers are bought."
+            confirmLabel="Buy & send"
+            busyLabel="Buying…"
+            cancelLabel="Cancel"
+            busy={confirming}
+            error={confirmError}
+            onConfirm={() => void onConfirm()}
+            onClose={() => setDialogOpen(false)}
+          />
         </section>
       )}
     </div>

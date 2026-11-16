@@ -2,8 +2,8 @@
 
 /* ─── Voucher Dispersal — campaign detail = live delivery report (/gifsy/voucher-dispersal/[id]) ──
    Summary tiles + every row with its voucher status, Hubble ref, masked code and WhatsApp status.
-   Auto-refreshes while the campaign is CONFIRMED / PROCESSING (3s, backing off ×1.5 to 30s) and stops
-   once it is done. Per-row Resend (BOUGHT only — no new voucher) and Retry purchase (only when allowed;
+   Auto-refreshes while the campaign is CONFIRMED / PROCESSING and for 30 minutes after it completes
+   (late WhatsApp delivered / read updates) — 3s, backing off ×1.5 to 30s — then stops. Per-row Resend (BOUGHT only — no new voucher) and Retry purchase (only when allowed;
    the server's refusal is shown word-for-word). Nothing here claims "sent" before the server says so.
 ──────────────────────────────────────────────────────────────────────────────────────────────── */
 
@@ -14,7 +14,7 @@ import { ArrowLeft, Download, Loader2, RefreshCw } from 'lucide-react';
 import {
   CAMPAIGN_STATUS_LABEL, CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE, PENDING_RECONCILE_NOTE,
   POLL_START_MS, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, canCancelCampaign, canResendRow, canRetryRow,
-  formatRupees, formatWhen, isLiveCampaign, isSetupCampaign, nextPollDelay, vdApi, vdReportUrl,
+  formatRupees, formatWhen, isLiveCampaign, isSetupCampaign, nextPollDelay, pollPhase, vdApi, vdReportUrl,
   type RowStatus, type VdListItem, type VdRow, type VdRowsPage,
 } from '@/lib/voucher-dispersal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
@@ -74,6 +74,10 @@ export default function VoucherCampaignDetailPage() {
   const [tick, setTick] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const delayRef = useRef(POLL_START_MS);
+  // When THIS page saw the campaign go from live to completed — the 30-min refresh window's start
+  // when the server sends no completedAt. Set before setItem so the same render sees it.
+  const sawLive = useRef(false);
+  const observedCompletedAt = useRef<number | null>(null);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
@@ -83,6 +87,11 @@ export default function VoucherCampaignDetailPage() {
     const [c, r] = await Promise.all([vdApi.getCampaign(id), vdApi.rows(id, { status: filter || undefined, page })]);
     if (!mounted.current) return;
     if (c.ok) {
+      const st = c.data.campaign.status;
+      if (isLiveCampaign(st)) sawLive.current = true;
+      else if ((st === 'COMPLETED' || st === 'COMPLETED_WITH_ERRORS') && sawLive.current && observedCompletedAt.current === null) {
+        observedCompletedAt.current = Date.now();
+      }
       setItem(c.data);
       setPollError(null);
     } else if (mode === 'poll') {
@@ -98,16 +107,19 @@ export default function VoucherCampaignDetailPage() {
 
   useEffect(() => { void refresh('initial'); }, [refresh]);
 
-  // Auto-refresh while live, backing off; a failed poll keeps polling (with the error shown) — never silently stops.
-  const live = !!item && isLiveCampaign(item.campaign.status);
+  // Auto-refresh while live and for 30 min after completion (late delivered / read updates), backing off;
+  // a failed poll keeps polling (with the error shown) — never silently stops.
+  const phase = item ? pollPhase(item.campaign, Date.now(), observedCompletedAt.current) : 'off';
+  const polling = phase !== 'off';
+  const live = phase === 'live';
   useEffect(() => {
-    if (!live) { delayRef.current = POLL_START_MS; return; }
+    if (!polling) { delayRef.current = POLL_START_MS; return; }
     const t = setTimeout(() => {
       delayRef.current = nextPollDelay(delayRef.current);
       void refresh('poll');
     }, delayRef.current);
     return () => clearTimeout(t);
-  }, [live, tick, refresh]);
+  }, [polling, tick, refresh]);
 
   // ── dialogs ──
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -201,9 +213,11 @@ export default function VoucherCampaignDetailPage() {
       <p className="text-xs text-white/60" role="status" data-testid="vd-live">
         {live
           ? 'Live — this page refreshes automatically while vouchers are being bought and sent.'
+          : phase === 'settling'
+            ? 'Finished — still refreshing automatically for 30 minutes after completion to pick up late WhatsApp delivered / read updates.'
           : isSetupCampaign(c.status)
             ? 'Not confirmed — nothing has been bought or sent.'
-            : 'Not refreshing automatically. Use Refresh to see late WhatsApp delivery / read updates.'}
+            : 'Not refreshing automatically. Use Refresh to see the latest WhatsApp delivery / read updates.'}
       </p>
       {pollError && (
         <p role="alert" data-testid="vd-poll-error" className="text-xs text-amber-200">

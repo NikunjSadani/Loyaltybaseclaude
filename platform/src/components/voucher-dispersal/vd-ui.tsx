@@ -97,6 +97,7 @@ export function ConfirmDialog({
   description,
   children,
   confirmLabel,
+  cancelLabel = 'Close',
   busyLabel,
   busy,
   error,
@@ -108,8 +109,9 @@ export function ConfirmDialog({
   title: string;
   /** One-line summary announced as the dialog's description (aria-describedby). */
   description: string;
-  children: React.ReactNode;
+  children?: React.ReactNode;
   confirmLabel: string;
+  cancelLabel?: string;
   busyLabel: string;
   busy: boolean;
   error: string | null;
@@ -133,7 +135,7 @@ export function ConfirmDialog({
             disabled={busy}
             className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           >
-            Close
+            {cancelLabel}
           </button>
           <button
             type="button"
