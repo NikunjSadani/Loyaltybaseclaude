@@ -6,7 +6,7 @@ import { usePathname } from 'next/navigation';
 import {
   LayoutGrid, Users, Settings, Building2,
   LogOut, Globe, ShoppingBag,
-  ShieldCheck, UserCog, Landmark, Bell, FolderDown,
+  ShieldCheck, UserCog, Landmark, Bell, FolderDown, Ticket,
 } from 'lucide-react';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
@@ -23,6 +23,10 @@ const NAV = [
   { href: '/gifsy/staff',         label: 'Staff',          icon: UserCog     },
   { href: '/gifsy/tds-statutory', label: 'TDS Statutory',  icon: Landmark    },
   { href: '/gifsy/notification-templates', label: 'Notifications', icon: Bell },
+  // Voucher Dispersal — platform-level Gifsy-owner tool (buy Hubble vouchers + WhatsApp them for an
+  // uploaded list). Not tenant-scoped; owner-only like the rest of this nav (GIFSY_STAFF gets no nav),
+  // and the pages are also guarded to ['GIFSY_ADMIN'] via gifsy/voucher-dispersal/layout.tsx.
+  { href: '/gifsy/voucher-dispersal', label: 'Voucher Dispersal', icon: Ticket },
   { href: '/gifsy/downloads',     label: 'Downloads',      icon: FolderDown  },
   { href: '/gifsy/settings',      label: 'Settings',       icon: Settings    },
 ];
