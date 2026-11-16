@@ -304,7 +304,7 @@ export class VoucherDispersalProcessor {
     const hubbleOrderId = (body.id ?? body.orderId ?? null) as string | null;
     if (status === 'SUCCESS') {
       // Product-aware: Amazon Pay's claim code arrives as cardPin — send that alone (hubble-voucher.ts).
-      const { code, pin } = hubbleVoucherCredentials((body.vouchers ?? [])[0], row.productId);
+      const { code, pin, claimCodeMissing } = hubbleVoucherCredentials((body.vouchers ?? [])[0], row.productId);
       if (!code) {
         await this.markPending(row, 'HUBBLE_SUCCESS_NO_CODE', { hubbleOrderId });
         return 'PENDING';
@@ -359,7 +359,16 @@ export class VoucherDispersalProcessor {
         voucherCode: maskVoucherCodeForAudit(code),
         ...(pin ? { voucherPin: '••••' } : {}),
         fromStatus: row.status,
+        ...(claimCodeMissing ? { claimCodeMissing: true } : {}),
       });
+      if (claimCodeMissing) {
+        // Never silent: the claim-code product (e.g. Amazon Pay) came back with no claim code, so the
+        // card number was stored/sent instead — it may be unusable. Ops must check with Hubble.
+        this.logger.error(
+          `[dispersal] campaign ${row.campaignId} row ${row.rowNumber}: Hubble returned NO claim code (cardPin) for claim-code product ${row.productId} — card number sent instead; ops: verify with Hubble`,
+        );
+        await this.audit(row.id, 'VOUCHER_DISPERSAL_CLAIM_CODE_MISSING', { hubbleOrderId, productId: row.productId });
+      }
       return 'BOUGHT';
     }
     if (status === 'PROCESSING') {

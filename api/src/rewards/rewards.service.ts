@@ -4449,10 +4449,19 @@ export class RewardsService {
   ): Promise<string> {
     const voucher = (body.vouchers ?? [])[0];
     // Product-aware: Amazon Pay's claim code arrives as cardPin — store/send that alone (hubble-voucher.ts).
-    const { code: voucherCode, pin: voucherPin } = hubbleVoucherCredentials(
-      voucher,
-      this.extractHubbleProductId(order.reward?.metadata),
-    );
+    const hubbleProductId = this.extractHubbleProductId(order.reward?.metadata);
+    const {
+      code: voucherCode,
+      pin: voucherPin,
+      claimCodeMissing,
+    } = hubbleVoucherCredentials(voucher, hubbleProductId);
+    if (claimCodeMissing) {
+      // Never silent: a claim-code product (e.g. Amazon Pay) arrived with no claim code — the card
+      // number is used instead and may be unusable. Ops must check with Hubble.
+      this.logger.error(
+        `[hubble] order ${order.orderNumber}: Hubble returned NO claim code (cardPin) for claim-code product ${hubbleProductId} — card number stored instead; ops: verify with Hubble`,
+      );
+    }
     if (!voucherCode) {
       // SUCCESS with no usable code is anomalous — do NOT flip to DELIVERED without a
       // code (would break the DIGITAL_VOUCHER delivered invariant). Leave pending.
@@ -4489,10 +4498,11 @@ export class RewardsService {
           deliveredAt: now,
           // MERGE onto existing metadata so the redeem-time snapshot (sellingValuePaise,
           // salesInitiatedById) is preserved alongside the Hubble voucher detail.
-          metadata: this.mergeOrderMetadata(
-            order.metadata,
-            this.buildHubbleVoucherMetadata(voucher, body),
-          ),
+          metadata: this.mergeOrderMetadata(order.metadata, {
+            ...this.buildHubbleVoucherMetadata(voucher, body),
+            // Persisted flag (with the error log above) — ops can find these orders.
+            ...(claimCodeMissing ? { hubbleClaimCodeMissing: true } : {}),
+          }),
         },
       }); // count 0 = already resolved by a concurrent apply — no-op (no history row)
     });

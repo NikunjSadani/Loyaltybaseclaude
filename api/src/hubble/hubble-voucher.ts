@@ -40,13 +40,20 @@ export function hubbleVoucherCredentials(
 ): {
   code: string | null;
   pin: string | null;
+  /**
+   * Set when a CLAIM-CODE product arrived WITHOUT its claim code (cardPin) and the card number was
+   * used instead — the recipient may get an unusable serial. Callers MUST surface it loudly
+   * (error log + audit), never silently (owner rule: no silent pass-through).
+   */
+  claimCodeMissing?: true;
 } {
   if (!voucher) return { code: null, pin: null };
   const num = (voucher.cardNumber ?? '').toString().trim();
   const pin = (voucher.cardPin ?? '').toString().trim();
   const pid = (productId ?? '').trim();
   if (pid && claimCodeProductIds(env).has(pid)) {
-    return { code: pin || num || null, pin: null };
+    if (!pin && num) return { code: num, pin: null, claimCodeMissing: true };
+    return { code: pin || null, pin: null };
   }
   return { code: num || pin || null, pin: num && pin ? pin : null };
 }

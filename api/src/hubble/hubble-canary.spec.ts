@@ -38,7 +38,12 @@ describe('hubbleVoucherCredentials (shared)', () => {
       pin: null,
     });
     // Claim-code product with only a card number → still deliver what exists (never empty).
-    expect(hubbleVoucherCredentials({ cardNumber: 'AMZ-1', cardPin: '  ' }, AMAZON)).toEqual({ code: 'AMZ-1', pin: null });
+    // …but it is FLAGGED (claimCodeMissing) so callers shout about it.
+    expect(hubbleVoucherCredentials({ cardNumber: 'AMZ-1', cardPin: '  ' }, AMAZON)).toEqual({
+      code: 'AMZ-1',
+      pin: null,
+      claimCodeMissing: true,
+    });
     expect(hubbleVoucherCredentials({ cardNumber: '', cardPin: '' }, AMAZON)).toEqual({ code: null, pin: null });
   });
   it('other products keep card number + PIN (Flipkart, unknown, no productId)', () => {
