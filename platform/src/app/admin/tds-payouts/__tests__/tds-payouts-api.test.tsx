@@ -65,8 +65,28 @@ const ROW = {
   invoiceNumber: 'INV-1',
 }
 
+let withCredits = false
+const M = (paise: number) => ({ paise: String(paise), inr: paise / 100 })
+
 function report() {
   return {
+    ...(withCredits
+      ? {
+          tdsCredits: {
+            count: 1,
+            totals: { created: M(40000), applied: M(31000), outstanding: M(9000) },
+            rows: [{
+              creditId: 'c1', clientId: 'bajaj', panNumber: 'ABCDE1234F', section: 'SEC_194C', fyLabel: '2026-27',
+              createdAt: '2026-11-10T00:00:00.000Z', sourceOutletCode: 'O1', sourceOutletName: 'Shop Reversed', sourcePeriod: '2026-10',
+              credit: M(40000), applied: M(31000), outstanding: M(9000),
+              applications: [
+                { applicationId: 'a1', appliedAt: '2026-11-12T00:00:00.000Z', amount: M(31000), outletName: 'Shop Next', period: '2026-11', released: false, releaseReason: null },
+                { applicationId: 'a0', appliedAt: '2026-11-11T00:00:00.000Z', amount: M(9000), outletName: 'Shop Failed', period: '2026-11', released: true, releaseReason: 'PAYOUT_FAILED' },
+              ],
+            }],
+          },
+        }
+      : {}),
     scope: { clientId: null, period: null },
     count: 1,
     totals: { amount: { paise: '1000000', inr: 10000 }, tdsDeducted: { paise: '20000', inr: 200 } },
@@ -97,6 +117,7 @@ function stubFetch(opts: { fail?: boolean } = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  withCredits = false
   Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:mock'), revokeObjectURL: vi.fn() })
 })
 
@@ -162,6 +183,29 @@ describe('/admin/tds-payouts — visibility payout TDS report', () => {
       (c) => typeof c[0] === 'string' && (c[0] as string).startsWith('/api/admin/tds-reports/payouts/export'),
     )
     expect(exportCall![0] as string).not.toContain('clientId')
+  })
+
+  it('policy round B: TDS credits from reversed payouts — created / adjusted / still to adjust, every use listed (PAN masked)', async () => {
+    asRole('CLIENT_ADMIN')
+    withCredits = true
+    stubFetch()
+    render(<AdminTdsPayoutsPage />)
+    const panel = await screen.findByTestId('tds-credits-panel')
+    expect(panel.textContent).toContain('TDS credits from reversed payouts')
+    expect(panel.textContent).toContain('PAN XXXXX1234F · SEC_194C · FY 2026-27')
+    expect(panel.textContent).not.toContain('ABCDE1234F')
+    expect(panel.textContent).toContain('Shop Reversed (2026-10)')
+    expect(panel.textContent).toMatch(/Still to adjust/)
+    expect(panel.textContent).toContain('adjusted from this credit against the TDS of Shop Next (2026-11)')
+    expect(panel.textContent).toContain('had been adjusted on Shop Failed (2026-11) — returned, that payout did not go through')
+  })
+
+  it('no TDS credits → no credits panel (unchanged page)', async () => {
+    asRole('GIFSY_ADMIN')
+    stubFetch()
+    render(<AdminTdsPayoutsPage />)
+    await screen.findByText('Shop A')
+    expect(screen.queryByTestId('tds-credits-panel')).toBeNull()
   })
 
   it('renders the error card when the report fetch fails', async () => {

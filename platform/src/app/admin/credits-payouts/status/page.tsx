@@ -93,7 +93,7 @@ interface ReversalTarget {
   originalPaise: number;
 }
 
-/** WP5 — a payout entry a PAYOUT reversal may pick (reversal engine SHADOW/V2 only). */
+/** WP5 — a payout entry a PAYOUT reversal may pick (reversal engine V2 only — SHADOW = LEGACY for payouts, owner 2026-11-16). */
 interface PayoutReversalEntry {
   id:          string;
   /** Integer paise. */
@@ -146,7 +146,7 @@ export default function PayoutStatusPage() {
   const [revRemarks, setRevRemarks] = useState('');
   const [revMsg,     setRevMsg]     = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [revLoading, setRevLoading] = useState(false);
-  // WP5 entry picker: set only when the tenant's reversal engine is SHADOW/V2 (LEGACY keeps the amount form).
+  // WP5 entry picker: set only when the tenant's reversal engine is V2 (LEGACY and SHADOW keep the amount form).
   const [revEntries,  setRevEntries]  = useState<PayoutReversalEntry[] | null>(null);
   const [revSelected, setRevSelected] = useState<string[]>([]);
   const revRequestRef = useRef(0);
@@ -258,7 +258,7 @@ export default function PayoutStatusPage() {
     if (row.awardType === 'PAYOUT') void loadPayoutEntries(batch.id, row.outletId, row.fieldId, reqId);
   }
 
-  /** WP5: under the SHADOW/V2 reversal engine a payout reversal picks whole entries; LEGACY → nothing changes. */
+  /** WP5: under the V2 reversal engine a payout reversal picks whole entries; LEGACY → nothing changes. */
   async function loadPayoutEntries(batchId: string, outletId: string, fieldId: string, reqId: number) {
     try {
       const params = new URLSearchParams({ outletId, fieldId });
@@ -271,7 +271,7 @@ export default function PayoutStatusPage() {
       setRevEntries(entries);
       setRevSelected(entries.filter((e) => e.selectable).map((e) => e.id));
     } catch {
-      // Keep the amount form; the server refuses a submission without entries on a SHADOW/V2 program.
+      // Keep the amount form; the server refuses a submission without entries on a V2 program.
     }
   }
 

@@ -171,7 +171,7 @@ interface Reversal {
   status:         string;
   remarks?:       string;
   /**
-   * WP5 — present only for a PAYOUT reversal raised under the SHADOW/V2 reversal engine: the whole entries it
+   * WP5 — present only for a PAYOUT reversal raised under the V2 reversal engine (or SHADOW before 2026-11-16): the whole entries it
    * holds (RESERVED while pending) or consumed. Absent for every LEGACY-engine reversal.
    */
   payoutEntries?: Array<{
@@ -183,11 +183,18 @@ interface Reversal {
   }>;
 }
 
-/** WP5: the approve/reject result of an engine payout reversal (PATCH response `payoutOutcome`). */
+/**
+ * The approve/reject result of a PAYOUT reversal (PATCH response `payoutOutcome`). Since policy round B
+ * (owner 2026-11-16) every tenant gets it — LEGACY included — with a server-written `headline` + `lines`
+ * ("Entry cancelled · ₹5,000 · will not be paid", "Recorded as owed · ₹9,800 · ₹200 TDS credit carried forward…").
+ */
 interface PayoutOutcome {
+  headline?:       string;
+  lines?:          Array<{ kind: string; entryId: string | null; text: string }>;
   cancelled:       Array<{ entryId: string; amountPaise: number; wasStatus: string; tdsOffsetPaise: number; tdsNote: string }>;
-  receivable:      Array<{ entryId: string; amountPaise: number; tdsNote: string }>;
+  receivable:      Array<{ entryId: string; amountPaise: number; receivablePaise?: number; tdsCreditPaise?: number; tdsNote: string }>;
   receivablePaise: number;
+  tdsCreditPaise?: number;
   released:        Array<{ entryId: string; amountPaise: number }>;
 }
 
@@ -195,6 +202,18 @@ const rupees = (paise: number) => `₹${(paise / 100).toLocaleString('en-IN')}`;
 
 function describePayoutOutcome(o: PayoutOutcome, rev?: { outletName: string; fieldName: string }): { title: string; lines: string[] } {
   const who = rev ? ` — ${rev.outletName} / ${rev.fieldName}` : '';
+  // Server-written summary (every tenant since policy round B) — shown verbatim, one line per entry.
+  if (o.headline && Array.isArray(o.lines)) {
+    return {
+      title: `${o.headline}${who}`,
+      lines: [
+        ...o.lines.map((l) => l.text),
+        ...(o.receivablePaise > 0
+          ? [`Total recorded as owed ${rupees(o.receivablePaise)} — shown as "Pending" in Processed Reversals below.`]
+          : []),
+      ],
+    };
+  }
   if (o.released.length > 0 && o.cancelled.length === 0 && o.receivable.length === 0) {
     return {
       title: `Reversal rejected${who}`,
@@ -218,7 +237,7 @@ const HELD_ENTRY_OUTCOME: Record<string, string> = {
   PENDING:    'not yet sent → will be cancelled',
   FAILED:     'bank payment failed → will be cancelled',
   PROCESSING: 'with the bank now → approval refused until the UTR / failure is recorded',
-  PAID:       'already paid → recorded as a receivable',
+  PAID:       'already paid → recorded as owed (the net amount received; any TDS withheld becomes a TDS credit on the PAN)',
 };
 
 interface Pagination {
@@ -263,6 +282,8 @@ function PayoutPageInner() {
   const [genError,   setGenError]   = useState('');
   // WP5: entries a pending payout reversal kept out of the last bank file (never a silent skip).
   const [genHeldNotice, setGenHeldNotice] = useState('');
+  // Policy round B: TDS an earlier TDS credit covered in the last bank file (never silent).
+  const [genTdsCreditNotice, setGenTdsCreditNotice] = useState('');
   // WP5: what approving / rejecting an engine payout reversal did (cancelled / receivable / TDS / released).
   const [revOutcome, setRevOutcome] = useState<{ title: string; lines: string[] } | null>(null);
 
@@ -282,6 +303,8 @@ function PayoutPageInner() {
     message?: string;
     /** OK rows the apply could not record — always shown in amber, never behind a green banner. */
     notApplied: UtrNotAppliedRow[];
+    /** Policy round B: TDS credit given back because the payout it covered failed (sent only when any). */
+    tdsCreditReleased: Array<{ entryId: string; amountPaise: number; note: string }>;
   } | null>(null);
   const [utrMsg,         setUtrMsg]         = useState('');
   const [expandedUtr,    setExpandedUtr]    = useState(false);
@@ -347,6 +370,7 @@ function PayoutPageInner() {
     setGenerating(true);
     setGenError('');
     setGenHeldNotice('');
+    setGenTdsCreditNotice('');
     try {
       const body: Record<string, unknown> = { period, groupType };
       if (groupType === 'SEPARATE' && fieldId) {
@@ -374,6 +398,16 @@ function PayoutPageInner() {
           `${heldCount} payout entr${heldCount === 1 ? 'y' : 'ies'} (₹${(heldPaise / 100).toLocaleString('en-IN')}) ` +
           `${heldCount === 1 ? 'was' : 'were'} held out of this bank file because a reversal request is pending — ` +
           'see Pending Reversal Requests below. Approve or reject each request; a rejected request releases its entries into the next file.',
+        );
+      }
+
+      const creditCount = Number(res.headers?.get?.('X-Tds-Credit-Applied-Count') ?? 0);
+      if (creditCount > 0) {
+        const creditPaise = Number(res.headers.get('X-Tds-Credit-Applied-Paise') ?? 0);
+        setGenTdsCreditNotice(
+          `₹${(creditPaise / 100).toLocaleString('en-IN')} of TDS on ${creditCount} payout entr${creditCount === 1 ? 'y was' : 'ies were'} ` +
+          'adjusted from earlier TDS credit (TDS already deposited for a reversed payout on the same PAN) — ' +
+          'less TDS was withheld from those retailers in this file. Details: TDS payout report → TDS credits.',
         );
       }
 
@@ -482,6 +516,7 @@ function PayoutPageInner() {
         noop,
         message: serverMsg,
         notApplied: readNotApplied(json.data?.notApplied),
+        tdsCreditReleased: Array.isArray(json.data?.tdsCreditReleased) ? json.data.tdsCreditReleased : [],
       });
       setUtrMsg(
         noop
@@ -630,6 +665,13 @@ function PayoutPageInner() {
           <div role="status" data-testid="reversal-held-notice" className="flex items-start gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
             <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
             {genHeldNotice}
+          </div>
+        )}
+
+        {genTdsCreditNotice && (
+          <div role="status" data-testid="tds-credit-applied-notice" className="flex items-start gap-2 text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            {genTdsCreditNotice}
           </div>
         )}
 
@@ -902,6 +944,15 @@ function PayoutPageInner() {
                       <span className="font-mono">{r.outletId}</span> — {r.reason}
                     </li>
                   ))}
+                </ul>
+              </div>
+            )}
+
+            {utrApplied && utrApplyResult && utrApplyResult.tdsCreditReleased.length > 0 && (
+              <div role="status" data-testid="utr-tds-credit-released" className="rounded-xl p-4 border bg-blue-50 border-blue-200 space-y-1 text-xs text-blue-800">
+                <p className="text-sm font-semibold">TDS credit returned</p>
+                <ul className="list-disc pl-5 space-y-0.5">
+                  {utrApplyResult.tdsCreditReleased.map((r) => <li key={r.entryId}>{r.note}</li>)}
                 </ul>
               </div>
             )}

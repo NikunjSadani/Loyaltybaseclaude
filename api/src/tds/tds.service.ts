@@ -464,6 +464,8 @@ export class TdsService {
         clientId,
         status: 'PAID',
         paidAt: { gte: start, lt: endExclusive },
+        // Policy round B: a PAID entry reversed with a TDS credit is no longer income (no credits → no-op).
+        tdsCredit: { is: null },
         // Exclude historical VENDOR_IMPORT payouts: these were already settled off-platform by the
         // prior vendor and are recorded as display-only history — they must NEVER enter statutory
         // TDS (194R). Provenance lives on the parent CreditBatch.sourceKind. NULL-safe: a bare
@@ -502,6 +504,7 @@ export class TdsService {
             status: 'PAID',
             period: { gte: startPeriod, lte: endPeriod },
             fieldId: { in: visFieldIdArr },
+            tdsCredit: { is: null }, // policy round B (see above)
           },
           select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
         })
@@ -890,6 +893,8 @@ export class TdsService {
         status: 'PAID',
         // FIX-4: bucket by payout PERIOD's FY (matches the ledger), not paidAt.
         period: { gte: startPeriod, lte: endPeriod },
+        // Policy round B: a PAID entry reversed with a TDS credit is no longer income (no credits → no-op).
+        tdsCredit: { is: null },
         OR: [
           { fieldId: { in: [...visFieldIds] } },
           { tdsSection: 'SEC_194C' },

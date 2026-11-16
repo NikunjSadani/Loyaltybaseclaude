@@ -290,7 +290,7 @@ export class CreateReversalDto {
   requestedPaise!: number;
 
   /**
-   * WP5 (reversal engine SHADOW/V2 only): the WHOLE payout entries this PAYOUT reversal covers; requestedPaise
+   * WP5 (reversal engine V2 only — SHADOW = LEGACY for payouts): the WHOLE payout entries this PAYOUT reversal covers; requestedPaise
    * must equal their sum. Refused for POINTS and for a tenant on the LEGACY engine (which matches entries itself).
    */
   @IsOptional()

@@ -57,12 +57,41 @@ interface PayoutRow {
   tdsDeducted: Money;
   invoiceNumber: string | null;
 }
+/** Policy round B: a TDS credit from a reversed PAID payout + its uses against later payouts' TDS. */
+interface TdsCreditRow {
+  creditId: string;
+  clientId: string;
+  panNumber: string;
+  section: string;
+  fyLabel: string;
+  createdAt: string;
+  sourceOutletCode: string | null;
+  sourceOutletName: string | null;
+  sourcePeriod: string | null;
+  credit: Money;
+  applied: Money;
+  outstanding: Money;
+  applications: Array<{
+    applicationId: string;
+    appliedAt: string;
+    amount: Money;
+    outletName: string | null;
+    period: string | null;
+    released: boolean;
+    releaseReason: string | null;
+  }>;
+}
 interface PayoutReport {
   scope: { clientId: string | null; period: string | null };
   count: number;
   totals: { amount: Money; tdsDeducted: Money };
   rows: PayoutRow[];
+  /** Absent on an older API. */
+  tdsCredits?: { count: number; totals: { created: Money; applied: Money; outstanding: Money }; rows: TdsCreditRow[] };
 }
+
+/** PAN shown masked on screen (XXXXX1234F). */
+const maskPan = (pan: string) => (pan.length >= 5 ? `XXXXX${pan.slice(5)}` : pan);
 
 const PAGE_SIZE = 50;
 
@@ -339,6 +368,47 @@ export default function AdminTdsPayoutsPage() {
           </div>
         )}
       </div>
+
+      {/* Policy round B: TDS credits from reversed PAID payouts — created / applied / outstanding (never silent). */}
+      {report?.tdsCredits && report.tdsCredits.count > 0 && (
+        <div data-testid="tds-credits-panel" className="bg-white border border-blue-200 rounded-xl p-4 space-y-3">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900">TDS credits from reversed payouts</h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              When an already-paid payout is reversed, the TDS withheld from it stays deposited with the government. It is
+              carried forward on that PAN and adjusted against the next TDS this program deducts for it.
+            </p>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <SummaryCard label="Credit created" value={inrPaise(report.tdsCredits.totals.created)} />
+            <SummaryCard label="Adjusted so far" value={inrPaise(report.tdsCredits.totals.applied)} />
+            <SummaryCard label="Still to adjust" value={inrPaise(report.tdsCredits.totals.outstanding)} sub="carried forward" />
+          </div>
+          <ul className="space-y-2 text-xs text-gray-700">
+            {report.tdsCredits.rows.map((c) => (
+              <li key={c.creditId} className="border border-gray-100 rounded-lg px-3 py-2">
+                <p>
+                  {isGifsy && <span className="text-gray-500">{c.clientId} · </span>}
+                  PAN {maskPan(c.panNumber)} · {c.section} · FY {c.fyLabel} — {inrPaise(c.credit)} credit from the reversed
+                  payout of {c.sourceOutletName ?? c.sourceOutletCode ?? '—'} ({c.sourcePeriod ?? '—'}) ·{' '}
+                  <strong>{inrPaise(c.outstanding)} still to adjust</strong>
+                </p>
+                {c.applications.length > 0 && (
+                  <ul className="list-disc pl-5 mt-1 text-gray-500">
+                    {c.applications.map((a) => (
+                      <li key={a.applicationId}>
+                        {a.released
+                          ? `${inrPaise(a.amount)} had been adjusted on ${a.outletName ?? '—'} (${a.period ?? '—'}) — returned, that payout did not go through`
+                          : `${inrPaise(a.amount)} adjusted from this credit against the TDS of ${a.outletName ?? '—'} (${a.period ?? '—'})`}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Pagination (client-side over the filtered set) */}
       {pages > 1 && (

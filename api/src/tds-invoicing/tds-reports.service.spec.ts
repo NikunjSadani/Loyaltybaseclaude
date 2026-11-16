@@ -13,6 +13,7 @@ const mockPrisma = {
   autoInvoice: { findMany: jest.fn() },
   channelPartner: { findMany: jest.fn() },
   tdsRecoveryEntry: { findMany: jest.fn() },
+  tdsCredit: { findMany: jest.fn().mockResolvedValue([]) },
 };
 
 describe('TdsReportsService', () => {
@@ -84,6 +85,44 @@ describe('TdsReportsService', () => {
       );
     });
     // The xlsx export (incl. the cellSafe guard) is the 'tds-payouts' export kind — exports/kinds/batch2/tds-payouts.kind.spec.ts.
+
+    it('policy round B: TDS credits created / applied / outstanding (tenant + FY of the period), JSON-safe', async () => {
+      mockPrisma.tdsCredit.findMany.mockResolvedValueOnce([
+        {
+          id: 'c1', clientId: 'bajaj', panNumber: 'ABCDE1234F', section: 'SEC_194C', fyLabel: '2026-27',
+          amountPaise: 40000n, appliedPaise: 31000n, createdAt: new Date('2026-11-10T00:00:00Z'), creditReversalId: 'r1',
+          sourcePayoutEntry: { id: 'va', outletId: 'O1', outletName: 'Shop 1', period: '2026-10', amountPaise: 4000000n },
+          applications: [
+            { id: 'a1', amountPaise: 31000n, createdAt: new Date('2026-11-12T00:00:00Z'), releasedAt: null, releaseReason: null, downloadId: 'd1', payoutEntry: { id: 'vb', outletId: 'O1', outletName: 'Shop 1', period: '2026-11' } },
+            { id: 'a0', amountPaise: 9000n, createdAt: new Date('2026-11-11T00:00:00Z'), releasedAt: new Date('2026-11-11T05:00:00Z'), releaseReason: 'PAYOUT_FAILED', downloadId: 'd0', payoutEntry: { id: 'vz', outletId: 'O1', outletName: 'Shop 1', period: '2026-11' } },
+          ],
+        },
+      ]);
+      const res = await service.payoutReport({ clientId: 'bajaj', period: '2026-11' });
+      expect(mockPrisma.tdsCredit.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { clientId: 'bajaj', fyLabel: '2026-27' } }),
+      );
+      expect(res.tdsCredits.totals).toEqual({
+        created: { paise: '40000', inr: 400 },
+        applied: { paise: '31000', inr: 310 },
+        outstanding: { paise: '9000', inr: 90 },
+      });
+      expect(res.tdsCredits.rows[0]).toMatchObject({ sourceEntryId: 'va', outstanding: { paise: '9000', inr: 90 } });
+      expect(res.tdsCredits.rows[0].applications.map((a) => [a.entryId, a.released, a.releaseReason])).toEqual([
+        ['vb', false, null],
+        ['vz', true, 'PAYOUT_FAILED'],
+      ]);
+      expect(() => JSON.stringify(res)).not.toThrow();
+    });
+
+    it('policy round B: no credits → an empty section (count 0)', async () => {
+      const res = await service.payoutReport({ clientId: 'deoleo' });
+      expect(res.tdsCredits).toEqual({
+        count: 0,
+        totals: { created: { paise: '0', inr: 0 }, applied: { paise: '0', inr: 0 }, outstanding: { paise: '0', inr: 0 } },
+        rows: [],
+      });
+    });
   });
 
   describe('unregisteredReport', () => {

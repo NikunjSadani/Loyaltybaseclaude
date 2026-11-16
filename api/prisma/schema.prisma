@@ -3579,6 +3579,9 @@ model CreditPayoutEntry {
   autoInvoice AutoInvoice?          @relation(fields: [autoInvoiceId], references: [id], onDelete: SetNull)
 
   reversalAllocations PayoutReversalAllocation[]
+  // Policy round B: the TDS credit created when this (PAID, DEDUCT) entry was reversed, and the credits applied to it.
+  tdsCredit             TdsCredit?             @relation("TdsCreditSource")
+  tdsCreditApplications TdsCreditApplication[] @relation("TdsCreditApplied")
 
   @@index([clientId])
   @@index([batchId])
@@ -3652,6 +3655,7 @@ model CreditReversal {
   walletTransactions WalletTransaction[]
   creditAllocations  CreditReversalAllocation[]
   payoutAllocations  PayoutReversalAllocation[]
+  tdsCredits         TdsCredit[]
 
   @@index([clientId])
   @@index([batchId])
@@ -3747,6 +3751,11 @@ model PayoutReversalAllocation {
   amountPaise      BigInt
   state            PayoutAllocationState @default(RESERVED)
   tdsOffsetPaise   BigInt                @default(0) // withholding offset applied once on approve (P4)
+  // Policy round B (owner 2026-11-16) — APPLIED_RECEIVABLE only: the receivable recorded = the NET cash the
+  // retailer actually received (amountPaise − TDS withheld), and the TDS that stays deposited with the government
+  // and becomes a TdsCredit on the PAN. Legacy/backfilled receivables: receivablePaise = amountPaise, credit 0.
+  receivablePaise  BigInt                @default(0)
+  tdsCreditPaise   BigInt                @default(0)
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt
 
@@ -3757,6 +3766,59 @@ model PayoutReversalAllocation {
   @@index([payoutEntryId])
   @@index([state])
   @@map("payout_reversal_allocations")
+}
+
+/// Policy round B (owner 2026-11-16, WALLET-REVERSAL-ENGINE-DESIGN.md §8.1): reversing an already-PAID payout entry
+/// whose TDS was DEDUCTED leaves that TDS deposited with the government. It becomes a credit on the PAN, scoped to
+/// the TENANT that reversed it, the TDS section and the financial year, and is applied automatically against the
+/// next TDS that tenant deducts for that PAN (bank download, under the PAN advisory lock). One credit per reversed
+/// entry (`sourcePayoutEntryId` unique → idempotent). The source entry's base leaves the PAN's cumulative TDS base.
+/// SQL CHECK: amountPaise > 0, 0 ≤ appliedPaise ≤ amountPaise. appliedPaise = Σ live (unreleased) applications.
+model TdsCredit {
+  id                  String     @id @default(cuid())
+  clientId            String
+  panNumber           String
+  section             TdsSection
+  fyLabel             String
+  sourcePayoutEntryId String     @unique
+  creditReversalId    String
+  amountPaise         BigInt
+  appliedPaise        BigInt     @default(0)
+  createdBy           String
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  sourcePayoutEntry CreditPayoutEntry      @relation("TdsCreditSource", fields: [sourcePayoutEntryId], references: [id], onDelete: Restrict)
+  creditReversal    CreditReversal         @relation(fields: [creditReversalId], references: [id], onDelete: Restrict)
+  applications      TdsCreditApplication[]
+
+  @@index([clientId, panNumber, section, fyLabel])
+  @@index([panNumber, section, fyLabel])
+  @@map("tds_credits")
+}
+
+/// One use of a TdsCredit against a later payout entry's TDS (that entry's withholding was reduced by amountPaise).
+/// Released (releasedAt set, credit restored) when that payout never happens: UTR FAILED, or the entry is cancelled
+/// by a reversal. Partial unique index `tds_credit_applications_live_key` on (tdsCreditId, payoutEntryId) WHERE
+/// releasedAt IS NULL → a credit is applied to an entry at most once at a time (a re-bank after a failure re-applies).
+model TdsCreditApplication {
+  id            String    @id @default(cuid())
+  tdsCreditId   String
+  clientId      String
+  payoutEntryId String
+  downloadId    String?
+  amountPaise   BigInt
+  releasedAt    DateTime?
+  releaseReason String?
+  createdAt     DateTime  @default(now())
+
+  tdsCredit   TdsCredit         @relation(fields: [tdsCreditId], references: [id], onDelete: Restrict)
+  payoutEntry CreditPayoutEntry @relation("TdsCreditApplied", fields: [payoutEntryId], references: [id], onDelete: Restrict)
+
+  @@index([tdsCreditId])
+  @@index([payoutEntryId])
+  @@index([clientId])
+  @@map("tds_credit_applications")
 }
 
 // ─── MODULE: WhatsApp Broadcasts (Gifsy-operator only) ──────────────────────
