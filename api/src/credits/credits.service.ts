@@ -13,17 +13,22 @@ import {
   computeDeduction,
   computeGrossUpTdsInvoiceBasePaise,
   allocateProRataRecovery,
+  withholdingTdsPaise,
 } from '../tds/tds-methodology.helper';
 import { grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, type ResolvedTdsStatutory } from '../tds/tds.helpers';
 import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
 import {
   deductWithCredits,
+  inDeductorScope,
+  istDate,
   loadOpenTdsCredits,
   maskPan,
+  tdsAdjustmentNote,
   releaseCreditApplications,
   writeCreditApplications,
   type CreditDraw,
   type OpenTdsCredit,
+  type PanCreditPosition,
   type ReleasedApplication,
 } from './tds-credit';
 import { ensureOutletAccount } from '../common/reward-account.helper';
@@ -109,12 +114,72 @@ export interface TdsCreditAppliedLine {
   entryId: string;
   outletId: string;
   outletName: string;
-  /** Integer paise. TDS due on the entry = creditPaise + withheldPaise. */
+  /** Integer paise. TDS due on the entry = creditPaise + handBackPaise + withheldPaise. */
   duePaise: number;
   creditPaise: number;
+  /** Of creditPaise: credit raised by another programme (194C — owner D4). */
+  otherProgrammePaise: number;
   withheldPaise: number;
   panMasked: string;
   note: string;
+}
+
+/** Fix round B (owner D3): one payout entry whose TDS the ledger lowered after a reversal took the PAN's base down. */
+export interface TdsAdjustmentLine {
+  entryId: string;
+  outletId: string;
+  outletName: string;
+  panMasked: string;
+  /** Integer paise: "₹X less TDS: adjusted after a reversal brought PAN below the limit". */
+  handBackPaise: number;
+  note: string;
+}
+
+/** Fix round B (screens #1): what a bank file left out / adjusted — read as JSON after the download (no headers). */
+export interface PayoutDownloadSummary {
+  downloadId: string;
+  downloadCode: string;
+  period: string;
+  createdAt: string;
+  reversalHeld: { count: number; paise: number; entries: ReversalHeldEntry[] };
+  tdsCreditApplied: { count: number; paise: number; lines: TdsCreditAppliedLine[] };
+  tdsAdjustments: { count: number; paise: number; lines: TdsAdjustmentLine[] };
+}
+
+/** Paise-number view of a plan's per-entry TDS adjustment → the two call-out lists (credit / hand-back). */
+function tdsAdjustmentLines(
+  creditByEntry: Map<string, { duePaise: bigint; creditPaise: bigint; otherProgrammePaise: bigint; handBackPaise: bigint; panNumber: string }>,
+  entryById: Map<string, { outletId: string; outletName: string }>,
+): { credit: TdsCreditAppliedLine[]; adjustments: TdsAdjustmentLine[] } {
+  const credit: TdsCreditAppliedLine[] = [];
+  const adjustments: TdsAdjustmentLine[] = [];
+  for (const [entryId, c] of creditByEntry) {
+    const e = entryById.get(entryId);
+    const note = tdsAdjustmentNote(c);
+    const base = { entryId, outletId: e?.outletId ?? '', outletName: e?.outletName ?? '', panMasked: maskPan(c.panNumber), note };
+    if (c.creditPaise > 0n) {
+      credit.push({
+        ...base,
+        duePaise: Number(c.duePaise),
+        creditPaise: Number(c.creditPaise),
+        otherProgrammePaise: Number(c.otherProgrammePaise),
+        withheldPaise: Number(c.duePaise - c.creditPaise - c.handBackPaise),
+      });
+    }
+    if (c.handBackPaise > 0n) adjustments.push({ ...base, handBackPaise: Number(c.handBackPaise) });
+  }
+  return { credit, adjustments };
+}
+
+/** Typed reversal remarks: trimmed, blank → null (owner D5 — saved on create / approve / reject, every tenant). */
+function cleanRemarks(r: string | null | undefined): string | null {
+  const t = (r ?? '').trim();
+  return t ? t : null;
+}
+
+/** BigInt-safe JSON for audit metadata. */
+function auditJson(v: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x))) as Prisma.InputJsonValue;
 }
 
 /** The DEDUCT/GROSS-UP write plan computed (reads-only) before the download $transaction. */
@@ -151,8 +216,14 @@ interface PayoutTdsPlan {
    * Empty for every tenant without credits (the plan is then identical to before).
    */
   creditDraws: CreditDraw[];
-  /** entryId → { TDS due on it, credit used for it } for every entry a credit reduced (download notice + audit). */
-  creditByEntry: Map<string, { duePaise: bigint; creditPaise: bigint; panNumber: string }>;
+  /**
+   * entryId → { TDS due on it, credit used for it (of which from another programme — 194C), D3 hand-back } for every
+   * entry a credit or a reversal hand-back reduced (download notice / summary + audit).
+   */
+  creditByEntry: Map<
+    string,
+    { duePaise: bigint; creditPaise: bigint; otherProgrammePaise: bigint; handBackPaise: bigint; panNumber: string }
+  >;
   /**
    * GROSS-UP monthly-incremental TDS TOP-UP invoices (FIX-1) + their DELTA pro-rata recovery.
    * `bodyPaise` is the DELTA (dueNow − alreadyInvoiced), NOT the cumulative — so Σ bodies over
@@ -265,6 +336,76 @@ export class CreditsService {
     return section === TdsSection.SEC_194C
       ? rate194CFrom(cfg, hasPan, entityType)
       : rate194RFrom(cfg, hasPan);
+  }
+
+  /**
+   * Fix round B (H1 / D1 / D3) — the PAN's TDS position in the deductor scope AFTER a reversed PAID entry left the
+   * base (the caller marked it `tdsBaseReversedAt` first and holds the PAN advisory lock). Same aggregation rules as
+   * buildPayoutTdsPlan: base = committed (PAID | PROCESSING) visibility entries of the PAN's outlets in the FY, not
+   * engine-reversed, 194C every tenant / 194R this client; threshold on the COMBINED base (+ 194C single payment);
+   * TDS due on the DEDUCT base; ledger + outstanding credits in the same scope.
+   */
+  private async panPositionForReversal(
+    db: Prisma.TransactionClient,
+    q: { pan: string; section: TdsSection; fyLabel: string; clientId: string; reversedAmountPaise: bigint },
+  ): Promise<PanCreditPosition> {
+    const startYear = parseInt(q.fyLabel.slice(0, 4), 10);
+    const startPeriod = `${startYear}-04`;
+    const endPeriod = `${startYear + 1}-03`;
+    const cfg = await this.statutory.getForFy(q.fyLabel);
+    const partners = await db.channelPartner.findMany({
+      where: { panNumber: q.pan, isParent: false },
+      select: { id: true, entityType: true },
+    });
+    const partnerIds = (partners ?? []).map((p) => p.id);
+    const outlets = partnerIds.length
+      ? await db.outlet.findMany({ where: { partnerId: { in: partnerIds } }, select: { outletCode: true, clientId: true } })
+      : [];
+    const keys = new Set((outlets ?? []).map((o) => `${o.clientId}|${o.outletCode}`));
+    let combined = 0n;
+    let deductBase = 0n;
+    let maxSingle = 0n;
+    if (keys.size > 0) {
+      const entries = await db.creditPayoutEntry.findMany({
+        where: {
+          tdsSection: q.section,
+          status: { in: ['PAID', 'PROCESSING'] },
+          period: { gte: startPeriod, lte: endPeriod },
+          outletId: { in: [...new Set((outlets ?? []).map((o) => o.outletCode))] },
+          tdsBaseReversedAt: null,
+        },
+        select: { clientId: true, outletId: true, amountPaise: true, tdsMethodology: true },
+      });
+      for (const e of entries ?? []) {
+        if (!keys.has(`${e.clientId}|${e.outletId}`) || !inDeductorScope(q.section, q.clientId, e.clientId)) continue;
+        combined += e.amountPaise;
+        if (e.tdsMethodology === TdsMethodology.DEDUCT) deductBase += e.amountPaise;
+        if (e.amountPaise > maxSingle) maxSingle = e.amountPaise;
+      }
+    }
+    const ledgerRows = await db.tdsDeductionEntry.findMany({
+      where: { panNumber: q.pan, section: q.section, fyLabel: q.fyLabel },
+      select: { clientId: true, tdsDeductedThisPaise: true },
+    });
+    const ledgerPaise = (ledgerRows ?? [])
+      .filter((r) => inDeductorScope(q.section, q.clientId, r.clientId))
+      .reduce((s, r) => s + r.tdsDeductedThisPaise, 0n);
+    const credits = await loadOpenTdsCredits(db, { pans: [q.pan], sections: [q.section], fyLabel: q.fyLabel });
+    const outstandingCreditsPaise = credits
+      .filter((c) => inDeductorScope(c.section, q.clientId, c.clientId))
+      .reduce((s, c) => s + (c.amountPaise - c.appliedPaise), 0n);
+    const entityType = (partners ?? []).find((p) => p.entityType)?.entityType ?? null;
+    const rate = this.tdsRateFor(q.section, true, entityType ? String(entityType) : null, cfg);
+    const thresholdMetAfter = this.tdsThresholdMet(q.section, combined, maxSingle, cfg);
+    const rev = q.reversedAmountPaise;
+    const thresholdMetBefore = this.tdsThresholdMet(q.section, combined + rev, rev > maxSingle ? rev : maxSingle, cfg);
+    return {
+      ledgerPaise,
+      outstandingCreditsPaise,
+      dueRemainingPaise: thresholdMetAfter ? withholdingTdsPaise(deductBase, rate) : 0n,
+      thresholdMetBefore,
+      thresholdMetAfter,
+    };
   }
 
   /**
@@ -413,9 +554,10 @@ export class CreditsService {
           status: { in: ['PAID', 'PROCESSING'] },
           period: { gte: startPeriod, lte: endPeriod },
           outletId: { in: [...priorOutletCodes] },
-          // Policy round B: a PAID entry reversed with a TDS credit is no longer income — its base leaves the
-          // cumulative (the credit carries the TDS deposited for it). No credits → no row excluded.
-          tdsCredit: { is: null },
+          // Fix round B (owner D1): a PAID entry reversed by the engine is no longer income — its base leaves the
+          // cumulative whether or not TDS was withheld (a credit, if any, carries the TDS deposited for it). No
+          // engine reversals (every LEGACY tenant, Deoleo) → no row excluded.
+          tdsBaseReversedAt: null,
         },
         // FIX-D: tdsMethodology partitions the cumulative base for the AMOUNT math. A legacy row
         // with a null methodology only feeds the COMBINED threshold base (no such visibility rows
@@ -425,6 +567,8 @@ export class CreditsService {
       for (const pe of priorEntries) {
         const pan = outletKeyToPan.get(`${pe.clientId}${SEP}${pe.outletId}`);
         if (!pan || !pe.tdsSection) continue; // outletCode belongs to a different tenant's outlet
+        // Owner D4: 194R is deducted by the CLIENT → only this client's base counts; 194C (Gifsy) → every tenant.
+        if (!inDeductorScope(pe.tdsSection, clientId, pe.clientId)) continue;
         const ps = `${pan}${SEP}${pe.tdsSection}`;
         priorBaseByPS.set(ps, (priorBaseByPS.get(ps) ?? 0n) + pe.amountPaise);
         if (pe.amountPaise > (priorMaxSingleByPS.get(ps) ?? 0n)) priorMaxSingleByPS.set(ps, pe.amountPaise);
@@ -443,24 +587,47 @@ export class CreditsService {
       }
     }
 
-    // Running DEDUCT carry-forward (cross-tenant ledger, PAN/section/FY).
+    // Fix round B (D3): (PAN, section) pairs whose FY base lost an engine-reversed PAID entry (in the deductor
+    // scope) — only these get the "less TDS: adjusted after a reversal" call-out. None → nothing changes.
+    const reversedPS = new Set<string>();
+    if (priorOutletCodes.size > 0) {
+      const reversedEntries = await db.creditPayoutEntry.findMany({
+        where: {
+          tdsSection: { in: [...sectionSet] },
+          period: { gte: startPeriod, lte: endPeriod },
+          outletId: { in: [...priorOutletCodes] },
+          tdsBaseReversedAt: { not: null },
+        },
+        select: { clientId: true, outletId: true, tdsSection: true, tdsBaseReversedAt: true },
+      });
+      for (const re of reversedEntries ?? []) {
+        if (!re.tdsBaseReversedAt) continue;
+        const pan = outletKeyToPan.get(`${re.clientId}${SEP}${re.outletId}`);
+        if (!pan || !re.tdsSection || !inDeductorScope(re.tdsSection, clientId, re.clientId)) continue;
+        reversedPS.add(`${pan}${SEP}${re.tdsSection}`);
+      }
+    }
+
+    // Running DEDUCT carry-forward (ledger, PAN/section/FY — every tenant for 194C, this client for 194R: D4).
     const priorDeductedByPS = new Map<string, bigint>();
     if (panSet.size) {
       const ledgerRows = await db.tdsDeductionEntry.findMany({
         where: { panNumber: { in: [...panSet] }, section: { in: [...sectionSet] }, fyLabel },
-        select: { panNumber: true, section: true, tdsDeductedThisPaise: true },
+        select: { clientId: true, panNumber: true, section: true, tdsDeductedThisPaise: true },
       });
       for (const lr of ledgerRows) {
+        if (!inDeductorScope(lr.section, clientId, lr.clientId)) continue;
         const ps = `${lr.panNumber}${SEP}${lr.section}`;
         priorDeductedByPS.set(ps, (priorDeductedByPS.get(ps) ?? 0n) + lr.tdsDeductedThisPaise);
       }
     }
 
-    // Policy round B: open TDS credits on these PANs (any tenant — other tenants' are hidden from this tenant's
-    // prior figure, its own are applied). None → every DEDUCT group below takes the unchanged path.
+    // Open TDS credits on these PANs in the deductor scope (D4: 194C any programme, 194R this client) — all usable
+    // here. None (and no reversed base) → every DEDUCT group below takes the unchanged path.
     const creditsByPS = new Map<string, OpenTdsCredit[]>();
     if (panSet.size) {
       for (const c of await loadOpenTdsCredits(db, { pans: [...panSet], sections: [...sectionSet], fyLabel })) {
+        if (!inDeductorScope(c.section, clientId, c.clientId)) continue;
         const ps = `${c.panNumber}${SEP}${c.section}`;
         const list = creditsByPS.get(ps) ?? [];
         list.push(c);
@@ -481,6 +648,7 @@ export class CreditsService {
         select: { panNumber: true, section: true, clientId: true, tenantSharePaise: true },
       });
       for (const r of recRows) {
+        if (!inDeductorScope(r.section, clientId, r.clientId)) continue; // D4: 194R recovery is per client
         const ps = `${r.panNumber}${SEP}${r.section}`;
         recoveredByPS.set(ps, (recoveredByPS.get(ps) ?? 0n) + r.tenantSharePaise);
         let tmap = recoveredByPSByTenant.get(ps);
@@ -528,8 +696,8 @@ export class CreditsService {
         let tdsDueCumulativePaise: bigint;
         let carryForwardPaise: bigint;
         let shareByEntry: Map<string, bigint>;
-        if (psCredits.length === 0) {
-          // No TDS credit on this PAN — exactly the pre-round-B computation.
+        if (psCredits.length === 0 && !reversedPS.has(ps)) {
+          // No TDS credit and no reversed base on this PAN — exactly the pre-round-B computation.
           const d = computeDeduction({
             cumulativeBasePaise: methodologyCumulativeBase, // FIX-D: DEDUCT-methodology base only
             priorDeductedPaise: priorDeducted,
@@ -549,7 +717,12 @@ export class CreditsService {
               : [];
           shareByEntry = new Map<string, bigint>(split.map((s): [string, bigint] => [s.clientId, s.tenantSharePaise]));
         } else {
-          // Policy round B: other tenants' credits hidden, this tenant's own credits applied FIFO (tds-credit.ts).
+          // Credits in the deductor scope applied FIFO + the D3 hand-back explained (tds-credit.ts). The withholding
+          // itself is computeDeduction(prior = ledger) exactly as in the branch above.
+          const priorDue =
+            reversedPS.has(ps) && this.tdsThresholdMet(g.section, priorBaseByPS.get(ps) ?? 0n, priorMaxSingle, cfg)
+              ? withholdingTdsPaise(priorBaseByPSM.get(psm) ?? 0n, rate)
+              : 0n;
           const d = deductWithCredits({
             clientId,
             cumulativeBasePaise: methodologyCumulativeBase,
@@ -559,16 +732,19 @@ export class CreditsService {
             thresholdMetOnCumulative: thresholdMet,
             entries: g.entries.map((e) => ({ id: e.id, amountPaise: e.amountPaise })),
             credits: psCredits,
+            priorDuePaise: reversedPS.has(ps) ? priorDue : null,
           });
           tdsDueCumulativePaise = d.tdsDueCumulativePaise;
           carryForwardPaise = d.carryForwardPaise;
           shareByEntry = new Map(d.perEntry.map((x): [string, bigint] => [x.entryId, x.withheldPaise]));
           plan.creditDraws.push(...d.draws);
           for (const x of d.perEntry) {
-            if (x.creditPaise > 0n) {
+            if (x.creditPaise > 0n || x.handBackPaise > 0n) {
               plan.creditByEntry.set(x.entryId, {
-                duePaise: x.withheldPaise + x.creditPaise,
+                duePaise: x.withheldPaise + x.creditPaise + x.handBackPaise,
                 creditPaise: x.creditPaise,
+                otherProgrammePaise: x.otherProgrammePaise,
+                handBackPaise: x.handBackPaise,
                 panNumber: g.panNumber,
               });
             }
@@ -707,7 +883,7 @@ export class CreditsService {
           tdsSection: { in: [...new Set([...noPanGroups.values()].map((g) => g.section))] },
           status: { in: ['PAID', 'PROCESSING'] },
           period: { gte: startPeriod, lte: endPeriod },
-          tdsCredit: { is: null }, // policy round B: reversed-with-credit income is not income (no credits → no-op)
+          tdsBaseReversedAt: null, // fix round B (D1): engine-reversed income is not income (none → no-op)
         },
         select: { outletId: true, amountPaise: true, tdsSection: true },
       });
@@ -1518,11 +1694,15 @@ export class CreditsService {
             originalPaise: credited,
             requestedPaise: requested,
             requestedBy: user.sub,
+            // Fix round B (owner D5, every tenant): the requester's typed remarks are kept (were dropped). Written
+            // only when typed, so a request without remarks writes exactly what it did before (column default NULL).
+            ...(cleanRemarks(dto.remarks) ? { requestRemarks: cleanRemarks(dto.remarks) } : {}),
           },
         });
         if (payoutReservation) {
           await reservePayoutEntries(tx, created.id, payoutReservation, {
             clientId: user.clientId, batchId: id, outletId: dto.outletId, fieldId: dto.fieldId, actorId: user.sub,
+            remarks: cleanRemarks(dto.remarks),
           });
         }
         if (shadowCap) {
@@ -1627,6 +1807,7 @@ export class CreditsService {
         originalPaise: snap.credited,
         requestedPaise: requested,
         requestedBy: user.sub,
+        ...(cleanRemarks(dto.remarks) ? { requestRemarks: cleanRemarks(dto.remarks) } : {}), // fix round B (D5)
       },
     });
   }
@@ -2145,6 +2326,8 @@ export class CreditsService {
     reversalHeld: ReversalHeldEntry[];
     /** Policy round B: entries whose TDS was (partly) covered by an earlier TDS credit (empty without credits). */
     tdsCreditApplied: TdsCreditAppliedLine[];
+    /** Fix round B (D3): entries whose TDS the ledger lowered after a reversal (empty without engine reversals). */
+    tdsAdjustments: TdsAdjustmentLine[];
   }> {
     const { period, groupType, fieldId, fieldName } = dto;
 
@@ -2413,7 +2596,8 @@ export class CreditsService {
     // FIX-8: the PAN cumulative aggregation + plan + ALL money writes run INSIDE this
     // $transaction, behind the per-PAN advisory locks acquired FIRST — so two concurrent
     // downloads for the same PAN serialize and cannot both under-deduct / mis-attribute recovery.
-    const { rec: download, deductionByOutlet, creditByEntry } = await this.prisma.$transaction(
+    const entryById = new Map(entries.map((e) => [e.id, e]));
+    const { rec: download, deductionByOutlet, tdsCreditApplied, tdsAdjustments } = await this.prisma.$transaction(
       async (tx) => {
         for (const k of sortedLockKeys) {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${k}, 0))`;
@@ -2517,7 +2701,9 @@ export class CreditsService {
           });
         }
         // Policy round B: TDS credits used by this file (guarded — a credit is never used beyond its amount) + an
-        // audit row naming every adjusted entry. None for a tenant without credits.
+        // audit row naming every adjusted entry. None for a tenant without credits. Fix round B: the per-entry lines
+        // (incl. "another programme" and the D3 hand-back) are stored too — the download summary endpoint reads them.
+        const adj = tdsAdjustmentLines(tdsPlan.creditByEntry, entryById);
         if (tdsPlan.creditDraws.length > 0) {
           await writeCreditApplications(tx, tdsPlan.creditDraws, { clientId: user.clientId, downloadId: rec.id });
           await tx.auditLog.create({
@@ -2526,18 +2712,25 @@ export class CreditsService {
               entityType: 'TDS_CREDIT_APPLIED',
               entityId: rec.id,
               actorId: user.sub,
-              metadata: JSON.parse(
-                JSON.stringify(
-                  {
-                    clientId: user.clientId,
-                    downloadCode,
-                    period,
-                    draws: tdsPlan.creditDraws,
-                    entries: [...tdsPlan.creditByEntry.entries()].map(([entryId, c]) => ({ entryId, ...c })),
-                  },
-                  (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
-                ),
-              ) as Prisma.InputJsonValue,
+              metadata: auditJson({
+                clientId: user.clientId,
+                downloadCode,
+                period,
+                draws: tdsPlan.creditDraws,
+                entries: [...tdsPlan.creditByEntry.entries()].map(([entryId, c]) => ({ entryId, ...c })),
+                lines: adj.credit,
+              }),
+            },
+          });
+        }
+        if (adj.adjustments.length > 0) {
+          await tx.auditLog.create({
+            data: {
+              action: 'EXPORT',
+              entityType: 'TDS_REVERSAL_ADJUSTMENT',
+              entityId: rec.id,
+              actorId: user.sub,
+              metadata: auditJson({ clientId: user.clientId, downloadCode, period, lines: adj.adjustments }),
             },
           });
         }
@@ -2624,26 +2817,15 @@ export class CreditsService {
             },
           });
         }
-        return { rec, deductionByOutlet: tdsPlan.deductionByOutlet, creditByEntry: tdsPlan.creditByEntry };
+        return {
+          rec,
+          deductionByOutlet: tdsPlan.deductionByOutlet,
+          tdsCreditApplied: adj.credit,
+          tdsAdjustments: adj.adjustments,
+        };
       },
       { timeout: 180_000, maxWait: 20_000 },
     );
-    // Policy round B — never silent: every entry whose TDS a credit reduced ("₹200 adjusted from earlier TDS credit").
-    const entryById = new Map(entries.map((e) => [e.id, e]));
-    const tdsCreditApplied: TdsCreditAppliedLine[] = [...(creditByEntry ?? new Map()).entries()].map(([entryId, c]) => {
-      const e = entryById.get(entryId);
-      return {
-        entryId,
-        outletId: e?.outletId ?? '',
-        outletName: e?.outletName ?? '',
-        duePaise: Number(c.duePaise),
-        creditPaise: Number(c.creditPaise),
-        withheldPaise: Number(c.duePaise - c.creditPaise),
-        panMasked: maskPan(c.panNumber),
-        note: `TDS due ${formatINR(c.duePaise)}: ${formatINR(c.creditPaise)} adjusted from earlier TDS credit, ${formatINR(c.duePaise - c.creditPaise)} withheld from this payout`,
-      };
-    });
-
     // Build the bank file AFTER the tx using the committed net (post-DEDUCT) amounts.
     const netPaiseFor = (code: string): number =>
       outletMap.get(code)!.amountPaise - Number(deductionByOutlet.get(code) ?? 0n);
@@ -2700,6 +2882,65 @@ export class CreditsService {
       heldEntries,
       reversalHeld,
       tdsCreditApplied,
+      tdsAdjustments,
+    };
+  }
+
+  // ─── GET /v1/admin/credits/payout-downloads/:id/summary · …/latest-summary ──────────────────────────
+  /**
+   * Fix round B (screens #1): what a bank file held back / adjusted, as JSON — the payout screen reads it after
+   * every download instead of depending on custom response headers through the proxy. Built from the download's
+   * audit rows (written in the download tx), so it is the same for every reader and survives a page reload.
+   * Tenant-scoped; `latest` = this user's most recent download for (period, groupType, fieldId).
+   */
+  async payoutDownloadSummary(
+    user: JwtPayload,
+    q: { id?: string; period?: string; groupType?: string; fieldId?: string },
+  ): Promise<PayoutDownloadSummary | null> {
+    const rec = q.id
+      ? await this.prisma.creditPayoutDownload.findFirst({ where: { id: q.id, clientId: user.clientId } })
+      : await this.prisma.creditPayoutDownload.findFirst({
+          where: {
+            clientId: user.clientId,
+            downloadedBy: user.sub,
+            ...(q.period ? { period: q.period } : {}),
+            ...(q.groupType ? { groupType: q.groupType as PayoutGroupType } : {}),
+            ...(q.fieldId ? { fieldId: q.fieldId } : {}),
+          },
+          orderBy: [{ downloadedAt: 'desc' }, { id: 'desc' }],
+        });
+    if (!rec) {
+      if (q.id) throw new NotFoundException('Payout download not found');
+      return null;
+    }
+    const audits = await this.prisma.auditLog.findMany({
+      where: {
+        entityId: rec.id,
+        entityType: { in: ['PAYOUT_DOWNLOAD_REVERSAL_HOLD', 'TDS_CREDIT_APPLIED', 'TDS_REVERSAL_ADJUSTMENT'] },
+      },
+      select: { entityType: true, metadata: true },
+    });
+    const meta = (t: string) =>
+      (audits.find((a) => a.entityType === t)?.metadata ?? null) as Record<string, unknown> | null;
+    const held = (meta('PAYOUT_DOWNLOAD_REVERSAL_HOLD')?.entries ?? []) as ReversalHeldEntry[];
+    const credit = (meta('TDS_CREDIT_APPLIED')?.lines ?? []) as TdsCreditAppliedLine[];
+    const adjustments = (meta('TDS_REVERSAL_ADJUSTMENT')?.lines ?? []) as TdsAdjustmentLine[];
+    return {
+      downloadId: rec.id,
+      downloadCode: rec.downloadCode,
+      period: rec.period,
+      createdAt: (rec.downloadedAt ?? rec.createdAt).toISOString(),
+      reversalHeld: { count: held.length, paise: held.reduce((n, h) => n + Number(h.amountPaise), 0), entries: held },
+      tdsCreditApplied: {
+        count: credit.length,
+        paise: credit.reduce((n, c) => n + Number(c.creditPaise), 0),
+        lines: credit,
+      },
+      tdsAdjustments: {
+        count: adjustments.length,
+        paise: adjustments.reduce((n, c) => n + Number(c.handBackPaise), 0),
+        lines: adjustments,
+      },
     };
   }
 
@@ -3304,6 +3545,8 @@ export class CreditsService {
         amountPaise: true,
         state: true,
         tdsOffsetPaise: true,
+        receivablePaise: true,
+        tdsCreditPaise: true,
         payoutEntry: { select: { status: true, period: true, createdAt: true } },
       },
     });
@@ -3316,6 +3559,8 @@ export class CreditsService {
         amountPaise: Number(r.amountPaise),
         allocationState: r.state,
         tdsOffsetPaise: Number(r.tdsOffsetPaise),
+        receivablePaise: Number(r.receivablePaise ?? 0n),
+        tdsCreditPaise: Number(r.tdsCreditPaise ?? 0n),
         entryStatus: r.payoutEntry.status,
         period: r.payoutEntry.period,
         createdAt: r.payoutEntry.createdAt,
@@ -3371,7 +3616,9 @@ export class CreditsService {
       throw new BadRequestException(`Reversal is already ${reversal.status}`);
     }
 
-    const { action, approvedPaise, remarks } = dto;
+    const { action, approvedPaise } = dto;
+    // Fix round B (D5): the approver's typed remarks, trimmed (blank → null), saved on every path.
+    const remarks = cleanRemarks(dto.remarks);
 
     // requestedPaise is a BigInt from Prisma; Number() is safe (paise « MAX_SAFE_INTEGER).
     const requestedPaiseNum = Number(reversal.requestedPaise);
@@ -3453,7 +3700,10 @@ export class CreditsService {
       if (reversal.awardType === 'PAYOUT') {
         const v2 = await patchPayoutReversalV2(
           tx,
-          { offsetWithholding: (e) => this.offsetWithholdingOnReversal(tx, user.clientId, e) },
+          {
+            offsetWithholding: (e) => this.offsetWithholdingOnReversal(tx, user.clientId, e),
+            panPosition: (q) => this.panPositionForReversal(tx, q),
+          },
           reversal,
           {
             action: action === ReversalAction.approve ? 'approve' : 'reject',

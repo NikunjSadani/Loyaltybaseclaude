@@ -128,7 +128,13 @@ async function run(ctx: ExportRunContext, p: TdsPayoutsParams, out: XlsxStreamWr
         'Applied (₹)': c.applied.inr,
         'Outstanding (₹)': c.outstanding.inr,
         Date: c.createdAt,
-        Note: `TDS withheld on the reversed PAID payout ${c.sourceEntryId ?? ''} (payout ${c.sourceAmount.inr}) stays deposited — carried forward on this PAN`,
+        // Fix round B: the credit's scope (L2), D2 "unused … not carried forward" and L6 previous-PAN call-outs.
+        Note: [
+          `TDS withheld on the reversed PAID payout ${c.sourceEntryId ?? ''} (payout ${c.sourceAmount.inr}) stays deposited — carried forward on this PAN`,
+          c.scopeNote,
+          c.unusedNote,
+          c.previousPanNote,
+        ].filter(Boolean).join(' · '),
       });
       for (const a of c.applications) {
         await sheetC.add({
@@ -145,9 +151,7 @@ async function run(ctx: ExportRunContext, p: TdsPayoutsParams, out: XlsxStreamWr
           'Applied (₹)': '',
           'Outstanding (₹)': '',
           Date: a.released ? (a.releasedAt ?? '') : a.appliedAt,
-          Note: a.released
-            ? `Returned to the credit — that payout did not go through (${a.releaseReason ?? 'released'})`
-            : `Adjusted from earlier TDS credit against the TDS of payout ${a.entryId ?? ''}`,
+          Note: a.note,
         });
       }
     }

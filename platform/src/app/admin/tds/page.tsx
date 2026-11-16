@@ -36,7 +36,7 @@ import {
 /** TDS apply (off-platform / deposits) is ONE insert — all-or-nothing — and a re-upload of the same rows
  *  is de-duplicated server-side, so a lost response means "the whole file may have been saved", never "some". */
 const TDS_APPLY_MAYBE_NOTE = 'It may have been saved — refresh and check before uploading again.';
-import { formatINR } from '@/lib/money';
+import { formatInrPaise as formatINR } from '@/lib/money-format';
 import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label';
 import { formatCountFrom } from '@/components/operator/tds-imported-payouts-card';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
@@ -44,6 +44,18 @@ import { DownloadActionStatus } from '@/components/exports/download-action-statu
 import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+/**
+ * Present on a 194R / 194C row only when a payout on that PAN was reversed (fix round B — D1/D3/M2). Absent → the
+ * row renders exactly as before. Paise fields are bigint-as-string like the rest of this endpoint; `notes` are
+ * API-authored and shown verbatim.
+ */
+interface TdsReversalFlag {
+  reversedPaise: number | string;
+  items: Array<{ amountPaise: number | string; reversedAt: string; period: string; outletCode: string; retroactive: boolean }>;
+  belowThresholdAfterReversal: boolean;
+  notes: string[];
+}
 
 interface Tds194RRow {
   panNumber:        string;
@@ -55,6 +67,7 @@ interface Tds194RRow {
   outstandingPaise: number | string;
   /** "TDS for month" (YYYY-MM) of the deposits counted on this row. */
   depositForPeriods?: string[];
+  reversal?: TdsReversalFlag;
 }
 
 interface Tds194RResponse {
@@ -67,6 +80,8 @@ interface Tds194RResponse {
     liabilityPaise:   number | string;
     depositedPaise:   number | string;
     outstandingPaise: number | string;
+    /** Count of rows carrying a `reversal` flag (newer API). */
+    reversalFlags?:   number;
   };
   rows: Tds194RRow[];
 }
@@ -83,6 +98,7 @@ interface Tds194CRow {
   depositedPaise:          number | string;
   outstandingPaise:        number | string;
   depositForPeriods?:      string[];
+  reversal?:               TdsReversalFlag;
 }
 
 interface Tds194CResponse {
@@ -93,6 +109,7 @@ interface Tds194CResponse {
     liabilityNoThresholdPaise: number | string;
     depositedPaise:          number | string;
     outstandingPaise:        number | string;
+    reversalFlags?:          number;
   };
   rows: Tds194CRow[];
 }
@@ -200,6 +217,39 @@ function SummaryCard({ label, paise }: { label: string; paise: number | string }
       <p className="text-xs text-gray-500">{label}</p>
       <p className="text-lg font-bold text-gray-900 mt-1">{formatINR(p(paise))}</p>
     </div>
+  );
+}
+
+/** Amber flag + API notes on a row whose PAN had a reversed payout (D1/D3/M2). */
+function ReversalFlagCell({ flag }: { flag?: TdsReversalFlag }) {
+  if (!flag) return null;
+  const retroactive = flag.items?.some((i) => i.retroactive);
+  return (
+    <div data-testid="tds-reversal-flag" className="mt-1 font-sans space-y-0.5">
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200 px-2 py-0.5 text-[10px] font-semibold">
+        <AlertTriangle className="w-3 h-3" aria-hidden />
+        Reversed {formatINR(p(flag.reversedPaise))}
+        {flag.belowThresholdAfterReversal && ' · below threshold'}
+        {retroactive && ' · changed after reversal'}
+      </span>
+      {flag.notes?.length > 0 && (
+        <ul className="text-[11px] text-amber-800 list-disc pl-4 whitespace-normal">
+          {flag.notes.map((n, i) => <li key={i}>{n}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** One-line summary above a liability table when any row is flagged. */
+function ReversalSummaryLine({ count, testId }: { count: number; testId: string }) {
+  if (count <= 0) return null;
+  return (
+    <p data-testid={testId} role="note" className="mx-4 mt-3 flex items-start gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+      <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden />
+      {count} PAN{count === 1 ? '' : 's'} changed after a payout reversal — see the flagged rows below; revise the TDS return if
+      it was already filed.
+    </p>
   );
 }
 
@@ -719,6 +769,10 @@ export default function AdminTdsPage() {
 
             {!r194Loading && !r194Error && r194 && (
               <>
+                <ReversalSummaryLine
+                  testId="tds-194r-reversal-summary"
+                  count={r194.summary.reversalFlags ?? r194.rows.filter((r) => r.reversal).length}
+                />
                 {r194.rows.length === 0 ? (
                   <p className="text-sm text-gray-500 text-center py-10">No 194R records for {fy}.</p>
                 ) : (
@@ -735,8 +789,11 @@ export default function AdminTdsPage() {
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {r194.rows.map((row, i) => (
-                          <tr key={i} className="hover:bg-gray-50 transition-colors">
-                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
+                          <tr key={i} className={`hover:bg-gray-50 transition-colors${row.reversal ? ' bg-amber-50/40' : ''}`}>
+                            <td className="px-4 py-3 font-mono text-xs text-gray-800">
+                              {deducteeCellLabel(row)}
+                              <ReversalFlagCell flag={row.reversal} />
+                            </td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.baseFyTotalPaise))}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>
                             <td className="px-4 py-3 text-right text-gray-700"><DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} /></td>
@@ -828,6 +885,10 @@ export default function AdminTdsPage() {
 
             {!r194cLoading && !r194cError && r194c && (
               <>
+                <ReversalSummaryLine
+                  testId="tds-194c-reversal-summary"
+                  count={r194c.summary.reversalFlags ?? r194c.rows.filter((r) => r.reversal).length}
+                />
                 {r194c.rows.length === 0 ? (
                   <p className="text-sm text-gray-500 text-center py-10">No 194C records for {fy}.</p>
                 ) : (
@@ -847,8 +908,11 @@ export default function AdminTdsPage() {
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {r194c.rows.map((row, i) => (
-                          <tr key={i} className="hover:bg-gray-50 transition-colors">
-                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
+                          <tr key={i} className={`hover:bg-gray-50 transition-colors${row.reversal ? ' bg-amber-50/40' : ''}`}>
+                            <td className="px-4 py-3 font-mono text-xs text-gray-800">
+                              {deducteeCellLabel(row)}
+                              <ReversalFlagCell flag={row.reversal} />
+                            </td>
                             <td className="px-4 py-3 text-xs text-gray-700">{row.entityType}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.maxSinglePaise))}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>

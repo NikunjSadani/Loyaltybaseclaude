@@ -32,6 +32,7 @@ import {
   ListPayoutDownloadsQueryDto,
   ListReversalsQueryDto,
   PatchFieldDto,
+  PayoutDownloadSummaryQueryDto,
   PatchReversalDto,
   PayoutReversalEntriesQueryDto,
   UtrUploadQueryDto,
@@ -249,7 +250,7 @@ export class CreditsController {
     @Body() dto: CreatePayoutDownloadDto,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { buffer, downloadCode, downloadId, reversalHeld, tdsCreditApplied } = await this.credits.createPayoutDownload(
+    const { buffer, downloadCode, downloadId, reversalHeld, tdsCreditApplied, tdsAdjustments } = await this.credits.createPayoutDownload(
       user,
       dto,
     );
@@ -258,6 +259,12 @@ export class CreditsController {
     if (tdsCreditApplied && tdsCreditApplied.length > 0) {
       res.setHeader('X-Tds-Credit-Applied-Count', String(tdsCreditApplied.length));
       res.setHeader('X-Tds-Credit-Applied-Paise', String(tdsCreditApplied.reduce((n, a) => n + a.creditPaise, 0)));
+    }
+    // Fix round B (D3): entries whose TDS the ledger lowered after a reversal took the PAN's base down. Headers are a
+    // secondary path only — the screen reads GET …/payout-downloads/:id/summary (or latest-summary) as JSON.
+    if (tdsAdjustments && tdsAdjustments.length > 0) {
+      res.setHeader('X-Tds-Adjustment-Count', String(tdsAdjustments.length));
+      res.setHeader('X-Tds-Adjustment-Paise', String(tdsAdjustments.reduce((n, a) => n + a.handBackPaise, 0)));
     }
     res.setHeader('X-Download-Code', downloadCode);
     res.setHeader('X-Download-Id', downloadId);
@@ -271,6 +278,21 @@ export class CreditsController {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="payout-${downloadCode}.xlsx"`,
     });
+  }
+
+  // Fix round B (screens #1): the download's call-outs as JSON (held entries, TDS credit applied, D3 adjustments).
+  @Get('payout-downloads/latest-summary')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:download_bank_file')
+  latestPayoutDownloadSummary(@CurrentUser() user: JwtPayload, @Query() query: PayoutDownloadSummaryQueryDto) {
+    return this.credits.payoutDownloadSummary(user, query);
+  }
+
+  @Get('payout-downloads/:id/summary')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:download_bank_file')
+  payoutDownloadSummary(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.credits.payoutDownloadSummary(user, { id });
   }
 
   @Post('payout-downloads/:id/utr')

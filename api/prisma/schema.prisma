@@ -3596,6 +3596,11 @@ model CreditPayoutEntry {
   // Policy round B: the TDS credit created when this (PAID, DEDUCT) entry was reversed, and the credits applied to it.
   tdsCredit             TdsCredit?             @relation("TdsCreditSource")
   tdsCreditApplications TdsCreditApplication[] @relation("TdsCreditApplied")
+  // Fix round B (owner D1, 2026-11-16): set when a V2 reversal of this PAID entry was approved — the income was
+  // reversed, so the entry leaves the PAN's yearly TDS base (payout TDS plan + 194R/194C liability report) whether or
+  // not TDS was withheld. NULL for every other entry (LEGACY / backfilled receivables keep their base — Q13).
+  tdsBaseReversedAt   DateTime?
+  tdsBaseReversalId   String?
 
   @@index([clientId])
   @@index([batchId])
@@ -3659,7 +3664,10 @@ model CreditReversal {
   approvedBy     String?
   approvedAt     DateTime?
   status         CreditReversalStatus @default(PENDING_GIFSY)
+  // `remarks` = what the approver / rejecter typed (decision note); `requestRemarks` = what the requester typed at
+  // create (fix round B, owner D5 2026-11-16 — previously dropped). Both shown on the reversal record / reports / audit.
   remarks        String?
+  requestRemarks String?
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
 

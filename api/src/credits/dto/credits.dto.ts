@@ -15,6 +15,7 @@ import {
   IsString,
   Matches,
   Max,
+  MaxLength,
   Min,
   MinLength,
   ValidateNested,
@@ -300,6 +301,12 @@ export class CreateReversalDto {
   @ArrayUnique()
   @IsString({ each: true })
   payoutEntryIds?: string[];
+
+  /** Fix round B (owner D5, every tenant): what the requester typed — saved as CreditReversal.requestRemarks. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  remarks?: string;
 }
 
 /** GET /admin/credits/batches/:id/payout-reversal-entries — the entries a PAYOUT reversal may select (WP5). */
@@ -332,7 +339,22 @@ export class PatchReversalDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(1000)
   remarks?: string;
+}
+
+/** GET /admin/credits/payout-downloads/latest-summary — this user's latest download for the scope (fix round B). */
+export class PayoutDownloadSummaryQueryDto {
+  @Matches(PERIOD_RE)
+  period!: string;
+
+  @IsOptional()
+  @IsEnum(PayoutGroupType)
+  groupType?: PayoutGroupType;
+
+  @IsOptional()
+  @IsString()
+  fieldId?: string;
 }
 
 /** Query flag for the UTR upload — ?apply=true applies, otherwise preview. */

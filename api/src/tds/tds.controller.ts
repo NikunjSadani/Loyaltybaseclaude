@@ -71,7 +71,7 @@ export class TdsController {
       // FY's base (report/liability only). null = not counted in this FY (OFF, or the date is after
       // the FY's end).
       importedPayoutsCountedFrom,
-      summary: serializeSummary194R(summary),
+      summary: { ...serializeSummary194R(summary), ...reversalFlags(rows) },
       rows: rows.map(serializeRow194R),
     };
   }
@@ -101,7 +101,7 @@ export class TdsController {
     return {
       section: '194C',
       fyLabel,
-      summary: serializeSummary194C(summary),
+      summary: { ...serializeSummary194C(summary), ...reversalFlags(rows) },
       rows: rows.map(serializeRow194C),
     };
   }
@@ -301,6 +301,23 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
     outstandingPaise: r.outstandingPaise.toString(),
     // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
     ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
+    ...(r.reversal ? { reversal: serializeReversal(r.reversal) } : {}),
+  };
+}
+
+/** Fix round B: a row's reversed-base flag (only on rows that have one). */
+function serializeReversal(v: import('./tds.service').TdsRowReversal) {
+  return {
+    reversedPaise: v.reversedPaise.toString(),
+    items: v.items.map((i) => ({
+      amountPaise: i.amountPaise.toString(),
+      reversedAt: i.reversedAt.toISOString(),
+      period: i.period,
+      outletCode: i.outletCode,
+      retroactive: i.retroactive,
+    })),
+    belowThresholdAfterReversal: v.belowThresholdAfterReversal,
+    notes: v.notes,
   };
 }
 
@@ -320,7 +337,14 @@ function serializeRow194C(r: import('./tds.service').TdsRow194C) {
     outstandingPaise: r.outstandingPaise.toString(),
     // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
     ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
+    ...(r.reversal ? { reversal: serializeReversal(r.reversal) } : {}),
   };
+}
+
+/** Fix round B: count of rows flagged by a reversal — added to the summary only when non-zero (else unchanged). */
+function reversalFlags(rows: Array<{ reversal?: unknown }>): { reversalFlags?: number } {
+  const n = rows.filter((r) => r.reversal).length;
+  return n > 0 ? { reversalFlags: n } : {};
 }
 
 function serializeSummary194R(s: import('./tds.service').TdsSummary194R) {

@@ -12,7 +12,8 @@
  *   - GIFSY_ADMIN may pass `clientId` to scope to one tenant, or omit it for platform-wide.
  */
 
-import { IsOptional, IsString, Matches } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min } from 'class-validator';
 
 const PERIOD_RE = /^\d{4}-\d{2}$/;
 const FY_RE = /^\d{4}-\d{2}$/;
@@ -29,6 +30,25 @@ export class PayoutReportQueryDto {
   @IsString()
   @Matches(PERIOD_RE, { message: 'period must be YYYY-MM' })
   period?: string;
+
+  /** Fix round B (#21): page of the TDS credits panel (1-based; JSON report only — the export ignores it). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  creditPage?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  creditLimit?: number;
+
+  /** 'true' → only the TDS credits block (a credits page flip must not reload every payout row). */
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  creditsOnly?: string;
 }
 
 /** ?clientId=&period=YYYY-MM for the unregistered / RCM report (GIFSY-only). */

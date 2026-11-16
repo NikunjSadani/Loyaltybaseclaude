@@ -70,7 +70,7 @@ import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { withholdingTdsPaise } from './tds-methodology.helper';
 import type { UploadResult, UploadRowError } from './dto/tds.dto';
 import { buildXlsx } from '../common/xlsx';
-import { paiseToRupees } from '../common/money';
+import { formatINR, paiseToRupees } from '../common/money';
 
 // ─── Result types ─────────────────────────────────────────────────────────────
 
@@ -123,6 +123,41 @@ function noPanDeducteeName(d: NoPanDeductee | undefined, unlinked?: boolean): st
  */
 function moneyCell(paise: bigint): number {
   return Number(paiseToRupees(paise).toFixed(2));
+}
+
+/** First instant of the month after a "YYYY-MM" period, IST (00:00 IST = previous day 18:30 UTC). */
+function nextMonthStartIst(period: string): Date {
+  const [y, m] = period.split('-').map((s) => parseInt(s, 10));
+  return new Date(Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1) - (5 * 60 + 30) * 60 * 1000);
+}
+
+/** "16 Nov 2026" (IST). */
+function istDay(d: Date): string {
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+}
+
+/** Fix round B: the row flag + plain-words notes for payouts reversed off a row's base (D1 / M2 / D3). */
+function buildRowReversal(
+  items: TdsRowReversal['items'],
+  fyLabel: string,
+  belowThresholdAfterReversal: boolean,
+  extra: string[],
+): TdsRowReversal {
+  const sorted = [...items].sort((a, b) => a.reversedAt.getTime() - b.reversedAt.getTime());
+  const notes = sorted.slice(0, 5).map((i) => `${formatINR(i.amountPaise)} reversed on ${istDay(i.reversedAt)} (payout ${i.period}, outlet ${i.outletCode})`);
+  if (sorted.length > 5) notes.push(`…and ${sorted.length - 5} more reversed payouts`);
+  if (belowThresholdAfterReversal) notes.push(`PAN below threshold after reversal — no TDS due for FY ${fyLabel} on what remains`);
+  const retro = sorted.filter((i) => i.retroactive);
+  if (retro.length > 0) {
+    notes.push(`Changed after reversal on ${istDay(retro[retro.length - 1].reversedAt)} — revise return if already filed`);
+  }
+  notes.push(...extra);
+  return {
+    reversedPaise: items.reduce((s, i) => s + i.amountPaise, 0n),
+    items: sorted,
+    belowThresholdAfterReversal,
+    notes,
+  };
 }
 
 /**
@@ -182,6 +217,19 @@ export interface NoPanDeductee {
   outletCodes: string[];
 }
 
+/**
+ * Fix round B (owner D1 / D3 / M2, 2026-11-16) — the PAID payouts an engine reversal took off this row's yearly base.
+ * Present ONLY on rows that had such a reversal (every other row — and every LEGACY tenant — is byte-identical).
+ */
+export interface TdsRowReversal {
+  reversedPaise: bigint;
+  items: Array<{ amountPaise: bigint; reversedAt: Date; period: string; outletCode: string; clientId: string; retroactive: boolean }>;
+  /** The base was above the threshold with the reversed payouts and is not any more. */
+  belowThresholdAfterReversal: boolean;
+  /** Plain-words call-outs: "₹X reversed on <date>", "PAN below threshold after reversal", M2 revise-return flag, D3. */
+  notes: string[];
+}
+
 export interface TdsRow194R {
   panNumber: string; // a PAN, a per-deductee `__NO_PAN__:…` key, or the unattributed '__NO_PAN__'
   noPanDeductee?: NoPanDeductee;
@@ -197,6 +245,8 @@ export interface TdsRow194R {
   outstandingPaise: bigint;
   /** "TDS for month" (YYYY-MM, ascending) of the deposits counted on this row — absent when none. */
   depositForPeriods?: string[];
+  /** Fix round B: payouts reversed off this row's base (absent when none). */
+  reversal?: TdsRowReversal;
 }
 
 /**
@@ -236,6 +286,8 @@ export interface TdsRow194C {
   recoveryByTenant: TdsRecoveryAttribution[]; // GROSS-UP per-tenant recovery split (report-only)
   /** See TdsRow194R.depositForPeriods. */
   depositForPeriods?: string[];
+  /** See TdsRow194R.reversal. */
+  reversal?: TdsRowReversal;
 }
 
 export interface TdsSummary194R {
@@ -464,8 +516,8 @@ export class TdsService {
         clientId,
         status: 'PAID',
         paidAt: { gte: start, lt: endExclusive },
-        // Policy round B: a PAID entry reversed with a TDS credit is no longer income (no credits → no-op).
-        tdsCredit: { is: null },
+        // Fix round B (owner D1): a PAID entry an engine reversal took off the base is no longer income (none → no-op).
+        tdsBaseReversedAt: null,
         // Exclude historical VENDOR_IMPORT payouts: these were already settled off-platform by the
         // prior vendor and are recorded as display-only history — they must NEVER enter statutory
         // TDS (194R). Provenance lives on the parent CreditBatch.sourceKind. NULL-safe: a bare
@@ -504,7 +556,7 @@ export class TdsService {
             status: 'PAID',
             period: { gte: startPeriod, lte: endPeriod },
             fieldId: { in: visFieldIdArr },
-            tdsCredit: { is: null }, // policy round B (see above)
+            tdsBaseReversedAt: null, // fix round B D1 (see above)
           },
           select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
         })
@@ -689,6 +741,20 @@ export class TdsService {
         ...depositPeriods.fieldFor(UNLINKED_NO_PAN_DEPOSIT_KEY),
       });
     }
+    // Fix round B (D1/M2): payouts an engine reversal took off a row's base — flag the row (a PAN whose whole base was
+    // reversed still gets a base-0 row so the reversal is never silent). No reversals → no change.
+    const reversed = await this.reversedBaseByKey('SEC_194R', fyLabel, clientId, visibilityFieldIds);
+    for (const [key, items] of reversed) {
+      let row = rows.find((r) => r.panNumber === key);
+      if (!row) {
+        row = { panNumber: key, fyLabel, baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 0n, outstandingPaise: 0n };
+        rows.push(row);
+      }
+      const reversedPaise = items.reduce((s, i) => s + i.amountPaise, 0n);
+      const before = row.baseFyTotalPaise + reversedPaise > cfg.thr194rFyPaise;
+      const after = row.baseFyTotalPaise > cfg.thr194rFyPaise;
+      row.reversal = buildRowReversal(items, fyLabel, before && !after, []);
+    }
     await this.attachNoPanDeductees(rows, clientId);
 
     // Sort: threshold-met first (descending by base), then below-threshold
@@ -702,6 +768,76 @@ export class TdsService {
     });
 
     return rows;
+  }
+
+  /**
+   * Fix round B (D1): the PAID payouts an engine reversal took off the yearly base, in this FY + effective section,
+   * keyed exactly like the report rows (PAN, else the per-deductee no-PAN key). 194R: one client (`clientId`);
+   * 194C: every tenant (null). Imported (vendor) history never counts. One query when there are none.
+   */
+  private async reversedBaseByKey(
+    section: 'SEC_194R' | 'SEC_194C',
+    fyLabel: string,
+    clientId: string | null,
+    visibilityFieldIds: Set<string>,
+  ): Promise<Map<string, TdsRowReversal['items']>> {
+    const out = new Map<string, TdsRowReversal['items']>();
+    const { start, endExclusive } = fyFromLabel(fyLabel);
+    const { startPeriod, endPeriod } = periodWindowForFy(fyLabel);
+    const entries = await this.prisma.creditPayoutEntry.findMany({
+      where: {
+        ...(clientId ? { clientId } : {}),
+        status: 'PAID',
+        tdsBaseReversedAt: { not: null },
+        OR: [{ period: { gte: startPeriod, lte: endPeriod } }, { paidAt: { gte: start, lt: endExclusive } }],
+        batch: { OR: [{ sourceKind: null }, { sourceKind: { not: 'VENDOR_IMPORT' } }] },
+      },
+      select: {
+        clientId: true, outletId: true, amountPaise: true, period: true, paidAt: true, fieldId: true,
+        tdsSection: true, tdsBaseReversedAt: true, status: true,
+      },
+    });
+    const mine = (entries ?? []).filter((e) => {
+      if (!e.tdsBaseReversedAt || e.status !== 'PAID') return false;
+      const isVis = visibilityFieldIds.has(e.fieldId) || e.tdsSection === 'SEC_194C';
+      if (effectiveEntrySection(e.tdsSection, isVis) !== section) return false;
+      return isVis
+        ? fyLabelForPeriod(e.period) === fyLabel
+        : !!e.paidAt && e.paidAt >= start && e.paidAt < endExclusive;
+    });
+    if (mine.length === 0) return out;
+    const outlets = await this.prisma.outlet.findMany({
+      where: { outletCode: { in: [...new Set(mine.map((e) => e.outletId))] }, ...(clientId ? { clientId } : {}) },
+      select: { outletCode: true, clientId: true, partnerId: true },
+    });
+    const partnerOf = new Map(outlets.map((o) => [`${o.clientId}:${o.outletCode}`, o.partnerId]));
+    const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter(Boolean))] as string[];
+    const partners = partnerIds.length
+      ? await this.prisma.channelPartner.findMany({ where: { id: { in: partnerIds } }, select: { id: true, panNumber: true } })
+      : [];
+    const panOf = new Map(partners.map((p) => [p.id, p.panNumber]));
+    for (const e of mine) {
+      const partnerId = partnerOf.get(`${e.clientId}:${e.outletId}`) ?? null;
+      const pan = partnerId ? (panOf.get(partnerId) ?? null) : null;
+      const key = !isNoPanCell(pan)
+        ? pan!.trim().toUpperCase()
+        : section === 'SEC_194R' && partnerId
+          ? noPanPartnerKey(partnerId)
+          : noPanOutletKey(e.clientId, e.outletId);
+      const reversedAt = e.tdsBaseReversedAt!;
+      const list = out.get(key) ?? [];
+      list.push({
+        amountPaise: e.amountPaise,
+        reversedAt,
+        period: e.period,
+        outletCode: e.outletId,
+        clientId: e.clientId,
+        // M2: reversed after the payout's month closed → that month's TDS return may already be filed.
+        retroactive: reversedAt >= nextMonthStartIst(e.period),
+      });
+      out.set(key, list);
+    }
+    return out;
   }
 
   /**
@@ -893,8 +1029,8 @@ export class TdsService {
         status: 'PAID',
         // FIX-4: bucket by payout PERIOD's FY (matches the ledger), not paidAt.
         period: { gte: startPeriod, lte: endPeriod },
-        // Policy round B: a PAID entry reversed with a TDS credit is no longer income (no credits → no-op).
-        tdsCredit: { is: null },
+        // Fix round B (owner D1): a PAID entry an engine reversal took off the base is no longer income (none → no-op).
+        tdsBaseReversedAt: null,
         OR: [
           { fieldId: { in: [...visFieldIds] } },
           { tdsSection: 'SEC_194C' },
@@ -1186,6 +1322,32 @@ export class TdsService {
         unlinkedNoPanDeposit: true as const,
         ...depositPeriods.fieldFor(UNLINKED_NO_PAN_DEPOSIT_KEY),
       });
+    }
+    // Fix round B (D1/D3/M2): flag rows whose base lost engine-reversed payouts. A reversed-only PAN with no other
+    // amount still gets a base-0 row so the reversal is never silent. No reversals → no change.
+    const reversed194C = await this.reversedBaseByKey('SEC_194C', fyLabel, null, visFieldIds);
+    for (const [key, items] of reversed194C) {
+      let row = rows.find((r) => r.panNumber === key);
+      if (!row) {
+        row = {
+          panNumber: key, entityType: 'OTHERS', fyLabel, baseFyTotalPaise: 0n, maxSinglePaise: 0n, thresholdMet: false,
+          liabilityPaise: 0n, liabilityNoThresholdPaise: 0n, depositedPaise: 0n, outstandingPaise: 0n, methodology: null,
+          withheldPaise: 0n, recoveredPaise: 0n, recoveryByTenant: [],
+        };
+        rows.push(row);
+      }
+      const reversedPaise = items.reduce((s, i) => s + i.amountPaise, 0n);
+      const maxRev = items.reduce((m, i) => (i.amountPaise > m ? i.amountPaise : m), 0n);
+      const before =
+        (maxRev > row.maxSinglePaise ? maxRev : row.maxSinglePaise) > cfg.thr194cSinglePaise ||
+        row.baseFyTotalPaise + reversedPaise > cfg.thr194cFyPaise;
+      const extra: string[] = [];
+      // D3: TDS withheld this FY beyond what the PAN now owes → the next payout on this PAN withholds that much less.
+      const over = row.withheldPaise - row.liabilityPaise;
+      if (over > 0n) {
+        extra.push(`${formatINR(over)} TDS withheld beyond what is now due — handed back on the next payout on this PAN (any programme)`);
+      }
+      row.reversal = buildRowReversal(items, fyLabel, before && !row.thresholdMet, extra);
     }
     await this.attachNoPanDeductees(rows, null);
 

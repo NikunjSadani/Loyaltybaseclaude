@@ -505,4 +505,29 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       expect(screen.getByTestId('payments-range')).toHaveTextContent('Showing 51–100 of 48,086')
     })
   })
+  describe('wallet reversal fix round B', () => {
+    it('a reversed PAID entry is marked "Reversed — ₹X owed back (receivable)" with its note; a TDS credit note shows', async () => {
+      asRole('CLIENT_ADMIN')
+      const data = report()
+      data.rows = [
+        {
+          ...ROW,
+          reversal: { receivablePaise: 450000, tdsCreditPaise: 50000, reversedAt: '2026-11-16T00:00:00.000Z', note: 'Reversed on 16 Nov 2026 — recover off-platform' },
+          tdsCreditPaise: 20000,
+          tdsNote: '₹200.00 less TDS — covered by a TDS credit on this PAN',
+        } as typeof ROW,
+        { ...ROW, outletCode: 'OUT-10', outletName: 'Shop B' },
+      ]
+      stubPagedFetch(() => ({ data }))
+      render(<AdminPaymentsReportPage />)
+      await screen.findByText('Shop A')
+      const marks = screen.getAllByTestId('payment-reversal')
+      expect(marks).toHaveLength(1) // Shop B (no reversal) renders as before
+      expect(marks[0].textContent).toContain('Reversed — ₹4,500.00 owed back (receivable) · ₹500.00 TDS credit')
+      expect(marks[0].textContent).toContain('Reversed on 16 Nov 2026 — recover off-platform')
+      const notes = screen.getAllByTestId('payment-tds-note')
+      expect(notes).toHaveLength(1)
+      expect(notes[0].textContent).toBe('₹200.00 less TDS — covered by a TDS credit on this PAN')
+    })
+  })
 })

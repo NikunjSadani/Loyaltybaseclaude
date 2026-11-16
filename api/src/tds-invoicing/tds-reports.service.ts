@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildXlsx } from '../common/xlsx';
+import { formatINR } from '../common/money';
+import { creditScopeNote, istDate, maskPan } from '../credits/tds-credit';
 
 /**
  * Visibility-payout TDS reports service — Wave 1 Stream C, §6.
@@ -36,6 +38,20 @@ export interface ReportScope {
   fy?: string;
 }
 
+/** Fix round B (#21): server-side page of the TDS credits panel (absent → every credit, e.g. the export). */
+export interface CreditPage {
+  page: number;
+  limit: number;
+}
+
+/** The last instant of an FY ("2025-26" → 1 Apr 2026 00:00 IST). */
+function fyEndExclusive(fyLabel: string): Date {
+  const y = parseInt(fyLabel.slice(0, 4), 10) + 1;
+  return new Date(Date.UTC(y, 3, 1) - (5 * 60 + 30) * 60 * 1000);
+}
+
+type CreditDb = Pick<PrismaService, 'tdsCredit'> & Partial<Pick<PrismaService, 'client' | 'outlet'>>;
+
 @Injectable()
 export class TdsReportsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -57,7 +73,7 @@ export class TdsReportsService {
    * with the outlet's GST registration type + entity type from ChannelPartner. Legacy/incentive
    * payouts (tdsSection null) are excluded — this is the TDS-regime payout report.
    */
-  async payoutReport(scope: ReportScope) {
+  async payoutReport(scope: ReportScope, creditPage?: CreditPage) {
     const where: Prisma.CreditPayoutEntryWhereInput = {
       // Only entries stamped under the visibility-payout TDS regime carry a frozen section.
       tdsSection: { not: null },
@@ -81,6 +97,17 @@ export class TdsReportsService {
         tdsDeductedPaise: true,
         autoInvoiceId: true,
         autoInvoice: { select: { invoiceNumber: true } },
+        // Fix round B (L1 / D1 / D3 / D4): reversal + TDS-credit call-outs per row.
+        downloadId: true,
+        tdsBaseReversedAt: true,
+        reversalAllocations: {
+          where: { state: 'APPLIED_RECEIVABLE' },
+          select: { receivablePaise: true, tdsCreditPaise: true },
+        },
+        tdsCreditApplications: {
+          where: { releasedAt: null },
+          select: { amountPaise: true, tdsCredit: { select: { clientId: true } } },
+        },
       },
     });
 
@@ -110,11 +137,18 @@ export class TdsReportsService {
         })
       : [];
     const outletMap = new Map(outlets.map((o) => [`${o.clientId}|${o.outletCode}`, o]));
+    const clientNames = await this.clientNames([...new Set(entries.map((e) => e.clientId))]);
+    // D3: the "less TDS after a reversal" lines of the downloads these rows went out in (none → no rows read).
+    const handBackByEntry = await this.handBackByEntry(
+      [...new Set(entries.filter((e) => e.downloadId).map((e) => e.downloadId!))],
+    );
 
     const rows = entries.map((e) => {
       const o = outletMap.get(`${e.clientId}|${e.outletId}`);
+      const notes = this.rowTdsNotes(e, handBackByEntry.get(e.id) ?? 0n);
       return {
         clientId: e.clientId,
+        clientName: clientNames.get(e.clientId) ?? null,
         outletCode: e.outletId,
         outletName: e.outletName,
         businessName: o?.partner?.businessName ?? null,
@@ -128,6 +162,7 @@ export class TdsReportsService {
         tdsMethodology: e.tdsMethodology,
         tdsDeducted: this.money(e.tdsDeductedPaise),
         invoiceNumber: e.autoInvoice?.invoiceNumber ?? null,
+        ...notes,
       };
     });
 
@@ -143,8 +178,73 @@ export class TdsReportsService {
       },
       rows,
       // Policy round B: TDS credits from reversed PAID payouts — created / applied / outstanding (never silent).
-      tdsCredits: await this.tdsCreditSection(this.prisma, scope),
+      tdsCredits: await this.tdsCreditSection(this.prisma, scope, creditPage),
     };
+  }
+
+  /** Fix round B (#21): just the TDS credits panel page (scope = the report's tenant / period filters). */
+  async creditsOnly(scope: ReportScope, creditPage: CreditPage) {
+    return { scope: { clientId: scope.clientId ?? null, period: scope.period ?? null }, tdsCredits: await this.tdsCreditSection(this.prisma, scope, creditPage) };
+  }
+
+  /** Tenant id → display name (Client.internalName); missing → absent (callers fall back to the id). */
+  private async clientNames(ids: string[]): Promise<Map<string, string>> {
+    if (ids.length === 0 || !this.prisma.client?.findMany) return new Map();
+    const rows = await this.prisma.client.findMany({ where: { id: { in: ids } }, select: { id: true, internalName: true } });
+    return new Map((rows ?? []).map((c) => [c.id, c.internalName]));
+  }
+
+  /** D3: entry → TDS the ledger lowered after a reversal, from the downloads' TDS_REVERSAL_ADJUSTMENT audit rows. */
+  private async handBackByEntry(downloadIds: string[]): Promise<Map<string, bigint>> {
+    const out = new Map<string, bigint>();
+    if (downloadIds.length === 0 || !this.prisma.auditLog?.findMany) return out;
+    const audits = await this.prisma.auditLog.findMany({
+      where: { entityType: 'TDS_REVERSAL_ADJUSTMENT', entityId: { in: downloadIds } },
+      select: { metadata: true },
+    });
+    for (const a of audits ?? []) {
+      const lines = ((a.metadata as { lines?: Array<{ entryId: string; handBackPaise: number }> } | null)?.lines ?? []);
+      for (const l of lines) out.set(l.entryId, (out.get(l.entryId) ?? 0n) + BigInt(l.handBackPaise));
+    }
+    return out;
+  }
+
+  /**
+   * L1 / D1 / D3 / D4 — the plain-words TDS call-outs of one payout row. Only present when something happened
+   * (a row without a reversal or a credit is shaped exactly as before).
+   */
+  private rowTdsNotes(
+    e: {
+      clientId: string;
+      amountPaise: bigint;
+      tdsBaseReversedAt: Date | null;
+      reversalAllocations: Array<{ receivablePaise: bigint; tdsCreditPaise: bigint }>;
+      tdsCreditApplications: Array<{ amountPaise: bigint; tdsCredit: { clientId: string } | null }>;
+    },
+    handBackPaise: bigint,
+  ): { reversedNote?: string; tdsCreditAppliedPaise?: number; tdsNote?: string } {
+    const out: { reversedNote?: string; tdsCreditAppliedPaise?: number; tdsNote?: string } = {};
+    if (e.tdsBaseReversedAt) {
+      const alloc = e.reversalAllocations?.[0];
+      out.reversedNote =
+        `${formatINR(e.amountPaise)} reversed on ${istDate(e.tdsBaseReversedAt)} — off the PAN's TDS base` +
+        (alloc
+          ? alloc.receivablePaise > 0n
+            ? `; ${formatINR(alloc.receivablePaise)} owed back (receivable)`
+            : '; nothing owed back (the whole amount was withheld as TDS)'
+          : '') +
+        (alloc && alloc.tdsCreditPaise > 0n ? `; ${formatINR(alloc.tdsCreditPaise)} TDS credit` : '');
+    }
+    const apps = e.tdsCreditApplications ?? [];
+    const credit = apps.reduce((s, a) => s + a.amountPaise, 0n);
+    const other = apps.filter((a) => a.tdsCredit && a.tdsCredit.clientId !== e.clientId).reduce((s, a) => s + a.amountPaise, 0n);
+    const parts: string[] = [];
+    if (credit - other > 0n) parts.push(`${formatINR(credit - other)} adjusted from earlier TDS credit`);
+    if (other > 0n) parts.push(`${formatINR(other)} adjusted from earlier TDS credit (another programme)`);
+    if (handBackPaise > 0n) parts.push(`${formatINR(handBackPaise)} less TDS: adjusted after a reversal brought PAN below the limit`);
+    if (credit > 0n) out.tdsCreditAppliedPaise = Number(credit);
+    if (parts.length > 0) out.tdsNote = `TDS lowered: ${parts.join(' · ')}`;
+    return out;
   }
 
   /**
@@ -153,7 +253,7 @@ export class TdsReportsService {
    * uses — that payout failed / was cancelled — are listed too, marked released). Shared with the 'tds-payouts'
    * export kind (its "TDS Credits" sheet). Money in BigInt paise.
    */
-  async tdsCreditSection(db: { tdsCredit: PrismaService['tdsCredit'] }, scope: ReportScope) {
+  async tdsCreditSection(db: CreditDb, scope: ReportScope, pageReq?: CreditPage) {
     const where: Prisma.TdsCreditWhereInput = {};
     if (scope.clientId) where.clientId = scope.clientId;
     if (scope.period) where.fyLabel = fyOfPeriod(scope.period);
@@ -180,6 +280,7 @@ export class TdsReportsService {
             releasedAt: true,
             releaseReason: true,
             downloadId: true,
+            clientId: true,
             payoutEntry: { select: { id: true, outletId: true, outletName: true, period: true } },
           },
         },
@@ -187,13 +288,67 @@ export class TdsReportsService {
     })) ?? [];
     let created = 0n;
     let applied = 0n;
-    const rows = credits.map((c) => {
+    for (const c of credits) {
       created += c.amountPaise;
       applied += c.appliedPaise;
+    }
+    // #21: a server-side page (the export asks for every credit — no page).
+    const total = credits.length;
+    const limit = pageReq ? Math.min(Math.max(pageReq.limit, 1), 100) : total || 1;
+    const pages = Math.max(1, Math.ceil(total / limit));
+    const page = pageReq ? Math.min(Math.max(pageReq.page, 1), pages) : 1;
+    const pageRows = pageReq ? credits.slice((page - 1) * limit, page * limit) : credits;
+
+    // L6: the PAN the source outlet's retailer holds TODAY — a credit on an older PAN is not applied automatically.
+    const curPan = new Map<string, string | null>();
+    if (pageRows.length > 0 && db.outlet?.findMany) {
+      const outlets = await db.outlet.findMany({
+        where: {
+          OR: pageRows
+            .filter((c) => c.sourcePayoutEntry?.outletId)
+            .map((c) => ({ clientId: c.clientId, outletCode: c.sourcePayoutEntry!.outletId })),
+        },
+        select: { clientId: true, outletCode: true, partner: { select: { panNumber: true } } },
+      });
+      for (const o of outlets ?? []) {
+        curPan.set(`${o.clientId}|${o.outletCode}`, o.partner?.panNumber?.trim().toUpperCase() ?? null);
+      }
+    }
+    const names = new Map<string, string>();
+    if (pageRows.length > 0 && db.client?.findMany) {
+      const cs = await db.client.findMany({
+        where: { id: { in: [...new Set(pageRows.map((c) => c.clientId))] } },
+        select: { id: true, internalName: true },
+      });
+      for (const c of cs ?? []) names.set(c.id, c.internalName);
+    }
+    const now = new Date();
+    let unusedCount = 0;
+    let previousPanCount = 0;
+    const rows = pageRows.map((c) => {
+      const left = c.amountPaise - c.appliedPaise;
+      const fyClosed = now >= fyEndExclusive(c.fyLabel);
+      // D2: a credit unused when its FY closed stays in that FY (TDS deposits belong to their FY).
+      const unusedNote =
+        fyClosed && left > 0n
+          ? `${formatINR(left)} unused credit for FY ${c.fyLabel}, not carried forward — the retailer can claim it in their return for that year`
+          : null;
+      if (unusedNote) unusedCount++;
+      const nowPan = c.sourcePayoutEntry?.outletId ? curPan.get(`${c.clientId}|${c.sourcePayoutEntry.outletId}`) : undefined;
+      const previousPanNote =
+        left > 0n && nowPan && nowPan !== c.panNumber.trim().toUpperCase()
+          ? `Credit on previous PAN ${maskPan(c.panNumber)} — not applied automatically (the retailer's PAN is now ${maskPan(nowPan)}); settle it off-platform`
+          : null;
+      if (previousPanNote) previousPanCount++;
       return {
         creditId: c.id,
         clientId: c.clientId,
+        clientName: names.get(c.clientId) ?? null,
         panNumber: c.panNumber,
+        panMasked: maskPan(c.panNumber),
+        scopeNote: creditScopeNote(c.section, c.fyLabel),
+        unusedNote,
+        previousPanNote,
         section: c.section,
         fyLabel: c.fyLabel,
         createdAt: c.createdAt.toISOString(),
@@ -206,29 +361,50 @@ export class TdsReportsService {
         credit: this.money(c.amountPaise),
         applied: this.money(c.appliedPaise),
         outstanding: this.money(c.amountPaise - c.appliedPaise),
-        applications: c.applications.map((a) => ({
-          applicationId: a.id,
-          appliedAt: a.createdAt.toISOString(),
-          amount: this.money(a.amountPaise),
-          entryId: a.payoutEntry?.id ?? null,
-          outletCode: a.payoutEntry?.outletId ?? null,
-          outletName: a.payoutEntry?.outletName ?? null,
-          period: a.payoutEntry?.period ?? null,
-          downloadId: a.downloadId,
-          released: a.releasedAt !== null,
-          releasedAt: a.releasedAt ? a.releasedAt.toISOString() : null,
-          releaseReason: a.releaseReason,
-        })),
+        applications: c.applications.map((a) => {
+          // D4: a 194C credit may be used by another programme's payout on the same PAN — in a single-tenant view
+          // that payout's details are not shown (another client's data), only that it happened.
+          const otherProgramme = !!a.clientId && a.clientId !== c.clientId;
+          const hide = otherProgramme && !!scope.clientId;
+          return {
+            applicationId: a.id,
+            appliedAt: a.createdAt.toISOString(),
+            amount: this.money(a.amountPaise),
+            entryId: hide ? null : (a.payoutEntry?.id ?? null),
+            outletCode: hide ? null : (a.payoutEntry?.outletId ?? null),
+            outletName: hide ? null : (a.payoutEntry?.outletName ?? null),
+            period: a.payoutEntry?.period ?? null,
+            downloadId: hide ? null : a.downloadId,
+            released: a.releasedAt !== null,
+            releasedAt: a.releasedAt ? a.releasedAt.toISOString() : null,
+            releaseReason: a.releaseReason,
+            otherProgramme,
+            note: a.releasedAt
+              ? `${formatINR(a.amountPaise)} returned to the credit — that payout did not go through (${a.releaseReason ?? 'released'})`
+              : otherProgramme
+                ? `${formatINR(a.amountPaise)} adjusted against the TDS of another programme's payout on this PAN (194C)`
+                : `${formatINR(a.amountPaise)} adjusted from earlier TDS credit against the TDS of payout ${a.payoutEntry?.id ?? ''}`,
+          };
+        }),
       };
     });
+    const notes: string[] = [];
+    if (unusedCount > 0) {
+      notes.push(`${unusedCount} credit${unusedCount === 1 ? '' : 's'} on this page unused when the FY closed — not carried forward to the next FY.`);
+    }
+    if (previousPanCount > 0) {
+      notes.push(`${previousPanCount} credit${previousPanCount === 1 ? ' is' : 's are'} on a retailer's previous PAN — not applied automatically.`);
+    }
     return {
-      count: rows.length,
+      count: total,
       totals: {
         created: this.money(created),
         applied: this.money(applied),
         outstanding: this.money(created - applied),
       },
       rows,
+      ...(pageReq ? { pagination: { page, limit, total, pages } } : {}),
+      ...(notes.length > 0 ? { notes } : {}),
     };
   }
 
