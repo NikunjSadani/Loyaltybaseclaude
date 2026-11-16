@@ -70,6 +70,7 @@
     "esbuild": "^0.28.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
+    "eslint-plugin-testing-library": "7.16.2",
     "jsdom": "^25.0.1",
     "serwist": "^9.2.1",
     "tailwindcss": "^4",
