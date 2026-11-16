@@ -96,6 +96,9 @@ const mockTx = {
   // Visibility-payout TDS read + write targets (atomic with the download / confirm).
   tdsDeductionEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   tdsRecoveryEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  // Policy round B: no TDS credits on these fixtures → every path behaves exactly as before.
+  tdsCredit: { findMany: jest.fn().mockResolvedValue([]) },
+  tdsCreditApplication: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn() },
   autoInvoice: { updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   // FIX-8 advisory lock — pg_advisory_xact_lock(hashtextextended(...)).
   $executeRaw: jest.fn().mockResolvedValue(0),
@@ -3376,6 +3379,41 @@ describe('CreditsService', () => {
       expect(rev.fyLabel).toBe('2026-27'); // FY of period 2026-05
       expect(rev.creditPayoutEntryId).toBe('e1');
       expect(rev.tdsDeductedThisPaise).toBe(-50000n);
+    });
+
+    it('policy round B: a FAILED payout gives back the TDS credit it used (released once, called out in the result)', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: 5000000n }],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{
+        id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 5000000n,
+        tdsDeductedPaise: 0n, tdsSection: 'SEC_194C', period: '2026-05', // the credit covered the whole TDS
+      }]);
+      mockTx.tdsCreditApplication.findMany.mockResolvedValueOnce([
+        { id: 'a1', tdsCreditId: 'c1', payoutEntryId: 'e1', amountPaise: 40000n },
+      ]);
+      mockTx.tdsCreditApplication.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.$executeRaw.mockResolvedValue(1);
+      const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', '', 'Failure', 'bounced']];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Payout');
+      const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+
+      const res = (await service.uploadUtr(gifsy, 'd1', file, true)) as Record<string, any>;
+
+      expect(mockTx.tdsCreditApplication.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { payoutEntryId: { in: ['e1'] }, releasedAt: null } }),
+      );
+      expect(mockTx.tdsCreditApplication.updateMany).toHaveBeenCalledWith({
+        where: { id: 'a1', releasedAt: null },
+        data: { releasedAt: expect.any(Date), releaseReason: 'PAYOUT_FAILED' },
+      });
+      expect(res.tdsCreditReleased).toEqual([
+        { entryId: 'e1', amountPaise: 40000, note: expect.stringMatching(/^₹400.00 TDS credit returned to the PAN.s credit balance — this payout failed/) },
+      ]);
     });
 
     // ── Non-success capture: failureReason + attemptedAt + uploaded UTR ──────────────────────────

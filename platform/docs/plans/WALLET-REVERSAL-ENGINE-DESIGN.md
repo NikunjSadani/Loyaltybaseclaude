@@ -208,6 +208,82 @@ Backfill existing PAYOUT reversals; ambiguous → flagged.
 - Tests: `payout-reversal-v2.spec.ts` (in-memory Prisma fake with rollback + the live partial unique index):
   T-pay1..5, reservation-vs-download (skip + race), lock order, double approval, flag rollback, backfill, call-outs;
   platform `status-payout-reversal-entries.test.tsx`, `payout-reversal-held-entries.test.tsx`.
+- ⚠️ Superseded by §8.1 (2026-11-16): SHADOW no longer takes this path for PAYOUT reversals; a PAID entry's receivable
+  is now the NET cash received and its withheld TDS becomes a TDS credit.
+
+### 8.1 Policy round B (owner decisions 2026-11-16) — as built on `feat/wre-pol-b`
+**B1 — SHADOW = LEGACY for PAYOUT reversals.** Only `V2` picks entries / reserves them. `createReversal` takes the
+engine path only when the flag is `V2`; `GET …/payout-reversal-entries` returns `mode` = the effective PAYOUT mode
+(`V2` or `LEGACY`) plus `engineMode` (the raw flag), so the status screen shows the amount form on SHADOW. Approve /
+reject still dispatch on allocation rows (a reversal reserved under SHADOW before this change still completes).
+
+**B2 — reversing a PAID entry whose TDS was DEDUCTED (V2 only; LEGACY/SHADOW keep the full-amount receivable).**
+- Receivable = `amountPaise − tdsDeductedPaise` (net cash received), stored on the allocation (`receivablePaise`) and
+  summed into `CreditReversal.shortfallPaise`.
+- Credit = the entry's own withholding as booked in the TDS ledger (Σ `tdsDeductedThisPaise` for the entry, capped at
+  the stamp) **+ any earlier TDS credit that had been applied to this payout** (that TDS was attributed to the
+  now-reversed income; all of it is deposited). One `TdsCredit` row per reversed entry (`sourcePayoutEntryId` unique),
+  keyed **(tenant, PAN, section, FY)**; the PAN is the one the payout was deducted under (ledger row, else the applied
+  credit's PAN). Withheld but not traceable to the ledger (e.g. imported history) → no credit, called out. GROSS_UP
+  (`tdsDeductedPaise = 0`) → receivable = amount, no credit, called out ("no TDS was withheld from the retailer; the
+  program paid it on top").
+- The source entry's base **leaves the PAN's cumulative TDS base** (`tdsCredit: { is: null }` on the prior-base reads
+  of `buildPayoutTdsPlan` and the TDS liability report `tds.service` 194R/194C) — the income was reversed. This is what
+  keeps the cumulative ledger consistent: Σ deposited − TDS due on the remaining income = Σ outstanding credit.
+- **Application** (bank download, under the existing PAN advisory lock `PAN|<pan>|<fy>`): for each DEDUCT group the plan
+  hides OTHER tenants' outstanding credits from the cross-tenant prior-deducted figure and computes the deduction with
+  and without this tenant's own credits (`deductWithCredits`, `api/src/credits/tds-credit.ts`); the difference is the
+  credit applied (0 ≤ applied ≤ outstanding, ≤ TDS due), split over the entries by their TDS due, drawn FIFO. E.g. due
+  ₹500, credit ₹200 → ₹300 withheld; due ₹310, credit ₹400 → ₹0 withheld, ₹90 carried forward. The ledger records the
+  NEW cash withheld. One `TdsCreditApplication` per (credit, entry); `appliedPaise` bumped with a guarded UPDATE
+  (`appliedPaise + x ≤ amountPaise`, else the download rolls back) + SQL CHECK + partial unique live index.
+- **Undo**: an application is RELEASED (credit restored, `releasedAt` + reason) when the payout it reduced never happens
+  — UTR FAILED (`uploadUtr`) or the entry cancelled by a reversal (V2 and LEGACY cancel paths). A re-bank re-applies.
+  A reversal that is REJECTED never created a credit (credits are created at approve only).
+- Credits are FY-scoped (the DEDUCT ledger is per FY) — see open question O2.
+- No credits on a tenant (every LEGACY tenant, Deoleo) → `buildPayoutTdsPlan` takes the unchanged branch (bit-for-bit
+  the old computation), one extra indexed read; the base exclusion filters nothing.
+
+**B3 — approve/reject OUTCOME SUMMARY on every tenant (display only).** `PATCH /reversals/:id` returns
+`payoutOutcome { headline, lines[], cancelled[], receivable[], receivablePaise, tdsCreditPaise, released[] }` for every
+PAYOUT reversal (LEGACY path builds it from what it did; data written is unchanged). Lines: "Entry cancelled · ₹5,000 ·
+will not be paid", "Recorded as owed · ₹9,800 · ₹200 TDS credit carried forward on PAN XXXXX1234F", "Entry released ·
+₹500 · goes into the next bank file again", LEGACY reject "Rejected · no payout entry was held or changed".
+
+**Call-outs (owner rule: no silent pass-throughs)**
+| Event | Where it is said |
+|---|---|
+| Entry cancelled (± TDS offset, ± credit it had used returned) | approve outcome line; audit `PAYOUT_REVERSAL_ALLOCATION` APPROVE |
+| Receivable recorded (net) + TDS credit created | outcome line + headline; allocation `receivablePaise/tdsCreditPaise`; audit APPROVE metadata |
+| GROSS_UP receivable (no credit) / untracked TDS (no credit) | outcome line + `tdsNote` |
+| LEGACY PAID receivable with TDS withheld (not adjusted) | outcome line + `tdsNote` |
+| Rejected / released | outcome headline + lines; audit REJECT (V2) |
+| TDS credit applied at a download | `X-Tds-Credit-Applied-Count/-Paise` headers → blue notice on the payout screen; `tdsCreditApplied[]` (per entry: due / credit / withheld); audit `TDS_CREDIT_APPLIED` |
+| TDS credit returned (payout FAILED) | UTR apply result `tdsCreditReleased[]` → "TDS credit returned" panel |
+| Credits outstanding / applied / released | TDS payout report JSON `tdsCredits` + panel on /admin/tds-payouts; export kind `tds-payouts` extra sheet "TDS Credits" (only when the scope has credits — Payouts/Summary stay byte-identical) |
+
+**Schema** — NEW migration `api/prisma/migrations/20261117130000_payout_reversal_tds_credit` (never applied):
+`payout_reversal_allocations.receivablePaise/tdsCreditPaise` (+ CHECK receivable ≤ amount, both ≥ 0); tables
+`tds_credits` (unique `sourcePayoutEntryId`, CHECK `0 ≤ applied ≤ amount`, amount > 0) and `tds_credit_applications`
+(partial unique `(tdsCreditId, payoutEntryId) WHERE releasedAt IS NULL`). Verified to apply on PGlite after all 73
+earlier migrations.
+
+**Tests** — `api/src/credits/tds-credit.spec.ts` (pure: owner example, partial, threshold, tenant scope, FIFO, 2,000-case
+property test, idempotent release); `payout-reversal-v2.spec.ts` "Policy round B" (9 end-to-end service cases: net
+receivable + credit + PAN lock, idempotency, GROSS_UP, applied next payout, partial/carry-forward over 3 downloads,
+concurrency rollback + no double use, undo + re-apply, credit of a payout that itself used credit, tenant scope) and
+SHADOW = LEGACY + LEGACY outcome summary with data unchanged; `credits.service.spec.ts` UTR FAILED release;
+`tds-reports.service.spec.ts`, `tds-payouts.kind.spec.ts` (extra sheet, Payouts/Summary parity); platform
+`payout-reversal-held-entries.test.tsx`, `tds-payouts-api.test.tsx`.
+
+**Open questions (owner)** — O1: a DEDUCT entry with NO TDS withheld (below threshold) that is reversed keeps its base in
+the PAN's cumulative (owner rule "no credit"); strictly the income was reversed too. Recommendation: keep (no silent
+TDS movement). O2: credits are per FY — a credit unused at 31 March stays outstanding on the report but is not applied
+to next FY's TDS. Recommendation: keep FY-scoped (TDS deposits belong to their FY; the retailer claims the excess in
+their return) and show it on the report. O3: when removing the reversed base un-crosses the threshold, deposits beyond
+the explicit credit (other entries' catch-up TDS) become an over-deduction the cumulative ledger already gives to the
+next payout on that PAN (any tenant), as it does today for any base reduction. Recommendation: accept (correct tax
+math; rare) or ask for a report flag.
 
 ## 9. One-off backfill (WP6, NOT built) + rollout
 **Backfill** (per wallet, own tx, advisory lock + wallet FOR UPDATE, resumable: skip wallets with movementSeq > 0):
@@ -321,6 +397,9 @@ credit batches on prod yet. Worth doing properly once Bajaj runs monthly credits
 | Q12 | Does a new credit pay off existing debt first? | Yes (prevents hidden debt pushing a positive wallet negative) | No |
 | Q13 | Historical reversals already done | Keep as recorded; backfill only classifies | Recalculate (would change balances) |
 | Q14 | Until the engine is on for a tenant | Refuse points reversals on wallets with debt (Bajaj's 8) | Keep the patched logic (known order bug) |
+| B1 (2026-11-16) | SHADOW mode for PAYOUT reversals | Behaves exactly like LEGACY; only V2 picks / reserves entries (§8.1) | SHADOW = V2 for payouts (WP5 as built) |
+| B2 (2026-11-16) | Reversing a PAID payout whose TDS was DEDUCTED (V2) | Receivable = net received; withheld TDS → TDS credit on the PAN (same tenant), auto-applied to the next TDS due, carried forward, released if that payout fails / is cancelled; GROSS_UP → full receivable, no credit, called out (§8.1) | Q11 (full receivable, TDS corrected off-platform) |
+| B3 (2026-11-16) | Approve/reject outcome summary | On every tenant incl. LEGACY/Deoleo — display only, data unchanged (⚠️ platform-wide, owner-approved) | Engine reversals only |
 
 ### 12.1 Policy round A — owner decisions 2026-11-15/16 (as built on `feat/wre-pol-a`)
 Owner rule for all of them: **no silent pass-throughs** — every refusal / skip / blocked wallet / unmapped credit / owed
@@ -356,7 +435,7 @@ amount / paused state is called out to whoever can act (call-outs table below).
 | WP2 | `applyMovement` v2 (lock-first, seq, pointsDelta, D/O, ledger link, positions, expiry reclassification) calling WP0 | ✅ `bd131860` — `WalletService.movementPath` rollout guard: movementSeq > 0 → v2 maintenance (any flag); movementSeq = 0 + LEGACY → pre-engine path byte-identical; SHADOW/V2 → v2 only for a pristine wallet, un-backfilled history → 409 (**changed by policy round A P-A1: → LEGACY path, only reversals refused**). Expiry with e = 0 writes no row (D/O only). Tests `wallet.reversal-engine.spec.ts` | WP0, WP1 | — |
 | WP3 | Reversal engine `applyCreditReversal` §6; own-lot-first; LEGACY/SHADOW/V2 flag; delete legacy floor helpers | ✅ `bd131860` — `applyCreditReversal`, `v2PointsReversalCap`, `reverseCreditBatchPoints` (flag `program_settings.reversalEngine`, absent → LEGACY, malformed → refused; SHADOW diff → audit_logs `REVERSAL_ENGINE_SHADOW`). Legacy floor helpers kept: LEGACY still needs them (removal = rollout step 7). `patchReversal` still calls the LEGACY pair directly → switch to the dispatcher in WP4 | WP2 | — |
 | WP4 | credits.service POINTS: position-based caps at create/approve, wallet from position, allocations, shortfall totals, SHADOW | ✅ branch `feat/wre-wp4` — mode resolved once per request (POINTS create/approve only; reject/PAYOUT never read it). **V2**: create cap Σ(a − ρ) − Σ pending, `originalPaise` = Σ position amounts, approve cap Σ(a − ρ) under the batch lock, then `reverseCreditBatchPoints(mode V2)` (receiving wallet, allocations, Σ shortfall → `shortfallPaise`); no current-partner / debt gate; no position / UNRESOLVED → 400. **SHADOW**: LEGACY decides + applies; v2 create-cap diff (audit `REVERSAL_ENGINE_SHADOW`, action CREATE) + approve diff (dispatcher). **LEGACY**: code path unchanged — golden snapshot generated on `1aa5084e` (`api/src/credits/__fixtures__/legacy-reversal-golden.json`). `confirmBatch` resolves the mode once per batch (`creditEarn` → `movementPath(knownMode)`): 2,000-row confirm 24,004 → 20,005 queries (LEGACY), 28,004 → 24,005 (V2). Tests `credits.reversal-engine.spec.ts` | WP3 | — |
-| WP5 | PAYOUT allocations §8: entry-selection DTO + UI, reservation, download/re-bank hold, approve rules, backfill of existing PAYOUT reversals | ✅ `4187cb6d` — SHADOW/V2 only; LEGACY byte-identical (existing credits spec unchanged but for 3 mock lines). Backfill = pure planner, WP6 wiring pending (§8 "As built") | WP1 + release branch merged in | — |
+| WP5 | PAYOUT allocations §8: entry-selection DTO + UI, reservation, download/re-bank hold, approve rules, backfill of existing PAYOUT reversals | ✅ `4187cb6d` — LEGACY byte-identical (existing credits spec unchanged but for 3 mock lines). Backfill = pure planner, WP6 wiring pending (§8 "As built"). **Policy round B (`feat/wre-pol-b`, §8.1):** V2 only (SHADOW = LEGACY for payouts); net receivable + tenant-scoped PAN TDS credit (create / apply at download / carry forward / release on FAILED or cancel); outcome summary on every tenant; TDS report + export + payout screen call-outs; migration `20261117130000_payout_reversal_tds_credit` | WP1 + release branch merged in | — |
 | WP6 | Backfill job §9 (pure module using WP0 `replay()` + Cloud Run job script, DRY_RUN default, resumable) + verify job V0–V9 + draft post-backfill migration | ✅ `6fed2005` — `api/src/wallet/backfill/` (planner, runner, Prisma store, `backfill.main.ts`, `verify.main.ts`) + 30 fixture tests; draft `platform/docs/plans/sql/wallet-reversal-post-backfill.DRAFT.sql`. Not yet run on any DB (runbook §9.1) | WP0, WP1 | — |
 | WP7 | Postgres e2e concurrency tests (concurrent credits, reversal vs redeem, double approval, reservation vs download) | 🟡 built (`feat/wre-wp7`): `api/test/wallet-reversal-concurrency.e2e-spec.ts` + `api/test/support/` (disposable-DB harness, WP0 oracle replay check). Run: `WRE_PG_ADMIN_URL=<throw-away LOCAL postgres admin URL>` (creates/migrates/drops its own DB; refuses non-localhost) or `WRE_PG_EMBEDDED=pglite` (serialised self-check only). PGlite: 26 green, 5 skipped. **Not yet run on a real server** (no Docker/Postgres on the dev machine). Pending: WP4 credits-path V2 approve race, WP5 reservation vs download (`it.skip` + TODO). Production finding (flag read OUTSIDE the tx → pool starvation) **fixed in policy round A** (§12.1 P-A6) — the pool test is now a regression guard expected GREEN on a real server | WP2–WP5 | ~1 h |
 | Pol-A | Owner policy round A (§12.1): Q1 blocked wallets on legacy rules + per-wallet backfill status, Q2 never-stop backfill, Q3 line-scoped unmapped refusal, Q4 owed ≠ recovered, Q5 approvals-paused switch + cheap re-run, WP7 tx-read fix, WP5 planner → WP6 (+ V9b), call-out endpoint `GET /v1/admin/credits/reversal-engine/attention` + `POST …/pause` + banner (`status/_components/ReversalEngineAttentionBanner.tsx`) | ✅ branch `feat/wre-pol-a` — schema additions folded into migration `20261117120000` (never applied). Tests: `credits.reversal-engine.spec.ts` (golden LEGACY unchanged), `wallet.reversal-engine.spec.ts`, `reversal-attention.spec.ts`, `backfill.spec.ts`, banner vitest. PGlite WP7 run: green except the T-pay3 schema test, which fails only because the SHARED generated Prisma client carried policy round B's `payout_reversal_allocations.receivablePaise` column (absent from this branch's migration) | WP0–WP7 | — |

@@ -16,6 +16,16 @@ import {
 } from '../tds/tds-methodology.helper';
 import { grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, type ResolvedTdsStatutory } from '../tds/tds.helpers';
 import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
+import {
+  deductWithCredits,
+  loadOpenTdsCredits,
+  maskPan,
+  releaseCreditApplications,
+  writeCreditApplications,
+  type CreditDraw,
+  type OpenTdsCredit,
+  type ReleasedApplication,
+} from './tds-credit';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { formatINR, paiseToRupees, toPaiseBigInt } from '../common/money';
@@ -60,6 +70,8 @@ import {
   reservedAmong,
   reservePayoutEntries,
   selectPayoutEntriesV2,
+  approvedHeadline,
+  type PayoutOutcome,
 } from './payout-reversal-v2';
 
 /**
@@ -92,6 +104,19 @@ interface PartnerTaxInfo {
   retailerState: string | null;
 }
 
+/** Policy round B: one payout entry whose TDS an earlier TDS credit (partly) covered in a bank download. */
+export interface TdsCreditAppliedLine {
+  entryId: string;
+  outletId: string;
+  outletName: string;
+  /** Integer paise. TDS due on the entry = creditPaise + withheldPaise. */
+  duePaise: number;
+  creditPaise: number;
+  withheldPaise: number;
+  panMasked: string;
+  note: string;
+}
+
 /** The DEDUCT/GROSS-UP write plan computed (reads-only) before the download $transaction. */
 interface PayoutTdsPlan {
   /** outletCode → paise to subtract from that outlet's bank-file line (DEDUCT only). */
@@ -120,6 +145,14 @@ interface PayoutTdsPlan {
     tdsDeductedThisPaise: bigint;
     carryForwardPaise: bigint;
   }>;
+  /**
+   * Policy round B (WALLET-REVERSAL-ENGINE-DESIGN.md §8.1): TDS credits (from reversed PAID payouts) of THIS tenant
+   * used against this download's DEDUCT withholding — one draw per (credit, entry); written with the download.
+   * Empty for every tenant without credits (the plan is then identical to before).
+   */
+  creditDraws: CreditDraw[];
+  /** entryId → { TDS due on it, credit used for it } for every entry a credit reduced (download notice + audit). */
+  creditByEntry: Map<string, { duePaise: bigint; creditPaise: bigint; panNumber: string }>;
   /**
    * GROSS-UP monthly-incremental TDS TOP-UP invoices (FIX-1) + their DELTA pro-rata recovery.
    * `bodyPaise` is the DELTA (dueNow − alreadyInvoiced), NOT the cumulative — so Σ bodies over
@@ -278,6 +311,8 @@ export class CreditsService {
       deductionLedger: [],
       grossUpInvoices: [],
       noPanRecovery: [],
+      creditDraws: [],
+      creditByEntry: new Map(),
     };
     if (engineEntries.length === 0) return plan;
 
@@ -378,6 +413,9 @@ export class CreditsService {
           status: { in: ['PAID', 'PROCESSING'] },
           period: { gte: startPeriod, lte: endPeriod },
           outletId: { in: [...priorOutletCodes] },
+          // Policy round B: a PAID entry reversed with a TDS credit is no longer income — its base leaves the
+          // cumulative (the credit carries the TDS deposited for it). No credits → no row excluded.
+          tdsCredit: { is: null },
         },
         // FIX-D: tdsMethodology partitions the cumulative base for the AMOUNT math. A legacy row
         // with a null methodology only feeds the COMBINED threshold base (no such visibility rows
@@ -415,6 +453,18 @@ export class CreditsService {
       for (const lr of ledgerRows) {
         const ps = `${lr.panNumber}${SEP}${lr.section}`;
         priorDeductedByPS.set(ps, (priorDeductedByPS.get(ps) ?? 0n) + lr.tdsDeductedThisPaise);
+      }
+    }
+
+    // Policy round B: open TDS credits on these PANs (any tenant — other tenants' are hidden from this tenant's
+    // prior figure, its own are applied). None → every DEDUCT group below takes the unchanged path.
+    const creditsByPS = new Map<string, OpenTdsCredit[]>();
+    if (panSet.size) {
+      for (const c of await loadOpenTdsCredits(db, { pans: [...panSet], sections: [...sectionSet], fyLabel })) {
+        const ps = `${c.panNumber}${SEP}${c.section}`;
+        const list = creditsByPS.get(ps) ?? [];
+        list.push(c);
+        creditsByPS.set(ps, list);
       }
     }
 
@@ -474,24 +524,56 @@ export class CreditsService {
 
       if (g.methodology === TdsMethodology.DEDUCT) {
         const priorDeducted = priorDeductedByPS.get(ps) ?? 0n;
-        const { tdsDueCumulativePaise, tdsDeductThisPaise, carryForwardPaise } = computeDeduction({
-          cumulativeBasePaise: methodologyCumulativeBase, // FIX-D: DEDUCT-methodology base only
-          priorDeductedPaise: priorDeducted,
-          thisPayoutPaise: thisEventBase,
-          rate,
-          thresholdMetOnCumulative: thresholdMet, // FIX-D: combined per-PAN threshold
-        });
-        // Exact-summing split of the withheld amount across this event's entries.
-        const split =
-          tdsDeductThisPaise > 0n
-            ? allocateProRataRecovery({
-                panTdsTotalPaise: tdsDeductThisPaise,
-                tenants: g.entries.map((e) => ({ clientId: e.id, basePaise: e.amountPaise })),
-              })
-            : [];
-        const shareByEntry = new Map<string, bigint>(
-          split.map((s): [string, bigint] => [s.clientId, s.tenantSharePaise]),
-        );
+        const psCredits = creditsByPS.get(ps) ?? [];
+        let tdsDueCumulativePaise: bigint;
+        let carryForwardPaise: bigint;
+        let shareByEntry: Map<string, bigint>;
+        if (psCredits.length === 0) {
+          // No TDS credit on this PAN — exactly the pre-round-B computation.
+          const d = computeDeduction({
+            cumulativeBasePaise: methodologyCumulativeBase, // FIX-D: DEDUCT-methodology base only
+            priorDeductedPaise: priorDeducted,
+            thisPayoutPaise: thisEventBase,
+            rate,
+            thresholdMetOnCumulative: thresholdMet, // FIX-D: combined per-PAN threshold
+          });
+          tdsDueCumulativePaise = d.tdsDueCumulativePaise;
+          carryForwardPaise = d.carryForwardPaise;
+          // Exact-summing split of the withheld amount across this event's entries.
+          const split =
+            d.tdsDeductThisPaise > 0n
+              ? allocateProRataRecovery({
+                  panTdsTotalPaise: d.tdsDeductThisPaise,
+                  tenants: g.entries.map((e) => ({ clientId: e.id, basePaise: e.amountPaise })),
+                })
+              : [];
+          shareByEntry = new Map<string, bigint>(split.map((s): [string, bigint] => [s.clientId, s.tenantSharePaise]));
+        } else {
+          // Policy round B: other tenants' credits hidden, this tenant's own credits applied FIFO (tds-credit.ts).
+          const d = deductWithCredits({
+            clientId,
+            cumulativeBasePaise: methodologyCumulativeBase,
+            priorDeductedPaise: priorDeducted,
+            thisPayoutPaise: thisEventBase,
+            rate,
+            thresholdMetOnCumulative: thresholdMet,
+            entries: g.entries.map((e) => ({ id: e.id, amountPaise: e.amountPaise })),
+            credits: psCredits,
+          });
+          tdsDueCumulativePaise = d.tdsDueCumulativePaise;
+          carryForwardPaise = d.carryForwardPaise;
+          shareByEntry = new Map(d.perEntry.map((x): [string, bigint] => [x.entryId, x.withheldPaise]));
+          plan.creditDraws.push(...d.draws);
+          for (const x of d.perEntry) {
+            if (x.creditPaise > 0n) {
+              plan.creditByEntry.set(x.entryId, {
+                duePaise: x.withheldPaise + x.creditPaise,
+                creditPaise: x.creditPaise,
+                panNumber: g.panNumber,
+              });
+            }
+          }
+        }
         for (const e of g.entries) {
           const share = shareByEntry.get(e.id) ?? 0n;
           if (share <= 0n) continue;
@@ -625,6 +707,7 @@ export class CreditsService {
           tdsSection: { in: [...new Set([...noPanGroups.values()].map((g) => g.section))] },
           status: { in: ['PAID', 'PROCESSING'] },
           period: { gte: startPeriod, lte: endPeriod },
+          tdsCredit: { is: null }, // policy round B: reversed-with-credit income is not income (no credits → no-op)
         },
         select: { outletId: true, amountPaise: true, tdsSection: true },
       });
@@ -1384,7 +1467,7 @@ export class CreditsService {
         // Interim rules (WALLET-REVERSAL-ENGINE-DESIGN.md Q14 / Q9) — refused at create AND approve:
         //  POINTS: the receiving wallet must hold the exact credit and carry no debt.
         //  PAYOUT: the amount must equal whole, not-yet-reversed payout entries of this batch.
-        // WP5 (reversal engine SHADOW/V2): PAYOUT reversals name their whole entries and RESERVE them.
+        // WP5 (reversal engine V2 — SHADOW = LEGACY for payouts since 2026-11-16): PAYOUT reversals name their whole entries and RESERVE them.
         let payoutReservation: Awaited<ReturnType<typeof selectPayoutEntriesV2>> | null = null;
         if (dto.payoutEntryIds !== undefined && dto.awardType !== 'PAYOUT') {
           throw new BadRequestException('payoutEntryIds applies to PAYOUT reversals only');
@@ -1401,7 +1484,8 @@ export class CreditsService {
           });
         } else if (dto.awardType === 'PAYOUT') {
           // Through this tx (it holds the batch row lock — never a second pool connection meanwhile).
-          if ((await this.tenantSettings.getReversalEngineModeUncached(user.clientId, tx)) !== 'LEGACY') {
+          // Owner decision 2026-11-16: SHADOW = LEGACY for PAYOUT reversals (today's screens + rules); V2 only picks.
+          if ((await this.tenantSettings.getReversalEngineModeUncached(user.clientId, tx)) === 'V2') {
             payoutReservation = await selectPayoutEntriesV2(
               tx, { clientId: user.clientId, batchId: id, outletId: dto.outletId, fieldId: dto.fieldId },
               dto.payoutEntryIds, requested,
@@ -2059,6 +2143,8 @@ export class CreditsService {
     }>;
     /** WP5: entries left out of this file because a pending reversal holds them (empty on LEGACY tenants). */
     reversalHeld: ReversalHeldEntry[];
+    /** Policy round B: entries whose TDS was (partly) covered by an earlier TDS credit (empty without credits). */
+    tdsCreditApplied: TdsCreditAppliedLine[];
   }> {
     const { period, groupType, fieldId, fieldName } = dto;
 
@@ -2327,7 +2413,7 @@ export class CreditsService {
     // FIX-8: the PAN cumulative aggregation + plan + ALL money writes run INSIDE this
     // $transaction, behind the per-PAN advisory locks acquired FIRST — so two concurrent
     // downloads for the same PAN serialize and cannot both under-deduct / mis-attribute recovery.
-    const { rec: download, deductionByOutlet } = await this.prisma.$transaction(
+    const { rec: download, deductionByOutlet, creditByEntry } = await this.prisma.$transaction(
       async (tx) => {
         for (const k of sortedLockKeys) {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${k}, 0))`;
@@ -2430,6 +2516,31 @@ export class CreditsService {
             data: { tdsDeductedPaise: d.tdsDeductedPaise },
           });
         }
+        // Policy round B: TDS credits used by this file (guarded — a credit is never used beyond its amount) + an
+        // audit row naming every adjusted entry. None for a tenant without credits.
+        if (tdsPlan.creditDraws.length > 0) {
+          await writeCreditApplications(tx, tdsPlan.creditDraws, { clientId: user.clientId, downloadId: rec.id });
+          await tx.auditLog.create({
+            data: {
+              action: 'EXPORT',
+              entityType: 'TDS_CREDIT_APPLIED',
+              entityId: rec.id,
+              actorId: user.sub,
+              metadata: JSON.parse(
+                JSON.stringify(
+                  {
+                    clientId: user.clientId,
+                    downloadCode,
+                    period,
+                    draws: tdsPlan.creditDraws,
+                    entries: [...tdsPlan.creditByEntry.entries()].map(([entryId, c]) => ({ entryId, ...c })),
+                  },
+                  (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
+                ),
+              ) as Prisma.InputJsonValue,
+            },
+          });
+        }
 
         // FIX-1: GROSS-UP monthly TOP-UP TDS invoices (one per crossing period) for the DELTA
         // + the DELTA pro-rata recovery ledger ("in lieu of TDS" — dashboard-only).
@@ -2513,10 +2624,25 @@ export class CreditsService {
             },
           });
         }
-        return { rec, deductionByOutlet: tdsPlan.deductionByOutlet };
+        return { rec, deductionByOutlet: tdsPlan.deductionByOutlet, creditByEntry: tdsPlan.creditByEntry };
       },
       { timeout: 180_000, maxWait: 20_000 },
     );
+    // Policy round B — never silent: every entry whose TDS a credit reduced ("₹200 adjusted from earlier TDS credit").
+    const entryById = new Map(entries.map((e) => [e.id, e]));
+    const tdsCreditApplied: TdsCreditAppliedLine[] = [...(creditByEntry ?? new Map()).entries()].map(([entryId, c]) => {
+      const e = entryById.get(entryId);
+      return {
+        entryId,
+        outletId: e?.outletId ?? '',
+        outletName: e?.outletName ?? '',
+        duePaise: Number(c.duePaise),
+        creditPaise: Number(c.creditPaise),
+        withheldPaise: Number(c.duePaise - c.creditPaise),
+        panMasked: maskPan(c.panNumber),
+        note: `TDS due ${formatINR(c.duePaise)}: ${formatINR(c.creditPaise)} adjusted from earlier TDS credit, ${formatINR(c.duePaise - c.creditPaise)} withheld from this payout`,
+      };
+    });
 
     // Build the bank file AFTER the tx using the committed net (post-DEDUCT) amounts.
     const netPaiseFor = (code: string): number =>
@@ -2567,7 +2693,14 @@ export class CreditsService {
 
     const buffer = generatePayoutFileBuffer(payoutBatch);
 
-    return { buffer, downloadCode: download.downloadCode, downloadId: download.id, heldEntries, reversalHeld };
+    return {
+      buffer,
+      downloadCode: download.downloadCode,
+      downloadId: download.id,
+      heldEntries,
+      reversalHeld,
+      tdsCreditApplied,
+    };
   }
 
   /**
@@ -2810,6 +2943,9 @@ export class CreditsService {
       tdsSection: TdsSection;
       period: string;
     }> = [];
+    // Policy round B: every entry this apply flips to FAILED (TDS credit applications on them are released).
+    const failedEntryIdsAll: string[] = [];
+    const tdsCreditReleased: ReleasedApplication[] = [];
 
     // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
     await this.prisma.$transaction(async (tx) => {
@@ -2924,6 +3060,7 @@ export class CreditsService {
           });
         } else {
           flippedFailedCount++;
+          failedEntryIdsAll.push(...pending.map((e) => e.id));
           // FIX-3/FIX-C: reverse EACH flipped FAILED entry's DEDUCT withholding, from its in-tx
           // tdsDeductedPaise (never a stale snapshot) — exactly once per entry.
           for (const entry of pending) {
@@ -2983,6 +3120,12 @@ export class CreditsService {
         if (reversalRows.length > 0) {
           await tx.tdsDeductionEntry.createMany({ data: reversalRows });
         }
+      }
+
+      // Policy round B: a FAILED payout never paid → the TDS credit it used goes back to the credit (re-applied on
+      // re-bank). No credits on the tenant → one indexed read, no writes.
+      if (failedEntryIdsAll.length > 0) {
+        tdsCreditReleased.push(...(await releaseCreditApplications(tx, failedEntryIdsAll, 'PAYOUT_FAILED')));
       }
 
       // Download status from the entries' LIVE statuses, re-read in this tx AFTER the flips (never
@@ -3095,6 +3238,16 @@ export class CreditsService {
       skippedCount: parseResult.summary.skipped,
       notApplied,
       notices,
+      // Policy round B: TDS credit given back because the payout it covered FAILED (only present when any).
+      ...(tdsCreditReleased.length > 0
+        ? {
+            tdsCreditReleased: tdsCreditReleased.map((r) => ({
+              entryId: r.payoutEntryId,
+              amountPaise: Number(r.amountPaise),
+              note: `${formatINR(r.amountPaise)} TDS credit returned to the PAN's credit balance — this payout failed; it is adjusted again when the payout is re-banked`,
+            })),
+          }
+        : {}),
       ...(noop
         ? {
             message:
@@ -3176,12 +3329,15 @@ export class CreditsService {
   /**
    * WP5 P1: the payout entries of (batch, outlet, field) a PAYOUT reversal may select, with why the others can't
    * be. `mode` tells the screen which form to show: LEGACY → the amount form (entries not listed — the interim
-   * rule matches them itself); SHADOW/V2 → the entry picker.
+   * rule matches them itself) — also for SHADOW (owner 2026-11-16); V2 → the entry picker.
    */
   async listPayoutReversalEntries(user: JwtPayload, batchId: string, q: { outletId: string; fieldId: string }) {
     const batch = await this.prisma.creditBatch.findFirst({ where: { id: batchId, clientId: user.clientId } });
     if (!batch) throw new NotFoundException('Batch not found');
-    const mode = await this.tenantSettings.getReversalEngineModeUncached(user.clientId);
+    const engineMode = await this.tenantSettings.getReversalEngineModeUncached(user.clientId);
+    // Owner decision 2026-11-16 (policy round B): SHADOW behaves exactly like LEGACY for PAYOUT reversals — only V2
+    // picks entries. `mode` is the effective PAYOUT mode the screen acts on; `engineMode` the tenant flag.
+    const mode = engineMode === 'V2' ? 'V2' : 'LEGACY';
     const candidates =
       mode === 'LEGACY'
         ? []
@@ -3190,6 +3346,7 @@ export class CreditsService {
           });
     return {
       mode,
+      engineMode,
       entries: candidates.map((c) => ({
         id: c.id,
         amountPaise: Number(c.amountPaise),
@@ -3261,6 +3418,15 @@ export class CreditsService {
       // V2: position-based approve cap (batch row lock, Σ(amount − reversedPoints), Q5 refusal) — replaces the
       // legacy stored-rows cap and the interim current-partner / debt gate below.
       if (pointsEngine === 'V2') {
+        // Lock THIS reversal row first and re-check it is still pending, so a concurrent second approval of the
+        // same reversal gets the honest "already processed" — not a misleading cap message computed after the
+        // winner's reversed amount landed (real-Postgres WP7 T-e3, 2026-11-16).
+        const [cur] = await tx.$queryRaw<Array<{ status: string }>>(
+          Prisma.sql`SELECT status FROM credit_reversals WHERE id = ${id} FOR UPDATE`,
+        );
+        if (!cur || cur.status !== 'PENDING_GIFSY') {
+          throw new BadRequestException('Reversal already processed');
+        }
         await this.assertV2PointsApproval(tx, pointsKey, finalApprovedPaise ?? 0n);
       }
       // ── Over-reversal guard (approve) ─────────────────────────────────────
@@ -3397,6 +3563,12 @@ export class CreditsService {
       //     The entry stays PAID but is recorded in consumedPayoutEntryIds, so no later reversal
       //     can claim it again.
       let payoutClawbackNote: string | null = null;
+      // Owner decision 3 (2026-11-16): the outcome summary on EVERY tenant — display only, built from what this
+      // path did below; it never changes what is written.
+      const legacyOutcome: PayoutOutcome | null =
+        reversal.awardType === 'PAYOUT'
+          ? { cancelled: [], receivable: [], receivablePaise: 0, tdsCreditPaise: 0, released: [], lines: [] }
+          : null;
       if (payoutEntries.length > 0) {
         let reversedCount = 0;
         let paidReceivablePaise = 0;
@@ -3412,12 +3584,35 @@ export class CreditsService {
           for (let attempt = 0; attempt < 3 && !settled; attempt++) {
             if (cur.status === 'REVERSED') {
               entryNotes.push(`entry ${payoutEntry.id} already REVERSED`);
+              legacyOutcome?.lines.push({
+                kind: 'ALREADY_REVERSED',
+                entryId: payoutEntry.id,
+                text: `Entry already reversed · ${formatINR(cur.amountPaise)} · nothing more to do`,
+              });
               settled = true;
               break;
             }
             if (cur.status === 'PAID') {
               paidReceivablePaise += Number(cur.amountPaise);
               entryNotes.push(`entry ${payoutEntry.id} (PAID ${formatINR(cur.amountPaise)}) → recoverable receivable`);
+              const withheld = cur.tdsDeductedPaise;
+              const tdsNote =
+                withheld > 0n
+                  ? `TDS ${formatINR(withheld)} withheld on this paid entry is not adjusted (this program uses the standard reversal rules) — correct it off-platform`
+                  : 'no TDS withheld';
+              legacyOutcome?.receivable.push({
+                entryId: payoutEntry.id,
+                amountPaise: Number(cur.amountPaise),
+                receivablePaise: Number(cur.amountPaise),
+                tdsCreditPaise: 0,
+                panMasked: null,
+                tdsNote,
+              });
+              legacyOutcome?.lines.push({
+                kind: 'RECEIVABLE',
+                entryId: payoutEntry.id,
+                text: `Recorded as owed · ${formatINR(cur.amountPaise)} · already paid — recover it off-platform · ${tdsNote}`,
+              });
               settled = true;
               break;
             }
@@ -3448,6 +3643,25 @@ export class CreditsService {
                 `entry ${payoutEntry.id} (was ${cur.status}) → REVERSED` +
                   (offset > 0n ? ` (withheld TDS ${formatINR(offset)} offset)` : ''),
               );
+              // Policy round B: TDS credit this unpaid entry had used goes back (none on a tenant without credits).
+              const back = await releaseCreditApplications(tx, [payoutEntry.id], 'ENTRY_CANCELLED_BY_REVERSAL');
+              const backPaise = back.reduce((s, r) => s + r.amountPaise, 0n);
+              legacyOutcome?.cancelled.push({
+                entryId: payoutEntry.id,
+                amountPaise: Number(cur.amountPaise),
+                wasStatus: cur.status,
+                tdsOffsetPaise: Number(offset),
+                tdsNote: offset > 0n ? `withheld TDS ${formatINR(offset)} offset in the TDS ledger` : 'no TDS withheld',
+              });
+              legacyOutcome?.lines.push({
+                kind: 'CANCELLED',
+                entryId: payoutEntry.id,
+                text:
+                  `Entry cancelled · ${formatINR(cur.amountPaise)} · will not be paid` +
+                  (cur.status === 'FAILED' ? ' (the bank payment had failed)' : '') +
+                  (offset > 0n ? ` · withheld TDS ${formatINR(offset)} reversed in the TDS ledger` : '') +
+                  (backPaise > 0n ? ` · ${formatINR(backPaise)} TDS credit it had used returned to the credit balance` : ''),
+              });
               settled = true;
               break;
             }
@@ -3494,7 +3708,20 @@ export class CreditsService {
       }
 
       const finalReversal = await tx.creditReversal.findFirst({ where: { id } });
-      return { ...finalReversal, clawbackShortfall, payoutClawbackNote };
+      if (!legacyOutcome) return { ...finalReversal, clawbackShortfall, payoutClawbackNote };
+      // Owner decision 3: outcome summary (display only — everything above wrote exactly what it always wrote).
+      if (action === ReversalAction.reject) {
+        legacyOutcome.headline = 'Rejected · no payout entry was held or changed';
+        legacyOutcome.lines.push({
+          kind: 'NOTHING',
+          entryId: null,
+          text: 'Rejected · nothing was reversed — the payout entries stay as they were (unpaid ones go into the next bank file as usual)',
+        });
+      } else {
+        legacyOutcome.receivablePaise = legacyOutcome.receivable.reduce((n, r) => n + r.receivablePaise, 0);
+        legacyOutcome.headline = approvedHeadline(legacyOutcome);
+      }
+      return { ...finalReversal, clawbackShortfall, payoutClawbackNote, payoutOutcome: legacyOutcome };
     }).catch(async (e: unknown) => {
       if (e instanceof ReversalAttentionException) {
         await this.auditReversalRefusal(user, 'APPROVE', id, e, {

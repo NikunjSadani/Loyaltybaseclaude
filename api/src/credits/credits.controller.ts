@@ -249,10 +249,16 @@ export class CreditsController {
     @Body() dto: CreatePayoutDownloadDto,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { buffer, downloadCode, downloadId, reversalHeld } = await this.credits.createPayoutDownload(
+    const { buffer, downloadCode, downloadId, reversalHeld, tdsCreditApplied } = await this.credits.createPayoutDownload(
       user,
       dto,
     );
+    // Policy round B: entries whose TDS an earlier TDS credit covered → the screen says so (never silent). Only sent
+    // when there are any (a tenant without TDS credits — every LEGACY tenant — gets the response unchanged).
+    if (tdsCreditApplied && tdsCreditApplied.length > 0) {
+      res.setHeader('X-Tds-Credit-Applied-Count', String(tdsCreditApplied.length));
+      res.setHeader('X-Tds-Credit-Applied-Paise', String(tdsCreditApplied.reduce((n, a) => n + a.creditPaise, 0)));
+    }
     res.setHeader('X-Download-Code', downloadCode);
     res.setHeader('X-Download-Id', downloadId);
     // WP5: entries left out because a pending reversal holds them → the screen tells the admin (never silent).

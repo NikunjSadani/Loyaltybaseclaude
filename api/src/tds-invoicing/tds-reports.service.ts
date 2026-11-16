@@ -22,6 +22,13 @@ import { buildXlsx } from '../common/xlsx';
  * it here. An undefined clientId means platform-wide (GIFSY only).
  */
 
+/** IST FY label ("2026-27") of a "YYYY-MM" period. */
+function fyOfPeriod(period: string): string {
+  const [y, m] = period.split('-').map((s) => parseInt(s, 10));
+  const start = m >= 4 ? y : y - 1;
+  return `${start}-${String((start + 1) % 100).padStart(2, '0')}`;
+}
+
 export interface ReportScope {
   /** undefined = platform-wide (GIFSY); a value = single-tenant scope. */
   clientId?: string;
@@ -133,6 +140,93 @@ export class TdsReportsService {
       totals: {
         amount: this.money(totalAmountPaise),
         tdsDeducted: this.money(totalTdsDeductedPaise),
+      },
+      rows,
+      // Policy round B: TDS credits from reversed PAID payouts — created / applied / outstanding (never silent).
+      tdsCredits: await this.tdsCreditSection(this.prisma, scope),
+    };
+  }
+
+  /**
+   * TDS credits (WALLET-REVERSAL-ENGINE-DESIGN.md §8.1) in scope: tenant (if any) + the FY of `period` (if any).
+   * One row per credit (source = the reversed PAID payout) and one per use against a later payout's TDS (released
+   * uses — that payout failed / was cancelled — are listed too, marked released). Shared with the 'tds-payouts'
+   * export kind (its "TDS Credits" sheet). Money in BigInt paise.
+   */
+  async tdsCreditSection(db: { tdsCredit: PrismaService['tdsCredit'] }, scope: ReportScope) {
+    const where: Prisma.TdsCreditWhereInput = {};
+    if (scope.clientId) where.clientId = scope.clientId;
+    if (scope.period) where.fyLabel = fyOfPeriod(scope.period);
+    const credits = (await db.tdsCredit.findMany({
+      where,
+      orderBy: [{ fyLabel: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        clientId: true,
+        panNumber: true,
+        section: true,
+        fyLabel: true,
+        amountPaise: true,
+        appliedPaise: true,
+        createdAt: true,
+        creditReversalId: true,
+        sourcePayoutEntry: { select: { id: true, outletId: true, outletName: true, period: true, amountPaise: true } },
+        applications: {
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          select: {
+            id: true,
+            amountPaise: true,
+            createdAt: true,
+            releasedAt: true,
+            releaseReason: true,
+            downloadId: true,
+            payoutEntry: { select: { id: true, outletId: true, outletName: true, period: true } },
+          },
+        },
+      },
+    })) ?? [];
+    let created = 0n;
+    let applied = 0n;
+    const rows = credits.map((c) => {
+      created += c.amountPaise;
+      applied += c.appliedPaise;
+      return {
+        creditId: c.id,
+        clientId: c.clientId,
+        panNumber: c.panNumber,
+        section: c.section,
+        fyLabel: c.fyLabel,
+        createdAt: c.createdAt.toISOString(),
+        creditReversalId: c.creditReversalId,
+        sourceEntryId: c.sourcePayoutEntry?.id ?? null,
+        sourceOutletCode: c.sourcePayoutEntry?.outletId ?? null,
+        sourceOutletName: c.sourcePayoutEntry?.outletName ?? null,
+        sourcePeriod: c.sourcePayoutEntry?.period ?? null,
+        sourceAmount: this.money(c.sourcePayoutEntry?.amountPaise ?? 0n),
+        credit: this.money(c.amountPaise),
+        applied: this.money(c.appliedPaise),
+        outstanding: this.money(c.amountPaise - c.appliedPaise),
+        applications: c.applications.map((a) => ({
+          applicationId: a.id,
+          appliedAt: a.createdAt.toISOString(),
+          amount: this.money(a.amountPaise),
+          entryId: a.payoutEntry?.id ?? null,
+          outletCode: a.payoutEntry?.outletId ?? null,
+          outletName: a.payoutEntry?.outletName ?? null,
+          period: a.payoutEntry?.period ?? null,
+          downloadId: a.downloadId,
+          released: a.releasedAt !== null,
+          releasedAt: a.releasedAt ? a.releasedAt.toISOString() : null,
+          releaseReason: a.releaseReason,
+        })),
+      };
+    });
+    return {
+      count: rows.length,
+      totals: {
+        created: this.money(created),
+        applied: this.money(applied),
+        outstanding: this.money(created - applied),
       },
       rows,
     };

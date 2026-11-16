@@ -252,9 +252,16 @@ function world(opts: WorldOpts = {}) {
       };
     }
   }
-  models.$queryRaw = async (strings: TemplateStringsArray) => {
+  models.$queryRaw = async (strings: TemplateStringsArray | { strings: string[]; values: unknown[] }) => {
     bump('$queryRaw');
-    T.rawSql.push(Array.isArray(strings) ? strings.join('?') : String(strings));
+    const sqlObj = !Array.isArray(strings) && strings && typeof strings === 'object' && 'strings' in strings ? strings : null;
+    const text = sqlObj ? sqlObj.strings.join('?') : Array.isArray(strings) ? strings.join('?') : String(strings);
+    T.rawSql.push(text);
+    // The V2 approve path row-locks the reversal and re-checks its status (Prisma.sql object).
+    if (sqlObj && /FROM credit_reversals WHERE id = \?/.test(text)) {
+      const row = T.reversals.find((r) => r.id === sqlObj.values[0]);
+      return row ? [{ status: row.status }] : [];
+    }
     return [];
   };
   models.$transaction = async (cb: any) => {

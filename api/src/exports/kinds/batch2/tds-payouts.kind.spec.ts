@@ -42,7 +42,8 @@ async function oldDownload(prisma: unknown, scope: ReportScope): Promise<Buffer>
 }
 
 function db(entries: Row[], outlets: Row[]) {
-  return { creditPayoutEntry: fakeModel(entries), outlet: fakeModel(outlets) };
+  // Policy round B: no TDS credits → no "TDS Credits" sheet (parity with the old builder).
+  return { creditPayoutEntry: fakeModel(entries), outlet: fakeModel(outlets), tdsCredit: fakeModel([]) };
 }
 
 function entry(i: number, over: Row = {}): Row {
@@ -131,6 +132,33 @@ describe('tds-payouts export kind', () => {
     expect(() => TDS_PAYOUTS_KIND.parseParams({ period: 'June' }, CLIENT)).toThrow(BadRequestException);
     expect(() => TDS_PAYOUTS_KIND.parseParams({ foo: 1 }, CLIENT)).toThrow(BadRequestException);
     expect(TDS_PAYOUTS_KIND.fileName({ clientId: 'bajaj', period: '2026-06' }, new Date())).toBe('payout-report-bajaj.xlsx');
+  });
+
+  it('policy round B: TDS credits in scope → an extra "TDS Credits" sheet; Payouts + Summary stay identical to the old builder', async () => {
+    const entries = Array.from({ length: 10 }, (_, i) => entry(i));
+    const credits = [
+      {
+        id: 'c1', clientId: 'bajaj', panNumber: 'ABCDE1234F', section: 'SEC_194C', fyLabel: '2026-27',
+        amountPaise: 40000n, appliedPaise: 31000n, createdAt: new Date('2026-11-10T00:00:00Z'), creditReversalId: 'r1',
+        sourcePayoutEntry: { id: 'va', outletId: 'O1', outletName: 'Shop 1', period: '2026-06', amountPaise: 4000000n },
+        applications: [
+          { id: 'a1', amountPaise: 31000n, createdAt: new Date('2026-11-12T00:00:00Z'), releasedAt: null, releaseReason: null, downloadId: 'd1', payoutEntry: { id: 'vb', outletId: 'O1', outletName: 'Shop 1', period: '2026-07' } },
+        ],
+      },
+      { id: 'c2', clientId: 'other', fyLabel: '2026-27', amountPaise: 1n, appliedPaise: 0n, createdAt: new Date(), applications: [] },
+    ];
+    const prisma = { ...db(entries, outlets()), tdsCredit: fakeModel(credits) };
+    const params = TDS_PAYOUTS_KIND.parseParams({ period: '2026-06' }, CLIENT);
+    const book = readBook((await renderKind(TDS_PAYOUTS_KIND, ctxFor(CLIENT, prisma), params)).buffer);
+    const old = readBook(await oldDownload(prisma, { clientId: 'bajaj', period: '2026-06' }));
+    expect(book.names).toEqual(['Payouts', 'Summary', 'TDS Credits']);
+    expect(book.sheets.Payouts.aoa).toEqual(old.sheets.Payouts.aoa);
+    expect(book.sheets.Summary.aoa).toEqual(old.sheets.Summary.aoa);
+    const c = book.sheets['TDS Credits'].aoa;
+    expect(c[0].slice(0, 3)).toEqual(['Line', 'Client', 'PAN']);
+    expect(c.map((r) => r[0])).toEqual(['Line', 'Credit created', 'Applied', 'TOTAL created', 'TOTAL applied', 'TOTAL outstanding']);
+    expect(c.flat()).not.toContain('other'); // tenant scope
+    expect(c[c.length - 1]).toContain(90); // ₹90 outstanding
   });
 
   it('a stale params.clientId never widens a tenant user: the scope is re-derived from the requester at run time', async () => {

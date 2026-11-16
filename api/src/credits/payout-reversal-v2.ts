@@ -1,7 +1,8 @@
 /**
  * PAYOUT (₹) reversals under the Wallet Reversal Engine — WP5 (WALLET-REVERSAL-ENGINE-DESIGN.md §8, Q9–Q11).
  *
- * Active for a tenant whose `reversalEngine` flag is SHADOW or V2 (LEGACY — the default, Deoleo — never reaches
+ * Active for a tenant whose `reversalEngine` flag is V2 (owner 2026-11-16: SHADOW behaves exactly like LEGACY for
+ * PAYOUT reversals; LEGACY — the default, Deoleo — never reaches
  * this module at create time; see CreditsService.createReversal). The rules:
  *  P1 entry-targeted: the request names the WHOLE payout entries it reverses (operator picks them; the UI
  *     preselects every open entry of the (batch, outlet, field)); requested = Σ selected (Q9).
@@ -24,6 +25,7 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { CreditEntryStatus, PayoutAllocationState, Prisma, TdsSection } from '@prisma/client';
 import { formatINR } from '../common/money';
+import { receivablePanLockKey, recordReceivableTds, releaseCreditApplications } from './tds-credit';
 
 /** Allocation states that hold an entry (the partial unique index's predicate). RELEASED does not. */
 export const LIVE_PAYOUT_ALLOCATION_STATES: PayoutAllocationState[] = [
@@ -289,6 +291,44 @@ export interface PatchPayoutV2Deps {
   }) => Promise<bigint>;
 }
 
+/**
+ * The approve/reject OUTCOME SUMMARY of a PAYOUT reversal (owner decision 3, 2026-11-16 — every tenant, display
+ * only). `headline` + `lines` are the plain-words call-outs the payout screen shows; the arrays keep the WP5 detail.
+ */
+export interface PayoutOutcome {
+  headline?: string;
+  lines: Array<{ kind: 'CANCELLED' | 'RECEIVABLE' | 'RELEASED' | 'ALREADY_REVERSED' | 'NOTHING'; entryId: string | null; text: string }>;
+  cancelled: Array<{ entryId: string; amountPaise: number; wasStatus: string; tdsOffsetPaise: number; tdsNote: string }>;
+  receivable: Array<{
+    entryId: string;
+    /** The entry's gross amount (integer paise). */
+    amountPaise: number;
+    /** The receivable recorded = net cash received (V2) / the full amount (LEGACY, unchanged rule). */
+    receivablePaise: number;
+    tdsCreditPaise: number;
+    panMasked: string | null;
+    tdsNote: string;
+  }>;
+  /** Σ receivable recorded (integer paise) = CreditReversal.shortfallPaise. */
+  receivablePaise: number;
+  /** Σ TDS credit created (V2 only; 0 on LEGACY). */
+  tdsCreditPaise: number;
+  released: Array<{ entryId: string; amountPaise: number }>;
+}
+
+/** "Approved · 1 entry cancelled (₹5,000) · ₹9,800 recorded as owed · ₹200 TDS credit carried forward". */
+export function approvedHeadline(o: PayoutOutcome): string {
+  const parts = ['Approved'];
+  if (o.cancelled.length > 0) {
+    const t = o.cancelled.reduce((n, c) => n + c.amountPaise, 0);
+    parts.push(`${o.cancelled.length} entr${o.cancelled.length === 1 ? 'y' : 'ies'} cancelled (${formatINR(BigInt(t))}) — will not be paid`);
+  }
+  if (o.receivable.length > 0) parts.push(`${formatINR(BigInt(o.receivablePaise))} recorded as owed`);
+  if (o.tdsCreditPaise > 0) parts.push(`${formatINR(BigInt(o.tdsCreditPaise))} TDS credit carried forward`);
+  if (o.cancelled.length === 0 && o.receivable.length === 0) parts.push('no payout entry changed');
+  return parts.join(' · ');
+}
+
 export const SENT_TO_BANK_MESSAGE =
   'Payment already sent to the bank for this outlet and field (payout file downloaded, not yet reconciled) — record the UTR or the failure first, then approve the reversal';
 
@@ -336,11 +376,25 @@ export async function patchPayoutReversalV2(
       metadata: { step: 'RELEASED', clientId: reversal.clientId, batchId: reversal.batchId, outletId: reversal.outletId, fieldId: reversal.fieldId, entries: released },
     });
     const finalReversal = await tx.creditReversal.findFirst({ where: { id: reversal.id } });
+    const releasedTotal = released.reduce((n, r) => n + r.amountPaise, 0);
+    const outcome: PayoutOutcome = {
+      cancelled: [],
+      receivable: [],
+      receivablePaise: 0,
+      tdsCreditPaise: 0,
+      released,
+      headline: `Rejected · ${released.length} entr${released.length === 1 ? 'y' : 'ies'} released · ${formatINR(BigInt(releasedTotal))}`,
+      lines: released.map((r) => ({
+        kind: 'RELEASED' as const,
+        entryId: r.entryId,
+        text: `Entry released · ${formatINR(BigInt(r.amountPaise))} · goes into the next bank file again`,
+      })),
+    };
     return {
       ...finalReversal,
       clawbackShortfall: 0,
       payoutClawbackNote: `Rejected: ${released.length} payout entr${released.length === 1 ? 'y' : 'ies'} released — eligible for the next bank file again.`,
-      payoutOutcome: { cancelled: [], receivable: [], receivablePaise: 0, released },
+      payoutOutcome: outcome,
     };
   }
 
@@ -394,31 +448,85 @@ export async function patchPayoutReversalV2(
   });
   if (claimed.count === 0) throw new BadRequestException('Reversal already processed');
 
+  // Policy round B: a PAID entry's TDS credit needs the PAN advisory lock the bank download uses — take every one
+  // this approval needs up front, sorted (deadlock-free against downloads and other approvals).
+  const panKeys = new Set<string>();
+  for (const a of allocations) {
+    const e = entryById.get(a.payoutEntryId)!;
+    if (e.status !== 'PAID') continue;
+    const k = await receivablePanLockKey(tx, { id: e.id, period: e.period, tdsDeductedPaise: e.tdsDeductedPaise ?? 0n });
+    if (k) panKeys.add(k);
+  }
+  for (const k of [...panKeys].sort()) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${k}, 0))`;
+  }
+
   let receivable = 0n;
   let cancelled = 0;
   const notes: string[] = [];
-  const outcome = {
-    cancelled: [] as Array<{ entryId: string; amountPaise: number; wasStatus: string; tdsOffsetPaise: number; tdsNote: string }>,
-    receivable: [] as Array<{ entryId: string; amountPaise: number; tdsNote: string }>,
+  const outcome: PayoutOutcome = {
+    cancelled: [],
+    receivable: [],
     receivablePaise: 0,
-    released: [] as Array<{ entryId: string; amountPaise: number }>,
+    tdsCreditPaise: 0,
+    released: [],
+    lines: [],
   };
   for (const a of allocations) {
     const e = entryById.get(a.payoutEntryId)!;
     let state: PayoutAllocationState;
     let tdsOffset = 0n;
+    let receivablePaise = 0n;
+    let tdsCreditPaise = 0n;
     if (e.status === 'PAID') {
-      // Q11: cash left — record the receivable only; the entry stays PAID and is unreachable to later reversals.
-      receivable += e.amountPaise;
+      // Q11 + owner decision 2 (2026-11-16): cash left — the receivable is the NET cash the retailer received; the
+      // withheld TDS stays deposited and becomes a TDS credit on the PAN. The entry stays PAID, unreachable to later
+      // reversals.
+      const t = await recordReceivableTds(
+        tx,
+        {
+          id: e.id,
+          clientId: reversal.clientId,
+          amountPaise: e.amountPaise,
+          period: e.period,
+          tdsSection: e.tdsSection ?? null,
+          tdsMethodology: e.tdsMethodology ?? null,
+          tdsDeductedPaise: e.tdsDeductedPaise ?? 0n,
+        },
+        { creditReversalId: reversal.id, actorId: p.actorId },
+      );
+      receivablePaise = t.receivablePaise;
+      tdsCreditPaise = t.tdsCreditPaise;
+      receivable += t.receivablePaise;
       state = 'APPLIED_RECEIVABLE';
-      notes.push(`entry ${e.id} (PAID ${formatINR(e.amountPaise)}) → recoverable receivable`);
+      notes.push(
+        `entry ${e.id} (PAID ${formatINR(e.amountPaise)}) → receivable ${formatINR(t.receivablePaise)}` +
+          (t.tdsCreditPaise > 0n ? ` + TDS credit ${formatINR(t.tdsCreditPaise)} on PAN ${t.panMasked}` : ''),
+      );
+      outcome.tdsCreditPaise += Number(t.tdsCreditPaise);
       outcome.receivable.push({
         entryId: e.id,
         amountPaise: Number(e.amountPaise),
-        tdsNote:
-          (e.tdsDeductedPaise ?? 0n) > 0n
-            ? `TDS ${formatINR(e.tdsDeductedPaise)} withheld on this paid entry is NOT reversed — correct it off-platform (Q11)`
-            : 'no TDS withheld',
+        receivablePaise: Number(t.receivablePaise),
+        tdsCreditPaise: Number(t.tdsCreditPaise),
+        panMasked: t.panMasked,
+        tdsNote: t.note,
+      });
+      outcome.lines.push({
+        kind: 'RECEIVABLE',
+        entryId: e.id,
+        text:
+          `Recorded as owed · ${formatINR(t.receivablePaise)}` +
+          (t.tdsCreditPaise > 0n
+            ? ` · ${formatINR(t.tdsCreditPaise)} TDS credit carried forward on PAN ${t.panMasked}`
+            : e.tdsMethodology === 'GROSS_UP'
+              ? ' · no TDS was withheld from the retailer (the program paid it on top) — no TDS credit'
+              : t.untrackedWithheldPaise > 0n
+                ? ` · net of ${formatINR(t.untrackedWithheldPaise)} TDS withheld — no TDS credit`
+                : ' · no TDS withheld — no TDS credit') +
+          (t.untrackedWithheldPaise > 0n
+            ? ` · ${formatINR(t.untrackedWithheldPaise)} TDS not in Gifsy's TDS ledger — correct it off-platform`
+            : ''),
       });
     } else {
       // PENDING / FAILED: cash never left → cancel. Rows are locked, so the guarded flip must hit exactly one row.
@@ -441,8 +549,20 @@ export async function patchPayoutReversalV2(
           tdsDeductedPaise: withheld,
         });
       }
+      // Policy round B: TDS credit this unpaid entry had used goes back to the credit (never silent).
+      const back = await releaseCreditApplications(tx, [e.id], 'ENTRY_CANCELLED_BY_REVERSAL');
+      const backPaise = back.reduce((s, r) => s + r.amountPaise, 0n);
       state = 'APPLIED_CANCELLED';
       cancelled++;
+      outcome.lines.push({
+        kind: 'CANCELLED',
+        entryId: e.id,
+        text:
+          `Entry cancelled · ${formatINR(e.amountPaise)} · will not be paid` +
+          (e.status === 'FAILED' ? ' (the bank payment had failed)' : '') +
+          (tdsOffset > 0n ? ` · withheld TDS ${formatINR(tdsOffset)} reversed in the TDS ledger` : '') +
+          (backPaise > 0n ? ` · ${formatINR(backPaise)} TDS credit it had used returned to the credit balance` : ''),
+      });
       outcome.cancelled.push({
         entryId: e.id,
         amountPaise: Number(e.amountPaise),
@@ -462,7 +582,7 @@ export async function patchPayoutReversalV2(
     }
     const upd = await tx.payoutReversalAllocation.updateMany({
       where: { id: a.id, state: 'RESERVED' },
-      data: { state, tdsOffsetPaise: tdsOffset },
+      data: { state, tdsOffsetPaise: tdsOffset, receivablePaise, tdsCreditPaise },
     });
     if (upd.count !== 1) throw new ConflictException('A payout reservation changed during approval — please retry');
   }
@@ -476,6 +596,7 @@ export async function patchPayoutReversalV2(
     ...notes,
   ].join(' | ');
   outcome.receivablePaise = Number(receivable);
+  outcome.headline = approvedHeadline(outcome);
   await auditPayoutReversal(tx, {
     action: 'APPROVE',
     creditReversalId: reversal.id,
@@ -603,6 +724,8 @@ export interface PlannedPayoutAllocation {
   amountPaise: bigint;
   state: 'APPLIED_CANCELLED' | 'APPLIED_RECEIVABLE';
   tdsOffsetPaise: bigint;
+  receivablePaise: bigint;
+  tdsCreditPaise: bigint;
 }
 
 export type PayoutBackfillFlagCode =
@@ -666,6 +789,9 @@ export function planPayoutAllocationBackfill(input: {
       amountPaise: e.amountPaise,
       state: e.status === 'PAID' ? 'APPLIED_RECEIVABLE' : 'APPLIED_CANCELLED',
       tdsOffsetPaise: e.status === 'PAID' ? 0n : offsetOf(e.id),
+      // Approved under the legacy/interim rule: the receivable was the full amount, no TDS credit (round B is V2-only).
+      receivablePaise: e.status === 'PAID' ? e.amountPaise : 0n,
+      tdsCreditPaise: 0n,
     }));
   const commit = (r: BackfillPayoutReversal, es: BackfillPayoutEntry[]) => {
     const receivable = es.filter((e) => e.status === 'PAID').reduce((s, e) => s + e.amountPaise, 0n);
