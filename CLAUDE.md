@@ -6,7 +6,8 @@ backend `/v1/*`). Work on branch **`develop`** (auto-deploys to staging).
 
 **Full project state, the THINGS-TO-BE-DONE list, open items, and the traps live in
 `platform/docs/plans/RESUME.md`** (the post-compact restart prompt) and `platform/docs/plans/GO-LIVE-ISSUE-LIST.md`
-(the master tracker). **Read RESUME.md first** — this file is only the always-on working agreements.
+(the master tracker). **Read RESUME.md first** — this file is only the always-on working agreements. Every doc is listed
+in `platform/docs/DOCS-INDEX.md` (with the release log); update docs in the same PR as the code and RESUME.md at every release.
 
 ## Standing working agreements (always apply — reinforced by the owner; do not need re-reminding)
 

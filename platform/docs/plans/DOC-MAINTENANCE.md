@@ -62,7 +62,9 @@ Update the owner doc; everyone else **references** it (don't restate). This is w
 | The **real operating model** (parameter-based, program-segmented, no-compute, the 3 layers, de-scaffold scope) | **`MODEL-ALIGNMENT.md`** | link to it, not re-explain it |
 | **Phase plan + live build status** | **`00-MASTER-PLAN.md`** (per-phase status blocks) | the milestone/epic/phased docs are SUPERSEDED — banner only |
 | **Gaps + resolutions** | **`spec/gap-register.md`** | reference gap #s |
-| **Restart/runtime brief** | **`RESUME.md`** (the paste-after-compact block) | — |
+| **Current state / what's next / known traps / deploy + verify procedure** | **`RESUME.md`** — rewritten 2026-11-16; updated at EVERY release | link to it; never restate SHAs elsewhere as "current" |
+| **Index of every doc + release log** | **`../DOCS-INDEX.md`** | add a line when you add a doc; add a row at every prod release |
+| **Master tracker (issue history)** | `GO-LIVE-ISSUE-LIST.md` (top banner + ▶ THINGS TO BE DONE kept current) | — |
 | **Per-context capability / data-model / API / workflow / configurability** | the respective **`spec/*.md`** | own their slice; reference MODEL-ALIGNMENT for the model |
 | **Reporting / KYC tracks** | `REPORTING-REVAMP.md` / `KYC-APPROVAL-REVAMP.md` | — |
 | **Dev DB / git / testing / RBAC enablement** | `DEV-DB.md` / `GIT-WORKFLOW.md` / `01-how-we-test.md` / `RBAC-ENABLEMENT.md` | — |
