@@ -5,7 +5,10 @@ import {
   Get,
   Headers,
   Post,
+  Query,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { timingSafeEqual } from 'crypto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Public, Roles } from '../common/decorators/roles.decorator';
@@ -13,7 +16,8 @@ import { PushSubscriptionService } from './push-subscription.service';
 import { PushSenderService } from './push-sender.service';
 import { PushDeliveryWorker } from './push-delivery.worker';
 import { PwaAdoptionService, AdoptionReport } from './pwa-adoption.service';
-import { SubscribeDto, UnsubscribeDto, ReportInstallDto } from './dto/push.dto';
+import { SubscribeDto, UnsubscribeDto, ReportInstallDto, InstalledUsersQueryDto } from './dto/push.dto';
+import { ExportsService } from '../exports/exports.service';
 
 /**
  * Web Push (PWA) API — re-homed onto /v1/push. Auth (JWT) + tenant scope come from
@@ -30,6 +34,7 @@ export class PushController {
     private readonly sender: PushSenderService,
     private readonly worker: PushDeliveryWorker,
     private readonly adoption: PwaAdoptionService,
+    private readonly exports: ExportsService,
   ) {}
 
   /**
@@ -59,6 +64,24 @@ export class PushController {
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER')
   getAdoption(@CurrentUser() user: JwtPayload): Promise<AdoptionReport> {
     return this.adoption.adoption(user.clientId);
+  }
+
+  /**
+   * GET /v1/push/adoption/installed-users — "Download installed users (Excel)" on the App Adoption page.
+   * One row per user with ≥1 pwa_install (name, phone, role, outlet, platforms, first install, last seen,
+   * notifications enabled, status), newest first install first. Optional ?roleGroup=sales|partner|admin and
+   * ?since=YYYY-MM-DD (first install on/after, IST). Same roles + SAME tenant scope as GET adoption (the JWT
+   * clientId — never cross-tenant). Built by the 'app-installed-users' export kind (always light → streamed
+   * instantly); every download writes an EXPORT AuditLog row (phone numbers = personal data).
+   */
+  @Get('adoption/installed-users')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER')
+  installedUsers(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: InstalledUsersQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.exports.respond(res, user, 'app-installed-users', q);
   }
 
   /**

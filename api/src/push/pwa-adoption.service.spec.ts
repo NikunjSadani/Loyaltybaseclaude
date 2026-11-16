@@ -35,7 +35,45 @@ describe('PwaAdoptionService', () => {
       prisma.pwaInstall.findMany.mockResolvedValue([]);
       await service.adoption('deoleo');
       expect(prisma.pushSubscription.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
-      expect(prisma.pwaInstall.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
+      expect(prisma.pwaInstall.findMany.mock.calls[0][0].where).toEqual({
+        clientId: 'deoleo',
+        user: { clientId: 'deoleo', deletedAt: null },
+      });
+    });
+
+    it('installed count = the tenant\'s own, non-deleted users (same population as the installed-users Excel)', async () => {
+      // A fake that honours the where (install clientId + the user relation filter), so this proves the filter's effect.
+      const users: Record<string, { clientId: string; deletedAt: Date | null }> = {
+        u1: { clientId: 'deoleo', deletedAt: null },
+        inactive: { clientId: 'deoleo', deletedAt: null }, // status is irrelevant: inactive users still count
+        op: { clientId: 'gifsy', deletedAt: null }, // Gifsy operator, install recorded while assumed into deoleo
+        gone: { clientId: 'deoleo', deletedAt: new Date('2026-10-01T00:00:00Z') }, // soft-deleted
+      };
+      const rows = [
+        { userId: 'u1', clientId: 'deoleo', platform: 'ANDROID' },
+        { userId: 'u1', clientId: 'deoleo', platform: 'IOS' },
+        { userId: 'inactive', clientId: 'deoleo', platform: 'ANDROID' },
+        { userId: 'op', clientId: 'deoleo', platform: 'DESKTOP' },
+        { userId: 'gone', clientId: 'deoleo', platform: 'ANDROID' },
+      ];
+      const { service, prisma } = makeService();
+      prisma.pushSubscription.findMany.mockResolvedValue([]);
+      prisma.pwaInstall.findMany.mockImplementation(
+        async ({ where }: { where: { clientId: string; user: { clientId: string; deletedAt: null } } }) =>
+          rows
+            .filter((r) => r.clientId === where.clientId)
+            .filter((r) => users[r.userId].clientId === where.user.clientId && users[r.userId].deletedAt === where.user.deletedAt)
+            .map(({ userId, platform }) => ({ userId, platform })),
+      );
+      const r = await service.adoption('deoleo');
+      expect(r.installed.users).toBe(2); // u1 + inactive; NOT the operator, NOT the deleted user
+      expect(r.installed.byPlatform).toEqual(
+        expect.arrayContaining([
+          { platform: 'ANDROID', users: 2 },
+          { platform: 'IOS', users: 1 },
+        ]),
+      );
+      expect(r.installed.byPlatform.find((p) => p.platform === 'DESKTOP')).toBeUndefined();
     });
 
     it('counts distinct subscribed users + devices, and buckets by role and OS', async () => {

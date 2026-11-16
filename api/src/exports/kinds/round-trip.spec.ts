@@ -55,6 +55,7 @@ const CASES: Record<string, Array<Record<string, unknown>>> = {
   'points-credit-upload': [{ period: '2026-10' }, { period: '2026-10', program: 'Gold', kpiCode: 'TOTAL' }],
   'points-preview-report': [{ period: '2026-10' }],
   'points-payout-report': [{ period: '2026-10', program: 'Silver' }],
+  'app-installed-users': [{}, { roleGroup: 'partner' }, { roleGroup: 'sales', since: '2026-11-01' }],
 };
 
 const REQ = { headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'bajajloyalty.gifsy.in' } };

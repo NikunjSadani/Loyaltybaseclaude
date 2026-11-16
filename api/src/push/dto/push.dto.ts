@@ -5,6 +5,7 @@ import {
   IsOptional,
   IsString,
   MaxLength,
+  Matches,
   MinLength,
   ValidateNested,
 } from 'class-validator';
@@ -59,4 +60,23 @@ export class UnsubscribeDto {
   @MinLength(1)
   @MaxLength(2048)
   endpoint!: string;
+}
+
+/** Role groups the installed-users download can be narrowed to. */
+export const INSTALLED_USERS_ROLE_GROUPS = ['sales', 'partner', 'admin'] as const;
+export type InstalledUsersRoleGroup = (typeof INSTALLED_USERS_ROLE_GROUPS)[number];
+
+/**
+ * GET /v1/push/adoption/installed-users query. Both filters optional; the tenant comes from the
+ * JWT only (no clientId param exists).
+ */
+export class InstalledUsersQueryDto {
+  @IsOptional()
+  @IsIn(INSTALLED_USERS_ROLE_GROUPS, { message: 'roleGroup must be one of: sales, partner, admin' })
+  roleGroup?: InstalledUsersRoleGroup;
+
+  /** Only users whose FIRST install is on/after this IST calendar date (YYYY-MM-DD). */
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'since must be a date like 2026-11-01' })
+  since?: string;
 }
