@@ -16,7 +16,7 @@
  */
 
 import React from 'react';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import { istMonthKey } from '@/lib/ist-date';
 
@@ -116,7 +116,7 @@ describe('partnerDashboardV2 ON', () => {
     expect(await within(card).findByText('500/1K · 50%')).toBeInTheDocument();
     expect(await within(card).findByTestId('kpi-untargeted-SALES')).toHaveTextContent('+₹2K so far at outlets without this target');
     // The Performance card trends the SAME KPI (the API then applies the same targeted-only rule).
-    expect(fetchFn.mock.calls.some(([u]) => String(u).includes('/api/partner/targets/trend') && String(u).includes('kpi=SALES'))).toBe(true);
+    await waitFor(() => expect(fetchFn.mock.calls.some(([u]) => String(u).includes('/api/partner/targets/trend') && String(u).includes('kpi=SALES'))).toBe(true));
   }, 20000);
 
   it('MX2: a KPI missing ENTIRELY at outlet B is counted from outlet A only — no "+X" line', async () => {
@@ -204,7 +204,8 @@ describe('partnerDashboardV2 OFF (Deoleo — unchanged)', () => {
     expect(hero).toHaveTextContent('250%');
     expect(document.body.textContent).not.toMatch(/outlets without this target|so far/);
     expect(screen.queryByTestId('target-achievement-card')).not.toBeInTheDocument();
-    expect(fetchFn.mock.calls.some(([u]) => String(u).includes('kpi=SALES'))).toBe(true);
+    // The trend request fires in its own effect after the hero renders — wait for it (load flake 2026-11-16).
+    await waitFor(() => expect(fetchFn.mock.calls.some(([u]) => String(u).includes('kpi=SALES'))).toBe(true));
   }, 20000);
 
   it('OFF2: target-less flagged primary → the old "0 of 0 · 0%" + "No targets yet" hero', async () => {
