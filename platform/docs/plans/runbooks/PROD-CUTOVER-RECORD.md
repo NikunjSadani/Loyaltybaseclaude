@@ -1,42 +1,29 @@
 # Production Cutover — Record (A-9)
 
-> ⚠️ **STALE — as-run entries below STOP at cutover #6 (`c36f6c8`, 2026-07-06).** Cutovers **#7–#47** were not
-> logged here. The **canonical cutover record** (SHAs · payloads · migrations · verification) is now memory
-> **`[[deoleo-go-live-bundle]]`** + the **CUTOVER LEDGER table in `RESUME.md`**. Current prod = **`e98f047`** (cutover #58, 2026-11-07). develop = `7c85d9fd` (the #59 + Sales Import release, LIVE on staging 2026-11-11, NOT on prod — see the two sections directly below + `RESUME.md` 📍 STATE 2026-11-11). ⚠️ **DEPLOY IS NOW MANUAL** — `deploy.yml` is `workflow_dispatch`-only; a FF `develop→main` NO LONGER deploys; prod ships ONLY via GitHub Actions → "Deploy — Production (main)" → Run workflow.
+> ⚠️ **HISTORICAL as-run log — entries below STOP at cutover #6 (`c36f6c8`, 2026-07-06).** Later releases: the release
+> log in `../../DOCS-INDEX.md` + `../archive/RESUME-ARCHIVE-2026-11-15.md` (CUTOVER LEDGER #14–#52). **Current prod =
+> `2eb8271d` (2026-11-15) = `main` = `develop`.** The live release procedure (gates → backup → prepare main → owner
+> dispatch → preflight → verify) is **`../RESUME.md` §6–§7**; this file keeps the preflight reference below.
 >
 > Executed 2026-06-20. This is the **as-run record** of the Deoleo production cutover. The cutover was
 > performed directly (each step gated by an independent adversarial audit) rather than handed off as a
 > runbook; this doc captures exactly what was done so it's reproducible/auditable. Companions:
 > [`PROD-DB-MIGRATION.md`](PROD-DB-MIGRATION.md) (the migration mechanics) + [`../MIGRATIONS.md`](../MIGRATIONS.md).
 
-## ⚠️ PROD DEPLOY PREFLIGHT — applies to EVERY prod deploy from the #59 + Sales Import release on (added 2026-11-10/11)
-The first step of `deploy.yml` ("Deploy — Production (main)") is a metadata-only check that Secret Manager holds
-`HUBBLE_CLIENT_ID`, `HUBBLE_CLIENT_SECRET` and `HUBBLE_WEBHOOK_SECRET`, each with an ENABLED latest version. Reading that
-metadata needs `roles/secretmanager.viewer` on `gifsy-deployer` — **granted 2026-11-10/11** (redundant: the deployer already
-holds editor + secretmanager.admin + projectIamAdmin; an over-privilege review of `gifsy-deployer` is OPEN). If any secret is
-missing the deploy **stops at step 1, before the image build and migrations — prod untouched** (the frontend job `needs:
-deploy-api`). This applies to Deoleo-only deploys too. The **owner creates the 3 Hubble secrets** (values never in chat);
-runbook = `../BAJAJ-PROD-GO-LIVE-CHECKLIST.md` F3. The staging deploy has the same preflight for
-`SALES_IMPORT_DRAIN_SECRET_STAGING` (exists since 2026-11-10/11).
+## ⚠️ PROD DEPLOY PREFLIGHT — applies to EVERY prod deploy (current as of 2026-11-16)
+After the CI test job, the first step of `deploy.yml` ("Deploy — Production (main)") is a metadata-only check that Secret
+Manager holds `HUBBLE_CLIENT_ID`, `HUBBLE_CLIENT_SECRET`, `HUBBLE_WEBHOOK_SECRET` and `SALES_IMPORT_DRAIN_SECRET`, each with
+an ENABLED latest version. Reading that metadata needs `roles/secretmanager.viewer` on `gifsy-deployer` (granted
+2026-11-10/11; redundant with its broader roles — over-privilege review OPEN). If any secret is missing the deploy **stops
+before the image build and migrations — prod untouched** (the frontend job `needs: deploy-api`). This applies to Deoleo-only
+deploys too. All four secrets exist (owner-created; values never in chat). The staging deploy has the same preflight for
+`SALES_IMPORT_DRAIN_SECRET_STAGING`. The Downloads worker (`gifsy-exports`, 2026-11-15) added no secret.
 
-## ▶ "Prepare main" checklist — the #59 + Sales Import release (develop `7c85d9fd`, live on staging 2026-11-11)
-Owner-gated; nothing below runs without the owner's explicit go. One approval does not cover the next step.
-1. **Owner staging UAT** of the release (contents: `RESUME.md` 📍 STATE 2026-11-11).
-2. **Owner creates prod secrets** `HUBBLE_CLIENT_ID` / `HUBBLE_CLIENT_SECRET` / `HUBBLE_WEBHOOK_SECRET` (preflight above).
-3. **Decide prod Sales Import infra** (separate owner OK): prod worker Cloud Run Job + API env (`SALES_IMPORT_RUNNER=job`,
-   `SALES_IMPORT_JOB`, `GCP_PROJECT`) + secret `SALES_IMPORT_DRAIN_SECRET` (+ add it to the prod preflight) +
-   `roles/run.jobsExecutor` for the API SA on the job + Cloud Scheduler drain. Mirror of staging: `../ENVIRONMENTS.md`.
-   Not a blocker for the deploy — until it exists the API refuses to switch `salesImport` ON in prod (runner safety net).
-4. **Merge develop → main KEEPING the TDS-194R revert** (`e8c3f463`): after the merge,
-   `git diff <prev-main> HEAD -- api/src/tds/` must be EMPTY. Run the full gates (`bash scripts/gates.sh`) on the merge.
-5. **Owner dispatches** GitHub Actions → "Deploy — Production (main)" → Run (MANUAL; a push to main does not deploy).
-6. **Verify the SERVING SHA** via gcloud (bare `:<sha>` tag on `gifsy-api` + `gifsy-frontend`), not branch HEAD; migrate job succeeded.
-7. **Prove the rate-limit fix on prod** (untestable on staging — `FIXED_OTP` disables the throttler): 6× send-otp for the
-   same UNREGISTERED number → the 6th returns 429; 8 different unregistered numbers → no 429.
-8. **Bajaj branding:** `bajajloyalty.gifsy.in` renders Bajaj (not generic "LoyaltyBase") and the uploaded logo + white
-   wordmark load (were 403 before the release). Deoleo `deoleo.gifsy.in/auth/login` still 200 with Deoleo branding.
-9. **OTP hardening deploy note:** KYC consent OTPs sent before the deploy can't verify — the rep taps Resend.
-10. Record the cutover (#59) in `RESUME.md` CUTOVER LEDGER + memory `[[deoleo-go-live-bundle]]`.
+## ✅ DONE — "Prepare main" checklist for the #59 + Sales Import release (historical)
+Executed 2026-11-12: prod = `a18cc932` (main = develop `dd27888b` + the TDS-194R revert kept), backup `1794452768704`,
+Sales Import prod infra created, rate-limit fix proven on prod, Bajaj branding confirmed. The "keep the TDS revert" rule was
+then SUPERSEDED: release `247fae4b` (2026-11-13) re-applied the 194R VENDOR_IMPORT exclusion on purpose
+(`BAJAJ-GO-LIVE-DECISIONS-LOG.md`). Full detail of that checklist: git history of this file / the RESUME archive.
 
 ## Pre-state (verified read-only, in-VPC)
 `gifsy_prod`: stale **June-6 schema** — `public_tables: 75`, `otp_codes: true`, **`kpi_defs`(P4): false**,

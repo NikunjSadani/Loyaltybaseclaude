@@ -92,14 +92,14 @@ describe('AA — Activations dashboard card', () => {
 
   it('AA1: card shows "New Activation" not "New Scheme"', async () => {
     render(<PartnerDashboardPage />);
-    await waitFor(() => expect(screen.getByText('New Activation')).toBeInTheDocument());
+    expect(await screen.findByText('New Activation')).toBeInTheDocument();
     expect(screen.queryByText('New Scheme')).not.toBeInTheDocument();
   });
 
   it('AA2: card links to /partner/schemes', async () => {
     render(<PartnerDashboardPage />);
-    await waitFor(() => expect(screen.getByText('New Activation')).toBeInTheDocument());
-    const link = screen.getByText('New Activation').closest('a');
+    expect(await screen.findByText('New Activation')).toBeInTheDocument();
+    const link = (await screen.findByText('New Activation')).closest('a');
     expect(link).toHaveAttribute('href', '/partner/schemes');
   });
 

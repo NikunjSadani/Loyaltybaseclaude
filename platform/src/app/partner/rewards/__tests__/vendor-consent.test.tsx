@@ -141,10 +141,10 @@ describe('CONSENT — vendor-PII consent gate', () => {
     await openGiftForm(user, 'Vendor Blender');
     await fillAddress(user);
 
-    const checkbox = screen.getByTestId('vendor-consent-checkbox') as HTMLInputElement;
+    const checkbox = await screen.findByTestId('vendor-consent-checkbox') as HTMLInputElement;
     expect(checkbox.checked).toBe(false);
 
-    const sendOtp = screen.getByRole('button', { name: /send otp/i });
+    const sendOtp = await screen.findByRole('button', { name: /send otp/i });
     expect(sendOtp).toBeDisabled();
 
     await user.click(checkbox);
@@ -168,8 +168,8 @@ describe('CONSENT — vendor-PII consent gate', () => {
       expect((screen.getByLabelText(/recipient name/i) as HTMLInputElement).value).toBe(MEMBER_NAME),
     );
     await fillAddress(user);
-    await user.click(screen.getByTestId('vendor-consent-checkbox'));
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByTestId('vendor-consent-checkbox'));
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([u]) => u === '/api/rewards/redeem');
@@ -197,7 +197,7 @@ describe('CONSENT — vendor-PII consent gate', () => {
 
     // No consent checkbox for a platform item; Send OTP is enabled immediately.
     expect(screen.queryByTestId('vendor-consent-checkbox')).not.toBeInTheDocument();
-    const sendOtp = screen.getByRole('button', { name: /send otp/i });
+    const sendOtp = await screen.findByRole('button', { name: /send otp/i });
     expect(sendOtp).not.toBeDisabled();
 
     await user.click(sendOtp);
@@ -221,8 +221,8 @@ describe('CONSENT — vendor-PII consent gate', () => {
     await fillAddress(user);
 
     // The consent gate must appear (fail-closed) even though the flag was never sent.
-    const checkbox = screen.getByTestId('vendor-consent-checkbox') as HTMLInputElement;
+    const checkbox = await screen.findByTestId('vendor-consent-checkbox') as HTMLInputElement;
     expect(checkbox.checked).toBe(false);
-    expect(screen.getByRole('button', { name: /send otp/i })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: /send otp/i })).toBeDisabled();
   });
 });

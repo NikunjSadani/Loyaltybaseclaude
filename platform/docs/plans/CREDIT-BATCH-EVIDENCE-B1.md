@@ -1,6 +1,6 @@
 # B1 — Audit-evidence attachments on a credit/payout batch
 
-**Status:** BUILT + gated + independently audited + boot-verified on `develop` (local, not yet deployed). Full data-path runtime verification is deferred to staging UAT. 2026-10-04.
+**Status:** ✅ IN PROD (on `main`; evidence uploads were reworked to one file per request in the 2026-11-15 release, `afab22d8`). _(Original 2026-10-04: built + gated + audited on develop, not yet deployed.)_
 
 ## Why
 A client runs its visibility audit **offline** and shares the proof (photos / a PDF audit sheet) with us; we pay those outlets under **194C**. The 194C payment already has a home (the Credits & Payouts rail → self-billed invoice → payout), but there was **no place in the portal to keep the audit proof** with the payment record. B1 adds that: bulk-upload the evidence files against the **batch** that pays them.

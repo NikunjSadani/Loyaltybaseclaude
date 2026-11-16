@@ -112,7 +112,7 @@ describe('VisibilityCaptureForm — camera field (live, camera-only)', () => {
     // Tapping Open reveals the live preview + shutter — still no file input, ever.
     await act(async () => { fireEvent.click(screen.getByTestId('camera-photo-open')); });
     expect(await screen.findByTestId('camera-photo-video')).toBeInTheDocument();
-    expect(screen.getByTestId('camera-photo-capture')).toBeInTheDocument();
+    expect(await screen.findByTestId('camera-photo-capture')).toBeInTheDocument();
     expect(container.querySelector('input[type="file"]')).toBeNull();
   });
 
@@ -147,7 +147,7 @@ describe('VisibilityCaptureForm — camera field (live, camera-only)', () => {
 
     // The captured photo is shown back to the rep (KYC-enrollment parity) — not just a text chip.
     expect(await screen.findByTestId('camera-photo-captured-img')).toBeInTheDocument();
-    expect(screen.getByText('Photo captured')).toBeInTheDocument();
+    expect(await screen.findByText('Photo captured')).toBeInTheDocument();
   });
 
   it('stops every camera track after the shot (no lingering stream)', async () => {

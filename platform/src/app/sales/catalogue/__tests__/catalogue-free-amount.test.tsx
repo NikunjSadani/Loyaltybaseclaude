@@ -92,10 +92,10 @@ describe('sales catalogue — FREE_AMOUNT vs FIXED copy', () => {
 
     // Big headline + sub-line are amount-based, not "0 pts".
     expect(await screen.findByText('You choose the amount')).toBeInTheDocument();
-    expect(screen.getByText('Redeemed as a ₹ amount')).toBeInTheDocument();
+    expect(await screen.findByText('Redeemed as a ₹ amount')).toBeInTheDocument();
 
     // The sticky CTA is a plain "Redeem", NOT "Redeem for 0 pts".
-    expect(screen.getByRole('button', { name: 'Redeem' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Redeem' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Redeem for/i })).not.toBeInTheDocument();
 
     // No "0 pts" anywhere on the sheet.
@@ -116,10 +116,10 @@ describe('sales catalogue — FREE_AMOUNT vs FIXED copy', () => {
       (el) => el.className.includes('text-2xl'),
     );
     expect(detailPts).toBeTruthy();
-    expect(screen.getByText('Required to redeem')).toBeInTheDocument();
+    expect(await screen.findByText('Required to redeem')).toBeInTheDocument();
 
     // CTA keeps the exact current copy.
-    expect(screen.getByRole('button', { name: 'Redeem for 2,500 pts' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Redeem for 2,500 pts' })).toBeInTheDocument();
     expect(screen.queryByText('You choose the amount')).not.toBeInTheDocument();
   });
 });

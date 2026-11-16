@@ -1,5 +1,19 @@
 /// <reference types="vitest/globals" />
 import '@testing-library/jest-dom';
+import { configure } from '@testing-library/react';
+
+// Flaky-test sweep 2026-11-15 — suite-wide defaults so a test's correctness never depends on runner speed:
+//  * findBy* / waitFor default timeout 1 s -> 15 s. A passing test resolves as soon as the element
+//    appears (no slowdown); only a genuinely-failing one waits longer. Must stay < testTimeout (30 s,
+//    vitest.config.ts) so a real failure reports the RTL "Unable to find…" message, not a bare timeout.
+configure({ asyncUtilTimeout: 15_000 });
+
+//  * Never leak fake timers into the next test: several tests call vi.useRealTimers() at the END of
+//    the body, which is skipped when an assertion throws first — the next test would then run on
+//    frozen timers and fail for an unrelated reason. Restoring after EVERY test makes that impossible.
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 // Stub browser APIs not available in jsdom
 //

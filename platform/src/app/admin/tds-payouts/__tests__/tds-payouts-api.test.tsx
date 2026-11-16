@@ -119,9 +119,9 @@ describe('/admin/tds-payouts — visibility payout TDS report', () => {
     render(<AdminTdsPayoutsPage />)
 
     await screen.findByText('Shop A')
-    expect(screen.getByText('SEC_194C')).toBeInTheDocument()   // frozen section
-    expect(screen.getByText('Gross-up')).toBeInTheDocument()   // methodology label
-    expect(screen.getByText('REGULAR')).toBeInTheDocument()    // GST reg type badge
+    expect(await screen.findByText('SEC_194C')).toBeInTheDocument()   // frozen section
+    expect(await screen.findByText('Gross-up')).toBeInTheDocument()   // methodology label
+    expect(await screen.findByText('REGULAR')).toBeInTheDocument()    // GST reg type badge
   })
 
   it('GIFSY: report GET is clientId-free; selecting a tenant scopes the EXPORT url', async () => {
@@ -137,7 +137,7 @@ describe('/admin/tds-payouts — visibility payout TDS report', () => {
     expect(reportCall![0] as string).toBe('/api/admin/tds-reports/payouts')
 
     // Pick the tenant in the GIFSY-only client dropdown (first combobox), then export.
-    const [clientSelect] = screen.getAllByRole('combobox')
+    const [clientSelect] = await screen.findAllByRole('combobox')
     fireEvent.change(clientSelect, { target: { value: 'deoleo' } })
     fireEvent.click(screen.getByText('Export Excel'))
 

@@ -84,12 +84,12 @@ describe('target upload — ignoredOutOfScope', () => {
     render(<TargetUploadPage />);
     await upload();
     expect(await screen.findByText('Rejected rows (700)')).toBeInTheDocument();
-    expect(screen.getByText(/Row 502 — X499/)).toBeInTheDocument();
-    const note = screen.getByText(/Showing the first 500 of 700 rejected rows/);
+    expect(await screen.findByText(/Row 502 — X499/)).toBeInTheDocument();
+    const note = await screen.findByText(/Showing the first 500 of 700 rejected rows/);
     // M3: partial save → re-upload only the failed rows (never "re-upload the file").
     expect(note.textContent).toMatch(/re-upload only the failed rows/i);
     // M7: the note sits ABOVE the short scroll box, not inside it.
-    const box = screen.getByText('Rejected rows (700)').parentElement as HTMLElement;
+    const box = (await screen.findByText('Rejected rows (700)')).parentElement as HTMLElement;
     expect(box.contains(note)).toBe(false);
     expect(note.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -111,6 +111,6 @@ describe('target upload — ignoredOutOfScope', () => {
     render(<TargetUploadPage />);
     await upload();
     await screen.findByText('Blank', { selector: 'p' });
-    expect((screen.getByText('Blank', { selector: 'p' }).parentElement as HTMLElement).textContent).toMatch(/^2/);
+    expect(((await screen.findByText('Blank', { selector: 'p' })).parentElement as HTMLElement).textContent).toMatch(/^2/);
   });
 });

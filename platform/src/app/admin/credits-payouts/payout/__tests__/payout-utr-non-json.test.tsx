@@ -105,9 +105,9 @@ describe('Payout UTR — non-JSON responses', () => {
     );
     expect(alert.textContent).not.toMatch(/SyntaxError|Unexpected token/);
     // Spinner ended, but Apply is PAUSED until the file is previewed again.
-    const btn = screen.getByText('Apply UTR Results').closest('button') as HTMLButtonElement;
+    const btn = (await screen.findByText('Apply UTR Results')).closest('button') as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
-    expect(screen.getByTestId('utr-apply-paused-hint').textContent).toMatch(/upload the file again/i);
+    expect((await screen.findByTestId('utr-apply-paused-hint')).textContent).toMatch(/upload the file again/i);
     expect(screen.queryByText('Applying…')).toBeNull();
     // Never claims success.
     expect(screen.queryByText('UTR results applied')).toBeNull();
@@ -149,7 +149,7 @@ describe('Payout UTR — non-JSON responses', () => {
     await selectAndUpload(container);
     fireEvent.click(await screen.findByText('Apply UTR Results'));
     expect((await screen.findByRole('alert')).textContent).toMatch(/file is too large/i);
-    const btn = screen.getByText('Apply UTR Results').closest('button') as HTMLButtonElement;
+    const btn = (await screen.findByText('Apply UTR Results')).closest('button') as HTMLButtonElement;
     expect(btn.disabled).toBe(false);
   });
 
@@ -242,7 +242,7 @@ describe('Payout UTR — non-JSON responses', () => {
     expect(list.textContent).toMatch('These rows were not applied:');
     expect(list.textContent).toMatch(/Row 4 · O-9 — Payout already recorded/);
     expect(screen.queryByText('UTR results applied')).toBeNull();
-    expect(screen.getByText('Applied with issues')).toBeTruthy();
+    expect(await screen.findByText('Applied with issues')).toBeTruthy();
   });
 
   it('APPLY noop with notApplied → server message + amber list, no green banner', async () => {
@@ -264,7 +264,7 @@ describe('Payout UTR — non-JSON responses', () => {
     await selectAndUpload(container);
     fireEvent.click(await screen.findByText('Apply UTR Results'));
     expect((await screen.findByTestId('utr-apply-noop')).textContent).toMatch(message);
-    expect(screen.getByTestId('utr-not-applied').querySelectorAll('li')).toHaveLength(2);
+    expect((await screen.findByTestId('utr-not-applied')).querySelectorAll('li')).toHaveLength(2);
     expect(screen.queryByText('UTR results applied')).toBeNull();
   });
 
@@ -283,7 +283,7 @@ describe('Payout UTR — non-JSON responses', () => {
     await selectAndUpload(container);
 
     expect(await screen.findByText(/didn't respond properly \(HTTP 500\)/)).toBeTruthy();
-    expect(screen.getByText(/Nothing was saved/)).toBeTruthy();
+    expect(await screen.findByText(/Nothing was saved/)).toBeTruthy();
     await waitFor(() => expect(screen.queryByText('Parsing file…')).toBeNull());
   });
 

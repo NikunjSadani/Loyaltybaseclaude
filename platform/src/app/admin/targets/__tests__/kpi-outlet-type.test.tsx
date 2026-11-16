@@ -81,9 +81,9 @@ describe('KPI applies-to scope', () => {
 
   it('KO1: chips — All outlets / legacy type label / full scope', async () => {
     await renderPage();
-    expect(screen.getByTestId('kpi-scope-MONTH_TGT')).toHaveTextContent('All outlets');
-    expect(screen.getByTestId('kpi-scope-RLP_LINES')).toHaveTextContent(/^RLP$/);
-    const chip = screen.getByTestId('kpi-scope-UNNATI_VOL');
+    expect(await screen.findByTestId('kpi-scope-MONTH_TGT')).toHaveTextContent('All outlets');
+    expect(await screen.findByTestId('kpi-scope-RLP_LINES')).toHaveTextContent(/^RLP$/);
+    const chip = await screen.findByTestId('kpi-scope-UNNATI_VOL');
     expect(chip).toHaveTextContent('RLP · Unnati · Lite');
     expect(chip).toHaveAttribute('title', 'Outlet types: RLP; Programs: Unnati; Sub-Programs: Lite');
   });
@@ -138,8 +138,8 @@ describe('KPI applies-to scope', () => {
     await renderPage();
     fireEvent.click(screen.getAllByTitle('Edit')[1]); // RLP_LINES (legacy SSS)
     const types = await screen.findByRole('group', { name: 'Outlet types' });
-    expect(within(types).getByRole('checkbox', { name: 'RLP (SSS)' })).toBeChecked();
-    expect(within(types).getByRole('checkbox', { name: 'BSC (WHOLESALER)' })).not.toBeChecked();
+    expect(await within(types).findByRole('checkbox', { name: 'RLP (SSS)' })).toBeChecked();
+    expect(await within(types).findByRole('checkbox', { name: 'BSC (WHOLESALER)' })).not.toBeChecked();
   });
 
   it('KO4: changing the scope sends all three arrays; clearing a legacy type sends [] for each', async () => {
@@ -169,7 +169,7 @@ describe('KPI applies-to scope', () => {
     await renderPage();
     fireEvent.click(screen.getByRole('button', { name: /Add KPI/ }));
     expect(await screen.findByRole('checkbox', { name: /Pragati.*not in settings list/ })).toBeInTheDocument();
-    expect(screen.getByText(/Leave all empty = applies to every outlet/)).toBeInTheDocument();
+    expect(await screen.findByText(/Leave all empty = applies to every outlet/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByTestId('kpi-scope-count')).toHaveTextContent('340 matching outlets right now (every outlet)'));
     fireEvent.click(screen.getByRole('checkbox', { name: 'Unnati' }));
     await waitFor(() => expect(screen.getByTestId('kpi-scope-count')).toHaveTextContent('12 matching outlets right now.'));
@@ -181,8 +181,8 @@ describe('KPI applies-to scope', () => {
     await renderPage();
     fireEvent.click(screen.getByRole('button', { name: /Add KPI/ }));
     expect(await screen.findByTestId('scope-options-error')).toHaveTextContent('Boom');
-    const types = screen.getByRole('group', { name: 'Outlet types' });
-    expect(within(types).getByRole('checkbox', { name: 'RLP (SSS)' })).toBeInTheDocument();
+    const types = await screen.findByRole('group', { name: 'Outlet types' });
+    expect(await within(types).findByRole('checkbox', { name: 'RLP (SSS)' })).toBeInTheDocument();
     optionsResponse = { success: true, data: OPTIONS };
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(screen.queryByTestId('scope-options-error')).not.toBeInTheDocument());

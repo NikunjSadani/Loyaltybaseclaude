@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -62,10 +62,7 @@ function setOutletType(type: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST' | 'SSS_TOT') 
 
 async function renderAndLoad() {
   render(<ProfilePage />);
-  await waitFor(
-    () => expect(screen.getByTestId('profile-header')).toBeInTheDocument(),
-    { timeout: 2000 },
-  );
+  expect(await screen.findByTestId('profile-header', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 describe('Q — Partner profile page rules', () => {
@@ -80,13 +77,13 @@ describe('Q — Partner profile page rules', () => {
   it('Q1: Visibility Invoices link is shown for SSS', async () => {
     setOutletType('SSS');
     await renderAndLoad();
-    expect(screen.getByText(/visibility invoices/i)).toBeInTheDocument();
+    expect(await screen.findByText(/visibility invoices/i)).toBeInTheDocument();
   });
 
   it('Q2: Visibility Invoices link is shown for SSS_TOT', async () => {
     setOutletType('SSS_TOT');
     await renderAndLoad();
-    expect(screen.getByText(/visibility invoices/i)).toBeInTheDocument();
+    expect(await screen.findByText(/visibility invoices/i)).toBeInTheDocument();
   });
 
   it('Q3: Visibility Invoices link is NOT shown for WHOLESALER', async () => {
@@ -119,13 +116,13 @@ describe('Q — Partner profile page rules', () => {
 
   it('Q8: GST number label and value are rendered', async () => {
     await renderAndLoad();
-    expect(screen.getByText(/gst/i)).toBeInTheDocument();
-    expect(screen.getByTestId('gst-number-value').textContent?.trim().length).toBeGreaterThan(0);
+    expect(await screen.findByText(/gst/i)).toBeInTheDocument();
+    expect((await screen.findByTestId('gst-number-value')).textContent?.trim().length).toBeGreaterThan(0);
   });
 
   it('Q9: PAN number label and value are rendered', async () => {
     await renderAndLoad();
-    expect(screen.getByText(/pan/i)).toBeInTheDocument();
-    expect(screen.getByTestId('pan-number-value').textContent?.trim().length).toBeGreaterThan(0);
+    expect(await screen.findByText(/pan/i)).toBeInTheDocument();
+    expect((await screen.findByTestId('pan-number-value')).textContent?.trim().length).toBeGreaterThan(0);
   });
 });

@@ -106,7 +106,7 @@ describe('Identity & Payout Uniqueness settings card', () => {
     render(<SettingsPage />);
     // PAN + GST are always-on golden keys.
     expect((await screen.findByTestId('uniq-pan')).textContent).toContain('Always on');
-    expect(screen.getByTestId('uniq-gst').textContent).toContain('Always on');
+    expect((await screen.findByTestId('uniq-gst')).textContent).toContain('Always on');
     // Bank seeded OFF → the OFF segment is selected.
     await waitFor(() => expect(screen.getByTestId('uniq-bank-off')).toHaveAttribute('aria-checked', 'true'));
   });
@@ -128,7 +128,7 @@ describe('Identity & Payout Uniqueness settings card', () => {
     stubFetch({ gst: true, phone: true, bank: false, upi: false });
     render(<SettingsPage />);
     expect(await screen.findByTestId('uniq-bank-on')).toBeDisabled();
-    expect(screen.getByTestId('uniq-upi-on')).toBeDisabled();
+    expect(await screen.findByTestId('uniq-upi-on')).toBeDisabled();
   });
 
   it('saves on the STORED policy (never the derived upi=true) while manual UPI entry is on', async () => {
@@ -141,9 +141,9 @@ describe('Identity & Payout Uniqueness settings card', () => {
     // Display uses the STORED value: UPI shows OFF; only OFF is disabled (ON stays selectable to
     // repair this invalid stored state), and the note explains why.
     await waitFor(() => expect(screen.getByTestId('uniq-upi-off')).toHaveAttribute('aria-checked', 'true'));
-    expect(screen.getByTestId('uniq-upi-off')).toBeDisabled();
+    expect(await screen.findByTestId('uniq-upi-off')).toBeDisabled();
     await waitFor(() => expect(screen.getByTestId('uniq-upi-on')).not.toBeDisabled());
-    expect(screen.getByTestId('uniq-upi-note')).toHaveTextContent('Enforced automatically while UPI Manual Entry is on');
+    expect(await screen.findByTestId('uniq-upi-note')).toHaveTextContent('Enforced automatically while UPI Manual Entry is on');
 
     fireEvent.click(screen.getByTestId('uniq-bank-on'));
     await waitFor(() =>
@@ -174,8 +174,8 @@ describe('Identity & Payout Uniqueness settings card', () => {
     render(<SettingsPage />);
 
     await waitFor(() => expect(screen.getByTestId('uniq-upi-on')).not.toBeDisabled());
-    expect(screen.getByTestId('uniq-upi-on')).toHaveAttribute('aria-checked', 'true');
-    const off = screen.getByTestId('uniq-upi-off');
+    expect(await screen.findByTestId('uniq-upi-on')).toHaveAttribute('aria-checked', 'true');
+    const off = await screen.findByTestId('uniq-upi-off');
     expect(off).toBeDisabled();
     fireEvent.click(off);
     expect(saveGifsySettings).not.toHaveBeenCalled();
@@ -189,9 +189,9 @@ describe('Identity & Payout Uniqueness settings card', () => {
 
     // Wait for the post-mount refresh to complete (the salesApp toggles unlock after it).
     await waitFor(() => expect(screen.getByTestId('upi-collection-on')).not.toBeDisabled());
-    expect(screen.getByTestId('upi-manual-entry-on')).toBeDisabled();
-    expect(screen.getByTestId('upi-manual-entry-off')).not.toBeDisabled();
-    expect(screen.getByTestId('upi-manual-entry-needs-uniqueness')).toHaveTextContent('Turn on UPI ID uniqueness first');
+    expect(await screen.findByTestId('upi-manual-entry-on')).toBeDisabled();
+    expect(await screen.findByTestId('upi-manual-entry-off')).not.toBeDisabled();
+    expect(await screen.findByTestId('upi-manual-entry-needs-uniqueness')).toHaveTextContent('Turn on UPI ID uniqueness first');
 
     fireEvent.click(screen.getByTestId('upi-manual-entry-on'));
     expect(saveGifsySettings).not.toHaveBeenCalled();
@@ -223,7 +223,7 @@ describe('Identity & Payout Uniqueness settings card', () => {
     stubFetch(stored, effectiveSettings({ stored, derived: stored, upiManualEntry: false }));
     render(<SettingsPage />);
     await waitFor(() => expect(screen.getByTestId('upi-collection-off')).not.toBeDisabled());
-    expect(screen.getByTestId('upi-collection-on')).toHaveAttribute('aria-checked', 'true');
+    expect(await screen.findByTestId('upi-collection-on')).toHaveAttribute('aria-checked', 'true');
 
     const settingsGets = () =>
       (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(([u]) => u === '/api/settings').length;
@@ -232,7 +232,7 @@ describe('Identity & Payout Uniqueness settings card', () => {
     await waitFor(() => expect(saveGifsySettings).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByTestId('upi-collection-off')).not.toBeDisabled());
     // Still OFF (the saved value) — not reverted to the stale ON.
-    expect(screen.getByTestId('upi-collection-off')).toHaveAttribute('aria-checked', 'true');
+    expect(await screen.findByTestId('upi-collection-off')).toHaveAttribute('aria-checked', 'true');
     expect(settingsGets()).toBe(before);
   });
 
@@ -303,8 +303,8 @@ describe('Identity & Payout Uniqueness settings card', () => {
     stubFetch(stored, effectiveSettings({ stored, derived, upiManualEntry: true }));
     render(<SettingsPage />);
     await waitFor(() => expect(screen.getByTestId('upi-manual-entry-off')).not.toBeDisabled());
-    const on  = screen.getByTestId('upi-manual-entry-on');
-    const off = screen.getByTestId('upi-manual-entry-off');
+    const on  = await screen.findByTestId('upi-manual-entry-on');
+    const off = await screen.findByTestId('upi-manual-entry-off');
     expect(on).toHaveAttribute('aria-checked', 'true');
     expect(on).toBeDisabled();
     expect(off).toHaveAttribute('tabindex', '0');
@@ -316,8 +316,8 @@ describe('Identity & Payout Uniqueness settings card', () => {
     stubFetch(stored, effectiveSettings({ stored, derived: stored, upiManualEntry: false }));
     render(<SettingsPage />);
     await waitFor(() => expect(screen.getByTestId('upi-manual-entry-off')).not.toBeDisabled());
-    const on  = screen.getByTestId('upi-manual-entry-on');
-    const off = screen.getByTestId('upi-manual-entry-off');
+    const on  = await screen.findByTestId('upi-manual-entry-on');
+    const off = await screen.findByTestId('upi-manual-entry-off');
     expect(on).toBeDisabled();
     off.focus();
     fireEvent.keyDown(off, { key: 'ArrowRight' });
@@ -334,7 +334,7 @@ describe('Identity & Payout Uniqueness settings card', () => {
     stubFetch(stored, effectiveSettings({ stored, derived: { ...stored, upi: false }, upiManualEntry: false }));
     render(<SettingsPage />);
     const note = await screen.findByTestId('upi-manual-entry-needs-uniqueness');
-    const group = screen.getByRole('radiogroup', { name: 'UPI manual entry' });
+    const group = await screen.findByRole('radiogroup', { name: 'UPI manual entry' });
     expect(note.id).not.toBe('');
     expect(group.getAttribute('aria-describedby')?.split(' ')).toContain(note.id);
   });
@@ -345,7 +345,7 @@ describe('Identity & Payout Uniqueness settings card', () => {
     stubFetch(stored, effectiveSettings({ stored, derived, upiManualEntry: true }));
     render(<SettingsPage />);
     const note = await screen.findByTestId('uniq-upi-note');
-    const group = screen.getByRole('radiogroup', { name: 'UPI ID' });
+    const group = await screen.findByRole('radiogroup', { name: 'UPI ID' });
     expect(group.getAttribute('aria-describedby')?.split(' ')).toContain(note.id);
   });
 });

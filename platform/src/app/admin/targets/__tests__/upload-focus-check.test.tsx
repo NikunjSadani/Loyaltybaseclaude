@@ -53,7 +53,7 @@ describe('target upload — focusCheck', () => {
     expect(panel.textContent).not.toContain('yet. (12 outlets)');
     expect(panel.textContent!.match(/12 outlets/g)).toHaveLength(1);
     expect(panel).toHaveTextContent('R1, R2');
-    expect(screen.getByText('Targets submitted successfully')).toBeInTheDocument();
+    expect(await screen.findByText('Targets submitted successfully')).toBeInTheDocument();
   });
 
   it('checked: false because no KPI takes names from the target file → silent', async () => {

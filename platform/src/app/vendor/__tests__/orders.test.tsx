@@ -76,7 +76,7 @@ describe('Vendor orders list', () => {
     get.mockResolvedValue({ success: true, data: { items: [orderWith({})] } });
     render(<VendorOrdersPage />);
     expect(await screen.findByText('DEO-26-000123')).toBeInTheDocument();
-    expect(screen.getByText('Bluetooth Speaker')).toBeInTheDocument();
+    expect(await screen.findByText('Bluetooth Speaker')).toBeInTheDocument();
   });
 
   it('OL2: a 403 shows the blocked panel with a Retry that recovers (transient block)', async () => {
@@ -116,11 +116,11 @@ describe('Vendor order detail', () => {
     render(<VendorOrderDetailPage />);
     expect(await screen.findByText('DEO-26-000123')).toBeInTheDocument();
     // Delivery PII the vendor needs to SHIP (C2 — this is the core dispatch flow).
-    expect(screen.getByText('Ravi Kumar')).toBeInTheDocument();
-    expect(screen.getByText('12 MG Road, Pune, MH, 411001')).toBeInTheDocument();
-    expect(screen.getByText('9876543210')).toBeInTheDocument();
+    expect(await screen.findByText('Ravi Kumar')).toBeInTheDocument();
+    expect(await screen.findByText('12 MG Road, Pune, MH, 411001')).toBeInTheDocument();
+    expect(await screen.findByText('9876543210')).toBeInTheDocument();
     // Item name resolves from the mapped `rewardName` (was "—" under the old raw shape).
-    expect(screen.getAllByText('Bluetooth Speaker').length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Bluetooth Speaker')).length).toBeGreaterThan(0);
     // PRIVACY (#15): the 194R cost basis is never sent → no rupee value / points shown.
     expect(screen.queryByText('₹1,999')).not.toBeInTheDocument();
     expect(screen.queryByText('1,999')).not.toBeInTheDocument();
@@ -165,11 +165,11 @@ describe('Vendor order detail', () => {
     });
     render(<VendorOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    expect(screen.getByTestId('ff-voucher-code-readonly')).toHaveTextContent('VEND-CODE-4321');
+    expect(await screen.findByTestId('ff-voucher-code-readonly')).toHaveTextContent('VEND-CODE-4321');
     expect(screen.queryByTestId('ff-voucher-code')).toBeNull();
     expect(screen.queryByTestId('ff-voucher-pin')).toBeNull();
-    expect(screen.getByTestId('ff-voucher-pin-readonly')).toHaveTextContent('PIN ••••');
-    const toggle = screen.getByRole('button', { name: 'Show PIN for order DEO-26-000123' });
+    expect(await screen.findByTestId('ff-voucher-pin-readonly')).toHaveTextContent('PIN ••••');
+    const toggle = await screen.findByRole('button', { name: 'Show PIN for order DEO-26-000123' });
     expect(toggle).toHaveTextContent('Show PIN');
     expect(toggle).not.toHaveAttribute('aria-pressed');
   });
@@ -179,7 +179,7 @@ describe('Vendor order detail', () => {
     render(<VendorOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
 
-    expect(screen.getByTestId('transition-DISPATCHED')).toBeInTheDocument();
+    expect(await screen.findByTestId('transition-DISPATCHED')).toBeInTheDocument();
     expect(screen.queryByTestId('transition-CANCELLED')).not.toBeInTheDocument();
     expect(screen.queryByTestId('transition-RETURNED')).not.toBeInTheDocument();
     expect(screen.queryByTestId('transition-FAILED')).not.toBeInTheDocument();
@@ -189,7 +189,7 @@ describe('Vendor order detail', () => {
     get.mockResolvedValue({ success: true, data: orderWith({ status: 'DISPATCHED' }) });
     render(<VendorOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    expect(screen.getByTestId('transition-DELIVERED')).toBeInTheDocument();
+    expect(await screen.findByTestId('transition-DELIVERED')).toBeInTheDocument();
     expect(screen.queryByTestId('transition-RETURNED')).not.toBeInTheDocument();
   });
 
@@ -199,7 +199,7 @@ describe('Vendor order detail', () => {
     await screen.findByText('DEO-26-000123');
     expect(screen.queryByTestId('transition-DELIVERED')).not.toBeInTheDocument();
     expect(screen.queryByTestId('transition-RETURNED')).not.toBeInTheDocument();
-    expect(screen.getByText(/only Gifsy can cancel or reverse/i)).toBeInTheDocument();
+    expect(await screen.findByText(/only Gifsy can cancel or reverse/i)).toBeInTheDocument();
   });
 
   it('OD6: a dispatch transition confirms then POSTs to the vendor transition endpoint', async () => {

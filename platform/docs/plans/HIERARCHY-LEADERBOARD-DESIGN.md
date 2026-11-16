@@ -1,6 +1,6 @@
 # Hierarchy-driven leaderboard — design (source of truth)
 
-**Status:** building · 2026-11-03 · **PLATFORM-WIDE** (owner-approved in-session — changes every
+**Status:** ✅ IN PROD (`9b3d7034` on `main`, early November 2026) · designed 2026-11-03 · **PLATFORM-WIDE** (owner-approved in-session — changes every
 tenant's Ranks screen, incl. live Deoleo).
 
 ## Problem

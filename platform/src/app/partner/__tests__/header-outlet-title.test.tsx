@@ -80,9 +80,9 @@ describe('HOT — partner header title from first paint', () => {
     expect(pending).toHaveLength(1); // /partner/me still in flight
     expect(title(container)).not.toContain(PERSON);
     // Person name stays on the sub-line (same person) …
-    expect(screen.getAllByText(PERSON).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(PERSON)).length).toBeGreaterThan(0);
     // … and the desktop sidebar shows the business, not the person, as its name line.
-    expect(screen.getByTestId('sidebar-user').textContent).toBe(`Chakradhar Traders|${PERSON}`);
+    expect((await screen.findByTestId('sidebar-user')).textContent).toBe(`Chakradhar Traders|${PERSON}`);
   });
 
   it('HOT2: /partner/me overrides the seeded values', async () => {

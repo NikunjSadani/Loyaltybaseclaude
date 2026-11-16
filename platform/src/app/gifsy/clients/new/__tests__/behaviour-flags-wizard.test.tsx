@@ -44,7 +44,7 @@ describe('New-client wizard — behaviour flags', () => {
     const postSpy = vi.fn();
     stubFetch(postSpy);
     await walkToFeatures();
-    const sw = screen.getByTestId('wizard-behaviour-flag-allowPayoutWithoutPan');
+    const sw = await screen.findByTestId('wizard-behaviour-flag-allowPayoutWithoutPan');
     fireEvent.click(sw);
     fireEvent.click(within(await screen.findByTestId('behaviour-flag-confirm')).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
@@ -61,7 +61,7 @@ describe('New-client wizard — behaviour flags', () => {
   it('W5: other behaviour flags flip immediately in the wizard (no confirm)', async () => {
     stubFetch(vi.fn());
     await walkToFeatures();
-    const sw = screen.getByTestId('wizard-behaviour-flag-soDeclarationKyc');
+    const sw = await screen.findByTestId('wizard-behaviour-flag-soDeclarationKyc');
     fireEvent.click(sw);
     expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
     expect(sw).toHaveAttribute('aria-checked', 'true');
@@ -86,7 +86,7 @@ describe('New-client wizard — behaviour flags', () => {
     const postSpy = vi.fn();
     stubFetch(postSpy);
     await walkToFeatures();
-    const sw = screen.getByTestId('wizard-behaviour-flag-outletMasterGeo');
+    const sw = await screen.findByTestId('wizard-behaviour-flag-outletMasterGeo');
     expect(sw).toHaveAttribute('aria-checked', 'false');
     fireEvent.click(sw);
     expect(sw).toHaveAttribute('aria-checked', 'true');
@@ -101,8 +101,8 @@ describe('New-client wizard — behaviour flags', () => {
     const postSpy = vi.fn();
     stubFetch(postSpy);
     await walkToFeatures();
-    expect(screen.getByText('Allow payouts without PAN')).toBeInTheDocument();
-    const sw = screen.getByTestId('wizard-behaviour-flag-allowPayoutWithoutPan');
+    expect(await screen.findByText('Allow payouts without PAN')).toBeInTheDocument();
+    const sw = await screen.findByTestId('wizard-behaviour-flag-allowPayoutWithoutPan');
     expect(sw).toHaveAttribute('aria-checked', 'false');
     fireEvent.click(sw);
     // Switching ON asks first (same dialog as the client page); nothing flips until confirmed.

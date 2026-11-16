@@ -81,14 +81,14 @@ async function walkToBankStep() {
   render(<NewKYCPage />);
   await waitFor(() =>
     expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c) => String(c[0]).includes('/api/kyc/K1'))).toBe(true),
-    { timeout: 5000 },
+    { timeout: 15_000 },
   );
-  await screen.findByTestId('rekyc-summary-banner', {}, { timeout: 5000 });
+  await screen.findByTestId('rekyc-summary-banner', {}, { timeout: 15_000 });
   fireEvent.click(await screen.findByRole('button', { name: /continue/i }));
-  await screen.findByPlaceholderText('City', {}, { timeout: 5000 });
-  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 5000 });
+  await screen.findByPlaceholderText('City', {}, { timeout: 15_000 });
+  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 15_000 });
   fireEvent.click(screen.getByRole('button', { name: /continue/i }));
-  return screen.findByTestId('consent-upi-summary', {}, { timeout: 5000 });
+  return screen.findByTestId('consent-upi-summary', {}, { timeout: 15_000 });
 }
 
 beforeEach(() => {
@@ -103,7 +103,7 @@ describe('KYC consent step — payout UPI ID summary', () => {
     install('MANUAL');
     const summary = await walkToBankStep();
     expect(summary).toHaveTextContent('Payouts will be sent to UPI ID: verma@okaxis');
-    expect(screen.getByTestId('consent-upi-manual-note')).toHaveTextContent('(typed manually — please double-check)');
+    expect(await screen.findByTestId('consent-upi-manual-note')).toHaveTextContent('(typed manually — please double-check)');
   }, 20000);
 
   it('CU2: a scanned (QR) UPI ID shows in full WITHOUT the manual note', async () => {

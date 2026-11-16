@@ -70,28 +70,28 @@ describe('Admin App Adoption page — real data', () => {
     mockFetchOk(PAYLOAD);
     render(<AppAdoptionPage />);
     expect(await screen.findByText('128')).toBeInTheDocument();
-    expect(screen.getByText('across 173 devices')).toBeInTheDocument();
+    expect(await screen.findByText('across 173 devices')).toBeInTheDocument();
   });
 
   it('AD2: renders a role breakdown row and an OS breakdown row', async () => {
     mockFetchOk(PAYLOAD);
     render(<AppAdoptionPage />);
     expect(await screen.findByText('PARTNER')).toBeInTheDocument();
-    expect(screen.getByText('Android')).toBeInTheDocument();
+    expect(await screen.findByText('Android')).toBeInTheDocument();
   });
 
   it('AD3: renders installed user count + a platform breakdown row', async () => {
     mockFetchOk(PAYLOAD);
     render(<AppAdoptionPage />);
     expect(await screen.findByText('64')).toBeInTheDocument();
-    expect(screen.getByText('ANDROID')).toBeInTheDocument();
+    expect(await screen.findByText('ANDROID')).toBeInTheDocument();
   });
 
   it('AD4: shows the empty state when all counts are zero', async () => {
     mockFetchOk(ZERO_PAYLOAD);
     render(<AppAdoptionPage />);
     expect(await screen.findByTestId('app-adoption-empty')).toBeInTheDocument();
-    expect(screen.getByText('No installs or subscriptions yet')).toBeInTheDocument();
+    expect(await screen.findByText('No installs or subscriptions yet')).toBeInTheDocument();
   });
 
   it('AD5: on fetch failure shows an error state and no fabricated numbers', async () => {

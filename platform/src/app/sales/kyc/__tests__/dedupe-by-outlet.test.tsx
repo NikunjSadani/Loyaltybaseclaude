@@ -67,7 +67,7 @@ describe('KYC list — one row per outlet, latest status', () => {
     await waitFor(() => expect(screen.getAllByText('Verma Traders').length).toBe(1));
     // …showing the LATEST status badge (Awaiting Gifsy). The superseded "Rejected"
     // attempt is gone from the rows — the only "Rejected" left is the filter <option>.
-    expect(screen.getByText('Awaiting Gifsy')).toBeInTheDocument();
+    expect(await screen.findByText('Awaiting Gifsy')).toBeInTheDocument();
     const rejectedNodes = screen.queryAllByText('Rejected').filter((n) => n.tagName !== 'OPTION');
     expect(rejectedNodes).toHaveLength(0);
   });

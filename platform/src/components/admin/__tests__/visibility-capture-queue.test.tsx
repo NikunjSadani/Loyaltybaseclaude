@@ -98,15 +98,15 @@ describe('VISQ — VisibilityCaptureQueue', () => {
   it('VISQ1: renders a row + the Outside geo-fence badge', async () => {
     render(<VisibilityCaptureQueue />);
     expect(await screen.findByText('Sharma Store')).toBeInTheDocument();
-    expect(screen.getByText(/Outside/)).toBeInTheDocument();
+    expect(await screen.findByText(/Outside/)).toBeInTheDocument();
   });
 
   it('VISQ2: the drawer shows duplicate matches + media grid', async () => {
     render(<VisibilityCaptureQueue />);
     fireEvent.click(await screen.findByRole('button', { name: /review/i }));
     expect(await screen.findByText(/Duplicate photo matches/i)).toBeInTheDocument();
-    expect(screen.getByText(/Same photo also on outlet/i)).toBeInTheDocument();
-    expect(screen.getByText(/Photos \(1\)/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Same photo also on outlet/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Photos \(1\)/i)).toBeInTheDocument();
   });
 
   it('VISQ3: Approve calls approveCapture', async () => {

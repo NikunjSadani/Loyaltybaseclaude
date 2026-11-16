@@ -1,6 +1,6 @@
 # Capture Bank/UPI payout details at redemption — design (source of truth)
 
-**Status:** DESIGN FROZEN · build in progress · 2026-11-03
+**Status:** ✅ IN PROD (on `main` since early November 2026; per-tenant flag `captureBankAtRedemption`, default OFF) · design frozen 2026-11-03
 **Classification:** ⚠️ PLATFORM-WIDE (shared redeem + payout + KYC code + schema). Owner-approved
 to build 2026-11-03. Deoleo stays **byte-identical** via: additive nullable schema defaulting
 VERIFIED, and the whole capture UX gated behind a per-tenant feature flag defaulting **OFF**.

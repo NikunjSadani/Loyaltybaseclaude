@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { __resetPermissionsForTests } from '@/lib/use-permissions';
 
 // Control usePathname per test via a hoisted holder.
@@ -60,7 +60,7 @@ describe('<AdminRouteGuard/>', () => {
     login('GIFSY_STAFF');
     installMe(['schemes:read']); // /admin/schemes → schemes:read
     render(<AdminRouteGuard>{PAGE}</AdminRouteGuard>);
-    await waitFor(() => expect(screen.getByText('SECRET PAGE CONTENT')).toBeTruthy());
+    expect(await screen.findByText('SECRET PAGE CONTENT')).toBeTruthy();
     expect(screen.queryByText("You don't have permission to access this")).toBeNull();
   });
 
@@ -68,9 +68,7 @@ describe('<AdminRouteGuard/>', () => {
     login('GIFSY_STAFF');
     installMe(['kyc:read']); // lacks schemes:read
     render(<AdminRouteGuard>{PAGE}</AdminRouteGuard>);
-    await waitFor(() =>
-      expect(screen.getByText("You don't have permission to access this")).toBeTruthy(),
-    );
+    expect(await screen.findByText("You don't have permission to access this")).toBeTruthy();
     expect(screen.queryByText('SECRET PAGE CONTENT')).toBeNull();
   });
 
@@ -79,6 +77,6 @@ describe('<AdminRouteGuard/>', () => {
     login('GIFSY_STAFF');
     installMe([]);
     render(<AdminRouteGuard>{PAGE}</AdminRouteGuard>);
-    await waitFor(() => expect(screen.getByText('SECRET PAGE CONTENT')).toBeTruthy());
+    expect(await screen.findByText('SECRET PAGE CONTENT')).toBeTruthy();
   });
 });

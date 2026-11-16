@@ -12,7 +12,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -94,10 +94,10 @@ describe('SPC — Sales KYC re-KYC proposed-change rendering', () => {
     stubFetch(REKYC);
     await renderPage();
     // Details auto-open on a proposed change → the proposed owner name is visible.
-    await waitFor(() => expect(screen.getByText('Mahesh Kumar')).toBeInTheDocument());
-    expect(screen.getByText(/was: Suresh Kumar/)).toBeInTheDocument();
+    expect(await screen.findByText('Mahesh Kumar')).toBeInTheDocument();
+    expect(await screen.findByText(/was: Suresh Kumar/)).toBeInTheDocument();
     // The changed fields carry the field-level badge (Owner Name + GST = 2).
-    expect(screen.getAllByTestId('proposed-change')).toHaveLength(2);
+    expect(await screen.findAllByTestId('proposed-change')).toHaveLength(2);
   });
 
   it('SPC4: a staged outlet-address change shows the proposed address + "was: <old>"', async () => {
@@ -111,15 +111,14 @@ describe('SPC — Sales KYC re-KYC proposed-change rendering', () => {
     const banner = await screen.findByTestId('proposed-changes-banner');
     expect(banner).toHaveTextContent('Address');
     // Details auto-open → proposed (overlaid) address is primary, old address as "was".
-    await waitFor(() =>
-      expect(screen.getByText('88 New Bazaar St, Pune, Maharashtra, 411002')).toBeInTheDocument());
-    expect(screen.getByText(/was: 12 Market Road, Mumbai, Maharashtra, 400001/)).toBeInTheDocument();
+    expect(await screen.findByText('88 New Bazaar St, Pune, Maharashtra, 411002')).toBeInTheDocument();
+    expect(await screen.findByText(/was: 12 Market Road, Mumbai, Maharashtra, 400001/)).toBeInTheDocument();
   });
 
   it('SPC3: no proposedPartner → no banner, no badges', async () => {
     stubFetch({ ...BASE, proposedPartner: null });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('Kumar General Store')).toBeInTheDocument());
+    expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
     expect(screen.queryByTestId('proposed-changes-banner')).not.toBeInTheDocument();
     expect(screen.queryByTestId('proposed-change')).not.toBeInTheDocument();
   });
@@ -137,7 +136,7 @@ describe('SPV — Sales KYC verified-on-parent badge', () => {
   it('SPV1: parent-verified fields show the badge (details opened manually)', async () => {
     stubFetch({ ...BASE, proposedPartner: null, parentVerified: { panNumber: true, gstNumber: true } });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('Kumar General Store')).toBeInTheDocument());
+    expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
     // No proposed change → details stay closed; open Store Information to reveal the fields.
     fireEvent.click(screen.getByRole('button', { name: /store information/i }));
     expect(screen.getAllByTestId('verified-on-parent-badge')).toHaveLength(2);
@@ -149,11 +148,11 @@ describe('SPV — Sales KYC verified-on-parent badge', () => {
     stubFetch({ ...REKYC, parentVerified: { gstNumber: true } });
     await renderPage();
     // A proposed change auto-opens details → the proposed owner name is visible.
-    await waitFor(() => expect(screen.getByText('Mahesh Kumar')).toBeInTheDocument());
+    expect(await screen.findByText('Mahesh Kumar')).toBeInTheDocument();
     // Proposed pills unchanged (Owner + GST = 2)…
-    expect(screen.getAllByTestId('proposed-change')).toHaveLength(2);
+    expect(await screen.findAllByTestId('proposed-change')).toHaveLength(2);
     // …plus exactly one verified badge (GST).
-    expect(screen.getAllByTestId('verified-on-parent-badge')).toHaveLength(1);
+    expect(await screen.findAllByTestId('verified-on-parent-badge')).toHaveLength(1);
   });
 
   it('SPV3: a masked reader still gets the badge (parentVerified pre-mask)', async () => {
@@ -164,7 +163,7 @@ describe('SPV — Sales KYC verified-on-parent badge', () => {
       parentVerified: { panNumber: true },
     });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('Kumar General Store')).toBeInTheDocument());
+    expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /store information/i }));
     expect(screen.getByTestId('verified-on-parent-badge')).toBeInTheDocument();
   });
@@ -172,7 +171,7 @@ describe('SPV — Sales KYC verified-on-parent badge', () => {
   it('SPV4: no parentVerified → no badge (purely additive)', async () => {
     stubFetch({ ...BASE, proposedPartner: null });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('Kumar General Store')).toBeInTheDocument());
+    expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /store information/i }));
     expect(screen.queryByTestId('verified-on-parent-badge')).not.toBeInTheDocument();
   });
@@ -206,6 +205,6 @@ describe('SGL — Sales KYC group-leave banner', () => {
     await renderPage();
     // Both banners present — the group-leave warning does not replace the proposed-changes one.
     expect(await screen.findByTestId('group-leave-banner')).toBeInTheDocument();
-    expect(screen.getByTestId('proposed-changes-banner')).toBeInTheDocument();
+    expect(await screen.findByTestId('proposed-changes-banner')).toBeInTheDocument();
   });
 });

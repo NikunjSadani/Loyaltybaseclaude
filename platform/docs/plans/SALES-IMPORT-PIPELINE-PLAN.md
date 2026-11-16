@@ -1,6 +1,12 @@
 # Sales Import Pipeline — Implementation Plan (DMS invoice-line file → monthly KPI achievements)
 
-> **Status (2026-11-11): P0–P3 COMPLETE · P4 STAGING DONE — LIVE on staging since develop `7c85d9fd` (2026-11-11), NOT on prod.**
+> **Status (2026-11-16): ✅ LIVE ON PROD** — shipped with #59 (`a18cc932`, 2026-11-12); FOCUS-FROM-TARGETS + the
+> PRODUCT_COUNT ("LINES") measure shipped in `e242b1a1`; prod serves `2eb8271d`. Prod infra exists (§14). `salesImport`
+> is ON for Bajaj; **November 2026 applied on prod 2026-11-15 and verified per outlet (6,452 records); the month is OPEN**
+> (points rules for November pending a dedicated rule-engine session — do not close the month or compute points before
+> then). **Read §18 (traps learned on the prod November apply) before configuring KPIs or uploading targets.**
+>
+> _(Historical status 2026-11-11 follows.)_ **P0–P3 COMPLETE · P4 STAGING DONE — LIVE on staging since develop `7c85d9fd` (2026-11-11), NOT on prod (at that date).**
 > Shipped to staging as part of one release with batch #59 (+ Bajaj prod config screens, branding/routing fixes, per-user rate limits,
 > OTP hardening); the owner releases it to prod TOGETHER with #59. Includes the extras (§10c): month history product-list summary +
 > **"Rebuild product list"**, KPI picker from month history, reprocess-as-new, graceful worker stop (SIGTERM, exit 143), and the runner
@@ -1342,7 +1348,13 @@ KPIs (owner D-8/D-9). Synthetic-file steps not run on staging (covered by tests 
 ---
 
 ## 14. Infra changes (owner-gated, D-4)
-> **Status 2026-11-11 — STAGING DONE, PROD PENDING the owner.** Staging (owner-approved 2026-11-10/11): secret
+> **Status 2026-11-16 — STAGING + PROD DONE.** Prod (verified 2026-11-13): secret `SALES_IMPORT_DRAIN_SECRET` (in the
+> prod deploy preflight), job `gifsy-sales-import` deployed by `deploy.yml` after the migrate step, API env
+> `SALES_IMPORT_RUNNER=job` / `SALES_IMPORT_JOB=gifsy-sales-import`, `run.jobsExecutor` for `gifsy-api-sa`, Scheduler
+> `sales-import-drain` (`*/10`, ENABLED). API memory is 1 GiB on prod + staging since `e242b1a1` (the 512Mi figures in
+> §3 are historical). The 2026-11-11 status below is historical.
+>
+> _(Historical)_ **Status 2026-11-11 — STAGING DONE, PROD PENDING the owner.** Staging (owner-approved 2026-11-10/11): secret
 > `SALES_IMPORT_DRAIN_SECRET_STAGING`; Cloud Run Job `gifsy-sales-import-staging` (args `--max-old-space-size=1700
 > dist/sales-import/worker.main.js`, 2Gi, 1 CPU, 3600 s, 1 retry; deployed by `deploy-staging.yml`, serves `staging-7c85d9fd`);
 > `roles/run.jobsExecutor` for `gifsy-api-sa` on that job (no overrides needed); Cloud Scheduler `sales-import-drain-staging`
@@ -1414,6 +1426,9 @@ KPIs (owner D-8/D-9). Synthetic-file steps not run on staging (covered by tests 
 - New RBAC permission keys (D-5 A).
 
 ## 17. Open questions (to the owner)
+_(Status 2026-11-16: prod infra created and verified 2026-11-13; Bajaj prod KPI config done and November 2026 applied
+2026-11-15. Q5 (KPI codes) is settled by the prod KPI configuration; Q4 (points per case / cap) belongs to the pending
+November points-rule session — see `RESUME.md` §4.)_
 _(Status 2026-11-11: Q1–Q3 DECIDED — D-1 = A, D-3 = A, D-4 = A; staging infra approved + CREATED 2026-11-10/11, prod infra = separate OK at release.
 Q7 decided = 30 days for per-import data (§14). Q4–Q5 still open and now BLOCKING the staging apply of the real import `6b681de7…`: the
 owner supplies points per case, monthly cap, KPI list and focus sets (BSC wholesalers only).)_
@@ -1426,6 +1441,24 @@ owner supplies points per case, monthly cap, KPI list and focus sets (BSC wholes
    become importer-owned (it is currently manually backfilled)?
 6. Should closing a month also be blocked while an apply/import for it is in flight? (Plan: close takes the same lock, so they serialize. No extra block.)
 7. Retention for raw uploaded files (plan: 30 days after READY).
+
+---
+
+## 18. Traps learned on the prod November 2026 apply (2026-11-15) — read before configuring or uploading
+
+1. **Focus product names come from the target file's SECOND column with the same heading.** When a KPI has a per-outlet
+   name override whose label equals the KPI's own label (Bajaj FOCUS BRAND / FOCUS BRAND 2), the target-upload parser
+   (`api/src/targets/targets.helpers.ts`, `parseTargetUploadBuffer`) takes the **first** column with that heading as
+   the target VALUE and the **second** as the per-outlet NAMES, stored in `OutletTarget.targetValues.__names[kpiCode]`.
+   A KPI with `productSource: 'TARGET_NAMES'` (FOCUS-FROM-TARGETS) reads its products only from there. If the second
+   column is missing, renamed or moved outside the month block, that month has no focus names → the month preview's
+   reconciliation shows the gap/blocker. Check the preview before apply; never assume the names arrived.
+2. **The Sales Import KPI scope is INTERSECTED with the target KPI's applies-to scope** (Targets → KPIs: outlet types /
+   programs / sub-programs). `sales-kpi.helper.ts` `intersectAppliesTo(definition scope, KpiDef scope)`: a sales-import
+   definition scoped wider than its target KPI still writes only the target KPI's outlets; a disjoint pair writes no
+   outlet. When a value is "missing" for an outlet, check both scopes first.
+3. Result of the November apply: 6,452 outlet records written and verified per outlet; month left OPEN for the points
+   rule (SAMT gate on NON ADHO ≥ ₹200 Elite / ≥ ₹400 Privilege, plus the rest of the rule — dedicated session pending).
 
 ---
 

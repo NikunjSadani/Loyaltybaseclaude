@@ -54,14 +54,14 @@ describe('GiftDisbursalPage', () => {
     const row = await screen.findByTestId('disbursal-row');
     expect(row).toBeInTheDocument();
     // "Acme" also appears in the vendor filter <option>; scope to the row.
-    expect(within(row).getByText('Acme')).toBeInTheDocument();
-    expect(screen.getByTestId('disbursal-total-value')).toHaveTextContent('7,000');
+    expect(await within(row).findByText('Acme')).toBeInTheDocument();
+    expect(await screen.findByTestId('disbursal-total-value')).toHaveTextContent('7,000');
   });
 
   it('names the value column "Delivered value (₹)" (parity with the Excel + DELIVERED-only basis)', async () => {
     render(<GiftDisbursalPage />);
     await screen.findByTestId('disbursal-row');
-    expect(screen.getByRole('columnheader', { name: /delivered value \(₹\)/i })).toBeInTheDocument();
+    expect(await screen.findByRole('columnheader', { name: /delivered value \(₹\)/i })).toBeInTheDocument();
     // The old ambiguous "Value (₹)" header is gone.
     expect(screen.queryByRole('columnheader', { name: /^value \(₹\)$/i })).not.toBeInTheDocument();
   });
@@ -69,7 +69,7 @@ describe('GiftDisbursalPage', () => {
   it('GIFSY scope: shows the Tenant filter + column and can send clientId', async () => {
     render(<GiftDisbursalPage />);
     await screen.findByTestId('disbursal-row');
-    expect(screen.getByTestId('filter-tenant')).toBeInTheDocument();
+    expect(await screen.findByTestId('filter-tenant')).toBeInTheDocument();
 
     fireEvent.change(screen.getByTestId('filter-tenant'), { target: { value: 'deoleo' } });
     fireEvent.change(screen.getByTestId('filter-vendor'), { target: { value: 'v1' } });
@@ -108,6 +108,6 @@ describe('GiftDisbursalPage', () => {
     get.mockResolvedValue({ success: false, error: 'Boom' });
     render(<GiftDisbursalPage />);
     const err = await screen.findByTestId('disbursal-error');
-    expect(within(err).getByText('Boom')).toBeInTheDocument();
+    expect(await within(err).findByText('Boom')).toBeInTheDocument();
   });
 });

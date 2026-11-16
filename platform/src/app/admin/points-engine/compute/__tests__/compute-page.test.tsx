@@ -165,20 +165,20 @@ describe('Points Engine compute page', () => {
     await runPreview();
 
     // Summary cards (labels).
-    await waitFor(() => expect(screen.getByText('Total points')).toBeInTheDocument());
-    expect(screen.getByText('No rule')).toBeInTheDocument();
+    expect(await screen.findByText('Total points')).toBeInTheDocument();
+    expect(await screen.findByText('No rule')).toBeInTheDocument();
     // 1,300 appears in both the Total-points card and the OK row's points cell — assert presence, not uniqueness.
-    expect(screen.getAllByText('1,300').length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('1,300')).length).toBeGreaterThan(0);
 
     // OK row (table) + ERROR row (panel).
-    expect(screen.getByTestId('group-OK')).toBeInTheDocument();
-    expect(screen.getByText('OUT-001')).toBeInTheDocument();
-    expect(screen.getByTestId('group-ERROR')).toBeInTheDocument();
-    expect(screen.getByText('OUT-002')).toBeInTheDocument();
-    expect(screen.getByText(/missing target value/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('group-OK')).toBeInTheDocument();
+    expect(await screen.findByText('OUT-001')).toBeInTheDocument();
+    expect(await screen.findByTestId('group-ERROR')).toBeInTheDocument();
+    expect(await screen.findByText('OUT-002')).toBeInTheDocument();
+    expect(await screen.findByText(/missing target value/i)).toBeInTheDocument();
 
     // Rule versions chip.
-    expect(screen.getByText('rule_cases_q3@7')).toBeInTheDocument();
+    expect(await screen.findByText('rule_cases_q3@7')).toBeInTheDocument();
   });
 
   it('PE-C2: engineDisabled shows the amber banner', async () => {
@@ -186,8 +186,8 @@ describe('Points Engine compute page', () => {
     render(<ComputePage />);
     await runPreview();
 
-    await waitFor(() => expect(screen.getByTestId('engine-disabled')).toBeInTheDocument());
-    expect(screen.getByText(/points engine is disabled for this tenant/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('engine-disabled')).toBeInTheDocument();
+    expect(await screen.findByText(/points engine is disabled for this tenant/i)).toBeInTheDocument();
     // No direct-credit affordance when the engine is disabled.
     expect(screen.queryByRole('button', { name: /credit in portal/i })).not.toBeInTheDocument();
   });
@@ -212,9 +212,9 @@ describe('Points Engine compute page', () => {
     render(<ComputePage />);
     await runPreview();
 
-    await waitFor(() => expect(screen.getByTestId('group-ERROR')).toBeInTheDocument());
+    expect(await screen.findByTestId('group-ERROR')).toBeInTheDocument();
     // Export is still available, direct credit is not.
-    expect(screen.getByRole('button', { name: /download credit-upload file/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /download credit-upload file/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /credit in portal/i })).not.toBeInTheDocument();
   });
 
@@ -231,10 +231,10 @@ describe('Points Engine compute page', () => {
       expect.objectContaining({ period: expect.any(String), expectedKey: 'deoleo|2026-09|cf_x|v7' }),
     );
 
-    await waitFor(() => expect(screen.getByTestId('commit-result')).toBeInTheDocument());
-    expect(screen.getByText('PEB-2026-09-001')).toBeInTheDocument();
+    expect(await screen.findByTestId('commit-result')).toBeInTheDocument();
+    expect(await screen.findByText('PEB-2026-09-001')).toBeInTheDocument();
 
-    const link = screen.getByRole('link', { name: /review .* confirm this batch in credits/i });
+    const link = await screen.findByRole('link', { name: /review .* confirm this batch in credits/i });
     expect(link).toHaveAttribute('href', '/admin/credits-payouts/status');
   });
 
@@ -265,8 +265,8 @@ describe('Points Engine compute page', () => {
     await runPreview();
 
     fireEvent.click(await screen.findByRole('button', { name: /credit in portal/i }));
-    await waitFor(() => expect(screen.getByTestId('commit-result')).toBeInTheDocument());
-    expect(screen.getByText(/already 2 credit batches for this period/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('commit-result')).toBeInTheDocument();
+    expect(await screen.findByText(/already 2 credit batches for this period/i)).toBeInTheDocument();
   });
 
   it('PE-C7: engineDisabled OK-group footer omits the credit-upload file reference', async () => {
@@ -291,8 +291,8 @@ describe('Points Engine compute page', () => {
     render(<ComputePage />);
     await runPreview();
 
-    await waitFor(() => expect(screen.getByTestId('group-OK')).toBeInTheDocument());
-    const footer = screen.getByText(/showing the first/i);
+    expect(await screen.findByTestId('group-OK')).toBeInTheDocument();
+    const footer = await screen.findByText(/showing the first/i);
     expect(footer.textContent).toMatch(/review report/i);
     expect(footer.textContent).not.toMatch(/credit-upload file/i);
   });
@@ -311,13 +311,13 @@ describe('Points Engine compute page', () => {
     await runPreview();
 
     // Total payout card. ₹2,500 shows in both the card and the payout row — assert presence, not uniqueness.
-    await waitFor(() => expect(screen.getByText('Total payout')).toBeInTheDocument());
-    expect(screen.getAllByText('₹2,500').length).toBeGreaterThan(0);
+    expect(await screen.findByText('Total payout')).toBeInTheDocument();
+    expect((await screen.findAllByText('₹2,500')).length).toBeGreaterThan(0);
 
     // The payout group renders its rows with ₹ amounts.
-    const payoutGroup = screen.getByTestId('group-PAYOUT');
+    const payoutGroup = await screen.findByTestId('group-PAYOUT');
     expect(payoutGroup).toBeInTheDocument();
-    expect(screen.getByText('OUT-003')).toBeInTheDocument();
+    expect(await screen.findByText('OUT-003')).toBeInTheDocument();
     expect(payoutGroup.textContent).toMatch(/to pay out/i);
   });
 
@@ -368,7 +368,7 @@ describe('Points Engine compute page', () => {
     fireEvent.click(await screen.findByRole('button', { name: /download payout report/i }));
     const note = await screen.findByTestId('download-queued');
     expect(note).toHaveTextContent("We're preparing your file.");
-    expect(screen.getByRole('link', { name: /open downloads/i })).toHaveAttribute('href', '/admin/downloads');
+    expect(await screen.findByRole('link', { name: /open downloads/i })).toHaveAttribute('href', '/admin/downloads');
     expect(screen.queryByText(/payout report downloaded/i)).not.toBeInTheDocument();
   });
 
@@ -385,12 +385,12 @@ describe('Points Engine compute page', () => {
     render(<ComputePage />);
     await runPreview();
 
-    await waitFor(() => expect(screen.getByTestId('group-PAYOUT')).toBeInTheDocument());
+    expect(await screen.findByTestId('group-PAYOUT')).toBeInTheDocument();
     // No points rows → the credit-upload file is disabled and in-portal crediting is not offered.
-    expect(screen.getByRole('button', { name: /download credit-upload file/i })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: /download credit-upload file/i })).toBeDisabled();
     expect(screen.queryByRole('button', { name: /credit in portal/i })).not.toBeInTheDocument();
     // The payout report is still available.
-    expect(screen.getByRole('button', { name: /download payout report/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /download payout report/i })).toBeInTheDocument();
   });
 
   it('PE-C11: the Program filter is a searchable dropdown listing the tenant\'s configured programs', async () => {
@@ -402,8 +402,8 @@ describe('Points Engine compute page', () => {
     // Open the list → the configured programs (from outletPrograms) are the options.
     fireEvent.click(programInput);
     expect(await screen.findByTestId('pe-program-option-Unnati')).toBeInTheDocument();
-    expect(screen.getByTestId('pe-program-option-BSC')).toBeInTheDocument();
-    expect(screen.getByTestId('pe-program-option-SAMT')).toBeInTheDocument();
+    expect(await screen.findByTestId('pe-program-option-BSC')).toBeInTheDocument();
+    expect(await screen.findByTestId('pe-program-option-SAMT')).toBeInTheDocument();
   });
 
   it('PE-C12: the KPI filter dropdown lists the enabled codes from /api/admin/kpis and omits disabled ones', async () => {
@@ -414,7 +414,7 @@ describe('Points Engine compute page', () => {
     fireEvent.click(kpiInput);
 
     expect(await screen.findByTestId('pe-kpi-option-CASES_SOLD')).toBeInTheDocument();
-    expect(screen.getByTestId('pe-kpi-option-LITRES_SOLD')).toBeInTheDocument();
+    expect(await screen.findByTestId('pe-kpi-option-LITRES_SOLD')).toBeInTheDocument();
     // enabled:false is filtered out (parity with the rule builder).
     expect(screen.queryByTestId('pe-kpi-option-DISABLED_KPI')).not.toBeInTheDocument();
   });
@@ -459,8 +459,8 @@ describe('Points Engine compute page', () => {
     render(<ComputePage />);
     await runPreview();
     const group = await screen.findByTestId('group-SKIP');
-    expect(within(group).getAllByText(/KPI not applicable to this outlet \(KPI scope\)/)).toHaveLength(2);
-    expect(within(group).getByTestId('skip-kpi-scope-count')).toHaveTextContent("2 because the KPI doesn't apply to that outlet (KPI scope)");
+    expect(await within(group).findAllByText(/KPI not applicable to this outlet \(KPI scope\)/)).toHaveLength(2);
+    expect(await within(group).findByTestId('skip-kpi-scope-count')).toHaveTextContent("2 because the KPI doesn't apply to that outlet (KPI scope)");
   });
 
   it('PE-C16: no scope-skip line when no SKIP row is a KPI-scope skip', async () => {

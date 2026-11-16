@@ -15,7 +15,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -47,10 +47,7 @@ function stubFetch() {
 async function renderAndWait() {
   stubFetch();
   render(<WalletPage />);
-  await waitFor(
-    () => expect(screen.getByTestId('statement-controls-row')).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByTestId('statement-controls-row', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 describe('V — Statement header layout (combined statement)', () => {

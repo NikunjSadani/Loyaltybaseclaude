@@ -82,7 +82,7 @@ describe('months page', () => {
     render(<MonthsPage />);
     await screen.findByText('September 2026');
     expect(screen.queryByRole('button', { name: /Reopen/ })).not.toBeInTheDocument();
-    expect(screen.getByText(/Ask Gifsy to reopen it/)).toBeInTheDocument();
+    expect(await screen.findByText(/Ask Gifsy to reopen it/)).toBeInTheDocument();
   });
 
   it('GIFSY_ADMIN can reopen a closed month', async () => {
@@ -149,7 +149,7 @@ describe('months page — recalculate from stored history', () => {
     expect(panel).toHaveTextContent('5 outlets would change');
     expect(panel).toHaveTextContent('New KPI');
     expect(panel).toHaveTextContent('+₹900');
-    expect(screen.getByTestId('recalc-panel-2026-10')).toHaveTextContent('nothing is re-uploaded');
+    expect(await screen.findByTestId('recalc-panel-2026-10')).toHaveTextContent('nothing is re-uploaded');
     const callsBefore = apiMock.months.mock.calls.length;
     await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
     expect((window.confirm as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatch(/Nothing is re-uploaded/);
@@ -188,7 +188,7 @@ describe('months page — recalculate from stored history', () => {
     render(<MonthsPage />);
     const btn = await screen.findByRole('button', { name: 'Recalculate October 2026 from stored history' });
     expect(btn).toBeDisabled();
-    expect(screen.getByText('Gifsy must reopen this month first')).toBeInTheDocument();
+    expect(await screen.findByText('Gifsy must reopen this month first')).toBeInTheDocument();
   });
 
   it('no action for a month without history, or without targets:upload', async () => {
@@ -210,7 +210,7 @@ describe('months page — recalculate from stored history', () => {
     render(<MonthsPage />);
     fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
     expect(await screen.findByTestId('recalc-apply')).toBeDisabled();
-    expect(screen.getByTestId('recalc-blocked')).toHaveTextContent('October 2026 is closed.');
+    expect(await screen.findByTestId('recalc-blocked')).toHaveTextContent('October 2026 is closed.');
   });
 
   it('MAPPING_CHANGED is explained in full without hover; recalculation stays possible', async () => {
@@ -221,7 +221,7 @@ describe('months page — recalculate from stored history', () => {
     expect(await screen.findByTestId('recalc-warnings')).toHaveTextContent(
       /column settings changed after this month was saved\. Every KPI can still be calculated from the stored lines.*check the totals before you recalculate/,
     );
-    expect(screen.getByTestId('recalc-apply')).toBeEnabled();
+    expect(await screen.findByTestId('recalc-apply')).toBeEnabled();
   });
 
   it('a blocked recalculation shows the reason prominently (alert), not only beside the button', async () => {
@@ -235,7 +235,7 @@ describe('months page — recalculate from stored history', () => {
     expect(b).toHaveAttribute('role', 'alert');
     expect(b).toHaveTextContent('October 2026 cannot be recalculated: KPI_X uses the "Pack size" column');
     expect(b.textContent).not.toContain('..');
-    expect(screen.getByTestId('recalc-apply')).toBeDisabled();
+    expect(await screen.findByTestId('recalc-apply')).toBeDisabled();
   });
 
   it('404 (no stored history) is explained', async () => {

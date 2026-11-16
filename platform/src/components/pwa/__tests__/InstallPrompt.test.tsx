@@ -89,11 +89,14 @@ describe('InstallPrompt', () => {
     vi.stubEnv('NEXT_PUBLIC_PWA_INSTALL_ENABLED', 'true');
     mockState = { canInstall: true, installed: false };
     render(<InstallPrompt />);
+    const before = Date.now();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     const stored = Number(localStorage.getItem(SNOOZE_KEY));
     expect(Number.isFinite(stored)).toBe(true);
     // Recent timestamp (within the last few seconds).
-    expect(Date.now() - stored).toBeLessThan(5000);
+    // Fresh timestamp written by THIS click (bracketed, no wall-clock budget to flake under load).
+    expect(stored).toBeGreaterThanOrEqual(before);
+    expect(stored).toBeLessThanOrEqual(Date.now());
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 

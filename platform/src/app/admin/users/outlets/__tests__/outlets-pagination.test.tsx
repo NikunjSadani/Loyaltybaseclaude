@@ -96,8 +96,8 @@ describe('Outlets list — server pagination + filtering', () => {
 
   it('renders the current server page and a Next control when more pages exist', async () => {
     render(<OutletsPage />);
-    await waitFor(() => expect(screen.getByTestId('outlets-next-page')).toBeInTheDocument());
+    expect(await screen.findByTestId('outlets-next-page')).toBeInTheDocument();
     // The current page shows the server-returned row, not a client-filtered subset.
-    expect(screen.getAllByTestId('outlet-row').length).toBeGreaterThan(0);
+    expect((await screen.findAllByTestId('outlet-row')).length).toBeGreaterThan(0);
   });
 });

@@ -125,8 +125,8 @@ describe('VISCFG — VisibilityConfigEditor', () => {
     render(<VisibilityConfigEditor />);
 
     // The warning appears and the Save button is disabled → no setConfig even on click.
-    await waitFor(() => expect(screen.getByTestId('geo-fence-no-gps-warning')).toBeInTheDocument());
-    const saveBtn = screen.getByRole('button', { name: /save configuration/i });
+    expect(await screen.findByTestId('geo-fence-no-gps-warning')).toBeInTheDocument();
+    const saveBtn = await screen.findByRole('button', { name: /save configuration/i });
     expect(saveBtn).toBeDisabled();
     fireEvent.click(saveBtn);
     expect(setConfig).not.toHaveBeenCalled();

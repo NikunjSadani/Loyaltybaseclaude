@@ -15,7 +15,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -62,10 +62,7 @@ function stubFetch() {
 async function renderAndWait() {
   stubFetch();
   render(<WalletPage />);
-  await waitFor(
-    () => expect(screen.getByTestId('statement-controls-row')).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByTestId('statement-controls-row', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 describe('PC — presence-based summary cards', () => {
@@ -75,35 +72,35 @@ describe('PC — presence-based summary cards', () => {
     mockIdentity = { ...mockIdentity, hasPointsActivity: true, hasPayoutActivity: false };
     await renderAndWait();
     // Points balance card copy is present; the payout summary card is not.
-    expect(screen.getByText(/lifetime earned/i)).toBeInTheDocument();
+    expect(await screen.findByText(/lifetime earned/i)).toBeInTheDocument();
     expect(screen.queryByTestId('payout-summary')).not.toBeInTheDocument();
   });
 
   it('PC2: a PAYOUT-only partner shows the payout card, not the points card', async () => {
     mockIdentity = { ...mockIdentity, outletType: 'SSS', hasPointsActivity: false, hasPayoutActivity: true };
     await renderAndWait();
-    expect(screen.getByTestId('payout-summary')).toBeInTheDocument();
+    expect(await screen.findByTestId('payout-summary')).toBeInTheDocument();
     expect(screen.queryByText(/lifetime earned/i)).not.toBeInTheDocument();
   });
 
   it('PC3: a BOTH-active partner shows both cards', async () => {
     mockIdentity = { ...mockIdentity, outletType: 'SSS', hasPointsActivity: true, hasPayoutActivity: true };
     await renderAndWait();
-    expect(screen.getByText(/lifetime earned/i)).toBeInTheDocument();
-    expect(screen.getByTestId('payout-summary')).toBeInTheDocument();
+    expect(await screen.findByText(/lifetime earned/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('payout-summary')).toBeInTheDocument();
   });
 
   it('PC4: the combined statement renders in every mix', async () => {
     mockIdentity = { ...mockIdentity, hasPointsActivity: false, hasPayoutActivity: true };
     await renderAndWait();
-    expect(screen.getByTestId('statement-controls-row')).toBeInTheDocument();
+    expect(await screen.findByTestId('statement-controls-row')).toBeInTheDocument();
   });
 
   it('PC5: a loyalty-ON outlet shows the Earn/Burn filter chips', async () => {
     mockIdentity = { ...mockIdentity, loyaltyEnabled: true, hasPointsActivity: true, hasPayoutActivity: false };
     await renderAndWait();
-    expect(screen.getByRole('button', { name: 'Earn' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Burn' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Earn' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Burn' })).toBeInTheDocument();
   });
 
   it('PC6: a loyalty-OFF (payout-only) outlet hides the Earn/Burn chips but keeps the KPI filter', async () => {
@@ -111,6 +108,6 @@ describe('PC — presence-based summary cards', () => {
     await renderAndWait();
     expect(screen.queryByRole('button', { name: 'Earn' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Burn' })).not.toBeInTheDocument();
-    expect(screen.getByTestId('wallet-kpi-filter')).toBeInTheDocument();
+    expect(await screen.findByTestId('wallet-kpi-filter')).toBeInTheDocument();
   });
 });

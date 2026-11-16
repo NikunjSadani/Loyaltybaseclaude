@@ -82,6 +82,6 @@ describe('PublishDialog', () => {
     await screen.findByTestId('publish-price-cl1');
     fireEvent.change(screen.getByTestId('publish-price-cl1'), { target: { value: '' } });
     await screen.findByTestId('publish-error-cl1');
-    expect(screen.getByTestId('publish-open-confirm')).toBeDisabled();
+    expect(await screen.findByTestId('publish-open-confirm')).toBeDisabled();
   });
 });

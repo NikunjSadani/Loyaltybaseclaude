@@ -62,8 +62,8 @@ describe('Gift order detail', () => {
     get.mockResolvedValue({ success: true, data: orderWith({}) });
     render(<GiftOrderDetailPage />);
     expect(await screen.findByText('DEO-26-000123')).toBeInTheDocument();
-    expect(screen.getByText('Acme Gifts')).toBeInTheDocument();
-    expect(screen.getByText('(internal)')).toBeInTheDocument();
+    expect(await screen.findByText('Acme Gifts')).toBeInTheDocument();
+    expect(await screen.findByText('(internal)')).toBeInTheDocument();
   });
 
   it('OD2: PATCHes the fulfilment with the chosen channel + tracking', async () => {
@@ -99,10 +99,10 @@ describe('Gift order detail', () => {
     patch.mockResolvedValue({ success: true, data: {} });
     render(<GiftOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    expect(screen.getByTestId('ff-voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    expect(await screen.findByTestId('ff-voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
     expect(screen.queryByTestId('ff-voucher-code')).toBeNull();
-    expect(screen.getByTestId('ff-voucher-provider')).toHaveAttribute('readonly');
-    expect(screen.getByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
+    expect(await screen.findByTestId('ff-voucher-provider')).toHaveAttribute('readonly');
+    expect(await screen.findByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('PIN (if the card has one)'), { target: { value: ' 4455 ' } });
     fireEvent.click(screen.getByTestId('ff-save'));
     await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
@@ -128,7 +128,7 @@ describe('Gift order detail', () => {
     patch.mockResolvedValue({ success: true, data: {} });
     render(<GiftOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    const select = screen.getByTestId('ff-channel') as HTMLSelectElement;
+    const select = await screen.findByTestId('ff-channel') as HTMLSelectElement;
     expect(Array.from(select.options).every((o) => !o.disabled)).toBe(true);
     expect(screen.queryByTestId('ff-channel-hint')).toBeNull();
     fireEvent.change(select, { target: { value: 'GIFSY_WAREHOUSE' } });
@@ -159,7 +159,7 @@ describe('Gift order detail', () => {
     patch.mockResolvedValue({ success: true, data: {} });
     render(<GiftOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    const provider = screen.getByTestId('ff-voucher-provider');
+    const provider = await screen.findByTestId('ff-voucher-provider');
     expect(provider).not.toHaveAttribute('readonly');
     fireEvent.change(provider, { target: { value: 'Croma' } });
     fireEvent.click(screen.getByTestId('ff-save'));
@@ -175,7 +175,7 @@ describe('Gift order detail', () => {
     render(<GiftOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
     expect(screen.queryByTestId('ff-voucher-pin')).toBeNull();
-    const pin = screen.getByTestId('ff-voucher-pin-readonly');
+    const pin = await screen.findByTestId('ff-voucher-pin-readonly');
     expect(pin).toHaveTextContent('PIN ••••');
     expect(pin).not.toHaveTextContent('4455');
     fireEvent.click(screen.getByRole('button', { name: 'Show PIN for order DEO-26-000123' }));
@@ -192,7 +192,7 @@ describe('Gift order detail', () => {
     await screen.findByText('DEO-26-000123');
 
     // The field pre-fills with the stored value; the operator clears it.
-    expect((screen.getByTestId('ff-tracking-number') as HTMLInputElement).value).toBe('OLD-TRK');
+    expect((await screen.findByTestId('ff-tracking-number') as HTMLInputElement).value).toBe('OLD-TRK');
     fireEvent.change(screen.getByTestId('ff-tracking-number'), { target: { value: '' } });
     fireEvent.click(screen.getByTestId('ff-save'));
 
@@ -241,7 +241,7 @@ describe('Gift order detail', () => {
     get.mockResolvedValue({ success: true, data: orderWith({ status: 'DELIVERED' }) });
     render(<GiftOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    expect(screen.getByTestId('transition-RETURNED')).toBeInTheDocument();
+    expect(await screen.findByTestId('transition-RETURNED')).toBeInTheDocument();
     expect(screen.queryByTestId('transition-DELIVERED')).not.toBeInTheDocument();
   });
 
@@ -267,6 +267,6 @@ describe('Gift order detail', () => {
     get.mockResolvedValue({ success: true, data: orderWith({ status: 'CANCELLED' }) });
     render(<GiftOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    expect(screen.getByText(/no further transitions/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no further transitions/i)).toBeInTheDocument();
   });
 });

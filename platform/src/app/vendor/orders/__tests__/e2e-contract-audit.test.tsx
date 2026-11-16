@@ -128,11 +128,11 @@ describe('FE↔BE contract — vendor order detail against the REAL backend shap
     get.mockResolvedValue({ success: true, data: mappedVendorOrderResponse() });
     render(<VendorOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    expect(screen.getByText('Ravi Kumar')).toBeInTheDocument();
-    expect(screen.getByText(/12 MG Road/)).toBeInTheDocument();
-    expect(screen.getByText('9876543210')).toBeInTheDocument();
+    expect(await screen.findByText('Ravi Kumar')).toBeInTheDocument();
+    expect(await screen.findByText(/12 MG Road/)).toBeInTheDocument();
+    expect(await screen.findByText('9876543210')).toBeInTheDocument();
     // Item name resolves from the mapped rewardName.
-    expect(screen.getAllByText('Bluetooth Speaker').length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Bluetooth Speaker')).length).toBeGreaterThan(0);
     // PRIVACY (#15): no rupee value / points reach the vendor.
     expect(screen.queryByText(/₹/)).not.toBeInTheDocument();
   });
@@ -143,7 +143,7 @@ describe('FE↔BE contract — vendor order detail against the REAL backend shap
     get.mockResolvedValue({ success: true, data: realVendorOrderResponse() });
     render(<VendorOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    expect(screen.getByText(/retention window has passed/i)).toBeInTheDocument();
+    expect(await screen.findByText(/retention window has passed/i)).toBeInTheDocument();
     expect(screen.queryByText('Ravi Kumar')).not.toBeInTheDocument();
     expect(screen.queryByText('9876543210')).not.toBeInTheDocument();
   });

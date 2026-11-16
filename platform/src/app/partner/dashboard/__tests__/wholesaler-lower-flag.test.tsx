@@ -11,7 +11,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -75,7 +75,7 @@ describe('WLF — leaderboard card removed from partner dashboard', () => {
     }));
 
     render(<PartnerDashboardPage />);
-    await waitFor(() => expect(screen.getByText('My Targets')).toBeInTheDocument());
+    expect(await screen.findByText('My Targets')).toBeInTheDocument();
 
     const links = screen.queryAllByRole('link');
     const leaderboardLink = links.find(l => l.getAttribute('href') === '/partner/leaderboard');

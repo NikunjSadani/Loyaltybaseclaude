@@ -102,7 +102,7 @@ describe('Points rule list', () => {
     listRules.mockResolvedValue({ success: true, data: [makeRow(), makeRow({ id: 'r2', ruleId: 'rule_litres', status: 'published' })] });
     render(<PointsRulesPage />);
     expect(await screen.findByText('rule_cases')).toBeInTheDocument();
-    expect(screen.getByText('rule_litres')).toBeInTheDocument();
+    expect(await screen.findByText('rule_litres')).toBeInTheDocument();
   });
 
   it('PR2: a status filter re-queries listRules with that status', async () => {
@@ -140,7 +140,7 @@ describe('Live simulator', () => {
     render(<SimulatorPanel draft={SAMPLE_DRAFT} />);
     // "Points awarded" + the trace detail are locale-independent (the big number uses toLocaleString).
     expect(await screen.findByText('Points awarded')).toBeInTheDocument();
-    expect(screen.getByText(/650 × 2/)).toBeInTheDocument();
+    expect(await screen.findByText(/650 × 2/)).toBeInTheDocument();
   });
 
   it('PR5: lists config errors from a valid:false result', async () => {
@@ -150,7 +150,7 @@ describe('Live simulator', () => {
     });
     render(<SimulatorPanel draft={SAMPLE_DRAFT} />);
     expect(await screen.findByText(/rate must be a finite number/)).toBeInTheDocument();
-    expect(screen.getByText(/not yet valid/i)).toBeInTheDocument();
+    expect(await screen.findByText(/not yet valid/i)).toBeInTheDocument();
   });
 });
 
@@ -166,7 +166,7 @@ describe('Publish lifecycle', () => {
     fireEvent.click(publishBtn);
 
     expect(await screen.findByText(/conflicting published rule/i)).toBeInTheDocument();
-    expect(screen.getByText(/overlaps rule_litres v2/)).toBeInTheDocument();
+    expect(await screen.findByText(/overlaps rule_litres v2/)).toBeInTheDocument();
   });
 
   it('PR7: editing a loaded draft blocks Publish until the changes are saved', async () => {
@@ -183,7 +183,7 @@ describe('Publish lifecycle', () => {
     // plain input for this dirty-state check.)
     fireEvent.change(screen.getByDisplayValue('2026-07-01'), { target: { value: '2026-08-01' } });
     expect(await screen.findByText(/save your changes before publishing/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /publish/i })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: /publish/i })).toBeDisabled();
   });
 });
 
@@ -199,7 +199,7 @@ describe('Rule list tab counts', () => {
     );
 
     // The active (published) tab shows its real count; the inactive tabs show no "(0)".
-    expect(screen.getByRole('button', { name: /published \(1\)/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /published \(1\)/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /draft \(0\)/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /archived \(0\)/i })).not.toBeInTheDocument();
   });

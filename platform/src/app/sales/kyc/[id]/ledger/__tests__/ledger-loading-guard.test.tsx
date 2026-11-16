@@ -12,7 +12,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -59,7 +59,7 @@ describe('LG — sales outlet ledger loading guard', () => {
       }),
     }));
     await renderLedger('k1');
-    await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
-    expect(screen.getByText('Points Ledger')).toBeInTheDocument();
+    expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
+    expect(await screen.findByText('Points Ledger')).toBeInTheDocument();
   });
 });

@@ -16,7 +16,7 @@
  */
 
 import React from 'react';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import { istMonthKey } from '@/lib/ist-date';
 
@@ -110,13 +110,13 @@ describe('partnerDashboardV2 ON', () => {
     expect(hero).toHaveTextContent('of 1000 INR');
     expect(hero).toHaveTextContent('50%');
     expect(hero).not.toHaveTextContent('250%');
-    expect(within(hero).getByTestId('hero-untargeted-SALES')).toHaveTextContent('+₹2K so far at outlets without this target');
+    expect(await within(hero).findByTestId('hero-untargeted-SALES')).toHaveTextContent('+₹2K so far at outlets without this target');
 
     const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
-    expect(within(card).getByText('500/1K · 50%')).toBeInTheDocument();
-    expect(within(card).getByTestId('kpi-untargeted-SALES')).toHaveTextContent('+₹2K so far at outlets without this target');
+    expect(await within(card).findByText('500/1K · 50%')).toBeInTheDocument();
+    expect(await within(card).findByTestId('kpi-untargeted-SALES')).toHaveTextContent('+₹2K so far at outlets without this target');
     // The Performance card trends the SAME KPI (the API then applies the same targeted-only rule).
-    expect(fetchFn.mock.calls.some(([u]) => String(u).includes('/api/partner/targets/trend') && String(u).includes('kpi=SALES'))).toBe(true);
+    await waitFor(() => expect(fetchFn.mock.calls.some(([u]) => String(u).includes('/api/partner/targets/trend') && String(u).includes('kpi=SALES'))).toBe(true));
   }, 20000);
 
   it('MX2: a KPI missing ENTIRELY at outlet B is counted from outlet A only — no "+X" line', async () => {
@@ -129,8 +129,8 @@ describe('partnerDashboardV2 ON', () => {
     expect(hero).toHaveTextContent('50%');
     expect(screen.queryByTestId('hero-untargeted-SALES')).not.toBeInTheDocument();
     const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
-    expect(within(card).getByText('500/1K · 50%')).toBeInTheDocument();
-    expect(within(card).getByText('10/16 SKU · 63%')).toBeInTheDocument();
+    expect(await within(card).findByText('500/1K · 50%')).toBeInTheDocument();
+    expect(await within(card).findByText('10/16 SKU · 63%')).toBeInTheDocument();
     expect(within(card).queryByTestId('kpi-untargeted-SALES')).not.toBeInTheDocument();
   }, 20000);
 
@@ -149,7 +149,7 @@ describe('partnerDashboardV2 ON', () => {
     expect(hero).not.toHaveTextContent('NON ADHO');
     expect(hero).not.toHaveTextContent('of 0');
     const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
-    expect(within(card.querySelector('[data-testid="kpi-no-target-NONADHO"]') as HTMLElement).getByText('₹2.8K so far')).toBeInTheDocument();
+    expect(await within(card.querySelector('[data-testid="kpi-no-target-NONADHO"]') as HTMLElement).findByText('₹2.8K so far')).toBeInTheDocument();
   }, 20000);
 
   it('MX4: no KPI has a target → neutral "so far" hero, no %, bar or red', async () => {
@@ -166,7 +166,7 @@ describe('partnerDashboardV2 ON', () => {
     expect(hero).toHaveTextContent('No targets set this month');
     expect(hero.textContent).not.toMatch(/%|of 0|to go|remaining|days? left/);
     const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
-    expect(within(card).getByText('No targets set this month')).toBeInTheDocument();
+    expect(await within(card).findByText('No targets set this month')).toBeInTheDocument();
   }, 20000);
 
   it('MX5: MT hero — target-less KPIs are neutral rows excluded from met/allMet; "+X" line for mixed outlets', async () => {
@@ -186,9 +186,9 @@ describe('partnerDashboardV2 ON', () => {
     const row = await screen.findByTestId('mt-no-target-NONADHO', {}, { timeout: 15000 });
     expect(row).toHaveTextContent('₹2.8K so far');
     expect(row.textContent).not.toMatch(/%|Met|left/);
-    expect(screen.getByTestId('mt-untargeted-SALES')).toHaveTextContent('+₹2K so far at outlets without this target');
+    expect(await screen.findByTestId('mt-untargeted-SALES')).toHaveTextContent('+₹2K so far at outlets without this target');
     // Both TARGETED KPIs are met (Sales on the targeted outlet only: 1,000/1,000) → all met.
-    expect(screen.getByText('All targets achieved 🎉')).toBeInTheDocument();
+    expect(await screen.findByText('All targets achieved 🎉')).toBeInTheDocument();
   }, 20000);
 });
 
@@ -204,7 +204,8 @@ describe('partnerDashboardV2 OFF (Deoleo — unchanged)', () => {
     expect(hero).toHaveTextContent('250%');
     expect(document.body.textContent).not.toMatch(/outlets without this target|so far/);
     expect(screen.queryByTestId('target-achievement-card')).not.toBeInTheDocument();
-    expect(fetchFn.mock.calls.some(([u]) => String(u).includes('kpi=SALES'))).toBe(true);
+    // The trend request fires in its own effect after the hero renders — wait for it (load flake 2026-11-16).
+    await waitFor(() => expect(fetchFn.mock.calls.some(([u]) => String(u).includes('kpi=SALES'))).toBe(true));
   }, 20000);
 
   it('OFF2: target-less flagged primary → the old "0 of 0 · 0%" + "No targets yet" hero', async () => {

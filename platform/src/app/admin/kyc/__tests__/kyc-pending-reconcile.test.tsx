@@ -93,7 +93,7 @@ describe('KYC — Pending card ⟷ filter reconciliation', () => {
     render(<KYCPage />);
     const pendingCard = await screen.findByRole('button', { name: /Pending/i });
     // The big number lives in the same card button as the "Pending" label.
-    expect(within(pendingCard).getByText('2')).toBeInTheDocument();
+    expect(await within(pendingCard).findByText('2')).toBeInTheDocument();
   });
 
   it('PR3: clicking Pending shows the same rows as the card count', async () => {
@@ -139,9 +139,9 @@ describe('KYC — "Pending — Gifsy" filter (awaiting Gifsy review)', () => {
     mockMixed();
     render(<KYCPage />);
     await screen.findByText('Gifsy Stage Store');
-    const statusSelect = screen.getByDisplayValue('All Statuses') as HTMLSelectElement;
+    const statusSelect = await screen.findByDisplayValue('All Statuses') as HTMLSelectElement;
     // The option is labelled with the live awaiting-Gifsy count (1).
-    expect(within(statusSelect).getByText(/Pending — Gifsy \(1\)/)).toBeInTheDocument();
+    expect(await within(statusSelect).findByText(/Pending — Gifsy \(1\)/)).toBeInTheDocument();
     fireEvent.change(statusSelect, { target: { value: 'AWAITING_GIFSY' } });
     // Only the Gifsy-stage row remains; field-pending + approved are hidden.
     expect(screen.getByText('Gifsy Stage Store')).toBeInTheDocument();

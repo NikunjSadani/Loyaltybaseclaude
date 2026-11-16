@@ -11,7 +11,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -61,7 +61,7 @@ async function renderAndExpand() {
     );
     await params;
   });
-  await waitFor(() => expect(screen.getByText('Verma Store')).toBeInTheDocument());
+  expect(await screen.findByText('Verma Store')).toBeInTheDocument();
   fireEvent.click(screen.getByText(/store information/i));
 }
 
@@ -87,7 +87,7 @@ describe('SKGEO — Sales KYC detail location (lat/long)', () => {
   it('SKGEO3: no Location row when neither geo was captured', async () => {
     stubFetch({ boardPhotoLat: null, boardPhotoLng: null, paymentLat: null, paymentLng: null });
     await renderAndExpand();
-    await waitFor(() => expect(screen.getByText('Verma Store')).toBeInTheDocument());
+    expect(await screen.findByText('Verma Store')).toBeInTheDocument();
     expect(screen.queryByTestId('kyc-store-location')).not.toBeInTheDocument();
   });
 });

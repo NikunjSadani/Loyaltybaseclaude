@@ -108,7 +108,7 @@ describe('Admin Program Health Dashboard — real data', () => {
     const pct = await screen.findByTestId('primary-kpi-pct');
     expect(pct).toHaveTextContent('72.5%');
     // achieved / target proves the rollup numbers came from the payload
-    expect(screen.getByTestId('primary-kpi-achieved')).toHaveTextContent('14,500');
+    expect(await screen.findByTestId('primary-kpi-achieved')).toHaveTextContent('14,500');
   });
 
   it('RD2: renders the participation rate from the payload', async () => {
@@ -116,7 +116,7 @@ describe('Admin Program Health Dashboard — real data', () => {
     render(<ProgramHealthPage />);
     const rate = await screen.findByTestId('participation-rate');
     expect(rate).toHaveTextContent('42.0%');
-    expect(screen.getByText('420 / 1,000 active earners')).toBeInTheDocument();
+    expect(await screen.findByText('420 / 1,000 active earners')).toBeInTheDocument();
   });
 
   it('RD3: renders a points-economy value from the payload', async () => {
@@ -125,7 +125,7 @@ describe('Admin Program Health Dashboard — real data', () => {
     // breakage % is unique to the points-economy section
     expect(await screen.findByText('3.2%')).toBeInTheDocument();
     // issued points
-    expect(screen.getByText(/12,50,000/)).toBeInTheDocument();
+    expect(await screen.findByText(/12,50,000/)).toBeInTheDocument();
   });
 
   it('RD4: on fetch failure shows an error state and NO fabricated numbers', async () => {

@@ -13,8 +13,7 @@
 recently-shipped FE: sales KYC wizard, scheme authoring + roster, scheme enrollment capture + edit/delete, admin settings +
 owner-group grouping. Four independent UX auditors; findings deduped + triaged below.
 
-**Deployment state legend:** `PROD` = live in prod (fix rides a future cutover) · `#23` = on develop, not yet in prod
-(fix rides the pending cutover #23, no extra cutover) · `GEOTAG` = per-photo-geotag optional polish (`ee00dd2` — IN PROD, rode cutover #23; dormant for every tenant).
+**Deployment state legend (historical — everything below is in prod since cutover #23, 2026-08-03):** `PROD` = live in prod (fix rode a later cutover) · `#23` = shipped in cutover #23 · `GEOTAG` = per-photo-geotag optional polish (`ee00dd2` — IN PROD, rode cutover #23; dormant for every tenant).
 
 Estimates are orchestrated build time (code) and EXCLUDE the per-batch gate + independent audit + staging-verify (add ~0.5d
 per batch). "d" = ideal engineer-day.

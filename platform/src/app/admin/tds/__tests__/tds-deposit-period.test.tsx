@@ -52,8 +52,8 @@ describe('TDS page — deposit "TDS for month"', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(MOCK_194R) }));
     render(<AdminTdsPage />);
     await screen.findByText('ABCDE1234F');
-    expect(screen.getByText('for Feb-2026, Mar-2026')).toBeTruthy();
-    expect(screen.getAllByText(/^for /)).toHaveLength(1);
+    expect(await screen.findByText('for Feb-2026, Mar-2026')).toBeTruthy();
+    expect(await screen.findAllByText(/^for /)).toHaveLength(1);
   });
 
   it('the deposit upload panel explains the optional TDS for month column and the default rule', async () => {
@@ -65,7 +65,7 @@ describe('TDS page — deposit "TDS for month"', () => {
     expect(hint.textContent).toMatch(/8–30 April counts for March/);
     expect(hint.textContent).toMatch(/07\/04\/2026 = 7 April 2026/);
     // Never re-upload TDS Gifsy already withheld (deduct) + deposits can't be edited after upload.
-    const warn = screen.getAllByTestId('deposit-upload-warnings')[0];
+    const warn = (await screen.findAllByTestId('deposit-upload-warnings'))[0];
     expect(warn.textContent).toMatch(/Do not upload TDS that Gifsy already withheld from payouts/);
     expect(warn.textContent).toMatch(/cannot be edited or deleted/);
   });

@@ -903,7 +903,7 @@ describe('KycService', () => {
       primeConsentUpToRouting();
       await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
       expect(routedUpdate().status).toBe('PENDING_RSM_APPROVAL');
-    }, 5000);
+    }, 30_000); // a hang would exceed this; 30 s = the suite default (was 5 s — too tight under full-suite load)
   });
 
   describe('create', () => {

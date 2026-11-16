@@ -106,7 +106,7 @@ describe('Employee Hierarchy — edit affordance', () => {
     expect(await screen.findByTestId('hierarchy-edit-Pune101')).toBeInTheDocument();
     expect(screen.queryByTestId('hierarchy-edit-Pune102')).not.toBeInTheDocument();
     // The pencil is labelled for the specific employee.
-    expect(screen.getByRole('button', { name: /edit asha patel/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /edit asha patel/i })).toBeInTheDocument();
   });
 
   it('HE2/HE3: clicking edit fetches user + options, opens the modal, and saving PATCHes the employee endpoint', async () => {
@@ -114,7 +114,7 @@ describe('Employee Hierarchy — edit affordance', () => {
     render(<HierarchyPage />);
     await screen.findByTestId('hierarchy-edit-Pune101');
 
-    await userEvent.click(screen.getByTestId('hierarchy-edit-Pune101'));
+    await userEvent.click(await screen.findByTestId('hierarchy-edit-Pune101'));
 
     // Modal opens with the fetched user pre-filled.
     const dialog = await screen.findByRole('dialog');
@@ -162,7 +162,7 @@ describe('Employee Hierarchy — edit affordance', () => {
     render(<HierarchyPage />);
     await screen.findByTestId('hierarchy-edit-Pune101');
 
-    await userEvent.click(screen.getByTestId('hierarchy-edit-Pune101'));
+    await userEvent.click(await screen.findByTestId('hierarchy-edit-Pune101'));
 
     expect(await screen.findByText(/couldn't load this employee to edit/i)).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();

@@ -245,8 +245,7 @@ describe('QR scanner', () => {
   it('hides camera view when Stop Scanning is clicked', async () => {
     render(<BankOrUpiSection {...upiProps} />);
     await userEvent.click(screen.getByRole('button', { name: /scan qr/i }));
-    await waitFor(() => screen.getByRole('button', { name: /stop scanning/i }));
-    await userEvent.click(screen.getByRole('button', { name: /stop scanning/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /stop scanning/i }));
     await waitFor(() => {
       expect(screen.queryByTestId('qr-camera-view')).not.toBeInTheDocument();
     });
@@ -440,7 +439,7 @@ describe('UPI manual entry — salesApp.upiManualEntry', () => {
     it('typing while the camera is scanning stops the scan', async () => {
       render(<Controlled onGeo={vi.fn()} />);
       await userEvent.click(screen.getByRole('button', { name: /scan qr/i }));
-      await waitFor(() => expect(screen.getByTestId('qr-camera-view')).toBeInTheDocument());
+      expect(await screen.findByTestId('qr-camera-view')).toBeInTheDocument();
       await userEvent.type(screen.getByTestId('manual-upi-input'), 'a');
       await waitFor(() => expect(screen.queryByTestId('qr-camera-view')).not.toBeInTheDocument());
     });
@@ -488,7 +487,7 @@ describe('UPI manual entry — salesApp.upiManualEntry', () => {
         version: 1,
       });
       await userEvent.click(screen.getByRole('button', { name: /scan qr/i }));
-      await waitFor(() => expect(screen.getByTestId('qr-camera-view')).toBeInTheDocument());
+      expect(await screen.findByTestId('qr-camera-view')).toBeInTheDocument();
       await act(async () => {}); // let getUserMedia/play resolve → the poll interval is armed
       // One poll tick kicks off a decode (its dynamic import resolves asynchronously); the
       // stop/typing happens in the SAME synchronous turn, i.e. while that decode is in flight.
@@ -656,7 +655,7 @@ describe('onUpiCaptureMethodChange — QR / MANUAL / null', () => {
     const onMethod = vi.fn();
     render(<Controlled onMethod={onMethod} />);
     await scanQr('user@paytm');
-    await waitFor(() => expect(screen.getByTestId('scanned-upi-display')).toBeInTheDocument());
+    expect(await screen.findByTestId('scanned-upi-display')).toBeInTheDocument();
     expect(onMethod).toHaveBeenLastCalledWith('QR');
     expect(onMethod).not.toHaveBeenCalledWith('MANUAL');
   });
@@ -665,7 +664,7 @@ describe('onUpiCaptureMethodChange — QR / MANUAL / null', () => {
     const onMethod = vi.fn();
     render(<Controlled onMethod={onMethod} />);
     await scanQr('user@paytm');
-    await waitFor(() => expect(screen.getByTestId('clear-scanned-upi')).toBeInTheDocument());
+    expect(await screen.findByTestId('clear-scanned-upi')).toBeInTheDocument();
     await userEvent.click(screen.getByTestId('clear-scanned-upi'));
     expect(onMethod).toHaveBeenLastCalledWith(null);
   });
@@ -711,7 +710,7 @@ describe('onUpiCaptureMethodChange — QR / MANUAL / null', () => {
     }
     render(<NoCb />);
     await scanQr('user@paytm');
-    await waitFor(() => expect(screen.getByTestId('clear-scanned-upi')).toBeInTheDocument());
+    expect(await screen.findByTestId('clear-scanned-upi')).toBeInTheDocument();
     await userEvent.click(screen.getByTestId('clear-scanned-upi'));
     expect(screen.queryByTestId('scanned-upi-display')).not.toBeInTheDocument();
   });

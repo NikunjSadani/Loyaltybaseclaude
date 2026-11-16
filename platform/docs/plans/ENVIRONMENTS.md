@@ -9,11 +9,12 @@
 |---|---|---|---|---|
 | **Local dev** (where we build/verify) | your machine — FE `:3000` (`next dev`), API `:4000` (`node dist/main.js`) | `gifsy_dev` | **`gifsy-db-dev`** — a **separate, isolated** Cloud SQL instance (Postgres 15, db-f1-micro, asia-south1-b, **public IP 34.14.195.38**, conn `gifsy-platform:asia-south1:gifsy-db-dev`), via Auth Proxy on `127.0.0.1:5433` | n/a (local) |
 | **Staging** | Cloud Run `gifsy-api-staging` + staging FE | `gifsy_staging` | **shared** instance `gifsy_db` (POSTGRES_15) — *same physical instance as prod* | **push to `develop`** → `deploy-staging.yml` (auto) |
-| **Production** | Cloud Run (prod) | `gifsy_prod` | **shared** instance `gifsy_db` | **MANUAL** — GitHub Actions → "Deploy — Production (main)" → Run (`deploy.yml` is `workflow_dispatch`-only; a push to `main` does not deploy). From the #59 + Sales Import release on, its first step is a **PREFLIGHT** (3 Hubble secrets must exist) — `runbooks/PROD-CUTOVER-RECORD.md` |
+| **Production** | Cloud Run (prod) | `gifsy_prod` | **shared** instance `gifsy_db` | **MANUAL** — GitHub Actions → "Deploy — Production (main)" → Run (`deploy.yml` is `workflow_dispatch`-only; a push to `main` does not deploy). After CI tests its first deploy step is a **PREFLIGHT** (`HUBBLE_CLIENT_ID`, `HUBBLE_CLIENT_SECRET`, `HUBBLE_WEBHOOK_SECRET`, `SALES_IMPORT_DRAIN_SECRET` must exist) — procedure in `RESUME.md` §6 |
+| **Test-only local Postgres** | dev machine | throw-away test DBs | Windows service `postgresql-x64-15` (PostgreSQL 15), **port 55432** — installed 2026-11-15/16 for disposable test databases only (e.g. the reversal-engine WP7 concurrency suite via `WRE_PG_ADMIN_URL`) | n/a — never holds real data; never point a test at `gifsy-db` |
 
 **Key facts (the ones that bite):**
 - **Local dev is the only isolated DB instance.** Staging + prod share one Cloud SQL instance (different databases). `gifsy_dev` is on its own instance.
-- **Staging auto-deploys from every `develop` push** — but only when the test job is green (`needs: test`; a red suite silently skips the deploy). As of 2026-11-11 staging serves `staging-7c85d9fd` (api, frontend and the Sales Import worker job). The staging deploy's first step is a metadata-only preflight for `SALES_IMPORT_DRAIN_SECRET_STAGING`.
+- **Staging auto-deploys from every `develop` push** — but only when the test job is green (`needs: test`; a red suite silently skips the deploy). As of 2026-11-15 staging AND prod both serve `2eb8271d` (api, frontend, Sales Import + Downloads worker jobs; staging images are tagged `staging-<sha>`, prod images the bare `<sha>`). Always re-check the serving image (`RESUME.md` §7). The staging deploy's first step is a metadata-only preflight for `SALES_IMPORT_DRAIN_SECRET_STAGING`. API memory is 1 GiB on both (since `e242b1a1`).
 - **Prod is never pushed by us** (`main`, approval-gated). Never point dev at prod; never `prisma migrate dev` (resets `gifsy_dev`).
 - **DB migrations (2026-06-20):** schema applies from one squashed Prisma **baseline** via `prisma migrate deploy` run as an **in-VPC Cloud Run Job** (the shared instance is private-IP). **Staging auto-migrates** on every `develop` push (`gifsy-migrate-staging` in `deploy-staging.yml`, before the new revision serves); **prod is gated** (`gifsy-migrate` job + a one-time P3005 baseline reconcile). `gifsy_dev` is unchanged — db-push / surgical-SQL via the proxy. Full model: [`MIGRATIONS.md`](MIGRATIONS.md).
 
@@ -28,8 +29,22 @@
 | Scheduler | `sales-import-drain-staging` — `*/10 * * * *` Asia/Kolkata, `POST /v1/sales-import/drain`, header `x-drain-secret`, attempt deadline 170 s (403 without the secret; 200 from the Scheduler) |
 | Tenant flag | `salesImport` ON for **bajaj (staging) only**; Deoleo OFF |
 
-**Prod has none of this** — the prod job, env, `SALES_IMPORT_DRAIN_SECRET`, IAM binding and Scheduler need a separate owner OK at release; until
-then the API refuses to switch `salesImport` ON in prod. Detail: `SALES-IMPORT-PIPELINE-PLAN.md` §14.
+**Prod mirror exists (verified 2026-11-13):** secret `SALES_IMPORT_DRAIN_SECRET` (in the prod preflight), Cloud Run Job
+`gifsy-sales-import` (deployed by `deploy.yml` after the migrate step), API env `SALES_IMPORT_RUNNER=job` /
+`SALES_IMPORT_JOB=gifsy-sales-import`, `run.jobsExecutor` for `gifsy-api-sa`, Scheduler `sales-import-drain` (`*/10`,
+ENABLED). `salesImport` is ON for Bajaj on prod (November 2026 applied 2026-11-15). Detail: `SALES-IMPORT-PIPELINE-PLAN.md` §14.
+
+## Downloads worker (background exports, live 2026-11-15)
+
+| Piece | Staging | Prod |
+|---|---|---|
+| Cloud Run Job | `gifsy-exports-staging` | `gifsy-exports` |
+| API env | `EXPORTS_RUNNER=job`, `EXPORTS_JOB=gifsy-exports-staging` | `EXPORTS_RUNNER=job`, `EXPORTS_JOB=gifsy-exports` |
+| IAM | `roles/run.jobsExecutor` for `gifsy-api-sa` — granted by the deploy workflow each run (idempotent) | same |
+| Secrets | none new (reuses DATABASE_URL / GCS / JWT) | none new |
+| Scheduler | optional, not created by the workflows | optional, not created by the workflows |
+
+Detail + runbook: `DOWNLOADS-PAGE.md`.
 
 ## Staging host convention (`uat-<slug>.gifsy.in`)
 

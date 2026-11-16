@@ -40,7 +40,7 @@ describe('CategoryEditor', () => {
     render(<CategoryEditor editing={null} allCategories={[]} onClose={() => {}} onSaved={() => {}} />);
     fireEvent.click(screen.getByTestId('save-category-btn'));
     await screen.findByTestId('category-errors');
-    expect(screen.getByTestId('category-errors').textContent).toMatch(/Name is required/);
+    expect((await screen.findByTestId('category-errors')).textContent).toMatch(/Name is required/);
     expect(post).not.toHaveBeenCalled();
   });
 

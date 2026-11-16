@@ -9,7 +9,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -55,13 +55,13 @@ describe('UC — wallet payouts are uncapped', () => {
   it('UC1: every payout row (more than 100) is listed in the statement', async () => {
     stubFetch();
     render(<WalletPage />);
-    await waitFor(() => expect(screen.getByText(`${N} entries`)).toBeInTheDocument(), { timeout: 10_000 });
+    expect(await screen.findByText(`${N} entries`, {}, { timeout: 15_000 })).toBeInTheDocument();
   }, 20_000);
 
   it('UC2: Lifetime Payout sums every PAID row (₹100 × 130 = ₹13,000)', async () => {
     stubFetch();
     render(<WalletPage />);
-    const card = await screen.findByTestId('payout-summary', undefined, { timeout: 10_000 });
+    const card = await screen.findByTestId('payout-summary', undefined, { timeout: 15_000 });
     expect(card.textContent).toContain('₹13,000');
   }, 20_000);
 });

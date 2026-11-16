@@ -75,12 +75,12 @@ describe('OffersAdminPage', () => {
   it('lists tiles for the current IST month and never sends a clientId', async () => {
     renderPage();
     const row = await screen.findByTestId('offer-row');
-    expect(within(row).getByText('+35 pts')).toBeInTheDocument();
-    expect(within(row).getByText(/ADHO 50 ml · Earn on every case/)).toBeInTheDocument();
+    expect(await within(row).findByText('+35 pts')).toBeInTheDocument();
+    expect(await within(row).findByText(/ADHO 50 ml · Earn on every case/)).toBeInTheDocument();
     // Targeting summary uses the tenant outlet-type label; KPI shown by its label.
-    expect(within(row).getByText(/Gold · BSC/)).toBeInTheDocument();
-    expect(within(row).getByText(/Progress: ADHO 50 ml/)).toBeInTheDocument();
-    expect(screen.getByText('Earn on your targets')).toBeInTheDocument();
+    expect(await within(row).findByText(/Gold · BSC/)).toBeInTheDocument();
+    expect(await within(row).findByText(/Progress: ADHO 50 ml/)).toBeInTheDocument();
+    expect(await screen.findByText('Earn on your targets')).toBeInTheDocument();
 
     expect(get).toHaveBeenCalledWith(`/api/admin/offers?month=${CUR}`);
     for (const [url] of get.mock.calls) expect(String(url)).not.toContain('clientId');
@@ -213,8 +213,8 @@ describe('OffersAdminPage', () => {
     renderPage();
     await screen.findByTestId('offer-row');
     expect(document.querySelector('input[type="month"]')).toBeNull();
-    const monthSel = screen.getByLabelText('Month') as HTMLSelectElement;
-    const yearSel = screen.getByLabelText('Year') as HTMLSelectElement;
+    const monthSel = await screen.findByLabelText('Month') as HTMLSelectElement;
+    const yearSel = await screen.findByLabelText('Year') as HTMLSelectElement;
     expect(monthSel.tagName).toBe('SELECT');
     expect(yearSel.value).toBe(CUR.slice(0, 4));
     fireEvent.change(yearSel, { target: { value: y } });
@@ -247,7 +247,7 @@ describe('OffersAdminPage', () => {
     resolvers[key(a)]({ success: true, data: { month: key(a), tiles: [tile({ id: 'old', label: 'Stale month' })] } });
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.queryByText(/Stale month/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Newest month/)).toBeInTheDocument();
+    expect(await screen.findByText(/Newest month/)).toBeInTheDocument();
   });
 
   it('copy dialog shows an error (not "nothing to copy") when the count fetch fails', async () => {
@@ -262,7 +262,7 @@ describe('OffersAdminPage', () => {
     const modal = await screen.findByTestId('copy-modal');
     expect(await within(modal).findByTestId('copy-count-error')).toHaveTextContent('Network error');
     expect(within(modal).queryByText(/nothing to copy/)).not.toBeInTheDocument();
-    expect(within(modal).getByTestId('confirm-copy')).toBeDisabled();
+    expect(await within(modal).findByTestId('confirm-copy')).toBeDisabled();
   });
 
   it('form validation: whitespace headline, value ≤ 0, percent > 100, sort order out of range — no request', async () => {
@@ -270,9 +270,9 @@ describe('OffersAdminPage', () => {
     await screen.findByTestId('offer-row');
     fireEvent.click(screen.getByTestId('new-tile-btn'));
     const form = await screen.findByTestId('offer-form');
-    const value = within(form).getByLabelText(/^Value \(points\)/);
+    const value = await within(form).findByLabelText(/^Value \(points\)/);
     expect(value).toHaveAttribute('min', '0.01');
-    expect(within(form).getByLabelText('Sort order')).toHaveAttribute('max', '1000000');
+    expect(await within(form).findByLabelText('Sort order')).toHaveAttribute('max', '1000000');
 
     fireEvent.change(value, { target: { value: '5' } });
     fireEvent.change(within(form).getByLabelText('Headline'), { target: { value: '   ' } });
@@ -303,8 +303,8 @@ describe('OffersAdminPage', () => {
     await screen.findByTestId('offer-row');
     fireEvent.click(screen.getByTestId('new-tile-btn'));
     const form = await screen.findByTestId('offer-form');
-    const preview = screen.getByTestId('offer-preview');
-    expect(within(preview).getByTestId('offer-tile-value')).toHaveTextContent('—');
+    const preview = await screen.findByTestId('offer-preview');
+    expect(await within(preview).findByTestId('offer-tile-value')).toHaveTextContent('—');
     expect(within(preview).queryByText('+0 pts')).not.toBeInTheDocument();
     fireEvent.change(within(form).getByLabelText('Value type'), { target: { value: 'RUPEES' } });
     fireEvent.change(within(form).getByLabelText(/^Value \(₹\)/), { target: { value: '1500.5' } });
@@ -337,10 +337,10 @@ describe('OffersAdminPage', () => {
     expect(panel).toHaveTextContent('2 copies had their target link removed');
     expect(panel).toHaveTextContent('1 copy has outlet types that no longer exist — fix before publishing.');
     await screen.findByText(/Copy two/);
-    const rows = screen.getAllByTestId('offer-row');
-    expect(within(rows[0]).getByTestId('row-kpi-cleared')).toBeInTheDocument();
+    const rows = await screen.findAllByTestId('offer-row');
+    expect(await within(rows[0]).findByTestId('row-kpi-cleared')).toBeInTheDocument();
     expect(within(rows[0]).queryByTestId('row-unknown-types')).not.toBeInTheDocument();
-    expect(within(rows[1]).getByTestId('row-unknown-types')).toHaveTextContent('fix before publishing');
+    expect(await within(rows[1]).findByTestId('row-unknown-types')).toHaveTextContent('fix before publishing');
 
     fireEvent.click(screen.getByLabelText('Dismiss copy warnings'));
     expect(screen.queryByTestId('copy-warnings')).not.toBeInTheDocument();

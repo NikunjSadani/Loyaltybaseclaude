@@ -73,7 +73,7 @@ describe('Enrollments view', () => {
 
   it('calls schemeApi.downloadExport when Export Excel is clicked', async () => {
     await act(async () => { await renderPage(); });
-    const btn = screen.getByRole('button', { name: /export excel/i });
+    const btn = await screen.findByRole('button', { name: /export excel/i });
     await act(async () => { fireEvent.click(btn); });
     await waitFor(() => expect(downloadExport).toHaveBeenCalledWith('sch-test'));
   });
@@ -81,8 +81,8 @@ describe('Enrollments view', () => {
   it('shows an error when the export fails', async () => {
     downloadExport.mockResolvedValueOnce({ success: false, error: 'Insufficient permissions' });
     await act(async () => { await renderPage(); });
-    const btn = screen.getByRole('button', { name: /export excel/i });
+    const btn = await screen.findByRole('button', { name: /export excel/i });
     await act(async () => { fireEvent.click(btn); });
-    await waitFor(() => expect(screen.getByText(/insufficient permissions/i)).toBeInTheDocument());
+    expect(await screen.findByText(/insufficient permissions/i)).toBeInTheDocument();
   });
 });
