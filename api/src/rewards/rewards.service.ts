@@ -4448,7 +4448,11 @@ export class RewardsService {
     actorId?: string,
   ): Promise<string> {
     const voucher = (body.vouchers ?? [])[0];
-    const { code: voucherCode, pin: voucherPin } = hubbleVoucherCredentials(voucher);
+    // Product-aware: Amazon Pay's claim code arrives as cardPin — store/send that alone (hubble-voucher.ts).
+    const { code: voucherCode, pin: voucherPin } = hubbleVoucherCredentials(
+      voucher,
+      this.extractHubbleProductId(order.reward?.metadata),
+    );
     if (!voucherCode) {
       // SUCCESS with no usable code is anomalous — do NOT flip to DELIVERED without a
       // code (would break the DIGITAL_VOUCHER delivered invariant). Leave pending.

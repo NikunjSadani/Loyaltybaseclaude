@@ -303,7 +303,8 @@ export class VoucherDispersalProcessor {
     const status = String(body.status ?? '').toUpperCase();
     const hubbleOrderId = (body.id ?? body.orderId ?? null) as string | null;
     if (status === 'SUCCESS') {
-      const { code, pin } = hubbleVoucherCredentials((body.vouchers ?? [])[0]);
+      // Product-aware: Amazon Pay's claim code arrives as cardPin — send that alone (hubble-voucher.ts).
+      const { code, pin } = hubbleVoucherCredentials((body.vouchers ?? [])[0], row.productId);
       if (!code) {
         await this.markPending(row, 'HUBBLE_SUCCESS_NO_CODE', { hubbleOrderId });
         return 'PENDING';
