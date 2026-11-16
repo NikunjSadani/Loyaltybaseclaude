@@ -218,7 +218,14 @@ function world(opts: WorldOpts = {}) {
     },
     creditReversal: {
       findFirst: find(T.reversals),
-      findMany: findMany(T.reversals),
+      // `creditAllocations: { none: {} }` (fix round A M3 — approved reversals without an allocation row)
+      findMany: async ({ where, ...rest }: any = {}) => {
+        const { creditAllocations, ...plain } = where ?? {};
+        const rows = await findMany(T.reversals)({ where: plain, ...rest });
+        return creditAllocations?.none
+          ? rows.filter((r) => !T.allocations.some((a) => a.creditReversalId === r.id))
+          : rows;
+      },
       create: async ({ data }: any) => {
         const row = {
           id: `rev${++clock}`, status: 'PENDING_GIFSY', approvedPaise: null, shortfallPaise: null, ...data,
@@ -611,7 +618,9 @@ describe('WP4 — V2 caps (position-based) at create and approve', () => {
     h.T.settingReads = {};
     await h.approve(r.id);
     expect(h.T.settingReads).toEqual({ reversalEngine: 1, pointsReversalApprovalsPaused: 1 });
-    expect(h.counts.out['programSetting.findUnique'] ?? 0).toBe(1); // only the engine flag is read outside the tx
+    // fix round A, L4: BOTH are read inside the tx, after the pause gate's shared engine lock (a flip can't land between)
+    expect(h.counts.out['programSetting.findUnique'] ?? 0).toBe(0);
+    expect(h.counts.tx['programSetting.findUnique']).toBe(2);
   });
 
   it('V2 approves on a wallet with debt (Q1) where LEGACY refuses it (Q14)', async () => {
@@ -826,7 +835,11 @@ describe('WP4 — confirmBatch resolves the reversal-engine mode ONCE per batch 
     expect(before.tx['channelPartner.findFirst']).toBe(N);
     expect(after.all['programSetting.findUnique']).toBe(1);
     expect(after.tx['channelPartner.findFirst'] ?? 0).toBe(0); // (the post-commit notify loop's reads are outside the tx)
-    expect(before.total - after.total).toBe(2 * N); // vs true pre-WP4: 2N − 1
+    // Fix round A, L5: a known-LEGACY batch also skips the per-row wallet lock + re-read ($queryRaw + wallet.findFirst)
+    // — each credit is exactly the pre-engine statement sequence (wallet read, expiry config, wallet UPDATE, passbook,
+    // ledger). Per batch: + the shared engine lock + 1 mode read (inside the tx, L4).
+    expect(before.total - after.total).toBe(4 * N);
+    expect(after.tx['$queryRaw']).toBe(1); // the batch-level shared engine lock only — no per-row wallet lock
     // byte-identical writes
     const strip = (h: World) => normalise({ w: h.T.wallets, t: h.T.walletTxns, l: h.T.ledger, p: h.T.positions });
     expect(strip(after.h)).toEqual(strip(before.h));
@@ -843,12 +856,18 @@ describe('WP4 — confirmBatch resolves the reversal-engine mode ONCE per batch 
     expect(strip(after.h)).toEqual(strip(before.h));
   }, 120_000);
 
-  it('a malformed flag aborts a POINTS confirm before any write (fail closed); a PAYOUT-only batch never reads it', async () => {
+  it('fix round A, M1: a malformed flag does NOT stop a POINTS confirm — credited on LEGACY rules; reversals still fail closed; a PAYOUT-only batch never reads it', async () => {
     const h = world({ mode: null, outlets: { O1: 'cp1' } });
     h.T.settings.set(`${TENANT}:reversalEngine`, 'v2'); // malformed
-    expect(await errorOf(h.confirm('B1', [{ outlet: 'O1', amount: 10 }]))).toMatch(/Invalid reversalEngine setting/);
-    expect(h.T.batches[0].status).toBe('PENDING_CONFIRM');
-    expect(h.T.walletTxns).toHaveLength(0);
+    await expect(h.confirm('B1', [{ outlet: 'O1', amount: 10 }])).resolves.toMatchObject({ pointsCredited: 1 });
+    expect(h.T.batches[0].status).toBe('CONFIRMED');
+    expect(h.w('cp1')).toMatchObject({ redeemablePoints: 10, movementSeq: 0 }); // LEGACY path: no seq
+    expect(h.T.positions).toHaveLength(0);
+    expect(h.T.walletTxns).toHaveLength(1);
+    // …while a POINTS reversal request/approval on it is refused (fail closed — the money path never guesses)
+    // (InvalidReversalEngineSettingException extends BadRequestException → HTTP 400)
+    expect(await errorOf(h.create('B1', 'O1', 10))).toMatch(/InvalidReversalEngineSettingException: Invalid reversalEngine setting for this tenant \("v2"\)/);
+    expect(h.T.reversals).toHaveLength(0);
 
     h.resetCounts();
     h.T.batches.push({
@@ -894,7 +913,9 @@ describe('policy Q5 — "POINTS reversal approvals paused" switch', () => {
     h.resetCounts();
     await h.create('B1', 'O1', 100);
     expect(h.T.rawSql[0]).toContain('pg_advisory_xact_lock_shared(hashtextextended(');
-    expect(h.counts.tx['programSetting.findUnique']).toBe(1); // the pause, read through the tx
+    // the pause, then the engine mode (fix round A, L4) — both read through the tx, after the shared lock
+    expect(h.counts.tx['programSetting.findUnique']).toBe(2);
+    expect(h.counts.out['programSetting.findUnique'] ?? 0).toBe(0);
   });
 
   it('an unreadable switch value fails CLOSED (treated as paused, says so)', async () => {
@@ -921,5 +942,67 @@ describe('policy Q5 — "POINTS reversal approvals paused" switch', () => {
     const e = new ReversalAttentionException('APPROVALS_PAUSED', 'x');
     expect(e.getStatus()).toBe(409);
     expect(e.code).toBe('APPROVALS_PAUSED');
+  });
+});
+
+// ───────────────────────── fix round A (money audit, 2026-11-16) ─────────────────────────
+
+describe('fix round A — L3 / L4 lock order and mode reads under the engine lock', () => {
+  it('L3: a V2 approve locks the batch row BEFORE the reversal row (same order as LEGACY) — no deadlock across a mode flip', async () => {
+    const h = world({ mode: 'V2', outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1')] });
+    await h.confirm('B1', [{ outlet: 'O1', amount: 300 }]);
+    const r = await h.create('B1', 'O1', 100);
+    h.T.rawSql.length = 0;
+    await h.approve(r.id);
+    const iBatch = h.T.rawSql.findIndex((s) => /FROM credit_batches WHERE id = \? FOR UPDATE/.test(s));
+    const iRev = h.T.rawSql.findIndex((s) => /FROM credit_reversals WHERE id = \? FOR UPDATE/.test(s));
+    expect(h.T.rawSql[0]).toContain('pg_advisory_xact_lock_shared('); // the pause gate's shared engine lock first
+    expect(iBatch).toBeGreaterThan(0);
+    expect(iRev).toBeGreaterThan(iBatch);
+    expect(h.T.rawSql.filter((s) => /FROM credit_batches WHERE id = \? FOR UPDATE/.test(s))).toHaveLength(1); // no re-lock
+  });
+
+  it('L4: a POINTS confirm takes the SHARED engine lock as its first statement and reads the mode inside the tx; a PAYOUT-only one does neither', async () => {
+    const h = world({ mode: 'LEGACY', outlets: { O1: 'cp1' } });
+    h.T.rawSql.length = 0;
+    h.resetCounts();
+    await h.confirm('B1', [{ outlet: 'O1', amount: 10 }]);
+    expect(h.T.rawSql[0]).toContain('pg_advisory_xact_lock_shared(hashtextextended(');
+    expect(h.counts.tx['programSetting.findUnique']).toBe(1);
+    expect(h.counts.out['programSetting.findUnique'] ?? 0).toBe(0);
+  });
+});
+
+describe('fix round A — M3 through the credits endpoints (LEGACY tenant, sequenced wallet)', () => {
+  it('a credit on a SEQUENCED wallet with no position for the line: create refused 409 CREDIT_UNMAPPED + audit row; approve of an earlier request refused too; nothing written', async () => {
+    const h = world({ mode: 'LEGACY', outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1', { movementSeq: 1 })] });
+    await h.confirm('B1', [{ outlet: 'O1', amount: 300 }]); // sequenced wallet → v2 maintenance → a position
+    const pending = await h.create('B1', 'O1', 100); // fine while the position exists
+    h.T.positions.length = 0; // …now the credit is no longer attributable (e.g. a backfill that could not map it)
+    const msg = "ReversalAttentionException: Can't reverse: the original credit for outlet O1 in this batch couldn't be identified — Gifsy must map it first.";
+    expect(await errorOf(h.create('B1', 'O1', 50))).toMatch(/pending reversal already exists/); // dup guard first
+    expect(await errorOf(h.approve(pending.id))).toBe(msg);
+    expect(h.T.reversals[0].status).toBe('PENDING_GIFSY');
+    expect(h.w('cp1').redeemablePoints).toBe(300);
+    await h.reject(pending.id);
+    expect(await errorOf(h.create('B1', 'O1', 50))).toBe(msg);
+    expect(h.T.auditLogs.filter((a) => a.entityType === 'REVERSAL_ENGINE_REFUSAL').map((a) => [a.metadata.phase, a.metadata.code, a.metadata.engine])).toEqual([
+      ['APPROVE', 'CREDIT_UNMAPPED', 'LEGACY'],
+      ['CREATE', 'CREDIT_UNMAPPED', 'LEGACY'],
+    ]);
+  });
+
+  it('V2 create/approve caps subtract an APPROVED reversal of the line that has no allocation row (double clawback impossible)', async () => {
+    const h = world({ mode: 'V2', outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1')] });
+    await h.confirm('B1', [{ outlet: 'O1', amount: 300 }]);
+    h.T.reversals.push({
+      id: 'R0', clientId: TENANT, batchId: 'B1', outletId: 'O1', fieldId: 'F', awardType: 'POINTS', status: 'APPROVED',
+      approvedPaise: 200n, requestedPaise: 200n, shortfallPaise: 0n,
+    });
+    expect(await errorOf(h.create('B1', 'O1', 150))).toMatch(/Reversal exceeds the amount still reversible .*requested 150 pts/);
+    const r = await h.create('B1', 'O1', 100);
+    await expect(h.approve(r.id)).resolves.toMatchObject({ status: 'APPROVED' });
+    expect(h.w('cp1').redeemablePoints).toBe(200);
+    expect(await errorOf(h.create('B1', 'O1', 1))).toMatch(/requested 1 pts/);
   });
 });

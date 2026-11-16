@@ -9,7 +9,13 @@ import { Prisma, KycStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { TenantService } from '../tenant/tenant.service';
-import { TenantSettingsService, OtpTemplatePurpose, OtpTemplatesSettings } from '../tenant/tenant-settings.service';
+import {
+  OtpTemplatePurpose,
+  OtpTemplatesSettings,
+  POINTS_REVERSAL_PAUSE_SETTING_KEY,
+  REVERSAL_ENGINE_SETTING_KEY,
+  TenantSettingsService,
+} from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { businessHoursBetween, isValidIsoDate } from '../common/business-hours';
 import { isActivePhoneConflict, ACTIVE_PHONE_IN_USE_MSG } from '../common/phone-conflict';
@@ -1303,6 +1309,23 @@ export class AdminCoreService {
     if (dto.key === 'pointsEngine' && !opts?.allowPlatformOnlyKey) {
       throw new ForbiddenException(
         'The points engine settings can only be changed via the dedicated owner-only Points Engine screen.',
+      );
+    }
+
+    // GIFSY-ADMIN-ONLY money controls at the DATA boundary (Wallet Reversal Engine fix round A, M2): the per-tenant
+    // reversal engine mode (`reversalEngine`) and the POINTS reversal maintenance pause (`pointsReversalApprovalsPaused`)
+    // decide how real-money points reversals run. They are written ONLY through the dedicated, validated, audited
+    // GIFSY_ADMIN endpoints (POST /v1/admin/credits/reversal-engine/mode — which refuses V2 while wallets are not
+    // backfilled or approvals are paused — and POST …/reversal-engine/pause). No allowPlatformOnlyKey bypass: those
+    // endpoints write the row themselves, never through this generic upsert.
+    if (dto.key === REVERSAL_ENGINE_SETTING_KEY) {
+      throw new ForbiddenException(
+        'The points reversal engine mode can only be changed by a Gifsy Admin via the dedicated reversal-engine endpoint.',
+      );
+    }
+    if (dto.key === POINTS_REVERSAL_PAUSE_SETTING_KEY) {
+      throw new ForbiddenException(
+        'The points reversal maintenance pause can only be changed by a Gifsy Admin via the dedicated reversal-engine pause endpoint.',
       );
     }
 

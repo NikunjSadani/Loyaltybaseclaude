@@ -11,6 +11,7 @@
 | **Why paused** | Not needed for go-live or any data import (§11). Release ships a safe interim rule instead (§10). Machine/bandwidth prioritised for go-live: release → imports → targets/achievement import → client training deck. |
 | **Built** | `679ed4c2` design doc · `f5677f1e` WP1 schema + migration · `7d64ab55` WP0 reference model (oracle) + 30 tests incl. property tests · `6fed2005` WP6 backfill + verify jobs (not yet run on any DB) · `bd131860` WP2 movement v2 + WP3 reversal engine & flag (credits.service not wired yet — WP4) · `4187cb6d` WP5 PAYOUT allocations/reservations (SHADOW/V2) |
 | **Policy round A** | branch `feat/wre-pol-a` (2026-11-16): owner decisions P-A1..P-A5 (§12.1) — blocked wallets keep today's rules, backfill never stops on blocked wallets, unmapped credit refuses only its outlet line, "recovered X, owed Y", per-tenant approvals-paused switch; tenant-flag reads through the caller's tx (WP7 pool finding fixed); WP5 payout planner wired into WP6; call-out endpoint + banner |
+| **Fix round A** | branch `feat/wre-fix-a` (2026-11-16): money-audit points-side fixes M1–M3, L1–L6 (§12.2) — malformed flag no longer stops activity, expiry isolated, settings fence + GIFSY mode endpoint, no silent LEGACY pass-through on sequenced wallets, Deoleo LEGACY path statement-identical to origin/main (parity spec) |
 | **Not built** | WP8 rollout · dual money audit · staging run |
 | **Remaining effort** | ~7–8 h wall-clock with parallel agents (§13) |
 
@@ -133,8 +134,14 @@ Purely additive; existing code keeps working.
 4. Insert WalletTransaction with `seq`, `pointsDelta`, `balanceBefore = balanceAfter − pointsDelta` (exact), then the
    PointsLedger row and set `pointsLedgerId`.
 5. Credit-batch POINTS credits also insert their `WalletCreditPosition` (`O_X = o`, `lotId`, attribution EXACT).
-- **Lock order (deadlock-free):** credit_batches → wallets (ascending id) → wallet_credit_positions → points_ledger →
-  credit_payout_entries (ascending id). `confirmBatch` pre-locks all target wallets ascending.
+- **Lock order (deadlock-free):** [engine advisory lock, shared] → credit_batches → credit_reversals (the one being
+  approved) → wallets (ascending id) → wallet_credit_positions → points_ledger → credit_payout_entries (ascending id).
+  V2 and LEGACY approve both take batch → reversal (fix round A, L3). **`confirmBatch` does NOT pre-lock its wallets
+  ascending (fix round A, L3 decision):** each LEGACY credit is one atomic `UPDATE` (implicit row lock) exactly as on
+  origin/main, and pre-locking would add statements to every Deoleo confirm (L5 parity). Two concurrent confirms that
+  share wallets in opposite row orders can deadlock — Postgres detects it and aborts ONE transaction, which rolls back
+  whole (confirm is all-or-nothing, `PENDING_CONFIRM` stays) and is safely retried; no money effect. This is the
+  pre-existing origin/main behaviour; the guarded `PENDING_CONFIRM → CONFIRMED` flip still prevents a double credit.
 - State maintenance runs for **all tenants** and is **B-neutral** (balances/counters/lots identical when D = 0).
 - **To delete** once V2 replaces them: `clawedBackForEarlierCredits`, runtime `findOriginalBatchCredit` (logic moves to
   the one-off backfill), legacy half of `creditedPointsForBatchRow`, `debitFloor`, patchReversal's current-partner wallet
@@ -166,6 +173,12 @@ Lot mirror becomes `Σ remaining(non-expired) = H = B + D` (today's `= B` is the
 `a − o`. Reversal's recovered part `c` consumes **the reversed credit's own lot first**, then FIFO — a bug fix: today the
 oldest lot is burnt and the reversed credit's own lot survives (extends expiry of reversed points). Expiry keeps today's
 clamp; excess is reclassified as debt repayment. Redemption refund is a credit (repays debt first).
+
+**Bajaj negative wallets and expiry (fix round A, M4 — no code change):** Bajaj has **no points expiry** — verified on
+prod 2026-11-16 (owner-relayed check): 0 of 29,283 points-ledger lots carry an `expiresAt` — so the expiry sweep never
+touches a Bajaj lot and the 8 negative wallets are unaffected. Behaviour stays as today (Q6 clamp,
+excess = debt repayment) should Bajaj ever configure expiry. An expiry that only repays debt (e = 0, x > 0) now leaves an
+audit trace (L1, §12.1 fix round A).
 
 ## 8. PAYOUT (₹) reversals (WP5 ✅ `4187cb6d` — SHADOW/V2 tenants; LEGACY keeps the §10 interim rule)
 Bugs found by audit in the patched code (fixed only by WP5; the release's interim rule mitigates — §10):
@@ -304,7 +317,8 @@ math; rare) or ask for a report flag.
 v2 for all tenants (B-neutral). 4. Backfill staging → prod (backup, shown SQL, `current_database()` guard) + verification
 V0–V9 below; anomaly list → owner. 5. Per-tenant flag **`reversalEngine: LEGACY | SHADOW | V2`** (default LEGACY):
 SHADOW computes v2 next to legacy, applies legacy, stores the diff; **Bajaj → V2 first; Deoleo → V2 only after weeks of
-zero shadow diff.** Until V2 for a tenant: refuse POINTS reversals on wallets with debt/offsets (Q14). 6. Post-backfill
+zero shadow diff** (owner 2026-11-16: Deoleo stays LEGACY with NO backfill until it needs an engine reversal — §9.1). The
+flag is set only through `POST /v1/admin/credits/reversal-engine/mode` (fix round A, M2). Until V2 for a tenant: refuse POINTS reversals on wallets with debt/offsets (Q14). 6. Post-backfill
 migration: add+VALIDATE holdings CHECK, `seq` NOT NULL. 7. Remove legacy floor code; docs sweep.
 
 **Verification queries (read-only; guard each session with `SELECT current_database()`):**
@@ -335,7 +349,12 @@ SELECT id, "redeemablePoints", "debtPoints" FROM wallets WHERE "redeemablePoints
 
 ### 9.1 WP6 backfill / verify runbook (`6fed2005` — NOT yet run on any DB)
 Same API image, Cloud Run Job, `--command=node`. Every DB step needs the owner's OK; prod also needs a fresh backup.
-1. **DRY_RUN** (default; reads only): `EXPECTED_DB=gifsy_staging TENANTS=bajaj,deoleo` → args `dist/wallet/backfill/backfill.main.js`.
+> **Owner decision 2026-11-16 (fix round A, L5): Deoleo stays LEGACY with NO backfill** until it actually needs a
+> points reversal on the engine. Every run below is **`TENANTS=bajaj` only** — never `deoleo`. Deoleo's wallets stay
+> un-sequenced (movementSeq 0) and take exactly origin/main's write path (proved statement-for-statement by
+> `api/src/wallet/legacy-movement-parity.spec.ts`). The V0 "Deoleo zero debt" check (V5) is moot until then.
+
+1. **DRY_RUN** (default; reads only): `EXPECTED_DB=gifsy_staging TENANTS=bajaj` → args `dist/wallet/backfill/backfill.main.js`.
    Prints per tenant: planned/noop/done/BLOCKED counts, rows to sequence, positions by attribution, allocations, every
    debt wallet (`B → D (H)`), every anomaly (BLOCKING = that wallet gets no writes; WARNING = written + flagged). The
    anomaly list goes to the owner. Save the `V0` numbers it is about to print in APPLY.
@@ -367,11 +386,17 @@ Same API image, Cloud Run Job, `--command=node`. Every DB step needs the owner's
    backfilled wallet sequenced even while the tenant is LEGACY) are loaded as COUNTS ONLY (+ their clawback rows) and
    never written again; only wallets that are still un-sequenced (new wallets with legacy history, previously BLOCKED
    ones Gifsy has fixed) are planned and applied. PAYOUT reversals that already have allocation rows are skipped by the
-   planner. Recommended flip sequence: re-run APPLY with `KEEP_POINTS_REVERSALS_PAUSED=true` → VERIFY → set
-   `reversalEngine = V2` → lift the pause.
+   planner. **Flip sequence (fix round A, M2 — replaces the old "keep paused → flip → lift"):** re-run APPLY (the pause
+   lifts itself at the end) → VERIFY → `POST /v1/admin/credits/reversal-engine/mode {"mode":"V2","clientId":"bajaj",
+   "reason":"…"}` as a GIFSY_ADMIN. The endpoint is the ONLY way to set the mode (the generic settings upsert refuses
+   `reversalEngine` / `pointsReversalApprovalsPaused`); it takes the EXCLUSIVE engine lock (waits for in-flight POINTS
+   reversals + POINTS confirms), and **refuses V2 while approvals are paused or while any wallet with history is still
+   un-sequenced without being listed BLOCKED-with-reason** (message names the count + sample wallet ids). BLOCKED wallets
+   are allowed (P-A1) and their count is returned. Rollback: same endpoint, `"mode":"LEGACY"` — always allowed.
 3. **VERIFY** (read-only): args `dist/wallet/backfill/verify.main.js`, env `EXPECTED_DB`, `TENANTS`,
    `V0_BASELINE_JSON='[…the "V0 before" objects APPLY printed…]'`, `NEVER_NEGATIVE_TENANTS=deoleo` (default),
    prod only: `EXPECTED_NEGATIVE_BALANCES='{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}'`. Exit 0 = no FAIL, 5 = a FAIL.
+   (`TENANTS=bajaj` only — Deoleo is not backfilled, see the owner decision above.)
    V0 here is the TENANT-level cross-check vs that baseline (which now carries `txCount / txIn / txOut`): PASS when
    identical or "live activity since the APPLY baseline … — explained" (Σ balance change = Σ net of the rows added,
    figures only moved alongside new rows, no rows/wallets lost); otherwise FAIL — also for a baseline printed by an
@@ -436,11 +461,42 @@ amount / paused state is called out to whoever can act (call-outs table below).
 | POINTS reversal on a credit whose wallet is BLOCKED / not backfilled (V2) | client admin (create), Gifsy (approve) | API 409 `WALLET_NEEDS_ATTENTION` with reason; audit `REVERSAL_ENGINE_REFUSAL`; banner on Payout Status (credits reversal screen); attention endpoint `wallets[]` | Gifsy fixes the wallet history, re-runs the backfill |
 | Unmapped credit on the line | client admin / Gifsy | API 409 `CREDIT_UNMAPPED` (owner wording); audit row; banner + `unmappedCredits[]` | Gifsy maps the credit (→ MANUAL) |
 | Approvals paused | client admin / Gifsy | API 409 `APPROVALS_PAUSED` with start time; audit row; banner (GIFSY: "Resume approvals") | wait for maintenance / Gifsy lifts a stuck pause |
-| Movement on a BLOCKED wallet of a V2 tenant (legacy path) | Gifsy | API log warn per movement; attention endpoint / banner | none needed for earn/redeem; fix to re-enable reversals |
+| Movement on a BLOCKED wallet of a V2 tenant (legacy path) | Gifsy | attention endpoint / banner `wallets[]` (always); API log warn when the caller knows the mode (batch confirm — fix round A L5 removed the per-movement flag read) | none needed for earn/redeem; fix to re-enable reversals |
 | BLOCKED wallets in a backfill run | Gifsy / owner | run log ATTENTION block + JSON report `attention`; `wallets.backfillBlockedReason`; audit `WALLET_BACKFILL_BLOCKED`; verify V10 WARN | fix, re-run |
 | PAYOUT reversal backfill flags (AMBIGUOUS / DOUBLE_CONSUMPTION / …) | Gifsy / owner | run log `PAYOUT_<code>` lines + ATTENTION; verify V9b WARN | resolve by hand (no rows written for BLOCKING) |
 | Historical clawback beyond holdings | Gifsy / owner | run log (WARNING `CLAWBACK_OWED`, summary line), verify V8, banner + `owedClawbacks[]` "recovered X, owed Y" | recover the owed points off-platform or leave as debt |
 | SHADOW v2 refusal | Gifsy | audit `REVERSAL_ENGINE_SHADOW` `v2.refused` (same wording) | review before V2 |
+
+### 12.2 Fix round A — money-audit findings, points side (2026-11-16, branch `feat/wre-fix-a`)
+| # | Finding | Fix (as built) |
+|---|---|---|
+| M1 | A malformed `reversalEngine` value stopped ALL points activity (movementPath / batch confirm threw) and one bad lot stopped the whole expiry sweep (all tenants) | `TenantSettingsService` throws a typed `InvalidReversalEngineSettingException` (400). `WalletService.movementEngineMode` (used by movementPath, the expiry sweep and confirmBatch) treats it as **LEGACY** + logs "reversalEngine setting is invalid: <value> — treated as LEGACY; fix in settings". POINTS reversal create / approve still read it STRICTLY (fail closed, 400). Attention endpoint: `effectiveMode` + `modeWarning` (shown up front, red, on the banner). Expiry sweep: each lot in its own tx inside try/catch → `{ expiredLots, expiredPoints, failedLots, failures[] }`; each failure → `logger.error` + audit `POINTS_EXPIRY_FAILURE` (entityId = tenant) → attention `expiryFailures[]` (30 days) + banner; the lot stays due (retried next sweep) |
+| M2 | `reversalEngine` / `pointsReversalApprovalsPaused` writable through the generic settings upsert (GIFSY_STAFF with tenancy:write_finance) | `AdminCoreService.upsertSetting` refuses both keys (403, no `allowPlatformOnlyKey` bypass). New `POST /v1/admin/credits/reversal-engine/mode {mode, reason?, clientId?}` (GIFSY_ADMIN, `credits:approve_reversal`, `ReversalEngineModeDto` IsIn) → `WalletService.setReversalEngineMode`: exclusive engine advisory lock; → SHADOW/V2 refused while paused; → V2 refused while any wallet with history is un-sequenced and NOT BLOCKED-with-reason (count + 5 sample ids, "run the backfill APPLY first"); → LEGACY always allowed; audit `REVERSAL_ENGINE_MODE` (old → new, reason, BLOCKED count); returns `blockedWalletsListed` + note. Pause only via the existing pause endpoint |
+| M3 | LEGACY clawback on a SEQUENCED wallet with no / too little credit position was logged-only (ρ not bumped) → a later V2 reversal could take the same credit back | `clawbackAward` refuses BEFORE any write: 409 `CREDIT_UNMAPPED` (owner wording) when the line has no resolved position on the wallet or Σ(a − ρ) < the clawback (detail: `engine: LEGACY`, reason, coverable, requested); `assertPointsReversalAllowed` refuses at create when a sequenced wallet has no position. Audited by credits (`REVERSAL_ENGINE_REFUSAL`) → attention `refusals[]` (30 days) + banner. V2 caps (`v2PointsReversalCap` → create cap, approve cap, applyCreditReversal, SHADOW diff) subtract `unallocatedApproved` = Σ approved points of APPROVED/PARTIAL POINTS reversals of the line with NO allocation row (the reversal being applied excluded) |
+| L1 | Expiry that only repays debt (e = 0, x > 0) left no trace | Audit row `POINTS_EXPIRY_DEBT_REPAID` (entityId = wallet; lot, h, debtRepaid, D before/after, seq) in the same tx. **Chosen over a zero-points movement:** a "Points expired 0" passbook row would show partners debt they are never shown (Q8) and every movement row keeps a non-zero `points` for the backfill / chain checks — no seq consumed |
+| L2 | `byCreditOrder` ordered by createdAt first | Same wallet + both seq → seq; else createdAt, then id (seq is per wallet, absent pre-backfill) |
+| L3 | V2 approve locked reversal → batch, LEGACY batch → reversal (deadlock across a flip) | V2 approve now locks batch row → reversal row (then cap); `assertV2PointsApproval` no longer re-locks. confirmBatch wallet pre-lock: **documented, not done** (§5 lock order) |
+| L4 | Mode read outside the tx (a flip could land mid-request) | POINTS create / approve read the mode through the tx right after the pause gate's SHARED engine lock; POINTS confirm takes the SHARED lock as its first statement (`lockReversalEngineShared`) then reads the mode in the tx; the mode endpoint takes the EXCLUSIVE lock. Still once per request / batch. Residual: a single non-batch movement (refund, points-engine credit) on a brand-new wallet racing a flip can land un-sequenced — visible on the attention list (`NOT_BACKFILLED`), reversals on it refused; a backfill re-run fixes it |
+| L5 | Un-backfilled LEGACY wallets paid a row lock + partner read + flag read per movement | `applyMovement` fast path: caller's read shows `movementSeq === 0` and (mode known LEGACY or the wallet visibly has history) → today's write path with NO lock / partner / flag read; its wallet UPDATE carries `AND "movementSeq" = 0` (one atomic statement, verified on Prisma 7 + PGlite: `UPDATE … WHERE id = $1 AND "movementSeq" = $2 RETURNING`) → a wallet sequenced since the read → nothing written, falls to the locked path. Expiry sweep + clawback decide "tracked" from the locked row (no flag read). Proof: `legacy-movement-parity.spec.ts` — a Deoleo-style scenario reproduces origin/main `2eb8271d`'s recording (fixture) statement for statement (69 = 69; pre-fix branch: 106) with identical rows; the only normalised differences are the `movementSeq` guard and two extra selected columns on the reversal gate's wallet read. 2,000-row LEGACY confirm: 24,006 → 16,006 statements. A brand-new (pristine) wallet's FIRST movement without a known mode still reads the flag once (it may need seq 1 on a SHADOW/V2 tenant) |
+| L6 | Pause endpoint for an un-assumed Gifsy user silently wrote Gifsy's own tenant | `resolveEngineAdminTenant`: assumed → that tenant (explicit clientId must match, else 400); un-assumed Gifsy → explicit `clientId` REQUIRED (400 "Choose the program…", nothing written) and must exist (404). Same rule for the mode endpoint. Banner sends the attention response's `clientId` |
+| M4 | Expiry on Bajaj negative wallets | No code change — Bajaj has no expiry lots (§7 note) |
+
+**Call-outs added:**
+
+| Path | Who sees it | Where | Action |
+|---|---|---|---|
+| Malformed `reversalEngine` | Gifsy / client admin | banner (red, up front) + attention `modeWarning`; API log warn per read; reversal create/approve 400 | Gifsy sets a valid mode via the mode endpoint |
+| Expiry lot failed | Gifsy | attention `expiryFailures[]` + banner; sweep result `failures[]`; audit `POINTS_EXPIRY_FAILURE`; log error | retried automatically; investigate if it repeats |
+| LEGACY clawback on a sequenced wallet not attributable | client admin (create) / Gifsy (approve) | 409 `CREDIT_UNMAPPED`; audit `REVERSAL_ENGINE_REFUSAL` (`engine: LEGACY`); attention `refusals[]` + banner | Gifsy maps the credit / re-runs the backfill |
+| Expiry repaid debt only | Gifsy (audit) | audit `POINTS_EXPIRY_DEBT_REPAID` | none |
+| Mode changed / refused | Gifsy | mode endpoint response + audit `REVERSAL_ENGINE_MODE`; refusal message names the reason | run the backfill / wait for the pause |
+| Pause / mode without a target program | Gifsy | 400 "Choose the program…" | assume the tenant or pass `clientId` |
+
+**Tests:** `api/src/wallet/legacy-movement-parity.spec.ts` + fixture `__fixtures__/legacy-movement-parity.origin-main.json`
+(L5); `wallet.reversal-engine.spec.ts` "fix round A" (M1 malformed + expiry isolation, L1, L2, L5 no-read + race +
+insufficient, M3 refusal/caps; SHADOW-on-sequenced-unmapped now refuses); `reversal-attention.spec.ts` (M1 attention,
+M2 mode endpoint, L6); `credits.reversal-engine.spec.ts` (L3 order, L4 confirm lock, M3 via endpoints, M1 confirm on
+malformed, counts updated; LEGACY golden unchanged); `admin-core.service.spec.ts` (M2 fence); banner vitest (M1/M3/L6).
 
 ## 13. Work packages & resume plan
 | WP | Scope | Status | Depends | Est. |
@@ -448,12 +504,13 @@ amount / paused state is called out to whoever can act (call-outs table below).
 | WP0 | Pure reference model `api/src/wallet/reversal-model.ts` + `reversal-model.spec.ts` — the ORACLE | ✅ `7d64ab55` (30 tests; jest + `tsc -p tsconfig.build.json` pass in the worktree) | — | — |
 | WP1 | Prisma schema + migration | ✅ `f5677f1e` | — | — |
 | WP2 | `applyMovement` v2 (lock-first, seq, pointsDelta, D/O, ledger link, positions, expiry reclassification) calling WP0 | ✅ `bd131860` — `WalletService.movementPath` rollout guard: movementSeq > 0 → v2 maintenance (any flag); movementSeq = 0 + LEGACY → pre-engine path byte-identical; SHADOW/V2 → v2 only for a pristine wallet, un-backfilled history → 409 (**changed by policy round A P-A1: → LEGACY path, only reversals refused**). Expiry with e = 0 writes no row (D/O only). Tests `wallet.reversal-engine.spec.ts` | WP0, WP1 | — |
-| WP3 | Reversal engine `applyCreditReversal` §6; own-lot-first; LEGACY/SHADOW/V2 flag; delete legacy floor helpers | ✅ `bd131860` — `applyCreditReversal`, `v2PointsReversalCap`, `reverseCreditBatchPoints` (flag `program_settings.reversalEngine`, absent → LEGACY, malformed → refused; SHADOW diff → audit_logs `REVERSAL_ENGINE_SHADOW`). Legacy floor helpers kept: LEGACY still needs them (removal = rollout step 7). `patchReversal` still calls the LEGACY pair directly → switch to the dispatcher in WP4 | WP2 | — |
+| WP3 | Reversal engine `applyCreditReversal` §6; own-lot-first; LEGACY/SHADOW/V2 flag; delete legacy floor helpers | ✅ `bd131860` — `applyCreditReversal`, `v2PointsReversalCap`, `reverseCreditBatchPoints` (flag `program_settings.reversalEngine`, absent → LEGACY, malformed → reversals refused / normal activity on LEGACY since fix round A M1; SHADOW diff → audit_logs `REVERSAL_ENGINE_SHADOW`). Legacy floor helpers kept: LEGACY still needs them (removal = rollout step 7). `patchReversal` still calls the LEGACY pair directly → switch to the dispatcher in WP4 | WP2 | — |
 | WP4 | credits.service POINTS: position-based caps at create/approve, wallet from position, allocations, shortfall totals, SHADOW | ✅ branch `feat/wre-wp4` — mode resolved once per request (POINTS create/approve only; reject/PAYOUT never read it). **V2**: create cap Σ(a − ρ) − Σ pending, `originalPaise` = Σ position amounts, approve cap Σ(a − ρ) under the batch lock, then `reverseCreditBatchPoints(mode V2)` (receiving wallet, allocations, Σ shortfall → `shortfallPaise`); no current-partner / debt gate; no position / UNRESOLVED → 400. **SHADOW**: LEGACY decides + applies; v2 create-cap diff (audit `REVERSAL_ENGINE_SHADOW`, action CREATE) + approve diff (dispatcher). **LEGACY**: code path unchanged — golden snapshot generated on `1aa5084e` (`api/src/credits/__fixtures__/legacy-reversal-golden.json`). `confirmBatch` resolves the mode once per batch (`creditEarn` → `movementPath(knownMode)`): 2,000-row confirm 24,004 → 20,005 queries (LEGACY), 28,004 → 24,005 (V2). Tests `credits.reversal-engine.spec.ts` | WP3 | — |
 | WP5 | PAYOUT allocations §8: entry-selection DTO + UI, reservation, download/re-bank hold, approve rules, backfill of existing PAYOUT reversals | ✅ `4187cb6d` — LEGACY byte-identical (existing credits spec unchanged but for 3 mock lines). Backfill = pure planner, WP6 wiring pending (§8 "As built"). **Policy round B (`feat/wre-pol-b`, §8.1):** V2 only (SHADOW = LEGACY for payouts); net receivable + tenant-scoped PAN TDS credit (create / apply at download / carry forward / release on FAILED or cancel); outcome summary on every tenant; TDS report + export + payout screen call-outs; migration `20261117130000_payout_reversal_tds_credit` | WP1 + release branch merged in | — |
 | WP6 | Backfill job §9 (pure module using WP0 `replay()` + Cloud Run job script, DRY_RUN default, resumable) + verify job V0–V9 + draft post-backfill migration | ✅ `6fed2005` — `api/src/wallet/backfill/` (planner, runner, Prisma store, `backfill.main.ts`, `verify.main.ts`) + 30 fixture tests; draft `platform/docs/plans/sql/wallet-reversal-post-backfill.DRAFT.sql`. Not yet run on any DB (runbook §9.1) | WP0, WP1 | — |
 | WP7 | Postgres e2e concurrency tests (concurrent credits, reversal vs redeem, double approval, reservation vs download) | 🟡 built (`feat/wre-wp7`): `api/test/wallet-reversal-concurrency.e2e-spec.ts` + `api/test/support/` (disposable-DB harness, WP0 oracle replay check). Run: `WRE_PG_ADMIN_URL=<throw-away LOCAL postgres admin URL>` (creates/migrates/drops its own DB; refuses non-localhost) or `WRE_PG_EMBEDDED=pglite` (serialised self-check only). PGlite: 26 green, 5 skipped. **Not yet run on a real server** (no Docker/Postgres on the dev machine). Pending: WP4 credits-path V2 approve race, WP5 reservation vs download (`it.skip` + TODO). Production finding (flag read OUTSIDE the tx → pool starvation) **fixed in policy round A** (§12.1 P-A6) — the pool test is now a regression guard expected GREEN on a real server | WP2–WP5 | ~1 h |
 | Pol-A | Owner policy round A (§12.1): Q1 blocked wallets on legacy rules + per-wallet backfill status, Q2 never-stop backfill, Q3 line-scoped unmapped refusal, Q4 owed ≠ recovered, Q5 approvals-paused switch + cheap re-run, WP7 tx-read fix, WP5 planner → WP6 (+ V9b), call-out endpoint `GET /v1/admin/credits/reversal-engine/attention` + `POST …/pause` + banner (`status/_components/ReversalEngineAttentionBanner.tsx`) | ✅ branch `feat/wre-pol-a` — schema additions folded into migration `20261117120000` (never applied). Tests: `credits.reversal-engine.spec.ts` (golden LEGACY unchanged), `wallet.reversal-engine.spec.ts`, `reversal-attention.spec.ts`, `backfill.spec.ts`, banner vitest. PGlite WP7 run: green except the T-pay3 schema test, which fails only because the SHARED generated Prisma client carried policy round B's `payout_reversal_allocations.receivablePaise` column (absent from this branch's migration) | WP0–WP7 | — |
+| Fix-A | Money-audit fix round A, points side (§12.2): M1 malformed flag → LEGACY for activity + expiry isolation, M2 settings fence + mode endpoint, M3 no silent LEGACY pass-through on sequenced wallets + caps, L1–L6 | ✅ branch `feat/wre-fix-a` (no schema change). Round B (payout/TDS/UI) in parallel on `feat/wre-fix-b`. ⚠️ WP7 PGlite run currently RED for an environment reason only: the SHARED generated Prisma client carries columns of another branch (`credit_reversals.requestRemarks`, `credit_payout_entries.tdsBaseReversedAt`) absent from this branch's migrations — re-run after the branches are merged + `prisma generate` | all | — |
 | WP8 | Flag rollout, shadow-diff report, docs sweep, prod runbook | ⬜ | all | with staging |
 | — | Dual independent money audit + fix round; full `scripts/gates.sh`; staging (migration, backfill, V0–V9, one Bajaj negative wallet + one Deoleo wallet with real logins) | ⬜ | all | ~3 h |
 

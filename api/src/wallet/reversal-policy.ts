@@ -58,6 +58,18 @@ export function pointsReversalLockKey(clientId: string): string {
 }
 
 /**
+ * Fix round A, L4: take the SHARED engine lock (same key) at the START of a transaction that must run wholly on one
+ * engine mode — a POINTS batch confirm — and read the mode after it. The dedicated mode endpoint
+ * (WalletService.setReversalEngineMode) takes the EXCLUSIVE lock, so a flip waits for in-flight holders and later
+ * holders see the new mode. Must be the transaction's first lock (before any wallet row lock): exclusive holders never
+ * wait on row locks, so this can't deadlock.
+ */
+export async function lockReversalEngineShared(tx: Prisma.TransactionClient, clientId: string): Promise<void> {
+  const key = pointsReversalLockKey(clientId);
+  await tx.$queryRaw`SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock_shared(hashtextextended(${key}, 0))) AS l`;
+}
+
+/**
  * The Q5 gate, run FIRST inside every POINTS reversal create / approve transaction (all engine modes — the backfill
  * runs while a tenant is still LEGACY). Takes the shared advisory lock, then reads the switch through the SAME `tx`.
  */

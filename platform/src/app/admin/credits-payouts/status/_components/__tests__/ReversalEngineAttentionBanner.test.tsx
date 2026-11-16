@@ -86,6 +86,55 @@ describe('ReversalEngineAttentionBanner', () => {
     await waitFor(() => expect(screen.queryByText(/approvals are paused/)).toBeNull());
   });
 
+  // ── Wallet Reversal Engine fix round A ──
+  it('M1: a malformed engine setting is shown LOUDLY up front (no expand needed), even with nothing else to report', async () => {
+    const warning =
+      'reversalEngine setting is invalid: "v2" — treated as LEGACY; fix in settings. Earning, redeeming, expiry and batch confirms run on today\'s (LEGACY) rules';
+    mockFetch([base({ mode: 'INVALID', modeError: 'Invalid reversalEngine setting', modeWarning: warning, effectiveMode: 'LEGACY' })]);
+    render(<ReversalEngineAttentionBanner />);
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('reversalEngine setting is invalid: "v2" — treated as LEGACY; fix in settings');
+    expect(screen.queryByText('reversal engine setting unreadable')).toBeNull(); // not duplicated
+  });
+
+  it('M1 / M3: expiry failures and Gifsy-must-act reversal refusals are counted and, expanded, listed with their reasons', async () => {
+    const at = '2026-11-16T05:00:00.000Z';
+    mockFetch([
+      base({
+        expiryFailures: [{ at, lotId: 'L1', walletId: 'w1', error: 'deadlock detected' }],
+        expiryFailuresTotal: 1,
+        refusals: [
+          {
+            at, entityId: 'rev1', phase: 'APPROVE', code: 'CREDIT_UNMAPPED', outletCode: 'O1',
+            message: "Can't reverse: the original credit for outlet O1 in this batch couldn't be identified — Gifsy must map it first.",
+            reason: 'sequenced wallet: no credit position records this credit',
+          },
+        ],
+        refusalsTotal: 1,
+      }),
+    ]);
+    render(<ReversalEngineAttentionBanner />);
+    expect(
+      await screen.findByText('1 points-expiry failure (last 30 days) · 1 points reversal refused — Gifsy must act (last 30 days)'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /show details/i }));
+    expect(screen.getByText(/lot L1 \(wallet w1\) — deadlock detected/)).toBeInTheDocument();
+    expect(screen.getByText(/outlet O1 · approval refused — Can't reverse: the original credit for outlet O1/)).toBeInTheDocument();
+    expect(screen.getByText(/\(sequenced wallet: no credit position records this credit\)/)).toBeInTheDocument();
+  });
+
+  it('L6: "Resume approvals" names the program the call-outs are about (never the Gifsy home tenant by default)', async () => {
+    const posted: unknown[] = [];
+    mockFetch([base({ clientId: 'bajaj', pause: { paused: true, since: '2026-11-16T03:00:00.000Z', by: 'x', reason: 'y' } }), base({ clientId: 'bajaj' })], (b) =>
+      posted.push(b),
+    );
+    render(<ReversalEngineAttentionBanner canLiftPause />);
+    fireEvent.click(await screen.findByRole('button', { name: /resume approvals/i }));
+    await waitFor(() =>
+      expect(posted).toEqual([{ paused: false, reason: 'lifted from the credits reversal screen', clientId: 'bajaj' }]),
+    );
+  });
+
   it('a failed call-out read is itself shown (never silent)', async () => {
     global.fetch = vi.fn(async () => ({ ok: false, status: 500, json: async () => ({ success: false, error: 'boom' }) })) as unknown as typeof fetch;
     render(<ReversalEngineAttentionBanner />);

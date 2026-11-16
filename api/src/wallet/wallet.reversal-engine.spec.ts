@@ -9,13 +9,21 @@
 
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import {
+  byCreditOrder,
   planV2Reversal,
+  POINTS_EXPIRY_DEBT_ONLY_ENTITY,
+  POINTS_EXPIRY_FAILURE_ENTITY,
+  ReversalPositionRow,
   WalletService,
   DEBT_REVERSAL_PAUSED_MESSAGE,
 } from './wallet.service';
 import { ReversalAttentionException } from './reversal-policy';
 import { PrismaService } from '../prisma/prisma.service';
-import { ReversalEngineMode, TenantSettingsService } from '../tenant/tenant-settings.service';
+import {
+  InvalidReversalEngineSettingException,
+  ReversalEngineMode,
+  TenantSettingsService,
+} from '../tenant/tenant-settings.service';
 import {
   checkInvariants,
   legacyReversalDecrement,
@@ -104,7 +112,8 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[]; mode?: ReversalEngine
   const auditLogs: Row[] = [];
   const outlets: Row[] = opts.outlets ?? [];
   const batches: Row[] = [];
-  const settings = { mode: opts.mode ?? ('LEGACY' as ReversalEngineMode), modeReads: 0, modeDbs: [] as unknown[] };
+  const reversals: Row[] = [];
+  const settings ={ mode: opts.mode ?? ('LEGACY' as ReversalEngineMode), modeReads: 0, modeDbs: [] as unknown[] };
   const positionView = (p: Row) => {
     const c = walletTxns.find((t) => t.id === p.creditTxId);
     return { ...p, creditTx: { seq: c?.seq ?? null, createdAt: c?.createdAt ?? NOW } };
@@ -122,7 +131,8 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[]; mode?: ReversalEngine
       },
       update: async ({ where, data }: any) => {
         const w = wallets.find((x) => matchWhere(x, where));
-        if (!w) throw new Error('wallet not found');
+        // Prisma's "record to update not found" (P2025) — e.g. the L5 `movementSeq: 0` guard missed
+        if (!w) throw Object.assign(new Error('Record to update not found'), { code: 'P2025' });
         applyData(w, data);
         return { ...w };
       },
@@ -213,6 +223,20 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[]; mode?: ReversalEngine
       findMany: async ({ where }: any) => outlets.filter((o) => matchWhere(o, where ?? {})),
     },
     creditBatch: { findFirst: async ({ where }: any = {}) => batches.find((b) => b.id === where?.id) ?? null },
+    // M3 (fix round A): approved reversals of a line with NO allocation row count against the V2 cap.
+    creditReversal: {
+      findMany: async ({ where }: any = {}) =>
+        reversals.filter((r) => {
+          if (where?.id?.not !== undefined && r.id === where.id.not) return false;
+          if (where?.batchId !== undefined && r.batchId !== where.batchId) return false;
+          if (where?.outletId !== undefined && r.outletId !== where.outletId) return false;
+          if (where?.fieldId !== undefined && r.fieldId !== where.fieldId) return false;
+          if (where?.awardType !== undefined && r.awardType !== where.awardType) return false;
+          if (where?.status?.in && !where.status.in.includes(r.status)) return false;
+          if (where?.creditAllocations?.none && allocations.some((a) => a.creditReversalId === r.id)) return false;
+          return true;
+        }),
+    },
     pointExpiryConfig: { findFirst: async () => null },
     channelPartner: { findFirst: async ({ where }: any) => ({ id: where?.id, clientId: 'bajaj' }) },
     $queryRaw: jest.fn(async () => []),
@@ -223,11 +247,13 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[]; mode?: ReversalEngine
     getReversalEngineModeUncached: async (_clientId: string, db?: unknown) => {
       settings.modeReads++;
       settings.modeDbs.push(db);
+      // a malformed stored value (fix round A, M1) — the real service throws exactly this
+      if (!['LEGACY', 'SHADOW', 'V2'].includes(settings.mode)) throw new InvalidReversalEngineSettingException(settings.mode);
       return settings.mode;
     },
   };
   const service = new WalletService(models as unknown as PrismaService, tenantSettings as unknown as TenantSettingsService);
-  return { service, models, wallets, walletTxns, ledger, positions, allocations, auditLogs, outlets, settings, batches };
+  return { service, models, wallets, walletTxns, ledger, positions, allocations, auditLogs, outlets, settings, batches, reversals };
 }
 type H = ReturnType<typeof harness>;
 
@@ -599,7 +625,7 @@ describe('rollout guard - which write path a movement takes (movementPath)', () 
     const h = harness({ wallets: [{ ...withHistory(), backfillStatus: 'BLOCKED', backfillBlockedReason: 'x' }], mode: 'V2' });
     seedRow(h);
     h.ledger.push({ id: 'L1', walletId: 'w1', transactionType: 'EARN', points: 100, remainingPoints: 60, isExpired: false, expiresAt: later(-10), createdAt: later(-9000) });
-    await expect(h.service.expireDuePoints({ now: NOW })).resolves.toEqual({ expiredLots: 1, expiredPoints: 60 });
+    await expect(h.service.expireDuePoints({ now: NOW })).resolves.toEqual({ expiredLots: 1, expiredPoints: 60, failedLots: 0, failures: [] });
     expect(h.wallets[0]).toMatchObject({ redeemablePoints: 40, movementSeq: 0, debtPoints: 0 });
   });
 
@@ -630,7 +656,7 @@ describe('rollout guard - which write path a movement takes (movementPath)', () 
     const h = harness({ wallets: [withHistory()], mode: 'V2' });
     seedRow(h);
     h.ledger.push({ id: 'L1', walletId: 'w1', transactionType: 'EARN', points: 100, remainingPoints: 100, isExpired: false, expiresAt: later(-10), createdAt: later(-9000) });
-    await expect(h.service.expireDuePoints({ now: NOW })).resolves.toEqual({ expiredLots: 1, expiredPoints: 100 });
+    await expect(h.service.expireDuePoints({ now: NOW })).resolves.toEqual({ expiredLots: 1, expiredPoints: 100, failedLots: 0, failures: [] });
     expect(h.wallets[0]).toMatchObject({ redeemablePoints: 0, movementSeq: 0 });
     expect(h.walletTxns[1].seq).toBeUndefined();
   });
@@ -872,7 +898,7 @@ describe('reverseCreditBatchPoints — per-tenant flag', () => {
     expect(h.settings.modeDbs[0]).toBe(h.models);
   });
 
-  it('SHADOW: a v2 refusal (UNRESOLVED credit in the batch, Q5) is recorded as a diff; LEGACY still applied', async () => {
+  it('SHADOW on a SEQUENCED wallet whose credit is UNRESOLVED: LEGACY no longer passes silently — refused CREDIT_UNMAPPED (fix round A, M3); nothing written', async () => {
     const h = harness({
       outlets: linked,
       mode: 'SHADOW',
@@ -888,12 +914,14 @@ describe('reverseCreditBatchPoints — per-tenant flag', () => {
       id: 'u1', walletId: 'w1', creditTxId: 'old', lotId: null, batchId: 'B1', outletCode: null, fieldId: null,
       amount: 500, offsetPoints: 0, reversedPoints: 0, attribution: 'UNRESOLVED',
     });
-    await dispatch(h, 200);
-    expect(h.wallets[0]).toMatchObject({ redeemablePoints: 300, movementSeq: 2 });
-    expect(h.auditLogs[0].metadata).toMatchObject({
-      differs: true,
-      v2: { refused: "Can't reverse: the original credit for outlet O1 in this batch couldn't be identified — Gifsy must map it first." },
-    });
+    // Before fix round A the LEGACY clawback ran (B 500 → 300) and the positions were left untouched (log-only), so a
+    // later V2 reversal could have taken the same credit back again.
+    const err = await dispatch(h, 200).catch((e) => e);
+    expect(err).toBeInstanceOf(ReversalAttentionException);
+    expect(err).toMatchObject({ code: 'CREDIT_UNMAPPED', detail: expect.objectContaining({ engine: 'LEGACY', walletId: 'w1' }) });
+    expect(err.message).toBe("Can't reverse: the original credit for outlet O1 in this batch couldn't be identified — Gifsy must map it first.");
+    expect(h.wallets[0]).toMatchObject({ redeemablePoints: 500, movementSeq: 1 });
+    expect(h.walletTxns).toHaveLength(1);
   });
 
   it('V2: the position engine runs (debt wallet R1: −841 +500 → reverse → −841); LEGACY helpers are not consulted', async () => {
@@ -1011,5 +1039,206 @@ describe('policy round A — v2PointsReversalCap refusals (owner 2026-11-16)', (
     const e = await err(none.service.v2PointsReversalCap(none.models as any, key));
     expect(e).toBeInstanceOf(BadRequestException);
     expect(e!.message).toMatch(/settle it off-platform/);
+  });
+});
+
+// ───────────────────────── fix round A (money audit, 2026-11-16) ─────────────────────────
+
+describe('fix round A — M1 (malformed flag never stops points activity; expiry failures isolated + reported)', () => {
+  it('a malformed reversalEngine value: movements run on LEGACY rules (pristine wallet too), logged — never refused', async () => {
+    const h = harness({ mode: 'v2' as unknown as ReversalEngineMode });
+    const warn = jest.spyOn((h.service as any).logger, 'warn').mockImplementation(() => undefined);
+    await h.service.creditEarn('cp1', 'bajaj', 50, { referenceType: 'CREDIT_BATCH', referenceId: 'B1', metadata: { fieldId: 'F1', outletCode: 'O1' } });
+    await h.service.debitRedeem('cp1', 20, {});
+    expect(h.wallets[0]).toMatchObject({ redeemablePoints: 30, movementSeq: 0 });
+    expect(h.walletTxns.every((t) => t.seq === undefined)).toBe(true);
+    expect(h.positions).toHaveLength(0);
+    expect(warn.mock.calls.map((c) => String(c[0]))).toContainEqual(
+      expect.stringMatching(/reversalEngine setting is invalid: "v2" — treated as LEGACY; fix in settings/),
+    );
+    // movementEngineMode reports it to callers that want to say so (attention banner / confirm)
+    await expect(h.service.movementEngineMode('bajaj')).resolves.toEqual({ mode: 'LEGACY', invalid: 'v2' });
+  });
+
+  it('expiry sweep: one lot failing never stops the others (any tenant); counted, listed, audited, retried next sweep', async () => {
+    const h = harness({
+      wallets: [
+        blankWallet('w1', 'cp1', { redeemablePoints: 100, earnedPoints: 100, lifetimeEarned: 100, partner: { clientId: 'bajaj' } }),
+        blankWallet('w2', 'cp2', { redeemablePoints: 70, earnedPoints: 70, lifetimeEarned: 70, partner: { clientId: 'deoleo' } }),
+      ],
+    });
+    h.ledger.push(
+      { id: 'L1', walletId: 'w1', transactionType: 'EARN', points: 100, remainingPoints: 100, isExpired: false, expiresAt: later(-20), createdAt: later(-9000) },
+      { id: 'L2', walletId: 'w2', transactionType: 'EARN', points: 70, remainingPoints: 70, isExpired: false, expiresAt: later(-10), createdAt: later(-9000) },
+    );
+    const realClaim = h.models.pointsLedger.updateMany;
+    h.models.pointsLedger.updateMany = async (a: any) => {
+      if (a.where?.id === 'L1' && a.data?.isExpired === true) throw new Error('boom: deadlock detected');
+      return realClaim(a);
+    };
+    const err = jest.spyOn((h.service as any).logger, 'error').mockImplementation(() => undefined);
+    const res = await h.service.expireDuePoints({ now: NOW });
+    expect(res).toEqual({
+      expiredLots: 1,
+      expiredPoints: 70,
+      failedLots: 1,
+      failures: [{ lotId: 'L1', walletId: 'w1', clientId: 'bajaj', error: 'boom: deadlock detected' }],
+    });
+    expect(h.wallets.find((w) => w.id === 'w2')!.redeemablePoints).toBe(0); // the other tenant's lot still expired
+    expect(h.ledger.find((l) => l.id === 'L1')!.isExpired).toBe(false); // still due → next sweep retries it
+    expect(h.auditLogs).toEqual([
+      expect.objectContaining({
+        entityType: POINTS_EXPIRY_FAILURE_ENTITY, entityId: 'bajaj', actorId: null,
+        metadata: expect.objectContaining({ lotId: 'L1', walletId: 'w1', error: 'boom: deadlock detected' }),
+      }),
+    ]);
+    expect(err).toHaveBeenCalled();
+  });
+});
+
+describe('fix round A — L1 (expiry that only repays debt leaves a trace)', () => {
+  it('e = 0, x > 0: audit row with the debt repaid; still no zero-points passbook row and no seq consumed', async () => {
+    const d = await drive(-100, [cr('X', 300), sp(150), rv('X', 100), ex('X')]);
+    expect(d.h.wallets[0]).toMatchObject({ redeemablePoints: -50, debtPoints: 50 });
+    expect(d.h.walletTxns.some((t) => t.transactionType === 'DEBIT_EXPIRY')).toBe(false);
+    const trace = d.h.auditLogs.filter((a) => a.entityType === POINTS_EXPIRY_DEBT_ONLY_ENTITY);
+    expect(trace).toEqual([
+      expect.objectContaining({
+        entityId: 'w1',
+        metadata: expect.objectContaining({ expiredFromBalance: 0, debtRepaid: 50, debtBefore: 100, debtAfter: 50, lotRemaining: 50 }),
+      }),
+    ]);
+    const seqs = d.h.walletTxns.filter((t) => t.seq != null).map((t) => t.seq);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(d.h.wallets[0].movementSeq).toBe(Math.max(...seqs));
+  });
+});
+
+describe('fix round A — L2 (positions ordered by seq, createdAt fallback)', () => {
+  const pos = (id: string, walletId: string, seq: number | null, t: number): ReversalPositionRow => ({
+    id, walletId, creditTxId: `c-${id}`, lotId: null, amount: 10, offsetPoints: 0, reversedPoints: 0,
+    creditTx: { seq, createdAt: later(t) },
+  });
+  it('same wallet: seq wins over createdAt; mixed / other wallet / no seq: createdAt, then id', () => {
+    // same wallet, clock skew made the later movement's stamp earlier — seq is the truth
+    expect([pos('b', 'w1', 2, 1), pos('a', 'w1', 1, 5)].sort(byCreditOrder).map((p) => p.id)).toEqual(['a', 'b']);
+    // different wallets: per-wallet seq is not comparable → createdAt
+    expect([pos('b', 'w2', 1, 9), pos('a', 'w1', 7, 3)].sort(byCreditOrder).map((p) => p.id)).toEqual(['a', 'b']);
+    // missing seq → createdAt, tie → id
+    expect([pos('z', 'w1', null, 4), pos('y', 'w1', 3, 4), pos('x', 'w1', null, 2)].sort(byCreditOrder).map((p) => p.id)).toEqual(['x', 'y', 'z']);
+  });
+});
+
+describe('fix round A — L5 (un-sequenced LEGACY wallet: today path, no lock / partner / flag read)', () => {
+  const withHistory = () => blankWallet('w1', 'cp1', { redeemablePoints: 100, earnedPoints: 100, lifetimeEarned: 100 });
+
+  it('a wallet with history: no FOR UPDATE, no partner read, no flag read — whatever the tenant flag', async () => {
+    for (const mode of ['LEGACY', 'SHADOW', 'V2'] as const) {
+      const h = harness({ wallets: [withHistory()], mode });
+      const partner = jest.spyOn(h.models.channelPartner, 'findFirst');
+      await h.service.creditEarn('cp1', 'bajaj', 50, { referenceType: 'CREDIT_BATCH', referenceId: 'B1', metadata: { fieldId: 'F1', outletCode: 'O1' } });
+      await h.service.debitRedeem('cp1', 30, {});
+      expect(h.models.$queryRaw).not.toHaveBeenCalled();
+      expect(partner).not.toHaveBeenCalled();
+      expect(h.settings.modeReads).toBe(0);
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: 120, movementSeq: 0 });
+      expect(h.walletTxns.every((t) => t.seq === undefined)).toBe(true);
+    }
+  });
+
+  it('race: the wallet was sequenced (backfill APPLY) after the caller read it → guarded UPDATE matches nothing, nothing written, the locked V2 path runs (never a mixed history)', async () => {
+    for (const op of ['credit', 'redeem'] as const) {
+      const h = harness({ wallets: [blankWallet('w1', 'cp1', { redeemablePoints: 100, earnedPoints: 100, lifetimeEarned: 100, movementSeq: 1 })] });
+      h.walletTxns.push({ id: 'old', walletId: 'w1', points: 100, seq: 1, pointsDelta: 100, balanceBefore: 0, balanceAfter: 100, createdAt: later(-5000) });
+      const real = h.models.wallet.findFirst;
+      let stale = true; // the caller's (pre-backfill) read
+      h.models.wallet.findFirst = async (a: any) => {
+        const r = await real(a);
+        if (stale && r) {
+          stale = false;
+          return { ...r, movementSeq: 0 };
+        }
+        return r;
+      };
+      if (op === 'credit') await h.service.creditEarn('cp1', 'bajaj', 50, {});
+      else await h.service.debitRedeem('cp1', 40, {});
+      const last = h.walletTxns[h.walletTxns.length - 1];
+      expect(h.walletTxns).toHaveLength(2);
+      expect(last).toMatchObject({ seq: 2, pointsDelta: op === 'credit' ? 50 : -40 });
+      expect(h.wallets[0]).toMatchObject({ movementSeq: 2, redeemablePoints: op === 'credit' ? 150 : 60 });
+      expect(h.models.$queryRaw).toHaveBeenCalled(); // the locked path
+    }
+  });
+
+  it('a guarded debit that is simply insufficient still says so (the guard does not mask it)', async () => {
+    const h = harness({ wallets: [withHistory()] });
+    // the pre-check passes on a stale read; the guarded UPDATE then finds the balance gone
+    const real = h.models.wallet.findFirst;
+    h.models.wallet.findFirst = async (a: any) => {
+      const r = await real(a);
+      return r && !a?.select ? { ...r, redeemablePoints: 1000 } : r;
+    };
+    await expect(h.service.debitRedeem('cp1', 500, {})).rejects.toThrow('Insufficient wallet balance for redemption');
+    expect(h.walletTxns).toHaveLength(0);
+  });
+});
+
+describe('fix round A — M3 (LEGACY clawback on a sequenced wallet must land on a position; V2 caps count un-allocated approvals)', () => {
+  const linked = [{ clientId: 'bajaj', outletCode: 'O1', partnerId: 'cp1' }];
+  const dispatch = (h: H, points: number, id = 'R1') =>
+    h.models.$transaction((tx: any) =>
+      h.service.reverseCreditBatchPoints(tx, {
+        clientId: 'bajaj', batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: id, points, actorId: 'u1',
+      }),
+    );
+  const credit = (h: H, amt: number) =>
+    h.service.creditEarn('cp1', 'bajaj', amt, { referenceType: 'CREDIT_BATCH', referenceId: 'B1', metadata: { fieldId: 'F1', outletCode: 'O1' } });
+
+  it('LEGACY, sequenced wallet, clawback larger than the positions reversible room → 409 CREDIT_UNMAPPED before any write', async () => {
+    const h = harness({ outlets: linked, wallets: [blankWallet('w1', 'cp1', { movementSeq: 1 })] });
+    await credit(h, 300);
+    h.positions[0].reversedPoints = 250; // e.g. an earlier reversal took most of it
+    const before = JSON.stringify(h.wallets[0]);
+    const e = await dispatch(h, 100).catch((x) => x);
+    expect(e).toBeInstanceOf(ReversalAttentionException);
+    expect(e).toMatchObject({ code: 'CREDIT_UNMAPPED', detail: expect.objectContaining({ coverable: 50, requested: 100, engine: 'LEGACY' }) });
+    expect(JSON.stringify(h.wallets[0])).toBe(before);
+    expect(h.allocations).toHaveLength(0);
+  });
+
+  it('LEGACY, sequenced wallet whose credit has NO position (credited before tracking, not attributed) → refused at the gate and at clawback', async () => {
+    const h = harness({ outlets: linked, wallets: [blankWallet('w1', 'cp1', { redeemablePoints: 300, earnedPoints: 300, lifetimeEarned: 300, movementSeq: 1 })] });
+    h.walletTxns.push({
+      id: 'old', walletId: 'w1', transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: 'B1',
+      points: 300, balanceBefore: 0, balanceAfter: 300, seq: 1, pointsDelta: 300, metadata: { fieldId: 'F1', outletCode: 'O1' }, createdAt: later(-9000),
+    });
+    const gate = await h.service
+      .assertPointsReversalAllowed(h.models as any, { clientId: 'bajaj', batchId: 'B1', outletCode: 'O1', fieldId: 'F1' })
+      .catch((x) => x);
+    expect(gate).toMatchObject({ code: 'CREDIT_UNMAPPED', detail: expect.objectContaining({ reason: 'sequenced wallet: no credit position records this credit' }) });
+    const cb = await h.models
+      .$transaction((tx: any) =>
+        h.service.clawbackAward('cp1', 100, { referenceType: 'CREDIT_REVERSAL', referenceId: 'R1', originalCredit: { batchId: 'B1', outletCode: 'O1', fieldId: 'F1' } }, tx),
+      )
+      .catch((x: unknown) => x);
+    expect(cb).toMatchObject({ code: 'CREDIT_UNMAPPED' });
+    expect(h.wallets[0].redeemablePoints).toBe(300);
+  });
+
+  it('V2 cap: an APPROVED reversal of the line with no allocation row counts against the credit (double clawback impossible); the reversal being applied is not counted twice', async () => {
+    const h = harness({ outlets: linked, mode: 'V2' });
+    await credit(h, 300);
+    const key = { batchId: 'B1', outletCode: 'O1', fieldId: 'F1' };
+    // a clawback approved earlier whose amount never reached the position (old log-only path / un-attributed legacy)
+    h.reversals.push({ id: 'R0', batchId: 'B1', outletId: 'O1', fieldId: 'F1', awardType: 'POINTS', status: 'APPROVED', approvedPaise: 200n });
+    await expect(h.service.v2PointsReversalCap(h.models as any, key)).resolves.toMatchObject({ cap: 100, unallocatedApproved: 200 });
+    await expect(dispatch(h, 150, 'R1')).rejects.toThrow(/reversible 100 pts after 200 pts of earlier approved reversals/);
+    expect(h.wallets[0].redeemablePoints).toBe(300);
+    // R1 itself is already APPROVED (flipped by the caller) without allocations yet — excluded from "others"
+    h.reversals.push({ id: 'R1', batchId: 'B1', outletId: 'O1', fieldId: 'F1', awardType: 'POINTS', status: 'APPROVED', approvedPaise: 100n });
+    await expect(dispatch(h, 100, 'R1')).resolves.toMatchObject({ mode: 'V2', shortfall: 0 });
+    expect(h.wallets[0].redeemablePoints).toBe(200);
+    // once R1 has its allocation it is reflected in ρ, so the cap is now 0 (300 − ρ 100 − R0's 200)
+    await expect(h.service.v2PointsReversalCap(h.models as any, key)).resolves.toMatchObject({ cap: 0 });
   });
 });

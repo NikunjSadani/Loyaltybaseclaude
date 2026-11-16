@@ -1008,6 +1008,20 @@ describe('AdminCoreService', () => {
       expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
     });
 
+    // Wallet Reversal Engine fix round A, M2: the reversal-engine money switches are NEVER written by the generic
+    // upsert — not even with allowPlatformOnlyKey (their dedicated GIFSY_ADMIN endpoints write the row themselves).
+    it.each([
+      ['reversalEngine', 'V2'],
+      ['reversalEngine', 'LEGACY'],
+      ['pointsReversalApprovalsPaused', { paused: false }],
+    ])('refuses %s (value %j) — 403, nothing written', async (key, value) => {
+      await expect(service.upsertSetting(gifsy, { key, value })).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(service.upsertSetting(gifsy, { key, value }, { allowPlatformOnlyKey: true })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
     // ── APPLIES-TO (plan §4): generic visibilityConfig writer carries over absent program lists ──
     describe('visibilityConfig programs/subPrograms carry-over', () => {
       const base = { outletScope: ['SSS'], frequencyPerMonth: 1, allowedSalesLevels: ['SO'], geoFence: { enabled: false, radiusMeters: 50 } };

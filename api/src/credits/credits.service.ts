@@ -5,8 +5,8 @@ import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WalletService } from '../wallet/wallet.service';
-import { assertPointsReversalsNotPaused, ReversalAttentionException } from '../wallet/reversal-policy';
-import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { assertPointsReversalsNotPaused, lockReversalEngineShared, ReversalAttentionException } from '../wallet/reversal-policy';
+import { ReversalEngineMode, TenantSettingsService } from '../tenant/tenant-settings.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import {
   deriveFrozenSection,
@@ -1142,12 +1142,13 @@ export class CreditsService {
     const pointsRows = rows.filter(
       (r) => r.awardType === 'POINTS' && r.status === 'OK' && r.amount > 0,
     );
-    // Wallet Reversal Engine (WP4): resolve the tenant's reversal-engine mode ONCE per batch and pass it to every
+    // Wallet Reversal Engine (WP4): the tenant's reversal-engine mode is resolved ONCE per batch and passed to every
     // credit (instead of 2 reads — partner + flag — per credited row inside WalletService.movementPath). Only when
-    // there is a POINTS row to credit, so a PAYOUT-only batch reads nothing new. Fail-closed exactly as before: a
-    // malformed flag aborts the confirm before any write (it used to abort at the first credited row).
-    const reversalEngineMode =
-      pointsRows.length > 0 ? await this.tenantSettings.getReversalEngineModeUncached(user.clientId) : undefined;
+    // there is a POINTS row to credit, so a PAYOUT-only batch reads nothing new. Fix round A: read INSIDE the confirm
+    // transaction, after its shared engine lock (L4 — a mode flip waits for this confirm, never lands mid-batch), and
+    // leniently (M1 — a malformed flag is treated as LEGACY and called out on the attention banner; it no longer
+    // blocks crediting).
+    let reversalEngineMode: ReversalEngineMode | undefined;
 
     // Rows that genuinely cannot be credited, WITH a reason surfaced to the admin
     // (never dropped silently). The only remaining skip causes are an unresolvable
@@ -1167,6 +1168,11 @@ export class CreditsService {
 
     // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
     const updated = await this.prisma.$transaction(async (tx) => {
+      if (pointsRows.length > 0) {
+        // First lock of this tx (L4): shared engine lock, then the mode — see lockReversalEngineShared.
+        await lockReversalEngineShared(tx, user.clientId);
+        reversalEngineMode = (await this.walletService.movementEngineMode(user.clientId, tx)).mode;
+      }
       // ── Concurrency guard ──────────────────────────────────────────────────
       // Replace the plain update with a conditional updateMany. Only the first
       // concurrent caller flips status PENDING_CONFIRM→CONFIRMED (count===1);
@@ -1416,15 +1422,18 @@ export class CreditsService {
       throw new BadRequestException('payoutEntryIds applies to PAYOUT reversals only');
     }
 
-    // Wallet Reversal Engine (WP4): POINTS reversals follow the tenant's engine mode (LEGACY default / SHADOW /
-    // V2), resolved once per request. PAYOUT reversals never read it.
-    const pointsEngine =
-      dto.awardType === 'POINTS' ? await this.tenantSettings.getReversalEngineModeUncached(user.clientId) : null;
-
     try {
       return await this.prisma.$transaction(async (tx) => {
         // Policy round A Q5: refused while the tenant's POINTS reversal approvals are paused (wallet backfill window).
-        if (dto.awardType === 'POINTS') await assertPointsReversalsNotPaused(tx, this.tenantSettings, user.clientId);
+        // The gate takes the SHARED engine lock; the mode is read right after it, through this tx (fix round A, L4:
+        // a flip via the mode endpoint takes the EXCLUSIVE lock → never lands between this read and the create).
+        // Wallet Reversal Engine (WP4): POINTS reversals follow the tenant's engine mode (LEGACY default / SHADOW /
+        // V2), resolved once per request — STRICT (a malformed flag refuses, M1). PAYOUT reversals never read it here.
+        let pointsEngine: ReversalEngineMode | null = null;
+        if (dto.awardType === 'POINTS') {
+          await assertPointsReversalsNotPaused(tx, this.tenantSettings, user.clientId);
+          pointsEngine = await this.tenantSettings.getReversalEngineModeUncached(user.clientId, tx);
+        }
         if (pointsEngine === 'V2') return this.createPointsReversalV2(tx, user, id, batch.period, dto);
 
         // Serialise every reversal create/approve for this batch (batch row lock) so the
@@ -1703,23 +1712,23 @@ export class CreditsService {
   }
 
   /**
-   * V2 approve gate (before the guarded flip): lock the batch row (same lock as the legacy cap), then cap the
-   * approval by the positions' Σ(amount − reversedPoints) (§6 approve cap). No position / UNRESOLVED credit of this
-   * line → refused with the reason (Q5 / policy Q1, Q3).
-   * applyCreditReversal re-checks the same cap under the wallet + position locks.
+   * V2 approve gate (before the guarded flip; the CALLER holds the batch row lock, then the reversal row lock — L3):
+   * cap the approval by the positions' Σ(amount − reversedPoints) − approved reversals of the line that never got an
+   * allocation (§6 approve cap + fix round A M3). No position / UNRESOLVED credit of this line → refused with the
+   * reason (Q5 / policy Q1, Q3). applyCreditReversal re-checks the same cap under the wallet + position locks.
    */
   private async assertV2PointsApproval(
     tx: Prisma.TransactionClient,
     key: { batchId: string; outletCode: string; fieldId: string },
     approving: bigint,
   ): Promise<void> {
-    await tx.$queryRaw`SELECT id FROM credit_batches WHERE id = ${key.batchId} FOR UPDATE`;
     if (approving <= 0n) return;
-    const { cap, positions } = await this.walletService.v2PointsReversalCap(tx, key);
+    const { cap, positions, unallocatedApproved } = await this.walletService.v2PointsReversalCap(tx, key);
     if (approving > BigInt(cap)) {
       const credited = positions.reduce((s, p) => s + p.amount, 0);
       throw new BadRequestException(
-        `Approval exceeds the amount still reversible for this outlet and field in this batch (credited ${credited} pts, already reversed ${credited - cap} pts, approving ${approving} pts)`,
+        `Approval exceeds the amount still reversible for this outlet and field in this batch (credited ${credited} pts, already reversed ${credited - cap} pts, approving ${approving} pts)` +
+          (unallocatedApproved > 0 ? ` — incl. ${unallocatedApproved} pts of earlier approved reversals never attributed to the credit` : ''),
       );
     }
   }
@@ -3401,26 +3410,29 @@ export class CreditsService {
         ? toPaiseBigInt(approvedPaise ?? requestedPaiseNum)
         : null;
 
-    // Wallet Reversal Engine (WP4): an approved POINTS reversal follows the tenant's engine mode (LEGACY default /
-    // SHADOW / V2), resolved once per request and passed down. Reject / PAYOUT never read it.
-    const pointsEngine =
-      action === ReversalAction.approve && reversal.awardType === 'POINTS'
-        ? await this.tenantSettings.getReversalEngineModeUncached(user.clientId)
-        : null;
     const pointsKey = { batchId: reversal.batchId, outletCode: reversal.outletId, fieldId: reversal.fieldId };
 
     return this.prisma.$transaction(async (tx) => {
       // Policy round A Q5: a POINTS approval is refused while the tenant's reversal approvals are paused (wallet
       // backfill window). Reject is never paused (it moves no points).
+      // Wallet Reversal Engine (WP4): an approved POINTS reversal follows the tenant's engine mode (LEGACY default /
+      // SHADOW / V2), resolved once per request and passed down; STRICT (malformed → refused, M1). Fix round A, L4:
+      // read through this tx right after the pause gate's SHARED engine lock, so a flip (EXCLUSIVE lock) can't land
+      // between the read and the approval. Reject / PAYOUT never read it.
+      let pointsEngine: ReversalEngineMode | null = null;
       if (action === ReversalAction.approve && reversal.awardType === 'POINTS') {
         await assertPointsReversalsNotPaused(tx, this.tenantSettings, user.clientId);
+        pointsEngine = await this.tenantSettings.getReversalEngineModeUncached(user.clientId, tx);
       }
       // V2: position-based approve cap (batch row lock, Σ(amount − reversedPoints), Q5 refusal) — replaces the
       // legacy stored-rows cap and the interim current-partner / debt gate below.
       if (pointsEngine === 'V2') {
-        // Lock THIS reversal row first and re-check it is still pending, so a concurrent second approval of the
-        // same reversal gets the honest "already processed" — not a misleading cap message computed after the
-        // winner's reversed amount landed (real-Postgres WP7 T-e3, 2026-11-16).
+        // Fix round A, L3 — the SAME lock order as the LEGACY approve (batch row → reversal row), so a V2 approve and a
+        // LEGACY approve of the same batch (e.g. across a mode flip) can never deadlock.
+        await tx.$queryRaw`SELECT id FROM credit_batches WHERE id = ${reversal.batchId} FOR UPDATE`;
+        // Then THIS reversal row, re-checked still pending, so a concurrent second approval of the same reversal gets
+        // the honest "already processed" — not a misleading cap message computed after the winner's reversed amount
+        // landed (real-Postgres WP7 T-e3, 2026-11-16).
         const [cur] = await tx.$queryRaw<Array<{ status: string }>>(
           Prisma.sql`SELECT status FROM credit_reversals WHERE id = ${id} FOR UPDATE`,
         );

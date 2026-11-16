@@ -58,6 +58,8 @@ const mockWalletService = {
   ),
   // Interim POINTS-reversal gate (no debt, exact credit on the receiving wallet); default: allowed.
   assertPointsReversalAllowed: jest.fn(),
+  // Wallet Reversal Engine fix round A (M1/L4): confirmBatch reads the mode once, leniently, inside its tx.
+  movementEngineMode: jest.fn(async () => ({ mode: 'LEGACY' as const })),
 };
 
 // ─── Mock Prisma TX ───────────────────────────────────────────────────────────

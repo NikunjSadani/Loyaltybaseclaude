@@ -383,7 +383,7 @@ describe('WalletService', () => {
     it('is a no-op when no lots are due', async () => {
       mockPrisma.pointsLedger.findMany.mockResolvedValue([]);
       const res = await service.expireDuePoints();
-      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
 
@@ -400,7 +400,7 @@ describe('WalletService', () => {
 
       const res = await service.expireDuePoints();
 
-      expect(res).toEqual({ expiredLots: 1, expiredPoints: 30 });
+      expect(res).toEqual({ expiredLots: 1, expiredPoints: 30, failedLots: 0, failures: [] });
       // Source lot claimed with a guarded updateMany (concurrency-safe idempotency).
       expect(mockTx.pointsLedger.updateMany).toHaveBeenCalledWith({
         where: { id: 'lot1', isExpired: false },
@@ -436,7 +436,7 @@ describe('WalletService', () => {
 
       const res = await service.expireDuePoints();
 
-      expect(res).toEqual({ expiredLots: 1, expiredPoints: 10 });
+      expect(res).toEqual({ expiredLots: 1, expiredPoints: 10, failedLots: 0, failures: [] });
       expect(mockTx.wallet.update).toHaveBeenCalledWith({
         where: { id: 'w1' },
         data: {
@@ -457,7 +457,7 @@ describe('WalletService', () => {
 
       const res = await service.expireDuePoints();
 
-      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
       // No wallet read, no balance mutation, no movement rows once the claim is lost.
       expect(mockTx.wallet.findFirst).not.toHaveBeenCalled();
       expect(mockTx.wallet.update).not.toHaveBeenCalled();
@@ -1317,7 +1317,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
     const res = await h.service.expireDuePoints({ now: daysFromNow(2) });
 
     // Only A is due; it backs just 20 spendable points → expire 20 (pre-fix wrongly expired 70).
-    expect(res).toEqual({ expiredLots: 1, expiredPoints: 20 });
+    expect(res).toEqual({ expiredLots: 1, expiredPoints: 20, failedLots: 0, failures: [] });
     // NOTE: the brief’s prose says \"redeemablePoints stays 70\", but that contradicts both
     // invariant #8 (redeemable === Σ remaining over live lots → 50) and \"expiredPoints += 20\".
     // The invariant-consistent outcome after expiring 20 is 50; asserting 50 (flagged to integrator).
@@ -1342,7 +1342,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
 
     // The money-safe outcome (contract #4): a lot with 0 unspent points expires 0 — no
     // balance move, no EXPIRE movement row, counters flat.
-    expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+    expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
     expect(h.rowsOfType('EXPIRE').length).toBe(0);
     expect(h.wallet.redeemablePoints).toBe(0);
     expect(h.wallet.expiredPoints).toBe(0);
@@ -1365,7 +1365,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
     await h.service.expireDuePoints({ now: daysFromNow(2) });
     const second = await h.service.expireDuePoints({ now: daysFromNow(2) });
 
-    expect(second).toEqual({ expiredLots: 0, expiredPoints: 0 });
+    expect(second).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
     expect(h.lot('A')!.isExpired).toBe(true);
     // Exactly ONE EXPIRE movement total across the two runs (isExpired guard held).
     expect(h.rowsOfType('EXPIRE').length).toBe(1);
@@ -1399,7 +1399,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
       });
       const res = await h.service.expireDuePoints({ now: daysFromNow(2) });
 
-      expect(res).toEqual({ expiredLots: 1, expiredPoints: 20 });
+      expect(res).toEqual({ expiredLots: 1, expiredPoints: 20, failedLots: 0, failures: [] });
       expect(h.lot('R')!.isExpired).toBe(true);
       expect(h.lot('R')!.remainingPoints).toBe(0);
       expect(h.wallet.redeemablePoints).toBe(0);
@@ -1473,7 +1473,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
         ],
       });
       const res = await h.service.expireDuePoints({ now: daysFromNow(2) });
-      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
       expect(h.wallet.redeemablePoints).toBe(-100);
       expect(h.wallet.expiredPoints).toBe(0);
       expect(h.rowsOfType('EXPIRE').length).toBe(0);
@@ -1975,7 +1975,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
         lots: [{ id: 'A', walletId: 'w1', transactionType: 'EARN', points: 50, remainingPoints: 50, expiresAt: daysFromNow(10), createdAt: daysFromNow(-1) }],
       });
       const res = await h.service.expireDuePoints({ now: daysFromNow(2) });
-      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
       expect(h.lot('A')!.isExpired).toBe(false);
       expect(h.wallet.redeemablePoints).toBe(50);
     });
