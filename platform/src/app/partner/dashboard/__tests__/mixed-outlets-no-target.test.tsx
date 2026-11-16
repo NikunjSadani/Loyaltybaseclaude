@@ -107,7 +107,7 @@ describe('partnerDashboardV2 ON', () => {
     const hero = await heroZone();
     expect(hero).toHaveTextContent('Monthly Sales');
     expect(hero).toHaveTextContent(/500\s*INR/);
-    expect(hero).toHaveTextContent('of 1000 INR');
+    expect(hero).toHaveTextContent('of 1,000 INR');
     expect(hero).toHaveTextContent('50%');
     expect(hero).not.toHaveTextContent('250%');
     expect(await within(hero).findByTestId('hero-untargeted-SALES')).toHaveTextContent('+₹2K so far at outlets without this target');
@@ -125,7 +125,7 @@ describe('partnerDashboardV2 ON', () => {
     render(<PartnerDashboardPage />);
 
     const hero = await heroZone();
-    expect(hero).toHaveTextContent('of 1000 INR');
+    expect(hero).toHaveTextContent('of 1,000 INR');
     expect(hero).toHaveTextContent('50%');
     expect(screen.queryByTestId('hero-untargeted-SALES')).not.toBeInTheDocument();
     const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
@@ -199,8 +199,8 @@ describe('partnerDashboardV2 OFF (Deoleo — unchanged)', () => {
     render(<PartnerDashboardPage />);
 
     const hero = await heroZone();
-    expect(hero).toHaveTextContent(/2500\s*INR/);
-    expect(hero).toHaveTextContent('of 1000 INR');
+    expect(hero).toHaveTextContent(/2,500\s*INR/);
+    expect(hero).toHaveTextContent('of 1,000 INR');
     expect(hero).toHaveTextContent('250%');
     expect(document.body.textContent).not.toMatch(/outlets without this target|so far/);
     expect(screen.queryByTestId('target-achievement-card')).not.toBeInTheDocument();
@@ -218,7 +218,7 @@ describe('partnerDashboardV2 OFF (Deoleo — unchanged)', () => {
 
     const hero = await heroZone();
     expect(hero).toHaveTextContent('NON ADHO');
-    expect(hero).toHaveTextContent(/2755\s*INR/);
+    expect(hero).toHaveTextContent(/2,755\s*INR/);
     expect(hero).toHaveTextContent('of 0 INR');
     expect(hero).toHaveTextContent('0%');
     expect(hero).toHaveTextContent('No targets yet');
@@ -233,7 +233,7 @@ describe('partnerDashboardV2 OFF (Deoleo — unchanged)', () => {
     ]]);
     render(<PartnerDashboardPage />);
 
-    expect(await screen.findByText('2755 of 0 INR', {}, { timeout: 15000 })).toBeInTheDocument();
+    expect(await screen.findByText('2,755 of 0 INR', {}, { timeout: 15000 })).toBeInTheDocument();
     expect(screen.queryByTestId('mt-no-target-NONADHO')).not.toBeInTheDocument();
     expect(screen.queryByText('All targets achieved 🎉')).not.toBeInTheDocument();
   }, 20000);

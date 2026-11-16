@@ -1,3 +1,5 @@
+import { isInrUnit } from './format-inr';
+
 /**
  * Builds the "X units to go · Y days left" message used in the
  * Sales vs Target card on the partner dashboard.
@@ -23,6 +25,29 @@ export function buildCasesToGoMsg(
 export function fmtRemaining(remaining: number): string {
   if (!Number.isFinite(remaining) || remaining <= 0) return '0';
   return Math.max(1, Math.ceil(remaining)).toLocaleString('en-IN');
+}
+
+/**
+ * max(0, target − achieved) with floating-point noise snapped to 0: summed fractional values can leave
+ * a remainder like 5.5e-17 on a target that IS met, which `fmtRemaining` would show as "1 to go" next to
+ * "Target achieved 🎉". Every "remaining / to go" site uses this so the met/green checks and the
+ * displayed amount agree.
+ */
+export function remainingOf(target: number, achieved: number): number {
+  const r = (Number(target) || 0) - (Number(achieved) || 0);
+  return r > 1e-6 * Math.max(1, Math.abs(Number(target) || 0)) ? r : 0;
+}
+
+/**
+ * A KPI achieved / target figure for display: Indian digit grouping; INR units as WHOLE rupees, other
+ * units (cases, Litre, SKU…) keep up to 2 decimals (integers print as before, just grouped).
+ * Fractional client targets used to render raw ("of 1349942.4167 INR"). Non-finite → "0".
+ */
+export function fmtKpiNum(value: number, unit?: string | null): string {
+  if (!Number.isFinite(value)) return '0';
+  if (isInrUnit(unit)) return (Math.round(value) || 0).toLocaleString('en-IN');
+  const v = Math.round(value * 100) / 100 || 0;
+  return v.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 }
 
 // ─── Pace classification ─────────────────────────────────────────────────────

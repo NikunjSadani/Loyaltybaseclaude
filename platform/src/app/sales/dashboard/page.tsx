@@ -13,7 +13,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
 import { pct, pctBarColor } from '@/lib/targets';
 import { type SalesRole, getRole, canEnroll, hasTeamView } from '@/lib/sales-role';
-import { classifyPaceGap, buildCasesToGoMsg } from '@/lib/pace';
+import { classifyPaceGap, buildCasesToGoMsg, remainingOf } from '@/lib/pace';
 import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
@@ -112,7 +112,7 @@ function TargetSummaryCard({ targets, role }: { targets: SalesTargets; role: Sal
   // all-KPI average, which is skewed green when a secondary KPI is over-achieved.
   const primaryKpi    = kpis.find((k) => k.isPrimary) ?? withTarget[0] ?? null;
   const primaryPct    = primaryKpi && primaryKpi.target > 0 ? pct(primaryKpi.achieved, primaryKpi.target) : 0;
-  const primaryLeft   = primaryKpi ? Math.max(0, primaryKpi.target - primaryKpi.achieved) : 0;
+  const primaryLeft   = primaryKpi ? remainingOf(primaryKpi.target, primaryKpi.achieved) : 0;
   const paceStatus    = primaryLeft === 0
     ? 'green'
     : classifyPaceGap(timePct - primaryPct, timePct, getGifsySettings().paceAmberThreshold ?? 10);

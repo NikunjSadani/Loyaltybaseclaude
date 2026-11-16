@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildCasesToGoMsg, classifyPaceGap, fmtRemaining } from './pace';
+import { buildCasesToGoMsg, classifyPaceGap, fmtKpiNum, fmtRemaining, remainingOf } from './pace';
 
 describe('buildCasesToGoMsg', () => {
   it('shows remaining units and days left — behind pace', () => {
@@ -33,6 +33,26 @@ describe('fmtRemaining', () => {
   });
   it('0 / negative / NaN / Infinity → "0"', () => {
     for (const v of [0, -5, NaN, Infinity]) expect(fmtRemaining(v)).toBe('0');
+  });
+});
+
+describe('remainingOf', () => {
+  it('target − achieved, never negative; float noise on a met target snaps to 0', () => {
+    expect(remainingOf(1000, 400)).toBe(600);
+    expect(remainingOf(100, 150)).toBe(0);
+    expect(remainingOf(0.3, 0.1 + 0.2)).toBe(0);
+    expect(remainingOf(1349942.4166666667, 674971.2081833335)).toBeCloseTo(674971.2084833332, 6);
+    expect(remainingOf(10, 9.5)).toBe(0.5);
+  });
+});
+
+describe('fmtKpiNum', () => {
+  it('INR → whole rupees grouped; other units ≤2 dp grouped; non-finite → 0', () => {
+    expect(fmtKpiNum(1349942.4167, 'INR')).toBe('13,49,942');
+    expect(fmtKpiNum(1000, 'INR')).toBe('1,000');
+    expect(fmtKpiNum(12.4999999, 'Litre')).toBe('12.5');
+    expect(fmtKpiNum(800, 'cases')).toBe('800');
+    expect(fmtKpiNum(NaN, 'cases')).toBe('0');
   });
 });
 

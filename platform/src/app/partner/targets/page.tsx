@@ -28,6 +28,7 @@ import { getGifsySettings } from '@/lib/gifsy-settings';
 import { istDateKey } from '@/lib/ist-date';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { formatKpiAmount, formatKpiSoFar, formatInrWhole, isInrUnit } from '@/lib/format-inr';
+import { fmtKpiNum, fmtRemaining, remainingOf } from '@/lib/pace';
 import { useTenantFeatures } from '@/lib/tenant-features';
 
 /* ─── Backend response types ─────────────────────────────────────────────────── */
@@ -141,16 +142,16 @@ function ParamCard({
   const bar        = pctBarColor(p);
   // INR-unit KPIs read as money — "₹10,414" (whole rupees, Indian grouping); every other unit
   // (SKU, cases, Litre…) keeps the raw "<n> <unit>" exactly as before (owner-approved, all tenants).
-  const fmt        = (n: number) => (isInrUnit(param.unit) ? formatInrWhole(n) : `${n} ${param.unit}`);
+  const fmt        = (n: number) => (isInrUnit(param.unit) ? formatInrWhole(n) : `${fmtKpiNum(n, param.unit)} ${param.unit}`);
   const isAchieved = p >= 100;
   const isOnPace   = timePct - p <= 0;
-  const remaining  = Math.max(0, param.target - achieved);
+  const remaining  = remainingOf(param.target, achieved);
   const dayWord    = daysLeft === 1 ? 'day' : 'days';
 
-  const unitLabel = remaining === 1 ? param.unit.replace(/s$/i, '') : param.unit;
+  const unitLabel = fmtRemaining(remaining) === '1' ? param.unit.replace(/s$/i, '') : param.unit;
   const paceMsg   = isOnPace
     ? `On track · ${daysLeft} ${dayWord} left`
-    : `${isInrUnit(param.unit) ? formatInrWhole(remaining > 0 ? Math.max(1, Math.ceil(remaining)) : 0) : `${remaining} ${unitLabel}`} to go · ${daysLeft} ${dayWord} left`;
+    : `${isInrUnit(param.unit) ? formatInrWhole(remaining > 0 ? Math.max(1, Math.ceil(remaining)) : 0) : `${fmtRemaining(remaining)} ${unitLabel}`} to go · ${daysLeft} ${dayWord} left`;
   const threshold = getGifsySettings().paceAmberThreshold ?? 10;
   const nearDone  = param.target > 0 && remaining / param.target <= threshold / 100;
   const paceBg    = isOnPace ? 'bg-emerald-50 text-emerald-700' : nearDone ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-600';

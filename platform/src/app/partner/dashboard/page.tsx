@@ -20,7 +20,7 @@ import {
 import { formatPoints } from '@/lib/utils';
 import { formatInrCompact, formatCompact, isInrUnit, formatKpiAmount, formatKpiSoFar } from '@/lib/format-inr';
 import type { PayoutLedgerEntry } from '@/types';
-import { buildCasesToGoMsg, classifyPaceGap, fmtRemaining } from '@/lib/pace';
+import { buildCasesToGoMsg, classifyPaceGap, fmtKpiNum, fmtRemaining, remainingOf } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import type { OutletType } from '@/lib/partner-session';
 import { pct, pctColor, pctBarColor, currentPeriod } from '@/lib/targets';
@@ -226,7 +226,7 @@ function PerformanceChart({ primary }: { primary: AggKpi | null }) {
   // Cases-to-go badge derived from the REAL primary KPI (achieved/target/unit).
   const achieved    = primary?.achieved ?? 0;
   const target      = primary?.target   ?? 0;
-  const remaining   = Math.max(0, target - achieved);
+  const remaining   = remainingOf(target, achieved);
   const unit        = primary?.unit ?? 'cases';
   const achievePct  = pct(achieved, target);
   const gap         = timePct - achievePct;
@@ -585,7 +585,7 @@ function TargetAchievementCard({ aggKpis }: { aggKpis: AggKpi[] }) {
   // Same pick as the page's hero (pickTargetedPrimary) so the footer and the hero name the same KPI.
   const primary       = pickTargetedPrimary(aggKpis);
   const primaryPct    = primary ? pct(primary.achieved, primary.target) : 0;
-  const primaryLeft   = primary ? Math.max(0, primary.target - primary.achieved) : 0;
+  const primaryLeft   = primary ? remainingOf(primary.target, primary.achieved) : 0;
   const paceStatus    = !primary
     ? 'neutral'
     : primaryLeft === 0
@@ -597,7 +597,7 @@ function TargetAchievementCard({ aggKpis }: { aggKpis: AggKpi[] }) {
     ? 'No targets set this month'
     : primaryLeft === 0
       ? `${primary.name} target met 🎉`
-      : `${fmtKpiValue(primaryLeft, primary.unit)} to go · ${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`;
+      : buildCasesToGoMsg(primaryLeft, primary.unit, daysLeft);
 
   return (
     <Card data-testid="target-achievement-card">
@@ -708,7 +708,7 @@ function kpiView(primary: AggKpi | null, daysLeft: number, timePct: number) {
   const achieved    = primary?.achieved ?? 0;
   const target      = primary?.target   ?? 0;
   const achievedPct = pct(achieved, target);
-  const remaining   = Math.max(0, target - achieved);
+  const remaining   = remainingOf(target, achieved);
   const unit        = primary?.unit ?? 'cases';
 
   const paceGap    = timePct - achievedPct;
@@ -806,8 +806,8 @@ function WholesalerHero({
         {/* Hero row: achieved (left) + % and days left (right) */}
         <div className="flex items-end justify-between mb-2.5">
           <div>
-            <p className="text-3xl font-extrabold text-white leading-none">{v.achieved} <span className="text-lg font-bold text-white/70">{v.unit}</span></p>
-            <p className="text-[11px] text-white/50 mt-1">of {v.target} {v.unit}</p>
+            <p className="text-3xl font-extrabold text-white leading-none">{fmtKpiNum(v.achieved, v.unit)} <span className="text-lg font-bold text-white/70">{v.unit}</span></p>
+            <p className="text-[11px] text-white/50 mt-1">of {fmtKpiNum(v.target, v.unit)} {v.unit}</p>
           </div>
           <div className="text-right">
             <p className="text-3xl font-extrabold text-white/90 leading-none">{v.achievedPct}%</p>
@@ -895,9 +895,9 @@ function RetailerHero({
         <div className="flex items-end justify-between mb-2.5">
           <div>
             <p className="text-3xl font-extrabold text-white leading-none">
-              {v.achieved} <span className="text-lg font-bold text-white/70">{v.unit}</span>
+              {fmtKpiNum(v.achieved, v.unit)} <span className="text-lg font-bold text-white/70">{v.unit}</span>
             </p>
-            <p className="text-[11px] text-white/50 mt-1">of {v.target} {v.unit}</p>
+            <p className="text-[11px] text-white/50 mt-1">of {fmtKpiNum(v.target, v.unit)} {v.unit}</p>
           </div>
           <div className="text-right">
             <p className="text-3xl font-extrabold text-white/90 leading-none">{v.achievedPct}%</p>
@@ -922,7 +922,7 @@ function RetailerHero({
         ) : v.target === 0 ? (
           <p className="text-[11px] text-white/40 mt-2">No targets yet</p>
         ) : v.remaining > 0 ? (
-          <p className="text-[11px] text-white/50 mt-2">{v.remaining} {v.unit} remaining</p>
+          <p className="text-[11px] text-white/50 mt-2">{fmtRemaining(v.remaining)} {v.unit} remaining</p>
         ) : null}
 
         {v2 && <HeroUntargetedLine kpi={primary} />}
@@ -945,7 +945,7 @@ function MTHero({
   const scored      = v2 ? aggKpis.filter(k => k.target > 0) : aggKpis;
   const soFarKpis   = v2 ? aggKpis.filter(k => !(k.target > 0)) : [];
   const mtPrimary   = v2 ? pickTargetedPrimary(aggKpis) : (aggKpis.find(k => k.isPrimary) ?? aggKpis[0] ?? null);
-  const mtRemaining = mtPrimary ? Math.max(0, mtPrimary.target - mtPrimary.achieved) : 0;
+  const mtRemaining = mtPrimary ? remainingOf(mtPrimary.target, mtPrimary.achieved) : 0;
 
   const kpiRows = scored.map((k) => {
     const achievedPct = pct(k.achieved, k.target);
@@ -1007,7 +1007,7 @@ function MTHero({
                     </div>
                   </div>
                   <ProgressBar pct={achievedPct} status={status} />
-                  <p className="text-[10px] text-white/50">{kpi.achieved} of {kpi.target} {kpi.unit}</p>
+                  <p className="text-[10px] text-white/50">{fmtKpiNum(kpi.achieved, kpi.unit)} of {fmtKpiNum(kpi.target, kpi.unit)} {kpi.unit}</p>
                   {v2 && positiveUntargeted(kpi) !== null && (
                     <p className="text-[10px] text-white/60" data-testid={`mt-untargeted-${kpi.code}`}>
                       +{formatKpiAmount(positiveUntargeted(kpi)!, kpi.unit)} so far at outlets without this target
