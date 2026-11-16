@@ -463,7 +463,9 @@ export class VoucherDispersalService {
   async process(user: JwtPayload, id: string) {
     this.assertAdmin(user);
     await this.getCampaignOr404(id);
-    const pass = await this.processor.drain({ campaignId: id, budgetMs: 25_000, maxBuys: 25 });
+    // Bounded so the worst case (budget + one in-flight Hubble call ≤15 s + canary verify) stays under the
+    // frontend proxy's ~30 s limit — the UI calls this repeatedly; the scheduler drain does the heavy lifting.
+    const pass = await this.processor.drain({ campaignId: id, budgetMs: 10_000, maxBuys: 10 });
     return { pass, ...(await this.detail(user, id)) };
   }
 
