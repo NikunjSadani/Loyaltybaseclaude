@@ -1,6 +1,6 @@
 # Visibility (POSM) — Design Doc (locked pre-build)
 
-> Status: **✅ LIVE ON STAGING (pushed `6e3b897`, migration applied+verified, API-surface runtime-verified) — NOT in prod.**
+> Status: **✅ IN PROD since cutover #16 (2026-07-28)** — per-tenant `visibilityConfig`; see the status section further down. _(Original header: LIVE ON STAGING `6e3b897` — NOT in prod, at the time.)_
 > Next step: optional synthetic-capture write-path proof → **~10-min owner phone smoke** (camera/geo/push) → owner UAT →
 > prod cutover. See **§16 AS-BUILT + STATUS** (the authoritative current-state record) at the bottom.
 > Feature-name (user-facing + internal): **Visibility** (proof of POSM — point-of-sale material).

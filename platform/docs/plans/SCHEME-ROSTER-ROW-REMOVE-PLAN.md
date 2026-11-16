@@ -1,6 +1,6 @@
 # Scheme Roster-Row Remove (SchemeOutlet soft-delete) — build plan
 
-> **✅ BUILT + TRIPLE-AUDITED + STAGING-VERIFIED — on develop `378f795` (2026-08-01), awaiting owner-gated prod cutover.**
+> **✅ IN PROD since cutover #23 (`ce5267a`, 2026-08-03; migration applied).** _(Original: built + triple-audited + staging-verified on develop `378f795`, 2026-08-01; the "NOT yet on prod" notes below are from then.)_
 > Gate: api jest 2174/0 · nest build 0 · FE tsc 0 · vitest 2066. Carries additive migration
 > `20260801120000_scheme_outlet_soft_delete` (deletedAt nullable + idx) — **APPLIED to gifsy_staging** (guarded,
 > `col=1 idx=1`, recorded, not rolled back); **NOT yet on prod** (applies at cutover via deploy.yml). Three

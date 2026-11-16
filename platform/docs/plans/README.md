@@ -1,5 +1,9 @@
 # Loyaltybase — Implementation Plan
 
+> **📍 2026-11-16 — for the live state read [`RESUME.md`](RESUME.md); for the list of every doc read
+> [`../DOCS-INDEX.md`](../DOCS-INDEX.md).** This README describes the ORIGINAL (June 2026) implementation plan; Phase S
+> (backend split) is COMPLETE and the platform is live (Deoleo, Bajaj). The "current priority" line below is historical.
+
 This folder turns the [spec](../spec/README.md) into an **executable, sequenced plan of
 bite-sized tasks** for an engineer **new to this codebase and domain**.
 
