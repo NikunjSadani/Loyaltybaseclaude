@@ -18,7 +18,7 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import { BfLedgerRow, BfTenantContext, BfTxRow, BfWalletHistory, WalletPlan } from './backfill-plan';
 import type { ApplyOutcome, BackfillStore, PausePriorState, PayoutBackfillInput } from './backfill-runner';
-import { computeV0, V0Snapshot, VerifySnapshot } from './verify-checks';
+import { assertWalletGuard, V0_FIELDS, V0WalletRow, VerifySnapshot, WalletGuardState } from './verify-checks';
 import type { PlannedPayoutAllocation } from '../../credits/payout-reversal-v2';
 import { parsePointsReversalPause, POINTS_REVERSAL_PAUSE_SETTING_KEY } from '../../tenant/tenant-settings.service';
 import { pointsReversalLockKey } from '../reversal-policy';
@@ -264,9 +264,40 @@ export class PrismaBackfillStore implements BackfillStore {
     return loadHistories(this.prisma, clientId);
   }
 
-  async snapshotV0(clientId: string): Promise<V0Snapshot> {
-    const wallets = await this.prisma.wallet.findMany({ where: { partner: { clientId } }, select: WALLET_COUNTERS });
-    return computeV0(clientId, wallets);
+  /**
+   * V0 per-wallet rows in ONE statement (one MVCC snapshot): a live movement writes its wallet update and its
+   * wallet_transactions row in the same transaction, so this read sees both or neither.
+   */
+  async snapshotV0Wallets(clientId: string): Promise<V0WalletRow[]> {
+    const rows = await this.prisma.$queryRaw<
+      {
+        id: string;
+        redeemablePoints: number;
+        earnedPoints: number;
+        lifetimeEarned: number;
+        redeemedPoints: number;
+        expiredPoints: number;
+        lifetimeRedeemed: number;
+        lifetimeExpired: number;
+        lockedPoints: number;
+        txCount: number | bigint;
+        txIn: number | bigint;
+        txOut: number | bigint;
+      }[]
+    >`SELECT w.id, w."redeemablePoints", w."earnedPoints", w."lifetimeEarned", w."redeemedPoints", w."expiredPoints",
+             w."lifetimeRedeemed", w."lifetimeExpired", w."lockedPoints",
+             m.n AS "txCount", m.cin AS "txIn", m.cout AS "txOut"
+      FROM wallets w
+      JOIN channel_partners cp ON cp.id = w."partnerId"
+      LEFT JOIN LATERAL (
+        SELECT count(*)::bigint AS n,
+               coalesce(sum(greatest(t."balanceAfter" - t."balanceBefore", 0)), 0)::bigint AS cin,
+               coalesce(sum(least(t."balanceAfter" - t."balanceBefore", 0)), 0)::bigint AS cout
+        FROM wallet_transactions t WHERE t."walletId" = w.id
+      ) m ON true
+      WHERE cp."clientId" = ${clientId}
+      ORDER BY w.id`;
+    return rows.map((r) => ({ ...r, txCount: Number(r.txCount), txIn: Number(r.txIn), txOut: Number(r.txOut) }));
   }
 
   async markWalletsBlocked(clientId: string, items: { walletId: string; reason: string }[]): Promise<number> {
@@ -387,7 +418,11 @@ export class PrismaBackfillStore implements BackfillStore {
         if (fresh.wallet.movementSeq > 0) return 'ALREADY_DONE';
         const plan = decide(fresh);
         if (!plan) return 'CHANGED';
+        // V0 per-wallet guard: same transaction, under the wallet row lock — nothing but the backfill can touch this
+        // wallet between the two reads, so any difference is a backfill defect → throw → rollback.
+        const guardBefore = await walletGuardState(tx, walletId);
         await writePlan(tx, plan);
+        assertWalletGuard(walletId, guardBefore, await walletGuardState(tx, walletId));
         return 'APPLIED';
       },
       { timeout: 120_000, maxWait: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
@@ -402,7 +437,7 @@ export class PrismaBackfillStore implements BackfillStore {
     const [txs, positions, allocations, payoutAllocations] = await Promise.all([
       this.prisma.walletTransaction.findMany({
         where: { walletId: { in: ids } },
-        select: { id: true, walletId: true, seq: true, pointsDelta: true, balanceAfter: true, transactionType: true, referenceType: true, referenceId: true, points: true },
+        select: { id: true, walletId: true, seq: true, pointsDelta: true, balanceBefore: true, balanceAfter: true, transactionType: true, referenceType: true, referenceId: true, points: true },
       }),
       this.prisma.walletCreditPosition.findMany({
         where: { walletId: { in: ids } },
@@ -427,6 +462,26 @@ export class PrismaBackfillStore implements BackfillStore {
       payoutAllocations: payoutAllocations.map((a) => ({ ...a, state: String(a.state) })),
     };
   }
+}
+
+/**
+ * V0 per-wallet guard state (caller holds the wallet row lock): figures + a digest of the movement rows' amount/balance
+ * columns (NOT seq / pointsDelta / link columns, which the backfill fills) + a digest of the wallet's lots.
+ */
+async function walletGuardState(tx: Prisma.TransactionClient, walletId: string): Promise<WalletGuardState> {
+  const w = await tx.wallet.findUniqueOrThrow({ where: { id: walletId }, select: WALLET_COUNTERS });
+  const [m] = await tx.$queryRaw<{ n: number; d: string }[]>`
+    SELECT count(*)::int AS n,
+           coalesce(md5(string_agg(concat_ws('|', id, "transactionType"::text, points, "balanceBefore", "balanceAfter", "balanceType"), ',' ORDER BY id)), '') AS d
+    FROM wallet_transactions WHERE "walletId" = ${walletId}`;
+  const [l] = await tx.$queryRaw<{ n: number; d: string }[]>`
+    SELECT count(*)::int AS n,
+           coalesce(md5(string_agg(concat_ws('|', id, "transactionType"::text, points, "remainingPoints", "isExpired"::text,
+             coalesce("expiresAt"::text, '-'), coalesce("lockedUntil"::text, '-'), "isClaimed"::text), ',' ORDER BY id)), '') AS d
+    FROM points_ledger WHERE "walletId" = ${walletId}`;
+  const s = { txCount: m.n, txDigest: m.d, lotCount: l.n, lotDigest: l.d } as WalletGuardState;
+  for (const f of V0_FIELDS) s[f] = w[f];
+  return s;
 }
 
 /** Guarded writes for ONE planned wallet (caller holds the wallet row lock). Any guard miss throws → rollback. */

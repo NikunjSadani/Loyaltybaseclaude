@@ -309,7 +309,8 @@ migration: add+VALIDATE holdings CHECK, `seq` NOT NULL. 7. Remove legacy floor c
 
 **Verification queries (read-only; guard each session with `SELECT current_database()`):**
 ```sql
--- V0 snapshot before AND after backfill (must be identical)
+-- V0 snapshot before AND after backfill (identical, or every change explained by movement rows committed in between —
+-- live earn/redeem is not paused; see §9.1 and api/src/wallet/backfill/verify-checks.ts VERIFY_SQL for the full query)
 SELECT cp."clientId", count(*), sum(w."redeemablePoints"), sum(w."earnedPoints"), sum(w."lifetimeEarned"),
        sum(w."redeemedPoints"), sum(w."expiredPoints")
 FROM wallets w JOIN channel_partners cp ON cp.id = w."partnerId" GROUP BY 1 ORDER BY 1;
@@ -348,7 +349,17 @@ Same API image, Cloud Run Job, `--command=node`. Every DB step needs the owner's
    unless `KEEP_POINTS_REVERSALS_PAUSED=true` or it was already on before the run. The run ends with an **ATTENTION**
    block (blocked wallets + reasons, payout flags, historical clawbacks "recovered X, owed Y") — send it to the owner.
    Exit 0 even with BLOCKED wallets (they are attention items, not a failure); 3 = a wallet / the payout plan changed
-   mid-run (re-run); 4 = V0 changed during the run → stop, investigate. Optional staging: `MAX_WALLETS=n`,
+   mid-run (re-run); 4 = V0 ALARM → stop, investigate. **V0 under live traffic** (earn/redeem are NOT paused — only
+   POINTS reversal approvals are, Q5): (i) PER WALLET, inside each wallet's backfill transaction, its figures
+   (balance + every counter) + a digest of its movement rows' amount/balance columns + a digest of its lots are read
+   under the wallet lock right before and right after the backfill's writes — any difference is a backfill defect:
+   that transaction rolls back, the run stops writing (no further wallet/tenant/payout step) and exits 4 naming the
+   wallet; (ii) TENANT reconciliation: a per-wallet snapshot (one SQL statement) before and after the run — each
+   wallet's balance change must equal the net (balanceAfter − balanceBefore) of the movement rows committed in between,
+   and figures may only move on a wallet that got new rows; the log prints `live activity during the run: +X earned /
+   −Y redeemed (… Σ balance = movements net …) — explained`. Anything unexplained → exit 4 with the amount and the
+   wallets. "Committed in between" = difference of the two consistent snapshots (row count / Σ), not createdAt (a
+   DB-side now() is the transaction START time). Optional staging: `MAX_WALLETS=n`,
    `RESUME_AFTER_WALLET=<id>`. A crash (or OOM kill) can leave the pause ON → it is shown on the credits screen banner;
    GIFSY lifts it there ("Resume approvals" → `POST /v1/admin/credits/reversal-engine/pause {paused:false}`).
    **Re-run right before flipping a tenant to V2 (P-A5) — cheap and idempotent:** wallets already sequenced
@@ -361,6 +372,10 @@ Same API image, Cloud Run Job, `--command=node`. Every DB step needs the owner's
 3. **VERIFY** (read-only): args `dist/wallet/backfill/verify.main.js`, env `EXPECTED_DB`, `TENANTS`,
    `V0_BASELINE_JSON='[…the "V0 before" objects APPLY printed…]'`, `NEVER_NEGATIVE_TENANTS=deoleo` (default),
    prod only: `EXPECTED_NEGATIVE_BALANCES='{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}'`. Exit 0 = no FAIL, 5 = a FAIL.
+   V0 here is the TENANT-level cross-check vs that baseline (which now carries `txCount / txIn / txOut`): PASS when
+   identical or "live activity since the APPLY baseline … — explained" (Σ balance change = Σ net of the rows added,
+   figures only moved alongside new rows, no rows/wallets lost); otherwise FAIL — also for a baseline printed by an
+   older build without the movement totals (re-capture). The per-wallet proof is the APPLY run's guard (i) above.
    Policy round A: BLOCKED wallets are excluded from V1/V2/V3/V7 and listed by **V10** (WARN); **V9b** re-runs the WP5
    payout planner read-only (WARN: an approved PAYOUT reversal still without rows, or a planner flag); V8 prints
    "recovered X, owed Y". WARN never fails the gate but is always printed + counted ("⚠ N check(s) need Gifsy attention").

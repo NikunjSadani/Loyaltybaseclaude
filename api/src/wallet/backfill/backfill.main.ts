@@ -15,7 +15,9 @@
  *   APPLY pauses the tenant's POINTS reversal create/approve for its window (owner Q5) and resumes them at the end.
  *
  * Exit codes: 0 ok (incl. BLOCKED wallets — see ATTENTION) · 1 crash · 2 guard refused · 3 wallets / payout plan
- * changed mid-run (re-run) · 4 V0 changed (ALARM).
+ * changed mid-run (re-run) · 4 V0 ALARM (a backfill write changed a wallet's balance/counters/lots — rolled back, run
+ * stopped — or a tenant balance change no committed movement row explains). Live earn/redeem during the run is
+ * reconciled and printed ("live activity during the run: +X earned / −Y redeemed — explained"), not an alarm.
  * Runbook: platform/docs/plans/WALLET-REVERSAL-ENGINE-DESIGN.md §9 + §13 (WP6).
  */
 import { PrismaClient } from '@prisma/client';
