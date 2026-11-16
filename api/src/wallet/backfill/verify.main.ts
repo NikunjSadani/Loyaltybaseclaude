@@ -3,7 +3,10 @@
  * Compiled to dist/wallet/backfill/verify.main.js. Runs V0–V9 (design §9) per tenant and prints PASS/FAIL per check.
  *
  *   EXPECTED_DB=gifsy_staging [TENANTS=bajaj,deoleo] \
- *   [V0_BASELINE_JSON='[{"clientId":"bajaj",...}]'   ← the "V0 before" lines the backfill APPLY printed]
+ *   [V0_BASELINE_JSON='[{"clientId":"bajaj",...}]'   ← the "V0 before" lines the backfill APPLY printed; V0 passes when
+ *                                                      identical OR every change is explained by movement rows added
+ *                                                      since ("live activity since the APPLY baseline: +X earned /
+ *                                                      −Y redeemed — explained"); an unexplained change FAILS]
  *   [NEVER_NEGATIVE_TENANTS=deoleo]                  ← default "deoleo" (V5)
  *   [EXPECTED_NEGATIVE_BALANCES='{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}']  ← V6b (Bajaj PROD values)
  *     node dist/wallet/backfill/verify.main.js

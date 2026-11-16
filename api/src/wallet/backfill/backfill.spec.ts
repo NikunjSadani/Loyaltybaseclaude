@@ -19,7 +19,19 @@ import {
 } from './backfill-plan';
 import { ApplyOutcome, BackfillStore, runBackfill, BackfillConfig, PausePriorState, PayoutBackfillInput } from './backfill-runner';
 import type { PlannedPayoutAllocation } from '../../credits/payout-reversal-v2';
-import { computeV0, runVerifyChecks, V0Snapshot, VerifySnapshot, VWallet } from './verify-checks';
+import {
+  assertWalletGuard,
+  computeV0,
+  reconcileV0Wallets,
+  runVerifyChecks,
+  V0_FIELDS,
+  V0Snapshot,
+  V0WalletRow,
+  v0RowsOf,
+  VerifySnapshot,
+  VWallet,
+  WalletGuardState,
+} from './verify-checks';
 import { runVerify, verifyConfigFromEnv } from './verify.main';
 import { configFromEnv } from './backfill.main';
 
@@ -283,6 +295,8 @@ class MemStore implements BackfillStore {
   applyCalls = 0;
   failOnApplyCall: number | null = null;
   beforeApply: ((walletId: string) => void) | null = null;
+  /** simulates a DEFECTIVE backfill write: runs after the wallet's writes, inside the emulated transaction */
+  corruptOnApply: ((walletId: string) => void) | null = null;
 
   constructor(public db = 'gifsy_test') {}
 
@@ -372,8 +386,24 @@ class MemStore implements BackfillStore {
     }
     return { outcome: 'APPLIED' as const, inserted: rows.length };
   }
+  async snapshotV0Wallets(clientId: string): Promise<V0WalletRow[]> {
+    const t = this.tenants.get(clientId)!;
+    return v0RowsOf(this.wallets(clientId), [...t.histories.values()].flatMap((h) => h.txs));
+  }
+  /** convenience for the verify specs (the V0 baseline APPLY prints) */
   async snapshotV0(clientId: string): Promise<V0Snapshot> {
-    return computeV0(clientId, this.wallets(clientId));
+    return computeV0(clientId, await this.snapshotV0Wallets(clientId));
+  }
+  /** mirror of the Prisma store's walletGuardState (figures + movement amounts + lots) */
+  private guardState(clientId: string, walletId: string): WalletGuardState {
+    const t = this.tenants.get(clientId)!;
+    const h = t.histories.get(walletId)!;
+    const w = this.wallets(clientId).find((x) => x.id === walletId)!;
+    const txs = [...h.txs].sort((a, b) => (a.id < b.id ? -1 : 1)).map((x) => [x.id, x.transactionType, x.points, x.balanceBefore, x.balanceAfter, x.balanceType]);
+    const lots = [...h.ledgers].sort((a, b) => (a.id < b.id ? -1 : 1)).map((l) => [l.id, l.transactionType, l.points, l.isExpired]);
+    const s = { txCount: txs.length, txDigest: JSON.stringify(txs), lotCount: lots.length, lotDigest: JSON.stringify(lots) } as WalletGuardState;
+    for (const f of V0_FIELDS) s[f] = w[f];
+    return s;
   }
   async applyWalletPlan(walletId: string, clientId: string, decide: (fresh: BfWalletHistory) => WalletPlan | null): Promise<ApplyOutcome> {
     this.applyCalls++;
@@ -383,6 +413,38 @@ class MemStore implements BackfillStore {
     if (live.wallet.movementSeq > 0) return 'ALREADY_DONE';
     const plan = decide(this.clone(live));
     if (!plan) return 'CHANGED';
+    // transaction emulation: everything below rolls back on a throw (guard miss or V0 wallet guard)
+    const counters = this.tenants.get(clientId)!.counters.get(walletId)!;
+    const saved = {
+      wallet: { ...live.wallet },
+      counters: { ...counters },
+      txs: live.txs.map((x) => ({ ...x })),
+      ledgers: live.ledgers.map((l) => ({ ...l })),
+      positions: this.positions.length,
+      allocations: this.allocations.length,
+      status: this.status.get(walletId),
+      writes: this.writes,
+    };
+    try {
+      const guardBefore = this.guardState(clientId, walletId);
+      const r = this.writePlanMem(live, plan, walletId, clientId);
+      this.corruptOnApply?.(walletId);
+      assertWalletGuard(walletId, guardBefore, this.guardState(clientId, walletId));
+      return r;
+    } catch (e) {
+      Object.assign(live.wallet, saved.wallet);
+      Object.assign(counters, saved.counters);
+      live.txs = saved.txs;
+      live.ledgers = saved.ledgers;
+      this.positions.length = saved.positions;
+      this.allocations.length = saved.allocations;
+      if (saved.status) this.status.set(walletId, saved.status);
+      else this.status.delete(walletId);
+      this.writes = saved.writes;
+      throw e;
+    }
+  }
+  private writePlanMem(live: BfWalletHistory, plan: WalletPlan, walletId: string, clientId: string): ApplyOutcome {
     // guarded writes (mirror writePlan): all-or-nothing
     const txById = new Map(live.txs.map((t) => [t.id, t]));
     for (const u of plan.txUpdates) if (!txById.get(u.txId) || txById.get(u.txId)!.seq !== null) throw new Error('guard: tx');
@@ -416,7 +478,7 @@ class MemStore implements BackfillStore {
     return {
       clientId,
       wallets: this.wallets(clientId),
-      txs: [...t.histories.values()].flatMap((h) => h.txs.map((x) => ({ id: x.id, walletId: x.walletId, seq: x.seq, pointsDelta: x.pointsDelta, balanceAfter: x.balanceAfter, transactionType: x.transactionType, referenceType: x.referenceType, referenceId: x.referenceId, points: x.points }))),
+      txs: [...t.histories.values()].flatMap((h) => h.txs.map((x) => ({ id: x.id, walletId: x.walletId, seq: x.seq, pointsDelta: x.pointsDelta, balanceBefore: x.balanceBefore, balanceAfter: x.balanceAfter, transactionType: x.transactionType, referenceType: x.referenceType, referenceId: x.referenceId, points: x.points }))),
       positions: this.positions.filter((p) => p.clientId === clientId),
       allocations: this.allocations.filter((a) => a.clientId === clientId),
       payoutAllocations: this.payoutAllocations.filter((a) => a.clientId === clientId),
@@ -816,9 +878,13 @@ describe('WP6 backfill runner', () => {
       h.wallet.redeemablePoints -= 100;
       s.beforeApply = null;
     };
-    const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
+    const lines: string[] = [];
+    const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), (l) => lines.push(l));
     expect(r.tenants[0].changed).toBe(1);
-    expect(r.exitCode).toBe(4); // the concurrent redemption also moved V0 → alarm
+    // the concurrent redemption is live traffic (its movement row explains the balance change) — not a V0 alarm
+    expect(r.exitCode).toBe(3);
+    expect(r.tenants[0].v0Reconciliation).toMatchObject({ explained: true, tenantBalanceDelta: -100, movementNet: -100 });
+    expect(lines.some((l) => l.includes('V0 ✓ live activity during the run: +0 earned / −100 redeemed') && l.endsWith('— explained'))).toBe(true);
     expect(s.tenants.get('bajaj')!.histories.get('W-BP')!.wallet.movementSeq).toBe(0);
     const r2 = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
     expect(r2.exitCode).toBe(0);
@@ -922,6 +988,152 @@ describe('WP6 backfill runner', () => {
     };
     expect(planWallet(summaryOnly, ctxOf('bajaj')).status).toBe('DONE');
     expect(planWallet({ ...summaryOnly, sequencedSummary: { txCount: 4, sequencedCount: 3, maxSeq: 3 } }, ctxOf('bajaj')).status).toBe('BLOCKED');
+  });
+});
+
+// ───────────────────────────── V0 under live traffic (earn/redeem are NOT paused during APPLY) ─────────────────────────────
+
+/** A live earn (+) / redeem (−) committed by the app while the backfill runs: wallet update + its movement row, together. */
+function liveMove(s: MemStore, clientId: string, walletId: string, id: string, delta: number, opts: { rowDelta?: number; noRow?: boolean } = {}): void {
+  const t = s.tenants.get(clientId)!;
+  const h = t.histories.get(walletId)!;
+  const c = t.counters.get(walletId)!;
+  const before = h.wallet.redeemablePoints;
+  h.wallet.redeemablePoints += delta;
+  if (delta > 0) {
+    c.earnedPoints += delta;
+    c.lifetimeEarned += delta;
+  } else {
+    c.redeemedPoints += -delta;
+    c.lifetimeRedeemed += -delta;
+  }
+  if (opts.noRow) return;
+  const rd = opts.rowDelta ?? delta;
+  h.txs.push({
+    id,
+    walletId,
+    transactionType: delta > 0 ? 'CREDIT_POINTS_EARNED' : 'DEBIT_REDEMPTION',
+    points: rd,
+    balanceBefore: before,
+    balanceAfter: before + rd,
+    balanceType: 'REDEEMABLE',
+    referenceType: null,
+    referenceId: null,
+    description: 'live',
+    metadata: null,
+    createdAt: new Date(T0 + 500_000),
+    seq: h.wallet.movementSeq > 0 ? ++h.wallet.movementSeq : null,
+    pointsDelta: h.wallet.movementSeq > 0 ? rd : null,
+    reversedCreditTxId: null,
+    creditReversalId: null,
+    pointsLedgerId: null,
+  });
+}
+
+describe('V0 per-wallet guard + tenant reconciliation (live earn/redeem during APPLY)', () => {
+  it('concurrent earn + redeem on other wallets during APPLY → exit 0 with "live activity … explained" (the backfill changed nothing)', async () => {
+    const s = fullStore();
+    s.beforeApply = (walletId) => {
+      if (walletId !== 'W-B5') return; // W-B0 is already backfilled at this point (wallets go in ascending id order)
+      liveMove(s, 'bajaj', 'W-B0', 'live-earn', 1000);
+      liveMove(s, 'bajaj', 'W-B0', 'live-redeem', -100);
+      s.beforeApply = null;
+    };
+    const lines: string[] = [];
+    const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), (l) => lines.push(l));
+    expect(r.exitCode).toBe(0);
+    const t = r.tenants[0];
+    expect(t.walletGuardFailures).toEqual([]);
+    expect(t.v0Diff!.length).toBeGreaterThan(0); // raw tenant totals DID move …
+    expect(t.v0Reconciliation).toMatchObject({ explained: true, identical: false, tenantBalanceDelta: 900, movementNet: 900, unexplained: [] }); // … and every point is explained
+    expect(t.v0Reconciliation!.activity).toMatchObject({ wallets: 1, rows: 2, earned: 1000, redeemed: 100 });
+    expect(lines.some((l) => l.startsWith('[bajaj] V0 ✓ live activity during the run: +1000 earned / −100 redeemed (2 movement row(s) on 1 wallet(s)') && l.endsWith('— explained'))).toBe(true);
+    expect(lines.some((l) => l.includes('V0 per-wallet guard ✓ — 9 wallet(s) written'))).toBe(true);
+    expect([...s.tenants.get('bajaj')!.histories.values()].every((h) => h.wallet.movementSeq > 0)).toBe(true);
+  });
+
+  it('a backfill write that changes a balance → rolled back, run STOPS, exit 4 naming the wallet', async () => {
+    const s = fullStore();
+    const pristine = fullStore();
+    s.corruptOnApply = (walletId) => {
+      if (walletId === 'W-B3') s.tenants.get('bajaj')!.histories.get('W-B3')!.wallet.redeemablePoints += 1;
+    };
+    const lines: string[] = [];
+    const r = await runBackfill(s, applyCfg(), (l) => lines.push(l)); // bajaj then deoleo
+    expect(r.exitCode).toBe(4);
+    const t = r.tenants.find((x) => x.clientId === 'bajaj')!;
+    expect(t.walletGuardFailures).toEqual([{ walletId: 'W-B3', diff: ['redeemablePoints: -360 → -359'] }]);
+    expect(lines.some((l) => l.includes("‼ V0 WALLET GUARD: the backfill's writes changed wallet W-B3 (redeemablePoints: -360 → -359) — rolled back"))).toBe(true);
+    expect(lines.some((l) => l.includes("‼ ALARM — the backfill's writes changed wallet W-B3"))).toBe(true);
+    // rolled back: W-B3 untouched (balance, seq, positions); nothing after it written; deoleo never processed
+    const b = s.tenants.get('bajaj')!.histories;
+    expect(b.get('W-B3')!.wallet).toEqual(pristine.tenants.get('bajaj')!.histories.get('W-B3')!.wallet);
+    expect(b.get('W-B3')!.txs.every((x) => x.seq === null)).toBe(true);
+    expect(['W-B0', 'W-B1', 'W-B2'].every((id) => b.get(id)!.wallet.movementSeq > 0)).toBe(true);
+    expect(['W-B4', 'W-B5', 'W-B6', 'W-B7', 'W-BP'].every((id) => b.get(id)!.wallet.movementSeq === 0)).toBe(true);
+    expect(r.tenants.map((x) => x.clientId)).toEqual(['bajaj']);
+    expect([...s.tenants.get('deoleo')!.histories.values()].every((h) => h.wallet.movementSeq === 0)).toBe(true);
+    expect(lines.some((l) => l.includes('‼ STOPPED') && l.includes('tenants not processed: deoleo'))).toBe(true);
+    expect(s.pause.get('bajaj')!.paused).toBe(false); // pause still lifted
+    expect(t.v0Reconciliation!.explained).toBe(true); // the rollback left the tenant totals intact
+    // the defect fixed → a re-run completes and ends in the one-shot state
+    s.corruptOnApply = null;
+    expect((await runBackfill(s, applyCfg(), silent)).exitCode).toBe(0);
+    await runBackfill(pristine, applyCfg(), silent);
+    expect(s.state()).toBe(pristine.state());
+  });
+
+  it('a counter / movement-amount / lot changed by a backfill write is caught too (diffWalletGuard covers every field)', async () => {
+    for (const corrupt of [
+      (s: MemStore) => (s.tenants.get('bajaj')!.counters.get('W-B1')!.lifetimeEarned += 5),
+      (s: MemStore) => (s.tenants.get('bajaj')!.histories.get('W-B1')!.txs[0].balanceAfter += 1),
+      (s: MemStore) => (s.tenants.get('bajaj')!.histories.get('W-B1')!.ledgers[0].isExpired = true),
+    ]) {
+      const s = fullStore();
+      s.corruptOnApply = (w) => (w === 'W-B1' ? void corrupt(s) : undefined);
+      const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
+      expect(r.exitCode).toBe(4);
+      expect(r.tenants[0].walletGuardFailures.map((g) => g.walletId)).toEqual(['W-B1']);
+    }
+  });
+
+  it('a tenant change no committed movement row explains → exit 4 with the unexplained amount and the wallets', async () => {
+    const s = fullStore();
+    s.beforeApply = (walletId) => {
+      if (walletId !== 'W-B5') return;
+      liveMove(s, 'bajaj', 'W-B0', 'x0', 50, { noRow: true }); // balance + counters moved, no row
+      s.tenants.get('bajaj')!.counters.get('W-B1')!.redeemedPoints += 7; // a counter alone, no row
+      liveMove(s, 'bajaj', 'W-B2', 'x2', 150, { rowDelta: 100 }); // the row says +100, the balance moved +150
+      liveMove(s, 'bajaj', 'W-B3', 'x3', 40); // legit live earn — explained, not listed
+      s.beforeApply = null;
+    };
+    const lines: string[] = [];
+    const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), (l) => lines.push(l));
+    expect(r.exitCode).toBe(4);
+    const rec = r.tenants[0].v0Reconciliation!;
+    expect(rec.explained).toBe(false);
+    expect(rec.unexplainedAmount).toBe(100); // 50 (no row) + 0 (counter only) + 50 (row short)
+    expect(rec.unexplained.map((u) => u.walletId)).toEqual(['W-B0', 'W-B1', 'W-B2']);
+    expect(rec.unexplained[2].detail).toContain('balance moved 150 but the 1 new movement row(s) net 100 — unexplained 50');
+    expect(r.tenants[0].walletGuardFailures).toEqual([]); // the backfill itself is not the culprit
+    expect(lines.some((l) => l.startsWith('[bajaj] ‼ V0 UNEXPLAINED change during APPLY') && l.includes('UNEXPLAINED 100 pts on 3 wallet(s)') && l.includes('W-B0') && l.includes('W-B2'))).toBe(true);
+    expect(lines.some((l) => l.includes('‼ ALARM — V0 unexplained 100 pts on 3 wallet(s)'))).toBe(true);
+  });
+
+  it('reconcileV0Wallets: new wallet opened during the run is fine; a vanished wallet or lost rows are unexplained', () => {
+    const w = (id: string, B: number, n = 0, i = 0, o = 0): V0WalletRow => {
+      const r = { id, txCount: n, txIn: i, txOut: o } as V0WalletRow;
+      for (const f of V0_FIELDS) r[f] = 0;
+      r.redeemablePoints = B;
+      return r;
+    };
+    expect(reconcileV0Wallets([w('A', 10, 1, 10)], [w('A', 10, 1, 10)]).identical).toBe(true);
+    const opened = reconcileV0Wallets([w('A', 10, 1, 10)], [w('A', 10, 1, 10), w('N', 0)]);
+    expect(opened).toMatchObject({ explained: true, identical: false, activity: { newWallets: 1 } });
+    const openedAndEarned = reconcileV0Wallets([w('A', 10, 1, 10)], [w('A', 10, 1, 10), w('N', 25, 1, 25)]);
+    expect(openedAndEarned).toMatchObject({ explained: true, activity: { earned: 25, wallets: 1 } });
+    expect(reconcileV0Wallets([w('A', 10, 1, 10)], []).unexplained).toEqual([{ walletId: 'A', detail: 'wallet disappeared during the run' }]);
+    expect(reconcileV0Wallets([w('A', 10, 2, 15, -5)], [w('A', 10, 1, 10)]).explained).toBe(false);
   });
 });
 
@@ -1096,6 +1308,30 @@ describe('WP6 verify V0–V9', () => {
     s.positions = s.positions.filter((p) => p.creditTxId !== 'd1c2');
     const rd = Object.fromEntries(runVerifyChecks(await s.loadVerifySnapshot('deoleo'), opts('deoleo')).map((r) => [r.check.split(' ')[0], r.status]));
     expect(rd).toMatchObject({ V5: 'FAIL', V7: 'FAIL', V8: 'FAIL' });
+  });
+
+  it('V0 vs the APPLY baseline: live earn/redeem since → PASS "live activity … explained"; a change no row explains → FAIL', async () => {
+    const s = fullStore();
+    const before = await s.snapshotV0('bajaj');
+    await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);
+    liveMove(s, 'bajaj', 'W-BP', 'v-earn', 30);
+    liveMove(s, 'bajaj', 'W-BP', 'v-redeem', -20);
+    const v0 = async (baseline: V0Snapshot = before) => runVerifyChecks(await s.loadVerifySnapshot('bajaj'), opts('bajaj', baseline)).find((r) => r.check.startsWith('V0'))!;
+    const ok = await v0();
+    expect(ok.status).toBe('PASS');
+    expect(ok.detail).toMatch(/^live activity since the APPLY baseline: \+30 earned \/ −20 redeemed \(2 movement row\(s\).*— explained$/);
+    liveMove(s, 'bajaj', 'W-BP', 'v-ghost', 5, { noRow: true });
+    const bad = await v0();
+    expect(bad.status).toBe('FAIL');
+    expect(bad.detail).toContain('UNEXPLAINED 5 pts');
+    // a baseline without movement totals can't be reconciled → FAIL (re-capture), never a silent pass
+    const old: Partial<V0Snapshot> = { ...before };
+    delete old.txCount;
+    delete old.txIn;
+    delete old.txOut;
+    const stale = await v0(old as V0Snapshot);
+    expect(stale.status).toBe('FAIL');
+    expect(stale.detail).toContain('re-capture');
   });
 
   it('V10 / Q2: a BLOCKED wallet is excluded from V1/V2/V3/V7 and listed as WARN (never silent); the run still passes', async () => {
