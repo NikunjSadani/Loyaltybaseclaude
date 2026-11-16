@@ -67,6 +67,19 @@ export function formatInrExact(rupees: number): string {
 }
 
 /**
+ * Rupee display with Indian digit grouping that keeps paise: whole amounts stay `₹1,500`, fractional
+ * amounts always show 2 decimals `₹1,500.50` (never `₹1,500.5` / `₹0.333`). Sign before the ₹. Non-finite → `₹0`.
+ * Additive helper (2026-11-16, Voucher Dispersal); no existing caller changes.
+ */
+export function formatInrPaise(rupees: number): string {
+  if (!Number.isFinite(rupees)) return '₹0';
+  const r = Math.round(rupees * 100) / 100 || 0; // `|| 0` folds -0 → 0
+  if (Number.isInteger(r)) return r < 0 ? `-${formatInrExact(-r)}` : formatInrExact(r);
+  const body = Math.abs(r).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${r < 0 ? '-' : ''}₹${body}`;
+}
+
+/**
  * Whole-rupee display with Indian digit grouping, rounded to the nearest rupee — `₹10,414`, `-₹1,500`
  * (the sign goes BEFORE the ₹; never `₹-1,500` or `-₹0`). Non-finite / NaN → `₹0`. Used by the partner
  * Targets page's "Achieved / Target" line for INR-unit KPIs (owner-approved, all tenants, 2026-11-15).

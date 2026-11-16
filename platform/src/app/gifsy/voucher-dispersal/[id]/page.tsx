@@ -2,20 +2,25 @@
 
 /* ─── Voucher Dispersal — campaign detail = live delivery report (/gifsy/voucher-dispersal/[id]) ──
    Summary tiles + every row with its voucher status, Hubble ref, masked code and WhatsApp status.
-   Auto-refreshes while the campaign is CONFIRMED / PROCESSING and for 30 minutes after it completes
-   (late WhatsApp delivered / read updates) — 3s, backing off ×1.5 to 30s — then stops. Per-row Resend (BOUGHT only — no new voucher) and Retry purchase (only when allowed;
-   the server's refusal is shown word-for-word). Nothing here claims "sent" before the server says so.
+   Auto-refreshes while the campaign is CONFIRMED / PROCESSING, while its status is unrecognised, and
+   for 30 minutes after it completes (late WhatsApp delivered / read updates) — 3s, backing off ×1.5
+   to 30s — then stops; paused while the tab is hidden. Only the LATEST request's reply is applied
+   (filter / page / poll / manual refreshes can overlap). Per-row Resend (server `canResend`) and Retry
+   purchase (server `canRetryBuy`): a refusal is shown word-for-word; a network error / 5xx means the
+   outcome is UNKNOWN → the dialog closes, the page refreshes and says so, and the action stays locked
+   until that refresh lands. Nothing here claims "sent" before the server says so.
 ──────────────────────────────────────────────────────────────────────────────────────────────── */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { ArrowLeft, Download, Loader2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Download, Loader2, RefreshCw, X } from 'lucide-react';
 import {
-  CAMPAIGN_STATUS_LABEL, CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE, PENDING_RECONCILE_NOTE,
-  POLL_START_MS, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, canCancelCampaign, canResendRow, canRetryRow,
-  formatRupees, formatWhen, isLiveCampaign, isSetupCampaign, nextPollDelay, pollPhase, vdApi, vdReportUrl,
-  type RowStatus, type VdListItem, type VdRow, type VdRowsPage,
+  CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE, PENDING_RECONCILE_NOTE, POLL_START_MS,
+  ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, billedToText, campaignStatusText, canCancelCampaign, canResendRow,
+  canRetryRow, formatCount, formatRupees, formatWhen, isLiveCampaign, isSetupCampaign, isUncertainFailure, nextPollDelay,
+  pollPhase, rowStatusText, vdApi, vdReportUrl,
+  type CampaignStatus, type RowStatus, type VdListItem, type VdRow, type VdRowsPage,
 } from '@/lib/voucher-dispersal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
@@ -26,6 +31,10 @@ type DialogState =
   | { kind: 'retry'; row: VdRow }
   | { kind: 'cancel' }
   | null;
+
+type Notice = { text: string; tone: 'info' | 'warning' } | null;
+
+const gt0 = (v: number | null) => v !== null && v > 0;
 
 function MessageCell({ row }: { row: VdRow }) {
   if (!row.messageStatus) {
@@ -48,14 +57,27 @@ function MessageCell({ row }: { row: VdRow }) {
 }
 
 function VoucherCell({ row }: { row: VdRow }) {
-  const reason = row.reason ?? (row.status === 'PENDING_RECONCILE' ? PENDING_RECONCILE_NOTE : row.status === 'BUY_FAILED' ? 'Hubble gave no reason.' : null);
+  const reason = row.reason
+    ?? (row.status === 'PENDING_RECONCILE' ? PENDING_RECONCILE_NOTE
+      : row.status === 'BUY_FAILED' ? 'Hubble gave no reason.'
+        : row.status === 'UNKNOWN' ? 'This status is not recognised by this screen — check the report or ask engineering.'
+          : null);
   const reasonTone = row.status === 'BUY_FAILED' || row.status === 'INVALID' ? 'text-red-200' : 'text-amber-200';
   return (
     <div className="space-y-1">
-      <StatusChip label={ROW_STATUS_LABEL[row.status]} tone={ROW_STATUS_TONE[row.status]} testId={`vd-row-status-${row.id}`} />
+      <StatusChip label={rowStatusText(row)} tone={ROW_STATUS_TONE[row.status]} testId={`vd-row-status-${row.id}`} />
       {reason && <p className={`text-xs break-words ${reasonTone}`}>{reason}</p>}
     </div>
   );
+}
+
+function liveText(phase: string, c: { status: CampaignStatus; rawStatus: string }, hidden: boolean): string {
+  const paused = hidden ? ' (paused while this tab is hidden)' : '';
+  if (phase === 'live') return `Live — this page refreshes automatically while vouchers are being bought and sent${paused}.`;
+  if (phase === 'unknown') return `The server reported a status this screen does not recognise (${c.rawStatus || 'none'}). Still refreshing automatically${paused}.`;
+  if (phase === 'settling') return `Finished — still refreshing automatically for 30 minutes after completion to pick up late WhatsApp delivered / read updates${paused}.`;
+  if (isSetupCampaign(c.status)) return 'Not confirmed — nothing has been bought or sent.';
+  return 'Not refreshing automatically. Use Refresh to see the latest WhatsApp delivery / read updates.';
 }
 
 export default function VoucherCampaignDetailPage() {
@@ -63,8 +85,10 @@ export default function VoucherCampaignDetailPage() {
   const id = String(Array.isArray(params.id) ? params.id[0] : params.id ?? '');
 
   const [item, setItem] = useState<VdListItem | null>(null);
+  const itemRef = useRef<VdListItem | null>(null);
   const [rows, setRows] = useState<VdRowsPage | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [rowsError, setRowsError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -72,32 +96,49 @@ export default function VoucherCampaignDetailPage() {
   const [filter, setFilter] = useState<'' | RowStatus>('');
   const [page, setPage] = useState(1);
   const [tick, setTick] = useState(0);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice>(null);
+  const [hidden, setHidden] = useState(false);
   const delayRef = useRef(POLL_START_MS);
-  // When THIS page saw the campaign go from live to completed — the 30-min refresh window's start
-  // when the server sends no completedAt. Set before setItem so the same render sees it.
+  const seqRef = useRef(0);
+  // When THIS page saw the campaign go from live to completed — the 30-min window's start when the
+  // server sends no completedAt. Set before setItem so the same render sees it.
   const sawLive = useRef(false);
   const observedCompletedAt = useRef<number | null>(null);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
-  const refresh = useCallback(async (mode: 'initial' | 'manual' | 'poll') => {
-    if (mode === 'initial') { setLoading(true); setLoadError(null); }
+  // Pause polling while the tab is hidden.
+  useEffect(() => {
+    const onVis = () => setHidden(document.visibilityState === 'hidden');
+    onVis();
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
+
+  /** Fetch campaign + current rows page. Only the latest call's reply is applied. */
+  const refresh = useCallback(async (mode: 'load' | 'manual' | 'poll') => {
+    const seq = ++seqRef.current;
+    if (mode === 'load' && !itemRef.current) { setLoading(true); setLoadError(null); }
     if (mode === 'manual') setRefreshing(true);
     const [c, r] = await Promise.all([vdApi.getCampaign(id), vdApi.rows(id, { status: filter || undefined, page })]);
-    if (!mounted.current) return;
+    if (!mounted.current || seq !== seqRef.current) return; // a newer request superseded this one
     if (c.ok) {
       const st = c.data.campaign.status;
       if (isLiveCampaign(st)) sawLive.current = true;
       else if ((st === 'COMPLETED' || st === 'COMPLETED_WITH_ERRORS') && sawLive.current && observedCompletedAt.current === null) {
         observedCompletedAt.current = Date.now();
       }
+      itemRef.current = c.data;
       setItem(c.data);
       setPollError(null);
+      setRefreshError(null);
+      setLoadError(null);
+    } else if (!itemRef.current) {
+      setLoadError(c.error);
     } else if (mode === 'poll') {
       setPollError(c.error);
     } else {
-      setLoadError(c.error);
+      setRefreshError(c.error);
     }
     if (r.ok) { setRows(r.data); setRowsError(null); } else setRowsError(r.error);
     setLoading(false);
@@ -105,62 +146,81 @@ export default function VoucherCampaignDetailPage() {
     setTick((t) => t + 1);
   }, [id, filter, page]);
 
-  useEffect(() => { void refresh('initial'); }, [refresh]);
+  // First load + every filter / page change.
+  useEffect(() => { void refresh('load'); }, [refresh]);
 
-  // Auto-refresh while live and for 30 min after completion (late delivered / read updates), backing off;
-  // a failed poll keeps polling (with the error shown) — never silently stops.
   const phase = item ? pollPhase(item.campaign, Date.now(), observedCompletedAt.current) : 'off';
   const polling = phase !== 'off';
-  const live = phase === 'live';
   useEffect(() => {
-    if (!polling) { delayRef.current = POLL_START_MS; return; }
+    if (!polling || hidden) return;
     const t = setTimeout(() => {
       delayRef.current = nextPollDelay(delayRef.current);
       void refresh('poll');
     }, delayRef.current);
     return () => clearTimeout(t);
-  }, [polling, tick, refresh]);
+  }, [polling, hidden, tick, refresh]);
+  useEffect(() => { if (!polling) delayRef.current = POLL_START_MS; }, [polling]);
 
   // ── dialogs ──
   const [dialog, setDialog] = useState<DialogState>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
+  /** Row ids (or 'campaign') whose action outcome is unknown — locked until the follow-up refresh lands. */
+  const [locked, setLocked] = useState<Set<string>>(new Set());
   const actionInFlight = useRef(false);
-  const openDialog = (d: DialogState) => { setDialog(d); setDialogError(null); };
+  const openDialog = (d: DialogState) => { setDialog(d); setDialogError(null); setNotice(null); };
   const closeDialog = () => { if (!dialogBusy) { setDialog(null); setDialogError(null); } };
 
   const runDialog = async () => {
     if (!dialog || actionInFlight.current) return;
+    const d = dialog;
+    const lockKey = d.kind === 'cancel' ? 'campaign' : d.row.id;
     actionInFlight.current = true;
     setDialogBusy(true);
     setDialogError(null);
     const res =
-      dialog.kind === 'resend' ? await vdApi.resend(id, dialog.row.id)
-      : dialog.kind === 'retry' ? await vdApi.retryBuy(id, dialog.row.id)
+      d.kind === 'resend' ? await vdApi.resend(id, d.row.id)
+      : d.kind === 'retry' ? await vdApi.retryBuy(id, d.row.id)
       : await vdApi.cancel(id);
     actionInFlight.current = false;
     setDialogBusy(false);
-    if (!res.ok) { setDialogError(res.error); return; }
-    setNotice(
-      dialog.kind === 'resend'
-        ? `Resend requested for row ${dialog.row.rowNumber}. The WhatsApp status below updates when WhatsApp reports back.`
-        : dialog.kind === 'retry'
-          ? `Purchase retry requested for row ${dialog.row.rowNumber}. The voucher status below updates as the server works on it.`
-          : 'Cancel requested. The campaign status below shows what the server did.',
-    );
+    if (!res.ok && !isUncertainFailure(res.status)) {
+      setDialogError(res.error); // a definite refusal — word for word, dialog stays open
+      return;
+    }
     setDialog(null);
+    if (res.ok) {
+      setNotice({
+        tone: 'info',
+        text:
+          d.kind === 'resend'
+            ? `Resend requested for row ${formatCount(d.row.rowNumber)}. The WhatsApp status below updates when WhatsApp reports back.`
+            : d.kind === 'retry'
+              ? `Purchase retry requested for row ${formatCount(d.row.rowNumber)}. The voucher status below updates as the server works on it.`
+              : 'Cancel requested. The campaign status below shows what the server did.',
+      });
+    } else {
+      const what = d.kind === 'resend' ? 'the resend' : d.kind === 'retry' ? 'the purchase retry' : 'the cancel';
+      const where = d.kind === 'cancel' ? 'the campaign status' : `row ${formatCount(d.row.rowNumber)}`;
+      setNotice({
+        tone: 'warning',
+        text: `We couldn't tell whether ${what} started (${res.error}). Refreshing — check ${where} below before trying again.`,
+      });
+    }
+    setLocked((s) => new Set(s).add(lockKey));
     delayRef.current = POLL_START_MS;
-    void refresh('manual');
+    await refresh('manual');
+    setLocked((s) => { const n = new Set(s); n.delete(lockKey); return n; });
   };
 
   const report = useDownloadAction();
 
   if (loading && !item) return <LoadingBlock label="Loading campaign…" />;
-  if (loadError && !item) return <ErrorPanel message={`Couldn't load this campaign: ${loadError}`} onRetry={() => void refresh('initial')} />;
-  if (!item) return null;
+  if (!item) return <ErrorPanel message={`Couldn't load this campaign: ${loadError ?? 'no reply from the server.'}`} onRetry={() => void refresh('load')} />;
 
   const { campaign: c, summary: s } = item;
-  const pageCount = rows ? Math.max(1, Math.ceil(rows.total / Math.max(1, rows.pageSize))) : 1;
+  const pageCount = rows && rows.total !== null ? Math.max(1, Math.ceil(rows.total / Math.max(1, rows.pageSize))) : null;
+  const hasNext = rows ? (pageCount !== null ? page < pageCount : rows.rows.length >= rows.pageSize && rows.rows.length > 0) : false;
 
   return (
     <div className="space-y-6" data-testid="vd-detail">
@@ -172,12 +232,13 @@ export default function VoucherCampaignDetailPage() {
           <div className="min-w-0">
             <h1 className="text-xl font-bold text-white break-words">{c.name || 'Untitled campaign'}</h1>
             <p className="text-xs text-white/50 mt-0.5 break-words">
-              Programme: {c.programLabel || '—'} · Billed to: {c.billedToClientName ?? '—'} · Created {formatWhen(c.createdAt)}
+              Programme: {c.programLabel || '—'} · Billed to: {billedToText(c)} · Created {formatWhen(c.createdAt)}
               {c.confirmedAt ? ` · Confirmed ${formatWhen(c.confirmedAt)}` : ''}
+              {c.completedAt ? ` · Completed ${formatWhen(c.completedAt)}` : ''}
             </p>
             {c.note && <p className="text-xs text-white/60 mt-1 break-words">Note: {c.note}</p>}
           </div>
-          <StatusChip label={CAMPAIGN_STATUS_LABEL[c.status]} tone={CAMPAIGN_STATUS_TONE[c.status]} testId="vd-campaign-status" />
+          <StatusChip label={campaignStatusText(c)} tone={CAMPAIGN_STATUS_TONE[c.status]} testId="vd-campaign-status" />
         </div>
       </div>
 
@@ -197,8 +258,8 @@ export default function VoucherCampaignDetailPage() {
           {refreshing ? 'Refreshing…' : 'Refresh'}
         </button>
         {canCancelCampaign(c) && (
-          <button type="button" onClick={() => openDialog({ kind: 'cancel' })} data-testid="vd-cancel"
-            className="rounded-lg border border-red-500/40 px-3 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/10">
+          <button type="button" onClick={() => openDialog({ kind: 'cancel' })} data-testid="vd-cancel" disabled={locked.has('campaign')}
+            className="rounded-lg border border-red-500/40 px-3 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/10 disabled:opacity-50">
             Cancel campaign
           </button>
         )}
@@ -210,35 +271,36 @@ export default function VoucherCampaignDetailPage() {
         )}
       </div>
 
-      <p className="text-xs text-white/60" role="status" data-testid="vd-live">
-        {live
-          ? 'Live — this page refreshes automatically while vouchers are being bought and sent.'
-          : phase === 'settling'
-            ? 'Finished — still refreshing automatically for 30 minutes after completion to pick up late WhatsApp delivered / read updates.'
-          : isSetupCampaign(c.status)
-            ? 'Not confirmed — nothing has been bought or sent.'
-            : 'Not refreshing automatically. Use Refresh to see the latest WhatsApp delivery / read updates.'}
-      </p>
+      <p className="text-xs text-white/60" role="status" data-testid="vd-live">{liveText(phase, c, hidden)}</p>
       {pollError && (
         <p role="alert" data-testid="vd-poll-error" className="text-xs text-amber-200">
           The last automatic refresh failed ({pollError}). Still retrying — the numbers below may be out of date.
         </p>
       )}
-      {notice && (
-        <p role="status" data-testid="vd-notice" className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
-          {notice}
+      {refreshError && (
+        <p role="alert" data-testid="vd-refresh-error" className="text-xs text-amber-200">
+          Refresh failed ({refreshError}). The numbers below may be out of date — try Refresh again.
         </p>
       )}
+      {notice && (
+        <div role="status" data-testid="vd-notice"
+          className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${notice.tone === 'warning' ? 'border-amber-500/40 bg-amber-500/10 text-amber-100' : 'border-sky-500/30 bg-sky-500/10 text-sky-200'}`}>
+          <p className="flex-1 min-w-0 break-words">{notice.text}</p>
+          <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss message" className="shrink-0 opacity-70 hover:opacity-100">
+            <X className="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
+        </div>
+      )}
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3" data-testid="vd-tiles">
-        <Tile label="Bought" value={s.bought} tone="success" testId="vd-tile-bought" />
-        <Tile label="Pending" value={s.pending} tone={s.pending > 0 ? 'warning' : 'neutral'} testId="vd-tile-pending" />
-        <Tile label="Buy failed" value={s.buyFailed} tone={s.buyFailed > 0 ? 'danger' : 'neutral'} testId="vd-tile-buyfailed" />
-        <Tile label="WhatsApp sent" value={s.messageSent} testId="vd-tile-sent" />
-        <Tile label="Delivered" value={s.delivered} testId="vd-tile-delivered" />
-        <Tile label="Read" value={s.read} testId="vd-tile-read" />
-        <Tile label="Msg failed" value={s.messageFailed} tone={s.messageFailed > 0 ? 'danger' : 'neutral'} testId="vd-tile-msgfailed" />
-        <Tile label="Spent / budget" value={`${formatRupees(s.spentRupees)} / ${formatRupees(c.budgetRupees)}`} testId="vd-tile-spent" />
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3" data-testid="vd-tiles">
+        <Tile label="Bought" value={formatCount(s.bought)} tone="success" testId="vd-tile-bought" />
+        <Tile label="Pending" value={formatCount(s.pending)} tone={gt0(s.pending) ? 'warning' : 'neutral'} testId="vd-tile-pending" />
+        <Tile label="Buy failed" value={formatCount(s.buyFailed)} tone={gt0(s.buyFailed) ? 'danger' : 'neutral'} testId="vd-tile-buyfailed" />
+        <Tile label="WhatsApp sent" value={formatCount(s.messageSent)} testId="vd-tile-sent" />
+        <Tile label="Delivered" value={formatCount(s.delivered)} testId="vd-tile-delivered" />
+        <Tile label="Read" value={formatCount(s.read)} testId="vd-tile-read" />
+        <Tile label="Msg failed" value={formatCount(s.messageFailed)} tone={gt0(s.messageFailed) ? 'danger' : 'neutral'} testId="vd-tile-msgfailed" />
+        <Tile label="Spent / budget" value={`${formatRupees(s.spentRupees)} / ${formatRupees(c.budgetRupees)}`} testId="vd-tile-spent" wide />
       </div>
 
       <section aria-labelledby="vd-rows-heading" className="space-y-3">
@@ -277,9 +339,9 @@ export default function VoucherCampaignDetailPage() {
                 <tbody className="divide-y divide-white/5 align-top">
                   {rows.rows.length === 0 ? (
                     <tr><td colSpan={8} className="px-3 py-6 text-center text-white/50">No rows{filter ? ' with this status' : ''}.</td></tr>
-                  ) : rows.rows.map((r) => (
-                    <tr key={r.id || r.rowNumber} data-testid={`vd-row-${r.id}`}>
-                      <td className="px-3 py-2 text-white/60">{r.rowNumber}</td>
+                  ) : rows.rows.map((r, i) => (
+                    <tr key={r.id || `i${i}`} data-testid={`vd-row-${r.id}`}>
+                      <td className="px-3 py-2 text-white/60">{formatCount(r.rowNumber)}</td>
                       <td className="px-3 py-2"><p className="text-white">{r.name || '—'}</p><p className="font-mono text-xs text-white/60">{r.phone || '—'}</p></td>
                       <td className="px-3 py-2 text-white whitespace-nowrap">{formatRupees(r.amount)}<p className="text-xs text-white/60">{r.brand || '—'}</p></td>
                       <td className="px-3 py-2 min-w-[12rem]"><VoucherCell row={r} /></td>
@@ -288,15 +350,17 @@ export default function VoucherCampaignDetailPage() {
                       <td className="px-3 py-2 min-w-[11rem]"><MessageCell row={r} /></td>
                       <td className="px-3 py-2">
                         <div className="flex flex-col gap-1.5">
-                          {canResendRow(r) && (
+                          {r.id && canResendRow(r, c.status) && (
                             <button type="button" onClick={() => openDialog({ kind: 'resend', row: r })} data-testid={`vd-resend-${r.id}`}
-                              className="whitespace-nowrap rounded border border-white/20 px-2 py-1 text-xs text-white hover:bg-white/10">
+                              disabled={locked.has(r.id)}
+                              className="whitespace-nowrap rounded border border-white/20 px-2 py-1 text-xs text-white hover:bg-white/10 disabled:opacity-50">
                               Resend WhatsApp
                             </button>
                           )}
-                          {canRetryRow(r) && (
+                          {r.id && canRetryRow(r) && (
                             <button type="button" onClick={() => openDialog({ kind: 'retry', row: r })} data-testid={`vd-retry-${r.id}`}
-                              className="whitespace-nowrap rounded border border-amber-500/40 px-2 py-1 text-xs text-amber-200 hover:bg-amber-500/10">
+                              disabled={locked.has(r.id)}
+                              className="whitespace-nowrap rounded border border-amber-500/40 px-2 py-1 text-xs text-amber-200 hover:bg-amber-500/10 disabled:opacity-50">
                               Retry purchase
                             </button>
                           )}
@@ -307,11 +371,11 @@ export default function VoucherCampaignDetailPage() {
                 </tbody>
               </table>
             </div>
-            {pageCount > 1 && (
+            {(page > 1 || hasNext) && (
               <nav aria-label="Row pages" className="flex items-center gap-3 text-xs text-white/70">
                 <button type="button" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded border border-white/15 px-2 py-1 disabled:opacity-40">Previous</button>
-                <span>Page {page} of {pageCount} · {rows.total} rows</span>
-                <button type="button" disabled={page >= pageCount} onClick={() => setPage(page + 1)} className="rounded border border-white/15 px-2 py-1 disabled:opacity-40">Next</button>
+                <span>Page {page}{pageCount !== null ? ` of ${pageCount}` : ''}{rows.total !== null ? ` · ${formatCount(rows.total)} rows` : ''}</span>
+                <button type="button" disabled={!hasNext} onClick={() => setPage(page + 1)} className="rounded border border-white/15 px-2 py-1 disabled:opacity-40">Next</button>
               </nav>
             )}
           </>
@@ -351,7 +415,7 @@ export default function VoucherCampaignDetailPage() {
       >
         {dialog?.kind === 'retry' && (
           <p>
-            Try again to buy a {formatRupees(dialog.row.amount)} {dialog.row.brand} voucher for {dialog.row.phone} (row {dialog.row.rowNumber}).
+            Try again to buy a {formatRupees(dialog.row.amount)} {dialog.row.brand} voucher for {dialog.row.phone} (row {formatCount(dialog.row.rowNumber)}).
             If it succeeds, the money is spent and the voucher is sent on WhatsApp. If the server refuses, its reason is shown here.
           </p>
         )}
@@ -372,7 +436,7 @@ export default function VoucherCampaignDetailPage() {
         <p>
           {isSetupCampaign(c.status)
             ? 'Nothing has been bought for this campaign, so nothing is spent.'
-            : 'Rows not bought yet will not be bought. Vouchers already bought stay bought and cannot be cancelled.'}
+            : 'Rows not bought yet will not be bought, but purchases already in progress may still complete. Vouchers already bought stay bought.'}
         </p>
       </ConfirmDialog>
     </div>

@@ -1,10 +1,12 @@
 'use client';
 
 /* ─── Voucher Dispersal — new campaign (/gifsy/voucher-dispersal/new[?campaign=<id>]) ─────
-   One page, four steps: ① details → create  ② upload file  ③ preview  ④ "Buy & send vouchers" → confirm dialog
-   (sends the previewed valid count + ₹ total; the server refuses verbatim if its preview differs).
-   NOTHING is bought before ④ succeeds — the copy says so at every step. A DRAFT / PREVIEWED
-   campaign can be resumed with ?campaign=<id> (the preview is re-run by uploading the file again).
+   One page, three steps: ① details → create  ② upload file  ③ preview + "Buy & send vouchers"
+   (→ confirm dialog → POST confirm with the preview version + the numbers shown → campaign report).
+   NOTHING is bought before the confirm succeeds, and the page says so — EXCEPT when a confirm
+   attempt ended in a network error / 5xx: then the outcome is unknown, the "nothing bought" copy is
+   withdrawn, Buy stays disabled, and the campaign is re-fetched to find out what actually happened.
+   After create the URL becomes ?campaign=<id>, so refresh / back resumes the same draft.
 ──────────────────────────────────────────────────────────────────────────────────────── */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -12,25 +14,28 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeft, FileSpreadsheet, Loader2, Upload } from 'lucide-react';
 import {
-  ROW_STATUS_LABEL, ROW_STATUS_TONE, confirmBlock, confirmDialogTitle, confirmPayload, defaultProgramLabel,
-  fetchBillableClients, formatRupees, isSetupCampaign, validateCreateForm, vdApi,
+  ROW_STATUS_TONE, billedToText, checkUploadFile, confirmBlock, confirmDialogTitle, confirmPayload, defaultProgramLabel,
+  fetchBillableClients, formatCount, formatRupees, isOverBudget, isSetupCampaign, isUncertainFailure, plural, rowStatusText,
+  validateCreateForm, vdApi,
   type CreateForm, type RowStatus, type VdBrand, type VdCampaign, type VdClient, type VdPreview,
 } from '@/lib/voucher-dispersal';
 import { ConfirmDialog, ErrorPanel, LoadingBlock, StatusChip, TemplateDownloadButton } from '@/components/voucher-dispersal/vd-ui';
 
-type Step = 'details' | 'upload' | 'preview' | 'confirm';
+type Step = 'details' | 'upload' | 'preview';
 const STEPS: { key: Step; label: string }[] = [
   { key: 'details', label: 'Details' },
   { key: 'upload', label: 'Upload file' },
-  { key: 'preview', label: 'Preview' },
-  { key: 'confirm', label: 'Confirm' },
+  { key: 'preview', label: 'Check & buy' },
 ];
 
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+/** After a confirm attempt: idle · checking (re-fetching after an unknown outcome) · uncertain (re-fetch failed) · clear (re-fetch proved still in setup). */
+type ConfirmState = 'idle' | 'checking' | 'uncertain' | 'clear';
+
 const ACCEPT = '.xlsx,.xls,.csv';
 const PAGE_SIZE = 50;
 
 const NOTHING_SPENT = 'Nothing has been bought or sent yet — vouchers are only bought after you confirm.';
+const UNKNOWN_OUTCOME = "We couldn't tell whether this started — check the campaign before trying again.";
 
 const inputCls =
   'w-full rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] disabled:opacity-60';
@@ -112,17 +117,21 @@ function NewCampaignFlow() {
 
   // ── campaign (created or resumed) ──
   const [campaign, setCampaign] = useState<VdCampaign | null>(null);
+  const campaignRef = useRef<VdCampaign | null>(null);
+  campaignRef.current = campaign;
   const [resumeLoading, setResumeLoading] = useState(!!resumeId);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const loadResume = useCallback(async () => {
     if (!resumeId) return;
+    // Just created here and the URL caught up (router.replace) — nothing to load.
+    if (campaignRef.current?.id === resumeId) { setResumeLoading(false); return; }
     setResumeLoading(true);
     setResumeError(null);
     const r = await vdApi.getCampaign(resumeId);
     if (!r.ok) { setResumeError(r.error); setResumeLoading(false); return; }
     const c = r.data.campaign;
     if (!isSetupCampaign(c.status)) {
-      router.replace(`/gifsy/voucher-dispersal/${encodeURIComponent(c.id)}`);
+      router.replace(`/gifsy/voucher-dispersal/${encodeURIComponent(c.id || resumeId)}`);
       return;
     }
     setCampaign(c);
@@ -165,8 +174,12 @@ function NewCampaignFlow() {
     inFlight.current = false;
     setCreating(false);
     if (!r.ok) { setCreateError(r.error); return; }
+    if (!r.data.id) { setCreateError('The server did not return the new campaign. Check the campaign list before creating it again.'); return; }
+    campaignRef.current = r.data;
     setCampaign(r.data);
     setStep('upload');
+    // Refresh / back now resumes this same draft instead of creating another one.
+    router.replace(`/gifsy/voucher-dispersal/new?campaign=${encodeURIComponent(r.data.id)}`);
   };
 
   // ── ② upload ──
@@ -175,13 +188,12 @@ function NewCampaignFlow() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const pickFile = (f: File | null) => {
     setUploadError(null);
-    if (!f) { setFile(null); setFileError(null); return; }
-    if (!/\.(xlsx|xls|csv)$/i.test(f.name)) { setFile(null); setFileError('Choose an Excel (.xlsx / .xls) or .csv file.'); return; }
-    if (f.size > MAX_FILE_BYTES) { setFile(null); setFileError('That file is over 10 MB. Split the list into smaller files.'); return; }
+    if (!f) return;
+    const problem = checkUploadFile(f);
+    if (problem) { setFile(null); setFileError(problem); return; }
     setFileError(null);
     setFile(f);
   };
@@ -197,14 +209,15 @@ function NewCampaignFlow() {
     setUploading(false);
     if (!r.ok) { setUploadError(r.error); return; }
     setPreview(r.data);
-    if (r.data.campaign.id) setCampaign(r.data.campaign);
+    if (r.data.campaign?.id) setCampaign(r.data.campaign);
     setFilter('ALL');
     setPage(1);
     setConfirmError(null);
+    setConfirmState('idle');
     setStep('preview');
   };
 
-  // ── ③ preview ──
+  // ── ③ preview + buy ──
   const [filter, setFilter] = useState<'ALL' | RowStatus>('ALL');
   const [page, setPage] = useState(1);
   const filteredRows = useMemo(
@@ -214,29 +227,60 @@ function NewCampaignFlow() {
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
   const pageRows = filteredRows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const statusCounts = useMemo(() => {
-    const m = new Map<RowStatus, number>();
-    for (const r of preview?.rows ?? []) m.set(r.status, (m.get(r.status) ?? 0) + 1);
+    const m = new Map<RowStatus, { n: number; label: string }>();
+    for (const r of preview?.rows ?? []) {
+      const cur = m.get(r.status);
+      m.set(r.status, { n: (cur?.n ?? 0) + 1, label: r.status === 'UNKNOWN' ? 'Unknown status' : rowStatusText(r) });
+    }
     return m;
   }, [preview]);
 
-  // ── ④ confirm ──
   const [dialogOpen, setDialogOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
-  const block = preview ? confirmBlock(preview.summary) : ({ blocked: true, reason: 'Upload a file first.' } as const);
+  const [confirmState, setConfirmState] = useState<ConfirmState>('idle');
+  const block = preview ? confirmBlock(preview) : ({ blocked: true, reason: 'Upload a file first.' } as const);
+  const outcomeUnknown = confirmState === 'checking' || confirmState === 'uncertain';
+
+  /** After an unknown confirm outcome: find out from the server whether the campaign started. */
+  const recheck = useCallback(async () => {
+    const c = campaignRef.current;
+    if (!c) return;
+    setConfirmState('checking');
+    const r = await vdApi.getCampaign(c.id);
+    if (!r.ok) { setConfirmState('uncertain'); return; }
+    if (!isSetupCampaign(r.data.campaign.status)) {
+      router.push(`/gifsy/voucher-dispersal/${encodeURIComponent(c.id)}`);
+      return;
+    }
+    setConfirmState('clear');
+  }, [router]);
 
   const onConfirm = async () => {
-    if (!campaign || !preview || block.blocked || inFlight.current) return;
+    if (!campaign || !preview || block.blocked || outcomeUnknown || inFlight.current) return;
+    const body = confirmPayload(preview);
+    if (!body) return;
     inFlight.current = true;
     setConfirming(true);
     setConfirmError(null);
-    // Send the exact numbers shown on the preview — the server refuses if its own preview differs.
-    const r = await vdApi.confirm(campaign.id, confirmPayload(preview.summary));
+    const r = await vdApi.confirm(campaign.id, body);
     inFlight.current = false;
     setConfirming(false);
-    if (!r.ok) { setConfirmError(r.error); return; }
-    setDialogOpen(false);
-    router.push(`/gifsy/voucher-dispersal/${encodeURIComponent(campaign.id)}`);
+    if (r.ok) {
+      setDialogOpen(false);
+      router.push(`/gifsy/voucher-dispersal/${encodeURIComponent(campaign.id)}`);
+      return;
+    }
+    if (isUncertainFailure(r.status)) {
+      // The server may or may not have started buying — never claim "nothing bought" now.
+      setDialogOpen(false);
+      setConfirmError(r.error);
+      await recheck();
+      return;
+    }
+    // A definite refusal (4xx): shown word-for-word; the dialog stays open.
+    setConfirmError(r.error);
+    setConfirmState('idle');
   };
 
   // ── render ──
@@ -244,6 +288,8 @@ function NewCampaignFlow() {
   if (resumeError) return <ErrorPanel message={`Couldn't load this campaign: ${resumeError}`} onRetry={() => void loadResume()} />;
 
   const s = preview?.summary;
+  const over = s ? isOverBudget(s) : false;
+  const skipped = s ? (s.invalid ?? 0) + (s.duplicates ?? 0) : 0;
 
   return (
     <div className="space-y-6" data-testid="vd-new">
@@ -253,14 +299,13 @@ function NewCampaignFlow() {
         </Link>
         <h1 className="text-xl font-bold text-white">New voucher campaign</h1>
         <StepHeader step={step} />
-        <p className="text-xs text-white/60" data-testid="vd-nothing-spent">{NOTHING_SPENT}</p>
+        {!outcomeUnknown && <p className="text-xs text-white/60" data-testid="vd-nothing-spent">{NOTHING_SPENT}</p>}
       </div>
 
       {campaign && step !== 'details' && (
         <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-xs text-white/70 break-words">
           <span className="font-semibold text-white">{campaign.name}</span> · Programme: {campaign.programLabel || '—'} · Billed to:{' '}
-          {campaign.billedToClientName ?? (campaign.billedToClientId ? clients?.find((c) => c.id === campaign.billedToClientId)?.name ?? campaign.billedToClientId : '—')}
-          {' '}· Budget {formatRupees(campaign.budgetRupees)}
+          {billedToText(campaign, clients)} · Budget {formatRupees(campaign.budgetRupees)}
         </div>
       )}
 
@@ -305,7 +350,7 @@ function NewCampaignFlow() {
                 aria-invalid={showErrors && !!errors.budgetRupees}
                 aria-describedby={`vd-budget-help${showErrors && errors.budgetRupees ? ' vd-budget-err' : ''}`}
                 onChange={(e) => setForm({ ...form, budgetRupees: e.target.value.replace(/[^\d.]/g, '') })} />
-              <p id="vd-budget-help" className="text-[11px] text-white/40 mt-1">The upload is blocked if the valid rows add up to more than this.</p>
+              <p id="vd-budget-help" className="text-[11px] text-white/40 mt-1">The purchase is blocked if the valid rows add up to more than this.</p>
               <FieldError id="vd-budget-err" msg={showErrors ? errors.budgetRupees : undefined} />
             </div>
             <div>
@@ -330,7 +375,7 @@ function NewCampaignFlow() {
         <section aria-labelledby="vd-step-heading" className="space-y-4">
           <h2 id="vd-step-heading" ref={headingRef} tabIndex={-1} className="text-base font-semibold text-white outline-none">2. Upload the list</h2>
           {campaign.status === 'PREVIEWED' && !preview && (
-            <p className="text-xs text-sky-300">This campaign was previewed earlier but not confirmed. Upload the file again to see the preview and confirm.</p>
+            <p className="text-xs text-sky-300">This campaign was previewed earlier but not confirmed. Upload the file again to see the preview and buy.</p>
           )}
           <div className="flex flex-wrap items-start gap-3">
             <TemplateDownloadButton />
@@ -341,19 +386,22 @@ function NewCampaignFlow() {
             onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onDrop={(e) => { e.preventDefault(); setDragOver(false); if (!uploading) pickFile(e.dataTransfer.files?.[0] ?? null); }}
-            className={`rounded-xl border-2 border-dashed px-4 py-8 text-center ${dragOver ? 'border-sky-400 bg-sky-500/10' : 'border-white/15 bg-white/5'}`}
+            className={`rounded-xl border-2 border-dashed px-4 py-8 text-center focus-within:ring-2 focus-within:ring-sky-400 focus-within:ring-offset-2 focus-within:ring-offset-gray-950 ${dragOver ? 'border-sky-400 bg-sky-500/10' : 'border-white/15 bg-white/5'}`}
           >
             <FileSpreadsheet className="w-8 h-8 mx-auto text-white/40" aria-hidden="true" />
             <p className="text-sm text-white/70 mt-2">Drag the filled-in template here, or</p>
             <label htmlFor="vd-file" className="mt-2 inline-block cursor-pointer rounded-lg border border-white/20 px-3 py-1.5 text-sm font-semibold text-white hover:bg-white/10">
               Choose file
             </label>
-            <input id="vd-file" ref={fileInputRef} type="file" accept={ACCEPT} className="sr-only" disabled={uploading}
-              onChange={(e) => pickFile(e.target.files?.[0] ?? null)} />
+            <input id="vd-file" type="file" accept={ACCEPT} className="sr-only" disabled={uploading}
+              onChange={(e) => {
+                pickFile(e.target.files?.[0] ?? null);
+                e.target.value = ''; // so picking the same (fixed) file again still triggers a change
+              }} />
             <p className="text-xs text-white/60 mt-2" aria-live="polite" data-testid="vd-file-name">
               {file ? `Selected: ${file.name}` : 'No file selected'}
             </p>
-            {fileError && <p role="alert" className="text-xs text-red-300 mt-1">{fileError}</p>}
+            {fileError && <p role="alert" data-testid="vd-file-error" className="text-xs text-red-300 mt-1">{fileError}</p>}
           </div>
           {uploadError && <ErrorPanel message={`Upload failed: ${uploadError}`} testId="vd-upload-error" />}
           <div className="flex flex-wrap gap-2">
@@ -372,34 +420,34 @@ function NewCampaignFlow() {
         </section>
       )}
 
-      {/* ③ Preview */}
+      {/* ③ Preview + buy */}
       {step === 'preview' && preview && s && (
         <section aria-labelledby="vd-step-heading" className="space-y-4">
-          <h2 id="vd-step-heading" ref={headingRef} tabIndex={-1} className="text-base font-semibold text-white outline-none">3. Check the preview</h2>
+          <h2 id="vd-step-heading" ref={headingRef} tabIndex={-1} className="text-base font-semibold text-white outline-none">3. Check the preview, then buy</h2>
           <div data-testid="vd-summary" className={`rounded-xl border px-4 py-3 ${block.blocked ? 'border-red-500/40 bg-red-500/10' : 'border-white/10 bg-white/5'}`}>
-            <dl className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
-              <div><dt className="text-[11px] uppercase text-white/50">Rows</dt><dd className="font-bold text-white">{s.total}</dd></div>
-              <div><dt className="text-[11px] uppercase text-white/50">Valid</dt><dd className="font-bold text-emerald-300" data-testid="vd-sum-valid">{s.valid}</dd></div>
-              <div><dt className="text-[11px] uppercase text-white/50">Invalid</dt><dd className={`font-bold ${s.invalid > 0 ? 'text-red-300' : 'text-white'}`} data-testid="vd-sum-invalid">{s.invalid}</dd></div>
-              <div><dt className="text-[11px] uppercase text-white/50">Duplicates</dt><dd className={`font-bold ${s.duplicates > 0 ? 'text-amber-300' : 'text-white'}`} data-testid="vd-sum-dupes">{s.duplicates}</dd></div>
-              <div>
+            <dl className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-sm">
+              <div><dt className="text-[11px] uppercase text-white/50">Rows</dt><dd className="font-bold text-white">{formatCount(s.total)}</dd></div>
+              <div><dt className="text-[11px] uppercase text-white/50">Valid</dt><dd className="font-bold text-emerald-300" data-testid="vd-sum-valid">{formatCount(s.valid)}</dd></div>
+              <div><dt className="text-[11px] uppercase text-white/50">Invalid</dt><dd className={`font-bold ${(s.invalid ?? 0) > 0 ? 'text-red-300' : 'text-white'}`} data-testid="vd-sum-invalid">{formatCount(s.invalid)}</dd></div>
+              <div><dt className="text-[11px] uppercase text-white/50">Duplicates</dt><dd className={`font-bold ${(s.duplicates ?? 0) > 0 ? 'text-amber-300' : 'text-white'}`} data-testid="vd-sum-dupes">{formatCount(s.duplicates)}</dd></div>
+              <div className="col-span-2">
                 <dt className="text-[11px] uppercase text-white/50">Total vs budget</dt>
-                <dd className={`font-bold ${s.overBudget ? 'text-red-300' : 'text-white'}`} data-testid="vd-sum-total">
+                <dd className={`font-bold break-words ${over ? 'text-red-300' : 'text-white'}`} data-testid="vd-sum-total">
                   {formatRupees(s.totalRupees)} / {formatRupees(s.budgetRupees)}
                 </dd>
               </div>
             </dl>
             {s.perBrand.length > 0 && (
               <p className="text-xs text-white/60 mt-2 break-words">
-                By brand: {s.perBrand.map((b) => `${b.brand} ${b.count}${b.rupees !== null ? ` (${formatRupees(b.rupees)})` : ''}`).join(' · ')}
+                By brand: {s.perBrand.map((b) => `${b.brand} ${formatCount(b.count)}${b.rupees !== null ? ` (${formatRupees(b.rupees)})` : ''}`).join(' · ')}
               </p>
             )}
-            {(s.invalid > 0 || s.duplicates > 0) && (
+            {skipped > 0 && (
               <p className="text-xs text-amber-200 mt-2">
-                {s.invalid} invalid and {s.duplicates} duplicate rows will NOT get a voucher. Each one is listed below with the reason.
+                {plural(s.invalid ?? 0, 'invalid row')} and {plural(s.duplicates ?? 0, 'duplicate row')} will NOT get a voucher. Each one is listed below with the reason.
               </p>
             )}
-            {block.blocked && <p role="alert" data-testid="vd-block-reason" className="text-sm font-semibold text-red-200 mt-2">{block.reason}</p>}
+            {block.blocked && <p role="alert" id="vd-block-reason" data-testid="vd-block-reason" className="text-sm font-semibold text-red-200 mt-2">{block.reason}</p>}
           </div>
 
           <div className="flex flex-wrap items-end gap-3">
@@ -407,7 +455,7 @@ function NewCampaignFlow() {
               <label htmlFor="vd-filter" className="block text-xs font-semibold text-white/70 mb-1">Show rows</label>
               <select id="vd-filter" className={inputCls} value={filter} onChange={(e) => { setFilter(e.target.value as 'ALL' | RowStatus); setPage(1); }}>
                 <option value="ALL">All ({preview.rows.length})</option>
-                {[...statusCounts.entries()].map(([st, n]) => <option key={st} value={st}>{ROW_STATUS_LABEL[st]} ({n})</option>)}
+                {[...statusCounts.entries()].map(([st, v]) => <option key={st} value={st}>{v.label} ({v.n})</option>)}
               </select>
             </div>
           </div>
@@ -428,15 +476,15 @@ function NewCampaignFlow() {
               <tbody className="divide-y divide-white/5">
                 {pageRows.length === 0 ? (
                   <tr><td colSpan={6} className="px-3 py-6 text-center text-white/50">No rows match this filter.</td></tr>
-                ) : pageRows.map((r) => (
-                  <tr key={`${r.rowNumber}-${r.phone}`} data-testid={`vd-prow-${r.rowNumber}`}>
-                    <td className="px-3 py-2 text-white/60">{r.rowNumber}</td>
+                ) : pageRows.map((r, i) => (
+                  <tr key={`${r.rowNumber ?? `i${i}`}-${r.phone}`} data-testid={`vd-prow-${r.rowNumber ?? `i${i}`}`}>
+                    <td className="px-3 py-2 text-white/60">{formatCount(r.rowNumber)}</td>
                     <td className="px-3 py-2 font-mono text-white">{r.phone || '—'}</td>
                     <td className="px-3 py-2 text-white">{r.name || '—'}</td>
                     <td className="px-3 py-2 text-white">{formatRupees(r.amount)}</td>
                     <td className="px-3 py-2 text-white">{r.brand || '—'}</td>
                     <td className="px-3 py-2">
-                      <StatusChip label={ROW_STATUS_LABEL[r.status]} tone={ROW_STATUS_TONE[r.status]} />
+                      <StatusChip label={rowStatusText(r)} tone={ROW_STATUS_TONE[r.status]} />
                       {r.invalidReason && <p className="text-xs text-red-200 mt-1 break-words">{r.invalidReason}</p>}
                       {!r.invalidReason && (r.status === 'INVALID' || r.status === 'DUPLICATE') && (
                         <p className="text-xs text-amber-200 mt-1">
@@ -457,50 +505,57 @@ function NewCampaignFlow() {
             </nav>
           )}
 
-          <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={() => { setFile(null); setStep('upload'); }}
-              className="rounded-lg border border-white/20 px-3 py-2 text-sm text-white/80 hover:bg-white/10">
-              Upload a different file
-            </button>
-            <button type="button" onClick={() => setStep('confirm')} disabled={block.blocked} data-testid="vd-to-confirm"
-              aria-describedby={block.blocked ? 'vd-block-reason' : undefined}
-              className="rounded-lg bg-[var(--brand-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
-              Continue to confirm
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* ④ Confirm */}
-      {step === 'confirm' && preview && s && (
-        <section aria-labelledby="vd-step-heading" className="space-y-4 max-w-xl">
-          <h2 id="vd-step-heading" ref={headingRef} tabIndex={-1} className="text-base font-semibold text-white outline-none">4. Buy and send</h2>
-          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 space-y-1">
-            <p>This buys <strong>{s.valid}</strong> Hubble vouchers worth <strong>{formatRupees(s.totalRupees)}</strong> and sends each one on WhatsApp. Bought vouchers cannot be taken back.</p>
-            {(s.invalid > 0 || s.duplicates > 0) && <p>{s.invalid + s.duplicates} invalid / duplicate rows are skipped.</p>}
-            <p>{NOTHING_SPENT}</p>
-          </div>
-          {block.blocked && <p role="alert" className="text-sm font-semibold text-red-200">{block.reason}</p>}
-          {confirmError && !dialogOpen && (
-            <div className="space-y-2">
+          {/* Buy */}
+          <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 space-y-3">
+            {outcomeUnknown ? (
+              <div role="alert" data-testid="vd-outcome-unknown" className="space-y-2 text-sm text-amber-100">
+                <p className="font-semibold">{UNKNOWN_OUTCOME}</p>
+                {confirmError && <p className="text-xs text-amber-200 break-words">Server reply: {confirmError}</p>}
+                {confirmState === 'checking' ? (
+                  <p className="inline-flex items-center gap-2 text-xs"><Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> Checking the campaign…</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" onClick={() => void recheck()}
+                      className="rounded-lg border border-amber-400/40 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-500/10">
+                      Check again
+                    </button>
+                    <Link href={`/gifsy/voucher-dispersal/${encodeURIComponent(campaign?.id ?? '')}`}
+                      className="rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white/80 hover:bg-white/10">
+                      Open the campaign report
+                    </Link>
+                  </div>
+                )}
+              </div>
+            ) : confirmState === 'clear' ? (
+              <p role="status" data-testid="vd-outcome-clear" className="text-sm text-sky-200 break-words">
+                Checked: this campaign is still not confirmed, so nothing was bought. You can try again.
+                {confirmError ? ` (Last error: ${confirmError})` : ''}
+              </p>
+            ) : (
+              <p className="text-sm text-white/80">
+                Buying spends money: one Hubble voucher per valid row, each sent on WhatsApp.
+                {skipped > 0 ? ` ${plural(skipped, 'invalid / duplicate row')} ${skipped === 1 ? 'is' : 'are'} skipped.` : ''}
+              </p>
+            )}
+            {confirmError && !dialogOpen && confirmState === 'idle' && (
               <ErrorPanel message={confirmError} testId="vd-confirm-error" />
-              <button type="button" onClick={() => { setFile(null); setConfirmError(null); setStep('upload'); }}
-                className="rounded-lg border border-white/20 px-3 py-2 text-sm text-white/80 hover:bg-white/10">
-                Upload the file again
+            )}
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => { setFile(null); setConfirmError(null); setConfirmState('idle'); setStep('upload'); }}
+                disabled={confirming || confirmState === 'checking'}
+                className="rounded-lg border border-white/20 px-3 py-2 text-sm text-white/80 hover:bg-white/10 disabled:opacity-60">
+                {confirmError && confirmState === 'idle' ? 'Upload the file again' : 'Upload a different file'}
+              </button>
+              <button type="button" onClick={() => { setConfirmError(null); setDialogOpen(true); }}
+                disabled={block.blocked || confirming || outcomeUnknown}
+                aria-describedby={block.blocked ? 'vd-block-reason' : undefined}
+                data-testid="vd-buy-send"
+                className="rounded-lg bg-[var(--brand-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
+                Buy &amp; send vouchers
               </button>
             </div>
-          )}
-          <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={() => setStep('preview')} disabled={confirming}
-              className="rounded-lg border border-white/20 px-3 py-2 text-sm text-white/80 hover:bg-white/10 disabled:opacity-60">
-              Back to preview
-            </button>
-            <button type="button" onClick={() => { setConfirmError(null); setDialogOpen(true); }} disabled={block.blocked || confirming}
-              data-testid="vd-buy-send"
-              className="rounded-lg bg-[var(--brand-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
-              Buy &amp; send vouchers
-            </button>
           </div>
+
           <ConfirmDialog
             open={dialogOpen}
             title={confirmDialogTitle(s)}

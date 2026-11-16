@@ -1,6 +1,8 @@
 /// <reference types="vitest/globals" />
 /**
- * Voucher Dispersal — new campaign flow: details → create → upload → preview → typed-phrase confirm.
+ * Voucher Dispersal — new campaign flow: details → create → upload → preview → "Buy & send" dialog.
+ * Covers the preview version on confirm, verbatim refusals, and the UNKNOWN-outcome path
+ * (network error / 5xx on confirm → re-fetch the campaign; never keep claiming "nothing bought").
  * Run: npx vitest run src/app/gifsy/voucher-dispersal/new/__tests__/new-campaign.test.tsx
  */
 import React from 'react';
@@ -37,8 +39,9 @@ const SUMMARY = { total: 4, valid: 2, invalid: 1, duplicates: 1, totalRupees: 15
 
 type Handler = (url: string, init?: RequestInit) => unknown;
 let uploadResponse: unknown;
-let confirmResponse: unknown;
+let confirmResponse: unknown | (() => Promise<unknown>);
 let createResponse: unknown;
+let campaignGet: unknown[];
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function installFetch(extra?: Handler) {
@@ -49,7 +52,13 @@ function installFetch(extra?: Handler) {
     if (url === '/api/gifsy/clients') return Promise.resolve(ok({ clients: [{ slug: 'bajaj', internalName: 'Bajaj Consumer Care', displayName: 'Bajaj', status: 'ACTIVE' }] }));
     if (url === `${BASE}/campaigns` && init?.method === 'POST') return Promise.resolve(createResponse);
     if (url === `${BASE}/campaigns/c1/upload`) return Promise.resolve(uploadResponse);
-    if (url === `${BASE}/campaigns/c1/confirm`) return Promise.resolve(confirmResponse);
+    if (url === `${BASE}/campaigns/c1/confirm`) {
+      return typeof confirmResponse === 'function' ? (confirmResponse as () => Promise<unknown>)() : Promise.resolve(confirmResponse);
+    }
+    if (url === `${BASE}/campaigns/c1`) {
+      const next = campaignGet.length > 1 ? campaignGet.shift() : campaignGet[0];
+      return Promise.resolve(next);
+    }
     return Promise.resolve(fail(404, `unexpected ${url}`));
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -60,8 +69,9 @@ const callsTo = (suffix: string) => fetchMock.mock.calls.filter((c) => String(c[
 beforeEach(() => {
   searchRef.current = new URLSearchParams();
   createResponse = ok(CAMPAIGN);
-  uploadResponse = ok({ campaign: { ...CAMPAIGN, status: 'PREVIEWED' }, rows: ROWS, summary: SUMMARY });
+  uploadResponse = ok({ campaign: { ...CAMPAIGN, status: 'PREVIEWED' }, rows: ROWS, summary: SUMMARY, previewId: 'pv-42' });
   confirmResponse = ok({ ...CAMPAIGN, status: 'CONFIRMED' });
+  campaignGet = [ok({ campaign: { ...CAMPAIGN, status: 'PREVIEWED' }, summary: {} })];
   installFetch();
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
@@ -83,6 +93,12 @@ async function uploadFile() {
   fireEvent.change(screen.getByLabelText('Choose file'), { target: { files: [file] } });
   expect(screen.getByTestId('vd-file-name')).toHaveTextContent('Selected: list.xlsx');
   fireEvent.click(screen.getByTestId('vd-upload'));
+  await screen.findByRole('heading', { name: '3. Check the preview, then buy' });
+}
+
+async function openBuyDialog() {
+  fireEvent.click(screen.getByRole('button', { name: 'Buy & send vouchers' }));
+  return screen.findByRole('dialog');
 }
 
 describe('New voucher campaign', () => {
@@ -92,17 +108,18 @@ describe('New voucher campaign', () => {
     expect(await screen.findByText('Enter a campaign name.')).toBeInTheDocument();
     expect(screen.getByText('Enter the programme name shown in the WhatsApp message.')).toBeInTheDocument();
     expect(screen.getByText('Enter a budget in rupees greater than 0.')).toBeInTheDocument();
+    expect(screen.getByText('The purchase is blocked if the valid rows add up to more than this.')).toBeInTheDocument();
     expect(callsTo('/campaigns')).toHaveLength(0);
     expect(screen.getByTestId('vd-nothing-spent')).toHaveTextContent('Nothing has been bought or sent yet');
   });
 
-  it('create → upload → preview (reasons, filter) → phrase-gated confirm → detail', { timeout: 20000 }, async () => {
+  it('create → URL becomes ?campaign=<id> → upload → preview (reasons, filter) → Buy & send dialog → report', { timeout: 20000 }, async () => {
     await fillAndCreate();
-    const createBody = JSON.parse(String(callsTo('/campaigns')[0][1]!.body));
-    expect(createBody).toEqual({ name: 'Diwali', programLabel: 'Bajaj Loyalty', billedToClientId: 'bajaj', budgetRupees: 5000 });
+    expect(JSON.parse(String(callsTo('/campaigns')[0][1]!.body)))
+      .toEqual({ name: 'Diwali', programLabel: 'Bajaj Loyalty', billedToClientId: 'bajaj', budgetRupees: 5000 });
+    expect(replace).toHaveBeenCalledWith('/gifsy/voucher-dispersal/new?campaign=c1');
 
     await uploadFile();
-    await screen.findByRole('heading', { name: '3. Check the preview' });
     expect(callsTo('/campaigns/c1/upload')[0][1]!.body).toBeInstanceOf(FormData);
 
     // Summary bar
@@ -110,7 +127,7 @@ describe('New voucher campaign', () => {
     expect(screen.getByTestId('vd-sum-invalid')).toHaveTextContent('1');
     expect(screen.getByTestId('vd-sum-dupes')).toHaveTextContent('1');
     expect(screen.getByTestId('vd-sum-total')).toHaveTextContent('₹1,500 / ₹5,000');
-    expect(screen.getByTestId('vd-summary')).toHaveTextContent('1 invalid and 1 duplicate rows will NOT get a voucher');
+    expect(screen.getByTestId('vd-summary')).toHaveTextContent('1 invalid row and 1 duplicate row will NOT get a voucher');
     // Every invalid / duplicate row visible with its reason
     expect(within(screen.getByTestId('vd-prow-4')).getByText('Phone must be a 10-digit Indian mobile')).toBeInTheDocument();
     expect(within(screen.getByTestId('vd-prow-5')).getByText('Duplicate of row 2')).toBeInTheDocument();
@@ -119,72 +136,116 @@ describe('New voucher campaign', () => {
     expect(screen.queryByTestId('vd-prow-2')).not.toBeInTheDocument();
     expect(screen.getByTestId('vd-prow-4')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByTestId('vd-to-confirm'));
-    await screen.findByRole('heading', { name: '4. Buy and send' });
-    expect(screen.getByTestId('vd-nothing-spent')).toHaveTextContent('Nothing has been bought or sent yet');
-    // Opening the dialog sends nothing.
-    fireEvent.click(screen.getByRole('button', { name: 'Buy & send vouchers' }));
-    const dialog = await screen.findByRole('dialog');
+    // Buy is on the preview step itself; the nothing-bought note is shown before it.
+    expect(screen.getByTestId('vd-nothing-spent')).toBeInTheDocument();
+    const dialog = await openBuyDialog();
     expect(dialog).toHaveTextContent('Buy and send 2 vouchers · ₹1,500 total?');
     expect(dialog).toHaveTextContent('Nothing can be undone once vouchers are bought.');
-    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
     expect(callsTo('/campaigns/c1/confirm')).toHaveLength(0);
     const btn = within(dialog).getByRole('button', { name: 'Buy & send' });
     fireEvent.click(btn);
     fireEvent.click(btn); // double-click must not double-confirm
     await waitFor(() => expect(push).toHaveBeenCalledWith('/gifsy/voucher-dispersal/c1'));
     expect(callsTo('/campaigns/c1/confirm')).toHaveLength(1);
-    expect(JSON.parse(String(callsTo('/campaigns/c1/confirm')[0][1]!.body))).toEqual({ expectedValidCount: 2, expectedTotalRupees: 1500 });
+    expect(JSON.parse(String(callsTo('/campaigns/c1/confirm')[0][1]!.body)))
+      .toEqual({ previewId: 'pv-42', expectedValidCount: 2, expectedTotalRupees: 1500 });
   });
 
   it('Cancel in the confirm dialog buys nothing', { timeout: 20000 }, async () => {
     await fillAndCreate();
     await uploadFile();
-    fireEvent.click(await screen.findByTestId('vd-to-confirm'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Buy & send vouchers' }));
-    const dialog = await screen.findByRole('dialog');
+    const dialog = await openBuyDialog();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(callsTo('/campaigns/c1/confirm')).toHaveLength(0);
     expect(push).not.toHaveBeenCalled();
   });
 
-  it('over budget → red reason and confirm is blocked', { timeout: 20000 }, async () => {
-    uploadResponse = ok({ campaign: CAMPAIGN, rows: ROWS, summary: { ...SUMMARY, totalRupees: 6000, overBudget: true } });
+  it('over budget → red total + reason and Buy is blocked (same condition)', { timeout: 20000 }, async () => {
+    uploadResponse = ok({ campaign: CAMPAIGN, rows: ROWS, summary: { ...SUMMARY, totalRupees: 6000, overBudget: false }, previewId: 'pv-1' });
     await fillAndCreate();
     await uploadFile();
-    expect(await screen.findByTestId('vd-block-reason')).toHaveTextContent('over the ₹5,000 budget');
-    expect(screen.getByTestId('vd-to-confirm')).toBeDisabled();
+    expect(screen.getByTestId('vd-block-reason')).toHaveTextContent('over the ₹5,000 budget');
+    expect(screen.getByTestId('vd-buy-send')).toBeDisabled();
     expect(screen.getByTestId('vd-sum-total').className).toMatch(/text-red/);
+  });
+
+  it('a preview without a previewId cannot be bought', { timeout: 20000 }, async () => {
+    uploadResponse = ok({ campaign: CAMPAIGN, rows: ROWS, summary: SUMMARY });
+    await fillAndCreate();
+    await uploadFile();
+    expect(screen.getByTestId('vd-block-reason')).toHaveTextContent('preview id');
+    expect(screen.getByTestId('vd-buy-send')).toBeDisabled();
+  });
+
+  it('confirm refusal (4xx, preview changed) is shown verbatim; re-upload offered; nothing-bought stays true', { timeout: 20000 }, async () => {
+    const refusal = 'The preview changed since you checked it (3 valid rows, ₹2,000). Upload the file again.';
+    confirmResponse = fail(409, refusal);
+    await fillAndCreate();
+    await uploadFile();
+    const dialog = await openBuyDialog();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Buy & send' }));
+    expect(await within(dialog).findByTestId('vd-dialog-error')).toHaveTextContent(refusal);
+    expect(push).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByTestId('vd-confirm-error')).toHaveTextContent(refusal);
+    expect(screen.getByTestId('vd-nothing-spent')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Upload the file again' }));
+    expect(await screen.findByRole('heading', { name: '2. Upload the list' })).toBeInTheDocument();
+  });
+
+  it('5xx on confirm, re-fetch shows it STARTED → goes to the campaign report', { timeout: 20000 }, async () => {
+    confirmResponse = fail(504, 'Gateway timeout');
+    await fillAndCreate();
+    await uploadFile();
+    campaignGet = [ok({ campaign: { ...CAMPAIGN, status: 'PROCESSING' }, summary: {} })];
+    const dialog = await openBuyDialog();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Buy & send' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/gifsy/voucher-dispersal/c1'));
+  });
+
+  it('network error on confirm + re-fetch fails → "couldn\'t tell", nothing-bought hidden, Buy disabled; Check again proves setup → re-enabled', { timeout: 20000 }, async () => {
+    confirmResponse = () => Promise.reject(new TypeError('Failed to fetch'));
+    await fillAndCreate();
+    await uploadFile();
+    campaignGet = [fail(503, 'Service unavailable'), ok({ campaign: { ...CAMPAIGN, status: 'PREVIEWED' }, summary: {} })];
+    const dialog = await openBuyDialog();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Buy & send' }));
+
+    const unknown = await screen.findByTestId('vd-outcome-unknown');
+    expect(unknown).toHaveTextContent("We couldn't tell whether this started — check the campaign before trying again.");
+    await screen.findByRole('button', { name: 'Check again' });
+    expect(screen.queryByTestId('vd-nothing-spent')).not.toBeInTheDocument();
+    expect(screen.getByTestId('vd-buy-send')).toBeDisabled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(push).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    expect(await screen.findByTestId('vd-outcome-clear')).toHaveTextContent('still not confirmed, so nothing was bought');
+    expect(screen.getByTestId('vd-buy-send')).toBeEnabled();
+    expect(callsTo('/campaigns/c1/confirm')).toHaveLength(1);
   });
 
   it('upload refusal is shown with the server text and no preview appears', { timeout: 20000 }, async () => {
     uploadResponse = fail(400, 'Missing column: brand');
     await fillAndCreate();
-    await uploadFile();
+    fireEvent.change(screen.getByLabelText('Choose file'), { target: { files: [new File(['x'], 'list.xlsx')] } });
+    fireEvent.click(screen.getByTestId('vd-upload'));
     expect(await screen.findByTestId('vd-upload-error')).toHaveTextContent('Missing column: brand');
-    expect(screen.queryByRole('heading', { name: '3. Check the preview' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '3. Check the preview, then buy' })).not.toBeInTheDocument();
   });
 
-  it('confirm refusal (preview changed) is shown verbatim; re-upload is offered', { timeout: 20000 }, async () => {
-    const refusal = 'The preview changed since you checked it (3 valid rows, ₹2,000). Upload the file again.';
-    confirmResponse = fail(409, refusal);
+  it('client-side file checks: empty file and wrong type are refused before upload', { timeout: 20000 }, async () => {
     await fillAndCreate();
-    await uploadFile();
-    fireEvent.click(await screen.findByTestId('vd-to-confirm'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Buy & send vouchers' }));
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Buy & send' }));
-    expect(await within(dialog).findByTestId('vd-dialog-error')).toHaveTextContent(refusal);
-    expect(push).not.toHaveBeenCalled();
-    // Closing the dialog keeps the refusal visible on the step with a way to re-upload.
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    expect(await screen.findByTestId('vd-confirm-error')).toHaveTextContent(refusal);
-    fireEvent.click(screen.getByRole('button', { name: 'Upload the file again' }));
-    expect(await screen.findByRole('heading', { name: '2. Upload the list' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Choose file'), { target: { files: [new File([], 'empty.xlsx')] } });
+    expect(screen.getByTestId('vd-file-error')).toHaveTextContent('That file is empty.');
+    expect(screen.getByTestId('vd-upload')).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Choose file'), { target: { files: [new File(['x'], 'photo.png')] } });
+    expect(screen.getByTestId('vd-file-error')).toHaveTextContent('Choose an Excel');
+    expect(callsTo('/upload')).toHaveLength(0);
   });
 
-  it('create failure shows the server text', { timeout: 20000 }, async () => {
+  it('create failure shows the server text; no client chosen → billedToClientId omitted', { timeout: 20000 }, async () => {
     createResponse = fail(400, 'budgetRupees must be a positive number');
     render(<NewCampaignPage />);
     fireEvent.change(await screen.findByLabelText('Campaign name'), { target: { value: 'X' } });
@@ -192,13 +253,12 @@ describe('New voucher campaign', () => {
     fireEvent.change(screen.getByLabelText('Budget (₹)'), { target: { value: '10' } });
     fireEvent.click(screen.getByTestId('vd-create'));
     expect(await screen.findByTestId('vd-create-error')).toHaveTextContent('budgetRupees must be a positive number');
-    // No client chosen → billedToClientId is omitted
     expect(JSON.parse(String(callsTo('/campaigns')[0][1]!.body))).not.toHaveProperty('billedToClientId');
+    expect(replace).not.toHaveBeenCalled();
   });
 
   it('resumes a PREVIEWED campaign at the upload step', { timeout: 20000 }, async () => {
     searchRef.current = new URLSearchParams('campaign=c1');
-    installFetch((url) => (url === `${BASE}/campaigns/c1` ? ok({ campaign: { ...CAMPAIGN, status: 'PREVIEWED' }, summary: {} }) : null));
     render(<NewCampaignPage />);
     expect(await screen.findByRole('heading', { name: '2. Upload the list' })).toBeInTheDocument();
     expect(screen.getByText(/previewed earlier but not confirmed/)).toBeInTheDocument();
@@ -206,7 +266,7 @@ describe('New voucher campaign', () => {
 
   it('a confirmed campaign opened via ?campaign= goes to its report', { timeout: 20000 }, async () => {
     searchRef.current = new URLSearchParams('campaign=c1');
-    installFetch((url) => (url === `${BASE}/campaigns/c1` ? ok({ campaign: { ...CAMPAIGN, status: 'PROCESSING' }, summary: {} }) : null));
+    campaignGet = [ok({ campaign: { ...CAMPAIGN, status: 'PROCESSING' }, summary: {} })];
     render(<NewCampaignPage />);
     await waitFor(() => expect(replace).toHaveBeenCalledWith('/gifsy/voucher-dispersal/c1'));
   });

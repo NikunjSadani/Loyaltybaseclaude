@@ -1,6 +1,6 @@
 'use client';
 
-/* Small shared pieces for the Voucher Dispersal console (/gifsy/voucher-dispersal) â€” dark Gifsy shell. */
+/* Small shared pieces for the Voucher Dispersal console (/gifsy/voucher-dispersal) — dark Gifsy shell. */
 
 import React from 'react';
 import { AlertTriangle, Download, Loader2, RefreshCw } from 'lucide-react';
@@ -9,7 +9,7 @@ import { VD_TEMPLATE_URL, type Tone } from '@/lib/voucher-dispersal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
-/** "Download template" â€” GET /template.xlsx through the shared download state machine. */
+/** "Download template" — GET /template.xlsx through the shared download state machine. */
 export function TemplateDownloadButton() {
   const action = useDownloadAction();
   return (
@@ -49,13 +49,17 @@ export function StatusChip({ label, tone, testId }: { label: string; tone: Tone;
   );
 }
 
-export function Tile({ label, value, tone = 'neutral', testId }: { label: string; value: React.ReactNode; tone?: Tone; testId?: string }) {
+/**
+ * Summary tile. `wide` spans two grid columns and WRAPS instead of truncating (for long values like
+ * "₹12,34,567.50 / ₹15,00,000") — a clipped money figure would be misleading.
+ */
+export function Tile({ label, value, tone = 'neutral', testId, wide }: { label: string; value: string; tone?: Tone; testId?: string; wide?: boolean }) {
   const accent =
     tone === 'danger' ? 'text-red-300' : tone === 'warning' ? 'text-amber-300' : tone === 'success' ? 'text-emerald-300' : 'text-white';
   return (
-    <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 min-w-0" data-testid={testId}>
-      <p className="text-[11px] uppercase tracking-wide text-white/50 truncate">{label}</p>
-      <p className={`text-lg font-bold ${accent} truncate`}>{value}</p>
+    <div className={`rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 min-w-0 ${wide ? 'col-span-2' : ''}`} data-testid={testId} title={`${label}: ${value}`}>
+      <p className={`text-[11px] uppercase tracking-wide text-white/50 ${wide ? '' : 'truncate'}`}>{label}</p>
+      <p className={`text-lg font-bold ${accent} ${wide ? 'break-words' : 'truncate'}`}>{value}</p>
     </div>
   );
 }

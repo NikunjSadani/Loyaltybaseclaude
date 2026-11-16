@@ -73,6 +73,31 @@ describe('Voucher Dispersal list', () => {
     expect(screen.getByRole('link', { name: /New campaign/ })).toHaveAttribute('href', '/gifsy/voucher-dispersal/new');
   });
 
+  it('unknown status shows the raw value (no setup wording); missing numbers show "—"; billed-to id fallback', { timeout: 20000 }, async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([
+      { campaign: { id: 'c3', name: 'Odd one', programLabel: 'X', billedToClientId: 'bajaj', status: 'PAUSED' }, summary: { bought: 4 } },
+    ]))));
+    render(<ListPage />);
+    const c3 = await screen.findByTestId('vd-campaign-c3');
+    expect(screen.getByTestId('vd-status-c3')).toHaveTextContent('Unknown status: PAUSED');
+    expect(c3).not.toHaveTextContent('nothing has been bought');
+    expect(c3).toHaveTextContent('Billed to: bajaj');
+    expect(c3).toHaveTextContent('Bought4');
+    expect(c3).toHaveTextContent('Delivered—');
+    expect(c3).toHaveTextContent('— / —');
+  });
+
+  it('a failed refresh keeps the list and says so', { timeout: 20000 }, async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(ok(CAMPAIGNS))
+      .mockResolvedValueOnce(fail(502, 'Bad gateway'));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<ListPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByTestId('vd-refresh-error')).toHaveTextContent('Bad gateway');
+    expect(screen.getByText('Diwali thank-you')).toBeInTheDocument();
+  });
+
   it('empty state', { timeout: 20000 }, async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([]))));
     render(<ListPage />);
