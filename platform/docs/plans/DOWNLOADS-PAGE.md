@@ -1,5 +1,11 @@
 # Downloads page (background exports) — design
 
+> **Status: ✅ LIVE on prod + staging since 2026-11-15 (`2eb8271d`).** Migration `20261116120000_export_requests`
+> applied on both; worker jobs `gifsy-exports` (prod) / `gifsy-exports-staging` deployed by the workflows, which also
+> grant `roles/run.jobsExecutor` to `gifsy-api-sa` (owner-approved IAM change, shipped with the release). The optional
+> drain Scheduler (Runbook below) is NOT created by the workflows (none is recorded as created) — the Downloads list
+> self-heals without it.
+
 Owner-approved 2026-11-13. ⚠️ PLATFORM-WIDE (shared code; every tenant incl. Deoleo). Part of the memory-safety plan
 (decisions log, 2026-11-13 "API memory + memory-safety plan").
 
@@ -44,7 +50,7 @@ like a bank statement download. Small downloads stay instant.
 ## Infra
 `roles/run.jobsExecutor` for `gifsy-api-sa` on `gifsy-exports` (prod) / `gifsy-exports-staging` — granted by the deploy
 workflows themselves (step "Allow the API to start the Downloads worker job", idempotent, right after the job deploy;
-⚠️ an IAM change — owner approval required before it ships). Without it every heavy request FAILS at once with "Downloads
+an IAM change — owner-approved, shipped 2026-11-15). Without it every heavy request FAILS at once with "Downloads
 couldn't start on the server…" (never stuck); the API is unaffected. (Runbook below.)
 
 ## Engine reference (lane A)
@@ -110,7 +116,7 @@ caller's requests waited > 2 min (QUEUED) or has a stale heartbeat.
 `--max-old-space-size=1700`, task timeout 1 h, 1 retry, VPC + Cloud SQL + `gifsy-api-sa`, secrets DATABASE_URL /
 GCS_BUCKET / GCP_PROJECT_ID / JWT_SECRET (all existing — nothing added to the prod PREFLIGHT list).
 
-**IAM — done by the deploy workflows** (⚠️ owner approval required: it is an IAM change), in the step right after the
+**IAM — done by the deploy workflows** (an IAM change; owner-approved, live since 2026-11-15), in the step right after the
 job deploy (idempotent; the deployer holds roles/run.admin; mirrors the grant on gifsy-sales-import):
 ```
 gcloud run jobs add-iam-policy-binding gifsy-exports-staging --region=asia-south1 \
