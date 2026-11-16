@@ -32,7 +32,7 @@ describe('offer form — KPI scope warning', () => {
   it('warns for audience values outside the KPI scope (partial vs none), never for an unscoped KPI', async () => {
     renderForm();
     const kpiSelect = await screen.findByLabelText(/Show this outlet.s progress on/);
-    const programs = screen.getByTestId('target-programs');
+    const programs = await screen.findByTestId('target-programs');
 
     fireEvent.change(kpiSelect, { target: { value: 'ALL' } });
     fireEvent.click(within(programs).getByRole('checkbox', { name: 'Pragati' }));

@@ -91,7 +91,7 @@ describe('AWE — Credit field award-map editor', () => {
     installFetch();
     render(<FieldConfigPage />);
     expect(await screen.findByText('Scheme Volume')).toBeInTheDocument();
-    expect(screen.getByText('Visibility')).toBeInTheDocument();
+    expect(await screen.findByText('Visibility')).toBeInTheDocument();
   });
 
   it('AWE2: NA → POINTS change Saves immediately and PATCHes the full map', async () => {
@@ -101,16 +101,16 @@ describe('AWE — Credit field award-map editor', () => {
     // Expand the second field (Visibility — all awards default NA).
     await screen.findByText('Visibility');
     const row = rowFor('Visibility');
-    const editToggle = within(row).getByRole('button', { name: /edit award map/i });
+    const editToggle = await within(row).findByRole('button', { name: /edit award map/i });
     await userEvent.click(editToggle);
 
     // Set SSS → POINTS (was NA: no money-path confirm needed).
     // The editor label is the only "SSS" span sitting next to a POINTS button.
-    const sssLabel = within(row).getByText('SSS', { selector: 'span.w-28' });
+    const sssLabel = await within(row).findByText('SSS', { selector: 'span.w-28' });
     const sssGroup = sssLabel.parentElement as HTMLElement;
-    await userEvent.click(within(sssGroup).getByRole('button', { name: 'POINTS' }));
+    await userEvent.click(await within(sssGroup).findByRole('button', { name: 'POINTS' }));
 
-    await userEvent.click(within(row).getByRole('button', { name: /^save$/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /^save$/i }));
 
     await waitFor(() => {
       const patch = lastPatch(calls);
@@ -133,20 +133,20 @@ describe('AWE — Credit field award-map editor', () => {
 
     await screen.findByText('Scheme Volume');
     const row = rowFor('Scheme Volume');
-    await userEvent.click(within(row).getByRole('button', { name: /edit award map/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /edit award map/i }));
 
     // Flip WHOLESALER POINTS → PAYOUT (money-path sensitive).
-    const whLabel = within(row).getByText('Wholesaler', { selector: 'span.w-28' });
+    const whLabel = await within(row).findByText('Wholesaler', { selector: 'span.w-28' });
     const whGroup = whLabel.parentElement as HTMLElement;
-    await userEvent.click(within(whGroup).getByRole('button', { name: 'PAYOUT' }));
+    await userEvent.click(await within(whGroup).findByRole('button', { name: 'PAYOUT' }));
 
     // First Save click only shows the confirm — no PATCH yet.
-    await userEvent.click(within(row).getByRole('button', { name: /^save$/i }));
-    expect(within(row).getByText(/become wallet points or bank payouts/i)).toBeInTheDocument();
+    await userEvent.click(await within(row).findByRole('button', { name: /^save$/i }));
+    expect(await within(row).findByText(/become wallet points or bank payouts/i)).toBeInTheDocument();
     expect(calls.some((c) => c.init?.method === 'PATCH')).toBe(false);
 
     // Confirm & Save issues the PATCH with the flipped value.
-    await userEvent.click(within(row).getByRole('button', { name: /confirm & save/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /confirm & save/i }));
     await waitFor(() => {
       const patch = lastPatch(calls);
       expect(patch).toBeTruthy();
@@ -163,7 +163,7 @@ describe('AWE — Credit field award-map editor', () => {
     await screen.findByText('Scheme Volume');
     const row = rowFor('Scheme Volume');
     // The active toggle's visible label is "Active"; clicking it deactivates.
-    await userEvent.click(within(row).getByRole('button', { name: /active/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /active/i }));
 
     await waitFor(() => {
       const patch = lastPatch(calls);

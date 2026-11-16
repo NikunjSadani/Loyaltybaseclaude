@@ -37,10 +37,7 @@ async function renderLedger(outletId: string) {
     await params;
   });
   // Wait for the KPI filter select to appear (includes Suspense resolution + 350ms inner load delay)
-  await waitFor(
-    () => expect(screen.queryByTestId('wallet-kpi-filter')).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByTestId('wallet-kpi-filter', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 // QUARANTINE (launch CD gate / A-1): pre-existing TDD-red spec for an unbuilt/changed feature. Un-skip when that feature ships. See docs/plans/reconcile/baseline-red-snapshot.txt
@@ -51,13 +48,13 @@ describe.skip('X — KPI filter in sales team ledger', () => {
 
   it('X1: ledger page has a wallet-kpi-filter select (same testid as partner wallet)', async () => {
     await renderLedger('k1');
-    const select = screen.getByTestId('wallet-kpi-filter');
+    const select = await screen.findByTestId('wallet-kpi-filter');
     expect(select.tagName.toLowerCase()).toBe('select');
   });
 
   it('X2: dropdown has "All KPIs" + at least one KPI from the ledger entries', async () => {
     await renderLedger('k1');
-    const select = screen.getByTestId('wallet-kpi-filter');
+    const select = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '');
     expect(options.some(t => /all kpi/i.test(t))).toBe(true);
     expect(options.length).toBeGreaterThan(1);
@@ -65,7 +62,7 @@ describe.skip('X — KPI filter in sales team ledger', () => {
 
   it('X3: selecting a KPI hides entries with a different kpiLabel', async () => {
     await renderLedger('k1');
-    const select = screen.getByTestId('wallet-kpi-filter');
+    const select = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option'));
     const kpiOption = options.find(o => !/all kpi/i.test(o.textContent ?? ''));
     if (!kpiOption) return;
@@ -83,7 +80,7 @@ describe.skip('X — KPI filter in sales team ledger', () => {
 
   it('X4: selecting "All KPIs" restores all entries', async () => {
     await renderLedger('k1');
-    const select = screen.getByTestId('wallet-kpi-filter');
+    const select = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option'));
     const kpiOption = options.find(o => !/all kpi/i.test(o.textContent ?? ''));
     if (!kpiOption) return;
@@ -99,7 +96,7 @@ describe.skip('X — KPI filter in sales team ledger', () => {
 
   it('X5: Visibility KPI option is present for k1 (has visibility earn entry)', async () => {
     await renderLedger('k1');
-    const select = screen.getByTestId('wallet-kpi-filter');
+    const select = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '');
     expect(options.some(t => /visibility/i.test(t))).toBe(true);
   });

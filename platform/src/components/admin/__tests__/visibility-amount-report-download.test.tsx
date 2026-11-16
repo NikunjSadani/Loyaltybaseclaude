@@ -32,7 +32,7 @@ describe('VisibilityAmountUploadPanel — report download', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     render(<VisibilityAmountUploadPanel />);
     fireEvent.click(screen.getByRole('button', { name: /Download Report/ }));
-    await waitFor(() => expect(screen.getByRole('button', { name: /Download Report/ })).toBeTruthy(), { timeout: 15000 });
+    expect(await screen.findByRole('button', { name: /Download Report/ }, { timeout: 15000 })).toBeTruthy();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3), { timeout: 15000 });
     expect(screen.queryByTestId('visibility-report-error')).toBeNull();
   }, 20000);

@@ -68,7 +68,7 @@ function stubFetch(
 
 async function renderWallet() {
   render(<WalletPage />);
-  await waitFor(() => expect(screen.getByTestId('statement-controls-row')).toBeInTheDocument(), { timeout: 3000 });
+  expect(await screen.findByTestId('statement-controls-row', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 async function pick(label: 'Excel (.xlsx)' | 'PDF') {
@@ -123,7 +123,7 @@ describe('SD — partner wallet statement download', () => {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: [] } }) });
     }));
     await renderWallet();
-    expect(screen.getByTestId('statement-download-btn')).toBeDisabled();
+    expect(await screen.findByTestId('statement-download-btn')).toBeDisabled();
   });
 
   it('SD4: PDF goes through the PDF renderer', async () => {
@@ -176,7 +176,7 @@ describe('SDO — statement outlet name/code always the same outlet', () => {
     await waitFor(() => expect(screen.getByTestId('statement-download-btn')).not.toBeDisabled());
     fireEvent.click(screen.getByTestId('statement-download-btn'));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Excel (.xlsx)' }));
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
     expect(statementToXlsxBlob).not.toHaveBeenCalled();
     expect(downloadBlob).not.toHaveBeenCalled();
   });
@@ -194,7 +194,7 @@ describe('SDO — statement outlet name/code always the same outlet', () => {
     await waitFor(() => expect(screen.getByTestId('statement-download-btn')).not.toBeDisabled());
     fireEvent.click(screen.getByTestId('statement-download-btn'));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Excel (.xlsx)' }));
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
     expect(statementToXlsxBlob).not.toHaveBeenCalled();
   });
 

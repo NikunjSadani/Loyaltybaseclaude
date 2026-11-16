@@ -14,7 +14,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -58,7 +58,7 @@ async function renderLedger(id: string) {
     );
     await params;
   });
-  await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
+  expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
 }
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -68,9 +68,9 @@ describe('CF — sales outlet ledger credit field name', () => {
     stubLedger();
     await renderLedger('k1');
     // Header = field name (in the row, not the KPI <option> which also lists it).
-    expect(screen.getByText('Monthly Scheme', { ignore: 'option' })).toBeInTheDocument();
+    expect(await screen.findByText('Monthly Scheme', { ignore: 'option' })).toBeInTheDocument();
     // Narration sub-line present.
-    expect(screen.getByText('Extra push for Q1')).toBeInTheDocument();
+    expect(await screen.findByText('Extra push for Q1')).toBeInTheDocument();
     // The raw batch CUID must NOT render anywhere.
     expect(screen.queryByText(/cmr8w205dxyz/)).not.toBeInTheDocument();
     expect(screen.queryByText(/#cmr8w/)).not.toBeInTheDocument();
@@ -79,7 +79,7 @@ describe('CF — sales outlet ledger credit field name', () => {
   it('CF2: a blank-narration credit still shows the field-name header', async () => {
     stubLedger();
     await renderLedger('k1');
-    expect(screen.getByText('Visibility', { ignore: 'option' })).toBeInTheDocument();
+    expect(await screen.findByText('Visibility', { ignore: 'option' })).toBeInTheDocument();
     // No stray CUID for the blank-narration credit either.
     expect(screen.queryByText(/cmr8w999abcd/)).not.toBeInTheDocument();
   });
@@ -87,7 +87,7 @@ describe('CF — sales outlet ledger credit field name', () => {
   it('CF3: the KPI filter lists the distinct field names', async () => {
     stubLedger();
     await renderLedger('k1');
-    const select = screen.getByTestId('wallet-kpi-filter');
+    const select = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map((o) => o.textContent ?? '');
     expect(options.some((t) => /all kpi/i.test(t))).toBe(true);
     expect(options).toContain('Monthly Scheme');
@@ -99,6 +99,6 @@ describe('CF — sales outlet ledger credit field name', () => {
   it('CF4: a non-credit (redeem) row keeps its own description header', async () => {
     stubLedger();
     await renderLedger('k1');
-    expect(screen.getByText('Bluetooth Speaker')).toBeInTheDocument();
+    expect(await screen.findByText('Bluetooth Speaker')).toBeInTheDocument();
   });
 });

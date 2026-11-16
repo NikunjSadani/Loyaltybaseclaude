@@ -130,11 +130,9 @@ describe('GO — Partner Group Overview (read-only)', () => {
     stubFetch(AVAILABLE_PAYLOAD);
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByText(/Group Overview — Sunrise Group/)).toBeInTheDocument(),
-    );
+    expect(await screen.findByText(/Group Overview — Sunrise Group/)).toBeInTheDocument();
     // Consolidated redeemable total (20,000 pts).
-    const card = screen.getByTestId('group-totals-card');
+    const card = await screen.findByTestId('group-totals-card');
     expect(card).toHaveTextContent('20,000');
     // Lifetime figures rolled up.
     expect(card).toHaveTextContent('58,500');
@@ -157,21 +155,19 @@ describe('GO — Partner Group Overview (read-only)', () => {
     await waitFor(() =>
       expect(screen.getAllByTestId('group-outlet-row')).toHaveLength(2),
     );
-    expect(screen.getByText('Sunrise Central')).toBeInTheDocument();
-    expect(screen.getByText('Sunrise North')).toBeInTheDocument();
-    expect(screen.getByText(/OUT-001/)).toBeInTheDocument();
+    expect(await screen.findByText('Sunrise Central')).toBeInTheDocument();
+    expect(await screen.findByText('Sunrise North')).toBeInTheDocument();
+    expect(await screen.findByText(/OUT-001/)).toBeInTheDocument();
     // Inactive outlet flagged.
-    expect(screen.getByText('Inactive')).toBeInTheDocument();
+    expect(await screen.findByText('Inactive')).toBeInTheDocument();
   });
 
   it('GO4: read-only badge + helper note present, and NO redeem/payout controls', async () => {
     stubFetch(AVAILABLE_PAYLOAD);
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('read-only-badge')).toBeInTheDocument(),
-    );
-    expect(screen.getByText(/happen per outlet/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('read-only-badge')).toBeInTheDocument();
+    expect(await screen.findByText(/happen per outlet/i)).toBeInTheDocument();
     // Never any action controls on this read-only view.
     expect(screen.queryByRole('button', { name: /redeem/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /payout|withdraw/i })).not.toBeInTheDocument();
@@ -181,11 +177,9 @@ describe('GO — Partner Group Overview (read-only)', () => {
     stubFetch({ available: false });
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('group-empty-state')).toBeInTheDocument(),
-    );
-    expect(screen.getByText(/No group overview available/i)).toBeInTheDocument();
-    const link = screen.getByRole('link', { name: /back to dashboard/i });
+    expect(await screen.findByTestId('group-empty-state')).toBeInTheDocument();
+    expect(await screen.findByText(/No group overview available/i)).toBeInTheDocument();
+    const link = await screen.findByRole('link', { name: /back to dashboard/i });
     expect(link).toHaveAttribute('href', '/partner/dashboard');
     // No totals card / outlet rows when there's no group.
     expect(screen.queryByTestId('group-totals-card')).not.toBeInTheDocument();
@@ -199,17 +193,15 @@ describe('GO Targets — consolidated group KPI roll-up (read-only)', () => {
     stubFetch(AVAILABLE_PAYLOAD, { targets: TARGETS_PAYLOAD });
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('group-targets-section')).toBeInTheDocument(),
-    );
+    expect(await screen.findByTestId('group-targets-section')).toBeInTheDocument();
     // One group total chip per KPI.
-    expect(screen.getAllByTestId('group-kpi-total')).toHaveLength(2);
-    const section = screen.getByTestId('group-targets-section');
+    expect(await screen.findAllByTestId('group-kpi-total')).toHaveLength(2);
+    const section = await screen.findByTestId('group-targets-section');
     // Primary KPI's group pace (0.85 → 85%) + achieved/target rendered.
     expect(section).toHaveTextContent('85%');
     expect(section).toHaveTextContent('850');
     // A row per outlet.
-    expect(screen.getAllByTestId('group-target-outlet-row')).toHaveLength(2);
+    expect(await screen.findAllByTestId('group-target-outlet-row')).toHaveLength(2);
     // A null-pace KPI degrades to a dash rather than crashing.
     expect(section).toHaveTextContent('—');
   });
@@ -218,9 +210,7 @@ describe('GO Targets — consolidated group KPI roll-up (read-only)', () => {
     stubFetch(AVAILABLE_PAYLOAD, { targets: { available: false } });
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('group-totals-card')).toBeInTheDocument(),
-    );
+    expect(await screen.findByTestId('group-totals-card')).toBeInTheDocument();
     expect(screen.queryByTestId('group-targets-section')).not.toBeInTheDocument();
   });
 });
@@ -232,9 +222,7 @@ describe('GO Visibility — per-outlet capture status (read-only, flag-gated)', 
     stubFetch(AVAILABLE_PAYLOAD, { visibility: { available: true, visibilityEnabled: false } });
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('group-totals-card')).toBeInTheDocument(),
-    );
+    expect(await screen.findByTestId('group-totals-card')).toBeInTheDocument();
     expect(screen.queryByTestId('group-visibility-section')).not.toBeInTheDocument();
   });
 
@@ -242,11 +230,9 @@ describe('GO Visibility — per-outlet capture status (read-only, flag-gated)', 
     stubFetch(AVAILABLE_PAYLOAD, { visibility: VISIBILITY_ON_PAYLOAD });
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('group-visibility-section')).toBeInTheDocument(),
-    );
-    expect(screen.getAllByTestId('group-visibility-row')).toHaveLength(2);
-    const section = screen.getByTestId('group-visibility-section');
+    expect(await screen.findByTestId('group-visibility-section')).toBeInTheDocument();
+    expect(await screen.findAllByTestId('group-visibility-row')).toHaveLength(2);
+    const section = await screen.findByTestId('group-visibility-section');
     expect(section).toHaveTextContent('Approved');
     expect(section).toHaveTextContent('Under review');
   });
@@ -259,11 +245,9 @@ describe('GO Leaderboard — group shops with tenant-wide rank (read-only)', () 
     stubFetch(AVAILABLE_PAYLOAD, { leaderboard: LEADERBOARD_PAYLOAD });
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('group-leaderboard-section')).toBeInTheDocument(),
-    );
-    expect(screen.getAllByTestId('group-leaderboard-row')).toHaveLength(2);
-    const section = screen.getByTestId('group-leaderboard-section');
+    expect(await screen.findByTestId('group-leaderboard-section')).toBeInTheDocument();
+    expect(await screen.findAllByTestId('group-leaderboard-row')).toHaveLength(2);
+    const section = await screen.findByTestId('group-leaderboard-section');
     expect(section).toHaveTextContent('#3');
     expect(section).toHaveTextContent('Sunrise Central');
     expect(section).toHaveTextContent('8,500');
@@ -277,11 +261,9 @@ describe('GO Leaderboard — group shops with tenant-wide rank (read-only)', () 
     });
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('group-leaderboard-section')).toBeInTheDocument(),
-    );
-    expect(screen.getByTestId('group-leaderboard-empty')).toBeInTheDocument();
-    expect(screen.getByText(/no published leaderboard yet/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('group-leaderboard-section')).toBeInTheDocument();
+    expect(await screen.findByTestId('group-leaderboard-empty')).toBeInTheDocument();
+    expect(await screen.findByText(/no published leaderboard yet/i)).toBeInTheDocument();
     expect(screen.queryByTestId('group-leaderboard-row')).not.toBeInTheDocument();
   });
 
@@ -289,9 +271,7 @@ describe('GO Leaderboard — group shops with tenant-wide rank (read-only)', () 
     stubFetch(AVAILABLE_PAYLOAD, { leaderboard: { available: false } });
     render(<GroupOverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('group-totals-card')).toBeInTheDocument(),
-    );
+    expect(await screen.findByTestId('group-totals-card')).toBeInTheDocument();
     expect(screen.queryByTestId('group-leaderboard-section')).not.toBeInTheDocument();
   });
 });

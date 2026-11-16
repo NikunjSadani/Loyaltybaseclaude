@@ -181,13 +181,13 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
     render(<AdminPaymentsReportPage />)
 
     await screen.findByText('Shop A')
-    expect(screen.getByText('Biz Pvt Ltd')).toBeInTheDocument()
-    expect(screen.getByText('TSE > ASM > RSM')).toBeInTheDocument()   // reporting chain
-    expect(screen.getByText('UTR12345')).toBeInTheDocument()          // UTR
+    expect(await screen.findByText('Biz Pvt Ltd')).toBeInTheDocument()
+    expect(await screen.findByText('TSE > ASM > RSM')).toBeInTheDocument()   // reporting chain
+    expect(await screen.findByText('UTR12345')).toBeInTheDocument()          // UTR
     // 'PAID' appears both as a status <option> and the row badge — assert at least one.
-    expect(screen.getAllByText('PAID').length).toBeGreaterThan(0)     // status badge
-    expect(screen.getByText('SEC_194C')).toBeInTheDocument()          // TDS section
-    expect(screen.getByText('ABCDE1234F')).toBeInTheDocument()        // PAN
+    expect((await screen.findAllByText('PAID')).length).toBeGreaterThan(0)     // status badge
+    expect(await screen.findByText('SEC_194C')).toBeInTheDocument()          // TDS section
+    expect(await screen.findByText('ABCDE1234F')).toBeInTheDocument()        // PAN
   })
 
   it('renders the Failure Reason column for a FAILED row (empty on PAID)', async () => {
@@ -213,8 +213,8 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
     render(<AdminPaymentsReportPage />)
     await screen.findByText('Shop A')
     // The captured bank reason renders in the new Failure Reason column.
-    expect(screen.getByText('Account Closed')).toBeInTheDocument()
-    expect(screen.getByText('UTR-FAIL')).toBeInTheDocument() // UTR kept on FAILED
+    expect(await screen.findByText('Account Closed')).toBeInTheDocument()
+    expect(await screen.findByText('UTR-FAIL')).toBeInTheDocument() // UTR kept on FAILED
   })
 
   it('Export button fetches the export URL carrying the current filters', async () => {
@@ -295,20 +295,20 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       const fetchMock = stubPagedFetch()
       render(<AdminPaymentsReportPage />)
       await screen.findByText('Shop 1')
-      expect(screen.getByTestId('payments-range')).toHaveTextContent('Showing 1–50 of 48,086')
+      expect(await screen.findByTestId('payments-range')).toHaveTextContent('Showing 1–50 of 48,086')
       expect(lastReportUrl(fetchMock).get('page')).toBe('1')
       expect(lastReportUrl(fetchMock).get('pageSize')).toBe('50')
       // Only the page's rows are rendered — never the whole range.
-      expect(screen.getByText('Shop 50')).toBeInTheDocument()
+      expect(await screen.findByText('Shop 50')).toBeInTheDocument()
       expect(screen.queryByText('Shop 51')).not.toBeInTheDocument()
       // Totals are the whole range, and say so.
-      expect(screen.getByText('Totals for the selected filters — all pages')).toBeInTheDocument()
-      expect(screen.getByText('48,086')).toBeInTheDocument()
-      expect(screen.getByText('₹28,90,00,000.00')).toBeInTheDocument()
-      expect(screen.getByText('₹1,23,456.00')).toBeInTheDocument()
-      expect(screen.getByText(/Page 1 of 962/)).toBeInTheDocument()
+      expect(await screen.findByText('Totals for the selected filters — all pages')).toBeInTheDocument()
+      expect(await screen.findByText('48,086')).toBeInTheDocument()
+      expect(await screen.findByText('₹28,90,00,000.00')).toBeInTheDocument()
+      expect(await screen.findByText('₹1,23,456.00')).toBeInTheDocument()
+      expect(await screen.findByText(/Page 1 of 962/)).toBeInTheDocument()
       // Previous is disabled on page 1.
-      expect(screen.getByRole('button', { name: /Previous/ })).toBeDisabled()
+      expect(await screen.findByRole('button', { name: /Previous/ })).toBeDisabled()
     })
 
     it('Next fetches page 2 ("Showing 51–100"), Previous goes back to page 1', async () => {
@@ -319,7 +319,7 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       fireEvent.click(screen.getByRole('button', { name: /Next/ }))
       await screen.findByText('Shop 51')
       expect(lastReportUrl(fetchMock).get('page')).toBe('2')
-      expect(screen.getByTestId('payments-range')).toHaveTextContent('Showing 51–100 of 48,086')
+      expect(await screen.findByTestId('payments-range')).toHaveTextContent('Showing 51–100 of 48,086')
       await waitFor(() => expect(screen.getByRole('button', { name: /Previous/ })).not.toBeDisabled())
       fireEvent.click(screen.getByRole('button', { name: /Previous/ }))
       await screen.findByText('Shop 1')
@@ -337,7 +337,7 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       await screen.findByText('Shop 200')
       expect(lastReportUrl(fetchMock).get('pageSize')).toBe('200')
       expect(lastReportUrl(fetchMock).get('page')).toBe('1')
-      expect(screen.getByTestId('payments-range')).toHaveTextContent('Showing 1–200 of 48,086')
+      expect(await screen.findByTestId('payments-range')).toHaveTextContent('Showing 1–200 of 48,086')
     })
 
     it('a filter change resets to page 1', async () => {
@@ -390,10 +390,10 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       await waitFor(() => expect(screen.getByRole('button', { name: /Next/ })).not.toBeDisabled())
       fireEvent.click(screen.getByRole('button', { name: /Next/ }))
       await screen.findByText('Shop 120')
-      expect(screen.getByTestId('payments-range')).toHaveTextContent('Showing 101–120 of 120')
-      expect(screen.getByText(/Page 3 of 3/)).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /Next/ })).toBeDisabled()
-      expect(screen.getByRole('button', { name: /Previous/ })).not.toBeDisabled()
+      expect(await screen.findByTestId('payments-range')).toHaveTextContent('Showing 101–120 of 120')
+      expect(await screen.findByText(/Page 3 of 3/)).toBeInTheDocument()
+      expect(await screen.findByRole('button', { name: /Next/ })).toBeDisabled()
+      expect(await screen.findByRole('button', { name: /Previous/ })).not.toBeDisabled()
     })
 
     it('a page past the end is clamped by the server: the pager follows the EFFECTIVE page (no "Page 9 of 5")', async () => {
@@ -404,10 +404,10 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       await screen.findByText('Shop 1')
       fireEvent.click(screen.getByRole('button', { name: /Next/ }))
       await waitFor(() => expect(screen.getByTestId('payments-range')).toHaveTextContent('Showing 1–40 of 40'))
-      expect(screen.getByText(/Page 1 of 1/)).toBeInTheDocument()
+      expect(await screen.findByText(/Page 1 of 1/)).toBeInTheDocument()
       expect(screen.queryByText('No payments match your filters')).not.toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /Next/ })).toBeDisabled()
-      expect(screen.getByRole('button', { name: /Previous/ })).toBeDisabled()
+      expect(await screen.findByRole('button', { name: /Next/ })).toBeDisabled()
+      expect(await screen.findByRole('button', { name: /Previous/ })).toBeDisabled()
     })
 
     it('rows=[] with totalRows>0 shows a loading state, never "No payments match"', async () => {
@@ -427,18 +427,18 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       fireEvent.click(screen.getByRole('button', { name: /Next/ }))
       expect(await screen.findByText('Server busy')).toBeInTheDocument()
       // The table and pager still describe page 1 (what is on screen) — Previous stays off, Next targets page 2 again.
-      expect(screen.getByTestId('payments-range')).toHaveTextContent('Showing 1–50 of 48,086')
-      expect(screen.getByText(/Page 1 of 962/)).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /Previous/ })).toBeDisabled()
-      expect(screen.getByRole('button', { name: /Next/ })).not.toBeDisabled()
+      expect(await screen.findByTestId('payments-range')).toHaveTextContent('Showing 1–50 of 48,086')
+      expect(await screen.findByText(/Page 1 of 962/)).toBeInTheDocument()
+      expect(await screen.findByRole('button', { name: /Previous/ })).toBeDisabled()
+      expect(await screen.findByRole('button', { name: /Next/ })).not.toBeDisabled()
       // Same filters → the totals label is NOT the "previous filters" one.
-      expect(screen.getByTestId('payments-totals-label')).toHaveTextContent('Totals for the selected filters — all pages')
+      expect(await screen.findByTestId('payments-totals-label')).toHaveTextContent('Totals for the selected filters — all pages')
       failPage2 = false
       fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
       await screen.findByText('Shop 51')
       expect(lastReportUrl(fetchMock).get('page')).toBe('2')
       expect(screen.queryByText('Server busy')).not.toBeInTheDocument()
-      expect(screen.getByTestId('payments-range')).toHaveTextContent('Showing 51–100 of 48,086')
+      expect(await screen.findByTestId('payments-range')).toHaveTextContent('Showing 51–100 of 48,086')
     })
 
     it('Next after a failed page load still asks for the next page (not a skip to page 3)', async () => {
@@ -460,14 +460,14 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       stubPagedFetch((url) => (url.includes('status=FAILED') ? { fail: 'Timed out' } : undefined))
       render(<AdminPaymentsReportPage />)
       await screen.findByText('Shop 1')
-      expect(screen.getByTestId('payments-totals-label')).toHaveTextContent('Totals for the selected filters — all pages')
+      expect(await screen.findByTestId('payments-totals-label')).toHaveTextContent('Totals for the selected filters — all pages')
       fireEvent.change(screen.getByDisplayValue('All Statuses'), { target: { value: 'FAILED' } })
       expect(await screen.findByText('Timed out')).toBeInTheDocument()
-      expect(screen.getByTestId('payments-totals-label')).toHaveTextContent('Showing the previous filters — the new filters failed to load')
-      expect(screen.getByText('The figures below are still for the previous filters.')).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /Next/ })).toBeDisabled()
-      expect(screen.getByRole('button', { name: /Previous/ })).toBeDisabled()
-      expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+      expect(await screen.findByTestId('payments-totals-label')).toHaveTextContent('Showing the previous filters — the new filters failed to load')
+      expect(await screen.findByText('The figures below are still for the previous filters.')).toBeInTheDocument()
+      expect(await screen.findByRole('button', { name: /Next/ })).toBeDisabled()
+      expect(await screen.findByRole('button', { name: /Previous/ })).toBeDisabled()
+      expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument()
     })
 
     it('while a filter change is in flight the totals + table are marked busy and labelled as updating', async () => {
@@ -483,8 +483,8 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       await screen.findByText('Shop 1')
       fireEvent.change(screen.getByDisplayValue('All Statuses'), { target: { value: 'PAID' } })
       await waitFor(() => expect(screen.getByTestId('payments-totals-label')).toHaveTextContent('Updating for the new filters…'))
-      expect(screen.getByRole('region', { name: 'Payment totals' })).toHaveAttribute('aria-busy', 'true')
-      expect(screen.getAllByRole('status').length).toBeGreaterThan(0)
+      expect(await screen.findByRole('region', { name: 'Payment totals' })).toHaveAttribute('aria-busy', 'true')
+      expect((await screen.findAllByRole('status')).length).toBeGreaterThan(0)
       release()
       await waitFor(() => expect(screen.getByTestId('payments-totals-label')).toHaveTextContent('Totals for the selected filters — all pages'))
     })
@@ -497,12 +497,12 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       })
       render(<AdminPaymentsReportPage />)
       await screen.findByText('Shop 1')
-      expect(screen.getByRole('columnheader', { name: 'Tenant' })).toBeInTheDocument()
+      expect(await screen.findByRole('columnheader', { name: 'Tenant' })).toBeInTheDocument()
       fireEvent.click(screen.getByRole('button', { name: /Next/ }))
       await screen.findByText('Shop 51')
-      expect(screen.getByRole('columnheader', { name: 'Tenant' })).toBeInTheDocument()
-      expect(screen.getAllByText('bajaj')).toHaveLength(50)
-      expect(screen.getByTestId('payments-range')).toHaveTextContent('Showing 51–100 of 48,086')
+      expect(await screen.findByRole('columnheader', { name: 'Tenant' })).toBeInTheDocument()
+      expect(await screen.findAllByText('bajaj')).toHaveLength(50)
+      expect(await screen.findByTestId('payments-range')).toHaveTextContent('Showing 51–100 of 48,086')
     })
   })
 })

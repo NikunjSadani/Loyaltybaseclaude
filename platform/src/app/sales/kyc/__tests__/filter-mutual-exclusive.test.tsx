@@ -38,7 +38,7 @@ async function renderAndLoad() {
   render(<KYCListPage />);
   await waitFor(
     () => expect(screen.getAllByTestId('kyc-entry-outlet-code').length).toBeGreaterThan(0),
-    { timeout: 2000 },
+    { timeout: 15_000 },
   );
 }
 

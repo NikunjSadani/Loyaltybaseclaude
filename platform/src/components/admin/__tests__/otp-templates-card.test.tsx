@@ -42,12 +42,12 @@ describe('OtpTemplatesCard', () => {
   it('OT1: shows the stored row as-is, marks empty purposes as global, Save disabled until an edit', async () => {
     await renderCard(DEOLEO);
     expect(getMock).toHaveBeenCalledWith('/api/admin/settings/otp-templates');
-    expect(screen.getByTestId('otp-tpl-login')).toHaveValue(LOGIN);
-    expect(screen.getByTestId('otp-tpl-kycConsent')).toHaveValue(KYC);
-    expect(screen.getByTestId('otp-tpl-redemptionSales')).toHaveValue('');
-    expect(screen.getByTestId('otp-tpl-redemptionSales-global')).toBeInTheDocument();
+    expect(await screen.findByTestId('otp-tpl-login')).toHaveValue(LOGIN);
+    expect(await screen.findByTestId('otp-tpl-kycConsent')).toHaveValue(KYC);
+    expect(await screen.findByTestId('otp-tpl-redemptionSales')).toHaveValue('');
+    expect(await screen.findByTestId('otp-tpl-redemptionSales-global')).toBeInTheDocument();
     expect(screen.queryByTestId('otp-tpl-login-global')).toBeNull();
-    expect(screen.getByTestId('otp-templates-save')).toBeDisabled();
+    expect(await screen.findByTestId('otp-templates-save')).toBeDisabled();
     expect(putMock).not.toHaveBeenCalled();
   });
 
@@ -63,7 +63,7 @@ describe('OtpTemplatesCard', () => {
     ]);
     await waitFor(() => expect(screen.getByTestId('otp-templates-save')).toBeDisabled());
     // Login template untouched on screen.
-    expect(screen.getByTestId('otp-tpl-login')).toHaveValue(LOGIN);
+    expect(await screen.findByTestId('otp-tpl-login')).toHaveValue(LOGIN);
   });
 
   it('OT3: a non-24-hex id blocks Save', async () => {
@@ -79,7 +79,7 @@ describe('OtpTemplatesCard', () => {
     fireEvent.change(screen.getByTestId('otp-tpl-redemptionSales'), { target: { value: NEW } });
     fireEvent.click(screen.getByTestId('otp-templates-save'));
     await waitFor(() => expect(screen.getByTestId('otp-templates-error')).toHaveTextContent('brand changed'));
-    expect(screen.getByTestId('otp-tpl-redemptionSales')).toHaveValue(NEW);
+    expect(await screen.findByTestId('otp-tpl-redemptionSales')).toHaveValue(NEW);
   });
 
   it('OT5: a failed READ shows error + Retry, no inputs/Save; Retry recovers', async () => {
@@ -92,7 +92,7 @@ describe('OtpTemplatesCard', () => {
     getMock.mockResolvedValueOnce({ success: true, data: { clientId: 'deoleo', templates: DEOLEO, stored: true } });
     fireEvent.click(screen.getByTestId('otp-templates-retry'));
     await screen.findByTestId('otp-tpl-login');
-    expect(screen.getByTestId('otp-tpl-login')).toHaveValue(LOGIN);
+    expect(await screen.findByTestId('otp-tpl-login')).toHaveValue(LOGIN);
     expect(screen.queryByTestId('otp-templates-load-error')).toBeNull();
   });
 });

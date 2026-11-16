@@ -47,9 +47,9 @@ describe('useDownloadAction + DownloadActionStatus', () => {
     expect(screen.getByRole('button', { name: DOWNLOAD_BUSY_LABEL })).toBeDisabled();
     await act(async () => { resolve({ kind: 'queued', exportRequestId: 'e1', message: "We're preparing your file." }); });
 
-    const btn = screen.getByRole('button', { name: DOWNLOAD_QUEUED_LABEL });
+    const btn = await screen.findByRole('button', { name: DOWNLOAD_QUEUED_LABEL });
     expect(btn).toBeDisabled();
-    expect(screen.getByTestId('download-live-region')).toBe(region); // same node — not re-created
+    expect(await screen.findByTestId('download-live-region')).toBe(region); // same node — not re-created
     expect(region).toHaveTextContent(/We're preparing your file\. Open Downloads/);
     expect(changed).toHaveBeenCalled(); // nav badge re-counts
     fireEvent.click(btn);
@@ -65,7 +65,7 @@ describe('useDownloadAction + DownloadActionStatus', () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole('button', { name: 'Download report' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('You already have 3 downloads being prepared.');
-    expect(screen.getByRole('button', { name: 'Download report' })).not.toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Download report' })).not.toBeDisabled();
   });
 
   it('downloaded → back to idle', async () => {

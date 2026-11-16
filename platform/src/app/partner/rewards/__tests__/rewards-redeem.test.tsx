@@ -214,7 +214,7 @@ describe('RR — Rewards live catalogue + redeem flow', () => {
     // Step 2 — enter OTP and Confirm → POST /api/rewards/redeem/confirm
     const otpInput = await screen.findByLabelText('OTP');
     await user.type(otpInput, '123456');
-    await user.click(screen.getByRole('button', { name: /confirm/i }));
+    await user.click(await screen.findByRole('button', { name: /confirm/i }));
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith('/api/rewards/redeem/confirm', expect.objectContaining({ method: 'POST' })),
@@ -274,7 +274,7 @@ describe('RR — Rewards live catalogue + redeem flow', () => {
 
     const otpInput = await screen.findByLabelText('OTP');
     await user.type(otpInput, '000000');
-    await user.click(screen.getByRole('button', { name: /confirm/i }));
+    await user.click(await screen.findByRole('button', { name: /confirm/i }));
 
     await waitFor(() =>
       expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/invalid or expired otp/i)),
@@ -458,7 +458,7 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
 
     // Real beneficiary rendered, masked account — no fabricated literals anywhere.
     expect(await screen.findByText(/axis bank/i)).toBeInTheDocument();
-    expect(screen.getByText(/5544/)).toBeInTheDocument();        // last-4 of the real acct
+    expect(await screen.findByText(/5544/)).toBeInTheDocument();        // last-4 of the real acct
     expect(screen.queryByText(/HDFC/)).not.toBeInTheDocument();
     expect(screen.queryByText(/3210/)).not.toBeInTheDocument();
   });
@@ -477,7 +477,7 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
 
     // The free-amount ₹ input is present, and the ₹-min (500 pts ÷ rate 1 = ₹500) is shown.
     expect(await screen.findByLabelText(/payout amount/i)).toBeInTheDocument();
-    expect(screen.getByText(/min ₹500/i)).toBeInTheDocument();
+    expect(await screen.findByText(/min ₹500/i)).toBeInTheDocument();
   });
 
   it('CASH3: posts { rewardId, amount } to the redeem endpoint for a cash payout', async () => {
@@ -503,7 +503,7 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
     await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
 
     await user.type(await screen.findByLabelText(/payout amount/i), '600');
-    await user.click(screen.getByRole('button', { name: /redeem ₹600/i }));
+    await user.click(await screen.findByRole('button', { name: /redeem ₹600/i }));
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([u]) => u === '/api/rewards/redeem');
@@ -535,18 +535,18 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
     await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
     const input = (await screen.findByLabelText(/payout amount/i)) as HTMLInputElement;
     await user.type(input, '600');
-    await user.click(screen.getByRole('button', { name: /redeem ₹600/i }));
+    await user.click(await screen.findByRole('button', { name: /redeem ₹600/i }));
     await screen.findByLabelText('OTP');
     expect(input).toBeDisabled(); // locked: the order already carries ₹600
 
     // "Change amount" unlocks and abandons the OTP (a fresh redeem next time).
-    await user.click(screen.getByRole('button', { name: 'Change amount' }));
+    await user.click(await screen.findByRole('button', { name: 'Change amount' }));
     expect(screen.queryByLabelText('OTP')).toBeNull();
     expect(input).toBeEnabled();
 
-    await user.click(screen.getByRole('button', { name: /redeem ₹600/i }));
+    await user.click(await screen.findByRole('button', { name: /redeem ₹600/i }));
     await user.type(await screen.findByLabelText('OTP'), '123456');
-    await user.click(screen.getByRole('button', { name: 'Confirm' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
     expect(await screen.findByText(/₹600 will be paid to/)).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([u]) => u === '/api/rewards/redeem')).toHaveLength(2);
   });
@@ -572,9 +572,9 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
     await user.click(await screen.findByRole('button', { name: /cash payout/i }));
     await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
     await user.type(await screen.findByLabelText(/payout amount/i), '600');
-    await user.click(screen.getByRole('button', { name: /redeem ₹600/i }));
+    await user.click(await screen.findByRole('button', { name: /redeem ₹600/i }));
     await user.type(await screen.findByLabelText('OTP'), '123456');
-    await user.click(screen.getByRole('button', { name: 'Confirm' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
     expect(await screen.findByText(/777 pts deducted/)).toBeInTheDocument();
   });
 
@@ -702,12 +702,12 @@ describe('HD — choose-from-amounts voucher', () => {
     expect(await screen.findByRole('group', { name: /voucher amount/i })).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: /voucher amount/i })).not.toBeInTheDocument();
     // Nothing chosen yet → cannot send.
-    expect(screen.getByRole('button', { name: /choose an amount/i })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: /choose an amount/i })).toBeDisabled();
 
-    await user.click(screen.getByRole('button', { name: /^₹1,250, 1,250 points/ }));
-    expect(screen.getByRole('button', { name: /^₹1,250, 1,250 points/ })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: /^₹300, 300 points/ })).toHaveAttribute('aria-pressed', 'false');
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByRole('button', { name: /^₹1,250, 1,250 points/ }));
+    expect(await screen.findByRole('button', { name: /^₹1,250, 1,250 points/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByRole('button', { name: /^₹300, 300 points/ })).toHaveAttribute('aria-pressed', 'false');
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([u]) => u === '/api/rewards/redeem');
@@ -733,13 +733,13 @@ describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
     const input = (await screen.findByLabelText(/voucher amount/i)) as HTMLInputElement;
     await user.type(input, '750.5');
     expect(input.value).toBe('750.5'); // never silently shrunk to 750
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount — whole rupees only');
     expect(fetchMock.mock.calls.some(([u]) => u === '/api/rewards/redeem')).toBe(false);
     // Fixed to a whole amount → posts the integer.
     await user.clear(input);
     await user.type(input, '750');
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([u]) => u === '/api/rewards/redeem');
       expect(call).toBeTruthy();
@@ -760,7 +760,7 @@ describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
     await user.click(await screen.findByText('Flexi Voucher'));
     const input = (await screen.findByLabelText(/voucher amount/i)) as HTMLInputElement;
     await user.type(input, '750.5');
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount — whole rupees only');
     expect(fetchMock.mock.calls.some(([u]) => u === '/api/rewards/redeem')).toBe(false);
   });
@@ -782,12 +782,12 @@ describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
     expect(input).toHaveAttribute('aria-invalid', 'true');
     // F6: not disabled — a tap re-shows the reason and sends nothing.
-    const btn = screen.getByRole('button', { name: 'Check the amount — whole rupees only' });
+    const btn = await screen.findByRole('button', { name: 'Check the amount — whole rupees only' });
     expect(btn).toBeEnabled();
     // F2: the next keystroke hides the alert; the live hint is never role="alert".
     await user.type(input, '1');
     expect(screen.queryByRole('alert')).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Redeem' }));
+    await user.click(await screen.findByRole('button', { name: 'Redeem' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
     expect((fetch as unknown as { mock: { calls: [string][] } }).mock.calls.some(([u]) => u === '/api/rewards/redeem')).toBe(false);
     await user.clear(input);

@@ -85,9 +85,9 @@ describe('KYC re-entry prefill — address/pincode/state + accountHolderName', (
 
     // Street Address + Pincode prefilled from existingKyc.address / .pincode
     expect(await screen.findByDisplayValue('12 MG Road')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('411001')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('411001')).toBeInTheDocument();
     // State searchable dropdown shows the prefilled value
-    expect(screen.getByTestId('state-select-input')).toHaveValue('Maharashtra');
+    expect(await screen.findByTestId('state-select-input')).toHaveValue('Maharashtra');
   });
 
   it('prefills the bank Account Holder Name on the Bank step', async () => {

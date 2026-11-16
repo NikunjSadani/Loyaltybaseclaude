@@ -6,7 +6,7 @@
  * Payment Details; nothing when the method is unknown.
  */
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -58,7 +58,7 @@ async function renderAndOpen() {
     );
     await params;
   });
-  await waitFor(() => expect(screen.getByText('Kumar General Store')).toBeInTheDocument());
+  expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
   // Payment Details live inside the collapsible Store Information.
   fireEvent.click(screen.getByRole('button', { name: /store information/i }));
   await screen.findByText('kumar@okaxis');
@@ -70,13 +70,13 @@ describe('SUCB — Sales KYC UPI capture-method badge', () => {
   it('SUCB1: QR → "Scanned"', async () => {
     stubFetch(submission('QR'));
     await renderAndOpen();
-    expect(screen.getByTestId('upi-capture-badge')).toHaveTextContent('Scanned');
+    expect(await screen.findByTestId('upi-capture-badge')).toHaveTextContent('Scanned');
   });
 
   it('SUCB2: MANUAL → "Typed" (warning style)', async () => {
     stubFetch(submission('MANUAL'));
     await renderAndOpen();
-    const badge = screen.getByTestId('upi-capture-badge');
+    const badge = await screen.findByTestId('upi-capture-badge');
     expect(badge).toHaveTextContent('Typed');
     expect(badge.className).toMatch(/amber/);
   });
@@ -106,9 +106,9 @@ describe('SUCB — Sales KYC UPI capture-method badge', () => {
     // A re-KYC with proposed changes auto-opens Store Information (no click needed).
     const struck = await screen.findByText('kumar@okaxis');
     expect(struck.tagName).toBe('DEL');
-    expect(screen.getByTestId('proposed-removal-badge')).toHaveTextContent('Will be removed on approval');
+    expect(await screen.findByTestId('proposed-removal-badge')).toHaveTextContent('Will be removed on approval');
     expect(screen.queryByTestId('upi-capture-badge')).not.toBeInTheDocument();
-    expect(screen.getByTestId('proposed-changes-banner')).toHaveTextContent('UPI ID (removed)');
+    expect(await screen.findByTestId('proposed-changes-banner')).toHaveTextContent('UPI ID (removed)');
   });
 
   /* U9 — UNVERIFIED partner: live payout hidden (nulls), proposed rep-entered values present. */
@@ -134,9 +134,9 @@ describe('SUCB — Sales KYC UPI capture-method badge', () => {
     // Proposed changes auto-open Store Information.
     const upi = await screen.findByText('fresh@okaxis');
     expect(upi.closest('[data-testid="proposed-change"]')).not.toBeNull();
-    expect(screen.getByTestId('upi-capture-badge')).toHaveTextContent('Scanned');
+    expect(await screen.findByTestId('upi-capture-badge')).toHaveTextContent('Scanned');
     expect(screen.queryByTestId('proposed-removal-badge')).not.toBeInTheDocument();
-    const banner = screen.getByTestId('proposed-changes-banner');
+    const banner = await screen.findByTestId('proposed-changes-banner');
     expect(banner).toHaveTextContent('UPI ID');
     expect(banner).not.toHaveTextContent('(removed)');
   });

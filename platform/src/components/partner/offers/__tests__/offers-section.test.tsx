@@ -77,24 +77,24 @@ describe('OffersSection', () => {
     fetchPartnerOffers.mockResolvedValue([T2, T1, T3]);
     render(<OffersSection />);
     const section = await screen.findByTestId('offers-section');
-    expect(within(section).getByText("This month's offers")).toBeInTheDocument();
+    expect(await within(section).findByText("This month's offers")).toBeInTheDocument();
 
-    const g1 = screen.getByText('Earn on your targets');
-    const g2 = screen.getByText('Extra schemes this month');
+    const g1 = await screen.findByText('Earn on your targets');
+    const g2 = await screen.findByText('Extra schemes this month');
     expect(g1.compareDocumentPosition(g2) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    const grid = screen.getByTestId('offers-grid-TARGET_REWARD');
+    const grid = await screen.findByTestId('offers-grid-TARGET_REWARD');
     expect(grid.className).toContain('grid-cols-2');
-    expect(within(grid).getAllByTestId('offer-tile')).toHaveLength(2);
+    expect(await within(grid).findAllByTestId('offer-tile')).toHaveLength(2);
 
-    const tile = within(grid).getAllByTestId('offer-tile')[0];
-    const value = within(tile).getByText('+35 pts');
-    const product = within(tile).getByText('ADHO 50 ml');
-    const label = within(tile).getByText('Earn on every case');
+    const tile = (await within(grid).findAllByTestId('offer-tile'))[0];
+    const value = await within(tile).findByText('+35 pts');
+    const product = await within(tile).findByText('ADHO 50 ml');
+    const label = await within(tile).findByText('Earn on every case');
     expect(value.compareDocumentPosition(product) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(product.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(within(screen.getByTestId('offers-grid-EXTRA_SCHEME')).getByText('+2.5%')).toBeInTheDocument();
-    expect(within(grid).getByText('Free kit')).toBeInTheDocument();
+    expect(await within(screen.getByTestId('offers-grid-EXTRA_SCHEME')).findByText('+2.5%')).toBeInTheDocument();
+    expect(await within(grid).findByText('Free kit')).toBeInTheDocument();
   });
 
   it('KPI progress: bar with aria-valuenow, "Unlocked" at ≥100%, no bar without a target', async () => {
@@ -105,16 +105,16 @@ describe('OffersSection', () => {
     fetchPartnerOffers.mockResolvedValue([T1, T3, noTarget]);
     render(<OffersSection />);
     await screen.findByTestId('offers-section');
-    const tiles = screen.getAllByTestId('offer-tile');
+    const tiles = await screen.findAllByTestId('offer-tile');
 
-    const bar1 = within(tiles[0]).getByRole('progressbar');
+    const bar1 = await within(tiles[0]).findByRole('progressbar');
     expect(bar1).toHaveAttribute('aria-valuenow', '60');
-    expect(within(tiles[0]).getByText('60%')).toBeInTheDocument();
+    expect(await within(tiles[0]).findByText('60%')).toBeInTheDocument();
     expect(within(tiles[0]).queryByText('Unlocked')).not.toBeInTheDocument();
 
-    expect(within(tiles[1]).getByText('Unlocked')).toBeInTheDocument();
+    expect(await within(tiles[1]).findByText('Unlocked')).toBeInTheDocument();
     // pct 110 is clamped for aria (0–100).
-    expect(within(tiles[1]).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100');
+    expect(await within(tiles[1]).findByRole('progressbar')).toHaveAttribute('aria-valuenow', '100');
     expect(within(tiles[2]).queryByRole('progressbar')).not.toBeInTheDocument();
   });
 
@@ -126,7 +126,7 @@ describe('OffersSection', () => {
     fetchPartnerOffers.mockResolvedValue([almost]);
     render(<OffersSection />);
     const tile = (await screen.findAllByTestId('offer-tile'))[0];
-    const bar = within(tile).getByRole('progressbar');
+    const bar = await within(tile).findByRole('progressbar');
     expect(bar).toHaveAttribute('aria-valuenow', '99');
     expect((bar.firstElementChild as HTMLElement).style.width).toBe('99%');
     expect(within(tile).queryByText('Unlocked')).not.toBeInTheDocument();
@@ -136,9 +136,9 @@ describe('OffersSection', () => {
     fetchPartnerOffers.mockResolvedValue([T1, T3]);
     render(<OffersSection />);
     await screen.findByTestId('offers-section');
-    expect(screen.getByRole('button', { name: 'Earn on every case, +35 pts per case, ADHO 50 ml, 60% of target' }))
+    expect(await screen.findByRole('button', { name: 'Earn on every case, +35 pts per case, ADHO 50 ml, 60% of target' }))
       .toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Hit the target, get a kit, Free kit, Pomace 5 L, Unlocked' }))
+    expect(await screen.findByRole('button', { name: 'Hit the target, get a kit, Free kit, Pomace 5 L, Unlocked' }))
       .toBeInTheDocument();
   });
 
@@ -146,12 +146,12 @@ describe('OffersSection', () => {
     fetchPartnerOffers.mockResolvedValue([{ ...T1, valueNumber: 9999999 }]);
     render(<OffersSection />);
     const tile = (await screen.findAllByTestId('offer-tile'))[0];
-    const value = within(tile).getByTestId('offer-tile-value');
+    const value = await within(tile).findByTestId('offer-tile-value');
     expect(value).toHaveTextContent('+99,99,999 pts');
     expect(value.className).not.toContain('truncate');
     expect(value.className).toContain('text-xl');
-    expect(value).not.toContainElement(within(tile).getByTestId('offer-tile-unit'));
-    expect(within(tile).getByTestId('offer-tile-unit').className).toContain('truncate');
+    expect(value).not.toContainElement(await within(tile).findByTestId('offer-tile-unit'));
+    expect((await within(tile).findByTestId('offer-tile-unit')).className).toContain('truncate');
   });
 
   it('small print meets contrast: ≥ 12px, gray-600 off-tile, group tone on-tile (Valid till, per-tile till, footer)', async () => {
@@ -173,7 +173,7 @@ describe('OffersSection', () => {
     const till = await screen.findByText('till 15 Nov');
     expect(till.className).toContain('text-amber-800');
     expect(till.className).toContain('text-xs');
-    const tillBrand = screen.getByText('till 30 Nov');
+    const tillBrand = await screen.findByText('till 30 Nov');
     expect(tillBrand.className).toContain(BRAND_TEXT);
     expect(tillBrand.className).toContain('text-xs');
   });
@@ -183,7 +183,7 @@ describe('OffersSection', () => {
     render(<OffersSection />);
     await screen.findByTestId('offers-section');
 
-    const target = within(screen.getByTestId('offers-grid-TARGET_REWARD')).getByTestId('offer-tile');
+    const target = await within(await screen.findByTestId('offers-grid-TARGET_REWARD')).findByTestId('offer-tile');
     expect(target).toHaveAttribute('data-group', 'TARGET_REWARD');
     expect(target.className).toContain('bg-[var(--brand-primary-light,#ecf8f0)]');
     expect(target.className).toContain('border-[color:color-mix(in_srgb,var(--brand-primary,#16a34a)_25%,white)]');
@@ -195,15 +195,15 @@ describe('OffersSection', () => {
     // No hardcoded tenant colour anywhere on the brand tile.
     expect(target.outerHTML).not.toMatch(/#[0-9a-f]{6}(?!\)|\])/i);
 
-    const extra = within(screen.getByTestId('offers-grid-EXTRA_SCHEME')).getByTestId('offer-tile');
+    const extra = await within(await screen.findByTestId('offers-grid-EXTRA_SCHEME')).findByTestId('offer-tile');
     expect(extra).toHaveAttribute('data-group', 'EXTRA_SCHEME');
     expect(extra.className).toContain('bg-amber-50');
     expect(extra.className).toContain('border-amber-200');
     expect(extra.className).not.toContain('bg-white');
-    expect(within(extra).getByTestId('offer-tile-value').className).toContain('text-amber-900');
-    expect(within(extra).getByTestId('offer-tile-product').className).toContain('text-amber-900');
-    expect(within(extra).getByTestId('offer-tile-unit').className).toContain('text-amber-800');
-    expect(within(extra).getByTestId('offer-tile-label').className).toContain('text-amber-800');
+    expect((await within(extra).findByTestId('offer-tile-value')).className).toContain('text-amber-900');
+    expect((await within(extra).findByTestId('offer-tile-product')).className).toContain('text-amber-900');
+    expect((await within(extra).findByTestId('offer-tile-unit')).className).toContain('text-amber-800');
+    expect((await within(extra).findByTestId('offer-tile-label')).className).toContain('text-amber-800');
     expect(extra.className).not.toContain('brand-primary-light');
   });
 
@@ -212,7 +212,7 @@ describe('OffersSection', () => {
     fetchPartnerOffers.mockResolvedValue([T1, T3, at85, { ...T2, id: 't7', progress: T1.progress }]);
     render(<OffersSection />);
     await screen.findByTestId('offers-section');
-    const tiles = screen.getAllByTestId('offer-tile');
+    const tiles = await screen.findAllByTestId('offer-tile');
     const bar = (t: HTMLElement) => within(t).getByRole('progressbar');
     const fill = (t: HTMLElement) => within(t).getByTestId('offer-tile-bar-fill');
 
@@ -222,9 +222,9 @@ describe('OffersSection', () => {
     expect(fill(tiles[2]).className).toContain('bg-amber-700');  // 85%
     expect(fill(tiles[3]).className).toContain('bg-orange-700'); // EXTRA_SCHEME tile, 60%
     for (const t of tiles) expect(fill(t).className).not.toMatch(/-(400|500)\b/);
-    expect(within(tiles[3]).getByTestId('offer-tile-pct').className).toContain('text-amber-800');
+    expect((await within(tiles[3]).findByTestId('offer-tile-pct')).className).toContain('text-amber-800');
 
-    const pill = within(tiles[1]).getByTestId('offer-tile-unlocked');
+    const pill = await within(tiles[1]).findByTestId('offer-tile-unlocked');
     expect(pill.className).toContain('bg-emerald-50');
     expect(pill.className).toContain('text-emerald-700');
     expect(pill.className).toContain('ring-emerald-200');
@@ -237,14 +237,14 @@ describe('OffersSection', () => {
     await screen.findByTestId('offers-section');
     fireEvent.click(screen.getByText('Earn on every case').closest('button')!);
     let dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByTestId('offer-sheet-value').className).toContain('text-[var(--brand-primary)]');
+    expect((await within(dialog).findByTestId('offer-sheet-value')).className).toContain('text-[var(--brand-primary)]');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
 
     fireEvent.click(screen.getByText('Festive bonus').closest('button')!);
     dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByTestId('offer-sheet-value').className).toContain('text-amber-700');
-    expect(within(dialog).getByTestId('offer-sheet').className).not.toMatch(/bg-amber|brand-primary-light/);
+    expect((await within(dialog).findByTestId('offer-sheet-value')).className).toContain('text-amber-700');
+    expect((await within(dialog).findByTestId('offer-sheet')).className).not.toMatch(/bg-amber|brand-primary-light/);
   });
 
   it('tapping a tile opens the sheet with details + Valid till + brand footer; close works', async () => {
@@ -254,12 +254,12 @@ describe('OffersSection', () => {
     fireEvent.click(screen.getByText('Earn on every case').closest('button')!);
 
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('+35 pts')).toBeInTheDocument();
-    expect(within(dialog).getByText('ADHO 50 ml')).toBeInTheDocument();
-    expect(within(dialog).getByText('Details')).toBeInTheDocument();
-    expect(within(dialog).getByText('Valid on billed cases only.')).toBeInTheDocument();
-    expect(within(dialog).getByText('Valid till 30 Nov 2026')).toBeInTheDocument();
-    expect(within(dialog).getByText(/120 \/ 200 cases · 60%/)).toBeInTheDocument();
+    expect(await within(dialog).findByText('+35 pts')).toBeInTheDocument();
+    expect(await within(dialog).findByText('ADHO 50 ml')).toBeInTheDocument();
+    expect(await within(dialog).findByText('Details')).toBeInTheDocument();
+    expect(await within(dialog).findByText('Valid on billed cases only.')).toBeInTheDocument();
+    expect(await within(dialog).findByText('Valid till 30 Nov 2026')).toBeInTheDocument();
+    expect(await within(dialog).findByText(/120 \/ 200 cases · 60%/)).toBeInTheDocument();
     expect(within(dialog).getByTestId('offer-sheet-footer')).toHaveTextContent(
       'Offer details are shared by Bajaj Consumer Care. Terms apply.',
     );
@@ -296,7 +296,7 @@ describe('OffersSection', () => {
     render(<OffersSection />);
     await screen.findByTestId('offers-section');
     expect(screen.queryByTestId('offers-valid-till')).not.toBeInTheDocument();
-    expect(screen.getByText('till 15 Nov')).toBeInTheDocument();
-    expect(screen.getByText('till 30 Nov')).toBeInTheDocument();
+    expect(await screen.findByText('till 15 Nov')).toBeInTheDocument();
+    expect(await screen.findByText('till 30 Nov')).toBeInTheDocument();
   });
 });

@@ -18,7 +18,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -129,7 +129,7 @@ describe('PDV2 — partnerDashboardV2 ON', () => {
 
     // The single merged Performance card replaces the chart in v2 (its content is covered in
     // performance-card.test.tsx; here we only assert the v2 GATING).
-    await waitFor(() => expect(screen.getByText('Performance')).toBeInTheDocument());
+    expect(await screen.findByText('Performance')).toBeInTheDocument();
 
     // Trend chart hidden.
     expect(screen.queryByTestId('achievement-chart')).not.toBeInTheDocument();
@@ -137,10 +137,10 @@ describe('PDV2 — partnerDashboardV2 ON', () => {
 
     // To-go banner from the hero's primary KPI (800 − 400 = 400 cases). Exact text so it
     // can't be confused with the OFF-mode chart footer ("… to go · N days left").
-    expect(screen.getByText('400 cases to go')).toBeInTheDocument();
+    expect(await screen.findByText('400 cases to go')).toBeInTheDocument();
 
     // Enlarged wallet points (500 → the points <p> carries text-3xl).
-    expect(screen.getByText('500').className).toContain('text-3xl');
+    expect((await screen.findByText('500')).className).toContain('text-3xl');
 
     // SINGLE identity source — the page must NOT fetch /partner/me itself (the hook is mocked).
     expect(fetchMock.mock.calls.some(c => String(c[0]).includes('/api/partner/me'))).toBe(false);
@@ -153,7 +153,7 @@ describe('PDV2 — partnerDashboardV2 OFF (byte-identical to today)', () => {
     vi.stubGlobal('fetch', stubFetch({ kpi: { code: 'SV', name: 'Secondary Volume', target: 800, achieved: 400, unit: 'cases' }, walletPts: 500, trend: CASES_TREND }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByTestId('achievement-chart')).toBeInTheDocument());
+    expect(await screen.findByTestId('achievement-chart')).toBeInTheDocument();
 
     // No merged Performance card, no hero to-go banner (the chart's own footer still reads
     // "… to go · N days left" as today — that is a DIFFERENT, non-exact string).
@@ -161,7 +161,7 @@ describe('PDV2 — partnerDashboardV2 OFF (byte-identical to today)', () => {
     expect(screen.queryByText('400 cases to go')).not.toBeInTheDocument();
 
     // Points stay small.
-    const ptsEl = screen.getByText('500');
+    const ptsEl = await screen.findByText('500');
     expect(ptsEl.className).toContain('text-base');
     expect(ptsEl.className).not.toContain('text-4xl');
   });
@@ -180,7 +180,7 @@ describe('PDV2 — to-go banner uses the SAME exact remaining>0 condition in all
     vi.stubGlobal('fetch', stubFetch({ kpi: { code: 'SV', name: 'Secondary Volume', target: 1000, achieved: 996, unit: 'cases' }, walletPts: 100, trend: boundaryTrend }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('4 cases to go')).toBeInTheDocument());
+    expect(await screen.findByText('4 cases to go')).toBeInTheDocument();
   });
 });
 

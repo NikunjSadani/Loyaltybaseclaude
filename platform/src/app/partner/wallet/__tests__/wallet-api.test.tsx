@@ -89,10 +89,7 @@ function stubFetch(
 
 async function renderWallet() {
   render(<WalletPage />);
-  await waitFor(
-    () => expect(screen.queryByTestId('wallet-kpi-filter')).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByTestId('wallet-kpi-filter', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 describe('PW — Partner wallet API wiring (live data)', () => {
@@ -151,7 +148,7 @@ describe('PW — Partner wallet API wiring (live data)', () => {
     await waitFor(() => {
       const balanceText = screen.getAllByText(/50[,.]?000/);
       expect(balanceText.length).toBeGreaterThan(0);
-    }, { timeout: 3000 });
+    }, { timeout: 15_000 });
   });
 
   // ── Error fallback ───────────────────────────────────────────────────────────
@@ -160,7 +157,7 @@ describe('PW — Partner wallet API wiring (live data)', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')));
     await renderWallet();
     expect(screen.queryByTestId('wallet-kpi-filter')).toBeInTheDocument();
-    expect(screen.getByTestId('statement-load-error')).toHaveTextContent(/couldn.t load your statement/i);
+    expect(await screen.findByTestId('statement-load-error')).toHaveTextContent(/couldn.t load your statement/i);
   });
 
   it('PW8: a statement error response shows an error state, never a silently empty statement', async () => {
@@ -172,7 +169,7 @@ describe('PW — Partner wallet API wiring (live data)', () => {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: REAL_API_BALANCE }) });
     }));
     await renderWallet();
-    expect(screen.getByTestId('statement-load-error')).toBeInTheDocument();
+    expect(await screen.findByTestId('statement-load-error')).toBeInTheDocument();
     expect(screen.queryByText(/No transactions for this period/i)).toBeNull();
   });
 

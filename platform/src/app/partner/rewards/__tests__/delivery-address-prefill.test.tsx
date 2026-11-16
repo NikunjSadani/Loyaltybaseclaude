@@ -134,9 +134,9 @@ describe('DAP — delivery address pre-fill from the active outlet', () => {
     expect(field('City *').value).toBe('Pune');
     expect(field('State').value).toBe('Maharashtra');
     expect(field('Pincode *').value).toBe('411001');
-    expect(screen.getByText(HINT)).toBeInTheDocument();
+    expect(await screen.findByText(HINT)).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
     await waitFor(() => expect(redeemBody()).not.toBeNull());
     expect(redeemBody().deliveryAddress).toMatchObject({
       address: '12 MG Road', city: 'Pune', state: 'Maharashtra', pincode: '411001',
@@ -152,12 +152,12 @@ describe('DAP — delivery address pre-fill from the active outlet', () => {
     expect(field('Pincode *').value).toBe('');
     expect(field('City *').value).toBe('Pune');
 
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
     expect(toastError).toHaveBeenCalledWith('Please fill in all required address fields');
     expect(redeemBody()).toBeNull();
 
     await user.type(field('Pincode *'), '411001');
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
     await waitFor(() => expect(redeemBody()).not.toBeNull());
     expect(redeemBody().deliveryAddress.pincode).toBe('411001');
   });
@@ -197,7 +197,7 @@ describe('DAP — delivery address pre-fill from the active outlet', () => {
 
     await user.clear(field('City *'));
     await user.type(field('City *'), 'Nashik');
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
     await waitFor(() => expect(redeemBody()).not.toBeNull());
     expect(redeemBody().deliveryAddress.city).toBe('Nashik');
   });
@@ -246,7 +246,7 @@ describe('DAP — delivery address pre-fill from the active outlet', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
     await openGiftForm(user);
-    expect(screen.getByText(HINT)).toBeInTheDocument();
+    expect(await screen.findByText(HINT)).toBeInTheDocument();
 
     await user.clear(field('City *'));
     await user.type(field('City *'), 'Nashik');

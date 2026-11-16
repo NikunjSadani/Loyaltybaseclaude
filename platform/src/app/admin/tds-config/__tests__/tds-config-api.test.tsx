@@ -86,9 +86,9 @@ describe('TDS Treatment config page', () => {
 
     const section194r = await screen.findByTestId('tds-section-sec_194r')
     expect(section194r).toHaveAttribute('aria-checked', 'true')
-    expect(screen.getByTestId('tds-section-sec_194c')).toHaveAttribute('aria-checked', 'false')
-    expect(screen.getByTestId('tds-methodology-deduct')).toHaveAttribute('aria-checked', 'true')
-    expect(screen.getByTestId('tds-methodology-gross_up')).toHaveAttribute('aria-checked', 'false')
+    expect(await screen.findByTestId('tds-section-sec_194c')).toHaveAttribute('aria-checked', 'false')
+    expect(await screen.findByTestId('tds-methodology-deduct')).toHaveAttribute('aria-checked', 'true')
+    expect(await screen.findByTestId('tds-methodology-gross_up')).toHaveAttribute('aria-checked', 'false')
     // Editable for GIFSY once loaded.
     expect(section194r).not.toBeDisabled()
   })
@@ -120,14 +120,14 @@ describe('TDS Treatment config page', () => {
     const { puts } = stubFetch({ clientId: 'bajaj', section: 'SEC_194C', methodology: 'GROSS_UP' })
     render(<TdsConfigPage />)
     expect(await screen.findByTestId('tds-config-tenant')).toHaveTextContent('bajaj')
-    const s194r = screen.getByTestId('tds-section-sec_194r')
+    const s194r = await screen.findByTestId('tds-section-sec_194r')
     await waitFor(() => expect(s194r).not.toBeDisabled())
     fireEvent.click(s194r)
     await waitFor(() => expect(puts).toHaveLength(1))
     expect(puts[0].body).toEqual({ clientId: 'bajaj', section: 'SEC_194R', methodology: 'GROSS_UP' })
     // Re-fetched after the save → shows the STORED value.
-    await waitFor(() => expect(screen.getByTestId('tds-saved-flash')).toBeInTheDocument())
-    expect(screen.getByTestId('tds-section-sec_194r')).toHaveAttribute('aria-checked', 'true')
+    expect(await screen.findByTestId('tds-saved-flash')).toBeInTheDocument()
+    expect(await screen.findByTestId('tds-section-sec_194r')).toHaveAttribute('aria-checked', 'true')
   })
 
   it('after a save the page RE-FETCHES: if the stored value did not change it shows the stored value + an error (no false "Saved")', async () => {
@@ -138,7 +138,7 @@ describe('TDS Treatment config page', () => {
     fireEvent.click(s194r)
     await waitFor(() => expect(puts).toHaveLength(1))
     expect(await screen.findByTestId('tds-save-error')).toHaveTextContent('did not take effect')
-    expect(screen.getByTestId('tds-section-sec_194c')).toHaveAttribute('aria-checked', 'true')
+    expect(await screen.findByTestId('tds-section-sec_194c')).toHaveAttribute('aria-checked', 'true')
     expect(screen.queryByTestId('tds-saved-flash')).not.toBeInTheDocument()
     const gets = fetchMock.mock.calls.filter(([u, i]) => u === '/api/admin/tds/config' && !(i as RequestInit | undefined)?.method)
     expect(gets.length).toBe(2) // seed + post-save re-fetch
@@ -152,8 +152,8 @@ describe('TDS Treatment config page', () => {
     const section194c = await screen.findByTestId('tds-section-sec_194c')
     expect(section194c).toHaveAttribute('aria-checked', 'true') // still shows the applied value
     expect(section194c).toBeDisabled()
-    expect(screen.getByTestId('tds-methodology-gross_up')).toBeDisabled()
-    expect(screen.getByTestId('tds-readonly-hint')).toBeInTheDocument()
+    expect(await screen.findByTestId('tds-methodology-gross_up')).toBeDisabled()
+    expect(await screen.findByTestId('tds-readonly-hint')).toBeInTheDocument()
 
     // Clicking a disabled toggle must not fire a PUT.
     fireEvent.click(screen.getByTestId('tds-section-sec_194r'))

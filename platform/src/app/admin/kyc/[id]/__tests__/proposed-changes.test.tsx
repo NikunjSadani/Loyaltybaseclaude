@@ -84,10 +84,10 @@ describe('KYCPC — Admin KYC re-KYC proposed-change rendering', () => {
     // Proposed (new) GSTIN is shown as the primary value…
     expect(await screen.findByText('29ZZZZZ9999Z9Z9')).toBeInTheDocument();
     // …with the old value alongside (one "was:" per changed field — GST + Account).
-    expect(screen.getAllByText(/was:/)).toHaveLength(2);
-    expect(screen.getByText('27AABCS1429B1Z5')).toBeInTheDocument();     // old GST
-    expect(screen.getByText('77777000000099')).toBeInTheDocument();      // new account
-    expect(screen.getByText('50100000000012')).toBeInTheDocument();      // old account
+    expect(await screen.findAllByText(/was:/)).toHaveLength(2);
+    expect(await screen.findByText('27AABCS1429B1Z5')).toBeInTheDocument();     // old GST
+    expect(await screen.findByText('77777000000099')).toBeInTheDocument();      // new account
+    expect(await screen.findByText('50100000000012')).toBeInTheDocument();      // old account
   });
 
   it('KYCPC2: banner lists the changed field labels', async () => {
@@ -104,9 +104,9 @@ describe('KYCPC — Admin KYC re-KYC proposed-change rendering', () => {
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     await screen.findByText('29ZZZZZ9999Z9Z9');
     // GSTIN + Account No. changed → 2 field-level badges.
-    expect(screen.getAllByTestId('proposed-change')).toHaveLength(2);
+    expect(await screen.findAllByTestId('proposed-change')).toHaveLength(2);
     // PAN unchanged → its live value still renders plainly.
-    expect(screen.getByText('AABCS1429B')).toBeInTheDocument();
+    expect(await screen.findByText('AABCS1429B')).toBeInTheDocument();
   });
 
   it('KYCPC5: a staged outlet-address change shows the proposed address + "was: <old>"', async () => {
@@ -121,8 +121,8 @@ describe('KYCPC — Admin KYC re-KYC proposed-change rendering', () => {
     // Proposed (overlaid) full address shown as primary…
     expect(await screen.findByText('Unit 4, New Market Rd, Pune, Maharashtra, 411001')).toBeInTheDocument();
     // …old outlet address as "was".
-    expect(screen.getByText(/was:/)).toBeInTheDocument();
-    expect(screen.getByText('Shop 12, Old Lane, Mumbai, Maharashtra, 400053')).toBeInTheDocument();
+    expect(await screen.findByText(/was:/)).toBeInTheDocument();
+    expect(await screen.findByText('Shop 12, Old Lane, Mumbai, Maharashtra, 400053')).toBeInTheDocument();
     // Banner lists Address.
     expect(await screen.findByTestId('proposed-changes-banner')).toHaveTextContent('Address');
   });
@@ -134,7 +134,7 @@ describe('KYCPC — Admin KYC re-KYC proposed-change rendering', () => {
     expect(screen.queryByTestId('proposed-changes-banner')).not.toBeInTheDocument();
     expect(screen.queryByTestId('proposed-change')).not.toBeInTheDocument();
     // Live GST renders as the plain value (no proposed override).
-    expect(screen.getByText('27AABCS1429B1Z5')).toBeInTheDocument();
+    expect(await screen.findByText('27AABCS1429B1Z5')).toBeInTheDocument();
   });
 });
 
@@ -150,7 +150,7 @@ describe('KYCPV — Admin KYC verified-on-parent badge', () => {
     stubFetch({ ...REKYC_SUBMISSION, proposedPartner: null, parentVerified: { panNumber: true, gstNumber: true } });
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     await screen.findAllByText('Sharma General Store');
-    expect(screen.getAllByTestId('verified-on-parent-badge')).toHaveLength(2);
+    expect(await screen.findAllByTestId('verified-on-parent-badge')).toHaveLength(2);
     // No proposed changes here → no proposed-change pills.
     expect(screen.queryByTestId('proposed-change')).not.toBeInTheDocument();
   });
@@ -161,9 +161,9 @@ describe('KYCPV — Admin KYC verified-on-parent badge', () => {
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     // The amber proposed pill still renders unchanged (GST + Account = 2)…
     expect(await screen.findByText('29ZZZZZ9999Z9Z9')).toBeInTheDocument();
-    expect(screen.getAllByTestId('proposed-change')).toHaveLength(2);
+    expect(await screen.findAllByTestId('proposed-change')).toHaveLength(2);
     // …alongside exactly one verified badge (on GST).
-    expect(screen.getAllByTestId('verified-on-parent-badge')).toHaveLength(1);
+    expect(await screen.findAllByTestId('verified-on-parent-badge')).toHaveLength(1);
   });
 
   it('KYCPV3: a masked reader still gets the badge (parentVerified computed pre-mask)', async () => {
@@ -178,7 +178,7 @@ describe('KYCPV — Admin KYC verified-on-parent badge', () => {
     });
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     await screen.findAllByText('Sharma General Store');
-    expect(screen.getByTestId('verified-on-parent-badge')).toBeInTheDocument();
+    expect(await screen.findByTestId('verified-on-parent-badge')).toBeInTheDocument();
   });
 
   it('KYCPV4: no parentVerified → no badge (purely additive)', async () => {
@@ -217,6 +217,6 @@ describe('KYCGL — Admin KYC group-leave banner', () => {
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     // Both banners present — the group-leave warning does not replace the proposed-changes one.
     expect(await screen.findByTestId('group-leave-banner')).toBeInTheDocument();
-    expect(screen.getByTestId('proposed-changes-banner')).toBeInTheDocument();
+    expect(await screen.findByTestId('proposed-changes-banner')).toBeInTheDocument();
   });
 });

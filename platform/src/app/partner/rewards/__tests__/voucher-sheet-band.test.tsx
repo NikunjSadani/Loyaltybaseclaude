@@ -94,25 +94,25 @@ describe('VB — admin band on the voucher sheet', () => {
     const user = userEvent.setup();
     await openSheet(user, 'Amazon Voucher');
 
-    expect(screen.getByTestId('voucher-amount-band')).toHaveTextContent('(min ₹500, max ₹10,000)');
-    const input = screen.getByLabelText(/voucher amount/i);
+    expect(await screen.findByTestId('voucher-amount-band')).toHaveTextContent('(min ₹500, max ₹10,000)');
+    const input = await screen.findByLabelText(/voucher amount/i);
 
     // Below the item min (but above the ₹250 tenant floor — the old, wrong min).
     await user.type(input, '300');
-    expect(screen.getByText('Minimum redemption is ₹500')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Min ₹500 required' })).toBeDisabled();
+    expect(await screen.findByText('Minimum redemption is ₹500')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Min ₹500 required' })).toBeDisabled();
 
     // Above the item max.
     await user.clear(input);
     await user.type(input, '20000');
-    expect(screen.getByText('Maximum redemption is ₹10,000')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Max ₹10,000 allowed' })).toBeDisabled();
+    expect(await screen.findByText('Maximum redemption is ₹10,000')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Max ₹10,000 allowed' })).toBeDisabled();
     expect(redeemCalls(fetchMock)).toHaveLength(0);
 
     // Inside the band → sends.
     await user.clear(input);
     await user.type(input, '600');
-    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await user.click(await screen.findByRole('button', { name: /send otp/i }));
     await waitFor(() => expect(redeemCalls(fetchMock)).toHaveLength(1));
     expect(JSON.parse((redeemCalls(fetchMock)[0][1] as RequestInit).body as string)).toEqual({ rewardId: 'amz', amount: 600 });
   });
@@ -122,9 +122,9 @@ describe('VB — admin band on the voucher sheet', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
     await openSheet(user, 'Amazon Voucher');
-    expect(screen.getByTestId('voucher-amount-band')).toHaveTextContent('(min ₹250, max ₹5,000)');
-    await user.type(screen.getByLabelText(/voucher amount/i), '200');
-    expect(screen.getByRole('button', { name: 'Min ₹250 required' })).toBeDisabled();
+    expect(await screen.findByTestId('voucher-amount-band')).toHaveTextContent('(min ₹250, max ₹5,000)');
+    await user.type(await screen.findByLabelText(/voucher amount/i), '200');
+    expect(await screen.findByRole('button', { name: 'Min ₹250 required' })).toBeDisabled();
   });
 
   // (A min-only band is not a real case: the server's FREE_AMOUNT needs BOTH bounds and the admin
@@ -134,12 +134,12 @@ describe('VB — admin band on the voucher sheet', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
     await openSheet(user, 'Flexi Voucher');
-    expect(screen.getByTestId('voucher-amount-band')).toHaveTextContent('(min ₹250, max ₹50,000)');
-    const input = screen.getByLabelText(/voucher amount/i);
+    expect(await screen.findByTestId('voucher-amount-band')).toHaveTextContent('(min ₹250, max ₹50,000)');
+    const input = await screen.findByLabelText(/voucher amount/i);
     // L4: the band is the field's description in the normal state…
     expect(input).toHaveAttribute('aria-describedby', 'voucher-amount-band');
     await user.type(input, '40000');
-    expect(screen.getByRole('button', { name: /send otp/i })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: /send otp/i })).toBeEnabled();
     // …and stays alongside the hint when one shows.
     await user.clear(input);
     await user.type(input, '60000');
@@ -151,13 +151,13 @@ describe('VB — admin band on the voucher sheet', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
     await openSheet(user, 'Amazon Voucher');
-    expect(screen.getByTestId('voucher-unredeemable')).toHaveTextContent("This voucher can't be redeemed right now");
+    expect(await screen.findByTestId('voucher-unredeemable')).toHaveTextContent("This voucher can't be redeemed right now");
     expect(screen.queryByTestId('voucher-amount-band')).toBeNull(); // never "(min ₹250, max ₹200)"
     expect(screen.queryByText(/max ₹200/)).toBeNull();
-    const input = screen.getByLabelText(/voucher amount/i);
+    const input = await screen.findByLabelText(/voucher amount/i);
     expect(input).toBeDisabled();
     expect(input).toHaveAttribute('aria-describedby', 'voucher-amount-unavailable');
-    const btn = screen.getByRole('button', { name: 'Not available' });
+    const btn = await screen.findByRole('button', { name: 'Not available' });
     expect(btn).toBeDisabled();
     await user.click(btn);
     expect(redeemCalls(fetchMock)).toHaveLength(0);
@@ -168,12 +168,12 @@ describe('VB — admin band on the voucher sheet', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
     await openSheet(user, 'Myntra Gift Card');
-    expect(screen.getByRole('group', { name: /voucher amount/i })).toBeInTheDocument();
+    expect(await screen.findByRole('group', { name: /voucher amount/i })).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: /voucher amount/i })).toBeNull();
     expect(screen.queryByTestId('voucher-amount-band')).toBeNull();
-    expect(screen.getByRole('button', { name: /^₹100, 100 points \(below the minimum\)/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /^₹500, 500 points$/ })).toBeEnabled();
-    expect(screen.getByRole('button', { name: /^₹1,000, 1,000 points$/ })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: /^₹100, 100 points \(below the minimum\)/ })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: /^₹500, 500 points$/ })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: /^₹1,000, 1,000 points$/ })).toBeEnabled();
   });
 });
 
@@ -184,9 +184,9 @@ describe('VB — brand on the sheet', () => {
     const user = userEvent.setup();
     const heading = await openSheet(user, 'Amazon Voucher');
     expect(heading).toHaveTextContent('Amazon Voucher');
-    expect(screen.getByAltText('Amazon Voucher logo')).toHaveAttribute('src', 'https://cdn.example/amazon.png');
+    expect(await screen.findByAltText('Amazon Voucher logo')).toHaveAttribute('src', 'https://cdn.example/amazon.png');
     expect(screen.queryByText('Voucher — Any Amount')).toBeNull();
-    expect(screen.getByText('Any amount')).toBeInTheDocument();
+    expect(await screen.findByText('Any amount')).toBeInTheDocument();
   });
 
   it('VB5b (L5): a broken logo URL falls back to the emoji tile', async () => {
@@ -226,13 +226,13 @@ describe('VB — success copy follows the confirm status', () => {
     const copy = await redeem('DELIVERED');
     expect(copy).toHaveTextContent('Your Amazon Voucher (₹600) is ready — view the code under Orders.');
     expect(copy).not.toHaveTextContent(/being processed/);
-    expect(screen.getByText('Voucher ready')).toBeInTheDocument();
+    expect(await screen.findByText('Voucher ready')).toBeInTheDocument();
   });
 
   it('VB8: CONFIRMED (manual / still issuing) → keeps the processing wording, with the brand name', async () => {
     const copy = await redeem('CONFIRMED');
     expect(copy).toHaveTextContent('Your Amazon Voucher (₹600) is being processed. Your voucher code will appear under Orders.');
-    expect(screen.getByText('Voucher confirmed')).toBeInTheDocument();
+    expect(await screen.findByText('Voucher confirmed')).toBeInTheDocument();
   });
 });
 

@@ -9,7 +9,7 @@
  * Run: npx vitest run src/app/sales/kyc/__tests__/not-interested-in-list.test.tsx
  */
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 let searchStr = '';
@@ -54,13 +54,13 @@ beforeEach(() => {
 describe('KYC list — NOT_INTERESTED outlets surface distinctly and non-actionable', () => {
   it('shows the not-interested outlet with the "Not Interested" badge', async () => {
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
+    expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
     // Scope to the row so we target the BADGE, not the new "Not Interested" filter <option>.
-    const row = screen.getByTestId('kyc-not-interested-row');
-    expect(within(row).getByText('Not Interested')).toBeInTheDocument();
+    const row = await screen.findByTestId('kyc-not-interested-row');
+    expect(await within(row).findByText('Not Interested')).toBeInTheDocument();
     expect(screen.queryByText('No KYC submissions')).not.toBeInTheDocument();
     // distinct, admin-re-open subtitle
-    expect(screen.getByText(/Marked not interested/)).toBeInTheDocument();
+    expect(await screen.findByText(/Marked not interested/)).toBeInTheDocument();
   });
 
   it('renders the not-interested row as a NON-link (admin must re-open — no enrollment link)', async () => {

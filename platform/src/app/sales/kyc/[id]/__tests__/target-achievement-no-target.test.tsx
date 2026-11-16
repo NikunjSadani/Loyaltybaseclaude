@@ -112,11 +112,11 @@ describe('TAN — Target Achievement card, target-less KPIs', () => {
     const inCard = within(card);
 
     const nonAdho = inCard.getByTestId('kpi-no-target-NONADHO');
-    expect(within(nonAdho).getByText('₹2.8K so far')).toBeInTheDocument();
+    expect(await within(nonAdho).findByText('₹2.8K so far')).toBeInTheDocument();
     expect(nonAdho.textContent).not.toMatch(/%|\/–|2,755\.12/);
-    expect(within(inCard.getByTestId('kpi-no-target-FB')).getByText('—')).toBeInTheDocument();
+    expect(await within(inCard.getByTestId('kpi-no-target-FB')).findByText('—')).toBeInTheDocument();
     expect(inCard.getByTestId('kpi-no-target-FB').textContent).not.toMatch(/%/);
-    expect(within(inCard.getByTestId('kpi-no-target-NEG')).getByText('-₹1.5K so far')).toBeInTheDocument();
+    expect(await within(inCard.getByTestId('kpi-no-target-NEG')).findByText('-₹1.5K so far')).toBeInTheDocument();
 
     // Targeted primary + grid KPI exactly as before.
     expect(inCard.getByText('50%')).toBeInTheDocument();

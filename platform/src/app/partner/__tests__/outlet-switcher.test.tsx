@@ -66,7 +66,7 @@ describe('OS — outlet switcher', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /kumar wholesale|switch outlet/i }));
     // The menu item for the sibling (active) carries aria-current=true; the own one does not.
-    const items = screen.getAllByRole('menuitem');
+    const items = await screen.findAllByRole('menuitem');
     const sib = items.find((el) => el.textContent?.includes('Kumar Wholesale'));
     const own = items.find((el) => el.textContent?.includes('Kumar General Store'));
     expect(sib).toHaveAttribute('aria-current', 'true');
@@ -77,7 +77,7 @@ describe('OS — outlet switcher', () => {
     render(<OutletSwitcher outlets={[OWN, SIB]} activePartnerId={null} />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button'));
-    const items = screen.getAllByRole('menuitem');
+    const items = await screen.findAllByRole('menuitem');
     const own = items.find((el) => el.textContent?.includes('Kumar General Store'));
     expect(own).toHaveAttribute('aria-current', 'true');
   });
@@ -86,7 +86,7 @@ describe('OS — outlet switcher', () => {
     render(<OutletSwitcher outlets={[OWN, SIB]} activePartnerId={null} />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button'));
-    await user.click(screen.getByRole('menuitem', { name: /kumar wholesale/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /kumar wholesale/i }));
     await waitFor(() => expect(setActivePartnerMock).toHaveBeenCalledWith('p-sib'));
     // The picked outlet's names are stored BEFORE the hard reload, so the reloaded header paints it.
     await waitFor(() => expect(rememberMock).toHaveBeenCalledWith(SIB));
@@ -97,7 +97,7 @@ describe('OS — outlet switcher', () => {
     render(<OutletSwitcher outlets={[OWN, SIB]} activePartnerId="p-sib" />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /kumar wholesale|switch outlet/i }));
-    await user.click(screen.getByRole('menuitem', { name: /kumar wholesale/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /kumar wholesale/i }));
     expect(setActivePartnerMock).not.toHaveBeenCalled();
   });
 });

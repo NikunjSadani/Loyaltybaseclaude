@@ -84,8 +84,8 @@ describe('GR — Gifsy Role Editor', () => {
     stubDefaultFetch();
     render(<GifsyRolesPage />);
     expect(await screen.findByText('Operations Manager')).toBeInTheDocument();
-    expect(screen.getByText('3 permissions')).toBeInTheDocument();
-    expect(screen.getByText('7')).toBeInTheDocument(); // usersCount
+    expect(await screen.findByText('3 permissions')).toBeInTheDocument();
+    expect(await screen.findByText('7')).toBeInTheDocument(); // usersCount
   });
 
   it('GR2: shows the loading spinner on mount', () => {
@@ -103,8 +103,8 @@ describe('GR — Gifsy Role Editor', () => {
     fireEvent.click(screen.getByRole('button', { name: /new role/i }));
 
     expect(await screen.findByText('KYC')).toBeInTheDocument();
-    expect(screen.getByText('Finance')).toBeInTheDocument();
-    expect(screen.getByLabelText('kyc:approve')).toBeInTheDocument();
+    expect(await screen.findByText('Finance')).toBeInTheDocument();
+    expect(await screen.findByLabelText('kyc:approve')).toBeInTheDocument();
   });
 
   it('GR4: reserved checkbox is disabled until the ack is toggled on', async () => {

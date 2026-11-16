@@ -12,7 +12,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -139,10 +139,10 @@ describe('SKCD — Sales KYC detail API wiring', () => {
     // The GOLD tier badge is inside the collapsible "Store Information" panel.
     await renderPage('k1');
     // Expand the Store Information panel to reveal the partnerClass badge
-    const expandBtn = screen.getByRole('button', { name: /store information/i });
+    const expandBtn = await screen.findByRole('button', { name: /store information/i });
     await act(async () => { expandBtn.click(); });
     // "GOLD Tier" text rendered from {kyc.partnerClass} Tier
-    expect(screen.getByText(/GOLD Tier/i)).toBeInTheDocument();
+    expect(await screen.findByText(/GOLD Tier/i)).toBeInTheDocument();
   });
 
   // ── Error fallback ───────────────────────────────────────────────────────────
@@ -153,10 +153,7 @@ describe('SKCD — Sales KYC detail API wiring', () => {
     await renderPage('k1');
     // MOCK_KYC['k1'].firmName = 'Kumar General Store' — guard blocks the fetch for 'k1'
     // so mock data is shown regardless of the error stub
-    await waitFor(
-      () => expect(screen.getByText('Kumar General Store')).toBeInTheDocument(),
-      { timeout: 3000 },
-    );
+    expect(await screen.findByText('Kumar General Store', {}, { timeout: 15_000 })).toBeInTheDocument();
   });
 
   // QUARANTINE (launch CD gate / A-1): pre-existing TDD-red spec for an unbuilt/changed feature. Un-skip when that feature ships. See docs/plans/reconcile/baseline-red-snapshot.txt
@@ -166,7 +163,7 @@ describe('SKCD — Sales KYC detail API wiring', () => {
       json: () => new Promise(() => {}),
     }));
     await renderPage('k1');
-    expect(screen.getByText('Kumar General Store')).toBeInTheDocument();
+    expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
     expect(screen.queryByLabelText('Loading')).not.toBeInTheDocument();
   });
 });

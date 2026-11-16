@@ -88,8 +88,8 @@ describe('Sales outlets — manager-only Team Member filter', () => {
   it('renders the Team Member filter for a manager (SO) when the payload carries members', async () => {
     localStorage.setItem('loyaltybase_sales_role', 'SO');
     render(<OutletsPage />);
-    await waitFor(() => expect(screen.getByText('Alpha Store')).toBeInTheDocument());
-    expect(screen.getByTestId('outlets-member-filter')).toBeInTheDocument();
+    expect(await screen.findByText('Alpha Store')).toBeInTheDocument();
+    expect(await screen.findByTestId('outlets-member-filter')).toBeInTheDocument();
   });
 
   it('does NOT render the filter for a plain rep (XSR) with no downline', async () => {
@@ -102,20 +102,20 @@ describe('Sales outlets — manager-only Team Member filter', () => {
       return Promise.resolve({ json: () => Promise.resolve(TARGETS) });
     });
     render(<OutletsPage />);
-    await waitFor(() => expect(screen.getByText('Alpha Store')).toBeInTheDocument());
+    expect(await screen.findByText('Alpha Store')).toBeInTheDocument();
     expect(screen.queryByTestId('outlets-member-filter')).not.toBeInTheDocument();
   });
 
   it('narrows the roster to the selected member\'s sub-tree', async () => {
     localStorage.setItem('loyaltybase_sales_role', 'SO');
     render(<OutletsPage />);
-    await waitFor(() => expect(screen.getByText('Beta Store')).toBeInTheDocument());
+    expect(await screen.findByText('Beta Store')).toBeInTheDocument();
 
-    const memberFilter = screen.getByTestId('outlets-member-filter') as HTMLSelectElement;
+    const memberFilter = await screen.findByTestId('outlets-member-filter') as HTMLSelectElement;
     fireEvent.change(memberFilter, { target: { value: 'mA' } });
 
     // Only Alpha Rep's outlet (assignedUserId u-a ∈ mA.submitterUserIds) stays visible.
     await waitFor(() => expect(screen.queryByText('Beta Store')).not.toBeInTheDocument());
-    expect(screen.getByText('Alpha Store')).toBeInTheDocument();
+    expect(await screen.findByText('Alpha Store')).toBeInTheDocument();
   });
 });

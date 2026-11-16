@@ -84,22 +84,22 @@ beforeEach(() => {
 describe('KYC list — program surface + Outlet-Type/Program filters', () => {
   it('renders the program name on a row', async () => {
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
+    expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
     // The row badge renders "<programName> · <category>" — assert on the combined
     // text so it targets the ROW badge specifically, not the filter <option> (which
     // also contains the bare program name).
-    expect(screen.getByText(/Gold Programme · Premium/)).toBeInTheDocument();
-    expect(screen.getByText(/Silver Programme · Standard/)).toBeInTheDocument();
+    expect(await screen.findByText(/Gold Programme · Premium/)).toBeInTheDocument();
+    expect(await screen.findByText(/Silver Programme · Standard/)).toBeInTheDocument();
   });
 
   it('the Program filter narrows the visible rows', async () => {
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Patel Kirana')).toBeInTheDocument());
+    expect(await screen.findByText('Patel Kirana')).toBeInTheDocument();
 
-    const programFilter = screen.getByTestId('kyc-program-filter') as HTMLSelectElement;
+    const programFilter = await screen.findByTestId('kyc-program-filter') as HTMLSelectElement;
     fireEvent.change(programFilter, { target: { value: 'Gold Programme' } });
 
     await waitFor(() => expect(screen.queryByText('Patel Kirana')).not.toBeInTheDocument());
-    expect(screen.getByText('Verma Traders')).toBeInTheDocument();
+    expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
   });
 });

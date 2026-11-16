@@ -61,8 +61,8 @@ describe('VendorListPage', () => {
   it('renders the vendor list with its granted tenant + login count', async () => {
     render(<VendorListPage />);
     expect(await screen.findByTestId('vendor-row-v1')).toBeInTheDocument();
-    expect(screen.getByText('Acme Fulfilment')).toBeInTheDocument();
-    expect(screen.getByText(/Deoleo/)).toBeInTheDocument();
+    expect(await screen.findByText('Acme Fulfilment')).toBeInTheDocument();
+    expect(await screen.findByText(/Deoleo/)).toBeInTheDocument();
   });
 
   it('shows an empty state when there are no vendors', async () => {
@@ -105,8 +105,8 @@ describe('VendorDetailPage', () => {
   it('renders grants + logins for the vendor', async () => {
     render(<VendorDetailPage />);
     expect(await screen.findByTestId('grant-row-g1')).toBeInTheDocument();
-    expect(screen.getByTestId('login-row-u1')).toBeInTheDocument();
-    expect(screen.getByText('Acme Ops')).toBeInTheDocument();
+    expect(await screen.findByTestId('login-row-u1')).toBeInTheDocument();
+    expect(await screen.findByText('Acme Ops')).toBeInTheDocument();
   });
 
   it('add-grant only offers ungranted tenants and POSTs { clientId, approvalPolicy }', async () => {

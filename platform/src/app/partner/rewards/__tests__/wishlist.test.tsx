@@ -179,7 +179,7 @@ describe('WL — persistent partner wishlist', () => {
     render(<RewardsPage />);
     expect(await screen.findByText('Alpha Headphones')).toBeInTheDocument();
     // Exactly one control whose accessible name starts with "Wishlist": the header pill.
-    const wishlistButtons = screen.getAllByRole('button', { name: /^wishlist/i });
+    const wishlistButtons = await screen.findAllByRole('button', { name: /^wishlist/i });
     expect(wishlistButtons).toHaveLength(1);
     expect(wishlistButtons[0]).toHaveAccessibleName(/wishlist, 1 item/i);
   });
@@ -190,18 +190,18 @@ describe('WL — persistent partner wishlist', () => {
     const user = userEvent.setup();
     expect(await screen.findByText('Beta Speaker')).toBeInTheDocument();
     // Start from the Vouchers tab so we can see the pill switch back to Physical.
-    await user.click(screen.getByRole('button', { name: /vouchers/i }));
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
     expect(screen.queryByText('Beta Speaker')).not.toBeInTheDocument();
 
     // The pill carries the seeded count and starts un-pressed.
-    const pill = screen.getByRole('button', { name: /wishlist, 1 item/i });
+    const pill = await screen.findByRole('button', { name: /wishlist, 1 item/i });
     expect(pill).toHaveAttribute('aria-pressed', 'false');
     await user.click(pill);
 
     // Activating the pill filters to wishlisted-only on the Physical (catalogue) tab.
     expect(pill).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByPlaceholderText('Search rewards…')).toBeInTheDocument();
-    expect(screen.getByText('Alpha Headphones')).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText('Search rewards…')).toBeInTheDocument();
+    expect(await screen.findByText('Alpha Headphones')).toBeInTheDocument();
     expect(screen.queryByText('Beta Speaker')).not.toBeInTheDocument();
   });
 
@@ -217,8 +217,8 @@ describe('WL — persistent partner wishlist', () => {
 
     await user.click(pill);
     expect(pill).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByText('Alpha Headphones')).toBeInTheDocument();
-    expect(screen.getByText('Beta Speaker')).toBeInTheDocument();
+    expect(await screen.findByText('Alpha Headphones')).toBeInTheDocument();
+    expect(await screen.findByText('Beta Speaker')).toBeInTheDocument();
   });
 
   it('WL6: from the Vouchers tab with the filter ON, the pill is not pressed and a tap returns to Physical still filtered', async () => {
@@ -231,15 +231,15 @@ describe('WL — persistent partner wishlist', () => {
     await user.click(pill); // filter ON (Physical)
     expect(pill).toHaveAttribute('aria-pressed', 'true');
 
-    await user.click(screen.getByRole('button', { name: /vouchers/i }));
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
     // On Vouchers the wishlist filter isn't filtering anything → not shown as pressed.
     expect(pill).toHaveAttribute('aria-pressed', 'false');
 
     await user.click(pill);
     // Back on Physical with the filter still ON — not toggled off by the tab jump.
-    expect(screen.getByPlaceholderText('Search rewards…')).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText('Search rewards…')).toBeInTheDocument();
     expect(pill).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByText('Alpha Headphones')).toBeInTheDocument();
+    expect(await screen.findByText('Alpha Headphones')).toBeInTheDocument();
     expect(screen.queryByText('Beta Speaker')).not.toBeInTheDocument();
   });
 
@@ -248,8 +248,8 @@ describe('WL — persistent partner wishlist', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
     expect(await screen.findByText('Beta Speaker')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /wishlist, 0 items/i }));
-    expect(screen.getByText('No items found')).toBeInTheDocument();
-    expect(screen.getByText('Your wishlist is empty — tap ♥ on a reward to save it')).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /wishlist, 0 items/i }));
+    expect(await screen.findByText('No items found')).toBeInTheDocument();
+    expect(await screen.findByText('Your wishlist is empty — tap ♥ on a reward to save it')).toBeInTheDocument();
   });
 });

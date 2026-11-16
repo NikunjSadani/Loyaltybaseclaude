@@ -68,7 +68,7 @@ describe('BatchEvidencePanel — one file per request', () => {
     for (const p of posted) expect(p).toHaveLength(1);
     expect(posted.map((p) => p[0].name)).toEqual(files.map((f) => f.name));
     // Upload button back to idle.
-    expect(screen.getByText('Upload files')).toBeTruthy();
+    expect(await screen.findByText('Upload files')).toBeTruthy();
   });
 
   it('a failed file is reported by name; the files after it are still uploaded', async () => {
@@ -90,7 +90,7 @@ describe('BatchEvidencePanel — one file per request', () => {
     );
     expect(posted).toHaveLength(4); // d.jpg still attempted after the failures
 
-    const alert = screen.getByRole('alert');
+    const alert = await screen.findByRole('alert');
     expect(alert.textContent).toMatch(/b\.jpg/);
     expect(alert.textContent).toMatch(/didn't respond properly \(HTTP 500\)/);
     expect(alert.textContent).toMatch(/may or may not have been saved/);
@@ -116,10 +116,10 @@ describe('BatchEvidencePanel — one file per request', () => {
     const summary = await screen.findByText(/^Uploaded 0 of 2 file\(s\)\./);
     expect(summary.textContent).toMatch(/1 failed and wasn't saved — re-select only that file/);
     expect(summary.textContent).toMatch(/1 may or may not have been saved — check the evidence list below first/);
-    const alert = screen.getByRole('alert');
+    const alert = await screen.findByRole('alert');
     expect(alert.textContent).toMatch(/big\.jpg.*file is too large/i);
     expect(alert.textContent).toMatch(/net\.jpg.*Couldn't reach the server/);
-    await waitFor(() => expect(screen.getByText('Upload files')).toBeTruthy());
+    expect(await screen.findByText('Upload files')).toBeTruthy();
   });
 
   it('only unsure failures → never tells the operator to blindly re-select', async () => {
@@ -141,7 +141,7 @@ describe('BatchEvidencePanel — one file per request', () => {
     const { container } = render(<BatchEvidencePanel batchId="b1" canDelete />);
     await screen.findByText('No audit evidence uploaded yet.');
     // Live region exists BEFORE any upload starts.
-    expect(screen.getByTestId('evidence-upload-progress').getAttribute('aria-live')).toBe('polite');
+    expect((await screen.findByTestId('evidence-upload-progress')).getAttribute('aria-live')).toBe('polite');
     pick(container, [new File(['x'], 'notes.txt', { type: 'text/plain' })]);
     expect((await screen.findByRole('alert')).textContent).toMatch(/notes\.txt.*not a JPG/);
   });

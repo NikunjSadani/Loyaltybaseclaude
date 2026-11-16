@@ -114,8 +114,8 @@ describe('Sales dashboard — RLP/BSC toggle gate', () => {
     setupFetch(true);
     render(<SalesDashboardPage />);
     const toggle = await screen.findByTestId('rlp-bsc-toggle');
-    const rlp = screen.getByRole('tab', { name: 'RLP' });
-    const bsc = screen.getByRole('tab', { name: 'BSC' });
+    const rlp = await screen.findByRole('tab', { name: 'RLP' });
+    const bsc = await screen.findByRole('tab', { name: 'BSC' });
     expect(toggle).toContainElement(rlp);
     expect(toggle).toContainElement(bsc);
     // Default selection = RLP (SSS).

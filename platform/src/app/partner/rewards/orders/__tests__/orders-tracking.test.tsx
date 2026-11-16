@@ -58,7 +58,7 @@ describe('Member order-tracking', () => {
     stubOrders([DISPATCHED]);
     render(<OrdersPage />);
     expect(await screen.findByTestId('carrier')).toHaveTextContent('Delhivery');
-    const link = screen.getByTestId('tracking-link');
+    const link = await screen.findByTestId('tracking-link');
     expect(link).toHaveAttribute('href', 'https://track.example.com/DEOLEO-5512');
   });
 
@@ -91,9 +91,9 @@ describe('Member order-tracking', () => {
     stubOrders([DISPATCHED]);
     render(<OrdersPage />);
     const bar = await screen.findByTestId('order-stepper-compact');
-    expect(within(bar).getByTestId('order-compact-step-dispatched')).toHaveAttribute('data-state', 'current');
-    expect(within(bar).getByTestId('order-compact-step-delivered')).toHaveAttribute('data-state', 'upcoming');
-    expect(screen.getByTestId('order-stepper-next')).toHaveTextContent('Next: Delivered');
+    expect(await within(bar).findByTestId('order-compact-step-dispatched')).toHaveAttribute('data-state', 'current');
+    expect(await within(bar).findByTestId('order-compact-step-delivered')).toHaveAttribute('data-state', 'upcoming');
+    expect(await screen.findByTestId('order-stepper-next')).toHaveTextContent('Next: Delivered');
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(vi.mocked(fetch).mock.calls[0][0]).toBe('/api/rewards/orders');
   });
@@ -118,7 +118,7 @@ describe('Member order-tracking', () => {
     }]);
     render(<OrdersPage />);
     const bar = await screen.findByTestId('order-stepper-compact');
-    expect(within(bar).getByTestId('order-compact-step-cancelled')).toHaveAttribute('data-state', 'failed');
+    expect(await within(bar).findByTestId('order-compact-step-cancelled')).toHaveAttribute('data-state', 'failed');
     expect(within(bar).queryAllByRole('listitem').some((li) => li.getAttribute('data-state') === 'upcoming')).toBe(false);
   });
 });

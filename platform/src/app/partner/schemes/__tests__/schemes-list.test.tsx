@@ -10,7 +10,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
@@ -56,8 +56,8 @@ describe('partner schemes list', () => {
 
   it('L1: an un-enrolled scheme shows under Available and links to its detail page', async () => {
     render(<PartnerSchemesPage />);
-    await waitFor(() => expect(screen.getByText('Alpha Drive')).toBeInTheDocument());
-    const link = screen.getByText('Alpha Drive').closest('a');
+    expect(await screen.findByText('Alpha Drive')).toBeInTheDocument();
+    const link = (await screen.findByText('Alpha Drive')).closest('a');
     expect(link).toHaveAttribute('href', '/partner/schemes/scm-a');
     // The enrolled one is NOT in the default (Available) tab.
     expect(screen.queryByText('Beta Drive')).not.toBeInTheDocument();
@@ -66,12 +66,12 @@ describe('partner schemes list', () => {
   it('L2: an enrolled scheme shows under My schemes with an Enrolled badge', async () => {
     const user = userEvent.setup();
     render(<PartnerSchemesPage />);
-    await waitFor(() => expect(screen.getByText('Alpha Drive')).toBeInTheDocument());
+    expect(await screen.findByText('Alpha Drive')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /My schemes/i }));
+    await user.click(await screen.findByRole('button', { name: /My schemes/i }));
 
-    await waitFor(() => expect(screen.getByText('Beta Drive')).toBeInTheDocument());
-    expect(screen.getByText('Enrolled')).toBeInTheDocument();
+    expect(await screen.findByText('Beta Drive')).toBeInTheDocument();
+    expect(await screen.findByText('Enrolled')).toBeInTheDocument();
     expect(screen.queryByText('Alpha Drive')).not.toBeInTheDocument();
   });
 });

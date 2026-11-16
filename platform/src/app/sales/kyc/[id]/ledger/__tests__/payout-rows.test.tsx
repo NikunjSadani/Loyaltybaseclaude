@@ -10,7 +10,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -58,7 +58,7 @@ async function renderLedger(id: string) {
     );
     await params;
   });
-  await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
+  expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
 }
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -67,24 +67,24 @@ describe('PL — sales outlet ledger payout rows', () => {
   it('PL1: a PAID payout row renders its ₹ amount, UTR and header', async () => {
     stubLedger();
     await renderLedger('k1');
-    expect(screen.getByText('Visibility · May 2026')).toBeInTheDocument();
-    expect(screen.getByText('₹5,000')).toBeInTheDocument();
-    expect(screen.getByText(/UTR9/)).toBeInTheDocument();
+    expect(await screen.findByText('Visibility · May 2026')).toBeInTheDocument();
+    expect(await screen.findByText('₹5,000')).toBeInTheDocument();
+    expect(await screen.findByText(/UTR9/)).toBeInTheDocument();
   });
 
   it('PL2: a non-PAID payout row shows the "Payout pending" badge', async () => {
     stubLedger();
     await renderLedger('k1');
-    const badges = screen.getAllByTestId('payout-pending-badge');
+    const badges = await screen.findAllByTestId('payout-pending-badge');
     expect(badges.length).toBeGreaterThanOrEqual(1);
     // the pending ₹2,500 row is present
-    expect(screen.getByText('₹2,500')).toBeInTheDocument();
+    expect(await screen.findByText('₹2,500')).toBeInTheDocument();
   });
 
   it('PL3: the KPI filter lists points field names AND payout KPI labels', async () => {
     stubLedger();
     await renderLedger('k1');
-    const select = screen.getByTestId('wallet-kpi-filter');
+    const select = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map((o) => o.textContent ?? '');
     expect(options).toContain('Monthly Scheme'); // points field name
     expect(options).toContain('Visibility');       // payout KPI label
@@ -104,7 +104,7 @@ describe('PL — sales outlet ledger payout rows', () => {
       }),
     }));
     await renderLedger('k1');
-    expect(screen.getByText(/Statement · Apr 2026$/)).toBeInTheDocument();
-    expect(screen.getByText('Edge · March 2026')).toBeInTheDocument();
+    expect(await screen.findByText(/Statement · Apr 2026$/)).toBeInTheDocument();
+    expect(await screen.findByText('Edge · March 2026')).toBeInTheDocument();
   });
 });

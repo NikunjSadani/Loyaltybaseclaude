@@ -17,7 +17,7 @@
  */
 
 import React, { useState } from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import type { SalesEligibleOutlet } from '@/lib/visibility-types';
 
@@ -98,8 +98,8 @@ describe('VCS — VisibilityCaptureSheet', () => {
     fireEvent.click(await screen.findByText('mock-submit'));
     expect(await screen.findByText(/capture submitted/i)).toBeInTheDocument();
     expect(submitCapture).toHaveBeenCalledWith({ outletId: 'o1', formValues: { photo: 'k1' } });
-    expect(screen.getByText(/captured late/i)).toBeInTheDocument();
-    expect(screen.getByText(/12m from the outlet/i)).toBeInTheDocument();
+    expect(await screen.findByText(/captured late/i)).toBeInTheDocument();
+    expect(await screen.findByText(/12m from the outlet/i)).toBeInTheDocument();
   });
 
   it('VCS2: geo-fence BLOCK surfaces the server error, no success', async () => {
@@ -128,9 +128,9 @@ describe('VCS — VisibilityCaptureSheet', () => {
   it('VCS4: a load ERROR shows the retry state, NOT "not configured" (H1)', async () => {
     getSalesForm.mockResolvedValue({ success: false, error: 'Forbidden' });
     render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
-    await waitFor(() => expect(screen.getByTestId('visibility-form-error')).toBeInTheDocument());
+    expect(await screen.findByTestId('visibility-form-error')).toBeInTheDocument();
     expect(screen.getByText(/couldn't load the capture form/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /retry/i })).toBeInTheDocument();
     // NOT the not-configured state, and no form.
     expect(screen.queryByTestId('visibility-form-unavailable')).not.toBeInTheDocument();
     expect(screen.queryByText('mock-submit')).not.toBeInTheDocument();
@@ -142,8 +142,8 @@ describe('VCS — VisibilityCaptureSheet', () => {
       data: { id: 'f', clientId: 'c', version: 1, createdAt: '', updatedAt: '', formSchema: null },
     });
     render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
-    await waitFor(() => expect(screen.getByTestId('visibility-form-unavailable')).toBeInTheDocument());
-    expect(screen.getByText(/no capture form has been configured yet/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('visibility-form-unavailable')).toBeInTheDocument();
+    expect(await screen.findByText(/no capture form has been configured yet/i)).toBeInTheDocument();
     expect(screen.queryByTestId('visibility-form-error')).not.toBeInTheDocument();
   });
 

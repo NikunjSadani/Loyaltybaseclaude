@@ -123,7 +123,7 @@ describe('KYCID — Admin KYC detail API wiring', () => {
     }));
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     expect(await screen.findByText('O999')).toBeInTheDocument();   // outlet code from partner.outlets
-    expect(screen.getByText(/Outlet ID:/)).toBeInTheDocument();
+    expect(await screen.findByText(/Outlet ID:/)).toBeInTheDocument();
     expect(screen.queryByText(/KYC ID:/)).not.toBeInTheDocument(); // old CUID label removed
   });
 
@@ -145,8 +145,8 @@ describe('KYCID — Admin KYC detail API wiring', () => {
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     // Tabs + checklist both render the label → at least one match each.
     expect((await screen.findAllByText('Voter ID card')).length).toBeGreaterThan(0);
-    expect(screen.getAllByText('OTHER').length).toBeGreaterThan(0);      // pre-existing label kept
-    expect(screen.getAllByText('PAN CARD').length).toBeGreaterThan(0);   // non-OTHER unchanged
+    expect((await screen.findAllByText('OTHER')).length).toBeGreaterThan(0);      // pre-existing label kept
+    expect((await screen.findAllByText('PAN CARD')).length).toBeGreaterThan(0);   // non-OTHER unchanged
     expect(screen.queryByText('Counter photo')).not.toBeInTheDocument(); // fileName never used
     expect(screen.queryByText('ID proof (Voter ID)')).not.toBeInTheDocument();
   });

@@ -56,8 +56,8 @@ describe('BrandSwitcher panel — GIFSY_STAFF launchpad', () => {
 
     expect(await screen.findByText(/choose a brand to work in/i)).toBeInTheDocument();
     // Each granted brand is its own pick button.
-    expect(screen.getByRole('button', { name: /Acme Foods/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Globex/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /Acme Foods/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /Globex/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /Globex/i }));
     await waitFor(() => expect(assumeTenant).toHaveBeenCalledWith('globex'));
@@ -68,7 +68,7 @@ describe('BrandSwitcher panel — GIFSY_STAFF launchpad', () => {
     render(<BrandSwitcher variant="panel" />);
 
     expect(await screen.findByText(/no brands assigned yet/i)).toBeInTheDocument();
-    expect(screen.getByText(/ask your admin/i)).toBeInTheDocument();
+    expect(await screen.findByText(/ask your admin/i)).toBeInTheDocument();
   });
 
   it('BSP4: an INACTIVE granted brand is not offered', async () => {

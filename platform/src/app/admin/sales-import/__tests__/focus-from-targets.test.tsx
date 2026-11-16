@@ -417,9 +417,9 @@ describe('import preview — focus reconciliation', () => {
     })])));
     render(<ImportPage />);
     expect(await screen.findByTestId('recon-blockers-2026-11')).toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: 'Apply November 2026' })).toBeDisabled();
-    expect(screen.getByTestId('sales-import-apply')).toBeDisabled();
-    const unavailable = screen.getByTestId('sales-import-unavailable-months');
+    expect(await screen.findByRole('checkbox', { name: 'Apply November 2026' })).toBeDisabled();
+    expect(await screen.findByTestId('sales-import-apply')).toBeDisabled();
+    const unavailable = await screen.findByTestId('sales-import-unavailable-months');
     expect(unavailable).toHaveTextContent('Not available:');
     expect(unavailable).toHaveTextContent(
       'November 2026 cannot be applied: 2 focus product names in the November target file could not be matched — see Focus brands.',
@@ -435,13 +435,13 @@ describe('import preview — focus reconciliation', () => {
     render(<ImportPage />);
     const blockers = await screen.findByTestId('recon-blockers-2026-11');
     // The Focus brands section shows too, without opening the month.
-    expect(screen.getByTestId('recon-focus-2026-11')).toBeInTheDocument();
+    expect(await screen.findByTestId('recon-focus-2026-11')).toBeInTheDocument();
     fireEvent.click(within(blockers).getByRole('button', { name: 'Accept XYZ (Focus Brand 2) as not sold yet' }));
     await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Apply November 2026' })).not.toBeDisabled());
     expect(apiMock.preview).toHaveBeenCalledTimes(2);
     expect(screen.queryByTestId('recon-blockers-2026-11')).not.toBeInTheDocument();
     // The row stays open after acting, so what was just changed is still on screen.
-    expect(screen.getByTestId('month-detail-2026-11')).toBeInTheDocument();
+    expect(await screen.findByTestId('month-detail-2026-11')).toBeInTheDocument();
   });
 
   it('L5: the month toggle\'s aria-expanded follows the visible detail row', async () => {
@@ -452,10 +452,10 @@ describe('import preview — focus reconciliation', () => {
     ])));
     render(<ImportPage />);
     const nov = await screen.findByRole('button', { name: 'November 2026' });
-    expect(screen.getByTestId('month-detail-2026-11')).toBeInTheDocument();
+    expect(await screen.findByTestId('month-detail-2026-11')).toBeInTheDocument();
     expect(nov).toHaveAttribute('aria-expanded', 'true');
     expect(nov).toHaveAttribute('aria-controls', 'month-detail-2026-11');
-    const oct = screen.getByRole('button', { name: 'October 2026' });
+    const oct = await screen.findByRole('button', { name: 'October 2026' });
     expect(screen.queryByTestId('month-detail-2026-10')).not.toBeInTheDocument();
     expect(oct).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(oct);
@@ -541,7 +541,7 @@ describe('months — targets changed badge + recalculate', () => {
     render(<MonthsPage />);
     fireEvent.click(await screen.findByTestId('recalc-open-2026-11'));
     expect(await screen.findByTestId('recon-blockers-2026-11')).toBeInTheDocument();
-    expect(screen.getByTestId('recalc-apply')).toBeDisabled();
+    expect(await screen.findByTestId('recalc-apply')).toBeDisabled();
     fireEvent.click(screen.getByTestId('recon-blocker-accept-FB2-XYZ'));
     await waitFor(() => expect(screen.getByTestId('recalc-apply')).not.toBeDisabled());
     expect(apiMock.recalcPreview).toHaveBeenCalledTimes(2);

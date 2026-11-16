@@ -85,15 +85,15 @@ describe('Vendor catalogue', () => {
     mockGet();
     renderPage();
     expect(await screen.findByText('JBL Speaker')).toBeInTheDocument();
-    expect(screen.getByTestId('moderation-i1')).toHaveTextContent('Approved');
-    expect(screen.getByTestId('moderation-i2')).toHaveTextContent('Pending approval');
+    expect(await screen.findByTestId('moderation-i1')).toHaveTextContent('Approved');
+    expect(await screen.findByTestId('moderation-i2')).toHaveTextContent('Pending approval');
   });
 
   it('CL2: renders the approval-policy note', async () => {
     mockGet();
     renderPage();
     await screen.findByText('JBL Speaker');
-    expect(screen.getByTestId('policy-note')).toHaveTextContent(/approval/i);
+    expect(await screen.findByTestId('policy-note')).toHaveTextContent(/approval/i);
   });
 
   it('CL3: blocks save when selling price exceeds MRP', async () => {
@@ -155,8 +155,8 @@ describe('Vendor catalogue', () => {
     renderPage();
     fireEvent.click(await screen.findByTestId('new-item-btn'));
     await screen.findByTestId('field-name');
-    const select = screen.getByTestId('field-category') as HTMLSelectElement;
-    expect(screen.getByRole('option', { name: 'Regression Widgets' })).toBeInTheDocument();
+    const select = await screen.findByTestId('field-category') as HTMLSelectElement;
+    expect(await screen.findByRole('option', { name: 'Regression Widgets' })).toBeInTheDocument();
     fireEvent.change(select, { target: { value: 'cat-x' } });
     expect(select.value).toBe('cat-x');
   });
