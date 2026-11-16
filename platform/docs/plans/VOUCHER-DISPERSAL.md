@@ -155,7 +155,13 @@ All state lives in the DB, so a restart loses nothing; every transition is a gua
 ## 6. WhatsApp
 
 `voucher_code` template, vars `{{1}}` Name, `{{2}}` `₹N`, `{{3}}` programLabel, `{{4}}` brand label, `{{5}}` code (or
-`code | PIN: pin`), via the new `NotificationsService.sendTrackedWhatsappTemplate` (receipt QUEUED → send with crqid →
+`code | PIN: pin`). **Claim-code products (2026-11-16, `api/src/hubble/hubble-voucher.ts`):** for Amazon Pay
+(`01HDRPKWFE2SMVM54TWD8S1927`, default) Hubble's `cardPin` IS the redeemable claim code and `cardNumber` is a useless
+serial → `{{5}}` = the claim code ALONE (no `| PIN:`). Same rule for Bajaj catalogue redemptions. Extend per environment
+with env `HUBBLE_CLAIM_CODE_PRODUCT_IDS` (comma-separated product ids; no code change). A claim-code product that arrives
+WITHOUT its claim code falls back to the card number AND is flagged loudly (error log + audit
+`VOUCHER_DISPERSAL_CLAIM_CODE_MISSING` / redemption metadata `hubbleClaimCodeMissing`). Other brands (Flipkart, Ajio,
+MakeMyTrip, Myntra, Uber) are unchanged: code + PIN when both exist. Sent via the new `NotificationsService.sendTrackedWhatsappTemplate` (receipt QUEUED → send with crqid →
 SENT/FAILED; billing-safe; never throws). Receipt `clientId` is ALWAYS the platform tenant `'gifsy'` (coordinator decision
 2026-11-16 — never the billed client: client admins must not see these phone numbers in their tenant delivery report nor
 count them in tenant WhatsApp stats), `eventKey` = `VOUCHER_DISPERSAL`. Tracking requires `DELIVERY_RECEIPTS_ENABLED=true` (on in prod); when off, messages are `SENT`

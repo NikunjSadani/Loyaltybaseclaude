@@ -23,9 +23,15 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 
 | | SHA | Since | Notes |
 |---|---|---|---|
-| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import`, `gifsy-exports`) | **`2eb8271d`** | 2026-11-15 ~22:10 IST | `origin/main` = `origin/develop` = `2eb8271d` |
-| **Staging** (`*-staging`) | **`2eb8271d`** | 2026-11-15 | same code as prod |
-| Previous prod | `e242b1a1` | 2026-11-13/14 | rollback target for the 2026-11-15 release |
+| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import`, `gifsy-exports`) | **`d5050024`** (once the 2026-11-16 (c) deploy is verified — check the serving image, §7) | 2026-11-16 | `origin/main` = `origin/develop` |
+| **Staging** (`*-staging`) | **`d5050024`** | 2026-11-16 | same code as prod |
+| Previous prod | `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-16 / 11-15 | rollback targets |
+
+**2026-11-16 releases** (release log in `DOCS-INDEX.md`): **Voucher Dispersal** (Gifsy platform admin tool — Excel →
+Hubble buy → WhatsApp; → [`VOUCHER-DISPERSAL.md`](VOUCHER-DISPERSAL.md)) + App Adoption installed-users export
+(`720ffce9`); **Amazon Pay claim-code-only** voucher message (`4e395b21`; other Hubble brands still send code + PIN —
+ask Hubble which are claim-code-only and add their product ids to env `HUBBLE_CLAIM_CODE_PRODUCT_IDS`); **dashboard
+rounding** (`d5050024`; `platform/src/lib/pace.ts` `fmtRemaining` / `remainingOf` / `fmtKpiNum`).
 
 **The 2026-11-15 release (`e242b1a1` → `2eb8271d`, 67 commits)** — all owner-approved; platform-wide items were
 approved in-session and dual-audited where money/identity was involved:
@@ -89,12 +95,18 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 2. **Bajaj points rules for November** (SAMT eligibility gate on NON ADHO: ≥ ₹200 → Elite, ≥ ₹400 → Privilege, plus the
    rest of the rule) — needs a **dedicated rule-engine session** with the owner. `points_rules` had no Bajaj rule at the
    last check. Do not close November or compute points before the rule is agreed.
-3. **Metro / Non-Metro for 71 Bajaj outlets** — owner to supply the values (outlet-master field).
-4. **October files from Bajaj**: the October **rewards** file and the October **cases** file — import when received.
+3. **SAMT ADHO / NON ADHO split (Bajaj RLP card: Total ≠ ADHO + NON ADHO).** Prod Nov targets: SAMT outlets
+   (861) carry only TOTAL + LINES; Unnati sums exactly. SAMT achievement has NON ADHO but no ADHO (KpiDef + sales-import
+   definition for ADHO are scoped `programs: [Unnati]`), so the card's NON ADHO % counts SAMT sales against an
+   Unnati-only target. Plan (owner 2026-11-16, Bajaj will provide the split): Bajaj re-sends SAMT targets with the split →
+   widen ADHO applies-to on BOTH the KpiDef and the sales KPI definition to Unnati + SAMT (tenant config, staging
+   first) → re-apply November sales. No Bajaj points rules exist on prod, so points are unaffected.
+4. **Metro / Non-Metro for 71 Bajaj outlets** — DONE 2026-11-16 (71 updated; Metro 1,657 / Non Metro 4,834).
+5. **October files from Bajaj**: the October **rewards** file and the October **cases** file — import when received.
    **Never run a points compute for Apr 2025 – Oct 2026** (paid by the vendor; imported).
-5. Owner process items still open: `gifsy-deployer` over-privilege review; stray `gifsy` `tdsPolicy` row from the F1 bug
+6. Owner process items still open: `gifsy-deployer` over-privilege review; stray `gifsy` `tdsPolicy` row from the F1 bug
    (harmless; delete when convenient); rotate the Hubble client secret (was shared in a screenshot).
-6. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first) → merge the flaky-test sweep → Daily Ops Digest.
+7. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first) → merge the flaky-test sweep → Daily Ops Digest.
 
 ## 5. Owner process rules (adopted — apply to every change)
 
