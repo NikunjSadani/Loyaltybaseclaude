@@ -87,14 +87,14 @@ describe('TeamViewScreen — OVERVIEW vs SINGLE', () => {
     render(<TeamViewScreen />);
 
     expect(await screen.findByText('Zoe Low')).toBeInTheDocument();
-    expect(screen.getAllByText('Primary Sales').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Secondary Sales').length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Primary Sales')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Secondary Sales')).length).toBeGreaterThan(0);
     // Score badge (40%) + a per-KPI value; null KPI shows an em dash.
-    expect(screen.getAllByText('40%').length).toBeGreaterThan(0);
-    expect(screen.getByText('—')).toBeInTheDocument(); // Zoe's SECONDARY_SALES is null
+    expect((await screen.findAllByText('40%')).length).toBeGreaterThan(0);
+    expect(await screen.findByText('—')).toBeInTheDocument(); // Zoe's SECONDARY_SALES is null
     // 4th summary card is "Avg Score" in overview.
-    expect(screen.getByText('Avg Score')).toBeInTheDocument();
-    expect(screen.getByText('55%')).toBeInTheDocument();
+    expect(await screen.findByText('Avg Score')).toBeInTheDocument();
+    expect(await screen.findByText('55%')).toBeInTheDocument();
     expect(screen.queryByText('Avg Target')).not.toBeInTheDocument();
   });
 
@@ -113,15 +113,15 @@ describe('TeamViewScreen — OVERVIEW vs SINGLE', () => {
     render(<TeamViewScreen />);
 
     expect(await screen.findByText('Zoe Low')).toBeInTheDocument();
-    expect(screen.getByText('40%')).toBeInTheDocument();
-    expect(screen.getByText('2/5 hit target')).toBeInTheDocument();
+    expect(await screen.findByText('40%')).toBeInTheDocument();
+    expect(await screen.findByText('2/5 hit target')).toBeInTheDocument();
     // The all-KPI grid is absent → the only "Secondary Sales" text is the Pill <option>,
     // never a rendered grid cell (a <span>).
     const secondaryMatches = screen.queryAllByText('Secondary Sales');
     expect(secondaryMatches.every((el) => el.tagName === 'OPTION')).toBe(true);
     // 4th card is "Avg Target" in single mode.
-    expect(screen.getByText('Avg Target')).toBeInTheDocument();
-    expect(screen.getByText('72%')).toBeInTheDocument();
+    expect(await screen.findByText('Avg Target')).toBeInTheDocument();
+    expect(await screen.findByText('72%')).toBeInTheDocument();
   });
 
   it('MV4: KPI Pill lists Overview first; default selection = Overview', async () => {
@@ -129,7 +129,7 @@ describe('TeamViewScreen — OVERVIEW vs SINGLE', () => {
     render(<TeamViewScreen />);
 
     await screen.findByText('Zoe Low');
-    const overviewOpt = screen.getByRole('option', { name: 'Overview' }) as HTMLOptionElement;
+    const overviewOpt = await screen.findByRole('option', { name: 'Overview' }) as HTMLOptionElement;
     const select = overviewOpt.closest('select') as HTMLSelectElement;
     expect(select.value).toBe(OVERVIEW_KPI);
     const optionValues = Array.from(select.options).map((o) => o.value);

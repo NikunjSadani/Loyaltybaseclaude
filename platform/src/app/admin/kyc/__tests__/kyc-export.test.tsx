@@ -60,7 +60,7 @@ describe('KYC — Export button (Gifsy review sheet)', () => {
     render(<KYCPage />);
     const btn = await screen.findByRole('button', { name: /Export Gifsy Review Sheet/i });
     expect(btn).toBeDisabled();
-    expect(screen.getByText('No submissions are awaiting Gifsy review')).toBeInTheDocument();
+    expect(await screen.findByText('No submissions are awaiting Gifsy review')).toBeInTheDocument();
   });
 
   it('EXP2: with a PENDING_GIFSY submission the export is enabled (no empty hint)', async () => {

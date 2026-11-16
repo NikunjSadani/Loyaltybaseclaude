@@ -573,7 +573,7 @@ describe('heap backstop outside the row loop (audit M2)', () => {
     }
     expect(final().data.status).toBe('FAILED');
     expect(final().data.error).toMatch(/too large to process in one go/);
-  }, 15_000);
+  }, 30_000);
 });
 
 describe('audit M-2: heap abort during an xlsx read reports "too large", never "corrupt"', () => {

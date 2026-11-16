@@ -84,9 +84,9 @@ describe('GIFV — Fulfilment access by role', () => {
     await openFulfilment();
 
     expect(await screen.findByText('RDM-1')).toBeInTheDocument();
-    expect(screen.getByText('Store Two')).toBeInTheDocument();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('(2)');
-    expect(screen.getByText(/View only — Gifsy updates order status/)).toBeInTheDocument();
+    expect(await screen.findByText('Store Two')).toBeInTheDocument();
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('(2)');
+    expect(await screen.findByText(/View only — Gifsy updates order status/)).toBeInTheDocument();
 
     expect(screen.queryByRole('button', { name: /advance/i })).toBeNull();
     expect(screen.queryByRole('columnheader', { name: /action/i })).toBeNull();
@@ -94,7 +94,7 @@ describe('GIFV — Fulfilment access by role', () => {
     expect(screen.queryByRole('button', { name: /download fulfilment sheet/i })).toBeNull();
     expect(document.querySelector('input[type="file"]')).toBeNull();
     expect(screen.queryByRole('button', { name: /voucher cancelled with vendor/i })).toBeNull();
-    expect(screen.getByRole('button', { name: /refresh orders/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /refresh orders/i })).toBeInTheDocument();
     expect((fetchMock.mock.calls as [string][]).some(([u]) => u.includes('/fulfilment/'))).toBe(false);
   });
 
@@ -112,8 +112,8 @@ describe('GIFV — Fulfilment access by role', () => {
     await openFulfilment();
 
     expect(await screen.findByText('RDM-1')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /advance/i }).length).toBe(2);
-    expect(screen.getByRole('button', { name: /download fulfilment sheet/i })).toBeInTheDocument();
+    expect((await screen.findAllByRole('button', { name: /advance/i })).length).toBe(2);
+    expect(await screen.findByRole('button', { name: /download fulfilment sheet/i })).toBeInTheDocument();
     expect(screen.queryByText(/View only/)).toBeNull();
   });
 
@@ -124,7 +124,7 @@ describe('GIFV — Fulfilment access by role', () => {
 
     const row = (await screen.findByText('RDM-2')).closest('tr') as HTMLElement;
     await userEvent.click(row.querySelector('button') as HTMLButtonElement);
-    const select = screen.getByDisplayValue('CANCELLED') as HTMLSelectElement;
+    const select = await screen.findByDisplayValue('CANCELLED') as HTMLSelectElement;
     expect(Array.from(select.options).map((o) => o.value)).toEqual(['CANCELLED']);
   });
 
@@ -143,7 +143,7 @@ describe('GIFV — Fulfilment access by role', () => {
     installFetch();
     await openFulfilment();
     expect(await screen.findByText('RDM-1')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /advance/i }).length).toBe(2);
+    expect((await screen.findAllByRole('button', { name: /advance/i })).length).toBe(2);
     expect(screen.queryByText(/View only/)).toBeNull();
   });
 

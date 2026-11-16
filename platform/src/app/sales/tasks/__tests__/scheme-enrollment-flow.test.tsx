@@ -120,10 +120,10 @@ describe('Sales Tasks — real sales-assisted scheme enrollment', () => {
     // The loader always requests page 1 at the DTO-max limit (single-page scheme → no page 2).
     expect(getSalesTargets).toHaveBeenCalledWith('s1', { page: 1, limit: 200 });
     expect(getSalesTargets).not.toHaveBeenCalledWith('s1', { page: 2, limit: 200 });
-    expect(screen.getByText('Sharma Traders')).toBeInTheDocument();
+    expect(await screen.findByText('Sharma Traders')).toBeInTheDocument();
 
     // Choose the target → formless confirm → enroll (the row button "Select" picks the outlet).
-    const enrollButtons = screen.getAllByRole('button', { name: 'Select' });
+    const enrollButtons = await screen.findAllByRole('button', { name: 'Select' });
     fireEvent.click(enrollButtons[enrollButtons.length - 1]); // the target-row button
 
     const confirm = await screen.findByText('Confirm enrollment');
@@ -170,11 +170,11 @@ describe('Sales Tasks — real sales-assisted scheme enrollment', () => {
 
     // Targets from page 1, the page boundary, AND the very last page-2 row are all rendered.
     expect(await screen.findByText('Outlet 1')).toBeInTheDocument();
-    expect(screen.getByText('Outlet 201')).toBeInTheDocument();
-    expect(screen.getByText('Outlet 260')).toBeInTheDocument();
+    expect(await screen.findByText('Outlet 201')).toBeInTheDocument();
+    expect(await screen.findByText('Outlet 260')).toBeInTheDocument();
 
     // All 260 target rows are selectable (plus the scheme card's own Select button).
-    const selects = screen.getAllByRole('button', { name: 'Select' });
+    const selects = await screen.findAllByRole('button', { name: 'Select' });
     expect(selects.length).toBeGreaterThanOrEqual(260);
   });
 

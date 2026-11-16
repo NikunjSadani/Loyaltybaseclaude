@@ -50,9 +50,9 @@ describe('SLA — Sales Profile log out from all devices', () => {
     render(<SalesProfilePage />);
     await screen.findByText('Rajesh Kumar');
 
-    await userEvent.click(screen.getByText('Log out from all devices'));
+    await userEvent.click(await screen.findByText('Log out from all devices'));
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
-    expect(screen.getByText(/signs you out on all your devices/i)).toBeInTheDocument();
+    expect(await screen.findByText(/signs you out on all your devices/i)).toBeInTheDocument();
   });
 
   it('SLA2: confirming POSTs /api/auth/logout-all, then clears this device via logout()', async () => {
@@ -60,9 +60,9 @@ describe('SLA — Sales Profile log out from all devices', () => {
     render(<SalesProfilePage />);
     await screen.findByText('Rajesh Kumar');
 
-    await userEvent.click(screen.getByText('Log out from all devices'));
+    await userEvent.click(await screen.findByText('Log out from all devices'));
     await screen.findByRole('dialog');
-    await userEvent.click(screen.getByRole('button', { name: /log out everywhere/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /log out everywhere/i }));
 
     await waitFor(() => {
       expect(logoutAction).toHaveBeenCalled();

@@ -49,7 +49,7 @@ describe('My Orders — header count waits for the list', () => {
 
     expect(await screen.findByTestId('orders-count')).toHaveTextContent('1 orders');
     expect(screen.queryByTestId('orders-count-loading')).toBeNull();
-    expect(screen.getByText('Amazon Voucher')).toBeInTheDocument();
+    expect(await screen.findByText('Amazon Voucher')).toBeInTheDocument();
   });
 
   it('OC3: an actual empty result shows "0 orders" and the empty state', async () => {
@@ -58,7 +58,7 @@ describe('My Orders — header count waits for the list', () => {
     ));
     render(<OrdersPage />);
     expect(await screen.findByText('No orders yet')).toBeInTheDocument();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('0 orders');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('0 orders');
   });
 
   it('OC4: a failed load shows the error + Retry and no count', async () => {

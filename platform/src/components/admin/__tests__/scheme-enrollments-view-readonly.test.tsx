@@ -11,7 +11,7 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 
 vi.mock('next/link', () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode; [k: string]: unknown }) =>
@@ -64,7 +64,7 @@ const LOAD = { timeout: 15_000 };
 describe('SchemeEnrollmentsView — read-only tenant boundary', { timeout: 30_000 }, () => {
   it('readOnly: fetches the TENANT report (never the GIFSY-only getReport) and never lists deleted', async () => {
     await act(async () => { await renderView(true); });
-    await waitFor(() => expect(screen.getByText('67%')).toBeInTheDocument(), LOAD);
+    expect(await screen.findByText('67%', {}, LOAD)).toBeInTheDocument();
     expect(getTenantReport).toHaveBeenCalledWith('s1');
     expect(getReport).not.toHaveBeenCalled();
     expect(listDeletedEnrollments).not.toHaveBeenCalled();
@@ -72,16 +72,16 @@ describe('SchemeEnrollmentsView — read-only tenant boundary', { timeout: 30_00
 
   it('readOnly: hides the write affordances (no Show-deleted) but keeps Export Excel', async () => {
     await act(async () => { await renderView(true); });
-    await waitFor(() => expect(screen.getByText('67%')).toBeInTheDocument(), LOAD);
+    expect(await screen.findByText('67%', {}, LOAD)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /show deleted/i })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /export excel/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /export excel/i })).toBeInTheDocument();
   });
 
   it('write mode (GIFSY): uses getReport and shows the Show-deleted recovery toggle', async () => {
     await act(async () => { await renderView(false); });
-    await waitFor(() => expect(screen.getByText('67%')).toBeInTheDocument(), LOAD);
+    expect(await screen.findByText('67%', {}, LOAD)).toBeInTheDocument();
     expect(getReport).toHaveBeenCalledWith('s1');
     expect(getTenantReport).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /show deleted/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /show deleted/i })).toBeInTheDocument();
   });
 });

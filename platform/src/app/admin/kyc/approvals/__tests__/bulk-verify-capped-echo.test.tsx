@@ -59,15 +59,15 @@ describe('KYC bulk-verify commit — capped echo', { timeout: 30_000 }, () => {
     await act(async () => { fireEvent.click(await screen.findByText(/Commit \(apply=true\)/, undefined, LOAD)); });
 
     expect(await screen.findByRole('table', { name: 'Failed submissions' }, LOAD)).toBeInTheDocument();
-    expect(screen.getByText('sub-bad-1')).toBeInTheDocument();
-    expect(screen.getByText('Submission is no longer pending')).toBeInTheDocument();
-    const note = screen.getByText(/Showing the first 1 of 650 failed submissions/);
+    expect(await screen.findByText('sub-bad-1')).toBeInTheDocument();
+    expect(await screen.findByText('Submission is no longer pending')).toBeInTheDocument();
+    const note = await screen.findByText(/Showing the first 1 of 650 failed submissions/);
     // M3: the other rows were committed → re-upload only the failed rows. M7: note above the list.
     expect(note.textContent).toMatch(/re-upload only the failed rows/i);
-    const table = screen.getByRole('table', { name: 'Failed submissions' });
+    const table = await screen.findByRole('table', { name: 'Failed submissions' });
     expect(note.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Older API without outlet details → says so instead of an empty cell.
-    expect(screen.getByText(/Outlet not returned/)).toBeInTheDocument();
+    expect(await screen.findByText(/Outlet not returned/)).toBeInTheDocument();
   });
 
   it('L7: shows the outlet code + name (and row) of a failed submission when the API sends them', async () => {

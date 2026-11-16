@@ -102,8 +102,8 @@ describe('WMP — "Within my points" filter chip', () => {
     render(<RewardsPage />);
     const chip = await screen.findByRole('button', { name: chipName });
     const row = chip.parentElement as HTMLElement;
-    const buttons = within(row).getAllByRole('button');
-    const allChip = within(row).getByRole('button', { name: 'All' });
+    const buttons = await within(row).findAllByRole('button');
+    const allChip = await within(row).findByRole('button', { name: 'All' });
     expect(buttons[0]).toBe(chip);
     expect(buttons.indexOf(allChip)).toBeGreaterThan(0);
     expect(chip).toHaveAttribute('aria-pressed', 'false');
@@ -118,15 +118,15 @@ describe('WMP — "Within my points" filter chip', () => {
 
     await user.click(chip);
     expect(chip).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByText('Cabin Bag')).toBeInTheDocument();
-    expect(screen.getByText('Earbuds')).toBeInTheDocument();
+    expect(await screen.findByText('Cabin Bag')).toBeInTheDocument();
+    expect(await screen.findByText('Earbuds')).toBeInTheDocument();
     expect(screen.queryByText('Trolley Set')).not.toBeInTheDocument();
     expect(screen.queryByText('Smart Phone')).not.toBeInTheDocument();
 
     await user.click(chip);
     expect(chip).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByText('Trolley Set')).toBeInTheDocument();
-    expect(screen.getByText('Smart Phone')).toBeInTheDocument();
+    expect(await screen.findByText('Trolley Set')).toBeInTheDocument();
+    expect(await screen.findByText('Smart Phone')).toBeInTheDocument();
   });
 
   it('WMP3: it combines with a category — chip ON + "Luggage" shows only affordable Luggage items', async () => {
@@ -134,9 +134,9 @@ describe('WMP — "Within my points" filter chip', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: chipName }));
-    await user.click(screen.getByRole('button', { name: 'Luggage' }));
+    await user.click(await screen.findByRole('button', { name: 'Luggage' }));
 
-    expect(screen.getByText('Cabin Bag')).toBeInTheDocument();
+    expect(await screen.findByText('Cabin Bag')).toBeInTheDocument();
     expect(screen.queryByText('Trolley Set')).not.toBeInTheDocument();
     expect(screen.queryByText('Earbuds')).not.toBeInTheDocument();
     expect(screen.queryByText('Smart Phone')).not.toBeInTheDocument();
@@ -147,16 +147,16 @@ describe('WMP — "Within my points" filter chip', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
     await screen.findByText('Cabin Bag');
-    await user.click(screen.getByRole('button', { name: /vouchers/i }));
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
 
     const chip = await screen.findByRole('button', { name: chipName });
     expect(screen.queryByRole('button', { name: 'All' })).not.toBeInTheDocument();
-    expect(within(chip.parentElement as HTMLElement).getAllByRole('button')).toEqual([chip]);
+    expect(await within(chip.parentElement as HTMLElement).findAllByRole('button')).toEqual([chip]);
 
-    expect(screen.getByText('Flight Voucher')).toBeInTheDocument();
+    expect(await screen.findByText('Flight Voucher')).toBeInTheDocument();
     await user.click(chip);
-    expect(screen.getByText('Coffee Voucher')).toBeInTheDocument();
-    expect(screen.getByText('Shopping Card')).toBeInTheDocument(); // 1000 ≥ 250 minimum
+    expect(await screen.findByText('Coffee Voucher')).toBeInTheDocument();
+    expect(await screen.findByText('Shopping Card')).toBeInTheDocument(); // 1000 ≥ 250 minimum
     expect(screen.queryByText('Flight Voucher')).not.toBeInTheDocument();
   });
 
@@ -167,7 +167,7 @@ describe('WMP — "Within my points" filter chip', () => {
     await user.click(await screen.findByRole('button', { name: /vouchers/i }));
     expect(await screen.findByText('Shopping Card')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: chipName }));
+    await user.click(await screen.findByRole('button', { name: chipName }));
     expect(screen.queryByText('Shopping Card')).not.toBeInTheDocument();
   });
 
@@ -176,8 +176,8 @@ describe('WMP — "Within my points" filter chip', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: chipName }));
-    expect(screen.getByText('No items found')).toBeInTheDocument();
-    expect(screen.getByText('Nothing within your points yet — turn off "Within my points" to see all rewards')).toBeInTheDocument();
+    expect(await screen.findByText('No items found')).toBeInTheDocument();
+    expect(await screen.findByText('Nothing within your points yet — turn off "Within my points" to see all rewards')).toBeInTheDocument();
     expect(screen.queryByText('Try a different search or category')).not.toBeInTheDocument();
   });
 
@@ -192,7 +192,7 @@ describe('WMP — "Within my points" filter chip', () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: /vouchers/i }));
     expect(await screen.findByText('Premium Card')).toBeInTheDocument();
-    expect(screen.getByText('Need 500 more')).toBeInTheDocument();
+    expect(await screen.findByText('Need 500 more')).toBeInTheDocument();
   });
 
   it('WMP8: affordability uses the LIVE conversion rate from /api/auth/me, not the cached settings rate', async () => {
@@ -203,7 +203,7 @@ describe('WMP — "Within my points" filter chip', () => {
     await user.click(await screen.findByRole('button', { name: /vouchers/i }));
     expect(await screen.findByText('Need 100 more')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: chipName }));
+    await user.click(await screen.findByRole('button', { name: chipName }));
     expect(screen.queryByText('Shopping Card')).not.toBeInTheDocument();
   });
 });

@@ -249,9 +249,9 @@ describe('TDS — Admin TDS page API wiring', () => {
     render(<AdminTdsPage />);
     // These labels appear in both a summary card and the table header → allow multiples.
     expect((await screen.findAllByText('TDS Liability')).length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Total Amount Paid').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Deposited').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Outstanding').length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Total Amount Paid')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Deposited')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Outstanding')).length).toBeGreaterThan(0);
   });
 
   // TDS8 — off-platform upload preview calls apply=false
@@ -337,7 +337,7 @@ describe('TDS — Admin TDS page API wiring', () => {
     render(<AdminTdsPage />);
     await screen.findByText('194R Liability — 2025-26');
 
-    const select = screen.getByRole('combobox');
+    const select = await screen.findByRole('combobox');
     fireEvent.change(select, { target: { value: '2024-25' } });
 
     await waitFor(() => {

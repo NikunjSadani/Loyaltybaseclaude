@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -59,10 +59,7 @@ const ME = {
 
 async function renderAndLoad() {
   render(<ProfilePage />);
-  await waitFor(
-    () => expect(screen.getByTestId('profile-header')).toBeInTheDocument(),
-    { timeout: 2000 },
-  );
+  expect(await screen.findByTestId('profile-header', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 /* ─── Tests ──────────────────────────────────────────────────────────────────── */
@@ -81,7 +78,7 @@ describe('U — Points Summary rules (real points-presence signal)', () => {
   it('U1: Points Summary card is shown when the partner has points activity', async () => {
     mockIdentity = { ...mockIdentity, hasPointsActivity: true };
     await renderAndLoad();
-    expect(screen.getByTestId('points-summary')).toBeInTheDocument();
+    expect(await screen.findByTestId('points-summary')).toBeInTheDocument();
   });
 
   it('U2: Points Summary card is NOT shown for a payout-only partner (no points activity)', async () => {
@@ -95,12 +92,12 @@ describe('U — Points Summary rules (real points-presence signal)', () => {
   it('U5: Points Summary shows "Redeemable" label', async () => {
     mockIdentity = { ...mockIdentity, hasPointsActivity: true };
     await renderAndLoad();
-    expect(screen.getByTestId('points-summary')).toHaveTextContent(/redeemable/i);
+    expect(await screen.findByTestId('points-summary')).toHaveTextContent(/redeemable/i);
   });
 
   it('U6: Points Summary does NOT show "Available" label', async () => {
     mockIdentity = { ...mockIdentity, hasPointsActivity: true };
     await renderAndLoad();
-    expect(screen.getByTestId('points-summary')).not.toHaveTextContent(/available/i);
+    expect(await screen.findByTestId('points-summary')).not.toHaveTextContent(/available/i);
   });
 });

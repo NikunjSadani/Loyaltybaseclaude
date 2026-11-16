@@ -88,9 +88,9 @@ describe('imports page', () => {
     render(<Page />);
     const link = await screen.findByRole('link', { name: 'oct.xlsx' });
     expect(link).toHaveAttribute('href', '/admin/sales-import/i1');
-    expect(screen.getByText('6,35,430')).toBeInTheDocument();
-    expect(screen.getByText('Processing')).toBeInTheDocument();
-    expect(screen.getByText('Repeat file')).toBeInTheDocument();
+    expect(await screen.findByText('6,35,430')).toBeInTheDocument();
+    expect(await screen.findByText('Processing')).toBeInTheDocument();
+    expect(await screen.findByText('Repeat file')).toBeInTheDocument();
   });
 
   it('list error → retry', async () => {
@@ -232,7 +232,7 @@ describe('imports page', () => {
     await act(async () => { finish('bg1'); });
     render(<Page />);
     const banner = await screen.findByTestId('sales-import-upload-finished');
-    expect(within(banner).getByRole('link', { name: 'Open the import' })).toHaveAttribute('href', '/admin/sales-import/bg1');
+    expect(await within(banner).findByRole('link', { name: 'Open the import' })).toHaveAttribute('href', '/admin/sales-import/bg1');
     expect(push).not.toHaveBeenCalled();
   });
 
@@ -288,12 +288,12 @@ describe('imports page', () => {
     render(<Page />);
     pick(new File(['a'], 'dms.csv'));
     await screen.findByRole('button', { name: /Resume upload/ });
-    expect(screen.getByTestId('sales-import-dropzone')).toHaveAttribute('aria-disabled', 'true');
+    expect(await screen.findByTestId('sales-import-dropzone')).toHaveAttribute('aria-disabled', 'true');
     pick(new File(['b'], 'other.csv'));
     expect(uploadMock.uploadInParts).toHaveBeenCalledTimes(1);
     pick(new File(['x'], 'bad.xls'));
-    expect(screen.getByRole('button', { name: /Resume upload/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Discard this upload' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /Resume upload/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Discard this upload' })).toBeInTheDocument();
   });
 
   it('Resume is disabled while a discard is running', async () => {

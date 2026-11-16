@@ -7,7 +7,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -33,7 +33,7 @@ describe.skip('AC — Member detail page', () => {
   async function renderAndSettle() {
     render(<MemberDetailPage />);
     await act(async () => { vi.advanceTimersByTime(500); });
-    await waitFor(() => expect(screen.getByText('Meena Joshi')).toBeInTheDocument());
+    expect(await screen.findByText('Meena Joshi')).toBeInTheDocument();
   }
 
   it('AC1: profile card shows employeeId but NOT the territory/beat', async () => {

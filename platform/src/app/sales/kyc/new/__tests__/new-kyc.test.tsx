@@ -7,7 +7,7 @@
  */
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
@@ -53,34 +53,30 @@ describe.skip('KYC Form — A: No inline OTP on phone number field', () => {
 
   it('does NOT show a "Send OTP" button in Step 2 after entering a mobile number', async () => {
     await advanceToBasicStep();
-    const mobileInput = screen.getByPlaceholderText('9876543210');
+    const mobileInput = await screen.findByPlaceholderText('9876543210');
     await userEvent.type(mobileInput, '9111111111');
     expect(screen.queryByRole('button', { name: /send otp/i })).toBeNull();
   });
 
   it('does NOT show an OTP input box in Step 2 after entering mobile', async () => {
     await advanceToBasicStep();
-    const mobileInput = screen.getByPlaceholderText('9876543210');
+    const mobileInput = await screen.findByPlaceholderText('9876543210');
     await userEvent.type(mobileInput, '9111111111');
     expect(screen.queryByPlaceholderText(/· · · ·/)).toBeNull();
   });
 
   it('shows conflict error when a registered outlet number is entered', async () => {
     await advanceToBasicStep();
-    const mobileInput = screen.getByPlaceholderText('9876543210');
+    const mobileInput = await screen.findByPlaceholderText('9876543210');
     await userEvent.type(mobileInput, '9876543210'); // conflict number
-    await waitFor(() =>
-      expect(screen.getByText(/already registered/i)).toBeInTheDocument()
-    );
+    expect(await screen.findByText(/already registered/i)).toBeInTheDocument();
   });
 
   it('shows conflict error when an employee number is entered', async () => {
     await advanceToBasicStep();
-    const mobileInput = screen.getByPlaceholderText('9876543210');
+    const mobileInput = await screen.findByPlaceholderText('9876543210');
     await userEvent.type(mobileInput, '9800000001'); // employee number
-    await waitFor(() =>
-      expect(screen.getByText(/employee number not allowed/i)).toBeInTheDocument()
-    );
+    expect(await screen.findByText(/employee number not allowed/i)).toBeInTheDocument();
   });
 });
 

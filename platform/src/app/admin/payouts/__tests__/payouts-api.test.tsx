@@ -152,8 +152,8 @@ describe('PAY — UTR upload skipped rows', () => {
     });
     await uploadFile();
     const box = await screen.findByTestId('utr-already-paid');
-    expect(within(box).getByText(/Already marked paid on 2026-11-09 \(bank\) — check for a double payment/)).toBeInTheDocument();
-    expect(within(box).getByText('Ignored columns (not recognised): "Paid outside platfrom (Y/N)"')).toBeInTheDocument();
+    expect(await within(box).findByText(/Already marked paid on 2026-11-09 \(bank\) — check for a double payment/)).toBeInTheDocument();
+    expect(await within(box).findByText('Ignored columns (not recognised): "Paid outside platfrom (Y/N)"')).toBeInTheDocument();
   });
 
   it('PAY-NOCHG: "already recorded as failed" rows are shown neutrally (role=status), never in the red alert', async () => {
@@ -166,8 +166,8 @@ describe('PAY — UTR upload skipped rows', () => {
     const box = await screen.findByTestId('utr-no-change');
     expect(box).toHaveAttribute('role', 'status');
     expect(box.className).not.toMatch(/red/);
-    expect(within(box).getByText('1 row already up to date — nothing changed')).toBeInTheDocument();
-    expect(within(box).getByText(/Already recorded as failed — no change/)).toBeInTheDocument();
+    expect(await within(box).findByText('1 row already up to date — nothing changed')).toBeInTheDocument();
+    expect(await within(box).findByText(/Already recorded as failed — no change/)).toBeInTheDocument();
     expect(screen.queryByTestId('utr-already-paid')).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
@@ -200,9 +200,9 @@ describe('PAY — UTR upload skipped rows', () => {
       ],
     });
     await uploadFile();
-    expect(screen.getByText(/UTR applied: 1 paid, 0 failed/)).toBeInTheDocument();
+    expect(await screen.findByText(/UTR applied: 1 paid, 0 failed/)).toBeInTheDocument();
     const box = await screen.findByTestId('utr-skipped');
-    expect(within(box).getByText('2 rows not applied')).toBeInTheDocument();
+    expect(await within(box).findByText('2 rows not applied')).toBeInTheDocument();
     const items = within(box).getAllByRole('listitem').map((li) => li.textContent);
     expect(items).toEqual([
       'Row 3 (txn-a): Payout already updated by another upload',
@@ -220,7 +220,7 @@ describe('PAY — UTR upload skipped rows', () => {
     });
     await uploadFile();
     const box = await screen.findByTestId('utr-blocked-orders');
-    expect(within(box).getByText('1 order not refunded (voucher code on the order)')).toBeInTheDocument();
+    expect(await within(box).findByText('1 order not refunded (voucher code on the order)')).toBeInTheDocument();
     expect(within(box).getByRole('listitem').textContent).toBe(
       'Row 4 (RDM-9): A voucher code is on this order — points not refunded and order left unchanged; needs ops review',
     );
@@ -231,7 +231,7 @@ describe('PAY — UTR upload skipped rows', () => {
   it('PAY6: no skipped block when nothing was skipped (or an older API omits the field)', async () => {
     stubUtrFlow({ applied: true, paidCount: 2, failedCount: 1, reversedCount: 1 });
     await uploadFile();
-    expect(screen.getByText(/UTR applied: 2 paid, 1 failed/)).toBeInTheDocument();
+    expect(await screen.findByText(/UTR applied: 2 paid, 1 failed/)).toBeInTheDocument();
     expect(screen.queryByTestId('utr-skipped')).not.toBeInTheDocument();
   });
 });

@@ -105,12 +105,12 @@ describe('GS — Gifsy Staff panel', () => {
     render(<GifsyStaffPage />);
     expect(await screen.findByText('Asha Menon')).toBeInTheDocument();
     // Role-name column
-    expect(screen.getByText('Ops')).toBeInTheDocument();
+    expect(await screen.findByText('Ops')).toBeInTheDocument();
     // The role-less staff renders the "— none —" placeholder
-    expect(screen.getByText('— none —')).toBeInTheDocument();
+    expect(await screen.findByText('— none —')).toBeInTheDocument();
     // Status badges
-    expect(screen.getByText('Active')).toBeInTheDocument();
-    expect(screen.getByText('Inactive')).toBeInTheDocument();
+    expect(await screen.findByText('Active')).toBeInTheDocument();
+    expect(await screen.findByText('Inactive')).toBeInTheDocument();
   });
 
   it('GS2: shows the loading spinner on mount', () => {

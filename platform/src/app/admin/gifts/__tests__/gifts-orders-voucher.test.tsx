@@ -65,21 +65,21 @@ describe('GIFVC — voucher handling', () => {
   it('GIFVC1: a code typed for PROCESSING is NOT sent after switching to CANCELLED (and the draft is cleared)', async () => {
     const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
 
     expect(advanceSelect().value).toBe('PROCESSING');
-    await userEvent.type(screen.getByLabelText('Card no. / code'), 'AMZ-TYPED-1234');
-    await userEvent.type(screen.getByLabelText('Provider'), 'Gifsy');
+    await userEvent.type(await screen.findByLabelText('Card no. / code'), 'AMZ-TYPED-1234');
+    await userEvent.type(await screen.findByLabelText('Provider'), 'Gifsy');
 
     await userEvent.selectOptions(advanceSelect(), 'CANCELLED');
     expect(screen.queryByLabelText('Card no. / code')).toBeNull();
     // Back to PROCESSING → the previously typed code is gone (fresh draft per target).
     await userEvent.selectOptions(advanceSelect(), 'PROCESSING');
-    expect((screen.getByLabelText('Card no. / code') as HTMLInputElement).value).toBe('');
-    await userEvent.type(screen.getByLabelText('Card no. / code'), 'AMZ-TYPED-1234');
+    expect((await screen.findByLabelText('Card no. / code') as HTMLInputElement).value).toBe('');
+    await userEvent.type(await screen.findByLabelText('Card no. / code'), 'AMZ-TYPED-1234');
     await userEvent.selectOptions(advanceSelect(), 'CANCELLED');
 
-    await userEvent.click(screen.getByRole('button', { name: /confirm → CANCELLED/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /confirm → CANCELLED/i }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(true));
     const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/transition'))!.init!.body));
     expect(body).toEqual({ toStatus: 'CANCELLED' });
@@ -88,9 +88,9 @@ describe('GIFVC — voucher handling', () => {
   it('GIFVC2: a forward move WITH the inputs on screen does send the code', async () => {
     const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    await userEvent.type(screen.getByLabelText('Card no. / code'), 'AMZ-NEW-5678');
-    await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
+    await userEvent.type(await screen.findByLabelText('Card no. / code'), 'AMZ-NEW-5678');
+    await userEvent.click(await screen.findByRole('button', { name: /confirm → PROCESSING/i }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(true));
     const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/transition'))!.init!.body));
     expect(body).toEqual({ toStatus: 'PROCESSING', voucherCode: 'AMZ-NEW-5678' });
@@ -99,10 +99,10 @@ describe('GIFVC — voucher handling', () => {
   it('GIFVC2b: an optional PIN typed with the code is sent alongside it (trimmed)', async () => {
     const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    await userEvent.type(screen.getByLabelText('Card no. / code'), '6001220012345678');
-    await userEvent.type(screen.getByLabelText('PIN (if the card has one)'), ' 482913 ');
-    await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
+    await userEvent.type(await screen.findByLabelText('Card no. / code'), '6001220012345678');
+    await userEvent.type(await screen.findByLabelText('PIN (if the card has one)'), ' 482913 ');
+    await userEvent.click(await screen.findByRole('button', { name: /confirm → PROCESSING/i }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(true));
     const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/transition'))!.init!.body));
     expect(body).toEqual({ toStatus: 'PROCESSING', voucherCode: '6001220012345678', voucherPin: '482913' });
@@ -111,9 +111,9 @@ describe('GIFVC — voucher handling', () => {
   it('GIFVC2c: a PIN without a card number is refused client-side (no request)', async () => {
     const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    await userEvent.type(screen.getByLabelText('PIN (if the card has one)'), '4829');
-    await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
+    await userEvent.type(await screen.findByLabelText('PIN (if the card has one)'), '4829');
+    await userEvent.click(await screen.findByRole('button', { name: /confirm → PROCESSING/i }));
     expect(await screen.findByText('Enter the card number before the PIN')).toBeInTheDocument();
     expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(false);
   });
@@ -121,35 +121,35 @@ describe('GIFVC — voucher handling', () => {
   it('GIFVC2d: a fulfilling operator sees the stored card number AND PIN on the row', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: '6001220012345678', voucherPin: '482913', voucherProvider: 'Gifsy' }]);
     const row = await openRow('RDM-1');
-    expect(within(row).getByTestId('order-voucher-code')).toHaveTextContent('6001220012345678');
+    expect(await within(row).findByTestId('order-voucher-code')).toHaveTextContent('6001220012345678');
     // The PIN is masked behind a per-row "Show PIN" toggle, hidden by default.
-    const pin = within(row).getByTestId('order-voucher-pin');
+    const pin = await within(row).findByTestId('order-voucher-pin');
     expect(pin).toHaveTextContent('PIN ••••');
     expect(pin).not.toHaveTextContent('482913');
     // Label-flip pattern: the accessible name CONTAINS the visible text ("Show PIN" / "Hide PIN");
     // no aria-pressed (a flipping name + a pressed state double-announces).
-    const toggle = within(pin).getByRole('button', { name: 'Show PIN for order RDM-1' });
+    const toggle = await within(pin).findByRole('button', { name: 'Show PIN for order RDM-1' });
     expect(toggle).toHaveTextContent('Show PIN');
     expect(toggle).not.toHaveAttribute('aria-pressed');
     await userEvent.click(toggle);
     expect(pin).toHaveTextContent('482913');
-    const hide = within(pin).getByRole('button', { name: 'Hide PIN for order RDM-1' });
+    const hide = await within(pin).findByRole('button', { name: 'Hide PIN for order RDM-1' });
     expect(hide).toHaveTextContent('Hide PIN');
     expect(hide).not.toHaveAttribute('aria-pressed');
     await userEvent.click(hide);
     expect(pin).not.toHaveTextContent('482913');
-    expect(within(pin).getByRole('button', { name: 'Show PIN for order RDM-1' })).toBeInTheDocument();
+    expect(await within(pin).findByRole('button', { name: 'Show PIN for order RDM-1' })).toBeInTheDocument();
   });
 
   it('GIFVC2e: a stored code WITHOUT a PIN offers a set-once PIN box on a forward move and sends only the PIN', async () => {
     const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Gifsy', voucherFillable: true }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    expect(screen.getByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
+    expect(await screen.findByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
     expect(screen.queryByLabelText('Card no. / code')).toBeNull(); // the stored code is not editable
-    expect(screen.getByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText('PIN (if the card has one)'), ' 9911 ');
-    await userEvent.click(screen.getByRole('button', { name: /confirm → DISPATCHED/i }));
+    expect(await screen.findByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
+    await userEvent.type(await screen.findByLabelText('PIN (if the card has one)'), ' 9911 ');
+    await userEvent.click(await screen.findByRole('button', { name: /confirm → DISPATCHED/i }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(true));
     const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/transition'))!.init!.body));
     expect(body).toEqual({ toStatus: 'DISPATCHED', voucherPin: '9911' });
@@ -158,8 +158,8 @@ describe('GIFVC — voucher handling', () => {
   it('item 14: the row PIN box follows the SERVER voucherFillable — false (e.g. unpaid / cash / Hubble) → no PIN box', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Gifsy', voucherFillable: false }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    expect(screen.getByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
+    expect(await screen.findByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
     expect(screen.queryByLabelText('PIN (if the card has one)')).toBeNull();
     expect(screen.queryByText('Add the PIN for this card — it can be saved once')).toBeNull();
   });
@@ -177,45 +177,45 @@ describe('GIFVC — voucher handling', () => {
       },
     );
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    expect(screen.getByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
+    expect(await screen.findByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: /confirm → PROCESSING/i }));
     await waitFor(() => expect(calls.some((c) => c.url === '/api/admin/gift-orders/o1')).toBe(true));
     // Server now says NOT fillable → the stale list `true` must not offer the PIN box.
     const after = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
-    await userEvent.click(within(after).getByRole('button', { name: /advance/i }));
-    expect(screen.getByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    await userEvent.click(await within(after).findByRole('button', { name: /advance/i }));
+    expect(await screen.findByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
     expect(screen.queryByText('Add the PIN for this card — it can be saved once')).toBeNull();
     // …and the reverse: a later update where the server says fillable → the PIN box returns.
     fillable = true;
-    await userEvent.click(screen.getByRole('button', { name: /confirm → DISPATCHED/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /confirm → DISPATCHED/i }));
     await waitFor(() => expect(calls.filter((c) => c.url === '/api/admin/gift-orders/o1').length).toBe(2));
     const again = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
-    await userEvent.click(within(again).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(again).findByRole('button', { name: /advance/i }));
     expect(await screen.findByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
   });
 
   it('GIFVC2f: a stored PIN is read-only + masked in the advance form (no PIN input)', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: '9911', voucherProvider: 'Gifsy' }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     expect(screen.queryByLabelText('PIN (if the card has one)')).toBeNull();
-    expect(screen.getByTestId('voucher-pin-readonly')).toHaveTextContent('PIN ••••');
+    expect(await screen.findByTestId('voucher-pin-readonly')).toHaveTextContent('PIN ••••');
   });
 
   it('GIFVC3: an order that already has a code shows it READ-ONLY (no editable input) and hides refund targets', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: 'AMZN-1234-5678-WXYZ', voucherProvider: 'Gifsy' }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING']); // CANCELLED / RETURNED hidden
-    expect(screen.getByTestId('voucher-code-readonly')).toHaveTextContent('AMZN-1234-5678-WXYZ');
+    expect(await screen.findByTestId('voucher-code-readonly')).toHaveTextContent('AMZN-1234-5678-WXYZ');
     expect(screen.queryByLabelText('Card no. / code')).toBeNull();
   });
 
   it('GIFVC4: a Hubble order never offers voucher inputs nor the vendor-cancel action', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, voucherProvider: 'Hubble' }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     expect(screen.queryByLabelText('Card no. / code')).toBeNull();
     expect(screen.queryByRole('button', { name: /voucher cancelled with vendor/i })).toBeNull();
   });
@@ -229,14 +229,14 @@ describe('GIFVC — voucher handling', () => {
     );
     const row = await openRow('RDM-1');
     // Before: only the forward edge.
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['DELIVERED']);
-    await userEvent.click(within(row).getByRole('button', { name: /close/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /close/i }));
 
-    await userEvent.click(within(row).getByRole('button', { name: /voucher cancelled with vendor/i }));
-    const confirm = screen.getByRole('button', { name: /confirm voucher cancelled/i });
+    await userEvent.click(await within(row).findByRole('button', { name: /voucher cancelled with vendor/i }));
+    const confirm = await screen.findByRole('button', { name: /confirm voucher cancelled/i });
     expect(confirm).toBeDisabled(); // reason required
-    await userEvent.type(screen.getByLabelText(/reason/i), '  Vendor ref VC-77  ');
+    await userEvent.type(await screen.findByLabelText(/reason/i), '  Vendor ref VC-77  ');
     await userEvent.click(confirm);
 
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/voucher-cancelled'))).toBe(true));
@@ -247,7 +247,7 @@ describe('GIFVC — voucher handling', () => {
     const updated = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
     await waitFor(() => expect(within(updated).queryByText('AMZN-1234-5678-WXYZ')).toBeNull());
     expect(within(updated).queryByRole('button', { name: /voucher cancelled with vendor/i })).toBeNull();
-    await userEvent.click(within(updated).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(updated).findByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['DELIVERED', 'RETURNED']);
   });
 
@@ -259,18 +259,18 @@ describe('GIFVC — voucher handling', () => {
         : undefined),
     );
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /voucher cancelled with vendor/i }));
-    await userEvent.type(screen.getByLabelText(/reason/i), 'dup click');
-    await userEvent.click(screen.getByRole('button', { name: /confirm voucher cancelled/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /voucher cancelled with vendor/i }));
+    await userEvent.type(await screen.findByLabelText(/reason/i), 'dup click');
+    await userEvent.click(await screen.findByRole('button', { name: /confirm voucher cancelled/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/voucher code changed/);
-    expect(within(row).getByText('AMZN-1234-5678-WXYZ')).toBeInTheDocument();
+    expect(await within(row).findByText('AMZN-1234-5678-WXYZ')).toBeInTheDocument();
   });
 
   it('GIFVC8: read-only staff (code withheld, voucherIssued only) see "Voucher issued" and no controls', async () => {
     session.role = 'GIFSY_STAFF'; session.perms = ['rewards:read'];
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, voucherIssued: true, voucherCodeMasked: true }]);
     const row = await openRow('RDM-1');
-    expect(within(row).getByTestId('order-voucher-code')).toHaveTextContent('Voucher issued');
+    expect(await within(row).findByTestId('order-voucher-code')).toHaveTextContent('Voucher issued');
     expect(within(row).queryByTestId('order-voucher-pin')).toBeNull();
     expect(within(row).queryByRole('button', { name: /advance/i })).toBeNull();
   });
@@ -279,7 +279,7 @@ describe('GIFVC — voucher handling', () => {
     session.role = 'GIFSY_STAFF'; session.perms = ['rewards:read', 'rewards:manage_orders'];
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, voucherIssued: true }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING']);
     // No editable code input either (a code is already issued).
     expect(screen.queryByLabelText('Card no. / code')).toBeNull();
@@ -289,8 +289,8 @@ describe('GIFVC — voucher handling', () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null,
       voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' }]);
     const row = await openRow('RDM-1');
-    expect(within(row).getByTestId('hubble-needs-reconcile')).toHaveTextContent('Needs reconcile · Hubble state unknown');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(await within(row).findByTestId('hubble-needs-reconcile')).toHaveTextContent('Needs reconcile · Hubble state unknown');
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING']);
     expect(screen.queryByLabelText('Card no. / code')).toBeNull(); // no plain manual code on a Hubble order
   });
@@ -299,8 +299,8 @@ describe('GIFVC — voucher handling', () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null,
       voucherProvider: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED' }]);
     const row = await openRow('RDM-1');
-    expect(within(row).getByTestId('hubble-needs-reconcile')).toHaveTextContent('Hubble not configured');
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(await within(row).findByTestId('hubble-needs-reconcile')).toHaveTextContent('Hubble not configured');
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);
   });
 
@@ -309,14 +309,14 @@ describe('GIFVC — voucher handling', () => {
       hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INVALID_AMOUNT' }]);
     const row = await openRow('RDM-1');
     expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
-    expect(within(row).getByRole('button', { name: /fulfil manually/i })).toBeInTheDocument();
+    expect(await within(row).findByRole('button', { name: /fulfil manually/i })).toBeInTheDocument();
   });
 
   it('GIFVC10d: a whitespace-only code is "no code" (no code shown, refund targets kept)', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: '   ' }]);
     const row = await openRow('RDM-1');
     expect(within(row).queryByTestId('order-voucher-code')).toBeNull();
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);
   });
 
@@ -327,7 +327,7 @@ describe('GIFVC — voucher handling', () => {
     );
     const row = await openRow('RDM-1');
     const before = calls.filter((c) => c.url.startsWith('/api/rewards/orders?')).length;
-    await userEvent.click(within(row).getByRole('button', { name: /retry with hubble/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /retry with hubble/i }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/hubble-reconcile'))).toBe(true));
     await waitFor(() => expect(calls.filter((c) => c.url.startsWith('/api/rewards/orders?')).length).toBeGreaterThan(before));
   });
@@ -397,14 +397,14 @@ describe('GIFVC — voucher handling', () => {
       },
     );
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /acknowledge — resolved/i }));
-    await userEvent.type(screen.getByLabelText('Note *'), 'short');
-    await userEvent.click(screen.getByRole('button', { name: /^acknowledge — resolved$/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /acknowledge — resolved/i }));
+    await userEvent.type(await screen.findByLabelText('Note *'), 'short');
+    await userEvent.click(await screen.findByRole('button', { name: /^acknowledge — resolved$/i }));
     const force = await screen.findByRole('checkbox', { name: /hubble unreachable — acknowledge anyway/i });
     await userEvent.click(force);
-    const confirm = screen.getByRole('button', { name: /^acknowledge — resolved$/i });
+    const confirm = await screen.findByRole('button', { name: /^acknowledge — resolved$/i });
     expect(confirm).toBeDisabled(); // note < 20 chars
-    await userEvent.type(screen.getByLabelText('Note *'), ' — portal shows no voucher');
+    await userEvent.type(await screen.findByLabelText('Note *'), ' — portal shows no voucher');
     await userEvent.click(confirm);
     await waitFor(() => expect(attempt).toBe(2));
     const sent = calls.filter((c) => c.url.endsWith('/hubble-acknowledge')).map((c) => JSON.parse(String(c.init!.body)));
@@ -420,10 +420,10 @@ describe('GIFVC — voucher handling', () => {
         : undefined),
     );
     const row = await openRow('RDM-1');
-    expect(within(row).getByTestId('hubble-latest-reason')).toHaveTextContent('Newer: Hubble succeeded without a code');
-    await userEvent.click(within(row).getByRole('button', { name: /acknowledge — resolved/i }));
-    await userEvent.type(screen.getByLabelText('Note *'), 'one voucher used');
-    await userEvent.click(screen.getByRole('button', { name: /^acknowledge — resolved$/i }));
+    expect(await within(row).findByTestId('hubble-latest-reason')).toHaveTextContent('Newer: Hubble succeeded without a code');
+    await userEvent.click(await within(row).findByRole('button', { name: /acknowledge — resolved/i }));
+    await userEvent.type(await screen.findByLabelText('Note *'), 'one voucher used');
+    await userEvent.click(await screen.findByRole('button', { name: /^acknowledge — resolved$/i }));
     const updated = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
     await waitFor(() => expect(within(updated).getByTestId('hubble-needs-reconcile')).toHaveTextContent(/Hubble succeeded without a code/));
     expect(within(updated).queryByTestId('hubble-latest-reason')).toBeNull();
@@ -433,20 +433,20 @@ describe('GIFVC — voucher handling', () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' }]);
     const row = await openRow('RDM-1');
     expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
-    expect(within(row).getByRole('button', { name: /acknowledge — resolved/i })).toBeInTheDocument();
+    expect(await within(row).findByRole('button', { name: /acknowledge — resolved/i })).toBeInTheDocument();
   });
 
   it('GIFVC11g: the row shows WHY Hubble\'s "no order" was not trusted', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE', hubbleNoOrderUnverifiedWhy: 'no delivered Hubble order on this Hubble account to verify against' }]);
     const row = await openRow('RDM-1');
-    expect(within(row).getByTestId('hubble-no-order-unverified')).toHaveTextContent(/not trusted: no delivered Hubble order on this Hubble account/);
-    expect(within(row).getByRole('button', { name: /retry with hubble/i })).toBeInTheDocument();
+    expect(await within(row).findByTestId('hubble-no-order-unverified')).toHaveTextContent(/not trusted: no delivered Hubble order on this Hubble account/);
+    expect(await within(row).findByRole('button', { name: /retry with hubble/i })).toBeInTheDocument();
   });
 
   it('GIFVC11d: an open-order flag (HUBBLE_WEBHOOK_BUT_NOT_FOUND) keeps Retry and offers no Acknowledge', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_WEBHOOK_BUT_NOT_FOUND' }]);
     const row = await openRow('RDM-1');
-    expect(within(row).getByRole('button', { name: /retry with hubble/i })).toBeInTheDocument();
+    expect(await within(row).findByRole('button', { name: /retry with hubble/i })).toBeInTheDocument();
     expect(within(row).queryByRole('button', { name: /acknowledge/i })).toBeNull();
   });
 
@@ -458,26 +458,26 @@ describe('GIFVC — voucher handling', () => {
         : undefined),
     );
     const row = await openRow('RDM-1');
-    await userEvent.click(within(row).getByRole('button', { name: /fulfil manually/i }));
-    const confirm = screen.getByRole('button', { name: /confirm manual fulfilment/i });
+    await userEvent.click(await within(row).findByRole('button', { name: /fulfil manually/i }));
+    const confirm = await screen.findByRole('button', { name: /confirm manual fulfilment/i });
     expect(confirm).toBeDisabled();
-    await userEvent.type(screen.getByLabelText('Card no. / code *'), 'POOL-7777');
+    await userEvent.type(await screen.findByLabelText('Card no. / code *'), 'POOL-7777');
     expect(confirm).toBeDisabled(); // reason still required
-    await userEvent.type(screen.getByLabelText('Reason *'), 'Hubble down');
+    await userEvent.type(await screen.findByLabelText('Reason *'), 'Hubble down');
     await userEvent.click(confirm);
     await waitFor(() => expect(calls.some((c) => c.url === '/api/rewards/orders/o1' && c.init?.method === 'PATCH')).toBe(true));
     const body = JSON.parse(String(calls.find((c) => c.init?.method === 'PATCH')!.init!.body));
     expect(body).toEqual({ voucherCode: 'POOL-7777', manualOverride: true, overrideReason: 'Hubble down' });
     const updated = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
     await waitFor(() => expect(within(updated).queryByTestId('hubble-needs-reconcile')).toBeNull());
-    expect(within(updated).getByText('POOL-7777')).toBeInTheDocument();
+    expect(await within(updated).findByText('POOL-7777')).toBeInTheDocument();
   });
 
   it('GIFVC13: a permissioned GIFSY_STAFF sees the badge but not the Hubble ops actions (GIFSY_ADMIN only)', async () => {
     session.role = 'GIFSY_STAFF'; session.perms = ['rewards:read', 'rewards:manage_orders'];
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' }]);
     const row = await openRow('RDM-1');
-    expect(within(row).getByTestId('hubble-needs-reconcile')).toBeInTheDocument();
+    expect(await within(row).findByTestId('hubble-needs-reconcile')).toBeInTheDocument();
     expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
     expect(within(row).queryByRole('button', { name: /fulfil manually/i })).toBeNull();
   });
@@ -486,7 +486,7 @@ describe('GIFVC — voucher handling', () => {
     session.role = 'GIFSY_STAFF'; session.perms = ['rewards:read', 'rewards:manage_orders'];
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: 'AMZN-1234-5678-WXYZ', voucherProvider: 'Gifsy' }]);
     const row = await openRow('RDM-1');
-    expect(within(row).getByRole('button', { name: /advance/i })).toBeInTheDocument();
+    expect(await within(row).findByRole('button', { name: /advance/i })).toBeInTheDocument();
     expect(within(row).queryByRole('button', { name: /voucher cancelled with vendor/i })).toBeNull();
   });
 });

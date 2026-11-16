@@ -53,7 +53,7 @@ describe('Reports page — Export Excel', () => {
     fireEvent.click(within(c).getByRole('button', { name: /export excel/i }));
     const note = await within(c).findByTestId('download-queued');
     expect(note).toHaveTextContent(/preparing your file/i);
-    expect(within(note).getByRole('link', { name: /open downloads/i })).toHaveAttribute('href', '/admin/downloads');
+    expect(await within(note).findByRole('link', { name: /open downloads/i })).toHaveAttribute('href', '/admin/downloads');
     expect(downloadBlob).not.toHaveBeenCalled();
   });
 

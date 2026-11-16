@@ -6,7 +6,7 @@
  * Run: npx vitest run src/app/sales/dashboard/__tests__/not-started-tasks.test.tsx
  */
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -59,7 +59,7 @@ beforeEach(() => {
 describe('Sales dashboard — NOT_STARTED outlets surface a KYC task', () => {
   it('shows the "KYC to be done" group with a count of un-KYC\'d outlets', async () => {
     render(<SalesDashboardPage />);
-    await waitFor(() => expect(screen.getByText('KYC to be done')).toBeInTheDocument());
+    expect(await screen.findByText('KYC to be done')).toBeInTheDocument();
     // No "no pending tasks" empty state when there ARE un-KYC'd outlets.
     expect(screen.queryByText(/No pending tasks/i)).not.toBeInTheDocument();
   });
@@ -67,9 +67,9 @@ describe('Sales dashboard — NOT_STARTED outlets surface a KYC task', () => {
   it('shows the "KYC to be done" group + New Enrollment for ASM (now an enroll role)', async () => {
     mockOutlets('ASM');
     render(<SalesDashboardPage />);
-    await waitFor(() => expect(screen.getByText('KYC to be done')).toBeInTheDocument());
+    expect(await screen.findByText('KYC to be done')).toBeInTheDocument();
     // ASM sees the enroll CTA, mirroring XSR/SO.
-    expect(screen.getByText('New Enrollment')).toBeInTheDocument();
+    expect(await screen.findByText('New Enrollment')).toBeInTheDocument();
     expect(screen.queryByText(/No pending tasks/i)).not.toBeInTheDocument();
   });
 
@@ -77,7 +77,7 @@ describe('Sales dashboard — NOT_STARTED outlets surface a KYC task', () => {
     mockOutlets('RSM');
     render(<SalesDashboardPage />);
     // RSM is not in ENROLL_ROLES → no field/KYC-to-do tasks, no enroll CTA.
-    await waitFor(() => expect(screen.getByText(/No pending tasks/i)).toBeInTheDocument());
+    expect(await screen.findByText(/No pending tasks/i)).toBeInTheDocument();
     expect(screen.queryByText('KYC to be done')).not.toBeInTheDocument();
     expect(screen.queryByText('New Enrollment')).not.toBeInTheDocument();
   });
@@ -92,7 +92,7 @@ describe('Sales dashboard — NOT_STARTED outlets surface a KYC task', () => {
       return Promise.resolve({ json: () => Promise.resolve({ success: true, data: { period: null, outletCount: 1, kpis: [], trend: [] } }) });
     });
     render(<SalesDashboardPage />);
-    await waitFor(() => expect(screen.getByText(/No pending tasks/i)).toBeInTheDocument());
+    expect(await screen.findByText(/No pending tasks/i)).toBeInTheDocument();
     expect(screen.queryByText('KYC to be done')).not.toBeInTheDocument();
   });
 });

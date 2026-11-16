@@ -35,25 +35,23 @@ describe('Partner Support — Your Sales Team is real, not hardcoded', () => {
     ]);
     render(<PartnerSupportPage />);
 
-    await waitFor(() => expect(screen.getByText('Meera Iyer')).toBeInTheDocument());
-    expect(screen.getByText('Vikas Rao')).toBeInTheDocument();
-    expect(screen.getByText('9811111111')).toBeInTheDocument();
+    expect(await screen.findByText('Meera Iyer')).toBeInTheDocument();
+    expect(await screen.findByText('Vikas Rao')).toBeInTheDocument();
+    expect(await screen.findByText('9811111111')).toBeInTheDocument();
 
     // The old fabricated personas must be gone.
     expect(screen.queryByText('Anil Sharma')).not.toBeInTheDocument();
     expect(screen.queryByText('Rajesh Kumar')).not.toBeInTheDocument();
 
     // Call link points at the real phone.
-    expect(screen.getByLabelText('Call Meera Iyer')).toHaveAttribute('href', 'tel:9811111111');
+    expect(await screen.findByLabelText('Call Meera Iyer')).toHaveAttribute('href', 'tel:9811111111');
   });
 
   it('shows an honest empty state when no rep is mapped (no fake fallback)', async () => {
     routeGet([]);
     render(<PartnerSupportPage />);
 
-    await waitFor(() =>
-      expect(screen.getByText(/No sales team is mapped/i)).toBeInTheDocument(),
-    );
+    expect(await screen.findByText(/No sales team is mapped/i)).toBeInTheDocument();
     expect(screen.queryByText('Anil Sharma')).not.toBeInTheDocument();
     expect(screen.queryByText('Rajesh Kumar')).not.toBeInTheDocument();
   });

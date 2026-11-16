@@ -50,9 +50,9 @@ describe('Outlet Master upload — tenant-config load guard', () => {
     // fetch settle. waitFor's default 1000ms budget is too tight for that chain when the whole
     // suite is contending for the CPU → it flaked red in-suite (passed solo). A generous timeout
     // waits the chain out and still fails fast on a genuine regression (element never appears).
-    await waitFor(() => expect(screen.getByText(/Drop your XLSX file/i)).toBeInTheDocument(), { timeout: 10000 });
+    expect(await screen.findByText(/Drop your XLSX file/i, {}, { timeout: 15_000 })).toBeInTheDocument();
     expect(screen.queryByTestId('upload-disabled')).not.toBeInTheDocument();
-  }, 15000);
+  }, 30_000);
 
   it('blocks the upload with a tenant-workspace hint when zero outlet types are enabled (no false rejection)', async () => {
     mockConfig([]);
@@ -66,9 +66,9 @@ describe('Outlet Master upload — tenant-config load guard', () => {
     // red in-suite, green solo). Waiting the chain out is deterministic; a real break still fails.
     await waitFor(() =>
       expect(screen.getByTestId('upload-disabled')).toHaveTextContent(/correct tenant workspace/i),
-      { timeout: 10000 },
+      { timeout: 15_000 },
     );
     // The active dropzone is hidden so a file can't be validated against an empty list.
     expect(screen.queryByText(/Drop your XLSX file/i)).not.toBeInTheDocument();
-  }, 15000);
+  }, 30_000);
 });

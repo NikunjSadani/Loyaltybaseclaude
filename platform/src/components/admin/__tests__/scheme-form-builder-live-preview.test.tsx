@@ -68,6 +68,6 @@ describe('SchemeFormBuilder — Live preview', () => {
     const realInput = await screen.findByLabelText(/Owner name/i);
     expect(realInput.tagName).toBe('INPUT');
     // Caption makes the dry-run explicit.
-    expect(screen.getByText(/nothing is saved/i)).toBeInTheDocument();
+    expect(await screen.findByText(/nothing is saved/i)).toBeInTheDocument();
   });
 });

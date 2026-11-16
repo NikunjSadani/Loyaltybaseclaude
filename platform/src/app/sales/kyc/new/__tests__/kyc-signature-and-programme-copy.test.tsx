@@ -129,7 +129,7 @@ describe('KYC signature pad — no layout change mid-stroke (SIG-2)', { timeout:
     install();
     const { container } = await walkToBankStep();
     const canvas = container.querySelector('canvas') as HTMLCanvasElement;
-    expect(screen.getByText(SIG_REQUIRED)).toBeInTheDocument();
+    expect(await screen.findByText(SIG_REQUIRED)).toBeInTheDocument();
     fireEvent.touchStart(canvas, { touches: [{ clientX: 5, clientY: 5 }] });
     fireEvent.touchMove(canvas, { touches: [{ clientX: 30, clientY: 30 }] });
     fireEvent.touchMove(canvas, { touches: [{ clientX: 60, clientY: 20 }] });

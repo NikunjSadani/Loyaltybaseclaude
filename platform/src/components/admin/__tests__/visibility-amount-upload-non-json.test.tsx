@@ -35,7 +35,7 @@ describe('VisibilityAmountUploadPanel — non-JSON responses', () => {
     expect(msg.textContent).toMatch(/may have been saved/);
     expect(screen.queryByText(/Network error/)).toBeNull();
     expect(screen.queryByText(/SyntaxError|Unexpected token/)).toBeNull();
-    expect(screen.getByRole('button', { name: /^Upload$/ })).toBeTruthy(); // spinner gone
+    expect(await screen.findByRole('button', { name: /^Upload$/ })).toBeTruthy(); // spinner gone
   });
 
   it('non-JSON 413 → says the file is too large', async () => {

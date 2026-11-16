@@ -87,7 +87,7 @@ describe('Admin Operations Dashboard — real data', () => {
     mockFetch(PAYLOAD_VIS_NULL);
     render(<OperationsDashboardPage />);
     expect((await screen.findAllByText('84.0%')).length).toBeGreaterThan(0);
-    expect(screen.getByText('168 / 200 transactions')).toBeInTheDocument();
+    expect(await screen.findByText('168 / 200 transactions')).toBeInTheDocument();
   });
 
   it('RD2: renders MTTR and shows "—" for the null first-response metric', async () => {
@@ -95,8 +95,8 @@ describe('Admin Operations Dashboard — real data', () => {
     render(<OperationsDashboardPage />);
     expect(await screen.findByText('18.4h')).toBeInTheDocument();
     // first-response is null → the card under "First Response" shows an em-dash
-    expect(screen.getByText('avg time to first reply')).toBeInTheDocument();
-    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+    expect(await screen.findByText('avg time to first reply')).toBeInTheDocument();
+    expect((await screen.findAllByText('—')).length).toBeGreaterThan(0);
   });
 
   it('RD3: hides the visibility card when payload.visibility is null', async () => {
@@ -112,8 +112,8 @@ describe('Admin Operations Dashboard — real data', () => {
     mockFetch(PAYLOAD_VIS_ON);
     render(<OperationsDashboardPage />);
     expect(await screen.findByTestId('operations-visibility-card')).toBeInTheDocument();
-    expect(screen.getByText('78.6%')).toBeInTheDocument();       // approval rate
-    expect(screen.getByText('of addressable outlets')).toBeInTheDocument();
+    expect(await screen.findByText('78.6%')).toBeInTheDocument();       // approval rate
+    expect(await screen.findByText('of addressable outlets')).toBeInTheDocument();
   });
 
   it('RD5: on fetch failure shows an error state and NO fabricated numbers', async () => {

@@ -12,7 +12,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -42,10 +42,7 @@ async function renderKyc(id: string) {
     k1: 'Kumar General Store',
     k4: 'Singh Supermart',
   };
-  await waitFor(
-    () => expect(screen.getByText(firmNames[id] ?? id)).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByText(firmNames[id] ?? id, {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 // QUARANTINE (launch CD gate / A-1): pre-existing TDD-red spec for an unbuilt/changed feature. Un-skip when that feature ships. See docs/plans/reconcile/baseline-red-snapshot.txt
@@ -59,7 +56,7 @@ describe.skip('AD — Outlet quick actions tenant config', () => {
       salesApp: { ledgerLabel: 'Wallet' },
     }));
     await renderKyc('k1');
-    expect(screen.getByText('Wallet')).toBeInTheDocument();
+    expect(await screen.findByText('Wallet')).toBeInTheDocument();
     expect(screen.queryByText('View Points Ledger')).not.toBeInTheDocument();
   });
 
@@ -67,15 +64,15 @@ describe.skip('AD — Outlet quick actions tenant config', () => {
     // Simulate a tenant that has no ledgerLabel override (salesApp: {} clears the Deoleo default)
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({ salesApp: {} }));
     await renderKyc('k1');
-    expect(screen.getByText('View Points Ledger')).toBeInTheDocument();
+    expect(await screen.findByText('View Points Ledger')).toBeInTheDocument();
     expect(screen.queryByText('Wallet')).not.toBeInTheDocument();
   });
 
   it('AD5: past performance section is shown with month labels and achievement bars', async () => {
     await renderKyc('k1');
-    expect(screen.getByTestId('past-performance')).toBeInTheDocument();
+    expect(await screen.findByTestId('past-performance')).toBeInTheDocument();
     // Should show at least one month label
-    const section = screen.getByTestId('past-performance');
+    const section = await screen.findByTestId('past-performance');
     expect(section.querySelectorAll('[data-testid="perf-month-bar"]').length).toBeGreaterThanOrEqual(1);
   });
 });

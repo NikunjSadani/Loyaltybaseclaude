@@ -86,12 +86,12 @@ describe('Re-KYC field-level lock', () => {
     expect(banner).toHaveTextContent('GST Number');
 
     // The flagged GST input is EDITABLE (pre-filled, not disabled).
-    const gstInput = screen.getByPlaceholderText('27AAPFU0939F1Z5') as HTMLInputElement;
+    const gstInput = await screen.findByPlaceholderText('27AAPFU0939F1Z5') as HTMLInputElement;
     expect(gstInput).toHaveValue('27AAPFU0939F1Z5');
     expect(gstInput).not.toBeDisabled();
 
     // A non-flagged Details field (PAN) is LOCKED.
-    expect(screen.getByPlaceholderText('AAPFU0939F')).toBeDisabled();
+    expect(await screen.findByPlaceholderText('AAPFU0939F')).toBeDisabled();
 
     // Details → Address step (City field lives here)
     fireEvent.click(await screen.findByRole('button', { name: /continue/i }));

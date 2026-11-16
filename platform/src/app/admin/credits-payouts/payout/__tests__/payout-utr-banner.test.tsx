@@ -128,7 +128,7 @@ describe('Payout UTR-apply result banner', () => {
     expect(bannerDiv.className).toMatch(/amber/);
     expect(bannerDiv.className).not.toMatch(/emerald/);
 
-    expect(screen.getByText(/1 failed/)).toBeTruthy();
+    expect(await screen.findByText(/1 failed/)).toBeTruthy();
   });
 
   it('shows the GREEN "UTR results applied" banner only when nothing failed', async () => {
@@ -173,8 +173,8 @@ describe('Payout UTR preview — problem rows only (memory-safety)', () => {
 
     fireEvent.click(await screen.findByText(/Show row details \(720\)/));
     expect(await screen.findByText('O-BAD')).toBeTruthy();
-    expect(screen.getByText('UTR is required')).toBeTruthy();
-    expect(screen.getByRole('status').textContent).toMatch(/first 1 of 720 problem rows/);
+    expect(await screen.findByText('UTR is required')).toBeTruthy();
+    expect((await screen.findByRole('status')).textContent).toMatch(/first 1 of 720 problem rows/);
     // Errors block the apply.
     expect(screen.queryByText('Apply UTR Results')).toBeNull();
   });
@@ -214,13 +214,13 @@ describe('Payout UTR preview — full row details before Apply (H3, API returns 
     expect(ok.textContent).toMatch(/O-OK/);
     expect(ok.textContent).toMatch(/UTR: UTR123/);
     expect(ok.textContent).toMatch(/Paid: 28\/6\/2026/);
-    const skip = screen.getByTestId('utr-row-3');
+    const skip = await screen.findByTestId('utr-row-3');
     expect(skip.textContent).toMatch(/O-SKIP/);
     expect(skip.textContent).toMatch(/Already paid/);
     expect(skip.textContent).toMatch(/Skipped/);
     // The list is shown BEFORE the Apply button, and Apply is available.
-    const apply = screen.getByText('Apply UTR Results');
-    expect(screen.getByTestId('utr-row-details').compareDocumentPosition(apply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const apply = await screen.findByText('Apply UTR Results');
+    expect((await screen.findByTestId('utr-row-details')).compareDocumentPosition(apply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('says "Showing the first N of M rows" when the API capped the full list', async () => {

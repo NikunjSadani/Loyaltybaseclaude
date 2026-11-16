@@ -10,7 +10,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -92,7 +92,7 @@ describe('PDB — Partner Dashboard real-data wiring', () => {
     vi.stubGlobal('fetch', stubFetch({ targets: EMPTY_TARGETS, me: EMPTY_ME }));
 
     render(<PartnerDashboardPage />);
-    await waitFor(() => expect(screen.getByText('My Targets')).toBeInTheDocument());
+    expect(await screen.findByText('My Targets')).toBeInTheDocument();
   });
 
   it('PDB2: fetch IS called to /api/partner/targets for real KPI data', async () => {
@@ -100,7 +100,7 @@ describe('PDB — Partner Dashboard real-data wiring', () => {
     vi.stubGlobal('fetch', mockFetch);
 
     render(<PartnerDashboardPage />);
-    await waitFor(() => expect(screen.getByText('My Targets')).toBeInTheDocument());
+    expect(await screen.findByText('My Targets')).toBeInTheDocument();
 
     const calls = mockFetch.mock.calls.map((c: unknown[]) => c[0] as string);
     expect(calls.some((url: string) => url.includes('/api/partner/targets'))).toBe(true);
@@ -110,7 +110,7 @@ describe('PDB — Partner Dashboard real-data wiring', () => {
     vi.stubGlobal('fetch', stubFetch({ targetsReject: true, me: EMPTY_ME }));
 
     render(<PartnerDashboardPage />);
-    await waitFor(() => expect(screen.getByText('My Targets')).toBeInTheDocument());
+    expect(await screen.findByText('My Targets')).toBeInTheDocument();
   });
 
   it('PDB4: hero shows REAL aggregated primary-KPI target + REAL wallet points', async () => {
@@ -142,11 +142,11 @@ describe('PDB — Partner Dashboard real-data wiring', () => {
     render(<PartnerDashboardPage />);
 
     // Summed target (800) appears, summed achieved + percentage shown.
-    await waitFor(() => expect(screen.getByText(/of 800 cases/)).toBeInTheDocument());
-    expect(screen.getByText('50%')).toBeInTheDocument();
+    expect(await screen.findByText(/of 800 cases/)).toBeInTheDocument();
+    expect(await screen.findByText('50%')).toBeInTheDocument();
 
     // REAL wallet points (1,234) — NOT the old demo 4,250.
-    expect(screen.getByText('1,234')).toBeInTheDocument();
+    expect(await screen.findByText('1,234')).toBeInTheDocument();
     expect(screen.queryByText('4,250')).not.toBeInTheDocument();
   });
 });

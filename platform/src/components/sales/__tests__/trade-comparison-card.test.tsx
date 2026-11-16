@@ -89,47 +89,47 @@ describe('TradeComparisonCard', () => {
   it('TC1: renders the KPI name, ₹ monthly sales, and target-met pct', async () => {
     render(<TradeComparisonCard outletType="SSS" />);
     await waitFor(() => expect(screen.getAllByText('Primary Sales').length).toBeGreaterThan(0));
-    expect(screen.getByText('₹1.2L')).toBeInTheDocument();  // current (1,20,000 → compact lakhs)
-    expect(screen.getByText('₹90K')).toBeInTheDocument();   // last month (90,000 → compact thousands)
-    expect(screen.getByText('₹1L')).toBeInTheDocument();    // last 3 months avg (1,00,000 → compact lakhs)
-    expect(screen.getByText('80%')).toBeInTheDocument();
-    expect(screen.getByText('60%')).toBeInTheDocument();
-    expect(screen.getByText('70%')).toBeInTheDocument();
+    expect(await screen.findByText('₹1.2L')).toBeInTheDocument();  // current (1,20,000 → compact lakhs)
+    expect(await screen.findByText('₹90K')).toBeInTheDocument();   // last month (90,000 → compact thousands)
+    expect(await screen.findByText('₹1L')).toBeInTheDocument();    // last 3 months avg (1,00,000 → compact lakhs)
+    expect(await screen.findByText('80%')).toBeInTheDocument();
+    expect(await screen.findByText('60%')).toBeInTheDocument();
+    expect(await screen.findByText('70%')).toBeInTheDocument();
   });
 
   it('TC2: shows achieved/withTarget for current & last month, pct-only for last 3 months', async () => {
     render(<TradeComparisonCard outletType="SSS" />);
     await waitFor(() => expect(screen.getAllByText('Primary Sales').length).toBeGreaterThan(0));
-    expect(screen.getByText('8/10')).toBeInTheDocument();  // current ratio
-    expect(screen.getByText('6/10')).toBeInTheDocument();  // last-month ratio
+    expect(await screen.findByText('8/10')).toBeInTheDocument();  // current ratio
+    expect(await screen.findByText('6/10')).toBeInTheDocument();  // last-month ratio
     // last3Months carries null achieved/withTarget → no ratio rendered, only the 70% pct.
     expect(screen.queryByText('7/10')).not.toBeInTheDocument();
   });
 
   it('TC3: renders the three column headers', async () => {
     render(<TradeComparisonCard outletType="SSS" />);
-    await waitFor(() => expect(screen.getByText('Current')).toBeInTheDocument());
-    expect(screen.getByText('Last month')).toBeInTheDocument();
-    expect(screen.getByText('Last 3 months')).toBeInTheDocument();
+    expect(await screen.findByText('Current')).toBeInTheDocument();
+    expect(await screen.findByText('Last month')).toBeInTheDocument();
+    expect(await screen.findByText('Last 3 months')).toBeInTheDocument();
     // Row label is now the selected KPI's name (default = primary). It may also appear as a
     // dropdown option, so allow multiple matches.
-    expect(screen.getAllByText('Primary Sales').length).toBeGreaterThan(0);
-    expect(screen.getByText('Width of achievement')).toBeInTheDocument();
+    expect((await screen.findAllByText('Primary Sales')).length).toBeGreaterThan(0);
+    expect(await screen.findByText('Width of achievement')).toBeInTheDocument();
   });
 
   it('TC4: program + member filter options come from team-view', async () => {
     render(<TradeComparisonCard outletType="SSS" />);
     const programSelect = await screen.findByLabelText('Program');
     await waitFor(() => expect(within(programSelect).getByRole('option', { name: 'Gold' })).toBeInTheDocument());
-    expect(within(programSelect).getByRole('option', { name: 'Silver' })).toBeInTheDocument();
-    const memberSelect = screen.getByLabelText('Team member');
-    expect(within(memberSelect).getByRole('option', { name: /Asha Rao/ })).toBeInTheDocument();
+    expect(await within(programSelect).findByRole('option', { name: 'Silver' })).toBeInTheDocument();
+    const memberSelect = await screen.findByLabelText('Team member');
+    expect(await within(memberSelect).findByRole('option', { name: /Asha Rao/ })).toBeInTheDocument();
   });
 
   it('TC5: a failed refetch after a type change clears stale data and shows the error (no wrong bucket)', async () => {
     const { rerender } = render(<TradeComparisonCard outletType="SSS" />);
     // First load succeeds — RLP numbers on screen (compact ₹).
-    await waitFor(() => expect(screen.getByText('₹1.2L')).toBeInTheDocument());
+    expect(await screen.findByText('₹1.2L')).toBeInTheDocument();
 
     // Backend now errors for the comparison; switch the outlet type → refetch.
     fetchMock.mockImplementation((url: string) => {
@@ -144,7 +144,7 @@ describe('TradeComparisonCard', () => {
     rerender(<TradeComparisonCard outletType="WHOLESALER" />);
 
     // The error state shows and the previous (RLP) numbers are GONE — never shown under the new type.
-    await waitFor(() => expect(screen.getByText(/Couldn.t load the comparison/i)).toBeInTheDocument());
+    expect(await screen.findByText(/Couldn.t load the comparison/i)).toBeInTheDocument();
     expect(screen.queryByText('₹1.2L')).not.toBeInTheDocument();
     expect(screen.queryByText('₹90K')).not.toBeInTheDocument();
   });
@@ -153,8 +153,8 @@ describe('TradeComparisonCard', () => {
     render(<TradeComparisonCard outletType="SSS" />);
     const kpiSelect = (await screen.findByLabelText('KPI')) as HTMLSelectElement;
     await waitFor(() => expect(within(kpiSelect).getByRole('option', { name: 'Volume' })).toBeInTheDocument());
-    expect(within(kpiSelect).getByRole('option', { name: 'Primary KPI' })).toBeInTheDocument();
-    expect(within(kpiSelect).getByRole('option', { name: 'Primary Sales' })).toBeInTheDocument();
+    expect(await within(kpiSelect).findByRole('option', { name: 'Primary KPI' })).toBeInTheDocument();
+    expect(await within(kpiSelect).findByRole('option', { name: 'Primary Sales' })).toBeInTheDocument();
     // Default selection is the primary (the '' value → the backend's primary default).
     expect(kpiSelect.value).toBe('');
   });
@@ -172,14 +172,14 @@ describe('TradeComparisonCard', () => {
     });
 
     render(<TradeComparisonCard outletType="SSS" />);
-    await waitFor(() => expect(screen.getByText('₹1.2L')).toBeInTheDocument());
+    expect(await screen.findByText('₹1.2L')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('KPI'), { target: { value: 'VOL' } });
 
     // Refetch for VOL: values reformatted with the Litre unit suffix (no ₹).
-    await waitFor(() => expect(screen.getByText('500 Litre')).toBeInTheDocument());
-    expect(screen.getByText('400 Litre')).toBeInTheDocument();
-    expect(screen.getByText('450 Litre')).toBeInTheDocument();
+    expect(await screen.findByText('500 Litre')).toBeInTheDocument();
+    expect(await screen.findByText('400 Litre')).toBeInTheDocument();
+    expect(await screen.findByText('450 Litre')).toBeInTheDocument();
     // The request carried ?kpi=VOL, and the old ₹ figure is gone.
     expect(fetchMock.mock.calls.some(([u]) => typeof u === 'string' && u.includes('kpi=VOL'))).toBe(true);
     expect(screen.queryByText('₹1.2L')).not.toBeInTheDocument();
@@ -192,11 +192,11 @@ describe('TradeComparisonCard', () => {
 
   it('TC9: renders the Achievement and Target rows with ₹ values', async () => {
     render(<TradeComparisonCard outletType="SSS" />);
-    await waitFor(() => expect(screen.getByText('Achievement')).toBeInTheDocument());
-    expect(screen.getByText('Target')).toBeInTheDocument();
+    expect(await screen.findByText('Achievement')).toBeInTheDocument();
+    expect(await screen.findByText('Target')).toBeInTheDocument();
     // Target values (distinct from the achievement figures) — current ₹2L / last mo ₹1.6L / 3-mo ₹1.8L.
-    expect(screen.getByText('₹2L')).toBeInTheDocument();
-    expect(screen.getByText('₹1.6L')).toBeInTheDocument();
-    expect(screen.getByText('₹1.8L')).toBeInTheDocument();
+    expect(await screen.findByText('₹2L')).toBeInTheDocument();
+    expect(await screen.findByText('₹1.6L')).toBeInTheDocument();
+    expect(await screen.findByText('₹1.8L')).toBeInTheDocument();
   });
 });

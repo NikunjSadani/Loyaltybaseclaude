@@ -74,7 +74,7 @@ describe('Re-KYC deep-link — Step 1 auto-skip', () => {
 
     // Still on Step 1: the outlet-dropdown trigger + Not Interested button are present.
     expect(await screen.findByTestId('outlet-dropdown-trigger')).toBeInTheDocument();
-    expect(screen.getByTestId('ni-btn')).toBeInTheDocument();
+    expect(await screen.findByTestId('ni-btn')).toBeInTheDocument();
     // And NOT auto-advanced — the summary banner (a step 2-4 element) is absent.
     expect(screen.queryByTestId('rekyc-summary-banner')).not.toBeInTheDocument();
   });

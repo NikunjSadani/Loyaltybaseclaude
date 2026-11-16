@@ -64,8 +64,8 @@ describe('Gift-dispatch console list', () => {
     render(<GiftOrdersConsolePage />);
 
     expect(await screen.findByTestId('orders-count')).toHaveTextContent('Page 1 of 3');
-    expect(screen.getByTestId('page-prev')).toBeDisabled();
-    expect(screen.getByTestId('page-next')).not.toBeDisabled();
+    expect(await screen.findByTestId('page-prev')).toBeDisabled();
+    expect(await screen.findByTestId('page-next')).not.toBeDisabled();
   });
 
   it('CL3: clicking Next requests the next page', async () => {

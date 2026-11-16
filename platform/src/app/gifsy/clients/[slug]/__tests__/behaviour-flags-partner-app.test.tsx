@@ -88,7 +88,7 @@ describe('Behaviour flags (B2)', () => {
 
     await renderPage();
     const row = await screen.findByTestId('behaviour-flag-outletMasterGeo');
-    const toggle = within(row).getByRole('switch');
+    const toggle = await within(row).findByRole('switch');
     expect(toggle).toHaveAttribute('aria-checked', 'false');
     // L4: a plain name — state is carried by aria-checked, not baked into the label.
     expect(toggle).toHaveAttribute('aria-label', 'Outlet master Lat/Long + 200 m geo-fence');
@@ -98,7 +98,7 @@ describe('Behaviour flags (B2)', () => {
     expect(patchSpy.mock.calls[0][0]).toEqual({ features: { outletMasterGeo: true } });
     await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true'));
     // The sibling behaviour flag is untouched.
-    expect(within(screen.getByTestId('behaviour-flag-soDeclarationKyc')).getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+    expect(await within(screen.getByTestId('behaviour-flag-soDeclarationKyc')).findByRole('switch')).toHaveAttribute('aria-checked', 'false');
   });
 
   it('BF2: shows a stored ON value; a failed PATCH keeps it ON and surfaces the error', async () => {
@@ -108,11 +108,11 @@ describe('Behaviour flags (B2)', () => {
 
     await renderPage();
     const row = await screen.findByTestId('behaviour-flag-soDeclarationKyc');
-    expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+    expect(await within(row).findByRole('switch')).toHaveAttribute('aria-checked', 'true');
     fireEvent.click(within(row).getByRole('switch'));
 
-    await waitFor(() => expect(screen.getByTestId('behaviour-flags-error')).toBeInTheDocument());
-    expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+    expect(await screen.findByTestId('behaviour-flags-error')).toBeInTheDocument();
+    expect(await within(row).findByRole('switch')).toHaveAttribute('aria-checked', 'true');
   });
 });
 
@@ -128,23 +128,23 @@ describe('Behaviour flags — allowPayoutWithoutPan (BF3)', () => {
 
     await renderPage();
     const row = await screen.findByTestId('behaviour-flag-allowPayoutWithoutPan');
-    expect(within(row).getByText('Allow payouts without PAN')).toBeInTheDocument();
+    expect(await within(row).findByText('Allow payouts without PAN')).toBeInTheDocument();
     expect(
       within(row).getByText(
         "Partners with no PAN on file can still be paid. They are paid the full amount; the TDS at the no-PAN rate is a company-borne liability shown in the TDS reports as 'NO PAN ON FILE'.",
       ),
     ).toBeInTheDocument();
-    const toggle = within(row).getByRole('switch');
+    const toggle = await within(row).findByRole('switch');
     expect(toggle).toHaveAttribute('aria-checked', 'false');
     expect(toggle).toHaveAttribute('aria-label', 'Allow payouts without PAN');
     fireEvent.click(toggle);
 
     // Switching ON asks first: nothing is saved until the confirm button is pressed.
     const dialog = await screen.findByTestId('behaviour-flag-confirm');
-    expect(screen.getByText('Allow payouts without PAN?')).toBeInTheDocument();
-    expect(within(dialog).getByText(/paid the FULL amount/)).toBeInTheDocument();
+    expect(await screen.findByText('Allow payouts without PAN?')).toBeInTheDocument();
+    expect(await within(dialog).findByText(/paid the FULL amount/)).toBeInTheDocument();
     expect(within(dialog).getByText(/batches that haven't been paid yet \(draft, submitted or failed\) will be included the next time/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/company-borne liability/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/company-borne liability/)).toBeInTheDocument();
     expect(patchSpy).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, allow payouts without PAN' }));
 
@@ -152,8 +152,8 @@ describe('Behaviour flags — allowPayoutWithoutPan (BF3)', () => {
     expect(patchSpy.mock.calls[0][0]).toEqual({ features: { allowPayoutWithoutPan: true } });
     await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
     await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true'));
-    expect(within(screen.getByTestId('behaviour-flag-soDeclarationKyc')).getByRole('switch')).toHaveAttribute('aria-checked', 'true');
-    expect(within(screen.getByTestId('behaviour-flag-outletMasterGeo')).getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+    expect(await within(screen.getByTestId('behaviour-flag-soDeclarationKyc')).findByRole('switch')).toHaveAttribute('aria-checked', 'true');
+    expect(await within(screen.getByTestId('behaviour-flag-outletMasterGeo')).findByRole('switch')).toHaveAttribute('aria-checked', 'false');
   });
 
   it('BF3: Cancel on the confirm dialog saves nothing and leaves the switch OFF', async () => {
@@ -169,7 +169,7 @@ describe('Behaviour flags — allowPayoutWithoutPan (BF3)', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
     expect(patchSpy).not.toHaveBeenCalled();
-    expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+    expect(await within(row).findByRole('switch')).toHaveAttribute('aria-checked', 'false');
   });
 
   it('BF3: other behaviour flags still save immediately with no confirm dialog', async () => {
@@ -193,7 +193,7 @@ describe('Behaviour flags — allowPayoutWithoutPan (BF3)', () => {
     }));
     await renderPage();
     const row = await screen.findByTestId('behaviour-flag-allowPayoutWithoutPan');
-    expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+    expect(await within(row).findByRole('switch')).toHaveAttribute('aria-checked', 'true');
     fireEvent.click(within(row).getByRole('switch'));
     await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
     expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
@@ -216,15 +216,15 @@ describe('Partner app tabs (B3)', () => {
     await renderPage();
     openSection('Partner app tabs');
     const row = await screen.findByTestId('partner-app-showLeaderboard');
-    expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+    expect(await within(row).findByRole('switch')).toHaveAttribute('aria-checked', 'false');
     fireEvent.click(within(row).getByRole('switch'));
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
     expect(patchSpy.mock.calls[0][0]).toEqual({ features: { partnerApp: { showLeaderboard: true } } });
     await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true'));
     // Effective sibling values remain (Wallet default ON, Invoices OFF).
-    expect(within(screen.getByTestId('partner-app-showWallet')).getByText('On')).toBeInTheDocument();
-    expect(within(screen.getByTestId('partner-app-showInvoices')).getByText('Off')).toBeInTheDocument();
+    expect(await within(screen.getByTestId('partner-app-showWallet')).findByText('On')).toBeInTheDocument();
+    expect(await within(screen.getByTestId('partner-app-showInvoices')).findByText('Off')).toBeInTheDocument();
   });
 
   it('PA2: tab keys no partner screen reads are shown read-only (no switch)', async () => {

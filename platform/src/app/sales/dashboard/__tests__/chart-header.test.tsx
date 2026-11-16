@@ -56,9 +56,7 @@ describe('Z — Sales dashboard chart header', () => {
 
   it('Z3: heading reads "Target vs. Achievement"', async () => {
     render(<SalesDashboardPage />);
-    await waitFor(() =>
-      expect(screen.getByText('Target vs. Achievement')).toBeInTheDocument()
-    );
+    expect(await screen.findByText('Target vs. Achievement')).toBeInTheDocument();
   });
 
   it('Z4: sub-line "Target vs Achieved" is not shown', async () => {

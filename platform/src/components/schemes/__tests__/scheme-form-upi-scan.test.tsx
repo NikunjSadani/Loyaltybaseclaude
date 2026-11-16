@@ -11,7 +11,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
@@ -62,7 +62,7 @@ describe('UpiQrScanField — scan-only, stores the VPA string', () => {
   it('opens the rear camera (facingMode environment) when Scan is pressed', async () => {
     renderForm();
     await userEvent.click(screen.getByRole('button', { name: /scan upi qr/i }));
-    await waitFor(() => expect(screen.getByTestId('upi-qr-camera-view')).toBeInTheDocument());
+    expect(await screen.findByTestId('upi-qr-camera-view')).toBeInTheDocument();
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith(
       expect.objectContaining({
         video: expect.objectContaining({ facingMode: expect.objectContaining({ ideal: 'environment' }) }),
@@ -86,7 +86,7 @@ describe('UpiQrScanField — scan-only, stores the VPA string', () => {
     // Advance past the ~300ms decode poll and flush the dynamic import().then().
     await act(async () => { vi.advanceTimersByTime(400); });
 
-    await waitFor(() => expect(screen.getByText('merchant@okhdfc')).toBeInTheDocument());
+    expect(await screen.findByText('merchant@okhdfc')).toBeInTheDocument();
     // Camera view is gone (scan stopped); no file input ever rendered.
     expect(screen.queryByTestId('upi-qr-camera-view')).not.toBeInTheDocument();
     expect(document.querySelector('input[type="file"]')).toBeNull();
@@ -110,13 +110,13 @@ describe('UpiQrScanField — scan-only, stores the VPA string', () => {
     renderForm();
     await userEvent.click(screen.getByRole('button', { name: /scan upi qr/i }));
     await act(async () => { vi.advanceTimersByTime(400); });
-    await waitFor(() => expect(screen.getByText('merchant@okhdfc')).toBeInTheDocument());
+    expect(await screen.findByText('merchant@okhdfc')).toBeInTheDocument();
 
     vi.useRealTimers();
 
     (navigator.mediaDevices.getUserMedia as ReturnType<typeof vi.fn>).mockClear();
     await userEvent.click(screen.getByRole('button', { name: /rescan/i }));
-    await waitFor(() => expect(screen.getByTestId('upi-qr-camera-view')).toBeInTheDocument());
+    expect(await screen.findByTestId('upi-qr-camera-view')).toBeInTheDocument();
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
     expect(document.querySelector('input[type="file"]')).toBeNull();
   });

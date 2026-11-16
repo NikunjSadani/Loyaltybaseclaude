@@ -48,9 +48,9 @@ describe('VISRPT — VisibilityReportView', () => {
   it('VISRPT1: admin variant renders coverage tiles', async () => {
     render(<VisibilityReportView variant="admin" />);
     expect(await screen.findByText('60%')).toBeInTheDocument();
-    expect(screen.getByText('Coverage')).toBeInTheDocument();
+    expect(await screen.findByText('Coverage')).toBeInTheDocument();
     // denominator tile
-    expect(screen.getByText('In scope')).toBeInTheDocument();
+    expect(await screen.findByText('In scope')).toBeInTheDocument();
   });
 
   it('VISRPT2: Export calls downloadExport with the selected window', async () => {

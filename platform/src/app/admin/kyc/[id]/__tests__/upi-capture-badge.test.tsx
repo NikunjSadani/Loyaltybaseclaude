@@ -56,7 +56,7 @@ describe('UCB — Admin KYC UPI capture-method badge', () => {
     stubFetch(submission(partner('QR')));
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     await screen.findByText('sharma@okaxis');
-    expect(screen.getByTestId('upi-capture-badge')).toHaveTextContent('Scanned');
+    expect(await screen.findByTestId('upi-capture-badge')).toHaveTextContent('Scanned');
     // Recorded (client-reported, possibly group-inherited) provenance — the tooltip must not
     // imply server-verified capture by this submission.
     expect(screen.getByTestId('upi-capture-badge').getAttribute('title')).toMatch(
@@ -68,7 +68,7 @@ describe('UCB — Admin KYC UPI capture-method badge', () => {
     stubFetch(submission(partner('MANUAL')));
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     await screen.findByText('sharma@okaxis');
-    const badge = screen.getByTestId('upi-capture-badge');
+    const badge = await screen.findByTestId('upi-capture-badge');
     expect(badge).toHaveTextContent('Typed');
     expect(badge.className).toMatch(/amber/);
     expect(badge.getAttribute('title')).toMatch(/may be inherited from the outlet group\): typed by hand/);
@@ -85,7 +85,7 @@ describe('UCB — Admin KYC UPI capture-method badge', () => {
     stubFetch(submission(partner('QR'), { upiId: 'sharma2@okaxis', upiCaptureMethod: 'MANUAL' }));
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     await screen.findByText('sharma2@okaxis');
-    expect(screen.getByTestId('upi-capture-badge')).toHaveTextContent('Typed');
+    expect(await screen.findByTestId('upi-capture-badge')).toHaveTextContent('Typed');
   });
 });
 
@@ -100,12 +100,12 @@ describe('UCB-R — Admin KYC: payout rail REMOVED by a re-KYC (explicit null pr
     const struck = await screen.findByText('sharma@okaxis');
     expect(struck.tagName).toBe('DEL');
     expect(struck).toHaveAttribute('data-testid', 'proposed-removal-value');
-    expect(screen.getByTestId('proposed-removal-badge')).toHaveTextContent('Will be removed on approval');
+    expect(await screen.findByTestId('proposed-removal-badge')).toHaveTextContent('Will be removed on approval');
     expect(screen.queryByTestId('upi-capture-badge')).not.toBeInTheDocument();
     // Banner lists the removal explicitly.
-    expect(screen.getByTestId('proposed-changes-banner')).toHaveTextContent('UPI ID (removed)');
+    expect(await screen.findByTestId('proposed-changes-banner')).toHaveTextContent('UPI ID (removed)');
     // The new bank values still render as ordinary proposed changes.
-    expect(screen.getByText('HDFC Bank')).toBeInTheDocument();
+    expect(await screen.findByText('HDFC Bank')).toBeInTheDocument();
   });
 
   it('UCB-R2: proposed upiId=null but NO current UPI → nothing to remove (no removal row)', async () => {
@@ -132,10 +132,10 @@ describe('UCB-R — Admin KYC: payout rail REMOVED by a re-KYC (explicit null pr
     const upi = await screen.findByText('fresh@okaxis');
     expect(upi.closest('[data-testid="proposed-change"]')).not.toBeNull();
     // The proposed method drives the reviewer badge.
-    expect(screen.getByTestId('upi-capture-badge')).toHaveTextContent('Typed');
+    expect(await screen.findByTestId('upi-capture-badge')).toHaveTextContent('Typed');
     // Hidden (null) live bank values → nothing to strike through.
     expect(screen.queryByTestId('proposed-removal-badge')).not.toBeInTheDocument();
-    const banner = screen.getByTestId('proposed-changes-banner');
+    const banner = await screen.findByTestId('proposed-changes-banner');
     expect(banner).toHaveTextContent('UPI ID');
     expect(banner).toHaveTextContent('Payment Mode');
     expect(banner).not.toHaveTextContent('(removed)');
@@ -166,11 +166,11 @@ describe('UCB-R — Admin KYC: payout rail REMOVED by a re-KYC (explicit null pr
     }));
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     await screen.findByText('sharma3@okaxis');
-    expect(screen.getByText('ICICI Bank').tagName).toBe('DEL');
-    expect(screen.getByText('ICIC0000001').tagName).toBe('DEL');
-    expect(screen.getAllByTestId('proposed-removal-badge').length).toBe(3); // bank, account, IFSC (holder was empty)
+    expect((await screen.findByText('ICICI Bank')).tagName).toBe('DEL');
+    expect((await screen.findByText('ICIC0000001')).tagName).toBe('DEL');
+    expect((await screen.findAllByTestId('proposed-removal-badge')).length).toBe(3); // bank, account, IFSC (holder was empty)
     // The NEW UPI keeps its (proposed) capture badge.
-    expect(screen.getByTestId('upi-capture-badge')).toHaveTextContent('Scanned');
+    expect(await screen.findByTestId('upi-capture-badge')).toHaveTextContent('Scanned');
   });
 });
 
@@ -186,8 +186,8 @@ describe('UCB-RR — Admin KYC: server removedRail notice (R10)', () => {
     const notice = await screen.findByTestId('kyc-detail-removed-rail');
     expect(notice).toHaveTextContent('The partner’s current UPI ID will be removed on approval');
     expect(notice).not.toHaveTextContent('sharma@okaxis'); // value-free
-    expect(screen.getByText('sharma@okaxis').tagName).toBe('DEL');
-    expect(screen.getAllByTestId('proposed-removal-badge')).toHaveLength(1);
+    expect((await screen.findByText('sharma@okaxis')).tagName).toBe('DEL');
+    expect(await screen.findAllByTestId('proposed-removal-badge')).toHaveLength(1);
   });
 
   it('UCB-RR2: removedRail=bank with HIDDEN live values → notice still shown, no per-field rows', async () => {
@@ -211,6 +211,6 @@ describe('UCB-RR — Admin KYC: server removedRail notice (R10)', () => {
     await screen.findByText('HDFC Bank');
     expect(screen.queryByTestId('kyc-detail-removed-rail')).not.toBeInTheDocument();
     expect(screen.queryByTestId('proposed-removal-badge')).not.toBeInTheDocument();
-    expect(screen.getByText('sharma@okaxis').tagName).not.toBe('DEL');
+    expect((await screen.findByText('sharma@okaxis')).tagName).not.toBe('DEL');
   });
 });

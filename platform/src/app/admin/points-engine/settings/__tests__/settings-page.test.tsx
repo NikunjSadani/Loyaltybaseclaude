@@ -40,8 +40,8 @@ describe('Points Engine settings page', () => {
   it('PE-S1: GIFSY_ADMIN sees editable toggles + Save', async () => {
     asGifsy();
     render(<SettingsPage />);
-    await waitFor(() => expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument());
-    const switches = screen.getAllByRole('switch');
+    expect(await screen.findByRole('button', { name: /save changes/i })).toBeInTheDocument();
+    const switches = await screen.findAllByRole('switch');
     expect(switches).toHaveLength(2);
     expect(switches.every((s) => !s.hasAttribute('disabled'))).toBe(true); // engine on → both enabled
   });
@@ -49,7 +49,7 @@ describe('Points Engine settings page', () => {
   it('PE-S2: CLIENT_ADMIN sees a read-only managed-by-Gifsy view, no Save', async () => {
     asClient();
     render(<SettingsPage />);
-    await waitFor(() => expect(screen.getByText(/managed by gifsy/i)).toBeInTheDocument());
+    expect(await screen.findByText(/managed by gifsy/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /save changes/i })).not.toBeInTheDocument();
     screen.getAllByRole('switch').forEach((s) => expect(s).toBeDisabled());
   });
@@ -58,17 +58,17 @@ describe('Points Engine settings page', () => {
     asGifsy();
     (getSettings as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ success: false, error: 'boom' });
     render(<SettingsPage />);
-    await waitFor(() => expect(screen.getByText(/couldn.t load points engine settings/i)).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+    expect(await screen.findByText(/couldn.t load points engine settings/i)).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /try again/i })).toBeInTheDocument();
   });
 
   it('PE-S4: saving posts the flags and shows Saved', async () => {
     asGifsy();
     render(<SettingsPage />);
-    await waitFor(() => expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument());
+    expect(await screen.findByRole('button', { name: /save changes/i })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
     await waitFor(() => expect(setSettings).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.getByText(/^saved$/i)).toBeInTheDocument());
+    expect(await screen.findByText(/^saved$/i)).toBeInTheDocument();
   });
 
   it('PE-S5: both toggles are disabled while a save is in flight', async () => {
@@ -80,7 +80,7 @@ describe('Points Engine settings page', () => {
       }),
     );
     render(<SettingsPage />);
-    await waitFor(() => expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument());
+    expect(await screen.findByRole('button', { name: /save changes/i })).toBeInTheDocument();
     // Engine is on in the loaded data, so before saving both switches are enabled.
     expect(screen.getAllByRole('switch').every((s) => !s.hasAttribute('disabled'))).toBe(true);
 
@@ -90,6 +90,6 @@ describe('Points Engine settings page', () => {
     );
 
     resolveSave({ success: true, data: { clientId: 'deoleo', enabled: true, directCreditEnabled: true } });
-    await waitFor(() => expect(screen.getByText(/^saved$/i)).toBeInTheDocument());
+    expect(await screen.findByText(/^saved$/i)).toBeInTheDocument();
   });
 });

@@ -90,7 +90,7 @@ describe('Parked / Removed tab — Park confirm', () => {
 
     // Validation panel appears with a Confirm button.
     const panel = await screen.findByTestId('park-validation-panel');
-    const confirm = within(panel).getByTestId('confirm-outlet-upload-btn');
+    const confirm = await within(panel).findByTestId('confirm-outlet-upload-btn');
     fireEvent.click(confirm);
 
     // The Park confirm POSTed the two collected codes.

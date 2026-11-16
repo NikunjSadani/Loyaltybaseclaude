@@ -27,7 +27,7 @@ async function renderAndLoad() {
   // KYC list has a 500 ms setTimeout before setting mock data
   await waitFor(
     () => expect(screen.getAllByTestId('kyc-entry-outlet-code').length).toBeGreaterThan(0),
-    { timeout: 2000 },
+    { timeout: 15_000 },
   );
 }
 

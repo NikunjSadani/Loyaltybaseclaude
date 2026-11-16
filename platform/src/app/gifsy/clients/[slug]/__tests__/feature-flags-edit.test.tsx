@@ -121,7 +121,7 @@ describe('Feature Flags editor (real PATCH persistence)', () => {
       expect(screen.getByTestId('feature-flags-error')).toBeInTheDocument();
     });
     // No optimistic desync — the switch stays OFF because local state never changed.
-    expect(screen.getByRole('switch', { name: 'Enable Hubble Voucher Auto-Issue' })).toHaveAttribute('aria-checked', 'false');
+    expect(await screen.findByRole('switch', { name: 'Enable Hubble Voucher Auto-Issue' })).toHaveAttribute('aria-checked', 'false');
   });
 
   it('FF3 (M1): the server\'s reason is shown next to the toggle (Sales Import refused: no background processor here)', async () => {
@@ -138,6 +138,6 @@ describe('Feature Flags editor (real PATCH persistence)', () => {
     await waitFor(() => {
       expect(screen.getByTestId('feature-flags-error')).toHaveTextContent(MSG);
     });
-    expect(screen.getByRole('switch', { name: 'Enable Sales Import (DMS file)' })).toHaveAttribute('aria-checked', 'false');
+    expect(await screen.findByRole('switch', { name: 'Enable Sales Import (DMS file)' })).toHaveAttribute('aria-checked', 'false');
   });
 });

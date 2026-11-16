@@ -88,26 +88,26 @@ describe('PTN — partnerDashboardV2 ON', () => {
     render(<PartnerTargetsPage />);
 
     const nonAdho = await screen.findByTestId('kpi-no-target-NONADHO', {}, { timeout: 15000 });
-    expect(within(nonAdho).getByText('NON ADHO')).toBeInTheDocument();
-    expect(within(nonAdho).getByText('No target this month')).toHaveClass('text-gray-500');
-    expect(within(nonAdho).getByText('₹2.8K so far')).toBeInTheDocument();
+    expect(await within(nonAdho).findByText('NON ADHO')).toBeInTheDocument();
+    expect(await within(nonAdho).findByText('No target this month')).toHaveClass('text-gray-500');
+    expect(await within(nonAdho).findByText('₹2.8K so far')).toBeInTheDocument();
     expect(within(nonAdho).queryByText(/%/)).not.toBeInTheDocument();
-    expect(within(screen.getByTestId('kpi-no-target-FB')).getByText('—')).toBeInTheDocument();
-    expect(within(screen.getByTestId('kpi-no-target-NEG')).getByText('-₹1.5K so far')).toBeInTheDocument();
-    expect(within(screen.getByTestId('kpi-no-target-VOL')).getByText('12.3 cases so far')).toBeInTheDocument();
+    expect(await within(screen.getByTestId('kpi-no-target-FB')).findByText('—')).toBeInTheDocument();
+    expect(await within(screen.getByTestId('kpi-no-target-NEG')).findByText('-₹1.5K so far')).toBeInTheDocument();
+    expect(await within(screen.getByTestId('kpi-no-target-VOL')).findByText('12.3 cases so far')).toBeInTheDocument();
     for (const id of ['NONADHO', 'FB', 'NEG', 'VOL']) {
       const c = screen.getByTestId(`kpi-no-target-${id}`);
       expect(c.textContent).not.toMatch(/%|On track|to go|Target achieved|NaN|Infinity/);
     }
 
     // Targeted card exactly as before: 50% pill + "Achieved: 400 cases / Target: 800 cases".
-    expect(screen.getAllByText('50%').length).toBeGreaterThan(0);
-    expect(screen.getByText('400 cases')).toBeInTheDocument();
-    expect(screen.getByText('800 cases')).toBeInTheDocument();
+    expect((await screen.findAllByText('50%')).length).toBeGreaterThan(0);
+    expect(await screen.findByText('400 cases')).toBeInTheDocument();
+    expect(await screen.findByText('800 cases')).toBeInTheDocument();
     // Hero "0/1 targets hit" — the four target-less KPIs are not in the denominator.
-    expect(screen.getByText('/1')).toBeInTheDocument();
+    expect(await screen.findByText('/1')).toBeInTheDocument();
     expect(screen.queryByText('/5')).not.toBeInTheDocument();
-    expect(screen.getByText('targets hit this month')).toBeInTheDocument();
+    expect(await screen.findByText('targets hit this month')).toBeInTheDocument();
   }, 20000);
 
   it('PTN2: "targets hit" counts only targeted KPIs', async () => {
@@ -118,10 +118,10 @@ describe('PTN — partnerDashboardV2 ON', () => {
     render(<PartnerTargetsPage />);
 
     await screen.findByTestId('kpi-no-target-NONADHO', {}, { timeout: 15000 });
-    expect(screen.getByText('/1')).toBeInTheDocument();
+    expect(await screen.findByText('/1')).toBeInTheDocument();
     expect(screen.queryByText('/2')).not.toBeInTheDocument();
-    expect(screen.getByText(/All targets achieved!/)).toBeInTheDocument();
-    expect(screen.getByText('₹400 so far')).toBeInTheDocument();
+    expect(await screen.findByText(/All targets achieved!/)).toBeInTheDocument();
+    expect(await screen.findByText('₹400 so far')).toBeInTheDocument();
   }, 20000);
 
   it('PTN3: only target-less KPIs → neutral note + "so far" card, no scored hero', async () => {
@@ -132,7 +132,7 @@ describe('PTN — partnerDashboardV2 ON', () => {
 
     const note = await screen.findByTestId('no-targets-note', {}, { timeout: 15000 });
     expect(note).toHaveTextContent(/No targets set for .*Your sales so far are shown below\./);
-    expect(screen.getByText('₹2.8K so far')).toBeInTheDocument();
+    expect(await screen.findByText('₹2.8K so far')).toBeInTheDocument();
     expect(screen.queryByText('targets hit this month')).not.toBeInTheDocument();
     expect(screen.queryByText(/%/)).not.toBeInTheDocument();
   }, 20000);
@@ -151,15 +151,15 @@ describe('PTN — partnerDashboardV2 ON', () => {
     render(<PartnerTargetsPage />);
 
     const row1 = (await screen.findByText('Kumar General Store', {}, { timeout: 15000 })).closest('tr')!;
-    expect(within(row1).getByText('₹2.8K')).toBeInTheDocument();
-    expect(within(row1).getByText('200')).toBeInTheDocument();
-    expect(within(row1).getByText('(50%)')).toBeInTheDocument();
-    const row2 = screen.getByText('Singh Traders').closest('tr')!;
-    expect(within(row2).getByText('—')).toBeInTheDocument();
-    expect(within(row2).getByText('300')).toBeInTheDocument();
-    expect(within(screen.getByTestId('kpi-no-target-NONADHO')).getByText('₹2.8K so far')).toBeInTheDocument();
+    expect(await within(row1).findByText('₹2.8K')).toBeInTheDocument();
+    expect(await within(row1).findByText('200')).toBeInTheDocument();
+    expect(await within(row1).findByText('(50%)')).toBeInTheDocument();
+    const row2 = (await screen.findByText('Singh Traders')).closest('tr')!;
+    expect(await within(row2).findByText('—')).toBeInTheDocument();
+    expect(await within(row2).findByText('300')).toBeInTheDocument();
+    expect(await within(screen.getByTestId('kpi-no-target-NONADHO')).findByText('₹2.8K so far')).toBeInTheDocument();
     // Both outlets have the MONTH target → plain sum exactly as before (500/800 = 63%), no extra line.
-    expect(screen.getByText('500 cases')).toBeInTheDocument();
+    expect(await screen.findByText('500 cases')).toBeInTheDocument();
     expect(screen.queryByTestId('kpi-untargeted-extra-MONTH')).not.toBeInTheDocument();
   }, 20000);
 
@@ -170,13 +170,13 @@ describe('PTN — partnerDashboardV2 ON', () => {
     const extra = await screen.findByTestId('kpi-untargeted-extra-SALES', {}, { timeout: 15000 });
     expect(extra).toHaveTextContent('+₹2K so far at outlets without this target');
     // Scored figure = Outlet A only: ₹500 / ₹1,000 = 50% (NOT 2,500 / 1,000 = 250%).
-    expect(screen.getByText('₹500')).toBeInTheDocument();
-    expect(screen.getByText('₹1,000')).toBeInTheDocument();
-    expect(screen.getAllByText('50%').length).toBeGreaterThan(0);
+    expect(await screen.findByText('₹500')).toBeInTheDocument();
+    expect(await screen.findByText('₹1,000')).toBeInTheDocument();
+    expect((await screen.findAllByText('50%')).length).toBeGreaterThan(0);
     expect(screen.queryByText('250%')).not.toBeInTheDocument();
     expect(screen.queryByTestId('kpi-untargeted-extra-LINES')).not.toBeInTheDocument();
     // "targets hit" uses targeted-only figures: SALES 50%, LINES 63% → 0/2.
-    expect(screen.getByText('targets hit this month').previousElementSibling?.textContent).toBe('0/2');
+    expect((await screen.findByText('targets hit this month')).previousElementSibling?.textContent).toBe('0/2');
     expect(screen.queryByTestId('kpi-no-target-SALES')).not.toBeInTheDocument();
   }, 20000);
 
@@ -201,9 +201,9 @@ describe('PTN — partnerDashboardV2 ON', () => {
 
     const card = await screen.findByTestId('kpi-no-target-NONADHO', {}, { timeout: 15000 });
     expect(card).toHaveTextContent(/No target for /);
-    expect(within(card).getByText('₹2.8K')).toBeInTheDocument();
+    expect(await within(card).findByText('₹2.8K')).toBeInTheDocument();
     expect(card.textContent).not.toMatch(/this month|so far/);
-    expect(screen.getByTestId('kpi-untargeted-extra-SALES')).toHaveTextContent(/^\+₹2K at outlets without this target$/);
+    expect(await screen.findByTestId('kpi-untargeted-extra-SALES')).toHaveTextContent(/^\+₹2K at outlets without this target$/);
   }, 20000);
 });
 
@@ -218,19 +218,19 @@ describe('PTN-OFF — partnerDashboardV2 OFF (Deoleo: unchanged)', () => {
 
     await screen.findByText('Shah Stores A', {}, { timeout: 15000 });
     // Plain sum across BOTH outlets: ₹2,500 of ₹1,000 = 250% (the pre-change behaviour).
-    expect(screen.getByText('₹2,500')).toBeInTheDocument();
-    expect(screen.getByText('₹1,000')).toBeInTheDocument();
-    expect(screen.getAllByText('250%').length).toBeGreaterThan(0);
+    expect(await screen.findByText('₹2,500')).toBeInTheDocument();
+    expect(await screen.findByText('₹1,000')).toBeInTheDocument();
+    expect((await screen.findAllByText('250%')).length).toBeGreaterThan(0);
     expect(screen.queryByTestId('kpi-untargeted-extra-SALES')).not.toBeInTheDocument();
     // Target-less KPI is filtered out (no "so far" card) as before.
     expect(screen.queryByTestId('kpi-no-target-NONADHO')).not.toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/so far/);
     // Table: raw achieved values, no compact ₹ / so-far formatting.
-    const rowA = screen.getByText('Shah Stores A').closest('tr')!;
-    expect(within(rowA).getByText('2755.12')).toBeInTheDocument();
-    const rowB = screen.getByText('Shah Stores B').closest('tr')!;
-    expect(within(rowB).getByText('2000')).toBeInTheDocument();
-    expect(screen.getByText('targets hit this month').previousElementSibling?.textContent).toBe('1/2');
+    const rowA = (await screen.findByText('Shah Stores A')).closest('tr')!;
+    expect(await within(rowA).findByText('2755.12')).toBeInTheDocument();
+    const rowB = (await screen.findByText('Shah Stores B')).closest('tr')!;
+    expect(await within(rowB).findByText('2000')).toBeInTheDocument();
+    expect((await screen.findByText('targets hit this month')).previousElementSibling?.textContent).toBe('1/2');
   }, 20000);
 
   it('PTN-OFF2: only target-less KPIs → the old "No targets configured" empty state', async () => {
@@ -267,7 +267,7 @@ describe('PTN — all tenants (flag-independent)', () => {
       expect(headers).toEqual(['Outlet', 'Type', 'Alpha', 'Beta', 'Gamma']);
       const cells = (tr: Element) => Array.from(tr.querySelectorAll('td')).slice(2).map(td => td.textContent);
       expect(cells(row1)).toEqual(['5(50%)', '7(35%)', '—']);
-      const row2 = screen.getByText('Second Shop').closest('tr')!;
+      const row2 = (await screen.findByText('Second Shop')).closest('tr')!;
       expect(cells(row2)).toEqual(['—', '11(55%)', '9(30%)']);
     }, 20000);
   }
@@ -281,13 +281,13 @@ describe('PTN — all tenants (flag-independent)', () => {
     render(<PartnerTargetsPage />);
 
     expect(await screen.findByText('₹10,414', {}, { timeout: 15000 })).toBeInTheDocument();
-    expect(screen.getByText('₹10,000')).toBeInTheDocument();
-    expect(screen.getByText('₹2,50,000')).toBeInTheDocument();
-    expect(screen.getByText('-₹1,500')).toBeInTheDocument();
+    expect(await screen.findByText('₹10,000')).toBeInTheDocument();
+    expect(await screen.findByText('₹2,50,000')).toBeInTheDocument();
+    expect(await screen.findByText('-₹1,500')).toBeInTheDocument();
     expect(screen.queryByText('10414.4 INR')).not.toBeInTheDocument();
     expect(screen.queryByText('10000 INR')).not.toBeInTheDocument();
     // Non-INR unit: raw "<n> <unit>" exactly as before.
-    expect(screen.getByText('4 SKU')).toBeInTheDocument();
-    expect(screen.getByText('8 SKU')).toBeInTheDocument();
+    expect(await screen.findByText('4 SKU')).toBeInTheDocument();
+    expect(await screen.findByText('8 SKU')).toBeInTheDocument();
   }, 20000);
 });

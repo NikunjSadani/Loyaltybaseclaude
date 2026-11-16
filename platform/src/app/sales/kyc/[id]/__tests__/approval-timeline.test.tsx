@@ -89,7 +89,7 @@ describe('TIMELINE — Approval Status stepper', () => {
     const gifsy = await screen.findByTestId('timeline-step-gifsy');
 
     // ASM Review = Rejected (with approver + current remark), NOT "Approved by".
-    expect(within(firstApprover).getByText('ASM Review')).toBeInTheDocument();
+    expect(await within(firstApprover).findByText('ASM Review')).toBeInTheDocument();
     expect(firstApprover).toHaveTextContent(/rejected/i);
     expect(firstApprover).toHaveTextContent('Others: Phone number is incorrect');
     expect(firstApprover).not.toHaveTextContent(/approved by/i);
@@ -130,14 +130,14 @@ describe('TIMELINE — Approval Status stepper', () => {
     await renderWith(submission('PENDING_SO_APPROVAL', []));
     const firstApprover = await screen.findByTestId('timeline-step-first-approver');
     // The status badge already read "Awaiting SO"; the stepper label must match, not "ASM Review".
-    expect(within(firstApprover).getByText('SO Review')).toBeInTheDocument();
+    expect(await within(firstApprover).findByText('SO Review')).toBeInTheDocument();
     expect(firstApprover).not.toHaveTextContent(/asm review/i);
   });
 
   it('L2: PENDING_ASM_APPROVAL (SO submitted / vacant-SO escalation) → label = "ASM Review"', async () => {
     await renderWith(submission('PENDING_ASM_APPROVAL', []));
     const firstApprover = await screen.findByTestId('timeline-step-first-approver');
-    expect(within(firstApprover).getByText('ASM Review')).toBeInTheDocument();
+    expect(await within(firstApprover).findByText('ASM Review')).toBeInTheDocument();
   });
 
   it('L3: acted FIRST_APPROVER event with role SALES_SO → label = "SO Review"', async () => {
@@ -145,7 +145,7 @@ describe('TIMELINE — Approval Status stepper', () => {
       { toStatus: 'PENDING_GIFSY', createdAt: '2026-06-02T00:00:00Z', notes: 'Approved by SO', metadata: { stage: 'FIRST_APPROVER', approverRole: 'SALES_SO' } },
     ]));
     const firstApprover = await screen.findByTestId('timeline-step-first-approver');
-    expect(within(firstApprover).getByText('SO Review')).toBeInTheDocument();
+    expect(await within(firstApprover).findByText('SO Review')).toBeInTheDocument();
     expect(firstApprover).not.toHaveTextContent(/asm review/i);
   });
 

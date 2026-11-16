@@ -108,7 +108,7 @@ describe('IDG — GST-certificate inherited-doc gate relaxation', () => {
     // GST pre-filled from the group source.
     expect(await screen.findByDisplayValue(GROUP_GST)).toBeInTheDocument();
     // No fresh GST cert uploaded + GST unchanged → inherited note visible (gate relaxed).
-    expect(screen.getByTestId('gst-cert-inherited-note')).toBeInTheDocument();
+    expect(await screen.findByTestId('gst-cert-inherited-note')).toBeInTheDocument();
   });
 
   it('IDG2: editing GST to a different value removes the inherited note', async () => {
@@ -119,7 +119,7 @@ describe('IDG — GST-certificate inherited-doc gate relaxation', () => {
     expect(await screen.findByTestId('gst-cert-inherited-note')).toBeInTheDocument();
 
     // Rep edits GST away from the group value → derived flag false → note gone.
-    const gst = screen.getByPlaceholderText('27AAPFU0939F1Z5');
+    const gst = await screen.findByPlaceholderText('27AAPFU0939F1Z5');
     fireEvent.change(gst, { target: { value: '27ZZZZZ9999Z1Z5' } });
 
     expect(screen.queryByTestId('gst-cert-inherited-note')).not.toBeInTheDocument();

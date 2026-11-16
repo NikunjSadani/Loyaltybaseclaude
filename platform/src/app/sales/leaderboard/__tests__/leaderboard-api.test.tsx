@@ -97,8 +97,8 @@ describe('Sales Leaderboard — API wiring (dynamic tabs)', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(resolve(body)));
     render(<SalesLeaderboardPage />);
     expect(await screen.findByRole('button', { name: 'Priya Menon' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Rohit Sharma' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Deepa Nair' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Rohit Sharma' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Deepa Nair' })).toBeTruthy();
     // The old hardcoded labels are gone.
     expect(screen.queryByRole('button', { name: 'Reporting Mgr' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'National' })).toBeNull();

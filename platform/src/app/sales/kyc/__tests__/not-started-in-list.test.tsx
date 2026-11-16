@@ -8,7 +8,7 @@
  * Run: npx vitest run src/app/sales/kyc/__tests__/not-started-in-list.test.tsx
  */
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 let searchStr = '';
@@ -52,11 +52,11 @@ beforeEach(() => {
 describe('KYC list — NOT_STARTED outlets surface as actionable entries', () => {
   it('shows un-enrolled outlets (no submission) instead of an empty list', async () => {
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
-    expect(screen.getByText('Patel Kirana')).toBeInTheDocument();
+    expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
+    expect(await screen.findByText('Patel Kirana')).toBeInTheDocument();
     expect(screen.queryByText('No KYC submissions')).not.toBeInTheDocument();
     // outlet code chip is populated (not the old blank '')
-    expect(screen.getByText('OUT-2026-001')).toBeInTheDocument();
+    expect(await screen.findByText('OUT-2026-001')).toBeInTheDocument();
   });
 
   it('links a NOT_STARTED entry to enrollment, deep-linking the outlet so the wizard pre-selects it', async () => {
@@ -66,32 +66,32 @@ describe('KYC list — NOT_STARTED outlets surface as actionable entries', () =>
     // Deep-links ?outletId=<Outlet CUID> — the new-KYC wizard reads it and auto-selects
     // the outlet, so the rep doesn't have to pick it again on the next page.
     expect(link).toHaveAttribute('href', '/sales/kyc/new?outletId=o1');
-    expect(screen.getAllByText('Tap to start enrollment').length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Tap to start enrollment')).length).toBeGreaterThan(0);
   });
 
   it('the dashboard deep-link ?status=NOT_STARTED resolves to the Pending KYC filter and shows them', async () => {
     searchStr = 'status=NOT_STARTED';
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
+    expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
     // the status dropdown reflects the Pending KYC filter
-    const select = screen.getByTestId('kyc-status-filter') as HTMLSelectElement;
+    const select = await screen.findByTestId('kyc-status-filter') as HTMLSelectElement;
     expect(select.value).toBe('PENDING_KYC');
   });
 
   it('ASM (now an enroll role) sees the New Enrollment button + NOT_STARTED rows', async () => {
     localStorage.setItem('loyaltybase_sales_role', 'ASM');
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
-    expect(screen.getByText('New Enrollment')).toBeInTheDocument();
+    expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
+    expect(await screen.findByText('New Enrollment')).toBeInTheDocument();
     // NOT_STARTED rows are actionable (link to enrollment) for ASM too.
-    expect(screen.getAllByText('Tap to start enrollment').length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Tap to start enrollment')).length).toBeGreaterThan(0);
   });
 
   it('a non-enroll manager (RSM) sees neither the New Enrollment button nor NOT_STARTED rows', async () => {
     localStorage.setItem('loyaltybase_sales_role', 'RSM');
     render(<KYCListPage />);
     // No submissions + RSM does not enroll → no NOT_STARTED synthesis → empty list.
-    await waitFor(() => expect(screen.getByText('No KYC submissions')).toBeInTheDocument());
+    expect(await screen.findByText('No KYC submissions')).toBeInTheDocument();
     expect(screen.queryByText('New Enrollment')).not.toBeInTheDocument();
     expect(screen.queryByText('Verma Traders')).not.toBeInTheDocument();
   });

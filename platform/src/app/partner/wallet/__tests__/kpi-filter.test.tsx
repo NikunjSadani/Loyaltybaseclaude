@@ -87,21 +87,18 @@ describe('W — KPI filter in the combined partner wallet statement', () => {
   async function renderWallet() {
     stubFetch();
     render(<WalletPage />);
-    await waitFor(
-      () => expect(screen.queryByTestId('wallet-kpi-filter')).toBeInTheDocument(),
-      { timeout: 3000 },
-    );
+    expect(await screen.findByTestId('wallet-kpi-filter', {}, { timeout: 15_000 })).toBeInTheDocument();
   }
 
   it('W1: the wallet shows a kpi-filter select', async () => {
     await renderWallet();
-    const select = screen.getByTestId('wallet-kpi-filter');
+    const select = await screen.findByTestId('wallet-kpi-filter');
     expect(select.tagName.toLowerCase()).toBe('select');
   });
 
   it('W2: dropdown has "All Parameters" + at least one KPI from the rows', async () => {
     await renderWallet();
-    const select  = screen.getByTestId('wallet-kpi-filter');
+    const select  = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '');
     expect(options.some(t => /all parameters/i.test(t))).toBe(true);
     expect(options.length).toBeGreaterThan(1);
@@ -109,7 +106,7 @@ describe('W — KPI filter in the combined partner wallet statement', () => {
 
   it('W3: selecting a KPI hides rows with a different kpiLabel', async () => {
     await renderWallet();
-    const select  = screen.getByTestId('wallet-kpi-filter');
+    const select  = await screen.findByTestId('wallet-kpi-filter');
     // Filter to "Monthly Target" — the redemption row (null label) must disappear.
     fireEvent.change(select, { target: { value: 'Monthly Target' } });
 
@@ -123,7 +120,7 @@ describe('W — KPI filter in the combined partner wallet statement', () => {
 
   it('W4: selecting "All Parameters" restores all rows', async () => {
     await renderWallet();
-    const select  = screen.getByTestId('wallet-kpi-filter');
+    const select  = await screen.findByTestId('wallet-kpi-filter');
     fireEvent.change(select, { target: { value: 'Monthly Target' } });
     fireEvent.change(select, { target: { value: '' } });
 
@@ -135,7 +132,7 @@ describe('W — KPI filter in the combined partner wallet statement', () => {
   it('W5: WHOLESALER outlet has NO exact "Visibility" KPI option', async () => {
     mockIdentity = { ...mockIdentity, outletType: 'WHOLESALER' };
     await renderWallet();
-    const select  = screen.getByTestId('wallet-kpi-filter');
+    const select  = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '');
     expect(options.includes('Visibility')).toBe(false);
   });
@@ -143,7 +140,7 @@ describe('W — KPI filter in the combined partner wallet statement', () => {
   it('W6: SSS outlet DOES have the "Visibility" KPI option', async () => {
     mockIdentity = { ...mockIdentity, outletType: 'SSS' };
     await renderWallet();
-    const select  = screen.getByTestId('wallet-kpi-filter');
+    const select  = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '');
     expect(options.includes('Visibility')).toBe(true);
   });

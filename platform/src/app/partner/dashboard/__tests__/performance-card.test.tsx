@@ -22,7 +22,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import { istMonthKey } from '@/lib/ist-date';
 
@@ -162,23 +162,23 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: TREND, pointsCredited: 750, walletPts: 1200 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('Performance')).toBeInTheDocument());
+    expect(await screen.findByText('Performance')).toBeInTheDocument();
     // This month · so far
-    expect(screen.getByText('This month · so far')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText('1,000 cases')).toBeInTheDocument());
-    expect(screen.getByText('100% of 1,000 cases target')).toBeInTheDocument();
+    expect(await screen.findByText('This month · so far')).toBeInTheDocument();
+    expect(await screen.findByText('1,000 cases')).toBeInTheDocument();
+    expect(await screen.findByText('100% of 1,000 cases target')).toBeInTheDocument();
     // Last month · <Mon>  (header carries "· " → distinct from "Change vs last month")
-    expect(screen.getByText(/^Last month · /)).toBeInTheDocument();
-    expect(screen.getByText('800 cases')).toBeInTheDocument();
-    expect(screen.getByText('below target')).toBeInTheDocument();
+    expect(await screen.findByText(/^Last month · /)).toBeInTheDocument();
+    expect(await screen.findByText('800 cases')).toBeInTheDocument();
+    expect(await screen.findByText('below target')).toBeInTheDocument();
     // Reward credited (points outlet only). The points line comes from the SEPARATE
     // /wallet/points-credited effect (setPointsCr), not the trend fetch awaited above — so await
     // it independently; a sync getByText here raced that cross-source commit under suite load.
     expect(await screen.findByText('+750 pts credited')).toBeInTheDocument();
     expect(screen.queryByText(/payout/)).not.toBeInTheDocument();
     // Change vs last month: 1000 − 800 = +200 (+25%)
-    expect(screen.getByText('Change vs last month')).toBeInTheDocument();
-    expect(screen.getByText(/\+25%/)).toBeInTheDocument();
+    expect(await screen.findByText('Change vs last month')).toBeInTheDocument();
+    expect(await screen.findByText(/\+25%/)).toBeInTheDocument();
     // No achievedAll in the payload → old label, old delta.
     expect(screen.queryByText('Change in total sales vs last month')).not.toBeInTheDocument();
   });
@@ -197,12 +197,12 @@ describe('Performance card — rendering', () => {
     // Await a trend-driven element first (the card shell renders before the trend fetch lands).
     expect(await screen.findByText('Change in total sales vs last month')).toBeInTheDocument();
     // The "so far" / target figures stay targeted-only.
-    expect(screen.getByText('50% of 1,000 cases target')).toBeInTheDocument();
-    expect(screen.getByText('2,500 cases')).toBeInTheDocument();
+    expect(await screen.findByText('50% of 1,000 cases target')).toBeInTheDocument();
+    expect(await screen.findByText('2,500 cases')).toBeInTheDocument();
     // Change line = total sales comparison, labelled as such.
-    expect(screen.getByText('Change in total sales vs last month')).toBeInTheDocument();
+    expect(await screen.findByText('Change in total sales vs last month')).toBeInTheDocument();
     expect(screen.queryByText('Change vs last month')).not.toBeInTheDocument();
-    const pctEl = screen.getByText(/\+0%/);
+    const pctEl = await screen.findByText(/\+0%/);
     expect(screen.queryByText(/-80%/)).not.toBeInTheDocument();
     expect(pctEl.closest('.text-red-600')).toBeNull();
     expect(pctEl.closest('.text-emerald-600')).not.toBeNull();
@@ -219,7 +219,7 @@ describe('Performance card — rendering', () => {
 
     // Await the trend-driven delta (the label alone renders before the trend fetch lands).
     expect(await screen.findByText(/\+25%/)).toBeInTheDocument();
-    expect(screen.getByText('Change vs last month')).toBeInTheDocument();
+    expect(await screen.findByText('Change vs last month')).toBeInTheDocument();
     expect(screen.queryByText('Change in total sales vs last month')).not.toBeInTheDocument();
   });
 
@@ -234,7 +234,7 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('+55,000 pts credited')).toBeInTheDocument());
+    expect(await screen.findByText('+55,000 pts credited')).toBeInTheDocument();
     // The card never touches the paginated passbook → correct at any scale.
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/api/wallet/transactions'))).toBe(false);
   });
@@ -250,7 +250,7 @@ describe('Performance card — rendering', () => {
     }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('₹5K payout')).toBeInTheDocument());
+    expect(await screen.findByText('₹5K payout')).toBeInTheDocument();
     expect(screen.queryByText(/pts credited/)).not.toBeInTheDocument();
   });
 
@@ -264,7 +264,7 @@ describe('Performance card — rendering', () => {
     }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('+320 pts credited')).toBeInTheDocument());
+    expect(await screen.findByText('+320 pts credited')).toBeInTheDocument();
     // The payout line comes from the SEPARATE /partner/payouts effect (setPayoutCr), a different
     // async source than the points line awaited above → await it too (was a sync cross-source race).
     expect(await screen.findByText('₹5K payout')).toBeInTheDocument();
@@ -279,9 +279,9 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: inr, unit: 'INR', noPrimary: true, pointsCredited: 0, walletPts: 1200 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('₹5.8L')).toBeInTheDocument()); // this month
-    expect(screen.getByText('₹5L')).toBeInTheDocument();                         // last month
-    expect(screen.getByText(/\+16%/)).toBeInTheDocument();                       // +₹80K → +16%
+    expect(await screen.findByText('₹5.8L')).toBeInTheDocument(); // this month
+    expect(await screen.findByText('₹5L')).toBeInTheDocument();                         // last month
+    expect(await screen.findByText(/\+16%/)).toBeInTheDocument();                       // +₹80K → +16%
   });
 
   it('no-target state → "No target" (this month) and "No target set" (last month)', async () => {
@@ -293,9 +293,9 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: noTargetTrend, noPrimary: true, pointsCredited: 90, walletPts: 1200 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('Performance')).toBeInTheDocument());
-    expect(screen.getByText('No target')).toBeInTheDocument();       // this-month sub-line
-    expect(screen.getByText('No target set')).toBeInTheDocument();   // last-month verdict
+    expect(await screen.findByText('Performance')).toBeInTheDocument();
+    expect(await screen.findByText('No target')).toBeInTheDocument();       // this-month sub-line
+    expect(await screen.findByText('No target set')).toBeInTheDocument();   // last-month verdict
   });
 
   it('zero points last month → honest "0 pts credited"', async () => {
@@ -303,7 +303,7 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: TREND, pointsCredited: 0, walletPts: 1200 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('0 pts credited')).toBeInTheDocument());
+    expect(await screen.findByText('0 pts credited')).toBeInTheDocument();
   });
 
   it('new-outlet empty state → "No activity last month"', async () => {
@@ -311,7 +311,7 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: [] }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('No activity last month')).toBeInTheDocument());
+    expect(await screen.findByText('No activity last month')).toBeInTheDocument();
   });
 
   it('v2 OFF (Deoleo) → the Performance card does NOT render (chart shown instead)', async () => {
@@ -319,7 +319,7 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: TREND, pointsCredited: 750 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByTestId('achievement-chart')).toBeInTheDocument());
+    expect(await screen.findByTestId('achievement-chart')).toBeInTheDocument();
     expect(screen.queryByText('Performance')).not.toBeInTheDocument();
   });
 });

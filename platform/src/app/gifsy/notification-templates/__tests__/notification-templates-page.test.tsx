@@ -75,20 +75,20 @@ describe('Notification Templates page', () => {
     render(<GifsyNotificationTemplatesPage />);
     // Row for a contract-labelled event, plus fields populated from config.
     await screen.findByTestId('row-KYC_SUBMITTED');
-    expect(screen.getByText('KYC submitted')).toBeInTheDocument();
-    expect((screen.getByTestId('mode-KYC_SUBMITTED') as HTMLSelectElement).value).toBe('BOTH');
-    expect((screen.getByTestId('sms-KYC_SUBMITTED') as HTMLInputElement).value).toBe('111');
-    expect((screen.getByTestId('wa-KYC_SUBMITTED') as HTMLInputElement).value).toBe('kyc_submitted_v1');
+    expect(await screen.findByText('KYC submitted')).toBeInTheDocument();
+    expect((await screen.findByTestId('mode-KYC_SUBMITTED') as HTMLSelectElement).value).toBe('BOTH');
+    expect((await screen.findByTestId('sms-KYC_SUBMITTED') as HTMLInputElement).value).toBe('111');
+    expect((await screen.findByTestId('wa-KYC_SUBMITTED') as HTMLInputElement).value).toBe('kyc_submitted_v1');
     // An event absent from the config is still rendered (normalized to OFF/blank).
-    expect(screen.getByTestId('row-ORDER_CANCELLED')).toBeInTheDocument();
-    expect((screen.getByTestId('mode-ORDER_CANCELLED') as HTMLSelectElement).value).toBe('OFF');
+    expect(await screen.findByTestId('row-ORDER_CANCELLED')).toBeInTheDocument();
+    expect((await screen.findByTestId('mode-ORDER_CANCELLED') as HTMLSelectElement).value).toBe('OFF');
   });
 
   it('T2: the mode selector updates state', async () => {
     stubFetch();
     render(<GifsyNotificationTemplatesPage />);
     await screen.findByTestId('row-ORDER_DISPATCHED');
-    const sel = screen.getByTestId('mode-ORDER_DISPATCHED') as HTMLSelectElement;
+    const sel = await screen.findByTestId('mode-ORDER_DISPATCHED') as HTMLSelectElement;
     expect(sel.value).toBe('OFF');
     fireEvent.change(sel, { target: { value: 'WHATSAPP' } });
     expect(sel.value).toBe('WHATSAPP');
@@ -110,7 +110,7 @@ describe('Notification Templates page', () => {
     stubFetch();
     render(<GifsyNotificationTemplatesPage />);
     await screen.findByTestId('row-KYC_SUBMITTED');
-    const smsInput = screen.getByTestId('sms-KYC_SUBMITTED') as HTMLInputElement;
+    const smsInput = await screen.findByTestId('sms-KYC_SUBMITTED') as HTMLInputElement;
     expect(smsInput).not.toBeDisabled();
     fireEvent.click(screen.getByTestId('master-sms-toggle'));
     expect(smsInput).toBeDisabled();
@@ -155,16 +155,16 @@ describe('Notification Templates page', () => {
     await screen.findByTestId('row-KYC_SUBMITTED');
 
     // freeChannels:false → honest "not sent" label, not the false "Always on".
-    const suppressed = screen.getByTestId('free-chip-KYC_SUBMITTED');
+    const suppressed = await screen.findByTestId('free-chip-KYC_SUBMITTED');
     expect(suppressed.textContent).toMatch(/not sent for this event/i);
     expect(suppressed.textContent).not.toMatch(/Always on/i);
 
     // freeChannels omitted → defaults to "Always on".
-    expect(screen.getByTestId('free-chip-POINTS_CREDITED').textContent).toMatch(/Always on/i);
+    expect((await screen.findByTestId('free-chip-POINTS_CREDITED')).textContent).toMatch(/Always on/i);
     // freeChannels:true → "Always on".
-    expect(screen.getByTestId('free-chip-ORDER_DISPATCHED').textContent).toMatch(/Always on/i);
+    expect((await screen.findByTestId('free-chip-ORDER_DISPATCHED')).textContent).toMatch(/Always on/i);
     // No contract at all → defaults to "Always on".
-    expect(screen.getByTestId('free-chip-ORDER_CANCELLED').textContent).toMatch(/Always on/i);
+    expect((await screen.findByTestId('free-chip-ORDER_CANCELLED')).textContent).toMatch(/Always on/i);
   });
 
   it('T6: the owner-only guard hides the editor for a non-GIFSY_ADMIN role', async () => {

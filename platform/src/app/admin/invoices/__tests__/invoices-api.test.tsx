@@ -208,7 +208,7 @@ describe('ADMI — Admin Invoice list API wiring', () => {
     }));
     render(<AdminInvoiceListPage />);
     await screen.findByText(/no invoices match your filters/i);
-    expect(screen.getByText(/generate invoices/i)).toBeInTheDocument();
+    expect(await screen.findByText(/generate invoices/i)).toBeInTheDocument();
   });
 
   it('ADMI12: list request sends ?page&limit (server pagination)', async () => {
@@ -258,7 +258,7 @@ describe('ADMI — Admin Invoice list API wiring', () => {
     render(<AdminInvoiceListPage />);
     // Page-1 invoice visible + Next control present.
     await screen.findByText('TGSL-VIS-OUT001-202604-001');
-    const nextBtn = screen.getByText('Next');
+    const nextBtn = await screen.findByText('Next');
     expect(nextBtn).toBeInTheDocument();
 
     fireEvent.click(nextBtn);
@@ -333,6 +333,6 @@ describe('ADMI — Admin Invoice list API wiring', () => {
     }));
     render(<AdminInvoiceListPage />);
     await screen.findByText('TGSL-VIS-OUT001-202604-001');
-    expect(screen.getByText(/export excel/i)).toBeInTheDocument();
+    expect(await screen.findByText(/export excel/i)).toBeInTheDocument();
   });
 });

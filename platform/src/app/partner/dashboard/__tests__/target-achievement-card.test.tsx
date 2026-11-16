@@ -17,7 +17,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import { istMonthKey } from '@/lib/ist-date';
 
@@ -141,7 +141,7 @@ describe('Target Achievement card', () => {
     expect(inCard.getByText(/500 cases to go · \d+ days? left/)).toBeInTheDocument();
 
     // Placement: the card sits BELOW the Performance card in document order.
-    const perf = screen.getByText('Performance');
+    const perf = await screen.findByText('Performance');
     // eslint-disable-next-line no-bitwise
     expect(perf.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -189,7 +189,7 @@ describe('Target Achievement card', () => {
     const inCard = within(card);
     expect(inCard.queryByText(/NON ADHO target met/)).not.toBeInTheDocument();
     expect(inCard.getByText(/1 SKU to go · \d+ days? left/)).toBeInTheDocument();
-    expect(within(inCard.getByTestId('kpi-no-target-FB')).getByText('—')).toBeInTheDocument();
+    expect(await within(inCard.getByTestId('kpi-no-target-FB')).findByText('—')).toBeInTheDocument();
   }, 20000);
 
   it('multi-outlet: sales at an outlet WITHOUT the target never fill another outlet\'s target', async () => {
@@ -213,7 +213,7 @@ describe('Target Achievement card', () => {
     // Targeted-only: 500/1,000 = 50% — NOT (500+2,000)/1,000 = 250%.
     expect(inCard.getByText('500/1K · 50%')).toBeInTheDocument();
     expect(inCard.queryByText(/250%/)).not.toBeInTheDocument();
-    expect(within(inCard.getByTestId('kpi-untargeted-NONADHO')).getByText(/\+₹2K\s+so far at outlets without this target/)).toBeInTheDocument();
+    expect(await within(inCard.getByTestId('kpi-untargeted-NONADHO')).findByText(/\+₹2K\s+so far at outlets without this target/)).toBeInTheDocument();
     // Both shops have the Lines target → summed exactly as before (4+6 of 8+8).
     expect(inCard.getByText('10/16 SKU · 63%')).toBeInTheDocument();
     expect(inCard.queryByTestId('kpi-untargeted-LINES')).not.toBeInTheDocument();
@@ -230,7 +230,7 @@ describe('Target Achievement card', () => {
     render(<PartnerDashboardPage />);
 
     const card = await screen.findByTestId('target-achievement-card', {}, { timeout: 15000 });
-    expect(within(card).getByText('No targets set this month')).toBeInTheDocument();
+    expect(await within(card).findByText('No targets set this month')).toBeInTheDocument();
     expect(within(card).queryByText(/target met/)).not.toBeInTheDocument();
   }, 20000);
 
@@ -240,7 +240,7 @@ describe('Target Achievement card', () => {
     render(<PartnerDashboardPage />);
 
     // Wait until the page has settled past its loading spinner (Quick Actions always renders).
-    await waitFor(() => expect(screen.getByText('My Targets')).toBeInTheDocument());
+    expect(await screen.findByText('My Targets')).toBeInTheDocument();
     expect(screen.queryByTestId('target-achievement-card')).not.toBeInTheDocument();
     expect(screen.queryByText('Target Achievement')).not.toBeInTheDocument();
   });

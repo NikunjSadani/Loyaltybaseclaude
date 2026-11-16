@@ -15,7 +15,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -126,10 +126,10 @@ describe('HFI — hero keyed off authoritative /partner/me identity', () => {
     render(<PartnerDashboardPage />);
 
     // WholesalerHero is the only hero with the "Available" wallet zone + a "Redeem" CTA.
-    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument());
-    expect(screen.getByText('Redeem')).toBeInTheDocument();
+    expect(await screen.findByText('Available')).toBeInTheDocument();
+    expect(await screen.findByText('Redeem')).toBeInTheDocument();
     // The REAL redeemable points (500) render in that zone.
-    expect(screen.getByText('500')).toBeInTheDocument();
+    expect(await screen.findByText('500')).toBeInTheDocument();
   });
 
   it('HFI2: SSS_TOT identity → MT hero detected (SSS TOT · KPI Tracker)', async () => {
@@ -138,7 +138,7 @@ describe('HFI — hero keyed off authoritative /partner/me identity', () => {
 
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('SSS TOT · KPI Tracker')).toBeInTheDocument());
+    expect(await screen.findByText('SSS TOT · KPI Tracker')).toBeInTheDocument();
     // MT hero has NO Available wallet zone.
     expect(screen.queryByText('Available')).not.toBeInTheDocument();
   });

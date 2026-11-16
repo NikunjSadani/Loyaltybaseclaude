@@ -74,8 +74,8 @@ describe('ADMIU — Generate Visibility Invoices (upload page)', () => {
     fireEvent.click(screen.getByRole('button', { name: /generate invoices/i }));
 
     expect(await screen.findByText(/2 Invoices Generated/i)).toBeInTheDocument();
-    expect(screen.getByText('OUT009')).toBeInTheDocument();
-    expect(screen.getByText(/no confirmed payout/i)).toBeInTheDocument();
+    expect(await screen.findByText('OUT009')).toBeInTheDocument();
+    expect(await screen.findByText(/no confirmed payout/i)).toBeInTheDocument();
   });
 
   it('ADMIU4: surfaces a backend error verbatim', async () => {

@@ -6,7 +6,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -49,7 +49,7 @@ describe.skip('AB — MemberCard sub-line shows employee ID', () => {
     render(<TeamPage />);
     await act(async () => { vi.advanceTimersByTime(500); });
 
-    await waitFor(() => expect(screen.getByText('xsr1')).toBeInTheDocument());
+    expect(await screen.findByText('xsr1')).toBeInTheDocument();
     expect(screen.getByText('xsr2')).toBeInTheDocument();
     expect(screen.getByText('xsr3')).toBeInTheDocument();
     expect(screen.getByText('xsr4')).toBeInTheDocument();
@@ -59,7 +59,7 @@ describe.skip('AB — MemberCard sub-line shows employee ID', () => {
     render(<TeamPage />);
     await act(async () => { vi.advanceTimersByTime(500); });
 
-    await waitFor(() => expect(screen.getByText('xsr1')).toBeInTheDocument());
+    expect(await screen.findByText('xsr1')).toBeInTheDocument();
     expect(screen.queryByText('Andheri Beat')).not.toBeInTheDocument();
     expect(screen.queryByText('Juhu Beat')).not.toBeInTheDocument();
     expect(screen.queryByText('Versova Beat')).not.toBeInTheDocument();

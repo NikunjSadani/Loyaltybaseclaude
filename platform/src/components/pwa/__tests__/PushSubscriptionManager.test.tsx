@@ -122,10 +122,13 @@ describe('PushSubscriptionManager', () => {
     vi.stubEnv('NEXT_PUBLIC_PWA_PUSH_ENABLED', 'true');
     stubNotification('default');
     render(<PushSubscriptionManager />);
+    const before = Date.now();
     fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
     const stored = Number(localStorage.getItem(SNOOZE_KEY));
     expect(Number.isFinite(stored)).toBe(true);
-    expect(Date.now() - stored).toBeLessThan(5000);
+    // Fresh timestamp written by THIS click (bracketed, no wall-clock budget to flake under load).
+    expect(stored).toBeGreaterThanOrEqual(before);
+    expect(stored).toBeLessThanOrEqual(Date.now());
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
@@ -157,7 +160,7 @@ describe('PushSubscriptionManager', () => {
   it('Bajaj auto-ask falls back to the in-app banner when the browser needs a gesture (default)', async () => {
     const requestPermission = stubNotification('default', 'default');
     render(<PushSubscriptionManager tenantSlug="bajaj" />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy());
+    expect(await screen.findByRole('button', { name: 'Enable' })).toBeTruthy();
     expect(requestPermission).toHaveBeenCalledTimes(1);
     expect(subscribeToPush).not.toHaveBeenCalled();
   });
@@ -167,25 +170,28 @@ describe('PushSubscriptionManager', () => {
     // auto-request must NOT write a snooze — else isSnoozed() would hide the banner next load.
     stubNotification('default', 'default');
     const { unmount } = render(<PushSubscriptionManager tenantSlug="bajaj" />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy());
+    expect(await screen.findByRole('button', { name: 'Enable' })).toBeTruthy();
     expect(localStorage.getItem(SNOOZE_KEY)).toBeNull();
     unmount();
 
     // Simulate a later load: no snooze present → the banner must appear again.
     stubNotification('default', 'default');
     render(<PushSubscriptionManager tenantSlug="bajaj" />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy());
+    expect(await screen.findByRole('button', { name: 'Enable' })).toBeTruthy();
     expect(localStorage.getItem(SNOOZE_KEY)).toBeNull();
   });
 
   it('Bajaj explicit "Not now" DOES snooze (the only path that snoozes)', async () => {
     stubNotification('default', 'default');
     render(<PushSubscriptionManager tenantSlug="bajaj" />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Not now' })).toBeTruthy());
+    expect(await screen.findByRole('button', { name: 'Not now' })).toBeTruthy();
+    const before = Date.now();
     fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
     const stored = Number(localStorage.getItem(SNOOZE_KEY));
     expect(Number.isFinite(stored)).toBe(true);
-    expect(Date.now() - stored).toBeLessThan(5000);
+    // Fresh timestamp written by THIS click (bracketed, no wall-clock budget to flake under load).
+    expect(stored).toBeGreaterThanOrEqual(before);
+    expect(stored).toBeLessThanOrEqual(Date.now());
   });
 
   it('renders nothing for a non-Bajaj tenant with the flag OFF (byte-identical)', () => {

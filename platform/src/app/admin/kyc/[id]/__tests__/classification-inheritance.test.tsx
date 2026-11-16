@@ -108,14 +108,14 @@ describe('CL — Gifsy classification + group inheritance', () => {
     await renderPage();
 
     const entity = await screen.findByTestId('entity-type-select') as HTMLSelectElement;
-    const gst = screen.getByTestId('gst-reg-type-select') as HTMLSelectElement;
+    const gst = await screen.findByTestId('gst-reg-type-select') as HTMLSelectElement;
     // The prior bug: these defaulted to INDIVIDUAL / UNREGISTERED. They must now be empty.
     expect(entity.value).toBe('');
     expect(gst.value).toBe('');
 
-    expect(screen.getByTestId('save-classification-btn')).toBeDisabled();
-    expect(screen.getByTestId('approve-kyc-btn')).toBeDisabled();
-    expect(screen.getByTestId('approve-disabled-reason')).toBeInTheDocument();
+    expect(await screen.findByTestId('save-classification-btn')).toBeDisabled();
+    expect(await screen.findByTestId('approve-kyc-btn')).toBeDisabled();
+    expect(await screen.findByTestId('approve-disabled-reason')).toBeInTheDocument();
   });
 
   it('CL2: pick both + Save POSTs /gst-details and, once persisted, Approve un-gates', async () => {
@@ -123,7 +123,7 @@ describe('CL — Gifsy classification + group inheritance', () => {
     await renderPage();
 
     const entity = await screen.findByTestId('entity-type-select') as HTMLSelectElement;
-    const gst = screen.getByTestId('gst-reg-type-select') as HTMLSelectElement;
+    const gst = await screen.findByTestId('gst-reg-type-select') as HTMLSelectElement;
 
     fireEvent.change(entity, { target: { value: 'INDIVIDUAL' } });
     fireEvent.change(gst, { target: { value: 'REGULAR' } });
@@ -150,16 +150,16 @@ describe('CL — Gifsy classification + group inheritance', () => {
     await renderPage();
 
     const entity = await screen.findByTestId('entity-type-select') as HTMLSelectElement;
-    const gst = screen.getByTestId('gst-reg-type-select') as HTMLSelectElement;
+    const gst = await screen.findByTestId('gst-reg-type-select') as HTMLSelectElement;
     expect(entity.value).toBe('COMPANY');
     expect(gst.value).toBe('REGULAR');
     expect(entity).toBeDisabled();
     expect(gst).toBeDisabled();
 
-    expect(screen.getByTestId('classification-lock-note')).toBeInTheDocument();
+    expect(await screen.findByTestId('classification-lock-note')).toBeInTheDocument();
     expect(screen.queryByTestId('save-classification-btn')).not.toBeInTheDocument();
     // Locked values are authoritative → Approve is not blocked on classification.
-    expect(screen.getByTestId('approve-kyc-btn')).not.toBeDisabled();
+    expect(await screen.findByTestId('approve-kyc-btn')).not.toBeDisabled();
   });
 
   it('CL4: a GROUP_INHERITED verification item renders the "Auto-verified from group" badge', async () => {
@@ -175,7 +175,7 @@ describe('CL — Gifsy classification + group inheritance', () => {
 
     const badges = await screen.findAllByTestId('group-inherited-badge');
     expect(badges.length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText(/auto-verified from group/i).length).toBeGreaterThanOrEqual(1);
+    expect((await screen.findAllByText(/auto-verified from group/i)).length).toBeGreaterThanOrEqual(1);
   });
 
   it('CL5: editing a saved value re-disables Approve; reverting it re-enables (label stays consistent)', async () => {
@@ -183,9 +183,9 @@ describe('CL — Gifsy classification + group inheritance', () => {
     await renderPage();
 
     const entity = await screen.findByTestId('entity-type-select') as HTMLSelectElement;
-    const save = screen.getByTestId('save-classification-btn');
+    const save = await screen.findByTestId('save-classification-btn');
     // Loaded persisted → Approve enabled, Save reads the ✓-saved label (and is disabled).
-    expect(screen.getByTestId('approve-kyc-btn')).not.toBeDisabled();
+    expect(await screen.findByTestId('approve-kyc-btn')).not.toBeDisabled();
     expect(save).toHaveTextContent(/classification saved/i);
     expect(save).toBeDisabled();
 
@@ -216,7 +216,7 @@ describe('CL — Gifsy classification + group inheritance', () => {
       expect(screen.getByTestId('classification-error')).toHaveTextContent(/locked to the group classification/i);
     });
     // Save failed → never persisted → Approve stays blocked.
-    expect(screen.getByTestId('approve-kyc-btn')).toBeDisabled();
+    expect(await screen.findByTestId('approve-kyc-btn')).toBeDisabled();
   });
 
   it('CL7: a verify response with classificationRequired renders the finalize notice, not a per-field error', async () => {
@@ -235,6 +235,6 @@ describe('CL — Gifsy classification + group inheritance', () => {
     await waitFor(() => {
       expect(screen.getByTestId('classification-required-notice')).toBeInTheDocument();
     });
-    expect(screen.getByText(/set & save entity type and gst registration type above to finalize/i)).toBeInTheDocument();
+    expect(await screen.findByText(/set & save entity type and gst registration type above to finalize/i)).toBeInTheDocument();
   });
 });

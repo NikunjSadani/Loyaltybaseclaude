@@ -146,7 +146,7 @@ describe('Client settings editor (real PATCH persistence)', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('activate-client')).not.toBeInTheDocument();
     });
-    expect(screen.getByTestId('client-status-pill')).toHaveTextContent('Active');
+    expect(await screen.findByTestId('client-status-pill')).toHaveTextContent('Active');
   });
 
   it('CS3: a failed PATCH surfaces the error message', async () => {

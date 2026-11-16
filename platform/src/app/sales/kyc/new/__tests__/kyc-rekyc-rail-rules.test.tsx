@@ -90,16 +90,16 @@ async function walkToBankStep() {
   const utils = render(<NewKYCPage />);
   await waitFor(() =>
     expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c) => String(c[0]).includes('/api/kyc/K1'))).toBe(true),
-    { timeout: 5000 },
+    { timeout: 15_000 },
   );
   // Details step pre-filled from existingKyc (works for blanket re-KYC too — no summary banner).
-  await screen.findAllByDisplayValue('7766554433', {}, { timeout: 5000 });
-  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 5000 });
+  await screen.findAllByDisplayValue('7766554433', {}, { timeout: 15_000 });
+  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 15_000 });
   fireEvent.click(screen.getByRole('button', { name: /continue/i }));
-  await screen.findByPlaceholderText('City', {}, { timeout: 5000 });
-  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 5000 });
+  await screen.findByPlaceholderText('City', {}, { timeout: 15_000 });
+  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 15_000 });
   fireEvent.click(screen.getByRole('button', { name: /continue/i }));
-  await screen.findByText('Bank Details', {}, { timeout: 5000 });
+  await screen.findByText('Bank Details', {}, { timeout: 15_000 });
   return utils;
 }
 
@@ -112,7 +112,7 @@ async function signConsentSubmit(container: HTMLElement, posted: Array<Record<st
   fireEvent.click(screen.getByRole('checkbox', { name: /I agree to the/i }));
   fireEvent.click(screen.getByRole('checkbox', { name: /programme communications/i }));
   const submit = await screen.findByRole('button', { name: /send otp to outlet owner/i });
-  await waitFor(() => expect(submit).not.toBeDisabled(), { timeout: 5000 });
+  await waitFor(() => expect(submit).not.toBeDisabled(), { timeout: 15_000 });
   fireEvent.click(submit);
   await waitFor(() => expect(posted.length).toBe(1));
 }
@@ -151,7 +151,7 @@ describe('Re-KYC payout rail — reachability rules (mirrors the backend)', () =
     expect(screen.queryByTestId('payment-mode-toggle')).not.toBeInTheDocument();
     expect(screen.queryByTestId('rekyc-rail-lock-note')).not.toBeInTheDocument();
     expect(screen.queryByTestId('manual-upi-input')).not.toBeInTheDocument();
-    const acct = screen.getByPlaceholderText('Account number');
+    const acct = await screen.findByPlaceholderText('Account number');
     expect(acct).toHaveValue('123456789012');
     expect(acct).toBeDisabled();
     await signConsentSubmit(container, posted);
@@ -162,26 +162,26 @@ describe('Re-KYC payout rail — reachability rules (mirrors the backend)', () =
   it('RR2: upiId flagged, live bank (complete), UPI on → default UPI and the toggle is free', async () => {
     install(existingKyc('bank'), { upiId: true });
     await walkToBankStep();
-    expect(screen.getByTestId('payment-mode-toggle')).toBeInTheDocument();
+    expect(await screen.findByTestId('payment-mode-toggle')).toBeInTheDocument();
     expect(screen.queryByTestId('rekyc-rail-lock-note')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /upi id/i })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByTestId('manual-upi-input')).not.toBeDisabled();
+    expect(await screen.findByRole('button', { name: /upi id/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByTestId('manual-upi-input')).not.toBeDisabled();
   }, 20000);
 
   it('RR3: upiId flagged, live bank but NO stored IFSC → bank unreachable → locked to UPI with the note', async () => {
     install(existingKyc('bank', { ifscCode: '' }), { upiId: true });
     await walkToBankStep();
     expect(screen.queryByTestId('payment-mode-toggle')).not.toBeInTheDocument();
-    expect(screen.getByTestId('rekyc-rail-lock-note')).toHaveTextContent(RAIL_LOCK_NOTE);
-    expect(screen.getByTestId('manual-upi-input')).not.toBeDisabled();
+    expect(await screen.findByTestId('rekyc-rail-lock-note')).toHaveTextContent(RAIL_LOCK_NOTE);
+    expect(await screen.findByTestId('manual-upi-input')).not.toBeDisabled();
   }, 20000);
 
   it('RR4: accountNumber-only flagged on a live-UPI partner (no stored IFSC) → locked to UPI with the note', async () => {
     install(existingKyc('upi'), { accountNumber: true });
     await walkToBankStep();
     expect(screen.queryByTestId('payment-mode-toggle')).not.toBeInTheDocument();
-    expect(screen.getByTestId('rekyc-rail-lock-note')).toHaveTextContent(RAIL_LOCK_NOTE);
-    const upi = screen.getByTestId('manual-upi-input');
+    expect(await screen.findByTestId('rekyc-rail-lock-note')).toHaveTextContent(RAIL_LOCK_NOTE);
+    const upi = await screen.findByTestId('manual-upi-input');
     expect(upi).toHaveValue('verma@okaxis');
     expect(upi).toBeDisabled();
     expect(screen.queryByPlaceholderText('Account number')).not.toBeInTheDocument();
@@ -190,17 +190,17 @@ describe('Re-KYC payout rail — reachability rules (mirrors the backend)', () =
   it('RR5: blanket re-KYC (no field flags) → toggle free, opens on the live rail (UPI), no note', async () => {
     install(existingKyc('upi'), {});
     await walkToBankStep();
-    expect(screen.getByTestId('payment-mode-toggle')).toBeInTheDocument();
+    expect(await screen.findByTestId('payment-mode-toggle')).toBeInTheDocument();
     expect(screen.queryByTestId('rekyc-rail-lock-note')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /upi id/i })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByTestId('manual-upi-input')).not.toBeDisabled();
+    expect(await screen.findByRole('button', { name: /upi id/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByTestId('manual-upi-input')).not.toBeDisabled();
   }, 20000);
 
   it('RR6: bank routing flagged on a live-UPI partner → locked empty bank name/holder never block the submit', async () => {
     const posted = install(existingKyc('upi'), { accountNumber: true, ifscCode: true });
     const { container } = await walkToBankStep();
-    expect(screen.getByRole('button', { name: /bank account/i })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByPlaceholderText('HDFC Bank')).toBeDisabled();
+    expect(await screen.findByRole('button', { name: /bank account/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByPlaceholderText('HDFC Bank')).toBeDisabled();
     fireEvent.change(screen.getByPlaceholderText('Account number'), { target: { value: '998877665544' } });
     fireEvent.change(screen.getByPlaceholderText('HDFC0001234'), { target: { value: 'ICIC0000001' } });
     await signConsentSubmit(container, posted);

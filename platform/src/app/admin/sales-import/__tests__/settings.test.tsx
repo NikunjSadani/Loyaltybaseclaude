@@ -557,7 +557,7 @@ describe('settings page', () => {
     apiMock.segmentOptions.mockResolvedValue(ok({ outletTypes: [], programs: [] }));
     render(<SettingsPage />);
     expect(await screen.findByText('Products (lines)')).toBeInTheDocument();
-    expect(screen.getByText('₹')).toBeInTheDocument();
+    expect(await screen.findByText('₹')).toBeInTheDocument();
   });
 
   it('loads segment-options and passes them to the KPI editor', async () => {
@@ -587,7 +587,7 @@ describe('settings page', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save KPI' })); });
     const note = await screen.findByTestId('kpi-saved-fill-past');
     expect(note).toHaveTextContent('KPI_X is saved');
-    expect(within(note).getByRole('link', { name: /Recalculate from stored history/ })).toHaveAttribute('href', '/admin/sales-import/months');
+    expect(await within(note).findByRole('link', { name: /Recalculate from stored history/ })).toHaveAttribute('href', '/admin/sales-import/months');
   });
 });
 
@@ -642,6 +642,6 @@ describe('KPI editor — PRODUCT_COUNT ("Number of products bought (lines)")', (
     expect(await screen.findByTestId('kpi-test-result')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('radio', { name: 'Number of products bought (lines)' }));
     await waitFor(() => expect(screen.queryByTestId('kpi-test-result')).not.toBeInTheDocument());
-    expect(screen.getByText(/test again/)).toBeInTheDocument();
+    expect(await screen.findByText(/test again/)).toBeInTheDocument();
   });
 });

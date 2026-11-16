@@ -46,8 +46,8 @@ describe('achievements page — Sales Import ownership', () => {
     stubFetch({ batches: [batch({ id: 'manual' }), batch({ id: 'si', status: 'SALES_IMPORT', month: '2026-09' })] });
     render(<SalesUploadPage />);
     expect(await screen.findByText('Sales Import')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /Delete/ })).toHaveLength(1);
-    expect(screen.getByText('Managed in Sales Import')).toBeInTheDocument();
+    expect(await screen.findAllByRole('button', { name: /Delete/ })).toHaveLength(1);
+    expect(await screen.findByText('Managed in Sales Import')).toBeInTheDocument();
   });
 
   it('shows the skipped-importer-owned notice after an upload that had owned columns', async () => {
@@ -68,7 +68,7 @@ describe('achievements page — Sales Import ownership', () => {
     // an all-unscoped tenant's response has NO ignoredOutOfScope key → no notice
     expect(screen.queryByTestId('ignored-out-of-scope')).not.toBeInTheDocument();
     expect(screen.queryByText('Sales Import')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Delete/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /Delete/ })).toBeInTheDocument();
   });
 
   it('APPLIES-TO D1: shows "N values ignored because the KPI doesn\'t apply…" with the saved rows remarks', async () => {

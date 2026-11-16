@@ -96,7 +96,7 @@ describe('My Orders — Load more', () => {
     await screen.findByText('Alpha Speaker');
     fireEvent.click(screen.getByTestId('orders-load-more'));
     await screen.findByText('Bravo Cookware');
-    expect(screen.getByTestId('orders-load-more')).toBeInTheDocument(); // still more
+    expect(await screen.findByTestId('orders-load-more')).toBeInTheDocument(); // still more
     fireEvent.click(screen.getByTestId('orders-load-more'));
     await screen.findByText('Charlie Mixer');
     await waitFor(() => expect(screen.queryByTestId('orders-load-more')).toBeNull());
@@ -114,7 +114,7 @@ describe('My Orders — Load more', () => {
     render(<OrdersPage />);
     await screen.findByText('Alpha Speaker');
     expect(screen.queryByTestId('orders-load-more')).toBeNull();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('1 orders');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('1 orders');
   });
 
   it('LM4: an appended order loads its timeline from /track on demand', async () => {
@@ -146,7 +146,7 @@ describe('My Orders — Load more', () => {
     await screen.findByText('Alpha Speaker');
     fireEvent.click(screen.getByTestId('orders-load-more'));
     expect(await screen.findByTestId('orders-load-more-error')).toBeInTheDocument();
-    expect(screen.getByText('Alpha Speaker')).toBeInTheDocument();
+    expect(await screen.findByText('Alpha Speaker')).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('orders-load-more'));
     expect(await screen.findByText('Bravo Cookware')).toBeInTheDocument();
@@ -163,13 +163,13 @@ describe('My Orders — Load more', () => {
     await screen.findByText('Bravo Cookware');
     fireEvent.click(screen.getByTestId('orders-load-more'));
     await screen.findByText('Charlie Mixer');
-    expect(screen.getAllByText('Bravo Cookware')).toHaveLength(1);
+    expect(await screen.findAllByText('Bravo Cookware')).toHaveLength(1);
   });
 
   it('LM7: the header shows the backend total, not just the loaded page', async () => {
     stubFetch({ first: () => page([A, B], 'c2', 57) });
     render(<OrdersPage />);
     await screen.findByText('Alpha Speaker');
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('57 orders');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('57 orders');
   });
 });

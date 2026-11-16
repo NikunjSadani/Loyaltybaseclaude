@@ -196,7 +196,7 @@ describe('CUP — credits upload save request', () => {
     installFetch(outlets, SAVED);
 
     await uploadAndConfirm(file);
-    await waitFor(() => expect(screen.getByText('Credits confirmed successfully')).toBeInTheDocument(), { timeout: 15000 });
+    expect(await screen.findByText('Credits confirmed successfully', {}, { timeout: 15000 })).toBeInTheDocument();
 
     expect(saveBodies).toHaveLength(1);
     const sent = JSON.parse(saveBodies[0]);
@@ -266,7 +266,7 @@ describe('CUP — credits upload save request', () => {
     installFetch(outlets, jsonReply({ success: false, error: 'Row for X exceeds the safety cap of 50000 points.' }, 400));
     await uploadAndConfirm(makeFile(outlets, TWO_VALUES));
     expect(await screen.findByRole('alert')).toHaveTextContent('Row for X exceeds the safety cap of 50000 points.');
-    expect(screen.getByRole('button', { name: /Confirm & Credit/ })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: /Confirm & Credit/ })).toBeEnabled();
   });
 
   it.each([
@@ -289,7 +289,7 @@ describe('CUP — credits upload save request', () => {
     expect(screen.getByRole('link', { name: /Open Payout Status/ })).toHaveAttribute('href', '/admin/credits-payouts/status');
 
     fireEvent.click(retry);
-    await waitFor(() => expect(screen.getByText('Credits confirmed successfully')).toBeInTheDocument());
+    expect(await screen.findByText('Credits confirmed successfully')).toBeInTheDocument();
 
     expect(saveBodies).toHaveLength(1); // never a second batch
     expect(confirmUrls).toEqual([
@@ -307,11 +307,11 @@ describe('CUP — credits upload save request', () => {
     await waitFor(() => expect(confirmUrls).toHaveLength(2));
     const retry = await screen.findByRole('button', { name: 'Retry confirm for CB-TEST-001' });
     await waitFor(() => expect(retry).toBeEnabled());
-    expect(screen.getByRole('alert')).toHaveTextContent(CONFIRM_UNKNOWN);
+    expect(await screen.findByRole('alert')).toHaveTextContent(CONFIRM_UNKNOWN);
     expect(screen.queryByRole('button', { name: /Confirm & Credit/ })).toBeNull();
 
     fireEvent.click(retry);
-    await waitFor(() => expect(screen.getByText('Credits confirmed successfully')).toBeInTheDocument());
+    expect(await screen.findByText('Credits confirmed successfully')).toBeInTheDocument();
     expect(saveBodies).toHaveLength(1);
     expect(new Set(confirmUrls)).toEqual(new Set(['/api/admin/credits/batches/b1/confirm']));
   });
@@ -330,7 +330,7 @@ describe('CUP — credits upload save request', () => {
     ));
     expect(screen.queryByRole('button', { name: /Retry confirm/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /Confirm & Credit/ })).toBeNull();
-    expect(screen.getByRole('link', { name: /Open Payout Status/ })).toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: /Open Payout Status/ })).toBeInTheDocument();
     expect(saveBodies).toHaveLength(1);
   });
 
