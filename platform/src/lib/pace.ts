@@ -35,7 +35,9 @@ export function fmtRemaining(remaining: number): string {
  */
 export function remainingOf(target: number, achieved: number): number {
   const r = (Number(target) || 0) - (Number(achieved) || 0);
-  return r > 1e-6 * Math.max(1, Math.abs(Number(target) || 0)) ? r : 0;
+  // Absolute snap below display precision (0.005) — NEVER relative to the target: a relative cut-off
+  // scales into real money on large aggregated targets (₹49 short of ₹5 Cr would read "met").
+  return r >= 0.005 ? r : 0;
 }
 
 /**

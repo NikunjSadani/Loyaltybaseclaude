@@ -43,6 +43,9 @@ describe('remainingOf', () => {
     expect(remainingOf(0.3, 0.1 + 0.2)).toBe(0);
     expect(remainingOf(1349942.4166666667, 674971.2081833335)).toBeCloseTo(674971.2084833332, 6);
     expect(remainingOf(10, 9.5)).toBe(0.5);
+    // a REAL ₹49 shortfall on a ₹5 Cr aggregate is never snapped to met
+    expect(remainingOf(50_000_000, 49_999_951)).toBe(49);
+    expect(remainingOf(1, 0.99)).toBeCloseTo(0.01, 6);
   });
 });
 

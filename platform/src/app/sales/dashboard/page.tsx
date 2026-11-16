@@ -13,7 +13,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
 import { pct, pctBarColor } from '@/lib/targets';
 import { type SalesRole, getRole, canEnroll, hasTeamView } from '@/lib/sales-role';
-import { classifyPaceGap, buildCasesToGoMsg, remainingOf } from '@/lib/pace';
+import { classifyPaceGap, buildCasesToGoMsg, fmtKpiNum, remainingOf } from '@/lib/pace';
 import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
@@ -165,7 +165,7 @@ function TargetSummaryCard({ targets, role }: { targets: SalesTargets; role: Sal
                       <span className={`text-[11px] font-bold shrink-0 ${p >= 100 ? 'text-emerald-600' : p >= 80 ? 'text-amber-600' : p >= 60 ? 'text-orange-500' : 'text-red-500'}`}>
                         {isInrKpi
                           ? `${formatCompact(k.achieved)}/${formatCompact(k.target)} · ${p}%`
-                          : `${k.achieved.toLocaleString('en-IN')}/${k.target.toLocaleString('en-IN')}${kpiUnitLabel(k) ? ` ${kpiUnitLabel(k)}` : ''} · ${p}%`}
+                          : `${fmtKpiNum(k.achieved, k.unit)}/${fmtKpiNum(k.target, k.unit)}${kpiUnitLabel(k) ? ` ${kpiUnitLabel(k)}` : ''} · ${p}%`}
                       </span>
                     </div>
                     <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">

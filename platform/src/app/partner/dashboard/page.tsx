@@ -640,7 +640,7 @@ function TargetAchievementCard({ aggKpis }: { aggKpis: AggKpi[] }) {
           // (same rules as the sales card).
           const paired = isInrKpi
             ? `${formatCompact(k.achieved)}/${formatCompact(k.target)}`
-            : `${k.achieved.toLocaleString('en-IN')}/${k.target.toLocaleString('en-IN')}${k.unit ? ` ${k.unit}` : ''}`;
+            : `${fmtKpiNum(k.achieved, k.unit)}/${fmtKpiNum(k.target, k.unit)}${k.unit ? ` ${k.unit}` : ''}`;
           return (
             <div key={k.code} className="space-y-1">
               <div className="flex items-center gap-2">
