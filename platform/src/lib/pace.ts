@@ -11,7 +11,18 @@ export function buildCasesToGoMsg(
   daysLeft: number,
 ): string {
   const dayWord = daysLeft === 1 ? 'day' : 'days';
-  return `${remaining} ${unit} to go · ${daysLeft} ${dayWord} left`;
+  return `${fmtRemaining(remaining)} ${unit} to go · ${daysLeft} ${dayWord} left`;
+}
+
+/**
+ * The "X to go" amount as a WHOLE number with Indian digit grouping (e.g. 6,74,972).
+ * Targets/achievements arrive as fractional values (client target files carry decimals), so the
+ * raw difference rendered as "674971.2084833332". Rounded UP: anything still remaining shows at
+ * least 1 — never a misleading "0 to go" while the target is not yet met. 0 / negative / NaN → "0".
+ */
+export function fmtRemaining(remaining: number): string {
+  if (!Number.isFinite(remaining) || remaining <= 0) return '0';
+  return Math.max(1, Math.ceil(remaining)).toLocaleString('en-IN');
 }
 
 // ─── Pace classification ─────────────────────────────────────────────────────

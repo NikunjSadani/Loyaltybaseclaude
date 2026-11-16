@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildCasesToGoMsg, classifyPaceGap } from './pace';
+import { buildCasesToGoMsg, classifyPaceGap, fmtRemaining } from './pace';
 
 describe('buildCasesToGoMsg', () => {
   it('shows remaining units and days left — behind pace', () => {
@@ -16,6 +16,23 @@ describe('buildCasesToGoMsg', () => {
 
   it('works with non-cases units', () => {
     expect(buildCasesToGoMsg(3, 'SKUs', 10)).toBe('3 SKUs to go · 10 days left');
+  });
+
+  it('rounds a fractional INR remainder UP to a whole number with Indian grouping (prod 2026-11-16)', () => {
+    expect(buildCasesToGoMsg(674971.2084833332, 'INR', 14)).toBe('6,74,972 INR to go · 14 days left');
+  });
+});
+
+describe('fmtRemaining', () => {
+  it('whole, Indian-grouped, rounded up; never "0" while something remains', () => {
+    expect(fmtRemaining(674971.2084833332)).toBe('6,74,972');
+    expect(fmtRemaining(12345678)).toBe('1,23,45,678');
+    expect(fmtRemaining(400)).toBe('400');
+    expect(fmtRemaining(4.0001)).toBe('5');
+    expect(fmtRemaining(0.2)).toBe('1');
+  });
+  it('0 / negative / NaN / Infinity → "0"', () => {
+    for (const v of [0, -5, NaN, Infinity]) expect(fmtRemaining(v)).toBe('0');
   });
 });
 

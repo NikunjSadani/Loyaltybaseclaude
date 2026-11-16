@@ -20,7 +20,7 @@ import {
 import { formatPoints } from '@/lib/utils';
 import { formatInrCompact, formatCompact, isInrUnit, formatKpiAmount, formatKpiSoFar } from '@/lib/format-inr';
 import type { PayoutLedgerEntry } from '@/types';
-import { buildCasesToGoMsg, classifyPaceGap } from '@/lib/pace';
+import { buildCasesToGoMsg, classifyPaceGap, fmtRemaining } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import type { OutletType } from '@/lib/partner-session';
 import { pct, pctColor, pctBarColor, currentPeriod } from '@/lib/targets';
@@ -823,7 +823,7 @@ function WholesalerHero({
 
         {v2 && v.remaining > 0 && (
           <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-xs font-bold text-white">
-            <Target className="h-3.5 w-3.5" /> {v.remaining} {v.unit} to go
+            <Target className="h-3.5 w-3.5" /> {fmtRemaining(v.remaining)} {v.unit} to go
           </div>
         )}
 
@@ -913,7 +913,7 @@ function RetailerHero({
 
         {v2 && v.remaining > 0 && (
           <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-xs font-bold text-white">
-            <Target className="h-3.5 w-3.5" /> {v.remaining} {v.unit} to go
+            <Target className="h-3.5 w-3.5" /> {fmtRemaining(v.remaining)} {v.unit} to go
           </div>
         )}
 
@@ -1035,7 +1035,7 @@ function MTHero({
 
         {v2 && mtPrimary && mtRemaining > 0 && (
           <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-xs font-bold text-white">
-            <Target className="h-3.5 w-3.5" /> {mtRemaining} {mtPrimary.unit} to go
+            <Target className="h-3.5 w-3.5" /> {fmtRemaining(mtRemaining)} {mtPrimary.unit} to go
           </div>
         )}
 
