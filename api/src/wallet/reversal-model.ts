@@ -676,7 +676,8 @@ export function replay(
             eventId: ev.id,
             seq,
             code: 'CLAWBACK_BEYOND_HOLDINGS',
-            detail: `recovered ${c} > holdings ${H}; ${extraDebt} booked as debt`,
+            // Q4 wording (owner 2026-11-16): never call the excess "recovered" — it is owed (booked as debt).
+            detail: `clawback took ${c} pts from a wallet holding ${H}: recovered ${H}, owed ${extraDebt} (booked as debt)`,
           });
           c = H;
         }

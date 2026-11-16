@@ -19,9 +19,15 @@ CREATE TYPE "CreditAttribution" AS ENUM ('EXACT', 'LEGACY_REPLAY', 'MANUAL', 'UN
 -- CreateEnum
 CREATE TYPE "PayoutAllocationState" AS ENUM ('RESERVED', 'APPLIED_CANCELLED', 'APPLIED_RECEIVABLE', 'RELEASED');
 
+-- CreateEnum (policy round A, owner Q1 2026-11-16: per-wallet backfill outcome)
+CREATE TYPE "WalletBackfillStatus" AS ENUM ('DONE', 'BLOCKED');
+
 -- AlterTable
 ALTER TABLE "wallets" ADD COLUMN     "debtPoints" INTEGER NOT NULL DEFAULT 0,
-ADD COLUMN     "movementSeq" INTEGER NOT NULL DEFAULT 0;
+ADD COLUMN     "movementSeq" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN     "backfillStatus" "WalletBackfillStatus",
+ADD COLUMN     "backfillBlockedReason" TEXT,
+ADD COLUMN     "backfillCheckedAt" TIMESTAMP(3);
 
 -- AlterTable
 ALTER TABLE "wallet_transactions" ADD COLUMN     "creditReversalId" TEXT,
@@ -57,6 +63,7 @@ CREATE TABLE "credit_reversal_allocations" (
     "requested" INTEGER NOT NULL,
     "debtRestored" INTEGER NOT NULL,
     "recovered" INTEGER NOT NULL,
+    "owed" INTEGER NOT NULL DEFAULT 0,
     "shortfall" INTEGER NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -91,6 +98,9 @@ CREATE INDEX "wallet_credit_positions_batchId_outletCode_fieldId_idx" ON "wallet
 
 -- CreateIndex
 CREATE INDEX "wallet_credit_positions_attribution_idx" ON "wallet_credit_positions"("attribution");
+
+-- CreateIndex
+CREATE INDEX "wallets_backfillStatus_idx" ON "wallets"("backfillStatus");
 
 -- CreateIndex
 CREATE INDEX "credit_reversal_allocations_positionId_idx" ON "credit_reversal_allocations"("positionId");
@@ -160,6 +170,9 @@ ALTER TABLE "payout_reversal_allocations" ADD CONSTRAINT "payout_reversal_alloca
 ALTER TABLE "wallets" ADD CONSTRAINT "wallets_debtPoints_nonneg_chk" CHECK ("debtPoints" >= 0);
 ALTER TABLE "wallets" ADD CONSTRAINT "wallets_movementSeq_nonneg_chk" CHECK ("movementSeq" >= 0);
 
+-- A BLOCKED wallet always says why (the reason is shown to Gifsy and in the reversal refusal).
+ALTER TABLE "wallets" ADD CONSTRAINT "wallets_backfill_blocked_reason_chk" CHECK ("backfillStatus" IS DISTINCT FROM 'BLOCKED' OR "backfillBlockedReason" IS NOT NULL);
+
 -- Optional sanity on per-movement seq (NULL passes until the backfill).
 ALTER TABLE "wallet_transactions" ADD CONSTRAINT "wallet_transactions_seq_pos_chk" CHECK ("seq" IS NULL OR "seq" > 0);
 
@@ -169,10 +182,11 @@ ALTER TABLE "wallet_credit_positions" ADD CONSTRAINT "wallet_credit_positions_of
 ALTER TABLE "wallet_credit_positions" ADD CONSTRAINT "wallet_credit_positions_reversed_bounds_chk" CHECK ("reversedPoints" >= 0 AND "reversedPoints" <= "amount");
 ALTER TABLE "wallet_credit_positions" ADD CONSTRAINT "wallet_credit_positions_key_chk" CHECK ("attribution" = 'UNRESOLVED' OR ("outletCode" IS NOT NULL AND "fieldId" IS NOT NULL));
 
--- POINTS allocation arithmetic (§1.2): r = p + c + shortfall, all parts >= 0, r > 0.
+-- POINTS allocation arithmetic (§1.2): r = p + c + owed + shortfall, all parts >= 0, r > 0. "owed" (Q4) is only ever
+-- > 0 on a HISTORICAL clawback classified by the backfill that debited more than the wallet held (excess → debt).
 ALTER TABLE "credit_reversal_allocations" ADD CONSTRAINT "credit_reversal_allocations_parts_chk" CHECK (
-  "requested" > 0 AND "debtRestored" >= 0 AND "recovered" >= 0 AND "shortfall" >= 0
-  AND "debtRestored" + "recovered" + "shortfall" = "requested"
+  "requested" > 0 AND "debtRestored" >= 0 AND "recovered" >= 0 AND "owed" >= 0 AND "shortfall" >= 0
+  AND "debtRestored" + "recovered" + "owed" + "shortfall" = "requested"
 );
 
 -- PAYOUT allocation amounts (§5).

@@ -7,10 +7,15 @@
  *   APPLY (writes seq / pointsDelta / ledger links / positions / allocations / debtPoints / movementSeq — never balances):
  *     EXPECTED_DB=gifsy_staging TENANTS=bajaj BACKFILL_APPLY=true BACKFILL_CONFIRM="APPLY gifsy_staging" \
  *       node dist/wallet/backfill/backfill.main.js
- *   Optional: ALLOW_BLOCKED=true (backfill the non-blocked wallets of a tenant that has blocked ones),
- *             RESUME_AFTER_WALLET=<walletId> (ascending cursor), MAX_WALLETS=<n> (staged first run).
+ *   Optional: RESUME_AFTER_WALLET=<walletId> (ascending cursor), MAX_WALLETS=<n> (staged first run),
+ *             KEEP_POINTS_REVERSALS_PAUSED=true (leave the tenant's POINTS reversal pause ON after APPLY — e.g. the
+ *             tenant is flipped to V2 right after; lift it from the credits screen / POST reversal-engine/pause).
+ *   BLOCKED wallets never stop a run (owner Q2 2026-11-16): every clean wallet is backfilled, every BLOCKED one is
+ *   marked with its reason and listed under ATTENTION (ALLOW_BLOCKED is no longer needed and is ignored).
+ *   APPLY pauses the tenant's POINTS reversal create/approve for its window (owner Q5) and resumes them at the end.
  *
- * Exit codes: 0 ok · 1 crash · 2 guard refused · 3 tenant refused / wallets changed mid-run · 4 V0 changed (ALARM).
+ * Exit codes: 0 ok (incl. BLOCKED wallets — see ATTENTION) · 1 crash · 2 guard refused · 3 wallets / payout plan
+ * changed mid-run (re-run) · 4 V0 changed (ALARM).
  * Runbook: platform/docs/plans/WALLET-REVERSAL-ENGINE-DESIGN.md §9 + §13 (WP6).
  */
 import { PrismaClient } from '@prisma/client';
@@ -34,7 +39,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): BackfillConfig {
     apply: env.BACKFILL_APPLY === 'true',
     confirm: env.BACKFILL_CONFIRM,
     tenants: list(env.TENANTS),
-    allowBlocked: env.ALLOW_BLOCKED === 'true',
+    keepPaused: env.KEEP_POINTS_REVERSALS_PAUSED === 'true',
     resumeAfterWallet: env.RESUME_AFTER_WALLET?.trim() || undefined,
     maxWallets: maxWallets !== undefined && Number.isInteger(maxWallets) && maxWallets > 0 ? maxWallets : undefined,
   };

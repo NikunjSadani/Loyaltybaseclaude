@@ -82,17 +82,12 @@ d(
       db = await startDisposableDb({ poolSize: 40 }); // > any burst below: these scenarios test LOCKS, not pool size
       prisma = db.prisma();
       const ps = prisma as unknown as PrismaService;
-      // Real server: the real TenantSettingsService (reads program_settings — production behaviour).
-      // PGlite: WalletService.movementPath / reverseCreditBatchPoints read the flag through TenantSettingsService's OWN
-      // prisma (outside the caller's transaction); PGlite runs one transaction at a time, so that read would wait for
-      // the very transaction that issued it (observed: every v2 movement hit the 60 s tx timeout). The PGlite run
-      // therefore answers the flag from the fixtures' record of what they wrote. See the pool-starvation test below.
-      const tenantSettings = db.concurrent
-        ? new TenantSettingsService(ps)
-        : (Object.assign(Object.create(TenantSettingsService.prototype), {
-            getReversalEngineModeUncached: (clientId: string) =>
-              Promise.resolve(tenantModes.get(clientId) ?? 'LEGACY'),
-          }) as TenantSettingsService);
+      // The real TenantSettingsService in BOTH modes (reads program_settings — production behaviour). Since policy
+      // round A, WalletService.movementPath / reverseCreditBatchPoints (and the credits POINTS-reversal pause gate)
+      // read the flags through the CALLER's transaction, so PGlite (one transaction at a time) no longer deadlocks on
+      // a nested read — before the fix, the PGlite run had to answer the flag from `tenantModes` (kept as the
+      // fixtures' record of what they wrote). See the pool-starvation test below.
+      const tenantSettings = new TenantSettingsService(ps);
       wallet = new WalletService(ps, tenantSettings);
       // patchReversal (POINTS) only touches prisma + walletService; the other collaborators are never reached.
       credits = new CreditsService(
@@ -607,7 +602,8 @@ d(
        * while the transaction (holding the wallet row lock) still holds its own. Once ≥ pool-size wallet transactions are
        * in flight, the lock holder waits for a free connection that only its own lock-waiters can release → every one
        * of them times out. Applies to EVERY tenant (LEGACY wallets with movementSeq 0 take the same read).
-       * Expected RED until movementPath / reverseCreditBatchPoints read the flag through the caller's `tx`.
+       * Was RED (WP7 finding); FIXED in policy round A: movementPath / reverseCreditBatchPoints / the pause gate read
+       * through the caller's `tx` (getReversalEngineModeUncached(clientId, tx)) → expected GREEN; regression guard.
        */
       itServer(
         'pool 4, tx timeout 5 s: 6 concurrent credits on one LEGACY wallet all complete',

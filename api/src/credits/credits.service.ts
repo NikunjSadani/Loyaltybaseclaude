@@ -5,6 +5,7 @@ import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WalletService } from '../wallet/wallet.service';
+import { assertPointsReversalsNotPaused, ReversalAttentionException } from '../wallet/reversal-policy';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import {
@@ -1339,6 +1340,8 @@ export class CreditsService {
 
     try {
       return await this.prisma.$transaction(async (tx) => {
+        // Policy round A Q5: refused while the tenant's POINTS reversal approvals are paused (wallet backfill window).
+        if (dto.awardType === 'POINTS') await assertPointsReversalsNotPaused(tx, this.tenantSettings, user.clientId);
         if (pointsEngine === 'V2') return this.createPointsReversalV2(tx, user, id, batch.period, dto);
 
         // Serialise every reversal create/approve for this batch (batch row lock) so the
@@ -1397,7 +1400,8 @@ export class CreditsService {
             clientId: user.clientId, batchId: id, outletCode: dto.outletId, fieldId: dto.fieldId,
           });
         } else if (dto.awardType === 'PAYOUT') {
-          if ((await this.tenantSettings.getReversalEngineModeUncached(user.clientId)) !== 'LEGACY') {
+          // Through this tx (it holds the batch row lock — never a second pool connection meanwhile).
+          if ((await this.tenantSettings.getReversalEngineModeUncached(user.clientId, tx)) !== 'LEGACY') {
             payoutReservation = await selectPayoutEntriesV2(
               tx, { clientId: user.clientId, batchId: id, outletId: dto.outletId, fieldId: dto.fieldId },
               dto.payoutEntryIds, requested,
@@ -1454,7 +1458,39 @@ export class CreditsService {
           'A pending reversal already exists for this outlet and field in this batch.',
         );
       }
+      if (e instanceof ReversalAttentionException) {
+        await this.auditReversalRefusal(user, 'CREATE', id, e, { outletId: dto.outletId, fieldId: dto.fieldId });
+      }
       throw e;
+    }
+  }
+
+  /**
+   * Policy round A (owner rule "no silent pass-throughs"): a POINTS reversal refused because Gifsy must act
+   * (wallet needs attention / credit unmapped / approvals paused) leaves an audit row — written AFTER the refused
+   * transaction rolled back, on the service's own client. Best effort: an audit failure never masks the refusal.
+   */
+  private async auditReversalRefusal(
+    user: JwtPayload,
+    phase: 'CREATE' | 'APPROVE',
+    entityId: string,
+    e: ReversalAttentionException,
+    extra: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'REJECT',
+          entityType: 'REVERSAL_ENGINE_REFUSAL',
+          entityId,
+          actorId: user.sub,
+          metadata: JSON.parse(
+            JSON.stringify({ phase, code: e.code, message: e.message, clientId: user.clientId, ...extra, ...e.detail }),
+          ) as Prisma.InputJsonValue,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(`reversal refusal audit failed (${e.code} on ${entityId}): ${(err as Error).message}`);
     }
   }
 
@@ -1464,7 +1500,8 @@ export class CreditsService {
   /**
    * V2 create (§6 "create cap"): the reversal is capped by the credit POSITIONS of (batch, outlet, field) —
    * Σ(amount − reversedPoints) − Σ pending requested — on whichever wallet(s) received the credit (Q4: an outlet
-   * relinked since is irrelevant). No position, or any UNRESOLVED credit in the batch → 400 (Q5). No debt refusal
+   * relinked since is irrelevant). No position, or an UNRESOLVED credit that could be THIS outlet line's → refused with
+   * the reason (Q5; narrowed to the line by policy Q3 2026-11-16 — WalletService.v2PointsReversalCap). No debt refusal
    * (Q1/Q14 apply to LEGACY only). Same batch row lock + duplicate-pending guard as the legacy create.
    */
   private async createPointsReversalV2(
@@ -1513,7 +1550,8 @@ export class CreditsService {
   /**
    * The v2 create-cap figures for (batch, outlet, field), read-only: credited = Σ position amount, reversible =
    * Σ(amount − reversedPoints), pending = Σ requested of PENDING POINTS reversals. A v2 refusal (no position /
-   * UNRESOLVED credit — WalletService.v2PointsReversalCap) is raised when `raise`, else returned (SHADOW records it).
+   * UNRESOLVED credit of this line / wallet needing attention — WalletService.v2PointsReversalCap) is raised when
+   * `raise`, else returned (SHADOW records it).
    */
   private async v2PointsCreateCapSnapshot(
     tx: Prisma.TransactionClient,
@@ -1582,7 +1620,8 @@ export class CreditsService {
 
   /**
    * V2 approve gate (before the guarded flip): lock the batch row (same lock as the legacy cap), then cap the
-   * approval by the positions' Σ(amount − reversedPoints) (§6 approve cap). No position / UNRESOLVED → 400 (Q5).
+   * approval by the positions' Σ(amount − reversedPoints) (§6 approve cap). No position / UNRESOLVED credit of this
+   * line → refused with the reason (Q5 / policy Q1, Q3).
    * applyCreditReversal re-checks the same cap under the wallet + position locks.
    */
   private async assertV2PointsApproval(
@@ -3214,6 +3253,11 @@ export class CreditsService {
     const pointsKey = { batchId: reversal.batchId, outletCode: reversal.outletId, fieldId: reversal.fieldId };
 
     return this.prisma.$transaction(async (tx) => {
+      // Policy round A Q5: a POINTS approval is refused while the tenant's reversal approvals are paused (wallet
+      // backfill window). Reject is never paused (it moves no points).
+      if (action === ReversalAction.approve && reversal.awardType === 'POINTS') {
+        await assertPointsReversalsNotPaused(tx, this.tenantSettings, user.clientId);
+      }
       // V2: position-based approve cap (batch row lock, Σ(amount − reversedPoints), Q5 refusal) — replaces the
       // legacy stored-rows cap and the interim current-partner / debt gate below.
       if (pointsEngine === 'V2') {
@@ -3451,6 +3495,13 @@ export class CreditsService {
 
       const finalReversal = await tx.creditReversal.findFirst({ where: { id } });
       return { ...finalReversal, clawbackShortfall, payoutClawbackNote };
+    }).catch(async (e: unknown) => {
+      if (e instanceof ReversalAttentionException) {
+        await this.auditReversalRefusal(user, 'APPROVE', id, e, {
+          batchId: reversal.batchId, outletId: reversal.outletId, fieldId: reversal.fieldId,
+        });
+      }
+      throw e;
     });
   }
 }

@@ -15,6 +15,7 @@ import { useAdminSession } from '@/lib/admin-session';
 import { jsonToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
 import BatchEvidencePanel from './_components/BatchEvidencePanel';
+import ReversalEngineAttentionBanner from './_components/ReversalEngineAttentionBanner';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -384,6 +385,8 @@ export default function PayoutStatusPage() {
           </p>
         </div>
       </div>
+
+      <ReversalEngineAttentionBanner canLiftPause={session.role === 'GIFSY_ADMIN'} />
 
       {/* Filter */}
       {periods.length > 1 && (

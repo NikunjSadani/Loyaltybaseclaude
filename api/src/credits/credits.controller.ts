@@ -37,6 +37,8 @@ import {
   UtrUploadQueryDto,
 } from './dto/credits.dto';
 import { HeavyOp } from '../common/heavy-op-limiter';
+import { WalletService } from '../wallet/wallet.service';
+import { ReversalAttentionQueryDto, ReversalPauseDto } from './dto/reversal-engine.dto';
 
 /**
  * Awards & Credits (§12a) — re-homed from
@@ -55,6 +57,7 @@ export class CreditsController {
   constructor(
     private readonly credits: CreditsService,
     private readonly evidence: CreditEvidenceService,
+    private readonly wallet: WalletService,
   ) {}
 
   // ─── Batches ───────────────────────────────────────────────────────────────
@@ -300,5 +303,23 @@ export class CreditsController {
     @Body() dto: PatchReversalDto,
   ) {
     return this.credits.patchReversal(user, id, dto);
+  }
+
+  // ─── Wallet reversal engine call-outs (policy round A — "no silent pass-throughs") ─────────────────────
+  // What blocks POINTS reversals for this tenant and why: approvals paused, wallets needing Gifsy attention,
+  // unmapped credits, historical clawbacks "recovered X, owed Y". Read by the credits reversal screen banner.
+  @Get('reversal-engine/attention')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  reversalAttention(@CurrentUser() user: JwtPayload, @Query() query: ReversalAttentionQueryDto) {
+    return this.wallet.reversalAttention(user.clientId, { limit: query.limit });
+  }
+
+  // GIFSY lifts (or sets) the POINTS reversal maintenance pause by hand — e.g. after a crashed backfill run.
+  @Post('reversal-engine/pause')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:approve_reversal')
+  setReversalPause(@CurrentUser() user: JwtPayload, @Body() dto: ReversalPauseDto) {
+    return this.wallet.setPointsReversalPause(user, { paused: dto.paused, reason: dto.reason ?? null });
   }
 }

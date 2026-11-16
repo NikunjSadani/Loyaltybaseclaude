@@ -1,7 +1,19 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { CreditAttribution, Prisma, PointsLedgerType, Wallet, WalletTransactionType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { ReversalEngineMode, TenantSettingsService } from '../tenant/tenant-settings.service';
+import {
+  POINTS_REVERSAL_PAUSE_SETTING_KEY,
+  ReversalEngineMode,
+  TenantSettingsService,
+} from '../tenant/tenant-settings.service';
+import {
+  batchLineAmount,
+  creditUnmappedMessage,
+  ReversalAttentionException,
+  unresolvedBlockingLine,
+  WALLET_NOT_YET_BACKFILLED_REASON,
+  walletNeedsAttentionMessage,
+} from './reversal-policy';
 import {
   credit as modelCredit,
   CreditPosition,
@@ -29,9 +41,6 @@ export const DEBT_REVERSAL_PAUSED_MESSAGE =
 export const WALLET_STATE_INCONSISTENT_MESSAGE =
   'This wallet\'s points state is inconsistent (debt / holdings out of range) — contact Gifsy';
 
-/** SHADOW / V2 tenant, wallet with history the WP6 backfill has not sequenced yet → no v2 write (no mixed history). */
-export const WALLET_NOT_BACKFILLED_MESSAGE =
-  'This wallet has not been prepared for the new reversal engine yet (backfill pending) — points movements on it are paused; contact Gifsy';
 
 /** Synthetic lot / credit ids for the WP0 model when it is used for STATE math only (real lots are DB rows). */
 const HOLDINGS_LOT_ID = '__holdings__';
@@ -94,6 +103,8 @@ export interface ReversalPositionRow {
   amount: number;
   offsetPoints: number;
   reversedPoints: number;
+  /** absent in pure-planner fixtures; UNRESOLVED rows are never drawn on (findPositions) */
+  attribution?: CreditAttribution | string;
   creditTx: { seq: number | null; createdAt: Date };
 }
 
@@ -273,11 +284,15 @@ export class WalletService {
    *  2. movementSeq = 0 and tenant flag LEGACY (the default — Deoleo, Bajaj today) → 'LEGACY': byte-identical
    *     to the pre-engine code, no v2 column or table is written.
    *  3. movementSeq = 0 and tenant SHADOW / V2 → 'V2' only for a pristine wallet (no row, every figure 0 — nothing
-   *     for the backfill to sequence); a wallet WITH un-sequenced history that the backfill has not applied
-   *     (e.g. an anomaly wallet) is REFUSED (409) rather than given a mixed history.
+   *     for the backfill to sequence). A wallet WITH un-sequenced history (the backfill BLOCKED it — history doesn't
+   *     add up, opening balance without a row, out-of-order rows, missing expiry rows on a once-negative wallet — or
+   *     has not processed it yet) keeps TODAY's rules: 'LEGACY' for earn, redeem and expiry (owner Q1 2026-11-16;
+   *     never a mixed history, never a blocked earn/redeem). Only POINTS reversals on it are refused, by
+   *     v2PointsReversalCap (no position) with the wallet's reason; it is listed by reversalAttention().
    * Call under the wallet row lock (the backfill takes the same lock).
    * `knownMode`: the tenant's mode, already resolved by a caller that KNOWS this wallet's tenant (confirmBatch
    * resolves it once per batch) — skips the per-movement partner + flag reads; the decision is otherwise identical.
+   * The flag is read through the caller's `tx` (never a second pool connection while the wallet lock is held).
    */
   async movementPath(
     tx: Prisma.TransactionClient,
@@ -289,11 +304,14 @@ export class WalletService {
     if (mode === undefined) {
       const partner = await tx.channelPartner.findFirst({ where: { id: w.partnerId }, select: { clientId: true } });
       if (!partner) throw new NotFoundException('Wallet owner not found');
-      mode = await this.tenantSettings.getReversalEngineModeUncached(partner.clientId);
+      mode = await this.tenantSettings.getReversalEngineModeUncached(partner.clientId, tx);
     }
     if (mode === 'LEGACY') return 'LEGACY';
     if (await this.isWalletPristine(tx, w)) return 'V2';
-    throw new ConflictException(WALLET_NOT_BACKFILLED_MESSAGE);
+    this.logger.warn(
+      `[reversal-engine] wallet ${w.id} (${mode} tenant) is not backfilled (${w.backfillStatus === 'BLOCKED' ? `BLOCKED: ${w.backfillBlockedReason ?? '?'}` : 'not yet processed'}) — movement takes the LEGACY path; reversals on it are refused until Gifsy fixes it`,
+    );
+    return 'LEGACY';
   }
 
   /**
@@ -1660,10 +1678,15 @@ export class WalletService {
     }
   }
 
-  /** Positions of a (batch, outlet, field) — optionally on one wallet — oldest credit first. */
+  /**
+   * Positions of a (batch, outlet, field) — optionally on one wallet — oldest credit first. UNRESOLVED positions
+   * (an unattributable credit that a backfill downgrade left on this exact key) are never drawn on — they are a
+   * refusal reason (v2PointsReversalCap) — unless `includeUnresolved`.
+   */
   private async findPositions(
     tx: Prisma.TransactionClient,
     key: CreditKey & { walletId?: string },
+    opts: { includeUnresolved?: boolean } = {},
   ): Promise<ReversalPositionRow[]> {
     const rows = await tx.walletCreditPosition.findMany({
       where: {
@@ -1680,55 +1703,105 @@ export class WalletService {
         amount: true,
         offsetPoints: true,
         reversedPoints: true,
+        attribution: true,
         creditTx: { select: { seq: true, createdAt: true } },
       },
     });
-    return [...rows].sort(byCreditOrder);
+    const kept = opts.includeUnresolved ? rows : rows.filter((p) => p.attribution !== CreditAttribution.UNRESOLVED);
+    return [...kept].sort(byCreditOrder);
   }
 
   // ─── Reversal engine v2 (WP3 — WALLET-REVERSAL-ENGINE-DESIGN.md §6) ─────────────────────────
 
   /**
-   * The v2 gate (read-only): the positions a POINTS reversal of (batch, outlet, field) would draw on and the
-   * reversible cap Σ(amount − reversed). REFUSES (400) when there is no position (nothing provably credited) or
-   * when the batch has ANY credit whose (outlet, field) could not be attributed (UNRESOLVED — Q5: Gifsy maps it
-   * first; an unresolved credit could belong to this very key, so the cap would be unsafe).
+   * The v2 gate (read-only): the RESOLVED positions a POINTS reversal of (batch, outlet, field) would draw on and the
+   * reversible cap Σ(amount − reversed). Refuses — always with the reason and what to do (owner rule: no silent
+   * pass-throughs):
+   *  - Q3 (owner 2026-11-16): an UNRESOLVED credit of the batch that could be THIS line's credit (recorded outlet /
+   *    field don't exclude it, and the line isn't already fully identified by its resolved positions) → refuse ONLY
+   *    this (batch, outlet, field) line — every other outlet of the batch stays reversible
+   *    (ReversalAttentionException CREDIT_UNMAPPED, owner wording).
+   *  - no position: the receiving wallet was BLOCKED / not processed by the backfill (Q1 — WALLET_NEEDS_ATTENTION
+   *    with the wallet's reason), a pre-engine credit with no per-credit metadata (CREDIT_UNMAPPED), or nothing was
+   *    credited at all (400 — settle off-platform).
    */
   async v2PointsReversalCap(
     tx: Prisma.TransactionClient,
     key: CreditKey,
   ): Promise<{ cap: number; positions: ReversalPositionRow[] }> {
-    const unresolved = await tx.walletCreditPosition.count({
+    const all = await this.findPositions(tx, key, { includeUnresolved: true });
+    const positions = all.filter((p) => p.attribution !== CreditAttribution.UNRESOLVED);
+    const unresolved = await tx.walletCreditPosition.findMany({
       where: { batchId: key.batchId, attribution: CreditAttribution.UNRESOLVED },
+      select: { id: true, walletId: true, outletCode: true, fieldId: true, amount: true },
     });
-    if (unresolved > 0) {
-      throw new BadRequestException(
-        `Cannot reverse yet: ${unresolved} credit(s) of batch ${key.batchId} could not be matched to an outlet and field — Gifsy must map them first`,
-      );
+    if (unresolved.length > 0) {
+      const resolvedAmount = positions.reduce((s, p) => s + p.amount, 0);
+      const exactKey = unresolved.some((u) => u.outletCode === key.outletCode && u.fieldId === key.fieldId);
+      // The batch rows are read only when an unresolved credit is in play (normal path: no extra query).
+      const lineAmount = exactKey
+        ? null
+        : batchLineAmount((await tx.creditBatch.findFirst({ where: { id: key.batchId }, select: { rows: true } }))?.rows, key);
+      const blocking = unresolvedBlockingLine(unresolved, key, resolvedAmount, lineAmount);
+      if (blocking.length > 0) {
+        throw new ReversalAttentionException('CREDIT_UNMAPPED', creditUnmappedMessage(key.outletCode), {
+          ...key,
+          unresolvedPositionIds: blocking.map((u) => u.id),
+          walletIds: [...new Set(blocking.map((u) => u.walletId))],
+        });
+      }
     }
-    const positions = await this.findPositions(tx, key);
-    if (positions.length === 0) {
-      // Error path only: tell "nothing was credited" apart from "credited, but the receiving wallet has no position
-      // yet" (a wallet the WP6 backfill has not prepared / blocked as an anomaly — or a legacy credit without
-      // per-credit metadata, which cannot be told apart here).
-      const credits = await tx.walletTransaction.findMany({
-        where: { transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: key.batchId },
-        select: { metadata: true },
-      });
-      const meta = (m: Prisma.JsonValue | null | undefined) =>
-        m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : null;
-      const untracked = credits.some((c) => {
-        const m = meta(c.metadata);
-        return !m || typeof m.fieldId !== 'string' || (m.fieldId === key.fieldId && m.outletCode === key.outletCode);
-      });
-      throw new BadRequestException(
-        untracked
-          ? `Cannot reverse yet: batch ${key.batchId} has credits for outlet ${key.outletCode} / field ${key.fieldId} (or old credits that can't be matched to an outlet) that the reversal engine does not track yet — Gifsy must prepare / map them first`
-          : `Cannot reverse: no wallet received a credit from batch ${key.batchId} for outlet ${key.outletCode} / field ${key.fieldId} — settle it off-platform`,
-      );
-    }
+    if (positions.length === 0) await this.explainNoPosition(tx, key);
     const cap = positions.reduce((s, p) => s + (p.amount - p.reversedPoints), 0);
     return { cap, positions };
+  }
+
+  /**
+   * Error path only (v2PointsReversalCap found no position): ALWAYS throws, naming why. Finds the batch's credits for
+   * the line (metadata match) or untracked legacy credits (no metadata), and the receiving wallets' backfill state.
+   */
+  private async explainNoPosition(tx: Prisma.TransactionClient, key: CreditKey): Promise<never> {
+    const credits = await tx.walletTransaction.findMany({
+      where: { transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: key.batchId },
+      select: { walletId: true, metadata: true },
+    });
+    const meta = (m: Prisma.JsonValue | null | undefined) =>
+      m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : null;
+    const line = credits.filter((c) => {
+      const m = meta(c.metadata);
+      return !!m && m.fieldId === key.fieldId && m.outletCode === key.outletCode;
+    });
+    const legacy = credits.filter((c) => {
+      const m = meta(c.metadata);
+      return !m || typeof m.fieldId !== 'string';
+    });
+    // The wallet(s) that received this line's credit: name the first one's backfill problem.
+    for (const walletId of [...new Set(line.map((c) => c.walletId))].sort()) {
+      const w = await tx.wallet.findFirst({
+        where: { id: walletId },
+        select: { id: true, movementSeq: true, backfillStatus: true, backfillBlockedReason: true },
+      });
+      if (!w || (w.movementSeq ?? 0) > 0) continue;
+      const reason =
+        w.backfillStatus === 'BLOCKED' ? w.backfillBlockedReason ?? 'blocked by the wallet backfill' : WALLET_NOT_YET_BACKFILLED_REASON;
+      throw new ReversalAttentionException('WALLET_NEEDS_ATTENTION', walletNeedsAttentionMessage(key.outletCode, reason), {
+        ...key,
+        walletId: w.id,
+        backfillStatus: w.backfillStatus ?? null,
+        reason,
+      });
+    }
+    if (line.length > 0 || legacy.length > 0) {
+      // A credit exists but no position records it: an old credit without per-credit metadata (can't be told which
+      // outlet it was) or a tracked wallet whose credit predates its position — Gifsy maps it.
+      throw new ReversalAttentionException('CREDIT_UNMAPPED', creditUnmappedMessage(key.outletCode), {
+        ...key,
+        untrackedCredits: line.length + legacy.length,
+      });
+    }
+    throw new BadRequestException(
+      `Cannot reverse: no wallet received a credit from batch ${key.batchId} for outlet ${key.outletCode} / field ${key.fieldId} — settle it off-platform`,
+    );
   }
 
   /**
@@ -1858,7 +1931,8 @@ export class WalletService {
       legacyTarget?: { partnerId: string; walletId: string } | null;
     },
   ): Promise<{ mode: ReversalEngineMode; shortfall: number; walletIds: string[] }> {
-    const mode = a.mode ?? (await this.tenantSettings.getReversalEngineModeUncached(a.clientId));
+    // Read through the caller's tx (it holds the credit_batches lock — never a second pool connection meanwhile).
+    const mode = a.mode ?? (await this.tenantSettings.getReversalEngineModeUncached(a.clientId, tx));
     const description = a.description ?? `Clawback for reversal ${a.creditReversalId} — batch POINTS reversal`;
 
     if (mode === 'V2') {
@@ -2268,6 +2342,184 @@ export class WalletService {
     }
 
     return { expiredLots, expiredPoints: totalExpired };
+  }
+
+  // ─── Reversal engine call-outs (policy round A — owner rule "no silent pass-throughs") ─────────────────────
+
+  /**
+   * Everything about the tenant's POINTS reversals that needs GIFSY to act, with reasons — feeds
+   * GET /v1/admin/credits/reversal-engine/attention and the banner on the credits reversal screen:
+   *  - `pause`: the Q5 maintenance pause (+ when / who);
+   *  - `wallets`: BLOCKED by the backfill (reason), and — on a SHADOW / V2 tenant — wallets with history the backfill
+   *    has not processed yet (both keep today's earn/redeem rules; reversals on them are refused — Q1);
+   *  - `unmappedCredits`: UNRESOLVED credit positions (reversals of their outlet line refused until mapped — Q3/Q5);
+   *  - `owedClawbacks`: historical clawbacks that took more than the wallet held — "recovered X, owed Y" (Q4).
+   * Lists are capped at `limit` (default 200); the totals are exact.
+   */
+  async reversalAttention(clientId: string, opts: { limit?: number } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 200, 1), 1000);
+    let mode: ReversalEngineMode | 'INVALID';
+    let modeError: string | null = null;
+    try {
+      mode = await this.tenantSettings.getReversalEngineModeUncached(clientId);
+    } catch (e) {
+      mode = 'INVALID';
+      modeError = (e as Error).message;
+    }
+    const pause = await this.tenantSettings.getPointsReversalPauseUncached(clientId);
+
+    const blockedWhere: Prisma.WalletWhereInput = { partner: { clientId }, movementSeq: 0, backfillStatus: 'BLOCKED' };
+    // On a LEGACY tenant every wallet is "not backfilled" until the job runs — that is the normal state, not a problem.
+    const pendingWhere: Prisma.WalletWhereInput | null =
+      mode === 'LEGACY'
+        ? null
+        : {
+            partner: { clientId },
+            movementSeq: 0,
+            backfillStatus: null,
+            OR: [{ redeemablePoints: { not: 0 } }, { transactions: { some: {} } }],
+          };
+    const walletSelect = {
+      id: true,
+      partnerId: true,
+      backfillStatus: true,
+      backfillBlockedReason: true,
+      backfillCheckedAt: true,
+      partner: { select: { businessName: true } },
+    } as const;
+    const [blockedTotal, blocked, pendingTotal, pending] = await Promise.all([
+      this.prisma.wallet.count({ where: blockedWhere }),
+      this.prisma.wallet.findMany({ where: blockedWhere, select: walletSelect, orderBy: { id: 'asc' }, take: limit }),
+      pendingWhere ? this.prisma.wallet.count({ where: pendingWhere }) : Promise.resolve(0),
+      pendingWhere
+        ? this.prisma.wallet.findMany({ where: pendingWhere, select: walletSelect, orderBy: { id: 'asc' }, take: limit })
+        : Promise.resolve([] as never[]),
+    ]);
+    const listed = [...blocked, ...pending].slice(0, limit);
+    const outlets = listed.length
+      ? await this.prisma.outlet.findMany({
+          where: { clientId, partnerId: { in: listed.map((w) => w.partnerId) } },
+          select: { partnerId: true, outletCode: true },
+        })
+      : [];
+    const codesOf = (partnerId: string) =>
+      outlets.filter((o) => o.partnerId === partnerId).map((o) => o.outletCode).sort();
+    const wallets = listed.map((w) => ({
+      walletId: w.id,
+      partnerId: w.partnerId,
+      partnerName: w.partner?.businessName ?? null,
+      outletCodes: codesOf(w.partnerId),
+      status: w.backfillStatus === 'BLOCKED' ? ('BLOCKED' as const) : ('NOT_BACKFILLED' as const),
+      reason: w.backfillStatus === 'BLOCKED' ? w.backfillBlockedReason ?? 'blocked by the wallet backfill' : WALLET_NOT_YET_BACKFILLED_REASON,
+      checkedAt: w.backfillCheckedAt ?? null,
+      action:
+        'Earning and redeeming keep working on today\'s rules; points reversals on this wallet are refused. Gifsy: fix the wallet history, then re-run the wallet backfill.',
+    }));
+
+    const unmappedWhere: Prisma.WalletCreditPositionWhereInput = {
+      attribution: CreditAttribution.UNRESOLVED,
+      wallet: { partner: { clientId } },
+    };
+    const [unmappedTotal, unmapped] = await Promise.all([
+      this.prisma.walletCreditPosition.count({ where: unmappedWhere }),
+      this.prisma.walletCreditPosition.findMany({
+        where: unmappedWhere,
+        select: { id: true, walletId: true, creditTxId: true, batchId: true, outletCode: true, fieldId: true, amount: true, reversedPoints: true },
+        orderBy: [{ batchId: 'asc' }, { id: 'asc' }],
+        take: limit,
+      }),
+    ]);
+    const owedWhere: Prisma.CreditReversalAllocationWhereInput = { owed: { gt: 0 }, creditReversal: { clientId } };
+    const [owedTotal, owed] = await Promise.all([
+      this.prisma.creditReversalAllocation.count({ where: owedWhere }),
+      this.prisma.creditReversalAllocation.findMany({
+        where: owedWhere,
+        select: {
+          creditReversalId: true, requested: true, debtRestored: true, recovered: true, owed: true, shortfall: true,
+          position: { select: { walletId: true, batchId: true, outletCode: true, fieldId: true } },
+        },
+        orderBy: { creditReversalId: 'asc' },
+        take: limit,
+      }),
+    ]);
+
+    return {
+      mode,
+      modeError,
+      pause,
+      wallets,
+      walletsTotal: blockedTotal + pendingTotal,
+      walletsBlocked: blockedTotal,
+      walletsNotBackfilled: pendingTotal,
+      unmappedCredits: unmapped.map((p) => ({
+        positionId: p.id,
+        walletId: p.walletId,
+        creditTxId: p.creditTxId,
+        batchId: p.batchId,
+        outletCode: p.outletCode,
+        fieldId: p.fieldId,
+        amount: p.amount,
+        reason: p.outletCode
+          ? `the credit of batch ${p.batchId} to outlet ${p.outletCode} could not be matched to its line (an approved reversal of it could not be attributed)`
+          : `a credit of ${p.amount} pts in batch ${p.batchId} could not be matched to an outlet${p.fieldId ? '' : ' and field'}`,
+        action: 'Reversals of the outlet line this credit could belong to are refused. Gifsy: map it to its outlet and field.',
+      })),
+      unmappedTotal,
+      owedClawbacks: owed.map((a) => ({
+        creditReversalId: a.creditReversalId,
+        walletId: a.position.walletId,
+        batchId: a.position.batchId,
+        outletCode: a.position.outletCode,
+        fieldId: a.position.fieldId,
+        requested: a.requested,
+        debtRestored: a.debtRestored,
+        recovered: a.recovered,
+        owed: a.owed,
+        shortfall: a.shortfall,
+        label: `recovered ${a.recovered}, owed ${a.owed}`,
+      })),
+      owedTotal,
+    };
+  }
+
+  /**
+   * GIFSY: turn the Q5 "POINTS reversal approvals paused" switch on / off by hand (the backfill job does it itself
+   * for its APPLY window; this lifts a pause a crashed run left on, or holds one across a flag flip). Audited.
+   */
+  async setPointsReversalPause(
+    actor: { sub: string; clientId: string },
+    a: { paused: boolean; reason?: string | null },
+  ) {
+    const before = await this.tenantSettings.getPointsReversalPauseUncached(actor.clientId);
+    const value = a.paused
+      ? { paused: true, since: new Date().toISOString(), by: actor.sub, reason: a.reason?.trim() || 'paused by Gifsy' }
+      : { paused: false, clearedAt: new Date().toISOString(), by: actor.sub, reason: a.reason?.trim() || null };
+    await this.prisma.$transaction(async (tx) => {
+      await tx.programSetting.upsert({
+        where: { clientId_settingKey: { clientId: actor.clientId, settingKey: POINTS_REVERSAL_PAUSE_SETTING_KEY } },
+        create: {
+          clientId: actor.clientId,
+          settingKey: POINTS_REVERSAL_PAUSE_SETTING_KEY,
+          settingValue: value,
+          category: 'reversal-engine',
+          description: 'POINTS reversal create/approve paused (wallet maintenance) — WALLET-REVERSAL-ENGINE-DESIGN.md §9.1',
+          updatedById: actor.sub,
+        },
+        update: { settingValue: value, updatedById: actor.sub },
+      });
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: 'POINTS_REVERSAL_PAUSE',
+          entityId: actor.clientId,
+          actorId: actor.sub,
+          oldValues: before as unknown as Prisma.InputJsonValue,
+          newValues: value as Prisma.InputJsonValue,
+        },
+      });
+    });
+    this.tenantSettings.invalidate(actor.clientId);
+    return this.tenantSettings.getPointsReversalPauseUncached(actor.clientId);
   }
 
   private getDefaultDescription(transactionType: string): string {

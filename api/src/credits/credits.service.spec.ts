@@ -155,6 +155,8 @@ const mockTenantSettings = {
   resolveTdsPolicy: jest.fn(async () => ({ section: 'SEC_194C', methodology: 'GROSS_UP' })),
   // Reversal engine flag (absent row → LEGACY): every test here exercises today's (LEGACY) behaviour.
   getReversalEngineModeUncached: jest.fn(async () => 'LEGACY' as const),
+  // Policy round A Q5: POINTS reversal approvals pause switch (absent row → not paused).
+  getPointsReversalPauseUncached: jest.fn(async () => ({ paused: false, since: null, by: null, reason: null })),
 };
 
 // Stream B: SERVICE invoice-at-confirm + gross-up TDS invoice-at-download are delegated here.

@@ -10,7 +10,8 @@
 | **Approval** | ✅ Owner approved 2026-11-13: the full design + all 14 decisions (Q1–Q14 = recommended A). ⚠️ PLATFORM-WIDE (approved in-session). |
 | **Why paused** | Not needed for go-live or any data import (§11). Release ships a safe interim rule instead (§10). Machine/bandwidth prioritised for go-live: release → imports → targets/achievement import → client training deck. |
 | **Built** | `679ed4c2` design doc · `f5677f1e` WP1 schema + migration · `7d64ab55` WP0 reference model (oracle) + 30 tests incl. property tests · `6fed2005` WP6 backfill + verify jobs (not yet run on any DB) · `bd131860` WP2 movement v2 + WP3 reversal engine & flag (credits.service not wired yet — WP4) · `4187cb6d` WP5 PAYOUT allocations/reservations (SHADOW/V2) |
-| **Not built** | WP4 credits caps + wiring of the WP3 dispatcher · WP7 concurrency e2e · WP8 rollout · WP6 wiring of the WP5 payout backfill planner |
+| **Policy round A** | branch `feat/wre-pol-a` (2026-11-16): owner decisions P-A1..P-A5 (§12.1) — blocked wallets keep today's rules, backfill never stops on blocked wallets, unmapped credit refuses only its outlet line, "recovered X, owed Y", per-tenant approvals-paused switch; tenant-flag reads through the caller's tx (WP7 pool finding fixed); WP5 payout planner wired into WP6; call-out endpoint + banner |
+| **Not built** | WP8 rollout · dual money audit · staging run |
 | **Remaining effort** | ~7–8 h wall-clock with parallel agents (§13) |
 
 ---
@@ -116,7 +117,9 @@ Purely additive; existing code keeps working.
   APPLIED_RECEIVABLE RELEASED}`. New-table FKs onDelete Restrict.
 - Raw-SQL CHECKs in the migration: `debtPoints ≥ 0`, `movementSeq ≥ 0`, `seq IS NULL OR seq > 0`, position bounds
   (`amount > 0`, `0 ≤ offset ≤ amount`, `0 ≤ reversed ≤ amount`, non-UNRESOLVED requires outletCode+fieldId),
-  allocation sums (`p + c + shortfall = requested`, all ≥ 0), payout `amountPaise > 0`, `tdsOffsetPaise ≥ 0`.
+  allocation sums (`p + c + owed + shortfall = requested`, all ≥ 0 — `owed` added by policy round A, Q4), payout
+  `amountPaise > 0`, `tdsOffsetPaise ≥ 0`, BLOCKED wallet ⇒ reason. Policy round A also added `wallets.backfillStatus /
+  backfillBlockedReason / backfillCheckedAt` (+ index) — §12.1.
 - **Deliberately NOT in WP1:** the holdings CHECK `redeemablePoints + debtPoints >= 0`. Reason: until the backfill sets
   D, the 8 Bajaj negative wallets have D = 0, so even a normal credit (−841 + 500 = −341) would violate it. It goes in
   the **post-backfill migration** (with `seq` NOT NULL) — §9 step 6. SQL is in a comment at the end of the WP1 migration.
@@ -142,7 +145,8 @@ Purely additive; existing code keeps working.
 approve POINTS reversal (credit batch B, outlet O, field F, amount r):
   lock credit_batches row
   positions = wallet_credit_positions WHERE batch=B AND outlet=O AND field=F ORDER BY creditTx.seq FOR UPDATE
-  if none or any UNRESOLVED → 400 ("map credit first" / settle off-platform)        -- R5, Q5
+  if none → 409 wallet needs attention / credit unmapped, or 400 settle off-platform -- R5, Q5, P-A1
+  if an UNRESOLVED credit could be THIS line's → 409 "map it first" (line only)      -- P-A3
   cap = Σ(amount − reversedPoints); r > cap → 400                                     -- R5
   guarded flip CreditReversal PENDING_GIFSY → APPROVED/PARTIAL                        -- never twice
   for pos in positions (oldest seq first) while remaining > 0:
@@ -193,11 +197,12 @@ Backfill existing PAYOUT reversals; ambiguous → flagged.
   card lists held entries + what approval will do; approve/reject result (`payoutOutcome`: cancelled / receivable /
   TDS offset or why not / released) shown on the payout screen; receivable = "Pending" in Processed Reversals; audit
   rows `PAYOUT_REVERSAL_ALLOCATION` (CREATE/APPROVE/REJECT) for every step.
-- Backfill: `planPayoutAllocationBackfill` (pure) — consumed ids → APPLIED_* rows; pre-column approvals derived only
+- Backfill: `planPayoutAllocationBackfill` (pure; **wired into the WP6 runner by policy round A** — flags in the run's
+  anomaly list + ATTENTION block, rows inserted on APPLY under the batch row locks after an identical re-plan, verify V9b) — consumed ids → APPLIED_* rows; pre-column approvals derived only
   when all / exactly one subset of settled entries fits (WARNING `DERIVED_LEGACY`), else `AMBIGUOUS_LEGACY`
   (BLOCKING); `DOUBLE_CONSUMPTION`, `ENTRY_MISSING`, `ENTRY_NOT_SETTLED`, `AMOUNT_MISMATCH` (BLOCKING),
   `SHORTFALL_MISMATCH` (WARNING), `PENDING_LEGACY` (INFO). Never writes entries/reversals/money; re-runs skip
-  reversals that already have rows. **Not yet wired into the WP6 runner** (WP6 must load the tenant's PAYOUT
+  reversals that already have rows. **Wired into the WP6 runner by policy round A** (it loads the tenant's PAYOUT
   reversals + their entries + existing allocations, print the flags in the anomaly list, and `createMany` the rows
   in APPLY). V2 is correct without it (create excludes legacy-consumed entries itself); it completes V9/reporting.
 - Tests: `payout-reversal-v2.spec.ts` (in-memory Prisma fake with rollback + the live partial unique index):
@@ -257,13 +262,32 @@ Same API image, Cloud Run Job, `--command=node`. Every DB step needs the owner's
    Prints per tenant: planned/noop/done/BLOCKED counts, rows to sequence, positions by attribution, allocations, every
    debt wallet (`B → D (H)`), every anomaly (BLOCKING = that wallet gets no writes; WARNING = written + flagged). The
    anomaly list goes to the owner. Save the `V0` numbers it is about to print in APPLY.
-2. **APPLY**: add `BACKFILL_APPLY=true BACKFILL_CONFIRM="APPLY gifsy_staging"` (exact). A tenant with BLOCKED wallets is
-   refused (exit 3) unless `ALLOW_BLOCKED=true`. Optional staging: `MAX_WALLETS=n`, `RESUME_AFTER_WALLET=<id>`. Re-runs
-   are safe (done wallets skipped). Exit 4 = V0 changed during the run → stop, investigate (concurrent traffic / bug).
-   Run with POINTS reversal approvals paused (a clawback committed mid-run on a backfilled wallet shows up in V1).
+2. **APPLY**: add `BACKFILL_APPLY=true BACKFILL_CONFIRM="APPLY gifsy_staging"` (exact). Per tenant the job itself:
+   (a) turns the tenant's **POINTS reversal approvals paused** switch ON (program_settings `pointsReversalApprovalsPaused`,
+   P-A5) and DRAINS in-flight reversal transactions (exclusive advisory lock vs the shared one every POINTS reversal
+   create/approve takes) — admins see "Points reversal approvals are paused — wallet maintenance in progress (started
+   <time>)"; (b) backfills EVERY clean wallet — BLOCKED wallets never stop the run (P-A2; `ALLOW_BLOCKED` is gone) — and
+   marks each BLOCKED wallet `backfillStatus = BLOCKED` + its reason; (c) inserts the WP5 PAYOUT reversal allocation rows
+   (planner flags printed; a BLOCKING-flagged reversal gets no rows); (d) turns the pause OFF again (also after a crash)
+   unless `KEEP_POINTS_REVERSALS_PAUSED=true` or it was already on before the run. The run ends with an **ATTENTION**
+   block (blocked wallets + reasons, payout flags, historical clawbacks "recovered X, owed Y") — send it to the owner.
+   Exit 0 even with BLOCKED wallets (they are attention items, not a failure); 3 = a wallet / the payout plan changed
+   mid-run (re-run); 4 = V0 changed during the run → stop, investigate. Optional staging: `MAX_WALLETS=n`,
+   `RESUME_AFTER_WALLET=<id>`. A crash (or OOM kill) can leave the pause ON → it is shown on the credits screen banner;
+   GIFSY lifts it there ("Resume approvals" → `POST /v1/admin/credits/reversal-engine/pause {paused:false}`).
+   **Re-run right before flipping a tenant to V2 (P-A5) — cheap and idempotent:** wallets already sequenced
+   (movementSeq > 0: done by an earlier run, or tracked by the engine since — rule 1 of movementPath keeps every
+   backfilled wallet sequenced even while the tenant is LEGACY) are loaded as COUNTS ONLY (+ their clawback rows) and
+   never written again; only wallets that are still un-sequenced (new wallets with legacy history, previously BLOCKED
+   ones Gifsy has fixed) are planned and applied. PAYOUT reversals that already have allocation rows are skipped by the
+   planner. Recommended flip sequence: re-run APPLY with `KEEP_POINTS_REVERSALS_PAUSED=true` → VERIFY → set
+   `reversalEngine = V2` → lift the pause.
 3. **VERIFY** (read-only): args `dist/wallet/backfill/verify.main.js`, env `EXPECTED_DB`, `TENANTS`,
    `V0_BASELINE_JSON='[…the "V0 before" objects APPLY printed…]'`, `NEVER_NEGATIVE_TENANTS=deoleo` (default),
-   prod only: `EXPECTED_NEGATIVE_BALANCES='{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}'`. Exit 0 = all PASS, 5 = a FAIL.
+   prod only: `EXPECTED_NEGATIVE_BALANCES='{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}'`. Exit 0 = no FAIL, 5 = a FAIL.
+   Policy round A: BLOCKED wallets are excluded from V1/V2/V3/V7 and listed by **V10** (WARN); **V9b** re-runs the WP5
+   payout planner read-only (WARN: an approved PAYOUT reversal still without rows, or a planner flag); V8 prints
+   "recovered X, owed Y". WARN never fails the gate but is always printed + counted ("⚠ N check(s) need Gifsy attention").
 4. Only after 1–3 pass for every tenant AND WP2 is live on every write path: ship
    `platform/docs/plans/sql/wallet-reversal-post-backfill.DRAFT.sql` as a real migration (instructions in its header).
 
@@ -298,17 +322,44 @@ credit batches on prod yet. Worth doing properly once Bajaj runs monthly credits
 | Q13 | Historical reversals already done | Keep as recorded; backfill only classifies | Recalculate (would change balances) |
 | Q14 | Until the engine is on for a tenant | Refuse points reversals on wallets with debt (Bajaj's 8) | Keep the patched logic (known order bug) |
 
+### 12.1 Policy round A — owner decisions 2026-11-15/16 (as built on `feat/wre-pol-a`)
+Owner rule for all of them: **no silent pass-throughs** — every refusal / skip / blocked wallet / unmapped credit / owed
+amount / paused state is called out to whoever can act (call-outs table below).
+
+| # | Situation | Decision (owner) | As built |
+|---|---|---|---|
+| P-A1 (Q1) | Wallet the backfill can't process (history doesn't add up, opening balance with no row, out-of-order rows, missing expiry rows on a once-negative wallet) on a SHADOW/V2 tenant | Keeps working on TODAY's (LEGACY) rules for earn, redeem and expiry; only REVERSALS on it are refused (clear error with the reason + what to do) | `wallets.backfillStatus` (DONE / BLOCKED / NULL = not processed) + `backfillBlockedReason` + `backfillCheckedAt` (migration `20261117120000`, CHECK: BLOCKED ⇒ reason). `WalletService.movementPath`: movementSeq 0 + SHADOW/V2 + not pristine → **LEGACY** (was 409 "backfill pending" for every movement) + a warn log. V2 reversal of a credit on such a wallet → 409 `WALLET_NEEDS_ATTENTION` "Can't reverse: the wallet that received this credit for outlet X needs Gifsy attention (<reason>). Gifsy must fix that wallet's points history and re-run the wallet backfill — earning and redeeming on it keep working meanwhile." SHADOW keeps LEGACY outcomes (LEGACY decides everything there); the v2 diff records the refusal. A fixed wallet becomes DONE (reason cleared) on the next backfill run. |
+| P-A2 (Q2) | Backfill run with some BLOCKED wallets | Process every clean wallet; list problem wallets with reasons in the run report | `ALLOW_BLOCKED` removed (default behaviour); BLOCKED wallets marked with their reason on APPLY (audit row `WALLET_BACKFILL_BLOCKED`); run report `attention.blockedWallets` + ATTENTION log block; exit 0. Verify V10 (WARN) lists them; V1/V2/V3/V7 skip them. |
+| P-A3 (Q3) | UNRESOLVED (unmapped) credit in a batch | Refuse ONLY that outlet's line (batch, outlet, field), not the whole batch: "Can't reverse: the original credit for outlet X in this batch couldn't be identified — Gifsy must map it first." | `WalletService.v2PointsReversalCap` (create cap, approve cap, applyCreditReversal, SHADOW diff — one gate): an UNRESOLVED position blocks the line only if it could be that line's credit — its recorded outlet/field don't exclude it AND the line isn't fully identified (Σ resolved positions of the key = Σ the batch's POINTS/OK rows for it) — or it carries exactly this key (backfill downgrade). UNRESOLVED positions are never drawn on (`findPositions`). 409 `CREDIT_UNMAPPED`, owner wording verbatim. A pre-engine credit without per-credit metadata and no position → same refusal. |
+| P-A4 (Q4) | Historical clawbacks that took more than the wallet held | Say "recovered X, owed Y" — never count the owed part as recovered | `credit_reversal_allocations.owed` (CHECK `p + c + owed + shortfall = requested`); backfill classification: recovered = WP0 c (capped at holdings), owed = moved − p − c, shortfall = requested − moved (was: recovered = moved − p, i.e. owed counted as recovered). WARNING `CLAWBACK_OWED` + WP0 `CLAWBACK_BEYOND_HOLDINGS` text "recovered H, owed E (booked as debt)"; tenant summary `historicalClawbacks`; verify V8 detail; attention endpoint `owedClawbacks[].label`. Engine (v2) reversals never produce owed (WP0 caps c at H). |
+| P-A5 (Q5) | Backfill APPLY window / re-run before a V2 flip | Per-tenant "points reversal approvals paused" switch turned on by the runbook during APPLY; POINTS reversal create/approve refuse with "Points reversal approvals are paused — wallet maintenance in progress (started <time>)"; re-run before the flip must be cheap/idempotent | program_settings `pointsReversalApprovalsPaused` `{paused, since, by, reason}` (absent ⇒ off; unreadable ⇒ paused, fail closed). Gate `assertPointsReversalsNotPaused` runs FIRST in every POINTS create/approve tx for ALL modes (incl. LEGACY): shared advisory lock + read through the tx; 409 `APPROVALS_PAUSED`. Reject and PAYOUT reversals are never paused. The backfill job sets it, drains (exclusive lock), clears it at the end. GIFSY: `POST /v1/admin/credits/reversal-engine/pause` (audited `POINTS_REVERSAL_PAUSE`). Re-run cost: §9.1 step 2. |
+| P-A6 | WP7 finding: tenant flag read on a second pool connection while the wallet lock is held | Fix | `getReversalEngineModeUncached(clientId, db = own client)` / `getPointsReversalPauseUncached(clientId, db)`; movementPath, reverseCreditBatchPoints, the PAYOUT-create mode check and the pause gate pass the caller's `tx`. Mode still resolved once per request / per batch (WP4). WP7 pool test is now a regression guard (expected GREEN); the PGlite run uses the real TenantSettingsService. |
+
+**Call-outs (who sees what, where, and what they do):**
+
+| Path | Who sees it | Where | Action |
+|---|---|---|---|
+| POINTS reversal on a credit whose wallet is BLOCKED / not backfilled (V2) | client admin (create), Gifsy (approve) | API 409 `WALLET_NEEDS_ATTENTION` with reason; audit `REVERSAL_ENGINE_REFUSAL`; banner on Payout Status (credits reversal screen); attention endpoint `wallets[]` | Gifsy fixes the wallet history, re-runs the backfill |
+| Unmapped credit on the line | client admin / Gifsy | API 409 `CREDIT_UNMAPPED` (owner wording); audit row; banner + `unmappedCredits[]` | Gifsy maps the credit (→ MANUAL) |
+| Approvals paused | client admin / Gifsy | API 409 `APPROVALS_PAUSED` with start time; audit row; banner (GIFSY: "Resume approvals") | wait for maintenance / Gifsy lifts a stuck pause |
+| Movement on a BLOCKED wallet of a V2 tenant (legacy path) | Gifsy | API log warn per movement; attention endpoint / banner | none needed for earn/redeem; fix to re-enable reversals |
+| BLOCKED wallets in a backfill run | Gifsy / owner | run log ATTENTION block + JSON report `attention`; `wallets.backfillBlockedReason`; audit `WALLET_BACKFILL_BLOCKED`; verify V10 WARN | fix, re-run |
+| PAYOUT reversal backfill flags (AMBIGUOUS / DOUBLE_CONSUMPTION / …) | Gifsy / owner | run log `PAYOUT_<code>` lines + ATTENTION; verify V9b WARN | resolve by hand (no rows written for BLOCKING) |
+| Historical clawback beyond holdings | Gifsy / owner | run log (WARNING `CLAWBACK_OWED`, summary line), verify V8, banner + `owedClawbacks[]` "recovered X, owed Y" | recover the owed points off-platform or leave as debt |
+| SHADOW v2 refusal | Gifsy | audit `REVERSAL_ENGINE_SHADOW` `v2.refused` (same wording) | review before V2 |
+
 ## 13. Work packages & resume plan
 | WP | Scope | Status | Depends | Est. |
 |---|---|---|---|---|
 | WP0 | Pure reference model `api/src/wallet/reversal-model.ts` + `reversal-model.spec.ts` — the ORACLE | ✅ `7d64ab55` (30 tests; jest + `tsc -p tsconfig.build.json` pass in the worktree) | — | — |
 | WP1 | Prisma schema + migration | ✅ `f5677f1e` | — | — |
-| WP2 | `applyMovement` v2 (lock-first, seq, pointsDelta, D/O, ledger link, positions, expiry reclassification) calling WP0 | ✅ `bd131860` — `WalletService.movementPath` rollout guard: movementSeq > 0 → v2 maintenance (any flag); movementSeq = 0 + LEGACY → pre-engine path byte-identical; SHADOW/V2 → v2 only for a pristine wallet, un-backfilled history → 409. Expiry with e = 0 writes no row (D/O only). Tests `wallet.reversal-engine.spec.ts` | WP0, WP1 | — |
+| WP2 | `applyMovement` v2 (lock-first, seq, pointsDelta, D/O, ledger link, positions, expiry reclassification) calling WP0 | ✅ `bd131860` — `WalletService.movementPath` rollout guard: movementSeq > 0 → v2 maintenance (any flag); movementSeq = 0 + LEGACY → pre-engine path byte-identical; SHADOW/V2 → v2 only for a pristine wallet, un-backfilled history → 409 (**changed by policy round A P-A1: → LEGACY path, only reversals refused**). Expiry with e = 0 writes no row (D/O only). Tests `wallet.reversal-engine.spec.ts` | WP0, WP1 | — |
 | WP3 | Reversal engine `applyCreditReversal` §6; own-lot-first; LEGACY/SHADOW/V2 flag; delete legacy floor helpers | ✅ `bd131860` — `applyCreditReversal`, `v2PointsReversalCap`, `reverseCreditBatchPoints` (flag `program_settings.reversalEngine`, absent → LEGACY, malformed → refused; SHADOW diff → audit_logs `REVERSAL_ENGINE_SHADOW`). Legacy floor helpers kept: LEGACY still needs them (removal = rollout step 7). `patchReversal` still calls the LEGACY pair directly → switch to the dispatcher in WP4 | WP2 | — |
 | WP4 | credits.service POINTS: position-based caps at create/approve, wallet from position, allocations, shortfall totals, SHADOW | ✅ branch `feat/wre-wp4` — mode resolved once per request (POINTS create/approve only; reject/PAYOUT never read it). **V2**: create cap Σ(a − ρ) − Σ pending, `originalPaise` = Σ position amounts, approve cap Σ(a − ρ) under the batch lock, then `reverseCreditBatchPoints(mode V2)` (receiving wallet, allocations, Σ shortfall → `shortfallPaise`); no current-partner / debt gate; no position / UNRESOLVED → 400. **SHADOW**: LEGACY decides + applies; v2 create-cap diff (audit `REVERSAL_ENGINE_SHADOW`, action CREATE) + approve diff (dispatcher). **LEGACY**: code path unchanged — golden snapshot generated on `1aa5084e` (`api/src/credits/__fixtures__/legacy-reversal-golden.json`). `confirmBatch` resolves the mode once per batch (`creditEarn` → `movementPath(knownMode)`): 2,000-row confirm 24,004 → 20,005 queries (LEGACY), 28,004 → 24,005 (V2). Tests `credits.reversal-engine.spec.ts` | WP3 | — |
 | WP5 | PAYOUT allocations §8: entry-selection DTO + UI, reservation, download/re-bank hold, approve rules, backfill of existing PAYOUT reversals | ✅ `4187cb6d` — SHADOW/V2 only; LEGACY byte-identical (existing credits spec unchanged but for 3 mock lines). Backfill = pure planner, WP6 wiring pending (§8 "As built") | WP1 + release branch merged in | — |
 | WP6 | Backfill job §9 (pure module using WP0 `replay()` + Cloud Run job script, DRY_RUN default, resumable) + verify job V0–V9 + draft post-backfill migration | ✅ `6fed2005` — `api/src/wallet/backfill/` (planner, runner, Prisma store, `backfill.main.ts`, `verify.main.ts`) + 30 fixture tests; draft `platform/docs/plans/sql/wallet-reversal-post-backfill.DRAFT.sql`. Not yet run on any DB (runbook §9.1) | WP0, WP1 | — |
-| WP7 | Postgres e2e concurrency tests (concurrent credits, reversal vs redeem, double approval, reservation vs download) | 🟡 built (`feat/wre-wp7`): `api/test/wallet-reversal-concurrency.e2e-spec.ts` + `api/test/support/` (disposable-DB harness, WP0 oracle replay check). Run: `WRE_PG_ADMIN_URL=<throw-away LOCAL postgres admin URL>` (creates/migrates/drops its own DB; refuses non-localhost) or `WRE_PG_EMBEDDED=pglite` (serialised self-check only). PGlite: 26 green, 5 skipped. **Not yet run on a real server** (no Docker/Postgres on the dev machine). Pending: WP4 credits-path V2 approve race, WP5 reservation vs download (`it.skip` + TODO). Production finding: `movementPath` / `reverseCreditBatchPoints` read the tenant flag OUTSIDE the tx (pool-starvation test, expected RED until fixed) | WP2–WP5 | ~1 h |
+| WP7 | Postgres e2e concurrency tests (concurrent credits, reversal vs redeem, double approval, reservation vs download) | 🟡 built (`feat/wre-wp7`): `api/test/wallet-reversal-concurrency.e2e-spec.ts` + `api/test/support/` (disposable-DB harness, WP0 oracle replay check). Run: `WRE_PG_ADMIN_URL=<throw-away LOCAL postgres admin URL>` (creates/migrates/drops its own DB; refuses non-localhost) or `WRE_PG_EMBEDDED=pglite` (serialised self-check only). PGlite: 26 green, 5 skipped. **Not yet run on a real server** (no Docker/Postgres on the dev machine). Pending: WP4 credits-path V2 approve race, WP5 reservation vs download (`it.skip` + TODO). Production finding (flag read OUTSIDE the tx → pool starvation) **fixed in policy round A** (§12.1 P-A6) — the pool test is now a regression guard expected GREEN on a real server | WP2–WP5 | ~1 h |
+| Pol-A | Owner policy round A (§12.1): Q1 blocked wallets on legacy rules + per-wallet backfill status, Q2 never-stop backfill, Q3 line-scoped unmapped refusal, Q4 owed ≠ recovered, Q5 approvals-paused switch + cheap re-run, WP7 tx-read fix, WP5 planner → WP6 (+ V9b), call-out endpoint `GET /v1/admin/credits/reversal-engine/attention` + `POST …/pause` + banner (`status/_components/ReversalEngineAttentionBanner.tsx`) | ✅ branch `feat/wre-pol-a` — schema additions folded into migration `20261117120000` (never applied). Tests: `credits.reversal-engine.spec.ts` (golden LEGACY unchanged), `wallet.reversal-engine.spec.ts`, `reversal-attention.spec.ts`, `backfill.spec.ts`, banner vitest. PGlite WP7 run: green except the T-pay3 schema test, which fails only because the SHARED generated Prisma client carried policy round B's `payout_reversal_allocations.receivablePaise` column (absent from this branch's migration) | WP0–WP7 | — |
 | WP8 | Flag rollout, shadow-diff report, docs sweep, prod runbook | ⬜ | all | with staging |
 | — | Dual independent money audit + fix round; full `scripts/gates.sh`; staging (migration, backfill, V0–V9, one Bajaj negative wallet + one Deoleo wallet with real logins) | ⬜ | all | ~3 h |
 
