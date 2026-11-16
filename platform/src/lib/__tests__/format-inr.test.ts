@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { formatInrCompact, formatCompact, formatInrExact, isInrUnit, formatInrWhole, formatKpiAmount, formatKpiSoFar } from '@/lib/format-inr';
+import { formatInrCompact, formatCompact, formatInrExact, isInrUnit, formatInrWhole, formatKpiAmount, formatKpiSoFar, formatInrPaise } from '@/lib/format-inr';
+
+describe('formatInrPaise (whole rupees stay whole; paise always 2 dp)', () => {
+  it('formats', () => {
+    expect(formatInrPaise(1500)).toBe('₹1,500');
+    expect(formatInrPaise(1500.5)).toBe('₹1,500.50');
+    expect(formatInrPaise(1234567.125)).toBe('₹12,34,567.13');
+    expect(formatInrPaise(-10.25)).toBe('-₹10.25');
+    expect(formatInrPaise(-0)).toBe('₹0');
+    expect(formatInrPaise(NaN)).toBe('₹0');
+  });
+});
 
 describe('formatCompact (no ₹ symbol — paired achieved/target displays)', () => {
   it('matches the compact scale without the ₹ prefix', () => {
