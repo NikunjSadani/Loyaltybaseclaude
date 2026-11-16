@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Get, INestApplication, Query, Res, type CanActivate, type ExecutionContext } from '@nestjs/common';
+import { BadRequestException, Controller, Get, INestApplication, NotFoundException, Param, Query, Res, type CanActivate, type ExecutionContext } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import type { Response } from 'express';
@@ -42,12 +42,32 @@ const kind: AnyExportKind = {
   },
 };
 
+/** Light kinds that fail BEFORE their first byte: a deliberate HttpException, and a plain error (e.g. audit write). */
+const lightKind = (id: string, run: AnyExportKind['run']): AnyExportKind => ({
+  ...kind,
+  kind: id,
+  parseParams: () => ({}),
+  isHeavy: () => false,
+  fileName: () => `${id}.xlsx`,
+  run,
+});
+const emptyKind = lightKind('empty', async () => {
+  throw new NotFoundException('0 users matched these filters.');
+});
+const auditFailKind = lightKind('audit-fail', async () => {
+  throw new Error('audit write refused: db down');
+});
+
 @Controller('admin/reports')
 class DemoReportController {
   constructor(private readonly exports: ExportsService) {}
   @Get('demo')
   demo(@CurrentUser() user: JwtPayload, @Query() q: Record<string, unknown>, @Res({ passthrough: true }) res: Response) {
     return this.exports.respond(res, user, 'demo', q);
+  }
+  @Get('k/:kind')
+  byKind(@CurrentUser() user: JwtPayload, @Param('kind') k: string, @Res({ passthrough: true }) res: Response) {
+    return this.exports.respond(res, user, k, {});
   }
 }
 
@@ -90,7 +110,10 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
         { provide: ExportsRunnerService, useValue: { isConfigured: () => true, kick: async () => 'job' } },
         { provide: GifsyRoleService, useValue: { getPermissions: async () => new Set() } },
         { provide: TenantService, useValue: { isFeatureEnabled: async () => false } },
-        { provide: EXPORT_KIND_REGISTRY, useValue: new Map([[kind.kind, kind]]) },
+        {
+          provide: EXPORT_KIND_REGISTRY,
+          useValue: new Map([kind, emptyKind, auditFailKind].map((k) => [k.kind, k] as const)),
+        },
         { provide: APP_GUARD, useClass: FakeAuth },
         { provide: APP_INTERCEPTOR, useClass: TransformInterceptor },
         { provide: APP_FILTER, useClass: AllExceptionsFilter },
@@ -155,6 +178,23 @@ describe('Downloads — HTTP contract through the Nest stack', () => {
       'https://api.gifsy.in',
       'https://api-staging.gifsy.in',
     ]);
+  }, HTTP_TIMEOUT);
+
+  it('light kind throwing an HttpException before its first byte → that status + JSON envelope, NO attachment', async () => {
+    const res = await request(app.getHttpServer()).get('/admin/reports/k/empty');
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: '0 users matched these filters.' });
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.headers['content-disposition']).toBeUndefined();
+  }, HTTP_TIMEOUT);
+
+  it('light kind failing before its first byte (e.g. refused audit write) → 500 JSON, no file bytes', async () => {
+    const res = await request(app.getHttpServer()).get('/admin/reports/k/audit-fail');
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ success: false, error: "We couldn't prepare this file. Please try again." });
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.headers['content-disposition']).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain('db down');
   }, HTTP_TIMEOUT);
 
   it('GET admin/exports → own list envelope', async () => {

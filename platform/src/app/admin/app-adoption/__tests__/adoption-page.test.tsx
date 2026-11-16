@@ -10,6 +10,8 @@
  *  - AD5: on fetch failure an explicit error state shows (no fabricated numbers)
  *  - AD6–AD9: "Download installed users (Excel)" — button + note, filters in the URL, loading
  *    state while the request is in flight, file saved on 200, readable error on 4xx / network failure
+ *  - AD10–AD12: panel disabled with a reason when nobody installed; a 404 "0 users matched these filters"
+ *    shows as a neutral note (no file, no error); visible labels are the accessible names
  */
 
 import React from 'react';
@@ -136,7 +138,7 @@ describe('Admin App Adoption page — real data', () => {
     const button = await screen.findByRole('button', { name: /Download installed users/ });
 
     fireEvent.change(screen.getByLabelText('Role group'), { target: { value: 'partner' } });
-    fireEvent.change(screen.getByLabelText('Installed since'), { target: { value: '2026-11-01' } });
+    fireEvent.change(screen.getByLabelText('Installed since (optional)'), { target: { value: '2026-11-01' } });
     fireEvent.click(button);
 
     // Loading: busy label + disabled while the request is in flight.
@@ -173,5 +175,46 @@ describe('Admin App Adoption page — real data', () => {
     render(<AppAdoptionPage />);
     fireEvent.click(await screen.findByRole('button', { name: /Download installed users/ }));
     expect(await screen.findByTestId('download-error')).toHaveTextContent("Couldn't reach the server");
+  });
+
+  it('AD10: nobody installed → the download panel is disabled with a short reason', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve(ZERO_PAYLOAD) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<AppAdoptionPage />);
+    const button = await screen.findByRole('button', { name: /Download installed users/ });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription('No one has installed the app yet, so there is nothing to download.');
+    expect(screen.getByLabelText('Role group')).toBeDisabled();
+    expect(screen.getByLabelText('Installed since (optional)')).toBeDisabled();
+    fireEvent.click(button);
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('installed-users'))).toBe(false);
+  });
+
+  it('AD11: filters that match nobody → "0 users matched these filters" (neutral), no file saved, no error', async () => {
+    mockFetchRoutes(() =>
+      Promise.resolve({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ success: false, error: '0 users matched these filters.' }),
+      }),
+    );
+    render(<AppAdoptionPage />);
+    fireEvent.change(await screen.findByLabelText('Role group'), { target: { value: 'admin' } });
+    fireEvent.click(screen.getByRole('button', { name: /Download installed users/ }));
+    await waitFor(() => expect(screen.getByTestId('installed-users-no-match')).toHaveTextContent('0 users matched these filters.'));
+    expect(screen.getByTestId('installed-users-no-match')).toHaveAttribute('role', 'status');
+    expect(screen.queryByTestId('download-error')).not.toBeInTheDocument();
+    expect(downloadBlob).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Download installed users/ })).toBeEnabled();
+    // Changing a filter clears the note.
+    fireEvent.change(screen.getByLabelText('Role group'), { target: { value: '' } });
+    expect(screen.getByTestId('installed-users-no-match')).toHaveTextContent('');
+  });
+
+  it('AD12: visible labels ARE the accessible names (no differing aria-labels)', async () => {
+    mockFetchRoutes(() => Promise.resolve(fileResponse()));
+    render(<AppAdoptionPage />);
+    expect(await screen.findByRole('combobox', { name: 'Role group' })).not.toHaveAttribute('aria-label');
+    expect(screen.getByLabelText('Installed since (optional)')).not.toHaveAttribute('aria-label');
   });
 });

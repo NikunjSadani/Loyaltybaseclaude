@@ -95,6 +95,14 @@ export function externalOrigin(req?: Pick<Request, 'headers'> | null): string {
   return `${proto}://${host}`;
 }
 
+/** The person-readable message of an HttpException (same rule as AllExceptionsFilter: arrays joined). */
+function httpErrorText(e: HttpException): string {
+  const body = e.getResponse();
+  if (typeof body === 'string') return body;
+  const msg = (body as { message?: string | string[]; error?: string }).message;
+  return Array.isArray(msg) ? msg.join(', ') : (msg ?? (body as { error?: string }).error ?? e.message);
+}
+
 function attachment(fileName: string): string {
   const ascii = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
@@ -319,15 +327,25 @@ export class ExportsService {
 
     const file = new StreamableFile(pass, { type: XLSX_CONTENT_TYPE, disposition: attachment(fileName) });
     file.setErrorHandler((err, response) => {
-      this.logger.error(`instant export ${def.kind} failed mid-stream: ${err.message}`);
+      // An HttpException is a deliberate answer (e.g. 404 "0 users matched"), not a failure worth an error log.
+      if (!(err instanceof HttpException)) this.logger.error(`instant export ${def.kind} failed mid-stream: ${err.message}`);
       if (response.destroyed) return;
       // Headers already out → cut the connection so the browser reports a failed download, never a corrupt file.
       if (response.headersSent) {
         (res as unknown as { destroy?: (e?: Error) => void }).destroy?.(err);
         return;
       }
-      response.statusCode = 500;
-      response.send("We couldn't prepare this file. Please try again.");
+      // Nothing sent yet (the kind failed before its first byte — e.g. a refused audit write, or an HttpException
+      // such as "0 users matched these filters") → a normal JSON error envelope, NOT an attachment: drop the file
+      // headers so the browser never saves the error text as an .xlsx. An HttpException keeps its own status +
+      // message (written for people); anything else is a generic 500.
+      // (`res` is this same response, typed as the full Express Response.)
+      for (const h of ['Content-Type', 'Content-Disposition', 'Content-Length']) res.removeHeader(h);
+      const http = err instanceof HttpException ? err : null;
+      res.status(http ? http.getStatus() : 500).json({
+        success: false,
+        error: http ? httpErrorText(http) : "We couldn't prepare this file. Please try again.",
+      });
     });
 
     void (async () => {
@@ -339,7 +357,7 @@ export class ExportsService {
         await def.run({ prisma: this.prisma, moduleRef: this.moduleRef, clientId: user.clientId, user, now }, params, out);
         await out.finish();
       } catch (e) {
-        if (!state.aborted) this.logger.error(`instant export ${def.kind} failed: ${(e as Error).stack ?? (e as Error).message}`);
+        if (!state.aborted && !(e instanceof HttpException)) this.logger.error(`instant export ${def.kind} failed: ${(e as Error).stack ?? (e as Error).message}`);
         pass.destroy(state.aborted ? undefined : (e as Error));
       } finally {
         clearInterval(idle);

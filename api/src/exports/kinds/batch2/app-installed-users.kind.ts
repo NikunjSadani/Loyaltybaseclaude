@@ -5,28 +5,44 @@
  * install first. Columns: Name · Phone · Role · Role Group · Outlet Code · Outlet Name · Platforms Installed ·
  * First Installed · Last Seen · Notifications Enabled · User Status.
  *
+ * Population — the SAME as the App Adoption page's "Installed to home screen" number (`tenantInstallWhere` in
+ * push/pwa-adoption.service.ts is the one definition both use), so the page number and the unfiltered file's row
+ * count always match: install rows of this tenant whose user BELONGS to this tenant (a Gifsy operator who opened the
+ * app while assumed in is excluded) and is NOT soft-deleted (owner policy: removed users' phone numbers must not
+ * circulate). Inactive / suspended users are kept (status column says so).
+ *
  * Scope (isolation-critical) — EXACTLY like GET /v1/push/adoption (PwaAdoptionService.adoption): every read is pinned
  * to the caller's JWT `clientId` (CLIENT_ADMIN / MIS_USER → own tenant; a GIFSY operator → the tenant they have
  * assumed; an un-assumed GIFSY_ADMIN → their home tenant, NEVER all tenants). No clientId param exists. A caller with
  * no tenant is refused before any read.
  *
- * Paging: one grouped read of the tenant's installs (one small row per installed user — a few thousand at most), then
- * users / platforms / push subscriptions are read ≤ 1,000 users at a time and written before the next read.
+ * Build order (audit before bytes): one grouped read of the tenant's installs (one small row per installed user — a
+ * few thousand at most), then users / platforms / push subscriptions ≤ 1,000 users at a time; ALL rows are built in
+ * memory first. Then:
+ *   • 0 rows → 404 "0 users matched these filters." — no file, no audit row (no personal data left the system).
+ *   • otherwise ONE AuditLog row (action EXPORT, entityType APP_ADOPTION: who, tenant, exact row count, filters) is
+ *     written, and ONLY THEN is the workbook written. If the audit write fails the request fails before a single
+ *     byte of the file is sent (the light-export stream turns a pre-byte error into an error response).
  *
- * Phone numbers are personal data: every built file writes ONE AuditLog row (action EXPORT, entityType APP_ADOPTION)
- * with who, tenant, row count and filters. If that write fails the download fails (never an unaudited file).
+ * Phone column: the last 10 digits (normalizePhoneLast10) so Indian numbers never become "'+91…" text cells; a number
+ * that is not 10+ digits is written as stored. Always text.
+ *
+ * Audit granularity (L8, accepted): one audit row per BUILT file. A download that is built but then not saved by the
+ * browser (client closes the tab mid-stream) is still audited — the record errs on the side of "may have left".
  */
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import type { UserRole } from '@prisma/client';
 import { istDateTimeCell } from '../../../common/ist-date';
 import { rungDisplayLabel } from '../../../common/hierarchy-labels';
+import { normalizePhoneLast10 } from '../../../common/partner-group.helper';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import {
   InstalledUsersQueryDto,
   type InstalledUsersRoleGroup,
 } from '../../../push/dto/push.dto';
+import { tenantInstallWhere } from '../../../push/pwa-adoption.service';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
-import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
+import type { XlsxCell, XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { parseQueryDto } from './kind-support';
 
 export interface InstalledUsersParams {
@@ -51,6 +67,9 @@ export const INSTALLED_USERS_HEADERS = [
 
 /** Users read per batch (keeps every `IN (...)` list small). */
 export const INSTALLED_USERS_CHUNK = 1000;
+
+/** 404 text when the filters match nobody — the App Adoption page shows it as a neutral note (no file is saved). */
+export const INSTALLED_USERS_NONE_MESSAGE = '0 users matched these filters.';
 
 export const ROLE_GROUP_ROLES: Record<InstalledUsersRoleGroup, readonly UserRole[]> = {
   sales: ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'],
@@ -104,8 +123,7 @@ interface UserRow {
   phone: string;
   role: string;
   status: string;
-  deletedAt: Date | null;
-  salesUser: { hierarchyLevel: { code: string } | null } | null;
+  salesUser: { hierarchyLevel: { code: string; name: string | null } | null } | null;
   channelPartner: {
     partnerCode: string;
     outlets: Array<{ outletCode: string; name: string; outletType: { code: string; name: string } | null }>;
@@ -115,8 +133,11 @@ interface UserRow {
 function roleLabel(clientId: string, u: UserRow, typeDisplay: Map<string, string>): string {
   const group = roleGroupOf(u.role);
   if (group === 'sales') {
-    const code = u.salesUser?.hierarchyLevel?.code;
-    if (code) return rungDisplayLabel(clientId, code);
+    // The tenant's own level name ("Area Sales Manager" …) → the code-based label (Bajaj rung labels) → the role.
+    const level = u.salesUser?.hierarchyLevel;
+    const name = (level?.name ?? '').trim();
+    if (name) return name;
+    if (level?.code) return rungDisplayLabel(clientId, level.code);
     return u.role.replace(/^SALES_/, '').replace(/_/g, ' ');
   }
   if (group === 'partner') {
@@ -126,11 +147,6 @@ function roleLabel(clientId: string, u: UserRow, typeDisplay: Map<string, string
   }
   if (group === 'admin') return ADMIN_ROLE_LABEL[u.role] ?? u.role;
   return u.role === 'VENDOR' ? 'Vendor' : u.role;
-}
-
-function statusLabel(u: UserRow): string {
-  if (u.deletedAt) return 'Deleted';
-  return STATUS_LABEL[u.status] ?? u.status;
 }
 
 function platformsLabel(platforms: Set<string>): string {
@@ -144,17 +160,13 @@ function platformsLabel(platforms: Set<string>): string {
     .join(', ');
 }
 
-async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
-  const clientId = requireTenant(ctx.user);
+/** Read everything and build every row in memory (no bytes written). */
+async function buildRows(ctx: ExportRunContext, clientId: string, p: InstalledUsersParams): Promise<XlsxCell[][]> {
   const { prisma } = ctx;
-  const sheet = await out.addSheet('Installed users', [...INSTALLED_USERS_HEADERS], {
-    widths: [26, 14, 16, 10, 16, 30, 22, 18, 18, 12, 14],
-  });
-
-  // ── 1. One row per installed user: first install + last seen (tenant-pinned). ──
+  // ── 1. One row per installed user: first install + last seen (tenant-pinned, shared population). ──
   const groups = await prisma.pwaInstall.groupBy({
     by: ['userId'],
-    where: { clientId },
+    where: tenantInstallWhere(clientId),
     _min: { installedAt: true },
     _max: { lastSeenAt: true },
   });
@@ -164,6 +176,7 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
     .filter((g): g is { userId: string; first: Date; last: Date | null } => !!g.first)
     .filter((g) => !since || g.first.getTime() >= since.getTime())
     .sort((a, b) => b.first.getTime() - a.first.getTime() || a.userId.localeCompare(b.userId));
+  if (!ordered.length) return [];
 
   // Per-tenant outlet-type display names ("Retailer" / "Wholesaler" …): displayName ?? OutletType.name.
   const typeDisplay = new Map<string, string>();
@@ -179,22 +192,22 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
   }
 
   const roleFilter = p.roleGroup ? { role: { in: [...ROLE_GROUP_ROLES[p.roleGroup]] } } : {};
-  let written = 0;
+  const rows: XlsxCell[][] = [];
   for (let i = 0; i < ordered.length; i += INSTALLED_USERS_CHUNK) {
     const chunk = ordered.slice(i, i + INSTALLED_USERS_CHUNK);
     const ids = chunk.map((c) => c.userId);
     const [users, installs, subs] = await Promise.all([
       prisma.user.findMany({
-        // clientId pinned again: an install row can never surface another tenant's user.
-        where: { id: { in: ids }, clientId, ...roleFilter },
+        // clientId + deletedAt pinned again (defence in depth, same as tenantInstallWhere): an install row can never
+        // surface another tenant's user or a removed user's phone number.
+        where: { id: { in: ids }, clientId, deletedAt: null, ...roleFilter },
         select: {
           id: true,
           name: true,
           phone: true,
           role: true,
           status: true,
-          deletedAt: true,
-          salesUser: { select: { hierarchyLevel: { select: { code: true } } } },
+          salesUser: { select: { hierarchyLevel: { select: { code: true, name: true } } } },
           channelPartner: {
             select: {
               partnerCode: true,
@@ -218,12 +231,12 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
 
     for (const c of chunk) {
       const u = byId.get(c.userId);
-      if (!u) continue; // other role group, or not a user of this tenant
+      if (!u) continue; // other role group (or not a current user of this tenant)
       const group = roleGroupOf(u.role);
       const outlet = u.channelPartner?.outlets[0];
-      await sheet.addRow([
+      rows.push([
         u.name ?? '',
-        u.phone ?? '',
+        normalizePhoneLast10(u.phone) ?? u.phone ?? '',
         roleLabel(clientId, u, typeDisplay),
         group ? GROUP_LABEL[group] : 'Other',
         outlet?.outletCode ?? (group === 'partner' ? u.channelPartner?.partnerCode ?? '' : ''),
@@ -232,14 +245,25 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
         istDateTimeCell(c.first),
         c.last ? istDateTimeCell(c.last) : '',
         notified.has(u.id) ? 'Yes' : 'No',
-        statusLabel(u),
+        STATUS_LABEL[u.status] ?? u.status,
       ]);
-      written++;
     }
   }
+  return rows;
+}
 
-  // Personal data (phone numbers) left the system — record who, which tenant, how many rows, which filters.
-  await prisma.auditLog.create({
+async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
+  const clientId = requireTenant(ctx.user);
+
+  // 1. Build every row in memory — nothing has been written to the response yet.
+  const rows = await buildRows(ctx, clientId, p);
+
+  // 2. Nobody matched → an honest "0 users" answer instead of an empty file (no personal data → no audit row).
+  if (!rows.length) throw new NotFoundException(INSTALLED_USERS_NONE_MESSAGE);
+
+  // 3. Audit BEFORE any byte leaves: who, which tenant, exactly how many rows, which filters. A failure here rejects
+  //    the run before the workbook is started, so the caller gets an error response and no file.
+  await ctx.prisma.auditLog.create({
     data: {
       action: 'EXPORT',
       entityType: 'APP_ADOPTION',
@@ -250,12 +274,18 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
         clientId,
         assumed: !!ctx.user.assumed,
         actorRole: ctx.user.role,
-        rowCount: written,
+        rowCount: rows.length,
         filters: { roleGroup: p.roleGroup, since: p.since },
       },
     },
   });
-  return { rowCount: written };
+
+  // 4. Only now write the workbook.
+  const sheet = await out.addSheet('Installed users', [...INSTALLED_USERS_HEADERS], {
+    widths: [26, 14, 16, 10, 16, 30, 22, 18, 18, 12, 14],
+  });
+  for (const r of rows) await sheet.addRow(r);
+  return { rowCount: rows.length };
 }
 
 export const APP_INSTALLED_USERS_KIND: ExportKindDef<InstalledUsersParams> = {

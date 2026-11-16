@@ -1,6 +1,22 @@
 import { Injectable } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PwaPlatform } from './dto/push.dto';
+
+/**
+ * The ONE definition of "an installed user of this tenant" — shared by the App Adoption page count
+ * (PwaAdoptionService.adoption) and the "Download installed users" Excel (app-installed-users export kind), so the
+ * number on the page and the file's row count (no filters) always match.
+ *
+ *   • the install row is stamped with this tenant (pwa_install.clientId), AND
+ *   • the user BELONGS to this tenant (user.clientId) — a Gifsy operator who opened the app while assumed into the
+ *     tenant leaves an install row stamped with it, but is not one of the tenant's users, AND
+ *   • the user is not soft-deleted (owner policy: removed users' phone numbers must not circulate). Inactive /
+ *     suspended users still count — they did install the app.
+ */
+export function tenantInstallWhere(clientId: string): Prisma.PwaInstallWhereInput {
+  return { clientId, user: { clientId, deletedAt: null } };
+}
 
 /** OS bucket derived from a stored userAgent. */
 type OsBucket = 'Android' | 'iOS' | 'Desktop' | 'Other';
@@ -14,7 +30,7 @@ export interface AdoptionReport {
     byOs: { os: OsBucket; users: number }[];
   };
   installed: {
-    users: number; // distinct users who launched the installed PWA
+    users: number; // distinct users of this tenant (not deleted) who launched the installed PWA — see tenantInstallWhere
     byPlatform: { platform: string; users: number }[];
   };
 }
@@ -70,9 +86,9 @@ export class PwaAdoptionService {
       (osUsers.get(os) ?? osUsers.set(os, new Set()).get(os)!).add(s.userId);
     }
 
-    // ── Installed to home screen (pwa_install) ──
+    // ── Installed to home screen (pwa_install) — same population as the installed-users Excel. ──
     const installs = await this.prisma.pwaInstall.findMany({
-      where: { clientId },
+      where: tenantInstallWhere(clientId),
       select: { userId: true, platform: true },
     });
     const installUsers = new Set<string>();

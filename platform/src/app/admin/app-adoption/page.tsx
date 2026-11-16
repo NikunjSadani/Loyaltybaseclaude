@@ -8,7 +8,8 @@
    + fetch + useEffect/useState pattern as the dashboard pages.
    (3) "Download installed users (Excel)" → GET /api/push/adoption/installed-users
    (backend /v1/push/adoption/installed-users, export kind 'app-installed-users'),
-   via the shared downloadOrQueue/useDownloadAction button state machine.
+   via the shared downloadOrQueue/useDownloadAction button state machine. Disabled (with the reason) when
+   nobody has installed the app; a 404 "0 users matched these filters." is shown as a neutral note (no file).
 ──────────────────────────────────────────────────────────────────────────────────── */
 
 import React, { useEffect, useState } from 'react';
@@ -81,53 +82,78 @@ function installedUsersUrl(roleGroup: RoleGroup, since: string): string {
   return qs ? `${INSTALLED_USERS_URL}?${qs}` : INSTALLED_USERS_URL;
 }
 
-function InstalledUsersDownload() {
+/** The server answers 404 with this text when the filters match nobody (export kind 'app-installed-users'). */
+const NO_MATCH_RE = /matched these filters/i;
+const NO_MATCH_TEXT = '0 users matched these filters.';
+const NO_INSTALLS_TEXT = 'No one has installed the app yet, so there is nothing to download.';
+
+function InstalledUsersDownload({ installedUsers }: { installedUsers: number }) {
   const action = useDownloadAction();
   const [roleGroup, setRoleGroup] = useState<RoleGroup>('');
   const [since, setSince] = useState('');
+  // "0 users matched" is an answer, not a failure — shown as a neutral note, and no file is saved.
+  const [noMatch, setNoMatch] = useState(false);
+  const empty = installedUsers <= 0;
+  const controlsDisabled = empty || action.busy;
 
-  const onDownload = () => {
-    void action.run(installedUsersUrl(roleGroup, since), {
+  const onDownload = async () => {
+    setNoMatch(false);
+    const outcome = await action.run(installedUsersUrl(roleGroup, since), {
       fallbackFileName: 'app-installed-users.xlsx',
       init: { headers: { ...authHeader() } },
     });
+    if (outcome?.kind === 'error' && outcome.status === 404 && NO_MATCH_RE.test(outcome.message)) {
+      action.reset();
+      setNoMatch(true);
+    }
   };
 
   return (
     <Card className="border border-gray-100 shadow-sm rounded-2xl" data-testid="installed-users-download">
       <CardContent className="py-4 space-y-2">
         <div className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-xs font-semibold text-gray-500">
-            Who
+          <div className="flex flex-col gap-1">
+            <label htmlFor="installed-users-role-group" className="text-xs font-semibold text-gray-500">
+              Role group
+            </label>
             <select
-              aria-label="Role group"
+              id="installed-users-role-group"
               className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-gray-800 bg-white"
               value={roleGroup}
-              onChange={(e) => setRoleGroup(e.target.value as RoleGroup)}
-              disabled={action.busy}
+              onChange={(e) => {
+                setRoleGroup(e.target.value as RoleGroup);
+                setNoMatch(false);
+              }}
+              disabled={controlsDisabled}
             >
               <option value="">All users</option>
               <option value="sales">Sales team</option>
               <option value="partner">Partners (outlets)</option>
               <option value="admin">Admins</option>
             </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-semibold text-gray-500">
-            Installed since (optional)
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor="installed-users-since" className="text-xs font-semibold text-gray-500">
+              Installed since (optional)
+            </label>
             <input
+              id="installed-users-since"
               type="date"
-              aria-label="Installed since"
               className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-gray-800 bg-white"
               value={since}
-              onChange={(e) => setSince(e.target.value)}
-              disabled={action.busy}
+              onChange={(e) => {
+                setSince(e.target.value);
+                setNoMatch(false);
+              }}
+              disabled={controlsDisabled}
             />
-          </label>
+          </div>
           <button
             type="button"
-            onClick={onDownload}
-            disabled={action.blocked}
+            onClick={() => void onDownload()}
+            disabled={empty || action.blocked}
             aria-busy={action.busy}
+            aria-describedby={empty ? 'installed-users-empty' : undefined}
             className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
             style={{ backgroundColor: DARK_NAVY }}
           >
@@ -139,8 +165,17 @@ function InstalledUsersDownload() {
             {downloadButtonLabel(action, 'Download installed users (Excel)')}
           </button>
         </div>
-        <p className="text-xs text-gray-400">
-          Includes everyone who opened the app as an installed app.
+        {empty ? (
+          <p id="installed-users-empty" className="text-xs text-gray-500" data-testid="installed-users-none">
+            {NO_INSTALLS_TEXT}
+          </p>
+        ) : (
+          <p className="text-xs text-gray-400">
+            Includes everyone who opened the app as an installed app.
+          </p>
+        )}
+        <p role="status" className="text-xs text-gray-600" data-testid="installed-users-no-match">
+          {noMatch ? NO_MATCH_TEXT : ''}
         </p>
         <DownloadActionStatus action={action} />
       </CardContent>
@@ -236,7 +271,7 @@ export default function AdminAppAdoptionPage() {
       </div>
 
       {/* ── Installed-users Excel download ── */}
-      <InstalledUsersDownload />
+      <InstalledUsersDownload installedUsers={installed.users} />
 
       {/* ── Empty state ── */}
       {nothingYet ? (

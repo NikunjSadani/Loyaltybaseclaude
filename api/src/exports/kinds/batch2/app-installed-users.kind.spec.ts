@@ -1,64 +1,129 @@
 import 'reflect-metadata';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import { ROLES_KEY } from '../../../common/decorators/roles.decorator';
 import { PushController } from '../../../push/push.controller';
+import { PwaAdoptionService } from '../../../push/pwa-adoption.service';
 import { ExportAccessChecker } from '../../export-access';
 import type { GifsyRoleService } from '../../../common/rbac/gifsy-role.service';
 import type { TenantService } from '../../../tenant/tenant.service';
+import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { EXPORT_KINDS } from '../index';
-import { APP_INSTALLED_USERS_KIND, INSTALLED_USERS_HEADERS, istDayStart } from './app-installed-users.kind';
+import {
+  APP_INSTALLED_USERS_KIND,
+  INSTALLED_USERS_HEADERS,
+  INSTALLED_USERS_NONE_MESSAGE,
+  istDayStart,
+} from './app-installed-users.kind';
 import { ctxFor, readBook, renderKind } from './parity.support-spec';
 
 const CLIENT = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '', name: '' } as JwtPayload;
 const MIS = { sub: 'mis', role: 'MIS_USER', clientId: 'bajaj', phone: '', name: '' } as JwtPayload;
 const OWNER_ASSUMED = { sub: 'g', role: 'GIFSY_ADMIN', clientId: 'bajaj', assumed: true, phone: '', name: '' } as JwtPayload;
 const OWNER_HOME = { sub: 'g', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: '' } as JwtPayload;
+const DEOLEO = { sub: 'dca', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' } as JwtPayload;
 const NO_TENANT = { ...CLIENT, clientId: '' } as JwtPayload;
 const XLSX_TIMEOUT = 30_000;
 
 const D = (iso: string) => new Date(iso);
 
-/** A tenant with: a Bajaj ISR (2 platforms, notifications on), a retailer partner, a client admin, a deleted user. */
+interface FakeUser {
+  id: string;
+  clientId: string;
+  name: string;
+  phone: string;
+  role: string;
+  status: string;
+  deletedAt: Date | null;
+  salesUser: { hierarchyLevel: { code: string; name: string | null } | null } | null;
+  channelPartner: unknown;
+}
+interface FakeInstall { userId: string; clientId: string; platform: string; installedAt: Date; lastSeenAt: Date | null }
+interface InstallWhere {
+  clientId: string;
+  userId?: { in: string[] };
+  user?: { clientId: string; deletedAt: null };
+}
+
+/**
+ * bajaj: an ISR (2 platforms, notifications on, "+91" phone), a retailer partner (inactive), a client admin, a
+ * suspended SO with no level, a SOFT-DELETED SO, and a Gifsy operator whose install row was recorded while assumed
+ * into bajaj (belongs to gifsy). deoleo: one ASM whose level has its own name. The fake HONOURS every where.
+ */
 function makePrisma() {
-  const groups = [
-    { userId: 'u-isr', _min: { installedAt: D('2026-11-10T04:30:00Z') }, _max: { lastSeenAt: D('2026-11-15T10:00:00Z') } },
-    { userId: 'u-ret', _min: { installedAt: D('2026-11-12T06:00:00Z') }, _max: { lastSeenAt: D('2026-11-12T06:00:00Z') } },
-    { userId: 'u-adm', _min: { installedAt: D('2026-10-01T00:00:00Z') }, _max: { lastSeenAt: D('2026-10-02T00:00:00Z') } },
-    { userId: 'u-del', _min: { installedAt: D('2026-09-01T00:00:00Z') }, _max: { lastSeenAt: null } },
-  ];
-  const users = [
+  const users: FakeUser[] = [
     {
-      id: 'u-isr', name: 'Ravi', phone: '9000000001', role: 'SALES_ISR', status: 'ACTIVE', deletedAt: null,
-      salesUser: { hierarchyLevel: { code: 'XSR' } }, channelPartner: null,
+      id: 'u-isr', clientId: 'bajaj', name: 'Ravi', phone: '+91 90000 00001', role: 'SALES_ISR', status: 'ACTIVE', deletedAt: null,
+      salesUser: { hierarchyLevel: { code: 'XSR', name: '' } }, channelPartner: null,
     },
     {
-      id: 'u-ret', name: '=HYPERLINK("http://evil","x")', phone: '9000000002', role: 'WHOLESALER', status: 'INACTIVE', deletedAt: null,
-      salesUser: null,
+      id: 'u-ret', clientId: 'bajaj', name: '=HYPERLINK("http://evil","x")', phone: '919000000002', role: 'WHOLESALER',
+      status: 'INACTIVE', deletedAt: null, salesUser: null,
       channelPartner: { partnerCode: 'P-1', outlets: [{ outletCode: 'BJ-001', name: 'Shree Stores', outletType: { code: 'RT', name: 'Retail' } }] },
     },
-    { id: 'u-adm', name: 'Asha', phone: '9000000003', role: 'CLIENT_ADMIN', status: 'ACTIVE', deletedAt: null, salesUser: null, channelPartner: null },
-    { id: 'u-del', name: 'Old', phone: '9000000004', role: 'SALES_SO', status: 'ACTIVE', deletedAt: D('2026-10-05T00:00:00Z'), salesUser: null, channelPartner: null },
+    { id: 'u-adm', clientId: 'bajaj', name: 'Asha', phone: '9000000003', role: 'CLIENT_ADMIN', status: 'ACTIVE', deletedAt: null, salesUser: null, channelPartner: null },
+    { id: 'u-sus', clientId: 'bajaj', name: 'Sunil', phone: '9000000005', role: 'SALES_SO', status: 'SUSPENDED', deletedAt: null, salesUser: null, channelPartner: null },
+    { id: 'u-del', clientId: 'bajaj', name: 'Old', phone: '9000000004', role: 'SALES_SO', status: 'ACTIVE', deletedAt: D('2026-10-05T00:00:00Z'), salesUser: null, channelPartner: null },
+    { id: 'u-g', clientId: 'gifsy', name: 'Operator', phone: '9000000009', role: 'GIFSY_ADMIN', status: 'ACTIVE', deletedAt: null, salesUser: null, channelPartner: null },
+    {
+      id: 'u-deo', clientId: 'deoleo', name: 'Maria', phone: '9000000007', role: 'SALES_ASM', status: 'ACTIVE', deletedAt: null,
+      salesUser: { hierarchyLevel: { code: 'ASM', name: 'Area Manager' } }, channelPartner: null,
+    },
   ];
-  const installs = [
-    { userId: 'u-isr', platform: 'IOS' },
-    { userId: 'u-isr', platform: 'ANDROID' },
-    { userId: 'u-ret', platform: 'ANDROID' },
-    { userId: 'u-adm', platform: 'DESKTOP' },
-    { userId: 'u-del', platform: 'ANDROID' },
+  const installs: FakeInstall[] = [
+    { userId: 'u-isr', clientId: 'bajaj', platform: 'IOS', installedAt: D('2026-11-10T04:30:00Z'), lastSeenAt: D('2026-11-15T10:00:00Z') },
+    { userId: 'u-isr', clientId: 'bajaj', platform: 'ANDROID', installedAt: D('2026-11-11T04:30:00Z'), lastSeenAt: D('2026-11-14T10:00:00Z') },
+    { userId: 'u-ret', clientId: 'bajaj', platform: 'ANDROID', installedAt: D('2026-11-12T06:00:00Z'), lastSeenAt: D('2026-11-12T06:00:00Z') },
+    { userId: 'u-adm', clientId: 'bajaj', platform: 'DESKTOP', installedAt: D('2026-10-01T00:00:00Z'), lastSeenAt: D('2026-10-02T00:00:00Z') },
+    { userId: 'u-sus', clientId: 'bajaj', platform: 'ANDROID', installedAt: D('2026-09-15T00:00:00Z'), lastSeenAt: null },
+    { userId: 'u-del', clientId: 'bajaj', platform: 'ANDROID', installedAt: D('2026-09-01T00:00:00Z'), lastSeenAt: D('2026-09-02T00:00:00Z') },
+    { userId: 'u-g', clientId: 'bajaj', platform: 'ANDROID', installedAt: D('2026-11-13T00:00:00Z'), lastSeenAt: D('2026-11-13T00:00:00Z') },
+    { userId: 'u-g', clientId: 'gifsy', platform: 'DESKTOP', installedAt: D('2026-11-01T00:00:00Z'), lastSeenAt: D('2026-11-01T00:00:00Z') },
+    { userId: 'u-deo', clientId: 'deoleo', platform: 'ANDROID', installedAt: D('2026-11-02T00:00:00Z'), lastSeenAt: D('2026-11-03T00:00:00Z') },
   ];
+  const byId = new Map(users.map((u) => [u.id, u]));
+  const matchInstall = (i: FakeInstall, w: InstallWhere) => {
+    if (i.clientId !== w.clientId) return false;
+    if (w.userId && !w.userId.in.includes(i.userId)) return false;
+    if (w.user) {
+      const u = byId.get(i.userId);
+      if (!u || u.clientId !== w.user.clientId || u.deletedAt !== w.user.deletedAt) return false;
+    }
+    return true;
+  };
   return {
     pwaInstall: {
-      groupBy: jest.fn(async () => groups),
-      findMany: jest.fn(async ({ where }: { where: { userId: { in: string[] } } }) => installs.filter((i) => where.userId.in.includes(i.userId))),
-    },
-    user: {
-      findMany: jest.fn(async ({ where }: { where: { id: { in: string[] }; role?: { in: string[] } } }) =>
-        users.filter((u) => where.id.in.includes(u.id) && (!where.role || where.role.in.includes(u.role))),
+      groupBy: jest.fn(async ({ where }: { where: InstallWhere }) => {
+        const g = new Map<string, { userId: string; _min: { installedAt: Date | null }; _max: { lastSeenAt: Date | null } }>();
+        for (const i of installs.filter((x) => matchInstall(x, where))) {
+          const cur = g.get(i.userId) ?? { userId: i.userId, _min: { installedAt: null }, _max: { lastSeenAt: null } };
+          if (!cur._min.installedAt || i.installedAt < cur._min.installedAt) cur._min.installedAt = i.installedAt;
+          if (i.lastSeenAt && (!cur._max.lastSeenAt || i.lastSeenAt > cur._max.lastSeenAt)) cur._max.lastSeenAt = i.lastSeenAt;
+          g.set(i.userId, cur);
+        }
+        return [...g.values()];
+      }),
+      findMany: jest.fn(async ({ where }: { where: InstallWhere }) =>
+        installs.filter((i) => matchInstall(i, where)).map(({ userId, platform }) => ({ userId, platform })),
       ),
     },
-    pushSubscription: { groupBy: jest.fn(async () => [{ userId: 'u-isr' }]) },
+    user: {
+      findMany: jest.fn(
+        async ({ where }: { where: { id: { in: string[] }; clientId: string; deletedAt?: null; role?: { in: string[] } } }) =>
+          users.filter(
+            (u) =>
+              where.id.in.includes(u.id) &&
+              u.clientId === where.clientId &&
+              (where.deletedAt !== null || u.deletedAt === null) &&
+              (!where.role || where.role.in.includes(u.role)),
+          ),
+      ),
+    },
+    pushSubscription: {
+      groupBy: jest.fn(async () => [{ userId: 'u-isr' }]),
+      findMany: jest.fn(async () => []),
+    },
     outletTypeClientConfig: {
       findMany: jest.fn(async () => [{ displayName: 'Retailer', outletType: { code: 'RT' } }]),
     },
@@ -66,8 +131,7 @@ function makePrisma() {
   };
 }
 
-async function build(user: JwtPayload, raw: Record<string, unknown> = {}) {
-  const prisma = makePrisma();
+async function build(user: JwtPayload, raw: Record<string, unknown> = {}, prisma = makePrisma()) {
   const params = APP_INSTALLED_USERS_KIND.parseParams(raw, user);
   const { buffer, rowCount } = await renderKind(APP_INSTALLED_USERS_KIND, ctxFor(user, prisma), params);
   const aoa = readBook(buffer).sheets['Installed users'].aoa;
@@ -83,6 +147,18 @@ function allWheres(prisma: ReturnType<typeof makePrisma>): Array<Record<string, 
     ...prisma.outletTypeClientConfig.findMany.mock.calls,
   ] as unknown as Array<[{ where: Record<string, unknown> }]>;
   return calls.map((c) => c[0].where);
+}
+
+/** A writer that records when the workbook is touched (any byte of the file starts at addSheet). */
+function spyWriter(events: string[]): XlsxStreamWriter {
+  return {
+    rowCount: 0,
+    addSheet: jest.fn(async () => {
+      events.push('addSheet');
+      return { rowCount: 0, addRow: jest.fn(async () => { events.push('row'); }) };
+    }),
+    finish: jest.fn(async () => { events.push('finish'); }),
+  } as unknown as XlsxStreamWriter;
 }
 
 describe('app-installed-users export kind', () => {
@@ -118,15 +194,15 @@ describe('app-installed-users export kind', () => {
     });
   });
 
-  it('row shape: headers, newest first install first, labels, platforms, notifications, status', async () => {
+  it('row shape: headers, newest first install first, labels, platforms, notifications, status, 10-digit phones', async () => {
     const { aoa, rowCount } = await build(CLIENT);
     expect(rowCount).toBe(4);
     expect(aoa[0]).toEqual([...INSTALLED_USERS_HEADERS]);
-    // u-ret (11-12) → u-isr (11-10) → u-adm (10-01) → u-del (09-01)
-    expect(aoa.slice(1).map((r) => r[1])).toEqual(['9000000002', '9000000001', '9000000003', '9000000004']);
+    // u-ret (11-12) → u-isr (11-10) → u-adm (10-01) → u-sus (09-15). NOT u-del (deleted), NOT u-g (Gifsy operator).
+    expect(aoa.slice(1).map((r) => r[1])).toEqual(['9000000002', '9000000001', '9000000003', '9000000005']);
     expect(aoa[1]).toEqual([
       `'=HYPERLINK("http://evil","x")`, // xlsx-safe: formula neutralised
-      '9000000002',
+      '9000000002', // "919000000002" → last 10 digits
       'Retailer', // per-tenant outlet-type display name
       'Partner',
       'BJ-001',
@@ -138,14 +214,41 @@ describe('app-installed-users export kind', () => {
       'Inactive',
     ]);
     expect(aoa[2]).toEqual([
-      'Ravi', '9000000001', 'ISR' /* Bajaj label for XSR */, 'Sales', null, null, 'Android, iOS',
-      '2026-11-10 10:00', '2026-11-15 15:30', 'Yes', 'Active',
+      'Ravi', '9000000001' /* "+91 90000 00001" — no apostrophe-prefixed "+91" cell */, 'ISR' /* empty level name → Bajaj label for XSR */,
+      'Sales', null, null, 'Android, iOS', '2026-11-10 10:00', '2026-11-15 15:30', 'Yes', 'Active',
     ]);
+    expect(typeof aoa[2][1]).toBe('string'); // phone stays text
     expect(aoa[3].slice(2, 4)).toEqual(['Client admin', 'Admin']);
     expect(aoa[3][6]).toBe('Desktop');
-    expect(aoa[4][2]).toBe('SO');
+    expect(aoa[4][2]).toBe('SO'); // no level → from the role
     expect(aoa[4][8]).toBeNull(); // no last-seen
-    expect(aoa[4][10]).toBe('Deleted');
+    expect(aoa[4][10]).toBe('Suspended'); // inactive / suspended users are KEPT
+    expect(aoa.flat()).not.toContain('Old');
+    expect(aoa.flat()).not.toContain('9000000004');
+    expect(aoa.flat()).not.toContain('Operator');
+  }, XLSX_TIMEOUT);
+
+  it("sales role label = the tenant's own level name (Deoleo), not a Bajaj rung label", async () => {
+    const { aoa } = await build(DEOLEO);
+    expect(aoa.slice(1).map((r) => [r[0], r[2], r[3]])).toEqual([['Maria', 'Area Manager', 'Sales']]);
+  }, XLSX_TIMEOUT);
+
+  it('soft-deleted users are excluded at BOTH reads (install population + user read)', async () => {
+    const { prisma } = await build(CLIENT);
+    expect(prisma.pwaInstall.groupBy.mock.calls[0][0].where).toEqual({
+      clientId: 'bajaj',
+      user: { clientId: 'bajaj', deletedAt: null },
+    });
+    expect(prisma.user.findMany.mock.calls[0][0].where).toMatchObject({ clientId: 'bajaj', deletedAt: null });
+  }, XLSX_TIMEOUT);
+
+  it('the App Adoption page count and the unfiltered file row count are the SAME population', async () => {
+    for (const user of [CLIENT, OWNER_HOME, DEOLEO]) {
+      const prisma = makePrisma();
+      const page = await new PwaAdoptionService(prisma as never).adoption(user.clientId);
+      const { rowCount } = await build(user, {}, prisma);
+      expect(rowCount).toBe(page.installed.users);
+    }
   }, XLSX_TIMEOUT);
 
   it('filters: roleGroup narrows by role; since keeps first installs on/after that IST day', async () => {
@@ -153,14 +256,36 @@ describe('app-installed-users export kind', () => {
     expect(sales.prisma.user.findMany.mock.calls[0][0].where.role).toEqual({
       in: ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'],
     });
-    expect(sales.aoa.slice(1).map((r) => r[0])).toEqual(['Ravi', 'Old']);
+    expect(sales.aoa.slice(1).map((r) => r[0])).toEqual(['Ravi', 'Sunil']);
 
     const since = await build(CLIENT, { since: '2026-11-10' });
     expect(since.aoa.slice(1).map((r) => r[0])).toEqual([`'=HYPERLINK("http://evil","x")`, 'Ravi']);
   }, XLSX_TIMEOUT);
 
-  it('writes ONE audit row per file: who, tenant, row count, filters', async () => {
-    const { prisma } = await build(OWNER_ASSUMED, { roleGroup: 'partner', since: '2026-11-01' });
+  it('0 matching users → 404 "0 users matched these filters." — no audit row, no workbook bytes', async () => {
+    const prisma = makePrisma();
+    const events: string[] = [];
+    await expect(
+      APP_INSTALLED_USERS_KIND.run(ctxFor(CLIENT, prisma), { roleGroup: 'admin', since: '2026-11-01' }, spyWriter(events)),
+    ).rejects.toThrow(new NotFoundException(INSTALLED_USERS_NONE_MESSAGE));
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it('writes ONE audit row per file — BEFORE any workbook byte: who, tenant, exact row count, filters', async () => {
+    const prisma = makePrisma();
+    const events: string[] = [];
+    prisma.auditLog.create.mockImplementation(async () => {
+      events.push('audit');
+      return {};
+    });
+    const res = await APP_INSTALLED_USERS_KIND.run(
+      ctxFor(OWNER_ASSUMED, prisma),
+      { roleGroup: 'partner', since: '2026-11-01' },
+      spyWriter(events),
+    );
+    expect(res.rowCount).toBe(1);
+    expect(events).toEqual(['audit', 'addSheet', 'row']);
     expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
     expect(prisma.auditLog.create).toHaveBeenCalledWith({
       data: {
@@ -178,15 +303,17 @@ describe('app-installed-users export kind', () => {
         },
       },
     });
-  }, XLSX_TIMEOUT);
+  });
 
-  it('a failed audit write fails the download (never an unaudited file)', async () => {
+  it('a failed audit write fails the download BEFORE any byte of the file (never an unaudited file)', async () => {
     const prisma = makePrisma();
     prisma.auditLog.create.mockRejectedValueOnce(new Error('db down'));
+    const events: string[] = [];
     await expect(
-      renderKind(APP_INSTALLED_USERS_KIND, ctxFor(CLIENT, prisma), { roleGroup: null, since: null }),
+      APP_INSTALLED_USERS_KIND.run(ctxFor(CLIENT, prisma), { roleGroup: null, since: null }, spyWriter(events)),
     ).rejects.toThrow('db down');
-  }, XLSX_TIMEOUT);
+    expect(events).toEqual([]); // the workbook was never started → the light stream answers with an error, no file
+  });
 
   it('validates params with readable 400s', () => {
     const parse = (raw: Record<string, unknown>) => APP_INSTALLED_USERS_KIND.parseParams(raw, CLIENT);
