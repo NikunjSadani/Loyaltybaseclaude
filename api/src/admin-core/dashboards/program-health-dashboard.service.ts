@@ -8,6 +8,13 @@ import { kpiCodeKeys, lastNMonths } from '../../targets/targets.helpers';
 import { istMonthBounds, istMonthKey } from '../../common/ist-date';
 import { AppliesToOutletFacets } from '../../common/applies-to/applies-to';
 import { scopedKpiPredicates } from '../../sales/outlet-kpi-scope.helper';
+import {
+  type ProgramCatalog,
+  loadProgramCatalog,
+  normalizeFilterParam,
+  partnerProgramScope,
+  programNameIn,
+} from './dashboard-program-filter';
 
 /**
  * ProgramHealthDashboardService — REAL, tenant-scoped "program health" aggregation
@@ -68,11 +75,14 @@ export class ProgramHealthDashboardService {
    * "count" for this tenant. NEVER add isActive:true here (trap 1). The kycIntent `not` is
    * wrapped in OR so the (vast majority) NULL-intent outlets survive (trap 2).
    */
-  private static addressableWhere(clientId: string): Prisma.OutletWhereInput {
+  private static addressableWhere(clientId: string, programVariants: readonly string[] | null = null): Prisma.OutletWhereInput {
     return {
       clientId,
       deletedAt: null,
       deactivatedAt: null,
+      // Program filter (no key at all when unfiltered → the where is byte-identical to before).
+      // Every stored whitespace variant of the selected program (`in: []` for an unknown one → zeros).
+      ...(programVariants ? { programName: programNameIn(programVariants) } : {}),
       // Exclude BOTH NOT_INTERESTED (sales-declined) and PARKED (admin-removed from the
       // pipeline) from the addressable universe. notIn drops NULL rows, so the {null} OR
       // branch keeps the common null-intent pending outlets.
@@ -85,9 +95,20 @@ export class ProgramHealthDashboardService {
    *
    * @param user   JWT — only user.clientId is used for tenant scope.
    * @param period YYYY-MM; defaults to the current month (server clock).
+   * @param programName optional trimmed Outlet.programName (matches every stored whitespace variant;
+   *   '' / absent = all programs). Scopes EVERY section through outlets: the addressable universe
+   *   (activation / participation / target rollup) is filtered by programName; points-economy, liability and redemptions are restricted to
+   *   partners owning ≥1 LIVE outlet in the program (KYC-dashboard grain: a multi-program partner counts
+   *   in each of its programs). Unknown program → zeros, never an error.
    */
-  async programHealth(user: JwtPayload, period?: string) {
+  async programHealth(user: JwtPayload, period?: string, programName?: unknown) {
     const clientId = user.clientId;
+    const program = normalizeFilterParam(programName, 'program');
+    // Program catalog (trimmed dropdown + raw variants). Read FIRST only when a program is selected (its
+    // variants scope every query); unfiltered it is read at the end, so the universe pull stays call #1.
+    let catalog: ProgramCatalog | null = program ? await loadProgramCatalog(this.prisma, clientId) : null;
+    const variants = program && catalog ? catalog.variantsOf(program) : null;
+    const partnerScope = partnerProgramScope(variants);
     const now = new Date();
     const periodKey =
       period && /^\d{4}-\d{2}$/.test(period) ? period : istMonthKey(now);
@@ -96,10 +117,10 @@ export class ProgramHealthDashboardService {
     // PointsLedger has no clientId column; it joins to the tenant via
     // wallet → partner → user.clientId (the canonical tenant tag for a partner).
     const ledgerTenant: Prisma.PointsLedgerWhereInput = {
-      wallet: { partner: { user: { clientId } } },
+      wallet: { partner: { user: { clientId }, ...partnerScope } },
     };
 
-    const addressableWhere = ProgramHealthDashboardService.addressableWhere(clientId);
+    const addressableWhere = ProgramHealthDashboardService.addressableWhere(clientId, variants);
 
     // ── Pull every addressable outlet ONCE with its owner + latest KYC submission ──
     // (mirrors buildOutlets/kycDashboard: latest submission = orderBy createdAt desc take 1).
@@ -237,7 +258,7 @@ export class ProgramHealthDashboardService {
       // outstanding liability = Σ Wallet.redeemablePoints for this tenant's partners
       this.prisma.wallet.aggregate({
         _sum: { redeemablePoints: true },
-        where: { partner: { user: { clientId } } },
+        where: { partner: { user: { clientId }, ...partnerScope } },
       }),
       // expiring in 30d = Σ REMAINING (unspent) points of spendable lots not yet expired
       // whose expiresAt ∈ [now, now+30d]. Mirrors the sweep's own selection exactly
@@ -377,7 +398,7 @@ export class ProgramHealthDashboardService {
       'CANCELLED',
       'RETURNED',
     ];
-    const redemptionTenant = { partner: { user: { clientId } } };
+    const redemptionTenant = { partner: { user: { clientId }, ...partnerScope } };
 
     // byMode: per redemptionMode, count + Σ pointsDeducted + Σ valueRupees over COMPLETED
     // orders created in the period. valuePaise is nullable → fall back to
@@ -428,6 +449,11 @@ export class ProgramHealthDashboardService {
       .map((g) => ({ status: g.status, count: g._count._all }))
       .sort((a, b) => b.count - a.count);
 
+    // Program dropdown source — the tenant's full real program list (filter-independent). Read
+    // AFTER the universe pull so outlet.findMany call #1 stays the universe query.
+    catalog = catalog ?? (await loadProgramCatalog(this.prisma, clientId));
+    const availablePrograms = catalog.available;
+
     // ── Resolve tenant slug for the scope echo (mirrors kycDashboard). ──────────
     let tenantSlug = 'ALL';
     if (clientId) {
@@ -444,7 +470,12 @@ export class ProgramHealthDashboardService {
         tenant: tenantSlug,
         generatedAt: now.toISOString(),
         period: periodKey,
+        // Additive: the applied program filter (null = all programs).
+        program,
       },
+      availablePrograms,
+      // Metrics that could NOT be tied to a program (none — every section joins to outlets).
+      notProgramScoped: [] as string[],
       activation: {
         registered,
         kycApproved,

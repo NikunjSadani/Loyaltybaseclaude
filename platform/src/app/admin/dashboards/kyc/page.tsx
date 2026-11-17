@@ -16,14 +16,18 @@ import {
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
+import { useDashboardProgram } from '@/lib/dashboard-program';
+import { ProgramFilter } from '@/components/admin/dashboard/ProgramFilter';
 
-// "All programs" sentinel = empty string (no filter). Real programNames are never blank, so '' is a
-// safe sentinel — a program literally named "ALL" now filters correctly. The option list comes from
-// the endpoint's `availablePrograms` (real distinct outlet.programName values), so every option
-// matches data the filter can actually hit.
-const ALL_PROGRAMS = '';
+// Program filter: the SHARED dashboard program (src/lib/dashboard-program.ts) — "All programs" sentinel =
+// '' (no filter; real programNames are never blank, so a program literally named "ALL" filters correctly).
+// The option list comes from the endpoint's `availablePrograms` (real distinct outlet.programName values),
+// so every option matches data the filter can actually hit. The choice persists across the Overview /
+// Program Health / KYC dashboards for the session; `?program=` in the URL wins.
 
 const DARK_NAVY = '#1A1A2E';
+/** KYC's own (original, Deoleo-identical) rule: the select always shows; a single listed program is usable. */
+const KYC_MIN_PROGRAMS = 1;
 
 /* ─── API response model (precise to the endpoint contract) ─────────────────── */
 
@@ -215,11 +219,14 @@ export default function AdminKycDashboardPage() {
 
   // Program filter (default = all programs). Options come from the endpoint's availablePrograms
   // (real distinct outlet.programName values), so every option matches data the filter can hit.
-  const [programName, setProgramName] = useState<string>(ALL_PROGRAMS);
+  const programFilterState = useDashboardProgram();
+  const { program: programName, ready: programReady, setProgram: setProgramName, reconcile } = programFilterState;
   const programOptions = data?.availablePrograms ?? [];
 
   useEffect(() => {
+    if (!programReady) return;
     let cancelled = false;
+    let dropped = false; // response discarded because its program isn't usable → a fresh fetch follows
     setLoading(true);
     setError(null);
     // Only append the param for a real selection ('' = All programs = no filter).
@@ -237,14 +244,18 @@ export default function AdminKycDashboardPage() {
         if (!payload || typeof payload !== 'object' || !('headline' in payload)) {
           throw new Error('Empty or malformed response');
         }
-        if (!cancelled) setData(payload);
+        if (cancelled) return;
+        // A program this tenant can't use (stale session value / link) → back to All programs, said out loud.
+        // KYC keeps its ORIGINAL rule: one listed program is enough (single-program tenants honour ?program=).
+        if (!reconcile(programName, payload.availablePrograms, KYC_MIN_PROGRAMS)) { dropped = true; return; }
+        setData(payload);
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load KYC dashboard');
       })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => { if (!cancelled && !dropped) setLoading(false); });
     return () => { cancelled = true; };
-  }, [programName]);
+  }, [programName, programReady, reconcile]);
 
   const funnelMax = useMemo(
     () => (data && data.funnel.length ? Math.max(...data.funnel.map((s) => s.count), 1) : 1),
@@ -267,22 +278,16 @@ export default function AdminKycDashboardPage() {
           Updating…
         </span>
       )}
-      <label htmlFor="kyc-program-filter" className="text-xs font-medium text-gray-500">
-        Program
-      </label>
-      <select
+      <ProgramFilter
         id="kyc-program-filter"
-        data-testid="kyc-program-filter"
-        aria-label="Program"
+        testId="kyc-program-filter"
+        programs={programOptions}
         value={programName}
-        onChange={(e) => setProgramName(e.target.value)}
-        className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-800 bg-white focus:outline-none focus:border-[var(--brand-primary)]"
-      >
-        <option value={ALL_PROGRAMS}>All programs</option>
-        {programOptions.map((p) => (
-          <option key={p} value={p}>{p}</option>
-        ))}
-      </select>
+        onChange={setProgramName}
+        droppedProgram={programFilterState.droppedProgram}
+        onDismissDropped={programFilterState.dismissDropped}
+        minPrograms={0}
+      />
     </div>
   );
 

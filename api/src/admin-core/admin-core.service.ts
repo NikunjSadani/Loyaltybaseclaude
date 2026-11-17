@@ -65,6 +65,12 @@ import {
 } from './hierarchy-persistence';
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { UpdateEmployeeDto } from './dto/sales-users.dto';
+import {
+  loadProgramCatalog,
+  normalizeFilterParam,
+  partnerProgramScope,
+  programNameIn,
+} from './dashboards/dashboard-program-filter';
 import { resolveVisibilityProgramLists } from '../visibility/visibility-scope.helper';
 import { isFastTrackRow } from '../kyc/kyc-fast-track.helper';
 import {
@@ -1830,21 +1836,39 @@ export class AdminCoreService {
     'PENDING_GIFSY',
   ];
 
-  async dashboardKpis(user: JwtPayload) {
+  /**
+   * GET /v1/admin/dashboard/kpis — Overview tiles + Payout Summary.
+   *
+   * Optional `programName` (trimmed Outlet.programName — matches every stored whitespace variant;
+   * '' / absent = all) scopes EVERY figure to that program through the OUTLET(S) each record belongs to:
+   *   activePartners / wallet liability / payouts → the partner owns ≥1 LIVE outlet in the program;
+   *   pendingKyc → the submission's partner owns ≥1 LIVE outlet in the program;
+   *   pendingVisibility → the capture's outlet is in the program.
+   * Unfiltered, every `where` is exactly the pre-filter one (Deoleo byte-identical). An unknown
+   * program matches nothing → zeros. `availablePrograms` = distinct trimmed outlet programs.
+   */
+  async dashboardKpis(user: JwtPayload, programName?: unknown) {
     const clientId = user.clientId;
+    const program = normalizeFilterParam(programName, 'program');
+    // Program catalog (dropdown source + raw whitespace variants). Needed BEFORE the scoped queries only
+    // when a program is selected; unfiltered it runs in parallel with them.
+    const catalogP = loadProgramCatalog(this.prisma, clientId);
+    const variants = program ? (await catalogP).variantsOf(program) : null;
+    const partnerScope = partnerProgramScope(variants);
 
-    const [activePartners, pendingKyc, pendingVisibilityRaw, walletAggregate, payoutGroups, visibilityEnabled] =
+    const [activePartners, pendingKyc, pendingVisibilityRaw, walletAggregate, payoutGroups, visibilityEnabled, catalog] =
       await Promise.all([
         this.prisma.channelPartner.count({
           // isParent:false — parents (owner-group anchors) are non-operating; they must not
           // inflate the active-partners KPI (docs/plans/PARTNER-MULTI-OUTLET.md §9).
-          where: { clientId, isActive: true, deletedAt: null, isParent: false },
+          where: { clientId, isActive: true, deletedAt: null, isParent: false, ...partnerScope },
         }),
 
         this.prisma.kycSubmission.count({
           where: {
             user: { clientId },
             status: { in: AdminCoreService.PENDING_KYC_STATUSES },
+            ...(variants ? { partner: partnerScope } : {}),
           },
         }),
 
@@ -1853,17 +1877,18 @@ export class AdminCoreService {
           where: {
             clientId,
             status: 'SUBMITTED',
+            ...(variants ? { outlet: { programName: programNameIn(variants) } } : {}),
           },
         }),
 
         this.prisma.wallet.aggregate({
           _sum: { redeemablePoints: true },
-          where: { partner: { clientId } },
+          where: { partner: { clientId, ...partnerScope } },
         }),
 
         this.prisma.payoutTransaction.groupBy({
           by: ['status'],
-          where: { partner: { clientId } },
+          where: { partner: { clientId, ...partnerScope } },
           _count: { id: true },
           _sum: { netAmountPaise: true },
         }),
@@ -1871,7 +1896,11 @@ export class AdminCoreService {
         // Master visibility switch — when OFF, the visibility KPI is suppressed so a
         // disabled tenant's residual SUBMITTED rows are not surfaced on the dashboard.
         this.tenantSettings.getVisibilityEnabledUncached(clientId),
+
+        // Program dropdown source — full tenant list, independent of the active filter.
+        catalogP,
       ]);
+    const availablePrograms = catalog.available;
 
     // Suppress the visibility KPI for a tenant whose visibility module is OFF.
     const pendingVisibility = visibilityEnabled ? pendingVisibilityRaw : 0;
@@ -1892,6 +1921,11 @@ export class AdminCoreService {
       pendingVisibility,
       totalRedeemablePoints,
       payoutSummary,
+      // Additive (program filter): the echo of the applied filter, the dropdown source, and the
+      // metrics that could NOT be program-scoped (none — every figure joins to an outlet).
+      program,
+      availablePrograms,
+      notProgramScoped: [] as string[],
     };
   }
 
@@ -1977,16 +2011,21 @@ export class AdminCoreService {
     // (real distinct values) below, so the value always matches real data.
     const programFilter =
       programName && programName.trim().length > 0 ? programName.trim() : null;
+    // Whitespace-tolerant program match (same as Overview / Program Health): the trimmed selection matches every
+    // stored raw variant. The catalog is read FIRST only when filtering; unfiltered it runs in the Promise.all
+    // below exactly as before (same query), so the default dashboard is unchanged.
+    const filterCatalog = programFilter ? await loadProgramCatalog(this.prisma, clientId) : null;
+    const programVariants = programFilter && filterCatalog ? filterCatalog.variantsOf(programFilter) : null;
+    const outletProgramWhere = programVariants ? { programName: programNameIn(programVariants) } : {};
     // Ties a KycSubmission to the selected program via its owning partner's outlets: a submission
     // carries no programName; its owner ChannelPartner reaches outlets through the OutletOwner
     // relation (Outlet.programName). GRAIN NOTE: quality/rejection are owner(submission)-grain, so
     // `some` ("owns ≥1 outlet in this program") means a multi-program owner contributes to EACH of
     // its programs — per-program tallies therefore do NOT sum to the unfiltered total. Submissions
     // whose partner is null are excluded from a program-scoped view (no program to attribute to).
-    // When unfiltered this contributes nothing.
-    const submissionProgramScope = programFilter
-      ? { partner: { outlets: { some: { programName: programFilter } } } }
-      : {};
+    // When unfiltered this contributes nothing. The partner match counts only LIVE outlets (shared
+    // `partnerProgramScope`), so Overview "Pending KYC" for a program uses the same rule.
+    const submissionProgramScope = programVariants ? { partner: partnerProgramScope(programVariants) } : {};
     // KYC SLA ages count BUSINESS hours only (Mon–Fri, minus the national holiday
     // calendar) — the stage targets are business hours, not calendar. The two targets are
     // per-tenant configurable (field 24h / gifsy 96h defaults), resolved once here.
@@ -2002,7 +2041,7 @@ export class AdminCoreService {
       reUploadCount,
       totalSubmissions,
       rejectionHistory,
-      programRows,
+      programCatalog,
     ] =
       await Promise.all([
         this.prisma.outlet.findMany({
@@ -2018,7 +2057,7 @@ export class AdminCoreService {
             deactivatedAt: null,
             // Program scope (no-op when unfiltered) — this is what makes every outlet-derived
             // metric (headline, funnel, buckets, SLA, coverageBy) fold to the selected program.
-            ...(programFilter ? { programName: programFilter } : {}),
+            ...outletProgramWhere,
             // Prisma's `{ notIn }` EXCLUDES NULL rows. Almost every outlet has
             // kycIntent=NULL (only sales-marked ones are NOT_INTERESTED, admin-parked ones
             // PARKED), so an explicit OR is required to keep them — otherwise addressable → 0.
@@ -2060,7 +2099,7 @@ export class AdminCoreService {
             clientId,
             deletedAt: null,
             kycIntent: 'NOT_INTERESTED',
-            ...(programFilter ? { programName: programFilter } : {}),
+            ...outletProgramWhere,
           },
         }),
         this.prisma.outlet.count({
@@ -2070,7 +2109,7 @@ export class AdminCoreService {
             clientId,
             deletedAt: null,
             deactivatedAt: { not: null },
-            ...(programFilter ? { programName: programFilter } : {}),
+            ...outletProgramWhere,
             OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
           },
         }),
@@ -2100,19 +2139,11 @@ export class AdminCoreService {
         // selection). Sourced from the outlets themselves, so every option matches an actual
         // outlet.programName value the filter can hit (unlike the settings allow-list, which is
         // free-text-independent). Null programNames are excluded (there's no program to select).
-        this.prisma.outlet.findMany({
-          where: { clientId, deletedAt: null, programName: { not: null } },
-          select: { programName: true },
-          distinct: ['programName'],
-          orderBy: { programName: 'asc' },
-        }),
+        // Same query as before (loadProgramCatalog), folded by trim: distinct TRIMMED, non-empty names.
+        filterCatalog ?? loadProgramCatalog(this.prisma, clientId),
       ]);
 
-    // Flatten + defensively drop any blank/whitespace program names (the query already excludes
-    // NULL and sorts ascending, so this stays alphabetical).
-    const availablePrograms = programRows
-      .map((r) => r.programName)
-      .filter((p): p is string => !!p && p.trim().length > 0);
+    const availablePrograms = programCatalog.available;
 
     const addressableCount = addressableOutlets.length;
 
