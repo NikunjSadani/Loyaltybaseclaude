@@ -2,31 +2,42 @@
  * Billing comparison — "MTD vs last month to the same day" and "MTD vs the 3-month average to the same day"
  * for the admin "Monthly billing progress" card, plus the "billing slower than usual" outlet list.
  * Shared by GET /v1/admin/dashboard/billing-progress/comparison(/slower-outlets) and the
- * 'billing-comparison-slower' export kind (screen and Excel can never disagree). Plain functions over
- * PrismaService (no Nest DI) so the export worker can run it from `ctx.prisma`.
+ * 'billing-comparison-slower' export kind (screen and Excel can never disagree — the plain-words `message`s are built
+ * HERE and shown verbatim by both). Plain functions over PrismaService (no Nest DI) so the export worker can run it.
  *
  * REUSE (never re-derived here): filters, the outlet universe (live roster, program / outlet-type / manager
- * filters, KPI applies-to scope) and the report KPI all come from `loadBillingProgress`. The comparison
- * population = that loader's `inScope` outlets (positive target for the SELECTED month), and the SAME
- * outlets are measured in every prior month — like-for-like, so a newly-targeted outlet never inflates the
- * current figure against a smaller prior population.
+ * filters, KPI applies-to scope) and the report KPI all come from `loadBillingProgress` (or the billing-progress
+ * service's CACHED result for the same tenant + filters, via `opts.loadBilling`). The comparison population = that
+ * loader's `inScope` outlets (positive target for the SELECTED month), and the SAME outlets are measured in every
+ * prior month — like-for-like, so a newly-targeted outlet never inflates the current figure.
  *
  * Day data (written by the sales importer): OutletSalesDay rows hold the CUMULATIVE month-to-date as of the
- * end of that day, sparse (rows only on billing days); SalesDaySet says a month has day data, up to `lastDay`.
+ * end of that day, sparse (rows only on billing days); SalesDaySet says a month has day data. Day data is kept for
+ * the retention window only (sales-import/retention-window.ts: current IST month + 3 before it); sets older than the
+ * cutoff are ignored even while the sweep is still deleting them.
  *   MTD(outlet, month, D) = mtdValues[kpi] of the outlet's LATEST row in the month with day ≤ D, else 0.
  *
- * Day alignment: D = the selected month's data day (SalesDaySet.lastDay; for the CURRENT month capped at
- * today's IST day — a future-dated invoice must not compare against days that haven't happened). Each prior
- * month is read at min(D, that month's length) (31 Mar → 28/29 Feb, 31 → 30). A prior month is AVAILABLE only
- * when its SalesDaySet exists AND its lastDay ≥ that aligned day; otherwise the comparison is unavailable and
- * `availableFrom` names the first month for which it will be.
+ * Month coverage (C1): SalesDaySet.lastDay is the last INVOICE day in the applied file — not how far the file
+ * reaches. A month whose applied file was taken AFTER the month ended (the file also carries a later month's
+ * invoices, or it was uploaded in a later IST month — read from the source SalesImport) is COMPLETE: covered to its
+ * last calendar day (a month ending on a non-billing Sunday stays usable at day 31). Otherwise it is covered only to
+ * `lastDay`.
  *
- * Queries: loadBillingProgress (≈9, parallel) + 1 client flag + 1 SalesDaySet list + ≤4 day reads (one per
- * month, ALL outlets of the tenant in one statement — never per outlet), all parallel.
+ * Day alignment: D = the selected month's covered day (for the CURRENT month capped at today's IST day). Each prior
+ * month is read at min(D, its length). A prior month is AVAILABLE only when it is inside the retention window, on or
+ * after the first day-data month, has a SalesDaySet covering the aligned day, AND its day data carries the KPI.
+ *
+ * Queries: 1 client flag + 1 SalesDaySet list (+ 1 SalesImport list of ≤ 4 source imports) FIRST — a tenant without
+ * day data stops there (no billing load). Then the billing universe (cached) + ≤ 4 day reads (one per month, ALL
+ * outlets of the tenant in one DISTINCT ON statement served by the ordered index
+ * outlet_sales_days(clientId, month, outletId, day DESC)), + a 1-row KPI probe only for a month with no row ≤ D.
  */
 import type { PrismaService } from '../../prisma/prisma.service';
 import { istDateKey, istMonthKey } from '../../common/ist-date';
+import { historyCutoffMonth, historyRetentionMonths } from '../../sales-import/retention-window';
+import { monthLabel } from '../../sales-import/months/month-state';
 import {
+  type BillingProgressData,
   type BillingProgressFilters,
   type BillingOutletRow,
   daysInMonthOf,
@@ -36,19 +47,51 @@ import {
 /** "Slower than usual" = current MTD below this % of the outlet's own last-month MTD to the same day. */
 export const SLOWER_THRESHOLD_PCT = 80;
 
+/** The first month that has day-by-day sales at all (the day-level feature and its one-off rebuild start here). */
+export const DAY_DATA_START_MONTH = '2026-11';
+
 /** Why the whole comparison is unavailable (null = it was computed). */
 export type ComparisonReason =
-  /** The tenant has no day-level sales data (not a Sales Import tenant). The UI shows nothing. */
+  /** The tenant has no day-level sales data in the window (and doesn't import sales). The UI shows nothing. */
   | 'NO_DAY_LEVEL_DATA'
   /** No enabled KPI — the billing card itself is hidden. */
   | 'NO_KPI'
-  /** The selected month has no day-level data (yet). */
+  /** No outlet has a target for the filters — nothing to compare. */
+  | 'NO_TARGETED_OUTLETS'
+  /** The selected month has no usable day-level data (`monthDataReason` says why). */
   | 'NO_DAY_DATA_FOR_MONTH'
   /** The month has day data, but none of it carries the report KPI (the importer doesn't own that KPI). */
   | 'KPI_NOT_IN_DAY_DATA';
 
-/** Why ONE comparison (last month / 3-month average) is unavailable. */
-export type PriorReason = 'NO_DAY_DATA' | 'DAY_DATA_INCOMPLETE';
+/** Why ONE month's day data can't be used. */
+export type PriorReason =
+  /** (a) before day-by-day sales existed at all. */
+  | 'BEFORE_DAY_DATA'
+  /** (b) deleted by the retention window. */
+  | 'DELETED_BY_RETENTION'
+  /** a past month in the window that has no day data (e.g. applied without it). */
+  | 'NO_DAY_DATA'
+  /** (c) the current / a future month whose data hasn't arrived yet. */
+  | 'NOT_YET'
+  /** the month's data doesn't reach the aligned day (file taken before the month ended). */
+  | 'DAY_DATA_INCOMPLETE'
+  /** the month's day data doesn't carry the report KPI. */
+  | 'KPI_NOT_IN_DAY_DATA';
+
+/** One month's day data: the last invoice day, and how far the applied file covers the month. */
+export interface DaySetInfo {
+  lastDay: number;
+  /** The applied file was taken after the month ended → covered to the month's last day. */
+  complete: boolean;
+}
+
+export interface MonthContext {
+  currentMonth: string;
+  /** Oldest month still kept (inclusive). */
+  cutoff: string;
+  startMonth: string;
+  retentionMonths: number;
+}
 
 // ─── Month / day arithmetic ─────────────────────────────────────────────────────────────────────
 
@@ -64,36 +107,72 @@ export function alignedDay(day: number, month: string): number {
   return Math.min(day, daysInMonthOf(month));
 }
 
-/** Prior month `month` is usable at day D iff it has a day set whose lastDay reaches the aligned day. */
-export function priorStatus(sets: ReadonlyMap<string, number>, month: string, day: number): { available: boolean; day: number; reason: PriorReason | null } {
+/** The last day of `month` the day data covers (month end when complete, else the last invoice day). */
+export function coveredTo(info: DaySetInfo, month: string): number {
+  return info.complete ? daysInMonthOf(month) : Math.min(info.lastDay, daysInMonthOf(month));
+}
+
+/** Why `month` has no usable day-data set (null = it has one). Order: (a) before the feature, (b) retention, then. */
+export function missingMonthReason(sets: ReadonlyMap<string, DaySetInfo>, month: string, ctx: MonthContext): PriorReason | null {
+  if (month < ctx.startMonth) return 'BEFORE_DAY_DATA';
+  if (month < ctx.cutoff) return 'DELETED_BY_RETENTION';
+  if (sets.has(month)) return null;
+  return month >= ctx.currentMonth ? 'NOT_YET' : 'NO_DAY_DATA';
+}
+
+export interface PriorStatus {
+  available: boolean;
+  day: number;
+  reason: PriorReason | null;
+  /** The day the month's data covers to (null when it has no set). */
+  coveredTo: number | null;
+}
+
+/** Prior month `month` is usable at day D iff it has a (kept) day set that covers the ALIGNED day. */
+export function priorStatus(sets: ReadonlyMap<string, DaySetInfo>, month: string, day: number, ctx: MonthContext): PriorStatus {
   const d = alignedDay(day, month);
-  const last = sets.get(month);
-  if (last === undefined) return { available: false, day: d, reason: 'NO_DAY_DATA' };
-  if (last < d) return { available: false, day: d, reason: 'DAY_DATA_INCOMPLETE' };
-  return { available: true, day: d, reason: null };
+  const missing = missingMonthReason(sets, month, ctx);
+  if (missing) return { available: false, day: d, reason: missing, coveredTo: null };
+  const cov = coveredTo(sets.get(month)!, month);
+  if (cov < d) return { available: false, day: d, reason: 'DAY_DATA_INCOMPLETE', coveredTo: cov };
+  return { available: true, day: d, reason: null, coveredTo: cov };
 }
 
 /**
- * The first month (after `selected`) whose `k` preceding months will all have day data: a month counts when it
- * already has a SalesDaySet, or is the current IST month or later (its data is still to arrive). A PAST month
- * with no set never gains one (day data starts with the importer), so it pushes the date out.
+ * The first month AFTER `selected` whose `k` preceding months will all have day data — or null when that month is
+ * already in the past (never show an "available from" date that has gone by: picking that month now is the user's
+ * call, it is not something to wait for). A month "will have" data when it is on/after the first day-data month and
+ * either has a kept set or is the current IST month or later (its data is still to arrive). Deleted (pre-cutoff),
+ * pre-feature and past months without a set never gain one, so they push the date out. Never ≤ `selected`.
  */
-export function availableFromMonth(sets: ReadonlyMap<string, number>, selected: string, k: number, currentMonth: string): string {
-  const willHave = (m: string) => sets.has(m) || m >= currentMonth;
+export function availableFromMonth(
+  sets: ReadonlyMap<string, DaySetInfo>,
+  selected: string,
+  k: number,
+  ctx: Pick<MonthContext, 'currentMonth' | 'startMonth' | 'cutoff'>,
+): string | null {
+  const willHave = (m: string) => m >= ctx.startMonth && ((m >= ctx.cutoff && sets.has(m)) || m >= ctx.currentMonth);
   let x = shiftMonth(selected, 1);
-  // Bounded: once x - k ≥ currentMonth every month in the window qualifies.
+  // Bounded: once x - k ≥ max(current, start) every month in the window qualifies.
   for (let i = 0; i < 1200; i++, x = shiftMonth(x, 1)) {
     let ok = true;
     for (let j = 1; j <= k && ok; j++) ok = willHave(shiftMonth(x, -j));
-    if (ok) return x;
+    if (ok) break;
   }
+  if (x <= selected || x < ctx.currentMonth) return null;
   return x;
 }
 
-/** (current − prior) / prior × 100 at 1 dp; null when prior ≤ 0 (no meaningful base — a negative base flips the sign). */
+/**
+ * (current − prior) / prior × 100 at 1 dp, rounding half AWAY from zero (+12.25 → +12.3, −12.25 → −12.3);
+ * null when prior ≤ 0 (no meaningful base — a negative base flips the sign).
+ */
 export function deltaPct(current: number, prior: number): number | null {
   if (!(prior > 0)) return null;
-  const v = Math.round(((current - prior) / prior) * 1000) / 10;
+  const tenths = ((current - prior) * 1000) / prior;
+  // +1e-9 tenths absorbs binary representation error (100.05 is stored as 100.0499…), so a displayed half rounds
+  // away from zero on both sides; it is far below any real difference at 1 dp.
+  const v = (Math.sign(tenths) * Math.round(Math.abs(tenths) + 1e-9)) / 10;
   return Object.is(v, -0) ? 0 : v;
 }
 
@@ -103,12 +182,87 @@ export function ratioPct(current: number, prior: number): number {
   return Object.is(v, -0) ? 0 : v;
 }
 
+// ─── Plain-words text (screen AND Excel) ────────────────────────────────────────────────────────
+
+/** Why one month can't be used, as a clause ("day-by-day sales start from November 2026"). */
+export function monthReasonClause(reason: PriorReason, month: string, ctx: MonthContext, extra: { coveredTo?: number | null; kpiLabel?: string } = {}): string {
+  const M = monthLabel(month);
+  switch (reason) {
+    case 'BEFORE_DAY_DATA':
+      return `day-by-day sales start from ${monthLabel(ctx.startMonth)}`;
+    case 'DELETED_BY_RETENTION':
+      return `day-by-day sales are kept for ${ctx.retentionMonths} months, and ${M} is older than that`;
+    case 'NO_DAY_DATA':
+      return `there are no day-by-day sales for ${M}`;
+    case 'NOT_YET':
+      return `there are no day-by-day sales for ${M} yet`;
+    case 'DAY_DATA_INCOMPLETE':
+      return `${M}'s day-by-day sales only go up to day ${extra.coveredTo ?? '—'}`;
+    case 'KPI_NOT_IN_DAY_DATA':
+      return `${M}'s day-by-day sales don't include ${extra.kpiLabel ?? 'this KPI'}`;
+  }
+}
+
+function capitalise(s: string): string {
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+function availableSuffix(availableFrom: string | null): string {
+  return availableFrom ? ` Available from ${monthLabel(availableFrom)}.` : '';
+}
+
 // ─── Day data reads ─────────────────────────────────────────────────────────────────────────────
 
-/** Every SalesDaySet of the tenant as month → lastDay (one row per month — tiny). */
-export async function loadDaySets(prisma: PrismaService, clientId: string): Promise<Map<string, number>> {
-  const rows = await prisma.salesDaySet.findMany({ where: { clientId }, select: { month: true, lastDay: true } });
-  return new Map((rows ?? []).map((r) => [r.month, Number(r.lastDay)]));
+interface ImportCoverage {
+  id: string;
+  createdAt: Date | string | null;
+  monthSummaries: unknown;
+}
+
+/**
+ * Is `month` complete in the import that produced its day set? The file was taken after the month ended when it
+ * carries invoices of a LATER month, or it was uploaded in a later IST month.
+ */
+export function monthCompleteIn(imp: ImportCoverage | undefined, month: string): boolean {
+  if (!imp) return false;
+  const sums = Array.isArray(imp.monthSummaries) ? (imp.monthSummaries as Array<{ month?: unknown }>) : [];
+  if (sums.some((s) => typeof s?.month === 'string' && s.month > month)) return true;
+  if (imp.createdAt) {
+    const at = new Date(imp.createdAt);
+    if (!Number.isNaN(at.getTime()) && istMonthKey(at) > month) return true;
+  }
+  return false;
+}
+
+/**
+ * The tenant's KEPT SalesDaySets (month ≥ the retention cutoff) as month → {lastDay, complete}. Completeness is read
+ * from the source SalesImport rows (≤ one per month — tiny; the row and its frozen month summaries survive the
+ * import's purge).
+ */
+export async function loadDaySets(prisma: PrismaService, clientId: string, cutoff: string): Promise<Map<string, DaySetInfo>> {
+  const rows = await prisma.salesDaySet.findMany({
+    where: { clientId, month: { gte: cutoff } },
+    select: { month: true, lastDay: true, sourceImportId: true },
+  });
+  const sets = (rows ?? []).filter((r) => r.month >= cutoff);
+  const ids = [...new Set(sets.map((r) => r.sourceImportId).filter((x): x is string => !!x))];
+  const imports: ImportCoverage[] = ids.length
+    ? ((await prisma.salesImport.findMany({
+        where: { clientId, id: { in: ids } },
+        select: { id: true, createdAt: true, monthSummaries: true },
+      })) ?? [])
+    : [];
+  const byId = new Map(imports.map((i) => [i.id, i]));
+  return new Map(
+    sets.map((r) => [r.month, { lastDay: Number(r.lastDay), complete: monthCompleteIn(byId.get(r.sourceImportId), r.month) }]),
+  );
+}
+
+export interface MonthRead {
+  byCode: Map<string, number>;
+  rows: number;
+  /** Does the month's day data carry the KPI? null = the month has no day rows at all (nothing to say). */
+  hasKey: boolean | null;
 }
 
 /**
@@ -117,10 +271,13 @@ export async function loadDaySets(prisma: PrismaService, clientId: string): Prom
  * Raw SQL, justified: the Prisma query API has no "latest row per group ≤ D" — `distinct` + `orderBy` would
  * work but Prisma applies `distinct` in memory after fetching EVERY row ≤ D (≈ outlets × billing days, ~160k
  * at Bajaj per month), and it cannot pull one key out of the JSON map. `DISTINCT ON` returns exactly one row
- * per outlet straight from Postgres (table `outlet_sales_days`, the @@map of OutletSalesDay), served by the
- * @@index(clientId, month, day) / @@unique(clientId, outletId, month, day) indexes.
+ * per outlet straight from Postgres (table `outlet_sales_days`, the @@map of OutletSalesDay). Expected plan:
+ *   Unique → Index Scan using outlet_sales_days_clientId_month_outletId_day_idx
+ *            Index Cond: ("clientId" = $2 AND "month" = $3 AND "day" <= $4)
+ * — the (clientId, month, outletId, day DESC) index already yields rows in the ORDER BY, so no Sort node.
+ * When no row is ≤ D, a one-row probe says whether the month's day data carries the KPI at all (so a month that
+ * never had the KPI is UNAVAILABLE, never a fake 0).
  * Tenant-scoped by `clientId`; every value is a bound parameter (no string interpolation).
- * A row whose map lacks the key comes back as v = NULL (counted as 0, and reported via `hasKey`).
  */
 export async function loadMtdByOutlet(
   prisma: PrismaService,
@@ -128,18 +285,27 @@ export async function loadMtdByOutlet(
   month: string,
   day: number,
   kpiCode: string,
-): Promise<{ byCode: Map<string, number>; rows: number; hasKey: boolean }> {
+): Promise<MonthRead> {
   const rows = await prisma.$queryRaw<Array<{ outletCode: string; v: string | null }>>`
     SELECT DISTINCT ON (d."outletId") d."outletCode" AS "outletCode", (d."mtdValues" ->> ${kpiCode}) AS v
     FROM "outlet_sales_days" d
     WHERE d."clientId" = ${clientId} AND d."month" = ${month} AND d."day" <= ${day}
     ORDER BY d."outletId", d."day" DESC`;
   const byCode = new Map<string, number>();
-  let hasKey = false;
+  let hasKey: boolean | null = null;
   for (const r of rows ?? []) {
     if (r.v !== null && r.v !== undefined) hasKey = true;
+    else if (hasKey === null) hasKey = false;
     const n = Number(r.v);
     byCode.set(r.outletCode, (byCode.get(r.outletCode) ?? 0) + (Number.isFinite(n) ? n : 0));
+  }
+  if (!rows?.length) {
+    const probe = await prisma.$queryRaw<Array<{ anyRow: boolean; withKey: boolean }>>`
+      SELECT EXISTS (SELECT 1 FROM "outlet_sales_days" p WHERE p."clientId" = ${clientId} AND p."month" = ${month}) AS "anyRow",
+             EXISTS (SELECT 1 FROM "outlet_sales_days" p WHERE p."clientId" = ${clientId} AND p."month" = ${month}
+                       AND jsonb_exists(p."mtdValues", ${kpiCode})) AS "withKey"`;
+    const p = probe?.[0];
+    hasKey = p?.anyRow ? !!p.withKey : null;
   }
   return { byCode, rows: rows?.length ?? 0, hasKey };
 }
@@ -168,9 +334,11 @@ export interface SlowerRow {
 
 export interface LastMonthComparison {
   available: boolean;
-  /** First month for which this comparison will be available (null when available or never meaningful). */
+  /** First month (≥ the current month) for which this comparison will be available; null when available / not to wait for. */
   availableFrom: string | null;
   reason: PriorReason | null;
+  /** Plain-words line when unavailable (shown verbatim on screen and in the Excel About sheet). */
+  message: string | null;
   month: string;
   /** The day the prior month is read at (min(D, its length)); null when there is no D. */
   compareDay: number | null;
@@ -182,6 +350,7 @@ export interface ThreeMonthComparison {
   available: boolean;
   availableFrom: string | null;
   reason: PriorReason | null;
+  message: string | null;
   months: string[];
   compareDays: Array<number | null>;
   /** Each month's MTD (null for an unavailable month). */
@@ -194,6 +363,10 @@ export interface BillingComparisonData {
   month: string;
   kpi: { code: string; label: string; unit: string } | null;
   reason: ComparisonReason | null;
+  /** Why the SELECTED month has no usable day data (only with reason NO_DAY_DATA_FOR_MONTH). */
+  monthDataReason: PriorReason | null;
+  /** Plain-words line for `reason` (null when computed). */
+  message: string | null;
   compareDay: number | null;
   current: { mtd: number | null; outlets: number };
   lastMonth: LastMonthComparison;
@@ -201,6 +374,15 @@ export interface BillingComparisonData {
   slowerThanUsual: { count: number; thresholdPct: number };
   slowerRows: SlowerRow[];
   managerName: string | null;
+}
+
+export interface BillingComparisonOptions {
+  /** The billing universe for the SAME tenant + filters (e.g. the billing-progress service's cached load). */
+  loadBilling?: () => Promise<BillingProgressData>;
+  /** Override of DAY_DATA_START_MONTH (tests). */
+  dayDataStartMonth?: string;
+  /** Override of the retention window length (default: the sales-import setting). */
+  retentionMonths?: number;
 }
 
 function sumOver(rows: readonly BillingOutletRow[], byCode: Map<string, number>): number {
@@ -214,56 +396,95 @@ export async function loadBillingComparison(
   clientId: string,
   f: BillingProgressFilters,
   now: Date,
+  opts: BillingComparisonOptions = {},
 ): Promise<BillingComparisonData> {
   const month = f.month ?? istMonthKey(now);
   const currentMonth = istMonthKey(now);
+  const retentionMonths = opts.retentionMonths ?? historyRetentionMonths();
+  const ctx: MonthContext = {
+    currentMonth,
+    cutoff: historyCutoffMonth(currentMonth, retentionMonths),
+    startMonth: opts.dayDataStartMonth ?? DAY_DATA_START_MONTH,
+    retentionMonths,
+  };
   const priorMonths = [1, 2, 3].map((k) => shiftMonth(month, -k));
 
-  const [billing, flagOn, sets] = await Promise.all([
-    loadBillingProgress(prisma, clientId, { ...f, month }, now),
-    readSalesImportFlag(prisma, clientId),
-    loadDaySets(prisma, clientId),
-  ]);
-
-  const kpi = billing.kpi;
-  const population = billing.inScope;
   const lastMonth: LastMonthComparison = {
-    available: false, availableFrom: null, reason: null, month: priorMonths[0], compareDay: null, mtd: null, deltaPct: null,
+    available: false, availableFrom: null, reason: null, message: null, month: priorMonths[0], compareDay: null, mtd: null, deltaPct: null,
   };
   const threeMonthAvg: ThreeMonthComparison = {
-    available: false, availableFrom: null, reason: null, months: priorMonths,
+    available: false, availableFrom: null, reason: null, message: null, months: priorMonths,
     compareDays: [null, null, null], monthMtds: [null, null, null], avgMtd: null, deltaPct: null,
   };
   const base = {
     month,
-    kpi,
+    kpi: null as BillingComparisonData['kpi'],
+    monthDataReason: null as PriorReason | null,
     compareDay: null as number | null,
-    current: { mtd: null as number | null, outlets: population.length },
+    current: { mtd: null as number | null, outlets: 0 },
     lastMonth,
     threeMonthAvg,
     slowerThanUsual: { count: 0, thresholdPct: SLOWER_THRESHOLD_PCT },
     slowerRows: [] as SlowerRow[],
-    managerName: billing.managerName,
+    managerName: null as string | null,
   };
 
-  if (!kpi) return { ...base, reason: 'NO_KPI' };
-  // Day-level data exists iff the tenant imports sales (flag) or ever did (sets left from a flag-on period).
-  if (!flagOn && sets.size === 0) return { ...base, reason: 'NO_DAY_LEVEL_DATA' };
-
-  const selectedLast = sets.get(month);
-  if (selectedLast === undefined || !(selectedLast >= 1)) {
-    lastMonth.availableFrom = availableFromMonth(sets, month, 1, currentMonth);
-    threeMonthAvg.availableFrom = availableFromMonth(sets, month, 3, currentMonth);
-    lastMonth.reason = 'NO_DAY_DATA';
-    threeMonthAvg.reason = 'NO_DAY_DATA';
-    return { ...base, reason: 'NO_DAY_DATA_FOR_MONTH' };
+  // C6: the cheap check FIRST — a tenant with no kept day data that doesn't import sales stops here (no billing load).
+  const [flagOn, sets] = await Promise.all([readSalesImportFlag(prisma, clientId), loadDaySets(prisma, clientId, ctx.cutoff)]);
+  if (!flagOn && sets.size === 0) {
+    return {
+      ...base,
+      reason: 'NO_DAY_LEVEL_DATA',
+      message: 'This program has no day-by-day sales data, so month-to-date comparisons are not available.',
+    };
   }
 
-  let D = Math.min(selectedLast, daysInMonthOf(month));
+  const billing = await (opts.loadBilling ? opts.loadBilling() : loadBillingProgress(prisma, clientId, { ...f, month }, now));
+  const kpi = billing.kpi;
+  const population = billing.inScope;
+  base.kpi = kpi;
+  base.managerName = billing.managerName;
+  base.current.outlets = population.length;
+
+  if (!kpi) return { ...base, reason: 'NO_KPI', message: 'No enabled KPI — nothing to compare.' };
+  if (population.length === 0) {
+    return { ...base, reason: 'NO_TARGETED_OUTLETS', message: 'No outlets have a target for these filters.' };
+  }
+
+  const M = monthLabel(month);
+  /** Fill one comparison's unavailable state (reason, message, availableFrom). */
+  const unavailable = (
+    c: LastMonthComparison | ThreeMonthComparison,
+    k: number,
+    lead: string,
+    blocker: { reason: PriorReason; month: string; coveredTo?: number | null },
+  ) => {
+    c.reason = blocker.reason;
+    c.availableFrom = availableFromMonth(sets, month, k, ctx);
+    c.message = `${lead}: ${monthReasonClause(blocker.reason, blocker.month, ctx, { coveredTo: blocker.coveredTo, kpiLabel: kpi.label })}.${availableSuffix(c.availableFrom)}`;
+  };
+  const LM_LEAD = 'Comparison with last month not available';
+  const AVG_LEAD = '3-month average not available';
+
+  // The selected month itself.
+  const selMissing = missingMonthReason(sets, month, ctx);
+  if (selMissing) {
+    for (const [c, k, lead] of [[lastMonth, 1, LM_LEAD], [threeMonthAvg, 3, AVG_LEAD]] as const) {
+      unavailable(c, k, lead, { reason: selMissing, month });
+    }
+    return {
+      ...base,
+      reason: 'NO_DAY_DATA_FOR_MONTH',
+      monthDataReason: selMissing,
+      message: `${capitalise(monthReasonClause(selMissing, month, ctx))}, so ${M} can't be compared with earlier months.`,
+    };
+  }
+
+  let D = coveredTo(sets.get(month)!, month);
   if (month === currentMonth) D = Math.min(D, Number(istDateKey(now).slice(8, 10)));
   D = Math.max(1, D);
 
-  const statuses = priorMonths.map((p) => priorStatus(sets, p, D));
+  const statuses = priorMonths.map((p) => priorStatus(sets, p, D, ctx));
   const reads = await Promise.all([
     loadMtdByOutlet(prisma, clientId, month, D, kpi.code),
     ...statuses.map((s, i) => (s.available ? loadMtdByOutlet(prisma, clientId, priorMonths[i], s.day, kpi.code) : Promise.resolve(null))),
@@ -271,9 +492,22 @@ export async function loadBillingComparison(
   const cur = reads[0]!;
   const prior = reads.slice(1);
 
-  if (cur.rows > 0 && !cur.hasKey) {
-    return { ...base, compareDay: D, reason: 'KPI_NOT_IN_DAY_DATA' };
+  if (cur.hasKey === false) {
+    return {
+      ...base,
+      compareDay: D,
+      reason: 'KPI_NOT_IN_DAY_DATA',
+      message: `The day-by-day sales data for ${M} doesn't include ${kpi.label}, so it can't be compared with earlier months.`,
+    };
   }
+  // C2: a prior month whose day data lacks the KPI is UNAVAILABLE (never counted as 0).
+  statuses.forEach((s, i) => {
+    if (s.available && prior[i]?.hasKey === false) {
+      s.available = false;
+      s.reason = 'KPI_NOT_IN_DAY_DATA';
+      prior[i] = null;
+    }
+  });
 
   const currentMtd = sumOver(population, cur.byCode);
 
@@ -285,8 +519,7 @@ export async function loadBillingComparison(
     lastMonth.mtd = sumOver(population, prior[0].byCode);
     lastMonth.deltaPct = deltaPct(currentMtd, lastMonth.mtd);
   } else {
-    lastMonth.reason = s1.reason;
-    lastMonth.availableFrom = availableFromMonth(sets, month, 1, currentMonth);
+    unavailable(lastMonth, 1, LM_LEAD, { reason: s1.reason!, month: priorMonths[0], coveredTo: s1.coveredTo });
   }
 
   // 3-month average (all three months needed — an average of fewer months isn't what the label says).
@@ -298,11 +531,11 @@ export async function loadBillingComparison(
     threeMonthAvg.avgMtd = (mtds[0] + mtds[1] + mtds[2]) / 3;
     threeMonthAvg.deltaPct = deltaPct(currentMtd, threeMonthAvg.avgMtd);
   } else {
-    threeMonthAvg.reason = statuses.find((s) => !s.available)!.reason;
-    threeMonthAvg.availableFrom = availableFromMonth(sets, month, 3, currentMonth);
+    const i = statuses.findIndex((s) => !s.available);
+    unavailable(threeMonthAvg, 3, AVG_LEAD, { reason: statuses[i].reason!, month: priorMonths[i], coveredTo: statuses[i].coveredTo });
   }
 
-  // Slower than usual: own last-month MTD to the same day > 0 and current < 80% of it.
+  // Slower than usual: own last-month MTD to the same day > 0 and current < 80% of it (needs last month AVAILABLE).
   const slowerRows: SlowerRow[] = [];
   if (lastMonth.available && prior[0]) {
     for (const r of population) {
@@ -329,6 +562,7 @@ export async function loadBillingComparison(
   return {
     ...base,
     reason: null,
+    message: null,
     compareDay: D,
     current: { mtd: currentMtd, outlets: population.length },
     slowerThanUsual: { count: slowerRows.length, thresholdPct: SLOWER_THRESHOLD_PCT },

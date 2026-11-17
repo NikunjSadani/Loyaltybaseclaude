@@ -7,8 +7,10 @@ import {
   SALES_IMPORT_MAX_INFLIGHT_UPLOADS,
   SALES_IMPORT_PART_SIZE,
   SALES_IMPORT_RETENTION_DAYS,
+  SALES_IMPORT_RETENTION_DAYS_V2,
   SALES_IMPORT_STALE_HEARTBEAT_MINUTES,
 } from '../sales-import.contract';
+import { withRetentionV2 } from '../retention-env.testspec';
 import { partKey } from './parts-file';
 import { currentMonthKey } from '../../targets/targets.helpers';
 import { shiftMonthKey } from '../months/month-state';
@@ -468,8 +470,27 @@ describe('SalesImportUploadService — read', () => {
     expect(h.rows.get(fresh)!.purgedAt).toBeNull();
   });
 
-  it('owner 2026-11-18: per-import data (aggregates, raw parts, unmatched.csv) is kept 7 days after the import finished, not 30', async () => {
-    expect(SALES_IMPORT_RETENTION_DAYS).toBe(7);
+  it('S1 switch OFF (default): per-import data is kept 30 days after the import finished, exactly as before — an 8-day-old import is NOT purged', async () => {
+    expect(SALES_IMPORT_RETENTION_DAYS).toBe(30);
+    for (const off of [undefined, '', 'off', 'true', '1']) {
+      await withRetentionV2(off, async () => {
+        const h = harness();
+        const at = (days: number) => new Date(Date.now() - days * 86_400_000);
+        const { importId: eight } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+        const { importId: old } = await h.svc.createUpload(USER, { filename: 'b.csv', sizeBytes: 1 });
+        Object.assign(h.rows.get(eight)!, { status: 'READY', finishedAt: at(8) });
+        Object.assign(h.rows.get(old)!, { status: 'READY', finishedAt: at(31) });
+        h.objects.set(partKey(`sales-imports/t1/${eight}/`, 0), Buffer.from('abc'));
+        await h.retention.sweep({ clientId: 't1', history: false });
+        expect(h.rows.get(eight)!.purgedAt).toBeNull();
+        expect([...h.objects.keys()].some((k) => k.includes(eight))).toBe(true);
+        expect(h.rows.get(old)!.purgedAt).toBeTruthy();
+      });
+    }
+  });
+
+  it('S1 switch ON (SALES_RETENTION_V2=on): per-import data (aggregates, raw parts, unmatched.csv) is kept 7 days after the import finished, not 30', () => withRetentionV2('on', async () => {
+    expect(SALES_IMPORT_RETENTION_DAYS_V2).toBe(7);
     const h = harness();
     const at = (days: number) => new Date(Date.now() - days * 86_400_000);
     const { importId: eight } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
@@ -483,7 +504,17 @@ describe('SalesImportUploadService — read', () => {
     expect([...h.objects.keys()].some((k) => k.includes(eight))).toBe(false);
     expect(h.rows.get(six)!.purgedAt).toBeNull();
     expect([...h.objects.keys()].some((k) => k.includes(six))).toBe(true);
-  });
+  }));
+
+  it('S1: an EXPLICIT retentionDays (the one-off trim) applies 7 days even with the switch OFF', () => withRetentionV2(undefined, async () => {
+    const h = harness();
+    const { importId: eight } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+    Object.assign(h.rows.get(eight)!, { status: 'READY', finishedAt: new Date(Date.now() - 8 * 86_400_000) });
+    await h.retention.sweep({ clientId: 't1', history: false });
+    expect(h.rows.get(eight)!.purgedAt).toBeNull();
+    await h.retention.sweep({ clientId: 't1', history: false, retentionDays: SALES_IMPORT_RETENTION_DAYS_V2 });
+    expect(h.rows.get(eight)!.purgedAt).toBeTruthy();
+  }));
 
   it('re-check M2: with a deadline, the sweep starts no purge whose worst case (lock wait + tx + GCS) could pass it', async () => {
     const h = harness();
@@ -633,8 +664,35 @@ describe('SalesImportUploadService — reprocess as a new import (re-audit M3)',
   });
 });
 
-describe('SalesImportRetentionService — month window (current IST month + 3 previous; owner 2026-11-18)', () => {
-  it('deletes history AND day data of months before the window — bounded: one tx, statement_timeout, chunked deletes, headers / day sets in step', async () => {
+describe('SalesImportRetentionService — month windows (S1: history 10 years while SALES_RETENTION_V2 is off; day data always current + 3 previous)', () => {
+  const sqlOf = (h: ReturnType<typeof harness>) => () => h.prisma.$executeRaw.mock.calls.map((c) => c[0] as unknown as { strings: string[]; values: unknown[] });
+
+  it('S1 switch OFF (default): the Cloud Scheduler drain sweep deletes history only before the 10-year cutoff (as before) and purges no import younger than 30 days', () => withRetentionV2(undefined, async () => {
+    const h = harness();
+    const sql = sqlOf(h);
+    const cur = currentMonthKey();
+    const { importId: eight } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+    Object.assign(h.rows.get(eight)!, { status: 'READY', finishedAt: new Date(Date.now() - 8 * 86_400_000) });
+    h.prisma.$executeRaw.mockClear(); // (createUpload ran its own tenant sweep)
+    // exactly the drain controller's call
+    await h.retention.sweep({ limit: 50, deadline: Date.now() + 150_000 });
+    expect(h.rows.get(eight)!.purgedAt).toBeNull();
+    const del = (table: string) => sql().find((q) => q.strings.join('?').includes(`DELETE FROM "${table}"`))!;
+    const [lines, combos, sets, daySets, dayRows] = ['sales_month_histories', 'sales_month_history_combos', 'sales_month_history_sets', 'sales_day_sets', 'outlet_sales_days'].map(del);
+    const legacy = shiftMonthKey(cur, -12 * 10); // origin/develop: shiftMonthKey(current, -12 * SALES_MONTH_HISTORY_RETENTION_YEARS)
+    expect(lines.values).toEqual([legacy, HISTORY_PURGE_CHUNK_ROWS]);
+    expect(combos.values).toEqual([legacy, HISTORY_PURGE_CHUNK_ROWS]);
+    expect(sets.values).toEqual([legacy]);
+    // the day tables are NEW (no row predates this release): they follow the 4-month window from day one
+    expect(daySets.values).toEqual([shiftMonthKey(cur, -3)]);
+    expect(dayRows.values).toEqual([shiftMonthKey(cur, -3), HISTORY_PURGE_CHUNK_ROWS]);
+    // an EXPLICIT history cutoff (the one-off trim) wins over the switch
+    h.prisma.$executeRaw.mockClear();
+    await h.retention.purgeOldHistory({ historyCutoff: shiftMonthKey(cur, -3) });
+    expect(sql()[0].values).toEqual([shiftMonthKey(cur, -3), HISTORY_PURGE_CHUNK_ROWS]);
+  }));
+
+  it('S1 switch ON: deletes history AND day data of months before the window — bounded: one tx, statement_timeout, chunked deletes, headers / day sets in step', () => withRetentionV2('on', async () => {
     const h = harness();
     const sql = () => h.prisma.$executeRaw.mock.calls.map((c) => c[0] as unknown as { strings: string[]; values: unknown[] });
     const cur = currentMonthKey();
@@ -667,7 +725,7 @@ describe('SalesImportRetentionService — month window (current IST month + 3 pr
     h.prisma.$executeRaw.mockClear();
     await h.retention.sweep({ clientId: 't1' });
     expect(sql().some((q) => q.strings.join('?').includes('DELETE FROM "sales_month_histories"'))).toBe(true);
-  });
+  }));
 
   it('L1: every purge statement is bounded (SET LOCAL statement_timeout first) and the GCS delete is abandoned after 15 s', async () => {
     jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });

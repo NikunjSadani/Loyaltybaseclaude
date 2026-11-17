@@ -28,6 +28,7 @@ import {
   BillingProgressCard, BUCKET_COLORS, fmtBillingAmount, fmtBillingExact, monthOptions, monthWords, pctOf, shiftMonth,
   type BillingProgressData,
 } from '../BillingProgressCard';
+import { BILLING_COMPARISON_URL, type BillingComparisonData } from '../BillingComparison';
 import { useDashboardProgram, dashboardProgramStorageKey } from '@/lib/dashboard-program';
 
 const DASHBOARD_PROGRAM_STORAGE_KEY = dashboardProgramStorageKey('bajaj', 'u1');
@@ -94,15 +95,40 @@ function rowsPage(page: number, total = 60) {
   };
 }
 
-/** Routes fetches by URL; `summary` decides the billing-progress body. */
+/** The comparison endpoint's body for a tenant WITHOUT day-level sales (the default — the card's own tests). */
+function noDayData(): BillingComparisonData {
+  return {
+    month: CUR_MONTH, kpi: null, reason: 'NO_DAY_LEVEL_DATA', monthDataReason: null,
+    message: 'This program has no day-by-day sales data, so month-to-date comparisons are not available.',
+    compareDay: null, current: { mtd: null, outlets: 0 },
+    lastMonth: { available: false, availableFrom: null, reason: null, message: null, month: shiftMonth(CUR_MONTH, -1), compareDay: null, mtd: null, deltaPct: null },
+    threeMonthAvg: { available: false, availableFrom: null, reason: null, message: null, months: [], compareDays: [], avgMtd: null, deltaPct: null },
+    slowerThanUsual: { count: 0, thresholdPct: 80 },
+  };
+}
+/** A day-data tenant's comparison body. */
+function withDayData(): BillingComparisonData {
+  return {
+    ...noDayData(),
+    kpi: { code: 'SAMT', label: 'Sales', unit: 'INR' }, reason: null, message: null, compareDay: 16,
+    current: { mtd: 5_432_100, outlets: 300 },
+    lastMonth: { available: true, availableFrom: null, reason: null, message: null, month: shiftMonth(CUR_MONTH, -1), compareDay: 16, mtd: 4_830_000, deltaPct: 12.5 },
+    slowerThanUsual: { count: 0, thresholdPct: 80 },
+  };
+}
+
+/** Routes fetches by URL; `summary` decides the billing-progress body, `comparison` the comparison body. */
 function mockFetch(
   summary: () => unknown,
-  opts: { failSummary?: boolean; failOutlets?: () => boolean } = {},
+  opts: { failSummary?: boolean; failOutlets?: () => boolean; comparison?: () => unknown } = {},
 ) {
   const fn = vi.fn(async (url: string) => {
     const u = String(url);
     if (u.startsWith('/api/auth/me')) {
       return { ok: true, status: 200, json: async () => ({ success: true, data: { id: 'u1', clientId: 'bajaj' } }) };
+    }
+    if (u.startsWith(BILLING_COMPARISON_URL)) {
+      return { ok: true, status: 200, json: async () => ({ success: true, data: (opts.comparison ?? noDayData)() }) };
     }
     if (u.startsWith('/api/admin/dashboard/billing-progress/outlets/export')) {
       return { ok: true, status: 202, json: async () => ({ success: true, data: { exportRequestId: 'x1', message: 'Queued for you.' } }) };
@@ -550,6 +576,43 @@ describe('BillingProgressCard', () => {
     render(<Harness />);
     expect(await screen.findByTestId('billing-progress-error')).toHaveTextContent('Server exploded');
     expect(screen.queryByTestId('billing-totals')).not.toBeInTheDocument();
+  });
+
+  it('BP21 (C7/C8): day-data tenant → the comparison renders INSIDE the card, directly under the headline totals', async () => {
+    const fn = mockFetch(() => payload(), { comparison: withDayData });
+    render(<Harness />);
+    const lm = await screen.findByTestId('billing-vs-last-month');
+    expect(lm).toHaveTextContent('▲ +12.5%');
+    const card = screen.getByTestId('billing-progress-card');
+    const cmp = screen.getByTestId('billing-comparison');
+    expect(card).toContainElement(cmp);
+    // Order: totals → comparison → pace → bucket list.
+    const totals = screen.getByTestId('billing-totals');
+    const follows = (a: Element, b: Element) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(totals, cmp)).toBe(true);
+    expect(follows(cmp, screen.getByTestId('billing-pace'))).toBe(true);
+    expect(follows(cmp, screen.getByTestId('billing-bucket-NOT_STARTED'))).toBe(true);
+    const req = new URL(calls(fn, BILLING_COMPARISON_URL)[0], 'http://x');
+    expect(req.searchParams.get('month')).toBe(CUR_MONTH);
+  });
+
+  it('BP22 (C7): NO_DAY_LEVEL_DATA tenant → no comparison at all (no line, no loading, no alert)', async () => {
+    const fn = mockFetch(() => payload());
+    render(<Harness />);
+    await screen.findByTestId('billing-totals');
+    await waitFor(() => expect(calls(fn, BILLING_COMPARISON_URL).length).toBe(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByTestId('billing-comparison')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('billing-comparison-loading')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('billing-comparison-error')).not.toBeInTheDocument();
+  });
+
+  it('BP23 (C7): a normal card render has no error alert anywhere (the comparison endpoint is mocked on its own)', async () => {
+    mockFetch(() => payload());
+    render(<Harness />);
+    await screen.findByTestId('billing-totals');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryAllByRole('alert')).toHaveLength(0);
   });
 
   it('BP9: formatting helpers (Indian grouping, compact L/Cr, non-INR ≤ 2 dp)', () => {

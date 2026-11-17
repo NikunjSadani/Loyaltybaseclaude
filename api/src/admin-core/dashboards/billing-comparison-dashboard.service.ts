@@ -8,9 +8,11 @@ import {
   BILLING_CACHE_TTL_MS,
   BILLING_LIST_DEFAULT_PAGE_SIZE,
   BILLING_LIST_MAX_PAGE_SIZE,
+  BillingProgressDashboardService,
 } from './billing-progress-dashboard.service';
 import {
   type BillingComparisonData,
+  type BillingComparisonOptions,
   loadBillingComparison,
   publicSlowerRow,
   summarizeBillingComparison,
@@ -31,8 +33,14 @@ function intParam(raw: unknown, name: string, def: number, min: number, max: num
 @Injectable()
 export class BillingComparisonDashboardService {
   private readonly cache = new Map<string, { at: number; data: Promise<BillingComparisonData> }>();
+  /** Loader overrides (tests only: the first day-data month / retention length); production uses the defaults. */
+  options: Omit<BillingComparisonOptions, 'loadBilling'> = {};
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    /** The billing universe is read through ITS cache (same tenant + filters as the card's own request). */
+    private readonly billingProgress: BillingProgressDashboardService,
+  ) {}
 
   get cacheSize(): number {
     return this.cache.size;
@@ -50,7 +58,10 @@ export class BillingComparisonDashboardService {
     const key = JSON.stringify([user.clientId, resolved.month, resolved.program, resolved.outletType, resolved.managerId]);
     const hit = this.cache.get(key);
     if (hit) return hit.data;
-    const data = loadBillingComparison(this.prisma, user.clientId, resolved, now);
+    const data = loadBillingComparison(this.prisma, user.clientId, resolved, now, {
+      ...this.options,
+      loadBilling: () => this.billingProgress.load(user, resolved),
+    });
     data.catch(() => {
       if (this.cache.get(key)?.data === data) this.cache.delete(key);
     });

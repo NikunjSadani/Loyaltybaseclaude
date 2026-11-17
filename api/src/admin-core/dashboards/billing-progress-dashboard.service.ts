@@ -48,7 +48,8 @@ export class BillingProgressDashboardService {
     for (const [k, v] of this.cache) if (nowMs - v.at >= BILLING_CACHE_TTL_MS) this.cache.delete(k);
   }
 
-  private load(user: JwtPayload, f: BillingProgressFilters): Promise<BillingProgressData> {
+  /** The (cached, tenant + filter keyed) month — also reused by BillingComparisonDashboardService (no second load). */
+  load(user: JwtPayload, f: BillingProgressFilters): Promise<BillingProgressData> {
     const now = new Date();
     const nowMs = now.getTime();
     this.evictExpired(nowMs);

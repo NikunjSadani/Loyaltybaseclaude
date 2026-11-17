@@ -6,7 +6,7 @@ import type { Prisma } from '@prisma/client';
 import { OutletKpiAccumulator, assertNeverMeasure, outletInScope, type KpiDefLite } from '../kpi/sales-kpi.helper';
 import { QTY_SCALE, divRoundHalfAway } from '../ingest/normalize';
 import { rosterIndexOf, type AggregatePager, type RosterOutlet } from '../kpi/sales-import-data';
-import { slicesMatchTotals, type DaySlice } from '../days/day-slices';
+import { slicesMatchTotals } from '../days/day-slices';
 
 export interface MonthOutletRow {
   outletCode: string;
@@ -53,17 +53,47 @@ export interface MonthComputation {
   days?: MonthDayInput;
 }
 
-/** One matched line (aggregate / history row) of an outlet with its split by IST invoice day. */
-export interface DayLine {
+/** A product (dimKey + its dims), interned once per month computation so lines share it (S5 memory). */
+export interface DayProduct {
   dimKey: string;
   dims: Record<string, string>;
-  days: DaySlice[];
+}
+/**
+ * One outlet's matched lines split by IST invoice day, stored COMPACTLY (S5 memory): flat parallel arrays, one entry
+ * per (line × day) slice — no per-line / per-slice objects. `product[i]` is the slice's interned product.
+ */
+export interface OutletDaySlices {
+  product: DayProduct[];
+  day: number[];
+  lines: number[];
+  paise: bigint[];
+  pico: bigint[];
 }
 export interface MonthDayInput {
-  /** ROSTER outlet code → its matched lines (with their day split). */
-  byOutlet: Map<string, DayLine[]>;
+  /** ROSTER outlet code → its matched lines' day slices. */
+  byOutlet: Map<string, OutletDaySlices>;
   /** Matched rows with no usable day split (absent, malformed, or not summing exactly to the row) — day data impossible. */
   rowsWithoutDays: number;
+  /** Matched rows seen (counted even after the limit tripped). */
+  matchedRows: number;
+  /**
+   * S5 hard guard: the month had more matched rows than SALES_DAY_BUILD_MAX_ROWS — collection STOPPED and what was
+   * collected was dropped (bounded memory on the shared 1 GiB API), so the month gets no day data and the result says why.
+   */
+  tooLarge?: { rows: number; limit: number };
+}
+
+/**
+ * S5: the most matched rows a month may have for its day data to be built in the API process (apply / recalculate /
+ * its preview). Above it the day build is SKIPPED with a loud reason instead of risking an OOM of gifsy-api (1 GiB,
+ * shared with live tenants). Setting: env SALES_DAY_BUILD_MAX_ROWS (whole number ≥ 1; anything else → the default).
+ * Measured cost ≈ 0.25 KB per matched row with a 1.3-day average split (see the S5 note in month-days.ts).
+ */
+export const SALES_DAY_BUILD_MAX_ROWS_DEFAULT = 500_000;
+export function dayBuildRowLimit(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.SALES_DAY_BUILD_MAX_ROWS?.trim();
+  if (!raw || !/^\d+$/.test(raw) || Number(raw) < 1) return SALES_DAY_BUILD_MAX_ROWS_DEFAULT;
+  return Number(raw);
 }
 
 /**
@@ -74,8 +104,11 @@ export async function computeMonthRows(
   pager: AggregatePager,
   defs: readonly KpiDefLite[],
   roster: Map<string, RosterOutlet>,
-  /** `collectDays`: keep every matched line's day split for buildMonthDays (the pager must read `withDays`). */
-  opts: { collectDays?: boolean } = {},
+  /**
+   * `collectDays`: keep every matched line's day split for buildMonthDays (the pager must read `withDays`), compactly,
+   * up to `dayRowLimit` matched rows (default dayBuildRowLimit()); beyond it collection stops (MonthDayInput.tooLarge).
+   */
+  opts: { collectDays?: boolean; dayRowLimit?: number } = {},
 ): Promise<MonthComputation> {
   // M6: aggregates carry the FILE's (normalized) customer code; they are mapped onto the roster as it is NOW, so an
   // outlet added after processing is written and one removed since is not.
@@ -90,7 +123,9 @@ export async function computeMonthRows(
   // Per outlet / per customer quantity, so the displayed totals round each one ONCE like the stored values do.
   const matchedQty = new Map<string, bigint>();
   const unmatchedQty = new Map<string, bigint>();
-  const days: MonthDayInput | undefined = opts.collectDays ? { byOutlet: new Map(), rowsWithoutDays: 0 } : undefined;
+  const days: MonthDayInput | undefined = opts.collectDays ? { byOutlet: new Map(), rowsWithoutDays: 0, matchedRows: 0 } : undefined;
+  const dayRowLimit = opts.dayRowLimit ?? dayBuildRowLimit();
+  const products = new Map<string, DayProduct>();
   await pager((page) => {
     for (const a of page) {
       const code = index.get(a.outletCode);
@@ -107,10 +142,27 @@ export async function computeMonthRows(
       matchedQty.set(code, (matchedQty.get(code) ?? 0n) + a.qtyPico);
       acc.add(code, a, a.dimKey);
       if (days) {
+        days.matchedRows++;
+        if (days.tooLarge) continue;
+        if (days.matchedRows > dayRowLimit) {
+          // S5: stop collecting and drop what was collected — the month gets no day data (loud reason), never an OOM.
+          days.tooLarge = { rows: days.matchedRows, limit: dayRowLimit };
+          days.byOutlet.clear();
+          products.clear();
+          continue;
+        }
         if (a.days && slicesMatchTotals(a.days, a)) {
-          let list = days.byOutlet.get(code);
-          if (!list) days.byOutlet.set(code, (list = []));
-          list.push({ dimKey: a.dimKey, dims: a.dims, days: a.days });
+          let o = days.byOutlet.get(code);
+          if (!o) days.byOutlet.set(code, (o = { product: [], day: [], lines: [], paise: [], pico: [] }));
+          let p = products.get(a.dimKey);
+          if (!p) products.set(a.dimKey, (p = { dimKey: a.dimKey, dims: a.dims }));
+          for (const d of a.days) {
+            o.product.push(p);
+            o.day.push(d.day);
+            o.lines.push(d.lines);
+            o.paise.push(d.amountPaise);
+            o.pico.push(d.qtyPico);
+          }
         } else {
           days.rowsWithoutDays++;
         }

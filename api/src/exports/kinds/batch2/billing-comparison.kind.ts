@@ -28,25 +28,13 @@ function describe(p: BillingComparisonExportParams): string {
   return parts.join(' · ');
 }
 
-/** Plain-words status of the comparison for the About sheet. */
+/**
+ * Plain-words status of the comparison for the About sheet — the SAME `message` text the card shows (built once in
+ * admin-core/dashboards/billing-comparison.ts), never a second wording.
+ */
 export function comparisonStatusText(d: BillingComparisonData): string {
-  switch (d.reason) {
-    case 'NO_KPI':
-      return 'No enabled KPI — nothing to compare.';
-    case 'NO_DAY_LEVEL_DATA':
-      return 'This program has no day-by-day sales data, so month-to-date comparisons are not available.';
-    case 'NO_DAY_DATA_FOR_MONTH':
-      return `No day-by-day sales data for ${monthWords(d.month)} yet.`;
-    case 'KPI_NOT_IN_DAY_DATA':
-      return `The day-by-day sales data does not include ${d.kpi?.label ?? 'this KPI'}.`;
-    default:
-      break;
-  }
-  if (!d.lastMonth.available) {
-    return d.lastMonth.availableFrom
-      ? `Comparison with last month available from ${monthWords(d.lastMonth.availableFrom)}.`
-      : 'Comparison with last month is not available.';
-  }
+  if (d.reason) return d.message ?? 'Comparison not available.';
+  if (!d.lastMonth.available) return d.lastMonth.message ?? 'Comparison with last month not available.';
   return 'Compared';
 }
 
@@ -64,6 +52,8 @@ async function run(ctx: ExportRunContext, p: BillingComparisonExportParams, out:
     ['Last month', `${monthWords(data.lastMonth.month)}${data.lastMonth.compareDay ? ` to day ${data.lastMonth.compareDay}` : ''}`],
     ['Rule', `Outlets with a target whose month-to-date billing is below ${data.slowerThanUsual.thresholdPct}% of their own billing last month to the same day (outlets that billed nothing last month to that day are not listed)`],
     ['Status', comparisonStatusText(data)],
+    ['3-month average', data.reason ? '—' : data.threeMonthAvg.available ? 'Compared' : (data.threeMonthAvg.message ?? '3-month average not available.')],
+    ['% of last month', 'This month to the day ÷ last month to the same day × 100 (79.9 = 79.9%), rounded down to 1 decimal'],
     ['Program', p.program ?? 'All programs'],
     ['Outlet type', p.outletType ?? 'All outlet types'],
     ['Manager', p.managerId ? (data.managerName ?? 'Unknown manager') + ' (and their team)' : 'Everyone'],

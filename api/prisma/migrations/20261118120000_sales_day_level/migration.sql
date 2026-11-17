@@ -1,6 +1,11 @@
 -- Sales Import day-level storage (owner decision 2026-11-18). ADDITIVE ONLY: two new tables + two nullable JSON columns
--- on the sales-import tables. No data is changed or deleted here (the one-off history trim is a separate, owner-gated
--- script: src/sales-import/oneoff/sales-history-trim.main.ts).
+-- on the sales-import tables. No data is changed or deleted here, and the release changes no retention by itself (the
+-- new windows apply only with SALES_RETENTION_V2=on, after the owner-gated one-off trim:
+-- src/sales-import/oneoff/sales-history-trim.main.ts; runbook in SALES-IMPORT-PIPELINE-PLAN.md §17b).
+
+-- Fail fast instead of queueing behind a long transaction on the live sales tables (the ALTERs below take an ACCESS
+-- EXCLUSIVE lock, briefly): a lock not obtained within 5 s aborts the migration, which is simply re-run.
+SET lock_timeout = '5s';
 
 -- Per-outlet, per-IST-invoice-day month-to-date KPI values (sparse: only days the outlet billed something).
 CREATE TABLE "outlet_sales_days" (

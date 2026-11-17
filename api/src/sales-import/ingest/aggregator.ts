@@ -7,8 +7,10 @@
  *  - not on the roster NOW → also unmatched[month][code] (with the name) for unmatched.csv + the frozen summary;
  *  - every valid line      → month summary counters, dimension values, dimension combos.
  * Day level (sales-day-level, 2026-11-18): each aggregate also carries its split by IST invoice DAY (`days`, summing
- * exactly to the row). Memory: a row whose lines all fall on ONE day (the common case) costs one small integer; a
- * second distinct day allocates a small per-row day map. ⚠️ Re-measure the real file's heap peak (plan §7.1 step 11).
+ * exactly to the row). Memory (S5): a row whose lines all fall on ONE day (the common case) costs one small integer; a
+ * second distinct day allocates ONE flat array per row ([day, paise, pico, lines, …] — no Map, no per-day objects),
+ * ≈ 32 B + the BigInts per extra day. The worker's heap backstop (HeapGuard, 75 % of old space) covers it like every
+ * other aggregator allocation. ⚠️ Re-measure the real file's heap peak (plan §7.1 step 11).
  * Invalid lines are skipped with a reason (≤ SALES_IMPORT_MAX_ERROR_SAMPLES samples kept, all counted).
  * Fully blank rows are ignored silently (trailing empty rows in an export).
  * Memory is bounded (S4): more than SALES_IMPORT_MAX_DISTINCT_CODES customer codes, MAX_AGGREGATE_KEYS aggregate keys
@@ -66,31 +68,42 @@ export interface UnmatchedRow extends AggValue {
   name: string;
 }
 
-/** An aggregate entry: totals + its day split (`byDay` null = every line so far on `day0`). */
+/**
+ * An aggregate entry: totals + its day split. `split` null = every line so far on `day0` (the totals ARE that day);
+ * otherwise a FLAT array of 4-tuples [day, paise, pico, lines, day, paise, pico, lines, …] (S5: compact — no Map and
+ * no per-day objects; at most 31 days, so the linear scan is short).
+ */
 interface AggEntry extends AggValue {
   day0: number;
-  byDay: Map<number, DaySlice> | null;
+  split: Array<number | bigint> | null;
 }
 
 /** Add one line's values to the entry's day split (BEFORE the totals are updated). */
 function addDay(e: AggEntry, day: number, paise: bigint, pico: bigint): void {
-  if (e.byDay === null) {
+  if (e.split === null) {
     if (day === e.day0) return; // still single-day: the totals ARE the day's values
-    e.byDay = new Map([[e.day0, { day: e.day0, amountPaise: e.amountPaise, qtyPico: e.qtyPico, lines: e.lines }]]);
+    e.split = [e.day0, e.amountPaise, e.qtyPico, e.lines];
   }
-  const s = e.byDay.get(day);
-  if (s) {
-    s.amountPaise += paise;
-    s.qtyPico += pico;
-    s.lines++;
-  } else {
-    e.byDay.set(day, { day, amountPaise: paise, qtyPico: pico, lines: 1 });
+  const s = e.split;
+  for (let i = 0; i < s.length; i += 4) {
+    if (s[i] === day) {
+      s[i + 1] = (s[i + 1] as bigint) + paise;
+      s[i + 2] = (s[i + 2] as bigint) + pico;
+      s[i + 3] = (s[i + 3] as number) + 1;
+      return;
+    }
   }
+  s.push(day, paise, pico, 1);
 }
 
 function daysOf(e: AggEntry): DaySlice[] {
-  if (e.byDay === null) return [{ day: e.day0, amountPaise: e.amountPaise, qtyPico: e.qtyPico, lines: e.lines }];
-  return [...e.byDay.values()].sort((a, b) => a.day - b.day).map((s) => ({ ...s }));
+  if (e.split === null) return [{ day: e.day0, amountPaise: e.amountPaise, qtyPico: e.qtyPico, lines: e.lines }];
+  const out: DaySlice[] = [];
+  const s = e.split;
+  for (let i = 0; i < s.length; i += 4) {
+    out.push({ day: s[i] as number, amountPaise: s[i + 1] as bigint, qtyPico: s[i + 2] as bigint, lines: s[i + 3] as number });
+  }
+  return out.sort((a, b) => a.day - b.day);
 }
 
 interface MonthAcc {
@@ -348,7 +361,7 @@ export class SalesAggregator {
         throw new AggregatorLimitError(`Row ${rowNo}: the quantity exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
       }
       if (this.aggregateCount + this.unmatchedCount >= this.maxTracked) throw this.tooMany();
-      byDim.set(dimKey, { amountPaise: paise, qtyPico: pico, lines: 1, day0: day, byDay: null });
+      byDim.set(dimKey, { amountPaise: paise, qtyPico: pico, lines: 1, day0: day, split: null });
       this.aggregateCount++;
       if (!this.dimsByKey.has(dimKey)) this.dimsByKey.set(dimKey, dims);
     }

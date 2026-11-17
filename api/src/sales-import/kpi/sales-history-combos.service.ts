@@ -5,6 +5,7 @@ import {
   SALES_HISTORY_COMBOS_MAX_MONTHS,
   SALES_IMPORT_MAX_DIMENSION_COMBOS,
   SALES_IMPORT_MAX_DIMENSION_VALUES,
+  SALES_MONTH_HISTORY_RETENTION_YEARS,
   type SalesDimensionCombo,
   type SalesDimensionValues,
   type SalesHistoryCombos,
@@ -12,7 +13,7 @@ import {
 import { paiseToRupees, picoToCases } from '../ingest/normalize';
 import { isMonthKey } from '../months/month-state';
 import { classifyMonthSummaries } from './month-combos';
-import { historyCutoffMonth, historyRetentionMessage, historyRetentionMonths, isBeyondHistoryRetention } from '../retention-window';
+import { historyCutoffMonth, historyRetentionMessage, historyRetentionMonths, isBeyondHistoryRetention, salesRetentionV2 } from '../retention-window';
 
 export interface SalesHistoryCombosQuery {
   month?: string;
@@ -20,11 +21,12 @@ export interface SalesHistoryCombosQuery {
 }
 
 /**
- * Upper bound on the set headers read for the month picker (one row per stored month; history is kept for the current
- * month + 3 previous — retention-window.ts — so a handful). "Last N" with N above the stored months returns what exists:
- * `months` / `availableMonths` say exactly which months were read.
+ * Upper bound on the set headers read for the month picker (one row per stored month inside the history window —
+ * retention-window.ts: 10 years while SALES_RETENTION_V2 is off, as before; the current month + 3 previous with it on).
+ * "Last N" with N above the stored months returns what exists: `months` / `availableMonths` say exactly which months
+ * were read.
  */
-const maxSetRows = () => historyRetentionMonths() + 2;
+const maxSetRows = () => (salesRetentionV2() ? historyRetentionMonths() + 2 : (SALES_MONTH_HISTORY_RETENTION_YEARS + 2) * 12);
 /** Per-statement bound for the read (summary rows: thousands per month; the missing-summary fallback reads lines). */
 export const HISTORY_COMBOS_STATEMENT_TIMEOUT_MS = 10_000;
 /** The read transaction's own bound (a handful of statements, each ≤ the statement timeout). */
@@ -104,7 +106,7 @@ export class SalesHistoryCombosService {
           await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
           // Constant, not user input (SET takes no bind parameters).
           await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`);
-          // Months older than the retention window (current + 3 previous) are being deleted by the sweep: never offered or read.
+          // Months older than the history window (retention-window.ts) are being deleted by the sweep: never offered or read.
           const cutoff = historyCutoffMonth();
           const sets = await tx.salesMonthHistorySet.findMany({
             where: { clientId, month: { gte: cutoff } },

@@ -288,6 +288,19 @@ describe('SalesAggregator — day split (sales-day-level)', () => {
     expect(r.getDays('2026-10', 'O1', '{"dimA":"Y","dimB":"500"}')).toEqual([{ day: 9, amountPaise: 700n, qtyPico: pico(1_000_000n), lines: 1 }]);
   });
 
+  it('S5: the per-row day split is stored COMPACTLY — one-day rows hold no split at all, a multi-day row ONE flat array (no Map / per-day objects)', () => {
+    const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    a.push(row('O1', '2026-10-09', 'Y', '500', '7.00', '1'), 2);
+    a.push(row('O1', '2026-10-09', 'Y', '500', '1.00', '1'), 3);
+    for (const [i, d] of ['2026-10-20', '2026-10-03', '2026-10-20', '2026-10-11'].entries()) a.push(row('O1', d, 'X', '500', '1.00', '0'), 4 + i);
+    const entries = (a as unknown as { aggs: Map<string, Map<string, Map<string, { split: unknown }>>> }).aggs.get('2026-10')!.get('O1')!;
+    expect(entries.get('{"dimA":"Y","dimB":"500"}')!.split).toBeNull();
+    const split = entries.get(KEY_X500)!.split;
+    expect(Array.isArray(split)).toBe(true);
+    expect(split).toEqual([20, 200n, 0n, 2, 3, 100n, 0n, 1, 11, 100n, 0n, 1]);
+    expect(a.result().getDays('2026-10', 'O1', KEY_X500)!.map((d) => [d.day, d.amountPaise, d.lines])).toEqual([[3, 100n, 1], [11, 100n, 1], [20, 200n, 2]]);
+  });
+
   it('the day is the IST calendar day — an instant late on the 31st (UTC) is the 1st of the NEXT month in IST', () => {
     const a = new SalesAggregator({ ...MAP, dateOrder: 'YMD' }, IDX, roster(['O1']), TODAY);
     a.push(row('O1', '2026-10-31T20:00:00Z', 'X', '500', '1', '0'), 2); // 01:30 IST on 1 Nov

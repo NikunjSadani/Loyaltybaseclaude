@@ -40,13 +40,20 @@ export const SALES_IMPORT_STALE_HEARTBEAT_MINUTES = 10;
 export const SALES_IMPORT_MAX_ATTEMPTS = 3;
 /** Max UPLOADING imports per tenant at once (POST uploads → 409 beyond it). */
 export const SALES_IMPORT_MAX_INFLIGHT_UPLOADS = 3;
-/** Raw parts, unmatched.csv, aggregates and sample rows are purged this long after an import finishes (owner 2026-11-18: 7, was 30). */
-export const SALES_IMPORT_RETENTION_DAYS = 7;
 /**
- * SalesMonthHistory (the final applied programme-outlet lines per month, + its product-list summary and set headers) AND
- * the day-level data (OutletSalesDay + SalesDaySet) are kept for this many months: the current IST month + the 3 before it
- * (owner 2026-11-18; was 10 years). Older months are deleted by the retention sweep. Default of the API setting
- * SALES_HISTORY_RETENTION_MONTHS.
+ * Retention (api/src/sales-import/retention-window.ts reads these; the switch SALES_RETENTION_V2 picks the regime and is
+ * OFF by default, so a deploy changes no retention):
+ * Raw parts, unmatched.csv, aggregates and sample rows are purged this long after an import finishes — switch OFF.
+ */
+export const SALES_IMPORT_RETENTION_DAYS = 30;
+/** The same with SALES_RETENTION_V2=on (owner 2026-11-18), and what the one-off trim applies explicitly. */
+export const SALES_IMPORT_RETENTION_DAYS_V2 = 7;
+/** SalesMonthHistory (+ its product-list summary and set headers) is kept this long — switch OFF. */
+export const SALES_MONTH_HISTORY_RETENTION_YEARS = 10;
+/**
+ * The new month window (owner 2026-11-18): the current IST month + the 3 before it. Month history follows it with
+ * SALES_RETENTION_V2=on (and the one-off trim applies it explicitly); the day-level data (OutletSalesDay + SalesDaySet)
+ * ALWAYS follows it. Default of the API setting SALES_HISTORY_RETENTION_MONTHS.
  */
 export const SALES_MONTH_HISTORY_RETENTION_MONTHS = 4;
 /** An UPLOADING import older than this is abandoned: CANCELLED + purged. */
@@ -432,7 +439,8 @@ export interface SalesMonthRow {
   downstream: { creditBatches: number; exports: number };
   /**
    * Stored month history (SalesMonthHistory): the FINAL applied file lines of this month (programme outlets only),
-   * written by each apply and kept SALES_MONTH_HISTORY_RETENTION_MONTHS (current month + 3 before it). `hasHistory` →
+   * written by each apply and kept for the history window (10 years while SALES_RETENTION_V2 is off; the current month
+   * + 3 before it with it on). `hasHistory` →
    * POST …/recalculate is possible. false for a month older than that window, even while the sweep is still deleting it.
    */
   hasHistory: boolean;

@@ -15,6 +15,7 @@ import { REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS, REBUILD_PRODUCT_LIST_TX_TIME
 import { SalesMonthClosedGuard } from './sales-month-closed.guard';
 import { monthLabel, shiftMonthKey } from './month-state';
 import { historyCutoffMonth } from '../retention-window';
+import { withRetentionV2 } from '../retention-env.testspec';
 
 const CUR = currentMonthKey();
 const PREV = shiftMonthKey(CUR, -1);
@@ -203,7 +204,16 @@ describe('SalesMonthsService (K-4)', () => {
     await expect(new SalesMonthsService(d as never).list('t1', '2026-13')).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('retention window: a month older than current + 3 previous shows NO history (no recalculate) even while the sweep still holds its header', async () => {
+  it('S1 switch OFF (default): a month 4 months back still shows its history (10-year retention, as before)', () => withRetentionV2(undefined, async () => {
+    const OUT = shiftMonthKey(CUR, -4);
+    const d = db([], { history: [{ month: OUT, sourceImportId: 'old', appliedAt: AT }] });
+    d.salesMonthHistorySet.findMany.mockImplementation(async ({ where }: { where: { month: { in: string[] } } }) =>
+      [{ month: OUT, sourceImportId: 'old', appliedAt: AT }].filter((h) => where.month.in.includes(h.month)));
+    const rows = await new SalesMonthsService(d as never).list('t1');
+    expect(Object.fromEntries(rows.map((r) => [r.month, r]))[OUT]).toEqual(expect.objectContaining({ hasHistory: true, historySourceImportId: 'old' }));
+  }));
+
+  it('S1 switch ON — retention window: a month older than current + 3 previous shows NO history (no recalculate) even while the sweep still holds its header', () => withRetentionV2('on', async () => {
     const OUT = shiftMonthKey(CUR, -4);
     const IN = shiftMonthKey(CUR, -3);
     const d = db([], { history: [{ month: OUT, sourceImportId: 'old', appliedAt: AT }, { month: IN, sourceImportId: 'imp9', appliedAt: AT }] });
@@ -214,7 +224,7 @@ describe('SalesMonthsService (K-4)', () => {
     expect(by[OUT]).toEqual(expect.objectContaining({ hasHistory: false, historySourceImportId: null }));
     expect(by[IN]).toEqual(expect.objectContaining({ hasHistory: true, historySourceImportId: 'imp9' }));
     expect(d.salesMonthHistorySet.findMany.mock.calls[0][0].where.month.in).not.toContain(OUT);
-  });
+  }));
 });
 
 describe('route metadata (roles / permissions)', () => {
@@ -498,7 +508,7 @@ describe('Rebuild product list (§10c) + productListCurrent', () => {
     await expect(new SalesMonthsService(busy.d as never).rebuildProductList(clientAdmin, PREV)).rejects.toBeInstanceOf(ConflictException);
   });
 
-  it('L1: a month outside the retention window (current + 3 previous) → 404 with the reason, before any lock; a header purged meanwhile → 404 (rolled back)', async () => {
+  it('L1 (switch ON): a month outside the retention window (current + 3 previous) → 404 with the reason, before any lock; a header purged meanwhile → 404 (rolled back)', () => withRetentionV2('on', async () => {
     const cutoff = historyCutoffMonth();
     expect(cutoff).toBe(shiftMonthKey(CUR, -3)); // computed from now: current month + the 3 before it are kept
     const old = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT });
@@ -509,7 +519,7 @@ describe('Rebuild product list (§10c) + productListCurrent', () => {
     await expect(new SalesMonthsService(raced.d as never).rebuildProductList(clientAdmin, PREV)).rejects.toBeInstanceOf(NotFoundException);
     expect(raced.order).toContain('stamp');
     expect(raced.order).not.toContain('audit'); // thrown before the audit → the whole tx rolls back
-  });
+  }));
 
   it('controller: targets:upload, gate first (flag off → 403)', async () => {
     expect(Reflect.getMetadata(PERMISSION_KEY, SalesMonthsController.prototype.rebuildProductList)).toBe('targets:upload');

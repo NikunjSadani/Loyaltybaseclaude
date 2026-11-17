@@ -9,12 +9,17 @@
  * with the SAME filters as the card; the drill-down pages …/comparison/slower-outlets and downloads
  * …/comparison/slower-outlets/export (export kind `billing-comparison-slower`).
  *
- * Honest states:
- *   - tenant without day-level sales data (`reason: NO_DAY_LEVEL_DATA`) or no KPI → renders NOTHING;
- *   - a comparison that isn't available yet → "Comparison with last month available from December 2026";
+ * Honest states (every "why" line is the backend's `message`, the SAME text the Excel About sheet carries):
+ *   - tenant without day-level sales data (`reason: NO_DAY_LEVEL_DATA`) or no KPI → renders NOTHING — and, like the
+ *     card's D6, that is REMEMBERED from the last good response: such a tenant (e.g. Deoleo) never sees a loading line
+ *     or an error alert, even while refetching or when a request fails;
+ *   - until the FIRST response confirms the tenant has day-level data, loading and errors render nothing too;
+ *   - no outlet with a target for the filters → "No outlets have a target for these filters.";
+ *   - a comparison that isn't available → why (before day data started / kept 4 months / incomplete month / KPI not
+ *     in the day data) + "Available from <Month>" only when that month is still to come;
  *   - the selected month has no day data / the day data doesn't carry the KPI → says so in one line;
  *   - prior month billed nothing → "nothing billed last month to compare" (never a fake ±100%);
- *   - loading → a muted line; error → an alert with Retry (the previous filters' figures are never kept).
+ *   - (day-data tenant) loading → a muted line; error → an alert with Retry (the previous filters' figures are never kept).
  * Direction is carried by an arrow AND a sign AND words for screen readers — never colour alone.
  *
  * Self-contained (no import from BillingProgressCard): embed as
@@ -39,18 +44,25 @@ export const BILLING_SLOWER_PAGE_SIZE = 25;
 
 /* ─── API contract ─────────────────────────────────────────────────────────── */
 
-export type ComparisonReason = 'NO_DAY_LEVEL_DATA' | 'NO_KPI' | 'NO_DAY_DATA_FOR_MONTH' | 'KPI_NOT_IN_DAY_DATA';
+export type ComparisonReason =
+  | 'NO_DAY_LEVEL_DATA' | 'NO_KPI' | 'NO_TARGETED_OUTLETS' | 'NO_DAY_DATA_FOR_MONTH' | 'KPI_NOT_IN_DAY_DATA';
 
 export interface BillingComparisonData {
   month: string;
   kpi: { code: string; label: string; unit: string } | null;
   reason: ComparisonReason | null;
+  /** Why the selected month has no usable day data (with NO_DAY_DATA_FOR_MONTH). */
+  monthDataReason?: string | null;
+  /** Plain-words line for `reason` (null when computed). */
+  message?: string | null;
   compareDay: number | null;
   current: { mtd: number | null; outlets: number };
   lastMonth: {
     available: boolean;
     availableFrom: string | null;
     reason?: string | null;
+    /** Plain-words line when unavailable. */
+    message?: string | null;
     month: string;
     compareDay: number | null;
     mtd: number | null;
@@ -60,6 +72,7 @@ export interface BillingComparisonData {
     available: boolean;
     availableFrom: string | null;
     reason?: string | null;
+    message?: string | null;
     months: string[];
     compareDays?: Array<number | null>;
     avgMtd: number | null;
@@ -172,6 +185,10 @@ export function BillingComparison({ month, program = '', outletType = '', manage
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [drillOpen, setDrillOpen] = useState(false);
+  // C5: does the tenant have day-level data, per the LAST GOOD response? null = not known yet. Until it is known to be
+  // true, loading and errors render nothing (a tenant without day data — e.g. Deoleo — never sees a flash); once a
+  // response says NO_DAY_LEVEL_DATA it stays hidden through later refetches and failures (like the card's D6).
+  const [dayTenant, setDayTenant] = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -183,7 +200,9 @@ export function BillingComparison({ month, program = '', outletType = '', manage
         if (!r.ok) throw new Error(await readError(r));
         const payload = unwrap<BillingComparisonData>(await r.json());
         if (!payload || !payload.lastMonth || !payload.threeMonthAvg) throw new Error('Empty or malformed response');
-        if (!cancelled) setData(payload);
+        if (cancelled) return;
+        setDayTenant(payload.reason !== 'NO_DAY_LEVEL_DATA');
+        setData(payload);
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error && err.message ? err.message : 'Failed to load the comparison');
@@ -201,6 +220,11 @@ export function BillingComparison({ month, program = '', outletType = '', manage
       {children}
     </div>
   );
+
+  // Not (or not yet known to be) a day-level tenant → nothing at all, whatever the request state.
+  if (dayTenant !== true) {
+    if (loading || error || !data) return null;
+  }
 
   if (loading) {
     return wrap(
@@ -235,17 +259,24 @@ export function BillingComparison({ month, program = '', outletType = '', manage
   const unit = data.kpi.unit ?? '';
   const monthLabel = comparisonMonthWords(data.month);
 
+  if (data.reason === 'NO_TARGETED_OUTLETS') {
+    return wrap(
+      <p data-testid="billing-comparison-no-targets" className="text-gray-500">
+        {data.message || 'No outlets have a target for these filters.'}
+      </p>,
+    );
+  }
   if (data.reason === 'NO_DAY_DATA_FOR_MONTH') {
     return wrap(
       <p data-testid="billing-comparison-no-month-data" className="text-gray-500">
-        No day-by-day sales for {monthLabel} yet, so it can&apos;t be compared with earlier months.
+        {data.message || `There are no day-by-day sales for ${monthLabel}, so it can't be compared with earlier months.`}
       </p>,
     );
   }
   if (data.reason === 'KPI_NOT_IN_DAY_DATA') {
     return wrap(
       <p data-testid="billing-comparison-kpi-missing" className="text-gray-500">
-        The day-by-day sales data doesn&apos;t include {data.kpi.label}, so it can&apos;t be compared with earlier months.
+        {data.message || `The day-by-day sales data doesn't include ${data.kpi.label}, so it can't be compared with earlier months.`}
       </p>,
     );
   }
@@ -267,9 +298,10 @@ export function BillingComparison({ month, program = '', outletType = '', manage
           available={lm.available}
           deltaPct={lm.deltaPct}
           unavailableText={
-            lm.availableFrom
+            lm.message ||
+            (lm.availableFrom
               ? `Comparison with last month available from ${comparisonMonthWords(lm.availableFrom)}`
-              : 'Comparison with last month not available'
+              : 'Comparison with last month not available')
           }
           zeroBaseText="nothing billed last month to this day to compare"
           title={lm.available ? `This month ${fmtAmount(data.current.mtd, unit)} · ${comparisonMonthWords(lm.month)} ${fmtAmount(lm.mtd, unit)}` : undefined}
@@ -280,9 +312,10 @@ export function BillingComparison({ month, program = '', outletType = '', manage
           available={avg.available}
           deltaPct={avg.deltaPct}
           unavailableText={
-            avg.availableFrom
+            avg.message ||
+            (avg.availableFrom
               ? `3-month average available from ${comparisonMonthWords(avg.availableFrom)}`
-              : '3-month average not available'
+              : '3-month average not available')
           }
           zeroBaseText="nothing billed in the last 3 months to this day to compare"
           title={avg.available ? `This month ${fmtAmount(data.current.mtd, unit)} · 3-month average ${fmtAmount(avg.avgMtd, unit)}` : undefined}

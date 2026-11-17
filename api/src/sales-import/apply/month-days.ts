@@ -21,7 +21,21 @@
  */
 import { OutletKpiAccumulator, type KpiDefLite } from '../kpi/sales-kpi.helper';
 import type { RosterOutlet } from '../kpi/sales-import-data';
-import { storedUnits, unitsToNumber, type DayLine, type MonthDayInput, type MonthOutletRow } from './month-compute';
+import { storedUnits, unitsToNumber, type MonthDayInput, type MonthOutletRow, type OutletDaySlices } from './month-compute';
+
+/*
+ * S5 MEMORY (apply / recalculate / its preview run in gifsy-api, 1 GiB shared with live tenants):
+ *   - computeMonthRows keeps each matched line's day split ONCE, compactly (OutletDaySlices: flat parallel arrays, the
+ *     product interned) — no per-line / per-slice objects, no second copy of the rows;
+ *   - buildMonthDays evaluates ONE outlet at a time with its own accumulator (sharing only the product-match cache), so
+ *     the accumulator state of finished outlets is garbage immediately; the outlet's slices are dropped once built;
+ *   - above SALES_DAY_BUILD_MAX_ROWS matched rows (default 500,000) nothing is collected (MonthDayInput.tooLarge) and the
+ *     month gets no day data with a loud reason.
+ * Estimate for 400,000 matched rows (≈ 1.3 days per row ⇒ ≈ 520,000 slices): per slice 5 array slots (40 B) + the two
+ * BigInts decoded from the page and retained (≈ 2 × 24 B) + growth slack (≈ 25 %) ≈ 110 B ⇒ ≈ 57 MB; the output rows
+ * (≈ outlets × billing days, e.g. 6,500 × 10 = 65,000 rows × ≈ 200 B) ≈ 13 MB; the per-outlet accumulator is transient
+ * (KBs). Added peak ≈ 70 MB, vs ≈ 150 MB for the previous per-line objects (DayLine + DaySlice objects + per-row dims / dimKey).
+ */
 
 export interface OutletDayRow {
   outletId: string;
@@ -33,11 +47,14 @@ export interface OutletDayRow {
 export type MonthDaysBuild =
   | { ok: true; rows: OutletDayRow[]; outlets: number }
   | { ok: false; code: 'NO_DAY_SPLIT'; rowsWithoutDays: number }
+  | { ok: false; code: 'TOO_LARGE'; rows: number; limit: number }
+  | { ok: false; code: 'OUT_OF_WINDOW'; month: string }
   | { ok: false; code: 'MISMATCH'; detail: string };
 
 /**
  * `written` = exactly the outlet rows the month write stores (values non-empty). Only their keys are written per day;
  * an outlet with no line this month gets no day row (its MTD is 0 every day, matching its zero-filled monthly values).
+ * Consumes `input` (each outlet's slices are released once built).
  */
 export function buildMonthDays(
   input: MonthDayInput | undefined,
@@ -46,9 +63,10 @@ export function buildMonthDays(
   written: readonly MonthOutletRow[],
 ): MonthDaysBuild {
   if (!input) return { ok: false, code: 'NO_DAY_SPLIT', rowsWithoutDays: -1 };
+  if (input.tooLarge) return { ok: false, code: 'TOO_LARGE', rows: input.tooLarge.rows, limit: input.tooLarge.limit };
   if (input.rowsWithoutDays > 0) return { ok: false, code: 'NO_DAY_SPLIT', rowsWithoutDays: input.rowsWithoutDays };
   const index = new Map(defs.map((d, i) => [d.kpiCode, i]));
-  const acc = new OutletKpiAccumulator(defs);
+  const matchCache = new Map<string, boolean[]>();
   const rows: OutletDayRow[] = [];
   let outlets = 0;
   for (const w of written) {
@@ -58,18 +76,26 @@ export function buildMonthDays(
     for (const k of keys) {
       if (!index.has(k)) return { ok: false, code: 'MISMATCH', detail: `${w.outletCode}: ${k} is not an owned KPI` };
     }
-    const byDay = groupByDay(input.byOutlet.get(w.outletCode) ?? []);
+    const slices = input.byOutlet.get(w.outletCode);
+    input.byOutlet.delete(w.outletCode);
+    // One accumulator per outlet (its state is garbage once the outlet is done); the product-match cache is shared.
+    const acc = new OutletKpiAccumulator(defs, matchCache);
     let last: Record<string, number> | null = null;
-    for (const [day, slices] of byDay) {
-      for (const s of slices) acc.add(w.outletCode, s.agg, s.dimKey);
-      const mtd: Record<string, number> = {};
-      for (const k of keys) {
-        const i = index.get(k)!;
-        const m = defs[i].measure;
-        mtd[k] = unitsToNumber(storedUnits(acc.rawSum(w.outletCode, i), m), m);
+    if (slices) {
+      for (const [day, idx] of groupByDay(slices)) {
+        for (const i of idx) {
+          const p = slices.product[i];
+          acc.add(w.outletCode, { dims: p.dims, amountPaise: slices.paise[i], qtyPico: slices.pico[i], lines: slices.lines[i] }, p.dimKey);
+        }
+        const mtd: Record<string, number> = {};
+        for (const k of keys) {
+          const i = index.get(k)!;
+          const m = defs[i].measure;
+          mtd[k] = unitsToNumber(storedUnits(acc.rawSum(w.outletCode, i), m), m);
+        }
+        rows.push({ outletId, outletCode: w.outletCode, day, mtdValues: mtd });
+        last = mtd;
       }
-      rows.push({ outletId, outletCode: w.outletCode, day, mtdValues: mtd });
-      last = mtd;
     }
     if (last) outlets++;
     for (const k of keys) {
@@ -82,17 +108,13 @@ export function buildMonthDays(
   return { ok: true, rows, outlets };
 }
 
-type Slice = { dimKey: string; agg: { dims: Record<string, string>; amountPaise: bigint; qtyPico: bigint; lines: number } };
-
-/** The outlet's lines regrouped by day, days ascending. */
-function groupByDay(lines: readonly DayLine[]): Array<[number, Slice[]]> {
-  const m = new Map<number, Slice[]>();
-  for (const l of lines) {
-    for (const d of l.days) {
-      let list = m.get(d.day);
-      if (!list) m.set(d.day, (list = []));
-      list.push({ dimKey: l.dimKey, agg: { dims: l.dims, amountPaise: d.amountPaise, qtyPico: d.qtyPico, lines: d.lines } });
-    }
+/** The outlet's slice indices grouped by day, days ascending (slice order kept within a day). */
+function groupByDay(s: OutletDaySlices): Array<[number, number[]]> {
+  const m = new Map<number, number[]>();
+  for (let i = 0; i < s.day.length; i++) {
+    let list = m.get(s.day[i]);
+    if (!list) m.set(s.day[i], (list = []));
+    list.push(i);
   }
   return [...m.entries()].sort((a, b) => a[0] - b[0]);
 }

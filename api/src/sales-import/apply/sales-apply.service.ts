@@ -39,7 +39,8 @@ import { computeMonthRows, sumOwnedValues, unitsToNumber, type MonthComputation 
 import { buildMonthDays } from './month-days';
 import { dayDataReason, replaceMonthDays } from './month-days-write';
 import { dayOfDate } from '../days/day-slices';
-import { historyRetentionMessage, isBeyondHistoryRetention } from '../retention-window';
+import { historyRetentionMessage, isBeyondDayDataRetention, isBeyondHistoryRetention } from '../retention-window';
+import type { MonthDaysBuild } from './month-days';
 import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
@@ -250,8 +251,10 @@ export class SalesApplyService {
             throw new MonthApplyError(FOCUS_CHANGED_MESSAGE);
           }
         }
-        const comp = await computeMonthRows(importPager(tx, importId, month, { withDays: true }), focus?.evalDefs ?? defs, roster, {
-          collectDays: true,
+        // Day data only inside its window (current + 3 previous): an older month reads no day split at all.
+        const withDays = !isBeyondDayDataRetention(month);
+        const comp = await computeMonthRows(importPager(tx, importId, month, { withDays }), focus?.evalDefs ?? defs, roster, {
+          collectDays: withDays,
         });
         const snap = await tx.salesImport.findFirst({ where: { id: importId, clientId }, select: { mappingSnapshot: true } });
         return this.writeMonth(tx, user, {
@@ -422,7 +425,7 @@ export class SalesApplyService {
       month,
       source: w.source,
       sourceImportId: w.sourceImportId,
-      build: buildMonthDays(w.comp.days, w.evalDefs, w.roster, rowsToWrite),
+      build: monthDaysFor(month, w.comp, w.evalDefs, w.roster, rowsToWrite),
       lastDay: w.lastDay,
       now,
     });
@@ -497,11 +500,12 @@ export class SalesApplyService {
       clientId, month, defs, roster, labelOf: labels,
       catalogue: lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId)),
     });
-    const comp = await computeMonthRows(historyPager(this.prisma, clientId, month, AGG_PAGE_SIZE, { withDays: true }), focus.evalDefs, roster, {
-      collectDays: true,
+    const withDays = !isBeyondDayDataRetention(month);
+    const comp = await computeMonthRows(historyPager(this.prisma, clientId, month, AGG_PAGE_SIZE, { withDays }), focus.evalDefs, roster, {
+      collectDays: withDays,
     });
     // Would the recalculation rebuild the month's day data? Same check the write runs (honest preview, never silent).
-    const dayBuild = buildMonthDays(comp.days, focus.evalDefs, roster, comp.rows.filter((r) => Object.keys(r.values).length > 0));
+    const dayBuild = monthDaysFor(month, comp, focus.evalDefs, roster, comp.rows.filter((r) => Object.keys(r.values).length > 0));
     const existing = await this.prisma.outletSalesRecord.findMany({
       where: { clientId, month },
       select: { outletCode: true, kpiValues: true, batch: { select: { status: true, createdAt: true } } },
@@ -591,8 +595,9 @@ export class SalesApplyService {
             throw new ConflictException(FOCUS_CHANGED_MESSAGE);
           }
         }
-        const comp = await computeMonthRows(historyPager(tx, clientId, month, AGG_PAGE_SIZE, { withDays: true }), focus?.evalDefs ?? defs, roster, {
-          collectDays: true,
+        const withDays = !isBeyondDayDataRetention(month);
+        const comp = await computeMonthRows(historyPager(tx, clientId, month, AGG_PAGE_SIZE, { withDays }), focus?.evalDefs ?? defs, roster, {
+          collectDays: withDays,
         });
         // SalesDaySet.lastDay = the applied file's last invoice day in the month (its frozen month summary survives the
         // import's retention purge); null → the latest day in the stored lines.
@@ -648,6 +653,18 @@ export class SalesApplyService {
     const p = await this.prisma.salesImportProfile.findUnique({ where: { clientId }, select: { columnMapping: true } });
     return mappingFingerprint((p?.columnMapping ?? null) as SalesColumnMapping | null);
   }
+}
+
+/** The month's day build: none for a month outside the day-data window (said so), else buildMonthDays (S5-bounded). */
+function monthDaysFor(
+  month: string,
+  comp: MonthComputation,
+  defs: readonly KpiDefLite[],
+  roster: Map<string, RosterOutlet>,
+  written: MonthComputation['rows'],
+): MonthDaysBuild {
+  if (isBeyondDayDataRetention(month)) return { ok: false, code: 'OUT_OF_WINDOW', month };
+  return buildMonthDays(comp.days, defs, roster, written);
 }
 
 /** 404 copy for a month without stored history: outside the retention window, or never applied. */

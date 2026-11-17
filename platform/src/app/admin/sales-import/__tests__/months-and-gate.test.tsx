@@ -158,6 +158,33 @@ describe('months page — recalculate from stored history', () => {
     expect(apiMock.months.mock.calls.length).toBeGreaterThan(callsBefore);
   });
 
+  it('S4: a recalculation that cannot rebuild the day-by-day figures says so in the preview AND the result; the copy says history keeps programme outlets only', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    const reason = "This month's stored sales lines were applied before day-by-day sales were stored, so this month has no day-by-day data. Apply the sales file to the month again to store it.";
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc({ dayData: { available: false, reason } })));
+    apiMock.recalculate.mockResolvedValue(ok({ month: '2026-10', ok: true, outletsWritten: 5, outletsZeroFilled: 2, dayData: { written: false, outlets: 0, rows: 0, lastDay: null, reason } }));
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    const panel = await screen.findByTestId('recalc-preview');
+    const pre = screen.getByTestId('day-data-missing-2026-10');
+    expect(pre).toHaveAttribute('role', 'alert');
+    expect(pre).toHaveTextContent(`Daily figures not stored for October 2026: ${reason}`);
+    expect(panel).toHaveTextContent('Stored history keeps programme outlets only');
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+    const result = await screen.findByTestId('recalc-result');
+    expect(result).toHaveTextContent('October 2026 recalculated: 5 outlets updated, 2 set to 0');
+    expect(result).toHaveTextContent(`Daily figures not stored for October 2026: ${reason}`);
+  });
+
+  it('S4: when the preview says the day figures CAN be rebuilt, no warning is shown', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc({ dayData: { available: true } })));
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    await screen.findByTestId('recalc-preview');
+    expect(screen.queryByTestId('day-data-missing-2026-10')).not.toBeInTheDocument();
+  });
+
   it('cancelling the confirm changes nothing', async () => {
     apiMock.months.mockResolvedValue(ok([histRow()]));
     apiMock.recalcPreview.mockResolvedValue(ok(recalc()));

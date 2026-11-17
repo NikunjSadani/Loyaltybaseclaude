@@ -34,6 +34,7 @@ import {
 import {
   MonthReconciliationPanel, reconciliationNeedsAttention, useDimensionLabels, useOutletTypeNames, type OutletTypeNames,
 } from '../_components/month-reconciliation-panel';
+import { DayDataNotice } from '../_components/day-data-notice';
 
 const POLL_MS = 2000;
 const UPLOADING_POLL_MS = 5000;
@@ -677,10 +678,13 @@ function PreviewSection({
                 {monthLabel(r.month)}: {r.ok ? 'applied' : 'not applied'}
               </p>
               {r.ok ? (
-                <p className="text-xs text-gray-700 mt-1">
-                  {formatCount(r.outletsWritten ?? 0)} outlets updated, {formatCount(r.outletsZeroFilled ?? 0)} set to 0. Targets
-                  cards and dashboards now show these numbers.
-                </p>
+                <>
+                  <p className="text-xs text-gray-700 mt-1">
+                    {formatCount(r.outletsWritten ?? 0)} outlets updated, {formatCount(r.outletsZeroFilled ?? 0)} set to 0. Targets
+                    cards and dashboards now show these numbers.
+                  </p>
+                  <DayDataNotice month={r.month} dayData={r.dayData} />
+                </>
               ) : (
                 <p className="text-xs text-red-700 mt-1">{r.error ?? 'Unknown error'}</p>
               )}

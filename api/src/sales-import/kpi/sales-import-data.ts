@@ -174,7 +174,7 @@ export interface MonthHistoryMeta {
 
 /**
  * The month's stored history set header (sales_month_history_sets; null = no history). One indexed row. A month older
- * than the retention window (current + 3 previous) has NO history here even while the bounded sweep is still deleting
+ * than the history window (retention-window.ts) has NO history here even while the bounded sweep is still deleting
  * it — a half-deleted month is never recalculated (callers say why with historyRetentionMessage).
  */
 export async function monthHistoryMeta(db: Db, clientId: string, month: string): Promise<MonthHistoryMeta | null> {

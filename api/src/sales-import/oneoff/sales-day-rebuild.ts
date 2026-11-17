@@ -5,14 +5,16 @@
  * values — it only fills the history lines' day split and writes outlet_sales_days / sales_day_sets.
  *
  * Refuses (nothing written; the reason is printed and returned) when:
- *   - the month has no stored history, or is outside the retention window;
+ *   - the month has no stored history, or is outside the day-data window (current month + 3 previous);
  *   - the import's stored file is gone (retention purge: raw files are kept 7 days after the import finished);
  *   - re-reading the file does not reproduce EVERY stored history line of the month exactly (amount, quantity, lines);
  *   - the CURRENT KPI definitions / roster / focus products no longer reproduce the month's stored monthly figures
  *     (then the day data would disagree with them — recalculate or re-apply the month first);
  *   - the day values do not add up to the monthly values (buildMonthDays invariant).
- * Writes happen in ONE transaction under the month lock, after re-checking that the month's history is still the same
- * set (sourceImportId + appliedAt) the dry run read.
+ * Writes happen in ONE transaction under the month lock, after re-checking (S6) that the month's history is still the
+ * same set (sourceImportId + appliedAt), that the KPI definitions (hash) and the focus products (fingerprint) are the
+ * ones the day values were built with, and that the stored monthly figures are still what those values end on — so a
+ * recalculate / apply that ran meanwhile is never overwritten with stale day data.
  */
 import type { Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -27,8 +29,8 @@ import { dayDataReason, replaceMonthDays } from '../apply/month-days-write';
 import { APPLY_TX_TIMEOUT_MS } from '../apply/sales-apply.service';
 import { lazyCatalogue, runMonthFocus } from '../apply/month-focus';
 import { kpiLabelsOf, loadFocusCatalogue } from '../kpi/focus-data';
-import type { KpiDefLite } from '../kpi/sales-kpi.helper';
-import { historyRetentionMessage, isBeyondHistoryRetention } from '../retention-window';
+import { definitionsHash, type KpiDefLite } from '../kpi/sales-kpi.helper';
+import { dayDataRetentionMessage, isBeyondDayDataRetention } from '../retention-window';
 import { monthLabel } from '../months/month-state';
 
 export const REBUILD_SAMPLE = 20;
@@ -133,7 +135,8 @@ export async function rebuildMonthDays(deps: RebuildDeps, a: { clientId: string;
     log.warn(JSON.stringify({ msg: 'sales-day rebuild refused', clientId, month, problem }));
     return { ...base, ...extra, problem };
   };
-  if (isBeyondHistoryRetention(month)) return fail(historyRetentionMessage(month));
+  // Day data outside its window would be deleted by the next sweep: never built (whatever the history window is).
+  if (isBeyondDayDataRetention(month)) return fail(dayDataRetentionMessage(month));
   const header = await db.salesMonthHistorySet.findUnique({ where: { clientId_month: { clientId, month } } });
   if (!header) return fail(`${monthLabel(month)} has no stored sales history (no file was applied to it).`);
   const imp = await db.salesImport.findFirst({ where: { id: header.sourceImportId, clientId } });
@@ -176,13 +179,18 @@ export async function rebuildMonthDays(deps: RebuildDeps, a: { clientId: string;
   // 2. The day values, with the CURRENT definitions / roster / focus products — which must still give the stored figures.
   const { defs } = await deps.kpiDefs.enabled(clientId);
   if (defs.length === 0) return fail('No importer-owned KPIs are defined.', counts);
-  const focus = await runMonthFocus(db, {
-    clientId, month, defs, roster,
-    labelOf: await kpiLabelsOf(db, clientId, defs.map((d) => d.kpiCode)),
-    catalogue: lazyCatalogue(() => loadFocusCatalogue(db, clientId)),
-  });
+  const focusOf = async (q: Prisma.TransactionClient, d: KpiDefLite[]) =>
+    runMonthFocus(q, {
+      clientId, month, defs: d, roster,
+      labelOf: await kpiLabelsOf(q, clientId, d.map((x) => x.kpiCode)),
+      catalogue: lazyCatalogue(() => loadFocusCatalogue(q, clientId)),
+    });
+  const focus = await focusOf(db, defs);
+  const defsHash = definitionsHash(defs);
+  const focusFingerprint = focus.resolution.fingerprint;
   const pager: AggregatePager = async (onPage) => onPage(lines);
-  const comp = await computeMonthRows(pager, focus.evalDefs, roster, { collectDays: true });
+  // The one-off runs in the 2 GiB job, not the shared API: no SALES_DAY_BUILD_MAX_ROWS cap here.
+  const comp = await computeMonthRows(pager, focus.evalDefs, roster, { collectDays: true, dayRowLimit: Number.POSITIVE_INFINITY });
   const written = comp.rows.filter((r) => Object.keys(r.values).length > 0);
   const existing = await db.outletSalesRecord.findMany({ where: { clientId, month }, select: { outletCode: true, kpiValues: true } });
   const diffs = figureDifferences(existing, written, defs.map((d) => d.kpiCode));
@@ -208,6 +216,20 @@ export async function rebuildMonthDays(deps: RebuildDeps, a: { clientId: string;
       const now = await tx.salesMonthHistorySet.findUnique({ where: { clientId_month: { clientId, month } } });
       if (!now || now.sourceImportId !== header.sourceImportId || now.appliedAt.getTime() !== header.appliedAt.getTime()) {
         throw new Error(`${monthLabel(month)} was applied or recalculated while the rebuild ran; run it again.`);
+      }
+      // S6: a recalculate does not change the history set, so re-check what the day values were built WITH — the
+      // definitions and the focus products — and that the stored monthly figures still end where they do.
+      const { defs: defsNow } = await deps.kpiDefs.enabled(clientId, tx);
+      if (definitionsHash(defsNow) !== defsHash) {
+        throw new Error(`The KPI definitions changed while the rebuild of ${monthLabel(month)} ran; nothing written — run it again.`);
+      }
+      if ((await focusOf(tx, defsNow)).resolution.fingerprint !== focusFingerprint) {
+        throw new Error(`The focus products of ${monthLabel(month)} changed while the rebuild ran; nothing written — run it again.`);
+      }
+      const storedNow = await tx.outletSalesRecord.findMany({ where: { clientId, month }, select: { outletCode: true, kpiValues: true } });
+      const moved = figureDifferences(storedNow, written, defs.map((d) => d.kpiCode));
+      if (moved.length > 0) {
+        throw new Error(`${monthLabel(month)}'s monthly figures changed while the rebuild ran (e.g. ${moved[0]}); nothing written — run it again.`);
       }
       for (let i = 0; i < lines.length; i += HISTORY_UPDATE_CHUNK) {
         const chunk = lines.slice(i, i + HISTORY_UPDATE_CHUNK);

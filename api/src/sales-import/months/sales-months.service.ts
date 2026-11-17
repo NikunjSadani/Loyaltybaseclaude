@@ -83,7 +83,8 @@ export const REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS = 280_000;
  * The stored month history per month: which import it holds and when it was applied. Reads the small per-month HEADER
  * table (sales_month_history_sets, unique (clientId, month)) — never the line rows (final check H1: Prisma's `distinct`
  * is applied in Node, so a `distinct` over sales_month_histories fetched every line of every month). Months older than
- * the retention window (current + 3 previous) have NO history here, even while the sweep is still deleting them.
+ * the history window (retention-window.ts: 10 years while SALES_RETENTION_V2 is off, current + 3 previous with it on)
+ * have NO history here, even while the sweep is still deleting them.
  */
 export async function historyMetaByMonth(
   db: Pick<Prisma.TransactionClient, 'salesMonthHistorySet'>,
@@ -239,7 +240,7 @@ export class SalesMonthsService {
    */
   async rebuildProductList(user: JwtPayload, month: string): Promise<SalesMonthRebuildProductListResult> {
     if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
-    // A month outside the retention window (current + 3 previous) is being deleted by the sweep: nothing to rebuild (the
+    // A month outside the history window (retention-window.ts) is being deleted by the sweep: nothing to rebuild (the
     // same cutoff as every reader), and the 404 says why.
     if (isBeyondHistoryRetention(month)) throw new NotFoundException(historyRetentionMessage(month));
     const clientId = user.clientId;

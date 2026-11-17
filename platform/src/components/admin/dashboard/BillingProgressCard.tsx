@@ -18,6 +18,7 @@
  * filter's numbers are never left on screen under new filters).
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { BillingComparison } from './BillingComparison';
 import { AlertCircle, ChevronLeft, ChevronRight, Download, Loader2, Receipt, RefreshCw } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
 import { fmtKpiNum } from '@/lib/pace';
@@ -392,6 +393,17 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
             filtered={!!(program || outletType || managerId)}
             disabled={refetching}
             onOpen={openDrill}
+            comparison={
+              // MTD vs last month / 3-month average — directly under the headline totals (renders nothing for
+              // tenants without day-level sales).
+              <BillingComparison
+                month={month}
+                program={program}
+                outletType={outletType}
+                managerId={managerId}
+                managerName={managerName}
+              />
+            }
           />
         </div>
       )}
@@ -414,7 +426,7 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
 /* ─── Body (headline + distribution) ───────────────────────────────────────── */
 
 function BillingBody({
-  data, unit, kpiLabel, monthLabel, filtered, disabled, onOpen,
+  data, unit, kpiLabel, monthLabel, filtered, disabled, onOpen, comparison,
 }: {
   data: BillingProgressData;
   unit: string;
@@ -423,6 +435,8 @@ function BillingBody({
   filtered: boolean;
   disabled: boolean;
   onOpen: (key: BillingListKey, label: string) => void;
+  /** The MTD comparison row — placed directly under the headline totals (only when there are sales to compare). */
+  comparison?: React.ReactNode;
 }) {
   // "Missed target" only when the month is over AND the data reaches its end; otherwise pace to the data date.
   const isPast = data.monthStatus === 'PAST' && data.fullMonth !== false;
@@ -549,6 +563,8 @@ function BillingBody({
           </p>
         </div>
       </div>
+
+      {comparison}
 
       {/* Pace (to the data date) */}
       {hasPace && (

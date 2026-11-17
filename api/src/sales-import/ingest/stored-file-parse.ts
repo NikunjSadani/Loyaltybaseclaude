@@ -5,7 +5,9 @@
  * same column mapping (the import's own mappingSnapshot), the same 'auto' decimal decision. The caller VERIFIES the
  * result against the month's stored lines before using it (a re-read that does not reproduce them exactly is refused),
  * so any drift between this reader and the processor can never write wrong day data.
- * Memory: the same as processing the file (run it in the 2 GiB job with --max-old-space-size=1700).
+ * Memory: the same as processing the file (run it in the 2 GiB job with --max-old-space-size=1700). S5: the SAME heap
+ * backstop as the worker (HeapGuard: used heap vs 75 % of the configured old space, checked every 2,000 rows / 2 s, two
+ * strikes) stops the re-read with a readable problem instead of an OOM.
  */
 import type { Readable } from 'node:stream';
 import type { StorageService } from '../../storage/storage.service';
@@ -15,13 +17,22 @@ import { csvRows } from './csv-row-source';
 import { HEADER_SCAN_ROWS, resolveHeader, type SourceRow } from './header';
 import { resolveDecimalSeparator, type DecimalSeparator } from './normalize';
 import { PartsFile } from './parts-file';
-import { decideDecimal } from './sales-import-processor.service';
+import { HeapGuard, decideDecimal } from './sales-import-processor.service';
 import { xlsxRows } from './xlsx-row-source';
 import { loadCentralDirectory, planXlsxRead, resequencedXlsxStream } from './xlsx-zip';
 
 const MAX_PREHEADER_ROWS = 1000; // = the processor's bound
 
 export type StoredParse = { ok: true; result: AggregatorResult } | { ok: false; problem: string };
+
+/** The heap check the re-read runs per row (HeapGuard.check; injectable for tests). */
+export interface StoredParseHeapGuard {
+  check(rows: number): boolean;
+}
+
+const TOO_LARGE_PROBLEM = (rows: number) =>
+  `The stored file is too large to re-read in this process: the memory limit was reached after ${rows.toLocaleString('en-IN')} rows. ` +
+  'Run rebuild-days in the 2 GiB job with --max-old-space-size=1700; nothing was written.';
 
 function isBlankRow(cells: unknown[]): boolean {
   return cells.every((c) => c === null || c === undefined || (typeof c === 'string' && c.trim() === ''));
@@ -32,16 +43,18 @@ export async function parseStoredFile(
   imp: { gcsPrefix: string; sizeBytes: bigint | number; fileKind: string },
   mapping: SalesColumnMapping,
   roster: ReadonlyMap<string, string>,
+  opts: { heapGuard?: StoredParseHeapGuard } = {},
 ): Promise<StoredParse> {
   const size = Number(imp.sizeBytes);
   const parts = new PartsFile(storage, imp.gcsPrefix, size);
   const setting = mapping.decimalSeparator ?? 'auto';
-  const first = await pass(parts, size, imp.fileKind, mapping, roster, { collectDecimalEvidence: setting === 'auto' });
+  const heapGuard = opts.heapGuard ?? new HeapGuard();
+  const first = await pass(parts, size, imp.fileKind, mapping, roster, { collectDecimalEvidence: setting === 'auto', heapGuard });
   if (!first.ok || setting !== 'auto') return first.ok ? { ok: true, result: first.result } : first;
   const decision = decideDecimal(first.result.decimalEvidence, first.decimal);
   if ('needsMapping' in decision) return { ok: false, problem: decision.needsMapping };
   if (decision.decimal === first.decimal) return { ok: true, result: first.result };
-  const second = await pass(parts, size, imp.fileKind, mapping, roster, { decimal: decision.decimal });
+  const second = await pass(parts, size, imp.fileKind, mapping, roster, { decimal: decision.decimal, heapGuard });
   return second.ok ? { ok: true, result: second.result } : second;
 }
 
@@ -51,7 +64,7 @@ async function pass(
   fileKind: string,
   mapping: SalesColumnMapping,
   roster: ReadonlyMap<string, string>,
-  opts: { decimal?: DecimalSeparator; collectDecimalEvidence?: boolean },
+  opts: { decimal?: DecimalSeparator; collectDecimalEvidence?: boolean; heapGuard: StoredParseHeapGuard },
 ): Promise<{ ok: true; result: AggregatorResult; decimal: DecimalSeparator } | { ok: false; problem: string }> {
   let source: Readable;
   let rows: AsyncGenerator<SourceRow>;
@@ -77,8 +90,11 @@ async function pass(
     for (const r of head.slice(res.headerRowIdx + 1)) agg.push(r.cells, r.rowNo);
     return null;
   };
+  let seen = 0;
   try {
     for await (const r of rows) {
+      seen++;
+      if (opts.heapGuard.check(seen)) return { ok: false, problem: TOO_LARGE_PROBLEM(seen) };
       if (isBlankRow(r.cells)) continue;
       if (agg) {
         (agg as SalesAggregator).push(r.cells, r.rowNo);

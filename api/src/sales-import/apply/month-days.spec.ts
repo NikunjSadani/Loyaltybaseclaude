@@ -1,7 +1,7 @@
 import { stableStringify, type KpiDefLite } from '../kpi/sales-kpi.helper';
 import type { AggRow, AggregatePager, RosterOutlet } from '../kpi/sales-import-data';
 import type { DaySlice } from '../days/day-slices';
-import { computeMonthRows } from './month-compute';
+import { SALES_DAY_BUILD_MAX_ROWS_DEFAULT, computeMonthRows, dayBuildRowLimit } from './month-compute';
 import { buildMonthDays } from './month-days';
 
 /**
@@ -165,5 +165,44 @@ describe('buildMonthDays — cumulative month-to-date per outlet × billing day'
     }
     expect(build.rows.some((x) => x.outletCode.startsWith('U'))).toBe(false);
     expect(build.rows.length).toBeGreaterThan(50); // a real spread of outlets × days was checked
+  });
+});
+
+describe('S5 — bounded day building', () => {
+  it('above the row limit collection STOPS, what was collected is dropped, and the build is TOO_LARGE (never an OOM)', async () => {
+    const rows = [line('O1', { b: 'A' }, [[1, 100n]]), line('O1', { b: 'B' }, [[2, 100n]]), line('O2', { b: 'A' }, [[3, 100n]]), line('ZZ', { b: 'A' }, [[3, 1n]])];
+    const r = roster(['O1', 'O2']);
+    const comp = await computeMonthRows(pagerOf(rows), [def('AMT', 'AMOUNT')], r, { collectDays: true, dayRowLimit: 2 });
+    expect(comp.days!.tooLarge).toEqual({ rows: 3, limit: 2 });
+    expect(comp.days!.byOutlet.size).toBe(0);
+    expect(comp.days!.matchedRows).toBe(3); // unmatched ZZ never counts
+    expect(comp.rows.find((x) => x.outletCode === 'O1')!.values).toEqual({ AMT: 2 }); // the monthly figures are unaffected
+    const written = comp.rows.filter((x) => Object.keys(x.values).length > 0);
+    expect(buildMonthDays(comp.days, [def('AMT', 'AMOUNT')], r, written)).toEqual({ ok: false, code: 'TOO_LARGE', rows: 3, limit: 2 });
+    // at the limit it still builds
+    const ok = await computeMonthRows(pagerOf(rows), [def('AMT', 'AMOUNT')], r, { collectDays: true, dayRowLimit: 3 });
+    expect(buildMonthDays(ok.days, [def('AMT', 'AMOUNT')], r, written).ok).toBe(true);
+  });
+
+  it('compact storage: flat per-outlet slices, the product interned once per month (rows never held twice); consumed as it builds', async () => {
+    const rows = [line('O1', { b: 'A' }, [[1, 100n], [4, 50n]]), line('O1', { b: 'A' }, [[2, 10n]]), line('O2', { b: 'A' }, [[3, 5n]])];
+    const r = roster(['O1', 'O2']);
+    const comp = await computeMonthRows(pagerOf(rows), [def('AMT', 'AMOUNT')], r, { collectDays: true });
+    const o1 = comp.days!.byOutlet.get('O1')!;
+    expect(o1.day).toEqual([1, 4, 2]);
+    expect(o1.paise).toEqual([100n, 50n, 10n]);
+    expect(o1.product[0]).toBe(o1.product[2]); // one object for the product, whichever row it came from
+    expect(o1.product[0]).toBe(comp.days!.byOutlet.get('O2')!.product[0]);
+    const written = comp.rows.filter((x) => Object.keys(x.values).length > 0);
+    const b = buildMonthDays(comp.days, [def('AMT', 'AMOUNT')], r, written);
+    expect(b.ok && b.rows.map((x) => [x.outletCode, x.day, x.mtdValues.AMT])).toEqual([['O1', 1, 1], ['O1', 2, 1.1], ['O1', 4, 1.6], ['O2', 3, 0.05]]);
+    expect(comp.days!.byOutlet.size).toBe(0); // each outlet released once built
+  });
+
+  it('the limit setting SALES_DAY_BUILD_MAX_ROWS (whole number >= 1; anything else -> the default)', () => {
+    expect(SALES_DAY_BUILD_MAX_ROWS_DEFAULT).toBe(500_000);
+    expect(dayBuildRowLimit({})).toBe(500_000);
+    expect(dayBuildRowLimit({ SALES_DAY_BUILD_MAX_ROWS: '1200000' })).toBe(1_200_000);
+    for (const bad of ['0', '-5', 'abc', '1.5', ' ']) expect(dayBuildRowLimit({ SALES_DAY_BUILD_MAX_ROWS: bad })).toBe(500_000);
   });
 });

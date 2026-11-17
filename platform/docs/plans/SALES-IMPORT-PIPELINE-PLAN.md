@@ -925,7 +925,9 @@ old aggregate rows instead of rescaling them (they belonged to imports without a
 ## 10b. Month history + "Recalculate from stored history" (owner decision 2026-11-10)
 **Why.** Per-import aggregates (every customer's lines) are purged 30 days after an import finishes (§14 retention), so
 without a durable copy a month could never be recomputed after a KPI-definition or roster change. The owner decided to
-keep exactly ONE set of lines per month — the FINAL applied one — for 10 years.
+keep exactly ONE set of lines per month — the FINAL applied one — for 10 years. **Update 2026-11-18 (sales-day-level):**
+the set now holds PROGRAMME outlets only, and the windows shrink to the current month + 3 previous once
+`SALES_RETENTION_V2=on` — see "Retention" below and the runbook in §17b.
 
 **Model** (`SalesMonthHistory`, table `sales_month_histories`, migration `20261112120000_sales_month_history` — a NEW
 migration so a database that already applied `20261111120000_sales_import_hardening` is not invalidated): clientId,
@@ -935,8 +937,11 @@ appliedById. Unique (clientId, month, customerCode, dimKey). No FK to sales_impo
 `sales_import_applies.source` = `IMPORT` | `HISTORY`.
 
 **Write.** Every APPLY of a month, inside the same transaction and month lock, DELETEs that month's history and INSERTs
-… SELECTs the applying import's aggregates for the month (all customer codes, unmatched included; outletId joined from
-the current roster). So history always equals the last applied file of the month, one set per month.
+… SELECTs the applying import's aggregates for the month. **Since 2026-11-18 (owner decision; write-side, no switch):
+PROGRAMME outlets only** — customer codes on the roster at apply time (outletId joined from that roster; unmatched
+customers are NOT stored — they stay in the import's own unmatched report while it exists), each line with its day split
+(`days`). Rows written before that date may still hold unmatched customers until the one-off trim (§17b) removes them.
+So history always equals the programme part of the last applied file of the month, one set per month.
 
 **Recalculate.** `GET admin/sales-months/:month/recalculate/preview` (targets:read) → `SalesMonthRecalcPreview`: ALL
 importer-owned KPIs recomputed from the history with the CURRENT definitions and the CURRENT roster (customer codes →
@@ -947,9 +952,20 @@ OutletSalesRecord with the SAME write as apply (full rewrite of owned keys, batc
 with `source: HISTORY` (importId = the history's source import). The history itself is not changed by a recalculation.
 `SalesMonthRow.hasHistory / historySourceImportId / historyAppliedAt` tell the UI when it is possible.
 
-**Retention.** Per-import aggregates / raw parts / unmatched.csv: 30 days after the import finishes (unchanged). Month
-history: `SALES_MONTH_HISTORY_RETENTION_YEARS` = 10 — the retention sweep (list / worker drain / idle drain) deletes
-history months (lines, set headers AND the §10c combos summary) older than 10 years before the current IST month.
+**Retention** (one place: `api/src/sales-import/retention-window.ts`; switch `SALES_RETENTION_V2`, **default OFF** — a
+deploy changes no retention):
+- switch OFF (default; the behaviour before 2026-11-18): per-import aggregates / raw parts / unmatched.csv 30 days after
+  the import finishes (`SALES_IMPORT_RETENTION_DAYS`); month history (lines, set headers AND the §10c combos summary)
+  10 years (`SALES_MONTH_HISTORY_RETENTION_YEARS`) before the current IST month;
+- switch ON (`SALES_RETENTION_V2=on`, set only after the §17b runbook): per-import data 7 days
+  (`SALES_IMPORT_RETENTION_DAYS_V2`); month history the current IST month + 3 previous
+  (`SALES_MONTH_HISTORY_RETENTION_MONTHS` = 4; the setting `SALES_HISTORY_RETENTION_MONTHS` overrides it). Readers (Months
+  list, recalculate, rebuild product list, KPI picker) treat older months as having no history even while the bounded
+  sweep is still deleting them;
+- day-level data (`outlet_sales_days` + `sales_day_sets`) ALWAYS keeps the current month + 3 previous, whatever the switch
+  (new tables — nothing that existed before is deleted by it; the comparison needs only those months). An apply /
+  recalculate of an older month stores no day data and says so (`dayData.written=false` + reason).
+The sweep (list / worker drain / idle drain) deletes by these windows; the one-off trim applies the V2 windows EXPLICITLY.
 
 **Final-check hardening (migration `20261112130000_sales_month_history_sets`, additive; backfills headers):**
 - **Set header** `sales_month_history_sets` (unique clientId+month): sourceImportId, appliedAt, appliedById, the
@@ -988,7 +1004,8 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   INSERT, with ONE `INSERT … SELECT … FROM sales_month_histories WHERE month GROUP BY dimKey, dims` (`kpi/month-combos.ts`;
   dimKey is 1:1 with dims; the apply log line adds `comboRows`, `combosMs`), and stamps the set header
   (`combosSourceImportId` / `combosAppliedAt`) in the same upsert. Recalculate does not change the history, so it does
-  not touch the summary. The 10-year retention deletes summary rows with the history.
+  not touch the summary. The history retention (10 years; current month + 3 previous with `SALES_RETENTION_V2=on`, §10b)
+  deletes summary rows with the history. Since 2026-11-18 the summary covers PROGRAMME outlets only (like the history).
 - **No background rebuild (lead decision 2026-11-10); an explicit "Rebuild product list" instead.** A summary can only be
   missing or out of date if an OLDER revision applied a month during the rolling deploy that introduces this table (no
   prod tenant has `salesImport` on; staging pushes are controlled), so there is no repair job. The earlier
@@ -999,7 +1016,7 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   `SET LOCAL statement_timeout = 240000` and a 280 s bound (apply scale), under the SAME blocking month lock as apply
   (`lockSalesMonth`): DELETE the month's summary, the same INSERT … SELECT from `sales_month_histories`, re-stamp the
   header from its own source. Allowed for OPEN and CLOSED months — it changes no achievement, KPI value or history line.
-  404 without history, for a month below the 10-year retention cutoff, or when the header was purged meanwhile (the
+  404 without history, for a month below the history retention cutoff (§10b), or when the header was purged meanwhile (the
   stamp is an `updateMany`; count 0 → 404 and the transaction rolls back); a statement timeout (e.g. the lock wait
   behind a long apply) → 409 "busy, try again".
   `SalesMonthRow.productListCurrent` (false only with history and a summary not from it) drives the Months-page button.
@@ -1012,7 +1029,7 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   stamp) are read INSIDE it, then two aggregate statements ONE AFTER THE OTHER. It never writes and never takes the month
   lock. Per month (from the header stamp, no summary scan): **current** → the summary; **missing or stale** → the stored
   lines (read-only), newest month first, while those months' line rows SUM to ≤ `HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS`
-  = 50,000; the rest → `SalesHistoryCombos.unavailableMonths` (no combos). Months below the 10-year retention cutoff
+  = 50,000; the rest → `SalesHistoryCombos.unavailableMonths` (no combos). Months below the history retention cutoff (§10b)
   (being deleted by the sweep) are never offered or read. 503 copy: statement timeout, or a P2028 for an
   expired / already-closed transaction → "Reading the stored months took too long. Try fewer months, or try again in a
   few minutes."; any other P2028 (no transaction could start) → "The server is busy right now. Try again in a moment."
@@ -1033,9 +1050,9 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
 - **Retention bounds (the idle Scheduler drain).** The drain sets `deadline = start + DRAIN_DEADLINE_MS (150 s)` and
   passes it to `sweep({deadline})`, which starts a step only if its worst case still ends by then: a purge
   (`PURGE_STEP_MS` = 120 s tx + 10 s lock wait + 15 s GCS) — inside it every statement runs under
-  `SET LOCAL statement_timeout = 100000`; a GCS retry (20 s); the 10-year history delete (45 s). The GCS prefix delete is
+  `SET LOCAL statement_timeout = 100000`; a GCS retry (20 s); the month-window history + day-data delete (45 s). The GCS prefix delete is
   abandoned after `GCS_DELETE_TIMEOUT_MS` = 15 s (the GCS client takes no abort signal, so the request itself is not
-  cancelled; `filesPurgedAt` stays null and the next sweep retries). The 10-year history delete is one transaction with
+  cancelled; `filesPurgedAt` stays null and the next sweep retries). The month-window history + day-data delete is one transaction with
   `statement_timeout = 12 s`, at most 50,000 line rows and 50,000 summary rows per call (headers go once a month's lines
   and summary are gone), so a large backlog drains over several sweeps; it runs only on the drains / worker sweeps, never
   on the import-list GET. That GET's inline sweep passes `history: false` and `stopStartingAfter` = now + 10 s (no new
@@ -1388,10 +1405,17 @@ KPIs (owner D-8/D-9). Synthetic-file steps not run on staging (covered by tests 
   `gifsy-migrate[-staging]` Cloud Run job with `--execute-now --wait` in the SAME job, BEFORE the `gcloud run deploy`
   step, so a failed migration fails the job and the API is not deployed. The worker job (`gifsy-sales-import[-staging]`)
   deploy step (in `deploy-staging.yml`, live on develop since 2026-11-11; the prod `deploy.yml` step is still owner-gated) must also come AFTER the migrate step.
-- GCS: parts + unmatched under `sales-imports/<clientId>/<importId>/`. The API deletes parts 30 days after READY (lazy, on list) or
-  immediately on DELETE. Bucket lifecycle is unchanged.
-- **Retention (current):** per-import data (raw parts, per-run unmatched.csv, aggregates, sample rows) 30 days after the
-  import finishes; abandoned uploads after 24 h; the month history (`sales_month_histories`, §10b, + its `sales_month_history_combos` summary, §10c) 10 years.
+- GCS: parts + unmatched under `sales-imports/<clientId>/<importId>/`. The API deletes parts 30 days after READY (7 days
+  with `SALES_RETENTION_V2=on`; lazy, on list / drains) or immediately on DELETE. Bucket lifecycle is unchanged.
+- **Retention (current — §10b is the reference):** with `SALES_RETENTION_V2` unset/OFF (the default; every env today):
+  per-import data (raw parts, per-run unmatched.csv, aggregates, sample rows) 30 days after the import finishes;
+  abandoned uploads after 24 h; the month history (`sales_month_histories`, §10b, + its `sales_month_history_combos`
+  summary, §10c) 10 years. With `SALES_RETENTION_V2=on`: 7 days and the current month + 3 previous. Day-level data
+  (`outlet_sales_days` / `sales_day_sets`) always the current month + 3 previous.
+- **New API env (sales-day-level):** `SALES_RETENTION_V2` (exactly `on` enables the new windows; set it on `gifsy-api`
+  AND the worker job, after §17b), `SALES_HISTORY_RETENTION_MONTHS` (optional, 1..120, default 4; V2 only),
+  `SALES_DAY_BUILD_MAX_ROWS` (optional, default 500,000 matched rows: above it apply / recalculate skip the month's day
+  data with a loud reason instead of risking the 1 GiB API's memory).
 
 ---
 
@@ -1430,7 +1454,7 @@ _(Status 2026-11-16: prod infra created and verified 2026-11-13; Bajaj prod KPI 
 2026-11-15. Q5 (KPI codes) is settled by the prod KPI configuration; Q4 (points per case / cap) belongs to the pending
 November points-rule session — see `RESUME.md` §4.)_
 _(Status 2026-11-11: Q1–Q3 DECIDED — D-1 = A, D-3 = A, D-4 = A; staging infra approved + CREATED 2026-11-10/11, prod infra = separate OK at release.
-Q7 decided = 30 days for per-import data (§14). Q4–Q5 still open and now BLOCKING the staging apply of the real import `6b681de7…`: the
+Q7 decided = 30 days for per-import data (§14) — revised 2026-11-18: 7 days + 4-month history, behind `SALES_RETENTION_V2` (§17b). Q4–Q5 still open and now BLOCKING the staging apply of the real import `6b681de7…`: the
 owner supplies points per case, monthly cap, KPI list and focus sets (BSC wholesalers only).)_
 
 1. ~~D-1: approve the 4-decorator engine guard (A), or no engine edit (B)?~~ Decided: A.
@@ -1440,7 +1464,33 @@ owner supplies points per case, monthly cap, KPI list and focus sets (BSC wholes
 5. D-9: final KPI codes/labels/units for Bajaj (`ADHO TARGET`, `NON ADHO`, `CNO 500` ₹ and cases, `BSC CASES`); should `MONTH TARGET`
    become importer-owned (it is currently manually backfilled)?
 6. Should closing a month also be blocked while an apply/import for it is in flight? (Plan: close takes the same lock, so they serialize. No extra block.)
-7. Retention for raw uploaded files (plan: 30 days after READY).
+7. ~~Retention for raw uploaded files (plan: 30 days after READY).~~ Decided 2026-11-18: 7 days for per-import data and
+   the current month + 3 previous for month history, history = programme outlets only. The windows take effect only with
+   `SALES_RETENTION_V2=on`, after the runbook below (until then: 30 days / 10 years, as before).
+
+## 17b. Runbook — moving existing data to the new retention (sales-day-level; owner-gated, in THIS order)
+
+Deploying the release changes NO retention (switch `SALES_RETENTION_V2` default OFF). Per environment (staging first,
+then prod), each step only after the previous one is verified, and each `--apply` only with the owner's explicit OK.
+Commands run as a Cloud Run job execution of the API image inside the VPC (the migrate-job recipe), with
+`TRIM_TARGET_DB` = the exact database name (the script refuses otherwise):
+
+1. **Backup** the database (Cloud SQL on-demand backup) and record its id. No backup → stop.
+2. **rebuild-days**, for EACH month inside the new window (current month + 3 previous) that has history but no day data
+   (the trim dry-run's step "0)" lists them): `rebuild-days --client <id> --month YYYY-MM` (dry-run) → review (it refuses
+   — and says why — when the stored file is gone, does not reproduce the stored lines, or the current definitions no
+   longer give the stored figures) → the same with `--apply`. Run with `--max-old-space-size=1700` in the 2 GiB job.
+   Months whose file is already gone cannot be rebuilt: re-apply their file, or accept no day data for them.
+3. **trim**: `trim` (dry-run) → review the counts per tenant × month (0: months still without day data; 1: history rows of
+   customers NOT on today's roster + outlet ids to back-fill + any SKIPPED tenant (empty roster); 2: months older than
+   the window; 3: imports older than 7 days) → `trim --apply`. It REFUSES while step 0 lists a month (its file would be
+   purged, the only source for rebuild-days): go back to step 2 for it, or pass `--allow-no-day-data` only if the owner
+   accepts losing that month's day data for good. Re-run the dry-run afterwards: every count should be 0.
+4. **Switch on**: set `SALES_RETENTION_V2=on` on `gifsy-api` AND the sales-import worker job (same value; redeploy /
+   update the env). From then on the sweeps keep 7 days / current month + 3 previous by themselves.
+
+Rollback: unset the switch (the sweeps return to 30 days / 10 years; already-deleted data does not come back — restore
+from the step-1 backup if needed).
 
 ---
 

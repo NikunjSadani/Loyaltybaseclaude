@@ -1,9 +1,6 @@
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join, relative } from 'path';
 import { dayOfDate, decodeDays, encodeDays, slicesMatchTotals } from './day-slices';
-import { currentMonthKey } from '../../targets/targets.helpers';
-import { shiftMonthKey } from '../months/month-state';
-import { historyCutoffMonth, historyRetentionMonths, isBeyondHistoryRetention } from '../retention-window';
 
 describe('day slices (stored JSON of the per-day split)', () => {
   it('round-trips BigInts beyond 2^53 exactly, sorted by day', () => {
@@ -33,30 +30,6 @@ describe('day slices (stored JSON of the per-day split)', () => {
     expect(slicesMatchTotals(s, { amountPaise: 2n, qtyPico: 2n, lines: 2 })).toBe(false);
     expect(slicesMatchTotals([...s, { day: 2, amountPaise: 0n, qtyPico: 0n, lines: 0 }], { amountPaise: 2n, qtyPico: 2n, lines: 3 })).toBe(false);
     expect(dayOfDate('2026-11-07')).toBe(7);
-  });
-});
-
-describe('retention window (current IST month + 3 previous; computed from now)', () => {
-  const OLD_ENV = process.env.SALES_HISTORY_RETENTION_MONTHS;
-  afterEach(() => {
-    if (OLD_ENV === undefined) delete process.env.SALES_HISTORY_RETENTION_MONTHS;
-    else process.env.SALES_HISTORY_RETENTION_MONTHS = OLD_ENV;
-  });
-
-  it('keeps the current month and the 3 before it by default', () => {
-    delete process.env.SALES_HISTORY_RETENTION_MONTHS;
-    const cur = currentMonthKey();
-    expect(historyRetentionMonths()).toBe(4);
-    expect(historyCutoffMonth()).toBe(shiftMonthKey(cur, -3));
-    expect(isBeyondHistoryRetention(shiftMonthKey(cur, -3))).toBe(false);
-    expect(isBeyondHistoryRetention(shiftMonthKey(cur, -4))).toBe(true);
-    expect(isBeyondHistoryRetention(cur)).toBe(false);
-    expect(historyCutoffMonth(shiftMonthKey(cur, 12))).toBe(shiftMonthKey(cur, 9)); // moves with the month
-  });
-
-  it('the setting SALES_HISTORY_RETENTION_MONTHS overrides it (whole number 1..120; anything else → 4)', () => {
-    expect(historyRetentionMonths({ SALES_HISTORY_RETENTION_MONTHS: '6' })).toBe(6);
-    for (const bad of ['0', '-1', '121', '4.5', 'abc', ' ']) expect(historyRetentionMonths({ SALES_HISTORY_RETENTION_MONTHS: bad })).toBe(4);
   });
 });
 

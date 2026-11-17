@@ -196,6 +196,27 @@ describe('import detail — preview + apply', () => {
     expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('3 outlets updated, 1 set to 0');
   });
 
+  it('S4: an apply that could not store the day-by-day figures says so LOUDLY per month (never silent); a written one shows no warning', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month(), month({ month: '2026-11', firstDate: '2026-11-01', lastDate: '2026-11-30' })])));
+    apiMock.apply.mockResolvedValue(ok({ results: [
+      { month: '2026-10', ok: true, applyId: 'a1', outletsWritten: 3, outletsZeroFilled: 1,
+        dayData: { written: false, outlets: 0, rows: 0, lastDay: null, reason: 'This file was processed before day-by-day sales were stored. Reprocess the file and apply it again to store it.' } },
+      { month: '2026-11', ok: true, applyId: 'a2', outletsWritten: 2, outletsZeroFilled: 0, dayData: { written: true, outlets: 2, rows: 9, lastDay: 17 } },
+    ] }));
+    render(<Page />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Apply November 2026' }));
+    for (const ack of screen.queryAllByRole('checkbox', { name: /replaces the whole of/ })) fireEvent.click(ack);
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
+    await screen.findByTestId('sales-import-apply-results');
+    const warn = screen.getByTestId('day-data-missing-2026-10');
+    expect(warn).toHaveAttribute('role', 'alert');
+    expect(warn).toHaveTextContent('Daily figures not stored for October 2026: This file was processed before day-by-day sales were stored. Reprocess the file and apply it again to store it.');
+    expect(warn.textContent).not.toContain('..');
+    expect(screen.queryByTestId('day-data-missing-2026-11')).not.toBeInTheDocument();
+  });
+
   it('an older file needs the older-file ack', async () => {
     apiMock.get.mockResolvedValue(ok(detail()));
     apiMock.preview.mockResolvedValue(ok(preview([month({ warnings: ['OLDER_THAN_LAST_APPLIED'] })])));

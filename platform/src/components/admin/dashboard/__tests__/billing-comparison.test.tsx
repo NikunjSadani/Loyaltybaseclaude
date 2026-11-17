@@ -7,9 +7,11 @@
  *  BC4 NO_DAY_LEVEL_DATA / NO_KPI → renders nothing
  *  BC5 NO_DAY_DATA_FOR_MONTH / KPI_NOT_IN_DAY_DATA → one honest line
  *  BC6 zero base → "nothing billed … to compare"; zero delta → "no change"
- *  BC7 loading → status line; error → alert + Retry recovers
+ *  BC7 (day-data tenant) loading → status line; error → alert + Retry recovers
  *  BC8 slower-than-usual: 0 → plain text; N → modal with paging, Retry, Download Excel; hidden when last month unavailable
  *  BC9 shorter prior month → label names both days
+ *  BC10 (C5) no loading / error flash until day data is confirmed; NO_DAY_LEVEL_DATA remembered through refetch + failure
+ *  BC11 (C4) no targeted outlets → its own line; BC3b/BC5b server reason text verbatim (KPI missing, deleted, never "yet")
  */
 import React from 'react';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
@@ -20,7 +22,8 @@ import {
 } from '../BillingComparison';
 import { istMonthKey } from '@/lib/ist-date';
 
-const T = { timeout: 5000 };
+// Flake rule: never below the suite's 15 s async default (RTL asyncUtilTimeout).
+const T = { timeout: 15_000 };
 const CUR = istMonthKey(new Date());
 function shift(key: string, delta: number): string {
   const [y, m] = key.split('-').map(Number);
@@ -120,22 +123,47 @@ describe('BillingComparison', () => {
     expect(Object.fromEntries(u.searchParams)).toEqual({ month: '2026-10', program: 'Gold', outletType: 'RETAIL', managerId: 'm1' });
   });
 
-  it('BC3: unavailable comparisons say from which month; no slower line without last month', async () => {
+  it('BC3: unavailable comparisons show the server’s honest line (why + available from); no slower line without last month', async () => {
     const next = shift(CUR, 1);
     const plus3 = shift(CUR, 3);
+    const lmMsg = `Comparison with last month not available: day-by-day sales start from ${comparisonMonthWords(CUR)}. Available from ${comparisonMonthWords(next)}.`;
+    const avgMsg = `3-month average not available: day-by-day sales start from ${comparisonMonthWords(CUR)}. Available from ${comparisonMonthWords(plus3)}.`;
     mockFetch(() =>
       payload({
-        lastMonth: { available: false, availableFrom: next, reason: 'NO_DAY_DATA', month: shift(CUR, -1), compareDay: 17, mtd: null, deltaPct: null },
-        threeMonthAvg: { available: false, availableFrom: plus3, reason: 'NO_DAY_DATA', months: [], compareDays: [], avgMtd: null, deltaPct: null },
+        lastMonth: { available: false, availableFrom: next, reason: 'BEFORE_DAY_DATA', message: lmMsg, month: shift(CUR, -1), compareDay: 17, mtd: null, deltaPct: null },
+        threeMonthAvg: { available: false, availableFrom: plus3, reason: 'BEFORE_DAY_DATA', message: avgMsg, months: [], compareDays: [], avgMtd: null, deltaPct: null },
         slowerThanUsual: { count: 0, thresholdPct: 80 },
       }),
     );
     render(<BillingComparison month={CUR} />);
-    expect(await screen.findByTestId('billing-vs-last-month', {}, T)).toHaveTextContent(
-      `Comparison with last month available from ${comparisonMonthWords(next)}`,
-    );
-    expect(screen.getByTestId('billing-vs-3-month-avg')).toHaveTextContent(`3-month average available from ${comparisonMonthWords(plus3)}`);
+    expect(await screen.findByTestId('billing-vs-last-month', {}, T)).toHaveTextContent(lmMsg);
+    expect(screen.getByTestId('billing-vs-3-month-avg')).toHaveTextContent(avgMsg);
     expect(screen.queryByTestId('billing-slower-than-usual')).toBeNull();
+  });
+
+  it('BC3b: KPI missing from last month / deleted month → the server line verbatim (never "nothing billed")', async () => {
+    const lmMsg = `Comparison with last month not available: ${comparisonMonthWords(shift(CUR, -1))}'s day-by-day sales don't include Sales.`;
+    const avgMsg = `3-month average not available: day-by-day sales are kept for 4 months, and ${comparisonMonthWords(shift(CUR, -4))} is older than that.`;
+    mockFetch(() =>
+      payload({
+        lastMonth: { available: false, availableFrom: null, reason: 'KPI_NOT_IN_DAY_DATA', message: lmMsg, month: shift(CUR, -1), compareDay: 17, mtd: null, deltaPct: null },
+        threeMonthAvg: { available: false, availableFrom: null, reason: 'DELETED_BY_RETENTION', message: avgMsg, months: [], compareDays: [], avgMtd: null, deltaPct: null },
+        slowerThanUsual: { count: 0, thresholdPct: 80 },
+      }),
+    );
+    render(<BillingComparison month={CUR} />);
+    const lm = await screen.findByTestId('billing-vs-last-month', {}, T);
+    expect(lm).toHaveTextContent(lmMsg);
+    expect(lm).not.toHaveTextContent('nothing billed');
+    expect(screen.getByTestId('billing-vs-3-month-avg')).toHaveTextContent(avgMsg);
+  });
+
+  it('BC11 (C4): no targeted outlets → "No outlets have a target for these filters"', async () => {
+    mockFetch(() => payload({ reason: 'NO_TARGETED_OUTLETS', message: 'No outlets have a target for these filters.', compareDay: null }));
+    render(<BillingComparison month={CUR} program="Nobody" />);
+    expect(await screen.findByTestId('billing-comparison-no-targets', {}, T)).toHaveTextContent('No outlets have a target for these filters.');
+    expect(screen.queryByTestId('billing-vs-last-month')).toBeNull();
+    expect(screen.queryByText(/nothing billed/)).toBeNull();
   });
 
   it.each(['NO_DAY_LEVEL_DATA', 'NO_KPI'] as const)('BC4: %s → renders nothing', async (reason) => {
@@ -146,17 +174,27 @@ describe('BillingComparison', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('BC5: no day data for the month / KPI not in day data → one honest line', async () => {
-    mockFetch(() => payload({ reason: 'NO_DAY_DATA_FOR_MONTH', compareDay: null }));
+  it('BC5: no day data for the month / KPI not in day data → the server’s one honest line', async () => {
+    const msg = `There are no day-by-day sales for ${comparisonMonthWords(CUR)} yet, so ${comparisonMonthWords(CUR)} can't be compared with earlier months.`;
+    mockFetch(() => payload({ reason: 'NO_DAY_DATA_FOR_MONTH', monthDataReason: 'NOT_YET', message: msg, compareDay: null }));
     const { unmount } = render(<BillingComparison month={CUR} />);
-    expect(await screen.findByTestId('billing-comparison-no-month-data', {}, T)).toHaveTextContent(
-      `No day-by-day sales for ${comparisonMonthWords(CUR)} yet`,
-    );
+    expect(await screen.findByTestId('billing-comparison-no-month-data', {}, T)).toHaveTextContent(msg);
     expect(screen.queryByTestId('billing-vs-last-month')).toBeNull();
     unmount();
-    mockFetch(() => payload({ reason: 'KPI_NOT_IN_DAY_DATA' }));
+    const kpiMsg = `The day-by-day sales data for ${comparisonMonthWords(CUR)} doesn't include Sales, so it can't be compared with earlier months.`;
+    mockFetch(() => payload({ reason: 'KPI_NOT_IN_DAY_DATA', message: kpiMsg }));
     render(<BillingComparison month={CUR} />);
-    expect(await screen.findByTestId('billing-comparison-kpi-missing', {}, T)).toHaveTextContent("doesn't include Sales");
+    expect(await screen.findByTestId('billing-comparison-kpi-missing', {}, T)).toHaveTextContent(kpiMsg);
+  });
+
+  it('BC5b: a past month without day data never says "yet" (server text shown as-is)', async () => {
+    const past = shift(CUR, -2);
+    const msg = `Day-by-day sales are kept for 4 months, and ${comparisonMonthWords(past)} is older than that, so ${comparisonMonthWords(past)} can't be compared with earlier months.`;
+    mockFetch(() => payload({ month: past, reason: 'NO_DAY_DATA_FOR_MONTH', monthDataReason: 'DELETED_BY_RETENTION', message: msg, compareDay: null }));
+    render(<BillingComparison month={past} />);
+    const line = await screen.findByTestId('billing-comparison-no-month-data', {}, T);
+    expect(line).toHaveTextContent(msg);
+    expect(line).not.toHaveTextContent(/\byet\b/);
   });
 
   it('BC6: zero base → nothing to compare (never a fake %); zero delta → no change', async () => {
@@ -173,18 +211,65 @@ describe('BillingComparison', () => {
     expect(await screen.findByTestId('billing-vs-3-month-avg', {}, T)).toHaveTextContent('no change');
   });
 
-  it('BC7: loading status, then error with Retry that recovers', async () => {
-    let fail = true;
+  it('BC7: day-data tenant → refetch shows the loading status, then an error with Retry that recovers', async () => {
+    let fail = false;
+    let gate: Promise<void> = Promise.resolve();
     const fn = mockFetch(() => payload(), { failSummary: () => fail });
-    render(<BillingComparison month={CUR} />);
-    expect(screen.getByTestId('billing-comparison-loading')).toHaveAttribute('role', 'status');
+    const slow = vi.fn(async (url: string) => {
+      await gate;
+      return fn(url);
+    });
+    vi.stubGlobal('fetch', slow);
+    const { rerender } = render(<BillingComparison month={CUR} />);
+    expect(await screen.findByTestId('billing-vs-last-month', {}, T)).toHaveTextContent('+12.4%');
+    let release!: () => void;
+    gate = new Promise<void>((r) => { release = r; });
+    fail = true;
+    rerender(<BillingComparison month={shift(CUR, -1)} />);
+    expect(await screen.findByTestId('billing-comparison-loading', {}, T)).toHaveAttribute('role', 'status');
+    release();
     const alert = await screen.findByTestId('billing-comparison-error', {}, T);
     expect(alert).toHaveTextContent('Server exploded');
     expect(screen.queryByTestId('billing-vs-last-month')).toBeNull();
     fail = false;
     fireEvent.click(screen.getByTestId('billing-comparison-retry'));
     expect(await screen.findByTestId('billing-vs-last-month', {}, T)).toHaveTextContent('+12.4%');
-    expect(calls(fn, BILLING_COMPARISON_URL)).toHaveLength(2);
+    expect(calls(fn, BILLING_COMPARISON_URL)).toHaveLength(3);
+  });
+
+  it('BC10 (C5): before the first response confirms day data, loading and errors render NOTHING', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const fn = mockFetch(() => payload(), { failSummary: () => true });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => { await gate; return fn(url); }));
+    const { container } = render(<BillingComparison month={CUR} />);
+    expect(screen.queryByTestId('billing-comparison-loading')).toBeNull();
+    expect(container).toBeEmptyDOMElement();
+    release();
+    await waitFor(() => expect(calls(fn, BILLING_COMPARISON_URL).length).toBe(1), T);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByTestId('billing-comparison-error')).toBeNull();
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('BC10b (C5): a NO_DAY_LEVEL_DATA tenant stays hidden through a refetch and a failure (Deoleo never flashes)', async () => {
+    let fail = false;
+    let gate: Promise<void> = Promise.resolve();
+    const fn = mockFetch(() => payload({ reason: 'NO_DAY_LEVEL_DATA', kpi: null }), { failSummary: () => fail });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => { await gate; return fn(url); }));
+    const { container, rerender } = render(<BillingComparison month={CUR} />);
+    await waitFor(() => expect(calls(fn, BILLING_COMPARISON_URL).length).toBe(1), T);
+    let release!: () => void;
+    gate = new Promise<void>((r) => { release = r; });
+    fail = true;
+    rerender(<BillingComparison month={shift(CUR, -1)} />);
+    expect(screen.queryByTestId('billing-comparison-loading')).toBeNull();
+    expect(container).toBeEmptyDOMElement();
+    release();
+    await waitFor(() => expect(calls(fn, BILLING_COMPARISON_URL).length).toBe(2), T);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByTestId('billing-comparison-error')).toBeNull();
+    expect(container).toBeEmptyDOMElement();
   });
 
   it('BC8a: no slower outlets → plain text, not a button', async () => {

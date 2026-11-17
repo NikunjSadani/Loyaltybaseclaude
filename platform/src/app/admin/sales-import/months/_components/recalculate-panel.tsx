@@ -19,6 +19,7 @@ import type { SalesMonthRecalcPreview, SalesMonthRecalcResult } from '@/lib/sale
 import {
   MonthReconciliationPanel, useDimensionLabels, useOutletTypeNames,
 } from '../../_components/month-reconciliation-panel';
+import { DayDataNotice } from '../../_components/day-data-notice';
 
 export function RecalculatePanel({ month, onClose, onApplied }: {
   month: string;
@@ -129,9 +130,11 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
             <strong>{formatCount(preview.outletsAffected)}</strong> outlet{preview.outletsAffected === 1 ? '' : 's'} would
             change. {formatCount(preview.matchedOutlets)} outlets found in the stored figures
             ({formatRupees(preview.matchedAmountRupees)}); {formatCount(preview.zeroFillOutlets)} programme outlets have no
-            lines and get 0; {formatCount(preview.unmatchedCustomers)} customers are not in the programme
-            ({formatRupees(preview.unmatchedAmountRupees)}, ignored).
+            lines and get 0; {formatCount(preview.unmatchedCustomers)} customers in the stored figures are not in the
+            programme now ({formatRupees(preview.unmatchedAmountRupees)}, ignored). Stored history keeps programme outlets
+            only, so customers that were never in the programme are not in these figures.
           </p>
+          {!result && <DayDataNotice month={month} dayData={preview.dayData} />}
           {!preview.canApply && preview.blockedReason && (
             <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 flex gap-2"
               data-testid="recalc-blocked-banner">
@@ -195,10 +198,13 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
             <div className={`rounded-lg border px-4 py-3 text-sm ${result.ok ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}
               data-testid="recalc-result" role="status">
               {result.ok ? (
-                <p className="flex items-center gap-1.5 text-emerald-800">
-                  <CheckCircle2 className="w-4 h-4" /> {label} recalculated: {formatCount(result.outletsWritten ?? 0)} outlets
-                  updated, {formatCount(result.outletsZeroFilled ?? 0)} set to 0.
-                </p>
+                <>
+                  <p className="flex items-center gap-1.5 text-emerald-800">
+                    <CheckCircle2 className="w-4 h-4" /> {label} recalculated: {formatCount(result.outletsWritten ?? 0)} outlets
+                    updated, {formatCount(result.outletsZeroFilled ?? 0)} set to 0.
+                  </p>
+                  <DayDataNotice month={month} dayData={result.dayData} />
+                </>
               ) : (
                 <p className="text-red-700">{label} was not recalculated: {sentence(result.error) || 'unknown error'}.</p>
               )}

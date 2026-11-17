@@ -3187,8 +3187,9 @@ model SalesImportApply {
 }
 
 /// The FINAL applied file lines of a month for PROGRAMME outlets only (customer codes matched to the roster at apply
-/// time; owner decision 2026-11-18 — unmatched customers are not kept), replaced by each apply and kept
-/// SALES_MONTH_HISTORY_RETENTION_MONTHS (current + 3 previous) — the source for "Recalculate from stored history" after
+/// time; owner decision 2026-11-18 — unmatched customers are not kept), replaced by each apply and kept for the history
+/// window of retention-window.ts (10 years while SALES_RETENTION_V2 is off — the default; the current month + 3 previous
+/// with it on) — the source for "Recalculate from stored history" after
 /// the per-import aggregates are purged (plan §10b). No FK to sales_imports on purpose: it outlives the import's data.
 model SalesMonthHistory {
   id             BigInt   @id @default(autoincrement())
@@ -3263,7 +3264,8 @@ model SalesMonthHistorySet {
 /// tenants with features.salesImport. SPARSE: a row exists only for a day on which the outlet billed something.
 /// MTD to day D for an outlet = `mtdValues` of its latest row with day ≤ D, or 0 when there is none. Invariant: the
 /// outlet's row for the month's last loaded day equals OutletSalesRecord.kpiValues (owned keys) of the same write.
-/// Kept for the current month + 3 previous (retention sweep, in step with sales_day_sets).
+/// Kept for the current month + 3 previous whatever SALES_RETENTION_V2 says (retention sweep, in step with
+/// sales_day_sets; the tables are new, so no existing data is affected).
 model OutletSalesDay {
   id             BigInt @id @default(autoincrement())
   clientId       String
@@ -3276,6 +3278,9 @@ model OutletSalesDay {
 
   @@unique([clientId, outletId, month, day])
   @@index([clientId, month, day])
+  /// Serves the billing comparison's "latest row per outlet ≤ day D" read (DISTINCT ON (outletId) … ORDER BY outletId,
+  /// day DESC) in index order — no sort (migration 20261118130000_sales_day_order_index).
+  @@index([clientId, month, outletId, day(sort: Desc)])
   @@map("outlet_sales_days")
 }
 

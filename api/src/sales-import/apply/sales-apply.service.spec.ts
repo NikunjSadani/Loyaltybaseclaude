@@ -9,6 +9,7 @@ import type { SalesColumnMapping } from '../sales-import.contract';
 import { lastDayOfMonth, monthLabel as monthLabelOf, shiftMonthKey } from '../months/month-state';
 import { SalesPreviewService } from './sales-preview.service';
 import { SalesApplyService, outletsAffected } from './sales-apply.service';
+import { withRetentionV2 } from '../retention-env.testspec';
 
 // ─── Date-relative months ──────────────────────────────────────────────────────
 const CUR = currentMonthKey();
@@ -1139,7 +1140,7 @@ describe('day-level data (OutletSalesDay / SalesDaySet)', () => {
     expect(q.dayData).toEqual({ available: false, reason: expect.stringMatching(/applied before day-by-day sales were stored/) });
   });
 
-  it('purged history (outside current + 3 previous months) is reported honestly: 404 with the retention reason, even while rows remain', async () => {
+  it('S1 switch ON — purged history (outside current + 3 previous months) is reported honestly: 404 with the retention reason, even while rows remain', () => withRetentionV2('on', async () => {
     const OUT = shiftMonthKey(CUR, -4);
     const db = makeDb({ history: DAY_HISTORY.map((h) => ({ ...h, month: OUT })) });
     await expect(services(db).apply.recalcPreview('t1', OUT)).rejects.toThrow(/kept only for the current month and the 3 months before it/);
@@ -1150,5 +1151,40 @@ describe('day-level data (OutletSalesDay / SalesDaySet)', () => {
     const IN = shiftMonthKey(CUR, -3);
     const ok = makeDb({ history: DAY_HISTORY.map((h) => ({ ...h, month: IN })) });
     await expect(services(ok).apply.recalcPreview('t1', IN)).resolves.toEqual(expect.objectContaining({ month: IN }));
+  }));
+
+  it('S1 switch OFF (default): a month 4 back still recalculates from its history (10-year retention); its day data is NOT stored (outside the day window) and the result says so', () => withRetentionV2(undefined, async () => {
+    const OUT = shiftMonthKey(CUR, -4);
+    // reopened by Gifsy (an OLDER month is CLOSED by default)
+    const db = makeDb({ history: DAY_HISTORY.map((h) => ({ ...h, month: OUT })), statuses: [{ month: OUT, state: 'OPEN', reopenedAt: AT, closedAt: null, lastAppliedImportId: null }] });
+    const p = await services(db).apply.recalcPreview('t1', OUT);
+    expect(p.dayData).toEqual({ available: false, reason: expect.stringMatching(/Day-by-day figures are kept only for the current month and the 3 months before it/) });
+    const r = await services(db).apply.recalculate(user, OUT, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() });
+    expect(r.dayData).toEqual(expect.objectContaining({ written: false, reason: expect.stringMatching(/kept only for the current month/) }));
+    expect(dayInsert(db)).toBeUndefined();
+    // the day split is not even read for such a month
+    const selects = db.salesMonthHistory.findMany.mock.calls.map((c) => (c[0] as unknown as { select: Record<string, boolean> }).select);
+    expect(selects.every((x) => x.days === undefined)).toBe(true);
+  }));
+
+  it('S5: above SALES_DAY_BUILD_MAX_ROWS matched rows the day build is SKIPPED with a loud reason (monthly figures still written)', async () => {
+    const prev = process.env.SALES_DAY_BUILD_MAX_ROWS;
+    process.env.SALES_DAY_BUILD_MAX_ROWS = '2';
+    try {
+      const db = makeDb({ months: [PREV], aggs: DAY_AGGS }); // 3 matched rows (O1 ×2, O2; GONE / O4 are off-roster)
+      const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
+      expect(r.results[0].ok).toBe(true);
+      expect(r.results[0].dayData).toEqual({
+        written: false, outlets: 0, rows: 0, lastDay: null, reason: expect.stringMatching(/too many sales lines for programme outlets \(3; the limit is 2\)/),
+      });
+      expect(dayInsert(db)).toBeUndefined();
+      const pdb = makeDb({ history: DAY_HISTORY });
+      process.env.SALES_DAY_BUILD_MAX_ROWS = '1';
+      const p = await services(pdb).apply.recalcPreview('t1', PREV);
+      expect(p.dayData).toEqual({ available: false, reason: expect.stringMatching(/too many sales lines/) });
+    } finally {
+      if (prev === undefined) delete process.env.SALES_DAY_BUILD_MAX_ROWS;
+      else process.env.SALES_DAY_BUILD_MAX_ROWS = prev;
+    }
   });
 });

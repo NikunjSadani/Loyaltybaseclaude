@@ -3,6 +3,7 @@ import { currentMonthKey } from '../../targets/targets.helpers';
 import { shiftMonthKey } from '../months/month-state';
 import { stableStringify, type KpiDefLite } from '../kpi/sales-kpi.helper';
 import { applyTrim, assertDatabase, countTrim, formatCounts } from './sales-history-trim';
+import { withRetentionV2 } from '../retention-env.testspec';
 import { parseArgs } from './sales-history-trim.main';
 import { rebuildMonthDays, type RebuildDeps } from './sales-day-rebuild';
 
@@ -13,30 +14,67 @@ const sqlText = (q: unknown) => (q as Prisma.Sql).strings.join('?');
 
 // ─── trim ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-function trimDb(state: { unmatched: number; beyond: number; expired: number; pending: number; header?: boolean }) {
+/**
+ * In-memory history for the trim: `rows` = SalesMonthHistory lines (customerCode, outletId) of month PREV for tenant t1;
+ * `roster` = t1's CURRENT roster outlet codes (S3: "programme" = on this roster now, NOT the apply-time outletId).
+ */
+function trimDb(state: {
+  rows?: Array<{ customerCode: string; outletId: string | null }>;
+  roster?: string[];
+  beyond: number; expired: number; pending: number; header?: boolean;
+  missingDayData?: Array<{ clientId: string; month: string; sourceImportId: string }>;
+}) {
   const log: string[] = [];
+  const rows = state.rows ?? [];
+  const roster = state.roster ?? ['R1'];
+  const onRoster = (codes: unknown) => (c: string) => (codes as string[]).includes(c);
   const db = {
     log,
     state,
+    rows,
     $queryRaw: jest.fn(async (q: Prisma.Sql) => {
       const t = sqlText(q);
       if (t.includes('current_database()')) return [{ db: 'gifsy_staging' }];
+      if (t.includes('SELECT DISTINCT s."clientId"')) return rows.length > 0 ? [{ clientId: 't1' }] : [];
+      if (t.includes('LEFT JOIN "sales_day_sets"')) return state.missingDayData ?? [];
       if (t.includes('GROUP BY 1, 2')) {
-        if (t.includes('"sales_month_histories"') && t.includes('IS NULL')) return state.unmatched > 0 ? [{ clientId: 't1', month: PREV, n: state.unmatched }] : [];
+        if (t.includes('"sales_month_histories"') && t.includes('NOT (h."customerCode" = ANY(')) {
+          const codes = q.values.find(Array.isArray)!;
+          const n = rows.filter((r) => !onRoster(codes)(r.customerCode)).length;
+          return n > 0 ? [{ clientId: 't1', month: PREV, n }] : [];
+        }
+        if (t.includes('"sales_month_histories"') && t.includes('"outletId" IS NULL')) {
+          const codes = q.values.find(Array.isArray)!;
+          const n = rows.filter((r) => r.outletId === null && onRoster(codes)(r.customerCode)).length;
+          return n > 0 ? [{ clientId: 't1', month: PREV, n }] : [];
+        }
         if (t.includes('"sales_month_histories"')) return state.beyond > 0 ? [{ clientId: 't1', month: OLD, n: state.beyond }] : [];
         return [];
       }
-      if (t.includes('count(*)::int AS n FROM "sales_month_histories"')) return [{ n: 40 }];
+      if (t.includes('count(*)::int AS n FROM "sales_month_histories"')) return [{ n: rows.length }];
       throw new Error(`unexpected query ${t}`);
     }),
     $executeRaw: jest.fn(async (q: Prisma.Sql) => {
       const t = sqlText(q);
       if (t.includes('pg_advisory_xact_lock')) { log.push('lock'); return 0; }
       if (t.includes('DELETE FROM "sales_month_histories"')) {
+        const codes = q.values.find(Array.isArray)!;
         const limit = q.values[q.values.length - 1] as number;
-        const n = Math.min(limit, state.unmatched);
-        state.unmatched -= n;
+        let n = 0;
+        for (let i = rows.length - 1; i >= 0 && n < limit; i--) {
+          if (!onRoster(codes)(rows[i].customerCode)) { rows.splice(i, 1); n++; }
+        }
         log.push(`delete-unmatched:${n}`);
+        return n;
+      }
+      if (t.includes('UPDATE "sales_month_histories" h SET "outletId"')) {
+        const [codes, ids] = q.values.filter(Array.isArray) as [string[], string[]];
+        let n = 0;
+        for (const r of rows) {
+          const i = codes.indexOf(r.customerCode);
+          if (r.outletId === null && i >= 0) { r.outletId = ids[i]; n++; }
+        }
+        log.push(`backfill:${n}`);
         return n;
       }
       if (t.includes('DELETE FROM "sales_month_history_combos"')) { log.push('combos.delete'); return 3; }
@@ -45,6 +83,9 @@ function trimDb(state: { unmatched: number; beyond: number; expired: number; pen
     }),
     $executeRawUnsafe: jest.fn(async () => 0),
     $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
+    outlet: {
+      findMany: jest.fn(async () => roster.map((c) => ({ id: `id-${c}`, outletCode: c, name: c, programName: null, programCategory: null, outletType: { code: 'RETAIL' } }))),
+    },
     salesMonthHistorySet: {
       findUnique: jest.fn(async () => (state.header === false ? null : { sourceImportId: 'imp9', appliedAt: new Date('2026-01-01T00:00:00Z') })),
       updateMany: jest.fn(async () => ({ count: 1 })),
@@ -54,22 +95,26 @@ function trimDb(state: { unmatched: number; beyond: number; expired: number; pen
     },
   };
   const retention = {
-    purgeOldHistory: jest.fn(async () => { const n = Math.min(3, state.beyond); state.beyond -= n; return n; }),
-    sweep: jest.fn(async () => { const n = Math.min(2, state.expired); state.expired -= n; state.pending = 0; return { abandoned: 0, purged: n }; }),
+    purgeOldHistory: jest.fn(async (_o?: unknown) => { const n = Math.min(3, state.beyond); state.beyond -= n; return n; }),
+    sweep: jest.fn(async (_o?: unknown) => { const n = Math.min(2, state.expired); state.expired -= n; state.pending = 0; return { abandoned: 0, purged: n }; }),
   };
   return { db, retention };
 }
 
+/** 5 history rows of customers that are NOT on today's roster (X1..X5, outletId null as applied). */
+const NOT_ON_ROSTER = (): Array<{ customerCode: string; outletId: string | null }> =>
+  Array.from({ length: 5 }, (_, i) => ({ customerCode: `X${i + 1}`, outletId: null }));
+
 describe('one-off sales-history-trim', () => {
   it('guards on current_database(): must EXACTLY equal TRIM_TARGET_DB (unset or different → refuse)', async () => {
-    const { db } = trimDb({ unmatched: 0, beyond: 0, expired: 0, pending: 0 });
+    const { db } = trimDb({ beyond: 0, expired: 0, pending: 0 });
     await expect(assertDatabase(db, undefined)).rejects.toThrow(/Set TRIM_TARGET_DB/);
     await expect(assertDatabase(db, 'gifsy_prod')).rejects.toThrow(/Connected to "gifsy_staging" but TRIM_TARGET_DB is "gifsy_prod"/);
     await expect(assertDatabase(db, 'gifsy_staging')).resolves.toBe('gifsy_staging');
   });
 
-  it('DRY-RUN counts per tenant × month and writes NOTHING', async () => {
-    const { db, retention } = trimDb({ unmatched: 5, beyond: 7, expired: 3, pending: 1 });
+  it('S1: DRY-RUN counts per tenant × month and writes NOTHING; applies the NEW windows explicitly even with SALES_RETENTION_V2 off', () => withRetentionV2(undefined, async () => {
+    const { db, retention } = trimDb({ rows: NOT_ON_ROSTER(), beyond: 7, expired: 3, pending: 1 });
     const c = await countTrim(db as never, { database: 'gifsy_staging' });
     expect(c.keepFromMonth).toBe(shiftMonthKey(CUR, -3));
     expect(c.unmatchedHistory).toEqual([{ clientId: 't1', month: PREV, rows: 5 }]);
@@ -80,14 +125,46 @@ describe('one-off sales-history-trim', () => {
     expect(db.$transaction).not.toHaveBeenCalled();
     expect(retention.purgeOldHistory).not.toHaveBeenCalled();
     expect(retention.sweep).not.toHaveBeenCalled();
-    // the unmatched count only looks INSIDE the window (older months go wholesale in step 2)
-    const q = db.$queryRaw.mock.calls.map((c) => c[0] as Prisma.Sql).find((x) => sqlText(x).includes('IS NULL'))!;
+    // the not-on-roster count only looks INSIDE the window (older months go wholesale in step 2)
+    const q = db.$queryRaw.mock.calls.map((x) => x[0] as Prisma.Sql).find((x) => sqlText(x).includes('NOT (h."customerCode" = ANY('))!;
     expect(sqlText(q)).toContain('h."month" >= ?');
     expect(q.values).toContain(shiftMonthKey(CUR, -3));
+  }));
+
+  it("S3: programme = on the CURRENT roster — a row with a null outletId whose customer is on today's roster is KEPT (and back-filled); a row with an outletId whose customer left the roster is deleted", async () => {
+    const rows = [
+      { customerCode: 'R1', outletId: null as string | null }, // joined the roster after the apply → kept, back-filled
+      { customerCode: 'R2', outletId: 'id-R2' }, // programme outlet → kept
+      { customerCode: 'GONE', outletId: 'id-GONE' }, // on the roster at apply time, removed since → deleted
+      { customerCode: 'X1', outletId: null }, // never on the roster → deleted
+    ];
+    const { db, retention } = trimDb({ rows, roster: ['R1', 'R2'], beyond: 0, expired: 0, pending: 0 });
+    const before = await countTrim(db as never, { database: 'gifsy_staging' });
+    expect(before.unmatchedHistory).toEqual([{ clientId: 't1', month: PREV, rows: 2 }]);
+    expect(before.nullOutletOnRoster).toEqual([{ clientId: 't1', month: PREV, rows: 1 }]);
+    const r = await applyTrim({ db: db as never, retention, log: () => undefined }, before);
+    expect(db.rows).toEqual([{ customerCode: 'R1', outletId: 'id-R1' }, { customerCode: 'R2', outletId: 'id-R2' }]);
+    expect(r).toMatchObject({ unmatchedDeleted: 2, outletIdsBackfilled: 1 });
+    // the delete never keys on the apply-time outletId
+    const del = db.$executeRaw.mock.calls.map((x) => x[0] as Prisma.Sql).find((x) => sqlText(x).includes('DELETE FROM "sales_month_histories"'))!;
+    expect(sqlText(del)).not.toContain('outletId');
+    expect(sqlText(del)).toContain('NOT (h."customerCode" = ANY(');
   });
 
-  it('--apply: batches the non-programme deletes under the month lock, rebuilds the product list, then drains old months + expired imports via the retention code', async () => {
-    const { db, retention } = trimDb({ unmatched: 5, beyond: 7, expired: 3, pending: 0 });
+  it('S3: a tenant whose roster is EMPTY today is skipped and reported — never "delete everything"', async () => {
+    const { db, retention } = trimDb({ rows: NOT_ON_ROSTER(), roster: [], beyond: 0, expired: 0, pending: 0 });
+    const before = await countTrim(db as never, { database: 'gifsy_staging' });
+    expect(before.unmatchedHistory).toEqual([]);
+    expect(before.skippedTenants).toEqual([{ clientId: 't1', reason: expect.stringMatching(/roster is empty/) }]);
+    expect(formatCounts(before).join('\n')).toMatch(/SKIPPED tenant t1/);
+    const lines: string[] = [];
+    await applyTrim({ db: db as never, retention, log: (l) => lines.push(l) }, before);
+    expect(db.rows).toHaveLength(5);
+    expect(lines.join('\n')).toMatch(/SKIPPED tenant t1/);
+  });
+
+  it('--apply: batches the deletes under the month lock, rebuilds the product list, then drains old months + expired imports with the EXPLICIT new windows (S1)', () => withRetentionV2(undefined, async () => {
+    const { db, retention } = trimDb({ rows: NOT_ON_ROSTER(), beyond: 7, expired: 3, pending: 0 });
     const before = await countTrim(db as never, { database: 'gifsy_staging' });
     const lines: string[] = [];
     const r = await applyTrim({ db: db as never, retention, log: (l) => lines.push(l) }, before, { batchRows: 2 });
@@ -95,27 +172,50 @@ describe('one-off sales-history-trim', () => {
     // every batch is its own short transaction holding the month lock
     expect(db.log.slice(0, 2)).toEqual(['lock', 'delete-unmatched:2']);
     const del = db.$executeRaw.mock.calls.map((c) => c[0] as Prisma.Sql).find((x) => sqlText(x).includes('DELETE FROM "sales_month_histories"'))!;
-    expect(sqlText(del)).toContain('h."outletId" IS NULL');
     expect(sqlText(del)).toContain('LIMIT ?');
     expect(db.log).toEqual(expect.arrayContaining(['combos.delete', 'combos.insert']));
     expect(db.salesMonthHistorySet.updateMany).toHaveBeenCalledWith({
       where: { clientId: 't1', month: PREV },
-      data: { lineRows: 40, combosSourceImportId: 'imp9', combosAppliedAt: new Date('2026-01-01T00:00:00Z') },
+      data: { lineRows: 0, combosSourceImportId: 'imp9', combosAppliedAt: new Date('2026-01-01T00:00:00Z') },
     });
     expect(retention.purgeOldHistory).toHaveBeenCalledTimes(3); // 7 rows, 3 per pass
-    expect(retention.sweep).toHaveBeenCalledWith({ clientId: undefined, limit: 50, history: false });
+    // the new windows are passed EXPLICITLY (the sweeps' own defaults stay the old ones while the switch is off)
+    expect(retention.purgeOldHistory).toHaveBeenCalledWith({ clientId: undefined, historyCutoff: shiftMonthKey(CUR, -3) });
+    expect(retention.sweep).toHaveBeenCalledWith({ clientId: undefined, limit: 50, history: false, retentionDays: 7 });
     expect(r).toMatchObject({ unmatchedDeleted: 5, beyondWindowPasses: 3, importsPurged: 3 });
-    expect(r.monthsRebuilt).toEqual([{ clientId: 't1', month: PREV, lineRows: 40, productListRows: 5 }]);
+    expect(r.monthsRebuilt).toEqual([{ clientId: 't1', month: PREV, lineRows: 0, productListRows: 5 }]);
     expect(r.after).toMatchObject({ unmatchedHistory: [], expiredImports: 0, pendingFileDeletes: 0 });
-    expect(lines.join('\n')).toMatch(/deleted 5 non-programme history rows; product list rebuilt/);
+    expect(lines.join('\n')).toMatch(/deleted 5 history rows of customers not on the current roster; back-filled 0 outlet ids; product list rebuilt/);
+  }));
+
+  it('S2: --apply REFUSES (nothing touched) while a month in the window has no day data but its last-applied file still exists; --allow-no-day-data proceeds', async () => {
+    const missing = [{ clientId: 't1', month: PREV, sourceImportId: 'imp9' }];
+    const { db, retention } = trimDb({ rows: NOT_ON_ROSTER(), beyond: 2, expired: 2, pending: 0, missingDayData: missing });
+    const before = await countTrim(db as never, { database: 'gifsy_staging' });
+    expect(before.missingDayData).toEqual(missing);
+    expect(formatCounts(before).join('\n')).toMatch(new RegExp(`months with NO day data[^\\n]*: 1[\\s\\S]*t1 ${PREV}: import imp9`));
+    await expect(applyTrim({ db: db as never, retention, log: () => undefined }, before))
+      .rejects.toThrow(new RegExp(`t1 ${PREV} \\(import imp9\\)[\\s\\S]*rebuild-days[\\s\\S]*--allow-no-day-data`));
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(retention.purgeOldHistory).not.toHaveBeenCalled();
+    expect(retention.sweep).not.toHaveBeenCalled();
+    expect(db.rows).toHaveLength(5);
+    // the query: in-window history sets with no day set whose import's files are not purged
+    const q = db.$queryRaw.mock.calls.map((x) => x[0] as Prisma.Sql).find((x) => sqlText(x).includes('LEFT JOIN "sales_day_sets"'))!;
+    expect(sqlText(q)).toMatch(/d\."id" IS NULL AND i\."purgedAt" IS NULL AND i\."filesPurgedAt" IS NULL/);
+    // the explicit override
+    const lines: string[] = [];
+    const r = await applyTrim({ db: db as never, retention, log: (l) => lines.push(l) }, before, { allowNoDayData: true });
+    expect(r.importsPurged).toBe(2);
+    expect(lines[0]).toMatch(/--allow-no-day-data: proceeding/);
   });
 
   it('a step that makes no progress STOPS the run loudly (never a silent partial)', async () => {
-    const { db, retention } = trimDb({ unmatched: 0, beyond: 4, expired: 0, pending: 0 });
+    const { db, retention } = trimDb({ beyond: 4, expired: 0, pending: 0 });
     retention.purgeOldHistory.mockResolvedValue(0); // e.g. statement timeouts
     const before = await countTrim(db as never, { database: 'gifsy_staging' });
     await expect(applyTrim({ db: db as never, retention, log: () => undefined }, before)).rejects.toThrow(/made no progress \(4 rows left\)/);
-    const stuck = trimDb({ unmatched: 0, beyond: 0, expired: 2, pending: 0 });
+    const stuck = trimDb({ beyond: 0, expired: 2, pending: 0 });
     stuck.retention.sweep.mockResolvedValue({ abandoned: 0, purged: 0 });
     const b2 = await countTrim(stuck.db as never, { database: 'gifsy_staging' });
     await expect(applyTrim({ db: stuck.db as never, retention: stuck.retention, log: () => undefined }, b2)).rejects.toThrow(/purging imports made no progress/);
@@ -124,6 +224,8 @@ describe('one-off sales-history-trim', () => {
   it('CLI arguments: dry-run unless --apply; rebuild-days needs --client and --month', () => {
     expect(parseArgs(['trim'])).toEqual({ command: 'trim', apply: false });
     expect(parseArgs(['trim', '--client', 'bajaj', '--apply'])).toEqual({ command: 'trim', apply: true, clientId: 'bajaj' });
+    expect(parseArgs(['trim', '--apply', '--allow-no-day-data'])).toEqual({ command: 'trim', apply: true, allowNoDayData: true });
+    expect(() => parseArgs(['rebuild-days', '--client', 'b', '--month', '2026-11', '--allow-no-day-data'])).toThrow(/Unknown argument/);
     expect(parseArgs(['rebuild-days', '--client', 'bajaj', '--month', '2026-11'])).toEqual({ command: 'rebuild-days', apply: false, clientId: 'bajaj', month: '2026-11' });
     expect(() => parseArgs(['rebuild-days', '--month', '2026-11'])).toThrow(/--client/);
     expect(() => parseArgs(['rebuild-days', '--client', 'b', '--month', '2026-13'])).toThrow(/--month/);
@@ -252,12 +354,29 @@ describe('one-off rebuild-days (November backfill from our own stored file)', ()
 
     const old = rebuildDb();
     const d = await rebuildMonthDays(old.deps, { clientId: 't1', month: OLD, apply: true });
-    expect(d.problem).toMatch(/kept only for the current month/);
+    expect(d.problem).toMatch(/Day-by-day figures are kept only for the current month/);
     for (const x of [purged, drift, moved, old]) expect(x.db.$transaction).not.toHaveBeenCalled();
   });
 
   it('--apply re-checks the month under the lock: applied / recalculated meanwhile → refused, rolled back', async () => {
     const { deps } = rebuildDb({ headerAfter: { sourceImportId: 'imp1', appliedAt: new Date() } });
     await expect(rebuildMonthDays(deps, { clientId: 't1', month: PREV, apply: true })).rejects.toThrow(/applied or recalculated while the rebuild ran/);
+  });
+
+  it('S6: under the lock it re-checks the definitions hash and the monthly figures (a recalculate does not move the history set) → refused, nothing written', async () => {
+    // definitions changed between the dry part and the locked write
+    const d1 = rebuildDb();
+    let calls = 0;
+    d1.deps.kpiDefs = { enabled: async () => ({ defs: calls++ === 0 ? DEFS : [DEFS[0]] }) };
+    await expect(rebuildMonthDays(d1.deps, { clientId: 't1', month: PREV, apply: true })).rejects.toThrow(/KPI definitions changed while the rebuild/);
+    expect(d1.db.log).not.toContain('days.insert');
+    // a recalculate rewrote the monthly figures meanwhile (same history set, same definitions)
+    const d2 = rebuildDb();
+    let reads = 0;
+    d2.db.outletSalesRecord.findMany.mockImplementation(async () =>
+      reads++ === 0 ? [{ outletCode: 'O1', kpiValues: { AMT: 50, LINES: 1 } }] : [{ outletCode: 'O1', kpiValues: { AMT: 51, LINES: 1 } }]);
+    await expect(rebuildMonthDays(d2.deps, { clientId: 't1', month: PREV, apply: true })).rejects.toThrow(/monthly figures changed while the rebuild ran \(e\.g\. O1 AMT: stored 51 vs now 50\)/);
+    expect(d2.db.log).not.toContain('days.insert');
+    expect(d2.db.log).not.toContain('history.days');
   });
 });

@@ -2,12 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../../storage/storage.service';
-import {
-  SALES_IMPORT_ABANDONED_UPLOAD_HOURS,
-  SALES_IMPORT_RETENTION_DAYS,
-} from '../sales-import.contract';
+import { SALES_IMPORT_ABANDONED_UPLOAD_HOURS } from '../sales-import.contract';
 import { currentMonthKey } from '../../targets/targets.helpers';
-import { historyCutoffMonth } from '../retention-window';
+import { dayDataCutoffMonth, historyCutoffMonth, importRetentionDays } from '../retention-window';
 import { isLockNotAvailable, lockImportRow, type LockedImport } from './import-lock';
 
 /** Statuses after which the raw file is no longer needed (retention clock = finishedAt). */
@@ -34,7 +31,8 @@ export interface PurgeOptions {
  *      logged and retried by the next sweep (rows with purgedAt set and filesPurgedAt null). Idempotent.
  * SalesImportApply history is untouched.
  *
- *   - finished imports (READY / NEEDS_MAPPING / FAILED / CANCELLED): purged SALES_IMPORT_RETENTION_DAYS after finishedAt;
+ *   - finished imports (READY / NEEDS_MAPPING / FAILED / CANCELLED): purged importRetentionDays() after finishedAt
+ *     (retention-window.ts: 30 days while SALES_RETENTION_V2 is off — the default — 7 with it on);
  *   - abandoned uploads (UPLOADING older than SALES_IMPORT_ABANDONED_UPLOAD_HOURS): CANCELLED + purged.
  * The sweep runs lazily on the tenant's list call and on every worker drain (all tenants), a few rows at a time.
  * Each purge holds `FOR UPDATE NOWAIT` on the import row, so it never races an apply / the worker's final write
@@ -53,8 +51,8 @@ export const PURGE_STEP_MS = PURGE_TX_TIMEOUT_MS + PURGE_MAX_WAIT_MS + GCS_DELET
 /** A GCS-only step (retrying a failed file delete). */
 export const SWEEP_SMALL_STEP_MS = GCS_DELETE_TIMEOUT_MS + 5_000;
 /**
- * The month-window delete (history lines / summary / headers + day data, months before the current + 3 previous): at
- * most this many rows PER TABLE per sweep, each statement bounded.
+ * The month-window delete (history lines / summary / headers before historyCutoffMonth() + day data before
+ * dayDataCutoffMonth()): at most this many rows PER TABLE per sweep, each statement bounded.
  */
 export const HISTORY_PURGE_CHUNK_ROWS = 50_000;
 export const HISTORY_PURGE_STATEMENT_TIMEOUT_MS = 12_000;
@@ -154,18 +152,21 @@ export class SalesImportRetentionService {
   }
 
   /**
-   * The month window (owner decision 2026-11-18; retention-window.ts): SalesMonthHistory (+ its combos summary and set
-   * headers) AND the day-level data (outlet_sales_days + sales_day_sets) are kept for the current IST month and the 3
-   * before it; older months are deleted — BOUNDED (re-check L1): one transaction, every statement under
-   * HISTORY_PURGE_STATEMENT_TIMEOUT_MS, at most HISTORY_PURGE_CHUNK_ROWS rows per table per call. A month's
-   * sales_day_sets row goes FIRST (so it never claims complete day data for a half-deleted month), then its day rows;
-   * a history set header goes once its lines and summary are gone. Readers treat every month before the cutoff as
-   * absent anyway. A large backlog (the first sweep after the 10-year → 4-month change) drains over several sweeps.
-   * Never throws. Returns the history line rows deleted.
+   * The month windows (retention-window.ts): SalesMonthHistory (+ its combos summary and set headers) of months before
+   * historyCutoffMonth() — 10 years while SALES_RETENTION_V2 is off (the default; exactly as before), the current IST
+   * month + 3 previous with it on — and the day-level data (outlet_sales_days + sales_day_sets) of months before
+   * dayDataCutoffMonth() (always current + 3 previous: new tables) are deleted — BOUNDED (re-check L1): one transaction,
+   * every statement under HISTORY_PURGE_STATEMENT_TIMEOUT_MS, at most HISTORY_PURGE_CHUNK_ROWS rows per table per call.
+   * A month's sales_day_sets row goes FIRST (so it never claims complete day data for a half-deleted month), then its day
+   * rows; a history set header goes once its lines and summary are gone. Readers treat every month before the cutoff as
+   * absent anyway. `historyCutoff` = an EXPLICIT history cutoff (the one-off trim applies the V2 window with it,
+   * whatever the switch). Never throws. Returns the history line rows deleted.
    */
-  async purgeOldHistory(opts: { clientId?: string; currentMonth?: string } = {}): Promise<number> {
+  async purgeOldHistory(opts: { clientId?: string; currentMonth?: string; historyCutoff?: string } = {}): Promise<number> {
     try {
-      const cutoff = historyCutoffMonth(opts.currentMonth ?? currentMonthKey());
+      const current = opts.currentMonth ?? currentMonthKey();
+      const cutoff = opts.historyCutoff ?? historyCutoffMonth(current);
+      const dayCutoff = dayDataCutoffMonth(current);
       const tenant = (alias: string) =>
         opts.clientId ? Prisma.sql`AND ${Prisma.raw(alias)}."clientId" = ${opts.clientId}` : Prisma.empty;
       return await this.prisma.$transaction(
@@ -186,11 +187,11 @@ export class SalesImportRetentionService {
                AND NOT EXISTS (SELECT 1 FROM "sales_month_history_combos" c WHERE c."clientId" = s."clientId" AND c."month" = s."month")`);
           // Day-level data, in step with the same window: the set first, then a bounded chunk of its rows.
           await tx.$executeRaw(Prisma.sql`
-            DELETE FROM "sales_day_sets" d WHERE d."month" < ${cutoff} ${tenant('d')}`);
+            DELETE FROM "sales_day_sets" d WHERE d."month" < ${dayCutoff} ${tenant('d')}`);
           await tx.$executeRaw(Prisma.sql`
             DELETE FROM "outlet_sales_days" WHERE "id" IN (
               SELECT o."id" FROM "outlet_sales_days" o
-               WHERE o."month" < ${cutoff} ${tenant('o')} LIMIT ${HISTORY_PURGE_CHUNK_ROWS})`);
+               WHERE o."month" < ${dayCutoff} ${tenant('o')} LIMIT ${HISTORY_PURGE_CHUNK_ROWS})`);
           return Number(lines);
         },
         { timeout: HISTORY_PURGE_TX_TIMEOUT_MS, maxWait: 5_000 },
@@ -216,6 +217,8 @@ export class SalesImportRetentionService {
     stopStartingAfter?: number;
     /** Run the month-window delete (history + day data; default true; the import-list GET passes false — drains / worker do it). */
     history?: boolean;
+    /** EXPLICIT import retention in days (the one-off trim applies the V2 7 days with it); default importRetentionDays(). */
+    retentionDays?: number;
   } = {}): Promise<{ abandoned: number; purged: number }> {
     const now = opts.now ?? new Date();
     const limit = opts.limit ?? 5;
@@ -250,7 +253,7 @@ export class SalesImportRetentionService {
         });
         if (r === 'purged') out.abandoned++;
       }
-      const expiredBefore = new Date(now.getTime() - SALES_IMPORT_RETENTION_DAYS * 86_400_000);
+      const expiredBefore = new Date(now.getTime() - (opts.retentionDays ?? importRetentionDays()) * 86_400_000);
       const expired = await this.prisma.salesImport.findMany({
         where: { ...tenant, status: { in: RETENTION_STATUSES }, purgedAt: null, finishedAt: { lt: expiredBefore } },
         select: { id: true, clientId: true },
@@ -270,7 +273,7 @@ export class SalesImportRetentionService {
     } catch (e) {
       this.logger.warn(`sales-import retention sweep failed: ${(e as Error).message}`);
     }
-    // Month window: history + day data older than the current + 3 previous months (bounded; usually nothing).
+    // Month windows: history before historyCutoffMonth() + day data before dayDataCutoffMonth() (bounded; usually nothing).
     if (opts.history !== false && fits(HISTORY_PURGE_STEP_MS)) await this.purgeOldHistory({ clientId: opts.clientId });
     return out;
   }

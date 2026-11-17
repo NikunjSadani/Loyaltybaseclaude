@@ -9,6 +9,7 @@ import type { Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { SalesDayDataResult } from '../sales-import.contract';
 import type { MonthDaysBuild } from './month-days';
+import { dayDataRetentionMessage } from '../retention-window';
 
 /** Rows per outlet_sales_days INSERT … unnest statement (≈ 6.5k outlets × billing days ≈ tens of thousands per month). */
 export const DAY_CHUNK = 5000;
@@ -22,6 +23,14 @@ export function dayDataReason(build: Exclude<MonthDaysBuild, { ok: true }>, sour
       ? 'This file was processed before day-by-day sales were stored, so this month now has no day-by-day data. Reprocess the file and apply it again to store it.'
       : "This month's stored sales lines were applied before day-by-day sales were stored, so this month has no day-by-day data. Apply the sales file to the month again to store it.";
   }
+  if (build.code === 'TOO_LARGE') {
+    return (
+      `This month has too many sales lines for programme outlets (${build.rows.toLocaleString('en-IN')}; the limit is ` +
+      `${build.limit.toLocaleString('en-IN')}) to build day-by-day figures safely, so none were stored for it (its monthly ` +
+      'figures were updated as usual). Contact Gifsy support.'
+    );
+  }
+  if (build.code === 'OUT_OF_WINDOW') return dayDataRetentionMessage(build.month);
   return `The day-by-day values did not add up to the monthly values (${build.detail}), so no day-by-day data was stored for this month. Contact Gifsy support.`;
 }
 
@@ -51,12 +60,17 @@ export async function replaceMonthDays(
     const reason = !build.ok
       ? dayDataReason(build, a.source)
       : 'The last invoice day of the applied file for this month is unknown, so no day-by-day data was stored. Apply the sales file to the month again.';
-    const detail = !build.ok ? (build.code === 'MISMATCH' ? { detail: build.detail } : { rowsWithoutDays: build.rowsWithoutDays }) : {};
+    const detail = !build.ok
+      ? build.code === 'MISMATCH' ? { detail: build.detail }
+        : build.code === 'NO_DAY_SPLIT' ? { rowsWithoutDays: build.rowsWithoutDays }
+          : build.code === 'TOO_LARGE' ? { rows: build.rows, limit: build.limit }
+            : {}
+      : {};
     const line = JSON.stringify({
       msg: 'sales-import day data NOT written', clientId, month, source: a.source, deletedRows: Number(deleted),
       code: build.ok ? 'NO_LAST_DAY' : build.code, ...detail,
     });
-    if (!build.ok && build.code === 'MISMATCH') log.error(line);
+    if (!build.ok && (build.code === 'MISMATCH' || build.code === 'TOO_LARGE')) log.error(line);
     else log.warn(line);
     return { written: false, outlets: 0, rows: 0, lastDay: null, reason };
   }
