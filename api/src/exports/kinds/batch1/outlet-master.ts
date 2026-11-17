@@ -23,6 +23,7 @@ import { istDateKey } from '../../../common/ist-date';
 import { isKycInFlight, isReKycPending } from '../../../common/kyc-rekyc.helper';
 import { rungIdHeader, rungNameHeader, rungPhoneHeader } from '../../../common/hierarchy-labels';
 import { mintDocViewToken } from '../../../kyc/doc-view-token';
+import { hasFastTrackMarker } from '../../../kyc/kyc-fast-track.helper';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import { BATCH1_PAGE_SIZE, rawObject, utcDateKey } from './common';
 
@@ -126,7 +127,7 @@ export function profileStatus(
   }
 }
 
-interface HistoryRow {
+export interface HistoryRow {
   toStatus: string;
   changedByUserId: string | null;
   createdAt: Date;
@@ -140,12 +141,17 @@ function stageOf(m: Prisma.JsonValue | null): string | undefined {
 /**
  * The status-history row of the SALES approval that handed the submission to Gifsy: a FIRST_APPROVER-stage row into
  * PENDING_GIFSY, else any row into PENDING_GIFSY, else a sales-side APPROVED (stage ≠ GIFSY).
+ *
+ * A GIFSY-reject FAST-TRACK row (DRAFT→PENDING_GIFSY at the owner's consent, Bajaj `gifsyRejectFastTrack`) is NOT a
+ * sales approval — its actor is the submitting REP — so it is skipped: a fast-tracked KYC has no sales approver and
+ * the "Approval by Employee" columns stay blank instead of naming the rep. (No such row exists for any other tenant.)
  */
-function salesApproverHistoryRow(history: HistoryRow[]): HistoryRow | undefined {
+export function salesApproverHistoryRow(history: HistoryRow[]): HistoryRow | undefined {
+  const sales = history.filter((h) => !hasFastTrackMarker(h.metadata));
   return (
-    history.find((h) => h.toStatus === 'PENDING_GIFSY' && stageOf(h.metadata) === 'FIRST_APPROVER') ||
-    history.find((h) => h.toStatus === 'PENDING_GIFSY') ||
-    history.find((h) => h.toStatus === 'APPROVED' && stageOf(h.metadata) !== 'GIFSY')
+    sales.find((h) => h.toStatus === 'PENDING_GIFSY' && stageOf(h.metadata) === 'FIRST_APPROVER') ||
+    sales.find((h) => h.toStatus === 'PENDING_GIFSY') ||
+    sales.find((h) => h.toStatus === 'APPROVED' && stageOf(h.metadata) !== 'GIFSY')
   );
 }
 

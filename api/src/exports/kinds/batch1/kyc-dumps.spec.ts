@@ -25,13 +25,15 @@ import { expectSameWorkbook, fakeModuleRef, readBack, runKindToBuffer, seeded } 
 
 // ─── The OLD generators, verbatim (kyc-review-dump.ts before 2026-11-13) ─────────────────────────────────────
 
-function oldReviewDump(entries: KycReviewDumpEntry[]): Buffer {
+function oldReviewDump(entries: KycReviewDumpEntry[], routing: boolean): Buffer {
   const perFieldHeaders: string[] = [];
   for (const { label } of KYC_FIELD_ORDER) {
     perFieldHeaders.push(kycFieldDecisionHeader(label));
     perFieldHeaders.push(kycFieldRemarkHeader(label));
   }
-  const headerRow: string[] = [...KYC_DUMP_CONTEXT_HEADERS, ...KYC_DUMP_DOC_HEADERS, ...perFieldHeaders];
+  // + the trailing "Routing" column (GIFSY-reject fast-track, 2026-11-17) ONLY when a flag-on tenant is in scope —
+  // the ONLY intended layout change; a flag-off scope (Deoleo) is the exact old 40-column file.
+  const headerRow: string[] = [...KYC_DUMP_CONTEXT_HEADERS, ...KYC_DUMP_DOC_HEADERS, ...perFieldHeaders, ...(routing ? ['Routing'] : [])];
   const dataRows: unknown[][] = entries.map((e) => {
     const row: unknown[] = [
       e.submissionId, e.outletCode, e.outletName, e.ownerName, e.mobile, e.outletType, e.gstNumber, e.panNumber,
@@ -48,6 +50,7 @@ function oldReviewDump(entries: KycReviewDumpEntry[]): Buffer {
       row.push(decision);
       row.push(decision === 'REJECT' ? fs.remark || 'Rejected (no remark on file)' : (fs.remark ?? ''));
     }
+    if (routing) row.push(e.fastTrack ? 'Direct to GIFSY (resubmitted after GIFSY rejection)' : '');
     return row;
   });
   const ws = aoaToSheetSafe([headerRow, ...dataRows]);
@@ -68,14 +71,15 @@ function oldReviewDump(entries: KycReviewDumpEntry[]): Buffer {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
 
-function oldRejected(rows: RejectedKycRow[]): Buffer {
+function oldRejected(rows: RejectedKycRow[], routing: boolean): Buffer {
   const verdictLabel = (d: string) => (d === 'APPROVED' ? 'OK' : d === 'REJECTED' ? 'REJECTED' : 'PENDING');
   const perFieldHeaders: string[] = [];
   for (const { label } of KYC_FIELD_ORDER) {
     perFieldHeaders.push(rejectedFieldVerdictHeader(label));
     perFieldHeaders.push(rejectedFieldRemarkHeader(label));
   }
-  const headerRow: string[] = [...REJECTED_KYC_IDENTITY_HEADERS, ...perFieldHeaders, ...REJECTED_KYC_VALUE_HEADERS];
+  // + the trailing "Routing" column (GIFSY-reject fast-track, 2026-11-17) ONLY when a flag-on tenant is in scope.
+  const headerRow: string[] = [...REJECTED_KYC_IDENTITY_HEADERS, ...perFieldHeaders, ...REJECTED_KYC_VALUE_HEADERS, ...(routing ? ['Routing'] : [])];
   const dataRows: unknown[][] = rows.map((r) => {
     const rejectedFields = KYC_FIELD_ORDER.filter(({ key }) => r.fields[key]?.decision === 'REJECTED').map(({ label }) => label).join(', ');
     const row: unknown[] = [r.outletCode, r.outletName, r.ownerName, r.mobile, r.salesRep, r.submittedDate, r.rejectedDate, r.rejectedBy, r.rejectionReason, rejectedFields];
@@ -86,6 +90,7 @@ function oldRejected(rows: RejectedKycRow[]): Buffer {
     }
     row.push(r.gstNumber, r.panNumber, r.address, r.city, r.state, r.pincode, r.bankName ?? '', r.accountHolderName ?? '',
       r.accountNumber ?? '', r.ifscCode ?? '', r.upiId ?? '', r.slaAgeHrs != null ? String(r.slaAgeHrs) : '');
+    if (routing) row.push(r.fastTrack ? 'Direct to GIFSY (resubmitted after GIFSY rejection)' : '');
     return row;
   });
   const ws = aoaToSheetSafe([headerRow, ...dataRows]);
@@ -117,6 +122,8 @@ function entries(n: number): KycReviewDumpEntry[] {
     nameMismatch: rnd() < 0.3,
     documents: { gstCertificateUrl: url(i, 'g'), addressDocUrl: url(i, 'a'), selfDeclarationUrl: url(i, 's'), boardPhotoUrl: url(i, 'b'), ownerPhotoUrl: url(i, 'o'), chequeUrl: url(i, 'c') },
     fields: fields(rnd),
+    // Some GIFSY-reject fast-tracked rows exercise the trailing "Routing" label (no rnd() draw → fixtures unchanged).
+    fastTrack: i % 7 === 3 ? { previousSubmissionId: `KYC-P${i}`, previousRejectedAt: new Date(0).toISOString() } : null,
   }));
 }
 
@@ -128,11 +135,12 @@ function rejectedRows(n: number): RejectedKycRow[] {
     slaAgeHrs: rnd() < 0.8 ? Math.floor(rnd() * 100) : undefined, fields: fields(rnd), gstNumber: 'G', panNumber: 'P',
     address: 'A', city: 'C', state: 'S', pincode: '1', bankName: rnd() < 0.5 ? 'HDFC' : undefined, accountHolderName: undefined,
     accountNumber: undefined, ifscCode: 'I', upiId: rnd() < 0.5 ? 'x@upi' : undefined,
+    fastTrack: i % 5 === 1 ? { previousSubmissionId: `P${i}`, previousRejectedAt: new Date(0).toISOString() } : null,
   }));
 }
 
 /** Serves `all` in (createdAt, id) keyset pages like the real page methods; records the cursors it was given. */
-function pagingKyc(allEntries: KycReviewDumpEntry[], allRows: RejectedKycRow[]) {
+function pagingKyc(allEntries: KycReviewDumpEntry[], allRows: RejectedKycRow[], routing = true) {
   const cursors: Array<KycExportCursor | null> = [];
   const users: JwtPayload[] = [];
   const page = <T,>(all: T[], after: KycExportCursor | null, take: number) => {
@@ -144,6 +152,11 @@ function pagingKyc(allEntries: KycReviewDumpEntry[], allRows: RejectedKycRow[]) 
   return {
     cursors,
     users,
+    // Whether a gifsyRejectFastTrack tenant is in the requester's scope → the trailing Routing column.
+    fastTrackInScope: async (u: JwtPayload) => {
+      users.push(u);
+      return routing;
+    },
     reviewDumpPage: async (u: JwtPayload, after: KycExportCursor | null, take: number) => {
       cursors.push(after);
       users.push(u);
@@ -172,7 +185,7 @@ describe('kyc-review-dump export kind', () => {
     const all = entries(4100);
     const kyc = pagingKyc(all, []);
     const res = await runKindToBuffer(KYC_REVIEW_DUMP_KIND, {}, { prisma, moduleRef: fakeModuleRef([[KycService, kyc]]), user: gifsy });
-    const got = expectSameWorkbook(res.buffer, oldReviewDump(all));
+    const got = expectSameWorkbook(res.buffer, oldReviewDump(all, true));
     expect(res.rowCount).toBe(4100);
     expect(kyc.cursors).toEqual([null, { createdAt: new Date(0), id: '1999' }, { createdAt: new Date(0), id: '3999' }]);
     expect(kyc.users.every((u) => u === gifsy)).toBe(true); // KycService scopes with the requester (kycTenantFilter)
@@ -184,8 +197,18 @@ describe('kyc-review-dump export kind', () => {
 
   it('PARITY (empty queue): header row only', async () => {
     const res = await runKindToBuffer(KYC_REVIEW_DUMP_KIND, {}, { prisma, moduleRef: fakeModuleRef([[KycService, pagingKyc([], [])]]), user: gifsy });
-    const got = expectSameWorkbook(res.buffer, oldReviewDump([]));
+    const got = expectSameWorkbook(res.buffer, oldReviewDump([], true));
     expect(got.rows['KYC Review Dump']).toHaveLength(1);
+  });
+
+  it('FLAG-OFF scope (Deoleo): exactly the old 40-column file — no Routing header or cells', async () => {
+    const all = entries(30);
+    const res = await runKindToBuffer(KYC_REVIEW_DUMP_KIND, {}, {
+      prisma, moduleRef: fakeModuleRef([[KycService, pagingKyc(all, [], false)]]), user: gifsy,
+    });
+    const got = expectSameWorkbook(res.buffer, oldReviewDump(all, false));
+    expect(got.rows['KYC Review Dump'][0]).toHaveLength(40);
+    expect(got.rows['KYC Review Dump'][0]).not.toContain('Routing');
   });
 });
 
@@ -194,11 +217,22 @@ describe('kyc-rejected export kind', () => {
     const all = rejectedRows(2600);
     const kyc = pagingKyc([], all);
     const res = await runKindToBuffer(KYC_REJECTED_KIND, {}, { prisma, moduleRef: fakeModuleRef([[KycService, kyc]]), user: gifsy });
-    expectSameWorkbook(res.buffer, oldRejected(all));
+    expectSameWorkbook(res.buffer, oldRejected(all, true));
     expect(kyc.cursors).toHaveLength(2);
     expect(JSON.stringify(readBack(res.buffer).rows)).toContain("'@SUM(A1)");
     expect(res.heavy).toBe(true);
     expect(res.fileName).toBe('kyc-rejected.xlsx');
+  });
+
+  it('FLAG-OFF scope (Deoleo): no Routing column — SLA Age (hrs) stays last', async () => {
+    const all = rejectedRows(20);
+    const res = await runKindToBuffer(KYC_REJECTED_KIND, {}, {
+      prisma, moduleRef: fakeModuleRef([[KycService, pagingKyc([], all, false)]]), user: gifsy,
+    });
+    const got = expectSameWorkbook(res.buffer, oldRejected(all, false));
+    const header = got.rows['Rejected Outlets'][0];
+    expect(header).not.toContain('Routing');
+    expect(header[header.length - 1]).toBe('SLA Age (hrs)');
   });
 
   it('access is Gifsy-only + kyc:read for both kinds', () => {

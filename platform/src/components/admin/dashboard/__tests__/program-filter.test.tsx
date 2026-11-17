@@ -17,7 +17,7 @@ import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { ProgramFilter } from '../ProgramFilter';
 import {
   useDashboardProgram, withProgramParam, isTenantWideMetric, isProgramUsable,
-  dashboardProgramStorageKey, type DashboardProgram,
+  dashboardProgramStorageKey, resolveDashboardProgramKey, type DashboardProgram,
 } from '@/lib/dashboard-program';
 
 /** /api/auth/me for the signed-in session (tenant + user drive the storage key). */
@@ -86,7 +86,7 @@ describe('ProgramFilter', () => {
     const select = (await screen.findByTestId('pf')) as HTMLSelectElement;
     fireEvent.change(select, { target: { value: 'Silver' } });
     expect(await screen.findByTestId('value')).toHaveTextContent('[Silver]');
-    expect(window.sessionStorage.getItem(KEY)).toBe('Silver');
+    await waitFor(() => expect(window.sessionStorage.getItem(KEY)).toBe('Silver')); // stored once the session resolves
     first.unmount();
 
     // A fresh mount (another dashboard) restores it.
@@ -102,7 +102,7 @@ describe('ProgramFilter', () => {
     await waitFor(() => expect(screen.getByTestId('value')).toHaveTextContent('[Gold]'));
     fireEvent.change(await screen.findByTestId('pf'), { target: { value: '' } });
     await waitFor(() => expect(screen.getByTestId('value')).toHaveTextContent('[]'));
-    expect(window.sessionStorage.getItem(KEY)).toBeNull();
+    await waitFor(() => expect(window.sessionStorage.getItem(KEY)).toBeNull());
     expect(window.location.search).toBe('');
   });
 
@@ -111,7 +111,7 @@ describe('ProgramFilter', () => {
     window.history.replaceState(null, '', '/admin/dashboard?program=Silver');
     render(<Harness programs={['Gold', 'Silver']} />);
     await waitFor(() => expect(screen.getByTestId('value')).toHaveTextContent('[Silver]'));
-    expect(window.sessionStorage.getItem(KEY)).toBe('Silver');
+    await waitFor(() => expect(window.sessionStorage.getItem(KEY)).toBe('Silver'));
   });
 
   it('PF3b: an empty ?program= means All programs even when a value is stored', async () => {
@@ -133,7 +133,8 @@ describe('ProgramFilter', () => {
     expect(await screen.findByTestId('program-filter-dropped')).toHaveTextContent(
       'Program “Platinum” isn\'t available here — showing all programs.',
     );
-    expect(window.sessionStorage.getItem(KEY)).toBeNull();
+    // D2: a page that can't use the program shows the notice but NEVER wipes the stored choice.
+    expect(window.sessionStorage.getItem(KEY)).toBe('Platinum');
   });
 
   it('PF6: storage is keyed per tenant AND user — another tenant / user never inherits the choice', async () => {
@@ -169,11 +170,59 @@ describe('ProgramFilter', () => {
     await waitFor(() => expect(window.location.search).toBe('?program=Gold'));
   });
 
+  it('D5: minPrograms={0} always shows the select (the KYC dashboard’s original rule)', async () => {
+    render(<ProgramFilter id="k" testId="pfk" programs={[]} value="" onChange={() => {}} minPrograms={0} />);
+    expect(await screen.findByTestId('pfk')).toBeInTheDocument();
+  });
+
   it('PF8: with a program active the select stays visible even when no program list is known', async () => {
     render(<ProgramFilter id="x" testId="pfx" programs={[]} value="Gold" onChange={() => {}} />);
     const select = (await screen.findByTestId('pfx')) as HTMLSelectElement;
     expect(select.value).toBe('Gold');
     expect(await screen.findByRole('option', { name: 'All programs' })).toBeInTheDocument();
+  });
+
+
+  it('D1: ready immediately — never waits on /api/auth/me (pending forever)', async () => {
+    window.sessionStorage.setItem(KEY, 'Gold');
+    const fn = vi.fn(() => new Promise(() => {})); // /auth/me never answers
+    vi.stubGlobal('fetch', fn);
+    render(<Harness programs={['Gold', 'Silver']} />);
+    expect(screen.getByTestId('ready')).toHaveTextContent('yes'); // synchronous after mount effects
+    expect(screen.getByTestId('value')).toHaveTextContent('[]'); // All programs until the session is known
+  });
+
+  it('D1: nothing stored + no ?program= → NO /api/auth/me call at all (unfiltered tenants: zero extra round-trips)', async () => {
+    const fn = mockSession();
+    render(<Harness programs={['Gold', 'Silver']} />);
+    expect(await screen.findByTestId('ready')).toHaveTextContent('yes');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('D1: the session lookup is hard-capped (2 s default) → null on timeout', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    const started = Date.now();
+    await expect(resolveDashboardProgramKey(30)).resolves.toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('D1: a stored program is applied once the session resolves', async () => {
+    window.sessionStorage.setItem(KEY, 'Silver');
+    render(<Harness programs={['Gold', 'Silver']} />);
+    expect(screen.getByTestId('value')).toHaveTextContent('[]');
+    await waitFor(() => expect(screen.getByTestId('value')).toHaveTextContent('[Silver]'));
+  });
+
+  it('D5: reconcile honours a page-specific minimum (KYC: 1 program is enough)', async () => {
+    window.history.replaceState(null, '', '/admin/dashboards/kyc?program=Only');
+    render(<Harness programs={['Only']} />);
+    await waitFor(() => expect(screen.getByTestId('value')).toHaveTextContent('[Only]'));
+    let ok = false;
+    act(() => { ok = latest!.reconcile('Only', ['Only'], 1); });
+    expect(ok).toBe(true);
+    expect(isProgramUsable('Only', ['Only'], 1)).toBe(true);
+    expect(isProgramUsable('Only', ['Only'])).toBe(false);
   });
 
   it('PF5: helpers', () => {

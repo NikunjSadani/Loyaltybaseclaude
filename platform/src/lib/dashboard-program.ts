@@ -7,9 +7,15 @@
  *  - '' (ALL_PROGRAMS) = All programs = no filter. Real Outlet.programName values are never blank.
  *  - The choice PERSISTS across those dashboards for the browser session (sessionStorage, every access
  *    wrapped in try/catch — private windows / blocked storage just fall back to All programs). The key is
- *    scoped to the TENANT clientId AND the user id (from GET /api/auth/me — the authoritative session, also
- *    correct for an operator assumed into a tenant), so a program never leaks into another tenant or another
- *    person on the same browser. Session unknown (the call fails) → nothing is restored or stored.
+ *    scoped to the TENANT clientId AND the user id, so a program never leaks into another tenant or another
+ *    person on the same browser. The access token is an httpOnly cookie (AF-6) — JS can't decode it, and the
+ *    client deliberately keeps no clientId — so the key comes from GET /api/auth/me. That lookup NEVER blocks:
+ *    pages fetch at once (URL program or All programs) and a stored program is applied when the session
+ *    resolves; the lookup is hard-capped at 2 s; and it is skipped entirely when nothing is stored and no
+ *    program is chosen (an unfiltered tenant makes no extra round-trip). Session unknown → nothing restored
+ *    or stored.
+ *  - `reconcile()` failing on ONE page shows the notice and resets that page, but never overwrites the stored
+ *    choice (another dashboard may well have that program).
  *  - A program restored from storage is written into `?program=` on mount, so the address bar always says
  *    what the screen is filtered by (and a copied link reproduces it).
  *  - A `?program=` in the URL WINS over the stored value when present (shareable links). Changing the
@@ -36,13 +42,35 @@ export function dashboardProgramStorageKey(clientId: string, userId: string): st
   return `${DASHBOARD_PROGRAM_STORAGE_KEY}:${clientId}:${userId}`;
 }
 
+/** Hard cap on the session lookup. */
+export const SESSION_LOOKUP_TIMEOUT_MS = 2000;
+
+/** True when ANY dashboard program is stored in this browser session (otherwise nothing can be restored). */
+function hasStoredPrograms(): boolean {
+  try {
+    const s = window.sessionStorage;
+    for (let i = 0; i < s.length; i++) if ((s.key(i) ?? '').startsWith(`${DASHBOARD_PROGRAM_STORAGE_KEY}:`)) return true;
+  } catch { /* storage unavailable */ }
+  return false;
+}
+
 /**
  * Resolve the storage key from the authoritative session (GET /api/auth/me → `{ id, clientId }`, the same call
- * `useAuthClientId` makes; user id falls back to the stored login user). null when it can't be resolved.
+ * `useAuthClientId` makes; user id falls back to the stored login user). null when it can't be resolved or the
+ * lookup exceeds `timeoutMs` (hard cap — it never holds a page up).
  */
-async function resolveStorageKey(): Promise<string | null> {
+export function resolveDashboardProgramKey(timeoutMs = SESSION_LOOKUP_TIMEOUT_MS): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => { ctrl?.abort(); resolve(null); }, timeoutMs);
+  });
+  return Promise.race([fetchStorageKey(ctrl?.signal), timeout]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+async function fetchStorageKey(signal?: AbortSignal): Promise<string | null> {
   try {
-    const r = await fetch(AUTH_ME_URL, { credentials: 'include' });
+    const r = await fetch(AUTH_ME_URL, { credentials: 'include', ...(signal ? { signal } : {}) });
     if (!r || !r.ok) return null;
     const j = (await r.json()) as { data?: Record<string, unknown> } & Record<string, unknown>;
     const d = (j && typeof j === 'object' && j.data && typeof j.data === 'object' ? j.data : j) as Record<string, unknown>;
@@ -104,11 +132,18 @@ function writeUrlProgram(p: string): void {
   }
 }
 
-/** The selection is usable against a response's program list: '' always is; a name only when listed AND the dropdown shows. */
-export function isProgramUsable(program: string, available: readonly string[] | null | undefined): boolean {
+/**
+ * The selection is usable against a response's program list: '' always is; a name only when listed AND the page's
+ * dropdown shows (`minPrograms` — Overview / Program Health use 2; the KYC dashboard uses 1).
+ */
+export function isProgramUsable(
+  program: string,
+  available: readonly string[] | null | undefined,
+  minPrograms: number = MIN_PROGRAMS_FOR_FILTER,
+): boolean {
   if (!program) return true;
   const list = available ?? [];
-  return list.length >= MIN_PROGRAMS_FOR_FILTER && list.includes(program);
+  return list.length >= Math.max(1, minPrograms) && list.includes(program);
 }
 
 /** Append `?<param>=<program>` only for a real selection ('' = All programs = no param, byte-identical URL). */
@@ -145,7 +180,7 @@ export interface DashboardProgram {
    * `droppedProgram` — when the requested program isn't usable; the caller should discard that response
    * (the reset triggers a fresh All-programs fetch).
    */
-  reconcile: (requested: string, available: readonly string[] | null | undefined) => boolean;
+  reconcile: (requested: string, available: readonly string[] | null | undefined, minPrograms?: number) => boolean;
   /** A program that was dropped because it isn't available here (shown as a notice); null otherwise. */
   droppedProgram: string | null;
   dismissDropped: () => void;
@@ -157,34 +192,48 @@ export function useDashboardProgram(): DashboardProgram {
   const [droppedProgram, setDroppedProgram] = useState<string | null>(null);
   // Per tenant + user storage key (null until /auth/me resolves, or when it can't).
   const keyRef = useRef<string | null>(null);
+  const keyPromiseRef = useRef<Promise<string | null> | null>(null);
   // The latest selection, so a late-resolving session stores what the person has picked meanwhile.
   const programRef = useRef<string>(ALL_PROGRAMS);
   const touchedRef = useRef(false);
+  const aliveRef = useRef(true);
+
+  /** Start (once) the capped session lookup. */
+  const lookupKey = useCallback((): Promise<string | null> => {
+    if (!keyPromiseRef.current) {
+      keyPromiseRef.current = resolveDashboardProgramKey().then((key) => {
+        keyRef.current = key;
+        return key;
+      });
+    }
+    return keyPromiseRef.current;
+  }, []);
 
   useEffect(() => {
-    let alive = true;
+    aliveRef.current = true;
     const fromUrl = readUrlProgram();
     if (fromUrl !== null) {
-      // A link wins and needs no session to apply — start immediately; persist once the session is known.
       programRef.current = fromUrl;
       setProgramState(fromUrl);
-      setReady(true);
     }
-    void resolveStorageKey().then((key) => {
-      if (!alive) return;
-      keyRef.current = key;
+    // NEVER wait for the session: pages fetch now (URL program or All programs).
+    setReady(true);
+    // Look the session up only when it can matter: a link to persist, or something stored to restore.
+    if (fromUrl === null && !hasStoredPrograms()) return () => { aliveRef.current = false; };
+    void lookupKey().then((key) => {
+      if (!aliveRef.current) return;
       if (fromUrl !== null || touchedRef.current) {
         storeProgram(key, programRef.current);
         return;
       }
       const restored = readStoredProgram(key);
+      if (!restored) return;
       programRef.current = restored;
-      setProgramState(restored);
-      if (restored) writeUrlProgram(restored); // the address bar says what the screen is filtered by
-      setReady(true);
+      setProgramState(restored); // the page refetches with it
+      writeUrlProgram(restored); // the address bar says what the screen is filtered by
     });
-    return () => { alive = false; };
-  }, []);
+    return () => { aliveRef.current = false; };
+  }, [lookupKey]);
 
   const setProgram = useCallback((p: string) => {
     const next = (p ?? '').trim();
@@ -192,18 +241,23 @@ export function useDashboardProgram(): DashboardProgram {
     programRef.current = next;
     setDroppedProgram(null);
     setProgramState(next);
-    storeProgram(keyRef.current, next);
     writeUrlProgram(next);
-  }, []);
+    if (keyPromiseRef.current) {
+      // Known (or resolving) session → store the LATEST choice once it is known.
+      void keyPromiseRef.current.then((key) => storeProgram(key, programRef.current));
+    } else {
+      void lookupKey().then((key) => storeProgram(key, programRef.current));
+    }
+  }, [lookupKey]);
 
-  const reconcile = useCallback<DashboardProgram['reconcile']>((requested, available) => {
-    if (isProgramUsable(requested, available)) return true;
+  const reconcile = useCallback<DashboardProgram['reconcile']>((requested, available, minPrograms) => {
+    if (isProgramUsable(requested, available, minPrograms)) return true;
     setDroppedProgram(requested);
-    // Only reset if the person hasn't already moved on to another choice.
+    // Only reset if the person hasn't already moved on to another choice. The STORED choice is left alone —
+    // this page can't use it, another dashboard may.
     setProgramState((cur) => {
       if (cur !== requested) return cur;
       programRef.current = ALL_PROGRAMS;
-      storeProgram(keyRef.current, ALL_PROGRAMS);
       writeUrlProgram(ALL_PROGRAMS);
       return ALL_PROGRAMS;
     });

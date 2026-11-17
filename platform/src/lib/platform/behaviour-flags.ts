@@ -10,14 +10,15 @@
  */
 import type { FeatureFlags } from './client-config';
 
-export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan'>;
+export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan' | 'gifsyRejectFastTrack'>;
 
 export interface BehaviourFlagMeta {
   label: string;
   description: string;
   /**
    * When set, switching the flag ON (console) first asks for explicit confirmation with this copy.
-   * Switching it OFF never asks. Used for flags that change who gets paid / what tax the company bears.
+   * Switching it OFF never asks. Used for flags that change who gets paid / what tax the company bears, or
+   * who checks a KYC before GIFSY (gifsyRejectFastTrack).
    */
   confirmOn?: { title: string; points: string[]; confirmLabel: string };
 }
@@ -45,6 +46,23 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = 
         "The TDS at the no-PAN rate is a company-borne liability — it is shown in the TDS reports as 'NO PAN ON FILE' and has to be deposited by the company.",
       ],
       confirmLabel: 'Yes, allow payouts without PAN',
+    },
+  },
+  gifsyRejectFastTrack: {
+    label: 'Send GIFSY-rejected KYC resubmissions straight to GIFSY',
+    description:
+      'When GIFSY rejects a KYC the managers already approved, the corrected resubmission skips manager approval. SO Declaration KYCs still go through managers.',
+    // F2: it changes who checks a KYC before GIFSY — confirm before switching ON (OFF never asks).
+    confirmOn: {
+      title: 'Send GIFSY-rejected KYC resubmissions straight to GIFSY?',
+      points: [
+        'Applies to KYCs GIFSY rejected before this was switched on too.',
+        "Only outlets' own assigned rep (or their managers) get the shortcut.",
+        'Managers are not notified for these KYCs.',
+        'Switching it off does not pull back KYCs already sent to GIFSY.',
+        'SO Declaration KYCs always go through managers.',
+      ],
+      confirmLabel: 'Yes, send resubmissions straight to GIFSY',
     },
   },
 };

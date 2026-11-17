@@ -39,12 +39,15 @@ export const KYC_REVIEW_DUMP_KIND: ExportKindDef<NoParams> = {
   fileName: () => 'kyc-review-dump.xlsx',
   async run(ctx, _params, out) {
     const kyc = ctx.moduleRef.get(KycService, { strict: false });
-    const headers = kycReviewDumpHeaders();
+    // Trailing "Routing" column ONLY when a gifsyRejectFastTrack tenant is in the requester's scope (Bajaj); a
+    // flag-off-only scope (Deoleo) gets exactly the established 40 columns.
+    const routing = await kyc.fastTrackInScope(ctx.user);
+    const headers = kycReviewDumpHeaders(routing);
     const sheet = await out.addSheet('KYC Review Dump', headers, { widths: kycDumpColumnWidths(headers) });
     let after: KycExportCursor | null = null;
     do {
       const page = await kyc.reviewDumpPage(ctx.user, after, BATCH1_PAGE_SIZE);
-      for (const e of page.entries) await sheet.addRow(kycReviewDumpCells(e));
+      for (const e of page.entries) await sheet.addRow(kycReviewDumpCells(e, routing));
       after = page.next;
     } while (after);
     return { rowCount: sheet.rowCount };
@@ -65,12 +68,14 @@ export const KYC_REJECTED_KIND: ExportKindDef<NoParams> = {
   async run(ctx, _params, out) {
     const kyc = ctx.moduleRef.get(KycService, { strict: false });
     const holidays = await loadHolidaySet(ctx.prisma);
-    const headers = rejectedKycHeaders();
+    // Trailing "Routing" column ONLY when a gifsyRejectFastTrack tenant is in the requester's scope.
+    const routing = await kyc.fastTrackInScope(ctx.user);
+    const headers = rejectedKycHeaders(routing);
     const sheet = await out.addSheet('Rejected Outlets', headers, { widths: kycDumpColumnWidths(headers) });
     let after: KycExportCursor | null = null;
     do {
       const page = await kyc.rejectedExportPage(ctx.user, after, BATCH1_PAGE_SIZE, holidays);
-      for (const r of page.rows) await sheet.addRow(rejectedKycCells(r));
+      for (const r of page.rows) await sheet.addRow(rejectedKycCells(r, routing));
       after = page.next;
     } while (after);
     return { rowCount: sheet.rowCount };

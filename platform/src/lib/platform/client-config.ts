@@ -40,6 +40,11 @@ export interface FeatureFlags {
   // the TDS reports as "NO PAN ON FILE". Bajaj-only; runtime behaviour flag, NOT a console module
   // toggle (excluded from FeatureKey below).
   allowPayoutWithoutPan: boolean;
+  // KYC routing: when ON, a rep's corrected resubmission of a KYC that GIFSY rejected AFTER the
+  // managers had approved it goes straight to GIFSY (PENDING_GIFSY), skipping manager approval.
+  // SO Declaration KYCs still go through the managers. Bajaj-only; runtime behaviour flag, NOT a
+  // console module toggle (excluded from FeatureKey below). Default OFF; Deoleo stays OFF.
+  gifsyRejectFastTrack: boolean;
   selfEnrollmentAllowed: boolean;   // Partners can self-accept schemes
   nonKycOutletCampaigns: boolean;   // Campaigns can target non-KYC outlets
   multiLevelApproval: boolean;      // ≥2 approval levels in hierarchy
@@ -102,7 +107,7 @@ export interface FeatureFlags {
 // The gifsy-console module toggles. Excludes `partnerApp` (nested) and
 // `kycAddressProofWaiver` (a runtime KYC behaviour flag set via clients.features, not a
 // console module) so the console's exhaustive feature Records stay to the module set.
-export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProofWaiver' | 'soDeclarationKyc' | 'outletMasterGeo' | 'allowPayoutWithoutPan'>;
+export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProofWaiver' | 'soDeclarationKyc' | 'outletMasterGeo' | 'allowPayoutWithoutPan' | 'gifsyRejectFastTrack'>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Branding

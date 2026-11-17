@@ -111,7 +111,8 @@ describe('Program Health — program filter', () => {
     const fn = mockOk({ ...PH, availablePrograms: ['Gold', 'Silver'], notProgramScoped: [] });
     render(<ProgramHealthPage />);
     await screen.findByTestId('program-health-dashboard');
-    expect(urls(fn)[0]).toBe('/api/admin/dashboard/program-health?program=Silver');
+    // D1: the first fetch never waits for the session; the stored program follows once known.
+    await waitFor(() => expect(urls(fn)).toContain('/api/admin/dashboard/program-health?program=Silver'));
   });
 
   it('PH6 (F1): a stored program stays visible in the filter even when the load fails', async () => {
@@ -143,14 +144,32 @@ describe('KYC — shared program filter', () => {
     const fn = mockOk(KYC);
     render(<KycDashboardPage />);
     await screen.findByTestId('kyc-dashboard');
-    expect(urls(fn)[0]).toBe('/api/admin/dashboard/kyc?programName=Gold');
+    await waitFor(() => expect(urls(fn)).toContain('/api/admin/dashboard/kyc?programName=Gold'));
     expect(((await screen.findByTestId('kyc-program-filter')) as HTMLSelectElement).value).toBe('Gold');
   });
 
-  it('KYC2: no dropdown when the tenant has fewer than 2 programs', async () => {
+  it('D5 KYC2: exactly ONE program → the dropdown still shows (original KYC rule, Deoleo-identical)', async () => {
     mockOk({ ...KYC, availablePrograms: ['Gold'] });
     render(<KycDashboardPage />);
     await screen.findByTestId('kyc-dashboard');
-    expect(screen.queryByTestId('kyc-program-filter')).not.toBeInTheDocument();
+    const sel = (await screen.findByTestId('kyc-program-filter')) as HTMLSelectElement;
+    expect([...sel.options].map((o) => o.textContent)).toEqual(['All programs', 'Gold']);
+  });
+
+  it('D5 KYC3: a single-program tenant keeps honouring ?program=', async () => {
+    window.history.replaceState(null, '', '/admin/dashboards/kyc?program=Gold');
+    const fn = mockOk({ ...KYC, availablePrograms: ['Gold'] });
+    render(<KycDashboardPage />);
+    await screen.findByTestId('kyc-dashboard');
+    expect(urls(fn)[0]).toBe('/api/admin/dashboard/kyc?programName=Gold');
+    expect(screen.queryByTestId('program-filter-dropped')).not.toBeInTheDocument();
+    expect(((await screen.findByTestId('kyc-program-filter')) as HTMLSelectElement).value).toBe('Gold');
+  });
+
+  it('D5 KYC4: zero programs → the select is still rendered (as on origin/develop)', async () => {
+    mockOk({ ...KYC, availablePrograms: [] });
+    render(<KycDashboardPage />);
+    await screen.findByTestId('kyc-dashboard');
+    expect(await screen.findByTestId('kyc-program-filter')).toBeInTheDocument();
   });
 });

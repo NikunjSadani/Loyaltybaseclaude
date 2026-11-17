@@ -69,8 +69,10 @@ const mockTx = {
 
 const mockPrisma = {
   // create() reads clients.features for the outlet-master geo-fence gate (outletMasterGeo).
-  client: { findUnique: jest.fn() },
-  channelPartner: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+  // findMany: an un-assumed GIFSY read checks whether ANY tenant has gifsyRejectFastTrack ON (D2/D1).
+  client: { findUnique: jest.fn(), findMany: jest.fn() },
+  // count: the A1/R1 partner-ownership check (a partner may act only on their own partner/outlet).
+  channelPartner: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), count: jest.fn() },
   // rejectedExport resolves the rejecter's display name in one round-trip.
   user: { findMany: jest.fn() },
   kycSubmission: {
@@ -85,7 +87,7 @@ const mockPrisma = {
   kycStatusHistory: { create: jest.fn(), findMany: jest.fn() },
   kycDocument: { create: jest.fn(), findUnique: jest.fn() },
   otpCode: { findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
-  outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]), count: jest.fn() },
   // reviewQueue/reviewDump resolve each row's per-tenant outlet-type displayName (scoped to the
   // submission's own tenant). Default [] (set in beforeEach after the reset loop) → empty map →
   // the original outletType.name passes through (Deoleo parity).
@@ -93,7 +95,9 @@ const mockPrisma = {
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   // assertCanViewSubmission's reassignment-aware allow-path looks up the outlet's
   // CURRENT active assignment (unassignedAt null) to a salesUser in the caller's subtree.
-  salesUserAssignment: { findFirst: jest.fn() },
+  // findMany: the active-assignment checks — A1 (create/notInterested/sendConsentOtp: outlet must be
+  // assigned to the sales caller's team) and B1 (fast-track: submitter is the assignee or above them).
+  salesUserAssignment: { findFirst: jest.fn(), findMany: jest.fn() },
   // ledger() resolves each credit tx's field name from its CreditBatch rows JSON.
   creditBatch: { findMany: jest.fn() },
   // ledger()/ledgerStatement() read the wallet's FULL passbook via the shared
@@ -176,6 +180,16 @@ const sss: JwtPayload = { sub: 'sss1', role: 'SSS', clientId: 'deoleo', phone: '
 // Tenant-side read-only observer (Q5) — must keep tenant-wide KYC read after the
 // sales-subtree scoping change (it is NOT a sales user, so it must not collapse to "own only").
 const mis: JwtPayload = { sub: 'mis1', role: 'MIS_USER', clientId: 'deoleo', phone: '', name: '' };
+// The ASSIGNED sales rep (isr1 in DEFAULT_SALES_TREE, actively assigned by default) — the real caller of
+// create / notInterested / sendConsentOtp / consent (only the sales app calls them). A1/R1: a non-real
+// role like RETAILER is refused by the assigned-rep gate, so OTP/consent mechanics tests use this caller.
+const rep: JwtPayload = { sub: 'isr1', role: 'SALES_ISR', clientId: 'deoleo', phone: '', name: '' };
+
+/** Default sales tree for the A1 assigned-rep gate: so1 (SO) <- isr1 (ISR). SalesUser.id = `<userId>-su`. */
+const DEFAULT_SALES_TREE = [
+  { id: 'so1-su', userId: 'so1', reportingToId: null, isActive: true },
+  { id: 'isr1-su', userId: 'isr1', reportingToId: 'so1-su', isActive: true },
+];
 
 /** All-7-APPROVED items for the bridge */
 const ALL_APPROVED = KYC_FIELD_KEYS.map((k) => ({ fieldKey: k, decision: 'APPROVED' as const }));
@@ -206,6 +220,16 @@ function primeSalesNodes(
 
 describe('KycService', () => {
   let service: KycService;
+  /**
+   * Turn gifsyRejectFastTrack ON for the read scope (D2): a tenant-scoped caller resolves its own tenant via
+   * TenantService.resolveClient; an un-assumed GIFSY caller checks every tenant (client.findMany).
+   */
+  const enableFastTrackScope = () => {
+    (service as unknown as { tenant: { resolveClient: jest.Mock } }).tenant.resolveClient.mockResolvedValue({
+      features: { soDeclarationKyc: true, gifsyRejectFastTrack: true },
+    });
+    mockPrisma.client.findMany.mockResolvedValue([{ features: {} }, { features: { gifsyRejectFastTrack: true } }]);
+  };
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -277,6 +301,10 @@ describe('KycService', () => {
     // Default: tenant NOT geo-enabled (no outletMasterGeo flag) → create() skips all geo-fence
     // logic (geoFenceStatus/geoFenceDistanceM stay null). Geo tests override per case.
     mockPrisma.client.findUnique.mockResolvedValue(null);
+    // A1 defaults: the sales callers used across the suite (so1 / isr1) exist in a one-branch tree and the
+    // target outlet is actively assigned to them, so the assigned-rep gate passes unless a test says otherwise.
+    mockPrisma.salesUser.findMany.mockResolvedValue(DEFAULT_SALES_TREE);
+    mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ salesUserId: 'so1-su' }, { salesUserId: 'isr1-su' }]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KycService,
@@ -611,6 +639,43 @@ describe('KycService', () => {
       expect(where.AND[1]).toEqual({ OR: [{ createdAt: { gt: at } }, { createdAt: at, id: { gt: 'b' } }] });
     });
 
+    it('carries fastTrack per entry (batched) so the dump can show the Routing column', async () => {
+      enableFastTrackScope();
+      const sub = (id: string) => ({
+        id, createdAt: new Date(), boardPhotoLat: null, boardPhotoLng: null, user: { name: 'A', phone: '1', clientId: 'bajaj' },
+        partner: null, documents: [], verificationItems: [],
+      });
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([sub('FT'), sub('N')]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'FT', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'OLD', previousRejectedAt: new Date().toISOString() },
+        },
+      ]);
+      const page = await service.reviewDumpPage(gifsy, null, 2000);
+      expect(page.entries[0].fastTrack?.previousSubmissionId).toBe('OLD');
+      expect(page.entries[1].fastTrack).toBeNull();
+      expect(mockPrisma.kycStatusHistory.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('D2: NO tenant in scope has the flag → no fastTrack key, no marker query (Deoleo byte-identical)', async () => {
+      mockPrisma.client.findMany.mockResolvedValue([{ features: { soDeclarationKyc: true } }, { features: null }]);
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        { id: 'A', createdAt: new Date(), boardPhotoLat: null, boardPhotoLng: null, user: { name: 'A', phone: '1', clientId: 'deoleo' }, partner: null, documents: [], verificationItems: [] },
+      ]);
+      const page = await service.reviewDumpPage(gifsy, null, 2000);
+      expect('fastTrack' in page.entries[0]).toBe(false);
+      expect(mockPrisma.kycStatusHistory.findMany).not.toHaveBeenCalled();
+    });
+
+    it('D2: an ASSUMED GIFSY / tenant scope decides by THAT tenant (resolveClient), not by every tenant', async () => {
+      mockPrisma.client.findMany.mockResolvedValue([{ features: { gifsyRejectFastTrack: true } }]); // bajaj elsewhere
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
+      expect(await service.fastTrackInScope({ ...gifsy, assumed: true })).toBe(false); // deoleo assumed → off
+      expect(mockPrisma.client.findMany).not.toHaveBeenCalled();
+      expect(await service.fastTrackInScope(gifsy)).toBe(true); // un-assumed: bajaj is in scope
+    });
+
     it('an assumed Gifsy operator is pinned to the assumed tenant', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
       await service.reviewDumpPage({ ...gifsy, assumed: true }, null, 2000);
@@ -713,6 +778,23 @@ describe('KycService', () => {
       expect(r).toMatchObject({ gstNumber: '27ABCDE1234F1ZK', panNumber: 'ABCDE1234F', address: '12 SV Road', ifscCode: 'HDFC0001' });
       // SLA age = 24 business hours (submitted → rejected, one weekday apart).
       expect(r.slaAgeHrs).toBe(24);
+      // Flag OFF in scope (default) → the key is absent and the marker loader never runs (D2).
+      expect('fastTrack' in r).toBe(false);
+      expect(mockPrisma.kycStatusHistory.findMany).not.toHaveBeenCalled();
+    });
+
+    it('a rejected FAST-TRACKED submission carries fastTrack (Routing column) from one batched query', async () => {
+      enableFastTrackScope();
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([rejectedSub()]);
+      mockPrisma.user.findMany.mockResolvedValueOnce([{ id: 'admin1', name: 'Gifsy Admin' }]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'KYC-R1', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'KYC-R0', previousRejectedAt: new Date().toISOString() },
+        },
+      ]);
+      const [r] = await rowsOf(gifsy);
+      expect(r.fastTrack?.previousSubmissionId).toBe('KYC-R0');
     });
   });
 
@@ -904,6 +986,482 @@ describe('KycService', () => {
       await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
       expect(routedUpdate().status).toBe('PENDING_RSM_APPROVAL');
     }, 30_000); // a hang would exceed this; 30 s = the suite default (was 5 s — too tight under full-suite load)
+  });
+
+  // ─── GIFSY-reject fast-track (Bajaj, clients.features.gifsyRejectFastTrack) ──────────────────────
+  describe('consent() — GIFSY-reject fast-track (gifsyRejectFastTrack)', () => {
+    const isr: JwtPayload = { sub: 'isr1', role: 'SALES_ISR', clientId: 'bajaj', phone: '', name: '' };
+    const dto = { submissionId: 'sub-new', mobile: '9000000001', otp: '123456' };
+    // Relative to "now" — never a hardcoded date.
+    const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
+    const tenantMock = () => (service as unknown as { tenant: { resolveClient: jest.Mock } }).tenant.resolveClient;
+    const salesNotify = () =>
+      (service as unknown as { salesNotifications: { kycSubmittedForApproval: jest.Mock } }).salesNotifications
+        .kycSubmittedForApproval;
+    const setFlag = (on: boolean) =>
+      tenantMock().mockResolvedValue({ features: { soDeclarationKyc: true, multiLevelApproval: true, gifsyRejectFastTrack: on } });
+    /**
+     * Bajaj tree: asm1 <- so1 <- {isr1, isrPeer};  asm2 <- so2 <- isr2 (another territory).
+     * SalesUser.id = `<userId>-su`.
+     */
+    const TREE = [
+      { id: 'asm1-su', userId: 'asm1', reportingToId: null },
+      { id: 'so1-su', userId: 'so1', reportingToId: 'asm1-su' },
+      { id: 'isr1-su', userId: 'isr1', reportingToId: 'so1-su' },
+      { id: 'isrPeer-su', userId: 'isrPeer', reportingToId: 'so1-su' },
+      { id: 'asm2-su', userId: 'asm2', reportingToId: null },
+      { id: 'so2-su', userId: 'so2', reportingToId: 'asm2-su' },
+      { id: 'isr2-su', userId: 'isr2', reportingToId: 'so2-su' },
+    ];
+    /** The outlet's CURRENT active assignee(s). */
+    const assignTo = (...salesUserIds: string[]) =>
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue(salesUserIds.map((salesUserId) => ({ salesUserId })));
+
+    /** OTP verify + the DRAFT submission load + ConsentRecord write. */
+    const primeConsent = (over: Record<string, unknown> = {}) => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o1', code: '123456', attempts: 0, maxAttempts: 3 });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub-new',
+        status: 'DRAFT',
+        userId: 'isr1',
+        partnerId: 'cp-1',
+        kycVariant: 'STANDARD',
+        proposedPartner: null,
+        partner: { ownerName: 'Owner', phone: '9000000001', outlets: [{ name: 'Store', programName: 'Bajaj' }] },
+        ...over,
+      });
+      mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr1' });
+    };
+    /** The PRIOR routed submission lookup (2nd kycSubmission.findFirst). */
+    const primePrior = (prior: unknown) => mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(prior);
+    /** A prior submission whose LATEST transition into `status` came from `from`. */
+    const priorRejected = (status: string, from: string, id = 'sub-old', at = hoursAgo(30)) => ({
+      id,
+      status,
+      statusHistory: [{ fromStatus: from, toStatus: status, createdAt: at }],
+    });
+    /** resolveInitialRouting (now resolved FIRST): submitter -> its first active manager. */
+    const primeRouting = (submitterSu = 'isr1-su', managerSu = 'so1-su', code = 'SO') =>
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: submitterSu, reportingToId: managerSu })
+        .mockResolvedValueOnce({ id: managerSu, isActive: true, deletedAt: null, reportingToId: null, hierarchyLevel: { code } });
+    /** Normal manager route: ISR -> active SO (+ the non-tx history write). */
+    const primeManagerRoute = () => {
+      primeRouting();
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+    };
+    const expectManagerRoute = (status = 'PENDING_SO_APPROVAL') => {
+      expect(mockPrisma.kycSubmission.updateMany.mock.calls[0][0].data).toMatchObject({ status });
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.kycStatusHistory.create).not.toHaveBeenCalled();
+      expect(salesNotify()).toHaveBeenCalledTimes(1);
+    };
+    const expectFastTrack = (previousSubmissionId: string, rejectedAt: Date, actor = 'isr1') => {
+      // Atomic DRAFT-guarded flip straight to PENDING_GIFSY — inside one transaction.
+      expect(mockTx.kycSubmission.updateMany).toHaveBeenCalledTimes(1);
+      const upd = mockTx.kycSubmission.updateMany.mock.calls[0][0];
+      expect(upd.where).toEqual({ id: 'sub-new', status: 'DRAFT' });
+      expect(upd.data).toMatchObject({ status: 'PENDING_GIFSY', escalatedFrom: null });
+      expect(upd.data.submittedAt).toBeInstanceOf(Date);
+      // Visible history row (DRAFT->PENDING_GIFSY) with the fast-track marker.
+      const hist = mockTx.kycStatusHistory.create.mock.calls[0][0].data;
+      expect(hist).toMatchObject({
+        kycSubmissionId: 'sub-new',
+        fromStatus: 'DRAFT',
+        toStatus: 'PENDING_GIFSY',
+        changedByUserId: actor,
+        notes: 'Resubmitted after a GIFSY rejection — sent directly to GIFSY; managers did not re-approve.',
+      });
+      expect(hist.metadata).toEqual({
+        fastTrack: 'GIFSY_REJECT_RESUBMISSION',
+        previousSubmissionId,
+        previousRejectedAt: rejectedAt.toISOString(),
+        stage: 'GIFSY',
+      });
+      expect(hist.metadata).not.toHaveProperty('approverRole');
+      // + an AuditLog row (no silent pass-through).
+      const audit = mockTx.auditLog.create.mock.calls[0][0].data;
+      expect(audit).toMatchObject({
+        entityType: 'KYC_SUBMISSION',
+        entityId: 'sub-new',
+        actorId: actor,
+        oldValues: { status: 'DRAFT' },
+        newValues: { status: 'PENDING_GIFSY' },
+      });
+      expect(audit.metadata).toMatchObject({ fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId });
+      // Managers skipped: no non-tx routing write, no sales-approver notification.
+      expect(mockPrisma.kycSubmission.updateMany).not.toHaveBeenCalled();
+      expect(mockPrisma.kycStatusHistory.create).not.toHaveBeenCalled();
+      expect(salesNotify()).not.toHaveBeenCalled();
+      // B6: the owner gets ONLY KYC_SUBMITTED (no second paid KYC_UNDER_REVIEW seconds later).
+      const keys = mockNotifications.notifyUserWithChannels.mock.calls.map((c) => c[0].eventKey);
+      expect(keys).toEqual(['KYC_SUBMITTED']);
+    };
+
+    beforeEach(() => {
+      mockTx.kycSubmission.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.kycStatusHistory.create.mockResolvedValue({});
+      mockTx.auditLog.create.mockResolvedValue({});
+      mockPrisma.salesUser.findMany.mockResolvedValue(TREE);
+      assignTo('isr1-su'); // default: the outlet is assigned to the submitting ISR
+    });
+
+    it('flag OFF (Deoleo) -> normal manager route; no prior lookup, and only the A1/R2 consent gate reads assignments', async () => {
+      setFlag(false);
+      primeConsent({ partnerId: 'cp-1' });
+      primeManagerRoute();
+      await service.consent({ ...isr, clientId: 'deoleo' }, dto);
+      expectManagerRoute();
+      expect(mockPrisma.kycSubmission.findFirst).toHaveBeenCalledTimes(1); // only the submission load
+      expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledTimes(1); // the R2 gate, not the fast-track
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('flag absent from features -> OFF (default)', async () => {
+      tenantMock().mockResolvedValue({ features: { soDeclarationKyc: true } });
+      primeConsent();
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+      expect(mockPrisma.kycSubmission.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it('flag ON + prior REJECTED by Gifsy via reject() from PENDING_GIFSY -> straight to PENDING_GIFSY', async () => {
+      setFlag(true);
+      const at = hoursAgo(30);
+      primeConsent();
+      primeRouting();
+      primePrior(priorRejected('REJECTED', 'PENDING_GIFSY', 'sub-old', at));
+      await service.consent(isr, dto);
+      expectFastTrack('sub-old', at);
+      // B4: the prior lookup — same partner, excludes THIS submission + every DRAFT, tenant-scoped, the most
+      // recently ROUTED first (submittedAt desc, nulls last, then createdAt, id), reading its FULL history in order.
+      const q = mockPrisma.kycSubmission.findFirst.mock.calls[1][0];
+      expect(q.where).toMatchObject({
+        partnerId: 'cp-1',
+        id: { not: 'sub-new' },
+        status: { not: 'DRAFT' },
+        partner: { clientId: 'bajaj' },
+      });
+      expect(q.orderBy).toEqual([
+        { submittedAt: { sort: 'desc', nulls: 'last' } },
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ]);
+      expect(q.select.statusHistory.where).toBeUndefined();
+      expect(q.select.statusHistory.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }]);
+    });
+
+    it('flag ON + prior RE_UPLOAD_REQUIRED via the field grid (PENDING_GIFSY->RE_UPLOAD_REQUIRED) -> fast-track', async () => {
+      setFlag(true);
+      const at = hoursAgo(5);
+      primeConsent();
+      primeRouting();
+      primePrior(priorRejected('RE_UPLOAD_REQUIRED', 'PENDING_GIFSY', 'sub-grid', at));
+      await service.consent(isr, dto);
+      expectFastTrack('sub-grid', at);
+    });
+
+    it('flag ON + prior RESUBMISSION_REQUIRED (legacy alias) rejected at PENDING_GIFSY -> fast-track', async () => {
+      setFlag(true);
+      const at = hoursAgo(2);
+      primeConsent();
+      primeRouting();
+      primePrior(priorRejected('RESUBMISSION_REQUIRED', 'PENDING_GIFSY', 'sub-alias', at));
+      await service.consent(isr, dto);
+      expectFastTrack('sub-alias', at);
+    });
+
+    it('prior rejected by a MANAGER (fromStatus PENDING_ASM_APPROVAL) -> normal manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primeManagerRoute();
+      primePrior(priorRejected('REJECTED', 'PENDING_ASM_APPROVAL'));
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('prior rejected by GIFSY while still at PENDING_SO_APPROVAL -> normal manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primeManagerRoute();
+      primePrior(priorRejected('REJECTED', 'PENDING_SO_APPROVAL'));
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('B3: Gifsy re-acts on its own rejection (PENDING_GIFSY->RE_UPLOAD_REQUIRED->REJECTED) -> still fast-track', async () => {
+      setFlag(true);
+      const latest = hoursAgo(2);
+      primeConsent();
+      primeRouting();
+      primePrior({
+        id: 'sub-old',
+        status: 'REJECTED',
+        statusHistory: [
+          { fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'PENDING_GIFSY', createdAt: hoursAgo(20) },
+          { fromStatus: 'PENDING_GIFSY', toStatus: 'RE_UPLOAD_REQUIRED', createdAt: hoursAgo(10) },
+          { fromStatus: 'RE_UPLOAD_REQUIRED', toStatus: 'REJECTED', createdAt: latest },
+        ],
+      });
+      await service.consent(isr, dto);
+      expectFastTrack('sub-old', latest);
+    });
+
+    it('B3: a MANAGER rejection later re-rejected by Gifsy (REJECTED->REJECTED) -> manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primeManagerRoute();
+      primePrior({
+        id: 'sub-old',
+        status: 'REJECTED',
+        statusHistory: [
+          { fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'REJECTED', createdAt: hoursAgo(10) },
+          { fromStatus: 'REJECTED', toStatus: 'REJECTED', createdAt: hoursAgo(2) },
+        ],
+      });
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('NEW submission is SO_DECLARATION -> managers (ASM must re-sign); no prior lookup', async () => {
+      setFlag(true);
+      primeConsent({ kycVariant: 'SO_DECLARATION' });
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+      expect(mockPrisma.kycSubmission.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it('prior SO_DECLARATION rejected by Gifsy -> NEW STANDARD -> fast-track (decided by the new variant only)', async () => {
+      setFlag(true);
+      const at = hoursAgo(10);
+      primeConsent({ kycVariant: 'STANDARD' });
+      primeRouting();
+      primePrior({ ...priorRejected('REJECTED', 'PENDING_GIFSY', 'sub-sodecl', at), kycVariant: 'SO_DECLARATION' });
+      await service.consent(isr, dto);
+      expectFastTrack('sub-sodecl', at);
+    });
+
+    it('second Gifsy rejection after a previous fast-track -> fast-track again', async () => {
+      setFlag(true);
+      const at = hoursAgo(1);
+      primeConsent();
+      primeRouting();
+      primePrior({
+        id: 'sub-ft-1',
+        status: 'RE_UPLOAD_REQUIRED',
+        statusHistory: [
+          { fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: hoursAgo(5) },
+          { fromStatus: 'PENDING_GIFSY', toStatus: 'RE_UPLOAD_REQUIRED', createdAt: at },
+        ],
+      });
+      await service.consent(isr, dto);
+      expectFastTrack('sub-ft-1', at);
+    });
+
+    it('LATEST transition into the rejected status came from a manager stage -> manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primeManagerRoute();
+      primePrior({
+        id: 'sub-old',
+        status: 'REJECTED',
+        statusHistory: [
+          { fromStatus: 'PENDING_GIFSY', toStatus: 'REJECTED', createdAt: hoursAgo(80) },
+          { fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'REJECTED', createdAt: hoursAgo(3) },
+        ],
+      });
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('no prior routed submission (an outlet first KYC) -> manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primeManagerRoute();
+      primePrior(null);
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('prior APPROVED (admin re-KYC of an approved outlet is not a rejection) -> manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primeManagerRoute();
+      primePrior({ id: 'sub-ok', status: 'APPROVED', statusHistory: [] });
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('submission without a partner -> manager route, no lookup', async () => {
+      setFlag(true);
+      primeConsent({ partnerId: null });
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+      expect(mockPrisma.kycSubmission.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it('flag read ERROR -> fails safe to OFF (manager route) and logs a warning', async () => {
+      tenantMock().mockRejectedValue(new Error('tenant cache down'));
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      primeConsent();
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('gifsyRejectFastTrack'))).toBe(true);
+      warn.mockRestore();
+    });
+
+    it('B5: prior-submission lookup ERROR -> warns, takes the normal route, never leaves the KYC in DRAFT', async () => {
+      setFlag(true);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      primeConsent();
+      primeManagerRoute();
+      mockPrisma.kycSubmission.findFirst.mockRejectedValueOnce(new Error('db blip'));
+      await expect(service.consent(isr, dto)).resolves.toEqual({ verified: true, submissionId: 'sub-new' });
+      expectManagerRoute();
+      expect(
+        warn.mock.calls.some((c) => String(c[0]).includes('gifsyRejectFastTrack') && String(c[0]).includes('db blip')),
+      ).toBe(true);
+      warn.mockRestore();
+    });
+
+    it('B5: assignment lookup ERROR -> warns, normal route', async () => {
+      setFlag(true);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      primeConsent();
+      primeManagerRoute();
+      primePrior(priorRejected('REJECTED', 'PENDING_GIFSY'));
+      mockPrisma.salesUserAssignment.findMany
+        .mockResolvedValueOnce([{ salesUserId: 'isr1-su' }]) // the R2 consent gate passes
+        .mockRejectedValueOnce(new Error('assign blip')); // the fast-track B1 lookup fails
+      await service.consent(isr, dto);
+      expectManagerRoute();
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('assign blip'))).toBe(true);
+      warn.mockRestore();
+    });
+
+    it('lost the DRAFT race (count 0) -> no history / audit / notifications', async () => {
+      setFlag(true);
+      mockTx.kycSubmission.updateMany.mockResolvedValue({ count: 0 });
+      primeConsent();
+      primeRouting();
+      primePrior(priorRejected('REJECTED', 'PENDING_GIFSY'));
+      const res = await service.consent(isr, dto);
+      expect(res).toEqual({ verified: true, submissionId: 'sub-new' });
+      expect(mockTx.kycStatusHistory.create).not.toHaveBeenCalled();
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      expect(salesNotify()).not.toHaveBeenCalled();
+    });
+
+    // ── B1: only the outlet's CURRENT assignee (or a manager above them) rides the shortcut ──
+    describe('B1 — submitter must be the current assignee or above them', () => {
+      it('the assignment lookup is ACTIVE-only, tenant-scoped, partner- or outlet-keyed', async () => {
+        setFlag(true);
+        primeConsent();
+        primeRouting();
+        primePrior(priorRejected('REJECTED', 'PENDING_GIFSY'));
+        await service.consent(isr, dto);
+        // calls[0] = the A1/R2 consent gate; the LAST call = the fast-track B1 lookup.
+        const calls = mockPrisma.salesUserAssignment.findMany.mock.calls;
+        const where = calls[calls.length - 1][0].where;
+        expect(where).toMatchObject({ unassignedAt: null, salesUser: { clientId: 'bajaj', deletedAt: null } });
+        expect(where.OR).toEqual([
+          { partnerId: 'cp-1', partner: { clientId: 'bajaj' } },
+          { outlet: { partnerId: 'cp-1', clientId: 'bajaj', deletedAt: null } },
+        ]);
+      });
+
+      it('a MANAGER above the assignee (the SO of the assigned ISR) -> fast-track', async () => {
+        setFlag(true);
+        const at = hoursAgo(4);
+        const soUser: JwtPayload = { sub: 'so1', role: 'SALES_SO', clientId: 'bajaj', phone: '', name: '' };
+        primeConsent({ userId: 'so1' });
+        primeRouting('so1-su', 'asm1-su', 'ASM');
+        primePrior(priorRejected('REJECTED', 'PENDING_GIFSY', 'sub-old', at));
+        assignTo('isr1-su');
+        await service.consent(soUser, dto);
+        expectFastTrack('sub-old', at, 'so1');
+      });
+
+      /** R2: an unassigned submitter is now refused at the TOP of consent() — before any routing / fast-track. */
+      const expectGateRefused = async (u: JwtPayload) => {
+        await expect(service.consent(u, dto)).rejects.toThrow("This outlet isn't assigned to you or your team.");
+        expect(mockPrisma.kycSubmission.updateMany).not.toHaveBeenCalled();
+        expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+        expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+      };
+
+      it('a rep from ANOTHER territory -> refused by the consent gate (never fast-tracked, never routed)', async () => {
+        setFlag(true);
+        const isr2: JwtPayload = { sub: 'isr2', role: 'SALES_ISR', clientId: 'bajaj', phone: '', name: '' };
+        primeConsent({ userId: 'isr2' });
+        assignTo('isr1-su');
+        await expectGateRefused(isr2);
+      });
+
+      it('a PEER rep under the same SO (not above the assignee) -> refused by the consent gate', async () => {
+        setFlag(true);
+        const peer: JwtPayload = { sub: 'isrPeer', role: 'SALES_ISR', clientId: 'bajaj', phone: '', name: '' };
+        primeConsent({ userId: 'isrPeer' });
+        assignTo('isr1-su');
+        await expectGateRefused(peer);
+      });
+
+      it('no ACTIVE assignment on the outlet -> refused by the consent gate', async () => {
+        setFlag(true);
+        primeConsent();
+        assignTo();
+        await expectGateRefused(isr);
+      });
+
+      it('B1 stays as defence in depth: gate passes but the fast-track lookup finds no covered assignee -> manager route', async () => {
+        setFlag(true);
+        primeConsent();
+        primeManagerRoute();
+        primePrior(priorRejected('REJECTED', 'PENDING_GIFSY'));
+        mockPrisma.salesUserAssignment.findMany
+          .mockResolvedValueOnce([{ salesUserId: 'isr1-su' }]) // R2 gate
+          .mockResolvedValueOnce([{ salesUserId: 'isr2-su' }]); // B1 lookup (e.g. reassigned in between)
+        await service.consent(isr, dto);
+        expectManagerRoute();
+      });
+
+      it('outlet REASSIGNED to a new rep -> the NEW assignee fast-tracks on the old Gifsy rejection', async () => {
+        setFlag(true);
+        const at = hoursAgo(40);
+        const isr2: JwtPayload = { sub: 'isr2', role: 'SALES_ISR', clientId: 'bajaj', phone: '', name: '' };
+        primeConsent({ userId: 'isr2' });
+        primeRouting('isr2-su', 'so2-su', 'SO');
+        primePrior(priorRejected('REJECTED', 'PENDING_GIFSY', 'sub-by-old-rep', at));
+        assignTo('isr2-su'); // the old rep's assignment was closed (unassignedAt set) -> not returned
+        await service.consent(isr2, dto);
+        expectFastTrack('sub-by-old-rep', at, 'isr2');
+      });
+    });
+
+    // ── B2: only when the normal route would have gone to a sales manager ──
+    describe('B2 — non-sales submitter keeps the SUBMITTED result', () => {
+      it.each([
+        ['CLIENT_ADMIN', 'ca1', 'CLIENT_ADMIN'],
+        ['SSS partner owning the outlet (partner login)', 'p1', 'SSS'],
+        ['soft-deleted sales user (no live SalesUser row)', 'isr1', 'SALES_ISR'],
+      ])('%s -> SUBMITTED, no prior lookup, no fast-track', async (_label, sub, role) => {
+        setFlag(true);
+        const u: JwtPayload = { sub, role: role as JwtPayload['role'], clientId: 'bajaj', phone: '', name: '' };
+        primeConsent({ userId: sub });
+        mockPrisma.channelPartner.count.mockResolvedValue(1); // R1: the SSS partner owns cp-1
+        mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // resolveInitialRouting: no live SalesUser
+        mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+        await service.consent(u, dto);
+        expect(mockPrisma.kycSubmission.updateMany.mock.calls[0][0].data).toMatchObject({ status: 'SUBMITTED' });
+        expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+        expect(mockPrisma.kycSubmission.findFirst).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   describe('create', () => {
@@ -3561,6 +4119,52 @@ describe('KycService', () => {
       expect(where.NOT).toEqual({ AND: [{ status: 'DRAFT' }, { userId: { not: 'user1' } }] });
     });
 
+    it('D2: flag OFF for the tenant (Deoleo) → list rows carry NO fastTrack key and the marker query never runs', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([{ id: 'a', status: 'PENDING_GIFSY', partner: null, statusHistory: [] }]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(1);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+      const res = await service.list(mis, {});
+      expect('fastTrack' in (res.submissions[0] as Record<string, unknown>)).toBe(false);
+      expect(mockPrisma.kycStatusHistory.findMany).not.toHaveBeenCalled();
+    });
+
+    it('D2: un-assumed GIFSY list → loader runs only when SOME tenant has the flag', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([{ id: 'a', status: 'PENDING_GIFSY', partner: null, statusHistory: [] }]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(1);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+      mockPrisma.client.findMany.mockResolvedValue([{ features: {} }]);
+      const off = await service.list(gifsy, {});
+      expect('fastTrack' in (off.submissions[0] as Record<string, unknown>)).toBe(false);
+      expect(mockPrisma.kycStatusHistory.findMany).not.toHaveBeenCalled();
+      mockPrisma.client.findMany.mockResolvedValue([{ features: {} }, { features: { gifsyRejectFastTrack: true } }]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
+      const on = await service.list(gifsy, {});
+      expect((on.submissions[0] as Record<string, unknown>).fastTrack).toBeNull();
+      expect(mockPrisma.kycStatusHistory.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('per-row fastTrack from ONE batched history query (admin KYC list)', async () => {
+      enableFastTrackScope();
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        { id: 'ft', status: 'PENDING_GIFSY', partner: null, statusHistory: [] },
+        { id: 'n', status: 'PENDING_GIFSY', partner: null, statusHistory: [] },
+      ]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(2);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'ft', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'old', previousRejectedAt: new Date().toISOString() },
+        },
+      ]);
+      const res = await service.list(mis, {});
+      expect((res.submissions[0] as Record<string, unknown>).fastTrack).toMatchObject({ previousSubmissionId: 'old' });
+      expect((res.submissions[1] as Record<string, unknown>).fastTrack).toBeNull();
+      expect(mockPrisma.kycStatusHistory.findMany).toHaveBeenCalledTimes(1);
+    });
+
     it('derives per-row gifsyEnteredAt = latest PENDING_GIFSY entry (ISO) and never leaks statusHistory', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(null); // partner → own only
       mockPrisma.kycSubmission.findMany.mockResolvedValue([
@@ -3692,6 +4296,64 @@ describe('KycService', () => {
       const res = await service.getOne(mis, 's1');
       expect(res.submission.id).toBe('s1');
       expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('fastTrack: derived from the DRAFT→PENDING_GIFSY fast-track history row (admin + sales detail)', async () => {
+      enableFastTrackScope();
+      const rejectedAt = new Date(Date.now() - 26 * 3_600_000);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, documents: [],
+        statusHistory: [
+          {
+            fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+            metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 's0', previousRejectedAt: rejectedAt.toISOString() },
+          },
+        ],
+      });
+      const res = (await service.getOne(mis, 's1')) as { submission: { fastTrack: unknown } };
+      expect(res.submission.fastTrack).toEqual({ previousSubmissionId: 's0', previousRejectedAt: rejectedAt.toISOString() });
+    });
+
+    it('D2: flag OFF for the tenant → the detail has NO fastTrack key (even with a marker row on file)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, documents: [],
+        statusHistory: [
+          {
+            fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+            metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 's0', previousRejectedAt: new Date().toISOString() },
+          },
+        ],
+      });
+      const res = (await service.getOne(mis, 's1')) as { submission: Record<string, unknown> };
+      expect('fastTrack' in res.submission).toBe(false);
+    });
+
+    it('D2: un-assumed GIFSY detail decides by the RECORD tenant (partner.clientId)', async () => {
+      const resolve = (service as unknown as { tenant: { resolveClient: jest.Mock } }).tenant.resolveClient;
+      resolve.mockImplementation(async (id: string) => ({ features: { gifsyRejectFastTrack: id === 'bajaj' } }));
+      const sub = (clientId: string) => ({
+        id: 's1', userId: 'other', partner: { clientId, outlets: [] }, documents: [], statusHistory: [],
+      });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(sub('deoleo'));
+      const d = (await service.getOne(gifsy, 's1')) as { submission: Record<string, unknown> };
+      expect('fastTrack' in d.submission).toBe(false);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(sub('bajaj'));
+      const b = (await service.getOne(gifsy, 's1')) as { submission: Record<string, unknown> };
+      expect(b.submission.fastTrack).toBeNull();
+      expect(mockPrisma.client.findMany).not.toHaveBeenCalled();
+    });
+
+    it('fastTrack: null for a normally-routed submission (incl. a manager first-approve row into PENDING_GIFSY)', async () => {
+      enableFastTrackScope();
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, documents: [],
+        statusHistory: [
+          { fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'PENDING_GIFSY', createdAt: new Date(), metadata: { stage: 'FIRST_APPROVER' } },
+          { fromStatus: 'DRAFT', toStatus: 'PENDING_SO_APPROVAL', createdAt: new Date(Date.now() - 3_600_000), metadata: null },
+        ],
+      });
+      const res = (await service.getOne(mis, 's1')) as { submission: { fastTrack: unknown } };
+      expect(res.submission.fastTrack).toBeNull();
     });
 
     it('surfaces the primary outlet reKycFlags (20 booleans + remarks) on the detail payload', async () => {
@@ -5629,7 +6291,7 @@ describe('KycService', () => {
     it('throws 401 when no valid OTP exists', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue(null);
       const err = await service
-        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '123456' })
+        .consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '123456' })
         .catch((e) => e);
       expect(err).toBeInstanceOf(HttpException);
       expect(err.getStatus()).toBe(401);
@@ -5644,7 +6306,7 @@ describe('KycService', () => {
       });
       mockPrisma.otpCode.update.mockResolvedValue({});
       mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr1' });
-      const res = await service.consent(partner, {
+      const res = await service.consent(rep, {
         submissionId: 's1',
         mobile: '9000000001',
         otp: '123456',
@@ -5668,11 +6330,11 @@ describe('KycService', () => {
       });
       mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr-1' });
 
-      await service.consent(partner, { submissionId: 'sub-consent-1', mobile: '9000000001', otp: '111111' });
+      await service.consent(rep, { submissionId: 'sub-consent-1', mobile: '9000000001', otp: '111111' });
 
       expect(mockPrisma.consentRecord.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
-          userId: 'user1',
+          userId: rep.sub, // the consenting (assigned) sales rep
           kycSubmissionId: 'sub-consent-1',
           consentType: 'KYC_TERMS',
           version: expect.any(String),
@@ -5691,7 +6353,7 @@ describe('KycService', () => {
       mockPrisma.otpCode.update.mockResolvedValueOnce({});
 
       const err = await service
-        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
+        .consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
         .catch((e) => e);
 
       expect(err).toBeInstanceOf(HttpException);
@@ -5703,7 +6365,7 @@ describe('KycService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o3', code: '999999', attempts: 1, maxAttempts: 3 });
       mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 2 }]); // this claim = attempt 2
       const err = await service
-        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
+        .consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
         .catch((e) => e);
       expect(err.getStatus()).toBe(401);
       expect(err.message).toBe('Invalid OTP. 1 attempt(s) remaining.');
@@ -5716,7 +6378,7 @@ describe('KycService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o3', code: '999999', attempts: 0, maxAttempts: 3 });
       mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 3 }]); // two parallel guesses claimed first
       const err = await service
-        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
+        .consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
         .catch((e) => e);
       expect(err.getStatus()).toBe(401);
       expect(err.message).toBe('Invalid OTP. 0 attempt(s) remaining.');
@@ -5726,7 +6388,7 @@ describe('KycService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
       mockPrisma.$queryRaw.mockResolvedValueOnce([]); // claim refused: no row updated
       const err = await service
-        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' })
+        .consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' })
         .catch((e) => e);
       expect(err.getStatus()).toBe(429);
       expect(err.message).toBe('OTP locked due to too many attempts. Request a new OTP.');
@@ -5738,7 +6400,7 @@ describe('KycService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
       mockPrisma.$queryRaw.mockResolvedValueOnce([]);
       mockPrisma.otpCode.findUnique.mockResolvedValueOnce({ expiresAt: new Date(Date.now() - 1000), verifiedAt: null });
-      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      const err = await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
       expect(err.getStatus()).toBe(401);
       expect(err.message).toBe('OTP not found or expired');
       expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
@@ -5748,7 +6410,7 @@ describe('KycService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
       mockPrisma.$queryRaw.mockResolvedValueOnce([]);
       mockPrisma.otpCode.findUnique.mockResolvedValueOnce(null);
-      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      const err = await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
       expect(err.getStatus()).toBe(401);
       expect(err.message).toBe('OTP not found or expired');
     });
@@ -5759,7 +6421,7 @@ describe('KycService', () => {
       });
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o6', code: '111111', attempts: 0, maxAttempts: 3 });
       mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr' });
-      await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' });
+      await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' });
       expect(mockPrisma.otpCode.findFirst.mock.calls[0][0].where).toMatchObject({
         phone: '9000000001', purpose: 'KYC_CONSENT', referenceId: 's1', verifiedAt: null,
       });
@@ -5769,7 +6431,7 @@ describe('KycService', () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
         id: 's1', status: 'DRAFT', userId: 'user1', proposedPartner: null, partner: { phone: '9000000002', ownerName: 'O', outlets: [] },
       });
-      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      const err = await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
       expect(err.getStatus()).toBe(401);
       expect(err.message).toBe('OTP not found or expired');
       expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
@@ -5783,7 +6445,7 @@ describe('KycService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o7', code: '111111', attempts: 0, maxAttempts: 3 });
       mockPrisma.otpCode.updateMany.mockImplementation(async ({ data }: any) =>
         (data?.verifiedAt ? { count: 0 } : { count: 1 }));
-      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      const err = await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
       expect(err.getStatus()).toBe(401);
       expect(err.message).toBe('OTP not found or expired');
       expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
@@ -5800,7 +6462,7 @@ describe('KycService', () => {
       mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr' });
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
       mockPrisma.kycSubmission.updateMany.mockResolvedValueOnce({ count: 0 }); // another consent routed it first
-      await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' });
+      await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' });
       expect(mockPrisma.kycSubmission.updateMany).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: 's1', status: 'DRAFT' },
       }));
@@ -5823,7 +6485,7 @@ describe('KycService', () => {
       mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr' });
       mockPrisma.kycStatusHistory.create.mockResolvedValue({});
       const results = await Promise.allSettled([1, 2].map(() =>
-        service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' })));
+        service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' })));
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
       expect(row.marks).toBe(1);
       expect(mockPrisma.consentRecord.create).toHaveBeenCalledTimes(1);
@@ -5838,7 +6500,7 @@ describe('KycService', () => {
       const row = simulateOtpClaims(mockPrisma);
       const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '111111' : String(200000 + i)));
       const results = await Promise.allSettled(otps.map((otp) =>
-        service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp })));
+        service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp })));
       const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
       expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
       // Exact remaining per winner, from each claim's post-increment value (was "2 …" for all three).
@@ -5857,7 +6519,7 @@ describe('KycService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce(null);
 
       const err = await service
-        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' })
+        .consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' })
         .catch((e) => e);
 
       expect(err).toBeInstanceOf(HttpException);
@@ -6190,6 +6852,17 @@ describe('KycService', () => {
       });
       expect(mockTx.kycStatusHistory.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ fromStatus: 'PENDING_GIFSY', toStatus: 'REJECTED', notes: 'blurry' }),
+      });
+    });
+
+    it('B7: the PATCH history row is labelled stage GIFSY (+ approverRole, like reject()) — every GIFSY status change is labelled', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 's1', status: 'REJECTED', userId: 'u1' });
+      mockTx.kycSubmission.update.mockResolvedValueOnce({ id: 's1', status: 'REJECTED' });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      await service.update(gifsy, 's1', { status: 'REJECTED', rejectionReason: 'still blurry' } as never);
+      expect(mockTx.kycStatusHistory.create.mock.calls[0][0].data.metadata).toEqual({
+        stage: 'GIFSY',
+        approverRole: 'GIFSY_ADMIN',
       });
     });
 
@@ -6720,6 +7393,47 @@ describe('KycService', () => {
       await expect(service.reviewQueue(so)).rejects.toBeInstanceOf(ForbiddenException);
     });
 
+    it('fastTrack per entry from ONE batched history query (no N+1); null for normally-routed rows', async () => {
+      enableFastTrackScope();
+      const rejectedAt = new Date(Date.now() - 50 * 3_600_000);
+      const row = (id: string) => ({
+        id, boardPhotoLat: null, boardPhotoLng: null, user: { name: 'A', phone: '1', clientId: 'bajaj' },
+        partner: null, verificationItems: [],
+      });
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([row('FT-1'), row('N-1')]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'FT-1', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'OLD-1', previousRejectedAt: rejectedAt.toISOString() },
+        },
+      ]);
+      const { entries } = await service.reviewQueue(gifsy);
+      expect(entries[0].fastTrack).toEqual({ previousSubmissionId: 'OLD-1', previousRejectedAt: rejectedAt.toISOString() });
+      expect(entries[1].fastTrack).toBeNull();
+      expect(mockPrisma.kycStatusHistory.findMany).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.kycStatusHistory.findMany.mock.calls[0][0].where).toEqual({
+        kycSubmissionId: { in: ['FT-1', 'N-1'] },
+        fromStatus: 'DRAFT',
+        toStatus: 'PENDING_GIFSY',
+      });
+    });
+
+    it('D2: no tenant in scope has the flag → queue entries carry NO fastTrack key, no marker query', async () => {
+      mockPrisma.client.findMany.mockResolvedValue([{ features: {} }]);
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        { id: 'N-1', boardPhotoLat: null, boardPhotoLng: null, user: { name: 'A', phone: '1', clientId: 'deoleo' }, partner: null, verificationItems: [] },
+      ]);
+      const { entries } = await service.reviewQueue(gifsy);
+      expect('fastTrack' in entries[0]).toBe(false);
+      expect(mockPrisma.kycStatusHistory.findMany).not.toHaveBeenCalled();
+    });
+
+    it('empty queue → no history query', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
+      await service.reviewQueue(gifsy);
+      expect(mockPrisma.kycStatusHistory.findMany).not.toHaveBeenCalled();
+    });
+
     it('queries PENDING_GIFSY cross-tenant (Gifsy, #38)', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
       await service.reviewQueue(gifsy);
@@ -7243,7 +7957,7 @@ describe('KycService', () => {
         isActive: false,
         kycIntent: 'NOT_INTERESTED',
       });
-      const res = await service.notInterested(partner, { outletId: 'outlet-cuid-1' });
+      const res = await service.notInterested(rep, { outletId: 'outlet-cuid-1' });
       expect(res).toEqual({ outletId: 'outlet-cuid-1', alreadyMarked: true });
       expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
     });
@@ -7251,7 +7965,7 @@ describe('KycService', () => {
     it('looks the outlet up by id + tenant (matches the FE contract), marks it NOT_INTERESTED', async () => {
       mockPrisma.outlet.findFirst.mockResolvedValue({ id: 'outlet-cuid-1', isActive: true, kycIntent: null });
       mockPrisma.outlet.update.mockResolvedValue({});
-      await service.notInterested(partner, { outletId: 'outlet-cuid-1' });
+      await service.notInterested(rep, { outletId: 'outlet-cuid-1' });
       // The FE sends the Outlet CUID (o.id), so the lookup must be by id, tenant-scoped —
       // NOT clientId_outletCode (that 404'd on every call).
       const findArg = mockPrisma.outlet.findFirst.mock.calls[0][0];
@@ -7265,9 +7979,288 @@ describe('KycService', () => {
     it('404s when the outlet id is not in this tenant', async () => {
       mockPrisma.outlet.findFirst.mockResolvedValue(null);
       await expect(
-        service.notInterested(partner, { outletId: 'nope' }),
+        service.notInterested(rep, { outletId: 'nope' }),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── A1: a SALES caller may file a KYC / mark "Not interested" only for an outlet actively assigned to
+  // them or their downline (PLATFORM-WIDE, owner-approved). Non-sales callers are unchanged.
+  describe('A1 — assigned-rep gate on create() + notInterested() + sendConsentOtp()', () => {
+    const NOT_ASSIGNED = "This outlet isn't assigned to you or your team.";
+    // so1 (SO) <- isr1 (ISR);  so2 (SO) <- isr2 (ISR) = another territory.
+    const TREE = [
+      { id: 'so1-su', userId: 'so1', reportingToId: null, isActive: true },
+      { id: 'isr1-su', userId: 'isr1', reportingToId: 'so1-su', isActive: true },
+      { id: 'so2-su', userId: 'so2', reportingToId: null, isActive: true },
+      { id: 'isr2-su', userId: 'isr2', reportingToId: 'so2-su', isActive: true },
+    ];
+    const isr1: JwtPayload = { sub: 'isr1', role: 'SALES_ISR', clientId: 'deoleo', phone: '', name: '' };
+    const so1: JwtPayload = { sub: 'so1', role: 'SALES_SO', clientId: 'deoleo', phone: '', name: '' };
+    const admin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+    const ghostRep: JwtPayload = { sub: 'ghost', role: 'SALES_ISR', clientId: 'deoleo', phone: '', name: '' };
+    const gifsyStaff: JwtPayload = { sub: 'gs1', role: 'GIFSY_STAFF', clientId: 'deoleo', phone: '', name: '' };
+    const sssOwner: JwtPayload = { sub: 'sss1', role: 'SSS', clientId: 'deoleo', phone: '', name: '' };
+    const vendor: JwtPayload = { sub: 'v1', role: 'VENDOR', clientId: 'deoleo', phone: '', name: '' };
+    const assignTo = (...ids: string[]) =>
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue(ids.map((salesUserId) => ({ salesUserId })));
+    const outlet = { id: 'outlet-1', clientId: 'deoleo', isActive: true, kycIntent: null, outletType: { code: 'RETAILER' } };
+    const createDto = { outletId: 'outlet-1' } as never;
+    const isNotAssigned = (e: unknown) => e instanceof ForbiddenException && e.message === NOT_ASSIGNED;
+
+    beforeEach(() => {
+      mockPrisma.salesUser.findMany.mockResolvedValue(TREE);
+      mockPrisma.outlet.findFirst.mockResolvedValue(outlet);
+      mockPrisma.outlet.update.mockResolvedValue({});
+    });
+
+    describe('create()', () => {
+      it('own outlet → passes the gate (the ACTIVE-assignment query is outlet + team scoped)', async () => {
+        assignTo('isr1-su');
+        const err = await service.create(isr1, createDto).catch((e: unknown) => e);
+        expect(isNotAssigned(err)).toBe(false);
+        const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+        expect(where).toMatchObject({ outletId: 'outlet-1', unassignedAt: null });
+        expect([...where.salesUserId.in].sort()).toEqual(['isr1-su']);
+      });
+
+      it('a DOWNLINE outlet for an SO (assigned to their ISR) → passes', async () => {
+        assignTo('isr1-su');
+        const err = await service.create(so1, createDto).catch((e: unknown) => e);
+        expect(isNotAssigned(err)).toBe(false);
+        expect([...mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where.salesUserId.in].sort()).toEqual([
+          'isr1-su',
+          'so1-su',
+        ]);
+      });
+
+      it("another territory's outlet → 403", async () => {
+        assignTo('isr2-su');
+        await expect(service.create(isr1, createDto)).rejects.toThrow(NOT_ASSIGNED);
+        await expect(service.create(so1, createDto)).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('an UNASSIGNED outlet (no active assignment) → 403', async () => {
+        assignTo();
+        await expect(service.create(isr1, createDto)).rejects.toThrow(NOT_ASSIGNED);
+      });
+
+      it('a SALES_* caller with no live SalesUser row → 403 (never treated as non-sales)', async () => {
+        assignTo('isr1-su');
+        await expect(service.create(ghostRep, createDto)).rejects.toThrow(NOT_ASSIGNED);
+      });
+
+      it('an outlet in ANOTHER tenant → still 404 (before the assignment gate)', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue(null);
+        await expect(service.create(isr1, createDto)).rejects.toBeInstanceOf(NotFoundException);
+        expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
+      });
+
+      it('admins (GIFSY_ADMIN / GIFSY_STAFF / CLIENT_ADMIN) are unaffected (no assignment / ownership query)', async () => {
+        assignTo();
+        for (const u of [admin, gifsy, gifsyStaff]) {
+          const err = await service.create(u, createDto).catch((e: unknown) => e);
+          expect(isNotAssigned(err)).toBe(false);
+        }
+        expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
+        expect(mockPrisma.outlet.count).not.toHaveBeenCalled();
+      });
+
+      it('R1: a partner (SSS) on their OWN outlet passes (ownership = outlet.partner.userId)', async () => {
+        mockPrisma.outlet.count.mockResolvedValue(1);
+        const err = await service.create(sssOwner, createDto).catch((e: unknown) => e);
+        expect(isNotAssigned(err)).toBe(false);
+        expect(mockPrisma.outlet.count.mock.calls[0][0].where).toEqual({
+          id: 'outlet-1', clientId: 'deoleo', deletedAt: null, partner: { userId: 'sss1' },
+        });
+        expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
+      });
+
+      it('R1: a partner on ANOTHER outlet → 403', async () => {
+        mockPrisma.outlet.count.mockResolvedValue(0);
+        await expect(service.create(sssOwner, createDto)).rejects.toThrow(NOT_ASSIGNED);
+      });
+
+      it('R1: every other role (MIS_USER, VENDOR, a non-login role) → 403', async () => {
+        for (const u of [mis, vendor, partner]) {
+          await expect(service.create(u, createDto)).rejects.toThrow(NOT_ASSIGNED);
+        }
+        expect(mockPrisma.outlet.count).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('notInterested()', () => {
+      it('own outlet → marked', async () => {
+        assignTo('isr1-su');
+        await service.notInterested(isr1, { outletId: 'outlet-1' });
+        expect(mockPrisma.outlet.update).toHaveBeenCalledTimes(1);
+      });
+
+      it('downline outlet for an SO → marked', async () => {
+        assignTo('isr1-su');
+        await service.notInterested(so1, { outletId: 'outlet-1' });
+        expect(mockPrisma.outlet.update).toHaveBeenCalledTimes(1);
+      });
+
+      it("another territory's outlet → 403, nothing written", async () => {
+        assignTo('isr2-su');
+        await expect(service.notInterested(isr1, { outletId: 'outlet-1' })).rejects.toThrow(NOT_ASSIGNED);
+        expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
+      });
+
+      it('unassigned outlet → 403, nothing written', async () => {
+        assignTo();
+        await expect(service.notInterested(so1, { outletId: 'outlet-1' })).rejects.toThrow(NOT_ASSIGNED);
+        expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
+      });
+
+      it('other tenant → 404', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue(null);
+        await expect(service.notInterested(isr1, { outletId: 'x' })).rejects.toBeInstanceOf(NotFoundException);
+      });
+
+      it('admins unaffected', async () => {
+        assignTo();
+        await service.notInterested(admin, { outletId: 'outlet-1' });
+        await service.notInterested(gifsy, { outletId: 'outlet-1' });
+        expect(mockPrisma.outlet.update).toHaveBeenCalledTimes(2);
+        expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
+      });
+
+      it('R1: partner on own outlet → marked; on another outlet → 403', async () => {
+        mockPrisma.outlet.count.mockResolvedValueOnce(1);
+        await service.notInterested(sssOwner, { outletId: 'outlet-1' });
+        expect(mockPrisma.outlet.update).toHaveBeenCalledTimes(1);
+        mockPrisma.outlet.count.mockResolvedValueOnce(0);
+        await expect(service.notInterested(sssOwner, { outletId: 'outlet-1' })).rejects.toThrow(NOT_ASSIGNED);
+        expect(mockPrisma.outlet.update).toHaveBeenCalledTimes(1);
+      });
+
+      it('R1: MIS_USER / VENDOR → 403, nothing written', async () => {
+        await expect(service.notInterested(mis, { outletId: 'outlet-1' })).rejects.toThrow(NOT_ASSIGNED);
+        await expect(service.notInterested(vendor, { outletId: 'outlet-1' })).rejects.toThrow(NOT_ASSIGNED);
+        expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
+      });
+
+      it('R3: an outlet ALREADY marked by THIS caller answers idempotently BEFORE the gate (repeat click after reassignment)', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          ...outlet, isActive: false, kycIntent: 'NOT_INTERESTED', kycIntentBy: isr1.sub,
+        });
+        assignTo('isr2-su'); // reassigned away since the first click
+        await expect(service.notInterested(isr1, { outletId: 'outlet-1' })).resolves.toEqual({
+          outletId: 'outlet-1',
+          alreadyMarked: true,
+        });
+        expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
+        expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
+      });
+
+      it('audit L1: an outlet marked by SOMEONE ELSE does not answer early — an unassigned caller gets 403 (no status probe)', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          ...outlet, isActive: false, kycIntent: 'NOT_INTERESTED', kycIntentBy: 'someone-else',
+        });
+        assignTo('isr2-su');
+        await expect(service.notInterested(isr1, { outletId: 'outlet-1' })).rejects.toThrow(NOT_ASSIGNED);
+        expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
+      });
+
+      it('audit L1: an outlet marked by a teammate stays idempotent for an ASSIGNED caller (no re-write)', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          ...outlet, isActive: false, kycIntent: 'NOT_INTERESTED', kycIntentBy: 'someone-else',
+        });
+        assignTo('isr1-su');
+        await expect(service.notInterested(isr1, { outletId: 'outlet-1' })).resolves.toEqual({
+          outletId: 'outlet-1',
+          alreadyMarked: true,
+        });
+        expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('sendConsentOtp() — the gate before consent routes the KYC', () => {
+      const primeSub = () =>
+        mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+          id: 'sub-1', partnerId: 'cp-1', proposedPartner: null, partner: { phone: '9000000001' },
+        });
+
+      it('outlet reassigned away from the rep since the draft → 403 before any OTP is sent', async () => {
+        primeSub();
+        assignTo('isr2-su');
+        await expect(service.sendConsentOtp(isr1, { submissionId: 'sub-1', mobile: '9000000001' })).rejects.toThrow(
+          NOT_ASSIGNED,
+        );
+        expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
+        const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+        expect(where).toMatchObject({ unassignedAt: null });
+        expect(where.OR).toEqual([
+          { partnerId: 'cp-1', partner: { clientId: 'deoleo' } },
+          { outlet: { partnerId: 'cp-1', clientId: 'deoleo', deletedAt: null } },
+        ]);
+      });
+
+      it('still assigned → passes the gate', async () => {
+        primeSub();
+        assignTo('isr1-su');
+        const err = await service
+          .sendConsentOtp(isr1, { submissionId: 'sub-1', mobile: '9000000001' })
+          .catch((e: unknown) => e);
+        expect(isNotAssigned(err)).toBe(false);
+      });
+
+      it('R1: a partner owning the submission partner passes; one who does not → 403; MIS / VENDOR → 403', async () => {
+        primeSub();
+        mockPrisma.channelPartner.count.mockResolvedValueOnce(1);
+        const ok = await service.sendConsentOtp(sssOwner, { submissionId: 'sub-1', mobile: '9000000001' }).catch((e: unknown) => e);
+        expect(isNotAssigned(ok)).toBe(false);
+        expect(mockPrisma.channelPartner.count.mock.calls[0][0].where).toEqual({
+          id: 'cp-1', clientId: 'deoleo', userId: 'sss1',
+        });
+        primeSub();
+        mockPrisma.channelPartner.count.mockResolvedValueOnce(0);
+        await expect(service.sendConsentOtp(sssOwner, { submissionId: 'sub-1', mobile: '9000000001' })).rejects.toThrow(NOT_ASSIGNED);
+        for (const u of [mis, vendor]) {
+          primeSub();
+          await expect(service.sendConsentOtp(u, { submissionId: 'sub-1', mobile: '9000000001' })).rejects.toThrow(NOT_ASSIGNED);
+        }
+        expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('consent() — R2: re-checked at the top, before the OTP is claimed', () => {
+      const primeDraft = () =>
+        mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+          id: 'sub-1', status: 'DRAFT', userId: 'isr1', partnerId: 'cp-1', kycVariant: 'STANDARD', proposedPartner: null,
+          partner: { ownerName: 'Owner', phone: '9000000001', outlets: [{ name: 'Store', programName: 'P' }] },
+        });
+
+      it('outlet reassigned BETWEEN the OTP send and the verify → 403, OTP not claimed, nothing written', async () => {
+        primeDraft();
+        assignTo('isr2-su');
+        mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'o1', code: '123456', attempts: 0, maxAttempts: 3 });
+        await expect(
+          service.consent(isr1, { submissionId: 'sub-1', mobile: '9000000001', otp: '123456' }),
+        ).rejects.toThrow(NOT_ASSIGNED);
+        expect(mockPrisma.$queryRaw).not.toHaveBeenCalled(); // claimOtpAttempt never ran
+        expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+        expect(mockPrisma.kycSubmission.updateMany).not.toHaveBeenCalled();
+        const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+        expect(where.OR).toEqual([
+          { partnerId: 'cp-1', partner: { clientId: 'deoleo' } },
+          { outlet: { partnerId: 'cp-1', clientId: 'deoleo', deletedAt: null } },
+        ]);
+      });
+
+      it('still assigned → proceeds to the OTP check', async () => {
+        primeDraft();
+        assignTo('isr1-su');
+        mockPrisma.otpCode.findFirst.mockResolvedValue(null);
+        const err = await service
+          .consent(isr1, { submissionId: 'sub-1', mobile: '9000000001', otp: '123456' })
+          .catch((e: unknown) => e);
+        expect(isNotAssigned(err)).toBe(false);
+        expect((err as HttpException).getStatus()).toBe(401); // reached the OTP lookup
+      });
     });
   });
 
@@ -7476,7 +8469,7 @@ describe('KycService', () => {
     });
 
     it('creates a KYC_CONSENT OtpCode and sends it via MSG91 (global env template when unset)', async () => {
-      const res = await service.sendConsentOtp(partner, dto);
+      const res = await service.sendConsentOtp(rep, dto);
       expect(res).toEqual({ success: true, expiresIn: 600 });
       const created = mockPrisma.otpCode.create.mock.calls[0][0].data;
       expect(created.purpose).toBe('KYC_CONSENT');
@@ -7488,13 +8481,13 @@ describe('KycService', () => {
 
     it('passes the per-tenant kycConsent template when one is configured', async () => {
       mockKycOtpTemplateId = 'kyc-tpl';
-      await service.sendConsentOtp(partner, dto);
+      await service.sendConsentOtp(rep, dto);
       expect(mockMsg91.sendOtp).toHaveBeenCalledWith('7795096288', expect.any(String), 'SMS', 'kyc-tpl');
     });
 
     it('rejects a number already registered to another enrolled outlet', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ businessName: 'Ravi Stores' });
-      await expect(service.sendConsentOtp(partner, dto)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.sendConsentOtp(rep, dto)).rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
       expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
     });
@@ -7502,25 +8495,25 @@ describe('KycService', () => {
     it('rejects a sales-employee number', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       mockPrisma.salesUser.findFirst.mockResolvedValue({ user: { name: 'Anil Sharma' } });
-      await expect(service.sendConsentOtp(partner, dto)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.sendConsentOtp(rep, dto)).rejects.toBeInstanceOf(BadRequestException);
       expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
     });
 
     it('excludes the submission\'s own partner so Re-KYC of the same outlet does not self-collide', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cpSelf', proposedPartner: null, partner: { phone: '7795096288' } });
-      await service.sendConsentOtp(partner, dto);
+      await service.sendConsentOtp(rep, dto);
       const where = mockPrisma.channelPartner.findFirst.mock.calls[0][0].where;
       expect(where.id).toEqual({ not: 'cpSelf' });
     });
 
     it('404s when the submission is not the caller\'s', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
-      await expect(service.sendConsentOtp(partner, dto)).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.sendConsentOtp(rep, dto)).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('#2: refuses a mobile that is NOT the submission\'s outlet-owner phone — nothing created or sent', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cp1', proposedPartner: null, partner: { phone: '9876500000' } });
-      const err = await service.sendConsentOtp(partner, dto).catch((e) => e);
+      const err = await service.sendConsentOtp(rep, dto).catch((e) => e);
       expect(err).toBeInstanceOf(BadRequestException);
       expect(err.message).toBe('This mobile number does not match the outlet owner on this KYC.');
       expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
@@ -7529,7 +8522,7 @@ describe('KycService', () => {
 
     it('#2: binds the OTP to the submission + the NORMALISED owner phone (a stored "+91 …" phone works)', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cp1', proposedPartner: null, partner: { phone: '+91 77950 96288' } });
-      await service.sendConsentOtp(partner, dto);
+      await service.sendConsentOtp(rep, dto);
       const created = mockPrisma.otpCode.create.mock.calls[0][0].data;
       expect(created).toMatchObject({ phone: '7795096288', purpose: 'KYC_CONSENT', referenceId: 'sub1' });
       expect(mockMsg91.sendOtp).toHaveBeenCalledWith('7795096288', expect.any(String), 'SMS', undefined);
@@ -7539,9 +8532,9 @@ describe('KycService', () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({
         id: 'sub1', partnerId: 'cpSelf', proposedPartner: { phone: '7795096288' }, partner: { phone: '9000000009' },
       });
-      await service.sendConsentOtp(partner, dto);
+      await service.sendConsentOtp(rep, dto);
       expect(mockPrisma.otpCode.create.mock.calls[0][0].data.phone).toBe('7795096288');
-      const other = await service.sendConsentOtp(partner, { submissionId: 'sub1', mobile: '9000000009' }).catch((e) => e);
+      const other = await service.sendConsentOtp(rep, { submissionId: 'sub1', mobile: '9000000009' }).catch((e) => e);
       expect(other).toBeInstanceOf(BadRequestException);
     });
 
@@ -7597,9 +8590,9 @@ describe('KycService', () => {
     it('cap: 5 sends for outlet A succeed, the 6th → 429 with the clear message; nothing created or sent', async () => {
       subs({ sub1: 'cp1' });
       otpTable();
-      for (let i = 0; i < 5; i++) await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      for (let i = 0; i < 5; i++) await expect(service.sendConsentOtp(rep, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
       expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(5);
-      const err = await service.sendConsentOtp(partner, dto).catch((e) => e);
+      const err = await service.sendConsentOtp(rep, dto).catch((e) => e);
       expect(err).toBeInstanceOf(HttpException);
       expect(err.getStatus()).toBe(429);
       expect(err.message).toBe(CAP_MSG);
@@ -7617,7 +8610,7 @@ describe('KycService', () => {
     it('M1: a FRESH DRAFT for the SAME outlet does not reset the budget (6th send still 429)', async () => {
       subs({ sub1: 'cp1', subDraft2: 'cp1' });
       otpTable(sends(5)); // outlet cp1 spent its budget on sub1
-      const err = await service.sendConsentOtp(partner, { submissionId: 'subDraft2', mobile: '7795096288' }).catch((e) => e);
+      const err = await service.sendConsentOtp(rep, { submissionId: 'subDraft2', mobile: '7795096288' }).catch((e) => e);
       expect(err.getStatus()).toBe(429);
       expect(err.message).toBe(CAP_MSG);
       expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
@@ -7626,20 +8619,20 @@ describe('KycService', () => {
     it('cap: a 6th send for the SAME number for a sibling OUTLET (another partner, group onboarding) is allowed', async () => {
       subs({ sub1: 'cp1', sub2: 'cp2' });
       const rows = otpTable(sends(5)); // outlet A (cp1) is at its cap
-      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
-      await expect(service.sendConsentOtp(partner, { submissionId: 'sub2', mobile: '7795096288' }))
+      await expect(service.sendConsentOtp(rep, dto)).rejects.toMatchObject({ message: CAP_MSG });
+      await expect(service.sendConsentOtp(rep, { submissionId: 'sub2', mobile: '7795096288' }))
         .resolves.toEqual({ success: true, expiresIn: 600 });
       expect(rows.filter((r) => r.referenceId === 'sub2')).toHaveLength(1);
       // …and the sibling has its own full budget of 5.
-      for (let i = 0; i < 4; i++) await service.sendConsentOtp(partner, { submissionId: 'sub2', mobile: '7795096288' });
-      await expect(service.sendConsentOtp(partner, { submissionId: 'sub2', mobile: '7795096288' }))
+      for (let i = 0; i < 4; i++) await service.sendConsentOtp(rep, { submissionId: 'sub2', mobile: '7795096288' });
+      await expect(service.sendConsentOtp(rep, { submissionId: 'sub2', mobile: '7795096288' }))
         .rejects.toMatchObject({ message: CAP_MSG });
     });
 
     it('cap: with no partner on the submission it falls back to the submission alone', async () => {
       subs({ sub1: null });
       otpTable(sends(5));
-      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+      await expect(service.sendConsentOtp(rep, dto)).rejects.toMatchObject({ message: CAP_MSG });
       expect(mockPrisma.kycSubmission.findMany).not.toHaveBeenCalled();
       expect(mockPrisma.otpCode.count.mock.calls[0][0].where.referenceId).toEqual({ in: ['sub1'] });
     });
@@ -7647,7 +8640,7 @@ describe('KycService', () => {
     it('M2: count + supersede + create run in ONE transaction under an advisory lock on (phone, partner)', async () => {
       subs({ sub1: 'cp1' });
       otpTable();
-      await service.sendConsentOtp(partner, dto);
+      await service.sendConsentOtp(rep, dto);
       expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
       // TWO locks, always in the same order (phone-wide first, then per-outlet) → no deadlock.
       expect(mockPrisma.$executeRaw).toHaveBeenCalledTimes(2);
@@ -7687,7 +8680,7 @@ describe('KycService', () => {
         });
         try { return await cb(tx); } finally { releases.forEach((r) => r()); }
       });
-      const results = await Promise.allSettled(Array.from({ length: 20 }, () => service.sendConsentOtp(partner, dto)));
+      const results = await Promise.allSettled(Array.from({ length: 20 }, () => service.sendConsentOtp(rep, dto)));
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(5);
       const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
       expect(rejected).toHaveLength(15);
@@ -7701,7 +8694,7 @@ describe('KycService', () => {
       try {
         subs({ sub1: 'cp1' });
         otpTable(sends(5));
-        await service.sendConsentOtp(partner, dto).catch(() => undefined);
+        await service.sendConsentOtp(rep, dto).catch(() => undefined);
         const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('[kyc-consent-otp-send-cap]'));
         expect(line).toBeDefined();
         const payload = JSON.parse(line!.replace('[kyc-consent-otp-send-cap] ', ''));
@@ -7718,14 +8711,14 @@ describe('KycService', () => {
         ...sends(5, { purpose: 'LOGIN', referenceId: null }),
         ...sends(5, { purpose: 'REDEMPTION_CONFIRM', referenceId: 'sub1' }), // even a colliding referenceId
       ]);
-      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      await expect(service.sendConsentOtp(rep, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
       expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(1);
     });
 
     it('cap: other numbers do not count', async () => {
       subs({ sub1: 'cp1' });
       otpTable(sends(5, { phone: '9000000009' })); // same submission id, another number
-      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      await expect(service.sendConsentOtp(rep, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
     });
 
     it('cap: the window rolls — sends older than an hour no longer count', async () => {
@@ -7735,12 +8728,12 @@ describe('KycService', () => {
         jest.setSystemTime(t0);
         subs({ sub1: 'cp1' });
         otpTable();
-        for (let i = 0; i < 5; i++) await service.sendConsentOtp(partner, dto);
-        await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+        for (let i = 0; i < 5; i++) await service.sendConsentOtp(rep, dto);
+        await expect(service.sendConsentOtp(rep, dto)).rejects.toMatchObject({ message: CAP_MSG });
         jest.setSystemTime(new Date(t0.getTime() + 59 * 60 * 1000)); // still inside the hour
-        await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+        await expect(service.sendConsentOtp(rep, dto)).rejects.toMatchObject({ message: CAP_MSG });
         jest.setSystemTime(new Date(t0.getTime() + 60 * 60 * 1000 + 1000)); // all 5 aged out
-        await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+        await expect(service.sendConsentOtp(rep, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
       } finally {
         jest.useRealTimers();
       }
@@ -7752,14 +8745,14 @@ describe('KycService', () => {
       process.env.DATABASE_URL = 'postgresql://u:p@127.0.0.1:5433/gifsy_dev';
       subs({ sub1: 'cp1' });
       otpTable(sends(5));
-      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      await expect(service.sendConsentOtp(rep, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
       expect(mockPrisma.otpCode.count).not.toHaveBeenCalled();
       expect(mockPrisma.otpCode.findMany).not.toHaveBeenCalled(); // nor the per-phone ceiling
     });
 
     // ── Per-PHONE ceiling: 15 KYC_CONSENT sends per normalised phone per hour within the tenant ─────
     const PHONE_SUBS = { s1: 'p1', s2: 'p2', s3: 'p3', s4: 'p4' };
-    const sendTo = (submissionId: string) => service.sendConsentOtp(partner, { submissionId, mobile: '7795096288' });
+    const sendTo = (submissionId: string) => service.sendConsentOtp(rep, { submissionId, mobile: '7795096288' });
 
     it('phone ceiling: 3 outlets × 5 = 15 sends ok, the 16th (a 4th outlet) → 429 same message', async () => {
       subs(PHONE_SUBS);
@@ -7851,13 +8844,13 @@ describe('KycService', () => {
       process.env.DATABASE_URL = 'postgresql://u:p@10.0.0.1:5432/gifsy_prod';
       subs({ sub1: 'cp1' });
       otpTable(sends(5));
-      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+      await expect(service.sendConsentOtp(rep, dto)).rejects.toMatchObject({ message: CAP_MSG });
     });
 
     it('supersedes (EXPIRES, not deletes) the OUTLET\'s earlier unverified consent OTPs (any of its submissions)', async () => {
       subs({ sub1: 'cp1', subOldDraft: 'cp1', subSibling: 'cp2' });
       otpTable();
-      await service.sendConsentOtp(partner, dto);
+      await service.sendConsentOtp(rep, dto);
       expect(mockPrisma.otpCode.deleteMany).not.toHaveBeenCalled();
       expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
         where: {
@@ -7912,20 +8905,20 @@ describe('KycService', () => {
       mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr' });
       const codeOf = (n: number) => mockMsg91.sendOtp.mock.calls[n][1] as string;
 
-      await service.sendConsentOtp(partner, { submissionId: 'subA', mobile: '7795096288' });
+      await service.sendConsentOtp(rep, { submissionId: 'subA', mobile: '7795096288' });
       const codeA1 = codeOf(0);
-      await service.sendConsentOtp(partner, { submissionId: 'subB', mobile: '7795096288' });
+      await service.sendConsentOtp(rep, { submissionId: 'subB', mobile: '7795096288' });
       // B's send did not expire A's live code → A verifies with it.
-      await expect(service.consent(partner, { submissionId: 'subA', mobile: '7795096288', otp: codeA1 }))
+      await expect(service.consent(rep, { submissionId: 'subA', mobile: '7795096288', otp: codeA1 }))
         .resolves.toEqual({ verified: true, submissionId: 'subA' });
 
       // Resend A: then a FRESH DRAFT of the same outlet A supersedes it (one active per number+outlet).
-      await service.sendConsentOtp(partner, { submissionId: 'subA', mobile: '7795096288' });
+      await service.sendConsentOtp(rep, { submissionId: 'subA', mobile: '7795096288' });
       const codeA2 = codeOf(2);
-      await service.sendConsentOtp(partner, { submissionId: 'subA2', mobile: '7795096288' });
+      await service.sendConsentOtp(rep, { submissionId: 'subA2', mobile: '7795096288' });
       const rowA2 = rows.find((r) => r.code === codeA2 && r.referenceId === 'subA')!;
       expect(rowA2.expiresAt.getTime()).toBeLessThanOrEqual(Date.now()); // A's earlier code is now invalid
-      const err = await service.consent(partner, { submissionId: 'subA', mobile: '7795096288', otp: codeA2 }).catch((e) => e);
+      const err = await service.consent(rep, { submissionId: 'subA', mobile: '7795096288', otp: codeA2 }).catch((e) => e);
       expect(err.getStatus()).toBe(401);
       // B's code is still live throughout.
       const rowB = rows.find((r) => r.referenceId === 'subB')!;
@@ -7934,7 +8927,7 @@ describe('KycService', () => {
 
     it('cap: a refused send (number not the owner) never reaches the count', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cp1', proposedPartner: null, partner: { phone: '9876500000' } });
-      await service.sendConsentOtp(partner, dto).catch(() => undefined);
+      await service.sendConsentOtp(rep, dto).catch(() => undefined);
       expect(mockPrisma.otpCode.count).not.toHaveBeenCalled();
     });
   });
@@ -7969,7 +8962,7 @@ describe('KycService', () => {
 
       // Stored code is 999999 but the user enters the fixed 123456 → accepted.
       await expect(
-        service.consent(partner, { submissionId: 'sub1', mobile: '7795096288', otp: '123456' }),
+        service.consent(rep, { submissionId: 'sub1', mobile: '7795096288', otp: '123456' }),
       ).resolves.toBeDefined();
       // marked verified (not an attempt-increment / throw)
       expect(mockPrisma.consentRecord.create).toHaveBeenCalled();

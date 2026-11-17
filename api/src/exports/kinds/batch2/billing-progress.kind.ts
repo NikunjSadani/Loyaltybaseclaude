@@ -15,6 +15,7 @@ import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
 import {
   billingListLabel,
+  monthStatusOf,
   type BillingListKey,
   type BillingProgressFilters,
   loadBillingProgress,
@@ -35,14 +36,21 @@ export function parseBillingProgressExportParams(raw: unknown): BillingProgressE
   return { ...parseBillingProgressFilters(q), bucket: parseBillingListKey(q.bucket) };
 }
 
-function describe(p: BillingProgressExportParams): string {
+/** Downloads-page summary. Month status is derived from the month (a past month → "Missed target"), the same
+ *  wording as the About sheet. `now` is injectable for tests. */
+export function describeBillingExport(p: BillingProgressExportParams, now: Date = new Date()): string {
+  const status = p.month ? monthStatusOf(p.month, now) : 'CURRENT';
   const parts = [
-    `Billing progress — ${billingListLabel(p.bucket)} — ${p.month ? monthWords(p.month) : 'current month'}`,
+    `Billing progress — ${billingListLabel(p.bucket, status)} — ${p.month ? monthWords(p.month) : 'current month'}`,
   ];
   if (p.program) parts.push(`Program: ${p.program}`);
   if (p.outletType) parts.push(`Outlet type: ${p.outletType}`);
   if (p.managerId) parts.push('One manager’s team');
   return parts.join(' · ');
+}
+
+function describe(p: BillingProgressExportParams): string {
+  return describeBillingExport(p);
 }
 
 /** Same INR spellings as the screen (platform/src/lib/format-inr.ts `isInrUnit`). */
@@ -67,13 +75,17 @@ async function run(ctx: ExportRunContext, p: BillingProgressExportParams, out: X
   const about = await out.addSheet('About', ['Field', 'Value'], { widths: [24, 60] });
   const aboutRows: Array<[string, string]> = [
     ['Report', 'Monthly billing progress'],
-    ['List', billingListLabel(bucket, data.monthStatus)],
+    ['List', billingListLabel(bucket, data.monthStatus, data.fullMonth)],
     ['Month', monthWords(data.month)],
     ['KPI', data.kpi ? `${data.kpi.label} (${data.kpi.code})` : 'No enabled KPI'],
     ['Program', filters.program ?? 'All programs'],
     ['Outlet type', filters.outletType ?? 'All outlet types'],
     ['Manager', filters.managerId ? (data.managerName ?? 'Unknown manager') + ' (and their team)' : 'Everyone'],
     ['Data as of', data.asOf ?? 'No sales uploaded for this month yet'],
+    [
+      'Target rows not in the live roster (tenant-wide)',
+      `${data.targetsOutsideRoster} — for outlets deleted, parked or not interested; not counted in this report`,
+    ],
     ['Generated at (IST)', istDateTimeCell(ctx.now)],
     ['Note', 'Includes outlets whose KYC is still pending (they can bill). Billed = achieved value of the KPI.'],
   ];
@@ -90,6 +102,7 @@ async function run(ctx: ExportRunContext, p: BillingProgressExportParams, out: X
     `Target${suffix}`,
     `Billed${suffix}`,
     'Achievement %',
+    'Note',
   ];
   const sheet = await out.addSheet('Billing progress', headers);
   let rowCount = 0;
@@ -104,6 +117,7 @@ async function run(ctx: ExportRunContext, p: BillingProgressExportParams, out: X
       r.target,
       r.achieved,
       r.pct ?? '',
+      r.note ?? '',
     ]);
     rowCount++;
   }

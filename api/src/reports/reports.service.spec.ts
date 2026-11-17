@@ -21,6 +21,9 @@ const mockPrisma = {
   userActivityDay: { findMany: jest.fn() },
   kycSubmission: { findMany: jest.fn() },
   outlet: { findMany: jest.fn() },
+  // kycStatus reads clients.features.gifsyRejectFastTrack (Bajaj "Routing" column). Default: no flag → OFF.
+  client: { findUnique: jest.fn() },
+  kycStatusHistory: { findMany: jest.fn() },
 };
 
 // visibilityStatus is master-gated; default ON so the existing scoping tests run.
@@ -339,6 +342,22 @@ describe('ReportsService', () => {
         'Reviewer Notes': '',
         'Rejected On': '',
       });
+    });
+
+    it('gifsyRejectFastTrack tenant: each row gains "Routing" (label for a fast-tracked latest submission)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValueOnce({ features: { gifsyRejectFastTrack: true } });
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        outletRow({}, { id: 'sub-ft', status: 'PENDING_GIFSY', submittedAt: new Date(), createdAt: new Date() } as never),
+      ]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'sub-ft', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'sub-0', previousRejectedAt: new Date().toISOString() },
+        },
+      ]);
+      const rows = rowsOf(await service.kycStatus({ ...gifsy, clientId: 'bajaj' }, {}));
+      expect(rows[0].Routing).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
+      expect(mockPrisma.client.findUnique.mock.calls[0][0].where).toEqual({ id: 'bajaj' });
     });
 
     it('an approved outlet shows Approved with Last Submitted On set', async () => {

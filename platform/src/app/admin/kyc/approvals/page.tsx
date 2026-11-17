@@ -26,6 +26,7 @@
  */
 
 import { Fragment, useState, useCallback, useEffect } from 'react'
+import Link from 'next/link'
 import {
   Download, Upload, CheckCircle, XCircle, RefreshCw,
   AlertTriangle, MapPin, FileText,
@@ -39,6 +40,7 @@ import { usePermissions } from '@/lib/use-permissions'
 import { UpiCaptureMethodBadge, asUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge'
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section'
 import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote'
+import { FAST_TRACK_HEADLINE, FAST_TRACK_QUEUE_BADGE, fastTrackPreviousText, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track'
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -94,6 +96,9 @@ interface KycApprovalEntry {
     chequeUrl?: string
   }
   fields: Record<KycFieldKey, KycFieldState>
+  // GIFSY-reject fast-track (Bajaj flag): this resubmission skipped manager approval. Normalised to
+  // null when absent (older API / normal submission) → nothing rendered.
+  fastTrack?: KycFastTrack | null
 }
 
 /** Dry-run preview response (apply=false). */
@@ -240,6 +245,19 @@ function ProgressPill({ fields }: { fields: Record<KycFieldKey, KycFieldState> }
   )
 }
 
+/** Queue badge: a fast-tracked resubmission — the managers did NOT re-check it. Text, not colour-only. */
+function FastTrackBadge() {
+  return (
+    <span
+      data-testid="fast-track-badge"
+      className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-800 bg-blue-50 border border-blue-200 rounded-full px-1.5 py-0.5 whitespace-nowrap"
+    >
+      <RefreshCw className="h-2.5 w-2.5" aria-hidden="true" />
+      {FAST_TRACK_QUEUE_BADGE}
+    </span>
+  )
+}
+
 function FieldDots({ fields }: { fields: Record<KycFieldKey, KycFieldState> }) {
   return (
     <span className="flex gap-0.5">
@@ -315,6 +333,7 @@ export default function KycApprovalsPage() {
         const normalised = data.entries.map(e => ({
           ...e,
           fields: { ...defaultFields(), ...e.fields },
+          fastTrack: parseFastTrack((e as { fastTrack?: unknown }).fastTrack),
         }))
         setEntries(normalised)
         if (normalised.length > 0) setSelectedId(normalised[0].submissionId)
@@ -708,13 +727,14 @@ export default function KycApprovalsPage() {
                   <span className="text-sm font-semibold text-gray-800 truncate">{e.outletName}</span>
                   <ProgressPill fields={e.fields} />
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 flex-wrap">
                   <p className="text-xs text-gray-500 font-mono">{e.outletCode}</p>
                   {brands.length > 1 && (
                     <span className="text-[10px] bg-indigo-50 text-indigo-700 rounded px-1.5 py-0.5 font-medium">
                       {e.clientId}
                     </span>
                   )}
+                  {e.fastTrack && <FastTrackBadge />}
                 </div>
                 <FieldDots fields={e.fields} />
               </button>
@@ -740,6 +760,36 @@ export default function KycApprovalsPage() {
                     {selected.partnerClass}
                   </span>
                 </div>
+
+                {/* GIFSY-reject fast-track: managers did not re-check this resubmission */}
+                {selected.fastTrack && (
+                  <div
+                    data-testid="fast-track-detail-note"
+                    role="note"
+                    className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded px-3 py-2 text-xs text-blue-800"
+                  >
+                    <RefreshCw className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span>
+                      <span className="font-semibold">{FAST_TRACK_HEADLINE}</span>
+                      {/* F6: same fallback as the admin banner when the date is unreadable. */}
+                      {` · ${fastTrackPreviousText(selected.fastTrack)}`}
+                      {/* F5: no id → no link (the note itself always shows). F1: new tab keeps the queue open. */}
+                      {selected.fastTrack.previousSubmissionId && (
+                        <>
+                          {' · '}
+                          <Link
+                            href={`/admin/kyc/${encodeURIComponent(selected.fastTrack.previousSubmissionId)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-medium underline underline-offset-2"
+                          >
+                            View previous submission
+                          </Link>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                )}
 
                 {/* Name mismatch banner */}
                 {selected.nameMismatch && (

@@ -23,15 +23,15 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 
 | | SHA | Since | Notes |
 |---|---|---|---|
-| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import`, `gifsy-exports`) | **`d5050024`** (once the 2026-11-16 (c) deploy is verified — check the serving image, §7) | 2026-11-16 | `origin/main` = `origin/develop` |
-| **Staging** (`*-staging`) | **`d5050024`** | 2026-11-16 | same code as prod |
+| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import`, `gifsy-exports`) | **`de2f3700`** (verified serving 2026-11-17: api rev `gifsy-api-00091`, frontend rev `gifsy-frontend-00081`; `/health` 200) | 2026-11-17 | `origin/main` = `origin/develop` |
+| **Staging** (`*-staging`) | **`de2f3700`** | 2026-11-17 | same code as prod |
 | Previous prod | `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-16 / 11-15 | rollback targets |
 
 **2026-11-16 releases** (release log in `DOCS-INDEX.md`): **Voucher Dispersal** (Gifsy platform admin tool — Excel →
 Hubble buy → WhatsApp; → [`VOUCHER-DISPERSAL.md`](VOUCHER-DISPERSAL.md)) + App Adoption installed-users export
 (`720ffce9`); **Amazon Pay claim-code-only** voucher message (`4e395b21`; other Hubble brands still send code + PIN —
 ask Hubble which are claim-code-only and add their product ids to env `HUBBLE_CLAIM_CODE_PRODUCT_IDS`); **dashboard
-rounding** (`d5050024`; `platform/src/lib/pace.ts` `fmtRemaining` / `remainingOf` / `fmtKpiNum`).
+rounding** (`d5050024`, shipped as `de2f3700` = + a test-only GIFP9 timeout bump; `platform/src/lib/pace.ts` `fmtRemaining` / `remainingOf` / `fmtKpiNum`).
 
 **The 2026-11-15 release (`e242b1a1` → `2eb8271d`, 67 commits)** — all owner-approved; platform-wide items were
 approved in-session and dual-audited where money/identity was involved:

@@ -31,7 +31,7 @@ import {
 import { useDashboardProgram, dashboardProgramStorageKey } from '@/lib/dashboard-program';
 
 const DASHBOARD_PROGRAM_STORAGE_KEY = dashboardProgramStorageKey('bajaj', 'u1');
-import { istMonthKey } from '@/lib/ist-date';
+import { formatISTDate, istMonthKey } from '@/lib/ist-date';
 
 function Harness() {
   const programState = useDashboardProgram();
@@ -231,8 +231,10 @@ describe('BillingProgressCard', () => {
     const fn = mockFetch(() => payload());
     render(<Harness />);
     await screen.findByTestId('billing-totals');
-    expect(calls(fn, '/api/admin/dashboard/billing-progress?')[0]).toBe(
-      `/api/admin/dashboard/billing-progress?month=${CUR_MONTH}&program=Gold`,
+    await waitFor(() =>
+      expect(calls(fn, '/api/admin/dashboard/billing-progress?')).toContain(
+        `/api/admin/dashboard/billing-progress?month=${CUR_MONTH}&program=Gold`,
+      ),
     );
     fireEvent.click(await screen.findByTestId('billing-bucket-NOT_STARTED'));
     await waitFor(() =>
@@ -381,6 +383,89 @@ describe('BillingProgressCard', () => {
     );
   });
 
+  it('D4: past month whose data stops early → "Data up to <date>" + behind pace, not "Full month · missed target"', async () => {
+    const past = shiftMonth(CUR_MONTH, -1);
+    const fn = mockFetch(() => payload({
+      month: past, monthStatus: 'PAST', fullMonth: false, asOf: `${past}-10`,
+      daysElapsed: 10, pacePct: 33, paceAsOf: `${past}-10`,
+    }));
+    render(<Harness />);
+    const pace = await screen.findByTestId('billing-pace');
+    expect(pace).toHaveTextContent(`Data up to ${formatISTDate(`${past}-10`)} (33% of month) · 180 outlets behind pace`);
+    expect(pace).not.toHaveTextContent('Full month');
+    expect(await screen.findByTestId('billing-pace-caption')).toHaveTextContent(
+      `Behind pace = billed less than 33% of target by ${formatISTDate(`${past}-10`)}`,
+    );
+    fireEvent.click(await screen.findByTestId('billing-behind-pace'));
+    expect(await screen.findByText(`Behind pace — ${monthWords(past)}`)).toBeInTheDocument();
+    await waitFor(() => expect(calls(fn, '/api/admin/dashboard/billing-progress/outlets?').length).toBe(1));
+  });
+
+  it('D6: a no-KPI tenant never flashes "Couldn\'t load" while refetching (card stays hidden)', async () => {
+    let fail = false;
+    const fn = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.startsWith('/api/auth/me')) return { ok: true, status: 200, json: async () => ({ success: true, data: { id: 'u1', clientId: 'bajaj' } }) };
+      if (fail) return { ok: false, status: 500, json: async () => ({ message: 'boom' }) };
+      return { ok: true, status: 200, json: async () => ({ success: true, data: payload({ kpi: null }) }) };
+    });
+    vi.stubGlobal('fetch', fn);
+    function Two() {
+      const ps = useDashboardProgram();
+      return (
+        <>
+          <button type="button" data-testid="go" onClick={() => ps.setProgram('Gold')}>go</button>
+          <BillingProgressCard programState={ps} />
+        </>
+      );
+    }
+    render(<Two />);
+    await waitFor(() => expect(calls(fn, '/api/admin/dashboard/billing-progress?').length).toBe(1));
+    await waitFor(() => expect(screen.queryByTestId('billing-progress-card')).not.toBeInTheDocument());
+    fail = true;
+    fireEvent.click(screen.getByTestId('go'));
+    await waitFor(() => expect(calls(fn, '/api/admin/dashboard/billing-progress?').length).toBe(2));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByTestId('billing-progress-card')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('billing-progress-error')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('billing-progress-loading')).not.toBeInTheDocument();
+  });
+
+  it('D7: NOT_COVERED rows show the REAL stored values with a "not counted" note', async () => {
+    const fn = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.startsWith('/api/auth/me')) return { ok: true, status: 200, json: async () => ({ success: true, data: { id: 'u1', clientId: 'bajaj' } }) };
+      if (u.startsWith('/api/admin/dashboard/billing-progress/outlets')) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({ success: true, data: { rows: [{
+            outletCode: 'S1', outletName: 'Silver Shop', program: 'Silver', outletType: 'RETAIL', soName: null, asmName: null,
+            target: 300_000, achieved: 120_000, pct: null, note: 'Not counted — outside this target’s scope',
+          }], total: 1, page: 1, pageSize: 25 } }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true, data: payload({ outletsNotCovered: 1 }) }) };
+    });
+    vi.stubGlobal('fetch', fn);
+    render(<Harness />);
+    fireEvent.click(await screen.findByTestId('billing-not-covered'));
+    expect(await screen.findByText('Silver Shop')).toBeInTheDocument();
+    expect(await screen.findByText('₹3,00,000')).toBeInTheDocument();
+    expect(await screen.findByText('₹1,20,000')).toBeInTheDocument();
+    expect(await screen.findByTestId('billing-row-note-S1')).toHaveTextContent('Not counted — outside this target’s scope');
+  });
+
+  it('D9: a disabled zero-count bucket does not invite "Show outlets"', async () => {
+    mockFetch(() => payload({
+      buckets: payload().buckets.map((b) => (b.key === 'P60_80' ? { ...b, count: 0, pctOfOutlets: 0, targetSum: 0, achievedSum: 0 } : b)),
+    }));
+    render(<Harness />);
+    const zero = await screen.findByTestId('billing-bucket-P60_80');
+    expect(zero).toBeDisabled();
+    expect(zero.getAttribute('aria-label')).not.toMatch(/Show outlets/);
+    expect(await screen.findByTestId('billing-bucket-P0_20')).toHaveAttribute('aria-label', expect.stringMatching(/Show outlets$/));
+  });
+
   it('BP16b (F5): future month → empty state, no pace and no buckets', async () => {
     const next = shiftMonth(CUR_MONTH, 1);
     mockFetch(() => payload({ month: next, monthStatus: 'FUTURE', asOf: null, daysElapsed: null, pacePct: null, paceAsOf: null }));
@@ -430,6 +515,9 @@ describe('BillingProgressCard', () => {
       expect(cb).toBeGreaterThan(cr); // blue
     }
     for (let i = 1; i < ramp.length; i++) expect(lum(ramp[i])).toBeLessThan(lum(ramp[i - 1])); // ordered ramp
+    // D9: neighbours are visibly different (≥ 1.25:1 between adjacent steps — incl. 60–79% vs 80–99%).
+    const ratio = (a: string, b: string) => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
+    for (let i = 1; i < ramp.length; i++) expect(ratio(ramp[i], ramp[i - 1])).toBeGreaterThanOrEqual(1.25);
   });
 
   it('BP18b (F8): the Not started swatch carries a border so the light grey reads on white', async () => {

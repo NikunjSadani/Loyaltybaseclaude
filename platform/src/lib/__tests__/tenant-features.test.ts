@@ -69,4 +69,11 @@ describe('normalizeFeatures', () => {
     expect(normalizeFeatures({ allowPayoutWithoutPan: true }).allowPayoutWithoutPan).toBe(true);
     expect(normalizeFeatures({ allowPayoutWithoutPan: 'true' }).allowPayoutWithoutPan).toBe(false);
   });
+
+  it('carries the gifsyRejectFastTrack behaviour flag, defaulting OFF', () => {
+    expect(DEFAULT_FEATURES.gifsyRejectFastTrack).toBe(false);
+    expect(normalizeFeatures({}).gifsyRejectFastTrack).toBe(false);
+    expect(normalizeFeatures({ gifsyRejectFastTrack: true }).gifsyRejectFastTrack).toBe(true);
+    expect(normalizeFeatures({ gifsyRejectFastTrack: 'true' }).gifsyRejectFastTrack).toBe(false);
+  });
 });

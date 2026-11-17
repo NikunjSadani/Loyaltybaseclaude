@@ -11,6 +11,7 @@ import {
   rejectedKycCells,
   rejectedKycHeaders,
   KYC_DUMP_TOTAL_COLUMN_COUNT,
+  kycDumpTotalColumnCount,
   KYC_FIELD_ORDER,
   kycFieldDecisionHeader,
   rejectedFieldVerdictHeader,
@@ -18,6 +19,7 @@ import {
   KycReviewDumpEntry,
   RejectedKycRow,
 } from './kyc-review-dump';
+import { parseKycApprovalSheet } from './kyc-bulk-verify';
 
 async function viaStream(sheetName: string, headers: string[], rows: XlsxCell[][]): Promise<Buffer> {
   const sink = new PassThrough();
@@ -31,10 +33,11 @@ async function viaStream(sheetName: string, headers: string[], rows: XlsxCell[][
   await done;
   return Buffer.concat(chunks);
 }
-const generateKycReviewDumpExcel = (entries: KycReviewDumpEntry[]) =>
-  viaStream('KYC Review Dump', kycReviewDumpHeaders(), entries.map(kycReviewDumpCells));
-const generateRejectedKycExcel = (rows: RejectedKycRow[]) =>
-  viaStream('Rejected Outlets', rejectedKycHeaders(), rows.map(rejectedKycCells));
+/** `routing` = a gifsyRejectFastTrack tenant is in the export's scope (adds the trailing "Routing" column). */
+const generateKycReviewDumpExcel = (entries: KycReviewDumpEntry[], routing = true) =>
+  viaStream('KYC Review Dump', kycReviewDumpHeaders(routing), entries.map((e) => kycReviewDumpCells(e, routing)));
+const generateRejectedKycExcel = (rows: RejectedKycRow[], routing = true) =>
+  viaStream('Rejected Outlets', rejectedKycHeaders(routing), rows.map((r) => rejectedKycCells(r, routing)));
 
 const allPending = (): KycReviewDumpEntry['fields'] => {
   const f = {} as KycReviewDumpEntry['fields'];
@@ -75,12 +78,58 @@ const parse = (buf: Buffer) => {
 };
 
 describe('KYC review dump layout (kycReviewDumpCells)', () => {
-  it('produces the 40-column header layout (Partner Class at index 5)', async () => {
+  it('flag-off scope: EXACTLY the established 40 columns, no Routing (Deoleo byte-identical)', async () => {
+    const { rows } = parse(await generateKycReviewDumpExcel([entry({ fastTrack: null })], false));
+    expect(KYC_DUMP_TOTAL_COLUMN_COUNT).toBe(40);
+    expect(kycDumpTotalColumnCount(false)).toBe(40);
+    expect(rows[0].length).toBe(40);
+    expect(rows[1].length).toBeLessThanOrEqual(40);
+    expect(rows[0]).not.toContain('Routing');
+    expect(kycReviewDumpHeaders()).toEqual(kycReviewDumpHeaders(false)); // default = no Routing
+    expect(kycReviewDumpCells(entry())).toHaveLength(40);
+    expect(rows[0][0]).toBe('Submission ID');
+    expect(rows[0][5]).toBe('Partner Class');
+  });
+
+  it('flag-on scope: 41 columns (Partner Class at index 5, Routing appended LAST)', async () => {
     const { rows } = parse(await generateKycReviewDumpExcel([entry()]));
-    expect(rows[0].length).toBe(KYC_DUMP_TOTAL_COLUMN_COUNT);
+    expect(kycDumpTotalColumnCount(true)).toBe(41);
+    expect(rows[0].length).toBe(41);
     expect(rows[0][0]).toBe('Submission ID');
     expect(rows[0][5]).toBe('Partner Class');
     expect(rows[0]).toContain(kycFieldDecisionHeader('Owner Photo'));
+    // Appended after every existing column so the original 40 keep their positions (bulk-verify keys by header).
+    expect(rows[0][40]).toBe('Routing');
+  });
+
+  it.each([
+    ['flag-off (40 columns)', false],
+    ['flag-on (41 columns, Routing)', true],
+  ])('bulk-verify re-upload round-trips the %s dump', async (_label, routing) => {
+    const fields = allPending();
+    fields.OWNER_PHOTO = { decision: 'REJECTED', remark: 'blurry' };
+    fields.PAYMENT = { decision: 'APPROVED' };
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const buf = await generateKycReviewDumpExcel([entry({ fields, fastTrack: ft })], routing);
+    const ws = XLSX.read(buf, { type: 'buffer' }).Sheets['KYC Review Dump'];
+    const rawRows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false }) as Record<string, unknown>[];
+    const res = parseKycApprovalSheet(rawRows, new Set(['KYC-1']));
+    expect(res.errors).toEqual([]);
+    expect(res.updates).toHaveLength(1);
+    expect(res.updates[0].submissionId).toBe('KYC-1');
+    expect(res.updates[0].fields.OWNER_PHOTO).toMatchObject({ decision: 'REJECTED', remark: 'blurry' });
+    expect(res.updates[0].fields.PAYMENT).toMatchObject({ decision: 'APPROVED' });
+  });
+
+  it('Routing = "Direct to GIFSY (resubmitted after GIFSY rejection)" for a fast-tracked entry, blank otherwise', async () => {
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const { rows } = parse(
+      await generateKycReviewDumpExcel([entry({ fastTrack: ft }), entry({ submissionId: 'KYC-2', fastTrack: null }), entry({ submissionId: 'KYC-3' })]),
+    );
+    const idx = rows[0].indexOf('Routing');
+    expect(rows[1][idx]).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
+    expect(rows[2][idx] ?? '').toBe('');
+    expect(rows[3][idx] ?? '').toBe('');
   });
 
   it('puts the outlet type value into the Partner Class column', async () => {
@@ -212,6 +261,24 @@ describe('Rejected outlets layout (rejectedKycCells)', () => {
     expect(byHeader(rows, data, 'GST Number')).toBe('27ABCDE1234F1ZK');
     expect(byHeader(rows, data, 'IFSC')).toBe('HDFC0001');
     expect(byHeader(rows, data, 'SLA Age (hrs)')).toBe('24');
+  });
+
+  it('Routing column (appended last): fast-track label vs blank', async () => {
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const { rows } = parse(await generateRejectedKycExcel([row({ fastTrack: ft }), row()]));
+    expect(rows[0][rows[0].length - 1]).toBe('Routing');
+    expect(byHeader(rows, rows[1], 'Routing')).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
+    expect(byHeader(rows, rows[2], 'Routing') ?? '').toBe('');
+  });
+
+  it('flag-off scope: no Routing column, SLA Age (hrs) stays the LAST column (Deoleo byte-identical)', async () => {
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const { rows } = parse(await generateRejectedKycExcel([row({ fastTrack: ft })], false));
+    expect(rows[0]).not.toContain('Routing');
+    expect(rows[0][rows[0].length - 1]).toBe('SLA Age (hrs)');
+    expect(rejectedKycHeaders()).toEqual(rejectedKycHeaders(false));
+    expect(rejectedKycCells(row())).toHaveLength(rejectedKycHeaders(false).length);
+    expect(rejectedKycCells(row(), true)).toHaveLength(rejectedKycHeaders(true).length);
   });
 
   it('neutralises formula-injection in user-supplied cells (AF-5)', async () => {

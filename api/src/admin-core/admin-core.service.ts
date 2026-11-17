@@ -72,6 +72,7 @@ import {
   programNameIn,
 } from './dashboards/dashboard-program-filter';
 import { resolveVisibilityProgramLists } from '../visibility/visibility-scope.helper';
+import { isFastTrackRow } from '../kyc/kyc-fast-track.helper';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_MAX_ATTEMPTS,
@@ -2010,16 +2011,21 @@ export class AdminCoreService {
     // (real distinct values) below, so the value always matches real data.
     const programFilter =
       programName && programName.trim().length > 0 ? programName.trim() : null;
+    // Whitespace-tolerant program match (same as Overview / Program Health): the trimmed selection matches every
+    // stored raw variant. The catalog is read FIRST only when filtering; unfiltered it runs in the Promise.all
+    // below exactly as before (same query), so the default dashboard is unchanged.
+    const filterCatalog = programFilter ? await loadProgramCatalog(this.prisma, clientId) : null;
+    const programVariants = programFilter && filterCatalog ? filterCatalog.variantsOf(programFilter) : null;
+    const outletProgramWhere = programVariants ? { programName: programNameIn(programVariants) } : {};
     // Ties a KycSubmission to the selected program via its owning partner's outlets: a submission
     // carries no programName; its owner ChannelPartner reaches outlets through the OutletOwner
     // relation (Outlet.programName). GRAIN NOTE: quality/rejection are owner(submission)-grain, so
     // `some` ("owns ≥1 outlet in this program") means a multi-program owner contributes to EACH of
     // its programs — per-program tallies therefore do NOT sum to the unfiltered total. Submissions
     // whose partner is null are excluded from a program-scoped view (no program to attribute to).
-    // When unfiltered this contributes nothing.
-    const submissionProgramScope = programFilter
-      ? { partner: { outlets: { some: { programName: programFilter } } } }
-      : {};
+    // When unfiltered this contributes nothing. The partner match counts only LIVE outlets (shared
+    // `partnerProgramScope`), so Overview "Pending KYC" for a program uses the same rule.
+    const submissionProgramScope = programVariants ? { partner: partnerProgramScope(programVariants) } : {};
     // KYC SLA ages count BUSINESS hours only (Mon–Fri, minus the national holiday
     // calendar) — the stage targets are business hours, not calendar. The two targets are
     // per-tenant configurable (field 24h / gifsy 96h defaults), resolved once here.
@@ -2035,7 +2041,7 @@ export class AdminCoreService {
       reUploadCount,
       totalSubmissions,
       rejectionHistory,
-      programRows,
+      programCatalog,
     ] =
       await Promise.all([
         this.prisma.outlet.findMany({
@@ -2051,7 +2057,7 @@ export class AdminCoreService {
             deactivatedAt: null,
             // Program scope (no-op when unfiltered) — this is what makes every outlet-derived
             // metric (headline, funnel, buckets, SLA, coverageBy) fold to the selected program.
-            ...(programFilter ? { programName: programFilter } : {}),
+            ...outletProgramWhere,
             // Prisma's `{ notIn }` EXCLUDES NULL rows. Almost every outlet has
             // kycIntent=NULL (only sales-marked ones are NOT_INTERESTED, admin-parked ones
             // PARKED), so an explicit OR is required to keep them — otherwise addressable → 0.
@@ -2075,7 +2081,9 @@ export class AdminCoreService {
                     approvedAt: true,
                     createdAt: true,
                     statusHistory: {
-                      select: { toStatus: true, createdAt: true },
+                      // fromStatus + metadata: a DRAFT→PENDING_GIFSY entry CARRYING the fast-track marker =
+                      // GIFSY-reject fast-track (no field stage).
+                      select: { fromStatus: true, toStatus: true, createdAt: true, metadata: true },
                     },
                   },
                 },
@@ -2091,7 +2099,7 @@ export class AdminCoreService {
             clientId,
             deletedAt: null,
             kycIntent: 'NOT_INTERESTED',
-            ...(programFilter ? { programName: programFilter } : {}),
+            ...outletProgramWhere,
           },
         }),
         this.prisma.outlet.count({
@@ -2101,7 +2109,7 @@ export class AdminCoreService {
             clientId,
             deletedAt: null,
             deactivatedAt: { not: null },
-            ...(programFilter ? { programName: programFilter } : {}),
+            ...outletProgramWhere,
             OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
           },
         }),
@@ -2131,19 +2139,11 @@ export class AdminCoreService {
         // selection). Sourced from the outlets themselves, so every option matches an actual
         // outlet.programName value the filter can hit (unlike the settings allow-list, which is
         // free-text-independent). Null programNames are excluded (there's no program to select).
-        this.prisma.outlet.findMany({
-          where: { clientId, deletedAt: null, programName: { not: null } },
-          select: { programName: true },
-          distinct: ['programName'],
-          orderBy: { programName: 'asc' },
-        }),
+        // Same query as before (loadProgramCatalog), folded by trim: distinct TRIMMED, non-empty names.
+        filterCatalog ?? loadProgramCatalog(this.prisma, clientId),
       ]);
 
-    // Flatten + defensively drop any blank/whitespace program names (the query already excludes
-    // NULL and sorts ascending, so this stays alphabetical).
-    const availablePrograms = programRows
-      .map((r) => r.programName)
-      .filter((p): p is string => !!p && p.trim().length > 0);
+    const availablePrograms = programCatalog.available;
 
     const addressableCount = addressableOutlets.length;
 
@@ -2282,7 +2282,12 @@ export class AdminCoreService {
         const submittedTs = sub.submittedAt.getTime();
         const firstEnteredAt = firstEnteredPendingGifsyAt(sub.statusHistory);
         const lastEnteredAt = enteredPendingGifsyAt(sub.statusHistory);
-        if (firstEnteredAt) {
+        // GIFSY-reject fast-track (Bajaj): the KYC went DRAFT→PENDING_GIFSY at consent — it had NO field stage, so
+        // it contributes no field-chain sample (a ~0h sample would fake field compliance). R4: proven ONLY by the
+        // fast-track marker on that row (isFastTrackRow), never by the bare edge — an unmarked DRAFT→PENDING_GIFSY
+        // row is still counted.
+        const skippedFieldStage = sub.statusHistory.some((h) => isFastTrackRow(h));
+        if (firstEnteredAt && !skippedFieldStage) {
           fieldChainHours.push(
             businessHoursBetween(submittedTs, firstEnteredAt.getTime(), holidays),
           );

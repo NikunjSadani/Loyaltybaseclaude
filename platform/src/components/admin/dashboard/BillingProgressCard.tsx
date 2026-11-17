@@ -65,6 +65,8 @@ export interface BillingProgressData {
   pacePct: number | null;
   /** The IST date pace is measured to (YYYY-MM-DD). */
   paceAsOf?: string | null;
+  /** Past month whose data reaches its last day ("missed target"); false = data stops early. */
+  fullMonth?: boolean;
   /** Outlets with a positive target (KYC-pending included). */
   outletsInScope: number;
   outletsWithoutTarget: number;
@@ -89,6 +91,8 @@ export interface BillingOutletRow {
   target: number;
   achieved: number;
   pct: number | null;
+  /** e.g. "Not counted — outside this target’s scope" (NOT_COVERED rows). */
+  note?: string | null;
 }
 
 interface BillingOutletsPage { rows: BillingOutletRow[]; total: number; page: number; pageSize: number }
@@ -189,11 +193,12 @@ async function readError(r: Response): Promise<string> {
  */
 export const BUCKET_COLORS: Record<BillingBucketKey, string> = {
   NOT_STARTED: '#e5e7eb',
+  // Each step ≥ 3:1 vs white AND ≥ 1.25:1 vs its neighbour (60–79% and 80–99% clearly apart).
   P0_20: '#3b82f6',
   P20_40: '#2563eb',
   P40_60: '#1d4ed8',
-  P60_80: '#1e40af',
-  P80_100: '#1e3a8a',
+  P60_80: '#1e3a8a',
+  P80_100: '#172554',
   ACHIEVED: '#15803d',
 };
 const NOT_STARTED_BORDER = '#9ca3af';
@@ -225,6 +230,9 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
     outletTypes: [], managers: [],
   });
   const [drill, setDrill] = useState<{ key: BillingListKey; label: string } | null>(null);
+  // The last GOOD response said the tenant has no enabled KPI → the card stays hidden, even while a refetch is
+  // loading or fails (no "Couldn't load" flash for a card that has nothing to show).
+  const [noKpi, setNoKpi] = useState(false);
 
   const filters: Filters = useMemo(() => ({ month, program, outletType, managerId }), [month, program, outletType, managerId]);
 
@@ -246,6 +254,7 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
           managers: Array.isArray(payload.availableManagers) ? payload.availableManagers : [],
         });
         if (!reconcile(filters.program, programs)) { dropped = true; return; }
+        setNoKpi(!payload.kpi);
         setData(payload);
       })
       .catch((err: unknown) => {
@@ -274,8 +283,9 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
 
   const openDrill = useCallback((key: BillingListKey, label: string) => setDrill({ key, label }), []);
 
-  // F3: the tenant has no enabled KPI at all → nothing to report; the card is hidden (no fake zeros).
-  if (data && !kpi && !loading && !error) return null;
+  // F3 / D6: the tenant has no enabled KPI at all → nothing to report; the card is hidden (no fake zeros, and no
+  // error / loading flash on a later refetch).
+  if (noKpi) return null;
 
   const subtitleParts = [
     kpi ? `Against each outlet's ${kpi.label} target` : null,
@@ -414,7 +424,9 @@ function BillingBody({
   disabled: boolean;
   onOpen: (key: BillingListKey, label: string) => void;
 }) {
-  const isPast = data.monthStatus === 'PAST';
+  // "Missed target" only when the month is over AND the data reaches its end; otherwise pace to the data date.
+  const isPast = data.monthStatus === 'PAST' && data.fullMonth !== false;
+  const partialPast = data.monthStatus === 'PAST' && data.fullMonth === false;
   const notCovered = data.outletsNotCovered ?? 0;
   const outsideRoster = data.targetsOutsideRoster ?? 0;
 
@@ -544,7 +556,9 @@ function BillingBody({
           <p className="text-xs text-gray-600" data-testid="billing-pace">
             {isPast
               ? 'Full month · '
-              : `Day ${fmtInt(data.daysElapsed as number)} of ${fmtInt(data.daysInMonth)} (${data.pacePct}% of month) · `}
+              : partialPast && data.paceAsOf
+                ? `Data up to ${formatISTDate(data.paceAsOf) || data.paceAsOf} (${data.pacePct}% of month) · `
+                : `Day ${fmtInt(data.daysElapsed as number)} of ${fmtInt(data.daysInMonth)} (${data.pacePct}% of month) · `}
             {behindPace.count > 0 ? (
               <button
                 type="button"
@@ -610,8 +624,9 @@ function BucketButton({
 }) {
   const target = fmtBillingAmount(bucket.targetSum, unit);
   const billed = fmtBillingAmount(bucket.achievedSum, unit);
-  // Screen readers get the EXACT figures (the compact L / Cr text is for the eye).
-  const aria = `${bucket.label}: ${fmtInt(bucket.count)} ${plural(bucket.count, 'outlet', 'outlets')}, ${bucket.pctOfOutlets}% of outlets, target ${fmtBillingExact(bucket.targetSum, unit)}, billed ${fmtBillingExact(bucket.achievedSum, unit)}. Show outlets`;
+  // Screen readers get the EXACT figures (the compact L / Cr text is for the eye). A zero-count bucket is
+  // disabled, so it doesn't invite "Show outlets".
+  const aria = `${bucket.label}: ${fmtInt(bucket.count)} ${plural(bucket.count, 'outlet', 'outlets')}, ${bucket.pctOfOutlets}% of outlets, target ${fmtBillingExact(bucket.targetSum, unit)}, billed ${fmtBillingExact(bucket.achievedSum, unit)}${bucket.count > 0 ? '. Show outlets' : ''}`;
   return (
     <button
       type="button"
@@ -792,6 +807,9 @@ function BillingDrillDown({
                     <td className="px-3 py-2 min-w-[8rem] sm:min-w-[10rem]">
                       <span className="font-medium text-gray-800">{r.outletName}</span>
                       <span className="block text-[10px] text-gray-400">{r.outletCode}</span>
+                      {r.note && (
+                        <span className="block text-[10px] text-amber-700" data-testid={`billing-row-note-${r.outletCode}`}>{r.note}</span>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-right text-gray-600 whitespace-nowrap">{r.pct === null || r.pct === undefined ? '—' : `${r.pct.toFixed(1)}%`}</td>
                     <td className="px-3 py-2 text-right font-semibold text-gray-800 whitespace-nowrap">{fmtBillingExact(r.achieved, unit)}</td>

@@ -26,6 +26,8 @@ import { ProgramFilter } from '@/components/admin/dashboard/ProgramFilter';
 // Program Health / KYC dashboards for the session; `?program=` in the URL wins.
 
 const DARK_NAVY = '#1A1A2E';
+/** KYC's own (original, Deoleo-identical) rule: the select always shows; a single listed program is usable. */
+const KYC_MIN_PROGRAMS = 1;
 
 /* ─── API response model (precise to the endpoint contract) ─────────────────── */
 
@@ -244,7 +246,8 @@ export default function AdminKycDashboardPage() {
         }
         if (cancelled) return;
         // A program this tenant can't use (stale session value / link) → back to All programs, said out loud.
-        if (!reconcile(programName, payload.availablePrograms)) { dropped = true; return; }
+        // KYC keeps its ORIGINAL rule: one listed program is enough (single-program tenants honour ?program=).
+        if (!reconcile(programName, payload.availablePrograms, KYC_MIN_PROGRAMS)) { dropped = true; return; }
         setData(payload);
       })
       .catch((err: unknown) => {
@@ -283,6 +286,7 @@ export default function AdminKycDashboardPage() {
         onChange={setProgramName}
         droppedProgram={programFilterState.droppedProgram}
         onDismissDropped={programFilterState.dismissDropped}
+        minPrograms={0}
       />
     </div>
   );

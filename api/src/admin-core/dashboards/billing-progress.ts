@@ -105,28 +105,46 @@ export interface BillingPace {
   pacePct: number | null;
   /** The IST date the pace is measured to (YYYY-MM-DD); null when there is no pace. */
   paceAsOf: string | null;
+  /** True only for a PAST month whose data reaches its last day ("missed target" wording). */
+  fullMonth: boolean;
+}
+
+/** IST "today" as YYYY-MM-DD. */
+export function istToday(now: Date): string {
+  return istDateKey(now);
+}
+
+/** A data date can't be in the future: min(asOf, today). */
+export function clampAsOf(asOf: string | null, now: Date): string | null {
+  if (!asOf) return null;
+  const today = istToday(now);
+  return asOf > today ? today : asOf;
+}
+
+/** Month status of a YYYY-MM key relative to `now` (IST). */
+export function monthStatusOf(month: string, now: Date): BillingMonthStatus {
+  const current = istMonthKey(now);
+  return month < current ? 'PAST' : month > current ? 'FUTURE' : 'CURRENT';
 }
 
 /**
- * Month pace by the IST calendar, measured to the DATA date:
- *   - no data (`asOf` null) → no pace, whatever the month;
- *   - past month → the whole month (100%, "missed target" wording on screen), as of the month's last day;
- *   - future month → no pace;
- *   - current month → the IST day of min(asOf, today) — pacing to today when the data stops at the 12th
- *     would flag outlets "behind" for days that haven't been uploaded yet.
+ * Month pace by the IST calendar, measured to the DATA date (`upTo` = min(asOf, today)):
+ *   - no data (`asOf` null) or a future month → no pace;
+ *   - data reaching the month's last day (past month) → the whole month, 100%, `fullMonth` ("missed target");
+ *   - otherwise (current month, or a past month whose data stops early) → the IST day of `upTo` in the month
+ *     ("Data up to <date>"); pacing to the calendar would flag outlets for days not uploaded yet;
+ *   - data dated before the month began → 0 days covered.
  */
 export function paceFor(month: string, now: Date, asOf: string | null): BillingPace {
   const daysInMonth = daysInMonthOf(month);
-  const current = istMonthKey(now);
-  const monthStatus: BillingMonthStatus = month < current ? 'PAST' : month > current ? 'FUTURE' : 'CURRENT';
-  const none = { monthStatus, daysInMonth, daysElapsed: null, pacePct: null, paceAsOf: null };
-  if (!asOf || monthStatus === 'FUTURE') return none;
-  if (monthStatus === 'PAST') {
-    return { monthStatus, daysInMonth, daysElapsed: daysInMonth, pacePct: 100, paceAsOf: `${month}-${String(daysInMonth).padStart(2, '0')}` };
+  const monthStatus = monthStatusOf(month, now);
+  const none = { monthStatus, daysInMonth, daysElapsed: null, pacePct: null, paceAsOf: null, fullMonth: false };
+  const upTo = clampAsOf(asOf, now);
+  if (!upTo || monthStatus === 'FUTURE') return none;
+  const monthEnd = `${month}-${String(daysInMonth).padStart(2, '0')}`;
+  if (upTo >= monthEnd) {
+    return { monthStatus, daysInMonth, daysElapsed: daysInMonth, pacePct: 100, paceAsOf: monthEnd, fullMonth: true };
   }
-  const today = istDateKey(now);
-  const upTo = asOf < today ? asOf : today;
-  // Data dated before the month began covers none of it.
   const daysElapsed = upTo.slice(0, 7) < month ? 0 : Number(upTo.slice(8, 10));
   return {
     monthStatus,
@@ -134,6 +152,7 @@ export function paceFor(month: string, now: Date, asOf: string | null): BillingP
     daysElapsed,
     pacePct: Math.round((daysElapsed / daysInMonth) * 100),
     paceAsOf: upTo,
+    fullMonth: false,
   };
 }
 
@@ -185,6 +204,8 @@ export interface BillingOutletRow {
   achieved: number;
   /** Display pct (1 dp, floored + clamped to the bucket — `displayPct`); null when there is no positive target. */
   pct: number | null;
+  /** Set when the row's values are shown but NOT counted (outside the KPI's applies-to scope). */
+  note: string | null;
   /** Unrounded pct — the sort key. */
   rawPct: number;
   bucket: BillingBucketKey | null;
@@ -209,6 +230,9 @@ export interface BillingProgressData extends BillingPace {
   availableOutletTypes: string[];
   availableManagers: Array<{ id: string; name: string; levelCode: string; levelName: string }>;
 }
+
+/** Shown on every NOT_COVERED row (drill-down + Excel). */
+export const NOT_COVERED_NOTE = 'Not counted — outside this target’s scope';
 
 /** Field-level / manager-level codes used for the list's SO / ASM columns (internal role codes are tenant-stable). */
 const SO_CODE = 'SO';
@@ -291,17 +315,22 @@ export async function loadBillingProgress(
   const kpiDef = pickReportKpi(kpiRows ?? []);
 
   // ── data freshness ── the importer's invoice date counts only when the importer OWNS the report KPI
-  // (a manually-uploaded KPI is as fresh as its last upload, not the DMS file).
+  // (a manually-uploaded KPI is as fresh as its last upload, not the DMS file). The upload-time fallback reads
+  // ONLY sales records that actually carry the report KPI's key — another KPI's upload says nothing about this
+  // one (→ null → "No sales uploaded"). A future date is clamped to today everywhere (screen + export).
   const importerOwnsKpi = !!kpiDef && !!lastApplied && lastApplied.ownedCodes.includes(kpiDef.code);
   let asOf: string | null = importerOwnsKpi ? lastApplied!.lastInvoiceDate : null;
-  if (!asOf) {
+  if (!asOf && kpiDef) {
     let latest = 0;
     for (const r of salesRows) {
+      const vals = r.kpiValues as Record<string, unknown> | null;
+      if (!vals || typeof vals !== 'object' || !Object.prototype.hasOwnProperty.call(vals, kpiDef.code)) continue;
       const t = r.updatedAt instanceof Date ? r.updatedAt.getTime() : 0;
       if (t > latest) latest = t;
     }
     asOf = latest > 0 ? istDateKey(new Date(latest)) : null;
   }
+  asOf = clampAsOf(asOf, now);
   const pace = paceFor(month, now, asOf);
 
   // ── managers ──
@@ -387,13 +416,17 @@ export async function loadBillingProgress(
       target: 0,
       achieved: 0,
       pct: null,
+      note: null,
       rawPct: 0,
       bucket: null,
       behindPace: false,
     };
     if (appliesTo && !appliesTo({ outletType: type, program: o.programName ?? null, subProgram: o.programCategory ?? null })) {
-      // Outside the KPI's applies-to scope: listed (never silently dropped), but its stored values for this KPI
-      // are excluded — the platform rule for out-of-scope (outlet, KPI) values.
+      // Outside the KPI's applies-to scope: listed with its REAL stored values (never silently dropped, never a
+      // fake 0), but NOT counted in any total — the platform rule for out-of-scope (outlet, KPI) values.
+      row.target = targetByCode.get(o.outletCode) ?? 0;
+      row.achieved = achByCode.get(o.outletCode) ?? 0;
+      row.note = NOT_COVERED_NOTE;
       notCovered.push(row);
       continue;
     }
@@ -439,6 +472,7 @@ export function summarizeBillingProgress(d: BillingProgressData) {
     daysInMonth: d.daysInMonth,
     pacePct: d.pacePct,
     paceAsOf: d.paceAsOf,
+    fullMonth: d.fullMonth,
     /** Outlets with a positive target for the KPI (KYC-pending outlets included — they bill). */
     outletsInScope: total,
     outletsWithoutTarget: d.noTarget.length,
@@ -491,11 +525,16 @@ export function publicBillingRow(r: BillingOutletRow) {
     target: r.target,
     achieved: r.achieved,
     pct: r.pct,
+    note: r.note,
   };
 }
 
-export function billingListLabel(key: BillingListKey, monthStatus?: BillingMonthStatus): string {
-  if (key === 'BEHIND_PACE') return monthStatus === 'PAST' ? 'Missed target' : 'Behind pace';
+/**
+ * List label. BEHIND_PACE reads "Missed target" for a past month — except when the data is known to stop
+ * before the month's end (`fullMonth === false`), where it is pace to the data date ("Behind pace").
+ */
+export function billingListLabel(key: BillingListKey, monthStatus?: BillingMonthStatus, fullMonth?: boolean): string {
+  if (key === 'BEHIND_PACE') return monthStatus === 'PAST' && fullMonth !== false ? 'Missed target' : 'Behind pace';
   if (key === 'NO_TARGET') return 'No target';
   if (key === 'NOT_COVERED') return 'Not covered by the KPI target';
   return BILLING_BUCKETS.find((b) => b.key === key)!.label;
