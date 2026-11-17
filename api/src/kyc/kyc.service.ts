@@ -4583,13 +4583,18 @@ export class KycService {
     });
 
     if (!outlet) throw new NotFoundException(`Outlet "${outletId}" not found`);
-    if (!outlet.isActive && outlet.kycIntent === 'NOT_INTERESTED') {
-      // Already marked — idempotent. Answered BEFORE the A1 gate (R3): a repeat click after the outlet was
-      // reassigned gets the same harmless reply, and nothing is written either way.
+    if (!outlet.isActive && outlet.kycIntent === 'NOT_INTERESTED' && outlet.kycIntentBy === user.sub) {
+      // Already marked BY THIS CALLER — idempotent. Answered BEFORE the A1 gate (R3): the same person's repeat
+      // click after the outlet was reassigned gets the same harmless reply. Limited to the original marker so
+      // the early reply can't be used by anyone else to probe an outlet's status (audit L1).
       return { outletId, alreadyMarked: true };
     }
     // A1: a sales caller may mark only an outlet actively assigned to them or their downline.
     await this.assertOutletAssignedToCallerTeam(user, { outletId: outlet.id });
+    // Already marked by someone else on the team — still idempotent (no re-write), now that the caller passed the gate.
+    if (!outlet.isActive && outlet.kycIntent === 'NOT_INTERESTED') {
+      return { outletId, alreadyMarked: true };
+    }
 
     await this.prisma.outlet.update({
       where: { id: outlet.id },

@@ -8143,8 +8143,10 @@ describe('KycService', () => {
         expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
       });
 
-      it('R3: an ALREADY-marked outlet answers idempotently BEFORE the gate (repeat click after reassignment)', async () => {
-        mockPrisma.outlet.findFirst.mockResolvedValue({ ...outlet, isActive: false, kycIntent: 'NOT_INTERESTED' });
+      it('R3: an outlet ALREADY marked by THIS caller answers idempotently BEFORE the gate (repeat click after reassignment)', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          ...outlet, isActive: false, kycIntent: 'NOT_INTERESTED', kycIntentBy: isr1.sub,
+        });
         assignTo('isr2-su'); // reassigned away since the first click
         await expect(service.notInterested(isr1, { outletId: 'outlet-1' })).resolves.toEqual({
           outletId: 'outlet-1',
@@ -8152,6 +8154,27 @@ describe('KycService', () => {
         });
         expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
         expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
+      });
+
+      it('audit L1: an outlet marked by SOMEONE ELSE does not answer early — an unassigned caller gets 403 (no status probe)', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          ...outlet, isActive: false, kycIntent: 'NOT_INTERESTED', kycIntentBy: 'someone-else',
+        });
+        assignTo('isr2-su');
+        await expect(service.notInterested(isr1, { outletId: 'outlet-1' })).rejects.toThrow(NOT_ASSIGNED);
+        expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
+      });
+
+      it('audit L1: an outlet marked by a teammate stays idempotent for an ASSIGNED caller (no re-write)', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          ...outlet, isActive: false, kycIntent: 'NOT_INTERESTED', kycIntentBy: 'someone-else',
+        });
+        assignTo('isr1-su');
+        await expect(service.notInterested(isr1, { outletId: 'outlet-1' })).resolves.toEqual({
+          outletId: 'outlet-1',
+          alreadyMarked: true,
+        });
+        expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
       });
     });
 
