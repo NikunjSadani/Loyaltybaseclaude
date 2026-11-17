@@ -547,8 +547,8 @@ export class KycService {
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
     // A1: the outlet must STILL be assigned to the sales caller's team when the owner is asked to consent (an outlet
-    // reassigned since the draft was started cannot be routed by the old rep). consent() needs this OTP, so it is
-    // covered transitively.
+    // reassigned since the draft was started cannot be routed by the old rep). consent() re-checks the same rule
+    // before verifying the OTP (R2), so a reassignment between send and verify is also caught.
     if (submission.partnerId) {
       await this.assertOutletAssignedToCallerTeam(user, { partnerId: submission.partnerId });
     }
@@ -1132,13 +1132,17 @@ export class KycService {
   }
 
   /**
-   * A1 (PLATFORM-WIDE, owner-approved) — a SALES caller may act on an outlet (file a KYC, mark "Not interested", send
-   * the consent OTP) ONLY when it is ACTIVELY assigned (SalesUserAssignment, unassignedAt null) to them or someone in
-   * their downline. "Sales caller" = a SALES_* role OR anyone with a live SalesUser row (a SALES_* role WITHOUT one is
-   * refused, never waved through as non-sales). Non-sales callers are unchanged: GIFSY/CLIENT admins and the outlet
-   * owner self-enrolling (partner roles).
-   *   - `{ outletId }` → assignments on that outlet;
-   *   - `{ partnerId }` → assignments keyed on the partner OR on any of its (tenant, non-deleted) outlets.
+   * A1 (PLATFORM-WIDE, owner-approved) — who may act on an outlet (file a KYC, mark "Not interested", send / verify
+   * the consent OTP). Deny by default:
+   *   - ADMINS (isAdmin: GIFSY_ADMIN / GIFSY_STAFF / CLIENT_ADMIN) → allowed, unchanged;
+   *   - PARTNER logins (isPartnerLoginRole: SSS / WHOLESALER / SUB_STOCKIST) → ONLY their OWN outlet/partner
+   *     (ChannelPartner.userId = the caller), tenant-scoped (R1);
+   *   - SALES callers (a live SalesUser row, or any SALES_* role) → ONLY an outlet ACTIVELY assigned
+   *     (SalesUserAssignment, unassignedAt null) to them or someone in their downline; a SALES_* role WITHOUT a live
+   *     SalesUser row is refused, never waved through;
+   *   - every OTHER role (MIS_USER, VENDOR, anything else) → refused (R1).
+   * Target: `{ outletId }` → that outlet; `{ partnerId }` → the partner OR any of its (tenant, non-deleted) outlets.
+   * (Only the sales app calls these endpoints — platform/src/app/sales/kyc/new.)
    */
   private async assertOutletAssignedToCallerTeam(
     user: JwtPayload,
@@ -1146,11 +1150,21 @@ export class KycService {
   ): Promise<void> {
     if (this.isAdmin(user.role)) return;
     const notAssigned = "This outlet isn't assigned to you or your team.";
-    const caller = await this.callerSalesTeam(user);
-    if (!caller) {
-      if (user.role.startsWith('SALES_')) throw new ForbiddenException(notAssigned);
-      return; // partner self-enrolment / other non-sales caller — unchanged
+    if (isPartnerLoginRole(user.role)) {
+      const owned =
+        'outletId' in target
+          ? await this.prisma.outlet.count({
+              where: { id: target.outletId, clientId: user.clientId, deletedAt: null, partner: { userId: user.sub } },
+            })
+          : await this.prisma.channelPartner.count({
+              where: { id: target.partnerId, clientId: user.clientId, userId: user.sub },
+            });
+      if (!owned) throw new ForbiddenException(notAssigned);
+      return;
     }
+    const caller = await this.callerSalesTeam(user);
+    // Not a sales user (MIS_USER, VENDOR, a SALES_* role with no live SalesUser row, anything else) → refused.
+    if (!caller) throw new ForbiddenException(notAssigned);
     const team = Array.from(caller.team);
     const rows = await this.prisma.salesUserAssignment.findMany({
       where:
@@ -1185,6 +1199,8 @@ export class KycService {
    *   5. B1 — the submitter is the outlet's CURRENT active assignee, or a manager above that assignee. Any rep can
    *      file a KYC for any outlet in the tenant, so without this a rep from another territory could ride an old
    *      rejection with no manager ever seeing it. An outlet reassigned to a new rep fast-tracks for the NEW assignee.
+   *      (The A1/R2 gate at the top of consent() already refuses an unassigned SALES submitter; this check stays as
+   *      defence in depth — e.g. a reassignment between the gate and here — and is what keeps it fast-track-specific.)
    * B5: any lookup ERROR in 4–5 → warn + null (the normal route; the KYC is never left in DRAFT by this).
    *
    * KEY = partnerId (the OUTLET's ChannelPartner), not the rep and not the outlet row: every KycSubmission is filed
@@ -4331,6 +4347,11 @@ export class KycService {
       },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
+    // A1/R2: re-check the assignment HERE too, before the OTP is claimed — an outlet reassigned between the OTP
+    // send and the verify must not be routed by the old rep.
+    if (submission.partnerId) {
+      await this.assertOutletAssignedToCallerTeam(user, { partnerId: submission.partnerId });
+    }
     const mobile = this.consentOwnerPhone(submission);
     if (!mobile || mobile !== this.phoneLast10(dto.mobile)) throw new UnauthorizedOtp('OTP not found or expired');
 
@@ -4562,12 +4583,13 @@ export class KycService {
     });
 
     if (!outlet) throw new NotFoundException(`Outlet "${outletId}" not found`);
-    // A1: a sales caller may mark only an outlet actively assigned to them or their downline.
-    await this.assertOutletAssignedToCallerTeam(user, { outletId: outlet.id });
     if (!outlet.isActive && outlet.kycIntent === 'NOT_INTERESTED') {
-      // Already marked — idempotent.
+      // Already marked — idempotent. Answered BEFORE the A1 gate (R3): a repeat click after the outlet was
+      // reassigned gets the same harmless reply, and nothing is written either way.
       return { outletId, alreadyMarked: true };
     }
+    // A1: a sales caller may mark only an outlet actively assigned to them or their downline.
+    await this.assertOutletAssignedToCallerTeam(user, { outletId: outlet.id });
 
     await this.prisma.outlet.update({
       where: { id: outlet.id },

@@ -1742,7 +1742,9 @@ describe('AdminCoreService', () => {
     });
 
     /** Build an addressable-outlet fixture in the shape kycDashboard selects. */
-    type Hist = { toStatus: string; createdAt: Date; fromStatus?: string };
+    type Hist = { toStatus: string; createdAt: Date; fromStatus?: string; metadata?: unknown };
+    /** The marker the GIFSY-reject fast-track writes on its DRAFT→PENDING_GIFSY row. */
+    const FT_META = { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'prev', stage: 'GIFSY' };
     const outlet = (opts: {
       status?: string | null; // null/undefined → NOT_STARTED (no submission)
       submittedAt?: Date | null;
@@ -2007,7 +2009,7 @@ describe('AdminCoreService', () => {
             status: 'APPROVED',
             submittedAt,
             approvedAt,
-            history: [{ fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: submittedAt }],
+            history: [{ fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: submittedAt, metadata: FT_META }],
           }),
           outlet({
             status: 'APPROVED',
@@ -2021,6 +2023,29 @@ describe('AdminCoreService', () => {
       expect(res.sla.fieldChainAvgHours).toBe(10); // only the normal KYC (not (0+10)/2)
       expect(res.sla.gifsyReviewAvgHours).toBe(25); // (20 + 30) / 2 — both reached Gifsy
       expect(res.sla.sampleSize).toBe(2);
+    });
+
+    it('R4: a BARE DRAFT→PENDING_GIFSY edge WITHOUT the fast-track marker is still a field-chain sample', async () => {
+      // Only the marker proves the field stage was skipped; an unmarked edge (legacy / hand-written / any other
+      // writer) is counted like every other KYC — never silently dropped from the tile.
+      const submittedAt = new Date(now - 30 * HOUR);
+      const enteredAt = new Date(now - 24 * HOUR); // 6 h field chain
+      const approvedAt = new Date(now - 10 * HOUR);
+      wire({
+        outlets: [
+          outlet({
+            status: 'APPROVED',
+            submittedAt,
+            approvedAt,
+            history: [{ fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: enteredAt, metadata: { stage: 'GIFSY' } }],
+          }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.sla.fieldChainAvgHours).toBe(6);
+      // The history select now reads metadata (to see the marker).
+      const outletArgs = JSON.stringify(mockPrisma.outlet.findMany.mock.calls);
+      expect(outletArgs).toContain('"metadata":true');
     });
 
     it('a PENDING fast-tracked KYC sits only in the Gifsy bucket (never a field breach)', async () => {

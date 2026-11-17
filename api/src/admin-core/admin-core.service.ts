@@ -66,6 +66,7 @@ import {
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { UpdateEmployeeDto } from './dto/sales-users.dto';
 import { resolveVisibilityProgramLists } from '../visibility/visibility-scope.helper';
+import { isFastTrackRow } from '../kyc/kyc-fast-track.helper';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_MAX_ATTEMPTS,
@@ -2041,8 +2042,9 @@ export class AdminCoreService {
                     approvedAt: true,
                     createdAt: true,
                     statusHistory: {
-                      // fromStatus: a DRAFT→PENDING_GIFSY entry = GIFSY-reject fast-track (no field stage).
-                      select: { fromStatus: true, toStatus: true, createdAt: true },
+                      // fromStatus + metadata: a DRAFT→PENDING_GIFSY entry CARRYING the fast-track marker =
+                      // GIFSY-reject fast-track (no field stage).
+                      select: { fromStatus: true, toStatus: true, createdAt: true, metadata: true },
                     },
                   },
                 },
@@ -2250,11 +2252,10 @@ export class AdminCoreService {
         const firstEnteredAt = firstEnteredPendingGifsyAt(sub.statusHistory);
         const lastEnteredAt = enteredPendingGifsyAt(sub.statusHistory);
         // GIFSY-reject fast-track (Bajaj): the KYC went DRAFT→PENDING_GIFSY at consent — it had NO field stage, so
-        // it contributes no field-chain sample (a ~0h sample would fake field compliance). Only the fast-track
-        // writes that edge; every normal hand-off comes from a PENDING_*_APPROVAL/SUBMITTED status.
-        const skippedFieldStage = sub.statusHistory.some(
-          (h) => h.toStatus === 'PENDING_GIFSY' && h.fromStatus === 'DRAFT',
-        );
+        // it contributes no field-chain sample (a ~0h sample would fake field compliance). R4: proven ONLY by the
+        // fast-track marker on that row (isFastTrackRow), never by the bare edge — an unmarked DRAFT→PENDING_GIFSY
+        // row is still counted.
+        const skippedFieldStage = sub.statusHistory.some((h) => isFastTrackRow(h));
         if (firstEnteredAt && !skippedFieldStage) {
           fieldChainHours.push(
             businessHoursBetween(submittedTs, firstEnteredAt.getTime(), holidays),

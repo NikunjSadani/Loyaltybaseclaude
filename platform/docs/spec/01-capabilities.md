@@ -98,7 +98,8 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
 - **Key entities.** `KycSubmission`, `KycDocument`, `KycStatusHistory`, `ConsentRecord`,
   `DataRequest`, `KycStatus` enum (15 states incl. penny-drop, agreement, SO/ASM/RSM/Gifsy
   approvals), `OutletKycIntent`.
-- **Surface.** `sales/kyc/{new,[id],[id]/edit,[id]/ledger}`, `admin/kyc*`, `admin/approvals`,
+- **Surface.** `sales/kyc/{new,[id],[id]/edit,[id]/ledger}`, `admin/kyc*` (GIFSY review queue = `admin/kyc/approvals`;
+  the old `admin/approvals` page is RETIRED 2026-11-17 — redirect only: GIFSY → `admin/kyc/approvals`, others → `admin/kyc`),
   `api/kyc/[id]/{first-approve,approve,reject,ledger}`, `api/kyc/{consent,not-interested,sla-metrics}`.
 - **Sequence.** Admin adds outlet first → **sales hierarchy (ISR) performs enrollment/KYC**
   on that outlet → reporting-manager approval chain (escalate on inactive) → Gifsy final →

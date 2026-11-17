@@ -89,7 +89,7 @@ Legend for audience: **CA**=CLIENT_ADMIN, **MIS**=MIS_USER (read-only), **P**=pa
 | `/admin/kyc` | CA, MIS | ◐ CA | `clientAdmin/kyc.e2e.ts` (route+no-fab only; no row/scope assert) |
 | `/admin/kyc/[id]` | CA | ◻ | detail render + tenant scope |
 | `/admin/kyc/approvals` | **G only** (Q2) | ✅ G | `gifsy/kyc-cross-tenant.e2e.ts` (cross-tenant queue + brand filter). ◻ CA-403 assertion. |
-| `/admin/approvals` | CA | ◻ | approvals queue (distinct from kyc/approvals) |
+| `/admin/approvals` | G, CA | ◻ (written, not run) | **RETIRED 2026-11-17** — redirect only (the old page's Approve/Reject never saved). G → `/admin/kyc/approvals` (`gifsy/approvals-redirect.e2e.ts`); CA/MIS → `/admin/kyc` (`clientAdmin/approvals.e2e.ts`). |
 | `/admin/payouts` | **G only** (Q1) | ◐ | scoping specs assert CA-out generally; ◻ no dedicated CA-403-on-`/admin/payouts` + ◻ G data render |
 | `/admin/payouts/fund` | **G only** | ◻ | fund page |
 | `/admin/visibility` | CA | ◻ | tenant visibility submissions list |
