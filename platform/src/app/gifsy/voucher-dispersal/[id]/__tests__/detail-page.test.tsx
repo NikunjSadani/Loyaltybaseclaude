@@ -84,7 +84,7 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe('Voucher campaign detail', () => {
-  it('shows tiles, every failure / pending with its reason, masked codes, timestamps', { timeout: 20000 }, async () => {
+  it('shows tiles, every failure / pending with its reason, masked codes, timestamps', async () => {
     render(<DetailPage />);
     expect(await screen.findByTestId('vd-row-r1')).toBeInTheDocument();
     expect(screen.getByTestId('vd-campaign-status')).toHaveTextContent('Completed with errors');
@@ -128,7 +128,7 @@ describe('Voucher campaign detail', () => {
     expect(processCalls()).toBe(0);
   });
 
-  it('retry purchase success shows the server\'s own message', { timeout: 20000 }, async () => {
+  it('retry purchase success shows the server\'s own message', async () => {
     actionResponse = ok({ message: 'Re-queued with the same reference — it will be bought shortly.', row: ROWS.rows[1] });
     render(<DetailPage />);
     fireEvent.click(await screen.findByTestId('vd-retry-r2'));
@@ -136,13 +136,13 @@ describe('Voucher campaign detail', () => {
     expect(await screen.findByTestId('vd-notice')).toHaveTextContent('Row 3: Re-queued with the same reference — it will be bought shortly.');
   });
 
-  it('Hubble not configured on a live campaign → amber note', { timeout: 20000 }, async () => {
+  it('Hubble not configured on a live campaign → amber note', async () => {
     campaignQueue = [ok({ ...campaign('PROCESSING'), hubbleConfigured: false })];
     render(<DetailPage />);
     expect(await screen.findByTestId('vd-hubble-off')).toHaveTextContent('Hubble is not configured on this server');
   });
 
-  it('missing numbers show "—", never 0', { timeout: 20000 }, async () => {
+  it('missing numbers show "—", never 0', async () => {
     campaignQueue = [ok({ campaign: { id: 'c1', name: 'X', status: 'COMPLETED' }, summary: { bought: 3 } })];
     render(<DetailPage />);
     expect(await screen.findByTestId('vd-tile-bought')).toHaveTextContent('3');
@@ -150,7 +150,7 @@ describe('Voucher campaign detail', () => {
     expect(screen.getByTestId('vd-tile-spent')).toHaveTextContent('— / —');
   });
 
-  it('resend without canResend: hidden while PROCESSING with no message yet', { timeout: 20000 }, async () => {
+  it('resend without canResend: hidden while PROCESSING with no message yet', async () => {
     campaignQueue = [ok(campaign('PROCESSING'))];
     rowsHandler = () => Promise.resolve(ok({ rows: [{ id: 'r9', rowNumber: 9, status: 'BOUGHT', voucherCode: null }], total: 1, pageSize: 50 }));
     render(<DetailPage />);
@@ -158,7 +158,7 @@ describe('Voucher campaign detail', () => {
     expect(screen.queryByTestId('vd-resend-r9')).not.toBeInTheDocument();
   });
 
-  it('resend: dialog says no new voucher is bought; posts once; honest, dismissible notice', { timeout: 20000 }, async () => {
+  it('resend: dialog says no new voucher is bought; posts once; honest, dismissible notice', async () => {
     render(<DetailPage />);
     fireEvent.click(await screen.findByTestId('vd-resend-r1'));
     const dialog = await screen.findByRole('dialog');
@@ -174,7 +174,7 @@ describe('Voucher campaign detail', () => {
     expect(screen.queryByTestId('vd-notice')).not.toBeInTheDocument();
   });
 
-  it('retry purchase: a 4xx refusal is shown verbatim and the dialog stays open', { timeout: 20000 }, async () => {
+  it('retry purchase: a 4xx refusal is shown verbatim and the dialog stays open', async () => {
     actionResponse = fail(409, 'Retry refused: Hubble shows this order as fulfilled (HB-002). Run reconcile instead.');
     render(<DetailPage />);
     fireEvent.click(await screen.findByTestId('vd-retry-r2'));
@@ -186,7 +186,7 @@ describe('Voucher campaign detail', () => {
     expect(callsTo((u) => u.endsWith('/rows/r2/retry-buy'))).toHaveLength(1);
   });
 
-  it('retry purchase: 5xx → dialog closes, outcome UNKNOWN notice, button locked until the refresh lands', { timeout: 20000 }, async () => {
+  it('retry purchase: 5xx → dialog closes, outcome UNKNOWN notice, button locked until the refresh lands', async () => {
     actionResponse = fail(502, 'Bad gateway');
     render(<DetailPage />);
     fireEvent.click(await screen.findByTestId('vd-retry-r2'));
@@ -205,7 +205,7 @@ describe('Voucher campaign detail', () => {
     expect(callsTo((u) => u.endsWith('/rows/r2/retry-buy'))).toHaveLength(1);
   });
 
-  it('retry purchase: network error is also an unknown outcome', { timeout: 20000 }, async () => {
+  it('retry purchase: network error is also an unknown outcome', async () => {
     actionResponse = () => Promise.reject(new TypeError('Failed to fetch'));
     render(<DetailPage />);
     fireEvent.click(await screen.findByTestId('vd-retry-r2'));
@@ -214,7 +214,7 @@ describe('Voucher campaign detail', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('Escape closes a dialog', { timeout: 20000 }, async () => {
+  it('Escape closes a dialog', async () => {
     render(<DetailPage />);
     fireEvent.click(await screen.findByTestId('vd-resend-r1'));
     const dialog = await screen.findByRole('dialog');
@@ -223,7 +223,7 @@ describe('Voucher campaign detail', () => {
     expect(callsTo((u) => u.endsWith('/resend'))).toHaveLength(0);
   });
 
-  it('cancel is offered while processing, warns in-progress purchases may complete, and posts after confirmation', { timeout: 20000 }, async () => {
+  it('cancel is offered while processing, warns in-progress purchases may complete, and posts after confirmation', async () => {
     campaignQueue = [ok(campaign('PROCESSING')), ok(campaign('CANCELLED'))];
     render(<DetailPage />);
     fireEvent.click(await screen.findByTestId('vd-cancel'));
@@ -235,7 +235,7 @@ describe('Voucher campaign detail', () => {
     expect(screen.getByTestId('vd-notice')).toHaveTextContent('Campaign cancelled.');
   });
 
-  it('cancel reply counts are reported honestly', { timeout: 20000 }, async () => {
+  it('cancel reply counts are reported honestly', async () => {
     campaignQueue = [ok(campaign('PROCESSING')), ok(campaign('CANCELLED'))];
     actionResponse = ok({ campaign: campaign('CANCELLED').campaign, cancelledRows: 5, stillWithHubble: 1, alreadyBought: 2 });
     render(<DetailPage />);
@@ -245,7 +245,7 @@ describe('Voucher campaign detail', () => {
       .toHaveTextContent('Campaign cancelled: 5 rows will not be bought; 1 purchase already with Hubble may still complete; 2 vouchers already bought stay bought.');
   });
 
-  it('unknown campaign / row status: raw value shown, never "Invalid" or setup wording, keeps refreshing', { timeout: 20000 }, async () => {
+  it('unknown campaign / row status: raw value shown, never "Invalid" or setup wording, keeps refreshing', async () => {
     campaignQueue = [ok(campaign('PAUSED'))];
     rowsHandler = () => Promise.resolve(ok({ rows: [{ id: 'rx', rowNumber: 7, status: 'REFUNDED' }], total: 1, pageSize: 50 }));
     render(<DetailPage />);
@@ -257,7 +257,7 @@ describe('Voucher campaign detail', () => {
     expect(screen.queryByText('Continue setup')).not.toBeInTheDocument();
   });
 
-  it('load error shows the server text and retries', { timeout: 20000 }, async () => {
+  it('load error shows the server text and retries', async () => {
     campaignQueue = [fail(500, 'Database unavailable'), ok(campaign('COMPLETED'))];
     render(<DetailPage />);
     expect(await screen.findByTestId('vd-error')).toHaveTextContent('Database unavailable');
@@ -265,7 +265,7 @@ describe('Voucher campaign detail', () => {
     expect(await screen.findByTestId('vd-row-r1')).toBeInTheDocument();
   });
 
-  it('a failed manual refresh is shown (data stays)', { timeout: 20000 }, async () => {
+  it('a failed manual refresh is shown (data stays)', async () => {
     campaignQueue = [ok(campaign('COMPLETED')), fail(503, 'Service unavailable')];
     render(<DetailPage />);
     await screen.findByTestId('vd-row-r1');
@@ -274,7 +274,7 @@ describe('Voucher campaign detail', () => {
     expect(screen.getByTestId('vd-row-r1')).toBeInTheDocument();
   });
 
-  it('only the latest response is applied when a filter change overlaps a slower earlier request', { timeout: 20000 }, async () => {
+  it('only the latest response is applied when a filter change overlaps a slower earlier request', async () => {
     render(<DetailPage />);
     await screen.findByTestId('vd-row-r1');
     // A slow "Refresh" (all rows) is overtaken by a fast filter change (BUY_FAILED only).
@@ -302,7 +302,7 @@ describe('Voucher campaign detail — polling', () => {
     }
   };
 
-  it('polls while PROCESSING with backoff, keeps going 30 min after COMPLETED, then stops', { timeout: 20000 }, async () => {
+  it('polls while PROCESSING with backoff, keeps going 30 min after COMPLETED, then stops', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     vi.setSystemTime(new Date('2026-11-16T10:00:00Z'));
     // No server completedAt → the window starts when this page sees it finish.
@@ -332,7 +332,7 @@ describe('Voucher campaign detail — polling', () => {
     expect(campaignCalls()).toBe(atStop);
   });
 
-  it('server completedAt drives the window: completed 40 min ago → no polling; 10 min ago → polls', { timeout: 20000 }, async () => {
+  it('server completedAt drives the window: completed 40 min ago → no polling; 10 min ago → polls', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     vi.setSystemTime(new Date('2026-11-16T10:40:00Z'));
     campaignQueue = [ok(campaign('COMPLETED', { completedAt: '2026-11-16T10:00:00Z' }))];
@@ -352,7 +352,7 @@ describe('Voucher campaign detail — polling', () => {
     expect(campaignCalls()).toBe(2);
   });
 
-  it('a failed poll is shown and polling continues', { timeout: 20000 }, async () => {
+  it('a failed poll is shown and polling continues', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     campaignQueue = [ok(campaign('PROCESSING')), fail(502, 'Bad gateway'), ok(campaign('PROCESSING'))];
     render(<DetailPage />);
@@ -365,7 +365,7 @@ describe('Voucher campaign detail — polling', () => {
     expect(screen.queryByTestId('vd-poll-error')).not.toBeInTheDocument();
   });
 
-  it('nudges POST /process alongside polling while PROCESSING — never two in flight', { timeout: 20000 }, async () => {
+  it('nudges POST /process alongside polling while PROCESSING — never two in flight', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     campaignQueue = [ok(campaign('PROCESSING'))];
     let releaseProcess: () => void = () => {};
@@ -386,7 +386,7 @@ describe('Voucher campaign detail — polling', () => {
     await act(async () => { releaseProcess(); });
   });
 
-  it('/process: 4xx is ignored quietly; repeated 5xx shows a non-blocking note; success clears it', { timeout: 20000 }, async () => {
+  it('/process: 4xx is ignored quietly; repeated 5xx shows a non-blocking note; success clears it', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     campaignQueue = [ok(campaign('PROCESSING'))];
     const replies = [fail(409, 'Campaign is not processing'), fail(409, 'Campaign is not processing'), fail(502, 'Bad gateway'), fail(503, 'Unavailable'), ok({ pass: {}, ...campaign('PROCESSING') })];
@@ -406,7 +406,7 @@ describe('Voucher campaign detail — polling', () => {
     expect(screen.queryByTestId('vd-process-note')).not.toBeInTheDocument();
   });
 
-  it('nudges during the 30-min settling window, not after it', { timeout: 20000 }, async () => {
+  it('nudges during the 30-min settling window, not after it', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     vi.setSystemTime(new Date('2026-11-16T10:10:00Z'));
     campaignQueue = [ok(campaign('COMPLETED', { completedAt: '2026-11-16T10:00:00Z' }))];
@@ -421,7 +421,7 @@ describe('Voucher campaign detail — polling', () => {
     expect(processCalls()).toBe(0);
   });
 
-  it('pauses while the tab is hidden and resumes when visible', { timeout: 20000 }, async () => {
+  it('pauses while the tab is hidden and resumes when visible', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let state: DocumentVisibilityState = 'visible';
     const spy = vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => state);

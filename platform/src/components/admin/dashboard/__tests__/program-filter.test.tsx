@@ -202,9 +202,18 @@ describe('ProgramFilter', () => {
 
   it('D1: the session lookup is hard-capped (2 s default) → null on timeout', async () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
-    const started = Date.now();
-    await expect(resolveDashboardProgramKey(30)).resolves.toBeNull();
-    expect(Date.now() - started).toBeLessThan(1000);
+    // Fake clock, not a wall-clock budget (flaky under load): the cap must fire AT its timeout, not before.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let settled = false;
+      const p = resolveDashboardProgramKey(30).then((v) => { settled = true; return v; });
+      await vi.advanceTimersByTimeAsync(29);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(p).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('D1: a stored program is applied once the session resolves', async () => {

@@ -54,7 +54,7 @@ const CAMPAIGNS = [
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); roleRef.current = 'GIFSY_ADMIN'; });
 
 describe('Voucher Dispersal list', () => {
-  it('renders campaigns with status chips, totals and billed-to / programme', { timeout: 20000 }, async () => {
+  it('renders campaigns with status chips, totals and billed-to / programme', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(ok(CAMPAIGNS)));
     vi.stubGlobal('fetch', fetchMock);
     render(<ListPage />);
@@ -77,7 +77,7 @@ describe('Voucher Dispersal list', () => {
     expect(screen.getByRole('link', { name: /New campaign/ })).toHaveAttribute('href', '/gifsy/voucher-dispersal/new');
   });
 
-  it('unknown status shows the raw value (no setup wording); missing numbers show "—"; billed-to id fallback', { timeout: 20000 }, async () => {
+  it('unknown status shows the raw value (no setup wording); missing numbers show "—"; billed-to id fallback', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([
       { id: 'c3', name: 'Odd one', programLabel: 'X', billedToClient: { id: 'bajaj', name: null }, status: 'PAUSED', summary: { bought: 4 } },
     ]))));
@@ -91,7 +91,7 @@ describe('Voucher Dispersal list', () => {
     expect(c3).toHaveTextContent('— / —');
   });
 
-  it('a failed refresh keeps the list and says so', { timeout: 20000 }, async () => {
+  it('a failed refresh keeps the list and says so', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(ok(CAMPAIGNS))
       .mockResolvedValueOnce(fail(502, 'Bad gateway'));
@@ -102,7 +102,7 @@ describe('Voucher Dispersal list', () => {
     expect(screen.getByText('Diwali thank-you')).toBeInTheDocument();
   });
 
-  it('pages through ?page= (50 per page): Next only when the page is full', { timeout: 20000 }, async () => {
+  it('pages through ?page= (50 per page): Next only when the page is full', async () => {
     const full = Array.from({ length: 50 }, (_, i) => ({ ...CAMPAIGNS[0], id: `p${i}`, name: `Campaign ${i}` }));
     const fetchMock = vi.fn((url: string) => Promise.resolve(ok(url.endsWith('page=1') ? full : [CAMPAIGNS[0]])));
     vi.stubGlobal('fetch', fetchMock);
@@ -116,13 +116,13 @@ describe('Voucher Dispersal list', () => {
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
   });
 
-  it('empty state', { timeout: 20000 }, async () => {
+  it('empty state', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([]))));
     render(<ListPage />);
     expect(await screen.findByTestId('vd-empty')).toHaveTextContent('No campaigns yet');
   });
 
-  it('error state shows the server text and retries', { timeout: 20000 }, async () => {
+  it('error state shows the server text and retries', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(fail(403, 'Access denied. Required: GIFSY_ADMIN.'))
       .mockResolvedValueOnce(ok(CAMPAIGNS));
@@ -133,7 +133,7 @@ describe('Voucher Dispersal list', () => {
     expect(await screen.findByText('Diwali thank-you')).toBeInTheDocument();
   });
 
-  it('Download template fetches the template file and saves it', { timeout: 20000 }, async () => {
+  it('Download template fetches the template file and saves it', async () => {
     const fetchMock = vi.fn((url: string) =>
       url.endsWith('/template.xlsx')
         ? Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, blob: () => Promise.resolve(new Blob(['x'])) })
@@ -153,12 +153,12 @@ describe('Voucher Dispersal gating', () => {
     expect(screen.getByTestId('require-auth')).toHaveAttribute('data-roles', 'GIFSY_ADMIN');
   });
 
-  it('nav shows Voucher Dispersal in the platform console for GIFSY_ADMIN', { timeout: 20000 }, async () => {
+  it('nav shows Voucher Dispersal in the platform console for GIFSY_ADMIN', async () => {
     render(<GifsyLayout><div /></GifsyLayout>);
     expect(await screen.findByRole('link', { name: /Voucher Dispersal/ })).toHaveAttribute('href', '/gifsy/voucher-dispersal');
   });
 
-  it('nav hides it from GIFSY_STAFF (launchpad only)', { timeout: 20000 }, async () => {
+  it('nav hides it from GIFSY_STAFF (launchpad only)', async () => {
     roleRef.current = 'GIFSY_STAFF';
     render(<GifsyLayout><div data-testid="child" /></GifsyLayout>);
     await screen.findByText('Choose a brand');

@@ -112,7 +112,7 @@ async function openBuyDialog() {
 }
 
 describe('New voucher campaign', () => {
-  it('validates required fields before creating (no request sent)', { timeout: 20000 }, async () => {
+  it('validates required fields before creating (no request sent)', async () => {
     render(<NewCampaignPage />);
     fireEvent.click(await screen.findByTestId('vd-create'));
     expect(await screen.findByText('Enter a campaign name.')).toBeInTheDocument();
@@ -123,7 +123,7 @@ describe('New voucher campaign', () => {
     expect(screen.getByTestId('vd-nothing-spent')).toHaveTextContent('Nothing has been bought or sent yet');
   });
 
-  it('create → URL becomes ?campaign=<id> → upload → preview (reasons, filter) → Buy & send dialog → report', { timeout: 20000 }, async () => {
+  it('create → URL becomes ?campaign=<id> → upload → preview (reasons, filter) → Buy & send dialog → report', async () => {
     await fillAndCreate();
     expect(JSON.parse(String(callsTo('/campaigns')[0][1]!.body)))
       .toEqual({ name: 'Diwali', programLabel: 'Bajaj Loyalty', billedToClientId: 'bajaj', budgetRupees: 5000 });
@@ -174,7 +174,7 @@ describe('New voucher campaign', () => {
     expect(callsTo('/campaigns/c1/process')[0][1]).toMatchObject({ method: 'POST' });
   });
 
-  it('Cancel in the confirm dialog buys nothing', { timeout: 20000 }, async () => {
+  it('Cancel in the confirm dialog buys nothing', async () => {
     await fillAndCreate();
     await uploadFile();
     const dialog = await openBuyDialog();
@@ -184,7 +184,7 @@ describe('New voucher campaign', () => {
     expect(push).not.toHaveBeenCalled();
   });
 
-  it('over budget → red total + reason and Buy is blocked (same condition)', { timeout: 20000 }, async () => {
+  it('over budget → red total + reason and Buy is blocked (same condition)', async () => {
     uploadResponse = ok({ campaign: CAMPAIGN, rows: ROWS, summary: { ...SUMMARY, totalRupees: 6000, overBudget: false }, previewId: 'pv-1' });
     await fillAndCreate();
     await uploadFile();
@@ -193,7 +193,7 @@ describe('New voucher campaign', () => {
     expect(screen.getByTestId('vd-sum-total').className).toMatch(/text-red/);
   });
 
-  it('a preview without a previewId cannot be bought', { timeout: 20000 }, async () => {
+  it('a preview without a previewId cannot be bought', async () => {
     uploadResponse = ok({ campaign: CAMPAIGN, rows: ROWS, summary: SUMMARY });
     await fillAndCreate();
     await uploadFile();
@@ -201,7 +201,7 @@ describe('New voucher campaign', () => {
     expect(screen.getByTestId('vd-buy-send')).toBeDisabled();
   });
 
-  it('confirm refusal (4xx, preview changed) is shown verbatim; re-upload offered; nothing-bought stays true', { timeout: 20000 }, async () => {
+  it('confirm refusal (4xx, preview changed) is shown verbatim; re-upload offered; nothing-bought stays true', async () => {
     const refusal = 'The preview changed since you checked it (3 valid rows, ₹2,000). Upload the file again.';
     confirmResponse = fail(409, refusal);
     await fillAndCreate();
@@ -217,7 +217,7 @@ describe('New voucher campaign', () => {
     expect(await screen.findByRole('heading', { name: '2. Upload the list' })).toBeInTheDocument();
   });
 
-  it('5xx on confirm, re-fetch shows it STARTED → goes to the campaign report', { timeout: 20000 }, async () => {
+  it('5xx on confirm, re-fetch shows it STARTED → goes to the campaign report', async () => {
     confirmResponse = fail(504, 'Gateway timeout');
     await fillAndCreate();
     await uploadFile();
@@ -227,7 +227,7 @@ describe('New voucher campaign', () => {
     await waitFor(() => expect(push).toHaveBeenCalledWith('/gifsy/voucher-dispersal/c1'));
   });
 
-  it('network error on confirm + re-fetch fails → "couldn\'t tell", nothing-bought hidden, Buy disabled; Check again proves setup → re-enabled', { timeout: 20000 }, async () => {
+  it('network error on confirm + re-fetch fails → "couldn\'t tell", nothing-bought hidden, Buy disabled; Check again proves setup → re-enabled', async () => {
     confirmResponse = () => Promise.reject(new TypeError('Failed to fetch'));
     await fillAndCreate();
     await uploadFile();
@@ -249,7 +249,7 @@ describe('New voucher campaign', () => {
     expect(callsTo('/campaigns/c1/confirm')).toHaveLength(1);
   });
 
-  it('upload refusal is shown with the server text and no preview appears', { timeout: 20000 }, async () => {
+  it('upload refusal is shown with the server text and no preview appears', async () => {
     uploadResponse = fail(400, 'Missing column: brand');
     await fillAndCreate();
     fireEvent.change(screen.getByLabelText('Choose file'), { target: { files: [new File(['x'], 'list.xlsx')] } });
@@ -258,7 +258,7 @@ describe('New voucher campaign', () => {
     expect(screen.queryByRole('heading', { name: '3. Check the preview, then buy' })).not.toBeInTheDocument();
   });
 
-  it('client-side file checks: empty file and wrong type are refused before upload', { timeout: 20000 }, async () => {
+  it('client-side file checks: empty file and wrong type are refused before upload', async () => {
     await fillAndCreate();
     fireEvent.change(screen.getByLabelText('Choose file'), { target: { files: [new File([], 'empty.xlsx')] } });
     expect(screen.getByTestId('vd-file-error')).toHaveTextContent('That file is empty.');
@@ -268,7 +268,7 @@ describe('New voucher campaign', () => {
     expect(callsTo('/upload')).toHaveLength(0);
   });
 
-  it('create failure shows the server text; no client chosen → billedToClientId omitted', { timeout: 20000 }, async () => {
+  it('create failure shows the server text; no client chosen → billedToClientId omitted', async () => {
     createResponse = fail(400, 'budgetRupees must be a positive number');
     render(<NewCampaignPage />);
     fireEvent.change(await screen.findByLabelText('Campaign name'), { target: { value: 'X' } });
@@ -280,14 +280,14 @@ describe('New voucher campaign', () => {
     expect(replace).not.toHaveBeenCalled();
   });
 
-  it('resumes a PREVIEWED campaign at the upload step', { timeout: 20000 }, async () => {
+  it('resumes a PREVIEWED campaign at the upload step', async () => {
     searchRef.current = new URLSearchParams('campaign=c1');
     render(<NewCampaignPage />);
     expect(await screen.findByRole('heading', { name: '2. Upload the list' })).toBeInTheDocument();
     expect(screen.getByText(/previewed earlier but not confirmed/)).toBeInTheDocument();
   });
 
-  it('a confirmed campaign opened via ?campaign= goes to its report', { timeout: 20000 }, async () => {
+  it('a confirmed campaign opened via ?campaign= goes to its report', async () => {
     searchRef.current = new URLSearchParams('campaign=c1');
     campaignGet = [ok({ campaign: { ...CAMPAIGN, status: 'PROCESSING' }, summary: {} })];
     render(<NewCampaignPage />);
