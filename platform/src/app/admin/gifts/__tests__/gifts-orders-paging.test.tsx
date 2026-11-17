@@ -303,7 +303,8 @@ describe('GIFP — admin fulfilment queue paging', () => {
     await waitFor(() => expect(lastLimit()).toBe('100'));
     await waitFor(() => expect(count()).toHaveTextContent('showing 100 of 2,000'));
     expect(await screen.findByText(/Reloaded the first 100 orders/)).toBeInTheDocument();
-  }, 30_000); // renders a 700-row table (needed to cross the 500 cap) — slow in jsdom, not async-flaky
+  }, 90_000); // renders a 700-row table (needed to cross the 500 cap) — slow in jsdom, not async-flaky.
+  // 30 s was not enough under full-suite load: took 42 s and failed the pre-push gate twice on 2026-11-17.
 
   it('GIFP10: the count never shows a total below the visible rows; a grown total with no cursor offers "New orders — Refresh"', async () => {
     installFetch(() =>
