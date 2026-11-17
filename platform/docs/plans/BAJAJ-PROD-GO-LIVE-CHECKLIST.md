@@ -161,6 +161,17 @@ Each Hubble brand is either **FIXED** (Hubble issues only certain face values) o
    `C:\Users\nikun\Downloads\Bajaj Loyalty training deck - with install and location.pptx`. The phone screens on those
    slides are illustrations, not real screenshots.
 
+### J. After the combined release (2026-11-17 batch) reaches prod
+
+1. **Owner** (Claude does not log into prod): `app.gifsy.in` → Clients → Bajaj Consumer Care → Behaviour flags → switch
+   on **"Send GIFSY-rejected KYC resubmissions straight to GIFSY"** → confirm. Claude then verifies the flag read-only.
+2. Overview → Monthly billing progress shows Bajaj November against the **Total** target (prod primary KPI = TOTAL,
+   6,417 outlets targeted on 2026-11-17).
+3. Sales history trim + new retention (`SALES-IMPORT-PIPELINE-PLAN.md` §17b): backup → `rebuild-days` only if no daily
+   import ran since deploy → trim dry-run → owner OK → apply → `SALES_RETENTION_V2=on`.
+4. Daily Ops Digest recipients on prod (Gifsy settings, `@gifsy.in` only) — set before the first scheduled run.
+5. Prod DB disk alert at 50%.
+
 ---
 
 ## GAP summary (needs a screen built or an owner-approved backend/infra step)

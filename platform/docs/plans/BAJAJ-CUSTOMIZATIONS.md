@@ -312,3 +312,25 @@ and the Performance trend (`GET /partner/targets/trend`).
 - **Bajaj has NO `tdsPolicy` row** → resolves to the default `{SEC_194C, GROSS_UP}`. ⚠️ **Owner to confirm Bajaj's TDS
   method (GROSS_UP vs DEDUCT) on TDS Treatment before the first live Bajaj credit payout** — with DEDUCT the message and
   bank line show the net amount.
+
+## 12. KYC fast-track after a GIFSY rejection — flag `gifsyRejectFastTrack` (2026-11-17; staging ON, prod pending)
+- Gifsy console → Clients → Bajaj → **Behaviour flags** → "Send GIFSY-rejected KYC resubmissions straight to GIFSY"
+  (confirm dialog). Default OFF for every tenant; Deoleo OFF.
+- At the owner's consent OTP (`KycService.consent()`), a resubmission goes straight to **PENDING_GIFSY** when the
+  partner's previous routed KYC was rejected by GIFSY **after** the managers approved it (first entry into the rejected
+  chain came from PENDING_GIFSY). Any GIFSY rejection counts (full Reject or Re-upload); whatever the rep changed.
+- Always through managers: SO Declaration resubmissions (ASM re-signs), manager rejections, GIFSY rejection before the
+  managers approved, re-KYC of an approved outlet, non-sales submitters.
+- Only the outlet's currently assigned rep (or a manager above them) gets the shortcut.
+- Visible everywhere (no silent skip): history note + `fastTrack` metadata, audit row, admin KYC banner, approvals-queue
+  badge "Resubmission · no manager re-approval", sales timeline "Manager Review — Not needed", "Routing" column in the
+  GIFSY KYC exports (only for flag-on scopes). Managers get no approval request; the owner gets only KYC_SUBMITTED.
+- Code: `api/src/kyc/kyc-fast-track.helper.ts`, `resolveGifsyRejectFastTrack` in `kyc.service.ts`; FE copy
+  `platform/src/lib/kyc-fast-track.ts`. Decision log F13.
+
+## 13. Day-level sales + MTD comparisons (Sales Import tenants; 2026-11-17, in the combined release)
+- Each applied DMS file also stores per-outlet per-day cumulative month-to-date KPI values (`OutletSalesDay`,
+  `SalesDaySet`) for programme outlets. Billing card shows "vs last month (to day D)" from Dec 2026 and "vs 3-month
+  average" from Feb 2027, plus "outlets billing slower than usual" (below 80% of their own last-month pace).
+- Sales history keeps programme outlets only, 4 months; import files 7 days — the deletion rules ship OFF
+  (`SALES_RETENTION_V2`) and are switched on via `SALES-IMPORT-PIPELINE-PLAN.md` §17b. Decision log F15.
