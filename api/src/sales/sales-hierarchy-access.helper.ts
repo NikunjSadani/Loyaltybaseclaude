@@ -16,6 +16,12 @@
 export interface SalesUserEdge {
   id: string;
   reportingToId: string | null;
+  /**
+   * Soft-delete marker (optional). Only `descendantSalesUserIds` reads it: a node with a non-null
+   * `deletedAt` is walked THROUGH (its reports stay reachable) but is never itself a team member.
+   * Edge lists loaded with a `deletedAt: null` filter never carry it → unchanged behaviour.
+   */
+  deletedAt?: Date | null;
 }
 
 /**
@@ -63,15 +69,24 @@ export function isSelfOrDescendant(
  * outlets and their team's KYC submissions) in ONE query instead of an
  * isSelfOrDescendant() call per row. Cycle-safe.
  *
+ * G3 (PLATFORM-WIDE, owner-approved 2026-11-17) — a SOFT-DELETED manager (edge `deletedAt` set) is
+ * walked THROUGH: their reports stay in the caller's downline (an ASM above a deleted SO still reaches
+ * that SO's ISRs), mirroring how KycService.resolveInitialRouting escalates past a vacant manager. The
+ * deleted node itself is NOT returned (a resigned user is not a team member; resign also unassigns
+ * their outlets). Callers that want this pass an edge list loaded WITHOUT a `deletedAt: null` filter
+ * and including `deletedAt`; an inactive-but-not-deleted node is a normal member (unchanged).
+ *
  * @param callerSalesUserId  the caller's own SalesUser.id (always included)
- * @param edges              tenant-scoped {id, reportingToId} edge list
+ * @param edges              tenant-scoped {id, reportingToId, deletedAt?} edge list
  */
 export function descendantSalesUserIds(
   callerSalesUserId: string,
   edges: SalesUserEdge[],
 ): Set<string> {
   const childrenOf = new Map<string, string[]>();
+  const deleted = new Set<string>();
   for (const e of edges) {
+    if (e.deletedAt != null) deleted.add(e.id);
     if (!e.reportingToId) continue;
     const arr = childrenOf.get(e.reportingToId) ?? [];
     arr.push(e.id);
@@ -79,14 +94,15 @@ export function descendantSalesUserIds(
   }
 
   const subtree = new Set<string>([callerSalesUserId]);
+  const visited = new Set<string>([callerSalesUserId]); // cycle guard (covers deleted nodes too)
   const queue: string[] = [callerSalesUserId];
   while (queue.length > 0) {
     const current = queue.shift() as string;
     for (const child of childrenOf.get(current) ?? []) {
-      if (!subtree.has(child)) {
-        subtree.add(child);
-        queue.push(child);
-      }
+      if (visited.has(child)) continue;
+      visited.add(child);
+      if (!deleted.has(child)) subtree.add(child);
+      queue.push(child);
     }
   }
   return subtree;

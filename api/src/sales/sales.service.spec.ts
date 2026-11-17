@@ -469,6 +469,59 @@ describe('SalesService', () => {
       expect([...where.salesUserId.in].sort()).toEqual(['isr1', 'mgr', 'so1', 'so2']);
     });
 
+    it('G3: an ASM above a soft-DELETED SO still sees that SO\'s ISRs\' outlets (the picker walks THROUGH deleted managers)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'asm', subordinates: [] });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'asm', reportingToId: null, userId: 'u-asm', deletedAt: null },
+        { id: 'so', reportingToId: 'asm', userId: 'u-so', deletedAt: new Date('2026-01-01') },
+        { id: 'isr1', reportingToId: 'so', userId: 'u-isr1', deletedAt: null },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      await service.getMyOutlets(caller);
+
+      // The edge read must INCLUDE soft-deleted nodes (no deletedAt filter) so the walk can pass through them.
+      const edgeWhere = mockPrisma.salesUser.findMany.mock.calls[0][0].where;
+      expect(edgeWhere).toEqual({ user: { clientId: 'deoleo' } });
+      // The outlet query reaches the ISR under the deleted SO; the deleted SO itself is not in the team.
+      const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+      expect([...where.salesUserId.in].sort()).toEqual(['asm', 'isr1']);
+    });
+
+    it('G1: notInterestedBlock = APPROVED (ever approved, even if the latest re-KYC was rejected) / IN_REVIEW (latest in flight) / null', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+      const row = (id: string, partner: unknown) => ({
+        outlet: { id, outletCode: id, name: id, city: 'C', district: 'D', state: 'S', outletType: { code: 'RETAIL' }, partner },
+      });
+      const p = (status: string, approvedCount: number) => ({
+        id: `cp-${status}`, wallets: [], _count: { kycSubmissions: approvedCount },
+        kycSubmissions: [{ id: 'k', status, createdAt: new Date() }],
+      });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        row('approved', p('APPROVED', 1)),
+        row('rejected-rekyc-of-approved', p('REJECTED', 1)),
+        row('pending-gifsy', p('PENDING_GIFSY', 0)),
+        row('submitted', p('SUBMITTED', 0)),
+        row('draft', p('DRAFT', 0)),
+        row('rejected', p('REJECTED', 0)),
+        row('no-partner', null),
+      ]);
+      const res = await service.getMyOutlets(caller);
+      const block = Object.fromEntries(res.outlets.map((o: { id: string; notInterestedBlock: unknown }) => [o.id, o.notInterestedBlock]));
+      expect(block).toEqual({
+        approved: 'APPROVED',
+        'rejected-rekyc-of-approved': 'APPROVED',
+        'pending-gifsy': 'IN_REVIEW',
+        submitted: 'IN_REVIEW',
+        draft: null,
+        rejected: null,
+        'no-partner': null,
+      });
+      // The approved count is read in the SAME outlet query (no extra round-trip).
+      const partnerSelect = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].include.outlet.select.partner.select;
+      expect(partnerSelect._count).toEqual({ select: { kycSubmissions: { where: { status: 'APPROVED' } } } });
+    });
+
     it('scopes to the caller + downline and INCLUDES partner-less (un-KYC\'d) outlets as NOT_STARTED so the rep can enrol them', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
       // No subordinates → subtree is just the caller.

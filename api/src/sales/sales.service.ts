@@ -27,6 +27,7 @@ import { VisibilityProgramScopeLike, visibilityProgramMatches } from '../visibil
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { pickDeliveryDefaults } from '../partner/delivery-defaults.helper';
 import { mapBounded } from '../common/map-bounded';
+import { NOT_INTERESTED_IN_FLIGHT_STATUSES } from '../kyc/kyc-not-interested.constants';
 
 /**
  * Relation filter that FULLY hides admin-PARKED outlets from sales reps: an outlet whose
@@ -1333,9 +1334,12 @@ export class SalesService {
 
     if (!salesUser) return { outlets: [], members: [] };
 
+    // G3: soft-deleted nodes are INCLUDED so the walk passes THROUGH a deleted middle manager (an ASM above a
+    // deleted SO still gets that SO's ISRs' outlets) — the SAME rule as the KYC file/consent gate
+    // (KycService.callerSalesTeam), so the picker and the gate agree. Deleted nodes are never returned.
     const edges = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true, userId: true },
+      where: { user: { clientId: user.clientId } },
+      select: { id: true, reportingToId: true, userId: true, deletedAt: true },
     });
     const subtreeIds = [...descendantSalesUserIds(salesUser.id, edges)];
 
@@ -2358,6 +2362,10 @@ export class SalesService {
                   take: 1,
                   select: { id: true, status: true, createdAt: true, rejectionReason: true },
                 },
+                // G1: whether the partner EVER had an APPROVED KYC (a later rejected re-KYC leaves the latest
+                // status REJECTED) — drives `notInterestedBlock` so the FE hides "Not interested" exactly where
+                // the server (KycService.notInterested) refuses it.
+                _count: { select: { kycSubmissions: { where: { status: 'APPROVED' } } } },
               },
             },
           },
@@ -2557,6 +2565,16 @@ export class SalesService {
               : outlet.kycIntent === 'NOT_INTERESTED'
                 ? 'NOT_INTERESTED'
                 : (latestKyc?.status ?? 'NOT_STARTED'),
+            // G1: why "Not interested" is NOT available for this outlet (null = it is). Mirrors the server
+            // refusal in KycService.notInterested: an APPROVED KYC on the partner (ever) wins over a KYC in
+            // flight (the latest submission — the in-flight dup guard means an in-flight one is the newest).
+            // PARKED outlets never reach this list (NOT_PARKED_OUTLET above).
+            notInterestedBlock:
+              (partner?._count?.kycSubmissions ?? 0) > 0
+                ? ('APPROVED' as const)
+                : latestKyc && NOT_INTERESTED_IN_FLIGHT_STATUSES.has(latestKyc.status)
+                  ? ('IN_REVIEW' as const)
+                  : null,
             kycSubmittedAt: latestKyc?.createdAt ? istDateKey(latestKyc.createdAt) : undefined,
             kycRejectionReason: latestKyc?.rejectionReason ?? null,
             reKycFlags: outlet.reKycFlags ?? null,

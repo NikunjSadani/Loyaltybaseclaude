@@ -51,6 +51,57 @@ describe('descendantSalesUserIds', () => {
     ];
     expect([...descendantSalesUserIds('a', cyclic)].sort()).toEqual(['a', 'b']);
   });
+
+  // G3 — a soft-deleted middle manager must not cut the team off from the managers above.
+  describe('G3 — walks THROUGH soft-deleted managers', () => {
+    // asm ─ so (DELETED) ─ isr1, isr2 ; asm ─ so2 ─ isr3
+    const WITH_DELETED = [
+      { id: 'asm', reportingToId: null, deletedAt: null },
+      { id: 'so', reportingToId: 'asm', deletedAt: new Date('2026-01-01') },
+      { id: 'isr1', reportingToId: 'so', deletedAt: null },
+      { id: 'isr2', reportingToId: 'so', deletedAt: null },
+      { id: 'so2', reportingToId: 'asm', deletedAt: null },
+      { id: 'isr3', reportingToId: 'so2', deletedAt: null },
+    ];
+
+    it('an ASM above a deleted SO still reaches that SO\'s ISRs; the deleted SO itself is NOT a team member', () => {
+      const sub = descendantSalesUserIds('asm', WITH_DELETED);
+      expect([...sub].sort()).toEqual(['asm', 'isr1', 'isr2', 'isr3', 'so2']);
+      expect(sub.has('so')).toBe(false);
+    });
+
+    it('a chain of TWO deleted managers is walked through', () => {
+      const edges = [
+        { id: 'rsm', reportingToId: null, deletedAt: null },
+        { id: 'asm', reportingToId: 'rsm', deletedAt: new Date() },
+        { id: 'so', reportingToId: 'asm', deletedAt: new Date() },
+        { id: 'isr', reportingToId: 'so', deletedAt: null },
+      ];
+      expect([...descendantSalesUserIds('rsm', edges)].sort()).toEqual(['isr', 'rsm']);
+    });
+
+    it('a deleted leaf is simply excluded (no team member gained)', () => {
+      const edges = [
+        { id: 'so', reportingToId: null, deletedAt: null },
+        { id: 'isr', reportingToId: 'so', deletedAt: new Date() },
+      ];
+      expect([...descendantSalesUserIds('so', edges)]).toEqual(['so']);
+    });
+
+    it('a cycle running through deleted nodes terminates', () => {
+      const edges = [
+        { id: 'a', reportingToId: 'c', deletedAt: null },
+        { id: 'b', reportingToId: 'a', deletedAt: new Date() },
+        { id: 'c', reportingToId: 'b', deletedAt: new Date() },
+        { id: 'd', reportingToId: 'c', deletedAt: null },
+      ];
+      expect([...descendantSalesUserIds('a', edges)].sort()).toEqual(['a', 'd']);
+    });
+
+    it('edges without a deletedAt field behave exactly as before (back-compat)', () => {
+      expect([...descendantSalesUserIds('so', EDGES)].sort()).toEqual(['so', 'xsr', 'xsr2']);
+    });
+  });
 });
 
 describe('firstActiveApproverId', () => {
