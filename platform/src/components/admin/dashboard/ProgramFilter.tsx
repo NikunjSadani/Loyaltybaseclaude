@@ -28,6 +28,8 @@ export interface ProgramFilterProps {
   droppedProgram?: string | null;
   onDismissDropped?: () => void;
   className?: string;
+  /** Programs needed before the select shows (default 2; the KYC dashboard passes 0 = always, its original rule). */
+  minPrograms?: number;
 }
 
 export function ProgramFilter({
@@ -41,11 +43,12 @@ export function ProgramFilter({
   droppedProgram,
   onDismissDropped,
   className = '',
+  minPrograms = MIN_PROGRAMS_FOR_FILTER,
 }: ProgramFilterProps) {
   const listed = programs ?? [];
   // The active program is always an option (it may be missing from a failed / stale list).
   const options = value && !listed.includes(value) ? [value, ...listed] : listed;
-  const showSelect = listed.length >= MIN_PROGRAMS_FOR_FILTER || !!value;
+  const showSelect = listed.length >= minPrograms || !!value;
   if (!showSelect && !droppedProgram) return null;
 
   return (

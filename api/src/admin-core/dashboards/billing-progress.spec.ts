@@ -6,7 +6,9 @@ import type { JwtPayload } from '../../common/decorators/current-user.decorator'
 import { istDateTimeCell, istMonthKey } from '../../common/ist-date';
 import {
   BILLING_BUCKETS,
+  NOT_COVERED_NOTE,
   bucketOf,
+  clampAsOf,
   displayPct,
   loadBillingProgress,
   paceFor,
@@ -21,7 +23,7 @@ import {
   BillingProgressDashboardService,
 } from './billing-progress-dashboard.service';
 import { EXPORT_KINDS } from '../../exports/kinds';
-import { BILLING_PROGRESS_OUTLETS_KIND } from '../../exports/kinds/batch2/billing-progress.kind';
+import { BILLING_PROGRESS_OUTLETS_KIND, describeBillingExport } from '../../exports/kinds/batch2/billing-progress.kind';
 
 /** A month key `delta` months from the current IST month — never a hard-coded date. */
 function monthOffset(delta: number, from = new Date()): string {
@@ -107,7 +109,7 @@ function makePrisma(w: World) {
       findMany: jest.fn(async ({ where }: { where: { clientId: string; month: string } }) =>
         w.sales
           .filter((r) => tenantOf(r) === where.clientId && r.month === where.month)
-          .map((r) => ({ ...r, updatedAt: r.updatedAt ?? new Date(Date.UTC(2020, 0, 1)) })), // a real (old) upload time
+          .map((r) => ({ ...r, updatedAt: r.updatedAt ?? new Date() })), // uploaded "now" unless a test says otherwise
       ),
     },
     salesImportApply: {
@@ -172,12 +174,28 @@ describe('paceFor (IST, to the data date)', () => {
   };
   const dateKeyOf = (month: string, day: number) => `${month}-${String(day).padStart(2, '0')}`;
 
-  it('N2 past month → whole month, 100%, as of the month’s last day', () => {
-    const p = paceFor(PAST, new Date(), '2000-01-01');
+  it('N2 past month with data through its end → whole month, 100%, as of the month’s last day', () => {
+    const p = paceFor(PAST, new Date(), istDateKeyNow());
     expect(p.monthStatus).toBe('PAST');
+    expect(p.fullMonth).toBe(true);
     expect(p.daysElapsed).toBe(p.daysInMonth);
     expect(p.pacePct).toBe(100);
     expect(p.paceAsOf).toBe(dateKeyOf(PAST, p.daysInMonth));
+  });
+
+  it('D4 past month whose data stops early → paced to the data date, not "full month"', () => {
+    const dim = daysInMonthOfKey(PAST);
+    const p = paceFor(PAST, new Date(), dateKeyOf(PAST, 10));
+    expect(p).toEqual({
+      monthStatus: 'PAST', daysInMonth: dim, daysElapsed: 10,
+      pacePct: Math.round((10 / dim) * 100), paceAsOf: dateKeyOf(PAST, 10), fullMonth: false,
+    });
+  });
+
+  it('D4 a future-dated asOf is clamped to today', () => {
+    expect(clampAsOf('2999-01-01', new Date())).toBe(istDateKeyNow());
+    expect(clampAsOf('2000-01-01', new Date())).toBe('2000-01-01');
+    expect(clampAsOf(null, new Date())).toBeNull();
   });
 
   it('N2 future month → no pace', () => {
@@ -198,7 +216,7 @@ describe('paceFor (IST, to the data date)', () => {
     // Data stops at the 12th → pace to the 12th.
     expect(paceFor(month, now, dateKeyOf(month, 12))).toEqual({
       monthStatus: 'CURRENT', daysInMonth: dim, daysElapsed: 12,
-      pacePct: Math.round((12 / dim) * 100), paceAsOf: dateKeyOf(month, 12),
+      pacePct: Math.round((12 / dim) * 100), paceAsOf: dateKeyOf(month, 12), fullMonth: false,
     });
     // asOf after today (future-dated invoice) → capped at today.
     expect(paceFor(month, now, dateKeyOf(month, 25)).daysElapsed).toBe(20);
@@ -214,6 +232,11 @@ describe('paceFor (IST, to the data date)', () => {
     expect(paceFor(month, now, dateKeyOf(month, 1)).daysElapsed).toBe(1);
   });
 });
+
+function istDateKeyNow(): string {
+  const d = new Date(Date.now() + 330 * 60_000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
 
 function daysInMonthOfKey(month: string): number {
   const [y, m] = month.split('-').map(Number);
@@ -373,9 +396,11 @@ describe('loadBillingProgress + summary', () => {
     expect(s.outletsNotCovered).toBe(2); // C, D
     const nc = selectBillingRows(d, 'NOT_COVERED');
     expect(nc.map((r) => r.outletCode)).toEqual(['C', 'D']);
-    // C's stored target is excluded (platform rule for out-of-scope values) — never mixed into a sum.
-    expect(nc[0]).toMatchObject({ target: 0, achieved: 0, pct: null });
+    // D7: C shows its REAL stored values with a "not counted" note — but they never enter a sum.
+    expect(nc[0]).toMatchObject({ target: 200, achieved: -10, pct: null, note: NOT_COVERED_NOTE });
+    expect(nc[1]).toMatchObject({ outletCode: 'D', target: 0, achieved: 0, note: NOT_COVERED_NOTE });
     expect(s.totals.targetSum).toBe(1500);
+    expect(s.totals.achievedSum).toBe(1099); // A 1000 + B 99 — C's -10 not counted
     // Filters narrow the not-covered count too.
     expect(summarizeBillingProgress(await load(w, { outletType: 'WHOLESALE' })).outletsNotCovered).toBe(1);
   });
@@ -438,6 +463,7 @@ describe('loadBillingProgress + summary', () => {
 
   it('asOf: importer-owned primary → last applied invoice date; otherwise latest sales updatedAt (IST date)', async () => {
     const w = base();
+    for (const r of w.sales) r.updatedAt = new Date(Date.UTC(2020, 0, 1));
     w.sales[0].updatedAt = new Date(Date.UTC(2020, 0, 5, 20, 0)); // 01:30 IST on the 6th
     expect((await load(w)).asOf).toBe('2020-01-06');
     w.lastApply = { importId: 'i1', createdAt: new Date(), appliedById: 'u', definitionsSnapshot: [{ kpiCode: 'TOTAL' }], month: PAST };
@@ -445,6 +471,33 @@ describe('loadBillingProgress + summary', () => {
     expect((await load(w)).asOf).toBe('2020-01-04');
     w.lastApply.definitionsSnapshot = [{ kpiCode: 'FOCUS' }]; // importer does not own the primary
     expect((await load(w)).asOf).toBe('2020-01-06');
+  });
+
+  it('D3 asOf comes ONLY from sales records carrying the report KPI — another KPI’s upload → null', async () => {
+    const w = base();
+    w.sales = [{ outletCode: 'A', month: PAST, kpiValues: { OTHER: 5 }, updatedAt: new Date() }];
+    const s = summarizeBillingProgress(await load(w));
+    expect(s.asOf).toBeNull();
+    expect(s.pacePct).toBeNull();
+    // A record with the key (even a 0) counts.
+    w.sales.push({ outletCode: 'B', month: PAST, kpiValues: { TOTAL: 0 }, updatedAt: new Date(Date.UTC(2020, 0, 5, 20, 0)) });
+    expect((await load(w)).asOf).toBe('2020-01-06');
+  });
+
+  it('D4 a future-dated importer invoice date is clamped to today in the response', async () => {
+    const w = base();
+    w.lastApply = { importId: 'i1', createdAt: new Date(), appliedById: 'u', definitionsSnapshot: [{ kpiCode: 'TOTAL' }], month: PAST };
+    w.monthSummaries = [{ month: PAST, lastDate: '2999-12-31' }];
+    expect((await load(w)).asOf).toBe(istDateKeyNow());
+  });
+
+  it('D4 past month with partial data → paced to the data date, behind pace (not missed target)', async () => {
+    const w = base();
+    const tenth = new Date(Date.UTC(Number(PAST.slice(0, 4)), Number(PAST.slice(5, 7)) - 1, 10, 6, 30));
+    for (const r of w.sales) r.updatedAt = tenth;
+    const s = summarizeBillingProgress(await load(w));
+    expect(s).toMatchObject({ monthStatus: 'PAST', fullMonth: false, daysElapsed: 10, paceAsOf: `${PAST}-10` });
+    expect(s.pacePct).toBe(Math.round((10 / daysInMonthOfKey(PAST)) * 100));
   });
 
   it('current-month pace drives behind-pace', async () => {
@@ -528,7 +581,7 @@ describe('outlets list + parsing', () => {
     expect(p1.rows.map((r) => r.outletCode)).toEqual(['B', 'C']);
     expect(p1.rows[0]).toEqual({
       outletCode: 'B', outletName: 'Outlet B', program: null, outletType: 'RETAIL', soName: null, asmName: null,
-      target: 300, achieved: 15, pct: 5,
+      target: 300, achieved: 15, pct: 5, note: null,
     });
     const p2 = await svc.outlets(user, { month: PAST, bucket: 'P0_20', page: '2', pageSize: '2' });
     expect(p2.rows.map((r) => r.outletCode)).toEqual(['A', 'D']);
@@ -573,6 +626,30 @@ describe('outlets list + parsing', () => {
     }
   });
 
+  it('D7 export: NOT_COVERED rows carry real values + the "not counted" note', async () => {
+    const wv = world({
+      kpis: [{ clientId: T, code: 'TOTAL', label: 'Total sales', unit: 'INR', isPrimary: true, enabled: true, programs: ['Gold'] }],
+      outlets: [{ code: 'S', program: 'Silver' }],
+      targets: [{ outletCode: 'S', month: PAST, targetValues: { TOTAL: 300 } }],
+      sales: [{ outletCode: 'S', month: PAST, kpiValues: { TOTAL: 120 } }],
+    });
+    const sheets: Array<{ name: string; rows: unknown[][] }> = [];
+    const out = {
+      addSheet: async (name: string) => {
+        const sh = { name, rows: [] as unknown[][] };
+        sheets.push(sh);
+        return { addRow: async (r: unknown[]) => void sh.rows.push(r), rowCount: 0 };
+      },
+    };
+    const params = BILLING_PROGRESS_OUTLETS_KIND.parseParams({ bucket: 'NOT_COVERED', month: PAST }, {} as JwtPayload);
+    await BILLING_PROGRESS_OUTLETS_KIND.run(
+      { prisma: makePrisma(wv), clientId: T, now: new Date(), user: {} as JwtPayload, moduleRef: {} } as never,
+      params,
+      out as never,
+    );
+    expect(sheets[1].rows).toEqual([['S', 'Outlet S', 'Silver', 'RETAIL', '', '', 300, 120, '', NOT_COVERED_NOTE]]);
+  });
+
   it('NOT_COVERED is a valid list key', () => {
     expect(parseBillingListKey('NOT_COVERED')).toBe('NOT_COVERED');
   });
@@ -594,7 +671,13 @@ describe('billing-progress-outlets export kind', () => {
     expect(BILLING_PROGRESS_OUTLETS_KIND.access).toEqual({ roles: ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'], permission: 'reports:read' });
     const p = BILLING_PROGRESS_OUTLETS_KIND.parseParams({ bucket: 'BEHIND_PACE', month: '2026-10' }, {} as JwtPayload);
     expect(BILLING_PROGRESS_OUTLETS_KIND.isHeavy(p)).toBe(false);
-    expect(BILLING_PROGRESS_OUTLETS_KIND.describeParams(p)).toBe('Billing progress — Behind pace — Oct 2026');
+    // D8: past month → "Missed target" (same wording as the About sheet); current month → "Behind pace".
+    expect(BILLING_PROGRESS_OUTLETS_KIND.describeParams(p)).toBe('Billing progress — Missed target — Oct 2026');
+    const cur = istMonthKey(new Date());
+    const pc = BILLING_PROGRESS_OUTLETS_KIND.parseParams({ bucket: 'BEHIND_PACE', month: cur }, {} as JwtPayload);
+    expect(describeBillingExport(pc)).toMatch(/^Billing progress — Behind pace — /);
+    const pn = BILLING_PROGRESS_OUTLETS_KIND.parseParams({ bucket: 'BEHIND_PACE' }, {} as JwtPayload);
+    expect(describeBillingExport(pn)).toBe('Billing progress — Behind pace — current month');
     expect(BILLING_PROGRESS_OUTLETS_KIND.fileName(p, new Date())).toBe('billing-progress-behind-pace-2026-10.xlsx');
   });
 
@@ -628,9 +711,9 @@ describe('billing-progress-outlets export kind', () => {
     // Same word as the screen ("Billed") + units in the headers.
     expect(sheets[1].headers).toEqual([
       'Outlet Code', 'Outlet Name', 'Program', 'Outlet Type', 'SO', 'ASM',
-      'Target (₹)', 'Billed (₹)', 'Achievement %',
+      'Target (₹)', 'Billed (₹)', 'Achievement %', 'Note',
     ]);
-    expect(sheets[1].rows[0]).toEqual(['B', 'Outlet B', '', 'RETAIL', '', '', 100, 0, 0]);
+    expect(sheets[1].rows[0]).toEqual(['B', 'Outlet B', '', 'RETAIL', '', '', 100, 0, 0, '']);
   });
 
   it('N9 About sheet: month, KPI, filters (manager NAME), data as of, generated at (IST); non-INR units', async () => {
@@ -639,7 +722,7 @@ describe('billing-progress-outlets export kind', () => {
         kpis: [{ clientId: T, code: 'CS', label: 'Cases', unit: 'cases', isPrimary: true, enabled: true }],
         outlets: [{ code: 'A', program: 'Gold', reps: ['so1'] }],
         targets: [{ outletCode: 'A', month: PAST, targetValues: { CS: 10 } }],
-        sales: [{ outletCode: 'A', month: PAST, kpiValues: { CS: 2 }, updatedAt: new Date(Date.UTC(2020, 0, 5, 20, 0)) }],
+        sales: [{ outletCode: 'A', month: PAST, kpiValues: { CS: 2 }, updatedAt: new Date() }],
         salesUsers: [
           { id: 'asm1', reportingToId: null, level: 3, code: 'ASM', name: 'Asha' },
           { id: 'so1', reportingToId: 'asm1', level: 2, code: 'SO', name: 'Sonu' },
@@ -673,9 +756,10 @@ describe('billing-progress-outlets export kind', () => {
     expect(about.Program).toBe('Gold');
     expect(about['Outlet type']).toBe('RETAIL');
     expect(about.Manager).toBe('Asha (and their team)');
-    expect(about['Data as of']).toBe('2020-01-06');
+    expect(about['Data as of']).toBe(istDateKeyNow());
     expect(about['Generated at (IST)']).toBe(istDateTimeCell(now));
     expect(String(about.Note)).toContain('KYC is still pending');
+    expect(String(about['Target rows not in the live roster (tenant-wide)'])).toMatch(/^0 — /);
     expect(sheets[1].headers.slice(6, 8)).toEqual(['Target (cases)', 'Billed (cases)']);
   });
 });

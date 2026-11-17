@@ -147,12 +147,35 @@ describe('Admin Overview — program filter', () => {
     await waitFor(() => expect(window.location.search).toBe(''));
   });
 
+  it('D1 OV7: the first kpis fetch starts while /api/auth/me is still pending', async () => {
+    window.sessionStorage.setItem(DASHBOARD_PROGRAM_STORAGE_KEY, 'Gold');
+    const fn = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.startsWith('/api/auth/me')) return new Promise(() => {}); // never answers
+      if (u.startsWith('/api/admin/dashboard/kpis')) return { ok: true, status: 200, json: async () => ({ success: true, data: KPIS }) };
+      return { ok: true, status: 200, json: async () => ({ success: true, data: BILLING }) };
+    });
+    vi.stubGlobal('fetch', fn);
+    render(<DashboardPage />);
+    expect(await screen.findByText('4,321')).toBeInTheDocument();
+    expect(urls(fn, '/api/admin/dashboard/kpis')[0]).toBe('/api/admin/dashboard/kpis');
+  });
+
+  it('D1 OV8: nothing stored → exactly one kpis fetch and no /api/auth/me call', async () => {
+    const fn = mockFetch({ ...KPIS, availablePrograms: ['Gold', 'Silver'], notProgramScoped: [] });
+    render(<DashboardPage />);
+    await screen.findByText('4,321');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(urls(fn, '/api/admin/dashboard/kpis')).toEqual(['/api/admin/dashboard/kpis']);
+    expect(urls(fn, '/api/auth/me')).toEqual([]);
+  });
+
   it('OV5: a program chosen on another dashboard is used on first load', async () => {
     window.sessionStorage.setItem(DASHBOARD_PROGRAM_STORAGE_KEY, 'Gold');
     const fn = mockFetch({ ...KPIS, availablePrograms: ['Gold', 'Silver'], notProgramScoped: [] }, { billingPrograms: ['Gold', 'Silver'] });
     render(<DashboardPage />);
     await screen.findByText('4,321');
-    expect(urls(fn, '/api/admin/dashboard/kpis')[0]).toBe('/api/admin/dashboard/kpis?program=Gold');
+    await waitFor(() => expect(urls(fn, '/api/admin/dashboard/kpis')).toContain('/api/admin/dashboard/kpis?program=Gold'));
     expect(((await screen.findByTestId('overview-program-filter')) as HTMLSelectElement).value).toBe('Gold');
   });
 });

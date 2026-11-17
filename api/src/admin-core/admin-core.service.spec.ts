@@ -1786,11 +1786,11 @@ describe('AdminCoreService', () => {
       /** Rows returned by the distinct-programs query (the FE dropdown source). */
       programRows?: { programName: string | null }[];
     }) => {
-      // outlet.findMany is called TWICE in Promise.all order: [1] addressable universe, then
-      // [2] the distinct-programs dropdown source. Mock them in that order.
-      mockPrisma.outlet.findMany
-        .mockResolvedValueOnce(opts.outlets ?? [])
-        .mockResolvedValueOnce(opts.programRows ?? []);
+      // outlet.findMany serves two queries: the addressable universe and the distinct-programs dropdown
+      // source (`distinct` set). Route by shape (with a program filter the catalog is read FIRST).
+      mockPrisma.outlet.findMany.mockImplementation((args: { distinct?: unknown }) =>
+        Promise.resolve(args?.distinct ? opts.programRows ?? [] : opts.outlets ?? []),
+      );
       // count is called 3× in order: notInterested, inactive, then NEVER outlet again.
       mockPrisma.outlet.count
         .mockResolvedValueOnce(opts.notInterested ?? 0)
@@ -2092,29 +2092,41 @@ describe('AdminCoreService', () => {
       expect(res.funnel.map((f) => f.count)).toEqual([1, 1, 1, 1, 1]);
     });
 
-    it('programName filter scopes the outlet universe + informational counts by programName', async () => {
-      wire({ outlets: [], notInterested: 0, inactive: 0 });
-      await service.kycDashboard(clientAdmin, 'Gold Programme');
+    /** The universe pull = the first NON-distinct outlet.findMany. */
+    const universeCall = () =>
+      mockPrisma.outlet.findMany.mock.calls.find((c: [{ distinct?: unknown }]) => !c[0].distinct)![0];
+    const GOLD_ROWS = [{ programName: 'Gold Programme' }, { programName: 'Gold Programme ' }, { programName: 'Silver Scheme' }];
+    const GOLD_IN = { in: ['Gold Programme', 'Gold Programme '] };
+    const LIVE = {
+      deletedAt: null,
+      deactivatedAt: null,
+      OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+    };
+
+    it('D2 programName filter scopes the outlet universe + counts by EVERY whitespace variant', async () => {
+      wire({ outlets: [], notInterested: 0, inactive: 0, programRows: GOLD_ROWS });
+      const res = await service.kycDashboard(clientAdmin, 'Gold Programme');
 
       // Addressable universe folds to the selected program (this is what makes every
       // outlet-derived metric — headline, funnel, buckets, SLA, coverageBy — scope).
-      const findManyWhere = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      const findManyWhere = universeCall().where;
       expect(findManyWhere.clientId).toBe('deoleo');
-      expect(findManyWhere.programName).toBe('Gold Programme');
+      expect(findManyWhere.programName).toEqual(GOLD_IN);
 
       // notInterested (call 0) + inactive (call 1) counts scope too, so the universe tile matches.
-      expect(mockPrisma.outlet.count.mock.calls[0][0].where.programName).toBe('Gold Programme');
-      expect(mockPrisma.outlet.count.mock.calls[1][0].where.programName).toBe('Gold Programme');
+      expect(mockPrisma.outlet.count.mock.calls[0][0].where.programName).toEqual(GOLD_IN);
+      expect(mockPrisma.outlet.count.mock.calls[1][0].where.programName).toEqual(GOLD_IN);
+      expect(res.availablePrograms).toEqual(['Gold Programme', 'Silver Scheme']); // trimmed + distinct
     });
 
-    it('programName filter scopes quality/rejection via partner→outlets→some.programName', async () => {
+    it('D2 programName filter scopes quality/rejection via partner→LIVE outlets (same rule as Overview)', async () => {
       // WAYS-OF-WORKING #2: reUpload / total-submission / rejection queries are keyed off
       // kycSubmission→user, NOT the outlet list — so they must be scoped independently or the
       // quality numbers would disagree with the filtered headline.
-      wire({ outlets: [], reUploadCount: 0, totalSubmissions: 0, rejectionHistory: [] });
+      wire({ outlets: [], reUploadCount: 0, totalSubmissions: 0, rejectionHistory: [], programRows: GOLD_ROWS });
       await service.kycDashboard(clientAdmin, 'Gold Programme');
 
-      const scope = { partner: { outlets: { some: { programName: 'Gold Programme' } } } };
+      const scope = { partner: { outlets: { some: { programName: GOLD_IN, ...LIVE } } } };
 
       // reUpload count (call 0) + total submissions (call 1)
       expect(mockPrisma.kycSubmission.count.mock.calls[0][0].where).toEqual({
@@ -2164,12 +2176,18 @@ describe('AdminCoreService', () => {
     });
 
     it("no longer special-cases 'ALL' — a program literally named ALL now filters", async () => {
-      wire({ outlets: [] });
+      wire({ outlets: [], programRows: [{ programName: 'ALL' }] });
       await service.kycDashboard(clientAdmin, 'ALL');
-      expect(mockPrisma.outlet.findMany.mock.calls[0][0].where.programName).toBe('ALL');
+      expect(universeCall().where.programName).toEqual({ in: ['ALL'] });
       expect(mockPrisma.kycSubmission.count.mock.calls[0][0].where.partner).toEqual({
-        outlets: { some: { programName: 'ALL' } },
+        outlets: { some: { programName: { in: ['ALL'] }, ...LIVE } },
       });
+    });
+
+    it('D2 an unknown program matches nothing (`in: []`), never an error', async () => {
+      wire({ outlets: [], programRows: GOLD_ROWS });
+      await service.kycDashboard(clientAdmin, 'Platinum');
+      expect(universeCall().where.programName).toEqual({ in: [] });
     });
 
     it('returns availablePrograms — the FULL distinct program list, sorted, filter-independent', async () => {
@@ -2183,7 +2201,7 @@ describe('AdminCoreService', () => {
 
       // The distinct-programs query (2nd outlet.findMany call) is tenant-scoped, non-null, distinct,
       // sorted — and carries NO programName equality filter.
-      const distinctCall = mockPrisma.outlet.findMany.mock.calls[1][0];
+      const distinctCall = mockPrisma.outlet.findMany.mock.calls.find((c: [{ distinct?: unknown }]) => !!c[0].distinct)![0];
       expect(distinctCall.where).toEqual({ clientId: 'deoleo', deletedAt: null, programName: { not: null } });
       expect(distinctCall.distinct).toEqual(['programName']);
       expect(distinctCall.orderBy).toEqual({ programName: 'asc' });
