@@ -28,7 +28,7 @@ import type { SoDeclarationData } from '@/lib/so-declaration';
 import { UpiCaptureMethodBadge, effectiveUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge';
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { REMOVED_RAIL_NOTICE, asPayoutRail, isRemovalConsistent, type PayoutRail } from '@/lib/payout-rail';
-import { FAST_TRACK_HEADLINE, formatFastTrackDate, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track';
+import { FAST_TRACK_HEADLINE, fastTrackPreviousText, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track';
 
 // ─── 7-field verification types (shared with approvals page) ─────────────────
 
@@ -434,7 +434,6 @@ function GroupInheritedBadge({ inherited }: { inherited?: boolean }): ReactNode 
  * re-checked it. Links to the previous (rejected) submission so the reviewer can compare.
  */
 function FastTrackBanner({ fastTrack }: { fastTrack: KycFastTrack }): ReactNode {
-  const rejectedOn = formatFastTrackDate(fastTrack.previousRejectedAt);
   return (
     <div
       data-testid="fast-track-banner"
@@ -446,14 +445,21 @@ function FastTrackBanner({ fastTrack }: { fastTrack: KycFastTrack }): ReactNode 
       <div className="min-w-0">
         <p className="font-semibold text-blue-800">{FAST_TRACK_HEADLINE}</p>
         <p className="text-blue-700 text-xs mt-0.5" data-testid="fast-track-previous">
-          {rejectedOn ? `Previous KYC rejected on ${rejectedOn}` : 'Previous KYC was rejected by GIFSY'}
-          {' · '}
-          <Link
-            href={`/admin/kyc/${encodeURIComponent(fastTrack.previousSubmissionId)}`}
-            className="font-medium underline underline-offset-2 hover:text-blue-900"
-          >
-            View previous submission
-          </Link>
+          {fastTrackPreviousText(fastTrack)}
+          {/* F5: no id → no link (the banner itself always shows). F1: new tab keeps this KYC open. */}
+          {fastTrack.previousSubmissionId && (
+            <>
+              {' · '}
+              <Link
+                href={`/admin/kyc/${encodeURIComponent(fastTrack.previousSubmissionId)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium underline underline-offset-2 hover:text-blue-900"
+              >
+                View previous submission
+              </Link>
+            </>
+          )}
         </p>
       </div>
     </div>

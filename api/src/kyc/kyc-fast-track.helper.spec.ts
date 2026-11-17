@@ -76,6 +76,58 @@ describe('kyc-fast-track.helper', () => {
     });
   });
 
+  describe('gifsyRejectionAfterManagers — walks back through Gifsy re-acting on an already-rejected KYC (B3)', () => {
+    const toGifsy = (h: number) => ({ fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'PENDING_GIFSY', createdAt: hoursAgo(h) });
+
+    it('PENDING_GIFSY→RE_UPLOAD_REQUIRED then RE_UPLOAD_REQUIRED→REJECTED via reject() → qualifies (latest rejection time)', () => {
+      const latest = hoursAgo(2);
+      expect(
+        gifsyRejectionAfterManagers({ status: 'REJECTED' }, [
+          toGifsy(10),
+          { fromStatus: 'PENDING_GIFSY', toStatus: 'RE_UPLOAD_REQUIRED', createdAt: hoursAgo(5) },
+          { fromStatus: 'RE_UPLOAD_REQUIRED', toStatus: 'REJECTED', createdAt: latest },
+        ]),
+      ).toEqual({ rejectedAt: latest });
+    });
+
+    it('PENDING_GIFSY→REJECTED then REJECTED→REJECTED via PATCH → qualifies; input order does not matter', () => {
+      const latest = hoursAgo(1);
+      expect(
+        gifsyRejectionAfterManagers({ status: 'REJECTED' }, [
+          { fromStatus: 'REJECTED', toStatus: 'REJECTED', createdAt: latest },
+          { fromStatus: 'PENDING_GIFSY', toStatus: 'REJECTED', createdAt: hoursAgo(6) },
+          toGifsy(9),
+        ]),
+      ).toEqual({ rejectedAt: latest });
+    });
+
+    it('a MANAGER rejection later re-rejected by Gifsy (REJECTED→REJECTED) does NOT qualify', () => {
+      expect(
+        gifsyRejectionAfterManagers({ status: 'REJECTED' }, [
+          { fromStatus: 'PENDING_ASM_APPROVAL', toStatus: 'REJECTED', createdAt: hoursAgo(6) },
+          { fromStatus: 'REJECTED', toStatus: 'REJECTED', createdAt: hoursAgo(1) },
+        ]),
+      ).toBeNull();
+    });
+
+    it('a manager-stage RE_UPLOAD_REQUIRED escalated to REJECTED by Gifsy does NOT qualify', () => {
+      expect(
+        gifsyRejectionAfterManagers({ status: 'REJECTED' }, [
+          { fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'RE_UPLOAD_REQUIRED', createdAt: hoursAgo(6) },
+          { fromStatus: 'RE_UPLOAD_REQUIRED', toStatus: 'REJECTED', createdAt: hoursAgo(1) },
+        ]),
+      ).toBeNull();
+    });
+
+    it('an unprovable chain (no row into the rejected fromStatus) → null (fail safe)', () => {
+      expect(
+        gifsyRejectionAfterManagers({ status: 'REJECTED' }, [
+          { fromStatus: 'RE_UPLOAD_REQUIRED', toStatus: 'REJECTED', createdAt: hoursAgo(1) },
+        ]),
+      ).toBeNull();
+    });
+  });
+
   it('kycRoutingLabel', () => {
     expect(kycRoutingLabel({ previousSubmissionId: 'a', previousRejectedAt: new Date().toISOString() })).toBe(
       'Direct to GIFSY (resubmitted after GIFSY rejection)',

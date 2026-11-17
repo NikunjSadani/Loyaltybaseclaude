@@ -98,7 +98,7 @@ describe('New-client wizard — behaviour flags', () => {
     expect(features).not.toHaveProperty('soDeclarationKyc');
   });
 
-  it('W6: switching gifsyRejectFastTrack ON (no confirm) sends only that behaviour key', async () => {
+  it('W6: switching gifsyRejectFastTrack ON asks first (F2 confirm), then sends only that behaviour key', async () => {
     const postSpy = vi.fn();
     stubFetch(postSpy);
     await walkToFeatures();
@@ -106,8 +106,20 @@ describe('New-client wizard — behaviour flags', () => {
     const sw = await screen.findByTestId('wizard-behaviour-flag-gifsyRejectFastTrack');
     expect(sw).toHaveAttribute('aria-checked', 'false');
     fireEvent.click(sw);
-    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
-    expect(sw).toHaveAttribute('aria-checked', 'true');
+    const dialog = await screen.findByTestId('behaviour-flag-confirm');
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+    expect(await screen.findByText('Send GIFSY-rejected KYC resubmissions straight to GIFSY?')).toBeInTheDocument();
+    for (const point of [
+      'Applies to KYCs GIFSY rejected before this was switched on too.',
+      "Only outlets' own assigned rep (or their managers) get the shortcut.",
+      'Managers are not notified for these KYCs.',
+      'Switching it off does not pull back KYCs already sent to GIFSY.',
+      'SO Declaration KYCs always go through managers.',
+    ]) {
+      expect(within(dialog).getByText(point)).toBeInTheDocument();
+    }
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, send resubmissions straight to GIFSY' }));
+    await waitFor(() => expect(sw).toHaveAttribute('aria-checked', 'true'));
     await submitFromFeatures();
     await waitFor(() => expect(postSpy).toHaveBeenCalledTimes(1));
     const features = postSpy.mock.calls[0][0].features as Record<string, unknown>;

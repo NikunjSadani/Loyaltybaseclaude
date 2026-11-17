@@ -36,7 +36,7 @@ import { RejectionModal } from './RejectionModal';
 import { UpiCaptureMethodBadge, effectiveUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge';
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { REMOVED_RAIL_NOTICE, asPayoutRail, isRemovalConsistent, type PayoutRail } from '@/lib/payout-rail';
-import { FAST_TRACK_SALES_NOTE, FAST_TRACK_SALES_NOTE_DECIDED, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track';
+import { FAST_TRACK_SALES_NOTE, FAST_TRACK_SKIPPED_SUBLABEL, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track';
 import { kycDocDisplayLabel } from '@/lib/kyc-doc-label';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -755,8 +755,11 @@ function buildTimeline(kyc: KYCDetail, slug: string): TimelineStep[] {
     kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||
     kyc.status === KYCStatus.RE_KYC_REQUIRED;
   const latestEvent = kyc.approvalHistory.at(-1);
+  // F4: a fast-tracked KYC went straight to Gifsy — no manager ever held it — so ANY rejection of it is
+  // Gifsy's (checked BEFORE the first-approver branch; never "SO Review — Rejected" under a skipped step).
   const gifsyRejected =
-    isRejectedStatus && latestEvent?.stage === 'GIFSY' && latestEvent.action === 'REJECTED';
+    isRejectedStatus &&
+    (!!kyc.fastTrack || (latestEvent?.stage === 'GIFSY' && latestEvent.action === 'REJECTED'));
   // A first-approver rejection: rejected status AND the current cycle did NOT clear
   // the first approver as its latest outcome (the newest event is a first-approver
   // rejection, or there is no first-approver approval standing for this cycle).
@@ -772,7 +775,13 @@ function buildTimeline(kyc: KYCDetail, slug: string): TimelineStep[] {
   // ── Step 2 — first approver (SO / ASM) ──────────────────────────────────────
   let step2State: StepState = 'pending';
   let step2Sub   = 'Pending review';
-  if (firstApproverRejected) {
+  if (kyc.fastTrack) {
+    // GIFSY-reject fast-track: this resubmission went straight to Gifsy — no manager approved it.
+    // Never show "Approved" / "Approved by SO" / "Rejected" here (the DRAFT→PENDING_GIFSY history row is
+    // NOT an approval); say plainly that the step was not needed and why. Checked FIRST (F4).
+    step2State = 'skipped';
+    step2Sub   = FAST_TRACK_SKIPPED_SUBLABEL;
+  } else if (firstApproverRejected) {
     step2State = 'rejected';
     step2Sub   = firstApproverEvent?.action === 'REJECTED' && firstApproverEvent.by
       ? `Rejected by ${firstApproverEvent.by}`
@@ -781,12 +790,6 @@ function buildTimeline(kyc: KYCDetail, slug: string): TimelineStep[] {
     // stale event note.
     const remark = kyc.rejectionReason ?? firstApproverEvent?.remarks;
     if (remark) step2Sub = `${step2Sub} — ${remark}`;
-  } else if (kyc.fastTrack) {
-    // GIFSY-reject fast-track: this resubmission went straight to GIFSY — no manager approved it.
-    // Never show "Approved" / "Approved by SO" here (the DRAFT→PENDING_GIFSY history row is NOT an
-    // approval); say plainly that the step was skipped and why.
-    step2State = 'skipped';
-    step2Sub   = 'Skipped — resubmission after GIFSY rejection';
   } else if (gifsyRejected || kyc.status === KYCStatus.PENDING_GIFSY || kyc.status === KYCStatus.APPROVED) {
     // The current cycle cleared the first approver (it advanced to Gifsy / approved /
     // Gifsy-rejected), so the first-approver step is complete regardless of history gaps.
@@ -1917,26 +1920,17 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         </Card>
       )}
 
-      {/* GIFSY-reject fast-track note: this resubmission went straight to GIFSY, skipping the
-          managers. Shown whatever the status (the skip stays on record after GIFSY decides). */}
-      {kyc.fastTrack && (
-        <div
-          data-testid="fast-track-note"
-          role="note"
-          className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-start gap-2"
-        >
-          <SkipForward className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" aria-hidden="true" />
-          <p className="text-sm text-blue-700 min-w-0">
-            {kyc.status === KYCStatus.PENDING_GIFSY ? FAST_TRACK_SALES_NOTE : FAST_TRACK_SALES_NOTE_DECIDED}
-          </p>
-        </div>
-      )}
-
-      {/* Pending Gifsy notice */}
+      {/* Pending Gifsy notice. GIFSY-reject fast-track: ONE extra line inside this same box (no second
+          box); once Gifsy decides there is no note — the timeline's "Skipped" step keeps the record. */}
       {kyc.status === KYCStatus.PENDING_GIFSY && (
-        <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-start gap-2">
+        <div data-testid="pending-gifsy-notice" className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-start gap-2">
           <Clock className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" />
-          <p className="text-sm text-blue-700">Awaiting final validation by Gifsy. No action required from your side.</p>
+          <div className="min-w-0">
+            <p className="text-sm text-blue-700">Awaiting final validation by Gifsy. No action required from your side.</p>
+            {kyc.fastTrack && (
+              <p data-testid="fast-track-note" className="text-sm text-blue-700 mt-1">{FAST_TRACK_SALES_NOTE}</p>
+            )}
+          </div>
         </div>
       )}
 

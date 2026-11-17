@@ -1,8 +1,9 @@
 /// <reference types="vitest/globals" />
 /**
- * FTQ — GIFSY review queue: fast-tracked resubmissions carry a "Resubmission · managers skipped"
+ * FTQ — GIFSY review queue: fast-tracked resubmissions carry a "Resubmission · no manager re-approval"
  * badge (and a note on the selected entry) so the reviewer knows no manager re-checked them.
- * Entries with fastTrack null / missing render exactly as before.
+ * Entries with fastTrack null / missing render exactly as before (F7 — the backend omits the key for
+ * flag-off tenants, so absent must render nothing).
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -54,7 +55,7 @@ describe('FTQ — GIFSY queue fast-track badge', { timeout: 30_000 }, () => {
 
     const fastBtn = (await screen.findAllByText('Fast Track Stores', undefined, LOAD))
       .map((el) => el.closest('button')).find(Boolean) as HTMLElement;
-    expect(await within(fastBtn).findByTestId('fast-track-badge')).toHaveTextContent('Resubmission · managers skipped');
+    expect(await within(fastBtn).findByTestId('fast-track-badge')).toHaveTextContent('Resubmission · no manager re-approval');
 
     const normalBtn = (await screen.findByText('Normal Stores')).closest('button') as HTMLElement;
     expect(within(normalBtn).queryByTestId('fast-track-badge')).toBeNull();
@@ -64,9 +65,29 @@ describe('FTQ — GIFSY queue fast-track badge', { timeout: 30_000 }, () => {
 
     // First entry is auto-selected → the detail note explains the skip.
     const note = await screen.findByTestId('fast-track-detail-note');
-    expect(note).toHaveTextContent('Resubmitted after GIFSY rejection — sent straight to GIFSY (manager approval skipped)');
+    expect(note).toHaveTextContent('Resubmitted after a GIFSY rejection — sent directly to GIFSY; managers did not re-approve.');
     expect(note).toHaveTextContent(`Previous KYC rejected on ${formatFastTrackDate(rejectedAt)}`);
-    expect(within(note).getByRole('link', { name: 'View previous submission' })).toHaveAttribute('href', '/admin/kyc/prev-1');
+    const link = within(note).getByRole('link', { name: 'View previous submission' });
+    expect(link).toHaveAttribute('href', '/admin/kyc/prev-1');
+    // F1: new tab — the reviewer keeps their place in the queue.
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noreferrer');
+  });
+
+  it('FTQ3 (F6): unreadable rejection date → the banner fallback text, never "Invalid Date" or nothing', async () => {
+    stubQueue([entry('s1', 'Fast Track Stores', { fastTrack: { previousSubmissionId: 'prev-1', previousRejectedAt: 'garbage' } })]);
+    render(<KycApprovalsPage />);
+    const note = await screen.findByTestId('fast-track-detail-note', undefined, LOAD);
+    expect(note).toHaveTextContent('Previous KYC was rejected by GIFSY');
+    expect(note).not.toHaveTextContent(/invalid date/i);
+  });
+
+  it('FTQ4 (F5): empty previousSubmissionId → badge + note still shown, link hidden', async () => {
+    stubQueue([entry('s1', 'Fast Track Stores', { fastTrack: { previousSubmissionId: '', previousRejectedAt: rejectedAt } })]);
+    render(<KycApprovalsPage />);
+    const note = await screen.findByTestId('fast-track-detail-note', undefined, LOAD);
+    expect(screen.getAllByTestId('fast-track-badge')).toHaveLength(1);
+    expect(within(note).queryByRole('link', { name: 'View previous submission' })).toBeNull();
   });
 
   it('FTQ2: no fast-tracked entries → no badge and no note', async () => {

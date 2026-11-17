@@ -80,12 +80,17 @@ export const KYC_DUMP_DOC_HEADERS = [
   'Cancelled Cheque',
 ] as const;
 
+/** 20 context + 6 doc + 14 per-field (7 × 2) = 40 — the established layout (every flag-off scope, incl. Deoleo). */
+export const KYC_DUMP_TOTAL_COLUMN_COUNT = 40;
+
 /**
- * 20 context + 6 doc + 14 per-field (7 × 2) + 1 trailing "Routing" = 41. Routing (GIFSY-reject fast-track, Bajaj)
- * is APPENDED after every original column so the 40 established columns keep their positions; the bulk-verify
- * parser keys cells by header label, so the extra read-only column round-trips harmlessly.
+ * Column count for a dump. `routing` = at least one tenant in the export's scope has `gifsyRejectFastTrack` ON (Bajaj):
+ * then ONE trailing read-only "Routing" column is APPENDED after every original column (41), so the 40 established
+ * columns keep their positions; the bulk-verify parser keys cells by header label, so both shapes round-trip.
  */
-export const KYC_DUMP_TOTAL_COLUMN_COUNT = 41;
+export function kycDumpTotalColumnCount(routing: boolean): number {
+  return KYC_DUMP_TOTAL_COLUMN_COUNT + (routing ? 1 : 0);
+}
 
 export interface KycReviewDumpFieldState {
   decision: KycFieldDecision;
@@ -128,14 +133,18 @@ export interface KycReviewDumpEntry {
   fastTrack?: KycFastTrack | null;
 }
 
-/** The 41 header strings in order: 20 context + 6 document + 14 per-field Decision/Remark + Routing. */
-export function kycReviewDumpHeaders(): string[] {
+/**
+ * The header strings in order: 20 context + 6 document + 14 per-field Decision/Remark (40), plus a trailing "Routing"
+ * ONLY when `routing` (a gifsyRejectFastTrack tenant is in scope). Default false → the established 40 columns.
+ */
+export function kycReviewDumpHeaders(routing = false): string[] {
   const perFieldHeaders: string[] = [];
   for (const { label } of KYC_FIELD_ORDER) {
     perFieldHeaders.push(kycFieldDecisionHeader(label));
     perFieldHeaders.push(kycFieldRemarkHeader(label));
   }
-  return [...KYC_DUMP_CONTEXT_HEADERS, ...KYC_DUMP_DOC_HEADERS, ...perFieldHeaders, KYC_ROUTING_HEADER];
+  const headers = [...KYC_DUMP_CONTEXT_HEADERS, ...KYC_DUMP_DOC_HEADERS, ...perFieldHeaders];
+  return routing ? [...headers, KYC_ROUTING_HEADER] : headers;
 }
 
 /** Column widths (characters): header length + 2, at least 14. */
@@ -144,11 +153,11 @@ export function kycDumpColumnWidths(headers: readonly string[]): number[] {
 }
 
 /**
- * One review-dump row (40 cells). A document cell is a real hyperlink showing "Open" ('' when there is no document);
+ * One review-dump row (40 cells; 41 with the trailing Routing cell when `routing` — MUST match kycReviewDumpHeaders). A document cell is a real hyperlink showing "Open" ('' when there is no document);
  * a field Decision is '' for PENDING, 'APPROVE'/'REJECT' for terminal states (reflecting prior Excel/portal work so
  * re-export is a faithful round-trip). Written by the `kyc-review-dump` export kind (exports/kinds/batch1/kyc-dumps.ts).
  */
-export function kycReviewDumpCells(e: KycReviewDumpEntry): XlsxCell[] {
+export function kycReviewDumpCells(e: KycReviewDumpEntry, routing = false): XlsxCell[] {
   const link = (url?: string): XlsxCell => (url ? { __hyperlink: true, text: 'Open', target: url } : '');
   const row: XlsxCell[] = [
     e.submissionId,
@@ -186,7 +195,7 @@ export function kycReviewDumpCells(e: KycReviewDumpEntry): XlsxCell[] {
     // is somehow missing (write paths enforce it).
     row.push(decision === 'REJECT' ? fs.remark || 'Rejected (no remark on file)' : (fs.remark ?? ''));
   }
-  row.push(kycRoutingLabel(e.fastTrack));
+  if (routing) row.push(kycRoutingLabel(e.fastTrack));
   return row;
 }
 
@@ -279,18 +288,22 @@ function verdictLabel(d: KycFieldDecision): string {
   return d === 'APPROVED' ? 'OK' : d === 'REJECTED' ? 'REJECTED' : 'PENDING';
 }
 
-/** The rejected-outlets header strings in order: identity + per-field Verdict/Remark + KYC values. */
-export function rejectedKycHeaders(): string[] {
+/**
+ * The rejected-outlets header strings in order: identity + per-field Verdict/Remark + KYC values, plus a trailing
+ * "Routing" ONLY when `routing` (a gifsyRejectFastTrack tenant is in the export's scope).
+ */
+export function rejectedKycHeaders(routing = false): string[] {
   const perFieldHeaders: string[] = [];
   for (const { label } of KYC_FIELD_ORDER) {
     perFieldHeaders.push(rejectedFieldVerdictHeader(label));
     perFieldHeaders.push(rejectedFieldRemarkHeader(label));
   }
-  return [...REJECTED_KYC_IDENTITY_HEADERS, ...perFieldHeaders, ...REJECTED_KYC_VALUE_HEADERS, KYC_ROUTING_HEADER];
+  const headers = [...REJECTED_KYC_IDENTITY_HEADERS, ...perFieldHeaders, ...REJECTED_KYC_VALUE_HEADERS];
+  return routing ? [...headers, KYC_ROUTING_HEADER] : headers;
 }
 
 /** One rejected-outlets row (written by the `kyc-rejected` export kind). */
-export function rejectedKycCells(r: RejectedKycRow): XlsxCell[] {
+export function rejectedKycCells(r: RejectedKycRow, routing = false): XlsxCell[] {
   // Comma-joined human list of the fields the admin rejected.
   const rejectedFields = KYC_FIELD_ORDER.filter(({ key }) => r.fields[key]?.decision === 'REJECTED')
     .map(({ label }) => label)
@@ -325,7 +338,7 @@ export function rejectedKycCells(r: RejectedKycRow): XlsxCell[] {
     r.ifscCode ?? '',
     r.upiId ?? '',
     r.slaAgeHrs != null ? String(r.slaAgeHrs) : '',
-    kycRoutingLabel(r.fastTrack),
   );
+  if (routing) row.push(kycRoutingLabel(r.fastTrack));
   return row;
 }

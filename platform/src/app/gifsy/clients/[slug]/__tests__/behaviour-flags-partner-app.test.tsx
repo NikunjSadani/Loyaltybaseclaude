@@ -205,7 +205,7 @@ describe('Behaviour flags — allowPayoutWithoutPan (BF3)', () => {
 describe('Behaviour flags — gifsyRejectFastTrack (BF4)', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
-  it('BF4: renders label + help text OFF; switching ON saves immediately (no confirm) and PATCHes ONLY its key', async () => {
+  it('BF4: renders label + help text OFF; switching ON asks first (F2 confirm), then PATCHes ONLY its key', async () => {
     const patchSpy = vi.fn();
     vi.stubGlobal('fetch', mockFetch(makeConfig({ soDeclarationKyc: true }), (body) => {
       patchSpy(body);
@@ -225,8 +225,23 @@ describe('Behaviour flags — gifsyRejectFastTrack (BF4)', () => {
     expect(toggle).toHaveAttribute('aria-label', 'Send GIFSY-rejected KYC resubmissions straight to GIFSY');
     fireEvent.click(toggle);
 
+    // F2: switching ON asks first — nothing saved until confirmed; the dialog spells out every consequence.
+    const dialog = await screen.findByTestId('behaviour-flag-confirm');
+    expect(await screen.findByText('Send GIFSY-rejected KYC resubmissions straight to GIFSY?')).toBeInTheDocument();
+    for (const point of [
+      'Applies to KYCs GIFSY rejected before this was switched on too.',
+      "Only outlets' own assigned rep (or their managers) get the shortcut.",
+      'Managers are not notified for these KYCs.',
+      'Switching it off does not pull back KYCs already sent to GIFSY.',
+      'SO Declaration KYCs always go through managers.',
+    ]) {
+      expect(within(dialog).getByText(point)).toBeInTheDocument();
+    }
+    expect(patchSpy).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, send resubmissions straight to GIFSY' }));
+
     await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
-    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
     expect(patchSpy.mock.calls[0][0]).toEqual({ features: { gifsyRejectFastTrack: true } });
     await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true'));
     // Siblings untouched.
@@ -234,7 +249,23 @@ describe('Behaviour flags — gifsyRejectFastTrack (BF4)', () => {
     expect(await within(screen.getByTestId('behaviour-flag-allowPayoutWithoutPan')).findByRole('switch')).toHaveAttribute('aria-checked', 'false');
   });
 
-  it('BF4: a stored ON value shows ON; switching OFF PATCHes { gifsyRejectFastTrack: false }', async () => {
+  it('BF4: Cancel on the confirm saves nothing and leaves the switch OFF', async () => {
+    const patchSpy = vi.fn();
+    vi.stubGlobal('fetch', mockFetch(makeConfig({}), (body) => {
+      patchSpy(body);
+      return { status: 200, ok: true, json: async () => ({ success: true, data: {} }) };
+    }));
+    await renderPage();
+    const row = await screen.findByTestId('behaviour-flag-gifsyRejectFastTrack');
+    fireEvent.click(await within(row).findByRole('switch'));
+    const dialog = await screen.findByTestId('behaviour-flag-confirm');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
+    expect(patchSpy).not.toHaveBeenCalled();
+    expect(await within(row).findByRole('switch')).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('BF4: a stored ON value shows ON; switching OFF PATCHes { gifsyRejectFastTrack: false } with NO confirm', async () => {
     const patchSpy = vi.fn();
     vi.stubGlobal('fetch', mockFetch(makeConfig({ gifsyRejectFastTrack: true }), (body) => {
       patchSpy(body);
@@ -245,6 +276,7 @@ describe('Behaviour flags — gifsyRejectFastTrack (BF4)', () => {
     expect(await within(row).findByRole('switch')).toHaveAttribute('aria-checked', 'true');
     fireEvent.click(within(row).getByRole('switch'));
     await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
     expect(patchSpy.mock.calls[0][0]).toEqual({ features: { gifsyRejectFastTrack: false } });
     await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'false'));
   });

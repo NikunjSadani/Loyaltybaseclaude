@@ -7,6 +7,8 @@
  * FT2: fastTrack null → no banner (Deoleo / normal submission byte-identical).
  * FT3: fastTrack missing (older API) → no banner.
  * FT4: unparseable rejection date → still flags the skip, without an "Invalid Date".
+ * FT5 (F5): marker with an EMPTY previousSubmissionId → the banner still shows; only the link is hidden.
+ * F1: the "View previous submission" link opens in a new tab (target=_blank rel=noreferrer).
  */
 import React from 'react';
 import { render, screen, within } from '@testing-library/react';
@@ -32,8 +34,9 @@ vi.mock('react', async (importOriginal) => {
 
 import KYCDetailPage from '../page';
 
-const HEADLINE = 'Resubmitted after GIFSY rejection — sent straight to GIFSY (manager approval skipped)';
-const HISTORY_NOTE = 'Resubmitted after GIFSY rejection — sent straight to GIFSY (manager approval skipped)';
+// F3: one plain wording across surfaces (the backend history note uses the same sentence).
+const HEADLINE = 'Resubmitted after a GIFSY rejection — sent directly to GIFSY; managers did not re-approve.';
+const HISTORY_NOTE = 'Resubmitted after a GIFSY rejection — sent directly to GIFSY; managers did not re-approve.';
 const LOAD = { timeout: 10_000 };
 
 // Relative to now — never a hardcoded date.
@@ -76,8 +79,19 @@ describe('FT — Admin KYC fast-track banner', { timeout: 30_000 }, () => {
     const expectedDate = formatFastTrackDate(rejectedAt);
     expect(expectedDate).toBeTruthy();
     expect(within(banner).getByTestId('fast-track-previous')).toHaveTextContent(`Previous KYC rejected on ${expectedDate}`);
-    expect(within(banner).getByRole('link', { name: 'View previous submission' }))
-      .toHaveAttribute('href', '/admin/kyc/KYC-PREV-1');
+    const link = within(banner).getByRole('link', { name: 'View previous submission' });
+    expect(link).toHaveAttribute('href', '/admin/kyc/KYC-PREV-1');
+    // F1: opens in a new tab so the reviewer keeps this KYC open.
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noreferrer');
+  });
+
+  it('FT5 (F5): empty previousSubmissionId → banner still shown (skip never silently dropped), link hidden', async () => {
+    stubFetch(submission({ fastTrack: { previousSubmissionId: '', previousRejectedAt: rejectedAt } }));
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC002' })} />);
+    const banner = await screen.findByTestId('fast-track-banner', undefined, LOAD);
+    expect(await within(banner).findByText(HEADLINE)).toBeInTheDocument();
+    expect(within(banner).queryByRole('link', { name: 'View previous submission' })).toBeNull();
   });
 
   it('FT1b: the DRAFT→PENDING_GIFSY history row shows the skip note with a System actor (no blank)', async () => {
@@ -96,7 +110,7 @@ describe('FT — Admin KYC fast-track banner', { timeout: 30_000 }, () => {
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC002' })} />);
     expect(await screen.findByText('Status History', undefined, LOAD)).toBeInTheDocument();
     expect(screen.queryByTestId('fast-track-banner')).toBeNull();
-    expect(screen.queryByText(/manager approval skipped/i)).toBeNull();
+    expect(screen.queryByText(/managers did not re-approve/i)).toBeNull();
   });
 
   it('FT3: fastTrack missing (older API) → no banner', async () => {

@@ -483,7 +483,7 @@ function FeaturesStep({
   const toggle = (key: FeatureKey, value: boolean) =>
     onChange({ features: { ...form.features, [key]: value } });
 
-  // A behaviour flag with `confirmOn` meta (allowPayoutWithoutPan) asks before switching ON — the
+  // A behaviour flag with `confirmOn` meta (allowPayoutWithoutPan, gifsyRejectFastTrack) asks before switching ON — the
   // same dialog as the client page. Switching OFF never asks.
   const [confirmKey, setConfirmKey] = useState<BehaviourFlagKey | null>(null);
   const setFlag = (key: BehaviourFlagKey, value: boolean) =>

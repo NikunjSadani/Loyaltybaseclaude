@@ -25,13 +25,21 @@ export const KYC_FAST_TRACK_MARKER = 'GIFSY_REJECT_RESUBMISSION';
 /** Tenant feature-flag key (clients.features). */
 export const KYC_FAST_TRACK_FEATURE = 'gifsyRejectFastTrack';
 
-/** Status-history notes on the fast-track routing row (the skip must be visible — no silent pass-through). */
+/**
+ * Status-history notes on the fast-track routing row (the skip must be visible — no silent pass-through). Same
+ * sentence as the admin banner / approvals note (platform/src/lib/kyc-fast-track.ts FAST_TRACK_HEADLINE).
+ */
 export const KYC_FAST_TRACK_NOTE =
-  'Resubmitted after GIFSY rejection — sent straight to GIFSY (manager approval skipped)';
+  'Resubmitted after a GIFSY rejection — sent directly to GIFSY; managers did not re-approve.';
 
 /** Export "Routing" column header + the value for a fast-tracked submission (blank otherwise). */
 export const KYC_ROUTING_HEADER = 'Routing';
 export const KYC_ROUTING_FAST_TRACK_LABEL = 'Direct to GIFSY (resubmitted after GIFSY rejection)';
+
+/** True iff a tenant features blob has the fast-track flag ON (exactly `true`). */
+export function hasFastTrackFeature(features: unknown): boolean {
+  return asObject(features)?.[KYC_FAST_TRACK_FEATURE] === true;
+}
 
 /** The rejected statuses a resubmission can follow. RESUBMISSION_REQUIRED is the legacy alias of RE_UPLOAD_REQUIRED. */
 export const KYC_REJECTED_STATUSES = ['REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED'] as const;
@@ -133,26 +141,51 @@ export function kycRoutingLabel(fastTrack: KycFastTrack | null | undefined): str
   return fastTrack ? KYC_ROUTING_FAST_TRACK_LABEL : '';
 }
 
+function isRejectedStatus(s: string | null | undefined): boolean {
+  return !!s && (KYC_REJECTED_STATUSES as readonly string[]).includes(s);
+}
+
 /**
- * Eligibility of the PRIOR submission: it is in a rejected state AND the latest transition INTO that
- * status came from PENDING_GIFSY (Gifsy rejected it AFTER the managers had approved / after a previous
- * fast-track). `rejectionRows` = that submission's history rows into ANY rejected status. Returns the
- * rejection row (for previousRejectedAt) or null when not eligible.
+ * Eligibility of the PRIOR submission: it is in a rejected state AND it FIRST entered its current rejected
+ * chain from PENDING_GIFSY (Gifsy rejected it AFTER the managers had approved / after a previous fast-track).
+ *
+ * `history` = that submission's FULL status history (any order). From the LATEST row into the prior's current
+ * status, walk back through consecutive rejected→rejected rows (REJECTED / RE_UPLOAD_REQUIRED /
+ * RESUBMISSION_REQUIRED — e.g. Gifsy acting again on an already-rejected KYC: RE_UPLOAD_REQUIRED→REJECTED via
+ * reject(), or REJECTED→REJECTED via PATCH) to the row where it FIRST entered the rejected chain; qualify iff that
+ * row's fromStatus is PENDING_GIFSY. A manager rejection later re-rejected by Gifsy therefore does NOT qualify.
+ * An unprovable chain (a gap: no earlier row into the rejected fromStatus) → null (the normal manager route).
+ * Returns the time of the LATEST rejection (previousRejectedAt) or null when not eligible.
  */
 export function gifsyRejectionAfterManagers(
   prior: { status: string } | null | undefined,
-  rejectionRows: KycFastTrackHistoryRow[] | null | undefined,
+  history: KycFastTrackHistoryRow[] | null | undefined,
 ): { rejectedAt: Date } | null {
-  if (!prior || !(KYC_REJECTED_STATUSES as readonly string[]).includes(prior.status)) return null;
-  if (!Array.isArray(rejectionRows)) return null;
+  if (!prior || !isRejectedStatus(prior.status)) return null;
+  if (!Array.isArray(history)) return null;
+  // Oldest → newest; ties keep the input (query) order. Rows without a readable time are unusable.
+  const rows = history
+    .map((h, idx) => ({ h, idx, ms: h?.createdAt ? new Date(h.createdAt).getTime() : NaN }))
+    .filter((r) => !!r.h && Number.isFinite(r.ms))
+    .sort((a, b) => a.ms - b.ms || a.idx - b.idx);
   // The LATEST row INTO the prior's CURRENT rejected status.
-  let latest: { row: KycFastTrackHistoryRow; ms: number } | null = null;
-  for (const h of rejectionRows) {
-    if (!h || h.toStatus !== prior.status || !h.createdAt) continue;
-    const ms = new Date(h.createdAt).getTime();
-    if (!Number.isFinite(ms)) continue;
-    if (!latest || ms > latest.ms) latest = { row: h, ms };
+  let end = -1;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].h.toStatus === prior.status) {
+      end = i;
+      break;
+    }
   }
-  if (!latest || latest.row.fromStatus !== 'PENDING_GIFSY') return null;
-  return { rejectedAt: new Date(latest.ms) };
+  if (end < 0) return null;
+  // Walk back to the first entry into the rejected chain.
+  let i = end;
+  while (isRejectedStatus(rows[i].h.fromStatus)) {
+    const from = rows[i].h.fromStatus;
+    let j = i - 1;
+    while (j >= 0 && rows[j].h.toStatus !== from) j--;
+    if (j < 0) return null; // gap — cannot prove who first rejected it → fail safe (manager route)
+    i = j;
+  }
+  if (rows[i].h.fromStatus !== 'PENDING_GIFSY') return null;
+  return { rejectedAt: new Date(rows[end].ms) };
 }

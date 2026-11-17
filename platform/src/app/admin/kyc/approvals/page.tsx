@@ -40,7 +40,7 @@ import { usePermissions } from '@/lib/use-permissions'
 import { UpiCaptureMethodBadge, asUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge'
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section'
 import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote'
-import { FAST_TRACK_HEADLINE, FAST_TRACK_QUEUE_BADGE, formatFastTrackDate, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track'
+import { FAST_TRACK_HEADLINE, FAST_TRACK_QUEUE_BADGE, fastTrackPreviousText, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track'
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -771,17 +771,22 @@ export default function KycApprovalsPage() {
                     <RefreshCw className="h-4 w-4 shrink-0" aria-hidden="true" />
                     <span>
                       <span className="font-semibold">{FAST_TRACK_HEADLINE}</span>
-                      {(() => {
-                        const on = formatFastTrackDate(selected.fastTrack.previousRejectedAt)
-                        return on ? ` · Previous KYC rejected on ${on}` : ''
-                      })()}
-                      {' · '}
-                      <Link
-                        href={`/admin/kyc/${encodeURIComponent(selected.fastTrack.previousSubmissionId)}`}
-                        className="font-medium underline underline-offset-2"
-                      >
-                        View previous submission
-                      </Link>
+                      {/* F6: same fallback as the admin banner when the date is unreadable. */}
+                      {` · ${fastTrackPreviousText(selected.fastTrack)}`}
+                      {/* F5: no id → no link (the note itself always shows). F1: new tab keeps the queue open. */}
+                      {selected.fastTrack.previousSubmissionId && (
+                        <>
+                          {' · '}
+                          <Link
+                            href={`/admin/kyc/${encodeURIComponent(selected.fastTrack.previousSubmissionId)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-medium underline underline-offset-2"
+                          >
+                            View previous submission
+                          </Link>
+                        </>
+                      )}
                     </span>
                   </div>
                 )}

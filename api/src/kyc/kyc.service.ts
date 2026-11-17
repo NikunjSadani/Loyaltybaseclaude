@@ -34,11 +34,11 @@ import { isPartnerLoginRole } from '../partner/partner-display.helper';
 import {
   fastTrackFromHistory,
   gifsyRejectionAfterManagers,
+  hasFastTrackFeature,
   loadKycFastTrackMap,
   KYC_FAST_TRACK_FEATURE,
   KYC_FAST_TRACK_MARKER,
   KYC_FAST_TRACK_NOTE,
-  KYC_REJECTED_STATUSES,
 } from './kyc-fast-track.helper';
 // Outlet-master geo-fence (Bajaj-only). REUSE the pure visibility haversine + validity helpers
 // and the shared radius constant — never re-implement the distance math (per the design).
@@ -546,6 +546,12 @@ export class KycService {
       select: { id: true, partnerId: true, proposedPartner: true, partner: { select: { phone: true } } },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
+    // A1: the outlet must STILL be assigned to the sales caller's team when the owner is asked to consent (an outlet
+    // reassigned since the draft was started cannot be routed by the old rep). consent() needs this OTP, so it is
+    // covered transitively.
+    if (submission.partnerId) {
+      await this.assertOutletAssignedToCallerTeam(user, { partnerId: submission.partnerId });
+    }
 
     // Bind the consent OTP to THIS submission's outlet owner: the number must be the one persisted on
     // the submission (re-KYC → the proposed phone; new outlet → the partner's phone), never an
@@ -1083,52 +1089,165 @@ export class KycService {
   }
 
   /**
+   * D2 — whether ANY tenant in this caller's KYC read scope has `gifsyRejectFastTrack` ON, i.e. whether KYC read
+   * responses / exports carry the `fastTrack` marker (+ the export "Routing" column) at all. Flag-off scopes (Deoleo)
+   * get byte-identical JSON/files: no key, no column, and the marker loader never runs.
+   *   - `recordClientId` given (a single record, e.g. GET /kyc/:id) → decided by THAT record's tenant;
+   *   - an assumed GIFSY / CLIENT_ADMIN / any tenant-pinned caller → their (assumed) tenant;
+   *   - an un-assumed GIFSY (platform-wide read) → true iff ANY tenant has the flag (the scope is every tenant).
+   * On a read ERROR it warns and fails OPEN (true): showing a `fastTrack: null` key is harmless, while hiding a real
+   * skip would be a silent pass-through.
+   */
+  async fastTrackInScope(user: JwtPayload, recordClientId?: string | null): Promise<boolean> {
+    const clientId = recordClientId || (platformWide(user) ? null : user.clientId);
+    try {
+      if (clientId) {
+        const cfg = await this.tenant.resolveClient(clientId);
+        return hasFastTrackFeature(cfg?.features);
+      }
+      const clients = await this.prisma.client.findMany({ select: { features: true } });
+      return Array.isArray(clients) && clients.some((c) => hasFastTrackFeature(c.features));
+    } catch (e) {
+      this.logger.warn(
+        `${KYC_FAST_TRACK_FEATURE} scope check failed (${clientId ?? 'all tenants'}); including the fast-track marker. ` +
+          (e instanceof Error ? e.message : String(e)),
+      );
+      return true;
+    }
+  }
+
+  /**
+   * The caller's live (non-deleted) SalesUser in this tenant + their reporting subtree (self + every descendant), from
+   * ONE tenant-scoped read. null when the caller has no live SalesUser (admin / partner / soft-deleted rep).
+   */
+  private async callerSalesTeam(user: JwtPayload): Promise<{ salesUserId: string; team: Set<string> } | null> {
+    const nodes = await this.prisma.salesUser.findMany({
+      where: { clientId: user.clientId, deletedAt: null },
+      select: { id: true, reportingToId: true, userId: true },
+    });
+    if (!Array.isArray(nodes)) return null;
+    const me = nodes.find((n) => n.userId === user.sub);
+    if (!me) return null;
+    return { salesUserId: me.id, team: descendantSalesUserIds(me.id, nodes) };
+  }
+
+  /**
+   * A1 (PLATFORM-WIDE, owner-approved) — a SALES caller may act on an outlet (file a KYC, mark "Not interested", send
+   * the consent OTP) ONLY when it is ACTIVELY assigned (SalesUserAssignment, unassignedAt null) to them or someone in
+   * their downline. "Sales caller" = a SALES_* role OR anyone with a live SalesUser row (a SALES_* role WITHOUT one is
+   * refused, never waved through as non-sales). Non-sales callers are unchanged: GIFSY/CLIENT admins and the outlet
+   * owner self-enrolling (partner roles).
+   *   - `{ outletId }` → assignments on that outlet;
+   *   - `{ partnerId }` → assignments keyed on the partner OR on any of its (tenant, non-deleted) outlets.
+   */
+  private async assertOutletAssignedToCallerTeam(
+    user: JwtPayload,
+    target: { outletId: string } | { partnerId: string },
+  ): Promise<void> {
+    if (this.isAdmin(user.role)) return;
+    const notAssigned = "This outlet isn't assigned to you or your team.";
+    const caller = await this.callerSalesTeam(user);
+    if (!caller) {
+      if (user.role.startsWith('SALES_')) throw new ForbiddenException(notAssigned);
+      return; // partner self-enrolment / other non-sales caller — unchanged
+    }
+    const team = Array.from(caller.team);
+    const rows = await this.prisma.salesUserAssignment.findMany({
+      where:
+        'outletId' in target
+          ? { outletId: target.outletId, unassignedAt: null, salesUserId: { in: team } }
+          : {
+              unassignedAt: null,
+              salesUserId: { in: team },
+              OR: [
+                { partnerId: target.partnerId, partner: { clientId: user.clientId } },
+                { outlet: { partnerId: target.partnerId, clientId: user.clientId, deletedAt: null } },
+              ],
+            },
+      select: { salesUserId: true },
+    });
+    if (!Array.isArray(rows) || !rows.some((r) => caller.team.has(r.salesUserId))) {
+      throw new ForbiddenException(notAssigned);
+    }
+  }
+
+  /**
    * GIFSY-reject fast-track eligibility for a DRAFT about to be routed at consent (see kyc-fast-track.helper.ts
    * for the full business rule). Returns the previous submission + its Gifsy-rejection time when the KYC must
-   * go STRAIGHT to PENDING_GIFSY, else null (→ the normal resolveInitialRouting manager route).
+   * go STRAIGHT to PENDING_GIFSY, else null (→ the normal resolveInitialRouting route, `routedStatus`).
    *
-   * Cheap gates first (no I/O): the NEW submission's variant (SO Declaration always goes via managers — the ASM
-   * must re-sign) and a partner to key on; then the tenant flag; only then the prior-submission read.
+   * Gates, cheapest first:
+   *   1. the NEW submission's variant (SO Declaration always goes via managers — the ASM must re-sign) + a partner;
+   *   2. B2 — the normal route would have gone to a sales MANAGER (`routedStatus` = PENDING_*_APPROVAL). A non-sales
+   *      submitter (CLIENT_ADMIN, partner login, soft-deleted sales user) routes to SUBMITTED → never fast-tracked;
+   *   3. the tenant flag (fail-safe OFF);
+   *   4. the partner's most recently ROUTED prior submission was rejected by Gifsy after the managers (B3/B4);
+   *   5. B1 — the submitter is the outlet's CURRENT active assignee, or a manager above that assignee. Any rep can
+   *      file a KYC for any outlet in the tenant, so without this a rep from another territory could ride an old
+   *      rejection with no manager ever seeing it. An outlet reassigned to a new rep fast-tracks for the NEW assignee.
+   * B5: any lookup ERROR in 4–5 → warn + null (the normal route; the KYC is never left in DRAFT by this).
    *
-   * KEY = partnerId (the OUTLET's ChannelPartner), not the rep and not the outlet row:
-   *   - every KycSubmission is filed ABOUT a partner (createSubmissionRow keys the duplicate guard on it);
-   *   - a brand-new outlet's FIRST KYC creates its partner and links outlet.partnerId in the same tx; the
-   *     resubmission after a rejection then takes the `outlet.partnerId` (re-KYC) branch of create() → the SAME
-   *     partnerId. Nothing unlinks it on rejection, and the 48h stale-draft cleanup never deletes a partner that
-   *     has any submission past DRAFT (a rejected one included);
-   *   - group child outlets each get their OWN partner (createPartnerWithUniqueCode per child), so siblings never
-   *     share a key; reassignment to another rep does not change it (no rep/time conditions, per the rule).
+   * KEY = partnerId (the OUTLET's ChannelPartner), not the rep and not the outlet row: every KycSubmission is filed
+   * ABOUT a partner; a resubmission after a rejection takes the `outlet.partnerId` (re-KYC) branch of create() → the
+   * SAME partnerId; group child outlets each get their OWN partner, so siblings never share a key.
    */
   private async resolveGifsyRejectFastTrack(
-    clientId: string,
+    user: JwtPayload,
     submission: { id: string; partnerId: string | null; kycVariant?: string | null },
+    routedStatus: string,
   ): Promise<{ previousSubmissionId: string; previousRejectedAt: Date } | null> {
     if (submission.kycVariant === 'SO_DECLARATION') return null;
     if (!submission.partnerId) return null;
+    if (!/^PENDING_[A-Z]+_APPROVAL$/.test(routedStatus)) return null; // B2
+    const clientId = user.clientId;
+    const partnerId = submission.partnerId;
     if (!(await this.isGifsyRejectFastTrack(clientId))) return null;
 
-    // The partner's most recent PRIOR submission that actually got ROUTED: excludes this submission and every
-    // DRAFT (superseded / never-confirmed drafts never reached an approver). Tenant-scoped via the partner.
-    const prior = await this.prisma.kycSubmission.findFirst({
-      where: {
-        partnerId: submission.partnerId,
-        id: { not: submission.id },
-        status: { not: 'DRAFT' },
-        partner: { clientId },
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      select: {
-        id: true,
-        status: true,
-        statusHistory: {
-          where: { toStatus: { in: [...KYC_REJECTED_STATUSES] as KycStatus[] } },
-          select: { fromStatus: true, toStatus: true, createdAt: true },
+    try {
+      // B4: the partner's most recently ROUTED prior submission (submittedAt = the consent/routing moment; nulls
+      // last, then createdAt, id). Excludes this submission and every DRAFT. Tenant-scoped via the partner.
+      const prior = await this.prisma.kycSubmission.findFirst({
+        where: { partnerId, id: { not: submission.id }, status: { not: 'DRAFT' }, partner: { clientId } },
+        orderBy: [{ submittedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }, { id: 'desc' }],
+        select: {
+          id: true,
+          status: true,
+          // B3: the FULL history (the walk-back needs the rejected→rejected chain), oldest first.
+          statusHistory: {
+            select: { fromStatus: true, toStatus: true, createdAt: true },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          },
         },
-      },
-    });
-    if (!prior) return null;
-    const rejection = gifsyRejectionAfterManagers(prior, prior.statusHistory);
-    return rejection ? { previousSubmissionId: prior.id, previousRejectedAt: rejection.rejectedAt } : null;
+      });
+      if (!prior) return null;
+      const rejection = gifsyRejectionAfterManagers(prior, prior.statusHistory);
+      if (!rejection) return null;
+
+      // B1: submitter = the current active assignee, or above them in the reporting chain.
+      const submitter = await this.callerSalesTeam(user);
+      if (!submitter) return null;
+      const assignments = await this.prisma.salesUserAssignment.findMany({
+        where: {
+          unassignedAt: null,
+          salesUser: { clientId, deletedAt: null },
+          OR: [
+            { partnerId, partner: { clientId } },
+            { outlet: { partnerId, clientId, deletedAt: null } },
+          ],
+        },
+        select: { salesUserId: true },
+      });
+      const covered = Array.isArray(assignments) && assignments.some((a) => submitter.team.has(a.salesUserId));
+      if (!covered) return null;
+
+      return { previousSubmissionId: prior.id, previousRejectedAt: rejection.rejectedAt };
+    } catch (e) {
+      this.logger.warn(
+        `${KYC_FAST_TRACK_FEATURE} eligibility lookup failed for submission ${submission.id}; taking the normal route. ` +
+          (e instanceof Error ? e.message : String(e)),
+      );
+      return null;
+    }
   }
 
   private async resolveNextActiveManagerLevel(
@@ -1619,6 +1738,9 @@ export class KycService {
       include: { outletType: { select: { code: true } } },
     });
     if (!outlet) throw new NotFoundException('Outlet not found');
+    // A1: a sales caller may file only for an outlet actively assigned to them or their downline (after the 404,
+    // so another tenant's outlet still 404s; an unassigned same-tenant outlet 403s).
+    await this.assertOutletAssignedToCallerTeam(user, { outletId: outlet.id });
 
     // ── OUTLET-MASTER GEO-FENCE (Bajaj-only via clients.features.outletMasterGeo) ──────────
     // REUSES the SAME feature resolution admin-outlets.service.ts uses (a direct Client.features
@@ -3008,8 +3130,11 @@ export class KycService {
     // BUT once the rep has RESUBMITTED (this submission is in-flight / under review), the
     // in-flight status must show through — else a just-resubmitted re-KYC keeps reading as
     // "Re-KYC Required" instead of "Under Review" (the flags stay set until approval).
-    // GIFSY-reject fast-track markers for the page in ONE query (no N+1) — `fastTrack` per row.
-    const fastTrackById = await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id));
+    // GIFSY-reject fast-track markers for the page in ONE query (no N+1) — `fastTrack` per row. D2: ONLY when a
+    // tenant in the caller's scope has the flag; otherwise no query and no key (flag-off JSON byte-identical).
+    const fastTrackById = (await this.fastTrackInScope(user))
+      ? await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id))
+      : null;
     const mapped = submissions.map((s) => {
       // Strip the raw statusHistory out of the response — it is an internal detail; the FE
       // only needs the derived `gifsyEnteredAt` (latest PENDING_GIFSY entry, ISO or null) to
@@ -3028,7 +3153,7 @@ export class KycService {
         proposedPartner: stripPayoutCarried(rest.proposedPartner),
         status,
         gifsyEnteredAt,
-        fastTrack: fastTrackById.get(s.id) ?? null,
+        ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
       };
     });
 
@@ -3318,6 +3443,9 @@ export class KycService {
           )
         : null;
 
+    // D2: whether the record's tenant shows the fast-track marker (partner.clientId; else the caller's scope).
+    const fastTrackOn = await this.fastTrackInScope(user, submission.partner?.clientId ?? null);
+
     return {
       submission: {
         ...submission,
@@ -3338,7 +3466,8 @@ export class KycService {
         classificationLock,
         // GIFSY-reject fast-track marker (Bajaj): { previousSubmissionId, previousRejectedAt } when this KYC
         // skipped the managers at consent, else null. Derived from the already-loaded status history (no query).
-        fastTrack: fastTrackFromHistory(submission.statusHistory),
+        // D2: the key exists ONLY for a flag-on tenant (decided by the RECORD's tenant) — flag-off JSON unchanged.
+        ...(fastTrackOn ? { fastTrack: fastTrackFromHistory(submission.statusHistory) } : {}),
       },
     };
   }
@@ -3515,6 +3644,8 @@ export class KycService {
             toStatus: status as never,
             notes: rejectionReason ?? null,
             changedByUserId: user.sub,
+            // B7: label every GIFSY status change (as reject() does) — PATCH is GIFSY-only.
+            metadata: { stage: 'GIFSY', approverRole: user.role },
           },
         });
       }
@@ -4279,7 +4410,9 @@ export class KycService {
       // KYC AFTER the managers approved it goes STRAIGHT to PENDING_GIFSY — no manager to approve, so no
       // sales-approver notification. The skip is made VISIBLE: a DRAFT→PENDING_GIFSY history row carrying the
       // marker (surfaced as `fastTrack` on the detail/queue + the exports' "Routing" column) + an AuditLog row.
-      const fastTrack = await this.resolveGifsyRejectFastTrack(user.clientId, submission);
+      // The normal route is resolved FIRST (read-only): B2 fast-tracks only what would have gone to a manager.
+      const initialRouting = await this.resolveInitialRouting(user);
+      const fastTrack = await this.resolveGifsyRejectFastTrack(user, submission, initialRouting.status);
       if (fastTrack) {
         // stage GIFSY (the KYC now sits with Gifsy); deliberately NO approverRole — nobody approved it.
         const ftMeta = {
@@ -4323,21 +4456,13 @@ export class KycService {
           `[kyc-fast-track] ${submissionId} → PENDING_GIFSY (previous ${fastTrack.previousSubmissionId} rejected by GIFSY)`,
         );
 
-        // Owner KYC_SUBMITTED — exactly as the normal path below (paid channels only, fire-and-forget).
+        // Owner KYC_SUBMITTED — exactly as the normal path below (paid channels only, fire-and-forget). B6: ONLY
+        // this one — no extra immediate KYC_UNDER_REVIEW (two paid owner messages seconds apart).
         await this.notifyOwnerKycSubmitted(user, submission, mobile, verifiedAt);
-        // The same notification a manager's hand-off to Gifsy fires (firstApprove → KYC_UNDER_REVIEW): the KYC
-        // is now with Gifsy. There is no Gifsy-side notification/queue event on that hand-off to mirror.
-        await this.notify({
-          userId: submission.userId,
-          event: 'KYC_UNDER_REVIEW',
-          body: `Your KYC is under review.`,
-          clientId: user.clientId,
-          partnerId: submission.partnerId,
-        });
         return { verified: true, submissionId };
       }
 
-      const { status: routedStatus, escalatedFrom } = await this.resolveInitialRouting(user);
+      const { status: routedStatus, escalatedFrom } = initialRouting;
       // ATOMIC DRAFT→routed: only the consent that actually moves the row out of DRAFT writes the
       // history row + notifies (a racing consent sees count 0 and stops here).
       const routed = await this.prisma.kycSubmission.updateMany({
@@ -4437,6 +4562,8 @@ export class KycService {
     });
 
     if (!outlet) throw new NotFoundException(`Outlet "${outletId}" not found`);
+    // A1: a sales caller may mark only an outlet actively assigned to them or their downline.
+    await this.assertOutletAssignedToCallerTeam(user, { outletId: outlet.id });
     if (!outlet.isActive && outlet.kycIntent === 'NOT_INTERESTED') {
       // Already marked — idempotent.
       return { outletId, alreadyMarked: true };
@@ -5954,7 +6081,10 @@ export class KycService {
     // Per-tenant outlet-type display labels, scoped to each row's own tenant (Gifsy = cross-tenant).
     const typeDisplayByClient = await this.loadTypeDisplayByClient(submissions.map((s) => s.user.clientId));
     // GIFSY-reject fast-track markers for the whole queue in ONE query (no N+1).
-    const fastTrackById = await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id));
+    // D2: only when a tenant in the caller's scope has gifsyRejectFastTrack ON (else no query, no key).
+    const fastTrackById = (await this.fastTrackInScope(user))
+      ? await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id))
+      : null;
 
     const entries = submissions.map((s) => {
       // Overlay the re-KYC PROPOSED values (stage-at-approval) so the queue shows what's UNDER
@@ -6004,7 +6134,7 @@ export class KycService {
         nameMismatch: !!(holder && owner && holder !== owner),
         fields: this.dumpFieldStates(s.verificationItems),
         // { previousSubmissionId, previousRejectedAt } when resubmitted straight to Gifsy, else null.
-        fastTrack: fastTrackById.get(s.id) ?? null,
+        ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
       };
     });
 
@@ -6078,7 +6208,10 @@ export class KycService {
     // Per-tenant outlet-type display labels, scoped to each row's own tenant (Gifsy = cross-tenant).
     const typeDisplayByClient = await this.loadTypeDisplayByClient(submissions.map((s) => s.user.clientId));
     // GIFSY-reject fast-track markers for the page in ONE query (drives the "Routing" column).
-    const fastTrackById = await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id));
+    // D2: only when a tenant in the caller's scope has gifsyRejectFastTrack ON (else no query, no key).
+    const fastTrackById = (await this.fastTrackInScope(user))
+      ? await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id))
+      : null;
 
     const entries: KycReviewDumpEntry[] = [];
     for (const s of submissions) {
@@ -6122,7 +6255,7 @@ export class KycService {
         nameMismatch: !!(holder && owner && holder !== owner),
         documents: await this.resolveDumpDocuments(s.documents),
         fields: this.dumpFieldStates(s.verificationItems),
-        fastTrack: fastTrackById.get(s.id) ?? null,
+        ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
       });
     }
 
@@ -6217,7 +6350,10 @@ export class KycService {
       : [];
     const actorName = new Map(actors.map((a) => [a.id, a.name]));
     // GIFSY-reject fast-track markers for the page in ONE query (drives the "Routing" column).
-    const fastTrackById = await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id));
+    // D2: only when a tenant in the caller's scope has gifsyRejectFastTrack ON (else no query, no key).
+    const fastTrackById = (await this.fastTrackInScope(user))
+      ? await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id))
+      : null;
 
     const rows: RejectedKycRow[] = submissions.map((s) => {
       // A rejected re-KYC's proposed values were never applied to the live partner; the reviewer
@@ -6265,7 +6401,7 @@ export class KycService {
         accountNumber: p?.bankAccountNumber ?? undefined,
         ifscCode: p?.ifscCode ?? undefined,
         upiId: p?.upiId ?? undefined,
-        fastTrack: fastTrackById.get(s.id) ?? null,
+        ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
       };
     });
 

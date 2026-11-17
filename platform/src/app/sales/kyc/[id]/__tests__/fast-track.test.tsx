@@ -7,7 +7,10 @@
  *       Gifsy step is active; no Approve / Reject buttons — even for an ASM / SO viewer.
  * FTS2: fastTrack null → no note, stepper unchanged ("Approved by ASM").
  * FTS3: fastTrack missing (older API) → no note.
- * FTS4: fast-tracked KYC later rejected by GIFSY → manager step still "Skipped", the decided note shows.
+ * FTS4: fast-tracked KYC later rejected by GIFSY → manager step still "Skipped", NO note once decided.
+ * FTS5 (F4): ANY rejection of a fast-tracked KYC is Gifsy's — even a legacy row with no stage — so the
+ *       stepper never shows "SO Review — Rejected" under a skipped step.
+ * FTS6 (F3): approved fast-tracked KYC → no note; step "Skipped".
  */
 import React, { Suspense, act } from 'react';
 import { render, screen, within } from '@testing-library/react';
@@ -23,8 +26,10 @@ vi.mock('next/link', () => ({
 
 import SalesKYCDetailPage from '../page';
 
-const NOTE = 'Sent straight to GIFSY (resubmission after GIFSY rejection) — no manager approval needed';
-const HISTORY_NOTE = 'Resubmitted after GIFSY rejection — sent straight to GIFSY (manager approval skipped)';
+// F3: one line inside the existing PENDING_GIFSY box (sales surfaces use the page's "Gifsy" casing).
+const NOTE = 'Sent directly to Gifsy. Your manager does not need to approve it again.';
+const SKIPPED = 'Not needed — resent after Gifsy rejection';
+const HISTORY_NOTE = 'Resubmitted after a GIFSY rejection — sent directly to GIFSY; managers did not re-approve.';
 const LOAD = { timeout: 10_000 };
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
@@ -68,16 +73,19 @@ afterEach(() => { vi.unstubAllGlobals(); });
 beforeEach(() => { localStorage.clear(); localStorage.setItem('loyaltybase_sales_role', 'ASM'); });
 
 describe('FTS — sales KYC fast-track', { timeout: 30_000 }, () => {
-  it('FTS1: PENDING_GIFSY fast-track → note, manager step "Skipped", Gifsy active, no approve/reject', async () => {
+  it('FTS1: PENDING_GIFSY fast-track → one line in the PENDING_GIFSY box, manager step "Skipped", Gifsy active', async () => {
     await renderWith(submission('PENDING_GIFSY', { fastTrack: FAST }));
 
     const note = await screen.findByTestId('fast-track-note', undefined, LOAD);
     expect(note).toHaveTextContent(NOTE);
-    expect(note).toHaveAttribute('role', 'note');
+    // Merged INTO the existing PENDING_GIFSY box — not a second box.
+    const box = await screen.findByTestId('pending-gifsy-notice');
+    expect(box).toContainElement(note);
+    expect(box).toHaveTextContent('Awaiting final validation by Gifsy. No action required from your side.');
 
     const manager = await screen.findByTestId('timeline-step-first-approver');
     expect(await within(manager).findByText('Manager Review')).toBeInTheDocument();
-    expect(manager).toHaveTextContent('Skipped — resubmission after GIFSY rejection');
+    expect(manager).toHaveTextContent(SKIPPED);
     expect(manager).not.toHaveTextContent(/approved/i);
     expect(within(manager).getByTestId('step-dot-skipped')).toBeInTheDocument();
     expect(await screen.findByTestId('timeline-step-gifsy')).toHaveTextContent(/under gifsy review/i);
@@ -115,7 +123,7 @@ describe('FTS — sales KYC fast-track', { timeout: 30_000 }, () => {
     expect(screen.queryByTestId('fast-track-note')).toBeNull();
   });
 
-  it('FTS4: fast-tracked KYC then rejected by GIFSY → manager step stays "Skipped", decided note', async () => {
+  it('FTS4: fast-tracked KYC then rejected by GIFSY → manager step stays "Skipped", no note once decided', async () => {
     await renderWith(submission('REJECTED', {
       fastTrack: FAST,
       rejectionReason: 'PAN photo blurred',
@@ -124,10 +132,34 @@ describe('FTS — sales KYC fast-track', { timeout: 30_000 }, () => {
         { toStatus: 'PENDING_GIFSY', createdAt: daysAgo(2), notes: HISTORY_NOTE, metadata: null },
       ],
     }));
-    const note = await screen.findByTestId('fast-track-note', undefined, LOAD);
-    expect(note).toHaveTextContent(/manager approval was skipped/i);
-    const manager = await screen.findByTestId('timeline-step-first-approver');
-    expect(manager).toHaveTextContent('Skipped — resubmission after GIFSY rejection');
+    const manager = await screen.findByTestId('timeline-step-first-approver', undefined, LOAD);
+    expect(manager).toHaveTextContent(SKIPPED);
     expect(await screen.findByTestId('timeline-step-gifsy')).toHaveTextContent(/rejected — pan photo blurred/i);
+    expect(screen.queryByTestId('fast-track-note')).toBeNull();
+  });
+
+  it('FTS5 (F4): rejection row WITHOUT a Gifsy stage on a fast-tracked KYC → still Gifsy-rejected, never "SO Review — Rejected"', async () => {
+    await renderWith(submission('RE_UPLOAD_REQUIRED', {
+      fastTrack: FAST,
+      rejectionReason: 'Cheque unreadable',
+      statusHistory: [
+        // Legacy/raw row: no metadata.stage → the default classifier would call it a first-approver rejection.
+        { toStatus: 'RE_UPLOAD_REQUIRED', createdAt: daysAgo(1), notes: 'Cheque unreadable', metadata: null },
+        { toStatus: 'PENDING_GIFSY', createdAt: daysAgo(2), notes: HISTORY_NOTE, metadata: null },
+      ],
+    }));
+    const manager = await screen.findByTestId('timeline-step-first-approver', undefined, LOAD);
+    expect(manager).toHaveTextContent('Manager Review');
+    expect(manager).toHaveTextContent(SKIPPED);
+    expect(manager).not.toHaveTextContent(/rejected/i);
+    expect(within(manager).queryByText(/SO Review/)).toBeNull();
+    expect(await screen.findByTestId('timeline-step-gifsy')).toHaveTextContent(/rejected — cheque unreadable/i);
+  });
+
+  it('FTS6 (F3): approved fast-tracked KYC → no note (an approved KYC opens the outlet view, no stepper)', async () => {
+    await renderWith(submission('APPROVED', { fastTrack: FAST }));
+    expect(await screen.findByTestId('outlet-detail-back', undefined, LOAD)).toBeInTheDocument();
+    expect(screen.queryByTestId('fast-track-note')).toBeNull();
+    expect(screen.queryByTestId('pending-gifsy-notice')).toBeNull();
   });
 });
