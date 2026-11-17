@@ -17,8 +17,11 @@ import {
 } from '../../common/kyc-sla-stage';
 import { resolveMonthState, shiftMonthKey } from '../../sales-import/months/month-state';
 import { latestTargetWriteByMonth, targetsNewerThanApply, tenantHasTargetNamesDef } from '../../sales-import/kpi/focus-data';
+import { loadBillingProgress, summarizeBillingProgress } from '../../admin-core/dashboards/billing-progress';
+import { DISPERSAL_RETRY_MIN_AGE_MS } from '../../voucher-dispersal/voucher-dispersal.processor';
 import { buildDailyOpsDigest, digestWindow, kycPendingBuckets, MAX_FAILED_REDEMPTION_ROWS } from './daily-ops-digest-report';
 import type {
+  BillingSection,
   DigestInput,
   DigestWindow,
   KycSection,
@@ -31,6 +34,7 @@ import type {
   SectionResult,
   TenantDigest,
   VisibilitySection,
+  VoucherDispersalSection,
   VouchersSection,
 } from './report.types';
 
@@ -145,7 +149,10 @@ export class ScheduledReportsService {
       };
       if (t.hubble) digest.vouchers = await this.section('vouchers', c, () => this.vouchers(c, window, nowMs));
       if (t.visibility) digest.visibility = await this.section('visibility', c, () => this.visibility(c, window));
-      if (t.salesImport) digest.salesImport = await this.section('salesImport', c, () => this.salesImport(c, window, nowMs));
+      if (t.salesImport) {
+        digest.salesImport = await this.section('salesImport', c, () => this.salesImport(c, window, nowMs));
+        digest.billing = await this.section('billing', c, () => this.billing(c, nowMs));
+      }
       out.push(digest);
     }
 
@@ -160,7 +167,9 @@ export class ScheduledReportsService {
       }),
     );
 
-    return { window, dateLabel, tenants: out, unattributedOtpFailed };
+    const voucherDispersal = await this.section('voucher-dispersal', 'gifsy', () => this.voucherDispersal(window, nowMs));
+
+    return { window, dateLabel, tenants: out, unattributedOtpFailed, voucherDispersal };
   }
 
   /** Run one section loader, isolating any failure to that section. */
@@ -202,11 +211,16 @@ export class ScheduledReportsService {
         status: true,
         submittedAt: true,
         createdAt: true,
-        statusHistory: { where: { toStatus: KYC_GIFSY_STATUS as never }, select: { toStatus: true, createdAt: true } },
+        // Every PENDING_GIFSY entry: the latest one starts the Gifsy clock, and fromStatus + metadata identify the
+        // GIFSY-reject fast-track routing row (DRAFT→PENDING_GIFSY + marker) — no extra query needed.
+        statusHistory: {
+          where: { toStatus: KYC_GIFSY_STATUS as never },
+          select: { fromStatus: true, toStatus: true, createdAt: true, metadata: true },
+        },
       },
     });
-    const { field, gifsy } = kycPendingBuckets(pendingRows as never, targets, holidays, nowMs);
-    return { submitted, approved, rejected, field, gifsy };
+    const rollup = kycPendingBuckets(pendingRows as never, targets, holidays, nowMs);
+    return { submitted, approved, rejected, ...rollup };
   }
 
   private async points(clientId: string, w: DigestWindow): Promise<PointsSection> {
@@ -402,6 +416,63 @@ export class ScheduledReportsService {
         };
       }),
     };
+  }
+
+  /**
+   * Current-month billing progress — the admin dashboard's own loader + summary (unfiltered), so the digest and
+   * the "Billing progress" card can never disagree. ≈9 parallel queries per Sales-Import tenant, none per outlet.
+   */
+  private async billing(clientId: string, nowMs: number): Promise<BillingSection> {
+    const now = new Date(nowMs);
+    const data = await loadBillingProgress(
+      this.prisma,
+      clientId,
+      { month: null, program: null, outletType: null, managerId: null },
+      now,
+    );
+    const s = summarizeBillingProgress(data);
+    return {
+      month: s.month,
+      kpiLabel: s.kpi ? s.kpi.label : null,
+      asOf: s.asOf,
+      withTarget: s.outletsInScope,
+      notStarted: s.buckets.find((b) => b.key === 'NOT_STARTED')?.count ?? 0,
+      noTarget: s.outletsWithoutTarget,
+      notCovered: s.outletsNotCovered,
+      targetsOutsideRoster: s.targetsOutsideRoster,
+    };
+  }
+
+  /**
+   * Gifsy-wide Voucher Dispersal (GIFSY-run campaigns, not a tenant). Same definitions as the campaign screen
+   * (VoucherDispersalService.campaign summary): pending = QUEUED + BUYING + PENDING_RECONCILE; a WhatsApp is
+   * failed when the row's mirrored status is FAILED / UNKNOWN (or the send itself errored with no status);
+   * a PENDING_RECONCILE row is retryable 2 h after its last place attempt / flag (DISPERSAL_RETRY_MIN_AGE_MS).
+   * Window figures use the row timestamps the engine stamps (boughtAt; updatedAt for failures). Every count rides
+   * the (status, updatedAt) index; only PENDING_RECONCILE rows are read (two timestamps each).
+   */
+  private async voucherDispersal(w: DigestWindow, nowMs: number): Promise<VoucherDispersalSection> {
+    const inWindow = this.range(w);
+    const rows = this.prisma.voucherDispersalRow;
+    const bought = await rows.count({ where: { status: 'BOUGHT', boughtAt: inWindow } });
+    const buyFailed = await rows.count({ where: { status: 'BUY_FAILED', updatedAt: inWindow } });
+    const messageFailed = await rows.count({
+      where: {
+        status: 'BOUGHT',
+        updatedAt: inWindow,
+        OR: [{ messageStatus: { in: ['FAILED', 'UNKNOWN'] } }, { messageStatus: null, messageError: { not: null } }],
+      },
+    });
+    const pending = await rows.count({ where: { status: { in: ['QUEUED', 'BUYING', 'PENDING_RECONCILE'] } } });
+    const reconcile = await rows.findMany({
+      where: { status: 'PENDING_RECONCILE' },
+      select: { placeAttemptAt: true, pendingSince: true },
+    });
+    const pendingRetryable = reconcile.filter((r) => {
+      const anchors = [r.placeAttemptAt, r.pendingSince].filter((d): d is Date => !!d).map((d) => d.getTime());
+      return anchors.length > 0 && Math.max(...anchors) + DISPERSAL_RETRY_MIN_AGE_MS <= nowMs;
+    }).length;
+    return { bought, buyFailed, messageFailed, pending, pendingRetryable };
   }
 
   // ── Shared inputs ─────────────────────────────────────────────────────────────────────────

@@ -45,6 +45,16 @@ export interface KycSection {
   field: SlaBucket;
   /** Pending at Gifsy (PENDING_GIFSY). */
   gifsy: SlaBucket;
+  /**
+   * Of `gifsy.pending`: KYCs that went straight to Gifsy through the GIFSY-reject fast-track (Bajaj flag
+   * `gifsyRejectFastTrack`; marker on the DRAFT→PENDING_GIFSY row, `isFastTrackRow`). They had NO field stage.
+   */
+  gifsyFastTracked: number;
+  /**
+   * Fast-tracked KYCs found at a FIELD status (not a path the code has today). They are EXCLUDED from the field SLA
+   * (same rule as the admin dashboard's field-chain exclusion) and called out here instead of being aged.
+   */
+  fieldFastTrackedExcluded: number;
 }
 
 export interface PointsSection {
@@ -146,6 +156,46 @@ export interface SalesImportSection {
   openMonths: SalesOpenMonth[];
 }
 
+/**
+ * Current-month billing progress for the tenant's report KPI — the SAME numbers as the admin "Billing progress"
+ * dashboard card (`loadBillingProgress` + `summarizeBillingProgress`, unfiltered).
+ */
+export interface BillingSection {
+  /** 'YYYY-MM' (the current IST month). */
+  month: string;
+  /** The report KPI's label; null = the tenant has no enabled KPI (the card is hidden on the dashboard too). */
+  kpiLabel: string | null;
+  /** Data date (YYYY-MM-DD) the figures run to; null = no sales uploaded for the month. */
+  asOf: string | null;
+  /** Live-roster outlets with a positive target for the KPI. */
+  withTarget: number;
+  /** Of `withTarget`: outlets with no (or net-negative) billing yet — the NOT_STARTED bucket. */
+  notStarted: number;
+  /** Live outlets in the KPI's scope with no target (not counted). */
+  noTarget: number;
+  /** Live outlets outside the KPI's applies-to scope (not counted). */
+  notCovered: number;
+  /** Positive-target rows whose outlet is not in the live roster (not counted). */
+  targetsOutsideRoster: number;
+}
+
+/**
+ * Gifsy-wide Voucher Dispersal (GIFSY-run Excel → Hubble → WhatsApp campaigns; not tied to a tenant — the
+ * WhatsApp receipts are written under the platform tenant 'gifsy', so no tenant section can see them).
+ */
+export interface VoucherDispersalSection {
+  /** Rows → BOUGHT in the window (boughtAt). */
+  bought: number;
+  /** Rows → BUY_FAILED in the window (updatedAt). */
+  buyFailed: number;
+  /** BOUGHT rows whose WhatsApp is FAILED / UNKNOWN, recorded in the window (updatedAt). */
+  messageFailed: number;
+  /** QUEUED + BUYING + PENDING_RECONCILE right now (the campaign screen's "pending"). */
+  pending: number;
+  /** Of `pending`: PENDING_RECONCILE rows past the 2 h retry gate (an admin may Retry now). */
+  pendingRetryable: number;
+}
+
 export interface TenantDigest {
   clientId: string;
   name: string;
@@ -160,6 +210,8 @@ export interface TenantDigest {
   visibility?: SectionResult<VisibilitySection>;
   /** Present ONLY for tenants with features.salesImport. */
   salesImport?: SectionResult<SalesImportSection>;
+  /** Present ONLY for tenants with features.salesImport (its own try/catch — a failure never hides Sales Import). */
+  billing?: SectionResult<BillingSection>;
 }
 
 export interface DigestInput {
@@ -169,6 +221,8 @@ export interface DigestInput {
   tenants: TenantDigest[];
   /** OTP delivery failures in the window that carry no user (pre-login) — no tenant to attach them to. */
   unattributedOtpFailed?: SectionResult<number>;
+  /** Gifsy-wide Voucher Dispersal; hidden when every figure is zero, "couldn't load" when it failed. */
+  voucherDispersal?: SectionResult<VoucherDispersalSection>;
 }
 
 /** The rendered digest. */
@@ -178,6 +232,8 @@ export interface DigestResult {
   html: string;
   /** Tenants with at least one "needs attention" item. */
   tenantsNeedingAttention: number;
-  /** Total "needs attention" items across tenants. */
+  /** Total "needs attention" items across tenants + the Gifsy-wide items. */
   attentionItems: number;
+  /** Gifsy-wide (not tenant) attention items: voucher dispersal. */
+  gifsyWideItems: number;
 }

@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { buildDailyOpsDigest, digestWindow, kycPendingBuckets, needsAttention } from './daily-ops-digest-report';
+import { buildDailyOpsDigest, digestWindow, gifsyWideAttention, kycPendingBuckets, needsAttention } from './daily-ops-digest-report';
 import type { DigestInput, SectionResult, TenantDigest } from './report.types';
 
 const IST = 330 * 60 * 1000;
@@ -16,7 +16,15 @@ function quietTenant(clientId: string, name: string): TenantDigest {
   return {
     clientId,
     name,
-    kyc: ok({ submitted: 0, approved: 0, rejected: 0, field: { ...zeroBucket }, gifsy: { ...zeroBucket } }),
+    kyc: ok({
+      submitted: 0,
+      approved: 0,
+      rejected: 0,
+      field: { ...zeroBucket },
+      gifsy: { ...zeroBucket },
+      gifsyFastTracked: 0,
+      fieldFastTrackedExcluded: 0,
+    }),
     points: ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 0 }),
     redemptions: ok({ requested: 0, completed: 0, failed: 0, failedRows: [] }),
     payouts: ok({
@@ -46,6 +54,8 @@ function busyTenant(): TenantDigest {
       rejected: 4,
       field: { pending: 58, within: 30, nearing: 16, breached: 12 },
       gifsy: { pending: 21, within: 18, nearing: 1, breached: 2 },
+      gifsyFastTracked: 3,
+      fieldFastTrackedExcluded: 0,
     }),
     points: ok({ credited: 184250, redeemed: 96400, expired: 1200, negativeWallets: 5 }),
     redemptions: ok({
@@ -81,8 +91,22 @@ function busyTenant(): TenantDigest {
         { month: '2026-10', lastAppliedAtMs: ist(2026, 11, 3, 11, 0), targetsChangedSinceApply: false },
       ],
     }),
+    billing: ok({
+      month: '2026-11',
+      kpiLabel: 'Total Sales',
+      asOf: '2026-11-12',
+      withTarget: 6417,
+      notStarted: 1840,
+      noTarget: 35,
+      notCovered: 0,
+      targetsOutsideRoster: 2,
+    }),
   };
 }
+
+/** Gifsy-wide voucher dispersal with problems. */
+const busyDispersal = () =>
+  ok({ bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1 });
 
 const NOW = ist(2026, 11, 13); // Fri 13 Nov 2026, 09:30 IST
 
@@ -149,6 +173,52 @@ describe('kycPendingBuckets (reuses the two-stage business-hours SLA)', () => {
     expect(kycPendingBuckets(rows, targets, new Set(), now).field.breached).toBe(1); // 33h > 24
     expect(kycPendingBuckets(rows, targets, new Set(['2026-11-12']), now).field.breached).toBe(0);
   });
+
+  const FT_ROW = {
+    fromStatus: 'DRAFT',
+    toStatus: 'PENDING_GIFSY',
+    metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION' },
+    createdAt: new Date(now - 2 * HOUR),
+  };
+
+  it('fast-track: a fast-tracked KYC at Gifsy is on the Gifsy clock and counted as fast-tracked, never a field item', () => {
+    const rows = [
+      // Submitted long ago (would breach the FIELD SLA if aged from submission) but fast-tracked 2h ago.
+      { status: 'PENDING_GIFSY', submittedAt: new Date(ist(2026, 11, 2, 9, 0)), statusHistory: [FT_ROW] },
+      // A normal Gifsy row.
+      {
+        status: 'PENDING_GIFSY',
+        submittedAt: new Date(ist(2026, 11, 2, 9, 0)),
+        statusHistory: [{ fromStatus: 'PENDING_RSM_APPROVAL', toStatus: 'PENDING_GIFSY', createdAt: new Date(now - HOUR) }],
+      },
+    ];
+    const r = kycPendingBuckets(rows, targets, new Set(), now);
+    expect(r.gifsy).toEqual({ pending: 2, within: 2, nearing: 0, breached: 0 });
+    expect(r.field).toEqual({ pending: 0, within: 0, nearing: 0, breached: 0 });
+    expect(r.gifsyFastTracked).toBe(1);
+    expect(r.fieldFastTrackedExcluded).toBe(0);
+  });
+
+  it('fast-track: an UNMARKED DRAFT→PENDING_GIFSY edge is not fast-track (marker only, same as the dashboard)', () => {
+    const rows = [
+      {
+        status: 'PENDING_GIFSY',
+        submittedAt: new Date(now - 3 * HOUR),
+        statusHistory: [{ fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', metadata: null, createdAt: new Date(now - HOUR) }],
+      },
+    ];
+    expect(kycPendingBuckets(rows, targets, new Set(), now).gifsyFastTracked).toBe(0);
+  });
+
+  it('fast-track: a fast-tracked KYC at a FIELD status is excluded from the field SLA and counted (never silently)', () => {
+    const rows = [
+      { status: 'PENDING_ASM_APPROVAL', submittedAt: new Date(ist(2026, 11, 2, 9, 0)), statusHistory: [FT_ROW] },
+      { status: 'PENDING_ASM_APPROVAL', submittedAt: new Date(ist(2026, 11, 2, 9, 0)) },
+    ];
+    const r = kycPendingBuckets(rows, targets, new Set(), now);
+    expect(r.field).toEqual({ pending: 1, within: 0, nearing: 0, breached: 1 });
+    expect(r.fieldFastTrackedExcluded).toBe(1);
+  });
 });
 
 describe('needsAttention', () => {
@@ -181,6 +251,37 @@ describe('needsAttention', () => {
     t.vouchers = ok({ issued: 0, failed: 0, stuckProcessing: 0, needsReconcile: 2 });
     t.salesImport = ok({ processed: 0, failed: 1, openMonths: [] });
     expect(needsAttention(t)).toEqual(['Hubble: 2 orders need reconcile', 'Sales Import: 1 import failed']);
+  });
+
+  it('a fast-tracked KYC at a field stage and a failed Billing progress section are attention items', () => {
+    const t = quietTenant('x', 'X');
+    if (t.kyc.ok) t.kyc.data.fieldFastTrackedExcluded = 1;
+    t.billing = { ok: false, error: 'timeout' };
+    expect(needsAttention(t)).toEqual([
+      '1 fast-tracked KYC at a field stage — not on the field SLA, check by hand',
+      "Couldn't load the Billing progress section",
+    ]);
+  });
+});
+
+describe('gifsyWideAttention (voucher dispersal)', () => {
+  it('nothing when absent or clean', () => {
+    expect(gifsyWideAttention({})).toEqual([]);
+    expect(gifsyWideAttention({ voucherDispersal: ok({ bought: 9, buyFailed: 0, messageFailed: 0, pending: 3, pendingRetryable: 0 }) })).toEqual([]);
+  });
+
+  it('failed purchases, failed WhatsApps and pending > 2 h are called out', () => {
+    expect(gifsyWideAttention({ voucherDispersal: busyDispersal() })).toEqual([
+      'Voucher dispersal: 2 purchases failed',
+      'Voucher dispersal: 4 WhatsApp messages failed',
+      'Voucher dispersal: 1 purchase unconfirmed by Hubble for over 2 h (Retry available)',
+    ]);
+  });
+
+  it('a load failure is itself an item', () => {
+    expect(gifsyWideAttention({ voucherDispersal: { ok: false, error: 'boom' } })).toEqual([
+      "Couldn't load the Voucher dispersal section",
+    ]);
   });
 });
 
@@ -279,6 +380,54 @@ describe('buildDailyOpsDigest', () => {
     expect(r2.html).toContain("Couldn't load the pre-login OTP failures (boom).");
   });
 
+  it('voucher dispersal: hidden when all zero; shown + Gifsy-wide box + subject suffix when there are problems', () => {
+    const zero = buildDailyOpsDigest(
+      input([quietTenant('d', 'D')], { voucherDispersal: ok({ bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0 }) }),
+    );
+    expect(zero.html).not.toContain('Voucher dispersal');
+    expect(zero.subject).toBe('Gifsy daily operations — 13 Nov 2026 — 0 need attention');
+    expect(zero.html).toContain('All quiet — no tenant needs attention.');
+
+    const busy = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: busyDispersal() }));
+    expect(busy.subject).toBe('Gifsy daily operations — 13 Nov 2026 — 0 need attention + Gifsy-wide items');
+    expect(busy.gifsyWideItems).toBe(3);
+    expect(busy.attentionItems).toBe(3);
+    expect(busy.html).toContain('Needs attention — Gifsy-wide');
+    expect(busy.html).toContain('data-section="Voucher dispersal (Gifsy-wide)"');
+    expect(busy.html).not.toContain('All quiet — no tenant needs attention.');
+
+    const failed = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: { ok: false, error: 'no table' } }));
+    expect(failed.html).toContain("Couldn't load this section (no table).");
+    expect(failed.html).not.toContain('All quiet — no tenant needs attention.');
+  });
+
+  it('KYC: fast-tracked count rides the Gifsy line; a field-stage fast-track gets a red note', () => {
+    const html = buildDailyOpsDigest(input([busyTenant()])).html;
+    expect(html).toContain('of which fast-tracked (skipped field)');
+    const t = quietTenant('x', 'X');
+    if (t.kyc.ok) t.kyc.data.fieldFastTrackedExcluded = 2;
+    const h2 = buildDailyOpsDigest(input([t])).html;
+    expect(h2).toContain('2 fast-tracked KYCs are at a field stage — left out of the field SLA');
+  });
+
+  it('billing progress: "N of M", data date, not-counted notes, and the honest empty / no-KPI states', () => {
+    const busy = buildDailyOpsDigest(input([busyTenant()])).html;
+    expect(busy).toContain('data-section="Billing progress"');
+    expect(busy).toContain('1,840 of 6,417 with a target');
+    expect(busy).toContain('KPI Total Sales · data up to 12 Nov 2026');
+    expect(busy).toContain('Not counted above: 35 outlets have no target; 2 targets are for outlets not in the live roster.');
+
+    const base = { month: '2026-11', asOf: null, withTarget: 0, notStarted: 0, noTarget: 0, notCovered: 0, targetsOutsideRoster: 0 };
+    const t1 = quietTenant('a', 'A');
+    t1.billing = ok({ ...base, kpiLabel: null });
+    expect(buildDailyOpsDigest(input([t1])).html).toContain("No enabled KPI for this tenant — billing progress for November 2026 can&#39;t be shown.");
+    const t2 = quietTenant('b', 'B');
+    t2.billing = ok({ ...base, kpiLabel: 'Total Sales' });
+    const h2 = buildDailyOpsDigest(input([t2])).html;
+    expect(h2).toContain('No outlet has a Total Sales target for November 2026 — nothing to measure.');
+    expect(h2).toContain('no sales uploaded for November 2026 yet');
+  });
+
   /**
    * The committed owner-facing sample (platform/docs/plans/samples/daily-ops-digest-sample.html) is a
    * golden file of this fixture. Regenerate after an intentional layout change with:
@@ -287,7 +436,7 @@ describe('buildDailyOpsDigest', () => {
   it('matches the committed sample HTML (busy Bajaj-like + quiet Deoleo-like tenant)', () => {
     const quietDeoleo = quietTenant('deoleo', 'Deoleo India');
     const html = buildDailyOpsDigest(
-      input([quietDeoleo, busyTenant()], { unattributedOtpFailed: ok(0) }),
+      input([quietDeoleo, busyTenant()], { unattributedOtpFailed: ok(0), voucherDispersal: busyDispersal() }),
     ).html;
     const file = path.resolve(__dirname, '../../../../platform/docs/plans/samples/daily-ops-digest-sample.html');
     if (process.env.UPDATE_DIGEST_SAMPLE === '1') {

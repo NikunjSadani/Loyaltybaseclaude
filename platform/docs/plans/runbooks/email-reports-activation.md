@@ -80,7 +80,9 @@ Confirm a recipient actually received it and it rendered (summary table, per-ten
 rendered sample lives at `platform/docs/plans/samples/daily-ops-digest-sample.html`.
 
 ## Notes
-- **Subject:** `Gifsy daily operations — <date> — <N> need attention` (N = tenants with ≥ 1 "needs attention" item).
+- **Subject:** `Gifsy daily operations — <date> — <N> need attention` (N = tenants with ≥ 1 "needs attention" item). When a
+  Gifsy-wide item (Voucher Dispersal: failed purchase / failed WhatsApp / unconfirmed > 2 h, or that section failed to
+  load) is present the subject ends `… need attention + Gifsy-wide items` — N stays a tenant count.
 - **Window:** since the same time on the previous working day — Monday covers Saturday 09:30 → Monday 09:30;
   other days the last 24 h (IST).
 - **All-tenant + platform recipients:** the digest summarises ALL active tenants and goes to one Gifsy-configured

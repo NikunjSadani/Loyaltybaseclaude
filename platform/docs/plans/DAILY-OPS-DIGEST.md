@@ -7,6 +7,10 @@ section per tenant. It goes to internal Gifsy recipients only, never to clients.
 Activation and recipients: `runbooks/email-reports-activation.md`. Rendered sample:
 `samples/daily-ops-digest-sample.html`.
 
+**Status (2026-11-17):** branch `feat/daily-ops-digest` brought up to `develop` `71df01f7` and reconciled with what
+shipped since 13 Nov — KYC fast-track, Voucher Dispersal, Billing progress (see "Reconciliation 2026-11-17" below).
+Not yet audited, pushed or merged.
+
 ## Code
 - `api/src/reports/scheduled/scheduled-reports.service.ts`: the runner. It does every Prisma query, tenant by tenant
   and section by section, and each section has its own try/catch.
@@ -25,10 +29,15 @@ Monday it covers **Saturday 09:30 → Monday 09:30** (48 h). On every other day 
 The digest covers every `Client` with `status = ACTIVE`, except the Gifsy operator row (`gifsy`). Each tenant is shown
 under its display name: `branding.displayName`, or `internalName` when that is empty.
 
-Three sections are optional. Each one appears only for tenants that have it switched on:
+Four sections are optional. Each one appears only for tenants that have it switched on:
 - **Vouchers (Hubble)**: `features.hubbleVoucherEnabled === true`.
-- **Sales Import**: `features.salesImport === true`.
+- **Sales Import** and **Billing progress**: `features.salesImport === true`.
 - **Visibility**: the `visibilityEnabled` program setting is `true`. This is the same rule `TenantSettingsService` uses.
+
+One section is **Gifsy-wide** (not a tenant) and sits in the summary at the top: **Voucher dispersal** (GIFSY-run
+Excel → Hubble → WhatsApp campaigns, `VOUCHER-DISPERSAL.md`). It is hidden when every figure is zero. Its WhatsApp
+receipts are written under the platform tenant `gifsy`, which the tenant list excludes, so no tenant section could
+show them.
 
 ## Sections and data sources
 Labels used below:
@@ -41,6 +50,7 @@ Labels used below:
 | | approved | `KycSubmission.status = APPROVED` and `approvedAt` in window |
 | | rejected | `KycStatusHistory.toStatus ∈ {REJECTED, RE_UPLOAD_REQUIRED, RESUBMISSION_REQUIRED}`, `createdAt` in window |
 | | pending by stage | Field statuses and `PENDING_GIFSY` (now). Each row is aged with the shared two-stage business-hours `kycStageSla` (holidays and per-tenant targets apply). Field rows start from submission. Gifsy rows start from the latest `PENDING_GIFSY` entry. Each row is then bucketed as **within** (< 75 % of target), **nearing** (75–100 %) or **breached** (> target). |
+| | fast-tracked | GIFSY-reject fast-track (Bajaj flag `gifsyRejectFastTrack`): a KYC whose PENDING_GIFSY history holds the marked DRAFT→PENDING_GIFSY row (`isFastTrackRow`, `api/src/kyc/kyc-fast-track.helper.ts` — the same predicate as the admin dashboard's field-chain exclusion; marker only, never the bare edge). It skipped the field chain, so it is **never a field-SLA item**. At Gifsy it ages on the Gifsy clock and is shown as "of which fast-tracked (skipped field)". At a field status (no code path does this today) it is left out of the field SLA and called out in red + as an attention item. Read from the same history rows (no extra query). |
 | Points | credited / redeemed / expired | `PointsLedger` `EARN` / `REDEEM` / `EXPIRE` points summed over `createdAt` in window (tenant via `wallet.partner.clientId`). Redeemed and expired are shown as absolute values. |
 | | negative wallets | `Wallet.redeemablePoints < 0` (now) |
 | Redemptions | requested | `RedemptionOrder.createdAt` in window |
@@ -62,6 +72,12 @@ Labels used below:
 | | pending | `VisibilityCapture.status = SUBMITTED` (now) |
 | Sales Import | processed / failed | `SalesImport` `READY` with `finishedAt` in window, and `FAILED` with `updatedAt` in window |
 | | open months | The last 6 months, kept when `resolveMonthState` says OPEN and the month is not in the future. Each shows `SalesMonthStatus.lastAppliedAt` and `targetsChangedSinceApply`. That flag uses the same rule as `SalesMonthsService`: `tenantHasTargetNamesDef`, then `latestTargetWriteByMonth`, then `targetsNewerThanApply`. Focus-product blockers are deliberately left out because they are too heavy to compute here. |
+| Billing progress | not started billing | Current IST month, the tenant's report KPI (primary, else first enabled). `loadBillingProgress` + `summarizeBillingProgress` from `api/src/admin-core/dashboards/billing-progress.ts`, unfiltered — the SAME numbers as the admin "Billing progress" card. Shows "N of M with a target" (N = NOT_STARTED bucket, M = live-roster outlets with a positive target), the data date, and what is not counted (outlets with no target, outside the KPI's scope, targets for outlets not in the live roster). No enabled KPI / no targets / no sales yet are each said in words. Informational — not an attention item. Its own try/catch: a failure never hides Sales Import. |
+| Voucher dispersal (Gifsy-wide) | bought | `VoucherDispersalRow.status = BOUGHT`, `boughtAt` in window |
+| | purchase failed | `status = BUY_FAILED`, `updatedAt` in window |
+| | WhatsApp failed | `status = BOUGHT` and the mirrored `messageStatus` ∈ {FAILED, UNKNOWN} (or no status but `messageError`), `updatedAt` in window — the campaign screen's "message failed" rule |
+| | pending | `QUEUED` + `BUYING` + `PENDING_RECONCILE` (now) — the campaign screen's "pending" |
+| | unconfirmed > 2 h | `PENDING_RECONCILE` rows past the retry gate: latest of `placeAttemptAt` / `pendingSince` + `DISPERSAL_RETRY_MIN_AGE_MS` (2 h) ≤ now — the service's `retryAvailableAt` rule |
 
 Failures in the message tables are counted when the failure was **recorded** (`updatedAt`), not when the message was
 sent. A delivery report that arrives after the send is therefore still counted, in the next digest.
@@ -76,7 +92,12 @@ Each tenant section starts with a bullet list of every abnormal item:
 - messages that failed delivery
 - failed Sales Imports
 - "Targets changed — recalculate <month>"
-- every section that could not be loaded
+- fast-tracked KYCs found at a field stage (not on the field SLA — check by hand)
+- every section that could not be loaded (incl. Billing progress)
+
+**Gifsy-wide** items are listed in a "Needs attention — Gifsy-wide" box in the summary: Voucher dispersal purchases
+failed, WhatsApp messages failed, purchases unconfirmed by Hubble for over 2 h (Retry available), or the section could
+not be loaded. They count in the attention-item total and stop the "All quiet" line, but they are not a tenant.
 
 The summary at the top has one row per tenant: the number of attention items, KYC pending, redemptions requested, points
 credited and payouts paid. Tenants are ordered by attention count (highest first), then by name.
@@ -86,7 +107,10 @@ pending review. These sections are hidden when every figure is zero. A tenant wi
 its name, then "All quiet — nothing to report."
 
 Subject: `Gifsy daily operations — <date> — <N> need attention`, where N is the number of tenants that have at least
-one attention item.
+one attention item. When there is any Gifsy-wide item the subject ends `… + Gifsy-wide items`, so it never reads
+"0 need attention" while a dispersal problem sits in the body.
+
+A Sales-Import tenant always shows its Billing progress block, so it is never "All quiet" on its own.
 
 ## Failure handling
 - **One section fails** (a query throws): that tenant's section shows "Couldn't load this section (reason)". It also
@@ -108,7 +132,22 @@ The recipient list is `reportRecipients.dailyDigest`, stored in a platform `prog
 ## Scale
 Queries run one tenant at a time, and within a tenant one section at a time. Every query is an indexed or
 relation-scoped count, aggregate or groupBy. The only row-level reads are:
-- the pending KYC rows, needed for the SLA calculation
+- the pending KYC rows, needed for the SLA calculation (with their PENDING_GIFSY history rows, which also carry the
+  fast-track marker)
 - up to 10 failed redemptions
+- the voucher-dispersal rows in PENDING_RECONCILE (two timestamps each)
+- Billing progress (Sales-Import tenants only): the dashboard loader's ≈9 parallel queries — the whole live roster,
+  targets and sales records for the month, aggregated in memory, none per outlet. Same load as opening the dashboard
+  card once (Bajaj ≈6.5k outlets).
 
 With a handful of tenants (Bajaj ~6.5k outlets, Deoleo with a longer history), one run is a few dozen small queries.
+
+## Reconciliation 2026-11-17 (merge of `develop` `71df01f7`)
+- **Merge:** conflicts only in `RESUME.md` and `BAJAJ-GO-LIVE-DECISIONS-LOG.md` (develop's side kept; both already
+  described the digest). Code auto-merged; develop renamed/removed no helper the digest uses.
+- **KYC fast-track** — see the KYC table rows above. A fast-tracked KYC was already never on the field clock (it sits
+  in PENDING_GIFSY); the rule is now explicit, uses the dashboard's `isFastTrackRow`, and the count is shown.
+- **Voucher Dispersal** — new Gifsy-wide section + attention items (above).
+- **Billing progress** — new per-tenant block for Sales-Import tenants (above).
+- Local note: this worktree's generated Prisma client predated the dispersal models; `npx prisma generate` (local
+  `node_modules` only) was needed before the api type-checked.
