@@ -5,6 +5,7 @@
  */
 import type { AnyExportKind } from '../export-kinds';
 import { APP_INSTALLED_USERS_KIND } from './batch2/app-installed-users.kind';
+import { BILLING_PROGRESS_OUTLETS_KIND } from './batch2/billing-progress.kind';
 import { DELIVERY_STATUS_KIND } from './batch2/delivery-status.kind';
 import { PAYMENTS_REPORT_KIND } from './batch2/payments-report.kind';
 import { POINTS_COMPUTE_KINDS } from './batch2/points-compute.kinds';
@@ -20,4 +21,5 @@ export const BATCH2_EXPORT_KINDS: readonly AnyExportKind[] = [
   DELIVERY_STATUS_KIND,
   ...POINTS_COMPUTE_KINDS,
   APP_INSTALLED_USERS_KIND,
+  BILLING_PROGRESS_OUTLETS_KIND,
 ];

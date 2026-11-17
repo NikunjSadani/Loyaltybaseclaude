@@ -9,8 +9,14 @@ import {
   CheckCircle2,
   AlertCircle,
   Banknote,
+  Loader2,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
+import {
+  useDashboardProgram, withProgramParam, isTenantWideMetric, MIN_PROGRAMS_FOR_FILTER,
+} from '@/lib/dashboard-program';
+import { ProgramFilter, TenantWideNote } from '@/components/admin/dashboard/ProgramFilter';
+import { BillingProgressCard } from '@/components/admin/dashboard/BillingProgressCard';
 
 /* ─── KPI card data ──────────────────────────────────────────────────────────── */
 
@@ -19,6 +25,8 @@ import { authHeader } from '@/lib/api-client';
 // the payout fund is GIFSY-only (Q1), not a tenant KPI. MoM/YoY trend deltas need time-series we don't
 // aggregate yet, so they're omitted here rather than faked (analytics deferred to P8).
 interface KpiMeta {
+  /** Response key — also the `notProgramScoped` key for the "Tenant-wide" note. */
+  key:   'activePartners' | 'pendingKyc' | 'pendingVisibility' | 'totalRedeemablePoints';
   label: string;
   icon:  React.ElementType;
   color: string;
@@ -26,10 +34,10 @@ interface KpiMeta {
 }
 
 const KPI_META: KpiMeta[] = [
-  { label: 'Total Active Partners',        icon: Users,      color: 'bg-blue-50 text-blue-600',     border: 'border-blue-100'   },
-  { label: 'Pending KYC',                  icon: Clock,      color: 'bg-amber-50 text-amber-600',   border: 'border-amber-100'  },
-  { label: 'Pending Visibility Approvals', icon: Eye,        color: 'bg-purple-50 text-purple-600', border: 'border-purple-100' },
-  { label: 'Total Points Liability',       icon: TrendingUp, color: 'bg-red-50 text-red-600',       border: 'border-red-100'    },
+  { key: 'activePartners',        label: 'Total Active Partners',        icon: Users,      color: 'bg-blue-50 text-blue-600',     border: 'border-blue-100'   },
+  { key: 'pendingKyc',            label: 'Pending KYC',                  icon: Clock,      color: 'bg-amber-50 text-amber-600',   border: 'border-amber-100'  },
+  { key: 'pendingVisibility',     label: 'Pending Visibility Approvals', icon: Eye,        color: 'bg-purple-50 text-purple-600', border: 'border-purple-100' },
+  { key: 'totalRedeemablePoints', label: 'Total Points Liability',       icon: TrendingUp, color: 'bg-red-50 text-red-600',       border: 'border-red-100'    },
 ];
 
 /* ─── Payout summary chrome ──────────────────────────────────────────────────── */
@@ -49,6 +57,10 @@ interface ApiKpiData {
   pendingVisibility:     number;
   totalRedeemablePoints: number;
   payoutSummary:         Record<string, { count: number; amountPaise: number }>;
+  /** Real distinct Outlet.programName values (dropdown source). Older API: absent → []. */
+  availablePrograms?:    string[];
+  /** Metric keys that stay tenant-wide when a program is selected. Older API: absent → []. */
+  notProgramScoped?:     string[];
 }
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
@@ -56,13 +68,47 @@ interface ApiKpiData {
 export default function DashboardPage() {
   // Live KPIs from the API — the only source for the cards. No mock fallback (was 4821/214/…).
   const [liveKpis, setLiveKpis] = useState<ApiKpiData | null>(null);
+  const [kpiLoading, setKpiLoading] = useState(true);
+  const [kpiError, setKpiError] = useState<string | null>(null);
+  // Shared dashboard program ('' = All programs → the request is byte-identical to before).
+  const programState = useDashboardProgram();
+  const { program, ready: programReady, setProgram, reconcile } = programState;
+  // Last-known program list — kept across a failed refetch so the person can still switch back.
+  const [programOptions, setProgramOptions] = useState<string[]>([]);
 
   useEffect(() => {
-    fetch('/api/admin/dashboard/kpis', { headers: { ...authHeader() } })
-      .then(r => r.json())
-      .then(json => { if (json.success && json.data) setLiveKpis(json.data); })
-      .catch(() => {});
-  }, []);
+    if (!programReady) return;
+    let cancelled = false;
+    let dropped = false; // response discarded because its program isn't usable → a fresh fetch follows
+    setKpiLoading(true);
+    setKpiError(null);
+    fetch(withProgramParam('/api/admin/dashboard/kpis', program), { headers: { ...authHeader() } })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`Request failed (${r.status})`);
+        return r.json();
+      })
+      .then((json) => {
+        if (cancelled) return;
+        if (!json?.success || !json.data) throw new Error('No data was returned by the server.');
+        const data = json.data as ApiKpiData;
+        const available = Array.isArray(data.availablePrograms) ? data.availablePrograms : [];
+        setProgramOptions(available);
+        if (!reconcile(program, available)) { dropped = true; return; }
+        setLiveKpis(data);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        // Never leave another program's numbers on screen under the new selection.
+        setLiveKpis(null);
+        setKpiError(err instanceof Error && err.message ? err.message : 'Failed to load key metrics.');
+      })
+      .finally(() => { if (!cancelled && !dropped) setKpiLoading(false); });
+    return () => { cancelled = true; };
+  }, [program, programReady, reconcile]);
+
+  const kpiRefetching = kpiLoading && !!liveKpis;
+  const tenantWide = (key: string) => isTenantWideMetric(program, liveKpis?.notProgramScoped, key);
+  const showProgramUi = programOptions.length >= MIN_PROGRAMS_FOR_FILTER || !!programState.droppedProgram;
 
   // Build the cards from real data; '—' until the endpoint responds (never a fabricated number).
   const displayedKpiCards = useMemo(() => {
@@ -98,9 +144,46 @@ export default function DashboardPage() {
 
       {/* ── KPI Cards (real — /admin/dashboard/kpis, #47) ─────────────────────── */}
       <div className="space-y-3">
-        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Key Metrics</p>
+        {showProgramUi ? (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Key Metrics</p>
+            <div className="flex items-center gap-2 flex-wrap justify-end min-w-0">
+              {kpiRefetching && (
+                <span className="flex items-center gap-1 text-[11px] text-gray-400" data-testid="overview-refetching">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Updating…
+                </span>
+              )}
+              <ProgramFilter
+                id="overview-program-filter"
+                testId="overview-program-filter"
+                programs={programOptions}
+                value={program}
+                onChange={setProgram}
+                droppedProgram={programState.droppedProgram}
+                onDismissDropped={programState.dismissDropped}
+              />
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Key Metrics</p>
+        )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        {kpiError && (
+          <div
+            role="alert"
+            data-testid="overview-kpis-error"
+            className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+          >
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden="true" />
+            <span>Couldn&apos;t load key metrics — {kpiError} Please refresh or try again later.</span>
+          </div>
+        )}
+
+        <div
+          className={`grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 transition-opacity ${kpiRefetching ? 'opacity-60' : ''}`}
+          aria-busy={kpiRefetching || undefined}
+        >
           {displayedKpiCards.map((card) => {
             const Icon = card.icon;
             return (
@@ -116,6 +199,7 @@ export default function DashboardPage() {
                 <div>
                   <p className="text-2xl font-bold text-gray-900">{card.value}</p>
                   <p className="text-xs text-gray-500 mt-0.5">{card.label}</p>
+                  {tenantWide(card.key) && <TenantWideNote className="mt-1" />}
                 </div>
               </div>
             );
@@ -124,11 +208,12 @@ export default function DashboardPage() {
       </div>
 
       {/* ── Payout Summary (real — overlaid from the KPI endpoint) ────────────── */}
-      <div className="bg-white rounded-xl border border-gray-200 px-5 py-4">
+      <div className={`bg-white rounded-xl border border-gray-200 px-5 py-4 transition-opacity ${kpiRefetching ? 'opacity-60' : ''}`}>
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-1.5">
             <Banknote className="w-4 h-4 text-gray-400" />
             <h3 className="text-sm font-semibold text-gray-800">Payout Summary</h3>
+            {tenantWide('payoutSummary') && <TenantWideNote className="ml-1" />}
           </div>
           <a href="/admin/payouts" className="text-xs text-[var(--brand-primary)] hover:text-[var(--brand-primary-dark)] font-medium">
             Manage →
@@ -150,6 +235,9 @@ export default function DashboardPage() {
           })}
         </div>
       </div>
+
+      {/* ── Monthly billing progress (real — /admin/dashboard/billing-progress) ── */}
+      <BillingProgressCard programState={programState} />
     </div>
   );
 }

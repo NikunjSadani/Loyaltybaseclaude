@@ -20,6 +20,8 @@ import {
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
 import { redemptionModeLabel, canonicalRedemptionMode } from '@/lib/redemption-mode';
+import { useDashboardProgram, withProgramParam, isTenantWideMetric, MIN_PROGRAMS_FOR_FILTER } from '@/lib/dashboard-program';
+import { ProgramFilter, TenantWideNote } from '@/components/admin/dashboard/ProgramFilter';
 
 const DARK_NAVY = '#1A1A2E';
 
@@ -63,6 +65,10 @@ interface ProgramHealthData {
     breakagePct: number;
     expiringIn30dPoints: number;
   };
+  /** Real distinct Outlet.programName values (dropdown source). Older API: absent → []. */
+  availablePrograms?: string[];
+  /** Metric keys that stay tenant-wide when a program is selected (e.g. "pointsEconomy" / "pointsEconomy.issued"). */
+  notProgramScoped?: string[];
   targetAchievement: {
     period: string;
     primary: KpiRow | null;
@@ -128,9 +134,11 @@ interface StatCardProps {
   iconBg: string;
   iconColor: string;
   valColor: string;
+  /** Show the "Tenant-wide — not split by program" note under the value. */
+  tenantWide?: boolean;
 }
 
-function StatCard({ label, value, sub, icon: Icon, iconBg, iconColor, valColor }: StatCardProps) {
+function StatCard({ label, value, sub, icon: Icon, iconBg, iconColor, valColor, tenantWide }: StatCardProps) {
   return (
     <Card className="border border-gray-100 shadow-sm rounded-2xl">
       <CardContent className="pt-6">
@@ -139,6 +147,7 @@ function StatCard({ label, value, sub, icon: Icon, iconBg, iconColor, valColor }
             <p className="text-sm text-gray-500">{label}</p>
             <p className={`text-3xl font-bold mt-1 ${valColor}`}>{value}</p>
             {sub && <p className="text-[11px] text-gray-400 mt-1">{sub}</p>}
+            {tenantWide && <TenantWideNote className="mt-1" />}
           </div>
           <div className={`p-3 rounded-xl ${iconBg} shrink-0`}>
             <Icon className={`w-6 h-6 ${iconColor}`} />
@@ -178,12 +187,19 @@ export default function AdminProgramHealthDashboardPage() {
   const [data, setData] = useState<ProgramHealthData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Shared dashboard program ('' = All programs → the request is byte-identical to before).
+  const programState = useDashboardProgram();
+  const { program, ready: programReady, setProgram, reconcile } = programState;
+  // Last-known program list — kept across a failed refetch so the person can still switch back.
+  const [programOptions, setProgramOptions] = useState<string[]>([]);
 
   useEffect(() => {
+    if (!programReady) return;
     let cancelled = false;
+    let dropped = false; // response discarded because its program isn't usable → a fresh fetch follows
     setLoading(true);
     setError(null);
-    fetch('/api/admin/dashboard/program-health', { headers: { ...authHeader() } })
+    fetch(withProgramParam('/api/admin/dashboard/program-health', program), { headers: { ...authHeader() } })
       .then(async (r) => {
         if (!r.ok) throw new Error(`Request failed (${r.status})`);
         const json: unknown = await r.json();
@@ -194,14 +210,18 @@ export default function AdminProgramHealthDashboardPage() {
         if (!payload || typeof payload !== 'object' || !('targetAchievement' in payload)) {
           throw new Error('Empty or malformed response');
         }
-        if (!cancelled) setData(payload);
+        if (cancelled) return;
+        const available = Array.isArray(payload.availablePrograms) ? payload.availablePrograms : [];
+        setProgramOptions(available);
+        if (!reconcile(program, available)) { dropped = true; return; }
+        setData(payload);
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load program health');
       })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => { if (!cancelled && !dropped) setLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [program, programReady, reconcile]);
 
   const funnelMax = useMemo(
     () => (data ? Math.max(data.activation.registered, 1) : 1),
@@ -214,8 +234,33 @@ export default function AdminProgramHealthDashboardPage() {
     [data],
   );
 
-  /* ── Loading state ── */
-  if (loading) {
+  // A program switch keeps the current dashboard on screen (dimmed) with a small "Updating…" note —
+  // no full-page spinner blank / layout jump.
+  const refetching = loading && !!data;
+
+  const showProgramUi = programOptions.length >= MIN_PROGRAMS_FOR_FILTER || !!programState.droppedProgram || refetching;
+  const programFilter = !showProgramUi ? null : (
+    <div className="flex items-center gap-2 flex-wrap justify-end">
+      {refetching && (
+        <span className="flex items-center gap-1 text-[11px] text-gray-400" data-testid="program-health-refetching">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Updating…
+        </span>
+      )}
+      <ProgramFilter
+        id="program-health-program-filter"
+        testId="program-health-program-filter"
+        programs={programOptions}
+        value={program}
+        onChange={setProgram}
+        droppedProgram={programState.droppedProgram}
+        onDismissDropped={programState.dismissDropped}
+      />
+    </div>
+  );
+
+  /* ── Loading state (only before the first payload) ── */
+  if (loading && !data) {
     return (
       <div className="flex flex-col items-center justify-center py-32 text-gray-400" data-testid="program-health-loading">
         <Loader2 className="w-8 h-8 animate-spin mb-3" />
@@ -228,10 +273,11 @@ export default function AdminProgramHealthDashboardPage() {
   if (error || !data) {
     return (
       <div className="space-y-6">
-        <div>
+        <div className="flex flex-wrap items-end justify-between gap-2">
           <h1 className="text-2xl font-bold tracking-tight" style={{ color: DARK_NAVY }}>
             Program Health
           </h1>
+          {programFilter}
         </div>
         <Card className="border border-red-100 shadow-sm rounded-2xl" data-testid="program-health-error">
           <CardContent className="py-12 flex flex-col items-center text-center gap-2">
@@ -247,6 +293,7 @@ export default function AdminProgramHealthDashboardPage() {
   }
 
   const { scope, activation, participation, pointsEconomy, targetAchievement, redemptions } = data;
+  const tw = (key: string) => isTenantWideMetric(program, data.notProgramScoped, key);
   const funnelStages = [
     { stage: 'Registered', count: activation.registered },
     { stage: 'KYC Approved', count: activation.kycApproved },
@@ -272,7 +319,7 @@ export default function AdminProgramHealthDashboardPage() {
   const fulfilmentTotal = redemptions.fulfilment.reduce((s, f) => s + f.count, 0);
 
   return (
-    <div className="space-y-6" data-testid="program-health-dashboard">
+    <div className="space-y-6" data-testid="program-health-dashboard" aria-busy={refetching || undefined}>
 
       {/* ── Header ── */}
       <div className="flex flex-wrap items-end justify-between gap-2">
@@ -284,8 +331,13 @@ export default function AdminProgramHealthDashboardPage() {
             {scope.tenant} · Activation, participation, points economy &amp; target achievement · {monthLabel(scope.period)}
           </p>
         </div>
-        <p className="text-xs text-gray-400">as of {fmtTimestamp(scope.generatedAt)}</p>
+        <div className="flex flex-col items-end gap-2">
+          {programFilter}
+          <p className="text-xs text-gray-400">as of {fmtTimestamp(scope.generatedAt)}</p>
+        </div>
       </div>
+
+      <div className={`space-y-6 transition-opacity ${refetching ? 'opacity-60' : ''}`}>
 
       {/* ══ HERO: TARGET ACHIEVEMENT ══ */}
       <Card className="border-2 shadow-sm rounded-2xl" style={{ borderColor: 'var(--brand-primary)' }} data-testid="target-achievement">
@@ -297,6 +349,7 @@ export default function AdminProgramHealthDashboardPage() {
           <p className="text-xs text-gray-400 mt-0.5">
             Achieved vs target across all addressable outlets for {monthLabel(targetAchievement.period)}
           </p>
+          {tw('targetAchievement') && <TenantWideNote className="mt-1" />}
         </CardHeader>
         <CardContent className="pb-6 space-y-6">
 
@@ -410,6 +463,7 @@ export default function AdminProgramHealthDashboardPage() {
               <CardTitle>Participation Rate</CardTitle>
             </div>
             <p className="text-xs text-gray-400 mt-0.5">Addressable outlets earning this month</p>
+            {tw('participation.activeRatePct') && <TenantWideNote className="mt-1" />}
           </CardHeader>
           <CardContent className="pb-6 flex flex-col items-center justify-center gap-1 py-6">
             <p className="text-5xl font-bold text-emerald-600" data-testid="participation-rate">
@@ -425,6 +479,7 @@ export default function AdminProgramHealthDashboardPage() {
           <CardHeader>
             <CardTitle>Active Earners — 6-Month Trend</CardTitle>
             <p className="text-xs text-gray-400 mt-0.5">Distinct addressable outlets earning each month</p>
+            {tw('participation.trend') && <TenantWideNote className="mt-1" />}
           </CardHeader>
           <CardContent className="pb-6">
             <div style={{ width: '100%', height: 220 }}>
@@ -461,6 +516,7 @@ export default function AdminProgramHealthDashboardPage() {
             <p className="text-xs text-gray-400 mt-0.5">
               From registration through first redemption (% of {fmtInt(activation.registered)} registered)
             </p>
+            {tw('activation.funnel') && <TenantWideNote className="mt-1" />}
           </CardHeader>
           <CardContent className="pb-5 space-y-3">
             {funnelStages.map((s) => (
@@ -476,6 +532,7 @@ export default function AdminProgramHealthDashboardPage() {
               <CardTitle>Time to Activate</CardTitle>
             </div>
             <p className="text-xs text-gray-400 mt-0.5">Median days from outlet creation to KYC approval</p>
+            {tw('activation.medianTimeToActivateDays') && <TenantWideNote className="mt-1" />}
           </CardHeader>
           <CardContent className="pb-6 flex flex-col items-center justify-center gap-1 py-8">
             <p className="text-5xl font-bold text-indigo-600">
@@ -497,18 +554,18 @@ export default function AdminProgramHealthDashboardPage() {
         </CardHeader>
         <CardContent className="pb-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-            <StatCard label="Issued (period)" value={fmtInt(pointsEconomy.issued)} sub="EARN points"
+            <StatCard label="Issued (period)" value={fmtInt(pointsEconomy.issued)} sub="EARN points" tenantWide={tw('pointsEconomy.issued')}
               icon={TrendingUp} iconBg="bg-green-100" iconColor="text-green-700" valColor="text-green-700" />
-            <StatCard label="Redeemed (period)" value={fmtInt(pointsEconomy.redeemed)} sub="REDEEM points"
+            <StatCard label="Redeemed (period)" value={fmtInt(pointsEconomy.redeemed)} sub="REDEEM points" tenantWide={tw('pointsEconomy.redeemed')}
               icon={Gift} iconBg="bg-purple-100" iconColor="text-purple-600" valColor="text-purple-700" />
             <StatCard label="Outstanding Liability" value={fmtInt(pointsEconomy.outstandingLiabilityPoints)}
-              sub={`${fmtRupees(pointsEconomy.outstandingLiabilityRupees)} redeemable`}
+              sub={`${fmtRupees(pointsEconomy.outstandingLiabilityRupees)} redeemable`} tenantWide={tw('pointsEconomy.outstandingLiabilityPoints')}
               icon={Coins} iconBg="bg-blue-100" iconColor="text-blue-600" valColor="text-blue-700" />
-            <StatCard label="Liability (₹)" value={fmtRupees(pointsEconomy.outstandingLiabilityRupees)} sub="at tenant rate"
+            <StatCard label="Liability (₹)" value={fmtRupees(pointsEconomy.outstandingLiabilityRupees)} sub="at tenant rate" tenantWide={tw('pointsEconomy.outstandingLiabilityRupees')}
               icon={Coins} iconBg="bg-sky-100" iconColor="text-sky-600" valColor="text-sky-700" />
-            <StatCard label="Breakage (period)" value={fmtPct(pointsEconomy.breakagePct)} sub="expired ÷ issued"
+            <StatCard label="Breakage (period)" value={fmtPct(pointsEconomy.breakagePct)} sub="expired ÷ issued" tenantWide={tw('pointsEconomy.breakagePct')}
               icon={ArrowDownCircle} iconBg="bg-red-100" iconColor="text-red-600" valColor="text-red-700" />
-            <StatCard label="Expiring ≤ 30d" value={fmtInt(pointsEconomy.expiringIn30dPoints)} sub="points at risk"
+            <StatCard label="Expiring ≤ 30d" value={fmtInt(pointsEconomy.expiringIn30dPoints)} sub="points at risk" tenantWide={tw('pointsEconomy.expiringIn30dPoints')}
               icon={Hourglass} iconBg="bg-amber-100" iconColor="text-amber-600" valColor="text-amber-700" />
           </div>
         </CardContent>
@@ -520,6 +577,7 @@ export default function AdminProgramHealthDashboardPage() {
           <CardHeader>
             <CardTitle>Redemptions by Mode</CardTitle>
             <p className="text-xs text-gray-400 mt-0.5">Completed redemptions for {monthLabel(redemptions.period)} (excludes pending/failed/cancelled/returned)</p>
+            {tw('redemptions.byMode') && <TenantWideNote className="mt-1" />}
           </CardHeader>
           <CardContent className="pb-5 space-y-4">
             {byModeMerged.length === 0 && (
@@ -549,6 +607,7 @@ export default function AdminProgramHealthDashboardPage() {
           <CardHeader>
             <CardTitle>Fulfilment Status</CardTitle>
             <p className="text-xs text-gray-400 mt-0.5">Order status distribution this period</p>
+            {tw('redemptions.fulfilment') && <TenantWideNote className="mt-1" />}
           </CardHeader>
           <CardContent className="pb-5">
             <table className="w-full text-sm">
@@ -576,6 +635,7 @@ export default function AdminProgramHealthDashboardPage() {
         </Card>
       </div>
 
+      </div>
     </div>
   );
 }

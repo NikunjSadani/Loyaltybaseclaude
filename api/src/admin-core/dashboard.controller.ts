@@ -1,8 +1,12 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { AdminCoreService } from './admin-core.service';
 import { ProgramHealthDashboardService } from './dashboards/program-health-dashboard.service';
 import { OperationsDashboardService } from './dashboards/operations-dashboard.service';
 import { FinanceDashboardService } from './dashboards/finance-dashboard.service';
+import { BillingProgressDashboardService } from './dashboards/billing-progress-dashboard.service';
+import { BILLING_PROGRESS_OUTLETS_KIND_ID } from '../exports/kinds/batch2/billing-progress.kind';
+import { ExportsService } from '../exports/exports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -21,12 +25,15 @@ export class AdminDashboardController {
     private readonly programHealth: ProgramHealthDashboardService,
     private readonly operations: OperationsDashboardService,
     private readonly finance: FinanceDashboardService,
+    private readonly billingProgress: BillingProgressDashboardService,
+    private readonly exports: ExportsService,
   ) {}
 
+  /** Overview tiles + Payout Summary. Optional `program` (exact Outlet.programName; '' / absent = all). */
   @Get('kpis')
   @RequirePermission('reports:read')
-  kpis(@CurrentUser() user: JwtPayload) {
-    return this.svc.dashboardKpis(user);
+  kpis(@CurrentUser() user: JwtPayload, @Query('program') program?: unknown) {
+    return this.svc.dashboardKpis(user, program);
   }
 
   /**
@@ -48,8 +55,40 @@ export class AdminDashboardController {
    *  target achievement hero, redemptions). Tenant-scoped. */
   @Get('program-health')
   @RequirePermission('reports:read')
-  programHealthDashboard(@CurrentUser() user: JwtPayload, @Query('period') period?: string) {
-    return this.programHealth.programHealth(user, period);
+  programHealthDashboard(
+    @CurrentUser() user: JwtPayload,
+    @Query('period') period?: string,
+    @Query('program') program?: unknown,
+  ) {
+    return this.programHealth.programHealth(user, period, program);
+  }
+
+  /**
+   * Billing progress — outlets bucketed by achievement of the tenant's PRIMARY KPI for a month.
+   * Query: month=YYYY-MM (default current IST month) · program · outletType · managerId.
+   */
+  @Get('billing-progress')
+  @RequirePermission('reports:read')
+  billingProgressSummary(@CurrentUser() user: JwtPayload, @Query() q: Record<string, unknown>) {
+    return this.billingProgress.summary(user, q);
+  }
+
+  /** The outlets behind one tile: same filters + bucket=<key>|BEHIND_PACE|NO_TARGET · page · pageSize (≤200). */
+  @Get('billing-progress/outlets')
+  @RequirePermission('reports:read')
+  billingProgressOutlets(@CurrentUser() user: JwtPayload, @Query() q: Record<string, unknown>) {
+    return this.billingProgress.outlets(user, q);
+  }
+
+  /** Excel of one tile's FULL list (export kind 'billing-progress-outlets'; streams instantly). */
+  @Get('billing-progress/outlets/export')
+  @RequirePermission('reports:read')
+  billingProgressOutletsExport(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: Record<string, unknown>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.exports.respond(res, user, BILLING_PROGRESS_OUTLETS_KIND_ID, q);
   }
 
   /** Operations — Gifsy operator view (payout health, ticket SLA, visibility, settlement). */

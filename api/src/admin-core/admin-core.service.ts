@@ -65,6 +65,11 @@ import {
 } from './hierarchy-persistence';
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { UpdateEmployeeDto } from './dto/sales-users.dto';
+import {
+  loadAvailablePrograms,
+  normalizeFilterParam,
+  partnerProgramScope,
+} from './dashboards/dashboard-program-filter';
 import { resolveVisibilityProgramLists } from '../visibility/visibility-scope.helper';
 import {
   OTP_EXPIRY_MINUTES,
@@ -1829,21 +1834,35 @@ export class AdminCoreService {
     'PENDING_GIFSY',
   ];
 
-  async dashboardKpis(user: JwtPayload) {
+  /**
+   * GET /v1/admin/dashboard/kpis — Overview tiles + Payout Summary.
+   *
+   * Optional `programName` (exact Outlet.programName; '' / absent = all) scopes EVERY figure to
+   * that program through the OUTLET(S) each record belongs to:
+   *   activePartners / wallet liability / payouts → the partner owns ≥1 outlet in the program;
+   *   pendingKyc → the submission's partner owns ≥1 outlet in the program (KYC dashboard rule);
+   *   pendingVisibility → the capture's outlet is in the program.
+   * Unfiltered, every `where` is exactly the pre-filter one (Deoleo byte-identical). An unknown
+   * program matches nothing → zeros. `availablePrograms` = real distinct outlet programs.
+   */
+  async dashboardKpis(user: JwtPayload, programName?: unknown) {
     const clientId = user.clientId;
+    const program = normalizeFilterParam(programName, 'program');
+    const partnerScope = partnerProgramScope(program);
 
-    const [activePartners, pendingKyc, pendingVisibilityRaw, walletAggregate, payoutGroups, visibilityEnabled] =
+    const [activePartners, pendingKyc, pendingVisibilityRaw, walletAggregate, payoutGroups, visibilityEnabled, availablePrograms] =
       await Promise.all([
         this.prisma.channelPartner.count({
           // isParent:false — parents (owner-group anchors) are non-operating; they must not
           // inflate the active-partners KPI (docs/plans/PARTNER-MULTI-OUTLET.md §9).
-          where: { clientId, isActive: true, deletedAt: null, isParent: false },
+          where: { clientId, isActive: true, deletedAt: null, isParent: false, ...partnerScope },
         }),
 
         this.prisma.kycSubmission.count({
           where: {
             user: { clientId },
             status: { in: AdminCoreService.PENDING_KYC_STATUSES },
+            ...(program ? { partner: partnerScope } : {}),
           },
         }),
 
@@ -1852,17 +1871,18 @@ export class AdminCoreService {
           where: {
             clientId,
             status: 'SUBMITTED',
+            ...(program ? { outlet: { programName: program } } : {}),
           },
         }),
 
         this.prisma.wallet.aggregate({
           _sum: { redeemablePoints: true },
-          where: { partner: { clientId } },
+          where: { partner: { clientId, ...partnerScope } },
         }),
 
         this.prisma.payoutTransaction.groupBy({
           by: ['status'],
-          where: { partner: { clientId } },
+          where: { partner: { clientId, ...partnerScope } },
           _count: { id: true },
           _sum: { netAmountPaise: true },
         }),
@@ -1870,6 +1890,9 @@ export class AdminCoreService {
         // Master visibility switch — when OFF, the visibility KPI is suppressed so a
         // disabled tenant's residual SUBMITTED rows are not surfaced on the dashboard.
         this.tenantSettings.getVisibilityEnabledUncached(clientId),
+
+        // Program dropdown source — full tenant list, independent of the active filter.
+        loadAvailablePrograms(this.prisma, clientId),
       ]);
 
     // Suppress the visibility KPI for a tenant whose visibility module is OFF.
@@ -1891,6 +1914,11 @@ export class AdminCoreService {
       pendingVisibility,
       totalRedeemablePoints,
       payoutSummary,
+      // Additive (program filter): the echo of the applied filter, the dropdown source, and the
+      // metrics that could NOT be program-scoped (none — every figure joins to an outlet).
+      program,
+      availablePrograms,
+      notProgramScoped: [] as string[],
     };
   }
 
