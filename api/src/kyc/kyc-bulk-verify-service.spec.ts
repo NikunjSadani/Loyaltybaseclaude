@@ -115,7 +115,7 @@ const mockPrisma = {
   auditLog: { create: jest.fn() },
   user: { update: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
-  outlet: { findUnique: jest.fn(), update: jest.fn() },
+  outlet: { findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -215,6 +215,18 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       expect(result.updates).toHaveLength(1);
       expect(result.errors).toHaveLength(0);
     });
+
+    it('memory-safety: parse errors are capped at 500 with the true total + truncated flag', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([{ id: SUB_ID }]);
+      const rows = Array.from({ length: 520 }, (_, i) => allApproveRow(`UNKNOWN-${i}`));
+      const file = { buffer: makeXlsx(rows), size: 1 } as Express.Multer.File;
+      const result = await service.bulkVerify(gifsy, file, false) as {
+        errors: unknown[]; errorCount: number; errorsTruncated: boolean;
+      };
+      expect(result.errors).toHaveLength(500);
+      expect(result.errorCount).toBe(520);
+      expect(result.errorsTruncated).toBe(true);
+    });
   });
 
   // ── Tenant scoping ─────────────────────────────────────────────────────────
@@ -274,9 +286,10 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
 
     it('returns outcome=approved', async () => {
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
-      const result = await service.bulkVerify(gifsy, file, true) as { committed: boolean; results: Array<{ outcome: string }> };
+      const result = await service.bulkVerify(gifsy, file, true) as { committed: boolean; problemRows: Array<{ submissionId: string; outcome: string; detail?: string }>; problemRowCount: number; summary: Record<string, number>; };
       expect(result.committed).toBe(true);
-      expect(result.results[0].outcome).toBe('approved');
+      expect(result.summary.approved).toBe(1);
+      expect(result.problemRows).toEqual([]); // memory-safety: only error outcomes are echoed
     });
 
     it('C5: BLOCKS the terminal approve when classification is null → row errors, no status flip', async () => {
@@ -288,9 +301,9 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
         partner: { entityType: null, gstRegistrationType: null, outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
       });
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
-      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string; detail?: string }> };
-      expect(result.results[0].outcome).toBe('error');
-      expect(result.results[0].detail).toMatch(/Set Entity Type and GST Registration Type/i);
+      const result = await service.bulkVerify(gifsy, file, true) as { problemRows: Array<{ outcome: string; detail?: string }> };
+      expect(result.problemRows[0].outcome).toBe('error');
+      expect(result.problemRows[0].detail).toMatch(/Set Entity Type and GST Registration Type/i);
       expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
     });
 
@@ -311,9 +324,9 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
         { upiId: 'self@upi', bankAccountNumber: null, ifscCode: null, paymentDetailsStatus: 'UNVERIFIED' },
       ]);
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
-      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string; detail?: string }> };
-      expect(result.results[0].outcome).toBe('error');
-      expect(result.results[0].detail).toBe(
+      const result = await service.bulkVerify(gifsy, file, true) as { problemRows: Array<{ outcome: string; detail?: string }> };
+      expect(result.problemRows[0].outcome).toBe('error');
+      expect(result.problemRows[0].detail).toBe(
         "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC",
       );
       expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
@@ -384,9 +397,9 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       mockTx.auditLog.create.mockRejectedValueOnce(new Error('audit write failed'));
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
       const result = (await service.bulkVerify(gifsy, file, true)) as {
-        results: Array<{ outcome: string }>;
+        problemRows: Array<{ submissionId: string; outcome: string; detail?: string }>; problemRowCount: number; summary: Record<string, number>;
       };
-      expect(result.results[0].outcome).toBe('error');
+      expect(result.problemRows[0].outcome).toBe('error');
       expect(mockNotifications.enqueue).not.toHaveBeenCalled();
     });
 
@@ -394,8 +407,9 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       // Second writer: count=0 (race loser)
       mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 0 });
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
-      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string }> };
-      expect(result.results[0].outcome).toBe('skipped');
+      const result = await service.bulkVerify(gifsy, file, true) as { problemRows: Array<{ submissionId: string; outcome: string; detail?: string }>; problemRowCount: number; summary: Record<string, number>; };
+      expect(result.summary.skipped).toBe(1);
+      expect(result.problemRows).toEqual([]); // memory-safety: only error outcomes are echoed
       // Side effects (user update, wallet create, notify) must NOT have fired
       expect(mockTx.user.update).not.toHaveBeenCalled();
       expect(mockTx.wallet.create).not.toHaveBeenCalled();
@@ -440,8 +454,9 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       mockTx.auditLog.create.mockResolvedValue({});
 
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
-      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string }> };
-      expect(result.results[0].outcome).toBe('approved');
+      const result = await service.bulkVerify(gifsy, file, true) as { problemRows: Array<{ submissionId: string; outcome: string; detail?: string }>; problemRowCount: number; summary: Record<string, number>; };
+      expect(result.summary.approved).toBe(1);
+      expect(result.problemRows).toEqual([]); // memory-safety: only error outcomes are echoed
 
       // The approval fan-out must carry [ownerName, programName] with the REAL program to the owner.
       expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
@@ -483,8 +498,9 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
 
     it('returns outcome=reupload', async () => {
       const file = { buffer: makeXlsx([ownerRejectRow(SUB_ID)]), size: 1 } as Express.Multer.File;
-      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string }> };
-      expect(result.results[0].outcome).toBe('reupload');
+      const result = await service.bulkVerify(gifsy, file, true) as { problemRows: Array<{ submissionId: string; outcome: string; detail?: string }>; problemRowCount: number; summary: Record<string, number>; };
+      expect(result.summary.reupload).toBe(1);
+      expect(result.problemRows).toEqual([]); // memory-safety: only error outcomes are echoed
     });
 
     it('sets reKycFlags on the primary outlet for the rejected field', async () => {
@@ -523,12 +539,12 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
         partner: { outlets: [] }, // no primary outlet
       });
       const file = { buffer: makeXlsx([ownerRejectRow(SUB_ID)]), size: 1 } as Express.Multer.File;
-      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string; detail?: string }> };
-      expect(result.results[0].outcome).toBe('error');
+      const result = await service.bulkVerify(gifsy, file, true) as { problemRows: Array<{ outcome: string; detail?: string }> };
+      expect(result.problemRows[0].outcome).toBe('error');
       // item #1: applyBridgeOutcome now throws a clean ConflictException whose message
       // does not leak the internal submission id; the bulk path surfaces it as the row detail.
-      expect(result.results[0].detail).toContain('no active outlet');
-      expect(result.results[0].detail).not.toContain(SUB_ID);
+      expect(result.problemRows[0].detail).toContain('no active outlet');
+      expect(result.problemRows[0].detail).not.toContain(SUB_ID);
       // S1 fix: the outlet is resolved BEFORE the flip, so no status mutation happened.
       expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
       expect(mockNotifications.enqueue).not.toHaveBeenCalled();
@@ -542,9 +558,10 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       // Inside tx: findFirst returns null (not PENDING_GIFSY)
       mockTx.kycSubmission.findFirst.mockResolvedValue(null);
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
-      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string }> };
+      const result = await service.bulkVerify(gifsy, file, true) as { problemRows: Array<{ submissionId: string; outcome: string; detail?: string }>; problemRowCount: number; summary: Record<string, number>; };
 
-      expect(result.results[0].outcome).toBe('skipped');
+      expect(result.summary.skipped).toBe(1);
+      expect(result.problemRows).toEqual([]); // memory-safety: only error outcomes are echoed
       expect(mockTx.user.update).not.toHaveBeenCalled();
       expect(mockNotifications.enqueue).not.toHaveBeenCalled();
     });
@@ -553,10 +570,11 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
   // ── Partial-batch isolation ─────────────────────────────────────────────────
   describe('per-submission isolation', () => {
     it('one submission erroring does not prevent others from committing', async () => {
-      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
-        { id: SUB_ID },
-        { id: SUB_ID_2 },
-      ]);
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce([{ id: SUB_ID }, { id: SUB_ID_2 }])
+        // failure enrichment: submission → partner → outlet
+        .mockResolvedValueOnce([{ id: SUB_ID, partnerId: 'partner-1' }]);
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([{ partnerId: 'partner-1', outletCode: 'OC-1', name: 'Shop One' }]);
 
       // First submission: throws inside tx
       let callCount = 0;
@@ -595,14 +613,17 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
         size: 1,
       } as Express.Multer.File;
       const result = await service.bulkVerify(gifsy, file, true) as {
-        results: Array<{ submissionId: string; outcome: string }>;
+        problemRows: Array<{ submissionId: string; outcome: string; detail?: string }>; problemRowCount: number; summary: Record<string, number>;
       };
 
       // First errored, second succeeded
-      const r1 = result.results.find((r) => r.submissionId === SUB_ID);
-      const r2 = result.results.find((r) => r.submissionId === SUB_ID_2);
+      const r1 = result.problemRows.find((r) => r.submissionId === SUB_ID);
+      // the failure names its spreadsheet row and outlet, so the operator can act on it
+      expect(r1).toEqual(expect.objectContaining({ rowNumber: 2, outletCode: 'OC-1', outletName: 'Shop One' }));
+      const r2 = result.problemRows.find((r) => r.submissionId === SUB_ID_2);
       expect(r1?.outcome).toBe('error');
-      expect(r2?.outcome).toBe('recorded');
+      expect(r2).toBeUndefined(); // a successful outcome is not echoed
+      expect(result.summary.recorded).toBe(1);
     });
   });
 
@@ -631,9 +652,10 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       }
       const file = { buffer: makeXlsx([partialRow]), size: 1 } as Express.Multer.File;
       const result = await service.bulkVerify(gifsy, file, true) as {
-        results: Array<{ outcome: string }>;
+        problemRows: Array<{ submissionId: string; outcome: string; detail?: string }>; problemRowCount: number; summary: Record<string, number>;
       };
-      expect(result.results[0].outcome).toBe('recorded');
+      expect(result.summary.recorded).toBe(1);
+      expect(result.problemRows).toEqual([]); // memory-safety: only error outcomes are echoed
       // No status flip
       expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
     });

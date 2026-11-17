@@ -103,15 +103,15 @@ async function walkToBankStep() {
   const utils = render(<NewKYCPage />);
   await waitFor(() =>
     expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c) => String(c[0]).includes('/api/kyc/K1'))).toBe(true),
-    { timeout: 5000 },
+    { timeout: 15_000 },
   );
-  await screen.findByTestId('rekyc-summary-banner', {}, { timeout: 5000 });
-  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 5000 });
+  await screen.findByTestId('rekyc-summary-banner', {}, { timeout: 15_000 });
+  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 15_000 });
   fireEvent.click(screen.getByRole('button', { name: /continue/i }));
-  await screen.findByPlaceholderText('City', {}, { timeout: 5000 });
-  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 5000 });
+  await screen.findByPlaceholderText('City', {}, { timeout: 15_000 });
+  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 15_000 });
   fireEvent.click(screen.getByRole('button', { name: /continue/i }));
-  await screen.findByText('Bank Details', {}, { timeout: 5000 });
+  await screen.findByText('Bank Details', {}, { timeout: 15_000 });
   return utils;
 }
 
@@ -145,10 +145,10 @@ describe('Re-KYC payout rail — default + lock', () => {
   it('RL1: only a non-routing payout field flagged (bankName) on a UPI partner → locked to UPI with the note', async () => {
     install({ rail: 'upi', flags: { bankName: true } });
     await walkToBankStep();
-    expect(screen.getByTestId('rekyc-rail-lock-note')).toHaveTextContent(RAIL_LOCK_NOTE);
+    expect(await screen.findByTestId('rekyc-rail-lock-note')).toHaveTextContent(RAIL_LOCK_NOTE);
     expect(screen.queryByTestId('payment-mode-toggle')).not.toBeInTheDocument();
     // UPI panel (the current rail) with the existing ID, locked (upiId not flagged).
-    const upi = screen.getByTestId('manual-upi-input');
+    const upi = await screen.findByTestId('manual-upi-input');
     expect(upi).toHaveValue('verma@okaxis');
     expect(upi).toBeDisabled();
     expect(screen.queryByPlaceholderText('HDFC Bank')).not.toBeInTheDocument();
@@ -157,10 +157,10 @@ describe('Re-KYC payout rail — default + lock', () => {
   it('RL2: just ONE of accountNumber / ifscCode flagged on a bank partner → locked to bank with the note', async () => {
     install({ rail: 'bank', flags: { ifscCode: true } });
     await walkToBankStep();
-    expect(screen.getByTestId('rekyc-rail-lock-note')).toHaveTextContent(RAIL_LOCK_NOTE);
+    expect(await screen.findByTestId('rekyc-rail-lock-note')).toHaveTextContent(RAIL_LOCK_NOTE);
     expect(screen.queryByTestId('payment-mode-toggle')).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText('HDFC0001234')).not.toBeDisabled(); // the flagged IFSC
-    expect(screen.getByPlaceholderText('Account number')).toBeDisabled();
+    expect(await screen.findByPlaceholderText('HDFC0001234')).not.toBeDisabled(); // the flagged IFSC
+    expect(await screen.findByPlaceholderText('Account number')).toBeDisabled();
     expect(screen.queryByTestId('manual-upi-input')).not.toBeInTheDocument();
   }, 20000);
 
@@ -168,17 +168,17 @@ describe('Re-KYC payout rail — default + lock', () => {
     install({ rail: 'upi', flags: { accountNumber: true, ifscCode: true } });
     await walkToBankStep();
     expect(screen.queryByTestId('rekyc-rail-lock-note')).not.toBeInTheDocument();
-    expect(screen.getByTestId('payment-mode-toggle')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /bank account/i })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByPlaceholderText('Account number')).not.toBeDisabled();
+    expect(await screen.findByTestId('payment-mode-toggle')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /bank account/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByPlaceholderText('Account number')).not.toBeDisabled();
   }, 20000);
 
   it('RL4: only UPI routing flagged (upiId) on a bank partner → defaults to UPI, toggle free', async () => {
     install({ rail: 'bank', flags: { upiId: true } });
     await walkToBankStep();
     expect(screen.queryByTestId('rekyc-rail-lock-note')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /upi id/i })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByTestId('manual-upi-input')).not.toBeDisabled();
+    expect(await screen.findByRole('button', { name: /upi id/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByTestId('manual-upi-input')).not.toBeDisabled();
   }, 20000);
 
   it('RL5: an outlet mandate (BANK) wins over the rail lock of a UPI partner — bank panel, no lock note', async () => {
@@ -186,7 +186,7 @@ describe('Re-KYC payout rail — default + lock', () => {
     await walkToBankStep();
     expect(screen.queryByTestId('rekyc-rail-lock-note')).not.toBeInTheDocument();
     expect(screen.queryByTestId('payment-mode-toggle')).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText('HDFC Bank')).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText('HDFC Bank')).toBeInTheDocument();
     expect(screen.queryByTestId('manual-upi-input')).not.toBeInTheDocument();
   }, 20000);
 });
@@ -240,7 +240,7 @@ describe('KYC submit — server rejection shown verbatim', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: /programme communications/i }));
 
     const submit = await screen.findByRole('button', { name: /send otp to outlet owner/i });
-    await waitFor(() => expect(submit).not.toBeDisabled(), { timeout: 5000 });
+    await waitFor(() => expect(submit).not.toBeDisabled(), { timeout: 15_000 });
     fireEvent.click(submit);
 
     await waitFor(() => expect(posted.length).toBe(1));

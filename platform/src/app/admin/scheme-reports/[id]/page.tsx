@@ -60,7 +60,7 @@ export default function TenantSchemeReportPage({ params }: { params: Promise<{ i
             <button onClick={handleExport} disabled={exporting || loading || !!error}
               className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
               {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-              {exporting ? 'Exporting…' : 'Download Excel'}
+              {exporting ? 'Preparing…' : 'Download Excel'}
             </button>
           </div>
           {exportError && <p className="text-xs text-red-500 mt-1">{exportError}</p>}

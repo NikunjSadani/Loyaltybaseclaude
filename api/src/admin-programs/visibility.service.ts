@@ -12,6 +12,7 @@ import {
   VISIBILITY_UPLOAD_HEADERS,
 } from './visibility/visibility-upload';
 import { aoaToSheetSafe } from '../common/xlsx';
+import { isPartnerLoginRole } from '../partner/partner-display.helper';
 
 interface ErrorRow {
   rowNumber: number;
@@ -41,8 +42,7 @@ export class VisibilityService {
     private readonly tenant: TenantService,
   ) {}
 
-  /** Partner roles are external traders — they cannot see admin visibility data. */
-  private static readonly PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
+  // Partner roles are external traders — they cannot see admin visibility data (isPartnerLoginRole).
 
   /**
    * Master Visibility gate — the module is opt-in per tenant (`visibilityEnabled`,
@@ -64,7 +64,7 @@ export class VisibilityService {
   /** GET /v1/admin/visibility/records */
   async listRecords(user: JwtPayload, q: ListVisibilityRecordsQueryDto) {
     await this.assertVisibilityEnabled(user);
-    if (VisibilityService.PARTNER_ROLES.includes(user.role)) {
+    if (isPartnerLoginRole(user.role)) {
       throw new ForbiddenException('Forbidden');
     }
     const page = Math.max(1, q.page ?? 1);

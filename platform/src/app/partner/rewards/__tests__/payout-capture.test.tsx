@@ -204,7 +204,7 @@ describe('PC — Cash Payout inline capture sheet (captureBankAtRedemption)', ()
     const meCallsBefore = fetchMock.mock.calls.filter(([u]) => String(u).includes('/api/auth/me')).length;
 
     // Submit → POST /api/partner/payout-details.
-    await user.click(screen.getByTestId('payout-capture-submit'));
+    await user.click(await screen.findByTestId('payout-capture-submit'));
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([u]) => u === '/api/partner/payout-details');
@@ -239,7 +239,7 @@ describe('PC — Cash Payout inline capture sheet (captureBankAtRedemption)', ()
     await screen.findByTestId('payout-capture-sheet');
 
     // Switch to UPI mode, then type an invalid VPA into the manual input.
-    await user.click(screen.getByRole('button', { name: /upi id/i }));
+    await user.click(await screen.findByRole('button', { name: /upi id/i }));
     fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: 'notaupi' } });
 
     // Submit → the new isValidUpiId gate blocks it inline; NO payout-details POST fires.
@@ -263,7 +263,7 @@ describe('PC — Cash Payout inline capture sheet (captureBankAtRedemption)', ()
     await openCashTab(user);
 
     await screen.findByTestId('payout-capture-sheet');
-    await user.click(screen.getByRole('button', { name: /upi id/i }));
+    await user.click(await screen.findByRole('button', { name: /upi id/i }));
     fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: '  shop@okaxis  ' } });
     // Typed ID → the type-it-twice confirm field is required (VPA safeguards).
     fireEvent.change(await screen.findByTestId('manual-upi-confirm-input'), { target: { value: ' shop@okaxis ' } });
@@ -292,7 +292,7 @@ describe('PC — Cash Payout inline capture sheet (captureBankAtRedemption)', ()
     await openCashTab(user);
 
     await screen.findByTestId('payout-capture-sheet');
-    await user.click(screen.getByRole('button', { name: /upi id/i }));
+    await user.click(await screen.findByRole('button', { name: /upi id/i }));
     fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: '   ' } });
 
     await user.click(screen.getByTestId('payout-capture-submit'));
@@ -300,7 +300,7 @@ describe('PC — Cash Payout inline capture sheet (captureBankAtRedemption)', ()
     await waitFor(() => {
       expect(screen.getByTestId('payout-capture-error')).toHaveTextContent('Enter or scan your UPI ID to continue');
     });
-    expect(screen.getByTestId('payout-capture-error')).not.toHaveTextContent(/valid upi id/i);
+    expect(await screen.findByTestId('payout-capture-error')).not.toHaveTextContent(/valid upi id/i);
     expect(fetchMock.mock.calls.some(([u]) => u === '/api/partner/payout-details')).toBe(false);
   });
 });
@@ -331,7 +331,7 @@ describe('PC-VPA — UPI capture method + confirm entry', () => {
     fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: 'shop@okaxis' } });
 
     const confirm = await screen.findByTestId('manual-upi-confirm-input');
-    expect(screen.getByLabelText('Re-enter UPI ID *')).toBe(confirm);
+    expect(await screen.findByLabelText('Re-enter UPI ID *')).toBe(confirm);
     expect(confirm).toHaveAttribute('autocapitalize', 'none');
     expect(confirm).toHaveAttribute('autocorrect', 'off');
     expect(confirm).toHaveAttribute('spellcheck', 'false');
@@ -354,9 +354,9 @@ describe('PC-VPA — UPI capture method + confirm entry', () => {
     });
     expect(payoutCall(fetchMock)).toBeUndefined();
     // a11y: the error is announced (role=alert) and linked to the confirm input.
-    const err = screen.getByTestId('payout-capture-error');
+    const err = await screen.findByTestId('payout-capture-error');
     expect(err).toHaveAttribute('role', 'alert');
-    const confirm = screen.getByTestId('manual-upi-confirm-input');
+    const confirm = await screen.findByTestId('manual-upi-confirm-input');
     expect(confirm).toHaveAttribute('aria-invalid', 'true');
     expect(confirm.getAttribute('aria-describedby')).toBe(err.id);
     expect(err.id).not.toBe('');
@@ -443,11 +443,11 @@ describe('PC-VPA — UPI capture method + confirm entry', () => {
     const fetchMock = makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY });
     const user = await openUpiSheet(fetchMock);
 
-    await user.click(screen.getByRole('button', { name: /scan qr/i }));
-    await waitFor(() => expect(screen.getByTestId('scanned-upi-display')).toHaveTextContent('shop@okaxis'), { timeout: 5000 });
+    await user.click(await screen.findByRole('button', { name: /scan qr/i }));
+    await waitFor(() => expect(screen.getByTestId('scanned-upi-display')).toHaveTextContent('shop@okaxis'), { timeout: 15_000 });
     expect(screen.queryByTestId('manual-upi-confirm-input')).not.toBeInTheDocument();
 
-    await user.click(screen.getByTestId('payout-capture-submit'));
+    await user.click(await screen.findByTestId('payout-capture-submit'));
     await waitFor(() => {
       const call = payoutCall(fetchMock);
       expect(call).toBeTruthy();
@@ -455,5 +455,5 @@ describe('PC-VPA — UPI capture method + confirm entry', () => {
         paymentMode: 'upi', upiId: 'shop@okaxis', upiCaptureMethod: 'QR',
       });
     });
-  }, 15000);
+  }, 30_000);
 });

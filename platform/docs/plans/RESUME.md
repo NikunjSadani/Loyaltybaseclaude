@@ -1,570 +1,230 @@
-# RESUME — Loyaltybase restart prompt
+# RESUME — Loyaltybase: current state, what's next, known traps
 
-Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo). Backend `api/`
-(NestJS + Prisma — owns the DB + ALL business logic) · thin FE `platform/` (Next.js, proxies
-`/api/*` → backend `/v1/*`). Work on **`develop`** (auto-deploys to staging). Repo root:
-`C:\Users\nikun\Loyaltybaseclaude`.
+> **The single living source of truth.** Read this first in every session (it is the restart prompt after a
+> context compaction). Working agreements, gates and guardrails live in the root **`CLAUDE.md`** (auto-loaded);
+> the index of every other doc is **[`../DOCS-INDEX.md`](../DOCS-INDEX.md)**.
+>
+> **Maintenance rule:** update this file **at every release** (prod or staging) and whenever a "current state",
+> "what's next" or "trap" fact changes — in the same commit/PR as the change. Replace stale lines; don't append dated
+> banners on top of old ones. History goes to the release log in `DOCS-INDEX.md` and to
+> [`archive/RESUME-ARCHIVE-2026-11-15.md`](archive/RESUME-ARCHIVE-2026-11-15.md) (the full chronology up to 2026-11-15,
+> incl. the CUTOVER LEDGER #14–#52). **Never trust a SHA written here over `git log` + the serving image (§7).**
+>
+> Last updated: **2026-11-16** (docs sweep after the 2026-11-15 release).
 
-> Working agreements, gates, and guardrails live in **`CLAUDE.md`** (auto-loaded) — not duplicated here.
-> This file is *current state + the traps + what's open*. **Always verify HEADs via `git log`; never trust a hardcoded SHA.**
+Multi-tenant FMCG **trade-loyalty** platform. Operator **Gifsy**; live clients **Deoleo** (since July 2026) and
+**Bajaj Consumer Care** (go-live November 2026). Backend `api/` (NestJS + Prisma 7 — owns the DB and ALL business logic)
+· thin frontend `platform/` (Next.js; proxies `/api/*` → backend `/v1/*`). Repo `C:\Users\nikun\Loyaltybaseclaude`;
+work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a manual workflow.
 
 ---
 
-## 📍 STATE 2026-11-11 — read this FIRST
+## 1. Where things stand (2026-11-16)
 
-> **📍 2026-11-13 (evening) — CURRENT STATE (supersedes everything below where they differ):**
-> - 🚀 **PROD = `ad01ace5`** (api + frontend images both `ad01ace51abc18eb2fdabe99805667d2dcf15bf1`; `/health` 200) — the
->   retailer-TDS release (`feat/tds-count-imports`) is LIVE. Owner saved Bajaj `tdsImportedPayouts =
->   {"countFrom":"2026-04-01"}` at 10:06 UTC (AuditLog `TdsImportedPayouts`/`bajaj`, null → that value) — verified it
->   landed on **bajaj**, not `gifsy`. A stray `gifsy` `tdsPolicy` row {SEC_194R, GROSS_UP} from the F1 bug is still there:
->   harmless, clean up when convenient.
-> - 📊 **194R FY 2026-27 on prod (verified by DB aggregation 2026-11-13):** imported retailer payouts now counted
->   ₹95,72,989.43 (17,873 entries / 3,869 outlets); still excluded pre-2026-04-01 ₹1,93,36,571.27. Retailers: 3,863
->   deductees, only **1 over ₹20,000** → liability ₹10,597.75 (no PAN, 20%). Wholesalers: 119 deductees, 117 over →
->   ₹8,84,251.28 liability, ₹6,25,285 deposited. **Combined liability ₹8,94,849.03 · deposited ₹6,25,285 · outstanding
->   ₹2,69,564.03.** Report-only — no withholding, no invoice, no payout changed; grows as more FY 26-27 months are paid.
->   Detail: `BAJAJ-PROD-OUTLET-IMPORT.md` §9.1a/§9.2.
-> - ✅ **Prod go-live readiness audit done 2026-11-13** (direct DB reads) — see `BAJAJ-PROD-GO-LIVE-CHECKLIST.md`
->   "Prod readiness audit". **November targets are ALREADY uploaded** (6,417 OutletTargets for 2026-11).
->   **Real gaps: `points_rules`, `sales_import_profiles` and `sales_kpi_definitions` are EMPTY on prod.**
->   **Sales Import prod INFRA ALREADY EXISTS** (secret + `gifsy-sales-import` job + enabled `sales-import-drain`
->   scheduler + deploy.yml env) — every older "prod infra pending / owner OK needed" line below is STALE.
->   FALSE ALARM, do not re-raise: Bajaj's `employee_hierarchy` setting carries `tenantId:"deoleo"` on all 1,049 rows, but
->   all 1,049 ids match live Bajaj `sales_users` employeeCodes — a cosmetic FE leftover, `getHierarchyConfig` overlays
->   live name/mobile/role from SalesUser. Not a bug.
-> - 📄 **November sales file received** 2026-11-13: `C:\Users\nikun\Downloads\Sales data  13 nov.xlsx` (97 MB, sheet
->   "Sheet1", header row 1 = the staging-verified DMS layout). Agreed: **upload + aggregate first**, preview/apply blocked
->   until the Bajaj sales KPI definitions + column mapping are configured (`BAJAJ-PROD-OUTLET-IMPORT.md` §12).
-> - 🔧 **NEXT RELEASE (not started):** F1+F9 toggle/session fixes (`63201b39`, `801c48d3`) + the three approved 194R export
->   columns (⚠️ PLATFORM-WIDE, owner-approved 2026-11-13: 'Outlet Code' on PAN rows, 'Outlet Type', 'Outlet Name' —
->   display-only, §9.3) + these docs. **Then** the Bajaj points rule + sales-import config; **then** the Daily Operations
->   Digest (⚠️ PLATFORM-WIDE, owner approved option A, branch `feat/daily-ops-digest`, worktree
->   `.claude/worktrees/ops-digest` — BUILT on the branch, not yet pushed/merged; design `DAILY-OPS-DIGEST.md`, sample
-  `samples/daily-ops-digest-sample.html`; recipients fall back to the union of the two old lists until the new card is saved).
-> - 🧰 Trap: gcloud on the owner's machine currently defaults to account `nikunj.sadani28@gmail.com` / project
->   `gifsy-posm` (changed by another session) — platform work must pass
->   `--account=gifsy-deployer@gifsy-platform.iam.gserviceaccount.com --project=gifsy-platform` explicitly.
->
-> **📍 2026-11-13 (afternoon) — CURRENT STATE (historical):**
-> - 🚀 **PROD = `247fae4b`** (deployed by owner 2026-11-13; migrations ran): no-PAN payouts (flag OFF until owner enables
->   for Bajaj) · whole-unit rounding · TDS deposit "TDS for month" + deposit-only rows + day-first dates + cross-upload
->   dedup + 194C withheld-only/entity type · applies-to (KPI + visibility scope) · wallet never-adds-points + INTERIM
->   reversal rules · KYC OTHER doc labels · 194R VENDOR_IMPORT exclusion restored (explicit revert of e8c3f46).
->   Pre-deploy Bajaj staging money test PASSED (no-PAN OFF/ON, UTR PAID/FAILED/refund, "paid outside" refusals, debt-wallet
->   reversal refused, normal reversal OK, TDS deposit preview, ₹199.50 refused).
-> - ✅ **Bajaj prod data complete except October:** outlets/KYC/docs · visibility · points · targets+achievements (to Sep 26)
->   · payout history (48,086 / ₹2.89 cr) · partial vendor TDS (119 wholesalers) — all verified; `BAJAJ-PROD-OUTLET-IMPORT.md`.
-> - ✅ _(SHIPPED — prod `ad01ace5`, see the evening block.)_ **Next small release `feat/tds-count-imports`** (owner approved): Bajaj-only setting counting imported payouts from
->   2026-04-01 in 194R (liability only) + TDS Config copy fix (method applies to visibility AND incentive payouts) →
->   dual audit → full gates → staging → owner deploy → owner sets the date on TDS Config.
-> - 📒 **All owner decisions:** `BAJAJ-GO-LIVE-DECISIONS-LOG.md` (new) — read with this file.
-> - Owner to-dos + waiting files: see the decisions log §7.
->
-> **📍 2026-11-13 (morning) — WHAT'S IN FLIGHT (historical):**
-> 1. ✅ **Applies-to (KPI + visibility scope) LIVE ON STAGING** — develop `7a78bc26`; Bajaj staging role test PASSED
->    (admin scope form + live count, template Program/Sub-Program + N/A, upload ignoredOutOfScope, Unnati partner hides
->    SAMT-only LINES, SAMT partner sees it; temp scope reverted). Still to check on staging: sales-rep views + visibility editor.
-> 2. ✅ **Bajaj prod imports done:** outlets/KYC/docs, visibility history (51,123 / 61,779 photos), wholesaler points
->    (2,281 wallets = vendor 11-Nov closing, Σ 67,27,723; 8 NEGATIVE wallets kept) — `BAJAJ-PROD-OUTLET-IMPORT.md` §8, §9b.
->    ⏸ Payout history (48,086 / ₹2.89 cr) dry-run PASS → runs AFTER the release (§9). Partial vendor TDS (119 wholesalers)
->    approved → after payout history (§10).
-> 3. 🔧 **Release `feat/payout-without-pan`** (no-PAN payouts · rounding · TDS deposit-only rows + deposit "TDS for month"
->    + day-first dates + cross-upload dedup + 194C withheld-only/entity type · KYC labels · wallet: never-adds-points clamp
->    + INTERIM reversal rules (points reversals refused on wallets carrying debt; payout reversals whole-entry, exact
->    subset, never consumed twice)) — dual audits done; last fix round → push (gates) → staging → owner prod deploy.
->    ⚠️ **PREPARE MAIN = `git revert e8c3f46` EXPLICITLY** (re-adds the 194R VENDOR_IMPORT exclusion — owner 2026-11-12:
->    ship the rule before the payout-history import). A plain merge does NOT undo the revert (audit 2026-11-13). After
->    preparing, verify `git grep VENDOR_IMPORT <main> -- api/src/tds` hits BOTH tds.service.ts and its spec. This REPLACES
->    the old "keep TDS revert" rule.
-> 4. ⏸ **Wallet reversal engine = FAST FOLLOW-UP AFTER GO-LIVE** (owner 2026-11-13). Branch `feat/wallet-reversal-engine`
->    (pushed), complete record + resume checklist in `WALLET-REVERSAL-ENGINE-DESIGN.md` on that branch.
-> 5. ✅ Historical targets/achievements imported on prod (§9c) + ✅ October 2026 (§9d, 6,387 rows; October rewards will
->    come from the client as a SEPARATE file → import when received; never compute points for Oct). ~~Next go-live work: Sales Import prod infra (owner OK needed)
->    for November achievements · client training deck.~~ **Corrected 2026-11-13: the prod Sales Import infra already
->    exists** (secret `SALES_IMPORT_DRAIN_SECRET`, job `gifsy-sales-import`, enabled scheduler `sales-import-drain`
->    */10, deploy.yml env) — what remains is the Bajaj column mapping + sales KPI definitions. ✅ Training deck done.
-> 5b. FAST FOLLOW-UP after the release (owner 2026-11-13): Bajaj-only setting — imported payouts from FY 2026-27 count in
->    194R (retailer TDS liability visible; FY 25-26 imports stay excluded; deposits subtract; no auto-recovery). See
->    `BAJAJ-PROD-OUTLET-IMPORT.md` §9.1.
-> 6. Open owner decision (non-blocking, pre-existing): 194C "Outstanding" = liability − deposited − withheld double-counts
->    once Gifsy uploads deposits for withheld DEDUCT TDS (guide now says don't upload withheld TDS as a deposit). Prod has 0
->    deposits/deductions today.
-> 7. Process rule: staging role tests — log in myself with FIXED_OTP 123456; prod logins stay with the owner.
+| | SHA | Since | Notes |
+|---|---|---|---|
+| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import`, `gifsy-exports`) | **`de2f3700`** (verified serving 2026-11-17: api rev `gifsy-api-00091`, frontend rev `gifsy-frontend-00081`; `/health` 200) | 2026-11-17 | `origin/main` = `origin/develop` |
+| **Staging** (`*-staging`) | **`de2f3700`** | 2026-11-17 | same code as prod |
+| Previous prod | `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-16 / 11-15 | rollback targets |
 
-> **📍 2026-11-12 (afternoon) — WHAT'S IN FLIGHT (read first):**
-> 1. ✅ **Bajaj outlet/KYC/document import LIVE on prod + verified** (6,491 outlets, 22,621 docs in our storage, 19 owner
->    groups) — full record + correction runbook: `BAJAJ-PROD-OUTLET-IMPORT.md`. Correction file sent to owner for Bajaj.
-> 2. 🔧 **Next release (branch `feat/payout-without-pan`, worktree `.claude/worktrees/payout-no-pan`, NOT pushed):**
->    Bajaj-only flag `allowPayoutWithoutPan` (processBatch no-PAN exclusion gated); UTR upload "Paid outside platform (Y/N)"
->    + note + optional amount (free-form refs, never on bank-sent rows, never for refunded orders, no bank-detail verify);
->    process-first rule (all tenants, owner-approved); per-partner no-PAN 194R / per-outlet 194C TDS; strict PAN on TDS
->    uploads (blank rejected; PANNOTAVBL etc. + Outlet Code); features audit log + confirm dialog; KYC review labels for
->    OTHER docs ("Counter photo" etc.); **credits upload rounds points AND ₹ payouts half-up to WHOLE units** (owner rule).
->    4 dual-audit rounds; last nit round in progress → full gates → Bajaj staging role test → owner deploys.
-> 3. 🔧 **Fast follow-ups #1+#2+#3 building in parallel** (branch `feat/applies-to`, worktree `.claude/worktrees/applies-to`):
->    one shared "applies-to" scope {outletTypes[], programs[], subPrograms[]} for KPIs (multi-type + program/sub-program)
->    and Visibility (program/sub-program). Owner approved ALL ★ decisions — plan `APPLIES-TO-TARGETING-PLAN.md`
->    (on that branch). WP-0 contract in progress → WP-A/B/C parallel → audit → gates → Deoleo no-change proof → Bajaj staging.
-> 4. **Owner prod setup for Bajaj (UI):** steps 1–9 done (flags, sub-programs incl. TOT, settings, points engine ON, 2 client
->    admins, KPIs = TOTAL(primary)/ADHO/NON ADHO/FOCUS BRAND/FOCUS BRAND 2/LINES — note: NOT staging's codes, visibility).
->    Owner renaming credit field "Target Achievement" → "Monthly Achievement" (deactivate + recreate; no rename feature).
->    Remaining: credit fields (10), points rule with prod KPI codes (11), sales-import mapping (12), catalogue fixes after
->    Hubble whitelist (13), offers (14). ✅ Hubble prod whitelist DONE (vendor confirmed 2026-11-13; verified: login from the prod
->    VPC egress 34.96.40.72 → 200 + token, previously 401 "not whitelisted"). Catalogue fixes (13) now unblocked.
->    ✅ Client training deck done (owner, 2026-11-13) — 7 slides added as slides 8–14 (install the app on Android / iPhone;
->    allow location on Android / iPhone), saved as `C:\Users\nikun\Downloads\Bajaj Loyalty training deck - with install and location.pptx`.
->    The phone screens on those slides are illustrations, not real screenshots.
-> 5. **Rounding rule (owner):** cases/values may be decimal; points and ₹ payouts are credited in WHOLE units, rounded
->    half-up ONCE at the end. Points engine already does this; credits upload fixed in (2).
-> 6. Staging leftovers: Bajaj order BAJAJ-26-000031 held (Hubble sandbox was 502 — reconcile/cancel); Deoleo staging
->    "ZZ PIN test card" + Sai Trader order kept on purpose (owner).
+**2026-11-16 releases** (release log in `DOCS-INDEX.md`): **Voucher Dispersal** (Gifsy platform admin tool — Excel →
+Hubble buy → WhatsApp; → [`VOUCHER-DISPERSAL.md`](VOUCHER-DISPERSAL.md)) + App Adoption installed-users export
+(`720ffce9`); **Amazon Pay claim-code-only** voucher message (`4e395b21`; other Hubble brands still send code + PIN —
+ask Hubble which are claim-code-only and add their product ids to env `HUBBLE_CLAIM_CODE_PRODUCT_IDS`); **dashboard
+rounding** (`d5050024`, shipped as `de2f3700` = + a test-only GIFP9 timeout bump; `platform/src/lib/pace.ts` `fmtRemaining` / `remainingOf` / `fmtKpiNum`).
 
-> **🚀 2026-11-12 ~09:10 IST: PROD CUTOVER #59 DONE — prod = `a18cc932`** (main = develop `dd27888b` + TDS revert kept; full
-> gates 5,456 / 3,706 green on that SHA; on-demand prod DB backup `1794452768704` taken first). api + frontend + `gifsy-sales-import`
-> job all serve `a18cc932`; owner dispatched the deploy. Post-deploy DONE: `run.jobsExecutor` on `gifsy-sales-import` for
-> gifsy-api-sa; Scheduler `sales-import-drain` (*/10 IST, 170 s, x-drain-secret) created — test run 200, no-secret 403;
-> per-number OTP throttle PROVEN on prod (same number: 6th → 429; 8 different numbers from same IP → none throttled);
-> no ERROR logs post-deploy; deoleo / deoleoloyalty / bajajloyalty hosts serve the right login. **Still open:** Hubble prod IP
-> allow-list removal (Hubble) → re-run read-only prod lookup → "Load from Hubble" on prod; Hubble SANDBOX 502 → reconcile Bajaj
-> staging order BAJAJ-26-000031; Bajaj prod flags (offerTiles/outletMasterGeo/soDeclarationKyc) via console = owner; Bajaj KPI
-> config → October points. Then FAST FOLLOW-UP #1 (KPI↔Program link).
->
-> **✅ 2026-11-12: release `dd27888b` PUSHED + LIVE ON STAGING** (api + frontend serving `dd27888b`; full gates 5,457 / 3,706 green).
-> Real-login API matrix on staging PASSED (Deoleo): ₹750.5 → 400 "Enter a whole-rupee amount"; card no. issued then PIN added
-> once (same PIN = no-op, different = 400, 65 chars = 400); partner list/detail show code+PIN, track has no PIN; SALES_ISR list
-> empty + detail/track 403; CLIENT_ADMIN code/pin null + "issued"; Gifsy detail + dispatch show both; bell re-sent "card no. and
-> PIN are in My Orders", no PIN stored in any notification. ⚠️ TEST DATA LEFT FOR OWNER UAT (clean up after): temp reward
-> `cmwcybras000e01s6wb2zvzur` "ZZ PIN test card (staging, temporary)" + Sai Trader (9000000300) order in `pin-state.json`
-> (PROCESSING, card TESTCARD…, PIN 0042, 250 pts debited) → cleanup = voucher-cancelled → CANCELLED (refund) → reward DISCONTINUED.
-> On-screen checks DONE 2026-11-12 (owner said go ahead): Deoleo partner My Orders shows Card no.+PIN w/ Copy; Gifsy dispatch PIN masked → Show/Hide PIN; Bajaj SO catalogue "750.5" → "Check the amount — whole rupees only", Send OTP sends nothing, "1,250" → 1250; Bajaj physical order BAJAJ-26-000026 fulfilment save (Gifsy warehouse + TESTTRK12345) → 200 (old 400 bug fixed). Owner: LEAVE the Deoleo test data. ⚠️ Bajaj order BAJAJ-26-000031 (Boat ₹500, pera sakti canteen, placed by SO 8058006912, owner-approved outlet) is HUBBLE_INDETERMINATE: Hubble SANDBOX (api.dev.myhubble.money) auth returned 502 — Hubble-side outage; points held. When the sandbox is back → Gifsy reconcile it → see whether Boat returns card+PIN.
->
-> **⏸ STOP-OVER 2026-11-11 night (owner asleep) — superseded by the line above.** Branch `feat/sales-import` (worktree
-> `.claude/worktrees/sales-import`) HEAD = merge `defc6087` = everything below + the **Hubble per-brand amounts + whole-rupee
-> amounts + GIFT-CARD PIN** work (branch `feat/hubble-denominations` up to `2549e593`; 4 dual-audit rounds, all findings fixed;
-> owner-approved platform-wide). **NOT pushed** (push to develop needs the owner at the keyboard for the platform-wide hook).
-> Full gates on the merged release ran overnight → result in scratchpad `gates-release.log` (re-run `bash scripts/gates.sh` if unsure).
-> New migration `20261113120000_add_redemption_voucher_pin` (additive `voucherPin TEXT`).
-> **Next, in order:** (1) gates green → push `feat/sales-import` → `develop` (owner OK at the prompt) → verify staging serving SHA;
-> (2) real-login checks per role on staging: partner (Card no.+PIN visible, Copy), SALES REP (never code/PIN), client admin (only
-> "Voucher issued"), Gifsy full-code operator (masked Show PIN, add-PIN-once), vendor; whole-rupee amounts ("750.5" → "Check the
-> amount — whole rupees only"); Load from Hubble + amount buttons; fulfilment save on a physical order (was a 400 bug);
-> (3) owner UAT; (4) Hubble removes prod IP allow-list → re-run the read-only prod lookup; (5) prepare main (keep TDS revert) →
-> owner dispatches prod deploy → post-deploy steps below. Fast follow-up after prod close: KPI↔Program link (WHAT'S NEXT).
+**The 2026-11-15 release (`e242b1a1` → `2eb8271d`, 67 commits)** — all owner-approved; platform-wide items were
+approved in-session and dual-audited where money/identity was involved:
+- **Downloads page** (background exports): heavy reports are built by a new Cloud Run job (`gifsy-exports` /
+  `gifsy-exports-staging`) and listed on a Downloads page; light ones stay instant. Migration
+  `20261116120000_export_requests`. The deploy workflows grant `roles/run.jobsExecutor` to `gifsy-api-sa` on the job.
+  → [`DOWNLOADS-PAGE.md`](DOWNLOADS-PAGE.md)
+- **Memory safety**: page-size caps on every list query, uploads return only problem rows (cap 500 + `truncated`),
+  per-instance heavy-operation limiter (max 2, 503 + Retry-After), multer size limits (413), photo/document proxies
+  stream, Prisma query logging off unless `PRISMA_LOG_QUERIES=true`, API memory 1 GiB (from `e242b1a1`).
+- **Payments report**: server-side paging (50/100/200) + whole-range DB totals + uncapped streamed export (the old
+  10,000-row cap is gone; wide ranges go via Downloads).
+- **Credits/payouts money path**: credit upload posts only OK rows (proxy body limit 15 MB); UTR apply truly idempotent
+  and multi-entry outlets settle together; **payout-credited WhatsApp/SMS states the amount actually credited to the
+  bank** (net of DEDUCT-method TDS) — Deoleo unaffected (all its entries are GROSS_UP with ₹0 withheld, checked on prod
+  2026-11-15).
+- **Hubble gift-card reconcile hardening** (LIVE on prod for Bajaj, flag `hubbleVoucherEnabled`): never refund after a
+  timeout/5xx/network error; ops "Retry with Hubble" refunds only when Hubble's own "no order" is ≥ 2 h old AND a
+  canary lookup passes; late webhooks always re-checked and flagged. → [`HUBBLE-RECONCILE-RUNBOOK.md`](HUBBLE-RECONCILE-RUNBOOK.md)
+- **Bajaj partner screens v2** (flag `partnerDashboardV2`): "₹X so far" for KPIs without a target, multi-outlet KPIs
+  count only targeted outlets, "Change vs last month" on total sales. All tenants: Targets-page outlet table aligned by
+  KPI code; ParamCard "₹10,414 · ₹10,000" / "₹X to go". → [`BAJAJ-CUSTOMIZATIONS.md`](BAJAJ-CUSTOMIZATIONS.md) §10
+- Smaller: visibility amount-upload "Download Report" pages ≤ 100 rows (was a rejected 10,000 → button did nothing);
+  ISR redeem-for-outlet sheet enforces the reward's min/max; voucher sheet uses the item's admin min/max; outlet name in
+  the login reply (retailer header right from first paint); honest error copy on upload/money screens; KYC programme
+  copy uses the tenant name (Deoleo PDF unchanged; Deoleo OTP note now "Deoleo India Loyalty Programme"); signature pad
+  no longer jumps; Bajaj app icon.
+- **How it went out:** pre-release on-demand prod backup **`1794744368023`** → first "Deploy — Production (main)" run
+  failed at **CI Tests** on a flaky platform test (VISCFG5, sync `getBy` before a second request resolved on the slower
+  GitHub runner) → test-only fix `2eb8271d` → redeployed green. Prod untouched by the failed run (tests run before the
+  preflight/build/migrate).
 
-**Release = batch #59 + Sales Import + Bajaj prod config + branding/routing fixes + per-user rate limits + OTP hardening — ONE prod release (owner decision 2026-11-10). LIVE ON STAGING 2026-11-11; NOT on prod.** prod serving = `e98f047` (#58, 2026-11-07); `origin/main` = `e5ab52c` (#59 A+C UPI money fixes, never dispatched); `origin/develop` = `7c85d9fd` (pushed af155bb..7c85d9fd; the first push `2712b64d` went RED in CI on one platform-dependent exceljs test → deploy skipped; the test was removed in `7c85d9fd` → green → deployed). api, frontend and the Sales Import worker job all serve **`staging-7c85d9fd`**. Always re-verify HEADs via `git log` + the serving SHA via gcloud. GitHub Actions is FREE-TIER → batch every push/deploy.
-- **What's in the release (all on staging):** (a) **batch #59** — UPI manual entry + safeguards · UTR upload / order-status CAS · manager redeem for the whole downline · sales gift-redeem delivery address · My Orders paging · payout statement cap removed · This Month's Offers tiles · admin payouts `?batchId=` fix · admin gifts paging · client-admin VIEW-ONLY Fulfilment (voucher codes withheld) · voucher refund blocked until a Gifsy admin records **"Voucher cancelled with vendor"** · Hubble ops exits · tenant-wide cancelled-code table. (b) **Sales Import** (`SALES-IMPORT-PIPELINE-PLAN.md` = SoT; ⚠️ PLATFORM-WIDE, tenant-gated, owner-approved; flag `salesImport` default OFF, Deoleo byte-identical) — month history (10-year retention), product-list summary + **"Rebuild product list"**, reprocess-as-new, graceful worker stop, runner safety net (`salesImport` cannot be switched ON where `SALES_IMPORT_RUNNER` isn't configured). (c) **Bajaj prod config screens** — behaviour flags, partner-app tabs, OTP templates card (GIFSY_ADMIN-only), `KpiDef.outletType`, KPI edit fix. (d) **Hubble env-neutral creds + prod deploy PREFLIGHT** (see "Prepare main" below). (e) **Branding / tenant-routing fixes** — render-side tenant refresh, public branding-asset route, proxy strips spoofable headers. (f) **Per-phone / per-user rate limits** (`IdentityThrottlerGuard`; refresh 1000/min; friendly 429 copy). (g) **OTP hardening** — claim-before-compare on all 4 OTP verifies, purpose-scoped login verify, submission-bound KYC consent OTP, conditional consume, LOGIN-only hourly send cap, re-KYC prefill = owner phone. ⚠️ deploy note: KYC consent OTPs in flight at deploy time need a **Resend**.
-- **Staging infra (owner-approved 2026-11-10/11, CREATED):** secret `SALES_IMPORT_DRAIN_SECRET_STAGING` · Cloud Run Job `gifsy-sales-import-staging` (args `--max-old-space-size=1700 dist/sales-import/worker.main.js`, 2Gi, 1 CPU, 3600 s, 1 retry) · `roles/run.jobsExecutor` for `gifsy-api-sa` on that job · Cloud Scheduler `sales-import-drain-staging` (`*/10` Asia/Kolkata, attempt-deadline 170 s, header `x-drain-secret`) · `roles/secretmanager.viewer` granted to `gifsy-deployer` (redundant — deployer already has editor + secretmanager.admin + projectIamAdmin → over-privilege review is OPEN). Detail: `ENVIRONMENTS.md`.
-- **Staging verification 2026-11-11 (runtime, real interface):** Gifsy console screens; `salesImport` ON for bajaj (staging); bajaj column mapping saved (CUSTOMER CODE / CUSTOMER / INVOICE DATE / NET AMT / QTY (CASES); dims CODE→brand, CLUB SKU→skuGroup); **REAL DMS file** (214.7 MB, 52 parts) through the real pipeline → job started <1 s after complete, ran 8 m 28 s → READY import `6b681de7-1495-4129-9471-0fdc73a58e3b`: 635,427 rows (1 skipped); Oct ₹586,716,492.12 / 170,312.546 cases (per-outlet 3-dp rounding; raw 170,312.543); Nov ₹34,439,896.87 / 10,085.335 (raw 10,085.354); Oct matched 4,874 outlets ₹136,984,266.33. **NOT applied** — apply is blocked until bajaj importer-owned KPIs exist (owner to supply D-8/D-9). Drain endpoint 403 without secret, 200 from Scheduler. OTP templates guards (409 wrong brand / 400 bad id / 403 generic PUT). KPI edit 201 (unchanged). Public branding route probes all 404; other `/api/public` 401; `/Logos/bajaj.png` 200. Deoleo + Bajaj staging login pages render their own branding. Redemption double-tap: 1×201 + 1×409 "Order is no longer awaiting confirmation", single debit, refunded (test order BAJAJ-26-000030 cancelled). **Rate-limit fix NOT runtime-testable on staging** (ThrottlerModule `skipIf` when `FIXED_OTP`) → prove on prod after release.
-  **Role matrix (scripted REAL logins, FIXED_OTP → MSG91 not called):** deoleo CLIENT_ADMIN / WHOLESALER / SALES_ISR, bajaj CLIENT_ADMIN / SALES_ISR / SALES_SO all log in with the right role; Deoleo sales-import 403; bajaj client admin sees the import + preview but not OTP templates / Gifsy console (403); deoleo admin phone can't log in on bajaj. **Deoleo approved partner redemption** ("Sai Trader"): wrong OTP 401 "Invalid OTP. 2 attempts remaining." → double-tap 1×201 CONFIRMED + 1×400 "Order is not awaiting confirmation" → debited once (600→500) → cancelled, refunded (600). **Re-KYC consent OTP** (Deoleo test partner "Daya", rep Vikash Dutta, address-only re-KYC): prefill = owner phone; consent-otp wrong number 400 "does not match the outlet owner" (no OTP created); right number 201; consent wrong number 401; "+91…"/spaced → 400 "Mobile must be 10 digits"; two parallel correct consents → 1×201 + 1×401, one DRAFT→PENDING_SO_APPROVAL history row; SO first-approve 201 → PENDING_GIFSY → Gifsy approve needed Entity Type + GST Registration Type (set INDIVIDUAL — the admin label "Individual / Proprietor" — + REGULAR per owner) → Gifsy approve 201 → Daya restored to APPROVED (phone, GST, PAN, bank, address, wallet 300/500/200 unchanged; re-KYC flags cleared). The real app carries the owner signature forward on re-KYC (pad pre-drawn from the prior SIGNATURE doc → hasSigned) — the test script omitted it, not a bug.
-- **Real-file local proof** (throwaway embedded Postgres): exact to the paisa vs an independent calculation. Scratchpad copies of the sales file DELETED.
-- **Prod Bajaj tenant:** created by the owner 2026-11-10 (`bajaj`, ONBOARDING; domains `bajajloyalty.gifsy.in` primary + `bajaj.gifsy.in`; prefix `TGSL-BCCL-`; 12 flags; logo + white wordmark uploaded) — see `BAJAJ-PROD-GO-LIVE-CHECKLIST.md`. Until this release ships, prod renders generic "LoyaltyBase" on `bajajloyalty.gifsy.in` (render-side tenant-cache bug, fixed in the release) and the uploaded logo URLs 403 (public branding route + read-time rewrite, in the release).
-- **Next (in order):** (1) **Owner staging UAT.** (2) **Owner creates prod secrets** `HUBBLE_CLIENT_ID`, `HUBBLE_CLIENT_SECRET`, `HUBBLE_WEBHOOK_SECRET` — else the prod deploy PREFLIGHT stops at step 1 (prod untouched). (3) **Prod Sales Import infra — owner APPROVED 2026-11-11, in this release:** `deploy.yml` now deploys the `gifsy-sales-import` job (same image, after migrations) + API env `SALES_IMPORT_RUNNER=job`/`SALES_IMPORT_JOB=gifsy-sales-import`/`GCP_PROJECT` + `SALES_IMPORT_DRAIN_SECRET` (commit `09793d98`; preflight also checks that secret). ✅ Secret `SALES_IMPORT_DRAIN_SECRET` CREATED (64 hex, ENABLED). **AFTER the prod deploy:** `gcloud run jobs add-iam-policy-binding gifsy-sales-import --member=serviceAccount:gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com --role=roles/run.jobsExecutor` + Cloud Scheduler `sales-import-drain` (`*/10` Asia/Kolkata, `--attempt-deadline=170s`, POST `https://gifsy-api-4d4n5mc6yq-el.a.run.app/v1/sales-import/drain`, header `x-drain-secret` from the secret). ✅ **Hubble prod secrets** `HUBBLE_CLIENT_ID` / `HUBBLE_CLIENT_SECRET` / `HUBBLE_WEBHOOK_SECRET` CREATED by the owner 2026-11-11 (verified: ENABLED, no stray whitespace, all different from the staging values); prod webhook URL registered in Hubble (Order Terminal Status) with a Hubble-generated signature. (4) **"Prepare main"** (checklist in `runbooks/PROD-CUTOVER-RECORD.md`) — merge develop → main **keeping the TDS-194R revert** (`git diff <prev-main> HEAD -- api/src/tds/` must be EMPTY) → owner dispatches "Deploy — Production (main)" (MANUAL) → verify serving SHA → prove the rate-limit fix (6× same unregistered number → 6th = 429; 8 different numbers → none) → confirm `bajajloyalty.gifsy.in` branding + uploaded logos load. (5) Bajaj October points: owner supplies D-8/D-9 KPIs → apply + close Oct → engine rule → preview → client approval → credit.
-- **Open:** ⚠️ **ops: re-KYC of any partner approved BEFORE Entity Type + GST Registration Type became required is blocked at Gifsy approve** ("Set Entity Type and GST Registration Type before approving this KYC.") until Gifsy fills both on the approval step — applies to Deoleo prod too (pre-existing rule, not from this release) · ⚠️ **Hubble PROD enforces an IP allow-list** (2026-11-11 read-only login → 401 "network that is not whitelisted"; the prod API has no static egress IP) → owner: Hubble will REMOVE the whitelisting; until then Bajaj prod gift cards can't issue — after Hubble confirms, re-run the one read-only prod product lookup (login + Flipkart FIXED shape) · deployer over-privilege review · Bajaj TDS import BLOCKED on vendor PANs · ⚠️ api `tsc` stops on 6 TS6059 rootDir errors (`nest build` still compiles) — owner decision pending. _(Resolved 2026-11-11: consent-OTP send caps (5 per number per outlet + 15 per number per tenant per hour), exact "attempts remaining", staging cleanups applied (2 both-rail partners, 1 malformed UPI; backup kept).)_
-- **Corrections (verified, unchanged):** Deoleo per-tenant OTP templates LIVE in prod since 2026-07-06. Visibility per-photo geotag (`ee00dd2`) IN PROD, dormant; owner real-phone smoke NOT recorded.
+**Staging proof of the Hubble change (2026-11-15):** Bajaj staging orders BAJAJ-26-000032 / -000038 / -000039 refunded
+through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" body was accepted by the canary check.
 
-**History — 2026-11-10:** owner decided #59 + Sales Import ship together; Sales Import P3 hardening complete + month history added; real-file local proof; owner approved the P4 staging push + infra and the platform-wide upload guard on logout/brand-switch/exit-tenant (force mode, 5 s timeout); `feat/sales-import` was local-only (develop `af155bb` + Sales Import) — all of it is now on staging (above).
+## 2. Tenants
 
-**History — 2026-11-09:** develop `93ed888` staging-verified; owner said "not yet" to prod. Batch contents (all platform-wide, owner-approved, gated + multi-round adversarial audits): UPI manual entry + safeguards (upiCaptureMethod QR/MANUAL migration `20261107120000`, type-it-twice on partner capture, one complete payout rail per KYC, re-KYC "never block the rep for what they can't fix" rail rules, reviewer removedRail/proposed values, approval verifies only fully-staged rails + FOR UPDATE lock + changed-carried-value 409, capture CAS); UTR upload CAS per payout (never paid+refunded) + sorted lock order + skipped rows UI; order-status CAS (no double refund) + OTP cleanup scoped; manager redeem for whole downline (outlet-keyed, not parked); sales gift-redeem delivery address (was 400); My Orders "Load more" (cursor) + payout statement cap removed; lock-order fixes (admin-outlets/parents) + PATCH-approve bypass closed; **This Month's Offers** tiles (migration `20261109120000_add_offer_tiles`, per-tenant `offerTiles` flag default OFF, two-colour tiles); admin payouts `?batchId=` list fix (pre-existing prod bug).
-**Runtime-verified on staging with ZZ TEST fixtures (created + removed):** offers (Bajaj ON, Deoleo 403), manual-entry guards, partner typed-UPI type-twice + ₹500 cash payout, concurrent PAID-vs-FAILED UTR upload (PAID won, FAILED skipped, no refund, UPI→VERIFIED), manager physical-gift redeem for rep's outlet, cancel-vs-process (single refund). NOT runtime-checked: rep KYC wizard typed UPI + reviewer badge (needs camera/signature) — unit-tested only.
-**Staging state left on purpose:** Bajaj `offerTiles` ON + 4 example tiles (Nov 2026); Bajaj `upiManualEntry` ON.
-**Owner decisions 2026-11-09 (don't re-raise):** client admins MAY change partner login phones directly (accepted risk: phone→OTP takeover within own tenant; "leave as is"). Issued gift-card vouchers can't be refunded until a Gifsy admin records "Voucher cancelled with vendor". Client admins get a view-only Fulfilment list with voucher codes hidden ("Issued" only).
-_(2026-11-09 next/open items are superseded by the 2026-11-11 list above; the admin gifts 100-row cap fix is now in #59.)_
+- **Deoleo** (`deoleo`; hosts `deoleo.gifsy.in`, `deoleoloyalty.gifsy.in`) — live since July 2026 (tenant created 2026-07-01). Must stay
+  **byte-identical** for every Bajaj-driven change unless the owner approved a platform-wide change.
+  TDS method: GROSS_UP everywhere (₹0 withheld). Reversal engine: stays **LEGACY** (owner 2026-11-15/16).
+- **Bajaj** (`bajaj`; prod hosts `bajajloyalty.gifsy.in` + `bajaj.gifsy.in`; staging `uat-bajaj.gifsy.in`) — prod data
+  imported and verified 2026-11-12/13 (outlets/KYC/docs, visibility, wholesaler points, payout history, partial vendor
+  TDS, targets + achievements Apr 2025 → Oct 2026): [`BAJAJ-PROD-OUTLET-IMPORT.md`](BAJAJ-PROD-OUTLET-IMPORT.md).
+  **November 2026 sales applied on prod 2026-11-15** via Sales Import and verified per outlet (6,452 records); the month
+  is **OPEN**. Customisations: [`BAJAJ-CUSTOMIZATIONS.md`](BAJAJ-CUSTOMIZATIONS.md); decisions:
+  [`BAJAJ-GO-LIVE-DECISIONS-LOG.md`](BAJAJ-GO-LIVE-DECISIONS-LOG.md); prod set-up: [`BAJAJ-PROD-GO-LIVE-CHECKLIST.md`](BAJAJ-PROD-GO-LIVE-CHECKLIST.md).
 
-## 📍 HANDOFF 2026-11-06 (historical — every item below has since shipped or been superseded; see 📍 STATE 2026-11-11)
+## 3. In progress (not on prod — do not describe as shipped)
 
-**Recovery.** The laptop died 2026-11-05 21:15 IST; its uncommitted work was pushed as `backup/wip-20261105-batt`.
-On the laptop, its working tree still holds that same uncommitted work — **discard the tracked-file edits**
-(`git checkout -- .`); they are all on GitHub. Do **NOT** `git clean` — the laptop's untracked drafts
-(`.claude/` hooks, `terraform/*.draft`, `EMPLOYEE-REWARDS-*.md`) live only there.
+| Work | Branch / worktree | State | Read |
+|---|---|---|---|
+| **Wallet Reversal Engine** (⚠️ platform-wide, owner-approved; money path) | `feat/wallet-reversal-engine` (+ `feat/wre-*`), worktree `.claude/worktrees/reversal-engine` | WP0–WP7 built on the branch (WP7 real-Postgres concurrency suite 2026-11-16); not merged, not deployed. Per-tenant flag `reversalEngine: LEGACY / SHADOW / V2` (default LEGACY). **Owner decisions 2026-11-15/16:** Deoleo stays **LEGACY**; Bajaj → **V2**; a reversal of an already-paid payout becomes a **net receivable**, with **TDS credited back on the PAN**; every reversal shows an **outcome summary** (all tenants). Prod today runs the INTERIM rule (points reversals refused on wallets carrying debt; payout reversals whole-entry only). | `WALLET-REVERSAL-ENGINE-DESIGN.md` **on that branch** (maintained there) |
+| **Flaky-test sweep** (test/tooling only) | `chore/flaky-test-sweep` (6 commits, 2026-11-16) | Not merged. Suite-wide async headroom (RTL `asyncUtilTimeout` 15 s, 30 s test timeouts, jest `testTimeout` 30 s), sync `getBy` after await → `findBy`, `eslint-plugin-testing-library` rules. | branch commits |
+| **Daily Operations Digest** (⚠️ platform-wide, owner approved option A) | `feat/daily-ops-digest`, worktree `.claude/worktrees/ops-digest` | One build commit `70744e63` (2026-11-13), not audited/merged; paused behind go-live. | branch |
 
-**✅ SHIPPED — CUTOVER #58 (`e98f047`, 2026-11-07).** Partner-shell **React #418 hydration fix** (⚠️ PLATFORM-WIDE) — `usePartnerIdentity` stopped reading `getStoredUser()` localStorage during the INITIAL render (server rendered an empty shell-header name vs the client's cached name → app-wide #418 on every partner page); now starts empty + seeds the cached name post-mount. Plus a **test-only flaky-test sweep** (`e23f49b`) + a RESUME doc. **LIVE on prod + VERIFIED** (api `gifsy-api-00080-6d4` + frontend serving bare `:e98f047` @100%; `deoleo.gifsy.in/auth/login` 200, `gifsy.in` 200, send-otp-empty→400). **Staging-verified** (`staging-eeb3f90`: partner dashboard + wallet consoles BOTH completely clean — were 3× #418). Independently audited (no other render-time client-only read remains in the shell). TDS still reverted; NO migration. develop `eeb3f90` → main (clean merge `e98f047`, no conflicts). See [[deoleo-go-live-bundle]] #58.
+## 4. What's next / waiting on the owner
 
-**✅ SHIPPED — CUTOVER #57 (`ff45f6b`, 2026-11-07).** `feat/partner-orders-wallet-address` → develop (`9dbbfa4`) → merged into main
-(`ff45f6b`) → **LIVE on prod + VERIFIED** (api `gifsy-api-00079-d7x` + frontend both serving bare `:ff45f6b` @100%;
-`deoleo.gifsy.in/auth/login` 200, `gifsy.in` 200, send-otp-empty→400 JSON envelope). All 3 features below are LIVE
-(staging-verified on Bajaj `uat-bajaj.gifsy.in` first: order-stepper, wallet Excel/PDF+Balance, delivery-address pre-fill;
-Task 0 balance-chain audit ran CLEAN 0/0/0). TDS 194R stays **reverted** on prod; NO migration. Deoleo category-name check
-WAIVED by owner (Deoleo has no physical-gift rewards). See [[deoleo-go-live-bundle]] #57. **Open (owner):** the 3 shelved
-UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration warning was root-caused + FIXED + shipped in #58 — see above.)_
+1. **Bajaj TDS method — decide BEFORE the first live Bajaj credit payout.** Bajaj has **no `tdsPolicy` row**, so it
+   resolves to the default `{SEC_194C, GROSS_UP}` (`api/src/tenant/tenant-settings.service.ts`). Owner to confirm
+   GROSS_UP vs DEDUCT on Gifsy → TDS Treatment.
+2. **Bajaj points rules for November** (SAMT eligibility gate on NON ADHO: ≥ ₹200 → Elite, ≥ ₹400 → Privilege, plus the
+   rest of the rule) — needs a **dedicated rule-engine session** with the owner. `points_rules` had no Bajaj rule at the
+   last check. Do not close November or compute points before the rule is agreed.
+3. **SAMT ADHO / NON ADHO split (Bajaj RLP card: Total ≠ ADHO + NON ADHO).** Prod Nov targets: SAMT outlets
+   (861) carry only TOTAL + LINES; Unnati sums exactly. SAMT achievement has NON ADHO but no ADHO (KpiDef + sales-import
+   definition for ADHO are scoped `programs: [Unnati]`), so the card's NON ADHO % counts SAMT sales against an
+   Unnati-only target. Plan (owner 2026-11-16, Bajaj will provide the split): Bajaj re-sends SAMT targets with the split →
+   widen ADHO applies-to on BOTH the KpiDef and the sales KPI definition to Unnati + SAMT (tenant config, staging
+   first) → re-apply November sales. No Bajaj points rules exist on prod, so points are unaffected.
+4. **Metro / Non-Metro for 71 Bajaj outlets** — DONE 2026-11-16 (71 updated; Metro 1,657 / Non Metro 4,834).
+5. **October files from Bajaj**: the October **rewards** file and the October **cases** file — import when received.
+   **Never run a points compute for Apr 2025 – Oct 2026** (paid by the vendor; imported).
+6. Owner process items still open: `gifsy-deployer` over-privilege review; stray `gifsy` `tdsPolicy` row from the F1 bug
+   (harmless; delete when convenient); rotate the Hubble client secret (was shared in a screenshot).
+7. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first) → merge the flaky-test sweep → Daily Ops Digest.
 
-**Shipped to `develop`/staging today (owner-approved, staging-verified on Bajaj, `uat-bajaj.gifsy.in`, partner 9830011252):**
-- `635595f8` dynamic reward **category chip row** (tenant RewardCategory names, ordered by admin `sortOrder`, then
-  name; ⚠️ PLATFORM-WIDE, approved) + dashboard v2 points font `text-4xl→3xl` (v2-flag only).
-- `14aad1dd`…`35e6ad8c` Rewards **filter-row UX** (⚠️ PLATFORM-WIDE, approved): "Within my points" chip (Physical +
-  Vouchers; shared `pointsRequired`/`isWithinPoints` = what the backend enforces: FIXED → points; FREE_AMOUNT →
-  max(item.minRedemptionPoints, round(minVoucherFreeAmount × LIVE effectiveRate)) — never the backend `isAffordable`);
-  Wishlist chip removed (header pill toggles, shows ON only on Physical); chip-row edge fade + selected chip kept in view;
-  filter-aware empty states. Plan: `REWARDS-FILTER-UX-PLAN.md`.
-- Staging test data left in Bajaj: categories Luggage (code `LUGGAGELUGGAGE` — typo, codes are immutable) + Lifestyle;
-  Snitch 3pcs → Luggage, Titan watch → Lifestyle. Someone also added Electronics / Kitchen Appliances on staging.
+## 5. Owner process rules (adopted — apply to every change)
 
-**On `feat/partner-orders-wallet-address` (built, independently reviewed, review fixes applied, NOT pushed to develop):**
-1. **Order timeline** (`ORDER-TIMELINE-STEPPER-PLAN.md`, ⚠️ PLATFORM-WIDE approved). Owner chose the LONG-TERM fix: ONE
-   shared `transitionOrderStatus` (`api/src/rewards/order-status-transition.ts`) writes status + `RedemptionStatusHistory`
-   in one tx for EVERY status change (incl. cash UTR DELIVERED/FAILED, auto-supersede, OTP-send-failure cleanup — now
-   GUARDED on PENDING, Hubble, vendor). Money paths byte-identical (dual review). Partner My Orders: compact progress bar
-   + dated stepper from `/rewards/orders/:id/track` (per-type labels); **never-confirmed orders hidden** from members;
-   "Points refunded" only when a CREDIT_REVERSAL exists. No migration, no backfill (old orders show undated steps).
-2. **Wallet statement** (`WALLET-STATEMENT-EXPORT-PLAN.md`, ⚠️ PLATFORM-WIDE approved): partner wallet + sales ledger,
-   one Download → Excel/PDF menu, Balance from STORED `balanceBefore/After` with bounded chain-inversion repair (200 s
-   window), opening/closing per date range (all tx types), fixes the old newest-20-rows truncation + `--50` sign bug.
-   PDF = jsPDF, "Rs." + English-letter names (owner D9; jsPDF can't shape Devanagari). ⚠️ **Task 0 still open:** a
-   guarded read-only staging check of the balance chain before pushing.
-3. **Delivery-address pre-fill** (`DELIVERY-ADDRESS-PREFILL-PLAN.md`, ⚠️ PLATFORM-WIDE approved, every brand, no flag):
-   physical-gift redeem form pre-fills from the ACTIVE outlet's address only (via `/partner/me` `deliveryDefaults`),
-   junk placeholders ('-', 'NA', '0'…) treated as empty, never overwrites typing, hint "From your outlet address".
+- **No silent pass-throughs.** Every skip, refusal, fallback or "not applied" is called out in plain words to the
+  admin/user on screen (and in logs) — never swallowed.
+- **Platform-wide changes need explicit in-session owner approval before building** (root `CLAUDE.md` 🚦; enforced by a
+  `PreToolUse` hook on push / prod dispatch). Prefer tenant-scoped.
+- **Batch deploys** — GitHub Actions is metered (free tier); bundle work into releases.
+- **Prod deploy = the owner clicks "Deploy — Production (main)"**. Never merge to `main`, deploy prod, or run a
+  prod/staging DB write without the owner (show the SQL/commands, confirm a backup, wait).
+- Staging role tests: log in yourself with `FIXED_OTP` 123456; prod logins stay with the owner.
+- Imports: exhaustive source→DB reconciliation + dual audit; copy vendor files to our storage (vendor links expire).
 
-**Open / next (owner):**
-- Staging runtime check of the 3 features above (real logins per role) → push to `develop`.
-- **Deoleo live category-name check** (REQUIRED before the next prod cutover — the dynamic row removed the whitelist).
-- Prod cutover (manual) for everything on `develop`.
-- **UPI manual entry SHELVED** (code on `backup/wip-20261105-batt`) until 3 platform-wide money fixes: lowercase-normalise
-  UPI + dupe scan/backfill; backend UPI validator; `upiManualEntry` ⇒ require `uniquenessPolicy.upi`.
-- **Bug (not fixed):** sales-assisted physical-gift redeem (`sales/catalogue` → `/rewards/redeem-for-outlet`) sends no
-  `deliveryAddress` → 400.
-- Pre-existing, noted by reviewers: admin/vendor `transitionOrder` have no status guard (stale-read race); OTP-send-failure
-  cleanup deletes a concurrent redeem's fresh OTP; My Orders page fetches only the newest 20 orders; wallet payout list caps
-  at 100 rows.
-- **TDS 194R:** `e8c3f463` reverted the VENDOR_IMPORT exclusion on `main` only — still present on `develop`. ~~Standing rule (2026-11-10): every "prepare main" KEEPS the revert.~~ **SUPERSEDED 2026-11-12/13 (owner): the next prepare-main must `git revert e8c3f46` explicitly** so the exclusion reaches prod before the Bajaj payout-history import; verify with `git grep VENDOR_IMPORT`.
-- **OTP hardening deploy note (this release):** KYC consent OTPs are now bound to the submission (stored with its id + the owner's
-  normalised phone). Consent OTPs already sent before the deploy have no submission id → verifying them returns "OTP not found or
-  expired"; the rep taps **Resend** (OTPs expire in 10 min, so the window is tiny). Login now only accepts LOGIN-purpose OTPs; the hourly
-  per-phone login cap counts LOGIN OTPs only; every OTP verify claims an attempt atomically before comparing.
-- **⚠️ PROD DEPLOY PREFLIGHT (from the #59 + Sales Import release on, EVERY prod deploy, Deoleo-only ones too):** `deploy.yml` first step checks
-  (metadata only) that `HUBBLE_CLIENT_ID`, `HUBBLE_CLIENT_SECRET`, `HUBBLE_WEBHOOK_SECRET` exist with an ENABLED latest version, which needs
-  `roles/secretmanager.viewer` on `gifsy-deployer` (terraform/iam.tf; one-time gcloud grant in BAJAJ-PROD-GO-LIVE-CHECKLIST.md F3 runbook step 0).
-  Missing either → the deploy stops at step 1 BEFORE the image build + migrations, prod untouched (frontend now `needs: deploy-api`). The owner
-  creates the 3 Hubble secrets themselves (values never in chat). The staging deploy (live on develop since `7c85d9fd`, 2026-11-11) has the same
-  metadata-only preflight for `SALES_IMPORT_DRAIN_SECRET_STAGING` as its first step (before build + migrate) — same viewer grant.
-- ✅ **CORRECTED 2026-11-13 — the prod Sales Import infra EXISTS** (verified): Secret Manager `SALES_IMPORT_DRAIN_SECRET`,
-  Cloud Run job `gifsy-sales-import`, Cloud Scheduler `sales-import-drain` **ENABLED** (`*/10 * * * *`), and `deploy.yml`
-  sets `SALES_IMPORT_RUNNER=job` / `SALES_IMPORT_JOB=gifsy-sales-import` + binds the drain secret. What remains for Bajaj
-  is per-tenant config only: the column mapping (`sales_import_profiles` empty on prod) + the sales KPI definitions
-  (`sales_kpi_definitions` empty on prod). The historical note below is kept for context:
-- ~~**⚠️ Sales Import in PROD needs infra the owner approves at release:**~~ prod worker Cloud Run Job + API env
-  (`SALES_IMPORT_RUNNER=job`, `SALES_IMPORT_JOB`, `GCP_PROJECT`) + Secret Manager `SALES_IMPORT_DRAIN_SECRET` (+ add it to the
-  prod preflight) + `run.jobsExecutor` binding + Cloud Scheduler drain. `deploy.yml` has none of it yet (staging has all of it since 2026-11-11 — `ENVIRONMENTS.md`). Safety net (integration
-  audit M1, live on staging since `7c85d9fd`): while the runner is not configured (`SALES_IMPORT_RUNNER` unset/`none`, or `job` without
-  `SALES_IMPORT_JOB`+project; `inline` counts as configured for local/dev) the API refuses to switch `features.salesImport` ON
-  (console PATCH + new-client create → 400 "Sales Import can't be switched on here yet: the background processor isn't set up in
-  this environment.", shown next to the console toggle) and refuses upload / complete / reprocess for a tenant already ON.
-- **Sales Import integration-audit follow-ups (2026-11-10, `feat/sales-import`):** L4 — a KPI whose `KpiDef.outletType` is set is
-  written by apply / recalculate / the tester ONLY for outlets of that type (intersected with the definition's outlet types;
-  other outlets get no key — blank, not 0), the type is part of `definitionsHash`, and the KPI editor warns when the two scopes
-  disagree. L3 — `wipe-tenant-data.ts` wipes the 9 sales-import tables (GCS `sales-imports/<clientId>/` is NOT removed by the
-  script — PROD-DATA-WIPE.md §1). L5 (not fixed, note only): the sales-import migration folder names are dated 2026-11-10..12,
-  i.e. partly future-dated relative to the day they were written; harmless for `migrate deploy` ordering, leave as is.
-- Owner preferences captured this session: implementation plans in the "zero-context engineer, bite-sized TDD tasks,
-  exact files, frequent commits" format; ask ONE multiple-choice question per message; Claude orchestrates (agents build,
-  Claude gates + independent review + runtime-verify).
+## 6. How to deploy
 
----
+**Gates (before every push):** `bash scripts/gates.sh` — api jest (`--maxWorkers=50%`) · api `nest build` (asserts
+`dist/main.js`) · platform vitest · platform `tsc --noEmit`. Read ITS exit code / `GATES:` line; never a piped exit code.
+The committed pre-push hook (`.githooks/pre-push`, enable once with `bash scripts/setup-hooks.sh`) runs the full gates on
+any code push. Gates do not boot the DI container — the staging deploy health check is the boot test.
 
-## 📮 POST-COMPACT PROMPT (tight restart — everything below this section is reference detail)
-> ⚠️ **HISTORICAL SNAPSHOT (2026-09/10):** the prod SHAs, "latest on develop" and "open" lines in this prompt and in 🟢 CURRENT STATE below are superseded — prod is now `e98f047` (#58) and all of those develop items have shipped. For the live state read **📍 STATE 2026-11-11** at the top. The Deploy / Gates / Mode lines remain valid.
-> **Loyaltybase** (Gifsy operator / Deoleo client). Repo `C:\Users\nikun\Loyaltybaseclaude`; backend `api/` (NestJS+Prisma, owns all logic), thin FE `platform/` (Next.js, proxies `/api`→`/v1`). Work on `develop`. Read this file + memory `[[deoleo-go-live-bundle]]` first; verify HEADs via `git log`, never trust a hardcoded SHA.
-> **prod SERVING = `7e47d75` (CUTOVER #50 LIVE + VERIFIED 2026-09-18).** (api rev `gifsy-api-00072-2t5` + frontend `gifsy-frontend-00063-cd9` @100% on the bare `:7e47d75` tag; migrate `gifsy-migrate-22rhl` succeeded = no-op; real domains deoleo/app/gifsy.in + `/auth/login` all HTTP 200; api healthy.) **#50 shipped 3 (all staging-verified):** scheme-report **"Enrollment Status (Excel)" de-collision** (`26efaec`, client complaint — an uploaded status-synonym column no longer looks like a duplicate of the live "Status"; + every Excel header de-duped on its FINAL value) · **WhatsApp send success log** (`6fc5e79` — `msg91.sendWhatsappTemplate` now logs a PII-safe INFO line: template + masked ••••last4 + var COUNT + req id; closes the #49 silent-success finding) · **KYC "Pending — Gifsy" filter** (`25c70bc` — a "Pending — Gifsy (N)" Status-dropdown option filtering to `awaitingGifsy`/PENDING_GIFSY rows; export aligns). ⚠️ confirm the SERVING image SHA via gcloud, never the branch HEAD (main carries docs-only commits past the deployed sha). *(prev #49 = `3257cd9`, 2026-09-17; #48 = `64e8d46`.)*
-> ✅ **#49 shipped (in prod) — all FOUR, dual-audited + gate-green (api jest 3277 · nest 0 · FE vitest 2564 · FE tsc 0):** (a) **stale-deploy self-heal** (`4578088`) — the Next "Failed to find Server Action" deploy-skew error (a tab open across a deploy) triggers a guarded ONCE-PER-SESSION reload; `lib/stale-deploy.ts` + app-wide `StaleDeploymentGuard` (uncaught) + wired caught callers (brand-switcher, login sendOTP/verifyOTP). (b) **admin KYC rejection reason → MULTI-select** (`c08479f`) — reviewer ticks multiple reasons + Others, joined via the shared `buildRejectionReason` (sales path was already multi); backend unchanged. (c) **GSTIN compulsory + Gifsy-only per-tenant toggle** (`1198f34`, code-only no migration) — per-tenant `kycGstinRequired` (default TRUE, mirrors `visibilityEnabled`), enforced service-side in `kyc.service create()` (blocks a blank GSTIN before any write, but ONLY when GST is editable this submission via `canProvide('gstNumber')` → no re-KYC deadlock on legacy no-GST outlets), read UNCACHED (fail-safe=compulsory, no OFF→ON stale window), Gifsy-only write coerced fail-safe; FE toggle + entry-form required marker/gate. **deoleo = COMPULSORY** (default). DUAL-audited (both lanes' HIGH re-KYC-deadlock + coercion/cache fail-open + FE step-gate parity all fixed). ⏳ **DEFERRED (owner recommendation accepted):** reviewer manual GSTIN entry — obviated by compulsory-at-entry; only needed for pre-existing blanks (Falcon), which owner deprioritized. ⚠️ go-live note: turning on a NEW tenant that has genuinely unregistered (no-GST) outlets requires flipping its Gifsy toggle OFF *before* field work. (d) **per-scheme WhatsApp confirmation on enrollment submit** (`f803c22`, code-only no migration) — config on `scheme.metadata.whatsappConfirm` (enabled + MSG91 templateName + recipient PARTNER_PHONE|FORM_FIELD + ordered variable→token mapping: OWNER_NAME/OWNER_PHONE/OUTLET_NAME/OUTLET_CODE/SCHEME_NAME/SUBMISSION_DATE/FORM_FIELD → body_1..N), set in the scheme-builder **WhatsApp tab** (visible token legend + "must match your registered template" note); fires fire-and-forget on EACH successful submit (never blocks/throws; recipient masked in logs); DORMANT until the tenant has `WHATSAPP_*` env + a registered template. DUAL-audited (comms/PII): fixed a PII-in-logs leak in the SHARED `msg91.service` (also protects OTP/broadcast), a metadata validation-bypass, a disabled-config 400, and the draft-vs-saved-form HIGH (authoritative backend cross-check: a referenced `formFieldId` must exist in the scheme's SAVED form). **8/8 staging runtime-verified** (config round-trip + cross-check) **+ FIRE-ON-SUBMIT e2e-verified on staging (2026-09-17):** built a self-contained synthetic scheme (form + 1 standalone roster row tagged to a real ISR + audience + activate), enrolled through the REAL sales-rep interface → submit returned 201/SUBMITTED and adminEdit re-fire returned 200 — the fire is genuinely non-blocking; the DEPLOYED resolver returns non-null {phone,template,bodyValues} for the exact inputs so `msg91.sendWhatsappTemplate` WAS invoked; `MSG91_AUTH_KEY` is set on staging and there was NO DEV-bypass / error / 10s-timeout log after either fire → the send returned success-shaped (MSG91 accepted; the deliberately-UNREGISTERED template ⇒ zero delivery, zero real recipient — used a Gifsy test number via FORM_FIELD). ⚠️ **observability finding (non-blocking):** `sendWhatsappTemplate`'s SUCCESS path is SILENT (no log, no notification/delivery-status record) — so in prod there is NO positive audit trail that a scheme confirmation actually fired/sent; consider a lightweight success log or a delivery-status handle if the owner wants that trail. ⏳ owner product-calls (flagged, non-blocking): recipient is the CONFIGURED number (not necessarily the OTP-consented one); an admin edit re-sends a confirmation; no per-message delivery tracking on this send; actual DELIVERY is only testable once the owner registers a real WhatsApp template (dormant by design).
-> **#48 shipped (in prod):** outlet-driven **KYC Status Report** (`2819562` — one row per non-deleted outlet + derived status incl. "Not Started", no date filter, shared `deriveKycStage`, owner/mobile from the outlet's `ChannelPartner`, tenant-scoped, no N+1) · **exit-tenant strand fix** (`6f14ca5` — authoritative `POST /v1/auth/exit-tenant` re-mints an un-assumed home session from the assumed token's real `sub`, revokes the assumed session so its refresh can't self-renew, refuses an un-assumed caller; FE: stash fast-path → backend exit → clear only on a definitive 401/403 + drop a leftover assumed refresh; DUAL-audited + 8/8 staging runtime-verified). Code-only (no migration).
-> **#47 (in prod):** scheme-builder **Live Preview** (`SchemeFormRenderer` dry-run `previewMode`) · **imageUrls fix** (shared `@IsImageRef` accepts the `/api/gift-images` proxy path OR an absolute URL) · **sales-enroll pagination fix** (rep enroll sheet loads ALL pages of `getSalesTargets`). #46 = KYC program-name filter + UPI_QR live-scanner; #45 = the 9-change batch.
-> **Open (owner):** **#48 prod UAT** (exit-tenant: assume a tenant then "Exit to platform" clears the banner even after a long/multi-tab session; KYC Status Report renders all outlets + statuses) · **#47 UAT** (upload→save a reward image; a >50-outlet scheme shows ALL outlets to the rep) · deoleo **Amazon Voucher** `maxRedemptionPoints` NULL → un-redeemable ("Send-OTP not clickable"), set a max in `/admin/gifts`. *(UPI-scanner device-camera UAT ✅ done 2026-09-16. Hierarchy-Excel #45 re-test ✅ done 2026-09-16: the outlet-holder manager-vs-role guard is CLIENT-SIDE (`validateEmployeeUpload`; backend `persistHierarchy` blind-upserts — a backend PUT wouldn't test it); ran the real guard against LIVE staging deoleo data — 16 real outlet-holding XSR manager-only changes ALL pass, role-change control 16/16 blocked; full pipeline also proven reversibly on staging.)*
-> **Deploy:** STAGING auto-deploys on push to `develop` (gated `needs: test` — a RED suite SILENTLY skips it). **PROD is MANUAL** — a FF `main`→`develop` does NOT deploy; ship via GitHub Actions → **"Deploy — Production (main)" → click it in the LEFT SIDEBAR → Run** (branch `main`). Prod & staging build SEPARATE images per SHA — verify the **bare** `:<sha>` prod-tag digest (not `:staging-<sha>`). No `gh` CLI here → verify serving revisions via `gcloud` (project `gifsy-platform`, region `asia-south1`).
-> **Gates (full, before EVERY push; run QUIESCED/sequential — running them concurrently with agents caused false `waitFor` flakes this session; re-run the failing file in isolation to confirm):** `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform && npx tsc --noEmit`.
-> **LATEST ON DEVELOP (staging only — pending prod cutover):** **capture bank/UPI at redemption** — a wholesaler with no payout details captures bank/UPI in-flow at cash redemption (reusing the KYC validator + `bank-or-upi-section`); stored UNVERIFIED + hidden from Store Info until the redemption **PayoutTransaction is PAID** → VERIFIED (FAILED → re-capture). ⚠️ **PLATFORM-WIDE** (owner-approved), Deoleo byte-identical via additive schema `ChannelPartner.paymentDetailsStatus @default(VERIFIED)` + migration `20261103120000_add_payment_details_status` and the per-tenant flag `captureBankAtRedemption` (default OFF). Gates green + DUAL-audited (money + identity, all findings fixed). Source of truth `PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md`; memory `[[payment-details-at-redemption]]`. ▶ after push: run the migration via the in-VPC job, enable the Bajaj flag on staging, owner runtime UAT.
-> **ALSO ON DEVELOP/STAGING (2026-11-03 sales batch):** visibility post-capture **nav fix** (deep-linked capture returns to the outlet detail); **team-member filter** on the Outlets screen (manager-only, reuses `descendantSalesUserIds`); **Trend Comparison** card now Achievement/Target/Width (dashboard, ₹-target added to `aggregateTargetMet`) + the dashboard graph hidden for Bajaj managers only when the card replaces it; single-outlet **Trend Comparison** card on the outlet detail (Bajaj); and the **PLATFORM-WIDE hierarchy leaderboard** (`9b3d703`) — Ranks tabs = the caller's ancestor chain (≤3), geography removed, incl. Deoleo. All gated + (dual-)audited. Memory `[[hierarchy-leaderboard]]` + `[[payment-details-at-redemption]]`.
-> **ALSO ON DEVELOP/STAGING (2026-11-04): FIFO points-expiry fix** (`524acda`, ⚠️ PLATFORM-WIDE, owner-approved) — `PointsLedger.remainingPoints` (additive migration) so expiry removes only a lot's REMAINING (not original `min(points,balance)` → was destroying valid newer-lot points); redeem/debit FIFO-consume oldest; reverse/credit-adjust get fresh expirable lots. Sweep **audit-hardened**: locks wallet row FIRST (`FOR UPDATE`)+clamps → closed a latent negative-balance race + deadlock. Also fixed 2 shared consumers: program-health "expiring-30d" (reads remainingPoints) + the **Points-Ledger report sign bug** (summed signed `points` wrong → overstated every redeemed outlet, e.g. Chakradhar 20,516→report-91,516; partner passbook was always correct). Exposure VERIFIED 0 on prod+staging → Deoleo byte-identical. Full gates green + DUAL audit + **runtime-verified on deployed staging** (seeded over-expiry → sweep expired only the remaining 20, not 70). Memory `[[points-expiry-fifo-fix]]`.
-> **ALSO ON DEVELOP/STAGING (2026-11-04): rejected-payout recording** (⚠️ PLATFORM-WIDE, owner-approved, all additive-nullable → Deoleo byte-identical). Capture a bank-rejected payout's reason + failure date + UTR from the UTR upload into 2 new nullable `CreditPayoutEntry` cols `failureReason` + `attemptedAt` (migration `20261104130000`); `paidAt` STAYS null on FAILED (never leaks into the default/PAID report view). Admin Payments report: new "Failure Reason" column, date shows `paidAt ?? attemptedAt`, non-PAID status filter relaxes the paidAt floor + orders by `attemptedAt desc nulls:last`; default/PAID path byte-identical. Re-bank clears reason+date+utr → clean re-attempt. ⚠️ fixed an audit-found regression: the dup-UTR guard (`usedUtrs`) is now scoped to `status:'PAID'` so a FAILED attempt's reference can't false-block a later payment. Status model = reuse FAILED (no enum change); admin-only; NO backfill; raw reason. Full gates green + money-path audit (clean, #8 fixed) + re-apply idempotency test. Doc `PAYOUT-REJECTED-RECORDING-DESIGN.md`.
-> **BUILT ON A WORKTREE BRANCH (2026-11-06): order-timeline stepper on partner My Orders** (⚠️ PLATFORM-WIDE, owner-approved; NOT yet pushed — branch commits `2bf64006`…`96d0ff8a`). Backend first (owner D1 = long-term fix): ONE shared `transitionOrderStatus` (`api/src/rewards/order-status-transition.ts`) now owns every `RedemptionOrder.status` write + its `RedemptionStatusHistory` row in the SAME tx — confirm ×2, admin `transitionOrder`, vendor transition, Hubble DELIVERED/PROCESSING/FAILED, cash UTR DELIVERED/FAILED, redeem/redeemForOutlet supersede of abandoned PENDING (per-order PENDING claim) + both OTP-send-failure cleanups. Money effects byte-identical (tests); forward-only — **no migration, no backfill, legacy gaps remain by design**. D4: `listOrders` (member branch only) hides never-confirmed CANCELLED orders (no CONFIRMED-or-later history, no dispatch/delivery stamp) in the WHERE so pagination agrees; admin views unchanged. D5: `/track` returns `refundedAt` (the order's CREDIT_REVERSAL wallet row) → "Points refunded" only when recorded. FE: compact progress bar on every card + dated vertical stepper on "View timeline" (loads `/track` once per order). Plan `ORDER-TIMELINE-STEPPER-PLAN.md`.
-> **Uncommitted drafts — LEAVE alone (not this session's work):** `platform/docs/plans/EMPLOYEE-REWARDS-*.md`, `terraform/*`, `.claude/`.
-> **Mode:** orchestrate builds via parallel sub-agents; personally run the full gates + an **independent adversarial audit** (it caught a real defect on nearly every build this session — incl. an over-strict validator that would have regressed) + runtime-verify; never push on unverified gates; keep RESUME + MEMORY consistent in the same pass. Env: OTP `123456` staging+local, gifsy `9830011252`, deoleo `6289864191`; prod = real MSG91. RBAC enforced.
+**Staging:** push to `develop` → `deploy-staging.yml`: tests (`needs: test` — a RED suite silently skips the deploy) →
+preflight (`SALES_IMPORT_DRAIN_SECRET_STAGING` exists) → build → `gifsy-migrate-staging` → Sales Import + Downloads
+worker jobs → jobsExecutor grant → API (1 GiB) → frontend. "Pushed" ≠ "deployed": verify the serving image (§7).
 
----
+**Production** (owner-gated; each step needs the owner's go):
+1. Staging-verified develop SHA, full gates green on that SHA, owner UAT done.
+2. **Backup:** `gcloud sql backups create --instance=gifsy-db --project=gifsy-platform --description="pre-release <sha>"`
+   and note the backup id (2026-11-15: `1794744368023`).
+3. **Prepare main:** bring `main` to that develop SHA (fast-forward). If a main-only revert is ever pending, it must be
+   re-applied explicitly — a merge does not undo a revert.
+4. **Owner dispatches** GitHub Actions → **"Deploy — Production (main)"** → Run workflow (branch `main`). `deploy.yml`
+   is `workflow_dispatch`-only; a push to `main` never deploys.
+   Order: CI tests → (approve) → **PREFLIGHT** (metadata-only: `HUBBLE_CLIENT_ID`, `HUBBLE_CLIENT_SECRET`,
+   `HUBBLE_WEBHOOK_SECRET`, `SALES_IMPORT_DRAIN_SECRET` must exist with an ENABLED version — else stop, prod untouched)
+   → build → `gifsy-migrate` → `gifsy-sales-import` + `gifsy-exports` jobs → jobsExecutor grant → API (1 GiB, min 1) →
+   frontend → health check.
+5. A flaky CI test fails the run **before** anything touches prod: fix the test (test-only commit), re-verify, redeploy.
+6. Verify (§7), then update this file + the release log in `DOCS-INDEX.md`.
 
-## 🟢 CURRENT STATE
-> **prod SERVING = `91f9773` (CUTOVER #52 LIVE + VERIFIED 2026-10-01)** (api `gifsy-api-00074-z68` + frontend `gifsy-frontend-00065-zqr` @100% bare `:91f9773`; migrate `gifsy-migrate-g9zk8` succeeded [no-op — code-only, no schema change]; `gifsy.in` 200, `deoleo.gifsy.in/auth/login` 200, api send-otp-empty → 400 JSON envelope [booted + pipe OK, no crash]. ⚠️ a 0%-traffic tagged revision `gifsy-api-00026-hap`/`dve` exists — ignore it; latest-ready=latest-created=00074). **#52 shipped:** Payments Report (`0682ea0`) + 3 payout fixes (`b49b170`: combined-UTR same-account + Payment-Date col + GST-reimb regenerate self-heal + payout phone) + RBAC route-guard fix (`7b62417`: assumed GIFSY_STAFF no longer loops on gifsyOnly pages — **Puja Kumari UNBLOCKED**) + IST timestamp sweep (`f3f5594`: all displayed/reported dates + day/month buckets → Asia/Kolkata; 4-layer verified incl. staging browser e2e). Prev prod `af124cf` (#51). ⚠️ LOCAL-ONLY develop commits not pushed (test/docs only) (staging-e2e gifsy spec `d364846` + RESUME notes) — test/docs, ride the next push. Confirm the serving SHA via gcloud, not branch HEAD. 🔁 **DEPLOY-BILLING HISTORY:** the #75 block (Actions "payments failed / spending limit") was sidestepped 2026-09-23 by making the repo **PUBLIC** (free Actions) → #51 deployed. Repo **RE-PRIVATISED 2026-09-24** (secret-scan at #51 was CLEAN). ⚠️ **Private = Actions metered again** → if the ORIGINAL GitHub billing/spending-limit is NOT resolved, the NEXT deploy (staging push OR prod cutover) will RE-BLOCK with the same error; owner to confirm billing is fixed (else re-public as the workaround). ⏳ still open: set an Actions spending limit. Prev prod = `7e47d75` (#50).
-> ✅ **SHIPPED in #52:** **Payments Report** (`0682ea0`) — READ-ONLY `GET /v1/admin/payments-report` [+ `/export` xlsx] + FE page `/admin/credits-payouts/payments` (nav under Credits & Payouts, **visible to CLIENT_ADMIN**). Date-ranged payout payments across ALL streams (CreditPayoutEntry, paidAt in range, NO tdsSection filter) with payment date · outlet id/name · business/owner · zone · state/city · sales rep + FULL reporting chain · amount · UTR · status · payout batch header · group type · payout field · remarks · period · TDS/invoice/GST/PAN/phone. Tenant-scoped (`platformWide()?query:user.clientId` — CLIENT_ADMIN pinned to own; enrichment keyed `clientId|outletCode` so a shared code can't leak cross-tenant); no N+1. Orchestrated (parallel BE+FE agents) + independent adversarial audit (tenant-isolation CLEAN); audit fixes folded: IST-day-inclusive date range (`istDayRangeFilter`), server 10k row-cap + `truncated` flag + FE banner + FE default range = current month (bounds the OOM/unbounded query), deterministic rep (`SalesUserAssignment orderBy assignedAt desc`), + a multi-tenant same-outletCode enrichment regression test. Gate-green (api jest 3327 · nest 0 · FE tsc 0 · FE vitest 2572).
-> ✅ **#52 (cont.): the 3 payout fixes** (`b49b170`, 2026-09-29 — orchestrated: agent wrote the B2 backend, I did the self-heal + FE + personal money-path review). (1) **B2 — combined-UTR + payment date** (`credits.helpers`/`credits.service`): the UTR upload now ALLOWS a repeated UTR when EVERY row/entry carrying it shares ONE bank account (a legit combined bank transfer — `knownUtrs` is now `Map<UTR,Set<account>>`; within-file per-UTR account tracking; re-apply exemption holds), while a repeated UTR across DIFFERENT accounts stays an error. Fixes the block that forced the manual DB settlement for the Gawde-Sir 6-outlet group. NEW **"Payment Date"** column on the payout bank file → parsed (ISO date-only→IST day, full ISO as-is, Excel serial, DD/MM/YYYY, DD-MM-YYYY; invalid→row error) and used as the entry's `paidAt` on apply (else apply time); FE preview shows the parsed date; `UtrUploadRow.paymentDate` added. (The FE mirror parser `credits-payouts-utr.ts` is DEAD — preview is backend-driven — left untouched.) (2) **GST-reimbursement regenerate self-heal** (`invoices.service.generateForPeriod`): now creates the HELD `GstReimbursement` in BOTH the create-new AND refresh paths when the invoice has GST (idempotent `ensureHeldReimbursement`, P2002-safe) — a regenerate that brings an invoice 0→GST (retailer reclassified REGULAR after first generation) now self-heals its held-GST row instead of it going missing from the release queue. (3) **Payout-file phone fix** (`credits.service.createPayoutDownload`): phone sources `partner.phone` (KYC owner) first, falling back to `Outlet.phone` (usually null) — matches the payout-WhatsApp recipient pick. Gate-green (api jest 3329 · nest 0 · FE tsc 0 · FE vitest 2572); money-path same-account rule + date parse personally reviewed.
-> ✅ **#52 (cont.): RBAC route-guard fix** (`7b62417`, 2026-09-30) — an assumed **GIFSY_STAFF** (reported: **Puja Kumari**, "Project Manager" role w/ `schemes:write` + Deoleo grant) who clicked a gifsyOnly nav item hit an infinite redirect **LOOP**: the page `RequireAuth` was locked to `['GIFSY_ADMIN']` only → rejected staff → `getRoleHome('GIFSY_STAFF')=/gifsy` → (assumed) bounced back to /admin → re-fired. Nav SHOWED the link (gifsyOnly=canManageSchemes, true for staff) but the route guard never admitted staff. Fix: widened 4 subtree guards to `['GIFSY_ADMIN','GIFSY_STAFF']` — `/admin/schemes`, `/admin/outlet-wallet`, `/admin/visibility`, `/admin/payouts`. SAFE: each backend is `@Roles('GIFSY_ADMIN')` + method `@RequirePermission`, so RolesGuard defers staff to the fine permission (a staff w/o e.g. `wallet:adjust`/`payouts:process_batch` can view, not act). The 4 gifsyAdminOnly subtrees (vendors, whatsapp-broadcasts, gift-catalogue, gift-orders) correctly stay `['GIFSY_ADMIN']` (nav also hides from staff → no loop). New `gifsy-staff-route-guards.test.tsx` (all 4 admit both roles) + updated outlet-wallet wiring test. Gate: FE tsc 0 · FE vitest 2576 (api unchanged 3329 · nest 0). ✅ Puja UNBLOCKED (live in #52).
-> ✅ **#52 (cont.): IST timestamp sweep** (2026-10-01, uncommitted→committing; orchestrated: 2 code-writer agents [both stalled mid-way → I finished + verified every file] + 3 independent audits [backend/primitives, FE blast-radius, money/legal — all "safe to ship", no DEFECT/RISKY]). Goal: every REPORTED/DISPLAYED timestamp + every DAY/MONTH boundary renders in IST (Asia/Kolkata); prod runs UTC. **Foundation was already sound** (filters/FY/SLA/scheduled-windows all IST). **New shared primitives:** backend `ist-date.ts` += `istMonthKey`/`istDateKey`/`istDateTimeCell`/`istMonthBounds` (26 specs; istMonthBounds verified incl. Dec→Jan rollover + all consumers use EXCLUSIVE-upper `lt`); new FE `platform/src/lib/ist-date.ts` (`formatISTDate/DateTime/Time/DateNumeric`+keys, pins Asia/Kolkata). **4 backend HIGH:** KYC-submitted WhatsApp date (`formatDateIST`), Payments-Report xlsx cell (`istDateKey`), GST invoice "Invoice Date" legal doc (`istDateKey`), payout-statement period (`istMonthKey`). **Backend MED sweep:** ~15 xlsx export date cells (`istDateKey`/`istDateTimeCell`) + dashboards/targets month-bucketing (`istMonthBounds`/`istMonthKey`) + banner end-date + group default month. **FE sweep:** `utils.formatDate/formatDateTime` routed through the IST helper (FORMAT-PRESERVING — app-wide but dates look identical, only TZ-correct) + ~35 call sites (added `timeZone:'Asia/Kolkata'` in place to preserve each bespoke format, or the helper where it matched) + the pacing "days-elapsed" math (partner/sales dashboards) now IST. **Audit fixes folded:** reverted 9 FE sites the agent had let FORMAT-DRIFT (seconds dropped/numeric→month-name) back to format-preserving; fixed 1 missed sibling export (`sales/kyc/[id]/ledger` `dateToYmd`→IST, twin of partner-wallet). **Deliberately out of scope (janitorial, no IST-output change):** download FILENAME dates (cosmetic UTC), 3 dead FE files, `IST_OFFSET_MIN` de-dup (~7 copies), un-consolidated `istDateKey` copies. Gate-green (api jest 3339 · nest 0 · FE tsc 0 · FE vitest 2576). Committed `f3f5594` (+ e2e `91f9773`/`d364846`). **VERIFICATION (4 layers):** (1) 3 static audits clean; (2) dual-TZ unit harness — full FE suite under `TZ=America/New_York` (2576 pass) + backend changed-areas under `TZ=UTC` (1754 pass) → TZ-independence proven for every date-asserting path; (3) 26 primitive boundary specs; (4) **STAGING BROWSER E2E** — pushed develop→staging (serving `staging-91f9773`), ran `e2e/gifsy/ist-dates.e2e.ts` (real gifsy login; staging lacks seed user 9000000001 so clientAdmin variant can't run there) → **CONCLUSIVE: under browser TZ UTC-12 (browser day 30 Sep) the admin "today" header showed 1 Oct IST, not the browser day**; changed date pages load clean under off-IST (no "Invalid Date"). Payments-Report cross-check skipped (no paid-payout rows on staging). ✅ LIVE in #52 (prod 2026-10-01).
-> ✅ **DONE (guarded prod write, 2026-09-29):** the 2 missing GST-reimbursement rows for the Gawde-Sir group were created — the group now has all 6 HELD rows (was 4). **✅ INVESTIGATED 2026-09-29 → NON-ISSUE (no fix needed):** the "36 GSTIN-but-null-classification Deoleo partners" are NOT a data defect. Guarded prod read of their KYC state: **0 of 36 ever KYC-approved** (onboardedAt null for all; all 36 outlets INACTIVE) — 22 still in the approval pipeline (8 PENDING_ASM, 7 PENDING_GIFSY, 7 PENDING_SO) + 14 REJECTED. Classification (`gstRegistrationType`/`entityType`) is set AT approval, so null is the EXPECTED state for un-approved partners — and since #31 (2026-08-14) made GST classification compulsory at approval, it self-captures when each is approved (the 14 rejected never bill). The two consumers I'd worried about (invoice GST `invoice.helpers.ts:111` null≠REGULAR → no GST; TDS 194C `tds.service.ts:396` null entityType → 2% vs 1%) CANNOT fire — they only run for approved+active outlets. Corrects the earlier "pre-#31 approvals needing a backfill" framing — there are ZERO approved partners with GSTIN+null-classification, so that concern doesn't exist in prod. A triage xlsx was produced (in Downloads) but should NOT be applied — writing REGULAR/COMPOSITE onto un-approved partners would pre-empt their real approval capture. **Only residual = a runtime UAT:** when one of the 22 pending is next approved on prod, confirm the approval screen forces GST classification to land non-null.
-> 🟢 **No CODE develop-ahead of prod** (#52 = `91f9773` = origin/develop = origin/main). ⚠️ LOCAL-only commits unpushed (staging-e2e gifsy spec `d364846` + RESUME/doc updates = test/docs only). Verify the serving SHA via gcloud, not branch HEAD.
-> ✅ **#51 shipped (in prod 2026-09-23) — code-only, no migration; all gate-green + audited; roster bulk-remove ALSO staging-e2e-verified against the real DB:** (1) **operator-Settings MOVE** (`6566b4d`) — Report Recipients + National Holiday Calendar moved from brand `/admin/settings` → operator `/gifsy/settings` (their `clientId='gifsy'` home). (2) **scheme WhatsApp "Send a test"** (`1415c5b`) — GIFSY admin fires the SAVED `whatsappConfirm` template to a typed number with editable samples, no enroll (`POST /v1/schemes/:id/whatsapp-confirm/test`, @Throttle 10/min, masked PII; dirty-guard). (3) **KYC Status Report rejection columns** (`9323b4f`) — for currently-Rejected rows, 5 extra xlsx cols (Rejection Stage/By/Reason/Notes/On), one batched actor `user.findMany` (no N+1). (4) **Roster bulk-remove by Excel** (`faddf93` + pipe-guard `d37fd9b`) — GIFSY admin uploads an Excel of Outlet IDs to soft-remove roster outlets in bulk (EXCEL-mode; matches `outletRef`); `POST /v1/schemes/:id/roster/remove-upload` reuses `parseRosterUploadBuffer` + shared `softRemoveRosterByIds`; `dryRun` preview→confirm→chunked soft-delete; recoverable via "Show removed → Restore". Audit caught+fixed a **HIGH** (the `dryRun` boolean DTO was fail-open under `enableImplicitConversion` — `'false'`→`true` — would make the confirm never remove AND default an omitted flag to a real removal; fixed by typing `dryRun` a STRING + preview-by-default; 6-test pipe guard). **Staging e2e (real DB) confirmed live:** preview no-writes, `dryRun=false` removes 2, dedup, notFound, getRoster/getRemovedRoster, restore, and omitted-dryRun→safe-preview all correct. ⚠️ **RBAC:** scheme management (incl. bulk-remove) = `@Roles('GIFSY_ADMIN')` + `@RequirePermission('schemes:write')`; a GIFSY_STAFF needs a role granting `schemes:write` (RolesGuard defers @Roles→@RequirePermission for staff) — DORMANT (no staff), so effectively owner-only. CLIENT_ADMIN has NO authoring/remove access.
-> _(historical develop-ahead detail preserved in `[[deoleo-go-live-bundle]]`.)_ **#49 shipped the four ex-develop-ahead features:** stale-deploy self-heal (`4578088`) + admin KYC rejection reason MULTI-select (`c08479f`) + GSTIN compulsory + Gifsy toggle (`1198f34`, deoleo=compulsory) + per-scheme WhatsApp confirmation (`f803c22`, DORMANT until a WhatsApp template is registered). Detail in the POST-COMPACT PROMPT above. ✅ **#50 shipped (in prod 2026-09-18) — 3, all gate-green + audited + staging-verified:** (1) **scheme-report "Enrollment Status" de-collision** (`26efaec`) — an uploaded roster column that is a status-synonym of the live built-in "Status" (e.g. a frozen "Enrollment Status" stuck on NOT_ENROLLED) now exports as **"Enrollment Status (Excel)"** (was a confusing bare duplicate next to the live "Status"); non-destructive, + every Excel header de-duped on its FINAL value so a second-order collision can't silently overwrite. Fixed a client complaint. Verified on staging: Gold-scheme export header is now "Enrollment Status (Excel)", live "Status" untouched. (2) **WhatsApp send success log** (`6fc5e79`) — `msg91.sendWhatsappTemplate` now logs a PII-safe INFO line on success (template + masked recipient + var COUNT + request id); closes the silent-success gap (was the #49 follow-up). Verified on staging: `MSG91 WhatsApp template "..." sent to ••••1252 (2 vars, req ...)` fired (+ confirmed MSG91 accepts the bulk request with a request id). (3) **KYC "Pending — Gifsy" filter** (`25c70bc`, FE-only) — a "Pending — Gifsy (N)" Status-dropdown option filtering to rows awaiting Gifsy review (`awaitingGifsy`/PENDING_GIFSY); export already aligns to that set. Audited (no HIGH/MED). **Staging-UI-verified** (Gifsy login `uat-gifsy.gifsy.in` → /admin/kyc → option present → "Showing 2 of 51", only Gifsy-badge rows). #48 = outlet-driven **KYC Status Report** (`2819562`) + **exit-tenant strand fix** (`6f14ca5`). #47 = scheme-builder Live Preview + imageUrls `@IsImageRef` fix + sales-enroll load-all-pages. Recent prod cutovers: **#46** (`9f4f385`) KYC program-name filter + UPI_QR live-scanner · **#45** (`399cfa7`) the 9-change batch. Older cutovers (#26–#44) → the **CUTOVER LEDGER** (below) + `[[deoleo-go-live-bundle]]`.
-> ⏳ **OPEN (owner-side):** **#51 prod UAT** (roster bulk-remove: on an EXCEL-mode scheme, upload an Excel of Outlet IDs → preview → confirm → "Show removed → Restore"; Report Recipients + National Holiday now on operator `/gifsy/settings`; KYC Status Report shows the 5 rejection columns for rejected rows; scheme WhatsApp "Send a test" — DORMANT until a template is registered) + **repo RE-PRIVATISED 2026-09-24** ✅ (⚠️ private = Actions metered again → confirm the GitHub billing/spending-limit is actually fixed, else the next deploy re-blocks and you'd re-public as the workaround; still set an Actions spending limit) · **#49 prod UAT** (blank GSTIN blocked at KYC entry for deoleo; admin KYC reject = multi-select; scheme-builder WhatsApp tab saves; stale-tab reload self-heals) — WhatsApp send stays DORMANT until a real template is registered · **#50 prod UAT** (report download shows "Enrollment Status (Excel)" not a bare duplicate of the live "Status"; `/admin/kyc` has a "Pending — Gifsy (N)" filter; WhatsApp send now logs a success line) · **#48 prod UAT** (assume a tenant then "Exit to platform" clears the banner even after a long/multi-tab session; KYC Status Report renders all outlets + statuses) · **#47 UAT** (upload→save a reward image on prod; client confirms a >50-outlet scheme shows ALL outlets to the rep) · deoleo **Amazon Voucher** `maxRedemptionPoints` NULL → un-redeemable ("Send-OTP not clickable"), set a max in `/admin/gifts`. *(✅ UPI-scanner device-camera UAT done 2026-09-16. ✅ Hierarchy-Excel #45 re-test done 2026-09-16 — the manager-vs-role guard is CLIENT-SIDE (`validateEmployeeUpload`); ran it against LIVE staging deoleo data: 16 real outlet-holding XSR manager-only changes all pass, role-change control 16/16 still blocked.)*
+Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md) (preflight + checklist),
+[`MIGRATIONS.md`](MIGRATIONS.md), [`ENVIRONMENTS.md`](ENVIRONMENTS.md).
 
-## ▶▶ WHAT'S NEXT
-- **Live next steps = the 📍 2026-11-13 (evening) block at the top.** In order:
-  1. **Next release** — F1 + F9 toggle/session fixes (`63201b39`, `801c48d3`) + the three approved 194R export columns
-     (⚠️ PLATFORM-WIDE, approved 2026-11-13) + these doc updates → gates → staging → owner deploys.
-  2. **Bajaj prod points rule** (`points_rules` empty for every tenant on prod; pointsEngine.enabled is true for Bajaj, so
-     November achievements cannot convert to points until a rule exists) — owner before end-November + a test run with the
-     main session; then the **sales-import config** (column mapping + sales KPI definitions) and the November sales file
-     (upload/aggregate first, apply after).
-  3. **Daily Operations Digest** (⚠️ PLATFORM-WIDE, owner approved option A; branch `feat/daily-ops-digest`, worktree
-     `.claude/worktrees/ops-digest`) — BUILT on the branch (not pushed/merged): replaces the two daily emails; see
-     `DAILY-OPS-DIGEST.md` + `runbooks/email-reports-activation.md`.
-- _(historical)_ **📍 STATE 2026-11-11** (release LIVE on staging `7c85d9fd` → owner staging UAT → owner creates prod Hubble secrets → decide prod Sales Import infra → prepare main → manual prod deploy + post-deploy checks → Bajaj October points).
-- 🔧 **FAST FOLLOW-UPS #1 KPI↔Program/Sub-Program + #2 KPI outlet-type multi-select + #3 Visibility by Program/Sub-Program — BUILDING since 2026-11-12 (owner asked to run in parallel; all ★ decisions approved), branch `feat/applies-to`, plan `APPLIES-TO-TARGETING-PLAN.md`. Original #1 note:**
-  Today `KpiDef` is tenant-wide (only an optional `outletType` tag); there is NO program link. Interim workaround = upload
-  targets only for that program's outlets (blank cells = no target, excluded from achieved counts; compute rules +
-  dashboards already filter by Program/Sub-Program). Proposed (⚠️ PLATFORM-WIDE — owner approved the idea, not yet the build):
-  optional Program/Sub-Program multi-select on each KPI (blank = all programs → Deoleo byte-identical); target upload rejects
-  a value for an outlet outside the KPI's program (row error); partner/sales/dashboard views show the KPI only for outlets in
-  its program; roll-ups respect it. Mirror the `outletType` pattern (additive nullable column).
-- ✅ _(Shipped in #57, 2026-11-07 — kept for reference.)_ **Wallet statement export (PLATFORM-WIDE, owner-approved 2026-11-06).** New
-  `GET /v1/wallet/statement` + `GET /v1/kyc/:id/ledger/statement` (shared `points-statement.helper`: stored-balance chain,
-  opening/closing, D10 tie-out warn); partner wallet + sales ledger get one Download → Excel/PDF picker with a Balance
-  column. Fixes: partner wallet newest-20-rows truncation (screen + file), the `--50` debit sign in the old Excel, and the
-  sales ledger `take: 200` cap. ⏳ Before push: run plan Task 0 (staging chain audit). **D9 decided:** PDF keeps `Rs.`
-  + English-letter names (non-Latin → `?`; jsPDF can't shape Devanagari). Plan: `WALLET-STATEMENT-EXPORT-PLAN.md`.
-- **Dormant-activation TODOs (owner-gated, from #37):** MSG91 `WHATSAPP_*` env + marketing templates + webhook (broadcasts) · notification SMS DLT templates · deoleo `physicalGifts` channel + real vendors (gift marketplace) · delivery-status: `DELIVERY_RECEIPTS_ENABLED` + `NOTIFICATIONS_STATUS_SECRET` + `NOTIFICATIONS_RETENTION_ENABLED` + MSG91 DLR callbacks + confirm the live SMS-DLR payload · email-report PROD recipients (#29) · **RBAC staff = owner creates the 2 staff + brand grants in the console** (Bajaj; runbook `runbooks/RBAC-PROD-ENABLE.md`).
-- **Dormant surfaces awaiting owner UAT (nothing blocks Deoleo):** VISIBILITY POSM `visibilityConfig` activation (#16) · TDS payout write-path + `/admin/users/parents` grouping UI + a real visibility-stream payout UAT (#17) · the SCHEME instrument on a real phone (camera/GPS/signature).
-- **Lower-priority (written, not built):** `RBAC-COMPLETION-PLAN.md` (⚠️ flipping RBAC today 403s all sales+partner routes) · staging-mode E2E CI harness as a fast-follow to onboarding the 2nd tenant (`[[e2e-harness]]`).
-- Per-cutover history is in the **CUTOVER LEDGER** (below) + `[[deoleo-go-live-bundle]]` — not duplicated here.
+## 7. How to verify
 
-## 🔶 STANDING MODE — orchestrator
-Default to orchestrating substantial work: decompose into **parallel sub-agents** (they write code —
-background agents are denied shell; YOU run the gates), integrate shared files yourself, and ALWAYS
-personally do the **INDEPENDENT adversarial audit + full gate + runtime-verify** before claiming
-done. Own doc + memory consistency in the same pass. The 5 working agreements are in `CLAUDE.md`.
-[[default-to-orchestration]] [[audit-every-build-item]] [[verify-flows-at-runtime]] [[own-consistency-no-micromanage]]
+- **Serving SHA** (never branch HEAD):
+  `gcloud run services describe gifsy-api --region asia-south1 --project gifsy-platform --account=gifsy-deployer@gifsy-platform.iam.gserviceaccount.com --format='value(spec.template.spec.containers[0].image)'`
+  (same for `gifsy-frontend`; staging = `gifsy-api-staging` / `gifsy-frontend-staging`, tag `staging-<sha>`; prod tag = bare `<sha>`).
+  Jobs: `gcloud run jobs describe gifsy-exports|gifsy-sales-import …`.
+- Health: API `/health` 200; `deoleo.gifsy.in/auth/login` and `bajajloyalty.gifsy.in/auth/login` render their own branding.
+- Runtime: real login per role (staging: `FIXED_OTP` 123456 — accounts in §9), the changed flow end-to-end, an honest
+  unhappy path, Deoleo no-change check when the change is platform-wide. Bajaj staging is the default tenant for UI checks.
+- Downloads: request a heavy report → QUEUED → RUNNING → READY within minutes; `gcloud run jobs executions list --job=gifsy-exports`.
+- After a migration: the `gifsy-migrate` execution succeeded.
 
-## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
-`cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green: CI test job green on develop `7c85d9fd` (2026-11-11, the release now on staging); full local gates on the complete release (`2712b64d`, 2026-11-11, scripts/gates.sh + the pre-push hook): api jest 5,256 · platform vitest 3,592 (+87 skipped) · nest build + platform tsc green; `7c85d9fd` removed one platform-dependent exceljs test (→ 5,255) and is CI-green (Tests & Type-check + Deploy — Staging).** _(2026-11-10 at `af155bb` + Sales Import: 4,996 / 3,510.)_ ⚠️ the api `tsc` step stops on 6 TS6059 rootDir errors before type-checking (`nest build` still compiles) — owner decision pending. _(Older snapshot: develop `91f9773` = #52, 2026-10-01: api jest 3339 · FE vitest 2576.)_ (prod SERVING = `e98f047` = #58, 2026-11-07; develop `7c85d9fd` (#59 + Sales Import + Bajaj config + branding/routing + rate limits + OTP hardening) is ahead of prod — see 📍 STATE 2026-11-11. Verify the SERVING image SHA via gcloud, not branch HEAD. ⚠️ gates DON'T instantiate the DI container — a real boot failure can still pass all four; the staging deploy health-gate is the boot check — proven this cycle, incl. a stray-npm-dep boot crash caught on staging.)
-- **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
-  `gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project gifsy-platform --format='value(spec.template.spec.containers[0].image)'`.
-- FE tsc gotcha: a stale `.next/types` surfaces a phantom `RejectionModal` error (pre-existing,
-  webpack-only) → `rm -rf platform/.next` then re-run tsc.
+## 8. Known traps (read before touching the area)
 
-## REUSABLE TRAPS
-- **(a) `CreditPayoutEntry.outletId` == the outlet CODE everywhere** (no FK — join via
-  `Outlet.outletCode`; `invoices.service`/`tds.service` confirm). Keying it by the Outlet **PK**
-  matches nothing (was the wallet-surfacing HIGH-1, dead since cutover #8).
-- **(b) A "completed" `PayoutTransaction` is `status='SUCCESS'`** — the `PayoutStatus` enum has NO
-  `PAID`/`COMPLETED`; `payouts.service` writes `SUCCESS` on UTR upload. Any status mapper MUST handle
-  it (was the wallet-surfacing HIGH-2).
-- **(1)** NEVER use `isActive:true` as an "active outlet" denominator (created `isActive=false` until
-  KYC approval — use `deletedAt:null AND deactivatedAt:null`). Conversely `isActive:true` IS the
-  denormalised **"approved+active"** predicate (no `kycStatus` column on Outlet).
-- **(2)** Prisma `{ not: X }` / `notIn` SILENTLY DROPS NULL rows → OR-wrap `OR:[{col:null},{col:{not:X}}]` (safe on non-nullable enum cols).
-- **(3)** a partner's **Wallet row is created ONLY at KYC approval** — any pre-KYC points path must `wallet.upsert`.
-- **(4)** tokens are bearer JWTs; the proxy reads the **httpOnly cookie** and injects the backend Bearer (post-AF-6). See SESSION/AUTH MODEL.
-- **(5)** Cloud Run **throttles CPU between requests** → NestJS `@Interval`/`@Cron` workers don't tick
-  reliably while idle (`min-instances=1` doesn't fix it). Drive via **Cloud Scheduler → internal HTTP
-  endpoint** (un-throttles CPU). This is why the push drain runs on a scheduler.
-- **(6)** the FE's `outletId` EVERYWHERE = the **Outlet CUID** (`o.id`), NOT `outletCode` — an endpoint
-  keyed on `clientId_outletCode` from an FE-sent outletId is WRONG; use `findFirst({id, clientId})`.
-  (Note this is the INVERSE of trap (a): FE sends the CUID, but `CreditPayoutEntry.outletId` stores the code.)
-- **(7)** the sales `/sales/kyc` LIST is now **ASSIGNMENT-DRIVEN** (`e9b3a21`) — the FE synthesises every
-  subtree outlet's derived KYC state from `/api/sales/outlets`; the submitter-scoped `/api/kyc` only
-  supplements reassignment-edge outlets. (Raw `kyc.service.list()` is still submitter-scoped by design.)
-- **(8)** a **bulk-upload loop of awaited writes in ONE interactive `$transaction` 500s at tenant
-  scale** (5s default, ~2,261 Deoleo outlets). Fix = **chunk** into `$transaction([...])` batches of ~100
-  for idempotent paths, or **raise `{timeout:180_000, maxWait:20_000}`** for MONEY paths that must stay atomic.
-- **(9)/(15)** **re-KYC has TWO entry paths**: in-app admin action flips submission→`RE_KYC_REQUIRED`;
-  bulk re-KYC upload sets ONLY `Outlet.reKycFlags` (submission stays APPROVED). `reKycFlags` persist
-  until approval clears them → gate DISPLAY/actionability on **`isReKycActionable(flags, latestStatus)`**
-  (flags set AND latest NOT in-flight — `common/kyc-rekyc.helper.ts` + `platform/src/lib/rekyc-fields.ts`),
-  NOT bare `isReKycPending`. The approver highlight keeps using the RAW flags.
-- **(11)** a FE **response-merge must match the service's ACTUAL projection shape** (the Gifsy client
-  editor read nested `.branding.x` while the service returns it FLAT → edits silently reverted).
-- **(12)** a spec `$transaction` mock typed `(cb) => cb(tx)` makes `.mock.calls[0][1]` a TS error →
-  widen to `(cb, _opts?) => cb(tx)` when asserting the timeout option.
-- **(13)/(14)** Employee Hierarchy upload keys User by `(clientId, phone)` but SalesUser by
-  `(clientId, employeeCode)` → a phone correction orphaned the old User (phone stayed reserved in
-  `users @@unique([clientId, phone])`, invisible in the UI). A "number in use" not in sales/outlet
-  lists is an orphaned/other-role `users` row → query the `users` table.
-- **(16)** guarded staging/prod one-off DB ops run via the **`gifsy-oneoff-staging` Cloud Run Job** —
-  override `--args` with `^@^-e@eval(Buffer.from('<b64>','base64').toString())` (custom `@` delimiter so
-  the comma inside `Buffer.from` isn't split); the image uses **Prisma 7 driver-adapter so bare
-  `new PrismaClient()` fails → use raw `pg` on `DATABASE_URL`**; guard `current_database()==='gifsy_staging'`
-  FIRST; reset args to a no-op after. (Staging writes still need a backup + owner OK per guardrails.)
-- **(17)** a static asset under a NEW `public/` subdir needs the `platform/src/proxy.ts` auth-middleware
-  `config.matcher` exclusion — else a no-token page 307's the asset to `/auth/login` (broken image).
-  **Local `npm run dev` does NOT reproduce the edge 307 — curl the REAL staging edge.**
-- **(18)** a backend `@Public` `/api/*` endpoint is NOT reachable session-less until its path is ALSO in
-  `platform/src/proxy.ts` `PUBLIC_PATHS` — the edge auth gate 401s any `/api/*` without a `token` cookie
-  BEFORE the request reaches the `@Public` backend. This bit the tokenized report-link endpoints
-  (`/api/schemes/media/view`, `/api/kyc/documents/view`): backend-direct 404 (public, bad token) but
-  through-edge 401, so Excel report image/doc links only worked in-session (fixed #25 `2a88436`). Rule:
-  ANY endpoint meant to be hit from a downloaded file / email / no-session context needs BOTH `@Public`
-  (backend) AND a `PUBLIC_PATHS` entry (edge). `startsWith` matches — keep the entry the exact leaf so a
-  sibling LIST route stays gated. Prove it by curling the REAL edge host (401→404 flip), not the backend.
-- **(19) `terraform plan` is runnable HEADLESS (no ADC/browser)** — `export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)`, `terraform -chdir=terraform init -reconfigure -backend-config="access_token=$TOKEN"`, then `terraform plan -lock=false -var="db_password=DUMMY"` (the ONLY required var; plan is READ-ONLY so a dummy pw is safe — it only adds a noise diff on the DATABASE_URL *version* + sql_user). **`terraform plan`'s refresh is the SOURCE OF TRUTH for live state — a `gcloud …yesno()` on a possibly-EMPTY object misreads** (Secret Manager `replication.automatic:{}` printed as "user" via `yesno(yes=auto,no=user)`, so I wrongly "fixed" secret-manager.tf `auto{}`→`user_managed`, which the plan showed would DESTROY+recreate all 12 secrets — reverted). **Also: terraform CONFIG had DIVERGED from out-of-band gcloud changes** (AR `gifsy-images` cleanup-policies, uploads-bucket CORS) — a blind `terraform apply` would have DELETED the AR cost-cleanup policies. Reconcile CONFIG→REALITY (edit the .tf to match live, verify by re-plan = no change), NEVER blind-apply. Detail: [[infra-cost-reduction]].
-- **(KYC-SLA)** the KYC review-SLA "age" FREEZES at the decision — a decided row (`APPROVED`/`REJECTED`/`RESUBMISSION_REQUIRED`/`RE_KYC_REQUIRED`) must use `approvedAt ?? reviewedAt ?? updatedAt`, NOT `now`, else it climbs for days and false-breaches. Shared helper `platform/src/lib/kyc-sla.ts` `kycAgeHrs(submittedAt, status, {reviewedAt,approvedAt,updatedAt})`. **Key on the terminal STATUS, not on `reviewedAt` being present** — a still-pending multi-level row (e.g. `PENDING_GIFSY`) carries a `reviewedAt` from a lower approval level yet must keep counting. The list breach threshold reads the tenant's `slaTargetHours` (settings, 1–168h, default 48) via `fetchKycSlaHours`.
-- **(IST)** server-local `Date` getters read **UTC in prod** (no TZ in the image) — user-facing IST
-  dates MUST go through `api/src/common/ist-date.ts` (`monthYearIST`/`formatDateIST`), or shift by
-  `IST_OFFSET_MIN` then read `getUTC*`.
-- **(A-DOMAIN-c)** `client_domains.clientId` is a **bare slug** (= `Client.id`, no FK — matches every
-  other model's clientId); `domain` global-uniqueness is a **hand-added `LOWER("domain")` UNIQUE index**
-  in the migration (Prisma can't model an expression index) — don't expect Prisma `@@unique` to enforce it,
-  and match domains case-insensitively (`{ equals, mode:'insensitive' }`).
-- **(A-DOMAIN-d)** the gifsy client-detail **Wallet/Invoicing/Feature cards edited INERT `Client.*` JSON
-  blobs the runtime never reads** — the REAL per-tenant config lives in `program_settings` (conversion
-  rate/floors, via `TenantSettingsService`/`settings.controller`), `PointExpiryConfig` (expiry), the
-  hardcoded `TECH_GIFSY` invoice constant, and `clients.features` (the runtime feature/RBAC store — post-D-1).
-  "Make the card persist" ≠ "make it work" — wire the card to the REAL store (P4b did Wallet via a tenant-targeted
-  `/gifsy/clients/:slug/wallet-settings`; Invoicing/Features left read-only).
-- **(A-DOMAIN-e) D-1 DONE:** `resolveClient` (tenant.service) reads the **`clients` table** now (not `AdminConfig`
-  `client_config`, which is RETIRED). It returns the raw `clients.features` blob; RBAC reads `(features as any)
-  .rbacEnforcement` dynamically (fail-open: missing row/flag/non-object → false). `visibilityCaptureMode` lives on
-  `clients.features`. Console create/update MUST `tenant.invalidateCache(slug)` (5-min cache). `RBAC_ENFORCEMENT`
-  env master-switch is OFF — flipping it needs a per-tenant `clients.features.rbacEnforcement` audit first.
-- **(A-DOMAIN-f) P5 features seam:** FE feature-gating reads `features` from the **authenticated** role endpoint
-  (`/partner/me`, `/sales/me`, admin `/admin/settings/config`) via `lib/tenant-features.ts` (`useTenantFeatures`/
-  `normalizeFeatures` — sparse/absent blob → `DEFAULT_FEATURES`, guaranteed nested `partnerApp`), NOT `CLIENT_REGISTRY`.
-  The registry is REDUCED to a domain→slug + `DEFAULT_CLIENT_CONFIG` fallback (kill-switch/cold-start) — do NOT delete it.
-- **(A-DOMAIN-g) worker route matches across dots:** `*.gifsy.in/*` also matches `api.gifsy.in`/`uat.x.gifsy.in` — safe
-  only because they hit the SAME `gifsy-proxy` worker + its explicit API-host check wins. `wrangler deploy` does NOT
-  prune Custom Domains absent from `wrangler.toml`, and it ROTATES the local `.wrangler` oauth_token (a cached-token
-  CF-API script 401s after — re-read or use wrangler). Reserved `www/mail/status.gifsy.in` 502 by worker design.
-- **(A-DOMAIN-h) S1 edge-secret:** the `*.run.app` origins are public (`ingress=all` + IAM `allUsers`) → `x-forwarded-host`
-  is forgeable by a direct hit. `lib/platform/edge-trust.ts` `resolveTrustedHost` trusts it only when the worker's
-  `x-edge-secret` matches; **env-gated** (`EDGE_SECRET` unset → inert). The CI frontend `--set-env-vars` REPLACES the
-  whole env set → `EDGE_SECRET` must live in the workflow (GitHub secret), never a manual `gcloud run update` (wiped next
-  deploy). Activation order: worker must send the secret BEFORE the frontend env is set, else legit login breaks.
-- **(ASSUME-TENANT-SCOPE) GIFSY operator reads scope to the ASSUMED tenant.** A GIFSY_ADMIN assumed into a tenant
-  (JWT `assumed:true`) is READ-scoped to that tenant; un-assumed GIFSY at home stays platform-wide. **Invariant:** any
-  new GIFSY-wide read MUST use `api/src/common/tenant-scope.ts` `platformWide(user) = role==='GIFSY_ADMIN' && !assumed`
-  (NOT a bare `role==='GIFSY_ADMIN'` check — that ignores assume-tenant and leaks the platform view to the operator's
-  scoped context). `compute194C`/`summary194C` stay platform-wide (correctness); write-auth (`isGifsyAdmin`) untouched;
-  194C views are un-assumed-GIFSY-only. LIVE develop `706efd1`+`12045db`, runtime-proven. Full detail: memory
-  [[gifsy-assume-tenant-scoping]]. (Owner found it onboarding a 2nd staging tenant `uatbajaj`; NOT a tenant leak.)
+**Sales Import / targets**
+- Focus product names come from the **target file's SECOND column with the same heading** as the KPI (the first is the
+  value, the second the per-outlet names → `OutletTarget.targetValues.__names[kpiCode]`). A missing/misplaced second
+  column = no focus names for that month.
+- The Sales Import KPI's scope is **INTERSECTED** with the KpiDef's applies-to scope (Targets → KPIs). A sales KPI scoped
+  wider than the target KPI still writes only the target KPI's outlets; disjoint scopes write nothing.
+- Never compute points for months that were imported as already-paid (Bajaj Apr 2025 – Oct 2026).
+- `__names` is the only non-KPI key in `targetValues`; anything enumerating KPI codes must skip it.
 
-## META-LESSONS (baked into CLAUDE.md agreements 1 & 2)
-1. A fix is DONE only when **EVERY consumer + alternate data path + scale case** is traced (grep all
-   consumers; 10-row vs 2,261-row; bulk-upload vs in-app entry produce different DB states).
-2. **Clarify before an imperfect build** — if an approach isn't the ideal/complete solution, present
-   ideal-vs-shortcut and let the owner choose; do NOT ship a caveated partial and iterate.
+**Money / wallets / TDS**
+- `CreditPayoutEntry.outletId` is the outlet **CODE** (no FK); the frontend's `outletId` is the Outlet **CUID**.
+- A paid `PayoutTransaction` is `status='SUCCESS'` (no `PAID` in that enum).
+- A partner's Wallet row is created only at KYC approval — pre-KYC point paths must upsert.
+- Absent `tdsPolicy` → `{SEC_194C, GROSS_UP}`; a malformed one throws (fail-closed).
+- Points and ₹ payouts are credited in **whole units**, rounded half-up once.
+- 8 Bajaj wallets are intentionally negative (sales returns); the interim rule refuses points reversals on wallets with debt.
+- Hubble: a timeout is **not** a "no". Never refund a Hubble order by hand — use the runbook.
 
-## SESSION/AUTH MODEL (post-AF-6 — answer precisely if asked)
-Access token = httpOnly `token` cookie, a **60-min** JWT that SLIDES on activity (rolling **7-day**
-session window; operator assume-tenant capped at **24h**); refresh = httpOnly `refresh_token` cookie,
-**30-day** single-use rotating; the edge proxy reads the cookie + injects the backend Bearer; `proxy.ts`
-does page-nav silent refresh + `SessionExpiryGuard` single-flight **refresh-on-401** + retry.
-(LIVE #30 — detail [[auth-rolling-session]].)
-Practical rule: a user stays logged in if they open the app ≥ once every ~7 days; a cold return after
->7 days lands on login (page nav is edge-redirected before the client refresh runs). Phone-change →
-logout: sessions tie to the USER row (revocable); at Gifsy approval a re-KYC phone change syncs
-`User.phone` + revokes the owner's sessions. All KYC mobiles validated `^[6-9]\d{9}$`.
+**Data / Prisma / DB**
+- Never `isActive:true` as an "active outlet" denominator (use `deletedAt:null AND deactivatedAt:null`); `isActive:true`
+  means approved+active.
+- Prisma `{not: X}` / `notIn` drops NULL rows → `OR:[{col:null},{col:{not:X}}]`.
+- Bulk write loops in one interactive `$transaction` time out at tenant scale → chunk, or raise the timeout for money paths.
+- Re-KYC has two entry paths (in-app flips the submission; bulk upload sets only `Outlet.reKycFlags`) → gate on
+  `isReKycActionable(flags, latestStatus)`.
+- Staging and prod share the private-IP Cloud SQL instance `gifsy-db` (DBs `gifsy_staging` / `gifsy_prod`): every
+  one-off op guards `current_database()` first. One-off jobs use raw `pg` (Prisma 7 driver adapter: bare `new PrismaClient()` fails).
+- Never `prisma migrate dev`. Run `prisma generate` before gating a schema change.
 
-## CONSTRAINTS (full list in CLAUDE.md guardrails)
-Work on `develop`; **NEVER `prisma migrate dev`**; any prod/staging DB op = double-guard
-`current_database()` + backup + show SQL + WAIT for owner (staging+prod share the private-IP
-`gifsy-db`; reads need only the guard). Never merge to `main` / trigger a cutover without the owner.
-Never expose secrets. gcloud/wrangler are authed.
+**Platform / infra**
+- Cloud Run throttles CPU between requests → periodic work runs from Cloud Scheduler → internal endpoint, not `@Cron`.
+- A new `public/` subdirectory needs the `platform/src/proxy.ts` matcher exclusion; a no-session `@Public` API path also
+  needs a `PUBLIC_PATHS` entry. Prove on the real staging edge, not `next dev`.
+- Any new GIFSY-wide read uses `platformWide(user)` (assumed operators are scoped to the tenant).
+- `FIXED_OTP` disables rate limiting on staging — throttling can only be proven on prod.
+- Windows-created secrets can carry a trailing `\r` or a BOM — strip before saving.
+- gcloud on the owner's machine may default to another project/account — always pass
+  `--account=gifsy-deployer@gifsy-platform.iam.gserviceaccount.com --project=gifsy-platform`.
+- A new npm import missing from `package.json` passes gates but crashes at boot (prefer `node:` built-ins).
+- `terraform` config has drifted from live in places — plan first, never blind-apply.
 
-## STAGING (FIXED_OTP=`123456`)
-GIFSY admin `9830011252`/clientId `gifsy`; deoleo admin `6289864191`; partner `7795096288`/deoleo
-(active, no payouts); sales `9900000041`(ISR) · `9900000002`(SO) · `9900000011`(XSR). Credit-payout
-test partner: `9000000007` (deoleo, outlet O003 — reactivated 2026-07-18). API base
-`https://gifsy-api-staging-4d4n5mc6yq-el.a.run.app` (login: POST `/v1/auth/send-otp` {phone,channel:'SMS'}
-then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant = POST
-`/v1/auth/assume-tenant` {clientId}).
-⚠️ **Rate limits are OFF on staging:** `ThrottlerModule` `skipIf` is true whenever `FIXED_OTP` is set, so the per-phone/per-user throttler
-(`IdentityThrottlerGuard`, 2026-11-11 release) can't be exercised here — prove it on prod after the release. **Sales Import (staging, since
-2026-11-11):** Cloud Run Job `gifsy-sales-import-staging` + Scheduler `sales-import-drain-staging` (`*/10`) + secret
-`SALES_IMPORT_DRAIN_SECRET_STAGING`; `salesImport` ON for bajaj only — detail `ENVIRONMENTS.md`.
+**Tests**
+- **CI-runner flakes:** GitHub runners are slower than the dev box. Use `findBy`/awaited queries (never a sync `getBy`
+  right after a request), generous `waitFor` and per-test timeouts, no wall-clock budgets. A flaky test blocked the
+  2026-11-15 prod run. Systemic fix on `chore/flaky-test-sweep` (not merged).
+- Local api jest runs at `--maxWorkers=50%` (all workers starved the 18-thread box).
+- A local **PostgreSQL 15** (Windows service `postgresql-x64-15`, port **55432**) exists on the dev machine **only for
+  disposable test databases** (e.g. the WP7 reversal-engine concurrency suite via `WRE_PG_ADMIN_URL`). Prod and staging
+  are Cloud SQL PostgreSQL 15 on `gifsy-db`; never point tests at them.
+- Never hardcode a future date in a test; compute relative to `new Date()`.
 
-## OPEN THREADS
-- **💸 INFRA COST-REDUCTION — ✅ THREAD CLOSED (owner decision 2026-08-20: we are LIVE → the remaining freeze levers will NOT be pulled).**
-  Permanent wins DONE + staying (~₹10k/mo / ~57%, zero prod impact): Redis deleted, VPC connector → Direct-VPC-egress, Artifact
-  Registry cleanup policy live. **The freeze/downgrade levers are DECIDED-AGAINST, not deferred:** prod Cloud Run min=1→0 + pause
-  prod schedulers, and stopping/downsizing `gifsy-db`/`gifsy-db-dev` — all rejected because Deoleo is in production and needs the
-  always-on posture (no cold-starts, no paused schedulers, no stopped DB). Do NOT resurface these as "open." Full detail = memory
-  [[infra-cost-reduction]]; architecture record `INFRA-ARCHITECTURE.md`.
-- **🚧 NOTIFICATIONS & AUTOMATED EMAILS epic (IN PROGRESS on `develop`, NOT cut).** Construct today: TWO delivery paths — a DB-queue
-  outbox (`NotificationsService.enqueue` → `notification_queue`) whose ONLY drainer is PUSH (SMS/EMAIL/WHATSAPP rows enqueue but never
-  send), and a DIRECT `Msg91Service` path (OTP-SMS + WhatsApp templates DO deliver). Email delivery did not exist at all. **Decisions (owner,
-  2026-08-10):** provider = **MSG91 email** (already-integrated vendor; **5,000 emails/mo free recurring**, permanent at ~100–200/mo actual)
-  sent from a **`notify.gifsy.in` subdomain** (own SPF/DKIM/MX/CNAME/DMARC → no Zoho-Mail conflict; Zoho MX on root untouched). Scope = **two
-  INTERNAL Gifsy reports** (recipients configurable from a Gifsy-admin page): **①Credits/Payouts summary (all-tenant)** + **③KYC actionables
-  digest (all-tenant, daily Mon–Sat, with SLA)** — two SEPARATE scheduled reports (Cloud Scheduler → internal endpoint). Framework built to
-  add tenant-specific scheduled reports later. Partners are NOT an email audience (phone-first).
-  **📧 EMAIL REPORTS = ✅ LIVE IN PROD #28 (`7190ed6`) BUT DORMANT, FAIL-CLOSED** (`POST /v1/reports/run` secret-gated · framework + #1 Credits/Payouts
-  + #3 KYC-actionables daily Mon–Sat · platform recipients store GIFSY-only + Gifsy-admin recipients UI). **TRANSPORT RESOLVED + PUSHED STAGING
-  `362cae0` (2026-08-11):** MSG91's v5 email API is TEMPLATE-only (can't carry rich report HTML), so `Msg91Service.sendEmail` now sends via **MSG91 SMTP
-  relay + nodemailer** (`smtp.mailer91.com:587`, user `emailer@notify.gifsy.in`, `requireTLS`, from `reports@notify.gifsy.in`) — NOT the `MSG91_AUTH_KEY`
-  HTTP path. Secrets `MSG91_SMTP_PASS` (owner-created, shared) + `REPORTS_RUN_SECRET`(`_STAGING`) created + wired into both deploy YAMLs + SA-granted;
-  independent-audited (requireTLS + doc/env fixes applied); gate-green (api jest 2296). Domain `notify.gifsy.in` VERIFIED (DNS Cloudflare); Zoho-free has
-  NO SMTP; MSG91 "Connections" tab ≠ SMTP relay (it's Domain Settings → SMTP Integration). ✅ **STAGING TEST-SEND PASSED (2026-08-12, rev `gifsy-api-staging-00459`):**
-  `POST /v1/reports/run` → `creditsPayouts:suppressed-empty` + `kycActionables:{status:"sent",recipients:1}` → the KYC digest was delivered via MSG91 SMTP to
-  `nikunj.sadani@gifsy.in` (recipient set from the **GIFSY operator** login `PUT /admin/settings/report-recipients`; the GIFSY-global row, NOT a tenant view —
-  a tenant-added email never reaches the runner). 🐛 **Fixed along the way:** both `REPORTS_RUN_SECRET_STAGING` **and** prod `REPORTS_RUN_SECRET` had a trailing
-  `\r`(0d) from Windows-shell creation → header auth could never match → 403; both cleaned to **v2** (CR-stripped, byte-verified) + staging revision rolled.
-  `MSG91_SMTP_PASS` is a single shared secret, proven clean by staging's successful auth → prod SMTP will work identically. ▶ **REMAINING:** (1) owner confirms
-  the staging email arrived + renders (✅ **owner confirmed 2026-08-12** — KYC digest landed + rendered; owner then dropped the "Oldest (business hrs)" column → `73914cb`, and the Report Recipients card got a **"Platform-wide · all tenants"** badge + reworded desc so it's not mistaken for the per-tenant Credits&Payouts "Notify emails" → `f915852`); (2) **prod cutover carries the SMTP + report-polish commits** (`362cae0`/`b0ae0a2`/`73914cb`/`f915852`); (3) create the **PROD-ONLY** Cloud Scheduler cron
-  (`30 9 * * 1-6` Asia/Kolkata) with the **CLEAN** `REPORTS_RUN_SECRET` v2 value in the `x-reports-run-secret` header; (4) set prod recipients from the GIFSY
-  operator login. (Staging has no cron by design, so it never auto-sends.) Runbook `runbooks/email-reports-activation.md`.
-- **🗓️ KYC SLA → TWO-STAGE (owner 2026-08-11) — ✅ LIVE IN PROD #28 (`5961d96`), gate-green (api jest 2276 · nest 0 · FE tsc 0 ·
-  FE vitest 2114), DUAL-AUDITED + all fixable findings FIXED.** Field SLA (submitted→reaching Gifsy, default **24h**) + Gifsy SLA (**LATEST**
-  PENDING_GIFSY entry→decision, default **96h**, restart-on-re-entry) — two per-tenant `field/gifsySlaTargetHours` settings REPLACING the single 48
-  (owner: 48 was wrong, Gifsy=96). Shared engine `common/kyc-sla-stage.ts` (mirrored `platform/src/lib`); rewired the FE list (stage-tagged Field/Gifsy
-  badge), `kycDashboard`, `slaMetrics`, the rejected-export, and the email KYC report. **DRAFT** hidden from every approver queue + all SLA, visible ONLY
-  to its creator (`kyc.service.list()` `draftNot`; the `statusCounts` tab-count groupBy carries the same guard). **Correctness fixes:** M1 — a
-  PENDING_GIFSY row with no PENDING_GIFSY history entry now ages from `submittedAt` on EVERY surface (helper + slaMetrics fall back, matching the
-  dashboard); M2 — dashboard field-chain tile = submitted→FIRST hand-off (pure field time), Gifsy-review keeps LATEST entry→approval (bounced KYCs no
-  longer fold rework into "field"); L4 — legacy slaMetrics anchors at submittedAt; INFO — getSettings skips the retired `slaTargetHours`. **L3**
-  (field-decided-after-bounce shows Gifsy badge) documented as a low-value limitation (inline comment). ▶ **NEXT:** owner on-device UAT on prod
-  (LIVE via #28). Detail: memory [[email-reports-business-day-sla]].
-- **(context) queue drainer — SMS leg ADDED (pending cutover #37, [[notifications-bell-and-channels]]).** The drainer is no longer PUSH-only: an SMS
-  leg (config-driven, DLT-template, atomic row-claim) now exists on `develop`, and the old dead SMS `enqueue` calls + the direct WhatsApp calls were
-  replaced by the single config-driven `notifyUserWithChannels` fan-out (IN_APP + PUSH always; SMS/WhatsApp per the per-tenant `notificationTemplates`
-  control panel). SMS is DORMANT until the owner registers DLT templates. The dead credit-batch EMAIL leg was removed (superseded by the Credits/Payouts report).
-- **#74 owner-ops residual:** optional cred/secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).
-- **POST-GO-LIVE-BACKLOG (later):** multi-tenant SSR branding, configurable RBAC (AF-12 kept OFF), WhatsApp per-tenant
-  generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics.
+## 9. Reference
 
-## READ FIRST
-`GO-LIVE-ISSUE-LIST.md` (⭐ master tracker) · memories **[[deoleo-go-live-bundle]]** (FIRST for any
-launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[audit-every-build-item]] ·
-[[scheme-data-collection]] · [[visibility-posm]] · [[partner-multi-outlet]] · [[staging-deploy-gate]] ·
-[[migration-model]] · [[e2e-harness]]. **Authoritative cutover record = the CUTOVER LEDGER below (#14–#44) + `[[deoleo-go-live-bundle]]` (#1–13 + per-cutover detail).** (`runbooks/PROD-CUTOVER-RECORD.md` is a historical as-run log, detailed only through ~#6; the ledger + memory are the source of truth — EXCEPT its two top sections, which are current: the **prod deploy PREFLIGHT** and the **"prepare main" checklist for the #59 + Sales Import release**.)
+**Session/auth model:** access token = httpOnly `token` cookie, 60-minute JWT that slides on activity; refresh =
+httpOnly `refresh_token`, single-use rotating; the edge proxy injects the backend Bearer; refresh-on-401 single-flight.
+Rolling idle window 30 days per device (`SESSION_TTL_DAYS`, `api/src/auth/auth.constants.ts`); an operator's
+assumed-tenant session slides on the same 30-day window (`ASSUMED_SESSION_TTL_HOURS` = 720). Detail: `P1-sessions-design.md`.
 
-## CUTOVER LEDGER (compact — full detail in `[[deoleo-go-live-bundle]]`)
+**Staging logins (`FIXED_OTP` 123456):** GIFSY admin `9830011252` (clientId `gifsy`); Deoleo admin `6289864191`; Deoleo
+partner `7795096288`; sales `9900000041` (ISR) · `9900000002` (SO) · `9900000011` (XSR). API base
+`https://gifsy-api-staging-4d4n5mc6yq-el.a.run.app` (POST `/v1/auth/send-otp` → `/v1/auth/verify-otp`; operator
+cross-tenant = `/v1/auth/assume-tenant`). Staging hosts `uat-<slug>.gifsy.in`.
 
-| # | prod SHA | payload (one line) | migration | rollback |
-|---|---|---|---|---|
-| **#53–#58** | … `e98f047` | (2026-10 → 2026-11-07) — not tabulated here; #57 (`ff45f6b`) + #58 (`e98f047`) are summarised in 📍 HANDOFF 2026-11-06 above; full per-cutover detail in `[[deoleo-go-live-bundle]]`. **Next = #59 + Sales Import + the rest of the 2026-11-11 release together** (on staging `7c85d9fd`; see 📍 STATE 2026-11-11). | — | — |
-| **52** | `91f9773` | (2026-10-01) — **IST timestamp sweep** (all displayed/reported dates + day/month buckets → Asia/Kolkata; BE+FE `ist-date` primitives; 4-layer verified incl. staging browser e2e) + **Payments Report** (`0682ea0`) + **3 payout fixes** (`b49b170`: combined-UTR same-account, Payment-Date col, GST-reimb self-heal, payout phone) + **RBAC route-guard fix** (`7b62417`: assumed GIFSY_STAFF no longer loops on gifsyOnly pages — Puja Kumari unblocked). Gated api jest 3339 · FE vitest 2576. | none (code-only) | `af124cf` |
-| **51** | `af124cf` | (2026-09-23) — operator-Settings move (Report Recipients + Holiday Calendar → `/gifsy/settings`) + KYC Status Report rejection columns + roster bulk-remove-by-Excel + scheme WhatsApp "Send a test". | none (code-only) | `7e47d75` |
-| **50** | `7e47d75` | (2026-09-18) — scheme-report "Enrollment Status (Excel)" de-collision + WhatsApp send success log + KYC "Pending — Gifsy" filter. | none (code-only) | `3257cd9` |
-| **49** | `3257cd9` | (2026-09-17) — stale-deploy self-heal + admin KYC rejection reason multi-select + GSTIN compulsory + Gifsy toggle + per-scheme WhatsApp confirmation (dormant). | none (code-only) | `64e8d46` |
-| **48** | `64e8d46` | (2026-09-16) — outlet-driven KYC Status Report + exit-tenant strand fix. | none (code-only) | `83c4af4` |
-| **47** | `83c4af4` | (2026-09-15) — scheme-builder Live Preview + imageUrls `@IsImageRef` fix + sales-enroll load-all-pages. | none (code-only) | `9f4f385` |
-| **46** | `9f4f385` | KYC whole-dashboard program-name filter + UPI_QR true live-camera scanner. | none (code-only) | `399cfa7` |
-| **45** | `399cfa7` | the 9-change batch (sales-assisted redeem toggle, gift-image upload proxy, Download Sales Data, edit-employee from Hierarchy, flexible/fixed voucher, KYC-status CLIENT_ADMIN, hierarchy guards, re-upload advisory). | none (code-only) | `5f811cf` |
-| **44** | `5f811cf` | (2026-09-08) — scheme-export **Outlet Name** un-blank (a form-field label colliding with a built-in export column no longer overwrites it → `<label> (Form)`; E2E 121/121→0/121) + residual de-collision edges (geo companion + case/whitespace-insensitive, form-field & Excel symmetric) + roster-upload **blank-name warning** (`blankNameCount` = blank+unmatched saved rows → amber warning + report Summary). Gated (jest 3104 · FE vitest 2490) + audited + regression-tested. FF from `1abba9d`; shipped via the MANUAL Run-workflow gate. | none (code-only) | `1abba9d` |
-| **43** | `1abba9d` | (2026-09-03) — VENDOR category-picker fix: `/api/vendor/categories` omitted `isActive` and the FE picker filtered on it → empty dropdown despite categories existing; BE returns `isActive`, FE filter → `c.isActive !== false`, admin gift-master editor hardened too. First deploy through the manual gate. FF from `d236219`. | none (code-only) | `d236219` |
-| **42** | `d236219` | (2026-09-03) — partner Rewards catalogue/redeem gated on per-outlet-type `loyaltyEnabled` (was `hasPointsActivity` → wholesalers w/ 0 points saw NO catalogue) + TOCTOU loyalty re-check in `confirmRedeem`/`confirmRedeemForOutlet` + rules-of-hooks crash fix. Money-path dual-audited + full E2E. ⚠️ AUTO-DEPLOYED with NO approval — the GitHub required-reviewers env gate stopped enforcing when the repo went public→private on Free → prompted the switch to `workflow_dispatch`-only (`4302c13`). FF from `5437572`. | none (code-only) | `5437572` |
-| **41** | `5437572` | (2026-09-02) — operator invoice-detail page `/admin/invoices/[id]` (list-row arrow 404 → built; backend existed) + partner wallet default-period fix (hardcoded `2026-05` → current-month + snap-to-activity) + `uat-<slug>.gifsy.in` staging convention (edge worker live, zero-touch tenants). FE-only. FF from `37e7206`. | none | `37e7206` |
-| **40** | `37e7206` | (2026-09-01) — credits award-editor default-on outlet types (`listOutletTypes` mirrors console default-on) + scheme lifecycle → Activate+Pause only (Expire/Cancel removed) + per-tenant login logo. FF from `8bef582`. | none | `8bef582` |
-| **39** | `8bef582` | (2026-09-01) — STAFF LOGIN-LOOP FIX (edge proxy `/admin` admits `GIFSY_STAFF`) + target-upload confirmation banner (`savedCount`) + Target-vs-Sales report (`/admin/reports/target-vs-sales`). FF from `ba99fc7`. | none | `ba99fc7` |
-| **38** | `ba99fc7` | (2026-08-31) — platform-wide IST date-boundary fix (`istDayRangeFilter`/`startOfIstDay`/`endOfIstDay`; scheme enrollment window end-dates now inclusive + reports/gift-dispatch/194R-window/payouts/credits-cutoff). ⚠️ spec-gutting trap caught (sub-agents deleted ~134 tests). FF from `78652fe`. | none | `78652fe` |
-| **37** | `78652fe` | (2026-08-26) — 4 additive + DORMANT features: Notifications (bell + SMS/WhatsApp fan-out + templates panel) + WhatsApp Broadcasts console + Gift Catalogue & Dispatch (Waves 0+1+2, 3P vendors) + Delivery-Status Reporting (Waves 0–4). FF from `47b2b3c`. | 7 additive (via `gifsy-migrate-pgcwp`) | `47b2b3c` |
-| **36** | `47b2b3c` | (2026-08-20) — **operator-portal + TDS batch** (additive; FE-mostly; NO migration): **Help & Guides** operator-docs section in `/admin` (Gifsy-ops only) with **Payouts** + **TDS** "How It Works" guides (react-markdown + Print/PDF, single-source content modules) · **inline single-record edit** for outlets + employees (Excel-editable fields only; `PATCH /v1/admin/outlets/:outletCode` + `/v1/admin/sales-users/:id`, reuse bulk mappings + updateUser guards + reports-to cycle guard) · **Path-2 invoice UX** month picker (same `POST /admin/invoices/generate`) · **editable platform-level TDS statutory config** (rates+thresholds owner-only, effective-by-FY, single-source `TdsStatutoryConfigService.getForFy` both engines read → dup constants removed; `GET/PUT /v1/admin/tds/statutory` + `/gifsy/tds-statutory` editor). Money-path DUAL-audited — fixed a **CRITICAL** DTO whitelist-strip (`entries` stripped → every owner save 400'd, caught only at runtime) + a **HIGH** owner-only bypass via generic `PUT /admin/settings` + closed-FY immutability + 0-threshold guard. **194R e2e RUNTIME-PROVEN on staging** (all 3 sources + deposit → 1 PAN: base ₹22,000 → liability ₹2,444 → outstanding ₹1,444; CA-export parity + negative control). Gates re-run clean before push: api jest 2567 · nest 0 · FE tsc 0 · FE vitest 2213. Both services `47b2b3c` (rev api-00054-r8m/fe-00045-gx5), migrate `gifsy-migrate-rtbvl` clean no-op, `/health/ready` 200 db:up. Detail [[operator-portal-additions]] + [[visibility-payout-tds-invoicing]]. FF from `54a84c2`. | none (code/FE-only) | `54a84c2` |
-| **35** | `54a84c2` | (2026-08-20) — **EMPLOYEE REWARDS Phase 0/1 — earner-model FOUNDATION** (additive + DORMANT): `Client.loyaltyType` (TRADE_LOYALTY\|EMPLOYEE_REWARDS, default trade) + capability-set resolver; unified `RewardAccount` (OUTLET\|EMPLOYEE) as the wallet owner, nullable `accountId` on wallet/order/partner with `partnerId` KEPT (outlet-compliance code untouched → Deoleo byte-identical); dual-write links the account at every wallet/order create (idempotent `ensureOutletAccount` + per-partner advisory lock); onDelete Restrict on money FKs. Post-cutover prod data ops (backup taken): cleanup (2 test wallets + 5 test batches removed, CONTROL held 6 real) + 6-row back-fill → 6/6 linked, balances byte-identical, idempotent, test data gone. Independent 3-lane audit + dual re-audit (money/identity/data-migration) ship-safe; all findings fixed. Reads stay on `partnerId` (Phase-1 outlet-only; account-keyed reads + EMPLOYEE earner + the 3 employee surfaces = Phase 2). `gifsy-migrate-l2lrv` applied 3 additive migrations. Detail [[employee-rewards-product]]. FF from `f578b6e`. | 3 additive (`20260819130000_client_loyalty_type` · `20260819140000_reward_account_additive` · `20260819150000_reward_account_fk_restrict`) | `f578b6e` |
-| **34** | `f578b6e` | (2026-08-19) — backlog closeout (code-only, NO migration): **D-B2** finance-permission split — new reserved `tenancy:write_finance` gates conversion-rate/points-expiry/`wallet-settings` money writes, split off the general `tenancy:write` (benign tenancy writes — holidays, report-recipients, create/update client, branding, outlet-type toggles — stay on `tenancy:write`) · **support-ticket internal-note read leak CLOSED** (`tickets.getOne`+`list` filter `isInternal` for non-support readers; support admins unchanged) · removed 3 orphan permission keys (`visibility:approve/reject`, `support:manage` — gated no route) from catalog + Ops seed · `deleteRole` self-guard (`where:{id,clientId}` updateMany) · scheme enroll-picker standalone-OTP note removed. Dual/adversarial-audited (found+fixed a missed `wallet-settings` money route on `tenancy:write`) + staging runtime-verified 17/17 (catalog/​me perms=70, finance-route 200, ticket leak closed partner-vs-admin). Gates api jest 2487 · nest 0 · FE tsc 0 · FE vitest 2201. FF from `0dbfefd`. | none (code-only) | `0dbfefd` |
-| **33** | `0dbfefd` | (2026-08-19) — **sales scheme "Activations / Tasks" visible to MANAGERS** (RSM/ZNM/NSM), not just field roles (XSR/SO/ASM). Root cause = a FE `isFieldRole` display gate hiding the scheme group on the sales Dashboard + Tasks page; the backend reach already returned a manager's downline-tagged targets AND already authorized manager enroll (`ENROLLER_ROLES` = all sales tiers; `assertSalesReachRoster`), so managers now get full **see + enroll** scoped to their downline (owner-confirmed intent, not view-only). Diagnosed on prod data (RSM:West reached all 12 tagged rows). Also fixes a tagged ASM's outlets being invisible to that ASM's reporting manager (an RSM). FE-only (dashboard/page.tsx + tasks/page.tsx + spec), gates api jest 2482 · nest 0 · FE tsc 0 · FE vitest 2201. Verified prod: both services `0dbfefd`, `/health/ready` 200. FF from `12fc22a`. | none (FE-only) | `12fc22a` |
-| **32** | `12fc22a` | (2026-08-19) — **RBAC Option-X P0–P6** (Gifsy staff roles + self-service role editor + `/gifsy` staff panel; P4 owner-takeover + session-revoke hardening; **P5** per-staff `GifsyStaffTenantGrant` deny-by-default + assume-to-work, closes the "Bajaj cliff"; **P6** permission-aware "you don't have permission" access messaging) + the **outlet-wallet + money-hardening** bundle (GIFSY-only outlet-wallet admin view + owner-adjust; atomic guarded redemption debit; passbook selected-outlet resolve). ALL additive + DORMANT (no `GIFSY_STAFF` in prod — enabling = owner creates the 2 staff + brand grants in the console). Dual-audited + cross-tenant write-sweep CLEAN + isolation walk 23/23 + /me contract 10/10 on staging; verified prod: both services on `12fc22a`, `/health/ready` 200, `gifsy-migrate-xqtd2` succeeded. FF from `0fc80c6`. | 3 additive (`20260818120000_gifsy_staff_role` enum · `20260818120100_gifsy_roles` table+FK · `20260819120000_gifsy_staff_tenant_grants` table+FK; applied via `gifsy-migrate-xqtd2`) | `0fc80c6` |
-| **31** | `0fc80c6` | (2026-08-14) — ① downloaded-report media/doc links → backend `/v1` (scheme "View image" + outlet-master KYC-doc; were FE `/api` prefix on the API host → 404; staging-verified 200 pdf) · ② compulsory Gifsy KYC classification (Entity Type + GST Reg Type REQUIRED to approve — single-choke-point `assertClassificationSet` + PATCH + disabled Approve; the no-op Save-Classification button now persists) + group auto-inherit/LOCK (one-per-org, `pg_advisory_xact_lock`) + `GROUP_INHERITED` verification carry-forward (GST_VALIDATION[PAN+GST]/GST_DOCUMENT/PAYMENT from an APPROVED sibling on genuine match; address/photos PENDING). Dual adversarial + UI/UX audit ×2, all closed + re-verified; staging gate-verified (400 blocks null-classification approve; set→approve clears). ⚠️ owner-accepted: inherited items point-in-time (source-revocation stale; bounded — PAYMENT needs exact own-account match; reviewer-reversible; re-KYC re-verifies). FF from `7e7ff4e` | `20260814120000_kyc_field_source_group_inherited` (`ALTER TYPE "KycFieldSource" ADD VALUE 'GROUP_INHERITED'`; applied+verified prod via `gifsy-migrate-f9zq5`) | `7e7ff4e` |
-| 30 | `7e7ff4e` | (2026-08-14) — rolling-7d-session (60m access token + activity-slide + `proxy.ts` page-nav silent refresh) · logout-all authority (`users.sessionsInvalidBefore`, stamp-before-revoke) · multi-tab idempotent rotation (`user_sessions.rotatedFromId`) · reuse-detection LENIENT + PLATFORM-only security-event log (`GET /v1/gifsy/security-events`) + GIFSY-home breach metric · assumed-mode Settings gating · mobile-responsive report emails. Dual-audited ×2 + tenant-isolation audit; staging-verified. Detail [[auth-rolling-session]] | 2 additive (`user_sessions.rotatedFromId` + `users.sessionsInvalidBefore`; applied via `gifsy-migrate-fk6nt`) | `185401a` |
-| 29 | `185401a` | (2026-08-12) — email SMTP transport (nodemailer→MSG91 SMTP relay, `smtp.mailer91.com:587`) + prod cron `reports-run-prod` ENABLED (Mon–Sat 9:30 IST) + KYC-report Oldest-col drop + Report-Recipients platform-badge; email reports LIVE in prod (▶ owner still to set PROD recipients → cron no-ops until then). Windows-secret `\r` gotcha fixed (both run-secrets CR-stripped to v2) | none | `06dd552` |
-| 28 | `06dd552` | (2026-08-11) — deactivate-frees-phone (only status='ACTIVE' reserves `(clientId,phone)`; deactivate/suspend frees, reactivate re-checks + clears deletedAt; login-by-phone ACTIVE-first, SUSPENDED blocked; `phone-conflict.ts` guards create/reactivate/KYC-approval/parent-activation) · Edit User UI on `/admin/users` · two-stage KYC SLA (Field 24h + Gifsy 96h business-hours) · business-day KYC SLA (Mon–Fri minus Gifsy-editable holiday calendar) · scheduled internal email reports on MSG91 (LIVE but DORMANT until owner activation). Dual-audited (CRITICAL stale-prisma build break + HIGH KYC-approval money-path fixed); FF from `84dab6b` | `20260811120000_user_phone_active_partial` (partial unique idx `users_clientId_phone_active_key WHERE status='ACTIVE'`; applied + verified prod via `gifsy-migrate-nlxbc`) | `84dab6b` |
-| 27 | `84dab6b` | (2026-08-08) — KYC review-SLA freeze + configurable `slaTargetHours` · outlet-master report columns aligned to upload template + real Profile Status · outlet-upload UX (Parent-ID + parked preview validation, batched Re-KYC/Deactivate/Park/Un-park uploads, un-park-in-master toggle, Download Parked Outlets, park/unpark/deactivate zero-match→benign-no-op) · auth assumed-tenant session TTL 24h→7d. Independent-audited (3 MED fixed); gates jest 2204/nest 0/tsc 0/vitest 2089. FE + backend, NO migration | none | `db5d6df` |
-| 26 | `db5d6df` | (2026-08-04) — TENANT read-only parity for scheme reports: CLIENT_ADMIN gets the rich enrollments view (roster + drawer answers/media/geo/history) + Excel export, read-only; opened 4 GET endpoints to CLIENT_ADMIN (tenant-scoped; writes+deleted stay GIFSY-only); one shared `SchemeEnrollmentsView({readOnly})` + new `/admin/scheme-reports/[id]/enrollments`; dual-audited + staging real-token verified | none | `2a88436` |
-| 25 | `2a88436` | (2026-08-04) — edge fix: add `@Public` tokenized report-link paths (`/api/schemes/media/view`, `/api/kyc/documents/view`) to `proxy.ts` `PUBLIC_PATHS` so scheme-report image + outlet-master KYC-doc links resolve from a downloaded .xlsx with no session (were edge-401'd before reaching the @Public backend); FE-only, +4 proxy tests | none | `078c404` |
-| 24 | `078c404` | (2026-08-03) — scheme "Enroll"→"Select" button rename (Tasks card + outlet-picker row open selection, not enroll); FE-only | none | `ce5267a` |
-| 23 | `ce5267a` | (2026-08-03) — the WHOLE UI/UX audit fix plan (52 findings, P1–P4+G1) + roster-row soft-delete + Auth Option B check-first login OTP + KYC grouped-child shared-phone fix + per-photo geotag + camera-copy correction; dual audit caught 4 HIGH | `20260801120000_scheme_outlet_soft_delete` (additive `scheme_outlets.deletedAt`; applied+verified prod) | `fb996d8` |
-| 22 | `fb996d8` | (2026-07-31) — reactivate pending-outlet leak fix + enrollment Excel report rebuild (public tokenized `/v1/schemes/media/view`) + PARKED remove-from-KYC-queue outlet state + grouped-child GST-cert/cheque doc carry-forward + "Activations/Tasks" rename | `20260731170000_outlet_kyc_intent_parked` (`ADD VALUE 'PARKED'`, additive; applied) | `a83b2f4` |
-| 21 | `a83b2f4` | (2026-07-31) — scheme UAT batches (downline reach, camera-only capture, edit/delete filled enrollment + consent carry-forward, roster export) + child-KYC group-identity prefill + Identity/Payout Uniqueness toggle | `20260730160000_scheme_enrollment_soft_delete` (additive; applied) | `8c08af3` |
-| 20 | `8c08af3` | (2026-07-30) — scheme UX-hardening (dual-source prefill `FormField.outletField` + H1–H6) + Parent-ID outlet-master DOWNLOAD export (57 cols) | none (code-only) | `daa4f3f` |
-| 19 | `daa4f3f` | (2026-07-30) — scheme roster-upload Excel report (Summary + per-row disposition + Duplicates + Unmatched-Employees) | none (code-only) | `f193127` |
-| 18 | `f193127` | (2026-07-30) — scheme prefill Editable/Locked (backend-enforced Excel-variable prefill, per-field Editable/Locked) | none (code-only) | `52fc19f` |
-| 17 | `52fc19f` | (2026-07-29) — visibility-led payouts/194C-TDS + GIFSY assume-tenant scoping + partner→multi-outlet admin grouping FE + POSM post-cutover infra | 2 additive (`..._visibility_payout_tds_foundation` + `..._credit_code_per_tenant_unique`; applied) | `4ebf12c` |
-| 16 | `4ebf12c` | (2026-07-28) — VISIBILITY (POSM) live: Scheme-based recurring, per-window, sales-captured, geo-fenced, Gifsy-approved POSM proof (reward-free) | `20260727120000_visibility_posm_rebuild` (destructive-but-guarded, 0-row abort-guard) | `bda9bf3` |
-| 15 | `bda9bf3` | (2026-07-27) — SCHEME data-collection instrument live (Gifsy-admin roster + form-builder + immutable versioned submissions; no reward engine) | `20260725120000_scheme_data_collection` (destructive-but-guarded, 0-row abort-guard) | `eca351e` |
-| 14 | `eca351e` | (2026-07-24) — PARTNER→MULTI-OUTLET Waves 1–4 (uniqueness engine + parent entity + admin grouping + re-KYC-at-approval + login picker + child-KYC prefill; opt-in DORMANT) | 4 additive migrations (all applied+verified) | `2187498` |
-
-Earlier cutovers #1–#13: see `[[deoleo-go-live-bundle]]` (`runbooks/PROD-CUTOVER-RECORD.md` covers only ~#1–6, deprecated).
+**Constraints:** see root `CLAUDE.md` (gates, platform-wide gate, guardrails). Memory (`~/.claude/projects/.../memory`)
+holds per-topic history; this file wins on current state.

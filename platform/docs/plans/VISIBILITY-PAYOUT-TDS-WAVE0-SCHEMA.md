@@ -329,7 +329,7 @@ checklist):** a low-severity double-reversal edge on an already-reversed PAID en
 threshold is per-(clientId, outletCode) since cross-tenant
 aggregation needs a PAN; MIXED cross-tenant methodology is a live multi-tenant scenario now handled but unexercised.
 
-**STATUS: LIVE ON STAGING (`500eaf9`) + runtime-verified. ▶ NEXT = owner UAT → W4 owner-gated prod cutover.**
+**STATUS: ✅ IN PROD since cutover #17 (`52fc19f`, 2026-07-29).** _(Original: LIVE ON STAGING `500eaf9`, next = owner UAT → prod cutover.)_
 
 ## 10. DEFERRED DECISIONS — pending, pick up later (owner-parked)
 

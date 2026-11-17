@@ -86,7 +86,7 @@ describe('Admin Schemes page', () => {
     // Never-resolving promise keeps the loading state visible
     mockFetch.mockReturnValue(new Promise(() => {}));
     await act(async () => { await renderPage(); });
-    expect(screen.getByText(/loading schemes/i)).toBeInTheDocument();
+    expect(await screen.findByText(/loading schemes/i)).toBeInTheDocument();
   });
 
   it('renders scheme cards after successful fetch', async () => {
@@ -142,7 +142,7 @@ describe('Admin Schemes page', () => {
     });
 
     // Click the delete (Archive icon) button
-    const deleteBtn = screen.getByTitle('Delete Scheme');
+    const deleteBtn = await screen.findByTitle('Delete Scheme');
     await act(async () => { fireEvent.click(deleteBtn); });
 
     await waitFor(() => {
@@ -181,7 +181,7 @@ describe('Admin Schemes page', () => {
 
     await waitFor(() => { expect(screen.getByText('Summer Push')).toBeInTheDocument(); });
 
-    const nextBtn = screen.getByText('Next');
+    const nextBtn = await screen.findByText('Next');
     expect(nextBtn).toBeInTheDocument();
     await act(async () => { fireEvent.click(nextBtn); });
 
@@ -201,7 +201,7 @@ describe('Admin Schemes page', () => {
       expect(screen.getByText('Keep This Scheme')).toBeInTheDocument();
     });
 
-    const deleteBtn = screen.getByTitle('Delete Scheme');
+    const deleteBtn = await screen.findByTitle('Delete Scheme');
     await act(async () => { fireEvent.click(deleteBtn); });
 
     // fetch should only have been called once (the list call)

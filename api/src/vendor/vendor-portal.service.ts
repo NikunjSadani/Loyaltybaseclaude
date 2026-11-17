@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { GiftApprovalPolicy, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { problemRowsEcho } from '../common/upload-echo';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EventKey } from '../notification-templates/notification-templates.config';
@@ -516,7 +517,8 @@ export class VendorPortalService {
       created: results.filter((r) => r.created).length,
       failed: results.filter((r) => r.error).length,
       moderationStatus,
-      results,
+      // Memory-safety (2026-11-13): only the FAILED rows (capped at 500), not one entry per row.
+      ...problemRowsEcho(results, (r) => !!r.error),
     };
   }
 

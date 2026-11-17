@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { CreditEntryStatus, Prisma, TdsMethodology, TdsSection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -42,6 +43,10 @@ import {
 import {
   generatePayoutFileBuffer,
   parseUtrUpload,
+  groupUtrBatchRows,
+  UTR_NOTICE_ALREADY_PAID,
+  UTR_NOTICE_ALREADY_FAILED,
+  FormerOutletFate,
   PayoutBatch,
   PayoutBatchRow,
 } from './credits.helpers';
@@ -2282,6 +2287,29 @@ export class CreditsService {
     return { buffer, downloadCode: download.downloadCode, downloadId: download.id, heldEntries };
   }
 
+  /**
+   * Recompute a payout download's status from its entries' LIVE statuses (call inside the UTR tx,
+   * after any flips, under the UTR advisory lock). Every entry settled (PAID / FAILED / REVERSED) →
+   * PAID; any still awaiting a result (PROCESSING / PENDING) → PARTIALLY_PAID. Conditional write:
+   * the row is untouched when the status is already correct.
+   */
+  private async recomputeUtrDownloadStatus(
+    tx: Prisma.TransactionClient,
+    downloadId: string,
+    clientId: string,
+  ): Promise<void> {
+    const liveEntries = await tx.creditPayoutEntry.findMany({
+      where: { downloadId, clientId },
+      select: { id: true, status: true },
+    });
+    const stillPending = liveEntries.some((e) => e.status === 'PROCESSING' || e.status === 'PENDING');
+    const nextStatus = stillPending ? 'PARTIALLY_PAID' : 'PAID';
+    await tx.creditPayoutDownload.updateMany({
+      where: { id: downloadId, clientId, status: { not: nextStatus } },
+      data: { status: nextStatus },
+    });
+  }
+
   // ─── POST /v1/admin/credits/payout-downloads/:id/utr ───────────────────────
   // [id] is the CreditPayoutDownload id. Parses the UTR upload; previews unless
   // ?apply=true, then applies PAID/FAILED to entries and notifies paid outlets.
@@ -2348,16 +2376,13 @@ export class CreditsService {
       ]),
     );
 
-    // Injectable batch rows from DB (accountNumber drives the same-account shared-UTR rule).
-    const batchRows = download.entries.map((e) => ({
-      outletId: e.outletId,
-      utrStatus: (e.status === 'PAID'
-        ? 'PAID'
-        : e.status === 'FAILED'
-          ? 'FAILED'
-          : 'PENDING') as 'PENDING' | 'PAID' | 'FAILED',
-      utr: e.utr ?? undefined,
-      accountNumber: acctByOutlet.get(e.outletId) ?? '',
+    // Injectable batch rows from DB — ONE per outlet (accountNumber drives the same-account
+    // shared-UTR rule). A download can hold SEVERAL entries for one outlet (one per payout row at
+    // confirm), summed into ONE bank line at download; the outlet's state is the GROUP's state
+    // (e.g. SKIP only when ALL its entries are already PAID) — never "last entry wins".
+    const batchRows = groupUtrBatchRows(download.entries).map((g) => ({
+      ...g,
+      accountNumber: acctByOutlet.get(g.outletId) ?? '',
     }));
 
     // UTR → set of distinct non-empty bank accounts prior entries used with it.
@@ -2374,22 +2399,121 @@ export class CreditsService {
       if (acct) set.add(acct);
     }
 
+    // Outlets recorded in this download's bankSnapshots that no longer have an entry here. The
+    // snapshot is built BEFORE the held/payable split, so it also lists outlets HELD at download
+    // (never in the bank file) — each one's fate is therefore classified from the DB below.
+    const currentOutletIds = new Set(download.entries.map((e) => e.outletId));
+    const snapshotOutletIds = Array.isArray(download.bankSnapshots)
+      ? (download.bankSnapshots as Array<{ outletId?: unknown }>)
+          .map((s) => (typeof s?.outletId === 'string' ? s.outletId : ''))
+          .filter((o) => !!o)
+      : [];
+    const formerOutletIds = [...new Set(snapshotOutletIds.filter((o) => !currentOutletIds.has(o)))];
+    // Classify each former outlet from its entries for THIS period (precedence: an entry now in
+    // ANOTHER download → REBANKED; else REVERSED → REVERSED; else PENDING with no download →
+    // HELD). An outlet matching none stays unclassified → the parser's blocking "not found" ERROR.
+    const formerOutlets = new Map<string, FormerOutletFate>();
+    if (formerOutletIds.length > 0) {
+      const formerEntries = await this.prisma.creditPayoutEntry.findMany({
+        where: { clientId: user.clientId, outletId: { in: formerOutletIds }, period: download.period },
+        select: { outletId: true, status: true, downloadId: true },
+      });
+      for (const outletId of formerOutletIds) {
+        const mine = formerEntries.filter((e) => e.outletId === outletId);
+        if (mine.some((e) => e.downloadId != null && e.downloadId !== download.id)) {
+          formerOutlets.set(outletId, 'REBANKED');
+        } else if (mine.some((e) => e.status === 'REVERSED')) {
+          formerOutlets.set(outletId, 'REVERSED');
+        } else if (mine.some((e) => e.status === 'PENDING' && e.downloadId == null)) {
+          formerOutlets.set(outletId, 'HELD');
+        }
+      }
+    }
+
     const parseResult = parseUtrUpload(ab, {
       downloadCode: download.downloadCode,
       batchRows,
       knownUtrs,
+      formerOutlets,
     });
 
     // Preview unless apply=true.
     if (!apply) {
-      return { parseResult, downloadCode: download.downloadCode };
+      // This preview precedes the IRREVERSIBLE "Apply UTR Results" (entries → PAID / FAILED), so the
+      // operator must see EVERY row about to be applied: the full parsed `rows` (as before 2026-11-13),
+      // bounded at PREVIEW_FULL_ROWS_MAX with `rowsTruncated`; plus the ERROR-row summary fields.
+      const { rows, ...rest } = parseResult;
+      return {
+        parseResult: { ...rest, ...fullRowsEcho(rows), ...problemRowsEcho(rows, (r) => r.status === 'ERROR') },
+        downloadCode: download.downloadCode,
+      };
     }
 
     if (!parseResult.canProceed) {
       throw new BadRequestException('Cannot apply — parse result has errors or no valid rows');
     }
 
+    // Re-apply of a fully-applied file (every row an idempotent SKIP, no errors) — common when the
+    // Next proxy times out (30 s) while the apply tx (≤180 s) commits and the admin retries. Succeed
+    // as a NO-OP: no entry writes, no notifications (mirrors the payouts module's all-notice file).
+    // The parser only SKIPs a row that repeats the entry's recorded outcome (PAID ← Success,
+    // FAILED ← Failed), so "already applied" is true for every skipped row. The ONE write allowed is
+    // the conditional download-status recompute (under the same lock), which repairs a download left
+    // at PARTIALLY_PAID by the old parse-row rule although every entry is settled.
+    // Row notices (informational, non-blocking) echoed on every apply response. "Attention" notices
+    // are the ones that do NOT mean "genuinely already applied" (paid-but-file-says-failed, a
+    // different UTR) — when any is present the no-op message must not claim "Already applied".
+    const notices = parseResult.rows
+      .filter((r) => !!r.notice)
+      .map((r) => ({ outletId: r.outletId, rowNum: r.rowNum, notice: r.notice as string }));
+    const attentionCount = notices.filter(
+      (n) => n.notice !== UTR_NOTICE_ALREADY_PAID && n.notice !== UTR_NOTICE_ALREADY_FAILED,
+    ).length;
+
+    if (parseResult.noop) {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`UTR|${download.id}`}, 0))`;
+        await this.recomputeUtrDownloadStatus(tx, download.id, user.clientId);
+      });
+      return {
+        applied: true,
+        noop: true,
+        paidCount: 0,
+        failedCount: 0,
+        skippedCount: parseResult.summary.skipped,
+        notApplied: [],
+        notices,
+        message:
+          attentionCount > 0
+            ? `Nothing changed — ${attentionCount} row${attentionCount === 1 ? ' has a notice' : 's have notices'} to review.`
+            : 'Already applied — nothing to change',
+      };
+    }
+
     const now = new Date();
+    // What THIS call actually transitioned (guarded flip count === 1), aggregated PER OUTLET (= per
+    // file row = per bank line; an outlet may own several entries in this download). Everything
+    // post-commit — the invoice lock, the payout notification, the response counts — is driven by
+    // these, NEVER by the early parse result (a retried/concurrent apply parses rows OK that a prior
+    // call already flipped). amountPaise = Σ of the entries THIS call flipped to PAID.
+    // notify=false when the outlet already had a PAID sibling on this bank line (a heal of a stuck
+    // entry — the outlet was already told it was credited).
+    // bankCreditedPaise = Σ(amountPaise − tdsDeductedPaise) of those same entries = the cash that
+    // actually reached the bank (the bank-file line is built NET of DEDUCT-method TDS; GROSS-UP /
+    // INCENTIVE entries carry tdsDeductedPaise=0, so for them it equals amountPaise). Floored at 0
+    // per entry. This — not the gross — is what the "payout credited" message states.
+    const flippedPaid: Array<{
+      outletId: string;
+      utr: string;
+      paymentDate: Date;
+      amountPaise: bigint;
+      bankCreditedPaise: bigint;
+      notify: boolean;
+    }> = [];
+    let flippedFailedCount = 0; // outlets (rows) with ≥1 entry flipped to FAILED by this call
+    // OK rows whose outlet had NO entry still PROCESSING inside the tx (a concurrent/prior apply
+    // already recorded it). Reported separately — never folded into "Already applied".
+    const notApplied: Array<{ outletId: string; rowNum: number; reason: string }> = [];
     // FIX-3: a FAILED payout never actually withheld its DEDUCT-method TDS (the cash never left),
     // so we must REVERSE that withholding — reset the entry's tdsDeductedPaise to 0 AND append a
     // compensating negative TdsDeductionEntry — so the running priorDeducted (Σ tdsDeductedThisPaise)
@@ -2424,15 +2548,37 @@ export class CreditsService {
           tdsDeductedPaise: true,
           tdsSection: true,
           period: true,
+          paidAt: true,
         },
       });
-      const freshByOutlet = new Map(freshEntries.map((e) => [e.outletId, e]));
+      // GROUP per outlet: a download can hold several entries for one outlet (one per payout row at
+      // confirm), summed into ONE bank line — so a file row settles EVERY entry of that outlet.
+      const freshByOutlet = new Map<string, typeof freshEntries>();
+      for (const e of freshEntries) {
+        const list = freshByOutlet.get(e.outletId);
+        if (list) list.push(e);
+        else freshByOutlet.set(e.outletId, [e]);
+      }
 
       for (const row of parseResult.rows) {
         if (row.status !== 'OK') continue;
 
-        const entry = freshByOutlet.get(row.outletId);
-        if (!entry) continue;
+        const group = freshByOutlet.get(row.outletId) ?? [];
+        // Settled already (in-tx read under the lock) → untouched. Only PROCESSING entries flip.
+        const pending = group.filter((e) => e.status === 'PROCESSING');
+        if (pending.length === 0) {
+          notApplied.push({
+            outletId: row.outletId,
+            rowNum: row.rowNum,
+            reason: 'Not applied — no entry for this outlet was still awaiting a result (another apply already recorded it). Check the payout status.',
+          });
+          continue;
+        }
+        // Healing a stuck entry whose sibling (same bank line) is already PAID: the outlet was told
+        // it was credited when the sibling flipped, so NO second "credited" message; a blank
+        // Payment Date defaults to the sibling's paidAt (the line's real payment date).
+        const paidSibling = group.find((e) => e.status === 'PAID');
+        const paidAt = row.paymentDate ?? paidSibling?.paidAt ?? now;
 
         // Non-success capture: the uploaded Remarks cell (bank/vendor reason) + the attempt date,
         // surfaced by the parser on row.remarks / row.paymentDate for FAILED rows too. Stored in
@@ -2442,16 +2588,20 @@ export class CreditsService {
         const normUtr = row.utr?.trim() ? row.utr.trim().toUpperCase() : null;
         const bankReason = (row.remarks ?? '').trim() || null;
 
-        // FIX-C: GUARDED flip — only an entry still PROCESSING transitions. A concurrent apply that
-        // already moved it returns count 0 → we skip it (and never reverse its withholding twice).
+        // FIX-C: GUARDED flip, ONE round-trip per outlet (bank line): only entries still PROCESSING
+        // transition. Under the UTR advisory lock no other writer can move a PROCESSING entry (a
+        // download claims only PENDING/FAILED; a reversal refuses PROCESSING), so the count must
+        // equal the PROCESSING ids we just read — anything else means the state moved under us →
+        // roll the WHOLE apply back (all-or-nothing; the admin re-checks and retries).
+        const pendingIds = pending.map((e) => e.id);
         const flip = await tx.creditPayoutEntry.updateMany({
-          where: { id: entry.id, status: 'PROCESSING' },
+          where: { id: { in: pendingIds }, status: 'PROCESSING' },
           data: row.success
             ? {
                 status: 'PAID',
                 utr: row.utr || null,
-                // Use the operator-supplied Payment Date when present, else the apply time.
-                paidAt: row.paymentDate ?? now,
+                // Operator Payment Date, else the PAID sibling's paidAt, else the apply time.
+                paidAt,
               }
             : {
                 status: 'FAILED',
@@ -2467,18 +2617,43 @@ export class CreditsService {
                 attemptedAt: row.paymentDate ?? null,
               },
         });
-        if (flip.count === 0) continue; // not transitioned by THIS call → no reversal
+        if (flip.count !== pendingIds.length) {
+          throw new ConflictException(
+            `UTR apply race on outlet ${row.outletId}: expected ${pendingIds.length} entries still ` +
+              `awaiting a result but updated ${flip.count}. Nothing was applied — re-check the file and retry.`,
+          );
+        }
 
-        // FIX-3/FIX-C: collect FAILED entries THIS call transitioned that carried a DEDUCT
-        // withholding, using their in-tx tdsDeductedPaise (never a stale snapshot).
-        if (!row.success && entry.tdsDeductedPaise > 0n && entry.tdsSection) {
-          failedWithholding.push({
-            entryId: entry.id,
-            outletId: entry.outletId,
-            tdsDeductedPaise: entry.tdsDeductedPaise,
-            tdsSection: entry.tdsSection,
-            period: entry.period,
+        if (row.success) {
+          // ONE paid record per outlet with the SUMMED amount actually flipped (the bank line).
+          flippedPaid.push({
+            outletId: row.outletId,
+            utr: row.utr ?? '',
+            paymentDate: paidAt,
+            amountPaise: pending.reduce((s, e) => s + e.amountPaise, 0n),
+            // In-tx tdsDeductedPaise (fresh read under the UTR lock) = what THIS bank line withheld.
+            // Floor the OUTLET total once (not each entry) so the message mirrors the bank line exactly.
+            bankCreditedPaise: (() => {
+              const net = pending.reduce((s, e) => s + e.amountPaise - (e.tdsDeductedPaise ?? 0n), 0n);
+              return net > 0n ? net : 0n;
+            })(),
+            notify: !paidSibling,
           });
+        } else {
+          flippedFailedCount++;
+          // FIX-3/FIX-C: reverse EACH flipped FAILED entry's DEDUCT withholding, from its in-tx
+          // tdsDeductedPaise (never a stale snapshot) — exactly once per entry.
+          for (const entry of pending) {
+            if (entry.tdsDeductedPaise > 0n && entry.tdsSection) {
+              failedWithholding.push({
+                entryId: entry.id,
+                outletId: entry.outletId,
+                tdsDeductedPaise: entry.tdsDeductedPaise,
+                tdsSection: entry.tdsSection,
+                period: entry.period,
+              });
+            }
+          }
         }
       }
 
@@ -2527,23 +2702,18 @@ export class CreditsService {
         }
       }
 
-      const stillPending = freshEntries.some((e) => {
-        const row = parseResult.rows.find((r) => r.outletId === e.outletId);
-        return !row || row.status === 'SKIP';
-      });
-      await tx.creditPayoutDownload.update({
-        where: { id: download.id },
-        data: { status: stillPending ? 'PARTIALLY_PAID' : 'PAID' },
-      });
+      // Download status from the entries' LIVE statuses, re-read in this tx AFTER the flips (never
+      // from the parse rows — an already-applied SKIP row is settled, not pending). Same rule as
+      // before: every entry settled (PAID / FAILED / REVERSED) → PAID; any entry still awaiting a
+      // result (PROCESSING / PENDING) → PARTIALLY_PAID. The write is conditional, so a re-apply that
+      // changes nothing leaves the download row untouched.
+      await this.recomputeUtrDownloadStatus(tx, download.id, user.clientId);
 
       // Lock the linked SERVICE invoice at UTR entry (D12): once the payout UTR/date is
       // recorded the invoice number can no longer be edited. We lock by (clientId, outletCode,
-      // period, SERVICE) for the successfully-paid outlets — robust whether or not the entry's
-      // autoInvoiceId was set at confirm. lockedAt=null guard keeps it idempotent (a re-apply
-      // never re-stamps an already-locked invoice).
-      const lockedOutletCodes = parseResult.rows
-        .filter((r) => r.status === 'OK' && r.success)
-        .map((r) => r.outletId);
+      // period, SERVICE) for the outlets THIS call flipped to PAID — robust whether or not the
+      // entry's autoInvoiceId was set at confirm. lockedAt=null guard keeps it idempotent.
+      const lockedOutletCodes = flippedPaid.map((p) => p.outletId);
       if (lockedOutletCodes.length > 0) {
         await tx.autoInvoice.updateMany({
           where: {
@@ -2558,10 +2728,10 @@ export class CreditsService {
       }
     }, { timeout: 180_000, maxWait: 20_000 });
 
-    // Notify paid outlets (fire-and-forget; needs phone from outlet).
-    const paidOutletIds = parseResult.rows
-      .filter((r) => r.status === 'OK' && r.success)
-      .map((r) => r.outletId);
+    // Notify ONLY the outlets THIS call flipped to PAID (fire-and-forget; needs phone from outlet).
+    // A retried / concurrent re-apply flips nothing → sends nothing (no duplicate payout message).
+    const toNotify = flippedPaid.filter((p) => p.notify);
+    const paidOutletIds = toNotify.map((p) => p.outletId);
 
     if (paidOutletIds.length > 0) {
       // POST-COMMIT notify block: the money tx above is already committed, so a fetch
@@ -2580,12 +2750,10 @@ export class CreditsService {
           },
         });
         const phoneMap = new Map(outlets.map((o) => [o.outletCode, o]));
-        for (const row of parseResult.rows) {
-          if (row.status !== 'OK' || !row.success) continue;
-          const entry = download.entries.find((e) => e.outletId === row.outletId);
-          const outlet = phoneMap.get(row.outletId);
+        for (const paid of toNotify) {
+          const outlet = phoneMap.get(paid.outletId);
           const phone = outlet?.partner?.phone?.trim();
-          if (!entry || !phone) continue;
+          if (!phone) continue;
 
           // Owner payout-credit notification via the config-driven paid channels (SMS/WhatsApp),
           // POST-COMMIT + fire-and-forget: the money tx above is already committed, so this MUST
@@ -2593,10 +2761,15 @@ export class CreditsService {
           // owner WhatsApp (no bell/push row), so keep it paid-channel-only (behaviour-neutral).
           // For a WHATSAPP_KYC tenant the WhatsApp default reproduces today's `deoleo_payout_credit`:
           //   {{1}} ownerName · {{2}} points · {{3}} UTR · {{4}} date of payment · {{5}} month
-          // pointsPaid = paid amount as a whole number (Deoleo: 1 point = ₹1 → paise ÷ 100;
-          // assumes a 1:1 conversion rate, which the Deoleo tenant runs).
+          // pointsPaid = the amount ACTUALLY CREDITED TO THE BANK, in whole rupees (owner rule
+          // 2026-11-15): gross minus any DEDUCT-method TDS withheld on this bank line; equals the
+          // gross when nothing was withheld (GROSS-UP / INCENTIVE). The var is labelled "points"
+          // in the pre-approved template; the value is rupees (Deoleo runs 1 point = ₹1).
           const ownerName = outlet?.partner?.ownerName?.trim() || 'Partner';
-          const pointsPaid = Math.round(Number(entry.amountPaise) / 100);
+          const pointsPaid = Math.round(Number(paid.bankCreditedPaise) / 100);
+          // Never tell a retailer "₹0 credited" (a line fully absorbed by withholding) — mirrors the
+          // redemption sender's `points <= 0` skip.
+          if (pointsPaid <= 0) continue;
           await this.notifications
             .notifyUserWithChannels({
               clientId: user.clientId,
@@ -2607,9 +2780,9 @@ export class CreditsService {
               vars: {
                 ownerName,
                 points: pointsPaid,
-                utr: row.utr ?? '',
+                utr: paid.utr,
                 // Reflect the actual payment date recorded on the entry (operator date or apply time).
-                paymentDate: formatDateIST(row.paymentDate ?? now),
+                paymentDate: formatDateIST(paid.paymentDate),
                 month: monthYearIST(download.period),
               },
               body: `Your payout of ${pointsPaid} points has been credited.`,
@@ -2626,11 +2799,29 @@ export class CreditsService {
       }
     }
 
+    // Counts reflect what THIS call actually wrote, PER OUTLET / FILE ROW (one bank line), the same
+    // unit as the parse summary: paidCount = rows that flipped ≥1 entry to PAID, failedCount = rows
+    // that flipped ≥1 entry to FAILED, skippedCount = the parser's genuine already-applied SKIP rows.
+    // OK rows that flipped nothing are listed in `notApplied` (never counted as paid or skipped).
+    const noop = flippedPaid.length + flippedFailedCount === 0;
     return {
       applied: true,
-      paidCount: parseResult.summary.paidCount,
-      failedCount: parseResult.summary.failedCount,
+      noop,
+      paidCount: flippedPaid.length,
+      failedCount: flippedFailedCount,
       skippedCount: parseResult.summary.skipped,
+      notApplied,
+      notices,
+      ...(noop
+        ? {
+            message:
+              notApplied.length > 0
+                ? `Nothing changed — ${notApplied.length} row${notApplied.length === 1 ? ' was' : 's were'} not applied because the payout was already recorded. Check the payout status.`
+                : attentionCount > 0
+                  ? `Nothing changed — ${attentionCount} row${attentionCount === 1 ? ' has a notice' : 's have notices'} to review.`
+                  : 'Already applied — nothing to change',
+          }
+        : {}),
     };
   }
 

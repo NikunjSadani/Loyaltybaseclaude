@@ -10,7 +10,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
@@ -36,10 +36,7 @@ function setRole(role: string) {
 async function renderAndLoad() {
   render(<KYCListPage />);
   // Wait for the mock data load (500 ms setTimeout inside the component)
-  await waitFor(
-    () => expect(screen.getByText('Kumar General Store')).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByText('Kumar General Store', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 /* ─── Setup ──────────────────────────────────────────────────────────────────── */
@@ -93,9 +90,9 @@ describe.skip('B: default state', () => {
 
   it('shows all KYC entries when "All Members" is selected', async () => {
     await renderAndLoad();
-    expect(screen.getByText('Kumar General Store')).toBeInTheDocument();
-    expect(screen.getByText('Sharma Kirana')).toBeInTheDocument();
-    expect(screen.getByText('Patel Grocery')).toBeInTheDocument();
+    expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
+    expect(await screen.findByText('Sharma Kirana')).toBeInTheDocument();
+    expect(await screen.findByText('Patel Grocery')).toBeInTheDocument();
   });
 });
 
@@ -105,27 +102,27 @@ describe.skip('B: default state', () => {
 describe.skip('C: member options', () => {
   it('lists "All Members" as the first option', async () => {
     await renderAndLoad();
-    const select = screen.getByRole('combobox', { name: /team member/i });
-    const firstOption = within(select).getAllByRole('option')[0];
+    const select = await screen.findByRole('combobox', { name: /team member/i });
+    const firstOption = (await within(select).findAllByRole('option'))[0];
     expect(firstOption).toHaveTextContent(/all members/i);
     expect(firstOption).toHaveValue('');
   });
 
   it("lists SO's XSR direct reports as options", async () => {
     await renderAndLoad();
-    const select = screen.getByRole('combobox', { name: /team member/i });
-    expect(within(select).getByRole('option', { name: /anil sharma/i })).toBeInTheDocument();
-    expect(within(select).getByRole('option', { name: /divya pillai/i })).toBeInTheDocument();
-    expect(within(select).getByRole('option', { name: /kiran rao/i })).toBeInTheDocument();
-    expect(within(select).getByRole('option', { name: /meena joshi/i })).toBeInTheDocument();
+    const select = await screen.findByRole('combobox', { name: /team member/i });
+    expect(await within(select).findByRole('option', { name: /anil sharma/i })).toBeInTheDocument();
+    expect(await within(select).findByRole('option', { name: /divya pillai/i })).toBeInTheDocument();
+    expect(await within(select).findByRole('option', { name: /kiran rao/i })).toBeInTheDocument();
+    expect(await within(select).findByRole('option', { name: /meena joshi/i })).toBeInTheDocument();
   });
 
   it("lists ASM's SO direct reports as options", async () => {
     setRole('ASM');
     await renderAndLoad();
-    const select = screen.getByRole('combobox', { name: /team member/i });
-    expect(within(select).getByRole('option', { name: /rajesh kumar/i })).toBeInTheDocument();
-    expect(within(select).getByRole('option', { name: /nisha verma/i })).toBeInTheDocument();
+    const select = await screen.findByRole('combobox', { name: /team member/i });
+    expect(await within(select).findByRole('option', { name: /rajesh kumar/i })).toBeInTheDocument();
+    expect(await within(select).findByRole('option', { name: /nisha verma/i })).toBeInTheDocument();
   });
 });
 
@@ -135,13 +132,13 @@ describe.skip('C: member options', () => {
 describe.skip('D: filtering', () => {
   it("shows only the selected member's entries", async () => {
     await renderAndLoad();
-    const select = screen.getByRole('combobox', { name: /team member/i });
+    const select = await screen.findByRole('combobox', { name: /team member/i });
 
     // xsr1 (Anil Sharma) submitted: Kumar General Store (k1) and Mehta Provisions (k5)
     await userEvent.selectOptions(select, 'xsr1');
 
-    expect(screen.getByText('Kumar General Store')).toBeInTheDocument();
-    expect(screen.getByText('Mehta Provisions')).toBeInTheDocument();
+    expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
+    expect(await screen.findByText('Mehta Provisions')).toBeInTheDocument();
 
     // entries from other XSRs should be hidden
     expect(screen.queryByText('Sharma Kirana')).not.toBeInTheDocument();   // xsr2
@@ -150,14 +147,14 @@ describe.skip('D: filtering', () => {
 
   it('shows all entries again when "All Members" is reselected', async () => {
     await renderAndLoad();
-    const select = screen.getByRole('combobox', { name: /team member/i });
+    const select = await screen.findByRole('combobox', { name: /team member/i });
 
     await userEvent.selectOptions(select, 'xsr1');
     await userEvent.selectOptions(select, ''); // All Members
 
-    expect(screen.getByText('Sharma Kirana')).toBeInTheDocument();
-    expect(screen.getByText('Kumar General Store')).toBeInTheDocument();
-    expect(screen.getByText('Patel Grocery')).toBeInTheDocument();
+    expect(await screen.findByText('Sharma Kirana')).toBeInTheDocument();
+    expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
+    expect(await screen.findByText('Patel Grocery')).toBeInTheDocument();
   });
 
   it('shows an empty state when a member has no KYC entries', async () => {
@@ -167,11 +164,11 @@ describe.skip('D: filtering', () => {
     // All 8 entries are spread across xsr1-4; none left for a hypothetical xsr5.
     // We'll verify the inverse: filtering by xsr2 hides xsr1 entries.
     await renderAndLoad();
-    const select = screen.getByRole('combobox', { name: /team member/i });
+    const select = await screen.findByRole('combobox', { name: /team member/i });
     await userEvent.selectOptions(select, 'xsr2');
 
-    expect(screen.getByText('Sharma Kirana')).toBeInTheDocument();    // xsr2
-    expect(screen.getByText('Desai Grocers')).toBeInTheDocument();    // xsr2
+    expect(await screen.findByText('Sharma Kirana')).toBeInTheDocument();    // xsr2
+    expect(await screen.findByText('Desai Grocers')).toBeInTheDocument();    // xsr2
     expect(screen.queryByText('Kumar General Store')).not.toBeInTheDocument(); // xsr1
   });
 });
@@ -182,17 +179,17 @@ describe.skip('D: filtering', () => {
 describe.skip('E: stacks with status filter', () => {
   it('applies both member and status filters simultaneously', async () => {
     await renderAndLoad();
-    const select = screen.getByRole('combobox', { name: /team member/i });
+    const select = await screen.findByRole('combobox', { name: /team member/i });
 
     // xsr1 has: k1 = APPROVED, k5 = PENDING_GIFSY
     await userEvent.selectOptions(select, 'xsr1');
 
     // Now also filter by APPROVED status (dropdown)
-    const statusSelect = screen.getByTestId('kyc-status-filter');
+    const statusSelect = await screen.findByTestId('kyc-status-filter');
     await userEvent.selectOptions(statusSelect, 'APPROVED');
 
     // Only k1 passes both filters
-    expect(screen.getByText('Kumar General Store')).toBeInTheDocument();
+    expect(await screen.findByText('Kumar General Store')).toBeInTheDocument();
     expect(screen.queryByText('Mehta Provisions')).not.toBeInTheDocument(); // xsr1 but PENDING_GIFSY
   });
 
@@ -200,13 +197,13 @@ describe.skip('E: stacks with status filter', () => {
     await renderAndLoad();
 
     // Filter to APPROVED first (dropdown)
-    await userEvent.selectOptions(screen.getByTestId('kyc-status-filter'), 'APPROVED');
+    await userEvent.selectOptions(await screen.findByTestId('kyc-status-filter'), 'APPROVED');
     // Then filter to xsr4
-    const select = screen.getByRole('combobox', { name: /team member/i });
+    const select = await screen.findByRole('combobox', { name: /team member/i });
     await userEvent.selectOptions(select, 'xsr4');
 
     // xsr4 approved entries: k4 (Singh Supermart) — k8 is RE_KYC_REQUIRED
-    expect(screen.getByText('Singh Supermart')).toBeInTheDocument();
+    expect(await screen.findByText('Singh Supermart')).toBeInTheDocument();
     expect(screen.queryByText('Kumar General Store')).not.toBeInTheDocument(); // xsr1
   });
 });

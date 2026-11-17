@@ -11,7 +11,7 @@
  * Run: npx vitest run src/app/sales/kyc/__tests__/reupload-consolidation.test.tsx
  */
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 let searchStr = '';
@@ -68,7 +68,7 @@ beforeEach(() => {
 describe('KYC list — Rejected / Re-upload consolidation', () => {
   it('renders a RE_UPLOAD_REQUIRED row without crashing, badged simply as "Rejected"', async () => {
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Reupload Mart')).toBeInTheDocument());
+    expect(await screen.findByText('Reupload Mart')).toBeInTheDocument();
     // Owner decision: keep it simple for the rep — a re-upload row badges as "Rejected"
     // (not "Re-upload"). Proves the enum/badge-map fix (previously undefined → crash) AND
     // the simplified label. Filter out any <option> so we assert on the row badges.
@@ -80,7 +80,7 @@ describe('KYC list — Rejected / Re-upload consolidation', () => {
 
   it('the "Re-upload" filter tab was removed (no standalone Re-upload option)', async () => {
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Reupload Mart')).toBeInTheDocument());
+    expect(await screen.findByText('Reupload Mart')).toBeInTheDocument();
     // The old separate filter <option> labelled "Re-upload" must be gone; only "Rejected".
     const reuploadOptions = screen.queryAllByText('Re-upload').filter((n) => n.tagName === 'OPTION');
     expect(reuploadOptions).toHaveLength(0);
@@ -89,9 +89,9 @@ describe('KYC list — Rejected / Re-upload consolidation', () => {
   it('deep-link ?status=REJECTED shows BOTH the rejected and the re-upload outlet', async () => {
     searchStr = 'status=REJECTED';
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Rejected Mart')).toBeInTheDocument());
+    expect(await screen.findByText('Rejected Mart')).toBeInTheDocument();
     // Consolidation: the re-upload outlet must ALSO appear under the Rejected filter.
-    expect(screen.getByText('Reupload Mart')).toBeInTheDocument();
+    expect(await screen.findByText('Reupload Mart')).toBeInTheDocument();
   });
 
   it('deep-link ?status=RE_UPLOAD_REQUIRED normalizes into the consolidated Rejected view', async () => {
@@ -99,7 +99,7 @@ describe('KYC list — Rejected / Re-upload consolidation', () => {
     render(<KYCListPage />);
     // Must resolve to a selectable view (the Rejected tab) that shows both outlets,
     // NOT a dead filter key that hides the rejected sibling.
-    await waitFor(() => expect(screen.getByText('Reupload Mart')).toBeInTheDocument());
-    expect(screen.getByText('Rejected Mart')).toBeInTheDocument();
+    expect(await screen.findByText('Reupload Mart')).toBeInTheDocument();
+    expect(await screen.findByText('Rejected Mart')).toBeInTheDocument();
   });
 });

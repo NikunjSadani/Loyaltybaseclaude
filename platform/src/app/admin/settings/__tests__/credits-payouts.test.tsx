@@ -66,8 +66,8 @@ describe('Credits & Payouts settings card', () => {
     render(<SettingsPage />);
     const cutoff = await screen.findByTestId('cp-cutoff-input');
     await waitFor(() => expect(cutoff).toHaveValue(15));
-    expect(screen.getByTestId('cp-cap-points-input')).toHaveValue(40000);
-    expect(screen.getByTestId('cp-cap-inr-input')).toHaveValue(80000);
+    expect(await screen.findByTestId('cp-cap-points-input')).toHaveValue(40000);
+    expect(await screen.findByTestId('cp-cap-inr-input')).toHaveValue(80000);
 
     fireEvent.change(cutoff, { target: { value: '20' } });
     fireEvent.change(screen.getByTestId('cp-notify-emails-input'), {
@@ -95,7 +95,7 @@ describe('Credits & Payouts settings card', () => {
     render(<SettingsPage />);
     const cutoff = await screen.findByTestId('cp-cutoff-input');
     await waitFor(() => expect(cutoff).toHaveValue(28));
-    const saveBtn = screen.getByTestId('cp-save');
+    const saveBtn = await screen.findByTestId('cp-save');
     await waitFor(() => expect(saveBtn).not.toBeDisabled());
     fireEvent.click(saveBtn);
     await waitFor(() => {
@@ -115,7 +115,7 @@ describe('Credits & Payouts settings card', () => {
     const saveBtn = screen.getByTestId('cp-save');
     await waitFor(() => expect(saveBtn).not.toBeDisabled());
     fireEvent.click(saveBtn);
-    await waitFor(() => expect(screen.getByText(/is not a valid email/)).toBeInTheDocument());
+    expect(await screen.findByText(/is not a valid email/)).toBeInTheDocument();
     expect(saveGifsySettings).not.toHaveBeenCalled();
   });
 
@@ -126,7 +126,7 @@ describe('Credits & Payouts settings card', () => {
     await waitFor(() => expect(cutoff).toHaveValue(28));
     fireEvent.change(cutoff, { target: { value: '40' } });
     fireEvent.click(screen.getByTestId('cp-save'));
-    await waitFor(() => expect(screen.getByText(/between 1 and 31/)).toBeInTheDocument());
+    expect(await screen.findByText(/between 1 and 31/)).toBeInTheDocument();
     expect(saveGifsySettings).not.toHaveBeenCalled();
   });
 

@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream';
 import {
   BadRequestException,
   ConflictException,
@@ -121,7 +122,7 @@ export class GiftCatalogueService {
   async serveGiftImage(
     user: JwtPayload,
     key: string,
-  ): Promise<{ bytes: Buffer; contentType: string; cachePublic: boolean }> {
+  ): Promise<{ stream: Readable; size: number; contentType: string; cachePublic: boolean }> {
     const deny = () => new NotFoundException();
     // Defense-in-depth: the tenant fence below trusts the key's folder segments, so
     // reject anything that isn't a clean gift-catalogue path BEFORE any storage read —
@@ -147,17 +148,20 @@ export class GiftCatalogueService {
 
     // Cap the read at the upload cap (5 MB) rather than downloadBytes' 24 MB default —
     // this is the member hot path, so never buffer a larger object into API memory.
-    const file = await this.storage.downloadBytes(key, 5 * 1024 * 1024);
+    const file = await this.storage.openBoundedObject(key, 5 * 1024 * 1024);
     if (!file) throw deny();
 
     // Only ever stream a known image type inline (never trust the stored content-type
     // into an inline response beyond the renderable set).
     const mime = (file.contentType || '').toLowerCase();
-    if (!GiftCatalogueService.RENDERABLE_MIME.has(mime)) throw deny();
+    if (!GiftCatalogueService.RENDERABLE_MIME.has(mime)) {
+      file.stream.destroy(); // opened but never served — release the storage read
+      throw deny();
+    }
     // _platform (master) images are portal-wide → safe to cache in the viewer's browser.
     // A per-tenant `<clientId>/` image must NOT be cached, so a shared browser can't
     // serve tenant A's cached image to tenant B without the server-side fence re-running.
-    return { bytes: file.bytes, contentType: mime, cachePublic: scope === '_platform' };
+    return { stream: file.stream, size: file.size, contentType: mime, cachePublic: scope === '_platform' };
   }
 
   // ── Wire mappers (list → { items }; detail → FLAT) ──────────────────────────

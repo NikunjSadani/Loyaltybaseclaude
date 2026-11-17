@@ -86,8 +86,8 @@ describe('Admin User Accounts page', () => {
     installFetch();
     render(<AdminUsersPage />);
     expect(await screen.findByText('Priya Sharma')).toBeInTheDocument();
-    expect(screen.getByText('Ravi Kumar')).toBeInTheDocument();
-    expect(screen.getByText('9830011252')).toBeInTheDocument();
+    expect(await screen.findByText('Ravi Kumar')).toBeInTheDocument();
+    expect(await screen.findByText('9830011252')).toBeInTheDocument();
   });
 
   it('AU2: the Create modal POSTs name/phone/role/email and refreshes', async () => {
@@ -95,7 +95,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /create user/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /create user/i }));
     const dialog = await screen.findByRole('dialog');
     const scope = within(dialog);
 
@@ -128,7 +128,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /create user/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /create user/i }));
     const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
     const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
     expect(options).toEqual(['MIS_USER']);
@@ -171,7 +171,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /create user/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /create user/i }));
     const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
     const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
     expect(options).toEqual(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER']);
@@ -184,7 +184,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /create user/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /create user/i }));
     const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
     const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
     // GIFSY_ADMIN is withheld in a tenant context — the footgun guard.
@@ -200,13 +200,13 @@ describe('Admin User Accounts page', () => {
     await screen.findByText('Priya Sharma');
 
     // u1 (self) row: no Deactivate button, a muted dash instead.
-    const selfRow = screen.getByText('Priya Sharma').closest('tr')!;
+    const selfRow = (await screen.findByText('Priya Sharma')).closest('tr')!;
     expect(within(selfRow).queryByRole('button', { name: /deactivate/i })).not.toBeInTheDocument();
-    expect(within(selfRow).getByText('—')).toBeInTheDocument();
+    expect(await within(selfRow).findByText('—')).toBeInTheDocument();
 
     // u2 (someone else, INACTIVE) row: the Reactivate button is still present.
-    const otherRow = screen.getByText('Ravi Kumar').closest('tr')!;
-    expect(within(otherRow).getByRole('button', { name: /reactivate/i })).toBeInTheDocument();
+    const otherRow = (await screen.findByText('Ravi Kumar')).closest('tr')!;
+    expect(await within(otherRow).findByRole('button', { name: /reactivate/i })).toBeInTheDocument();
   });
 
   it('AU6: "Revoke sessions" opens a confirm modal and POSTs /api/admin/users/:id/revoke-sessions', async () => {
@@ -222,13 +222,13 @@ describe('Admin User Accounts page', () => {
     await screen.findByText('Priya Sharma');
 
     // Open the confirm modal from Ravi Kumar's (u2) row.
-    const row = screen.getByText('Ravi Kumar').closest('tr')!;
-    await userEvent.click(within(row).getByRole('button', { name: /revoke sessions/i }));
+    const row = (await screen.findByText('Ravi Kumar')).closest('tr')!;
+    await userEvent.click(await within(row).findByRole('button', { name: /revoke sessions/i }));
 
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/log this user out of all devices/i)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/log this user out of all devices/i)).toBeInTheDocument();
 
-    await userEvent.click(within(dialog).getByRole('button', { name: /^revoke sessions$/i }));
+    await userEvent.click(await within(dialog).findByRole('button', { name: /^revoke sessions$/i }));
 
     await waitFor(() => {
       const post = calls.find((c) => c.url === '/api/admin/users/u2/revoke-sessions' && c.init?.method === 'POST');
@@ -249,7 +249,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /edit priya sharma/i }));
     const dialog = await screen.findByRole('dialog');
     const scope = within(dialog);
 
@@ -295,7 +295,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /edit priya sharma/i }));
     const scope = within(await screen.findByRole('dialog'));
     await userEvent.clear(scope.getByPlaceholderText('user@company.com'));
     await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
@@ -316,7 +316,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /edit priya sharma/i }));
     const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
     const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
     expect(options).toContain('MIS_USER');       // assignable
@@ -339,7 +339,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /edit priya sharma/i }));
     const scope = within(await screen.findByRole('dialog'));
     await userEvent.clear(scope.getByPlaceholderText('e.g. Priya Sharma'));
     await userEvent.type(scope.getByPlaceholderText('e.g. Priya Sharma'), 'Priya S');
@@ -366,7 +366,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /edit priya sharma/i }));
     const scope = within(await screen.findByRole('dialog'));
     await userEvent.selectOptions(scope.getByLabelText('Role'), 'MIS_USER');
     await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
@@ -390,14 +390,14 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /edit priya sharma/i }));
     const scope = within(await screen.findByRole('dialog'));
     await userEvent.clear(scope.getByPlaceholderText('9830011252'));
     await userEvent.type(scope.getByPlaceholderText('9830011252'), '9900000041');
     await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
 
     expect(await screen.findByText('Phone number already in use')).toBeInTheDocument();
-    expect(screen.getByRole('dialog')).toBeInTheDocument(); // stays open to correct
+    expect(await screen.findByRole('dialog')).toBeInTheDocument(); // stays open to correct
   });
 
   it('AU4: a backend 400/403 surfaces the error message inline (not swallowed)', async () => {
@@ -410,7 +410,7 @@ describe('Admin User Accounts page', () => {
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
 
-    await userEvent.click(screen.getByRole('button', { name: /create user/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /create user/i }));
     const dialog = await screen.findByRole('dialog');
     const scope = within(dialog);
 
@@ -420,6 +420,6 @@ describe('Admin User Accounts page', () => {
 
     expect(await screen.findByText('User with this phone already exists')).toBeInTheDocument();
     // modal stays open so the operator can correct the input
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 });

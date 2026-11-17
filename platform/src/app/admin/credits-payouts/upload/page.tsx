@@ -11,7 +11,9 @@ import {
   ChevronRight,
   RotateCcw,
   Coins,
+  ExternalLink,
 } from 'lucide-react';
+import Link from 'next/link';
 import { useAdminSession } from '@/lib/admin-session';
 import { generateCreditTemplate } from '@/lib/credits-payouts-template';
 import { parseCreditUpload }      from '@/lib/credits-payouts-parser';
@@ -43,6 +45,97 @@ function downloadBuffer(buf: ArrayBuffer, fileName: string) {
 
 function isUploadWindowOpen(cutoffDay: number): boolean {
   return new Date().getDate() <= cutoffDay;
+}
+
+/**
+ * Rows to POST when saving a batch: ONLY the OK rows, unchanged.
+ *
+ * The parser emits one row per outlet × field, so a mostly-blank file is mostly SKIP rows
+ * (amount 0, plus a long skipReason). Every server-side reader of CreditBatch.rows acts only on
+ * `status === 'OK'` rows (create-time caps/whole-unit checks, confirm, reversals, wallet pairing,
+ * the Status page), and SKIP rows carry amount 0 so they never match a credit either. ERROR rows
+ * can't be present (canProceed requires no errors). Sending the SKIP rows only bloated the body —
+ * 6,517 outlets × 7 fields with 2 values was ~12.7 MB and got truncated by the frontend proxy.
+ * The points-engine direct-credit path already stores OK rows only, so this is not a new shape.
+ * OK rows are sent whole (every field is read: narration → wallet description, outletName/
+ * fieldName → Status page + reversals, originalAmount → audit), so each stored row is identical.
+ */
+function rowsToSave(rows: CreditParseResult['rows']): CreditParseResult['rows'] {
+  return rows.filter((r) => r.status === 'OK');
+}
+
+const PAYOUT_STATUS_HREF = '/admin/credits-payouts/status';
+
+// ─── User-facing messages for the save → confirm requests ────────────────────
+// Every message must be TRUE whatever actually happened server-side. Once a batch is saved
+// this preview never saves another one (see `pendingBatch`), so none of these invite a re-upload.
+
+/** Save rejected with 413 — the body was too large for the server/proxy. */
+const SAVE_TOO_LARGE_MSG =
+  'The upload was too large for the server — nothing was credited. Split the file into smaller uploads and try again.';
+
+/**
+ * Save failed for any other reason (5xx, non-JSON reply, network drop). A gateway timeout can
+ * arrive after the API created the (unconfirmed) batch, so we don't claim "nothing was saved" —
+ * only that nothing was credited, which is always true (crediting happens at confirm).
+ */
+function saveFailedMsg(serverError?: string): string {
+  return `Couldn't save the batch${serverError ? ` (${serverError})` : ''} — nothing was credited. ` +
+    'If an unconfirmed batch from this attempt appears in Payout Status, ignore it and upload again.';
+}
+
+/** Batch saved, but the confirm outcome is unknown (5xx / non-JSON / network drop). */
+function confirmUnknownMsg(batchCode: string, serverError?: string): string {
+  return `Batch ${batchCode} was saved but we couldn't confirm whether it was credited` +
+    `${serverError ? ` (${serverError})` : ''}. Check Payout Status: if it shows Confirmed, you're done; ` +
+    'if it shows Pending Approval, use Retry confirm below. Do not upload this file again.';
+}
+
+/** Batch saved, confirm REJECTED with a readable reason (e.g. upload window closed) — nothing credited. */
+function confirmRejectedMsg(batchCode: string, serverError: string): string {
+  return `Batch ${batchCode} was saved but not confirmed: ${serverError.trim().replace(/\.+$/, '')}. ` +
+    "Nothing has been credited yet. Once that's resolved, use Retry confirm below (or check Payout Status). " +
+    'Do not upload this file again.';
+}
+
+/** Confirm says the batch is already CONFIRMED — e.g. an earlier attempt went through. */
+function alreadyConfirmedMsg(batchCode: string): string {
+  return `Batch ${batchCode} is already confirmed — its credits were applied when it was first confirmed. ` +
+    'See Payout Status for what was credited. Do not upload this file again.';
+}
+
+interface ApiEnvelope {
+  success?: boolean;
+  data?: Record<string, unknown> & { id?: string; batchCode?: string };
+  error?: string;
+}
+
+/**
+ * Read a reply's `{ success, data | error }` envelope without ever throwing. `body` is null when
+ * the reply isn't a JSON object (e.g. a proxy's plain-text "Internal Server Error"), so callers
+ * show a readable message instead of a raw SyntaxError.
+ */
+async function readReply(res: Response): Promise<{ status: number; body: ApiEnvelope | null }> {
+  try {
+    const body = (await res.json()) as unknown;
+    return { status: res.status, body: body && typeof body === 'object' ? (body as ApiEnvelope) : null };
+  } catch {
+    return { status: res.status, body: null };
+  }
+}
+
+/** A string `error` from an envelope, if the server sent one. */
+function serverErrorOf(body: ApiEnvelope | null): string | undefined {
+  return typeof body?.error === 'string' && body.error.trim() ? body.error : undefined;
+}
+
+/** A batch that was saved by this preview (whether or not its confirm has gone through). */
+interface PendingBatch {
+  id:               string;
+  batchCode:        string;
+  totalOutlets:     number;
+  totalPoints:      number;
+  totalPayoutPaise: number;
 }
 
 type Step = 'template' | 'upload' | 'preview' | 'done';
@@ -110,8 +203,22 @@ export default function CreditsPayoutsUploadPage() {
   const [saved,       setSaved]       = useState(false);
   const [savedBatch,  setSavedBatch]  = useState<SavedBatch | null>(null);
   const [confirmError, setConfirmError] = useState('');
+  /** The batch this preview already SAVED — from then on only its confirm may be retried. */
+  const [pendingBatch, setPendingBatch] = useState<PendingBatch | null>(null);
+  /** Confirm reported the pending batch as already CONFIRMED — nothing left to retry. */
+  const [alreadyConfirmed, setAlreadyConfirmed] = useState(false);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef    = useRef<HTMLInputElement>(null);
+  const confirmErrorRef = useRef<HTMLDivElement>(null);
+  /** Synchronous re-entry guard (a double-click lands before `confirming` re-renders the button). */
+  const inFlightRef     = useRef(false);
+
+  /** Forget any saved batch — ONLY when a fresh file replaces this preview. */
+  function clearPendingBatch() {
+    setPendingBatch(null);
+    setAlreadyConfirmed(false);
+    setConfirmError('');
+  }
 
   useEffect(() => {
     Promise.all([
@@ -136,6 +243,7 @@ export default function CreditsPayoutsUploadPage() {
     setFileName(file.name);
     setParsing(true);
     setParseResult(null);
+    clearPendingBatch();
 
     const buf    = await file.arrayBuffer();
     const result = parseCreditUpload(buf, {
@@ -164,72 +272,135 @@ export default function CreditsPayoutsUploadPage() {
   }, [fields, period, outlets, cp]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Step 3: Confirm ────────────────────────────────────────────────────────
+  //
+  // DOUBLE-CREDIT GUARD: once this preview has SAVED a batch (`pendingBatch`), it never saves
+  // another. Every post-save failure offers "Retry confirm" for the SAME batch id instead —
+  // confirm is idempotent server-side (guarded PENDING_CONFIRM → CONFIRMED claim), and an
+  // "already CONFIRMED" reply is reported as such. Only a fresh upload (Upload Again / a new
+  // file) clears it.
 
   async function handleConfirm() {
-    if (!parseResult?.canProceed) return;
+    if (!parseResult?.canProceed || inFlightRef.current) return;
+    inFlightRef.current = true;
     setConfirming(true);
     setConfirmError('');
 
-    const headers = { 'Content-Type': 'application/json' };
-
     try {
-      // Save batch
-      const okRows = parseResult.rows.filter((r) => r.status === 'OK');
-      const uniqueOutlets = new Set(okRows.map((r) => r.outletId));
+      const batch = pendingBatch ?? (await saveBatch(parseResult));
+      if (batch) await confirmSavedBatch(batch);
+    } finally {
+      inFlightRef.current = false;
+      setConfirming(false);
+    }
+  }
 
+  /** POST the batch. Returns it when saved (and records it as pending), or null after showing why not. */
+  async function saveBatch(pr: CreditParseResult): Promise<PendingBatch | null> {
+    // Only the OK rows (see rowsToSave); totals unchanged from the parse.
+    const okRows = rowsToSave(pr.rows);
+    const uniqueOutlets = new Set(okRows.map((r) => r.outletId));
+
+    let reply: Awaited<ReturnType<typeof readReply>>;
+    try {
       const saveRes = await fetch('/api/admin/credits/batches', {
-        method: 'POST', headers,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           period,
           totalOutlets:    uniqueOutlets.size,
-          totalPoints:     parseResult.summary.totalPoints,
+          totalPoints:     pr.summary.totalPoints,
           // totalPayoutPaise: already in paise from the parser
-          totalPayoutPaise: parseResult.summary.totalPayoutPaise,
-          rows:             parseResult.rows,
+          totalPayoutPaise: pr.summary.totalPayoutPaise,
+          rows:             okRows,
         }),
       });
-      const saveJson = await saveRes.json();
-      if (!saveJson.success) {
-        setConfirmError(saveJson.error ?? 'Failed to save batch');
-        setConfirming(false);
-        return;
-      }
-
-      const batchId = saveJson.data.id;
-
-      // Confirm (creates payout entries + notifies Gifsy)
-      const confirmRes = await fetch(`/api/admin/credits/batches/${batchId}/confirm`, {
-        method: 'POST',
-      });
-      const confirmJson = await confirmRes.json();
-      if (!confirmJson.success) {
-        setConfirmError(confirmJson.error ?? 'Failed to confirm batch');
-        setConfirming(false);
-        return;
-      }
-
-      // The confirm response is the source of truth for what was ACTUALLY credited.
-      // (Previously this was ignored, so silently-skipped points showed as "success".)
-      const cd = confirmJson.data ?? {};
-      setSavedBatch({
-        id:               saveJson.data.id,
-        batchCode:        saveJson.data.batchCode,
-        totalOutlets:     saveJson.data.totalOutlets,
-        totalPoints:      Number(saveJson.data.totalPoints),
-        // BigInt is serialised to number via toJSON patch in api/src/main.ts
-        totalPayoutPaise: Number(saveJson.data.totalPayoutPaise),
-        pointsCreditedRows:   Number(cd.pointsCredited ?? 0),
-        pointsCreditedTotal:  Number(cd.pointsCreditedTotal ?? 0),
-        payoutEntriesCreated: Number(cd.payoutEntriesCreated ?? 0),
-        skipped:              Array.isArray(cd.skipped) ? (cd.skipped as SkippedRow[]) : [],
-      });
-      setSaved(true);
-      setStep('done');
-    } catch (e) {
-      setConfirmError(String(e));
-    } finally {
-      setConfirming(false);
+      reply = await readReply(saveRes);
+    } catch {
+      // Network drop / aborted request — never surface a raw TypeError.
+      showConfirmError(saveFailedMsg());
+      return null;
     }
+
+    const { status, body } = reply;
+    if (status === 413) {
+      showConfirmError(SAVE_TOO_LARGE_MSG);
+      return null;
+    }
+    if (status >= 500 || !body) {
+      showConfirmError(saveFailedMsg(status >= 500 ? serverErrorOf(body) : undefined));
+      return null;
+    }
+    if (!body.success || !body.data?.id) {
+      // A readable rejection (validation, safety cap, upload window) — the batch was NOT created.
+      showConfirmError(serverErrorOf(body) ?? 'Failed to save batch');
+      return null;
+    }
+
+    const d = body.data;
+    const batch: PendingBatch = {
+      id:               String(d.id),
+      batchCode:        String(d.batchCode ?? d.id),
+      totalOutlets:     Number(d.totalOutlets),
+      totalPoints:      Number(d.totalPoints),
+      // BigInt is serialised to number via toJSON patch in api/src/main.ts
+      totalPayoutPaise: Number(d.totalPayoutPaise),
+    };
+    setPendingBatch(batch);
+    return batch;
+  }
+
+  /** POST /confirm for an already-saved batch (first attempt or a retry). Never saves a batch. */
+  async function confirmSavedBatch(batch: PendingBatch) {
+    let reply: Awaited<ReturnType<typeof readReply>>;
+    try {
+      // Confirm (creates payout entries + notifies Gifsy)
+      const confirmRes = await fetch(`/api/admin/credits/batches/${batch.id}/confirm`, { method: 'POST' });
+      reply = await readReply(confirmRes);
+    } catch {
+      showConfirmError(confirmUnknownMsg(batch.batchCode));
+      return;
+    }
+
+    const { status, body } = reply;
+    if (status >= 500 || !body) {
+      showConfirmError(confirmUnknownMsg(batch.batchCode, status >= 500 ? serverErrorOf(body) : undefined));
+      return;
+    }
+    if (!body.success) {
+      const err = serverErrorOf(body) ?? 'Failed to confirm batch';
+      // confirmBatch: `Batch is already ${batch.status}` for any non-PENDING_CONFIRM batch.
+      const already = /^Batch is already (\w+)/.exec(err)?.[1];
+      if (already === 'CONFIRMED') {
+        setAlreadyConfirmed(true);
+        showConfirmError(alreadyConfirmedMsg(batch.batchCode));
+      } else if (already) {
+        // Some other terminal state — we can't say what was credited; point to Payout Status.
+        showConfirmError(confirmUnknownMsg(batch.batchCode, err));
+      } else {
+        showConfirmError(confirmRejectedMsg(batch.batchCode, err));
+      }
+      return;
+    }
+
+    // The confirm response is the source of truth for what was ACTUALLY credited.
+    // (Previously this was ignored, so silently-skipped points showed as "success".)
+    const cd = body.data ?? {};
+    setSavedBatch({
+      ...batch,
+      pointsCreditedRows:   Number(cd.pointsCredited ?? 0),
+      pointsCreditedTotal:  Number(cd.pointsCreditedTotal ?? 0),
+      payoutEntriesCreated: Number(cd.payoutEntriesCreated ?? 0),
+      skipped:              Array.isArray(cd.skipped) ? (cd.skipped as SkippedRow[]) : [],
+    });
+    setSaved(true);
+    setStep('done');
+  }
+
+  /** Show an error/notice next to the Confirm button and bring it into view. */
+  function showConfirmError(message: string) {
+    setConfirmError(message);
+    // After render: the alert sits beside the buttons, but a long preview can push it off-screen.
+    requestAnimationFrame(() => confirmErrorRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' }));
   }
 
   // ─── Download report ─────────────────────────────────────────────────────────
@@ -279,7 +450,7 @@ export default function CreditsPayoutsUploadPage() {
     setParseResult(null);
     setSaved(false);
     setSavedBatch(null);
-    setConfirmError('');
+    clearPendingBatch();
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
@@ -405,13 +576,6 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
-          {confirmError && (
-            <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
-              <p className="text-sm text-red-700">{confirmError}</p>
-            </div>
-          )}
-
           {/* Summary cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[
@@ -490,8 +654,21 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
+          {/* Next to the buttons (and scrolled into view) so a failed click is never invisible. */}
+          {confirmError && (
+            <div
+              ref={confirmErrorRef}
+              role="alert"
+              className={`rounded-xl p-4 flex items-start gap-3 border ${
+                alreadyConfirmed ? 'bg-amber-50 border-amber-200' : 'bg-red-50 border-red-200'}`}
+            >
+              <AlertTriangle className={`w-5 h-5 flex-shrink-0 mt-0.5 ${alreadyConfirmed ? 'text-amber-500' : 'text-red-500'}`} />
+              <p className={`text-sm ${alreadyConfirmed ? 'text-amber-800' : 'text-red-700'}`}>{confirmError}</p>
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-3">
-            {parseResult.canProceed && !saved && (
+            {parseResult.canProceed && !saved && !pendingBatch && (
               <button
                 onClick={handleConfirm}
                 disabled={!uploadWindowOpen || confirming}
@@ -500,6 +677,26 @@ export default function CreditsPayoutsUploadPage() {
                 <CheckCircle className="w-4 h-4" />
                 {confirming ? 'Saving…' : 'Confirm & Credit'}
               </button>
+            )}
+            {/* A batch is already saved: only its confirm may be retried — never a second batch. */}
+            {pendingBatch && !saved && !alreadyConfirmed && (
+              <button
+                onClick={handleConfirm}
+                disabled={confirming}
+                className="flex items-center gap-2 px-4 py-2.5 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <RotateCcw className="w-4 h-4" />
+                {confirming ? 'Confirming…' : `Retry confirm for ${pendingBatch.batchCode}`}
+              </button>
+            )}
+            {pendingBatch && !saved && (
+              <Link
+                href={PAYOUT_STATUS_HREF}
+                className="flex items-center gap-2 px-4 py-2.5 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+              >
+                <ExternalLink className="w-4 h-4" />
+                Open Payout Status
+              </Link>
             )}
             <button
               onClick={handleDownloadReport}

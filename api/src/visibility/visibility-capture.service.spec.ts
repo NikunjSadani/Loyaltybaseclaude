@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 /**
  * Unit tests for visibility-capture.service.ts (Stream B).
  *
@@ -53,9 +54,10 @@ const mockTenant = {
   resolveVisibilityCaptureMode: jest.fn(),
 };
 const mockSettings = { getEffectiveSettings: jest.fn() };
-const mockStorage = { downloadBytes: jest.fn() };
+const mockStorage = { openBoundedObject: jest.fn() };
 const mockMedia = {
   computeImageHash: jest.fn(),
+  computeImageHashFromStream: jest.fn(),
   recordImageHashes: jest.fn(),
   uploadMedia: jest.fn(),
 };
@@ -121,8 +123,8 @@ describe('VisibilityCaptureService', () => {
     mockPrisma.outlet.findFirst.mockResolvedValue(outletRow);
     mockPrisma.visibilityForm.findUnique.mockResolvedValue(form);
     mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5));
-    mockStorage.downloadBytes.mockResolvedValue({ bytes: Buffer.from('img'), contentType: 'image/jpeg' });
-    mockMedia.computeImageHash.mockReturnValue('hashA');
+    mockStorage.openBoundedObject.mockResolvedValue({ stream: Readable.from([Buffer.from('img')]), size: (Buffer.from('img')).length, contentType: 'image/jpeg' });
+    mockMedia.computeImageHashFromStream.mockResolvedValue('hashA');
     mockMedia.recordImageHashes.mockResolvedValue({ dupHashes: [] });
 
     // Transaction internals: no approved row, no current row → create path.

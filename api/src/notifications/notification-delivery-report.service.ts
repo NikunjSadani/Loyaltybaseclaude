@@ -1,15 +1,40 @@
-import { ForbiddenException, Injectable, StreamableFile } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, tenantScope } from '../common/tenant-scope';
-import { buildXlsx } from '../common/xlsx';
-import { istDateTimeCell } from '../common/ist-date';
 import { MessageDeliveryStatusService } from './message-delivery-status.service';
 import {
   NotificationDeliveryListQueryDto,
   NotificationDeliverySummaryQueryDto,
 } from './dto/notification-delivery-report.dto';
+
+/**
+ * The report's createdAt window. A date-only string (the FE's <input type="date">, e.g. "2026-08-25") is an IST
+ * calendar day: `from` → start of that IST day; `to` → INCLUSIVE of the whole IST day (an exclusive `lt` at the start
+ * of the next IST day) so "To = today" doesn't drop today's messages. A full ISO datetime is used as given. Shared
+ * with the 'delivery-status' export kind.
+ */
+export function deliveryDateRange(from?: string, to?: string): Prisma.DateTimeFilter | undefined {
+  const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+  const range: Prisma.DateTimeFilter = {};
+  if (from) {
+    const gte = DATE_ONLY.test(from) ? new Date(`${from}T00:00:00+05:30`) : new Date(from);
+    if (!Number.isNaN(gte.getTime())) range.gte = gte;
+  }
+  if (to) {
+    if (DATE_ONLY.test(to)) {
+      const startOfIstDay = new Date(`${to}T00:00:00+05:30`);
+      if (!Number.isNaN(startOfIstDay.getTime())) {
+        range.lt = new Date(startOfIstDay.getTime() + 24 * 60 * 60 * 1000); // start of next IST day (exclusive)
+      }
+    } else {
+      const lte = new Date(to);
+      if (!Number.isNaN(lte.getTime())) range.lte = lte;
+    }
+  }
+  return Object.keys(range).length > 0 ? range : undefined;
+}
 
 /** Per-channel status bucket counts (raw, from groupBy). */
 type StatusCounts = {
@@ -100,8 +125,8 @@ export interface DeliveryListPage {
  */
 @Injectable()
 export class NotificationDeliveryReportService {
-  /** Hard cap so a 90-day export can never build an unbounded workbook in memory. */
-  private static readonly MAX_EXPORT_ROWS = 100_000;
+  /** Hard cap on the export (the 'delivery-status' export kind) — a visible notice row is added when hit. */
+  static readonly MAX_EXPORT_ROWS = 100_000;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -185,77 +210,7 @@ export class NotificationDeliveryReportService {
     };
   }
 
-  /** Excel export — one row per receipt, scoped + filtered identically to the list. */
-  async export(
-    user: JwtPayload,
-    q: NotificationDeliverySummaryQueryDto,
-  ): Promise<StreamableFile> {
-    const where = this.listWhere(user, q);
-    const rows = await this.prisma.messageDeliveryReceipt.findMany({
-      where,
-      orderBy: { createdAt: 'asc' },
-      take: NotificationDeliveryReportService.MAX_EXPORT_ROWS,
-      select: this.rowSelect,
-    });
-
-    const iso = (d: Date | null) => (d ? istDateTimeCell(d) : '');
-    const sheetRows: Record<string, string>[] = rows.map((r) => ({
-      Channel: r.channel,
-      Event: r.eventKey ?? '',
-      'Recipient Phone': r.recipientPhone ?? '',
-      Status: r.status,
-      'Sent At': iso(r.sentAt),
-      'Delivered At': iso(r.deliveredAt),
-      'Read At': iso(r.readAt),
-      'Failure Reason': r.failureReason ?? '',
-      'Created At': iso(r.createdAt),
-    }));
-
-    // M3: the export is hard-capped at MAX_EXPORT_ROWS with no signal, while the on-screen totals show
-    // the TRUE count — a silently-clipped xlsx would mismatch and be read as complete. When we hit the
-    // cap, append a visible notice row so the reader knows the file is truncated and how to fix it.
-    if (rows.length === NotificationDeliveryReportService.MAX_EXPORT_ROWS) {
-      sheetRows.push({
-        Channel: `⚠️ Export truncated at ${NotificationDeliveryReportService.MAX_EXPORT_ROWS.toLocaleString(
-          'en-US',
-        )} rows — narrow the date range for a complete export.`,
-        Event: '',
-        'Recipient Phone': '',
-        Status: '',
-        'Sent At': '',
-        'Delivered At': '',
-        'Read At': '',
-        'Failure Reason': '',
-        'Created At': '',
-      });
-    }
-
-    // buildXlsx derives the header from the first row's keys; an empty result still needs a header
-    // row so the sheet isn't blank (mirrors the broadcast report).
-    const finalRows =
-      sheetRows.length > 0
-        ? sheetRows
-        : [
-            {
-              Channel: '',
-              Event: '',
-              'Recipient Phone': '',
-              Status: '',
-              'Sent At': '',
-              'Delivered At': '',
-              'Read At': '',
-              'Failure Reason': '',
-              'Created At': '',
-            },
-          ];
-
-    const buffer = buildXlsx([{ name: 'Delivery', rows: finalRows }]);
-    const filename = `notification-delivery-${new Date().toISOString().slice(0, 10)}.xlsx`;
-    return new StreamableFile(buffer, {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="${filename}"`,
-    });
-  }
+  // The Excel export is the 'delivery-status' export kind (exports/kinds/batch2/delivery-status.kind.ts).
 
   // ── scoping + filter builders ───────────────────────────────────────────────
 
@@ -310,32 +265,8 @@ export class NotificationDeliveryReportService {
     };
   }
 
-  private dateRange(
-    from?: string,
-    to?: string,
-  ): Prisma.DateTimeFilter | undefined {
-    // A date-only string (the FE's <input type="date">, e.g. "2026-08-25") is interpreted as an IST
-    // calendar day: `from` → start of that IST day; `to` → INCLUSIVE of the whole IST day (via an
-    // exclusive `lt` at the start of the next IST day) so "To = today" doesn't drop all of today's
-    // messages (every receipt has a time > IST-midnight). A full ISO datetime is used as given.
-    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-    const range: Prisma.DateTimeFilter = {};
-    if (from) {
-      const gte = DATE_ONLY.test(from) ? new Date(`${from}T00:00:00+05:30`) : new Date(from);
-      if (!Number.isNaN(gte.getTime())) range.gte = gte;
-    }
-    if (to) {
-      if (DATE_ONLY.test(to)) {
-        const startOfIstDay = new Date(`${to}T00:00:00+05:30`);
-        if (!Number.isNaN(startOfIstDay.getTime())) {
-          range.lt = new Date(startOfIstDay.getTime() + 24 * 60 * 60 * 1000); // start of next IST day (exclusive)
-        }
-      } else {
-        const lte = new Date(to);
-        if (!Number.isNaN(lte.getTime())) range.lte = lte;
-      }
-    }
-    return Object.keys(range).length > 0 ? range : undefined;
+  private dateRange(from?: string, to?: string): Prisma.DateTimeFilter | undefined {
+    return deliveryDateRange(from, to);
   }
 
   // ── counting + funnel math ──────────────────────────────────────────────────

@@ -38,6 +38,7 @@ import {
   Calculator,
   BadgePercent,
   FileSpreadsheet,
+  FolderDown,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useTenantFeatures } from '@/lib/tenant-features';
@@ -49,6 +50,7 @@ import { useAssumedContext } from '@/lib/use-assumed-context';
 import { OperatorBanner } from '@/components/operator/operator-banner';
 import { SiteFooter } from '@/components/layout/site-footer';
 import { AdminRouteGuard } from '@/components/rbac/admin-route-guard';
+import { DownloadsNavBadge } from '@/components/exports/downloads-nav-badge';
 
 // All possible nav items — feature flags control which are visible
 const ALL_NAV_ITEMS = [
@@ -193,6 +195,9 @@ const ALL_NAV_ITEMS = [
   // as the BE @Roles + the admin/sales-import/layout.tsx guard. See SALES-IMPORT-PIPELINE-PLAN §11 F-2.
   { href: '/admin/sales-import', label: 'Sales Import', icon: FileSpreadsheet, featureFlag: 'salesImport' as const, salesImportAdmin: true },
   { href: '/admin/reports',  label: 'Reports',          icon: FileBarChart2, featureFlag: null },
+  // Downloads — the caller's background report files (DOWNLOADS-PAGE.md). Shown to every admin role:
+  // any of them can request at least one report, and the API scopes the list to the caller's own.
+  { href: '/admin/downloads', label: 'Downloads',       icon: FolderDown,    featureFlag: null },
   { href: '/admin/app-adoption', label: 'App Adoption', icon: Smartphone,    featureFlag: null },
   // Help & Guides — internal operating guides for the Gifsy ops team. gifsyOnly: shown to
   // GIFSY_ADMIN + GIFSY_STAFF (canManageSchemes), hidden from CLIENT_ADMIN / MIS_USER; the
@@ -419,7 +424,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 ) : (
                   <Link
                     href={item.href}
-                    className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                    className={`relative flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
                       active
                         ? 'bg-[var(--brand-primary)] text-white'
                         : 'text-slate-300 hover:bg-[#16213E] hover:text-white'
@@ -428,6 +433,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                   >
                     <Icon className="w-4 h-4 flex-shrink-0" />
                     {!collapsed && <span>{item.label}</span>}
+                    {item.href === '/admin/downloads' && <DownloadsNavBadge collapsed={collapsed} />}
                   </Link>
                 )}
               </div>

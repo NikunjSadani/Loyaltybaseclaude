@@ -26,6 +26,8 @@ import {
   isWizardFieldFlagged, isWizardFieldEditable,
 } from '@/lib/rekyc-fields';
 import { useTenantFeatures } from '@/lib/tenant-features';
+import { useClientConfig } from '@/lib/platform/client-config-context';
+import { loyaltyProgrammeLabel, tradeLoyaltyProgrammeTitle } from '@/lib/programme-name';
 import { isAddressProofRequired, isSelfDeclarationRequired } from '@/lib/kyc-document-gating';
 import { SignaturePad, SignatureClearButton, type SignaturePadHandle } from '@/components/signature-pad';
 import { SoDeclarationView } from '@/components/so-declaration-view';
@@ -409,6 +411,8 @@ export default function NewKYCPage() {
    * way. While features load, DEFAULT_FEATURES has the flag OFF → the SAFE default of
    * requiring the self-declaration on a declared mismatch. */
   const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
+  /* Tenant name for programme copy (was hard-coded "Deoleo" — showed on Bajaj; owner 2026-11-14). */
+  const tenantDisplayName = useClientConfig().branding.displayName;
   const waiverEnabled = features.kycAddressProofWaiver;
   const addressProofRequired = isAddressProofRequired();
   const selfDeclarationRequired = isSelfDeclarationRequired(waiverEnabled, nameMismatch);
@@ -455,12 +459,20 @@ export default function NewKYCPage() {
 
   /* C — Signature pad */
   const signatureCanvasRef = useRef<HTMLCanvasElement>(null);
-  const [isDrawing,  setIsDrawing]  = useState(false);
+  /* SIG-2 (2026-11-14): drawing state lives in REFS, not React state. (a) A state flag only flips on
+   * the next render, so the first moves of a fast stroke were dropped. (b) Flipping `hasSigned` on
+   * the FIRST segment re-rendered mid-stroke and removed the "Signature required" / "To continue"
+   * hints below the pad; with the page scrolled to the bottom that shrank the page and the pad jumped
+   * ~85 px under the finger, breaking the stroke. `hasSigned` now flips when the stroke ENDS. */
+  const drawingRef = useRef(false);
+  const strokeDrewRef = useRef(false);
   const [hasSigned,  setHasSigned]  = useState(false);
   const lastPoint = useRef<{ x: number; y: number } | null>(null);
   /* Signature carried over from the previous submission — drawn onto the canvas
    *  once the Bank step (where the pad mounts) renders. */
   const [pendingSignature, setPendingSignature] = useState<string | null>(null);
+  /* Once a signature was carried over, its note keeps its slot above the pad (SIG-2 audit). */
+  const [sigNoteSlot, setSigNoteSlot] = useState(false);
   /* True once a previous signature has been carried over (drives the "reused" hint;
    *  cleared when the rep clears the pad to re-sign). */
   const [signatureCarriedOver, setSignatureCarriedOver] = useState(false);
@@ -798,7 +810,7 @@ export default function NewKYCPage() {
     setDocs({ businessDoc: null, ownerPhoto: null, shopAddressDoc: null, storeBoardPhoto: null, cheque: null, selfDeclaration: null });
     setBoardPhotoGeo(null); setBoardPhotoGeoError(''); setBoardPhotoGeoLoading(false); boardPhotoGeoLoadingRef.current = false; setBoardPhotoLockMs(null); setBoardPhotoGeoPrecise(false);
     setPaymentGeo(null); setPaymentGeoError(''); setPaymentGeoLoading(false); paymentGeoLoadingRef.current = false;
-    setPendingSignature(null); setSignatureCarriedOver(false); setHasSigned(false);
+    setPendingSignature(null); setSignatureCarriedOver(false); setSigNoteSlot(false); setHasSigned(false);
     const canvas = signatureCanvasRef.current;
     canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     // SO-declaration fields/signature never bleed across outlets either. The flow CHOICE also
@@ -848,7 +860,7 @@ export default function NewKYCPage() {
         const nextDocs: Partial<Record<DocKey, UploadedFile>> = {};
         for (const d of sub.documents ?? []) {
           if (d.documentType === 'SIGNATURE') {
-            if (d.viewUrl) { setPendingSignature(d.viewUrl); setSignatureCarriedOver(true); }
+            if (d.viewUrl) { setPendingSignature(d.viewUrl); setSignatureCarriedOver(true); setSigNoteSlot(true); }
             continue;
           }
           const key = DOC_TYPE_TO_KEY[d.documentType];
@@ -913,13 +925,29 @@ export default function NewKYCPage() {
     if (!ctx) return;
     const img = new Image();
     img.onload = () => {
+      // SIG-2 audit: never paint the carried-over signature over a stroke the rep has started.
+      if (drawingRef.current || strokeDrewRef.current) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       setHasSigned(true);
       setPendingSignature(null);
     };
     img.src = pendingSignature;
+    return () => { img.onload = null; };
   }, [step, pendingSignature, hasSigned]);
+
+  /* SIG-2 (audit): from the first touch on a signature pad until the step changes, the page may only GROW.
+   * Rows below the pad ("Signature required", the "To continue" gate, the carried-over note) unmount once
+   * the rep signs; with the page scrolled to the bottom that shrank the page, the scroll clamped and the pad
+   * moved under the finger (mid-stroke, or between a first and second stroke). Pinning the current height as
+   * a min-height keeps the pad still whichever rows disappear; released on every step change. */
+  const pageRootRef = useRef<HTMLDivElement>(null);
+  const [lockedMinHeight, setLockedMinHeight] = useState<number | null>(null);
+  const lockPageHeight = () => {
+    const h = pageRootRef.current?.offsetHeight ?? 0;
+    if (h > 0) setLockedMinHeight((prev) => (prev != null && prev >= h ? prev : h));
+  };
+  useEffect(() => { setLockedMinHeight(null); }, [step]);
 
   /* ── Geo capture helpers ──
    *  KYC-H2: each fires an async getCurrentPosition; the caller (auto-trigger on capture +
@@ -1264,7 +1292,7 @@ export default function NewKYCPage() {
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(120, 120, 120);
     doc.text(
-      'Address Proof Name Mismatch  ·  Deoleo India Trade Loyalty Programme',
+      `Address Proof Name Mismatch  ·  ${tradeLoyaltyProgrammeTitle(tenantDisplayName)}`,
       PW / 2, y, { align: 'center' },
     );
     y += 5;
@@ -1380,8 +1408,12 @@ export default function NewKYCPage() {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    setIsDrawing(true);
-    setSignatureCarriedOver(false); // drawing over it makes it the rep's own signature
+    // A second finger / palm while a stroke is in progress is ignored (it must not reset the stroke).
+    if (drawingRef.current || ('touches' in e && e.touches.length > 1)) return;
+    lockPageHeight(); // SIG-2: nothing below the pad may shrink the page from here on
+    drawingRef.current = true;
+    strokeDrewRef.current = false;
+    // (carried-over flag clears in endDraw — the note sits ABOVE the pad; removing it now moved the pad)
     const pos = getSigPos(canvas, e);
     lastPoint.current = pos;
     ctx.beginPath();
@@ -1390,7 +1422,7 @@ export default function NewKYCPage() {
 
   const continueDraw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     e.preventDefault();
-    if (!isDrawing) return;
+    if (!drawingRef.current) return;
     const canvas = signatureCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -1404,10 +1436,19 @@ export default function NewKYCPage() {
     ctx.beginPath();
     ctx.moveTo(pos.x, pos.y);
     lastPoint.current = pos;
-    if (!hasSigned) setHasSigned(true);
+    strokeDrewRef.current = true; // hasSigned flips on endDraw — never mid-stroke (SIG-2)
   };
 
-  const endDraw = () => { setIsDrawing(false); lastPoint.current = null; };
+  const endDraw = () => {
+    const drew = drawingRef.current && strokeDrewRef.current;
+    drawingRef.current = false;
+    strokeDrewRef.current = false;
+    lastPoint.current = null;
+    if (drew) {
+      setHasSigned(true);
+      setSignatureCarriedOver(false); // drawing over it makes it the rep's own signature
+    }
+  };
 
   const clearSignature = () => {
     const canvas = signatureCanvasRef.current;
@@ -2067,7 +2108,7 @@ export default function NewKYCPage() {
             </div>
 
             <p className="text-[11px] text-gray-400 text-center">
-              The OTP confirms the outlet owner's consent to enroll in the Deoleo Loyalty Programme.
+              The OTP confirms the outlet owner's consent to enroll in {loyaltyProgrammeLabel(tenantDisplayName)}.
             </p>
           </CardContent>
         </Card>
@@ -2253,7 +2294,12 @@ export default function NewKYCPage() {
 
   /* ── Page shell ── */
   return (
-    <div className="space-y-5 fade-in">
+    <div
+      ref={pageRootRef}
+      data-testid="kyc-new-root"
+      className="space-y-5 fade-in"
+      style={lockedMinHeight != null ? { minHeight: lockedMinHeight } : undefined}
+    >
       {/* Header */}
       <div className="flex items-center gap-3">
         <Link href="/sales/kyc" className="p-2 rounded-lg hover:bg-gray-100 transition-colors">
@@ -3215,9 +3261,16 @@ export default function NewKYCPage() {
                 )}
               </div>
               <p className="text-[11px] text-gray-400">Owner signs below to confirm KYC consent</p>
-              {signatureCarriedOver && (
-                <p className="text-[11px] text-amber-600 flex items-center gap-1">
-                  <RefreshCw className="h-3 w-3 shrink-0" /> Signature carried over from the previous submission — Clear to re-sign.
+              {/* SIG-2 (audit): this note sits ABOVE the pad, so once shown it keeps its slot (fixed min-height) and
+                  only its wording changes — unmounting it moved the pad under the rep's finger. */}
+              {sigNoteSlot && (
+                <p data-testid="signature-carry-note" className="text-[11px] text-amber-600 flex items-start gap-1 min-h-[2rem]">
+                  <RefreshCw className="h-3 w-3 shrink-0 mt-0.5" />
+                  {signatureCarriedOver
+                    ? 'Signature carried over from the previous submission — Clear to re-sign.'
+                    : hasSigned
+                      ? 'New signature drawn — it replaces the previous one.'
+                      : 'Previous signature cleared — the owner signs below.'}
                 </p>
               )}
 
@@ -3244,6 +3297,7 @@ export default function NewKYCPage() {
                   onTouchStart={startDraw}
                   onTouchMove={continueDraw}
                   onTouchEnd={endDraw}
+                  onTouchCancel={endDraw}
                 />
               </div>
               {!hasSigned && (
@@ -3342,7 +3396,7 @@ export default function NewKYCPage() {
                 </p>
                 {soHasSigned && <SignatureClearButton onClear={() => soSigRef.current?.clear()} />}
               </div>
-              <SignaturePad ref={soSigRef} onInkedChange={setSoHasSigned} ariaLabel="Sales Officer signature pad" placeholder="SO signs here" />
+              <SignaturePad ref={soSigRef} onInkedChange={setSoHasSigned} onStrokeStart={lockPageHeight} ariaLabel="Sales Officer signature pad" placeholder="SO signs here" />
               {!soHasSigned && (
                 <p className="text-[11px] text-amber-600 flex items-center gap-1">
                   <AlertCircle className="h-3 w-3 shrink-0" /> Signature required to proceed.

@@ -22,7 +22,7 @@
  *     GET    /v1/admin/achievements/pace       target + achievement + pace per outlet × KPI (query: month=YYYY-MM)
  *
  * Thin adapter: auth + tenant scope come from @CurrentUser(); RBAC via
- * @RequirePermission. StreamableFile is passed through the global interceptor unwrapped.
+ * @RequirePermission. Template / export downloads go through ExportsService.respond (Downloads page design).
  */
 
 import {
@@ -35,13 +35,19 @@ import {
   Body,
   Query,
   Res,
-  StreamableFile,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
 import { TargetsService } from './targets.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { ExportsService } from '../exports/exports.service';
+import {
+  ACHIEVEMENTS_EXPORT_KIND,
+  TARGETS_EXPORT_KIND,
+  assertTargetsDownloadable,
+} from '../exports/kinds/batch2/targets.kinds';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -57,6 +63,7 @@ import {
   AchievementTemplateQueryDto,
   KpiScopeCountQueryDto,
 } from './dto/targets.dto';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 // ─── KPI CRUD ─────────────────────────────────────────────────────────────────
 
@@ -141,7 +148,11 @@ export class KpisController {
 
 @Controller('admin/targets')
 export class TargetsController {
-  constructor(private readonly targets: TargetsService) {}
+  constructor(
+    private readonly targets: TargetsService,
+    private readonly exports: ExportsService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   /**
    * GET /v1/admin/targets/template?months=2026-07,2026-08
@@ -155,13 +166,10 @@ export class TargetsController {
     @CurrentUser() user: JwtPayload,
     @Query() q: TemplateQueryDto,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<StreamableFile> {
-    const buffer = await this.targets.getTemplateBuffer(user, q);
-    const filename = `target-template-${q.months.replace(/,/g, '_')}.xlsx`;
-    return new StreamableFile(buffer, {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="${filename}"`,
-    });
+  ) {
+    // 'targets-template' export kind: ≤ 3 months streams now (200); more months → Downloads page (202).
+    await assertTargetsDownloadable(this.prisma, user.clientId, 'targets-template');
+    return this.exports.respond(res, user, 'targets-template', q);
   }
 
   /**
@@ -176,13 +184,11 @@ export class TargetsController {
     @CurrentUser() user: JwtPayload,
     @Query('month') month: string,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<StreamableFile> {
-    const buffer = await this.targets.exportTargetsBuffer(user, month);
-    const filename = `final-targets-${month}.xlsx`;
-    return new StreamableFile(buffer, {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="${filename}"`,
-    });
+  ) {
+    // 'targets-export' export kind (one month, streamed in pages). Month is validated before the KPI check, as before.
+    const params = TARGETS_EXPORT_KIND.parseParams({ month }, user);
+    await assertTargetsDownloadable(this.prisma, user.clientId, 'targets-export');
+    return this.exports.respond(res, user, 'targets-export', params);
   }
 
   /**
@@ -194,14 +200,14 @@ export class TargetsController {
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('targets:upload')
   @UseInterceptors(
-    FileInterceptor('file', {
-      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB ceiling — bound memory on parse
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
       fileFilter: (_req, file, cb) =>
         /\.(xlsx|xls)$/i.test(file.originalname)
           ? cb(null, true)
           : cb(new BadRequestException('Only .xlsx/.xls files are accepted'), false),
     }),
   )
+  @HeavyOp()
   uploadTargets(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
@@ -243,7 +249,11 @@ export class TargetsController {
  */
 @Controller('admin/achievements')
 export class AchievementsController {
-  constructor(private readonly targets: TargetsService) {}
+  constructor(
+    private readonly targets: TargetsService,
+    private readonly exports: ExportsService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   /**
    * GET /v1/admin/achievements/template?month=YYYY-MM
@@ -260,13 +270,10 @@ export class AchievementsController {
     @CurrentUser() user: JwtPayload,
     @Query() q: AchievementTemplateQueryDto,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<StreamableFile> {
-    const buffer = await this.targets.buildAchievementTemplate(user, q.month);
-    const filename = `sales-template-${q.month}.xlsx`;
-    return new StreamableFile(buffer, {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="${filename}"`,
-    });
+  ) {
+    // 'achievements-template' export kind (one month, streamed).
+    await assertTargetsDownloadable(this.prisma, user.clientId, 'achievements-template');
+    return this.exports.respond(res, user, 'achievements-template', q);
   }
 
   /**
@@ -284,13 +291,11 @@ export class AchievementsController {
     @CurrentUser() user: JwtPayload,
     @Query('month') month: string,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<StreamableFile> {
-    const buffer = await this.targets.exportAchievementsBuffer(user, month);
-    const filename = `sales-data-${month}.xlsx`;
-    return new StreamableFile(buffer, {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="${filename}"`,
-    });
+  ) {
+    // 'achievements-export' export kind (one month, streamed in pages).
+    const params = ACHIEVEMENTS_EXPORT_KIND.parseParams({ month }, user);
+    await assertTargetsDownloadable(this.prisma, user.clientId, 'achievements-export');
+    return this.exports.respond(res, user, 'achievements-export', params);
   }
 
   /**
@@ -303,14 +308,14 @@ export class AchievementsController {
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('targets:upload')
   @UseInterceptors(
-    FileInterceptor('file', {
-      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB ceiling
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
       fileFilter: (_req, file, cb) =>
         /\.(xlsx|xls)$/i.test(file.originalname)
           ? cb(null, true)
           : cb(new BadRequestException('Only .xlsx/.xls files are accepted'), false),
     }),
   )
+  @HeavyOp()
   uploadAchievements(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,

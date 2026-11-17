@@ -1,8 +1,10 @@
-import { Body, Controller, ForbiddenException, Headers, Logger, Post, Req } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Headers, Logger, Optional, Post, Req } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
 import { Public } from '../common/decorators/roles.decorator';
 import { RewardsService } from '../rewards/rewards.service';
+import { VoucherDispersalProcessor } from '../voucher-dispersal/voucher-dispersal.processor';
 
 /** express Request augmented with the raw body captured in main.ts (for HMAC verification). */
 type RawBodyRequest = Request & { rawBody?: Buffer };
@@ -32,7 +34,26 @@ type RawBodyRequest = Request & { rawBody?: Buffer };
 export class HubbleWebhookController {
   private readonly logger = new Logger(HubbleWebhookController.name);
 
-  constructor(private readonly rewards: RewardsService) {}
+  constructor(
+    private readonly rewards: RewardsService,
+    // Optional so unit tests that build the controller with RewardsService alone keep working.
+    @Optional() private readonly moduleRef?: ModuleRef,
+  ) {}
+
+  /**
+   * Voucher Dispersal rows use references `vd<24 hex>` (never a cuid, which RedemptionOrder ids are).
+   * Resolved lazily (strict:false) from the global container — RewardsModule (which registers this
+   * controller) does not import VoucherDispersalModule, and doesn't need to. Absent (tests / module not loaded) → rewards path only.
+   */
+  private dispersal(): { reconcileByReference(ref: string): Promise<string> } | null {
+    if (!this.moduleRef) return null;
+    try {
+      return this.moduleRef.get(VoucherDispersalProcessor, { strict: false });
+    } catch (e) {
+      this.logger.warn(`[hubble webhook] Voucher Dispersal processor unavailable: ${e}`);
+      return null;
+    }
+  }
 
   @Public()
   @Post('webhook')
@@ -51,10 +72,37 @@ export class HubbleWebhookController {
       return { ok: true, reconciled: false };
     }
 
+    // Voucher Dispersal reference → its own reconcile (lookup-by-reference only, never places).
+    // NOT_FOUND (no dispersal row owns it) falls through to the rewards path unchanged.
+    if (/^vd[0-9a-f]{24}$/.test(referenceId)) {
+      const d = this.dispersal();
+      if (d) {
+        try {
+          const outcome = await d.reconcileByReference(referenceId);
+          if (outcome !== 'NOT_FOUND') return { ok: true, reconciled: true, outcome: `DISPERSAL_${outcome}` };
+        } catch (e) {
+          this.logger.error(`[hubble webhook] dispersal reconcile failed for ${referenceId}: ${e}`);
+          return { ok: true, reconciled: false };
+        }
+      }
+    }
+
     // The reconcile is fully idempotent + self-contained (get-by-reference → apply
     // terminal transition). It never throws into the HTTP layer.
-    const outcome = await this.rewards.reconcileHubbleOrder(referenceId);
+    const outcome = await this.rewards.reconcileHubbleOrder(referenceId, { webhookStatus: this.extractStatus(payload) });
     return { ok: true, reconciled: true, outcome };
+  }
+
+  /** The order status the webhook reports (top-level, or under `data` / `order`), upper-cased; null if none. */
+  private extractStatus(payload: unknown): string | null {
+    if (!payload || typeof payload !== 'object') return null;
+    const p = payload as Record<string, unknown>;
+    for (const src of [p, p.data, p.order]) {
+      if (src && typeof src === 'object' && typeof (src as Record<string, unknown>).status === 'string') {
+        return ((src as Record<string, unknown>).status as string).trim().toUpperCase() || null;
+      }
+    }
+    return null;
   }
 
   /**

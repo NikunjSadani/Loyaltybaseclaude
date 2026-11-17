@@ -5,6 +5,7 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { GiftDisbursalQueryDto } from './dto/vendor.dto';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 /**
  * Gift Disbursal report (Wave 2, §6) — /v1/admin/gift-disbursal. The ONE gift endpoint
@@ -25,6 +26,7 @@ export class GiftDisbursalController {
 
   @Get('export')
   @RequirePermission('rewards:read')
+  @HeavyOp()
   async export(
     @CurrentUser() user: JwtPayload,
     @Query() q: GiftDisbursalQueryDto,

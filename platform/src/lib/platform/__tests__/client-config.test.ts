@@ -74,6 +74,11 @@ describe('DEOLEO_CONFIG seed (minimal registry fallback)', () => {
     expect(isFeatureEnabled(DEOLEO_CONFIG, 'walletModule')).toBe(true);
     expect(isFeatureEnabled(DEOLEO_CONFIG, 'visibilityInvoiceModule')).toBe(false);
   });
+
+  it('keeps the gifsyRejectFastTrack behaviour flag OFF by default (Deoleo unchanged)', () => {
+    expect(DEFAULT_CLIENT_CONFIG.features.gifsyRejectFastTrack).toBe(false);
+    expect(DEOLEO_CONFIG.features.gifsyRejectFastTrack).toBe(false);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

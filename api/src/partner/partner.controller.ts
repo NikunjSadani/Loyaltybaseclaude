@@ -8,7 +8,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { PartnerService } from './partner.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -93,7 +93,7 @@ export class PartnerController {
   // KYC `kyc:initiate` doc route. Service gates the actual capture on the tenant flag.
   @Post('documents')
   @RequirePermission('rewards:read')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(LimitedFileInterceptor('file', MEDIA_UPLOAD_MAX_BYTES))
   uploadPayoutDocument(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,

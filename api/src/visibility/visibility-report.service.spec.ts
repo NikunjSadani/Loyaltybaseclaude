@@ -3,13 +3,13 @@
  *
  * Covers: coverage/miss math (approved numerator over the addressable in-scope
  * denominator), GIFSY-only gate on the gifsy report, CLIENT_ADMIN read-only tenant
- * report, and the xlsx export shape. Prisma / Tenant / TenantSettings mocked.
+ * report. Prisma / Tenant / TenantSettings mocked.
  *
  * Run: npx jest src/visibility/visibility-report.service.spec.ts
  */
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { ForbiddenException, StreamableFile } from '@nestjs/common';
+import { ForbiddenException } from '@nestjs/common';
 import { VisibilityReportService } from './visibility-report.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
@@ -18,9 +18,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
   outlet: { count: jest.fn() },
-  visibilityCapture: { groupBy: jest.fn(), findMany: jest.fn() },
-  visibilityImageHash: { findMany: jest.fn() },
-  visibilityFormVersion: { findMany: jest.fn() },
+  visibilityCapture: { groupBy: jest.fn() },
 };
 
 const mockTenant = { resolveVisibilityEnabled: jest.fn() };
@@ -137,78 +135,7 @@ describe('VisibilityReportService', () => {
     await expect(service.tenantReport(clientAdmin, '2026-07-P1')).rejects.toThrow(ForbiddenException);
   });
 
-  // ── Export ───────────────────────────────────────────────────────────────────
-  it('exportCaptures returns an xlsx StreamableFile with a dup flag column', async () => {
-    mockPrisma.visibilityCapture.findMany.mockResolvedValue([
-      {
-        id: 'cap1',
-        outletCode: 'OC1',
-        outletName: 'Shop 1',
-        windowKey: '2026-07-P1',
-        status: 'APPROVED',
-        geoFenceOk: true,
-        distanceMeters: 12,
-        captureAccuracy: 10,
-        capturedAt: new Date('2026-07-05T10:00:00Z'),
-        receivedAt: new Date('2026-07-05T10:01:00Z'),
-        rejectionReasonCode: null,
-        rejectionReason: null,
-        formValues: { photo: 'visibility-media/t1/x.jpg' },
-        formVersion: 1,
-        submittedBy: { employeeCode: 'E1' },
-      },
-    ]);
-    mockPrisma.visibilityImageHash.findMany.mockResolvedValue([
-      { hash: 'hashA', captureId: 'cap1' },
-      { hash: 'hashA', captureId: 'cap2' },
-    ]);
-    mockPrisma.visibilityFormVersion.findMany.mockResolvedValue([
-      { version: 1, formSchema: { fields: [{ id: 'photo', type: 'CAMERA' }] } },
-    ]);
-
-    const file = await service.exportCaptures(gifsy, '2026-07-P1');
-    expect(file).toBeInstanceOf(StreamableFile);
-  });
-
-  it('exportCaptures batches the form-version snapshots once (M5 — no per-row N+1)', async () => {
-    mockPrisma.visibilityCapture.findMany.mockResolvedValue([
-      {
-        id: 'cap1', outletCode: 'OC1', outletName: 'Shop 1', windowKey: '2026-07-P1',
-        status: 'APPROVED', geoFenceOk: true, distanceMeters: 12, captureAccuracy: 10,
-        capturedAt: new Date('2026-07-05T10:00:00Z'), receivedAt: new Date('2026-07-05T10:01:00Z'),
-        rejectionReasonCode: null, rejectionReason: null,
-        formValues: { photo: 'visibility-media/t1/x.jpg' }, formVersion: 1,
-        submittedBy: { employeeCode: 'E1' },
-      },
-      {
-        id: 'cap2', outletCode: 'OC2', outletName: 'Shop 2', windowKey: '2026-07-P1',
-        status: 'APPROVED', geoFenceOk: true, distanceMeters: 5, captureAccuracy: 8,
-        capturedAt: new Date('2026-07-06T10:00:00Z'), receivedAt: new Date('2026-07-06T10:01:00Z'),
-        rejectionReasonCode: null, rejectionReason: null,
-        formValues: { photo: 'visibility-media/t1/y.jpg' }, formVersion: 1,
-        submittedBy: { employeeCode: 'E2' },
-      },
-    ]);
-    mockPrisma.visibilityImageHash.findMany.mockResolvedValue([]);
-    mockPrisma.visibilityFormVersion.findMany.mockResolvedValue([
-      { version: 1, formSchema: { fields: [{ id: 'photo', type: 'CAMERA' }] } },
-    ]);
-
-    await service.exportCaptures(gifsy, '2026-07-P1');
-    // TWO capture rows sharing formVersion 1 → the snapshots are fetched in ONE query.
-    expect(mockPrisma.visibilityFormVersion.findMany).toHaveBeenCalledTimes(1);
-    expect(mockPrisma.visibilityFormVersion.findMany.mock.calls[0][0].where).toEqual({
-      clientId: 't1',
-      version: { in: [1] },
-    });
-  });
-
-  it('exportCaptures still returns a StreamableFile when there are no captures', async () => {
-    mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
-    mockPrisma.visibilityImageHash.findMany.mockResolvedValue([]);
-    const file = await service.exportCaptures(gifsy);
-    expect(file).toBeInstanceOf(StreamableFile);
-  });
+  // The xlsx captures export is the `visibility-captures` export kind (exports/kinds/batch1/visibility-captures.spec.ts).
 
   // ── APPLIES-TO (D9/D12): numerator and denominator narrow TOGETHER ─────────────────────────
   it('APPLIES-TO: the program narrowing lands on BOTH the denominator and the numerator outlet filter', async () => {

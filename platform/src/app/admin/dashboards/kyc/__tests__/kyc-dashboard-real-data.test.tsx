@@ -95,7 +95,7 @@ describe('Admin KYC Dashboard — real data', () => {
     // pipeline bar's share of addressable) — assert ≥1 occurrence
     expect((await screen.findAllByText('73.4%')).length).toBeGreaterThan(0);
     // subtitle proves approved/addressable came from the payload (unique to the card)
-    expect(screen.getByText('734 / 1,000 approved')).toBeInTheDocument();
+    expect(await screen.findByText('734 / 1,000 approved')).toBeInTheDocument();
   });
 
   it('RD2: renders both bottleneck bucket counts and breached counts', async () => {
@@ -103,10 +103,10 @@ describe('Admin KYC Dashboard — real data', () => {
     render(<KycDashboardPage />);
     // bucket counts (also shown on the headline cards → expect ≥1 occurrence each)
     expect((await screen.findAllByText('470')).length).toBeGreaterThan(0); // pending field
-    expect(screen.getAllByText('50').length).toBeGreaterThan(0);           // awaiting gifsy
+    expect((await screen.findAllByText('50')).length).toBeGreaterThan(0);           // awaiting gifsy
     // breached counts (unique to the bucket stacked bars)
-    expect(screen.getByText('170 breached')).toBeInTheDocument();
-    expect(screen.getByText('5 breached')).toBeInTheDocument();
+    expect(await screen.findByText('170 breached')).toBeInTheDocument();
+    expect(await screen.findByText('5 breached')).toBeInTheDocument();
   });
 
   it('RD3: renders an SLA compliance %', async () => {
@@ -119,7 +119,7 @@ describe('Admin KYC Dashboard — real data', () => {
     mockFetchOk();
     render(<KycDashboardPage />);
     expect(await screen.findByText('Maharashtra')).toBeInTheDocument();
-    expect(screen.getByText('240 / 300')).toBeInTheDocument();
+    expect(await screen.findByText('240 / 300')).toBeInTheDocument();
   });
 
   it('RD5: on fetch failure shows an error state and NO fabricated demo numbers', async () => {
@@ -147,13 +147,13 @@ describe('Admin KYC Dashboard — real data', () => {
     // Wait for the loaded dashboard so we query the CONTENT-branch select (the loading-branch
     // header renders one too, then detaches on load).
     await screen.findByTestId('kyc-dashboard');
-    const select = screen.getByTestId('kyc-program-filter') as HTMLSelectElement;
+    const select = await screen.findByTestId('kyc-program-filter') as HTMLSelectElement;
     expect(select).toBeInTheDocument();
     expect(select.value).toBe(''); // '' sentinel = All programs = no filter
     // Options are sourced from the endpoint's availablePrograms (NOT a static allow-list): a
     // program name that only exists in the response must render as an option.
-    expect(screen.getByRole('option', { name: 'Deoleo Trade Loyalty' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'Silver Scheme' })).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: 'Deoleo Trade Loyalty' })).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: 'Silver Scheme' })).toBeInTheDocument();
     // The default (All programs) load hits the endpoint WITHOUT a programName query param.
     await waitFor(() =>
       expect(
@@ -171,7 +171,7 @@ describe('Admin KYC Dashboard — real data', () => {
     render(<KycDashboardPage />);
     // Query the CONTENT-branch select (stable) after the first load resolves.
     await screen.findByTestId('kyc-dashboard');
-    const select = screen.getByTestId('kyc-program-filter') as HTMLSelectElement;
+    const select = await screen.findByTestId('kyc-program-filter') as HTMLSelectElement;
     // Options come from the response — pick one that is NOT an old static default.
     fireEvent.change(select, { target: { value: 'Deoleo Trade Loyalty' } });
     expect(select.value).toBe('Deoleo Trade Loyalty');

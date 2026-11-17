@@ -68,7 +68,7 @@ describe('Admin Finance Dashboard — real data', () => {
     // redeemable ₹5,000 (appears on the stat card and the detail block)
     expect((await screen.findAllByText('₹5,000.00')).length).toBeGreaterThan(0);
     // locked points line is unique to the detail block
-    expect(screen.getByText('12,000 points')).toBeInTheDocument();
+    expect(await screen.findByText('12,000 points')).toBeInTheDocument();
   });
 
   it('RD2: renders the breakage %', async () => {
@@ -76,7 +76,7 @@ describe('Admin Finance Dashboard — real data', () => {
     render(<FinanceDashboardPage />);
     // breakage 5.0% renders (stat card + breakage panel)
     expect((await screen.findAllByText('5.0%')).length).toBeGreaterThan(0);
-    expect(screen.getByText('2,000 expired / 40,000 issued')).toBeInTheDocument();
+    expect(await screen.findByText('2,000 expired / 40,000 issued')).toBeInTheDocument();
   });
 
   it('RD3: renders a TDS outstanding value, with 194R tenant + 194C platform labelled', async () => {
@@ -85,10 +85,10 @@ describe('Admin Finance Dashboard — real data', () => {
     // 194C outstanding ₹20,000 (unique value)
     expect(await screen.findByText('₹20,000.00')).toBeInTheDocument();
     // both sections present and labelled
-    expect(screen.getByText('Section 194R')).toBeInTheDocument();
-    expect(screen.getByText('Section 194C')).toBeInTheDocument();
-    expect(screen.getByText('Tenant')).toBeInTheDocument();
-    expect(screen.getByText('Platform')).toBeInTheDocument();
+    expect(await screen.findByText('Section 194R')).toBeInTheDocument();
+    expect(await screen.findByText('Section 194C')).toBeInTheDocument();
+    expect(await screen.findByText('Tenant')).toBeInTheDocument();
+    expect(await screen.findByText('Platform')).toBeInTheDocument();
   });
 
   it('RD3b: the 194R tile shows the imported-payouts note only when the API sends it', async () => {
@@ -117,7 +117,7 @@ describe('Admin Finance Dashboard — real data', () => {
     render(<FinanceDashboardPage />);
     // available ₹22,000 is unique to the fund ledger (and the headline card)
     expect((await screen.findAllByText('₹22,000.00')).length).toBeGreaterThan(0);
-    expect(screen.getByText('Total Received')).toBeInTheDocument();
+    expect(await screen.findByText('Total Received')).toBeInTheDocument();
   });
 
   it('RD5: on fetch failure shows an error state and NO real payload numbers', async () => {

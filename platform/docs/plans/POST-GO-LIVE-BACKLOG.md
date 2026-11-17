@@ -115,7 +115,7 @@ so the operator can neither see nor assume the tenant → **cannot configure it*
 
 | Item | Why deferred | Ref |
 |---|---|---|
-| **D1 residuals** — admin header notifications dropdown (fabricated "14 KYC pending…"); partner `DemoSwitcher` + `lib/partner-session` demo personas (touch identity wiring → dedicated follow-up); the GIFSY cross-tenant KYC **brand column** (A1 polish); small display bugs (admin/approvals "Invalid Date", sales/catalogue "1 Issue"). | Left out of D1's admin-dashboard scope; partner shell needs careful identity rework | #45; D1 report |
+| **D1 residuals** — admin header notifications dropdown (fabricated "14 KYC pending…"); partner `DemoSwitcher` + `lib/partner-session` demo personas (touch identity wiring → dedicated follow-up); the GIFSY cross-tenant KYC **brand column** (A1 polish); small display bugs (~~admin/approvals "Invalid Date"~~ — moot: the page was retired to a redirect 2026-11-17; sales/catalogue "1 Issue"). | Left out of D1's admin-dashboard scope; partner shell needs careful identity rework | #45; D1 report |
 | **Legacy-lib demo retirement** — `lib/targets`/`gifts`/`partner-session`/`redemption-store` (Prisma-free; not D2's scope) | Retire as each consuming page gets real backend wiring | D2 plan §8 |
 | **`GIFT_CATALOGUE` cosmetic reliance** (emoji/gradient defaults in sales catalogue) | Cosmetic; real catalog data is wired | D1 |
 | **target-config / banner JSON-blob normalization** | Works as blobs today | #18 residual |
@@ -126,7 +126,7 @@ These are DONE-on-`develop` features whose only remaining piece is a prod infra 
 
 | Item | What | Ref |
 |---|---|---|
-| **Create the `expire-sweep-prod` Cloud Scheduler job** | At the next cutover, create a daily Cloud Scheduler job (mirrors `push-drain-prod`) → `POST` prod `/v1/wallet/expire-sweep` with the prod `EXPIRE_SWEEP_SECRET` in the drain-secret header. **The prod secret `EXPIRE_SWEEP_SECRET` already exists** and **`deploy.yml` already references it**, and the `20260630130000_point_expiry_default_unique` migration **auto-applies at cutover** via the pipeline migrate step — so the only manual action is creating the scheduler job. See `CUTOVER-RUNBOOK.md` Step 7. | 2026-06-30; `192abb2` |
+| ✅ **DONE (verified 2026-11-16: `expire-sweep-prod` ENABLED, daily 00:30)** ~~Create the `expire-sweep-prod` Cloud Scheduler job~~ | At the next cutover, create a daily Cloud Scheduler job (mirrors `push-drain-prod`) → `POST` prod `/v1/wallet/expire-sweep` with the prod `EXPIRE_SWEEP_SECRET` in the drain-secret header. **The prod secret `EXPIRE_SWEEP_SECRET` already exists** and **`deploy.yml` already references it**, and the `20260630130000_point_expiry_default_unique` migration **auto-applies at cutover** via the pipeline migrate step — so the only manual action is creating the scheduler job. See `CUTOVER-RUNBOOK.md` Step 7. | 2026-06-30; `192abb2` |
 
 ## Owner decisions (2026-06-30)
 

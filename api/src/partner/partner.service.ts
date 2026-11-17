@@ -36,6 +36,7 @@ import {
 } from '../common/payment-type.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { pickDeliveryDefaults, DeliveryDefaults } from './delivery-defaults.helper';
+import { PRIMARY_OUTLET_ORDER_BY, partnerOutletsWhere, pickPrimaryOutletName } from './partner-display.helper';
 import { AppliesToOutletFacets } from '../common/applies-to/applies-to';
 import { kpiAppliesToOutlet, outletPrimaryFallback } from '../sales/outlet-kpi-scope.helper';
 
@@ -224,9 +225,11 @@ export class PartnerService {
     // NB: CreditPayoutEntry.outletId stores the outlet CODE (not the Outlet PK) — it is a
     // bare string set from the uploaded "Outlet ID", resolved elsewhere via outletCode
     // (credits.service confirmBatch). So the credit-payout scope MUST key on outletCode.
+    // Primary-outlet rule shared with the OTP-login reply (partner-display.helper) so the header
+    // name painted at login is the SAME one /partner/me later confirms.
     const outlets = await this.prisma.outlet.findMany({
-      where: { clientId, partnerId, deletedAt: null },
-      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+      where: partnerOutletsWhere(clientId, partnerId),
+      orderBy: PRIMARY_OUTLET_ORDER_BY,
       select: {
         name: true,
         outletCode: true,
@@ -244,7 +247,7 @@ export class PartnerService {
     // The ACTIVE outlet's MASTER name (the admin-roster Outlet.name) for the partner-shell header,
     // resolved from the SAME primary-outlet selection as outletType. Null when the partner has no
     // outlet — the FE then falls back to businessName so the header never shows blank.
-    const outletName = outlets[0]?.name ?? null;
+    const outletName = pickPrimaryOutletName(outlets);
     const outletCodes = outlets.map((o) => o.outletCode);
     // Redeem-form address pre-fill from the SAME primary-outlet row (outlet address only).
     const deliveryDefaults = pickDeliveryDefaults(outlets[0] ?? null);
@@ -534,7 +537,9 @@ export class PartnerService {
     kpiCode: string | null;
     kpiName: string | null;
     unit: string | null;
-    trend: Array<{ month: string; target: number | null; achieved: number | null }>;
+    /** `achievedAll` (partnerDashboardV2 only — absent when the flag is OFF): the month's
+     *  achieved summed over ALL the partner's in-scope outlets, targeted or not. */
+    trend: Array<{ month: string; target: number | null; achieved: number | null; achievedAll?: number | null }>;
   }> {
     const span = Math.min(Math.max(Math.trunc(months) || 0, 1), 36);
 
@@ -589,34 +594,72 @@ export class PartnerService {
       month: { in: monthKeys },
     };
 
+    // partnerDashboardV2 (Bajaj, tenant-scoped): a month's ACHIEVED counts only the outlets whose
+    // target for that month is > 0, so sales at a partner's outlet WITHOUT this target never fill
+    // another outlet's target — the same rule the v2 dashboard hero + Target Achievement card apply
+    // (owner 2026-11-15). A month where NO outlet has a target keeps the plain sum (a "so far" figure).
+    // Flag OFF (Deoleo) → the plain per-month sums below, byte-identical to before.
+    const features = await resolveTenantFeatures(this.tenant, user.clientId);
+    const targetedOnly = features.partnerDashboardV2 === true;
+
     const [targetRows, achievementRows] = await Promise.all([
       this.prisma.outletTarget.findMany({
         where: whereBase,
-        select: { month: true, targetValues: true },
+        select: targetedOnly
+          ? { month: true, outletCode: true, targetValues: true }
+          : { month: true, targetValues: true },
       }),
       this.prisma.outletSalesRecord.findMany({
         where: whereBase,
-        select: { month: true, kpiValues: true },
+        select: targetedOnly
+          ? { month: true, outletCode: true, kpiValues: true }
+          : { month: true, kpiValues: true },
       }),
     ]);
 
     const code = primary.code;
     const targetByMonth = new Map<string, number>();
     const achievedByMonth = new Map<string, number>();
+    // v2 only: outlets with a target > 0 for the trended KPI, per month ("YYYY-MM" → outletCodes).
+    const targetedOutletsByMonth = new Map<string, Set<string>>();
     for (const r of targetRows) {
       const v = (r.targetValues as Record<string, unknown>)?.[code];
       if (typeof v === 'number') targetByMonth.set(r.month, (targetByMonth.get(r.month) ?? 0) + v);
+      if (targetedOnly && typeof v === 'number' && v > 0) {
+        const oc = (r as { outletCode?: string }).outletCode;
+        if (oc) {
+          const set = targetedOutletsByMonth.get(r.month) ?? new Set<string>();
+          set.add(oc);
+          targetedOutletsByMonth.set(r.month, set);
+        }
+      }
     }
+    // v2 only: the month's TOTAL across ALL the partner's (in-scope) outlets, targeted or not —
+    // feeds the Performance card's "Change vs last month", a true sales comparison that must not
+    // swing just because the targeted outlet set changed month to month (owner 2026-11-15).
+    const achievedAllByMonth = new Map<string, number>();
     for (const r of achievementRows) {
       const v = (r.kpiValues as Record<string, unknown>)?.[code];
-      if (typeof v === 'number') achievedByMonth.set(r.month, (achievedByMonth.get(r.month) ?? 0) + v);
+      if (typeof v !== 'number') continue;
+      if (targetedOnly) {
+        achievedAllByMonth.set(r.month, (achievedAllByMonth.get(r.month) ?? 0) + v);
+        const targeted = targetedOutletsByMonth.get(r.month);
+        const oc = (r as { outletCode?: string }).outletCode;
+        if (targeted && targeted.size > 0 && (!oc || !targeted.has(oc))) continue; // untargeted outlet's sales
+      }
+      achievedByMonth.set(r.month, (achievedByMonth.get(r.month) ?? 0) + v);
     }
 
-    const trend = monthKeys.map((m) => ({
-      month: m,
-      target: targetByMonth.has(m) ? targetByMonth.get(m)! : null,
-      achieved: achievedByMonth.has(m) ? achievedByMonth.get(m)! : null,
-    }));
+    const trend = monthKeys.map((m) => {
+      const row: { month: string; target: number | null; achieved: number | null; achievedAll?: number | null } = {
+        month: m,
+        target: targetByMonth.has(m) ? targetByMonth.get(m)! : null,
+        achieved: achievedByMonth.has(m) ? achievedByMonth.get(m)! : null,
+      };
+      // Flag OFF → no achievedAll key at all (response shape byte-identical for Deoleo).
+      if (targetedOnly) row.achievedAll = achievedAllByMonth.has(m) ? achievedAllByMonth.get(m)! : null;
+      return row;
+    });
 
     return { kpiCode: code, kpiName: primary.label, unit: primary.unit ?? '', trend };
   }

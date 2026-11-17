@@ -27,6 +27,9 @@ import {
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { istDateKey } from '@/lib/ist-date';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { formatKpiAmount, formatKpiSoFar, formatInrWhole, isInrUnit } from '@/lib/format-inr';
+import { fmtKpiNum, fmtRemaining, remainingOf } from '@/lib/pace';
+import { useTenantFeatures } from '@/lib/tenant-features';
 
 /* ─── Backend response types ─────────────────────────────────────────────────── */
 
@@ -64,6 +67,25 @@ interface DisplayParam {
   unit:      string;   // 'cases' (from KpiDef, not in this response — default)
   target:    number;
   isPrimary: boolean;
+  /** partnerDashboardV2 only: sales of this KPI at the partner's OTHER outlets that have NO target for
+   *  it — shown separately, never in the %. Absent with the flag OFF; 0 for single-outlet partners /
+   *  when every outlet has the target. */
+  untargetedAchieved?: number;
+}
+
+/** One column of the multi-outlet breakdown table (union of KPI codes across outlets, first-seen order). */
+interface TableCol {
+  code: string;
+  name: string;
+}
+
+/** A KPI with NO target this month (summed target ≤ 0) — shown as a neutral "so far" figure. */
+interface SoFarParam {
+  id:       string;
+  label:    string;
+  unit?:    string;
+  /** Summed achieved across outlets; null when NO outlet reported a value (no sales data → "—"). */
+  achieved: number | null;
 }
 
 /* ─── Pace helper ─────────────────────────────────────────────────────────────── */
@@ -105,26 +127,31 @@ function ParamCard({
   achieved,
   timePct,
   daysLeft,
+  isCurrentPeriod = true,
 }: {
   param:    DisplayParam;
   achieved: number;
   timePct:  number;
   daysLeft: number;
+  /** False for a past (closed) month — the untargeted-sales line then drops "so far". */
+  isCurrentPeriod?: boolean;
 }) {
   const clientName = useClientConfig().branding.displayName;
   const p          = pct(achieved, param.target);
   const col        = pctColor(p);
   const bar        = pctBarColor(p);
-  const fmt        = (n: number) => `${n} ${param.unit}`;
+  // INR-unit KPIs read as money — "₹10,414" (whole rupees, Indian grouping); every other unit
+  // (SKU, cases, Litre…) keeps the raw "<n> <unit>" exactly as before (owner-approved, all tenants).
+  const fmt        = (n: number) => (isInrUnit(param.unit) ? formatInrWhole(n) : `${fmtKpiNum(n, param.unit)} ${param.unit}`);
   const isAchieved = p >= 100;
   const isOnPace   = timePct - p <= 0;
-  const remaining  = Math.max(0, param.target - achieved);
+  const remaining  = remainingOf(param.target, achieved);
   const dayWord    = daysLeft === 1 ? 'day' : 'days';
 
-  const unitLabel = remaining === 1 ? param.unit.replace(/s$/i, '') : param.unit;
+  const unitLabel = fmtRemaining(remaining) === '1' ? param.unit.replace(/s$/i, '') : param.unit;
   const paceMsg   = isOnPace
     ? `On track · ${daysLeft} ${dayWord} left`
-    : `${remaining} ${unitLabel} to go · ${daysLeft} ${dayWord} left`;
+    : `${isInrUnit(param.unit) ? formatInrWhole(remaining > 0 ? Math.max(1, Math.ceil(remaining)) : 0) : `${fmtRemaining(remaining)} ${unitLabel}`} to go · ${daysLeft} ${dayWord} left`;
   const threshold = getGifsySettings().paceAmberThreshold ?? 10;
   const nearDone  = param.target > 0 && remaining / param.target <= threshold / 100;
   const paceBg    = isOnPace ? 'bg-emerald-50 text-emerald-700' : nearDone ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-600';
@@ -156,6 +183,15 @@ function ParamCard({
           </div>
         </div>
 
+        {/* partnerDashboardV2: sales at the partner's outlets WITHOUT this target — neutral, never part
+            of the % above. Absent (byte-identical card) with the flag OFF, for single-outlet partners,
+            when every outlet has the target, and when the amount is ≤ 0 (net returns). */}
+        {(param.untargetedAchieved ?? 0) >= 0.5 && (
+          <p className="text-[10px] text-gray-500" data-testid={`kpi-untargeted-extra-${param.id}`}>
+            +{formatKpiAmount(param.untargetedAchieved ?? 0, param.unit)}{isCurrentPeriod ? ' so far' : ''} at outlets without this target
+          </p>
+        )}
+
         {!isAchieved && (
           <div className={`flex items-center gap-1.5 text-[10px] font-semibold px-2 py-1 rounded-lg ${paceBg}`}>
             <TrendingUp className="h-3 w-3 shrink-0" />
@@ -169,6 +205,40 @@ function ParamCard({
             <span className="text-xs text-emerald-700 font-semibold">Target achieved! Incentive being verified by {clientName}.</span>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── No-target ("so far") card ───────────────────────────────────────────────── */
+
+/**
+ * A KPI with sales but NO target this month (e.g. Bajaj SAMT's NON ADHO eligibility-gate KPI): a
+ * neutral grey "so far" figure — no %, no bar, no pace/achieved status, never counted in
+ * "targets hit". A red 0% read as "you have done nothing" even when the outlet had sales.
+ */
+function SoFarCard({
+  param, isCurrentPeriod, periodLabel,
+}: { param: SoFarParam; isCurrentPeriod: boolean; periodLabel: string }) {
+  // A closed (past) month is final — no "this month" / "so far" wording there.
+  const value = isCurrentPeriod
+    ? formatKpiSoFar(param.achieved, param.unit)
+    : param.achieved === null || !Number.isFinite(param.achieved) ? '—' : formatKpiAmount(param.achieved, param.unit);
+  return (
+    <div
+      className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm"
+      data-testid={`kpi-no-target-${param.id}`}
+    >
+      <div className="p-4 flex items-center justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-gray-900 leading-tight">{param.label}</p>
+          <p className="text-[10px] text-gray-500 mt-0.5">
+            {isCurrentPeriod ? 'No target this month' : `No target for ${periodLabel}`}
+          </p>
+        </div>
+        <span className="text-sm font-semibold text-gray-500 shrink-0">
+          {value}
+        </span>
       </div>
     </div>
   );
@@ -201,6 +271,12 @@ export default function PartnerTargetsPage() {
   const [period,  setPeriod]  = useState(currentPeriodValue);
   const [loading, setLoading] = useState(true);
   const [data,    setData]    = useState<TargetsResponse | null>(null);
+  // partnerDashboardV2 (Bajaj, tenant-scoped) — the SAME DB-backed flag the dashboard reads, from the
+  // same authenticated /partner/me features (normalized). It gates the target-less "so far" cards and
+  // the targeted-outlets-only multi-outlet aggregation; OFF (Deoleo) → today's page. The page waits for
+  // it (spinner) so a v2 tenant never flashes the flag-OFF layout first.
+  const { features, loading: featuresLoading } = useTenantFeatures('/api/partner/me');
+  const v2 = features.partnerDashboardV2;
 
   /* Fetch on period change */
   useEffect(() => {
@@ -230,11 +306,13 @@ export default function PartnerTargetsPage() {
 
   /* Flatten to params + achievements from the FIRST outlet's KPIs (partner
      typically has one outlet; if multiple outlets exist we aggregate). */
-  const { params, achievementMap } = useMemo((): {
+  const { params, soFarParams, achievementMap, tableCols } = useMemo((): {
     params: DisplayParam[];
+    soFarParams: SoFarParam[];
     achievementMap: Record<string, number>;
+    tableCols: TableCol[];
   } => {
-    if (!data || data.outlets.length === 0) return { params: [], achievementMap: {} };
+    if (!data || data.outlets.length === 0) return { params: [], soFarParams: [], achievementMap: {}, tableCols: [] };
 
     // Collect the union of all KPI codes across all outlets
     const kpiCodeSet = new Set<string>();
@@ -255,32 +333,78 @@ export default function PartnerTargetsPage() {
     // which KPI is primary (the old code guessed "first by position").
     const primaryByCode: Record<string, boolean> = {};
     const unitByCode:    Record<string, string>  = {};
+    // At least one outlet reported a non-null achieved — false = no sales data yet ("—" on a no-target card).
+    const hasAchieved:   Record<string, boolean> = {};
     const kpiCodes = [...kpiCodeSet];
+
+    // partnerDashboardV2 ONLY — a partner can own several outlets. A KPI's scored figure (target AND
+    // achieved) counts ONLY the outlets where that KPI has a target (> 0): sales at an outlet WITHOUT
+    // that target must not inflate the % (owner 2026-11-15). Those sales are kept apart in
+    // `untargetedSum` and shown as a neutral "+₹2K so far at outlets without this target" line.
+    // Flag OFF → the plain target/achieved sums across every outlet, exactly as before.
+    const targetedAchieved: Record<string, number> = {};
+    const untargetedSum:    Record<string, number> = {};
 
     for (const outlet of data.outlets) {
       for (const k of outlet.kpis) {
-        targetSum[k.code]   = (targetSum[k.code]   ?? 0) + (k.target   ?? 0);
+        if (!v2) {
+          targetSum[k.code]        = (targetSum[k.code]        ?? 0) + (k.target   ?? 0);
+        } else if ((k.target ?? 0) > 0) {
+          targetSum[k.code]        = (targetSum[k.code]        ?? 0) + (k.target as number);
+          targetedAchieved[k.code] = (targetedAchieved[k.code] ?? 0) + (k.achieved ?? 0);
+        } else {
+          untargetedSum[k.code]    = (untargetedSum[k.code]    ?? 0) + (k.achieved ?? 0);
+        }
         achievedSum[k.code] = (achievedSum[k.code] ?? 0) + (k.achieved ?? 0);
+        hasAchieved[k.code] = (hasAchieved[k.code] ?? false) || (k.achieved !== null && k.achieved !== undefined);
         if (!nameByCode[k.code] && k.name) nameByCode[k.code] = k.name;
         primaryByCode[k.code] = (primaryByCode[k.code] ?? false) || (k.isPrimary ?? false);
         if (!unitByCode[k.code] && k.unit) unitByCode[k.code] = k.unit;
       }
     }
 
+    // Custom name if set, else label (from backend); else format the code.
+    const labelOf = (code: string) => nameByCode[code]
+      ?? code.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
     const displayParams: DisplayParam[] = kpiCodes
-      .filter(code => (targetSum[code] ?? 0) > 0)  // only show KPIs that have a target
+      .filter(code => (targetSum[code] ?? 0) > 0)  // targeted KPIs → the scored ParamCards
       .map((code) => ({
         id:        code,
-        // Custom name if set, else label (from backend); else format the code.
-        label:     nameByCode[code]
-          ?? code.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+        label:     labelOf(code),
         unit:      unitByCode[code] ?? 'cases',
         target:    targetSum[code] ?? 0,
         isPrimary: primaryByCode[code] ?? false, // real flag; primaryParam falls back to first
+        ...(v2 ? { untargetedAchieved: untargetedSum[code] ?? 0 } : {}),
       }));
 
-    return { params: displayParams, achievementMap: achievedSum };
-  }, [data]);
+    // Flag OFF → achievement = the plain sum (as before). v2 → scored achievement per targeted KPI =
+    // targeted outlets only (drives %, bar, pace, "targets hit").
+    const scoredAchieved: Record<string, number> = { ...achievedSum };
+    if (v2) for (const p of displayParams) scoredAchieved[p.id] = targetedAchieved[p.id] ?? 0;
+
+    // v2: KPIs with NO target (summed target ≤ 0) → neutral "so far" cards: never scored, never counted
+    // in "X/Y targets hit", never the hero's primary (owner 2026-11-15). Flag OFF → hidden, as before.
+    const soFar: SoFarParam[] = !v2 ? [] : kpiCodes
+      .filter(code => !((targetSum[code] ?? 0) > 0))
+      .map((code) => ({
+        id:       code,
+        label:    labelOf(code),
+        unit:     unitByCode[code],
+        achieved: hasAchieved[code] ? (achievedSum[code] ?? 0) : null,
+      }));
+
+    // Outlet-breakdown table columns = the UNION of KPI codes across ALL outlets (first-seen order),
+    // each cell looked up BY CODE. (The header used to come from outlets[0] while each row rendered
+    // its own kpis in its own order → misaligned columns whenever outlets differed. All tenants.)
+    const cols: TableCol[] = kpiCodes.map((code) => ({
+      code,
+      // custom name if set, else label (backend `name`), else code — as the header always did
+      name: nameByCode[code] ?? code.replace(/_/g, ' '),
+    }));
+
+    return { params: displayParams, soFarParams: soFar, achievementMap: scoredAchieved, tableCols: cols };
+  }, [data, v2]);
 
   const pace = useMemo(() => (data?.period ? computePace(data.period) : null), [data]);
 
@@ -298,6 +422,8 @@ export default function PartnerTargetsPage() {
 
   const periodLabel = periodOptions.find(p => p.value === period)?.label ?? period;
   const activePeriod = data?.period ?? period;
+  // The current IST month is live ("so far"); any other (past) month is closed/final.
+  const isCurrentPeriod = activePeriod === istDateKey(new Date()).slice(0, 7);
 
   return (
     <div className="space-y-5 fade-in">
@@ -325,9 +451,9 @@ export default function PartnerTargetsPage() {
         </div>
       </div>
 
-      {loading ? (
+      {loading || featuresLoading ? (
         <div className="flex items-center justify-center min-h-48"><Spinner size="lg" /></div>
-      ) : params.length === 0 ? (
+      ) : params.length === 0 && soFarParams.length === 0 ? (
         <div className="flex flex-col items-center gap-3 py-16 text-center">
           <Target className="h-10 w-10 text-gray-200" />
           <p className="text-sm text-gray-400">No targets configured for {periodLabel}.</p>
@@ -335,8 +461,18 @@ export default function PartnerTargetsPage() {
         </div>
       ) : (
         <>
+          {/* Only target-less KPIs this month → no scored hero (there is nothing to be behind on). */}
+          {params.length === 0 && (
+            <div className="flex items-center gap-2 rounded-2xl border border-gray-100 bg-gray-50 px-4 py-3" data-testid="no-targets-note">
+              <Target className="h-4 w-4 text-gray-300 shrink-0" />
+              <p className="text-xs text-gray-500">
+                No targets set for {periodLabel}. {isCurrentPeriod ? 'Your sales so far are shown below.' : 'Your sales are shown below.'}
+              </p>
+            </div>
+          )}
+
           {/* Overall score card */}
-          {(() => {
+          {params.length > 0 && (() => {
             const notHit   = params.length - unlockedCount;
             const daysLeft = pace?.daysLeft ?? 0;
             const dWord    = daysLeft === 1 ? 'day' : 'days';
@@ -433,7 +569,11 @@ export default function PartnerTargetsPage() {
                 achieved={achievementMap[param.id] ?? 0}
                 timePct={pace?.timePct ?? 100}
                 daysLeft={pace?.daysLeft ?? 0}
+                isCurrentPeriod={isCurrentPeriod}
               />
+            ))}
+            {soFarParams.map(param => (
+              <SoFarCard key={param.id} param={param} isCurrentPeriod={isCurrentPeriod} periodLabel={periodLabel} />
             ))}
           </div>
 
@@ -449,10 +589,10 @@ export default function PartnerTargetsPage() {
                     <tr className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide bg-gray-50">
                       <th className="py-2 pl-4 pr-2 text-left">Outlet</th>
                       <th className="py-2 px-2 text-left">Type</th>
-                      {(data.outlets[0]?.kpis ?? []).map(k => (
-                        <th key={k.code} className="py-2 px-2 text-right">
+                      {tableCols.map(c => (
+                        <th key={c.code} className="py-2 px-2 text-right">
                           {/* custom name if set, else label (backend `name`), else code */}
-                          {k.name ?? k.code.replace(/_/g, ' ')}
+                          {c.name}
                         </th>
                       ))}
                     </tr>
@@ -462,11 +602,26 @@ export default function PartnerTargetsPage() {
                       <tr key={outlet.outletCode}>
                         <td className="py-2 pl-4 pr-2 font-medium text-gray-800">{outlet.outletName}</td>
                         <td className="py-2 px-2 text-gray-400">{outlet.outletType}</td>
-                        {outlet.kpis.map(k => {
+                        {tableCols.map(c => {
+                          // Cell looked up BY CODE under its header; KPI absent at this outlet → "—".
+                          const k = outlet.kpis.find(x => x.code === c.code);
+                          if (!k) {
+                            return (
+                              <td key={c.code} className="py-2 px-2 text-right">
+                                <span className="text-gray-800 font-mono">—</span>
+                              </td>
+                            );
+                          }
                           const p = k.target && k.target > 0 ? pct(k.achieved ?? 0, k.target) : null;
+                          // v2: no target for this outlet → the same neutral formatting as the "so far" cards
+                          // (₹2.8K / 2,755.1 cases). Targeted cells, and every cell with the flag OFF, keep
+                          // the raw value + (%) as before.
+                          const shown = v2 && p === null && k.achieved !== null && k.achieved !== undefined
+                            ? formatKpiAmount(k.achieved, k.unit)
+                            : (k.achieved ?? '—');
                           return (
-                            <td key={k.code} className="py-2 px-2 text-right">
-                              <span className="text-gray-800 font-mono">{k.achieved ?? '—'}</span>
+                            <td key={c.code} className="py-2 px-2 text-right">
+                              <span className="text-gray-800 font-mono">{shown}</span>
                               {p !== null && (
                                 <span className={`ml-1 text-[10px] ${pctColor(p)}`}>({p}%)</span>
                               )}

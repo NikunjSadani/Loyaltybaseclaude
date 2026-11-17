@@ -6,11 +6,20 @@ import {
   CheckCircle2, Info, Trash2, History, AlertTriangle, BarChart3,
 } from 'lucide-react';
 import { buildAchievementReportBuffer } from '@/lib/achievement-report';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
+import { normalizeRowsEcho } from '@/lib/upload-rows-echo';
 import { DEOLEO_DEFAULT_KPIS } from '@/lib/platform/tenant-kpi-config';
 import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
 import { formatMonth } from '@/lib/targets';
 import { SALES_IMPORT_BATCH_STATUS } from '@/lib/sales-import/types';
 import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
+import {
+  readJsonSafe,
+  serverErrorText,
+  responseErrorMessage,
+  networkErrorMessage,
+  MAYBE_SAVED_NOTE,
+} from '@/lib/safe-response';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -60,7 +69,17 @@ interface UploadResult {
   totalRows:     number;
   acceptedCount: number;
   rejectedCount: number;
-  rows:          UploadResultRow[];
+  /**
+   * Memory-safety (2026-11-13): only REJECTED rows (problemRows) and saved rows with an
+   * ignored-value remark (warningRows) come back — each capped at 500 with true totals.
+   */
+  problemRows:          UploadResultRow[];
+  problemRowCount:      number;
+  problemRowsTruncated: boolean;
+  warningRows:          UploadResultRow[];
+  warningRowCount:      number;
+  warningRowsTruncated: boolean;
+  skippedBlankCount?:   number;
   /** Sales Import: KPI columns in the file that are importer-owned and were NOT written (absent for most tenants). */
   skippedImporterOwnedKpis?: string[];
   /** APPLIES-TO D1: values ignored because the KPI does not apply to that outlet (absent on older API builds). */
@@ -378,6 +397,7 @@ export default function SalesUploadPage() {
   const [kpiDefs, setKpiDefs]       = useState<TenantKpiDef[]>(DEOLEO_DEFAULT_KPIS);
   const [fileName,    setFileName]  = useState('');
   const [uploading,   setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
   const [saved,       setSaved]     = useState(false);
   const [historyKey,  setHistoryKey] = useState(0);  // bump to refresh history
@@ -481,6 +501,7 @@ export default function SalesUploadPage() {
     setFileName(file.name);
     setUploadResult(null);
     setSaved(false);
+    setUploadError('');
 
     // Upload the raw xlsx to the backend (multipart); the backend parses + stores
     // and returns the authoritative per-row result used for the report download.
@@ -489,21 +510,41 @@ export default function SalesUploadPage() {
       const formData = new FormData();
       formData.append('file', file, file.name);
 
-      const res  = await fetch('/api/admin/achievements/upload', {
-        method:  'POST',
-        body:    formData,
-      });
-      const body = await res.json();
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/achievements/upload', {
+          method:  'POST',
+          body:    formData,
+        });
+      } catch (e) {
+        // Only a rejected fetch() is a network error — the upload may have reached the API and saved.
+        console.error('[SALES] Upload network error:', e);
+        setUploadError(networkErrorMessage(MAYBE_SAVED_NOTE));
+        setHistoryKey(k => k + 1);
+        return;
+      }
+      const body = await readJsonSafe(res);
 
-      if (res.ok && body.success) {
-        setUploadResult(body.data as UploadResult);
+      if (res.ok && body?.success) {
+        setUploadResult(normalizeRowsEcho(body.data as UploadResult & { rows?: UploadResultRow[] }));
         setSaved(true);
         setHistoryKey(k => k + 1);
       } else {
         console.error('[SALES] Upload failed:', body);
+        // Show the failure to the operator (it used to be console-only). A non-JSON body means the
+        // response was lost (proxy truncation / plain-text 5xx) — the upload may still have saved.
+        setUploadError(
+          body
+            ? (serverErrorText(body) ?? `Upload failed (HTTP ${res.status})`)
+            : responseErrorMessage(res, body, MAYBE_SAVED_NOTE),
+        );
+        setHistoryKey(k => k + 1);
       }
     } catch (e) {
+      // Not a network error (handled above) — e.g. the result couldn't be shown after the server answered.
       console.error('[SALES] Upload error:', e);
+      setUploadError(`Something went wrong showing the upload result. ${MAYBE_SAVED_NOTE}`);
+      setHistoryKey(k => k + 1);
     } finally {
       setUploading(false);
     }
@@ -523,12 +564,27 @@ export default function SalesUploadPage() {
   // ── Download report ────────────────────────────────────────────────────
 
   function handleDownloadReport() {
-    if (!uploadResult) return;
-    // Built from the AUTHORITATIVE backend response (uploadResult.rows), not a
-    // local re-parse — the backend is the single source of truth for what stored.
+    if (!uploadResult || !summary) return;
+    // Built from the AUTHORITATIVE backend response, not a local re-parse. Memory-safety
+    // (2026-11-13): the file lists only the rows to act on (rejected + partly-ignored), with the
+    // counts on a Summary sheet — saved rows are counted, not listed.
     downloadBuffer(
-      buildAchievementReportBuffer(uploadResult.rows),
-      `sales_upload_report_${salesMonth}.xlsx`,
+      buildAchievementReportBuffer(
+        [...uploadResult.problemRows, ...uploadResult.warningRows].sort((a, b) => a.rowIndex - b.rowIndex),
+        {
+          summary: {
+            month: salesMonth,
+            total: summary.total,
+            saved: summary.saved,
+            skippedBlank: summary.skipped,
+            rejected: summary.rejected,
+            partlyIgnored: uploadResult.warningRowCount,
+          },
+          problem: { shown: uploadResult.problemRows.length, total: uploadResult.problemRowCount, truncated: uploadResult.problemRowsTruncated },
+          warning: { shown: uploadResult.warningRows.length, total: uploadResult.warningRowCount, truncated: uploadResult.warningRowsTruncated },
+        },
+      ),
+      `sales_upload_problem_rows_${salesMonth}.xlsx`,
     );
   }
 
@@ -684,6 +740,10 @@ export default function SalesUploadPage() {
             Uploading and saving…
           </div>
         )}
+
+        {uploadError && (
+          <p role="alert" className="text-sm text-red-600">{uploadError}</p>
+        )}
       </div>
 
       {/* ── Step 3: Results ───────────────────────────────────────────────── */}
@@ -729,40 +789,54 @@ export default function SalesUploadPage() {
 
           <IgnoredOutOfScopeNotice
             count={uploadResult.ignoredOutOfScope}
-            rows={uploadResult.rows.filter(r => r.status === 'accepted')}
+            rows={uploadResult.warningRows}
           />
 
-          {/* Skipped / rejected rows from backend */}
-          {uploadResult.rows.filter(r => r.status !== 'accepted').length > 0 && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
-              <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows</p>
-              {uploadResult.rows
-                .filter(r => r.status !== 'accepted')
-                .slice(0, 20)
-                .map(r => (
-                  <p key={r.rowIndex} className="text-xs text-amber-700">
-                    <span className="font-mono font-semibold">Row {r.rowIndex} — {r.outletCode}:</span>{' '}
-                    {r.remarks}
-                  </p>
-                ))}
-              {uploadResult.rows.filter(r => r.status !== 'accepted').length > 20 && (
-                <p className="text-xs text-amber-500">…download the report for full details</p>
-              )}
+          {/* Skipped / rejected rows from backend — the "first N of M" note sits ABOVE the short scroll box. */}
+          {uploadResult.problemRows.length > 0 && (
+            <div className="space-y-1.5">
+              <UploadTruncationNote
+                shown={uploadResult.problemRows.length}
+                total={uploadResult.problemRowCount}
+                truncated={uploadResult.problemRowsTruncated}
+                noun="rejected rows"
+                next={TRUNCATION_NEXT.PARTIAL_SAVE}
+              />
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
+                <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows ({uploadResult.problemRowCount.toLocaleString('en-IN')})</p>
+                {uploadResult.problemRows
+                  .map(r => (
+                    <p key={r.rowIndex} className="text-xs text-amber-700">
+                      <span className="font-mono font-semibold">Row {r.rowIndex} — {r.outletCode}:</span>{' '}
+                      {r.remarks}
+                    </p>
+                  ))}
+              </div>
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex items-center gap-3 flex-wrap">
-            {/* Report is built from the authoritative backend uploadResult.rows,
-                which is guaranteed present inside this block. */}
-            <button
-              onClick={handleDownloadReport}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors"
-            >
-              <Download className="w-4 h-4" />
-              Download Report
-            </button>
-          </div>
+          {/* Actions — only when there is something to act on (M5). */}
+          {(uploadResult.problemRowCount > 0 || uploadResult.warningRowCount > 0) ? (
+            <div className="space-y-1">
+              <button
+                type="button"
+                onClick={handleDownloadReport}
+                data-testid="download-problem-rows"
+                className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                Download problem rows
+              </button>
+              <p className="text-xs text-gray-500">
+                The file lists only the rows that need attention, with the counts on a Summary sheet. It no longer
+                includes every saved row — the saved total is shown above.
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500" data-testid="no-problem-rows">
+              No problem rows — every non-blank row was saved.
+            </p>
+          )}
         </div>
       )}
 

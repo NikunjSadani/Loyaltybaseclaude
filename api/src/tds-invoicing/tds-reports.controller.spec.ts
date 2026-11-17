@@ -9,6 +9,7 @@ import { ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { TdsReportsController } from './tds-reports.controller';
 import { TdsReportsService } from './tds-reports.service';
+import { ExportsService } from '../exports/exports.service';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -18,6 +19,7 @@ const svc = {
   unregisteredReport: jest.fn().mockResolvedValue({ rows: [] }),
   recoveryReport: jest.fn().mockResolvedValue({ rows: [] }),
 };
+const exportsSvc = { respond: jest.fn().mockResolvedValue({ exportRequestId: 'x', message: 'm' }) };
 
 const GIFSY: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9', name: 'Op' };
 const CLIENT: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '8', name: 'CA' };
@@ -38,7 +40,7 @@ describe('TdsReportsController', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    controller = new TdsReportsController(svc as unknown as TdsReportsService);
+    controller = new TdsReportsController(svc as unknown as TdsReportsService, exportsSvc as unknown as ExportsService);
   });
 
   describe('scoping — CLIENT_ADMIN pinned to own tenant', () => {
@@ -65,6 +67,12 @@ describe('TdsReportsController', () => {
     it('payouts: an ASSUMED GIFSY operator is pinned to the assumed tenant (?clientId= ignored)', async () => {
       await controller.payouts(ASSUMED, { clientId: 'other-tenant', period: '2026-06' });
       expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: 'deoleo', period: '2026-06' });
+    });
+
+    it('payouts/export: hands the query to the tds-payouts export kind (which pins the scope the same way)', async () => {
+      const res = {} as never;
+      await controller.payoutsExport(CLIENT, { clientId: 'other-tenant', period: '2026-06' }, res);
+      expect(exportsSvc.respond).toHaveBeenCalledWith(res, CLIENT, 'tds-payouts', { clientId: 'other-tenant', period: '2026-06' });
     });
   });
 

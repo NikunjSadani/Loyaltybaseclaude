@@ -62,6 +62,15 @@ const nextConfig: NextConfig = {
   // `*` does not cross dots, so multi-level hosts (uat.deoleoloyalty…) are listed
   // explicitly in addition to the single-level wildcard.
   experimental: {
+    // `src/proxy.ts` makes Next clone + buffer every request body that passes through it (before
+    // auth), capped by this limit (default 10 MB). Over the cap the body is SILENTLY TRUNCATED (no
+    // error), so the /api/* rewrite forwarded a cut-off JSON body to the API and the browser got a
+    // 500 after 30 s (credits upload, 2026-11-14). The credits page now sends only OK rows; a FULLY
+    // populated Bajaj file is still ~11 MB of JSON, so 15 MB gives headroom while keeping the
+    // per-request buffer well under the API's own 25 MB JSON limit (api/src/main.ts).
+    // This covers JSON bodies only: a MULTIPART upload above 15 MB through the proxy can still be
+    // truncated (evidence uploads — tracked separately). See next/dist/docs/.../proxyClientMaxBodySize.md.
+    proxyClientMaxBodySize: '15mb',
     serverActions: {
       allowedOrigins: [
         '*.gifsy.in',                 // all single-label tenant subdomains (deoleo, clientb, platform, deoleoloyalty)

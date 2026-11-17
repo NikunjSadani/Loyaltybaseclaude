@@ -8,7 +8,9 @@
  *   • LAST MONTH · <Mon>  — previous-month achieved + target verdict (✓ target met /
  *     below target / No target set) + reward CREDITED last month (points OR payout,
  *     BOTH when the outlet has both)
- *   • Change vs last month — the same delta the old comparison card showed
+ *   • Change vs last month — TOTAL sales across all outlets when the v2 trend carries
+ *     `achievedAll` ("Change in total sales vs last month" when it differs from the
+ *     targeted-only figures), else the same delta the old comparison card showed
  *
  * Reuses the SAME /api/partner/targets/trend series (computeMonthComparison for achieved
  * + delta; lastMonthFromTrend by month KEY for targets) and the EXACT points-vs-payout
@@ -20,7 +22,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import { istMonthKey } from '@/lib/ist-date';
 
@@ -52,6 +54,8 @@ const identityRef: { current: unknown } = { current: null };
 vi.mock('@/lib/partner-identity', () => ({ usePartnerIdentity: () => identityRef.current }));
 
 import PartnerDashboardPage, {
+  computeMonthComparison,
+  computeSalesChange,
   lastMonthFromTrend,
   previousMonthKey,
   sumPayoutCreditedInMonth,
@@ -68,7 +72,7 @@ function identity(opts: { points: boolean; payout: boolean; v2?: boolean; outlet
   };
 }
 
-type TrendRow = { month: string; target: number | null; achieved: number | null };
+type TrendRow = { month: string; target: number | null; achieved: number | null; achievedAll?: number | null };
 type Payout = { id?: string; period: string; status: string; payoutAmountPaise: number; paidAt?: string };
 
 // Date-relative month keys (IST), matching how the card derives them.
@@ -137,6 +141,17 @@ describe('Performance — pure helpers', () => {
     ];
     expect(sumPayoutCreditedInMonth(payouts as never, PREV)).toBe(5000);
   });
+  it('computeSalesChange — uses achievedAll when present (A/B → 0%, total-sales label)', () => {
+    const ab = [
+      { month: PREV, target: null, achieved: 2500, achievedAll: 2500 },
+      { month: CUR,  target: 1000, achieved: 500,  achievedAll: 2500 },
+    ];
+    expect(computeSalesChange(ab)).toEqual({ current: 2500, previous: 2500, delta: 0, pctChange: 0, totalSalesLabel: true });
+  });
+  it('computeSalesChange — no achievedAll (flag OFF payload) → identical to computeMonthComparison, old label', () => {
+    expect(computeSalesChange(TREND)).toEqual({ ...computeMonthComparison(TREND), totalSalesLabel: false });
+    expect(computeSalesChange([])).toEqual({ current: null, previous: null, delta: null, pctChange: null, totalSalesLabel: false });
+  });
 });
 
 /* ─── Rendering ───────────────────────────────────────────────────────────────── */
@@ -147,23 +162,65 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: TREND, pointsCredited: 750, walletPts: 1200 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('Performance')).toBeInTheDocument());
+    expect(await screen.findByText('Performance')).toBeInTheDocument();
     // This month · so far
-    expect(screen.getByText('This month · so far')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText('1,000 cases')).toBeInTheDocument());
-    expect(screen.getByText('100% of 1,000 cases target')).toBeInTheDocument();
+    expect(await screen.findByText('This month · so far')).toBeInTheDocument();
+    expect(await screen.findByText('1,000 cases')).toBeInTheDocument();
+    expect(await screen.findByText('100% of 1,000 cases target')).toBeInTheDocument();
     // Last month · <Mon>  (header carries "· " → distinct from "Change vs last month")
-    expect(screen.getByText(/^Last month · /)).toBeInTheDocument();
-    expect(screen.getByText('800 cases')).toBeInTheDocument();
-    expect(screen.getByText('below target')).toBeInTheDocument();
+    expect(await screen.findByText(/^Last month · /)).toBeInTheDocument();
+    expect(await screen.findByText('800 cases')).toBeInTheDocument();
+    expect(await screen.findByText('below target')).toBeInTheDocument();
     // Reward credited (points outlet only). The points line comes from the SEPARATE
     // /wallet/points-credited effect (setPointsCr), not the trend fetch awaited above — so await
     // it independently; a sync getByText here raced that cross-source commit under suite load.
     expect(await screen.findByText('+750 pts credited')).toBeInTheDocument();
     expect(screen.queryByText(/payout/)).not.toBeInTheDocument();
     // Change vs last month: 1000 − 800 = +200 (+25%)
-    expect(screen.getByText('Change vs last month')).toBeInTheDocument();
-    expect(screen.getByText(/\+25%/)).toBeInTheDocument();
+    expect(await screen.findByText('Change vs last month')).toBeInTheDocument();
+    expect(await screen.findByText(/\+25%/)).toBeInTheDocument();
+    // No achievedAll in the payload → old label, old delta.
+    expect(screen.queryByText('Change in total sales vs last month')).not.toBeInTheDocument();
+  });
+
+  it('A/B example — targeted set changes month to month → change uses ALL-outlet sales (0%, no red), honest label', async () => {
+    // Last month: no targets → 2,500 across A+B. This month: only A targeted → targeted-only 500,
+    // but total sales still 2,500. Old behaviour showed −80%; the change line must read 0%.
+    identityRef.current = identity({ points: true, payout: false });
+    const ab = [
+      { month: PREV, target: null, achieved: 2500, achievedAll: 2500 },
+      { month: CUR,  target: 1000, achieved: 500,  achievedAll: 2500 },
+    ];
+    vi.stubGlobal('fetch', stubFetch({ trend: ab as TrendRow[], pointsCredited: 0, walletPts: 1200 }));
+    render(<PartnerDashboardPage />);
+
+    // Await a trend-driven element first (the card shell renders before the trend fetch lands).
+    expect(await screen.findByText('Change in total sales vs last month')).toBeInTheDocument();
+    // The "so far" / target figures stay targeted-only.
+    expect(await screen.findByText('50% of 1,000 cases target')).toBeInTheDocument();
+    expect(await screen.findByText('2,500 cases')).toBeInTheDocument();
+    // Change line = total sales comparison, labelled as such.
+    expect(await screen.findByText('Change in total sales vs last month')).toBeInTheDocument();
+    expect(screen.queryByText('Change vs last month')).not.toBeInTheDocument();
+    const pctEl = await screen.findByText(/\+0%/);
+    expect(screen.queryByText(/-80%/)).not.toBeInTheDocument();
+    expect(pctEl.closest('.text-red-600')).toBeNull();
+    expect(pctEl.closest('.text-emerald-600')).not.toBeNull();
+  });
+
+  it('achievedAll equals the targeted figure in both months → old label kept', async () => {
+    identityRef.current = identity({ points: true, payout: false });
+    const same = [
+      { month: PREV, target: 1000, achieved: 800,  achievedAll: 800 },
+      { month: CUR,  target: 1000, achieved: 1000, achievedAll: 1000 },
+    ];
+    vi.stubGlobal('fetch', stubFetch({ trend: same as TrendRow[], pointsCredited: 0, walletPts: 1200 }));
+    render(<PartnerDashboardPage />);
+
+    // Await the trend-driven delta (the label alone renders before the trend fetch lands).
+    expect(await screen.findByText(/\+25%/)).toBeInTheDocument();
+    expect(await screen.findByText('Change vs last month')).toBeInTheDocument();
+    expect(screen.queryByText('Change in total sales vs last month')).not.toBeInTheDocument();
   });
 
   it('BLOCKER regression — points come from the month aggregate, NOT page-1 of the passbook', async () => {
@@ -177,7 +234,7 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('+55,000 pts credited')).toBeInTheDocument());
+    expect(await screen.findByText('+55,000 pts credited')).toBeInTheDocument();
     // The card never touches the paginated passbook → correct at any scale.
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/api/wallet/transactions'))).toBe(false);
   });
@@ -193,7 +250,7 @@ describe('Performance card — rendering', () => {
     }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('₹5K payout')).toBeInTheDocument());
+    expect(await screen.findByText('₹5K payout')).toBeInTheDocument();
     expect(screen.queryByText(/pts credited/)).not.toBeInTheDocument();
   });
 
@@ -207,7 +264,7 @@ describe('Performance card — rendering', () => {
     }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('+320 pts credited')).toBeInTheDocument());
+    expect(await screen.findByText('+320 pts credited')).toBeInTheDocument();
     // The payout line comes from the SEPARATE /partner/payouts effect (setPayoutCr), a different
     // async source than the points line awaited above → await it too (was a sync cross-source race).
     expect(await screen.findByText('₹5K payout')).toBeInTheDocument();
@@ -222,9 +279,9 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: inr, unit: 'INR', noPrimary: true, pointsCredited: 0, walletPts: 1200 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('₹5.8L')).toBeInTheDocument()); // this month
-    expect(screen.getByText('₹5L')).toBeInTheDocument();                         // last month
-    expect(screen.getByText(/\+16%/)).toBeInTheDocument();                       // +₹80K → +16%
+    expect(await screen.findByText('₹5.8L')).toBeInTheDocument(); // this month
+    expect(await screen.findByText('₹5L')).toBeInTheDocument();                         // last month
+    expect(await screen.findByText(/\+16%/)).toBeInTheDocument();                       // +₹80K → +16%
   });
 
   it('no-target state → "No target" (this month) and "No target set" (last month)', async () => {
@@ -236,9 +293,9 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: noTargetTrend, noPrimary: true, pointsCredited: 90, walletPts: 1200 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('Performance')).toBeInTheDocument());
-    expect(screen.getByText('No target')).toBeInTheDocument();       // this-month sub-line
-    expect(screen.getByText('No target set')).toBeInTheDocument();   // last-month verdict
+    expect(await screen.findByText('Performance')).toBeInTheDocument();
+    expect(await screen.findByText('No target')).toBeInTheDocument();       // this-month sub-line
+    expect(await screen.findByText('No target set')).toBeInTheDocument();   // last-month verdict
   });
 
   it('zero points last month → honest "0 pts credited"', async () => {
@@ -246,7 +303,7 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: TREND, pointsCredited: 0, walletPts: 1200 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('0 pts credited')).toBeInTheDocument());
+    expect(await screen.findByText('0 pts credited')).toBeInTheDocument();
   });
 
   it('new-outlet empty state → "No activity last month"', async () => {
@@ -254,7 +311,7 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: [] }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByText('No activity last month')).toBeInTheDocument());
+    expect(await screen.findByText('No activity last month')).toBeInTheDocument();
   });
 
   it('v2 OFF (Deoleo) → the Performance card does NOT render (chart shown instead)', async () => {
@@ -262,7 +319,7 @@ describe('Performance card — rendering', () => {
     vi.stubGlobal('fetch', stubFetch({ trend: TREND, pointsCredited: 750 }));
     render(<PartnerDashboardPage />);
 
-    await waitFor(() => expect(screen.getByTestId('achievement-chart')).toBeInTheDocument());
+    expect(await screen.findByTestId('achievement-chart')).toBeInTheDocument();
     expect(screen.queryByText('Performance')).not.toBeInTheDocument();
   });
 });

@@ -111,7 +111,7 @@ describe('Offers section placement', () => {
     render(<PartnerDashboardPage />);
 
     const section = await screen.findByTestId('offers-section');
-    const card = screen.getByTestId('target-achievement-card');
+    const card = await screen.findByTestId('target-achievement-card');
     expect(follows(card, section)).toBe(true);
     expect(follows(section, quickActions())).toBe(true);
   });
@@ -123,7 +123,7 @@ describe('Offers section placement', () => {
     render(<PartnerDashboardPage />);
 
     const section = await screen.findByTestId('offers-section');
-    const chart = screen.getByTestId('achievement-chart');
+    const chart = await screen.findByTestId('achievement-chart');
     expect(follows(chart, section)).toBe(true);
     expect(follows(section, quickActions())).toBe(true);
     expect(screen.queryByTestId('target-achievement-card')).not.toBeInTheDocument();

@@ -89,7 +89,7 @@ describe('GIFP — admin fulfilment queue paging', () => {
     expect(qs.get('limit')).toBe('100');
     expect(qs.has('cursor')).toBe(false);
     expect(qs.has('status')).toBe(false);
-    expect(screen.getByRole('button', { name: /load more orders/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /load more orders/i })).toBeInTheDocument();
   });
 
   it('GIFP2: Load more follows nextCursor, appends rows, and hides itself on the last page', async () => {
@@ -103,18 +103,18 @@ describe('GIFP — admin fulfilment queue paging', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: /load more orders/i }));
     expect(await screen.findByText('RDM-200')).toBeInTheDocument();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('showing 200 of 205');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('showing 200 of 205');
 
-    await userEvent.click(screen.getByRole('button', { name: /load more orders/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /load more orders/i }));
     // Every row is reachable — the oldest order renders.
     expect(await screen.findByText('RDM-205')).toBeInTheDocument();
-    expect(screen.getByText('RDM-1')).toBeInTheDocument();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('(205)');
+    expect(await screen.findByText('RDM-1')).toBeInTheDocument();
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('(205)');
     expect(screen.queryByRole('button', { name: /load more orders/i })).toBeNull();
 
     expect(new URLSearchParams(orderUrls[1].split('?')[1]).get('cursor')).toBe('c1');
     expect(new URLSearchParams(orderUrls[2].split('?')[1]).get('cursor')).toBe('c2');
-  }, 15_000); // renders 205 rows across 3 pages — slow under full-suite load, not async-flaky
+  }, 30_000); // renders 205 rows across 3 pages — slow under full-suite load, not async-flaky
 
   it('GIFP3: the status filter is sent SERVER-side on the first page AND on load-more; total follows the filter', async () => {
     const { orderUrls } = installFetch((qs) => {
@@ -129,13 +129,13 @@ describe('GIFP — admin fulfilment queue paging', () => {
     await openFulfilment();
     expect(await screen.findByTestId('orders-count')).toHaveTextContent('showing 100 of 900');
 
-    await userEvent.selectOptions(screen.getByDisplayValue('All statuses'), 'DISPATCHED');
+    await userEvent.selectOptions(await screen.findByDisplayValue('All statuses'), 'DISPATCHED');
     await waitFor(() => expect(screen.getByTestId('orders-count')).toHaveTextContent('showing 100 of 102'));
     expect(screen.queryByText('RDM-1')).toBeNull();
 
-    await userEvent.click(screen.getByRole('button', { name: /load more orders/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /load more orders/i }));
     expect(await screen.findByText('RDM-302')).toBeInTheDocument();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('(102)');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('(102)');
 
     const last = new URLSearchParams(orderUrls[orderUrls.length - 1].split('?')[1]);
     expect(last.get('status')).toBe('DISPATCHED');
@@ -161,14 +161,14 @@ describe('GIFP — admin fulfilment queue paging', () => {
     await openFulfilment();
 
     await userEvent.click(await screen.findByRole('button', { name: /load more orders/i }));
-    await userEvent.selectOptions(screen.getByDisplayValue('All statuses'), 'DELIVERED');
+    await userEvent.selectOptions(await screen.findByDisplayValue('All statuses'), 'DELIVERED');
     await waitFor(() => expect(screen.getByTestId('orders-count')).toHaveTextContent('(3)'));
 
     releaseStale!();
     await new Promise((r) => setTimeout(r, 20));
     // The All-statuses page-2 rows never leak into the DELIVERED view; count stays honest.
     expect(screen.queryByText('RDM-150')).toBeNull();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('(3)');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('(3)');
     expect(screen.queryByRole('button', { name: /load more orders/i })).toBeNull();
   });
 
@@ -186,15 +186,15 @@ describe('GIFP — admin fulfilment queue paging', () => {
     const row = (await screen.findByText('RDM-150')).closest('tr') as HTMLElement;
     const before = orderUrls.length;
 
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     // PENDING's only console edge is CANCELLED (mirrors the backend table).
-    await userEvent.click(screen.getByRole('button', { name: /confirm → CANCELLED/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /confirm → CANCELLED/i }));
 
     const updated = (await screen.findByText('RDM-150')).closest('tr') as HTMLElement;
     await waitFor(() => expect(within(updated).getByText('CANCELLED')).toBeInTheDocument());
     expect(orderUrls.length).toBe(before); // no window reload
-    expect(screen.getByText('RDM-200')).toBeInTheDocument();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('showing 200 of 300');
+    expect(await screen.findByText('RDM-200')).toBeInTheDocument();
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('showing 200 of 300');
   });
 
   it('GIFP5b: under a status filter, a transitioned row that no longer matches leaves the view and the total drops by one', async () => {
@@ -207,11 +207,11 @@ describe('GIFP — admin fulfilment queue paging', () => {
     await openFulfilment();
     await userEvent.selectOptions(await screen.findByDisplayValue('All statuses'), 'CONFIRMED');
     const row = (await screen.findByText('RDM-2')).closest('tr') as HTMLElement;
-    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
+    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /confirm → PROCESSING/i }));
 
     await waitFor(() => expect(screen.queryByText('RDM-2')).toBeNull());
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('(2)');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('(2)');
     expect(screen.queryByRole('button', { name: /new orders/i })).toBeNull();
   });
 
@@ -235,7 +235,7 @@ describe('GIFP — admin fulfilment queue paging', () => {
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     await userEvent.upload(fileInput, new File(['x'], 'f.xlsx'));
 
-    await userEvent.selectOptions(screen.getByDisplayValue('All statuses'), 'DELIVERED');
+    await userEvent.selectOptions(await screen.findByDisplayValue('All statuses'), 'DELIVERED');
     await waitFor(() => expect(screen.getByTestId('orders-count')).toHaveTextContent('(2)'));
 
     finishUpload!();
@@ -245,9 +245,9 @@ describe('GIFP — admin fulfilment queue paging', () => {
       expect(last.get('status')).toBe('DELIVERED');
       expect(last.get('limit')).toBe('100');
     });
-    expect(screen.getByText('RDM-501')).toBeInTheDocument();
+    expect(await screen.findByText('RDM-501')).toBeInTheDocument();
     expect(screen.queryByText('RDM-1')).toBeNull();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('(2)');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('(2)');
   });
 
   it('GIFP8: a first-page failure on a filter change CLEARS the old rows/total/cursor and offers Retry', async () => {
@@ -262,15 +262,15 @@ describe('GIFP — admin fulfilment queue paging', () => {
     await openFulfilment();
     await screen.findByText('RDM-100');
 
-    await userEvent.selectOptions(screen.getByDisplayValue('All statuses'), 'DISPATCHED');
+    await userEvent.selectOptions(await screen.findByDisplayValue('All statuses'), 'DISPATCHED');
     expect(await screen.findByRole('alert')).toHaveTextContent('server down');
     expect(screen.queryByText('RDM-1')).toBeNull();
     expect(screen.queryByRole('button', { name: /load more orders/i })).toBeNull();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent(/^$/);
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent(/^$/);
 
-    await userEvent.click(screen.getByRole('button', { name: /^retry$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^retry$/i }));
     expect(await screen.findByText('RDM-302')).toBeInTheDocument();
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('(2)');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('(2)');
   });
 
   it('GIFP9: Refresh re-fetches the loaded window up to 500; deeper than 500 resets to the first page and says so', async () => {
@@ -296,14 +296,15 @@ describe('GIFP — admin fulfilment queue paging', () => {
     expect(screen.queryByText(/use "Load more"/)).toBeNull();
 
     // Page to 700 (> 500) -> refresh resets to the first 100 and says so.
-    await waitFor(() => expect(screen.getByText('Load more orders')).toBeInTheDocument());
+    expect(await screen.findByText('Load more orders')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Load more orders'));
     await waitFor(() => expect(count()).toHaveTextContent('showing 700 of 2,000'));
     fireEvent.click(screen.getByLabelText('Refresh orders'));
     await waitFor(() => expect(lastLimit()).toBe('100'));
     await waitFor(() => expect(count()).toHaveTextContent('showing 100 of 2,000'));
-    expect(screen.getByText(/Reloaded the first 100 orders/)).toBeInTheDocument();
-  }, 30_000); // renders a 700-row table (needed to cross the 500 cap) — slow in jsdom, not async-flaky
+    expect(await screen.findByText(/Reloaded the first 100 orders/)).toBeInTheDocument();
+  }, 90_000); // renders a 700-row table (needed to cross the 500 cap) — slow in jsdom, not async-flaky.
+  // 30 s was not enough under full-suite load: took 42 s and failed the pre-push gate twice on 2026-11-17.
 
   it('GIFP10: the count never shows a total below the visible rows; a grown total with no cursor offers "New orders — Refresh"', async () => {
     installFetch(() =>
@@ -311,9 +312,9 @@ describe('GIFP — admin fulfilment queue paging', () => {
     await openFulfilment();
     await screen.findByText('RDM-5');
     // total 3 < 5 rows on screen → shows 5, never "5 of 3".
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('(5)');
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('(5)');
     expect(screen.queryByRole('button', { name: /new orders/i })).toBeNull();
-    expect(screen.getByTestId('orders-count')).toHaveAttribute('aria-live', 'polite');
+    expect(await screen.findByTestId('orders-count')).toHaveAttribute('aria-live', 'polite');
   });
 
   it('GIFP11: "New orders — Refresh" appears when the server total exceeds the loaded rows with no cursor', async () => {
@@ -324,8 +325,8 @@ describe('GIFP — admin fulfilment queue paging', () => {
     await userEvent.click(await screen.findByRole('button', { name: /load more orders/i }));
     await screen.findByText('RDM-150');
     // 3 orders landed above while paging: total 153, 150 loaded, no cursor.
-    expect(screen.getByTestId('orders-count')).toHaveTextContent('showing 150 of 153');
-    expect(screen.getByRole('button', { name: /new orders — refresh/i })).toBeInTheDocument();
+    expect(await screen.findByTestId('orders-count')).toHaveTextContent('showing 150 of 153');
+    expect(await screen.findByRole('button', { name: /new orders — refresh/i })).toBeInTheDocument();
     // a11y: focus moved to the first appended row once Load more unmounted.
     expect(document.activeElement?.getAttribute('data-order-id')).toBe('o101');
   });
@@ -343,8 +344,8 @@ describe('GIFP — admin fulfilment queue paging', () => {
     await userEvent.click(await screen.findByRole('button', { name: /load more orders/i }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
-    expect(screen.getByText('RDM-100')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: /retry load more/i }));
+    expect(await screen.findByText('RDM-100')).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: /retry load more/i }));
     expect(await screen.findByText('RDM-110')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).toBeNull();
   });

@@ -546,24 +546,31 @@ export class WalletService {
       requestedPartnerId,
     });
     if (active.forbidden) throw new ForbiddenException('You cannot act on that outlet.');
-    if (!active.partnerId) return { ...EMPTY_STATEMENT, rows: [] };
+    if (!active.partnerId) return { ...EMPTY_STATEMENT, outletName: null, rows: [] };
 
-    const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: active.partnerId } });
-    if (!wallet) return { ...EMPTY_STATEMENT, rows: [] };
-
+    // The statement's outlet — the SAME row supplies the code AND the name, so a downloaded
+    // statement can never pair one outlet's name with another's code (the FE used to take the name
+    // from the shell identity, which can lag the active-outlet selection). Resolved before the
+    // wallet check so a no-wallet (payout-only / pre-KYC) statement carries the matching pair too.
     const outlet = await this.prisma.outlet.findFirst({
       where: { clientId: user.clientId, partnerId: active.partnerId, deletedAt: null },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-      select: { outletCode: true },
+      select: { outletCode: true, name: true },
     });
+    const outletCode = outlet?.outletCode ?? '';
+    const outletName = outlet?.name ?? null;
 
-    return buildStatementResponse(this.prisma, this.logger, {
+    const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: active.partnerId } });
+    if (!wallet) return { ...EMPTY_STATEMENT, outletCode, outletName, rows: [] };
+
+    const stmt = await buildStatementResponse(this.prisma, this.logger, {
       wallet,
       clientId: user.clientId,
-      outletCode: outlet?.outletCode ?? '',
+      outletCode,
       from: q.from,
       to: q.to,
     });
+    return { ...stmt, outletName };
   }
 
   /**

@@ -11,6 +11,8 @@ RUN ./node_modules/.bin/tsc -p tsconfig.build.json
 RUN ls dist/main.js
 # Sales Import worker entrypoint (Cloud Run Job: node dist/sales-import/worker.main.js).
 RUN ls dist/sales-import/worker.main.js
+# Downloads worker entrypoint (Cloud Run Job: node dist/exports/worker.main.js — DOWNLOADS-PAGE.md).
+RUN ls dist/exports/worker.main.js
 # Compile the DB seed to JS so it runs in the prod image (which omits ts-node).
 # seed.ts → prisma/seed-gifsy-roles.ts imports `../src/common/rbac/gifsy-seed-roles`
 # (the canonical RBAC role defs — kept in src/ so the app owns them, DRY). The prod

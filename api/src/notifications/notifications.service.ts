@@ -377,6 +377,48 @@ export class NotificationsService implements OnModuleInit {
   }
 
   /**
+   * A DIRECT, receipt-tracked transactional WhatsApp to a bare phone number that is NOT a login user
+   * (Voucher Dispersal recipients). Same receipt mechanics as the WhatsApp leg of
+   * notifyUserWithChannels (receipt QUEUED first with a crqid → send → SENT / FAILED, billing-safe), but
+   * the caller names the template + ordered body values and gets the outcome back so it can be shown
+   * per recipient. No bell / push / SMS legs, no per-tenant channel config (the caller decides).
+   *
+   * `clientId` scopes the receipt for the per-tenant delivery report and must be non-empty.
+   * `secretValues` (e.g. the voucher code) are scrubbed from the stored/logged/returned failure reason.
+   * NEVER throws. `receiptId` is null when tracking is off (DELIVERY_RECEIPTS_ENABLED !== 'true') or
+   * the receipt could not be written — the send still fires.
+   */
+  async sendTrackedWhatsappTemplate(params: {
+    clientId: string;
+    eventKey: string;
+    phone: string;
+    templateName: string;
+    bodyValues: string[];
+    secretValues?: (string | null | undefined)[];
+  }): Promise<{ receiptId: string | null; requestId: string | null; error: string | null }> {
+    const secrets = (params.secretValues ?? []).filter(
+      (v): v is string => typeof v === 'string' && v.trim() !== '',
+    );
+    const receipt = await this.createWhatsappReceipt(params.clientId, params.eventKey, params.phone);
+    try {
+      const sendRes = await this.msg91.sendWhatsappTemplate(params.phone, params.templateName, params.bodyValues, {
+        ...(receipt ? { crqid: receipt.crqid } : {}),
+        ...(secrets.length ? { secretValues: secrets } : {}),
+      });
+      const requestId = (sendRes ?? {}).requestId ?? null;
+      await this.markWhatsappReceiptSent(receipt, requestId);
+      return { receiptId: receipt?.id ?? null, requestId, error: null };
+    } catch (e) {
+      const reason = scrubSecrets(String(e), secrets);
+      this.logger.warn(
+        `[notifications] tracked WhatsApp send failed (${params.eventKey}, template ${params.templateName}, ••••${params.phone.slice(-4)}): ${reason}`,
+      );
+      await this.markWhatsappReceiptFailed(receipt, reason);
+      return { receiptId: receipt?.id ?? null, requestId: null, error: reason.slice(0, 500) };
+    }
+  }
+
+  /**
    * Create the additive MessageDeliveryReceipt (channel WHATSAPP, status QUEUED) for a to-be-sent
    * transactional WhatsApp. Returns `{ id, crqid }` or null when a receipt can't be written —
    * BEST-EFFORT: this must never break the send, so every failure (pre-migration table, transient DB

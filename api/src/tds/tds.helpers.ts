@@ -21,9 +21,26 @@ import { createHash } from 'crypto';
 import * as XLSX from 'xlsx';
 import { rupeesToPaise, toPaiseBigInt } from '../common/money';
 import type { UploadResult, UploadRowError } from './dto/tds.dto';
+import { problemRowsEcho } from '../common/upload-echo';
 
 // ─── Re-export so consumers only need to import from tds.helpers ─────────────
 export type { UploadResult, UploadRowError };
+
+/**
+ * Cap an upload result's error + warning lists at UPLOAD_ECHO_MAX_ROWS (memory-safety 2026-11-13).
+ * `failed` already carries the true error total; warningCount carries the true warning total.
+ */
+export function capUploadResult(result: UploadResult): UploadResult {
+  const e = problemRowsEcho(result.errors, () => true);
+  const out: UploadResult = { ...result, errors: e.problemRows, errorsTruncated: e.problemRowsTruncated };
+  if (result.warnings) {
+    const w = problemRowsEcho(result.warnings, () => true);
+    out.warnings = w.problemRows;
+    out.warningCount = w.problemRowCount;
+    out.warningsTruncated = w.problemRowsTruncated;
+  }
+  return out;
+}
 
 // ─── Spreadsheet formula-injection guard ─────────────────────────────────────
 

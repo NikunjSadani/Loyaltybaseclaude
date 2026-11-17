@@ -43,7 +43,7 @@ describe('BrandSwitcher tenant filtering', () => {
       expect(screen.getByText('Onboarding Co')).toBeInTheDocument();
     });
     // ACTIVE one is present too.
-    expect(screen.getByText('Live Co')).toBeInTheDocument();
+    expect(await screen.findByText('Live Co')).toBeInTheDocument();
   });
 
   it('BS2: an INACTIVE tenant does NOT appear', async () => {
@@ -62,7 +62,7 @@ describe('BrandSwitcher tenant filtering', () => {
       expect(screen.getByText('Onboarding Co')).toBeInTheDocument();
     });
     // The muted status chip is only rendered for ONBOARDING rows.
-    expect(screen.getByText('Onboarding')).toBeInTheDocument();
+    expect(await screen.findByText('Onboarding')).toBeInTheDocument();
   });
 });
 
@@ -87,7 +87,7 @@ describe('BrandSwitcher — stale-deployment self-heal on assume', () => {
     );
     render(<BrandSwitcher />);
     fireEvent.click(screen.getByRole('button', { name: /work in brand/i }));
-    await waitFor(() => expect(screen.getByText('Live Co')).toBeInTheDocument());
+    expect(await screen.findByText('Live Co')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Live Co'));
 
     await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
@@ -101,10 +101,10 @@ describe('BrandSwitcher — stale-deployment self-heal on assume', () => {
     );
     render(<BrandSwitcher />);
     fireEvent.click(screen.getByRole('button', { name: /work in brand/i }));
-    await waitFor(() => expect(screen.getByText('Live Co')).toBeInTheDocument());
+    expect(await screen.findByText('Live Co')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Live Co'));
 
-    await waitFor(() => expect(screen.getByText('You do not have access to this brand')).toBeInTheDocument());
+    expect(await screen.findByText('You do not have access to this brand')).toBeInTheDocument();
     expect(reload).not.toHaveBeenCalled();
   });
 });

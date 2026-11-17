@@ -9,7 +9,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { GifsyService } from './gifsy.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -80,7 +80,7 @@ export class GifsyController {
   @Post('clients/:slug/branding-asset')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('tenancy:write')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }))
+  @UseInterceptors(LimitedFileInterceptor('file', MEDIA_UPLOAD_MAX_BYTES))
   uploadBrandingAsset(
     @CurrentUser() user: JwtPayload,
     @Param('slug') slug: string,

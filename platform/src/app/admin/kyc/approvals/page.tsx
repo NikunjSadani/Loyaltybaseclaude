@@ -26,6 +26,7 @@
  */
 
 import { Fragment, useState, useCallback, useEffect } from 'react'
+import Link from 'next/link'
 import {
   Download, Upload, CheckCircle, XCircle, RefreshCw,
   AlertTriangle, MapPin, FileText,
@@ -33,10 +34,13 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton'
-import { downloadBlob } from '@/lib/download'
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
+import { DownloadActionStatus } from '@/components/exports/download-action-status'
 import { usePermissions } from '@/lib/use-permissions'
 import { UpiCaptureMethodBadge, asUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge'
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section'
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote'
+import { FAST_TRACK_HEADLINE, FAST_TRACK_QUEUE_BADGE, fastTrackPreviousText, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track'
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -92,6 +96,9 @@ interface KycApprovalEntry {
     chequeUrl?: string
   }
   fields: Record<KycFieldKey, KycFieldState>
+  // GIFSY-reject fast-track (Bajaj flag): this resubmission skipped manager approval. Normalised to
+  // null when absent (older API / normal submission) → nothing rendered.
+  fastTrack?: KycFastTrack | null
 }
 
 /** Dry-run preview response (apply=false). */
@@ -103,15 +110,35 @@ interface KycVerifyUpdate {
 interface KycVerifyPreviewResult {
   committed: false
   updates: KycVerifyUpdate[]
+  /** Capped at 500 (memory-safety); errorCount = true total, errorsTruncated when cut. */
   errors: { rowNumber: number; submissionId: string; message: string }[]
+  errorCount?: number
+  errorsTruncated?: boolean
   summary: { rowsParsed: number; fieldsSet: number; errors: number }
+}
+
+/** One failed submission on commit. outletCode / outletName / rowNumber are shown when the API sends them
+ *  (operators recognise outlets, not submission UUIDs); the submission id is always kept for support. */
+interface CommitFailureRow {
+  submissionId: string
+  outcome: string
+  detail?: string
+  outletCode?: string | null
+  outletName?: string | null
+  rowNumber?: number | null
 }
 
 /** Commit response (apply=true). */
 interface KycVerifyCommitResult {
   committed: true
-  results: { submissionId: string; outcome: string; detail?: string }[]
+  /** Only the submissions whose commit FAILED (outcome 'error'), capped at 500 — successful
+   *  outcomes are counted in summary, not echoed (memory-safety 2026-11-13). */
+  problemRows: CommitFailureRow[]
+  problemRowCount: number
+  problemRowsTruncated: boolean
   errors: { rowNumber: number; submissionId: string; message: string }[]
+  errorCount?: number
+  errorsTruncated?: boolean
   summary: {
     rowsParsed: number
     fieldsSet: number
@@ -218,6 +245,19 @@ function ProgressPill({ fields }: { fields: Record<KycFieldKey, KycFieldState> }
   )
 }
 
+/** Queue badge: a fast-tracked resubmission — the managers did NOT re-check it. Text, not colour-only. */
+function FastTrackBadge() {
+  return (
+    <span
+      data-testid="fast-track-badge"
+      className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-800 bg-blue-50 border border-blue-200 rounded-full px-1.5 py-0.5 whitespace-nowrap"
+    >
+      <RefreshCw className="h-2.5 w-2.5" aria-hidden="true" />
+      {FAST_TRACK_QUEUE_BADGE}
+    </span>
+  )
+}
+
 function FieldDots({ fields }: { fields: Record<KycFieldKey, KycFieldState> }) {
   return (
     <span className="flex gap-0.5">
@@ -267,8 +307,8 @@ export default function KycApprovalsPage() {
   const [commitError, setCommitError] = useState<string | null>(null)
 
   // ── Export ─────────────────────────────────────────────────────────────────
-  const [exportLoading, setExportLoading] = useState(false)
-  const [exportError, setExportError] = useState<string | null>(null)
+  const exportAction = useDownloadAction()
+  const exportLoading = exportAction.busy
 
   // ── Portal-field remark inputs (keyed submissionId+fieldKey) ───────────────
   const [remarkInputs, setRemarkInputs] = useState<Record<string, string>>({})
@@ -293,6 +333,7 @@ export default function KycApprovalsPage() {
         const normalised = data.entries.map(e => ({
           ...e,
           fields: { ...defaultFields(), ...e.fields },
+          fastTrack: parseFastTrack((e as { fastTrack?: unknown }).fastTrack),
         }))
         setEntries(normalised)
         if (normalised.length > 0) setSelectedId(normalised[0].submissionId)
@@ -306,20 +347,13 @@ export default function KycApprovalsPage() {
   }, [])
 
   // ── Export review dump ─────────────────────────────────────────────────────
-  const handleExport = useCallback(async () => {
-    setExportLoading(true)
-    setExportError(null)
-    try {
-      const res = await fetch('/api/kyc/review-dump')
-      if (!res.ok) throw new Error(`Export failed (${res.status})`)
-      const blob = await res.blob()
-      downloadBlob(blob, `kyc-review-dump-${new Date().toISOString().slice(0, 10)}.xlsx`)
-    } catch (err) {
-      setExportError(err instanceof Error ? err.message : 'Export failed.')
-    } finally {
-      setExportLoading(false)
-    }
-  }, [])
+  // 200 → saves straight away; 202 → prepared in the background (Downloads page).
+  const runExport = exportAction.run
+  const handleExport = useCallback(() => {
+    void runExport('/api/kyc/review-dump', {
+      fallbackFileName: `kyc-review-dump-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    })
+  }, [runExport])
 
   // ── Upload + validate (bulk-verify dry-run preview, apply=false) ───────────
   const handleValidate = useCallback(async () => {
@@ -470,20 +504,15 @@ export default function KycApprovalsPage() {
             <span className="text-xs font-bold text-gray-500 w-20">Step 1</span>
             <Button
               onClick={handleExport}
-              disabled={exportLoading}
+              disabled={exportAction.blocked}
               size="sm"
               className="flex items-center gap-1.5 bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white"
             >
-              {exportLoading
-                ? <><RefreshCw className="h-3 w-3 animate-spin" />Exporting…</>
-                : <><Download className="h-3 w-3" />Export Review Dump (.xlsx)</>}
+              {exportLoading ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+              {downloadButtonLabel(exportAction, 'Export Review Dump (.xlsx)')}
             </Button>
             <span className="text-xs text-gray-400">Download full dump — fill verification cols offline.</span>
-            {exportError && (
-              <span className="text-xs text-red-600 font-medium flex items-center gap-1">
-                <AlertTriangle className="h-3 w-3" />{exportError}
-              </span>
-            )}
+            <DownloadActionStatus action={exportAction} className="basis-full" />
           </div>
 
           {/* Step 2 — Upload + Preview */}
@@ -572,8 +601,21 @@ export default function KycApprovalsPage() {
                   <span className="text-green-700 font-semibold">0 errors</span>
                 )}
               </p>
+              {/* "First N of M" note ABOVE the list (M7); nothing is saved on a preview (M3). */}
+              <UploadTruncationNote
+                shown={previewResult.errors.length}
+                total={previewResult.errorCount}
+                truncated={previewResult.errorsTruncated}
+                noun="errors"
+                next={TRUNCATION_NEXT.PREVIEW}
+              />
               {previewResult.errors.length > 0 && (
-                <ErrorTable errors={previewResult.errors} filename="kyc-bulk-verify-preview-errors.xlsx" />
+                <ErrorTable
+                  errors={previewResult.errors}
+                  filename="kyc-bulk-verify-preview-errors.xlsx"
+                  total={previewResult.errorCount}
+                  truncated={previewResult.errorsTruncated}
+                />
               )}
             </div>
           )}
@@ -593,8 +635,31 @@ export default function KycApprovalsPage() {
                   <span className="text-green-700 font-semibold">0 commit errors</span>
                 )}
               </p>
+              {/* Notes ABOVE each list (M7). The other rows were committed, so fix + re-upload ONLY these (M3). */}
+              <UploadTruncationNote
+                shown={commitResult.errors.length}
+                total={commitResult.errorCount}
+                truncated={commitResult.errorsTruncated}
+                noun="errors"
+                next={TRUNCATION_NEXT.PARTIAL_SAVE}
+              />
               {commitResult.errors.length > 0 && (
-                <ErrorTable errors={commitResult.errors} filename="kyc-bulk-verify-commit-errors.xlsx" />
+                <ErrorTable
+                  errors={commitResult.errors}
+                  filename="kyc-bulk-verify-commit-errors.xlsx"
+                  total={commitResult.errorCount}
+                  truncated={commitResult.errorsTruncated}
+                />
+              )}
+              <UploadTruncationNote
+                shown={commitResult.problemRows?.length ?? 0}
+                total={commitResult.problemRowCount}
+                truncated={commitResult.problemRowsTruncated}
+                noun="failed submissions"
+                next={TRUNCATION_NEXT.PARTIAL_SAVE}
+              />
+              {(commitResult.problemRows?.length ?? 0) > 0 && (
+                <CommitFailureTable rows={commitResult.problemRows} />
               )}
             </div>
           )}
@@ -662,13 +727,14 @@ export default function KycApprovalsPage() {
                   <span className="text-sm font-semibold text-gray-800 truncate">{e.outletName}</span>
                   <ProgressPill fields={e.fields} />
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 flex-wrap">
                   <p className="text-xs text-gray-500 font-mono">{e.outletCode}</p>
                   {brands.length > 1 && (
                     <span className="text-[10px] bg-indigo-50 text-indigo-700 rounded px-1.5 py-0.5 font-medium">
                       {e.clientId}
                     </span>
                   )}
+                  {e.fastTrack && <FastTrackBadge />}
                 </div>
                 <FieldDots fields={e.fields} />
               </button>
@@ -694,6 +760,36 @@ export default function KycApprovalsPage() {
                     {selected.partnerClass}
                   </span>
                 </div>
+
+                {/* GIFSY-reject fast-track: managers did not re-check this resubmission */}
+                {selected.fastTrack && (
+                  <div
+                    data-testid="fast-track-detail-note"
+                    role="note"
+                    className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded px-3 py-2 text-xs text-blue-800"
+                  >
+                    <RefreshCw className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span>
+                      <span className="font-semibold">{FAST_TRACK_HEADLINE}</span>
+                      {/* F6: same fallback as the admin banner when the date is unreadable. */}
+                      {` · ${fastTrackPreviousText(selected.fastTrack)}`}
+                      {/* F5: no id → no link (the note itself always shows). F1: new tab keeps the queue open. */}
+                      {selected.fastTrack.previousSubmissionId && (
+                        <>
+                          {' · '}
+                          <Link
+                            href={`/admin/kyc/${encodeURIComponent(selected.fastTrack.previousSubmissionId)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-medium underline underline-offset-2"
+                          >
+                            View previous submission
+                          </Link>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                )}
 
                 {/* Name mismatch banner */}
                 {selected.nameMismatch && (
@@ -952,7 +1048,18 @@ export default function KycApprovalsPage() {
 
 // ─── Error table (shared by preview + commit) ─────────────────────────────────
 
-function ErrorTable({ errors, filename = 'kyc-bulk-verify-errors.xlsx' }: { errors: { rowNumber: number; submissionId: string; message: string }[]; filename?: string }) {
+function ErrorTable({
+  errors,
+  filename = 'kyc-bulk-verify-errors.xlsx',
+  total,
+  truncated,
+}: {
+  errors: { rowNumber: number; submissionId: string; message: string }[]
+  filename?: string
+  /** True error count + capped flag → the downloaded file says "Showing the first N of M problems" (M4). */
+  total?: number
+  truncated?: boolean
+}) {
   return (
     <div className="space-y-2">
     <div className="overflow-x-auto rounded border border-red-200">
@@ -986,7 +1093,46 @@ function ErrorTable({ errors, filename = 'kyc-bulk-verify-errors.xlsx' }: { erro
         errorsByRow={(row) => (row.__errors as string[]) ?? []}
         filename={filename}
         sheetName="KYC Errors"
+        truncation={{ shown: errors.length, total, truncated, noun: 'problems' }}
       />
+    </div>
+  )
+}
+
+// ─── Commit failures (submissions whose commit errored) ──────────────────────────
+
+function CommitFailureTable({ rows }: { rows: CommitFailureRow[] }) {
+  return (
+    <div className="overflow-x-auto rounded border border-red-200">
+      <table className="text-xs border-collapse w-full" aria-label="Failed submissions">
+        <thead>
+          <tr className="bg-red-50 border-b border-red-200 text-red-700">
+            {['Row', 'Outlet', 'Commit error', 'Submission ID'].map(h => (
+              <th key={h} className="px-3 py-1.5 font-medium text-left">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={`fail-${r.submissionId}-${i}`} className="border-b border-red-100 align-top">
+              <td className="px-3 py-1.5 font-mono text-red-600 whitespace-nowrap">{r.rowNumber ?? '—'}</td>
+              <td className="px-3 py-1.5 text-gray-800">
+                {r.outletCode || r.outletName ? (
+                  <>
+                    {r.outletCode && <span className="font-mono font-semibold">{r.outletCode}</span>}
+                    {r.outletCode && r.outletName && ' — '}
+                    {r.outletName && <span>{r.outletName}</span>}
+                  </>
+                ) : (
+                  <span className="text-gray-400">Outlet not returned — use the submission ID</span>
+                )}
+              </td>
+              <td className="px-3 py-1.5 text-gray-700">{r.detail ?? 'Commit failed'}</td>
+              <td className="px-3 py-1.5 font-mono text-gray-400 whitespace-nowrap">{r.submissionId}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

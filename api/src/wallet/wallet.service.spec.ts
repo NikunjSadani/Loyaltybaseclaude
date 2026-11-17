@@ -652,6 +652,7 @@ describe('WalletService', () => {
         closingBalance: 0,
         currentBalance: 0,
         outletCode: '',
+        outletName: null,
         rows: [],
       });
     });
@@ -664,9 +665,33 @@ describe('WalletService', () => {
         closingBalance: 0,
         currentBalance: 0,
         outletCode: '',
+        outletName: null,
         rows: [],
       });
       expect(mockPrisma.walletTransaction.findMany).not.toHaveBeenCalled();
+    });
+
+    it('no wallet yet but an outlet → the empty statement still names the outlet (code + name from the SAME row)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-9', name: 'Payout Only Store' });
+      const res = await service.statement(partner, {});
+      expect(res).toMatchObject({ outletCode: 'OUT-9', outletName: 'Payout Only Store', rows: [] });
+    });
+
+    it('the outlet name comes from the SAME tenant-scoped active-partner outlet row as the code', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 0 });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-1', name: 'Shop One' });
+      mockPrisma.walletTransaction.findMany.mockResolvedValue([]);
+      const res = await service.statement(partner, {});
+      expect(res.outletCode).toBe('OUT-1');
+      expect(res.outletName).toBe('Shop One');
+      expect(mockPrisma.outlet.findFirst).toHaveBeenCalledWith({
+        where: { clientId: partner.clientId, partnerId: 'cp1', deletedAt: null },
+        orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+        select: { outletCode: true, name: true },
+      });
     });
 
     it('returns every row oldest-first with stored balances, currentBalance and the API row shape', async () => {

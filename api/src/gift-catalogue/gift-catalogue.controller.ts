@@ -10,7 +10,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { GiftCatalogueService } from './gift-catalogue.service';
 import { GiftBackfillService } from './gift-backfill.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -154,7 +154,7 @@ export class GiftCatalogueController {
   // limits.fileSize rejects an oversize upload BEFORE Multer buffers the whole body
   // into memory (matches the branding uploader). Without it the 5 MB check in the
   // service runs only after the full file is in RAM — an unauthenticated-size DoS.
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024, files: 1 } }))
+  @UseInterceptors(LimitedFileInterceptor('file', MEDIA_UPLOAD_MAX_BYTES, { limits: { files: 1 } }))
   uploadGiftImage(@CurrentUser() user: JwtPayload, @UploadedFile() file: Express.Multer.File) {
     return this.catalogue.uploadGiftImage(user, file);
   }

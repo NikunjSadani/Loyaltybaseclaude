@@ -3925,3 +3925,173 @@ model CancelledVoucherCode {
   @@index([orderId])
   @@map("cancelled_voucher_codes")
 }
+
+/// Downloads page (platform/docs/plans/DOWNLOADS-PAGE.md): a heavy report requested by a user, prepared by the
+/// `gifsy-exports` Cloud Run JOB (api/src/exports/worker.main.ts) and kept for EXPORT_RETENTION_DAYS. The file lives in
+/// GCS at `storagePath`; the row is the only index of it. `actor` is the requester's scoping snapshot (role, clientId,
+/// assumed, gifsyRoleId) taken at request time — the worker scopes the report with it, never with a live session.
+/// Claimed with FOR UPDATE SKIP LOCKED + a random claimToken, heartbeated while RUNNING (same model as sales_imports).
+model ExportRequest {
+  id            String    @id @default(cuid())
+  clientId      String // the requester's tenant (assumed tenant for an operator; 'gifsy' for an un-assumed owner)
+  requestedById String
+  kind          String // api/src/exports/export-kinds.ts
+  params        Json // validated, kind-specific
+  actor         Json // { role, clientId, assumed, gifsyRoleId } at request time
+  status        String    @default("QUEUED") // QUEUED|RUNNING|READY|FAILED|EXPIRED
+  fileName      String?
+  storagePath   String?
+  sizeBytes     BigInt?
+  rowCount      Int?
+  error         String?
+  attempts      Int       @default(0)
+  claimToken    String?
+  heartbeatAt   DateTime?
+  createdAt     DateTime  @default(now())
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  expiresAt     DateTime?
+  updatedAt     DateTime  @updatedAt
+
+  @@index([clientId, requestedById, createdAt])
+  @@index([status, createdAt])
+  @@map("export_requests")
+}
+
+// ──────────────────────────────────────────────────────────
+// Voucher Dispersal (platform/docs/plans/VOUCHER-DISPERSAL.md) — a GENERIC, PLATFORM-LEVEL Gifsy admin
+// tool: upload an Excel of recipients (phone, name, ₹ amount, brand), preview, confirm → the system buys
+// ONE Hubble voucher per row (platform Hubble account) and sends it by WhatsApp (`voucher_code`).
+// NOT tenant data: `billedToClientId` is only a reporting label (which client to bill; no FK, nullable).
+// Recipients are bare phone numbers (never users/outlets). Additive: two new tables + two enums.
+// ──────────────────────────────────────────────────────────
+
+enum VoucherDispersalCampaignStatus {
+  DRAFT
+  PREVIEWED
+  CONFIRMED
+  PROCESSING
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+  CANCELLED
+}
+
+enum VoucherDispersalRowStatus {
+  VALID
+  INVALID
+  DUPLICATE
+  QUEUED
+  BUYING
+  PENDING_RECONCILE
+  BOUGHT
+  BUY_FAILED
+  CANCELLED
+}
+
+model VoucherDispersalCampaign {
+  id               String                         @id @default(cuid())
+  name             String
+  /// {{3}} "program" variable of the voucher_code WhatsApp template (e.g. "Bajaj Loyalty").
+  programLabel     String
+  /// Reporting label only — which client this spend is billed to (Client.id slug; no FK). Null = Gifsy.
+  billedToClientId String?
+  note             String?
+  /// Hard ceiling: Σ amount of rows that may be bought never exceeds this (checked at upload,
+  /// at confirm under a campaign row lock, and again under the lock before EVERY Hubble buy).
+  budgetPaise      BigInt
+  status           VoucherDispersalCampaignStatus @default(DRAFT)
+  sourceFileName   String?
+  /// Opaque id of the CURRENT preview (new on every upload). Confirm must quote it (stale-tab protection)
+  /// and a repeated confirm quoting it is answered idempotently.
+  previewId        String?
+  uploadedAt       DateTime?
+  uploadedById     String?
+  createdById      String
+  confirmedById    String?
+  confirmedAt      DateTime?
+  cancelledById    String?
+  cancelledAt      DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime                       @default(now())
+  updatedAt        DateTime                       @updatedAt
+
+  rows VoucherDispersalRow[]
+
+  @@index([status, createdAt])
+  @@index([billedToClientId, createdAt])
+  @@map("voucher_dispersal_campaigns")
+}
+
+model VoucherDispersalRow {
+  id                   String                    @id @default(cuid())
+  campaignId           String
+  /// The Excel row number (header = row 1).
+  rowNumber            Int
+  /// Normalised bare 10-digit Indian mobile; null when the uploaded value could not be parsed.
+  phone                String?
+  /// The phone exactly as uploaded (shown for INVALID rows).
+  rawPhone             String?
+  /// Set ONLY on the first row of the file for a phone (one-voucher-per-phone invariant, DB-enforced by
+  /// @@unique([campaignId, dedupePhone]) — NULLs are distinct, so INVALID/DUPLICATE rows never collide).
+  dedupePhone          String?
+  name                 String
+  amountPaise          BigInt?
+  brandKey             String?
+  brandLabel           String?
+  productId            String?
+  note                 String?
+  status               VoucherDispersalRowStatus
+  invalidReason        String?
+  /// Preview warning (not blocking), e.g. the phone already got a voucher in another campaign recently.
+  warning              String?
+  /// Our Hubble idempotency key — assigned at upload (BEFORE any Hubble call) and reused on every
+  /// indeterminate retry. Replaced only after a DEFINITIVE failure proven by Hubble (old one kept below).
+  hubbleReferenceId    String?                   @unique
+  previousReferenceIds String[]                  @default([])
+  /// Non-secret Hubble account fingerprint at place time (HubbleService.accountFingerprint).
+  hubbleAccount        String?
+  hubbleOrderId        String?
+  placeAttemptAt       DateTime?
+  /// When the CURRENT reference was first handed to Hubble (placeOrder called). Null = this reference
+  /// never reached Hubble. A failed row whose reference reached Hubble keeps counting against the budget
+  /// and stays in the reconcile sweep (Hubble may still hold an order for it).
+  referenceSentAt      DateTime?
+  placeResponded       Boolean?
+  claimToken           String?
+  buyingAt             DateTime?
+  pendingReason        String?
+  pendingSince         DateTime?
+  lastReconcileAt      DateTime?
+  lastReconcileResult  String?
+  /// The voucher credential (stored like RedemptionOrder.voucherCode). NEVER returned to admins
+  /// unmasked, never logged, never audited in clear.
+  voucherCode          String?
+  voucherPin           String?
+  voucherValidTill     String?
+  boughtAt             DateTime?
+  buyFailureReason     String?
+  /// HUBBLE_FAILED | REJECTED | NOT_SENT | BUDGET
+  buyFailureSource     String?
+  /// → MessageDeliveryReceipt.id (no FK: receipts are purged by the 90-day retention; mirror below).
+  whatsappReceiptId    String?
+  messageClaimedAt     DateTime?
+  sentAt               DateTime?
+  messageError         String?
+  /// Last known WhatsApp status mirrored from the receipt (survives receipt retention).
+  messageStatus        String?
+  messageDeliveredAt   DateTime?
+  messageReadAt        DateTime?
+  messageFailureReason String?
+  resendCount          Int                       @default(0)
+  attempts             Int                       @default(0)
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+
+  campaign VoucherDispersalCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+
+  @@unique([campaignId, rowNumber])
+  @@unique([campaignId, dedupePhone])
+  @@index([campaignId, status])
+  @@index([status, updatedAt])
+  @@map("voucher_dispersal_rows")
+}

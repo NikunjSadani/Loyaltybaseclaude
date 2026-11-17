@@ -16,11 +16,15 @@ import type { StatementDoc } from '@/lib/wallet-statement/statement-model';
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }));
+const BASE_IDENTITY = {
+  businessName: 'Anil Traders', outletName: 'Anil Traders Outlet', ownerName: 'Owner', partnerCode: 'P1',
+  outletType: 'SSS', hasPointsActivity: true, hasPayoutActivity: true, loyaltyEnabled: true,
+  resolved: true, loading: false, activePartnerId: null as string | null,
+  operableOutlets: [] as Array<{ partnerId: string; outletCode: string; isOwnLogin: boolean }>,
+};
+let mockIdentity: Record<string, unknown> = { ...BASE_IDENTITY };
 vi.mock('@/lib/partner-identity', () => ({
-  usePartnerIdentity: () => ({
-    businessName: 'Anil Traders', outletName: 'Anil Traders Outlet', ownerName: 'Owner', partnerCode: 'P1',
-    outletType: 'SSS', hasPointsActivity: true, hasPayoutActivity: true, loyaltyEnabled: true,
-  }),
+  usePartnerIdentity: () => mockIdentity,
 }));
 const downloadBlob = vi.fn();
 vi.mock('@/lib/download', () => ({ downloadBlob: (...a: unknown[]) => downloadBlob(...a) }));
@@ -47,11 +51,15 @@ const PAYOUTS = [
     payoutAmountPaise: 250_000, uploadedAt: '2026-05-02T06:00:00.000Z', paidAt: '2026-05-15T06:00:00.000Z', utr: 'UTR1' },
 ];
 
-function stubFetch(rows: unknown[] = ROWS) {
+function stubFetch(
+  rows: unknown[] = ROWS,
+  outletCode = 'OUT-1',
+  opts: { outletName?: string | null } = { outletName: 'Anil Traders Outlet' },
+) {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
     const u = String(url);
     if (u.startsWith('/api/wallet/statement'))
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(statementPayload(rows as typeof ROWS)) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(statementPayload(rows as typeof ROWS, outletCode, opts)) });
     if (u.includes('/api/partner/payouts'))
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: PAYOUTS } }) });
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
@@ -60,7 +68,7 @@ function stubFetch(rows: unknown[] = ROWS) {
 
 async function renderWallet() {
   render(<WalletPage />);
-  await waitFor(() => expect(screen.getByTestId('statement-controls-row')).toBeInTheDocument(), { timeout: 3000 });
+  expect(await screen.findByTestId('statement-controls-row', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 async function pick(label: 'Excel (.xlsx)' | 'PDF') {
@@ -71,6 +79,7 @@ async function pick(label: 'Excel (.xlsx)' | 'PDF') {
 
 describe('SD — partner wallet statement download', () => {
   beforeEach(() => {
+    mockIdentity = { ...BASE_IDENTITY };
     downloadBlob.mockReset();
     statementToXlsxBlob.mockClear();
     statementToPdfBlob.mockClear();
@@ -114,7 +123,7 @@ describe('SD — partner wallet statement download', () => {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: [] } }) });
     }));
     await renderWallet();
-    expect(screen.getByTestId('statement-download-btn')).toBeDisabled();
+    expect(await screen.findByTestId('statement-download-btn')).toBeDisabled();
   });
 
   it('SD4: PDF goes through the PDF renderer', async () => {
@@ -124,5 +133,84 @@ describe('SD — partner wallet statement download', () => {
     await pick('PDF');
     expect(statementToPdfBlob).toHaveBeenCalledTimes(1);
     expect(downloadBlob.mock.calls[0][1]).toBe('wallet-statement-OUT-1-2026-04_2026-05.pdf');
+  });
+});
+
+/**
+ * SDO — the statement's outlet NAME and CODE are always the same outlet. The shell identity may hold
+ * the login's own outlet A (seeded from storage, /partner/me pending or failed) while the active
+ * selection — and so the statement API — is sibling B.
+ */
+describe('SDO — statement outlet name/code always the same outlet', () => {
+  beforeEach(() => {
+    mockIdentity = { ...BASE_IDENTITY };
+    downloadBlob.mockReset();
+    statementToXlsxBlob.mockClear();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const OUTLET_A = { outletName: 'Store A', businessName: 'Firm A' };
+
+  it.each([
+    ['pending', { resolved: false, loading: true }],
+    ['failed', { resolved: false, loading: false }],
+    ['resolved (stale A)', { resolved: true, loading: false }],
+  ])('SDO1: identity %s on outlet A, statement API = B → the doc names B with B\'s code', async (_l, state) => {
+    mockIdentity = { ...BASE_IDENTITY, ...OUTLET_A, ...state };
+    stubFetch(ROWS, 'OUT-B', { outletName: 'Store B' });
+    await renderWallet();
+    await waitFor(() => expect(screen.getByTestId('statement-download-btn')).not.toBeDisabled());
+    await pick('Excel (.xlsx)');
+    const doc = statementToXlsxBlob.mock.calls[0][0];
+    expect(doc.outletName).toBe('Store B');
+    expect(doc.outletCode).toBe('OUT-B');
+  });
+
+  it.each([
+    ['pending', { resolved: false, loading: true }],
+    ['failed', { resolved: false, loading: false }],
+  ])('SDO2: API without a name + identity %s → download BLOCKED (no mixed doc built)', async (_l, state) => {
+    mockIdentity = { ...BASE_IDENTITY, ...OUTLET_A, ...state };
+    stubFetch(ROWS, 'OUT-B', { outletName: undefined });
+    await renderWallet();
+    await waitFor(() => expect(screen.getByTestId('statement-download-btn')).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId('statement-download-btn'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Excel (.xlsx)' }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(statementToXlsxBlob).not.toHaveBeenCalled();
+    expect(downloadBlob).not.toHaveBeenCalled();
+  });
+
+  it('SDO3: API without a name + resolved identity whose ACTIVE outlet has a different code → BLOCKED', async () => {
+    mockIdentity = {
+      ...BASE_IDENTITY, ...OUTLET_A, activePartnerId: null,
+      operableOutlets: [
+        { partnerId: 'pa', outletCode: 'OUT-A', isOwnLogin: true },
+        { partnerId: 'pb', outletCode: 'OUT-B', isOwnLogin: false },
+      ],
+    };
+    stubFetch(ROWS, 'OUT-B', { outletName: undefined });
+    await renderWallet();
+    await waitFor(() => expect(screen.getByTestId('statement-download-btn')).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId('statement-download-btn'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Excel (.xlsx)' }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(statementToXlsxBlob).not.toHaveBeenCalled();
+  });
+
+  it('SDO4: API without a name + resolved identity whose active outlet IS the statement outlet → identity name', async () => {
+    mockIdentity = {
+      ...BASE_IDENTITY, outletName: 'Store B', businessName: 'Firm B', activePartnerId: 'pb',
+      operableOutlets: [
+        { partnerId: 'pa', outletCode: 'OUT-A', isOwnLogin: true },
+        { partnerId: 'pb', outletCode: 'OUT-B', isOwnLogin: false },
+      ],
+    };
+    stubFetch(ROWS, 'OUT-B', { outletName: undefined });
+    await renderWallet();
+    await waitFor(() => expect(screen.getByTestId('statement-download-btn')).not.toBeDisabled());
+    await pick('Excel (.xlsx)');
+    const doc = statementToXlsxBlob.mock.calls[0][0];
+    expect([doc.outletName, doc.outletCode]).toEqual(['Store B', 'OUT-B']);
   });
 });

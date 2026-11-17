@@ -74,14 +74,14 @@ describe('sales catalogue — redemption amounts', () => {
     const { posts } = mockFetch([LIST_ITEM]);
     await openConfirm(/Flipkart Card/);
 
-    expect(screen.getByRole('group', { name: /voucher amount/i })).toBeInTheDocument();
+    expect(await screen.findByRole('group', { name: /voucher amount/i })).toBeInTheDocument();
     expect(screen.queryByLabelText('Amount to redeem (₹)')).not.toBeInTheDocument();
     expect(await screen.findByText('2,500 pts')).toBeInTheDocument(); // ₹1,250 × 2
-    expect(screen.getByRole('button', { name: /Send OTP/ })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: /Send OTP/ })).toBeDisabled();
 
     // ₹300 is below the ₹500 program minimum → greyed out (disabled), like the partner sheet.
     expect(await screen.findByRole('button', { name: /^₹300, 600 points \(below the minimum\)/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /^₹600, 1,200 points$/ })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: /^₹600, 1,200 points$/ })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: /^₹1,250, 2,500 points$/ }));
     expect(screen.getByRole('button', { name: /^₹1,250, 2,500 points$/ })).toHaveAttribute('aria-pressed', 'true');
     fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
@@ -92,16 +92,17 @@ describe('sales catalogue — redemption amounts', () => {
   it('SA2: free-amount ₹ input is whole-rupee only and posts an integer', async () => {
     const { posts } = mockFetch([FREE_ITEM]);
     await openConfirm(/Amazon Any/);
-    const input = screen.getByLabelText('Amount to redeem (₹)') as HTMLInputElement;
+    await screen.findByTestId('redeem-amount-band'); // limits loaded (Send is disabled until then)
+    const input = await screen.findByLabelText('Amount to redeem (₹)') as HTMLInputElement;
     expect(input).toHaveAttribute('inputmode', 'numeric');
 
     const user = userEvent.setup();
     await user.click(input);
     await user.paste('1,250.75');
     expect(input.value).toBe('1,250.75'); // never shrunk
-    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
     // F6: the button is NOT disabled for an invalid amount — a tap shows the reason, sends nothing.
-    const send = screen.getByRole('button', { name: /Send OTP/ });
+    const send = await screen.findByRole('button', { name: /Send OTP/ });
     expect(send).toBeEnabled();
     // F2: the next keystroke hides the message (never shown mid-typing)…
     await user.type(input, '5');
@@ -137,33 +138,37 @@ describe('sales catalogue — redemption amounts', () => {
       }
       if (url.includes('/api/rewards/catalog')) return ok({ items: [FREE_ITEM] });
       if (url.includes('/api/sales/outlets')) return ok({ outlets: [OUTLET] });
+      // The typed-amount ₹ limits need the tenant rate (Send stays disabled until it loads).
+      if (url.includes('/api/auth/me')) return ok({ conversionRate: 2, settings: { minVoucherFreeAmount: 500 } });
       return ok({});
     }));
     await openConfirm(/Amazon Any/);
+    await screen.findByTestId('redeem-amount-band');
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Amount to redeem (₹)'), '1234');
+    await user.type(await screen.findByLabelText('Amount to redeem (₹)'), '1234');
     fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
     await screen.findByText('OTP sent to outlet');
     const otp = document.querySelector('input[maxlength="6"]') as HTMLInputElement;
     fireEvent.change(otp, { target: { value: '123456' } });
     fireEvent.click(screen.getByRole('button', { name: /Verify & Redeem/ }));
     expect(await screen.findByText('Redemption Successful!')).toBeInTheDocument();
-    expect(screen.getByText('₹1,234')).toBeInTheDocument();
-    expect(screen.getByText('−2,468 pts')).toBeInTheDocument();
-    expect(screen.getByText(`${(50000 - 2468).toLocaleString('en-IN')} pts`)).toBeInTheDocument();
+    expect(await screen.findByText('₹1,234')).toBeInTheDocument();
+    expect(await screen.findByText('−2,468 pts')).toBeInTheDocument();
+    expect(await screen.findByText(`${(50000 - 2468).toLocaleString('en-IN')} pts`)).toBeInTheDocument();
   });
 
   it('SA4: after the OTP is sent the ORDER amount is shown; "Change amount" returns to an unlocked field', async () => {
     const { posts } = mockFetch([FREE_ITEM]);
     await openConfirm(/Amazon Any/);
+    await screen.findByTestId('redeem-amount-band');
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Amount to redeem (₹)'), '900');
+    await user.type(await screen.findByLabelText('Amount to redeem (₹)'), '900');
     fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(posts[0]).toMatchObject({ amount: 900 });
     expect(await screen.findByText('₹900')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Change amount' }));
-    const input = screen.getByLabelText('Amount to redeem (₹)') as HTMLInputElement;
+    await user.click(await screen.findByRole('button', { name: 'Change amount' }));
+    const input = await screen.findByLabelText('Amount to redeem (₹)') as HTMLInputElement;
     expect(input).toBeEnabled();
     expect(input.value).toBe('900');
     await user.clear(input);

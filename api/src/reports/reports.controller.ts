@@ -1,9 +1,11 @@
-import { Controller, Get, Query, StreamableFile } from '@nestjs/common';
+import { Controller, Get, Query, Res, StreamableFile } from '@nestjs/common';
+import type { Response } from 'express';
 import { ReportsService, ReportResult } from './reports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { ReportRangeQueryDto, TdsReportQueryDto } from './dto/reports.dto';
+import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/reports.dto';
+import { ExportsService } from '../exports/exports.service';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -20,7 +22,10 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
  */
 @Controller('reports')
 export class ReportsController {
-  constructor(private readonly reports: ReportsService) {}
+  constructor(
+    private readonly reports: ReportsService,
+    private readonly exports: ExportsService,
+  ) {}
 
   /** Turns a service ReportResult into either a plain JSON payload or a download. */
   private respond(result: ReportResult): unknown | StreamableFile {
@@ -36,7 +41,17 @@ export class ReportsController {
   @Get('visibility-status')
   @Roles('GIFSY_ADMIN', 'MIS_USER')
   @RequirePermission('reports:read')
-  async visibilityStatus(@CurrentUser() user: JwtPayload, @Query() query: ReportRangeQueryDto) {
+  async visibilityStatus(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: ReportRangeQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // xlsx → the 'visibility-status' export kind: a range of ≤ 1 month streams now (200); open-ended / longer ranges
+    // are queued (202 → Downloads). The master-switch 403 is checked first, as before.
+    if (query.format === ReportFormat.XLSX) {
+      await this.reports.assertVisibilityStatusAllowed(user);
+      return this.exports.respond(res, user, 'visibility-status', query);
+    }
     return this.respond(await this.reports.visibilityStatus(user, query));
   }
 
@@ -71,7 +86,13 @@ export class ReportsController {
   @Get('kyc-status')
   @Roles('GIFSY_ADMIN', 'MIS_USER', 'CLIENT_ADMIN')
   @RequirePermission('reports:read')
-  async kycStatus(@CurrentUser() user: JwtPayload, @Query() query: ReportRangeQueryDto) {
+  async kycStatus(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: ReportRangeQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // xlsx → the 'kyc-status' export kind (full outlet snapshot → always queued, 202 → Downloads).
+    if (query.format === ReportFormat.XLSX) return this.exports.respond(res, user, 'kyc-status', query);
     return this.respond(await this.reports.kycStatus(user, query));
   }
 }

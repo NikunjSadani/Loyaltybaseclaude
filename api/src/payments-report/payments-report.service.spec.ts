@@ -2,29 +2,28 @@
  * Unit tests for PaymentsReportService — READ-ONLY cross-stream payments report. Mock Prisma, no I/O.
  * Covers: ALL streams included (NO tdsSection filter in the where); paidAt not-null + [from,to]
  * range; optional status filter; batched lookups (findMany call counts — no N+1); the sales chain
- * built from the assignment + reportingTo up-walk (cycle-safe); BigInt → {paise,inr} serialisation;
- * and the xlsx cellSafe formula-injection guard.
+ * built from the assignment + reportingTo up-walk (cycle-safe); BigInt → {paise,inr} serialisation; server-side
+ * PAGING (page/pageSize, total order with an id tiebreak) with WHOLE-RANGE totals from a DB aggregate.
  * Run: npx jest src/payments-report/payments-report.service.spec.ts
  */
 import { PaymentsReportService } from './payments-report.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { startOfIstDay, endOfIstDay } from '../common/ist-date';
-import * as XLSX from 'xlsx';
 
-const mockPrisma = {
-  creditPayoutEntry: { findMany: jest.fn() },
+const mockPrisma: Record<string, unknown> & {
+  creditPayoutEntry: { findMany: jest.Mock; aggregate: jest.Mock };
+  outlet: { findMany: jest.Mock };
+  salesUserAssignment: { findMany: jest.Mock };
+  salesUser: { findMany: jest.Mock };
+  $transaction: jest.Mock;
+} = {
+  creditPayoutEntry: { findMany: jest.fn(), aggregate: jest.fn() },
   outlet: { findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
   salesUser: { findMany: jest.fn() },
+  // Interactive transaction: run the callback against the same mock delegates.
+  $transaction: jest.fn(),
 };
-
-/** Read a built workbook Buffer back into per-sheet array-of-objects. */
-function readWorkbook(buffer: Buffer): Record<string, Record<string, unknown>[]> {
-  const wb = XLSX.read(buffer, { type: 'buffer' });
-  const out: Record<string, Record<string, unknown>[]> = {};
-  for (const name of wb.SheetNames) out[name] = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
-  return out;
-}
 
 const OUTLET = {
   id: 'outlet-pk-1',
@@ -92,7 +91,9 @@ describe('PaymentsReportService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     service = new PaymentsReportService(mockPrisma as unknown as PrismaService);
+    mockPrisma.$transaction.mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => cb(mockPrisma));
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+    mockPrisma.creditPayoutEntry.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { amountPaise: null, tdsDeductedPaise: null } });
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
     mockPrisma.salesUser.findMany.mockResolvedValue([]);
@@ -101,6 +102,7 @@ describe('PaymentsReportService', () => {
   describe('paymentReport — stream inclusion + where clause', () => {
     it('does NOT filter on tdsSection — both visibility and incentive streams are included', async () => {
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue(twoStreamEntries());
+      mockPrisma.creditPayoutEntry.aggregate.mockResolvedValue({ _count: { _all: 2 }, _sum: { amountPaise: 750000n, tdsDeductedPaise: 0n } });
       mockPrisma.outlet.findMany.mockResolvedValue([OUTLET]);
 
       const res = await service.paymentReport({ clientId: 'deoleo' });
@@ -151,6 +153,8 @@ describe('PaymentsReportService', () => {
       ]);
       mockPrisma.outlet.findMany.mockResolvedValue([OUTLET]);
 
+      mockPrisma.creditPayoutEntry.aggregate.mockResolvedValue({ _count: { _all: 1 }, _sum: { amountPaise: 300000n, tdsDeductedPaise: 0n } });
+
       const res = await service.paymentReport({ clientId: 'deoleo', status: 'FAILED' as never });
       const call = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];
       expect(call.where.status).toBe('FAILED');
@@ -159,6 +163,7 @@ describe('PaymentsReportService', () => {
       expect(call.orderBy).toEqual([
         { attemptedAt: { sort: 'desc', nulls: 'last' } },
         { createdAt: 'desc' },
+        { id: 'desc' }, // total order → stable OFFSET pages, identical to the export
       ]);
 
       // The FAILED row surfaces: its reason + the attempt date as the display date (paidAt ?? attemptedAt).
@@ -184,7 +189,7 @@ describe('PaymentsReportService', () => {
       const call = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];
       expect(call.where.status).toBe('PAID');
       expect(call.where.paidAt).toEqual({ not: null });
-      expect(call.orderBy).toEqual([{ paidAt: 'desc' }, { createdAt: 'desc' }]);
+      expect(call.orderBy).toEqual([{ paidAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }]);
     });
 
     it('the default (no status) path is byte-identical: paidAt floor + paidAt-desc order', async () => {
@@ -192,7 +197,7 @@ describe('PaymentsReportService', () => {
       const call = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];
       expect(call.where.paidAt).toEqual({ not: null });
       expect(call.where).not.toHaveProperty('attemptedAt');
-      expect(call.orderBy).toEqual([{ paidAt: 'desc' }, { createdAt: 'desc' }]);
+      expect(call.orderBy).toEqual([{ paidAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }]);
     });
 
     it('platform-wide scope (no clientId) does not pin the query to a tenant', async () => {
@@ -228,20 +233,11 @@ describe('PaymentsReportService', () => {
       expect(byClient['tenantB'].panNumber).toBe('B');
     });
 
-    it('caps at MAX_ROWS and flags truncated (take = MAX_ROWS + 1)', async () => {
-      const one = {
-        clientId: 'deoleo', outletId: 'OUT1', outletName: 'S', fieldName: 'F', period: '2026-06',
-        amountPaise: 100n, narration: '', status: 'PAID', utr: 'U', paidAt: new Date('2026-06-15T00:00:00Z'),
-        tdsSection: null, tdsMethodology: null, tdsDeductedPaise: 0n, download: null, autoInvoice: null,
-      };
-      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue(
-        Array.from({ length: 10001 }, (_, i) => ({ ...one, id: `e${i}` })),
-      );
-      mockPrisma.outlet.findMany.mockResolvedValue([OUTLET]);
+    it('NO cap / truncated flag: the envelope is a page + whole-range totals', async () => {
       const res = await service.paymentReport({ clientId: 'deoleo' });
-      expect(res.truncated).toBe(true);
-      expect(res.count).toBe(10000);
-      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].take).toBe(10001);
+      expect(res).not.toHaveProperty('truncated');
+      expect(res).not.toHaveProperty('maxRows');
+      expect(res).toMatchObject({ page: 1, pageSize: 50, totalRows: 0, totalPages: 0, count: 0 });
     });
 
     it('picks the latest active assignment (orderBy assignedAt desc)', async () => {
@@ -346,33 +342,101 @@ describe('PaymentsReportService', () => {
     });
   });
 
-  describe('paymentReportXlsx', () => {
-    it('emits Payments + Summary sheets and escapes a formula-injection cell', async () => {
-      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
-        {
-          ...twoStreamEntries()[0],
-          outletId: '=HYPERLINK("evil")',
-          outletName: '=cmd()|calc',
-          narration: '@SUM(A1)',
-        },
-      ]);
-      mockPrisma.outlet.findMany.mockResolvedValue([]); // no enrichment; focus on the cell guard
+  describe('server-side paging + whole-range DB totals', () => {
+    function entries(n: number, start = 0) {
+      return Array.from({ length: n }, (_, i) => ({
+        ...twoStreamEntries()[0],
+        id: `e${start + i}`,
+        amountPaise: 100n,
+      }));
+    }
 
-      const { buffer, filename } = await service.paymentReportXlsx({ clientId: 'deoleo' });
-      expect(filename).toBe('payments-report-deoleo.xlsx');
-
-      const wb = readWorkbook(buffer);
-      expect(Object.keys(wb)).toEqual(['Payments', 'Summary']);
-      const row = wb['Payments'][0];
-      expect(String(row['Outlet Code'])).toBe("'=HYPERLINK(\"evil\")");
-      expect(String(row['Outlet Name'])).toBe("'=cmd()|calc");
-      expect(String(row['Remarks'])).toBe("'@SUM(A1)");
-      expect(wb['Summary'][0]).toEqual({ Metric: 'Rows', Value: 1 });
+    it('defaults to page 1 × 50: skip 0, take 50 — never more than one page of entries is loaded', async () => {
+      await service.paymentReport({ clientId: 'deoleo' });
+      const call = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];
+      expect(call.skip).toBe(0);
+      expect(call.take).toBe(50);
     });
 
-    it('platform-wide export filename is "all"', async () => {
-      const { filename } = await service.paymentReportXlsx({});
-      expect(filename).toBe('payments-report-all.xlsx');
+    it('page N → skip (N−1)·pageSize; pageSize is clamped to 1..200', async () => {
+      mockPrisma.creditPayoutEntry.aggregate.mockResolvedValue({ _count: { _all: 100_000 }, _sum: { amountPaise: 1n, tdsDeductedPaise: 0n } });
+      await service.paymentReport({ clientId: 'deoleo', page: 3, pageSize: 100 });
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0]).toMatchObject({ skip: 200, take: 100 });
+      await service.paymentReport({ clientId: 'deoleo', page: 2, pageSize: 5000 });
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[1][0]).toMatchObject({ skip: 200, take: 200 });
+      await service.paymentReport({ clientId: 'deoleo', page: 0, pageSize: 0 });
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[2][0]).toMatchObject({ skip: 0, take: 1 });
+    });
+
+    it('totals come from ONE aggregate over the SAME where (all matching rows), not from the page', async () => {
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue(entries(50, 50)); // page 2: 50 rows × ₹1
+      mockPrisma.creditPayoutEntry.aggregate.mockResolvedValue({
+        _count: { _all: 48_086 },
+        _sum: { amountPaise: 28_900_000_000n, tdsDeductedPaise: 123_456n },
+      });
+      const res = await service.paymentReport({ clientId: 'deoleo', from: '2026-01-01', to: '2026-06-30', page: 2 });
+      const agg = mockPrisma.creditPayoutEntry.aggregate.mock.calls[0][0];
+      const find = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];
+      expect(agg.where).toEqual(find.where); // identical filter → totals are for exactly the paged set
+      expect(agg).toMatchObject({ _count: { _all: true }, _sum: { amountPaise: true, tdsDeductedPaise: true } });
+      expect(agg).not.toHaveProperty('take');
+      expect(agg).not.toHaveProperty('skip');
+      expect(res.rows).toHaveLength(50);
+      expect(res).toMatchObject({ page: 2, pageSize: 50, totalRows: 48_086, totalPages: 962, count: 48_086 });
+      expect(res.totals).toEqual({
+        count: 48_086,
+        amount: { paise: '28900000000', inr: 289_000_000 },
+        tdsDeducted: { paise: '123456', inr: 1234.56 },
+      });
+    });
+
+    it('a page past the end is CLAMPED to the last page (never an empty page with non-zero totals)', async () => {
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue(entries(10, 100));
+      mockPrisma.creditPayoutEntry.aggregate.mockResolvedValue({ _count: { _all: 110 }, _sum: { amountPaise: 11000n, tdsDeductedPaise: 0n } });
+      const res = await service.paymentReport({ clientId: 'deoleo', page: 9, pageSize: 50 });
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0]).toMatchObject({ skip: 100, take: 50 }); // page 3 = last
+      expect(res).toMatchObject({ page: 3, totalPages: 3, totalRows: 110 });
+      expect(res.rows).toHaveLength(10);
+    });
+
+    it('an empty range returns page 1 of 0 with zero totals', async () => {
+      const res = await service.paymentReport({ clientId: 'deoleo', page: 5 });
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0]).toMatchObject({ skip: 0 });
+      expect(res).toMatchObject({ page: 1, totalPages: 0, totalRows: 0, rows: [] });
+      expect(res.totals.amount).toEqual({ paise: '0', inr: 0 });
+    });
+
+    it('the totals and the page are read in ONE REPEATABLE READ transaction (cards and pager always agree)', async () => {
+      const order: string[] = [];
+      const tx = {
+        creditPayoutEntry: {
+          aggregate: jest.fn(async () => {
+            order.push('aggregate');
+            return { _count: { _all: 2 }, _sum: { amountPaise: 750000n, tdsDeductedPaise: 0n } };
+          }),
+          findMany: jest.fn(async () => {
+            order.push('findMany');
+            return twoStreamEntries();
+          }),
+        },
+      };
+      mockPrisma.$transaction.mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx));
+      mockPrisma.outlet.findMany.mockResolvedValue([OUTLET]);
+      const res = await service.paymentReport({ clientId: 'deoleo' });
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.$transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'RepeatableRead' });
+      expect(order).toEqual(['aggregate', 'findMany']); // both inside the snapshot
+      expect(mockPrisma.creditPayoutEntry.findMany).not.toHaveBeenCalled(); // never outside it
+      expect(mockPrisma.creditPayoutEntry.aggregate).not.toHaveBeenCalled();
+      expect(res.totals.count).toBe(res.totalRows);
+      expect(res.rows).toHaveLength(2);
+    });
+
+    it('joins outlets for THIS PAGE only (outlet lookup sized by the page, not the range)', async () => {
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue(entries(3));
+      mockPrisma.creditPayoutEntry.aggregate.mockResolvedValue({ _count: { _all: 48_086 }, _sum: { amountPaise: 1n, tdsDeductedPaise: 0n } });
+      await service.paymentReport({ clientId: 'deoleo', pageSize: 3 });
+      expect(mockPrisma.outlet.findMany.mock.calls[0][0].where.outletCode.in).toEqual(['OUT1']);
     });
   });
 });

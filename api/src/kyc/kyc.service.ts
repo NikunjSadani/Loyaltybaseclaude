@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream';
 import {
   BadRequestException,
   ConflictException,
@@ -29,6 +30,16 @@ import { sniffFileType } from '../common/file-signature';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { isActivePhoneConflict } from '../common/phone-conflict';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
+import { isPartnerLoginRole } from '../partner/partner-display.helper';
+import {
+  fastTrackFromHistory,
+  gifsyRejectionAfterManagers,
+  hasFastTrackFeature,
+  loadKycFastTrackMap,
+  KYC_FAST_TRACK_FEATURE,
+  KYC_FAST_TRACK_MARKER,
+  KYC_FAST_TRACK_NOTE,
+} from './kyc-fast-track.helper';
 // Outlet-master geo-fence (Bajaj-only). REUSE the pure visibility haversine + validity helpers
 // and the shared radius constant — never re-implement the distance math (per the design).
 import {
@@ -106,11 +117,11 @@ import {
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
+import { problemRowsEcho, type ProblemRowsEcho } from '../common/upload-echo';
 import { KYC_FIELD_KEYS, BridgeResult, requiredFieldKeys } from './kyc-verification.helper';
 import { evaluateSubmission } from './kyc-verification.helper';
+import { mintDocViewToken } from './doc-view-token';
 import {
-  generateKycReviewDumpExcel,
-  generateRejectedKycExcel,
   KycReviewDumpEntry,
   KycReviewDumpFieldState,
   RejectedKycRow,
@@ -195,12 +206,20 @@ export interface BulkVerifySubmissionResult {
   submissionId: string;
   outcome: 'approved' | 'reupload' | 'recorded' | 'skipped' | 'error';
   detail?: string;
+  /** Commit failures only: where the operator finds it — spreadsheet row + the partner's outlet(s). */
+  rowNumber?: number;
+  outletCode?: string;
+  outletName?: string;
 }
 
-export interface BulkVerifyResult {
+export interface BulkVerifyResult extends ProblemRowsEcho<BulkVerifySubmissionResult> {
   committed: boolean;
-  results: BulkVerifySubmissionResult[];
+  // Memory-safety (2026-11-13): per-submission outcomes are no longer echoed in full —
+  // only the 'error' outcomes come back (problemRows, capped); the counts live in summary.
+  /** Parse errors, capped at UPLOAD_ECHO_MAX_ROWS (errorCount = true total). */
   errors: KycVerifyParseResult['errors'];
+  errorCount: number;
+  errorsTruncated: boolean;
   summary: {
     rowsParsed: number;
     fieldsSet: number;
@@ -213,10 +232,25 @@ export interface BulkVerifyResult {
   };
 }
 
+/** Parse errors are already problem-only; cap the list (memory-safety) and report the true total. */
+function cappedParseErrors(errors: KycVerifyParseResult['errors']): {
+  errors: KycVerifyParseResult['errors'];
+  errorCount: number;
+  errorsTruncated: boolean;
+} {
+  const e = problemRowsEcho(errors, () => true);
+  return { errors: e.problemRows, errorCount: e.problemRowCount, errorsTruncated: e.problemRowsTruncated };
+}
+
 export interface BulkVerifyDryRunResult {
   committed: false;
+  /** One entry per PENDING_GIFSY submission in the file — bounded by the tenant's pending queue;
+   *  the review screen merges these decisions into its in-memory state, so they stay. */
   updates: KycVerifyUpdate[];
+  /** Parse errors, capped at UPLOAD_ECHO_MAX_ROWS (errorCount = true total). */
   errors: KycVerifyParseResult['errors'];
+  errorCount: number;
+  errorsTruncated: boolean;
   summary: KycVerifyParseResult['summary'];
 }
 
@@ -252,6 +286,23 @@ type CommitOutcome = BulkVerifySubmissionResult & { notification?: CommitNotifyI
  * KycDocument.fileUrl (no multipart upload happens on this path — the form posts
  * JSON with base64/url document references), so no StorageService upload is used.
  */
+/** Keyset position of a KYC export page (submissions ordered by createdAt, id ascending). */
+export interface KycExportCursor {
+  createdAt: Date;
+  id: string;
+}
+
+/** Submissions strictly after `c` in (createdAt, id) ascending order. */
+function kycExportAfter(c: KycExportCursor): Prisma.KycSubmissionWhereInput {
+  return { OR: [{ createdAt: { gt: c.createdAt } }, { createdAt: c.createdAt, id: { gt: c.id } }] };
+}
+
+/** The cursor after a page — null when the page was not full (the last page). */
+function kycExportNext(page: { createdAt: Date; id: string }[], take: number): KycExportCursor | null {
+  const last = page[page.length - 1];
+  return page.length === take && last ? { createdAt: last.createdAt, id: last.id } : null;
+}
+
 /** Shared empty display-name map (per-tenant fallback) so `labelFor` always receives a Map. */
 const EMPTY_TYPE_DISPLAY: ReadonlyMap<string, string> = new Map<string, string>();
 
@@ -283,10 +334,7 @@ export class KycService {
    * document links in the Outlet Master export.
    */
   signDocViewToken(docId: string, clientId: string): string {
-    return this.jwt.sign(
-      { sub: docId, clientId, typ: 'docview' },
-      { secret: this.config.get('JWT_SECRET'), expiresIn: '30d' },
-    );
+    return mintDocViewToken(this.jwt, this.config.get('JWT_SECRET'), docId, clientId);
   }
 
   /**
@@ -306,7 +354,7 @@ export class KycService {
    * document's real tenant (KycDocument → kycSubmission → user.clientId) — there
    * is no logged-in user on this public route, so the token IS the authority.
    */
-  async viewDocument(token: string): Promise<{ bytes: Buffer; contentType: string; inline: boolean }> {
+  async viewDocument(token: string): Promise<{ stream: Readable; size: number; contentType: string; inline: boolean }> {
     const deny = () => new NotFoundException();
 
     if (!token || typeof token !== 'string') throw deny();
@@ -344,7 +392,7 @@ export class KycService {
     if (!docClientId || docClientId !== tokenClientId) throw deny();
     if (!doc.fileKey) throw deny();
 
-    const file = await this.storage.downloadBytes(doc.fileKey);
+    const file = await this.storage.openBoundedObject(doc.fileKey);
     if (!file) throw deny();
 
     // Stored-XSS guard: a KYC document's mimeType is CLIENT-supplied at upload, and
@@ -359,7 +407,8 @@ export class KycService {
     const inline  = SAFE.has(rawMime);
 
     return {
-      bytes: file.bytes,
+      stream: file.stream,
+      size: file.size,
       contentType: inline ? rawMime : 'application/octet-stream',
       inline,
     };
@@ -497,6 +546,12 @@ export class KycService {
       select: { id: true, partnerId: true, proposedPartner: true, partner: { select: { phone: true } } },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
+    // A1: the outlet must STILL be assigned to the sales caller's team when the owner is asked to consent (an outlet
+    // reassigned since the draft was started cannot be routed by the old rep). consent() re-checks the same rule
+    // before verifying the OTP (R2), so a reassignment between send and verify is also caught.
+    if (submission.partnerId) {
+      await this.assertOutletAssignedToCallerTeam(user, { partnerId: submission.partnerId });
+    }
 
     // Bind the consent OTP to THIS submission's outlet owner: the number must be the one persisted on
     // the submission (re-KYC → the proposed phone; new outlet → the partner's phone), never an
@@ -1013,6 +1068,204 @@ export class KycService {
     }
   }
 
+  /**
+   * Whether the tenant fast-tracks a resubmission after a GIFSY rejection straight to Gifsy (Bajaj, via the
+   * `gifsyRejectFastTrack` feature; default OFF → every other tenant incl. Deoleo routes exactly as before).
+   * Reads the cached tenant config; on a resolve ERROR it LOGS a warning and fails SAFE to OFF (the normal
+   * manager route — never skips an approval by accident).
+   */
+  private async isGifsyRejectFastTrack(clientId: string): Promise<boolean> {
+    try {
+      const cfg = await this.tenant.resolveClient(clientId);
+      const features = (cfg.features ?? {}) as unknown as Record<string, unknown>;
+      return features[KYC_FAST_TRACK_FEATURE] === true;
+    } catch (e) {
+      this.logger.warn(
+        `${KYC_FAST_TRACK_FEATURE} resolve failed for tenant ${clientId}; falling back to the normal manager route. ` +
+          (e instanceof Error ? e.message : String(e)),
+      );
+      return false;
+    }
+  }
+
+  /**
+   * D2 — whether ANY tenant in this caller's KYC read scope has `gifsyRejectFastTrack` ON, i.e. whether KYC read
+   * responses / exports carry the `fastTrack` marker (+ the export "Routing" column) at all. Flag-off scopes (Deoleo)
+   * get byte-identical JSON/files: no key, no column, and the marker loader never runs.
+   *   - `recordClientId` given (a single record, e.g. GET /kyc/:id) → decided by THAT record's tenant;
+   *   - an assumed GIFSY / CLIENT_ADMIN / any tenant-pinned caller → their (assumed) tenant;
+   *   - an un-assumed GIFSY (platform-wide read) → true iff ANY tenant has the flag (the scope is every tenant).
+   * On a read ERROR it warns and fails OPEN (true): showing a `fastTrack: null` key is harmless, while hiding a real
+   * skip would be a silent pass-through.
+   */
+  async fastTrackInScope(user: JwtPayload, recordClientId?: string | null): Promise<boolean> {
+    const clientId = recordClientId || (platformWide(user) ? null : user.clientId);
+    try {
+      if (clientId) {
+        const cfg = await this.tenant.resolveClient(clientId);
+        return hasFastTrackFeature(cfg?.features);
+      }
+      const clients = await this.prisma.client.findMany({ select: { features: true } });
+      return Array.isArray(clients) && clients.some((c) => hasFastTrackFeature(c.features));
+    } catch (e) {
+      this.logger.warn(
+        `${KYC_FAST_TRACK_FEATURE} scope check failed (${clientId ?? 'all tenants'}); including the fast-track marker. ` +
+          (e instanceof Error ? e.message : String(e)),
+      );
+      return true;
+    }
+  }
+
+  /**
+   * The caller's live (non-deleted) SalesUser in this tenant + their reporting subtree (self + every descendant), from
+   * ONE tenant-scoped read. null when the caller has no live SalesUser (admin / partner / soft-deleted rep).
+   */
+  private async callerSalesTeam(user: JwtPayload): Promise<{ salesUserId: string; team: Set<string> } | null> {
+    const nodes = await this.prisma.salesUser.findMany({
+      where: { clientId: user.clientId, deletedAt: null },
+      select: { id: true, reportingToId: true, userId: true },
+    });
+    if (!Array.isArray(nodes)) return null;
+    const me = nodes.find((n) => n.userId === user.sub);
+    if (!me) return null;
+    return { salesUserId: me.id, team: descendantSalesUserIds(me.id, nodes) };
+  }
+
+  /**
+   * A1 (PLATFORM-WIDE, owner-approved) — who may act on an outlet (file a KYC, mark "Not interested", send / verify
+   * the consent OTP). Deny by default:
+   *   - ADMINS (isAdmin: GIFSY_ADMIN / GIFSY_STAFF / CLIENT_ADMIN) → allowed, unchanged;
+   *   - PARTNER logins (isPartnerLoginRole: SSS / WHOLESALER / SUB_STOCKIST) → ONLY their OWN outlet/partner
+   *     (ChannelPartner.userId = the caller), tenant-scoped (R1);
+   *   - SALES callers (a live SalesUser row, or any SALES_* role) → ONLY an outlet ACTIVELY assigned
+   *     (SalesUserAssignment, unassignedAt null) to them or someone in their downline; a SALES_* role WITHOUT a live
+   *     SalesUser row is refused, never waved through;
+   *   - every OTHER role (MIS_USER, VENDOR, anything else) → refused (R1).
+   * Target: `{ outletId }` → that outlet; `{ partnerId }` → the partner OR any of its (tenant, non-deleted) outlets.
+   * (Only the sales app calls these endpoints — platform/src/app/sales/kyc/new.)
+   */
+  private async assertOutletAssignedToCallerTeam(
+    user: JwtPayload,
+    target: { outletId: string } | { partnerId: string },
+  ): Promise<void> {
+    if (this.isAdmin(user.role)) return;
+    const notAssigned = "This outlet isn't assigned to you or your team.";
+    if (isPartnerLoginRole(user.role)) {
+      const owned =
+        'outletId' in target
+          ? await this.prisma.outlet.count({
+              where: { id: target.outletId, clientId: user.clientId, deletedAt: null, partner: { userId: user.sub } },
+            })
+          : await this.prisma.channelPartner.count({
+              where: { id: target.partnerId, clientId: user.clientId, userId: user.sub },
+            });
+      if (!owned) throw new ForbiddenException(notAssigned);
+      return;
+    }
+    const caller = await this.callerSalesTeam(user);
+    // Not a sales user (MIS_USER, VENDOR, a SALES_* role with no live SalesUser row, anything else) → refused.
+    if (!caller) throw new ForbiddenException(notAssigned);
+    const team = Array.from(caller.team);
+    const rows = await this.prisma.salesUserAssignment.findMany({
+      where:
+        'outletId' in target
+          ? { outletId: target.outletId, unassignedAt: null, salesUserId: { in: team } }
+          : {
+              unassignedAt: null,
+              salesUserId: { in: team },
+              OR: [
+                { partnerId: target.partnerId, partner: { clientId: user.clientId } },
+                { outlet: { partnerId: target.partnerId, clientId: user.clientId, deletedAt: null } },
+              ],
+            },
+      select: { salesUserId: true },
+    });
+    if (!Array.isArray(rows) || !rows.some((r) => caller.team.has(r.salesUserId))) {
+      throw new ForbiddenException(notAssigned);
+    }
+  }
+
+  /**
+   * GIFSY-reject fast-track eligibility for a DRAFT about to be routed at consent (see kyc-fast-track.helper.ts
+   * for the full business rule). Returns the previous submission + its Gifsy-rejection time when the KYC must
+   * go STRAIGHT to PENDING_GIFSY, else null (→ the normal resolveInitialRouting route, `routedStatus`).
+   *
+   * Gates, cheapest first:
+   *   1. the NEW submission's variant (SO Declaration always goes via managers — the ASM must re-sign) + a partner;
+   *   2. B2 — the normal route would have gone to a sales MANAGER (`routedStatus` = PENDING_*_APPROVAL). A non-sales
+   *      submitter (CLIENT_ADMIN, partner login, soft-deleted sales user) routes to SUBMITTED → never fast-tracked;
+   *   3. the tenant flag (fail-safe OFF);
+   *   4. the partner's most recently ROUTED prior submission was rejected by Gifsy after the managers (B3/B4);
+   *   5. B1 — the submitter is the outlet's CURRENT active assignee, or a manager above that assignee. Any rep can
+   *      file a KYC for any outlet in the tenant, so without this a rep from another territory could ride an old
+   *      rejection with no manager ever seeing it. An outlet reassigned to a new rep fast-tracks for the NEW assignee.
+   *      (The A1/R2 gate at the top of consent() already refuses an unassigned SALES submitter; this check stays as
+   *      defence in depth — e.g. a reassignment between the gate and here — and is what keeps it fast-track-specific.)
+   * B5: any lookup ERROR in 4–5 → warn + null (the normal route; the KYC is never left in DRAFT by this).
+   *
+   * KEY = partnerId (the OUTLET's ChannelPartner), not the rep and not the outlet row: every KycSubmission is filed
+   * ABOUT a partner; a resubmission after a rejection takes the `outlet.partnerId` (re-KYC) branch of create() → the
+   * SAME partnerId; group child outlets each get their OWN partner, so siblings never share a key.
+   */
+  private async resolveGifsyRejectFastTrack(
+    user: JwtPayload,
+    submission: { id: string; partnerId: string | null; kycVariant?: string | null },
+    routedStatus: string,
+  ): Promise<{ previousSubmissionId: string; previousRejectedAt: Date } | null> {
+    if (submission.kycVariant === 'SO_DECLARATION') return null;
+    if (!submission.partnerId) return null;
+    if (!/^PENDING_[A-Z]+_APPROVAL$/.test(routedStatus)) return null; // B2
+    const clientId = user.clientId;
+    const partnerId = submission.partnerId;
+    if (!(await this.isGifsyRejectFastTrack(clientId))) return null;
+
+    try {
+      // B4: the partner's most recently ROUTED prior submission (submittedAt = the consent/routing moment; nulls
+      // last, then createdAt, id). Excludes this submission and every DRAFT. Tenant-scoped via the partner.
+      const prior = await this.prisma.kycSubmission.findFirst({
+        where: { partnerId, id: { not: submission.id }, status: { not: 'DRAFT' }, partner: { clientId } },
+        orderBy: [{ submittedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }, { id: 'desc' }],
+        select: {
+          id: true,
+          status: true,
+          // B3: the FULL history (the walk-back needs the rejected→rejected chain), oldest first.
+          statusHistory: {
+            select: { fromStatus: true, toStatus: true, createdAt: true },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          },
+        },
+      });
+      if (!prior) return null;
+      const rejection = gifsyRejectionAfterManagers(prior, prior.statusHistory);
+      if (!rejection) return null;
+
+      // B1: submitter = the current active assignee, or above them in the reporting chain.
+      const submitter = await this.callerSalesTeam(user);
+      if (!submitter) return null;
+      const assignments = await this.prisma.salesUserAssignment.findMany({
+        where: {
+          unassignedAt: null,
+          salesUser: { clientId, deletedAt: null },
+          OR: [
+            { partnerId, partner: { clientId } },
+            { outlet: { partnerId, clientId, deletedAt: null } },
+          ],
+        },
+        select: { salesUserId: true },
+      });
+      const covered = Array.isArray(assignments) && assignments.some((a) => submitter.team.has(a.salesUserId));
+      if (!covered) return null;
+
+      return { previousSubmissionId: prior.id, previousRejectedAt: rejection.rejectedAt };
+    } catch (e) {
+      this.logger.warn(
+        `${KYC_FAST_TRACK_FEATURE} eligibility lookup failed for submission ${submission.id}; taking the normal route. ` +
+          (e instanceof Error ? e.message : String(e)),
+      );
+      return null;
+    }
+  }
+
   private async resolveNextActiveManagerLevel(
     approverUserId: string,
     clientId: string,
@@ -1501,6 +1754,9 @@ export class KycService {
       include: { outletType: { select: { code: true } } },
     });
     if (!outlet) throw new NotFoundException('Outlet not found');
+    // A1: a sales caller may file only for an outlet actively assigned to them or their downline (after the 404,
+    // so another tenant's outlet still 404s; an unassigned same-tenant outlet 403s).
+    await this.assertOutletAssignedToCallerTeam(user, { outletId: outlet.id });
 
     // ── OUTLET-MASTER GEO-FENCE (Bajaj-only via clients.features.outletMasterGeo) ──────────
     // REUSES the SAME feature resolution admin-outlets.service.ts uses (a direct Client.features
@@ -2890,6 +3146,11 @@ export class KycService {
     // BUT once the rep has RESUBMITTED (this submission is in-flight / under review), the
     // in-flight status must show through — else a just-resubmitted re-KYC keeps reading as
     // "Re-KYC Required" instead of "Under Review" (the flags stay set until approval).
+    // GIFSY-reject fast-track markers for the page in ONE query (no N+1) — `fastTrack` per row. D2: ONLY when a
+    // tenant in the caller's scope has the flag; otherwise no query and no key (flag-off JSON byte-identical).
+    const fastTrackById = (await this.fastTrackInScope(user))
+      ? await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id))
+      : null;
     const mapped = submissions.map((s) => {
       // Strip the raw statusHistory out of the response — it is an internal detail; the FE
       // only needs the derived `gifsyEnteredAt` (latest PENDING_GIFSY entry, ISO or null) to
@@ -2903,7 +3164,13 @@ export class KycService {
           ? ('RE_KYC_REQUIRED' as (typeof s)['status'])
           : s.status;
       // FIX 2: never ship the internal payoutCarried bookkeeping (it may hold a hidden live value).
-      return { ...rest, proposedPartner: stripPayoutCarried(rest.proposedPartner), status, gifsyEnteredAt };
+      return {
+        ...rest,
+        proposedPartner: stripPayoutCarried(rest.proposedPartner),
+        status,
+        gifsyEnteredAt,
+        ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
+      };
     });
 
     return {
@@ -3192,6 +3459,9 @@ export class KycService {
           )
         : null;
 
+    // D2: whether the record's tenant shows the fast-track marker (partner.clientId; else the caller's scope).
+    const fastTrackOn = await this.fastTrackInScope(user, submission.partner?.clientId ?? null);
+
     return {
       submission: {
         ...submission,
@@ -3210,6 +3480,10 @@ export class KycService {
         gstRegistrationType:
           (submission.partner?.gstRegistrationType as GstRegistrationType | null | undefined) ?? null,
         classificationLock,
+        // GIFSY-reject fast-track marker (Bajaj): { previousSubmissionId, previousRejectedAt } when this KYC
+        // skipped the managers at consent, else null. Derived from the already-loaded status history (no query).
+        // D2: the key exists ONLY for a flag-on tenant (decided by the RECORD's tenant) — flag-off JSON unchanged.
+        ...(fastTrackOn ? { fastTrack: fastTrackFromHistory(submission.statusHistory) } : {}),
       },
     };
   }
@@ -3386,6 +3660,8 @@ export class KycService {
             toStatus: status as never,
             notes: rejectionReason ?? null,
             changedByUserId: user.sub,
+            // B7: label every GIFSY status change (as reject() does) — PATCH is GIFSY-only.
+            metadata: { stage: 'GIFSY', approverRole: user.role },
           },
         });
       }
@@ -3943,9 +4219,8 @@ export class KycService {
     // Intra-tenant read leak fix: a partner could read ANY submission's wallet
     // ledger in their tenant (PII). Restrict partner callers to their own
     // submission; admins + sales stay tenant-wide (mirrors list()).
-    const PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
     const where: Prisma.KycSubmissionWhereInput = { id, ...this.kycTenantFilter(user) };
-    if (PARTNER_ROLES.includes(user.role)) where.userId = user.sub; // a partner may only read their own KYC
+    if (isPartnerLoginRole(user.role)) where.userId = user.sub; // a partner may only read their own KYC
 
     const submission = await this.prisma.kycSubmission.findFirst({
       where,
@@ -4072,6 +4347,11 @@ export class KycService {
       },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
+    // A1/R2: re-check the assignment HERE too, before the OTP is claimed — an outlet reassigned between the OTP
+    // send and the verify must not be routed by the old rep.
+    if (submission.partnerId) {
+      await this.assertOutletAssignedToCallerTeam(user, { partnerId: submission.partnerId });
+    }
     const mobile = this.consentOwnerPhone(submission);
     if (!mobile || mobile !== this.phoneLast10(dto.mobile)) throw new UnauthorizedOtp('OTP not found or expired');
 
@@ -4146,7 +4426,64 @@ export class KycService {
     // owner. Guarded on DRAFT so a repeat consent (OTP re-verify) is idempotent — no
     // double-routing, double-notify, or duplicate "submitted" WhatsApp.
     if (submission.status === 'DRAFT') {
-      const { status: routedStatus, escalatedFrom } = await this.resolveInitialRouting(user);
+      // GIFSY-reject FAST-TRACK (Bajaj `gifsyRejectFastTrack`; OFF for every other tenant → this returns null
+      // and the normal routing below runs byte-identically). A resubmission after Gifsy rejected the previous
+      // KYC AFTER the managers approved it goes STRAIGHT to PENDING_GIFSY — no manager to approve, so no
+      // sales-approver notification. The skip is made VISIBLE: a DRAFT→PENDING_GIFSY history row carrying the
+      // marker (surfaced as `fastTrack` on the detail/queue + the exports' "Routing" column) + an AuditLog row.
+      // The normal route is resolved FIRST (read-only): B2 fast-tracks only what would have gone to a manager.
+      const initialRouting = await this.resolveInitialRouting(user);
+      const fastTrack = await this.resolveGifsyRejectFastTrack(user, submission, initialRouting.status);
+      if (fastTrack) {
+        // stage GIFSY (the KYC now sits with Gifsy); deliberately NO approverRole — nobody approved it.
+        const ftMeta = {
+          fastTrack: KYC_FAST_TRACK_MARKER,
+          previousSubmissionId: fastTrack.previousSubmissionId,
+          previousRejectedAt: fastTrack.previousRejectedAt.toISOString(),
+          stage: 'GIFSY',
+        };
+        // ATOMIC: the DRAFT-guarded flip + its history + audit commit together (a racing consent sees count 0).
+        const routedFast = await this.prisma.$transaction(async (tx) => {
+          const r = await tx.kycSubmission.updateMany({
+            where: { id: submissionId, status: 'DRAFT' },
+            data: { status: 'PENDING_GIFSY', escalatedFrom: null, submittedAt: verifiedAt },
+          });
+          if (r?.count !== 1) return false;
+          await tx.kycStatusHistory.create({
+            data: {
+              kycSubmissionId: submissionId,
+              fromStatus: 'DRAFT',
+              toStatus: 'PENDING_GIFSY',
+              changedByUserId: user.sub,
+              notes: KYC_FAST_TRACK_NOTE,
+              metadata: ftMeta,
+            },
+          });
+          await tx.auditLog.create({
+            data: {
+              action: 'UPDATE',
+              entityType: 'KYC_SUBMISSION',
+              entityId: submissionId,
+              actorId: user.sub,
+              oldValues: { status: 'DRAFT' },
+              newValues: { status: 'PENDING_GIFSY' },
+              metadata: { ...ftMeta, reason: KYC_FAST_TRACK_NOTE },
+            },
+          });
+          return true;
+        });
+        if (!routedFast) return { verified: true, submissionId };
+        this.logger.log(
+          `[kyc-fast-track] ${submissionId} → PENDING_GIFSY (previous ${fastTrack.previousSubmissionId} rejected by GIFSY)`,
+        );
+
+        // Owner KYC_SUBMITTED — exactly as the normal path below (paid channels only, fire-and-forget). B6: ONLY
+        // this one — no extra immediate KYC_UNDER_REVIEW (two paid owner messages seconds apart).
+        await this.notifyOwnerKycSubmitted(user, submission, mobile, verifiedAt);
+        return { verified: true, submissionId };
+      }
+
+      const { status: routedStatus, escalatedFrom } = initialRouting;
       // ATOMIC DRAFT→routed: only the consent that actually moves the row out of DRAFT writes the
       // history row + notifies (a racing consent sees count 0 and stops here).
       const routed = await this.prisma.kycSubmission.updateMany({
@@ -4181,25 +4518,38 @@ export class KycService {
       // WHATSAPP_KYC tenant the default reproduces today's `deoleo_kyc_submission` WhatsApp.
       // includeFreeChannels:false — submission historically wrote NO bell/push row, only the
       // owner WhatsApp, so keep it paid-channel-only (behaviour-neutral). Fire-and-forget.
-      await this.notifications
-        .notifyUserWithChannels({
-          clientId: user.clientId,
-          userId: submission.userId,
-          eventKey: 'KYC_SUBMITTED',
-          recipientPhone: mobile,
-          includeFreeChannels: false,
-          vars: {
-            ownerName: submission.partner?.ownerName ?? 'Partner',
-            submissionDate: this.formatKycDate(verifiedAt),
-            programName: submission.partner?.outlets?.[0]?.programName ?? '',
-          },
-          body: 'Your KYC has been submitted.',
-          event: 'KYC_SUBMITTED',
-        })
-        .catch((e) => this.logger.warn(`[kyc-notify] KYC_SUBMITTED fan-out failed: ${e}`));
+      await this.notifyOwnerKycSubmitted(user, submission, mobile, verifiedAt);
     }
 
     return { verified: true, submissionId };
+  }
+
+  /** The owner's KYC_SUBMITTED fan-out at consent (shared by the normal + fast-track routes; unchanged payload). */
+  private async notifyOwnerKycSubmitted(
+    user: JwtPayload,
+    submission: {
+      userId: string;
+      partner?: { ownerName?: string | null; outlets?: { programName?: string | null }[] } | null;
+    },
+    mobile: string,
+    verifiedAt: Date,
+  ): Promise<void> {
+    await this.notifications
+      .notifyUserWithChannels({
+        clientId: user.clientId,
+        userId: submission.userId,
+        eventKey: 'KYC_SUBMITTED',
+        recipientPhone: mobile,
+        includeFreeChannels: false,
+        vars: {
+          ownerName: submission.partner?.ownerName ?? 'Partner',
+          submissionDate: this.formatKycDate(verifiedAt),
+          programName: submission.partner?.outlets?.[0]?.programName ?? '',
+        },
+        body: 'Your KYC has been submitted.',
+        event: 'KYC_SUBMITTED',
+      })
+      .catch((e) => this.logger.warn(`[kyc-notify] KYC_SUBMITTED fan-out failed: ${e}`));
   }
 
   /**
@@ -4233,8 +4583,16 @@ export class KycService {
     });
 
     if (!outlet) throw new NotFoundException(`Outlet "${outletId}" not found`);
+    if (!outlet.isActive && outlet.kycIntent === 'NOT_INTERESTED' && outlet.kycIntentBy === user.sub) {
+      // Already marked BY THIS CALLER — idempotent. Answered BEFORE the A1 gate (R3): the same person's repeat
+      // click after the outlet was reassigned gets the same harmless reply. Limited to the original marker so
+      // the early reply can't be used by anyone else to probe an outlet's status (audit L1).
+      return { outletId, alreadyMarked: true };
+    }
+    // A1: a sales caller may mark only an outlet actively assigned to them or their downline.
+    await this.assertOutletAssignedToCallerTeam(user, { outletId: outlet.id });
+    // Already marked by someone else on the team — still idempotent (no re-write), now that the caller passed the gate.
     if (!outlet.isActive && outlet.kycIntent === 'NOT_INTERESTED') {
-      // Already marked — idempotent.
       return { outletId, alreadyMarked: true };
     }
 
@@ -4734,7 +5092,7 @@ export class KycService {
       return {
         committed: false,
         updates: parseResult.updates,
-        errors: parseResult.errors,
+        ...cappedParseErrors(parseResult.errors),
         summary: parseResult.summary,
       };
     }
@@ -4769,14 +5127,53 @@ export class KycService {
           submissionId,
           outcome: 'error',
           detail: err instanceof Error ? err.message : String(err),
+          rowNumber: update.rowNumber,
         });
       }
     }
 
+    // Commit failures name the outlet (not just the submission id) so the operator can act on them.
+    // Best-effort: a lookup failure must never lose the commit result (the submission id is still shown).
+    const failedIds = results.filter((r) => r.outcome === 'error').map((r) => r.submissionId);
+    if (failedIds.length > 0) try {
+      const subs = (await this.prisma.kycSubmission.findMany({
+        where: { id: { in: failedIds }, ...this.kycTenantFilter(user) },
+        select: { id: true, partnerId: true },
+      })) ?? [];
+      const partnerIds = [...new Set(subs.map((s) => s.partnerId).filter((x): x is string => !!x))];
+      const outlets = partnerIds.length
+        ? await this.prisma.outlet.findMany({
+            where: { partnerId: { in: partnerIds }, deletedAt: null },
+            select: { partnerId: true, outletCode: true, name: true },
+            orderBy: { outletCode: 'asc' },
+          })
+        : [];
+      const byPartner = new Map<string, { codes: string[]; names: string[] }>();
+      for (const o of outlets) {
+        if (!o.partnerId) continue;
+        const e = byPartner.get(o.partnerId) ?? { codes: [], names: [] };
+        e.codes.push(o.outletCode);
+        e.names.push(o.name);
+        byPartner.set(o.partnerId, e);
+      }
+      const partnerOf = new Map(subs.map((s) => [s.id, s.partnerId]));
+      for (const r of results) {
+        if (r.outcome !== 'error') continue;
+        const pid = partnerOf.get(r.submissionId);
+        const e = pid ? byPartner.get(pid) : undefined;
+        if (e) {
+          r.outletCode = e.codes.join(', ');
+          r.outletName = e.names.join(', ');
+        }
+      }
+    } catch (err: unknown) {
+      this.logger.warn(`bulkVerify: could not attach outlet details to ${failedIds.length} failure(s): ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     return {
       committed: true,
-      results,
-      errors: parseResult.errors,
+      ...problemRowsEcho(results, (r) => r.outcome === 'error'),
+      ...cappedParseErrors(parseResult.errors),
       summary: {
         rowsParsed: parseResult.summary.rowsParsed,
         fieldsSet: parseResult.summary.fieldsSet,
@@ -5710,6 +6107,11 @@ export class KycService {
 
     // Per-tenant outlet-type display labels, scoped to each row's own tenant (Gifsy = cross-tenant).
     const typeDisplayByClient = await this.loadTypeDisplayByClient(submissions.map((s) => s.user.clientId));
+    // GIFSY-reject fast-track markers for the whole queue in ONE query (no N+1).
+    // D2: only when a tenant in the caller's scope has gifsyRejectFastTrack ON (else no query, no key).
+    const fastTrackById = (await this.fastTrackInScope(user))
+      ? await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id))
+      : null;
 
     const entries = submissions.map((s) => {
       // Overlay the re-KYC PROPOSED values (stage-at-approval) so the queue shows what's UNDER
@@ -5758,24 +6160,33 @@ export class KycService {
             : null,
         nameMismatch: !!(holder && owner && holder !== owner),
         fields: this.dumpFieldStates(s.verificationItems),
+        // { previousSubmissionId, previousRejectedAt } when resubmitted straight to Gifsy, else null.
+        ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
       };
     });
 
     return { entries };
   }
 
-  // ─── GET /v1/kyc/review-dump ─────────────────────────────────────────────────
+  // ─── GET /v1/kyc/review-dump (export kind `kyc-review-dump`) ─────────────────
   /**
-   * Lane A export: one xlsx of all PENDING_GIFSY submissions for this tenant, with
-   * every filled field, signed document hyperlinks, and the per-field Decision/Remark
-   * columns reflecting current verification state (so re-export round-trips). Pure
-   * layout in kyc-review-dump.ts; this assembles entries from real data.
+   * Lane A export, ONE PAGE: PENDING_GIFSY submissions in this caller's scope (kycTenantFilter — un-assumed Gifsy =
+   * every tenant), oldest first, keyset (createdAt, id) after `after`, with every filled field, signed document links
+   * and the per-field Decision/Remark state (so re-export round-trips). The `kyc-review-dump` export kind
+   * (exports/kinds/batch1/kyc-dumps.ts) pages through this and streams kycReviewDumpCells() rows; `next` = the
+   * keyset of the last row when the page was full, else null.
    */
-  async reviewDump(user: JwtPayload): Promise<Buffer> {
+  async reviewDumpPage(
+    user: JwtPayload,
+    after: KycExportCursor | null,
+    take: number,
+  ): Promise<{ entries: KycReviewDumpEntry[]; next: KycExportCursor | null }> {
     if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
+    const base: Prisma.KycSubmissionWhereInput = { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) };
     const submissions = await this.prisma.kycSubmission.findMany({
-      where: { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
+      where: after ? { AND: [base, kycExportAfter(after)] } : base,
+      take,
       include: {
         user: { select: { name: true, phone: true, clientId: true } },
         partner: {
@@ -5818,11 +6229,16 @@ export class KycService {
         documents: { select: { documentType: true, fileUrl: true, fileKey: true, fileName: true } },
         verificationItems: { select: { fieldKey: true, decision: true, remark: true, source: true } },
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
 
     // Per-tenant outlet-type display labels, scoped to each row's own tenant (Gifsy = cross-tenant).
     const typeDisplayByClient = await this.loadTypeDisplayByClient(submissions.map((s) => s.user.clientId));
+    // GIFSY-reject fast-track markers for the page in ONE query (drives the "Routing" column).
+    // D2: only when a tenant in the caller's scope has gifsyRejectFastTrack ON (else no query, no key).
+    const fastTrackById = (await this.fastTrackInScope(user))
+      ? await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id))
+      : null;
 
     const entries: KycReviewDumpEntry[] = [];
     for (const s of submissions) {
@@ -5866,15 +6282,17 @@ export class KycService {
         nameMismatch: !!(holder && owner && holder !== owner),
         documents: await this.resolveDumpDocuments(s.documents),
         fields: this.dumpFieldStates(s.verificationItems),
+        ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
       });
     }
 
-    return generateKycReviewDumpExcel(entries);
+    return { entries, next: kycExportNext(submissions, take) };
   }
 
-  // ─── GET /v1/kyc/rejected-export ─────────────────────────────────────────────
+  // ─── GET /v1/kyc/rejected-export (export kind `kyc-rejected`) ────────────────
   /**
-   * "Rejected outlets" export: one xlsx row per REJECTED submission, with the full
+   * "Rejected outlets" export, ONE PAGE (keyset (createdAt, id) after `after`; `holidays` = loadHolidaySet, read once
+   * per export by the caller): one row per REJECTED submission, with the full
    * KYC payload PLUS exactly which fields the Gifsy admin rejected and the per-field
    * remark. Scoped EXACTLY like the on-screen list (`kycTenantFilter`) so the rows
    * match what the admin sees on the Rejected filter (Gifsy = cross-tenant; a tenant
@@ -5884,16 +6302,21 @@ export class KycService {
    * toStatus = REJECTED (the most recent such transition); the actor name is resolved
    * from changedByUserId. Overall reason = KycSubmission.rejectionReason.
    */
-  async rejectedExport(user: JwtPayload): Promise<Buffer> {
+  async rejectedExportPage(
+    user: JwtPayload,
+    after: KycExportCursor | null,
+    take: number,
+    holidays: Awaited<ReturnType<typeof loadHolidaySet>>,
+  ): Promise<{ rows: RejectedKycRow[]; next: KycExportCursor | null }> {
     if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
-    // The "SLA Age (hrs)" column counts BUSINESS hours (Mon–Fri minus the national holiday
+    // `holidays`: the "SLA Age (hrs)" column counts BUSINESS hours (Mon–Fri minus the national holiday
     // calendar), matching the KYC list badge + slaMetrics — otherwise the export would disagree
     // with every other SLA surface by the excluded weekend.
-    const holidays = await loadHolidaySet(this.prisma);
-
+    const base: Prisma.KycSubmissionWhereInput = { status: 'REJECTED', ...this.kycTenantFilter(user) };
     const submissions = await this.prisma.kycSubmission.findMany({
-      where: { status: 'REJECTED', ...this.kycTenantFilter(user) },
+      where: after ? { AND: [base, kycExportAfter(after)] } : base,
+      take,
       include: {
         user: { select: { name: true, phone: true } },
         partner: {
@@ -5942,7 +6365,7 @@ export class KycService {
           select: { createdAt: true, changedByUserId: true },
         },
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
 
     // Resolve the rejecter names in one round-trip (avoid an N+1 user lookup).
@@ -5953,6 +6376,11 @@ export class KycService {
       ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, name: true } })
       : [];
     const actorName = new Map(actors.map((a) => [a.id, a.name]));
+    // GIFSY-reject fast-track markers for the page in ONE query (drives the "Routing" column).
+    // D2: only when a tenant in the caller's scope has gifsyRejectFastTrack ON (else no query, no key).
+    const fastTrackById = (await this.fastTrackInScope(user))
+      ? await loadKycFastTrackMap(this.prisma, submissions.map((s) => s.id))
+      : null;
 
     const rows: RejectedKycRow[] = submissions.map((s) => {
       // A rejected re-KYC's proposed values were never applied to the live partner; the reviewer
@@ -6000,10 +6428,11 @@ export class KycService {
         accountNumber: p?.bankAccountNumber ?? undefined,
         ifscCode: p?.ifscCode ?? undefined,
         upiId: p?.upiId ?? undefined,
+        ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
       };
     });
 
-    return generateRejectedKycExcel(rows);
+    return { rows, next: kycExportNext(submissions, take) };
   }
 
   /**

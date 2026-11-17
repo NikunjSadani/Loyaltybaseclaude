@@ -82,15 +82,15 @@ describe('NotificationDeliveryPage', () => {
   it('renders the funnels + a receipt row from the real BE shape (C2 regression)', async () => {
     render(<NotificationDeliveryPage />);
     const row = await screen.findByTestId('delivery-row');
-    expect(within(row).getByText('9830011252')).toBeInTheDocument();
-    expect(within(row).getByText('SMS')).toBeInTheDocument();
-    expect(within(row).getByText('Delivered')).toBeInTheDocument();
+    expect(await within(row).findByText('9830011252')).toBeInTheDocument();
+    expect(await within(row).findByText('SMS')).toBeInTheDocument();
+    expect(await within(row).findByText('Delivered')).toBeInTheDocument();
 
     // Funnel delivery rates rendered from deliveryRate (5/6 → 83%, 1 → 100%).
-    expect(within(screen.getByTestId('funnel-sms')).getByTestId('funnel-sms-rate')).toHaveTextContent('83%');
-    expect(within(screen.getByTestId('funnel-whatsapp')).getByTestId('funnel-whatsapp-rate')).toHaveTextContent('100%');
+    expect(await within(await screen.findByTestId('funnel-sms')).findByTestId('funnel-sms-rate')).toHaveTextContent('83%');
+    expect(await within(await screen.findByTestId('funnel-whatsapp')).findByTestId('funnel-whatsapp-rate')).toHaveTextContent('100%');
     // SMS funnel Sent=7.
-    expect(within(screen.getByTestId('funnel-sms')).getByText('7')).toBeInTheDocument();
+    expect(await within(screen.getByTestId('funnel-sms')).findByText('7')).toBeInTheDocument();
   });
 
   it('never sends a clientId on any request (BE enforces the tenant scope)', async () => {
@@ -132,7 +132,6 @@ describe('NotificationDeliveryPage', () => {
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/admin/notification-delivery/export'),
-        expect.anything(),
       ),
     );
     await waitFor(() => expect(downloadBlob).toHaveBeenCalled());
@@ -164,6 +163,6 @@ describe('NotificationDeliveryPage', () => {
     );
     render(<NotificationDeliveryPage />);
     const err = await screen.findByTestId('delivery-error');
-    expect(within(err).getByText('Boom')).toBeInTheDocument();
+    expect(await within(err).findByText('Boom')).toBeInTheDocument();
   });
 });

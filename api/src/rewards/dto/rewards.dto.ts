@@ -97,6 +97,23 @@ export class VoucherCancelledWithVendorDto {
   reason!: string;
 }
 
+/** POST /rewards/orders/:id/hubble-acknowledge — GIFSY_ADMIN clears a post-refund Hubble flag. */
+export class HubbleAcknowledgeDto {
+  /** What ops checked in Hubble's portal and concluded — required, trimmed, audited. */
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @Length(1, 500)
+  note!: string;
+
+  /**
+   * Acknowledge although the pre-check could not reach Hubble ("Hubble unreachable") — only honoured
+   * with a note of at least 20 characters; recorded as forced + audited.
+   */
+  @IsOptional()
+  @IsBoolean()
+  force?: boolean;
+}
+
 /** Hard cap on GET /v1/rewards/orders `limit` (one request never reads more rows than this). */
 export const ORDERS_LIST_MAX_LIMIT = 500;
 

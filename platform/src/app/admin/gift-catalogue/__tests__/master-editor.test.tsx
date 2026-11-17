@@ -41,7 +41,7 @@ describe('MasterEditor (create)', () => {
     fireEvent.click(screen.getByTestId('save-master-btn'));
 
     await screen.findByTestId('master-errors');
-    expect(screen.getByTestId('master-errors').textContent).toMatch(/Name is required/);
+    expect((await screen.findByTestId('master-errors')).textContent).toMatch(/Name is required/);
     expect(post).not.toHaveBeenCalled();
   });
 
@@ -89,7 +89,7 @@ describe('MasterEditor — FIXED vs FLEXIBLE (free-amount)', () => {
     fireEvent.click(screen.getByTestId('save-master-btn'));
 
     await screen.findByTestId('master-errors');
-    expect(screen.getByTestId('master-errors').textContent).toMatch(/Maximum amount/);
+    expect((await screen.findByTestId('master-errors')).textContent).toMatch(/Maximum amount/);
     expect(post).not.toHaveBeenCalled();
   });
 

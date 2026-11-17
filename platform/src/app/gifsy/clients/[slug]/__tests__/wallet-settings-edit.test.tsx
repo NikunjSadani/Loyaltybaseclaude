@@ -100,9 +100,9 @@ describe('Wallet settings editor (real GET/PUT money-path persistence)', () => {
     await waitFor(() => {
       expect((screen.getByTestId('wallet-conversion-rate') as HTMLInputElement).value).toBe('2');
     });
-    expect((screen.getByTestId('wallet-points-expiry') as HTMLInputElement).value).toBe('365');
-    expect((screen.getByTestId('wallet-min-bank') as HTMLInputElement).value).toBe('300');
-    expect((screen.getByTestId('wallet-min-voucher') as HTMLInputElement).value).toBe('150');
+    expect((await screen.findByTestId('wallet-points-expiry') as HTMLInputElement).value).toBe('365');
+    expect((await screen.findByTestId('wallet-min-bank') as HTMLInputElement).value).toBe('300');
+    expect((await screen.findByTestId('wallet-min-voucher') as HTMLInputElement).value).toBe('150');
   });
 
   it('WS2: MONEY GUARD — a blank conversion rate is rejected with no PUT (never coerced to 0)', async () => {

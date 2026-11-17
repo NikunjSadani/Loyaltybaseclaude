@@ -15,8 +15,10 @@
  * Every sheet is built through `aoaToSheetSafe` / `jsonToSheetSafe` so a hostile
  * outlet-id / employee-code cell can never be a formula-injection sink (AF-5b).
  *
- * This is the "quick summary" report (Phase 1). A per-row disposition report
- * (Phase 2) needs the backend to return each input row's outcome.
+ *   • Problem Rows  — per-row disposition of the rows to look at (dropped duplicates,
+ *                     standalone rows, tagged employee codes not found). The backend
+ *                     echoes at most 500 of them (memory-safety); the sheet says so when
+ *                     the list was cut.
  */
 
 import * as XLSX from 'xlsx';
@@ -49,12 +51,19 @@ export function buildRosterReportWorkbook(
       ? [['Saved rows with no outlet name (unmatched → blank in report)', result.blankNameCount]]
       : []),
   ];
+  summary.push(
+    [],
+    ['This file lists only the rows that need attention. Saved rows without a problem are counted above, not listed.'],
+  );
+  if (result.problemRowsTruncated) {
+    summary.push([`Showing the first ${(result.problemRows?.length ?? 0).toLocaleString('en-IN')} of ${(result.problemRowCount ?? result.problemRows?.length ?? 0).toLocaleString('en-IN')} problem rows (see the Problem Rows sheet).`]);
+  }
   XLSX.utils.book_append_sheet(wb, aoaToSheetSafe(summary), 'Summary');
 
-  // Full per-row disposition (Phase 2) — every input row with its outcome. Present
-  // only when the backend returned `rows`; older backends omit it (Summary-only file).
-  if (result.rows && result.rows.length) {
-    const rows = result.rows.map((r) => ({
+  // Per-row disposition of the PROBLEM rows only (memory-safety: the backend no longer echoes
+  // every file row; at most 500 problem rows). Omitted when there are none.
+  if (result.problemRows && result.problemRows.length) {
+    const rows = result.problemRows.map((r) => ({
       'Row #': r.rowIndex,
       'Outlet ID': r.outletRef,
       'Outlet Name': r.outletName,
@@ -64,7 +73,15 @@ export function buildRosterReportWorkbook(
       'Tagged Employee Found':
         r.taggedEmployeeFound === null ? '—' : r.taggedEmployeeFound ? 'Yes' : 'No (not tagged)',
     }));
-    XLSX.utils.book_append_sheet(wb, jsonToSheetSafe(rows), 'Rows');
+    const sheet = jsonToSheetSafe(rows);
+    if (result.problemRowsTruncated) {
+      XLSX.utils.sheet_add_aoa(
+        sheet,
+        [[`Showing the first ${result.problemRows.length.toLocaleString('en-IN')} of ${(result.problemRowCount ?? result.problemRows.length).toLocaleString('en-IN')} problem rows. Fix these, then re-upload only those rows — the next upload lists any that are left.`]],
+        { origin: -1 },
+      );
+    }
+    XLSX.utils.book_append_sheet(wb, sheet, 'Problem Rows');
   }
 
   // Always include the issue sheets (empty-but-headed when there are none) so the
@@ -86,6 +103,13 @@ export function buildRosterReportWorkbook(
   return wb;
 }
 
+/** True when the upload has anything to act on (else the "Download problem rows" button is hidden). */
+export function rosterHasProblems(result: RosterUploadResult): boolean {
+  return (result.problemRowCount ?? result.problemRows?.length ?? 0) > 0
+    || result.duplicateRefs.length > 0
+    || result.unmatchedEmployeeCodes.length > 0;
+}
+
 /** Generate + trigger the browser download of the roster-upload report. */
 export function downloadRosterReport(result: RosterUploadResult, schemeName?: string): void {
   const wb = buildRosterReportWorkbook(result, schemeName);
@@ -94,5 +118,5 @@ export function downloadRosterReport(result: RosterUploadResult, schemeName?: st
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
   const slug = (schemeName ?? 'scheme').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
-  downloadBlob(blob, `roster-upload-report-${slug || 'scheme'}.xlsx`);
+  downloadBlob(blob, `roster-upload-problem-rows-${slug || 'scheme'}.xlsx`);
 }

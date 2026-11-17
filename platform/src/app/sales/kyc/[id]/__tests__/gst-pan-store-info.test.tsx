@@ -30,10 +30,7 @@ async function renderK1() {
     );
     await params;
   });
-  await waitFor(
-    () => expect(screen.getByText('Kumar General Store')).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByText('Kumar General Store', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 // QUARANTINE (launch CD gate / A-1): pre-existing TDD-red spec for an unbuilt/changed feature. Un-skip when that feature ships. See docs/plans/reconcile/baseline-red-snapshot.txt

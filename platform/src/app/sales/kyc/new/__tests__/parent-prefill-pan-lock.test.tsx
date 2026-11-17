@@ -115,14 +115,14 @@ describe('PPL — approved-parent pre-fill + group-PAN lock', () => {
 
     // Owner + GST pre-filled from the parent.
     expect(await screen.findByDisplayValue('Anil Sharma')).toBeInTheDocument();   // Owner/Contact Name
-    expect(screen.getByDisplayValue('27AABCS1429B1Z5')).toBeInTheDocument();      // GST
+    expect(await screen.findByDisplayValue('27AABCS1429B1Z5')).toBeInTheDocument();      // GST
 
     // PAN forced to the group PAN, read-only + disabled, badged.
-    const pan = screen.getByPlaceholderText('AAPFU0939F');
+    const pan = await screen.findByPlaceholderText('AAPFU0939F');
     expect(pan).toHaveValue('AABCS1429B');
     expect(pan).toBeDisabled();
     expect(pan).toHaveAttribute('readonly');
-    expect(screen.getByTestId('group-pan-locked-badge')).toBeInTheDocument();
+    expect(await screen.findByTestId('group-pan-locked-badge')).toBeInTheDocument();
   });
 
   it('PPL2: groupPan null → pre-fills but PAN stays editable (no lock, no badge)', async () => {
@@ -133,7 +133,7 @@ describe('PPL — approved-parent pre-fill + group-PAN lock', () => {
     expect(await screen.findByDisplayValue('Ravi Kumar')).toBeInTheDocument();     // Owner pre-filled
 
     // PAN pre-filled from the parent PAN but NOT locked (no GST, no group PAN).
-    const pan = screen.getByPlaceholderText('AAPFU0939F');
+    const pan = await screen.findByPlaceholderText('AAPFU0939F');
     expect(pan).toHaveValue('ZZZZZ9999Z');
     expect(pan).not.toBeDisabled();
     expect(pan).not.toHaveAttribute('readonly');
@@ -151,7 +151,7 @@ describe('PPL — approved-parent pre-fill + group-PAN lock', () => {
     expect(pan).not.toHaveAttribute('readonly');
     expect(screen.queryByTestId('group-pan-locked-badge')).not.toBeInTheDocument();
     // Owner name is blank (no parent to seed from).
-    expect(screen.getByPlaceholderText('Full name')).toHaveValue('');
+    expect(await screen.findByPlaceholderText('Full name')).toHaveValue('');
   });
 });
 
@@ -223,7 +223,7 @@ describe('PPL4 — re-entry child: submit sends the group PAN, not the stale exi
     expect(pan).toBeDisabled();
 
     // Details → Address: the "Continue" button enables once the carried-over docs settle.
-    const detailsContinue = screen.getByRole('button', { name: /continue/i });
+    const detailsContinue = await screen.findByRole('button', { name: /continue/i });
     await waitFor(() => expect(detailsContinue).not.toBeDisabled());
     fireEvent.click(detailsContinue);
 

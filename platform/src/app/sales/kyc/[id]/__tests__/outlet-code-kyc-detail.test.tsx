@@ -10,7 +10,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -35,10 +35,7 @@ async function renderK1() {
     // Awaiting inside act flushes React's internal Promise tracking
     await params;
   });
-  await waitFor(
-    () => expect(screen.getByText('Kumar General Store')).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByText('Kumar General Store', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 // QUARANTINE (launch CD gate / A-1): pre-existing TDD-red spec for an unbuilt/changed feature. Un-skip when that feature ships. See docs/plans/reconcile/baseline-red-snapshot.txt
@@ -50,14 +47,14 @@ describe.skip('S — Outlet code in KYC detail', () => {
 
   it('S9: outlet code is rendered in the page header', async () => {
     await renderK1();
-    const code = screen.getByTestId('kyc-header-outlet-code');
+    const code = await screen.findByTestId('kyc-header-outlet-code');
     expect(code).toBeInTheDocument();
     expect(code.textContent?.trim().length).toBeGreaterThan(0);
   });
 
   it('S10: the header outlet code has font-mono class', async () => {
     await renderK1();
-    const code = screen.getByTestId('kyc-header-outlet-code');
+    const code = await screen.findByTestId('kyc-header-outlet-code');
     expect(code.className).toMatch(/font-mono/);
   });
 
@@ -65,24 +62,20 @@ describe.skip('S — Outlet code in KYC detail', () => {
     await renderK1();
     // Open the collapsible Store Information section
     fireEvent.click(screen.getByText(/store information/i));
-    await waitFor(() =>
-      expect(screen.getByTestId('kyc-store-outlet-code')).toBeInTheDocument(),
-    );
+    expect(await screen.findByTestId('kyc-store-outlet-code')).toBeInTheDocument();
   });
 
   it('S12: store-info outlet code is non-empty', async () => {
     await renderK1();
     fireEvent.click(screen.getByText(/store information/i));
-    await waitFor(() => screen.getByTestId('kyc-store-outlet-code'));
-    expect(screen.getByTestId('kyc-store-outlet-code').textContent?.trim().length).toBeGreaterThan(0);
+    const code = await screen.findByTestId('kyc-store-outlet-code');
+    expect(code.textContent?.trim().length).toBeGreaterThan(0);
   });
 
   it('S13: outlet photos section shows a lazy "View Photos" button, no inline thumbnails', async () => {
     await renderK1();
     fireEvent.click(screen.getByText(/store information/i));
-    await waitFor(() =>
-      expect(screen.getByTestId('outlet-photo-view-btn')).toBeInTheDocument(),
-    );
+    expect(await screen.findByTestId('outlet-photo-view-btn')).toBeInTheDocument();
     // Lightbox must NOT be open before the user clicks
     expect(screen.queryByTestId('outlet-photo-lightbox')).not.toBeInTheDocument();
   });

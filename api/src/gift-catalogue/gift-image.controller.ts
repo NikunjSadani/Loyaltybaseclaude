@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import type { Response } from 'express';
+import { streamObjectResponse } from '../common/stream-object';
 import { GiftCatalogueService } from './gift-catalogue.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 
@@ -43,7 +44,7 @@ export class GiftImageController {
     @Query('key') key: string,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { bytes, contentType, cachePublic } = await this.catalogue.serveGiftImage(user, key);
+    const { stream, size, contentType, cachePublic } = await this.catalogue.serveGiftImage(user, key);
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', 'inline');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -51,6 +52,6 @@ export class GiftImageController {
     // Per-tenant images → no-store, so a shared browser never serves one tenant's cached
     // image to another user without the server-side tenant fence re-running.
     res.setHeader('Cache-Control', cachePublic ? 'private, max-age=86400' : 'no-store');
-    return new StreamableFile(bytes, { type: contentType, disposition: 'inline' });
+    return streamObjectResponse(res, { stream, size }, { type: contentType, disposition: 'inline' });
   }
 }

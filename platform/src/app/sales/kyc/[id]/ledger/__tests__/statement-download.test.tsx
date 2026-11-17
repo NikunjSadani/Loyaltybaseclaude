@@ -70,7 +70,7 @@ async function renderLedger() {
     render(<Suspense fallback={<div>Loading…</div>}><OutletLedgerPage params={params} /></Suspense>);
     await params;
   });
-  await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
+  expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
 }
 
 async function pick(label: 'Excel (.xlsx)' | 'PDF') {
@@ -91,8 +91,8 @@ describe('SLD — sales ledger statement download', () => {
   it('SLD1: the Download picker is present and the on-screen list still renders', async () => {
     stub();
     await renderLedger();
-    expect(screen.getByTestId('statement-download-btn')).toBeInTheDocument();
-    expect(screen.getAllByTestId('transaction-item')).toHaveLength(2);
+    expect(await screen.findByTestId('statement-download-btn')).toBeInTheDocument();
+    expect(await screen.findAllByTestId('transaction-item')).toHaveLength(2);
   });
 
   it('SLD2: Excel fetches the ledger statement for the range and builds the doc from meta + payouts', async () => {
@@ -123,6 +123,6 @@ describe('SLD — sales ledger statement download', () => {
   it('SLD4: the Download button is disabled when the selected period has no rows', async () => {
     stub([], []);
     await renderLedger();
-    expect(screen.getByTestId('statement-download-btn')).toBeDisabled();
+    expect(await screen.findByTestId('statement-download-btn')).toBeDisabled();
   });
 });

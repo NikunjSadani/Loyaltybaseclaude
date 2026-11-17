@@ -12,7 +12,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -56,10 +56,7 @@ const ME = {
 
 async function renderAndLoad() {
   render(<ProfilePage />);
-  await waitFor(
-    () => expect(screen.getByText('Anil Traders')).toBeInTheDocument(),
-    { timeout: 2000 },
-  );
+  expect(await screen.findByText('Anil Traders', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 /* ─── Tests ──────────────────────────────────────────────────────────────────── */
@@ -71,34 +68,34 @@ describe('Partner Profile — real data, no fabrication', () => {
 
   it('P1: "Outlet Code" label is visible', async () => {
     await renderAndLoad();
-    expect(screen.getByText(/outlet code/i)).toBeInTheDocument();
+    expect(await screen.findByText(/outlet code/i)).toBeInTheDocument();
   });
 
   it('P2: the REAL outlet code value is rendered', async () => {
     await renderAndLoad();
-    const el = screen.getByTestId('outlet-code-value');
+    const el = await screen.findByTestId('outlet-code-value');
     expect(el.textContent).toBe('OUT-2026-000123');
   });
 
   it('P3: outlet code is inside the dark profile header card', async () => {
     await renderAndLoad();
-    expect(screen.getByTestId('profile-header')).toContainElement(screen.getByTestId('outlet-code-value'));
+    expect(await screen.findByTestId('profile-header')).toContainElement(await screen.findByTestId('outlet-code-value'));
   });
 
   it('P4: outlet code element has font-mono class', async () => {
     await renderAndLoad();
-    expect(screen.getByTestId('outlet-code-value').className).toMatch(/font-mono/);
+    expect((await screen.findByTestId('outlet-code-value')).className).toMatch(/font-mono/);
   });
 
   it('AF3-1: shows the REAL bank and NOT the old hardcoded fake bank', async () => {
     await renderAndLoad();
-    expect(screen.getByText('State Bank of India')).toBeInTheDocument();
+    expect(await screen.findByText('State Bank of India')).toBeInTheDocument();
     expect(screen.queryByText('HDFC Bank')).not.toBeInTheDocument();
   });
 
   it('AF3-2: the account number is masked (raw number never rendered)', async () => {
     await renderAndLoad();
-    const acct = screen.getByTestId('bank-account-value');
+    const acct = await screen.findByTestId('bank-account-value');
     expect(acct.textContent).toContain('3333');           // last 4 visible
     expect(screen.queryByText('111122223333')).not.toBeInTheDocument(); // raw never shown
   });

@@ -38,7 +38,7 @@ run() { # run <name> <dir> <cmd...>
   fi
 }
 
-[ "$FAST" -eq 0 ] && run "api jest"        api      npx jest --no-coverage
+[ "$FAST" -eq 0 ] && run "api jest"        api      npx jest --no-coverage --maxWorkers=50%
 # A stale incremental tsbuildinfo makes `nest build` (deleteOutDir:true) exit 0 while emitting NOTHING
 # (2026-11-10: a "green" build gate with no dist/ at all). Remove it so the build always really compiles,
 # then assert the entrypoint was actually emitted.

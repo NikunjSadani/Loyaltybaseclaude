@@ -27,6 +27,7 @@ import { isValidUpiId } from '@/lib/upi-utils';
 import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
 import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
 import { pointsForAmount } from '@/lib/hubble-product';
+import { voucherAmountBand } from '@/lib/voucher-band';
 
 /* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
    The partner's real, on-file KYC payout details + the tenant conversionRate.
@@ -253,6 +254,10 @@ export function pointsRequired(item: AffordabilityItem, settings: AffordabilityS
   }
   return Math.max(item.minRedemptionPoints ?? 0, floorPoints);
 }
+
+// The ₹ band helper now lives in lib/voucher-band (shared with the sales "redeem for outlet"
+// sheet); re-exported here so existing imports from this page keep working.
+export { voucherAmountBand };
 
 /** True when the partner's balance covers `pointsRequired` for this item. */
 export function isWithinPoints(item: AffordabilityItem, balance: number, settings: AffordabilitySettings): boolean {
@@ -710,10 +715,16 @@ function VoucherRedeemSheet({
   const [otpSent,    setOtpSent]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [success,    setSuccess]    = useState(false);
+  // True when confirm returned DELIVERED (Hubble instant issue — the code is already in Orders).
+  const [issued,     setIssued]     = useState(false);
+  const [logoFailed, setLogoFailed] = useState(false);
   const [orderId,    setOrderId]    = useState<string | null>(null);
   // Vendor-PII consent (decision #15) — default UNTICKED; blocks redeem for vendor items.
   const [consent,    setConsent]    = useState(false);
   const needConsent = requiresVendorConsent(voucher);
+  // The item's real name (e.g. "Amazon Voucher") — the member catalogue sends no separate brand
+  // field, so `voucher.brand` is usually empty; fall back to the brand, then a generic label.
+  const displayName = voucher.name?.trim() || voucher.brand?.trim() || 'Voucher';
 
   const isFixed   = voucher.voucherType === 'FIXED';
   const fixedPts  = isFixed ? voucher.points : 0;
@@ -733,18 +744,33 @@ function VoucherRedeemSheet({
   // (Math.round, rewards.service redeem) so the preview, the balance check and the debit agree.
   // (At an integer rate — e.g. 1 — this is identical to the previous Math.ceil.)
   const ptsNeeded = isFixed ? fixedPts : pointsForAmount(freeAmt, conversionRate);
-  const canAfford = myBalance >= ptsNeeded && (isFixed || freeAmt >= minFreeAmount);
+  // The ₹ band the member may type: the ADMIN's per-item band (min/max points on the reward,
+  // set in the admin rewards editor) with the tenant floor as a lower bound. A choose-from-amounts
+  // item skips the item band (the server does too — the listed amounts ARE the band); only the
+  // floor applies there. Server validation is unchanged (defence in depth).
+  const band = !isFixed && !amountOptions
+    ? voucherAmountBand(voucher, minFreeAmount, conversionRate)
+    : { min: minFreeAmount, max: null as number | null };
+  const minAmt = band.min;
+  const maxAmt = band.max;
+  // An empty band (₹ max below ₹ min — the tenant floor above the item max, a band narrower than
+  // one rupee, or a huge rate): no amount can ever pass, so say so instead of "(min ₹500, max ₹300)".
+  const unredeemable = !isFixed && !amountOptions && maxAmt != null && maxAmt < minAmt;
+  const aboveMax = !isFixed && !unredeemable && maxAmt != null && freeAmt > maxAmt;
+  const canAfford = myBalance >= ptsNeeded && (isFixed || (freeAmt >= minAmt && !aboveMax));
 
   // Client-side UX validation for FREE_AMOUNT (server is authoritative).
   // Guard against a zero/invalid conversionRate so we never divide by zero
   // (which would yield Infinity/NaN in the balance hint). null => unknown cap.
   const hasRate = Number.isFinite(conversionRate) && conversionRate > 0;
   const maxAffordableInr = hasRate ? Math.floor(myBalance / conversionRate) : null;
-  // Live minimum / balance hint (polite — not an alert; the invalid-amount alert is separate).
+  // Live minimum / maximum / balance hint (polite — not an alert; the invalid-amount alert is separate).
   const amountHint = amtInvalid
     ? ''
-    : !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
-    ? `Minimum redemption is ${fmtInr(minFreeAmount)}`
+    : !isFixed && freeAmt > 0 && freeAmt < minAmt
+    ? `Minimum redemption is ${fmtInr(minAmt)}`
+    : aboveMax
+    ? `Maximum redemption is ${fmtInr(maxAmt ?? 0)}`
     : !isFixed && hasRate && freeAmt > 0 && ptsNeeded > myBalance
     ? `Exceeds your balance (max ${fmtInr(maxAffordableInr ?? 0)})`
     : '';
@@ -807,15 +833,20 @@ function VoucherRedeemSheet({
       return;
     }
     onRedeemed(sentFor?.pts ?? ptsNeeded);
+    // Hubble instant issuance returns DELIVERED (the code already exists); everything else
+    // (CONFIRMED — manual fulfilment, or Hubble still issuing) is still being processed.
+    setIssued(result.data?.status === 'DELIVERED');
     setSuccess(true);
   };
+
+  const successAmount = fmtInr(sentFor?.amount ?? (isFixed ? fixedPts : freeAmt));
 
   return (
     <Modal
       open
       onOpenChange={(o) => { if (!o) onClose(); }}
-      title={success ? 'Voucher confirmed' : 'Redeem voucher'}
-      description={success ? undefined : `${voucher.brand} voucher`}
+      title={success ? (issued ? 'Voucher ready' : 'Voucher confirmed') : 'Redeem voucher'}
+      description={success ? undefined : displayName}
       className="max-w-md"
     >
       {success ? (
@@ -824,8 +855,10 @@ function VoucherRedeemSheet({
             <CheckCircle className="h-8 w-8 text-emerald-600" />
           </div>
           <div>
-            <p className="text-sm text-gray-500 mt-1">
-              {`${voucher.brand} voucher (${fmtInr(sentFor?.amount ?? (isFixed ? fixedPts : freeAmt))})`} is being processed. Your voucher code will appear under Orders.
+            <p className="text-sm text-gray-500 mt-1" data-testid="voucher-success-copy">
+              {issued
+                ? `Your ${displayName} (${successAmount}) is ready — view the code under Orders.`
+                : `Your ${displayName} (${successAmount}) is being processed. Your voucher code will appear under Orders.`}
             </p>
             <p className="text-xs text-gray-400 mt-1">{sentFor?.pts ?? ptsNeeded} pts deducted from your balance.</p>
           </div>
@@ -833,16 +866,28 @@ function VoucherRedeemSheet({
         </div>
       ) : (
         <div className="space-y-4">
-          {/* Voucher header */}
+          {/* Voucher header — the item's real name + its image/brand logo (same data as the
+              catalogue tile); the gradient emoji is only the fallback for an item with no image. */}
           <div className="flex items-center gap-3">
-            <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-3xl"
-              style={{ background: `linear-gradient(135deg, ${voucher.gradientFrom}25, ${voucher.gradientTo}40)` }}>
-              {voucher.emoji}
-            </div>
-            <div>
-              <p className="text-xs text-gray-400">{voucher.brand}</p>
-              <h3 className="text-base font-bold text-gray-900">{isFixed ? `${fmtInr(fixedPts)} Voucher` : amountOptions ? 'Voucher — Choose an amount' : 'Voucher — Any Amount'}</h3>
-              <p className="text-xs text-gray-500">{voucher.description}</p>
+            {voucher.imageDataUrl && !logoFailed ? (
+              <div className="w-14 h-14 shrink-0 rounded-2xl border border-gray-100 bg-white flex items-center justify-center overflow-hidden">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={voucher.imageDataUrl} alt={`${displayName} logo`} className="max-h-full max-w-full object-contain p-1.5"
+                  // A broken logo URL falls back to the emoji tile (never a broken-image icon).
+                  onError={() => setLogoFailed(true)} />
+              </div>
+            ) : (
+              <div className="w-14 h-14 shrink-0 rounded-2xl flex items-center justify-center text-3xl"
+                style={{ background: `linear-gradient(135deg, ${voucher.gradientFrom}25, ${voucher.gradientTo}40)` }}
+                aria-hidden="true">
+                {voucher.emoji}
+              </div>
+            )}
+            <div className="min-w-0">
+              {voucher.brand && voucher.brand !== displayName && <p className="text-xs text-gray-400">{voucher.brand}</p>}
+              <h3 className="text-base font-bold text-gray-900" data-testid="voucher-sheet-name">{displayName}</h3>
+              <p className="text-xs text-gray-500">{isFixed ? `${fmtInr(fixedPts)} voucher` : amountOptions ? 'Choose an amount' : 'Any amount'}</p>
+              {voucher.description && <p className="text-xs text-gray-500">{voucher.description}</p>}
             </div>
           </div>
 
@@ -870,7 +915,7 @@ function VoucherRedeemSheet({
                 {amountOptions.map((amt) => {
                   const pts = pointsForAmount(amt, conversionRate);
                   const selected = freeAmt === amt;
-                  const tooLow = amt < minFreeAmount;
+                  const tooLow = amt < minAmt;
                   const tooMuch = pts > myBalance;
                   return (
                     <button
@@ -909,8 +954,18 @@ function VoucherRedeemSheet({
           {!isFixed && !amountOptions && (
             <div>
               <label className="text-xs font-medium text-gray-600 block mb-1">
-                Amount to redeem * <span className="text-gray-400 font-normal">(min {fmtInr(minFreeAmount)})</span>
+                Amount to redeem *{' '}
+                {!unredeemable && (
+                  <span id="voucher-amount-band" className="text-gray-400 font-normal" data-testid="voucher-amount-band">
+                    ({maxAmt != null ? `min ${fmtInr(minAmt)}, max ${fmtInr(maxAmt)}` : `min ${fmtInr(minAmt)}`})
+                  </span>
+                )}
               </label>
+              {unredeemable && (
+                <p id="voucher-amount-unavailable" data-testid="voucher-unredeemable" className="text-xs text-red-500 mb-1 flex items-center gap-1">
+                  <AlertCircle className="h-3 w-3" />This voucher can&apos;t be redeemed right now
+                </p>
+              )}
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-bold text-gray-500">₹</span>
                 <input
@@ -918,21 +973,28 @@ function VoucherRedeemSheet({
                     'w-full border rounded-xl pl-7 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]',
                     amtInvalidShown || amountHint ? 'border-red-300' : 'border-gray-200',
                   )}
-                  placeholder={`${minFreeAmount}`}
+                  placeholder={`${minAmt}`}
                   value={amount}
                   // Whole rupees only: "750.5" / "750,5" / a pasted decimal stay visible → "Check the amount" on commit.
                   {...amountField.inputProps}
                   // Locked once the OTP is sent — the order already carries this amount.
-                  disabled={otpSent}
+                  // …and locked when no amount can pass the band.
+                  disabled={otpSent || unredeemable}
                   aria-invalid={amtInvalidShown || !!amountHint ? true : undefined}
-                  aria-describedby={amtInvalidShown ? 'voucher-amount-error' : amountHint ? 'voucher-amount-hint' : undefined}
+                  // The band ("min ₹X, max ₹Y") always describes the field; an error/hint is added to it.
+                  aria-describedby={
+                    unredeemable
+                      ? 'voucher-amount-unavailable'
+                      : ['voucher-amount-band', amtInvalidShown ? 'voucher-amount-error' : amountHint ? 'voucher-amount-hint' : null]
+                          .filter(Boolean).join(' ')
+                  }
                   aria-label="Voucher amount"
                 />
               </div>
               {amtInvalidShown && <p id="voucher-amount-error" role="alert" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{WHOLE_RUPEE_INVALID_MESSAGE}</p>}
               <div aria-live="polite">
                 {amountHint && <p id="voucher-amount-hint" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountHint}</p>}
-                {freeAmt >= minFreeAmount && !amtInvalid && !amountHint && (
+                {freeAmt >= minAmt && !amtInvalid && !amountHint && (
                   <p className="text-xs text-emerald-600 mt-1 font-medium">
                     = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
                   </p>
@@ -970,14 +1032,18 @@ function VoucherRedeemSheet({
               <Button variant="primary" className="w-full" loading={submitting}
                 // An INVALID amount text never disables the button (it can't say why): the tap
                 // commits and shows "Check the amount" instead of sending.
-                disabled={!amtInvalid && (!canAfford || !!amountHint || (!isFixed && freeAmt < minFreeAmount) || (!!amountOptions && !amountOptions.includes(freeAmt)) || (needConsent && !consent))}
+                disabled={unredeemable || (!amtInvalid && (!canAfford || !!amountHint || (!isFixed && freeAmt < minAmt) || aboveMax || (!!amountOptions && !amountOptions.includes(freeAmt)) || (needConsent && !consent)))}
                 onClick={handleSendOtp}>
-                {amtInvalidShown
+                {unredeemable
+                  ? 'Not available'
+                  : amtInvalidShown
                   ? WHOLE_RUPEE_INVALID_MESSAGE
                   : amountOptions && !amountOptions.includes(freeAmt)
                   ? 'Choose an amount'
-                  : !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
-                  ? `Min ${fmtInr(minFreeAmount)} required`
+                  : !isFixed && freeAmt > 0 && freeAmt < minAmt
+                  ? `Min ${fmtInr(minAmt)} required`
+                  : aboveMax
+                  ? `Max ${fmtInr(maxAmt ?? 0)} allowed`
                   : myBalance < ptsNeeded
                   ? 'Insufficient balance'
                   : 'Send OTP'}

@@ -6,12 +6,18 @@
    Shows (1) Web Push notification opt-in (users / devices, by role + by OS) and
    (2) home-screen installs (users, by platform). Auth follows the same authHeader()
    + fetch + useEffect/useState pattern as the dashboard pages.
+   (3) "Download installed users (Excel)" → GET /api/push/adoption/installed-users
+   (backend /v1/push/adoption/installed-users, export kind 'app-installed-users'),
+   via the shared downloadOrQueue/useDownloadAction button state machine. Disabled (with the reason) when
+   nobody has installed the app; a 404 "0 users matched these filters." is shown as a neutral note (no file).
 ──────────────────────────────────────────────────────────────────────────────────── */
 
 import React, { useEffect, useState } from 'react';
-import { Bell, Smartphone, Loader2, AlertCircle } from 'lucide-react';
+import { Bell, Smartphone, Loader2, AlertCircle, Download } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 const DARK_NAVY = '#1A1A2E';
 
@@ -58,6 +64,122 @@ function BreakdownList({
         </ul>
       )}
     </div>
+  );
+}
+
+/* ─── Installed-users download ───────────────────────────────────────────────── */
+
+const INSTALLED_USERS_URL = '/api/push/adoption/installed-users';
+
+type RoleGroup = '' | 'sales' | 'partner' | 'admin';
+
+/** URL for the installed-users Excel, with only the filters that were chosen. */
+function installedUsersUrl(roleGroup: RoleGroup, since: string): string {
+  const q = new URLSearchParams();
+  if (roleGroup) q.set('roleGroup', roleGroup);
+  if (since) q.set('since', since);
+  const qs = q.toString();
+  return qs ? `${INSTALLED_USERS_URL}?${qs}` : INSTALLED_USERS_URL;
+}
+
+/** The server answers 404 with this text when the filters match nobody (export kind 'app-installed-users'). */
+const NO_MATCH_RE = /matched these filters/i;
+const NO_MATCH_TEXT = '0 users matched these filters.';
+const NO_INSTALLS_TEXT = 'No one has installed the app yet, so there is nothing to download.';
+
+function InstalledUsersDownload({ installedUsers }: { installedUsers: number }) {
+  const action = useDownloadAction();
+  const [roleGroup, setRoleGroup] = useState<RoleGroup>('');
+  const [since, setSince] = useState('');
+  // "0 users matched" is an answer, not a failure — shown as a neutral note, and no file is saved.
+  const [noMatch, setNoMatch] = useState(false);
+  const empty = installedUsers <= 0;
+  const controlsDisabled = empty || action.busy;
+
+  const onDownload = async () => {
+    setNoMatch(false);
+    const outcome = await action.run(installedUsersUrl(roleGroup, since), {
+      fallbackFileName: 'app-installed-users.xlsx',
+      init: { headers: { ...authHeader() } },
+    });
+    if (outcome?.kind === 'error' && outcome.status === 404 && NO_MATCH_RE.test(outcome.message)) {
+      action.reset();
+      setNoMatch(true);
+    }
+  };
+
+  return (
+    <Card className="border border-gray-100 shadow-sm rounded-2xl" data-testid="installed-users-download">
+      <CardContent className="py-4 space-y-2">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex flex-col gap-1">
+            <label htmlFor="installed-users-role-group" className="text-xs font-semibold text-gray-500">
+              Role group
+            </label>
+            <select
+              id="installed-users-role-group"
+              className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-gray-800 bg-white"
+              value={roleGroup}
+              onChange={(e) => {
+                setRoleGroup(e.target.value as RoleGroup);
+                setNoMatch(false);
+              }}
+              disabled={controlsDisabled}
+            >
+              <option value="">All users</option>
+              <option value="sales">Sales team</option>
+              <option value="partner">Partners (outlets)</option>
+              <option value="admin">Admins</option>
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor="installed-users-since" className="text-xs font-semibold text-gray-500">
+              Installed since (optional)
+            </label>
+            <input
+              id="installed-users-since"
+              type="date"
+              className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-gray-800 bg-white"
+              value={since}
+              onChange={(e) => {
+                setSince(e.target.value);
+                setNoMatch(false);
+              }}
+              disabled={controlsDisabled}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => void onDownload()}
+            disabled={empty || action.blocked}
+            aria-busy={action.busy}
+            aria-describedby={empty ? 'installed-users-empty' : undefined}
+            className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            style={{ backgroundColor: DARK_NAVY }}
+          >
+            {action.busy ? (
+              <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <Download className="w-4 h-4" aria-hidden="true" />
+            )}
+            {downloadButtonLabel(action, 'Download installed users (Excel)')}
+          </button>
+        </div>
+        {empty ? (
+          <p id="installed-users-empty" className="text-xs text-gray-500" data-testid="installed-users-none">
+            {NO_INSTALLS_TEXT}
+          </p>
+        ) : (
+          <p className="text-xs text-gray-400">
+            Includes everyone who opened the app as an installed app.
+          </p>
+        )}
+        <p role="status" className="text-xs text-gray-600" data-testid="installed-users-no-match">
+          {noMatch ? NO_MATCH_TEXT : ''}
+        </p>
+        <DownloadActionStatus action={action} />
+      </CardContent>
+    </Card>
   );
 }
 
@@ -147,6 +269,9 @@ export default function AdminAppAdoptionPage() {
           Push notification opt-ins &amp; home-screen installs across this brand
         </p>
       </div>
+
+      {/* ── Installed-users Excel download ── */}
+      <InstalledUsersDownload installedUsers={installed.users} />
 
       {/* ── Empty state ── */}
       {nothingYet ? (

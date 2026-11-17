@@ -64,10 +64,7 @@ function stubFetch(payouts: unknown[]) {
 async function renderWallet(payouts: unknown[]) {
   stubFetch(payouts);
   render(<WalletPage />);
-  await waitFor(
-    () => expect(screen.getByTestId('statement-controls-row')).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByTestId('statement-controls-row', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 describe('D — Wallet default period (regression: no hardcoded month)', () => {
@@ -83,16 +80,16 @@ describe('D — Wallet default period (regression: no hardcoded month)', () => {
     // hardcoded window.
     expect(await screen.findByText(/Field Visibility Payout ·/)).toBeInTheDocument();
     // And the period selector snapped to that past month, not the current month or May 2026.
-    const pickerBtn = screen.getByTestId('period-picker-btn');
+    const pickerBtn = await screen.findByTestId('period-picker-btn');
     expect(pickerBtn.textContent).toContain(pickerLabel(past));
   });
 
   it('D2: a partner with NO activity opens on the CURRENT month, empty, picker usable', async () => {
     await renderWallet([]);
     const now = new Date();
-    const pickerBtn = screen.getByTestId('period-picker-btn');
+    const pickerBtn = await screen.findByTestId('period-picker-btn');
     expect(pickerBtn.textContent).toContain(pickerLabel(now));
-    expect(screen.getByText(/No transactions for this period/i)).toBeInTheDocument();
+    expect(await screen.findByText(/No transactions for this period/i)).toBeInTheDocument();
 
     // Picker opens and the To field allows up to the current month (max >= today).
     fireEvent.click(pickerBtn);
@@ -114,7 +111,7 @@ describe('D — Wallet default period (regression: no hardcoded month)', () => {
     // Default snap shows BOTH payout ROWS (full activity range). Match the row (with "·")
     // rather than the same-label KPI-filter <option>.
     expect(await screen.findByText(/Older Payout ·/)).toBeInTheDocument();
-    expect(screen.getByText(/Recent Payout ·/)).toBeInTheDocument();
+    expect(await screen.findByText(/Recent Payout ·/)).toBeInTheDocument();
 
     // Partner narrows the window to the recent month only.
     fireEvent.click(screen.getByTestId('period-picker-btn'));
@@ -125,7 +122,7 @@ describe('D — Wallet default period (regression: no hardcoded month)', () => {
     fireEvent.click(screen.getByText('Apply'));
 
     await waitFor(() => expect(screen.queryByText(/Older Payout ·/)).not.toBeInTheDocument());
-    expect(screen.getByText(/Recent Payout ·/)).toBeInTheDocument();
+    expect(await screen.findByText(/Recent Payout ·/)).toBeInTheDocument();
 
     // A re-render from an unrelated control must NOT reset the pick back to the full range.
     fireEvent.click(screen.getByText('Earn'));

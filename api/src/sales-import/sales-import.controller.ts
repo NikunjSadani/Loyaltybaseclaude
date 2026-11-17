@@ -32,6 +32,7 @@ import {
 import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
 import { SalesImportUploadService } from './ingest/sales-import-upload.service';
 import { CreateSalesImportUploadDto, ListSalesImportsQueryDto } from './ingest/sales-import-upload.dto';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 /**
  * Sales Import UPLOAD + READ routes (plan §5.2, tasks I-9 / I-10):
@@ -153,6 +154,7 @@ export class SalesImportController {
 
   @Get(':id/errors.xlsx')
   @RequirePermission('targets:read')
+  @HeavyOp()
   async errorsXlsx(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<StreamableFile> {
     await this.gate(user, false);
     const { buffer, filename } = await this.uploads.errorsXlsx(user, id);

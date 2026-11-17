@@ -112,11 +112,11 @@ describe('VIS — Sales Visibility list', () => {
     getSalesEligible.mockResolvedValue({ success: true, data: RESP });
     render(<SalesVisibilityPage />);
     expect(await screen.findByText('Due Store')).toBeInTheDocument();
-    expect(screen.getByText('Approved Store')).toBeInTheDocument();
+    expect(await screen.findByText('Approved Store')).toBeInTheDocument();
     // Two outlets sit in the 'due' window state (o-due + the view-only o-view).
     // Scope to the badge <span>s so the status-filter <option>s of the same text don't count.
-    expect(screen.getAllByText('Due', { selector: 'span' })).toHaveLength(2);
-    expect(screen.getByText('Approved', { selector: 'span' })).toBeInTheDocument();
+    expect(await screen.findAllByText('Due', { selector: 'span' })).toHaveLength(2);
+    expect(await screen.findByText('Approved', { selector: 'span' })).toBeInTheDocument();
   });
 
   it('VIS5: status filter narrows the list', async () => {
@@ -138,7 +138,7 @@ describe('VIS — Sales Visibility list', () => {
     expect(screen.queryByText('Action needed')).not.toBeInTheDocument();
     expect(screen.queryByText('Name A–Z')).not.toBeInTheDocument();
     // The kept status filter still renders.
-    expect(screen.getByDisplayValue('All statuses')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('All statuses')).toBeInTheDocument();
   });
 
   it('VIS2: Capture button only for canCapture + unsatisfied window (D8)', async () => {
@@ -146,7 +146,7 @@ describe('VIS — Sales Visibility list', () => {
     render(<SalesVisibilityPage />);
     await screen.findByText('Due Store');
     // Exactly one capturable outlet (o-due). o-appr is satisfied; o-view is view-only.
-    const captureButtons = screen.getAllByRole('button', { name: /capture/i });
+    const captureButtons = await screen.findAllByRole('button', { name: /capture/i });
     expect(captureButtons).toHaveLength(1);
   });
 
@@ -176,9 +176,9 @@ describe('VIS — Sales Visibility list', () => {
     render(<SalesVisibilityPage />);
     await screen.findByText('Ann Store');
     // The "All team" pill + both member options are present.
-    expect(screen.getByDisplayValue('All team')).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'Ann Rep' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'Bob Rep' })).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('All team')).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: 'Ann Rep' })).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: 'Bob Rep' })).toBeInTheDocument();
   });
 
   it('VIS9: filtering by a member narrows the list to that member’s assignedUserId sub-tree', async () => {

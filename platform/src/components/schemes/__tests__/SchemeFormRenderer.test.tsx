@@ -89,7 +89,7 @@ describe('conditional-required (D12b)', () => {
     fireEvent.change(screen.getByLabelText(/Field kind/i), { target: { value: 'OTHER' } });
     fireEvent.click(screen.getByRole('button', { name: /submit/i }));
 
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
     expect(enroll).not.toHaveBeenCalled();
     expect(onSubmitted).not.toHaveBeenCalled();
   });
@@ -225,7 +225,7 @@ describe('media field → stored key', () => {
     fireEvent.change(input, { target: { files: [file] } });
 
     await waitFor(() => expect(uploadMedia).toHaveBeenCalledWith('s1', file, undefined));
-    await waitFor(() => expect(screen.getByText(/Captured/i)).toBeInTheDocument());
+    expect(await screen.findByText(/Captured/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /submit/i }));
     await waitFor(() => expect(enroll).toHaveBeenCalled());
@@ -269,8 +269,8 @@ describe('previewMode (dry-run — no side effects)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /submit/i }));
 
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
-    expect(screen.getByRole('alert')).toHaveTextContent(/is required/i);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/is required/i);
     expect(enroll).not.toHaveBeenCalled();
     expect(screen.queryByTestId('preview-submit-result')).not.toBeInTheDocument();
   });
@@ -289,7 +289,7 @@ describe('previewMode (dry-run — no side effects)', () => {
     const file = new File([new Uint8Array([1, 2, 3])], 'shop.jpg', { type: 'image/jpeg' });
     fireEvent.change(input, { target: { files: [file] } });
 
-    await waitFor(() => expect(screen.getByText(/Captured/i)).toBeInTheDocument());
+    expect(await screen.findByText(/Captured/i)).toBeInTheDocument();
     expect(uploadMedia).not.toHaveBeenCalled();
 
     // The synthetic preview key is what a real submit would carry — proven via the panel.
@@ -315,7 +315,7 @@ describe('previewMode (dry-run — no side effects)', () => {
     fireEvent.change(screen.getByLabelText(/Field kind/i), { target: { value: 'OTHER' } });
     fireEvent.click(screen.getByRole('button', { name: /submit/i }));
 
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
     expect(enroll).not.toHaveBeenCalled();
     expect(screen.queryByTestId('preview-submit-result')).not.toBeInTheDocument();
   });

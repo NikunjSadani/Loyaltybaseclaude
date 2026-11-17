@@ -8,6 +8,12 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./vitest.setup.ts'],
+    // Suite-load headroom (flaky-test sweep 2026-11-15): heavy component tests render in 1–3 s
+    // isolated and 3–5x slower under full-suite CPU contention / the slower GitHub runner, so the
+    // 5 s default per-test/hook limit false-failed and blocked deploys. 30 s still catches a hang.
+    // Async RTL queries get a matching 15 s default via `configure({ asyncUtilTimeout })` in setup.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     // Default lane = deterministic unit/component tests only (per docs/plans/01-how-we-test.md:
     // "No real network/DB/clock"). Live DB-integration tests use the `*-live.test.ts` suffix and
     // run in a separate lane: `npm run test:integration` (vitest.integration.config.ts).

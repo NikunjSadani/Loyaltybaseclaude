@@ -40,6 +40,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     soDeclarationKyc: false,
     outletMasterGeo: false,
     allowPayoutWithoutPan: false,
+    gifsyRejectFastTrack: false,
     campaignEnrollmentForm: true,
     salesTeamApp: true,
     walletModule: true,

@@ -695,6 +695,32 @@ describe('GifsyService', () => {
       expect(mockPrisma.client.update).not.toHaveBeenCalled();
     });
 
+    it('gifsyRejectFastTrack: PATCH merges + echoes it; absent → OFF; non-boolean → 400', async () => {
+      const stored = { walletModule: true, multiLevelApproval: true };
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: stored,
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features ?? stored,
+      }));
+      const on = await service.updateClient(gifsy, 'bajaj', { features: { gifsyRejectFastTrack: true } });
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({ ...stored, gifsyRejectFastTrack: true });
+      expect((on.features as Record<string, unknown>).gifsyRejectFastTrack).toBe(true);
+
+      const off = await service.updateClient(gifsy, 'bajaj', { status: 'ACTIVE' });
+      expect((off.features as Record<string, unknown>).gifsyRejectFastTrack).toBe(false);
+
+      mockPrisma.client.update.mockClear();
+      for (const v of ['true', 1, null]) {
+        await expect(
+          service.updateClient(gifsy, 'bajaj', { features: { gifsyRejectFastTrack: v } } as never),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      expect(mockPrisma.client.update).not.toHaveBeenCalled();
+    });
+
     // ── Feature-change audit trail (log-only) ───────────────────────────────────
     const bajajRow = (features: Record<string, unknown>) => ({
       id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),

@@ -47,6 +47,9 @@ import type {
 } from '@/lib/points-engine/types';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import type { DownloadOutcome } from '@/lib/exports/download';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -311,11 +314,22 @@ export default function PointsComputePage() {
   const [appliedSourceKey, setAppliedSourceKey] = useState<string | null>(null);
 
   // EXPORT
-  const [exportingFile, setExportingFile] = useState(false);
-  const [exportingReport, setExportingReport] = useState(false);
-  const [exportingPayout, setExportingPayout] = useState(false);
+  // One shared button state per file (useDownloadAction): "Preparing…" while in flight; a big file is
+  // prepared in the background (HTTP 202) → the button stays "Being prepared — see Downloads" until the
+  // message is dismissed; errors show under the buttons.
+  const fileAction = useDownloadAction();
+  const reportAction = useDownloadAction();
+  const payoutAction = useDownloadAction();
   const [exportMsg, setExportMsg] = useState<string | null>(null);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const showOutcome = (out: DownloadOutcome | null, doneMsg: string) => {
+    if (out?.kind === 'downloaded') setExportMsg(doneMsg);
+  };
+  const resetExports = () => {
+    setExportMsg(null);
+    fileAction.reset();
+    reportAction.reset();
+    payoutAction.reset();
+  };
 
   // COMMIT (direct credit)
   const [committing, setCommitting] = useState(false);
@@ -329,8 +343,7 @@ export default function PointsComputePage() {
     setPreview(null);
     setCommitResult(null);
     setCommitError(null);
-    setExportMsg(null);
-    setExportError(null);
+    resetExports();
 
     const filter: AppliedFilter = {
       period,
@@ -350,36 +363,21 @@ export default function PointsComputePage() {
   };
 
   const handleExport = async () => {
-    if (!applied || exportingFile) return;
-    setExportingFile(true);
+    if (!applied || fileAction.blocked) return;
     setExportMsg(null);
-    setExportError(null);
-    const err = await downloadExport(applied);
-    if (err) setExportError(err);
-    else setExportMsg('Credit-upload file downloaded.');
-    setExportingFile(false);
+    showOutcome(await fileAction.run(() => downloadExport(applied)), 'Credit-upload file downloaded.');
   };
 
   const handleReport = async () => {
-    if (!applied || exportingReport) return;
-    setExportingReport(true);
+    if (!applied || reportAction.blocked) return;
     setExportMsg(null);
-    setExportError(null);
-    const err = await downloadPreviewReport(applied);
-    if (err) setExportError(err);
-    else setExportMsg('Review report downloaded.');
-    setExportingReport(false);
+    showOutcome(await reportAction.run(() => downloadPreviewReport(applied)), 'Review report downloaded.');
   };
 
   const handlePayoutReport = async () => {
-    if (!applied || exportingPayout) return;
-    setExportingPayout(true);
+    if (!applied || payoutAction.blocked) return;
     setExportMsg(null);
-    setExportError(null);
-    const err = await downloadPayoutReport(applied);
-    if (err) setExportError(err);
-    else setExportMsg('Payout report downloaded.');
-    setExportingPayout(false);
+    showOutcome(await payoutAction.run(() => downloadPayoutReport(applied)), 'Payout report downloaded.');
   };
 
   const handleCommit = async () => {
@@ -409,8 +407,7 @@ export default function PointsComputePage() {
     setApplied(null);
     setAppliedSourceKey(null);
     setPreviewError(null);
-    setExportMsg(null);
-    setExportError(null);
+    resetExports();
     setCommitResult(null);
     setCommitError(null);
   };
@@ -669,7 +666,7 @@ export default function PointsComputePage() {
               <div className="flex flex-wrap gap-3">
                 <button
                   onClick={() => void handleExport()}
-                  disabled={exportingFile || preview.engineDisabled || !hasPointsOkRows || filtersChanged}
+                  disabled={fileAction.blocked || preview.engineDisabled || !hasPointsOkRows || filtersChanged}
                   title={
                     preview.engineDisabled
                       ? 'Unavailable while the engine is disabled'
@@ -679,25 +676,25 @@ export default function PointsComputePage() {
                   }
                   className="inline-flex items-center gap-2 rounded-xl bg-[var(--brand-primary)] px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  {exportingFile ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                  Download credit-upload file
+                  {fileAction.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                  {downloadButtonLabel(fileAction, 'Download credit-upload file')}
                 </button>
                 <button
                   onClick={() => void handleReport()}
-                  disabled={exportingReport || filtersChanged}
+                  disabled={reportAction.blocked || filtersChanged}
                   className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-40"
                 >
-                  {exportingReport ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
-                  Download review report
+                  {reportAction.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
+                  {downloadButtonLabel(reportAction, 'Download review report')}
                 </button>
                 {hasPayoutRows && (
                   <button
                     onClick={() => void handlePayoutReport()}
-                    disabled={exportingPayout || filtersChanged}
+                    disabled={payoutAction.blocked || filtersChanged}
                     className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-40"
                   >
-                    {exportingPayout ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
-                    Download payout report
+                    {payoutAction.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
+                    {downloadButtonLabel(payoutAction, 'Download payout report')}
                   </button>
                 )}
               </div>
@@ -712,11 +709,9 @@ export default function PointsComputePage() {
                   <CheckCircle2 className="h-3.5 w-3.5" /> {exportMsg}
                 </p>
               )}
-              {exportError && (
-                <p className="inline-flex items-center gap-1 text-xs font-medium text-red-700">
-                  <AlertTriangle className="h-3.5 w-3.5" /> {exportError}
-                </p>
-              )}
+              <DownloadActionStatus action={fileAction} />
+              <DownloadActionStatus action={reportAction} />
+              <DownloadActionStatus action={payoutAction} />
             </div>
 
             {/* Direct credit */}

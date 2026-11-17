@@ -386,14 +386,14 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
 
       const panel = await scope.findByTestId('hubble-product-panel');
-      expect(within(panel).getByText('Flipkart')).toBeInTheDocument();
-      expect(within(panel).getByText(/fixed amounts/i)).toBeInTheDocument();
+      expect(await within(panel).findByText('Flipkart')).toBeInTheDocument();
+      expect(await within(panel).findByText(/fixed amounts/i)).toBeInTheDocument();
       // ₹150 is below the ₹200 program minimum → disabled; ₹300 = 600 pts at rate 2.
-      expect(within(panel).getByRole('checkbox', { name: 'Offer ₹150' })).toBeDisabled();
-      expect(within(panel).getByText('600 pts')).toBeInTheDocument();
+      expect(await within(panel).findByRole('checkbox', { name: 'Offer ₹150' })).toBeDisabled();
+      expect(await within(panel).findByText('600 pts')).toBeInTheDocument();
 
-      await userEvent.click(within(panel).getByRole('checkbox', { name: 'Offer ₹1,250' }));
-      await userEvent.click(within(panel).getByRole('checkbox', { name: 'Offer ₹300' }));
+      await userEvent.click(await within(panel).findByRole('checkbox', { name: 'Offer ₹1,250' }));
+      await userEvent.click(await within(panel).findByRole('checkbox', { name: 'Offer ₹300' }));
       // The selling-value / range inputs are gone — the amounts drive the item.
       expect(scope.queryByPlaceholderText('500')).not.toBeInTheDocument();
       expect(scope.getByTestId('amount-list-note')).toHaveTextContent('₹300 · ₹1,250');
@@ -441,22 +441,22 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'amz-1');
       await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
       const panel = await scope.findByTestId('hubble-product-panel');
-      expect(within(panel).getByText(/flexible amount/i)).toBeInTheDocument();
+      expect(await within(panel).findByText(/flexible amount/i)).toBeInTheDocument();
       expect(panel).toHaveTextContent('₹500');
       expect(panel).toHaveTextContent('₹10,000');
 
-      const amt = within(panel).getByLabelText('Amount to offer');
+      const amt = await within(panel).findByLabelText('Amount to offer');
       await userEvent.type(amt, '250');
-      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+      await userEvent.click(await within(panel).findByRole('button', { name: /add amount/i }));
       expect(await scope.findByText(/minimum for this brand is ₹500/i)).toBeInTheDocument();
       await userEvent.clear(amt);
       await userEvent.type(amt, '1000.5'); // a decimal is never swallowed — refused, nothing added
-      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+      await userEvent.click(await within(panel).findByRole('button', { name: /add amount/i }));
       expect(await within(panel).findByText('Check the amount — whole rupees only')).toHaveAttribute('role', 'alert');
       expect(scope.queryByRole('button', { name: 'Remove ₹1,000' })).toBeNull();
       await userEvent.clear(amt);
       await userEvent.type(amt, '1000');
-      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+      await userEvent.click(await within(panel).findByRole('button', { name: /add amount/i }));
       expect(scope.getByRole('button', { name: 'Remove ₹1,000' })).toBeInTheDocument();
 
       await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
@@ -479,14 +479,14 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'fk-1');
       await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
       const panel = await scope.findByTestId('hubble-product-panel');
-      expect(within(panel).getByTestId('fixed-list-unknown'))
+      expect(await within(panel).findByTestId('fixed-list-unknown'))
         .toHaveTextContent("Hubble didn't return its amounts — enter the amounts Hubble shows for this brand");
 
-      const amt = within(panel).getByLabelText('Amount to offer');
+      const amt = await within(panel).findByLabelText('Amount to offer');
       // F2/F6: an invalid amount never disables "Add amount" — the tap shows "Check the amount" (and
       // adds nothing); the next keystroke hides it.
       await userEvent.type(amt, '1,2');
-      const addBtn = within(panel).getByRole('button', { name: /add amount/i });
+      const addBtn = await within(panel).findByRole('button', { name: /add amount/i });
       expect(addBtn).toBeEnabled();
       await userEvent.click(addBtn);
       expect(await within(panel).findByText('Check the amount — whole rupees only')).toHaveAttribute('role', 'alert');
@@ -494,11 +494,11 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       expect(within(panel).queryByText('Check the amount — whole rupees only')).toBeNull();
       await userEvent.clear(amt);
       await userEvent.type(amt, '175'); // below the ₹200 program minimum
-      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+      await userEvent.click(await within(panel).findByRole('button', { name: /add amount/i }));
       expect(await scope.findByText(/below this program's minimum voucher amount/i)).toBeInTheDocument();
       await userEvent.clear(amt);
       await userEvent.type(amt, '300');
-      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+      await userEvent.click(await within(panel).findByRole('button', { name: /add amount/i }));
 
       await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
       await waitFor(() => {
@@ -542,13 +542,13 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       const dialog = await screen.findByText('Edit Reward', { selector: 'h2' });
       const scope = within(dialog.closest('div.relative') as HTMLElement);
       const panel = await scope.findByTestId('hubble-product-panel');
-      expect(within(panel).getByRole('checkbox', { name: 'Offer ₹300' })).toBeChecked();
-      expect(within(panel).getByRole('checkbox', { name: 'Offer ₹1,250' })).toBeChecked();
+      expect(await within(panel).findByRole('checkbox', { name: 'Offer ₹300' })).toBeChecked();
+      expect(await within(panel).findByRole('checkbox', { name: 'Offer ₹1,250' })).toBeChecked();
       expect(calls.some((c) => c.url === '/api/admin/rewards/hubble-products/fk-1')).toBe(true);
 
       // Untick both → the item falls back to a normal voucher; the save sends [] to clear the list.
-      await userEvent.click(within(panel).getByRole('checkbox', { name: 'Offer ₹300' }));
-      await userEvent.click(within(panel).getByRole('checkbox', { name: 'Offer ₹1,250' }));
+      await userEvent.click(await within(panel).findByRole('checkbox', { name: 'Offer ₹300' }));
+      await userEvent.click(await within(panel).findByRole('checkbox', { name: 'Offer ₹1,250' }));
       // The stored shape is variable-amount → switch to Fixed and price it at ₹300 instead.
       await userEvent.click(scope.getByRole('button', { name: /🎯 fixed/i }));
       await userEvent.type(scope.getByPlaceholderText('500'), '300');
@@ -640,7 +640,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
 
     // Error row renders
     expect(await screen.findByText(/Unknown order number/)).toBeInTheDocument();
-    expect(screen.getByText(/Row 4/)).toBeInTheDocument();
+    expect(await screen.findByText(/Row 4/)).toBeInTheDocument();
 
     // It was sent as multipart FormData (not JSON)
     expect(uploadBody).toBeInstanceOf(FormData);

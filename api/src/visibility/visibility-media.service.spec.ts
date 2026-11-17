@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 /**
  * Unit tests for visibility-media.service.ts.
  *
@@ -17,7 +18,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 const mockStorage = {
   generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-07/uuid-${name}`),
   uploadFile: jest.fn().mockResolvedValue('https://storage/x'),
-  downloadBytes: jest.fn(),
+  openBoundedObject: jest.fn(),
 };
 
 const admin: JwtPayload = { sub: 'a1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9', name: 'A' };
@@ -92,7 +93,7 @@ describe('VisibilityMediaService', () => {
 
   describe('viewMedia (tenant-from-key)', () => {
     it('serves a same-tenant object inline for safe mime', async () => {
-      mockStorage.downloadBytes.mockResolvedValue({ bytes: jpegBuffer, contentType: 'image/jpeg' });
+      mockStorage.openBoundedObject.mockResolvedValue({ stream: Readable.from([jpegBuffer]), size: (jpegBuffer).length, contentType: 'image/jpeg' });
       const out = await service.viewMedia(t1User, 'visibility-media/t1/2026-07/a.jpg');
       expect(out.inline).toBe(true);
       expect(out.contentType).toBe('image/jpeg');
@@ -102,11 +103,11 @@ describe('VisibilityMediaService', () => {
       await expect(
         service.viewMedia(t2User, 'visibility-media/t1/2026-07/a.jpg'),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('M4: lets a CLIENT_ADMIN read its OWN tenant media (export photo links, D15)', async () => {
-      mockStorage.downloadBytes.mockResolvedValue({ bytes: jpegBuffer, contentType: 'image/jpeg' });
+      mockStorage.openBoundedObject.mockResolvedValue({ stream: Readable.from([jpegBuffer]), size: (jpegBuffer).length, contentType: 'image/jpeg' });
       const out = await service.viewMedia(t1ClientAdmin, 'visibility-media/t1/2026-07/a.jpg');
       expect(out.inline).toBe(true);
       expect(out.contentType).toBe('image/jpeg');
@@ -116,11 +117,11 @@ describe('VisibilityMediaService', () => {
       await expect(
         service.viewMedia(t1ClientAdmin, 'visibility-media/t2/2026-07/a.jpg'),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
     it('lets a GIFSY_ADMIN read any tenant key (cross-tenant operator)', async () => {
-      mockStorage.downloadBytes.mockResolvedValue({ bytes: jpegBuffer, contentType: 'image/jpeg' });
+      mockStorage.openBoundedObject.mockResolvedValue({ stream: Readable.from([jpegBuffer]), size: (jpegBuffer).length, contentType: 'image/jpeg' });
       const out = await service.viewMedia(admin, 'visibility-media/t1/2026-07/a.jpg');
       expect(out.inline).toBe(true);
     });
@@ -132,14 +133,14 @@ describe('VisibilityMediaService', () => {
     });
 
     it('404s a missing object', async () => {
-      mockStorage.downloadBytes.mockResolvedValue(null);
+      mockStorage.openBoundedObject.mockResolvedValue(null);
       await expect(
         service.viewMedia(t1User, 'visibility-media/t1/2026-07/a.jpg'),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('forces a non-safe mime to an octet-stream download', async () => {
-      mockStorage.downloadBytes.mockResolvedValue({ bytes: jpegBuffer, contentType: 'image/svg+xml' });
+      mockStorage.openBoundedObject.mockResolvedValue({ stream: Readable.from([jpegBuffer]), size: (jpegBuffer).length, contentType: 'image/svg+xml' });
       const out = await service.viewMedia(t1User, 'visibility-media/t1/2026-07/a.svg');
       expect(out.inline).toBe(false);
       expect(out.contentType).toBe('application/octet-stream');

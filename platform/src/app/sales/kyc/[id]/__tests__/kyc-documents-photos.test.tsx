@@ -67,7 +67,7 @@ async function renderAndExpand() {
     );
     await params;
   });
-  await waitFor(() => expect(screen.getByText('Verma Store')).toBeInTheDocument());
+  expect(await screen.findByText('Verma Store')).toBeInTheDocument();
   fireEvent.click(screen.getByText(/store information/i));
 }
 
@@ -80,11 +80,11 @@ describe('SKDP — Sales KYC detail documents + photos', () => {
       { documentType: 'GST_CERTIFICATE', status: 'VERIFIED', viewUrl: 'https://signed/gst' },
     ]);
     await renderAndExpand();
-    await waitFor(() => expect(screen.getByText('PAN Card')).toBeInTheDocument());
-    expect(screen.getByText('GST Certificate')).toBeInTheDocument();
+    expect(await screen.findByText('PAN Card')).toBeInTheDocument();
+    expect(await screen.findByText('GST Certificate')).toBeInTheDocument();
     // "View" is now a button (it opens the doc via a blob: URL — a `data:` URL can't
     // be opened as a top-level tab, which had shown a blank page).
-    const viewLinks = screen.getAllByTestId('kyc-doc-view-link');
+    const viewLinks = await screen.findAllByTestId('kyc-doc-view-link');
     expect(viewLinks.length).toBe(2);
     expect(viewLinks[0].tagName).toBe('BUTTON');
   });
@@ -139,14 +139,14 @@ describe('SKDP — Sales KYC detail documents + photos', () => {
     ]);
     await renderAndExpand();
     await waitFor(() => expect(screen.getAllByTestId('outlet-photo-thumb').length).toBe(2));
-    const imgs = screen.getAllByRole('img');
+    const imgs = await screen.findAllByRole('img');
     expect(imgs.some(i => i.getAttribute('src') === 'https://signed/board')).toBe(true);
   });
 
   it('SKDP4: no demo-mode placeholder and no dead Tier chip', async () => {
     stubFetch([{ documentType: 'PAN_CARD', status: 'PENDING', viewUrl: 'https://signed/pan' }]);
     await renderAndExpand();
-    await waitFor(() => expect(screen.getByText('PAN Card')).toBeInTheDocument());
+    expect(await screen.findByText('PAN Card')).toBeInTheDocument();
     expect(screen.queryByText(/demo mode/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Tier/i)).not.toBeInTheDocument();
   });
@@ -158,9 +158,9 @@ describe('SKDP — Sales KYC detail documents + photos', () => {
       { id: 'k3', documentType: 'OTHER', status: 'PENDING', fileName: 'x.pdf', metadata: { label: 'Counter photo' }, viewUrl: 'https://signed/o2' },
     ]);
     await renderAndExpand();
-    await waitFor(() => expect(screen.getByText('PAN Card')).toBeInTheDocument());
-    expect(screen.getByText('Counter photo')).toBeInTheDocument();
-    expect(screen.getByText('Other Document')).toBeInTheDocument(); // pre-existing label kept
+    expect(await screen.findByText('PAN Card')).toBeInTheDocument();
+    expect(await screen.findByText('Counter photo')).toBeInTheDocument();
+    expect(await screen.findByText('Other Document')).toBeInTheDocument(); // pre-existing label kept
     expect(screen.queryByText('ID proof (Driving licence)')).not.toBeInTheDocument(); // fileName never used
     expect(screen.queryByText('x')).not.toBeInTheDocument();
   });
@@ -168,7 +168,7 @@ describe('SKDP — Sales KYC detail documents + photos', () => {
   it('SKDP5: honest empty states when nothing was uploaded', async () => {
     stubFetch([]);
     await renderAndExpand();
-    await waitFor(() => expect(screen.getByText(/no documents uploaded/i)).toBeInTheDocument());
-    expect(screen.getByText(/no photos uploaded/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no documents uploaded/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no photos uploaded/i)).toBeInTheDocument();
   });
 });

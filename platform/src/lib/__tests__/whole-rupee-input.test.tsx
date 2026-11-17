@@ -98,14 +98,14 @@ describe('WR — wholeRupeeInputProps', () => {
     render(<HookHarness onSubmit={onSubmit} />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
     await userEvent.type(el, '750.5');
-    await userEvent.click(screen.getByRole('button', { name: 'Redeem' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Redeem' }));
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount — whole rupees only');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount — whole rupees only');
     expect(el.value).toBe('750.5');
     // Fixing it (delete ".5") → the next tap submits the whole amount.
     await userEvent.type(el, '{Backspace}{Backspace}');
     expect(screen.queryByRole('alert')).toBeNull();
-    await userEvent.click(screen.getByRole('button', { name: 'Redeem' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Redeem' }));
     expect(onSubmit).toHaveBeenCalledWith(750);
   });
 
@@ -127,13 +127,13 @@ describe('WR — wholeRupeeInputProps', () => {
     await userEvent.click(el);
     await userEvent.paste('750.5');
     expect(el.value).toBe('750.5'); // never shrunk to 750
-    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
-    expect(screen.getByRole('button', { name: 'Redeem' })).toBeDisabled();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
+    expect(await screen.findByRole('button', { name: 'Redeem' })).toBeDisabled();
     expect(wholeRupeeAmount(el.value)).toBeNull();
     await userEvent.clear(el);
     await userEvent.paste('₹1,250.50');
     expect(el.value).toBe('1,250.50');
-    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
   });
 
   it('WR3b: pasting "Rs. 1,250" / "Rs.1,250" / "₹ 1,250" / "INR 1250" → 1250, no error', async () => {
@@ -352,7 +352,7 @@ describe('WR — wholeRupeeInputProps', () => {
     // Keydown path: a refused letter key changes nothing either.
     await userEvent.type(el, 'q');
     expect(el.value).toBe('750.5');
-    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
     // A real edit clears it.
     await userEvent.type(el, '{Backspace}');
     expect(el.value).toBe('750.');
@@ -367,7 +367,7 @@ describe('WR — wholeRupeeInputProps', () => {
     el.setSelectionRange(0, 3);
     await userEvent.paste('1.5');
     expect(el.value).toBe('1.5');
-    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
     // Android clipboard-suggestion paste (beforeinput insertFromPaste) — same splice.
     fireEvent.change(el, { target: { value: '500' } });
     el.setSelectionRange(0, 3);
@@ -398,7 +398,7 @@ describe('WR — wholeRupeeInputProps', () => {
     render(<HookHarness onSubmit={() => undefined} />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
     await userEvent.type(el, '9999');
-    await userEvent.click(screen.getByRole('button', { name: 'Reset' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Reset' }));
     expect(el.value).toBe('');
     expect(el.dataset.last).toBeUndefined();
     // A refused (letter-adding) change now restores the CURRENT text (''), never "9999".

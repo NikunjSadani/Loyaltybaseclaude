@@ -21,6 +21,9 @@ const mockPrisma = {
   userActivityDay: { findMany: jest.fn() },
   kycSubmission: { findMany: jest.fn() },
   outlet: { findMany: jest.fn() },
+  // kycStatus reads clients.features.gifsyRejectFastTrack (Bajaj "Routing" column). Default: no flag → OFF.
+  client: { findUnique: jest.fn() },
+  kycStatusHistory: { findMany: jest.fn() },
 };
 
 // visibilityStatus is master-gated; default ON so the existing scoping tests run.
@@ -105,15 +108,7 @@ describe('ReportsService', () => {
       });
     });
 
-    it('returns an xlsx buffer when format=xlsx', async () => {
-      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
-      const res = await service.visibilityStatus(gifsy, { format: ReportFormat.XLSX });
-      expect(res.kind).toBe('xlsx');
-      if (res.kind === 'xlsx') {
-        expect(res.filename).toBe('visibility-status.xlsx');
-        expect(Buffer.isBuffer(res.buffer)).toBe(true);
-      }
-    });
+    // format=xlsx is the `visibility-status` export kind (exports/kinds/batch1/visibility-status.spec.ts).
   });
 
   describe('schemePerformance', () => {
@@ -349,6 +344,22 @@ describe('ReportsService', () => {
       });
     });
 
+    it('gifsyRejectFastTrack tenant: each row gains "Routing" (label for a fast-tracked latest submission)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValueOnce({ features: { gifsyRejectFastTrack: true } });
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        outletRow({}, { id: 'sub-ft', status: 'PENDING_GIFSY', submittedAt: new Date(), createdAt: new Date() } as never),
+      ]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'sub-ft', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'sub-0', previousRejectedAt: new Date().toISOString() },
+        },
+      ]);
+      const rows = rowsOf(await service.kycStatus({ ...gifsy, clientId: 'bajaj' }, {}));
+      expect(rows[0].Routing).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
+      expect(mockPrisma.client.findUnique.mock.calls[0][0].where).toEqual({ id: 'bajaj' });
+    });
+
     it('an approved outlet shows Approved with Last Submitted On set', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([
         outletRow({}, {
@@ -433,16 +444,7 @@ describe('ReportsService', () => {
       expect(where).toEqual({ clientId: 'deoleo', deletedAt: null });
     });
 
-    it('empty tenant → valid xlsx buffer, no throw', async () => {
-      mockPrisma.outlet.findMany.mockResolvedValue([]);
-      const res = await service.kycStatus(gifsy, { format: ReportFormat.XLSX });
-      expect(res.kind).toBe('xlsx');
-      if (res.kind === 'xlsx') {
-        expect(res.filename).toBe('kyc-status.xlsx');
-        expect(Buffer.isBuffer(res.buffer)).toBe(true);
-        expect(res.buffer.length).toBeGreaterThan(0);
-      }
-    });
+    // format=xlsx is the `kyc-status` export kind (exports/kinds/batch1/kyc-status.spec.ts, incl. the empty tenant).
 
     // Parity: the report's Status for an in-pipeline outlet (no lifecycle overlay) is
     // EXACTLY the shared canonical derivation deriveKycStage(latest status).

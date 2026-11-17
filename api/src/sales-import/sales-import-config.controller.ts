@@ -18,6 +18,7 @@ import type {
   SalesKpiTestResult,
   SalesSegmentOptions,
 } from './sales-import.contract';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 /**
  * Sales Import CONFIG routes (plan §5.2): column mapping + importer-owned KPI definitions.
@@ -73,6 +74,7 @@ export class SalesImportConfigController {
 
   @Post('kpis/test')
   @RequirePermission('targets:read')
+  @HeavyOp()
   async testKpi(@CurrentUser() user: JwtPayload, @Body() body: SalesKpiTestRequest): Promise<SalesKpiTestResult> {
     await this.gate(user, false);
     return this.kpis.test(user, body);

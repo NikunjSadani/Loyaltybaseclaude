@@ -172,6 +172,31 @@ describe('VendorPortalService', () => {
     });
   });
 
+  describe('uploadCatalogue — memory-safety: only failed rows are echoed', () => {
+    it('returns counts + the failed rows only (no per-row entry for created rows)', async () => {
+      grantScope('AUTO_LIVE');
+      mockPrisma.giftCategory.findFirst.mockResolvedValue({ id: 'gc1', code: 'ELEC', name: 'Electronics', imageUrl: null, sortOrder: 0 });
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'rc-cat-1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
+      mockPrisma.rewardCatalog.create.mockImplementation(async ({ data }: never) => ({ id: 'rcat-1', giftCategory: null, ...(data as object) }));
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const XLSX = require('xlsx');
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['Name', 'Category Code', 'Selling Value (paise)', 'MRP (paise)', 'Description', 'Image URLs', 'Redemption Mode', 'Fulfilment Channel', 'Stock Quantity'],
+        ['Earbuds', 'ELEC', 150000, 199900, '', '', 'PHYSICAL_GIFT', 'BRAND', ''],
+        ['Speaker', '', 150000, 199900, '', '', 'PHYSICAL_GIFT', 'BRAND', ''], // missing category → fails
+      ]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Catalogue');
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+
+      const res = await service.uploadCatalogue(vendor, { buffer } as Express.Multer.File);
+      expect(res).toMatchObject({ total: 2, created: 1, failed: 1, problemRowCount: 1, problemRowsTruncated: false });
+      expect(res).not.toHaveProperty('results');
+      expect(res.problemRows).toEqual([{ rowIndex: expect.any(Number), error: 'Category Code is required' }]);
+    });
+  });
+
   describe('updateCatalogue — re-moderation (review #9)', () => {
     const existing = {
       id: 'rcat-1', sourceType: 'VENDOR', vendorId: 'v1', clientId: 'deoleo',

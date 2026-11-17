@@ -264,6 +264,15 @@ export interface MatchedRosterRow {
 }
 
 /** Per-input-row disposition, for the downloadable upload report (one per file row). */
+/**
+ * A roster-upload row the operator should look at (memory-safety upload echo): a dropped
+ * duplicate, a row that did not link to a tenant outlet (standalone), or a tagged employee
+ * code that did not resolve. Everything else is a clean save.
+ */
+export function isRosterProblemRow(r: RosterRowReport): boolean {
+  return r.disposition === 'DUPLICATE_DROPPED' || r.linkage === 'STANDALONE' || r.taggedEmployeeFound === false;
+}
+
 export interface RosterRowReport {
   /** 1-based row number in the uploaded sheet (matches RawRosterRow.rowIndex). */
   rowIndex: number;

@@ -25,7 +25,12 @@ vi.mock('@/components/layout/nav-bottom', () => ({ NavBottom: () => null }));
 vi.mock('@/components/layout/sidebar', () => ({ Sidebar: () => null }));
 vi.mock('@/components/layout/site-footer', () => ({ SiteFooter: () => null }));
 vi.mock('@/components/auth/require-auth', () => ({ RequireAuth: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
-vi.mock('@/lib/partner-identity', () => ({ usePartnerIdentity: () => ({}) }));
+const rememberMock = vi.fn();
+vi.mock('@/lib/partner-identity', () => ({
+  usePartnerIdentity: () => ({}),
+  announceActivePartnerChanged: vi.fn(),
+  rememberActiveOutletDisplay: (o: unknown) => rememberMock(o),
+}));
 vi.mock('@/lib/platform/client-config-context', () => ({ useClientConfig: () => ({ branding: {} }) }));
 vi.mock('@/lib/auth-client', () => ({ logout: vi.fn(), PORTAL_ROLES: { partner: [] } }));
 
@@ -61,7 +66,7 @@ describe('OS — outlet switcher', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /kumar wholesale|switch outlet/i }));
     // The menu item for the sibling (active) carries aria-current=true; the own one does not.
-    const items = screen.getAllByRole('menuitem');
+    const items = await screen.findAllByRole('menuitem');
     const sib = items.find((el) => el.textContent?.includes('Kumar Wholesale'));
     const own = items.find((el) => el.textContent?.includes('Kumar General Store'));
     expect(sib).toHaveAttribute('aria-current', 'true');
@@ -72,7 +77,7 @@ describe('OS — outlet switcher', () => {
     render(<OutletSwitcher outlets={[OWN, SIB]} activePartnerId={null} />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button'));
-    const items = screen.getAllByRole('menuitem');
+    const items = await screen.findAllByRole('menuitem');
     const own = items.find((el) => el.textContent?.includes('Kumar General Store'));
     expect(own).toHaveAttribute('aria-current', 'true');
   });
@@ -81,15 +86,18 @@ describe('OS — outlet switcher', () => {
     render(<OutletSwitcher outlets={[OWN, SIB]} activePartnerId={null} />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button'));
-    await user.click(screen.getByRole('menuitem', { name: /kumar wholesale/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /kumar wholesale/i }));
     await waitFor(() => expect(setActivePartnerMock).toHaveBeenCalledWith('p-sib'));
+    // The picked outlet's names are stored BEFORE the hard reload, so the reloaded header paints it.
+    await waitFor(() => expect(rememberMock).toHaveBeenCalledWith(SIB));
+    expect(window.location.href).toBe('/partner/dashboard');
   });
 
   it('OS4: clicking the already-active outlet does NOT re-set the cookie', async () => {
     render(<OutletSwitcher outlets={[OWN, SIB]} activePartnerId="p-sib" />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /kumar wholesale|switch outlet/i }));
-    await user.click(screen.getByRole('menuitem', { name: /kumar wholesale/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /kumar wholesale/i }));
     expect(setActivePartnerMock).not.toHaveBeenCalled();
   });
 });

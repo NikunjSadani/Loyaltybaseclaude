@@ -87,7 +87,7 @@ describe('POLISH — rewards chip row edge fade + keep the selected chip in view
     render(<RewardsPage />);
     const allChip = await screen.findByRole('button', { name: 'All' });
 
-    const fade = screen.getByTestId('chip-row-fade');
+    const fade = await screen.findByTestId('chip-row-fade');
     expect(fade).toHaveAttribute('aria-hidden', 'true');
     // Taps must pass through the fade to the chip underneath (here the class IS the behaviour).
     expect(fade).toHaveClass('pointer-events-none');
@@ -116,13 +116,13 @@ describe('POLISH — rewards chip row edge fade + keep the selected chip in view
     render(<RewardsPage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Luggage' }));
-    await user.click(screen.getByRole('button', { name: /vouchers/i }));
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
     scrollIntoView.mockClear();
 
-    await user.click(screen.getByRole('button', { name: /physical/i }));
+    await user.click(await screen.findByRole('button', { name: /physical/i }));
 
     // The chip row re-mounted with fresh buttons — the NEW Luggage chip is the one scrolled.
-    const luggage = screen.getByRole('button', { name: 'Luggage' });
+    const luggage = await screen.findByRole('button', { name: 'Luggage' });
     expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ block: 'nearest', inline: 'nearest' }));
     expect(scrollIntoView.mock.contexts.at(-1)).toBe(luggage);
   });

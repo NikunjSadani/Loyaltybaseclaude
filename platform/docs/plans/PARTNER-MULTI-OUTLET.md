@@ -386,7 +386,7 @@ schemes from ALL partners; it is now an opt-in allowlist threaded through the pi
 `20260723140000_scheme_enrollment_by_partner` (W3). W1+W2 already applied on staging; W3's two apply on the
 next develop push.
 
-### ⚠️ CUTOVER CHECKLIST (owner-gated; the migrations are NOT yet in prod)
+### CUTOVER CHECKLIST (historical — ✅ executed at cutover #14 `eca351e`, 2026-07-24; migrations applied)
 1. **PROD dup-PAN pre-check BEFORE `migrate deploy`** — the PAN partial-unique index FAILS to build if two
    ungrouped active partners already share a PAN. Guarded read (prod is PRE-Wave-1 → `isParent` col does NOT
    exist yet, so OMIT that filter — no parents exist pre-migration anyway):

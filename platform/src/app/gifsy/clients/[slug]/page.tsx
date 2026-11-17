@@ -1166,7 +1166,7 @@ function LiveSwitchRow({
 // Behaviour flags section (B2) — runtime flags that are NOT console modules
 // ─────────────────────────────────────────────────────────────────────────────
 
-// outletMasterGeo / soDeclarationKyc / allowPayoutWithoutPan are deliberately excluded from FeatureKey (they change how an
+// outletMasterGeo / soDeclarationKyc / allowPayoutWithoutPan / gifsyRejectFastTrack are deliberately excluded from FeatureKey (they change how an
 // existing flow behaves rather than switching a module on), so they get their own section. Same
 // REAL persistence as the module toggles: PATCH { features: { <key>: bool } } — the backend merges
 // one key at a time (every other stored flag survives). A failed save leaves the switch unchanged.

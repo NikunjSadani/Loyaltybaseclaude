@@ -1,8 +1,13 @@
 # Focus products from the target file — design (FOCUS-FROM-TARGETS)
 
 Owner-approved 2026-11-13 (option A). ⚠️ PLATFORM-WIDE (shared Sales Import + targets code), dormant for every tenant
-until a Sales Import KPI is set to `productSource: 'TARGET_NAMES'`. Ships in the next release with LINES
-(PRODUCT_COUNT, `5ed08fd6`) and the 194R export outlet columns (`1d664ad9`).
+until a Sales Import KPI is set to `productSource: 'TARGET_NAMES'`. ✅ Shipped to prod in `e242b1a1` (2026-11-13/14)
+with LINES (PRODUCT_COUNT, `5ed08fd6`) and the 194R export outlet columns (`1d664ad9`); used for the Bajaj November 2026
+apply (2026-11-15).
+
+> ⚠️ **Trap (prod, 2026-11-15):** the per-outlet names are read from the target file's **second column with the same
+> heading** as the KPI (first = value, second = names → `__names[kpiCode]`), and the Sales Import KPI scope is
+> **intersected** with the target KPI's applies-to scope. Detail: `SALES-IMPORT-PIPELINE-PLAN.md` §18.
 
 ## 1. The problem
 

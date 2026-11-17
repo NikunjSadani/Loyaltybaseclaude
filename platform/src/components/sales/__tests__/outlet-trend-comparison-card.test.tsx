@@ -99,35 +99,35 @@ describe('deriveOutletTrendBuckets', () => {
 describe('OutletTrendComparisonCard', () => {
   it('OT3: renders the headers, the three rows, the ₹ values and the per-bucket pcts', async () => {
     render(<OutletTrendComparisonCard outletCode="OUT1" />);
-    await waitFor(() => expect(screen.getByText('Achievement')).toBeInTheDocument());
+    expect(await screen.findByText('Achievement')).toBeInTheDocument();
 
     // Column headers
-    expect(screen.getByText('Current')).toBeInTheDocument();
-    expect(screen.getByText('Last month')).toBeInTheDocument();
-    expect(screen.getByText('Last 3 months')).toBeInTheDocument();
+    expect(await screen.findByText('Current')).toBeInTheDocument();
+    expect(await screen.findByText('Last month')).toBeInTheDocument();
+    expect(await screen.findByText('Last 3 months')).toBeInTheDocument();
     // Rows
-    expect(screen.getByText('Target')).toBeInTheDocument();
-    expect(screen.getByText('% achievement')).toBeInTheDocument();
+    expect(await screen.findByText('Target')).toBeInTheDocument();
+    expect(await screen.findByText('% achievement')).toBeInTheDocument();
 
     // Achievement: current ₹2.2L, last month ₹1.8L, 3-mo mean ₹1.6L.
-    expect(screen.getByText('₹2.2L')).toBeInTheDocument();
-    expect(screen.getByText('₹1.8L')).toBeInTheDocument();
-    expect(screen.getByText('₹1.6L')).toBeInTheDocument();
+    expect(await screen.findByText('₹2.2L')).toBeInTheDocument();
+    expect(await screen.findByText('₹1.8L')).toBeInTheDocument();
+    expect(await screen.findByText('₹1.6L')).toBeInTheDocument();
     // Target: current ₹2L (also last-month ₹2L), 3-mo mean ₹1.7L.
-    expect(screen.getAllByText('₹2L').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('₹1.7L')).toBeInTheDocument();
+    expect((await screen.findAllByText('₹2L')).length).toBeGreaterThanOrEqual(1);
+    expect(await screen.findByText('₹1.7L')).toBeInTheDocument();
     // Percentages
-    expect(screen.getByText('110%')).toBeInTheDocument();
-    expect(screen.getByText('90%')).toBeInTheDocument();
-    expect(screen.getByText('93%')).toBeInTheDocument();
+    expect(await screen.findByText('110%')).toBeInTheDocument();
+    expect(await screen.findByText('90%')).toBeInTheDocument();
+    expect(await screen.findByText('93%')).toBeInTheDocument();
   });
 
   it('OT4: the % cells are colour-coded by band', async () => {
     render(<OutletTrendComparisonCard outletCode="OUT1" />);
-    await waitFor(() => expect(screen.getByText('110%')).toBeInTheDocument());
-    expect(screen.getByText('110%').className).toMatch(/text-emerald-600/); // ≥100
-    expect(screen.getByText('90%').className).toMatch(/text-amber-600/);     // ≥80
-    expect(screen.getByText('93%').className).toMatch(/text-amber-600/);     // ≥80
+    expect(await screen.findByText('110%')).toBeInTheDocument();
+    expect((await screen.findByText('110%')).className).toMatch(/text-emerald-600/); // ≥100
+    expect((await screen.findByText('90%')).className).toMatch(/text-amber-600/);     // ≥80
+    expect((await screen.findByText('93%')).className).toMatch(/text-amber-600/);     // ≥80
   });
 
   it('OT5: self-hides when the outlet has no target this month', async () => {
@@ -153,15 +153,15 @@ describe('OutletTrendComparisonCard', () => {
       return mockOk({ success: true, data: {} });
     });
     render(<OutletTrendComparisonCard outletCode="OUT1" />);
-    await waitFor(() => expect(screen.getByText(/No target history yet for this outlet/i)).toBeInTheDocument());
+    expect(await screen.findByText(/No target history yet for this outlet/i)).toBeInTheDocument();
   });
 
   it('OT7: the KPI dropdown lists the outlet-targets KPI columns and defaults to the primary', async () => {
     render(<OutletTrendComparisonCard outletCode="OUT1" />);
     const kpiSelect = (await screen.findByLabelText('KPI')) as HTMLSelectElement;
     await waitFor(() => expect(within(kpiSelect).getByRole('option', { name: 'Volume' })).toBeInTheDocument());
-    expect(within(kpiSelect).getByRole('option', { name: 'Primary KPI' })).toBeInTheDocument();
-    expect(within(kpiSelect).getByRole('option', { name: 'Primary Sales' })).toBeInTheDocument();
+    expect(await within(kpiSelect).findByRole('option', { name: 'Primary KPI' })).toBeInTheDocument();
+    expect(await within(kpiSelect).findByRole('option', { name: 'Primary Sales' })).toBeInTheDocument();
     expect(kpiSelect.value).toBe('');
   });
 });

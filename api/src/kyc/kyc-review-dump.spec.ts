@@ -1,11 +1,17 @@
-// Unit tests for the pure KYC review-dump generator (40-column Lane A export).
+// Unit tests for the pure KYC review-dump layout (40-column Lane A export) + the rejected-outlets layout, written
+// through the streaming writer exactly as the `kyc-review-dump` / `kyc-rejected` export kinds write them.
 
+import { PassThrough } from 'node:stream';
 import * as XLSX from 'xlsx';
-import { KycFieldKey } from '@prisma/client';
+import { createXlsxStreamWriter, type XlsxCell } from '../common/xlsx-stream';
 import {
-  generateKycReviewDumpExcel,
-  generateRejectedKycExcel,
+  kycDumpColumnWidths,
+  kycReviewDumpCells,
+  kycReviewDumpHeaders,
+  rejectedKycCells,
+  rejectedKycHeaders,
   KYC_DUMP_TOTAL_COLUMN_COUNT,
+  kycDumpTotalColumnCount,
   KYC_FIELD_ORDER,
   kycFieldDecisionHeader,
   rejectedFieldVerdictHeader,
@@ -13,6 +19,25 @@ import {
   KycReviewDumpEntry,
   RejectedKycRow,
 } from './kyc-review-dump';
+import { parseKycApprovalSheet } from './kyc-bulk-verify';
+
+async function viaStream(sheetName: string, headers: string[], rows: XlsxCell[][]): Promise<Buffer> {
+  const sink = new PassThrough();
+  const chunks: Buffer[] = [];
+  sink.on('data', (c: Buffer) => chunks.push(c));
+  const done = new Promise<void>((r) => sink.on('end', () => r()));
+  const w = createXlsxStreamWriter(sink);
+  const sheet = await w.addSheet(sheetName, headers, { widths: kycDumpColumnWidths(headers) });
+  for (const r of rows) await sheet.addRow(r);
+  await w.finish();
+  await done;
+  return Buffer.concat(chunks);
+}
+/** `routing` = a gifsyRejectFastTrack tenant is in the export's scope (adds the trailing "Routing" column). */
+const generateKycReviewDumpExcel = (entries: KycReviewDumpEntry[], routing = true) =>
+  viaStream('KYC Review Dump', kycReviewDumpHeaders(routing), entries.map((e) => kycReviewDumpCells(e, routing)));
+const generateRejectedKycExcel = (rows: RejectedKycRow[], routing = true) =>
+  viaStream('Rejected Outlets', rejectedKycHeaders(routing), rows.map((r) => rejectedKycCells(r, routing)));
 
 const allPending = (): KycReviewDumpEntry['fields'] => {
   const f = {} as KycReviewDumpEntry['fields'];
@@ -52,25 +77,71 @@ const parse = (buf: Buffer) => {
   return { ws, rows };
 };
 
-describe('generateKycReviewDumpExcel', () => {
-  it('produces the 40-column header layout (Partner Class at index 5)', () => {
-    const { rows } = parse(generateKycReviewDumpExcel([entry()]));
-    expect(rows[0].length).toBe(KYC_DUMP_TOTAL_COLUMN_COUNT);
+describe('KYC review dump layout (kycReviewDumpCells)', () => {
+  it('flag-off scope: EXACTLY the established 40 columns, no Routing (Deoleo byte-identical)', async () => {
+    const { rows } = parse(await generateKycReviewDumpExcel([entry({ fastTrack: null })], false));
+    expect(KYC_DUMP_TOTAL_COLUMN_COUNT).toBe(40);
+    expect(kycDumpTotalColumnCount(false)).toBe(40);
+    expect(rows[0].length).toBe(40);
+    expect(rows[1].length).toBeLessThanOrEqual(40);
+    expect(rows[0]).not.toContain('Routing');
+    expect(kycReviewDumpHeaders()).toEqual(kycReviewDumpHeaders(false)); // default = no Routing
+    expect(kycReviewDumpCells(entry())).toHaveLength(40);
+    expect(rows[0][0]).toBe('Submission ID');
+    expect(rows[0][5]).toBe('Partner Class');
+  });
+
+  it('flag-on scope: 41 columns (Partner Class at index 5, Routing appended LAST)', async () => {
+    const { rows } = parse(await generateKycReviewDumpExcel([entry()]));
+    expect(kycDumpTotalColumnCount(true)).toBe(41);
+    expect(rows[0].length).toBe(41);
     expect(rows[0][0]).toBe('Submission ID');
     expect(rows[0][5]).toBe('Partner Class');
     expect(rows[0]).toContain(kycFieldDecisionHeader('Owner Photo'));
+    // Appended after every existing column so the original 40 keep their positions (bulk-verify keys by header).
+    expect(rows[0][40]).toBe('Routing');
   });
 
-  it('puts the outlet type value into the Partner Class column', () => {
-    const { rows } = parse(generateKycReviewDumpExcel([entry({ outletType: 'WHOLESALER' })]));
+  it.each([
+    ['flag-off (40 columns)', false],
+    ['flag-on (41 columns, Routing)', true],
+  ])('bulk-verify re-upload round-trips the %s dump', async (_label, routing) => {
+    const fields = allPending();
+    fields.OWNER_PHOTO = { decision: 'REJECTED', remark: 'blurry' };
+    fields.PAYMENT = { decision: 'APPROVED' };
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const buf = await generateKycReviewDumpExcel([entry({ fields, fastTrack: ft })], routing);
+    const ws = XLSX.read(buf, { type: 'buffer' }).Sheets['KYC Review Dump'];
+    const rawRows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false }) as Record<string, unknown>[];
+    const res = parseKycApprovalSheet(rawRows, new Set(['KYC-1']));
+    expect(res.errors).toEqual([]);
+    expect(res.updates).toHaveLength(1);
+    expect(res.updates[0].submissionId).toBe('KYC-1');
+    expect(res.updates[0].fields.OWNER_PHOTO).toMatchObject({ decision: 'REJECTED', remark: 'blurry' });
+    expect(res.updates[0].fields.PAYMENT).toMatchObject({ decision: 'APPROVED' });
+  });
+
+  it('Routing = "Direct to GIFSY (resubmitted after GIFSY rejection)" for a fast-tracked entry, blank otherwise', async () => {
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const { rows } = parse(
+      await generateKycReviewDumpExcel([entry({ fastTrack: ft }), entry({ submissionId: 'KYC-2', fastTrack: null }), entry({ submissionId: 'KYC-3' })]),
+    );
+    const idx = rows[0].indexOf('Routing');
+    expect(rows[1][idx]).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
+    expect(rows[2][idx] ?? '').toBe('');
+    expect(rows[3][idx] ?? '').toBe('');
+  });
+
+  it('puts the outlet type value into the Partner Class column', async () => {
+    const { rows } = parse(await generateKycReviewDumpExcel([entry({ outletType: 'WHOLESALER' })]));
     expect(rows[1][5]).toBe('WHOLESALER');
   });
 
-  it('maps field decisions APPROVED→APPROVE, REJECTED→REJECT, PENDING→blank', () => {
+  it('maps field decisions APPROVED→APPROVE, REJECTED→REJECT, PENDING→blank', async () => {
     const fields = allPending();
     fields.PAYMENT = { decision: 'APPROVED' };
     fields.OWNER_PHOTO = { decision: 'REJECTED', remark: 'blurry' };
-    const { rows } = parse(generateKycReviewDumpExcel([entry({ fields })]));
+    const { rows } = parse(await generateKycReviewDumpExcel([entry({ fields })]));
     const payIdx = rows[0].indexOf(kycFieldDecisionHeader('Payment (Bank/UPI)'));
     const ownIdx = rows[0].indexOf(kycFieldDecisionHeader('Owner Photo'));
     const gstIdx = rows[0].indexOf(kycFieldDecisionHeader('GST Validation'));
@@ -79,39 +150,39 @@ describe('generateKycReviewDumpExcel', () => {
     expect(rows[1][gstIdx]).toBe('');
   });
 
-  it('applies a clickable hyperlink to a document cell', () => {
+  it('applies a clickable hyperlink to a document cell', async () => {
     const { ws } = parse(
-      generateKycReviewDumpExcel([entry({ documents: { gstCertificateUrl: 'https://signed/gst' } })]),
+      await generateKycReviewDumpExcel([entry({ documents: { gstCertificateUrl: 'https://signed/gst' } })]),
     );
     const cell = ws[XLSX.utils.encode_cell({ r: 1, c: 20 })]; // GST Certificate column
     expect((cell as { l?: { Target: string } }).l?.Target).toBe('https://signed/gst');
   });
 
-  it('renders an empty doc cell (no hyperlink) when the URL is absent', () => {
-    const { ws } = parse(generateKycReviewDumpExcel([entry({ documents: {} })]));
+  it('renders an empty doc cell (no hyperlink) when the URL is absent', async () => {
+    const { ws } = parse(await generateKycReviewDumpExcel([entry({ documents: {} })]));
     const cell = ws[XLSX.utils.encode_cell({ r: 1, c: 20 })];
     expect(cell?.v ?? '').toBe('');
   });
 
-  it('a REJECTED field with no remark gets a placeholder (round-trip stays valid)', () => {
+  it('a REJECTED field with no remark gets a placeholder (round-trip stays valid)', async () => {
     const fields = allPending();
     fields.PAYMENT = { decision: 'REJECTED' }; // no remark
-    const { rows } = parse(generateKycReviewDumpExcel([entry({ fields })]));
+    const { rows } = parse(await generateKycReviewDumpExcel([entry({ fields })]));
     const decIdx = rows[0].indexOf(kycFieldDecisionHeader('Payment (Bank/UPI)'));
     expect(rows[1][decIdx]).toBe('REJECT');
     expect(rows[1][decIdx + 1]).not.toBe(''); // remark column carries a non-empty placeholder
   });
 
-  it('is deterministic in content', () => {
-    const a = parse(generateKycReviewDumpExcel([entry()])).rows;
-    const b = parse(generateKycReviewDumpExcel([entry()])).rows;
+  it('is deterministic in content', async () => {
+    const a = parse(await generateKycReviewDumpExcel([entry()])).rows;
+    const b = parse(await generateKycReviewDumpExcel([entry()])).rows;
     expect(a).toEqual(b);
   });
 
   // ─── AF-5: formula-injection hardening (export is a sink — reviewers open it) ──
-  it('neutralises formula-injection in user/data string cells', () => {
+  it('neutralises formula-injection in user/data string cells', async () => {
     const { rows } = parse(
-      generateKycReviewDumpExcel([
+      await generateKycReviewDumpExcel([
         entry({
           outletName: '=cmd|\'/c calc\'!A1',
           ownerName: '@SUM(A1)',
@@ -130,7 +201,7 @@ describe('generateKycReviewDumpExcel', () => {
   });
 });
 
-describe('generateRejectedKycExcel', () => {
+describe('Rejected outlets layout (rejectedKycCells)', () => {
   const allPendingRej = (): RejectedKycRow['fields'] => {
     const f = {} as RejectedKycRow['fields'];
     for (const { key } of KYC_FIELD_ORDER) f[key] = { decision: 'PENDING' };
@@ -165,11 +236,11 @@ describe('generateRejectedKycExcel', () => {
 
   const byHeader = (rows: string[][], data: string[], name: string) => data[rows[0].indexOf(name)];
 
-  it('emits the per-field verdict + remark columns and the rejected-fields summary', () => {
+  it('emits the per-field verdict + remark columns and the rejected-fields summary', async () => {
     const fields = allPendingRej();
     fields.GST_DOCUMENT = { decision: 'REJECTED', remark: 'illegible' };
     fields.PAYMENT = { decision: 'APPROVED' };
-    const { rows } = parse(generateRejectedKycExcel([row({ fields })]));
+    const { rows } = parse(await generateRejectedKycExcel([row({ fields })]));
     const data = rows[1];
 
     expect(rows[0]).toContain(rejectedFieldVerdictHeader('GST Document'));
@@ -181,8 +252,8 @@ describe('generateRejectedKycExcel', () => {
     expect(byHeader(rows, data, 'Rejected Fields')).toBe('GST Document');
   });
 
-  it('maps identity + KYC value columns', () => {
-    const { rows } = parse(generateRejectedKycExcel([row()]));
+  it('maps identity + KYC value columns', async () => {
+    const { rows } = parse(await generateRejectedKycExcel([row()]));
     const data = rows[1];
     expect(byHeader(rows, data, 'Outlet ID')).toBe('OUT-1');
     expect(byHeader(rows, data, 'Rejected By')).toBe('Gifsy Admin');
@@ -192,11 +263,29 @@ describe('generateRejectedKycExcel', () => {
     expect(byHeader(rows, data, 'SLA Age (hrs)')).toBe('24');
   });
 
-  it('neutralises formula-injection in user-supplied cells (AF-5)', () => {
+  it('Routing column (appended last): fast-track label vs blank', async () => {
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const { rows } = parse(await generateRejectedKycExcel([row({ fastTrack: ft }), row()]));
+    expect(rows[0][rows[0].length - 1]).toBe('Routing');
+    expect(byHeader(rows, rows[1], 'Routing')).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
+    expect(byHeader(rows, rows[2], 'Routing') ?? '').toBe('');
+  });
+
+  it('flag-off scope: no Routing column, SLA Age (hrs) stays the LAST column (Deoleo byte-identical)', async () => {
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const { rows } = parse(await generateRejectedKycExcel([row({ fastTrack: ft })], false));
+    expect(rows[0]).not.toContain('Routing');
+    expect(rows[0][rows[0].length - 1]).toBe('SLA Age (hrs)');
+    expect(rejectedKycHeaders()).toEqual(rejectedKycHeaders(false));
+    expect(rejectedKycCells(row())).toHaveLength(rejectedKycHeaders(false).length);
+    expect(rejectedKycCells(row(), true)).toHaveLength(rejectedKycHeaders(true).length);
+  });
+
+  it('neutralises formula-injection in user-supplied cells (AF-5)', async () => {
     const fields = allPendingRej();
     fields.ADDRESS = { decision: 'REJECTED', remark: '=cmd|\'/c calc\'!A1' };
     const { rows } = parse(
-      generateRejectedKycExcel([
+      await generateRejectedKycExcel([
         row({ outletName: '=HYPERLINK("http://evil")', ownerName: '@SUM(A1)', city: '-2', fields }),
       ]),
     );
@@ -208,9 +297,9 @@ describe('generateRejectedKycExcel', () => {
     expect(byHeader(rows, data, rejectedFieldRemarkHeader('Address'))).toBe('\'=cmd|\'/c calc\'!A1');
   });
 
-  it('is deterministic in content', () => {
-    const a = parse(generateRejectedKycExcel([row()])).rows;
-    const b = parse(generateRejectedKycExcel([row()])).rows;
+  it('is deterministic in content', async () => {
+    const a = parse(await generateRejectedKycExcel([row()])).rows;
+    const b = parse(await generateRejectedKycExcel([row()])).rows;
     expect(a).toEqual(b);
   });
 });

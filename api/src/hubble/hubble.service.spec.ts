@@ -4,7 +4,14 @@
 // Run: npx jest src/hubble/hubble.service.spec.ts
 
 import { ConfigService } from '@nestjs/config';
-import { HubbleNotConfiguredError, HubbleProductNotFoundError, HubbleService } from './hubble.service';
+import {
+  HubbleNotConfiguredError,
+  HubblePlaceOrderRejectedError,
+  HubbleProductNotFoundError,
+  HubbleService,
+  hubbleAccountFingerprintMatches,
+  isHubbleNotFoundBody,
+} from './hubble.service';
 
 const CONFIG: Record<string, string> = {
   HUBBLE_BASE_URL: 'https://api.dev.myhubble.money',
@@ -60,7 +67,7 @@ describe('HubbleService', () => {
 
   it('F3: the neutral names WIN over the *_STAGING ones at login', async () => {
     fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
-    fetchMock.mockResolvedValueOnce(jsonRes(404, undefined));
+    fetchMock.mockResolvedValueOnce(jsonRes(404, { id: 'E404', code: 'NOT_FOUND', message: 'Order not found' }));
     const svc = makeService({ HUBBLE_CLIENT_ID: 'prod-cid', HUBBLE_CLIENT_SECRET: 'prod-secret' });
     await svc.getOrderByReference('ref-1');
     const loginBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
@@ -86,7 +93,7 @@ describe('HubbleService', () => {
 
   it('F3: blank neutral names fall back to *_STAGING (staging keeps working unchanged)', async () => {
     fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
-    fetchMock.mockResolvedValueOnce(jsonRes(404, undefined));
+    fetchMock.mockResolvedValueOnce(jsonRes(404, { id: 'E404', code: 'NOT_FOUND', message: 'Order not found' }));
     const svc = makeService({ HUBBLE_CLIENT_ID: '  ', HUBBLE_CLIENT_SECRET: '' });
     expect(svc.isConfigured()).toBe(true);
     await svc.getOrderByReference('ref-2');
@@ -169,10 +176,103 @@ describe('HubbleService', () => {
     const svc = makeService();
     fetchMock
       .mockResolvedValueOnce(jsonRes(200, LOGIN_OK))
-      .mockResolvedValueOnce(jsonRes(404, { message: 'not found' }));
+      .mockResolvedValueOnce(jsonRes(404, { id: 'E404', code: 'NOT_FOUND', message: 'Order not found' }));
 
     const res = await svc.getOrderByReference('r-unknown');
     expect(res).toBeNull();
+  });
+
+  // Only a Hubble-shaped JSON error 404 is "no order"; any other 404 is indeterminate (throws).
+  it.each([
+    ['the E102-style error body', { id: 'E404', code: 'NOT_FOUND', message: 'Order not found' }],
+    ['a code-only error body', { code: 'RESOURCE_NOT_FOUND' }],
+    ['a Hubble message-only error', { message: 'No order found for referenceId r1' }],
+  ])('getOrderByReference: 404 with %s → null', async (_n, body) => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce(jsonRes(404, body));
+    await expect(svc.getOrderByReference('r1')).resolves.toBeNull();
+  });
+
+  it.each([
+    ['an empty body', undefined],
+    ['a JSON array', ['not found']],
+    ['an empty object', {}],
+    ['blank fields', { message: '   ', code: '' }],
+    ['an order-shaped body', { status: 'PROCESSING', message: 'x' }],
+    ['a nested order body', { data: { status: 'SUCCESS', vouchers: [] }, message: 'x' }],
+    // Generic framework / gateway 404s (wrong route / base path) — say nothing about the order.
+    ['a bare { message: "Not Found" }', { message: 'Not Found' }],
+    ['a lower-case "not found." message', { message: 'not found.' }],
+    ['an AWS API Gateway miss', { message: 'Missing Authentication Token' }],
+    ['an Express-style route miss', { message: 'Cannot GET /v1/partners/orders/by-reference/r1' }],
+    ['a Spring Boot error body', { timestamp: '2026-11-15T00:00:00Z', status: 404, error: 'Not Found', path: '/v1/partners/orders/by-reference/r1' }],
+    ['a numeric status + message', { status: 404, message: 'Order not found' }],
+    ['an error: "Not Found" body', { error: 'Not Found', message: 'whatever' }],
+    ['timestamp + path only', { timestamp: 1, path: '/x', message: 'gone' }],
+  ])('getOrderByReference: 404 with %s → THROWS (indeterminate)', async (_n, body) => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce(jsonRes(404, body));
+    await expect(svc.getOrderByReference('r1')).rejects.toThrow(/404 with an unrecognised body/);
+  });
+
+  it('getOrderByReference: an HTML (gateway / proxy) 404 → THROWS (indeterminate)', async () => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce({
+      ok: false, status: 404, text: async () => '<html><body>404 Not Found</body></html>',
+    } as unknown as Response);
+    await expect(svc.getOrderByReference('r1')).rejects.toThrow(/indeterminate/);
+  });
+
+  it('getOrderByReference: auth failure / 5xx still THROW (never null)', async () => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(502, { message: 'bad gateway' }));
+    await expect(svc.getOrderByReference('r1')).rejects.toThrow(/auth failed \(HTTP 502\)/);
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce(jsonRes(503, { message: 'down' }));
+    await expect(svc.getOrderByReference('r1')).rejects.toThrow(/HTTP 503/);
+  });
+
+  it('isHubbleNotFoundBody screens a numeric statusCode like status', () => {
+    expect(isHubbleNotFoundBody({ statusCode: 404, message: 'Order not found' })).toBe(false);
+  });
+
+  it('isHubbleNotFoundBody: the Hubble E-style error is accepted, generic framework bodies are not', () => {
+    expect(isHubbleNotFoundBody({ id: 'E102', code: 'OPERATION_NOT_ALLOWED', message: 'Brand is not active' })).toBe(true);
+    expect(isHubbleNotFoundBody({ message: 'Not Found' })).toBe(false);
+    expect(isHubbleNotFoundBody({ message: 'Missing Authentication Token' })).toBe(false);
+    expect(isHubbleNotFoundBody({ timestamp: 'x', status: 404, error: 'Not Found', path: '/p' })).toBe(false);
+  });
+
+  it('accountFingerprint includes the base-URL PATH (trailing slash ignored); a path-less base keeps the host-only form', () => {
+    const plain = makeService().accountFingerprint()!;
+    const withPath = makeService({ HUBBLE_BASE_URL: 'https://api.dev.myhubble.money/partner-api/' }).accountFingerprint()!;
+    expect(withPath).toMatch(/^api\.dev\.myhubble\.money\/partner-api#[0-9a-f]{16}$/);
+    expect(withPath).not.toBe(plain);
+    expect(makeService({ HUBBLE_BASE_URL: 'https://api.dev.myhubble.money/other' }).accountFingerprint()).not.toBe(withPath);
+    expect(makeService({ HUBBLE_BASE_URL: 'https://api.dev.myhubble.money/' }).accountFingerprint()).toBe(plain);
+  });
+
+  it('hubbleAccountFingerprintMatches: exact for the path format; host + hash for the legacy host-only format', () => {
+    const h = '0123456789abcdef';
+    // legacy host-only recording vs a current fingerprint with a path → compared on host + hash
+    expect(hubbleAccountFingerprintMatches(`api.x.money#${h}`, `api.x.money/partner#${h}`)).toBe(true);
+    expect(hubbleAccountFingerprintMatches(`API.X.MONEY#${h}`, `api.x.money#${h}`)).toBe(true);
+    expect(hubbleAccountFingerprintMatches(`api.x.money#${h}`, `api.y.money/partner#${h}`)).toBe(false);
+    expect(hubbleAccountFingerprintMatches(`api.x.money#${h}`, `api.x.money/partner#ffffffffffffffff`)).toBe(false);
+    // path-format recording → exact only
+    expect(hubbleAccountFingerprintMatches(`api.x.money/partner#${h}`, `api.x.money/partner#${h}`)).toBe(true);
+    expect(hubbleAccountFingerprintMatches(`api.x.money/partner#${h}`, `api.x.money/other#${h}`)).toBe(false);
+    expect(hubbleAccountFingerprintMatches(`api.x.money/partner#${h}`, `api.x.money#${h}`)).toBe(false);
+    expect(hubbleAccountFingerprintMatches(`api.x.money#${h}`, null)).toBe(false);
+  });
+
+  it('accountFingerprint: host + client-id hash, never the raw id/secret; changes with host or client', () => {
+    const fp = makeService().accountFingerprint();
+    expect(fp).toMatch(/^api\.dev\.myhubble\.money#[0-9a-f]{16}$/);
+    expect(fp).not.toContain('cid-123');
+    expect(fp).not.toContain('secret-xyz');
+    expect(makeService({ HUBBLE_BASE_URL: 'https://api.myhubble.money' }).accountFingerprint()).not.toBe(fp);
+    expect(makeService({ HUBBLE_CLIENT_ID_STAGING: 'other' }).accountFingerprint()).not.toBe(fp);
+    expect(makeService({ HUBBLE_CLIENT_ID_STAGING: undefined }).accountFingerprint()).toBeNull();
   });
 
   it('getOrderByReference returns the normalised body on 200', async () => {
@@ -196,6 +296,42 @@ describe('HubbleService', () => {
     await expect(
       svc.placeOrder({ productId: 'p', referenceId: 'r1', amount: 500, denominationDetails: [{ denomination: 500, quantity: 1 }] }),
     ).rejects.toThrow(/non-success HTTP 500/);
+  });
+
+  const place = (svc: HubbleService) =>
+    svc.placeOrder({ productId: 'p', referenceId: 'r1', amount: 500, denominationDetails: [{ denomination: 500, quantity: 1 }] });
+
+  it.each([
+    [400, { id: 'E102', code: 'OPERATION_NOT_ALLOWED', message: 'Brand is not active' }],
+    [422, { code: 'INVALID_AMOUNT', message: 'Amount not allowed' }],
+  ])('placeOrder HTTP %s with a Hubble error body → HubblePlaceOrderRejectedError (definitive rejection)', async (status, body) => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce(jsonRes(status, body));
+    const err = await place(svc).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HubblePlaceOrderRejectedError);
+    expect(err).toMatchObject({ httpStatus: status });
+  });
+
+  it.each([
+    ['500', 500, { id: 'E500', message: 'boom' }],
+    ['409 (could be a duplicate reference — the order may exist)', 409, { id: 'E409', message: 'conflict' }],
+    ['404 (wrong route)', 404, { id: 'E404', message: 'x' }],
+    ['429', 429, { id: 'E429', message: 'slow down' }],
+    ['400 with a generic framework body', 400, { timestamp: 't', status: 400, error: 'Bad Request', path: '/v1/partners/orders' }],
+    ['400 with no body', 400, undefined],
+    ['400 duplicate reference', 400, { id: 'E201', code: 'DUPLICATE_REFERENCE', message: 'Order with this referenceId already exists' }],
+    ['422 order in progress', 422, { code: 'ORDER_IN_PROGRESS', message: 'Order is being processed' }],
+    ['400 internal error', 400, { id: 'E500', code: 'INTERNAL_ERROR', message: 'Something went wrong' }],
+    ['400 retry later', 400, { code: 'E1', message: 'Please try again later' }],
+    ['400 rate limited', 400, { code: 'RATE_LIMITED', message: 'Too many requests' }],
+    ['400 provider unavailable', 400, { code: 'E9', message: 'Brand provider unavailable' }],
+    ['400 with a NestJS-style statusCode body', 400, { statusCode: 400, message: 'Bad Request' }],
+  ])('placeOrder %s → a plain (INDETERMINATE) Error, never a definitive rejection', async (_n, status, body) => {
+    const svc = makeService();
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK)).mockResolvedValueOnce(jsonRes(status, body));
+    const err = await place(svc).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(HubblePlaceOrderRejectedError);
   });
 
   it('throws a clear error when login fails (and never leaks the body)', async () => {

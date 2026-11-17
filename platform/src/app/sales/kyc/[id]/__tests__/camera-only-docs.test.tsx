@@ -17,7 +17,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -41,10 +41,7 @@ async function renderK3() {
     );
     await params;
   });
-  await waitFor(
-    () => expect(screen.getByText('Patel Grocery')).toBeInTheDocument(),
-    { timeout: 3000 },
-  );
+  expect(await screen.findByText('Patel Grocery', {}, { timeout: 15_000 })).toBeInTheDocument();
 }
 
 // QUARANTINE (launch CD gate / A-1): pre-existing TDD-red spec for an unbuilt/changed feature. Un-skip when that feature ships. See docs/plans/reconcile/baseline-red-snapshot.txt
@@ -55,7 +52,7 @@ describe.skip('T — Camera-only photo documents', () => {
 
   it('T8: "Owner Photo" document label is present in Fix & Resubmit section', async () => {
     await renderK3();
-    expect(screen.getByText(/owner photo/i)).toBeInTheDocument();
+    expect(await screen.findByText(/owner photo/i)).toBeInTheDocument();
   });
 
   it('T9: file input for Owner Photo has capture="environment" (forces camera)', async () => {
@@ -81,7 +78,7 @@ describe.skip('T — Camera-only photo documents', () => {
 
   it('T11: "Board Photo" document label is present in Fix & Resubmit section', async () => {
     await renderK3();
-    expect(screen.getByText(/board photo/i)).toBeInTheDocument();
+    expect(await screen.findByText(/board photo/i)).toBeInTheDocument();
   });
 
   it('T12: there are exactly 2 camera-only inputs (Owner Photo + Board Photo)', async () => {

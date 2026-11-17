@@ -100,17 +100,17 @@ describe('OH — dated timeline from /track', () => {
     stubFetch([PROCESSING], () => Promise.resolve(TRACK_OK()));
     render(<OrdersPage />);
     await expandFirst();
-    const detail = screen.getByTestId('order-stepper-detail');
+    const detail = await screen.findByTestId('order-stepper-detail');
     expect(await within(detail).findByTestId('order-step-date-confirmed')).toBeInTheDocument();
-    expect(within(detail).getByTestId('order-step-date-processing')).toBeInTheDocument();
+    expect(await within(detail).findByTestId('order-step-date-processing')).toBeInTheDocument();
   });
 
   it('OH4: while /track is loading, the status-only stepper stays rendered', async () => {
     stubFetch([PROCESSING], () => new Promise(() => {})); // never resolves
     render(<OrdersPage />);
     await expandFirst();
-    const detail = screen.getByTestId('order-stepper-detail');
-    expect(within(detail).getByTestId('order-step-processing')).toHaveAttribute('data-state', 'current');
+    const detail = await screen.findByTestId('order-stepper-detail');
+    expect(await within(detail).findByTestId('order-step-processing')).toHaveAttribute('data-state', 'current');
     expect(within(detail).queryByTestId('order-step-date-confirmed')).toBeNull();
   });
 
@@ -172,7 +172,7 @@ describe('OH — dated timeline from /track', () => {
     stubFetch([PROCESSING], () => Promise.resolve(TRACK_OK()));
     render(<OrdersPage />);
     await screen.findByText('Bluetooth Speaker (JBL)');
-    const btn = screen.getByText('View timeline');
+    const btn = await screen.findByText('View timeline');
     expect(btn).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(btn);
     expect(screen.getByText('Hide timeline')).toHaveAttribute('aria-expanded', 'true');

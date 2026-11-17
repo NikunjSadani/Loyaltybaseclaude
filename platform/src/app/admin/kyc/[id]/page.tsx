@@ -28,6 +28,7 @@ import type { SoDeclarationData } from '@/lib/so-declaration';
 import { UpiCaptureMethodBadge, effectiveUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge';
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { REMOVED_RAIL_NOTICE, asPayoutRail, isRemovalConsistent, type PayoutRail } from '@/lib/payout-rail';
+import { FAST_TRACK_HEADLINE, fastTrackPreviousText, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track';
 
 // ─── 7-field verification types (shared with approvals page) ─────────────────
 
@@ -170,6 +171,9 @@ interface ApiKycDetail {
   // signatures on screen, not just typed names. Null for STANDARD / before signing.
   soSignatureViewUrl?: string | null;
   asmSignatureViewUrl?: string | null;
+  // GIFSY-reject fast-track (Bajaj flag gifsyRejectFastTrack): set when this resubmission skipped
+  // manager approval because GIFSY rejected the previous, manager-approved KYC. null/absent = normal.
+  fastTrack?: { previousSubmissionId: string; previousRejectedAt: string } | null;
 }
 
 /** The declaration snapshot persisted at submission (SO_DECLARATION only). */
@@ -231,6 +235,8 @@ type KycDetailShape = {
   declarationData: SoDeclarationDataSnapshot | null;
   soSignatureViewUrl: string | null;
   asmSignatureViewUrl: string | null;
+  // GIFSY-reject fast-track (null for every normal submission → nothing rendered).
+  fastTrack: KycFastTrack | null;
 };
 
 /* ─── Re-KYC proposed-change diff (stage-at-approval) ─────────────────────────── */
@@ -423,6 +429,43 @@ function GroupInheritedBadge({ inherited }: { inherited?: boolean }): ReactNode 
   );
 }
 
+/**
+ * GIFSY-reject fast-track banner: the corrected resubmission went straight to GIFSY, so no manager
+ * re-checked it. Links to the previous (rejected) submission so the reviewer can compare.
+ */
+function FastTrackBanner({ fastTrack }: { fastTrack: KycFastTrack }): ReactNode {
+  return (
+    <div
+      data-testid="fast-track-banner"
+      role="note"
+      aria-label="Manager approval skipped"
+      className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-2 text-sm"
+    >
+      <RefreshCw className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" aria-hidden="true" />
+      <div className="min-w-0">
+        <p className="font-semibold text-blue-800">{FAST_TRACK_HEADLINE}</p>
+        <p className="text-blue-700 text-xs mt-0.5" data-testid="fast-track-previous">
+          {fastTrackPreviousText(fastTrack)}
+          {/* F5: no id → no link (the banner itself always shows). F1: new tab keeps this KYC open. */}
+          {fastTrack.previousSubmissionId && (
+            <>
+              {' · '}
+              <Link
+                href={`/admin/kyc/${encodeURIComponent(fastTrack.previousSubmissionId)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium underline underline-offset-2 hover:text-blue-900"
+              >
+                View previous submission
+              </Link>
+            </>
+          )}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /** Coerce a KYC-captured lat/lng pair (Prisma Decimal → JSON string) into numbers.
  *  Returns null unless BOTH are present and finite. */
 function parseGeo(lat: unknown, lng: unknown): { lat: number; lng: number } | null {
@@ -468,6 +511,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     declarationData:  s.declarationData ?? null,
     soSignatureViewUrl:  s.soSignatureViewUrl ?? null,
     asmSignatureViewUrl: s.asmSignatureViewUrl ?? null,
+    fastTrack:        parseFastTrack(s.fastTrack),
     verificationItems: s.verificationItems ?? [],
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
@@ -980,6 +1024,10 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           {kyc.status.replace('_', ' ')}
         </span>
       </div>
+
+      {/* GIFSY-reject fast-track: this resubmission skipped manager approval. Shown near the status
+          so the reviewer knows the managers did NOT re-check it. Absent for every normal KYC. */}
+      {kyc.fastTrack && <FastTrackBanner fastTrack={kyc.fastTrack} />}
 
       {actionResult && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-2 text-sm text-green-700">

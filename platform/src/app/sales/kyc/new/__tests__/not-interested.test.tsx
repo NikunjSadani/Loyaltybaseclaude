@@ -97,7 +97,7 @@ describe('NI2–NI4 — NI button location and enabled state', () => {
   it.skip('NI4: NI button becomes enabled after selecting a non-Re-KYC outlet', async () => {
     const user = userEvent.setup();
     await selectOutlet(user);
-    expect(screen.getByTestId('ni-btn')).not.toBeDisabled();
+    expect(await screen.findByTestId('ni-btn')).not.toBeDisabled();
   });
 });
 
@@ -119,26 +119,26 @@ describe('NI6–NI8 — confirmation modal', () => {
   it.skip('NI6: clicking NI button opens a confirmation modal', async () => {
     const user = userEvent.setup();
     await selectOutlet(user);
-    await user.click(screen.getByTestId('ni-btn'));
-    expect(screen.getByTestId('not-interested-confirm-dialog')).toBeInTheDocument();
+    await user.click(await screen.findByTestId('ni-btn'));
+    expect(await screen.findByTestId('not-interested-confirm-dialog')).toBeInTheDocument();
   });
 
   // QUARANTINE (launch CD gate / A-1): pre-existing TDD-red spec for an unbuilt/changed feature. Un-skip when that feature ships. See docs/plans/reconcile/baseline-red-snapshot.txt
   it.skip('NI7: modal shows the selected outlet name', async () => {
     const user = userEvent.setup();
     await selectOutlet(user);
-    await user.click(screen.getByTestId('ni-btn'));
-    const dialog = screen.getByTestId('not-interested-confirm-dialog');
-    expect(within(dialog).getByText(/Verma Traders/i)).toBeInTheDocument();
+    await user.click(await screen.findByTestId('ni-btn'));
+    const dialog = await screen.findByTestId('not-interested-confirm-dialog');
+    expect(await within(dialog).findByText(/Verma Traders/i)).toBeInTheDocument();
   });
 
   // QUARANTINE (launch CD gate / A-1): pre-existing TDD-red spec for an unbuilt/changed feature. Un-skip when that feature ships. See docs/plans/reconcile/baseline-red-snapshot.txt
   it.skip('NI8: modal mentions removal from pending KYC list', async () => {
     const user = userEvent.setup();
     await selectOutlet(user);
-    await user.click(screen.getByTestId('ni-btn'));
-    const dialog = screen.getByTestId('not-interested-confirm-dialog');
-    expect(within(dialog).getByText(/pending KYC/i)).toBeInTheDocument();
+    await user.click(await screen.findByTestId('ni-btn'));
+    const dialog = await screen.findByTestId('not-interested-confirm-dialog');
+    expect(await within(dialog).findByText(/pending KYC/i)).toBeInTheDocument();
   });
 });
 
@@ -149,16 +149,16 @@ describe('NI9 — cancel keeps outlet', () => {
   it.skip('NI9: clicking Cancel closes the modal and keeps the outlet selectable', async () => {
     const user = userEvent.setup();
     await selectOutlet(user);
-    await user.click(screen.getByTestId('ni-btn'));
-    expect(screen.getByTestId('not-interested-confirm-dialog')).toBeInTheDocument();
+    await user.click(await screen.findByTestId('ni-btn'));
+    expect(await screen.findByTestId('not-interested-confirm-dialog')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /cancel/i }));
+    await user.click(await screen.findByRole('button', { name: /cancel/i }));
 
     expect(screen.queryByTestId('not-interested-confirm-dialog')).not.toBeInTheDocument();
 
     // Outlet option still appears in the dropdown
-    await user.click(screen.getByTestId('outlet-dropdown-trigger'));
-    expect(screen.getByTestId('outlet-option-OUT-2026-001')).toBeInTheDocument();
+    await user.click(await screen.findByTestId('outlet-dropdown-trigger'));
+    expect(await screen.findByTestId('outlet-option-OUT-2026-001')).toBeInTheDocument();
   });
 });
 
@@ -169,8 +169,8 @@ describe('NI10 — API call on confirm', () => {
   it.skip('NI10: confirming calls POST /api/kyc/not-interested with the outletId', async () => {
     const user = userEvent.setup();
     await selectOutlet(user);
-    await user.click(screen.getByTestId('ni-btn'));
-    await user.click(screen.getByRole('button', { name: /^yes, not interested$/i }));
+    await user.click(await screen.findByTestId('ni-btn'));
+    await user.click(await screen.findByRole('button', { name: /^yes, not interested$/i }));
 
     await waitFor(() => {
       expect(mockFetch).toHaveBeenCalledWith(
@@ -191,15 +191,15 @@ describe('NI11 — outlet removed from dropdown', () => {
   it.skip('NI11: after confirm, the outlet no longer appears in the dropdown', async () => {
     const user = userEvent.setup();
     await selectOutlet(user);
-    await user.click(screen.getByTestId('ni-btn'));
-    await user.click(screen.getByRole('button', { name: /^yes, not interested$/i }));
+    await user.click(await screen.findByTestId('ni-btn'));
+    await user.click(await screen.findByRole('button', { name: /^yes, not interested$/i }));
 
     await waitFor(() => {
       expect(screen.queryByTestId('not-interested-confirm-dialog')).not.toBeInTheDocument();
     });
 
     // Reopen dropdown — Verma Traders should be gone
-    await user.click(screen.getByTestId('outlet-dropdown-trigger'));
+    await user.click(await screen.findByTestId('outlet-dropdown-trigger'));
     expect(screen.queryByTestId('outlet-option-OUT-2026-001')).not.toBeInTheDocument();
   });
 });
@@ -211,8 +211,8 @@ describe('NI12 — success feedback', () => {
   it.skip('NI12: a success toast appears after confirming Not Interested', async () => {
     const user = userEvent.setup();
     await selectOutlet(user);
-    await user.click(screen.getByTestId('ni-btn'));
-    await user.click(screen.getByRole('button', { name: /^yes, not interested$/i }));
+    await user.click(await screen.findByTestId('ni-btn'));
+    await user.click(await screen.findByRole('button', { name: /^yes, not interested$/i }));
 
     await waitFor(() => {
       expect(screen.getByTestId('not-interested-toast')).toBeInTheDocument();

@@ -9,7 +9,8 @@
  *                        → RAW xlsx binary (NOT JSON-wrapped) → browser download
  *     Upload:            POST /api/admin/targets/upload (FormData, field "file")
  *                        → { success: true, data: { batchId, month, monthsInBatch,
- *                             totalRows, acceptedCount, rejectedCount, rows } }
+ *                             totalRows, acceptedCount, rejectedCount,
+ *                             problemRows, warningRows (+ counts / truncated flags) } }
  *
  * The client-side xlsx parsing path is REMOVED. The backend parses now.
  * UI shell / styling is preserved; only the data layer changes.
@@ -18,15 +19,20 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Download, ChevronDown, ChevronUp,
-  CheckCircle2, XCircle, FileSpreadsheet,
+  CheckCircle2, FileSpreadsheet,
   AlertTriangle, Info,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
+import { readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE } from '@/lib/safe-response';
 import { buildMonthRange, formatMonth } from '@/lib/targets';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
 import { TargetFocusCheckNotice } from '@/components/admin/target-focus-check-notice';
 import type { TargetUploadFocusCheck } from '@/lib/sales-import/types';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
+import { normalizeRowsEcho } from '@/lib/upload-rows-echo';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -36,7 +42,8 @@ interface UploadRow {
   outletCode?: string;
   outletId?:   string;
   month?:      string;
-  status:      'accepted' | 'rejected' | 'skipped' | 'updated' | 'error';
+  /** Backend RowStatus: accepted · rejected_outlet · rejected_kpi · skipped_blank. */
+  status:      string;
   remarks?:    string;
   [key: string]: unknown;
 }
@@ -56,20 +63,27 @@ interface UploadResult {
   ignoredOutOfScope?: number;
   /** FOCUS-FROM-TARGETS §7: early, NON-blocking check of the focus product names (absent on older API builds). */
   focusCheck?:   TargetUploadFocusCheck;
-  rows:          UploadRow[];
+  /**
+   * Memory-safety (2026-11-13): the API no longer echoes every parsed row. It returns the
+   * REJECTED rows (problemRows) and the saved rows whose values were partly ignored
+   * (warningRows), each capped at 500 with the true totals; blank template rows are counted.
+   */
+  problemRows:          UploadRow[];
+  problemRowCount:      number;
+  problemRowsTruncated: boolean;
+  warningRows:          UploadRow[];
+  warningRowCount:      number;
+  warningRowsTruncated: boolean;
+  skippedBlankCount?:   number;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Trigger a browser download from a Blob */
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: filename });
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+/** Blank template rows: the API count, else what is left of Total after Accepted + Rejected (older API). */
+function blankRowCount(r: Pick<UploadResult, 'totalRows' | 'acceptedCount' | 'rejectedCount' | 'skippedBlankCount'>): number {
+  return r.skippedBlankCount ?? Math.max(0, r.totalRows - r.acceptedCount - r.rejectedCount);
 }
+
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -89,8 +103,10 @@ export default function TargetUploadPage() {
   const [result,      setResult]      = useState<UploadResult | null>(null);
 
   // Template download state
-  const [downloading,   setDownloading]   = useState(false);
-  const [downloadError, setDownloadError] = useState('');
+  // One shared button state per download (useDownloadAction): "Preparing…", queued (202 → Downloads page,
+  // button stays disabled until the message is dismissed) or a plain error under the buttons.
+  const templateAction = useDownloadAction();
+  const finalAction    = useDownloadAction();
 
   // KPI count hint (fetched once on mount)
   const [kpiCount, setKpiCount] = useState<number | null>(null);
@@ -160,65 +176,21 @@ export default function TargetUploadPage() {
     const months = selectedMonths();
     if (months.length === 0) return;
 
-    setDownloading(true);
-    setDownloadError('');
-
-    try {
-      const qs       = months.join(',');
-      const filename = `targets_template_${months[0]}_to_${months[months.length - 1]}.xlsx`;
-
-      const res = await fetch(`/api/admin/targets/template?months=${encodeURIComponent(qs)}`, {
-        headers: authHeader(),
-      });
-
-      if (!res.ok) {
-        // Try to parse an error message from JSON (backend sends { success: false, error })
-        let msg = `HTTP ${res.status}`;
-        try {
-          const j = await res.json() as { error?: string; message?: string };
-          msg = j.error ?? j.message ?? msg;
-        } catch { /* ignore */ }
-        setDownloadError(msg);
-        return;
-      }
-
-      // SUCCESS — the response body is raw xlsx binary
-      const blob = await res.blob();
-      downloadBlob(blob, filename);
-    } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : 'Download failed');
-    } finally {
-      setDownloading(false);
-    }
+    const qs = months.join(',');
+    // 200 → the template saves straight away; 202 (a long range) → prepared in the background
+    // and shown on the Downloads page.
+    await templateAction.run(`/api/admin/targets/template?months=${encodeURIComponent(qs)}`, {
+      fallbackFileName: `targets_template_${months[0]}_to_${months[months.length - 1]}.xlsx`,
+    });
   }
 
   // ── Download Final Targets (export stored targets for the From month) ───────
 
   async function handleDownloadFinal() {
     if (!fromMonth) return;
-    setDownloading(true);
-    setDownloadError('');
-    try {
-      const res = await fetch(
-        `/api/admin/targets/export?month=${encodeURIComponent(fromMonth)}`,
-        { headers: authHeader() },
-      );
-      if (!res.ok) {
-        let msg = `HTTP ${res.status}`;
-        try {
-          const j = (await res.json()) as { error?: string; message?: string };
-          msg = j.error ?? j.message ?? msg;
-        } catch { /* ignore */ }
-        setDownloadError(msg);
-        return;
-      }
-      const blob = await res.blob();
-      downloadBlob(blob, `final_targets_${fromMonth}.xlsx`);
-    } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : 'Download failed');
-    } finally {
-      setDownloading(false);
-    }
+    await finalAction.run(`/api/admin/targets/export?month=${encodeURIComponent(fromMonth)}`, {
+      fallbackFileName: `final_targets_${fromMonth}.xlsx`,
+    });
   }
 
   // ── Upload ─────────────────────────────────────────────────────────────────
@@ -233,22 +205,36 @@ export default function TargetUploadPage() {
       const formData = new FormData();
       formData.append('file', file);
 
-      const res = await fetch('/api/admin/targets/upload', {
-        method:  'POST',
-        headers: authHeader(), // Do NOT add Content-Type — let the browser set multipart boundary
-        body:    formData,
-      });
+      let res: Response;
+      try {
+        res = await fetch('/api/admin/targets/upload', {
+          method:  'POST',
+          headers: authHeader(), // Do NOT add Content-Type — let the browser set multipart boundary
+          body:    formData,
+        });
+      } catch {
+        // The request may have reached the API and applied before the connection dropped.
+        setUploadError(networkErrorMessage(MAYBE_SAVED_NOTE));
+        return;
+      }
 
-      const json = await res.json() as { success: boolean; data?: UploadResult; error?: string };
+      const json = await readJsonSafe<{ success: boolean; data?: UploadResult; error?: string }>(res);
+
+      if (!json) {
+        // Non-JSON (proxy truncation / plain-text 5xx / edge 413): readable + honest, never a raw SyntaxError.
+        setUploadError(responseErrorMessage(res, json, MAYBE_SAVED_NOTE));
+        return;
+      }
 
       if (!res.ok || !json.success) {
         setUploadError(json.error ?? `Upload failed (HTTP ${res.status})`);
         return;
       }
 
-      setResult(json.data!);
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+      setResult(normalizeRowsEcho(json.data! as UploadResult & { rows?: UploadRow[] }));
+    } catch {
+      // Not a network error (that is handled above) — e.g. an unexpected response shape.
+      setUploadError('Something went wrong showing the upload result. Refresh and check the targets before uploading again.');
     } finally {
       setUploading(false);
     }
@@ -374,22 +360,24 @@ export default function TargetUploadPage() {
           </div>
           <button
             onClick={handleDownloadTemplate}
-            disabled={chosenMonths.length === 0 || downloading}
+            disabled={chosenMonths.length === 0 || templateAction.blocked}
             className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-xl hover:opacity-90 disabled:opacity-40 transition-opacity"
           >
-            {downloading
+            {templateAction.busy
               ? <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
               : <Download className="w-4 h-4" />}
-            Download Template
+            {downloadButtonLabel(templateAction, 'Download Template')}
           </button>
           <button
             onClick={handleDownloadFinal}
-            disabled={!fromMonth || downloading}
+            disabled={!fromMonth || finalAction.blocked}
             title="Export the stored (final) targets for the From month"
             className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-700 text-sm font-semibold rounded-xl hover:border-gray-400 disabled:opacity-40 transition-colors"
           >
-            <Download className="w-4 h-4" />
-            Download Final Targets
+            {finalAction.busy
+              ? <div className="w-4 h-4 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
+              : <Download className="w-4 h-4" />}
+            {downloadButtonLabel(finalAction, 'Download Final Targets')}
           </button>
         </div>
 
@@ -402,11 +390,9 @@ export default function TargetUploadPage() {
           </p>
         )}
 
-        {downloadError && (
-          <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
-            <XCircle className="w-4 h-4 shrink-0" /> {downloadError}
-          </div>
-        )}
+        {/* Queued / error messages — directly below the download buttons. */}
+        <DownloadActionStatus action={templateAction} />
+        <DownloadActionStatus action={finalAction} />
       </div>
 
       {/* ── Section 3: Upload ───────────────────────────────────────────────── */}
@@ -497,7 +483,8 @@ export default function TargetUploadPage() {
                 <p className="text-xs text-emerald-700">
                   {savedCount.toLocaleString()} outlet-month target{savedCount !== 1 ? 's' : ''} saved
                   to the system{savedMonths > 0 ? ` across ${savedMonths} month${savedMonths !== 1 ? 's' : ''}` : ''}
-                  {result.rejectedCount > 0 ? ` · ${result.rejectedCount} row${result.rejectedCount !== 1 ? 's' : ''} skipped (see below)` : ''}.
+                  {result.rejectedCount > 0 ? ` · ${result.rejectedCount} row${result.rejectedCount !== 1 ? 's' : ''} rejected (see below)` : ''}
+                  {(result.skippedBlankCount ?? 0) > 0 ? ` · ${result.skippedBlankCount} blank row${result.skippedBlankCount !== 1 ? 's' : ''} skipped` : ''}.
                   You can confirm anytime with <span className="font-semibold">Download Final Targets</span> above.
                 </p>
               </div>
@@ -522,17 +509,18 @@ export default function TargetUploadPage() {
           </div>
 
           {/* Summary stat cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {/* Total = Accepted + Rejected + Blank (L1) — blank template rows are counted, not saved. */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             <StatCard label="Total rows"  value={result.totalRows}     color="gray"  />
             <StatCard label="Accepted"    value={result.acceptedCount} color="green" />
             <StatCard label="Rejected"    value={result.rejectedCount} color={result.rejectedCount > 0 ? 'red' : 'gray'} />
+            <StatCard label="Blank"       value={blankRowCount(result)} color="gray" />
             <StatCard label="Months"      value={result.monthsInBatch.length} color="gray" />
           </div>
 
           <IgnoredOutOfScopeNotice
             count={result.ignoredOutOfScope}
-            rows={result.rows
-              .filter(r => r.status === 'accepted' || r.status === 'updated')
+            rows={result.warningRows
               .map(r => ({ rowIndex: r.rowIndex, outletCode: r.outletCode ?? r.outletId, remarks: r.remarks }))}
           />
 
@@ -550,43 +538,45 @@ export default function TargetUploadPage() {
             </div>
           )}
 
-          {/* Rejected rows preview */}
-          {result.rows.filter(r => r.status === 'rejected' || r.status === 'error' || r.status === 'skipped').length > 0 && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
-              <p className="text-xs font-semibold text-amber-700 mb-2">Skipped / Rejected rows</p>
-              {result.rows
-                .filter(r => r.status !== 'accepted' && r.status !== 'updated')
-                .slice(0, 20)
-                .map((r, i) => (
-                  <p key={i} className="text-xs text-amber-700">
-                    <span className="font-mono font-semibold">
-                      Row {r.rowIndex ?? i + 1}
-                      {r.outletCode ? ` — ${r.outletCode}` : r.outletId ? ` — ${r.outletId}` : ''}:{' '}
-                    </span>
-                    {r.remarks ?? String(r.status)}
-                  </p>
-                ))}
-              {result.rows.filter(r => r.status !== 'accepted' && r.status !== 'updated').length > 20 && (
-                <p className="text-xs text-amber-500">…{result.rows.filter(r => r.status !== 'accepted' && r.status !== 'updated').length - 20} more rows not shown</p>
-              )}
-              <div className="pt-2">
-                <DownloadErrorReportButton
-                  columns={['Row', 'Outlet Code', 'Month', 'Status']}
-                  rows={result.rows
-                    .filter(r => r.status !== 'accepted' && r.status !== 'updated')
-                    .map(r => ({
-                      Row:          r.rowIndex,
-                      'Outlet Code': r.outletCode ?? r.outletId ?? '',
-                      Month:        r.month ?? '',
-                      Status:       r.status,
-                      __errors:     [r.remarks ?? String(r.status)],
-                    }))}
-                  errorsByRow={(row) => (row.__errors as string[]) ?? []}
-                  filename={`target-upload-errors-${result.batchId || 'batch'}.xlsx`}
-                  sheetName="Upload Report"
-                  errorHeader="Remarks"
-                />
+          {/* Rejected rows — the "first N of M" note sits ABOVE the short scroll box; the download is below it. */}
+          {result.problemRows.length > 0 && (
+            <div className="space-y-2">
+              <UploadTruncationNote
+                shown={result.problemRows.length}
+                total={result.problemRowCount}
+                truncated={result.problemRowsTruncated}
+                noun="rejected rows"
+                next={TRUNCATION_NEXT.PARTIAL_SAVE}
+              />
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
+                <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows ({result.problemRowCount.toLocaleString('en-IN')})</p>
+                {result.problemRows
+                  .map((r, i) => (
+                    <p key={i} className="text-xs text-amber-700">
+                      <span className="font-mono font-semibold">
+                        Row {r.rowIndex ?? i + 1}
+                        {r.outletCode ? ` — ${r.outletCode}` : r.outletId ? ` — ${r.outletId}` : ''}:{' '}
+                      </span>
+                      {r.remarks ?? String(r.status)}
+                    </p>
+                  ))}
               </div>
+              <DownloadErrorReportButton
+                columns={['Row', 'Outlet Code', 'Month', 'Status']}
+                rows={result.problemRows
+                  .map(r => ({
+                    Row:          r.rowIndex,
+                    'Outlet Code': r.outletCode ?? r.outletId ?? '',
+                    Month:        r.month ?? '',
+                    Status:       r.status,
+                    __errors:     [r.remarks ?? String(r.status)],
+                  }))}
+                errorsByRow={(row) => (row.__errors as string[]) ?? []}
+                filename={`target-upload-errors-${result.batchId || 'batch'}.xlsx`}
+                sheetName="Upload Report"
+                errorHeader="Remarks"
+                truncation={{ shown: result.problemRows.length, total: result.problemRowCount, truncated: result.problemRowsTruncated, noun: 'problems' }}
+              />
             </div>
           )}
 

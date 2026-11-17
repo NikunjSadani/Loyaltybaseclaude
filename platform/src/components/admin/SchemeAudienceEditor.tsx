@@ -29,9 +29,10 @@ import {
   type RosterRow,
   type RosterRemoveUploadPreview,
 } from '@/lib/schemes';
-import { downloadRosterReport } from '@/lib/scheme-roster-report';
+import { downloadRosterReport, rosterHasProblems } from '@/lib/scheme-roster-report';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
+import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 import type { AudienceConfig, AudienceFilter, AudienceMode } from '@/lib/scheme-types';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -896,13 +897,17 @@ function RosterUploadPanel({ schemeId, schemeName, onUploaded }: { schemeId: str
             <span className="font-semibold text-green-800">{result.upserted} of {result.totalRows} rows saved</span>
             <span className="text-green-700">{result.matchedCount} matched</span>
             <span className="text-gray-600">{result.standaloneCount} standalone</span>
-            <button
-              type="button"
-              onClick={() => downloadRosterReport(result, schemeName)}
-              className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-green-300 text-green-700 font-medium hover:bg-green-100 transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" /> Download upload report (.xlsx)
-            </button>
+            {rosterHasProblems(result) && (
+              <button
+                type="button"
+                onClick={() => downloadRosterReport(result, schemeName)}
+                data-testid="roster-download-problem-rows"
+                title="Lists only the rows that need attention, with the counts on a Summary sheet — not every saved row."
+                className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-green-300 text-green-700 font-medium hover:bg-green-100 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" /> Download problem rows (.xlsx)
+              </button>
+            )}
           </div>
           <div className="px-3 py-2 text-xs text-gray-600 space-y-1">
             {result.duplicateRefs.length > 0 && (
@@ -923,6 +928,20 @@ function RosterUploadPanel({ schemeId, schemeName, onUploaded }: { schemeId: str
             {result.duplicateRefs.length === 0 && result.unmatchedEmployeeCodes.length === 0 && (result.blankNameCount ?? 0) === 0 && (
               <p className="flex items-center gap-1.5 text-green-600"><CheckCircle className="w-3.5 h-3.5" /> No duplicates, unmatched employees, or missing names.</p>
             )}
+            {rosterHasProblems(result) && (
+              <p className="text-gray-500" data-testid="roster-report-help">
+                The problem-rows file lists only the rows that need attention (duplicates, standalone rows, employee
+                codes not found) with the counts on a Summary sheet. It no longer includes every saved row.
+              </p>
+            )}
+            {/* The report's Problem Rows sheet holds at most 500 rows (memory-safety). */}
+            <UploadTruncationNote
+              shown={result.problemRows?.length ?? 0}
+              total={result.problemRowCount}
+              truncated={result.problemRowsTruncated}
+              noun="problem rows in the problem-rows file"
+              next={TRUNCATION_NEXT.PARTIAL_SAVE}
+            />
           </div>
         </div>
       )}

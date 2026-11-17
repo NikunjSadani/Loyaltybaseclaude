@@ -87,8 +87,8 @@ describe('TDS Statutory Config page', () => {
     render(<GifsyTdsStatutoryPage />);
     const fy = await screen.findByTestId('fy-0');
     expect((fy as HTMLInputElement).value).toBe('2026-27');
-    expect((screen.getByTestId('field-0-r194rWithPanPct') as HTMLInputElement).value).toBe('10');
-    expect((screen.getByTestId('field-0-thr194cSingleRupees') as HTMLInputElement).value).toBe('30000');
+    expect((await screen.findByTestId('field-0-r194rWithPanPct') as HTMLInputElement).value).toBe('10');
+    expect((await screen.findByTestId('field-0-thr194cSingleRupees') as HTMLInputElement).value).toBe('30000');
   });
 
   it('T2: "Add financial year" appends a new blank entry', async () => {
@@ -106,7 +106,7 @@ describe('TDS Statutory Config page', () => {
     render(<GifsyTdsStatutoryPage />);
     await screen.findByTestId('fy-0');
     // With one row, remove is disabled.
-    expect(screen.getByTestId('remove-0')).toBeDisabled();
+    expect(await screen.findByTestId('remove-0')).toBeDisabled();
     // Add a second row → both removable → remove one → back to a single row.
     fireEvent.click(screen.getByTestId('add-row'));
     expect(screen.getByTestId('remove-0')).not.toBeDisabled();
@@ -121,7 +121,7 @@ describe('TDS Statutory Config page', () => {
     await screen.findByTestId('fy-0');
     fireEvent.change(screen.getByTestId('field-0-r194rWithPanPct'), { target: { value: '99' } });
     expect(await screen.findByText('Must be between 0 and 95')).toBeInTheDocument();
-    expect(screen.getByTestId('save-btn')).toBeDisabled();
+    expect(await screen.findByTestId('save-btn')).toBeDisabled();
   });
 
   it('T5: Save → confirm → PUTs the full entries list with the right body', async () => {

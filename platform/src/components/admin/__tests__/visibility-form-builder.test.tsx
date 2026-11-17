@@ -75,7 +75,7 @@ describe('VISFORM — VisibilityFormBuilder', () => {
 
     // The new CAMERA field auto-expands: instruction input + sample uploader visible.
     expect(await screen.findByLabelText('Camera instruction')).toBeInTheDocument();
-    expect(screen.getByLabelText('Upload sample image')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Upload sample image')).toBeInTheDocument();
   });
 
   it('VISFORM5: the local validator accepts a clause keyed on the reserved Outlet Sub-Program source', () => {
@@ -138,8 +138,8 @@ describe('VISFORM — VisibilityFormBuilder', () => {
     });
     render(<VisibilityFormBuilder />);
 
-    await waitFor(() => expect(screen.getByTestId('geo-fence-no-gps-warning')).toBeInTheDocument());
-    const saveBtn = screen.getByRole('button', { name: /save form/i });
+    expect(await screen.findByTestId('geo-fence-no-gps-warning')).toBeInTheDocument();
+    const saveBtn = await screen.findByRole('button', { name: /save form/i });
     expect(saveBtn).toBeDisabled();
     fireEvent.click(saveBtn);
     expect(upsertForm).not.toHaveBeenCalled();

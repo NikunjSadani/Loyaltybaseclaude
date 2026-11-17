@@ -19,6 +19,7 @@ import {
   ListInvoicesQueryDto,
   UpdateInvoiceNumberDto,
 } from './dto/invoices.dto';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 /**
  * Self-bill visibility invoicing controller (P6.7).
@@ -57,6 +58,7 @@ export class AdminInvoicesController {
    * `:id` so "export" is not swallowed by the param route.
    */
   @Get('export')
+  @HeavyOp()
   async export(
     @CurrentUser() user: JwtPayload,
     @Query() q: ListInvoicesQueryDto,

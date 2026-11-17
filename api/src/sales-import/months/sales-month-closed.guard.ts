@@ -29,7 +29,8 @@ import { salesMonthEntityId } from './sales-months.service';
  * tenant decides (ON → involved; OFF or never read → treated as OFF, so it can only fail open).
  *
  * Each SUCCESSFUL export / report download of a guarded month is recorded as an AuditLog EXPORT row on the month entity
- * (re-audit L4: written when the response finishes with a 2xx, so a failed export is never recorded), so a later GIFSY
+ * (re-audit L4: written when the response finishes with a 2xx, so a failed export is never recorded; a 202 — queued
+ * on the Downloads page — is NOT recorded here, the export kind records it when the file is built), so a later GIFSY
  * reopen can warn that artefacts were already produced (M5). Commit is not recorded here: it creates a CreditBatch,
  * which the reopen check counts directly. (A response hook rather than an interceptor keeps the points-compute
  * controller free of further edits.)
@@ -86,7 +87,10 @@ export class SalesMonthClosedGuard implements CanActivate {
     const res = http.getResponse<{ statusCode?: number; once?: (ev: string, cb: () => void) => unknown } | undefined>();
     if (route !== 'commit' && res && typeof res.once === 'function') {
       res.once('finish', () => {
-        if ((res.statusCode ?? 500) >= 300) return;
+        const code = res.statusCode ?? 500;
+        // 202 = the file was only QUEUED on the Downloads page (nothing produced yet): the export kind records it
+        // once, when the file is actually built (exports/kinds/batch2/points-compute.kinds.ts) — never twice.
+        if (code < 200 || code >= 300 || code === 202) return;
         void this.recordExport(clientId, period, user.sub, route);
       });
     }

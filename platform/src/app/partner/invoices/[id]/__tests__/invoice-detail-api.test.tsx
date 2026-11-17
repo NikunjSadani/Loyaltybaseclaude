@@ -186,7 +186,7 @@ describe('PINVD — Partner Invoice detail API wiring', () => {
     // Wait for page to load
     await screen.findAllByText('TGSL-VIS-OUT001-202604-001');
     expect(screen.queryByText(/edit/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/locked after payment/i)).toBeInTheDocument();
+    expect(await screen.findByText(/locked after payment/i)).toBeInTheDocument();
   });
 
   it('PINVD9: recipient (Tech Gifsy) block rendered from snapshot.recipient', async () => {

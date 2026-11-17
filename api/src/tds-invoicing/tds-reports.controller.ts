@@ -1,6 +1,7 @@
 import { Controller, Get, Query, Res, StreamableFile } from '@nestjs/common';
 import type { Response } from 'express';
 import { TdsReportsService, ReportScope } from './tds-reports.service';
+import { ExportsService } from '../exports/exports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -26,7 +27,10 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
  */
 @Controller('admin/tds-reports')
 export class TdsReportsController {
-  constructor(private readonly reports: TdsReportsService) {}
+  constructor(
+    private readonly reports: TdsReportsService,
+    private readonly exports: ExportsService,
+  ) {}
 
   /**
    * The effective tenant scope: CLIENT_ADMIN → own clientId (query ignored); GIFSY_ADMIN →
@@ -49,15 +53,14 @@ export class TdsReportsController {
 
   @Get('payouts/export')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
-  async payoutsExport(
+  payoutsExport(
     @CurrentUser() user: JwtPayload,
     @Query() q: PayoutReportQueryDto,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<StreamableFile> {
-    const scope: ReportScope = { clientId: this.resolveClientId(user, q.clientId), period: q.period };
-    const { buffer, filename } = await this.reports.payoutReportXlsx(scope);
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return new StreamableFile(buffer, { type: XLSX_MIME });
+  ) {
+    // 'tds-payouts' export kind (same scope rule): one tenant × one period streams now; all periods / all tenants are
+    // prepared on the Downloads page (202).
+    return this.exports.respond(res, user, 'tds-payouts', q);
   }
 
   // ─── Unregistered-retailer / RCM report (GIFSY-only) ───────────────────────

@@ -8,7 +8,7 @@
  * from /api/sales/outlets so it appears under the Re-KYC filter + tasks.
  */
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 let searchStr = '';
@@ -52,8 +52,8 @@ beforeEach(() => {
 describe('KYC list — re-KYC outlets surface (assignment-scoped)', () => {
   it('shows a RE_KYC_REQUIRED outlet from /api/sales/outlets even when /api/kyc has no submission for it', async () => {
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
-    expect(screen.getByText('DAMD0555')).toBeInTheDocument();
+    expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
+    expect(await screen.findByText('DAMD0555')).toBeInTheDocument();
     expect(screen.queryByText('No KYC submissions')).not.toBeInTheDocument();
   });
 
@@ -66,7 +66,7 @@ describe('KYC list — re-KYC outlets surface (assignment-scoped)', () => {
   it('is present under the ?status=RE_KYC_REQUIRED deep-link filter', async () => {
     searchStr = 'status=RE_KYC_REQUIRED';
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
+    expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
   });
 
   it('also surfaces a REJECTED reassigned outlet (whole re-entry family, not just RE_KYC)', async () => {
@@ -84,7 +84,7 @@ describe('KYC list — re-KYC outlets surface (assignment-scoped)', () => {
       return Promise.resolve({ json: () => Promise.resolve({ success: true, data: {} }) });
     });
     render(<KYCListPage />);
-    await waitFor(() => expect(screen.getByText('Patel Kirana')).toBeInTheDocument());
-    expect(screen.getByText('Patel Kirana').closest('a')).toHaveAttribute('href', '/sales/kyc/kyc-2');
+    expect(await screen.findByText('Patel Kirana')).toBeInTheDocument();
+    expect((await screen.findByText('Patel Kirana')).closest('a')).toHaveAttribute('href', '/sales/kyc/kyc-2');
   });
 });

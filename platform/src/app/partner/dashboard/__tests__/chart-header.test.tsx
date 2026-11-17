@@ -6,7 +6,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -54,16 +54,12 @@ describe('Z — Partner dashboard chart header', () => {
 
   it('Z1: heading reads "Target vs. Achievement"', async () => {
     render(<PartnerDashboardPage />);
-    await waitFor(() =>
-      expect(screen.getByText('Target vs. Achievement')).toBeInTheDocument()
-    );
+    expect(await screen.findByText('Target vs. Achievement')).toBeInTheDocument();
   });
 
   it('Z2: sub-line "Target vs Achieved" is not shown', async () => {
     render(<PartnerDashboardPage />);
-    await waitFor(() =>
-      expect(screen.getByText('Target vs. Achievement')).toBeInTheDocument()
-    );
+    expect(await screen.findByText('Target vs. Achievement')).toBeInTheDocument();
     expect(screen.queryByText(/target vs achieved/i)).not.toBeInTheDocument();
   });
 });

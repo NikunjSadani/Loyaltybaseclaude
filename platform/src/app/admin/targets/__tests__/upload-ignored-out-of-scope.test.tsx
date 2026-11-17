@@ -15,10 +15,10 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 const result = (extra: Record<string, unknown> = {}) => ({
   batchId: 'batch-000001', month: '2026-11', monthsInBatch: ['2026-11'], totalRows: 2, acceptedCount: 2, rejectedCount: 0,
   savedCount: 2,
-  rows: [
-    { rowIndex: 3, outletCode: 'O1', status: 'accepted', remarks: 'Ignored (KPI not applicable): UNNATI_VOL' },
-    { rowIndex: 4, outletCode: 'O2', status: 'accepted', remarks: '' },
-  ],
+  // Memory-safety (2026-11-13): the API echoes only rejected rows + warning rows (capped), not every row.
+  problemRows: [], problemRowCount: 0, problemRowsTruncated: false,
+  warningRows: [{ rowIndex: 3, outletCode: 'O1', status: 'accepted', remarks: 'Ignored (KPI not applicable): UNNATI_VOL' }],
+  warningRowCount: 1, warningRowsTruncated: false, skippedBlankCount: 0,
   ...extra,
 });
 
@@ -59,5 +59,58 @@ describe('target upload — ignoredOutOfScope', () => {
     await upload();
     expect(await screen.findByText('Upload Result')).toBeInTheDocument();
     expect(screen.queryByTestId('ignored-out-of-scope')).not.toBeInTheDocument();
+  });
+
+  it('older API build that still sends rows → the saved row with the remark is still listed', async () => {
+    stub({
+      batchId: 'batch-000001', month: '2026-11', monthsInBatch: ['2026-11'], totalRows: 2, acceptedCount: 2, rejectedCount: 0,
+      ignoredOutOfScope: 1,
+      rows: [
+        { rowIndex: 3, outletCode: 'O1', status: 'accepted', remarks: 'Ignored (KPI not applicable): UNNATI_VOL' },
+        { rowIndex: 4, outletCode: 'O2', status: 'accepted', remarks: '' },
+      ],
+    });
+    render(<TargetUploadPage />);
+    await upload();
+    expect(await screen.findByTestId('ignored-out-of-scope')).toHaveTextContent('Row 3 — O1');
+  });
+
+  it('rejected rows: lists every returned row and says when the API capped the list', async () => {
+    stub(result({
+      rejectedCount: 700, acceptedCount: 0, savedCount: 0,
+      problemRows: Array.from({ length: 500 }, (_, i) => ({ rowIndex: i + 3, outletCode: 'X' + i, status: 'rejected_outlet', remarks: 'not found' })),
+      problemRowCount: 700, problemRowsTruncated: true,
+    }));
+    render(<TargetUploadPage />);
+    await upload();
+    expect(await screen.findByText('Rejected rows (700)')).toBeInTheDocument();
+    expect(await screen.findByText(/Row 502 — X499/)).toBeInTheDocument();
+    const note = await screen.findByText(/Showing the first 500 of 700 rejected rows/);
+    // M3: partial save → re-upload only the failed rows (never "re-upload the file").
+    expect(note.textContent).toMatch(/re-upload only the failed rows/i);
+    // M7: the note sits ABOVE the short scroll box, not inside it.
+    const box = (await screen.findByText('Rejected rows (700)')).parentElement as HTMLElement;
+    expect(box.contains(note)).toBe(false);
+    expect(note.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('L1: a Blank tile makes Total = Accepted + Rejected + Blank visible', async () => {
+    stub(result({ totalRows: 10, acceptedCount: 6, savedCount: 6, rejectedCount: 1, skippedBlankCount: 3 }));
+    render(<TargetUploadPage />);
+    await upload();
+    const tile = (label: string) => (screen.getByText(label, { selector: 'p' }).parentElement as HTMLElement).textContent;
+    expect(await screen.findByText('Blank', { selector: 'p' })).toBeInTheDocument();
+    expect(tile('Total rows')).toMatch(/^10/);
+    expect(tile('Accepted')).toMatch(/^6/);
+    expect(tile('Rejected')).toMatch(/^1/);
+    expect(tile('Blank')).toMatch(/^3/);
+  });
+
+  it('L1: older API without skippedBlankCount → Blank = Total − Accepted − Rejected', async () => {
+    stub(result({ totalRows: 9, acceptedCount: 5, savedCount: 5, rejectedCount: 2, skippedBlankCount: undefined }));
+    render(<TargetUploadPage />);
+    await upload();
+    await screen.findByText('Blank', { selector: 'p' });
+    expect(((await screen.findByText('Blank', { selector: 'p' })).parentElement as HTMLElement).textContent).toMatch(/^2/);
   });
 });

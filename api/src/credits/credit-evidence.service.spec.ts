@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { CreditEvidenceService } from './credit-evidence.service';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -44,7 +45,7 @@ function makeService(over: {
   const storage = {
     generateKey: jest.fn((folder: string, name: string) => `${folder}/uuid-${name}`),
     uploadFile: jest.fn().mockResolvedValue('gs://bucket/key'),
-    downloadBytes: jest.fn().mockResolvedValue({ bytes: pngBuf(), contentType: 'image/png' }),
+    openBoundedObject: jest.fn().mockResolvedValue({ stream: Readable.from([pngBuf()]), size: (pngBuf()).length, contentType: 'image/png' }),
     deleteFile: jest.fn().mockResolvedValue(undefined),
   };
   const svc = new CreditEvidenceService(prisma as never, storage as never);
@@ -116,7 +117,7 @@ describe('CreditEvidenceService', () => {
     const { svc, storage } = makeService({
       attachment: { clientId: 'deoleo', fileKey: 'credit-evidence/deoleo/b1/uuid-a.pdf', fileName: 'a.pdf', contentType: 'application/pdf' },
     });
-    storage.downloadBytes.mockResolvedValueOnce({ bytes: Buffer.from('%PDF-1.4'), contentType: 'application/pdf' });
+    storage.openBoundedObject.mockResolvedValueOnce({ stream: Readable.from([Buffer.from('%PDF-1.4')]), size: (Buffer.from('%PDF-1.4')).length, contentType: 'application/pdf' });
     const out = await svc.viewEvidence(USER, 'att1');
     expect(out.inline).toBe(false);
     expect(out.contentType).toBe('application/pdf');

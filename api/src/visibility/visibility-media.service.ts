@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream';
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Prisma } from '@prisma/client';
@@ -74,7 +75,7 @@ export class VisibilityMediaService {
   async viewMedia(
     user: JwtPayload,
     key: string,
-  ): Promise<{ bytes: Buffer; contentType: string; inline: boolean }> {
+  ): Promise<{ stream: Readable; size: number; contentType: string; inline: boolean }> {
     const deny = () => new NotFoundException();
     if (!key || typeof key !== 'string' || !key.startsWith(MEDIA_FOLDER_PREFIX)) throw deny();
 
@@ -84,12 +85,12 @@ export class VisibilityMediaService {
     // operator — is pinned to its (assumed) tenant folder.
     if (!platformWide(user) && keyClientId !== user.clientId) throw deny();
 
-    const file = await this.storage.downloadBytes(key);
+    const file = await this.storage.openBoundedObject(key);
     if (!file) throw deny();
 
     const rawMime = (file.contentType || '').toLowerCase();
     const inline = INLINE_SAFE_MIME.has(rawMime);
-    return { bytes: file.bytes, contentType: inline ? rawMime : 'application/octet-stream', inline };
+    return { stream: file.stream, size: file.size, contentType: inline ? rawMime : 'application/octet-stream', inline };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -99,6 +100,22 @@ export class VisibilityMediaService {
   /** SHA-256 hex digest of a photo's raw bytes — the per-image content fingerprint. */
   computeImageHash(buffer: Buffer): string {
     return createHash('sha256').update(buffer).digest('hex');
+  }
+
+  /**
+   * Same SHA-256 fingerprint as computeImageHash, computed chunk-by-chunk from a stream
+   * (identical digest for identical bytes). Returns null when the stream errors — the
+   * caller skips that photo, matching the old "download failed → no hash" behaviour.
+   */
+  async computeImageHashFromStream(stream: Readable): Promise<string | null> {
+    const h = createHash('sha256');
+    try {
+      for await (const chunk of stream) h.update(chunk as Buffer);
+      return h.digest('hex');
+    } catch {
+      stream.destroy();
+      return null;
+    }
   }
 
   /**

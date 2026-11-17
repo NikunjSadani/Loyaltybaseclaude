@@ -8,7 +8,7 @@ import {
   CheckCircle, XCircle, Clock, AlertTriangle,
   Camera, ChevronRight, ChevronDown,
   BookOpen, Gift, HeadphonesIcon, ThumbsUp,
-  ShoppingCart, Target, TrendingUp,
+  ShoppingCart, Target, TrendingUp, SkipForward,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -27,6 +27,8 @@ import { renderSoDeclarationPdf, type SoDeclarationData } from '@/lib/so-declara
 import { getStoredUser } from '@/lib/auth-client';
 import { pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
 import { istMonthKey } from '@/lib/ist-date';
+import { formatKpiSoFar } from '@/lib/format-inr';
+import { useTenantFeatures } from '@/lib/tenant-features';
 import { fetchTargetTrend, type TargetTrendResult } from '@/lib/sales-trend';
 import { TargetTrendChart } from '@/components/target-trend-chart';
 import { OutletTrendComparisonCard } from '@/components/sales/OutletTrendComparisonCard';
@@ -34,6 +36,7 @@ import { RejectionModal } from './RejectionModal';
 import { UpiCaptureMethodBadge, effectiveUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge';
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { REMOVED_RAIL_NOTICE, asPayoutRail, isRemovalConsistent, type PayoutRail } from '@/lib/payout-rail';
+import { FAST_TRACK_SALES_NOTE, FAST_TRACK_SKIPPED_SUBLABEL, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track';
 import { kycDocDisplayLabel } from '@/lib/kyc-doc-label';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -111,6 +114,9 @@ interface KYCDetail {
   // The ASM's approval signature (resolved by getOne once signed) so the dual-signed declaration
   // shows BOTH actual inks on screen. Null for STANDARD / before the ASM signs.
   asmSignatureViewUrl?: string | null;
+  // GIFSY-reject fast-track (Bajaj flag gifsyRejectFastTrack): this resubmission went straight to
+  // GIFSY, skipping manager approval. null/absent = normal flow (nothing extra rendered).
+  fastTrack?: KycFastTrack | null;
 }
 
 /** The declaration snapshot persisted at submission (SO_DECLARATION only). */
@@ -237,6 +243,8 @@ interface ApiSalesKYC {
   } | null;
   documents?: { id?: string; documentType: string; status?: string; viewUrl?: string | null;
     fileName?: string | null; metadata?: unknown }[];
+  // GIFSY-reject fast-track marker; null/absent for every normal submission (older API too).
+  fastTrack?: { previousSubmissionId: string; previousRejectedAt: string } | null;
 }
 
 /** Mimes safe to RENDER in a top-level tab. A doc's mime is client-supplied at upload,
@@ -523,6 +531,7 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
       .filter(d => PHOTO_DOC_TYPES.has(d.documentType) && d.viewUrl)
       .map(d => ({ label: docLabel(d.documentType), url: d.viewUrl as string, documentType: d.documentType })),
     approvalHistory: [],
+    fastTrack: parseFastTrack(s.fastTrack),
   };
 }
 
@@ -602,7 +611,8 @@ function relativeDate(dateStr: string): string {
 
 /* ─── Approval Timeline ──────────────────────────────────────────────────────── */
 
-type StepState = 'complete' | 'active' | 'rejected' | 'pending';
+// 'skipped' = the step was deliberately bypassed (GIFSY-reject fast-track skips manager approval).
+type StepState = 'complete' | 'active' | 'rejected' | 'pending' | 'skipped';
 
 interface TimelineStep {
   label:    string;
@@ -745,8 +755,11 @@ function buildTimeline(kyc: KYCDetail, slug: string): TimelineStep[] {
     kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||
     kyc.status === KYCStatus.RE_KYC_REQUIRED;
   const latestEvent = kyc.approvalHistory.at(-1);
+  // F4: a fast-tracked KYC went straight to Gifsy — no manager ever held it — so ANY rejection of it is
+  // Gifsy's (checked BEFORE the first-approver branch; never "SO Review — Rejected" under a skipped step).
   const gifsyRejected =
-    isRejectedStatus && latestEvent?.stage === 'GIFSY' && latestEvent.action === 'REJECTED';
+    isRejectedStatus &&
+    (!!kyc.fastTrack || (latestEvent?.stage === 'GIFSY' && latestEvent.action === 'REJECTED'));
   // A first-approver rejection: rejected status AND the current cycle did NOT clear
   // the first approver as its latest outcome (the newest event is a first-approver
   // rejection, or there is no first-approver approval standing for this cycle).
@@ -762,7 +775,13 @@ function buildTimeline(kyc: KYCDetail, slug: string): TimelineStep[] {
   // ── Step 2 — first approver (SO / ASM) ──────────────────────────────────────
   let step2State: StepState = 'pending';
   let step2Sub   = 'Pending review';
-  if (firstApproverRejected) {
+  if (kyc.fastTrack) {
+    // GIFSY-reject fast-track: this resubmission went straight to Gifsy — no manager approved it.
+    // Never show "Approved" / "Approved by SO" / "Rejected" here (the DRAFT→PENDING_GIFSY history row is
+    // NOT an approval); say plainly that the step was not needed and why. Checked FIRST (F4).
+    step2State = 'skipped';
+    step2Sub   = FAST_TRACK_SKIPPED_SUBLABEL;
+  } else if (firstApproverRejected) {
     step2State = 'rejected';
     step2Sub   = firstApproverEvent?.action === 'REJECTED' && firstApproverEvent.by
       ? `Rejected by ${firstApproverEvent.by}`
@@ -820,14 +839,18 @@ function buildTimeline(kyc: KYCDetail, slug: string): TimelineStep[] {
   } else if (kyc.status === KYCStatus.PENDING_GIFSY) {
     step3State = 'active';
     step3Sub   = 'Under Gifsy review';
-  } else if (step2State === 'complete') {
-    // First approver cleared but not yet at Gifsy (transient) — queued.
+  } else if (step2State === 'complete' || step2State === 'skipped') {
+    // First approver cleared (or skipped) but not yet at Gifsy (transient) — queued.
     step3Sub = 'Queued for Gifsy';
   }
 
   return [
     step1,
-    { label: stepFirstLabel, sublabel: step2Sub, state: step2State, testid: 'timeline-step-first-approver' },
+    {
+      // Fast-track: no specific reviewer level applies (none acted) → a neutral label, not "SO Review".
+      label: step2State === 'skipped' ? 'Manager Review' : stepFirstLabel,
+      sublabel: step2Sub, state: step2State, testid: 'timeline-step-first-approver',
+    },
     { label: 'Gifsy Validation',  sublabel: step3Sub, state: step3State, testid: 'timeline-step-gifsy' },
   ];
 }
@@ -841,6 +864,14 @@ function StepDot({ state }: { state: StepState }) {
   if (state === 'rejected') return (
     <div className="w-7 h-7 rounded-full bg-red-100 border-2 border-red-500 flex items-center justify-center shrink-0">
       <XCircle className="h-3.5 w-3.5 text-red-600" />
+    </div>
+  );
+  if (state === 'skipped') return (
+    <div
+      data-testid="step-dot-skipped"
+      className="w-7 h-7 rounded-full bg-blue-50 border-2 border-dashed border-blue-400 flex items-center justify-center shrink-0"
+    >
+      <SkipForward className="h-3.5 w-3.5 text-blue-600" aria-hidden="true" />
     </div>
   );
   if (state === 'active') return (
@@ -873,7 +904,8 @@ function ApprovalTimeline({ kyc, slug }: { kyc: KYCDetail; slug: string }) {
               {i < steps.length - 1 && (
                 <div className={`w-0.5 flex-1 my-1 rounded-full ${
                   step.state === 'complete' ? 'bg-emerald-300' :
-                  step.state === 'rejected' ? 'bg-red-200' : 'bg-gray-200'
+                  step.state === 'rejected' ? 'bg-red-200' :
+                  step.state === 'skipped'  ? 'bg-blue-200' : 'bg-gray-200'
                 }`} style={{ minHeight: 20 }} />
               )}
             </div>
@@ -882,7 +914,8 @@ function ApprovalTimeline({ kyc, slug }: { kyc: KYCDetail; slug: string }) {
               <p className={`text-sm font-semibold leading-tight ${
                 step.state === 'complete' ? 'text-emerald-700' :
                 step.state === 'rejected' ? 'text-red-700' :
-                step.state === 'active'   ? 'text-amber-700' : 'text-gray-400'
+                step.state === 'active'   ? 'text-amber-700' :
+                step.state === 'skipped'  ? 'text-blue-700'  : 'text-gray-400'
               }`}>{step.label}</p>
               <p className="text-xs text-gray-400 mt-0.5 leading-snug">{step.sublabel}</p>
             </div>
@@ -1008,6 +1041,11 @@ const fmtTgtNum = (n: number | null | undefined) => (n === null || n === undefin
 function TargetAchievementCard({ outletCode }: { outletCode: string }) {
   const [cols, setCols] = useState<OutletKpiCol[] | null>(null);
   const [kpis, setKpis] = useState<Record<string, OutletKpiVal>>({});
+  // partnerDashboardV2 (Bajaj, tenant-scoped) — DB-backed tenant flag from the authenticated /sales/me
+  // features (the same seam the sales KYC/visibility screens read). Gates the neutral "so far" rendering of
+  // target-less KPIs; OFF (Deoleo) → today's card. The card waits for it so v2 never flashes a red 0%.
+  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
+  const v2 = features.partnerDashboardV2;
 
   useEffect(() => {
     if (!outletCode) { setCols(null); return; }
@@ -1026,7 +1064,7 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
     return () => { cancelled = true; };
   }, [outletCode]);
 
-  if (!cols) return null;
+  if (!cols || featuresLoading) return null;
   // Hide entirely when this outlet has no target/achieved for any KPI this month.
   const hasAny = cols.some((c) => {
     const k = kpis[c.code];
@@ -1034,12 +1072,22 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
   });
   if (!hasAny) return null;
 
-  const primary = getPrimaryParam(cols);
+  // v2: headline the first TARGETED KPI (flagged primary first) — same pick as the partner dashboard/Targets page,
+  // so the rep and the retailer see the same headline. Flag OFF: unchanged getPrimaryParam.
+  const targeted = (c: { code: string }) => { const k = kpis[c.code]; return k?.target != null && k.target > 0; };
+  const primary = v2
+    ? (cols.find((c) => c.isPrimary && targeted(c)) ?? cols.find(targeted) ?? getPrimaryParam(cols))
+    : getPrimaryParam(cols);
   // Exclude the ACTUAL headline KPI by code (not by isPrimary): getPrimaryParam falls back to
   // cols[0] when no KPI is flagged primary, so filtering on !isPrimary would render cols[0] twice.
   const others  = cols.filter((c) => c.code !== primary?.code);
   const pk      = primary ? kpis[primary.code] : undefined;
   const pPct    = primary && pk?.target ? pct(pk.achieved ?? 0, pk.target) : 0;
+  // A KPI with NO target this month (null / ≤ 0 — e.g. Bajaj SAMT's NON ADHO eligibility-gate KPI) has
+  // nothing to be behind on: it renders a neutral grey "₹2.8K so far" (or "—" with no sales data) — no
+  // "/–", no % pill, no bar. A red "0%" read as "you have done nothing" (owner 2026-11-15). v2 ONLY —
+  // flag OFF treats every KPI as targeted, i.e. the original "x /– · 0%" rendering, unchanged.
+  const hasTgt  = (k: OutletKpiVal | undefined) => !v2 || (k?.target != null && k.target > 0);
 
   return (
     <Card data-testid="target-achievement-card">
@@ -1049,7 +1097,13 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
         </CardTitle>
       </CardHeader>
       <CardContent className="pt-0 pb-3">
-        {primary && pk && (
+        {primary && pk && !hasTgt(pk) && (
+          <div className="pb-2.5 flex items-center justify-between" data-testid={`kpi-no-target-${primary.code}`}>
+            <span className="text-[11px] font-semibold text-gray-600">{primary.name}</span>
+            <span className="text-[13px] font-semibold text-gray-500">{formatKpiSoFar(pk.achieved, primary.unit)}</span>
+          </div>
+        )}
+        {primary && pk && hasTgt(pk) && (
           <div className="pb-2.5">
             <div className="flex items-center justify-between mb-1">
               <span className="text-[11px] font-semibold text-gray-600">{primary.name}</span>
@@ -1069,6 +1123,14 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
           <div className={`grid grid-cols-2 gap-x-3 gap-y-3 ${primary && pk ? 'border-t border-gray-100 pt-2.5' : ''}`}>
             {others.map((c) => {
               const k  = kpis[c.code];
+              if (!hasTgt(k)) {
+                return (
+                  <div key={c.code} className="border-l-[3px] border-gray-200 pl-2" data-testid={`kpi-no-target-${c.code}`}>
+                    <p className="text-[11px] font-semibold text-gray-600 truncate leading-tight">{c.name}</p>
+                    <p className="text-[13px] font-semibold text-gray-500 leading-tight mt-0.5">{formatKpiSoFar(k?.achieved ?? null, c.unit)}</p>
+                  </div>
+                );
+              }
               const pp = k?.target ? pct(k.achieved ?? 0, k.target) : 0;
               return (
                 <div key={c.code} className="border-l-[3px] border-gray-200 pl-2">
@@ -1360,6 +1422,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           declarationData: (s.declarationData as SoDeclarationDataSnapshot | null) ?? null,
           soSignatureViewUrl: (s.soSignatureViewUrl as string | null | undefined) ?? null,
           asmSignatureViewUrl: (s.asmSignatureViewUrl as string | null | undefined) ?? null,
+          // GIFSY-reject fast-track: manager approval was skipped (drives the timeline + note).
+          fastTrack:       parseFastTrack(s.fastTrack),
         });
       }
     } catch {
@@ -1856,11 +1920,17 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         </Card>
       )}
 
-      {/* Pending Gifsy notice */}
+      {/* Pending Gifsy notice. GIFSY-reject fast-track: ONE extra line inside this same box (no second
+          box); once Gifsy decides there is no note — the timeline's "Skipped" step keeps the record. */}
       {kyc.status === KYCStatus.PENDING_GIFSY && (
-        <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-start gap-2">
+        <div data-testid="pending-gifsy-notice" className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-start gap-2">
           <Clock className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" />
-          <p className="text-sm text-blue-700">Awaiting final validation by Gifsy. No action required from your side.</p>
+          <div className="min-w-0">
+            <p className="text-sm text-blue-700">Awaiting final validation by Gifsy. No action required from your side.</p>
+            {kyc.fastTrack && (
+              <p data-testid="fast-track-note" className="text-sm text-blue-700 mt-1">{FAST_TRACK_SALES_NOTE}</p>
+            )}
+          </div>
         </div>
       )}
 

@@ -3,9 +3,15 @@
 Single source of truth for every change **exclusive to, or driven by, the Bajaj tenant**
 (slug `bajaj`; staging host `uat-bajaj.gifsy.in`; prod hosts `bajajloyalty.gifsy.in` (primary) + `bajaj.gifsy.in`).
 Keep Deoleo + all other tenants byte-identical. Update this doc in the SAME pass as any
-Bajaj change. Last updated: 2026-11-11.
+Bajaj change. Last updated: 2026-11-16.
 
-> **📍 STATE 2026-11-11.** **Prod:** tenant `bajaj` created by the owner 2026-11-10 — status ONBOARDING; domains
+> **📍 STATE 2026-11-16 (current).** Prod and staging both serve **`2eb8271d`** (release 2026-11-15). Bajaj is live on
+> prod: branding + logos render on `bajajloyalty.gifsy.in`; Hubble gift cards are LIVE (§1); the v2 partner screens
+> carry the "so far" / targeted-outlets rules (§10); payout-credited messages state the net bank amount (§11); November
+> 2026 sales applied via Sales Import (month OPEN; points rule pending). Bajaj prod data history:
+> `BAJAJ-PROD-OUTLET-IMPORT.md`; current state + owner to-dos: `RESUME.md`. The 2026-11-11 block below is historical.
+>
+> **📍 STATE 2026-11-11 (historical).** **Prod:** tenant `bajaj` created by the owner 2026-11-10 — status ONBOARDING; domains
 > `bajajloyalty.gifsy.in` (primary) + `bajaj.gifsy.in`; invoice prefix `TGSL-BCCL-`; 12 feature flags; logo + white wordmark
 > uploaded. Until the next prod release, prod renders the generic "LoyaltyBase" shell on `bajajloyalty.gifsy.in` and the uploaded
 > logo URLs return 403 (both fixed in the release). **Staging:** the release (develop `7c85d9fd`, 2026-11-11) carries the Bajaj prod
@@ -33,15 +39,24 @@ Bajaj change. Last updated: 2026-11-11.
 - **Secrets (staging):** `HUBBLE_CLIENT_ID_STAGING` / `HUBBLE_CLIENT_SECRET_STAGING` /
   `WebhookHubbleStaging`→`HUBBLE_WEBHOOK_SECRET` (all in GCP Secret Manager, project `gifsy-platform`).
   Webhook URL: `https://gifsy-api-staging-4d4n5mc6yq-el.a.run.app/v1/hubble/webhook` (enforcing X-Verify).
-- **Prod wiring (`feat/bajaj-prod-gaps`, 2026-11-10; on develop/staging since `7c85d9fd` 2026-11-11; NOT on prod yet):** the code reads the
+- **✅ LIVE ON PROD for Bajaj** — wiring shipped in #59 (`a18cc932`, 2026-11-12); prod secrets created by the owner
+  2026-11-11; Hubble whitelisted the prod VPC egress IP `34.96.40.72` (verified 2026-11-13: login → 200 + token).
+- **Reconcile hardening (2026-11-15 release, ⚠️ platform-wide rewards/Hubble code, owner-approved, triple-audited):**
+  confirm never refunds after a timeout / 5xx / network / unknown error — only a definitive Hubble 400/422 business
+  rejection + lookup "not found" + canary; ops "Retry with Hubble" refunds a "no order" only when the order is ≥ 2 hours
+  old + canary (a known-delivered order on the same Hubble account fingerprint, any tenant, up to 5 candidates; 2 / 20 s
+  at confirm); late webhooks always re-checked and flagged (`HUBBLE_ISSUED_AFTER_REFUND` etc.); Acknowledge rules incl.
+  forced ack with a ≥ 20-character note; retailer "taking longer than usual" copy. Staging proof: BAJAJ-26-000032/38/39
+  refunded via Retry (+500 ×3). **Ops guide: `HUBBLE-RECONCILE-RUNBOOK.md`.**
+- **Prod wiring (`feat/bajaj-prod-gaps`, 2026-11-10; shipped in #59):** the code reads the
   env-neutral `HUBBLE_CLIENT_ID` / `HUBBLE_CLIENT_SECRET` / `HUBBLE_WEBHOOK_SECRET` (falling back to
   the `*_STAGING` names, so staging is unchanged); the webhook is fail-closed everywhere (no dev-bypass);
   prod `deploy.yml` binds the three secrets + `HUBBLE_BASE_URL=https://api.myhubble.money`.
   Prod webhook URL (confirm the Cloud Run URL first): `https://gifsy-api-4d4n5mc6yq-el.a.run.app/v1/hubble/webhook`.
   Owner steps (secrets MUST exist before the prod deploy): `BAJAJ-PROD-GO-LIVE-CHECKLIST.md` § F3 runbook.
-- **Open items:** rotate the Hubble Client Secret (was shared in a screenshot); create the prod
-  secrets BEFORE the prod deploy (the deploy preflight stops at step 1 otherwise; the deployer's
-  `secretmanager.viewer` grant is done) + register the prod webhook (runbook above); static-egress-IP decision (prod min-instances=1 already warm).
+- **Open items:** rotate the Hubble Client Secret (was shared in a screenshot). _(Done: prod secrets created + prod
+  webhook registered 2026-11-11; egress IP whitelisted 2026-11-13. The prod deploy PREFLIGHT still checks the 3 secrets
+  on every deploy.)_
 
 ## 2. VOUCHER_ISSUED notification — voucher code to the owner (ALL tenants, not Bajaj-only)
 - **What:** when a voucher code is issued (Hubble auto-issue OR manual fulfilment), send the
@@ -247,8 +262,8 @@ next `claude` session (a fresh settings.json isn't loaded mid-session).
 - **Uniqueness:** Bajaj `uniquenessPolicy.bank+upi` already ON (verified 2026-11-02, 0 dups); capture
   runs `checkGroupUniqueness`.
 - **Status:** ✅ Built, full gates green (api jest 3807 · nest 0 · FE vitest 2874 · tsc 0), dual
-  adversarial audit (money + identity) → all confirmed findings fixed. ▶ push to `develop` → migration
-  via in-VPC job → enable Bajaj flag on staging → owner runtime UAT. Source of truth:
+  adversarial audit (money + identity) → all confirmed findings fixed. ✅ On prod (in `main` since early
+  November 2026, before cutover #57 `ff45f6b`); the per-tenant flag decides where it is ON. Source of truth:
   `platform/docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md`. ⚠️ **PLATFORM-WIDE** (owner-approved).
 
 ## Payout rail = FREE CHOICE for Bajaj (bank/UPI toggle), not a per-outlet mandate (2026-11-05)
@@ -267,4 +282,33 @@ Two changes (owner-approved, Option B):
    had mandated (5,229 BANK + 1,277 UPI) were updated to ANY via a guarded in-VPC job; snapshot kept in
    `_bak_bajaj_req_payment` (reversible: `UPDATE outlets o SET "requiredPaymentType"=b."requiredPaymentType"
    FROM _bak_bajaj_req_payment b WHERE o.id=b.id;`). All ~6,515 Bajaj outlets are now ANY → the toggle
-   shows everywhere. (prod has no Bajaj outlets yet; apply the same if/when Bajaj goes live on prod.)
+   shows everywhere. (At the time prod had no Bajaj outlets. ⚠️ Bajaj outlets were imported to prod 2026-11-12 — this
+   doc does not record whether prod outlets carry ANY; check `requiredPaymentType` on prod before relying on it.)
+
+## 10. Partner screens v2 — "so far" and targeted-outlet rules (2026-11-15 release)
+Flag **`partnerDashboardV2`** (Bajaj; Deoleo has it OFF → byte-identical, 27 HTML diffs checked). Commits `1a010a62`,
+`5199dec7`, `5100e928`. Applies to the dashboard hero/card/multi-outlet hero, retailer Targets page, sales-rep outlet card
+and the Performance trend (`GET /partner/targets/trend`).
+- **A KPI with no target** shows a neutral grey **"₹X so far"** (no %, no bar, no red). No sales data at all → "—".
+  Why: Bajaj SAMT outlets have NON ADHO sales but no NON ADHO target (it is an eligibility gate) — the old red "— · 0%"
+  read as "you did nothing".
+- **Multi-outlet partners:** a KPI's target AND achieved are summed **only over outlets that have a target for that KPI**;
+  the rest is shown as **"+₹X so far at outlets without this target"**.
+- **Primary (headline) KPI** = the first KPI that has a target, on every screen; footer falls back to "No targets set
+  this month" instead of claiming a target-less KPI was met. Past months drop "this month" / "so far".
+- **Performance "Change vs last month"** compares the primary KPI's **total sales across ALL the partner's outlets**
+  (`achievedAll`), so a change in which outlets are targeted can't fake a swing; label reads "Change in total sales vs
+  last month" when totals differ from the targeted figures. "This month vs target" and target-met badges stay
+  targeted-only.
+- **All tenants (owner-approved 2026-11-15, ⚠️ platform-wide):** the Targets-page outlet table's columns are the **union
+  of KPI codes**, cells matched by code (fixed misaligned columns); INR ParamCard text **"₹10,414 · ₹10,000"** and
+  **"₹X to go"** (whole rupees).
+
+## 11. Payout-credited message and TDS (2026-11-15 release)
+- The payout-credited WhatsApp/SMS now states the **amount actually credited to the bank** = Σ(amount − TDS withheld) of
+  the entries this UTR apply flipped to PAID, floored once per outlet (same figure as the bank-file line); no message when
+  nothing reaches the bank (`a77cbc7c`, ⚠️ platform-wide, owner-approved). Redemption cash-outs never withhold → unchanged.
+- **Deoleo unaffected:** every Deoleo entry is GROSS_UP with ₹0 withheld (verified on prod 2026-11-15).
+- **Bajaj has NO `tdsPolicy` row** → resolves to the default `{SEC_194C, GROSS_UP}`. ⚠️ **Owner to confirm Bajaj's TDS
+  method (GROSS_UP vs DEDUCT) on TDS Treatment before the first live Bajaj credit payout** — with DEDUCT the message and
+  bank line show the net amount.

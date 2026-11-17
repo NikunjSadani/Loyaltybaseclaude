@@ -46,11 +46,11 @@ describe('RosterRemoveByExcelPanel', () => {
     const { container } = renderPanel();
     chooseFile(container);
 
-    await waitFor(() => expect(screen.getByText(/2 of 3 Outlet IDs will be removed/i)).toBeInTheDocument());
+    expect(await screen.findByText(/2 of 3 Outlet IDs will be removed/i)).toBeInTheDocument();
     // the first call is a preview, never a write
     expect(removeRosterByUpload).toHaveBeenCalledWith('s1', expect.any(File), { idColumn: undefined, dryRun: true });
-    expect(screen.getByText(/a filled enrollment/i)).toBeInTheDocument();
-    expect(screen.getByText(/OUT3/)).toBeInTheDocument();
+    expect(await screen.findByText(/a filled enrollment/i)).toBeInTheDocument();
+    expect(await screen.findByText(/OUT3/)).toBeInTheDocument();
     expect(onRemoved).not.toHaveBeenCalled();
   });
 
@@ -72,8 +72,8 @@ describe('RosterRemoveByExcelPanel', () => {
 
     await waitFor(() => expect(onRemoved).toHaveBeenCalledTimes(1));
     expect(removeRosterByUpload).toHaveBeenNthCalledWith(2, 's1', expect.any(File), { idColumn: undefined, dryRun: false });
-    expect(screen.getByText(/Removed 2 outlets/i)).toBeInTheDocument();
-    expect(screen.getByText(/1 had a filled enrollment/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Removed 2 outlets/i)).toBeInTheDocument();
+    expect(await screen.findByText(/1 had a filled enrollment/i)).toBeInTheDocument();
   });
 
   it('a preview with nothing to remove shows the notice and offers no destructive button', async () => {
@@ -84,7 +84,7 @@ describe('RosterRemoveByExcelPanel', () => {
     const { container } = renderPanel();
     chooseFile(container);
 
-    await waitFor(() => expect(screen.getByText(/Nothing to remove/i)).toBeInTheDocument());
+    expect(await screen.findByText(/Nothing to remove/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Remove \d+ outlet/i })).not.toBeInTheDocument();
   });
 
@@ -92,7 +92,7 @@ describe('RosterRemoveByExcelPanel', () => {
     removeRosterByUpload.mockResolvedValueOnce({ success: false, error: 'Invalid or corrupted xlsx file' });
     const { container } = renderPanel();
     chooseFile(container);
-    await waitFor(() => expect(screen.getByText(/Invalid or corrupted xlsx file/i)).toBeInTheDocument());
+    expect(await screen.findByText(/Invalid or corrupted xlsx file/i)).toBeInTheDocument();
     expect(onRemoved).not.toHaveBeenCalled();
   });
 });

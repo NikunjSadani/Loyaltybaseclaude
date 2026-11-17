@@ -1,6 +1,6 @@
 # Delivery-Status Reporting — Build Scope (SMS · OTP · transactional WhatsApp)
 
-**Status:** ✅ BUILT 2026-08-25 (Waves 0–4, on `develop`, pending cutover #37) — additive + ships DORMANT.
+**Status:** ✅ IN PROD since cutover #37 (`78652fe`, 2026-08-26) — additive, DORMANT until activated (built 2026-08-25, Waves 0–4).
 All 5 waves gated + adversarially audited + runtime-proven on staging. SMS/OTP/transactional-WhatsApp
 delivery tracking + the team+tenant report all working end-to-end on the deployed container. Decisions §6.
 

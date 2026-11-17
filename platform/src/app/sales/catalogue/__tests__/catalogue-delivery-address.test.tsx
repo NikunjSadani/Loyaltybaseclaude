@@ -85,7 +85,7 @@ describe('sales catalogue — physical-gift delivery address', () => {
     expect(field('City *').value).toBe('Pune');
     expect(field('State').value).toBe('Maharashtra');
     expect(field('Pincode *').value).toBe('411001');
-    expect(screen.getByText('From the outlet address')).toBeInTheDocument();
+    expect(await screen.findByText('From the outlet address')).toBeInTheDocument();
   });
 
   it('sends deliveryAddress (with the outlet mobile) in the redeem-for-outlet body', async () => {

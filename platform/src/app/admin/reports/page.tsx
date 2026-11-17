@@ -6,7 +6,8 @@ import { FileSpreadsheet, Download, RefreshCw, ExternalLink } from 'lucide-react
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { downloadBlob } from '@/lib/download'
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
+import { DownloadActionStatus } from '@/components/exports/download-action-status'
 
 interface ReportConfig {
   id: string
@@ -30,7 +31,7 @@ const reports: ReportConfig[] = [
   { id: 'points-ledger', name: 'Outlet Points Ledger', description: 'Per-outlet points movement (opening, monthly earn/burn, expiry, closing) over a selected period — up to 24 months.', category: 'business', endpoint: '/api/admin/reports/points-ledger', href: '/admin/reports/points-ledger', filters: [] },
   { id: 'billing-trends', name: 'Billing Trends Report', description: 'Month-over-month billing by channel partner class, territory, and SKU', category: 'business', endpoint: '/api/reports/billing-trends', filters: ['dateFrom', 'dateTo', 'partnerClass', 'state', 'skuCode'] },
   { id: 'scheme-performance', name: 'Scheme Performance Report', description: 'Target vs achievement per scheme, with payout accrued and eligibility rate', category: 'business', endpoint: '/api/reports/scheme-performance', filters: ['schemeId', 'dateFrom', 'dateTo', 'partnerClass'] },
-  { id: 'target-vs-sales', name: 'Target vs Sales Performance', description: 'Target vs actual per outlet, month, and KPI over a selected period (up to 15 months). Months with no uploaded data appear as blank cells.', category: 'business', endpoint: '/api/admin/reports/target-vs-sales', href: '/admin/reports/target-vs-sales', filters: [] },
+  { id: 'target-vs-sales', name: 'Target vs Sales Performance', description: 'Target vs actual per outlet, month, and KPI over a selected period (preview up to 3 months on screen; download up to 15 months). Months with no uploaded data appear as blank cells.', category: 'business', endpoint: '/api/admin/reports/target-vs-sales', href: '/admin/reports/target-vs-sales', filters: [] },
   { id: 'sku-performance', name: 'SKU Performance Report', description: 'Sales volume and value by SKU across channel partner types', category: 'business', endpoint: '/api/reports/sku-performance', filters: ['dateFrom', 'dateTo', 'category', 'state'] },
   { id: 'outlet-growth', name: 'Outlet Growth Report', description: 'New outlet activations, KYC conversions, and inactive outlet tracking', category: 'business', endpoint: '/api/reports/outlet-growth', filters: ['dateFrom', 'dateTo', 'partnerClass', 'state'] },
   // Finance
@@ -50,25 +51,19 @@ const categoryLabels = {
 }
 
 function ReportCard({ report }: { report: ReportConfig }) {
-  const [loading, setLoading] = useState(false)
+  const dl = useDownloadAction()
+  const loading = dl.busy
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
 
-  const handleExport = async () => {
-    setLoading(true)
-    try {
-      const params = new URLSearchParams({ format: 'xlsx' })
-      if (dateFrom) params.append('dateFrom', dateFrom)
-      if (dateTo) params.append('dateTo', dateTo)
-      const res = await fetch(`${report.endpoint}?${params}`)
-      if (!res.ok) throw new Error('Export failed')
-      const blob = await res.blob()
-      downloadBlob(blob, `${report.id}-${new Date().toISOString().split('T')[0]}.xlsx`)
-    } catch {
-      alert('Export failed. Please try again.')
-    } finally {
-      setLoading(false)
-    }
+  // 200 → the file saves straight away; 202 → prepared in the background (Downloads page).
+  const handleExport = () => {
+    const params = new URLSearchParams({ format: 'xlsx' })
+    if (dateFrom) params.append('dateFrom', dateFrom)
+    if (dateTo) params.append('dateTo', dateTo)
+    void dl.run(`${report.endpoint}?${params}`, {
+      fallbackFileName: `${report.id}-${new Date().toISOString().split('T')[0]}.xlsx`,
+    })
   }
 
   const cat = categoryLabels[report.category]
@@ -109,10 +104,12 @@ function ReportCard({ report }: { report: ReportConfig }) {
             </Button>
           </Link>
         ) : (
-          <Button onClick={handleExport} disabled={loading} size="sm" className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-xs">
-            {loading ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Generating...</> : <><Download className="h-3 w-3 mr-1" />Export Excel</>}
+          <Button onClick={handleExport} disabled={dl.blocked} size="sm" className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-xs">
+            {loading ? <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> : <Download className="h-3 w-3 mr-1" />}
+            {downloadButtonLabel(dl, 'Export Excel')}
           </Button>
         )}
+        <DownloadActionStatus action={dl} />
       </CardContent>
     </Card>
   )
@@ -127,7 +124,10 @@ export default function ReportsPage() {
     <div className="p-6 space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-[#1A1A2E]">Reports</h1>
-        <p className="text-sm text-gray-500 mt-1">All reports export in Microsoft Excel (.xlsx) format</p>
+        <p className="text-sm text-gray-500 mt-1">
+          All reports export in Microsoft Excel (.xlsx) format. Large reports are prepared in the background and appear
+          under <Link href="/admin/downloads" className="font-medium text-[var(--brand-primary)] underline underline-offset-2">Downloads</Link>.
+        </p>
       </div>
 
       <div className="flex gap-2 flex-wrap">

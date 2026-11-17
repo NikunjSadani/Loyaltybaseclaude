@@ -4,7 +4,6 @@ import { useState, useMemo, useEffect } from 'react';
 import {
   Search,
   Download,
-  AlertTriangle,
   Clock,
   CheckCircle,
   XCircle,
@@ -25,7 +24,8 @@ import {
   type KycSlaResult,
 } from '@/lib/kyc-sla-stage';
 import { fetchHolidayDateSet } from '@/lib/holidays';
-import { downloadBlob } from '@/lib/download';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
 type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
 
@@ -146,8 +146,7 @@ export default function KYCPage() {
   // submissions in Gifsy's court — the same set the "Gifsy Review Sheet" export covers.
   const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL' | 'AWAITING_GIFSY'>('ALL');
   const [programFilter, setProgramFilter] = useState('');
-  const [exportLoading, setExportLoading] = useState(false);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const exportAction = useDownloadAction();
 
   useEffect(() => {
     // Fetch the SLA targets + holiday calendar alongside the list so the stage-aware
@@ -217,12 +216,8 @@ export default function KYCPage() {
   const rejectedMode = statusFilter === 'REJECTED';
   const gifsyCount = useMemo(() => kycList.filter((k) => k.awaitingGifsy).length, [kycList]);
   const exportEmpty = rejectedMode ? stats.rejected === 0 : gifsyCount === 0;
-  const exportDisabled = exportLoading || exportEmpty;
-  const exportLabel = exportLoading
-    ? 'Exporting…'
-    : rejectedMode
-    ? 'Export Rejected Outlets'
-    : 'Export Gifsy Review Sheet';
+  const exportDisabled = exportAction.blocked || exportEmpty;
+  const exportLabel = downloadButtonLabel(exportAction, rejectedMode ? 'Export Rejected Outlets' : 'Export Gifsy Review Sheet');
   const exportTitle = rejectedMode
     ? 'Download the Rejected-outlets report — full KYC + which fields were rejected + remarks.'
     : 'Download the Gifsy-stage review worksheet — submissions awaiting your final Gifsy decision (PENDING_GIFSY), to verify offline and re-upload. It does NOT export the whole on-screen list.';
@@ -230,27 +225,17 @@ export default function KYCPage() {
     ? 'No rejected submissions to export'
     : 'No submissions are awaiting Gifsy review';
 
-  const handleExport = async () => {
-    setExportLoading(true);
-    setExportError(null);
-    try {
-      // On the Rejected filter, export the "Rejected outlets" report (full KYC +
-      // which fields the admin rejected + per-field remark); otherwise the Lane A
-      // review-dump of pending submissions.
-      const rejected = statusFilter === 'REJECTED';
-      const url = rejected ? '/api/kyc/rejected-export' : '/api/kyc/review-dump';
-      const filePrefix = rejected ? 'kyc-rejected' : 'kyc-review-dump';
-      const res = await fetch(url, {
-        headers: { ...authHeader() },
-      });
-      if (!res.ok) throw new Error(`Export failed (${res.status})`);
-      const blob = await res.blob();
-      downloadBlob(blob, `${filePrefix}-${new Date().toISOString().slice(0, 10)}.xlsx`);
-    } catch (err) {
-      setExportError(err instanceof Error ? err.message : 'Export failed.');
-    } finally {
-      setExportLoading(false);
-    }
+  const handleExport = () => {
+    // On the Rejected filter, export the "Rejected outlets" report (full KYC +
+    // which fields the admin rejected + per-field remark); otherwise the Lane A
+    // review-dump of pending submissions. A large file is prepared in the background (202)
+    // and appears on the Downloads page.
+    const rejected = statusFilter === 'REJECTED';
+    const url = rejected ? '/api/kyc/rejected-export' : '/api/kyc/review-dump';
+    const filePrefix = rejected ? 'kyc-rejected' : 'kyc-review-dump';
+    void exportAction.run(url, {
+      fallbackFileName: `${filePrefix}-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    });
   };
 
   if (loading) {
@@ -352,14 +337,10 @@ export default function KYCPage() {
                 <Download className="w-4 h-4" />
                 {exportLabel}
               </button>
-              {!exportLoading && exportEmpty && (
+              {!exportAction.busy && exportEmpty && (
                 <span className="text-xs text-gray-400">{exportEmptyHint}</span>
               )}
-              {exportError && (
-                <span className="flex items-center gap-1 text-xs text-red-600">
-                  <AlertTriangle className="w-3 h-3" />{exportError}
-                </span>
-              )}
+              <DownloadActionStatus action={exportAction} className="max-w-xs" />
             </div>
           )}
         </div>

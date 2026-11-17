@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import * as XLSX from 'xlsx';
-import { buildRosterReportWorkbook } from '@/lib/scheme-roster-report';
+import { buildRosterReportWorkbook, rosterHasProblems } from '@/lib/scheme-roster-report';
 import type { RosterUploadResult } from '@/lib/schemes';
 
 const base: RosterUploadResult = {
@@ -49,23 +49,46 @@ describe('buildRosterReportWorkbook', () => {
     expect(XLSX.utils.sheet_to_json(wb.Sheets['Duplicates'])).toHaveLength(0);
   });
 
-  it('adds a Rows sheet with per-row disposition when the backend returns `rows` (Phase 2)', () => {
+  it('adds a Problem Rows sheet with per-row disposition when the backend returns problemRows', () => {
     const wb = buildRosterReportWorkbook({
       ...base,
-      rows: [
+      problemRows: [
         { rowIndex: 2, outletRef: 'DKOL0401', outletName: 'Shop A', taggedEmployeeCode: 'XSR-M010', disposition: 'SAVED', linkage: 'MATCHED', taggedEmployeeFound: true },
         { rowIndex: 3, outletRef: 'DKOL0401', outletName: 'Shop A dup', taggedEmployeeCode: '', disposition: 'DUPLICATE_DROPPED', linkage: '', taggedEmployeeFound: null },
       ],
     });
-    expect(wb.SheetNames).toContain('Rows');
-    const rows = XLSX.utils.sheet_to_json<Record<string, string | number>>(wb.Sheets['Rows']);
+    expect(wb.SheetNames).toContain('Problem Rows');
+    const rows = XLSX.utils.sheet_to_json<Record<string, string | number>>(wb.Sheets['Problem Rows']);
     expect(rows[0]).toMatchObject({ 'Row #': 2, Disposition: 'Saved', Linkage: 'Matched', 'Tagged Employee Found': 'Yes' });
     expect(rows[1]).toMatchObject({ 'Row #': 3, Disposition: 'Duplicate — dropped', Linkage: '—' });
   });
 
-  it('omits the Rows sheet when the backend did not return `rows` (older backend)', () => {
-    const wb = buildRosterReportWorkbook(base);
-    expect(wb.SheetNames).not.toContain('Rows');
+  it('omits the Problem Rows sheet when there are no problem rows', () => {
+    const wb = buildRosterReportWorkbook({ ...base, problemRows: [], problemRowCount: 0, problemRowsTruncated: false });
+    expect(wb.SheetNames).not.toContain('Problem Rows');
+  });
+
+  it('memory-safety: notes in the sheet when the API capped the problem rows', () => {
+    const wb = buildRosterReportWorkbook({
+      ...base,
+      problemRows: [
+        { rowIndex: 5, outletRef: 'X1', outletName: '', taggedEmployeeCode: '', disposition: 'SAVED', linkage: 'STANDALONE', taggedEmployeeFound: null },
+      ],
+      problemRowCount: 812,
+      problemRowsTruncated: true,
+    });
+    const aoa = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets['Problem Rows'], { header: 1 });
+    expect(String(aoa[aoa.length - 1][0])).toBe('Showing the first 1 of 812 problem rows. Fix these, then re-upload only those rows — the next upload lists any that are left.');
+    // M4/M5: the Summary sheet also says the list was cut, and that saved rows are counted, not listed.
+    const summary = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets['Summary'], { header: 1 }).map((r) => String(r[0] ?? '')).join(' | ');
+    expect(summary).toMatch(/Showing the first 1 of 812 problem rows/);
+    expect(summary).toMatch(/lists only the rows that need attention/);
+  });
+
+  it('rosterHasProblems: false only when nothing needs attention (button hidden)', () => {
+    expect(rosterHasProblems({ ...base, duplicateRefs: [], unmatchedEmployeeCodes: [], problemRows: [], problemRowCount: 0 })).toBe(false);
+    expect(rosterHasProblems(base)).toBe(true);
+    expect(rosterHasProblems({ ...base, duplicateRefs: [], unmatchedEmployeeCodes: [], problemRowCount: 3 })).toBe(true);
   });
 
   it('shows the skipped-rows line only when the backend reports skippedRows', () => {

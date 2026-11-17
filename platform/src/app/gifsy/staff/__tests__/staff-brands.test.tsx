@@ -94,7 +94,7 @@ describe('GS-P5 — assumable-brands grants', () => {
 
     // One checkbox per brand, labelled by name (displayName, else internalName).
     const acme   = await screen.findByLabelText('Acme');
-    const globex = screen.getByLabelText('Globex');
+    const globex = await screen.findByLabelText('Globex');
     expect(acme).toBeInTheDocument();
     expect(globex).toBeInTheDocument();
 

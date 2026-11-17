@@ -125,8 +125,8 @@ describe('VISCFG — VisibilityConfigEditor', () => {
     render(<VisibilityConfigEditor />);
 
     // The warning appears and the Save button is disabled → no setConfig even on click.
-    await waitFor(() => expect(screen.getByTestId('geo-fence-no-gps-warning')).toBeInTheDocument());
-    const saveBtn = screen.getByRole('button', { name: /save configuration/i });
+    expect(await screen.findByTestId('geo-fence-no-gps-warning')).toBeInTheDocument();
+    const saveBtn = await screen.findByRole('button', { name: /save configuration/i });
     expect(saveBtn).toBeDisabled();
     fireEvent.click(saveBtn);
     expect(setConfig).not.toHaveBeenCalled();
@@ -139,18 +139,20 @@ describe('VISCFG — VisibilityConfigEditor', () => {
         programs: ['Unnati'], subPrograms: [] },
     });
     render(<VisibilityConfigEditor />);
-    const progs = await screen.findByRole('group', { name: 'Programs (optional)' });
-    expect(await within(progs).findByRole('checkbox', { name: 'Unnati' })).toBeChecked();
-    const subs = screen.getByRole('group', { name: 'Sub-Programs (optional)' });
-    expect(within(subs).getByRole('checkbox', { name: /Legacy.*not in settings list/ })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByTestId('visibility-scope-count')).toHaveTextContent('7 matching outlets right now.'));
+    // The config and the scope OPTIONS load via separate requests — wait for each (CI-runner flake 2026-11-15:
+    // a sync getBy on the sub-program options ran before the options request resolved).
+    const progs = await screen.findByRole('group', { name: 'Programs (optional)' }, { timeout: 15000 });
+    expect(await within(progs).findByRole('checkbox', { name: 'Unnati' }, { timeout: 15000 })).toBeChecked();
+    const subs = await screen.findByRole('group', { name: 'Sub-Programs (optional)' }, { timeout: 15000 });
+    expect(await within(subs).findByRole('checkbox', { name: /Legacy.*not in settings list/ }, { timeout: 15000 })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('visibility-scope-count')).toHaveTextContent('7 matching outlets right now.'), { timeout: 15000 });
     expect(apiGet).toHaveBeenCalledWith('/api/admin/kpis/scope-count?outletTypes=SSS&programs=Unnati');
 
-    fireEvent.click(within(subs).getByRole('checkbox', { name: 'Lite' }));
+    fireEvent.click(await within(subs).findByRole('checkbox', { name: 'Lite' }, { timeout: 15000 }));
     fireEvent.click(screen.getByRole('button', { name: /save configuration/i }));
     await waitFor(() => expect(setConfig).toHaveBeenCalledTimes(1));
     expect(setConfig.mock.calls[0][0]).toMatchObject({ outletScope: ['SSS'], programs: ['Unnati'], subPrograms: ['Lite'] });
-  });
+  }, 30000);
 
   it('VISCFG6: an older config (no keys) saves [] for both; no count without an outlet type; options error shown', async () => {
     apiGet.mockImplementation(async () => ({ success: false, error: 'Nope' }));

@@ -10,7 +10,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { PayoutsService } from './payouts.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -24,6 +24,7 @@ import {
   ReceiveFundDto,
   ReconciliationQueryDto,
 } from './dto/payouts.dto';
+import { HeavyOp } from '../common/heavy-op-limiter';
 
 /**
  * Credits & Payouts API — re-homed from platform/src/app/api/payouts/* onto /v1.
@@ -121,8 +122,7 @@ export class PayoutsController {
   @Roles('GIFSY_ADMIN')
   @RequirePermission('payouts:reconcile')
   @UseInterceptors(
-    FileInterceptor('file', {
-      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB ceiling — bound memory on parse
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
       fileFilter: (_req, file, cb) =>
         /\.(xlsx|xls)$/i.test(file.originalname)
           ? cb(null, true)
@@ -141,6 +141,7 @@ export class PayoutsController {
   @Get('reconciliation')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('payouts:reconcile')
+  @HeavyOp()
   async reconciliation(
     @CurrentUser() user: JwtPayload,
     @Query() query: ReconciliationQueryDto,

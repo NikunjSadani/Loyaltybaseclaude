@@ -10,6 +10,7 @@ import {
   StreamableFile,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { streamObjectResponse } from '../common/stream-object';
 import { SchemeReportService } from './scheme-report.service';
 import { SchemeNotifyService } from './scheme-notify.service';
 import { SkipThrottle } from '@nestjs/throttler';
@@ -59,7 +60,7 @@ export class SchemeReportController {
     @Query('token') token: string,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { bytes, contentType, inline } = await this.reports.viewMediaByToken(token);
+    const { stream, size, contentType, inline } = await this.reports.viewMediaByToken(token);
     const disposition = inline ? 'inline' : 'attachment; filename="media"';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', disposition);
@@ -67,7 +68,7 @@ export class SchemeReportController {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     // Private capture — never let an intermediary cache the media bytes.
     res.setHeader('Cache-Control', 'no-store');
-    return new StreamableFile(bytes, { type: contentType, disposition });
+    return streamObjectResponse(res, { stream, size }, { type: contentType, disposition });
   }
 
   // ── Notifications (D29) — GIFSY_ADMIN only ────────────────────────────────

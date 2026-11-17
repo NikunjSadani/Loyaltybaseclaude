@@ -21,10 +21,18 @@ import { useState, useCallback } from 'react'
 import { Download, RefreshCw, TableIcon } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { downloadBlob } from '@/lib/download'
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
+import { DownloadActionStatus } from '@/components/exports/download-action-status'
 import { formatMonth } from '@/lib/targets'
 
 const MAX_MONTHS = 15
+/**
+ * The on-screen preview (JSON) covers at most this many months — mirrors the API's
+ * TARGET_VS_SALES_INSTANT_MAX_MONTHS (api/src/exports/kinds/batch2/target-vs-sales.kind.ts); a longer
+ * range gets a 400. The Excel download still covers up to MAX_MONTHS: up to 3 months it saves straight
+ * away, longer ranges are prepared in the background and appear on the Downloads page.
+ */
+const PREVIEW_MAX_MONTHS = 3
 
 // ─── Types (mirror the backend targetVsSales JSON payload) ────────────────────
 
@@ -72,13 +80,15 @@ function columnsFor(kpis: KpiCol[]): string[] {
 
 export default function TargetVsSalesPage() {
   const todayMM     = currentYYYYMM()
-  const defaultFrom = subtractMonths(todayMM, 5) // last 6 months inclusive
+  // Default to the last PREVIEW_MAX_MONTHS months (inclusive) so both Preview and Download work instantly.
+  const defaultFrom = subtractMonths(todayMM, PREVIEW_MAX_MONTHS - 1)
 
   const [from,    setFrom   ] = useState(defaultFrom)
   const [to,      setTo     ] = useState(todayMM)
   const [preview, setPreview] = useState<PreviewData | null>(null)
   const [loading, setLoading] = useState(false)
   const [error,   setError  ] = useState<string | null>(null)
+  const exportAction = useDownloadAction()
 
   // ── Inline validation ──────────────────────────────────────────────────────
   const validationError: string | null = (() => {
@@ -89,6 +99,8 @@ export default function TargetVsSalesPage() {
     return null
   })()
   const actionsDisabled = !!validationError || !from || !to
+  // Longer than the on-screen limit → Preview is off; Download (prepared in the background) still works.
+  const previewTooLong = !actionsDisabled && monthSpan(from, to) > PREVIEW_MAX_MONTHS
 
   // ── Generate preview ──────────────────────────────────────────────────────
   const handlePreview = useCallback(async () => {
@@ -114,21 +126,14 @@ export default function TargetVsSalesPage() {
   }, [from, to])
 
   // ── Download Excel ──────────────────────────────────────────────────────────
-  const handleExport = useCallback(async () => {
-    setLoading(true)
+  // 200 → saves straight away; 202 (a long period) → prepared in the background (Downloads page).
+  const runExport = exportAction.run
+  const handleExport = useCallback(() => {
     setError(null)
-    try {
-      const url = `/api/admin/reports/target-vs-sales?fromMonth=${from}&toMonth=${to}&format=xlsx`
-      const res = await fetch(url)
-      if (!res.ok) throw new Error(`Export failed (${res.status})`)
-      const blob = await res.blob()
-      downloadBlob(blob, `target-vs-sales-${from}-to-${to}.xlsx`)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Export failed.')
-    } finally {
-      setLoading(false)
-    }
-  }, [from, to])
+    void runExport(`/api/admin/reports/target-vs-sales?fromMonth=${from}&toMonth=${to}&format=xlsx`, {
+      fallbackFileName: `target-vs-sales-${from}-to-${to}.xlsx`,
+    })
+  }, [from, to, runExport])
 
   const columns = preview ? columnsFor(preview.kpis) : []
 
@@ -139,8 +144,8 @@ export default function TargetVsSalesPage() {
       <div>
         <h1 className="text-2xl font-bold text-[#1A1A2E]">Target vs Sales Performance</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Target vs actual per outlet, month, and KPI over a selected period — up to {MAX_MONTHS} months.
-          Months with no uploaded data appear as blank cells.
+          Target vs actual per outlet, month, and KPI over a selected period — preview up to {PREVIEW_MAX_MONTHS} months
+          on screen, download up to {MAX_MONTHS} months. Months with no uploaded data appear as blank cells.
         </p>
       </div>
 
@@ -175,7 +180,8 @@ export default function TargetVsSalesPage() {
             {/* Actions */}
             <Button
               onClick={handlePreview}
-              disabled={actionsDisabled || loading}
+              disabled={actionsDisabled || loading || previewTooLong}
+              aria-describedby={previewTooLong ? 'tvs-preview-limit' : undefined}
               size="sm"
               variant="outline"
               className="flex items-center gap-1.5 border-[var(--brand-primary)] text-[var(--brand-primary)] hover:bg-red-50"
@@ -187,26 +193,32 @@ export default function TargetVsSalesPage() {
 
             <Button
               onClick={handleExport}
-              disabled={actionsDisabled || loading}
+              disabled={actionsDisabled || loading || exportAction.blocked}
               size="sm"
               className="flex items-center gap-1.5 bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white"
             >
-              {loading
-                ? <><RefreshCw className="h-3 w-3 animate-spin" />Loading…</>
-                : <><Download className="h-3 w-3" />Download Excel</>}
+              {exportAction.busy ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+              {downloadButtonLabel(exportAction, 'Download Excel')}
             </Button>
           </div>
+          <DownloadActionStatus action={exportAction} />
 
           {/* Helper / validation copy */}
           <p className="text-xs text-gray-500">
             Selected: {from ? formatMonth(from) : '—'} to {to ? formatMonth(to) : '—'}. Months with no
             uploaded target or sales data appear as blank cells (not zero).
           </p>
+          {previewTooLong && (
+            <p id="tvs-preview-limit" data-testid="tvs-preview-limit" className="text-xs text-amber-700">
+              The on-screen preview covers up to {PREVIEW_MAX_MONTHS} months. For this {monthSpan(from, to)}-month period use
+              Download Excel — the file is prepared in the background and appears under Downloads (usually 1–5 minutes).
+            </p>
+          )}
           {validationError && (
-            <p className="text-xs text-red-600 font-medium">{validationError}</p>
+            <p role="alert" className="text-xs text-red-600 font-medium">{validationError}</p>
           )}
           {error && !validationError && (
-            <p className="text-xs text-red-600 font-medium">{error}</p>
+            <p role="alert" className="text-xs text-red-600 font-medium">{error}</p>
           )}
         </CardContent>
       </Card>

@@ -26,6 +26,11 @@ import {
   SESSION_TTL_DAYS,
   ACCESS_TTL,
 } from './auth.constants';
+import {
+  resolveLoginPartnerDisplay,
+  isPartnerLoginRole,
+  PartnerDisplayIdentity,
+} from '../partner/partner-display.helper';
 import * as crypto from 'crypto';
 
 /**
@@ -71,7 +76,7 @@ export class AuthService {
    * The flat identity fields are kept for any consumer that reads them (and the A2 operator banner).
    */
   async getMe(user: JwtPayload) {
-    const [dbUser, channelPartner, salesUser, settings, visibilityCaptureMode] = await Promise.all([
+    const [dbUser, channelPartner, salesUser, settings, visibilityCaptureMode, display] = await Promise.all([
       this.prisma.user.findUnique({ where: { id: user.sub }, select: { name: true, phone: true } }),
       this.prisma.channelPartner.findUnique({
         where: { userId: user.sub },
@@ -116,6 +121,10 @@ export class AuthService {
       // the SALES shell can read it (the /admin/settings/config endpoint is admin-only, so
       // sales would 403 and wrongly default to PHOTO_APPROVAL).
       this.tenant.resolveVisibilityCaptureMode(user.clientId),
+      // Partner-shell header identity (partner roles only; null otherwise) — the same values the
+      // OTP-login reply carries, so a live-cookie/empty-storage re-hydrate (login page) also
+      // paints the outlet name from the first frame. Never throws.
+      this.resolveLoginDisplay(user.role, user.sub, user.clientId, user.phone ?? null),
     ]);
 
     const wallet = channelPartner
@@ -164,6 +173,8 @@ export class AuthService {
         name: dbUser?.name ?? user.name,
         phone: dbUser?.phone ?? null,
         role: user.role,
+        // ADDITIVE, partner roles only (absent for every other role — reply unchanged).
+        ...(display ? { businessName: display.businessName, outletName: display.outletName } : {}),
         channelPartner: channelPartner
           ? (() => {
               const { outlets, ...cp } = channelPartner;
@@ -295,7 +306,11 @@ export class AuthService {
     phone: string,
     otp: string,
     clientId: string,
-  ): Promise<{ accessToken: string; refreshToken: string; user: Partial<User> }> {
+  ): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    user: Partial<User> & Partial<PartnerDisplayIdentity>;
+  }> {
     const cleanPhone = phone.replace(/\D/g, '');
 
     // LOGIN-purpose only: the phone may also hold an unverified REDEMPTION_CONFIRM / KYC_CONSENT /
@@ -409,6 +424,12 @@ export class AuthService {
     const tokens = await this.generateTokens(user);
     this.logger.log(`User ${user.id} (${user.role}) logged in — client: ${clientId}`);
 
+    // Partner-shell header identity (ADDITIVE; partner logins only). The same businessName/outletName
+    // GET /partner/me returns for the login's default outlet, so the retailer-app header paints the
+    // OUTLET name from the first frame instead of the person's name. Display-only: a failure here
+    // must never block a login, so it degrades to the legacy reply (FE then waits for /partner/me).
+    const display = await this.resolveLoginDisplay(user.role, user.id, clientId, user.phone);
+
     return {
       ...tokens,
       user: {
@@ -416,8 +437,29 @@ export class AuthService {
         name:  user.name,
         role:  user.role,
         phone: user.phone,
+        ...(display ? { businessName: display.businessName, outletName: display.outletName } : {}),
       },
     };
+  }
+
+  /**
+   * Partner-shell header identity for the login reply AND the /auth/me re-hydrate (one rule:
+   * partner-display.helper). Non-partner roles never query (returns null → reply unchanged).
+   * Display-only: any failure degrades to null rather than failing the login / me call.
+   */
+  private async resolveLoginDisplay(
+    role: string | null | undefined,
+    userId: string,
+    clientId: string,
+    phone: string | null,
+  ): Promise<PartnerDisplayIdentity | null> {
+    if (!isPartnerLoginRole(role)) return null;
+    try {
+      return await resolveLoginPartnerDisplay(this.prisma, { clientId, userSub: userId, phone });
+    } catch (err) {
+      this.logger.warn(`Login display identity unavailable for user ${userId}: ${(err as Error)?.message}`);
+      return null;
+    }
   }
 
   // ── Generate JWT + Refresh token ─────────────────────────────────────────────

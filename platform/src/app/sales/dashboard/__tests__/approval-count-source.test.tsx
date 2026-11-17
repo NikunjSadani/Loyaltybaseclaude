@@ -72,6 +72,6 @@ describe('Sales dashboard — Approval Required count comes from submissions', (
     render(<SalesDashboardPage />);
     const label = await screen.findByText('Approval Required');
     const row = label.closest('a')!;            // the group summary row
-    expect(within(row).getByText('2')).toBeInTheDocument();   // 2, not 1
+    expect(await within(row).findByText('2')).toBeInTheDocument();   // 2, not 1
   });
 });
