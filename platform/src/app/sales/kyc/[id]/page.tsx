@@ -8,7 +8,7 @@ import {
   CheckCircle, XCircle, Clock, AlertTriangle,
   Camera, ChevronRight, ChevronDown,
   BookOpen, Gift, HeadphonesIcon, ThumbsUp,
-  ShoppingCart, Target, TrendingUp,
+  ShoppingCart, Target, TrendingUp, SkipForward,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -36,6 +36,7 @@ import { RejectionModal } from './RejectionModal';
 import { UpiCaptureMethodBadge, effectiveUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge';
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { REMOVED_RAIL_NOTICE, asPayoutRail, isRemovalConsistent, type PayoutRail } from '@/lib/payout-rail';
+import { FAST_TRACK_SALES_NOTE, FAST_TRACK_SALES_NOTE_DECIDED, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track';
 import { kycDocDisplayLabel } from '@/lib/kyc-doc-label';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -113,6 +114,9 @@ interface KYCDetail {
   // The ASM's approval signature (resolved by getOne once signed) so the dual-signed declaration
   // shows BOTH actual inks on screen. Null for STANDARD / before the ASM signs.
   asmSignatureViewUrl?: string | null;
+  // GIFSY-reject fast-track (Bajaj flag gifsyRejectFastTrack): this resubmission went straight to
+  // GIFSY, skipping manager approval. null/absent = normal flow (nothing extra rendered).
+  fastTrack?: KycFastTrack | null;
 }
 
 /** The declaration snapshot persisted at submission (SO_DECLARATION only). */
@@ -239,6 +243,8 @@ interface ApiSalesKYC {
   } | null;
   documents?: { id?: string; documentType: string; status?: string; viewUrl?: string | null;
     fileName?: string | null; metadata?: unknown }[];
+  // GIFSY-reject fast-track marker; null/absent for every normal submission (older API too).
+  fastTrack?: { previousSubmissionId: string; previousRejectedAt: string } | null;
 }
 
 /** Mimes safe to RENDER in a top-level tab. A doc's mime is client-supplied at upload,
@@ -525,6 +531,7 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
       .filter(d => PHOTO_DOC_TYPES.has(d.documentType) && d.viewUrl)
       .map(d => ({ label: docLabel(d.documentType), url: d.viewUrl as string, documentType: d.documentType })),
     approvalHistory: [],
+    fastTrack: parseFastTrack(s.fastTrack),
   };
 }
 
@@ -604,7 +611,8 @@ function relativeDate(dateStr: string): string {
 
 /* ─── Approval Timeline ──────────────────────────────────────────────────────── */
 
-type StepState = 'complete' | 'active' | 'rejected' | 'pending';
+// 'skipped' = the step was deliberately bypassed (GIFSY-reject fast-track skips manager approval).
+type StepState = 'complete' | 'active' | 'rejected' | 'pending' | 'skipped';
 
 interface TimelineStep {
   label:    string;
@@ -773,6 +781,12 @@ function buildTimeline(kyc: KYCDetail, slug: string): TimelineStep[] {
     // stale event note.
     const remark = kyc.rejectionReason ?? firstApproverEvent?.remarks;
     if (remark) step2Sub = `${step2Sub} — ${remark}`;
+  } else if (kyc.fastTrack) {
+    // GIFSY-reject fast-track: this resubmission went straight to GIFSY — no manager approved it.
+    // Never show "Approved" / "Approved by SO" here (the DRAFT→PENDING_GIFSY history row is NOT an
+    // approval); say plainly that the step was skipped and why.
+    step2State = 'skipped';
+    step2Sub   = 'Skipped — resubmission after GIFSY rejection';
   } else if (gifsyRejected || kyc.status === KYCStatus.PENDING_GIFSY || kyc.status === KYCStatus.APPROVED) {
     // The current cycle cleared the first approver (it advanced to Gifsy / approved /
     // Gifsy-rejected), so the first-approver step is complete regardless of history gaps.
@@ -822,14 +836,18 @@ function buildTimeline(kyc: KYCDetail, slug: string): TimelineStep[] {
   } else if (kyc.status === KYCStatus.PENDING_GIFSY) {
     step3State = 'active';
     step3Sub   = 'Under Gifsy review';
-  } else if (step2State === 'complete') {
-    // First approver cleared but not yet at Gifsy (transient) — queued.
+  } else if (step2State === 'complete' || step2State === 'skipped') {
+    // First approver cleared (or skipped) but not yet at Gifsy (transient) — queued.
     step3Sub = 'Queued for Gifsy';
   }
 
   return [
     step1,
-    { label: stepFirstLabel, sublabel: step2Sub, state: step2State, testid: 'timeline-step-first-approver' },
+    {
+      // Fast-track: no specific reviewer level applies (none acted) → a neutral label, not "SO Review".
+      label: step2State === 'skipped' ? 'Manager Review' : stepFirstLabel,
+      sublabel: step2Sub, state: step2State, testid: 'timeline-step-first-approver',
+    },
     { label: 'Gifsy Validation',  sublabel: step3Sub, state: step3State, testid: 'timeline-step-gifsy' },
   ];
 }
@@ -843,6 +861,14 @@ function StepDot({ state }: { state: StepState }) {
   if (state === 'rejected') return (
     <div className="w-7 h-7 rounded-full bg-red-100 border-2 border-red-500 flex items-center justify-center shrink-0">
       <XCircle className="h-3.5 w-3.5 text-red-600" />
+    </div>
+  );
+  if (state === 'skipped') return (
+    <div
+      data-testid="step-dot-skipped"
+      className="w-7 h-7 rounded-full bg-blue-50 border-2 border-dashed border-blue-400 flex items-center justify-center shrink-0"
+    >
+      <SkipForward className="h-3.5 w-3.5 text-blue-600" aria-hidden="true" />
     </div>
   );
   if (state === 'active') return (
@@ -875,7 +901,8 @@ function ApprovalTimeline({ kyc, slug }: { kyc: KYCDetail; slug: string }) {
               {i < steps.length - 1 && (
                 <div className={`w-0.5 flex-1 my-1 rounded-full ${
                   step.state === 'complete' ? 'bg-emerald-300' :
-                  step.state === 'rejected' ? 'bg-red-200' : 'bg-gray-200'
+                  step.state === 'rejected' ? 'bg-red-200' :
+                  step.state === 'skipped'  ? 'bg-blue-200' : 'bg-gray-200'
                 }`} style={{ minHeight: 20 }} />
               )}
             </div>
@@ -884,7 +911,8 @@ function ApprovalTimeline({ kyc, slug }: { kyc: KYCDetail; slug: string }) {
               <p className={`text-sm font-semibold leading-tight ${
                 step.state === 'complete' ? 'text-emerald-700' :
                 step.state === 'rejected' ? 'text-red-700' :
-                step.state === 'active'   ? 'text-amber-700' : 'text-gray-400'
+                step.state === 'active'   ? 'text-amber-700' :
+                step.state === 'skipped'  ? 'text-blue-700'  : 'text-gray-400'
               }`}>{step.label}</p>
               <p className="text-xs text-gray-400 mt-0.5 leading-snug">{step.sublabel}</p>
             </div>
@@ -1391,6 +1419,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           declarationData: (s.declarationData as SoDeclarationDataSnapshot | null) ?? null,
           soSignatureViewUrl: (s.soSignatureViewUrl as string | null | undefined) ?? null,
           asmSignatureViewUrl: (s.asmSignatureViewUrl as string | null | undefined) ?? null,
+          // GIFSY-reject fast-track: manager approval was skipped (drives the timeline + note).
+          fastTrack:       parseFastTrack(s.fastTrack),
         });
       }
     } catch {
@@ -1885,6 +1915,21 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* GIFSY-reject fast-track note: this resubmission went straight to GIFSY, skipping the
+          managers. Shown whatever the status (the skip stays on record after GIFSY decides). */}
+      {kyc.fastTrack && (
+        <div
+          data-testid="fast-track-note"
+          role="note"
+          className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-start gap-2"
+        >
+          <SkipForward className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" aria-hidden="true" />
+          <p className="text-sm text-blue-700 min-w-0">
+            {kyc.status === KYCStatus.PENDING_GIFSY ? FAST_TRACK_SALES_NOTE : FAST_TRACK_SALES_NOTE_DECIDED}
+          </p>
+        </div>
       )}
 
       {/* Pending Gifsy notice */}

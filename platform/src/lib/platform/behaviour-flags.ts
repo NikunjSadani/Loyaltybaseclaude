@@ -10,7 +10,7 @@
  */
 import type { FeatureFlags } from './client-config';
 
-export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan'>;
+export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan' | 'gifsyRejectFastTrack'>;
 
 export interface BehaviourFlagMeta {
   label: string;
@@ -46,6 +46,11 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = 
       ],
       confirmLabel: 'Yes, allow payouts without PAN',
     },
+  },
+  gifsyRejectFastTrack: {
+    label: 'Send GIFSY-rejected KYC resubmissions straight to GIFSY',
+    description:
+      'When GIFSY rejects a KYC the managers already approved, the corrected resubmission skips manager approval. SO Declaration KYCs still go through managers.',
   },
 };
 

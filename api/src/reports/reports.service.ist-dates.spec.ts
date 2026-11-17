@@ -38,6 +38,8 @@ describe('ReportsService — IST createdAt date bounds', () => {
       kycSubmission: { findMany: kycFindMany },
       // kycStatus also runs a tenant-scoped outlet.findMany for the outlet columns.
       outlet: { findMany: jest.fn().mockResolvedValue([]) },
+      // kycStatus reads clients.features (gifsyRejectFastTrack "Routing" column) — no row → OFF.
+      client: { findUnique: jest.fn().mockResolvedValue(null) },
       visibilityCapture: { findMany: visibilityFindMany },
       tdsRecord: { findMany: tdsFindMany },
       payoutTransaction: { findMany: payoutFindMany },

@@ -14,7 +14,7 @@ import { istDateKey } from '../../../common/ist-date';
 import { isKycInFlight, isReKycPending } from '../../../common/kyc-rekyc.helper';
 import { rungIdHeader, rungNameHeader, rungPhoneHeader } from '../../../common/hierarchy-labels';
 import { mintDocViewToken } from '../../../kyc/doc-view-token';
-import { OUTLET_MASTER_KIND, profileStatus } from './outlet-master';
+import { OUTLET_MASTER_KIND, profileStatus, salesApproverHistoryRow as liveSalesApproverHistoryRow } from './outlet-master';
 import { expectSameWorkbook, fakeModuleRef, readBack, runKindToBuffer, seeded } from './parity-testkit-spec';
 
 // ─── Fake database ─────────────────────────────────────────────────────────────────────────────────────────
@@ -716,5 +716,19 @@ describe('outlet-master export kind', () => {
     expect(OUTLET_MASTER_KIND.isHeavy(p)).toBe(true);
     expect(OUTLET_MASTER_KIND.fileName(p, new Date('2026-11-13T20:00:00Z'))).toBe('outlet-master-2026-11-13.xlsx');
     expect(OUTLET_MASTER_KIND.access).toEqual({ roles: ['GIFSY_ADMIN', 'CLIENT_ADMIN'], permission: 'reports:export' });
+  });
+
+  it('GIFSY-reject fast-track: the consent-routed DRAFT→PENDING_GIFSY row (actor = the rep) is NOT a sales approver', () => {
+    const now = Date.now();
+    const ftRow = {
+      toStatus: 'PENDING_GIFSY', changedByUserId: 'rep-1', createdAt: new Date(now - 3_600_000),
+      metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 's0' },
+    };
+    const gifsyApproved = { toStatus: 'APPROVED', changedByUserId: 'admin', createdAt: new Date(now), metadata: { stage: 'GIFSY' } };
+    // Fast-tracked → no sales approver at all (blank "Approval by Employee" columns).
+    expect(liveSalesApproverHistoryRow([ftRow, gifsyApproved])).toBeUndefined();
+    // A normal manager hand-off is unaffected.
+    const mgr = { toStatus: 'PENDING_GIFSY', changedByUserId: 'asm-1', createdAt: new Date(now - 7_200_000), metadata: { stage: 'FIRST_APPROVER' } };
+    expect(liveSalesApproverHistoryRow([mgr, gifsyApproved])?.changedByUserId).toBe('asm-1');
   });
 });

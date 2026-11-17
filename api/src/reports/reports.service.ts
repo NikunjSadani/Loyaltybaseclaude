@@ -12,7 +12,7 @@ import {
   visibilityStatusRow,
   visibilityStatusWhere,
 } from '../exports/kinds/batch1/visibility-status';
-import { KYC_STATUS_OUTLET_SELECT, kycStatusRows } from '../exports/kinds/batch1/kyc-status';
+import { KYC_STATUS_OUTLET_SELECT, kycStatusRows, kycStatusRoutingEnabled } from '../exports/kinds/batch1/kyc-status';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -368,7 +368,9 @@ export class ReportsService {
       select: KYC_STATUS_OUTLET_SELECT,
       orderBy: [{ outletCode: 'asc' }, { id: 'asc' }],
     });
-    const data = await kycStatusRows(this.prisma, user.clientId, outlets);
+    // "Routing" column only for a gifsyRejectFastTrack tenant (Bajaj); every other tenant's rows are unchanged.
+    const routing = await kycStatusRoutingEnabled(this.prisma, user.clientId);
+    const data = await kycStatusRows(this.prisma, user.clientId, outlets, 0, { routing });
     return this.toJson({ data, recordCount: data.length });
   }
 }

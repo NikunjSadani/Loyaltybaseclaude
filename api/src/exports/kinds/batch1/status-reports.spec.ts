@@ -170,8 +170,12 @@ function outlets(n: number): Out[] {
   return out;
 }
 
-function outletPrisma(rows: Out[]) {
+function outletPrisma(
+  rows: Out[],
+  opts: { features?: Record<string, unknown> | null; history?: Array<Record<string, unknown>> } = {},
+) {
   const calls: Array<Record<string, any>> = [];
+  const historyCalls: Array<Record<string, any>> = [];
   const users = [
     { id: 'ua', name: 'Gifsy A', role: 'GIFSY_ADMIN' },
     { id: 'ub', name: 'State Head', role: 'SALES_STATE_HEAD' },
@@ -179,6 +183,15 @@ function outletPrisma(rows: Out[]) {
   ];
   return {
     calls,
+    historyCalls,
+    // Tenant features (gifsyRejectFastTrack drives the Bajaj-only "Routing" column). null = no client row.
+    client: { findUnique: async () => (opts.features === null || opts.features === undefined ? null : { features: opts.features }) },
+    kycStatusHistory: {
+      findMany: async (a: Record<string, any>) => {
+        historyCalls.push(a);
+        return (opts.history ?? []).filter((h) => a.where.kycSubmissionId.in.includes(h.kycSubmissionId));
+      },
+    },
     outlet: {
       findMany: async (a: Record<string, any>) => {
         calls.push(a);
@@ -229,5 +242,50 @@ describe('kyc-status export kind', () => {
 
   it('access mirrors the endpoint', () => {
     expect(KYC_STATUS_KIND.access).toEqual({ roles: ['GIFSY_ADMIN', 'MIS_USER', 'CLIENT_ADMIN'], permission: 'reports:read' });
+  });
+
+  // ── GIFSY-reject fast-track "Routing" column — ONLY for a gifsyRejectFastTrack tenant ──
+  const ftOutlet = (id: string, subId: string): Out =>
+    ({
+      id, clientId: 'bajaj', deletedAt: null, zone: null, outletCode: `C-${id}`, name: `Outlet ${id}`, programName: null,
+      deactivatedAt: null, kycIntent: null,
+      partner: {
+        ownerName: 'Own', phone: '9', businessName: 'Biz', panNumber: 'PAN',
+        kycSubmissions: [{
+          status: 'PENDING_GIFSY', submittedAt: new Date(), createdAt: new Date(), id: subId,
+          rejectionReason: null, reviewerNotes: null, reviewedAt: null, statusHistory: [],
+        }],
+      },
+    }) as unknown as Out;
+  const ftHistory = [{
+    kycSubmissionId: 's-ft', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+    metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 's-old', previousRejectedAt: new Date().toISOString() },
+  }];
+
+  it('flag ON (Bajaj): appends a "Routing" column — label for a fast-tracked latest submission, blank otherwise', async () => {
+    const prisma = outletPrisma([ftOutlet('a', 's-ft'), ftOutlet('b', 's-normal')], { features: { gifsyRejectFastTrack: true }, history: ftHistory });
+    const res = await runKindToBuffer(KYC_STATUS_KIND, {}, { prisma, moduleRef: fakeModuleRef([]), user: mis });
+    const sheet = readBack(res.buffer).rows['KYC Status'];
+    expect(sheet[0][sheet[0].length - 1]).toBe('Routing');
+    const idx = sheet[0].indexOf('Routing');
+    expect(sheet[1][idx]).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
+    expect(sheet[2][idx] ?? '').toBe('');
+    expect(prisma.historyCalls).toHaveLength(1); // ONE batched query per page
+  });
+
+  it('flag OFF (Deoleo): header + rows byte-identical — no Routing column, no history query', async () => {
+    const prisma = outletPrisma([ftOutlet('a', 's-ft')], { features: { gifsyRejectFastTrack: false }, history: ftHistory });
+    const res = await runKindToBuffer(KYC_STATUS_KIND, {}, { prisma, moduleRef: fakeModuleRef([]), user: mis });
+    expectSameWorkbook(res.buffer, await oldKycStatus([ftOutlet('a', 's-ft')], 'bajaj'));
+    expect(readBack(res.buffer).rows['KYC Status'][0]).not.toContain('Routing');
+    expect(prisma.historyCalls).toHaveLength(0);
+  });
+
+  it('JSON row builder: Routing key only when asked (routing:true)', async () => {
+    const prisma = outletPrisma([], { history: ftHistory });
+    const off = await kycStatusRows(prisma as never, 'bajaj', [ftOutlet('a', 's-ft')]);
+    expect('Routing' in off[0]).toBe(false);
+    const on = await kycStatusRows(prisma as never, 'bajaj', [ftOutlet('a', 's-ft')], 0, { routing: true });
+    expect(on[0].Routing).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
   });
 });

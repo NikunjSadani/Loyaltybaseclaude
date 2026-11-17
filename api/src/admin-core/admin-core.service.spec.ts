@@ -1742,7 +1742,7 @@ describe('AdminCoreService', () => {
     });
 
     /** Build an addressable-outlet fixture in the shape kycDashboard selects. */
-    type Hist = { toStatus: string; createdAt: Date };
+    type Hist = { toStatus: string; createdAt: Date; fromStatus?: string };
     const outlet = (opts: {
       status?: string | null; // null/undefined → NOT_STARTED (no submission)
       submittedAt?: Date | null;
@@ -1992,6 +1992,50 @@ describe('AdminCoreService', () => {
       expect(res.sla.fieldChainAvgHours).toBe(10); // submitted → FIRST entry (not 70h to latest)
       expect(res.sla.gifsyReviewAvgHours).toBe(20); // LATEST entry → approval
       expect(res.sla.endToEndAvgHours).toBe(90); // submitted → approval, unchanged
+    });
+
+    it('GIFSY-reject fast-track (DRAFT→PENDING_GIFSY, no field stage) is EXCLUDED from the field-chain tile', async () => {
+      // A fast-tracked KYC skipped the managers: it has NO field stage, so it must not feed a ~0h
+      // "field chain" sample (inflating field compliance). Gifsy review + end-to-end still count it.
+      const submittedAt = new Date(now - 30 * HOUR);
+      const approvedAt = new Date(now - 10 * HOUR);
+      const normalSubmitted = new Date(now - 50 * HOUR);
+      const normalEntered = new Date(now - 40 * HOUR); // field chain 10h
+      wire({
+        outlets: [
+          outlet({
+            status: 'APPROVED',
+            submittedAt,
+            approvedAt,
+            history: [{ fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: submittedAt }],
+          }),
+          outlet({
+            status: 'APPROVED',
+            submittedAt: normalSubmitted,
+            approvedAt,
+            history: [{ fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'PENDING_GIFSY', createdAt: normalEntered }],
+          }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.sla.fieldChainAvgHours).toBe(10); // only the normal KYC (not (0+10)/2)
+      expect(res.sla.gifsyReviewAvgHours).toBe(25); // (20 + 30) / 2 — both reached Gifsy
+      expect(res.sla.sampleSize).toBe(2);
+    });
+
+    it('a PENDING fast-tracked KYC sits only in the Gifsy bucket (never a field breach)', async () => {
+      wire({
+        outlets: [
+          outlet({
+            status: 'PENDING_GIFSY',
+            submittedAt: new Date(now - 200 * HOUR),
+            history: [{ fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(now - 5 * HOUR) }],
+          }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.buckets.pendingFieldApproval).toMatchObject({ count: 0, breached: 0 });
+      expect(res.buckets.pendingGifsyApproval).toMatchObject({ count: 1, withinSla: 1, breached: 0 });
     });
 
     it('rejection reasons are tenant-filtered in the query and grouped (null→Unspecified, top 8)', async () => {

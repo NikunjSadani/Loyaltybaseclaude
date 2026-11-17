@@ -16,6 +16,7 @@
 import { KycFieldKey, KycFieldDecision, KycFieldSource } from '@prisma/client';
 import { KYC_FIELD_KEYS } from './kyc-verification.helper';
 import type { XlsxCell } from '../common/xlsx-stream';
+import { KYC_ROUTING_HEADER, kycRoutingLabel, type KycFastTrack } from './kyc-fast-track.helper';
 
 // ─── Field order (7, fixed) — key + the human label used in the column header ───
 const FIELD_LABELS: Record<KycFieldKey, string> = {
@@ -79,8 +80,12 @@ export const KYC_DUMP_DOC_HEADERS = [
   'Cancelled Cheque',
 ] as const;
 
-/** 20 context + 6 doc + 14 per-field (7 × 2) = 40. */
-export const KYC_DUMP_TOTAL_COLUMN_COUNT = 40;
+/**
+ * 20 context + 6 doc + 14 per-field (7 × 2) + 1 trailing "Routing" = 41. Routing (GIFSY-reject fast-track, Bajaj)
+ * is APPENDED after every original column so the 40 established columns keep their positions; the bulk-verify
+ * parser keys cells by header label, so the extra read-only column round-trips harmlessly.
+ */
+export const KYC_DUMP_TOTAL_COLUMN_COUNT = 41;
 
 export interface KycReviewDumpFieldState {
   decision: KycFieldDecision;
@@ -119,16 +124,18 @@ export interface KycReviewDumpEntry {
     chequeUrl?: string;
   };
   fields: Record<KycFieldKey, KycReviewDumpFieldState>;
+  /** GIFSY-reject fast-track marker → the "Routing" cell (absent/null = routed normally → blank). */
+  fastTrack?: KycFastTrack | null;
 }
 
-/** The 40 header strings in order: 20 context + 6 document + 14 per-field Decision/Remark. */
+/** The 41 header strings in order: 20 context + 6 document + 14 per-field Decision/Remark + Routing. */
 export function kycReviewDumpHeaders(): string[] {
   const perFieldHeaders: string[] = [];
   for (const { label } of KYC_FIELD_ORDER) {
     perFieldHeaders.push(kycFieldDecisionHeader(label));
     perFieldHeaders.push(kycFieldRemarkHeader(label));
   }
-  return [...KYC_DUMP_CONTEXT_HEADERS, ...KYC_DUMP_DOC_HEADERS, ...perFieldHeaders];
+  return [...KYC_DUMP_CONTEXT_HEADERS, ...KYC_DUMP_DOC_HEADERS, ...perFieldHeaders, KYC_ROUTING_HEADER];
 }
 
 /** Column widths (characters): header length + 2, at least 14. */
@@ -179,6 +186,7 @@ export function kycReviewDumpCells(e: KycReviewDumpEntry): XlsxCell[] {
     // is somehow missing (write paths enforce it).
     row.push(decision === 'REJECT' ? fs.remark || 'Rejected (no remark on file)' : (fs.remark ?? ''));
   }
+  row.push(kycRoutingLabel(e.fastTrack));
   return row;
 }
 
@@ -223,6 +231,8 @@ export interface RejectedKycRow {
   accountNumber?: string;
   ifscCode?: string;
   upiId?: string;
+  /** GIFSY-reject fast-track marker → the trailing "Routing" cell (absent/null = blank). */
+  fastTrack?: KycFastTrack | null;
 }
 
 /** Identity / outcome columns (left block). */
@@ -276,7 +286,7 @@ export function rejectedKycHeaders(): string[] {
     perFieldHeaders.push(rejectedFieldVerdictHeader(label));
     perFieldHeaders.push(rejectedFieldRemarkHeader(label));
   }
-  return [...REJECTED_KYC_IDENTITY_HEADERS, ...perFieldHeaders, ...REJECTED_KYC_VALUE_HEADERS];
+  return [...REJECTED_KYC_IDENTITY_HEADERS, ...perFieldHeaders, ...REJECTED_KYC_VALUE_HEADERS, KYC_ROUTING_HEADER];
 }
 
 /** One rejected-outlets row (written by the `kyc-rejected` export kind). */
@@ -315,6 +325,7 @@ export function rejectedKycCells(r: RejectedKycRow): XlsxCell[] {
     r.ifscCode ?? '',
     r.upiId ?? '',
     r.slaAgeHrs != null ? String(r.slaAgeHrs) : '',
+    kycRoutingLabel(r.fastTrack),
   );
   return row;
 }

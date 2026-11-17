@@ -31,7 +31,8 @@ function oldReviewDump(entries: KycReviewDumpEntry[]): Buffer {
     perFieldHeaders.push(kycFieldDecisionHeader(label));
     perFieldHeaders.push(kycFieldRemarkHeader(label));
   }
-  const headerRow: string[] = [...KYC_DUMP_CONTEXT_HEADERS, ...KYC_DUMP_DOC_HEADERS, ...perFieldHeaders];
+  // + the trailing "Routing" column (GIFSY-reject fast-track, 2026-11-17) — the ONLY intended layout change.
+  const headerRow: string[] = [...KYC_DUMP_CONTEXT_HEADERS, ...KYC_DUMP_DOC_HEADERS, ...perFieldHeaders, 'Routing'];
   const dataRows: unknown[][] = entries.map((e) => {
     const row: unknown[] = [
       e.submissionId, e.outletCode, e.outletName, e.ownerName, e.mobile, e.outletType, e.gstNumber, e.panNumber,
@@ -48,6 +49,7 @@ function oldReviewDump(entries: KycReviewDumpEntry[]): Buffer {
       row.push(decision);
       row.push(decision === 'REJECT' ? fs.remark || 'Rejected (no remark on file)' : (fs.remark ?? ''));
     }
+    row.push(e.fastTrack ? 'Direct to GIFSY (resubmitted after GIFSY rejection)' : '');
     return row;
   });
   const ws = aoaToSheetSafe([headerRow, ...dataRows]);
@@ -75,7 +77,8 @@ function oldRejected(rows: RejectedKycRow[]): Buffer {
     perFieldHeaders.push(rejectedFieldVerdictHeader(label));
     perFieldHeaders.push(rejectedFieldRemarkHeader(label));
   }
-  const headerRow: string[] = [...REJECTED_KYC_IDENTITY_HEADERS, ...perFieldHeaders, ...REJECTED_KYC_VALUE_HEADERS];
+  // + the trailing "Routing" column (GIFSY-reject fast-track, 2026-11-17) — the ONLY intended layout change.
+  const headerRow: string[] = [...REJECTED_KYC_IDENTITY_HEADERS, ...perFieldHeaders, ...REJECTED_KYC_VALUE_HEADERS, 'Routing'];
   const dataRows: unknown[][] = rows.map((r) => {
     const rejectedFields = KYC_FIELD_ORDER.filter(({ key }) => r.fields[key]?.decision === 'REJECTED').map(({ label }) => label).join(', ');
     const row: unknown[] = [r.outletCode, r.outletName, r.ownerName, r.mobile, r.salesRep, r.submittedDate, r.rejectedDate, r.rejectedBy, r.rejectionReason, rejectedFields];
@@ -85,7 +88,8 @@ function oldRejected(rows: RejectedKycRow[]): Buffer {
       row.push(fs?.remark ?? '');
     }
     row.push(r.gstNumber, r.panNumber, r.address, r.city, r.state, r.pincode, r.bankName ?? '', r.accountHolderName ?? '',
-      r.accountNumber ?? '', r.ifscCode ?? '', r.upiId ?? '', r.slaAgeHrs != null ? String(r.slaAgeHrs) : '');
+      r.accountNumber ?? '', r.ifscCode ?? '', r.upiId ?? '', r.slaAgeHrs != null ? String(r.slaAgeHrs) : '',
+      r.fastTrack ? 'Direct to GIFSY (resubmitted after GIFSY rejection)' : '');
     return row;
   });
   const ws = aoaToSheetSafe([headerRow, ...dataRows]);
@@ -117,6 +121,8 @@ function entries(n: number): KycReviewDumpEntry[] {
     nameMismatch: rnd() < 0.3,
     documents: { gstCertificateUrl: url(i, 'g'), addressDocUrl: url(i, 'a'), selfDeclarationUrl: url(i, 's'), boardPhotoUrl: url(i, 'b'), ownerPhotoUrl: url(i, 'o'), chequeUrl: url(i, 'c') },
     fields: fields(rnd),
+    // Some GIFSY-reject fast-tracked rows exercise the trailing "Routing" label (no rnd() draw → fixtures unchanged).
+    fastTrack: i % 7 === 3 ? { previousSubmissionId: `KYC-P${i}`, previousRejectedAt: new Date(0).toISOString() } : null,
   }));
 }
 
@@ -128,6 +134,7 @@ function rejectedRows(n: number): RejectedKycRow[] {
     slaAgeHrs: rnd() < 0.8 ? Math.floor(rnd() * 100) : undefined, fields: fields(rnd), gstNumber: 'G', panNumber: 'P',
     address: 'A', city: 'C', state: 'S', pincode: '1', bankName: rnd() < 0.5 ? 'HDFC' : undefined, accountHolderName: undefined,
     accountNumber: undefined, ifscCode: 'I', upiId: rnd() < 0.5 ? 'x@upi' : undefined,
+    fastTrack: i % 5 === 1 ? { previousSubmissionId: `P${i}`, previousRejectedAt: new Date(0).toISOString() } : null,
   }));
 }
 

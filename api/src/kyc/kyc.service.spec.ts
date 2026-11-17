@@ -611,6 +611,24 @@ describe('KycService', () => {
       expect(where.AND[1]).toEqual({ OR: [{ createdAt: { gt: at } }, { createdAt: at, id: { gt: 'b' } }] });
     });
 
+    it('carries fastTrack per entry (batched) so the dump can show the Routing column', async () => {
+      const sub = (id: string) => ({
+        id, createdAt: new Date(), boardPhotoLat: null, boardPhotoLng: null, user: { name: 'A', phone: '1', clientId: 'bajaj' },
+        partner: null, documents: [], verificationItems: [],
+      });
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([sub('FT'), sub('N')]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'FT', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'OLD', previousRejectedAt: new Date().toISOString() },
+        },
+      ]);
+      const page = await service.reviewDumpPage(gifsy, null, 2000);
+      expect(page.entries[0].fastTrack?.previousSubmissionId).toBe('OLD');
+      expect(page.entries[1].fastTrack).toBeNull();
+      expect(mockPrisma.kycStatusHistory.findMany).toHaveBeenCalledTimes(1);
+    });
+
     it('an assumed Gifsy operator is pinned to the assumed tenant', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
       await service.reviewDumpPage({ ...gifsy, assumed: true }, null, 2000);
@@ -713,6 +731,21 @@ describe('KycService', () => {
       expect(r).toMatchObject({ gstNumber: '27ABCDE1234F1ZK', panNumber: 'ABCDE1234F', address: '12 SV Road', ifscCode: 'HDFC0001' });
       // SLA age = 24 business hours (submitted → rejected, one weekday apart).
       expect(r.slaAgeHrs).toBe(24);
+      // Normally routed → no fast-track marker → blank Routing.
+      expect(r.fastTrack).toBeNull();
+    });
+
+    it('a rejected FAST-TRACKED submission carries fastTrack (Routing column) from one batched query', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([rejectedSub()]);
+      mockPrisma.user.findMany.mockResolvedValueOnce([{ id: 'admin1', name: 'Gifsy Admin' }]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'KYC-R1', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'KYC-R0', previousRejectedAt: new Date().toISOString() },
+        },
+      ]);
+      const [r] = await rowsOf(gifsy);
+      expect(r.fastTrack?.previousSubmissionId).toBe('KYC-R0');
     });
   });
 
@@ -904,6 +937,306 @@ describe('KycService', () => {
       await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
       expect(routedUpdate().status).toBe('PENDING_RSM_APPROVAL');
     }, 30_000); // a hang would exceed this; 30 s = the suite default (was 5 s — too tight under full-suite load)
+  });
+
+  // ─── GIFSY-reject fast-track (Bajaj, clients.features.gifsyRejectFastTrack) ──────────────────────
+  describe('consent() — GIFSY-reject fast-track (gifsyRejectFastTrack)', () => {
+    const isr: JwtPayload = { sub: 'isr1', role: 'SALES_ISR', clientId: 'bajaj', phone: '', name: '' };
+    const dto = { submissionId: 'sub-new', mobile: '9000000001', otp: '123456' };
+    // Relative to "now" — never a hardcoded date.
+    const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
+    const tenantMock = () => (service as unknown as { tenant: { resolveClient: jest.Mock } }).tenant.resolveClient;
+    const salesNotify = () =>
+      (service as unknown as { salesNotifications: { kycSubmittedForApproval: jest.Mock } }).salesNotifications
+        .kycSubmittedForApproval;
+    const setFlag = (on: boolean) =>
+      tenantMock().mockResolvedValue({ features: { soDeclarationKyc: true, multiLevelApproval: true, gifsyRejectFastTrack: on } });
+
+    /** OTP verify + the DRAFT submission load + ConsentRecord write. */
+    const primeConsent = (over: Record<string, unknown> = {}) => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o1', code: '123456', attempts: 0, maxAttempts: 3 });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub-new',
+        status: 'DRAFT',
+        userId: 'isr1',
+        partnerId: 'cp-1',
+        kycVariant: 'STANDARD',
+        proposedPartner: null,
+        partner: { ownerName: 'Owner', phone: '9000000001', outlets: [{ name: 'Store', programName: 'Bajaj' }] },
+        ...over,
+      });
+      mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr1' });
+    };
+    /** The PRIOR routed submission lookup (2nd kycSubmission.findFirst). */
+    const primePrior = (prior: unknown) => mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(prior);
+    /** A prior submission whose LATEST transition into `status` came from `from`. */
+    const priorRejected = (status: string, from: string, id = 'sub-old', at = hoursAgo(30)) => ({
+      id,
+      status,
+      statusHistory: [{ fromStatus: from, toStatus: status, createdAt: at }],
+    });
+    /** Normal manager route: ISR → active SO. */
+    const primeManagerRoute = () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })
+        .mockResolvedValueOnce({ id: 'so-su', isActive: true, deletedAt: null, reportingToId: 'asm-su', hierarchyLevel: { code: 'SO' } });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+    };
+    const expectManagerRoute = () => {
+      expect(mockPrisma.kycSubmission.updateMany.mock.calls[0][0].data).toMatchObject({ status: 'PENDING_SO_APPROVAL' });
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.kycStatusHistory.create).not.toHaveBeenCalled();
+      expect(salesNotify()).toHaveBeenCalledTimes(1);
+    };
+    const expectFastTrack = (previousSubmissionId: string, rejectedAt: Date) => {
+      // Atomic DRAFT-guarded flip straight to PENDING_GIFSY — inside one transaction.
+      expect(mockTx.kycSubmission.updateMany).toHaveBeenCalledTimes(1);
+      const upd = mockTx.kycSubmission.updateMany.mock.calls[0][0];
+      expect(upd.where).toEqual({ id: 'sub-new', status: 'DRAFT' });
+      expect(upd.data).toMatchObject({ status: 'PENDING_GIFSY', escalatedFrom: null });
+      expect(upd.data.submittedAt).toBeInstanceOf(Date);
+      // Visible history row (DRAFT→PENDING_GIFSY) with the fast-track marker.
+      const hist = mockTx.kycStatusHistory.create.mock.calls[0][0].data;
+      expect(hist).toMatchObject({
+        kycSubmissionId: 'sub-new',
+        fromStatus: 'DRAFT',
+        toStatus: 'PENDING_GIFSY',
+        changedByUserId: 'isr1',
+        notes: 'Resubmitted after GIFSY rejection — sent straight to GIFSY (manager approval skipped)',
+      });
+      expect(hist.metadata).toEqual({
+        fastTrack: 'GIFSY_REJECT_RESUBMISSION',
+        previousSubmissionId,
+        previousRejectedAt: rejectedAt.toISOString(),
+        stage: 'GIFSY',
+      });
+      expect(hist.metadata).not.toHaveProperty('approverRole');
+      // + an AuditLog row (no silent pass-through).
+      const audit = mockTx.auditLog.create.mock.calls[0][0].data;
+      expect(audit).toMatchObject({
+        entityType: 'KYC_SUBMISSION',
+        entityId: 'sub-new',
+        actorId: 'isr1',
+        oldValues: { status: 'DRAFT' },
+        newValues: { status: 'PENDING_GIFSY' },
+      });
+      expect(audit.metadata).toMatchObject({ fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId });
+      // Managers skipped: no routing walk, no non-tx routing write, no sales-approver notification.
+      expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.kycSubmission.updateMany).not.toHaveBeenCalled();
+      expect(mockPrisma.kycStatusHistory.create).not.toHaveBeenCalled();
+      expect(salesNotify()).not.toHaveBeenCalled();
+      // Owner KYC_SUBMITTED stays; KYC_UNDER_REVIEW fires exactly as when a manager hands a KYC to Gifsy.
+      const keys = mockNotifications.notifyUserWithChannels.mock.calls.map((c) => c[0].eventKey);
+      expect(keys).toEqual(['KYC_SUBMITTED', 'KYC_UNDER_REVIEW']);
+    };
+
+    beforeEach(() => {
+      mockTx.kycSubmission.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.kycStatusHistory.create.mockResolvedValue({});
+      mockTx.auditLog.create.mockResolvedValue({});
+    });
+
+    it('flag OFF (Deoleo) → normal manager route, and the prior-submission lookup never runs (byte-identical)', async () => {
+      setFlag(false);
+      primeConsent({ partnerId: 'cp-1' });
+      primeManagerRoute();
+      await service.consent({ ...isr, clientId: 'deoleo' }, dto);
+      expectManagerRoute();
+      expect(mockPrisma.kycSubmission.findFirst).toHaveBeenCalledTimes(1); // only the submission load
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('flag absent from features → OFF (default)', async () => {
+      tenantMock().mockResolvedValue({ features: { soDeclarationKyc: true } });
+      primeConsent();
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+      expect(mockPrisma.kycSubmission.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it('flag ON + prior REJECTED by Gifsy via reject() from PENDING_GIFSY → straight to PENDING_GIFSY', async () => {
+      setFlag(true);
+      const at = hoursAgo(30);
+      primeConsent();
+      primePrior(priorRejected('REJECTED', 'PENDING_GIFSY', 'sub-old', at));
+      await service.consent(isr, dto);
+      expectFastTrack('sub-old', at);
+      // The prior lookup: same partner, excludes THIS submission + every (superseded/unconfirmed) DRAFT,
+      // tenant-scoped, newest first, reading only the rejection transitions.
+      const q = mockPrisma.kycSubmission.findFirst.mock.calls[1][0];
+      expect(q.where).toMatchObject({
+        partnerId: 'cp-1',
+        id: { not: 'sub-new' },
+        status: { not: 'DRAFT' },
+        partner: { clientId: 'bajaj' },
+      });
+      expect(q.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }]);
+      expect(q.select.statusHistory.where).toEqual({
+        toStatus: { in: ['REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED'] },
+      });
+    });
+
+    it('flag ON + prior RE_UPLOAD_REQUIRED via the field grid (PENDING_GIFSY→RE_UPLOAD_REQUIRED) → fast-track', async () => {
+      setFlag(true);
+      const at = hoursAgo(5);
+      primeConsent();
+      primePrior(priorRejected('RE_UPLOAD_REQUIRED', 'PENDING_GIFSY', 'sub-grid', at));
+      await service.consent(isr, dto);
+      expectFastTrack('sub-grid', at);
+    });
+
+    it('flag ON + prior RESUBMISSION_REQUIRED (legacy alias) rejected at PENDING_GIFSY → fast-track', async () => {
+      setFlag(true);
+      const at = hoursAgo(2);
+      primeConsent();
+      primePrior(priorRejected('RESUBMISSION_REQUIRED', 'PENDING_GIFSY', 'sub-alias', at));
+      await service.consent(isr, dto);
+      expectFastTrack('sub-alias', at);
+    });
+
+    it('prior rejected by a MANAGER (fromStatus PENDING_ASM_APPROVAL) → normal manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primePrior(priorRejected('REJECTED', 'PENDING_ASM_APPROVAL'));
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('prior rejected by GIFSY while still at PENDING_SO_APPROVAL → normal manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primePrior(priorRejected('REJECTED', 'PENDING_SO_APPROVAL'));
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('NEW submission is SO_DECLARATION → managers (ASM must re-sign); no prior lookup', async () => {
+      setFlag(true);
+      primeConsent({ kycVariant: 'SO_DECLARATION' });
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+      expect(mockPrisma.kycSubmission.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it('prior SO_DECLARATION rejected by Gifsy → NEW STANDARD → fast-track (decided by the new variant only)', async () => {
+      setFlag(true);
+      const at = hoursAgo(10);
+      primeConsent({ kycVariant: 'STANDARD' });
+      primePrior({ ...priorRejected('REJECTED', 'PENDING_GIFSY', 'sub-sodecl', at), kycVariant: 'SO_DECLARATION' });
+      await service.consent(isr, dto);
+      expectFastTrack('sub-sodecl', at);
+    });
+
+    it('second Gifsy rejection after a previous fast-track → fast-track again', async () => {
+      setFlag(true);
+      const at = hoursAgo(1);
+      primeConsent();
+      // The previous (fast-tracked) submission reached PENDING_GIFSY directly and Gifsy rejected it again.
+      primePrior(priorRejected('RE_UPLOAD_REQUIRED', 'PENDING_GIFSY', 'sub-ft-1', at));
+      await service.consent(isr, dto);
+      expectFastTrack('sub-ft-1', at);
+    });
+
+    it('uses the LATEST transition into the rejected status (older manager rejection, newer Gifsy one → fast-track)', async () => {
+      setFlag(true);
+      const at = hoursAgo(3);
+      primeConsent();
+      primePrior({
+        id: 'sub-old',
+        status: 'REJECTED',
+        statusHistory: [
+          { fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'REJECTED', createdAt: hoursAgo(80) },
+          { fromStatus: 'PENDING_GIFSY', toStatus: 'REJECTED', createdAt: at },
+        ],
+      });
+      await service.consent(isr, dto);
+      expectFastTrack('sub-old', at);
+    });
+
+    it('LATEST transition into the rejected status came from a manager stage → manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primePrior({
+        id: 'sub-old',
+        status: 'REJECTED',
+        statusHistory: [
+          { fromStatus: 'PENDING_GIFSY', toStatus: 'REJECTED', createdAt: hoursAgo(80) },
+          { fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'REJECTED', createdAt: hoursAgo(3) },
+        ],
+      });
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('no prior routed submission (an outlet’s first KYC) → manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primePrior(null);
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('prior APPROVED (admin re-KYC of an approved outlet is not a rejection) → manager route', async () => {
+      setFlag(true);
+      primeConsent();
+      primePrior({ id: 'sub-ok', status: 'APPROVED', statusHistory: [] });
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+    });
+
+    it('a superseded DRAFT between them is ignored — the lookup filters DRAFTs, so the routed Gifsy-rejected prior decides', async () => {
+      setFlag(true);
+      const at = hoursAgo(20);
+      primeConsent();
+      // The DB query (status != DRAFT, id != this submission) skips the abandoned draft and returns the rejected one.
+      primePrior(priorRejected('REJECTED', 'PENDING_GIFSY', 'sub-rejected', at));
+      await service.consent(isr, dto);
+      expectFastTrack('sub-rejected', at);
+      const where = mockPrisma.kycSubmission.findFirst.mock.calls[1][0].where;
+      expect(where.status).toEqual({ not: 'DRAFT' });
+      expect(where.id).toEqual({ not: 'sub-new' });
+    });
+
+    it('submission without a partner → manager route, no lookup', async () => {
+      setFlag(true);
+      primeConsent({ partnerId: null });
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+      expect(mockPrisma.kycSubmission.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it('flag read ERROR → fails safe to OFF (manager route) and logs a warning', async () => {
+      tenantMock().mockRejectedValue(new Error('tenant cache down'));
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      primeConsent();
+      primeManagerRoute();
+      await service.consent(isr, dto);
+      expectManagerRoute();
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('gifsyRejectFastTrack'))).toBe(true);
+      warn.mockRestore();
+    });
+
+    it('lost the DRAFT race (count 0) → no history / audit / notifications', async () => {
+      setFlag(true);
+      mockTx.kycSubmission.updateMany.mockResolvedValue({ count: 0 });
+      primeConsent();
+      primePrior(priorRejected('REJECTED', 'PENDING_GIFSY'));
+      const res = await service.consent(isr, dto);
+      expect(res).toEqual({ verified: true, submissionId: 'sub-new' });
+      expect(mockTx.kycStatusHistory.create).not.toHaveBeenCalled();
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      expect(salesNotify()).not.toHaveBeenCalled();
+    });
   });
 
   describe('create', () => {
@@ -3561,6 +3894,26 @@ describe('KycService', () => {
       expect(where.NOT).toEqual({ AND: [{ status: 'DRAFT' }, { userId: { not: 'user1' } }] });
     });
 
+    it('per-row fastTrack from ONE batched history query (admin KYC list)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        { id: 'ft', status: 'PENDING_GIFSY', partner: null, statusHistory: [] },
+        { id: 'n', status: 'PENDING_GIFSY', partner: null, statusHistory: [] },
+      ]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(2);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'ft', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'old', previousRejectedAt: new Date().toISOString() },
+        },
+      ]);
+      const res = await service.list(mis, {});
+      expect((res.submissions[0] as Record<string, unknown>).fastTrack).toMatchObject({ previousSubmissionId: 'old' });
+      expect((res.submissions[1] as Record<string, unknown>).fastTrack).toBeNull();
+      expect(mockPrisma.kycStatusHistory.findMany).toHaveBeenCalledTimes(1);
+    });
+
     it('derives per-row gifsyEnteredAt = latest PENDING_GIFSY entry (ISO) and never leaks statusHistory', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(null); // partner → own only
       mockPrisma.kycSubmission.findMany.mockResolvedValue([
@@ -3692,6 +4045,33 @@ describe('KycService', () => {
       const res = await service.getOne(mis, 's1');
       expect(res.submission.id).toBe('s1');
       expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('fastTrack: derived from the DRAFT→PENDING_GIFSY fast-track history row (admin + sales detail)', async () => {
+      const rejectedAt = new Date(Date.now() - 26 * 3_600_000);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, documents: [],
+        statusHistory: [
+          {
+            fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+            metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 's0', previousRejectedAt: rejectedAt.toISOString() },
+          },
+        ],
+      });
+      const res = (await service.getOne(mis, 's1')) as { submission: { fastTrack: unknown } };
+      expect(res.submission.fastTrack).toEqual({ previousSubmissionId: 's0', previousRejectedAt: rejectedAt.toISOString() });
+    });
+
+    it('fastTrack: null for a normally-routed submission (incl. a manager first-approve row into PENDING_GIFSY)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, documents: [],
+        statusHistory: [
+          { fromStatus: 'PENDING_SO_APPROVAL', toStatus: 'PENDING_GIFSY', createdAt: new Date(), metadata: { stage: 'FIRST_APPROVER' } },
+          { fromStatus: 'DRAFT', toStatus: 'PENDING_SO_APPROVAL', createdAt: new Date(Date.now() - 3_600_000), metadata: null },
+        ],
+      });
+      const res = (await service.getOne(mis, 's1')) as { submission: { fastTrack: unknown } };
+      expect(res.submission.fastTrack).toBeNull();
     });
 
     it('surfaces the primary outlet reKycFlags (20 booleans + remarks) on the detail payload', async () => {
@@ -6718,6 +7098,36 @@ describe('KycService', () => {
   describe('reviewQueue (GET /v1/kyc/review-queue)', () => {
     it('is Gifsy-only — non-Gifsy caller gets ForbiddenException', async () => {
       await expect(service.reviewQueue(so)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('fastTrack per entry from ONE batched history query (no N+1); null for normally-routed rows', async () => {
+      const rejectedAt = new Date(Date.now() - 50 * 3_600_000);
+      const row = (id: string) => ({
+        id, boardPhotoLat: null, boardPhotoLng: null, user: { name: 'A', phone: '1', clientId: 'bajaj' },
+        partner: null, verificationItems: [],
+      });
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([row('FT-1'), row('N-1')]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValueOnce([
+        {
+          kycSubmissionId: 'FT-1', fromStatus: 'DRAFT', toStatus: 'PENDING_GIFSY', createdAt: new Date(),
+          metadata: { fastTrack: 'GIFSY_REJECT_RESUBMISSION', previousSubmissionId: 'OLD-1', previousRejectedAt: rejectedAt.toISOString() },
+        },
+      ]);
+      const { entries } = await service.reviewQueue(gifsy);
+      expect(entries[0].fastTrack).toEqual({ previousSubmissionId: 'OLD-1', previousRejectedAt: rejectedAt.toISOString() });
+      expect(entries[1].fastTrack).toBeNull();
+      expect(mockPrisma.kycStatusHistory.findMany).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.kycStatusHistory.findMany.mock.calls[0][0].where).toEqual({
+        kycSubmissionId: { in: ['FT-1', 'N-1'] },
+        fromStatus: 'DRAFT',
+        toStatus: 'PENDING_GIFSY',
+      });
+    });
+
+    it('empty queue → no history query', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
+      await service.reviewQueue(gifsy);
+      expect(mockPrisma.kycStatusHistory.findMany).not.toHaveBeenCalled();
     });
 
     it('queries PENDING_GIFSY cross-tenant (Gifsy, #38)', async () => {

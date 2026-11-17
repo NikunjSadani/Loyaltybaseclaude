@@ -2041,7 +2041,8 @@ export class AdminCoreService {
                     approvedAt: true,
                     createdAt: true,
                     statusHistory: {
-                      select: { toStatus: true, createdAt: true },
+                      // fromStatus: a DRAFT→PENDING_GIFSY entry = GIFSY-reject fast-track (no field stage).
+                      select: { fromStatus: true, toStatus: true, createdAt: true },
                     },
                   },
                 },
@@ -2248,7 +2249,13 @@ export class AdminCoreService {
         const submittedTs = sub.submittedAt.getTime();
         const firstEnteredAt = firstEnteredPendingGifsyAt(sub.statusHistory);
         const lastEnteredAt = enteredPendingGifsyAt(sub.statusHistory);
-        if (firstEnteredAt) {
+        // GIFSY-reject fast-track (Bajaj): the KYC went DRAFT→PENDING_GIFSY at consent — it had NO field stage, so
+        // it contributes no field-chain sample (a ~0h sample would fake field compliance). Only the fast-track
+        // writes that edge; every normal hand-off comes from a PENDING_*_APPROVAL/SUBMITTED status.
+        const skippedFieldStage = sub.statusHistory.some(
+          (h) => h.toStatus === 'PENDING_GIFSY' && h.fromStatus === 'DRAFT',
+        );
+        if (firstEnteredAt && !skippedFieldStage) {
           fieldChainHours.push(
             businessHoursBetween(submittedTs, firstEnteredAt.getTime(), holidays),
           );

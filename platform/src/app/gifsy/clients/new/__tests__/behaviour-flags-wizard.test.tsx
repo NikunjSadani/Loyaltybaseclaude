@@ -79,6 +79,7 @@ describe('New-client wizard — behaviour flags', () => {
     expect(features).not.toHaveProperty('outletMasterGeo');
     expect(features).not.toHaveProperty('soDeclarationKyc');
     expect(features).not.toHaveProperty('allowPayoutWithoutPan');
+    expect(features).not.toHaveProperty('gifsyRejectFastTrack');
     expect(features.kycApprovalFlow).toBe(true); // module set unchanged
   });
 
@@ -95,6 +96,25 @@ describe('New-client wizard — behaviour flags', () => {
     const features = postSpy.mock.calls[0][0].features as Record<string, unknown>;
     expect(features.outletMasterGeo).toBe(true);
     expect(features).not.toHaveProperty('soDeclarationKyc');
+  });
+
+  it('W6: switching gifsyRejectFastTrack ON (no confirm) sends only that behaviour key', async () => {
+    const postSpy = vi.fn();
+    stubFetch(postSpy);
+    await walkToFeatures();
+    expect(await screen.findByText('Send GIFSY-rejected KYC resubmissions straight to GIFSY')).toBeInTheDocument();
+    const sw = await screen.findByTestId('wizard-behaviour-flag-gifsyRejectFastTrack');
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+    fireEvent.click(sw);
+    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+    await submitFromFeatures();
+    await waitFor(() => expect(postSpy).toHaveBeenCalledTimes(1));
+    const features = postSpy.mock.calls[0][0].features as Record<string, unknown>;
+    expect(features.gifsyRejectFastTrack).toBe(true);
+    expect(features).not.toHaveProperty('outletMasterGeo');
+    expect(features).not.toHaveProperty('soDeclarationKyc');
+    expect(features).not.toHaveProperty('allowPayoutWithoutPan');
   });
 
   it('W3: switching allowPayoutWithoutPan ON sends only that behaviour key', async () => {

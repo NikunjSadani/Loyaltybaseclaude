@@ -75,12 +75,26 @@ const parse = (buf: Buffer) => {
 };
 
 describe('KYC review dump layout (kycReviewDumpCells)', () => {
-  it('produces the 40-column header layout (Partner Class at index 5)', async () => {
+  it('produces the 41-column header layout (Partner Class at index 5, Routing appended LAST)', async () => {
     const { rows } = parse(await generateKycReviewDumpExcel([entry()]));
+    expect(KYC_DUMP_TOTAL_COLUMN_COUNT).toBe(41);
     expect(rows[0].length).toBe(KYC_DUMP_TOTAL_COLUMN_COUNT);
     expect(rows[0][0]).toBe('Submission ID');
     expect(rows[0][5]).toBe('Partner Class');
     expect(rows[0]).toContain(kycFieldDecisionHeader('Owner Photo'));
+    // Appended after every existing column so the original 40 keep their positions (bulk-verify keys by header).
+    expect(rows[0][40]).toBe('Routing');
+  });
+
+  it('Routing = "Direct to GIFSY (resubmitted after GIFSY rejection)" for a fast-tracked entry, blank otherwise', async () => {
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const { rows } = parse(
+      await generateKycReviewDumpExcel([entry({ fastTrack: ft }), entry({ submissionId: 'KYC-2', fastTrack: null }), entry({ submissionId: 'KYC-3' })]),
+    );
+    const idx = rows[0].indexOf('Routing');
+    expect(rows[1][idx]).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
+    expect(rows[2][idx] ?? '').toBe('');
+    expect(rows[3][idx] ?? '').toBe('');
   });
 
   it('puts the outlet type value into the Partner Class column', async () => {
@@ -212,6 +226,14 @@ describe('Rejected outlets layout (rejectedKycCells)', () => {
     expect(byHeader(rows, data, 'GST Number')).toBe('27ABCDE1234F1ZK');
     expect(byHeader(rows, data, 'IFSC')).toBe('HDFC0001');
     expect(byHeader(rows, data, 'SLA Age (hrs)')).toBe('24');
+  });
+
+  it('Routing column (appended last): fast-track label vs blank', async () => {
+    const ft = { previousSubmissionId: 'KYC-0', previousRejectedAt: new Date().toISOString() };
+    const { rows } = parse(await generateRejectedKycExcel([row({ fastTrack: ft }), row()]));
+    expect(rows[0][rows[0].length - 1]).toBe('Routing');
+    expect(byHeader(rows, rows[1], 'Routing')).toBe('Direct to GIFSY (resubmitted after GIFSY rejection)');
+    expect(byHeader(rows, rows[2], 'Routing') ?? '').toBe('');
   });
 
   it('neutralises formula-injection in user-supplied cells (AF-5)', async () => {
