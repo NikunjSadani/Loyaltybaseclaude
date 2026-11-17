@@ -18,6 +18,7 @@ import {
 } from '../sales-import.contract';
 import { SalesKpiDefService, toDto } from '../kpi/sales-kpi-def.service';
 import {
+  AGG_PAGE_SIZE,
   MAPPING_CHANGED_REASON,
   historyPager,
   importPager,
@@ -35,6 +36,10 @@ import { lockImportRow } from '../ingest/import-lock';
 import { SQL_NOW_UTC, sqlUtc } from '../sql-time';
 import { isMonthKey, monthLabel, resolveMonthState } from '../months/month-state';
 import { computeMonthRows, sumOwnedValues, unitsToNumber, type MonthComputation } from './month-compute';
+import { buildMonthDays } from './month-days';
+import { dayDataReason, replaceMonthDays } from './month-days-write';
+import { dayOfDate } from '../days/day-slices';
+import { historyRetentionMessage, isBeyondHistoryRetention } from '../retention-window';
 import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
@@ -245,7 +250,9 @@ export class SalesApplyService {
             throw new MonthApplyError(FOCUS_CHANGED_MESSAGE);
           }
         }
-        const comp = await computeMonthRows(importPager(tx, importId, month), focus?.evalDefs ?? defs, roster);
+        const comp = await computeMonthRows(importPager(tx, importId, month, { withDays: true }), focus?.evalDefs ?? defs, roster, {
+          collectDays: true,
+        });
         const snap = await tx.salesImport.findFirst({ where: { id: importId, clientId }, select: { mappingSnapshot: true } });
         return this.writeMonth(tx, user, {
           month,
@@ -258,6 +265,8 @@ export class SalesApplyService {
           state,
           roster,
           comp,
+          evalDefs: focus?.evalDefs ?? defs,
+          lastDay: dayOfDate(summary.lastDate),
           focusFingerprint: focus?.resolution.fingerprint ?? '',
           mapping: {
             fingerprint: imp.mappingFingerprint,
@@ -289,6 +298,10 @@ export class SalesApplyService {
       state: ReturnType<typeof resolveMonthState>;
       roster: Map<string, RosterOutlet>;
       comp: MonthComputation;
+      /** The definitions the values were evaluated with (FOCUS-FROM-TARGETS: per-outlet filters attached) — day data uses the same. */
+      evalDefs: KpiDefLite[];
+      /** Last invoice day of the month in the applied file (SalesDaySet.lastDay); null = unknown. */
+      lastDay: number | null;
       /** FOCUS-FROM-TARGETS: the focus fingerprint written with (recorded on the audit row only when non-empty). */
       focusFingerprint?: string;
       /** IMPORT only: the mapping the lines were parsed with (stored on the history set header). */
@@ -349,8 +362,9 @@ export class SalesApplyService {
          AND "kpiValues" ?| ${owned}::text[]`);
 
     const now = new Date();
-    // 4. IMPORT only: the month's stored history becomes exactly this import's lines for the month (every customer
-    //    code; outletId = the roster outlet NOW, null when unmatched). One set per month, whatever was uploaded before.
+    // 4. IMPORT only: the month's stored history becomes exactly this import's lines for the month — PROGRAMME outlets
+    //    only (owner decision 2026-11-18: customer codes on the roster NOW; unmatched customers are not kept — they stay
+    //    in the import's own unmatched report while it exists), with each line's day split. One set per month.
     if (w.source === 'IMPORT') {
       const index = rosterIndexOf(w.roster);
       const histCodes = [...index.keys()];
@@ -362,12 +376,12 @@ export class SalesApplyService {
       const t1 = Date.now();
       const inserted = await tx.$executeRaw(Prisma.sql`
         INSERT INTO "sales_month_histories"
-          ("clientId","month","customerCode","outletId","dims","dimKey","keyHash","amountPaise","qtyPico","lines","sourceImportId","appliedAt","appliedById")
+          ("clientId","month","customerCode","outletId","dims","dimKey","keyHash","amountPaise","qtyPico","lines","days","sourceImportId","appliedAt","appliedById")
         SELECT ${clientId}, a."month", a."outletCode", r.id, a."dims", a."dimKey", md5(a."outletCode" || chr(31) || a."dimKey"),
-               a."amountPaise", a."qtyPico", a."lines", ${w.sourceImportId}, ${sqlUtc(now)}, ${user.sub}
+               a."amountPaise", a."qtyPico", a."lines", a."days", ${w.sourceImportId}, ${sqlUtc(now)}, ${user.sub}
           FROM "sales_import_aggregates" a
-          LEFT JOIN unnest(${histCodes}::text[], ${histIds}::text[]) AS r(code, id) ON r.code = a."outletCode"
-         WHERE a."importId" = ${w.sourceImportId} AND a."month" = ${month}`);
+          JOIN unnest(${histCodes}::text[], ${histIds}::text[]) AS r(code, id) ON r.code = a."outletCode"
+         WHERE a."importId" = ${w.sourceImportId} AND a."month" = ${month} AND r.id IS NOT NULL`);
       const t2 = Date.now();
       // The month's combos summary (plan §10c, audit M1): replaced from the lines just written, in this transaction, with
       // ONE INSERT … SELECT … GROUP BY (dimKey is the stable key of dims, 1:1). Stamped with the same sourceImportId /
@@ -398,6 +412,20 @@ export class SalesApplyService {
         JSON.stringify({ msg: 'sales-import month history written', clientId, month, deletedRows: Number(deleted), insertedRows: Number(inserted), comboRows: Number(comboRows), deleteMs: t1 - t0, insertMs: t2 - t1, combosMs: t3 - t2 }),
       );
     }
+
+    // 4b. Day-level data (sales-day-level), BOTH sources: the month's OutletSalesDay rows are REPLACED in this same
+    //     transaction, from the same lines and the same definitions as the monthly values above (buildMonthDays checks
+    //     that the last day equals the monthly value). When they cannot be built, the old rows and the set go, and the
+    //     result / audit say why — never stale day data next to new monthly values.
+    const dayData = await replaceMonthDays(tx, this.log, {
+      clientId,
+      month,
+      source: w.source,
+      sourceImportId: w.sourceImportId,
+      build: buildMonthDays(w.comp.days, w.evalDefs, w.roster, rowsToWrite),
+      lastDay: w.lastDay,
+      now,
+    });
 
     // 5. Apply record + month pointer + audit.
     const totals: Record<string, { before: number; after: number }> = {};
@@ -438,13 +466,14 @@ export class SalesApplyService {
           outletsWritten: rowsToWrite.length,
           outletsZeroFilled,
           totals,
+          dayData,
           ...(w.focusFingerprint ? { focusFingerprint: w.focusFingerprint } : {}),
-        } as Prisma.InputJsonValue,
+        } as unknown as Prisma.InputJsonValue,
         metadata: { clientId, applyId: applyRow.id, batchId: batch.id, source: w.source },
       },
     });
 
-    return { month, ok: true, applyId: applyRow.id, outletsWritten: rowsToWrite.length, outletsZeroFilled };
+    return { month, ok: true, applyId: applyRow.id, outletsWritten: rowsToWrite.length, outletsZeroFilled, dayData };
   }
 
   // ─── Recalculate a month from its stored history (owner decision 2026-11-10) ─────────────────────────────────
@@ -456,7 +485,7 @@ export class SalesApplyService {
   async recalcPreview(clientId: string, month: string): Promise<SalesMonthRecalcPreview> {
     if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
     const meta = await monthHistoryMeta(this.prisma, clientId, month);
-    if (!meta) throw new NotFoundException(`${monthLabel(month)} has no stored sales history (no file was applied to it).`);
+    if (!meta) throw new NotFoundException(noHistoryMessage(month));
     const { defs, hash } = await this.kpiDefs.enabled(clientId);
     const roster = await loadRosterMeta(this.prisma, clientId);
     const override = await this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
@@ -468,7 +497,11 @@ export class SalesApplyService {
       clientId, month, defs, roster, labelOf: labels,
       catalogue: lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId)),
     });
-    const comp = await computeMonthRows(historyPager(this.prisma, clientId, month), focus.evalDefs, roster);
+    const comp = await computeMonthRows(historyPager(this.prisma, clientId, month, AGG_PAGE_SIZE, { withDays: true }), focus.evalDefs, roster, {
+      collectDays: true,
+    });
+    // Would the recalculation rebuild the month's day data? Same check the write runs (honest preview, never silent).
+    const dayBuild = buildMonthDays(comp.days, focus.evalDefs, roster, comp.rows.filter((r) => Object.keys(r.values).length > 0));
     const existing = await this.prisma.outletSalesRecord.findMany({
       where: { clientId, month },
       select: { outletCode: true, kpiValues: true, batch: { select: { status: true, createdAt: true } } },
@@ -504,6 +537,7 @@ export class SalesApplyService {
       zeroFillOutlets: comp.zeroFillOutlets,
       outletsAffected: outletsAffected(existing, comp.rows, owned),
       warnings,
+      dayData: dayBuild.ok ? { available: true } : { available: false, reason: dayDataReason(dayBuild, 'HISTORY') },
       kpis: defs.map((d, i) => {
         const newTotal = comp.stats[i].total;
         const currentTotal = currentTotals[d.kpiCode] ?? 0;
@@ -536,7 +570,7 @@ export class SalesApplyService {
       async (tx) => {
         await lockSalesMonth(tx, clientId, month);
         const meta = await monthHistoryMeta(tx, clientId, month);
-        if (!meta) throw new NotFoundException(`${monthLabel(month)} has no stored sales history.`);
+        if (!meta) throw new NotFoundException(noHistoryMessage(month));
         if (meta.appliedAt.toISOString() !== body.expectedHistoryAppliedAt) {
           throw new ConflictException('A newer file was applied to this month since the preview. Refresh the preview and try again.');
         }
@@ -557,10 +591,18 @@ export class SalesApplyService {
             throw new ConflictException(FOCUS_CHANGED_MESSAGE);
           }
         }
-        const comp = await computeMonthRows(historyPager(tx, clientId, month), focus?.evalDefs ?? defs, roster);
+        const comp = await computeMonthRows(historyPager(tx, clientId, month, AGG_PAGE_SIZE, { withDays: true }), focus?.evalDefs ?? defs, roster, {
+          collectDays: true,
+        });
+        // SalesDaySet.lastDay = the applied file's last invoice day in the month (its frozen month summary survives the
+        // import's retention purge); null → the latest day in the stored lines.
+        const src = await tx.salesImport.findFirst({ where: { id: meta.sourceImportId, clientId }, select: { monthSummaries: true } });
+        const srcSummary = (Array.isArray(src?.monthSummaries) ? (src!.monthSummaries as unknown as MonthSummary[]) : []).find((s) => s?.month === month);
         return this.writeMonth(tx, user, {
           month,
           source: 'HISTORY',
+          evalDefs: focus?.evalDefs ?? defs,
+          lastDay: srcSummary?.lastDate ? dayOfDate(srcSummary.lastDate) : null,
           sourceImportId: meta.sourceImportId,
           processingVersion: null,
           defRows,
@@ -606,6 +648,13 @@ export class SalesApplyService {
     const p = await this.prisma.salesImportProfile.findUnique({ where: { clientId }, select: { columnMapping: true } });
     return mappingFingerprint((p?.columnMapping ?? null) as SalesColumnMapping | null);
   }
+}
+
+/** 404 copy for a month without stored history: outside the retention window, or never applied. */
+export function noHistoryMessage(month: string): string {
+  return isBeyondHistoryRetention(month)
+    ? historyRetentionMessage(month)
+    : `${monthLabel(month)} has no stored sales history (no file was applied to it).`;
 }
 
 /**

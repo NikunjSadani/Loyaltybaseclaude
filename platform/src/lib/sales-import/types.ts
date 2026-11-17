@@ -40,10 +40,15 @@ export const SALES_IMPORT_STALE_HEARTBEAT_MINUTES = 10;
 export const SALES_IMPORT_MAX_ATTEMPTS = 3;
 /** Max UPLOADING imports per tenant at once (POST uploads → 409 beyond it). */
 export const SALES_IMPORT_MAX_INFLIGHT_UPLOADS = 3;
-/** Raw parts, unmatched.csv, aggregates and sample rows are purged this long after an import finishes. */
-export const SALES_IMPORT_RETENTION_DAYS = 30;
-/** SalesMonthHistory (the final applied lines per month) is kept this long, then deleted by the retention sweep. */
-export const SALES_MONTH_HISTORY_RETENTION_YEARS = 10;
+/** Raw parts, unmatched.csv, aggregates and sample rows are purged this long after an import finishes (owner 2026-11-18: 7, was 30). */
+export const SALES_IMPORT_RETENTION_DAYS = 7;
+/**
+ * SalesMonthHistory (the final applied programme-outlet lines per month, + its product-list summary and set headers) AND
+ * the day-level data (OutletSalesDay + SalesDaySet) are kept for this many months: the current IST month + the 3 before it
+ * (owner 2026-11-18; was 10 years). Older months are deleted by the retention sweep. Default of the API setting
+ * SALES_HISTORY_RETENTION_MONTHS.
+ */
+export const SALES_MONTH_HISTORY_RETENTION_MONTHS = 4;
 /** An UPLOADING import older than this is abandoned: CANCELLED + purged. */
 export const SALES_IMPORT_ABANDONED_UPLOAD_HOURS = 24;
 /** Header detection reads at most this many columns per row (wider rows are truncated). */
@@ -284,8 +289,8 @@ export const SALES_HISTORY_COMBOS_MAX_MONTHS = 12;
  * GET admin/sales-import/history-combos (targets:read) — the KPI product picker's "Stored month(s)" source.
  * Query: `month=YYYY-MM` (one stored month) OR `lastMonths=N` (the N most recent months WITH stored history,
  * 1..SALES_HISTORY_COMBOS_MAX_MONTHS; the default is 1). Never both.
- * Combos / values are aggregated in SQL from SalesMonthHistory (the final applied lines of each month, every customer
- * code), in the same shape as SalesImportCombos and capped the same way (top SALES_IMPORT_MAX_DIMENSION_COMBOS combos
+ * Combos / values are aggregated in SQL from SalesMonthHistory (the final applied lines of each month, programme
+ * outlets only — since 2026-11-18), in the same shape as SalesImportCombos and capped the same way (top SALES_IMPORT_MAX_DIMENSION_COMBOS combos
  * and SALES_IMPORT_MAX_DIMENSION_VALUES values per key, by |₹|). A combo's `dims` carry the keys its month's lines were
  * read with (SalesMonthHistorySet.dimensionKeys). 404 when `month` has no stored history; a tenant with no history at
  * all gets `months: []` and empty lists.
@@ -382,6 +387,18 @@ export interface ApplyRequest {
   /** month -> MonthReconciliation.focusFingerprint reviewed; required for every month whose fingerprint is non-empty (409 on mismatch). */
   expectedFocusFingerprints?: Record<string, string>;
 }
+/**
+ * Day-level data written with a month (OutletSalesDay / SalesDaySet; sales-day-level 2026-11-18). `written: false` =
+ * the month's previous day data was REMOVED and the month has no day data now — `reason` says why (e.g. the file was
+ * processed before day-level storage → reprocess it; the stored history has no day split). Never silent.
+ */
+export interface SalesDayDataResult {
+  written: boolean;
+  outlets: number;      // programme outlets with at least one day row
+  rows: number;         // OutletSalesDay rows written
+  lastDay: number | null; // SalesDaySet.lastDay (last invoice day in the applied file for the month)
+  reason?: string;
+}
 export interface ApplyMonthResult {
   month: string;
   ok: boolean;
@@ -389,6 +406,8 @@ export interface ApplyMonthResult {
   outletsWritten?: number;
   outletsZeroFilled?: number;
   error?: string;
+  /** Present on ok:true (tenants with features.salesImport only). */
+  dayData?: SalesDayDataResult;
 }
 export interface ApplyResult {
   results: ApplyMonthResult[];
@@ -412,8 +431,9 @@ export interface SalesMonthRow {
    */
   downstream: { creditBatches: number; exports: number };
   /**
-   * Stored month history (SalesMonthHistory): the FINAL applied file lines of this month (every customer code), written
-   * by each apply and kept SALES_MONTH_HISTORY_RETENTION_YEARS. `hasHistory` → POST …/recalculate is possible.
+   * Stored month history (SalesMonthHistory): the FINAL applied file lines of this month (programme outlets only),
+   * written by each apply and kept SALES_MONTH_HISTORY_RETENTION_MONTHS (current month + 3 before it). `hasHistory` →
+   * POST …/recalculate is possible. false for a month older than that window, even while the sweep is still deleting it.
    */
   hasHistory: boolean;
   historySourceImportId: string | null; // the import whose lines the history holds (the last applied one)
@@ -456,6 +476,11 @@ export interface SalesMonthRecalcPreview {
   warnings: SalesMonthWarning[]; // NEGATIVE_VALUES / REPLACES_MANUAL_VALUES
   kpis: MonthPreviewKpi[];
   reconciliation: MonthReconciliation;
+  /**
+   * Can the recalculation rebuild the month's day-level data? false when the stored lines have no day split (applied
+   * before day-level storage): recalculating then REMOVES the month's day data — `reason` says so.
+   */
+  dayData?: { available: boolean; reason?: string };
 }
 
 /** POST admin/sales-months/:month/recalculate body (targets:upload; month OPEN; 409 when either token is stale). */

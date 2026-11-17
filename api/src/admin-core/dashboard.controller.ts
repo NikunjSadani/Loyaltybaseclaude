@@ -6,6 +6,8 @@ import { OperationsDashboardService } from './dashboards/operations-dashboard.se
 import { FinanceDashboardService } from './dashboards/finance-dashboard.service';
 import { BillingProgressDashboardService } from './dashboards/billing-progress-dashboard.service';
 import { BILLING_PROGRESS_OUTLETS_KIND_ID } from '../exports/kinds/batch2/billing-progress.kind';
+import { BillingComparisonDashboardService } from './dashboards/billing-comparison-dashboard.service';
+import { BILLING_COMPARISON_SLOWER_KIND_ID } from '../exports/kinds/batch2/billing-comparison.kind';
 import { ExportsService } from '../exports/exports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -27,6 +29,7 @@ export class AdminDashboardController {
     private readonly finance: FinanceDashboardService,
     private readonly billingProgress: BillingProgressDashboardService,
     private readonly exports: ExportsService,
+    private readonly billingComparisonSvc: BillingComparisonDashboardService,
   ) {}
 
   /** Overview tiles + Payout Summary. Optional `program` (exact Outlet.programName; '' / absent = all). */
@@ -89,6 +92,31 @@ export class AdminDashboardController {
     @Res({ passthrough: true }) res: Response,
   ) {
     return this.exports.respond(res, user, BILLING_PROGRESS_OUTLETS_KIND_ID, q);
+  }
+
+  /** MTD vs last month / 3-month average to the same day (same filters as billing-progress). */
+  @Get('billing-progress/comparison')
+  @RequirePermission('reports:read')
+  billingComparison(@CurrentUser() user: JwtPayload, @Query() q: Record<string, unknown>) {
+    return this.billingComparisonSvc.summary(user, q);
+  }
+
+  /** Outlets billing slower than usual (< 80% of their own last-month MTD to the same day): filters · page · pageSize. */
+  @Get('billing-progress/comparison/slower-outlets')
+  @RequirePermission('reports:read')
+  billingComparisonSlower(@CurrentUser() user: JwtPayload, @Query() q: Record<string, unknown>) {
+    return this.billingComparisonSvc.slowerOutlets(user, q);
+  }
+
+  /** Excel of the full slower-than-usual list (export kind 'billing-comparison-slower'; streams instantly). */
+  @Get('billing-progress/comparison/slower-outlets/export')
+  @RequirePermission('reports:read')
+  billingComparisonSlowerExport(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: Record<string, unknown>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.exports.respond(res, user, BILLING_COMPARISON_SLOWER_KIND_ID, q);
   }
 
   /** Operations — Gifsy operator view (payout health, ticket SLA, visibility, settlement). */

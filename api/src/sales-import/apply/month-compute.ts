@@ -6,6 +6,7 @@ import type { Prisma } from '@prisma/client';
 import { OutletKpiAccumulator, assertNeverMeasure, outletInScope, type KpiDefLite } from '../kpi/sales-kpi.helper';
 import { QTY_SCALE, divRoundHalfAway } from '../ingest/normalize';
 import { rosterIndexOf, type AggregatePager, type RosterOutlet } from '../kpi/sales-import-data';
+import { slicesMatchTotals, type DaySlice } from '../days/day-slices';
 
 export interface MonthOutletRow {
   outletCode: string;
@@ -48,6 +49,21 @@ export interface MonthComputation {
   split: MonthRosterSplit;
   /** ROSTER outlet codes with at least one sales line this month (in an owned KPI's scope or not) — reconciliation gaps. */
   matchedOutletCodes: ReadonlySet<string>;
+  /** sales-day-level: the matched lines with their day split — only with `collectDays` (apply / recalculate). */
+  days?: MonthDayInput;
+}
+
+/** One matched line (aggregate / history row) of an outlet with its split by IST invoice day. */
+export interface DayLine {
+  dimKey: string;
+  dims: Record<string, string>;
+  days: DaySlice[];
+}
+export interface MonthDayInput {
+  /** ROSTER outlet code → its matched lines (with their day split). */
+  byOutlet: Map<string, DayLine[]>;
+  /** Matched rows with no usable day split (absent, malformed, or not summing exactly to the row) — day data impossible. */
+  rowsWithoutDays: number;
 }
 
 /**
@@ -58,6 +74,8 @@ export async function computeMonthRows(
   pager: AggregatePager,
   defs: readonly KpiDefLite[],
   roster: Map<string, RosterOutlet>,
+  /** `collectDays`: keep every matched line's day split for buildMonthDays (the pager must read `withDays`). */
+  opts: { collectDays?: boolean } = {},
 ): Promise<MonthComputation> {
   // M6: aggregates carry the FILE's (normalized) customer code; they are mapped onto the roster as it is NOW, so an
   // outlet added after processing is written and one removed since is not.
@@ -72,6 +90,7 @@ export async function computeMonthRows(
   // Per outlet / per customer quantity, so the displayed totals round each one ONCE like the stored values do.
   const matchedQty = new Map<string, bigint>();
   const unmatchedQty = new Map<string, bigint>();
+  const days: MonthDayInput | undefined = opts.collectDays ? { byOutlet: new Map(), rowsWithoutDays: 0 } : undefined;
   await pager((page) => {
     for (const a of page) {
       const code = index.get(a.outletCode);
@@ -87,6 +106,15 @@ export async function computeMonthRows(
       split.matchedPico += a.qtyPico;
       matchedQty.set(code, (matchedQty.get(code) ?? 0n) + a.qtyPico);
       acc.add(code, a, a.dimKey);
+      if (days) {
+        if (a.days && slicesMatchTotals(a.days, a)) {
+          let list = days.byOutlet.get(code);
+          if (!list) days.byOutlet.set(code, (list = []));
+          list.push({ dimKey: a.dimKey, dims: a.dims, days: a.days });
+        } else {
+          days.rowsWithoutDays++;
+        }
+      }
     }
   });
   split.matchedOutlets = matched.size;
@@ -119,7 +147,7 @@ export async function computeMonthRows(
   // Real-DB finding 2: the total is the sum of the per-outlet values that are actually STORED (each rounded once), so a
   // re-apply of identical data shows Δ 0 and the audit "after" total equals what OutletSalesRecord holds.
   defs.forEach((d, i) => (stats[i].total = unitsToNumber(storedSums[i], d.measure)));
-  return { rows, stats, zeroFillOutlets, split, matchedOutletCodes: matched };
+  return { rows, stats, zeroFillOutlets, split, matchedOutletCodes: matched, ...(days ? { days } : {}) };
 }
 
 /**

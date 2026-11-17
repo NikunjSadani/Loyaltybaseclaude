@@ -10,6 +10,8 @@ import {
   SALES_IMPORT_STALE_HEARTBEAT_MINUTES,
 } from '../sales-import.contract';
 import { partKey } from './parts-file';
+import { currentMonthKey } from '../../targets/targets.helpers';
+import { shiftMonthKey } from '../months/month-state';
 import { sheetjsWorkbook } from './test-fixtures.testspec';
 import {
   GCS_DELETE_TIMEOUT_MS, HISTORY_PURGE_CHUNK_ROWS, HISTORY_PURGE_STATEMENT_TIMEOUT_MS, HISTORY_PURGE_TX_TIMEOUT_MS, PURGE_STATEMENT_TIMEOUT_MS, PURGE_STEP_MS,
@@ -243,9 +245,9 @@ describe('SalesImportUploadService — upload', () => {
     const s = await h.svc.complete(USER, id);
     expect(s).toMatchObject({ id, status: 'QUEUED', partsReceived: 1, uploadedBy: 'Admin', progressPct: null, queuedAt: expect.any(String), canCancel: true });
     expect(h.lockModes).toEqual([]);
-    // no raw write of its own (the only raw statements are the retention sweep's bounded 10-year history deletes)
+    // no raw write of its own (the only raw statements are the retention sweep's bounded month-window deletes: history + day data)
     const raw = h.prisma.$executeRaw.mock.calls.map((c) => (c[0] as unknown as { strings: string[] }).strings.join('?'));
-    expect(raw.filter((s) => !/"sales_month_histor(ies|y_combos|y_sets)"/.test(s))).toEqual([]);
+    expect(raw.filter((s) => !/"(sales_month_histor(ies|y_combos|y_sets)|outlet_sales_days|sales_day_sets)"/.test(s))).toEqual([]);
     // every GCS call of complete happened before its (only) transaction started
     const lastTx = h.order.lastIndexOf('tx:start');
     expect(h.order.slice(lastTx).filter((o) => o.startsWith('gcs:'))).toEqual([]);
@@ -466,6 +468,23 @@ describe('SalesImportUploadService — read', () => {
     expect(h.rows.get(fresh)!.purgedAt).toBeNull();
   });
 
+  it('owner 2026-11-18: per-import data (aggregates, raw parts, unmatched.csv) is kept 7 days after the import finished, not 30', async () => {
+    expect(SALES_IMPORT_RETENTION_DAYS).toBe(7);
+    const h = harness();
+    const at = (days: number) => new Date(Date.now() - days * 86_400_000);
+    const { importId: eight } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+    const { importId: six } = await h.svc.createUpload(USER, { filename: 'b.csv', sizeBytes: 1 });
+    Object.assign(h.rows.get(eight)!, { status: 'READY', finishedAt: at(8) });
+    Object.assign(h.rows.get(six)!, { status: 'READY', finishedAt: at(6) });
+    h.objects.set(partKey(`sales-imports/t1/${eight}/`, 0), Buffer.from('abc'));
+    h.objects.set(partKey(`sales-imports/t1/${six}/`, 0), Buffer.from('abc'));
+    await h.retention.sweep({ clientId: 't1', history: false });
+    expect(h.rows.get(eight)!.purgedAt).toBeTruthy();
+    expect([...h.objects.keys()].some((k) => k.includes(eight))).toBe(false);
+    expect(h.rows.get(six)!.purgedAt).toBeNull();
+    expect([...h.objects.keys()].some((k) => k.includes(six))).toBe(true);
+  });
+
   it('re-check M2: with a deadline, the sweep starts no purge whose worst case (lock wait + tx + GCS) could pass it', async () => {
     const h = harness();
     const ids: string[] = [];
@@ -614,25 +633,33 @@ describe('SalesImportUploadService — reprocess as a new import (re-audit M3)',
   });
 });
 
-describe('SalesImportRetentionService — month history (10 years)', () => {
-  it('deletes history months older than 10 years — bounded: one tx, statement_timeout, chunked line / summary deletes, then headers', async () => {
+describe('SalesImportRetentionService — month window (current IST month + 3 previous; owner 2026-11-18)', () => {
+  it('deletes history AND day data of months before the window — bounded: one tx, statement_timeout, chunked deletes, headers / day sets in step', async () => {
     const h = harness();
     const sql = () => h.prisma.$executeRaw.mock.calls.map((c) => c[0] as unknown as { strings: string[]; values: unknown[] });
+    const cur = currentMonthKey();
+    const keepFrom = shiftMonthKey(cur, -3); // computed from now, never a fixed date
     h.prisma.$executeRaw.mockResolvedValueOnce(7); // the line rows deleted
-    await expect(h.retention.purgeOldHistory({ clientId: 't1', currentMonth: '2036-11' })).resolves.toBe(7);
+    await expect(h.retention.purgeOldHistory({ clientId: 't1' })).resolves.toBe(7);
     expect(h.prisma.$executeRawUnsafe).toHaveBeenCalledWith(`SET LOCAL statement_timeout = ${HISTORY_PURGE_STATEMENT_TIMEOUT_MS}`);
-    const [lines, combos, sets] = sql();
+    const [lines, combos, sets, daySets, dayRows] = sql();
     expect(lines.strings.join('?')).toMatch(/DELETE FROM "sales_month_histories" WHERE "id" IN \(\s*SELECT h\."id" FROM "sales_month_histories" h\s+WHERE h\."month" < \? AND h\."clientId" = \? LIMIT \?\)/);
-    expect(lines.values).toEqual(['2026-11', 't1', HISTORY_PURGE_CHUNK_ROWS]);
+    expect(lines.values).toEqual([keepFrom, 't1', HISTORY_PURGE_CHUNK_ROWS]);
     expect(combos.strings.join('?')).toMatch(/DELETE FROM "sales_month_history_combos" WHERE "id" IN/);
-    expect(combos.values).toEqual(['2026-11', 't1', HISTORY_PURGE_CHUNK_ROWS]);
+    expect(combos.values).toEqual([keepFrom, 't1', HISTORY_PURGE_CHUNK_ROWS]);
     // a month's header goes only once its lines AND summary are gone (a big backlog drains over several sweeps)
     expect(sets.strings.join('?')).toMatch(/DELETE FROM "sales_month_history_sets" s[\s\S]*NOT EXISTS[\s\S]*sales_month_histories[\s\S]*NOT EXISTS[\s\S]*sales_month_history_combos/);
+    // day data, same window: the "complete day data" set FIRST (never claims a half-deleted month), then bounded rows
+    expect(daySets.strings.join('?')).toMatch(/DELETE FROM "sales_day_sets" d WHERE d\."month" < \? AND d\."clientId" = \?/);
+    expect(daySets.values).toEqual([keepFrom, 't1']);
+    expect(dayRows.strings.join('?')).toMatch(/DELETE FROM "outlet_sales_days" WHERE "id" IN \(\s*SELECT o\."id" FROM "outlet_sales_days" o\s+WHERE o\."month" < \? AND o\."clientId" = \? LIMIT \?\)/);
+    expect(dayRows.values).toEqual([keepFrom, 't1', HISTORY_PURGE_CHUNK_ROWS]);
     expect(h.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: HISTORY_PURGE_TX_TIMEOUT_MS, maxWait: 5_000 });
-    // all tenants when no clientId
+    // an explicit current month (e.g. a month from now) moves the window with it
     h.prisma.$executeRaw.mockClear();
-    await h.retention.purgeOldHistory({ currentMonth: '2036-11' });
-    expect(sql()[0].values).toEqual(['2026-11', HISTORY_PURGE_CHUNK_ROWS]);
+    await h.retention.purgeOldHistory({ currentMonth: shiftMonthKey(cur, 1) });
+    expect(sql()[0].values).toEqual([shiftMonthKey(cur, -2), HISTORY_PURGE_CHUNK_ROWS]); // all tenants when no clientId
+    expect(sql()[4].values).toEqual([shiftMonthKey(cur, -2), HISTORY_PURGE_CHUNK_ROWS]);
     // never throws
     h.prisma.$executeRaw.mockRejectedValueOnce(new Error('canceling statement due to statement timeout'));
     await expect(h.retention.purgeOldHistory()).resolves.toBe(0);

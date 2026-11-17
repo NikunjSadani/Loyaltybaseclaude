@@ -61,6 +61,11 @@ const CASES: Record<string, Array<Record<string, unknown>>> = {
     { bucket: 'P0_20', month: '2026-10', program: 'Gold', outletType: 'RETAIL', managerId: 'su-1' },
     { bucket: 'NO_TARGET', month: '2026-11', program: '' },
   ],
+  'billing-comparison-slower': [
+    {},
+    { month: '2026-10', program: 'Gold', outletType: 'RETAIL', managerId: 'su-1' },
+    { month: '2026-11', program: '' },
+  ],
 };
 
 const REQ = { headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'bajajloyalty.gifsy.in' } };

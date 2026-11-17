@@ -12,7 +12,7 @@ import type {
   SalesMonthReopenResult,
   SalesMonthRow,
 } from '../sales-import.contract';
-import { SALES_MONTH_HISTORY_RETENTION_YEARS } from '../sales-import.contract';
+import { historyRetentionMessage, isBeyondHistoryRetention } from '../retention-window';
 import { classifyMonthSummaries, insertMonthCombosSql } from '../kpi/month-combos';
 import { isMonthKey, monthLabel, resolveMonthState, shiftMonthKey } from './month-state';
 import {
@@ -82,16 +82,18 @@ export const REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS = 280_000;
 /**
  * The stored month history per month: which import it holds and when it was applied. Reads the small per-month HEADER
  * table (sales_month_history_sets, unique (clientId, month)) — never the line rows (final check H1: Prisma's `distinct`
- * is applied in Node, so a `distinct` over sales_month_histories fetched every line of every month).
+ * is applied in Node, so a `distinct` over sales_month_histories fetched every line of every month). Months older than
+ * the retention window (current + 3 previous) have NO history here, even while the sweep is still deleting them.
  */
 export async function historyMetaByMonth(
   db: Pick<Prisma.TransactionClient, 'salesMonthHistorySet'>,
   clientId: string,
   months: string[],
 ): Promise<Map<string, HistoryMeta>> {
-  if (months.length === 0) return new Map();
+  const kept = months.filter((m) => !isBeyondHistoryRetention(m));
+  if (kept.length === 0) return new Map();
   const rows = await db.salesMonthHistorySet.findMany({
-    where: { clientId, month: { in: months } },
+    where: { clientId, month: { in: kept } },
     select: { month: true, sourceImportId: true, appliedAt: true, lineRows: true, combosSourceImportId: true, combosAppliedAt: true },
   });
   return new Map(rows.map((r) => [r.month, r]));
@@ -237,10 +239,9 @@ export class SalesMonthsService {
    */
   async rebuildProductList(user: JwtPayload, month: string): Promise<SalesMonthRebuildProductListResult> {
     if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
-    // A month past the 10-year retention is being deleted by the sweep: nothing to rebuild (the same cutoff as the reader).
-    if (month < shiftMonthKey(currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS)) {
-      throw new NotFoundException(`${monthLabel(month)} has no stored sales lines.`);
-    }
+    // A month outside the retention window (current + 3 previous) is being deleted by the sweep: nothing to rebuild (the
+    // same cutoff as every reader), and the 404 says why.
+    if (isBeyondHistoryRetention(month)) throw new NotFoundException(historyRetentionMessage(month));
     const clientId = user.clientId;
     try {
       await this.prisma.$transaction(

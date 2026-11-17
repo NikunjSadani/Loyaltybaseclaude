@@ -5,10 +5,9 @@ import { StorageService } from '../../storage/storage.service';
 import {
   SALES_IMPORT_ABANDONED_UPLOAD_HOURS,
   SALES_IMPORT_RETENTION_DAYS,
-  SALES_MONTH_HISTORY_RETENTION_YEARS,
 } from '../sales-import.contract';
 import { currentMonthKey } from '../../targets/targets.helpers';
-import { shiftMonthKey } from '../months/month-state';
+import { historyCutoffMonth } from '../retention-window';
 import { isLockNotAvailable, lockImportRow, type LockedImport } from './import-lock';
 
 /** Statuses after which the raw file is no longer needed (retention clock = finishedAt). */
@@ -53,7 +52,10 @@ export const GCS_DELETE_TIMEOUT_MS = 15_000;
 export const PURGE_STEP_MS = PURGE_TX_TIMEOUT_MS + PURGE_MAX_WAIT_MS + GCS_DELETE_TIMEOUT_MS;
 /** A GCS-only step (retrying a failed file delete). */
 export const SWEEP_SMALL_STEP_MS = GCS_DELETE_TIMEOUT_MS + 5_000;
-/** The 10-year history delete: at most this many line / summary rows per sweep, each statement bounded. */
+/**
+ * The month-window delete (history lines / summary / headers + day data, months before the current + 3 previous): at
+ * most this many rows PER TABLE per sweep, each statement bounded.
+ */
 export const HISTORY_PURGE_CHUNK_ROWS = 50_000;
 export const HISTORY_PURGE_STATEMENT_TIMEOUT_MS = 12_000;
 export const HISTORY_PURGE_TX_TIMEOUT_MS = 40_000;
@@ -152,14 +154,18 @@ export class SalesImportRetentionService {
   }
 
   /**
-   * SalesMonthHistory is kept SALES_MONTH_HISTORY_RETENTION_YEARS: months older than that (vs the current IST month) are
-   * deleted — BOUNDED (re-check L1): one transaction, every statement under HISTORY_PURGE_STATEMENT_TIMEOUT_MS, at most
-   * HISTORY_PURGE_CHUNK_ROWS line rows and summary rows per call; a month's set header goes once its lines and summary are
-   * gone. A large backlog drains over several sweeps. Never throws. Returns the line rows deleted.
+   * The month window (owner decision 2026-11-18; retention-window.ts): SalesMonthHistory (+ its combos summary and set
+   * headers) AND the day-level data (outlet_sales_days + sales_day_sets) are kept for the current IST month and the 3
+   * before it; older months are deleted — BOUNDED (re-check L1): one transaction, every statement under
+   * HISTORY_PURGE_STATEMENT_TIMEOUT_MS, at most HISTORY_PURGE_CHUNK_ROWS rows per table per call. A month's
+   * sales_day_sets row goes FIRST (so it never claims complete day data for a half-deleted month), then its day rows;
+   * a history set header goes once its lines and summary are gone. Readers treat every month before the cutoff as
+   * absent anyway. A large backlog (the first sweep after the 10-year → 4-month change) drains over several sweeps.
+   * Never throws. Returns the history line rows deleted.
    */
   async purgeOldHistory(opts: { clientId?: string; currentMonth?: string } = {}): Promise<number> {
     try {
-      const cutoff = shiftMonthKey(opts.currentMonth ?? currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
+      const cutoff = historyCutoffMonth(opts.currentMonth ?? currentMonthKey());
       const tenant = (alias: string) =>
         opts.clientId ? Prisma.sql`AND ${Prisma.raw(alias)}."clientId" = ${opts.clientId}` : Prisma.empty;
       return await this.prisma.$transaction(
@@ -178,6 +184,13 @@ export class SalesImportRetentionService {
              WHERE s."month" < ${cutoff} ${tenant('s')}
                AND NOT EXISTS (SELECT 1 FROM "sales_month_histories" h WHERE h."clientId" = s."clientId" AND h."month" = s."month")
                AND NOT EXISTS (SELECT 1 FROM "sales_month_history_combos" c WHERE c."clientId" = s."clientId" AND c."month" = s."month")`);
+          // Day-level data, in step with the same window: the set first, then a bounded chunk of its rows.
+          await tx.$executeRaw(Prisma.sql`
+            DELETE FROM "sales_day_sets" d WHERE d."month" < ${cutoff} ${tenant('d')}`);
+          await tx.$executeRaw(Prisma.sql`
+            DELETE FROM "outlet_sales_days" WHERE "id" IN (
+              SELECT o."id" FROM "outlet_sales_days" o
+               WHERE o."month" < ${cutoff} ${tenant('o')} LIMIT ${HISTORY_PURGE_CHUNK_ROWS})`);
           return Number(lines);
         },
         { timeout: HISTORY_PURGE_TX_TIMEOUT_MS, maxWait: 5_000 },
@@ -201,7 +214,7 @@ export class SalesImportRetentionService {
     deadline?: number;
     /** Soft: no NEW step starts after this time (the import-list GET keeps its inline sweep short). */
     stopStartingAfter?: number;
-    /** Run the 10-year history delete (default true; the import-list GET passes false — drains / worker do it). */
+    /** Run the month-window delete (history + day data; default true; the import-list GET passes false — drains / worker do it). */
     history?: boolean;
   } = {}): Promise<{ abandoned: number; purged: number }> {
     const now = opts.now ?? new Date();
@@ -257,7 +270,7 @@ export class SalesImportRetentionService {
     } catch (e) {
       this.logger.warn(`sales-import retention sweep failed: ${(e as Error).message}`);
     }
-    // 10-year month history (cheap indexed delete; usually nothing).
+    // Month window: history + day data older than the current + 3 previous months (bounded; usually nothing).
     if (opts.history !== false && fits(HISTORY_PURGE_STEP_MS)) await this.purgeOldHistory({ clientId: opts.clientId });
     return out;
   }

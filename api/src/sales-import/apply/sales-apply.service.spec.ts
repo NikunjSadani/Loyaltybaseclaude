@@ -49,8 +49,12 @@ const summary = (month: string, over: Record<string, unknown> = {}) => ({
   unmatchedQuantity: 0,
   ...over,
 });
-const agg = (id: number, month: string, outletCode: string, dims: Record<string, string>, amountPaise: bigint, qtyMicro: bigint) => ({
-  id: BigInt(id), importId: 'imp1', month, outletCode, dims, dimKey: stableStringify(dims), amountPaise, qtyPico: qtyMicro * 1_000_000n, lines: 1,
+/** sales-day-level: every fixture aggregate carries its day split (default: one line on day 3). `days: null` = processed before day-level storage. */
+const agg = (
+  id: number, month: string, outletCode: string, dims: Record<string, string>, amountPaise: bigint, qtyMicro: bigint,
+  days: Array<[number, string, string, number]> | null = [[3, String(amountPaise), String(qtyMicro * 1_000_000n), 1]],
+) => ({
+  id: BigInt(id), importId: 'imp1', month, outletCode, dims, dimKey: stableStringify(dims), amountPaise, qtyPico: qtyMicro * 1_000_000n, lines: 1, days,
 });
 
 function makeDb(opts: {
@@ -195,6 +199,10 @@ function makeDb(opts: {
     },
     salesUploadBatch: { create: jest.fn(async (a: { data: Record<string, unknown> }) => { log.push('batch.create'); return { id: 'batch1', ...a.data }; }) },
     auditLog: { create: jest.fn(async () => { log.push('audit'); return {}; }) },
+    salesDaySet: {
+      upsert: jest.fn(async (a: unknown) => { log.push('dayset.upsert'); return a; }),
+      deleteMany: jest.fn(async () => { log.push('dayset.delete'); return { count: 1 }; }),
+    },
     user: {
       findUnique: jest.fn(async () => ({ name: 'Applier' })),
       findMany: jest.fn(async () => [{ id: 'u1', name: 'Admin' }]),
@@ -203,6 +211,7 @@ function makeDb(opts: {
       const text = 'strings' in (q as Prisma.Sql) ? (q as Prisma.Sql).strings.join('?') : (q as TemplateStringsArray).join('?');
       log.push(
         text.includes('pg_advisory_xact_lock') ? 'lock'
+          : text.includes('outlet_sales_days') ? (text.includes('DELETE') ? 'days.delete' : 'days.insert')
           : text.includes('sales_month_history_combos') ? (text.includes('DELETE') ? 'combos.delete' : 'combos.insert')
           : text.includes('sales_month_histories') ? (text.includes('DELETE') ? 'history.delete' : 'history.insert')
           : text.includes('INSERT') ? 'insert' : 'strip',
@@ -383,8 +392,11 @@ describe('SalesApplyService', () => {
   it('happy path: lock FIRST, SALES_IMPORT batch, owned-only merge SQL, strip of other rows, history, pointer, audit', async () => {
     const db = makeDb();
     const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
-    expect(r.results).toEqual([{ month: PREV, ok: true, applyId: 'apply1', outletsWritten: 3, outletsZeroFilled: 1 }]);
-    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'history.delete', 'history.insert', 'combos.delete', 'combos.insert', 'history.set', 'apply.create', 'status.upsert', 'audit']);
+    expect(r.results).toEqual([{
+      month: PREV, ok: true, applyId: 'apply1', outletsWritten: 3, outletsZeroFilled: 1,
+      dayData: { written: true, outlets: 2, rows: 2, lastDay: Number(lastDayOfMonth(PREV).slice(8)) },
+    }]);
+    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'history.delete', 'history.insert', 'combos.delete', 'combos.insert', 'history.set', 'days.delete', 'days.insert', 'dayset.upsert', 'apply.create', 'status.upsert', 'audit']);
 
     const sql = sqlCalls(db);
     expect(sql[0].values).toEqual([`sales-month:t1:${PREV}`]);
@@ -473,7 +485,7 @@ describe('SalesApplyService', () => {
 describe('month history', () => {
   const body = (months: string[]) => ({ months, expectedDefinitionsHash: HASH, processingVersion: VERSION });
 
-  it('apply REPLACES the month history with this import’s lines (every customer code; outletId from the roster now) inside the same tx', async () => {
+  it('apply REPLACES the month history with this import’s lines (PROGRAMME outlets only — roster now — with their day split) inside the same tx', async () => {
     const db = makeDb();
     await services(db).apply.apply(user, 'imp1', body([PREV]));
     const sql = sqlCalls(db);
@@ -481,7 +493,11 @@ describe('month history', () => {
     expect(del.values).toEqual(['t1', PREV]);
     const ins = sql.find((q) => q.text.includes('INSERT INTO "sales_month_histories"'))!;
     expect(ins.text).toContain('FROM "sales_import_aggregates" a');
-    expect(ins.text).toContain('LEFT JOIN unnest('); // unmatched codes kept, outletId null
+    // owner decision 2026-11-18: unmatched customers are NOT kept (inner join on the roster, outletId never null)
+    expect(ins.text).not.toContain('LEFT JOIN');
+    expect(ins.text).toMatch(/\bJOIN unnest\(/);
+    expect(ins.text).toContain('r.id IS NOT NULL');
+    expect(ins.text).toContain('a."days"'); // the day split travels with the line (recalculate can rebuild day data)
     expect(ins.text).toContain('md5(a."outletCode" || chr(31) || a."dimKey")'); // bounded unique key (final check L1)
     // the set header records the source import + the mapping its lines were parsed with (final check M1)
     const header = (db.salesMonthHistorySet.upsert.mock.calls[0] as unknown as [{ where: unknown; create: Record<string, unknown> }])[0];
@@ -546,7 +562,9 @@ describe('month history', () => {
     const db = makeDb({ history: HISTORY });
     const r = await services(db).apply.recalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() });
     expect(r).toEqual(expect.objectContaining({ month: PREV, ok: true, outletsWritten: 3 }));
-    expect(db.log).toEqual(['lock', 'batch.create', 'insert', 'strip', 'apply.create', 'status.upsert', 'audit']);
+    // these stored lines predate day-level storage → the month's day data is removed, and the result says so
+    expect(r.dayData).toEqual(expect.objectContaining({ written: false, reason: expect.stringMatching(/before day-by-day sales were stored/) }));
+    expect(db.log).toEqual(['lock', 'batch.create', 'insert', 'strip', 'days.delete', 'dayset.delete', 'apply.create', 'status.upsert', 'audit']);
     const apply = (db.salesImportApply.create.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0].data;
     expect(apply).toEqual(expect.objectContaining({ source: 'HISTORY', importId: 'imp0' }));
     const audit = (db.auditLog.create.mock.calls[0] as unknown as [{ data: { newValues: Record<string, unknown> } }])[0].data;
@@ -810,7 +828,7 @@ describe('FOCUS-FROM-TARGETS: preview / apply / recalculate with products from t
     expect(p.definitionsHash).toBe(HASH);
     const r = await services(db).apply.apply(user, 'imp1', { months: [PREV], expectedDefinitionsHash: HASH, processingVersion: VERSION });
     expect(r.results[0].ok).toBe(true);
-    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'history.delete', 'history.insert', 'combos.delete', 'combos.insert', 'history.set', 'apply.create', 'status.upsert', 'audit']);
+    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'history.delete', 'history.insert', 'combos.delete', 'combos.insert', 'history.set', 'days.delete', 'days.insert', 'dayset.upsert', 'apply.create', 'status.upsert', 'audit']);
     expect(writtenValues(db)).toEqual({ O1: { OWN_AMT: 100, OWN_QTY: 2 }, O2: { OWN_AMT: -25 }, O3: { OWN_AMT: 0 } });
     // apply never reads targets / acceptances for such a tenant (the write path is the original one)
     expect(db.outletTarget.findMany).toHaveBeenCalledTimes(2); // the preview's two months only
@@ -1012,5 +1030,125 @@ describe('FOCUS-FROM-TARGETS: November fixture (retailers "CNO & ADHO500", whole
       { TOTAL: 500, FB1: 200, FB2: 300 },
       { TOTAL: 10, FB1: 0, FB2: 10 },
     ]);
+  });
+});
+
+// ─── sales-day-level (owner decision 2026-11-18): day data written with every month write ─────────────────────────
+
+describe('day-level data (OutletSalesDay / SalesDaySet)', () => {
+  const body = (months: string[]) => ({ months, expectedDefinitionsHash: HASH, processingVersion: VERSION });
+  const P = (micro: bigint) => String(micro * 1_000_000n);
+  // O1 (wholesaler): product P/500 bought on day 2 (₹60, 1 case) and day 9 (₹40, 0.5 case); product Q/500 on day 9.
+  // O2 (retail): P/50 return on day 5. GONE / O4: not on the roster → never stored. O3: no lines → no day rows.
+  const DAY_AGGS = [
+    { ...agg(1, PREV, 'O1', { dimA: 'P', dimB: '500' }, 10000n, 1_500000n, [[2, '6000', P(1_000000n), 1], [9, '4000', P(500000n), 1]]), lines: 2 },
+    agg(2, PREV, 'O1', { dimA: 'Q', dimB: '500' }, 5000n, 500000n, [[9, '5000', P(500000n), 1]]),
+    agg(3, PREV, 'O2', { dimA: 'P', dimB: '50' }, -2500n, 0n, [[5, '-2500', '0', 1]]),
+    agg(4, PREV, 'GONE', { dimA: 'P', dimB: '50' }, 99999n, 0n, [[1, '99999', '0', 1]]),
+    agg(5, PREV, 'O4', { dimA: 'P', dimB: '50' }, 700n, 0n, [[1, '700', '0', 1]]),
+  ];
+  const dayInsert = (db: ReturnType<typeof makeDb>) => sqlCalls(db).find((q) => q.text.includes('INSERT INTO "outlet_sales_days"'));
+
+  it('apply writes CUMULATIVE month-to-date values per programme outlet × billing day, replacing the month in the same tx', async () => {
+    const db = makeDb({ months: [PREV], aggs: DAY_AGGS });
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
+    const lastDay = Number(lastDayOfMonth(PREV).slice(8));
+    expect(r.results[0]).toEqual(expect.objectContaining({ ok: true, dayData: { written: true, outlets: 2, rows: 3, lastDay } }));
+    const sql = sqlCalls(db);
+    const del = sql.find((q) => q.text.includes('DELETE FROM "outlet_sales_days"'))!;
+    expect(del.values).toEqual(['t1', PREV]);
+    const ins = dayInsert(db)!;
+    expect(ins.values).toEqual([
+      't1', PREV, 'imp1',
+      ['id-O1', 'id-O1', 'id-O2'], ['O1', 'O1', 'O2'], [2, 9, 5],
+      [
+        JSON.stringify({ OWN_AMT: 60, OWN_QTY: 1 }),
+        JSON.stringify({ OWN_AMT: 100, OWN_QTY: 2 }), // cumulative: day 2 + day 9 (OWN_AMT counts P only)
+        JSON.stringify({ OWN_AMT: -25 }), // retail: OWN_QTY out of scope → omitted, exactly like the monthly row
+      ],
+    ]);
+    // INVARIANT: each outlet's last day equals the monthly value written by the SAME apply
+    const monthly = sql.find((q) => q.text.includes('INSERT INTO "outlet_sales_records"'))!;
+    expect(monthly.values).toContainEqual([JSON.stringify({ OWN_AMT: 100, OWN_QTY: 2 }), JSON.stringify({ OWN_AMT: -25 }), JSON.stringify({ OWN_AMT: 0 })]);
+    const set = (db.salesDaySet.upsert.mock.calls[0] as unknown as [{ where: unknown; create: Record<string, unknown> }])[0];
+    expect(set.where).toEqual({ clientId_month: { clientId: 't1', month: PREV } });
+    expect(set.create).toEqual(expect.objectContaining({ clientId: 't1', month: PREV, lastDay, sourceImportId: 'imp1', appliedAt: expect.any(Date) }));
+    // the day split is read where it is needed (apply)
+    const selects = db.salesImportAggregate.findMany.mock.calls.map((c) => (c[0] as unknown as { select: Record<string, boolean> }).select);
+    expect(selects.some((s) => s.days === true)).toBe(true);
+    const audit = (db.auditLog.create.mock.calls[0] as unknown as [{ data: { newValues: Record<string, unknown> } }])[0].data;
+    expect(audit.newValues.dayData).toEqual({ written: true, outlets: 2, rows: 3, lastDay });
+  });
+
+  it('the preview never reads the day split', async () => {
+    const db = makeDb({ months: [PREV], aggs: DAY_AGGS });
+    await services(db).preview.preview('t1', 'imp1');
+    const selects = db.salesImportAggregate.findMany.mock.calls.map((c) => (c[0] as unknown as { select: Record<string, boolean> }).select);
+    expect(selects.every((s) => s.days === undefined)).toBe(true);
+  });
+
+  it('re-apply REPLACES the day data; a file processed before day-level storage removes the old day data + set and SAYS so', async () => {
+    const db = makeDb({ months: [PREV], aggs: DAY_AGGS });
+    await services(db).apply.apply(user, 'imp1', body([PREV]));
+    await services(db).apply.apply(user, 'imp1', body([PREV]));
+    expect(db.log.filter((l) => l === 'days.delete')).toHaveLength(2); // every apply deletes the month's rows first
+    expect(db.log.indexOf('days.delete')).toBeLessThan(db.log.indexOf('days.insert'));
+
+    const old = makeDb({ months: [PREV], aggs: DAY_AGGS.map((a) => ({ ...a, days: null })) });
+    const r = await services(old).apply.apply(user, 'imp1', body([PREV]));
+    expect(r.results[0].ok).toBe(true); // the monthly figures are still written
+    expect(r.results[0].dayData).toEqual({
+      written: false, outlets: 0, rows: 0, lastDay: null, reason: expect.stringMatching(/processed before day-by-day sales were stored.*Reprocess/),
+    });
+    expect(old.log).toEqual(expect.arrayContaining(['days.delete', 'dayset.delete']));
+    expect(old.log).not.toContain('days.insert');
+    expect(old.salesDaySet.upsert).not.toHaveBeenCalled();
+    const audit = (old.auditLog.create.mock.calls[0] as unknown as [{ data: { newValues: Record<string, unknown> } }])[0].data;
+    expect(audit.newValues.dayData).toEqual(expect.objectContaining({ written: false }));
+  });
+
+  it('a day split that does not add up to its line is never used (no day data, reason given)', async () => {
+    const broken = DAY_AGGS.map((a, i) => (i === 0 ? { ...a, days: [[2, '6000', P(1_000000n), 1]] as Array<[number, string, string, number]> } : a));
+    const db = makeDb({ months: [PREV], aggs: broken });
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
+    expect(r.results[0].dayData?.written).toBe(false);
+    expect(dayInsert(db)).toBeUndefined();
+  });
+
+  const histDay = (id: number, code: string, dims: Record<string, string>, paise: bigint, micro: bigint, days: Array<[number, string, string, number]> | null) => ({
+    id: BigInt(id), month: PREV, customerCode: code, dims, dimKey: stableStringify(dims), amountPaise: paise, qtyPico: micro * 1_000_000n,
+    lines: days ? days.reduce((s, d) => s + d[3], 0) : 1, days,
+  });
+  const DAY_HISTORY = [
+    histDay(1, 'O1', { dimA: 'P', dimB: '500' }, 10000n, 1_500000n, [[2, '6000', P(1_000000n), 1], [9, '4000', P(500000n), 1]]),
+    histDay(2, 'O2', { dimA: 'P', dimB: '50' }, -2500n, 0n, [[5, '-2500', '0', 1]]),
+  ];
+
+  it("recalculate rebuilds the day data from the stored lines (lastDay = the applied file's last invoice day); the preview says whether it can", async () => {
+    const db = makeDb({ history: DAY_HISTORY });
+    const p = await services(db).apply.recalcPreview('t1', PREV);
+    expect(p.dayData).toEqual({ available: true });
+    const r = await services(db).apply.recalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() });
+    expect(r.dayData).toEqual({ written: true, outlets: 2, rows: 3, lastDay: 28 }); // imp0's summary: last invoice on the 28th
+    expect(dayInsert(db)!.values).toContainEqual([JSON.stringify({ OWN_AMT: 60, OWN_QTY: 1 }), JSON.stringify({ OWN_AMT: 100, OWN_QTY: 1.5 }), JSON.stringify({ OWN_AMT: -25 })]);
+    const set = (db.salesDaySet.upsert.mock.calls[0] as unknown as [{ create: Record<string, unknown> }])[0];
+    expect(set.create).toEqual(expect.objectContaining({ sourceImportId: 'imp0', lastDay: 28 }));
+
+    const old = makeDb({ history: DAY_HISTORY.map((h) => ({ ...h, days: null })) });
+    const q = await services(old).apply.recalcPreview('t1', PREV);
+    expect(q.dayData).toEqual({ available: false, reason: expect.stringMatching(/applied before day-by-day sales were stored/) });
+  });
+
+  it('purged history (outside current + 3 previous months) is reported honestly: 404 with the retention reason, even while rows remain', async () => {
+    const OUT = shiftMonthKey(CUR, -4);
+    const db = makeDb({ history: DAY_HISTORY.map((h) => ({ ...h, month: OUT })) });
+    await expect(services(db).apply.recalcPreview('t1', OUT)).rejects.toThrow(/kept only for the current month and the 3 months before it/);
+    await expect(services(db).apply.recalculate(user, OUT, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() }))
+      .rejects.toBeInstanceOf(NotFoundException);
+    expect(db.salesMonthHistorySet.findUnique).not.toHaveBeenCalled(); // never reads a half-deleted month
+    // the oldest month INSIDE the window still works
+    const IN = shiftMonthKey(CUR, -3);
+    const ok = makeDb({ history: DAY_HISTORY.map((h) => ({ ...h, month: IN })) });
+    await expect(services(ok).apply.recalcPreview('t1', IN)).resolves.toEqual(expect.objectContaining({ month: IN }));
   });
 });

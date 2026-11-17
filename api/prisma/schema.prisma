@@ -3154,6 +3154,9 @@ model SalesImportAggregate {
   amountPaise BigInt // Σ amount in paise (signed, returns net off)
   qtyPico     BigInt // Σ quantity × 1e12 (signed; exact per-line accumulation, H3)
   lines       Int
+  /// Day-level split of this row by IST invoice day (sales-day-level, 2026-11-18): [[day, "paise", "pico", lines], …]
+  /// sorted by day; the parts sum EXACTLY to amountPaise / qtyPico / lines. Null = processed before day-level storage.
+  days        Json?
 
   import SalesImport @relation(fields: [importId], references: [id], onDelete: Cascade)
 
@@ -3183,9 +3186,10 @@ model SalesImportApply {
   @@map("sales_import_applies")
 }
 
-/// The FINAL applied file lines of a month (every customer code, matched or not), replaced by each apply and kept
-/// SALES_MONTH_HISTORY_RETENTION_YEARS (10) — the source for "Recalculate from stored history" after the per-import
-/// aggregates are purged (plan §10b). No FK to sales_imports on purpose: it outlives the import's data.
+/// The FINAL applied file lines of a month for PROGRAMME outlets only (customer codes matched to the roster at apply
+/// time; owner decision 2026-11-18 — unmatched customers are not kept), replaced by each apply and kept
+/// SALES_MONTH_HISTORY_RETENTION_MONTHS (current + 3 previous) — the source for "Recalculate from stored history" after
+/// the per-import aggregates are purged (plan §10b). No FK to sales_imports on purpose: it outlives the import's data.
 model SalesMonthHistory {
   id             BigInt   @id @default(autoincrement())
   clientId       String
@@ -3198,6 +3202,9 @@ model SalesMonthHistory {
   amountPaise    BigInt
   qtyPico        BigInt
   lines          Int
+  /// Day-level split copied from the aggregate (same shape as SalesImportAggregate.days); null = applied before
+  /// day-level storage (recalculate then cannot rebuild the month's day data and says so).
+  days           Json?
   sourceImportId String
   appliedAt      DateTime
   appliedById    String
@@ -3249,6 +3256,42 @@ model SalesMonthHistorySet {
 
   @@unique([clientId, month])
   @@map("sales_month_history_sets")
+}
+
+/// Day-level month-to-date KPI values per PROGRAMME outlet (sales-day-level, owner decision 2026-11-18). Written by every
+/// apply / recalculate of a month in the same transaction as OutletSalesRecord (the month's rows are REPLACED), only for
+/// tenants with features.salesImport. SPARSE: a row exists only for a day on which the outlet billed something.
+/// MTD to day D for an outlet = `mtdValues` of its latest row with day ≤ D, or 0 when there is none. Invariant: the
+/// outlet's row for the month's last loaded day equals OutletSalesRecord.kpiValues (owned keys) of the same write.
+/// Kept for the current month + 3 previous (retention sweep, in step with sales_day_sets).
+model OutletSalesDay {
+  id             BigInt @id @default(autoincrement())
+  clientId       String
+  outletId       String
+  outletCode     String
+  month          String // YYYY-MM (IST)
+  day            Int // 1..31 (IST invoice day)
+  mtdValues      Json // { kpiCode: number } = month-to-date value AS OF the end of this day (cumulative; PRODUCT_COUNT = distinct products with cumulative net > 0)
+  sourceImportId String
+
+  @@unique([clientId, outletId, month, day])
+  @@index([clientId, month, day])
+  @@map("outlet_sales_days")
+}
+
+/// One per tenant × month: the month HAS complete day data (outlet_sales_days) from this source import. Absent = no
+/// (or no longer) complete day data for that month. Deleted with the day rows (apply that cannot build day data,
+/// retention).
+model SalesDaySet {
+  id             String   @id @default(cuid())
+  clientId       String
+  month          String
+  lastDay        Int // last invoice day present in the applied file for that month
+  sourceImportId String
+  appliedAt      DateTime
+
+  @@unique([clientId, month])
+  @@map("sales_day_sets")
 }
 
 /// Explicit override of the implicit open/closed month rule (plan §7.3).

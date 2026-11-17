@@ -9,6 +9,7 @@ import { SALES_IMPORT_PART_SIZE } from '../sales-import.contract';
 import { mappingFingerprint } from './mapping-fingerprint';
 import { exceljsWorkbook } from './test-fixtures.testspec';
 import { WorkerStop } from './worker-stop';
+import { decodeDays, slicesMatchTotals } from '../days/day-slices';
 
 // These tests build and stream real xlsx workbooks (exceljs + zlib). They take well under a second each in
 // isolation but can exceed jest's 5 s default under full-suite CPU load (seen 2026-11-10: the whole file took
@@ -209,7 +210,9 @@ describe('SalesImportProcessorService.processClaimed', () => {
     ]);
 
     const written = prisma.salesImportAggregate.createMany.mock.calls.flatMap((c) => c[0].data);
-    expect(written).toEqual([
+    // sales-day-level: every row carries its split by IST invoice day, summing exactly to the row
+    for (const w of written) expect(slicesMatchTotals(decodeDays(w.days)!, w)).toBe(true);
+    expect(written.map(({ days: _days, ...w }: Record<string, unknown>) => w)).toEqual([
       { importId: 'imp1', month: '2026-10', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 6000n, qtyPico: 1_000_000n * 1_000_000n, lines: 2 },
       { importId: 'imp1', month: '2026-10', outletCode: 'O2', dims: { dimA: 'Q', dimB: '200' }, dimKey: '{"dimA":"Q","dimB":"200"}', amountPaise: 100050n, qtyPico: 2_000_000n * 1_000_000n, lines: 1 },
       // M6: the unmatched customer is aggregated too (apply maps codes onto the roster current at apply time)
@@ -250,7 +253,10 @@ describe('SalesImportProcessorService.processClaimed', () => {
     await svc.processClaimed(row);
     expect(final().data).toMatchObject({ status: 'READY', rowsRead: 2, rowsSkipped: 0, contentSha256: createHash('sha256').update(file).digest('hex') });
     expect(prisma.salesImportAggregate.createMany.mock.calls[0][0].data).toEqual([
-      { importId: 'imp1', month: '2026-10', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 10000n, qtyPico: 2_000_000n * 1_000_000n, lines: 2 },
+      {
+        importId: 'imp1', month: '2026-10', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 10000n, qtyPico: 2_000_000n * 1_000_000n, lines: 2,
+        days: [[3, '10025', '1500000000000', 1], [4, '-25', '500000000000', 1]], // the xlsx date cells' calendar days
+      },
     ]);
   });
 

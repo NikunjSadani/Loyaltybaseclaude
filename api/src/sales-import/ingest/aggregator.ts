@@ -6,6 +6,9 @@
  *                            at PREVIEW / APPLY time (M6), so an outlet added after processing is not lost;
  *  - not on the roster NOW → also unmatched[month][code] (with the name) for unmatched.csv + the frozen summary;
  *  - every valid line      → month summary counters, dimension values, dimension combos.
+ * Day level (sales-day-level, 2026-11-18): each aggregate also carries its split by IST invoice DAY (`days`, summing
+ * exactly to the row). Memory: a row whose lines all fall on ONE day (the common case) costs one small integer; a
+ * second distinct day allocates a small per-row day map. ⚠️ Re-measure the real file's heap peak (plan §7.1 step 11).
  * Invalid lines are skipped with a reason (≤ SALES_IMPORT_MAX_ERROR_SAMPLES samples kept, all counted).
  * Fully blank rows are ignored silently (trailing empty rows in an export).
  * Memory is bounded (S4): more than SALES_IMPORT_MAX_DISTINCT_CODES customer codes, MAX_AGGREGATE_KEYS aggregate keys
@@ -24,6 +27,7 @@ import {
   type SalesImportErrorSample,
 } from '../sales-import.contract';
 import type { ColumnIndex } from './header';
+import { dayOfDate, type DaySlice } from '../days/day-slices';
 import {
   QTY_SCALE,
   normalizeDim,
@@ -48,6 +52,8 @@ export interface AggValue {
 
 export interface AggRow extends AggValue {
   month: string;
+  /** The row split by IST invoice day (sorted; sums exactly to the row). */
+  days: DaySlice[];
   /** normalizeOutletCode(file cell) — NOT necessarily a roster code (M6). */
   outletCode: string;
   dims: Record<string, string>;
@@ -58,6 +64,33 @@ export interface UnmatchedRow extends AggValue {
   month: string;
   code: string;
   name: string;
+}
+
+/** An aggregate entry: totals + its day split (`byDay` null = every line so far on `day0`). */
+interface AggEntry extends AggValue {
+  day0: number;
+  byDay: Map<number, DaySlice> | null;
+}
+
+/** Add one line's values to the entry's day split (BEFORE the totals are updated). */
+function addDay(e: AggEntry, day: number, paise: bigint, pico: bigint): void {
+  if (e.byDay === null) {
+    if (day === e.day0) return; // still single-day: the totals ARE the day's values
+    e.byDay = new Map([[e.day0, { day: e.day0, amountPaise: e.amountPaise, qtyPico: e.qtyPico, lines: e.lines }]]);
+  }
+  const s = e.byDay.get(day);
+  if (s) {
+    s.amountPaise += paise;
+    s.qtyPico += pico;
+    s.lines++;
+  } else {
+    e.byDay.set(day, { day, amountPaise: paise, qtyPico: pico, lines: 1 });
+  }
+}
+
+function daysOf(e: AggEntry): DaySlice[] {
+  if (e.byDay === null) return [{ day: e.day0, amountPaise: e.amountPaise, qtyPico: e.qtyPico, lines: e.lines }];
+  return [...e.byDay.values()].sort((a, b) => a.day - b.day).map((s) => ({ ...s }));
 }
 
 interface MonthAcc {
@@ -128,8 +161,10 @@ export interface AggregatorResult {
   aggregateCount: number;
   aggregates(): Iterable<AggRow>;
   unmatched(): Iterable<UnmatchedRow>;
-  /** Test/inspection accessor. */
+  /** Test/inspection accessor (totals only). */
   get(month: string, outletCode: string, dimKey: string): AggValue | undefined;
+  /** Test/inspection accessor: the row's split by IST invoice day. */
+  getDays(month: string, outletCode: string, dimKey: string): DaySlice[] | undefined;
 }
 
 const rupees = paiseToRupees;
@@ -144,7 +179,7 @@ const byAbsDesc = (a: bigint, b: bigint) => {
 const fmt = (n: number | bigint) => n.toLocaleString('en-IN');
 
 export class SalesAggregator {
-  private readonly aggs = new Map<string, Map<string, Map<string, AggValue>>>(); // month → code → dimKey
+  private readonly aggs = new Map<string, Map<string, Map<string, AggEntry>>>(); // month → code → dimKey
   private readonly dimsByKey = new Map<string, Record<string, string>>();
   private readonly unmatchedMap = new Map<string, Map<string, UnmatchedRow>>(); // month → code
   private readonly months = new Map<string, MonthAcc>();
@@ -231,8 +266,9 @@ export class SalesAggregator {
 
     const d = parseInvoiceDateDetailed(cells[idx.invoiceDate], this.mapping.dateOrder, this.todayIso);
     if (!('date' in d)) return this.skip(rowNo, this.headers.invoiceDate, d.reason);
-    const date = d.date;
+    const date = d.date; // the IST calendar date (normalize.ts)
     const month = date.slice(0, 7);
+    const day = dayOfDate(date);
 
     // H4: with BOTH measures mapped, a blank one counts as 0 (e.g. a ₹-only credit note or a free-goods line keeps its
     // other measure); such a row is skipped only when both are blank. A non-blank, unparsable value is always skipped.
@@ -295,6 +331,7 @@ export class SalesAggregator {
     if (!byDim) byCode.set(code, (byDim = new Map()));
     const a = byDim.get(dimKey);
     if (a) {
+      addDay(a, day, paise, pico);
       a.amountPaise += paise;
       a.qtyPico += pico;
       a.lines++;
@@ -311,7 +348,7 @@ export class SalesAggregator {
         throw new AggregatorLimitError(`Row ${rowNo}: the quantity exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
       }
       if (this.aggregateCount + this.unmatchedCount >= this.maxTracked) throw this.tooMany();
-      byDim.set(dimKey, { amountPaise: paise, qtyPico: pico, lines: 1 });
+      byDim.set(dimKey, { amountPaise: paise, qtyPico: pico, lines: 1, day0: day, byDay: null });
       this.aggregateCount++;
       if (!this.dimsByKey.has(dimKey)) this.dimsByKey.set(dimKey, dims);
     }
@@ -436,14 +473,26 @@ export class SalesAggregator {
       *aggregates() {
         for (const [month, byCode] of aggs) {
           for (const [outletCode, byDim] of byCode) {
-            for (const [dimKey, v] of byDim) yield { month, outletCode, dims: dimsByKey.get(dimKey)!, dimKey, ...v };
+            for (const [dimKey, v] of byDim) {
+              yield {
+                month, outletCode, dims: dimsByKey.get(dimKey)!, dimKey,
+                amountPaise: v.amountPaise, qtyPico: v.qtyPico, lines: v.lines, days: daysOf(v),
+              };
+            }
           }
         }
       },
       *unmatched() {
         for (const byCode of unmatchedMap.values()) yield* byCode.values();
       },
-      get: (month, outletCode, dimKey) => aggs.get(month)?.get(outletCode)?.get(dimKey),
+      get: (month, outletCode, dimKey) => {
+        const e = aggs.get(month)?.get(outletCode)?.get(dimKey);
+        return e ? { amountPaise: e.amountPaise, qtyPico: e.qtyPico, lines: e.lines } : undefined;
+      },
+      getDays: (month, outletCode, dimKey) => {
+        const e = aggs.get(month)?.get(outletCode)?.get(dimKey);
+        return e ? daysOf(e) : undefined;
+      },
     };
   }
 }

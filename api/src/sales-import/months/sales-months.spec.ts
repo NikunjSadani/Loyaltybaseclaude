@@ -14,7 +14,7 @@ import { SalesImportApplyController } from '../sales-import-apply.controller';
 import { REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS, REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS, SalesMonthsService } from './sales-months.service';
 import { SalesMonthClosedGuard } from './sales-month-closed.guard';
 import { monthLabel, shiftMonthKey } from './month-state';
-import { SALES_MONTH_HISTORY_RETENTION_YEARS } from '../sales-import.contract';
+import { historyCutoffMonth } from '../retention-window';
 
 const CUR = currentMonthKey();
 const PREV = shiftMonthKey(CUR, -1);
@@ -201,6 +201,19 @@ describe('SalesMonthsService (K-4)', () => {
     expect(q.distinct).toBeUndefined();
     expect(d.salesMonthHistory.findMany).not.toHaveBeenCalled();
     await expect(new SalesMonthsService(d as never).list('t1', '2026-13')).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('retention window: a month older than current + 3 previous shows NO history (no recalculate) even while the sweep still holds its header', async () => {
+    const OUT = shiftMonthKey(CUR, -4);
+    const IN = shiftMonthKey(CUR, -3);
+    const d = db([], { history: [{ month: OUT, sourceImportId: 'old', appliedAt: AT }, { month: IN, sourceImportId: 'imp9', appliedAt: AT }] });
+    d.salesMonthHistorySet.findMany.mockImplementation(async ({ where }: { where: { month: { in: string[] } } }) =>
+      [{ month: OUT, sourceImportId: 'old', appliedAt: AT }, { month: IN, sourceImportId: 'imp9', appliedAt: AT }].filter((h) => where.month.in.includes(h.month)));
+    const rows = await new SalesMonthsService(d as never).list('t1'); // default range: the last 6 months
+    const by = Object.fromEntries(rows.map((r) => [r.month, r]));
+    expect(by[OUT]).toEqual(expect.objectContaining({ hasHistory: false, historySourceImportId: null }));
+    expect(by[IN]).toEqual(expect.objectContaining({ hasHistory: true, historySourceImportId: 'imp9' }));
+    expect(d.salesMonthHistorySet.findMany.mock.calls[0][0].where.month.in).not.toContain(OUT);
   });
 });
 
@@ -485,10 +498,12 @@ describe('Rebuild product list (§10c) + productListCurrent', () => {
     await expect(new SalesMonthsService(busy.d as never).rebuildProductList(clientAdmin, PREV)).rejects.toBeInstanceOf(ConflictException);
   });
 
-  it('L1: a month below the 10-year retention cutoff → 404 before any lock; a header purged meanwhile → 404 (rolled back)', async () => {
-    const cutoff = shiftMonthKey(CUR, -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
+  it('L1: a month outside the retention window (current + 3 previous) → 404 with the reason, before any lock; a header purged meanwhile → 404 (rolled back)', async () => {
+    const cutoff = historyCutoffMonth();
+    expect(cutoff).toBe(shiftMonthKey(CUR, -3)); // computed from now: current month + the 3 before it are kept
     const old = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT });
-    await expect(new SalesMonthsService(old.d as never).rebuildProductList(clientAdmin, shiftMonthKey(cutoff, -1))).rejects.toBeInstanceOf(NotFoundException);
+    await expect(new SalesMonthsService(old.d as never).rebuildProductList(clientAdmin, shiftMonthKey(cutoff, -1)))
+      .rejects.toThrow(/kept only for the current month and the 3 months before it/);
     expect(old.d.$transaction).not.toHaveBeenCalled();
     const raced = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT }, { purgedMeanwhile: true });
     await expect(new SalesMonthsService(raced.d as never).rebuildProductList(clientAdmin, PREV)).rejects.toBeInstanceOf(NotFoundException);

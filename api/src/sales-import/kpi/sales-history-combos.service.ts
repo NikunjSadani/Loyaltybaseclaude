@@ -5,7 +5,6 @@ import {
   SALES_HISTORY_COMBOS_MAX_MONTHS,
   SALES_IMPORT_MAX_DIMENSION_COMBOS,
   SALES_IMPORT_MAX_DIMENSION_VALUES,
-  SALES_MONTH_HISTORY_RETENTION_YEARS,
   type SalesDimensionCombo,
   type SalesDimensionValues,
   type SalesHistoryCombos,
@@ -13,16 +12,19 @@ import {
 import { paiseToRupees, picoToCases } from '../ingest/normalize';
 import { isMonthKey } from '../months/month-state';
 import { classifyMonthSummaries } from './month-combos';
-import { currentMonthKey } from '../../targets/targets.helpers';
-import { shiftMonthKey } from '../months/month-state';
+import { historyCutoffMonth, historyRetentionMessage, historyRetentionMonths, isBeyondHistoryRetention } from '../retention-window';
 
 export interface SalesHistoryCombosQuery {
   month?: string;
   lastMonths?: string;
 }
 
-/** Upper bound on the set headers read for the month picker (one row per stored month; history is kept 10 years). */
-const MAX_SET_ROWS = (SALES_MONTH_HISTORY_RETENTION_YEARS + 2) * 12;
+/**
+ * Upper bound on the set headers read for the month picker (one row per stored month; history is kept for the current
+ * month + 3 previous — retention-window.ts — so a handful). "Last N" with N above the stored months returns what exists:
+ * `months` / `availableMonths` say exactly which months were read.
+ */
+const maxSetRows = () => historyRetentionMonths() + 2;
 /** Per-statement bound for the read (summary rows: thousands per month; the missing-summary fallback reads lines). */
 export const HISTORY_COMBOS_STATEMENT_TIMEOUT_MS = 10_000;
 /** The read transaction's own bound (a handful of statements, each ≤ the statement timeout). */
@@ -102,8 +104,8 @@ export class SalesHistoryCombosService {
           await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
           // Constant, not user input (SET takes no bind parameters).
           await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`);
-          // Months older than the 10-year retention are being deleted by the sweep: never offered or read.
-          const cutoff = shiftMonthKey(currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
+          // Months older than the retention window (current + 3 previous) are being deleted by the sweep: never offered or read.
+          const cutoff = historyCutoffMonth();
           const sets = await tx.salesMonthHistorySet.findMany({
             where: { clientId, month: { gte: cutoff } },
             select: {
@@ -111,11 +113,13 @@ export class SalesHistoryCombosService {
               combosSourceImportId: true, combosAppliedAt: true,
             },
             orderBy: { month: 'desc' },
-            take: MAX_SET_ROWS,
+            take: maxSetRows(),
           });
           const availableMonths = sets.map((s) => s.month);
           const chosen = hasMonth ? sets.filter((s) => s.month === q.month) : sets.slice(0, last);
-          if (hasMonth && chosen.length === 0) throw new NotFoundException('No stored sales lines for that month.');
+          if (hasMonth && chosen.length === 0) {
+            throw new NotFoundException(isBeyondHistoryRetention(q.month!) ? historyRetentionMessage(q.month!) : 'No stored sales lines for that month.');
+          }
           const months = chosen.map((s) => s.month).sort();
           const keySets = chosen.map((s) => [...new Set(s.dimensionKeys)].sort().join('\u001f'));
           const empty: SalesHistoryCombos = {

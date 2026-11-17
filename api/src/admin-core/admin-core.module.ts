@@ -13,6 +13,7 @@ import { ProgramHealthDashboardService } from './dashboards/program-health-dashb
 import { OperationsDashboardService } from './dashboards/operations-dashboard.service';
 import { FinanceDashboardService } from './dashboards/finance-dashboard.service';
 import { BillingProgressDashboardService } from './dashboards/billing-progress-dashboard.service';
+import { BillingComparisonDashboardService } from './dashboards/billing-comparison-dashboard.service';
 import { PayoutsModule } from '../payouts/payouts.module';
 import { TdsModule } from '../tds/tds.module';
 
@@ -42,6 +43,7 @@ import { TdsModule } from '../tds/tds.module';
     OperationsDashboardService,
     FinanceDashboardService,
     BillingProgressDashboardService,
+    BillingComparisonDashboardService,
   ],
   // Exported so GifsyModule can reuse the SAME per-tenant settings writes
   // (upsertSetting / setPointsExpiry) for the GIFSY-operator tenant-targeted

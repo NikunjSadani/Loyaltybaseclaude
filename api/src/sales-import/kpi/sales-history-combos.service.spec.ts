@@ -1,8 +1,7 @@
 import { BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
-import { SALES_IMPORT_MAX_DIMENSION_COMBOS, SALES_IMPORT_MAX_DIMENSION_VALUES, SALES_MONTH_HISTORY_RETENTION_YEARS } from '../sales-import.contract';
-import { currentMonthKey } from '../../targets/targets.helpers';
-import { shiftMonthKey } from '../months/month-state';
+import { SALES_IMPORT_MAX_DIMENSION_COMBOS, SALES_IMPORT_MAX_DIMENSION_VALUES } from '../sales-import.contract';
+import { historyCutoffMonth } from '../retention-window';
 import {
   HISTORY_COMBOS_BUSY_MESSAGE,
   HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS,
@@ -101,8 +100,8 @@ describe('SalesHistoryCombosService', () => {
     });
     const r = await svc.combos('t1', { lastMonths: '2' });
     expect(tx.salesMonthHistorySet.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      // L2: months below the 10-year retention cutoff (being deleted) are never offered or read
-      where: { clientId: 't1', month: { gte: shiftMonthKey(currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS) } },
+      // L2: months outside the retention window (current + 3 previous; being deleted) are never offered or read
+      where: { clientId: 't1', month: { gte: historyCutoffMonth() } },
       select: expect.objectContaining({ combosSourceImportId: true, combosAppliedAt: true, lineRows: true }),
     }));
     expect(r.months).toEqual(['2026-09', '2026-10']);

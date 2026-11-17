@@ -43,8 +43,17 @@ describe('SalesAggregator', () => {
     expect(r.monthSummaries[0]).toMatchObject({ matchedOutlets: 1, matchedAmountRupees: 60, matchedQuantity: 1 });
     expect(r.aggregateCount).toBe(2);
     expect([...r.aggregates()]).toEqual([
-      { month: '2026-10', outletCode: 'O1', dims: { dimA: 'X', dimB: '500' }, dimKey: KEY_X500, amountPaise: 6000n, qtyPico: pico(1_000_000n), lines: 2 },
-      { month: '2026-11', outletCode: 'O1', dims: { dimA: 'X', dimB: '500' }, dimKey: KEY_X500, amountPaise: 1000n, qtyPico: pico(40_000n), lines: 1 },
+      {
+        month: '2026-10', outletCode: 'O1', dims: { dimA: 'X', dimB: '500' }, dimKey: KEY_X500, amountPaise: 6000n, qtyPico: pico(1_000_000n), lines: 2,
+        days: [
+          { day: 3, amountPaise: 10000n, qtyPico: pico(1_500_000n), lines: 1 },
+          { day: 20, amountPaise: -4000n, qtyPico: pico(-500_000n), lines: 1 },
+        ],
+      },
+      {
+        month: '2026-11', outletCode: 'O1', dims: { dimA: 'X', dimB: '500' }, dimKey: KEY_X500, amountPaise: 1000n, qtyPico: pico(40_000n), lines: 1,
+        days: [{ day: 1, amountPaise: 1000n, qtyPico: pico(40_000n), lines: 1 }],
+      },
     ]);
   });
 
@@ -260,5 +269,47 @@ describe('SalesAggregator — month summary quantities rounded like preview / ap
     a.push(row('U1', '2026-10-03', 'X', '500', 1, '0.0005'), 4);
     a.push(row('U2', '2026-10-03', 'Y', '500', 1, '0.0005'), 5);
     expect(a.result().monthSummaries[0]).toMatchObject({ matchedQuantity: 0.002, unmatchedQuantity: 0.002 }); // raw: 0.001 each
+  });
+});
+
+describe('SalesAggregator — day split (sales-day-level)', () => {
+  it('splits each aggregate by IST invoice DAY; the parts sum exactly to the row (one-day rows stay compact)', () => {
+    const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    a.push(row('O1', '2026-10-03', 'X', '500', '100.00', '1.5'), 2);
+    a.push(row('O1', '2026-10-20', 'X', '500', '-40.00', '-0.5'), 3);
+    a.push(row('O1', '2026-10-03', 'X', '500', '5.00', '0.25'), 4); // the 3rd again
+    a.push(row('O1', '2026-10-09', 'Y', '500', '7.00', '1'), 5); // a one-day row
+    const r = a.result();
+    expect(r.getDays('2026-10', 'O1', KEY_X500)).toEqual([
+      { day: 3, amountPaise: 10500n, qtyPico: pico(1_750_000n), lines: 2 },
+      { day: 20, amountPaise: -4000n, qtyPico: pico(-500_000n), lines: 1 },
+    ]);
+    expect(r.get('2026-10', 'O1', KEY_X500)).toEqual({ amountPaise: 6500n, qtyPico: pico(1_250_000n), lines: 3 });
+    expect(r.getDays('2026-10', 'O1', '{"dimA":"Y","dimB":"500"}')).toEqual([{ day: 9, amountPaise: 700n, qtyPico: pico(1_000_000n), lines: 1 }]);
+  });
+
+  it('the day is the IST calendar day — an instant late on the 31st (UTC) is the 1st of the NEXT month in IST', () => {
+    const a = new SalesAggregator({ ...MAP, dateOrder: 'YMD' }, IDX, roster(['O1']), TODAY);
+    a.push(row('O1', '2026-10-31T20:00:00Z', 'X', '500', '1', '0'), 2); // 01:30 IST on 1 Nov
+    a.push(row('O1', '2026-10-31T18:29:00Z', 'X', '500', '2', '0'), 3); // 23:59 IST on 31 Oct
+    a.push(row('O1', '2026-10-31 23:45', 'X', '500', '4', '0'), 4); // wall clock (IST) without a zone → 31 Oct
+    a.push(row('O1', new Date(Date.UTC(2026, 9, 31)), 'X', '500', '8', '0'), 5); // an xlsx date cell = a calendar date
+    const r = a.result();
+    expect(r.getDays('2026-11', 'O1', KEY_X500)).toEqual([{ day: 1, amountPaise: 100n, qtyPico: 0n, lines: 1 }]);
+    expect(r.getDays('2026-10', 'O1', KEY_X500)).toEqual([{ day: 31, amountPaise: 1400n, qtyPico: 0n, lines: 3 }]);
+    expect(r.monthSummaries.map((m) => [m.month, m.firstDate, m.lastDate])).toEqual([
+      ['2026-10', '2026-10-31', '2026-10-31'],
+      ['2026-11', '2026-11-01', '2026-11-01'],
+    ]);
+  });
+
+  it('a line that cannot be dated is never dropped silently: it is skipped, counted and sampled (and in no month / day)', () => {
+    const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    a.push(row('O1', 'not a date', 'X', '500', '1', '0'), 2);
+    a.push(row('O1', '2026-10-05', 'X', '500', '1', '0'), 3);
+    const r = a.result();
+    expect(r.rowsSkipped).toBe(1);
+    expect(r.errorSamples).toEqual([{ row: 2, column: 'DATE', reason: 'invalid date' }]);
+    expect([...r.aggregates()].flatMap((x) => x.days.map((d) => d.day))).toEqual([5]);
   });
 });

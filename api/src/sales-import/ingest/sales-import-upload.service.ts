@@ -588,7 +588,7 @@ export class SalesImportUploadService {
   async list(user: JwtPayload, q: { cursor?: string; limit?: number }): Promise<SalesImportList> {
     const limit = Math.min(SALES_IMPORT_LIST_MAX_LIMIT, Math.max(1, Math.trunc(Number(q.limit ?? SALES_IMPORT_LIST_DEFAULT_LIMIT)) || SALES_IMPORT_LIST_DEFAULT_LIMIT));
     // S5: lazy retention for this tenant (bounded; never throws).
-    // Inline on a GET: only the cheap import steps, started within 10 s; the 10-year history delete runs on the drains.
+    // Inline on a GET: only the cheap import steps, started within 10 s; the month-window history + day-data delete runs on the drains.
     await this.retention.sweep({ clientId: user.clientId, limit: 3, history: false, stopStartingAfter: Date.now() + LIST_SWEEP_START_WINDOW_MS });
     const where: Prisma.SalesImportWhereInput = { clientId: user.clientId, status: { not: 'CANCELLED' } };
     if (q.cursor) {

@@ -19,6 +19,7 @@ import { claimNextImport } from './claim';
 import { CsvLimitError, csvRows } from './csv-row-source';
 import { HEADER_SCAN_ROWS, resolveHeader, type SourceRow } from './header';
 import { mappingFingerprint } from './mapping-fingerprint';
+import { encodeDays } from '../days/day-slices';
 import { normalizeHeader, resolveDecimalSeparator, type DecimalSeparator } from './normalize';
 import { PartsFile, unmatchedCsvKey } from './parts-file';
 import { loadRoster } from './roster';
@@ -733,6 +734,8 @@ export class SalesImportProcessorService {
             amountPaise: a.amountPaise,
             qtyPico: a.qtyPico,
             lines: a.lines,
+            // sales-day-level: the row's split by IST invoice day (apply writes the day data from it).
+            days: encodeDays(a.days) as unknown as Prisma.InputJsonValue,
           });
           if (batch.length >= AGGREGATE_CHUNK) {
             checkHeap();

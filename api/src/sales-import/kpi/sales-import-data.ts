@@ -9,6 +9,8 @@ import type { SalesColumnMapping } from '../sales-import.contract';
 import type { KpiAgg, OutletScopeMeta } from './sales-kpi.helper';
 import { normalizedRosterIndex, rosterOutletWhere } from '../ingest/roster';
 import { mappingFingerprint } from '../ingest/mapping-fingerprint';
+import { decodeDays, type DaySlice } from '../days/day-slices';
+import { isBeyondHistoryRetention } from '../retention-window';
 
 type Db = PrismaService | Prisma.TransactionClient;
 
@@ -21,6 +23,16 @@ export interface AggRow extends KpiAgg {
   /** normalizeOutletCode of the file's customer code (M6) — map it with RosterIndex.byNormalized. */
   outletCode: string;
   dimKey: string;
+  /**
+   * sales-day-level: the row's split by IST invoice day — only when the pager was asked `withDays`. null = the row has no
+   * (valid) split (processed / applied before day-level storage).
+   */
+  days?: DaySlice[] | null;
+}
+
+/** Pager options: `withDays` also reads the day split column (apply / recalculate only; preview and the tester skip it). */
+export interface PagerOptions {
+  withDays?: boolean;
 }
 
 export interface RosterOutlet extends OutletScopeMeta {
@@ -101,6 +113,7 @@ function toAgg(r: {
   amountPaise: bigint;
   qtyPico: bigint;
   lines: number;
+  days?: Prisma.JsonValue;
 }): AggRow {
   const dims: Record<string, string> = {};
   if (r.dims && typeof r.dims === 'object' && !Array.isArray(r.dims)) {
@@ -115,29 +128,34 @@ function toAgg(r: {
     amountPaise: BigInt(r.amountPaise),
     qtyPico: BigInt(r.qtyPico),
     lines: r.lines,
+    ...(r.days !== undefined ? { days: decodeDays(r.days) } : {}),
   };
 }
 
 /** An import's aggregates for one month, as a pager. */
-export function importPager(db: Db, importId: string, month: string): AggregatePager {
-  return (onPage) => forEachAggregatePage(db, importId, month, onPage);
+export function importPager(db: Db, importId: string, month: string, opts: PagerOptions = {}): AggregatePager {
+  return (onPage) => forEachAggregatePage(db, importId, month, onPage, AGG_PAGE_SIZE, opts);
 }
 
 /**
  * A month's stored history (SalesMonthHistory) as a pager, in the aggregate shape (`outletCode` = the stored customer
  * code, normalized like the aggregates). Keyset-paged on the (clientId, month, id) index.
  */
-export function historyPager(db: Db, clientId: string, month: string, pageSize = AGG_PAGE_SIZE): AggregatePager {
+export function historyPager(db: Db, clientId: string, month: string, pageSize = AGG_PAGE_SIZE, opts: PagerOptions = {}): AggregatePager {
   return async (onPage) => {
     let cursor: bigint | null = null;
     for (;;) {
       const page: Array<{
         id: bigint; month: string; customerCode: string; dims: Prisma.JsonValue; dimKey: string; amountPaise: bigint; qtyPico: bigint; lines: number;
+        days?: Prisma.JsonValue;
       }> = await db.salesMonthHistory.findMany({
         where: { clientId, month, ...(cursor !== null ? { id: { gt: cursor } } : {}) },
         orderBy: { id: 'asc' },
         take: pageSize,
-        select: { id: true, month: true, customerCode: true, dims: true, dimKey: true, amountPaise: true, qtyPico: true, lines: true },
+        select: {
+          id: true, month: true, customerCode: true, dims: true, dimKey: true, amountPaise: true, qtyPico: true, lines: true,
+          ...(opts.withDays ? { days: true } : {}),
+        },
       });
       if (page.length === 0) return;
       await onPage(page.map((r) => toAgg({ ...r, outletCode: r.customerCode })));
@@ -154,8 +172,13 @@ export interface MonthHistoryMeta {
   dimensionKeys: string[];
 }
 
-/** The month's stored history set header (sales_month_history_sets; null = no history). One indexed row. */
+/**
+ * The month's stored history set header (sales_month_history_sets; null = no history). One indexed row. A month older
+ * than the retention window (current + 3 previous) has NO history here even while the bounded sweep is still deleting
+ * it — a half-deleted month is never recalculated (callers say why with historyRetentionMessage).
+ */
 export async function monthHistoryMeta(db: Db, clientId: string, month: string): Promise<MonthHistoryMeta | null> {
+  if (isBeyondHistoryRetention(month)) return null;
   return db.salesMonthHistorySet.findUnique({
     where: { clientId_month: { clientId, month } },
     select: { sourceImportId: true, appliedAt: true, mappingFingerprint: true, dimensionKeys: true },
@@ -172,6 +195,7 @@ export async function forEachAggregatePage(
   month: string | null,
   onPage: (rows: AggRow[]) => void | Promise<void>,
   pageSize = AGG_PAGE_SIZE,
+  opts: PagerOptions = {},
 ): Promise<void> {
   let cursor: bigint | null = null;
   for (;;) {
@@ -179,10 +203,13 @@ export async function forEachAggregatePage(
       where: { importId, ...(month ? { month } : {}), ...(cursor !== null ? { id: { gt: cursor } } : {}) },
       orderBy: { id: 'asc' },
       take: pageSize,
-      select: { id: true, month: true, outletCode: true, dims: true, dimKey: true, amountPaise: true, qtyPico: true, lines: true },
+      select: {
+        id: true, month: true, outletCode: true, dims: true, dimKey: true, amountPaise: true, qtyPico: true, lines: true,
+        ...(opts.withDays ? { days: true } : {}),
+      },
     });
     if (page.length === 0) return;
-    await onPage(page.map(toAgg));
+    await onPage(page.map((r) => toAgg(r as Parameters<typeof toAgg>[0])));
     if (page.length < pageSize) return;
     cursor = page[page.length - 1].id;
   }
