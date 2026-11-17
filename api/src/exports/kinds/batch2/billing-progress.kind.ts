@@ -10,7 +10,7 @@
  * and then writes the selected rows; the file is at most one row per outlet, so it streams instantly (not heavy).
  */
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
-import { istMonthKey } from '../../../common/ist-date';
+import { istDateTimeCell, istMonthKey } from '../../../common/ist-date';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
 import {
@@ -45,11 +45,41 @@ function describe(p: BillingProgressExportParams): string {
   return parts.join(' · ');
 }
 
+/** Same INR spellings as the screen (platform/src/lib/format-inr.ts `isInrUnit`). */
+export function isInrUnit(unit: string | null | undefined): boolean {
+  const u = (unit ?? '').trim().toLowerCase();
+  return ['inr', '₹', 'rs', 'rs.', 'rupee', 'rupees'].includes(u);
+}
+
+/** Column-header unit suffix: INR → " (₹)", another unit → " (<unit>)", none → "". */
+export function unitSuffix(unit: string | null | undefined): string {
+  if (isInrUnit(unit)) return ' (₹)';
+  const u = (unit ?? '').trim();
+  return u ? ` (${u})` : '';
+}
+
 async function run(ctx: ExportRunContext, p: BillingProgressExportParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
   const { bucket, ...filters } = p;
   const data = await loadBillingProgress(ctx.prisma, ctx.clientId, filters, ctx.now);
-  const unit = data.kpi?.unit ? ` (${data.kpi.unit})` : '';
-  const kpiLabel = data.kpi?.label ?? 'Primary KPI';
+  const suffix = unitSuffix(data.kpi?.unit);
+
+  // Sheet 1 — "About": what this file is, so it still makes sense once forwarded.
+  const about = await out.addSheet('About', ['Field', 'Value'], { widths: [24, 60] });
+  const aboutRows: Array<[string, string]> = [
+    ['Report', 'Monthly billing progress'],
+    ['List', billingListLabel(bucket, data.monthStatus)],
+    ['Month', monthWords(data.month)],
+    ['KPI', data.kpi ? `${data.kpi.label} (${data.kpi.code})` : 'No enabled KPI'],
+    ['Program', filters.program ?? 'All programs'],
+    ['Outlet type', filters.outletType ?? 'All outlet types'],
+    ['Manager', filters.managerId ? (data.managerName ?? 'Unknown manager') + ' (and their team)' : 'Everyone'],
+    ['Data as of', data.asOf ?? 'No sales uploaded for this month yet'],
+    ['Generated at (IST)', istDateTimeCell(ctx.now)],
+    ['Note', 'Includes outlets whose KYC is still pending (they can bill). Billed = achieved value of the KPI.'],
+  ];
+  for (const r of aboutRows) await about.addRow(r);
+
+  // Sheet 2 — the outlets, exactly the on-screen list. Same word as the screen: "Billed".
   const headers = [
     'Outlet Code',
     'Outlet Name',
@@ -57,8 +87,8 @@ async function run(ctx: ExportRunContext, p: BillingProgressExportParams, out: X
     'Outlet Type',
     'SO',
     'ASM',
-    `${kpiLabel} Target${unit}`,
-    `${kpiLabel} Achieved${unit}`,
+    `Target${suffix}`,
+    `Billed${suffix}`,
     'Achievement %',
   ];
   const sheet = await out.addSheet('Billing progress', headers);

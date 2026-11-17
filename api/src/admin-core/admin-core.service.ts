@@ -66,9 +66,10 @@ import {
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { UpdateEmployeeDto } from './dto/sales-users.dto';
 import {
-  loadAvailablePrograms,
+  loadProgramCatalog,
   normalizeFilterParam,
   partnerProgramScope,
+  programNameIn,
 } from './dashboards/dashboard-program-filter';
 import { resolveVisibilityProgramLists } from '../visibility/visibility-scope.helper';
 import {
@@ -1837,20 +1838,24 @@ export class AdminCoreService {
   /**
    * GET /v1/admin/dashboard/kpis — Overview tiles + Payout Summary.
    *
-   * Optional `programName` (exact Outlet.programName; '' / absent = all) scopes EVERY figure to
-   * that program through the OUTLET(S) each record belongs to:
-   *   activePartners / wallet liability / payouts → the partner owns ≥1 outlet in the program;
-   *   pendingKyc → the submission's partner owns ≥1 outlet in the program (KYC dashboard rule);
+   * Optional `programName` (trimmed Outlet.programName — matches every stored whitespace variant;
+   * '' / absent = all) scopes EVERY figure to that program through the OUTLET(S) each record belongs to:
+   *   activePartners / wallet liability / payouts → the partner owns ≥1 LIVE outlet in the program;
+   *   pendingKyc → the submission's partner owns ≥1 LIVE outlet in the program;
    *   pendingVisibility → the capture's outlet is in the program.
    * Unfiltered, every `where` is exactly the pre-filter one (Deoleo byte-identical). An unknown
-   * program matches nothing → zeros. `availablePrograms` = real distinct outlet programs.
+   * program matches nothing → zeros. `availablePrograms` = distinct trimmed outlet programs.
    */
   async dashboardKpis(user: JwtPayload, programName?: unknown) {
     const clientId = user.clientId;
     const program = normalizeFilterParam(programName, 'program');
-    const partnerScope = partnerProgramScope(program);
+    // Program catalog (dropdown source + raw whitespace variants). Needed BEFORE the scoped queries only
+    // when a program is selected; unfiltered it runs in parallel with them.
+    const catalogP = loadProgramCatalog(this.prisma, clientId);
+    const variants = program ? (await catalogP).variantsOf(program) : null;
+    const partnerScope = partnerProgramScope(variants);
 
-    const [activePartners, pendingKyc, pendingVisibilityRaw, walletAggregate, payoutGroups, visibilityEnabled, availablePrograms] =
+    const [activePartners, pendingKyc, pendingVisibilityRaw, walletAggregate, payoutGroups, visibilityEnabled, catalog] =
       await Promise.all([
         this.prisma.channelPartner.count({
           // isParent:false — parents (owner-group anchors) are non-operating; they must not
@@ -1862,7 +1867,7 @@ export class AdminCoreService {
           where: {
             user: { clientId },
             status: { in: AdminCoreService.PENDING_KYC_STATUSES },
-            ...(program ? { partner: partnerScope } : {}),
+            ...(variants ? { partner: partnerScope } : {}),
           },
         }),
 
@@ -1871,7 +1876,7 @@ export class AdminCoreService {
           where: {
             clientId,
             status: 'SUBMITTED',
-            ...(program ? { outlet: { programName: program } } : {}),
+            ...(variants ? { outlet: { programName: programNameIn(variants) } } : {}),
           },
         }),
 
@@ -1892,8 +1897,9 @@ export class AdminCoreService {
         this.tenantSettings.getVisibilityEnabledUncached(clientId),
 
         // Program dropdown source — full tenant list, independent of the active filter.
-        loadAvailablePrograms(this.prisma, clientId),
+        catalogP,
       ]);
+    const availablePrograms = catalog.available;
 
     // Suppress the visibility KPI for a tenant whose visibility module is OFF.
     const pendingVisibility = visibilityEnabled ? pendingVisibilityRaw : 0;

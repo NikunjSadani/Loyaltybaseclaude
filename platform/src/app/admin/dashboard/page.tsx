@@ -108,7 +108,8 @@ export default function DashboardPage() {
 
   const kpiRefetching = kpiLoading && !!liveKpis;
   const tenantWide = (key: string) => isTenantWideMetric(program, liveKpis?.notProgramScoped, key);
-  const showProgramUi = programOptions.length >= MIN_PROGRAMS_FOR_FILTER || !!programState.droppedProgram;
+  // A program that is ACTIVE keeps the filter on screen even if /kpis failed (never a hidden filter).
+  const showProgramUi = programOptions.length >= MIN_PROGRAMS_FOR_FILTER || !!programState.droppedProgram || !!program;
 
   // Build the cards from real data; '—' until the endpoint responds (never a fabricated number).
   const displayedKpiCards = useMemo(() => {

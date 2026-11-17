@@ -238,7 +238,8 @@ export default function AdminProgramHealthDashboardPage() {
   // no full-page spinner blank / layout jump.
   const refetching = loading && !!data;
 
-  const showProgramUi = programOptions.length >= MIN_PROGRAMS_FOR_FILTER || !!programState.droppedProgram || refetching;
+  // An ACTIVE program keeps the filter visible even when the load failed (never a hidden filter).
+  const showProgramUi = programOptions.length >= MIN_PROGRAMS_FOR_FILTER || !!programState.droppedProgram || refetching || !!program;
   const programFilter = !showProgramUi ? null : (
     <div className="flex items-center gap-2 flex-wrap justify-end">
       {refetching && (

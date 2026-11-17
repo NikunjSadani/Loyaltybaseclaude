@@ -4,15 +4,18 @@
  * Monthly billing progress — Overview dashboard card (all tenants).
  *
  * 100% wired to GET /api/admin/dashboard/billing-progress (proxy → /v1/admin/dashboard/billing-progress):
- * how far each outlet has billed against its headline-KPI target this month, bucketed 0 → 100%+, with a
- * pace line ("Day 16 of 30 · N outlets behind pace") and the outlets with NO target called out separately.
- * Clicking a bucket / "behind pace" / "no target" opens the outlet list
+ * how far each outlet has billed against its target for ONE KPI this month (the tenant's primary KPI, or the
+ * platform fallback), bucketed 0 → 100%+, with a pace line paced to the DATA date ("Day 12 of 30 · N outlets
+ * behind pace" + what "behind pace" means), and every outlet that isn't bucketed called out: no target,
+ * not covered by the KPI's applies-to scope, and target rows for outlets outside the live roster.
+ * Clicking a bucket / "behind pace" / "no target" / "not covered" opens the outlet list
  * (GET …/billing-progress/outlets, paginated) with a Download Excel button (…/billing-progress/outlets/export,
  * export kind `billing-progress-outlets` — streams instantly, or 202 → Downloads page via useDownloadAction).
  *
- * Program: follows the Overview page's program filter (no dropdown on the card itself).
- * Honest states: no headline KPI → says so (no fake zeros); no sales uploaded yet → says so; fetch failure →
- * an error (the previous filter's numbers are never left on screen under new filters).
+ * Program: follows the Overview page's program filter (no dropdown on the card itself); the subtitle names it.
+ * Honest states: no enabled KPI → the card is hidden; no sales uploaded yet → says so (no fake zeros, no red
+ * "behind pace"); future month → empty state; past month → "missed target"; fetch failure → an error (the previous
+ * filter's numbers are never left on screen under new filters).
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertCircle, ChevronLeft, ChevronRight, Download, Loader2, Receipt, RefreshCw } from 'lucide-react';
@@ -25,8 +28,7 @@ import { Modal } from '@/components/ui/modal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
-// TODO(orchestrator): confirm the export kind key. Backend registers it as BILLING_PROGRESS_OUTLETS_KIND_ID in
-// api/src/exports/kinds/batch2/billing-progress.kind.ts and serves it at GET admin/dashboard/billing-progress/outlets/export.
+/** Backend: BILLING_PROGRESS_OUTLETS_KIND_ID (api/src/exports/kinds/batch2/billing-progress.kind.ts). */
 export const BILLING_PROGRESS_EXPORT_KIND = 'billing-progress-outlets';
 
 export const BILLING_PROGRESS_URL = '/api/admin/dashboard/billing-progress';
@@ -39,7 +41,7 @@ export const BILLING_MONTHS_BACK = 12;
 /* ─── API contract ─────────────────────────────────────────────────────────── */
 
 export type BillingBucketKey = 'NOT_STARTED' | 'P0_20' | 'P20_40' | 'P40_60' | 'P60_80' | 'P80_100' | 'ACHIEVED';
-export type BillingListKey = BillingBucketKey | 'BEHIND_PACE' | 'NO_TARGET';
+export type BillingListKey = BillingBucketKey | 'BEHIND_PACE' | 'NO_TARGET' | 'NOT_COVERED';
 
 export interface BillingBucket {
   key: BillingBucketKey;
@@ -56,11 +58,19 @@ export interface BillingProgressData {
   month: string;
   kpi: { code: string; label: string; unit: string } | null;
   asOf: string | null;
-  daysElapsed: number;
+  monthStatus?: 'PAST' | 'CURRENT' | 'FUTURE';
+  /** null = no pace (no sales yet, or a future month). */
+  daysElapsed: number | null;
   daysInMonth: number;
-  pacePct: number;
+  pacePct: number | null;
+  /** The IST date pace is measured to (YYYY-MM-DD). */
+  paceAsOf?: string | null;
+  /** Outlets with a positive target (KYC-pending included). */
   outletsInScope: number;
   outletsWithoutTarget: number;
+  outletsNotCovered?: number;
+  targetsOutsideRoster?: number;
+  /** Σ over the outlets WITH a target only. */
   totals: { targetSum: number; achievedSum: number };
   behindPace: { count: number; targetSum: number; achievedSum: number };
   buckets: BillingBucket[];
@@ -118,14 +128,28 @@ export function fmtBillingAmount(value: number, unit: string | null | undefined)
   return `${fmtKpiNum(value, unit)}${unit ? ` ${unit}` : ''}`;
 }
 
-/** Exact figure (table cells / tooltips): INR → ₹ whole rupees with Indian grouping; other units ≤ 2 dp. */
+/** Exact figure (table cells / tooltips / aria): INR → ₹ whole rupees with Indian grouping; other units ≤ 2 dp. */
 export function fmtBillingExact(value: number, unit: string | null | undefined): string {
   return isInrUnit(unit) ? `₹${fmtKpiNum(value, unit)}` : fmtKpiNum(value, unit);
 }
 
-function pctOf(achieved: number, target: number): string {
+/** Column-header unit: INR → "(₹)", another unit → "(<unit>)", none → "". */
+export function unitHeader(unit: string | null | undefined): string {
+  if (isInrUnit(unit)) return ' (₹)';
+  const u = (unit ?? '').trim();
+  return u ? ` (${u})` : '';
+}
+
+/**
+ * Achieved ÷ target, 1 dp — FLOORED below 100 (99.96 → 99.9) so an unmet total never reads "100.0%";
+ * the same rule the outlet rows use (backend `displayPct`).
+ */
+export function pctOf(achieved: number, target: number): string {
   if (!(target > 0)) return '—';
-  return `${((achieved / target) * 100).toFixed(1)}%`;
+  const raw = (achieved / target) * 100;
+  const met = target - achieved < 0.005;
+  const shown = met ? Math.max(100, Math.floor(raw * 10) / 10) : Math.min(99.9, Math.floor(raw * 10) / 10);
+  return `${shown.toFixed(1)}%`;
 }
 
 const fmtInt = (n: number) => (Number.isFinite(n) ? n : 0).toLocaleString('en-IN');
@@ -158,16 +182,30 @@ async function readError(r: Response): Promise<string> {
   return `Request failed (${r.status})`;
 }
 
-/** Sequential scale low → high (one hue); "Not started" is the neutral dark anchor so it stands out. */
+/**
+ * Colours: "Not started" = a clearly distinct LIGHT grey (always drawn with a border / stripe so it reads on
+ * white); the middle bands = a blue ramp light → dark, every step ≥ 3:1 against white (WCAG non-text);
+ * Achieved = green. The text labels stay the source of truth.
+ */
 export const BUCKET_COLORS: Record<BillingBucketKey, string> = {
-  NOT_STARTED: '#4b5563',
-  P0_20: '#bfdbfe',
-  P20_40: '#93c5fd',
-  P40_60: '#60a5fa',
-  P60_80: '#3b82f6',
-  P80_100: '#2563eb',
-  ACHIEVED: '#1e40af',
+  NOT_STARTED: '#e5e7eb',
+  P0_20: '#3b82f6',
+  P20_40: '#2563eb',
+  P40_60: '#1d4ed8',
+  P60_80: '#1e40af',
+  P80_100: '#1e3a8a',
+  ACHIEVED: '#15803d',
 };
+const NOT_STARTED_BORDER = '#9ca3af';
+const NOT_STARTED_STRIPES = `repeating-linear-gradient(45deg, ${BUCKET_COLORS.NOT_STARTED} 0 4px, #d1d5db 4px 6px)`;
+
+/** Inline style for a bucket swatch / bar segment (Not started gets its stripe + border). */
+function bucketStyle(key: BillingBucketKey): React.CSSProperties {
+  if (key === 'NOT_STARTED') {
+    return { background: NOT_STARTED_STRIPES, border: `1px solid ${NOT_STARTED_BORDER}` };
+  }
+  return { backgroundColor: BUCKET_COLORS[key] ?? '#6b7280' };
+}
 
 /* ─── Card ─────────────────────────────────────────────────────────────────── */
 
@@ -232,16 +270,19 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
     }
     return [...groups.entries()];
   }, [opts.managers]);
+  const managerName = managerId ? opts.managers.find((m) => m.id === managerId)?.name ?? null : null;
 
   const openDrill = useCallback((key: BillingListKey, label: string) => setDrill({ key, label }), []);
 
-  const subtitle = !data
-    ? null
-    : !kpi
-      ? null
-      : data.asOf
-        ? `Against each outlet's ${kpi.label} target · Data as of ${formatISTDate(data.asOf) || data.asOf}`
-        : `Against each outlet's ${kpi.label} target · No sales data uploaded for this month yet`;
+  // F3: the tenant has no enabled KPI at all → nothing to report; the card is hidden (no fake zeros).
+  if (data && !kpi && !loading && !error) return null;
+
+  const subtitleParts = [
+    kpi ? `Against each outlet's ${kpi.label} target` : null,
+    program ? `Program: ${program}` : null,
+    data?.asOf ? `Data as of ${formatISTDate(data.asOf) || data.asOf}` : null,
+  ].filter((p): p is string => !!p);
+  const subtitle = subtitleParts.length ? subtitleParts.join(' · ') : null;
 
   const selectCls = 'w-full sm:w-auto min-w-0 border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-800 bg-white focus:outline-none focus:border-[var(--brand-primary)]';
 
@@ -326,18 +367,22 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
           <Loader2 className="w-5 h-5 animate-spin" aria-hidden="true" />
           <span className="text-sm">Loading billing progress…</span>
         </div>
-      ) : error || !data ? (
+      ) : error || !data || !kpi ? (
         <div role="alert" data-testid="billing-progress-error" className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-xs text-red-700">
           <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
           <span>Couldn&apos;t load billing progress — {error ?? 'No data was returned by the server.'} Please refresh or try again later.</span>
         </div>
-      ) : !kpi ? (
-        <p className="py-8 text-center text-sm text-gray-500" data-testid="billing-progress-no-kpi">
-          No headline target KPI configured for this tenant
-        </p>
       ) : (
         <div className={`space-y-4 transition-opacity ${refetching ? 'opacity-60' : ''}`}>
-          <BillingBody data={data} unit={unit} kpiLabel={kpi.label} monthLabel={titleMonth} disabled={refetching} onOpen={openDrill} />
+          <BillingBody
+            data={data}
+            unit={unit}
+            kpiLabel={kpi.label}
+            monthLabel={titleMonth}
+            filtered={!!(program || outletType || managerId)}
+            disabled={refetching}
+            onOpen={openDrill}
+          />
         </div>
       )}
 
@@ -347,6 +392,7 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
           listKey={drill.key}
           listLabel={drill.label}
           monthLabel={titleMonth}
+          managerName={managerName}
           unit={unit}
           onClose={() => setDrill(null)}
         />
@@ -358,15 +404,21 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
 /* ─── Body (headline + distribution) ───────────────────────────────────────── */
 
 function BillingBody({
-  data, unit, kpiLabel, monthLabel, disabled, onOpen,
+  data, unit, kpiLabel, monthLabel, filtered, disabled, onOpen,
 }: {
   data: BillingProgressData;
   unit: string;
   kpiLabel: string;
   monthLabel: string;
+  filtered: boolean;
   disabled: boolean;
   onOpen: (key: BillingListKey, label: string) => void;
 }) {
+  const isPast = data.monthStatus === 'PAST';
+  const notCovered = data.outletsNotCovered ?? 0;
+  const outsideRoster = data.targetsOutsideRoster ?? 0;
+
+  const linkCls = 'text-left text-xs text-gray-600 underline decoration-dotted underline-offset-2 hover:text-gray-900 disabled:opacity-60';
   const noTargetLabel = `No ${kpiLabel} target`;
   const noTargetLine = data.outletsWithoutTarget > 0 ? (
     <button
@@ -374,7 +426,7 @@ function BillingBody({
       disabled={disabled}
       onClick={() => onOpen('NO_TARGET', noTargetLabel)}
       data-testid="billing-no-target"
-      className="text-left text-xs text-gray-600 underline decoration-dotted underline-offset-2 hover:text-gray-900 disabled:opacity-60"
+      className={linkCls}
     >
       {fmtInt(data.outletsWithoutTarget)} active {plural(data.outletsWithoutTarget, 'outlet has', 'outlets have')} no {kpiLabel} target this month
     </button>
@@ -383,6 +435,44 @@ function BillingBody({
       Every active outlet has a {kpiLabel} target this month
     </p>
   );
+  const notCoveredLine = notCovered > 0 ? (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => onOpen('NOT_COVERED', `Not covered by the ${kpiLabel} target`)}
+      data-testid="billing-not-covered"
+      className={linkCls}
+    >
+      {fmtInt(notCovered)} {plural(notCovered, "outlet isn't", "outlets aren't")} covered by the {kpiLabel} target
+    </button>
+  ) : null;
+  const outsideRosterLine = outsideRoster > 0 ? (
+    <p className="text-xs text-amber-800" data-testid="billing-outside-roster">
+      {fmtInt(outsideRoster)} target {plural(outsideRoster, 'row', 'rows')} for this month {plural(outsideRoster, 'belongs', 'belong')} to
+      outlets that aren&apos;t in the live roster (deleted, parked or not interested) and aren&apos;t counted here.
+      {filtered ? ' (tenant-wide)' : ''}
+    </p>
+  ) : null;
+  const kycNote = (
+    <p className="text-[11px] text-gray-500" data-testid="billing-kyc-note">Includes outlets whose KYC is still pending.</p>
+  );
+  const sideLines = (
+    <div className="flex flex-col items-start gap-1">
+      {noTargetLine}
+      {notCoveredLine}
+      {outsideRosterLine}
+      {kycNote}
+    </div>
+  );
+
+  // Future month — nothing has happened yet.
+  if (data.monthStatus === 'FUTURE') {
+    return (
+      <div className="space-y-3" data-testid="billing-future-month">
+        <p className="py-6 text-center text-sm text-gray-500">{monthLabel} hasn&apos;t started yet.</p>
+      </div>
+    );
+  }
 
   if (data.outletsInScope === 0) {
     return (
@@ -390,26 +480,54 @@ function BillingBody({
         <p className="py-6 text-center text-sm text-gray-500">
           No outlets have a {kpiLabel} target for {monthLabel} with these filters.
         </p>
-        {data.outletsWithoutTarget > 0 && noTargetLine}
+        {sideLines}
       </div>
     );
   }
 
   const { totals, behindPace } = data;
+  const headlineCount = (
+    <div className="rounded-lg bg-gray-50 border border-gray-100 px-3 py-2.5 min-w-0">
+      <p className="text-[11px] text-gray-500">Outlets with a target</p>
+      <p className="text-xl font-bold text-gray-900" data-testid="billing-outlets-in-scope">{fmtInt(data.outletsInScope)}</p>
+    </div>
+  );
+
+  // F2: no sales uploaded for the month — show the target, not fake zeros or a red "behind pace".
+  if (!data.asOf) {
+    return (
+      <>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {headlineCount}
+          <div className="rounded-lg bg-gray-50 border border-gray-100 px-3 py-2.5 min-w-0 sm:col-span-2">
+            <p className="text-[11px] text-gray-500">Target (outlets with a target)</p>
+            <p className="text-xl font-bold text-gray-900 break-words" data-testid="billing-target-total">
+              <span title={fmtBillingExact(totals.targetSum, unit)}>{fmtBillingAmount(totals.targetSum, unit)}</span>
+            </p>
+          </div>
+        </div>
+        <p className="rounded-lg border border-dashed border-gray-300 px-3 py-4 text-center text-sm text-gray-600" data-testid="billing-no-sales">
+          No sales uploaded for {monthLabel} yet
+        </p>
+        {sideLines}
+      </>
+    );
+  }
+
   const totalCount = data.buckets.reduce((s, b) => s + b.count, 0) || 1;
   const notStarted = data.buckets.find((b) => b.key === 'NOT_STARTED');
   const rest = data.buckets.filter((b) => b.key !== 'NOT_STARTED');
+  const behindWord = isPast ? 'missed target' : 'behind pace';
+  const behindListLabel = isPast ? 'Missed target' : 'Behind pace';
+  const hasPace = data.pacePct !== null && data.pacePct !== undefined && data.daysElapsed !== null && data.daysElapsed !== undefined;
 
   return (
     <>
       {/* Headline */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <div className="rounded-lg bg-gray-50 border border-gray-100 px-3 py-2.5 min-w-0">
-          <p className="text-[11px] text-gray-500">Outlets with a target</p>
-          <p className="text-xl font-bold text-gray-900" data-testid="billing-outlets-in-scope">{fmtInt(data.outletsInScope)}</p>
-        </div>
+        {headlineCount}
         <div className="rounded-lg bg-gray-50 border border-gray-100 px-3 py-2.5 min-w-0 sm:col-span-2">
-          <p className="text-[11px] text-gray-500">Billed vs target</p>
+          <p className="text-[11px] text-gray-500" data-testid="billing-totals-label">Billed vs target (outlets with a target)</p>
           <p className="text-xl font-bold text-gray-900 break-words" data-testid="billing-totals">
             <span title={fmtBillingExact(totals.achievedSum, unit)}>{fmtBillingAmount(totals.achievedSum, unit)}</span>
             <span className="text-sm font-medium text-gray-500">
@@ -420,23 +538,34 @@ function BillingBody({
         </div>
       </div>
 
-      {/* Pace */}
-      <p className="text-xs text-gray-600" data-testid="billing-pace">
-        Day {fmtInt(data.daysElapsed)} of {fmtInt(data.daysInMonth)} ({data.pacePct}% of month) ·{' '}
-        {behindPace.count > 0 ? (
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onOpen('BEHIND_PACE', 'Behind pace')}
-            data-testid="billing-behind-pace"
-            className="font-semibold text-red-700 underline decoration-dotted underline-offset-2 hover:text-red-900 disabled:opacity-60"
-          >
-            {fmtInt(behindPace.count)} {plural(behindPace.count, 'outlet', 'outlets')} behind pace
-          </button>
-        ) : (
-          <span className="font-semibold text-emerald-700" data-testid="billing-behind-pace">0 outlets behind pace</span>
-        )}
-      </p>
+      {/* Pace (to the data date) */}
+      {hasPace && (
+        <div className="space-y-0.5">
+          <p className="text-xs text-gray-600" data-testid="billing-pace">
+            {isPast
+              ? 'Full month · '
+              : `Day ${fmtInt(data.daysElapsed as number)} of ${fmtInt(data.daysInMonth)} (${data.pacePct}% of month) · `}
+            {behindPace.count > 0 ? (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onOpen('BEHIND_PACE', behindListLabel)}
+                data-testid="billing-behind-pace"
+                className="font-semibold text-red-700 underline decoration-dotted underline-offset-2 hover:text-red-900 disabled:opacity-60"
+              >
+                {fmtInt(behindPace.count)} {plural(behindPace.count, 'outlet', 'outlets')} {behindWord}
+              </button>
+            ) : (
+              <span className="font-semibold text-emerald-700" data-testid="billing-behind-pace">0 outlets {behindWord}</span>
+            )}
+          </p>
+          {!isPast && data.paceAsOf && (
+            <p className="text-[11px] text-gray-500" data-testid="billing-pace-caption">
+              Behind pace = billed less than {data.pacePct}% of target by {formatISTDate(data.paceAsOf) || data.paceAsOf}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Distribution: stacked bar (visual) + labelled, clickable rows (the accessible source of truth) */}
       <div className="space-y-3">
@@ -445,7 +574,7 @@ function BillingBody({
             <div
               key={b.key}
               className="h-full first:rounded-l-full last:rounded-r-full"
-              style={{ width: `${(b.count / totalCount) * 100}%`, backgroundColor: BUCKET_COLORS[b.key] ?? '#9ca3af' }}
+              style={{ width: `${(b.count / totalCount) * 100}%`, ...bucketStyle(b.key) }}
               title={`${b.label}: ${fmtInt(b.count)} outlets`}
             />
           ))}
@@ -465,7 +594,7 @@ function BillingBody({
         </ul>
       </div>
 
-      {noTargetLine}
+      {sideLines}
     </>
   );
 }
@@ -481,7 +610,8 @@ function BucketButton({
 }) {
   const target = fmtBillingAmount(bucket.targetSum, unit);
   const billed = fmtBillingAmount(bucket.achievedSum, unit);
-  const aria = `${bucket.label}: ${fmtInt(bucket.count)} ${plural(bucket.count, 'outlet', 'outlets')}, ${bucket.pctOfOutlets}% of outlets, target ${target}, billed ${billed}. Show outlets`;
+  // Screen readers get the EXACT figures (the compact L / Cr text is for the eye).
+  const aria = `${bucket.label}: ${fmtInt(bucket.count)} ${plural(bucket.count, 'outlet', 'outlets')}, ${bucket.pctOfOutlets}% of outlets, target ${fmtBillingExact(bucket.targetSum, unit)}, billed ${fmtBillingExact(bucket.achievedSum, unit)}. Show outlets`;
   return (
     <button
       type="button"
@@ -495,7 +625,12 @@ function BucketButton({
     >
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-1.5 min-w-0">
-          <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: BUCKET_COLORS[bucket.key] ?? '#9ca3af' }} aria-hidden="true" />
+          <span
+            className="w-2.5 h-2.5 rounded-sm shrink-0"
+            style={bucketStyle(bucket.key)}
+            data-testid={`billing-swatch-${bucket.key}`}
+            aria-hidden="true"
+          />
           <span className={`truncate ${prominent ? 'text-sm font-bold text-gray-900' : 'text-xs font-semibold text-gray-700'}`}>{bucket.label}</span>
         </span>
         <span className="text-[11px] text-gray-500 shrink-0">{bucket.pctOfOutlets}% of outlets</span>
@@ -514,19 +649,23 @@ function BucketButton({
 /* ─── Drill-down ───────────────────────────────────────────────────────────── */
 
 function BillingDrillDown({
-  filters, listKey, listLabel, monthLabel, unit, onClose,
+  filters, listKey, listLabel, monthLabel, managerName, unit, onClose,
 }: {
   filters: Filters;
   listKey: BillingListKey;
   listLabel: string;
   monthLabel: string;
+  managerName: string | null;
   unit: string;
   onClose: () => void;
 }) {
   const [page, setPage] = useState(1);
   const [result, setResult] = useState<BillingOutletsPage | null>(null);
+  // Last known total / page size — paging keeps working after a failed page load.
+  const [known, setKnown] = useState<{ total: number; pageSize: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const exportAction = useDownloadAction();
 
   useEffect(() => {
@@ -539,7 +678,9 @@ function BillingDrillDown({
         if (!r.ok) throw new Error(await readError(r));
         const payload = unwrap<BillingOutletsPage>(await r.json());
         if (!payload || !Array.isArray(payload.rows)) throw new Error('Empty or malformed response');
-        if (!cancelled) setResult(payload);
+        if (cancelled) return;
+        setResult(payload);
+        setKnown({ total: payload.total, pageSize: payload.pageSize || BILLING_OUTLETS_PAGE_SIZE });
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -549,13 +690,16 @@ function BillingDrillDown({
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [filters, listKey, page]);
+  }, [filters, listKey, page, attempt]);
 
-  const total = result?.total ?? 0;
-  const pageSize = result?.pageSize || BILLING_OUTLETS_PAGE_SIZE;
+  const total = known?.total ?? 0;
+  const pageSize = known?.pageSize ?? BILLING_OUTLETS_PAGE_SIZE;
   const pages = Math.max(1, Math.ceil(total / pageSize));
-  const from = total === 0 ? 0 : (page - 1) * pageSize + 1;
-  const to = Math.min(total, page * pageSize);
+  // The range describes the rows ON SCREEN — i.e. the page the server returned, not the one requested.
+  const shownPage = result?.page ?? page;
+  const shownSize = result?.pageSize || pageSize;
+  const from = !result || result.total === 0 ? 0 : (shownPage - 1) * shownSize + 1;
+  const to = result ? Math.min(result.total, shownPage * shownSize) : 0;
 
   const runExport = exportAction.run;
   const handleExport = useCallback(() => {
@@ -568,6 +712,12 @@ function BillingDrillDown({
   const filterBits = [monthLabel];
   if (filters.program) filterBits.push(`Program: ${filters.program}`);
   if (filters.outletType) filterBits.push(`Outlet type: ${filters.outletType}`);
+  if (filters.managerId) filterBits.push(`Manager: ${managerName ?? 'selected manager'} (and team)`);
+
+  const u = unitHeader(unit);
+  // Phone (< sm): Outlet, %, Billed, Target (+ SO) — Program / Type / ASM only from sm up.
+  const wide = 'hidden sm:table-cell';
+  const th = 'font-semibold px-3 py-2';
 
   return (
     <Modal
@@ -579,13 +729,19 @@ function BillingDrillDown({
     >
       <div className="space-y-3" data-testid="billing-drilldown">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs text-gray-500" data-testid="billing-drilldown-count">
-            {loading && !result ? 'Loading outlets…' : `Showing ${fmtInt(from)}–${fmtInt(to)} of ${fmtInt(total)} ${plural(total, 'outlet', 'outlets')}`}
-          </p>
+          {error ? (
+            <span />
+          ) : (
+            <p className="text-xs text-gray-500" data-testid="billing-drilldown-count">
+              {loading && !result
+                ? 'Loading outlets…'
+                : `Showing ${fmtInt(from)}–${fmtInt(to)} of ${fmtInt(result?.total ?? total)} ${plural(result?.total ?? total, 'outlet', 'outlets')}`}
+            </p>
+          )}
           <button
             type="button"
             onClick={handleExport}
-            disabled={exportAction.blocked || total === 0}
+            disabled={exportAction.blocked}
             data-testid="billing-download-excel"
             className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
           >
@@ -596,23 +752,32 @@ function BillingDrillDown({
         <DownloadActionStatus action={exportAction} />
 
         {error ? (
-          <div role="alert" data-testid="billing-drilldown-error" className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-xs text-red-700">
+          <div role="alert" data-testid="billing-drilldown-error" className="flex flex-wrap items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-xs text-red-700">
             <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
-            <span>Couldn&apos;t load the outlet list — {error}</span>
+            <span className="min-w-0 flex-1">Couldn&apos;t load the outlet list — {error}</span>
+            <button
+              type="button"
+              onClick={() => setAttempt((n) => n + 1)}
+              disabled={loading}
+              data-testid="billing-drilldown-retry"
+              className="inline-flex items-center gap-1 rounded-md border border-red-300 bg-white px-2 py-1 font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60"
+            >
+              <RefreshCw className="w-3 h-3" aria-hidden="true" /> Retry
+            </button>
           </div>
         ) : (
           <div className={`overflow-x-auto rounded-lg border border-gray-100 ${loading && result ? 'opacity-60' : ''}`} aria-busy={loading || undefined}>
             <table className="w-full text-xs">
               <thead className="bg-gray-50 text-gray-500">
                 <tr>
-                  <th scope="col" className="text-left font-semibold px-3 py-2">Outlet</th>
-                  <th scope="col" className="text-left font-semibold px-3 py-2">Program</th>
-                  <th scope="col" className="text-left font-semibold px-3 py-2">Type</th>
-                  <th scope="col" className="text-left font-semibold px-3 py-2">SO</th>
-                  <th scope="col" className="text-left font-semibold px-3 py-2">ASM</th>
-                  <th scope="col" className="text-right font-semibold px-3 py-2">Target</th>
-                  <th scope="col" className="text-right font-semibold px-3 py-2">Billed</th>
-                  <th scope="col" className="text-right font-semibold px-3 py-2">%</th>
+                  <th scope="col" className={`text-left ${th}`}>Outlet</th>
+                  <th scope="col" className={`text-right ${th}`}>%</th>
+                  <th scope="col" className={`text-right ${th} whitespace-nowrap`}>Billed{u}</th>
+                  <th scope="col" className={`text-right ${th} whitespace-nowrap`}>Target{u}</th>
+                  <th scope="col" className={`text-left ${th}`}>SO</th>
+                  <th scope="col" className={`text-left ${th} ${wide}`}>ASM</th>
+                  <th scope="col" className={`text-left ${th} ${wide}`}>Program</th>
+                  <th scope="col" className={`text-left ${th} ${wide}`}>Type</th>
                 </tr>
               </thead>
               <tbody>
@@ -624,17 +789,17 @@ function BillingDrillDown({
                 )}
                 {result?.rows.map((r) => (
                   <tr key={r.outletCode} className="border-t border-gray-50">
-                    <td className="px-3 py-2 min-w-[10rem]">
+                    <td className="px-3 py-2 min-w-[8rem] sm:min-w-[10rem]">
                       <span className="font-medium text-gray-800">{r.outletName}</span>
                       <span className="block text-[10px] text-gray-400">{r.outletCode}</span>
                     </td>
-                    <td className="px-3 py-2 text-gray-600">{r.program ?? '—'}</td>
-                    <td className="px-3 py-2 text-gray-600">{r.outletType ?? '—'}</td>
-                    <td className="px-3 py-2 text-gray-600">{r.soName ?? '—'}</td>
-                    <td className="px-3 py-2 text-gray-600">{r.asmName ?? '—'}</td>
-                    <td className="px-3 py-2 text-right text-gray-600 whitespace-nowrap">{fmtBillingExact(r.target, unit)}</td>
-                    <td className="px-3 py-2 text-right font-semibold text-gray-800 whitespace-nowrap">{fmtBillingExact(r.achieved, unit)}</td>
                     <td className="px-3 py-2 text-right text-gray-600 whitespace-nowrap">{r.pct === null || r.pct === undefined ? '—' : `${r.pct.toFixed(1)}%`}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-gray-800 whitespace-nowrap">{fmtBillingExact(r.achieved, unit)}</td>
+                    <td className="px-3 py-2 text-right text-gray-600 whitespace-nowrap">{fmtBillingExact(r.target, unit)}</td>
+                    <td className="px-3 py-2 text-gray-600">{r.soName ?? '—'}</td>
+                    <td className={`px-3 py-2 text-gray-600 ${wide}`}>{r.asmName ?? '—'}</td>
+                    <td className={`px-3 py-2 text-gray-600 ${wide}`}>{r.program ?? '—'}</td>
+                    <td className={`px-3 py-2 text-gray-600 ${wide}`}>{r.outletType ?? '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -653,7 +818,7 @@ function BillingDrillDown({
             >
               <ChevronLeft className="w-3.5 h-3.5" aria-hidden="true" /> Previous
             </button>
-            <span className="text-xs text-gray-500">Page {page} of {pages}</span>
+            <span className="text-xs text-gray-500">Page {shownPage} of {pages}</span>
             <button
               type="button"
               onClick={() => setPage((p) => Math.min(pages, p + 1))}

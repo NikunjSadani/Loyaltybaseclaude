@@ -370,7 +370,10 @@ describe('ProgramHealthDashboardService', () => {
   });
 
   describe('program filter', () => {
-    const gold = { outlets: { some: { programName: 'Gold' } } };
+    const gold = { outlets: { some: { programName: { in: ['Gold', 'Gold '] }, deletedAt: null, deactivatedAt: null, OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }] } } };
+    /** The universe pull = the first NON-distinct outlet.findMany. */
+    const universeWhere = () =>
+      mockPrisma.outlet.findMany.mock.calls.find((c: [{ distinct?: unknown }]) => !c[0].distinct)![0].where;
 
     it('absent / blank program → the pre-filter where clauses exactly + availablePrograms', async () => {
       mockPrisma.outlet.findMany.mockImplementation((args: { distinct?: unknown }) =>
@@ -394,10 +397,14 @@ describe('ProgramHealthDashboardService', () => {
       }
     });
 
-    it('a program scopes the outlet universe, ledger, liability and redemptions through outlets', async () => {
+    it('N5/N6 a program scopes the universe, ledger, liability and redemptions through LIVE outlets (all variants)', async () => {
+      mockPrisma.outlet.findMany.mockImplementation((args: { distinct?: unknown }) =>
+        Promise.resolve(args.distinct ? [{ programName: 'Gold' }, { programName: 'Gold ' }, { programName: 'Silver' }] : []),
+      );
       const res = await service.programHealth(user, PERIOD, ' Gold ');
       expect(res.scope.program).toBe('Gold');
-      expect(mockPrisma.outlet.findMany.mock.calls[0][0].where.programName).toBe('Gold');
+      expect(res.availablePrograms).toEqual(['Gold', 'Silver']);
+      expect(universeWhere().programName).toEqual({ in: ['Gold', 'Gold '] });
       for (const call of mockPrisma.pointsLedger.aggregate.mock.calls) {
         expect(call[0].where.wallet).toEqual({ partner: { user: { clientId: 'deoleo' }, ...gold } });
       }
@@ -411,21 +418,26 @@ describe('ProgramHealthDashboardService', () => {
       mockPrisma.kpiDef.findMany.mockResolvedValue([
         { code: 'TOTAL', label: 'Total', unit: '', isPrimary: true, outletType: null, outletTypes: [], programs: [], subPrograms: [] },
       ]);
-      // The DB applies the program filter; emulate it on the roster pull.
-      mockPrisma.outlet.findMany.mockImplementation((args: { where?: { programName?: string }; select?: Record<string, unknown>; distinct?: unknown }) => {
-        if (args.distinct) return Promise.resolve([{ programName: 'Gold' }, { programName: 'Silver' }]);
+      // The DB applies the program filter; emulate it on the roster pull (incl. a whitespace variant).
+      mockPrisma.outlet.findMany.mockImplementation((args: { where?: { programName?: { in: string[] } }; select?: Record<string, unknown>; distinct?: unknown }) => {
+        if (args.distinct) return Promise.resolve([{ programName: 'Gold' }, { programName: ' Gold' }, { programName: 'Silver' }]);
         if (args.select && 'partner' in args.select) return Promise.resolve([]);
-        const all = [{ outletCode: 'g1', programName: 'Gold' }, { outletCode: 's1', programName: 'Silver' }];
-        return Promise.resolve(all.filter((o) => !args.where?.programName || o.programName === args.where.programName));
+        const all = [
+          { outletCode: 'g1', programName: 'Gold' },
+          { outletCode: 'g2', programName: ' Gold' },
+          { outletCode: 's1', programName: 'Silver' },
+        ];
+        return Promise.resolve(all.filter((o) => !args.where?.programName || args.where.programName.in.includes(o.programName)));
       });
       mockPrisma.outletTarget.findMany.mockResolvedValue([
         { outletCode: 'g1', targetValues: { TOTAL: 100 } },
+        { outletCode: 'g2', targetValues: { TOTAL: 7 } },
         { outletCode: 's1', targetValues: { TOTAL: 50 } },
       ]);
       const all = await service.programHealth(user, PERIOD);
-      expect(all.targetAchievement.primary?.target).toBe(150);
+      expect(all.targetAchievement.primary?.target).toBe(157);
       const g = await service.programHealth(user, PERIOD, 'Gold');
-      expect(g.targetAchievement.primary?.target).toBe(100);
+      expect(g.targetAchievement.primary?.target).toBe(107); // 'Gold' + ' Gold'
       const unknown = await service.programHealth(user, PERIOD, 'Nope');
       expect(unknown.targetAchievement.primary?.target).toBe(0);
     });

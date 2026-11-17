@@ -3,9 +3,11 @@
 import { BadRequestException } from '@nestjs/common';
 import type { PrismaService } from '../../prisma/prisma.service';
 import type { JwtPayload } from '../../common/decorators/current-user.decorator';
-import { istMonthKey } from '../../common/ist-date';
+import { istDateTimeCell, istMonthKey } from '../../common/ist-date';
 import {
+  BILLING_BUCKETS,
   bucketOf,
+  displayPct,
   loadBillingProgress,
   paceFor,
   parseBillingListKey,
@@ -13,7 +15,11 @@ import {
   selectBillingRows,
   summarizeBillingProgress,
 } from './billing-progress';
-import { BillingProgressDashboardService } from './billing-progress-dashboard.service';
+import {
+  BILLING_CACHE_MAX_ENTRIES,
+  BILLING_CACHE_TTL_MS,
+  BillingProgressDashboardService,
+} from './billing-progress-dashboard.service';
 import { EXPORT_KINDS } from '../../exports/kinds';
 import { BILLING_PROGRESS_OUTLETS_KIND } from '../../exports/kinds/batch2/billing-progress.kind';
 
@@ -49,21 +55,19 @@ function makePrisma(w: World) {
   const tenantOf = (r: { clientId?: string }) => r.clientId ?? T;
   return {
     kpiDef: {
-      findFirst: jest.fn(async ({ where }: { where: Record<string, unknown> }) => {
-        const rows = w.kpis
-          .filter((k) => k.clientId === where.clientId && k.enabled !== false && k.isPrimary === true)
-          .sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0) || String(a.code).localeCompare(String(b.code)));
-        const k = rows[0];
-        return k
-          ? { outletType: null, outletTypes: [], programs: [], subPrograms: [], unit: '', ...k }
-          : null;
-      }),
+      findMany: jest.fn(async ({ where }: { where: Record<string, unknown> }) =>
+        w.kpis
+          .filter((k) => k.clientId === where.clientId && (where.enabled === undefined || (k.enabled !== false) === where.enabled))
+          .sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0) || String(a.code).localeCompare(String(b.code)))
+          .map((k) => ({ outletType: null, outletTypes: [], programs: [], subPrograms: [], unit: '', isPrimary: false, ...k })),
+      ),
     },
     outlet: {
       findMany: jest.fn(async ({ where, distinct }: { where: { clientId: string }; distinct?: string[] }) => {
         const mine = w.outlets.filter((o) => tenantOf(o) === where.clientId);
         if (distinct) {
-          return [...new Set(mine.map((o) => o.program).filter((p): p is string => !!p))].sort().map((programName) => ({ programName }));
+          // Raw distinct values (whitespace variants are distinct rows, exactly like Postgres DISTINCT).
+          return [...new Set(mine.map((o) => o.program).filter((p): p is string => p !== null && p !== undefined))].sort().map((programName) => ({ programName }));
         }
         return mine.map((o) => ({
           outletCode: o.code,
@@ -103,7 +107,7 @@ function makePrisma(w: World) {
       findMany: jest.fn(async ({ where }: { where: { clientId: string; month: string } }) =>
         w.sales
           .filter((r) => tenantOf(r) === where.clientId && r.month === where.month)
-          .map((r) => ({ ...r, updatedAt: r.updatedAt ?? new Date(0) })),
+          .map((r) => ({ ...r, updatedAt: r.updatedAt ?? new Date(Date.UTC(2020, 0, 1)) })), // a real (old) upload time
       ),
     },
     salesImportApply: {
@@ -160,32 +164,98 @@ describe('bucketOf — edges (no rounding before bucketing)', () => {
   });
 });
 
-describe('paceFor (IST)', () => {
-  it('past month → whole month, 100%', () => {
-    const p = paceFor(PAST, new Date());
+describe('paceFor (IST, to the data date)', () => {
+  /** The current IST month's `day`th at 12:00 IST — relative to now, never a hard-coded date. */
+  const istNoonOn = (day: number) => {
+    const [y, m] = istMonthKey(new Date()).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, day, 6, 30));
+  };
+  const dateKeyOf = (month: string, day: number) => `${month}-${String(day).padStart(2, '0')}`;
+
+  it('N2 past month → whole month, 100%, as of the month’s last day', () => {
+    const p = paceFor(PAST, new Date(), '2000-01-01');
+    expect(p.monthStatus).toBe('PAST');
     expect(p.daysElapsed).toBe(p.daysInMonth);
     expect(p.pacePct).toBe(100);
+    expect(p.paceAsOf).toBe(dateKeyOf(PAST, p.daysInMonth));
   });
 
-  it('future month → 0', () => {
-    expect(paceFor(monthOffset(2), new Date()).pacePct).toBe(0);
+  it('N2 future month → no pace', () => {
+    const p = paceFor(monthOffset(2), new Date(), dateKeyOf(monthOffset(2), 1));
+    expect(p).toMatchObject({ monthStatus: 'FUTURE', daysElapsed: null, pacePct: null, paceAsOf: null });
   });
 
-  it('current month → IST day-of-month / days in month (mocked clock, relative to now)', () => {
-    const base = new Date();
-    const [y, m] = istMonthKey(base).split('-').map(Number);
-    // 10th of the current IST month, 12:00 IST (= 06:30 UTC).
-    const now = new Date(Date.UTC(y, m - 1, 10, 6, 30));
-    const p = paceFor(istMonthKey(now), now);
-    const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
-    expect(p).toEqual({ daysElapsed: 10, daysInMonth: dim, pacePct: Math.round((10 / dim) * 100) });
+  it('N2 asOf null → no pace, whatever the month', () => {
+    for (const m of [PAST, istMonthKey(new Date())]) {
+      expect(paceFor(m, new Date(), null)).toMatchObject({ daysElapsed: null, pacePct: null, paceAsOf: null });
+    }
+  });
+
+  it('N2 current month → IST day of min(asOf, today), not today', () => {
+    const now = istNoonOn(20);
+    const month = istMonthKey(now);
+    const dim = daysInMonthOfKey(month);
+    // Data stops at the 12th → pace to the 12th.
+    expect(paceFor(month, now, dateKeyOf(month, 12))).toEqual({
+      monthStatus: 'CURRENT', daysInMonth: dim, daysElapsed: 12,
+      pacePct: Math.round((12 / dim) * 100), paceAsOf: dateKeyOf(month, 12),
+    });
+    // asOf after today (future-dated invoice) → capped at today.
+    expect(paceFor(month, now, dateKeyOf(month, 25)).daysElapsed).toBe(20);
+    // asOf before the month began → 0 days covered.
+    expect(paceFor(month, now, '2000-01-01')).toMatchObject({ daysElapsed: 0, pacePct: 0 });
   });
 
   it('00:30 IST on the 1st is day 1 of the NEW month (not the UTC previous day)', () => {
     const [y, m] = istMonthKey(new Date()).split('-').map(Number);
     const now = new Date(Date.UTC(y, m - 1, 1, 0, 30) - 330 * 60_000); // 00:30 IST on the 1st
-    expect(istMonthKey(now)).toBe(`${y}-${String(m).padStart(2, '0')}`);
-    expect(paceFor(istMonthKey(now), now).daysElapsed).toBe(1);
+    const month = `${y}-${String(m).padStart(2, '0')}`;
+    expect(istMonthKey(now)).toBe(month);
+    expect(paceFor(month, now, dateKeyOf(month, 1)).daysElapsed).toBe(1);
+  });
+});
+
+function daysInMonthOfKey(month: string): number {
+  const [y, m] = month.split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+describe('N3 displayPct + labels', () => {
+  it('labels read as bands', () => {
+    expect(BILLING_BUCKETS.map((b) => b.label)).toEqual([
+      'Not started', 'Under 20%', '20–39%', '40–59%', '60–79%', '80–99%', 'Achieved (100%+)',
+    ]);
+  });
+
+  it.each([
+    [100, 99.96, 'P80_100', 99.9], // floored, never rounded up to 100.0
+    [100, 99.99, 'P80_100', 99.9], // remaining 0.01 ≥ 0.005 → not met
+    [100, 99.996, 'ACHIEVED', 100], // snapped met → shows 100
+    [100, 250, 'ACHIEVED', 250],
+    [100, 19.99, 'P0_20', 19.9],
+    [100_000, 1, 'P0_20', 0.1], // a started outlet never reads 0.0%
+    [100, 20, 'P20_40', 20],
+    [100, 0, 'NOT_STARTED', 0],
+    [100, -10, 'NOT_STARTED', -10],
+  ])('target %p achieved %p → %s shows %p', (t, a, bucketKey, shown) => {
+    const bucket = bucketOf(t, a);
+    expect(bucket).toBe(bucketKey);
+    expect(displayPct(t, a, bucket)).toBe(shown);
+  });
+
+  it('the shown pct never leaves its bucket’s band (sweep incl. float-noise edges)', () => {
+    const targets = [3, 7, 100, 333.33, 12_345_678];
+    for (const t of targets) {
+      for (let i = -5; i <= 1100; i++) {
+        const a = (t * i) / 1000;
+        const bucket = bucketOf(t, a);
+        const p = displayPct(t, a, bucket);
+        const b = BILLING_BUCKETS.find((x) => x.key === bucket)!;
+        expect(p).toBeGreaterThanOrEqual(b.lo);
+        expect(p).toBeLessThanOrEqual(b.hi);
+        if (bucket !== 'ACHIEVED') expect(p).toBeLessThan(100);
+      }
+    }
   });
 });
 
@@ -229,6 +299,32 @@ describe('loadBillingProgress + summary', () => {
     expect(s.behindPace).toEqual({ count: 2, targetSum: 700, achievedSum: 89 });
     expect(s.availablePrograms).toEqual(['Gold', 'Silver']);
     expect(s.availableOutletTypes).toEqual(['RETAIL', 'WHOLESALE']);
+    expect(s.outletsNotCovered).toBe(0);
+    expect(s.monthStatus).toBe('PAST');
+    expect(s.paceAsOf).toBe(`${PAST}-${String(daysInMonthOfKey(PAST)).padStart(2, '0')}`);
+  });
+
+  it('N7 target rows for outlets outside the live roster are counted, never dropped silently', async () => {
+    const s = summarizeBillingProgress(await load(base()));
+    expect(s.targetsOutsideRoster).toBe(1); // GHOST (999)
+    const w = base();
+    w.targets.push({ outletCode: 'GONE', month: PAST, targetValues: { OTHER: 50 } }); // no target for THIS KPI
+    w.targets.push({ outletCode: 'GONE2', month: PAST, targetValues: { TOTAL: 0 } }); // zero target
+    expect(summarizeBillingProgress(await load(w)).targetsOutsideRoster).toBe(1);
+    // A program filter doesn't hide them (they can't be attributed to a program) — tenant-wide.
+    expect(summarizeBillingProgress(await load(base(), { program: 'Gold' })).targetsOutsideRoster).toBe(1);
+  });
+
+  it('N6 program whitespace: dropdown trimmed + distinct; filtering matches every raw variant', async () => {
+    const w = base();
+    w.outlets[1].program = 'Gold '; // B
+    w.outlets.push({ code: 'F', program: '  Gold' }, { code: 'G', program: '   ' });
+    w.targets.push({ outletCode: 'F', month: PAST, targetValues: { TOTAL: 10 } });
+    const d = await load(w, { program: 'Gold' });
+    const s = summarizeBillingProgress(d);
+    expect(s.availablePrograms).toEqual(['Gold', 'Silver']);
+    expect(s.outletsInScope).toBe(3); // A, B ("Gold "), F ("  Gold")
+    expect(d.inScope.find((r) => r.outletCode === 'B')?.program).toBe('Gold'); // shown trimmed
   });
 
   it('program / outletType filters; unknown program → zeros (not an error); dropdowns stay full', async () => {
@@ -267,29 +363,66 @@ describe('loadBillingProgress + summary', () => {
     expect(a1.availableManagers[0]).toEqual({ id: 'rsm', name: 'Rita', levelCode: 'RSM', levelName: 'SM' });
   });
 
-  it('applies-to: an outlet outside the primary KPI scope is excluded from scope AND from without-target', async () => {
+  it('N1 applies-to: outlets outside the KPI scope are NOT dropped — counted as not covered + listed', async () => {
     const w = base();
     w.kpis[0].programs = ['Gold'];
-    const s = summarizeBillingProgress(await load(w));
+    const d = await load(w);
+    const s = summarizeBillingProgress(d);
     expect(s.outletsInScope).toBe(2); // A, B (C is Silver)
     expect(s.outletsWithoutTarget).toBe(1); // E only — D is Silver, out of scope
+    expect(s.outletsNotCovered).toBe(2); // C, D
+    const nc = selectBillingRows(d, 'NOT_COVERED');
+    expect(nc.map((r) => r.outletCode)).toEqual(['C', 'D']);
+    // C's stored target is excluded (platform rule for out-of-scope values) — never mixed into a sum.
+    expect(nc[0]).toMatchObject({ target: 0, achieved: 0, pct: null });
+    expect(s.totals.targetSum).toBe(1500);
+    // Filters narrow the not-covered count too.
+    expect(summarizeBillingProgress(await load(w, { outletType: 'WHOLESALE' })).outletsNotCovered).toBe(1);
   });
 
-  it('tenant with no primary KPI → kpi null, empty buckets, dropdowns still served', async () => {
+  it('N1 KPI choice: no primary flagged → first ENABLED by order, then code', async () => {
     const w = base();
-    w.kpis = [{ clientId: T, code: 'TOTAL', label: 'T', isPrimary: false, enabled: true }];
+    w.kpis = [
+      { clientId: T, code: 'ZED', label: 'Zed', isPrimary: false, enabled: true, order: 1 },
+      { clientId: T, code: 'TOTAL', label: 'Total sales', isPrimary: false, enabled: true, order: 0 },
+      { clientId: T, code: 'AAA', label: 'Aaa', isPrimary: false, enabled: false, order: 0 },
+    ];
+    expect((await load(w)).kpi?.code).toBe('TOTAL');
+    w.kpis[1].order = 1; // tie on order → code (TOTAL < ZED)
+    expect((await load(w)).kpi?.code).toBe('TOTAL');
+    w.kpis.push({ clientId: T, code: 'ABC', label: 'Abc', isPrimary: false, enabled: true, order: 1 });
+    expect((await load(w)).kpi?.code).toBe('ABC');
+  });
+
+  it('N1 KPI choice: a DISABLED primary falls back to the first enabled KPI; the report stays on ONE KPI', async () => {
+    const w = base();
+    w.kpis[0].enabled = false; // TOTAL is flagged primary but disabled
+    w.kpis.push({ clientId: T, code: 'OTHER', label: 'Other', unit: 'cases', isPrimary: false, enabled: true, order: 5 });
+    const s = summarizeBillingProgress(await load(w));
+    expect(s.kpi).toEqual({ code: 'OTHER', label: 'Other', unit: 'cases' });
+    // Only OTHER targets are summed (C: 5, E: 9) — never TOTAL's.
+    expect(s.totals.targetSum).toBe(14);
+    expect(s.outletsInScope).toBe(2);
+  });
+
+  it('N1 an enabled primary wins over order', async () => {
+    const w = base();
+    w.kpis[0].order = 9;
+    w.kpis.push({ clientId: T, code: 'AAA', label: 'A', isPrimary: false, enabled: true, order: 0 });
+    expect((await load(w)).kpi?.code).toBe('TOTAL');
+  });
+
+  it('N1 no ENABLED KPI at all → kpi null, empty buckets, dropdowns still served', async () => {
+    const w = base();
+    w.kpis = [{ clientId: T, code: 'TOTAL', label: 'T', isPrimary: true, enabled: false }];
     const s = summarizeBillingProgress(await load(w));
     expect(s.kpi).toBeNull();
     expect(s.outletsInScope).toBe(0);
     expect(s.outletsWithoutTarget).toBe(0);
+    expect(s.outletsNotCovered).toBe(0);
+    expect(s.targetsOutsideRoster).toBe(0);
     expect(s.buckets.every((b) => b.count === 0)).toBe(true);
     expect(s.availablePrograms).toEqual(['Gold', 'Silver']);
-  });
-
-  it('a disabled primary is ignored', async () => {
-    const w = base();
-    w.kpis[0].enabled = false;
-    expect((await load(w)).kpi).toBeNull();
   });
 
   it('tenant isolation: another tenant’s outlets / targets / KPIs never appear', async () => {
@@ -325,14 +458,42 @@ describe('loadBillingProgress + summary', () => {
         { outletCode: 'B', month, targetValues: { TOTAL: 100 } },
       ],
       sales: [
-        { outletCode: 'A', month, kpiValues: { TOTAL: 10 } },
-        { outletCode: 'B', month, kpiValues: { TOTAL: 90 } },
+        { outletCode: 'A', month, kpiValues: { TOTAL: 10 }, updatedAt: now },
+        { outletCode: 'B', month, kpiValues: { TOTAL: 90 }, updatedAt: now },
       ],
     });
     const s = summarizeBillingProgress(await load(w, { month: null }, now));
     expect(s.month).toBe(month);
     expect(s.daysElapsed).toBe(15);
+    expect(s.paceAsOf).toBe(`${month}-15`);
     expect(s.behindPace.count).toBe(1); // A (10% < ~50%)
+  });
+
+  it('N2 current month: data uploaded up to the 3rd → paced to the 3rd, not today', async () => {
+    const [y, m] = istMonthKey(new Date()).split('-').map(Number);
+    const now = new Date(Date.UTC(y, m - 1, 20, 6, 30)); // 20th IST
+    const dataAt = new Date(Date.UTC(y, m - 1, 3, 6, 30)); // last upload on the 3rd IST
+    const month = istMonthKey(now);
+    const w = world({
+      outlets: [{ code: 'A' }],
+      targets: [{ outletCode: 'A', month, targetValues: { TOTAL: 100 } }],
+      sales: [{ outletCode: 'A', month, kpiValues: { TOTAL: 15 }, updatedAt: dataAt }], // 15% ≥ ~10% pace to the 3rd
+    });
+    const s = summarizeBillingProgress(await load(w, { month: null }, now));
+    expect(s.daysElapsed).toBe(3);
+    expect(s.paceAsOf).toBe(`${month}-03`);
+    expect(s.behindPace.count).toBe(0); // paced to today (20th, ~65%) it would wrongly be behind
+  });
+
+  it('N2 / F2 no sales for the month → asOf null, no pace, nobody behind; target total kept', async () => {
+    const [y, m] = istMonthKey(new Date()).split('-').map(Number);
+    const now = new Date(Date.UTC(y, m - 1, 20, 6, 30));
+    const month = istMonthKey(now);
+    const w = world({ outlets: [{ code: 'A' }], targets: [{ outletCode: 'A', month, targetValues: { TOTAL: 100 } }] });
+    const s = summarizeBillingProgress(await load(w, { month: null }, now));
+    expect(s).toMatchObject({ asOf: null, daysElapsed: null, pacePct: null, paceAsOf: null, monthStatus: 'CURRENT' });
+    expect(s.behindPace.count).toBe(0);
+    expect(s.totals.targetSum).toBe(100);
   });
 });
 
@@ -385,6 +546,37 @@ describe('outlets list + parsing', () => {
     expect(b.outletsInScope).toBe(0);
   });
 
+  it('N4 cache: hit within the TTL; expired entries evicted on every read/write; capped at 10', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      const prisma = makePrisma(w());
+      const svc = new BillingProgressDashboardService(prisma as unknown as PrismaService);
+      const user = { sub: 'u', role: 'CLIENT_ADMIN', clientId: T } as JwtPayload;
+      await svc.summary(user, { month: PAST });
+      await svc.summary(user, { month: PAST });
+      expect(prisma.outletTarget.findMany).toHaveBeenCalledTimes(1); // cached
+      await svc.summary(user, { month: PAST, program: 'Gold' }); // different filters → different key
+      expect(prisma.outletTarget.findMany).toHaveBeenCalledTimes(2);
+      expect(svc.cacheSize).toBe(2);
+      // Expire both; ANY read evicts them (not only the key being read).
+      jest.setSystemTime(Date.now() + BILLING_CACHE_TTL_MS + 1);
+      await svc.summary(user, { month: PAST, outletType: 'RETAIL' });
+      expect(svc.cacheSize).toBe(1);
+      // A re-read of an expired key reloads.
+      await svc.summary(user, { month: PAST });
+      expect(prisma.outletTarget.findMany).toHaveBeenCalledTimes(4);
+      // Cap.
+      for (let i = 0; i < BILLING_CACHE_MAX_ENTRIES + 5; i++) await svc.summary(user, { month: PAST, managerId: `m${i}` });
+      expect(svc.cacheSize).toBe(BILLING_CACHE_MAX_ENTRIES);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('NOT_COVERED is a valid list key', () => {
+    expect(parseBillingListKey('NOT_COVERED')).toBe('NOT_COVERED');
+  });
+
   it('parses / validates filters', () => {
     expect(parseBillingProgressFilters({ month: ' ', program: '  Gold ', outletType: '', requestOrigin: 'x' })).toEqual({
       month: null, program: 'Gold', outletType: null, managerId: null,
@@ -417,12 +609,12 @@ describe('billing-progress-outlets export kind', () => {
         sales: [{ outletCode: 'A', month: PAST, kpiValues: { TOTAL: 100 } }],
       }),
     );
-    const rows: unknown[][] = [];
-    let headers: string[] = [];
+    const sheets: Array<{ name: string; headers: string[]; rows: unknown[][] }> = [];
     const out = {
-      addSheet: async (_n: string, h: string[]) => {
-        headers = h;
-        return { addRow: async (r: unknown[]) => void rows.push(r), rowCount: 0 };
+      addSheet: async (name: string, h: string[]) => {
+        const sh = { name, headers: h, rows: [] as unknown[][] };
+        sheets.push(sh);
+        return { addRow: async (r: unknown[]) => void sh.rows.push(r), rowCount: 0 };
       },
     };
     const params = BILLING_PROGRESS_OUTLETS_KIND.parseParams({ bucket: 'NOT_STARTED', month: PAST }, {} as JwtPayload);
@@ -432,10 +624,58 @@ describe('billing-progress-outlets export kind', () => {
       out as never,
     );
     expect(res.rowCount).toBe(1);
-    expect(headers).toEqual([
+    expect(sheets.map((x) => x.name)).toEqual(['About', 'Billing progress']);
+    // Same word as the screen ("Billed") + units in the headers.
+    expect(sheets[1].headers).toEqual([
       'Outlet Code', 'Outlet Name', 'Program', 'Outlet Type', 'SO', 'ASM',
-      'Total sales Target (INR)', 'Total sales Achieved (INR)', 'Achievement %',
+      'Target (₹)', 'Billed (₹)', 'Achievement %',
     ]);
-    expect(rows[0]).toEqual(['B', 'Outlet B', '', 'RETAIL', '', '', 100, 0, 0]);
+    expect(sheets[1].rows[0]).toEqual(['B', 'Outlet B', '', 'RETAIL', '', '', 100, 0, 0]);
+  });
+
+  it('N9 About sheet: month, KPI, filters (manager NAME), data as of, generated at (IST); non-INR units', async () => {
+    const prisma = makePrisma(
+      world({
+        kpis: [{ clientId: T, code: 'CS', label: 'Cases', unit: 'cases', isPrimary: true, enabled: true }],
+        outlets: [{ code: 'A', program: 'Gold', reps: ['so1'] }],
+        targets: [{ outletCode: 'A', month: PAST, targetValues: { CS: 10 } }],
+        sales: [{ outletCode: 'A', month: PAST, kpiValues: { CS: 2 }, updatedAt: new Date(Date.UTC(2020, 0, 5, 20, 0)) }],
+        salesUsers: [
+          { id: 'asm1', reportingToId: null, level: 3, code: 'ASM', name: 'Asha' },
+          { id: 'so1', reportingToId: 'asm1', level: 2, code: 'SO', name: 'Sonu' },
+        ],
+      }),
+    );
+    const sheets: Array<{ name: string; headers: string[]; rows: unknown[][] }> = [];
+    const out = {
+      addSheet: async (name: string, h: string[]) => {
+        const sh = { name, headers: h, rows: [] as unknown[][] };
+        sheets.push(sh);
+        return { addRow: async (r: unknown[]) => void sh.rows.push(r), rowCount: 0 };
+      },
+    };
+    const now = new Date();
+    const params = BILLING_PROGRESS_OUTLETS_KIND.parseParams(
+      { bucket: 'BEHIND_PACE', month: PAST, program: 'Gold', outletType: 'RETAIL', managerId: 'asm1' },
+      {} as JwtPayload,
+    );
+    const res = await BILLING_PROGRESS_OUTLETS_KIND.run(
+      { prisma, clientId: T, now, user: {} as JwtPayload, moduleRef: {} } as never,
+      params,
+      out as never,
+    );
+    expect(res.rowCount).toBe(1); // About rows are not counted as data rows
+    const about = Object.fromEntries(sheets[0].rows.map((r) => [r[0], r[1]]));
+    const [py, pm] = PAST.split('-').map(Number);
+    expect(about.Month).toBe(`${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][pm - 1]} ${py}`);
+    expect(about.KPI).toBe('Cases (CS)');
+    expect(about.List).toBe('Missed target'); // past-month wording
+    expect(about.Program).toBe('Gold');
+    expect(about['Outlet type']).toBe('RETAIL');
+    expect(about.Manager).toBe('Asha (and their team)');
+    expect(about['Data as of']).toBe('2020-01-06');
+    expect(about['Generated at (IST)']).toBe(istDateTimeCell(now));
+    expect(String(about.Note)).toContain('KYC is still pending');
+    expect(sheets[1].headers.slice(6, 8)).toEqual(['Target (cases)', 'Billed (cases)']);
   });
 });

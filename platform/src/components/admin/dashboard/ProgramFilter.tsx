@@ -5,7 +5,9 @@
  * Monthly billing progress card). Pair with `useDashboardProgram()` (src/lib/dashboard-program.ts).
  *
  *  - Options come from the endpoint's `availablePrograms` (real distinct Outlet.programName values).
- *  - Hidden unless there are at least 2 programs — a single-program tenant sees exactly today's page.
+ *  - Hidden unless there are at least 2 programs — a single-program tenant sees exactly today's page —
+ *    EXCEPT while a program is active: then it always shows (even with no list, e.g. the load failed), so the
+ *    person can see what the screen is filtered by and switch back to All programs.
  *  - '' = "All programs".
  *  - `droppedProgram` → a visible notice that a program from a link / an earlier page isn't available
  *    here and All programs is shown instead (never a silent reset).
@@ -40,8 +42,10 @@ export function ProgramFilter({
   onDismissDropped,
   className = '',
 }: ProgramFilterProps) {
-  const options = programs ?? [];
-  const showSelect = options.length >= MIN_PROGRAMS_FOR_FILTER;
+  const listed = programs ?? [];
+  // The active program is always an option (it may be missing from a failed / stale list).
+  const options = value && !listed.includes(value) ? [value, ...listed] : listed;
+  const showSelect = listed.length >= MIN_PROGRAMS_FOR_FILTER || !!value;
   if (!showSelect && !droppedProgram) return null;
 
   return (

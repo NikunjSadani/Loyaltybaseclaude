@@ -16,8 +16,9 @@ import {
 export const BILLING_LIST_DEFAULT_PAGE_SIZE = 50;
 export const BILLING_LIST_MAX_PAGE_SIZE = 200;
 /** Paging through one tile's list re-uses the computed month for this long (no re-scan per page). */
-const CACHE_TTL_MS = 30_000;
-const CACHE_MAX_ENTRIES = 20;
+export const BILLING_CACHE_TTL_MS = 30_000;
+/** Hard cap — each entry holds a whole month's per-outlet rows (≈6.5k at Bajaj). */
+export const BILLING_CACHE_MAX_ENTRIES = 10;
 
 function intParam(raw: unknown, name: string, def: number, min: number, max: number): number {
   if (raw === undefined || raw === null || raw === '') return def;
@@ -37,20 +38,37 @@ export class BillingProgressDashboardService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Entries currently held (tests / diagnostics). */
+  get cacheSize(): number {
+    return this.cache.size;
+  }
+
+  /** Drop every expired entry (run on every read and write, so stale months never pile up in memory). */
+  private evictExpired(nowMs: number): void {
+    for (const [k, v] of this.cache) if (nowMs - v.at >= BILLING_CACHE_TTL_MS) this.cache.delete(k);
+  }
+
   private load(user: JwtPayload, f: BillingProgressFilters): Promise<BillingProgressData> {
     const now = new Date();
+    const nowMs = now.getTime();
+    this.evictExpired(nowMs);
     const resolved: BillingProgressFilters = { ...f, month: f.month ?? istMonthKey(now) };
+    // Key = tenant + EVERY filter (one tenant never sees another's rows; one filter set never another's).
     const key = JSON.stringify([user.clientId, resolved.month, resolved.program, resolved.outletType, resolved.managerId]);
     const hit = this.cache.get(key);
-    if (hit && now.getTime() - hit.at < CACHE_TTL_MS) return hit.data;
+    if (hit) return hit.data;
 
     const data = loadBillingProgress(this.prisma, user.clientId, resolved, now);
-    // A failed load must not be cached.
-    data.catch(() => this.cache.delete(key));
-    this.cache.set(key, { at: now.getTime(), data });
-    if (this.cache.size > CACHE_MAX_ENTRIES) {
+    // A failed load must not be cached (only remove OUR entry — a newer one may have replaced it).
+    data.catch(() => {
+      if (this.cache.get(key)?.data === data) this.cache.delete(key);
+    });
+    this.cache.set(key, { at: nowMs, data });
+    // Cap: evict oldest-inserted first (Map iteration order) until within the limit.
+    while (this.cache.size > BILLING_CACHE_MAX_ENTRIES) {
       const oldest = this.cache.keys().next().value;
-      if (oldest !== undefined) this.cache.delete(oldest);
+      if (oldest === undefined) break;
+      this.cache.delete(oldest);
     }
     return data;
   }

@@ -6,7 +6,12 @@
  *
  *  - '' (ALL_PROGRAMS) = All programs = no filter. Real Outlet.programName values are never blank.
  *  - The choice PERSISTS across those dashboards for the browser session (sessionStorage, every access
- *    wrapped in try/catch — private windows / blocked storage just fall back to All programs).
+ *    wrapped in try/catch — private windows / blocked storage just fall back to All programs). The key is
+ *    scoped to the TENANT clientId AND the user id (from GET /api/auth/me — the authoritative session, also
+ *    correct for an operator assumed into a tenant), so a program never leaks into another tenant or another
+ *    person on the same browser. Session unknown (the call fails) → nothing is restored or stored.
+ *  - A program restored from storage is written into `?program=` on mount, so the address bar always says
+ *    what the screen is filtered by (and a copied link reproduces it).
  *  - A `?program=` in the URL WINS over the stored value when present (shareable links). Changing the
  *    program rewrites that param in place (history.replaceState — Next's router stays in sync), so a
  *    reload keeps showing what the person last picked.
@@ -17,11 +22,38 @@
  *    with fewer than 2 programs — where the dropdown is hidden) is dropped back to All programs and
  *    recorded in `droppedProgram` so the screen says so out loud (never a silent zero dashboard).
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { getStoredUser } from './auth-client';
 
 export const ALL_PROGRAMS = '';
 export const PROGRAM_URL_PARAM = 'program';
+/** Prefix only — the real key is per tenant + user (`dashboardProgramStorageKey`). */
 export const DASHBOARD_PROGRAM_STORAGE_KEY = 'gifsy.adminDashboards.program';
+export const AUTH_ME_URL = '/api/auth/me';
+
+/** sessionStorage key for one tenant + one user. */
+export function dashboardProgramStorageKey(clientId: string, userId: string): string {
+  return `${DASHBOARD_PROGRAM_STORAGE_KEY}:${clientId}:${userId}`;
+}
+
+/**
+ * Resolve the storage key from the authoritative session (GET /api/auth/me → `{ id, clientId }`, the same call
+ * `useAuthClientId` makes; user id falls back to the stored login user). null when it can't be resolved.
+ */
+async function resolveStorageKey(): Promise<string | null> {
+  try {
+    const r = await fetch(AUTH_ME_URL, { credentials: 'include' });
+    if (!r || !r.ok) return null;
+    const j = (await r.json()) as { data?: Record<string, unknown> } & Record<string, unknown>;
+    const d = (j && typeof j === 'object' && j.data && typeof j.data === 'object' ? j.data : j) as Record<string, unknown>;
+    const clientId = typeof d?.clientId === 'string' ? d.clientId : '';
+    const nested = d?.user && typeof d.user === 'object' ? (d.user as { id?: unknown }).id : undefined;
+    const userId = String((typeof d?.id === 'string' && d.id) || (typeof nested === 'string' && nested) || getStoredUser()?.id || '');
+    return clientId && userId ? dashboardProgramStorageKey(clientId, userId) : null;
+  } catch {
+    return null;
+  }
+}
 /** The dropdown is only worth showing when there is a real choice to make. */
 export const MIN_PROGRAMS_FOR_FILTER = 2;
 
@@ -35,18 +67,20 @@ function readUrlProgram(): string | null {
   }
 }
 
-function readStoredProgram(): string {
+function readStoredProgram(key: string | null): string {
+  if (!key) return ALL_PROGRAMS;
   try {
-    return (window.sessionStorage.getItem(DASHBOARD_PROGRAM_STORAGE_KEY) ?? '').trim();
+    return (window.sessionStorage.getItem(key) ?? '').trim();
   } catch {
     return ALL_PROGRAMS;
   }
 }
 
-function storeProgram(p: string): void {
+function storeProgram(key: string | null, p: string): void {
+  if (!key) return; // session unknown → never write under a guessed key
   try {
-    if (p) window.sessionStorage.setItem(DASHBOARD_PROGRAM_STORAGE_KEY, p);
-    else window.sessionStorage.removeItem(DASHBOARD_PROGRAM_STORAGE_KEY);
+    if (p) window.sessionStorage.setItem(key, p);
+    else window.sessionStorage.removeItem(key);
   } catch {
     /* storage unavailable — the choice just won't persist */
   }
@@ -121,20 +155,44 @@ export function useDashboardProgram(): DashboardProgram {
   const [program, setProgramState] = useState<string>(ALL_PROGRAMS);
   const [ready, setReady] = useState(false);
   const [droppedProgram, setDroppedProgram] = useState<string | null>(null);
+  // Per tenant + user storage key (null until /auth/me resolves, or when it can't).
+  const keyRef = useRef<string | null>(null);
+  // The latest selection, so a late-resolving session stores what the person has picked meanwhile.
+  const programRef = useRef<string>(ALL_PROGRAMS);
+  const touchedRef = useRef(false);
 
   useEffect(() => {
+    let alive = true;
     const fromUrl = readUrlProgram();
-    const initial = fromUrl !== null ? fromUrl : readStoredProgram();
-    if (fromUrl !== null) storeProgram(fromUrl);
-    setProgramState(initial);
-    setReady(true);
+    if (fromUrl !== null) {
+      // A link wins and needs no session to apply — start immediately; persist once the session is known.
+      programRef.current = fromUrl;
+      setProgramState(fromUrl);
+      setReady(true);
+    }
+    void resolveStorageKey().then((key) => {
+      if (!alive) return;
+      keyRef.current = key;
+      if (fromUrl !== null || touchedRef.current) {
+        storeProgram(key, programRef.current);
+        return;
+      }
+      const restored = readStoredProgram(key);
+      programRef.current = restored;
+      setProgramState(restored);
+      if (restored) writeUrlProgram(restored); // the address bar says what the screen is filtered by
+      setReady(true);
+    });
+    return () => { alive = false; };
   }, []);
 
   const setProgram = useCallback((p: string) => {
     const next = (p ?? '').trim();
+    touchedRef.current = true;
+    programRef.current = next;
     setDroppedProgram(null);
     setProgramState(next);
-    storeProgram(next);
+    storeProgram(keyRef.current, next);
     writeUrlProgram(next);
   }, []);
 
@@ -144,7 +202,8 @@ export function useDashboardProgram(): DashboardProgram {
     // Only reset if the person hasn't already moved on to another choice.
     setProgramState((cur) => {
       if (cur !== requested) return cur;
-      storeProgram(ALL_PROGRAMS);
+      programRef.current = ALL_PROGRAMS;
+      storeProgram(keyRef.current, ALL_PROGRAMS);
       writeUrlProgram(ALL_PROGRAMS);
       return ALL_PROGRAMS;
     });

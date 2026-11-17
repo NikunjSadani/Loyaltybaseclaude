@@ -13,7 +13,9 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import ProgramHealthPage from '../page';
 import KycDashboardPage from '../../kyc/page';
-import { DASHBOARD_PROGRAM_STORAGE_KEY } from '@/lib/dashboard-program';
+import { dashboardProgramStorageKey } from '@/lib/dashboard-program';
+
+const DASHBOARD_PROGRAM_STORAGE_KEY = dashboardProgramStorageKey('bajaj', 'u1');
 
 vi.mock('recharts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('recharts')>();
@@ -55,12 +57,18 @@ const KYC = {
   coverageBy: { state: [], outletType: [], program: [] },
 };
 
+/** Every dashboard GET returns `body`; /api/auth/me returns the session (tenant + user key the stored program). */
 function mockOk(body: unknown) {
-  const fn = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(body) });
+  const fn = vi.fn(async (url: string) =>
+    String(url).startsWith('/api/auth/me')
+      ? { ok: true, json: () => Promise.resolve({ success: true, data: { id: 'u1', clientId: 'bajaj' } }) }
+      : { ok: true, json: () => Promise.resolve(body) },
+  );
   vi.stubGlobal('fetch', fn);
   return fn;
 }
-const urls = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.map((c) => String(c[0]));
+const urls = (fn: ReturnType<typeof vi.fn>) =>
+  fn.mock.calls.map((c) => String(c[0])).filter((u) => !u.startsWith('/api/auth/me'));
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -104,6 +112,18 @@ describe('Program Health — program filter', () => {
     render(<ProgramHealthPage />);
     await screen.findByTestId('program-health-dashboard');
     expect(urls(fn)[0]).toBe('/api/admin/dashboard/program-health?program=Silver');
+  });
+
+  it('PH6 (F1): a stored program stays visible in the filter even when the load fails', async () => {
+    window.sessionStorage.setItem(DASHBOARD_PROGRAM_STORAGE_KEY, 'Gold');
+    vi.stubGlobal('fetch', vi.fn(async (url: string) =>
+      String(url).startsWith('/api/auth/me')
+        ? { ok: true, json: () => Promise.resolve({ success: true, data: { id: 'u1', clientId: 'bajaj' } }) }
+        : { ok: false, status: 500, json: () => Promise.resolve({}) },
+    ));
+    render(<ProgramHealthPage />);
+    expect(await screen.findByTestId('program-health-error')).toBeInTheDocument();
+    expect(((await screen.findByTestId('program-health-program-filter')) as HTMLSelectElement).value).toBe('Gold');
   });
 
   it('PH5: a stored program this tenant does not have → All programs + notice', async () => {

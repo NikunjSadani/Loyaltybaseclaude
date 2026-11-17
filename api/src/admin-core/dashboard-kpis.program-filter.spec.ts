@@ -32,7 +32,10 @@ describe('AdminCoreService.dashboardKpis — program filter', () => {
     mockPrisma.payoutTransaction.groupBy.mockResolvedValue([
       { status: 'PAID', _count: { id: 4 }, _sum: { netAmountPaise: BigInt(12345) } },
     ]);
-    mockPrisma.outlet.findMany.mockResolvedValue([{ programName: 'Gold' }, { programName: ' ' }, { programName: 'Silver' }]);
+    // Raw DISTINCT values as Postgres returns them — incl. whitespace variants and a blank.
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      { programName: ' Gold' }, { programName: ' ' }, { programName: 'Gold' }, { programName: 'Gold ' }, { programName: 'Silver' },
+    ]);
     mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(true);
     const mod = await Test.createTestingModule({
       providers: [
@@ -73,23 +76,32 @@ describe('AdminCoreService.dashboardKpis — program filter', () => {
     }
   });
 
-  it('a program scopes every metric through the outlet(s)', async () => {
+  it('N5/N6 a program scopes every metric through LIVE outlet(s), matching every whitespace variant', async () => {
     const res = await svc.dashboardKpis(user, '  Gold ');
     expect(res.program).toBe('Gold');
-    const some = { outlets: { some: { programName: 'Gold' } } };
+    const variants = { in: [' Gold', 'Gold', 'Gold '] };
+    // Live-outlet condition (same as the billing roster): not deleted / deactivated / parked / not-interested,
+    // NULL-safe OR-wrap (Prisma `notIn` drops NULL kycIntent rows).
+    const some = { outlets: { some: { programName: variants, deletedAt: null, deactivatedAt: null, OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }] } } };
     expect(mockPrisma.channelPartner.count.mock.calls[0][0].where).toEqual({
       clientId: 'bajaj', isActive: true, deletedAt: null, isParent: false, ...some,
     });
     expect(mockPrisma.kycSubmission.count.mock.calls[0][0].where.partner).toEqual(some);
     expect(mockPrisma.kycSubmission.count.mock.calls[0][0].where.user).toEqual({ clientId: 'bajaj' });
     expect(mockPrisma.visibilityCapture.count.mock.calls[0][0].where).toEqual({
-      clientId: 'bajaj', status: 'SUBMITTED', outlet: { programName: 'Gold' },
+      clientId: 'bajaj', status: 'SUBMITTED', outlet: { programName: variants },
     });
     expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where).toEqual({ partner: { clientId: 'bajaj', ...some } });
     expect(mockPrisma.payoutTransaction.groupBy.mock.calls[0][0].where).toEqual({ partner: { clientId: 'bajaj', ...some } });
     // availablePrograms is the full tenant list, not narrowed by the filter.
     expect(mockPrisma.outlet.findMany.mock.calls[0][0].where).toEqual({ clientId: 'bajaj', deletedAt: null, programName: { not: null } });
     expect(res.availablePrograms).toEqual(['Gold', 'Silver']);
+  });
+
+  it('N6 an unknown program matches nothing (`in: []`) — zeros, never an error', async () => {
+    await svc.dashboardKpis(user, 'Platinum');
+    expect(mockPrisma.channelPartner.count.mock.calls[0][0].where.outlets.some.programName).toEqual({ in: [] });
+    expect(mockPrisma.visibilityCapture.count.mock.calls[0][0].where.outlet).toEqual({ programName: { in: [] } });
   });
 
   it('rejects an over-long or repeated program param', async () => {
