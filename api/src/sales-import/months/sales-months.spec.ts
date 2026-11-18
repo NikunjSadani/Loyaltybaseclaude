@@ -37,6 +37,7 @@ function db(
     focusDefs?: Array<Record<string, unknown>>;
     /** Background jobs: active job rows (activeJobsByMonth shape). */
     activeJobs?: Array<Record<string, unknown>>;
+    lastJobs?: Array<Record<string, unknown>>;
   } = {},
 ) {
   const log: string[] = [];
@@ -85,6 +86,7 @@ function db(
     salesFocusAcceptance: acceptanceTable(downstream.acceptances ?? [], log),
     $executeRaw: jest.fn(async (q: Prisma.Sql) => { log.push(`lock:${q.values[0]}`); return 1; }),
     $queryRaw: jest.fn(async (q: Prisma.Sql) => {
+      if (q.strings.join('?').includes('DISTINCT ON (m."month")')) return downstream.lastJobs ?? [];
       if (q.strings.join('?').includes('FROM "sales_apply_job_months"')) {
         const months = q.values[1] as string[];
         return (downstream.activeJobs ?? []).filter((j) => months.includes(j.month as string));
@@ -684,14 +686,14 @@ describe('background jobs: Close / Reopen refused while an Apply / Recalculate o
   it('close → 409 "… is being applied by Ravi since 10:32 — try again when it finishes." and nothing is locked or written', async () => {
     const d = db([], { activeJobs: [busy] });
     const svc = new SalesMonthsService(d as never);
-    await expect(svc.close(clientAdmin, PREV)).rejects.toThrow(`${monthLabel(PREV)} is being applied by Ravi since 10:32 — try again when it finishes.`);
+    await expect(svc.close(clientAdmin, PREV)).rejects.toThrow(new RegExp(`^${monthLabel(PREV)} is being applied by Ravi since (\d+ \w+, )?10:32 — try again when it finishes\.$`));
     expect(d.$transaction).not.toHaveBeenCalled();
   });
 
   it('reopen → the same 409 (recalculate wording for a RECALC job)', async () => {
     const d = db([{ clientId: 't1', month: OLD, state: 'CLOSED' }], { activeJobs: [{ ...busy, month: OLD, kind: 'RECALC' }] });
     const svc = new SalesMonthsService(d as never);
-    await expect(svc.reopen(gifsyAssumed, OLD, { acknowledgeDownstream: true })).rejects.toThrow(`${monthLabel(OLD)} is being recalculated by Ravi since 10:32 — try again when it finishes.`);
+    await expect(svc.reopen(gifsyAssumed, OLD, { acknowledgeDownstream: true })).rejects.toThrow(new RegExp(`^${monthLabel(OLD)} is being recalculated by Ravi since (\d+ \w+, )?10:32 — try again when it finishes\.$`));
   });
 
   it('the months list carries each month activeJob (null when none)', async () => {
@@ -700,5 +702,14 @@ describe('background jobs: Close / Reopen refused while an Apply / Recalculate o
     expect(rows[0].activeJob).toEqual({ jobId: 'j1', kind: 'APPLY', status: 'RUNNING', importId: 'imp1', requestedBy: 'Ravi', createdAt: '2026-11-18T05:02:00.000Z' });
     const none = await new SalesMonthsService(db() as never).list('t1', PREV, PREV);
     expect(none[0].activeJob).toBeNull();
+    expect(none[0].lastJob).toBeNull();
+  });
+
+  it('B-H1: the months list carries each month latest FINISHED job (who / when / result) so a result never disappears', async () => {
+    const fin = { month: PREV, jobId: 'j0', kind: 'APPLY', status: 'FAILED', importId: 'imp1', requestedByName: 'Ravi',
+      createdAt: new Date('2026-11-18T05:02:00.000Z'), finishedAt: new Date('2026-11-18T05:04:00.000Z'), result: { month: PREV, ok: false, error: 'closed' } };
+    const rows = await new SalesMonthsService(db([], { lastJobs: [fin] }) as never).list('t1', PREV, PREV);
+    expect(rows[0].lastJob).toEqual({ jobId: 'j0', kind: 'APPLY', status: 'FAILED', importId: 'imp1', requestedBy: 'Ravi',
+      createdAt: '2026-11-18T05:02:00.000Z', finishedAt: '2026-11-18T05:04:00.000Z', result: { month: PREV, ok: false, error: 'closed' } });
   });
 });

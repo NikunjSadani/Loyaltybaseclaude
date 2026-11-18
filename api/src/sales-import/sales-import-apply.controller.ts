@@ -8,7 +8,7 @@ import { SalesPreviewService } from './apply/sales-preview.service';
 import { SalesApplyService } from './apply/sales-apply.service';
 import { assertSalesImportAccess } from './sales-import-access';
 import type { ApplyEnqueued, ApplyRequest, SalesApplyJobDto, SalesImportPreview } from './sales-import.contract';
-import { SalesApplyJobsService } from './apply/sales-apply-jobs.service';
+import { NO_JOB_FOR_REQUEST, SalesApplyJobsService } from './apply/sales-apply-jobs.service';
 import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
 import { HeavyOp } from '../common/heavy-op-limiter';
 
@@ -67,7 +67,7 @@ export class SalesImportApplyController {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: false });
     if (!requestId) throw new BadRequestException('requestId is required.');
     const job = await this.jobs.findByRequestId(user.clientId, requestId);
-    if (!job) throw new NotFoundException('No apply was recorded for this request.');
+    if (!job) throw new NotFoundException(NO_JOB_FOR_REQUEST);
     return job;
   }
 }

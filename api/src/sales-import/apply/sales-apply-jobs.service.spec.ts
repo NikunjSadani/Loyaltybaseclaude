@@ -17,9 +17,9 @@ import { assertNoActiveJob, busyText, istClock } from './apply-jobs-data';
 const user: JwtPayload = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'Asha' };
 
 type Job = Record<string, unknown> & { id: string; status: string; claimToken: string | null; attempts: number };
-type Month = { jobId: string; clientId: string; month: string; status: string; result: unknown; startedAt: Date | null; finishedAt: Date | null };
+type Month = { jobId: string; clientId: string; month: string; status: string; result: unknown; lastError?: string | null; startedAt: Date | null; finishedAt: Date | null };
 
-function fakeDb() {
+function fakeDb(opts: { flag?: boolean; userStatus?: string; userRole?: string; deleted?: boolean } = {}) {
   const jobs: Job[] = [];
   const months: Month[] = [];
   const log: string[] = [];
@@ -42,12 +42,13 @@ function fakeDb() {
     if (t.includes('SELECT "month" FROM "sales_apply_job_months" WHERE "jobId" = ? AND "status" = \'QUEUED\'')) {
       return months.filter((m) => m.jobId === vals[0] && m.status === 'QUEUED').sort((a, b) => a.month.localeCompare(b.month));
     }
-    if (t.includes('SELECT "month" FROM "sales_apply_job_months" WHERE "jobId" = ? AND "status" IN')) {
+    if (t.includes('SELECT "month", "lastError" FROM "sales_apply_job_months" WHERE "jobId" = ? AND "status" IN')) {
       return months.filter((m) => m.jobId === vals[0] && ['QUEUED', 'RUNNING'].includes(m.status));
     }
     if (t.includes('UPDATE "sales_apply_jobs" SET "status" = \'RUNNING\'')) {
       const token = vals[0] as string;
-      const j = jobs.find((x) => x.status === 'QUEUED');
+      const exclude = (vals.find((x) => Array.isArray(x)) ?? []) as string[];
+      const j = jobs.find((x) => x.status === 'QUEUED' && !exclude.includes(x.id));
       if (!j) return [];
       Object.assign(j, { status: 'RUNNING', claimToken: token, attempts: j.attempts + 1 });
       return [{ ...j }];
@@ -62,19 +63,34 @@ function fakeDb() {
       if (failInsertWith) throw failInsertWith;
       const [id, clientId, kind, importId, requestId, request, requestedById, requestedByName, requestedByRole] = vals as string[];
       jobs.push({ id, clientId, kind, importId, requestId, request: JSON.parse(request), requestedById, requestedByName, requestedByRole,
-        status: 'QUEUED', claimToken: null, attempts: 0, error: null, createdAt: new Date('2026-11-18T05:02:00.000Z'), startedAt: null, finishedAt: null });
+        status: 'QUEUED', claimToken: null, attempts: 0, error: null, focusBasis: null, createdAt: new Date('2026-11-18T05:02:00.000Z'), startedAt: null, finishedAt: null });
       const [, ids, ms] = vals.slice(-3) as [string, string[], string[]];
       void ids;
       for (const m of ms) months.push({ jobId: id, clientId, month: m, status: 'QUEUED', result: null, startedAt: null, finishedAt: null });
       log.push(`insert:${ms.join(',')}`);
       return 1;
     }
-    if (t.includes('SET "heartbeatAt"')) return 1;
-    if (t.includes('UPDATE "sales_apply_job_months" SET "status" = \'QUEUED\', "startedAt" = NULL')) {
-      for (const m of months) if (m.jobId === vals[0] && m.status === 'RUNNING') m.status = 'QUEUED';
+    if (t.includes('SET "heartbeatAt" = (now()')) return 1;
+    const held = (jobId: unknown, token: unknown) => jobOf(jobId)?.claimToken === token;
+    if (t.includes('UPDATE "sales_apply_job_months" m SET "status" = \'QUEUED\', "startedAt" = NULL')) {
+      const [jobId, token] = vals;
+      if (!held(jobId, token)) { log.push('reset:refused'); return 0; }
+      for (const m of months) if (m.jobId === jobId && m.status === 'RUNNING') m.status = 'QUEUED';
       return 1;
     }
-    const held = (jobId: unknown, token: unknown) => jobOf(jobId)?.claimToken === token;
+    if (t.includes('SET "lastError" = ?')) {
+      const [err, jobId, token, monthA] = vals as string[];
+      if (!held(jobId, token)) return 0;
+      for (const m of months) if (m.jobId === jobId && ['QUEUED', 'RUNNING'].includes(m.status) && (monthA == null || m.month === monthA)) m.lastError = err;
+      return 1;
+    }
+    if (t.includes('SET "focusBasis" = ?')) {
+      const [basis, jobId, token] = vals as string[];
+      const j = jobOf(jobId);
+      if (j && held(jobId, token) && j.focusBasis == null) j.focusBasis = JSON.parse(basis);
+      log.push('basis:saved');
+      return 1;
+    }
     if (t.includes('SET "status" = \'RUNNING\', "startedAt"')) {
       const [jobId, token, month] = vals as string[];
       const m = months.find((x) => x.jobId === jobId && x.month === month && x.status === 'QUEUED');
@@ -112,15 +128,24 @@ function fakeDb() {
       log.push(`job:${status}`);
       return 1;
     }
-    if (t.includes('UPDATE "sales_apply_jobs" SET "status" = \'QUEUED\', "claimToken" = NULL')) {
-      const [jobId, token] = vals;
-      if (held(jobId, token)) Object.assign(jobOf(jobId)!, { status: 'QUEUED', claimToken: null });
-      log.push('job:released');
+    if (t.includes('UPDATE "sales_apply_jobs" SET "status" = \'QUEUED\', "claimToken" = NULL, "heartbeatAt" = NULL')) {
+      const [dec, jobId, token] = vals as [number, string, string];
+      if (held(jobId, token)) {
+        const j = jobOf(jobId)!;
+        Object.assign(j, { status: 'QUEUED', claimToken: null, attempts: Math.max(0, j.attempts - dec) });
+        log.push(dec ? 'job:released(not counted)' : 'job:released(counted)');
+      } else log.push('job:release-refused');
       return 1;
     }
     throw new Error(`unexpected statement: ${t}`);
   });
-  const db = { jobs, months, log, $queryRaw: queryRaw, $executeRaw: executeRaw, failInsert: (e: unknown) => { failInsertWith = e; } };
+  const db = {
+    jobs, months, log, $queryRaw: queryRaw, $executeRaw: executeRaw, failInsert: (e: unknown) => { failInsertWith = e; },
+    // requester re-check (A-L4)
+    client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: { salesImport: opts.flag ?? true } })) },
+    user: { findUnique: jest.fn(async () => ({ status: opts.userStatus ?? 'ACTIVE', deletedAt: opts.deleted ? new Date() : null, role: opts.userRole ?? 'CLIENT_ADMIN', gifsyRoleId: null })) },
+    gifsyRole: { findFirst: jest.fn(async () => null) },
+  };
   return db;
 }
 
@@ -180,7 +205,7 @@ describe('enqueue', () => {
     db.failInsert(Object.assign(new Error('Raw query failed. Code: `23505`. Message: `duplicate key value violates unique constraint "sales_apply_job_months_active_month_key"`'), { code: 'P2010', meta: { code: '23505' } }));
     const p = svc.enqueueApply(user, 'imp1', { ...body, requestId: 'req-asha-0002' });
     await expect(p).rejects.toBeInstanceOf(ConflictException);
-    await expect(p).rejects.toThrow('October 2026 is being applied by Ravi since 10:32. Wait for it to finish, then check the result before applying again.');
+    await expect(p).rejects.toThrow(/^October 2026 is being applied by Ravi since (\d+ \w+, )?10:32\. Wait for it to finish, then check the result before applying again\.$/);
   });
 
   it('Recalculate: prechecks and records a RECALC job for the one month', async () => {
@@ -228,7 +253,7 @@ describe('worker run', () => {
     expect(await svc.drain()).toEqual({ finished: 1, released: 0 });
     expect(apply.apply).toHaveBeenCalledWith(
       expect.objectContaining({ sub: 'u1', clientId: 't1', name: 'Asha', role: 'CLIENT_ADMIN' }), 'imp1',
-      expect.objectContaining({ months: ['2026-10', '2026-11'], expectedDefinitionsHash: 'h' }), expect.anything());
+      expect.objectContaining({ months: ['2026-10', '2026-11'], expectedDefinitionsHash: 'h' }), expect.anything(), expect.anything());
     expect(db.log).toEqual(['running:2026-10', 'done:2026-10', 'running:2026-11', 'failed:2026-11', 'job:DONE']);
     const job = await svc.getJob('t1', db.jobs[0].id);
     expect(job.status).toBe('DONE');
@@ -270,7 +295,7 @@ describe('worker run', () => {
       return run(u, id, req, wrapped);
     });
     expect(await svc.drain(stop)).toEqual({ finished: 0, released: 1 });
-    expect(db.log).toEqual(['running:2026-10', 'done:2026-10', 'job:released']);
+    expect(db.log).toEqual(['running:2026-10', 'done:2026-10', 'job:released(not counted)']);
     expect(db.jobs[0].status).toBe('QUEUED');
     expect(db.months.map((m) => m.status)).toEqual(['DONE', 'QUEUED']);
   });
@@ -279,7 +304,7 @@ describe('worker run', () => {
     const { db, apply, svc } = await queued();
     apply.apply.mockRejectedValue(new Error('Connection terminated'));
     expect(await svc.drain({ requested: false } as never).catch(() => 'threw')).toBeDefined();
-    expect(db.log[0]).toBe('job:released');
+    expect(db.log[0]).toBe('job:released(counted)');
   });
 
   it(`more than ${SALES_APPLY_MAX_ATTEMPTS} claims → the remaining months FAILED (never an endless retry)`, async () => {
@@ -323,12 +348,16 @@ describe('helpers', () => {
     const db = fakeDb();
     const svc = new SalesApplyJobsService(db as never, applyMock() as never);
     await svc.enqueueApply({ ...user, name: 'Ravi' }, 'imp1', { ...body, months: ['2026-10'] });
-    await expect(assertNoActiveJob(db as never, 't1', '2026-10')).rejects.toThrow('October 2026 is being applied by Ravi since 10:32 — try again when it finishes.');
+    await expect(assertNoActiveJob(db as never, 't1', '2026-10')).rejects.toThrow(/^October 2026 is being applied by Ravi since (\d+ \w+, )?10:32 — try again when it finishes\.$/);
     await expect(assertNoActiveJob(db as never, 't1', '2026-09')).resolves.toBeUndefined();
   });
   it('istClock / busyText use India time', () => {
-    expect(istClock('2026-11-18T05:02:00.000Z')).toBe('10:32');
-    expect(busyText('2026-10', { kind: 'RECALC', requestedBy: 'Asha', createdAt: '2026-11-18T18:45:00.000Z' })).toBe('October 2026 is being recalculated by Asha since 00:15');
+    const sameDay = new Date('2026-11-18T08:00:00.000Z');
+    expect(istClock('2026-11-18T05:02:00.000Z', sameDay)).toBe('10:32');
+    // B-L11: another day shows the date
+    expect(istClock('2026-11-17T05:02:00.000Z', sameDay)).toBe('17 Nov, 10:32');
+    expect(busyText('2026-10', { kind: 'RECALC', requestedBy: 'Asha', createdAt: '2026-11-18T18:45:00.000Z' }, new Date('2026-11-18T19:00:00.000Z')))
+      .toBe('October 2026 is being recalculated by Asha since 00:15');
   });
   it('isUniqueViolation recognises the raw (P2010/23505) and typed (P2002) forms, optionally of one index', () => {
     const raw = Object.assign(new Error('… unique constraint "sales_apply_job_months_active_month_key"'), { code: 'P2010', meta: { code: '23505' } });
@@ -373,5 +402,127 @@ describe('controllers: enqueue (202) then start the worker', () => {
     await expect(c.recalculate(user, '2026-10', req)).resolves.toBe(queuedJob);
     expect(jobs.enqueueRecalculate).toHaveBeenCalledWith(user, '2026-10', req);
     expect(runner.kick).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('audit fixes (dual audit of e1ce98d8)', () => {
+  type Hooks = { beforeMonth(m: string): Promise<void>; inTx(tx: unknown, r: unknown): Promise<void> };
+  async function queued(months = ['2026-10'], o: Parameters<typeof fakeDb>[0] = {}) {
+    const db = fakeDb(o);
+    const apply = applyMock();
+    const svc = new SalesApplyJobsService(db as never, apply as never);
+    await svc.enqueueApply(user, 'imp1', { ...body, months });
+    db.log.length = 0;
+    return { db, apply, svc };
+  }
+  /** A stop token like WorkerStop: listeners fire on request(). */
+  function stopToken() {
+    const ls: Array<(r: string) => void> = [];
+    const t = { requested: false, onStop: (cb: (r: string) => void) => { ls.push(cb); return () => undefined; },
+      request: () => { t.requested = true; ls.forEach((l) => l('SIGTERM')); } };
+    return t;
+  }
+
+  it('A-M2: a stop signal MID-month hands the job back at once (QUEUED, no heartbeat, not counted); the in-flight month cannot commit DONE', async () => {
+    const { db, apply, svc } = await queued();
+    const stop = stopToken();
+    apply.apply.mockImplementation(async (_u: JwtPayload, _i: string, req: { months: string[] }, hooks: Hooks) => {
+      await hooks.beforeMonth(req.months[0]);
+      stop.request(); // SIGTERM while the month is writing
+      await new Promise((r) => setImmediate(r));
+      await expect(hooks.inTx(db, { month: req.months[0], ok: true })).rejects.toThrow(/claim lost/);
+      return { results: [{ month: req.months[0], ok: false, error: 'Apply failed for this month. Nothing was changed for it.' }] };
+    });
+    expect(await svc.drain(stop)).toEqual({ finished: 0, released: 1 });
+    expect(db.jobs[0]).toEqual(expect.objectContaining({ status: 'QUEUED', claimToken: null, attempts: 0 }));
+    expect(db.months[0].status).toBe('QUEUED');
+    expect(db.log).toContain('job:released(not counted)');
+    expect(db.log).not.toContain('done:2026-10');
+    expect(db.log).not.toContain('failed:2026-10');
+  });
+
+  it('A-M3: a run that lost its claim cannot reset or release a month of the run that took the job over', async () => {
+    const { db, apply, svc } = await queued();
+    apply.apply.mockImplementation(async (_u: JwtPayload, _i: string, req: { months: string[] }, hooks: Hooks) => {
+      await hooks.beforeMonth(req.months[0]);
+      db.jobs[0].claimToken = 'newer-run'; // another worker reclaimed it; its month is RUNNING
+      throw new Error('Connection terminated');
+    });
+    await svc.drain();
+    expect(db.log).toEqual(['running:2026-10', 'reset:refused', 'job:release-refused']);
+    expect(db.months[0].status).toBe('RUNNING'); // the newer run's month is untouched
+    expect(db.jobs[0].claimToken).toBe('newer-run');
+  });
+
+  it('A-L2 + A-L3: a transient DB error hands the job back (counted) with the month lastError; when the attempts run out the reason is shown', async () => {
+    const { TransientApplyError } = await import('./sales-apply.service');
+    const { db, apply, svc } = await queued();
+    apply.apply.mockImplementation(async (_u: JwtPayload, _i: string, req: { months: string[] }, hooks: Hooks) => {
+      await hooks.beforeMonth(req.months[0]);
+      throw new TransientApplyError(req.months[0], 'October 2026: a temporary database problem (deadlock detected)');
+    });
+    for (let i = 0; i < SALES_APPLY_MAX_ATTEMPTS; i++) expect(await svc.drain()).toEqual({ finished: 0, released: 1 });
+    expect(db.months[0]).toEqual(expect.objectContaining({ status: 'QUEUED', lastError: 'October 2026: a temporary database problem (deadlock detected)' }));
+    expect(db.jobs[0].attempts).toBe(SALES_APPLY_MAX_ATTEMPTS);
+    expect(await svc.drain()).toEqual({ finished: 1, released: 0 }); // the next claim is attempt MAX + 1
+    expect(db.months[0].result).toEqual(expect.objectContaining({ ok: false,
+      error: `Stopped after ${SALES_APPLY_MAX_ATTEMPTS} attempts without finishing: October 2026: a temporary database problem (deadlock detected). Nothing more was written for this month — check it and apply again.` }));
+    expect(apply.apply).toHaveBeenCalledTimes(SALES_APPLY_MAX_ATTEMPTS);
+  });
+
+  it('A-L3: stops do not use up attempts (a job stopped many times still runs)', async () => {
+    const { db, apply, svc } = await queued();
+    apply.apply.mockImplementation(async () => { throw new ApplyStopError('stopping'); });
+    for (let i = 0; i < SALES_APPLY_MAX_ATTEMPTS + 2; i++) await svc.drain();
+    expect(db.jobs[0]).toEqual(expect.objectContaining({ status: 'QUEUED', attempts: 0 }));
+  });
+
+  it.each([
+    [{ flag: false }, /Sales Import was turned off for this client before this apply ran\. Nothing was written\./],
+    [{ userStatus: 'SUSPENDED' }, /Asha.s account is no longer active, so this apply was not run\. Nothing was written/],
+    [{ deleted: true }, /Asha.s account is no longer active/],
+    [{ userRole: 'SALES_USER' }, /Asha is no longer allowed to apply sales files, so this apply was not run\. Nothing was written\./],
+  ])('A-L4: the worker re-checks the tenant flag and the requester before running (%j) → every month FAILED with the reason, nothing applied', async (o, why) => {
+    const { db, apply, svc } = await queued(['2026-10', '2026-11'], o as never);
+    await svc.drain();
+    expect(apply.apply).not.toHaveBeenCalled();
+    expect(db.jobs[0]).toEqual(expect.objectContaining({ status: 'FAILED', error: expect.stringMatching(why) }));
+    expect(db.months.every((m) => m.status === 'FAILED' && why.test((m.result as { error: string }).error))).toBe(true);
+  });
+
+  it('A-L5: a requestId reused for a DIFFERENT apply (months / import / kind) → 409, never the old job', async () => {
+    const db = fakeDb();
+    const svc = new SalesApplyJobsService(db as never, applyMock() as never);
+    await svc.enqueueApply(user, 'imp1', body);
+    await expect(svc.enqueueApply(user, 'imp1', { ...body, months: ['2026-10'] })).rejects.toThrow('This request id was already used for a different apply. Refresh the page and try again.');
+    await expect(svc.enqueueApply(user, 'imp2', body)).rejects.toBeInstanceOf(ConflictException);
+    await expect(svc.enqueueRecalculate(user, '2026-10', { expectedDefinitionsHash: 'h', expectedHistoryAppliedAt: 'x', requestId: body.requestId })).rejects.toBeInstanceOf(ConflictException);
+    expect((await svc.enqueueApply(user, 'imp1', { ...body, months: ['2026-10', '2026-11'] })).job.months).toHaveLength(2); // same months, any order → same job
+  });
+
+  it('A-M1 (worker): the first run saves the product-list snapshot; a retry passes it back to apply()', async () => {
+    const { db, apply, svc } = await queued(['2026-09', '2026-10']);
+    const SNAP = [{ dims: '{"dimA":"R"}' }];
+    apply.apply.mockImplementationOnce(async (_u: JwtPayload, _i: string, _req: { months: string[] }, hooks: Hooks, job: { onFocusHistory(h: unknown): Promise<void> }) => {
+      await job.onFocusHistory(SNAP);
+      await hooks.beforeMonth('2026-09');
+      await hooks.inTx(db, { month: '2026-09', ok: true });
+      throw new ApplyStopError('worker killed');
+    });
+    await svc.drain();
+    expect(db.jobs[0].focusBasis).toEqual(SNAP);
+    apply.apply.mockImplementationOnce(async () => ({ results: [{ month: '2026-10', ok: true }] }));
+    await svc.drain();
+    expect(apply.apply.mock.calls[1][2].months).toEqual(['2026-10']);
+    expect(apply.apply.mock.calls[1][4]).toEqual(expect.objectContaining({ focusHistory: SNAP }));
+  });
+
+  it('B-H2: a Recalculate 202 also carries a top-level not-ok month result, so an OLD Months tab never shows "recalculated"', async () => {
+    const r = await new SalesApplyJobsService(fakeDb() as never, applyMock() as never)
+      .enqueueRecalculate(user, '2026-10', { expectedDefinitionsHash: 'h', expectedHistoryAppliedAt: 'x', requestId: 'req-recalc-77' });
+    expect(r).toEqual(expect.objectContaining({ month: '2026-10', ok: false, error: expect.stringMatching(/being recalculated in the background — refresh this page to follow it/) }));
+    expect(r.job.attempts).toBe(0);
+    // B-L3: an old page renders "<Month>: not applied" above this text — it starts by saying it is simply not finished yet.
+    expect(r.results[0].error).toMatch(/^Not finished yet: October 2026 is being recalculated in the background/);
   });
 });

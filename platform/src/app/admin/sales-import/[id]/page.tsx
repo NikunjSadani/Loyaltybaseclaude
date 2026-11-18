@@ -28,8 +28,8 @@ import {
 import { getUploadState, subscribeUpload } from '@/lib/sales-import/upload-store';
 import { failureReason, noAnswerReason, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import {
-  JOB_QUEUED_TOO_LONG_MS, jobEnded, lookUp, monthProgressText, monthResult, newRequestId, resolveSubmit, useJobFollower,
-  type SubmitOutcome,
+  JOB_QUEUED_TOO_LONG_MS, clearUnknown, jobEnded, jobHeadline, loadUnknown, lookUp, monthProgressText, monthResult,
+  newRequestId, resolveSubmit, resultsSummary, saveUnknown, useJobFollower, whenLabel, type SubmitOutcome, type UnknownLock,
 } from '@/lib/sales-import/apply-job';
 import { usePermissions } from '@/lib/use-permissions';
 import {
@@ -58,11 +58,6 @@ function finalErrorText(status: number | undefined): string | null {
 function legacyResults(data: unknown): ApplyMonthResult[] | null {
   const r = (data as { results?: unknown } | null)?.results;
   return Array.isArray(r) ? (r as ApplyMonthResult[]) : null;
-}
-
-/** "10:32" in the admin's clock (India time). */
-function clockLabel(iso: string): string {
-  return new Date(iso).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
 // ── Polling the import ───────────────────────────────────────────────────────
@@ -416,13 +411,15 @@ function MonthRow({
 
 function PreviewSection({
   importId, onReprocess, reprocessing, canAct, canReprocess, onApplied, canReprocessAsNew = false, onReprocessAsNew,
-  reprocessingAsNew = false,
+  reprocessingAsNew = false, onActiveJob,
 }: {
   importId: string; onReprocess(): void; reprocessing: boolean; canAct: boolean; canReprocess: boolean;
   /** Applied import whose mapping changed: re-read the stored file as a NEW import. */
   canReprocessAsNew?: boolean; onReprocessAsNew?(): void; reprocessingAsNew?: boolean;
   /** After an apply attempt that changed (or may have changed) server state: refresh the import detail too. */
   onApplied(): void;
+  /** An Apply of THIS import is queued / running (or null when none): the page holds Reprocess / Cancel / Delete. */
+  onActiveJob?(why: string | null): void;
 }) {
   const [preview, setPreview] = useState<SalesImportPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -443,7 +440,16 @@ function PreviewSection({
    * No clear answer and the lookup failed too: whether the click was recorded is unknown → Apply disabled until Check
    * again settles it. `notRecorded`: the lookup says the click recorded nothing → Try again (same requestId: harmless).
    */
-  const [unknown, setUnknown] = useState<{ requestId: string; reason: string } | null>(null);
+  const unknownKey = `sales-import-apply-unknown:${importId}`;
+  // B-L8: an unknown outcome survives a reload (Apply stays held until Check again settles it).
+  const [unknown, setUnknownState] = useState<UnknownLock | null>(() => (typeof window === 'undefined' ? null : loadUnknown(unknownKey)));
+  const setUnknown = useCallback((u: UnknownLock | null) => {
+    setUnknownState(u);
+    if (u) saveUnknown(unknownKey, u); else clearUnknown(unknownKey);
+  }, [unknownKey]);
+  /** Where focus goes after a confirm, so keyboard / screen-reader users land on the outcome (B-L10). */
+  const outcomeRef = useRef<HTMLDivElement | null>(null);
+  const focusOutcome = () => { setTimeout(() => outcomeRef.current?.focus(), 0); };
   const [notRecorded, setNotRecorded] = useState(false);
   /** The last request sent (with its requestId) — Try again resends exactly it, so the server can never queue it twice. */
   const lastSent = useRef<ApplyRequest | null>(null);
@@ -493,7 +499,7 @@ function PreviewSection({
     onApplied();
     void loadPreview();
   }, [importId, loadPreview, onApplied]);
-  const { jobs, lostContact, follow } = useJobFollower(onJobEnded);
+  const { jobs, problems, follow } = useJobFollower(onJobEnded);
 
   // Refresh-safe / several admins: any month with an Apply / Recalculate queued or running is followed until it ends;
   // a job of THIS import is shown as this page's progress (whoever started it).
@@ -503,11 +509,20 @@ function PreviewSection({
       const a = m.activeJob;
       if (!a) continue;
       follow(a.jobId);
-      if (a.importId === importId && a.kind === 'APPLY') setJobId((cur) => cur ?? a.jobId);
+      // B-L5: a LATER job on this import (after the shown one ended) becomes the one shown.
+      if (a.importId === importId && a.kind === 'APPLY') setJobId((cur) => (cur && cur !== a.jobId && !jobEnded(jobs[cur]) ? cur : a.jobId));
     }
-  }, [preview, importId, follow]);
+  }, [preview, importId, follow, jobs]);
 
     const refetch = useCallback(() => setTick((t) => t + 1), []);
+
+  // A-L6 / B-M8: tell the page an Apply of this import is queued / running, so it holds Reprocess / Cancel / Delete.
+  const activeOfThis = preview?.months.find((m) => m.activeJob && m.activeJob.importId === importId)?.activeJob ?? null;
+  const shownRunning = !!(jobId && jobs[jobId] && !jobEnded(jobs[jobId]));
+  const holdWhy = activeOfThis || shownRunning
+    ? `An apply of this file is ${activeOfThis ? `running (started by ${activeOfThis.requestedBy} at ${whenLabel(activeOfThis.createdAt)})` : 'running'} — wait for it to finish.`
+    : null;
+  useEffect(() => { onActiveJob?.(holdWhy); }, [holdWhy, onActiveJob]);
 
   if (error && !preview) {
     return (
@@ -536,8 +551,13 @@ function PreviewSection({
   const jobRunning = !!job && !jobEnded(job);
   /** Apply is held while a request is out, its outcome is being checked or unknown, or this import's job still runs. */
   const busy = applying || checking || !!unknown || jobRunning;
-  const queuedTooLong = !!job && job.status === 'QUEUED' && Date.now() - Date.parse(job.createdAt) > JOB_QUEUED_TOO_LONG_MS;
-  const progressLines = job ? job.months.map((m) => monthProgressText(job, m.month, monthLabel(m.month), clockLabel)) : [];
+  const queuedTooLong = !!job && job.status === 'QUEUED' && job.attempts === 0 && Date.now() - Date.parse(job.createdAt) > JOB_QUEUED_TOO_LONG_MS;
+  const progressLines = job ? job.months.map((m) => monthProgressText(job, m.month, monthLabel(m.month))) : [];
+  const problem = jobId ? problems[jobId] ?? null : null;
+  // B-H1: coming back after a job ended — its result cards come from each month's latest finished job of this import.
+  const lastResults = months
+    .filter((m) => m.lastJob && m.lastJob.importId === importId && m.lastJob.kind === 'APPLY' && !m.activeJob)
+    .map((m) => ({ month: m.month, job: m.lastJob! }));
   /** Why Apply is disabled — read out with the button (aria-describedby, audit L9). */
   const applyWhy = unknown ? 'Apply is held until the page can confirm whether the last apply was recorded.'
     : jobRunning ? 'Apply is held while this file is being applied.'
@@ -545,7 +565,8 @@ function PreviewSection({
         : blockers.length > 0 ? blockers.join(' ') : '';
   /** One always-present polite live region (L9): what changed, for screen-reader users. */
   const liveText = unknown ? '' : checking ? 'Checking what happened to the apply…'
-    : jobRunning ? progressLines.join('. ') : notice ?? '';
+    : jobRunning ? progressLines.join('. ')
+      : results ? `Apply finished. ${resultsSummary(results, monthLabel)}.` : notice ?? '';
 
   function toggle(month: string) {
     setResults(null);
@@ -593,6 +614,7 @@ function PreviewSection({
     if (!r.success && !outcomeUnknown(r)) {
       setApplying(false);
       await refused(r.status, failureReason(r));
+      focusOutcome();
       return;
     }
     if (!r.success) setChecking(true);
@@ -604,6 +626,7 @@ function PreviewSection({
   }
 
   async function settle(out: SubmitOutcome, requestId: string) {
+    focusOutcome();
     if (out.kind === 'job') {
       setUnknown(null);
       // Clear the ticks FIRST: an already-finished job ends inside follow() and re-ticks its failed months.
@@ -628,7 +651,7 @@ function PreviewSection({
       setNotRecorded(true);
       setNotice(`Nothing was applied: ${out.reason}, and nothing was recorded for this click. Try again.`);
     } else {
-      setUnknown({ requestId, reason: out.reason });
+      setUnknown({ requestId, reason: out.reason, months: lastSent.current?.months ?? [] });
     }
   }
 
@@ -695,6 +718,7 @@ function PreviewSection({
         </Banner>
       )}
       <p className="sr-only" aria-live="polite" data-testid="sales-import-live">{liveText}</p>
+      <div ref={outcomeRef} tabIndex={-1} className="space-y-4 outline-none" data-testid="sales-import-outcome">
       {checking && (
         <Banner tone="blue" testId="sales-import-apply-checking">
           <span className="inline-flex items-center gap-2">
@@ -722,10 +746,10 @@ function PreviewSection({
           aria-label="Apply progress">
           <p className="font-semibold flex items-center gap-2">
             {jobRunning && <Spinner size="sm" />}
-            {job.status === 'QUEUED' ? 'Queued — waiting for the processor to start' : 'Applying in the background'}
+            {jobHeadline(job)}
           </p>
           <p className="text-xs">
-            Started by {job.requestedBy} at {clockLabel(job.createdAt)}. You can leave this page — it carries on, and this
+            Started by {job.requestedBy} at {whenLabel(job.createdAt)}. You can leave this page — it carries on, and this
             page shows the result when you come back. Don&apos;t apply these months again meanwhile.
           </p>
           <ul className="text-xs list-disc pl-4" data-testid="sales-import-job-months">
@@ -737,13 +761,14 @@ function PreviewSection({
               again. If it is still queued after that, contact Gifsy support.
             </p>
           )}
-          {lostContact && (
-            <p className="text-xs text-amber-800" data-testid="sales-import-job-lost-contact">
-              Lost contact with the server while following the apply — still trying. The apply itself carries on.
+          {problem && (
+            <p role={problem.final ? 'alert' : undefined} className="text-xs text-amber-800" data-testid="sales-import-job-lost-contact">
+              {problem.text}
             </p>
           )}
         </section>
       )}
+      </div>
       {downloadError && <Banner tone="red">{downloadError}</Banner>}
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-x-auto">
@@ -841,6 +866,32 @@ function PreviewSection({
         </p>
       )}
 
+      {!results && !jobRunning && lastResults.length > 0 && (
+        <div className="space-y-2" data-testid="sales-import-last-results">
+          <p className="text-xs font-medium text-gray-700">Last apply from this file</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {lastResults.map(({ month, job: lj }) => {
+              const ok = lj.status === 'DONE' && lj.result?.ok !== false;
+              return (
+                <div key={month} className={`rounded-xl border px-4 py-3 text-sm ${ok ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}
+                  data-testid={`last-result-${month}`}>
+                  <p className="font-semibold flex items-center gap-1.5">
+                    {ok ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <XCircle className="w-4 h-4 text-red-600" />}
+                    {monthLabel(month)}: {ok ? 'applied' : 'not applied'}
+                  </p>
+                  <p className="text-xs text-gray-700 mt-1">
+                    By {lj.requestedBy}, {lj.finishedAt ? `finished ${whenLabel(lj.finishedAt)}` : `started ${whenLabel(lj.createdAt)}`}.
+                    {ok
+                      ? (lj.result?.outletsWritten !== undefined ? ` ${formatCount(lj.result.outletsWritten)} outlets updated, ${formatCount(lj.result.outletsZeroFilled ?? 0)} set to 0.` : '')
+                      : ` ${lj.result?.error ?? 'No reason was given.'}`}
+                  </p>
+                  {ok && <DayDataNotice month={month} dayData={lj.result?.dayData} />}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {results && (
         <div className="grid gap-3 sm:grid-cols-2" data-testid="sales-import-apply-results">
           {results.map((r) => (
@@ -882,6 +933,8 @@ export default function SalesImportDetailPage() {
   const canConfigure = ready && has('targets:manage_config');
   const [busy, setBusy] = useState<'reprocess' | 'reprocess-new' | 'delete' | 'cancel' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  /** A-L6 / B-M8: why Reprocess / Read again / Cancel / Delete are held (an apply of this file is queued or running). */
+  const [heldWhy, setHeldWhy] = useState<string | null>(null);
 
   async function reprocess() {
     if (!importId || busy) return;
@@ -917,6 +970,8 @@ export default function SalesImportDetailPage() {
       refresh();
       return;
     }
+    // B-M1: a success whose body was empty carries no id — say so instead of crashing.
+    if (!r.data?.id) { setActionError('A new import was started, but its link was not received. Open All imports to find it.'); refresh(); return; }
     router.push(`/admin/sales-import/${r.data.id}`);
   }
 
@@ -984,22 +1039,22 @@ export default function SalesImportDetailPage() {
         {canAct && (
           <div className="flex gap-2">
             {d.canCancel && (
-              <Button size="sm" variant="outline" onClick={cancel} loading={busy === 'cancel'} data-testid="sales-import-cancel">
+              <Button size="sm" variant="outline" onClick={cancel} loading={busy === 'cancel'} data-testid="sales-import-cancel" disabled={!!heldWhy} aria-describedby={heldWhy ? 'sales-import-held-why' : undefined}>
                 <Ban className="w-3.5 h-3.5" /> Cancel processing
               </Button>
             )}
             {d.canReprocessAsNew && (
-              <Button size="sm" variant="outline" onClick={reprocessAsNew} loading={busy === 'reprocess-new'} data-testid="sales-import-reprocess-as-new">
+              <Button size="sm" variant="outline" onClick={reprocessAsNew} loading={busy === 'reprocess-new'} data-testid="sales-import-reprocess-as-new" disabled={!!heldWhy} aria-describedby={heldWhy ? 'sales-import-held-why' : undefined}>
                 <Copy className="w-3.5 h-3.5" /> Read again as a new import
               </Button>
             )}
             {d.canReprocess && d.status !== 'NEEDS_MAPPING' && (
-              <Button size="sm" variant="outline" onClick={reprocess} loading={busy === 'reprocess'}>
+              <Button size="sm" variant="outline" onClick={reprocess} loading={busy === 'reprocess'} disabled={!!heldWhy} aria-describedby={heldWhy ? 'sales-import-held-why' : undefined}>
                 <RefreshCw className="w-3.5 h-3.5" /> Reprocess
               </Button>
             )}
             {d.canDelete && (
-              <Button size="sm" variant="ghost" onClick={remove} loading={busy === 'delete'} className="text-red-600">
+              <Button size="sm" variant="ghost" onClick={remove} loading={busy === 'delete'} className="text-red-600" disabled={!!heldWhy} aria-describedby={heldWhy ? 'sales-import-held-why' : undefined}>
                 <Trash2 className="w-3.5 h-3.5" /> Delete
               </Button>
             )}
@@ -1013,6 +1068,11 @@ export default function SalesImportDetailPage() {
         </Banner>
       )}
       {actionError && <Banner tone="red">{actionError}</Banner>}
+      {canAct && heldWhy && (
+        <p id="sales-import-held-why" className="text-xs text-gray-600" data-testid="sales-import-held-why">
+          Reprocess, Cancel and Delete are not available: {heldWhy}
+        </p>
+      )}
 
       {d.reprocessedFromId && (
         <Banner tone="blue" testId="sales-import-reprocessed-from">
@@ -1084,7 +1144,7 @@ export default function SalesImportDetailPage() {
       {d.status === 'READY' && !purged && (
         <PreviewSection importId={d.id} onReprocess={reprocess} reprocessing={busy === 'reprocess'} canAct={canAct}
           canReprocess={d.canReprocess} onApplied={refresh} canReprocessAsNew={d.canReprocessAsNew}
-          onReprocessAsNew={reprocessAsNew} reprocessingAsNew={busy === 'reprocess-new'} />
+          onReprocessAsNew={reprocessAsNew} reprocessingAsNew={busy === 'reprocess-new'} onActiveJob={setHeldWhy} />
       )}
     </div>
   );

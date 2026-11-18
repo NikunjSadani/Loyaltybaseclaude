@@ -45,7 +45,7 @@ import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
 import { insertMonthCombosSql } from '../kpi/month-combos';
-import { hasTargetNamesDef, kpiLabelsOf, loadFocusCatalogue } from '../kpi/focus-data';
+import { hasTargetNamesDef, kpiLabelsOf, loadFocusCatalogue, loadHistoryCombos } from '../kpi/focus-data';
 import type { FocusCatalogue } from '../kpi/focus-products';
 import {
   FOCUS_CHANGED_MESSAGE,
@@ -72,6 +72,35 @@ class MonthApplyError extends Error {}
 
 /** Thrown by a MonthWriteHooks.beforeMonth to stop an apply between months (worker stopping / claim lost). Propagates. */
 export class ApplyStopError extends Error {}
+
+/**
+ * A month hit a TRANSIENT database problem (connection lost, serialization / deadlock, transaction timeout or API
+ * error): its transaction rolled back, nothing is written, and a retry may well succeed — so the background job is
+ * handed back for another attempt instead of marking the month FAILED (audit A-L2). Propagates out of apply().
+ */
+export class TransientApplyError extends Error {
+  constructor(readonly month: string, message: string) {
+    super(message);
+  }
+}
+
+/** Is this a database error a retry can fix (as opposed to a definite business refusal)? */
+export function isTransientDbError(e: unknown): boolean {
+  const err = e as { code?: string; meta?: { code?: string }; message?: string };
+  const code = String(err?.code ?? '');
+  if (['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2028', 'P2034'].includes(code)) return true;
+  if (['40001', '40P01', '57P01', '57P02', '57P03', '08000', '08003', '08006'].includes(String(err?.meta?.code ?? ''))) return true;
+  return /Connection terminated|ECONNRESET|ECONNREFUSED|Can't reach database|Server has closed the connection|could not serialize|deadlock detected|Transaction already closed|Transaction API error|terminating connection/i
+    .test(String(err?.message ?? ''));
+}
+
+/** Background-job options of apply() (see SalesApplyJobsService). */
+export interface ApplyJobOptions {
+  /** The stored product lists to resolve focus names against (a retried job's snapshot); else they are read now. */
+  focusHistory?: Array<{ dims: unknown }>;
+  /** Called once with the lists read now (the first run snapshots them), before any month is written. */
+  onFocusHistory?(history: Array<{ dims: unknown }>): Promise<void>;
+}
 
 /** Background-job hooks around each month's write (see SalesApplyJobsService). */
 export interface MonthWriteHooks {
@@ -110,8 +139,22 @@ export class SalesApplyService {
    * products; the worker runs it — still before ANY write — via apply()). Returns the validated, sorted months.
    */
   async precheckApply(user: JwtPayload, importId: string, body: ApplyRequest): Promise<string[]> {
-    const { req } = await this.prepareApply(user, importId, body, { focus: false });
+    const { req, summaries } = await this.prepareApply(user, importId, body, { focus: false });
+    // Audit A-L1: a CLOSED / future month (or one not in the file) is refused NOW (409), not after queueing. The worker
+    // re-checks every month under the month lock anyway.
+    for (const month of req.months) {
+      if (!summaries.has(month)) throw new BadRequestException(`${monthLabel(month)} is not in this file.`);
+      await this.assertMonthOpen(user.clientId, month);
+    }
     return req.months;
+  }
+
+  /** 409 with the preview's own reason when the month is CLOSED or has not started (cheap; no lock). */
+  private async assertMonthOpen(clientId: string, month: string): Promise<void> {
+    const override = await this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
+    const state = resolveMonthState(month, currentMonthKey(), override);
+    const why = blockedReasonFor({ month, defsCount: 1, mappingChanged: false, state });
+    if (why) throw new ConflictException(why);
   }
 
   /**
@@ -119,8 +162,8 @@ export class SalesApplyService {
    * is one transaction. `hooks` (background worker): beforeMonth before a month's transaction; inTx INSIDE it, after the
    * write, so the job's month row is marked DONE atomically with the write (a crash rolls both back — never applied twice).
    */
-  async apply(user: JwtPayload, importId: string, body: ApplyRequest, hooks?: MonthWriteHooks): Promise<ApplyResult> {
-    const { req, imp, summaries, catalogue } = await this.prepareApply(user, importId, body, { focus: true });
+  async apply(user: JwtPayload, importId: string, body: ApplyRequest, hooks?: MonthWriteHooks, job?: ApplyJobOptions): Promise<ApplyResult> {
+    const { req, imp, summaries, catalogue } = await this.prepareApply(user, importId, body, { focus: true, job });
     const results: ApplyMonthResult[] = [];
     for (const month of req.months) {
       const summary = summaries.get(month);
@@ -133,6 +176,10 @@ export class SalesApplyService {
         results.push(await this.applyMonth(user, imp.id, summary, req, catalogue, hooks));
       } catch (e) {
         if (e instanceof ApplyStopError) throw e;
+        // A background job retries a transient DB problem (the month's transaction rolled back); a direct call reports it.
+        if (hooks && !(e instanceof MonthApplyError) && isTransientDbError(e)) {
+          throw new TransientApplyError(month, `${monthLabel(month)}: a temporary database problem (${(e as Error)?.message ?? 'unknown'})`);
+        }
         const msg = e instanceof MonthApplyError ? e.message : 'Apply failed for this month. Nothing was changed for it.';
         if (!(e instanceof MonthApplyError)) this.log.error(`apply ${imp.id} ${month} failed: ${(e as Error)?.message}`);
         results.push({ month, ok: false, error: msg });
@@ -141,7 +188,7 @@ export class SalesApplyService {
     return { results };
   }
 
-  private async prepareApply(user: JwtPayload, importId: string, body: ApplyRequest, opts: { focus: boolean }) {
+  private async prepareApply(user: JwtPayload, importId: string, body: ApplyRequest, opts: { focus: boolean; job?: ApplyJobOptions }) {
     const clientId = user.clientId;
     const req = this.validateBody(body);
 
@@ -183,7 +230,13 @@ export class SalesApplyService {
     // definition skip this entirely (fingerprint '' -> not required).
     // ONE catalogue for the whole request (stored product lists as they are NOW ∪ this import's products), reused by
     // every month incl. the under-lock re-check — see lazyCatalogue for why it must not be re-read per month.
-    const catalogue = lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId, { importId: imp.id }));
+    const catalogue = lazyCatalogue(async () => {
+      // Background job: a retry resolves against the lists its FIRST run saw (A-M1); the first run snapshots them.
+      const given = opts.job?.focusHistory;
+      const history = given ?? (await loadHistoryCombos(this.prisma, clientId));
+      if (!given) await opts.job?.onFocusHistory?.(history);
+      return loadFocusCatalogue(this.prisma, clientId, { importId: imp.id, history });
+    });
     if (opts.focus && hasTargetNamesDef(defs)) {
       const roster = await loadRosterMeta(this.prisma, clientId);
       const labelOf = await kpiLabelsOf(this.prisma, clientId, defs.map((d) => d.kpiCode));
@@ -613,6 +666,7 @@ export class SalesApplyService {
     if (meta.appliedAt.toISOString() !== body.expectedHistoryAppliedAt) {
       throw new ConflictException('A newer file was applied to this month since the preview. Refresh the preview and try again.');
     }
+    await this.assertMonthOpen(user.clientId, month); // A-L1
     const { hash } = await this.kpiDefs.enabled(user.clientId);
     if (hash !== body.expectedDefinitionsHash) throw new ConflictException('KPI definitions changed since the preview. Refresh the preview and try again.');
   }

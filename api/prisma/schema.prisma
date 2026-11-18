@@ -3198,6 +3198,7 @@ model SalesApplyJob {
   heartbeatAt     DateTime?
   attempts        Int       @default(0)
   error           String?
+  focusBasis      Json? // APPLY: stored product lists the first run resolved focus names against (a retry reuses them)
   createdAt       DateTime  @default(now())
   startedAt       DateTime?
   finishedAt      DateTime?
@@ -3221,6 +3222,7 @@ model SalesApplyJobMonth {
   month      String
   status     String    @default("QUEUED") // QUEUED | RUNNING | DONE | FAILED
   result     Json? // ApplyMonthResult once DONE / FAILED
+  lastError  String? // the last retryable error (shown when the attempts run out)
   startedAt  DateTime?
   finishedAt DateTime?
 

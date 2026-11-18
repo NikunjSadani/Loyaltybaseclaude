@@ -1544,6 +1544,25 @@ from the step-1 backup if needed).
      (resends the SAME requestId — harmless); lookup fails too → "We couldn't confirm whether this apply was recorded…
      Don't apply again yet" + Check again, Apply disabled. Still queued after 2 min → says the processor will be started
      again within 10 minutes.
+   - **Dual audit of `e1ce98d8` fixed** (exactly-once held; no critical): a retried job resolves focus names against the
+     product lists its FIRST run snapshotted (`sales_apply_jobs.focusBasis`), so months a run already wrote cannot make
+     later ones "focus products changed" (A-M1); SIGTERM hands the job back at once (QUEUED, no heartbeat) instead of
+     leaving it stuck 10–20 min (A-M2); every reset / release is guarded by the claim token (A-M3); a CLOSED / not
+     started month is refused at enqueue (409, A-L1); a transient DB error (connection, deadlock / serialization, Prisma
+     P1001 / P2024 / P2028 / P2034 …) hands the job back for a retry instead of failing the month (A-L2); stops and lost
+     claims do not use up attempts, and "Stopped after 3 attempts: <last error>" keeps the month's `lastError` (A-L3);
+     the worker re-checks the tenant flag and that the requester is still ACTIVE and allowed (targets:upload) before
+     each job (A-L4); a requestId reused for a different import / kind / months → 409 (A-L5); Reprocess / Read again /
+     Cancel / Delete of an import with an active job → 409 and disabled in the UI (A-L6 / B-M8). A drain never re-claims
+     a job it handed back in the same run (back-off until the next kick or the 10-minute drain). Each month's latest
+     FINISHED job is on the preview and the Months list (`lastJob`), so a result never disappears (B-H1). The Recalculate
+     202 also carries a top-level not-ok result for an old Months tab (B-H2).
+   - **Deploy order (A-M4 / B-M3)**: both workflows deploy the API BEFORE the frontend (`deploy.yml`:
+     `deploy-frontend` needs `deploy-api`; `deploy-staging.yml`: `deploy-frontend-staging` needs `deploy-api-staging`), so
+     the skew window is "new API + old page" (handled by the old-shape `results` / top-level result). Never deploy the
+     frontend alone ahead of this API: a new page against an old API would get a plain 404 from the requestId lookup —
+     the page treats any 404 WITHOUT the server's own "No apply was recorded for this request." text as UNKNOWN (Apply
+     held + Check again), never as "nothing recorded", and says "nothing recorded" only after a second lookup ~5 s later.
    - **Rollback runbook** (only if the release is rolled back to code without jobs): the old code ignores the new tables,
      but a QUEUED / RUNNING job would never run. Before deploying the old image, run on the target DB (with the usual
      `current_database()` guard, backup confirmed, SQL shown to the owner first):

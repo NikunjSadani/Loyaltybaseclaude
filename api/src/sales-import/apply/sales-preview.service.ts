@@ -28,8 +28,8 @@ import { loadFocusCatalogue } from '../kpi/focus-data';
 import { focusBlockedReason, lazyCatalogue, reconcileMonth, runMonthFocus } from './month-focus';
 import type { FocusCatalogue } from '../kpi/focus-products';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
-import { activeJobsByMonth, busyText } from './apply-jobs-data';
-import type { SalesMonthActiveJob } from '../sales-import.contract';
+import { activeJobsByMonth, busyText, lastJobsByMonth } from './apply-jobs-data';
+import type { SalesMonthActiveJob, SalesMonthLastJob } from '../sales-import.contract';
 
 /** Why a month cannot be applied (null = it can). Shared by preview and apply. */
 export function blockedReasonFor(opts: {
@@ -84,6 +84,7 @@ export class SalesPreviewService {
     const catalogue = lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId, { importId: imp.id }));
     // Background jobs (2026-11-18): a month with an Apply / Recalculate queued or running (by anyone) cannot be ticked.
     const active = await activeJobsByMonth(this.prisma, clientId, months);
+    const finished = await lastJobsByMonth(this.prisma, clientId, months);
 
     const out: MonthPreview[] = [];
     for (const summary of summaries) {
@@ -93,6 +94,7 @@ export class SalesPreviewService {
           labelOf,
           catalogue,
           activeJob: active.get(summary.month) ?? null,
+          lastJob: finished.get(summary.month) ?? null,
         }),
       );
     }
@@ -119,6 +121,7 @@ export class SalesPreviewService {
       labelOf: Map<string, string>;
       catalogue: () => Promise<FocusCatalogue>;
       activeJob?: SalesMonthActiveJob | null;
+      lastJob?: SalesMonthLastJob | null;
     },
   ): Promise<MonthPreview> {
     const month = summary.month;
@@ -191,6 +194,7 @@ export class SalesPreviewService {
       lastApplied,
       reconciliation: reconcileMonth(focus, comp, owned, last?.at ?? null),
       activeJob,
+      lastJob: ctx.lastJob ?? null,
     };
   }
 }

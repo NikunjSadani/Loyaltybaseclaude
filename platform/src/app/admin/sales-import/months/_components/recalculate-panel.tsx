@@ -21,8 +21,8 @@ import type {
 } from '@/lib/sales-import/types';
 import { failureReason, outcomeUnknown } from '@/lib/request-outcome';
 import {
-  JOB_QUEUED_TOO_LONG_MS, jobEnded, lookUp, monthProgressText, monthResult, newRequestId, resolveSubmit, useJobFollower,
-  type SubmitOutcome,
+  JOB_QUEUED_TOO_LONG_MS, clearUnknown, jobEnded, jobHeadline, loadUnknown, lookUp, monthProgressText, monthResult,
+  newRequestId, resolveSubmit, resultsSummary, saveUnknown, useJobFollower, whenLabel, type SubmitOutcome, type UnknownLock,
 } from '@/lib/sales-import/apply-job';
 import {
   MonthReconciliationPanel, useDimensionLabels, useOutletTypeNames,
@@ -33,9 +33,6 @@ import { DayDataNotice } from '../../_components/day-data-notice';
 function legacyResult(data: unknown): ApplyMonthResult[] | null {
   return data && typeof data === 'object' && 'ok' in (data as object) ? [data as ApplyMonthResult] : null;
 }
-
-const clockLabel = (iso: string) =>
-  new Date(iso).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
 
 export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }: {
   month: string;
@@ -57,7 +54,15 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
   /** Looking the click up by its requestId after no clear answer. */
   const [checking, setChecking] = useState(false);
   /** No clear answer and the lookup failed too → Recalculate disabled until Check again settles it. */
-  const [unknown, setUnknown] = useState<{ requestId: string; reason: string } | null>(null);
+  const unknownKey = `sales-recalc-unknown:${month}`;
+  // B-L8: an unknown outcome survives a reload (Recalculate stays held until Check again settles it).
+  const [unknown, setUnknownState] = useState<UnknownLock | null>(() => (typeof window === 'undefined' ? null : loadUnknown(unknownKey)));
+  const setUnknown = useCallback((u: UnknownLock | null) => {
+    setUnknownState(u);
+    if (u) saveUnknown(unknownKey, u); else clearUnknown(unknownKey);
+  }, [unknownKey]);
+  const outcomeRef = useRef<HTMLDivElement | null>(null);
+  const focusOutcome = () => { setTimeout(() => outcomeRef.current?.focus(), 0); };
   /** The lookup says the click recorded nothing → Try again resends the SAME request (same requestId: harmless). */
   const [notRecorded, setNotRecorded] = useState(false);
   const lastSent = useRef<SalesMonthRecalcRequest | null>(null);
@@ -94,7 +99,7 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
     const refreshed = await load();
     if (mountedRef.current && res?.ok && !refreshed) setStaleAfterApply(true);
   }, [load, month, onApplied]);
-  const { jobs, lostContact, follow } = useJobFollower(onJobEnded);
+  const { jobs, problems, follow } = useJobFollower(onJobEnded);
 
   // Opened while an Apply / Recalculate of this month is queued or running → follow it (refresh-safe, several admins).
   useEffect(() => {
@@ -106,8 +111,9 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
   const job = jobId ? jobs[jobId] ?? null : null;
   const jobRunning = (!!job && !jobEnded(job)) || (!!activeJob && !job);
   const busy = applying || checking || !!unknown || jobRunning;
-  const queuedTooLong = !!job && job.status === 'QUEUED' && Date.now() - Date.parse(job.createdAt) > JOB_QUEUED_TOO_LONG_MS;
-  const progress = job ? job.months.map((m) => monthProgressText(job, m.month, monthLabel(m.month), clockLabel)).join('. ') : '';
+  const queuedTooLong = !!job && job.status === 'QUEUED' && job.attempts === 0 && Date.now() - Date.parse(job.createdAt) > JOB_QUEUED_TOO_LONG_MS;
+  const progress = job ? job.months.map((m) => monthProgressText(job, m.month, monthLabel(m.month))).join('. ') : '';
+  const problem = jobId ? problems[jobId] ?? null : null;
 
   async function apply() {
     if (!preview || !preview.canApply || busy) return;
@@ -137,6 +143,7 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
     if (!r.success && !outcomeUnknown(r)) {
       setApplying(false);
       await refused(r.status, failureReason(r));
+      focusOutcome();
       return;
     }
     if (!r.success) setChecking(true);
@@ -148,6 +155,7 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
   }
 
   async function settle(out: SubmitOutcome, requestId: string) {
+    focusOutcome();
     if (out.kind === 'job') {
       setUnknown(null);
       setJobId(out.job.id);
@@ -168,11 +176,12 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
       setNotRecorded(true);
       setNotice(`Nothing was changed: ${out.reason}, and nothing was recorded for this click. Try again.`);
     } else {
-      setUnknown({ requestId, reason: out.reason });
+      setUnknown({ requestId, reason: out.reason, months: [month] });
     }
   }
 
   async function refused(status: number | undefined, reason: string) {
+    if (status === 401) { setNotice('Nothing was changed: your session has expired. Sign in again, then recalculate.'); return; } // B-L12
     if (status === 403) { setNotice('Nothing was changed: you don’t have permission to recalculate months.'); return; }
     const refreshed = await load();
     onApplied();
@@ -193,7 +202,9 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
   const recalcWhy = unknown ? 'Recalculate is held until the page can confirm whether the last one was recorded.'
     : jobRunning ? `${label} is being ${job?.kind === 'APPLY' ? 'applied' : 'recalculated'} — wait for it to finish.`
       : checking ? 'Checking what happened to the last recalculation.' : '';
-  const liveText = checking ? 'Checking what happened to the recalculation…' : jobRunning ? progress : notice ?? '';
+  // B-M6: the result is announced too (the visible result card has no live role of its own).
+  const liveText = checking ? 'Checking what happened to the recalculation…' : jobRunning ? progress
+    : result ? resultsSummary([result], monthLabel, 'recalculated') : notice ?? '';
 
   return (
     <section className="bg-white rounded-xl border border-blue-200 shadow-sm p-5 space-y-4" data-testid={`recalc-panel-${month}`}
@@ -216,6 +227,7 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
         </div>
       )}
       <p className="sr-only" aria-live="polite" data-testid="recalc-live">{liveText}</p>
+      <div ref={outcomeRef} tabIndex={-1} className="space-y-4 outline-none" data-testid="recalc-outcome">
       {checking && (
         <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 flex items-center gap-2"
           data-testid="recalc-checking">
@@ -237,18 +249,18 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
           )}
         </div>
       )}
+      </div>
       {jobRunning && (
         <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 space-y-1" data-testid="recalc-job">
           <p className="font-semibold flex items-center gap-2"><Spinner size="sm" />
-            {job?.status === 'QUEUED' ? 'Queued — waiting for the processor to start'
-              : job?.kind === 'APPLY' ? `${label} is being applied from a sales file` : 'Recalculating in the background'}
+            {job?.kind === 'APPLY' && job.status !== 'QUEUED' ? `${label} is being applied from a sales file` : job ? jobHeadline(job) : 'Waiting for it to finish'}
           </p>
-          {job && <p className="text-xs">Started by {job.requestedBy} at {clockLabel(job.createdAt)}. {progress}. You can close this panel — it carries on.</p>}
-          {!job && activeJob && <p className="text-xs">Started by {activeJob.requestedBy} at {clockLabel(activeJob.createdAt)}.</p>}
+          {job && <p className="text-xs">Started by {job.requestedBy} at {whenLabel(job.createdAt)}. {progress}. You can close this panel — it carries on.</p>}
+          {!job && activeJob && <p className="text-xs">Started by {activeJob.requestedBy} at {whenLabel(activeJob.createdAt)}.</p>}
           {queuedTooLong && (
             <p className="text-xs text-amber-800">The processor has not started yet. It is started again automatically within 10 minutes — don&apos;t recalculate again.</p>
           )}
-          {lostContact && <p className="text-xs text-amber-800">Lost contact with the server while following it — still trying. The work itself carries on.</p>}
+          {problem && <p role={problem.final ? 'alert' : undefined} className="text-xs text-amber-800" data-testid="recalc-job-problem">{problem.text}</p>}
         </div>
       )}
 
@@ -327,7 +339,7 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
 
           {result ? (
             <div className={`rounded-lg border px-4 py-3 text-sm ${result.ok ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}
-              data-testid="recalc-result" role="status">
+              data-testid="recalc-result">
               {result.ok && result.outletsWritten === undefined ? (
                 <p className="flex items-center gap-1.5 text-emerald-800"><CheckCircle2 className="w-4 h-4" /> {label} recalculated.</p>
               ) : result.ok ? (

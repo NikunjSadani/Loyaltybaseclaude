@@ -36,8 +36,13 @@ export function noAnswerReason(r: Failed): string {
   if (s === undefined || s === 0) {
     return /cut off/i.test(r.error ?? '') ? reasonOr(r.error, '') : 'the server could not be reached';
   }
+  // A 503 that carries the server's own words (e.g. "The server is busy…" from the heavy-operation limiter) says them.
+  if (s === 503 && !GENERIC_GATEWAY_TEXT.test((r.error ?? '').trim())) return `the server is busy: ${reasonOr(r.error, '')}`;
   return `the server didn’t give a clear answer (error ${s})`;
 }
+
+/** Status-line texts a proxy / gateway puts in an error body — not a reason worth showing. */
+const GENERIC_GATEWAY_TEXT = /^(|service unavailable|internal server error|bad gateway|gateway time-?out|http \d{3})$/i;
 
 /** The reason of ANY failure, never empty: the server's own words for a refusal, plain words for no clear answer. */
 export function failureReason(r: Failed): string {

@@ -15,7 +15,7 @@
  * FOCUS-FROM-TARGETS: `targetsChangedSinceApply` → a "Targets changed — recalculate" badge that opens the Recalculate
  * panel for that month (a plain badge when the month can't be recalculated here).
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Calculator, Lock, LockOpen, RefreshCw, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
@@ -26,9 +26,7 @@ import { failureReason, noAnswerReason, outcomeUnknown, reasonOr } from '@/lib/r
 import { usePermissions } from '@/lib/use-permissions';
 import type { SalesMonthRow } from '@/lib/sales-import/types';
 import { RecalculatePanel } from './_components/recalculate-panel';
-
-const clockLabel = (iso: string) =>
-  new Date(iso).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
+import { whenLabel } from '@/lib/sales-import/apply-job';
 
 export default function SalesMonthsPage() {
   const { role } = useAdminSession();
@@ -41,10 +39,12 @@ export default function SalesMonthsPage() {
   const [busyMonth, setBusyMonth] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const [recalcMonth, setRecalcMonth] = useState<string | null>(null);
+  /** B-L7: bumped by every action that writes a row — a list fetch that started before it is stale and is re-run. */
+  const writeSeq = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
-    setError(null);
+    const startedAt = writeSeq.current;
     // ?from=&to= from the KPI picker: list that range so every month it names is shown (window / clock read in the effect).
     const qs = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
     const valid = (m: string | null | undefined) => (m && /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : undefined);
@@ -54,22 +54,35 @@ export default function SalesMonthsPage() {
     const to = rawTo && from ? (rawTo > nowIst ? nowIst : rawTo) : undefined;
     (from ? (to && to >= from ? salesImportApi.months(from, to) : salesImportApi.months(from)) : salesImportApi.months()).then((r) => {
       if (cancelled) return;
-      if (r.success) setRows([...r.data].sort((a, b) => b.month.localeCompare(a.month)));
-      else setError(failureReason(r));
+      if (writeSeq.current !== startedAt) { setTick((x) => x + 1); return; } // an action changed a row meanwhile
+      if (r.success && Array.isArray(r.data)) { setError(null); setRows([...r.data].sort((a, b) => b.month.localeCompare(a.month))); }
+      else setError(r.success ? 'the server’s reply was incomplete' : failureReason(r));
     });
     return () => { cancelled = true; };
   }, [tick]);
 
   // A month with an Apply / Recalculate queued or running (background jobs, 2026-11-18): re-read the list every 5 s until
-  // none is left, so the "being applied" note and the buttons follow it.
+  // none is left, so the "being applied" note and the buttons follow it. B-M4: a FAILED re-read reschedules too (the tick
+  // changes), and the stale list says so. B-L9: no polling while the tab is hidden.
   const anyActive = !!rows?.some((r) => r.activeJob);
   useEffect(() => {
     if (!anyActive) return;
-    const t = setTimeout(() => setTick((x) => x + 1), 5000);
-    return () => clearTimeout(t);
-  }, [anyActive, rows]);
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => { t = setTimeout(() => setTick((x) => x + 1), 5000); };
+    const onVisible = () => { if (document.visibilityState !== 'hidden' && !t) schedule(); };
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') document.addEventListener('visibilitychange', onVisible);
+    else schedule();
+    return () => { if (t) clearTimeout(t); document.removeEventListener('visibilitychange', onVisible); };
+  }, [anyActive, tick]);
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
+
+  /** Put a row the server returned in place (or re-read the list when the reply carried none — B-M1). */
+  const putRow = useCallback((month: string, data: SalesMonthRow | undefined | null) => {
+    writeSeq.current++;
+    if (data && typeof data === 'object' && data.month === month) setRows((prev) => prev?.map((x) => (x.month === month ? data : x)) ?? prev);
+    else setTick((t) => t + 1);
+  }, []);
 
   /**
    * An action on a month got NO definite answer (proxy / Worker timeout, 5xx, network) — the backend may have done it
@@ -86,9 +99,9 @@ export default function SalesMonthsPage() {
       reload();
       return;
     }
-    setRows((prev) => prev?.map((x) => (x.month === row.month ? now : x)) ?? prev);
+    putRow(row.month, now);
     setActionMsg(t.done(now)
-      ? { tone: 'ok', text: `${t.doneText} (The server's reply didn't arrive in time; checking again confirmed it.)` }
+      ? { tone: 'ok', text: `${t.doneText} (No clear answer came from the server; checking again confirmed it.)` }
       : { tone: 'err', text: t.notDoneText });
   }
 
@@ -116,7 +129,7 @@ export default function SalesMonthsPage() {
     setBusyMonth(null);
     if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not closed: ${reasonOr(r.error, 'the server refused it without a reason')}.` }); reload(); return; }
     setActionMsg({ tone: 'ok', text: closedText });
-    setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
+    putRow(row.month, r.data);
   }
 
   async function rebuildProductList(row: SalesMonthRow) {
@@ -139,7 +152,7 @@ export default function SalesMonthsPage() {
     setBusyMonth(null);
     if (!r.success) { setActionMsg({ tone: 'err', text: `The product list for ${label} was not rebuilt: ${reasonOr(r.error, 'the server refused it without a reason')}.` }); reload(); return; }
     setActionMsg({ tone: 'ok', text: `The product list for ${label} is rebuilt. No figures changed.` });
-    setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
+    putRow(row.month, r.data);
   }
 
   async function reopen(row: SalesMonthRow) {
@@ -182,10 +195,10 @@ export default function SalesMonthsPage() {
     }
     setBusyMonth(null);
     if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not reopened: ${reasonOr(r.error, 'the server refused it without a reason')}.` }); reload(); return; }
-    const { warnings, ...updated } = r.data;
+    const { warnings, ...updated } = r.data ?? ({} as Partial<typeof r.data>);
     const extra = warnings?.length ? ` Check: ${warnings.map(sentence).join('; ')}.` : '';
     setActionMsg({ tone: warnings?.length ? 'warn' : 'ok', text: `${label} is open again. Close it once the corrected file is applied.${extra}` });
-    setRows((prev) => prev?.map((x) => (x.month === row.month ? updated : x)) ?? prev);
+    putRow(row.month, r.data ? (updated as SalesMonthRow) : undefined);
   }
 
   return (
@@ -215,6 +228,14 @@ export default function SalesMonthsPage() {
       </div>
       {actionMsg?.tone === 'err' && (
         <div role="alert" className="rounded-lg border px-4 py-3 text-sm bg-red-50 border-red-200 text-red-800">{actionMsg.text}</div>
+      )}
+
+      {rows !== null && error && (
+        <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" data-testid="months-stale">
+          {anyActive ? 'Updates paused — ' : ''}couldn&apos;t refresh the months ({error}). The list below may be out of date
+          {anyActive ? '; retrying every few seconds' : ''}.{' '}
+          <Button size="sm" variant="outline" className="ml-2" onClick={reload}>Retry now</Button>
+        </div>
       )}
 
       {recalcMonth && (
@@ -272,7 +293,17 @@ export default function SalesMonthsPage() {
                           className="mt-1 flex w-fit items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border bg-blue-50 text-blue-800 border-blue-200">
                           <Spinner size="sm" />
                           {row.activeJob.status === 'QUEUED' ? 'Queued' : row.activeJob.kind === 'RECALC' ? 'Being recalculated' : 'Being applied'}
-                          {' '}by {row.activeJob.requestedBy} since {clockLabel(row.activeJob.createdAt)}
+                          {' '}by {row.activeJob.requestedBy} since {whenLabel(row.activeJob.createdAt)}
+                        </span>
+                      )}
+                      {!row.activeJob && row.lastJob && (
+                        <span data-testid={`last-job-${row.month}`}
+                          className={`mt-1 block text-[11px] ${row.lastJob.status === 'DONE' && row.lastJob.result?.ok !== false ? 'text-gray-500' : 'text-red-700 font-medium'}`}>
+                          Last {row.lastJob.kind === 'RECALC' ? 'recalculation' : 'apply'} by {row.lastJob.requestedBy}
+                          {row.lastJob.finishedAt ? `, ${whenLabel(row.lastJob.finishedAt)}` : ''}:{' '}
+                          {row.lastJob.status === 'DONE' && row.lastJob.result?.ok !== false
+                            ? (row.lastJob.kind === 'RECALC' ? 'recalculated' : 'applied')
+                            : `not done — ${row.lastJob.result?.error ?? 'no reason was given'}`}
                         </span>
                       )}
                     </td>
@@ -289,8 +320,14 @@ export default function SalesMonthsPage() {
                       {row.closedAt ? `${dateTimeLabel(row.closedAt)}${row.closedBy ? ` by ${row.closedBy}` : ''}` : '—'}
                     </td>
                     <td className="px-4 py-2 text-right whitespace-nowrap">
+                      {row.activeJob && (canClose && (row.canClose || (isGifsyAdmin && row.canReopen))) && (
+                        <span id={`job-hold-${row.month}`} className="block text-[11px] text-gray-500" data-testid={`job-hold-${row.month}`}>
+                          {row.canClose ? 'Close' : 'Reopen'} waits until the {row.activeJob.kind === 'RECALC' ? 'recalculation' : 'apply'} finishes
+                        </span>
+                      )}
                       {canClose && row.canClose && (
                         <Button size="sm" variant="outline" onClick={() => close(row)} loading={busyMonth === row.month}
+                          disabled={!!row.activeJob} aria-describedby={row.activeJob ? `job-hold-${row.month}` : undefined}
                           aria-label={`Close ${label}`}>
                           <Lock className="w-3.5 h-3.5" /> Close {label}
                         </Button>
@@ -319,6 +356,7 @@ export default function SalesMonthsPage() {
                       )}
                       {isGifsyAdmin && canClose && row.canReopen && (
                         <Button size="sm" variant="ghost" onClick={() => reopen(row)} loading={busyMonth === row.month}
+                          disabled={!!row.activeJob} aria-describedby={row.activeJob ? `job-hold-${row.month}` : undefined}
                           aria-label={`Reopen ${label}`}>
                           <LockOpen className="w-3.5 h-3.5" /> Reopen
                         </Button>

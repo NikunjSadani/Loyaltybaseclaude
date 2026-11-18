@@ -135,6 +135,12 @@ describe('api.del', () => {
     expect(result).toEqual({ success: false, error: 'The server’s reply was cut off, so its result is not known' });
   });
 
+  it('B-M1: a 2xx whose body stream FAILS while being read is a cut-off reply (outcome unknown), not a success', async () => {
+    const res = { ok: true, status: 200, statusText: 'OK', json: () => Promise.reject(new TypeError('network error')), text: () => Promise.reject(new TypeError('network error')) };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res));
+    expect(await api.post('/api/x', {})).toEqual({ success: false, error: 'The server’s reply was cut off, so its result is not known' });
+  });
+
   it('a real empty 2xx Response (no body at all) is still a success', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 200 })));
     expect((await api.del('/api/items/1')).success).toBe(true);

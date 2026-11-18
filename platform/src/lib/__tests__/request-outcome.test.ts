@@ -28,6 +28,11 @@ describe('noAnswerReason (M5: "didn’t reply in time" only for real timeouts)',
     expect(noAnswerReason({ status: 503 })).toBe('the server didn’t give a clear answer (error 503)');
     expect(noAnswerReason({ status: 500 })).not.toMatch(/in time/);
   });
+  it('B-L4: a 503 with the server’s own reason says it (busy), a bare gateway 503 does not', () => {
+    expect(noAnswerReason({ status: 503, error: 'The server is busy with other large requests. Try again in a minute.' }))
+      .toBe('the server is busy: The server is busy with other large requests. Try again in a minute');
+    expect(noAnswerReason({ status: 503, error: 'Service Unavailable' })).toBe('the server didn’t give a clear answer (error 503)');
+  });
   it('offline / fetch threw → could not be reached; a cut-off reply says so', () => {
     expect(noAnswerReason({ error: 'Failed to fetch' })).toBe('the server could not be reached');
     expect(noAnswerReason({ error: 'The server’s reply was cut off, so its result is not known' })).toBe('The server’s reply was cut off, so its result is not known');

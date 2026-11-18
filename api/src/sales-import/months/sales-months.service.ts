@@ -12,11 +12,12 @@ import type {
   SalesMonthReopenResult,
   SalesMonthRow,
   SalesMonthActiveJob,
+  SalesMonthLastJob,
 } from '../sales-import.contract';
 import { historyRetentionMessage, isBeyondHistoryRetention } from '../retention-window';
 import { classifyMonthSummaries, insertMonthCombosSql } from '../kpi/month-combos';
 import { isMonthKey, monthLabel, resolveMonthState, shiftMonthKey } from './month-state';
-import { activeJobsByMonth, assertNoActiveJob } from '../apply/apply-jobs-data';
+import { activeJobsByMonth, assertNoActiveJob, lastJobsByMonth } from '../apply/apply-jobs-data';
 import {
   kpiLabelsOf,
   latestTargetWriteByMonth,
@@ -133,15 +134,16 @@ export class SalesMonthsService {
     const rows = await this.prisma.salesMonthStatus.findMany({ where: { clientId, month: { in: months } } });
     const byMonth = new Map(rows.map((r) => [r.month, r]));
     const names = await this.userNames(rows.map((r) => r.closedById));
-    const [downstream, history, targetTimes, active] = await Promise.all([
+    const [downstream, history, targetTimes, active, finished] = await Promise.all([
       downstreamArtifacts(this.prisma, clientId, months),
       historyMetaByMonth(this.prisma, clientId, months),
       this.targetChangeTimes(clientId, months),
       activeJobsByMonth(this.prisma, clientId, months),
+      lastJobsByMonth(this.prisma, clientId, months),
     ]);
     return months
       .reverse()
-      .map((m) => this.toRow(m, current, byMonth.get(m) ?? null, names, downstream.get(m), history.get(m), targetTimes.get(m), active.get(m)));
+      .map((m) => this.toRow(m, current, byMonth.get(m) ?? null, names, downstream.get(m), history.get(m), targetTimes.get(m), active.get(m), finished.get(m)));
   }
 
   async close(user: JwtPayload, month: string): Promise<SalesMonthRow> {
@@ -436,6 +438,7 @@ export class SalesMonthsService {
     targetUploadedAt?: Date,
     /** The month's queued / running Apply / Recalculate (list only; close / reopen refuse while one exists). */
     activeJob?: SalesMonthActiveJob,
+    lastJob?: SalesMonthLastJob,
   ): SalesMonthRow {
     const st = resolveMonthState(month, current, row);
     const closedExplicit = st.state === 'CLOSED' && !st.implicit;
@@ -458,6 +461,7 @@ export class SalesMonthsService {
       // targetChangeTimes is empty for a tenant without a TARGET_NAMES KPI (B-M1) → always false there.
       targetsChangedSinceApply: targetsNewerThanApply(targetUploadedAt ?? null, row?.lastAppliedAt ?? null, targetUploadedAt !== undefined),
       activeJob: activeJob ?? null,
+      lastJob: lastJob ?? null,
     };
   }
 

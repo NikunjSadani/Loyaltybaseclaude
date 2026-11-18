@@ -165,10 +165,23 @@ export async function profileDimensionKeys(db: Db, clientId: string): Promise<st
  * did, for every aggregate of the import); the import read uses the aggregates' (importId, …) index for the WHERE and
  * one sort on dimKey. Never Prisma `distinct` (that loads every row into Node).
  */
-export async function loadFocusCatalogue(db: Db, clientId: string, opts: { importId?: string } = {}): Promise<FocusCatalogue> {
-  const dimensionKeys = await profileDimensionKeys(db, clientId);
-  const history = await db.$queryRaw<Array<{ dims: unknown }>>(Prisma.sql`
+/**
+ * The stored product lists (every month's history combos) as raw `dims` rows — the part of the catalogue that APPLYING a
+ * month changes. A background apply job snapshots it on its first run (SalesApplyJob.focusBasis) so a retried job
+ * resolves its remaining months against the SAME lists, not ones its own earlier months rewrote (audit A-M1).
+ */
+export async function loadHistoryCombos(db: Db, clientId: string): Promise<Array<{ dims: unknown }>> {
+  return db.$queryRaw<Array<{ dims: unknown }>>(Prisma.sql`
     SELECT DISTINCT ON ("dimKey") "dims" FROM "sales_month_history_combos" WHERE "clientId" = ${clientId} ORDER BY "dimKey"`);
+}
+
+export async function loadFocusCatalogue(
+  db: Db,
+  clientId: string,
+  opts: { importId?: string; history?: Array<{ dims: unknown }> } = {},
+): Promise<FocusCatalogue> {
+  const dimensionKeys = await profileDimensionKeys(db, clientId);
+  const history = opts.history ?? (await loadHistoryCombos(db, clientId));
   const fromImport = opts.importId
     ? await db.$queryRaw<Array<{ dims: unknown }>>(Prisma.sql`
         SELECT DISTINCT ON (a."dimKey") a."dims" FROM "sales_import_aggregates" a

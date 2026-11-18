@@ -372,6 +372,8 @@ export interface MonthPreview extends MonthSummary {
   reconciliation: MonthReconciliation;
   /** An Apply / Recalculate of this month queued or running now (by anyone): the month cannot be applied until it ends. */
   activeJob: SalesMonthActiveJob | null;
+  /** The month's latest finished Apply / Recalculate (any import), or null. */
+  lastJob: SalesMonthLastJob | null;
 }
 
 export interface SalesImportPreview {
@@ -449,6 +451,8 @@ export interface SalesApplyJobMonthDto {
   finishedAt: string | null;
   /** DONE / FAILED: what happened (same shape as the old synchronous apply result). */
   result: ApplyMonthResult | null;
+  /** The last retryable error of this month (a temporary DB problem); the job retried it. */
+  lastError: string | null;
 }
 export interface SalesApplyJobDto {
   id: string;
@@ -463,6 +467,8 @@ export interface SalesApplyJobDto {
   finishedAt: string | null;
   /** A whole-job refusal found by the worker before any write (e.g. focus products changed since the preview). */
   error: string | null;
+  /** Worker runs that took this job (a stop does not count). >0 while QUEUED = handed back, waiting to continue. */
+  attempts: number;
   months: SalesApplyJobMonthDto[];
 }
 /** The active (QUEUED / RUNNING) job on a month, shown on the preview and the Months list. */
@@ -482,6 +488,27 @@ export interface SalesMonthActiveJob {
 export interface ApplyEnqueued {
   job: SalesApplyJobDto;
   results: ApplyMonthResult[];
+  /**
+   * Recalculate only: the month result an OLD Months tab reads (`ok: false` + "being recalculated in the background —
+   * refresh this page to follow it") instead of a false "recalculated" (audit B-H2).
+   */
+  month?: string;
+  ok?: false;
+  error?: string;
+}
+/**
+ * The latest FINISHED Apply / Recalculate of a month (DONE or FAILED), shown when coming back to the page so a result
+ * never disappears (audit B-H1).
+ */
+export interface SalesMonthLastJob {
+  jobId: string;
+  kind: SalesApplyJobKind;
+  status: 'DONE' | 'FAILED';
+  importId: string | null;
+  requestedBy: string;
+  createdAt: string;
+  finishedAt: string | null;
+  result: ApplyMonthResult | null;
 }
 
 // ─── Months ─────────────────────────────────────────────────────────────────────
@@ -524,6 +551,8 @@ export interface SalesMonthRow {
   targetsChangedSinceApply: boolean;
   /** An Apply / Recalculate of this month queued or running now: Close / Reopen / Recalculate are refused (409) until it ends. */
   activeJob: SalesMonthActiveJob | null;
+  /** The month's latest finished Apply / Recalculate, or null. */
+  lastJob: SalesMonthLastJob | null;
 }
 
 /**

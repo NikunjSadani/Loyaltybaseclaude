@@ -20,6 +20,7 @@ CREATE TABLE "sales_apply_jobs" (
     "heartbeatAt" TIMESTAMP(3),
     "attempts" INTEGER NOT NULL DEFAULT 0,
     "error" TEXT,
+    "focusBasis" JSONB,                   -- APPLY: the stored product lists the first run resolved focus names against
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "startedAt" TIMESTAMP(3),
     "finishedAt" TIMESTAMP(3),
@@ -38,6 +39,7 @@ CREATE TABLE "sales_apply_job_months" (
     "month" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'QUEUED', -- QUEUED | RUNNING | DONE | FAILED
     "result" JSONB,
+    "lastError" TEXT,                     -- the last retryable error (shown if the attempts run out)
     "startedAt" TIMESTAMP(3),
     "finishedAt" TIMESTAMP(3),
 

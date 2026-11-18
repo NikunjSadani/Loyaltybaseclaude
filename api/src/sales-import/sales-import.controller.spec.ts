@@ -10,7 +10,7 @@ import { PURGE_STEP_MS } from './ingest/sales-import-retention.service';
 const ADMIN = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'A' };
 const UNASSUMED_GIFSY = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'G' };
 
-function make(flag: boolean) {
+function make(flag: boolean, activeJobs: Array<Record<string, unknown>> = []) {
   const uploads = {
     createUpload: jest.fn().mockResolvedValue({ importId: 'i', partSize: 1, partCount: 1 }),
     putPart: jest.fn().mockResolvedValue({ partsReceived: 1 }),
@@ -24,7 +24,10 @@ function make(flag: boolean) {
     unmatchedCsv: jest.fn(),
     errorsXlsx: jest.fn().mockResolvedValue({ buffer: Buffer.from('x'), filename: 'e.xlsx' }),
   };
-  const prisma = { client: { findUnique: jest.fn().mockResolvedValue({ features: { salesImport: flag }, status: 'ACTIVE' }) } };
+  const prisma = {
+    client: { findUnique: jest.fn().mockResolvedValue({ features: { salesImport: flag }, status: 'ACTIVE' }) },
+    $queryRaw: jest.fn().mockResolvedValue(activeJobs),
+  };
   const tenant = { resolveClient: jest.fn().mockResolvedValue({ id: 't1', features: { salesImport: flag } }) };
   const gifsyRoles = { getPermissions: jest.fn().mockResolvedValue(new Set()) };
   const ctrl = new SalesImportController({} as never, tenant as never, prisma as never, uploads as never, gifsyRoles as never);
@@ -32,6 +35,20 @@ function make(flag: boolean) {
 }
 
 describe('SalesImportController', () => {
+  it('A-L6: reprocess / read again / cancel / delete of an import with an active Apply → 409 naming who, and the service is not called', async () => {
+    const busy = [{ month: '2026-10', jobId: 'j1', kind: 'APPLY', status: 'RUNNING', importId: 'i', requestedByName: 'Ravi', createdAt: new Date('2026-11-18T05:02:00.000Z') }];
+    const { ctrl, uploads } = make(true, busy);
+    for (const call of [() => ctrl.reprocess(ADMIN, 'i'), () => ctrl.reprocessAsNew(ADMIN, 'i'), () => ctrl.cancel(ADMIN, 'i'), () => ctrl.remove(ADMIN, 'i')]) {
+      await expect(call()).rejects.toThrow(/October 2026 is being applied by Ravi since (\d+ \w+, )?10:32 from this file — try again when it finishes\./);
+    }
+    expect(uploads.reprocess).not.toHaveBeenCalled();
+    expect(uploads.cancel).not.toHaveBeenCalled();
+    expect(uploads.remove).not.toHaveBeenCalled();
+    const idle = make(true);
+    await idle.ctrl.cancel(ADMIN, 'i');
+    expect(idle.uploads.cancel).toHaveBeenCalled();
+  });
+
   it('flag OFF → 403 before any service call (writes read the flag uncached)', async () => {
     const { ctrl, uploads, prisma } = make(false);
     await expect(ctrl.createUpload(ADMIN, { filename: 'a.csv', sizeBytes: 1 })).rejects.toBeInstanceOf(ForbiddenException);
