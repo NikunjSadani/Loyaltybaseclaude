@@ -45,6 +45,11 @@ const OUTLETS = {
         id: 'o-fresh', kycId: '', outletCode: 'OUT-002', name: 'Patel Kirana',
         location: 'Mumbai', beat: 'B1', district: 'D', state: 'MH', type: 'SSS', kycStatus: 'NOT_STARTED',
       },
+      // K2: a 2-outlet owner whose latest KYC (in review) was filed via OUT-009, which this rep cannot open.
+      {
+        id: 'o-sibling', kycId: '', kycFiledViaOutletCode: 'OUT-009', outletCode: 'OUT-003', name: 'Gupta Stores',
+        location: 'Mumbai', beat: 'B1', district: 'D', state: 'MH', type: 'SSS', kycStatus: 'PENDING_GIFSY',
+      },
     ],
   },
 };
@@ -92,5 +97,13 @@ describe('Sales outlets — KYC link guard (no dead /sales/kyc/)', () => {
       const deadLink = document.querySelector('a[href="/sales/kyc/"]');
       expect(deadLink).toBeNull();
     });
+  });
+
+  it('K2: the owner KYC filed via ANOTHER outlet → status kept, NO link (no dead detail, no start wizard), note shown', async () => {
+    render(<OutletsPage />);
+    const name = await screen.findByText('Gupta Stores');
+    expect(name.closest('a')).toBeNull(); // plain card, not a link
+    expect(screen.getByText('KYC filed via outlet OUT-009')).toBeInTheDocument();
+    expect(document.querySelector('a[href="/sales/kyc/new?outletId=o-sibling"]')).toBeNull();
   });
 });

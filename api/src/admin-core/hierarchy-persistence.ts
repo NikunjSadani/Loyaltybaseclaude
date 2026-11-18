@@ -156,6 +156,12 @@ export interface PersistHierarchyResult {
   salesUsersUpserted: number;
   reportingLinksSet: number;
   placeholders: number;
+  /**
+   * K3: login User ids of EXISTING employees this upload turned into a vacant PLACEHOLDER (their User row is
+   * set INACTIVE). The caller MUST revoke their sessions after the commit (a vacated person's token must stop
+   * working, exactly like resign / deactivate). Not part of the HTTP response.
+   */
+  vacatedUserIds: string[];
 }
 
 /**
@@ -286,6 +292,7 @@ export async function persistHierarchy(
   let usersUpserted = 0;
   let salesUsersUpserted = 0;
   let placeholders = 0;
+  const vacatedUserIds: string[] = [];
   const salesUserIdByCode = new Map<string, string>();
 
   for (const emp of employees) {
@@ -335,6 +342,8 @@ export async function persistHierarchy(
     // number simply creates a fresh row (the stale INACTIVE row no longer reserves the phone).
     let user: { id: string };
     if (existingSU) {
+      // K3: an existing employee re-uploaded as a vacant placeholder → their sessions are revoked after commit.
+      if (isPlaceholder) vacatedUserIds.push(existingSU.userId);
       user = await tx.user.update({
         where: { id: existingSU.userId },
         data: { phone, name, role: userRole, status: userStatus },
@@ -399,5 +408,6 @@ export async function persistHierarchy(
     salesUsersUpserted,
     reportingLinksSet,
     placeholders,
+    vacatedUserIds,
   };
 }

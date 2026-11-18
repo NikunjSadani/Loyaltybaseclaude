@@ -9,6 +9,7 @@ import {
   UserCheck, Loader2,
 } from 'lucide-react';
 import { KYCStatus } from '@/types';
+import { kycTaskHrefFor } from '@/lib/sales-kyc-link';
 import { fetchTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig } from '@/lib/task-config';
 import {
   fetchOutletVisibilityStatuses,
@@ -37,6 +38,8 @@ type OutletType = 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
 
 interface OutletRow {
   id: string; kycId: string; name: string; mobile: string;
+  /** K2: owner's KYC filed via ANOTHER outlet this caller cannot open → no detail link (see sales-kyc-link). */
+  kycFiledViaOutletCode?: string;
   location: string; type: OutletType; kycStatus: KYCStatus;
   kycSubmittedAt?: string;
   outletCode: string;  // matches Outlet.outletCode for visibility lookup
@@ -68,6 +71,7 @@ function mapOutlet(o: any): OutletRow {
   return {
     id:             o.id,
     kycId:          o.kycId ?? '',
+    kycFiledViaOutletCode: o.kycFiledViaOutletCode ?? undefined,
     outletCode:     o.outletCode ?? '',
     partnerId:      o.partnerId ?? '',
     name:           o.name,
@@ -397,7 +401,7 @@ export default function TasksPage() {
             // Re-KYC outlets normally carry a prior submission (kycId); when absent,
             // open the start wizard pre-selected on this outlet rather than the bare
             // list, matching the rest of the app.
-            href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+            href: kycTaskHrefFor(o),
             priority: 'high' as const,
             ageDays: ageInDays(o.kycSubmittedAt),
           })),
@@ -419,7 +423,7 @@ export default function TasksPage() {
             // `/sales/kyc/${o.id}` linked to a non-existent submission id → "KYC not
             // found". Open the start wizard on this outlet; deep-link only if a real
             // kycId exists.
-            href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+            href: kycTaskHrefFor(o),
             priority: 'medium' as const,
             ageDays: ageInDays(o.kycSubmittedAt),
           })),
@@ -467,7 +471,7 @@ export default function TasksPage() {
         ...rejectedOutlets.map((o) => ({
           id: o.kycId || o.id, title: o.name,
           subtitle: 'Resubmission required',
-          href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+          href: kycTaskHrefFor(o),
           priority: 'high' as const,
           ageDays: ageInDays(o.kycSubmittedAt),
         })),

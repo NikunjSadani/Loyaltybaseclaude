@@ -11,6 +11,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
+import { kycTaskHrefFor } from '@/lib/sales-kyc-link';
 import { pct, pctBarColor } from '@/lib/targets';
 import { type SalesRole, getRole, canEnroll, hasTeamView } from '@/lib/sales-role';
 import { classifyPaceGap, buildCasesToGoMsg, fmtKpiNum, remainingOf } from '@/lib/pace';
@@ -40,6 +41,8 @@ type OutletType = 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
 
 interface OutletRow {
   id: string; kycId: string; name: string; mobile: string;
+  /** K2: owner's KYC filed via ANOTHER outlet this caller cannot open → no detail link (see sales-kyc-link). */
+  kycFiledViaOutletCode?: string;
   location: string; type: OutletType; kycStatus: KYCStatus;
   lastVisit?: string; kycSubmittedAt?: string;
   outletCode: string; // for the visibility-status lookup
@@ -336,6 +339,7 @@ export default function SalesDashboard() {
         setOutlets((outletResult.data.outlets ?? []).map((o: any) => ({
           id:             o.id,
           kycId:          o.kycId ?? '',
+          kycFiledViaOutletCode: o.kycFiledViaOutletCode ?? undefined,
           outletCode:     o.outletCode ?? '',
           name:           o.name,
           mobile:         o.mobile,
@@ -506,7 +510,7 @@ export default function SalesDashboard() {
             // Re-KYC outlets normally have a prior submission (kycId); guard the empty
             // case so the fallback never points at a non-existent submission id (an
             // outlet id) → "KYC not found". Empty → start wizard on this outlet.
-            href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+            href: kycTaskHrefFor(o),
             priority: 'high' as const,
             ageDays: ageInDays(o.kycSubmittedAt),
           })),
@@ -529,7 +533,7 @@ export default function SalesDashboard() {
             // `/sales/kyc/${o.id}` linked to a non-existent submission id → "KYC not
             // found". With a real kycId, deep-link to the detail; otherwise open the
             // start wizard pre-selected on this outlet.
-            href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+            href: kycTaskHrefFor(o),
             priority: 'medium' as const,
             ageDays: ageInDays(o.kycSubmittedAt),
           })),
@@ -583,7 +587,7 @@ export default function SalesDashboard() {
         ...rejectedOutlets.map((o) => ({
           id: o.kycId || o.id, title: o.name,
           subtitle: 'Resubmission required',
-          href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+          href: kycTaskHrefFor(o),
           priority: 'high' as const,
           ageDays: ageInDays(o.kycSubmittedAt),
         })),
@@ -698,9 +702,7 @@ export default function SalesDashboard() {
                   const only = searchResults[0];
                   // No submission yet → start wizard (else the empty kycId yields a
                   // dead /sales/kyc/ → "KYC not found").
-                  window.location.href = only.kycId
-                    ? `/sales/kyc/${only.kycId}`
-                    : `/sales/kyc/new?outletId=${only.id}`;
+                  window.location.href = kycTaskHrefFor(only);
                 } else {
                   window.location.href = `/sales/outlets?q=${encodeURIComponent(search.trim())}`;
                 }
@@ -722,9 +724,7 @@ export default function SalesDashboard() {
                     setSearchOpen(false);
                     setSearch('');
                     // No submission yet → start wizard (else empty kycId → dead route).
-                    window.location.href = o.kycId
-                      ? `/sales/kyc/${o.kycId}`
-                      : `/sales/kyc/new?outletId=${o.id}`;
+                    window.location.href = kycTaskHrefFor(o);
                   }}
                   className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-gray-50 text-left transition-colors border-b border-gray-50 last:border-0"
                 >

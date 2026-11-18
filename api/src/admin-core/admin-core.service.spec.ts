@@ -8,6 +8,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -926,6 +927,46 @@ describe('AdminCoreService', () => {
       }
       // Only the resigned users — nobody else's sessions are touched.
       expect(mockPrisma.userSession.updateMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('K3: a session-revoke FAILURE after a committed resign is reported (not a 500) and the others still revoke', async () => {
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 's1', userId: 'u1', employeeCode: 'E1' },
+        { id: 's2', userId: 'u2', employeeCode: 'E2' },
+      ]);
+      mockPrisma.user.update.mockImplementation((args: { where: { id: string } }) =>
+        args.where.id === 'u1' ? Promise.reject(new Error('db blip')) : Promise.resolve({}),
+      );
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      const errSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      const res = await service.bulkEditUsers(clientAdmin, { action: 'resign', employeeCodes: ['E1', 'E2'] });
+      expect(res).toMatchObject({
+        resigned: 2,
+        notFound: 0,
+        sessionRevokeFailures: [{ employeeCode: 'E1', error: 'db blip' }],
+      });
+      expect((res as { message?: string }).message).toMatch(/could not be signed out/);
+      // u2 still revoked despite u1's failure; the failure was logged LOUDLY.
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({ where: { userId: 'u2', revokedAt: null }, data: { revokedAt: expect.any(Date) } });
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('SESSION REVOKE FAILED for user u1'));
+      errSpy.mockRestore();
+    });
+  });
+
+  describe('saveHierarchyConfig — K3 placeholder re-upload revokes the vacated person\'s sessions', () => {
+    it('revokes every vacated user after the commit and keeps vacatedUserIds out of the response', async () => {
+      mockPrisma.$transaction.mockImplementationOnce(async () => ({
+        levelsUpserted: 1, usersUpserted: 1, salesUsersUpserted: 1, reportingLinksSet: 0, placeholders: 1,
+        vacatedUserIds: ['u-gone'],
+      }));
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 2 });
+      const res = await service.saveHierarchyConfig(clientAdmin, { employees: [] } as never);
+      expect(mockPrisma.user.update).toHaveBeenCalledWith({ where: { id: 'u-gone' }, data: { sessionsInvalidBefore: expect.any(Date) } });
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({ where: { userId: 'u-gone', revokedAt: null }, data: { revokedAt: expect.any(Date) } });
+      expect(res).toEqual({
+        message: 'Employee hierarchy saved',
+        persisted: { levelsUpserted: 1, usersUpserted: 1, salesUsersUpserted: 1, reportingLinksSet: 0, placeholders: 1 },
+      });
     });
 
     it('rejects an unknown action', async () => {

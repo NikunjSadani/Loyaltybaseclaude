@@ -2941,7 +2941,7 @@ describe('SalesService', () => {
       const res = await service.getTeam(caller);
       expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so2', 'isr']);
       const isr = res.members.find((m: { id: string }) => m.id === 'isr')!;
-      expect(isr).toMatchObject({ outlets: 1, kycPending: 1, submitterUserIds: ['u-isr'] });
+      expect(isr).toMatchObject({ outlets: 1, kycPending: 1, submitterUserIds: ['u-isr', 'u-so'] }); // K4: + the removed SO's own KYCs;
       // The rollup spans the whole effective downline (through the deleted SO), never the SO itself.
       const aWhere = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
       expect([...aWhere.salesUserId.in].sort()).toEqual(['asm', 'isr', 'isr2', 'so2']);
@@ -3037,36 +3037,62 @@ describe('SalesService', () => {
       expect([...where.salesUserId.in].sort()).toEqual(['asm', 'isr']);
     });
 
-    // ── F1 — per-outlet rows show THAT outlet's KYC (never a sibling outlet's, which R5 would refuse) ──
-    it('F1: a 2-outlet owner — each row shows the submission filed for ITS outlet; legacy (null outletId) is the fallback', async () => {
-      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
-      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
-      const partner = {
-        id: 'cp-multi', wallets: [], _count: { kycSubmissions: 0 },
-        // newest first: O2's in-flight KYC, then O1's rejected one, then a legacy (pre-outletId) row.
-        kycSubmissions: [
-          { id: 'k-o2', status: 'PENDING_GIFSY', createdAt: new Date('2026-11-10'), outletId: 'o2' },
-          { id: 'k-o1', status: 'REJECTED', createdAt: new Date('2026-11-05'), outletId: 'o1' },
-          { id: 'k-legacy', status: 'REJECTED', createdAt: new Date('2026-01-01'), outletId: null },
-        ],
-      };
-      const row = (id: string) => ({
-        outlet: { id, outletCode: id, name: id, city: 'C', district: 'D', state: 'S', outletType: { code: 'RETAIL' }, partner },
+    // ── K2 — status stays OWNER-level; a KYC filed via a sibling outlet the caller can't open → no link + note ──
+    it('K2: 2-outlet owner — every row shows the OWNER latest status; a sibling-outlet KYC the caller cannot open has no link', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su', subordinates: [] });
+      // caller holds O1 only; O2 belongs to a rep in ANOTHER branch (other-su).
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'caller-su', reportingToId: null, userId: 'user-mgr', isActive: true, deletedAt: null },
+        { id: 'other-su', reportingToId: null, userId: 'u-other', isActive: true, deletedAt: null },
+      ]);
+      const owner = (latest: Record<string, unknown>) => ({
+        id: 'cp-multi', wallets: [], _count: { kycSubmissions: 0 }, kycSubmissions: [latest],
       });
-      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([row('o1'), row('o2'), row('o3')]);
-      const res = await service.getMyOutlets(caller);
-      const by = Object.fromEntries(
-        res.outlets.map((o: { id: string; kycId: string; kycStatus: string; notInterestedBlock: unknown }) => [o.id, o]),
+      const row = (id: string, partner: unknown) => ({
+        outlet: { id, outletCode: id.toUpperCase(), name: id, city: 'C', district: 'D', state: 'S', outletType: { code: 'RETAIL' }, partner },
+      });
+      const viaO2 = { id: 'k-o2', status: 'PENDING_GIFSY', createdAt: new Date(), outletId: 'o2', userId: 'u-other', submitterManagerChain: [], outlet: { outletCode: 'O2' } };
+      const legacy = { id: 'k-leg', status: 'REJECTED', createdAt: new Date(), outletId: null, userId: 'u-other', submitterManagerChain: [], outlet: null };
+      const own = { id: 'k-o3', status: 'APPROVED', createdAt: new Date(), outletId: 'o3', userId: 'u-other', submitterManagerChain: [], outlet: { outletCode: 'O3' } };
+      mockPrisma.salesUserAssignment.findMany.mockImplementation((args: { where: { outletId?: { in?: string[] } } }) =>
+        Promise.resolve(
+          args.where.outletId && 'in' in (args.where.outletId as object)
+            ? [] // Path-B lookup: O2 is NOT assigned to the caller's subtree
+            : [row('o1', owner(viaO2)), row('o4', owner(legacy)), row('o3', owner(own))],
+        ),
       );
-      expect(by.o1).toMatchObject({ kycId: 'k-o1', kycStatus: 'REJECTED' }); // NOT O2's newer KYC
-      expect(by.o2).toMatchObject({ kycId: 'k-o2', kycStatus: 'PENDING_GIFSY' });
-      expect(by.o3).toMatchObject({ kycId: 'k-legacy', kycStatus: 'REJECTED' }); // legacy fallback
-      // "Not interested" stays partner-level (the server's in-flight rule): O2's KYC in flight blocks all rows.
-      expect(by.o1.notInterestedBlock).toBe('IN_REVIEW');
-      // The load is a bounded window carrying outletId.
+      const res = await service.getMyOutlets(caller);
+      const by = Object.fromEntries(res.outlets.map((o: { id: string }) => [o.id, o as Record<string, unknown>]));
+      // Owner-level status (never a fake "Not started"), but NO link and the "filed via" code.
+      expect(by.o1).toMatchObject({ kycStatus: 'PENDING_GIFSY', kycId: '', kycFiledViaOutletCode: 'O2' });
+      // Legacy (no outletId) → partner-level rule → linked, no note.
+      expect(by.o4).toMatchObject({ kycStatus: 'REJECTED', kycId: 'k-leg' });
+      expect(by.o4).not.toHaveProperty('kycFiledViaOutletCode');
+      // Filed for THIS outlet → linked.
+      expect(by.o3).toMatchObject({ kycStatus: 'APPROVED', kycId: 'k-o3' });
+      // The status query is the owner's latest (take 1), exactly as before — no per-outlet window.
       const sel = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].include.outlet.select.partner.select.kycSubmissions;
-      expect(sel.take).toBe(20);
-      expect(sel.select.outletId).toBe(true);
+      expect(sel.take).toBe(1);
+      // Path B lookup is tenant-scoped to the caller's live subtree.
+      const lookup = mockPrisma.salesUserAssignment.findMany.mock.calls[1][0].where;
+      expect(lookup).toMatchObject({ outletId: { in: ['o2'] }, unassignedAt: null, salesUserId: { in: ['caller-su'] }, outlet: { clientId: 'deoleo' } });
+    });
+
+    it('K2: …and the SAME row links when the sibling outlet IS held by the caller subtree (path B)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su', subordinates: [] });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null, userId: 'user-mgr', isActive: true, deletedAt: null }]);
+      const viaO2 = { id: 'k-o2', status: 'PENDING_GIFSY', createdAt: new Date(), outletId: 'o2', userId: 'u-x', submitterManagerChain: [], outlet: { outletCode: 'O2' } };
+      const partner = { id: 'cp', wallets: [], _count: { kycSubmissions: 0 }, kycSubmissions: [viaO2] };
+      mockPrisma.salesUserAssignment.findMany.mockImplementation((args: { where: { outletId?: unknown } }) =>
+        Promise.resolve(
+          args.where.outletId && typeof args.where.outletId === 'object' && 'in' in (args.where.outletId as object)
+            ? [{ outletId: 'o2' }]
+            : [{ outlet: { id: 'o1', outletCode: 'O1', name: 'o1', city: 'C', district: 'D', state: 'S', outletType: { code: 'RETAIL' }, partner } }],
+        ),
+      );
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0]).toMatchObject({ kycId: 'k-o2', kycStatus: 'PENDING_GIFSY' });
+      expect(res.outlets[0]).not.toHaveProperty('kycFiledViaOutletCode');
     });
 
     // ── F2 — only REMOVED (deleted) managers are walked through; INACTIVE ones stay exactly as before ──
@@ -3115,6 +3141,32 @@ describe('SalesService', () => {
     });
 
     // ── O1 — the KYC-list branch filter keeps a REMOVED rep's KYCs in their manager's branch ──
+    it('K4: a PROMOTED member (past a removed SO) carries that removed SO\'s OWN login id — the SO\'s KYCs never vanish under a member filter', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'asm', employeeCode: 'E-asm', region: 'R', zone: null,
+        hierarchyLevel: { code: 'ASM', name: 'ASM', level: 2 },
+        subordinates: [memberRow('so2', 'SO Two', 'SO', 1)],
+      });
+      wireEdges(); // asm ← so (DELETED) ← isr ; asm ← so2 ← isr2
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+      const res = await service.getTeam(caller);
+      const isr = res.members.find((m: { id: string }) => m.id === 'isr')!;
+      const so2 = res.members.find((m: { id: string }) => m.id === 'so2')!;
+      expect([...isr.submitterUserIds].sort()).toEqual(['u-isr', 'u-so']); // the removed SO's own KYCs ride with isr
+      expect(so2.submitterUserIds).not.toContain('u-so'); // a direct (non-promoted) member does not
+      // K5: the direct reports are loaded in a deterministic order (employeeCode), like the visibility filter.
+      expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].include.subordinates.orderBy).toEqual({ employeeCode: 'asc' });
+    });
+
+    it('K5: the outlets Team-Member filter loads direct reports in employeeCode order', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'asm', subordinates: [] });
+      wireEdges([]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      await service.getMyOutlets(caller);
+      expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].select.subordinates.orderBy).toEqual({ employeeCode: 'asc' });
+    });
+
     it('O1: getTeam submitterUserIds include a deleted rep under that member (their KYCs stay in the branch filter)', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({
         id: 'asm', employeeCode: 'E-asm', region: 'R', zone: null,

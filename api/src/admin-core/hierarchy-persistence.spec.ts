@@ -206,6 +206,17 @@ describe('persistHierarchy — phone ↔ employeeCode guard', () => {
     // distinct → no two users collapse onto one (clientId, '') row
     expect(new Set(upsertedUserPhones).size).toBe(2);
   });
+
+  it('K3: an EXISTING employee re-uploaded as a vacant PLACEHOLDER is returned in vacatedUserIds (sessions revoked by the caller)', async () => {
+    const employees = [
+      emp({ id: 'XSR-1', status: 'PLACEHOLDER' as HierarchyEmployee['status'], name: undefined, mobile: '' }),
+      emp({ id: 'XSR-2', mobile: '9900000002' }), // existing, still a real person → not vacated
+      emp({ id: 'XSR-NEW', status: 'PLACEHOLDER' as HierarchyEmployee['status'], name: undefined, mobile: '' }), // new vacant slot
+    ];
+    const { tx } = makeTx([], { 'XSR-1': { userId: 'user-1' }, 'XSR-2': { userId: 'user-2' } });
+    const result = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+    expect(result.vacatedUserIds).toEqual(['user-1']);
+  });
 });
 
 describe('buildLevelRows — tenant-aware level names (Bajaj rename)', () => {

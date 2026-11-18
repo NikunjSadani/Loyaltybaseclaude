@@ -9,6 +9,8 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
+import { kycHrefFor, kycFiledViaNote } from '@/lib/sales-kyc-link';
+import { KycCardLink } from '@/components/sales/KycCardLink';
 import {
   pct, pctBg, pctBarColor, PERIODS, CURRENT_MONTH,
   getPrimaryParam,
@@ -29,6 +31,8 @@ interface OutletMeta {
   type: OutletType;
   kycStatus: KYCStatus;
   kycId: string;
+  /** K2: the owner's KYC was filed via ANOTHER outlet this caller cannot open (status shown, no link). */
+  kycFiledViaOutletCode?: string;
   beat: string;
   district?: string;
   state?: string;
@@ -545,15 +549,12 @@ export default function MemberOutletsPage() {
                 const stripClass = svK?.target ? paceStrip(svPct, period) : 'bg-gray-100';
 
                 return (
-                  <Link
+                  <KycCardLink
                     key={outlet.id}
                     // No submission yet → start wizard (else the empty kycId yields a dead
-                    // /sales/kyc/ → "KYC not found"). With a kycId → detail deep-link.
-                    href={
-                      outlet.kycId
-                        ? `/sales/kyc/${outlet.kycId}`
-                        : `/sales/kyc/new?outletId=${outlet.id}`
-                    }
+                    // /sales/kyc/ → "KYC not found"). With a kycId → detail deep-link. K2: no link
+                    // (plain card + note) when the owner's KYC was filed via another outlet.
+                    href={kycHrefFor(outlet)}
                     className="block bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-all active:scale-[0.99]"
                   >
                     {/* Traffic-light pace strip */}
@@ -571,6 +572,9 @@ export default function MemberOutletsPage() {
                           </Badge>
                         </div>
                         <p className="text-[11px] text-gray-400 mt-0.5">{outlet.location} · {outlet.beat}</p>
+                        {kycFiledViaNote(outlet) && (
+                          <p className="text-[10px] text-gray-500 leading-tight" data-testid="kyc-filed-via">{kycFiledViaNote(outlet)}</p>
+                        )}
                       </div>
                       <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />
                     </div>
@@ -624,7 +628,7 @@ export default function MemberOutletsPage() {
                         )}
                       </>
                     )}
-                  </Link>
+                  </KycCardLink>
                 );
               })}
             </div>

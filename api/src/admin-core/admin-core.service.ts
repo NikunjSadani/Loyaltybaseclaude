@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, KycStatus, UserRole } from '@prisma/client';
@@ -110,6 +111,8 @@ interface HierarchyEmployeeSnapshot {
  */
 @Injectable()
 export class AdminCoreService {
+  private readonly logger = new Logger(AdminCoreService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenant: TenantService,
@@ -186,6 +189,31 @@ export class AdminCoreService {
   // ════════════════════════════════════════════════════════════════════════
   // Session helpers — ported from platform/src/lib/session.ts
   // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * K3 — revoke the sessions of users whose access was just removed by an ALREADY-COMMITTED write (bulk resign,
+   * a placeholder re-upload). Per user, sequential (bounded by the callers' caps). A failure never turns the
+   * committed change into a 500: it is logged LOUDLY (error level, with the user id and what to do) and
+   * RETURNED so the caller puts it in the response — never a silent pass-through.
+   */
+  private async revokeSessionsAfterCommit(
+    userIds: string[],
+    context: string,
+  ): Promise<Array<{ userId: string; error: string }>> {
+    const failures: Array<{ userId: string; error: string }> = [];
+    for (const userId of [...new Set(userIds)]) {
+      try {
+        await this.revokeAllSessionsForUser(userId);
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        this.logger.error(
+          `[${context}] SESSION REVOKE FAILED for user ${userId} — their login may still work; revoke it from the user's "Log out of all devices" action. ${error}`,
+        );
+        failures.push({ userId, error });
+      }
+    }
+    return failures;
+  }
 
   /** Revoke all non-revoked sessions for a single user. Returns the count. */
   private async revokeAllSessionsForUser(userId: string): Promise<number> {
@@ -658,15 +686,23 @@ export class AdminCoreService {
         });
       });
 
-      // F4 (security): a resigned rep must lose their live sessions NOW — the refresh path does not re-check
+      // F4/K3 (security): a resigned rep must lose their live sessions NOW — the refresh path does not re-check
       // status, so without this a resigned rep's token kept working for up to the session window. Same shared
-      // stamp-before-sweep helper as deleteUser / deactivate. After the commit (the helper writes outside the
-      // tx); sequential, bounded by the 200-code cap.
-      for (const uid of userIds) {
-        await this.revokeAllSessionsForUser(uid);
-      }
+      // stamp-before-sweep helper as deleteUser / deactivate, per user AFTER the commit. A revoke failure is
+      // logged loudly and returned (with the employee code) — the resign itself already succeeded, never a 500.
+      const failures = await this.revokeSessionsAfterCommit(userIds, 'bulk_resign');
+      const codeByUserId = new Map(salesUsers.map((s) => [s.userId, s.employeeCode]));
 
-      return { resigned: salesUsers.length, notFound: employeeCodes.length - salesUsers.length };
+      return {
+        resigned: salesUsers.length,
+        notFound: employeeCodes.length - salesUsers.length,
+        ...(failures.length
+          ? {
+              sessionRevokeFailures: failures.map((f) => ({ employeeCode: codeByUserId.get(f.userId) ?? f.userId, error: f.error })),
+              message: `Resigned ${salesUsers.length}, but ${failures.length} login(s) could not be signed out — log them out manually.`,
+            }
+          : {}),
+      };
     }
 
     // ── Reassign outlet XSR ─────────────────────────────────────────────────
@@ -1795,7 +1831,17 @@ export class AdminCoreService {
       );
     }, { timeout: 20_000, maxWait: 10_000 });
 
-    return { message: 'Employee hierarchy saved', persisted: result };
+    // K3: an existing employee re-uploaded as a vacant PLACEHOLDER loses their sessions (after the commit), with
+    // failures logged loudly + returned — same rule as resign / deactivate.
+    const { vacatedUserIds = [], ...persisted } = result;
+    const failures = await this.revokeSessionsAfterCommit(vacatedUserIds, 'hierarchy_placeholder');
+    return {
+      message: failures.length
+        ? `Employee hierarchy saved, but ${failures.length} vacated login(s) could not be signed out — log them out manually.`
+        : 'Employee hierarchy saved',
+      persisted,
+      ...(failures.length ? { sessionRevokeFailures: failures } : {}),
+    };
   }
 
   // ════════════════════════════════════════════════════════════════════════
