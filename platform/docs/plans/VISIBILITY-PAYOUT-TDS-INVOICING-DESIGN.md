@@ -163,15 +163,17 @@ a 194R run's FY is the run date's FY (194C keeps its period FY — unchanged). B
 
 **How much** (D5/D6/Q1/Q3): total base > ₹20,000 (FY statutory config) → TDS on the **whole year**. Rate 10% PAN /
 20% no-PAN from the statutory config (never a fixed fraction). The whole year uses the client's **current** method:
-- **Deduct part** = visibility base of a **PAN holder** when the current method is **DEDUCT** → `base × rate%`.
+- **Deduct part** = visibility base when the current method is **DEDUCT** → `base × rate%` — 10% with a PAN, **20% without**
+  (owner 2026-11-18: a no-PAN retailer's 194R visibility IS withheld, netted per owner key).
 - **Client-borne part** = everything else (incentives, cash redemptions, gifts, vouchers, off-platform, imported payouts,
-  and all visibility on GROSS_UP or without a PAN — a no-PAN payout is never withheld) → `base × rate/(100−rate)`.
+  and all visibility on GROSS_UP) → `base × rate/(100−rate)`.
 - Each part is rounded to the rupee separately; liability = the sum.
 - **Report outstanding = liability − deposits uploaded in the portal** (`TdsDeposit`, client/PAN/FY by "TDS for month").
   TDS deducted from payouts is shown ("deducted so far", net of reversals) but **not** subtracted (Q3). Imported vendor
   TDS (the Bajaj partial import = 212 `TdsDeposit` rows) is a deposit, subtracted once; rows whose `uploadBatchId` is not
   a portal file hash (`DEP-`/`OP-` + sha256) are also shown "of which imported vendor TDS" (Q4, informational only).
-- **Engine withholding** (only 194R visibility of a PAN holder on a client whose current method is DEDUCT; Q1):
+- **Engine withholding** (only 194R visibility on a client whose current method is DEDUCT — PAN at 10%, no-PAN at 20%
+  keyed per owner `__NO_PAN__:<partnerId>`, which is also the ledger `panNumber`; Q1):
   `withhold = deduct part (whole year, incl. this run) − already deducted for (client, PAN, FY)`, capped at this run's
   payout, the rest carried forward (`computeDeduction`). Ledger rows carry `clientId`, `fyLabel` = run FY; a FAILED /
   reversal offset is written in the FY of the original withholding. Incentive payouts and cash redemptions are always
@@ -182,8 +184,9 @@ a 194R run's FY is the run date's FY (194C keeps its period FY — unchanged). B
 **Worked examples (PAN = 10%, no PAN = 20%):**
 1. Client on DEDUCT, PAN: visibility ₹15,000 + gift ₹8,000 = ₹23,000 > ₹20,000 → deduct part 10% × 15,000 = **₹1,500**
    (withheld) + client-borne 8,000 × 10/90 = **₹889** → liability **₹2,389**; outstanding = 2,389 − deposits.
-2. No-PAN owner with two outlets, ₹15,000 + ₹15,000 → one retailer, ₹30,000 → 30,000 × 20/80 = **₹7,500** client-borne
-   (never withheld).
+2. No-PAN owner with two outlets, visibility ₹15,000 + ₹15,000 → one retailer, ₹30,000 > ₹20,000. On DEDUCT: 20% ×
+   30,000 = **₹6,000 withheld**, ₹24,000 released (netted per owner key). On GROSS_UP: 30,000 × 20/80 = **₹7,500**
+   client-borne. Incentives / gifts for a no-PAN owner are always client-borne at 20/80.
 3. Method switch: ₹1,00,000 visibility paid on GROSS_UP, client then moves to DEDUCT, next visibility payout ₹5,000 → the
    whole year on DEDUCT: 10% × 1,05,000 = **₹10,500** due; ₹5,000 withheld now, **₹5,500** carried forward. (Had the
    client stayed on GROSS_UP: 1,05,000 × 10/90 = ₹11,667, all client-borne.)

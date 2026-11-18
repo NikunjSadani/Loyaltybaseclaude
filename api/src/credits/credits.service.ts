@@ -14,7 +14,26 @@ import {
   allocateProRataRecovery,
 } from '../tds/tds-methodology.helper';
 import { financialYear, grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, type ResolvedTdsStatutory } from '../tds/tds.helpers';
-import { collect194RBases, emptyBases194R, importedPayoutsCountFromOrThrow, liability194R } from '../tds/tds-194r.shared';
+import {
+  collect194RBases,
+  emptyBases194R,
+  importedPayoutsCountFromOrThrow,
+  liability194R,
+  noPanOutletKey,
+  noPanPartnerKey,
+  retailerKeyOfLedgerPan,
+} from '../tds/tds-194r.shared';
+
+/** 194R retailer key of a payout: its owner's PAN, else the no-PAN owner key (per partner / outlet). */
+function r194RetailerKey(
+  clientId: string,
+  outletCode: string,
+  info: { partnerId?: string | null; panNumber?: string | null } | undefined,
+): { key: string; hasPan: boolean } {
+  const pan = info?.panNumber?.trim().toUpperCase();
+  if (pan) return { key: pan, hasPan: true };
+  return { key: info?.partnerId ? noPanPartnerKey(info.partnerId) : noPanOutletKey(clientId, outletCode), hasPan: false };
+}
 import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -301,12 +320,12 @@ export class CreditsService {
   }
 
   /**
-   * 194R WHOLE-YEAR TRUE-UP withholding (owner 2026-11-18) for this run's 194R visibility payouts of
-   * PAN holders, on a client whose CURRENT method is DEDUCT. Uses the SHARED definition
+   * 194R WHOLE-YEAR TRUE-UP withholding (owner 2026-11-18) for this run's 194R visibility payouts on a
+   * client whose CURRENT method is DEDUCT — PAN holders at 10%, no-PAN retailers (keyed per owner) at 20%. Uses the SHARED definition
    * (`collect194RBases` + `liability194R`) the 194R report uses, so the TDS due here == the report's
    * deducted part for the same data:
    *   due      = (whole-FY visibility base incl. this run) × rate%   — once ALL 194R benefits > ₹20k
-   *   withhold = due − already deducted for this (client, PAN, FY) (net of reversals),
+   *   withhold = due − already deducted for this (client, retailer key, FY) (net of reversals),
    *              capped at this run's payout; the rest carries forward (computeDeduction).
    * FY = the run date's FY (D3: dated by when actually paid). Per client, never across clients.
    */
@@ -317,19 +336,24 @@ export class CreditsService {
       clientId: string;
       runAt: Date;
       importedCountFrom: string | null;
-      byPan: Map<string, Array<{ id: string; outletId: string; amountPaise: bigint }>>;
+      byPan: Map<string, { hasPan: boolean; partnerId: string | null; entries: Array<{ id: string; outletId: string; amountPaise: bigint }> }>;
     },
   ): Promise<void> {
     const { clientId } = a;
     const fyLabel = financialYear(a.runAt).fyLabel;
     const cfg = await this.statutory.getForFy(fyLabel);
-    const pans = [...a.byPan.keys()];
-    // Scope the shared read to THIS client's (non-parent) partners holding these PANs + their outlets.
-    const scopePartners = await db.channelPartner.findMany({
-      where: { clientId, isParent: false, OR: pans.map((p) => ({ panNumber: { equals: p, mode: 'insensitive' as const } })) },
-      select: { id: true },
-    });
-    const partnerIds = scopePartners.map((p) => p.id);
+    const keys = [...a.byPan.keys()];
+    const pans = [...a.byPan.entries()].filter(([, v]) => v.hasPan).map(([k]) => k);
+    // Scope the shared read to THIS client's (non-parent) partners holding these PANs + the no-PAN
+    // owners in this run, and all their outlets.
+    const scopePartners = pans.length
+      ? await db.channelPartner.findMany({
+          where: { clientId, isParent: false, OR: pans.map((p) => ({ panNumber: { equals: p, mode: 'insensitive' as const } })) },
+          select: { id: true },
+        })
+      : [];
+    const noPanOwners = [...a.byPan.values()].filter((v) => !v.hasPan && v.partnerId).map((v) => v.partnerId!);
+    const partnerIds = [...new Set([...scopePartners.map((p) => p.id), ...noPanOwners])];
     const scopeOutlets = partnerIds.length
       ? await db.outlet.findMany({ where: { clientId, partnerId: { in: partnerIds } }, select: { outletCode: true } })
       : [];
@@ -339,21 +363,22 @@ export class CreditsService {
       importedCountFrom: a.importedCountFrom,
       scope: { outletCodes: [...new Set(scopeOutlets.map((o) => o.outletCode))], partnerIds, pans },
     });
-    // Already deducted for this (client, PAN, FY) — net of FAILED/reversal negative rows.
+    // Already deducted for this (client, retailer key, FY) — net of FAILED/reversal negative rows. The
+    // ledger's panNumber holds the retailer key (a PAN, or the no-PAN owner key `__NO_PAN__:…`).
     const ledgerRows = await db.tdsDeductionEntry.findMany({
-      where: { clientId, section: TdsSection.SEC_194R, fyLabel, panNumber: { in: pans } },
+      where: { clientId, section: TdsSection.SEC_194R, fyLabel, panNumber: { in: keys } },
       select: { clientId: true, panNumber: true, tdsDeductedThisPaise: true },
     });
     const priorByPan = new Map<string, bigint>();
     for (const lr of ledgerRows) {
       if (lr.clientId && lr.clientId !== clientId) continue; // per client (defensive; the query scopes it)
-      const k = lr.panNumber.trim().toUpperCase();
+      const k = retailerKeyOfLedgerPan(lr.panNumber);
       priorByPan.set(k, (priorByPan.get(k) ?? 0n) + lr.tdsDeductedThisPaise);
     }
-    const rate = rate194RFrom(cfg, true);
-    for (const [pan, entries] of a.byPan) {
+    for (const [pan, { hasPan, entries }] of a.byPan) {
+      const rate = rate194RFrom(cfg, hasPan);
       const runBase = entries.reduce((s, e) => s + e.amountPaise, 0n);
-      const b = { ...(bases.get(pan) ?? emptyBases194R(true)), hasPan: true };
+      const b = { ...(bases.get(pan) ?? emptyBases194R(hasPan)), hasPan };
       b.visPaise += runBase; // this run is paid now → counts in the run date's FY
       const l = liability194R(b, TdsMethodology.DEDUCT, cfg);
       const priorDeducted = priorByPan.get(pan) ?? 0n;
@@ -464,20 +489,19 @@ export class CreditsService {
     type NoPanGrp = { outletCode: string; section: TdsSection; entries: typeof engineEntries };
     const noPanGroups = new Map<string, NoPanGrp>();
     const noPanOutletCodes = new Set<string>();
-    // 194R entries of PAN holders, by PAN (this client only — one download = one tenant).
-    const r194ByPan = new Map<string, typeof engineEntries>();
+    // 194R entries by retailer key (PAN / no-PAN owner key) — this client only (one download = one tenant).
+    const r194ByPan = new Map<string, { hasPan: boolean; partnerId: string | null; entries: typeof engineEntries }>();
     for (const e of engineEntries) {
       const info = outletTaxMap.get(e.outletId);
       const pan = info?.panNumber?.trim().toUpperCase();
       if (e.tdsSection === TdsSection.SEC_194R) {
-        // 194R (owner 2026-11-18): handled by the whole-year block below on the SHARED definition.
-        // A no-PAN 194R payout is never withheld (paid full) and writes nothing (D7) — the 194R
-        // report carries its client-borne liability.
-        if (pan) {
-          const rg = r194ByPan.get(pan) ?? [];
-          rg.push(e);
-          r194ByPan.set(pan, rg);
-        }
+        // 194R (owner 2026-11-18): handled by the whole-year block below on the SHARED definition,
+        // keyed by retailer: the PAN, or — without a PAN — the owner (per partner; an owner-less outlet
+        // alone), the same keys the 194R report uses. No-PAN visibility IS withheld at 20% on DEDUCT.
+        const key = r194RetailerKey(clientId, e.outletId, info);
+        const rg = r194ByPan.get(key.key) ?? { hasPan: key.hasPan, partnerId: info?.partnerId ?? null, entries: [] };
+        rg.entries.push(e);
+        r194ByPan.set(key.key, rg);
         continue;
       }
       if (!pan) {
@@ -503,7 +527,7 @@ export class CreditsService {
       g.entries.push(e);
     }
     // ── 194R: WHOLE-YEAR TRUE-UP on the SHARED definition (owner 2026-11-18, D2/D3/D6/D9, Q1/Q3) ──
-    // Only a PAN holder's visibility payouts on the client's CURRENT DEDUCT method are ever withheld;
+    // Only visibility payouts on the client's CURRENT DEDUCT method are ever withheld (10% PAN / 20% no-PAN);
     // under GROSS_UP nothing is withheld and nothing is written (D7). The threshold is tested on ALL
     // the client's 194R benefits to this retailer this FY (incentives, redemptions, off-platform,
     // counted imported payouts, visibility), dated by when actually paid (this run = runAt).
@@ -2260,8 +2284,12 @@ export class CreditsService {
           ? `PAN|${pan}|${engineFyLabel}`
           : `NOPAN|${user.clientId}|${e.outletId}|${engineFyLabel}`,
       );
-      // 194R's whole-year read/write is per (client, PAN, run FY) — serialize on that too.
-      if (pan && e.tdsSection === TdsSection.SEC_194R) lockKeys.add(`PAN194R|${user.clientId}|${pan}|${runFyLabel}`);
+      // 194R's whole-year read/write is per (client, retailer key, run FY) — serialize on that too
+      // (a no-PAN owner's outlets share one key, so two downloads can't both under-withhold).
+      if (e.tdsSection === TdsSection.SEC_194R) {
+        const rk = r194RetailerKey(user.clientId, e.outletId, outletTaxMap.get(e.outletId)).key;
+        lockKeys.add(`R194|${user.clientId}|${rk}|${runFyLabel}`);
+      }
     }
     // D6/D9: only a download carrying 194R PAN entries needs the client's CURRENT method + the
     // imported-payouts countFrom (both fail CLOSED on a malformed stored value, before any write).

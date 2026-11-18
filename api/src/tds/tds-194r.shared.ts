@@ -22,11 +22,11 @@
  *
  *  HOW MUCH (D5/D6/Q1/Q3): total base > ₹20,000 (FY, statutory config) → TDS on the WHOLE year.
  *  Rate = 10% with PAN / 20% without (statutory config, never a fixed fraction).
- *    - deduct part      = the visibility base of a PAN holder when the client's CURRENT method is
- *                         DEDUCT → base × rate% (withheld from the retailer's visibility payouts).
+ *    - deduct part      = the visibility base when the client's CURRENT method is DEDUCT → base ×
+ *                         rate% (10% with PAN, 20% without — owner 2026-11-18: a no-PAN retailer's
+ *                         visibility IS withheld at 20%), withheld from the retailer's visibility payouts.
  *    - client-borne part = everything else (incentives, cash redemptions, gifts, vouchers,
- *                         off-platform, and ALL visibility under GROSS_UP or without a PAN — a no-PAN
- *                         payout is never withheld) → base × rate / (100 − rate).
+ *                         off-platform, and ALL visibility under GROSS_UP) → base × rate / (100 − rate).
  *    Each part is rounded to the rupee separately. Liability = deduct part + client-borne part.
  *    Outstanding (report) = liability − deposits uploaded in the portal. Deductions do NOT reduce the
  *    liability; the engine withholds (deduct part − already deducted, net of reversals), capped at
@@ -61,6 +61,15 @@ export const isNoPanKey = (key: string): boolean => key === NO_PAN_KEY || key.st
 export const isNoPanCell = (pan: string | null | undefined): boolean =>
   !pan || !pan.trim() || isNoPanKey(pan.trim().toUpperCase());
 
+/**
+ * Normalise a 194R TdsDeductionEntry.panNumber to the retailer key: a real PAN is upper-cased; a no-PAN
+ * owner key (`__NO_PAN__:<partnerId>` / `__NO_PAN__:outlet:…`) is kept EXACTLY (ids are case-sensitive).
+ */
+export function retailerKeyOfLedgerPan(panNumber: string): string {
+  const t = panNumber.trim();
+  return isNoPanKey(t.toUpperCase()) ? t : t.toUpperCase();
+}
+
 /** Redemption modes that are CASH (paid to the retailer's bank/UPI); the rest are gifts/vouchers. */
 export const CASH_REDEMPTION_MODES: ReadonlySet<string> = new Set(['UPI', 'BANK_TRANSFER']);
 
@@ -85,7 +94,7 @@ export interface Liability194R {
   /** Whole-percent rate applied (10 with PAN / 20 without, from the FY statutory config). */
   ratePct: number;
   methodology: TdsMethodology;
-  /** Base on which TDS is WITHHELD from the retailer (visibility, PAN, DEDUCT). */
+  /** Base on which TDS is WITHHELD from the retailer (visibility on DEDUCT — with or without a PAN). */
   deductBasePaise: bigint;
   /** Base whose TDS the CLIENT bears (gross-up). */
   clientBorneBasePaise: bigint;
@@ -100,7 +109,9 @@ export function liability194R(b: Bases194R, methodology: TdsMethodology, cfg: Re
   const cashBasePaise = b.visPaise + b.cashPaise;
   const totalBasePaise = cashBasePaise + b.nonCashPaise;
   const thresholdMet = totalBasePaise > cfg.thr194rFyPaise;
-  const withheld = b.hasPan && methodology === 'DEDUCT';
+  // Owner 2026-11-18: on DEDUCT the visibility base is withheld for EVERY retailer — 10% with a PAN,
+  // 20% without (the no-PAN rate). Everything else stays client-borne gross-up.
+  const withheld = methodology === 'DEDUCT';
   const deductBasePaise = withheld ? b.visPaise : 0n;
   const clientBorneBasePaise = totalBasePaise - deductBasePaise;
   const deductPartPaise = thresholdMet && deductBasePaise > 0n ? withholdingTdsPaise(deductBasePaise, rate) : 0n;

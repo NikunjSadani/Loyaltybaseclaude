@@ -144,9 +144,17 @@ describe('194R shared definition — liability194R (pure)', () => {
     const l = liability194R({ hasPan: true, visPaise: 1500000n, cashPaise: 0n, nonCashPaise: 800000n }, 'GROSS_UP', cfg);
     expect(l).toMatchObject({ deductPartPaise: 0n, clientBornePartPaise: 255600n, liabilityPaise: 255600n }); // 23000×10/90 = 2555.56 → ₹2,556
   });
-  it('no PAN: 20% and never withheld (client-borne 20/80) even on DEDUCT', () => {
+  it('no PAN on DEDUCT (owner 2026-11-18): visibility ₹30,000 is WITHHELD at 20% = ₹6,000 (not client-borne)', () => {
     const l = liability194R({ hasPan: false, visPaise: 3000000n, cashPaise: 0n, nonCashPaise: 0n }, 'DEDUCT', cfg);
-    expect(l).toMatchObject({ ratePct: 20, deductBasePaise: 0n, deductPartPaise: 0n, clientBornePartPaise: 750000n });
+    expect(l).toMatchObject({ ratePct: 20, deductBasePaise: 3000000n, deductPartPaise: 600000n, clientBornePartPaise: 0n, liabilityPaise: 600000n });
+  });
+  it('no PAN on DEDUCT: gifts / incentives stay client-borne at 20/80 alongside the withheld visibility', () => {
+    const l = liability194R({ hasPan: false, visPaise: 1500000n, cashPaise: 400000n, nonCashPaise: 400000n }, 'DEDUCT', cfg);
+    expect(l).toMatchObject({ deductPartPaise: 300000n, clientBornePartPaise: 200000n }); // 20% × 15k; 8k × 20/80
+  });
+  it('no PAN on GROSS_UP: the whole year client-borne at 20/80', () => {
+    const l = liability194R({ hasPan: false, visPaise: 3000000n, cashPaise: 0n, nonCashPaise: 0n }, 'GROSS_UP', cfg);
+    expect(l).toMatchObject({ deductPartPaise: 0n, clientBornePartPaise: 750000n });
   });
   it('threshold is strictly greater than ₹20,000 (exactly ₹20,000 → nothing due)', () => {
     expect(liability194R({ hasPan: true, visPaise: 2000000n, cashPaise: 0n, nonCashPaise: 0n }, 'DEDUCT', cfg).liabilityPaise).toBe(0n);
@@ -194,6 +202,23 @@ describe('194R report (compute194R) on the shared definition', () => {
     const rows = await tds.compute194R(CLIENT, FY.fyLabel, null);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ panNumber: '__NO_PAN__:p9', baseFyTotalPaise: 3000000n, ratePct: 20, liabilityPaise: 750000n, deductLiabilityPaise: 0n });
+  });
+
+  it('no-PAN OWNER with 2 outlets, VISIBILITY on DEDUCT: ₹15,000 + ₹15,000 → 20% = ₹6,000 deducted part; "deducted so far" matched by the owner key', async () => {
+    const d = empty();
+    d.partners = [pan('p9', null)];
+    d.outlets = [
+      { outletCode: 'A1', clientId: CLIENT, partnerId: 'p9' },
+      { outletCode: 'A2', clientId: CLIENT, partnerId: 'p9' },
+    ];
+    d.entries = [paidVis('v1', 1500000n, 'A1'), paidVis('v2', 1500000n, 'A2')];
+    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p9', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 600000n }];
+    const rows = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      panNumber: '__NO_PAN__:p9', ratePct: 20, deductBasePaise: 3000000n, deductLiabilityPaise: 600000n,
+      clientBorneLiabilityPaise: 0n, liabilityPaise: 600000n, deductedPaise: 600000n, outstandingPaise: 600000n,
+    });
   });
 
   it('D4: an outlet with NO partner counts alone (per client + outlet)', async () => {
@@ -305,5 +330,55 @@ describe('PARITY: engine and report give the same 194R TDS for the same data', (
     expect(row.deductLiabilityPaise).toBe(engineDue);
     expect(row.deductedPaise + withheldNow).toBe(row.deductLiabilityPaise); // ₹500 earlier + ₹2,000 now
     expect(row.clientBorneLiabilityPaise).toBe(144400n); // (4,000 + 8,000 + 1,000) × 10/90 = 1444.44 → ₹1,444
+  });
+  it('no-PAN OWNER with 2 outlets on DEDUCT: engine withholding (20%) == the report’s deducted part', async () => {
+    const d = empty();
+    d.partners = [pan('p9', null)];
+    d.outlets = [
+      { outletCode: 'A1', clientId: CLIENT, partnerId: 'p9' },
+      { outletCode: 'A2', clientId: CLIENT, partnerId: 'p9' },
+    ];
+    d.entries = [paidVis('v1', 1000000n, 'A1')];
+    d.redemptions = [{ clientId: CLIENT, partnerId: 'p9', valuePaise: 400000n, redemptionMode: 'GIFT_CARD', deliveredAt: inFy(20) }];
+    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p9', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 100000n }];
+    const { credits } = services(d, 'DEDUCT');
+    const plan = await (credits as unknown as {
+      buildPayoutTdsPlan: (db: unknown, p: unknown) => Promise<{ deductionLedger: Array<{ panNumber: string; tdsDueCumulativePaise: bigint; tdsDeductedThisPaise: bigint; carryForwardPaise: bigint }> }>;
+    }).buildPayoutTdsPlan(fakeDb(d), {
+      clientId: CLIENT,
+      period: '2026-05',
+      // This run pays BOTH outlets of the same owner — one retailer, one whole-year true-up.
+      engineEntries: [
+        { id: 'r1', outletId: 'A1', amountPaise: 1000000n, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' },
+        { id: 'r2', outletId: 'A2', amountPaise: 1000000n, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' },
+      ],
+      outletTaxMap: new Map([
+        ['A1', { partnerId: 'p9', panNumber: null, entityType: null }],
+        ['A2', { partnerId: 'p9', panNumber: null, entityType: null }],
+      ]),
+      runAt: NOW,
+      currentMethodology: 'DEDUCT',
+      importedCountFrom: null,
+    });
+    expect(new Set(plan.deductionLedger.map((r) => r.panNumber))).toEqual(new Set(['__NO_PAN__:p9']));
+    const engineDue = plan.deductionLedger[0].tdsDueCumulativePaise;
+    const withheldNow = plan.deductionLedger.reduce((s, r) => s + r.tdsDeductedThisPaise, 0n);
+    expect(engineDue).toBe(600000n); // 20% × (₹10,000 earlier + ₹20,000 now)
+    expect(withheldNow).toBe(500000n); // minus ₹1,000 already deducted
+
+    const after = {
+      ...d,
+      entries: [
+        ...d.entries,
+        { id: 'r1', clientId: CLIENT, status: 'PROCESSING', paidAt: null, downloadedAt: NOW, outletId: 'A1', amountPaise: 1000000n, fieldId: 'f-vis', tdsSection: 'SEC_194R' },
+        { id: 'r2', clientId: CLIENT, status: 'PROCESSING', paidAt: null, downloadedAt: NOW, outletId: 'A2', amountPaise: 1000000n, fieldId: 'f-vis', tdsSection: 'SEC_194R' },
+      ],
+      ledger: [...d.ledger, { clientId: CLIENT, panNumber: '__NO_PAN__:p9', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: withheldNow }],
+    };
+    const [row] = await services(after, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row.panNumber).toBe('__NO_PAN__:p9');
+    expect(row.deductLiabilityPaise).toBe(engineDue);
+    expect(row.deductedPaise).toBe(row.deductLiabilityPaise); // fully withheld after this run
+    expect(row.clientBorneLiabilityPaise).toBe(100000n); // gift ₹4,000 × 20/80
   });
 });

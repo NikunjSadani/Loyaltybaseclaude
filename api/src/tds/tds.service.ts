@@ -18,7 +18,7 @@
  * date), imported vendor incentive payouts from the tenant's `tdsImportedPayouts.countFrom` date
  * (read once per request, fails CLOSED), DELIVERED redemptions (cash vs gift/voucher by mode, by
  * deliveredAt) and TdsOffPlatformEntry (by entryDate). Threshold > ₹20,000 → TDS on the WHOLE year:
- * visibility of a PAN holder on the client's CURRENT DEDUCT method → base × rate%; everything else
+ * visibility on the client's CURRENT DEDUCT method → base × rate% (10% PAN / 20% no-PAN); everything else
  * → client-borne gross-up base × rate/(100−rate). Rates 10% PAN / 20% no-PAN (statutory config).
  * Deposited: SUM TdsDeposit (section=SEC_194R, clientId, panNumber) whose "TDS for month"
  * (forPeriod) is in the FY — a deposit counts for the FY of the MONTH IT PAYS FOR, not its deposit date.
@@ -71,6 +71,7 @@ import {
   outletsByCodeCI as sharedOutletsByCodeCI,
   ownerPansOf as sharedOwnerPansOf,
   keyForOutletCode,
+  retailerKeyOfLedgerPan,
   type Bases194R,
 } from './tds-194r.shared';
 import type { TdsMethodology } from '@prisma/client';
@@ -208,7 +209,7 @@ export interface TdsRow194R {
   cashBasePaise: bigint;
   /** Non-cash benefits: gifts, vouchers, off-platform. */
   nonCashBasePaise: bigint;
-  /** Base on which TDS is withheld from the retailer (PAN holder's visibility payouts on DEDUCT). */
+  /** Base on which TDS is withheld from the retailer (visibility payouts on DEDUCT, PAN or no-PAN). */
   deductBasePaise: bigint;
   /** Base whose TDS the client bears (gross-up). */
   clientBorneBasePaise: bigint;
@@ -487,8 +488,10 @@ export class TdsService {
     });
     const deducted = new Map<string, bigint>();
     for (const d of deductions ?? []) {
-      if (isNoPanCell(d.panNumber)) continue;
-      const k = d.panNumber.trim().toUpperCase();
+      // The ledger's panNumber is the retailer key: a PAN, or the no-PAN owner key (owner 2026-11-18:
+      // no-PAN visibility is withheld at 20% on DEDUCT). A blank legacy value has no retailer → skipped.
+      if (!d.panNumber?.trim()) continue;
+      const k = retailerKeyOfLedgerPan(d.panNumber);
       deducted.set(k, (deducted.get(k) ?? 0n) + d.tdsDeductedThisPaise);
     }
 

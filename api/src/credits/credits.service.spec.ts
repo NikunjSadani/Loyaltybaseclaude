@@ -3819,7 +3819,7 @@ describe('CreditsService', () => {
         priorRows({});
         await download();
         const keys = mockTx.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
-        expect(keys).toContain(`PAN194R|deoleo|PAN1|${runFy}`);
+        expect(keys).toContain(`R194|deoleo|PAN1|${runFy}`);
       });
 
       it('194C-only download (e.g. Deoleo): no 194R reads at all — no policy read, no countFrom read, no shared base read', async () => {
@@ -3857,19 +3857,73 @@ describe('CreditsService', () => {
         expect(ledgerRow()).toMatchObject({ clientId: 'deoleo', panNumber: 'PAN1', section: 'SEC_194R', fyLabel: '2027-28', tdsDeductedThisPaise: -250000n });
       });
 
-      it('D4/Q1: a no-PAN 194R retailer on DEDUCT is never withheld (paid full) — its TDS is client-borne on the report', async () => {
-        policy('DEDUCT');
-        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(5000000n)]);
-        const noPan = bankOutlet('INDIVIDUAL');
-        (noPan.partner as { panNumber: string | null }).panNumber = null;
-        mockPrisma.outlet.findMany.mockResolvedValue([noPan]);
-        priorRows({});
+      describe('no-PAN retailer on DEDUCT (owner 2026-11-18): visibility IS withheld at 20%, keyed per owner', () => {
+        const noPanOutlet = () => {
+          const o = bankOutlet('INDIVIDUAL');
+          (o.partner as { panNumber: string | null }).panNumber = null;
+          return o;
+        };
+        beforeEach(() => {
+          mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: null }]);
+          mockTx.outlet.findMany.mockResolvedValue([{ outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' }]);
+        });
 
-        await download();
+        it('₹30,000 → ₹6,000 withheld, ₹24,000 released; ledger keyed by the owner (`__NO_PAN__:<partnerId>`); no recovery row', async () => {
+          policy('DEDUCT');
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(3000000n)]);
+          mockPrisma.outlet.findMany.mockResolvedValue([noPanOutlet()]);
+          priorRows({});
 
-        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
-        expect(mockTx.tdsRecoveryEntry.createMany).not.toHaveBeenCalled();
-        expect(mockTx.creditPayoutDownload.create.mock.calls[0][0].data.totalAmountPaise).toBe(BigInt(5000000));
+          await download();
+
+          expect(ledgerRow()).toMatchObject({
+            clientId: 'deoleo', panNumber: '__NO_PAN__:p1', section: 'SEC_194R', fyLabel: runFy,
+            tdsDueCumulativePaise: 600000n, tdsDeductedThisPaise: 600000n, carryForwardPaise: 0n,
+          });
+          expect(mockTx.creditPayoutDownload.create.mock.calls[0][0].data.totalAmountPaise).toBe(BigInt(2400000));
+          expect(mockTx.tdsRecoveryEntry.createMany).not.toHaveBeenCalled();
+          expect(mockInvoicesService.createTdsInvoice).not.toHaveBeenCalled();
+        });
+
+        it('nets per owner key: ₹2,000 already withheld for this owner → ₹4,000 now (another owner’s rows ignored)', async () => {
+          policy('DEDUCT');
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(3000000n)]);
+          mockPrisma.outlet.findMany.mockResolvedValue([noPanOutlet()]);
+          priorRows({});
+          mockTx.tdsDeductionEntry.findMany.mockResolvedValue([
+            { clientId: 'deoleo', panNumber: '__NO_PAN__:p1', tdsDeductedThisPaise: 200000n },
+            { clientId: 'other', panNumber: '__NO_PAN__:p1', tdsDeductedThisPaise: 999900n },
+          ]);
+
+          await download();
+
+          expect(ledgerRow()).toMatchObject({ tdsDeductedPriorPaise: 200000n, tdsDeductedThisPaise: 400000n });
+          const where = mockTx.tdsDeductionEntry.findMany.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where)
+            .find((w: Record<string, unknown>) => w.section === 'SEC_194R');
+          expect(where).toMatchObject({ clientId: 'deoleo', panNumber: { in: ['__NO_PAN__:p1'] } });
+        });
+
+        it('GROSS_UP client: a no-PAN retailer is still paid in full (client-borne on the report)', async () => {
+          policy('GROSS_UP');
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(3000000n)]);
+          mockPrisma.outlet.findMany.mockResolvedValue([noPanOutlet()]);
+          priorRows({});
+
+          await download();
+
+          expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+          expect(mockTx.creditPayoutDownload.create.mock.calls[0][0].data.totalAmountPaise).toBe(BigInt(3000000));
+        });
+
+        it('takes the per-owner 194R lock', async () => {
+          policy('DEDUCT');
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(3000000n)]);
+          mockPrisma.outlet.findMany.mockResolvedValue([noPanOutlet()]);
+          priorRows({});
+          await download();
+          const keys = mockTx.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
+          expect(keys).toContain(`R194|deoleo|__NO_PAN__:p1|${runFy}`);
+        });
       });
     });
 
