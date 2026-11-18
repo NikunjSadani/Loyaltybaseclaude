@@ -9,8 +9,8 @@ export const tdsGuide: Guide = {
   slug: 'tds',
   title: 'TDS — How It Works',
   summary:
-    'The whole TDS module in one place: the two sections (194R/194C), the two options (deduct/gross-up), how it calculates, when it fires, what cumulates for 194R, invoicing/GST, and where to set the rates.',
-  updated: '2026-11-13',
+    'The whole TDS module in one place: the two sections (194R/194C), the two options (deduct/gross-up), how it calculates, when it fires, what counts for 194R and how its amount is worked out (with examples), invoicing/GST, and where to set the rates.',
+  updated: '2026-11-18',
   markdown: `# TDS — How It Works
 
 *A plain-English guide to the entire TDS module — sections, calculation, triggers, what cumulates, invoicing, and where to configure it. This describes what the platform does, not any one client's setup.*
@@ -57,7 +57,7 @@ Set per client on the **TDS Treatment** screen (default **194C + Gross-up**). Wh
 - **No PAN:** rate is 20%; on the live payout path a no-PAN outlet is **paid in full** and it becomes a report-only reconciliation item. Each no-PAN recipient is its **own deductee** — the threshold and the 20% apply to *that recipient's* yearly total, never to all no-PAN partners added together: **194R** per partner, **194C** per outlet (the same unit the payout tax step uses). On the **TDS screen** such a row reads **"NO PAN ON FILE · Partner Name (outlet codes)"**; in the **Excel export** the Deductee Name is **"Partner Name (NO PAN ON FILE)"**, PAN is blank and the **Outlet Code** column names that partner's outlets (in the **194C** export the Outlet Code column is added only when such a row exists; the **194R** export always carries it — see "194R Excel export: outlet columns" below). To record a deposit (or an off-platform 194R benefit) for one, write **PANNOTAVBL** (or PANAPPLIED / PANINVALID / NA / N/A) in the PAN column **and** the partner's **Outlet Code** (any letter case) — the code must exist for that client. A **blank PAN is rejected** ("PAN is required — enter the PAN, or PANNOTAVBL if the deductee has none"), and a file without a PAN column is rejected as a whole. If that outlet's owner turns out to have a PAN on file, the row is counted under that PAN and the upload says so. For **194C** deposits, add the **Client** column (client slug) when the same Outlet Code exists in more than one client. A no-PAN deposit that can't be matched to a recipient — e.g. older deposits uploaded without an Outlet Code — appears on its own row **"Earlier no-PAN deposits (not linked to a partner)"**, with the deposit shown as a negative outstanding (a credit); the totals are always the sum of the rows.
 - **194R Excel export: outlet columns:** every row carries **Outlet Code**, **Outlet Name** and **Outlet Type** — the outlets whose payouts make up that row's amount for the year (paid incentive credits, imported vendor payouts when they are counted, and off-platform entries that name an Outlet Code; deposits and redemptions don't add outlets). Several outlets are listed comma-separated, sorted by code, with names and types in the same order as the codes. If a PAN row has no such outlet (for example an off-platform entry uploaded with only a PAN), it shows the outlets of this client's partners holding that PAN (never the parent of a group); if there are none, the cells are blank. A no-PAN row shows that partner's outlets; the "NO PAN ON FILE" and "Earlier no-PAN deposits" rows stay blank. These columns are for identification only — no amount changes.
 - **Redemption payouts without PAN (per-client switch):** by default a partner with no PAN on file is **excluded** from a Redemption Payouts batch. A Gifsy admin can switch on **"Allow payouts without PAN"** for a client (client settings → Behaviour flags): those partners are then paid the full amount, and the TDS at the no-PAN rate is a **company-borne** liability shown in the TDS reports as "NO PAN ON FILE".
-- **194R is report-only at payout:** an incentive (194R) payout has **nothing withheld** from it — the platform *reports* what's due per PAN for the client's filing, and the client deposits it (recorded via a deposit upload). Actual withholding at payout only happens for **visibility** payouts on the **Deduct** methodology.
+- **194R at payout:** incentive payouts and cash redemptions are **paid in full** — their TDS is borne by the client and shown on the 194R report. The only 194R withholding is on **visibility** payouts of a retailer **with a PAN** on a client set to **194R + Deduct** — see "194R — what counts and how the amount is worked out" below.
 
 ## When it fires (trigger points)
 
@@ -65,24 +65,74 @@ Set per client on the **TDS Treatment** screen (default **194C + Gross-up**). Wh
 2. **At Generate Bank File** (payout download): for **visibility** payouts only, the tax is **computed and applied** — either deducted from the bank line, or grossed-up (with a TDS invoice raised for **194C** only; a **194R** client's gross-up appears on the 194R report).
 3. **Reports / CA export**: recomputed **on demand** whenever a report is opened — always current.
 
-## What cumulates for 194R (the three inputs)
+## 194R — what counts and how the amount is worked out
 
-Everything below, for the **same PAN**, adds into that PAN's yearly 194R total:
+194R is worked out **per client, per retailer, per financial year** (Apr–Mar). The same retailer's 194R benefits under two different clients are never added together.
 
-| Input | Trigger (when it's added) |
+### What counts (everything the client gave this retailer in the year)
+
+| Benefit | Counted on | Cash or non-cash |
+|---|---|---|
+| **Incentive payouts** | the date the payout was **paid** (UTR date) | Cash |
+| **Visibility payouts** on a client set to **194R** | the date **paid** — or, while it is still in a bank file without a UTR, the bank file's date | Cash |
+| **Cash redemptions** (UPI / bank) | the date the redemption was **delivered** | Cash |
+| **Gifts and vouchers** redeemed | the date **delivered** | Non-cash |
+| **Off-platform benefits** (uploaded) | the entry date in the file | Non-cash |
+| **Imported vendor payouts** (only if the client's "count imported payouts" date is set) | the date paid, **on or after** that date | Cash |
+
+A failed, reversed or not-yet-sent payout does not count.
+
+**Who is "one retailer":** a retailer with a PAN is one row per PAN. Without a PAN, **all the outlets of one owner are one retailer** (one row); an outlet with no owner attached counts on its own.
+
+### How the amount is worked out
+
+1. Add up everything above for the year. If the total is **₹20,000 or less**, no TDS is due.
+2. Once it is **over ₹20,000**, TDS is due on the **whole year** (not only the part above ₹20,000).
+3. The rate is **10% with a PAN, 20% without** (set on the TDS Statutory screen).
+4. The amount is worked out on the client's **current** Deduct / Gross-up setting — for the **whole year**, even if the setting changed during the year:
+   - **Deducted from the retailer** — only **visibility** payouts, only for a retailer **with a PAN**, only when the client is on **Deduct**: \`base × 10%\`. This is taken out of the retailer's visibility payouts at **Generate Bank File**. If it is more than that payout, the rest is taken from the next payouts.
+   - **Borne by the client** — everything else (incentives, cash redemptions, gifts, vouchers, off-platform, imported payouts, and all visibility payouts on **Gross-up** or **without a PAN**): \`base × rate ÷ (100 − rate)\` (10/90 with PAN, 20/80 without). The retailer is always paid in full for these.
+5. **Outstanding = TDS liability − deposits uploaded in the portal** (TDS → Deposit Upload). TDS already deducted from payouts is shown for reference but is **not** subtracted — it is cleared when its deposit is uploaded.
+
+194R never raises a TDS invoice or a recovery line (that is 194C only).
+
+### The 194R report columns
+
+| Column | Meaning |
 |---|---|
-| **Incentive payouts** paid on the platform | when the payout's **UTR is recorded** (status → Paid) |
-| **Reward redemptions** (the ₹ value redeemed) | when the order reaches **Delivered** — cash: the payout UTR auto-delivers it; gift: the fulfilment steps |
-| **Off-platform benefits** the client gave outside the system | when the client **uploads & applies** the off-platform 194R file |
+| **Amount Paid** | Everything counted for this retailer in the year |
+| **Cash / Non-cash** | That total split: cash (incentive, visibility, UPI/bank redemptions, imported payouts) and non-cash (gifts, vouchers, off-platform) |
+| **Method · Rate** | The client's current setting used for the whole year, and 10% / 20% |
+| **Deducted part / Client-borne** | The TDS taken from the retailer's visibility payouts, and the TDS the client bears |
+| **TDS Liability** | The two parts added together |
+| **Deducted so far** | TDS already taken from this retailer's payouts (after any reversals) — for reference |
+| **Deposited** | Deposits uploaded for this retailer and year. "of which imported vendor TDS" shows the part that came from a data import (for example the previous vendor's TDS) |
+| **Outstanding** | TDS Liability − Deposited |
 
-Then **Deposits** (194R tax the client actually paid the government, uploaded) are **subtracted** → the **outstanding** amount. Below ₹20,000 total → no liability; once crossed → 10% (with PAN), grossed-up on the whole total.
+The Excel export carries the same columns.
+
+### Worked examples
+
+**1. Retailer with a PAN, client on Deduct, visibility + a gift.** Visibility payouts ₹15,000 and a gift worth ₹8,000 in the year → total ₹23,000, over ₹20,000.
+- Deducted part: 10% × ₹15,000 = **₹1,500** (taken from the visibility payouts).
+- Client-borne: ₹8,000 × 10/90 = **₹889**.
+- TDS Liability **₹2,389**. If the client has uploaded deposits of ₹1,000, Outstanding is **₹1,389**.
+
+**2. Owner without a PAN, two outlets.** Outlet A paid ₹15,000 and outlet B paid ₹15,000 → **one** retailer, total ₹30,000, over ₹20,000.
+- Nothing is deducted (no PAN — the retailer is paid in full).
+- Client-borne: ₹30,000 × 20/80 = **₹7,500**.
+
+**3. Client switches from Gross-up to Deduct mid-year.** The retailer (with a PAN) was paid ₹1,00,000 of visibility while the client was on Gross-up; nothing was taken. The client moves to Deduct, and the next visibility payout is ₹5,000.
+- The whole year is recalculated on Deduct: 10% × ₹1,05,000 = **₹10,500**.
+- That payout is ₹5,000, so **₹5,000** is taken now and **₹5,500** is carried to the next payouts.
+- On the report the liability shows **₹10,500** (Deduct, whole year), not the earlier gross-up figure.
 
 ### Imported (vendor) payout history — per-client setting
 
 Payout history imported from a client's previous vendor (already paid off-platform) is **left out of 194R by default**. A Gifsy Admin can switch on **"Count imported (vendor) payouts in the 194R report"** for one client on the **TDS Treatment** screen, with a **from date** (e.g. \`2026-04-01\`):
 
 - Imported vendor **incentive payouts** **paid on or after that date** are added to each retailer's 194R total exactly like a platform payout — same PAN / no-PAN deductee (no PAN → its own row at 20%), same ₹20,000 threshold, and **deposits** uploaded with **TDS for month** subtract as usual. Imported payouts **before** the date stay excluded (e.g. a closed financial year). Other kinds of imported history are never counted automatically.
-- It is **report / liability only**. Nothing is deducted from any future payout, no TDS invoice is raised and nothing is recovered automatically — the retailers were already paid in full. Because nothing was withheld from those payouts, the liability is **payer-borne for every client** (whatever its Deduct / Gross-up setting); who finally bears it is settled outside the platform.
+- Their TDS is **client-borne** (gross-up) for every client, whatever its Deduct / Gross-up setting — the retailers were already paid in full, so nothing is taken back for them and no TDS invoice is raised. They **do** count towards the retailer's ₹20,000 threshold, so a visibility payout on Deduct can start being withheld sooner. Who finally bears it is settled outside the platform.
 - **Retailer TDS paid later must be uploaded as deposits only** (TDS → Deposit Upload, with **TDS for month**) — **never as off-platform benefits**: the imported payouts are already in the base, so an off-platform upload would count them twice.
 - Wherever a 194R figure includes them — the **194R** screen, the 194R **Excel export** (Summary sheet), the liability tracker and the **Finance dashboard** 194R tile — it says **"Includes imported (vendor) payouts paid on/after <date>"**. The note appears only for a financial year the date reaches into (a 1 Apr 2026 date shows nothing on FY 2025-26).
 - The date must be between **1 Jan 2000** and **one year from today**. A date before the **current** financial year also counts earlier years, so the screen warns and asks you to confirm; **Switch off** asks to confirm too.

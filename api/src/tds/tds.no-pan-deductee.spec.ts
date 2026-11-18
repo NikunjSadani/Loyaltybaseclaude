@@ -12,6 +12,10 @@ import { TdsService } from './tds.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { DEFAULT_RESOLVED_TDS_STATUTORY } from './tds.helpers';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+const mockTdsTenantSettings = {
+  resolveTdsPolicy: jest.fn().mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' }),
+};
 
 const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
 
@@ -115,6 +119,8 @@ describe('TdsService — per-deductee no-PAN', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -188,7 +194,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('P1', 'f1', 2_100_000n), entry('N1', 'f1', 500_000n)]);
     const rows = await service.compute194R(CLIENT, FY);
     const pan = rows.find((r) => r.panNumber === 'ABCDE1234F')!;
-    expect(pan).toEqual({
+    expect(pan).toMatchObject({
       panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 2_100_000n,
       liabilityPaise: 233_300n, depositedPaise: 0n, outstandingPaise: 233_300n,
     });
@@ -236,7 +242,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: null, amountPaise: 2_500_000n }]);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '', outletCode: null, amountPaise: 100_000n }]);
     const rows = await service.compute194R(CLIENT, FY);
-    expect(rows).toEqual([
+    expect(rows).toMatchObject([
       { panNumber: '__NO_PAN__', fyLabel: FY, baseFyTotalPaise: 2_500_000n, liabilityPaise: 625_000n, depositedPaise: 0n, outstandingPaise: 625_000n },
       { panNumber: '__NO_PAN__:unlinked-deposits', fyLabel: FY, baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 100_000n, outstandingPaise: -100_000n, unlinkedNoPanDeposit: true },
     ]);
@@ -248,7 +254,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: 'op', amountPaise: 1_500_000n }]);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: 'OP', amountPaise: 50_000n }]);
     const rows = await service.compute194R(CLIENT, FY);
-    expect(rows).toEqual([
+    expect(rows).toMatchObject([
       { panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 2_500_000n, liabilityPaise: 277_800n, depositedPaise: 50_000n, outstandingPaise: 227_800n },
     ]);
   });
@@ -283,7 +289,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('O1', 'f1', 2_100_000n)]);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: 'ABCDE1234F', outletCode: null, amountPaise: 100_000n }]);
     const rows = await service.compute194R(CLIENT, FY);
-    expect(rows).toEqual([
+    expect(rows).toMatchObject([
       { panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 2_100_000n, liabilityPaise: 233_300n, depositedPaise: 100_000n, outstandingPaise: 133_300n },
     ]);
     expect(Object.keys(rows[0])).not.toContain('noPanDeductee');
@@ -323,8 +329,11 @@ describe('TdsService — per-deductee no-PAN', () => {
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('O1', 'f1', 2_100_000n)]);
     const { buffer } = await service.export194R(CLIENT, FY);
     expect(headers(buffer)).toEqual([
-      'S.No', 'Deductee Name', 'PAN', 'Outlet Code', 'Outlet Name', 'Outlet Type', 'Section', 'Amount Paid (₹)', 'TDS Rate %',
-      'TDS Amount (₹)', 'Already Deposited (₹)', 'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'FY',
+      'S.No', 'Deductee Name', 'PAN', 'Outlet Code', 'Outlet Name', 'Outlet Type', 'Section', 'Amount Paid (₹)',
+      'Cash Benefits (₹)', 'Non-cash Benefits (₹)', 'Method', 'TDS Rate %',
+      'Base Deducted from Retailer (₹)', 'Base Borne by Client (₹)', 'TDS — Deducted Part (₹)', 'TDS — Client-borne Part (₹)',
+      'TDS Amount (₹)', 'Deducted from Payouts So Far (₹)', 'Already Deposited (₹)', 'of which Imported Vendor TDS (₹)',
+      'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'FY',
     ]);
     expect(parseSheet(buffer)[0]['Outlet Code']).toBe('O1');
   });
@@ -444,7 +453,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OQ', 'f1', 2_100_000n)]); // only Q has a base
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: 'op', amountPaise: 50_000n }]);
     const rows = await service.compute194R(CLIENT, FY);
-    expect(rows.find((r) => r.panNumber === 'ABCDE1234F')).toEqual({
+    expect(rows.find((r) => r.panNumber === 'ABCDE1234F')).toMatchObject({
       panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 50_000n, outstandingPaise: -50_000n,
     });
     const sum = await service.summary194R(CLIENT, FY);
@@ -529,7 +538,7 @@ describe('TdsService — per-deductee no-PAN', () => {
       { panNumber: ' abcde1234f ', outletCode: null, amountPaise: 40_000n }, // lower-case, padded
     ]);
     const rows = await service.compute194R(CLIENT, FY);
-    expect(rows.filter((r) => r.panNumber === 'ABCDE1234F')).toEqual([
+    expect(rows.filter((r) => r.panNumber === 'ABCDE1234F')).toMatchObject([
       { panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 40_000n, outstandingPaise: -40_000n },
     ]);
     const sum = await service.summary194R(CLIENT, FY);
@@ -590,7 +599,12 @@ describe('TdsService — per-deductee no-PAN', () => {
     ]);
     for (const r of rows) {
       expect(r.outstandingPaise).toBe(r.liabilityPaise - r.depositedPaise);
-      expect(Object.keys(r).sort()).toEqual(['baseFyTotalPaise', 'depositedPaise', 'fyLabel', 'liabilityPaise', 'outstandingPaise', 'panNumber']);
+      // A PAN-only (Deoleo-style) row carries no no-PAN identity / unlinked flag / deposit months.
+      expect(Object.keys(r).sort()).toEqual([
+        'baseFyTotalPaise', 'cashBasePaise', 'clientBorneBasePaise', 'clientBorneLiabilityPaise', 'deductBasePaise',
+        'deductLiabilityPaise', 'deductedPaise', 'depositedPaise', 'fyLabel', 'importedVendorDepositPaise',
+        'liabilityPaise', 'methodology', 'nonCashBasePaise', 'outstandingPaise', 'panNumber', 'ratePct',
+      ]);
     }
   });
 

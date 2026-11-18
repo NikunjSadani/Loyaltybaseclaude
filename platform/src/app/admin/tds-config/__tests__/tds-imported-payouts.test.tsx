@@ -227,6 +227,8 @@ describe('TdsImportedPayoutsCard', () => {
     expect(card).toHaveTextContent('this liability is payer-borne for every client')
     expect(card).not.toHaveTextContent(/gross-up client/i)
     expect(card).toHaveTextContent('must be uploaded as deposits only — never as off-platform benefits')
+    // Owner D9 (2026-11-18): they also count towards the threshold the payout engine uses.
+    expect(card).toHaveTextContent('They do count towards the retailer’s ₹20,000 threshold')
   })
 
   it('helpers: formatCountFrom, currentFyStart, importedMaxDate', () => {

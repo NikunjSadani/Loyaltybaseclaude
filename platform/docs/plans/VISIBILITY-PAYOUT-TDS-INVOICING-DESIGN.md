@@ -42,8 +42,7 @@ PAN `AAACT9811F`, West Bengal / code 19, SAC 998361).
   **D7 applies to 194C ONLY. 194R is PER CLIENT (owner, 2026-11-18):** a retailer PAN's 194R visibility payouts under
   tenant A and tenant B are never aggregated — threshold (₹20k/FY), prior base and DEDUCT carry-forward ledger are all
   evaluated per (client, PAN, FY). This matches the 194R report's client scope (`api/src/tds/tds.service.ts`) — its
-  inputs and method still differ (open items: the report also counts incentive payouts / redemptions / off-platform
-  entries, keys no-PAN per partner, and always uses gross-up).
+  inputs and method are now ONE shared definition too (§9 — `api/src/tds/tds-194r.shared.ts`).
   **TDS INVOICING IS 194C-ONLY (owner, 2026-11-18):** Gifsy deposits 194C TDS and recovers it from the client, so only
   194C GROSS_UP raises a TDS invoice + `TdsRecoveryEntry` rows. A **194R** GROSS_UP payout raises **no** TDS invoice and
   **no** recovery row (no-PAN 194R included) — the retailer is paid in full and the client's liability is shown by the
@@ -53,11 +52,7 @@ PAN `AAACT9811F`, West Bengal / code 19, SAC 998361).
   Only seq 001 is the anchor (a deleted 001 is not re-anchored). Limit: the numbers are derived from existing rows, so
   if the HIGHEST invoice is deleted its number is issued again (no persisted counter; TDS invoices are born locked and
   the app has no delete path — deletion is a manual DB operation).
-  **Planned (194R whole-year true-up, owner D3 — not built yet, waiting on owner Q1–Q6):** benefits are dated by when
-  they were ACTUALLY paid (cash payouts by `paidAt`, redemptions by `deliveredAt`, off-platform by `entryDate`). Chosen
-  rule for payouts without a `paidAt` yet: a PROCESSING entry (already in a bank file) and the entries of the run being
-  built count in the FY of the run date (IST) — so a run always counts what it is paying; once the UTR is recorded the
-  real `paidAt` is used; FAILED / REVERSED entries drop out.
+  **194R whole-year true-up (owner D2–D6/D9/D10 + Q1–Q6, 2026-11-18) — BUILT;** the full rules are in §9 below.
   **Legacy rows:** ledger rows written before this change carry their tenant's `clientId`, so they are re-scoped
   automatically on the next read (another tenant's 194R withholding simply stops counting). Any legacy 194R TDS invoice /
   194R recovery row is ignored by the engine (it never blocks or reduces a 194C top-up) and still lists on the recovery
@@ -139,3 +134,71 @@ post-cutover. **~0.5 day (mostly owner-gated).**
 **Total ≈ 4.5–5.5 days** focused build. Biggest variables: money-path audit findings (always real → fix cycles) and
 owner sign-off/UAT cadence. Wall-clock within a session is shorter (agents run in parallel); the estimate bakes in the
 non-negotiable gate + dual-audit + staging-verify rigor for a money path.
+
+
+## 9. How TDS is calculated (owner decisions 2026-11-18 — the reference)
+
+### 9.1 194R — per client, per retailer, per FY
+**One shared definition** (`api/src/tds/tds-194r.shared.ts`: `collect194RBases` + `liability194R`) is used by BOTH the
+payout engine (`credits.service.ts` `plan194RDeductions`) and the 194R report (`tds.service.ts` `compute194R`). A parity
+spec (`api/src/tds/tds-194r.spec.ts`) runs one dataset through both and asserts the same TDS.
+
+**What counts** (never across clients):
+
+| Benefit | Dated by (D3) | Bucket |
+|---|---|---|
+| Incentive payouts (always 194R) | `paidAt`; a PROCESSING payout (in a bank file, no UTR) by its bank file's `downloadedAt` | cash, client-borne |
+| Visibility payouts whose section was **frozen 194R at confirm** (Q6 — no re-classification) | same | cash ("vis") |
+| Imported vendor incentive payouts (`VENDOR_IMPORT`, `historical-incentive-payout`), only paid on/after the client's `tdsImportedPayouts.countFrom` (D9; fail-closed on a malformed value) | `paidAt` | cash, client-borne |
+| Delivered redemptions — UPI / BANK_TRANSFER | `deliveredAt` | cash, client-borne |
+| Delivered redemptions — GIFT_CARD / PHYSICAL_GIFT | `deliveredAt` | non-cash |
+| `TdsOffPlatformEntry` (194R) | `entryDate` | non-cash |
+
+FAILED / REVERSED / PENDING payouts never count. The engine counts the run it is building at the run date (`runAt`), so
+a 194R run's FY is the run date's FY (194C keeps its period FY — unchanged). Bajaj's imported payout history and the §10
+"Outlet Points" off-platform rows are different benefits and both count (Q5).
+
+**Who** (D4): PAN → one row per PAN. No PAN → all outlets of one ChannelPartner = one retailer
+(`__NO_PAN__:<partnerId>`); an outlet with no partner counts alone (`__NO_PAN__:outlet:<clientId>:<outletCode>`).
+
+**How much** (D5/D6/Q1/Q3): total base > ₹20,000 (FY statutory config) → TDS on the **whole year**. Rate 10% PAN /
+20% no-PAN from the statutory config (never a fixed fraction). The whole year uses the client's **current** method:
+- **Deduct part** = visibility base of a **PAN holder** when the current method is **DEDUCT** → `base × rate%`.
+- **Client-borne part** = everything else (incentives, cash redemptions, gifts, vouchers, off-platform, imported payouts,
+  and all visibility on GROSS_UP or without a PAN — a no-PAN payout is never withheld) → `base × rate/(100−rate)`.
+- Each part is rounded to the rupee separately; liability = the sum.
+- **Report outstanding = liability − deposits uploaded in the portal** (`TdsDeposit`, client/PAN/FY by "TDS for month").
+  TDS deducted from payouts is shown ("deducted so far", net of reversals) but **not** subtracted (Q3). Imported vendor
+  TDS (the Bajaj partial import = 212 `TdsDeposit` rows) is a deposit, subtracted once; rows whose `uploadBatchId` is not
+  a portal file hash (`DEP-`/`OP-` + sha256) are also shown "of which imported vendor TDS" (Q4, informational only).
+- **Engine withholding** (only 194R visibility of a PAN holder on a client whose current method is DEDUCT; Q1):
+  `withhold = deduct part (whole year, incl. this run) − already deducted for (client, PAN, FY)`, capped at this run's
+  payout, the rest carried forward (`computeDeduction`). Ledger rows carry `clientId`, `fyLabel` = run FY; a FAILED /
+  reversal offset is written in the FY of the original withholding. Incentive payouts and cash redemptions are always
+  paid in full (no change to `payouts.service` / `rewards.service`). A download with no 194R entries issues none of the
+  194R reads (Deoleo's 194C downloads are unchanged).
+- **No TDS invoice and no `TdsRecoveryEntry` for 194R** (D7).
+
+**Worked examples (PAN = 10%, no PAN = 20%):**
+1. Client on DEDUCT, PAN: visibility ₹15,000 + gift ₹8,000 = ₹23,000 > ₹20,000 → deduct part 10% × 15,000 = **₹1,500**
+   (withheld) + client-borne 8,000 × 10/90 = **₹889** → liability **₹2,389**; outstanding = 2,389 − deposits.
+2. No-PAN owner with two outlets, ₹15,000 + ₹15,000 → one retailer, ₹30,000 → 30,000 × 20/80 = **₹7,500** client-borne
+   (never withheld).
+3. Method switch: ₹1,00,000 visibility paid on GROSS_UP, client then moves to DEDUCT, next visibility payout ₹5,000 → the
+   whole year on DEDUCT: 10% × 1,05,000 = **₹10,500** due; ₹5,000 withheld now, **₹5,500** carried forward. (Had the
+   client stayed on GROSS_UP: 1,05,000 × 10/90 = ₹11,667, all client-borne.)
+4. Threshold from mixed benefits: incentive ₹18,000 + UPI redemption ₹1,000 + off-platform ₹500 + visibility ₹5,000 on
+   DEDUCT → ₹24,500 → only 10% × 5,000 = ₹500 withheld; 19,500 × 10/90 = ₹2,167 client-borne.
+
+**Report row fields (D10):** base, cash / non-cash base, deduct base / client-borne base, method, rate %, deduct part /
+client-borne part, liability, deducted so far, deposited (of which imported vendor TDS), outstanding — on screen
+(`/admin/tds`), API (`GET /v1/admin/tds/194r`) and the Excel export.
+
+### 9.2 194C — unchanged (D1/D7/D8)
+Combined **across all tenants by PAN** (TGSL = single deductor): thresholds > ₹30,000 single or > ₹1,00,000 FY; rates 1%
+individual/HUF, 2% others, 20% no-PAN; FY by payout **period**; methodology = the one **frozen** on each entry. DEDUCT →
+withheld from the visibility payout with carry-forward (cross-tenant ledger). GROSS_UP → paid full; a monthly TDS top-up
+**invoice** (`TGSL-TDS-<PAN>-<FY>-<seq>`, seq = highest existing + 1) and pro-rata `TdsRecoveryEntry` rows across the
+contributing tenants (D10). No-PAN → paid full + per-(tenant, outlet) recovery (FIX-9). **Only 194C is invoiced.**
+Worked example: tenant X ₹70,000 + tenant Y ₹40,000 (individual) → ₹1,10,000 > ₹1L → gross-up 1,10,000 × 1/99 = ₹1,111,
+recovered pro-rata X ₹707 / Y ₹404.

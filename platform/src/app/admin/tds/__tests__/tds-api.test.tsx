@@ -396,4 +396,33 @@ describe('TDS — Admin TDS page API wiring', () => {
       ).toBe(true);
     });
   });
+  // TDS14 — D10 (owner 2026-11-18): the 194R row shows how the year's TDS was worked out.
+  it('TDS14: 194R row shows cash/non-cash base, method · rate, deducted/client-borne parts, deducted so far and imported vendor TDS', async () => {
+    const row = {
+      panNumber: 'ABCDE1234F',
+      baseFyTotalPaise: 2300000, liabilityPaise: 238900, depositedPaise: 100000, outstandingPaise: 138900,
+      methodology: 'DEDUCT', ratePct: 10,
+      cashBasePaise: 1500000, nonCashBasePaise: 800000,
+      deductLiabilityPaise: 150000, clientBorneLiabilityPaise: 88900,
+      deductedPaise: 150000, importedVendorDepositPaise: 40000,
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { ...MOCK_194R.data, rows: [row] } }),
+    }));
+    render(<AdminTdsPage />);
+    expect(await screen.findByTestId('r194-method')).toHaveTextContent('Deduct · 10%');
+    expect(screen.getByTestId('r194-cash-noncash')).toHaveTextContent('₹15,000.00 / ₹8,000.00');
+    expect(screen.getByTestId('r194-parts')).toHaveTextContent('₹1,500.00 / ₹889.00');
+    expect(screen.getByTestId('r194-deducted')).toHaveTextContent('₹1,500.00');
+    expect(screen.getByTestId('r194-imported')).toHaveTextContent('of which imported vendor TDS ₹400.00');
+  });
+
+  it('TDS15: a row without the D10 fields (older API) still renders (Gross-up, ₹0 parts, no imported note)', async () => {
+    vi.stubGlobal('fetch', make194RFetch());
+    render(<AdminTdsPage />);
+    const methods = await screen.findAllByTestId('r194-method');
+    expect(methods[0]).toHaveTextContent('Gross-up');
+    expect(screen.queryByTestId('r194-imported')).toBeNull();
+  });
 });

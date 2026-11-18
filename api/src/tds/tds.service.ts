@@ -13,20 +13,16 @@
  * "Earlier no-PAN deposits (not linked to a partner)" row and netted in the totals (see below).
  *
  * ── 194R (per clientId, per FY) ──────────────────────────────────────────────
- * Sources summed per PAN:
- *   1. Non-visibility CreditPayoutEntry (status PAID, paidAt in FY, field NOT isSeparatePayout)
- *      → PAN via Outlet→ChannelPartner. Imported history (batch.sourceKind = VENDOR_IMPORT) is
- *      EXCLUDED — unless the tenant's `tdsImportedPayouts.countFrom` date is set, in which case
- *      imported incentive payouts (fieldId historical-incentive-payout only) paid on/after that IST
- *      date count like any other (report/liability only). The setting is read once per request
- *      (report194R) and fails CLOSED (throws) on a read failure or malformed value.
- *   2. RedemptionOrder.valuePaise for DELIVERED/FULFILLED redemptions (deliveredAt in FY)
- *      → PAN via ChannelPartner
- *   3. TdsOffPlatformEntry (section=SEC_194R, clientId, entryDate in FY)
- *      → PAN on the row
- * Threshold: fyTotal > 2,000,000 paise (₹20,000) → liability on WHOLE fyTotal (retroactive).
+ * Base + liability = the ONE shared definition in `tds-194r.shared.ts` (also used by the payout
+ * engine): incentive + 194R-frozen visibility payouts (PAID by paidAt; PROCESSING by its bank file's
+ * date), imported vendor incentive payouts from the tenant's `tdsImportedPayouts.countFrom` date
+ * (read once per request, fails CLOSED), DELIVERED redemptions (cash vs gift/voucher by mode, by
+ * deliveredAt) and TdsOffPlatformEntry (by entryDate). Threshold > ₹20,000 → TDS on the WHOLE year:
+ * visibility of a PAN holder on the client's CURRENT DEDUCT method → base × rate%; everything else
+ * → client-borne gross-up base × rate/(100−rate). Rates 10% PAN / 20% no-PAN (statutory config).
  * Deposited: SUM TdsDeposit (section=SEC_194R, clientId, panNumber) whose "TDS for month"
  * (forPeriod) is in the FY — a deposit counts for the FY of the MONTH IT PAYS FOR, not its deposit date.
+ * Outstanding = liability − deposited (TDS deducted from payouts is shown, never subtracted).
  *
  * ── 194C (platform-wide, per FY) ────────────────────────────────────────────
  * Sources summed per PAN:
@@ -44,9 +40,7 @@ import {
   fyLabelForPeriod,
   periodWindowForFy,
   grossUpTdsPaise,
-  rate194RFrom,
   rate194CFrom,
-  roundToRupeePaise,
   sectionParamToEnum,
   effectiveEntrySection,
   parseOffPlatformUpload,
@@ -59,14 +53,27 @@ import {
   formatForPeriod,
   cellSafe,
   TDS_IMPORTED_PAYOUTS_SETTING_KEY,
-  IMPORTED_INCENTIVE_PAYOUT_FIELD_ID,
   parseImportedPayoutsSetting,
-  istDayStartInstant,
   importedCountFromForFy,
   importedPayoutsNote,
   capUploadResult,
 } from './tds.helpers';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import {
+  NO_PAN_KEY,
+  noPanOutletKey,
+  isNoPanKey,
+  isNoPanCell,
+  collect194RBases,
+  liability194R,
+  emptyBases194R,
+  outletsByCodeCI as sharedOutletsByCodeCI,
+  ownerPansOf as sharedOwnerPansOf,
+  keyForOutletCode,
+  type Bases194R,
+} from './tds-194r.shared';
+import type { TdsMethodology } from '@prisma/client';
 import { withholdingTdsPaise } from './tds-methodology.helper';
 import type { UploadResult, UploadRowError } from './dto/tds.dto';
 import { buildXlsx } from '../common/xlsx';
@@ -86,20 +93,8 @@ import { paiseToRupees } from '../common/money';
  * without an Outlet Code) — so nothing silently drops out of the totals.
  * Every PAN row is unaffected: a tenant with no no-PAN deductee is byte-identical.
  */
-const NO_PAN_KEY = '__NO_PAN__';
-export const noPanPartnerKey = (partnerId: string): string => `${NO_PAN_KEY}:${partnerId}`;
-export const noPanOutletKey = (clientId: string, outletCode: string): string =>
-  `${NO_PAN_KEY}:outlet:${clientId}:${outletCode}`;
-/** True for the bare unattributed key AND every per-deductee no-PAN key. */
-export const isNoPanKey = (key: string): boolean =>
-  key === NO_PAN_KEY || key.startsWith(`${NO_PAN_KEY}:`);
-/**
- * A STORED PAN value that means "no PAN": blank, or the `__NO_PAN__…` sentinel the upload parsers
- * write for an explicit marker. Stored values such as 'NA' / 'PANNOTAVBL' on a partner or on an
- * older row are NOT reinterpreted — marker recognition happens only on upload cells (tds.helpers).
- */
-const isNoPanCell = (pan: string | null | undefined): boolean =>
-  !pan || !pan.trim() || isNoPanKey(pan.trim().toUpperCase());
+// Defined once in tds-194r.shared (the engine + report share them); re-exported for existing importers.
+export { noPanPartnerKey, noPanOutletKey, isNoPanKey } from './tds-194r.shared';
 
 /** Label of the row holding no-PAN deposits that cannot be linked to a deductee. */
 export const UNLINKED_NO_PAN_DEPOSIT_LABEL = 'Earlier no-PAN deposits (not linked to a partner)';
@@ -139,6 +134,15 @@ function summariseRows(
     totalOutstandingPaise: rows.reduce((s, r) => s + r.outstandingPaise, 0n),
     rowCount: rows.length,
   };
+}
+
+/**
+ * True for a TdsDeposit uploadBatchId written by a DATA IMPORT (e.g. the Bajaj vendor-TDS batch)
+ * rather than a portal upload — portal uploads store a deterministic file hash `DEP-<sha256>` /
+ * `OP-<sha256>`. Informational only ("of which imported vendor TDS"); never changes an amount.
+ */
+export function isImportedDepositBatch(uploadBatchId: string | null | undefined): boolean {
+  return !!uploadBatchId && !/^(DEP|OP)-[0-9a-f]{64}$/.test(uploadBatchId);
 }
 
 /**
@@ -195,6 +199,25 @@ export interface TdsRow194R {
   liabilityPaise: bigint;
   depositedPaise: bigint;
   outstandingPaise: bigint;
+  // ── Owner D10 (2026-11-18): how the liability was worked out (tds-194r.shared liability194R) ──
+  /** The client's CURRENT methodology the whole year was computed on. */
+  methodology: TdsMethodology;
+  /** Whole-percent rate applied (10 with PAN / 20 without). */
+  ratePct: number;
+  /** Cash benefits: visibility + incentive payouts + cash (UPI/bank) redemptions. */
+  cashBasePaise: bigint;
+  /** Non-cash benefits: gifts, vouchers, off-platform. */
+  nonCashBasePaise: bigint;
+  /** Base on which TDS is withheld from the retailer (PAN holder's visibility payouts on DEDUCT). */
+  deductBasePaise: bigint;
+  /** Base whose TDS the client bears (gross-up). */
+  clientBorneBasePaise: bigint;
+  deductLiabilityPaise: bigint;
+  clientBorneLiabilityPaise: bigint;
+  /** TDS already deducted from this retailer's payouts (net of reversals) — shown, NOT subtracted. */
+  deductedPaise: bigint;
+  /** Of `depositedPaise`, the part from imported vendor TDS batches (informational). */
+  importedVendorDepositPaise: bigint;
   /** "TDS for month" (YYYY-MM, ascending) of the deposits counted on this row — absent when none. */
   depositForPeriods?: string[];
 }
@@ -262,12 +285,6 @@ export interface TdsSummary194C {
 
 // ─── Internal accumulators ───────────────────────────────────────────────────
 
-interface PanAccum194R {
-  panNumber: string;
-  hasPan: boolean;
-  totalPaise: bigint;
-}
-
 interface PanAccum194C {
   panNumber: string;
   hasPan: boolean;
@@ -294,6 +311,8 @@ export class TdsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly statutory: TdsStatutoryConfigService,
+    // D6: the 194R report computes the whole year on the client's CURRENT methodology.
+    private readonly tenantSettings: TenantSettingsService,
   ) {}
 
   // ─── Imported (vendor) payouts setting ──────────────────────────────────────
@@ -391,9 +410,10 @@ export class TdsService {
   // ─── 194R ───────────────────────────────────────────────────────────────────
 
   /**
-   * Compute 194R rows for a given clientId and FY label (e.g. "2025-26").
-   * Aggregates all three sources, applies the retroactive threshold, and
-   * subtracts actual deposits to produce outstanding.
+   * Compute 194R rows for a given clientId and FY label (e.g. "2025-26"), per (client, retailer).
+   * The base + liability come from the ONE shared definition (`tds-194r.shared`: collect194RBases +
+   * liability194R) that the payout engine also uses — owner decisions 2026-11-18 (D2–D6, D9, D10).
+   * Outstanding = liability − deposits uploaded in the portal (Q3; deductions do NOT reduce it).
    */
   async compute194R(
     clientId: string,
@@ -419,267 +439,90 @@ export class TdsService {
     const countFromDate =
       importedCountFrom !== undefined ? importedCountFrom : await this.importedPayoutsCountFrom(clientId);
     const cfg = await this.statutory.getForFy(fyLabel);
-    const fy = fyFromLabel(fyLabel);
-    const { start, endExclusive } = fy;
-    // FIX-4: VISIBILITY entries frozen 194R are anchored by their payout PERIOD's FY (matching
-    // the ledger); INCENTIVE (non-visibility) 194R keeps its paidAt anchor.
-    const { startPeriod, endPeriod } = periodWindowForFy(fyLabel);
+    // D6: the client's CURRENT methodology (fail-closed on a malformed stored policy).
+    const { methodology } = await this.tenantSettings.resolveTdsPolicy(clientId);
 
-    // Accumulate per PAN
-    const accum = new Map<string, PanAccum194R>();
-
-    // `noPanKey` = the per-deductee key to use when this amount has NO PAN (see noPanPartnerKey /
-    // noPanOutletKey). Omitted → the unattributed bucket (legacy behaviour for identity-less rows).
-    // Returns the row key the amount was added to (used only by the display-only outlet sink).
-    const addToPan = (pan: string | null | undefined, amountPaise: bigint, noPanKey?: string): string => {
-      const key = isNoPanCell(pan) ? (noPanKey ?? NO_PAN_KEY) : pan!.trim().toUpperCase();
-      const hasPan = !isNoPanKey(key);
-      const existing = accum.get(key);
-      if (existing) {
-        existing.totalPaise += amountPaise;
-      } else {
-        accum.set(key, { panNumber: key, hasPan, totalPaise: amountPaise });
-      }
-      return key;
-    };
-
-    // Visibility field IDs (the explicit classifier) — needed both to widen the query by
-    // period and to resolve the FROZEN-null fallback classification (effectiveEntrySection).
-    const visibilityFields = await this.prisma.creditField.findMany({
-      where: { clientId, payoutStream: 'VISIBILITY' },
-      select: { id: true },
-    });
-    const visibilityFieldIds = new Set(visibilityFields.map((f) => f.id));
-    const visFieldIdArr = [...visibilityFieldIds];
-
-    // ── Source 1: CreditPayoutEntry whose EFFECTIVE section is 194R ──────────────
-    // Two windows, unioned by id (a visibility row can satisfy both):
-    //   A) paidAt in FY  — covers INCENTIVE (paidAt anchor) + visibility paid within the FY
-    //   B) period in FY  — covers VISIBILITY frozen-194R whose PERIOD (not paidAt) lands in FY
-    // Each row is then re-checked with its correct anchor so a visibility row whose PERIOD is
-    // in a DIFFERENT FY (but whose paidAt happened to fall in this one) is dropped.
-    // NOTE: CreditPayoutEntry.outletId stores the outletCode (string code), NOT the Outlet PK.
-    const paidAtEntries = await this.prisma.creditPayoutEntry.findMany({
-      where: {
-        clientId,
-        status: 'PAID',
-        paidAt: { gte: start, lt: endExclusive },
-        // Exclude historical VENDOR_IMPORT payouts: these were already settled off-platform by the
-        // prior vendor and are recorded as display-only history — they must NEVER enter statutory
-        // TDS (194R). Provenance lives on the parent CreditBatch.sourceKind. NULL-safe: a bare
-        // `{ not: 'VENDOR_IMPORT' }` would silently DROP ordinary operator-upload entries (whose
-        // batch.sourceKind is NULL) under Prisma's three-valued logic, so OR-wrap to keep them.
-        // Tenants with no import batches (e.g. Deoleo) match every row here → behaviour unchanged.
-        batch: { OR: [{ sourceKind: null }, { sourceKind: { not: 'VENDOR_IMPORT' } }] },
-      },
-      select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
-    });
-    // Per-tenant opt-in (ProgramSetting `tdsImportedPayouts.countFrom`, default OFF → this query is
-    // never issued and the rows are byte-identical; the setting itself costs ONE ProgramSetting read
-    // per request, done by the caller): imported vendor INCENTIVE payouts (VENDOR_IMPORT batch AND
-    // fieldId historical-incentive-payout — other future import kinds are never swept in) whose
-    // paidAt is on/after the configured IST date are counted like any other paid incentive — same
-    // PAN / per-deductee no-PAN keys, same FY threshold, deposits subtract. Before that date they
-    // stay excluded. REPORT-ONLY: nothing on the payout/withholding path reads compute194R.
-    const importCountFrom = countFromDate ? istDayStartInstant(countFromDate) : null;
-    const importedEntries =
-      importCountFrom && importCountFrom < endExclusive
-        ? await this.prisma.creditPayoutEntry.findMany({
-            where: {
-              clientId,
-              status: 'PAID',
-              paidAt: { gte: importCountFrom > start ? importCountFrom : start, lt: endExclusive },
-              fieldId: IMPORTED_INCENTIVE_PAYOUT_FIELD_ID,
-              batch: { sourceKind: 'VENDOR_IMPORT' },
-            },
-            select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
-          })
-        : [];
-    const periodVisEntries = visFieldIdArr.length
-      ? await this.prisma.creditPayoutEntry.findMany({
-          where: {
-            clientId,
-            status: 'PAID',
-            period: { gte: startPeriod, lte: endPeriod },
-            fieldId: { in: visFieldIdArr },
-          },
-          select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
-        })
-      : [];
-
-    const unionById = new Map<string, (typeof paidAtEntries)[number]>();
-    for (const e of [...paidAtEntries, ...importedEntries, ...periodVisEntries]) unionById.set(e.id, e);
-
-    const section194REntries = [...unionById.values()].filter((e) => {
-      const isVis = visibilityFieldIds.has(e.fieldId);
-      // Visibility rows belong to THIS FY only if their period's FY matches (period anchor);
-      // non-visibility rows came from the paidAt window so are already in-FY.
-      const inFy = isVis ? fyLabelForPeriod(e.period) === fyLabel : true;
-      if (!inFy) return false;
-      return effectiveEntrySection(e.tdsSection, isVis) === 'SEC_194R';
-    });
-    const outletCodes = [...new Set(section194REntries.map((e) => e.outletId))];
-
-    // Resolve outletCode → partnerId → PAN
-    const outlets = outletCodes.length
-      ? await this.prisma.outlet.findMany({
-          where: { outletCode: { in: outletCodes }, clientId },
-          select: { outletCode: true, partnerId: true },
-        })
-      : [];
-    const outletToPartnerId = new Map(outlets.map((o) => [o.outletCode, o.partnerId]));
-
-    const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter(Boolean))] as string[];
-    const partners = partnerIds.length
-      ? await this.prisma.channelPartner.findMany({
-          // isParent:false — parents never own outlets so are never in partnerIds; defensive
-          // (docs/plans/PARTNER-MULTI-OUTLET.md §9).
-          where: { id: { in: partnerIds }, isParent: false },
-          select: { id: true, panNumber: true },
-        })
-      : [];
-    const partnerToPan = new Map(partners.map((p) => [p.id, p.panNumber]));
-
-    for (const entry of section194REntries) {
-      const partnerId = outletToPartnerId.get(entry.outletId) ?? null;
-      const pan = partnerId ? (partnerToPan.get(partnerId) ?? null) : null;
-      // No PAN → this partner is its OWN deductee (an owner-less outlet keys by tenant+outlet).
-      const key = addToPan(
-        pan,
-        entry.amountPaise,
-        partnerId ? noPanPartnerKey(partnerId) : noPanOutletKey(clientId, entry.outletId),
-      );
-      noteOutlet(key, entry.outletId); // entry.outletId IS the outletCode
-    }
-
-    // ── Source 2: RedemptionOrder.valuePaise for fulfilled redemptions ──
-    // Fulfilled = DELIVERED status (deliveredAt in FY); PAN via partner.
-    const redemptions = await this.prisma.redemptionOrder.findMany({
-      where: {
-        status: 'DELIVERED',
-        deliveredAt: { gte: start, lt: endExclusive },
-        partner: { clientId },
-        valuePaise: { not: null },
-      },
-      select: {
-        valuePaise: true,
-        partner: { select: { id: true, panNumber: true } },
-      },
-    });
-
-    for (const r of redemptions) {
-      if (r.valuePaise != null) {
-        addToPan(r.partner?.panNumber, r.valuePaise, r.partner?.id ? noPanPartnerKey(r.partner.id) : undefined);
-      }
-    }
-
-    // ── Source 3: TdsOffPlatformEntry (section=SEC_194R, clientId, entryDate in FY) ──
-    const offPlatform = await this.prisma.tdsOffPlatformEntry.findMany({
-      where: {
-        clientId,
-        section: 'SEC_194R',
-        entryDate: { gte: start, lt: endExclusive },
-      },
-      select: { panNumber: true, amountPaise: true, outletCode: true },
+    // ── Base: the ONE shared definition (tds-194r.shared — also used by the payout engine) ──
+    const accum = await collect194RBases(this.prisma, {
+      clientId,
+      fyLabel,
+      importedCountFrom: countFromDate,
+      noteOutlet: contributingOutlets ? noteOutlet : undefined,
     });
 
     // ── Deposited: SUM TdsDeposit (section=SEC_194R, clientId, "TDS for month" in FY) ──
+    // Q4: imported vendor TDS IS a deposit (subtracted once); rows from an import batch (any
+    // uploadBatchId that is not a portal-upload file hash) are also shown "of which imported".
     const deposits = await this.depositsForFy('SEC_194R', fyLabel, clientId);
-
-    // No-PAN off-platform entries AND deposits are attributed to their deductee via the row's
-    // Outlet Code (matched case-insensitively within the tenant; outlet → owner partner). One
-    // extra query, run ONLY when such rows exist — PAN rows are unchanged.
-    const noPanCodes = [...offPlatform, ...deposits]
-      .filter((r) => isNoPanCell(r.panNumber) && r.outletCode?.trim())
-      .map((r) => r.outletCode!.trim());
-    const outletsByCode = await this.outletsByCodeCI(noPanCodes, clientId);
+    const depCodes = deposits.filter((r) => isNoPanCell(r.panNumber) && r.outletCode?.trim()).map((r) => r.outletCode!.trim());
+    const outletsByCode = await this.outletsByCodeCI(depCodes, clientId);
     const ownerPans = await this.ownerPansOf(outletsByCode);
-    // Outlet → deductee key: the owner's PAN when one is ON FILE (the amount counts under that PAN —
-    // flagged on upload), else the owner's own no-PAN key (owner-less outlet → per-outlet key).
-    const keyForCode = (code: string | null | undefined): string | null => {
-      const c = code?.trim();
-      if (!c) return null;
-      const matches = outletsByCode.get(c.toUpperCase()) ?? [];
-      if (matches.length !== 1) return null;
-      const o = matches[0];
-      const pan = o.partnerId ? ownerPans.get(o.partnerId) : null;
-      if (pan) return pan;
-      return o.partnerId ? noPanPartnerKey(o.partnerId) : noPanOutletKey(o.clientId, o.outletCode);
-    };
-
-    for (const e of offPlatform) {
-      // No-PAN off-platform benefit → the outlet owner's PAN / own deductee key (bare bucket if unlinkable).
-      const key = addToPan(e.panNumber, e.amountPaise, isNoPanCell(e.panNumber) ? (keyForCode(e.outletCode) ?? undefined) : undefined);
-      if (contributingOutlets && e.outletCode?.trim()) {
-        // A no-PAN entry's code was resolved case-insensitively above → record the stored code;
-        // a PAN entry's code is recorded as uploaded (export194R resolves it within the tenant).
-        const m = isNoPanCell(e.panNumber) ? outletsByCode.get(e.outletCode.trim().toUpperCase()) : undefined;
-        noteOutlet(key, m && m.length === 1 ? m[0].outletCode : e.outletCode);
-      }
-    }
 
     const deposited = new Map<string, bigint>();
+    const importedDeposited = new Map<string, bigint>();
     const depositPeriods = new DepositPeriods();
     let unlinkedNoPanDepositPaise = 0n;
-    // Deductees with a deposit FOR this FY but NO base this FY (e.g. a deposit whose "TDS for month"
-    // is in this FY for a PAN paid nothing else) — a deposit naming the PAN directly, a no-PAN-marker
-    // deposit attributed to an owner PAN, or one attributed to a known no-PAN deductee. They still get
-    // ONE row (base 0, outstanding −deposit) so the deposit never drops out of the rows or the
-    // totals. A key that also has a base this FY is never added here (no duplicate).
+    // Deductees with a deposit FOR this FY but NO base this FY get ONE row (base 0, outstanding
+    // −deposit) so the deposit never drops out of the rows or the totals.
     const depositOnlyPanKeys = new Set<string>();
     for (const d of deposits) {
-      // PAN deposit → that PAN. No-PAN deposit → the owner's PAN, else its own no-PAN deductee key
-      // (resolved via the Outlet Code); unresolvable (no / unknown / ambiguous code) → "Earlier" row.
-      const key = !isNoPanCell(d.panNumber) ? d.panNumber.trim().toUpperCase() : keyForCode(d.outletCode);
+      const key = !isNoPanCell(d.panNumber) ? d.panNumber.trim().toUpperCase() : keyForOutletCode(d.outletCode, outletsByCode, ownerPans);
       if (!key) {
         unlinkedNoPanDepositPaise += d.amountPaise;
         depositPeriods.note(UNLINKED_NO_PAN_DEPOSIT_KEY, d.period);
         continue;
       }
       deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
+      if (isImportedDepositBatch(d.uploadBatchId)) {
+        importedDeposited.set(key, (importedDeposited.get(key) ?? 0n) + d.amountPaise);
+      }
       depositPeriods.note(key, d.period);
       if (!accum.has(key)) depositOnlyPanKeys.add(key);
     }
 
-    // ── Build result rows ──
-    const rows: TdsRow194R[] = [];
-    for (const [key, a] of accum) {
-      const fyTotal = a.totalPaise;
-      const thresholdMet = fyTotal > cfg.thr194rFyPaise;
-      const liabilityPaise = thresholdMet
-        ? grossUpTdsPaise(fyTotal, rate194RFrom(cfg, a.hasPan))
-        : 0n;
-      const depositedPaise = deposited.get(key) ?? 0n;
-      const outstandingPaise = liabilityPaise - depositedPaise;
-
-      rows.push({
-        panNumber: a.panNumber,
-        fyLabel,
-        baseFyTotalPaise: fyTotal,
-        liabilityPaise,
-        depositedPaise,
-        outstandingPaise,
-        ...depositPeriods.fieldFor(key),
-      });
+    // ── Deducted so far (display only — Q3: deductions never reduce the liability) ──
+    const deductions = await this.prisma.tdsDeductionEntry.findMany({
+      where: { clientId, section: 'SEC_194R', fyLabel },
+      select: { panNumber: true, tdsDeductedThisPaise: true },
+    });
+    const deducted = new Map<string, bigint>();
+    for (const d of deductions ?? []) {
+      if (isNoPanCell(d.panNumber)) continue;
+      const k = d.panNumber.trim().toUpperCase();
+      deducted.set(k, (deducted.get(k) ?? 0n) + d.tdsDeductedThisPaise);
     }
-    for (const key of depositOnlyPanKeys) {
+
+    const rowFor = (key: string, b: Bases194R): TdsRow194R => {
+      const l = liability194R(b, methodology, cfg);
       const depositedPaise = deposited.get(key) ?? 0n;
-      rows.push({
+      return {
         panNumber: key,
         fyLabel,
-        baseFyTotalPaise: 0n,
-        liabilityPaise: 0n,
+        baseFyTotalPaise: l.totalBasePaise,
+        liabilityPaise: l.liabilityPaise,
         depositedPaise,
-        outstandingPaise: -depositedPaise,
+        outstandingPaise: l.liabilityPaise - depositedPaise,
+        methodology,
+        ratePct: l.ratePct,
+        cashBasePaise: l.cashBasePaise,
+        nonCashBasePaise: l.nonCashBasePaise,
+        deductBasePaise: l.deductBasePaise,
+        clientBorneBasePaise: l.clientBorneBasePaise,
+        deductLiabilityPaise: l.deductPartPaise,
+        clientBorneLiabilityPaise: l.clientBornePartPaise,
+        deductedPaise: deducted.get(key) ?? 0n,
+        importedVendorDepositPaise: importedDeposited.get(key) ?? 0n,
         ...depositPeriods.fieldFor(key),
-      });
-    }
+      };
+    };
+
+    // ── Build result rows ──
+    const rows: TdsRow194R[] = [];
+    for (const [key, b] of accum) rows.push(rowFor(key, b));
+    for (const key of depositOnlyPanKeys) rows.push(rowFor(key, emptyBases194R(!isNoPanKey(key))));
     if (unlinkedNoPanDepositPaise > 0n) {
       rows.push({
-        panNumber: UNLINKED_NO_PAN_DEPOSIT_KEY,
-        fyLabel,
-        baseFyTotalPaise: 0n,
-        liabilityPaise: 0n,
+        ...rowFor(UNLINKED_NO_PAN_DEPOSIT_KEY, emptyBases194R(false)),
         depositedPaise: unlinkedNoPanDepositPaise,
         outstandingPaise: -unlinkedNoPanDepositPaise,
         unlinkedNoPanDeposit: true as const,
@@ -739,7 +582,7 @@ export class TdsService {
     fyLabel: string,
     clientId?: string,
   ): Promise<
-    Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null }>
+    Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null; uploadBatchId: string | null }>
   > {
     const { startPeriod, endPeriod } = periodWindowForFy(fyLabel);
     const { start, endExclusive } = fyFromLabel(fyLabel);
@@ -753,9 +596,9 @@ export class TdsService {
           { forPeriod: null, depositDate: { gte: start, lt: fallbackEnd } },
         ],
       },
-      select: { panNumber: true, amountPaise: true, outletCode: true, clientId: true, forPeriod: true, depositDate: true },
+      select: { panNumber: true, amountPaise: true, outletCode: true, clientId: true, forPeriod: true, depositDate: true, uploadBatchId: true },
     });
-    const out: Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null }> = [];
+    const out: Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null; uploadBatchId: string | null }> = [];
     for (const d of found) {
       const period = depositPeriodOf(d);
       // period null only when neither column is present (not possible for a stored row) → trust the query.
@@ -766,6 +609,7 @@ export class TdsService {
         outletCode: d.outletCode ?? null,
         clientId: d.clientId ?? null,
         period,
+        uploadBatchId: d.uploadBatchId ?? null,
       });
     }
     return out;
@@ -775,20 +619,11 @@ export class TdsService {
    * owner partnerId → its PAN, for owners of the given outlets that have a REAL PAN on file
    * (blank / `__NO_PAN__` excluded). No query when there are no owners.
    */
+  /** owner partnerId → its REAL PAN, for owners of the given outlets (shared helper). */
   private async ownerPansOf(
     outletsByCode: Map<string, Array<{ partnerId: string | null }>>,
   ): Promise<Map<string, string>> {
-    const ids = [...new Set([...outletsByCode.values()].flat().map((o) => o.partnerId).filter((x): x is string => !!x))];
-    const out = new Map<string, string>();
-    if (!ids.length) return out;
-    const owners = await this.prisma.channelPartner.findMany({
-      where: { id: { in: ids } },
-      select: { id: true, panNumber: true },
-    });
-    for (const o of owners) {
-      if (!isNoPanCell(o.panNumber)) out.set(o.id, o.panNumber!.trim().toUpperCase());
-    }
-    return out;
+    return sharedOwnerPansOf(this.prisma, outletsByCode);
   }
 
   /** Summary for 194R: totals across all PAN rows. */
@@ -1294,26 +1129,7 @@ export class TdsService {
     codes: string[],
     clientId: string | null,
   ): Promise<Map<string, Array<{ outletCode: string; clientId: string; partnerId: string | null }>>> {
-    const out = new Map<string, Array<{ outletCode: string; clientId: string; partnerId: string | null }>>();
-    const uniq = [...new Set(codes.map((c) => c.trim()).filter(Boolean).map((c) => c.toUpperCase()))];
-    if (!uniq.length) return out;
-    const found = await this.prisma.outlet.findMany({
-      where: {
-        ...(clientId ? { clientId } : {}),
-        OR: uniq.map((c) => ({ outletCode: { equals: c, mode: 'insensitive' as const } })),
-      },
-      select: { outletCode: true, clientId: true, partnerId: true },
-    });
-    for (const o of found) {
-      const k = o.outletCode.toUpperCase();
-      if (!uniq.includes(k)) continue;
-      const list = out.get(k) ?? [];
-      if (!list.some((x) => x.clientId === o.clientId && x.outletCode === o.outletCode)) {
-        list.push({ outletCode: o.outletCode, clientId: o.clientId, partnerId: o.partnerId ?? null });
-      }
-      out.set(k, list);
-    }
-    return out;
+    return sharedOutletsByCodeCI(this.prisma, codes, clientId);
   }
 
   /** Summary for 194C: totals across all PAN rows. */
@@ -1826,8 +1642,10 @@ export class TdsService {
    *   Type = the outlet type's name (blank when unknown). Nothing numeric is affected.
    *
    * Columns: S.No · Deductee Name · PAN · Outlet Code · Outlet Name · Outlet Type · Section
-   *          · Amount Paid (₹) · TDS Rate % · TDS Amount (₹) · Already Deposited (₹)
-   *          · Deposits — TDS for Month(s) · Outstanding (₹) · FY
+   *          · Amount Paid (₹) · Cash / Non-cash Benefits (₹) · Method · TDS Rate % · Base Deducted
+   *          from Retailer / Borne by Client (₹) · TDS — Deducted / Client-borne Part (₹)
+   *          · TDS Amount (₹) · Deducted from Payouts So Far (₹) · Already Deposited (₹)
+   *          · of which Imported Vendor TDS (₹) · Deposits — TDS for Month(s) · Outstanding (₹) · FY
    *
    * A second "Summary" sheet provides totals.
    *
@@ -1871,7 +1689,6 @@ export class TdsService {
     const outletCols = await this.outletColumns194R(clientId, rows, contributing, partners);
     const detailRows = rows.map((r, i) => {
       const hasPan = !isNoPanKey(r.panNumber);
-      const tdsRatePct = hasPan ? 10 : 20;
       const deducteeName = hasPan ? (panToName.get(r.panNumber) ?? '') : noPanDeducteeName(r.noPanDeductee, r.unlinkedNoPanDeposit);
       const outlets = outletCols.get(r.panNumber) ?? [];
 
@@ -1884,9 +1701,19 @@ export class TdsService {
         'Outlet Type': cellSafe(alignedCell(outlets.map((o) => o.type))),
         Section: '194R',
         'Amount Paid (₹)': moneyCell(r.baseFyTotalPaise),
-        'TDS Rate %': tdsRatePct,
+        // D10: the base split + how the year's TDS was worked out.
+        'Cash Benefits (₹)': moneyCell(r.cashBasePaise),
+        'Non-cash Benefits (₹)': moneyCell(r.nonCashBasePaise),
+        Method: r.methodology === 'DEDUCT' ? 'Deduct' : 'Gross-up',
+        'TDS Rate %': r.ratePct,
+        'Base Deducted from Retailer (₹)': moneyCell(r.deductBasePaise),
+        'Base Borne by Client (₹)': moneyCell(r.clientBorneBasePaise),
+        'TDS — Deducted Part (₹)': moneyCell(r.deductLiabilityPaise),
+        'TDS — Client-borne Part (₹)': moneyCell(r.clientBorneLiabilityPaise),
         'TDS Amount (₹)': moneyCell(r.liabilityPaise),
+        'Deducted from Payouts So Far (₹)': moneyCell(r.deductedPaise),
         'Already Deposited (₹)': moneyCell(r.depositedPaise),
+        'of which Imported Vendor TDS (₹)': moneyCell(r.importedVendorDepositPaise),
         'Deposits — TDS for Month(s)': depositMonthsCell(r.depositForPeriods),
         'Outstanding (₹)': moneyCell(r.outstandingPaise),
         FY: fyLabel,

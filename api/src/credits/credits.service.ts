@@ -13,7 +13,8 @@ import {
   computeGrossUpTdsInvoiceBasePaise,
   allocateProRataRecovery,
 } from '../tds/tds-methodology.helper';
-import { grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, type ResolvedTdsStatutory } from '../tds/tds.helpers';
+import { financialYear, grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, type ResolvedTdsStatutory } from '../tds/tds.helpers';
+import { collect194RBases, emptyBases194R, importedPayoutsCountFromOrThrow, liability194R } from '../tds/tds-194r.shared';
 import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -224,6 +225,164 @@ export class CreditsService {
   }
 
   /**
+   * Split ONE (PAN, section) group's withholding exactly across its entries and append the per-entry
+   * DEDUCT ledger rows (FIX-C). Shared by the 194C DEDUCT branch and the 194R whole-year block.
+   */
+  private pushDeduction(
+    plan: PayoutTdsPlan,
+    a: {
+      clientId: string;
+      panNumber: string;
+      section: TdsSection;
+      fyLabel: string;
+      entries: Array<{ id: string; outletId: string; amountPaise: bigint }>;
+      eventBasePaise: bigint;
+      cumulativeBasePaise: bigint;
+      rateNum: number;
+      tdsDueCumulativePaise: bigint;
+      priorDeductedPaise: bigint;
+      tdsDeductThisPaise: bigint;
+      carryForwardPaise: bigint;
+    },
+  ): void {
+    // Exact-summing split of the withheld amount across this event's entries.
+    const split =
+      a.tdsDeductThisPaise > 0n
+        ? allocateProRataRecovery({
+            panTdsTotalPaise: a.tdsDeductThisPaise,
+            tenants: a.entries.map((e) => ({ clientId: e.id, basePaise: e.amountPaise })),
+          })
+        : [];
+    const shareByEntry = new Map<string, bigint>(split.map((s): [string, bigint] => [s.clientId, s.tenantSharePaise]));
+    for (const e of a.entries) {
+      const share = shareByEntry.get(e.id) ?? 0n;
+      if (share <= 0n) continue;
+      plan.entryDeductions.push({ entryId: e.id, tdsDeductedPaise: share });
+      plan.deductionByOutlet.set(e.outletId, (plan.deductionByOutlet.get(e.outletId) ?? 0n) + share);
+    }
+    const base = {
+      clientId: a.clientId,
+      panNumber: a.panNumber,
+      section: a.section,
+      fyLabel: a.fyLabel,
+      cumulativeBasePaise: a.cumulativeBasePaise,
+      tdsRate: a.rateNum,
+      tdsDueCumulativePaise: a.tdsDueCumulativePaise,
+      tdsDeductedPriorPaise: a.priorDeductedPaise,
+    };
+    // FIX-C: PER-ENTRY DEDUCT ledger rows (creditPayoutEntryId + the entry's own outletCode).
+    const withheldEntries = a.entries.filter((e) => (shareByEntry.get(e.id) ?? 0n) > 0n);
+    if (withheldEntries.length === 0) {
+      if (a.tdsDueCumulativePaise > 0n || a.carryForwardPaise > 0n) {
+        // Threshold met but nothing fit in this event's payouts (all carried forward): record a
+        // representative row so the cumulative + carry-forward state persists across events.
+        plan.deductionLedger.push({
+          ...base,
+          creditPayoutEntryId: a.entries[0].id,
+          outletCode: a.entries[0].outletId,
+          eventBasePaise: a.eventBasePaise,
+          tdsDeductedThisPaise: 0n,
+          carryForwardPaise: a.carryForwardPaise,
+        });
+      }
+      return;
+    }
+    withheldEntries.forEach((e, i) => {
+      plan.deductionLedger.push({
+        ...base,
+        creditPayoutEntryId: e.id,
+        outletCode: e.outletId,
+        eventBasePaise: e.amountPaise,
+        tdsDeductedThisPaise: shareByEntry.get(e.id) ?? 0n,
+        // carryForward on the LAST row only → Σ carryForward across the group == group residual.
+        carryForwardPaise: i === withheldEntries.length - 1 ? a.carryForwardPaise : 0n,
+      });
+    });
+  }
+
+  /**
+   * 194R WHOLE-YEAR TRUE-UP withholding (owner 2026-11-18) for this run's 194R visibility payouts of
+   * PAN holders, on a client whose CURRENT method is DEDUCT. Uses the SHARED definition
+   * (`collect194RBases` + `liability194R`) the 194R report uses, so the TDS due here == the report's
+   * deducted part for the same data:
+   *   due      = (whole-FY visibility base incl. this run) × rate%   — once ALL 194R benefits > ₹20k
+   *   withhold = due − already deducted for this (client, PAN, FY) (net of reversals),
+   *              capped at this run's payout; the rest carries forward (computeDeduction).
+   * FY = the run date's FY (D3: dated by when actually paid). Per client, never across clients.
+   */
+  private async plan194RDeductions(
+    db: Prisma.TransactionClient,
+    plan: PayoutTdsPlan,
+    a: {
+      clientId: string;
+      runAt: Date;
+      importedCountFrom: string | null;
+      byPan: Map<string, Array<{ id: string; outletId: string; amountPaise: bigint }>>;
+    },
+  ): Promise<void> {
+    const { clientId } = a;
+    const fyLabel = financialYear(a.runAt).fyLabel;
+    const cfg = await this.statutory.getForFy(fyLabel);
+    const pans = [...a.byPan.keys()];
+    // Scope the shared read to THIS client's (non-parent) partners holding these PANs + their outlets.
+    const scopePartners = await db.channelPartner.findMany({
+      where: { clientId, isParent: false, OR: pans.map((p) => ({ panNumber: { equals: p, mode: 'insensitive' as const } })) },
+      select: { id: true },
+    });
+    const partnerIds = scopePartners.map((p) => p.id);
+    const scopeOutlets = partnerIds.length
+      ? await db.outlet.findMany({ where: { clientId, partnerId: { in: partnerIds } }, select: { outletCode: true } })
+      : [];
+    const bases = await collect194RBases(db, {
+      clientId,
+      fyLabel,
+      importedCountFrom: a.importedCountFrom,
+      scope: { outletCodes: [...new Set(scopeOutlets.map((o) => o.outletCode))], partnerIds, pans },
+    });
+    // Already deducted for this (client, PAN, FY) — net of FAILED/reversal negative rows.
+    const ledgerRows = await db.tdsDeductionEntry.findMany({
+      where: { clientId, section: TdsSection.SEC_194R, fyLabel, panNumber: { in: pans } },
+      select: { clientId: true, panNumber: true, tdsDeductedThisPaise: true },
+    });
+    const priorByPan = new Map<string, bigint>();
+    for (const lr of ledgerRows) {
+      if (lr.clientId && lr.clientId !== clientId) continue; // per client (defensive; the query scopes it)
+      const k = lr.panNumber.trim().toUpperCase();
+      priorByPan.set(k, (priorByPan.get(k) ?? 0n) + lr.tdsDeductedThisPaise);
+    }
+    const rate = rate194RFrom(cfg, true);
+    for (const [pan, entries] of a.byPan) {
+      const runBase = entries.reduce((s, e) => s + e.amountPaise, 0n);
+      const b = { ...(bases.get(pan) ?? emptyBases194R(true)), hasPan: true };
+      b.visPaise += runBase; // this run is paid now → counts in the run date's FY
+      const l = liability194R(b, TdsMethodology.DEDUCT, cfg);
+      const priorDeducted = priorByPan.get(pan) ?? 0n;
+      const { tdsDueCumulativePaise, tdsDeductThisPaise, carryForwardPaise } = computeDeduction({
+        cumulativeBasePaise: b.visPaise,
+        priorDeductedPaise: priorDeducted,
+        thisPayoutPaise: runBase,
+        rate,
+        thresholdMetOnCumulative: l.thresholdMet,
+      });
+      // computeDeduction's due == liability194R's deducted part (same formula, same base).
+      this.pushDeduction(plan, {
+        clientId,
+        panNumber: pan,
+        section: TdsSection.SEC_194R,
+        fyLabel,
+        entries,
+        eventBasePaise: runBase,
+        cumulativeBasePaise: b.visPaise,
+        rateNum: rate.num,
+        tdsDueCumulativePaise,
+        priorDeductedPaise: priorDeducted,
+        tdsDeductThisPaise,
+        carryForwardPaise,
+      });
+    }
+  }
+
+  /**
    * Build the DEDUCT/GROSS-UP write plan for a visibility payout download (reads only; the
    * writes happen inside the caller's download $transaction). PAN aggregation is combined
    * across ALL 194C tenants (TGSL = single deductor, D7) and across the FY. 194R is PER CLIENT
@@ -265,6 +424,12 @@ export class CreditsService {
         tdsMethodology: TdsMethodology;
       }>;
       outletTaxMap: Map<string, PartnerTaxInfo>;
+      /** D3: the run date — 194R benefits are dated by when they are actually paid (this run = now). */
+      runAt: Date;
+      /** D6: the client's CURRENT methodology (applies to 194R visibility; 194C keeps the frozen one). */
+      currentMethodology: TdsMethodology;
+      /** D9: the client's imported-payouts countFrom (read once by the caller), or null. */
+      importedCountFrom: string | null;
     },
   ): Promise<PayoutTdsPlan> {
     const { clientId, period, engineEntries, outletTaxMap } = params;
@@ -299,14 +464,24 @@ export class CreditsService {
     type NoPanGrp = { outletCode: string; section: TdsSection; entries: typeof engineEntries };
     const noPanGroups = new Map<string, NoPanGrp>();
     const noPanOutletCodes = new Set<string>();
+    // 194R entries of PAN holders, by PAN (this client only — one download = one tenant).
+    const r194ByPan = new Map<string, typeof engineEntries>();
     for (const e of engineEntries) {
       const info = outletTaxMap.get(e.outletId);
       const pan = info?.panNumber?.trim().toUpperCase();
+      if (e.tdsSection === TdsSection.SEC_194R) {
+        // 194R (owner 2026-11-18): handled by the whole-year block below on the SHARED definition.
+        // A no-PAN 194R payout is never withheld (paid full) and writes nothing (D7) — the 194R
+        // report carries its client-borne liability.
+        if (pan) {
+          const rg = r194ByPan.get(pan) ?? [];
+          rg.push(e);
+          r194ByPan.set(pan, rg);
+        }
+        continue;
+      }
       if (!pan) {
-        // no-PAN → paid full (no deduction), but accrues a tenant recovery obligation (FIX-9) —
-        // 194C ONLY. D7 (owner 2026-11-18): 194R writes NO TdsRecoveryEntry; a no-PAN 194R payout is
-        // paid full and its liability is carried by the 194R report (per-client, no-PAN deductee).
-        if (e.tdsSection === TdsSection.SEC_194R) continue;
+        // no-PAN → paid full (no deduction), but accrues a tenant recovery obligation (FIX-9, 194C).
         const nk = `${e.outletId}${SEP}${e.tdsSection}`;
         let ng = noPanGroups.get(nk);
         if (!ng) {
@@ -327,18 +502,23 @@ export class CreditsService {
       }
       g.entries.push(e);
     }
+    // ── 194R: WHOLE-YEAR TRUE-UP on the SHARED definition (owner 2026-11-18, D2/D3/D6/D9, Q1/Q3) ──
+    // Only a PAN holder's visibility payouts on the client's CURRENT DEDUCT method are ever withheld;
+    // under GROSS_UP nothing is withheld and nothing is written (D7). The threshold is tested on ALL
+    // the client's 194R benefits to this retailer this FY (incentives, redemptions, off-platform,
+    // counted imported payouts, visibility), dated by when actually paid (this run = runAt).
+    if (r194ByPan.size > 0 && params.currentMethodology === TdsMethodology.DEDUCT) {
+      await this.plan194RDeductions(db, plan, {
+        clientId,
+        runAt: params.runAt,
+        importedCountFrom: params.importedCountFrom,
+        byPan: r194ByPan,
+      });
+    }
+
     if (groups.size === 0 && noPanGroups.size === 0) return plan;
 
-    // ── SECTION SCOPE (owner 2026-11-18) ───────────────────────────────────────
-    // 194C is aggregated ACROSS ALL TENANTS by PAN (TGSL = single deductor, D7). 194R is PER CLIENT:
-    // a PAN's 194R payouts under tenant A and tenant B are NEVER aggregated (matches the per-clientId
-    // 194R report in tds.service.ts). Every cross-tenant read below (prior base, max single, DEDUCT
-    // ledger, recovery ledger, prior TDS invoices) therefore drops ANOTHER tenant's 194R rows. Every
-    // group in this plan belongs to `clientId` (one download = one tenant), so keys stay (PAN, section).
-    const inSectionScope = (section: TdsSection | null | undefined, rowClientId: string | null | undefined): boolean =>
-      section !== TdsSection.SEC_194R || rowClientId === clientId;
-
-    // ── Prior FY aggregation per (PAN, section): cross-tenant for 194C, this tenant for 194R ──
+    // ── Prior FY aggregation per (PAN, section) — 194C only from here on: cross-tenant (D7) ──
     const priorBaseByPS = new Map<string, bigint>();
     const priorMaxSingleByPS = new Map<string, bigint>();
     // FIX-D: prior committed base partitioned by (PAN, section, methodology) — the AMOUNT basis
@@ -395,7 +575,6 @@ export class CreditsService {
       for (const pe of priorEntries) {
         const pan = outletKeyToPan.get(`${pe.clientId}${SEP}${pe.outletId}`);
         if (!pan || !pe.tdsSection) continue; // outletCode belongs to a different tenant's outlet
-        if (!inSectionScope(pe.tdsSection, pe.clientId)) continue; // another tenant's 194R base
         const ps = `${pan}${SEP}${pe.tdsSection}`;
         priorBaseByPS.set(ps, (priorBaseByPS.get(ps) ?? 0n) + pe.amountPaise);
         if (pe.amountPaise > (priorMaxSingleByPS.get(ps) ?? 0n)) priorMaxSingleByPS.set(ps, pe.amountPaise);
@@ -414,7 +593,7 @@ export class CreditsService {
       }
     }
 
-    // Running DEDUCT carry-forward (PAN/section/FY ledger — cross-tenant for 194C, this tenant for 194R).
+    // Running DEDUCT carry-forward (PAN/section/FY ledger — cross-tenant, 194C).
     const priorDeductedByPS = new Map<string, bigint>();
     if (panSet.size) {
       const ledgerRows = await db.tdsDeductionEntry.findMany({
@@ -422,7 +601,6 @@ export class CreditsService {
         select: { clientId: true, panNumber: true, section: true, tdsDeductedThisPaise: true },
       });
       for (const lr of ledgerRows) {
-        if (!inSectionScope(lr.section, lr.clientId)) continue; // another tenant's 194R withholding
         const ps = `${lr.panNumber}${SEP}${lr.section}`;
         priorDeductedByPS.set(ps, (priorDeductedByPS.get(ps) ?? 0n) + lr.tdsDeductedThisPaise);
       }
@@ -441,8 +619,6 @@ export class CreditsService {
         select: { panNumber: true, section: true, clientId: true, tenantSharePaise: true },
       });
       for (const r of recRows) {
-        // 194R: only THIS tenant's recovery telescopes its top-ups (no cross-tenant pro-rata).
-        if (!inSectionScope(r.section, r.clientId)) continue;
         const ps = `${r.panNumber}${SEP}${r.section}`;
         recoveredByPS.set(ps, (recoveredByPS.get(ps) ?? 0n) + r.tenantSharePaise);
         let tmap = recoveredByPSByTenant.get(ps);
@@ -493,66 +669,20 @@ export class CreditsService {
           rate,
           thresholdMetOnCumulative: thresholdMet, // FIX-D: combined per-PAN threshold
         });
-        // Exact-summing split of the withheld amount across this event's entries.
-        const split =
-          tdsDeductThisPaise > 0n
-            ? allocateProRataRecovery({
-                panTdsTotalPaise: tdsDeductThisPaise,
-                tenants: g.entries.map((e) => ({ clientId: e.id, basePaise: e.amountPaise })),
-              })
-            : [];
-        const shareByEntry = new Map<string, bigint>(
-          split.map((s): [string, bigint] => [s.clientId, s.tenantSharePaise]),
-        );
-        for (const e of g.entries) {
-          const share = shareByEntry.get(e.id) ?? 0n;
-          if (share <= 0n) continue;
-          plan.entryDeductions.push({ entryId: e.id, tdsDeductedPaise: share });
-          plan.deductionByOutlet.set(e.outletId, (plan.deductionByOutlet.get(e.outletId) ?? 0n) + share);
-        }
-        // FIX-C: PER-ENTRY DEDUCT ledger rows (creditPayoutEntryId + the entry's own outletCode).
-        const withheldEntries = g.entries.filter((e) => (shareByEntry.get(e.id) ?? 0n) > 0n);
-        if (withheldEntries.length === 0) {
-          if (tdsDueCumulativePaise > 0n || carryForwardPaise > 0n) {
-            // Threshold met but nothing fit in this event's payouts (all carried forward): record a
-            // representative row so the cumulative + carry-forward state persists across events.
-            plan.deductionLedger.push({
-              clientId,
-              panNumber: g.panNumber,
-              section: g.section,
-              fyLabel,
-              creditPayoutEntryId: g.entries[0].id,
-              outletCode: g.entries[0].outletId,
-              eventBasePaise: thisEventBase,
-              cumulativeBasePaise: methodologyCumulativeBase,
-              tdsRate: rate.num,
-              tdsDueCumulativePaise,
-              tdsDeductedPriorPaise: priorDeducted,
-              tdsDeductedThisPaise: 0n,
-              carryForwardPaise,
-            });
-          }
-        } else {
-          withheldEntries.forEach((e, i) => {
-            const isLast = i === withheldEntries.length - 1;
-            plan.deductionLedger.push({
-              clientId,
-              panNumber: g.panNumber,
-              section: g.section,
-              fyLabel,
-              creditPayoutEntryId: e.id,
-              outletCode: e.outletId,
-              eventBasePaise: e.amountPaise,
-              cumulativeBasePaise: methodologyCumulativeBase,
-              tdsRate: rate.num,
-              tdsDueCumulativePaise,
-              tdsDeductedPriorPaise: priorDeducted,
-              tdsDeductedThisPaise: shareByEntry.get(e.id) ?? 0n,
-              // carryForward on the LAST row only → Σ carryForward across the group == group residual.
-              carryForwardPaise: isLast ? carryForwardPaise : 0n,
-            });
-          });
-        }
+        this.pushDeduction(plan, {
+          clientId,
+          panNumber: g.panNumber,
+          section: g.section,
+          fyLabel,
+          entries: g.entries,
+          eventBasePaise: thisEventBase,
+          cumulativeBasePaise: methodologyCumulativeBase,
+          rateNum: rate.num,
+          tdsDueCumulativePaise,
+          priorDeductedPaise: priorDeducted,
+          tdsDeductThisPaise,
+          carryForwardPaise,
+        });
       } else {
         // GROSS_UP — retailer paid full. FIX-1: at EACH crossing period, raise a monthly TOP-UP
         // TDS invoice for the DELTA = grossUp(cumulative) − Σ already-invoiced (recovery ledger),
@@ -560,7 +690,6 @@ export class CreditsService {
         // D7 (owner 2026-11-18): TDS INVOICING IS 194C-ONLY (Gifsy deposits the TDS and recovers it
         // from the client). A 194R GROSS_UP payout raises NO TDS invoice and NO TdsRecoveryEntry — the
         // retailer is paid in full and the client's liability is shown by the 194R report.
-        if (g.section === TdsSection.SEC_194R) continue;
         if (!thresholdMet) continue;
 
         // Idempotency per (PAN, FY, period): a top-up already raised for THIS period must not
@@ -1515,10 +1644,11 @@ export class CreditsService {
     const ledger = await tx.tdsDeductionEntry.findMany({
       where: { creditPayoutEntryId: e.id },
       orderBy: { createdAt: 'desc' },
-      select: { panNumber: true, tdsDeductedThisPaise: true },
+      select: { panNumber: true, tdsDeductedThisPaise: true, fyLabel: true },
     });
     const net = ledger.reduce((s, r) => s + r.tdsDeductedThisPaise, 0n);
-    const pan = ledger.find((r) => r.tdsDeductedThisPaise > 0n && r.panNumber)?.panNumber ?? null;
+    const orig = ledger.find((r) => r.tdsDeductedThisPaise > 0n && r.panNumber);
+    const pan = orig?.panNumber ?? null;
     const amount = net < e.tdsDeductedPaise ? net : e.tdsDeductedPaise;
     if (amount <= 0n || !pan) return 0n;
     await tx.tdsDeductionEntry.createMany({
@@ -1527,7 +1657,9 @@ export class CreditsService {
           clientId,
           panNumber: pan,
           section: e.tdsSection,
-          fyLabel: this.fyForPeriod(e.period).fyLabel,
+          // Offset in the SAME FY the withholding was booked in (194R = the run date's FY, D3;
+          // 194C = the period FY). Falls back to the period FY only for a row without one.
+          fyLabel: orig?.fyLabel ?? this.fyForPeriod(e.period).fyLabel,
           creditPayoutEntryId: e.id,
           outletCode: e.outletId,
           eventBasePaise: 0n,
@@ -2116,6 +2248,10 @@ export class CreditsService {
     // deterministic sorted order (deadlock-safe). Empty for STANDARD / non-visibility downloads
     // → the engine + locks are a no-op there.
     const { fyLabel: engineFyLabel } = this.fyForPeriod(period);
+    // D3 (owner 2026-11-18): 194R benefits are dated by when ACTUALLY paid — this run pays now, so a
+    // 194R payout counts in the run date's FY (194C keeps its period-based FY, unchanged).
+    const runAt = new Date();
+    const runFyLabel = financialYear(runAt).fyLabel;
     const lockKeys = new Set<string>();
     for (const e of engineEntries) {
       const pan = outletTaxMap.get(e.outletId)?.panNumber?.trim().toUpperCase();
@@ -2124,7 +2260,17 @@ export class CreditsService {
           ? `PAN|${pan}|${engineFyLabel}`
           : `NOPAN|${user.clientId}|${e.outletId}|${engineFyLabel}`,
       );
+      // 194R's whole-year read/write is per (client, PAN, run FY) — serialize on that too.
+      if (pan && e.tdsSection === TdsSection.SEC_194R) lockKeys.add(`PAN194R|${user.clientId}|${pan}|${runFyLabel}`);
     }
+    // D6/D9: only a download carrying 194R PAN entries needs the client's CURRENT method + the
+    // imported-payouts countFrom (both fail CLOSED on a malformed stored value, before any write).
+    // 194C-only downloads (e.g. Deoleo) issue neither read.
+    const has194R = engineEntries.some((e) => e.tdsSection === TdsSection.SEC_194R);
+    const currentMethodology = has194R
+      ? (await this.tenantSettings.resolveTdsPolicy(user.clientId)).methodology
+      : TdsMethodology.GROSS_UP;
+    const importedCountFrom = has194R ? await importedPayoutsCountFromOrThrow(this.prisma, user.clientId) : null;
     // Also serialize per-(tenant, period) downloadCode generation (STANDARD downloads have no
     // engine entries, so this is the only advisory lock they take).
     lockKeys.add(`PDLOCK|${user.clientId}|${period}`);
@@ -2149,6 +2295,9 @@ export class CreditsService {
           period,
           engineEntries,
           outletTaxMap,
+          runAt,
+          currentMethodology,
+          importedCountFrom,
         });
 
         // Net (post-DEDUCT) paise an outlet is actually paid + the file total — computed here so
@@ -2731,12 +2880,14 @@ export class CreditsService {
           // Newest first so the MOST RECENT withholding's PAN wins (a re-banked entry may have an
           // older deduction under a since-changed PAN; the current withholding is what we reverse).
           orderBy: { createdAt: 'desc' },
-          select: { creditPayoutEntryId: true, panNumber: true },
+          select: { creditPayoutEntryId: true, panNumber: true, fyLabel: true },
         });
         const entryToPan = new Map<string, string>();
+        const entryToFy = new Map<string, string>();
         for (const d of origDeductions) {
           if (d.creditPayoutEntryId && d.panNumber && !entryToPan.has(d.creditPayoutEntryId)) {
             entryToPan.set(d.creditPayoutEntryId, d.panNumber);
+            if (d.fyLabel) entryToFy.set(d.creditPayoutEntryId, d.fyLabel);
           }
         }
         const reversalRows = failedWithholding
@@ -2746,7 +2897,8 @@ export class CreditsService {
             clientId: user.clientId,
             panNumber: pan,
             section: f.tdsSection,
-            fyLabel: this.fyForPeriod(f.period).fyLabel,
+            // Reverse in the FY the withholding was booked in (194R = run-date FY, D3).
+            fyLabel: entryToFy.get(f.entryId) ?? this.fyForPeriod(f.period).fyLabel,
             // FIX-C: link the reversal to the originating entry (mirrors the original deduction row).
             creditPayoutEntryId: f.entryId,
             outletCode: f.outletId,

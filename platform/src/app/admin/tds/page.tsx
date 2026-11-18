@@ -55,6 +55,15 @@ interface Tds194RRow {
   outstandingPaise: number | string;
   /** "TDS for month" (YYYY-MM) of the deposits counted on this row. */
   depositForPeriods?: string[];
+  // ── D10 (owner 2026-11-18): how the year's TDS was worked out ──
+  methodology?: 'DEDUCT' | 'GROSS_UP';
+  ratePct?: number;
+  cashBasePaise?: number | string;
+  nonCashBasePaise?: number | string;
+  deductLiabilityPaise?: number | string;
+  clientBorneLiabilityPaise?: number | string;
+  deductedPaise?: number | string;
+  importedVendorDepositPaise?: number | string;
 }
 
 interface Tds194RResponse {
@@ -728,7 +737,11 @@ export default function AdminTdsPage() {
                         <tr className="bg-gray-50 border-b border-gray-100">
                           <th className="text-left px-4 py-3 text-xs font-semibold text-gray-600">Deductee PAN</th>
                           <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600">Amount Paid</th>
+                          <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600" title="Cash = visibility + incentive payouts + UPI/bank redemptions; non-cash = gifts, vouchers, off-platform">Cash / Non-cash</th>
+                          <th className="text-left px-4 py-3 text-xs font-semibold text-gray-600">Method · Rate</th>
+                          <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600" title="Deducted part = TDS withheld from the retailer's visibility payouts; client-borne = gross-up the client pays">Deducted part / Client-borne</th>
                           <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600">TDS Liability</th>
+                          <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600" title="TDS already withheld from payouts — shown for reference, not subtracted from the liability">Deducted so far</th>
                           <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600">Deposited</th>
                           <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600">Outstanding</th>
                         </tr>
@@ -738,8 +751,25 @@ export default function AdminTdsPage() {
                           <tr key={i} className="hover:bg-gray-50 transition-colors">
                             <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.baseFyTotalPaise))}</td>
+                            <td className="px-4 py-3 text-right text-xs text-gray-600" data-testid="r194-cash-noncash">
+                              {formatINR(p(row.cashBasePaise ?? 0))} / {formatINR(p(row.nonCashBasePaise ?? 0))}
+                            </td>
+                            <td className="px-4 py-3 text-xs text-gray-600" data-testid="r194-method">
+                              {row.methodology === 'DEDUCT' ? 'Deduct' : 'Gross-up'}{row.ratePct != null ? ` · ${row.ratePct}%` : ''}
+                            </td>
+                            <td className="px-4 py-3 text-right text-xs text-gray-600" data-testid="r194-parts">
+                              {formatINR(p(row.deductLiabilityPaise ?? 0))} / {formatINR(p(row.clientBorneLiabilityPaise ?? 0))}
+                            </td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>
-                            <td className="px-4 py-3 text-right text-gray-700"><DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} /></td>
+                            <td className="px-4 py-3 text-right text-gray-700" data-testid="r194-deducted">{formatINR(p(row.deductedPaise ?? 0))}</td>
+                            <td className="px-4 py-3 text-right text-gray-700">
+                              <DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} />
+                              {p(row.importedVendorDepositPaise ?? 0) > 0 && (
+                                <div className="text-[11px] text-gray-500" data-testid="r194-imported">
+                                  of which imported vendor TDS {formatINR(p(row.importedVendorDepositPaise ?? 0))}
+                                </div>
+                              )}
+                            </td>
                             <td className="px-4 py-3 text-right">
                               <OutstandingCell paise={row.outstandingPaise} />
                             </td>

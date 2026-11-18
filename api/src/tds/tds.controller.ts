@@ -299,6 +299,17 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
     liabilityPaise: r.liabilityPaise.toString(),
     depositedPaise: r.depositedPaise.toString(),
     outstandingPaise: r.outstandingPaise.toString(),
+    // D10 (owner 2026-11-18): base split + how the year's TDS was worked out.
+    methodology: r.methodology,
+    ratePct: r.ratePct,
+    cashBasePaise: r.cashBasePaise.toString(),
+    nonCashBasePaise: r.nonCashBasePaise.toString(),
+    deductBasePaise: r.deductBasePaise.toString(),
+    clientBorneBasePaise: r.clientBorneBasePaise.toString(),
+    deductLiabilityPaise: r.deductLiabilityPaise.toString(),
+    clientBorneLiabilityPaise: r.clientBorneLiabilityPaise.toString(),
+    deductedPaise: r.deductedPaise.toString(),
+    importedVendorDepositPaise: r.importedVendorDepositPaise.toString(),
     // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
     ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
   };

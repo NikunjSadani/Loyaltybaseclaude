@@ -20,6 +20,10 @@ import {
   importedCountFromForFy,
   importedCountFromBounds,
 } from './tds.helpers';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+const mockTdsTenantSettings = {
+  resolveTdsPolicy: jest.fn().mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' }),
+};
 
 const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
 
@@ -77,6 +81,8 @@ describe('TdsService — imported (VENDOR_IMPORT) payouts in 194R', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -115,7 +121,7 @@ describe('TdsService — imported (VENDOR_IMPORT) payouts in 194R', () => {
 
       const legacyPrisma = { ...mockPrisma } as Record<string, unknown>;
       delete legacyPrisma.programSetting;
-      const legacy = new TdsService(legacyPrisma as unknown as PrismaService, mockStatutory as unknown as TdsStatutoryConfigService);
+      const legacy = new TdsService(legacyPrisma as unknown as PrismaService, mockStatutory as unknown as TdsStatutoryConfigService, mockTdsTenantSettings as unknown as TenantSettingsService);
       const legacyRows = await legacy.compute194R(CLIENT, '2026-27', null);
       expect(off).toEqual(legacyRows);
       expect(importedCalls()).toHaveLength(0);
@@ -335,7 +341,7 @@ describe('TdsService — imported (VENDOR_IMPORT) payouts in 194R', () => {
           });
         },
       });
-      const svc = new TdsService(guarded as unknown as PrismaService, mockStatutory as unknown as TdsStatutoryConfigService);
+      const svc = new TdsService(guarded as unknown as PrismaService, mockStatutory as unknown as TdsStatutoryConfigService, mockTdsTenantSettings as unknown as TenantSettingsService);
       await svc.compute194R(CLIENT, '2026-27');
       expect(writes).toEqual([]);
     });

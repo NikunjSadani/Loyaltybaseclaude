@@ -20,6 +20,10 @@ import { TdsService, TdsRow194R, TdsRow194C } from './tds.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { DEFAULT_RESOLVED_TDS_STATUTORY } from './tds.helpers';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+const mockTdsTenantSettings = {
+  resolveTdsPolicy: jest.fn().mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' }),
+};
 
 // Resolver mock → built-in code defaults (identical to the pre-refactor hardcoded values).
 const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
@@ -59,6 +63,17 @@ const ROW_194R_PAN: TdsRow194R = {
   liabilityPaise: 233300n,         // from 10/90 grossing — pre-computed
   depositedPaise: 100_000n,        // ₹1,000
   outstandingPaise: 133300n,
+  // D10 split (GROSS_UP client, all cash, nothing deducted).
+  methodology: 'GROSS_UP',
+  ratePct: 10,
+  cashBasePaise: 2_100_000n,
+  nonCashBasePaise: 0n,
+  deductBasePaise: 0n,
+  clientBorneBasePaise: 2_100_000n,
+  deductLiabilityPaise: 0n,
+  clientBorneLiabilityPaise: 233300n,
+  deductedPaise: 0n,
+  importedVendorDepositPaise: 0n,
 };
 
 const ROW_194R_NOPAN: TdsRow194R = {
@@ -68,6 +83,16 @@ const ROW_194R_NOPAN: TdsRow194R = {
   liabilityPaise: 625_000n,        // 20/80
   depositedPaise: 0n,
   outstandingPaise: 625_000n,
+  methodology: 'GROSS_UP',
+  ratePct: 20,
+  cashBasePaise: 0n,
+  nonCashBasePaise: 2_500_000n,
+  deductBasePaise: 0n,
+  clientBorneBasePaise: 2_500_000n,
+  deductLiabilityPaise: 0n,
+  clientBorneLiabilityPaise: 625_000n,
+  deductedPaise: 0n,
+  importedVendorDepositPaise: 0n,
 };
 
 const ROW_194C_INDIVIDUAL: TdsRow194C = {
@@ -172,6 +197,8 @@ describe('TdsService — export194R (P6.5c)', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -360,6 +387,8 @@ describe('TdsService — export194C (P6.5c)', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
