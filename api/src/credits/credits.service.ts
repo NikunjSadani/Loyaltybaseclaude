@@ -232,18 +232,22 @@ export class CreditsService {
    * so a 194R GROSS_UP recovery is 100% this tenant's:
    *
    *   cumulativeBase = prior committed (PAID|PROCESSING) visibility base for the PAN/section
-   *                    in the FY (cross-tenant, by period window) + this event's payable base.
+   *                    in the FY (by period window; 194C = all tenants, 194R = this tenant only)
+   *                    + this event's payable base.
    *   maxSingle      = the largest single payout entry (prior + this event) — for the 194C
    *                    single-payment threshold.
-   *   priorDeducted  = Σ tdsDeductedThisPaise from the cross-tenant DEDUCT ledger (PAN/section/FY).
+   *   priorDeducted  = Σ tdsDeductedThisPaise from the DEDUCT ledger (PAN/section/FY; 194C = all
+   *                    tenants, 194R = this tenant only).
    *
    * DEDUCT (computeDeduction): once cumulativeBase crosses the threshold, TDS on the whole
    * aggregate becomes due; the catch-up owed at this event is withheld from this payout (capped
    * at the payout, remainder carried forward). We reduce the bank-file line + stamp each entry,
    * and append a ledger row. GROSS-UP (computeGrossUpTdsInvoiceBasePaise): the retailer is paid
-   * full; at the FIRST crossing (any tenant) we raise ONE TDS invoice for the PAN/FY and split
-   * the grossed-up TDS pro-rata across the PAN's contributing tenants (recovery ledger). No-PAN
-   * visibility payouts are excluded from the engine (paid full; a reporting-only TDS concern).
+   * full; at each crossing period we raise a TDS top-up invoice for the delta. 194C: the scope is
+   * the PAN across ALL tenants (a crossing by any tenant) and the grossed-up TDS is split pro-rata
+   * across the PAN's contributing tenants (D10). 194R: the scope is (THIS tenant, PAN) and the
+   * recovery is 100% this tenant's. No-PAN visibility payouts are paid full (no deduction, no
+   * invoice) and accrue a per-(tenant, outlet) recovery only (FIX-9).
    */
   private async buildPayoutTdsPlan(
     // FIX-8: reads run on the download WRITE $transaction client (not this.prisma) so the

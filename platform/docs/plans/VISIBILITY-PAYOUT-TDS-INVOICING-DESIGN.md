@@ -42,8 +42,18 @@ PAN `AAACT9811F`, West Bengal / code 19, SAC 998361).
   **D7 applies to 194C ONLY. 194R is PER CLIENT (owner, 2026-11-18):** a retailer PAN's 194R visibility payouts under
   tenant A and tenant B are never aggregated — threshold (₹20k/FY), prior base, DEDUCT carry-forward ledger, GROSS_UP
   recovery and the same-period TDS-invoice idempotency are all evaluated per (client, PAN, FY), and a 194R GROSS_UP
-  recovery is 100% the paying tenant's (D10 pro-rata is 194C-only). This matches the per-clientId 194R report
-  (`api/src/tds/tds.service.ts`). TDS invoice NUMBERS stay globally sequenced per (PAN, FY) (`TGSL-TDS-<PAN>-<FY>-<seq>`).
+  recovery is 100% the paying tenant's (D10 pro-rata is 194C-only). This matches the 194R report's client scope
+  (`api/src/tds/tds.service.ts`) — its inputs and method still differ (open items: the report also counts incentive
+  payouts / redemptions / off-platform entries, keys no-PAN per partner, and always uses gross-up). TDS invoice NUMBERS
+  stay globally sequenced per (PAN, FY) (`TGSL-TDS-<PAN>-<FY>-<seq>`).
+  **Legacy rows:** ledger / recovery rows written before this change carry their tenant's `clientId`, so they are
+  re-scoped automatically on the next read (another tenant's 194R row simply stops counting). A legacy 194R recovery
+  row written under the old cross-tenant pro-rata split now counts only toward ITS OWN tenant's 194R top-ups (e.g. a
+  ₹1,000 legacy share attributed to tenant A reduces A's next 194R top-up by ₹1,000; tenant B's legacy share no longer
+  reduces A's). Prod had **0** TDS ledger rows at the change, so no data migration is needed. A same-period TDS
+  invoice with **no recovery rows** (section unknown) still blocks a 194C re-raise for the PAN (as before) and a 194R
+  re-raise for the SAME tenant; another tenant's such invoice never blocks a 194R top-up. Pinned by specs in `credits.service.spec.ts`
+  ("194R per-client scoping").
 - **D8 — DEDUCT method:** below threshold pay full; at crossing, TDS on the full aggregate becomes due and is
   **deducted from the crossing payout**; if the catch-up exceeds that payout, **deduct what fits and carry the rest
   forward** to the next payout(s) (per-PAN carry-forward ledger). Retailer bears it (claims via 26AS).

@@ -3546,6 +3546,127 @@ describe('CreditsService', () => {
         expect(rec).toMatchObject({ clientId: 'deoleo', panNumber: '__NO_PAN__:O1', section: 'SEC_194R', tenantSharePaise: 1071400n });
       });
 
+      it('(a) FAILED 194R DEDUCT payout: the negative ledger row carries the tenant, and a later download nets it PER CLIENT', async () => {
+        // ── Step 1: deoleo's ₹25k 194R DEDUCT payout (₹2,500 withheld) FAILS at UTR upload. ──
+        mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+          id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+          entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: 2500000n, tdsDeductedPaise: 250000n, tdsSection: 'SEC_194R', period: '2026-05' }],
+        });
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]); // used-UTR dedup query
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 2500000n, tdsDeductedPaise: 250000n, tdsSection: 'SEC_194R', period: '2026-05' },
+        ]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'e1', panNumber: 'PAN1' }]);
+        const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', '', 'Failure', 'bounced']];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Payout');
+        const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+
+        await service.uploadUtr(gifsy, 'd1', file, true);
+
+        const rev = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data[0];
+        expect(rev).toMatchObject({ clientId: 'deoleo', panNumber: 'PAN1', section: 'SEC_194R', tdsDeductedThisPaise: -250000n });
+
+        // ── Step 2: the failed ₹25k is re-banked (later download). deoleo's ledger nets to 0; tenant
+        // 'other' has ₹900 withheld on PAN1 194R, which must NOT reduce deoleo's catch-up. ──
+        jest.clearAllMocks();
+        mockStatutory.getForFy.mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY);
+        mockTx.creditPayoutEntry.updateMany.mockImplementation(async (arg: { where?: { id?: { in?: string[] } } }) => ({ count: arg?.where?.id?.in?.length ?? 0 }));
+        mockInvoicesService.createTdsInvoice.mockResolvedValue({ invoiceId: 'tds1', gstPaise: 0n, gstApplicable: false });
+        mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+        mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]);
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([secEntry(2500000n, 'SEC_194R', 'DEDUCT')]);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([]); // the FAILED base is not "prior committed"
+        mockTx.autoInvoice.findMany.mockResolvedValue([]);
+        mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]);
+        mockTx.$executeRaw.mockResolvedValue(0);
+        wirePan1BothTenants();
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([
+          { clientId: 'deoleo', panNumber: 'PAN1', section: 'SEC_194R', tdsDeductedThisPaise: 250000n },
+          { ...rev, clientId: 'deoleo' }, // the −₹2,500 reversal written in step 1
+          { clientId: 'other', panNumber: 'PAN1', section: 'SEC_194R', tdsDeductedThisPaise: 90000n },
+        ]);
+
+        await download();
+
+        const ledger = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data[0];
+        expect(ledger).toMatchObject({ clientId: 'deoleo', tdsDueCumulativePaise: 250000n, tdsDeductedPriorPaise: 0n, tdsDeductedThisPaise: 250000n });
+      });
+
+      it('(b) one download needing TWO TDS invoices for one PAN (mixed 194R + 194C entries) → distinct, consecutive seqs', async () => {
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+          { ...secEntry(2500000n, 'SEC_194R', 'GROSS_UP'), id: 'e1' },
+          { ...secEntry(11000000n, 'SEC_194C', 'GROSS_UP'), id: 'e2' },
+        ]);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
+        wirePan1BothTenants();
+        mockTx.autoInvoice.findMany.mockResolvedValue([]); // nothing raised yet for PAN1 this FY
+
+        await download();
+
+        const calls = mockInvoicesService.createTdsInvoice.mock.calls.map((c) => (c as unknown[])[1] as { seq: number; isAnchor: boolean; bodyPaise: bigint });
+        expect(calls).toHaveLength(2);
+        expect(calls.map((c) => c.seq).sort()).toEqual([1, 2]);
+        // Exactly one anchor (seq 1) → the (clientId, PAN, FY) partial unique is never hit twice.
+        expect(calls.filter((c) => c.isAnchor)).toHaveLength(1);
+        expect(calls.find((c) => c.seq === 1)!.isAnchor).toBe(true);
+        expect(calls.map((c) => c.bodyPaise).sort()).toEqual([111100n, 277800n]);
+      });
+
+      describe('(c) same-period LEGACY TDS invoice with no recovery rows (section unknown) — current behaviour', () => {
+        beforeEach(() => {
+          mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
+          wirePan1BothTenants();
+          mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]); // no recovery rows anywhere → section unresolvable
+        });
+        it('194C: another tenant’s legacy invoice still BLOCKS (conservative = pre-change behaviour)', async () => {
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([secEntry(11000000n, 'SEC_194C', 'GROSS_UP')]);
+          mockTx.autoInvoice.findMany.mockResolvedValue([{ id: 'inv-legacy', clientId: 'other', period: '2026-05' }]);
+          await download();
+          expect(mockInvoicesService.createTdsInvoice).not.toHaveBeenCalled();
+        });
+        it('194R: this tenant’s own legacy invoice BLOCKS', async () => {
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([secEntry(2500000n, 'SEC_194R', 'GROSS_UP')]);
+          mockTx.autoInvoice.findMany.mockResolvedValue([{ id: 'inv-legacy', clientId: 'deoleo', period: '2026-05' }]);
+          await download();
+          expect(mockInvoicesService.createTdsInvoice).not.toHaveBeenCalled();
+        });
+        it('194R: ANOTHER tenant’s legacy invoice does not block (194R is per client) — takes the next seq', async () => {
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([secEntry(2500000n, 'SEC_194R', 'GROSS_UP')]);
+          mockTx.autoInvoice.findMany.mockResolvedValue([{ id: 'inv-legacy', clientId: 'other', period: '2026-05' }]);
+          await download();
+          expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(
+            mockTx, expect.objectContaining({ clientId: 'deoleo', bodyPaise: 277800n, seq: 2, isAnchor: false }),
+          );
+        });
+      });
+
+      it('(d) LEGACY cross-tenant 194R recovery rows (old pro-rata split): each tenant’s row now telescopes only its OWN 194R top-ups', async () => {
+        // Pre-change, a 194R invoice could split recovery across tenants: deoleo was attributed ₹1,000
+        // and 'other' ₹4,000 for PAN1 194R. Now deoleo's ₹25k crosses on its own: dueNow = ₹2,778;
+        // alreadyInvoiced = deoleo's OWN ₹1,000 only (other's ₹4,000 no longer counts) → delta ₹1,778.
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([secEntry(2500000n, 'SEC_194R', 'GROSS_UP')]);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
+        wirePan1BothTenants();
+        mockTx.tdsRecoveryEntry.findMany.mockImplementation(async (arg: { where?: { tdsInvoiceId?: unknown } }) =>
+          arg?.where?.tdsInvoiceId
+            ? []
+            : [
+                { panNumber: 'PAN1', section: 'SEC_194R', clientId: 'deoleo', tenantSharePaise: 100000n },
+                { panNumber: 'PAN1', section: 'SEC_194R', clientId: 'other', tenantSharePaise: 400000n },
+              ],
+        );
+        mockTx.autoInvoice.findMany.mockResolvedValue([{ id: 'inv-old', clientId: 'other', period: '2026-04' }]);
+
+        await download();
+
+        expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(
+          mockTx, expect.objectContaining({ clientId: 'deoleo', bodyPaise: 177800n, seq: 2 }),
+        );
+        const recovery = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data;
+        expect(recovery).toEqual([expect.objectContaining({ clientId: 'deoleo', section: 'SEC_194R', tenantSharePaise: 177800n })]);
+      });
+
       it('194C (unchanged): a same-period 194C TDS invoice raised by ANOTHER tenant still blocks a re-raise (one per PAN/FY/period)', async () => {
         mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([secEntry(11000000n, 'SEC_194C', 'GROSS_UP')]);
         mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
