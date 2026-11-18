@@ -9,8 +9,12 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { NOT_INTERESTED_BLOCKING_KYC_STATUSES, NOT_INTERESTED_REFUSAL } from './kyc-not-interested.constants';
-import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
+import {
+  NOT_INTERESTED_BLOCKING_KYC_STATUSES,
+  NOT_INTERESTED_IN_FLIGHT_KYC_STATUSES,
+  NOT_INTERESTED_REFUSAL,
+} from './kyc-not-interested.constants';
+import { loadSalesHierarchy, type SalesHierarchyNode } from '../sales/sales-hierarchy.loader';
 import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus, EntityType, GstRegistrationType, PaymentDetailsStatus } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -154,6 +158,7 @@ import {
 import {
   descendantSalesUserIds,
   firstActiveApproverId,
+  HIERARCHY_MAX_HOPS,
   isSelfOrDescendant,
 } from '../sales/sales-hierarchy-access.helper';
 
@@ -311,6 +316,22 @@ const EMPTY_TYPE_DISPLAY: ReadonlyMap<string, string> = new Map<string, string>(
 @Injectable()
 export class KycService {
   private readonly logger = new Logger(KycService.name);
+
+  /**
+   * F5 — the tenant sales hierarchy, loaded ONCE per request: keyed by the request's JwtPayload object
+   * (a fresh object per request; WeakMap → released with the request). consent() runs the A1 gate and the
+   * fast-track B1 check, list/view/approve each walk once — no repeated full-tenant reads.
+   */
+  private readonly hierarchyByRequest = new WeakMap<JwtPayload, Promise<SalesHierarchyNode[]>>();
+  private tenantHierarchy(user: JwtPayload): Promise<SalesHierarchyNode[]> {
+    let p = this.hierarchyByRequest.get(user);
+    if (!p) {
+      p = loadSalesHierarchy(this.prisma, user.clientId);
+      this.hierarchyByRequest.set(user, p);
+      p.catch(() => this.hierarchyByRequest.delete(user)); // a failed read is retried, never cached
+    }
+    return p;
+  }
 
   constructor(
     private readonly prisma: PrismaService,
@@ -971,7 +992,7 @@ export class KycService {
   private async resolveInitialRouting(
     user: JwtPayload,
   ): Promise<{ status: string; escalatedFrom: string | null }> {
-    const MAX_HOPS = 10;
+    const MAX_HOPS = HIERARCHY_MAX_HOPS; // F6: one shared bound for every upward walk
 
     // Step 1: find the submitter's own SalesUser.
     const submitterSalesUser = await this.prisma.salesUser.findFirst({
@@ -1126,7 +1147,7 @@ export class KycService {
    * Deleted nodes are never team members themselves, and the caller must be live.
    */
   private async callerSalesTeam(user: JwtPayload): Promise<{ salesUserId: string; team: Set<string> } | null> {
-    const nodes = await loadSalesHierarchy(this.prisma, user.clientId);
+    const nodes = await this.tenantHierarchy(user);
     const me = nodes.find((n) => n.userId === user.sub && n.deletedAt == null);
     if (!me) return null;
     return { salesUserId: me.id, team: descendantSalesUserIds(me.id, nodes) };
@@ -1288,7 +1309,7 @@ export class KycService {
     approverUserId: string,
     clientId: string,
   ): Promise<string | null> {
-    const MAX_HOPS = 10;
+    const MAX_HOPS = HIERARCHY_MAX_HOPS; // F6: one shared bound for every upward walk
     const approver = await this.prisma.salesUser.findFirst({
       where: { userId: approverUserId, clientId, deletedAt: null },
       select: { reportingToId: true },
@@ -1342,9 +1363,13 @@ export class KycService {
 
     // G3: include soft-deleted nodes so the walk passes THROUGH a deleted middle manager (same rule as
     // callerSalesTeam + the sales outlet picker); descendantSalesUserIds never returns a deleted node.
-    const nodes = await loadSalesHierarchy(this.prisma, user.clientId);
+    const nodes = await this.tenantHierarchy(user);
     const subtree = descendantSalesUserIds(caller.id, nodes);
-    const subtreeUserIds = nodes.filter((n) => subtree.has(n.id)).map((n) => n.userId);
+    // O1 (owner 2026-11-18): the SUBMITTER scope also covers reps REMOVED after filing — their KYCs stay with
+    // the managers above them (list/queue + view path A). Membership / assignment scope (`subtree`) never
+    // includes a deleted node.
+    const submitterSubtree = descendantSalesUserIds(caller.id, nodes, { includeDeleted: true });
+    const subtreeUserIds = nodes.filter((n) => submitterSubtree.has(n.id)).map((n) => n.userId);
     return { callerSalesUserId: caller.id, subtreeUserIds, subtreeSalesUserIds: subtree };
   }
 
@@ -1420,7 +1445,8 @@ export class KycService {
       select: { id: true },
     });
     const submitter = await this.prisma.salesUser.findFirst({
-      where: { userId: submitterUserId, user: { clientId: user.clientId }, deletedAt: null },
+      // O1: the submitter may have been REMOVED after filing — their KYC stays with the managers above them.
+      where: { userId: submitterUserId, user: { clientId: user.clientId } },
       select: { id: true },
     });
     if (!caller || !submitter) {
@@ -1432,7 +1458,7 @@ export class KycService {
     // ASM above a deleted SO is approvable/rejectable by that ASM (the queue and the action agree).
     // firstActiveApproverId skips deleted + inactive levels; isSelfOrDescendant never treats a deleted
     // node as the submitter. Before this, the walk stopped at the missing SO and the ASM got a 403.
-    const nodes = await loadSalesHierarchy(this.prisma, user.clientId);
+    const nodes = await this.tenantHierarchy(user);
 
     // Multi-stage sales approval (Bajaj, via multiLevelApproval): the routed approver ADVANCES as the
     // submission climbs SO→ASM, so a single "first active approver" check would reject the ASM at the
@@ -1444,7 +1470,7 @@ export class KycService {
     if (await this.isMultiLevelApproval(user.clientId)) {
       const callerNode = nodes.find((n) => n.id === caller.id);
       const callerActive = callerNode?.isActive === true && callerNode.deletedAt == null;
-      if (callerActive && caller.id !== submitter.id && isSelfOrDescendant(submitter.id, caller.id, nodes)) {
+      if (callerActive && caller.id !== submitter.id && isSelfOrDescendant(submitter.id, caller.id, nodes, { allowDeletedTarget: true })) {
         return;
       }
       throw new ForbiddenException('Only the submitting rep’s reporting manager can approve this KYC.');
@@ -4640,10 +4666,17 @@ export class KycService {
     // Submissions about this outlet: its partner's (every KycSubmission is filed ABOUT a partner) + any filed for
     // this outlet row (G2 `outletId`; covers an outlet whose partner link changed). Tenant-safe: both keys come
     // from the tenant-scoped outlet read above.
+    // F3 (2026-11-18): an APPROVED KYC blocks only when it belongs to the outlet's CURRENT owner (partnerId) —
+    // a PREVIOUS owner's approval (matched only via `outletId`) must not block forever. A KYC IN FLIGHT blocks
+    // via either key (the current owner's, or one filed for this outlet row).
     const blocking = await this.prisma.kycSubmission.findMany({
       where: {
-        OR: [...(outlet.partnerId ? [{ partnerId: outlet.partnerId }] : []), { outletId: outlet.id }],
-        status: { in: [...NOT_INTERESTED_BLOCKING_KYC_STATUSES] },
+        OR: [
+          ...(outlet.partnerId
+            ? [{ partnerId: outlet.partnerId, status: { in: [...NOT_INTERESTED_BLOCKING_KYC_STATUSES] } }]
+            : []),
+          { outletId: outlet.id, status: { in: [...NOT_INTERESTED_IN_FLIGHT_KYC_STATUSES] } },
+        ],
       },
       select: { status: true },
     });

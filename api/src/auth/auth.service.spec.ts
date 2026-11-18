@@ -169,15 +169,22 @@ describe('AuthService', () => {
         (mockPrisma as any).salesUser.findUnique.mockResolvedValue({
           id: 'isr', employeeCode: 'E1', region: null, zone: null, clientId: 'bajaj', reportingTo,
         });
-        (mockPrisma as any).salesUser.findMany = jest.fn().mockResolvedValue([
-          { id: 'asm', reportingToId: null, userId: 'u-asm', isActive: true, deletedAt: null },
-          { id: 'so', reportingToId: 'asm', userId: 'u-so', isActive: true, deletedAt: new Date('2026-11-01') },
-          { id: 'isr', reportingToId: 'so', userId: 'u-isr', isActive: true, deletedAt: null },
-        ]);
-        (mockPrisma as any).salesUser.findFirst = jest.fn().mockResolvedValue({
-          id: 'asm', employeeCode: 'E-ASM', user: { name: 'Arun ASM', phone: '8' }, hierarchyLevel: { name: 'ASM', level: 3 },
-        });
+        (mockPrisma as any).salesUser.findMany = jest.fn();
+        // F5: the vacant-manager walk goes UP by id lookups (bounded), never a full-tenant load.
+        const NODES: Record<string, unknown> = {
+          so: { id: 'so', employeeCode: 'E-SO', reportingToId: 'asm', isActive: true, deletedAt: new Date('2026-11-01'), user: { name: 'Gone SO', phone: '7' }, hierarchyLevel: { name: 'SO', level: 2 } },
+          asm: { id: 'asm', employeeCode: 'E-ASM', reportingToId: null, isActive: true, deletedAt: null, user: { name: 'Arun ASM', phone: '8' }, hierarchyLevel: { name: 'ASM', level: 3 } },
+        };
+        (mockPrisma as any).salesUser.findFirst = jest.fn((args: { where: { id: string; clientId: string } }) =>
+          Promise.resolve(args.where.clientId === 'bajaj' ? (NODES[args.where.id] ?? null) : null),
+        );
       };
+
+      it('F4: the /auth/me sales lookup excludes a REMOVED (soft-deleted) sales user', async () => {
+        stub(null);
+        await service.getMe(salesCaller);
+        expect((mockPrisma as any).salesUser.findUnique.mock.calls[0][0].where).toEqual({ userId: 'u-isr', deletedAt: null });
+      });
 
       it('a live, active direct manager is shown as before (no extra query)', async () => {
         stub({ isActive: true, deletedAt: null, user: { name: 'Sonu SO', phone: '7' }, hierarchyLevel: { name: 'SO' } });
@@ -189,11 +196,25 @@ describe('AuthService', () => {
       });
 
       it('a soft-deleted direct manager is replaced by the next ACTIVE manager (tenant-scoped walk)', async () => {
-        stub({ isActive: true, deletedAt: new Date('2026-11-01'), user: { name: 'Gone SO', phone: '7' }, hierarchyLevel: { name: 'SO' } });
+        stub({ id: 'so', isActive: true, deletedAt: new Date('2026-11-01'), user: { name: 'Gone SO', phone: '7' }, hierarchyLevel: { name: 'SO' } });
         const res = await service.getMe(salesCaller);
         expect((res.user.salesUser as any).reportingTo).toEqual({ user: { name: 'Arun ASM', phone: '8' }, hierarchyLevel: { name: 'ASM' } });
-        expect((mockPrisma as any).salesUser.findMany.mock.calls[0][0].where).toEqual({ clientId: 'bajaj' });
-        expect((mockPrisma as any).salesUser.findFirst.mock.calls[0][0].where).toEqual({ id: 'asm', clientId: 'bajaj', deletedAt: null, isActive: true });
+        // Bounded, tenant-scoped id walk from the vacant SO up to the ASM; no full-tenant read.
+        expect((mockPrisma as any).salesUser.findFirst.mock.calls.map((c: any[]) => c[0].where)).toEqual([
+          { id: 'so', clientId: 'bajaj' },
+          { id: 'asm', clientId: 'bajaj' },
+        ]);
+        expect((mockPrisma as any).salesUser.findMany).not.toHaveBeenCalled();
+      });
+
+      it('F6: a corrupt cyclic chain above a vacant manager terminates with no manager shown', async () => {
+        stub({ id: 'so', isActive: false, deletedAt: null, user: { name: 'Off SO', phone: '7' }, hierarchyLevel: { name: 'SO' } });
+        (mockPrisma as any).salesUser.findFirst = jest.fn((args: { where: { id: string } }) =>
+          Promise.resolve({ id: args.where.id, reportingToId: args.where.id === 'so' ? 'x' : 'so', isActive: false, deletedAt: null, user: null, hierarchyLevel: null }),
+        );
+        const res = await service.getMe(salesCaller);
+        expect((res.user.salesUser as any).reportingTo).toBeNull();
+        expect((mockPrisma as any).salesUser.findFirst.mock.calls.length).toBeLessThanOrEqual(20);
       });
     });
 

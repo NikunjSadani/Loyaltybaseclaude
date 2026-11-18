@@ -105,13 +105,15 @@ export class AuthService {
         },
       }),
       this.prisma.salesUser.findUnique({
-        where: { userId: user.sub },
+        // F4: a REMOVED (soft-deleted) sales user gets no sales identity back (salesUser: null).
+        where: { userId: user.sub, deletedAt: null },
         select: {
           id: true, employeeCode: true, region: true, zone: true, clientId: true,
           // Reporting manager — surfaced on /sales/profile (name + designation + phone).
           // R3: isActive/deletedAt decide whether the DIRECT manager can be shown (see below).
           reportingTo: {
             select: {
+              id: true,
               isActive: true,
               deletedAt: true,
               user: { select: { name: true, phone: true } },
@@ -135,6 +137,7 @@ export class AuthService {
     // manager — the person this rep's KYCs are routed to (resolveInitialRouting's rule). A soft-deleted /
     // deactivated direct manager is never shown; the walk continues up the chain (resolveNextActiveManager).
     // Fast path: a live+active direct manager is shown as before (no extra query). Response shape unchanged.
+    // F5: a vacant direct manager → a bounded walk up by id lookups (no full-tenant load per /auth/me).
     let salesUserOut: Record<string, unknown> | null = null;
     if (salesUser) {
       const { reportingTo, clientId: suClientId, ...rest } = salesUser;
@@ -143,7 +146,7 @@ export class AuthService {
           ? { user: reportingTo.user, hierarchyLevel: reportingTo.hierarchyLevel }
           : null;
       if (!manager && reportingTo) {
-        const next = await resolveNextActiveManager(this.prisma, suClientId, rest.id);
+        const next = await resolveNextActiveManager(this.prisma, suClientId, reportingTo.id);
         manager = next ? { user: next.user, hierarchyLevel: next.hierarchyLevel ? { name: next.hierarchyLevel.name } : null } : null;
       }
       salesUserOut = { ...rest, reportingTo: manager };

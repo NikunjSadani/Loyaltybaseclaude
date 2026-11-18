@@ -489,7 +489,7 @@ describe('SalesService', () => {
       expect(res.members.map((m: { id: string }) => m.id)).toEqual(['isr1']);
       expect(res.members[0]).toMatchObject({ id: 'isr1', name: 'Isr One', submitterUserIds: ['u-isr1'] });
       const promotedWhere = mockPrisma.salesUser.findMany.mock.calls[1][0].where;
-      expect(promotedWhere).toEqual({ id: { in: ['isr1'] }, clientId: 'deoleo', deletedAt: null });
+      expect(promotedWhere).toEqual({ id: { in: ['isr1'] }, clientId: 'deoleo', deletedAt: null, isActive: true });
 
       // The edge read must INCLUDE soft-deleted nodes (no deletedAt filter) so the walk can pass through them.
       const edgeWhere = mockPrisma.salesUser.findMany.mock.calls[0][0].where;
@@ -2947,7 +2947,7 @@ describe('SalesService', () => {
       expect([...aWhere.salesUserId.in].sort()).toEqual(['asm', 'isr', 'isr2', 'so2']);
       // Tenant scoping: the edge read + the promoted-member fetch are both tenant-scoped.
       expect(mockPrisma.salesUser.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
-      expect(mockPrisma.salesUser.findMany.mock.calls[1][0].where).toEqual({ id: { in: ['isr'] }, clientId: 'deoleo', deletedAt: null });
+      expect(mockPrisma.salesUser.findMany.mock.calls[1][0].where).toEqual({ id: { in: ['isr'] }, clientId: 'deoleo', deletedAt: null, isActive: true });
     });
 
     it('getTeam: the RSM above the ASM gets teamSize = the ASM\'s effective team (so2 + promoted isr)', async () => {
@@ -3031,9 +3031,125 @@ describe('SalesService', () => {
       );
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
       const res = await service.getMyOutlets(caller);
-      expect(res.members.map((m: { id: string }) => m.id)).toEqual(['isr']);
+      // F7: a and b are ALSO the ASM's ancestors in this corrupt cycle → never walked into for promotion.
+      expect(res.members.map((m: { id: string }) => m.id)).toEqual([]);
       const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
       expect([...where.salesUserId.in].sort()).toEqual(['asm', 'isr']);
+    });
+
+    // ── F1 — per-outlet rows show THAT outlet's KYC (never a sibling outlet's, which R5 would refuse) ──
+    it('F1: a 2-outlet owner — each row shows the submission filed for ITS outlet; legacy (null outletId) is the fallback', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+      const partner = {
+        id: 'cp-multi', wallets: [], _count: { kycSubmissions: 0 },
+        // newest first: O2's in-flight KYC, then O1's rejected one, then a legacy (pre-outletId) row.
+        kycSubmissions: [
+          { id: 'k-o2', status: 'PENDING_GIFSY', createdAt: new Date('2026-11-10'), outletId: 'o2' },
+          { id: 'k-o1', status: 'REJECTED', createdAt: new Date('2026-11-05'), outletId: 'o1' },
+          { id: 'k-legacy', status: 'REJECTED', createdAt: new Date('2026-01-01'), outletId: null },
+        ],
+      };
+      const row = (id: string) => ({
+        outlet: { id, outletCode: id, name: id, city: 'C', district: 'D', state: 'S', outletType: { code: 'RETAIL' }, partner },
+      });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([row('o1'), row('o2'), row('o3')]);
+      const res = await service.getMyOutlets(caller);
+      const by = Object.fromEntries(
+        res.outlets.map((o: { id: string; kycId: string; kycStatus: string; notInterestedBlock: unknown }) => [o.id, o]),
+      );
+      expect(by.o1).toMatchObject({ kycId: 'k-o1', kycStatus: 'REJECTED' }); // NOT O2's newer KYC
+      expect(by.o2).toMatchObject({ kycId: 'k-o2', kycStatus: 'PENDING_GIFSY' });
+      expect(by.o3).toMatchObject({ kycId: 'k-legacy', kycStatus: 'REJECTED' }); // legacy fallback
+      // "Not interested" stays partner-level (the server's in-flight rule): O2's KYC in flight blocks all rows.
+      expect(by.o1.notInterestedBlock).toBe('IN_REVIEW');
+      // The load is a bounded window carrying outletId.
+      const sel = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].include.outlet.select.partner.select.kycSubmissions;
+      expect(sel.take).toBe(20);
+      expect(sel.select.outletId).toBe(true);
+    });
+
+    // ── F2 — only REMOVED (deleted) managers are walked through; INACTIVE ones stay exactly as before ──
+    it('F2: an INACTIVE (not deleted) SO is NOT walked through — no promotion; teamSize keeps the old non-deleted basis', async () => {
+      const edges = [
+        { id: 'asm', reportingToId: null, userId: 'u-asm', isActive: true, deletedAt: null },
+        { id: 'soOff', reportingToId: 'asm', userId: 'u-soOff', isActive: false, deletedAt: null },
+        { id: 'isr', reportingToId: 'soOff', userId: 'u-isr', isActive: true, deletedAt: null },
+        { id: 'so2', reportingToId: 'asm', userId: 'u-so2', isActive: true, deletedAt: null },
+        { id: 'isr2', reportingToId: 'so2', userId: 'u-isr2', isActive: false, deletedAt: null },
+      ];
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'asm', employeeCode: 'E-asm', region: 'R', zone: null,
+        hierarchyLevel: { code: 'ASM', name: 'ASM', level: 2 },
+        // _count (getTeam basis = non-deleted incl. inactive) for so2 = 1 (isr2, inactive) — the old value.
+        subordinates: [memberRow('so2', 'SO Two', 'SO', 1)],
+      });
+      wireEdges([]);
+      mockPrisma.salesUser.findMany.mockImplementation((args: { where: { id?: unknown } }) =>
+        Promise.resolve(args.where.id ? [] : edges),
+      );
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+      const res = await service.getTeam(caller);
+      expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so2']); // isr NOT promoted past the inactive SO
+      expect(res.members[0].teamSize).toBe(1); // unchanged
+      expect(mockPrisma.salesUser.findMany).toHaveBeenCalledTimes(1); // no promoted fetch at all
+
+      // getMember: teamSize = non-deleted reports (active + inactive), as before.
+      mockPrisma.salesUser.findFirst.mockReset();
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'asm' })
+        .mockResolvedValueOnce({ id: 'so2', employeeCode: 'E', region: null, zone: null, user: { name: 'S', phone: '' }, hierarchyLevel: { code: 'SO', name: 'SO', level: 1 }, assignments: [] });
+      const m = await service.getMember(caller, 'so2');
+      expect(m.member.teamSize).toBe(1);
+    });
+
+    it('F2: getMember teamSize = old count minus deleted + the deleted report\'s live reports', async () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'rsm' })
+        .mockResolvedValueOnce({ id: 'asm', employeeCode: 'E', region: null, zone: null, user: { name: 'A', phone: '' }, hierarchyLevel: { code: 'ASM', name: 'ASM', level: 2 }, assignments: [] });
+      wireEdges();
+      const m = await service.getMember(caller, 'asm');
+      // asm's reports: so (DELETED → replaced by isr) + so2 → 2.
+      expect(m.member.teamSize).toBe(2);
+    });
+
+    // ── O1 — the KYC-list branch filter keeps a REMOVED rep's KYCs in their manager's branch ──
+    it('O1: getTeam submitterUserIds include a deleted rep under that member (their KYCs stay in the branch filter)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'asm', employeeCode: 'E-asm', region: 'R', zone: null,
+        hierarchyLevel: { code: 'ASM', name: 'ASM', level: 2 },
+        subordinates: [memberRow('so2', 'SO Two', 'SO', 1)],
+      });
+      const edges = [
+        { id: 'asm', reportingToId: null, userId: 'u-asm', isActive: true, deletedAt: null },
+        { id: 'so2', reportingToId: 'asm', userId: 'u-so2', isActive: true, deletedAt: null },
+        { id: 'isrGone', reportingToId: 'so2', userId: 'u-isrGone', isActive: false, deletedAt: DEL },
+      ];
+      mockPrisma.salesUser.findMany.mockImplementation((args: { where: { id?: unknown } }) =>
+        Promise.resolve(args.where.id ? [] : edges),
+      );
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+      const res = await service.getTeam(caller);
+      expect([...res.members[0].submitterUserIds].sort()).toEqual(['u-isrGone', 'u-so2']);
+      // …but the deleted rep is never a member row nor in the assignment scope.
+      expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so2']);
+    });
+
+    // ── F5 — one hierarchy read per request on the drill-down screens ──
+    it('F5: team-view drill-down (memberId) reads the tenant hierarchy ONCE (guard + scope share it)', async () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'asm' }) // guard caller
+        .mockResolvedValueOnce({
+          id: 'so2', user: { name: 'SO Two', phone: '' }, hierarchyLevel: { code: 'SO', name: 'SO', level: 1 }, subordinates: [],
+        });
+      wireEdges([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      await service.getTeamView(caller, { memberId: 'so2' });
+      const hierarchyReads = mockPrisma.salesUser.findMany.mock.calls.filter((c: [{ where: { id?: unknown } }]) => !c[0].where.id);
+      expect(hierarchyReads).toHaveLength(1);
     });
 
     it('getLeaderboard: an ISR under a deleted SO gets their ASM\'s tab; the cohort reaches through the SO; deleted users never rank', async () => {
