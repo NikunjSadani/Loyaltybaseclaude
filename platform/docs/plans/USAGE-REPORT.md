@@ -1,7 +1,7 @@
 # Usage Report — design note
 
-**Status:** built on `feat/usage-report` (worktree `.claude/worktrees/usage-report`), not merged, not deployed.
-**Scope:** ⚠️ PLATFORM-WIDE — owner-approved 2026-11-18, ships with the combined release (all tenants incl. Deoleo).
+**Status:** ✅ LIVE on prod `7ba69566` (2026-11-19 ~00:30 IST; migration `20261118190000_user_activity_usage` applied). Staging-verified 2026-11-18 (phone-app ISR 132 s, browser SO 66 s, background-only traffic added 0; Excel + About sheet). Duration / medium data count from the prod ship date.
+**Scope:** ⚠️ PLATFORM-WIDE — owner-approved 2026-11-18, shipped in the 2026-11-19 prod release (all tenants incl. Deoleo).
 
 ## What the owner asked for
 

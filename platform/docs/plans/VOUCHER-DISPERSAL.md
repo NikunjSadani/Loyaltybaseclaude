@@ -3,6 +3,9 @@
 Owner-approved 2026-11-16. **Money code**: every confirmed row spends real money on the platform Hubble account.
 Branch `feat/vd-api` (server) + `feat/vd-ui` (screens). **2026-11-18 (owner-approved, branch `feat/vd-campaign-extend`):**
 clickable campaign cards + per-card Excel, **Edit campaign** (name / budget) and **"Add more people"** batches — §10.
+**Status:** base tool LIVE since 2026-11-16 (`720ffce9`); the §10–§10f extension is ✅ **LIVE on prod `7ba69566`
+(2026-11-19)** — migration `20261118160000_voucher_dispersal_batches` applied; staging-verified 2026-11-18 (edit refusal +
+history, batch-2 DUPLICATE, discard, Excel). Prod deploy ran with `voucher-dispersal-drain-prod` paused (resumed after).
 
 ## 1. What it is
 

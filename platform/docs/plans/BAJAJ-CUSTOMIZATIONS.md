@@ -328,7 +328,7 @@ and the Performance trend (`GET /partner/targets/trend`).
 - Code: `api/src/kyc/kyc-fast-track.helper.ts`, `resolveGifsyRejectFastTrack` in `kyc.service.ts`; FE copy
   `platform/src/lib/kyc-fast-track.ts`. Decision log F13.
 
-## 13. Day-level sales + MTD comparisons (Sales Import tenants; 2026-11-17, in the combined release)
+## 13. Day-level sales + MTD comparisons (Sales Import tenants; 2026-11-17; LIVE on prod `7ba69566` 2026-11-19 — retention rules still OFF)
 - Each applied DMS file also stores per-outlet per-day cumulative month-to-date KPI values (`OutletSalesDay`,
   `SalesDaySet`) for programme outlets. Billing card shows "vs last month (to day D)" from Dec 2026 and "vs 3-month
   average" from Feb 2027, plus "outlets billing slower than usual" (below 80% of their own last-month pace).

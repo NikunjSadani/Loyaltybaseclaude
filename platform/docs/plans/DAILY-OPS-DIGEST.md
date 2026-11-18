@@ -7,7 +7,7 @@ section per tenant. It goes to internal Gifsy recipients only, never to clients.
 Activation and recipients: `runbooks/email-reports-activation.md`. Rendered sample:
 `samples/daily-ops-digest-sample.html`.
 
-**Status (2026-11-18):** branch `feat/daily-ops-digest` brought up to `develop` `71df01f7`, reconciled (17 Nov), then
+**Status:** ✅ LIVE on prod `7ba69566` (2026-11-19); prod recipients + Cloud Scheduler deadline (300 s, no retries) still to set (owner-gated). **History (2026-11-18):** branch `feat/daily-ops-digest` brought up to `develop` `71df01f7`, reconciled (17 Nov), then
 the two audits' findings fixed (see "Audit fixes 2026-11-18" below). Not pushed or merged.
 
 **Classification: ⚠️ PLATFORM-WIDE** (shared report code + the admin KYC dashboard's query/rule extracted into a shared

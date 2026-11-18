@@ -10,7 +10,7 @@
 > [`archive/RESUME-ARCHIVE-2026-11-15.md`](archive/RESUME-ARCHIVE-2026-11-15.md) (the full chronology up to 2026-11-15,
 > incl. the CUTOVER LEDGER #14–#52). **Never trust a SHA written here over `git log` + the serving image (§7).**
 >
-> Last updated: **2026-11-17** (staging release `71df01f7` + the combined release being assembled — §1, §3, §4).
+> Last updated: **2026-11-19** (prod release `7ba69566` — the combined 17/18-Nov release — §1, §3, §4, §6).
 
 Multi-tenant FMCG **trade-loyalty** platform. Operator **Gifsy**; live clients **Deoleo** (since July 2026) and
 **Bajaj Consumer Care** (go-live November 2026). Backend `api/` (NestJS + Prisma 7 — owns the DB and ALL business logic)
@@ -19,20 +19,25 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 
 ---
 
-## 1. Where things stand (2026-11-17)
+## 1. Where things stand (2026-11-19)
 
 | | SHA | Since | Notes |
 |---|---|---|---|
-| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import`, `gifsy-exports`) | **`de2f3700`** (verified serving 2026-11-17: api rev `gifsy-api-00091`, frontend rev `gifsy-frontend-00081`; `/health` 200) | 2026-11-17 | ⚠️ `origin/main` = **`71df01f7`** is pushed but **NOT deployed** — the owner chose to deploy it together with the combined release (§3); do not run the prod workflow until that is ready |
-| **Staging** (`*-staging`) | **`71df01f7`** | 2026-11-17 | `origin/develop` = `71df01f7` (see below) |
-| Previous prod | `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-16 / 11-15 | rollback targets |
+| **Production** (`gifsy-api`, `gifsy-frontend`, job `gifsy-sales-import`) | **`7ba69566`** (verified 2026-11-19 ~00:30 IST: api / frontend / worker images `7ba69566`; migrate `gifsy-migrate-zd2zc` succeeded; 8 migrations `20261118120000…190000` applied, 0 unfinished; payout payee backfill 48,131/48,131; 0 5xx / 0 error logs after deploy) | 2026-11-19 | `origin/main` = `origin/develop` = `7ba69566` |
+| **Staging** (`*-staging`) | **`7ba69566`** | 2026-11-18 | runtime-verified per piece (below) |
+| Previous prod | `71df01f7` (≈1 h, accidental re-run of an old workflow run — no migrations) → `de2f3700` → `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-18 … 11-15 | rollback targets |
 
-**On staging, not on prod — `71df01f7` (2026-11-17), owner-approved, runtime-verified on Bajaj staging with real logins:**
+**The 2026-11-19 prod release `7ba69566`** (all owner-approved; platform-wide items approved in-session; money paths dual-audited; release gates: only CRITICAL/HIGH block). Staging runtime checks 2026-11-18 with real logins on Bajaj:
+- **Voucher Dispersal — edit + "Add more people" batches** (GIFSY console): whole card clickable + per-card Excel; edit name/budget (floor = spent + with Hubble + failed-may-complete + queued; audited history); numbered batches (preview → confirm / discard; one voucher per phone per campaign across batches → "Already sent in batch N"); **Mark as not bought is FINAL** (admin, audited, releases budget, closes the row); only Hubble's documented statuses (SUCCESS/PROCESSING/FAILED) are trusted; earlier-order alerts (strongest status kept, open count on page + list badge + Daily Ops Digest "still open"). Staging: edit refusal below spent ✓, edit history ✓, batch-2 DUPLICATE ✓, discard ✓, Excel ✓. → [`VOUCHER-DISPERSAL.md`](VOUCHER-DISPERSAL.md) §10–§10f
+- **Sales Import Apply / Recalculate as background jobs** + Next `/api` proxy timeout 300 s: Apply returns 202, the `gifsy-sales-import` worker applies month by month (DONE inside the write transaction), one active job per month (409 to a second click / another admin / Close / Reopen), requestId lookup, "Last apply from this file". Staging: 202 → worker in 13 s → done in 18 s; 2nd click 409; same requestId → same job ✓. → [`SALES-IMPORT-PIPELINE-PLAN.md`](SALES-IMPORT-PIPELINE-PLAN.md) §18 items 4–5 (⚠️ migration `20261118170000` is NOT re-runnable — recovery steps there)
+- **TDS 194R rules** (owner decisions 2026-11-18): per client; TDS keyed **by PAN** (payee snapshot `payeePan` on every payout / redemption; a PAN change splits the year); base = every benefit; FY = bank-file date; 10% PAN / 20% no-PAN; whole year on the current method; only 194R visibility on DEDUCT is withheld; no 194R TDS or service invoices; excess only flagged; fully withheld payouts settle without a bank line. Staging: raw SQL proven on the real DB in a rolled-back transaction; 194R/194C reports + summary cards ✓. **194C unchanged.** → `VISIBILITY-PAYOUT-TDS-INVOICING-DESIGN.md` §9 + in-app TDS guide
+- **Usage report** (`/admin/reports/usage`): per user — days, visits, minutes (a minimum: first→last action per visit, new visit after 30 min idle), installed app vs browser, phone vs computer; automatic requests (`X-Background: 1`) never count. Staging: phone-app ISR 132 s, browser SO 66 s, background-only traffic added 0 ✓; Excel with About sheet ✓. Tracking starts on the prod ship date. → [`USAGE-REPORT.md`](USAGE-REPORT.md)
+- **Also in this release (staging-verified 2026-11-17/18):** KYC hardening + roll-up past removed managers (filing-time manager chain); day-level sales + MTD comparison (retention rules shipped OFF behind `SALES_RETENTION_V2`); **Daily Operations Digest** (staging test-send to the owner + Nikita OK); Sales Import in-app guide; flaky-test follow-ups; and everything from `71df01f7` below.
 - **KYC fast-track** (Bajaj flag `gifsyRejectFastTrack`, Gifsy console → Behaviour flags, confirm dialog): a KYC
   resubmitted after a GIFSY rejection goes straight to PENDING_GIFSY when the previous KYC was rejected by GIFSY *after*
   the managers approved it; SO Declaration and manager rejections always go through managers; only the outlet's assigned
   rep (or their managers) gets the shortcut. Visible on the admin KYC banner, approvals-queue badge, sales timeline,
-  exports' "Routing" column. Staging flag ON; **prod flag to be switched ON by the owner after deploy.**
+  exports' "Routing" column. Staging flag ON; **prod flag to be switched ON by the owner (pending, 2026-11-19).**
 - **Assigned-rep gate (all tenants):** filing a KYC / "Not interested" / consent OTP only for outlets assigned to the
   caller or their downline; partner logins only their own outlet; read-only roles refused.
 - **`/admin/approvals`** (dead page whose buttons never saved) → redirects (GIFSY → `/admin/kyc/approvals`, others →
@@ -98,17 +103,8 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 | Work | Branch / worktree | State | Read |
 |---|---|---|---|
 | **Wallet Reversal Engine** (⚠️ platform-wide, owner-approved; money path) | `feat/wallet-reversal-engine` (+ `feat/wre-*`), worktree `.claude/worktrees/reversal-engine` | WP0–WP7 built on the branch (WP7 real-Postgres concurrency suite 2026-11-16); not merged, not deployed. Per-tenant flag `reversalEngine: LEGACY / SHADOW / V2` (default LEGACY). **Owner decisions 2026-11-15/16:** Deoleo stays **LEGACY**; Bajaj → **V2**; a reversal of an already-paid payout becomes a **net receivable**, with **TDS credited back on the PAN**; every reversal shows an **outcome summary** (all tenants). Prod today runs the INTERIM rule (points reversals refused on wallets carrying debt; payout reversals whole-entry only). | `WALLET-REVERSAL-ENGINE-DESIGN.md` **on that branch** (maintained there) |
-| **Combined release (owner: ONE prod deploy)** = `71df01f7` (staging) + the four rows below | merged into one release branch, Prisma client regenerated ONCE from it (worktrees share `node_modules`), full gates, staging verify, then `main` → owner runs the prod workflow once → owner switches `gifsyRejectFastTrack` ON for Bajaj prod | Assembling (2026-11-17) | this table |
-| **KYC hardening** (⚠️ platform-wide, owner-approved) | `feat/gifsy-reject-fast-track` (worktree `fast-track`) `183b38a4` + in progress | "Not interested" refused (409) for approved / in-review / parked outlets; consent check per outlet (`KycSubmission.outletId`, migration `20261118140000`); hierarchy walks pass THROUGH soft-deleted managers everywhere (KYC gate + approvals, picker, dashboards/targets, team, leaderboard, reportee, assisted redeem, visibility, scheme — prod has 0 deleted sales users today, preventive); KYC VIEW check per outlet. **2026-11-18 re-check fixes K1–K5 (`9c8896c4`):** a removed rep's KYC stays with the managers above them **at filing time** (`KycSubmission.submitterManagerChain`, migration `20261118150000`; legacy rows = current links); owner-level KYC status restored on outlet lists, with "KYC filed via outlet X" (no dead link) when the caller can't open it; placeholder re-upload + bulk resign revoke sessions (failures reported); removed manager's own KYCs stay under member filters; deterministic order. Open: the KYC-list member filter uses current links, not the snapshot. | branch |
-| **Day-level sales + MTD comparison** (salesImport tenants = Bajaj) | `feat/sales-day-level` (worktree `sales-day`) | Built + dual-audited + fixed. `OutletSalesDay` / `SalesDaySet` (migrations `20261118120000`, `20261118130000`); "vs last month" (from Dec 2026) and "vs 3-month average" (from Feb 2027) on the billing card + slower-than-usual list. History keeps **programme outlets only**. New deletion rules (history 4 months, import files 7 days) ship **OFF** behind `SALES_RETENTION_V2`; turn on only via the runbook (`SALES-IMPORT-PIPELINE-PLAN.md` §17b: backup → rebuild-days → trim dry-run → owner OK → apply → `SALES_RETENTION_V2=on`). | §17b |
-| **Daily Operations Digest** (⚠️ platform-wide, owner approved option A 2026-11-13) | `feat/daily-ops-digest`, worktree `.claude/worktrees/ops-digest` | Built 2026-11-13 but was never merged (no tracking note — lost across sessions). Revived 2026-11-17: merged with develop, reconciled (fast-track KYCs, voucher-dispersal block, billing line), dual-audited. **2026-11-18: both audits' findings fixed** (`487e3ac3`: paid-by-recorded-time, failed run → non-2xx + guarded loaders, window since last successful send + idempotency/`force` + "still open" counts, honest `[Gifsy]` subject, `@gifsy.in`-only recipients, settings load-failure guard, KYC SLA via the dashboard's shared helper, non-ACTIVE tenants). **Re-check fixes D1–D6 (`736ba0ce`):** readable non-2xx body + one structured log line; any failed section = degraded + repeat notice + "INCOMPLETE N days"; 240 s budget inside the 300 s Cloud Run limit, lease + compare-and-set state writes; event counting; payout write-site tripwire spec (the wallet reversal engine must pass it). Staging test-send to the owner + Nikita before prod. | `DAILY-OPS-DIGEST.md` |
-| **Flaky-test follow-ups** | `chore/flaky-test-sweep` `7b1f5eae`, `9cc1a973` | The sweep itself shipped with the 2026-11-16 release; these two apply its rules to tests added since. | branch |
-| **Sales Import in-app guide** (GIFSY-only, like every guide — owner 2026-11-18) | `feat/sales-day-level` `44418252` | Step-by-step guide at `/admin/guides/sales-import`, labels checked against the real screens. Guides are only for multi-step workflows; client-admin visibility to be decided later. | `platform/src/content/guides/sales-import.ts` |
-| **Voucher Dispersal: edit + "Add more people" batches** (GIFSY-console only; money path — owner approved 2026-11-18, "Add to the same campaign") | `feat/vd-campaign-extend` (worktree `.claude/worktrees/vd-extend`, from `ab1dbbbb`) | Built, targeted specs green; NOT merged / deployed; adversarial (dual, money) audit not yet run. Whole list card clickable + "Download Excel" per card; Edit campaign (name / budget ≥ spent + committed, audited, history on the page); numbered batches (upload → preview → confirm / discard on a finished campaign; phones live in an earlier batch → DUPLICATE; budget checked against what is left); report Batch + Source file columns; batch list + filter. Migration `20261118160000_voucher_dispersal_batches` (additive + widens the row-number unique to per-batch; 17 = 17 statements vs `prisma migrate diff`). Earlier-order alerts: strongest real status kept, never resolved over SUCCESS / unrecognised, "no order" resolves only with a verified canary, row-locked merge, webhook always 200, failed-lookup FAILED rows re-swept, cancelled-row webhooks looked up, digest "still open" line, canary only in the sweep, `__`-prefixed internal labels, open-alert badge on the list (§10d–§10f). | `VOUCHER-DISPERSAL.md` §10–§10f |
-| **Proxy timeout + sales-import Apply / Recalculate as BACKGROUND JOBS** (⚠️ platform-wide, owner-approved 2026-11-18) | `fix/proxy-timeout-honest-apply` (worktree `proxy-timeout`, from `ab1dbbbb`) | Prod 2026-11-18: the Next `/api/*` proxy cut the ~30 s apply at its 30 s default, the page said "Nothing was applied: ." while the backend had applied → repeat applies. Fix: `experimental.proxyTimeout = 300_000`; Apply / Recalculate now record a job (202) run by the `gifsy-sales-import` Cloud Run Job (migration `20261118170000_sales_apply_jobs`; one active job per month → 409; Close / Reopen 409 while one runs; month DONE inside its write transaction); the page follows the job and looks a click up by `requestId` when no clear answer arrives; neutral wording for non-timeouts. Dual audit of `e1ce98d8` (no critical) fully fixed: focus-basis snapshot for retries, SIGTERM release, token-guarded resets, transient-error retry + last error, requester re-check, requestId-reuse 409, import actions 409, `lastJob` results, poller 401/403/404, months stale/poll fixes, unknown lock across reload. Deploy order: API before frontend (both workflows). Not merged, not deployed; Prisma client must be regenerated once in the release (raw SQL used meanwhile). Rollback step in the plan. | `SALES-IMPORT-PIPELINE-PLAN.md` §18 items 4–5 |
-| **194R per client + whole-year true-up** (⚠️ platform-wide, owner-approved 2026-11-18; money path) | `fix/194r-visibility-per-client` (worktree `.claude/worktrees/tds-194r`, off `ab1dbbbb`) | **194R:** per client, per retailer, per FY; ONE shared definition for the payout engine AND the 194R report (`api/src/tds/tds-194r.shared.ts`); counts incentives + 194R visibility + delivered redemptions (cash vs gift/voucher) + off-platform + imported payouts from `countFrom`; dated by the date the bank file was made (owner FY rule; imports by paid date); no-PAN per owner; 10%/20% from config; whole year on the CURRENT method — only 194R visibility on DEDUCT is withheld (10% PAN / 20% no-PAN keyed per owner; due − already deducted, carry forward), everything else client-borne gross-up; report outstanding = liability − portal deposits (deductions shown, not subtracted); new report columns. **D7:** TDS invoices + recovery rows 194C-only. **D8:** 194C invoice seq = highest + 1. **Service invoices + GST holdback 194C-only.** Over-withholding flagged (no refund; report, tracker, digest). Fully withheld payouts: no ₹0 bank line, settled + shown to retailer as ₹0 paid. One `R194|client|FY` lock. **TDS is by PAN — payee snapshot on every payout/redemption (`payeePan`/`payeePartnerId`) and a `resolvedKey` on 194R deposits / off-platform rows; a PAN change splits the year.** **Schema change (additive):** migration `20261118180000_tds_payee_snapshot` — 6 columns + 1 index + backfill, idempotent, NOT applied anywhere yet; run the §9 runbook pre-check first (this worktree uses its own copied Prisma client). Excess = deducted from the retailer − the retailer's whole-year deduct part on the current method (flag only; Deduct → Gross-up after withholding IS flagged). A regenerated invoice reconciles its HELD GST reimbursement (GST → ₹0 keeps the row at ₹0; released mismatch → loud warning). Release gate passed on 9d3080f4. Payments report / wallet / statement / digest label TDS-withheld payouts. **194C otherwise unchanged.** Three dual-audit rounds fixed (final round 2026-11-18); targeted specs + `nest build` + platform `tsc` green; NOT merged, not deployed. Rules: design doc §9. | design doc §9 |
-| **Usage Report** (⚠️ platform-wide, owner-approved 2026-11-18; ships with the combined release) | `feat/usage-report` (worktree `.claude/worktrees/usage-report`, from `ab1dbbbb`) | Built + targeted tests green; not merged, not deployed, not runtime-verified. Per-user visits / minutes (a minimum: first→last action per visit, new visit after 30 min idle) / installed app vs browser (`X-Client-Medium` header) / phone vs computer (User-Agent), one atomic upsert on `user_activity_day` (migration `20261118190000_user_activity_usage`, additive). Page `/admin/reports/usage` + `GET /v1/reports/usage` (+ Excel kind `usage-report`), Session Report access. Release-gate review round fixed: automatic requests (bell poll, badges, job polling, beacons) carry `X-Background: 1` and are NOT counted; bell pauses on hidden tabs; write backoff + in-flight cap; statement timeout; clear 503 if the migration hasn't run (runbook in the design note). | `USAGE-REPORT.md` |
-| **Release branch** | `release/2026-11-18-combined` (worktree `release-combined`) | Assembly branch for the combined release: sales build + guide, KYC hardening + roll-up + K1–K5 (`9c8896c4`), daily digest + D1–D6 (`736ba0ce`), flaky-test follow-ups. Migrations: `20261116120000`, `20261117140000`, `20261118120000`, `20261118130000`, `20261118140000`, `20261118150000`. | — |
+| **Location gate + location-compliance report** (owner-approved 2026-11-18; per-tenant setting, ON for Bajaj, OFF for Deoleo) | `feat/location-gate` (worktree `.claude/worktrees/location-gate`, from `7ba69566`) | Building. KYC + visibility (only) can't start or submit until location permission is granted AND a real GPS fix arrives (step-by-step phone guide + "Test again"); server refuses a capture with no fix when the setting is on; per-rep report (no GPS / accuracy > 50 m / unverifiable) + Daily Ops Digest line. Web apps cannot switch GPS on or track in the background — capture-time only. | `LOCATION-GATE.md` (on the branch) |
+| **Open follow-ups from the 2026-11-19 release** | — | KYC-list member filter uses current reporting links (a removed rep's KYC whose original manager moved shows under no member); ₹0 HELD GST reimbursement shows in the release list; minor Voucher Dispersal alert wording (duplicate MARKED alert entry, alert kind after a later mark); webhook may wait a few seconds on a lookup. | this row |
 
 ## 4. What's next / waiting on the owner
 
@@ -129,12 +125,22 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
    **Never run a points compute for Apr 2025 – Oct 2026** (paid by the vendor; imported).
 6. Owner process items still open: `gifsy-deployer` over-privilege review; stray `gifsy` `tdsPolicy` row from the F1 bug
    (harmless; delete when convenient); rotate the Hubble client secret (was shared in a screenshot).
-7. **Combined release (§3) → prod**, then (each owner-gated, backup first): Bajaj prod `gifsyRejectFastTrack` ON;
-   sales-history trim + `SALES_RETENTION_V2=on` per §17b; prod DB disk alert at 50% (gifsy-db: 20 GB SSD, auto-grow,
-   ~1.6 GB used on 2026-11-17).
+7. **After the 2026-11-19 prod release** (each owner-gated, backup first): owner switches Bajaj prod
+   `gifsyRejectFastTrack` ON → verify read-only; Daily Ops Digest prod recipients (`@gifsy.in` only, Gifsy → Settings →
+   Report Recipients) + Cloud Scheduler `reports-run-prod` `--attempt-deadline=300s --max-retry-attempts=0`;
+   sales-history trim + `SALES_RETENTION_V2=on` per `SALES-IMPORT-PIPELINE-PLAN.md` §17b; prod DB disk alert at 50%
+   (gifsy-db: 20 GB SSD, auto-grow, ~1.6 GB used on 2026-11-17); remove the prod revision tag `dve` on
+   `gifsy-api-00026-hap` (crash-loops on a deleted `REDIS_URL` secret — harmless noise).
+7b. **Month-end sales files (300–350 MB):** test a 200 MB+ real Bajaj file on staging before 30 Nov (owner to send the
+   file). Next release: processing as a Cloud Run Job end-to-end + direct-to-storage resumable uploads; ask Bajaj about
+   daily rolling 2–3-day files.
+7c. **Open owner question:** how important alerts reach people who never allow phone notifications (web push cannot be on
+   by default) — WhatsApp for key events vs an after-login reminder; owner gave no preference yet (2026-11-18).
 8. **Hubble:** ask which of Ajio / MakeMyTrip / Myntra / Uber are claim-code-only → add product ids to
    `HUBBLE_CLAIM_CODE_PRODUCT_IDS`.
-9. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first).
+9. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first; replay Bajaj's past reversals on a data copy → if
+   they match, straight to V2). Its migrations must now sort AFTER `20261118190000`, and it must pass the digest's
+   payout write-site tripwire spec and the TDS rules in design doc §9 (PAN-keyed, `R194|client|FY` lock).
 
 ## 5. Owner process rules (adopted — apply to every change)
 
@@ -165,8 +171,11 @@ worker jobs → jobsExecutor grant → API (1 GiB) → frontend. "Pushed" ≠ "d
    and note the backup id (2026-11-15: `1794744368023`).
 3. **Prepare main:** bring `main` to that develop SHA (fast-forward). If a main-only revert is ever pending, it must be
    re-applied explicitly — a merge does not undo a revert.
-4. **Owner dispatches** GitHub Actions → **"Deploy — Production (main)"** → Run workflow (branch `main`). `deploy.yml`
-   is `workflow_dispatch`-only; a push to `main` never deploys.
+4. **Owner dispatches** GitHub Actions → **"Deploy — Production (main)"** → **Run workflow** (branch `main`) → then
+   **Review deployments → Approve** (the run waits at the approval gate). `deploy.yml` is `workflow_dispatch`-only; a
+   push to `main` never deploys. ⚠️ **Never "Re-run" an older run** — it redeploys THAT run's old commit (2026-11-19:
+   a re-run put `71df01f7` on prod for ~1 h). Before the deploy: pause `voucher-dispersal-drain-prod` and ask that no
+   sales file is applied; resume the scheduler after verification.
    Order: CI tests → (approve) → **PREFLIGHT** (metadata-only: `HUBBLE_CLIENT_ID`, `HUBBLE_CLIENT_SECRET`,
    `HUBBLE_WEBHOOK_SECRET`, `SALES_IMPORT_DRAIN_SECRET` must exist with an ENABLED version — else stop, prod untouched)
    → build → `gifsy-migrate` → `gifsy-sales-import` + `gifsy-exports` jobs → jobsExecutor grant → API (1 GiB, min 1) →
@@ -207,7 +216,11 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
 - Absent `tdsPolicy` → `{SEC_194C, GROSS_UP}`; a malformed one throws (fail-closed).
 - Points and ₹ payouts are credited in **whole units**, rounded half-up once.
 - 8 Bajaj wallets are intentionally negative (sales returns); the interim rule refuses points reversals on wallets with debt.
-- Hubble: a timeout is **not** a "no". Never refund a Hubble order by hand — use the runbook.
+- Hubble: a timeout is **not** a "no". Never refund a Hubble order by hand — use the runbook. Hubble only documents
+  order statuses SUCCESS / PROCESSING / FAILED — CANCELLED / RETURNED are OUR redemption statuses, not Hubble's.
+- TDS 194R is keyed by the **payee PAN snapshot** (`payeePan`), not the outlet's current owner; every new payout path
+  must stamp it (see design doc §9 "import rule"). Any new automatic/timer frontend request must carry
+  `X-Background: 1` (`{ background: true }`), or the Usage report counts it as activity.
 
 **Data / Prisma / DB**
 - Never `isActive:true` as an "active outlet" denominator (use `deletedAt:null AND deactivatedAt:null`); `isActive:true`
@@ -219,6 +232,12 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
 - Staging and prod share the private-IP Cloud SQL instance `gifsy-db` (DBs `gifsy_staging` / `gifsy_prod`): every
   one-off op guards `current_database()` first. One-off jobs use raw `pg` (Prisma 7 driver adapter: bare `new PrismaClient()` fails).
 - Never `prisma migrate dev`. Run `prisma generate` before gating a schema change.
+- Migrations: use a plain `SET lock_timeout = '5s';` at the top and `RESET lock_timeout;` at the end — **`SET LOCAL` is
+  ignored by `prisma migrate deploy`** (Postgres logged "SET LOCAL can only be used in transaction blocks", 2026-11-18).
+  Write new migrations idempotent (`IF NOT EXISTS` / guarded `DO` blocks) so a lock-timeout failure can simply be
+  resolved and re-run. Never edit a migration already applied anywhere (checksum).
+- Worktrees share `node_modules` (junction): a schema change must make the worktree's `.prisma` / `@prisma/client` local
+  before `prisma generate`, or it breaks every other worktree's client.
 
 **Platform / infra**
 - Cloud Run throttles CPU between requests → periodic work runs from Cloud Scheduler → internal endpoint, not `@Cron`.
