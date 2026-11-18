@@ -447,9 +447,9 @@ describe('TdsService', () => {
     });
   });
 
-  // ─── summary194R ──────────────────────────────────────────────────────────
+  // ─── report194R summary ──────────────────────────────────────────────────────────
 
-  describe('summary194R', () => {
+  describe('report194R summary', () => {
     it('aggregates totals across rows', async () => {
       // Two PANs both above threshold
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
@@ -465,7 +465,7 @@ describe('TdsService', () => {
         { id: 'cp2', panNumber: 'PAN002' },
       ]);
 
-      const summary = await service.summary194R(CLIENT_ID, FY);
+      const summary = (await service.report194R(CLIENT_ID, FY)).summary;
 
       expect(summary.totalBasePaise).toBe(5_100_000n);
       expect(summary.totalLiabilityPaise).toBeGreaterThan(0n);

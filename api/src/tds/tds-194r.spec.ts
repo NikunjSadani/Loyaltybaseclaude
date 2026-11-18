@@ -529,24 +529,40 @@ describe('over-withholding — ONLY FLAGGED (owner 2026-11-18): excess column + 
     expect(rows[0]).toMatchObject({ deductLiabilityPaise: 600000n, deductedPaise: 600000n, excessDeductedPaise: 0n });
   });
 
-  it('excess arises when the client switches DEDUCT → GROSS_UP after withholding: "TDS taken in excess" note', async () => {
+  it('B-M1: excess = deducted − the WHOLE-YEAR liability — a DEDUCT → GROSS_UP switch is NOT excess while deducted ≤ liability', async () => {
     const d = base();
     d.entries = [paidVis('v1', 3000000n)];
     d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
     const [row] = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
-    expect(row).toMatchObject({ excessDeductedPaise: 300000n });
+    // GROSS_UP whole-year liability ₹3,333 ≥ ₹3,000 deducted → no excess.
+    expect(row).toMatchObject({ liabilityPaise: 333300n, deductedPaise: 300000n, excessDeductedPaise: 0n });
+  });
+
+  it('B-M1: excess when deducted > the whole-year liability (the year later drops to ₹20,000 or less after TDS was taken)', async () => {
+    const d = base();
+    d.entries = [paidVis('v1', 1500000n)]; // ₹3,000 was taken while the year was over ₹20,000; it is now ₹15,000
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
+    const [row] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row).toMatchObject({ liabilityPaise: 0n, deductedPaise: 300000n, excessDeductedPaise: 300000n });
     expect(row.note).toContain('TDS taken in excess: ₹3,000.00');
     expect(row.note).toMatch(/no automatic refund/i);
   });
 
-  it('DEDUCT → GROSS_UP after withholding: everything withheld from the retailer is flagged as excess (outstanding unchanged)', async () => {
+  it('A-L3: the carry-forward is read from the LATEST ledger group (createdAt, then id) — earlier groups never leak in', async () => {
     const d = base();
-    d.entries = [paidVis('v1', 4000000n)];
-    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
-    d.deposits = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: null, amountPaise: 300000n, forPeriod: `${FY.fyLabel.slice(0, 4)}-06`, depositDate: inFy(70), uploadBatchId: 'DEP-' + 'c'.repeat(64) }];
-    const { tds } = services(d, 'GROSS_UP');
-    const [row] = await tds.compute194R(CLIENT, FY.fyLabel, null);
-    expect(row).toMatchObject({ excessDeductedPaise: 300000n, outstandingPaise: 144400n });
+    d.entries = [paidVis('v1', 10500000n)];
+    const t1 = inFy(40);
+    const t0 = inFy(10);
+    d.ledger = [
+      // latest group (one download, same instant): only its LAST row carries the residual
+      // stored out of order on purpose: the engine must sort, not trust the read order
+      { clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 250000n, carryForwardPaise: 550000n, createdAt: t1, id: 'b2' } as never,
+      { clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 250000n, carryForwardPaise: 0n, createdAt: t1, id: 'b1' } as never,
+      // an older group's carry-forward (superseded)
+      { clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 0n, carryForwardPaise: 999900n, createdAt: t0, id: 'a1' } as never,
+    ];
+    const [row] = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row.carryForwardDroppedPaise).toBe(550000n);
   });
 
   it('a carry-forward that is no longer due is shown as DROPPED (not silently)', async () => {
@@ -563,7 +579,7 @@ describe('over-withholding — ONLY FLAGGED (owner 2026-11-18): excess column + 
 
   it('L4: the liability tracker carries the note, deducted so far and the excess (rows + totals)', async () => {
     const d = base();
-    d.entries = [paidVis('v1', 3000000n)];
+    d.entries = [paidVis('v1', 1500000n)];
     d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
     const { tds } = services(d, 'GROSS_UP');
     jest.spyOn(tds, 'importedPayoutsCountFrom').mockResolvedValue(null);
@@ -575,7 +591,7 @@ describe('over-withholding — ONLY FLAGGED (owner 2026-11-18): excess column + 
 
   it('the summary carries the total excess (and the count of retailers with excess)', async () => {
     const d = base();
-    d.entries = [paidVis('v1', 3000000n)];
+    d.entries = [paidVis('v1', 1500000n)];
     d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
     const { tds } = services(d, 'GROSS_UP');
     jest.spyOn(tds, 'importedPayoutsCountFrom').mockResolvedValue(null);

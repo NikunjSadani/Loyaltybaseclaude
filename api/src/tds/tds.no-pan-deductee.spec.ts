@@ -145,7 +145,7 @@ describe('TdsService — per-deductee no-PAN', () => {
       expect(r.liabilityPaise).toBe(0n);
     }
     expect(rows.reduce((s, r) => s + r.liabilityPaise, 0n)).toBe(0n);
-    const summary = await service.summary194R(CLIENT, FY);
+    const summary = (await service.report194R(CLIENT, FY)).summary;
     expect(summary.totalLiabilityPaise).toBe(0n);
     expect(summary.rowCount).toBe(10);
   });
@@ -218,7 +218,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     });
     expect(earlier.noPanDeductee).toBeUndefined();
     // totals: outstanding = liability − every deposit (the pooled deposit nets against no-PAN liability)
-    const summary = await service.summary194R(CLIENT, FY);
+    const summary = (await service.report194R(CLIENT, FY)).summary;
     expect(summary.totalLiabilityPaise).toBe(625_000n);
     expect(summary.totalDepositedPaise).toBe(700_000n);
     expect(summary.totalOutstandingPaise).toBe(625_000n - 700_000n);
@@ -230,7 +230,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: null, amountPaise: 100_000n }]);
     const rows = await service.compute194R(CLIENT, FY);
     expect(rows.find((r) => r.unlinkedNoPanDeposit)).toMatchObject({ depositedPaise: 100_000n, outstandingPaise: -100_000n });
-    const sum = await service.summary194R(CLIENT, FY);
+    const sum = (await service.report194R(CLIENT, FY)).summary;
     expect(sum.totalDepositedPaise).toBe(rows.reduce((x, r) => x + r.depositedPaise, 0n));
     expect(sum.totalOutstandingPaise).toBe(rows.reduce((x, r) => x + r.outstandingPaise, 0n));
     expect(sum.totalOutstandingPaise).toBe(sum.totalLiabilityPaise - sum.totalDepositedPaise);
@@ -456,7 +456,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(rows.find((r) => r.panNumber === 'ABCDE1234F')).toMatchObject({
       panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 50_000n, outstandingPaise: -50_000n,
     });
-    const sum = await service.summary194R(CLIENT, FY);
+    const sum = (await service.report194R(CLIENT, FY)).summary;
     expect(sum.totalDepositedPaise).toBe(50_000n);
   });
 
@@ -541,7 +541,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(rows.filter((r) => r.panNumber === 'ABCDE1234F')).toMatchObject([
       { panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 40_000n, outstandingPaise: -40_000n },
     ]);
-    const sum = await service.summary194R(CLIENT, FY);
+    const sum = (await service.report194R(CLIENT, FY)).summary;
     const s = sumRows(rows);
     expect(sum.totalDepositedPaise).toBe(40_000n);
     expect(sum.totalDepositedPaise).toBe(s.deposited);
@@ -582,7 +582,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(p).toHaveLength(1);
     expect(p[0]).toMatchObject({ baseFyTotalPaise: 0n, depositedPaise: 25_000n, outstandingPaise: -25_000n });
     expect(rows).toHaveLength(2);
-    expect((await service.summary194R(CLIENT, FY)).totalDepositedPaise).toBe(35_000n);
+    expect(((await service.report194R(CLIENT, FY)).summary).totalDepositedPaise).toBe(35_000n);
   });
 
   it('194R DEP-3 (Deoleo case): every deposit PAN has payouts → exactly the payee rows, no extra row', async () => {

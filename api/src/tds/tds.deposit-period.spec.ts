@@ -407,7 +407,7 @@ describe('TdsService — deposits by "TDS for month" FY', () => {
     const b = rows.find((r) => r.panNumber === 'BBBBB2222B')!;
     expect(b).toMatchObject({ baseFyTotalPaise: 0n, depositedPaise: 50_000n, outstandingPaise: -50_000n, depositForPeriods: [`${Y}-10`] });
 
-    const summary = await service.summary194R(CLIENT, FY);
+    const summary = (await service.report194R(CLIENT, FY)).summary;
     expect(summary.totalDepositedPaise).toBe(rows.reduce((s, r) => s + r.depositedPaise, 0n));
     expect(summary.totalOutstandingPaise).toBe(rows.reduce((s, r) => s + r.outstandingPaise, 0n));
     expect(summary.totalOutstandingPaise).toBe(-50_000n);

@@ -300,9 +300,9 @@ describe('TdsService — imported (VENDOR_IMPORT) payouts in 194R', () => {
       expect(row.baseFyTotalPaise).toBe(2_500_000n);
     });
 
-    it('summary194R totals include the imported base', async () => {
+    it('the report summary totals include the imported base', async () => {
       payoutEntries([entry('R1', 1_000_000n)], [entry('R1', 1_500_000n), entry('R2', 2_500_000n)]);
-      const s = await service.summary194R(CLIENT, '2026-27');
+      const s = (await service.report194R(CLIENT, '2026-27')).summary;
       expect(s.totalBasePaise).toBe(5_000_000n);
       expect(s.rowCount).toBe(2);
     });

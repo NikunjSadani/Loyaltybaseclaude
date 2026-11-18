@@ -139,9 +139,12 @@ function summariseRows(
   };
 }
 
-/** Owner 2026-11-18: TDS taken from a retailer beyond the whole-year deducted part (flag only). */
-function excessOf(deductPart: bigint, deducted: bigint): bigint {
-  return deducted > deductPart ? deducted - deductPart : 0n;
+/**
+ * Owner 2026-11-18 + B-M1: TDS taken from a retailer beyond the WHOLE-YEAR liability (on the client's current
+ * method) — flag only, no refund. A DEDUCT → GROSS_UP switch is NOT excess while deducted ≤ that liability.
+ */
+function excessOf(liability: bigint, deducted: bigint): bigint {
+  return deducted > liability ? deducted - liability : 0n;
 }
 
 /** A recorded carry-forward that the current rules no longer ask to withhold (shown as dropped). */
@@ -234,9 +237,9 @@ export interface TdsRow194R {
   /** Of `depositedPaise`, the part from imported vendor TDS batches (informational). */
   importedVendorDepositPaise: bigint;
   /**
-   * Owner 2026-11-18 — over-withholding is ONLY FLAGGED: TDS taken from this retailer beyond the whole-year
-   * deducted part (e.g. 20% no-PAN then the PAN was added, or DEDUCT → GROSS_UP after withholding).
-   * No automatic refund.
+   * Owner 2026-11-18 + B-M1 — over-withholding is ONLY FLAGGED: TDS taken from this retailer beyond the
+   * WHOLE-YEAR liability on the client's current method (e.g. the year later drops to ₹20,000 or less, or the
+   * rate is lowered). No automatic refund.
    */
   excessDeductedPaise: bigint;
   /** A carry-forward recorded on the ledger that is no longer due under the current rules (dropped, shown). */
@@ -352,7 +355,7 @@ export class TdsService {
    *
    * FAIL CLOSED: a failed read or a malformed stored value THROWS (a visible 500) — a statutory
    * report must never silently drop to OFF and under-state liability. Callers read this ONCE per
-   * request and pass it into compute194R/summary194R (see report194R).
+   * request and pass it into compute194R (see report194R).
    */
   async importedPayoutsCountFrom(clientId: string): Promise<string | null> {
     let raw: unknown;
@@ -541,7 +544,7 @@ export class TdsService {
         deductLiabilityPaise: l.deductPartPaise,
         clientBorneLiabilityPaise: l.clientBornePartPaise,
         deductedPaise: deducted.get(key) ?? 0n,
-        excessDeductedPaise: excessOf(l.deductPartPaise, deducted.get(key) ?? 0n),
+        excessDeductedPaise: excessOf(l.liabilityPaise, deducted.get(key) ?? 0n),
         carryForwardDroppedPaise: droppedOf(lastCarry.get(key) ?? 0n, l.deductPartPaise, deducted.get(key) ?? 0n),
         importedVendorDepositPaise: importedDeposited.get(key) ?? 0n,
         ...depositPeriods.fieldFor(key),
@@ -569,8 +572,8 @@ export class TdsService {
       }
       if (r.excessDeductedPaise > 0n) {
         notes.push(
-          `TDS taken in excess: ${formatINR(r.excessDeductedPaise)} — more was withheld from this retailer than is due for ` +
-            'the year on the current rules. Flagged only: no automatic refund.',
+          `TDS taken in excess: ${formatINR(r.excessDeductedPaise)} — more was withheld from this retailer than the whole ` +
+            "year's TDS on the current rules. Flagged only: no automatic refund.",
         );
       }
       if (r.carryForwardDroppedPaise > 0n) {
@@ -685,17 +688,6 @@ export class TdsService {
     outletsByCode: Map<string, Array<{ partnerId: string | null }>>,
   ): Promise<Map<string, string>> {
     return sharedOwnerPansOf(this.prisma, outletsByCode);
-  }
-
-  /** Summary for 194R: totals across all PAN rows. */
-  async summary194R(
-    clientId: string,
-    fyLabel: string,
-    /** Already-read imported-payouts countFrom (undefined → read once here). */
-    importedCountFrom?: string | null,
-  ): Promise<TdsSummary194R> {
-    const rows = await this.compute194R(clientId, fyLabel, importedCountFrom);
-    return { fyLabel, clientId, ...summariseRows(rows) };
   }
 
   // ─── 194C ───────────────────────────────────────────────────────────────────

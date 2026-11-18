@@ -450,22 +450,20 @@ export async function deducted194RByRetailer(
       fyLabel,
       ...(scope ? { panNumber: { in: scope.keys } } : {}),
     },
-    select: { clientId: true, panNumber: true, outletCode: true, tdsDeductedThisPaise: true, carryForwardPaise: true, createdAt: true },
+    select: { id: true, clientId: true, panNumber: true, outletCode: true, tdsDeductedThisPaise: true, carryForwardPaise: true, createdAt: true },
   });
   const mine = (rows ?? []).filter((r) => !r.clientId || r.clientId === clientId);
   const out = new Map<string, bigint>();
-  const latestAt = new Map<string, number>();
-  for (const r of mine) {
+  // A-L3: a DETERMINISTIC order — (createdAt, id) ascending — so the carry-forward read below is the
+  // LAST row of each retailer's latest ledger group (rows of one download share createdAt), never whichever
+  // row the database happened to return last.
+  const atOf = (r: { createdAt?: Date | string | null }) => (r.createdAt ? new Date(r.createdAt).getTime() : 0);
+  const ordered = [...mine].sort((x, y) => atOf(x) - atOf(y) || String(x.id ?? '').localeCompare(String(y.id ?? '')));
+  for (const r of ordered) {
     if (!r.panNumber?.trim()) continue; // a legacy blank key has no retailer
     const key = retailerKeyOfLedgerPan(r.panNumber);
     out.set(key, (out.get(key) ?? 0n) + r.tdsDeductedThisPaise);
-    if (lastCarryForward && r.carryForwardPaise != null) {
-      const at = r.createdAt ? new Date(r.createdAt).getTime() : 0;
-      if (!latestAt.has(key) || at >= latestAt.get(key)!) {
-        latestAt.set(key, at);
-        lastCarryForward.set(key, r.carryForwardPaise);
-      }
-    }
+    if (lastCarryForward && r.carryForwardPaise != null) lastCarryForward.set(key, r.carryForwardPaise);
   }
   return out;
 }
