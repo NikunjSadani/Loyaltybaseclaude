@@ -217,16 +217,16 @@ refusals) (actor = admin).
   verified 2026-11-18: Postgres logged "SET LOCAL can only be used in transaction blocks" when staging applied
   `20261118130000_sales_day_order_index` (whose 10 s limit therefore did not apply; harmless there — new, small table).
 - **If it fails on `lock_timeout`** (P3018 on the run; afterwards `migrate deploy` refuses with P3009 — a failed migration
-  is recorded): because the statements are NOT run in one transaction (above), the ones BEFORE the failing statement
-  may already be applied. Before re-running, check what exists (read-only, `current_database()` guarded): the enum
-  `VoucherDispersalBatchStatus`; columns `voucher_dispersal_rows.batchNumber` / `lateCompletedAt` and
-  `voucher_dispersal_campaigns.settleFailures` / `settleError`; table `voucher_dispersal_batches` (+ its indexes / FK);
-  index `voucher_dispersal_rows_campaignId_batchNumber_rowNumber_key`; and whether
-  `voucher_dispersal_rows_campaignId_rowNumber_key` is still there. Drop what was created (owner OK + shown SQL — they are
-  all new and empty) so the file can run from the top, then `npx prisma migrate resolve --rolled-back
-  20261118160000_voucher_dispersal_batches` (in the in-VPC migrate job), then re-run `npx prisma migrate deploy` in a
-  quieter window. (Option not taken: make each statement idempotent — `IF NOT EXISTS` / guarded `DO` blocks — so a re-run
-  needs no clean-up; ask the owner.)
+  is recorded): the statements are NOT one transaction (above), so the ones before the failing statement may already be
+  applied — that is fine: the file is **re-runnable** (every statement is idempotent: the enum and the foreign key in
+  guarded `DO` blocks, `ADD COLUMN IF NOT EXISTS`, `CREATE TABLE / INDEX IF NOT EXISTS`, `DROP INDEX IF EXISTS`; the wide
+  unique index is still created before the old one is dropped). **No clean-up step.** Recover with exactly
+  `npx prisma migrate resolve --rolled-back 20261118160000_voucher_dispersal_batches` (in the in-VPC migrate job), then
+  re-run `npx prisma migrate deploy` in a quieter window (drain paused, as above).
+- **Verification of the re-runnable file (2026-11-18):** compared statement-by-statement with Prisma's own SQL for
+  base schema (`ab1dbbbb`) → current `schema.prisma` (`prisma migrate diff --from-schema … --to-schema … --script`, the
+  idempotency wrappers stripped): 9 = 9 statements, none missing or extra. NOT yet run against a database (no shadow /
+  scratch DB was used) — before prod, apply it TWICE to a local / throwaway database and confirm the second run is clean.
 - **Old/new revision overlap during that deploy:** for the minutes both API revisions serve traffic, the OLD revision
   does not know about batches and would count an unconfirmed batch's rows in its list summary — harmless, because no
   batch can exist until the new revision is serving (only it can create one).
