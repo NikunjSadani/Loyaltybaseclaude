@@ -3018,11 +3018,14 @@ describe('RewardsService', () => {
         return e ? { id: e.id } : null;
       });
       // Edge list honours the tenant filter (as Prisma would) — the cross-tenant su-x is excluded.
-      mockPrisma.salesUser.findMany.mockImplementation(async ({ where }: any) =>
-        EDGES.filter((e) => where?.user?.clientId === undefined || e.clientId === where.user.clientId).map(
-          ({ id, reportingToId }) => ({ id, reportingToId }),
-        ),
-      );
+      // G3: also honours a `deletedAt: null` filter, so a walker that drops deleted nodes really loses them.
+      mockPrisma.salesUser.findMany.mockImplementation(async ({ where }: any) => {
+        const tenant = where?.clientId ?? where?.user?.clientId;
+        return (EDGES as Array<(typeof EDGES)[number] & { deletedAt?: Date | null }>)
+          .filter((e) => tenant === undefined || e.clientId === tenant)
+          .filter((e) => !(where && 'deletedAt' in where && where.deletedAt === null && e.deletedAt))
+          .map(({ id, reportingToId, deletedAt }) => ({ id, reportingToId, userId: `user-${id}`, isActive: true, deletedAt: deletedAt ?? null }));
+      });
       mockPrisma.channelPartner.findFirst.mockImplementation(async ({ where }: any) =>
         // The in-tx TOCTOU re-check looks up by id only (no clientId) — honour clientId when given.
         where.id === 'cp-out' && (where.clientId === undefined || where.clientId === 'deoleo') ? outletPartner : null,
@@ -3076,14 +3079,29 @@ describe('RewardsService', () => {
     const confirm = (u: JwtPayload) =>
       service.confirmRedeemForOutlet(u, { orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out' });
 
-    it('loads edges with EXACTLY the getMyOutlets query (tenant-scoped, non-deleted, no isActive filter)', async () => {
+    it('loads edges with EXACTLY the getMyOutlets query (shared deleted-aware loader, tenant-scoped, no isActive filter)', async () => {
       await redeem(jwt('su-asm'));
       expect(mockPrisma.salesUser.findMany).toHaveBeenCalledWith({
-        where: { user: { clientId: 'deoleo' }, deletedAt: null },
-        select: { id: true, reportingToId: true },
+        where: { clientId: 'deoleo' },
+        select: { id: true, reportingToId: true, userId: true, isActive: true, deletedAt: true },
       });
       const where = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
       expect([...where.salesUserId.in].sort()).toEqual(['su-asm', 'su-isr1', 'su-isr2', 'su-so']);
+    });
+
+    it('G3: with the SO soft-deleted, the ASM above can still redeem + confirm for the ISR\'s outlet (same scope as the list); the SO is not in scope', async () => {
+      const so = EDGES.find((e) => e.id === 'su-so') as { deletedAt?: Date | null };
+      so.deletedAt = new Date('2026-11-01');
+      try {
+        await expect(redeem(jwt('su-asm'))).resolves.toBeDefined();
+        await expect(confirm(jwt('su-asm'))).resolves.toMatchObject({ status: 'CONFIRMED' });
+        const where = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
+        expect([...where.salesUserId.in].sort()).toEqual(['su-asm', 'su-isr1', 'su-isr2']);
+        // A sibling ASM is still refused (branch isolation unchanged).
+        await expect(redeem(jwt('su-asm2'))).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+      } finally {
+        so.deletedAt = null;
+      }
     });
 
     it('manager (ASM) redeems for a subordinate rep\'s outlet → allowed; OTP still bound to the OUTLET', async () => {

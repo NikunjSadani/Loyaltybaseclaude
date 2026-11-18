@@ -17,11 +17,15 @@ export interface SalesUserEdge {
   id: string;
   reportingToId: string | null;
   /**
-   * Soft-delete marker (optional). Only `descendantSalesUserIds` reads it: a node with a non-null
-   * `deletedAt` is walked THROUGH (its reports stay reachable) but is never itself a team member.
-   * Edge lists loaded with a `deletedAt: null` filter never carry it → unchanged behaviour.
+   * Soft-delete marker (optional). A node with a non-null `deletedAt` is walked THROUGH (its
+   * reports stay reachable, its manager stays reachable from below) but is never itself a team
+   * member, a viewable member, an approver or an immediate reportee (G3). Edge lists loaded with a
+   * `deletedAt: null` filter never carry it → unchanged behaviour. Load edges with
+   * `loadSalesHierarchy` (sales-hierarchy.loader.ts) to get the deleted-aware list.
    */
   deletedAt?: Date | null;
+  /** Optional active flag — only read by `effectiveDirectReportIds` / `firstActiveApproverId`. */
+  isActive?: boolean;
 }
 
 /**
@@ -32,9 +36,12 @@ export interface SalesUserEdge {
  * the target is in the caller's subtree. The walk is bounded by the number of
  * edges and guards against cycles (defensive — the tree shouldn't have any).
  *
+ * G3: a soft-deleted node in the middle of the chain is walked THROUGH (an ASM above a deleted SO
+ * can view that SO's ISRs); a soft-deleted TARGET is never viewable (a resigned user is not a member).
+ *
  * @param targetId           the SalesUser the caller wants to view
  * @param callerSalesUserId  the caller's own SalesUser.id
- * @param edges              tenant-scoped {id, reportingToId} edge list
+ * @param edges              tenant-scoped {id, reportingToId, deletedAt?} edge list
  */
 export function isSelfOrDescendant(
   targetId: string,
@@ -45,10 +52,15 @@ export function isSelfOrDescendant(
   if (targetId === callerSalesUserId) return true;
 
   const parentOf = new Map<string, string | null>();
-  for (const e of edges) parentOf.set(e.id, e.reportingToId);
+  const deleted = new Set<string>();
+  for (const e of edges) {
+    parentOf.set(e.id, e.reportingToId);
+    if (e.deletedAt != null) deleted.add(e.id);
+  }
 
-  // The target must exist in the tenant's edge list to be viewable at all.
+  // The target must exist in the tenant's edge list to be viewable at all, and must be live.
   if (!parentOf.has(targetId)) return false;
+  if (deleted.has(targetId)) return false;
 
   const seen = new Set<string>();
   let current: string | null = targetId;
@@ -109,6 +121,60 @@ export function descendantSalesUserIds(
 }
 
 /**
+ * A node counts as a LIVE, ACTIVE team member: not soft-deleted and not deactivated. Edges loaded
+ * without the optional fields (legacy callers / tests) are treated as live + active.
+ */
+export function isLiveActiveNode(e: SalesUserEdge): boolean {
+  return e.deletedAt == null && e.isActive !== false;
+}
+
+/**
+ * G3 — the manager's EFFECTIVE direct reports: every live+active node directly under the manager,
+ * PLUS — for a direct report that is soft-deleted or inactive (a vacant slot) — that slot's own
+ * effective reports, recursively. So an ASM whose SO resigned lists the SO's ISRs as their own
+ * direct reports (the same "skip the vacant level" rule KycService.resolveInitialRouting applies to
+ * approvals). Order: direct reports first in edge order, then promoted ones in BFS order. Cycle-safe.
+ *
+ * @param managerId  the manager whose team list is being built
+ * @param edges      tenant-scoped edge list INCLUDING deleted/inactive nodes (`loadSalesHierarchy`)
+ */
+export function effectiveDirectReportIds(managerId: string, edges: SalesUserEdge[]): string[] {
+  const childrenOf = new Map<string, SalesUserEdge[]>();
+  for (const e of edges) {
+    if (!e.reportingToId) continue;
+    const arr = childrenOf.get(e.reportingToId) ?? [];
+    arr.push(e);
+    childrenOf.set(e.reportingToId, arr);
+  }
+  const out: string[] = [];
+  const visited = new Set<string>([managerId]);
+  const queue: string[] = [managerId];
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    for (const child of childrenOf.get(current) ?? []) {
+      if (visited.has(child.id)) continue; // cycle guard
+      visited.add(child.id);
+      if (isLiveActiveNode(child)) out.push(child.id);
+      else queue.push(child.id); // vacant slot → walk through to its reports
+    }
+  }
+  return out;
+}
+
+/**
+ * The effective direct reports reached ONLY through a vacant (deleted / inactive) direct report —
+ * i.e. `effectiveDirectReportIds` minus the manager's own live+active direct children. Callers that
+ * already load the direct children with a Prisma `subordinates` include use this to fetch the extra
+ * (promoted) rows only when there are any.
+ */
+export function promotedReportIds(managerId: string, edges: SalesUserEdge[]): string[] {
+  const direct = new Set(
+    edges.filter((e) => e.reportingToId === managerId && e.id !== managerId && isLiveActiveNode(e)).map((e) => e.id),
+  );
+  return effectiveDirectReportIds(managerId, edges).filter((id) => !direct.has(id));
+}
+
+/**
  * Resolve the viewer's IMMEDIATE REPORTEE for an outlet — the viewer's DIRECT report
  * through whom the chain of command reaches the outlet's assigned rep, so a reviewer
  * knows whom to call to action the outlet.
@@ -139,20 +205,32 @@ export function immediateReporteeForOutlet(
   if (!viewerSalesUserId || assignedSalesUserIds.length === 0) return null;
 
   const parentOf = new Map<string, string | null>();
-  for (const e of edges) parentOf.set(e.id, e.reportingToId);
+  const deleted = new Set<string>();
+  for (const e of edges) {
+    parentOf.set(e.id, e.reportingToId);
+    if (e.deletedAt != null) deleted.add(e.id);
+  }
 
   for (const repId of assignedSalesUserIds) {
     // The rep must exist in the tenant's edge list to be walkable at all.
     if (!repId || !parentOf.has(repId)) continue;
     const seen = new Set<string>();
     let current: string | null = repId;
+    // G3: the top-most LIVE node seen so far on the way up. When the viewer's direct report on this
+    // chain is soft-deleted, the immediate reportee is the next live person below that vacant slot
+    // (the viewer's EFFECTIVE direct report) — never the deleted person.
+    let topLive: string | null = null;
     while (current) {
       if (seen.has(current)) break; // cycle guard
       seen.add(current);
+      if (!deleted.has(current)) topLive = current;
       const parent = parentOf.get(current) ?? null;
       // `current`'s parent is the viewer → `current` is a direct report of the viewer,
       // and it is the (inclusive) ancestor of the assigned rep = the immediate reportee.
-      if (parent === viewerSalesUserId) return current;
+      if (parent === viewerSalesUserId) {
+        if (topLive) return topLive;
+        break; // every node on this chain is deleted → no reportee via this rep
+      }
       current = parent;
     }
   }
@@ -163,6 +241,8 @@ export interface SalesApproverNode {
   id: string;
   reportingToId: string | null;
   isActive: boolean;
+  /** G3: a soft-deleted node is a vacant level — skipped exactly like an inactive one. */
+  deletedAt?: Date | null;
 }
 
 /**
@@ -172,8 +252,12 @@ export interface SalesApproverNode {
  * ("the next level approves; if that level is vacant, the level above it does").
  * Returns null when no active manager exists up the chain. Bounded + cycle-safe.
  *
+ * G3: pass a node list that INCLUDES soft-deleted nodes (with `deletedAt`) so the walk continues past
+ * a deleted manager instead of stopping at a dangling reference — exactly resolveInitialRouting's rule
+ * (skip `!isActive || deletedAt != null`). Also used as the "next active manager" for DISPLAY.
+ *
  * @param submitterSalesUserId  the SalesUser who filed the KYC
- * @param nodes                 tenant-scoped node list with isActive
+ * @param nodes                 tenant-scoped node list with isActive (+ deletedAt)
  */
 export function firstActiveApproverId(
   submitterSalesUserId: string,
@@ -193,7 +277,7 @@ export function firstActiveApproverId(
     hops++;
     const node = byId.get(currentId);
     if (!node) break; // dangling reference
-    if (node.isActive) return node.id;
+    if (node.isActive && node.deletedAt == null) return node.id;
     currentId = node.reportingToId;
   }
   return null;

@@ -10,6 +10,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { NOT_INTERESTED_BLOCKING_KYC_STATUSES, NOT_INTERESTED_REFUSAL } from './kyc-not-interested.constants';
+import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus, EntityType, GstRegistrationType, PaymentDetailsStatus } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -1125,11 +1126,7 @@ export class KycService {
    * Deleted nodes are never team members themselves, and the caller must be live.
    */
   private async callerSalesTeam(user: JwtPayload): Promise<{ salesUserId: string; team: Set<string> } | null> {
-    const nodes = await this.prisma.salesUser.findMany({
-      where: { clientId: user.clientId },
-      select: { id: true, reportingToId: true, userId: true, deletedAt: true },
-    });
-    if (!Array.isArray(nodes)) return null;
+    const nodes = await loadSalesHierarchy(this.prisma, user.clientId);
     const me = nodes.find((n) => n.userId === user.sub && n.deletedAt == null);
     if (!me) return null;
     return { salesUserId: me.id, team: descendantSalesUserIds(me.id, nodes) };
@@ -1345,10 +1342,7 @@ export class KycService {
 
     // G3: include soft-deleted nodes so the walk passes THROUGH a deleted middle manager (same rule as
     // callerSalesTeam + the sales outlet picker); descendantSalesUserIds never returns a deleted node.
-    const nodes = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId } },
-      select: { id: true, reportingToId: true, userId: true, deletedAt: true },
-    });
+    const nodes = await loadSalesHierarchy(this.prisma, user.clientId);
     const subtree = descendantSalesUserIds(caller.id, nodes);
     const subtreeUserIds = nodes.filter((n) => subtree.has(n.id)).map((n) => n.userId);
     return { callerSalesUserId: caller.id, subtreeUserIds, subtreeSalesUserIds: subtree };
@@ -1365,6 +1359,7 @@ export class KycService {
     user: JwtPayload,
     submitterUserId: string,
     partnerId?: string | null,
+    outletId?: string | null,
   ): Promise<void> {
     if (this.canReadTenantWide(user.role)) return; // admins/Gifsy + MIS read tenant-wide
     if (submitterUserId === user.sub) return; // own submission
@@ -1381,14 +1376,24 @@ export class KycService {
     // list and must be able to open it, even though the ORIGINAL submitter is in a
     // different branch. An UNRELATED SO (neither submitter-chain nor current-assignee-
     // chain) still falls through to Forbidden below. Tenant-scoped via outlet.clientId.
-    if (partnerId) {
+    // R5 (PLATFORM-WIDE, owner-approved 2026-11-17): OUTLET-level when the submission records its outlet
+    // (G2 `outletId`) — only THAT outlet's active assignment counts, so a rep holding O2 of a multi-outlet
+    // owner can no longer open the KYC filed for O1. Legacy rows (`outletId` null) keep the partner-level
+    // rule. The routed approver is unaffected: they sit in the submitter's chain → Path A above. The
+    // subtree walks THROUGH soft-deleted managers (resolveSalesScope → loadSalesHierarchy).
+    const outletScope = outletId
+      ? { id: outletId, clientId: user.clientId }
+      : partnerId
+        ? { partnerId, clientId: user.clientId }
+        : null;
+    if (outletScope) {
       const activeAssignment = await this.prisma.salesUserAssignment.findFirst({
         where: {
           unassignedAt: null,
           salesUserId: { in: Array.from(scope.subtreeSalesUserIds) },
           // Outlet carries its own tenant tag (clientId) — scope to this tenant so the
           // assignment lookup can never cross a tenant boundary.
-          outlet: { partnerId, clientId: user.clientId },
+          outlet: outletScope,
         },
         select: { id: true },
       });
@@ -1422,10 +1427,12 @@ export class KycService {
       throw new ForbiddenException('Only the submitting rep’s reporting manager can approve this KYC.');
     }
 
-    const nodes = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true, isActive: true },
-    });
+    // R1/G3: the node list INCLUDES soft-deleted managers (loadSalesHierarchy) so both checks below walk
+    // THROUGH a deleted SO exactly like resolveInitialRouting routed the KYC past it — a KYC routed to the
+    // ASM above a deleted SO is approvable/rejectable by that ASM (the queue and the action agree).
+    // firstActiveApproverId skips deleted + inactive levels; isSelfOrDescendant never treats a deleted
+    // node as the submitter. Before this, the walk stopped at the missing SO and the ASM got a 403.
+    const nodes = await loadSalesHierarchy(this.prisma, user.clientId);
 
     // Multi-stage sales approval (Bajaj, via multiLevelApproval): the routed approver ADVANCES as the
     // submission climbs SO→ASM, so a single "first active approver" check would reject the ASM at the
@@ -1435,7 +1442,8 @@ export class KycService {
     // (Deoleo) keep the strict first-active-approver check below — byte-identical. Same helper as the
     // first-approve climb, so the two can never disagree (even on a transient feature-resolve error).
     if (await this.isMultiLevelApproval(user.clientId)) {
-      const callerActive = nodes.find((n) => n.id === caller.id)?.isActive === true;
+      const callerNode = nodes.find((n) => n.id === caller.id);
+      const callerActive = callerNode?.isActive === true && callerNode.deletedAt == null;
       if (callerActive && caller.id !== submitter.id && isSelfOrDescendant(submitter.id, caller.id, nodes)) {
         return;
       }
@@ -3273,7 +3281,7 @@ export class KycService {
     // non-admin non-owner (a sales reviewer sees PAN/bank as last-4). partnerId widens
     // the read to the outlet's CURRENT assignee chain (reassignment case — matches the
     // list/targets views in buildOutlets), not just the original submitter chain.
-    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId);
+    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId, submission.outletId);
 
     // ── Task 3.4e: DPDP read-masking ─────────────────────────────────────────
     // Mask sensitive fields (bank account, PAN, GST → last 4) for non-admin callers
@@ -4282,7 +4290,7 @@ export class KycService {
     // same widening as getOne, so the ledger read matches what the list exposes); an
     // out-of-chain manager is Forbidden. (Partner callers are already scoped to their
     // own via the where.userId filter above → a foreign id 404s here.)
-    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId);
+    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId, submission.outletId);
 
     const partner = submission.partner;
     return {

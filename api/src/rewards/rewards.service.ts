@@ -30,6 +30,7 @@ import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibili
 import { isGifsyOperator, isTenantAdmin, tenantScope } from '../common/tenant-scope';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
+import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { NOT_PARKED_OUTLET } from '../sales/sales.service';
 import { generateTenantOrderNumber } from './order-number.helper';
 import {
@@ -1480,10 +1481,9 @@ export class RewardsService {
     //    seed shape; both live assignment writers key on outletId) never appears in the
     //    list, so it no longer authorizes; nor does a PARKED outlet the rep cannot see.
     //    Same rule for reps and managers.
-    const edges = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true },
-    });
+    //    G3: the SAME deleted-aware tenant read as getMyOutlets (loadSalesHierarchy) — an ASM above a
+    //    deleted SO may redeem for that SO's ISRs' outlets, exactly the ones the list shows them.
+    const edges = await loadSalesHierarchy(this.prisma, user.clientId);
     const subtreeIds = [...descendantSalesUserIds(callerSalesUser.id, edges)];
     const assignment = await this.prisma.salesUserAssignment.findFirst({
       where: {

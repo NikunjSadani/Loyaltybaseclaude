@@ -308,6 +308,35 @@ describe('SchemeEnrollmentService', () => {
       await expect(service.enroll(salesUser, 's1', { enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9', formValues: { f1: 'x' } })).rejects.toBeInstanceOf(ForbiddenException);
     });
 
+    it('G3: an ASM above a soft-DELETED SO can enroll a row tagged to that SO\'s ISR; a row tagged to the deleted SO itself is refused', async () => {
+      const DEL = new Date('2026-11-01');
+      const NODES = [
+        { id: 'su-caller', reportingToId: null, deletedAt: null },
+        { id: 'su-so', reportingToId: 'su-caller', deletedAt: DEL },
+        { id: 'su-child', reportingToId: 'su-so', deletedAt: null },
+      ];
+      mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-caller' });
+      // Honour a deletedAt:null filter like the DB (the pre-G3 read lost the SO → the ISR fell out of reach).
+      mockPrisma.salesUser.findMany.mockImplementation((args: { where: { deletedAt?: null } }) =>
+        Promise.resolve(NODES.filter((n) => !('deletedAt' in args.where && n.deletedAt))),
+      );
+      mockPrisma.schemeOutlet.findFirst.mockResolvedValue(standaloneRow); // tagged su-child (the ISR)
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(null);
+      mockPrisma.schemeEnrollment.create.mockResolvedValue({ id: 'enr9', schemeId: 's1', schemeOutletId: 'ro9', currentVersion: 1 });
+      mockPrisma.schemeSubmission.create.mockResolvedValue({ id: 'sub9' });
+
+      const res = await service.enroll(salesUser, 's1', { enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9', formValues: { f1: 'Kirana' } });
+      expect(res.enrollment.id).toBe('enr9');
+      expect(mockPrisma.salesUser.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
+
+      mockPrisma.schemeOutlet.findFirst.mockResolvedValue({ ...standaloneRow, taggedSalesUserId: 'su-so' });
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null); // no assignment reach either
+      await expect(
+        service.enroll(salesUser, 's1', { enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9', formValues: { f1: 'x' } }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
     it('forbids self-enroll of a standalone row (D19)', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
       mockPrisma.schemeOutlet.findFirst.mockResolvedValue(standaloneRow);

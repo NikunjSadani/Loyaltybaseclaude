@@ -48,7 +48,8 @@ type FlowVariant = 'STANDARD' | 'SO_DECLARATION';
 /** G1 — the server's reasons "Not interested" is refused (same wording as the API's 409). */
 type NotInterestedBlock = 'APPROVED' | 'IN_REVIEW';
 const NOT_INTERESTED_BLOCK_REASON: Record<NotInterestedBlock, string> = {
-  APPROVED:  "This outlet's KYC is already approved — it can't be marked Not interested.",
+  // R4: "was … before" — also true for an outlet approved once whose latest re-KYC was rejected.
+  APPROVED:  "This outlet was KYC-approved before — it can't be marked Not interested.",
   IN_REVIEW: "This outlet's KYC is under review — it can't be marked Not interested now.",
 };
 

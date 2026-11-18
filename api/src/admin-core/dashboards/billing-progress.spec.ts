@@ -46,7 +46,7 @@ interface World {
   outlets: OutletSeed[];
   targets: Array<{ clientId?: string; outletCode: string; month: string; targetValues: Record<string, unknown> }>;
   sales: Array<{ clientId?: string; outletCode: string; month: string; kpiValues: Record<string, unknown>; updatedAt?: Date }>;
-  salesUsers: Array<{ id: string; reportingToId: string | null; level: number; code: string; name: string; clientId?: string; isActive?: boolean }>;
+  salesUsers: Array<{ id: string; reportingToId: string | null; level: number; code: string; name: string; clientId?: string; isActive?: boolean; deletedAt?: Date | null }>;
   lastApply?: { importId: string; createdAt: Date; appliedById: string; definitionsSnapshot: unknown; clientId?: string; month: string } | null;
   monthSummaries?: unknown;
 }
@@ -82,13 +82,16 @@ function makePrisma(w: World) {
       }),
     },
     salesUser: {
-      findMany: jest.fn(async ({ where }: { where: { clientId: string } }) =>
+      findMany: jest.fn(async ({ where }: { where: { clientId: string; deletedAt?: null } }) =>
         w.salesUsers
           .filter((u) => (u.clientId ?? T) === where.clientId)
+          // Honour a `deletedAt: null` filter like the DB (G3: the loader must NOT filter it).
+          .filter((u) => !('deletedAt' in where && where.deletedAt === null && u.deletedAt))
           .map((u) => ({
             id: u.id,
             reportingToId: u.reportingToId,
             isActive: u.isActive ?? true,
+            deletedAt: u.deletedAt ?? null,
             employeeCode: u.id.toUpperCase(),
             user: { name: u.name },
             hierarchyLevel: { code: u.code, name: u.code === 'RSM' ? 'SM' : u.code, level: u.level },
@@ -384,6 +387,26 @@ describe('loadBillingProgress + summary', () => {
     // availableManagers: above field level (ISR=1), this tenant only, senior first.
     expect(a1.availableManagers.map((m) => m.id)).toEqual(['rsm', 'asm1', 'asm2', 'so2', 'so1']);
     expect(a1.availableManagers[0]).toEqual({ id: 'rsm', name: 'Rita', levelCode: 'RSM', levelName: 'SM' });
+  });
+
+  it('G3: the manager filter + SO/ASM columns walk THROUGH a soft-deleted SO; the deleted SO is never a manager option nor a name', async () => {
+    const w = base();
+    w.salesUsers = [
+      { id: 'rsm', reportingToId: null, level: 4, code: 'RSM', name: 'Rita' },
+      { id: 'asm1', reportingToId: 'rsm', level: 3, code: 'ASM', name: 'Asha' },
+      { id: 'so1', reportingToId: 'asm1', level: 2, code: 'SO', name: 'Gone SO', deletedAt: new Date('2026-11-01') },
+      { id: 'isr1', reportingToId: 'so1', level: 1, code: 'XSR', name: 'Ira' },
+    ];
+    w.outlets[0].reps = ['isr1'];
+    const a1 = await load(w, { managerId: 'asm1' });
+    expect(a1.inScope.map((r) => r.outletCode)).toEqual(['A']); // reached through the deleted SO
+    // SO cell blank (vacant level — never the deleted person, never the ASM mislabelled as SO); ASM cell resolves.
+    expect(a1.inScope[0]).toMatchObject({ soName: null, asmName: 'Asha' });
+    expect(a1.availableManagers.map((m) => m.id)).not.toContain('so1');
+    // A stale URL with the deleted manager's id → empty (never their old team), and no name.
+    const gone = await load(w, { managerId: 'so1' });
+    expect(gone.inScope).toEqual([]);
+    expect(gone.managerName).toBeNull();
   });
 
   it('N1 applies-to: outlets outside the KPI scope are NOT dropped — counted as not covered + listed', async () => {

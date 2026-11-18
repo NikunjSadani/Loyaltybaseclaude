@@ -24,7 +24,8 @@ vi.stubGlobal('fetch', mockFetch);
 
 import NewKYCPage from '../page';
 
-const APPROVED_REASON = "This outlet's KYC is already approved — it can't be marked Not interested.";
+// R4: accurate for an outlet approved once whose latest re-KYC was rejected (the case below) — never "already approved".
+const APPROVED_REASON = "This outlet was KYC-approved before — it can't be marked Not interested.";
 const IN_REVIEW_REASON = "This outlet's KYC is under review — it can't be marked Not interested now.";
 
 const OUTLETS = [
@@ -61,6 +62,7 @@ describe('G1 — Not interested is disabled, with the reason, for approved / in-
     deepLink('o-approved');
     render(<NewKYCPage />);
     expect(await screen.findByTestId('ni-blocked-reason')).toHaveTextContent(APPROVED_REASON);
+    expect(screen.getByTestId('ni-blocked-reason')).not.toHaveTextContent(/already approved/i);
     expect(screen.getByTestId('ni-btn')).toBeDisabled();
     expect(screen.getByTestId('ni-btn')).toHaveAttribute('aria-describedby', 'ni-blocked-reason');
   });

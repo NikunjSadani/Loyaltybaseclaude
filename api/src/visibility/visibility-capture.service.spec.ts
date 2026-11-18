@@ -440,6 +440,35 @@ describe('VisibilityCaptureService', () => {
     ]);
   });
 
+  it('G3: an ASM above a soft-deleted SO reaches the ISR\'s outlet AND gets the ISR as a promoted Team-Member option (never the SO)', async () => {
+    const DEL = new Date('2026-11-01');
+    mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'asm', hierarchyLevel: { code: 'SO' }, subordinates: [] });
+    const NODES = [
+      { id: 'asm', reportingToId: null, userId: 'u-asm', isActive: true, deletedAt: null },
+      { id: 'so', reportingToId: 'asm', userId: 'u-so', isActive: true, deletedAt: DEL },
+      { id: 'isr', reportingToId: 'so', userId: 'u-isr', isActive: true, deletedAt: null },
+    ];
+    // Edge read honours a deletedAt:null filter like the DB; the promoted-member fetch is by id.
+    mockPrisma.salesUser.findMany.mockImplementation((args: { where: { id?: unknown; deletedAt?: null } }) =>
+      Promise.resolve(
+        args.where.id
+          ? [{ id: 'isr', employeeCode: 'E-ISR', user: { name: 'Isr One' } }]
+          : NODES.filter((n) => !('deletedAt' in args.where && n.deletedAt)),
+      ),
+    );
+    mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'o1', salesUser: { userId: 'u-isr' } }]);
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      { id: 'o1', outletCode: 'OC1', name: 'Shop 1', zone: null, state: null, outletType: { code: 'SSS' } },
+    ]);
+    mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+
+    const res = await service.getSalesEligible(user);
+    const aWhere = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+    expect([...aWhere.salesUserId.in].sort()).toEqual(['asm', 'isr']);
+    expect(res.members).toEqual([{ id: 'isr', name: 'Isr One', submitterUserIds: ['u-isr'] }]);
+    expect(mockPrisma.salesUser.findMany.mock.calls[0][0].where).toEqual({ clientId: 't1' });
+  });
+
   it('getSalesEligible returns members [] for a leaf rep with no downline', async () => {
     mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1', hierarchyLevel: { code: 'SO' }, subordinates: [] });
     mockPrisma.outlet.findMany.mockResolvedValue([

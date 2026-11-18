@@ -18,6 +18,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { descendantSalesUserIds, SalesUserEdge } from '../sales/sales-hierarchy-access.helper';
+import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { generateNumericOtp } from '../common/otp';
 import { claimOtpAttempt, markOtpUsed, whyOtpClaimRefused } from '../common/otp-attempt';
 import { startOfIstDay, endOfIstDay, istDayRangeFilter } from '../common/ist-date';
@@ -625,11 +626,13 @@ export class SchemeEnrollmentService {
     return caller;
   }
 
+  /**
+   * G3: deleted-aware tenant edges (loadSalesHierarchy) — every reach in this service (enroll-on-behalf
+   * guard, roster lists, scheme outlet reach) walks THROUGH a soft-deleted manager to their live reports,
+   * the same scope as the sales outlet picker; the deleted node itself is never in the reach.
+   */
   private async loadSalesEdges(clientId: string): Promise<SalesUserEdge[]> {
-    return this.prisma.salesUser.findMany({
-      where: { clientId, deletedAt: null },
-      select: { id: true, reportingToId: true },
-    });
+    return loadSalesHierarchy(this.prisma, clientId);
   }
 
   private async hasActiveAssignment(

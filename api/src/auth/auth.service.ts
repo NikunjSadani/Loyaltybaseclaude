@@ -31,6 +31,7 @@ import {
   isPartnerLoginRole,
   PartnerDisplayIdentity,
 } from '../partner/partner-display.helper';
+import { resolveNextActiveManager } from '../sales/sales-hierarchy.loader';
 import * as crypto from 'crypto';
 
 /**
@@ -106,10 +107,13 @@ export class AuthService {
       this.prisma.salesUser.findUnique({
         where: { userId: user.sub },
         select: {
-          id: true, employeeCode: true, region: true, zone: true,
+          id: true, employeeCode: true, region: true, zone: true, clientId: true,
           // Reporting manager — surfaced on /sales/profile (name + designation + phone).
+          // R3: isActive/deletedAt decide whether the DIRECT manager can be shown (see below).
           reportingTo: {
             select: {
+              isActive: true,
+              deletedAt: true,
               user: { select: { name: true, phone: true } },
               hierarchyLevel: { select: { name: true } },
             },
@@ -126,6 +130,24 @@ export class AuthService {
       // paints the outlet name from the first frame. Never throws.
       this.resolveLoginDisplay(user.role, user.sub, user.clientId, user.phone ?? null),
     ]);
+
+    // R3 (G3, PLATFORM-WIDE owner-approved 2026-11-17): the profile's "reporting manager" is the NEXT ACTIVE
+    // manager — the person this rep's KYCs are routed to (resolveInitialRouting's rule). A soft-deleted /
+    // deactivated direct manager is never shown; the walk continues up the chain (resolveNextActiveManager).
+    // Fast path: a live+active direct manager is shown as before (no extra query). Response shape unchanged.
+    let salesUserOut: Record<string, unknown> | null = null;
+    if (salesUser) {
+      const { reportingTo, clientId: suClientId, ...rest } = salesUser;
+      let manager: { user: { name: string | null; phone: string | null } | null; hierarchyLevel: { name: string } | null } | null =
+        reportingTo && reportingTo.isActive && reportingTo.deletedAt == null
+          ? { user: reportingTo.user, hierarchyLevel: reportingTo.hierarchyLevel }
+          : null;
+      if (!manager && reportingTo) {
+        const next = await resolveNextActiveManager(this.prisma, suClientId, rest.id);
+        manager = next ? { user: next.user, hierarchyLevel: next.hierarchyLevel ? { name: next.hierarchyLevel.name } : null } : null;
+      }
+      salesUserOut = { ...rest, reportingTo: manager };
+    }
 
     const wallet = channelPartner
       ? await this.prisma.wallet.findUnique({
@@ -186,7 +208,7 @@ export class AuthService {
               };
             })()
           : null,
-        salesUser: salesUser ?? null,
+        salesUser: salesUserOut,
       },
     };
   }

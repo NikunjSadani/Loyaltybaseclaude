@@ -290,12 +290,15 @@ export async function loadBillingProgress(
         },
       },
     }),
+    // G3: INCLUDES soft-deleted users (deletedAt) so the manager-downline filter and the SO/ASM name columns
+    // walk THROUGH a resigned manager; deleted users are never offered as a manager nor shown as a name.
     prisma.salesUser.findMany({
-      where: { clientId, deletedAt: null },
+      where: { clientId },
       select: {
         id: true,
         reportingToId: true,
         isActive: true,
+        deletedAt: true,
         employeeCode: true,
         user: { select: { name: true } },
         hierarchyLevel: { select: { code: true, name: true, level: true } },
@@ -335,17 +338,20 @@ export async function loadBillingProgress(
 
   // ── managers ──
   const userById = new Map(salesUsers.map((u) => [u.id, u]));
+  const liveUsers = salesUsers.filter((u) => u.deletedAt == null);
   const nameOf = (u: (typeof salesUsers)[number]) => u.user?.name || u.employeeCode;
   const minLevel = levels.length
     ? Math.min(...levels.map((l) => l.level))
-    : salesUsers.length
-      ? Math.min(...salesUsers.map((u) => u.hierarchyLevel?.level ?? Infinity))
+    : liveUsers.length
+      ? Math.min(...liveUsers.map((u) => u.hierarchyLevel?.level ?? Infinity))
       : Infinity;
-  const availableManagers = salesUsers
+  const availableManagers = liveUsers
     .filter((u) => u.isActive && u.hierarchyLevel && u.hierarchyLevel.level > minLevel)
     .sort((a, b) => b.hierarchyLevel.level - a.hierarchyLevel.level || nameOf(a).localeCompare(nameOf(b)))
     .map((u) => ({ id: u.id, name: nameOf(u), levelCode: u.hierarchyLevel.code, levelName: u.hierarchyLevel.name }));
-  const selectedManager = f.managerId ? userById.get(f.managerId) : undefined;
+  // A deleted manager id (stale URL) behaves like an unknown id → empty downline (never their old team).
+  const selectedCandidate = f.managerId ? userById.get(f.managerId) : undefined;
+  const selectedManager = selectedCandidate && selectedCandidate.deletedAt == null ? selectedCandidate : undefined;
   const managerName = selectedManager ? nameOf(selectedManager) : null;
 
   const availableOutletTypes = [
@@ -369,18 +375,22 @@ export async function loadBillingProgress(
     downline = selectedManager
       ? descendantSalesUserIds(
           f.managerId,
-          salesUsers.map((u) => ({ id: u.id, reportingToId: u.reportingToId })),
+          salesUsers.map((u) => ({ id: u.id, reportingToId: u.reportingToId, deletedAt: u.deletedAt ?? null })),
         )
       : new Set<string>();
   }
 
-  /** Nearest self-or-ancestor with level code `code` (cycle-safe). */
+  /**
+   * Nearest LIVE self-or-ancestor with level code `code` (cycle-safe). G3: the walk passes THROUGH a deleted
+   * node and never names one — a vacant SO slot leaves the SO cell blank (a level-specific column must not
+   * show the ASM as the "SO") while the ASM cell above it still resolves.
+   */
   const ancestorName = (startId: string | undefined, code: string): string | null => {
     const seen = new Set<string>();
     let cur = startId ? userById.get(startId) : undefined;
     while (cur && !seen.has(cur.id)) {
       seen.add(cur.id);
-      if (cur.hierarchyLevel?.code === code) return nameOf(cur);
+      if (cur.deletedAt == null && cur.hierarchyLevel?.code === code) return nameOf(cur);
       cur = cur.reportingToId ? userById.get(cur.reportingToId) : undefined;
     }
     return null;

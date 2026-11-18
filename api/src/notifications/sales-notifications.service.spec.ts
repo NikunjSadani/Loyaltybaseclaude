@@ -114,6 +114,29 @@ describe('SalesNotificationsService', () => {
       expect(arg.variables).toEqual({ url: '/sales/kyc' });
     });
 
+    it('G3: walks PAST a soft-deleted SO and notifies the ASM the KYC was routed to (deleted-aware, tenant-scoped read)', async () => {
+      prisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'isr' })
+        .mockResolvedValueOnce({ userId: 'u-asm' });
+      // Honour a deletedAt:null filter like the DB — the pre-G3 read would lose the SO and stop the walk.
+      const NODES = [
+        { id: 'isr', reportingToId: 'so', isActive: true, deletedAt: null, userId: 'u-isr' },
+        { id: 'so', reportingToId: 'asm', isActive: true, deletedAt: new Date('2026-11-01'), userId: 'u-so' },
+        { id: 'asm', reportingToId: null, isActive: true, deletedAt: null, userId: 'u-asm' },
+      ];
+      prisma.salesUser.findMany.mockImplementation((args: { where: { deletedAt?: null } }) =>
+        Promise.resolve(NODES.filter((n) => !('deletedAt' in args.where && n.deletedAt))),
+      );
+
+      await service.kycSubmittedForApproval('c1', 'login-isr', 'Acme Store');
+
+      expect(prisma.salesUser.findMany.mock.calls[0][0].where).toEqual({ clientId: 'c1' });
+      // The approver login lookup targeted the ASM (never the deleted SO).
+      expect(prisma.salesUser.findFirst.mock.calls[1][0].where).toMatchObject({ id: 'asm', clientId: 'c1', deletedAt: null });
+      expect(notifications.enqueue).toHaveBeenCalledTimes(1);
+      expect(notifications.enqueue.mock.calls[0][0].userId).toBe('u-asm');
+    });
+
     it('does NOT enqueue when the submitter is not a sales user', async () => {
       prisma.salesUser.findFirst.mockResolvedValue(null);
 
@@ -263,6 +286,19 @@ describe('SalesNotificationsService', () => {
         expect(arg).toMatchObject({ channel: 'PUSH', subject: 'New targets uploaded' });
         expect(arg.variables).toEqual({ url: '/sales/dashboard' });
       });
+    });
+
+    it('G3: the "SO" push goes to the next ACTIVE manager past a soft-deleted SO, never the deleted one', async () => {
+      prisma.salesUserAssignment.findMany.mockResolvedValue([{ salesUser: { id: 'isr', userId: 'u-isr' } }]);
+      prisma.salesUser.findMany.mockResolvedValue([
+        { id: 'isr', reportingToId: 'so', isActive: true, deletedAt: null, userId: 'u-isr' },
+        { id: 'so', reportingToId: 'asm', isActive: true, deletedAt: new Date('2026-11-01'), userId: 'u-so' },
+        { id: 'asm', reportingToId: null, isActive: true, deletedAt: null, userId: 'u-asm' },
+      ]);
+      await service.targetsUploaded('c1', ['o1']);
+      const recipients = notifications.enqueue.mock.calls.map((c) => c[0].userId).sort();
+      expect(recipients).toEqual(['u-asm', 'u-isr']);
+      expect(prisma.salesUser.findMany).toHaveBeenCalledTimes(1); // one deleted-aware read serves both maps
     });
 
     it('does NOT enqueue when no assignments are found', async () => {

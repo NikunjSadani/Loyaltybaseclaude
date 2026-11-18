@@ -32,6 +32,8 @@ const mockPrisma = {
   outletSalesRecord: { findMany: jest.fn() },
   kpiDef:            { findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
+  // R3: getSalesTeam resolves the NEXT ACTIVE manager past a vacant (deleted / inactive) direct manager.
+  salesUser:         { findMany: jest.fn(), findFirst: jest.fn() },
   // capturePayoutDetails runs its partner row-lock (SELECT … FOR UPDATE via $queryRaw), uniqueness
   // check + write inside an interactive tx; the tx client reuses the same mocks (shared so call ORDER
   // across the row lock and the advisory identity locks ($executeRaw) is observable).
@@ -1108,19 +1110,50 @@ describe('PartnerService', () => {
       expect(res.team[0].employeeCode).toBe('E-r1');
     });
 
-    it('excludes an inactive/deleted reporting manager', async () => {
+    // R3 (G3): a deleted / inactive direct manager is NEVER shown — the NEXT ACTIVE manager up the chain is
+    // (the person the rep's KYCs are routed to), and showing nobody is only right when nobody is active above.
+    it('a deleted reporting manager is never shown; the NEXT ACTIVE manager (routing\'s rule) is', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
       mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1' }]);
       const deletedMgr = {
-        id: 'm1', employeeCode: 'E-m1', isActive: false, deletedAt: new Date(),
+        id: 'm1', clientId: 'deoleo', employeeCode: 'E-m1', isActive: true, deletedAt: new Date(),
         user: { name: 'Gone Manager', phone: '9' }, hierarchyLevel: { name: 'SO', level: 4 },
       };
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
         rep('r1', 'Anita Rep', '9000000001', 'ISR', 5, deletedMgr),
       ]);
+      // Tenant tree: asm ← m1 (DELETED) ← r1.
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'asm', reportingToId: null, userId: 'u-asm', isActive: true, deletedAt: null },
+        { id: 'm1', reportingToId: 'asm', userId: 'u-m1', isActive: true, deletedAt: new Date() },
+        { id: 'r1', reportingToId: 'm1', userId: 'u-r1', isActive: true, deletedAt: null },
+      ]);
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'asm', employeeCode: 'E-asm', user: { name: 'Arun ASM', phone: '9000000003' }, hierarchyLevel: { name: 'ASM', level: 3 },
+      });
       const res = await service.getSalesTeam(partner);
-      expect(res.team).toHaveLength(1);
-      expect(res.team[0].name).toBe('Anita Rep');
+      expect(res.team.map((m: { name: string }) => m.name)).toEqual(['Anita Rep', 'Arun ASM']);
+      expect(res.team.some((m: { name: string }) => m.name === 'Gone Manager')).toBe(false);
+      // Tenant-scoped walk + the shown manager must be live and active.
+      expect(mockPrisma.salesUser.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
+      expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].where).toEqual({ id: 'asm', clientId: 'deoleo', deletedAt: null, isActive: true });
+    });
+
+    it('no active manager anywhere above the vacant slot → only the rep (nobody to show)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1' }]);
+      const inactiveMgr = {
+        id: 'm1', clientId: 'deoleo', employeeCode: 'E-m1', isActive: false, deletedAt: null,
+        user: { name: 'Off Manager', phone: '9' }, hierarchyLevel: { name: 'SO', level: 4 },
+      };
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([rep('r1', 'Anita Rep', '9000000001', 'ISR', 5, inactiveMgr)]);
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'm1', reportingToId: null, userId: 'u-m1', isActive: false, deletedAt: null },
+        { id: 'r1', reportingToId: 'm1', userId: 'u-r1', isActive: true, deletedAt: null },
+      ]);
+      const res = await service.getSalesTeam(partner);
+      expect(res.team.map((m: { name: string }) => m.name)).toEqual(['Anita Rep']);
+      expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
     });
 
     it('keeps a user who is BOTH a direct rep and another rep\'s manager at the direct (rep) tier', async () => {

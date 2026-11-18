@@ -30,7 +30,9 @@ export const NOT_INTERESTED_IN_FLIGHT_STATUSES: ReadonlySet<string> = new Set(NO
 
 /** The plain-words refusals (the sales FE shows the same text next to the hidden button). */
 export const NOT_INTERESTED_REFUSAL = {
-  APPROVED: "This outlet's KYC is already approved — it can't be marked Not interested.",
+  // R4: "was … before" — the block also covers an outlet approved once whose LATEST re-KYC was rejected, so
+  // "is already approved" would be false for it. The rule is unchanged (any APPROVED KYC ever blocks).
+  APPROVED: "This outlet was KYC-approved before — it can't be marked Not interested.",
   IN_REVIEW: "This outlet's KYC is under review — it can't be marked Not interested now.",
   PARKED: 'This outlet is parked by the admin.',
 } as const;

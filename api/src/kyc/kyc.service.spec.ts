@@ -201,22 +201,41 @@ const ALL_APPROVED = KYC_FIELD_KEYS.map((k) => ({ fieldKey: k, decision: 'APPROV
  * a row by its where.userId; findMany returns the whole node set. isActive defaults true.
  */
 function primeSalesNodes(
-  nodes: { id: string; reportingToId: string | null; userId: string; isActive?: boolean }[],
+  nodes: { id: string; reportingToId: string | null; userId: string; isActive?: boolean; deletedAt?: Date | null }[],
 ): void {
-  mockPrisma.salesUser.findFirst.mockImplementation((args: { where?: { userId?: string } }) => {
+  mockPrisma.salesUser.findFirst.mockImplementation((args: { where?: { userId?: string; deletedAt?: null } }) => {
     const uid = args?.where?.userId;
-    const n = nodes.find((x) => x.userId === uid);
+    // Honour a `deletedAt: null` filter (the caller / submitter lookups) so a soft-deleted user is not found.
+    const n = nodes.find(
+      (x) => x.userId === uid && !(args?.where && 'deletedAt' in args.where && args.where.deletedAt === null && x.deletedAt),
+    );
     return Promise.resolve(n ? { id: n.id } : null);
   });
-  mockPrisma.salesUser.findMany.mockResolvedValue(
-    nodes.map((n) => ({
-      id: n.id,
-      reportingToId: n.reportingToId,
-      userId: n.userId,
-      isActive: n.isActive ?? true,
-    })),
+  // Honour a `deletedAt: null` filter like the DB would — so a walker that still filters out deleted nodes
+  // (the pre-G3 behaviour) really loses them here and its test fails.
+  mockPrisma.salesUser.findMany.mockImplementation((args: { where?: { deletedAt?: null } }) =>
+    Promise.resolve(
+      nodes
+        .filter((n) => !(args?.where && 'deletedAt' in args.where && args.where.deletedAt === null && n.deletedAt))
+        .map((n) => ({
+          id: n.id,
+          reportingToId: n.reportingToId,
+          userId: n.userId,
+          isActive: n.isActive ?? true,
+          deletedAt: n.deletedAt ?? null,
+        })),
+    ),
   );
 }
+
+/** R1/R5 branch: asm ← so (SOFT-DELETED) ← isr. The KYC routed past the deleted SO lands on the ASM. */
+const DELETED_SO_TREE = [
+  { id: 'rsm-su', reportingToId: null, userId: 'rsm1' },
+  { id: 'asm-su', reportingToId: 'rsm-su', userId: 'asm1' },
+  { id: 'so-su', reportingToId: 'asm-su', userId: 'so1', deletedAt: new Date('2026-11-01') },
+  { id: 'isr-su', reportingToId: 'so-su', userId: 'isr1' },
+];
+const asm: JwtPayload = { sub: 'asm1', role: 'SALES_ASM', clientId: 'deoleo', phone: '', name: '' };
 
 describe('KycService', () => {
   let service: KycService;
@@ -4264,6 +4283,94 @@ describe('KycService', () => {
       expect(where.outlet.partnerId).toBe('p1');
     });
 
+    // ── R5 — the assignment path of the VIEW check is OUTLET-level when the submission records its outlet ──
+    describe('R5 — outlet-level view check (submission.outletId)', () => {
+      // A multi-outlet owner p1: O1 (assigned to far-su, another branch) and O2 (assigned to xsr-su, the SO's ISR).
+      // The salesUserAssignment mock answers like the DB would: a row exists only for the outlet / partner the
+      // where-clause names AND an assignee inside the caller's subtree.
+      const ASSIGNMENTS = [
+        { outletId: 'O1', partnerId: 'p1', salesUserId: 'far-su' },
+        { outletId: 'O2', partnerId: 'p1', salesUserId: 'xsr-su' },
+      ];
+      const assignmentDb = () =>
+        mockPrisma.salesUserAssignment.findFirst.mockImplementation(
+          (args: { where: { salesUserId: { in: string[] }; outlet: { id?: string; partnerId?: string; clientId: string } } }) => {
+            const { outlet, salesUserId } = args.where;
+            const hit = ASSIGNMENTS.find(
+              (a) =>
+                outlet.clientId === 'deoleo' &&
+                (outlet.id ? a.outletId === outlet.id : a.partnerId === outlet.partnerId) &&
+                salesUserId.in.includes(a.salesUserId),
+            );
+            return Promise.resolve(hit ? { id: 'asg' } : null);
+          },
+        );
+      const tree = () =>
+        primeSalesNodes([
+          { id: 'so-su', reportingToId: null, userId: 'so1' },
+          { id: 'xsr-su', reportingToId: 'so-su', userId: 'current-rep' },
+          { id: 'far-su', reportingToId: null, userId: 'far-submitter' },
+        ]);
+
+      it('a team holding O2 of a multi-outlet owner gets 403 opening the KYC filed for O1', async () => {
+        tree();
+        assignmentDb();
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'far-submitter', partnerId: 'p1', outletId: 'O1', partner: null, documents: [], statusHistory: [],
+        });
+        await expect(service.getOne(so, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+        const where = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
+        expect(where.outlet).toEqual({ id: 'O1', clientId: 'deoleo' }); // outlet-level, tenant-scoped
+      });
+
+      it('…and CAN open the KYC filed for O2 (its own outlet)', async () => {
+        tree();
+        assignmentDb();
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's2', userId: 'far-submitter', partnerId: 'p1', outletId: 'O2', partner: null, documents: [], statusHistory: [],
+        });
+        const res = await service.getOne(so, 's2');
+        expect(res.submission.id).toBe('s2');
+      });
+
+      it('a LEGACY row (outletId null) keeps the partner-level rule (O2 still opens the owner\'s KYC)', async () => {
+        tree();
+        assignmentDb();
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's3', userId: 'far-submitter', partnerId: 'p1', outletId: null, partner: null, documents: [], statusHistory: [],
+        });
+        const res = await service.getOne(so, 's3');
+        expect(res.submission.id).toBe('s3');
+        expect(mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where.outlet).toEqual({ partnerId: 'p1', clientId: 'deoleo' });
+      });
+
+      it('the routed approver can always view (submitter-chain path, no assignment needed) — past a deleted SO too', async () => {
+        primeSalesNodes(DELETED_SO_TREE);
+        mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null); // the outlet assignment is irrelevant here
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's4', userId: 'isr1', partnerId: 'p9', outletId: 'O9', partner: null, documents: [], statusHistory: [],
+        });
+        const res = await service.getOne(asm, 's4');
+        expect(res.submission.id).toBe('s4');
+        expect(mockPrisma.salesUserAssignment.findFirst).not.toHaveBeenCalled();
+      });
+
+      it('an ASM above a deleted SO can view their ISR\'s OUTLET KYC filed by someone else (assignment path)', async () => {
+        primeSalesNodes([...DELETED_SO_TREE, { id: 'far-su', reportingToId: null, userId: 'far-submitter' }]);
+        mockPrisma.salesUserAssignment.findFirst.mockImplementation(
+          (args: { where: { salesUserId: { in: string[] }; outlet: { id?: string } } }) =>
+            Promise.resolve(args.where.outlet.id === 'O5' && args.where.salesUserId.in.includes('isr-su') ? { id: 'asg' } : null),
+        );
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's5', userId: 'far-submitter', partnerId: 'p5', outletId: 'O5', partner: null, documents: [], statusHistory: [],
+        });
+        const res = await service.getOne(asm, 's5');
+        expect(res.submission.id).toBe('s5');
+        const inScope = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where.salesUserId.in;
+        expect(inScope).not.toContain('so-su'); // the deleted SO is never a member of the scope
+      });
+    });
+
     it('still forbids an UNRELATED SO — neither submitter-chain NOR current-assignee-chain', async () => {
       // 'far-submitter' is out of chain AND the outlet's current assignment is NOT in the
       // SO's subtree → the assignment lookup returns null → Forbidden preserved.
@@ -4840,6 +4947,64 @@ describe('KycService', () => {
       await expect(service.firstApprove(so, 's1', { remarks: 'ok' })).rejects.toBeInstanceOf(
         ForbiddenException,
       );
+    });
+
+    // ── R1 — the approve ACTION walks past a soft-deleted SO exactly like routing did ───────────────
+    describe('R1 — KYC routed to the ASM past a deleted SO', () => {
+      const routedToAsm = () =>
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'isr1', status: 'PENDING_ASM_APPROVAL', user: { name: 'n', phone: 'p' },
+        });
+
+      it('single-stage tenant: the ASM (first ACTIVE manager past the deleted SO) can approve', async () => {
+        primeSalesNodes(DELETED_SO_TREE);
+        routedToAsm();
+        const res = await service.firstApprove(asm, 's1', { remarks: 'ok' });
+        expect(res.nextStatus).toBe('PENDING_GIFSY');
+        // The node read is tenant-scoped and deleted-aware (no deletedAt filter).
+        expect(mockPrisma.salesUser.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
+      });
+
+      it('multi-level tenant (Bajaj): the ASM in the chain past the deleted SO can approve', async () => {
+        (service as unknown as { tenant: { resolveClient: jest.Mock } }).tenant.resolveClient.mockResolvedValue({
+          features: { multiLevelApproval: true },
+        });
+        primeSalesNodes(DELETED_SO_TREE);
+        routedToAsm();
+        const res = await service.firstApprove(asm, 's1', { remarks: 'ok' });
+        expect(res.nextStatus).toBe('PENDING_GIFSY');
+      });
+
+      it('an ASM in ANOTHER branch is still refused (branch isolation unchanged)', async () => {
+        primeSalesNodes([
+          ...DELETED_SO_TREE.filter((n) => n.userId !== 'asm1'),
+          { id: 'asm-other', reportingToId: 'rsm-su', userId: 'asm1' },
+          { id: 'asm-real', reportingToId: 'rsm-su', userId: 'asm-real' },
+        ].map((n) => (n.id === 'so-su' ? { ...n, reportingToId: 'asm-real' } : n)));
+        routedToAsm();
+        await expect(service.firstApprove(asm, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('a reporting cycle through deleted managers terminates (Forbidden, no hang)', async () => {
+        primeSalesNodes([
+          { id: 'asm-su', reportingToId: null, userId: 'asm1' },
+          { id: 'a-su', reportingToId: 'b-su', userId: 'a', deletedAt: new Date() },
+          { id: 'b-su', reportingToId: 'a-su', userId: 'b', deletedAt: new Date() },
+          { id: 'isr-su', reportingToId: 'a-su', userId: 'isr1' },
+        ]);
+        routedToAsm();
+        await expect(service.firstApprove(asm, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('the approve QUEUE (list) and the ACTION agree: the ASM\'s list scope includes the ISR past the deleted SO', async () => {
+        primeSalesNodes(DELETED_SO_TREE);
+        mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+        mockPrisma.kycSubmission.count.mockResolvedValue(0);
+        mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+        await service.list(asm, {});
+        const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
+        expect([...where.userId.in].sort()).toEqual(['asm1', 'isr1']); // never the deleted SO's own login
+      });
     });
   });
 
@@ -6275,6 +6440,15 @@ describe('KycService', () => {
       expect(res.message).toBe('KYC rejected successfully');
       const historyArg = mockTx.kycStatusHistory.create.mock.calls[0][0].data;
       expect(historyArg.metadata.stage).toBe('GIFSY');
+    });
+
+    it('R1: the ASM can REJECT a KYC routed to them past a deleted SO', async () => {
+      primeSalesNodes(DELETED_SO_TREE);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'isr1', status: 'PENDING_ASM_APPROVAL', user: { phone: 'p' },
+      });
+      const res = await service.reject(asm, 's1', { reason: 'bad' });
+      expect(res.message).toBe('KYC rejected successfully');
     });
   });
 
@@ -8267,7 +8441,7 @@ describe('KycService', () => {
 
     // ── G1 — "Not interested" must not switch off an outlet that is KYC-approved, under review, or admin-parked.
     describe('G1 — notInterested() refuses an approved / in-review / parked outlet', () => {
-      const APPROVED_MSG = "This outlet's KYC is already approved — it can't be marked Not interested.";
+      const APPROVED_MSG = "This outlet was KYC-approved before — it can't be marked Not interested."; // R4 copy
       const IN_REVIEW_MSG = "This outlet's KYC is under review — it can't be marked Not interested now.";
       const PARKED_MSG = 'This outlet is parked by the admin.';
       const withPartner = { ...outlet, partnerId: 'cp-1' };
