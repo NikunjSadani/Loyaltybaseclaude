@@ -2064,6 +2064,19 @@ export class CreditsService {
       reason: string;
       entryIds: string[];
     }>;
+    /**
+     * A-H2: outlets whose whole payout was withheld as TDS this run — NOT sent to the bank (never a ₹0
+     * line). Their entries are settled PAID here (utr `TDS-WITHHELD-<downloadCode>`, paidAt = the
+     * download time) and must be surfaced to the operator (fullyWithheldNote / response headers).
+     */
+    fullyWithheld: Array<{
+      outletId: string;
+      outletName: string;
+      amountPaise: number;
+      tdsWithheldPaise: number;
+      entryIds: string[];
+    }>;
+    fullyWithheldNote: string | null;
   }> {
     const { period, groupType, fieldId, fieldName } = dto;
 
@@ -2342,7 +2355,7 @@ export class CreditsService {
     // FIX-8: the PAN cumulative aggregation + plan + ALL money writes run INSIDE this
     // $transaction, behind the per-PAN advisory locks acquired FIRST — so two concurrent
     // downloads for the same PAN serialize and cannot both under-deduct / mis-attribute recovery.
-    const { rec: download, deductionByOutlet } = await this.prisma.$transaction(
+    const { rec: download, deductionByOutlet, fullyWithheldCodes } = await this.prisma.$transaction(
       async (tx) => {
         // A-M3: all advisory locks in ONE round-trip (sorted → deadlock-safe ordering).
         await lockAdvisoryKeys(tx, sortedLockKeys);
@@ -2503,7 +2516,30 @@ export class CreditsService {
           });
         }
 
-        return { rec, deductionByOutlet: tdsPlan.deductionByOutlet };
+        // A-H2: an outlet whose WHOLE payout was withheld as TDS is not a bank line (a ₹0 line would be
+        // sent to the bank and later "credited ₹0"). Settle its entries here without the bank — guarded
+        // on THIS download's PROCESSING claim — and report them loudly to the operator.
+        const fullyWithheldCodes = payableCodes.filter(
+          (code) => (tdsPlan.deductionByOutlet.get(code) ?? 0n) > 0n && netInTx(code) <= 0,
+        );
+        if (fullyWithheldCodes.length > 0) {
+          const ids = fullyWithheldCodes.flatMap((code) => outletMap.get(code)!.entryIds);
+          const settled = await tx.creditPayoutEntry.updateMany({
+            where: { id: { in: ids }, status: 'PROCESSING', downloadId: rec.id },
+            data: { status: 'PAID', utr: `TDS-WITHHELD-${downloadCode}`, paidAt: runAt },
+          });
+          if (settled.count !== ids.length) {
+            throw new ConflictException(
+              `Could not settle ${ids.length - settled.count} fully-withheld payout(s) for period ${period}. Rolled back — retry the download.`,
+            );
+          }
+          // Nothing left for the bank at all → the download is already fully settled.
+          if (fullyWithheldCodes.length === payableCodes.length) {
+            await tx.creditPayoutDownload.update({ where: { id: rec.id }, data: { status: 'PAID' } });
+          }
+        }
+
+        return { rec, deductionByOutlet: tdsPlan.deductionByOutlet, fullyWithheldCodes };
       },
       { timeout: 180_000, maxWait: 20_000 },
     );
@@ -2512,7 +2548,25 @@ export class CreditsService {
     const netPaiseFor = (code: string): number =>
       outletMap.get(code)!.amountPaise - Number(deductionByOutlet.get(code) ?? 0n);
 
-    const rows: PayoutBatchRow[] = payableCodes.map((code) => {
+    // A-H2: fully-withheld outlets are NOT bank lines (settled in the tx above).
+    const fullyWithheldSet = new Set(fullyWithheldCodes);
+    const bankCodes = payableCodes.filter((code) => !fullyWithheldSet.has(code));
+    const fullyWithheld = fullyWithheldCodes.map((code) => {
+      const info = outletMap.get(code)!;
+      return {
+        outletId: code,
+        outletName: info.outletName,
+        amountPaise: info.amountPaise,
+        tdsWithheldPaise: Number(deductionByOutlet.get(code) ?? 0n),
+        entryIds: info.entryIds,
+      };
+    });
+    const fullyWithheldNote = fullyWithheld.length
+      ? `${fullyWithheld.length} payout${fullyWithheld.length === 1 ? '' : 's'} fully withheld as TDS — not sent to the bank ` +
+        `(outlet${fullyWithheld.length === 1 ? '' : 's'} ${fullyWithheld.map((f) => f.outletId).join(', ')}).`
+      : null;
+
+    const rows: PayoutBatchRow[] = bankCodes.map((code) => {
       const info = outletMap.get(code)!;
       const o = outletDbMap.get(code);
       const snapshot = snapshotMap.get(code)!;
@@ -2537,7 +2591,7 @@ export class CreditsService {
         entryIds: info.entryIds,
       };
     });
-    const totalAmountPaise = payableCodes.reduce((s, code) => s + netPaiseFor(code), 0);
+    const totalAmountPaise = bankCodes.reduce((s, code) => s + netPaiseFor(code), 0);
 
     const payoutBatch: PayoutBatch = {
       id: download.downloadCode,
@@ -2557,7 +2611,7 @@ export class CreditsService {
 
     const buffer = generatePayoutFileBuffer(payoutBatch);
 
-    return { buffer, downloadCode: download.downloadCode, downloadId: download.id, heldEntries };
+    return { buffer, downloadCode: download.downloadCode, downloadId: download.id, heldEntries, fullyWithheld, fullyWithheldNote };
   }
 
   /**

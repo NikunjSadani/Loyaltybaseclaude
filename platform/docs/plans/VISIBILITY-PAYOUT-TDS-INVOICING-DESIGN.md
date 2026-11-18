@@ -182,6 +182,12 @@ rows carry that FY, and the report windows PAID + PROCESSING payouts by `downloa
   paid in full (no change to `payouts.service` / `rewards.service`). A download with no 194R entries issues none of the
   194R reads (Deoleo's 194C downloads are unchanged).
 - **No TDS invoice and no `TdsRecoveryEntry` for 194R** (D7).
+- **Fully withheld payout (audit A-H2):** an outlet whose whole payout is withheld as TDS in a run is NOT a bank line
+  (no ₹0 line). Its entries are settled PAID inside the download tx (utr `TDS-WITHHELD-<downloadCode>`, paidAt = the
+  download time, guarded on this download's PROCESSING claim); the download result + `X-Fully-Withheld-Count/-Note`
+  headers name them and the payout screen shows an amber note; no "credited" message is sent (that only happens on a
+  UTR apply). FAILED / re-bank never touch them (re-bank reads PENDING/FAILED; a UTR row for an all-PAID outlet is a
+  notice, never a write). Open: a later reversal of such an entry follows the PAID path (receivable) — owner to decide.
 
 **Worked examples (PAN = 10%, no PAN = 20%):**
 1. Client on DEDUCT, PAN: visibility ₹15,000 + gift ₹8,000 = ₹23,000 > ₹20,000 → deduct part 10% × 15,000 = **₹1,500**

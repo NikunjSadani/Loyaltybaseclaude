@@ -145,6 +145,7 @@ This layer runs **only** for payout columns marked as **visibility payouts**. Or
 2. **At bank-file generation (Step 3):** the system applies **TDS** in one of two ways (configured per client):
    - **Deduct** — the tax is *withheld* from the outlet's payout. The outlet receives the amount **minus** TDS; the platform sends the TDS to the tax authority. (The outlet bears the tax.)
    - **Gross-up** — the outlet is paid the **full** amount and the tax is borne **on top** by the client. Under **194C** the platform pays it, raising a separate **TDS invoice** and recovering it from the client; under **194R** no TDS invoice is raised — the **194R report** shows it as the client's liability.
+   - **Fully withheld:** if the whole payout of an outlet is taken as TDS, it is **not put in the bank file** (no ₹0 line). It is settled straight away (reference **TDS-WITHHELD-<file code>**), the screen lists it in an amber note after you generate the file, and no "credited" message is sent.
 3. **GST** on a service invoice is **held back** at payout time and **released later**, once the outlet proves it deposited that GST — done on the **GST Reimbursements** screen.
 4. **After the UTR is recorded**, the related invoice is **locked** (its number can no longer be changed).
 

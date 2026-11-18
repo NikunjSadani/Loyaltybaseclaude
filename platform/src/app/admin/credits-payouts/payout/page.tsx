@@ -212,6 +212,8 @@ function PayoutPageInner() {
   const [reversals, setReversals] = useState<Reversal[]>([]);
   const [generating, setGenerating] = useState(false);
   const [genError,   setGenError]   = useState('');
+  // A-H2: payouts fully withheld as TDS are NOT in the bank file — the API names them in headers.
+  const [fullyWithheldNote, setFullyWithheldNote] = useState('');
 
   // UTR upload state
   const [utrDownloadId,  setUtrDownloadId]  = useState('');
@@ -293,6 +295,7 @@ function PayoutPageInner() {
   async function handleGeneratePayoutFile() {
     setGenerating(true);
     setGenError('');
+    setFullyWithheldNote('');
     try {
       const body: Record<string, unknown> = { period, groupType };
       if (groupType === 'SEPARATE' && fieldId) {
@@ -311,6 +314,17 @@ function PayoutPageInner() {
         const json = await res.json().catch(() => ({ error: 'Request failed' }));
         setGenError(json.error ?? `HTTP ${res.status}`);
         return;
+      }
+
+      // A-H2: never silent — show which payouts were fully withheld as TDS (not in this file).
+      const withheldCount = Number(res.headers?.get?.('X-Fully-Withheld-Count') ?? '0');
+      const withheldNote = res.headers?.get?.('X-Fully-Withheld-Note');
+      if (withheldCount > 0) {
+        setFullyWithheldNote(
+          withheldNote
+            ? decodeURIComponent(withheldNote)
+            : `${withheldCount} payout(s) fully withheld as TDS — not sent to the bank.`,
+        );
       }
 
       // Binary response — trigger download
@@ -559,6 +573,20 @@ function PayoutPageInner() {
             {generating ? 'Generating…' : 'Generate & Download'}
           </button>
         </div>
+
+        {fullyWithheldNote && (
+          <div
+            data-testid="fully-withheld-notice"
+            role="status"
+            className="flex items-center gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+            <span>
+              {fullyWithheldNote} Their whole amount was withheld as TDS, so they are already settled and will
+              not appear in the bank&apos;s response file.
+            </span>
+          </div>
+        )}
 
         {genError && (
           <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 rounded-xl px-4 py-3">

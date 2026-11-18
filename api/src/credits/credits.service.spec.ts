@@ -3664,7 +3664,7 @@ describe('CreditsService', () => {
       async function download() {
         mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
         mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-001' });
-        await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+        return service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
       }
       const ledgerRow = () => mockTx.tdsDeductionEntry.createMany.mock.calls[0]?.[0]?.data?.[0];
       beforeEach(() => {
@@ -3888,6 +3888,56 @@ describe('CreditsService', () => {
         expect(lockKeysTaken()).toContain(`R194|deoleo|PAN1|${runFy}`);
         const lockOrder = mockTx.$executeRaw.mock.invocationCallOrder[mockTx.$executeRaw.mock.calls.findIndex((c: unknown[]) => Array.isArray(c[1]))];
         expect(lockOrder).toBeLessThan(mockTx.creditPayoutEntry.updateMany.mock.invocationCallOrder[0]);
+      });
+
+      describe('A-H2: a payout FULLY withheld as TDS never becomes a ₹0 bank line', () => {
+        it('the outlet is left out of the bank file, its entries settle PAID with ref TDS-WITHHELD-<code> at the download time, listed loudly, no message', async () => {
+          policy('DEDUCT');
+          // Method switch case: ₹1,00,000 earlier on GROSS_UP → due ₹10,500 ≥ this ₹5,000 → all withheld.
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(500000n)]);
+          priorRows({ paid: [prior('v1', 10000000n)] });
+
+          const res = await download();
+
+          // Settled without the bank (guarded on the PROCESSING claim of THIS download).
+          expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+            where: { id: { in: ['e1'] }, status: 'PROCESSING', downloadId: 'd1' },
+            data: expect.objectContaining({ status: 'PAID', utr: 'TDS-WITHHELD-PD-2026-05-001', paidAt: expect.any(Date) }),
+          });
+          // Not in the bank file.
+          const wb = XLSX.read(res.buffer);
+          const cells = JSON.stringify(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 }));
+          expect(cells).not.toContain('"O1"');
+          // Listed loudly in the result.
+          expect(res.fullyWithheld).toEqual([
+            expect.objectContaining({ outletId: 'O1', amountPaise: 500000, tdsWithheldPaise: 500000, entryIds: ['e1'] }),
+          ]);
+          expect(res.fullyWithheldNote).toBe('1 payout fully withheld as TDS — not sent to the bank (outlet O1).');
+          // Every outlet was withheld → the download is already settled.
+          expect(mockTx.creditPayoutDownload.update).toHaveBeenCalledWith({ where: { id: 'd1' }, data: { status: 'PAID' } });
+          // No "credited ₹0" message is ever sent.
+          expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+          expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+        });
+
+        it('a partly withheld outlet stays in the bank file at its net amount; nothing is settled without the bank', async () => {
+          policy('DEDUCT');
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(1500000n)]);
+          mockTx.redemptionOrder.findMany.mockResolvedValue([
+            { valuePaise: 800000n, redemptionMode: 'PHYSICAL_GIFT', partner: { id: 'p1', panNumber: 'PAN1' } },
+          ]);
+          priorRows({});
+
+          const res = await download();
+
+          expect(res.fullyWithheld).toEqual([]);
+          expect(res.fullyWithheldNote).toBeNull();
+          const settleCalls = mockTx.creditPayoutEntry.updateMany.mock.calls.filter(
+            (c: [{ data?: { status?: string } }]) => c[0]?.data?.status === 'PAID',
+          );
+          expect(settleCalls).toHaveLength(0);
+          expect(mockTx.creditPayoutDownload.update).not.toHaveBeenCalled();
+        });
       });
 
       it('194C-only download (e.g. Deoleo): no 194R reads at all — no policy read, no countFrom read, no shared base read', async () => {
