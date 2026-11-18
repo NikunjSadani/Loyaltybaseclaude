@@ -26,6 +26,7 @@ import {
   isActiveStatus, isPartialMonth, monthLabel, sentence, warningText,
 } from '@/lib/sales-import/format';
 import { getUploadState, subscribeUpload } from '@/lib/sales-import/upload-store';
+import { NO_REPLY, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import { usePermissions } from '@/lib/use-permissions';
 import {
   SALES_IMPORT_ABANDONED_UPLOAD_HOURS, SALES_IMPORT_MAX_DIM_VALUE_CHARS, SALES_IMPORT_STALE_HEARTBEAT_MINUTES,
@@ -47,6 +48,12 @@ function finalErrorText(status: number | undefined): string | null {
   if (status === 404) return 'This import was not found. It may have been deleted.';
   return null;
 }
+
+/** A month result on screen; `confirmedAfterNoReplyAt` = no reply arrived, a re-read showed this file applied then. */
+type ShownResult = ApplyMonthResult & { confirmedAfterNoReplyAt?: string };
+/** The picked months and each one's last apply (lastAppliedKey) at the moment Apply was pressed. */
+type ApplyCheck = { months: string[]; before: Record<string, string | null> };
+const lastAppliedKey = (la: MonthPreview['lastApplied']): string | null => (la ? `${la.importId}|${la.at}` : null);
 
 // ── Polling the import ───────────────────────────────────────────────────────
 
@@ -73,7 +80,7 @@ function useImportDetail(importId: string | undefined) {
       if (cancelled || seq !== seqRef.current) return; // stale response
       if (!r.success) {
         const final = finalErrorText(r.status);
-        setError({ text: final ?? r.error, final: final !== null });
+        setError({ text: final ?? reasonOr(r.error, NO_REPLY), final: final !== null });
         // Keep polling through a transient error; 401/403/404 are final.
         if (!final) timer = setTimeout(load, POLL_MS * 2);
         return;
@@ -414,7 +421,14 @@ function PreviewSection({
   const [partialAcks, setPartialAcks] = useState<Set<string>>(new Set());
   const [olderAck, setOlderAck] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [results, setResults] = useState<ApplyMonthResult[] | null>(null);
+  const [results, setResults] = useState<ShownResult[] | null>(null);
+  /** Re-reading the preview after an Apply whose reply never arrived. */
+  const [checking, setChecking] = useState(false);
+  /**
+   * The last Apply got no reply: 'unknown' = the re-read failed too (Apply is disabled until Check again settles it);
+   * 'not-applied' = the re-read showed no new apply (Try again is offered, Check again still works).
+   */
+  const [noReply, setNoReply] = useState<{ check: ApplyCheck; state: 'unknown' | 'not-applied' } | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const seqRef = useRef(0);
   const mountedRef = useRef(true);
@@ -422,12 +436,12 @@ function PreviewSection({
   const dims = useDimensionLabels();
   const typeNames = useOutletTypeNames();
 
-  /** Loads the preview; resolves true only when THIS load landed successfully (stale / failed → false). */
-  const loadPreview = useCallback(async (): Promise<boolean> => {
+  /** Loads the preview; resolves to it only when THIS load landed successfully (stale / failed → null). */
+  const loadPreview = useCallback(async (): Promise<SalesImportPreview | null> => {
     const seq = ++seqRef.current;
     setLoading(true);
     const r = await salesImportApi.preview(importId);
-    if (!mountedRef.current || seq !== seqRef.current) return false;
+    if (!mountedRef.current || seq !== seqRef.current) return null;
     setLoading(false);
     if (r.success) {
       setError(null);
@@ -435,20 +449,71 @@ function PreviewSection({
       // Drop selections that are no longer applicable after a refresh.
       const ok = new Set(r.data.months.filter((m) => m.canApply).map((m) => m.month));
       setSelected((prev) => new Set([...prev].filter((m) => ok.has(m))));
-      return true;
+      return r.data;
     }
-    setError(finalErrorText(r.status) ?? r.error);
-    return false;
+    setError(finalErrorText(r.status) ?? reasonOr(r.error, NO_REPLY));
+    return null;
   }, [importId]);
+  /** For the month rows (Accept / Undo of a focus name): true when the reload landed. */
+  const reloadPreview = useCallback(async () => (await loadPreview()) !== null, [loadPreview]);
 
   useEffect(() => { void loadPreview(); }, [loadPreview, tick]);
+
+  /**
+   * After an Apply whose reply never arrived (proxy / Worker timeout, gateway error, network drop): the backend may have
+   * finished it anyway. Re-read the preview and compare each picked month's last apply with what it was before the
+   * click — never claim "nothing was applied" without looking (prod 2026-11-18: four applies from four clicks).
+   */
+  const verifyApply = useCallback(async (check: ApplyCheck) => {
+    setChecking(true);
+    setNotice(null);
+    setResults(null);
+    const fresh = await loadPreview();
+    if (!mountedRef.current) return;
+    setChecking(false);
+    onApplied();
+    if (!fresh) { setNoReply({ check, state: 'unknown' }); return; }
+    const byMonth = new Map(fresh.months.map((m) => [m.month, m]));
+    const appliedNow = (month: string) => {
+      const la = byMonth.get(month)?.lastApplied ?? null;
+      return la !== null && la.importId === importId && lastAppliedKey(la) !== check.before[month];
+    };
+    const done = check.months.filter(appliedNow);
+    const missing = check.months.filter((m) => !appliedNow(m));
+    const missingNames = missing.map(monthLabel).join(', ');
+    const stillFinishing = 'If you pressed Apply only moments ago the server may still be finishing — press Check again in a ' +
+      'minute; if it still shows nothing new, press Try again.';
+    if (done.length === 0) {
+      setNoReply({ check, state: 'not-applied' });
+      setNotice(`Nothing was applied: ${NO_REPLY}, and checking again shows no new apply from this file for ${missingNames}. ${stillFinishing}`);
+      return;
+    }
+    const applicable = new Set(fresh.months.filter((m) => m.canApply).map((m) => m.month));
+    setResults([
+      ...done.map((month): ShownResult => ({ month, ok: true, confirmedAfterNoReplyAt: byMonth.get(month)!.lastApplied!.at })),
+      ...missing.map((month): ShownResult => ({
+        month, ok: false,
+        error: `${NO_REPLY.charAt(0).toUpperCase()}${NO_REPLY.slice(1)}, and checking again shows no new apply from this file for this month.`,
+      })),
+    ]);
+    setSelected(new Set(missing.filter((m) => applicable.has(m))));
+    setPartialAcks(new Set());
+    setOlderAck(false);
+    if (missing.length > 0) {
+      // Check again re-checks EVERY picked month against its value at the click, so the confirmed cards stay.
+      setNoReply({ check, state: 'not-applied' });
+      setNotice(`The server's reply didn't arrive. Checking again shows this file applied to ${done.map(monthLabel).join(', ')}, but not to ${missingNames}. ${stillFinishing}`);
+    } else {
+      setNoReply(null);
+    }
+  }, [importId, loadPreview, onApplied]);
 
   const refetch = useCallback(() => setTick((t) => t + 1), []);
 
   if (error && !preview) {
     return (
       <Banner tone="red">
-        Couldn&apos;t load the preview: {error}{' '}
+        Couldn&apos;t load the preview: {reasonOr(error, NO_REPLY)}{' '}
         <Button size="sm" variant="outline" className="ml-2" onClick={refetch}>Retry</Button>
       </Banner>
     );
@@ -478,7 +543,7 @@ function PreviewSection({
   }
 
   async function apply() {
-    if (!preview || blockers.length > 0 || applying || !canAct) return;
+    if (!preview || blockers.length > 0 || applying || checking || noReply?.state === 'unknown' || !canAct) return;
     const picked = months.filter((m) => selected.has(m.month));
     const names = picked.map((m) => monthLabel(m.month)).join(', ');
     const ok = window.confirm(
@@ -490,6 +555,12 @@ function PreviewSection({
     setApplying(true);
     setNotice(null);
     setResults(null);
+    setNoReply(null);
+    // What each picked month's last apply is NOW — compared after the call if no reply arrives.
+    const check: ApplyCheck = {
+      months: picked.map((m) => m.month),
+      before: Object.fromEntries(picked.map((m) => [m.month, lastAppliedKey(m.lastApplied)])),
+    };
     const partialMonths = picked.filter(isPartialMonth).map((m) => m.month);
     const fingerprints = focusFingerprintsFor(months, selected);
     const r = await salesImportApi.apply(importId, {
@@ -507,20 +578,21 @@ function PreviewSection({
       } else if (r.status === 403) {
         setApplying(false);
         setNotice('Nothing was applied: you don\u2019t have permission to apply sales files.');
-      } else if (r.status !== undefined && r.status >= 400 && r.status < 500) {
+      } else if (outcomeUnknown(r)) {
+        // No definite answer (proxy / Worker timeout, 5xx, network): the backend may have applied anyway → look.
+        setApplying(false);
+        await verifyApply(check);
+      } else {
         // Any refusal (definitions / processing version changed, a month closed, an ack now needed…) means the
         // preview on screen may be out of date → reload it (and the import) so the admin decides on the current
         // state. Only claim "refreshed" when the reload actually landed.
         onApplied();
-        const refreshed = await loadPreview();
+        const refreshed = (await loadPreview()) !== null;
         setApplying(false);
-        const why = sentence(r.error) || 'the preview is out of date';
+        const why = reasonOr(r.error, 'the preview is out of date');
         setNotice(refreshed
           ? `Nothing was applied: ${why}. The preview has been refreshed — check it and apply again.`
           : `Nothing was applied: ${why}. The preview could not be refreshed — press Refresh preview before applying again.`);
-      } else {
-        setApplying(false);
-        setNotice(`Nothing was applied: ${sentence(r.error)}. Try again in a moment.`);
       }
       return;
     }
@@ -569,11 +641,35 @@ function PreviewSection({
       )}
       {error && (
         <Banner tone="red" testId="sales-import-preview-error">
-          Couldn&apos;t refresh the preview: {sentence(error)}. The figures below may be out of date.{' '}
+          Couldn&apos;t refresh the preview: {reasonOr(error, NO_REPLY)}. The figures below may be out of date.{' '}
           <Button size="sm" variant="outline" className="ml-2" onClick={refetch}>Retry</Button>
         </Banner>
       )}
-      {notice && <Banner tone="amber" testId="sales-import-apply-notice">{notice}</Banner>}
+      {checking && (
+        <Banner tone="blue" testId="sales-import-apply-checking">
+          <span className="inline-flex items-center gap-2">
+            <Spinner size="sm" /> The server didn&apos;t reply in time. Checking what happened…
+          </span>
+        </Banner>
+      )}
+      {!checking && noReply?.state === 'unknown' && (
+        <Banner tone="red" testId="sales-import-apply-unknown">
+          We couldn&apos;t confirm whether this was applied: {NO_REPLY}, and checking again also failed. Don&apos;t
+          apply again yet — press Check again.{' '}
+          <Button size="sm" variant="outline" className="ml-2" onClick={() => { void verifyApply(noReply.check); }}>Check again</Button>
+        </Banner>
+      )}
+      {notice && (
+        <Banner tone="amber" testId="sales-import-apply-notice">
+          {notice}
+          {!checking && noReply?.state === 'not-applied' && (
+            <span className="inline-flex gap-2 ml-2">
+              <Button size="sm" variant="outline" onClick={() => { void verifyApply(noReply.check); }}>Check again</Button>
+              <Button size="sm" variant="outline" onClick={() => { void apply(); }} disabled={blockers.length > 0}>Try again</Button>
+            </span>
+          )}
+        </Banner>
+      )}
       {downloadError && <Banner tone="red">{downloadError}</Banner>}
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-x-auto">
@@ -625,7 +721,7 @@ function PreviewSection({
                   onDownloadError={setDownloadError}
                   dims={dims}
                   typeNames={typeNames}
-                  onRefresh={loadPreview}
+                  onRefresh={reloadPreview}
                 />
               ))}
             </tbody>
@@ -646,7 +742,8 @@ function PreviewSection({
 
       {canAct ? (
         <div className="flex flex-wrap items-start gap-3">
-          <Button variant="primary" onClick={apply} disabled={blockers.length > 0} loading={applying} data-testid="sales-import-apply">
+          <Button variant="primary" onClick={apply} loading={applying} data-testid="sales-import-apply"
+            disabled={blockers.length > 0 || checking || noReply?.state === 'unknown'}>
             Apply {selected.size > 0 ? `${selected.size} month${selected.size > 1 ? 's' : ''}` : ''}
           </Button>
           {showBlockers && (
@@ -677,7 +774,14 @@ function PreviewSection({
                 {r.ok ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <XCircle className="w-4 h-4 text-red-600" />}
                 {monthLabel(r.month)}: {r.ok ? 'applied' : 'not applied'}
               </p>
-              {r.ok ? (
+              {r.ok && r.confirmedAfterNoReplyAt ? (
+                <p className="text-xs text-gray-700 mt-1" data-testid={`apply-confirmed-late-${r.month}`}>
+                  The server&apos;s reply didn&apos;t arrive in time, so its details (outlets updated, day-by-day figures) were
+                  not received. Checking again confirmed this file was applied to {monthLabel(r.month)} at{' '}
+                  {dateTimeLabel(r.confirmedAfterNoReplyAt)}. Targets cards and dashboards now show these numbers — don&apos;t
+                  apply it again.
+                </p>
+              ) : r.ok ? (
                 <>
                   <p className="text-xs text-gray-700 mt-1">
                     {formatCount(r.outletsWritten ?? 0)} outlets updated, {formatCount(r.outletsZeroFilled ?? 0)} set to 0. Targets
@@ -715,7 +819,13 @@ export default function SalesImportDetailPage() {
     setActionError(null);
     const r = await salesImportApi.reprocess(importId);
     setBusy(null);
-    if (!r.success) { setActionError(`Not reprocessed: ${sentence(r.error)}.`); refresh(); return; }
+    if (!r.success) {
+      setActionError(outcomeUnknown(r)
+        ? `We couldn’t confirm whether the file was sent for reprocessing: ${NO_REPLY}. The page has been refreshed — check the status above before pressing Reprocess again.`
+        : `Not reprocessed: ${reasonOr(r.error, 'the server refused it without a reason')}.`);
+      refresh();
+      return;
+    }
     refresh();
   }
 
@@ -730,7 +840,13 @@ export default function SalesImportDetailPage() {
     setActionError(null);
     const r = await salesImportApi.reprocessAsNew(importId);
     setBusy(null);
-    if (!r.success) { setActionError(`Not started: ${sentence(r.error)}.`); refresh(); return; }
+    if (!r.success) {
+      setActionError(outcomeUnknown(r)
+        ? `We couldn’t confirm whether a new import was started: ${NO_REPLY}. Check All imports for a new import of this file before trying again.`
+        : `Not started: ${reasonOr(r.error, 'the server refused it without a reason')}.`);
+      refresh();
+      return;
+    }
     router.push(`/admin/sales-import/${r.data.id}`);
   }
 
@@ -741,7 +857,11 @@ export default function SalesImportDetailPage() {
     setActionError(null);
     const r = await salesImportApi.cancel(importId);
     setBusy(null);
-    if (!r.success) { setActionError(`Not cancelled: ${sentence(r.error)}.`); }
+    if (!r.success) {
+      setActionError(outcomeUnknown(r)
+        ? `We couldn’t confirm whether processing was cancelled: ${NO_REPLY}. The page has been refreshed — check the status above before trying again.`
+        : `Not cancelled: ${reasonOr(r.error, 'the server refused it without a reason')}.`);
+    }
     refresh();
   }
 
@@ -752,7 +872,13 @@ export default function SalesImportDetailPage() {
     setActionError(null);
     const r = await salesImportApi.remove(importId);
     setBusy(null);
-    if (!r.success) { setActionError(`Not deleted: ${sentence(r.error)}.`); refresh(); return; }
+    if (!r.success) {
+      setActionError(outcomeUnknown(r)
+        ? `We couldn’t confirm whether this import was deleted: ${NO_REPLY}. The page has been refreshed — if the import still shows, try again.`
+        : `Not deleted: ${reasonOr(r.error, 'the server refused it without a reason')}.`);
+      refresh();
+      return;
+    }
     router.push('/admin/sales-import');
   }
 
@@ -813,7 +939,7 @@ export default function SalesImportDetailPage() {
 
       {error && (
         <Banner tone={error.final ? 'red' : 'amber'}>
-          {error.final ? error.text : `Lost contact with the server (${sentence(error.text)}). Still trying…`}
+          {error.final ? error.text : `Lost contact with the server (${reasonOr(error.text, NO_REPLY)}). Still trying…`}
         </Banner>
       )}
       {actionError && <Banner tone="red">{actionError}</Banner>}

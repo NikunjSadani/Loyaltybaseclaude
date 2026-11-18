@@ -380,3 +380,147 @@ describe('months page — Rebuild product list (§10c)', () => {
     }
   });
 });
+
+// ── No reply (proxy / Worker timeout, 5xx, network): never claim "not closed" / "nothing changed" without looking ──
+describe('months page — an action whose reply never arrives', () => {
+  it('close: no reply, re-read shows CLOSED → reported as closed (slow reply noted), never "was not closed"', async () => {
+    apiMock.months
+      .mockResolvedValueOnce(ok([row({ month: '2026-10' })]))
+      .mockResolvedValue(ok([row({ month: '2026-10', state: 'CLOSED', canClose: false, canReopen: true })]));
+    apiMock.closeMonth.mockResolvedValue({ success: false, error: '', status: 500 });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const msg = await screen.findByRole('status');
+    expect(msg).toHaveTextContent('October 2026 is closed');
+    expect(msg).toHaveTextContent(/reply didn.t arrive/);
+    expect(screen.queryByText(/was not closed/)).not.toBeInTheDocument();
+  });
+
+  it('close: no reply, re-read shows it still OPEN → "was not closed: the server didn’t reply in time", no ": ."', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10' })]));
+    apiMock.closeMonth.mockResolvedValue({ success: false, error: 'Failed to fetch' });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/October 2026 was not closed: the server didn.t reply in time/);
+    expect(alert.textContent).not.toMatch(/: \./);
+  });
+
+  it('close: no reply AND the re-read fails → "We couldn’t confirm whether October 2026 was closed"', async () => {
+    apiMock.months.mockResolvedValueOnce(ok([row({ month: '2026-10' })])).mockResolvedValue({ success: false, error: '', status: 502 });
+    apiMock.closeMonth.mockResolvedValue({ success: false, error: '', status: 504 });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/couldn.t confirm whether October 2026 was closed/);
+    expect(alert).toHaveTextContent(/before trying again/);
+  });
+
+  it('a refusal with an EMPTY message never renders "was not closed: ."', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10' })]));
+    apiMock.closeMonth.mockResolvedValue({ success: false, error: '', status: 409 });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).not.toMatch(/: \./);
+    expect(alert).toHaveTextContent(/was not closed: \S/);
+  });
+
+  it('reopen (GIFSY_ADMIN): no reply, re-read shows OPEN → reported as open again', async () => {
+    roleRef.current = 'GIFSY_ADMIN';
+    apiMock.months
+      .mockResolvedValueOnce(ok([row({ month: '2026-09', state: 'CLOSED', canClose: false, canReopen: true })]))
+      .mockResolvedValue(ok([row({ month: '2026-09', state: 'OPEN' })]));
+    apiMock.reopenMonth.mockResolvedValue({ success: false, error: '', status: 524 });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Reopen September 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const msg = await screen.findByRole('status');
+    expect(msg).toHaveTextContent('September 2026 is open again');
+    expect(msg).toHaveTextContent(/reply didn.t arrive/);
+  });
+
+  it('rebuild product list: no reply, re-read shows the list current → reported as rebuilt', async () => {
+    apiMock.months
+      .mockResolvedValueOnce(ok([row({ month: '2026-09', hasHistory: true, productListCurrent: false })]))
+      .mockResolvedValue(ok([row({ month: '2026-09', hasHistory: true, productListCurrent: true })]));
+    apiMock.rebuildProductList.mockResolvedValue({ success: false, error: '', status: 500 });
+    await act(async () => { render(<MonthsPage />); });
+    await act(async () => { fireEvent.click(screen.getByTestId('rebuild-product-list-2026-09')); });
+    const msg = await screen.findByRole('status');
+    expect(msg).toHaveTextContent('The product list for September 2026 is rebuilt');
+    expect(msg).toHaveTextContent(/reply didn.t arrive/);
+  });
+});
+
+describe('recalculate — a recalculation whose reply never arrives', () => {
+  const histRow = (over: Partial<SalesMonthRow> = {}) => row({
+    month: '2026-10', hasHistory: true, historySourceImportId: 'i1', historyAppliedAt: '2026-11-02T05:00:00.000Z', ...over,
+  });
+  const LATER = '2026-11-18T06:00:00.000Z';
+
+  async function openAndRecalc() {
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    await screen.findByTestId('recalc-preview');
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+  }
+
+  it('re-read shows the month re-written after the click → shown as recalculated, with the slow-reply note', async () => {
+    apiMock.months
+      .mockResolvedValueOnce(ok([histRow()])) // page
+      .mockResolvedValueOnce(ok([histRow()])) // before the click
+      .mockResolvedValue(ok([histRow({ lastAppliedAt: LATER })]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValue({ success: false, error: '', status: 500 });
+    await openAndRecalc();
+    const result = await screen.findByTestId('recalc-result');
+    expect(result).toHaveTextContent('October 2026 recalculated');
+    expect(result).toHaveTextContent(/reply didn.t arrive/);
+    expect(screen.queryByText(/Nothing was changed/)).not.toBeInTheDocument();
+    expect(apiMock.recalculate).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-read shows NO change → "Nothing was changed: the server didn’t reply in time" with Try again', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValueOnce({ success: false, error: 'Failed to fetch' })
+      .mockResolvedValue(ok({ month: '2026-10', ok: true, outletsWritten: 5, outletsZeroFilled: 2 }));
+    await openAndRecalc();
+    const notice = await screen.findByTestId('recalc-notice');
+    expect(notice).toHaveTextContent(/Nothing was changed: the server didn.t reply in time/);
+    expect(notice.textContent).not.toMatch(/: \./);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
+    expect(await screen.findByTestId('recalc-result')).toHaveTextContent('5 outlets updated');
+  });
+
+  it('re-read fails → unknown: Recalculate disabled, "Don’t recalculate again yet", Check again resolves it', async () => {
+    apiMock.months
+      .mockResolvedValueOnce(ok([histRow()]))
+      .mockResolvedValueOnce(ok([histRow()]))
+      .mockResolvedValueOnce({ success: false, error: '', status: 503 })
+      .mockResolvedValue(ok([histRow({ lastAppliedAt: LATER })]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValue({ success: false, error: '', status: 504 });
+    await openAndRecalc();
+    const unknown = await screen.findByTestId('recalc-unknown');
+    expect(unknown).toHaveTextContent(/couldn.t confirm whether October 2026 was recalculated/);
+    expect(unknown).toHaveTextContent(/Don.t recalculate again yet/);
+    expect(screen.getByTestId('recalc-apply')).toBeDisabled();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check again' })); });
+    expect(await screen.findByTestId('recalc-result')).toHaveTextContent('October 2026 recalculated');
+    expect(apiMock.recalculate).toHaveBeenCalledTimes(1);
+  });
+
+  it('the month cannot be read BEFORE recalculating → nothing is sent, and it says so', async () => {
+    apiMock.months.mockResolvedValueOnce(ok([histRow()])).mockResolvedValue({ success: false, error: '', status: 503 });
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    await openAndRecalc();
+    expect(apiMock.recalculate).not.toHaveBeenCalled();
+    expect(await screen.findByTestId('recalc-notice')).toHaveTextContent(/Nothing was changed.*nothing was sent/i);
+  });
+});

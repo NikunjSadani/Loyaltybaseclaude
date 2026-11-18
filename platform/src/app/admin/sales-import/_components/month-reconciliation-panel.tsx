@@ -14,6 +14,7 @@ import { AlertTriangle, Info, Undo2, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { salesImportApi } from '@/lib/sales-import/api';
 import { dateTimeLabel, formatCount, formatKpiValue, monthLabel, sentence } from '@/lib/sales-import/format';
+import { NO_REPLY, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import type {
   DimMatch, FocusBlocker, FocusNameSummary, FocusTokenResolution, MonthFocusKpi, MonthReconciliation,
   SalesDimensionMapping, SalesKpiMeasure,
@@ -385,8 +386,13 @@ export function MonthReconciliationPanel({
     setPending(null);
     setFocusAfter({ kpiCode: a.kpiCode, key: a.key });
     if (!res.success) {
-      setError(`${a.kind === 'accept' ? 'Not accepted' : 'Not undone'}: ${sentence(res.error) || 'the request failed'}. ` +
-        (refreshed ? 'The preview has been reloaded.' : `The preview could not be refreshed — ${refreshHint}.`));
+      // No definite answer (timeout / 5xx / network): it may have been saved — the reloaded preview shows the truth.
+      setError(outcomeUnknown(res)
+        ? `We couldn’t confirm whether this was ${a.kind === 'accept' ? 'accepted' : 'undone'}: ${NO_REPLY}. ` +
+          (refreshed ? 'The preview has been reloaded and shows what is saved now — check it before trying again.'
+            : `The preview could not be refreshed — ${refreshHint}.`)
+        : `${a.kind === 'accept' ? 'Not accepted' : 'Not undone'}: ${reasonOr(res.error, 'the request failed')}. ` +
+          (refreshed ? 'The preview has been reloaded.' : `The preview could not be refreshed — ${refreshHint}.`));
       return;
     }
     if (!refreshed) {

@@ -1509,6 +1509,19 @@ from the step-1 backup if needed).
    outlet. When a value is "missing" for an outlet, check both scopes first.
 3. Result of the November apply: 6,452 outlet records written and verified per outlet; month left OPEN for the points
    rule (SAMT gate on NON ADHO ≥ ₹200 Elite / ≥ ₹400 Privilege, plus the rest of the rule — dedicated session pending).
+4. **Apply cut off at 30 s → false "Nothing was applied: ." → repeat applies (prod, 2026-11-17/18).** The Next `/api/*`
+   rewrite proxy had a 30 s default limit; the Bajaj apply takes ~30+ s, so the browser got a bare 500 while the backend
+   FINISHED (prod DB: 4 applies from 4 clicks on 2026-11-18, 3 the day before). Fix (branch
+   `fix/proxy-timeout-honest-apply`): `experimental.proxyTimeout = 300_000` in `platform/next.config.ts` (= Cloud Run's
+   300 s), and when no definite reply arrives (network error / 408 / any 5xx incl. 502/504/524 / empty error —
+   `platform/src/lib/request-outcome.ts` `outcomeUnknown`) the page never says "nothing happened": Apply shows
+   "Checking what happened…", re-reads the preview and compares each picked month's `lastApplied` (importId + at) with
+   its value at the click → applied (success card + "reply didn't arrive" note) / not applied (Try again + Check again;
+   the server may still be finishing) / can't tell (Apply DISABLED, "Don't apply again yet — press Check again").
+   Same honest handling for Recalculate (compares `SalesMonthRow.lastAppliedAt`, read just before the POST), Close /
+   Reopen / Rebuild product list (re-read the month row), Reprocess / Read again / Cancel / Delete, focus Accept/Undo,
+   KPI Test/Save and mapping Save. Still true: the Cloudflare Worker (`gifsy-proxy`) has its own ~100 s origin limit, and
+   a second apply while the first still runs WAITS on the month lock and then re-applies (no "apply in progress" 409).
 
 ---
 

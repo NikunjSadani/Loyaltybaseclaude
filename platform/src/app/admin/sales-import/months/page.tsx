@@ -22,6 +22,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { useAdminSession } from '@/lib/admin-session';
 import { salesImportApi } from '@/lib/sales-import/api';
 import { dateTimeLabel, monthLabel, sentence } from '@/lib/sales-import/format';
+import { NO_REPLY, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import { usePermissions } from '@/lib/use-permissions';
 import type { SalesMonthRow } from '@/lib/sales-import/types';
 import { RecalculatePanel } from './_components/recalculate-panel';
@@ -58,6 +59,27 @@ export default function SalesMonthsPage() {
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
+  /**
+   * An action on a month got NO definite answer (proxy / Worker timeout, 5xx, network) — the backend may have done it
+   * anyway. Re-read that month and report what is true now, never "was not …" without looking. Retrying close / reopen /
+   * rebuild is harmless (an already-closed month is refused; a rebuild changes no figures).
+   */
+  async function settleNoReply(row: SalesMonthRow, t: {
+    done(now: SalesMonthRow): boolean; doneText: string; notDoneText: string; unknownText: string;
+  }) {
+    const r = await salesImportApi.months(row.month, row.month);
+    const now = r.success ? r.data.find((x) => x.month === row.month) : undefined;
+    if (!now) {
+      setActionMsg({ tone: 'err', text: t.unknownText });
+      reload();
+      return;
+    }
+    setRows((prev) => prev?.map((x) => (x.month === row.month ? now : x)) ?? prev);
+    setActionMsg(t.done(now)
+      ? { tone: 'ok', text: `${t.doneText} (The server's reply didn't arrive in time; checking again confirmed it.)` }
+      : { tone: 'err', text: t.notDoneText });
+  }
+
   async function close(row: SalesMonthRow) {
     if (busyMonth) return;
     const label = monthLabel(row.month);
@@ -68,9 +90,20 @@ export default function SalesMonthsPage() {
     setBusyMonth(row.month);
     setActionMsg(null);
     const r = await salesImportApi.closeMonth(row.month);
+    const closedText = `${label} is closed. You can now compute points for it in the Points Engine.`;
+    if (!r.success && outcomeUnknown(r)) {
+      await settleNoReply(row, {
+        done: (now) => now.state === 'CLOSED',
+        doneText: closedText,
+        notDoneText: `${label} was not closed: ${NO_REPLY}, and checking again shows it still open. Press Close again.`,
+        unknownText: `We couldn’t confirm whether ${label} was closed: ${NO_REPLY}, and checking again also failed. Refresh this page and check ${label}'s state before trying again.`,
+      });
+      setBusyMonth(null);
+      return;
+    }
     setBusyMonth(null);
-    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not closed: ${sentence(r.error)}.` }); reload(); return; }
-    setActionMsg({ tone: 'ok', text: `${label} is closed. You can now compute points for it in the Points Engine.` });
+    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not closed: ${reasonOr(r.error, 'the server refused it without a reason')}.` }); reload(); return; }
+    setActionMsg({ tone: 'ok', text: closedText });
     setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
   }
 
@@ -81,8 +114,18 @@ export default function SalesMonthsPage() {
     setBusyMonth(row.month);
     setActionMsg(null);
     const r = await salesImportApi.rebuildProductList(row.month);
+    if (!r.success && outcomeUnknown(r)) {
+      await settleNoReply(row, {
+        done: (now) => now.productListCurrent === true,
+        doneText: `The product list for ${label} is rebuilt. No figures changed.`,
+        notDoneText: `The product list for ${label} was not rebuilt: ${NO_REPLY}, and checking again shows it still out of date. Rebuilding again is safe — it changes no figures.`,
+        unknownText: `We couldn’t confirm whether the product list for ${label} was rebuilt: ${NO_REPLY}, and checking again also failed. Refresh this page to check; rebuilding again is safe — it changes no figures.`,
+      });
+      setBusyMonth(null);
+      return;
+    }
     setBusyMonth(null);
-    if (!r.success) { setActionMsg({ tone: 'err', text: `The product list for ${label} was not rebuilt: ${sentence(r.error)}.` }); reload(); return; }
+    if (!r.success) { setActionMsg({ tone: 'err', text: `The product list for ${label} was not rebuilt: ${reasonOr(r.error, 'the server refused it without a reason')}.` }); reload(); return; }
     setActionMsg({ tone: 'ok', text: `The product list for ${label} is rebuilt. No figures changed.` });
     setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
   }
@@ -107,7 +150,7 @@ export default function SalesMonthsPage() {
     // Only the downstream-acknowledgement 409 is re-asked ("…needs confirmation: …"); any other 409 (already open,
     // current month…) falls through to the message + re-fetch below.
     if (!r.success && r.status === 409 && !hasDownstream && /needs confirmation/i.test(r.error ?? '')) {
-      if (window.confirm(`${sentence(r.error)}.\n\nReopen ${label} anyway? Points already credited or exported for it may no longer match.`)) {
+      if (window.confirm(`${reasonOr(r.error, 'Points work exists for this month')}.\n\nReopen ${label} anyway? Points already credited or exported for it may no longer match.`)) {
         r = await salesImportApi.reopenMonth(row.month, { acknowledgeDownstream: true });
       } else {
         setBusyMonth(null);
@@ -115,8 +158,18 @@ export default function SalesMonthsPage() {
         return;
       }
     }
+    if (!r.success && outcomeUnknown(r)) {
+      await settleNoReply(row, {
+        done: (now) => now.state === 'OPEN',
+        doneText: `${label} is open again. Close it once the corrected file is applied.`,
+        notDoneText: `${label} was not reopened: ${NO_REPLY}, and checking again shows it still closed. Press Reopen again.`,
+        unknownText: `We couldn’t confirm whether ${label} was reopened: ${NO_REPLY}, and checking again also failed. Refresh this page and check ${label}'s state before trying again.`,
+      });
+      setBusyMonth(null);
+      return;
+    }
     setBusyMonth(null);
-    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not reopened: ${sentence(r.error)}.` }); reload(); return; }
+    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not reopened: ${reasonOr(r.error, 'the server refused it without a reason')}.` }); reload(); return; }
     const { warnings, ...updated } = r.data;
     const extra = warnings?.length ? ` Check: ${warnings.map(sentence).join('; ')}.` : '';
     setActionMsg({ tone: warnings?.length ? 'warn' : 'ok', text: `${label} is open again. Close it once the corrected file is applied.${extra}` });
@@ -155,7 +208,7 @@ export default function SalesMonthsPage() {
       {rows === null ? (
         error ? (
           <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 flex items-center gap-3">
-            Couldn&apos;t load months: {error}
+            Couldn&apos;t load months: {reasonOr(error, NO_REPLY)}
             <Button size="sm" variant="outline" onClick={reload}>Retry</Button>
           </div>
         ) : (

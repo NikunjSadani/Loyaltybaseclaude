@@ -16,6 +16,7 @@ import {
   dateTimeLabel, formatCount, formatKpiValue, formatRupees, formatSigned, monthLabel, sentence, warningText,
 } from '@/lib/sales-import/format';
 import type { SalesMonthRecalcPreview, SalesMonthRecalcResult } from '@/lib/sales-import/types';
+import { NO_REPLY, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import {
   MonthReconciliationPanel, useDimensionLabels, useOutletTypeNames,
 } from '../../_components/month-reconciliation-panel';
@@ -35,6 +36,12 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
   const [result, setResult] = useState<SalesMonthRecalcResult | null>(null);
   /** Recalculated, but the follow-up preview reload failed: the reconciliation shown predates the recalculation. */
   const [staleAfterApply, setStaleAfterApply] = useState(false);
+  /** Re-reading the month after a recalculation whose reply never arrived. */
+  const [checking, setChecking] = useState(false);
+  /** No reply: 'unknown' = the re-read failed too (Recalculate disabled until Check again settles it). */
+  const [noReply, setNoReply] = useState<{ before: string | null; state: 'unknown' | 'not-changed' } | null>(null);
+  /** Set when the result was confirmed by re-reading (no reply arrived): the month's new last-written time. */
+  const [lateAt, setLateAt] = useState<string | null>(null);
   const seqRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
@@ -48,14 +55,47 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
     if (r.success) { setPreview(r.data); setError(null); return true; }
     setError(r.status === 404
       ? `${label} has no stored history yet — it is saved each time a sales file is applied to the month.`
-      : sentence(r.error));
+      : reasonOr(r.error, NO_REPLY));
     return false;
   }, [month, label]);
 
   useEffect(() => { void load(); }, [load]);
 
+  /** The month's last-written time (SalesMonthRow.lastAppliedAt; a recalculation moves it), or undefined if unreadable. */
+  const readLastWritten = useCallback(async (): Promise<{ at: string | null } | undefined> => {
+    const r = await salesImportApi.months(month, month);
+    const row = r.success ? r.data.find((x) => x.month === month) : undefined;
+    return row ? { at: row.lastAppliedAt } : undefined;
+  }, [month]);
+
+  /**
+   * After a recalculation whose reply never arrived (proxy / Worker timeout, 5xx, network): the backend may have
+   * finished it. Re-read the month and compare its last-written time with the one read just before the click.
+   */
+  const verify = useCallback(async (before: string | null) => {
+    setChecking(true);
+    setNotice(null);
+    const now = await readLastWritten();
+    if (!mountedRef.current) return;
+    setChecking(false);
+    if (!now) { setNoReply({ before, state: 'unknown' }); return; }
+    if (now.at !== before && now.at !== null) {
+      setNoReply(null);
+      setLateAt(now.at);
+      setResult({ month, ok: true });
+      onApplied();
+      const refreshed = await load();
+      if (mountedRef.current && !refreshed) setStaleAfterApply(true);
+      return;
+    }
+    setNoReply({ before, state: 'not-changed' });
+    setNotice(`Nothing was changed: ${NO_REPLY}, and checking again shows ${label} still as it was before. If you pressed ` +
+      'Recalculate only moments ago the server may still be finishing — press Check again in a minute; if it still shows ' +
+      'nothing new, press Try again.');
+  }, [label, load, month, onApplied, readLastWritten]);
+
   async function apply() {
-    if (!preview || !preview.canApply || applying) return;
+    if (!preview || !preview.canApply || applying || checking || noReply?.state === 'unknown') return;
     const names = preview.kpis.map((k) => k.label || k.kpiCode).join(', ');
     if (!window.confirm(
       `Recalculate ${label} from stored history?\n\nThe Sales Import KPIs${names ? ` (${names})` : ''} are rewritten for every ` +
@@ -64,6 +104,15 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
     )) return;
     setApplying(true);
     setNotice(null);
+    setNoReply(null);
+    // What the month's last write is NOW — needed to tell, if no reply arrives, whether the recalculation happened.
+    const before = await readLastWritten();
+    if (!mountedRef.current) return;
+    if (!before) {
+      setApplying(false);
+      setNotice(`Nothing was changed: ${label} could not be read from the server just now, so nothing was sent. Try again in a moment.`);
+      return;
+    }
     const r = await salesImportApi.recalculate(month, {
       expectedDefinitionsHash: preview.definitionsHash,
       expectedHistoryAppliedAt: preview.historyAppliedAt,
@@ -76,16 +125,17 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
         setNotice('Nothing was changed: you don’t have permission to recalculate months.');
         return;
       }
-      if (r.status !== undefined && r.status >= 400 && r.status < 500) {
-        const refreshed = await load();
+      if (outcomeUnknown(r)) {
+        // No definite answer: the backend may have recalculated anyway → look before saying anything.
         setApplying(false);
-        setNotice(`Nothing was changed: ${sentence(r.error) || 'the preview is out of date'}. ` + (refreshed
-          ? 'The preview has been refreshed — check it and recalculate again.'
-          : 'The preview could not be refreshed — close and open it again.'));
+        await verify(before.at);
         return;
       }
+      const refreshed = await load();
       setApplying(false);
-      setNotice(`Nothing was changed: ${sentence(r.error)}. Try again in a moment.`);
+      setNotice(`Nothing was changed: ${reasonOr(r.error, 'the preview is out of date')}. ` + (refreshed
+        ? 'The preview has been refreshed — check it and recalculate again.'
+        : 'The preview could not be refreshed — close and open it again.'));
       return;
     }
     setApplying(false);
@@ -119,7 +169,30 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
           <Button size="sm" variant="outline" className="ml-2" onClick={() => { void load(); }}>Retry</Button>
         </div>
       )}
-      {notice && <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" data-testid="recalc-notice">{notice}</div>}
+      {checking && (
+        <div role="status" className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 flex items-center gap-2"
+          data-testid="recalc-checking">
+          <Spinner size="sm" /> The server didn&apos;t reply in time. Checking what happened…
+        </div>
+      )}
+      {!checking && noReply?.state === 'unknown' && (
+        <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" data-testid="recalc-unknown">
+          We couldn&apos;t confirm whether {label} was recalculated: {NO_REPLY}, and checking again also failed. Don&apos;t
+          recalculate again yet — press Check again.{' '}
+          <Button size="sm" variant="outline" className="ml-2" onClick={() => { void verify(noReply.before); }}>Check again</Button>
+        </div>
+      )}
+      {notice && (
+        <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" data-testid="recalc-notice">
+          {notice}
+          {!checking && noReply?.state === 'not-changed' && (
+            <span className="inline-flex gap-2 ml-2">
+              <Button size="sm" variant="outline" onClick={() => { void verify(noReply.before); }}>Check again</Button>
+              <Button size="sm" variant="outline" onClick={() => { void apply(); }}>Try again</Button>
+            </span>
+          )}
+        </div>
+      )}
 
       {!preview && !error && <div className="py-4 flex items-center gap-2 text-sm text-gray-500"><Spinner size="sm" /> Working out the figures…</div>}
 
@@ -197,7 +270,16 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
           {result ? (
             <div className={`rounded-lg border px-4 py-3 text-sm ${result.ok ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}
               data-testid="recalc-result" role="status">
-              {result.ok ? (
+              {result.ok && lateAt ? (
+                <p className="flex items-start gap-1.5 text-emerald-800" data-testid="recalc-confirmed-late">
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>
+                    {label} recalculated. The server&apos;s reply didn&apos;t arrive in time, so its details (outlets updated,
+                    day-by-day figures) were not received; checking again shows {label} was re-written at{' '}
+                    {dateTimeLabel(lateAt)}. Don&apos;t recalculate it again.
+                  </span>
+                </p>
+              ) : result.ok ? (
                 <>
                   <p className="flex items-center gap-1.5 text-emerald-800">
                     <CheckCircle2 className="w-4 h-4" /> {label} recalculated: {formatCount(result.outletsWritten ?? 0)} outlets
@@ -212,7 +294,8 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
           ) : (
             <div className="flex flex-wrap items-center gap-3">
               <Button variant="primary" onClick={apply} loading={applying}
-                disabled={!preview.canApply || preview.kpis.length === 0} data-testid="recalc-apply">
+                disabled={!preview.canApply || preview.kpis.length === 0 || checking || noReply?.state === 'unknown'}
+                data-testid="recalc-apply">
                 Recalculate {label}
               </Button>
               {!preview.canApply && preview.blockedReason && (

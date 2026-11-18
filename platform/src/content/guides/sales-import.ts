@@ -214,6 +214,10 @@ Recalculate uses the figures **saved at the month's last apply** — nothing is 
 | "Confirm that you want to roll a month back to this file's older data." | Tick the older-data box — or untick the month (usually the right choice). |
 | "Nothing was applied: <reason>. The preview has been refreshed — check it and apply again." | Something changed since you looked (another file was applied, the KPIs or targets changed, the file was reprocessed). Re-check the refreshed preview and apply again. |
 | "Nothing was applied: your session has expired. Sign in again, then apply." | Sign in again. |
+| "The server didn't reply in time. Checking what happened…" | Wait — the page is re-reading the months to see whether the apply went through. |
+| A result card "<Month>: applied" saying the server's reply didn't arrive | The apply DID go through (checking again confirmed it). Don't apply it again. |
+| "Nothing was applied: the server didn't reply in time, and checking again shows no new apply…" | The server may still be finishing a slow apply. Wait a minute and press **Check again**; only if it still shows nothing new, press **Try again**. |
+| "We couldn't confirm whether this was applied… Don't apply again yet" (Apply greyed out) | Press **Check again** until the page can tell. Never apply again before it does. |
 | "This file's data was removed on <date> (files are kept for a limited time)…" | Upload the file again. |
 | "<Month>: not applied" on a result card | Read the reason on the card; the other months were still applied. |
 
@@ -239,6 +243,9 @@ The monthly figures **were** applied. Only the day-by-day figures (used by "vs l
 | "<Month> is older than the stored sales lines…" | Apply a sales file to that month again to change it. |
 | "<Month> cannot be recalculated: <reason>" | Follow the reason (often a focus-product problem — fix it under **Focus brands**). |
 | "Nothing was changed: <reason>. The preview has been refreshed — check it and recalculate again." | Something changed meanwhile. Re-check and press **Recalculate <Month>** again. |
+| "Nothing was changed: the server didn't reply in time, and checking again shows <Month> still as it was before…" | Wait a minute and press **Check again**; only if it still shows nothing new, press **Try again**. |
+| "We couldn't confirm whether <Month> was recalculated… Don't recalculate again yet" (Recalculate greyed out) | Press **Check again** until the page can tell. |
+| "We couldn't confirm whether <Month> was closed / reopened…" | Refresh the Months page and check the month's state before trying again. |
 | "<Month> was not closed / not reopened: <reason>" | Read the reason. The current month can never be closed. |
 
 ### Dashboard comparison ("vs last month")
