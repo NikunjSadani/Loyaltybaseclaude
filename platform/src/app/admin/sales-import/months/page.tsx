@@ -15,16 +15,18 @@
  * FOCUS-FROM-TARGETS: `targetsChangedSinceApply` → a "Targets changed — recalculate" badge that opens the Recalculate
  * panel for that month (a plain badge when the month can't be recalculated here).
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Calculator, Lock, LockOpen, RefreshCw, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { useAdminSession } from '@/lib/admin-session';
 import { salesImportApi } from '@/lib/sales-import/api';
 import { dateTimeLabel, monthLabel, sentence } from '@/lib/sales-import/format';
+import { failureReason, noAnswerReason, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import { usePermissions } from '@/lib/use-permissions';
 import type { SalesMonthRow } from '@/lib/sales-import/types';
 import { RecalculatePanel } from './_components/recalculate-panel';
+import { whenLabel } from '@/lib/sales-import/apply-job';
 
 export default function SalesMonthsPage() {
   const { role } = useAdminSession();
@@ -37,10 +39,14 @@ export default function SalesMonthsPage() {
   const [busyMonth, setBusyMonth] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const [recalcMonth, setRecalcMonth] = useState<string | null>(null);
+  /** B-L7: bumped by every action that writes a row — a list fetch that started before it is stale and is re-run. */
+  const writeSeq = useRef(0);
+  /** Successful list reads so far — the Recalculate panel waits for a read made after a lost follow (final review L5). */
+  const [listVersion, setListVersion] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    setError(null);
+    const startedAt = writeSeq.current;
     // ?from=&to= from the KPI picker: list that range so every month it names is shown (window / clock read in the effect).
     const qs = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
     const valid = (m: string | null | undefined) => (m && /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : undefined);
@@ -50,13 +56,63 @@ export default function SalesMonthsPage() {
     const to = rawTo && from ? (rawTo > nowIst ? nowIst : rawTo) : undefined;
     (from ? (to && to >= from ? salesImportApi.months(from, to) : salesImportApi.months(from)) : salesImportApi.months()).then((r) => {
       if (cancelled) return;
-      if (r.success) setRows([...r.data].sort((a, b) => b.month.localeCompare(a.month)));
-      else setError(r.error);
+      if (writeSeq.current !== startedAt) { setTick((x) => x + 1); return; } // an action changed a row meanwhile
+      if (r.success && Array.isArray(r.data)) {
+        setError(null);
+        setRows([...r.data].sort((a, b) => b.month.localeCompare(a.month)));
+        setListVersion((v) => v + 1);
+      }
+      else setError(r.success ? 'the server’s reply was incomplete' : failureReason(r));
     });
     return () => { cancelled = true; };
   }, [tick]);
 
+  // A month with an Apply / Recalculate queued or running (background jobs, 2026-11-18): re-read the list every 5 s until
+  // none is left, so the "being applied" note and the buttons follow it. B-M4: a FAILED re-read reschedules too (the tick
+  // changes), and the stale list says so. B-L9: no polling while the tab is hidden.
+  const anyActive = !!rows?.some((r) => r.activeJob);
+  useEffect(() => {
+    if (!anyActive) return;
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => { if (!t) t = setTimeout(() => { t = null; setTick((x) => x + 1); }, 5000); };
+    // Re-review L5: listen for the WHOLE time — a tab hidden after polling started stops polling, and resumes when shown.
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') { if (t) { clearTimeout(t); t = null; } } else schedule();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    if (document.visibilityState !== 'hidden') schedule();
+    return () => { if (t) clearTimeout(t); document.removeEventListener('visibilitychange', onVisibility); };
+  }, [anyActive, tick]);
+
   const reload = useCallback(() => setTick((t) => t + 1), []);
+
+  /** Put a row the server returned in place (or re-read the list when the reply carried none — B-M1). */
+  const putRow = useCallback((month: string, data: SalesMonthRow | undefined | null) => {
+    writeSeq.current++;
+    if (data && typeof data === 'object' && data.month === month) setRows((prev) => prev?.map((x) => (x.month === month ? data : x)) ?? prev);
+    else setTick((t) => t + 1);
+  }, []);
+
+  /**
+   * An action on a month got NO definite answer (proxy / Worker timeout, 5xx, network) — the backend may have done it
+   * anyway. Re-read that month and report what is true now, never "was not …" without looking. Retrying close / reopen /
+   * rebuild is harmless (an already-closed month is refused; a rebuild changes no figures).
+   */
+  async function settleNoReply(row: SalesMonthRow, t: {
+    done(now: SalesMonthRow): boolean; doneText: string; notDoneText: string; unknownText: string;
+  }) {
+    const r = await salesImportApi.months(row.month, row.month);
+    const now = r.success ? r.data.find((x) => x.month === row.month) : undefined;
+    if (!now) {
+      setActionMsg({ tone: 'err', text: t.unknownText });
+      reload();
+      return;
+    }
+    putRow(row.month, now);
+    setActionMsg(t.done(now)
+      ? { tone: 'ok', text: `${t.doneText} (No clear answer came from the server; checking again confirmed it.)` }
+      : { tone: 'err', text: t.notDoneText });
+  }
 
   async function close(row: SalesMonthRow) {
     if (busyMonth) return;
@@ -68,10 +124,21 @@ export default function SalesMonthsPage() {
     setBusyMonth(row.month);
     setActionMsg(null);
     const r = await salesImportApi.closeMonth(row.month);
+    const closedText = `${label} is closed. You can now compute points for it in the Points Engine.`;
+    if (!r.success && outcomeUnknown(r)) {
+      await settleNoReply(row, {
+        done: (now) => now.state === 'CLOSED',
+        doneText: closedText,
+        notDoneText: `${label} was not closed: ${noAnswerReason(r)}, and checking again shows it still open. Press Close again.`,
+        unknownText: `We couldn’t confirm whether ${label} was closed: ${noAnswerReason(r)}, and checking again also failed. Refresh this page and check ${label}'s state before trying again.`,
+      });
+      setBusyMonth(null);
+      return;
+    }
     setBusyMonth(null);
-    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not closed: ${sentence(r.error)}.` }); reload(); return; }
-    setActionMsg({ tone: 'ok', text: `${label} is closed. You can now compute points for it in the Points Engine.` });
-    setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
+    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not closed: ${reasonOr(r.error, 'the server refused it without a reason')}.` }); reload(); return; }
+    setActionMsg({ tone: 'ok', text: closedText });
+    putRow(row.month, r.data);
   }
 
   async function rebuildProductList(row: SalesMonthRow) {
@@ -81,10 +148,20 @@ export default function SalesMonthsPage() {
     setBusyMonth(row.month);
     setActionMsg(null);
     const r = await salesImportApi.rebuildProductList(row.month);
+    if (!r.success && outcomeUnknown(r)) {
+      await settleNoReply(row, {
+        done: (now) => now.productListCurrent === true,
+        doneText: `The product list for ${label} is rebuilt. No figures changed.`,
+        notDoneText: `The product list for ${label} was not rebuilt: ${noAnswerReason(r)}, and checking again shows it still out of date. Rebuilding again is safe — it changes no figures.`,
+        unknownText: `We couldn’t confirm whether the product list for ${label} was rebuilt: ${noAnswerReason(r)}, and checking again also failed. Refresh this page to check; rebuilding again is safe — it changes no figures.`,
+      });
+      setBusyMonth(null);
+      return;
+    }
     setBusyMonth(null);
-    if (!r.success) { setActionMsg({ tone: 'err', text: `The product list for ${label} was not rebuilt: ${sentence(r.error)}.` }); reload(); return; }
+    if (!r.success) { setActionMsg({ tone: 'err', text: `The product list for ${label} was not rebuilt: ${reasonOr(r.error, 'the server refused it without a reason')}.` }); reload(); return; }
     setActionMsg({ tone: 'ok', text: `The product list for ${label} is rebuilt. No figures changed.` });
-    setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
+    putRow(row.month, r.data);
   }
 
   async function reopen(row: SalesMonthRow) {
@@ -107,7 +184,7 @@ export default function SalesMonthsPage() {
     // Only the downstream-acknowledgement 409 is re-asked ("…needs confirmation: …"); any other 409 (already open,
     // current month…) falls through to the message + re-fetch below.
     if (!r.success && r.status === 409 && !hasDownstream && /needs confirmation/i.test(r.error ?? '')) {
-      if (window.confirm(`${sentence(r.error)}.\n\nReopen ${label} anyway? Points already credited or exported for it may no longer match.`)) {
+      if (window.confirm(`${reasonOr(r.error, 'Points work exists for this month')}.\n\nReopen ${label} anyway? Points already credited or exported for it may no longer match.`)) {
         r = await salesImportApi.reopenMonth(row.month, { acknowledgeDownstream: true });
       } else {
         setBusyMonth(null);
@@ -115,12 +192,22 @@ export default function SalesMonthsPage() {
         return;
       }
     }
+    if (!r.success && outcomeUnknown(r)) {
+      await settleNoReply(row, {
+        done: (now) => now.state === 'OPEN',
+        doneText: `${label} is open again. Close it once the corrected file is applied.`,
+        notDoneText: `${label} was not reopened: ${noAnswerReason(r)}, and checking again shows it still closed. Press Reopen again.`,
+        unknownText: `We couldn’t confirm whether ${label} was reopened: ${noAnswerReason(r)}, and checking again also failed. Refresh this page and check ${label}'s state before trying again.`,
+      });
+      setBusyMonth(null);
+      return;
+    }
     setBusyMonth(null);
-    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not reopened: ${sentence(r.error)}.` }); reload(); return; }
-    const { warnings, ...updated } = r.data;
+    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not reopened: ${reasonOr(r.error, 'the server refused it without a reason')}.` }); reload(); return; }
+    const { warnings, ...updated } = r.data ?? ({} as Partial<typeof r.data>);
     const extra = warnings?.length ? ` Check: ${warnings.map(sentence).join('; ')}.` : '';
     setActionMsg({ tone: warnings?.length ? 'warn' : 'ok', text: `${label} is open again. Close it once the corrected file is applied.${extra}` });
-    setRows((prev) => prev?.map((x) => (x.month === row.month ? updated : x)) ?? prev);
+    putRow(row.month, r.data ? (updated as SalesMonthRow) : undefined);
   }
 
   return (
@@ -138,24 +225,37 @@ export default function SalesMonthsPage() {
         <Button size="sm" variant="ghost" onClick={reload} aria-label="Refresh months"><RefreshCw className="w-3.5 h-3.5" /> Refresh</Button>
       </div>
 
-      {actionMsg && (
-        <div role={actionMsg.tone === 'err' ? 'alert' : 'status'}
-          className={`rounded-lg border px-4 py-3 text-sm ${
-            actionMsg.tone === 'err' ? 'bg-red-50 border-red-200 text-red-800'
-              : actionMsg.tone === 'warn' ? 'bg-amber-50 border-amber-200 text-amber-800'
-                : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
-          {actionMsg.text}
+      {/* L9: the status region is ALWAYS mounted (a region that appears with its text is not reliably read out); errors
+          are role=alert, which is announced when it appears. */}
+      <div role="status" aria-live="polite">
+        {actionMsg && actionMsg.tone !== 'err' && (
+          <div className={`rounded-lg border px-4 py-3 text-sm ${
+            actionMsg.tone === 'warn' ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
+            {actionMsg.text}
+          </div>
+        )}
+      </div>
+      {actionMsg?.tone === 'err' && (
+        <div role="alert" className="rounded-lg border px-4 py-3 text-sm bg-red-50 border-red-200 text-red-800">{actionMsg.text}</div>
+      )}
+
+      {rows !== null && error && (
+        <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" data-testid="months-stale">
+          {anyActive ? 'Updates paused — ' : ''}couldn&apos;t refresh the months ({error}). The list below may be out of date
+          {anyActive ? '; retrying every few seconds' : ''}.{' '}
+          <Button size="sm" variant="outline" className="ml-2" onClick={reload}>Retry now</Button>
         </div>
       )}
 
       {recalcMonth && (
-        <RecalculatePanel key={recalcMonth} month={recalcMonth} onClose={() => setRecalcMonth(null)} onApplied={reload} />
+        <RecalculatePanel key={recalcMonth} month={recalcMonth} onClose={() => setRecalcMonth(null)} onApplied={reload}
+          activeJob={rows?.find((r) => r.month === recalcMonth)?.activeJob ?? null} listVersion={listVersion} />
       )}
 
       {rows === null ? (
         error ? (
           <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 flex items-center gap-3">
-            Couldn&apos;t load months: {error}
+            Couldn&apos;t load months: {reasonOr(error, 'no reason was given')}
             <Button size="sm" variant="outline" onClick={reload}>Retry</Button>
           </div>
         ) : (
@@ -197,6 +297,24 @@ export default function SalesMonthsPage() {
                           </span>
                         )
                       )}
+                      {row.activeJob && (
+                        <span data-testid={`active-job-${row.month}`}
+                          className="mt-1 flex w-fit items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border bg-blue-50 text-blue-800 border-blue-200">
+                          <span aria-hidden="true" className="inline-flex"><Spinner size="sm" /></span>
+                          {row.activeJob.status === 'QUEUED' ? 'Queued' : row.activeJob.kind === 'RECALC' ? 'Being recalculated' : 'Being applied'}
+                          {' '}by {row.activeJob.requestedBy} since {whenLabel(row.activeJob.createdAt)}
+                        </span>
+                      )}
+                      {!row.activeJob && row.lastJob && (
+                        <span data-testid={`last-job-${row.month}`}
+                          className={`mt-1 block text-[11px] ${row.lastJob.status === 'DONE' && row.lastJob.result?.ok !== false ? 'text-gray-500' : 'text-red-700 font-medium'}`}>
+                          Last {row.lastJob.kind === 'RECALC' ? 'recalculation' : 'apply'} by {row.lastJob.requestedBy}
+                          {row.lastJob.finishedAt ? `, ${whenLabel(row.lastJob.finishedAt)}` : ''}:{' '}
+                          {row.lastJob.status === 'DONE' && row.lastJob.result?.ok !== false
+                            ? (row.lastJob.kind === 'RECALC' ? 'recalculated' : 'applied')
+                            : `not done — ${row.lastJob.result?.error ?? 'no reason was given'}`}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-2">
                       <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
@@ -211,8 +329,14 @@ export default function SalesMonthsPage() {
                       {row.closedAt ? `${dateTimeLabel(row.closedAt)}${row.closedBy ? ` by ${row.closedBy}` : ''}` : '—'}
                     </td>
                     <td className="px-4 py-2 text-right whitespace-nowrap">
+                      {row.activeJob && (canClose && (row.canClose || (isGifsyAdmin && row.canReopen))) && (
+                        <span id={`job-hold-${row.month}`} className="block text-[11px] text-gray-500" data-testid={`job-hold-${row.month}`}>
+                          {row.canClose ? 'Close' : 'Reopen'} waits until the {row.activeJob.kind === 'RECALC' ? 'recalculation' : 'apply'} finishes
+                        </span>
+                      )}
                       {canClose && row.canClose && (
                         <Button size="sm" variant="outline" onClick={() => close(row)} loading={busyMonth === row.month}
+                          disabled={!!row.activeJob} aria-describedby={row.activeJob ? `job-hold-${row.month}` : undefined}
                           aria-label={`Close ${label}`}>
                           <Lock className="w-3.5 h-3.5" /> Close {label}
                         </Button>
@@ -241,6 +365,7 @@ export default function SalesMonthsPage() {
                       )}
                       {isGifsyAdmin && canClose && row.canReopen && (
                         <Button size="sm" variant="ghost" onClick={() => reopen(row)} loading={busyMonth === row.month}
+                          disabled={!!row.activeJob} aria-describedby={row.activeJob ? `job-hold-${row.month}` : undefined}
                           aria-label={`Reopen ${label}`}>
                           <LockOpen className="w-3.5 h-3.5" /> Reopen
                         </Button>

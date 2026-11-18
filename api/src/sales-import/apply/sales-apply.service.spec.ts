@@ -92,6 +92,10 @@ function makeDb(opts: {
   historyCombos?: Array<Record<string, string>>;
   historyCombosAfterApply?: Array<Record<string, string>>;
   acceptances?: Array<{ month: string; kpiCode: string; key: string; acceptedById: string; acceptedAt: Date }>;
+  /** Active job rows (activeJobsByMonth shape) for the preview. */
+  activeJobs?: Array<Record<string, unknown>>;
+  /** Finished job rows (lastJobsByMonth shape) for the preview. */
+  lastJobs?: Array<Record<string, unknown>>;
   /** Extra KpiDef rows (code + label) beyond OWN_AMT / OWN_QTY. */
   extraKpis?: Array<{ code: string; label: string }>;
 } = {}) {
@@ -139,6 +143,9 @@ function makeDb(opts: {
     // lockImportRow(…, 'SHARE') — H1: the apply holds the import row FOR SHARE
     $queryRaw: jest.fn(async (q: Prisma.Sql) => {
       const text = q.strings.join('?');
+      // Background jobs: the active Apply / Recalculate of the previewed months (none unless a test sets them).
+      if (text.includes('DISTINCT ON (m."month")')) return opts.lastJobs ?? [];
+      if (text.includes('FROM "sales_apply_job_months"')) return opts.activeJobs ?? [];
       // FOCUS-FROM-TARGETS catalogue reads (only for a tenant with a TARGET_NAMES definition)
       if (text.includes('FROM "sales_month_history_combos"')) {
         // `historyCombosAfterApply`: what the stored product lists hold once a month's apply rewrote its own list
@@ -871,6 +878,32 @@ describe('FOCUS-FROM-TARGETS: preview / apply / recalculate with products from t
     expect(rec.focus.map((f) => [f.kpiCode, f.measure])).toEqual([['FOCUS', 'AMOUNT']]);
   });
 
+  it('A-M1: a RETRIED background job resolves its remaining month against the FIRST run’s product lists (Sep done, worker killed, Oct still applies)', async () => {
+    const R = { dimA: 'R', dimB: '1' };
+    const db = fdb({
+      months: [PREV, CUR],
+      historyCombos: [R],
+      historyCombosAfterApply: [], // once PREV is written its product list no longer holds R
+      targets: [tgt(PREV, 'O1', 10, 'P500'), tgt(PREV, 'O2', 5, 'R'), tgt(CUR, 'O1', 10, 'P500'), tgt(CUR, 'O2', 5, 'R')],
+    });
+    const p = await services(db).preview.preview('t1', 'imp1');
+    // First run: snapshots the lists, writes PREV, then "dies" before CUR (beforeMonth stops it).
+    let basis: Array<{ dims: unknown }> | undefined;
+    const { ApplyStopError: Stop } = await import('./sales-apply.service');
+    await expect(services(db).apply.apply(user, 'imp1', applyBody(p, { months: [PREV, CUR] }), {
+      beforeMonth: async (m) => { if (m === CUR) throw new Stop('worker killed'); },
+    }, { onFocusHistory: async (h) => { basis = h; } })).rejects.toBeInstanceOf(Stop);
+    expect(basis).toEqual([{ dims: JSON.stringify(R) }]);
+    // Retry of CUR only — WITHOUT the snapshot it is refused (R is no longer in the stored lists)…
+    await expect(services(db).apply.apply(user, 'imp1', applyBody(p, { months: [CUR] }), {}, {})).rejects.toBeInstanceOf(ConflictException);
+    // …WITH the first run's snapshot it applies, and the stored lists are not re-read.
+    db.$queryRaw.mockClear();
+    const r = await services(db).apply.apply(user, 'imp1', applyBody(p, { months: [CUR] }), {}, { focusHistory: basis });
+    expect(r.results).toEqual([expect.objectContaining({ month: CUR, ok: true })]);
+    const texts = db.$queryRaw.mock.calls.map((c) => (c[0] as unknown as Prisma.Sql).strings.join('?'));
+    expect(texts.filter((t) => t.includes('FROM "sales_month_history_combos"'))).toHaveLength(0);
+  });
+
   it('audit follow-up: ONE catalogue per apply request — applying month A (which rewrites A’s product list) cannot unmatch month B', async () => {
     // "R" is known only from a stored month's product list; month A's apply replaces the stored lists (mock: once a
     // combos.insert ran, the stored lists no longer hold R). Re-reading the catalogue per month would block B after A
@@ -1186,5 +1219,154 @@ describe('day-level data (OutletSalesDay / SalesDaySet)', () => {
       if (prev === undefined) delete process.env.SALES_DAY_BUILD_MAX_ROWS;
       else process.env.SALES_DAY_BUILD_MAX_ROWS = prev;
     }
+  });
+});
+
+// ─── Background job hooks (owner 2026-11-18: apply / recalculate run in the sales-import worker) ──────────────────
+describe('background-job hooks + prechecks', () => {
+  const body = (months: string[], over: Record<string, unknown> = {}) => ({ months, expectedDefinitionsHash: HASH, processingVersion: VERSION, ...over });
+
+  it('precheckApply: the same 4xx as apply before any transaction, and returns the sorted months', async () => {
+    const db = makeDb();
+    await expect(services(db).apply.precheckApply(user, 'imp1', body([PREV], { expectedDefinitionsHash: 'x' }))).rejects.toBeInstanceOf(ConflictException);
+    await expect(services(db).apply.precheckApply(user, 'imp1', body([]))).rejects.toBeInstanceOf(BadRequestException);
+    await expect(services(db).apply.precheckApply(user, 'nope', body([PREV]))).rejects.toBeInstanceOf(NotFoundException);
+    expect(await services(db).apply.precheckApply(user, 'imp1', body([CUR, PREV]))).toEqual([PREV, CUR]);
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('apply: beforeMonth runs before each month, inTx runs INSIDE the month transaction after the write (with the result)', async () => {
+    const db = makeDb();
+    const seen: string[] = [];
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV, CUR]), {
+      beforeMonth: async (m) => { seen.push(`before:${m}:${db.$transaction.mock.calls.length}`); },
+      inTx: async (tx, res) => { seen.push(`inTx:${res.month}:${res.ok}:${tx === (db as unknown)}:${db.log.at(-1)}`); },
+    });
+    expect(r.results.map((x) => x.ok)).toEqual([true, true]);
+    expect(seen).toEqual([`before:${PREV}:0`, `inTx:${PREV}:true:true:audit`, `before:${CUR}:1`, `inTx:${CUR}:true:true:audit`]);
+  });
+
+  it('apply: an inTx throw fails THAT month (its transaction rolls back) and the next month still runs', async () => {
+    const db = makeDb();
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV, CUR]), {
+      inTx: async (_tx, res) => { if (res.month === PREV) throw new Error('claim lost'); },
+    });
+    expect(r.results).toEqual([
+      expect.objectContaining({ month: PREV, ok: false, error: 'Apply failed for this month. Nothing was changed for it.' }),
+      expect.objectContaining({ month: CUR, ok: true }),
+    ]);
+  });
+
+  it('apply: an ApplyStopError from beforeMonth stops the run (propagates; later months are not written)', async () => {
+    const { ApplyStopError } = await import('./sales-apply.service');
+    const db = makeDb();
+    await expect(services(db).apply.apply(user, 'imp1', body([PREV, CUR]), {
+      beforeMonth: async (m) => { if (m === CUR) throw new ApplyStopError('stopping'); },
+    })).rejects.toBeInstanceOf(ApplyStopError);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  const HISTORY = [
+    { id: 1n, month: PREV, customerCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: stableStringify({ dimA: 'P', dimB: '500' }), amountPaise: 10000n, qtyPico: 1_500000n * 1_000_000n, lines: 1 },
+  ];
+
+  it('A-L1: precheckApply refuses a CLOSED (or not started) month at once with its reason (409); the worker re-checks anyway', async () => {
+    const db = makeDb({ statuses: [{ month: PREV, state: 'CLOSED', closedAt: AT }] });
+    await expect(services(db).apply.precheckApply(user, 'imp1', body([PREV, CUR]))).rejects.toThrow(ConflictException);
+    await expect(services(db).apply.precheckApply(user, 'imp1', body([PREV]))).rejects.toThrow(/CLOSED/);
+    await expect(services(makeDb()).apply.precheckApply(user, 'imp1', body([FUT]))).rejects.toBeInstanceOf(BadRequestException); // not in the file
+    expect(await services(makeDb()).apply.precheckApply(user, 'imp1', body([PREV]))).toEqual([PREV]);
+  });
+
+  it('A-L1: precheckRecalculate refuses a CLOSED month at once (409)', async () => {
+    const db = makeDb({ history: HISTORY, statuses: [{ month: PREV, state: 'CLOSED', closedAt: AT }] });
+    await expect(services(db).apply.precheckRecalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() }))
+      .rejects.toThrow(/CLOSED/);
+  });
+
+  it('A-L2: in a background job a TRANSIENT DB error (deadlock / connection) propagates as TransientApplyError (retry); a direct call still reports it per month', async () => {
+    const { TransientApplyError, isTransientDbError } = await import('./sales-apply.service');
+    const db = makeDb();
+    db.salesUploadBatch.create.mockRejectedValue(new Error('deadlock detected'));
+    await expect(services(db).apply.apply(user, 'imp1', body([PREV]), {})).rejects.toBeInstanceOf(TransientApplyError);
+    const direct = await services(db).apply.apply(user, 'imp1', body([PREV]));
+    expect(direct.results[0]).toEqual(expect.objectContaining({ ok: false, error: 'Apply failed for this month. Nothing was changed for it.' }));
+    for (const e of [{ code: 'P1001' }, { code: 'P2034' }, { code: 'P2028', message: 'Transaction API error: Unable to start a transaction in the given time.' }, { code: 'P2010', meta: { code: '40001' } }, new Error('Connection terminated unexpectedly')]) {
+      expect(isTransientDbError(e)).toBe(true);
+    }
+    for (const e of [new Error('null value in column'), { code: 'P2002' }, new ConflictException('closed')]) expect(isTransientDbError(e)).toBe(false);
+  });
+
+  it('M1: a month whose transaction ran past APPLY_TX_TIMEOUT_MS is FINAL with its own words — never retried as a temporary problem', async () => {
+    const { isTxTimeout, isTransientDbError } = await import('./sales-apply.service');
+    const timedOut = Object.assign(new Error('Transaction already closed: A commit cannot be executed on an expired transaction. The timeout for this transaction was 300000 ms, however 300012 ms passed since the start of the transaction.'), { code: 'P2028' });
+    expect(isTxTimeout(timedOut)).toBe(true);
+    expect(isTransientDbError(timedOut)).toBe(false);
+    const busyPool = Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' });
+    expect(isTxTimeout(busyPool)).toBe(false);
+    expect(isTransientDbError(busyPool)).toBe(true);
+    const db = makeDb();
+    db.salesUploadBatch.create.mockRejectedValueOnce(timedOut);
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV, CUR]), {}); // a background job (hooks)
+    expect(r.results[0]).toEqual({ month: PREV, ok: false,
+      error: `${monthLabelOf(PREV)} took longer than 5 minutes to write and was rolled back — nothing changed. The file may be too large for one apply; contact Gifsy tech.` });
+    expect(r.results[1]).toEqual(expect.objectContaining({ month: CUR, ok: true })); // the next month still runs
+  });
+
+  it('final review M1: exact Prisma texts — a LOST transaction (connection drop / engine restart) is TRANSIENT, only an expired one is FINAL', async () => {
+    const { isTxTimeout, isTxLost, isTransientDbError, TransientApplyError } = await import('./sales-apply.service');
+    const lost = Object.assign(new Error("Transaction API error: Transaction not found. Transaction ID is invalid, refers to an old closed transaction Prisma doesn't have information about anymore, or was obtained before disconnecting."), { code: 'P2028' });
+    const expiredCommit = Object.assign(new Error('Transaction already closed: A commit cannot be executed on an expired transaction. The timeout for this transaction was 300000 ms, however 300012 ms passed since the start of the transaction. Consider increasing the interactive transaction timeout or doing less work in the transaction.'), { code: 'P2028' });
+    const expiredQuery = Object.assign(new Error('Transaction already closed: A query cannot be executed on an expired transaction. The timeout for this transaction was 300000 ms, however 301500 ms passed since the start of the transaction. Consider increasing the interactive transaction timeout or doing less work in the transaction.'), { code: 'P2028' });
+    expect([isTxLost(lost), isTxTimeout(lost), isTransientDbError(lost)]).toEqual([true, false, true]);
+    for (const e of [expiredCommit, expiredQuery]) expect([isTxLost(e), isTxTimeout(e), isTransientDbError(e)]).toEqual([false, true, false]);
+    const db = makeDb();
+    db.salesUploadBatch.create.mockRejectedValueOnce(lost);
+    await expect(services(db).apply.apply(user, 'imp1', body([PREV]), {})).rejects.toBeInstanceOf(TransientApplyError); // retried, not "too large"
+  });
+
+  it('precheckRecalculate: 400 bad body, 404 no history, 409 stale history / definitions — no transaction', async () => {
+    const none = makeDb();
+    await expect(services(none).apply.precheckRecalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() })).rejects.toBeInstanceOf(NotFoundException);
+    const db = makeDb({ history: HISTORY });
+    await expect(services(db).apply.precheckRecalculate(user, 'bad', { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(services(db).apply.precheckRecalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: new Date(0).toISOString() })).rejects.toBeInstanceOf(ConflictException);
+    await expect(services(db).apply.precheckRecalculate(user, PREV, { expectedDefinitionsHash: 'x', expectedHistoryAppliedAt: AT.toISOString() })).rejects.toBeInstanceOf(ConflictException);
+    await expect(services(db).apply.precheckRecalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() })).resolves.toBeUndefined();
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('recalculate: inTx runs inside the transaction after the write', async () => {
+    const db = makeDb({ history: HISTORY });
+    const seen: string[] = [];
+    await services(db).apply.recalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() }, {
+      inTx: async (_tx, res) => { seen.push(`${res.month}:${res.ok}:${db.log.at(-1)}`); },
+    });
+    expect(seen).toEqual([`${PREV}:true:audit`]);
+  });
+});
+
+describe('preview × background jobs', () => {
+  it('a month with an Apply / Recalculate queued or running cannot be ticked: activeJob + "being applied by X since HH:MM"', async () => {
+    const db = makeDb({
+      activeJobs: [{ month: PREV, jobId: 'j1', kind: 'APPLY', status: 'RUNNING', importId: 'imp1', requestedByName: 'Ravi', createdAt: new Date('2026-11-18T05:02:00.000Z') }],
+    });
+    const p = await services(db).preview.preview('t1', 'imp1');
+    const prev = p.months.find((m) => m.month === PREV)!;
+    expect(prev.activeJob).toEqual({ jobId: 'j1', kind: 'APPLY', status: 'RUNNING', importId: 'imp1', requestedBy: 'Ravi', createdAt: '2026-11-18T05:02:00.000Z' });
+    expect(prev.canApply).toBe(false);
+    expect(prev.blockedReason).toMatch(new RegExp(`^${monthLabelOf(PREV)} is being applied by Ravi since (\d+ \w+, )?10:32\. Wait for it to finish\.$`));
+    const cur = p.months.find((m) => m.month === CUR)!;
+    expect(cur.activeJob).toBeNull();
+    expect(cur.canApply).toBe(true);
+    expect(cur.lastJob).toBeNull();
+  });
+
+  it('B-H1: the preview carries each month latest FINISHED job so its result is shown when coming back', async () => {
+    const fin = { month: PREV, jobId: 'j0', kind: 'APPLY', status: 'DONE', importId: 'imp1', requestedByName: 'Asha',
+      createdAt: new Date('2026-11-18T05:02:00.000Z'), finishedAt: new Date('2026-11-18T05:04:00.000Z'), result: { month: PREV, ok: true, outletsWritten: 3 } };
+    const p = await services(makeDb({ lastJobs: [fin] })).preview.preview('t1', 'imp1');
+    expect(p.months.find((m) => m.month === PREV)!.lastJob).toEqual(expect.objectContaining({ jobId: 'j0', status: 'DONE', requestedBy: 'Asha',
+      finishedAt: '2026-11-18T05:04:00.000Z', result: { month: PREV, ok: true, outletsWritten: 3 } }));
   });
 });

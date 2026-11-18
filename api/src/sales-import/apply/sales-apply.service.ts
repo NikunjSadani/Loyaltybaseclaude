@@ -45,7 +45,7 @@ import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
 import { insertMonthCombosSql } from '../kpi/month-combos';
-import { hasTargetNamesDef, kpiLabelsOf, loadFocusCatalogue } from '../kpi/focus-data';
+import { hasTargetNamesDef, kpiLabelsOf, loadFocusCatalogue, loadHistoryCombos } from '../kpi/focus-data';
 import type { FocusCatalogue } from '../kpi/focus-products';
 import {
   FOCUS_CHANGED_MESSAGE,
@@ -70,6 +70,80 @@ export const APPLY_CHUNK = 3250;
 /** A per-month failure that is reported in ApplyResult (never rolls back other months). */
 class MonthApplyError extends Error {}
 
+/** Thrown by a MonthWriteHooks.beforeMonth to stop an apply between months (worker stopping / claim lost). Propagates. */
+export class ApplyStopError extends Error {}
+
+/**
+ * A month hit a TRANSIENT database problem (connection lost, serialization / deadlock, transaction timeout or API
+ * error): its transaction rolled back, nothing is written, and a retry may well succeed — so the background job is
+ * handed back for another attempt instead of marking the month FAILED (audit A-L2). Propagates out of apply().
+ */
+export class TransientApplyError extends Error {
+  constructor(readonly month: string, message: string) {
+    super(message);
+  }
+}
+
+/**
+ * Prisma's interactive transaction is gone because the CONNECTION / engine went away ("Transaction not found …
+ * obtained before disconnecting") — a retry may succeed, so this is TRANSIENT (final review M1), checked BEFORE the
+ * timeout test (its text also says "closed").
+ */
+export function isTxLost(e: unknown): boolean {
+  return /Transaction not found|obtained before disconnecting|Transaction ID is invalid/i.test(String((e as { message?: string })?.message ?? ''));
+}
+
+/**
+ * The month's transaction ran past its own timeout (APPLY_TX_TIMEOUT_MS = 300 s) and was rolled back: Prisma P2028
+ * "Transaction already closed: A commit / query cannot be executed on an expired transaction. The timeout for this
+ * transaction was … ms". Retrying would only run as long again — so this is FINAL (re-review M1). A lost transaction
+ * (isTxLost) and a busy pool ("Unable to start a transaction") are NOT timeouts.
+ */
+export function isTxTimeout(e: unknown): boolean {
+  if (isTxLost(e)) return false;
+  const msg = String((e as { message?: string })?.message ?? '');
+  if (/Unable to start a transaction/i.test(msg)) return false;
+  return /Transaction already closed/i.test(msg) && /expired transaction|timeout for this transaction/i.test(msg);
+}
+
+/** "<Month> took longer than 5 minutes to write…" — the plain words for a month whose write ran out of time. */
+export function txTimeoutMessage(month: string): string {
+  return `${monthLabel(month)} took longer than ${Math.round(APPLY_TX_TIMEOUT_MS / 60_000)} minutes to write and was rolled back — nothing changed. ` +
+    'The file may be too large for one apply; contact Gifsy tech.';
+}
+
+/**
+ * Is this a database error a retry can fix (connection lost, deadlock / serialization, pool busy) — as opposed to a
+ * definite business refusal or a transaction that simply ran out of time (isTxTimeout, FINAL)?
+ */
+export function isTransientDbError(e: unknown): boolean {
+  if (isTxLost(e)) return true;
+  if (isTxTimeout(e)) return false;
+  const err = e as { code?: string; meta?: { code?: string }; message?: string };
+  const code = String(err?.code ?? '');
+  if (['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2034'].includes(code)) return true;
+  if (code === 'P2028') return /Unable to start a transaction/i.test(String(err?.message ?? ''));
+  if (['40001', '40P01', '57P01', '57P02', '57P03', '08000', '08003', '08006'].includes(String(err?.meta?.code ?? ''))) return true;
+  return /Connection terminated|ECONNRESET|ECONNREFUSED|Can't reach database|Server has closed the connection|could not serialize|deadlock detected|Unable to start a transaction|terminating connection/i
+    .test(String(err?.message ?? ''));
+}
+
+/** Background-job options of apply() (see SalesApplyJobsService). */
+export interface ApplyJobOptions {
+  /** The stored product lists to resolve focus names against (a retried job's snapshot); else they are read now. */
+  focusHistory?: Array<{ dims: unknown }>;
+  /** Called once with the lists read now (the first run snapshots them), before any month is written. */
+  onFocusHistory?(history: Array<{ dims: unknown }>): Promise<void>;
+}
+
+/** Background-job hooks around each month's write (see SalesApplyJobsService). */
+export interface MonthWriteHooks {
+  /** Before the month's transaction starts. May throw ApplyStopError to stop the whole run (nothing more is written). */
+  beforeMonth?(month: string): Promise<void>;
+  /** INSIDE the month's transaction, after the write: a throw rolls the month's write back. */
+  inTx?(tx: Prisma.TransactionClient, result: ApplyMonthResult): Promise<void>;
+}
+
 /**
  * Per-month apply into OutletSalesRecord (plan §7.2; task K-6). OWNER: Lane K.
  *
@@ -92,7 +166,70 @@ export class SalesApplyService {
     private readonly kpiDefs: SalesKpiDefService,
   ) {}
 
-  async apply(user: JwtPayload, importId: string, body: ApplyRequest): Promise<ApplyResult> {
+  /**
+   * The cheap checks of an apply request, for ENQUEUEING it as a background job (owner 2026-11-18): body, READY import,
+   * processing version, definitions hash, column mapping and the partial / older acknowledgements — every 4xx the
+   * synchronous apply gives before its first write, EXCEPT the focus-fingerprint check (it resolves every month's focus
+   * products; the worker runs it — still before ANY write — via apply()). Returns the validated, sorted months.
+   */
+  async precheckApply(user: JwtPayload, importId: string, body: ApplyRequest): Promise<string[]> {
+    const { req, summaries } = await this.prepareApply(user, importId, body, { focus: false });
+    // Audit A-L1: a CLOSED / future month (or one not in the file) is refused NOW (409), not after queueing. The worker
+    // re-checks every month under the month lock anyway.
+    for (const month of req.months) {
+      if (!summaries.has(month)) throw new BadRequestException(`${monthLabel(month)} is not in this file.`);
+      await this.assertMonthOpen(user.clientId, month);
+    }
+    return req.months;
+  }
+
+  /** 409 with the preview's own reason when the month is CLOSED or has not started (cheap; no lock). */
+  private async assertMonthOpen(clientId: string, month: string): Promise<void> {
+    const override = await this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
+    const state = resolveMonthState(month, currentMonthKey(), override);
+    const why = blockedReasonFor({ month, defsCount: 1, mappingChanged: false, state });
+    if (why) throw new ConflictException(why);
+  }
+
+  /**
+   * Apply months of a READY import. Every check that can refuse the whole request runs first (no write); then each month
+   * is one transaction. `hooks` (background worker): beforeMonth before a month's transaction; inTx INSIDE it, after the
+   * write, so the job's month row is marked DONE atomically with the write (a crash rolls both back — never applied twice).
+   */
+  async apply(user: JwtPayload, importId: string, body: ApplyRequest, hooks?: MonthWriteHooks, job?: ApplyJobOptions): Promise<ApplyResult> {
+    const { req, imp, summaries, catalogue } = await this.prepareApply(user, importId, body, { focus: true, job });
+    const results: ApplyMonthResult[] = [];
+    for (const month of req.months) {
+      const summary = summaries.get(month);
+      if (!summary) {
+        results.push({ month, ok: false, error: `${monthLabel(month)} is not in this file.` });
+        continue;
+      }
+      try {
+        await hooks?.beforeMonth?.(month);
+        results.push(await this.applyMonth(user, imp.id, summary, req, catalogue, hooks));
+      } catch (e) {
+        if (e instanceof ApplyStopError) throw e;
+        // A background job retries a transient DB problem (the month's transaction rolled back); a direct call reports it.
+        if (hooks && !(e instanceof MonthApplyError) && isTransientDbError(e)) {
+          throw new TransientApplyError(month, `${monthLabel(month)}: a temporary database problem (${(e as Error)?.message ?? 'unknown'})`);
+        }
+        if (isTxTimeout(e)) {
+          // FINAL, and loud: the month is too big to write inside APPLY_TX_TIMEOUT_MS (re-review M1).
+          this.log.error(JSON.stringify({ msg: 'sales-import apply: month write TIMED OUT and was rolled back', importId: imp.id, month,
+            timeoutMs: APPLY_TX_TIMEOUT_MS, error: (e as Error)?.message }));
+          results.push({ month, ok: false, error: txTimeoutMessage(month) });
+          continue;
+        }
+        const msg = e instanceof MonthApplyError ? e.message : 'Apply failed for this month. Nothing was changed for it.';
+        if (!(e instanceof MonthApplyError)) this.log.error(`apply ${imp.id} ${month} failed: ${(e as Error)?.message}`);
+        results.push({ month, ok: false, error: msg });
+      }
+    }
+    return { results };
+  }
+
+  private async prepareApply(user: JwtPayload, importId: string, body: ApplyRequest, opts: { focus: boolean; job?: ApplyJobOptions }) {
     const clientId = user.clientId;
     const req = this.validateBody(body);
 
@@ -134,8 +271,14 @@ export class SalesApplyService {
     // definition skip this entirely (fingerprint '' -> not required).
     // ONE catalogue for the whole request (stored product lists as they are NOW ∪ this import's products), reused by
     // every month incl. the under-lock re-check — see lazyCatalogue for why it must not be re-read per month.
-    const catalogue = lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId, { importId: imp.id }));
-    if (hasTargetNamesDef(defs)) {
+    const catalogue = lazyCatalogue(async () => {
+      // Background job: a retry resolves against the lists its FIRST run saw (A-M1); the first run snapshots them.
+      const given = opts.job?.focusHistory;
+      const history = given ?? (await loadHistoryCombos(this.prisma, clientId));
+      if (!given) await opts.job?.onFocusHistory?.(history);
+      return loadFocusCatalogue(this.prisma, clientId, { importId: imp.id, history });
+    });
+    if (opts.focus && hasTargetNamesDef(defs)) {
       const roster = await loadRosterMeta(this.prisma, clientId);
       const labelOf = await kpiLabelsOf(this.prisma, clientId, defs.map((d) => d.kpiCode));
       for (const month of req.months) {
@@ -147,22 +290,7 @@ export class SalesApplyService {
       }
     }
 
-    const results: ApplyMonthResult[] = [];
-    for (const month of req.months) {
-      const summary = summaries.get(month);
-      if (!summary) {
-        results.push({ month, ok: false, error: `${monthLabel(month)} is not in this file.` });
-        continue;
-      }
-      try {
-        results.push(await this.applyMonth(user, imp.id, summary, req, catalogue));
-      } catch (e) {
-        const msg = e instanceof MonthApplyError ? e.message : 'Apply failed for this month. Nothing was changed for it.';
-        if (!(e instanceof MonthApplyError)) this.log.error(`apply ${imp.id} ${month} failed: ${(e as Error)?.message}`);
-        results.push({ month, ok: false, error: msg });
-      }
-    }
-    return { results };
+    return { req, imp, summaries, catalogue };
   }
 
   private validateBody(body: ApplyRequest) {
@@ -206,6 +334,7 @@ export class SalesApplyService {
     },
     /** The request-scoped focus catalogue (see lazyCatalogue). */
     catalogue: () => Promise<FocusCatalogue>,
+    hooks?: MonthWriteHooks,
   ): Promise<ApplyMonthResult> {
     const clientId = user.clientId;
     const month = summary.month;
@@ -257,7 +386,7 @@ export class SalesApplyService {
           collectDays: withDays,
         });
         const snap = await tx.salesImport.findFirst({ where: { id: importId, clientId }, select: { mappingSnapshot: true } });
-        return this.writeMonth(tx, user, {
+        const res = await this.writeMonth(tx, user, {
           month,
           source: 'IMPORT',
           sourceImportId: importId,
@@ -276,6 +405,8 @@ export class SalesApplyService {
             dimensionKeys: ((snap?.mappingSnapshot as unknown as SalesColumnMapping | null)?.dimensions ?? []).map((d) => d.key),
           },
         });
+        await hooks?.inTx?.(tx, res);
+        return res;
       },
       { timeout: APPLY_TX_TIMEOUT_MS, maxWait: 10_000 },
     );
@@ -564,11 +695,32 @@ export class SalesApplyService {
    * write as apply; recorded as a SalesImportApply with source HISTORY; the history itself is unchanged). Month lock;
    * month must be OPEN; 409 when the definitions or the history changed since the preview.
    */
-  async recalculate(user: JwtPayload, month: string, body: SalesMonthRecalcRequest): Promise<ApplyMonthResult> {
+  /**
+   * The cheap checks of a recalculate request, for ENQUEUEING it (owner 2026-11-18): body, stored history present (404),
+   * history and definitions unchanged since the preview (409). Everything is re-checked under the month lock by
+   * recalculate() in the worker.
+   */
+  async precheckRecalculate(user: JwtPayload, month: string, body: SalesMonthRecalcRequest): Promise<void> {
+    this.validateRecalcBody(month, body);
+    const meta = await monthHistoryMeta(this.prisma, user.clientId, month);
+    if (!meta) throw new NotFoundException(noHistoryMessage(month));
+    if (meta.appliedAt.toISOString() !== body.expectedHistoryAppliedAt) {
+      throw new ConflictException('A newer file was applied to this month since the preview. Refresh the preview and try again.');
+    }
+    await this.assertMonthOpen(user.clientId, month); // A-L1
+    const { hash } = await this.kpiDefs.enabled(user.clientId);
+    if (hash !== body.expectedDefinitionsHash) throw new ConflictException('KPI definitions changed since the preview. Refresh the preview and try again.');
+  }
+
+  private validateRecalcBody(month: string, body: SalesMonthRecalcRequest): void {
     if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
     if (!body || typeof body.expectedDefinitionsHash !== 'string' || typeof body.expectedHistoryAppliedAt !== 'string') {
       throw new BadRequestException('expectedDefinitionsHash and expectedHistoryAppliedAt are required (from the recalculate preview).');
     }
+  }
+
+  async recalculate(user: JwtPayload, month: string, body: SalesMonthRecalcRequest, hooks?: MonthWriteHooks): Promise<ApplyMonthResult> {
+    this.validateRecalcBody(month, body);
     const clientId = user.clientId;
     return this.prisma.$transaction(
       async (tx) => {
@@ -603,7 +755,7 @@ export class SalesApplyService {
         // import's retention purge); null → the latest day in the stored lines.
         const src = await tx.salesImport.findFirst({ where: { id: meta.sourceImportId, clientId }, select: { monthSummaries: true } });
         const srcSummary = (Array.isArray(src?.monthSummaries) ? (src!.monthSummaries as unknown as MonthSummary[]) : []).find((s) => s?.month === month);
-        return this.writeMonth(tx, user, {
+        const res = await this.writeMonth(tx, user, {
           month,
           source: 'HISTORY',
           evalDefs: focus?.evalDefs ?? defs,
@@ -618,6 +770,8 @@ export class SalesApplyService {
           comp,
           focusFingerprint: focus?.resolution.fingerprint ?? '',
         });
+        await hooks?.inTx?.(tx, res);
+        return res;
       },
       { timeout: APPLY_TX_TIMEOUT_MS, maxWait: 10_000 },
     );

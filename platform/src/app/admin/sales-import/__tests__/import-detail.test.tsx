@@ -6,8 +6,8 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import { EMPTY_MONTH_RECONCILIATION, type MonthPreview, type SalesImportDetail, type SalesImportPreview } from '@/lib/sales-import/types';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { EMPTY_MONTH_RECONCILIATION, type MonthPreview, type SalesApplyJobDto, type SalesImportDetail, type SalesImportPreview } from '@/lib/sales-import/types';
 
 const push = vi.fn();
 vi.mock('next/navigation', () => ({
@@ -21,6 +21,7 @@ vi.mock('next/link', () => ({
 
 const apiMock = vi.hoisted(() => ({
   get: vi.fn(), preview: vi.fn(), apply: vi.fn(), reprocess: vi.fn(), remove: vi.fn(), cancel: vi.fn(), reprocessAsNew: vi.fn(),
+  getApplyJob: vi.fn(), findApplyJob: vi.fn(),
   unmatchedCsvUrl: (id: string) => `/u/${id}`, errorsXlsxUrl: (id: string) => `/e/${id}`,
 }));
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock, fetchDownload: vi.fn() }));
@@ -50,7 +51,7 @@ function month(over: Partial<MonthPreview> = {}): MonthPreview {
     unmatchedCustomers: 2, matchedAmountRupees: 1200, matchedQuantity: 4.5, unmatchedAmountRupees: 30,
     unmatchedQuantity: 0.2, monthState: 'OPEN', canApply: true, warnings: [], zeroFillOutlets: 1,
     kpis: [{ kpiCode: 'KPI_X', label: 'KPI X', measure: 'AMOUNT', newTotal: 1200, currentTotal: 1000, delta: 200, outletsNonZero: 3, outletsNegative: 0 }],
-    lastApplied: null, reconciliation: EMPTY_MONTH_RECONCILIATION, ...over,
+    lastApplied: null, reconciliation: EMPTY_MONTH_RECONCILIATION, activeJob: null, lastJob: null, ...over,
   };
 }
 
@@ -64,6 +65,7 @@ function preview(months: MonthPreview[], over: Partial<SalesImportPreview> = {})
 const ok = <T,>(data: T) => ({ success: true as const, data });
 
 beforeEach(() => {
+  window.sessionStorage.clear();
   Object.values(apiMock).forEach((f) => typeof f === 'function' && 'mockReset' in f && (f as ReturnType<typeof vi.fn>).mockReset());
   push.mockReset();
   perms.granted = true;
@@ -191,7 +193,7 @@ describe('import detail — preview + apply', () => {
     await act(async () => { fireEvent.click(apply); });
     expect(window.confirm).toHaveBeenCalled();
     expect(apiMock.apply).toHaveBeenCalledWith('imp1', {
-      months: ['2026-10'], expectedDefinitionsHash: 'h1', processingVersion: 7, acknowledgePartialMonths: ['2026-10'],
+      months: ['2026-10'], expectedDefinitionsHash: 'h1', processingVersion: 7, acknowledgePartialMonths: ['2026-10'], requestId: expect.any(String),
     });
     expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('3 outlets updated, 1 set to 0');
   });
@@ -291,15 +293,194 @@ describe('import detail — preview + apply', () => {
     expect(apiMock.preview).toHaveBeenCalledTimes(2);
   });
 
-  it('a 5xx from Apply does not pretend the preview was refreshed', async () => {
-    apiMock.get.mockResolvedValue(ok(detail()));
-    apiMock.preview.mockResolvedValue(ok(preview([month()])));
-    apiMock.apply.mockResolvedValue({ success: false, error: 'HTTP 502', status: 502 });
-    render(<Page />);
+  // ── Background apply jobs (owner 2026-11-18): the POST records a job (202); the page follows it. With no clear answer
+  //    the click is looked up by its requestId — never guessed from "last applied" (audit H1 / M4).
+  const job = (over: Partial<SalesApplyJobDto> = {}, months: Array<Partial<SalesApplyJobDto['months'][number]>> = [{}]): SalesApplyJobDto => ({
+    id: 'job1', kind: 'APPLY', importId: 'imp1', requestId: 'rq', status: 'QUEUED', requestedBy: 'Asha',
+    createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, error: null, attempts: 0,
+    months: months.map((m) => ({ month: '2026-10', status: 'QUEUED', startedAt: null, finishedAt: null, result: null, lastError: null, ...m })),
+    ...over,
+  });
+  const DONE_OCT = { status: 'DONE' as const, result: { month: '2026-10', ok: true, applyId: 'a1', outletsWritten: 3, outletsZeroFilled: 1 } };
+  const enqueued = (j: SalesApplyJobDto) => ok({ job: j, results: [] });
+
+  async function clickApply() {
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
     await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
-    expect(await screen.findByTestId('sales-import-apply-notice')).toHaveTextContent('Try again in a moment');
-    expect(apiMock.preview).toHaveBeenCalledTimes(1);
+  }
+
+  it('Apply → 202 job: sends a requestId, shows Queued → Applying → the result card; Apply held meanwhile', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue(enqueued(job()));
+    apiMock.getApplyJob
+      .mockResolvedValueOnce(ok(job({ status: 'RUNNING' }, [{ status: 'RUNNING', startedAt: new Date().toISOString() }])))
+      .mockResolvedValue(ok(job({ status: 'DONE' }, [DONE_OCT])));
+    render(<Page />);
+    await clickApply();
+    expect(apiMock.apply).toHaveBeenCalledWith('imp1', expect.objectContaining({ months: ['2026-10'], requestId: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/) }));
+    const panel = await screen.findByTestId('sales-import-job');
+    expect(panel).toHaveTextContent('Queued — waiting its turn for the processor');
+    expect(panel).toHaveTextContent('Started by Asha');
+    expect(screen.getByTestId('sales-import-apply')).toBeDisabled();
+    expect(screen.getByTestId('sales-import-apply')).toHaveAttribute('aria-describedby', 'sales-import-apply-why');
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(screen.getByTestId('sales-import-job-months')).toHaveTextContent(/October 2026: applying \(started/);
+    expect(screen.getByTestId('sales-import-live')).toHaveTextContent(/October 2026: applying/);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('October 2026: applied');
+    expect(screen.getByTestId('sales-import-apply-results')).toHaveTextContent('3 outlets updated, 1 set to 0');
+    expect(screen.queryByTestId('sales-import-job')).not.toBeInTheDocument();
+    expect(apiMock.apply).toHaveBeenCalledTimes(1);
+  });
+
+  it('a FAILED month of the job is shown with its reason and stays ticked for another try', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue(enqueued(job({ status: 'DONE' }, [{ status: 'FAILED', result: { month: '2026-10', ok: false, error: 'October 2026 is CLOSED.' } }])));
+    render(<Page />);
+    await clickApply();
+    const results = await screen.findByTestId('sales-import-apply-results');
+    expect(results).toHaveTextContent('October 2026: not applied');
+    expect(results).toHaveTextContent('October 2026 is CLOSED.');
+    expect(screen.getByRole('checkbox', { name: 'Apply October 2026' })).toBeChecked();
+  });
+
+  it('no clear answer (cut-off 500) → looks the click up by requestId → found: follows THAT job, never a second apply', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: false, error: '', status: 500 });
+    apiMock.findApplyJob.mockResolvedValue(ok(job({ status: 'DONE' }, [DONE_OCT])));
+    render(<Page />);
+    await clickApply();
+    expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('October 2026: applied');
+    expect(apiMock.findApplyJob).toHaveBeenCalledWith(apiMock.apply.mock.calls[0][1].requestId);
+    expect(screen.getByTestId('sales-import-apply-notice')).toHaveTextContent(/first reply didn.t come through, but the apply was recorded/);
+    expect(screen.queryByText(/Nothing was applied/)).not.toBeInTheDocument();
+    expect(apiMock.apply).toHaveBeenCalledTimes(1);
+  });
+
+  it('no clear answer and the lookup says the click recorded nothing (404) → "Nothing was applied" + Try again resends the SAME requestId', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValueOnce({ success: false, error: 'Failed to fetch' }).mockResolvedValue(enqueued(job({ status: 'DONE' }, [DONE_OCT])));
+    apiMock.findApplyJob.mockResolvedValue({ success: false, error: 'No apply was recorded for this request.', status: 404 });
+    render(<Page />);
+    await clickApply();
+    const notice = await screen.findByTestId('sales-import-apply-notice');
+    expect(notice).toHaveTextContent('Nothing was applied: the server could not be reached, and nothing was recorded for this click. Try again.');
+    expect(notice.textContent).not.toMatch(/in time/); // M5: an offline browser is not a timeout
+    await act(async () => { fireEvent.click(within(notice).getByRole('button', { name: 'Try again' })); });
+    expect(apiMock.apply).toHaveBeenCalledTimes(2);
+    expect(apiMock.apply.mock.calls[1][1].requestId).toBe(apiMock.apply.mock.calls[0][1].requestId);
+    expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('October 2026: applied');
+  });
+
+  it('no clear answer and the lookup ALSO fails → unknown: Apply disabled, "Don’t apply again yet", Check again settles it', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: false, error: '', status: 504 });
+    apiMock.findApplyJob.mockResolvedValueOnce({ success: false, error: '', status: 503 }).mockResolvedValue(ok(job({ status: 'DONE' }, [DONE_OCT])));
+    render(<Page />);
+    await clickApply();
+    const unknown = await screen.findByTestId('sales-import-apply-unknown');
+    expect(unknown).toHaveAttribute('role', 'alert');
+    expect(unknown).toHaveTextContent(/couldn.t confirm whether this apply was recorded: the server didn.t reply in time/);
+    expect(unknown).toHaveTextContent(/Don.t apply again yet/);
+    expect(screen.getByTestId('sales-import-apply')).toBeDisabled();
+    await act(async () => { fireEvent.click(within(unknown).getByRole('button', { name: 'Check again' })); });
+    expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('October 2026: applied');
+    expect(screen.queryByTestId('sales-import-apply-unknown')).not.toBeInTheDocument();
+    expect(apiMock.apply).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows "Checking what happened…" while the lookup runs', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    let release: (v: unknown) => void = () => {};
+    apiMock.apply.mockResolvedValue({ success: false, error: '', status: 502 });
+    apiMock.findApplyJob.mockImplementation(() => new Promise((res) => { release = res; }));
+    render(<Page />);
+    await clickApply();
+    expect(await screen.findByTestId('sales-import-apply-checking')).toHaveTextContent('Checking what happened');
+    expect(screen.getByTestId('sales-import-apply')).toBeDisabled();
+    await act(async () => { release(ok(job({ status: 'DONE' }, [DONE_OCT]))); });
+    expect(screen.queryByTestId('sales-import-apply-checking')).not.toBeInTheDocument();
+  });
+
+  it('refresh-safe / another admin: a month already being applied is shown as such — progress followed, month cannot be ticked', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const active = { jobId: 'job9', kind: 'APPLY' as const, status: 'RUNNING' as const, importId: 'imp1', requestedBy: 'Ravi', createdAt: new Date().toISOString() };
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview
+      .mockResolvedValueOnce(ok(preview([month({ activeJob: active, canApply: false, blockedReason: 'October 2026 is being applied by Ravi since 10:32. Wait for it to finish.' })])))
+      .mockResolvedValue(ok(preview([month()])));
+    apiMock.getApplyJob
+      .mockResolvedValueOnce(ok(job({ id: 'job9', status: 'RUNNING', requestedBy: 'Ravi' }, [{ status: 'RUNNING', startedAt: new Date().toISOString() }])))
+      .mockResolvedValue(ok(job({ id: 'job9', status: 'DONE', requestedBy: 'Ravi' }, [DONE_OCT])));
+    render(<Page />);
+    const box = await screen.findByRole('checkbox', { name: 'Apply October 2026' });
+    expect(box).toBeDisabled();
+    expect(screen.getByText(/being applied by Ravi since 10:32/)).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(await screen.findByTestId('sales-import-job')).toHaveTextContent('Started by Ravi');
+    expect(apiMock.getApplyJob).toHaveBeenCalledWith('job9');
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('October 2026: applied');
+    expect(apiMock.apply).not.toHaveBeenCalled();
+  });
+
+  it('409 (the month is being applied by someone else) → "Nothing was applied: …" with the server reason, preview refreshed', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: false, error: 'October 2026 is being applied by Ravi since 10:32. Wait for it to finish, then check the result before applying again.', status: 409 });
+    render(<Page />);
+    await clickApply();
+    expect(await screen.findByTestId('sales-import-apply-notice')).toHaveTextContent('Nothing was applied: October 2026 is being applied by Ravi since 10:32');
+    expect(apiMock.preview).toHaveBeenCalledTimes(2);
+    expect(apiMock.findApplyJob).not.toHaveBeenCalled();
+  });
+
+  it('L10: a 2xx without a usable body is treated as no clear answer (looked up), never a crash or a stuck spinner', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: true, data: undefined });
+    apiMock.findApplyJob.mockResolvedValue(ok(job({ status: 'DONE' }, [DONE_OCT])));
+    render(<Page />);
+    await clickApply();
+    expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('October 2026: applied');
+  });
+
+  it('an old (synchronous) API answer during a deploy is still shown as results', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue(ok({ results: [{ month: '2026-10', ok: true, outletsWritten: 2, outletsZeroFilled: 0 }] }));
+    render(<Page />);
+    await clickApply();
+    expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('2 outlets updated');
+  });
+
+  it('an empty error never renders "Nothing was applied: ." (4xx with no message)', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: false, error: '', status: 409 });
+    render(<Page />);
+    await clickApply();
+    const notice = await screen.findByTestId('sales-import-apply-notice');
+    expect(notice.textContent).not.toMatch(/: \./);
+    expect(notice).toHaveTextContent('Nothing was applied: the server refused it without giving a reason.');
+  });
+
+  it('reprocess with no clear answer does not claim "Not reprocessed"', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ status: 'FAILED', error: 'Bad' })));
+    apiMock.reprocess.mockResolvedValue({ success: false, error: '', status: 502 });
+    render(<Page />);
+    await screen.findByTestId('sales-import-failed');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Reprocess/ })); });
+    const alert = await screen.findByText(/couldn.t confirm whether/i);
+    expect(alert.textContent).not.toMatch(/Not reprocessed/);
+    expect(alert.textContent).toMatch(/error 502/);
   });
 
   it('the Refresh preview button reloads the preview', async () => {
@@ -383,7 +564,7 @@ describe('import detail — preview + apply', () => {
     const notice = await screen.findByTestId('sales-import-apply-notice');
     expect(notice).toHaveTextContent('could not be refreshed');
     expect(notice).not.toHaveTextContent('has been refreshed');
-    expect(screen.getByTestId('sales-import-preview-error')).toHaveTextContent('HTTP 503');
+    expect(screen.getByTestId('sales-import-preview-error')).toHaveTextContent('the server didn’t give a clear answer (error 503)');
     expect(screen.getByTestId('sales-import-preview')).toBeInTheDocument(); // the old preview stays visible
     expect(apiMock.get.mock.calls.length).toBeGreaterThan(before);
   });
@@ -463,5 +644,116 @@ describe('import detail — preview + apply', () => {
     render(<Page />);
     expect(await screen.findByText('product value longer than 200 characters')).toBeInTheDocument();
     expect(screen.getByTestId('skip-reasons-note')).toHaveTextContent('a product value longer than 200 characters');
+  });
+});
+
+describe('import detail — dual-audit fixes (background jobs)', () => {
+  const job = (over: Partial<SalesApplyJobDto> = {}, months: Array<Partial<SalesApplyJobDto['months'][number]>> = [{}]): SalesApplyJobDto => ({
+    id: 'job1', kind: 'APPLY', importId: 'imp1', requestId: 'rq', status: 'QUEUED', requestedBy: 'Asha',
+    createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, error: null, attempts: 0,
+    months: months.map((m) => ({ month: '2026-10', status: 'QUEUED', startedAt: null, finishedAt: null, result: null, lastError: null, ...m })),
+    ...over,
+  });
+  const DONE_OCT = { status: 'DONE' as const, result: { month: '2026-10', ok: true, applyId: 'a1', outletsWritten: 3, outletsZeroFilled: 1 } };
+  const active = (over = {}) => ({ jobId: 'job9', kind: 'APPLY' as const, status: 'RUNNING' as const, importId: 'imp1', requestedBy: 'Ravi', createdAt: new Date().toISOString(), ...over });
+
+  async function clickApply() {
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
+  }
+
+  it('B-H1: coming back after a job ended shows its result card (who / when / reason) from the month’s lastJob', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month({
+      lastJob: { jobId: 'j0', kind: 'APPLY', status: 'FAILED', importId: 'imp1', requestedBy: 'Ravi', createdAt: '2026-11-17T05:00:00.000Z',
+        finishedAt: '2026-11-17T05:02:00.000Z', result: { month: '2026-10', ok: false, error: 'October 2026 is CLOSED.' } },
+    })])));
+    render(<Page />);
+    const card = await screen.findByTestId('last-result-2026-10');
+    expect(card).toHaveTextContent('October 2026: not applied');
+    expect(card).toHaveTextContent(/By Ravi, finished 17 Nov, 10:32\. October 2026 is CLOSED\./);
+  });
+
+  it('B-M6: the job’s end is announced in the live region with each month’s result', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue(ok({ job: job({ status: 'DONE' }, [DONE_OCT]), results: [] }));
+    render(<Page />);
+    await clickApply();
+    await screen.findByTestId('sales-import-apply-results');
+    expect(screen.getByTestId('sales-import-live')).toHaveTextContent('Apply finished. October 2026: applied.');
+  });
+
+  it('B-L10: after the confirm, focus moves to the outcome area', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: false, error: 'October 2026 is closed.', status: 409 });
+    render(<Page />);
+    await clickApply();
+    await screen.findByTestId('sales-import-apply-notice');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('sales-import-outcome')));
+  });
+
+  it('A-L6 / B-M8: while an apply of this file runs, Reprocess / Read again / Cancel / Delete are disabled with the reason', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ canCancel: true, canDelete: true, canReprocess: true })));
+    apiMock.preview.mockResolvedValue(ok(preview([month({ activeJob: active(), canApply: false, blockedReason: 'busy' })])));
+    apiMock.getApplyJob.mockResolvedValue(ok(job({ id: 'job9', status: 'RUNNING', requestedBy: 'Ravi' }, [{ status: 'RUNNING' }])));
+    render(<Page />);
+    const why = await screen.findByTestId('sales-import-held-why');
+    expect(why).toHaveTextContent(/apply of this file is running \(started by Ravi at/);
+    for (const b of [screen.getByTestId('sales-import-cancel'), screen.getByRole('button', { name: /Reprocess/ }), screen.getByRole('button', { name: /Delete/ })]) {
+      expect(b).toBeDisabled();
+      expect(b).toHaveAttribute('aria-describedby', 'sales-import-held-why');
+    }
+  });
+
+  it('B-L1: a job handed back after a restart says it will continue, not "queued"', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue(ok({ job: job({ status: 'QUEUED', attempts: 1 }), results: [] }));
+    apiMock.getApplyJob.mockResolvedValue(ok(job({ status: 'QUEUED', attempts: 1 })));
+    render(<Page />);
+    await clickApply();
+    expect(await screen.findByTestId('sales-import-job')).toHaveTextContent(/Waiting to continue — the processor was restarted/);
+  });
+
+  it('B-L5: when the shown job has ended, a LATER job on the same file (another admin) is followed', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview
+      .mockResolvedValueOnce(ok(preview([month()])))
+      .mockResolvedValue(ok(preview([month({ activeJob: active({ jobId: 'job2', requestedBy: 'Ravi' }), canApply: false, blockedReason: 'busy' })])));
+    apiMock.apply.mockResolvedValue(ok({ job: job({ status: 'DONE' }, [DONE_OCT]), results: [] }));
+    apiMock.getApplyJob.mockResolvedValue(ok(job({ id: 'job2', status: 'RUNNING', requestedBy: 'Ravi' }, [{ status: 'RUNNING' }])));
+    render(<Page />);
+    await clickApply();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(apiMock.getApplyJob).toHaveBeenCalledWith('job2');
+    expect(await screen.findByTestId('sales-import-job')).toHaveTextContent('Started by Ravi');
+  });
+
+  it('B-L8: an unknown outcome survives a reload — Apply stays held and Check again is offered', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: false, error: '', status: 504 });
+    apiMock.findApplyJob.mockResolvedValue({ success: false, error: '', status: 503 });
+    const first = render(<Page />);
+    await clickApply();
+    await screen.findByTestId('sales-import-apply-unknown');
+    first.unmount();
+    render(<Page />);
+    expect(await screen.findByTestId('sales-import-apply-unknown')).toHaveTextContent(/Don.t apply again yet/);
+    expect(screen.getByTestId('sales-import-apply')).toBeDisabled();
+  });
+
+  it('B-M1: "Read again as a new import" whose success reply carries no id says so instead of crashing', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ applied: true, canReprocess: false, canDelete: false, canReprocessAsNew: true })));
+    apiMock.preview.mockResolvedValue(ok(preview([month({ canApply: false })], { mappingChanged: true })));
+    apiMock.reprocessAsNew.mockResolvedValue({ success: true, data: undefined });
+    render(<Page />);
+    const btn = await screen.findByTestId('sales-import-reprocess-as-new');
+    await act(async () => { fireEvent.click(btn); });
+    expect(await screen.findByText(/A new import was started, but its link was not received/)).toBeInTheDocument();
+    expect(push).not.toHaveBeenCalled();
   });
 });

@@ -28,6 +28,7 @@ const apiMock = vi.hoisted(() => ({
   get: vi.fn(), preview: vi.fn(), apply: vi.fn(), reprocess: vi.fn(), remove: vi.fn(), cancel: vi.fn(), reprocessAsNew: vi.fn(),
   getProfile: vi.fn(), acceptFocusToken: vi.fn(), undoFocusAcceptance: vi.fn(),
   months: vi.fn(), closeMonth: vi.fn(), reopenMonth: vi.fn(), recalcPreview: vi.fn(), recalculate: vi.fn(), rebuildProductList: vi.fn(),
+  getApplyJob: vi.fn(), findApplyJob: vi.fn(),
   createKpi: vi.fn(), patchKpi: vi.fn(), testKpi: vi.fn(), segmentOptions: vi.fn(),
   unmatchedCsvUrl: (id: string) => `/u/${id}`, errorsXlsxUrl: (id: string) => `/e/${id}`,
 }));
@@ -91,6 +92,7 @@ const UNMATCHED_RECON = recon({
 });
 
 beforeEach(() => {
+  window.sessionStorage.clear();
   Object.values(apiMock).forEach((f) => typeof f === 'function' && 'mockReset' in f && (f as ReturnType<typeof vi.fn>).mockReset());
   apiMock.getProfile.mockResolvedValue(ok({ dimensions: DIMS }));
   apiMock.segmentOptions.mockResolvedValue(ok({
@@ -375,7 +377,7 @@ function month(over: Partial<MonthPreview> = {}): MonthPreview {
     unmatchedCustomers: 0, matchedAmountRupees: 1200, matchedQuantity: 4.5, unmatchedAmountRupees: 0,
     unmatchedQuantity: 0, monthState: 'OPEN', canApply: true, warnings: [], zeroFillOutlets: 1,
     kpis: [{ kpiCode: 'FB1', label: 'Focus Brand 1', measure: 'AMOUNT', newTotal: 1200, currentTotal: 0, delta: 1200, outletsNonZero: 3, outletsNegative: 0 }],
-    lastApplied: null, reconciliation: recon(), ...over,
+    lastApplied: null, reconciliation: recon(), activeJob: null, lastJob: null, ...over,
   };
 }
 function preview(months: MonthPreview[]): SalesImportPreview {
@@ -493,7 +495,7 @@ function row(over: Partial<SalesMonthRow> = {}): SalesMonthRow {
     month: '2026-11', state: 'OPEN', implicit: true, closedAt: null, closedBy: null, lastAppliedAt: '2026-11-02T05:00:00.000Z',
     lastAppliedImportId: 'i1', canClose: false, canReopen: false, downstream: { creditBatches: 0, exports: 0 },
     hasHistory: true, historySourceImportId: 'i1', historyAppliedAt: '2026-11-02T05:00:00.000Z', productListCurrent: true,
-    targetsChangedSinceApply: false, ...over,
+    targetsChangedSinceApply: false, activeJob: null, lastJob: null, ...over,
   };
 }
 function recalc(over: Partial<SalesMonthRecalcPreview> = {}): SalesMonthRecalcPreview {
@@ -521,6 +523,7 @@ describe('months — targets changed badge + recalculate', () => {
     await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
     expect(apiMock.recalculate).toHaveBeenCalledWith('2026-11', {
       expectedDefinitionsHash: 'dh1', expectedHistoryAppliedAt: '2026-11-02T05:00:00.000Z', expectedFocusFingerprint: 'fp-nov',
+      requestId: expect.any(String),
     });
   });
 

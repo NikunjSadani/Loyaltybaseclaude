@@ -142,6 +142,13 @@ describe('KPI editor — product set', () => {
     expect(chips[2]).toHaveTextContent('P 999 never appears in the latest file');
   });
 
+  it('Test with no reply (empty 504) says it didn’t finish and is safe to repeat — never an empty error', async () => {
+    apiMock.testKpi.mockResolvedValue({ success: false, error: '', status: 504 });
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'P' }] } } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Test against latest import/ })); });
+    expect(screen.getByRole('alert')).toHaveTextContent(/The test didn.t finish: the server didn.t reply in time\. A test saves nothing/);
+  });
+
   it('server warnings disappear once the set changes (stale test)', async () => {
     apiMock.testKpi.mockResolvedValue(ok({ months: [], unmatchedEntries: { anyOf: [0], noneOf: [] }, redundantEntries: { anyOf: [] }, matchedLines: 0 }));
     renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'P' }] } } });
@@ -505,7 +512,7 @@ describe('settings page', () => {
     render(<SettingsPage />);
     fireEvent.click(await screen.findByRole('button', { name: /Add KPI/ }));
     const err = await screen.findByTestId('kpi-list-error');
-    expect(err).toHaveTextContent('HTTP 503');
+    expect(err).toHaveTextContent('the server didn’t give a clear answer (error 503)');
     await act(async () => { fireEvent.click(within(err).getByRole('button', { name: 'Retry' })); });
     expect(await screen.findByRole('option', { name: /KPI X/ })).toBeInTheDocument();
   });

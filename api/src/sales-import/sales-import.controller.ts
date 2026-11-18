@@ -19,6 +19,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { TenantService } from '../tenant/tenant.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
+import { assertNoActiveJobForImport } from './apply/apply-jobs-data';
 import { assertSalesImportAccess, callerHasPermission, SalesImportPartGuard } from './sales-import-access';
 import {
   SALES_IMPORT_PART_LIMIT_BYTES,
@@ -105,6 +106,7 @@ export class SalesImportController {
   @RequirePermission('targets:upload')
   async reprocess(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportSummary> {
     await this.gate(user, true);
+    await assertNoActiveJobForImport(this.prisma, user.clientId, id); // A-L6: not while an apply of it runs
     return this.uploads.reprocess(user, id);
   }
 
@@ -113,6 +115,7 @@ export class SalesImportController {
   @RequirePermission('targets:upload')
   async reprocessAsNew(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportSummary> {
     await this.gate(user, true);
+    await assertNoActiveJobForImport(this.prisma, user.clientId, id); // A-L6: not while an apply of it runs
     return this.uploads.reprocessAsNew(user, id);
   }
 
@@ -120,6 +123,7 @@ export class SalesImportController {
   @RequirePermission('targets:upload')
   async cancel(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportSummary> {
     await this.gate(user, true);
+    await assertNoActiveJobForImport(this.prisma, user.clientId, id); // A-L6: not while an apply of it runs
     return this.uploads.cancel(user, id);
   }
 
@@ -127,6 +131,7 @@ export class SalesImportController {
   @RequirePermission('targets:upload')
   async remove(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportSummary> {
     await this.gate(user, true);
+    await assertNoActiveJobForImport(this.prisma, user.clientId, id); // A-L6: not while an apply of it runs
     return this.uploads.remove(user, id);
   }
 

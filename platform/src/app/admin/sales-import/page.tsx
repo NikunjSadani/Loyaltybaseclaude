@@ -15,6 +15,7 @@ import { useRouter } from 'next/navigation';
 import { AlertTriangle, CheckCircle2, Copy, FileSpreadsheet, Info, RefreshCw, Upload, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { salesImportApi } from '@/lib/sales-import/api';
+import { failureReason } from '@/lib/request-outcome';
 import { validateSalesFile } from '@/lib/sales-import/upload';
 import {
   cancelUpload, discardUpload, getUploadState, resetUpload, resumeUpload, startUpload, subscribeUpload,
@@ -236,7 +237,7 @@ function ImportsList({ refreshKey }: { refreshKey: string }) {
     salesImportApi.list(null).then((r) => {
       if (cancelled) return;
       if (r.success) { setItems(r.data.items); setCursor(r.data.nextCursor); loadedOnceRef.current = true; }
-      else setError(r.error);
+      else setError(failureReason(r));
       setLoading(false);
     });
     return () => { cancelled = true; };
@@ -247,7 +248,7 @@ function ImportsList({ refreshKey }: { refreshKey: string }) {
     setLoadingMore(true);
     const r = await salesImportApi.list(cursor);
     if (r.success) { setItems((prev) => [...prev, ...r.data.items]); setCursor(r.data.nextCursor); }
-    else setError(r.error);
+    else setError(`Couldn’t load more imports: ${failureReason(r)}.`);
     setLoadingMore(false);
   }
 

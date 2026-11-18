@@ -5,7 +5,8 @@
  * every Sales Import KPI recomputed from the month's stored final figures (the lines saved when the month was last
  * applied) with the CURRENT KPI definitions and outlet list — then, after a confirm, applies it. Nothing is
  * re-uploaded. The preview's definitions hash + history version are sent back; a 409 (either changed meanwhile)
- * reloads the preview.
+ * reloads the preview. Since 2026-11-18 the recalculation runs as a BACKGROUND job (the POST answers 202 with the job;
+ * the page follows it); with no clear answer the click is looked up by its requestId — never guessed.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, X } from 'lucide-react';
@@ -15,15 +16,31 @@ import { salesImportApi } from '@/lib/sales-import/api';
 import {
   dateTimeLabel, formatCount, formatKpiValue, formatRupees, formatSigned, monthLabel, sentence, warningText,
 } from '@/lib/sales-import/format';
-import type { SalesMonthRecalcPreview, SalesMonthRecalcResult } from '@/lib/sales-import/types';
+import type {
+  ApplyMonthResult, SalesApplyJobDto, SalesMonthActiveJob, SalesMonthRecalcPreview, SalesMonthRecalcRequest,
+} from '@/lib/sales-import/types';
+import { failureReason, outcomeUnknown } from '@/lib/request-outcome';
+import {
+  JOB_QUEUED_TOO_LONG_MS, clearUnknown, jobEnded, jobHeadline, loadUnknown, lookUp, monthProgressText, monthResult,
+  newRequestId, resolveSubmit, resultsSummary, saveUnknown, useJobFollower, whenLabel, type SubmitOutcome, type UnknownLock,
+} from '@/lib/sales-import/apply-job';
 import {
   MonthReconciliationPanel, useDimensionLabels, useOutletTypeNames,
 } from '../../_components/month-reconciliation-panel';
 import { DayDataNotice } from '../../_components/day-data-notice';
 
-export function RecalculatePanel({ month, onClose, onApplied }: {
+/** The pre-release synchronous recalculate answer (one ApplyMonthResult) — still accepted during a deploy. */
+function legacyResult(data: unknown): ApplyMonthResult[] | null {
+  return data && typeof data === 'object' && 'ok' in (data as object) ? [data as ApplyMonthResult] : null;
+}
+
+export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, listVersion = 0 }: {
   month: string;
   onClose(): void;
+  /** The month's queued / running Apply or Recalculate (SalesMonthRow.activeJob): followed until it ends. */
+  activeJob?: SalesMonthActiveJob | null;
+  /** Bumped by the Months page on every successful list read (final review L5: "the list has confirmed"). */
+  listVersion?: number;
   /** After a successful recalculation (re-fetch the months). */
   onApplied(): void;
 }) {
@@ -31,73 +48,176 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
   const [preview, setPreview] = useState<SalesMonthRecalcPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** The POST is in flight. */
   const [applying, setApplying] = useState(false);
-  const [result, setResult] = useState<SalesMonthRecalcResult | null>(null);
+  const [result, setResult] = useState<ApplyMonthResult | null>(null);
   /** Recalculated, but the follow-up preview reload failed: the reconciliation shown predates the recalculation. */
   const [staleAfterApply, setStaleAfterApply] = useState(false);
+  /** Looking the click up by its requestId after no clear answer. */
+  const [checking, setChecking] = useState(false);
+  /** No clear answer and the lookup failed too → Recalculate disabled until Check again settles it. */
+  const unknownKey = `sales-recalc-unknown:${month}`;
+  // B-L8: an unknown outcome survives a reload (Recalculate stays held until Check again settles it).
+  const [unknown, setUnknownState] = useState<UnknownLock | null>(() => (typeof window === 'undefined' ? null : loadUnknown(unknownKey)));
+  const setUnknown = useCallback((u: UnknownLock | null) => {
+    setUnknownState(u);
+    if (u) saveUnknown(unknownKey, u); else clearUnknown(unknownKey);
+  }, [unknownKey]);
+  const outcomeRef = useRef<HTMLDivElement | null>(null);
+  const focusOutcome = () => { setTimeout(() => outcomeRef.current?.focus(), 0); };
+  /** The lookup says the click recorded nothing → Try again resends the SAME request (same requestId: harmless). */
+  const [notRecorded, setNotRecorded] = useState(false);
+  const lastSent = useRef<SalesMonthRecalcRequest | null>(null);
+  /** The month's job this panel shows (this click's, or the one already running when it opened). */
+  const [jobId, setJobId] = useState<string | null>(null);
   const seqRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
   const dims = useDimensionLabels();
   const typeNames = useOutletTypeNames();
 
+  /** true when this load landed OR a newer one superseded it (L8: a superseded load is not a failure). */
   const load = useCallback(async (): Promise<boolean> => {
     const seq = ++seqRef.current;
     const r = await salesImportApi.recalcPreview(month);
-    if (!mountedRef.current || seq !== seqRef.current) return false;
+    if (!mountedRef.current || seq !== seqRef.current) return true;
     if (r.success) { setPreview(r.data); setError(null); return true; }
     setError(r.status === 404
       ? `${label} has no stored history yet — it is saved each time a sales file is applied to the month.`
-      : sentence(r.error));
+      : failureReason(r));
     return false;
   }, [month, label]);
 
   useEffect(() => { void load(); }, [load]);
 
+  const onJobEnded = useCallback(async (job: SalesApplyJobDto) => {
+    if (!mountedRef.current) return;
+    onApplied();
+    if (job.kind !== 'RECALC' || !job.months.some((m) => m.month === month)) { void load(); return; }
+    const res = monthResult(job, month);
+    setResult(res);
+    // Reload the preview so "targets were uploaded after the last apply — recalculate" and the like disappear now that
+    // the month has been recalculated. If the reload fails, hide the (now stale) reconciliation instead.
+    const refreshed = await load();
+    if (mountedRef.current && res?.ok && !refreshed) setStaleAfterApply(true);
+  }, [load, month, onApplied]);
+  const { jobs, problems, follow } = useJobFollower(onJobEnded);
+
+  // Opened while an Apply / Recalculate of this month is queued or running → follow it (refresh-safe, several admins).
+  useEffect(() => {
+    if (!activeJob) return;
+    follow(activeJob.jobId);
+    setJobId((cur) => cur ?? activeJob.jobId);
+  }, [activeJob, follow]);
+
+  const job = jobId ? jobs[jobId] ?? null : null;
+  const followProblem = jobId ? problems[jobId] ?? null : null;
+  // Re-review L6: a FINAL 401 / 403 / 404 while following ends the wait (the message says why) and re-enables
+  // Recalculate — never "Waiting for it to finish" forever.
+  const jobRunning = !followProblem?.final && ((!!job && !jobEnded(job)) || (!!activeJob && !job));
+  // Final review L5: after a FINAL 401 / 403 / 404 the recalculation may still be running. Re-read the Months list and
+  // keep Recalculate held until a list read made AFTER the stop shows no active job for this month.
+  const [stoppedAtList, setStoppedAtList] = useState<number | null>(null);
+  useEffect(() => {
+    if (followProblem?.final && stoppedAtList === null) { setStoppedAtList(listVersion); onApplied(); }
+  }, [followProblem?.final, stoppedAtList, listVersion, onApplied]);
+  const awaitingList = stoppedAtList !== null && (listVersion === stoppedAtList || !!activeJob);
+  const busy = applying || checking || !!unknown || jobRunning || awaitingList;
+  const queuedTooLong = !!job && job.status === 'QUEUED' && job.attempts === 0 && Date.now() - Date.parse(job.createdAt) > JOB_QUEUED_TOO_LONG_MS;
+  const progress = job ? job.months.map((m) => monthProgressText(job, m.month, monthLabel(m.month))).join('. ') : '';
+  const problem = followProblem;
+
   async function apply() {
-    if (!preview || !preview.canApply || applying) return;
+    if (!preview || !preview.canApply || busy) return;
     const names = preview.kpis.map((k) => k.label || k.kpiCode).join(', ');
     if (!window.confirm(
       `Recalculate ${label} from stored history?\n\nThe Sales Import KPIs${names ? ` (${names})` : ''} are rewritten for every ` +
       `programme outlet from the figures saved on ${dateTimeLabel(preview.historyAppliedAt)}, using today's KPI ` +
-      'definitions and outlet list. Nothing is re-uploaded. Other KPIs are not touched.',
+      'definitions and outlet list. Nothing is re-uploaded. Other KPIs are not touched. It runs in the background.',
     )) return;
-    setApplying(true);
-    setNotice(null);
-    const r = await salesImportApi.recalculate(month, {
+    await send({
       expectedDefinitionsHash: preview.definitionsHash,
       expectedHistoryAppliedAt: preview.historyAppliedAt,
       ...(preview.reconciliation?.focusFingerprint ? { expectedFocusFingerprint: preview.reconciliation.focusFingerprint } : {}),
+      requestId: newRequestId(),
     });
+  }
+
+  async function send(req: SalesMonthRecalcRequest) {
+    lastSent.current = req;
+    setApplying(true);
+    setNotice(null);
+    setResult(null);
+    setUnknown(null);
+    setNotRecorded(false);
+    const r = await salesImportApi.recalculate(month, req);
     if (!mountedRef.current) return;
-    if (!r.success) {
-      if (r.status === 403) {
-        setApplying(false);
-        setNotice('Nothing was changed: you don’t have permission to recalculate months.');
-        return;
-      }
-      if (r.status !== undefined && r.status >= 400 && r.status < 500) {
-        const refreshed = await load();
-        setApplying(false);
-        setNotice(`Nothing was changed: ${sentence(r.error) || 'the preview is out of date'}. ` + (refreshed
-          ? 'The preview has been refreshed — check it and recalculate again.'
-          : 'The preview could not be refreshed — close and open it again.'));
-        return;
-      }
+    if (!r.success && !outcomeUnknown(r)) {
       setApplying(false);
-      setNotice(`Nothing was changed: ${sentence(r.error)}. Try again in a moment.`);
+      await refused(r.status, failureReason(r));
+      focusOutcome();
       return;
     }
+    if (!r.success) setChecking(true);
+    const out = await resolveSubmit(r, req.requestId!, legacyResult);
+    if (!mountedRef.current) return;
     setApplying(false);
-    setResult(r.data);
-    if (r.data.ok) {
+    setChecking(false);
+    await settle(out, req.requestId!);
+  }
+
+  async function settle(out: SubmitOutcome, requestId: string) {
+    focusOutcome();
+    if (out.kind === 'job') {
+      setUnknown(null);
+      setJobId(out.job.id);
+      follow(out.job.id, out.job);
       onApplied();
-      // Reload the preview so "targets were uploaded after the last apply — recalculate" and the like disappear
-      // now that the month has been recalculated. If the reload fails, hide the (now stale) reconciliation instead.
-      const refreshed = await load();
-      if (mountedRef.current && !refreshed) setStaleAfterApply(true);
+      if (out.afterNoAnswer) setNotice('The server’s first reply didn’t come through, but the recalculation was recorded — its progress is shown below. Don’t recalculate again.');
+    } else if (out.kind === 'legacy') {
+      const res = out.results[0];
+      setResult(res);
+      if (res.ok) {
+        onApplied();
+        const refreshed = await load();
+        if (mountedRef.current && !refreshed) setStaleAfterApply(true);
+      }
+    } else if (out.kind === 'refused') {
+      await refused(out.status, out.reason);
+    } else if (out.kind === 'not-recorded') {
+      setNotRecorded(true);
+      setNotice(`Nothing was changed: ${out.reason}, and nothing was recorded for this click. Try again.`);
+    } else {
+      setUnknown({ requestId, reason: out.reason, months: [month] });
     }
   }
+
+  async function refused(status: number | undefined, reason: string) {
+    if (status === 401) { setNotice('Nothing was changed: your session has expired. Sign in again, then recalculate.'); return; } // B-L12
+    if (status === 403) { setNotice('Nothing was changed: you don’t have permission to recalculate months.'); return; }
+    const refreshed = await load();
+    onApplied();
+    setNotice(`Nothing was changed: ${reason}. ` + (refreshed
+      ? 'The preview has been refreshed — check it and recalculate again.'
+      : 'The preview could not be refreshed — close and open it again.'));
+  }
+
+  async function checkAgain() {
+    if (!unknown) return;
+    setChecking(true);
+    const out = await lookUp(unknown.requestId, unknown.reason);
+    if (!mountedRef.current) return;
+    setChecking(false);
+    await settle(out, unknown.requestId);
+  }
+
+  const recalcWhy = awaitingList ? 'Recalculate is held until the Months list shows the earlier recalculation has finished.'
+    : unknown ? 'Recalculate is held until the page can confirm whether the last one was recorded.'
+    : jobRunning ? `${label} is being ${job?.kind === 'APPLY' ? 'applied' : 'recalculated'} — wait for it to finish.`
+      : checking ? 'Checking what happened to the last recalculation.' : '';
+  // B-M6: the result is announced too (the visible result card has no live role of its own).
+  const liveText = checking ? 'Checking what happened to the recalculation…' : jobRunning ? progress
+    : result ? resultsSummary([result], monthLabel, 'recalculated') : notice ?? '';
 
   return (
     <section className="bg-white rounded-xl border border-blue-200 shadow-sm p-5 space-y-4" data-testid={`recalc-panel-${month}`}
@@ -119,7 +239,49 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
           <Button size="sm" variant="outline" className="ml-2" onClick={() => { void load(); }}>Retry</Button>
         </div>
       )}
-      {notice && <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" data-testid="recalc-notice">{notice}</div>}
+      <p className="sr-only" aria-live="polite" data-testid="recalc-live">{liveText}</p>
+      <div ref={outcomeRef} tabIndex={-1} className="space-y-4 outline-none" data-testid="recalc-outcome">
+      {checking && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 flex items-center gap-2"
+          data-testid="recalc-checking">
+          <Spinner size="sm" /> No clear answer from the server. Checking what happened…
+        </div>
+      )}
+      {!checking && unknown && (
+        <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" data-testid="recalc-unknown">
+          We couldn&apos;t confirm whether the recalculation of {label} was recorded: {unknown.reason}, and checking also
+          failed. Don&apos;t recalculate again yet — press Check again.{' '}
+          <Button size="sm" variant="outline" className="ml-2" onClick={() => { void checkAgain(); }}>Check again</Button>
+        </div>
+      )}
+      {notice && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" data-testid="recalc-notice">
+          {notice}
+          {notRecorded && lastSent.current && (
+            <Button size="sm" variant="outline" className="ml-2" onClick={() => { void send(lastSent.current!); }}>Try again</Button>
+          )}
+        </div>
+      )}
+      </div>
+      {problem?.final && (
+        <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" data-testid="recalc-job-stopped">
+          We couldn&apos;t follow the recalculation — it may still be running; refresh before trying again. ({problem.text})
+          {awaitingList && ' Recalculate stays unavailable until the Months list shows it has finished.'}
+        </div>
+      )}
+      {jobRunning && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 space-y-1" data-testid="recalc-job">
+          <p className="font-semibold flex items-center gap-2"><Spinner size="sm" />
+            {job?.kind === 'APPLY' && job.status !== 'QUEUED' ? `${label} is being applied from a sales file` : job ? jobHeadline(job) : 'Waiting for it to finish'}
+          </p>
+          {job && <p className="text-xs">Started by {job.requestedBy} at {whenLabel(job.createdAt)}. {progress}. You can close this panel — it carries on.</p>}
+          {!job && activeJob && <p className="text-xs">Started by {activeJob.requestedBy} at {whenLabel(activeJob.createdAt)}.</p>}
+          {queuedTooLong && (
+            <p className="text-xs text-amber-800">The processor has not started yet. It is started again automatically within 10 minutes — don&apos;t recalculate again.</p>
+          )}
+          {problem && <p role={problem.final ? 'alert' : undefined} className="text-xs text-amber-800" data-testid="recalc-job-problem">{problem.text}</p>}
+        </div>
+      )}
 
       {!preview && !error && <div className="py-4 flex items-center gap-2 text-sm text-gray-500"><Spinner size="sm" /> Working out the figures…</div>}
 
@@ -196,8 +358,10 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
 
           {result ? (
             <div className={`rounded-lg border px-4 py-3 text-sm ${result.ok ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}
-              data-testid="recalc-result" role="status">
-              {result.ok ? (
+              data-testid="recalc-result">
+              {result.ok && result.outletsWritten === undefined ? (
+                <p className="flex items-center gap-1.5 text-emerald-800"><CheckCircle2 className="w-4 h-4" /> {label} recalculated.</p>
+              ) : result.ok ? (
                 <>
                   <p className="flex items-center gap-1.5 text-emerald-800">
                     <CheckCircle2 className="w-4 h-4" /> {label} recalculated: {formatCount(result.outletsWritten ?? 0)} outlets
@@ -212,9 +376,12 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
           ) : (
             <div className="flex flex-wrap items-center gap-3">
               <Button variant="primary" onClick={apply} loading={applying}
-                disabled={!preview.canApply || preview.kpis.length === 0} data-testid="recalc-apply">
+                disabled={!preview.canApply || preview.kpis.length === 0 || busy}
+                aria-describedby={recalcWhy ? 'recalc-apply-why' : undefined}
+                data-testid="recalc-apply">
                 Recalculate {label}
               </Button>
+              {recalcWhy && <span id="recalc-apply-why" className="sr-only">{recalcWhy}</span>}
               {!preview.canApply && preview.blockedReason && (
                 <span className="text-xs text-gray-600" data-testid="recalc-blocked">{preview.blockedReason}</span>
               )}

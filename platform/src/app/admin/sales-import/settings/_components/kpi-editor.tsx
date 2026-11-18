@@ -11,6 +11,7 @@ import React, { useState } from 'react';
 import { AlertTriangle, FlaskConical, Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { salesImportApi } from '@/lib/sales-import/api';
+import { noAnswerReason, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import { entryKey, listOf, validateFilter } from '@/lib/sales-import/product-set';
 import { formatCases, formatCount, formatProducts, formatRupees, monthLabel } from '@/lib/sales-import/format';
 import type {
@@ -225,7 +226,13 @@ export function KpiEditor({
     setTestError(null);
     const r = await salesImportApi.testKpi({ importId: 'latest', definition: def });
     setTesting(false);
-    if (!r.success) { setTestError(r.status === 404 ? 'There is no processed file yet. Upload one first, then test.' : r.error); return; }
+    if (!r.success) {
+      setTestError(r.status === 404 ? 'There is no processed file yet. Upload one first, then test.'
+        // A test only reads (nothing is saved), so running it again is always safe.
+        : outcomeUnknown(r) ? `The test didn’t finish: ${noAnswerReason(r)}. A test saves nothing — press Test again.`
+          : `The test didn’t run: ${reasonOr(r.error, 'the server refused it without a reason')}.`);
+      return;
+    }
     setTest({ sig, result: r.data });
   }
 
@@ -242,7 +249,12 @@ export function KpiEditor({
       : initial.productSource !== undefined ? { ...rest, productSource: 'FILTER' } : rest;
     const r = id ? await salesImportApi.patchKpi(id, body) : await salesImportApi.createKpi(body);
     setSaving(false);
-    if (!r.success) { setSaveError(r.error); return; }
+    if (!r.success) {
+      setSaveError(outcomeUnknown(r)
+        ? `We couldn’t confirm whether this KPI was saved: ${noAnswerReason(r)}. Close this editor and check the KPI list before saving again.`
+        : r.error.trim() || 'Not saved: the server refused it without a reason.');
+      return;
+    }
     onSaved(r.data);
   }
 

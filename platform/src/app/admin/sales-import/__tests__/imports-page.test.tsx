@@ -94,9 +94,9 @@ describe('imports page', () => {
   });
 
   it('list error → retry', async () => {
-    apiMock.list.mockResolvedValueOnce({ success: false, error: 'HTTP 500' }).mockResolvedValue(ok({ items: [item()], nextCursor: null }));
+    apiMock.list.mockResolvedValueOnce({ success: false, error: 'HTTP 500', status: 500 }).mockResolvedValue(ok({ items: [item()], nextCursor: null }));
     render(<Page />);
-    expect(await screen.findByText(/Couldn't load imports: HTTP 500/)).toBeInTheDocument();
+    expect(await screen.findByText(/Couldn't load imports: the server didn’t give a clear answer \(error 500\)/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByRole('link', { name: 'oct.xlsx' })).toBeInTheDocument();
   });

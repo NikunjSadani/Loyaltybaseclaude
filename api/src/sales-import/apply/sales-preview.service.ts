@@ -28,6 +28,8 @@ import { loadFocusCatalogue } from '../kpi/focus-data';
 import { focusBlockedReason, lazyCatalogue, reconcileMonth, runMonthFocus } from './month-focus';
 import type { FocusCatalogue } from '../kpi/focus-products';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
+import { activeJobsByMonth, busyText, lastJobsByMonth } from './apply-jobs-data';
+import type { SalesMonthActiveJob, SalesMonthLastJob } from '../sales-import.contract';
 
 /** Why a month cannot be applied (null = it can). Shared by preview and apply. */
 export function blockedReasonFor(opts: {
@@ -80,6 +82,9 @@ export class SalesPreviewService {
     const statusOf = new Map(statuses.map((s) => [s.month, s]));
     // FOCUS-FROM-TARGETS: one catalogue (stored months + this import's products) for every month of the preview.
     const catalogue = lazyCatalogue(() => loadFocusCatalogue(this.prisma, clientId, { importId: imp.id }));
+    // Background jobs (2026-11-18): a month with an Apply / Recalculate queued or running (by anyone) cannot be ticked.
+    const active = await activeJobsByMonth(this.prisma, clientId, months);
+    const finished = await lastJobsByMonth(this.prisma, clientId, months);
 
     const out: MonthPreview[] = [];
     for (const summary of summaries) {
@@ -88,6 +93,8 @@ export class SalesPreviewService {
           status: statusOf.get(summary.month) ?? null,
           labelOf,
           catalogue,
+          activeJob: active.get(summary.month) ?? null,
+          lastJob: finished.get(summary.month) ?? null,
         }),
       );
     }
@@ -113,6 +120,8 @@ export class SalesPreviewService {
       status: { state: string } | null;
       labelOf: Map<string, string>;
       catalogue: () => Promise<FocusCatalogue>;
+      activeJob?: SalesMonthActiveJob | null;
+      lastJob?: SalesMonthLastJob | null;
     },
   ): Promise<MonthPreview> {
     const month = summary.month;
@@ -143,7 +152,9 @@ export class SalesPreviewService {
     }
     if (comp.stats.some((s) => s.outletsNegative > 0)) warnings.push('NEGATIVE_VALUES');
 
+    const activeJob = ctx.activeJob ?? null;
     const blockedReason =
+      (activeJob ? `${busyText(month, activeJob)}. Wait for it to finish.` : null) ??
       blockedReasonFor({ month, defsCount: defs.length, mappingChanged, state }) ?? focusBlockedReason(month, focus.resolution.blockers);
 
     let lastApplied: MonthPreview['lastApplied'] = null;
@@ -182,6 +193,8 @@ export class SalesPreviewService {
       }),
       lastApplied,
       reconciliation: reconcileMonth(focus, comp, owned, last?.at ?? null),
+      activeJob,
+      lastJob: ctx.lastJob ?? null,
     };
   }
 }

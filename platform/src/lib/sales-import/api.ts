@@ -5,8 +5,10 @@
  */
 import { api, authHeader, type ApiResponse } from '@/lib/api-client';
 import type {
+  ApplyEnqueued,
   ApplyRequest,
   ApplyResult,
+  SalesApplyJobDto,
   FocusAcceptanceList,
   FocusAcceptanceRequest,
   SalesColumnMapping,
@@ -24,12 +26,14 @@ import type {
   SalesMonthRebuildProductListResult,
   SalesMonthRecalcPreview,
   SalesMonthRecalcRequest,
-  SalesMonthRecalcResult,
   SalesMonthReopenRequest,
   SalesMonthReopenResult,
   SalesMonthRow,
   SalesSegmentOptions,
 } from './types';
+
+/** The pre-release synchronous recalculate answer (one month result). */
+type SalesMonthRecalcResultLegacy = import('./types').ApplyMonthResult;
 
 const BASE = '/api/admin/sales-import';
 const MONTHS = '/api/admin/sales-months';
@@ -78,7 +82,15 @@ export const salesImportApi = {
   cancel: (importId: string) => api.post<SalesImportSummary>(`${BASE}/${id(importId)}/cancel`, {}),
   remove: (importId: string) => api.del<SalesImportSummary>(`${BASE}/${id(importId)}`),
   preview: (importId: string) => api.get<SalesImportPreview>(`${BASE}/${id(importId)}/preview`),
-  apply: (importId: string, req: ApplyRequest) => api.post<ApplyResult>(`${BASE}/${id(importId)}/apply`, req),
+  /**
+   * 202 ApplyEnqueued: the apply runs in the BACKGROUND (owner 2026-11-18) — follow `job` with getApplyJob. ApplyResult
+   * is the pre-release synchronous answer (an API not yet updated during a deploy), still handled by the page.
+   */
+  apply: (importId: string, req: ApplyRequest) => api.post<ApplyEnqueued | ApplyResult>(`${BASE}/${id(importId)}/apply`, req),
+  /** A background Apply / Recalculate job (progress + per-month results). */
+  getApplyJob: (jobId: string) => api.get<SalesApplyJobDto>(`${BASE}/apply-jobs/${id(jobId)}`),
+  /** The job a click created, by the page's requestId (404 = that click recorded nothing). */
+  findApplyJob: (requestId: string) => api.get<SalesApplyJobDto>(`${BASE}/apply-jobs?requestId=${id(requestId)}`),
   unmatchedCsvUrl: (importId: string) => `${BASE}/${id(importId)}/unmatched.csv`,
   errorsXlsxUrl: (importId: string) => `${BASE}/${id(importId)}/errors.xlsx`,
 
@@ -95,9 +107,9 @@ export const salesImportApi = {
   rebuildProductList: (month: string) => api.post<SalesMonthRebuildProductListResult>(`${MONTHS}/${id(month)}/rebuild-product-list`, {}),
   /** What "Recalculate from stored history" would write for an OPEN month (404 = no stored history). */
   recalcPreview: (month: string) => api.get<SalesMonthRecalcPreview>(`${MONTHS}/${id(month)}/recalculate/preview`),
-  /** Rewrites the month's importer-owned KPIs from stored history (409 when a token is stale). */
+  /** Rewrites the month's importer-owned KPIs from stored history — a BACKGROUND job (202; 409 when a token is stale). */
   recalculate: (month: string, body: SalesMonthRecalcRequest) =>
-    api.post<SalesMonthRecalcResult>(`${MONTHS}/${id(month)}/recalculate`, body),
+    api.post<ApplyEnqueued | SalesMonthRecalcResultLegacy>(`${MONTHS}/${id(month)}/recalculate`, body),
   reopenMonth: (month: string, body: SalesMonthReopenRequest = {}) =>
     api.post<SalesMonthReopenResult>(`${MONTHS}/${id(month)}/reopen`, body),
 

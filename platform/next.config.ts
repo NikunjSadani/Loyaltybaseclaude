@@ -62,6 +62,15 @@ const nextConfig: NextConfig = {
   // `*` does not cross dots, so multi-level hosts (uat.deoleoloyalty…) are listed
   // explicitly in addition to the single-level wildcard.
   experimental: {
+    // How long the `/api/*` rewrite above waits for the backend. Next's default is 30 s
+    // (next/dist/server/lib/router-utils/proxy-request.js: `proxyTimeout || 30000`; read from
+    // `config.experimental.proxyTimeout` in router-server.js). A slower request was cut at 30 s and the
+    // browser got a bare 500 while the backend went on and FINISHED it — the Bajaj sales-import apply
+    // (~30+ s) showed "Nothing was applied" and admins applied again (prod, 2026-11-18). 300 s matches the
+    // Cloud Run request timeout of both services. NOTE: tenant hosts also pass through the Cloudflare
+    // Worker (gifsy-proxy), which has its own ~100 s origin limit, so a long request can still be cut there —
+    // pages doing slow writes must re-read the outcome when no reply arrives (see lib/request-outcome.ts).
+    proxyTimeout: 300_000,
     // `src/proxy.ts` makes Next clone + buffer every request body that passes through it (before
     // auth), capped by this limit (default 10 MB). Over the cap the body is SILENTLY TRUNCATED (no
     // error), so the /api/* rewrite forwarded a cut-off JSON body to the API and the browser got a

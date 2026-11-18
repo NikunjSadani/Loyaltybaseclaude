@@ -128,7 +128,8 @@ Click a month to open it. It shows, for each KPI, **From this file**, **Stored n
 1. Tick the month(s) to update. Months that cannot be ticked say why under the month name (for example "… is CLOSED. Only Gifsy can reopen it.").
 2. Tick any confirmation boxes the warnings ask for. Until everything is in order, the reasons are listed next to the button (for example "Tick at least one month.").
 3. Press **Apply N months** and confirm. The message reminds you that the Sales Import KPIs are **fully replaced** for every programme outlet, outlets with no sales in the file get **0**, and other KPIs are not touched.
-4. Each month shows a result card: **"<Month>: applied"** with "N outlets updated, M set to 0. Targets cards and dashboards now show these numbers." — or **"not applied"** with the reason. One month failing does not undo the others.
+4. The apply runs **in the background** (large files take a minute or more per month). The page shows **"Queued — waiting its turn for the processor"**, then **"Applying in the background"** with each month's progress ("<Month>: applying (started 10:32)…"). You can leave the page — it carries on. When you come back the page shows the progress, or the result under **"Last apply from this file"** (who applied it, when, and the reason for any month that was not applied). Apply, Reprocess, Cancel and Delete stay greyed out until it finishes, and anyone else opening the file sees "Started by <name>". Never apply the same months again while it runs.
+5. Each month then shows a result card: **"<Month>: applied"** with "N outlets updated, M set to 0. Targets cards and dashboards now show these numbers." — or **"not applied"** with the reason. One month failing does not undo the others.
 
 **What changes:** the outlets' achievement for the Sales Import KPIs (Targets cards on the outlet app, admin dashboards and reports) now shows the applied numbers. Nothing is credited: **points are only computed after the month is closed** (Step 7).
 
@@ -214,6 +215,18 @@ Recalculate uses the figures **saved at the month's last apply** — nothing is 
 | "Confirm that you want to roll a month back to this file's older data." | Tick the older-data box — or untick the month (usually the right choice). |
 | "Nothing was applied: <reason>. The preview has been refreshed — check it and apply again." | Something changed since you looked (another file was applied, the KPIs or targets changed, the file was reprocessed). Re-check the refreshed preview and apply again. |
 | "Nothing was applied: your session has expired. Sign in again, then apply." | Sign in again. |
+| "Queued — waiting its turn for the processor" | Apply runs in the background. It usually starts within a minute; you can leave the page. Don't apply again. |
+| "Waiting to continue — the processor was restarted; it carries on by itself" | The processor restarted part-way. The months already applied stay applied; the rest continue automatically. Don't apply again. |
+| "Stopped after 3 attempts without finishing: <reason>" on a month | The month could not be written (nothing was changed for it). Check the reason; apply that month again later or contact Gifsy support. |
+| "<name>'s account is no longer active…" / "…is no longer allowed to apply sales files…" / "Sales Import was turned off…" | The apply was not run; nothing was written. Someone with access can apply it again. |
+| "Applying in the background" with "<Month>: applying (started 10:32)…" | The month is being written. When it finishes the page shows "<Month>: applied" (or "not applied" with the reason). You can leave the page and come back. |
+| "The processor has not started yet…" | It is started again automatically within 10 minutes. Don't apply again; if it is still queued after that, contact Gifsy support. |
+| A month greyed out with "<Month> is being applied by <name> since 10:32" | Someone (maybe you, in another tab) is applying it now. Wait for it to finish, then check the result. |
+| "Nothing was applied: <Month> is being applied by <name> since 10:32…" | The same: another apply of that month is running. Wait for it. |
+| "No clear answer from the server. Checking what happened…" | Wait — the page is looking up whether your click was recorded. |
+| "The server's first reply didn't come through, but the apply was recorded" | Your apply IS running (its progress is shown). Don't apply again. |
+| "Nothing was applied: …, and nothing was recorded for this click. Try again." | Press **Try again** (it is safe — it can never queue the same click twice). |
+| "We couldn't confirm whether this apply was recorded… Don't apply again yet" (Apply greyed out) | Press **Check again** until the page can tell. Never apply again before it does. |
 | "This file's data was removed on <date> (files are kept for a limited time)…" | Upload the file again. |
 | "<Month>: not applied" on a result card | Read the reason on the card; the other months were still applied. |
 
@@ -239,6 +252,14 @@ The monthly figures **were** applied. Only the day-by-day figures (used by "vs l
 | "<Month> is older than the stored sales lines…" | Apply a sales file to that month again to change it. |
 | "<Month> cannot be recalculated: <reason>" | Follow the reason (often a focus-product problem — fix it under **Focus brands**). |
 | "Nothing was changed: <reason>. The preview has been refreshed — check it and recalculate again." | Something changed meanwhile. Re-check and press **Recalculate <Month>** again. |
+| "Recalculating in the background" / "Queued — waiting its turn for the processor" | Recalculate also runs in the background; the result appears in the panel. You can close the panel. |
+| "Being applied by <name> since 10:32" / "Being recalculated by…" next to a month | An Apply or Recalculate of that month is running. Close, Reopen and Recalculate are greyed out until it finishes ("Close waits until the apply finishes"). |
+| "Last apply by <name>, 17 Nov, 10:32: not done — <reason>" under a month | The last Apply / Recalculate of that month did not go through, with the reason. |
+| "Updates paused — couldn't refresh the months…" | The page could not re-read the list; it keeps retrying. The list shown may be out of date until it clears. |
+| "<Month> was not closed / not reopened: <Month> is being applied by <name> since 10:32 — try again when it finishes." | Wait for the apply to finish (the note next to the month disappears), then press Close / Reopen again. |
+| "Nothing was changed: …, and nothing was recorded for this click. Try again." | Press **Try again** (safe). |
+| "We couldn't confirm whether the recalculation of <Month> was recorded… Don't recalculate again yet" | Press **Check again** until the page can tell. |
+| "We couldn't confirm whether <Month> was closed / reopened…" | Refresh the Months page and check the month's state before trying again. |
 | "<Month> was not closed / not reopened: <reason>" | Read the reason. The current month can never be closed. |
 
 ### Dashboard comparison ("vs last month")

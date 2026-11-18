@@ -18,6 +18,7 @@ import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Plus, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { salesImportApi } from '@/lib/sales-import/api';
+import { failureReason } from '@/lib/request-outcome';
 import {
   ALL_BLANK_MESSAGE, addEntries, comboEntry, comboMappingDrift, coveringEntryIndex, dimensionKeyDrift,
   entriesNotInCombos, entryKey, entryLabel, hasEntry, includeExcludeConflicts, isAllBlank, listOf, removeEntry,
@@ -117,7 +118,7 @@ function useHistoryCombos(active: boolean, sel: string) {
             setRes({ key, data: r.data, error: null });
             setAvailableMonths(r.data.availableMonths);
           } else {
-            setRes({ key, data: null, error: r.error });
+            setRes({ key, data: null, error: failureReason(r) });
           }
         })
         .catch((e: unknown) => { if (!ctrl.signal.aborted) setRes({ key, data: null, error: e instanceof Error ? e.message : 'Network error' }); });

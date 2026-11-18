@@ -370,7 +370,7 @@ export interface SalesMonthRow {
 | `GET  admin/sales-import` | targets:read | `?cursor&limit≤50` → `{items: SalesImportSummary[], nextCursor}` |
 | `GET  admin/sales-import/:id` | targets:read | → `SalesImportSummary & {monthSummaries, errorSamples}` (poll every 2 s while QUEUED/PROCESSING) |
 | `GET  admin/sales-import/:id/preview` | targets:read | → `SalesImportPreview` (READY only) |
-| `POST admin/sales-import/:id/apply` | targets:upload | `ApplyRequest` → `ApplyResult` (per month; one month failing does not roll back others) |
+| `POST admin/sales-import/:id/apply` | targets:upload | `ApplyRequest` → **202 `ApplyEnqueued`** since 2026-11-18 (a background job — §18 item 5; was `ApplyResult`; per month; one month failing does not roll back others) |
 | `GET  admin/sales-import/:id/unmatched.csv` | targets:read | streams `sales-imports/<c>/<id>/unmatched.csv` (customer code, name, month, lines, ₹, qty) |
 | `GET  admin/sales-import/:id/errors.xlsx` | targets:read | errorSamples as xlsx (`buildXlsx`, `common/xlsx.ts:132`) |
 | `GET  admin/sales-months` | targets:read | `?from=YYYY-MM&to=YYYY-MM` (default last 6) → `SalesMonthRow[]` |
@@ -1509,7 +1509,107 @@ from the step-1 backup if needed).
    outlet. When a value is "missing" for an outlet, check both scopes first.
 3. Result of the November apply: 6,452 outlet records written and verified per outlet; month left OPEN for the points
    rule (SAMT gate on NON ADHO ≥ ₹200 Elite / ≥ ₹400 Privilege, plus the rest of the rule — dedicated session pending).
-
+4. **Apply cut off at 30 s → false "Nothing was applied: ." → repeat applies (prod, 2026-11-17/18).** The Next `/api/*`
+   rewrite proxy had a 30 s default limit; the Bajaj apply takes ~30+ s, so the browser got a bare 500 while the backend
+   FINISHED (prod DB: 4 applies from 4 clicks on 2026-11-18, 3 the day before). Fixed on branch
+   `fix/proxy-timeout-honest-apply`: `experimental.proxyTimeout = 300_000` in `platform/next.config.ts` (= Cloud Run's
+   300 s) AND item 5 below (Apply / Recalculate no longer run inside the request at all). Every sales-import action that
+   gets no clear answer (network / 408 / 5xx / cut-off 2xx — `platform/src/lib/request-outcome.ts`) says so plainly
+   instead of "nothing happened"; "didn't reply in time" is used only for real timeouts (408 / 504 / 524).
+5. **Apply and Recalculate are BACKGROUND JOBS (owner decision 2026-11-18, platform-wide approved).** Files reach
+   300–350 MB at month end; one month took 21 → 36 s in four days and may reach 60–90 s; the Cloudflare Worker cuts
+   tenant-host requests at ~100 s, and the API runs CPU-throttled once a response is sent.
+   - **Tables** (migration `20261118170000_sales_apply_jobs`, additive): `sales_apply_jobs` (one per click: kind
+     APPLY / RECALC, the validated request, who, `requestId`, status QUEUED → RUNNING → DONE / FAILED, claim token +
+     heartbeat + attempts) and `sales_apply_job_months` (one per month: status + the ApplyMonthResult). A PARTIAL unique
+     index allows ONE active (QUEUED / RUNNING) job per tenant × month.
+   - **API**: `POST admin/sales-import/:id/apply` and `POST admin/sales-months/:month/recalculate` run every cheap check
+     (all the 4xx as before, except the focus-fingerprint check, which the worker runs before any write), record the job
+     and answer **202 `{ job, results }`** (`results` = one "being applied in the background — refresh" line per month for a
+     page loaded before the release). A second Apply / Recalculate of a month with an active job → **409** "<Month> is
+     being applied by X since 10:32…". **Close / Reopen → 409** "<Month> is being applied by X since 10:32 — try again
+     when it finishes." `GET admin/sales-import/apply-jobs/:jobId` = progress; `GET …/apply-jobs?requestId=` = the job a
+     click created (404 = nothing recorded). The preview's months and the Months list carry `activeJob`.
+   - **Worker**: the existing Cloud Run Job `gifsy-sales-import[-staging]` (1 CPU, 2 GiB, 3600 s; same image as the API,
+     updated by every deploy; the API SA holds `roles/run.jobsExecutor` on it — checked read-only 2026-11-18, no IAM
+     change). The POST kicks it (`jobs:run`, ~3 s to schedule + boot); the 10-minute Cloud Scheduler drain also kicks it
+     when a job is waiting or stale. It drains apply jobs FIRST, then imports, then jobs again. Each month is ONE
+     transaction (≤ 300 s) and its month row is set DONE INSIDE that transaction (guarded by the claim token): a crash rolls
+     both back, a reclaimed job (heartbeat > 10 min) re-runs only months not yet written — never twice. After 3 claims the
+     remaining months are FAILED with a reason.
+   - **Page**: Apply / Recalculate send a per-click `requestId`; the page shows Queued → Applying <Month> (started HH:MM)
+     → the result card per month, polling every 2 s; it is refresh-safe and shows another admin's job ("Started by X");
+     Apply / Recalculate are disabled (with the reason read out) while a job runs. With no clear answer the click is
+     looked up by `requestId`: found → follow it; 404 → "Nothing was applied: …, and nothing was recorded" + Try again
+     (resends the SAME requestId — harmless); lookup fails too → "We couldn't confirm whether this apply was recorded…
+     Don't apply again yet" + Check again, Apply disabled. Still queued after 2 min → says the processor will be started
+     again within 10 minutes.
+   - **Dual audit of `e1ce98d8` fixed** (exactly-once held; no critical): a retried job resolves focus names against the
+     product lists its FIRST run snapshotted (`sales_apply_jobs.focusBasis`), so months a run already wrote cannot make
+     later ones "focus products changed" (A-M1); SIGTERM hands the job back at once (QUEUED, no heartbeat) instead of
+     leaving it stuck 10–20 min (A-M2); every reset / release is guarded by the claim token (A-M3); a CLOSED / not
+     started month is refused at enqueue (409, A-L1); a transient DB error (connection, deadlock / serialization, Prisma
+     P1001 / P2024 / P2028 / P2034 …) hands the job back for a retry instead of failing the month (A-L2); stops and lost
+     claims do not use up attempts, and "Stopped after 3 attempts: <last error>" keeps the month's `lastError` (A-L3);
+     the worker re-checks the tenant flag and that the requester is still ACTIVE and allowed (targets:upload) before
+     each job (A-L4); a requestId reused for a different import / kind / months → 409 (A-L5); Reprocess / Read again /
+     Cancel / Delete of an import with an active job → 409 and disabled in the UI (A-L6 / B-M8). A drain never re-claims
+     a job it handed back in the same run (back-off until the next kick or the 10-minute drain). Each month's latest
+     FINISHED job is on the preview and the Months list (`lastJob`), so a result never disappears (B-H1). The Recalculate
+     202 also carries a top-level not-ok result for an old Months tab (B-H2).
+   - **Deploy order (A-M4 / B-M3)**: both workflows deploy the API BEFORE the frontend (`deploy.yml`:
+     `deploy-frontend` needs `deploy-api`; `deploy-staging.yml`: `deploy-frontend-staging` needs `deploy-api-staging`), so
+     the skew window is "new API + old page" (handled by the old-shape `results` / top-level result). Never deploy the
+     frontend alone ahead of this API: a new page against an old API would get a plain 404 from the requestId lookup —
+     the page treats any 404 WITHOUT the server's own "No apply was recorded for this request." text as UNKNOWN (Apply
+     held + Check again), never as "nothing recorded", and says "nothing recorded" only after a second lookup ~5 s later.
+   - **Migration notes — keep the partial index.** `sales_apply_job_months_active_month_key` (one active job per
+     tenant × month) exists only in migration `20261118170000_sales_apply_jobs`; Prisma cannot express it, so any later
+     `prisma migrate dev` WILL generate `DROP INDEX "sales_apply_job_months_active_month_key"` — delete that line from the
+     generated migration. `api/src/sales-import/apply/active-month-index.spec.ts` fails if a later migration drops it
+     without re-creating it.
+   - **Re-review of `91e4cc46` fixed**: a month whose write runs past the 300 s transaction timeout is FINAL ("<Month>
+     took longer than 5 minutes to write and was rolled back — nothing changed…", logged loudly) — only connection-level
+     errors and "Unable to start a transaction" are retried (M1); the worker keeps ONE hand-back list for its whole run
+     (M2); polling reads select explicit columns, never `focusBasis` (M3); a lost claim inside the write is a stop, and
+     a hand-back is one statement (L1) that is awaited after SIGTERM (L2); a whole-job refusal after a partial success
+     names the months already applied and those not run (L3); Gifsy staff also need their per-tenant grant (L4).
+   - **Final review of `f616a390` fixed**: a LOST transaction (Prisma P2028 "Transaction not found … obtained before
+     disconnecting" — connection drop / engine restart) is retried, never reported as "file too large"; only an EXPIRED
+     transaction ("Transaction already closed: … expired transaction … timeout for this transaction") is final (M1). A
+     stop hand-back is awaited even when the run then finishes, and its failure is logged, never thrown (L1). Close /
+     Reopen check for an active job UNDER the month lock, in the transaction that changes the state (L4). After a final
+     401 / 403 / 404 while following, the Recalculate panel says the job may still be running and keeps Recalculate held
+     until a Months-list read made after that shows no active job (L5).
+   - **Worker DB connections (L2)**: the `gifsy-sales-import` job uses the SAME `DATABASE_URL` secret as the API
+     (`deploy.yml` / `deploy-staging.yml` set no extra query parameters; any `connection_limit` lives inside the secret,
+     which was NOT read for this note). Prisma's default pool is `num_cpus × 2 + 1` = **3** on the job's 1 CPU. A month
+     write holds ONE connection for up to 300 s, so the SIGTERM hand-back (started at once from the signal, before the
+     month is aborted) gets its own pooled connection. ⚠️ If the secret ever sets `connection_limit=1`, the hand-back
+     waits behind the month's transaction and the job is only recovered by the 10-minute stale-heartbeat reclaim — keep
+     the worker's pool at ≥ 2 (check before changing the secret).
+   - **RBAC parity (L3)**: the worker's `targets:upload` re-check reads `RBAC_ENFORCEMENT` from its own env, which the job
+     does not set — exactly like the API service today (neither workflow sets it). If it is ever turned on for the API,
+     set it on the `gifsy-sales-import` job too.
+   - **Import actions vs a running job (L4)**: Reprocess / Read again / Cancel / Delete check for an active job of the
+     import BEFORE taking the import's row lock. The race left open is covered loudly by the worker: each month write holds
+     the import row `FOR SHARE` (Reprocess / Cancel / Delete need `FOR UPDATE NOWAIT` → 409 while a month is writing), and
+     a job whose import was reprocessed / cancelled / deleted between months fails WHOLE with the server's reason ("This
+     file was reprocessed after the preview…" / "not READY"), shown on every month — never silently.
+   - **Rollback runbook** (only if the release is rolled back to code without jobs): the old code ignores the new tables,
+     but a QUEUED / RUNNING job would never run. Before deploying the old image, run on the target DB (with the usual
+     `current_database()` guard, backup confirmed, SQL shown to the owner first):
+     `UPDATE "sales_apply_job_months" SET "status" = 'FAILED', "result" = jsonb_build_object('month', "month", 'ok', false,
+     'error', 'Stopped by a rollback. Nothing was written for this month - apply it again.'), "finishedAt" = (now() AT TIME
+     ZONE 'UTC') WHERE "status" IN ('QUEUED','RUNNING');` then
+     `UPDATE "sales_apply_jobs" SET "status" = 'DONE', "claimToken" = NULL, "finishedAt" = (now() AT TIME ZONE 'UTC')
+     WHERE "status" IN ('QUEUED','RUNNING');` and tell admins to apply those months again. Nothing is half-written (each
+     month is one transaction). The tables can stay (additive).
+   - **Tests**: `api/src/sales-import/apply/sales-apply-jobs.service.spec.ts` (enqueue, 409, resend, worker run, reclaim,
+     stop, attempts cap, lost claim, controllers 202 + kick), `sales-apply.service.spec.ts` (hooks + prechecks + preview
+     `activeJob`), `months/sales-months.spec.ts` (Close / Reopen 409, `activeJob`), `api/test/sales-apply-jobs.e2e-spec.ts`
+     (REAL Postgres, opt-in `SALES_IMPORT_E2E=1`: partial index, SKIP LOCKED, DONE rolls back with the write);
+     platform `import-detail.test.tsx` / `months-and-gate.test.tsx`.
 ---
 
 ## Appendix A — Bajaj configuration (DATA entered via the Settings screen on staging; never in code)

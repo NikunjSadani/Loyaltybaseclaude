@@ -54,6 +54,17 @@ describe('SalesImportRunnerService.kick', () => {
     expect(processor.processClaimed.mock.calls.map((c) => c[0].id)).toEqual(['a', 'b']);
   });
 
+  it('inline → registered drains (background Apply / Recalculate jobs) run after the imports, in the same loop', async () => {
+    process.env.SALES_IMPORT_RUNNER = 'inline';
+    const order: string[] = [];
+    processor.claimNext.mockResolvedValueOnce({ id: 'a' }).mockResolvedValue(null);
+    processor.processClaimed.mockImplementation(async (row: { id: string }) => { order.push(`import:${row.id}`); });
+    runner.registerDrain(async () => { order.push('applyJobs'); });
+    await runner.kick();
+    await runner.inlineIdle;
+    expect(order).toEqual(['import:a', 'applyJobs']);
+  });
+
   it('inline → after the drain: the retention sweep only (no background combos rebuild)', async () => {
     process.env.SALES_IMPORT_RUNNER = 'inline';
     const retention = { sweep: jest.fn(async () => ({ abandoned: 0, purged: 0 })) };

@@ -42,11 +42,34 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<ApiRespo
     // spurious error. Skip 204 outright, and tolerate an empty/unparseable body so a
     // bodyless 2xx is not mistaken for a failure.
     let body: { success?: boolean; data?: T; error?: string } | null = null;
+    // A reply that is cut off or unreadable is NOT a success: the action may have happened and its result is unknown, so
+    // it fails with no `status` (callers treat it like a reply that never arrived — lib/request-outcome.ts). Only a truly
+    // EMPTY body (204 / bodyless 2xx) is a success without data (audit B-M1 / L10).
+    const cutOff = { success: false as const, error: 'The server’s reply was cut off, so its result is not known' };
     if (res.status !== 204) {
-      try {
-        body = (await res.json()) as { success?: boolean; data?: T; error?: string };
-      } catch {
-        body = null;
+      if (typeof res.text === 'function') {
+        let raw: string;
+        try {
+          raw = await res.text();
+        } catch {
+          if (res.ok) return cutOff; // the body stream failed part-way
+          raw = '';
+        }
+        if (raw.trim() !== '') {
+          try {
+            body = JSON.parse(raw) as { success?: boolean; data?: T; error?: string };
+          } catch {
+            if (res.ok) return cutOff;
+            body = null;
+          }
+        }
+      } else {
+        // Minimal Response stand-ins (tests) without text(): the JSON reader only.
+        try {
+          body = (await res.json()) as { success?: boolean; data?: T; error?: string };
+        } catch {
+          body = null;
+        }
       }
     }
     if (!res.ok) {

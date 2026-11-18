@@ -218,7 +218,7 @@ describe('product set builder — stored month history source', () => {
     apiMock.historyCombos.mockResolvedValueOnce({ success: false, error: 'boom', status: 500 }).mockResolvedValueOnce(ok(HISTORY));
     await act(async () => { fireEvent.click(screen.getByRole('radio', { name: 'Latest file' })); });
     await useStored();
-    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load the stored months: boom");
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load the stored months: the server didn’t give a clear answer (error 500)");
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); });
     expect(screen.getByText('Pick combinations from October 2026')).toBeInTheDocument();
   });

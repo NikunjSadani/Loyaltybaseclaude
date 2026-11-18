@@ -5,13 +5,16 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/react';
-import { EMPTY_MONTH_RECONCILIATION, type SalesMonthRecalcPreview, type SalesMonthRow } from '@/lib/sales-import/types';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { EMPTY_MONTH_RECONCILIATION, type SalesApplyJobDto, type SalesMonthRecalcPreview, type SalesMonthRow } from '@/lib/sales-import/types';
 
 const roleRef = { current: 'CLIENT_ADMIN' };
 vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => ({ role: roleRef.current }) }));
 
-const apiMock = vi.hoisted(() => ({ months: vi.fn(), closeMonth: vi.fn(), reopenMonth: vi.fn(), recalcPreview: vi.fn(), recalculate: vi.fn(), rebuildProductList: vi.fn() }));
+const apiMock = vi.hoisted(() => ({
+  months: vi.fn(), closeMonth: vi.fn(), reopenMonth: vi.fn(), recalcPreview: vi.fn(), recalculate: vi.fn(), rebuildProductList: vi.fn(),
+  getApplyJob: vi.fn(), findApplyJob: vi.fn(),
+}));
 const perms = vi.hoisted(() => ({ granted: true }));
 vi.mock('@/lib/use-permissions', () => ({
   usePermissions: () => ({ role: 'CLIENT_ADMIN', permissions: [], ready: true, error: false, retry: () => {}, has: () => perms.granted }),
@@ -25,7 +28,7 @@ function row(over: Partial<SalesMonthRow>): SalesMonthRow {
   return {
     month: '2026-10', state: 'OPEN', implicit: true, closedAt: null, closedBy: null, lastAppliedAt: '2026-11-02T05:00:00.000Z',
     lastAppliedImportId: 'i1', canClose: true, canReopen: false, downstream: { creditBatches: 0, exports: 0 },
-    hasHistory: false, historySourceImportId: null, historyAppliedAt: null, productListCurrent: true, targetsChangedSinceApply: false, ...over,
+    hasHistory: false, historySourceImportId: null, historyAppliedAt: null, productListCurrent: true, targetsChangedSinceApply: false, activeJob: null, lastJob: null, ...over,
   };
 }
 const ok = <T,>(data: T) => ({ success: true as const, data });
@@ -41,6 +44,7 @@ function recalc(over: Partial<SalesMonthRecalcPreview> = {}): SalesMonthRecalcPr
 }
 
 beforeEach(() => {
+  window.sessionStorage.clear();
   perms.granted = true;
   roleRef.current = 'CLIENT_ADMIN';
   Object.values(apiMock).forEach((f) => f.mockReset());
@@ -153,7 +157,7 @@ describe('months page — recalculate from stored history', () => {
     const callsBefore = apiMock.months.mock.calls.length;
     await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
     expect((window.confirm as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatch(/Nothing is re-uploaded/);
-    expect(apiMock.recalculate).toHaveBeenCalledWith('2026-10', { expectedDefinitionsHash: 'dh1', expectedHistoryAppliedAt: '2026-11-02T05:00:00.000Z' });
+    expect(apiMock.recalculate).toHaveBeenCalledWith('2026-10', { expectedDefinitionsHash: 'dh1', expectedHistoryAppliedAt: '2026-11-02T05:00:00.000Z', requestId: expect.any(String) });
     expect(await screen.findByTestId('recalc-result')).toHaveTextContent('October 2026 recalculated: 5 outlets updated, 2 set to 0');
     expect(apiMock.months.mock.calls.length).toBeGreaterThan(callsBefore);
   });
@@ -377,6 +381,355 @@ describe('months page — Rebuild product list (§10c)', () => {
       expect(apiMock.months).toHaveBeenCalledWith('2025-12');
     } finally {
       window.history.pushState({}, '', '/');
+    }
+  });
+});
+
+// ── No reply (proxy / Worker timeout, 5xx, network): never claim "not closed" / "nothing changed" without looking ──
+describe('months page — an action whose reply never arrives', () => {
+  it('close: no reply, re-read shows CLOSED → reported as closed (slow reply noted), never "was not closed"', async () => {
+    apiMock.months
+      .mockResolvedValueOnce(ok([row({ month: '2026-10' })]))
+      .mockResolvedValue(ok([row({ month: '2026-10', state: 'CLOSED', canClose: false, canReopen: true })]));
+    apiMock.closeMonth.mockResolvedValue({ success: false, error: '', status: 500 });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const msg = await screen.findByRole('status');
+    expect(msg).toHaveTextContent('October 2026 is closed');
+    expect(msg).toHaveTextContent(/No clear answer came from the server; checking again confirmed it/);
+    expect(screen.queryByText(/was not closed/)).not.toBeInTheDocument();
+  });
+
+  it('close: no reply, re-read shows it still OPEN → "was not closed: the server didn’t reply in time", no ": ."', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10' })]));
+    apiMock.closeMonth.mockResolvedValue({ success: false, error: 'Failed to fetch' });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/October 2026 was not closed: the server could not be reached/);
+    expect(alert.textContent).not.toMatch(/: \./);
+  });
+
+  it('close: no reply AND the re-read fails → "We couldn’t confirm whether October 2026 was closed"', async () => {
+    apiMock.months.mockResolvedValueOnce(ok([row({ month: '2026-10' })])).mockResolvedValue({ success: false, error: '', status: 502 });
+    apiMock.closeMonth.mockResolvedValue({ success: false, error: '', status: 504 });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const alert = await screen.findByText(/couldn.t confirm whether October 2026 was closed/);
+    expect(alert).toHaveAttribute('role', 'alert');
+    expect(alert).toHaveTextContent(/before trying again/);
+  });
+
+  it('a refusal with an EMPTY message never renders "was not closed: ."', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10' })]));
+    apiMock.closeMonth.mockResolvedValue({ success: false, error: '', status: 409 });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).not.toMatch(/: \./);
+    expect(alert).toHaveTextContent(/was not closed: \S/);
+  });
+
+  it('reopen (GIFSY_ADMIN): no reply, re-read shows OPEN → reported as open again', async () => {
+    roleRef.current = 'GIFSY_ADMIN';
+    apiMock.months
+      .mockResolvedValueOnce(ok([row({ month: '2026-09', state: 'CLOSED', canClose: false, canReopen: true })]))
+      .mockResolvedValue(ok([row({ month: '2026-09', state: 'OPEN' })]));
+    apiMock.reopenMonth.mockResolvedValue({ success: false, error: '', status: 524 });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Reopen September 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    const msg = await screen.findByRole('status');
+    expect(msg).toHaveTextContent('September 2026 is open again');
+    expect(msg).toHaveTextContent(/No clear answer came from the server; checking again confirmed it/);
+  });
+
+  it('rebuild product list: no reply, re-read shows the list current → reported as rebuilt', async () => {
+    apiMock.months
+      .mockResolvedValueOnce(ok([row({ month: '2026-09', hasHistory: true, productListCurrent: false })]))
+      .mockResolvedValue(ok([row({ month: '2026-09', hasHistory: true, productListCurrent: true })]));
+    apiMock.rebuildProductList.mockResolvedValue({ success: false, error: '', status: 500 });
+    await act(async () => { render(<MonthsPage />); });
+    await act(async () => { fireEvent.click(screen.getByTestId('rebuild-product-list-2026-09')); });
+    const msg = await screen.findByRole('status');
+    expect(msg).toHaveTextContent('The product list for September 2026 is rebuilt');
+    expect(msg).toHaveTextContent(/No clear answer came from the server; checking again confirmed it/);
+  });
+});
+
+describe('recalculate — a background job (owner 2026-11-18)', () => {
+  const histRow = (over: Partial<SalesMonthRow> = {}) => row({
+    month: '2026-10', hasHistory: true, historySourceImportId: 'i1', historyAppliedAt: '2026-11-02T05:00:00.000Z', ...over,
+  });
+  const job = (over: Partial<SalesApplyJobDto> = {}, m: Partial<SalesApplyJobDto['months'][number]> = {}): SalesApplyJobDto => ({
+    id: 'rj1', kind: 'RECALC', importId: null, requestId: 'rq', status: 'QUEUED', requestedBy: 'Asha', createdAt: new Date().toISOString(),
+    startedAt: null, finishedAt: null, error: null, attempts: 0,
+    months: [{ month: '2026-10', status: 'QUEUED', startedAt: null, finishedAt: null, result: null, lastError: null, ...m }], ...over,
+  });
+  const DONE = { status: 'DONE' as const, result: { month: '2026-10', ok: true, applyId: 'a9', outletsWritten: 5, outletsZeroFilled: 2 } };
+
+  async function openAndRecalc() {
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    await screen.findByTestId('recalc-preview');
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+  }
+
+  it('202 job: sends a requestId, shows the job running (Recalculate held), then the result card', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiMock.months.mockResolvedValue(ok([histRow()]));
+      apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+      apiMock.recalculate.mockResolvedValue(ok({ job: job(), results: [] }));
+      apiMock.getApplyJob.mockResolvedValue(ok(job({ status: 'DONE' }, DONE)));
+      await openAndRecalc();
+      expect(apiMock.recalculate).toHaveBeenCalledWith('2026-10', expect.objectContaining({ requestId: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/) }));
+      expect(await screen.findByTestId('recalc-job')).toHaveTextContent('Queued — waiting its turn for the processor');
+      expect(screen.getByTestId('recalc-apply')).toBeDisabled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(await screen.findByTestId('recalc-result')).toHaveTextContent('October 2026 recalculated: 5 outlets updated, 2 set to 0');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('no clear answer → the click is looked up by requestId; found → that job is followed (never a second recalculation)', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValue({ success: false, error: '', status: 500 });
+    apiMock.findApplyJob.mockResolvedValue(ok(job({ status: 'DONE' }, DONE)));
+    await openAndRecalc();
+    expect(await screen.findByTestId('recalc-result')).toHaveTextContent('October 2026 recalculated');
+    expect(screen.queryByText(/Nothing was changed/)).not.toBeInTheDocument();
+    expect(apiMock.recalculate).toHaveBeenCalledTimes(1);
+  });
+
+  it('no clear answer, nothing recorded (404) → "Nothing was changed: …" with Try again (same requestId)', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValueOnce({ success: false, error: 'Failed to fetch' }).mockResolvedValue(ok({ job: job({ status: 'DONE' }, DONE), results: [] }));
+    apiMock.findApplyJob.mockResolvedValue({ success: false, error: 'No apply was recorded for this request.', status: 404 });
+    await openAndRecalc();
+    const notice = await screen.findByTestId('recalc-notice');
+    expect(notice).toHaveTextContent('Nothing was changed: the server could not be reached, and nothing was recorded for this click. Try again.');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
+    expect(apiMock.recalculate.mock.calls[1][1].requestId).toBe(apiMock.recalculate.mock.calls[0][1].requestId);
+    expect(await screen.findByTestId('recalc-result')).toHaveTextContent('5 outlets updated');
+  });
+
+  it('no clear answer and the lookup fails → unknown: Recalculate disabled, "Don’t recalculate again yet", Check again settles it', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValue({ success: false, error: '', status: 504 });
+    apiMock.findApplyJob.mockResolvedValueOnce({ success: false, error: '', status: 503 }).mockResolvedValue(ok(job({ status: 'DONE' }, DONE)));
+    await openAndRecalc();
+    const unknown = await screen.findByTestId('recalc-unknown');
+    expect(unknown).toHaveTextContent(/couldn.t confirm whether the recalculation of October 2026 was recorded: the server didn.t reply in time/);
+    expect(unknown).toHaveTextContent(/Don.t recalculate again yet/);
+    expect(screen.getByTestId('recalc-apply')).toBeDisabled();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check again' })); });
+    expect(await screen.findByTestId('recalc-result')).toHaveTextContent('October 2026 recalculated');
+    expect(apiMock.recalculate).toHaveBeenCalledTimes(1);
+  });
+
+  it('a month with an active job: the Months list says who and since when; the panel follows it with Recalculate held', async () => {
+    const active = { jobId: 'job7', kind: 'APPLY' as const, status: 'RUNNING' as const, importId: 'imp3', requestedBy: 'Ravi', createdAt: '2026-11-18T05:02:00.000Z' };
+    apiMock.months.mockResolvedValue(ok([histRow({ activeJob: active })]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.getApplyJob.mockResolvedValue(ok(job({ id: 'job7', kind: 'APPLY', importId: 'imp3', status: 'RUNNING', requestedBy: 'Ravi', createdAt: '2026-11-18T05:02:00.000Z' }, { status: 'RUNNING', startedAt: '2026-11-18T05:03:00.000Z' })));
+    render(<MonthsPage />);
+    expect(await screen.findByTestId('active-job-2026-10')).toHaveTextContent('Being applied by Ravi since 10:32');
+    fireEvent.click(screen.getByTestId('recalc-open-2026-10'));
+    await screen.findByTestId('recalc-preview');
+    expect(await screen.findByTestId('recalc-job')).toHaveTextContent('October 2026 is being applied from a sales file');
+    expect(screen.getByTestId('recalc-apply')).toBeDisabled();
+    expect(screen.getByTestId('recalc-apply')).toHaveAttribute('aria-describedby', 'recalc-apply-why');
+  });
+
+  it('Close while a job runs → the server’s 409 is shown as is ("… is being applied by X since 10:32 — try again when it finishes.")', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10' })]));
+    apiMock.closeMonth.mockResolvedValue({ success: false, error: 'October 2026 is being applied by Ravi since 10:32 — try again when it finishes.', status: 409 });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    expect(await screen.findByRole('alert')).toHaveTextContent('October 2026 was not closed: October 2026 is being applied by Ravi since 10:32 — try again when it finishes.');
+  });
+});
+
+describe('months — dual-audit fixes (background jobs)', () => {
+  const active = { jobId: 'job7', kind: 'APPLY' as const, status: 'RUNNING' as const, importId: 'imp3', requestedBy: 'Ravi', createdAt: new Date().toISOString() };
+  const histRow = (over: Partial<SalesMonthRow> = {}) => row({
+    month: '2026-10', hasHistory: true, historySourceImportId: 'i1', historyAppliedAt: '2026-11-02T05:00:00.000Z', ...over,
+  });
+
+  it('B-M7: Close is disabled while an Apply of the month runs, with the reason', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10', activeJob: active })]));
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('aria-describedby', 'job-hold-2026-10');
+    expect(screen.getByTestId('job-hold-2026-10')).toHaveTextContent('Close waits until the apply finishes');
+  });
+
+  it('B-M7: Reopen (GIFSY_ADMIN) is disabled while a Recalculate of the month runs', async () => {
+    roleRef.current = 'GIFSY_ADMIN';
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-09', state: 'CLOSED', canClose: false, canReopen: true, activeJob: { ...active, kind: 'RECALC' } })]));
+    render(<MonthsPage />);
+    expect(await screen.findByRole('button', { name: 'Reopen September 2026' })).toBeDisabled();
+    expect(screen.getByTestId('job-hold-2026-09')).toHaveTextContent('Reopen waits until the recalculation finishes');
+  });
+
+  it('B-H1: each month shows its last finished apply / recalculation (who, when, failure reason)', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10', lastJob: { jobId: 'j0', kind: 'RECALC', status: 'FAILED', importId: null,
+      requestedBy: 'Asha', createdAt: '2026-11-17T05:00:00.000Z', finishedAt: '2026-11-17T05:02:00.000Z',
+      result: { month: '2026-10', ok: false, error: 'A newer file was applied to this month since the preview.' } } })]));
+    render(<MonthsPage />);
+    expect(await screen.findByTestId('last-job-2026-10')).toHaveTextContent(
+      'Last recalculation by Asha, 17 Nov, 10:32: not done — A newer file was applied to this month since the preview.');
+  });
+
+  it('B-M4: a failed re-read while a job runs keeps polling and says the list is stale ("Updates paused — retrying")', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiMock.months
+        .mockResolvedValueOnce(ok([row({ month: '2026-10', activeJob: active })]))
+        .mockResolvedValueOnce({ success: false, error: '', status: 502 })
+        .mockResolvedValue(ok([row({ month: '2026-10' })]));
+      render(<MonthsPage />);
+      await screen.findByTestId('active-job-2026-10');
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(await screen.findByTestId('months-stale')).toHaveTextContent(/Updates paused — couldn.t refresh the months \(the server didn.t give a clear answer \(error 502\)\)\. The list below may be out of date; retrying/);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      await waitFor(() => expect(screen.queryByTestId('active-job-2026-10')).not.toBeInTheDocument());
+      expect(screen.queryByTestId('months-stale')).not.toBeInTheDocument();
+      expect(apiMock.months).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('B-M1: a Close whose success reply carries no row re-reads the list (never puts "undefined" in the table)', async () => {
+    apiMock.months
+      .mockResolvedValueOnce(ok([row({ month: '2026-10' })]))
+      .mockResolvedValue(ok([row({ month: '2026-10', state: 'CLOSED', canClose: false, canReopen: true })]));
+    apiMock.closeMonth.mockResolvedValue({ success: true, data: undefined });
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    expect(await screen.findByRole('status')).toHaveTextContent('October 2026 is closed');
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Close October 2026' })).not.toBeInTheDocument());
+    expect(apiMock.months).toHaveBeenCalledTimes(2);
+  });
+
+  it('B-L7: a list read that started BEFORE a Close is not allowed to put the old row back', async () => {
+    let releaseStale: (v: unknown) => void = () => {};
+    apiMock.months
+      .mockResolvedValueOnce(ok([row({ month: '2026-10' })]))
+      .mockImplementationOnce(() => new Promise((res) => { releaseStale = res; }))
+      .mockResolvedValue(ok([row({ month: '2026-10', state: 'CLOSED', canClose: false, canReopen: true })]));
+    apiMock.closeMonth.mockResolvedValue(ok(row({ month: '2026-10', state: 'CLOSED', canClose: false, canReopen: true })));
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Close October 2026' });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Refresh months' })); }); // a read starts…
+    await act(async () => { fireEvent.click(btn); }); // …the Close lands first
+    await act(async () => { releaseStale(ok([row({ month: '2026-10' })])); }); // the stale read (still OPEN) arrives
+    await waitFor(() => expect(apiMock.months).toHaveBeenCalledTimes(3)); // ignored and read again
+    expect(screen.queryByRole('button', { name: 'Close October 2026' })).not.toBeInTheDocument();
+  });
+
+  it('B-L12: Recalculate refused with 401 says the session expired', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValue({ success: false, error: 'Unauthorized', status: 401 });
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    await screen.findByTestId('recalc-preview');
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+    expect(await screen.findByTestId('recalc-notice')).toHaveTextContent('Nothing was changed: your session has expired. Sign in again, then recalculate.');
+  });
+
+  it('B-M6: the recalculation result is announced in the always-present live region', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValue(ok({ job: { id: 'r1', kind: 'RECALC', importId: null, requestId: 'rq', status: 'DONE', requestedBy: 'Asha',
+      createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, error: null, attempts: 1,
+      months: [{ month: '2026-10', status: 'DONE', startedAt: null, finishedAt: null, lastError: null, result: { month: '2026-10', ok: true, outletsWritten: 5, outletsZeroFilled: 2 } }] }, results: [] }));
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    expect(screen.getByTestId('recalc-live')).toBeInTheDocument();
+    await screen.findByTestId('recalc-preview');
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+    await screen.findByTestId('recalc-result');
+    expect(screen.getByTestId('recalc-live')).toHaveTextContent('October 2026: recalculated');
+  });
+});
+
+describe('months — re-review fixes', () => {
+  const active = { jobId: 'job7', kind: 'APPLY' as const, status: 'RUNNING' as const, importId: 'imp3', requestedBy: 'Ravi', createdAt: new Date().toISOString() };
+  const histRow = (over: Partial<SalesMonthRow> = {}) => row({
+    month: '2026-10', hasHistory: true, historySourceImportId: 'i1', historyAppliedAt: '2026-11-02T05:00:00.000Z', ...over,
+  });
+
+  it('L5: polling stops when the tab is hidden AFTER it started, and resumes when shown', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let state: DocumentVisibilityState = 'visible';
+    const spy = vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => state);
+    try {
+      apiMock.months.mockResolvedValue(ok([row({ month: '2026-10', activeJob: active })]));
+      render(<MonthsPage />);
+      await screen.findByTestId('active-job-2026-10');
+      expect(apiMock.months).toHaveBeenCalledTimes(1);
+      state = 'hidden';
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(apiMock.months).toHaveBeenCalledTimes(1);
+      state = 'visible';
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(apiMock.months).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('the "being applied" badge spinner is hidden from screen readers (no stray "Loading")', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10', activeJob: active })]));
+    render(<MonthsPage />);
+    const badge = await screen.findByTestId('active-job-2026-10');
+    // every "Loading" spinner in the badge sits inside an aria-hidden wrapper
+    const spinners = badge.querySelectorAll('svg[aria-label="Loading"]');
+    expect(spinners.length).toBeGreaterThan(0);
+    spinners.forEach((sv) => expect(sv.closest('[aria-hidden="true"]')).not.toBeNull());
+  });
+
+  it('L6 + final review L5: a FINAL 403 while following says it may still be running; Recalculate stays held until the Months list shows no active job', async () => {
+    const running = histRow({ activeJob: { ...active, kind: 'RECALC', importId: null } });
+    apiMock.months
+      .mockResolvedValueOnce(ok([running]))   // page load
+      .mockResolvedValueOnce(ok([running]))   // re-read after the lost follow: still running
+      .mockResolvedValue(ok([histRow()]));    // later: finished
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.getApplyJob.mockResolvedValue({ success: false, error: 'Forbidden', status: 403 });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const view = render(<MonthsPage />);
+    try {
+      fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+      await screen.findByTestId('recalc-preview');
+      const stopped = await screen.findByTestId('recalc-job-stopped');
+      expect(stopped).toHaveTextContent(/We couldn.t follow the recalculation — it may still be running; refresh before trying again\. \(You no longer have access/);
+      expect(screen.queryByTestId('recalc-job')).not.toBeInTheDocument(); // never "waiting" forever
+      await waitFor(() => expect(apiMock.months).toHaveBeenCalledTimes(2));
+      expect(screen.getByTestId('recalc-apply')).toBeDisabled(); // the list still shows it running
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); }); // the list polls while a job is active
+      await waitFor(() => expect(screen.getByTestId('recalc-apply')).not.toBeDisabled());
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
     }
   });
 });
