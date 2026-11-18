@@ -16,7 +16,7 @@ import {
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   descendantSalesUserIds,
-  promotedReportIds,
+  promotedActiveReportIds,
   SalesUserEdge,
 } from '../sales/sales-hierarchy-access.helper';
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
@@ -247,17 +247,22 @@ export class VisibilityCaptureService {
     const edges = await loadSalesHierarchy(this.prisma, user.clientId);
     const userIdBySalesUserId = new Map(edges.map((e) => [e.id, e.userId]));
 
-    // G3 Team-Member filter: a deleted / inactive direct report's live reports are PROMOTED to selectable
-    // members under the caller — the same rule as the Outlets screen (SalesService.getMyOutlets).
-    const promotedIds = promotedReportIds(callerSu.id, edges);
-    const promoted = promotedIds.length
+    // G3 Team-Member filter: a REMOVED (deleted) direct report's ACTIVE reports are PROMOTED to selectable
+    // members under the caller — the same rule as the Outlets screen (SalesService.getMyOutlets). F2: an
+    // inactive report is never walked through. F8: direct reports first (their existing employeeCode
+    // order), then promoted ones in WALK order — the same promoted order as the Team / Outlets screens.
+    const promotedIds = promotedActiveReportIds(callerSu.id, edges);
+    const promotedRows = promotedIds.length
       ? await this.prisma.salesUser.findMany({
-          where: { id: { in: promotedIds }, clientId: user.clientId, deletedAt: null },
+          where: { id: { in: promotedIds }, clientId: user.clientId, deletedAt: null, isActive: true },
           select: { id: true, employeeCode: true, user: { select: { name: true } } },
-          orderBy: { employeeCode: 'asc' },
         })
       : [];
-    const directMembers = [...(callerSu.subordinates ?? []), ...(Array.isArray(promoted) ? promoted : [])];
+    const pos = new Map(promotedIds.map((id, i) => [id, i]));
+    const promoted = (Array.isArray(promotedRows) ? promotedRows : []).sort(
+      (a, b) => (pos.get(a.id) ?? 0) - (pos.get(b.id) ?? 0),
+    );
+    const directMembers = [...(callerSu.subordinates ?? []), ...promoted];
 
     // Each DIRECT report enriched with the login-User ids of that report PLUS their whole
     // downline (submitterUserIds). The Team Member filter matches an outlet whose assignedUserId

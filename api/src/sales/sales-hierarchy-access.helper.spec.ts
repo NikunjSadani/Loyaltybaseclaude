@@ -5,6 +5,7 @@ import {
   immediateReporteeForOutlet,
   effectiveDirectReportIds,
   promotedReportIds,
+  promotedActiveReportIds,
 } from './sales-hierarchy-access.helper';
 
 /**
@@ -221,6 +222,14 @@ describe('G3 — isSelfOrDescendant walks through deleted managers, never return
   it('the deleted SO itself is never a viewable member', () => {
     expect(isSelfOrDescendant('so', 'asm', BRANCH)).toBe(false);
   });
+  it('O1: allowDeletedTarget — a REMOVED submitter is still under the managers above them (and only them)', () => {
+    expect(isSelfOrDescendant('so', 'asm', BRANCH, { allowDeletedTarget: true })).toBe(true);
+    expect(isSelfOrDescendant('so', 'so2', BRANCH, { allowDeletedTarget: true })).toBe(false);
+  });
+  it('O1: descendantSalesUserIds includeDeleted returns the deleted nodes reached (submitter scope only)', () => {
+    expect([...descendantSalesUserIds('asm', BRANCH, { includeDeleted: true })].sort()).toEqual(['asm', 'isr', 'isr2', 'so', 'so2']);
+    expect([...descendantSalesUserIds('asm', BRANCH)].sort()).toEqual(['asm', 'isr', 'isr2', 'so2']);
+  });
   it('a sibling branch is still refused', () => {
     expect(isSelfOrDescendant('isr', 'so2', BRANCH)).toBe(false);
   });
@@ -277,13 +286,44 @@ describe('G3 — effectiveDirectReportIds / promotedReportIds (the team list rul
     expect(effectiveDirectReportIds('asm', BRANCH)).toEqual(['so2', 'isr']);
     expect(promotedReportIds('asm', BRANCH)).toEqual(['isr']);
   });
-  it('an inactive (vacant, not deleted) direct report is walked through the same way', () => {
+  it('F2: an INACTIVE (not deleted) direct report stays a normal member — its team is NOT promoted', () => {
     const edges = [
       { id: 'asm', reportingToId: null, isActive: true, deletedAt: null },
       { id: 'so', reportingToId: 'asm', isActive: false, deletedAt: null },
       { id: 'isr', reportingToId: 'so', isActive: true, deletedAt: null },
     ];
-    expect(effectiveDirectReportIds('asm', edges)).toEqual(['isr']);
+    expect(effectiveDirectReportIds('asm', edges)).toEqual(['so']);
+    expect(promotedReportIds('asm', edges)).toEqual([]);
+  });
+
+  it('F2: an inactive person BELOW a deleted slot counts toward the team (teamSize) but is not an active member row', () => {
+    const edges = [
+      { id: 'asm', reportingToId: null, isActive: true, deletedAt: null },
+      { id: 'so', reportingToId: 'asm', isActive: false, deletedAt: DEL },
+      { id: 'isrA', reportingToId: 'so', isActive: true, deletedAt: null },
+      { id: 'isrI', reportingToId: 'so', isActive: false, deletedAt: null },
+    ];
+    expect(promotedReportIds('asm', edges)).toEqual(['isrA', 'isrI']);
+    expect(promotedActiveReportIds('asm', edges)).toEqual(['isrA']);
+  });
+
+  it('F7: a corrupt manager → deleted D → ANCESTOR cycle never promotes the ancestor (or the manager)', () => {
+    // boss ← m (m reports to boss) ; m ← d (deleted) ; d ← boss  → cycle boss→d→m→boss in parent pointers.
+    const edges = [
+      { id: 'boss', reportingToId: 'd', deletedAt: null },
+      { id: 'm', reportingToId: 'boss', deletedAt: null },
+      { id: 'd', reportingToId: 'm', deletedAt: DEL },
+      { id: 'isr', reportingToId: 'd', deletedAt: null },
+    ];
+    // Before F7 the walk went m → d (deleted) → boss and PROMOTED the boss into m's team. Now d (which is
+    // also m's ancestor in this corrupt cycle) is never walked into: neither boss nor m is ever returned.
+    const out = effectiveDirectReportIds('m', edges);
+    expect(out).not.toContain('boss');
+    expect(out).not.toContain('m');
+    expect(out).toEqual([]);
+    // A NON-cyclic deleted slot under m is still walked through normally.
+    const ok = [...edges.filter((e) => e.id !== 'boss'), { id: 'boss', reportingToId: null, deletedAt: null }];
+    expect(effectiveDirectReportIds('m', ok)).toEqual(['isr']);
   });
   it('two stacked deleted levels are walked through', () => {
     const edges = [
@@ -305,6 +345,8 @@ describe('G3 — effectiveDirectReportIds / promotedReportIds (the team list rul
       { id: 'b', reportingToId: 'a', deletedAt: DEL },
       { id: 'c', reportingToId: 'b', deletedAt: null },
     ];
-    expect(effectiveDirectReportIds('m', edges)).toEqual(['c']);
+    // a and b are m's ANCESTORS as well as descendants (corrupt cycle) → F7 never walks into an ancestor,
+    // so nothing hanging off the cycle is promoted; the walk terminates.
+    expect(effectiveDirectReportIds('m', edges)).toEqual([]);
   });
 });

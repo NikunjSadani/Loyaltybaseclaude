@@ -5,6 +5,10 @@ import { Readable } from 'node:stream';
 
 import { Test, TestingModule } from '@nestjs/testing';
 import {
+  NOT_INTERESTED_BLOCKING_KYC_STATUSES,
+  NOT_INTERESTED_IN_FLIGHT_KYC_STATUSES,
+} from './kyc-not-interested.constants';
+import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
@@ -4949,6 +4953,66 @@ describe('KycService', () => {
       );
     });
 
+    // ── O1 (owner 2026-11-18) — a KYC filed by an ISR who was REMOVED afterwards stays with the managers ──
+    describe('O1 — the submitter (ISR) was removed after filing', () => {
+      const DEL = new Date('2026-11-01');
+      // asm1 ← so1 ← isr1 (DELETED after filing) ; asm1 ← so2 (sibling branch)
+      const TREE = [
+        { id: 'asm-su', reportingToId: null, userId: 'asm1' },
+        { id: 'so-su', reportingToId: 'asm-su', userId: 'so1' },
+        { id: 'isr-su', reportingToId: 'so-su', userId: 'isr1', deletedAt: DEL },
+        { id: 'so2-su', reportingToId: 'asm-su', userId: 'so2' },
+      ];
+      const so2: JwtPayload = { sub: 'so2', role: 'SALES_SO', clientId: 'deoleo', phone: '', name: '' };
+      const filed = (status: string) =>
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'isr1', partnerId: null, outletId: null, status, partner: null,
+          documents: [], statusHistory: [], user: { name: 'n', phone: 'p' },
+        });
+
+      it('the SO above still SEES it in the queue/list (and the ASM above them too)', async () => {
+        primeSalesNodes(TREE);
+        mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+        mockPrisma.kycSubmission.count.mockResolvedValue(0);
+        mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+        await service.list(so, {});
+        expect(mockPrisma.kycSubmission.findMany.mock.calls[0][0].where.userId.in).toContain('isr1');
+      });
+
+      it('the SO above can OPEN it; a sibling SO cannot', async () => {
+        primeSalesNodes(TREE);
+        filed('PENDING_SO_APPROVAL');
+        mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null);
+        await expect(service.getOne(so, 's1')).resolves.toBeDefined();
+        await expect(service.getOne(so2, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('the SO above can APPROVE it (single-stage); a sibling SO cannot', async () => {
+        primeSalesNodes(TREE);
+        filed('PENDING_SO_APPROVAL');
+        await expect(service.firstApprove(so, 's1', {})).resolves.toMatchObject({ nextStatus: 'PENDING_GIFSY' });
+        await expect(service.firstApprove(so2, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('multi-level tenant: the SO (and ASM at its stage) can approve; the sibling SO cannot', async () => {
+        (service as unknown as { tenant: { resolveClient: jest.Mock } }).tenant.resolveClient.mockResolvedValue({
+          features: { multiLevelApproval: true },
+        });
+        primeSalesNodes(TREE);
+        filed('PENDING_ASM_APPROVAL');
+        await expect(service.firstApprove(asm, 's1', {})).resolves.toBeDefined();
+        filed('PENDING_SO_APPROVAL');
+        await expect(service.firstApprove(so2, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('the SO above can REJECT it', async () => {
+        primeSalesNodes(TREE);
+        filed('PENDING_SO_APPROVAL');
+        const res = await service.reject(so, 's1', { reason: 'bad' });
+        expect(res.message).toBe('KYC rejected successfully');
+      });
+    });
+
     // ── R1 — the approve ACTION walks past a soft-deleted SO exactly like routing did ───────────────
     describe('R1 — KYC routed to the ASM past a deleted SO', () => {
       const routedToAsm = () =>
@@ -5003,7 +5067,8 @@ describe('KycService', () => {
         mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
         await service.list(asm, {});
         const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
-        expect([...where.userId.in].sort()).toEqual(['asm1', 'isr1']); // never the deleted SO's own login
+        // O1 (owner 2026-11-18): the deleted SO's OWN KYCs stay with the ASM above them too (submitter scope).
+        expect([...where.userId.in].sort()).toEqual(['asm1', 'isr1', 'so1']);
       });
     });
   });
@@ -8454,9 +8519,12 @@ describe('KycService', () => {
         expect(err).toBeInstanceOf(ConflictException);
         expect((err as Error).message).toBe(APPROVED_MSG);
         expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
-        // The lookup covers the outlet's partner AND submissions filed for this outlet (G2 column).
+        // F3: APPROVED counts only for the CURRENT owner (partnerId); the outlet-row key matches IN-FLIGHT only.
         const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
-        expect(where.OR).toEqual([{ partnerId: 'cp-1' }, { outletId: 'outlet-1' }]);
+        expect(where.OR).toEqual([
+          { partnerId: 'cp-1', status: { in: [...NOT_INTERESTED_BLOCKING_KYC_STATUSES] } },
+          { outletId: 'outlet-1', status: { in: [...NOT_INTERESTED_IN_FLIGHT_KYC_STATUSES] } },
+        ]);
       });
 
       it.each([
@@ -8515,17 +8583,49 @@ describe('KycService', () => {
         await service.notInterested(isr1, { outletId: 'outlet-1' });
         expect(mockPrisma.outlet.update).toHaveBeenCalledTimes(1);
         // Only the blocking statuses are queried (DRAFT / REJECTED / RE_* never block).
-        const statuses = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where.status.in;
-        expect(statuses).not.toContain('DRAFT');
-        expect(statuses).not.toContain('REJECTED');
-        expect(statuses).toContain('APPROVED');
+        const [ownerClause, outletClause] = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where.OR;
+        expect(ownerClause.status.in).not.toContain('DRAFT');
+        expect(ownerClause.status.in).not.toContain('REJECTED');
+        expect(ownerClause.status.in).toContain('APPROVED');
+        // F3: the outlet-row key never matches APPROVED (a previous owner's approval must not block forever).
+        expect(outletClause.status.in).not.toContain('APPROVED');
+        expect(outletClause.status.in).not.toContain('DRAFT');
+      });
+
+      it('F3: a PREVIOUS owner\'s APPROVED KYC on this outlet row does NOT block; the current owner\'s does', async () => {
+        assignTo('isr1-su');
+        mockPrisma.outlet.findFirst.mockResolvedValue(withPartner); // current owner cp-1
+        const SUBS = [{ partnerId: 'old-owner', outletId: 'outlet-1', status: 'APPROVED' }];
+        // Evaluate the real where-clause like the DB would.
+        const evalWhere = (where: { OR: Array<{ partnerId?: string; outletId?: string; status: { in: string[] } }> }) =>
+          SUBS.filter((s) =>
+            where.OR.some(
+              (c) =>
+                (c.partnerId === undefined || c.partnerId === s.partnerId) &&
+                (c.outletId === undefined || c.outletId === s.outletId) &&
+                c.status.in.includes(s.status),
+            ),
+          ).map((s) => ({ status: s.status }));
+        mockPrisma.kycSubmission.findMany.mockImplementation((args: { where: Parameters<typeof evalWhere>[0] }) =>
+          Promise.resolve(evalWhere(args.where)),
+        );
+        await service.notInterested(isr1, { outletId: 'outlet-1' });
+        expect(mockPrisma.outlet.update).toHaveBeenCalledTimes(1); // marked — the old owner's approval is ignored
+
+        // The CURRENT owner's approval still blocks.
+        SUBS.push({ partnerId: 'cp-1', outletId: 'outlet-1', status: 'APPROVED' });
+        mockPrisma.outlet.update.mockClear();
+        const err = await service.notInterested(isr1, { outletId: 'outlet-1' }).catch((e: unknown) => e);
+        expect((err as Error).message).toBe(APPROVED_MSG);
       });
 
       it('a partner-less outlet checks only the outlet-level submissions', async () => {
         assignTo('isr1-su');
         mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
         await service.notInterested(isr1, { outletId: 'outlet-1' });
-        expect(mockPrisma.kycSubmission.findMany.mock.calls[0][0].where.OR).toEqual([{ outletId: 'outlet-1' }]);
+        expect(mockPrisma.kycSubmission.findMany.mock.calls[0][0].where.OR).toEqual([
+          { outletId: 'outlet-1', status: { in: [...NOT_INTERESTED_IN_FLIGHT_KYC_STATUSES] } },
+        ]);
         expect(mockPrisma.outlet.update).toHaveBeenCalledTimes(1);
       });
 

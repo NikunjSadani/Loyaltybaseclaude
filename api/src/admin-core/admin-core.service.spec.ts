@@ -907,6 +907,27 @@ describe('AdminCoreService', () => {
       expect(res).toEqual({ resigned: 1, notFound: 1 });
     });
 
+    it('F4: revokes EVERY resigned rep\'s live sessions (stamp-before-sweep), so a resigned token stops working', async () => {
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 's1', userId: 'u1', employeeCode: 'E1' },
+        { id: 's2', userId: 'u2', employeeCode: 'E2' },
+      ]);
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      await service.bulkEditUsers(clientAdmin, { action: 'resign', employeeCodes: ['E1', 'E2'] });
+      for (const uid of ['u1', 'u2']) {
+        expect(mockPrisma.user.update).toHaveBeenCalledWith({
+          where: { id: uid },
+          data: { sessionsInvalidBefore: expect.any(Date) },
+        });
+        expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+          where: { userId: uid, revokedAt: null },
+          data: { revokedAt: expect.any(Date) },
+        });
+      }
+      // Only the resigned users — nobody else's sessions are touched.
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledTimes(2);
+    });
+
     it('rejects an unknown action', async () => {
       await expect(
         service.bulkEditUsers(clientAdmin, { action: 'nope' }),

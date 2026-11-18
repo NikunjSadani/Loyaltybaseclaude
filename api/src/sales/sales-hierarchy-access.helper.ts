@@ -47,6 +47,8 @@ export function isSelfOrDescendant(
   targetId: string,
   callerSalesUserId: string,
   edges: SalesUserEdge[],
+  /** O1: `allowDeletedTarget` — the target may itself be soft-deleted (a removed KYC submitter). */
+  opts: { allowDeletedTarget?: boolean } = {},
 ): boolean {
   if (!targetId || !callerSalesUserId) return false;
   if (targetId === callerSalesUserId) return true;
@@ -58,9 +60,10 @@ export function isSelfOrDescendant(
     if (e.deletedAt != null) deleted.add(e.id);
   }
 
-  // The target must exist in the tenant's edge list to be viewable at all, and must be live.
+  // The target must exist in the tenant's edge list to be viewable at all, and must be live — unless the
+  // caller explicitly asks about a REMOVED target (O1: the submitter of a KYC who resigned after filing).
   if (!parentOf.has(targetId)) return false;
-  if (deleted.has(targetId)) return false;
+  if (deleted.has(targetId) && !opts.allowDeletedTarget) return false;
 
   const seen = new Set<string>();
   let current: string | null = targetId;
@@ -88,12 +91,17 @@ export function isSelfOrDescendant(
  * their outlets). Callers that want this pass an edge list loaded WITHOUT a `deletedAt: null` filter
  * and including `deletedAt`; an inactive-but-not-deleted node is a normal member (unchanged).
  *
+ * O1 (owner 2026-11-18): `includeDeleted` ALSO returns the deleted nodes reached by the walk — used only
+ * to scope KYC SUBMITTERS, so a KYC filed by a rep who was removed afterwards stays with the managers
+ * above that rep. Never use it for membership / assignment scope.
+ *
  * @param callerSalesUserId  the caller's own SalesUser.id (always included)
  * @param edges              tenant-scoped {id, reportingToId, deletedAt?} edge list
  */
 export function descendantSalesUserIds(
   callerSalesUserId: string,
   edges: SalesUserEdge[],
+  opts: { includeDeleted?: boolean } = {},
 ): Set<string> {
   const childrenOf = new Map<string, string[]>();
   const deleted = new Set<string>();
@@ -113,7 +121,7 @@ export function descendantSalesUserIds(
     for (const child of childrenOf.get(current) ?? []) {
       if (visited.has(child)) continue;
       visited.add(child);
-      if (!deleted.has(child)) subtree.add(child);
+      if (!deleted.has(child) || opts.includeDeleted) subtree.add(child);
       queue.push(child);
     }
   }
@@ -121,22 +129,47 @@ export function descendantSalesUserIds(
 }
 
 /**
- * A node counts as a LIVE, ACTIVE team member: not soft-deleted and not deactivated. Edges loaded
- * without the optional fields (legacy callers / tests) are treated as live + active.
+ * ONE hop bound for every upward reporting walk (routing, the multi-level climb, the approver lookup, the
+ * next-active-manager display). Real chains are ≤ 6 levels; the bound only stops corrupt data. (F6)
  */
+export const HIERARCHY_MAX_HOPS = 20;
+
+/** A node is soft-deleted (REMOVED). Inactive-but-not-deleted is NOT removed. */
+export function isRemovedNode(e: SalesUserEdge): boolean {
+  return e.deletedAt != null;
+}
+
+/** A node can be shown as a manager / approver: live AND active (routing's rule). */
 export function isLiveActiveNode(e: SalesUserEdge): boolean {
   return e.deletedAt == null && e.isActive !== false;
 }
 
+/** Ids of the manager's ancestors (walking reportingToId up, cycle-safe). */
+function ancestorIds(managerId: string, edges: SalesUserEdge[]): Set<string> {
+  const parentOf = new Map<string, string | null>();
+  for (const e of edges) parentOf.set(e.id, e.reportingToId);
+  const out = new Set<string>();
+  let cur = parentOf.get(managerId) ?? null;
+  while (cur && !out.has(cur) && cur !== managerId) {
+    out.add(cur);
+    cur = parentOf.get(cur) ?? null;
+  }
+  return out;
+}
+
 /**
- * G3 — the manager's EFFECTIVE direct reports: every live+active node directly under the manager,
- * PLUS — for a direct report that is soft-deleted or inactive (a vacant slot) — that slot's own
- * effective reports, recursively. So an ASM whose SO resigned lists the SO's ISRs as their own
- * direct reports (the same "skip the vacant level" rule KycService.resolveInitialRouting applies to
- * approvals). Order: direct reports first in edge order, then promoted ones in BFS order. Cycle-safe.
+ * G3 — the manager's EFFECTIVE direct reports: every NON-DELETED node directly under the manager (active
+ * or inactive — exactly the people the team screens counted before), PLUS — for a direct report that was
+ * REMOVED (soft-deleted) — that slot's own effective reports, recursively. Owner F2 (2026-11-18): ONLY
+ * `deletedAt` triggers the walk-through; an INACTIVE manager stays a normal member and their team is NOT
+ * promoted (Deoleo has inactive users on prod — their screens stay byte-identical).
+ *
+ * F7: cycle-safe — every node is visited once, and the manager itself or any of the manager's ANCESTORS is
+ * never returned (a corrupt manager → deleted D → ancestor cycle cannot promote the boss into the team).
+ * Order: BFS (direct reports first, then promoted ones in walk order).
  *
  * @param managerId  the manager whose team list is being built
- * @param edges      tenant-scoped edge list INCLUDING deleted/inactive nodes (`loadSalesHierarchy`)
+ * @param edges      tenant-scoped edge list INCLUDING deleted nodes (`loadSalesHierarchy`)
  */
 export function effectiveDirectReportIds(managerId: string, edges: SalesUserEdge[]): string[] {
   const childrenOf = new Map<string, SalesUserEdge[]>();
@@ -146,6 +179,7 @@ export function effectiveDirectReportIds(managerId: string, edges: SalesUserEdge
     arr.push(e);
     childrenOf.set(e.reportingToId, arr);
   }
+  const forbidden = ancestorIds(managerId, edges);
   const out: string[] = [];
   const visited = new Set<string>([managerId]);
   const queue: string[] = [managerId];
@@ -154,24 +188,31 @@ export function effectiveDirectReportIds(managerId: string, edges: SalesUserEdge
     for (const child of childrenOf.get(current) ?? []) {
       if (visited.has(child.id)) continue; // cycle guard
       visited.add(child.id);
-      if (isLiveActiveNode(child)) out.push(child.id);
-      else queue.push(child.id); // vacant slot → walk through to its reports
+      if (forbidden.has(child.id)) continue; // F7: never promote an ancestor (corrupt cycle)
+      if (isRemovedNode(child)) queue.push(child.id); // removed slot → walk through to its reports
+      else out.push(child.id);
     }
   }
   return out;
 }
 
 /**
- * The effective direct reports reached ONLY through a vacant (deleted / inactive) direct report —
- * i.e. `effectiveDirectReportIds` minus the manager's own live+active direct children. Callers that
- * already load the direct children with a Prisma `subordinates` include use this to fetch the extra
- * (promoted) rows only when there are any.
+ * The effective direct reports reached ONLY through a REMOVED direct report — `effectiveDirectReportIds`
+ * minus the manager's own non-deleted direct children. Callers that already load the direct children with
+ * a Prisma `subordinates` include use this to fetch the extra (promoted) rows only when there are any.
+ * Includes inactive promoted reports (they count toward teamSize; member LISTS filter them like before).
  */
 export function promotedReportIds(managerId: string, edges: SalesUserEdge[]): string[] {
   const direct = new Set(
-    edges.filter((e) => e.reportingToId === managerId && e.id !== managerId && isLiveActiveNode(e)).map((e) => e.id),
+    edges.filter((e) => e.reportingToId === managerId && e.id !== managerId && !isRemovedNode(e)).map((e) => e.id),
   );
   return effectiveDirectReportIds(managerId, edges).filter((id) => !direct.has(id));
+}
+
+/** `promotedReportIds` restricted to ACTIVE people — the extra member ROWS a team list shows. */
+export function promotedActiveReportIds(managerId: string, edges: SalesUserEdge[]): string[] {
+  const byId = new Map(edges.map((e) => [e.id, e]));
+  return promotedReportIds(managerId, edges).filter((id) => byId.get(id)?.isActive !== false);
 }
 
 /**
@@ -267,7 +308,7 @@ export function firstActiveApproverId(
   const start = byId.get(submitterSalesUserId);
   if (!start) return null;
 
-  const MAX_HOPS = 20;
+  const MAX_HOPS = HIERARCHY_MAX_HOPS;
   const seen = new Set<string>();
   let currentId: string | null = start.reportingToId;
   let hops = 0;

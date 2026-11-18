@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client';
-import { firstActiveApproverId } from './sales-hierarchy-access.helper';
+import { HIERARCHY_MAX_HOPS } from './sales-hierarchy-access.helper';
 
 /**
  * G3 (PLATFORM-WIDE, owner-approved 2026-11-17) — the ONE tenant reporting-tree read every hierarchy
@@ -53,24 +53,47 @@ export const DISPLAY_MANAGER_SELECT = {
 export type DisplayManager = Prisma.SalesUserGetPayload<{ select: typeof DISPLAY_MANAGER_SELECT }>;
 
 /**
- * R3 (G3) — the manager to DISPLAY for a rep: the NEXT ACTIVE manager up the chain, skipping a soft-deleted
- * or deactivated (vacant) level — the exact rule KycService.resolveInitialRouting uses to pick the approver,
- * so the name a rep sees is the person their KYCs actually go to. Never a deleted person; null only when no
- * active manager exists anywhere above (the caller then shows nothing — there is genuinely nobody).
- * Tenant-scoped; cycle-safe (firstActiveApproverId). Callers take a fast path when the direct manager is
- * already live + active, so this two-query walk runs only for a vacant slot.
+ * R3 (G3) — the manager to DISPLAY for a rep whose DIRECT manager is vacant (soft-deleted or deactivated):
+ * the next ACTIVE, non-deleted manager walking up from that vacant manager — the exact rule
+ * KycService.resolveInitialRouting uses to pick the approver, so the name a rep sees is the person their
+ * KYCs actually go to. Never a deleted person; null only when nobody active exists above.
+ *
+ * F5 (perf) — walks UP by primary-key lookups (one indexed `findFirst` per hop, bounded by
+ * HIERARCHY_MAX_HOPS, tenant-scoped, cycle-safe) instead of loading the whole tenant (~1,050 rows) per call.
+ * Chosen over a per-tenant TTL cache: no cross-instance staleness after a hierarchy edit (Cloud Run runs
+ * several instances and there is no hierarchy-write hook to invalidate on), and it costs nothing on the
+ * common path (callers take a fast path when the direct manager is already live + active). `memo` (keyed by
+ * the vacant manager's id) dedupes repeated walks inside one request (the partner "my sales team" card).
+ *
+ * @param startManagerId  the rep's vacant DIRECT manager (checked first, then upward)
  */
 export async function resolveNextActiveManager(
-  prisma: { salesUser: Pick<Prisma.TransactionClient['salesUser'], 'findMany' | 'findFirst'> },
+  prisma: { salesUser: Pick<Prisma.TransactionClient['salesUser'], 'findFirst'> },
   clientId: string,
-  salesUserId: string,
+  startManagerId: string,
+  memo?: Map<string, Promise<DisplayManager | null>>,
 ): Promise<DisplayManager | null> {
-  const nodes = await loadSalesHierarchy(prisma, clientId);
-  const managerId = firstActiveApproverId(salesUserId, nodes);
-  if (!managerId) return null;
-  const mgr = await prisma.salesUser.findFirst({
-    where: { id: managerId, clientId, deletedAt: null, isActive: true },
-    select: DISPLAY_MANAGER_SELECT,
-  });
-  return (mgr as DisplayManager | null) ?? null;
+  const hit = memo?.get(startManagerId);
+  if (hit) return hit;
+  const run = (async () => {
+    const seen = new Set<string>();
+    let cur: string | null = startManagerId;
+    for (let hops = 0; cur && hops < HIERARCHY_MAX_HOPS; hops++) {
+      if (seen.has(cur)) return null; // cycle guard
+      seen.add(cur);
+      const node = (await prisma.salesUser.findFirst({
+        where: { id: cur, clientId },
+        select: { ...DISPLAY_MANAGER_SELECT, isActive: true, deletedAt: true, reportingToId: true },
+      })) as (DisplayManager & { isActive: boolean; deletedAt: Date | null; reportingToId: string | null }) | null;
+      if (!node) return null; // dangling / foreign-tenant reference
+      if (node.isActive && node.deletedAt == null) {
+        const { isActive: _a, deletedAt: _d, reportingToId: _r, ...display } = node;
+        return display as DisplayManager;
+      }
+      cur = node.reportingToId; // vacant level → keep walking (routing's rule)
+    }
+    return null;
+  })();
+  memo?.set(startManagerId, run);
+  return run;
 }

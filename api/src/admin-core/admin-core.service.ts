@@ -658,6 +658,14 @@ export class AdminCoreService {
         });
       });
 
+      // F4 (security): a resigned rep must lose their live sessions NOW — the refresh path does not re-check
+      // status, so without this a resigned rep's token kept working for up to the session window. Same shared
+      // stamp-before-sweep helper as deleteUser / deactivate. After the commit (the helper writes outside the
+      // tx); sequential, bounded by the 200-code cap.
+      for (const uid of userIds) {
+        await this.revokeAllSessionsForUser(uid);
+      }
+
       return { resigned: salesUsers.length, notFound: employeeCodes.length - salesUsers.length };
     }
 

@@ -15,6 +15,7 @@ import {
   descendantSalesUserIds,
   effectiveDirectReportIds,
   immediateReporteeForOutlet,
+  promotedActiveReportIds,
   promotedReportIds,
   type SalesUserEdge,
 } from './sales-hierarchy-access.helper';
@@ -49,15 +50,48 @@ export const NOT_PARKED_OUTLET = {
 
 /**
  * The member-row shape of the Team / Team-view screens (a direct report OR a report promoted past a
- * vacant manager — G3). `_count.subordinates` = LIVE + ACTIVE direct reports only; the vacant-slot
- * promotions are added on top by `withPromotedReports`, so teamSize = the member's EFFECTIVE team.
+ * REMOVED manager — G3). The promotions are added on top of `_count.subordinates` by
+ * `withPromotedReports`, so teamSize = the member's EFFECTIVE team. Two counting bases, each exactly what
+ * the screen counted before (F2 — identical whenever nobody is deleted):
+ *   - /sales/team (getTeam): every NON-DELETED subordinate, active or inactive (was the unfiltered count;
+ *     a deleted subordinate is no longer a team member);
+ *   - /sales/team-view: ACTIVE non-deleted subordinates only (drives the drill-down route, unchanged).
  */
 const TEAM_MEMBER_INCLUDE = {
+  user: { select: { name: true, phone: true } },
+  hierarchyLevel: { select: { code: true, name: true, level: true } },
+  _count: { select: { subordinates: { where: { deletedAt: null } } } },
+} satisfies Prisma.SalesUserInclude;
+const TEAM_VIEW_MEMBER_INCLUDE = {
   user: { select: { name: true, phone: true } },
   hierarchyLevel: { select: { code: true, name: true, level: true } },
   _count: { select: { subordinates: { where: { isActive: true, deletedAt: null } } } },
 } satisfies Prisma.SalesUserInclude;
 type TeamMemberRow = Prisma.SalesUserGetPayload<{ include: typeof TEAM_MEMBER_INCLUDE }>;
+
+/** Re-order DB rows to match a walk order (F8 — one member order for every team / filter list). */
+function orderByIds<T extends { id: string }>(rows: T[], ids: string[]): T[] {
+  const pos = new Map(ids.map((id, i) => [id, i]));
+  return [...rows].sort((a, b) => (pos.get(a.id) ?? 0) - (pos.get(b.id) ?? 0));
+}
+
+/**
+ * F1 — the KYC submission a per-OUTLET row shows: the newest submission filed for THAT outlet
+ * (`outletId` match); a legacy submission (`outletId` null, filed before the column existed) counts as the
+ * partner's. A newer submission filed for a SIBLING outlet of the same multi-outlet owner is skipped — the
+ * row must never link to a KYC the outlet-level view check (R5) would refuse. `subs` = the partner's
+ * submissions, newest first. Back-compat: rows loaded without `outletId` behave exactly as before
+ * (`undefined` counts as legacy → the partner-latest).
+ */
+export function latestKycForOutlet<T extends { outletId?: string | null }>(outletId: string, subs: T[] | undefined): T | null {
+  for (const s of subs ?? []) {
+    if (s.outletId == null || s.outletId === outletId) return s;
+  }
+  return null;
+}
+
+/** How many of a partner's newest submissions each per-outlet list loads (F1 — bounded; a partner has a few). */
+const KYC_PER_PARTNER_WINDOW = 20;
 
 /** A Team-Member filter option on the /sales/outlets screen (direct or promoted report — G3). */
 const OUTLET_FILTER_MEMBER_SELECT = {
@@ -247,12 +281,15 @@ export class SalesService {
     if (!salesUser) return { salesUser: null, members: [] };
 
     // G3: ONE deleted-aware tenant read (loadSalesHierarchy) feeds the member list, the rollups and the
-    // branch-submitter sets, so every walk passes THROUGH a soft-deleted / deactivated manager.
+    // branch-submitter sets, so every walk passes THROUGH a soft-deleted (REMOVED) manager.
     const edges = await loadSalesHierarchy(this.prisma, user.clientId);
-    // The caller's EFFECTIVE direct reports: live direct reports + the live reports of a vacant
-    // (deleted / inactive) direct report, promoted one level up (the routing rule). The deleted SO is
-    // never a member row, and their ISRs are not orphaned out of the caller's team list.
-    const directReports = await this.withPromotedReports(salesUser.subordinates, salesUser.id, edges, user.clientId);
+    // The caller's EFFECTIVE direct reports: active direct reports + the active reports of a REMOVED
+    // direct report, promoted one level up. The deleted SO is never a member row, and their ISRs are not
+    // orphaned out of the caller's team list. F2: inactive managers are NOT walked through.
+    const directReports = await this.withPromotedReports(salesUser.subordinates, salesUser.id, edges, user.clientId, {
+      include: TEAM_MEMBER_INCLUDE,
+      countInactive: true,
+    });
 
     const rollups = await this.buildTeamRollups(
       user.clientId,
@@ -269,7 +306,9 @@ export class SalesService {
 
     const members = directReports.map((sub) => {
       const roll = rollups.get(sub.id) ?? { outlets: 0, kycDone: 0, kycPending: 0, targetValue: 0, targetPct: 0 };
-      const submitterUserIds = [...descendantSalesUserIds(sub.id, edges)]
+      // O1: includeDeleted — a KYC filed by a rep in this branch who was REMOVED afterwards still belongs to
+      // the branch (the KYC-list member filter must keep finding it).
+      const submitterUserIds = [...descendantSalesUserIds(sub.id, edges, { includeDeleted: true })]
         .map((id) => userIdBySalesUserId.get(id))
         .filter((v): v is string => !!v);
       return {
@@ -308,34 +347,39 @@ export class SalesService {
   }
 
   /**
-   * G3 — a manager's member rows = their live+active direct reports (already loaded via a
-   * `subordinates` include) PLUS the reports PROMOTED past a vacant (soft-deleted / deactivated)
-   * direct report (`promotedReportIds`), fetched with the SAME include, tenant-scoped. The extra query
-   * runs only when there is something to promote. Each row's `_count.subordinates` is widened by that
-   * member's own promotions, so teamSize (and the FE drill-down choice team-view vs outlets) reflects
-   * the member's EFFECTIVE team — a member whose only report is a deleted SO with live ISRs still
-   * drills into a team view instead of an empty outlet list.
+   * G3 — a manager's member rows = their ACTIVE non-deleted direct reports (already loaded via a
+   * `subordinates` include, filter unchanged) PLUS the ACTIVE reports PROMOTED past a REMOVED
+   * (soft-deleted) direct report (`promotedActiveReportIds`), fetched with the SAME include,
+   * tenant-scoped, only when there is something to promote. F2: an INACTIVE manager is never walked
+   * through (their team stays under them exactly as before — Deoleo-identical).
+   *
+   * Each row's `_count.subordinates` is widened by that member's own promotions on the SAME basis as the
+   * include counts (`countInactive` true → non-deleted incl. inactive, getTeam; false → active only,
+   * team-view), so teamSize equals the old value whenever nobody is deleted, and a member whose only report
+   * is a deleted SO with live ISRs still drills into a team view instead of an empty outlet list.
+   * Order (F8, shared with the outlet + visibility member filters): direct reports first as loaded, then
+   * promoted ones in walk order.
    */
   private async withPromotedReports(
     direct: TeamMemberRow[],
     managerId: string,
     edges: SalesUserEdge[],
     clientId: string,
+    opts: { include: typeof TEAM_MEMBER_INCLUDE | typeof TEAM_VIEW_MEMBER_INCLUDE; countInactive: boolean },
   ): Promise<TeamMemberRow[]> {
-    const promotedIds = promotedReportIds(managerId, edges);
+    const promotedIds = promotedActiveReportIds(managerId, edges);
     const promoted = promotedIds.length
-      ? await this.prisma.salesUser.findMany({
-          where: { id: { in: promotedIds }, clientId, deletedAt: null },
-          include: TEAM_MEMBER_INCLUDE,
-        })
+      ? ((await this.prisma.salesUser.findMany({
+          where: { id: { in: promotedIds }, clientId, deletedAt: null, isActive: true },
+          include: opts.include,
+        })) as TeamMemberRow[])
       : [];
-    const order = new Map(promotedIds.map((id, i) => [id, i]));
-    const promotedSorted = (Array.isArray(promoted) ? promoted : []).sort(
-      (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
-    );
+    const promotedSorted = orderByIds(Array.isArray(promoted) ? promoted : [], promotedIds);
+    const extra = (id: string) =>
+      (opts.countInactive ? promotedReportIds(id, edges) : promotedActiveReportIds(id, edges)).length;
     return [...direct, ...promotedSorted].map((m) => ({
       ...m,
-      _count: { subordinates: (m._count?.subordinates ?? 0) + promotedReportIds(m.id, edges).length },
+      _count: { subordinates: (m._count?.subordinates ?? 0) + extra(m.id) },
     }));
   }
 
@@ -426,8 +470,8 @@ export class SalesService {
               select: {
                 kycSubmissions: {
                   orderBy: { createdAt: 'desc' },
-                  take: 1,
-                  select: { status: true },
+                  take: KYC_PER_PARTNER_WINDOW, // F1: the outlet own latest (latestKycForOutlet)
+                  select: { status: true, outletId: true },
                 },
               },
             },
@@ -458,7 +502,7 @@ export class SalesService {
     const outletsByUser = new Map<string, OutletInfo[]>();
     for (const a of assignments) {
       if (!a.outlet) continue;
-      const status = a.outlet.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED';
+      const status = latestKycForOutlet(a.outlet.id, a.outlet.partner?.kycSubmissions)?.status ?? 'NOT_STARTED';
       const arr = outletsByUser.get(a.salesUserId) ?? [];
       arr.push({
         id: a.outlet.id,
@@ -536,7 +580,8 @@ export class SalesService {
     user: JwtPayload,
     opts: { memberId?: string; outletType?: string; program?: string; kpi?: string } = {},
   ) {
-    if (opts.memberId) await this.assertCanViewMember(user, opts.memberId);
+    // F5: the guard's tenant hierarchy read is REUSED by buildOutletScope below (one load per request).
+    const guardEdges = opts.memberId ? await this.assertCanViewMember(user, opts.memberId) : undefined;
 
     const root = await this.prisma.salesUser.findFirst({
       where: opts.memberId
@@ -547,11 +592,11 @@ export class SalesService {
         hierarchyLevel: { select: { code: true, name: true, level: true } },
         subordinates: {
           where: { isActive: true, deletedAt: null },
-          // ACTIVE direct-report count only (TEAM_MEMBER_INCLUDE) — this drives the FE drill-down
+          // ACTIVE direct-report count only (TEAM_VIEW_MEMBER_INCLUDE) — this drives the FE drill-down
           // route (teamSize>0 → team view, else → outlets). An unfiltered count would still show
           // teamSize=1 for a manager whose only subordinate is soft-deleted and route to an empty
-          // team view. G3: withPromotedReports adds the live reports BELOW such a vacant slot.
-          include: TEAM_MEMBER_INCLUDE,
+          // team view. G3: withPromotedReports adds the active reports BELOW a REMOVED slot.
+          include: TEAM_VIEW_MEMBER_INCLUDE,
         },
       },
     });
@@ -632,9 +677,13 @@ export class SalesService {
     // Shared scope: tenant edges + the root's subtree outlets (deduped, typed, KYC-tagged).
     // The SAME builder feeds getTradeComparison, so the two screens never drift on scoping.
     const { edges, rootSubtree, outletsByUser, typeSet, programSet } =
-      await this.buildOutletScope(user.clientId, root.id);
-    // G3: effective direct reports — a vacant (deleted / inactive) direct report is replaced by its live reports.
-    const directReports = await this.withPromotedReports(root.subordinates, root.id, edges, user.clientId);
+      await this.buildOutletScope(user.clientId, root.id, guardEdges);
+    // G3: effective direct reports — a REMOVED direct report is replaced by its active reports (F2: an
+    // inactive one is not walked through). teamSize keeps the ACTIVE-only basis (drill-down route).
+    const directReports = await this.withPromotedReports(root.subordinates, root.id, edges, user.clientId, {
+      include: TEAM_VIEW_MEMBER_INCLUDE,
+      countInactive: false,
+    });
     const memberSubtrees = new Map<string, Set<string>>(
       directReports.map((m) => [m.id, descendantSalesUserIds(m.id, edges)]),
     );
@@ -909,6 +958,8 @@ export class SalesService {
   private async buildOutletScope(
     clientId: string,
     rootId: string,
+    // F5: the request's hierarchy, when the caller already loaded it (assertCanViewMember) — no second read.
+    preloadedEdges?: SalesHierarchyNode[],
   ): Promise<{
     edges: SalesHierarchyNode[];
     rootSubtree: Set<string>;
@@ -917,7 +968,7 @@ export class SalesService {
     programSet: Set<string>;
   }> {
     // G3: deleted-aware edges → the subtree walks THROUGH a soft-deleted manager (never returns them).
-    const edges = await loadSalesHierarchy(this.prisma, clientId);
+    const edges = preloadedEdges ?? (await loadSalesHierarchy(this.prisma, clientId));
     const rootSubtree = descendantSalesUserIds(rootId, edges);
 
     // One assignment batch over the root subtree, with each outlet's type + program + latest KYC.
@@ -943,7 +994,14 @@ export class SalesService {
             programCategory: true,
             outletType: { select: { code: true, name: true } },
             partner: {
-              select: { kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true } } },
+              // F1: the outlet's OWN latest submission (latestKycForOutlet), not a sibling outlet's.
+              select: {
+                kycSubmissions: {
+                  orderBy: { createdAt: 'desc' },
+                  take: KYC_PER_PARTNER_WINDOW,
+                  select: { status: true, outletId: true },
+                },
+              },
             },
           },
         },
@@ -963,7 +1021,7 @@ export class SalesService {
         typeName: o.outletType?.name ?? o.outletType?.code ?? '',
         program: o.programName ?? '',
         subProgram: o.programCategory ?? '',
-        status: o.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED',
+        status: latestKycForOutlet(o.id, o.partner?.kycSubmissions)?.status ?? 'NOT_STARTED',
         isActive: !!o.isActive,
       };
       if (info.typeCode) typeSet.set(info.typeCode, info.typeName);
@@ -1002,7 +1060,8 @@ export class SalesService {
     user: JwtPayload,
     opts: { memberId?: string; outletType?: string; program?: string; kpi?: string } = {},
   ) {
-    if (opts.memberId) await this.assertCanViewMember(user, opts.memberId);
+    // F5: reuse the guard's hierarchy read in buildOutletScope (one load per request).
+    const guardEdges = opts.memberId ? await this.assertCanViewMember(user, opts.memberId) : undefined;
 
     const root = await this.prisma.salesUser.findFirst({
       where: opts.memberId
@@ -1070,7 +1129,7 @@ export class SalesService {
       };
     }
 
-    const { rootSubtree, outletsByUser } = await this.buildOutletScope(user.clientId, root.id);
+    const { rootSubtree, outletsByUser } = await this.buildOutletScope(user.clientId, root.id, guardEdges);
     const passes = (o: OutletScopeInfo) =>
       (!typeF || o.typeCode === typeF) && (!progF || o.program === progF);
     // Out-of-scope (outlet, selected KPI) values are excluded (same rule as team-view); unscoped → undefined.
@@ -1258,8 +1317,8 @@ export class SalesService {
                     id: true,
                     kycSubmissions: {
                       orderBy: { createdAt: 'desc' },
-                      take: 1,
-                      select: { id: true, status: true },
+                      take: KYC_PER_PARTNER_WINDOW, // F1: the outlet own latest (latestKycForOutlet)
+                      select: { id: true, status: true, outletId: true },
                     },
                   },
                 },
@@ -1282,7 +1341,7 @@ export class SalesService {
 
     // A partner-less outlet has no KYC submission → NOT_STARTED (pending action).
     const latestStatusOf = (a: (typeof outletAssignments)[number]): string =>
-      a.outlet!.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED';
+      latestKycForOutlet(a.outlet!.id, a.outlet!.partner?.kycSubmissions)?.status ?? 'NOT_STARTED';
 
     const kycDone = outletAssignments.filter((a) => latestStatusOf(a) === 'APPROVED').length;
 
@@ -1299,7 +1358,7 @@ export class SalesService {
     const outlets = outletAssignments.map((a) => {
       const outlet = a.outlet!;
       const partner = outlet.partner; // null until the outlet is KYC'd
-      const latestKyc = partner?.kycSubmissions[0] ?? null;
+      const latestKyc = latestKycForOutlet(outlet.id, partner?.kycSubmissions); // F1
       return {
         id: outlet.id,
         partnerId: partner?.id ?? null,
@@ -1389,19 +1448,18 @@ export class SalesService {
     // caller (promoted one level, exactly as the Team screen lists them) rather than rolled into some
     // other member — there is no live person to roll them up into, and the filter must offer the same
     // people the Team screen shows. Fetched only when a vacant slot exists.
-    const promotedIds = promotedReportIds(salesUser.id, edges);
+    // F2: only a REMOVED (deleted) report is walked through; promoted members are ACTIVE (same filter as
+    // the direct `subordinates` list). F8: direct first, then promoted in walk order (= Team screen).
+    const promotedIds = promotedActiveReportIds(salesUser.id, edges);
     const promoted = promotedIds.length
       ? await this.prisma.salesUser.findMany({
-          where: { id: { in: promotedIds }, clientId: user.clientId, deletedAt: null },
+          where: { id: { in: promotedIds }, clientId: user.clientId, deletedAt: null, isActive: true },
           select: OUTLET_FILTER_MEMBER_SELECT,
         })
       : [];
-    const promotedOrder = new Map(promotedIds.map((id, i) => [id, i]));
     const directMembers = [
       ...(salesUser.subordinates ?? []),
-      ...(Array.isArray(promoted) ? promoted : []).sort(
-        (a, b) => (promotedOrder.get(a.id) ?? 0) - (promotedOrder.get(b.id) ?? 0),
-      ),
+      ...orderByIds(Array.isArray(promoted) ? promoted : [], promotedIds),
     ];
 
     // Team-member filter options: each DIRECT report enriched with the login-User ids
@@ -2432,8 +2490,10 @@ export class SalesService {
                 wallets: { select: { redeemablePoints: true } },
                 kycSubmissions: {
                   orderBy: { createdAt: 'desc' },
-                  take: 1,
-                  select: { id: true, status: true, createdAt: true, rejectionReason: true },
+                  // F1: a window of the partner newest submissions; the row shows the one filed for THIS
+                  // outlet (latestKycForOutlet) — never a sibling outlet KYC the R5 view check would refuse.
+                  take: KYC_PER_PARTNER_WINDOW,
+                  select: { id: true, status: true, createdAt: true, rejectionReason: true, outletId: true },
                 },
                 // G1: whether the partner EVER had an APPROVED KYC (a later rejected re-KYC leaves the latest
                 // status REJECTED) — drives `notInterestedBlock` so the FE hides "Not interested" exactly where
@@ -2498,7 +2558,7 @@ export class SalesService {
         .map((a) => {
           const outlet = a.outlet!;
           const partner = outlet.partner; // null until the outlet is KYC'd
-          const latestKyc = partner?.kycSubmissions[0] ?? null;
+          const latestKyc = latestKycForOutlet(outlet.id, partner?.kycSubmissions); // F1: THIS outlet
           // Re-entry statuses: the rep re-opens the SAME outlet's KYC wizard
           // pre-filled. Only build existingKyc for these (else null). DRAFT = an
           // un-confirmed KYC (saved at submit, awaiting the outlet-owner OTP) — the rep
@@ -2641,11 +2701,12 @@ export class SalesService {
             // G1: why "Not interested" is NOT available for this outlet (null = it is). Mirrors the server
             // refusal in KycService.notInterested: an APPROVED KYC on the partner (ever) wins over a KYC in
             // flight (the latest submission — the in-flight dup guard means an in-flight one is the newest).
-            // PARKED outlets never reach this list (NOT_PARKED_OUTLET above).
+            // PARKED outlets never reach this list (NOT_PARKED_OUTLET above). The server checks in-flight at
+            // PARTNER level, so this reads the partner's NEWEST submission (not the per-outlet `latestKyc`, F1).
             notInterestedBlock:
               (partner?._count?.kycSubmissions ?? 0) > 0
                 ? ('APPROVED' as const)
-                : latestKyc && NOT_INTERESTED_IN_FLIGHT_STATUSES.has(latestKyc.status)
+                : partner?.kycSubmissions?.[0] && NOT_INTERESTED_IN_FLIGHT_STATUSES.has(partner.kycSubmissions[0].status)
                   ? ('IN_REVIEW' as const)
                   : null,
             kycSubmittedAt: latestKyc?.createdAt ? istDateKey(latestKyc.createdAt) : undefined,

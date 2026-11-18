@@ -39,7 +39,7 @@ import { pickDeliveryDefaults, DeliveryDefaults } from './delivery-defaults.help
 import { PRIMARY_OUTLET_ORDER_BY, partnerOutletsWhere, pickPrimaryOutletName } from './partner-display.helper';
 import { AppliesToOutletFacets } from '../common/applies-to/applies-to';
 import { kpiAppliesToOutlet, outletPrimaryFallback } from '../sales/outlet-kpi-scope.helper';
-import { resolveNextActiveManager } from '../sales/sales-hierarchy.loader';
+import { resolveNextActiveManager, type DisplayManager } from '../sales/sales-hierarchy.loader';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -737,6 +737,9 @@ export class PartnerService {
         tier,
       });
     };
+    // F5: one walk per distinct vacant manager per request (memo), each a bounded id-lookup walk — never a
+    // full-tenant hierarchy load per assignment.
+    const nextActiveMemo = new Map<string, Promise<DisplayManager | null>>();
     for (const a of assignments) {
       add(a.salesUser, 0);
       const mgr = a.salesUser?.reportingTo;
@@ -750,7 +753,7 @@ export class PartnerService {
         // (or, defensively, foreign) → show the NEXT ACTIVE manager up the chain — the person this rep's KYCs
         // are routed to (resolveInitialRouting's rule) — instead of nobody. Tenant-scoped walk; never a
         // deleted person. Runs only for a vacant slot (the common case takes the branch above).
-        const next = await resolveNextActiveManager(this.prisma, user.clientId, a.salesUser.id);
+        const next = await resolveNextActiveManager(this.prisma, user.clientId, mgr.id, nextActiveMemo);
         if (next) add(next, 1);
       }
     }
