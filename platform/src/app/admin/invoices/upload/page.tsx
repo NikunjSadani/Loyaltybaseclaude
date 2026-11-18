@@ -27,6 +27,7 @@ import {
   Info,
 } from 'lucide-react';
 import { formatPeriodLabel } from '@/lib/invoice';
+import { GstReleaseWarnings, type GenerateWarning } from '@/components/invoices/gst-release-warnings';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface SkippedOutlet {
@@ -36,6 +37,8 @@ interface SkippedOutlet {
 interface GenerateResult {
   generated: number;
   skipped: SkippedOutlet[];
+  /** B-M3: released GST that no longer matches a regenerated invoice (shown loudly). */
+  warnings?: GenerateWarning[];
   message?: string;
 }
 
@@ -72,6 +75,7 @@ export default function InvoiceUploadPage() {
       setResult({
         generated: json.data?.generated ?? 0,
         skipped: json.data?.skipped ?? [],
+        warnings: json.data?.warnings ?? [],
       });
     } catch (err) {
       setGenError(err instanceof Error ? err.message : 'Generation failed');
@@ -162,6 +166,7 @@ export default function InvoiceUploadPage() {
             </p>
           </div>
 
+          <GstReleaseWarnings warnings={result.warnings} />
           {result.skipped.length > 0 && (
             <div className="w-full bg-amber-50 border border-amber-200 rounded-lg p-3 text-left">
               <p className="text-[11px] font-semibold text-amber-700 mb-1">

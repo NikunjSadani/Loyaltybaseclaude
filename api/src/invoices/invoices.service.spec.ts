@@ -312,7 +312,12 @@ const mockPrisma = {
     updateMany: jest.fn(),
   },
   // generateForPeriod ensures a HELD reimbursement (create + refresh self-heal); default: none exists.
-  gstReimbursement: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() },
+  gstReimbursement: {
+    findUnique: jest.fn().mockResolvedValue(null),
+    create: jest.fn(),
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+  },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -620,6 +625,62 @@ describe('InvoicesService', () => {
       await service.generateForPeriod(admin, { period: '2025-01' });
 
       expect(mockPrisma.gstReimbursement.create).not.toHaveBeenCalled();
+    });
+
+    describe('B-M3: a regenerate that changes the GST reconciles the HELD reimbursement (never leaves it stale)', () => {
+      const refreshWith = (outlet: unknown, reimb: unknown) => {
+        mockPrisma.autoInvoice.count.mockResolvedValue(1);
+        mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([{ outletId: 'O1', amountPaise: 500000n }]);
+        mockPrisma.outlet.findMany.mockResolvedValue([outlet]);
+        const p2002 = new Prisma.PrismaClientKnownRequestError('x', { code: 'P2002', clientVersion: '5.0.0' });
+        mockPrisma.autoInvoice.create.mockRejectedValue(p2002);
+        mockPrisma.autoInvoice.findFirst.mockResolvedValue({ id: 'inv1' });
+        mockPrisma.autoInvoice.updateMany.mockResolvedValue({ count: 1 });
+        mockPrisma.gstReimbursement.findUnique.mockResolvedValue(reimb);
+      };
+      const unregistered = { ...kycApprovedWBOutlet, partner: { ...kycApprovedWBOutlet.partner, gstRegistrationType: 'UNREGISTERED', gstNumber: null } };
+
+      it('HELD + a LOWER GST base → the held amount is updated to the invoice GST (guarded on HELD)', async () => {
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'HELD', gstPaise: 999_999n });
+        const res = await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.updateMany).toHaveBeenCalledTimes(1);
+        const call = mockPrisma.gstReimbursement.updateMany.mock.calls[0][0];
+        expect(call.where).toEqual({ id: 'gr1', status: 'HELD' });
+        expect(call.data.gstPaise).not.toBe(999_999n);
+        expect(Number(call.data.gstPaise)).toBeGreaterThan(0);
+        expect(mockPrisma.gstReimbursement.create).not.toHaveBeenCalled();
+        expect(res.warnings).toEqual([]);
+      });
+
+      it('HELD + the invoice no longer has GST → the HELD row is removed (nothing to hold back)', async () => {
+        refreshWith(unregistered, { id: 'gr1', status: 'HELD', gstPaise: 90_000n });
+        await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.deleteMany).toHaveBeenCalledWith({ where: { id: 'gr1', status: 'HELD' } });
+        expect(mockPrisma.gstReimbursement.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('HELD + the same GST → untouched', async () => {
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'HELD', gstPaise: 90_000n });
+        await service.generateForPeriod(admin, { period: '2025-01' });
+        const newGst = mockPrisma.autoInvoice.updateMany.mock.calls[0][0].data.gstPaise as bigint;
+        mockPrisma.gstReimbursement.updateMany.mockClear();
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'HELD', gstPaise: newGst });
+        await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.updateMany).not.toHaveBeenCalled();
+        expect(mockPrisma.gstReimbursement.deleteMany).not.toHaveBeenCalled();
+      });
+
+      it('already RELEASED with a different amount → NOT changed, flagged LOUDLY in the result', async () => {
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'RELEASED', gstPaise: 999_999n });
+        const res = await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.updateMany).not.toHaveBeenCalled();
+        expect(mockPrisma.gstReimbursement.deleteMany).not.toHaveBeenCalled();
+        expect(res.warnings).toHaveLength(1);
+        expect(res.warnings[0].outletCode).toBe('O1');
+        expect(res.warnings[0].reason).toMatch(/already released/i);
+        expect(res.warnings[0].reason).toContain('₹9,999.99');
+      });
     });
 
     it('does NOT mutate a PAID (finalized) invoice on re-run — guarded updateMany skips it', async () => {

@@ -40,6 +40,7 @@ import { api, authHeader } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
 import { formatPeriodLabel } from '@/lib/invoice';
 import { useAdminSession } from '@/lib/admin-session';
+import { GstReleaseWarnings, type GenerateWarning } from '@/components/invoices/gst-release-warnings';
 
 /** Trigger a browser download of an xlsx blob from a backend endpoint. */
 async function downloadXlsx(url: string, fallbackName: string): Promise<string | null> {
@@ -115,6 +116,8 @@ interface SkippedOutlet {
 interface GenerateResult {
   generated: number;
   skipped: SkippedOutlet[];
+  /** B-M3: released GST that no longer matches a regenerated invoice (shown loudly). */
+  warnings?: GenerateWarning[];
 }
 
 // ── Display row ───────────────────────────────────────────────────────────────
@@ -422,6 +425,7 @@ export default function AdminInvoiceListPage() {
                 <CheckCircle className="w-3.5 h-3.5 inline mr-1" />
                 {generateResult.generated} invoice{generateResult.generated !== 1 ? 's' : ''} generated
               </p>
+              <GstReleaseWarnings warnings={generateResult.warnings} />
               {generateResult.skipped.length > 0 && (
                 <div>
                   <p className="text-[11px] font-semibold text-amber-700 mb-1">
