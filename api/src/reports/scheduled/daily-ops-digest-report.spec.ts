@@ -26,10 +26,11 @@ function quietTenant(clientId: string, name: string): TenantDigest {
       fieldFastTrackedExcluded: 0,
     }),
     points: ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 0 }),
-    redemptions: ok({ requested: 0, completed: 0, failed: 0, failedRows: [] }),
+    redemptions: ok({ requested: 0, completed: 0, failed: 0, failedNotRefunded: 0, failedRows: [] }),
     payouts: ok({
       batchesConfirmed: 0,
       batchPoints: 0,
+      batchOutlets: 0,
       batchPayoutPaise: 0n,
       creditPaid: 0,
       creditPaidPaise: 0n,
@@ -38,6 +39,9 @@ function quietTenant(clientId: string, name: string): TenantDigest {
       failedOrReturned: 0,
       awaitingUtr: 0,
       awaitingUtrPaise: 0n,
+      openFailedCredit: 0,
+      openFailedCreditPaise: 0n,
+      openFailedRedemption: 0,
     }),
     messages: ok({ otpFailed: 0, smsFailed: 0, whatsappFailed: 0, broadcastFailed: 0 }),
   };
@@ -62,6 +66,7 @@ function busyTenant(): TenantDigest {
       requested: 37,
       completed: 29,
       failed: 3,
+      failedNotRefunded: 0,
       failedRows: [
         { outlet: 'Shree Ganesh Traders (BJ-10421)', reward: 'Amazon Pay Voucher ₹500', reason: 'Hubble: insufficient balance' },
         { outlet: 'Maa Durga General Store (BJ-22870)', reward: 'Amazon Pay Voucher ₹1,000', reason: 'Hubble: product unavailable' },
@@ -72,6 +77,7 @@ function busyTenant(): TenantDigest {
     payouts: ok({
       batchesConfirmed: 2,
       batchPoints: 184250,
+      batchOutlets: 412,
       batchPayoutPaise: 1_25_000_00n,
       creditPaid: 412,
       creditPaidPaise: 8_43_500_00n,
@@ -80,12 +86,16 @@ function busyTenant(): TenantDigest {
       failedOrReturned: 3,
       awaitingUtr: 120,
       awaitingUtrPaise: 2_40_000_00n,
+      openFailedCredit: 4,
+      openFailedCreditPaise: 8_000_00n,
+      openFailedRedemption: 0,
     }),
     messages: ok({ otpFailed: 5, smsFailed: 0, whatsappFailed: 3, broadcastFailed: 0 }),
     visibility: ok({ submitted: 140, approved: 118, rejected: 9, pending: 63 }),
     salesImport: ok({
       processed: 1,
       failed: 0,
+      failedOpen: 0,
       openMonths: [
         { month: '2026-11', lastAppliedAtMs: ist(2026, 11, 12, 18, 5), targetsChangedSinceApply: true },
         { month: '2026-10', lastAppliedAtMs: ist(2026, 11, 3, 11, 0), targetsChangedSinceApply: false },
@@ -106,7 +116,9 @@ function busyTenant(): TenantDigest {
 
 /** Gifsy-wide voucher dispersal with problems. */
 const busyDispersal = () =>
-  ok({ bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1 });
+  ok({ bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 3, messageFailedOpen: 4 });
+const zeroDispersal = () =>
+  ok({ bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0 });
 
 const NOW = ist(2026, 11, 13); // Fri 13 Nov 2026, 09:30 IST
 
@@ -166,6 +178,21 @@ describe('kycPendingBuckets (reuses the two-stage business-hours SLA)', () => {
     const { field, gifsy } = kycPendingBuckets(rows, targets, new Set(), now);
     expect(field).toEqual({ pending: 3, within: 1, nearing: 1, breached: 1 });
     expect(gifsy).toEqual({ pending: 1, within: 1, nearing: 0, breached: 0 });
+  });
+
+  it('compares UNROUNDED business hours (dashboard rule): 24 h 20 min against a 24 h target is breached', () => {
+    // Fri 18:00 − 24h20m of business time = Thu 17:40 (Thu+Fri are business days).
+    const rows = [{ status: 'SUBMITTED', submittedAt: new Date(now - (24 * 60 + 20) * 60 * 1000) }];
+    // Math.round(24.33) = 24 would have read "not breached" (24 > 24 is false) — the dashboard says breached.
+    expect(kycPendingBuckets(rows, targets, new Set(), now).field).toEqual({ pending: 1, within: 0, nearing: 0, breached: 1 });
+    // Exactly at the target is still within (age ≤ target), counted as nearing.
+    const atTarget = [{ status: 'SUBMITTED', submittedAt: new Date(now - 24 * HOUR) }];
+    expect(kycPendingBuckets(atTarget, targets, new Set(), now).field).toEqual({ pending: 1, within: 0, nearing: 1, breached: 0 });
+  });
+
+  it('a PENDING_GIFSY row with no Gifsy history ages from submittedAt, else createdAt (dashboard fallback)', () => {
+    const rows = [{ status: 'PENDING_GIFSY', submittedAt: null, createdAt: new Date(ist(2026, 11, 2, 9, 0)), statusHistory: [] }];
+    expect(kycPendingBuckets(rows, targets, new Set(), now).gifsy.breached).toBe(1);
   });
 
   it('holidays pause the clock (a holiday-spanning field row is not breached)', () => {
@@ -231,12 +258,33 @@ describe('needsAttention', () => {
       '2 KYCs breaching the Gifsy SLA',
       '12 KYCs breaching the field SLA',
       '5 negative wallets',
-      '3 redemptions failed',
-      'Hubble: 2 vouchers failed',
+      '3 redemptions failed (2 via Hubble)',
       'Hubble: 1 voucher stuck in processing > 30 min',
-      '3 payouts failed or returned',
+      '3 payouts failed or returned in the window',
+      'Still open: 4 credit payouts (₹8,000) awaiting re-bank or reversal',
       '8 messages failed delivery',
       'Targets changed — recalculate November 2026',
+    ]);
+  });
+
+  it('Hubble failures are NOT listed twice: they ride the redemption bullet; alone only if Redemptions failed to load', () => {
+    const t = quietTenant('x', 'X');
+    t.redemptions = ok({ requested: 2, completed: 0, failed: 2, failedNotRefunded: 0, failedRows: [] });
+    t.vouchers = ok({ issued: 0, failed: 2, stuckProcessing: 0, needsReconcile: 0 });
+    expect(needsAttention(t)).toEqual(['2 redemptions failed (2 via Hubble)']);
+    t.redemptions = { ok: false, error: 'boom' };
+    expect(needsAttention(t)).toEqual(["Couldn't load the Redemptions section", 'Hubble: 2 vouchers failed']);
+  });
+
+  it('standing "still open" items count even with no window activity', () => {
+    const t = quietTenant('x', 'X');
+    t.redemptions = ok({ requested: 0, completed: 0, failed: 0, failedNotRefunded: 1, failedRows: [] });
+    if (t.payouts.ok) t.payouts.data.openFailedRedemption = 2;
+    t.salesImport = ok({ processed: 0, failed: 0, failedOpen: 1, openMonths: [] });
+    expect(needsAttention(t)).toEqual([
+      "Still open: 1 failed redemption still holds the outlet's points (not refunded)",
+      'Still open: 2 redemption payouts failed without a refund',
+      'Still open: 1 failed Sales Import not yet replaced by a successful upload',
     ]);
   });
 
@@ -249,7 +297,7 @@ describe('needsAttention', () => {
   it('sales-import failures and Hubble reconcile flags count', () => {
     const t = quietTenant('x', 'X');
     t.vouchers = ok({ issued: 0, failed: 0, stuckProcessing: 0, needsReconcile: 2 });
-    t.salesImport = ok({ processed: 0, failed: 1, openMonths: [] });
+    t.salesImport = ok({ processed: 0, failed: 1, failedOpen: 0, openMonths: [] });
     expect(needsAttention(t)).toEqual(['Hubble: 2 orders need reconcile', 'Sales Import: 1 import failed']);
   });
 
@@ -267,14 +315,36 @@ describe('needsAttention', () => {
 describe('gifsyWideAttention (voucher dispersal)', () => {
   it('nothing when absent or clean', () => {
     expect(gifsyWideAttention({})).toEqual([]);
-    expect(gifsyWideAttention({ voucherDispersal: ok({ bought: 9, buyFailed: 0, messageFailed: 0, pending: 3, pendingRetryable: 0 }) })).toEqual([]);
+    expect(
+      gifsyWideAttention({
+        voucherDispersal: ok({ bought: 9, buyFailed: 0, messageFailed: 0, pending: 3, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0 }),
+      }),
+    ).toEqual([]);
   });
 
   it('failed purchases, failed WhatsApps and pending > 2 h are called out', () => {
     expect(gifsyWideAttention({ voucherDispersal: busyDispersal() })).toEqual([
-      'Voucher dispersal: 2 purchases failed',
-      'Voucher dispersal: 4 WhatsApp messages failed',
+      'Voucher dispersal: 2 purchases failed in the window; 3 still failed (not retried)',
+      'Voucher dispersal: 4 WhatsApp messages failed in the window; 4 still failed (not resent)',
       'Voucher dispersal: 1 purchase unconfirmed by Hubble for over 2 h (Retry available)',
+    ]);
+  });
+
+  it('standing dispersal failures count even with nothing new in the window', () => {
+    const d = ok({ bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 2, messageFailedOpen: 0 });
+    expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
+      'Voucher dispersal: 0 purchases failed in the window; 2 still failed (not retried)',
+    ]);
+  });
+
+  it('Gifsy-wide OTP failures: pre-login + Gifsy staff, or the load failure; run notices first', () => {
+    expect(gifsyWideAttention({ gifsyOtpFailed: ok({ preLogin: 4, gifsyStaff: 1 }) })).toEqual([
+      '4 OTPs failed delivery before login (no tenant known)',
+      '1 OTP to Gifsy staff failed delivery',
+    ]);
+    expect(gifsyWideAttention({ gifsyOtpFailed: { ok: false, error: 'x' }, runNotices: ['N1'] })).toEqual([
+      'N1',
+      "Couldn't load the Gifsy-wide OTP failures (x)",
     ]);
   });
 
@@ -286,9 +356,9 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
 });
 
 describe('buildDailyOpsDigest', () => {
-  it('subject carries the date and the number of tenants needing attention', () => {
+  it('subject: [Gifsy] prefix, the date and EVERY attention item (tenants + Gifsy-wide)', () => {
     const r = buildDailyOpsDigest(input([busyTenant(), quietTenant('deoleo', 'Deoleo')]));
-    expect(r.subject).toBe('Gifsy daily operations — 13 Nov 2026 — 1 need attention');
+    expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — 9 items need attention (1 tenant)');
     expect(r.key).toBe('dailyDigest');
     expect(r.tenantsNeedingAttention).toBe(1);
     expect(r.attentionItems).toBe(9);
@@ -296,9 +366,66 @@ describe('buildDailyOpsDigest', () => {
 
   it('all quiet → still a full email that says so', () => {
     const r = buildDailyOpsDigest(input([quietTenant('deoleo', 'Deoleo')]));
-    expect(r.subject).toBe('Gifsy daily operations — 13 Nov 2026 — 0 need attention');
-    expect(r.html).toContain('All quiet — no tenant needs attention.');
+    expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — all quiet');
+    expect(r.html).toContain('All quiet — nothing needs attention.');
     expect(r.html).toContain('All quiet — nothing to report.');
+  });
+
+  it('subject never says "all quiet"/0 while a red OTP problem is in the body', () => {
+    const r = buildDailyOpsDigest(input([quietTenant('d', 'D')], { gifsyOtpFailed: ok({ preLogin: 2, gifsyStaff: 0 }) }));
+    expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — 1 item needs attention (Gifsy-wide)');
+    expect(r.attentionItems).toBe(1);
+    const failed = buildDailyOpsDigest(input([quietTenant('d', 'D')], { gifsyOtpFailed: { ok: false, error: 'boom' } }));
+    expect(failed.subject).toContain('1 item needs attention');
+    expect(failed.html).not.toContain('All quiet — nothing needs attention.');
+  });
+
+  it('run notices: red "incomplete" box at the top, attention items, INCOMPLETE in the subject', () => {
+    const r = buildDailyOpsDigest(input([quietTenant('d', 'D')], { runNotices: ["Couldn't load the tenant list (x)"] }));
+    expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — INCOMPLETE — 1 item needs attention (Gifsy-wide)');
+    expect(r.html).toContain('data-run-notices="1"');
+    expect(r.html).toContain('This digest is incomplete');
+    expect(r.html.indexOf('This digest is incomplete')).toBeLessThan(r.html.indexOf('All tenants'));
+  });
+
+  it('non-ACTIVE tenants: shown (marked) with activity / open items, otherwise NAMED as not shown', () => {
+    const busyOnboarding = { ...quietTenant('o', 'Onb Co'), status: 'ONBOARDING' as const };
+    busyOnboarding.points = ok({ credited: 10, redeemed: 0, expired: 0, negativeWallets: 0 });
+    const quietInactive = { ...quietTenant('i', 'Old Co'), status: 'INACTIVE' as const };
+    // Billing progress alone (always rendered for Sales-Import tenants) is not "activity".
+    quietInactive.billing = ok({ month: '2026-11', kpiLabel: null, asOf: null, withTarget: 0, notStarted: 0, noTarget: 0, notCovered: 0, targetsOutsideRoster: 0 });
+    const r = buildDailyOpsDigest(input([quietTenant('a', 'Active Co'), busyOnboarding, quietInactive]));
+    expect(r.html).toContain('data-tenant="o"');
+    expect(r.html).toContain('>ONBOARDING<');
+    expect(r.html).toContain('Onb Co (ONBOARDING)');
+    expect(r.html).not.toContain('data-tenant="i"');
+    expect(r.html).toContain('Not shown (not ACTIVE, no activity and no open items): Old Co (INACTIVE).');
+    expect(r.hiddenTenants).toBe(1);
+    expect(r.html).toContain('data-tenant="a"'); // ACTIVE tenants always shown
+  });
+
+  it('dropped (non-internal) recipients are named in the footer', () => {
+    const r = buildDailyOpsDigest(input([quietTenant('d', 'D')], { droppedRecipients: ['cfo@acme.com'] }));
+    expect(r.html).toContain('Not sent to cfo@acme.com — not an internal address');
+  });
+
+  it('window notes ride the intro line', () => {
+    const r = buildDailyOpsDigest(input([quietTenant('d', 'D')], { windowNotes: ['(manual re-run)'] }));
+    expect(r.html).toContain('Window: Thu 12 Nov, 09:30 → Fri 13 Nov, 09:30 IST — (manual re-run)');
+  });
+
+  it('vouchers show live problems for a tenant with Hubble switched off, labelled so', () => {
+    const t = { ...quietTenant('x', 'X'), hubbleEnabled: false };
+    t.vouchers = ok({ issued: 0, failed: 0, stuckProcessing: 1, needsReconcile: 0 });
+    const html = buildDailyOpsDigest(input([t])).html;
+    expect(html).toContain('data-section="Vouchers (Hubble) — integration switched off"');
+    expect(needsAttention(t)).toEqual(['Hubble: 1 voucher stuck in processing > 30 min']);
+  });
+
+  it('payouts: the batches line shows outlets (old Credits email figure) and a still-open line', () => {
+    const html = buildDailyOpsDigest(input([busyTenant()])).html;
+    expect(html).toContain('outlets <strong style="color:#111827;">412</strong>');
+    expect(html).toContain('credit failed (re-bank / reverse)');
   });
 
   it('a quiet tenant renders as just its name + one line (every section hidden)', () => {
@@ -321,7 +448,7 @@ describe('buildDailyOpsDigest', () => {
   it('orders tenants by needs-attention desc, then name', () => {
     const a = quietTenant('a', 'Alpha');
     const z = quietTenant('z', 'Zulu');
-    z.redemptions = ok({ requested: 1, completed: 0, failed: 1, failedRows: [] });
+    z.redemptions = ok({ requested: 1, completed: 0, failed: 1, failedNotRefunded: 0, failedRows: [] });
     const m = quietTenant('m', 'Mike');
     const html = buildDailyOpsDigest(input([a, m, z])).html;
     const pos = (id: string) => html.indexOf(`data-tenant="${id}"`);
@@ -350,7 +477,7 @@ describe('buildDailyOpsDigest', () => {
     expect(html).toContain('data-section="Payouts"');
   });
 
-  it('gates Hubble / Visibility / Sales Import on their presence', () => {
+  it('hides empty Hubble / Visibility / Sales Import, shows them when present', () => {
     const quiet = buildDailyOpsDigest(input([quietTenant('deoleo', 'Deoleo')])).html;
     expect(quiet).not.toContain('Vouchers (Hubble)');
     expect(quiet).not.toContain('data-section="Visibility"');
@@ -365,40 +492,40 @@ describe('buildDailyOpsDigest', () => {
   it('lists failed redemptions and caps the rows at 10', () => {
     const t = quietTenant('x', 'X');
     const rows = Array.from({ length: 14 }, (_, i) => ({ outlet: `Outlet ${i}`, reward: 'R', reason: 'why' }));
-    t.redemptions = ok({ requested: 14, completed: 0, failed: 14, failedRows: rows });
+    t.redemptions = ok({ requested: 14, completed: 0, failed: 14, failedNotRefunded: 0, failedRows: rows });
     const html = buildDailyOpsDigest(input([t])).html;
     expect(html).toContain('Outlet 9<');
     expect(html).not.toContain('Outlet 10<');
     expect(html).toContain('Showing the latest 10 of 14.');
   });
 
-  it('surfaces pre-login OTP failures (or their load failure) in the summary', () => {
-    const r1 = buildDailyOpsDigest(input([quietTenant('d', 'D')], { unattributedOtpFailed: ok(4) }));
+  it('surfaces Gifsy-wide OTP failures (or their load failure) in the Gifsy-wide box', () => {
+    const r1 = buildDailyOpsDigest(input([quietTenant('d', 'D')], { gifsyOtpFailed: ok({ preLogin: 4, gifsyStaff: 2 }) }));
     expect(r1.html).toContain('4 OTPs failed delivery before login');
-    expect(r1.html).not.toContain('All quiet — no tenant needs attention.');
-    const r2 = buildDailyOpsDigest(input([quietTenant('d', 'D')], { unattributedOtpFailed: { ok: false, error: 'boom' } }));
-    expect(r2.html).toContain("Couldn't load the pre-login OTP failures (boom).");
+    expect(r1.html).toContain('2 OTPs to Gifsy staff failed delivery');
+    expect(r1.html).toContain('Needs attention — Gifsy-wide');
+    expect(r1.html).not.toContain('All quiet — nothing needs attention.');
+    const r2 = buildDailyOpsDigest(input([quietTenant('d', 'D')], { gifsyOtpFailed: { ok: false, error: 'boom' } }));
+    expect(r2.html).toContain('Couldn&#39;t load the Gifsy-wide OTP failures (boom)');
   });
 
   it('voucher dispersal: hidden when all zero; shown + Gifsy-wide box + subject suffix when there are problems', () => {
-    const zero = buildDailyOpsDigest(
-      input([quietTenant('d', 'D')], { voucherDispersal: ok({ bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0 }) }),
-    );
+    const zero = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: zeroDispersal() }));
     expect(zero.html).not.toContain('Voucher dispersal');
-    expect(zero.subject).toBe('Gifsy daily operations — 13 Nov 2026 — 0 need attention');
-    expect(zero.html).toContain('All quiet — no tenant needs attention.');
+    expect(zero.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — all quiet');
+    expect(zero.html).toContain('All quiet — nothing needs attention.');
 
     const busy = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: busyDispersal() }));
-    expect(busy.subject).toBe('Gifsy daily operations — 13 Nov 2026 — 0 need attention + Gifsy-wide items');
+    expect(busy.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — 3 items need attention (Gifsy-wide)');
     expect(busy.gifsyWideItems).toBe(3);
     expect(busy.attentionItems).toBe(3);
     expect(busy.html).toContain('Needs attention — Gifsy-wide');
     expect(busy.html).toContain('data-section="Voucher dispersal (Gifsy-wide)"');
-    expect(busy.html).not.toContain('All quiet — no tenant needs attention.');
+    expect(busy.html).not.toContain('All quiet — nothing needs attention.');
 
     const failed = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: { ok: false, error: 'no table' } }));
     expect(failed.html).toContain("Couldn't load this section (no table).");
-    expect(failed.html).not.toContain('All quiet — no tenant needs attention.');
+    expect(failed.html).not.toContain('All quiet — nothing needs attention.');
   });
 
   it('KYC: fast-tracked count rides the Gifsy line; a field-stage fast-track gets a red note', () => {
@@ -436,7 +563,7 @@ describe('buildDailyOpsDigest', () => {
   it('matches the committed sample HTML (busy Bajaj-like + quiet Deoleo-like tenant)', () => {
     const quietDeoleo = quietTenant('deoleo', 'Deoleo India');
     const html = buildDailyOpsDigest(
-      input([quietDeoleo, busyTenant()], { unattributedOtpFailed: ok(0), voucherDispersal: busyDispersal() }),
+      input([quietDeoleo, busyTenant()], { gifsyOtpFailed: ok({ preLogin: 0, gifsyStaff: 0 }), voucherDispersal: busyDispersal() }),
     ).html;
     const file = path.resolve(__dirname, '../../../../platform/docs/plans/samples/daily-ops-digest-sample.html');
     if (process.env.UPDATE_DIGEST_SAMPLE === '1') {

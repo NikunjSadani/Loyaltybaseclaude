@@ -29,7 +29,11 @@ import {
   REPORTS_CLIENT_ID,
   REPORT_RECIPIENTS_KEY,
   ReportRecipients,
+  RecipientsSource,
   normalizeReportRecipients,
+  resolveReportRecipients,
+  allowedRecipientDomains,
+  splitRecipientsByDomain,
 } from '../common/report-recipients';
 import {
   KYC_FIELD_SLA_KEY,
@@ -73,6 +77,7 @@ import {
 } from './dashboards/dashboard-program-filter';
 import { resolveVisibilityProgramLists } from '../visibility/visibility-scope.helper';
 import { isFastTrackRow } from '../kyc/kyc-fast-track.helper';
+import { kycAddressableOutletWhere, kycPendingAge, KYC_LATEST_SUBMISSION_SELECT } from './dashboards/kyc-pending-sla';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_MAX_ATTEMPTS,
@@ -108,6 +113,14 @@ interface HierarchyEmployeeSnapshot {
  * Single return shape: each method returns the `data` payload directly
  * (the Next `ok(data)` body); the global TransformInterceptor envelopes it.
  */
+/** GET/PUT /admin/settings/report-recipients response (the settings card's contract). */
+export interface ReportRecipientsView {
+  recipients: ReportRecipients;
+  source: RecipientsSource;
+  allowedDomains: string[];
+  blocked: string[];
+}
+
 @Injectable()
 export class AdminCoreService {
   constructor(
@@ -1190,18 +1203,25 @@ export class AdminCoreService {
   // creditsPayouts ∪ kycActionables fallback when no dailyDigest list was ever saved). Storage +
   // defaults + normalizer live in the shared common/report-recipients module (used identically by
   // the scheduled-report runner), so the configured list and the send logic can never drift.
-  // GIFSY_ADMIN edits it; CLIENT_ADMIN can read it.
+  // Gifsy operators only — BOTH the read and the write (tenant admins can neither see nor set it).
+  // Internal-only: every address must be on an allowed domain (REPORTS_RECIPIENT_DOMAINS, default
+  // gifsy.in) — refused on save here, and dropped (loudly) again at send time by the runner.
 
   /**
    * The platform digest recipient list, for the settings UI. Returns the EFFECTIVE list (stored
-   * dailyDigest, else the legacy-lists union), normalized; empty when no row exists.
+   * dailyDigest, else the legacy-lists union), normalized; empty when no row exists. Also returns
+   * where it came from (`source`: saved / legacy / none), the allowed domains, and any address in
+   * the list that is NOT on an allowed domain (`blocked` — it will not receive the digest).
    */
-  async getReportRecipients(): Promise<{ recipients: ReportRecipients }> {
+  async getReportRecipients(): Promise<ReportRecipientsView> {
     const row = await this.prisma.programSetting.findFirst({
       where: { clientId: REPORTS_CLIENT_ID, settingKey: REPORT_RECIPIENTS_KEY },
       select: { settingValue: true },
     });
-    return { recipients: normalizeReportRecipients(row?.settingValue) };
+    const { dailyDigest, source } = resolveReportRecipients(row?.settingValue);
+    const allowedDomains = allowedRecipientDomains();
+    const { blocked } = splitRecipientsByDomain(dailyDigest, allowedDomains);
+    return { recipients: { dailyDigest }, source, allowedDomains, blocked };
   }
 
   /**
@@ -1212,11 +1232,20 @@ export class AdminCoreService {
   async setReportRecipients(
     user: JwtPayload,
     dto: SetReportRecipientsDto,
-  ): Promise<{ recipients: ReportRecipients }> {
+  ): Promise<ReportRecipientsView> {
     // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
     if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
     const recipients = normalizeReportRecipients(dto);
+    const allowedDomains = allowedRecipientDomains();
+    const { blocked } = splitRecipientsByDomain(recipients.dailyDigest, allowedDomains);
+    if (blocked.length > 0) {
+      throw new BadRequestException(
+        `Only internal addresses can receive the Daily Operations Digest (${allowedDomains
+          .map((d) => '@' + d)
+          .join(', ')}). Not allowed: ${blocked.join(', ')}`,
+      );
+    }
 
     // ReportRecipients is a plain JSON object; cast to Prisma's JSON input type (the interface
     // lacks the index signature Prisma's InputJsonValue expects).
@@ -1231,7 +1260,7 @@ export class AdminCoreService {
       },
       update: { settingValue },
     });
-    return { recipients };
+    return { recipients, source: 'saved', allowedDomains, blocked: [] };
   }
 
   async getSettings(user: JwtPayload) {
@@ -2052,44 +2081,19 @@ export class AdminCoreService {
           // (the very thing this dashboard tracks). The correct exclusions are deleted,
           // NOT_INTERESTED, and genuinely DEACTIVATED (deactivatedAt set) — pending
           // outlets have deactivatedAt=null and stay in the universe.
-          where: {
-            clientId,
-            deletedAt: null,
-            deactivatedAt: null,
-            // Program scope (no-op when unfiltered) — this is what makes every outlet-derived
-            // metric (headline, funnel, buckets, SLA, coverageBy) fold to the selected program.
-            ...outletProgramWhere,
-            // Prisma's `{ notIn }` EXCLUDES NULL rows. Almost every outlet has
-            // kycIntent=NULL (only sales-marked ones are NOT_INTERESTED, admin-parked ones
-            // PARKED), so an explicit OR is required to keep them — otherwise addressable → 0.
-            // BOTH NOT_INTERESTED (declined) and PARKED (admin-removed from pipeline) are
-            // excluded from the addressable universe so coverage% isn't depressed by them.
-            OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
-          },
+          // Shared with the Daily Operations Digest (dashboards/kyc-pending-sla.ts) so both count the
+          // same population. Prisma's `{ notIn }` EXCLUDES NULL rows; almost every outlet has
+          // kycIntent=NULL, so the helper's explicit OR keeps them. BOTH NOT_INTERESTED (declined)
+          // and PARKED (admin-removed from pipeline) are excluded so coverage% isn't depressed.
+          // Program scope (no-op when unfiltered) folds every outlet-derived metric (headline,
+          // funnel, buckets, SLA, coverageBy) to the selected program.
+          where: kycAddressableOutletWhere(clientId, outletProgramWhere),
           select: {
             id: true,
             state: true,
             programName: true,
             outletType: { select: { code: true } },
-            partner: {
-              select: {
-                kycSubmissions: {
-                  orderBy: { createdAt: 'desc' },
-                  take: 1,
-                  select: {
-                    status: true,
-                    submittedAt: true,
-                    approvedAt: true,
-                    createdAt: true,
-                    statusHistory: {
-                      // fromStatus + metadata: a DRAFT→PENDING_GIFSY entry CARRYING the fast-track marker =
-                      // GIFSY-reject fast-track (no field stage).
-                      select: { fromStatus: true, toStatus: true, createdAt: true, metadata: true },
-                    },
-                  },
-                },
-              },
-            },
+            partner: { select: KYC_LATEST_SUBMISSION_SELECT },
           },
         }),
 
@@ -2256,19 +2260,16 @@ export class AdminCoreService {
       bump(byProgram, o.programName ?? 'Unassigned', isApproved);
 
       // ── Per-stage SLA detail ──
+      // Shared rule (dashboards/kyc-pending-sla.ts, also used by the Daily Operations Digest): field
+      // rows age from submittedAt (else createdAt); PENDING_GIFSY rows from the LATEST Gifsy entry
+      // (else submittedAt → createdAt); UNROUNDED business hours, breached when age > target.
       if (status !== 'NOT_STARTED' && sub) {
-        if (AdminCoreService.KYC_PENDING_FIELD_STATUSES.has(status)) {
-          // age = business hours since submittedAt (fall back to createdAt if null)
-          const startTs = (sub.submittedAt ?? sub.createdAt).getTime();
-          const ageH = businessHoursBetween(startTs, now, holidays);
-          if (ageH <= fieldHrs) pendingFieldWithin += 1;
+        const live = kycPendingAge(sub, now, holidays);
+        if (live?.stage === 'field') {
+          if (live.ageHrs <= fieldHrs) pendingFieldWithin += 1;
           else pendingFieldBreached += 1;
-        } else if (status === 'PENDING_GIFSY') {
-          // clock = business hours since entering PENDING_GIFSY; fall back submittedAt → createdAt
-          const enteredAt = enteredPendingGifsyAt(sub.statusHistory);
-          const startTs = (enteredAt ?? sub.submittedAt ?? sub.createdAt).getTime();
-          const ageH = businessHoursBetween(startTs, now, holidays);
-          if (ageH <= gifsyHrs) pendingGifsyWithin += 1;
+        } else if (live?.stage === 'gifsy') {
+          if (live.ageHrs <= gifsyHrs) pendingGifsyWithin += 1;
           else pendingGifsyBreached += 1;
         }
       }

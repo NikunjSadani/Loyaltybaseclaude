@@ -1,4 +1,28 @@
-import { emailShell, table, statRow, esc } from './email-html';
+import { emailShell, table, statRow, esc, rupees } from './email-html';
+
+describe('rupees — one rounding rule for BigInt and number paise (half up, whole rupees)', () => {
+  it('rounds BigInt and number inputs identically', () => {
+    for (const p of [0, 49, 50, 99, 150, 12_345_67, 12_345_50, 12_345_49]) {
+      expect(rupees(BigInt(p))).toBe(rupees(p));
+    }
+    expect(rupees(150n)).toBe('₹2'); // was ₹1 (BigInt truncated) while 150 gave ₹2
+    expect(rupees(149n)).toBe('₹1');
+    expect(rupees(12_345_50n)).toBe('₹12,346');
+  });
+
+  it('negative amounts round symmetrically (half away from zero) for both input types', () => {
+    expect(rupees(-150n)).toBe('-₹2');
+    expect(rupees(-150)).toBe('-₹2');
+    expect(rupees(-149n)).toBe('-₹1');
+  });
+});
+
+describe('emailShell footer note', () => {
+  it('renders an escaped red footer note when given (e.g. dropped recipients)', () => {
+    const html = emailShell({ title: 't', body: '', dateLabel: 'd', footerNote: 'Not sent to <x@acme.com>' });
+    expect(html).toContain('Not sent to &lt;x@acme.com&gt;');
+  });
+});
 
 /**
  * Locks the responsive-email hooks so a future refactor can't silently regress the mobile

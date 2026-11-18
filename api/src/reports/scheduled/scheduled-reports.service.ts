@@ -1,8 +1,15 @@
+import { randomUUID } from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Msg91Service } from '../../notifications/msg91.service';
 import { loadHolidaySet } from '../../common/holiday-calendar';
-import { loadReportRecipients, REPORTS_CLIENT_ID } from '../../common/report-recipients';
+import {
+  allowedRecipientDomains,
+  loadReportRecipients,
+  REPORTS_CLIENT_ID,
+  splitRecipientsByDomain,
+} from '../../common/report-recipients';
 import { formatDateIST, istMonthKey } from '../../common/ist-date';
 import {
   KYC_FIELD_SLA_KEY,
@@ -11,15 +18,24 @@ import {
   KYC_GIFSY_SLA_DEFAULT,
   KYC_SLA_MIN_HOURS,
   KYC_SLA_MAX_HOURS,
-  KYC_FIELD_STATUSES,
-  KYC_GIFSY_STATUS,
   KycSlaTargets,
 } from '../../common/kyc-sla-stage';
 import { resolveMonthState, shiftMonthKey } from '../../sales-import/months/month-state';
 import { latestTargetWriteByMonth, targetsNewerThanApply, tenantHasTargetNamesDef } from '../../sales-import/kpi/focus-data';
 import { loadBillingProgress, summarizeBillingProgress } from '../../admin-core/dashboards/billing-progress';
+import { kycAddressableOutletWhere, KYC_LATEST_SUBMISSION_SELECT } from '../../admin-core/dashboards/kyc-pending-sla';
 import { DISPERSAL_RETRY_MIN_AGE_MS } from '../../voucher-dispersal/voucher-dispersal.processor';
-import { buildDailyOpsDigest, digestWindow, kycPendingBuckets, MAX_FAILED_REDEMPTION_ROWS } from './daily-ops-digest-report';
+import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../rewards/rewards.service';
+import { buildDailyOpsDigest, kycPendingBuckets, MAX_FAILED_REDEMPTION_ROWS } from './daily-ops-digest-report';
+import {
+  DIGEST_RUN_STATE_KEY,
+  DigestRunState,
+  DigestRunStatus,
+  parseRunState,
+  planDigestWindow,
+  RUN_LEASE_MS,
+  WindowPlan,
+} from './digest-run-state';
 import type {
   BillingSection,
   DigestInput,
@@ -33,6 +49,7 @@ import type {
   SalesImportSection,
   SectionResult,
   TenantDigest,
+  TenantStatus,
   VisibilitySection,
   VoucherDispersalSection,
   VouchersSection,
@@ -46,24 +63,42 @@ export const HUBBLE_STUCK_MS = 30 * MINUTE_MS;
 const OTP_LOOKBACK_MS = DAY_MS;
 /** Sales-import months considered for "open month" rows (same default range as the months list). */
 const SALES_MONTHS_BACK = 5;
-const KYC_PENDING_STATUSES = [...KYC_FIELD_STATUSES, KYC_GIFSY_STATUS];
 const KYC_REJECT_STATUSES = ['REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED'] as const;
 /** Case-insensitive match on the integration-stamped provider ('Hubble'). */
 const HUBBLE_PROVIDER = { equals: 'hubble', mode: 'insensitive' as const };
+/** Orders whose FAILED flip refunded them (the refund paths zero pointsDeducted). */
+const REFUNDED_OR_CLOSED_ORDER = ['FAILED', 'CANCELLED', 'RETURNED'] as const;
 
-/** Outcome of one run (returned from the endpoint for observability). */
-interface ReportOutcome {
+/** Outcome of one run (returned from the endpoint for observability; the controller maps it to an HTTP status). */
+export interface ReportOutcome {
   key: ReportKey;
-  status: 'sent' | 'no-recipients' | 'error';
+  /**
+   * sent        — emailed with complete data (window recorded as the last successful send).
+   * degraded    — emailed, but a shared input failed (tenants / holidays / SLA targets / run state) — NOT a
+   *               successful send: the window is not advanced and the HTTP status is 500.
+   * skipped     — a successful send for today already exists (idempotent); force=true re-runs.
+   * no-recipients / in-progress / error — nothing sent (409 / 409 / 500).
+   */
+  status: DigestRunStatus;
   recipients?: number;
   tenants?: number;
   tenantsNeedingAttention?: number;
+  attentionItems?: number;
+  window?: { startMs: number; endMs: number; label: string };
+  /** Configured addresses NOT sent to (not on an allowed internal domain). */
+  droppedRecipients?: string[];
+  /** Run-level problems shown in the email's "incomplete" box. */
+  notices?: string[];
+  /** 'already-sent' with the time of that send, when skipped. */
+  skipped?: 'already-sent';
+  lastSentAt?: string;
   error?: string;
 }
 
 interface TenantMeta {
   clientId: string;
   name: string;
+  status: TenantStatus;
   hubble: boolean;
   salesImport: boolean;
   visibility: boolean;
@@ -74,17 +109,23 @@ const num = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 const big = (v: unknown): bigint => (typeof v === 'bigint' ? v : 0n);
+const short = (e: unknown) => ((e as Error)?.message ?? String(e)).split('\n')[0].slice(0, 160);
 
 /**
  * Runs the daily INTERNAL Gifsy email — the Daily Operations Digest (owner-approved 2026-11-13;
  * it replaced the separate Credits/Payouts + KYC actionables emails). Driven by Cloud Scheduler →
  * the secret-gated POST /v1/reports/run endpoint (Mon–Sat 09:30 IST).
  *
- * Does ALL the Prisma: per tenant, per section, each section in its own try/catch — a failing
- * section is passed to the builder as `{ ok:false }` and renders "couldn't load this section"
- * for that tenant (never silently omitted) while the rest of the email still sends. Then hands
- * the plain structs to the PURE builder and sends ONE email to the digest recipient list.
- * Always sends (an all-quiet day says so), unless there are no recipients.
+ * Lifecycle of one run (digest-run-state.ts): read the run state → plan the window (since the last
+ * SUCCESSFUL send, ≤ 7 days; skip if today's already went out unless force) → load recipients (internal
+ * domains only; others dropped loudly) → take a lease (a concurrent trigger loses) → collect → send →
+ * record the outcome. Every failure is visible: the endpoint answers non-2xx for degraded / error /
+ * no-recipients / in-progress so Cloud Scheduler marks the run failed.
+ *
+ * Collect does ALL the Prisma: per tenant, per section, each section in its own try/catch — a failing
+ * section is passed to the builder as `{ ok:false }` and renders "couldn't load this section" for that
+ * tenant. The SHARED inputs (tenant list, holiday calendar, SLA targets) are guarded too: a failure
+ * still sends the email with a red "This digest is incomplete" notice and marks the run degraded.
  */
 @Injectable()
 export class ScheduledReportsService {
@@ -95,43 +136,258 @@ export class ScheduledReportsService {
     private readonly msg91: Msg91Service,
   ) {}
 
-  async runDailyReports(nowMs: number = Date.now()): Promise<{ dateLabel: string; reports: ReportOutcome[] }> {
+  async runDailyReports(
+    nowMs: number = Date.now(),
+    opts: { force?: boolean } = {},
+  ): Promise<{ dateLabel: string; reports: ReportOutcome[] }> {
     const dateLabel = formatDateIST(new Date(nowMs));
-    const outcome = await this.runDigest(nowMs, dateLabel);
-    this.logger.log(`Daily operations digest (${dateLabel}): ${outcome.status}${outcome.error ? ` — ${outcome.error}` : ''}`);
+    const outcome = await this.runDigest(nowMs, dateLabel, opts.force === true);
+    const msg = `Daily operations digest (${dateLabel}${opts.force ? ', force' : ''}): ${outcome.status}${outcome.error ? ` — ${outcome.error}` : ''}`;
+    if (outcome.status === 'sent' || outcome.status === 'skipped') this.logger.log(msg);
+    else this.logger.error(msg);
     return { dateLabel, reports: [outcome] };
   }
 
-  private async runDigest(nowMs: number, dateLabel: string): Promise<ReportOutcome> {
+  private async runDigest(nowMs: number, dateLabel: string, force: boolean): Promise<ReportOutcome> {
     const key: ReportKey = 'dailyDigest';
-    try {
-      const { dailyDigest: to } = await loadReportRecipients(this.prisma);
-      if (to.length === 0) return { key, status: 'no-recipients' };
 
-      const input = await this.collect(nowMs, dateLabel);
+    // 1. Run state → window. A read failure falls back to the fixed rule and DEGRADES the run (no
+    //    idempotency / no "since last send" guarantee this time — said loudly in the email).
+    let stateRow: { id: string; updatedAt: Date; settingValue: unknown } | null = null;
+    let stateReadError: string | null = null;
+    try {
+      stateRow = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY } },
+        select: { id: true, updatedAt: true, settingValue: true },
+      });
+    } catch (e) {
+      stateReadError = short(e);
+      this.logger.error(`Digest run state could not be read: ${stateReadError}`);
+    }
+    const state = parseRunState(stateRow?.settingValue);
+    const plan: WindowPlan = stateReadError
+      ? { ...planDigestWindow(nowMs, {}, force), notes: [] }
+      : planDigestWindow(nowMs, state, force);
+    if (stateReadError) {
+      plan.notices.push(
+        `Couldn't read the digest run history (${stateReadError}) — the window is the fixed "since the previous working day" rule, so activity since the last successful send may be missed or repeated, and a repeat send today is not blocked.`,
+      );
+    }
+    // Never write the state back when it could not be read — that would erase the last-success record.
+    const persist = !stateReadError;
+    if (plan.skip) {
+      return { key, status: 'skipped', skipped: 'already-sent', lastSentAt: state.lastSuccess?.sentAt, window: plan.window };
+    }
+
+    // 2. Recipients — internal domains only. A read failure is an ERROR (never mistaken for "nobody").
+    let to: string[];
+    let dropped: string[];
+    try {
+      const { dailyDigest } = await loadReportRecipients(this.prisma);
+      const split = splitRecipientsByDomain(dailyDigest, allowedRecipientDomains());
+      to = split.allowed;
+      dropped = split.blocked;
+    } catch (e) {
+      const error = `couldn't read the recipient list: ${short(e)}`;
+      if (persist) await this.recordAttempt(state, { status: 'error', error, window: plan.window });
+      return { key, status: 'error', error, window: plan.window };
+    }
+    if (dropped.length > 0) {
+      this.logger.warn(`Daily operations digest: NOT sending to non-internal address(es): ${dropped.join(', ')}`);
+    }
+    if (to.length === 0) {
+      if (persist) await this.recordAttempt(state, { status: 'no-recipients', window: plan.window });
+      return { key, status: 'no-recipients', droppedRecipients: dropped, window: plan.window };
+    }
+
+    // 3. Lease — only when the state row is readable (otherwise the run is already degraded/unguarded).
+    let token: string | null = null;
+    if (!stateReadError) {
+      token = await this.claimLease(state, stateRow, nowMs);
+      if (token === null) {
+        return { key, status: 'in-progress', error: 'another digest run is in progress', window: plan.window };
+      }
+    }
+
+    // 4. Collect → build → send → record.
+    try {
+      const input = await this.collect(nowMs, dateLabel, plan.window);
+      input.runNotices = [...plan.notices, ...(input.runNotices ?? [])];
+      input.windowNotes = plan.notes;
+      input.droppedRecipients = dropped;
       const result = buildDailyOpsDigest(input);
       await this.msg91.sendEmail({ to, subject: result.subject, html: result.html });
+      // A capped window is complete for what it covers — it doesn't hold back the next window. Any other
+      // notice means a shared input failed → degraded (the window is NOT advanced; the next run re-covers it).
+      const degraded = (input.runNotices?.length ?? 0) > plan.notices.length || !!stateReadError;
+      const status: DigestRunStatus = degraded ? 'degraded' : 'sent';
+      const saveError = !persist
+        ? null
+        : await this.finishRun(state, nowMs, {
+        status,
+        window: plan.window,
+        recipients: to.length,
+        forced: plan.forced,
+        error: degraded ? input.runNotices?.join(' | ').slice(0, 500) : undefined,
+      });
       return {
         key,
-        status: 'sent',
+        status: saveError ? 'error' : status,
         recipients: to.length,
         tenants: input.tenants.length,
         tenantsNeedingAttention: result.tenantsNeedingAttention,
+        attentionItems: result.attentionItems,
+        window: plan.window,
+        ...(dropped.length > 0 ? { droppedRecipients: dropped } : {}),
+        ...((input.runNotices?.length ?? 0) > 0 ? { notices: input.runNotices } : {}),
+        ...(saveError ? { error: `the email WAS sent, but the run could not be recorded (${saveError}) — the next run may repeat this window` } : {}),
       };
     } catch (e) {
-      const error = (e as Error)?.message ?? String(e);
+      const error = short(e);
       this.logger.error(`Daily operations digest failed: ${error}`);
-      return { key, status: 'error', error };
+      if (persist) await this.finishRun(state, nowMs, { status: 'error', window: plan.window, error });
+      return { key, status: 'error', error, window: plan.window };
     }
   }
 
-  /** Assemble the builder input. Public for the runner spec (exercises section isolation). */
-  async collect(nowMs: number, dateLabel: string): Promise<DigestInput> {
-    const window = digestWindow(nowMs);
-    const tenants = await this.loadTenants();
-    const holidays = await loadHolidaySet(this.prisma);
-    const slaTargets = await this.loadSlaTargets();
+  // ── Run state persistence ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Take the run lease with optimistic concurrency on the state row's updatedAt (or a create that
+   * collides on the unique key). Returns the lease token, or null when another run holds a live lease
+   * or won the race.
+   */
+  private async claimLease(
+    state: DigestRunState,
+    row: { id: string; updatedAt: Date } | null,
+    nowMs: number,
+  ): Promise<string | null> {
+    if (state.running && nowMs - new Date(state.running.startedAt).getTime() < RUN_LEASE_MS) return null;
+    const token = randomUUID();
+    const value = { ...state, running: { startedAt: new Date(nowMs).toISOString(), token } } as unknown as Prisma.InputJsonValue;
+    if (row) {
+      const won = await this.prisma.programSetting.updateMany({
+        where: { id: row.id, updatedAt: row.updatedAt },
+        data: { settingValue: value },
+      });
+      return won.count === 1 ? token : null;
+    }
+    try {
+      await this.prisma.programSetting.create({
+        data: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY, settingValue: value, category: 'reports', isEditable: false },
+      });
+      return token;
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') return null;
+      throw e;
+    }
+  }
+
+  /** Write the outcome and clear the lease. Returns an error string when the write failed (never throws). */
+  private async finishRun(
+    state: DigestRunState,
+    nowMs: number,
+    o: { status: DigestRunStatus; window: DigestWindow; recipients?: number; forced?: boolean; error?: string },
+  ): Promise<string | null> {
+    const at = new Date(nowMs).toISOString();
+    const next: DigestRunState = {
+      ...state,
+      running: null,
+      lastAttempt: {
+        at,
+        status: o.status,
+        windowStartMs: o.window.startMs,
+        windowEndMs: o.window.endMs,
+        ...(o.recipients !== undefined ? { recipients: o.recipients } : {}),
+        ...(o.error ? { error: o.error } : {}),
+      },
+    };
+    if (o.status === 'sent') {
+      next.lastSuccess = {
+        windowStartMs: o.window.startMs,
+        windowEndMs: o.window.endMs,
+        sentAt: at,
+        recipients: o.recipients ?? 0,
+        ...(o.forced ? { forced: true } : {}),
+      };
+    }
+    try {
+      const value = next as unknown as Prisma.InputJsonValue;
+      await this.prisma.programSetting.upsert({
+        where: { clientId_settingKey: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY } },
+        create: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY, settingValue: value, category: 'reports', isEditable: false },
+        update: { settingValue: value },
+      });
+      return null;
+    } catch (e) {
+      const err = short(e);
+      this.logger.error(`Digest run state could not be written (${o.status}): ${err}`);
+      return err;
+    }
+  }
+
+  /** Record an attempt that never took the lease (no-recipients / early error). Best effort. */
+  private async recordAttempt(
+    state: DigestRunState,
+    o: { status: DigestRunStatus; window: DigestWindow; error?: string },
+  ): Promise<void> {
+    const next: DigestRunState = {
+      ...state,
+      lastAttempt: {
+        at: new Date().toISOString(),
+        status: o.status,
+        windowStartMs: o.window.startMs,
+        windowEndMs: o.window.endMs,
+        ...(o.error ? { error: o.error } : {}),
+      },
+    };
+    try {
+      const value = next as unknown as Prisma.InputJsonValue;
+      await this.prisma.programSetting.upsert({
+        where: { clientId_settingKey: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY } },
+        create: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY, settingValue: value, category: 'reports', isEditable: false },
+        update: { settingValue: value },
+      });
+    } catch (e) {
+      this.logger.error(`Digest run state could not be written (${o.status}): ${short(e)}`);
+    }
+  }
+
+  // ── Collect ─────────────────────────────────────────────────────────────────────────────────
+
+  /** Assemble the builder input for `window`. Public for the runner spec (exercises section isolation). */
+  async collect(nowMs: number, dateLabel: string, window: DigestWindow): Promise<DigestInput> {
+    const runNotices: string[] = [];
     const defaultTargets: KycSlaTargets = { fieldHrs: KYC_FIELD_SLA_DEFAULT, gifsyHrs: KYC_GIFSY_SLA_DEFAULT };
+
+    let tenants: TenantMeta[] = [];
+    try {
+      tenants = await this.loadTenants();
+    } catch (e) {
+      const err = short(e);
+      this.logger.error(`Digest: tenant list failed: ${err}`);
+      runNotices.push(`Couldn't load the tenant list (${err}) — this digest has NO tenant sections. Only the Gifsy-wide figures below are real.`);
+    }
+    let holidays = new Set<string>();
+    try {
+      holidays = await loadHolidaySet(this.prisma);
+    } catch (e) {
+      const err = short(e);
+      this.logger.error(`Digest: holiday calendar failed: ${err}`);
+      runNotices.push(
+        `Couldn't load the national holiday calendar (${err}) — KYC SLA ages below skip weekends only, so they may OVERSTATE breaches.`,
+      );
+    }
+    let slaTargets = new Map<string, KycSlaTargets>();
+    try {
+      slaTargets = await this.loadSlaTargets();
+    } catch (e) {
+      const err = short(e);
+      this.logger.error(`Digest: KYC SLA targets failed: ${err}`);
+      runNotices.push(
+        `Couldn't load the per-tenant KYC SLA targets (${err}) — every tenant's KYC SLA below uses the defaults (${KYC_FIELD_SLA_DEFAULT} h field / ${KYC_GIFSY_SLA_DEFAULT} h Gifsy).`,
+      );
+    }
 
     const out: TenantDigest[] = [];
     // Tenants one at a time (a handful of tenants; keeps the DB pool calm); sections within a
@@ -141,13 +397,16 @@ export class ScheduledReportsService {
       const digest: TenantDigest = {
         clientId: c,
         name: t.name,
+        status: t.status,
+        hubbleEnabled: t.hubble,
         kyc: await this.section('kyc', c, () => this.kyc(c, window, slaTargets.get(c) ?? defaultTargets, holidays, nowMs)),
         points: await this.section('points', c, () => this.points(c, window)),
         redemptions: await this.section('redemptions', c, () => this.redemptions(c, window)),
+        // Loaded for EVERY tenant: a live Hubble problem must show even after the flag was switched off.
+        vouchers: await this.section('vouchers', c, () => this.vouchers(c, window, nowMs)),
         payouts: await this.section('payouts', c, () => this.payouts(c, window)),
         messages: await this.section('messages', c, () => this.messages(c, window)),
       };
-      if (t.hubble) digest.vouchers = await this.section('vouchers', c, () => this.vouchers(c, window, nowMs));
       if (t.visibility) digest.visibility = await this.section('visibility', c, () => this.visibility(c, window));
       if (t.salesImport) {
         digest.salesImport = await this.section('salesImport', c, () => this.salesImport(c, window, nowMs));
@@ -156,20 +415,22 @@ export class ScheduledReportsService {
       out.push(digest);
     }
 
-    const unattributedOtpFailed = await this.section('otp-unattributed', '-', () =>
-      this.prisma.otpCode.count({
-        where: {
-          userId: null,
-          deliveryStatus: 'FAILED',
-          expiresAt: { gte: new Date(window.startMs - OTP_LOOKBACK_MS) },
-          updatedAt: { gte: new Date(window.startMs), lt: new Date(window.endMs) },
-        },
-      }),
-    );
+    const otpWindow = (extra: Prisma.OtpCodeWhereInput): Prisma.OtpCodeWhereInput => ({
+      ...extra,
+      deliveryStatus: 'FAILED',
+      expiresAt: { gte: new Date(window.startMs - OTP_LOOKBACK_MS) },
+      updatedAt: { gte: new Date(window.startMs), lt: new Date(window.endMs) },
+    });
+    // Gifsy-wide OTP failures: pre-login (no user) + Gifsy staff (users of the operator row, which the
+    // tenant loop excludes) — attributed to a Gifsy-wide line, never dropped.
+    const gifsyOtpFailed = await this.section('otp-gifsy-wide', 'gifsy', async () => ({
+      preLogin: await this.prisma.otpCode.count({ where: otpWindow({ userId: null }) }),
+      gifsyStaff: await this.prisma.otpCode.count({ where: otpWindow({ user: { clientId: REPORTS_CLIENT_ID } }) }),
+    }));
 
     const voucherDispersal = await this.section('voucher-dispersal', 'gifsy', () => this.voucherDispersal(window, nowMs));
 
-    return { window, dateLabel, tenants: out, unattributedOtpFailed, voucherDispersal };
+    return { window, dateLabel, tenants: out, gifsyOtpFailed, voucherDispersal, runNotices };
   }
 
   /** Run one section loader, isolating any failure to that section. */
@@ -190,6 +451,12 @@ export class ScheduledReportsService {
 
   // ── Sections ──────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Window figures by submission, and the live pending SLA from the admin KYC dashboard's OWN population
+   * and rule (dashboards/kyc-pending-sla.ts): the latest submission per ADDRESSABLE outlet (not deleted /
+   * deactivated / NOT_INTERESTED / PARKED), aged in unrounded business hours — so the breach counts here
+   * equal the dashboard's for the same moment.
+   */
   private async kyc(
     clientId: string,
     w: DigestWindow,
@@ -205,20 +472,13 @@ export class ScheduledReportsService {
     const rejected = await this.prisma.kycStatusHistory.count({
       where: { toStatus: { in: [...KYC_REJECT_STATUSES] }, createdAt: inWindow, kycSubmission: { user: { clientId } } },
     });
-    const pendingRows = await this.prisma.kycSubmission.findMany({
-      where: { user: { clientId }, status: { in: KYC_PENDING_STATUSES as never } },
-      select: {
-        status: true,
-        submittedAt: true,
-        createdAt: true,
-        // Every PENDING_GIFSY entry: the latest one starts the Gifsy clock, and fromStatus + metadata identify the
-        // GIFSY-reject fast-track routing row (DRAFT→PENDING_GIFSY + marker) — no extra query needed.
-        statusHistory: {
-          where: { toStatus: KYC_GIFSY_STATUS as never },
-          select: { fromStatus: true, toStatus: true, createdAt: true, metadata: true },
-        },
-      },
+    const outlets = await this.prisma.outlet.findMany({
+      where: kycAddressableOutletWhere(clientId),
+      select: { partner: { select: KYC_LATEST_SUBMISSION_SELECT } },
     });
+    const pendingRows = outlets
+      .map((o) => o.partner?.kycSubmissions?.[0])
+      .filter((s): s is NonNullable<typeof s> => !!s);
     const rollup = kycPendingBuckets(pendingRows as never, targets, holidays, nowMs);
     return { submitted, approved, rejected, ...rollup };
   }
@@ -253,6 +513,11 @@ export class ScheduledReportsService {
     });
     const failedWhere = { toStatus: 'FAILED' as const, createdAt: inWindow, order: { partner: { clientId } } };
     const failed = await this.prisma.redemptionStatusHistory.count({ where: failedWhere });
+    // STILL OPEN: every refund path zeroes pointsDeducted when it flips the order FAILED — a FAILED order
+    // still holding points was never refunded.
+    const failedNotRefunded = await this.prisma.redemptionOrder.count({
+      where: { partner: { clientId }, status: 'FAILED', pointsDeducted: { gt: 0 } },
+    });
     const rows =
       failed === 0
         ? []
@@ -275,6 +540,7 @@ export class ScheduledReportsService {
       requested,
       completed,
       failed,
+      failedNotRefunded,
       failedRows: rows.map((r) => ({
         outlet: [r.order?.partner?.businessName, r.order?.partner?.partnerCode ? `(${r.order.partner.partnerCode})` : '']
           .filter(Boolean)
@@ -291,13 +557,32 @@ export class ScheduledReportsService {
     const issued = await this.prisma.redemptionStatusHistory.count({
       where: { toStatus: 'DELIVERED', createdAt: inWindow, order: hubbleOrder },
     });
+    // Hubble-ROUTED failures: the provider stamp, OR the no-Hubble-order refund (rewards.service
+    // refundAndFailNoHubbleOrder deliberately leaves voucherProvider empty — no Hubble order exists — but
+    // the order was Hubble-routed; it is identified by its fixed cancelReason).
     const failed = await this.prisma.redemptionStatusHistory.count({
-      where: { toStatus: 'FAILED', createdAt: inWindow, order: hubbleOrder },
+      where: {
+        toStatus: 'FAILED',
+        createdAt: inWindow,
+        order: {
+          partner: { clientId },
+          OR: [{ voucherProvider: HUBBLE_PROVIDER }, { cancelReason: HUBBLE_NO_ORDER_REFUND_REASON }],
+        },
+      },
     });
-    // PROCESSING = handed to Hubble, waiting for its webhook. updatedAt is stamped when the order
-    // entered PROCESSING (any later write would be a status move / reconcile flag).
+    // Stuck: measured from the order's latest PROCESSING status-history entry (updatedAt moves on any
+    // later write, e.g. a reconcile flag). An order with no PROCESSING entry at all falls back to updatedAt.
+    const cutoff = new Date(nowMs - HUBBLE_STUCK_MS);
     const stuckProcessing = await this.prisma.redemptionOrder.count({
-      where: { ...hubbleOrder, status: 'PROCESSING', updatedAt: { lt: new Date(nowMs - HUBBLE_STUCK_MS) } },
+      where: {
+        ...hubbleOrder,
+        status: 'PROCESSING',
+        statusHistory: { none: { toStatus: 'PROCESSING', createdAt: { gte: cutoff } } },
+        OR: [
+          { statusHistory: { some: { toStatus: 'PROCESSING', createdAt: { lt: cutoff } } } },
+          { statusHistory: { none: { toStatus: 'PROCESSING' } }, updatedAt: { lt: cutoff } },
+        ],
+      },
     });
     const needsReconcile = await this.prisma.redemptionOrder.count({
       where: { partner: { clientId }, metadata: { path: ['hubbleNeedsReconcile'], equals: true } },
@@ -310,10 +595,15 @@ export class ScheduledReportsService {
     const batches = await this.prisma.creditBatch.aggregate({
       where: { clientId, status: { in: ['CONFIRMED', 'PARTIALLY_REVERSED'] }, confirmedAt: inWindow },
       _count: { _all: true },
-      _sum: { totalPoints: true, totalPayoutPaise: true },
+      _sum: { totalPoints: true, totalPayoutPaise: true, totalOutlets: true },
     });
+    // Credit payouts are counted when the payment was RECORDED, not by paidAt: paidAt is the operator's
+    // Payment Date (IST midnight), almost always inside an already-sent window. No app path writes a
+    // PAID entry again (credits.service: UTR apply is the only PROCESSING→PAID/FAILED flip; a reversal
+    // leaves a PAID entry untouched; invoices only link fresh PENDING entries at confirm), so for a PAID
+    // or FAILED entry updatedAt IS the apply moment. Failures use the same clock.
     const creditPaid = await this.prisma.creditPayoutEntry.aggregate({
-      where: { clientId, status: 'PAID', paidAt: inWindow },
+      where: { clientId, status: 'PAID', updatedAt: inWindow },
       _count: { _all: true },
       _sum: { amountPaise: true },
     });
@@ -333,9 +623,29 @@ export class ScheduledReportsService {
       _count: { _all: true },
       _sum: { amountPaise: true },
     });
+    // STILL OPEN (not windowed): a FAILED credit entry waits for a re-bank download or a reversal (both move it).
+    const openCredit = await this.prisma.creditPayoutEntry.aggregate({
+      where: { clientId, status: 'FAILED' },
+      _count: { _all: true },
+      _sum: { amountPaise: true },
+    });
+    // A FAILED redemption payout normally fails + refunds its order in the same transaction (resolved). It is
+    // still open when the order was NOT failed/refunded (e.g. the issued-voucher refund block) or it has no order.
+    const failedTxns = await this.prisma.payoutTransaction.findMany({
+      where: { partner: { clientId }, status: 'FAILED' },
+      select: { redemptionOrderId: true },
+    });
+    const orderIds = failedTxns.map((t) => t.redemptionOrderId).filter((id): id is string => !!id);
+    const closed =
+      orderIds.length === 0
+        ? 0
+        : await this.prisma.redemptionOrder.count({
+            where: { id: { in: orderIds }, status: { in: [...REFUNDED_OR_CLOSED_ORDER] } },
+          });
     return {
       batchesConfirmed: num(batches._count?._all),
       batchPoints: num(batches._sum?.totalPoints),
+      batchOutlets: num(batches._sum?.totalOutlets),
       batchPayoutPaise: big(batches._sum?.totalPayoutPaise),
       creditPaid: num(creditPaid._count?._all),
       creditPaidPaise: big(creditPaid._sum?.amountPaise),
@@ -344,6 +654,9 @@ export class ScheduledReportsService {
       failedOrReturned: creditFailed + txnFailed,
       awaitingUtr: num(awaiting._count?._all),
       awaitingUtrPaise: big(awaiting._sum?.amountPaise),
+      openFailedCredit: num(openCredit._count?._all),
+      openFailedCreditPaise: big(openCredit._sum?.amountPaise),
+      openFailedRedemption: failedTxns.length - closed,
     };
   }
 
@@ -382,14 +695,23 @@ export class ScheduledReportsService {
   }
 
   /**
-   * Imports processed/failed in the window + every OPEN month (last 6, not future) with its last
-   * apply and the "targets changed since apply" flag — the SAME rule SalesMonthsService.list uses
-   * (resolveMonthState + tenantHasTargetNamesDef + latestTargetWriteByMonth + targetsNewerThanApply).
+   * Imports processed/failed in the window (both by finishedAt — the processor stamps it on READY and
+   * FAILED; the retention purge bumps updatedAt, so updatedAt would re-count old failures) + FAILED imports
+   * not superseded by a later READY one + every OPEN month (last 6, not future) with its last apply and the
+   * "targets changed since apply" flag — the SAME rule SalesMonthsService.list uses.
    */
   private async salesImport(clientId: string, w: DigestWindow, nowMs: number): Promise<SalesImportSection> {
     const inWindow = this.range(w);
     const processed = await this.prisma.salesImport.count({ where: { clientId, status: 'READY', finishedAt: inWindow } });
-    const failed = await this.prisma.salesImport.count({ where: { clientId, status: 'FAILED', updatedAt: inWindow } });
+    const failed = await this.prisma.salesImport.count({ where: { clientId, status: 'FAILED', finishedAt: inWindow } });
+    const lastReady = await this.prisma.salesImport.findFirst({
+      where: { clientId, status: 'READY' },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    const failedOpen = await this.prisma.salesImport.count({
+      where: { clientId, status: 'FAILED', ...(lastReady ? { createdAt: { gt: lastReady.createdAt } } : {}) },
+    });
 
     const current = istMonthKey(new Date(nowMs));
     const months: string[] = [];
@@ -406,6 +728,7 @@ export class ScheduledReportsService {
     return {
       processed,
       failed,
+      failedOpen,
       openMonths: open.reverse().map((m) => {
         const lastAppliedAt = byMonth.get(m)?.lastAppliedAt ?? null;
         const targetAt = targetTimes.get(m);
@@ -448,22 +771,24 @@ export class ScheduledReportsService {
    * (VoucherDispersalService.campaign summary): pending = QUEUED + BUYING + PENDING_RECONCILE; a WhatsApp is
    * failed when the row's mirrored status is FAILED / UNKNOWN (or the send itself errored with no status);
    * a PENDING_RECONCILE row is retryable 2 h after its last place attempt / flag (DISPERSAL_RETRY_MIN_AGE_MS).
-   * Window figures use the row timestamps the engine stamps (boughtAt; updatedAt for failures). Every count rides
-   * the (status, updatedAt) index; only PENDING_RECONCILE rows are read (two timestamps each).
+   * Window figures use the row timestamps the engine stamps (boughtAt; updatedAt for failures). STILL OPEN:
+   * rows in BUY_FAILED now (a Retry moves the row out of it) and BOUGHT rows whose WhatsApp is failed now (a
+   * Resend clears the status). Every count rides the (status, updatedAt) index; only PENDING_RECONCILE rows
+   * are read (two timestamps each).
    */
   private async voucherDispersal(w: DigestWindow, nowMs: number): Promise<VoucherDispersalSection> {
     const inWindow = this.range(w);
     const rows = this.prisma.voucherDispersalRow;
+    const messageFailedWhere = {
+      status: 'BOUGHT' as const,
+      OR: [{ messageStatus: { in: ['FAILED', 'UNKNOWN'] } }, { messageStatus: null, messageError: { not: null } }],
+    };
     const bought = await rows.count({ where: { status: 'BOUGHT', boughtAt: inWindow } });
     const buyFailed = await rows.count({ where: { status: 'BUY_FAILED', updatedAt: inWindow } });
-    const messageFailed = await rows.count({
-      where: {
-        status: 'BOUGHT',
-        updatedAt: inWindow,
-        OR: [{ messageStatus: { in: ['FAILED', 'UNKNOWN'] } }, { messageStatus: null, messageError: { not: null } }],
-      },
-    });
+    const messageFailed = await rows.count({ where: { ...messageFailedWhere, updatedAt: inWindow } });
     const pending = await rows.count({ where: { status: { in: ['QUEUED', 'BUYING', 'PENDING_RECONCILE'] } } });
+    const buyFailedOpen = await rows.count({ where: { status: 'BUY_FAILED' } });
+    const messageFailedOpen = await rows.count({ where: messageFailedWhere });
     const reconcile = await rows.findMany({
       where: { status: 'PENDING_RECONCILE' },
       select: { placeAttemptAt: true, pendingSince: true },
@@ -472,20 +797,21 @@ export class ScheduledReportsService {
       const anchors = [r.placeAttemptAt, r.pendingSince].filter((d): d is Date => !!d).map((d) => d.getTime());
       return anchors.length > 0 && Math.max(...anchors) + DISPERSAL_RETRY_MIN_AGE_MS <= nowMs;
     }).length;
-    return { bought, buyFailed, messageFailed, pending, pendingRetryable };
+    return { bought, buyFailed, messageFailed, pending, pendingRetryable, buyFailedOpen, messageFailedOpen };
   }
 
   // ── Shared inputs ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * All ACTIVE tenants (minus the Gifsy operator row) with display name and the gates for the
-   * optional sections: features.hubbleVoucherEnabled, features.salesImport, and the per-tenant
-   * `visibilityEnabled` program setting (=== true, the same rule as TenantSettingsService).
+   * Every tenant (minus the Gifsy operator row) with display name, status and the gates for the optional
+   * sections: features.hubbleVoucherEnabled, features.salesImport, and the per-tenant `visibilityEnabled`
+   * program setting (=== true, the same rule as TenantSettingsService). ONBOARDING / INACTIVE tenants are
+   * loaded too — the builder shows them (marked) when they have activity or open items, and names the rest.
    */
   private async loadTenants(): Promise<TenantMeta[]> {
     const clients = await this.prisma.client.findMany({
-      where: { status: 'ACTIVE', id: { not: REPORTS_CLIENT_ID } },
-      select: { id: true, internalName: true, branding: true, features: true },
+      where: { id: { not: REPORTS_CLIENT_ID } },
+      select: { id: true, internalName: true, status: true, branding: true, features: true },
     });
     const ids = clients.map((c) => c.id);
     const visRows =
@@ -503,6 +829,7 @@ export class ScheduledReportsService {
       return {
         clientId: c.id,
         name,
+        status: (c.status ?? 'ACTIVE') as TenantStatus,
         hubble: features.hubbleVoucherEnabled === true,
         salesImport: features.salesImport === true,
         visibility: visibilityOn.has(c.id),

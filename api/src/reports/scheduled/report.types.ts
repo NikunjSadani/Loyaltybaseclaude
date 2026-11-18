@@ -12,7 +12,7 @@
 /** Stable report key — also the key the recipient list is stored under (reportRecipients). */
 export type ReportKey = 'dailyDigest';
 
-/** The reporting window: [startMs, endMs) in UTC-ms (computed in IST by digestWindow). */
+/** The reporting window: [startMs, endMs) in UTC-ms — since the last SUCCESSFUL send (digest-run-state.ts). */
 export interface DigestWindow {
   startMs: number;
   endMs: number;
@@ -77,6 +77,8 @@ export interface FailedRedemptionRow {
 export interface RedemptionsSection {
   /** RedemptionOrder.createdAt in the window. */
   requested: number;
+  /** STILL OPEN (now, not windowed): orders FAILED but still holding deducted points (pointsDeducted > 0 — never refunded). */
+  failedNotRefunded: number;
   /** RedemptionStatusHistory → DELIVERED in the window. */
   completed: number;
   /** RedemptionStatusHistory → FAILED in the window. */
@@ -88,9 +90,13 @@ export interface RedemptionsSection {
 export interface VouchersSection {
   /** Hubble orders → DELIVERED in the window. */
   issued: number;
-  /** Hubble orders → FAILED in the window. */
+  /**
+   * Hubble-routed orders → FAILED in the window: voucherProvider 'Hubble' OR the no-Hubble-order refund
+   * (cancelReason HUBBLE_NO_ORDER_REFUND_REASON — that path deliberately does not stamp the provider).
+   * A subset of RedemptionsSection.failed.
+   */
   failed: number;
-  /** Hubble orders sitting in PROCESSING for more than 30 minutes right now. */
+  /** Hubble orders in PROCESSING whose latest PROCESSING history entry is > 30 min old (updatedAt when there is none). */
   stuckProcessing: number;
   /** Orders with an open hubbleNeedsReconcile flag right now. */
   needsReconcile: number;
@@ -101,16 +107,27 @@ export interface PayoutsSection {
   batchesConfirmed: number;
   /** Σ totalPoints of those batches. */
   batchPoints: number;
+  /** Σ totalOutlets of those batches (the old Credits email's "Outlets" figure). */
+  batchOutlets: number;
   /** Σ totalPayoutPaise of those batches (money committed). */
   batchPayoutPaise: bigint;
-  /** Credit payouts marked PAID (CreditPayoutEntry.paidAt in the window). */
+  /**
+   * Credit payouts RECORDED as PAID in the window — CreditPayoutEntry status PAID with updatedAt in the window
+   * (no app path writes a PAID entry again, so updatedAt = the UTR-apply moment; paidAt is the operator's
+   * payment DATE at IST midnight and would fall in an already-sent window).
+   */
   creditPaid: number;
   creditPaidPaise: bigint;
   /** Redemption payouts SUCCESS (PayoutTransaction.completedAt in the window). */
   redemptionPaid: number;
   redemptionPaidPaise: bigint;
-  /** Credit entries → FAILED + payout transactions → FAILED/REVERSED in the window. */
+  /** Credit entries recorded FAILED + payout transactions → FAILED/REVERSED in the window (updatedAt). */
   failedOrReturned: number;
+  /** STILL OPEN (now): credit entries FAILED (awaiting re-bank or reversal). */
+  openFailedCredit: number;
+  openFailedCreditPaise: bigint;
+  /** STILL OPEN (now): redemption payout transactions FAILED whose order was NOT failed/refunded (needs ops). */
+  openFailedRedemption: number;
   /** Credit entries downloaded for the bank file and waiting for the UTR upload (PROCESSING, now). */
   awaitingUtr: number;
   awaitingUtrPaise: bigint;
@@ -150,8 +167,10 @@ export interface SalesOpenMonth {
 export interface SalesImportSection {
   /** Imports that reached READY in the window (finishedAt). */
   processed: number;
-  /** Imports that went FAILED in the window. */
+  /** Imports that went FAILED in the window (finishedAt — the retention purge bumps updatedAt). */
   failed: number;
+  /** STILL OPEN (now): FAILED imports with no READY import created after them (not superseded). */
+  failedOpen: number;
   /** OPEN months (last 6, not future), newest first. */
   openMonths: SalesOpenMonth[];
 }
@@ -194,15 +213,26 @@ export interface VoucherDispersalSection {
   pending: number;
   /** Of `pending`: PENDING_RECONCILE rows past the 2 h retry gate (an admin may Retry now). */
   pendingRetryable: number;
+  /** STILL OPEN (now): rows in BUY_FAILED (a Retry moves a row out of BUY_FAILED). */
+  buyFailedOpen: number;
+  /** STILL OPEN (now): BOUGHT rows whose WhatsApp is FAILED / UNKNOWN (a Resend clears the status). */
+  messageFailedOpen: number;
 }
+
+/** Client.status values. */
+export type TenantStatus = 'ACTIVE' | 'ONBOARDING' | 'INACTIVE';
 
 export interface TenantDigest {
   clientId: string;
   name: string;
+  /** Client.status. A non-ACTIVE tenant is shown (with its status) only when it has activity or open items. */
+  status?: TenantStatus;
+  /** features.hubbleVoucherEnabled — the Vouchers section is loaded for EVERY tenant (live problems show even when off). */
+  hubbleEnabled?: boolean;
   kyc: SectionResult<KycSection>;
   points: SectionResult<PointsSection>;
   redemptions: SectionResult<RedemptionsSection>;
-  /** Present ONLY for tenants with features.hubbleVoucherEnabled. */
+  /** Loaded for every tenant; shown when non-empty (labelled "integration switched off" when the flag is off). */
   vouchers?: SectionResult<VouchersSection>;
   payouts: SectionResult<PayoutsSection>;
   messages: SectionResult<MessagesSection>;
@@ -219,10 +249,19 @@ export interface DigestInput {
   /** Date the digest is sent, e.g. "13 Nov 2026" (IST). */
   dateLabel: string;
   tenants: TenantDigest[];
-  /** OTP delivery failures in the window that carry no user (pre-login) — no tenant to attach them to. */
-  unattributedOtpFailed?: SectionResult<number>;
+  /** Gifsy-wide OTP delivery failures in the window: pre-login (no user) + Gifsy staff users (clientId 'gifsy'). */
+  gifsyOtpFailed?: SectionResult<{ preLogin: number; gifsyStaff: number }>;
   /** Gifsy-wide Voucher Dispersal; hidden when every figure is zero, "couldn't load" when it failed. */
   voucherDispersal?: SectionResult<VoucherDispersalSection>;
+  /**
+   * Run-level problems (a shared loader failed, the window was capped, …). Each is rendered in a red
+   * "This digest is incomplete" box at the top and counts as an attention item.
+   */
+  runNotices?: string[];
+  /** Informational window notes (first tracked run, manual re-run) — shown under the window, not attention. */
+  windowNotes?: string[];
+  /** Configured recipients DROPPED at send time (not on an allowed internal domain) — named in the footer. */
+  droppedRecipients?: string[];
 }
 
 /** The rendered digest. */
@@ -234,6 +273,8 @@ export interface DigestResult {
   tenantsNeedingAttention: number;
   /** Total "needs attention" items across tenants + the Gifsy-wide items. */
   attentionItems: number;
-  /** Gifsy-wide (not tenant) attention items: voucher dispersal. */
+  /** Gifsy-wide (not tenant) attention items: voucher dispersal, Gifsy-wide OTP failures, run notices. */
   gifsyWideItems: number;
+  /** Non-ACTIVE tenants left out because they had no activity and no open items (named in the email). */
+  hiddenTenants: number;
 }

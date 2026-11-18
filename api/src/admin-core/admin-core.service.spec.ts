@@ -1716,6 +1716,45 @@ describe('AdminCoreService', () => {
       expect(mockPrisma.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({ dailyDigest: [] });
     });
 
+    it('getReportRecipients reports the source, the allowed domains and any blocked (non-internal) address', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue({
+        settingValue: { creditsPayouts: ['finance@gifsy.in', 'cfo@acme.com'] },
+      });
+      const r = await service.getReportRecipients();
+      expect(r).toEqual({
+        recipients: { dailyDigest: ['finance@gifsy.in', 'cfo@acme.com'] },
+        source: 'legacy',
+        allowedDomains: ['gifsy.in'],
+        blocked: ['cfo@acme.com'],
+      });
+      mockPrisma.programSetting.findFirst.mockResolvedValue(null);
+      expect((await service.getReportRecipients()).source).toBe('none');
+      mockPrisma.programSetting.findFirst.mockResolvedValue({ settingValue: { dailyDigest: [] } });
+      expect((await service.getReportRecipients()).source).toBe('saved');
+    });
+
+    it('setReportRecipients REFUSES a non-internal address (400 naming it) and writes nothing', async () => {
+      await expect(
+        service.setReportRecipients(gifsy, { dailyDigest: ['ops@gifsy.in', 'client@deoleo.com', 'x@evil-gifsy.in'] }),
+      ).rejects.toThrow(/client@deoleo\.com.*x@evil-gifsy\.in|only internal/i);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('setReportRecipients honours REPORTS_RECIPIENT_DOMAINS (comma-separated)', async () => {
+      const prev = process.env.REPORTS_RECIPIENT_DOMAINS;
+      process.env.REPORTS_RECIPIENT_DOMAINS = 'gifsy.in, @notify.gifsy.in';
+      try {
+        mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'ps' });
+        const r = await service.setReportRecipients(gifsy, { dailyDigest: ['a@notify.gifsy.in', 'b@gifsy.in'] });
+        expect(r.recipients.dailyDigest).toEqual(['a@notify.gifsy.in', 'b@gifsy.in']);
+        expect(r.allowedDomains).toEqual(['gifsy.in', 'notify.gifsy.in']);
+        expect(r.source).toBe('saved');
+      } finally {
+        if (prev === undefined) delete process.env.REPORTS_RECIPIENT_DOMAINS;
+        else process.env.REPORTS_RECIPIENT_DOMAINS = prev;
+      }
+    });
+
     it('setReportRecipients forbids a non-GIFSY caller', async () => {
       await expect(
         service.setReportRecipients(clientAdmin, { dailyDigest: ['finance@gifsy.in'] }),

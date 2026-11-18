@@ -122,7 +122,9 @@ export class SetHolidaysDto {
  * DTO for PUT /v1/admin/settings/report-recipients — the platform-global recipient list of the
  * internal Daily Operations Digest (GIFSY_ADMIN only). Replaces the whole store (the legacy
  * per-report lists are dropped on save). Capped at 50 addresses; each must be a valid email. The
- * service further lowercases + de-dups before storing.
+ * service further lowercases + de-dups, and REFUSES (400) any address whose domain is not on the
+ * internal allow-list (REPORTS_RECIPIENT_DOMAINS, default gifsy.in — env-driven, so it is enforced
+ * in the service rather than a static decorator here).
  */
 export class SetReportRecipientsDto {
   @IsArray()

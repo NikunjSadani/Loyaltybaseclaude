@@ -5,11 +5,13 @@
  *
  * PURE: no DB, no clock. The runner (scheduled-reports.service.ts) does all the Prisma and passes
  * plain structs (report.types.ts). Every dynamic value is HTML-escaped (`esc`). Also exports the
- * other pure pieces the runner needs: the reporting window (`digestWindow`) and the KYC pending-SLA
- * roll-up (`kycPendingBuckets`, which reuses the shared two-stage `kycStageSla`).
+ * other pure pieces the runner needs: the reporting window label (`windowBetween`, and `digestWindow` —
+ * the first-run fallback) and the KYC pending-SLA roll-up (`kycPendingBuckets`, which reuses the admin KYC
+ * dashboard's own rule `kycPendingAge`).
  */
 
-import { kycStageSla, latestGifsyEntryMs, KycSlaTargets } from '../../common/kyc-sla-stage';
+import type { KycSlaTargets } from '../../common/kyc-sla-stage';
+import { kycPendingAge } from '../../admin-core/dashboards/kyc-pending-sla';
 import { formatDateIST } from '../../common/ist-date';
 import { isFastTrackRow, type KycFastTrackHistoryRow } from '../../kyc/kyc-fast-track.helper';
 import { monthLabel } from '../../sales-import/months/month-state';
@@ -47,16 +49,21 @@ function istStamp(ms: number): string {
   return `${WEEKDAYS[s.getUTCDay()]} ${date}, ${hh}:${mm}`;
 }
 
+/** A window [startMs, endMs) with its IST label. */
+export function windowBetween(startMs: number, endMs: number): DigestWindow {
+  return { startMs, endMs, label: `${istStamp(startMs)} → ${istStamp(endMs)} IST` };
+}
+
 /**
- * The digest window, ending at `nowMs`: since the same time on the previous WORKING day. The digest
- * runs Mon–Sat, so on a Monday (IST) the window reaches back to Saturday at the same time (48 h,
- * covering Sunday); any other day it is the last 24 h.
+ * The FIRST-RUN fallback window, ending at `nowMs`: since the same time on the previous WORKING day.
+ * The digest runs Mon–Sat, so on a Monday (IST) the window reaches back to Saturday at the same time
+ * (48 h, covering Sunday); any other day it is the last 24 h. Once a successful send is recorded the
+ * window runs from that send's end instead (digest-run-state.ts `planDigestWindow`).
  */
 export function digestWindow(nowMs: number): DigestWindow {
   const istWeekday = new Date(nowMs + IST_OFFSET_MS).getUTCDay();
   const span = istWeekday === 1 ? 2 * DAY_MS : DAY_MS;
-  const startMs = nowMs - span;
-  return { startMs, endMs: nowMs, label: `${istStamp(startMs)} → ${istStamp(nowMs)} IST` };
+  return windowBetween(nowMs - span, nowMs);
 }
 
 // ── KYC pending roll-up (reuses the shared two-stage business-hours SLA) ─────────────────────
@@ -84,9 +91,12 @@ export interface KycPendingRollup {
 }
 
 /**
- * Bucket one tenant's pending KYC rows by stage (field / Gifsy) and SLA state. Field rows age from
- * submission, Gifsy rows from the LATEST PENDING_GIFSY entry — each against its own target, in
- * business hours (weekends + the holiday set excluded) — exactly as the KYC dashboards do.
+ * Bucket one tenant's pending KYC rows by stage (field / Gifsy) and SLA state with the admin KYC
+ * dashboard's OWN rule (`kycPendingAge`, dashboards/kyc-pending-sla.ts): field rows age from
+ * submission, Gifsy rows from the LATEST PENDING_GIFSY entry, in business hours (weekends + the
+ * holiday set excluded), UNROUNDED — breached when age > target, exactly the dashboard's test (no
+ * rounding before the comparison). Nearing = 75 % of target ≤ age ≤ target. The runner feeds it the
+ * dashboard's population (latest submission per addressable outlet), so the counts match the card.
  *
  * GIFSY-reject fast-track: a fast-tracked KYC skipped the field chain, so it is NEVER a field-SLA item — the same
  * rule as the admin dashboard's field-chain exclusion (`isFastTrackRow` on the history; proven only by the marker,
@@ -106,27 +116,23 @@ export function kycPendingBuckets(
   let fieldFastTrackedExcluded = 0;
   for (const r of rows) {
     if (!r || typeof r.status !== 'string') continue;
-    const fastTracked = Array.isArray(r.statusHistory) && r.statusHistory.some((h) => isFastTrackRow(h));
-    const sla = kycStageSla(
-      {
-        status: r.status,
-        submittedAt: r.submittedAt ?? r.createdAt ?? null,
-        gifsyEnteredAt: latestGifsyEntryMs(r.statusHistory as never),
-        nowMs,
-      },
-      targets,
+    const live = kycPendingAge(
+      { status: r.status, submittedAt: r.submittedAt, createdAt: r.createdAt, statusHistory: r.statusHistory as never },
+      nowMs,
       holidays,
     );
-    if (sla.clock === 'none' || sla.frozen) continue;
-    if (fastTracked && sla.clock === 'field') {
+    if (!live) continue;
+    const fastTracked = Array.isArray(r.statusHistory) && r.statusHistory.some((h) => isFastTrackRow(h));
+    if (fastTracked && live.stage === 'field') {
       fieldFastTrackedExcluded += 1;
       continue;
     }
     if (fastTracked) gifsyFastTracked += 1;
-    const b = sla.clock === 'gifsy' ? gifsy : field;
+    const target = live.stage === 'gifsy' ? targets.gifsyHrs : targets.fieldHrs;
+    const b = live.stage === 'gifsy' ? gifsy : field;
     b.pending += 1;
-    if (sla.breached) b.breached += 1;
-    else if (sla.targetHrs !== null && sla.ageHrs >= sla.targetHrs * KYC_NEARING_RATIO) b.nearing += 1;
+    if (live.ageHrs > target) b.breached += 1;
+    else if (live.ageHrs >= target * KYC_NEARING_RATIO) b.nearing += 1;
     else b.within += 1;
   }
   return { field, gifsy, gifsyFastTracked, fieldFastTrackedExcluded };
@@ -159,22 +165,43 @@ export function needsAttention(t: TenantDigest): string[] {
     out.push(plural(t.points.data.negativeWallets, 'negative wallet', 'negative wallets'));
   }
 
+  // Redemption failures and Hubble voucher failures overlap (a Hubble failure IS a failed redemption):
+  // one bullet, with the Hubble share inside it. The Hubble bullet stands alone only when the
+  // Redemptions section itself could not be loaded.
   failed('Redemptions', t.redemptions);
-  if (t.redemptions.ok && t.redemptions.data.failed > 0) {
-    out.push(`${plural(t.redemptions.data.failed, 'redemption', 'redemptions')} failed`);
+  const hubbleFailed = t.vouchers?.ok ? t.vouchers.data.failed : 0;
+  if (t.redemptions.ok) {
+    const r = t.redemptions.data;
+    if (r.failed > 0) {
+      const share = hubbleFailed > 0 ? ` (${intIN(Math.min(hubbleFailed, r.failed))} via Hubble)` : '';
+      out.push(`${plural(r.failed, 'redemption', 'redemptions')} failed${share}`);
+    }
+    if (r.failedNotRefunded > 0) {
+      out.push(`Still open: ${plural(r.failedNotRefunded, 'failed redemption still holds', 'failed redemptions still hold')} the outlet's points (not refunded)`);
+    }
+  } else if (hubbleFailed > 0) {
+    out.push(`Hubble: ${plural(hubbleFailed, 'voucher', 'vouchers')} failed`);
   }
 
   failed('Vouchers (Hubble)', t.vouchers);
   if (t.vouchers?.ok) {
     const v = t.vouchers.data;
-    if (v.failed > 0) out.push(`Hubble: ${plural(v.failed, 'voucher', 'vouchers')} failed`);
     if (v.stuckProcessing > 0) out.push(`Hubble: ${plural(v.stuckProcessing, 'voucher', 'vouchers')} stuck in processing > 30 min`);
     if (v.needsReconcile > 0) out.push(`Hubble: ${plural(v.needsReconcile, 'order needs', 'orders need')} reconcile`);
   }
 
   failed('Payouts', t.payouts);
-  if (t.payouts.ok && t.payouts.data.failedOrReturned > 0) {
-    out.push(`${plural(t.payouts.data.failedOrReturned, 'payout', 'payouts')} failed or returned`);
+  if (t.payouts.ok) {
+    const p = t.payouts.data;
+    if (p.failedOrReturned > 0) out.push(`${plural(p.failedOrReturned, 'payout', 'payouts')} failed or returned in the window`);
+    const parts: string[] = [];
+    if (p.openFailedCredit > 0) {
+      parts.push(`${plural(p.openFailedCredit, 'credit payout', 'credit payouts')} (${rupees(p.openFailedCreditPaise)}) awaiting re-bank or reversal`);
+    }
+    if (p.openFailedRedemption > 0) {
+      parts.push(`${plural(p.openFailedRedemption, 'redemption payout', 'redemption payouts')} failed without a refund`);
+    }
+    if (parts.length > 0) out.push(`Still open: ${parts.join('; ')}`);
   }
 
   failed('Messages', t.messages);
@@ -190,6 +217,9 @@ export function needsAttention(t: TenantDigest): string[] {
   if (t.salesImport?.ok) {
     const s = t.salesImport.data;
     if (s.failed > 0) out.push(`Sales Import: ${plural(s.failed, 'import', 'imports')} failed`);
+    if (s.failedOpen > 0) {
+      out.push(`Still open: ${plural(s.failedOpen, 'failed Sales Import', 'failed Sales Imports')} not yet replaced by a successful upload`);
+    }
     for (const m of s.openMonths) {
       if (m.targetsChangedSinceApply) out.push(`Targets changed — recalculate ${monthLabel(m.month)}`);
     }
@@ -199,9 +229,20 @@ export function needsAttention(t: TenantDigest): string[] {
   return out;
 }
 
-/** Gifsy-wide (not tenant) attention items — today: Voucher Dispersal. */
-export function gifsyWideAttention(input: Pick<DigestInput, 'voucherDispersal'>): string[] {
-  const out: string[] = [];
+/**
+ * Gifsy-wide (not tenant) attention items: run notices (a shared loader failed, the window was capped…),
+ * Gifsy-wide OTP failures (pre-login + Gifsy staff, or their load failure) and Voucher Dispersal.
+ */
+export function gifsyWideAttention(
+  input: Pick<DigestInput, 'voucherDispersal' | 'gifsyOtpFailed' | 'runNotices'>,
+): string[] {
+  const out: string[] = [...(input.runNotices ?? [])];
+  const otp = input.gifsyOtpFailed;
+  if (otp && !otp.ok) out.push(`Couldn't load the Gifsy-wide OTP failures (${otp.error})`);
+  else if (otp && otp.ok) {
+    if (otp.data.preLogin > 0) out.push(`${plural(otp.data.preLogin, 'OTP', 'OTPs')} failed delivery before login (no tenant known)`);
+    if (otp.data.gifsyStaff > 0) out.push(`${plural(otp.data.gifsyStaff, 'OTP', 'OTPs')} to Gifsy staff failed delivery`);
+  }
   const vd = input.voucherDispersal;
   if (!vd) return out;
   if (!vd.ok) {
@@ -209,8 +250,17 @@ export function gifsyWideAttention(input: Pick<DigestInput, 'voucherDispersal'>)
     return out;
   }
   const d = vd.data;
-  if (d.buyFailed > 0) out.push(`Voucher dispersal: ${plural(d.buyFailed, 'purchase', 'purchases')} failed`);
-  if (d.messageFailed > 0) out.push(`Voucher dispersal: ${plural(d.messageFailed, 'WhatsApp message', 'WhatsApp messages')} failed`);
+  // Window failures and the standing "still failed now" figures overlap — one bullet per topic.
+  if (d.buyFailed > 0 || d.buyFailedOpen > 0) {
+    out.push(
+      `Voucher dispersal: ${plural(d.buyFailed, 'purchase', 'purchases')} failed in the window; ${intIN(d.buyFailedOpen)} still failed (not retried)`,
+    );
+  }
+  if (d.messageFailed > 0 || d.messageFailedOpen > 0) {
+    out.push(
+      `Voucher dispersal: ${plural(d.messageFailed, 'WhatsApp message', 'WhatsApp messages')} failed in the window; ${intIN(d.messageFailedOpen)} still failed (not resent)`,
+    );
+  }
   if (d.pendingRetryable > 0) {
     out.push(`Voucher dispersal: ${plural(d.pendingRetryable, 'purchase', 'purchases')} unconfirmed by Hubble for over 2 h (Retry available)`);
   }
@@ -305,7 +355,12 @@ function billingBody(b: BillingSection): string {
 }
 
 const dispersalEmpty = (d: VoucherDispersalSection) =>
-  d.bought === 0 && d.buyFailed === 0 && d.messageFailed === 0 && d.pending === 0;
+  d.bought === 0 &&
+  d.buyFailed === 0 &&
+  d.messageFailed === 0 &&
+  d.pending === 0 &&
+  d.buyFailedOpen === 0 &&
+  d.messageFailedOpen === 0;
 
 /** Gifsy-wide Voucher Dispersal block for the summary ('' when every figure is zero). */
 function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): string {
@@ -318,6 +373,8 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
     metricLine('Right now', [
       ['pending', intIN(d.pending), accentIf(d.pending, 'amber')],
       ['unconfirmed > 2 h', intIN(d.pendingRetryable), accentIf(d.pendingRetryable, 'red')],
+      ['purchase still failed', intIN(d.buyFailedOpen), accentIf(d.buyFailedOpen, 'red')],
+      ['WhatsApp still failed', intIN(d.messageFailedOpen), accentIf(d.messageFailedOpen, 'red')],
     ]),
   );
 }
@@ -364,13 +421,16 @@ function tenantSections(t: TenantDigest): string {
     renderSection(
       'Redemptions',
       t.redemptions,
-      (r) => r.requested === 0 && r.completed === 0 && r.failed === 0,
+      (r) => r.requested === 0 && r.completed === 0 && r.failed === 0 && r.failedNotRefunded === 0,
       (r) =>
         metricLine('In window', [
           ['requested', intIN(r.requested)],
           ['completed', intIN(r.completed)],
           ['failed', intIN(r.failed), accentIf(r.failed, 'red')],
         ]) +
+        (r.failedNotRefunded > 0
+          ? metricLine('Right now', [['failed, points not refunded', intIN(r.failedNotRefunded), 'red']])
+          : '') +
         (r.failedRows.length > 0
           ? table(
               [{ label: 'Outlet' }, { label: 'Reward' }, { label: 'Reason' }],
@@ -382,7 +442,7 @@ function tenantSections(t: TenantDigest): string {
           : ''),
     ),
     renderSection(
-      'Vouchers (Hubble)',
+      t.hubbleEnabled === false ? 'Vouchers (Hubble) — integration switched off' : 'Vouchers (Hubble)',
       t.vouchers,
       (v) => v.issued === 0 && v.failed === 0 && v.stuckProcessing === 0 && v.needsReconcile === 0,
       (v) =>
@@ -399,11 +459,18 @@ function tenantSections(t: TenantDigest): string {
       'Payouts',
       t.payouts,
       (p) =>
-        p.batchesConfirmed === 0 && p.creditPaid === 0 && p.redemptionPaid === 0 && p.failedOrReturned === 0 && p.awaitingUtr === 0,
+        p.batchesConfirmed === 0 &&
+        p.creditPaid === 0 &&
+        p.redemptionPaid === 0 &&
+        p.failedOrReturned === 0 &&
+        p.awaitingUtr === 0 &&
+        p.openFailedCredit === 0 &&
+        p.openFailedRedemption === 0,
       (p) =>
         (p.batchesConfirmed > 0
           ? metricLine('Batches', [
               ['confirmed', intIN(p.batchesConfirmed)],
+              ['outlets', intIN(p.batchOutlets)],
               ['points', intIN(p.batchPoints)],
               ['payout committed', rupees(p.batchPayoutPaise)],
             ])
@@ -415,7 +482,13 @@ function tenantSections(t: TenantDigest): string {
         metricLine('Issues', [
           ['failed / returned', intIN(p.failedOrReturned), accentIf(p.failedOrReturned, 'red')],
           ['awaiting UTR', `${intIN(p.awaitingUtr)} (${rupees(p.awaitingUtrPaise)})`, accentIf(p.awaitingUtr, 'amber')],
-        ]),
+        ]) +
+        (p.openFailedCredit + p.openFailedRedemption > 0
+          ? metricLine('Still open', [
+              ['credit failed (re-bank / reverse)', `${intIN(p.openFailedCredit)} (${rupees(p.openFailedCreditPaise)})`, accentIf(p.openFailedCredit, 'red')],
+              ['redemption failed, no refund', intIN(p.openFailedRedemption), accentIf(p.openFailedRedemption, 'red')],
+            ])
+          : ''),
     ),
     renderSection(
       'Messages — delivery failures',
@@ -443,12 +516,13 @@ function tenantSections(t: TenantDigest): string {
     renderSection(
       'Sales Import',
       t.salesImport,
-      (s) => s.processed === 0 && s.failed === 0 && !s.openMonths.some((m) => m.targetsChangedSinceApply),
+      (s) => s.processed === 0 && s.failed === 0 && s.failedOpen === 0 && !s.openMonths.some((m) => m.targetsChangedSinceApply),
       (s) =>
         metricLine('In window', [
           ['processed', intIN(s.processed)],
           ['failed', intIN(s.failed), accentIf(s.failed, 'red')],
         ]) +
+        (s.failedOpen > 0 ? metricLine('Right now', [['failed, not yet replaced', intIN(s.failedOpen), 'red']]) : '') +
         (s.openMonths.length > 0
           ? table(
               [{ label: 'Open month' }, { label: 'Last applied' }, { label: 'Targets changed since apply' }],
@@ -471,7 +545,11 @@ function tenantBlock(t: TenantDigest, attention: string[]): string {
     attention.length > 0
       ? `<span style="display:inline-block;margin-left:8px;padding:2px 8px;border-radius:999px;background:#fef2f2;color:#b91c1c;font-size:12px;font-weight:700;">${esc(plural(attention.length, 'needs attention', 'need attention'))}</span>`
       : '';
-  const head = `<div style="font-size:16px;font-weight:700;color:#111827;margin:0 0 8px;">${esc(t.name)}${badge}</div>`;
+  const statusBadge =
+    t.status && t.status !== 'ACTIVE'
+      ? `<span style="display:inline-block;margin-left:8px;padding:2px 8px;border-radius:999px;background:#f3f4f6;color:#374151;font-size:12px;font-weight:700;">${esc(t.status)}</span>`
+      : '';
+  const head = `<div style="font-size:16px;font-weight:700;color:#111827;margin:0 0 8px;">${esc(t.name)}${statusBadge}${badge}</div>`;
   const sections = tenantSections(t);
   const bullets =
     attention.length > 0
@@ -487,16 +565,38 @@ function tenantBlock(t: TenantDigest, attention: string[]): string {
 
 const headline = <T,>(r: SectionResult<T> | undefined, pick: (d: T) => string): string => (r ? (r.ok ? pick(r.data) : '—') : '—');
 
+const RED_BOX = 'background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;margin:8px 0;';
+const RED_BOX_TITLE = 'font-size:12px;font-weight:700;color:#b91c1c;text-transform:uppercase;letter-spacing:.04em;margin:0 0 4px;';
+
+function redList(title: string, items: string[], attr = ''): string {
+  return `<div${attr} style="${RED_BOX}"><div style="${RED_BOX_TITLE}">${esc(title)}</div><ul style="margin:0;padding-left:18px;font-size:13px;color:#7f1d1d;">${items
+    .map((a) => `<li style="margin:2px 0;">${esc(a)}</li>`)
+    .join('')}</ul></div>`;
+}
+
+/**
+ * A non-ACTIVE (ONBOARDING / INACTIVE) tenant is shown only when it has something to say: an attention
+ * item, or a non-empty section (Billing progress — always rendered for Sales-Import tenants — doesn't count).
+ */
+function hasActivity(t: TenantDigest, attention: string[]): boolean {
+  return attention.length > 0 || tenantSections({ ...t, billing: undefined }) !== '';
+}
+
+const nameWithStatus = (t: TenantDigest) => (t.status && t.status !== 'ACTIVE' ? `${t.name} (${t.status})` : t.name);
+
 /** Render the digest. Always produces an email (an all-quiet day says so). */
 export function buildDailyOpsDigest(input: DigestInput): DigestResult {
-  const rows = input.tenants.map((t) => ({ t, attention: needsAttention(t) }));
+  const all = input.tenants.map((t) => ({ t, attention: needsAttention(t) }));
+  // ACTIVE tenants always; ONBOARDING / INACTIVE ones only with activity or open items — the rest are
+  // NAMED at the bottom (never silently dropped).
+  const rows = all.filter(({ t, attention }) => !t.status || t.status === 'ACTIVE' || hasActivity(t, attention));
+  const hidden = all.filter((r) => !rows.includes(r)).map(({ t }) => nameWithStatus(t));
   rows.sort((a, b) => b.attention.length - a.attention.length || a.t.name.localeCompare(b.t.name));
 
   const tenantsNeedingAttention = rows.filter((r) => r.attention.length > 0).length;
   const gifsyWide = gifsyWideAttention(input);
   const attentionItems = rows.reduce((s, r) => s + r.attention.length, 0) + gifsyWide.length;
-  const otp = input.unattributedOtpFailed;
-  const otpProblem = otp ? (!otp.ok || otp.data > 0) : false;
+  const incomplete = (input.runNotices?.length ?? 0) > 0;
 
   const summaryTable = table(
     [
@@ -508,24 +608,26 @@ export function buildDailyOpsDigest(input: DigestInput): DigestResult {
       { label: 'Payouts paid', align: 'right' },
     ],
     rows.map(({ t, attention }) => [
-      esc(t.name),
+      esc(nameWithStatus(t)),
       attention.length > 0 ? `<strong style="color:#b91c1c;">${esc(intIN(attention.length))}</strong>` : esc('0'),
       esc(headline(t.kyc, (k) => intIN(k.field.pending + k.gifsy.pending))),
       esc(headline(t.redemptions, (r) => intIN(r.requested))),
       esc(headline(t.points, (p) => intIN(p.credited))),
       esc(headline(t.payouts, (p) => intIN(p.creditPaid + p.redemptionPaid))),
     ]),
-    'No active tenants.',
+    'No tenants to show.',
   );
 
-  const allQuiet = tenantsNeedingAttention === 0 && !otpProblem && gifsyWide.length === 0;
-  const gifsyWideBox =
-    gifsyWide.length > 0
-      ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;margin:8px 0;"><div style="font-size:12px;font-weight:700;color:#b91c1c;text-transform:uppercase;letter-spacing:.04em;margin:0 0 4px;">Needs attention — Gifsy-wide</div><ul style="margin:0;padding-left:18px;font-size:13px;color:#7f1d1d;">${gifsyWide
-          .map((a) => `<li style="margin:2px 0;">${esc(a)}</li>`)
-          .join('')}</ul></div>`
-      : '';
+  // "All quiet" only when there is NOTHING red anywhere: no tenant item, no Gifsy-wide item (incl. OTP
+  // failures and run notices).
+  const allQuiet = attentionItems === 0;
+  const runNoticeBox = incomplete
+    ? redList('This digest is incomplete', input.runNotices ?? [], ' data-run-notices="1"')
+    : '';
+  const otherGifsyWide = gifsyWide.slice(input.runNotices?.length ?? 0);
+  const gifsyWideBox = otherGifsyWide.length > 0 ? redList('Needs attention — Gifsy-wide', otherGifsyWide) : '';
   const summary =
+    runNoticeBox +
     sectionHeading('All tenants') +
     statRow([
       { label: 'Tenants', value: intIN(rows.length) },
@@ -533,34 +635,52 @@ export function buildDailyOpsDigest(input: DigestInput): DigestResult {
       { label: 'Attention items', value: intIN(attentionItems), accent: attentionItems > 0 ? 'red' : 'green' },
     ]) +
     (allQuiet
-      ? `<div style="font-size:14px;font-weight:600;color:#047857;margin:6px 0 10px;">All quiet — no tenant needs attention.</div>`
+      ? `<div style="font-size:14px;font-weight:600;color:#047857;margin:6px 0 10px;">All quiet — nothing needs attention.</div>`
       : '') +
     summaryTable +
-    (otp && !otp.ok
-      ? `<div style="font-size:13px;color:#b91c1c;margin:6px 0;">Couldn't load the pre-login OTP failures (${esc(otp.error)}).</div>`
-      : otp && otp.ok && otp.data > 0
-        ? `<div style="font-size:13px;color:#b91c1c;margin:6px 0;">${esc(plural(otp.data, 'OTP', 'OTPs'))} failed delivery before login (no tenant known).</div>`
-        : '') +
     gifsyWideBox +
     dispersalBlock(input.voucherDispersal);
 
-  const body = summary + sectionHeading('By tenant') + rows.map(({ t, attention }) => tenantBlock(t, attention)).join('');
+  const hiddenNote =
+    hidden.length > 0
+      ? `<div style="font-size:12px;color:${MUTED};margin:12px 0 0;">${esc(
+          `Not shown (not ACTIVE, no activity and no open items): ${hidden.join(', ')}.`,
+        )}</div>`
+      : '';
+  const body = summary + sectionHeading('By tenant') + rows.map(({ t, attention }) => tenantBlock(t, attention)).join('') + hiddenNote;
 
+  const windowNotes = (input.windowNotes ?? []).filter((n) => n.trim() !== '');
   const html = emailShell({
     title: 'Daily operations digest',
-    intro: `Window: ${input.window.label}`,
+    intro: `Window: ${input.window.label}${windowNotes.length > 0 ? ` — ${windowNotes.join(' ')}` : ''}`,
     body,
     dateLabel: input.dateLabel,
+    footerNote:
+      input.droppedRecipients && input.droppedRecipients.length > 0
+        ? `Not sent to ${input.droppedRecipients.join(', ')} — not an internal address (only internal Gifsy addresses may receive this digest). Remove ${input.droppedRecipients.length === 1 ? 'it' : 'them'} in Gifsy Settings → Report Recipients.`
+        : undefined,
   });
+
+  // Subject: never "0 need attention" while the body shows a red problem — the count is EVERY attention
+  // item (tenant items + Gifsy-wide items incl. OTP failures, standing open items and run notices).
+  const where = [
+    tenantsNeedingAttention > 0 ? plural(tenantsNeedingAttention, 'tenant', 'tenants') : null,
+    gifsyWide.length > 0 ? 'Gifsy-wide' : null,
+  ]
+    .filter(Boolean)
+    .join(' + ');
+  const status =
+    attentionItems === 0
+      ? 'all quiet'
+      : `${intIN(attentionItems)} ${attentionItems === 1 ? 'item needs' : 'items need'} attention (${where})`;
 
   return {
     key: 'dailyDigest',
-    // Gifsy-wide items are not a tenant, so they don't change N — but the subject must not read "0 need
-    // attention" while a dispersal problem sits in the body.
-    subject: `Gifsy daily operations — ${input.dateLabel} — ${tenantsNeedingAttention} need attention${gifsyWide.length > 0 ? ' + Gifsy-wide items' : ''}`,
+    subject: `[Gifsy] Daily operations — ${input.dateLabel} — ${incomplete ? 'INCOMPLETE — ' : ''}${status}`,
     html,
     tenantsNeedingAttention,
     attentionItems,
     gifsyWideItems: gifsyWide.length,
+    hiddenTenants: hidden.length,
   };
 }

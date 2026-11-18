@@ -6,13 +6,20 @@
  *
  * Storage: ONE programSetting row under the operator client (REPORTS_CLIENT_ID), key
  * REPORT_RECIPIENTS_KEY, value = `{ dailyDigest: string[] }`. Platform-level, not per-tenant.
- * GIFSY_ADMIN edits it; CLIENT_ADMIN can read it.
+ * Only a Gifsy operator (GIFSY_ADMIN / permitted GIFSY_STAFF) can read or change it — both the GET
+ * and the PUT are Gifsy-only; tenant admins can neither see nor set it.
  *
  * LEGACY FALLBACK (owner-approved 2026-11-13): before the digest there were two emails with their
  * own lists (`creditsPayouts`, `kycActionables`). If the stored row has NO `dailyDigest` key, the
  * digest goes to the UNION of those two legacy lists — so whoever got today's emails keeps getting
  * the digest without anyone re-entering addresses. Once a `dailyDigest` list is saved (even an
  * empty one — an explicit "nobody") it is used as-is and the legacy keys are ignored.
+ *
+ * INTERNAL-ONLY RULE: the digest summarises every tenant, so it may only go to internal addresses.
+ * The allowed domains come from REPORTS_RECIPIENT_DOMAINS (comma-separated, default `gifsy.in`;
+ * exact match on the part after '@' — a sub-domain must be listed itself). Enforced on SAVE (the
+ * PUT refuses a non-allowed address) and again at SEND (a non-allowed address — e.g. one inherited
+ * from a legacy list — is dropped and named in the email footer + the logs).
  *
  * There is no code default — an unset row means "no recipients yet".
  */
@@ -22,6 +29,8 @@ import type { PrismaService } from '../prisma/prisma.service';
 /** The platform report-recipients store lives on the operator client's settings row. */
 export const REPORTS_CLIENT_ID = 'gifsy';
 export const REPORT_RECIPIENTS_KEY = 'reportRecipients';
+/** Allowed recipient domains when REPORTS_RECIPIENT_DOMAINS is unset/blank. */
+export const DEFAULT_RECIPIENT_DOMAINS = ['gifsy.in'];
 
 /** Stable report key — identical to report.types.ts ReportKey. */
 export type ReportKey = 'dailyDigest';
@@ -30,6 +39,9 @@ export type ReportKey = 'dailyDigest';
 export interface ReportRecipients {
   dailyDigest: string[];
 }
+
+/** Where the effective list came from: a saved digest list, the legacy-lists union, or no row/keys at all. */
+export type RecipientsSource = 'saved' | 'legacy' | 'none';
 
 /** A simple, tolerant email shape check — enough to drop obvious junk before storing. */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -47,31 +59,57 @@ function cleanEmails(raw: unknown): string[] {
 }
 
 /**
- * Normalize a stored settingValue into the effective ReportRecipients. `dailyDigest` present (an
- * array) → that list, cleaned. Absent → the union of the legacy `creditsPayouts` + `kycActionables`
- * lists (cleaned, de-duped, creditsPayouts order first). A non-object (absent/blank row) → [].
+ * Normalize a stored settingValue into the effective list + where it came from. `dailyDigest`
+ * present (an array) → that list, cleaned ('saved'). Absent → the union of the legacy
+ * `creditsPayouts` + `kycActionables` lists (cleaned, de-duped, creditsPayouts order first) —
+ * 'legacy' when either legacy key exists, else 'none'.
  */
-export function normalizeReportRecipients(raw: unknown): ReportRecipients {
+export function resolveReportRecipients(raw: unknown): ReportRecipients & { source: RecipientsSource } {
   const obj = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  if (Array.isArray(obj.dailyDigest)) return { dailyDigest: cleanEmails(obj.dailyDigest) };
+  if (Array.isArray(obj.dailyDigest)) return { dailyDigest: cleanEmails(obj.dailyDigest), source: 'saved' };
+  const hasLegacy = 'creditsPayouts' in obj || 'kycActionables' in obj;
   const legacy = [...cleanEmails(obj.creditsPayouts), ...cleanEmails(obj.kycActionables)];
-  return { dailyDigest: [...new Set(legacy)] };
+  return { dailyDigest: [...new Set(legacy)], source: hasLegacy ? 'legacy' : 'none' };
+}
+
+/** Back-compat shape-only normalizer (no source). */
+export function normalizeReportRecipients(raw: unknown): ReportRecipients {
+  return { dailyDigest: resolveReportRecipients(raw).dailyDigest };
+}
+
+/** The allowed recipient domains (lowercase, no '@'), from REPORTS_RECIPIENT_DOMAINS or the default. */
+export function allowedRecipientDomains(env: string | undefined = process.env.REPORTS_RECIPIENT_DOMAINS): string[] {
+  const list = (env ?? '')
+    .split(',')
+    .map((d) => d.trim().toLowerCase().replace(/^@+/, ''))
+    .filter((d) => d.length > 0);
+  return list.length > 0 ? [...new Set(list)] : [...DEFAULT_RECIPIENT_DOMAINS];
+}
+
+/** Exact-domain check on the part after the last '@'. */
+export function isAllowedRecipient(email: string, domains: string[]): boolean {
+  const at = email.lastIndexOf('@');
+  if (at < 0) return false;
+  return domains.includes(email.slice(at + 1).trim().toLowerCase());
+}
+
+/** Split a list into the allowed addresses and the blocked (non-internal) ones, order kept. */
+export function splitRecipientsByDomain(emails: string[], domains: string[]): { allowed: string[]; blocked: string[] } {
+  const allowed: string[] = [];
+  const blocked: string[] = [];
+  for (const e of emails) (isAllowedRecipient(e, domains) ? allowed : blocked).push(e);
+  return { allowed, blocked };
 }
 
 /**
- * The effective digest recipients. Reads the single platform row (with the legacy fallback).
- * Fully defensive — a read failure yields an empty list, never throws into the report runner.
+ * The effective digest recipients for the RUNNER. Reads the single platform row (with the legacy
+ * fallback). A read failure THROWS — the runner must report it as a failed run, never mistake a DB
+ * error for "no recipients".
  */
-export async function loadReportRecipients(prisma: PrismaService): Promise<ReportRecipients> {
-  let raw: unknown;
-  try {
-    const row = await prisma.programSetting.findFirst({
-      where: { clientId: REPORTS_CLIENT_ID, settingKey: REPORT_RECIPIENTS_KEY },
-      select: { settingValue: true },
-    });
-    raw = row?.settingValue;
-  } catch {
-    raw = undefined; // read failure → empty list (never let it break the runner)
-  }
-  return normalizeReportRecipients(raw);
+export async function loadReportRecipients(prisma: PrismaService): Promise<ReportRecipients & { source: RecipientsSource }> {
+  const row = await prisma.programSetting.findFirst({
+    where: { clientId: REPORTS_CLIENT_ID, settingKey: REPORT_RECIPIENTS_KEY },
+    select: { settingValue: true },
+  });
+  return resolveReportRecipients(row?.settingValue);
 }

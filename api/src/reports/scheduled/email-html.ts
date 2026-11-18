@@ -19,10 +19,17 @@ export function esc(v: unknown): string {
     .replace(/'/g, '&#39;');
 }
 
-/** Format a paise BigInt/number as "₹1,23,456" (Indian grouping, whole rupees). */
+/**
+ * Format paise (BigInt or number) as "₹1,23,456" (Indian grouping, whole rupees). ONE rounding rule
+ * for both input types: half away from zero (₹1.50 → ₹2, −₹1.50 → −₹2). Exact in BigInt — a number
+ * input is converted to BigInt first (paise are integers; a fractional number is rounded to paise).
+ */
 export function rupees(paise: bigint | number): string {
-  const rs = typeof paise === 'bigint' ? Number(paise / 100n) : Math.round(Number(paise) / 100);
-  return '₹' + rs.toLocaleString('en-IN');
+  const p = typeof paise === 'bigint' ? paise : BigInt(Math.round(Number.isFinite(paise) ? paise : 0));
+  const neg = p < 0n;
+  const abs = neg ? -p : p;
+  const rs = (abs + 50n) / 100n;
+  return (neg && rs > 0n ? '-' : '') + '₹' + Number(rs).toLocaleString('en-IN');
 }
 
 /** Format a plain integer with Indian grouping (e.g. points, counts). */
@@ -56,7 +63,7 @@ const RESPONSIVE_STYLE = `@media only screen and (max-width:480px){
  * Wrap body HTML in an email-client-safe document: a viewport-tagged `<head>` with the responsive
  * `<style>`, then a titled card (inline-styled for the desktop/fallback look) with intro + footer.
  */
-export function emailShell(opts: { title: string; intro?: string; body: string; dateLabel: string }): string {
+export function emailShell(opts: { title: string; intro?: string; body: string; dateLabel: string; footerNote?: string }): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light only"><style>${RESPONSIVE_STYLE}</style></head><body style="margin:0;padding:0;">
 <div style="margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2937;">
   <div class="rpt-card" style="max-width:720px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
@@ -69,7 +76,7 @@ export function emailShell(opts: { title: string; intro?: string; body: string; 
       ${opts.body}
     </div>
     <div class="rpt-pad" style="padding:14px 24px;border-top:1px solid #eef0f2;font-size:12px;color:#9ca3af;">
-      Automated internal report from Gifsy. Do not reply.
+      ${opts.footerNote ? `<div style="color:#b91c1c;font-weight:600;margin:0 0 6px;">${esc(opts.footerNote)}</div>` : ''}Automated internal report from Gifsy. Do not reply.
     </div>
   </div>
 </div>
