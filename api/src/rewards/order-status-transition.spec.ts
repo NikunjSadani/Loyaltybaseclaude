@@ -32,11 +32,17 @@ describe('transitionOrderStatus — the single status-write choke point', () => 
         data: { deliveredAt: new Date() },
       });
       expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
-      const sql = (tx.$executeRaw.mock.calls[0][0] as string[]).join('?');
+      const q = tx.$executeRaw.mock.calls[0][0] as { strings: string[]; values: unknown[] };
+      const sql = q.strings.join('?');
       expect(sql).toContain('UPDATE "redemption_orders"');
       expect(sql).toContain('"payeePan"');
       expect(sql).toContain("'__NO_PAN__:'");
-      expect(tx.$executeRaw.mock.calls[0][1]).toBe('o1');
+      // A-L2: no LIKE-escape tricks — a plain prefix compare on the normalised PAN.
+      expect(sql).toContain("left(");
+      expect(sql).not.toContain('LIKE');
+      // A-M2: the ONE normaliser (every whitespace char removed, upper-cased).
+      expect(sql).toContain('regexp_replace(');
+      expect(q.values).toEqual(['o1']);
     });
 
     it('no snapshot when the guarded claim lost (count 0) or for any other status', async () => {

@@ -23,6 +23,8 @@ import {
   isNoPanCell,
   noPanOutletKey,
   noPanPartnerKey,
+  PAN_NORMALISE_SQL,
+  payeeKeyFor,
 } from '../tds/tds-194r.shared';
 
 /** B-H1: a header-safe list — the first 20 items, then "+K more" (full lists stay in the JSON result). */
@@ -55,8 +57,8 @@ function r194RetailerKey(
   outletCode: string,
   info: { partnerId?: string | null; panNumber?: string | null } | undefined,
 ): { key: string; hasPan: boolean } {
-  // L3: a stored `__NO_PAN__…` sentinel means NO PAN (same rule as the report's isNoPanCell).
-  if (!isNoPanCell(info?.panNumber)) return { key: info!.panNumber!.trim().toUpperCase(), hasPan: true };
+  // L3/A-M2: the ONE payee-key rule (shared with the report and every snapshot writer).
+  if (!isNoPanCell(info?.panNumber)) return { key: payeeKeyFor(clientId, outletCode, { id: info?.partnerId ?? '', panNumber: info!.panNumber! }), hasPan: true };
   return { key: info?.partnerId ? noPanPartnerKey(info.partnerId) : noPanOutletKey(clientId, outletCode), hasPan: false };
 }
 import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
@@ -406,7 +408,13 @@ export class CreditsService {
     // A-L1: ONE exact match on the normalised PAN for this client (served by the clientId index) instead
     // of an ILIKE OR per PAN; includes a group PARENT sharing the PAN (B-L8).
     const scopePartners = pans.length
-      ? await db.$queryRaw<Array<{ id: string; panNumber: string | null }>>`SELECT "id", "panNumber" FROM "channel_partners" WHERE "clientId" = ${clientId} AND upper(btrim("panNumber")) = ANY(${pans}::text[])`
+      ? await db.$queryRaw<Array<{ id: string; panNumber: string | null }>>(
+          Prisma.sql([
+            `SELECT "id", "panNumber" FROM "channel_partners" WHERE "clientId" = `,
+            ` AND ${PAN_NORMALISE_SQL('"panNumber"')} = ANY(`,
+            `::text[])`,
+          ], clientId, pans),
+        )
       : [];
     const noPanOwners = [...a.byPan.values()].filter((v) => !v.hasPan && v.partnerId).map((v) => v.partnerId!);
     const partnerIds = [...new Set([...scopePartners.map((p) => p.id), ...noPanOwners])];

@@ -7,7 +7,7 @@
 import { TdsService } from './tds.service';
 import { CreditsService } from '../credits/credits.service';
 import { DEFAULT_RESOLVED_TDS_STATUTORY, financialYear, type ResolvedTdsStatutory } from './tds.helpers';
-import { liability194R } from './tds-194r.shared';
+import { liability194R, normalisePan, payeeKeyFor } from './tds-194r.shared';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import type { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -31,8 +31,8 @@ type Data = {
   outlets: Array<{ outletCode: string; clientId: string; partnerId: string | null }>;
   partners: Array<{ id: string; clientId: string; panNumber: string | null; isParent?: boolean }>;
   redemptions: Array<{ clientId: string; partnerId: string; valuePaise: bigint; redemptionMode: string; deliveredAt: Date; payeePan?: string | null }>;
-  offPlatform: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; entryDate: Date }>;
-  deposits: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; forPeriod: string; depositDate: Date; uploadBatchId: string | null }>;
+  offPlatform: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; entryDate: Date; resolvedKey?: string | null }>;
+  deposits: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; forPeriod: string; depositDate: Date; uploadBatchId: string | null; resolvedKey?: string | null }>;
   ledger: Array<{ clientId: string; panNumber: string; section: string; fyLabel: string; tdsDeductedThisPaise: bigint; outletCode?: string | null; carryForwardPaise?: bigint; createdAt?: Date }>;
   countFrom: string | null;
 };
@@ -50,9 +50,9 @@ function fakeDb(d: Data) {
   return {
     creditField: { findMany: async () => [{ id: 'f-vis' }] },
     // A-L1: SELECT … FROM channel_partners WHERE "clientId" = $1 AND upper(btrim("panNumber")) = ANY($2)
-    $queryRaw: async (_sql: TemplateStringsArray, clientId: string, pans: string[]) =>
+    $queryRaw: async (q: { values: [string, string[]] }) =>
       d.partners
-        .filter((p) => p.clientId === clientId && !!p.panNumber && pans.includes(p.panNumber.trim().toUpperCase()))
+        .filter((p) => p.clientId === q.values[0] && !!p.panNumber && q.values[1].includes(normalisePan(p.panNumber)))
         .map((p) => ({ id: p.id, panNumber: p.panNumber })),
     programSetting: { findUnique: async () => (d.countFrom ? { settingValue: { countFrom: d.countFrom } } : null) },
     creditPayoutEntry: {
@@ -581,6 +581,62 @@ describe('over-withholding — ONLY FLAGGED (owner 2026-11-18): excess column + 
     jest.spyOn(tds, 'importedPayoutsCountFrom').mockResolvedValue(null);
     const rep = await tds.report194R(CLIENT, FY.fyLabel);
     expect(rep.summary).toMatchObject({ totalExcessDeductedPaise: 300000n, excessRetailerCount: 1 });
+  });
+});
+
+describe('A-M2: ONE PAN normaliser (JS == SQL) — every whitespace char removed, upper-cased', () => {
+  it('normalisePan / payeeKeyFor', () => {
+    expect(normalisePan('ABCDE1234F\r')).toBe('ABCDE1234F');
+    expect(normalisePan(' abcde 1234f\u00a0\t\n')).toBe('ABCDE1234F');
+    expect(payeeKeyFor('c1', 'O1', { id: 'p1', panNumber: 'abcde1234f\r' })).toBe('ABCDE1234F');
+    expect(payeeKeyFor('c1', 'O1', { id: 'p1', panNumber: '  ' })).toBe('__NO_PAN__:p1');
+    expect(payeeKeyFor('c1', 'O1', { id: 'p1', panNumber: '__NO_PAN__' })).toBe('__NO_PAN__:p1');
+    expect(payeeKeyFor('c1', 'O1', null)).toBe('__NO_PAN__:outlet:c1:O1');
+  });
+
+  it('a partner PAN stored as "ABCDE1234F\\r" and a snapshot "ABCDE1234F" are the SAME retailer row', async () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F\r')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [paidVis('v1', 1500000n), { ...paidVis('v2', 1500000n), id: 'v2', payeePan: 'ABCDE1234F' }];
+    const rows = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(rows.map((r) => r.panNumber)).toEqual(['ABCDE1234F']);
+    expect(rows[0].baseFyTotalPaise).toBe(3000000n);
+  });
+});
+
+describe('A-H1: a no-PAN DEPOSIT / OFF-PLATFORM row keeps the retailer key AS OF its upload (the PAN split)', () => {
+  const data = () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F')]; // the PAN was added AFTER these uploads
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [{ ...paidVis('v1', 3000000n), payeePan: '__NO_PAN__:p1' }];
+    return d;
+  };
+
+  it('the auditor\'s ₹6,000 no-PAN deposit stays on the no-PAN row (not moved to the PAN)', async () => {
+    const d = data();
+    d.deposits = [{ clientId: CLIENT, panNumber: '__NO_PAN__', outletCode: 'O1', amountPaise: 600000n, forPeriod: `${FY.fyLabel.slice(0, 4)}-06`, depositDate: inFy(70), uploadBatchId: 'DEP-' + 'd'.repeat(64), resolvedKey: '__NO_PAN__:p1' }];
+    const rows = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    const by = Object.fromEntries(rows.map((r) => [r.panNumber, r]));
+    expect(by['__NO_PAN__:p1'].depositedPaise).toBe(600000n);
+    expect(by['ABCDE1234F']).toBeUndefined();
+  });
+
+  it('the auditor\'s ₹10,000 no-PAN off-platform gift stays on the no-PAN row', async () => {
+    const d = data();
+    d.offPlatform = [{ clientId: CLIENT, panNumber: '__NO_PAN__', outletCode: 'O1', amountPaise: 1000000n, entryDate: inFy(20), resolvedKey: '__NO_PAN__:p1' }];
+    const rows = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    const by = Object.fromEntries(rows.map((r) => [r.panNumber, r]));
+    expect(by['__NO_PAN__:p1']).toMatchObject({ baseFyTotalPaise: 4000000n, nonCashBasePaise: 1000000n });
+    expect(by['ABCDE1234F']).toBeUndefined();
+  });
+
+  it('a row without the snapshot (legacy) still resolves through its outlet to the CURRENT owner', async () => {
+    const d = data();
+    d.offPlatform = [{ clientId: CLIENT, panNumber: '__NO_PAN__', outletCode: 'O1', amountPaise: 1000000n, entryDate: inFy(20) }];
+    const rows = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(rows.find((r) => r.panNumber === 'ABCDE1234F')!.nonCashBasePaise).toBe(1000000n);
   });
 });
 

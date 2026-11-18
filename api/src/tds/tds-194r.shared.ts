@@ -62,9 +62,43 @@ export const noPanOutletKey = (clientId: string, outletCode: string): string =>
   `${NO_PAN_KEY}:outlet:${clientId}:${outletCode}`;
 /** True for the bare unattributed key AND every per-deductee no-PAN key. */
 export const isNoPanKey = (key: string): boolean => key === NO_PAN_KEY || key.startsWith(`${NO_PAN_KEY}:`);
-/** A STORED PAN value that means "no PAN": blank, or a `__NO_PAN__…` sentinel. */
-export const isNoPanCell = (pan: string | null | undefined): boolean =>
-  !pan || !pan.trim() || isNoPanKey(pan.trim().toUpperCase());
+
+/**
+ * A-M2 — the ONE PAN normaliser. Every character in PAN_WS_CLASS (space, \t \n \r \f \v, NBSP, zero-width
+ * space, BOM) is removed — anywhere, not only at the ends — and the result upper-cased. The SQL twin is
+ * PAN_NORMALISE_SQL (identical character class, used by the engine scope query, the DELIVERED snapshot and
+ * the 20261118180000_tds_payee_snapshot backfill). Keep the two in lock-step.
+ */
+export const PAN_WS_CLASS = '[ \\t\\n\\r\\f\\v\\u00a0\\u200b\\ufeff]';
+const PAN_WS_RE = new RegExp(PAN_WS_CLASS, 'g');
+export function normalisePan(pan: string): string {
+  return pan.replace(PAN_WS_RE, '').toUpperCase();
+}
+/** SQL twin of normalisePan for a column/expression `x`: upper(regexp_replace(x, PAN_WS_CLASS, '', 'g')). */
+export const PAN_NORMALISE_SQL = (x: string): string => `upper(regexp_replace(${x}, '${PAN_WS_CLASS}', '', 'g'))`;
+
+/** A STORED PAN value that means "no PAN": blank (after normalising), or a `__NO_PAN__…` sentinel. */
+export const isNoPanCell = (pan: string | null | undefined): boolean => {
+  if (!pan) return true;
+  const n = normalisePan(pan);
+  return !n || isNoPanKey(n);
+};
+
+/**
+ * The 194R payee key of a payout / redemption / upload AS OF NOW: the owner's normalised PAN, else the
+ * no-PAN owner key `__NO_PAN__:<partnerId>`, else (no owner) `__NO_PAN__:outlet:<clientId>:<outletCode>`.
+ * A-L1: every writer of a payee snapshot (bank file, delivery, deposit / off-platform uploads, and ANY
+ * future import script) must use this so keys are identical everywhere.
+ */
+export function payeeKeyFor(
+  clientId: string,
+  outletCode: string | null,
+  partner: { id: string; panNumber: string | null } | null | undefined,
+): string {
+  if (partner && !isNoPanCell(partner.panNumber)) return normalisePan(partner.panNumber!);
+  if (partner?.id) return noPanPartnerKey(partner.id);
+  return noPanOutletKey(clientId, outletCode ?? '');
+}
 
 /**
  * Normalise a 194R TdsDeductionEntry.panNumber to the retailer key: a real PAN is upper-cased; a no-PAN
@@ -72,7 +106,7 @@ export const isNoPanCell = (pan: string | null | undefined): boolean =>
  */
 export function retailerKeyOfLedgerPan(panNumber: string): string {
   const t = panNumber.trim();
-  return isNoPanKey(t.toUpperCase()) ? t : t.toUpperCase();
+  return isNoPanKey(t.toUpperCase()) ? t : normalisePan(t);
 }
 
 /** Redemption modes that are CASH (paid to the retailer's bank/UPI); the rest are gifts/vouchers. */
@@ -195,7 +229,7 @@ export async function ownerPansOf(
   const out = new Map<string, string>();
   if (!ids.length) return out;
   const owners = await db.channelPartner.findMany({ where: { id: { in: ids } }, select: { id: true, panNumber: true } });
-  for (const o of owners) if (!isNoPanCell(o.panNumber)) out.set(o.id, o.panNumber!.trim().toUpperCase());
+  for (const o of owners) if (!isNoPanCell(o.panNumber)) out.set(o.id, normalisePan(o.panNumber!));
   return out;
 }
 
@@ -248,7 +282,7 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
     out.set(key, b);
   };
   const keyOf = (pan: string | null | undefined, noPanKey: string): { key: string; hasPan: boolean } =>
-    isNoPanCell(pan) ? { key: noPanKey, hasPan: false } : { key: pan!.trim().toUpperCase(), hasPan: true };
+    isNoPanCell(pan) ? { key: noPanKey, hasPan: false } : { key: normalisePan(pan!), hasPan: true };
 
   const visibilityFields = await db.creditField.findMany({
     where: { clientId, payoutStream: 'VISIBILITY' },
@@ -359,22 +393,29 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
       ...(scope
         ? {
             OR: [
-              { panNumber: { in: scope.pans, mode: 'insensitive' as const } },
-              { outletCode: { in: scope.outletCodes, mode: 'insensitive' as const } },
+              { resolvedKey: { in: scopeKeys } },
+              { resolvedKey: null, panNumber: { in: scope.pans, mode: 'insensitive' as const } },
+              { resolvedKey: null, outletCode: { in: scope.outletCodes, mode: 'insensitive' as const } },
             ],
           }
         : {}),
     },
-    select: { panNumber: true, amountPaise: true, outletCode: true },
+    select: { panNumber: true, amountPaise: true, outletCode: true, resolvedKey: true },
   });
-  const noPanCodes = offPlatform.filter((r) => isNoPanCell(r.panNumber) && r.outletCode?.trim()).map((r) => r.outletCode!.trim());
+  const noPanCodes = offPlatform
+    .filter((r) => !r.resolvedKey && isNoPanCell(r.panNumber) && r.outletCode?.trim())
+    .map((r) => r.outletCode!.trim());
   const byCode = await outletsByCodeCI(db, noPanCodes, clientId);
   const ownerPans = await ownerPansOf(db, byCode);
   for (const e of offPlatform) {
     let key: string;
     let hasPan: boolean;
-    if (!isNoPanCell(e.panNumber)) {
-      key = e.panNumber.trim().toUpperCase();
+    if (e.resolvedKey) {
+      // A-H1: the retailer key AS OF the upload (a later PAN change never moves it).
+      key = e.resolvedKey;
+      hasPan = !isNoPanKey(key);
+    } else if (!isNoPanCell(e.panNumber)) {
+      key = normalisePan(e.panNumber);
       hasPan = true;
     } else {
       key = keyForOutletCode(e.outletCode, byCode, ownerPans) ?? NO_PAN_KEY;

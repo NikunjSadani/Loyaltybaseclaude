@@ -71,6 +71,8 @@ import {
   outletsByCodeCI as sharedOutletsByCodeCI,
   ownerPansOf as sharedOwnerPansOf,
   keyForOutletCode,
+  normalisePan,
+  payeeKeyFor,
   deducted194RByRetailer,
   type Bases194R,
 } from './tds-194r.shared';
@@ -486,7 +488,7 @@ export class TdsService {
     // Q4: imported vendor TDS IS a deposit (subtracted once); rows from an import batch (any
     // uploadBatchId that is not a portal-upload file hash) are also shown "of which imported".
     const deposits = await this.depositsForFy('SEC_194R', fyLabel, clientId);
-    const depCodes = deposits.filter((r) => isNoPanCell(r.panNumber) && r.outletCode?.trim()).map((r) => r.outletCode!.trim());
+    const depCodes = deposits.filter((r) => !r.resolvedKey && isNoPanCell(r.panNumber) && r.outletCode?.trim()).map((r) => r.outletCode!.trim());
     const outletsByCode = await this.outletsByCodeCI(depCodes, clientId);
     const ownerPans = await this.ownerPansOf(outletsByCode);
 
@@ -498,7 +500,10 @@ export class TdsService {
     // −deposit) so the deposit never drops out of the rows or the totals.
     const depositOnlyPanKeys = new Set<string>();
     for (const d of deposits) {
-      const key = !isNoPanCell(d.panNumber) ? d.panNumber.trim().toUpperCase() : keyForOutletCode(d.outletCode, outletsByCode, ownerPans);
+      // A-H1: a 194R deposit keeps the retailer key AS OF its upload; a legacy row resolves now.
+      const key =
+        d.resolvedKey ??
+        (!isNoPanCell(d.panNumber) ? normalisePan(d.panNumber) : keyForOutletCode(d.outletCode, outletsByCode, ownerPans));
       if (!key) {
         unlinkedNoPanDepositPaise += d.amountPaise;
         depositPeriods.note(UNLINKED_NO_PAN_DEPOSIT_KEY, d.period);
@@ -637,7 +642,7 @@ export class TdsService {
     fyLabel: string,
     clientId?: string,
   ): Promise<
-    Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null; uploadBatchId: string | null }>
+    Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null; uploadBatchId: string | null; resolvedKey: string | null }>
   > {
     const { startPeriod, endPeriod } = periodWindowForFy(fyLabel);
     const { start, endExclusive } = fyFromLabel(fyLabel);
@@ -651,9 +656,9 @@ export class TdsService {
           { forPeriod: null, depositDate: { gte: start, lt: fallbackEnd } },
         ],
       },
-      select: { panNumber: true, amountPaise: true, outletCode: true, clientId: true, forPeriod: true, depositDate: true, uploadBatchId: true },
+      select: { panNumber: true, amountPaise: true, outletCode: true, clientId: true, forPeriod: true, depositDate: true, uploadBatchId: true, resolvedKey: true },
     });
-    const out: Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null; uploadBatchId: string | null }> = [];
+    const out: Array<{ panNumber: string; amountPaise: bigint; outletCode: string | null; clientId: string | null; period: string | null; uploadBatchId: string | null; resolvedKey: string | null }> = [];
     for (const d of found) {
       const period = depositPeriodOf(d);
       // period null only when neither column is present (not possible for a stored row) → trust the query.
@@ -665,6 +670,7 @@ export class TdsService {
         clientId: d.clientId ?? null,
         period,
         uploadBatchId: d.uploadBatchId ?? null,
+        resolvedKey: d.resolvedKey ?? null,
       });
     }
     return out;
@@ -1312,8 +1318,11 @@ export class TdsService {
     });
 
     if (toInsert.length > 0) {
+      // A-H1: store the 194R retailer key AS OF this upload (a later PAN change never moves the row).
+      const keys = await this.resolvedKeys194R(clientId, toInsert);
       await this.prisma.tdsOffPlatformEntry.createMany({
-        data: toInsert.map((r) => ({
+        data: toInsert.map((r, i) => ({
+          resolvedKey: keys[i],
           clientId,
           section: 'SEC_194R' as const,
           entryDate: r.entryDate,
@@ -1328,6 +1337,23 @@ export class TdsService {
     }
 
     return capUploadResult(result);
+  }
+
+  /**
+   * A-H1: the 194R retailer key of each upload row AS OF NOW (stored on the row): a PAN → its normalised
+   * form; a no-PAN marker → its Outlet Code's owner key in this client (PAN on file → that PAN; else the
+   * no-PAN owner / outlet key); unresolvable → null (the report then shows it as an unlinked deposit).
+   */
+  private async resolvedKeys194R(
+    clientId: string,
+    rows: Array<{ panNumber: string; outletCode?: string | null }>,
+  ): Promise<Array<string | null>> {
+    const codes = rows.filter((r) => isNoPanCell(r.panNumber) && r.outletCode?.trim()).map((r) => r.outletCode!.trim());
+    const byCode = await this.outletsByCodeCI(codes, clientId);
+    const ownerPans = await this.ownerPansOf(byCode);
+    return rows.map((r) =>
+      !isNoPanCell(r.panNumber) ? normalisePan(r.panNumber) : keyForOutletCode(r.outletCode, byCode, ownerPans),
+    );
   }
 
   /** Natural-key string mirroring the tds_off_platform_entries_dedup_unique index. */
@@ -1387,8 +1413,11 @@ export class TdsService {
     const uploadBatchId = depositFileHash(validated);
 
     if (toInsert.length > 0) {
+      // A-H1: a 194R deposit stores the retailer key AS OF this upload (194C keeps its own per-outlet rule).
+      const keys = prismaSection === 'SEC_194R' && clientId ? await this.resolvedKeys194R(clientId, toInsert) : [];
       await this.prisma.tdsDeposit.createMany({
-        data: toInsert.map((r) => ({
+        data: toInsert.map((r, i) => ({
+          ...(keys.length ? { resolvedKey: keys[i] } : {}),
           section: prismaSection,
           depositorType: depositorType as 'CLIENT' | 'GIFSY',
           // 194C (platform) rows keep clientId null, EXCEPT a no-PAN row: it records the tenant of

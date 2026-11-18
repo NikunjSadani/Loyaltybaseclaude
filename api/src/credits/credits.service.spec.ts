@@ -4077,11 +4077,14 @@ describe('CreditsService', () => {
         mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(1500000n)]);
         priorRows({});
         await download();
-        const call = mockTx.$queryRaw.mock.calls.find((c: unknown[]) => String((c[0] as string[]).join('?')).includes('channel_partners'));
+        const call = mockTx.$queryRaw.mock.calls.find((c: unknown[]) => (c[0] as { strings?: string[] })?.strings?.join('?').includes('channel_partners'));
         expect(call).toBeDefined();
-        const sql = (call![0] as string[]).join('?');
-        expect(sql).toMatch(/upper\(btrim\("panNumber"\)\) = ANY/);
-        expect(call!.slice(1)).toEqual(['deoleo', ['PAN1']]);
+        const q = call![0] as { strings: string[]; values: unknown[] };
+        const sql = q.strings.join('?');
+        // A-M2: the ONE normaliser (whitespace class removed, upper-cased) — same as normalisePan.
+        expect(sql).toMatch(/upper\(regexp_replace\("panNumber", '\[ /);
+        expect(sql).toContain(') = ANY(');
+        expect(q.values).toEqual(['deoleo', ['PAN1']]);
         const ilike = mockTx.channelPartner.findMany.mock.calls.some((c: [{ where?: { OR?: Array<{ panNumber?: { contains?: string } }> } }]) =>
           (c[0]?.where?.OR ?? []).some((x) => !!x.panNumber?.contains),
         );

@@ -1,5 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import { Prisma, RedemptionOrder, RedemptionStatus } from '@prisma/client';
+import { PAN_NORMALISE_SQL } from '../tds/tds-194r.shared';
 
 /**
  * THE single write path for `RedemptionOrder.status` (order-timeline plan, owner D1).
@@ -94,7 +95,17 @@ export async function transitionOrderStatus(
  * the 20261118180000_tds_payee_snapshot backfill.
  */
 async function snapshotPayee(tx: Tx, orderId: string): Promise<void> {
-  await tx.$executeRaw`UPDATE "redemption_orders" AS r SET "payeePartnerId" = r."partnerId", "payeePan" = CASE WHEN p."panNumber" IS NOT NULL AND btrim(p."panNumber") <> '' AND upper(btrim(p."panNumber")) NOT LIKE '\_\_NO\_PAN\_\_%' THEN upper(btrim(p."panNumber")) ELSE '__NO_PAN__:' || r."partnerId" END FROM "channel_partners" AS p WHERE r."id" = ${orderId} AND p."id" = r."partnerId"`;
+  const pan = PAN_NORMALISE_SQL('p."panNumber"');
+  // A-L2: a plain prefix compare (left(...) <> '__NO_PAN__'), no LIKE escaping.
+  await tx.$executeRaw(
+    Prisma.sql(
+      [
+        `UPDATE "redemption_orders" AS r SET "payeePartnerId" = r."partnerId", "payeePan" = CASE WHEN p."panNumber" IS NOT NULL AND ${pan} <> '' AND left(${pan}, 10) <> '__NO_PAN__' THEN ${pan} ELSE '__NO_PAN__:' || r."partnerId" END FROM "channel_partners" AS p WHERE r."id" = `,
+        ` AND p."id" = r."partnerId"`,
+      ],
+      orderId,
+    ),
+  );
 }
 
 export const ORDER_STATUS_CONFLICT_MESSAGE = 'Order status changed — refresh and try again';

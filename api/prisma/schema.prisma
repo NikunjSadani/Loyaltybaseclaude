@@ -2030,6 +2030,9 @@ model TdsOffPlatformEntry {
   // reports the row as "skipped — duplicate entry". See 20260621000000_uat_hardening_constraints.
   uploadBatchId String?
   uploadedBy    String?
+  // A-H1 (owner rule 2026-11-18: TDS by PAN; a PAN change splits the year): the 194R retailer key AS OF this
+  // upload — the normalised PAN, or for a no-PAN marker row the outlet owner's key at that time. Null = legacy.
+  resolvedKey   String?
   createdAt     DateTime   @default(now())
 
   @@index([clientId, panNumber])
@@ -2064,6 +2067,8 @@ model TdsDeposit {
   // catches P2002.
   uploadBatchId String?
   uploadedBy    String?
+  // A-H1: the 194R retailer key AS OF this upload (194R deposits only; null for 194C / legacy rows).
+  resolvedKey   String?
   createdAt     DateTime         @default(now())
 
   @@index([section, panNumber])
