@@ -4114,7 +4114,7 @@ describe('CreditsService', () => {
         expect(lockKeysTaken()).toContain('PAN|PAN1|2026-27');
       });
 
-      it('A-L1: the partner scope is ONE exact match on upper(btrim(PAN)) for this client (no per-PAN ILIKE OR)', async () => {
+      it('A-L1: the partner scope is ONE exact match on the normalised PAN (PAN_NORMALISE_SQL) for this client (no per-PAN ILIKE OR)', async () => {
         policy('DEDUCT');
         mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(1500000n)]);
         priorRows({});

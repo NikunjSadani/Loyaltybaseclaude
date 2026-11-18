@@ -167,12 +167,16 @@ written by `transitionOrderStatus` on DELIVERED). Base, threshold, liability, de
 per that key (within the client and FY): everything paid BEFORE a PAN change stays with the OLD PAN; everything after
 goes to the NEW PAN. No PAN → PAN added: the earlier payouts stay on the no-PAN owner key at 20%, the later ones go to
 the PAN. Ledger rows net by their own stored `panNumber` (the PAN at withholding). A row without a snapshot (not yet in
-a bank file, or pre-snapshot data the backfill could not resolve) falls back to the current owner; off-platform rows
-carry their own PAN; imported vendor payouts were snapshotted at import = the owner at the backfill (history was not
-recorded before 2026-11-18). Without a PAN, all outlets of one ChannelPartner = one retailer (`__NO_PAN__:<partnerId>`);
+a bank file, or pre-snapshot data the backfill could not resolve) falls back to the current owner. Off-platform rows and
+194R deposits store `resolvedKey` = the retailer key AS OF their upload (A-H1: a PAN row → its normalised PAN; a no-PAN
+row → its outlet's owner key at upload), so a later PAN change never moves them; a legacy row without it resolves now.
+Imported vendor payouts were snapshotted at import = the owner at the backfill (history was not recorded before
+2026-11-18). Without a PAN, all outlets of one ChannelPartner = one retailer (`__NO_PAN__:<partnerId>`);
 an outlet with no partner counts alone (`__NO_PAN__:outlet:<clientId>:<outletCode>`). Migration
-`20261118180000_tds_payee_snapshot` (additive, idempotent, backfills PROCESSING/PAID entries + DELIVERED orders from
-the CURRENT owner; prod had 0 194R TDS rows) — not applied anywhere yet.
+`20261118180000_tds_payee_snapshot` (additive, idempotent, `lock_timeout 5s`; backfill: (1) an entry with a positive
+194R ledger row takes THAT row's key (A-M1), (2) other PROCESSING/PAID entries + DELIVERED orders the CURRENT owner,
+(3) `resolvedKey` for 194R off-platform rows + deposits; prod had 0 194R TDS rows) — not applied anywhere yet. See the
+runbook pre-check below.
 
 **How much** (D5/D6/Q1/Q3): total base > ₹20,000 (FY statutory config) → TDS on the **whole year**. Rate 10% PAN /
 20% no-PAN from the statutory config (never a fixed fraction). The whole year uses the client's **current** method:
@@ -219,7 +223,8 @@ the CURRENT owner; prod had 0 194R TDS rows) — not applied anywhere yet.
    DEDUCT → ₹24,500 → only 10% × 5,000 = ₹500 withheld; 19,500 × 10/90 = ₹2,167 client-borne.
 5. DEDUCT → GROSS_UP switch (audit A-M5): ₹30,000 visibility on DEDUCT → ₹3,000 withheld and deposited; client moves to
    GROSS_UP and pays ₹10,000 more in full → whole year ₹40,000 × 10/90 = **₹4,444** liability − ₹3,000 deposited =
-   **₹1,444** outstanding (client-borne). Handled by "liability − deposits uploaded" — no special case.
+   **₹1,444** outstanding (client-borne). Handled by "liability − deposits uploaded" — no special case. Deducted ₹3,000
+   ≤ liability ₹4,444 → **no** excess (B-M1).
 
 **Audit follow-ups (2026-11-18):**
 - *A-M4 — REVERSED by the owner rule (2026-11-18):* ledger rows are NOT moved to the outlet's current owner; each nets
@@ -233,8 +238,9 @@ the CURRENT owner; prod had 0 194R TDS rows) — not applied anywhere yet.
   reversal approvals take the same key before writing an offset. A Bajaj-scale 194R run takes 1 lock (+1 per-download
   key) — far under the ~6,400 lock slots (db-g1-small, max_connections 100 × max_locks_per_transaction 64). 194C keeps
   its per-PAN keys.
-- *Scope (B-L8):* engine and report use one rule — stored PAN trimmed + upper-cased; a group parent sharing the PAN counts
-  (its redemptions).
+- *Scope (B-L8 / A-M2):* engine, report, snapshots and the backfill use ONE PAN normaliser — `normalisePan` / its SQL twin
+  `PAN_NORMALISE_SQL` in `tds-194r.shared.ts` (every space / tab / CR / LF / FF / VT / NBSP / zero-width space / BOM
+  removed anywhere, then upper-cased); a group parent sharing the PAN counts (its redemptions).
 - *Recovery report (B-L6):* legacy 194R recovery rows are listed separately ("Earlier 194R recoveries (no longer raised)")
   and excluded from the 194C rows/totals.
 - *Imported vendor deposit label (B-L7):* portal ids are `DEP-`/`OP-` + sha256 or + uuid; any other `uploadBatchId` is
@@ -249,9 +255,11 @@ section is 194C (null = legacy 194C) are invoiced — at confirm (`generateForBa
 generation (`generateForPeriod`), both filtered on `tdsSection`. A 194R visibility payout gets no service invoice and
 no GST holdback; invoices raised earlier are left untouched.
 
-**Over-withholding — ONLY FLAGGED (owner 2026-11-18).** When TDS already withheld from a retailer exceeds the whole-year
-deducted part on the current rules (e.g. 20% no-PAN, then the PAN is added → 10%; DEDUCT → GROSS_UP after withholding),
-the 194R report row shows `excessDeductedPaise` ("TDS taken in excess: ₹X — flagged, no automatic refund"), and a
+**Over-withholding — ONLY FLAGGED (owner 2026-11-18; definition B-M1).** `excessDeductedPaise = deducted so far − the
+WHOLE-YEAR liability` (on the client's current method), when positive — e.g. the year later drops to ₹20,000 or less (the
+"count imported payouts" setting switched off) or the rate is lowered. A DEDUCT → GROSS_UP switch is NOT excess while
+deducted ≤ liability (worked example 5), and adding a PAN never is (the no-PAN and PAN rows are separate keys). The
+194R report row shows `excessDeductedPaise` ("TDS taken in excess: ₹X — flagged, no automatic refund"), and a
 carry-forward recorded on the ledger that is no longer due shows as `carryForwardDroppedPaise`. The summary carries the
 total + count; the liability tracker, the Excel ("TDS Taken in Excess") and the admin screen show it; the Daily Ops
 Digest has a "TDS (194R)" section (count, total, largest 10) and a Needs-attention line. Nothing is refunded.
@@ -271,12 +279,70 @@ Digest has a "TDS (194R)" section (count, total, largest 10) and a Needs-attenti
 - *A-L3:* when every payout in a run is fully withheld, no bank file is produced — the API answers JSON with the reason.
 - *B-H1/B-L1/B-L2:* response notice headers are bounded (count + first 20 + "+K more"; full lists in JSON); the file is
   saved before headers are read; a cut connection says the outcome is unknown (check Download History).
-- *A-L1:* the engine's 194R partner scope is one exact match on `upper(btrim("panNumber"))` for the client (raw SQL).
+- *A-L1:* the engine's 194R partner scope is one exact match on the normalised PAN (`PAN_NORMALISE_SQL`) for the client (raw SQL).
 - *L3:* a stored `__NO_PAN__` sentinel on a partner is treated as no PAN by the engine (same as the report).
 - *A-L2:* an off-platform row that names a PAN stays under that PAN (consistent with "everything is by PAN"); only
   no-PAN rows resolve through their outlet to the owner's current key.
 - *A-H2 — RESOLVED by the payee snapshot:* a past payout / withholding stays with the PAN it was paid / withheld under,
   even if the outlet later changes owner.
+
+**Final-audit follow-ups (2026-11-18, third round):**
+- *A-H1:* `TdsDeposit.resolvedKey` / `TdsOffPlatformEntry.resolvedKey` — the 194R key AS OF the upload (written by both
+  uploads via `payeeKeyFor`); the report and engine prefer it.
+- *A-M1:* backfill takes a ledger-booked entry's key from its positive 194R ledger row (PAN keys normalised), else the
+  current owner.
+- *A-M2:* one PAN normaliser (above).
+- *A-L1 — imports:* any script that writes 194R payouts / redemptions / uploads (e.g. a vendor-history import) must set
+  `payeePan` / `payeePartnerId` (or `resolvedKey`) with `payeeKeyFor()` — never its own PAN rule.
+- *A-L2:* the DELIVERED snapshot uses `left(pan, 10) <> '__NO_PAN__'` (no LIKE escaping).
+- *A-L3:* the carry-forward note reads the latest ledger group's LAST row in a deterministic `(createdAt, id)` order.
+- *A-L5/B-L4:* ONE fully-withheld notice per owner per download (outlets added together). 194R: "The client deposits it
+  with the Income Tax Department"; "against your PAN" only when a PAN is on file (else: no PAN → higher rate, add PAN).
+- *A-L6:* the dead `summary194R` was removed — `report194R().summary` is the one summary.
+- *B-M1/B-M2:* excess definition (above); the guide's examples match it (example 4 no excess, example 5 a real excess).
+- *B-M3:* regenerating a month (`generateForPeriod` refresh) reconciles the invoice's GST reimbursement — HELD → amount
+  updated (guarded on HELD; GST gone → HELD row removed), none → created, RELEASED at a different amount → never
+  changed, returned in `warnings[]` and shown in red on both generate screens.
+- *B-L1:* the downloaded wallet statement carries the same TDS note as the screen row (`payoutTdsNote`, shared); a fully
+  withheld payout has no UTR.
+- *B-L2/B-L3:* the digest's credit-paid filter OR-wraps `utr IS NULL`; "awaiting UTR" is net of TDS withheld.
+- *B-L5:* invoicing follows each payout's section stamped at confirm (payouts guide).
+- *B-L6:* the Payments report (screen + export) shows "Settled by TDS withholding (no bank payment)" instead of the
+  internal `TDS-WITHHELD-…` reference; the wallet "Last Month Payout" card adds up the money received in the latest paid
+  month, or shows "₹0 — withheld as TDS".
+
+**Runbook pre-check before applying `20261118180000_tds_payee_snapshot` (read-only; run on the target DB first, behind
+the usual `current_database()` guard):** how many ledger-booked entries will be backfilled with a key DIFFERENT from the
+current owner's (their outlet changed owner / PAN after the withholding). Expected 0 on prod (no 194R TDS rows); a
+non-zero count is not an error — those entries keep the PAN they were withheld under — but report it before applying.
+
+```sql
+SELECT count(*) AS entries_keyed_to_an_earlier_payee
+FROM (
+  SELECT DISTINCT ON (l."creditPayoutEntryId")
+         l."creditPayoutEntryId",
+         CASE WHEN left(btrim(l."panNumber"), 10) = '__NO_PAN__' THEN btrim(l."panNumber")
+              ELSE upper(regexp_replace(l."panNumber", '[ \t\n\r\f\v ​﻿]', '', 'g')) END AS ledger_key,
+         e."clientId", e."outletId"
+  FROM "tds_deduction_entries" l
+  JOIN "credit_payout_entries" e ON e."id" = l."creditPayoutEntryId"
+  WHERE l."section" = 'SEC_194R' AND l."tdsDeductedThisPaise" > 0
+    AND l."panNumber" IS NOT NULL AND btrim(l."panNumber") <> ''
+  ORDER BY l."creditPayoutEntryId", l."createdAt" DESC, l."id" DESC
+) x
+JOIN "outlets" o ON o."clientId" = x."clientId" AND o."outletCode" = x."outletId"
+LEFT JOIN "channel_partners" p ON p."id" = o."partnerId"
+WHERE x.ledger_key IS DISTINCT FROM CASE
+  WHEN p."panNumber" IS NOT NULL
+   AND upper(regexp_replace(p."panNumber", '[ \t\n\r\f\v ​﻿]', '', 'g')) <> ''
+   AND left(upper(regexp_replace(p."panNumber", '[ \t\n\r\f\v ​﻿]', '', 'g')), 10) <> '__NO_PAN__'
+    THEN upper(regexp_replace(p."panNumber", '[ \t\n\r\f\v ​﻿]', '', 'g'))
+  WHEN o."partnerId" IS NOT NULL THEN '__NO_PAN__:' || o."partnerId"
+  ELSE '__NO_PAN__:outlet:' || x."clientId" || ':' || x."outletId"
+END;
+```
+(The character class is byte-identical to the migration's; copy it from the migration file if a viewer mangles the
+invisible characters.)
 
 ### 9.2 194C — unchanged (D1/D7/D8)
 Combined **across all tenants by PAN** (TGSL = single deductor): thresholds > ₹30,000 single or > ₹1,00,000 FY; rates 1%

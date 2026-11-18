@@ -49,7 +49,7 @@ function fakeDb(d: Data) {
   /* eslint-disable @typescript-eslint/no-explicit-any */
   return {
     creditField: { findMany: async () => [{ id: 'f-vis' }] },
-    // A-L1: SELECT … FROM channel_partners WHERE "clientId" = $1 AND upper(btrim("panNumber")) = ANY($2)
+    // A-L1: SELECT … FROM channel_partners WHERE "clientId" = $1 AND <PAN_NORMALISE_SQL("panNumber")> = ANY($2)
     $queryRaw: async (q: { values: [string, string[]] }) =>
       d.partners
         .filter((p) => p.clientId === q.values[0] && !!p.panNumber && q.values[1].includes(normalisePan(p.panNumber)))

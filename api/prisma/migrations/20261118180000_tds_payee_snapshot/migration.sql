@@ -26,9 +26,13 @@ CREATE INDEX IF NOT EXISTS "credit_payout_entries_clientId_payeePan_idx" ON "cre
 -- ── Backfill. History was not recorded before this change: the best available is (A-M1) the key a
 -- POSITIVE 194R withholding was booked under, else the CURRENT outlet owner. Prod had 0 194R TDS rows.
 
--- (1) A-M1: an entry that already has a positive 194R ledger row takes THAT row's stored key (latest row).
+-- (1) A-M1: an entry that already has a positive 194R ledger row takes THAT row's stored key (latest row) —
+--     a PAN key through the ONE normaliser (A-M2), a no-PAN key (`__NO_PAN__…`) as stored (trimmed).
 UPDATE "credit_payout_entries" AS e
-SET "payeePan" = l."panNumber"
+SET "payeePan" = CASE
+      WHEN left(btrim(l."panNumber"), 10) = '__NO_PAN__' THEN btrim(l."panNumber")
+      ELSE upper(regexp_replace(l."panNumber", '[ \t\n\r\f\v ​﻿]', '', 'g'))
+    END
 FROM (
   SELECT DISTINCT ON ("creditPayoutEntryId") "creditPayoutEntryId", "panNumber"
   FROM "tds_deduction_entries"
