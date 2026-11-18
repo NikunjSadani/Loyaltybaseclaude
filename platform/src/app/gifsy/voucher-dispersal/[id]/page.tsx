@@ -18,28 +18,94 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { ArrowLeft, Download, Loader2, RefreshCw, X } from 'lucide-react';
+import { ArrowLeft, Download, Loader2, Pencil, RefreshCw, UserPlus, X } from 'lucide-react';
 import {
-  CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE, PENDING_RECONCILE_NOTE, POLL_START_MS,
-  PROCESS_FAILURES_BEFORE_NOTE, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, billedToText, campaignStatusText,
-  canCancelCampaign, canResendRow, canRetryRow, formatCount, formatRupees, formatWhen, isLiveCampaign, isProcessInFlight,
-  isSetupCampaign, isUncertainFailure, nextPollDelay, nextProcessFailures, plural, pollPhase, rowStatusText,
-  shouldNudgeProcessing, vdApi, vdReportUrl,
-  type CampaignStatus, type RowStatus, type VdListItem, type VdRow, type VdRowsPage,
+  BATCH_STATUS_LABEL, BATCH_STATUS_TONE, CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE,
+  PENDING_RECONCILE_NOTE, POLL_START_MS,
+  PROCESS_FAILURES_BEFORE_NOTE, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, batchLabel, billedToText, campaignStatusText,
+  budgetUsageText, earlierOrderAlertText, resolvedOrderAlertText, overBudgetCauseText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
+  isProcessInFlight, isSetupCampaign, isUncertainFailure, nextPollDelay, nextProcessFailures, plural, pollPhase, rowStatusText,
+  shouldNudgeProcessing, vdApi, vdReportFallbackName, vdReportUrl,
+  type CampaignStatus, type RowStatus, type VdBatch, type VdListItem, type VdRow, type VdRowsPage,
 } from '@/lib/voucher-dispersal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
-import { ConfirmDialog, ErrorPanel, LoadingBlock, StatusChip, Tile } from '@/components/voucher-dispersal/vd-ui';
+import { ConfirmDialog, EditCampaignDialog, ErrorPanel, LoadingBlock, StatusChip, Tile } from '@/components/voucher-dispersal/vd-ui';
 
 type DialogState =
   | { kind: 'resend'; row: VdRow }
   | { kind: 'retry'; row: VdRow }
   | { kind: 'cancel' }
+  | { kind: 'discard'; batch: VdBatch }
+  | { kind: 'mark'; row: VdRow }
   | null;
+
+/** Batch list: every upload (1 = the first file) with its own counts. */
+function BatchesTable({ batches }: { batches: VdBatch[] }) {
+  return (
+    <div className="overflow-x-auto rounded-xl border border-white/10">
+      <table className="min-w-full text-sm" data-testid="vd-batches">
+        <caption className="sr-only">Upload batches of this campaign</caption>
+        <thead className="bg-white/5 text-left text-[11px] uppercase tracking-wide text-white/50">
+          <tr>
+            <th scope="col" className="px-3 py-2">Batch</th>
+            <th scope="col" className="px-3 py-2">File</th>
+            <th scope="col" className="px-3 py-2">Uploaded</th>
+            <th scope="col" className="px-3 py-2">Status</th>
+            <th scope="col" className="px-3 py-2">Rows</th>
+            <th scope="col" className="px-3 py-2">Valid</th>
+            <th scope="col" className="px-3 py-2">Not issued</th>
+            <th scope="col" className="px-3 py-2">Cancelled</th>
+            <th scope="col" className="px-3 py-2">Bought</th>
+            <th scope="col" className="px-3 py-2">Failed</th>
+            <th scope="col" className="px-3 py-2" title="Marked as not bought — closed">Closed</th>
+            <th scope="col" className="px-3 py-2">Pending</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/5 align-top">
+          {batches.map((b, i) => (
+            <tr key={b.batchNumber ?? `i${i}`} data-testid={`vd-batch-${b.batchNumber ?? `i${i}`}`}>
+              <td className="px-3 py-2 text-white whitespace-nowrap">{batchLabel(b.batchNumber)}</td>
+              <td className="px-3 py-2 text-white/80 break-all">{b.sourceFileName ?? '—'}</td>
+              <td className="px-3 py-2 text-xs text-white/70">
+                {b.uploadedByName ?? '—'}<br />{formatWhen(b.uploadedAt)}
+              </td>
+              <td className="px-3 py-2">
+                <StatusChip label={b.status === 'UNKNOWN' ? `Unknown status: ${b.rawStatus || '(none)'}` : BATCH_STATUS_LABEL[b.status]} tone={BATCH_STATUS_TONE[b.status]} />
+                {b.status === 'DISCARDED' && (
+                  <p className="text-[11px] text-white/50 mt-1">
+                    {b.discardedByName ? `By ${b.discardedByName} ` : ''}{b.discardedAt ? formatWhen(b.discardedAt) : ''}{b.discardReason ? ` — ${b.discardReason}` : ''}
+                  </p>
+                )}
+              </td>
+              <td className="px-3 py-2 text-white/80">{formatCount(b.total)}</td>
+              <td className="px-3 py-2 text-white/80" data-testid={`vd-batch-${b.batchNumber}-valid`}>{formatCount(b.valid)}</td>
+              <td className={`px-3 py-2 ${((b.invalid ?? 0) + (b.duplicates ?? 0)) > 0 ? 'text-amber-300' : 'text-white/80'}`} data-testid={`vd-batch-${b.batchNumber}-not-issued`}
+                title={b.invalid !== null && b.duplicates !== null ? `${plural(b.invalid, 'invalid row')} + ${plural(b.duplicates, 'duplicate')}` : undefined}>
+                {b.invalid === null && b.duplicates === null ? '—' : formatCount((b.invalid ?? 0) + (b.duplicates ?? 0))}
+              </td>
+              <td className="px-3 py-2 text-white/80" data-testid={`vd-batch-${b.batchNumber}-cancelled`}>{formatCount(b.cancelled)}</td>
+              <td className="px-3 py-2 text-emerald-300" data-testid={`vd-batch-${b.batchNumber}-bought`}>{formatCount(b.bought)}</td>
+              <td className={`px-3 py-2 ${(b.buyFailed ?? 0) > 0 ? 'text-red-300' : 'text-white/80'}`} data-testid={`vd-batch-${b.batchNumber}-failed`}>{formatCount(b.buyFailed)}</td>
+              <td className="px-3 py-2 text-white/80" data-testid={`vd-batch-${b.batchNumber}-closed`}>{formatCount(b.markedClosed)}</td>
+              <td className={`px-3 py-2 ${(b.pending ?? 0) > 0 ? 'text-amber-300' : 'text-white/80'}`}>{formatCount(b.pending)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 type Notice = { text: string; tone: 'info' | 'warning' } | null;
 
 const gt0 = (v: number | null) => v !== null && v > 0;
+
+/** "batch 2, row 5" (row numbers restart in every batch's file); "row 5" when the server sent no batch. */
+function rowRef(r: Pick<VdRow, 'batchNumber' | 'rowNumber'>): string {
+  return r.batchNumber !== null ? `batch ${r.batchNumber}, row ${formatCount(r.rowNumber)}` : `row ${formatCount(r.rowNumber)}`;
+}
+const upperFirst = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
 
 function MessageCell({ row }: { row: VdRow }) {
   if (!row.messageStatus) {
@@ -106,7 +172,9 @@ export default function VoucherCampaignDetailPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<'' | RowStatus>('');
+  const [batchFilter, setBatchFilter] = useState<number | null>(null);
   const [page, setPage] = useState(1);
+  const [editOpen, setEditOpen] = useState(false);
   const [tick, setTick] = useState(0);
   const [notice, setNotice] = useState<Notice>(null);
   const [hidden, setHidden] = useState(false);
@@ -134,7 +202,10 @@ export default function VoucherCampaignDetailPage() {
     const seq = ++seqRef.current;
     if (mode === 'load' && !itemRef.current) { setLoading(true); setLoadError(null); }
     if (mode === 'manual') setRefreshing(true);
-    const [c, r] = await Promise.all([vdApi.getCampaign(id), vdApi.rows(id, { status: filter || undefined, page })]);
+    const [c, r] = await Promise.all([
+      vdApi.getCampaign(id),
+      vdApi.rows(id, { status: filter || undefined, page, ...(batchFilter !== null ? { batch: batchFilter } : {}) }),
+    ]);
     if (!mounted.current || seq !== seqRef.current) return; // a newer request superseded this one
     if (c.ok) {
       const st = c.data.campaign.status;
@@ -158,7 +229,7 @@ export default function VoucherCampaignDetailPage() {
     setLoading(false);
     setRefreshing(false);
     setTick((t) => t + 1);
-  }, [id, filter, page]);
+  }, [id, filter, batchFilter, page]);
 
   // First load + every filter / page change.
   useEffect(() => { void refresh('load'); }, [refresh]);
@@ -195,19 +266,28 @@ export default function VoucherCampaignDetailPage() {
   /** Row ids (or 'campaign') whose action outcome is unknown — locked until the follow-up refresh lands. */
   const [locked, setLocked] = useState<Set<string>>(new Set());
   const actionInFlight = useRef(false);
-  const openDialog = (d: DialogState) => { setDialog(d); setDialogError(null); setNotice(null); };
+  const [markReason, setMarkReason] = useState('');
+  const openDialog = (d: DialogState) => { setDialog(d); setDialogError(null); setNotice(null); setMarkReason(''); };
   const closeDialog = () => { if (!dialogBusy) { setDialog(null); setDialogError(null); } };
 
   const runDialog = async () => {
     if (!dialog || actionInFlight.current) return;
     const d = dialog;
-    const lockKey = d.kind === 'cancel' ? 'campaign' : d.row.id;
+    if (d.kind === 'discard' && d.batch.batchNumber === null) return; // never guess a batch number
+    const reason = markReason.replace(/\s+/g, ' ').trim();
+    if (d.kind === 'mark' && reason.length < 5) {
+      setDialogError('Give the reason (at least 5 characters) — it is kept in the audit trail.');
+      return;
+    }
+    const lockKey = d.kind === 'cancel' || d.kind === 'discard' ? 'campaign' : d.row.id;
     actionInFlight.current = true;
     setDialogBusy(true);
     setDialogError(null);
     const res =
       d.kind === 'resend' ? await vdApi.resend(id, d.row.id)
       : d.kind === 'retry' ? await vdApi.retryBuy(id, d.row.id)
+      : d.kind === 'discard' ? await vdApi.discardBatch(id, d.batch.batchNumber as number)
+      : d.kind === 'mark' ? await vdApi.markNotBought(id, d.row.id, reason)
       : await vdApi.cancel(id);
     actionInFlight.current = false;
     setDialogBusy(false);
@@ -219,22 +299,30 @@ export default function VoucherCampaignDetailPage() {
     if (res.ok) {
       let text: string;
       if (d.kind === 'resend') {
-        text = `Resend requested for row ${formatCount(d.row.rowNumber)}. The WhatsApp status below updates when WhatsApp reports back.`;
+        text = `Resend requested for ${rowRef(d.row)}. The WhatsApp status below updates when WhatsApp reports back.`;
       } else if (d.kind === 'retry') {
         const msg = (res.data as { message: string | null }).message;
-        text = `Row ${formatCount(d.row.rowNumber)}: ${msg ?? 'purchase retry requested.'} The voucher status below updates as the server works on it.`;
+        text = `${upperFirst(rowRef(d.row))}: ${msg ?? 'purchase retry requested.'} The voucher status below updates as the server works on it.`;
+      } else if (d.kind === 'mark') {
+        text = `${upperFirst(rowRef(d.row))} marked as not bought — the row is closed: its ${formatRupees(d.row.amount)} is released and no voucher will be bought for this person in this campaign. Arrange any replacement with Hubble outside this campaign.`;
+      } else if (d.kind === 'discard') {
+        const r = res.data as { discardedRows: number | null };
+        text = `${batchLabel(d.batch.batchNumber)} discarded${r.discardedRows !== null ? `: ${plural(r.discardedRows, 'row')} removed` : ''}. Nothing was bought.`;
       } else {
-        const r = res.data as { cancelledRows: number | null; stillWithHubble: number | null; alreadyBought: number | null };
+        const r = res.data as { cancelledRows: number | null; stillWithHubble: number | null; alreadyBought: number | null; discardedPendingBatchRows: number | null };
         const parts: string[] = [];
         if (r.cancelledRows !== null) parts.push(`${plural(r.cancelledRows, 'row')} will not be bought`);
         if (r.stillWithHubble !== null && r.stillWithHubble > 0) parts.push(`${plural(r.stillWithHubble, 'purchase')} already with Hubble may still complete`);
         if (r.alreadyBought !== null && r.alreadyBought > 0) parts.push(`${plural(r.alreadyBought, 'voucher')} already bought stay bought`);
+        if (r.discardedPendingBatchRows !== null && r.discardedPendingBatchRows > 0) {
+          parts.push(`${plural(r.discardedPendingBatchRows, 'row')} of the unconfirmed batch were discarded`);
+        }
         text = `Campaign cancelled${parts.length ? `: ${parts.join('; ')}` : ''}.`;
       }
       setNotice({ tone: 'info', text });
     } else {
-      const what = d.kind === 'resend' ? 'the resend' : d.kind === 'retry' ? 'the purchase retry' : 'the cancel';
-      const where = d.kind === 'cancel' ? 'the campaign status' : `row ${formatCount(d.row.rowNumber)}`;
+      const what = d.kind === 'resend' ? 'the resend' : d.kind === 'retry' ? 'the purchase retry' : d.kind === 'discard' ? 'the discard' : d.kind === 'mark' ? 'marking it as not bought' : 'the cancel';
+      const where = d.kind === 'cancel' ? 'the campaign status' : d.kind === 'discard' ? 'the batch list' : rowRef(d.row);
       setNotice({
         tone: 'warning',
         text: `We couldn't tell whether ${what} started (${res.error}). Refreshing — check ${where} below before trying again.`,
@@ -252,6 +340,13 @@ export default function VoucherCampaignDetailPage() {
   if (!item) return <ErrorPanel message={`Couldn't load this campaign: ${loadError ?? 'no reply from the server.'}`} onRetry={() => void refresh('load')} />;
 
   const { campaign: c, summary: s } = item;
+  const setup = isSetupCampaign(c.status);
+  // One "Add more people" batch at a time: an unconfirmed one is reviewed / confirmed / discarded first.
+  const pendingBatch = item.batches.find((b) => b.status === 'PREVIEWED' && (b.batchNumber ?? 0) >= 2) ?? null;
+  const confirmedBatches = item.batches.filter((b) => b.status === 'CONFIRMED' && b.batchNumber !== null);
+  const multiBatch = confirmedBatches.length > 1;
+  const canEdit = c.canEdit !== null ? c.canEdit : c.status !== 'CANCELLED';
+  const addHref = `/gifsy/voucher-dispersal/${encodeURIComponent(c.id || id)}/add`;
   const pageCount = rows && rows.total !== null ? Math.max(1, Math.ceil(rows.total / Math.max(1, rows.pageSize))) : null;
   const hasNext = rows ? (pageCount !== null ? page < pageCount : rows.rows.length >= rows.pageSize && rows.rows.length > 0) : false;
 
@@ -278,7 +373,7 @@ export default function VoucherCampaignDetailPage() {
       <div className="flex flex-wrap items-start gap-2">
         <div className="flex flex-col gap-1">
           <button type="button" disabled={report.blocked} aria-busy={report.busy}
-            onClick={() => void report.run(vdReportUrl(id), { fallbackFileName: `voucher-campaign-${id}.xlsx` })}
+            onClick={() => void report.run(vdReportUrl(id), { fallbackFileName: vdReportFallbackName(id) })}
             className="inline-flex items-center gap-2 rounded-lg border border-white/20 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10 disabled:opacity-60">
             {report.busy ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> : <Download className="w-4 h-4" aria-hidden="true" />}
             {downloadButtonLabel(report, 'Download report (Excel)')}
@@ -296,13 +391,36 @@ export default function VoucherCampaignDetailPage() {
             Cancel campaign
           </button>
         )}
-        {isSetupCampaign(c.status) && (
+        {/* Always shown: disabled with the reason when the server says it can't be edited (never silently missing). */}
+        <button type="button" onClick={() => { if (canEdit) { setNotice(null); setEditOpen(true); } }} data-testid="vd-edit"
+          disabled={!canEdit || locked.has('campaign')} aria-describedby={!canEdit ? 'vd-edit-blocked' : undefined}
+          className="inline-flex items-center gap-2 rounded-lg border border-white/20 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10 disabled:opacity-50">
+          <Pencil className="w-4 h-4" aria-hidden="true" /> Edit campaign
+        </button>
+        {!setup && !pendingBatch && c.addPeopleBlockedReason === null && c.status !== 'UNKNOWN' && c.status !== 'CANCELLED' && (
+          <Link href={addHref}
+            className="inline-flex items-center gap-2 rounded-lg bg-[var(--brand-primary)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90">
+            <UserPlus className="w-4 h-4" aria-hidden="true" /> Add more people
+          </Link>
+        )}
+        {setup && (
           <Link href={`/gifsy/voucher-dispersal/new?campaign=${encodeURIComponent(c.id)}`}
             className="rounded-lg bg-[var(--brand-primary)] px-3 py-2 text-sm font-semibold text-white">
             Continue setup
           </Link>
         )}
       </div>
+      {!canEdit && (
+        <p id="vd-edit-blocked" data-testid="vd-edit-blocked" className="text-xs text-white/60">
+          {c.status === 'CANCELLED' ? "A cancelled campaign can't be edited." : "This campaign can't be edited right now."}
+        </p>
+      )}
+      {!setup && !pendingBatch && (c.addPeopleBlockedReason !== null || c.status === 'UNKNOWN') && (
+        <p data-testid="vd-add-people-blocked" className="text-xs text-white/60">
+          <span className="font-semibold text-white/80">Add more people:</span>{' '}
+          {c.addPeopleBlockedReason ?? 'Add more people is unavailable while the status is not recognised.'}
+        </p>
+      )}
 
       <p className="text-xs text-white/60" role="status" data-testid="vd-live">{liveText(phase, c, hidden)}</p>
       {item.hubbleConfigured === false && !isSetupCampaign(c.status) && (
@@ -335,28 +453,121 @@ export default function VoucherCampaignDetailPage() {
         </div>
       )}
 
+      {s.overBudgetRupees !== null && s.overBudgetRupees > 0 && (
+        <p role="alert" data-testid="vd-over-budget" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-200 break-words">
+          Over budget by {formatRupees(s.overBudgetRupees)} — {overBudgetCauseText(s)}.
+          {' '}Raise the budget or check with Hubble; nothing more is bought while it is over.
+        </p>
+      )}
+      {(s.earlierOrderAlerts.total ?? s.earlierOrderAlerts.items.length) > 0 && (
+        <div role="alert" data-testid="vd-earlier-orders" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200 space-y-1">
+          <p className="font-semibold">
+            {plural(s.earlierOrderAlerts.total ?? s.earlierOrderAlerts.items.length, 'open order alert')} — Hubble activity on orders this campaign no longer acts on
+            {s.earlierOrderAlerts.total !== null && s.earlierOrderAlerts.total > s.earlierOrderAlerts.items.length
+              ? ` (the latest ${s.earlierOrderAlerts.items.length} are listed).`
+              : '.'}
+            {' '}Not counted against the budget.
+          </p>
+          {s.earlierOrderAlerts.items.map((a, i) => (
+            <p key={`${a.referenceId ?? i}`} className="break-words">{earlierOrderAlertText(a)}</p>
+          ))}
+        </div>
+      )}
+      {(s.earlierOrderAlerts.resolvedTotal ?? s.earlierOrderAlerts.resolvedItems.length) > 0 && (
+        <div role="status" data-testid="vd-resolved-orders" className="rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-sm text-white/75 space-y-1">
+          <p className="font-semibold">
+            {plural(s.earlierOrderAlerts.resolvedTotal ?? s.earlierOrderAlerts.resolvedItems.length, 'resolved order alert')} — nothing to do.
+            {s.earlierOrderAlerts.resolvedTotal !== null && s.earlierOrderAlerts.resolvedTotal > s.earlierOrderAlerts.resolvedItems.length
+              ? ` The latest ${s.earlierOrderAlerts.resolvedItems.length} are listed.`
+              : ''}
+          </p>
+          {s.earlierOrderAlerts.resolvedItems.map((a, i) => (
+            <p key={`${a.referenceId ?? i}`} className="break-words">{resolvedOrderAlertText(a)}</p>
+          ))}
+        </div>
+      )}
+      {s.queuedAtRiskRupees !== null && s.queuedAtRiskRupees > 0 && (
+        <p role="alert" data-testid="vd-queued-at-risk" className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 break-words">
+          {formatRupees(s.queuedAtRiskRupees)} of queued vouchers can&apos;t be bought within the budget — raise the budget (Edit campaign) or they will fail with a budget reason.
+        </p>
+      )}
+      {c.settleError && (
+        <p role="alert" data-testid="vd-settle-error" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200 break-words">
+          <span className="font-semibold">Status update keeps failing — contact Gifsy tech.</span> The status shown may be out of date. Last error: {c.settleError}
+        </p>
+      )}
+
+      {pendingBatch && (
+        <div data-testid="vd-pending-batch" role="status" className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-100 space-y-2">
+          <p className="break-words">
+            {batchLabel(pendingBatch.batchNumber)}{pendingBatch.sourceFileName ? ` (${pendingBatch.sourceFileName})` : ''} is waiting for confirmation — nothing in it has been bought, and it is not in the totals or the report.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Link href={addHref} className="rounded-lg bg-[var(--brand-primary)] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90">
+              Review &amp; confirm
+            </Link>
+            <button type="button" data-testid="vd-discard-batch" disabled={locked.has('campaign')}
+              onClick={() => openDialog({ kind: 'discard', batch: pendingBatch })}
+              className="rounded-lg border border-white/25 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10 disabled:opacity-50">
+              Discard batch
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3" data-testid="vd-tiles">
         <Tile label="Bought" value={formatCount(s.bought)} tone="success" testId="vd-tile-bought" />
         <Tile label="Pending" value={formatCount(s.pending)} tone={gt0(s.pending) ? 'warning' : 'neutral'} testId="vd-tile-pending" />
         <Tile label="Buy failed" value={formatCount(s.buyFailed)} tone={gt0(s.buyFailed) ? 'danger' : 'neutral'} testId="vd-tile-buyfailed" />
+        {gt0(s.markedClosed) && <Tile label="Closed (marked not bought)" value={formatCount(s.markedClosed)} testId="vd-tile-closed" />}
         <Tile label="WhatsApp sent" value={formatCount(s.messageSent)} testId="vd-tile-sent" />
         <Tile label="Delivered" value={formatCount(s.delivered)} testId="vd-tile-delivered" />
         <Tile label="Read" value={formatCount(s.read)} testId="vd-tile-read" />
         <Tile label="Msg failed" value={formatCount(s.messageFailed)} tone={gt0(s.messageFailed) ? 'danger' : 'neutral'} testId="vd-tile-msgfailed" />
         <Tile label="Spent / budget" value={`${formatRupees(s.spentRupees)} / ${formatRupees(c.budgetRupees)}`} testId="vd-tile-spent" wide />
       </div>
+      {s.budgetUsage && (
+        <p data-testid="vd-budget-usage" className="text-xs text-white/70 break-words">
+          Budget used: {formatRupees(s.budgetUsage.floorRupees)} of {formatRupees(c.budgetRupees)} — {budgetUsageText(s.budgetUsage)}
+        </p>
+      )}
+
+      {item.batches.length > 0 && (
+        <section aria-labelledby="vd-batches-heading" className="space-y-2">
+          <h2 id="vd-batches-heading" className="text-base font-semibold text-white">Batches</h2>
+          <p className="text-xs text-white/50">Batch 1 is the first file; each &quot;Add more people&quot; upload is the next batch. The totals above cover every confirmed batch.</p>
+          <BatchesTable batches={item.batches} />
+        </section>
+      )}
 
       <section aria-labelledby="vd-rows-heading" className="space-y-3">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <h2 id="vd-rows-heading" className="text-base font-semibold text-white">Rows</h2>
-          <div>
-            <label htmlFor="vd-row-filter" className="block text-xs font-semibold text-white/70 mb-1">Voucher status</label>
-            <select id="vd-row-filter" value={filter}
-              onChange={(e) => { setFilter(e.target.value as '' | RowStatus); setPage(1); }}
-              className="rounded-lg border border-white/15 bg-gray-900 px-3 py-2 text-sm text-white">
-              <option value="">All rows</option>
-              {ROW_STATUSES.map((st) => <option key={st} value={st}>{ROW_STATUS_LABEL[st]}</option>)}
-            </select>
+          <div className="flex flex-wrap items-end gap-3">
+            {multiBatch && (
+              <div>
+                <label htmlFor="vd-batch-filter" className="block text-xs font-semibold text-white/70 mb-1">Batch</label>
+                <select id="vd-batch-filter" value={batchFilter === null ? '' : String(batchFilter)}
+                  onChange={(e) => { setBatchFilter(e.target.value ? Number(e.target.value) : null); setPage(1); }}
+                  className="rounded-lg border border-white/15 bg-gray-900 px-3 py-2 text-sm text-white">
+                  <option value="">All batches</option>
+                  {confirmedBatches.map((b) => (
+                    <option key={b.batchNumber!} value={String(b.batchNumber)}>
+                      {batchLabel(b.batchNumber)}{b.sourceFileName ? ` — ${b.sourceFileName}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div>
+              <label htmlFor="vd-row-filter" className="block text-xs font-semibold text-white/70 mb-1">Voucher status</label>
+              <select id="vd-row-filter" value={filter}
+                onChange={(e) => { setFilter(e.target.value as '' | RowStatus); setPage(1); }}
+                className="rounded-lg border border-white/15 bg-gray-900 px-3 py-2 text-sm text-white">
+                <option value="">All rows</option>
+                {ROW_STATUSES.map((st) => <option key={st} value={st}>{ROW_STATUS_LABEL[st]}</option>)}
+              </select>
+            </div>
           </div>
         </div>
         {rowsError && <ErrorPanel message={`Couldn't load the rows: ${rowsError}`} onRetry={() => void refresh('manual')} testId="vd-rows-error" />}
@@ -384,7 +595,10 @@ export default function VoucherCampaignDetailPage() {
                     <tr><td colSpan={8} className="px-3 py-6 text-center text-white/50">No rows{filter ? ' with this status' : ''}.</td></tr>
                   ) : rows.rows.map((r, i) => (
                     <tr key={r.id || `i${i}`} data-testid={`vd-row-${r.id}`}>
-                      <td className="px-3 py-2 text-white/60">{formatCount(r.rowNumber)}</td>
+                      <td className="px-3 py-2 text-white/60 whitespace-nowrap">
+                        {formatCount(r.rowNumber)}
+                        {multiBatch && r.batchNumber !== null && <p className="text-[11px] text-white/40">{batchLabel(r.batchNumber)}</p>}
+                      </td>
                       <td className="px-3 py-2"><p className="text-white">{r.name || '—'}</p><p className="font-mono text-xs text-white/60">{r.phone || '—'}</p></td>
                       <td className="px-3 py-2 text-white whitespace-nowrap">{formatRupees(r.amount)}<p className="text-xs text-white/60">{r.brand || '—'}</p></td>
                       <td className="px-3 py-2 min-w-[12rem]"><VoucherCell row={r} /></td>
@@ -407,6 +621,21 @@ export default function VoucherCampaignDetailPage() {
                               Retry purchase
                             </button>
                           )}
+                          {r.closedNote && (
+                            <p data-testid={`vd-closed-${r.id}`} className="max-w-[16rem] text-[11px] text-white/70">{r.closedNote}</p>
+                          )}
+                          {r.id && r.canMarkNotBought === true && !canRetryRow(r) && (
+                            <p data-testid={`vd-retry-unavailable-${r.id}`} className="max-w-[14rem] text-[11px] text-amber-200">
+                              Retry is unavailable: Hubble&apos;s answer was not recognised — check with Hubble; if it was not bought, Mark as not bought closes the row.
+                            </p>
+                          )}
+                          {r.id && r.canMarkNotBought === true && (
+                            <button type="button" onClick={() => openDialog({ kind: 'mark', row: r })} data-testid={`vd-mark-${r.id}`}
+                              disabled={locked.has(r.id)}
+                              className="whitespace-nowrap rounded border border-red-500/40 px-2 py-1 text-xs text-red-200 hover:bg-red-500/10 disabled:opacity-50">
+                              Mark as not bought
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -424,6 +653,58 @@ export default function VoucherCampaignDetailPage() {
           </>
         ) : null}
       </section>
+
+      {item.edits.length > 0 && (
+        <section aria-labelledby="vd-history-heading" className="space-y-2">
+          <h2 id="vd-history-heading" className="text-base font-semibold text-white">Edit history</h2>
+          <ul data-testid="vd-edit-history" className="space-y-1.5 text-xs text-white/70">
+            {item.edits.map((e, i) => (
+              <li key={`${e.at ?? ''}-${i}`} className="break-words">
+                <span className="text-white/50">{formatWhen(e.at)}</span> · <span className="font-semibold text-white/80">{e.byName ?? 'Unknown admin'}</span>:{' '}
+                {e.changes.length ? e.changes.map(editChangeText).join('; ') : 'no details recorded'}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {editOpen && (
+        <EditCampaignDialog
+          open={editOpen}
+          campaign={{ id: c.id || id, name: c.name, budgetRupees: c.budgetRupees }}
+          floorRupees={s.budgetFloorRupees}
+          onClose={() => setEditOpen(false)}
+          onSaved={(summary) => {
+            setEditOpen(false);
+            setNotice({ tone: 'info', text: `Campaign updated: ${summary}.` });
+            void refresh('manual');
+          }}
+          onUncertain={(error) => {
+            setEditOpen(false);
+            setNotice({ tone: 'warning', text: `We couldn't tell whether the edit was saved (${error}). Refreshing — check the name and budget before trying again.` });
+            void refresh('manual');
+          }}
+        />
+      )}
+
+      <ConfirmDialog
+        open={dialog?.kind === 'discard'}
+        title={`Discard ${dialog?.kind === 'discard' ? batchLabel(dialog.batch.batchNumber).toLowerCase() : 'batch'}?`}
+        description="Nothing in this batch has been bought. Its rows are removed; the batch stays listed as discarded."
+        confirmLabel="Discard batch"
+        busyLabel="Discarding…"
+        busy={dialogBusy}
+        error={dialogError}
+        danger
+        onConfirm={() => void runDialog()}
+        onClose={closeDialog}
+      >
+        {dialog?.kind === 'discard' && (
+          <p>
+            {dialog.batch.total !== null ? `${plural(dialog.batch.total, 'uploaded row')}` : 'The uploaded rows'}{dialog.batch.sourceFileName ? ` from ${dialog.batch.sourceFileName}` : ''} will be removed. To add these people later, upload the file again.
+          </p>
+        )}
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={dialog?.kind === 'resend'}
@@ -445,6 +726,32 @@ export default function VoucherCampaignDetailPage() {
       </ConfirmDialog>
 
       <ConfirmDialog
+        open={dialog?.kind === 'mark'}
+        title="Mark as not bought?"
+        description="Only after checking with Hubble that no voucher was issued. Recorded with your name and reason."
+        confirmLabel="Mark as not bought"
+        busyLabel="Saving…"
+        busy={dialogBusy}
+        error={dialogError}
+        danger
+        onConfirm={() => void runDialog()}
+        onClose={closeDialog}
+      >
+        {dialog?.kind === 'mark' && (
+          <div className="space-y-2">
+            <p>
+              Hubble answered with a status we do not recognise for {rowRef(dialog.row)} ({formatRupees(dialog.row.amount)} {dialog.row.brand}, {dialog.row.phone}).
+              This closes the row for good: its {formatRupees(dialog.row.amount)} is released and no voucher will be bought for this person in this campaign. Arrange any replacement with Hubble outside this campaign.
+            </p>
+            <label htmlFor="vd-mark-reason" className="block text-xs font-semibold text-gray-600">Reason (kept in the audit trail)</label>
+            <textarea id="vd-mark-reason" rows={2} maxLength={300} value={markReason} disabled={dialogBusy}
+              onChange={(e) => setMarkReason(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900" />
+          </div>
+        )}
+      </ConfirmDialog>
+
+      <ConfirmDialog
         open={dialog?.kind === 'retry'}
         title="Retry the purchase?"
         description="If the retry succeeds, money is spent on a new voucher."
@@ -458,7 +765,7 @@ export default function VoucherCampaignDetailPage() {
       >
         {dialog?.kind === 'retry' && (
           <p>
-            Try again to buy a {formatRupees(dialog.row.amount)} {dialog.row.brand} voucher for {dialog.row.phone} (row {formatCount(dialog.row.rowNumber)}).
+            Try again to buy a {formatRupees(dialog.row.amount)} {dialog.row.brand} voucher for {dialog.row.phone} ({rowRef(dialog.row)}).
             If it succeeds, the money is spent and the voucher is sent on WhatsApp. If the server refuses, its reason is shown here.
           </p>
         )}
@@ -479,7 +786,8 @@ export default function VoucherCampaignDetailPage() {
         <p>
           {isSetupCampaign(c.status)
             ? 'Nothing has been bought for this campaign, so nothing is spent.'
-            : 'Rows not bought yet will not be bought, but purchases already in progress may still complete. Vouchers already bought stay bought.'}
+            : 'Rows not bought yet (in every batch) will not be bought, but purchases already in progress may still complete. Vouchers already bought stay bought.'}
+          {pendingBatch ? ` ${batchLabel(pendingBatch.batchNumber)}, waiting for confirmation, is discarded too.` : ''}
         </p>
       </ConfirmDialog>
     </div>

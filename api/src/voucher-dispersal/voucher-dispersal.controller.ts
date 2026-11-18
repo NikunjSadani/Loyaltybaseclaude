@@ -6,7 +6,10 @@ import {
   Get,
   Headers,
   HttpCode,
+  Injectable,
   Param,
+  Patch,
+  PipeTransform,
   Post,
   Query,
   StreamableFile,
@@ -22,11 +25,40 @@ import { VoucherDispersalProcessor } from './voucher-dispersal.processor';
 import {
   ConfirmDispersalCampaignDto,
   CreateDispersalCampaignDto,
+  EditDispersalCampaignDto,
   ListDispersalCampaignsQueryDto,
+  MarkNotBoughtDto,
   ListDispersalRowsQueryDto,
 } from './dto/voucher-dispersal.dto';
 
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/** Highest batch number accepted in a path / query (a bigger value is a 400, never a DB Int overflow 500). */
+export const MAX_BATCH_NUMBER = 100_000;
+
+/** `:n` batch number — a whole number 1..MAX_BATCH_NUMBER, else 400 (money-audit M7). */
+@Injectable()
+export class BatchNumberPipe implements PipeTransform<string, number> {
+  transform(value: string): number {
+    const v = String(value ?? '').trim();
+    const n = /^\d{1,9}$/.test(v) ? Number(v) : NaN;
+    if (!Number.isInteger(n) || n < 1 || n > MAX_BATCH_NUMBER) {
+      throw new BadRequestException(`Batch number must be a whole number from 1 to ${MAX_BATCH_NUMBER}.`);
+    }
+    return n;
+  }
+}
+
+/** Same .xlsx-only, size-capped multipart interceptor for the first file and every later batch. */
+const xlsxUpload = () =>
+  UseInterceptors(
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
+      fileFilter: (_req, file, cb) =>
+        /\.xlsx$/i.test(file.originalname)
+          ? cb(null, true)
+          : cb(new BadRequestException('Only .xlsx files are accepted — download the template and fill it in.'), false),
+    }),
+  );
 
 /**
  * Voucher Dispersal — `/v1/admin/voucher-dispersal/*`. GIFSY_ADMIN ONLY.
@@ -65,15 +97,14 @@ export class VoucherDispersalController {
     return this.svc.detail(user, id);
   }
 
+  /** Rename and/or change the budget (never below spent + committed). Audited. */
+  @Patch('campaigns/:id')
+  edit(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: EditDispersalCampaignDto) {
+    return this.svc.editCampaign(user, id, dto);
+  }
+
   @Post('campaigns/:id/upload')
-  @UseInterceptors(
-    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
-      fileFilter: (_req, file, cb) =>
-        /\.xlsx$/i.test(file.originalname)
-          ? cb(null, true)
-          : cb(new BadRequestException('Only .xlsx files are accepted — download the template and fill it in.'), false),
-    }),
-  )
+  @xlsxUpload()
   upload(@CurrentUser() user: JwtPayload, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
     return this.svc.upload(user, id, file);
   }
@@ -108,10 +139,47 @@ export class VoucherDispersalController {
     return this.svc.resend(user, id, rowId);
   }
 
-  @Post('campaigns/:id/rows/:rowId/retry-buy')
+  /** An admin declares a row NOT BOUGHT (only after an unrecognised Hubble status; reason required; audited). */
+  @Post('campaigns/:id/rows/:rowId/mark-not-bought')
+  @HttpCode(200)
+  markNotBought(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('rowId') rowId: string, @Body() dto: MarkNotBoughtDto) {
+    return this.svc.markNotBought(user, id, rowId, dto);
+  }
+
+    @Post('campaigns/:id/rows/:rowId/retry-buy')
   @HttpCode(200)
   retryBuy(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('rowId') rowId: string) {
     return this.svc.retryBuy(user, id, rowId);
+  }
+
+  /** "Add more people": upload another file to a finished campaign → preview (nothing bought yet). */
+  @Post('campaigns/:id/batches')
+  @xlsxUpload()
+  uploadBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+    return this.svc.uploadBatch(user, id, file);
+  }
+
+  /** The preview of a batch still waiting for confirmation (resume after leaving the page). */
+  @Get('campaigns/:id/batches/:n')
+  batchPreview(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('n', BatchNumberPipe) n: number) {
+    return this.svc.batchPreview(user, id, n);
+  }
+
+  @Post('campaigns/:id/batches/:n/confirm')
+  @HttpCode(200)
+  confirmBatch(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('n', BatchNumberPipe) n: number,
+    @Body() dto: ConfirmDispersalCampaignDto,
+  ) {
+    return this.svc.confirmBatch(user, id, n, dto);
+  }
+
+  @Post('campaigns/:id/batches/:n/discard')
+  @HttpCode(200)
+  discardBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('n', BatchNumberPipe) n: number) {
+    return this.svc.discardBatch(user, id, n);
   }
 
   @Post('campaigns/:id/cancel')

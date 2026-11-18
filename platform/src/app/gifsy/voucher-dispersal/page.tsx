@@ -5,23 +5,51 @@
    GET /api/admin/voucher-dispersal/campaigns — nothing is computed or invented here
    (a number the server did not send shows as "—"). The list carries purchase counts only — WhatsApp
    delivered / read counts are on each campaign's page. 50 campaigns per page (server `?page=`).
+   Each card is ONE real link (the title, stretched over the card with an ::after overlay — keyboard
+   focusable, announced by its name); the per-card "Download Excel" button / "Continue setup" link sit
+   above the overlay (relative z-10) and are NOT nested inside the link.
 ──────────────────────────────────────────────────────────────────────────────────── */
 
 import React, { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Plus, Ticket, RefreshCw } from 'lucide-react';
+import { Download, Loader2, Plus, Ticket, RefreshCw } from 'lucide-react';
 import {
   CAMPAIGN_STATUS_TONE, billedToText, campaignStatusText, formatCount, formatRupees, formatWhen,
-  isSetupCampaign, vdApi, VD_CAMPAIGNS_PAGE_SIZE, type VdListItem,
+  isSetupCampaign, plural, vdApi, vdReportFallbackName, vdReportUrl, VD_CAMPAIGNS_PAGE_SIZE, type VdListItem,
 } from '@/lib/voucher-dispersal';
+import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
+import { DownloadActionStatus } from '@/components/exports/download-action-status';
 import { ErrorPanel, LoadingBlock, StatusChip, TemplateDownloadButton } from '@/components/voucher-dispersal/vd-ui';
+
+/** Per-card report download (same report.xlsx as the campaign page), above the card's stretched link. */
+function CardDownload({ id, name }: { id: string; name: string }) {
+  const action = useDownloadAction();
+  return (
+    <div className="relative z-10 flex flex-col items-end gap-1">
+      <button
+        type="button"
+        data-testid={`vd-card-download-${id}`}
+        aria-label={`Download Excel report for ${name || 'this campaign'}`}
+        disabled={action.blocked}
+        aria-busy={action.busy}
+        onClick={() => void action.run(vdReportUrl(id), { fallbackFileName: vdReportFallbackName(id) })}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-white/20 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-white/10 disabled:opacity-60 outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+      >
+        {action.busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> : <Download className="w-3.5 h-3.5" aria-hidden="true" />}
+        {downloadButtonLabel(action, 'Download Excel')}
+      </button>
+      <DownloadActionStatus action={action} tone="dark" downloadsHref="/gifsy/downloads" />
+    </div>
+  );
+}
 
 function Count({ label, value, alert, wide }: { label: string; value: string; alert?: 'danger' | 'warning'; wide?: boolean }) {
   const color = alert === 'danger' ? 'text-red-300' : alert === 'warning' ? 'text-amber-300' : 'text-white';
   return (
     <div className={`min-w-0 ${wide ? 'col-span-2' : ''}`}>
       <dt className="text-[10px] uppercase tracking-wide text-white/40">{label}</dt>
-      <dd className={`text-sm font-semibold break-words ${color}`}>{value}</dd>
+      {/* The value sits above the card's link overlay so it can be selected / copied. */}
+      <dd className={`relative z-10 w-fit select-text cursor-text text-sm font-semibold break-words ${color}`}>{value}</dd>
     </div>
   );
 }
@@ -108,22 +136,40 @@ export default function VoucherDispersalListPage() {
                   ? `/gifsy/voucher-dispersal/new?campaign=${encodeURIComponent(c.id)}`
                   : `/gifsy/voucher-dispersal/${encodeURIComponent(c.id)}`;
                 return (
-                  <li key={c.id} data-testid={`vd-campaign-${c.id}`} className="rounded-xl border border-white/10 bg-white/5 p-4">
+                  <li key={c.id} data-testid={`vd-campaign-${c.id}`}
+                    className="relative rounded-xl border border-white/10 bg-white/5 p-4 transition-colors hover:border-white/25 hover:bg-white/[0.08]">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <Link href={href} className="text-base font-semibold text-white hover:underline break-words">
+                        <Link href={href} data-testid={`vd-card-link-${c.id}`}
+                          className="text-base font-semibold text-white hover:underline break-words outline-none after:absolute after:inset-0 after:rounded-xl after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-sky-400">
                           {c.name || 'Untitled campaign'}
                         </Link>
-                        <p className="text-xs text-white/50 mt-0.5 break-words">
+                        {/* Above the link overlay so it can be selected / copied (plain text — nothing interactive). */}
+                        <p data-testid={`vd-card-meta-${c.id}`} className="relative z-10 w-fit select-text cursor-text text-xs text-white/50 mt-0.5 break-words">
                           Programme: {c.programLabel || '—'} · Billed to: {billedToText(c)} · Created {formatWhen(c.createdAt)}
                         </p>
                       </div>
-                      <StatusChip label={campaignStatusText(c)} tone={CAMPAIGN_STATUS_TONE[c.status]} testId={`vd-status-${c.id}`} />
+                      <div className="flex flex-wrap items-start gap-2">
+                        <StatusChip label={campaignStatusText(c)} tone={CAMPAIGN_STATUS_TONE[c.status]} testId={`vd-status-${c.id}`} />
+                        {!setup && <CardDownload id={c.id} name={c.name} />}
+                      </div>
                     </div>
+                    {gt0(s.openOrderAlerts) && (
+                      <p role="alert" data-testid={`vd-card-open-alerts-${c.id}`} className="relative z-10 mt-2 inline-block rounded-md border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-200">
+                        {plural(s.openOrderAlerts ?? 0, 'open order alert')} — check with Hubble (see the campaign)
+                      </p>
+                    )}
+                    {s.pendingBatchNumber !== null && (
+                      <p data-testid={`vd-card-pending-batch-${c.id}`} className="mt-2 text-xs text-sky-200">
+                        Batch {s.pendingBatchNumber} is waiting for confirmation — nothing in it has been bought.
+                      </p>
+                    )}
                     {setup ? (
                       <p className="mt-3 text-xs text-white/60">
                         Not confirmed — nothing has been bought.{' '}
-                        <Link href={href} className="font-semibold text-sky-300 underline underline-offset-2">Continue setup</Link>
+                        {/* Mouse shortcut only: the card's own title link is THE link for keyboard / screen readers. */}
+                        <Link href={href} tabIndex={-1} aria-hidden="true" data-testid={`vd-continue-setup-${c.id}`}
+                          className="relative z-10 font-semibold text-sky-300 underline underline-offset-2">Continue setup</Link>
                       </p>
                     ) : (
                       <dl className="mt-3 grid grid-cols-3 sm:grid-cols-8 gap-3">
@@ -131,6 +177,7 @@ export default function VoucherDispersalListPage() {
                         <Count label="Bought" value={formatCount(s.bought)} />
                         <Count label="Pending" value={formatCount(s.pending)} alert={gt0(s.pending) ? 'warning' : undefined} />
                         <Count label="Buy failed" value={formatCount(s.buyFailed)} alert={gt0(s.buyFailed) ? 'danger' : undefined} />
+                        {gt0(s.markedClosed) && <Count label="Closed (marked not bought)" value={formatCount(s.markedClosed)} />}
                         <Count label="Cancelled" value={formatCount(s.cancelled)} />
                         <Count label="Spent / budget" value={`${formatRupees(s.spentRupees)} / ${formatRupees(c.budgetRupees)}`} wide />
                       </dl>

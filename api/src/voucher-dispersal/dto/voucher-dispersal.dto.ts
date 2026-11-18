@@ -1,4 +1,4 @@
-import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength, ValidateIf } from 'class-validator';
 import { Type } from 'class-transformer';
 
 /** POST /v1/admin/voucher-dispersal/campaigns */
@@ -55,6 +55,34 @@ export class ConfirmDispersalCampaignDto {
   expectedTotalRupees!: number;
 }
 
+/**
+ * PATCH /campaigns/:id — rename and/or change the budget. At least one field; the budget may go UP, or DOWN
+ * but never below what is already spent + committed (computed server-side under the campaign lock).
+ */
+export class EditDispersalCampaignDto {
+  // ValidateIf (not IsOptional): an omitted field is skipped, but an explicit null is validated → 400.
+  @ValidateIf((o: EditDispersalCampaignDto) => o.name !== undefined)
+  @IsString()
+  @MaxLength(120)
+  name?: string;
+
+  /** Whole rupees (same bounds as create). */
+  @ValidateIf((o: EditDispersalCampaignDto) => o.budgetRupees !== undefined)
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10_000_000)
+  budgetRupees?: number;
+}
+
+/** POST /campaigns/:id/rows/:rowId/mark-not-bought — the admin's reason (kept in the audit trail). */
+export class MarkNotBoughtDto {
+  @IsString()
+  @MinLength(5)
+  @MaxLength(300)
+  reason!: string;
+}
+
 export const DISPERSAL_ROW_STATUSES = [
   'VALID',
   'INVALID',
@@ -67,11 +95,19 @@ export const DISPERSAL_ROW_STATUSES = [
   'CANCELLED',
 ] as const;
 
-/** GET /campaigns/:id/rows?status=&page= */
+/** GET /campaigns/:id/rows?status=&batch=&page= */
 export class ListDispersalRowsQueryDto {
   @IsOptional()
   @IsIn(DISPERSAL_ROW_STATUSES)
   status?: (typeof DISPERSAL_ROW_STATUSES)[number];
+
+  /** Only this upload batch (1 = the first file). An unconfirmed batch is listed ONLY when asked for by number. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100_000) // = MAX_BATCH_NUMBER (controller) — over it is a 400, never a DB Int overflow
+  batch?: number;
 
   @IsOptional()
   @Type(() => Number)

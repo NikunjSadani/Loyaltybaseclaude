@@ -77,8 +77,19 @@ export class HubbleWebhookController {
     if (/^vd[0-9a-f]{24}$/.test(referenceId)) {
       const d = this.dispersal();
       if (d) {
+        // ALWAYS 200 for dispersal processing (coordinator review of 4d8454ad, M3): this endpoint also carries the live
+        // rewards / gift webhooks of every tenant (incl. Deoleo) and Hubble's retry / auto-disable policy for non-2xx
+        // answers is unverified — a 5xx here must never risk those. A failed dispersal lookup is instead RECORDED on the
+        // campaign as an order alert ("couldn't check" / last check failed). Re-checked by the 2-minute sweep: pending
+        // rows, failed rows with a local failure, and (release-gate H2) HUBBLE_FAILED / REJECTED rows whose last lookup
+        // failed — until Hubble answers. NOT re-checked: earlier (retired) references, marked rows and cancelled rows —
+        // their alert stays open on the campaign page and in the digest's "still open" line until Hubble calls again.
         try {
           const outcome = await d.reconcileByReference(referenceId);
+          if (outcome === 'LOOKUP_FAILED') {
+            this.logger.warn(`[hubble webhook] dispersal lookup failed for ${referenceId} — recorded on the campaign; acked 200`);
+            return { ok: true, reconciled: false, outcome: 'DISPERSAL_LOOKUP_FAILED' };
+          }
           if (outcome !== 'NOT_FOUND') return { ok: true, reconciled: true, outcome: `DISPERSAL_${outcome}` };
         } catch (e) {
           this.logger.error(`[hubble webhook] dispersal reconcile failed for ${referenceId}: ${e}`);

@@ -2,8 +2,9 @@
  * TEST-ONLY in-memory Prisma fake for the Voucher Dispersal specs (excluded from the build by the
  * `**\/*spec.ts` pattern; not a test file itself — jest only runs `*.spec.ts`).
  * Supports exactly the query subset the module uses: equality (incl. null / Date / bigint), in, notIn,
- * not, lt, has, OR, AND; update data with increment / push; orderBy / skip / take; aggregate (_count,
- * _sum.amountPaise); groupBy [campaignId, status]; $transaction(fn) (sequential, no isolation needed).
+ * not, lt, has, OR, AND, JSON path+equals; composite unique keys (rows: campaign+dedupePhone,
+ * campaign+batch+rowNumber, hubbleReferenceId; batches: campaign+batchNumber); update data with increment / push; orderBy / skip / take; aggregate (_count,
+ * _sum.amountPaise); groupBy (any `by` list, default [campaignId, status]); $transaction(fn) (sequential, no isolation needed; opt-in FIFO serialization).
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Rec = Record<string, any>;
@@ -31,14 +32,25 @@ export function matches(rec: Rec, where: Rec | undefined): boolean {
       if (!(cond as Rec[]).every((c) => matches(rec, c))) return false;
       continue;
     }
-    const v = rec[k];
+    if (k === 'NOT') {
+      if (matches(rec, cond as Rec)) return false;
+      continue;
+    }
+    let v = rec[k];
+    if (cond !== null && typeof cond === 'object' && !(cond instanceof Date) && Array.isArray((cond as Rec).path)) {
+      // JSON path filter (Prisma `{ path: ['a'], equals: x }`).
+      for (const seg of (cond as Rec).path as string[]) v = v == null ? undefined : v[seg];
+    }
     if (cond !== null && typeof cond === 'object' && !(cond instanceof Date)) {
       if ('in' in cond && !(cond.in as any[]).some((x) => eq(v, x))) return false;
       if ('notIn' in cond && (cond.notIn as any[]).some((x) => eq(v, x))) return false;
       if ('not' in cond && eq(v, cond.not)) return false;
       if ('lt' in cond && !(v != null && v < cond.lt)) return false;
+      if ('gt' in cond && !(v != null && v > cond.gt)) return false;
       if ('gte' in cond && !(v != null && v >= cond.gte)) return false;
       if ('has' in cond && !(Array.isArray(v) && v.includes(cond.has))) return false;
+      if ('startsWith' in cond && !(typeof v === 'string' && v.startsWith(cond.startsWith))) return false;
+      if ('isEmpty' in cond && (Array.isArray(v) ? v.length === 0 : true) !== cond.isEmpty) return false;
       if ('equals' in cond && !eq(v, cond.equals)) return false;
       continue;
     }
@@ -55,7 +67,8 @@ function applyData(rec: Rec, data: Rec) {
       else rec[k] = v;
     } else if (v !== undefined) rec[k] = v;
   }
-  rec.updatedAt = tick();
+  // Like Prisma's @updatedAt: set automatically unless the write gives updatedAt explicitly.
+  if (!('updatedAt' in data)) rec.updatedAt = tick();
 }
 
 function sortBy(list: Rec[], orderBy: any): Rec[] {
@@ -73,7 +86,35 @@ function sortBy(list: Rec[], orderBy: any): Rec[] {
   });
 }
 
-function table(store: Rec[], prefix: string, defaults: () => Rec, include?: (r: Rec, inc: Rec) => Rec) {
+/** Composite unique keys (NULL members never collide — Postgres semantics). Throws like Prisma P2002. */
+function checkUnique(store: Rec[], uniques: string[][]) {
+  for (const keys of uniques) {
+    const seen = new Set<string>();
+    for (const r of store) {
+      if (keys.some((k) => r[k] == null)) continue;
+      const sig = keys.map((k) => String(r[k])).join('|');
+      if (seen.has(sig)) {
+        // Prisma's real shape: PrismaClientKnownRequestError with code P2002.
+        throw Object.assign(new Error(`Unique constraint failed on the fields: (${keys.join(',')})`), { code: 'P2002', meta: { target: keys } });
+      }
+      seen.add(sig);
+    }
+  }
+}
+
+function table(store: Rec[], prefix: string, defaults: () => Rec, include?: (r: Rec, inc: Rec) => Rec, uniques: string[][] = []) {
+  /** Apply a mutation; on a unique violation roll the store back and throw. */
+  const guarded = <T>(fn: () => T): T => {
+    const snapshot = store.map((r) => ({ ...r }));
+    const out = fn();
+    try {
+      checkUnique(store, uniques);
+    } catch (e) {
+      store.splice(0, store.length, ...snapshot);
+      throw e;
+    }
+    return out;
+  };
   const find = (args: Rec = {}) => {
     let l = sortBy(store.filter((r) => matches(r, args.where)), args.orderBy);
     if (args.skip) l = l.slice(args.skip);
@@ -82,15 +123,19 @@ function table(store: Rec[], prefix: string, defaults: () => Rec, include?: (r: 
   };
   return {
     store,
-    create: jest.fn(async ({ data }: Rec) => {
-      const r = { ...defaults(), id: nextId(prefix), createdAt: tick(), updatedAt: tick(), ...data };
-      store.push(r);
-      return { ...r };
-    }),
-    createMany: jest.fn(async ({ data }: Rec) => {
-      for (const d of data) store.push({ ...defaults(), id: nextId(prefix), createdAt: tick(), updatedAt: tick(), ...d });
-      return { count: data.length };
-    }),
+    create: jest.fn(async ({ data }: Rec) =>
+      guarded(() => {
+        const r = { ...defaults(), id: nextId(prefix), createdAt: tick(), updatedAt: tick(), ...data };
+        store.push(r);
+        return { ...r };
+      }),
+    ),
+    createMany: jest.fn(async ({ data }: Rec) =>
+      guarded(() => {
+        for (const d of data) store.push({ ...defaults(), id: nextId(prefix), createdAt: tick(), updatedAt: tick(), ...d });
+        return { count: data.length };
+      }),
+    ),
     findMany: jest.fn(async (args: Rec = {}) => find(args)),
     findFirst: jest.fn(async (args: Rec = {}) => find(args)[0] ?? null),
     findFirstOrThrow: jest.fn(async (args: Rec = {}) => {
@@ -104,17 +149,21 @@ function table(store: Rec[], prefix: string, defaults: () => Rec, include?: (r: 
       if (!r) throw new Error('not found');
       return r;
     }),
-    update: jest.fn(async ({ where, data }: Rec) => {
-      const r = store.find((x) => matches(x, where));
-      if (!r) throw new Error('Record to update not found');
-      applyData(r, data);
-      return { ...r };
-    }),
-    updateMany: jest.fn(async ({ where, data }: Rec) => {
-      const l = store.filter((x) => matches(x, where));
-      l.forEach((r) => applyData(r, data));
-      return { count: l.length };
-    }),
+    update: jest.fn(async ({ where, data }: Rec) =>
+      guarded(() => {
+        const r = store.find((x) => matches(x, where));
+        if (!r) throw new Error('Record to update not found');
+        applyData(r, data);
+        return { ...r };
+      }),
+    ),
+    updateMany: jest.fn(async ({ where, data }: Rec) =>
+      guarded(() => {
+        const l = store.filter((x) => matches(x, where));
+        l.forEach((r) => applyData(r, data));
+        return { count: l.length };
+      }),
+    ),
     deleteMany: jest.fn(async ({ where }: Rec) => {
       const keep = store.filter((x) => !matches(x, where));
       const n = store.length - keep.length;
@@ -127,11 +176,12 @@ function table(store: Rec[], prefix: string, defaults: () => Rec, include?: (r: 
       const sum = l.reduce((a, r) => (r.amountPaise == null ? a : (a ?? 0n) + BigInt(r.amountPaise)), null as bigint | null);
       return { _count: { _all: l.length }, _sum: { amountPaise: sum } };
     }),
-    groupBy: jest.fn(async ({ where }: Rec) => {
+    groupBy: jest.fn(async ({ where, by }: Rec) => {
+      const keys: string[] = by ?? ['campaignId', 'status'];
       const m = new Map<string, Rec>();
       for (const r of store.filter((x) => matches(x, where))) {
-        const k = `${r.campaignId}|${r.status}`;
-        const g = m.get(k) ?? { campaignId: r.campaignId, status: r.status, _count: { _all: 0 }, _sum: { amountPaise: null } };
+        const k = keys.map((f) => String(r[f])).join('|');
+        const g = m.get(k) ?? { ...Object.fromEntries(keys.map((f) => [f, r[f]])), _count: { _all: 0 }, _sum: { amountPaise: null } };
         g._count._all++;
         if (r.amountPaise != null) g._sum.amountPaise = (g._sum.amountPaise ?? 0n) + BigInt(r.amountPaise);
         m.set(k, g);
@@ -141,16 +191,23 @@ function table(store: Rec[], prefix: string, defaults: () => Rec, include?: (r: 
   };
 }
 
-export function makeFakePrisma() {
+/**
+ * `serializeTransactions`: run $transaction callbacks one at a time (FIFO) — a conservative model of Postgres row
+ * locks, for specs that race writers which lock a row first (e.g. the order-alert update). Off by default.
+ */
+export function makeFakePrisma(opts: { serializeTransactions?: boolean } = {}) {
   const campaigns: Rec[] = [];
   const rows: Rec[] = [];
   const receipts: Rec[] = [];
   const audits: Rec[] = [];
+  const batches: Rec[] = [];
+  const orderAlerts: Rec[] = [];
+  const users: Rec[] = [{ id: 'admin-1', name: 'Admin One' }, { id: 'admin-2', name: 'Admin Two' }];
   const clients: Rec[] = [{ id: 'bajaj', internalName: 'Bajaj Consumer Care', branding: { displayName: 'Bajaj' } }];
   const prisma: Rec = {
     voucherDispersalCampaign: table(campaigns, 'camp', () => ({
       note: null, status: 'DRAFT', sourceFileName: null, uploadedAt: null, uploadedById: null, confirmedById: null,
-      confirmedAt: null, cancelledById: null, cancelledAt: null, completedAt: null, billedToClientId: null,
+      confirmedAt: null, cancelledById: null, cancelledAt: null, completedAt: null, billedToClientId: null, settleFailures: 0, settleError: null,
     })),
     voucherDispersalRow: table(
       rows,
@@ -162,15 +219,46 @@ export function makeFakePrisma() {
         lastReconcileAt: null, lastReconcileResult: null, voucherCode: null, voucherPin: null, voucherValidTill: null, boughtAt: null,
         buyFailureReason: null, buyFailureSource: null, whatsappReceiptId: null, messageClaimedAt: null, sentAt: null,
         messageError: null, messageStatus: null, messageDeliveredAt: null, messageReadAt: null, messageFailureReason: null,
-        resendCount: 0, attempts: 0,
+        resendCount: 0, attempts: 0, batchNumber: 1, warning: null, lateCompletedAt: null,
       }),
       (r, inc) => (inc.campaign ? { ...r, campaign: { ...campaigns.find((c) => c.id === r.campaignId) } } : r),
+      [['campaignId', 'dedupePhone'], ['campaignId', 'batchNumber', 'rowNumber'], ['hubbleReferenceId']],
     ),
+    voucherDispersalBatch: table(
+      batches,
+      'batch',
+      () => ({
+        previewId: null, sourceFileName: null, confirmedById: null, confirmedAt: null, discardedById: null, discardedAt: null,
+        discardReason: null,
+      }),
+      undefined,
+      [['campaignId', 'batchNumber']],
+    ),
+    user: table(users, 'user', () => ({})),
+    voucherDispersalOrderAlert: table(orderAlerts, 'alert', () => ({ statusHistory: [], resolvedAt: null, lastCheckFailedAt: null, noOrderUnverifiedAt: null, statusChangedAt: new Date() }), undefined, [['campaignId', 'referenceId']]),
     messageDeliveryReceipt: table(receipts, 'rcpt', () => ({ status: 'QUEUED', sentAt: null, deliveredAt: null, readAt: null, failureReason: null })),
     auditLog: table(audits, 'audit', () => ({})),
     client: table(clients, 'client', () => ({})),
     redemptionOrder: { findMany: jest.fn(async () => []) },
   };
-  prisma.$transaction = jest.fn(async (fn: (tx: Rec) => Promise<unknown>) => fn(prisma));
-  return { prisma, campaigns, rows, receipts, audits, clients };
+  // Interactive transaction: runs fn(prisma); if it THROWS, every table is restored to its state before the
+  // transaction (rollback). Not isolated from concurrent transactions (no locks) — enough for the specs.
+  const allStores = [campaigns, rows, receipts, audits, clients, batches, users, orderAlerts];
+  let chain: Promise<unknown> = Promise.resolve();
+  const run = async (fn: (tx: Rec) => Promise<unknown>) => {
+    const snap = allStores.map((st) => st.map((r) => ({ ...r })));
+    try {
+      return await fn(prisma);
+    } catch (e) {
+      allStores.forEach((st, i) => st.splice(0, st.length, ...snap[i]));
+      throw e;
+    }
+  };
+  prisma.$transaction = jest.fn(async (fn: (tx: Rec) => Promise<unknown>) => {
+    if (!opts.serializeTransactions) return run(fn);
+    const mine = chain.then(() => run(fn));
+    chain = mine.catch(() => undefined);
+    return mine;
+  });
+  return { prisma, campaigns, rows, receipts, audits, clients, batches, users, orderAlerts };
 }

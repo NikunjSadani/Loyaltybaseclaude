@@ -10,6 +10,8 @@ import {
   isProcessInFlight, isUncertainFailure, maskVoucherCode, nextPollDelay, nextProcessFailures, normalizeBrand, normalizeClients,
   normalizeDetail, normalizeListItem, normalizePreview, normalizeRow, normalizeRowsPage, pendingReasonText, plural, pollPhase,
   rowStatusText, shouldNudgeProcessing, validateCreateForm, vdApi, PENDING_RECONCILE_NOTE, POLL_AFTER_COMPLETE_MS, POLL_MAX_MS,
+  batchConfirmBlock, editChangeText, editPayload, validateEditForm, normalizeBatch, normalizeCancelResult,
+  parseRupeeInput, rupeeEcho, RUPEE_COMMA_ERROR, RUPEE_DIGITS_ERROR,
   type VdPreview, type VdPreviewSummary,
 } from '@/lib/voucher-dispersal';
 
@@ -259,5 +261,136 @@ describe('vdApi.process — single-flight per campaign', () => {
     expect(isProcessInFlight('c1')).toBe(false);
     void vdApi.process('c1');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── Edit campaign + "Add more people" batches (2026-11-18) ──────────────────────
+
+describe('validateEditForm / editPayload', () => {
+  const cur = { name: 'Diwali', budgetRupees: 5000 };
+  it('refuses empty name, non-whole / zero budget, a budget below the server floor, and no change', () => {
+    expect(validateEditForm({ name: '  ', budgetRupees: '5000' }, cur, 0).name).toMatch(/name/);
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '0' }, cur, 0).budgetRupees).toMatch(/greater than 0/);
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '12.5' }, cur, 0).budgetRupees).toMatch(/whole rupees/);
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '1799' }, cur, 1800).budgetRupees).toBe(
+      "The budget can't go below ₹1,800 — that much is already spent or committed to purchases in progress.",
+    );
+    expect(validateEditForm({ name: ' Diwali ', budgetRupees: '5000' }, cur, 0).form).toBe('Nothing has changed.');
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '1800' }, cur, 1800)).toEqual({});
+    // Unknown floor → the server decides (its refusal is shown word for word).
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '1' }, cur, null)).toEqual({});
+  });
+  it('sends only the changed fields', () => {
+    expect(editPayload({ name: 'Diwali 2', budgetRupees: '5000' }, cur)).toEqual({ name: 'Diwali 2' });
+    expect(editPayload({ name: 'Diwali', budgetRupees: '7000' }, cur)).toEqual({ budgetRupees: 7000 });
+  });
+  it('describes an audited change in plain words', () => {
+    expect(editChangeText({ field: 'budgetRupees', from: 2000, to: 5000 })).toBe('Budget ₹2,000 → ₹5,000');
+    expect(editChangeText({ field: 'name', from: 'A', to: 'B' })).toBe('Name "A" → "B"');
+  });
+});
+
+describe('batchConfirmBlock', () => {
+  const p = (o: Partial<VdPreviewSummary>, remaining: number | null, committed: number | null = 1000) => ({
+    previewId: 'pv-2', summary: summary(o), remainingBudgetRupees: remaining, alreadyCommittedRupees: committed,
+  });
+  it('over what is LEFT of the budget → blocked, advising to raise the budget (Edit campaign)', () => {
+    const b = batchConfirmBlock(p({ totalRupees: 800, budgetRupees: 1500, overBudget: true }, 500));
+    expect(b).toEqual({
+      blocked: true,
+      reason: "This batch's valid rows total ₹800, but only ₹500 of the ₹1,500 budget is left (₹1,000 is already spent or committed). Raise the budget with Edit campaign, or remove rows and upload again.",
+    });
+    // The client-side rule also catches it when the server flag is missing.
+    expect(batchConfirmBlock(p({ totalRupees: 800, overBudget: false }, 500)).blocked).toBe(true);
+  });
+  it('no valid rows / incomplete reply → blocked; otherwise free', () => {
+    expect(batchConfirmBlock(p({ valid: 0, totalRupees: 0 }, 5000))).toMatchObject({ blocked: true, reason: expect.stringMatching(/no valid rows in this batch/) });
+    expect(batchConfirmBlock({ ...p({}, 5000), previewId: null })).toMatchObject({ blocked: true });
+    expect(batchConfirmBlock(p({ totalRupees: 500 }, 500))).toEqual({ blocked: false });
+  });
+});
+
+describe('batch / cancel normalisers', () => {
+  it('an unknown batch status is UNKNOWN (never disguised); missing counts are null', () => {
+    expect(normalizeBatch({ batchNumber: 2, status: 'WEIRD' })).toMatchObject({ batchNumber: 2, status: 'UNKNOWN', rawStatus: 'WEIRD', bought: null });
+    expect(normalizeCancelResult({ campaign: {}, cancelledRows: 1 }).discardedPendingBatchRows).toBeNull();
+  });
+  it('detail without batches / edits → empty lists; list items carry pendingBatchNumber', () => {
+    expect(normalizeDetail({ campaign: {}, summary: {} })).toMatchObject({ batches: [], edits: [] });
+    expect(normalizeListItem({ id: 'c', summary: { pendingBatchNumber: 3 } }).summary.pendingBatchNumber).toBe(3);
+  });
+});
+
+// ─── UI/UX audit fixes (2026-11-18) ─────────────────────────────────────────────
+describe('rupee input: typed as-is, parsed strictly (decimal point kept, commas only in real grouping, a leading ₹ ok)', () => {
+  const create = (budgetRupees: string) => validateCreateForm({ name: 'x', programLabel: 'y', billedToClientId: '', note: '', budgetRupees }).budgetRupees;
+  const edit = (budgetRupees: string) => validateEditForm({ name: 'Diwali', budgetRupees }, { name: 'Diwali', budgetRupees: 5000 }, 0).budgetRupees;
+  it('parseRupeeInput', () => {
+    expect(parseRupeeInput('2500')).toEqual({ clean: '2500', error: null });
+    expect(parseRupeeInput('2,500')).toEqual({ clean: '2500', error: null });
+    expect(parseRupeeInput('1,25,000')).toEqual({ clean: '125000', error: null });
+    expect(parseRupeeInput('1,250,000')).toEqual({ clean: '1250000', error: null });
+    expect(parseRupeeInput('₹2,500')).toEqual({ clean: '2500', error: null });
+    expect(parseRupeeInput(' ₹ 2,500 ')).toEqual({ clean: '2500', error: null });
+    expect(parseRupeeInput('2500.00')).toEqual({ clean: '2500.00', error: null });
+    // L1: commas that are not a thousands grouping are refused — never silently "25,00" → ₹2,500.
+    for (const bad of ['25,00', '2,50', '1,2,3', ',2500', '2500,', '2,5000', '12,34,5678']) {
+      expect(parseRupeeInput(bad).error).toBe(RUPEE_COMMA_ERROR);
+    }
+  });
+  it('validation uses it (create + edit): "2500.00" whole rupees; "25,00" comma message; "₹2,500" accepted', () => {
+    expect(create('2500.00')).toBe('Enter the budget in whole rupees (no paise).');
+    expect(edit('2500.00')).toBe('Enter the budget in whole rupees (no paise).');
+    expect(create('25,00')).toBe(RUPEE_COMMA_ERROR);
+    expect(edit('25,00')).toBe(RUPEE_COMMA_ERROR);
+    expect(create('₹2,500')).toBeUndefined();
+    expect(edit('₹2,500')).toBeUndefined();
+    expect(editPayload({ name: 'Diwali', budgetRupees: '₹7,000' }, { name: 'Diwali', budgetRupees: 5000 })).toEqual({ budgetRupees: 7000 });
+  });
+  it('final review L1: clear reasons for non-digits and negatives', () => {
+    for (const bad of ['1e5', '0x10', '२५००', '２５００', '25a0', '2 500']) {
+      expect(create(bad)).toBe(RUPEE_DIGITS_ERROR);
+      expect(edit(bad)).toBe(RUPEE_DIGITS_ERROR);
+    }
+    expect(create('-1,000')).toBe('Enter a budget in rupees greater than 0.');
+    expect(edit('-1000')).toBe('Enter a budget in rupees greater than 0.');
+    expect(create('2500.')).toBe('Enter the budget in whole rupees (no paise).');
+    expect(rupeeEcho('1e5')).toBeNull();
+    expect(rupeeEcho('-1000')).toBeNull();
+  });
+
+  it('echo', () => {
+    expect(rupeeEcho('2500')).toBe('= ₹2,500');
+    expect(rupeeEcho('₹1,25,000')).toBe('= ₹1,25,000');
+    expect(rupeeEcho('2500.00')).toBe('= ₹2,500');
+    expect(rupeeEcho('25,00')).toBeNull();
+    expect(rupeeEcho('abc')).toBeNull();
+    expect(rupeeEcho('')).toBeNull();
+  });
+});
+
+describe('validateEditForm: the floor only limits LOWERING the budget (last review M3)', () => {
+  // Floor ₹6,000 above the current ₹5,000 budget (e.g. a refused purchase completed later).
+  const cur = { name: 'Diwali', budgetRupees: 5000 };
+  it('rename only, or a partial raise, is allowed even when the floor is above the budget', () => {
+    expect(validateEditForm({ name: 'Diwali 2', budgetRupees: '5000' }, cur, 6000)).toEqual({});
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '5500' }, cur, 6000)).toEqual({});
+  });
+  it('lowering is still checked against the floor', () => {
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '4000' }, cur, 3000)).toEqual({});
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '2999' }, cur, 3000).budgetRupees).toMatch(/can't go below ₹3,000/);
+  });
+});
+
+describe('plurals', () => {
+  it('confirm title says "1 voucher" / "N vouchers"', () => {
+    expect(confirmDialogTitle({ valid: 1, totalRupees: 500 })).toBe('Buy and send 1 voucher · ₹500 total?');
+    expect(confirmDialogTitle({ valid: 3, totalRupees: 1500 })).toBe('Buy and send 3 vouchers · ₹1,500 total?');
+  });
+});
+
+describe('pending reason: "no order at Hubble yet" in plain words (review M4)', () => {
+  it('NO_ORDER_AT_HUBBLE_YET', () => {
+    expect(pendingReasonText('NO_ORDER_AT_HUBBLE_YET')).toBe('Hubble has no order for this reference yet. It is checked with Hubble automatically and is not counted as bought or failed until then.');
   });
 });

@@ -4076,10 +4076,16 @@ model VoucherDispersalCampaign {
   cancelledById    String?
   cancelledAt      DateTime?
   completedAt      DateTime?
+  /// Consecutive failed status settles (reset on success); surfaced from SETTLE_FAILURES_BEFORE_ALERT (3).
+  settleFailures   Int                            @default(0)
+  /// The last settle error (shown once settleFailures reaches the alert threshold).
+  settleError      String?
   createdAt        DateTime                       @default(now())
   updatedAt        DateTime                       @updatedAt
 
-  rows VoucherDispersalRow[]
+  rows        VoucherDispersalRow[]
+  batches     VoucherDispersalBatch[]
+  orderAlerts VoucherDispersalOrderAlert[]
 
   @@index([status, createdAt])
   @@index([billedToClientId, createdAt])
@@ -4089,7 +4095,11 @@ model VoucherDispersalCampaign {
 model VoucherDispersalRow {
   id                   String                    @id @default(cuid())
   campaignId           String
-  /// The Excel row number (header = row 1).
+  /// Upload batch (1 = the campaign's first file; 2, 3, … = "Add more people" files). Migration
+  /// 20261118160000: existing rows default to 1. Rows of a batch still PREVIEWED (not confirmed) are
+  /// VALID / INVALID / DUPLICATE only and are excluded from every campaign total, the list and the report.
+  batchNumber          Int                       @default(1)
+  /// The Excel row number (header = row 1) within its batch's file.
   rowNumber            Int
   /// Normalised bare 10-digit Indian mobile; null when the uploaded value could not be parsed.
   phone                String?
@@ -4097,6 +4107,8 @@ model VoucherDispersalRow {
   rawPhone             String?
   /// Set ONLY on the first row of the file for a phone (one-voucher-per-phone invariant, DB-enforced by
   /// @@unique([campaignId, dedupePhone]) — NULLs are distinct, so INVALID/DUPLICATE rows never collide).
+  /// Spans ALL batches: a later batch's row for a phone already live in an earlier batch is DUPLICATE
+  /// (dedupePhone null); a dead earlier row (INVALID / DUPLICATE / CANCELLED) gives the key up.
   dedupePhone          String?
   name                 String
   amountPaise          BigInt?
@@ -4148,14 +4160,95 @@ model VoucherDispersalRow {
   messageFailureReason String?
   resendCount          Int                       @default(0)
   attempts             Int                       @default(0)
+  /// Set (once, by a guarded write) when a FAILED row is later reported bought / processing by Hubble.
+  lateCompletedAt      DateTime?
   createdAt            DateTime                  @default(now())
   updatedAt            DateTime                  @updatedAt
 
   campaign VoucherDispersalCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
 
-  @@unique([campaignId, rowNumber])
+  @@unique([campaignId, batchNumber, rowNumber])
   @@unique([campaignId, dedupePhone])
   @@index([campaignId, status])
   @@index([status, updatedAt])
+  @@index([lateCompletedAt])
   @@map("voucher_dispersal_rows")
+}
+
+enum VoucherDispersalBatchStatus {
+  PREVIEWED
+  CONFIRMED
+  DISCARDED
+}
+
+/// Hubble reported activity on an order this campaign no longer acts on — an EARLIER (retired) reference of a row, the
+/// reference of a row marked "not bought", or a SUCCESS that could not be applied — or such an order could not be checked.
+/// ONE alert per (campaign, reference) (unique key = race-safe dedupe); a later status updates it (statusHistory) and is
+/// never a second count. Alerted, NEVER counted against the budget. Shown on the campaign page + the Daily Ops Digest.
+model VoucherDispersalOrderAlert {
+  id            String   @id @default(cuid())
+  campaignId    String
+  rowId         String
+  batchNumber   Int
+  rowNumber     Int
+  referenceId   String
+  /// SUPERSEDED | MARKED_NOT_BOUGHT | NOT_APPLIED
+  kind          String
+  /// STRONGEST real Hubble status reported for the reference (SUCCESS > unrecognised > PROCESSING); FAILED / NO_ORDER
+  /// when resolved; LOOKUP_FAILED only while no real status was ever seen (a lookup failure never overwrites one).
+  hubbleStatus      String
+  /// Every report, oldest first — consecutive duplicates removed, capped at the latest 20.
+  statusHistory     String[]  @default([])
+  /// Set when Hubble confirmed FAILED / no order (excluded from the open count); cleared if activity is reported again.
+  resolvedAt        DateTime?
+  /// Last time the lookup itself failed ("couldn't check") — kept alongside the real status.
+  lastCheckFailedAt DateTime?
+  /// Created, or WORSENED (status moved up to SUCCESS / PROCESSING / unrecognised, or re-opened) — the digest window key.
+  statusChangedAt   DateTime  @default(now())
+  /// Set while the latest answer is an UNVERIFIED "no order" on an alert that could be resolved: the 2-minute sweep
+  /// re-looks it up and runs the canary (never in the webhook); cleared by any other answer.
+  noOrderUnverifiedAt DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  campaign VoucherDispersalCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+
+  @@unique([campaignId, referenceId])
+  @@index([createdAt])
+  @@index([statusChangedAt])
+  @@index([resolvedAt])
+  @@index([noOrderUnverifiedAt])
+  @@map("voucher_dispersal_order_alerts")
+}
+
+/// An "Add more people" upload on a confirmed campaign (batch 2, 3, …). Batch 1 is the campaign's own
+/// first file (its file / uploader / confirm fields live on VoucherDispersalCampaign) and has no row here.
+/// At most one PREVIEWED batch per campaign (enforced under the campaign row lock).
+model VoucherDispersalBatch {
+  id             String                      @id @default(cuid())
+  campaignId     String
+  batchNumber    Int
+  status         VoucherDispersalBatchStatus @default(PREVIEWED)
+  /// Opaque id of the CURRENT preview of this batch (new on every re-upload); confirm must quote it.
+  previewId      String?
+  sourceFileName String?
+  uploadedById   String
+  uploadedAt     DateTime
+  confirmedById  String?
+  confirmedAt    DateTime?
+  discardedById  String?
+  discardedAt    DateTime?
+  discardReason  String?
+  /// Upload notes kept so a waiting batch reopened later shows them (null = not recorded).
+  skippedBlankRows   Int?
+  skippedFormulaRows Int?
+  hiddenRowsIncluded Int?
+  createdAt      DateTime                    @default(now())
+  updatedAt      DateTime                    @updatedAt
+
+  campaign VoucherDispersalCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+
+  @@unique([campaignId, batchNumber])
+  @@index([campaignId, status])
+  @@map("voucher_dispersal_batches")
 }

@@ -73,7 +73,9 @@ describe('Voucher Dispersal list', () => {
     const c2 = screen.getByTestId('vd-campaign-c2');
     expect(c2).toHaveTextContent('Billed to: —');
     expect(c2).toHaveTextContent('Not confirmed — nothing has been bought.');
-    expect(screen.getByRole('link', { name: 'Continue setup' })).toHaveAttribute('href', '/gifsy/voucher-dispersal/new?campaign=c2');
+    // The card's own link resumes setup; the visible "Continue setup" text link is a mouse shortcut (aria-hidden).
+    expect(screen.getByRole('link', { name: 'Draft one' })).toHaveAttribute('href', '/gifsy/voucher-dispersal/new?campaign=c2');
+    expect(screen.getByTestId('vd-continue-setup-c2')).toHaveAttribute('href', '/gifsy/voucher-dispersal/new?campaign=c2');
     expect(screen.getByRole('link', { name: /New campaign/ })).toHaveAttribute('href', '/gifsy/voucher-dispersal/new');
   });
 
@@ -144,6 +146,86 @@ describe('Voucher Dispersal list', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Download template' }));
     await waitFor(() => expect(downloadBlob).toHaveBeenCalledWith(expect.any(Blob), 'voucher-dispersal-template.xlsx'));
     expect(fetchMock.mock.calls.some((c) => c[0] === '/api/admin/voucher-dispersal/template.xlsx')).toBe(true);
+  });
+});
+
+describe('Voucher Dispersal list — clickable cards + Excel per card (2026-11-18)', () => {
+  it('the whole card opens the campaign through ONE real link (stretched; nothing interactive nested inside it)', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok(CAMPAIGNS))));
+    render(<ListPage />);
+    const link = await screen.findByRole('link', { name: 'Diwali thank-you' });
+    expect(link).toHaveAttribute('href', '/gifsy/voucher-dispersal/c1');
+    expect(link).toHaveAttribute('data-testid', 'vd-card-link-c1');
+    // The stretched pseudo-element covers the card (the card is the positioning context).
+    expect(link.className).toMatch(/after:absolute/);
+    expect(link.className).toMatch(/after:inset-0/);
+    expect(screen.getByTestId('vd-campaign-c1').className).toMatch(/(^|\s)relative(\s|$)/);
+    // No interactive element is nested inside the link.
+    expect(link.querySelector('a, button')).toBeNull();
+    // Setup cards keep going to Continue setup.
+    expect(screen.getByRole('link', { name: 'Draft one' })).toHaveAttribute('href', '/gifsy/voucher-dispersal/new?campaign=c2');
+  });
+
+  it('"Download Excel" on each confirmed card fetches that campaign report.xlsx; setup cards have none', async () => {
+    const fetchMock = vi.fn((url: string) =>
+      url.endsWith('/report.xlsx')
+        ? Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, blob: () => Promise.resolve(new Blob(['x'])) })
+        : Promise.resolve(ok(CAMPAIGNS)),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(<ListPage />);
+    await screen.findByText('Diwali thank-you');
+    const c2 = screen.getByTestId('vd-campaign-c2');
+    expect(c2.querySelector('[data-testid^="vd-card-download"]')).toBeNull();
+    const btn = screen.getByTestId('vd-card-download-c1');
+    expect(btn).toHaveAccessibleName('Download Excel report for Diwali thank-you');
+    fireEvent.click(btn);
+    await waitFor(() => expect(downloadBlob).toHaveBeenCalledWith(expect.any(Blob), 'voucher-campaign-c1.xlsx'));
+    expect(fetchMock.mock.calls.some((c) => c[0] === '/api/admin/voucher-dispersal/campaigns/c1/report.xlsx')).toBe(true);
+  });
+
+  it('keyboard focus ring is on the card link overlay (focus-visible only, not on mouse click); Download Excel has its own', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok(CAMPAIGNS))));
+    render(<ListPage />);
+    const link = await screen.findByRole('link', { name: 'Diwali thank-you' });
+    expect(link.className).toMatch(/focus-visible:after:ring-2/);
+    // No focus-within ring on the card (that also fires on a mouse click).
+    expect(screen.getByTestId('vd-campaign-c1').className).not.toMatch(/focus-within:ring/);
+    expect(screen.getByTestId('vd-card-download-c1').className).toMatch(/focus-visible:ring-2/);
+  });
+
+  it('setup cards: the second "Continue setup" link is out of the tab order and hidden from AT (the title link is the one link)', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok(CAMPAIGNS))));
+    render(<ListPage />);
+    await screen.findByText('Draft one');
+    const extra = screen.getByTestId('vd-continue-setup-c2');
+    expect(extra).toHaveAttribute('tabindex', '-1');
+    expect(extra).toHaveAttribute('aria-hidden', 'true');
+    // The card's numbers / programme line sit above the overlay so they can be selected (not interactive).
+    expect(screen.getByTestId('vd-card-meta-c1').className).toMatch(/relative/);
+    expect(screen.getByTestId('vd-card-meta-c1').className).toMatch(/select-text/);
+  });
+
+  it('a card with an unconfirmed "Add more people" batch says so (never silent)', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([{ ...CAMPAIGNS[0], summary: { ...CAMPAIGNS[0].summary, pendingBatchNumber: 2 } }]))));
+    render(<ListPage />);
+    expect(await screen.findByTestId('vd-card-pending-batch-c1')).toHaveTextContent('Batch 2 is waiting for confirmation — nothing in it has been bought.');
+  });
+});
+
+describe('Voucher Dispersal list — open order alerts (release gate M4)', () => {
+  it('a card (even a COMPLETED campaign) with open order alerts shows a loud count badge', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([{ ...CAMPAIGNS[0], status: 'COMPLETED', summary: { ...CAMPAIGNS[0].summary, openOrderAlerts: 2 } }]))));
+    render(<ListPage />);
+    const badge = await screen.findByTestId('vd-card-open-alerts-c1');
+    expect(badge).toHaveTextContent('2 open order alerts — check with Hubble (see the campaign)');
+  });
+
+  it('no badge when there are none', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([{ ...CAMPAIGNS[0], summary: { ...CAMPAIGNS[0].summary, openOrderAlerts: 0 } }]))));
+    render(<ListPage />);
+    await screen.findByText(CAMPAIGNS[0].name);
+    expect(screen.queryByTestId('vd-card-open-alerts-c1')).not.toBeInTheDocument();
   });
 });
 

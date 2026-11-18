@@ -23,6 +23,7 @@ vi.mock('next/link', () => ({
 vi.mock('@/lib/download', () => ({ downloadBlob: vi.fn() }));
 
 import NewCampaignPage from '../page';
+import { RUPEE_COMMA_ERROR } from '@/lib/voucher-dispersal';
 
 const BASE = '/api/admin/voucher-dispersal';
 const ok = (data: unknown) => ({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data }) });
@@ -121,6 +122,31 @@ describe('New voucher campaign', () => {
     expect(screen.getByText('Whole rupees. The purchase is blocked if the valid rows add up to more than this.')).toBeInTheDocument();
     expect(callsTo('/campaigns')).toHaveLength(0);
     expect(screen.getByTestId('vd-nothing-spent')).toHaveTextContent('Nothing has been bought or sent yet');
+  });
+
+  it('budget box keeps the decimal point: "2500.00" is refused (never ₹2,50,000); "2,500" is ₹2,500 and echoed back', async () => {
+    render(<NewCampaignPage />);
+    fireEvent.change(await screen.findByLabelText('Campaign name'), { target: { value: 'Diwali' } });
+    fireEvent.change(screen.getByLabelText('Programme name shown in the WhatsApp message'), { target: { value: 'Bajaj Loyalty' } });
+    const budget = screen.getByLabelText('Budget (₹)') as HTMLInputElement;
+    fireEvent.change(budget, { target: { value: '2500.00' } });
+    expect(budget.value).toBe('2500.00');
+    fireEvent.click(screen.getByTestId('vd-create'));
+    expect(await screen.findByText('Enter the budget in whole rupees (no paise).')).toBeInTheDocument();
+    expect(callsTo('/campaigns')).toHaveLength(0);
+    // L1: commas only as a real thousands grouping — "25,00" is refused (never ₹2,500).
+    fireEvent.change(budget, { target: { value: '25,00' } });
+    fireEvent.click(screen.getByTestId('vd-create'));
+    expect(await screen.findByText(RUPEE_COMMA_ERROR)).toBeInTheDocument();
+    expect(callsTo('/campaigns')).toHaveLength(0);
+    // L2: a leading ₹ is fine (never "greater than 0").
+    fireEvent.change(budget, { target: { value: '₹2,500' } });
+    expect(budget.value).toBe('₹2,500');
+    expect(screen.queryByText('Enter a budget in rupees greater than 0.')).not.toBeInTheDocument();
+    expect(screen.getByTestId('vd-budget-echo')).toHaveTextContent('= ₹2,500');
+    fireEvent.click(screen.getByTestId('vd-create'));
+    await waitFor(() => expect(callsTo('/campaigns')).toHaveLength(1));
+    expect(JSON.parse(String(callsTo('/campaigns')[0][1]!.body)).budgetRupees).toBe(2500);
   });
 
   it('create → URL becomes ?campaign=<id> → upload → preview (reasons, filter) → Buy & send dialog → report', async () => {

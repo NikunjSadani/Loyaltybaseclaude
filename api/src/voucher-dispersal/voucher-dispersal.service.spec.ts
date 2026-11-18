@@ -564,14 +564,14 @@ describe('audit fix round', () => {
     expect(t.rows[0]).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'HUBBLE_FAILED' });
     expect(t.rows[0].referenceSentAt).toBeTruthy();
     expect(t.rows[1].status).toBe('BOUGHT');
-    // Tighten the budget: the failed row's ₹1,000 is still "possibly committed" → a re-queued attempt
-    // is refused at the claim (BUDGET), never bought over the ceiling.
+    // Tighten the budget: a retry that would not fit (₹1,000 bought + this ₹1,000 > ₹1,500) is refused
+    // UNDER THE CAMPAIGN LOCK before anything is re-queued (money-audit M2, 2026-11-18) — never bought over the
+    // ceiling, and the claim-time BUDGET guard below it is unchanged.
     t.campaigns[0].budgetPaise = 150000n;
     t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H1', status: 'FAILED' });
-    await t.svc.retryBuy(ADMIN, id, t.rows[0].id);
-    expect(t.rows[0].status).toBe('QUEUED');
+    await expect(t.svc.retryBuy(ADMIN, id, t.rows[0].id)).rejects.toThrow(/Retrying needs ₹1,000; only ₹500 is left/);
+    expect(t.rows[0]).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'HUBBLE_FAILED' });
     await t.processor.drain({ campaignId: id });
-    expect(t.rows[0]).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'BUDGET' });
     expect(t.hubble.placeOrder).toHaveBeenCalledTimes(2);
   });
 

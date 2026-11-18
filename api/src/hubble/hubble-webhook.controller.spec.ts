@@ -137,3 +137,33 @@ describe('HubbleWebhookController', () => {
     expect(reconcile).not.toHaveBeenCalled();
   });
 });
+
+describe('HubbleWebhookController — Voucher Dispersal failures always ack 200 (review of 4d8454ad, M3 — the endpoint is shared with every tenant live webhook)', () => {
+  const OLD_ENV = process.env;
+  beforeEach(() => {
+    process.env = { ...OLD_ENV, HUBBLE_WEBHOOK_SECRET: 's3cret' };
+  });
+  afterAll(() => {
+    process.env = OLD_ENV;
+  });
+  const call = async (reconcileByReference: jest.Mock) => {
+    const rewards = { reconcileHubbleOrder: jest.fn() } as unknown as RewardsService;
+    const moduleRef = { get: () => ({ reconcileByReference }) } as never;
+    const controller = new HubbleWebhookController(rewards, moduleRef);
+    const payload = { referenceId: 'vd0123456789abcdef01234567' };
+    const raw = Buffer.from(JSON.stringify(payload));
+    return controller.webhook({ rawBody: raw } as never, payload, createHmac('sha256', 's3cret').update(raw).digest('base64'));
+  };
+
+  it('a dispersal lookup that failed → 200, not reconciled (the failure is recorded on the campaign, never a 5xx)', async () => {
+    await expect(call(jest.fn().mockResolvedValue('LOOKUP_FAILED'))).resolves.toEqual({ ok: true, reconciled: false, outcome: 'DISPERSAL_LOOKUP_FAILED' });
+  });
+
+  it('a dispersal processing error → 200, not reconciled (logged; never a 5xx)', async () => {
+    await expect(call(jest.fn().mockRejectedValue(new Error('db down')))).resolves.toEqual({ ok: true, reconciled: false });
+  });
+
+  it('a processed dispersal webhook → 200 with the outcome', async () => {
+    await expect(call(jest.fn().mockResolvedValue('SKIPPED'))).resolves.toEqual({ ok: true, reconciled: true, outcome: 'DISPERSAL_SKIPPED' });
+  });
+});

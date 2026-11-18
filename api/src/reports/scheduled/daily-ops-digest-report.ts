@@ -313,6 +313,86 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
       events: d.pendingRetryable,
     });
   }
+  // Owner rule — never silent: money over the budget, a status that cannot be updated, late completions.
+  if ((d.overBudgetCampaigns ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: ${plural(d.overBudgetCampaigns!, 'campaign', 'campaigns')} over budget — spending is over the budget; see the campaign's budget breakdown`,
+      events: d.overBudgetCampaigns!,
+    });
+  }
+  if ((d.settleErrorCampaigns ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: ${plural(d.settleErrorCampaigns!, 'campaign', 'campaigns')} whose status update keeps failing (contact Gifsy tech)`,
+      events: d.settleErrorCampaigns!,
+    });
+  }
+  // Earlier-order alerts created or worsened in the window — worded per kind / status (review of 4d8454ad, M4).
+  const by = d.earlierOrderAlertsBy;
+  if (by) {
+    if (by.superseded > 0) {
+      out.push({
+        text: `Voucher dispersal: Hubble reported activity on ${plural(by.superseded, 'earlier order', 'earlier orders')} retired by a retry (in the window) — check with Hubble (a voucher may have been issued twice)`,
+        events: by.superseded,
+      });
+    }
+    if (by.marked > 0) {
+      out.push({
+        text: `Voucher dispersal: Hubble reported activity on the ${by.marked === 1 ? 'order of 1 row' : `orders of ${intIN(by.marked)} rows`} marked "not bought" (in the window) — check with Hubble (a voucher may have been issued; the row stays closed)`,
+        events: by.marked,
+      });
+    }
+    if (by.notApplied > 0) {
+      out.push({
+        text: `Voucher dispersal: ${plural(by.notApplied, 'order', 'orders')} Hubble completed could not be applied to ${by.notApplied === 1 ? 'its row' : 'their rows'} (in the window) — check with Hubble (a paid voucher may not have reached the person)`,
+        events: by.notApplied,
+      });
+    }
+    if (by.couldNotCheck > 0) {
+      out.push({
+        text: `Voucher dispersal: couldn't check ${plural(by.couldNotCheck, 'earlier order', 'earlier orders')} with Hubble — the lookup failed and no status is known yet (in the window); check ${by.couldNotCheck === 1 ? 'it' : 'them'} with Hubble`,
+        events: by.couldNotCheck,
+      });
+    }
+    if ((by.noOrderUnverified ?? 0) > 0) {
+      out.push({
+        text: `Voucher dispersal: Hubble said "no order" for ${plural(by.noOrderUnverified, 'order', 'orders')} but it could not be verified yet (in the window) — kept open and re-checked automatically`,
+        events: by.noOrderUnverified,
+      });
+    }
+  }
+  // Every alert still OPEN (any age) — an attention item each day until Hubble resolves it (release-gate review).
+  const open = d.earlierOrderAlertsOpenBy;
+  if (open && (d.earlierOrderAlertsOpen ?? 0) > 0) {
+    const parts = [
+      open.superseded ? plural(open.superseded, 'earlier order', 'earlier orders') : null,
+      open.marked ? plural(open.marked, 'marked row', 'marked rows') : null,
+      open.notApplied ? plural(open.notApplied, 'order not applied', 'orders not applied') : null,
+      open.couldNotCheck ? `${intIN(open.couldNotCheck)} couldn't check` : null,
+      open.noOrderUnverified ? `${intIN(open.noOrderUnverified)} no order (unverified)` : null,
+    ].filter(Boolean);
+    out.push({
+      text: `Voucher dispersal: still open: ${plural(d.earlierOrderAlertsOpen!, 'order alert', 'order alerts')} (${parts.join(', ')}) — open until Hubble confirms the order failed / there is no order; see the campaign pages`,
+      events: d.earlierOrderAlertsOpen!,
+    });
+  }
+  if (!by && (d.earlierOrderAlerts ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: Hubble reported activity on ${plural(d.earlierOrderAlerts!, 'earlier order', 'earlier orders')} after a retry or a "not bought" mark (in the window) — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)`,
+      events: d.earlierOrderAlerts!,
+    });
+  }
+  if ((d.unrecognisedStatus ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: ${plural(d.unrecognisedStatus!, 'purchase', 'purchases')} with a Hubble status we do not recognise — needs Gifsy tech`,
+      events: d.unrecognisedStatus!,
+    });
+  }
+  if ((d.lateCompleted ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: ${plural(d.lateCompleted!, 'purchase', 'purchases')} bought later by Hubble after ${d.lateCompleted === 1 ? 'it' : 'they'} had failed / been refused (in the window)`,
+      events: d.lateCompleted!,
+    });
+  }
   return out;
 }
 
@@ -444,7 +524,15 @@ const dispersalEmpty = (d: VoucherDispersalSection) =>
   d.messageFailed === 0 &&
   d.pending === 0 &&
   d.buyFailedOpen === 0 &&
-  d.messageFailedOpen === 0;
+  d.messageFailedOpen === 0 &&
+  !d.overBudgetCampaigns &&
+  !d.settleErrorCampaigns &&
+  !d.earlierOrderAlerts &&
+  !d.earlierOrderAlertsResolved &&
+  !d.earlierOrderAlertsOpen &&
+  !d.unrecognisedStatus &&
+  !d.markedClosed &&
+  !d.lateCompleted;
 
 /** Gifsy-wide Voucher Dispersal block for the summary ('' when every figure is zero). */
 function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): string {
@@ -453,12 +541,20 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['bought', intIN(d.bought)],
       ['purchase failed', intIN(d.buyFailed), accentIf(d.buyFailed, 'red')],
       ['WhatsApp failed', intIN(d.messageFailed), accentIf(d.messageFailed, 'red')],
+      ['bought later after failing', intIN(d.lateCompleted ?? 0), accentIf(d.lateCompleted ?? 0, 'red')],
+      ['earlier order reported by Hubble', intIN(d.earlierOrderAlerts ?? 0), accentIf(d.earlierOrderAlerts ?? 0, 'red')],
+      ['earlier-order alert resolved (Hubble: failed / no order)', intIN(d.earlierOrderAlertsResolved ?? 0)],
     ]) +
     metricLine('Right now', [
       ['pending', intIN(d.pending), accentIf(d.pending, 'amber')],
       ['unconfirmed > 2 h', intIN(d.pendingRetryable), accentIf(d.pendingRetryable, 'red')],
       ['purchase still failed', intIN(d.buyFailedOpen), accentIf(d.buyFailedOpen, 'red')],
       ['WhatsApp still failed', intIN(d.messageFailedOpen), accentIf(d.messageFailedOpen, 'red')],
+      ['campaigns over budget', intIN(d.overBudgetCampaigns ?? 0), accentIf(d.overBudgetCampaigns ?? 0, 'red')],
+      ['status update failing', intIN(d.settleErrorCampaigns ?? 0), accentIf(d.settleErrorCampaigns ?? 0, 'red')],
+      ['Hubble status not recognised', intIN(d.unrecognisedStatus ?? 0), accentIf(d.unrecognisedStatus ?? 0, 'red')],
+      ['order alerts still open', intIN(d.earlierOrderAlertsOpen ?? 0), accentIf(d.earlierOrderAlertsOpen ?? 0, 'red')],
+      ['closed (marked not bought)', intIN(d.markedClosed ?? 0)],
     ]),
   );
 }

@@ -217,6 +217,48 @@ export interface VoucherDispersalSection {
   buyFailedOpen: number;
   /** STILL OPEN (now): BOUGHT rows whose WhatsApp is FAILED / UNKNOWN (a Resend clears the status). */
   messageFailedOpen: number;
+  /** NOW: campaigns whose spent + with-Hubble + failed-may-complete money exceeds the budget (queued not counted). */
+  overBudgetCampaigns?: number;
+  /** NOW: campaigns whose status update has failed SETTLE_FAILURES_BEFORE_ALERT times in a row. */
+  settleErrorCampaigns?: number;
+  /** In the window: purchases Hubble BOUGHT after they had failed / been refused (row.lateCompletedAt). */
+  lateCompleted?: number;
+  /**
+   * In the window: OPEN earlier-order alerts CREATED or WORSENED (status moved up to SUCCESS / PROCESSING / an
+   * unrecognised status, or re-opened) — one per reference; never counted as spend. Split in `earlierOrderAlertsBy`.
+   */
+  earlierOrderAlerts?: number;
+  /**
+   * `earlierOrderAlerts` by what happened: Hubble activity on an EARLIER (retired) reference / on the reference of a row
+   * marked "not bought" / a completed CURRENT order that could not be applied to its row; `couldNotCheck` = the lookup
+   * failed and no real status is known yet.
+   */
+  earlierOrderAlertsBy?: VdAlertSplit;
+  /** In the window: alerts RESOLVED (Hubble confirmed the order failed / there is no order) — listed apart. */
+  earlierOrderAlertsResolved?: number;
+  /** NOW: every OPEN order alert, of any age — stays an attention item each day until resolved. */
+  earlierOrderAlertsOpen?: number;
+  /** `earlierOrderAlertsOpen` by what happened (same split as `earlierOrderAlertsBy`). */
+  earlierOrderAlertsOpenBy?: VdAlertSplit;
+  /** NOW: rows an admin marked "not bought" — CLOSED (informational; not "still failed"). */
+  markedClosed?: number;
+  /**
+   * NOW: pending rows whose last Hubble answer was undocumented (not in `pendingRetryable`), plus FAILED rows (not
+   * marked) whose LATEST lookup was an undocumented status — need Gifsy tech.
+   */
+  unrecognisedStatus?: number;
+}
+
+/**
+ * Order alerts by what happened. `couldNotCheck` = only lookup failures so far; `noOrderUnverified` = Hubble said "no
+ * order" but the canary is not verified yet (kept open, re-checked by the sweep); the rest = Hubble activity by kind.
+ */
+export interface VdAlertSplit {
+  superseded: number;
+  marked: number;
+  notApplied: number;
+  couldNotCheck: number;
+  noOrderUnverified: number;
 }
 
 /** Client.status values. */

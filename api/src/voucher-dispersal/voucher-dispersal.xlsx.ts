@@ -73,6 +73,10 @@ export async function buildDispersalTemplate(brands: DispersalBrandLimits[]): Pr
 
 /** One delivery-report row (no voucher code — never). */
 export interface DispersalReportRow {
+  /** Upload batch (1 = the first file; 2, 3, … = "Add more people" files). */
+  batchNumber: number;
+  /** That batch's uploaded file name (when stored). */
+  sourceFile: string | null;
   rowNumber: number;
   phone: string;
   name: string;
@@ -102,7 +106,7 @@ export function phoneCell(v: string): string {
 }
 
 const REPORT_HEADERS = [
-  'Row', 'Phone', 'Name', 'Amount', 'Brand', 'Voucher status', 'Hubble order ref', 'Bought at (IST)', 'Failure reason',
+  'Batch', 'Source file', 'Row', 'Phone', 'Name', 'Amount', 'Brand', 'Voucher status', 'Hubble order ref', 'Bought at (IST)', 'Failure reason',
   'WhatsApp status', 'Sent at (IST)', 'Delivered at (IST)', 'Read at (IST)', 'Message failure reason',
 ];
 
@@ -111,6 +115,8 @@ export function buildDispersalReport(rows: DispersalReportRow[]): Buffer {
   const aoa: unknown[][] = [
     REPORT_HEADERS,
     ...rows.map((r) => [
+      r.batchNumber,
+      safe(r.sourceFile),
       r.rowNumber,
       phoneCell(r.phone),
       safe(r.name),
