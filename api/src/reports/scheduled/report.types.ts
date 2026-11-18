@@ -117,7 +117,11 @@ export interface PayoutsSection {
    * payment DATE at IST midnight and would fall in an already-sent window).
    */
   creditPaid: number;
+  /** NET actually paid (gross − TDS withheld on those bank lines). */
   creditPaidPaise: bigint;
+  /** Credit payouts settled ENTIRELY by TDS withholding (never sent to the bank — not paid money). */
+  creditSettledByTds: number;
+  creditSettledByTdsPaise: bigint;
   /** Redemption payouts SUCCESS (PayoutTransaction.completedAt in the window). */
   redemptionPaid: number;
   redemptionPaidPaise: bigint;

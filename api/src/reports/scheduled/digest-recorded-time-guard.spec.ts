@@ -45,6 +45,18 @@ const CREDIT_ENTRY_SITES: Site[] = [
     reason: 'reversal: PENDING / FAILED → REVERSED (a PAID entry is skipped before this, untouched)',
   },
   {
+    file: 'credits/credits.service.ts',
+    fingerprint: /status: 'PROCESSING', downloadId: rec\.id \}/,
+    reason:
+      'A-H2 settle-by-TDS in the download tx: PROCESSING (claimed by THIS download) → PAID — a status change; the digest ' +
+      'counts it as "settled by TDS withholding" (utr TDS-WITHHELD-…), never as paid money',
+  },
+  {
+    file: 'credits/credits.service.ts',
+    fingerprint: /status: 'PAID', tdsDeductedPaise: withheld \}/,
+    reason: 'reversal of a FULLY withheld entry: PAID → REVERSED (a status change, guarded on the withholding read)',
+  },
+  {
     file: 'invoices/invoices.service.ts',
     fingerprint: /where: \{ id: \{ in: info\.entryIds \} \},\s*data: \{ autoInvoiceId: existing\.id \}/,
     reason: 'generateForBatch: links entries created moments ago in the same confirm tx (PENDING)',

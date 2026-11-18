@@ -700,14 +700,22 @@ export class ScheduledReportsService {
       _sum: { totalPoints: true, totalPayoutPaise: true, totalOutlets: true },
     });
     // Credit payouts are counted when the payment was RECORDED, not by paidAt: paidAt is the operator's
-    // Payment Date (IST midnight), almost always inside an already-sent window. No app path writes a
-    // PAID entry again (credits.service: UTR apply is the only PROCESSING→PAID/FAILED flip; a reversal
-    // leaves a PAID entry untouched; invoices only link fresh PENDING entries at confirm), so for a PAID
-    // or FAILED entry updatedAt IS the apply moment. Failures use the same clock.
+    // Payment Date (IST midnight), almost always inside an already-sent window. No app path rewrites a
+    // PAID entry that stays PAID (the write sites are pinned by digest-recorded-time-guard.spec): an entry
+    // becomes PAID either by the UTR apply (PROCESSING → PAID/FAILED) or — when its WHOLE amount was
+    // withheld as TDS — by the download itself (PROCESSING → PAID, utr `TDS-WITHHELD-…`); a reversal of
+    // a fully withheld entry moves it PAID → REVERSED. So for a PAID or FAILED entry updatedAt IS the
+    // moment it was recorded. Money actually PAID = gross − TDS withheld; a payout settled entirely by TDS
+    // withholding is NOT paid money and is reported separately ("settled by TDS withholding").
     const creditPaid = await this.prisma.creditPayoutEntry.aggregate({
-      where: { clientId, status: 'PAID', updatedAt: inWindow },
+      where: { clientId, status: 'PAID', updatedAt: inWindow, NOT: { utr: { startsWith: 'TDS-WITHHELD-' } } },
       _count: { _all: true },
-      _sum: { amountPaise: true },
+      _sum: { amountPaise: true, tdsDeductedPaise: true },
+    });
+    const creditSettledByTds = await this.prisma.creditPayoutEntry.aggregate({
+      where: { clientId, status: 'PAID', updatedAt: inWindow, utr: { startsWith: 'TDS-WITHHELD-' } },
+      _count: { _all: true },
+      _sum: { amountPaise: true, tdsDeductedPaise: true },
     });
     const redemptionPaid = await this.prisma.payoutTransaction.aggregate({
       where: { partner: { clientId }, status: 'SUCCESS', completedAt: inWindow },
@@ -750,7 +758,10 @@ export class ScheduledReportsService {
       batchOutlets: num(batches._sum?.totalOutlets),
       batchPayoutPaise: big(batches._sum?.totalPayoutPaise),
       creditPaid: num(creditPaid._count?._all),
-      creditPaidPaise: big(creditPaid._sum?.amountPaise),
+      // NET actually paid to retailers (gross − any TDS withheld from those bank lines).
+      creditPaidPaise: big(creditPaid._sum?.amountPaise) - big(creditPaid._sum?.tdsDeductedPaise),
+      creditSettledByTds: num(creditSettledByTds._count?._all),
+      creditSettledByTdsPaise: big(creditSettledByTds._sum?.tdsDeductedPaise),
       redemptionPaid: num(redemptionPaid._count?._all),
       redemptionPaidPaise: big(redemptionPaid._sum?.amountPaise),
       failedOrReturned: creditFailed + txnFailed,

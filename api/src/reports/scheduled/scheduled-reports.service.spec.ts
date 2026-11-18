@@ -528,7 +528,12 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     const input = await svc.collect(NOW, '13 Nov 2026', WIN);
     const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
     const paidWhere = prisma.creditPayoutEntry.aggregate.mock.calls.find((c: [{ where: { status: string } }]) => c[0].where.status === 'PAID')[0].where;
-    expect(paidWhere).toEqual({ clientId: 'bajaj', status: 'PAID', updatedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) } });
+    expect(paidWhere).toEqual({
+      clientId: 'bajaj',
+      status: 'PAID',
+      updatedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) },
+      NOT: { utr: { startsWith: 'TDS-WITHHELD-' } },
+    });
     expect(paidWhere.paidAt).toBeUndefined();
     expect(bajaj.payouts.ok && bajaj.payouts.data).toMatchObject({
       batchOutlets: 37,
@@ -538,6 +543,31 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       openFailedCredit: 3,
       openFailedCreditPaise: 30000n,
       openFailedRedemption: 2, // 3 failed txns, 1 whose order was failed/refunded
+    });
+  });
+
+  it('payouts (A-M3/B-M1): a payout settled by TDS withholding is NOT counted as paid money; paid = NET of TDS; shown separately', async () => {
+    prisma.creditPayoutEntry.aggregate.mockImplementation(
+      ({ where }: { where: { status: string; utr?: { startsWith?: string }; NOT?: unknown } }) =>
+        Promise.resolve(
+          where.status === 'PAID' && where.utr?.startsWith === 'TDS-WITHHELD-'
+            ? { _count: { _all: 1 }, _sum: { amountPaise: 500000n, tdsDeductedPaise: 500000n } }
+            : where.status === 'PAID'
+              ? { _count: { _all: 2 }, _sum: { amountPaise: 300000n, tdsDeductedPaise: 20000n } }
+              : { _count: { _all: 0 }, _sum: { amountPaise: 0n } },
+        ),
+    );
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
+    const paidWhere = prisma.creditPayoutEntry.aggregate.mock.calls
+      .map((c: [{ where: Record<string, unknown> }]) => c[0].where)
+      .find((w: Record<string, unknown>) => w.status === 'PAID' && w.NOT)!;
+    expect(paidWhere.NOT).toEqual({ utr: { startsWith: 'TDS-WITHHELD-' } });
+    expect(bajaj.payouts.ok && bajaj.payouts.data).toMatchObject({
+      creditPaid: 2,
+      creditPaidPaise: 280000n, // ₹3,000 gross − ₹200 TDS withheld = what actually went to retailers
+      creditSettledByTds: 1,
+      creditSettledByTdsPaise: 500000n,
     });
   });
 

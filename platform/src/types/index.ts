@@ -602,6 +602,12 @@ export interface PayoutLedgerEntry {
   paidAt?:           string;      // ISO date of payment
   status:            'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED';
   narration?:        string;      // optional admin-supplied note shown under the row
+  /** Gross before TDS — present only when TDS was withheld (payoutAmountPaise is then the NET received). */
+  grossAmountPaise?: number;
+  /** TDS withheld from this payout (paise) — present only when > 0. */
+  tdsWithheldPaise?: number;
+  /** The whole payout was withheld as TDS — ₹0 paid to the retailer (no bank transfer / UTR). */
+  settledByTds?:     true;
 }
 
 // ─── Wallet Balance Type ──────────────────────────────────────────────────────

@@ -40,7 +40,14 @@ export function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
       {/* Description */}
       <div className="flex-1 min-w-0">
         <p className="text-[13px] text-gray-800 leading-snug truncate">{p.kpiLabel} · {monthLabel(p.period)}</p>
-        {p.utr && <p className="text-[10px] text-gray-400 font-mono">UTR {p.utr}</p>}
+        {p.utr && !p.settledByTds && <p className="text-[10px] text-gray-400 font-mono">UTR {p.utr}</p>}
+        {!!p.tdsWithheldPaise && (
+          <p data-testid="payout-tds-note" className="text-[10px] text-amber-700 mt-0.5 leading-snug">
+            {p.settledByTds
+              ? `Withheld as TDS ${fmtInr(p.tdsWithheldPaise / 100)} — ₹0 paid to you`
+              : `TDS ${fmtInr(p.tdsWithheldPaise / 100)} withheld from ${fmtInr((p.grossAmountPaise ?? p.payoutAmountPaise + p.tdsWithheldPaise) / 100)}`}
+          </p>
+        )}
         {!isPaid && (
           <span
             data-testid="payout-pending-badge"

@@ -43,6 +43,8 @@ function quietTenant(clientId: string, name: string): TenantDigest {
       batchPayoutPaise: 0n,
       creditPaid: 0,
       creditPaidPaise: 0n,
+      creditSettledByTds: 0,
+      creditSettledByTdsPaise: 0n,
       redemptionPaid: 0,
       redemptionPaidPaise: 0n,
       failedOrReturned: 0,
@@ -90,6 +92,8 @@ function busyTenant(): TenantDigest {
       batchPayoutPaise: 1_25_000_00n,
       creditPaid: 412,
       creditPaidPaise: 8_43_500_00n,
+      creditSettledByTds: 3,
+      creditSettledByTdsPaise: 15_000_00n,
       redemptionPaid: 9,
       redemptionPaidPaise: 18_000_00n,
       failedOrReturned: 3,
@@ -496,6 +500,12 @@ describe('buildDailyOpsDigest', () => {
     const html = buildDailyOpsDigest(input([busyTenant()])).html;
     expect(html).toContain('outlets <strong style="color:#111827;">412</strong>');
     expect(html).toContain('credit failed (re-bank / reverse)');
+  });
+
+  it('payouts: payouts settled by TDS withholding are a SEPARATE figure, never "paid" money (A-M3/B-M1)', () => {
+    const html = buildDailyOpsDigest(input([busyTenant()])).html;
+    expect(html).toContain('settled by TDS withholding');
+    expect(html).toContain('3 (₹15,000)');
   });
 
   it('a quiet tenant renders as just its name + one line (every section hidden)', () => {

@@ -545,6 +545,7 @@ function tenantSections(t: TenantDigest): string {
       (p) =>
         p.batchesConfirmed === 0 &&
         p.creditPaid === 0 &&
+        p.creditSettledByTds === 0 &&
         p.redemptionPaid === 0 &&
         p.failedOrReturned === 0 &&
         p.awaitingUtr === 0 &&
@@ -562,6 +563,9 @@ function tenantSections(t: TenantDigest): string {
         metricLine('Paid', [
           ['credit payouts', `${intIN(p.creditPaid)} (${rupees(p.creditPaidPaise)})`],
           ['redemption payouts', `${intIN(p.redemptionPaid)} (${rupees(p.redemptionPaidPaise)})`],
+          ...(p.creditSettledByTds > 0
+            ? ([['settled by TDS withholding (₹0 to the retailer)', `${intIN(p.creditSettledByTds)} (${rupees(p.creditSettledByTdsPaise)})`]] as Array<[string, string]>)
+            : []),
         ]) +
         metricLine('Issues', [
           ['failed / returned', intIN(p.failedOrReturned), accentIf(p.failedOrReturned, 'red')],
