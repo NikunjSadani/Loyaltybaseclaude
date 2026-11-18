@@ -388,3 +388,9 @@ describe('plurals', () => {
     expect(confirmDialogTitle({ valid: 3, totalRupees: 1500 })).toBe('Buy and send 3 vouchers · ₹1,500 total?');
   });
 });
+
+describe('pending reason: "no order at Hubble yet" in plain words (review M4)', () => {
+  it('NO_ORDER_AT_HUBBLE_YET', () => {
+    expect(pendingReasonText('NO_ORDER_AT_HUBBLE_YET')).toBe('Hubble has no order for this reference yet. It is checked with Hubble automatically and is not counted as bought or failed until then.');
+  });
+});

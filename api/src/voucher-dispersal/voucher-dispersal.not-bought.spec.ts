@@ -84,7 +84,7 @@ describe('unrecognised status: Retry refused honestly (F2 too) + "Mark as not bo
     const err = await t.svc.retryBuy(ADMIN, id, b.id).then(() => new Error('resolved'), (e: Error) => e);
     expect(err).toBeInstanceOf(ConflictException);
     expect(err.message).toBe(
-      'Hubble reports this order with a status we do not recognise (WEIRD) — we cannot tell whether it was bought. Contact Gifsy tech; if it was not bought, use "Mark as not bought", then retry.',
+      'Hubble reports this order with a status we do not recognise (WEIRD) — we cannot tell whether it was bought. Contact Gifsy tech; if it was not bought, "Mark as not bought" closes the row (no voucher will be bought for this person in this campaign).',
     );
     expect(b.status).toBe('PENDING_RECONCILE');
     expect(t.audits.filter((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_UNKNOWN_STATUS_ON_FAILED_ROW').length).toBe(1);

@@ -4083,8 +4083,9 @@ model VoucherDispersalCampaign {
   createdAt        DateTime                       @default(now())
   updatedAt        DateTime                       @updatedAt
 
-  rows    VoucherDispersalRow[]
-  batches VoucherDispersalBatch[]
+  rows        VoucherDispersalRow[]
+  batches     VoucherDispersalBatch[]
+  orderAlerts VoucherDispersalOrderAlert[]
 
   @@index([status, createdAt])
   @@index([billedToClientId, createdAt])
@@ -4178,6 +4179,32 @@ enum VoucherDispersalBatchStatus {
   PREVIEWED
   CONFIRMED
   DISCARDED
+}
+
+/// Hubble reported activity on an order this campaign no longer acts on — an EARLIER (retired) reference of a row, the
+/// reference of a row marked "not bought", or a SUCCESS that could not be applied — or such an order could not be checked.
+/// ONE alert per (campaign, reference) (unique key = race-safe dedupe); a later status updates it (statusHistory) and is
+/// never a second count. Alerted, NEVER counted against the budget. Shown on the campaign page + the Daily Ops Digest.
+model VoucherDispersalOrderAlert {
+  id            String   @id @default(cuid())
+  campaignId    String
+  rowId         String
+  batchNumber   Int
+  rowNumber     Int
+  referenceId   String
+  /// SUPERSEDED | MARKED_NOT_BOUGHT | NOT_APPLIED
+  kind          String
+  /// Latest Hubble status reported for the reference (or LOOKUP_FAILED).
+  hubbleStatus  String
+  statusHistory String[] @default([])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  campaign VoucherDispersalCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+
+  @@unique([campaignId, referenceId])
+  @@index([createdAt])
+  @@map("voucher_dispersal_order_alerts")
 }
 
 /// An "Add more people" upload on a confirmed campaign (batch 2, 3, …). Batch 1 is the campaign's own

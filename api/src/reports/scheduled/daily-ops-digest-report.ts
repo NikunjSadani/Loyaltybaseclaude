@@ -332,6 +332,12 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
       events: d.earlierOrderAlerts!,
     });
   }
+  if ((d.unrecognisedStatus ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: ${plural(d.unrecognisedStatus!, 'purchase', 'purchases')} with a Hubble status we do not recognise — needs Gifsy tech`,
+      events: d.unrecognisedStatus!,
+    });
+  }
   if ((d.lateCompleted ?? 0) > 0) {
     out.push({
       text: `Voucher dispersal: ${plural(d.lateCompleted!, 'purchase', 'purchases')} bought later by Hubble after ${d.lateCompleted === 1 ? 'it' : 'they'} had failed / been refused (in the window)`,
@@ -473,6 +479,8 @@ const dispersalEmpty = (d: VoucherDispersalSection) =>
   !d.overBudgetCampaigns &&
   !d.settleErrorCampaigns &&
   !d.earlierOrderAlerts &&
+  !d.unrecognisedStatus &&
+  !d.markedClosed &&
   !d.lateCompleted;
 
 /** Gifsy-wide Voucher Dispersal block for the summary ('' when every figure is zero). */
@@ -483,6 +491,7 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['purchase failed', intIN(d.buyFailed), accentIf(d.buyFailed, 'red')],
       ['WhatsApp failed', intIN(d.messageFailed), accentIf(d.messageFailed, 'red')],
       ['bought later after failing', intIN(d.lateCompleted ?? 0), accentIf(d.lateCompleted ?? 0, 'red')],
+      ['earlier order reported by Hubble', intIN(d.earlierOrderAlerts ?? 0), accentIf(d.earlierOrderAlerts ?? 0, 'red')],
     ]) +
     metricLine('Right now', [
       ['pending', intIN(d.pending), accentIf(d.pending, 'amber')],
@@ -491,7 +500,8 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['WhatsApp still failed', intIN(d.messageFailedOpen), accentIf(d.messageFailedOpen, 'red')],
       ['campaigns over budget', intIN(d.overBudgetCampaigns ?? 0), accentIf(d.overBudgetCampaigns ?? 0, 'red')],
       ['status update failing', intIN(d.settleErrorCampaigns ?? 0), accentIf(d.settleErrorCampaigns ?? 0, 'red')],
-      ['earlier order reported by Hubble', intIN(d.earlierOrderAlerts ?? 0), accentIf(d.earlierOrderAlerts ?? 0, 'red')],
+      ['Hubble status not recognised', intIN(d.unrecognisedStatus ?? 0), accentIf(d.unrecognisedStatus ?? 0, 'red')],
+      ['closed (marked not bought)', intIN(d.markedClosed ?? 0)],
     ]),
   );
 }

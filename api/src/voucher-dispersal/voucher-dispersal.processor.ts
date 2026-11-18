@@ -69,14 +69,25 @@ export const HUBBLE_KNOWN_STATUSES: ReadonlySet<string> = new Set(['SUCCESS', 'P
 export const NOT_BOUGHT_FAILURE_SOURCES = ['REJECTED', 'MARKED_NOT_BOUGHT'];
 /** Campaign-level alert: Hubble reported activity on an EARLIER (superseded) reference of a row (not counted). */
 export const SUPERSEDED_ALERT_EVENT = 'VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY';
+
+/**
+ * A row an admin marked "not bought" is CLOSED: every write guarded on status BUY_FAILED also carries this, so a racing
+ * webhook / sweep / retry lookup can never buy or move it (those paths fall through to an alert). OR-wrapped so a NULL
+ * source is never dropped by `not`.
+ */
+export const NOT_MARKED: Prisma.VoucherDispersalRowWhereInput = {
+  OR: [{ buyFailureSource: null }, { buyFailureSource: { not: 'MARKED_NOT_BOUGHT' } }],
+};
 /** After the pass deadline, settles continue only within this grace (the request must still answer in time). */
 export const SETTLE_GRACE_MS = 5_000;
 
 /** True when the row's last lookup result is a Hubble status we do not recognise (e.g. "HUBBLE_WEIRD"). */
 export function lastLookupUnrecognised(r: { lastReconcileResult: string | null; pendingReason?: string | null; status: string }): boolean {
-  if (r.status === RS.PENDING_RECONCILE && (r.pendingReason ?? '').startsWith('HUBBLE_UNKNOWN_STATUS')) return true;
   const m = /^HUBBLE_(.*)$/.exec(r.lastReconcileResult ?? '');
-  return !!m && !HUBBLE_KNOWN_STATUSES.has(m[1]);
+  // The LATEST lookup decides: a documented answer (or "no order yet") clears the marker (review M4).
+  if (r.lastReconcileResult === 'NO_ORDER_AT_HUBBLE_YET' || (m && HUBBLE_KNOWN_STATUSES.has(m[1]))) return false;
+  if (m) return true;
+  return r.status === RS.PENDING_RECONCILE && (r.pendingReason ?? '').startsWith('HUBBLE_UNKNOWN_STATUS');
 }
 
 /** Seconds of every drain pass kept for settling campaigns (capped at a quarter of a short pass). */
@@ -368,6 +379,12 @@ export class VoucherDispersalProcessor {
     }
     if (body === null) {
       await this.noteReconcile(row, 'NO_ORDER_AT_HUBBLE_YET');
+      if (row.status === RS.PENDING_RECONCILE && (row.pendingReason ?? '').startsWith('HUBBLE_UNKNOWN_STATUS')) {
+        // A definitive later answer clears the "unrecognised" marker → Retry follows the normal rules again (review M4).
+        await this.prisma.voucherDispersalRow
+          .updateMany({ where: { id: row.id, status: RS.PENDING_RECONCILE, pendingReason: row.pendingReason }, data: { pendingReason: 'NO_ORDER_AT_HUBBLE_YET' } })
+          .catch((e: unknown) => this.logger.warn(`[dispersal] could not clear the unrecognised marker on row ${row.id}: ${e}`));
+      }
       return 'NO_ORDER';
     }
     await this.noteReconcile(row, `HUBBLE_${String(body.status ?? '').toUpperCase() || 'UNKNOWN'}`);
@@ -380,8 +397,8 @@ export class VoucherDispersalProcessor {
     if (row && row.status === RS.BUY_FAILED && row.buyFailureSource === 'MARKED_NOT_BOUGHT') {
       // Owner decision: "Mark as not bought" is FINAL — the row is never changed again. Activity Hubble reports on it is
       // alerted loudly (once per status; not counted) for ops to settle with Hubble outside the campaign.
-      await this.alertEarlierOrder(row, referenceId, 'MARKED_NOT_BOUGHT');
-      return 'SKIPPED';
+      const r = await this.alertEarlierOrder(row, referenceId, 'MARKED_NOT_BOUGHT');
+      return r.status === 'LOOKUP_FAILED' ? 'LOOKUP_FAILED' : 'SKIPPED';
     }
     if (row) {
       if (row.status !== RS.BUYING && row.status !== RS.PENDING_RECONCILE && row.status !== RS.BUY_FAILED) {
@@ -404,16 +421,16 @@ export class VoucherDispersalProcessor {
     if (!superseded) return 'NOT_FOUND';
     // A webhook for a reference this row no longer uses (retired by a retry): looked up and, if Hubble reports activity
     // on it, alerted loudly — once per reference + status, NOT counted against the budget (owner decision).
-    await this.alertEarlierOrder(superseded, referenceId, 'SUPERSEDED');
-    return 'SKIPPED';
+    const r = await this.alertEarlierOrder(superseded, referenceId, 'SUPERSEDED');
+    return r.status === 'LOOKUP_FAILED' ? 'LOOKUP_FAILED' : 'SKIPPED';
   }
 
   /**
    * Hubble activity on an order this campaign no longer acts on — an EARLIER (superseded) reference of a row, or the
    * reference of a row an admin marked "not bought". SUCCESS / PROCESSING / an undocumented status → error log +
    * a CAMPAIGN audit row (indexed by campaign; shown on the page with a total count, and in the digest), once per
-   * reference + status. Never changes the row, never counted against the budget. A lookup error is logged only (the
-   * webhook is retried by Hubble).
+   * reference (a later status updates the same alert). Never changes the row, never counted against the budget. A lookup
+   * error is alerted too ("could not check") and returned as LOOKUP_FAILED — the webhook then answers 503 so Hubble retries.
    */
   async alertEarlierOrder(
     row: { id: string; campaignId: string; rowNumber: number; batchNumber: number },
@@ -425,46 +442,75 @@ export class VoucherDispersalProcessor {
       const b = await this.hubble.getOrderByReference(ref);
       status = b === null ? 'NO_ORDER' : String(b.status ?? '').toUpperCase() || 'UNKNOWN';
     } catch (e) {
+      // Could not check it: alerted (once per reference) AND reported as failed — the webhook answers non-2xx so
+      // Hubble retries (review M2; the dispersal path is idempotent: lookup-only + deduped alerts).
       this.logger.error(`[dispersal] could not look up earlier reference ${ref} (campaign ${row.campaignId} row ${row.rowNumber}): ${e}`);
-      return { status: 'LOOKUP_FAILED', alerted: false };
+      await this.recordOrderAlert(row, ref, 'LOOKUP_FAILED', kind);
+      return { status: 'LOOKUP_FAILED', alerted: true };
     }
     if (status === 'NO_ORDER' || status === 'FAILED') return { status, alerted: false };
-    const dup = await this.prisma.auditLog.findFirst({
-      where: {
-        entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
-        entityId: row.campaignId,
-        AND: [
-          { metadata: { path: ['event'], equals: SUPERSEDED_ALERT_EVENT } },
-          { metadata: { path: ['referenceId'], equals: ref } },
-          { metadata: { path: ['hubbleStatus'], equals: status } },
-        ],
-      },
-      select: { id: true },
-    });
-    if (dup) return { status, alerted: false };
-    this.logger.error(
-      `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: ${kind === 'SUPERSEDED' ? 'an EARLIER order (retired by a retry)' : 'the order of a row marked NOT BOUGHT'} (reference ${ref}) was reported ${status} by Hubble — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)`,
-    );
-    await this.prisma.auditLog
-      .create({
-        data: {
-          actorId: null,
-          action: 'UPDATE',
-          entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
-          entityId: row.campaignId,
-          metadata: {
-            event: SUPERSEDED_ALERT_EVENT,
-            kind,
-            rowId: row.id,
-            batchNumber: row.batchNumber,
-            rowNumber: row.rowNumber,
-            referenceId: ref,
-            hubbleStatus: status,
+    const alerted = await this.recordOrderAlert(row, ref, status, kind);
+    return { status, alerted };
+  }
+
+  /**
+   * ONE alert per (campaign, reference) — the table's unique key makes this race-safe. A first alert: error log +
+   * campaign audit row. A later, different status updates the same alert (statusHistory; error log + audit) and is
+   * never a second count. Returns true when something was recorded. Never throws.
+   */
+  async recordOrderAlert(
+    row: { id: string; campaignId: string; rowNumber: number; batchNumber: number },
+    ref: string,
+    status: string,
+    kind: 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | 'NOT_APPLIED',
+  ): Promise<boolean> {
+    const what =
+      kind === 'SUPERSEDED'
+        ? 'an EARLIER order (retired by a retry)'
+        : kind === 'MARKED_NOT_BOUGHT'
+          ? 'the order of a row marked NOT BOUGHT'
+          : 'a completed order that could not be applied to the row';
+    const say = (prefix: string) =>
+      this.logger.error(
+        `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: ${prefix} ${what} (reference ${ref}) — Hubble status ${status}; check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)`,
+      );
+    const audit = (extra: Record<string, unknown>) =>
+      this.prisma.auditLog
+        .create({
+          data: {
+            actorId: null,
+            action: 'UPDATE',
+            entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+            entityId: row.campaignId,
+            metadata: { event: SUPERSEDED_ALERT_EVENT, kind, rowId: row.id, batchNumber: row.batchNumber, rowNumber: row.rowNumber, referenceId: ref, hubbleStatus: status, ...extra },
           },
-        },
-      })
-      .catch((e: unknown) => this.logger.error(`[dispersal] earlier-order alert audit failed for ${row.campaignId}: ${e}`));
-    return { status, alerted: true };
+        })
+        .catch((e: unknown) => this.logger.error(`[dispersal] order-alert audit failed for ${row.campaignId}: ${e}`));
+    try {
+      await this.prisma.voucherDispersalOrderAlert.create({
+        data: { campaignId: row.campaignId, rowId: row.id, batchNumber: row.batchNumber, rowNumber: row.rowNumber, referenceId: ref, kind, hubbleStatus: status, statusHistory: [status] },
+      });
+      say('ALERT —');
+      await audit({});
+      return true;
+    } catch {
+      // Already alerted for this reference (unique key) — update it when the status changed (never a second count).
+      try {
+        const cur = await this.prisma.voucherDispersalOrderAlert.findFirst({ where: { campaignId: row.campaignId, referenceId: ref } });
+        if (!cur || cur.hubbleStatus === status) return false;
+        const upd = await this.prisma.voucherDispersalOrderAlert.updateMany({
+          where: { id: cur.id, hubbleStatus: cur.hubbleStatus },
+          data: { hubbleStatus: status, statusHistory: { push: status } },
+        });
+        if (upd.count !== 1) return false;
+        say(`ALERT UPDATE (was ${cur.hubbleStatus}) —`);
+        await audit({ previousStatus: cur.hubbleStatus });
+        return true;
+      } catch (e) {
+        this.logger.error(`[dispersal] could not record the order alert for ${ref} (campaign ${row.campaignId}): ${e}`);
+        return false;
+      }
+    }
   }
 
   /**
@@ -522,11 +568,11 @@ export class VoucherDispersalProcessor {
       // F6: one guarded write per possible previous state, in order — the one that matches tells the REAL previous
       // status (and whether this is a late completion), decided by the database, never by the snapshot.
       const attempts: { where: Prisma.VoucherDispersalRowWhereInput; from: RS; late: boolean }[] = [
-        { where: { status: RS.BUY_FAILED, lateCompletedAt: null }, from: RS.BUY_FAILED, late: true },
+        { where: { status: RS.BUY_FAILED, lateCompletedAt: null, AND: [NOT_MARKED] }, from: RS.BUY_FAILED, late: true },
         { where: { status: RS.PENDING_RECONCILE, buyFailureSource: { not: null }, lateCompletedAt: null }, from: RS.PENDING_RECONCILE, late: true },
         { where: { status: RS.BUYING }, from: RS.BUYING, late: false },
         { where: { status: RS.PENDING_RECONCILE }, from: RS.PENDING_RECONCILE, late: false },
-        { where: { status: RS.BUY_FAILED }, from: RS.BUY_FAILED, late: false },
+        { where: { status: RS.BUY_FAILED, AND: [NOT_MARKED] }, from: RS.BUY_FAILED, late: false },
       ];
       let won = { count: 0 };
       let fromStatus: RS | null = null;
@@ -545,7 +591,7 @@ export class VoucherDispersalProcessor {
       if (won.count === 0) {
         const now = await this.prisma.voucherDispersalRow.findFirst({
           where: { id: row.id },
-          select: { status: true, hubbleReferenceId: true, rowNumber: true, campaignId: true },
+          select: { status: true, hubbleReferenceId: true, rowNumber: true, campaignId: true, batchNumber: true, buyFailureSource: true },
         });
         if (now?.status === RS.BOUGHT && now.hubbleReferenceId === row.hubbleReferenceId) return 'BOUGHT';
         // Hubble holds a PAID voucher for a reference this row no longer uses (superseded) or for a row we
@@ -560,6 +606,19 @@ export class VoucherDispersalProcessor {
           rowStatus: now?.status ?? null,
           referenceSuperseded: now ? now.hubbleReferenceId !== row.hubbleReferenceId : null,
         });
+        // …and the campaign-level alert (counted on the page + in the digest; one per reference).
+        if (row.hubbleReferenceId) {
+          await this.recordOrderAlert(
+            { id: row.id, campaignId: row.campaignId, batchNumber: now?.batchNumber ?? row.batchNumber, rowNumber: now?.rowNumber ?? row.rowNumber },
+            row.hubbleReferenceId,
+            'SUCCESS',
+            now && now.hubbleReferenceId !== row.hubbleReferenceId
+              ? 'SUPERSEDED'
+              : now?.buyFailureSource === 'MARKED_NOT_BOUGHT'
+                ? 'MARKED_NOT_BOUGHT'
+                : 'NOT_APPLIED',
+          );
+        }
         return 'SKIPPED';
       }
       this.logger.log(`[dispersal] row ${row.id} voucher bought`);
@@ -671,7 +730,7 @@ export class VoucherDispersalProcessor {
       };
       // From FAILED as its own guarded write: the late event fires exactly once (re-review M2).
       const fromFailed = await this.prisma.voucherDispersalRow.updateMany({
-        where: { ...base, status: RS.BUY_FAILED },
+        where: { ...base, status: RS.BUY_FAILED, AND: [NOT_MARKED] }, // a marked row is closed (review M1)
         data, // buyFailureSource is KEPT: a later BOUGHT is then recognised as "bought after it had failed"
       });
       const res =
@@ -682,6 +741,13 @@ export class VoucherDispersalProcessor {
         await this.audit(row.id, 'VOUCHER_DISPERSAL_PENDING', { reason });
       }
       if (fromFailed.count === 1) await this.failedBackToPending(row, reason, extra.hubbleOrderId ?? null);
+      if (res.count === 0 && row.status === RS.BUY_FAILED && row.hubbleReferenceId) {
+        const now = await this.prisma.voucherDispersalRow.findFirst({ where: { id: row.id }, select: { buyFailureSource: true, hubbleReferenceId: true } });
+        if (now?.buyFailureSource === 'MARKED_NOT_BOUGHT' && now.hubbleReferenceId === row.hubbleReferenceId) {
+          const st = reason.startsWith('HUBBLE_UNKNOWN_STATUS:') ? reason.slice('HUBBLE_UNKNOWN_STATUS:'.length) : reason === 'HUBBLE_PROCESSING' ? 'PROCESSING' : reason === 'HUBBLE_SUCCESS_NO_CODE' ? 'SUCCESS' : reason;
+          await this.recordOrderAlert(row, row.hubbleReferenceId, st, 'MARKED_NOT_BOUGHT');
+        }
+      }
     } catch (e) {
       // Left BUYING → the stale sweep moves it to PENDING_RECONCILE (lookup only). Never re-placed.
       this.logger.error(`[dispersal] could not mark row ${row.id} pending (${reason}); the stale sweep will: ${e}`);
@@ -1375,7 +1441,7 @@ export class VoucherDispersalProcessor {
         const left = BigInt(camp.budgetPaise) - b.floorPaise;
         if (budget.amountPaise > left) return { refused: 'BUDGET' as const, needPaise: budget.amountPaise, leftPaise: left < 0n ? 0n : left };
       }
-      const res = await tx.voucherDispersalRow.updateMany({ where: { ...where, campaignId }, data: { ...data, status: RS.QUEUED } });
+      const res = await tx.voucherDispersalRow.updateMany({ where: { ...where, campaignId, AND: [NOT_MARKED] }, data: { ...data, status: RS.QUEUED } });
       if (res.count !== 1) return 'LOST' as const;
       if (camp.status !== CS.PROCESSING) {
         await tx.voucherDispersalCampaign.update({ where: { id: campaignId }, data: { status: CS.PROCESSING, completedAt: null } });

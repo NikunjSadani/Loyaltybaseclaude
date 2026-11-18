@@ -37,7 +37,6 @@ import {
   budgetBreakdown,
   overBudget,
   HUBBLE_KNOWN_STATUSES,
-  SUPERSEDED_ALERT_EVENT,
   lastLookupUnrecognised,
   type BudgetBreakdown,
 } from './voucher-dispersal.processor';
@@ -1226,28 +1225,23 @@ export class VoucherDispersalService {
    * row / reference / Hubble status.
    */
   private async earlierOrderAlerts(id: string) {
-    const where = {
-      entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
-      entityId: id,
-      metadata: { path: ['event'], equals: SUPERSEDED_ALERT_EVENT },
-    } satisfies Prisma.AuditLogWhereInput;
+    // One alert per (campaign, reference) — its own table (unique key); the TOTAL and the latest 20.
     const [total, latest] = await Promise.all([
-      this.prisma.auditLog.count({ where }),
-      this.prisma.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, take: 20 }),
+      this.prisma.voucherDispersalOrderAlert.count({ where: { campaignId: id } }),
+      this.prisma.voucherDispersalOrderAlert.findMany({ where: { campaignId: id }, orderBy: { updatedAt: 'desc' }, take: 20 }),
     ]);
     return {
       total,
-      items: latest.map((a) => {
-        const m = (a.metadata ?? {}) as Record<string, unknown>;
-        return {
-          at: a.createdAt,
-          kind: typeof m.kind === 'string' ? m.kind : 'SUPERSEDED',
-          batchNumber: typeof m.batchNumber === 'number' ? m.batchNumber : null,
-          rowNumber: typeof m.rowNumber === 'number' ? m.rowNumber : null,
-          referenceId: typeof m.referenceId === 'string' ? m.referenceId : null,
-          hubbleStatus: typeof m.hubbleStatus === 'string' ? m.hubbleStatus : null,
-        };
-      }),
+      items: latest.map((a) => ({
+        at: a.updatedAt,
+        firstAt: a.createdAt,
+        kind: a.kind,
+        batchNumber: a.batchNumber,
+        rowNumber: a.rowNumber,
+        referenceId: a.referenceId,
+        hubbleStatus: a.hubbleStatus,
+        statusHistory: a.statusHistory,
+      })),
     };
   }
 
@@ -1671,7 +1665,7 @@ export class VoucherDispersalService {
           await this.processor.recordUnrecognisedStatus(row, st, (look.body.id ?? look.body.orderId ?? null) as string | null);
           await audit('REFUSED_UNRECOGNISED_HUBBLE_STATUS', { hubbleStatus: st || null });
           throw new ConflictException(
-            `Hubble reports this order with a status we do not recognise (${st || 'none'}) — we cannot tell whether it was bought. Contact Gifsy tech; if it was not bought, use "Mark as not bought", then retry.`,
+            `Hubble reports this order with a status we do not recognise (${st || 'none'}) — we cannot tell whether it was bought. Contact Gifsy tech; if it was not bought, "Mark as not bought" closes the row (no voucher will be bought for this person in this campaign).`,
           );
         }
         if (st !== 'FAILED') {

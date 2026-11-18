@@ -302,7 +302,7 @@ export default function VoucherCampaignDetailPage() {
         const msg = (res.data as { message: string | null }).message;
         text = `${upperFirst(rowRef(d.row))}: ${msg ?? 'purchase retry requested.'} The voucher status below updates as the server works on it.`;
       } else if (d.kind === 'mark') {
-        text = `${upperFirst(rowRef(d.row))} marked as not bought — it no longer counts against the budget. Retry is now available (with a new reference).`;
+        text = `${upperFirst(rowRef(d.row))} marked as not bought — the row is closed: its ${formatRupees(d.row.amount)} is released and no voucher will be bought for this person in this campaign. Arrange any replacement with Hubble outside this campaign.`;
       } else if (d.kind === 'discard') {
         const r = res.data as { discardedRows: number | null };
         text = `${batchLabel(d.batch.batchNumber)} discarded${r.discardedRows !== null ? `: ${plural(r.discardedRows, 'row')} removed` : ''}. Nothing was bought.`;
@@ -610,7 +610,7 @@ export default function VoucherCampaignDetailPage() {
                           )}
                           {r.id && r.canMarkNotBought === true && !canRetryRow(r) && (
                             <p data-testid={`vd-retry-unavailable-${r.id}`} className="max-w-[14rem] text-[11px] text-amber-200">
-                              Retry is unavailable: Hubble&apos;s answer was not recognised — check with Hubble, then use Mark as not bought.
+                              Retry is unavailable: Hubble&apos;s answer was not recognised — check with Hubble; if it was not bought, Mark as not bought closes the row.
                             </p>
                           )}
                           {r.id && r.canMarkNotBought === true && (
@@ -725,7 +725,7 @@ export default function VoucherCampaignDetailPage() {
           <div className="space-y-2">
             <p>
               Hubble answered with a status we do not recognise for {rowRef(dialog.row)} ({formatRupees(dialog.row.amount)} {dialog.row.brand}, {dialog.row.phone}).
-              Marking it as not bought stops the automatic checks and frees its {formatRupees(dialog.row.amount)} in the budget; Retry then buys with a NEW Hubble reference.
+              This closes the row for good: its {formatRupees(dialog.row.amount)} is released and no voucher will be bought for this person in this campaign. Arrange any replacement with Hubble outside this campaign.
             </p>
             <label htmlFor="vd-mark-reason" className="block text-xs font-semibold text-gray-600">Reason (kept in the audit trail)</label>
             <textarea id="vd-mark-reason" rows={2} maxLength={300} value={markReason} disabled={dialogBusy}

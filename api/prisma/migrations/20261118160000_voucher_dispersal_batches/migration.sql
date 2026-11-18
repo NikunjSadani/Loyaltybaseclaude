@@ -51,6 +51,36 @@ CREATE TABLE IF NOT EXISTS "voucher_dispersal_batches" (
     CONSTRAINT "voucher_dispersal_batches_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable (earlier-order alerts: one per (campaign, reference) — the unique key is the race-safe dedupe)
+CREATE TABLE IF NOT EXISTS "voucher_dispersal_order_alerts" (
+    "id" TEXT NOT NULL,
+    "campaignId" TEXT NOT NULL,
+    "rowId" TEXT NOT NULL,
+    "batchNumber" INTEGER NOT NULL,
+    "rowNumber" INTEGER NOT NULL,
+    "referenceId" TEXT NOT NULL,
+    "kind" TEXT NOT NULL,
+    "hubbleStatus" TEXT NOT NULL,
+    "statusHistory" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "voucher_dispersal_order_alerts_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_createdAt_idx" ON "voucher_dispersal_order_alerts"("createdAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_campaignId_referenceId_key" ON "voucher_dispersal_order_alerts"("campaignId", "referenceId");
+
+-- AddForeignKey (guarded: skipped when the constraint already exists)
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'voucher_dispersal_order_alerts_campaignId_fkey') THEN
+    ALTER TABLE "voucher_dispersal_order_alerts" ADD CONSTRAINT "voucher_dispersal_order_alerts_campaignId_fkey" FOREIGN KEY ("campaignId") REFERENCES "voucher_dispersal_campaigns"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+  END IF;
+END $$;
+
 -- CreateIndex
 CREATE UNIQUE INDEX IF NOT EXISTS "voucher_dispersal_batches_campaignId_batchNumber_key" ON "voucher_dispersal_batches"("campaignId", "batchNumber");
 

@@ -192,6 +192,7 @@ export function makeFakePrisma() {
   const receipts: Rec[] = [];
   const audits: Rec[] = [];
   const batches: Rec[] = [];
+  const orderAlerts: Rec[] = [];
   const users: Rec[] = [{ id: 'admin-1', name: 'Admin One' }, { id: 'admin-2', name: 'Admin Two' }];
   const clients: Rec[] = [{ id: 'bajaj', internalName: 'Bajaj Consumer Care', branding: { displayName: 'Bajaj' } }];
   const prisma: Rec = {
@@ -225,6 +226,7 @@ export function makeFakePrisma() {
       [['campaignId', 'batchNumber']],
     ),
     user: table(users, 'user', () => ({})),
+    voucherDispersalOrderAlert: table(orderAlerts, 'alert', () => ({ statusHistory: [] }), undefined, [['campaignId', 'referenceId']]),
     messageDeliveryReceipt: table(receipts, 'rcpt', () => ({ status: 'QUEUED', sentAt: null, deliveredAt: null, readAt: null, failureReason: null })),
     auditLog: table(audits, 'audit', () => ({})),
     client: table(clients, 'client', () => ({})),
@@ -232,7 +234,7 @@ export function makeFakePrisma() {
   };
   // Interactive transaction: runs fn(prisma); if it THROWS, every table is restored to its state before the
   // transaction (rollback). Not isolated from concurrent transactions (no locks) — enough for the specs.
-  const allStores = [campaigns, rows, receipts, audits, clients, batches, users];
+  const allStores = [campaigns, rows, receipts, audits, clients, batches, users, orderAlerts];
   prisma.$transaction = jest.fn(async (fn: (tx: Rec) => Promise<unknown>) => {
     const snap = allStores.map((st) => st.map((r) => ({ ...r })));
     try {
@@ -242,5 +244,5 @@ export function makeFakePrisma() {
       throw e;
     }
   });
-  return { prisma, campaigns, rows, receipts, audits, clients, batches, users };
+  return { prisma, campaigns, rows, receipts, audits, clients, batches, users, orderAlerts };
 }

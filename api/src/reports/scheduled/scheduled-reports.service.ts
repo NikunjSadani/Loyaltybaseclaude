@@ -27,7 +27,6 @@ import { kycAddressableOutletWhere, KYC_LATEST_SUBMISSION_SELECT } from '../../a
 import {
   DISPERSAL_RETRY_MIN_AGE_MS,
   SETTLE_FAILURES_BEFORE_ALERT,
-  SUPERSEDED_ALERT_EVENT,
   failedMayStillCompleteWhere,
 } from '../../voucher-dispersal/voucher-dispersal.processor';
 import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../rewards/rewards.service';
@@ -877,7 +876,9 @@ export class ScheduledReportsService {
    * Gifsy-wide Voucher Dispersal (GIFSY-run campaigns, not a tenant). Same definitions as the campaign screen
    * (VoucherDispersalService.campaign summary): pending = QUEUED + BUYING + PENDING_RECONCILE; a WhatsApp is
    * failed when the row's mirrored status is FAILED / UNKNOWN (or the send itself errored with no status);
-   * a PENDING_RECONCILE row is retryable 2 h after its last place attempt / flag (DISPERSAL_RETRY_MIN_AGE_MS).
+   * a PENDING_RECONCILE row is retryable 2 h after its last place attempt / flag (DISPERSAL_RETRY_MIN_AGE_MS) — except one
+   * whose last Hubble answer was undocumented (counted apart: needs Gifsy tech). Rows marked "not bought" are CLOSED:
+   * excluded from "purchase failed" / "still failed" and counted as `markedClosed`.
    * Window figures use the row timestamps the engine stamps (boughtAt; updatedAt for failures). STILL OPEN:
    * rows in BUY_FAILED now (a Retry moves the row out of it) and BOUGHT rows whose WhatsApp is failed now (a
    * Resend clears the status). Every count rides the (status, updatedAt) index; only PENDING_RECONCILE rows
@@ -891,16 +892,22 @@ export class ScheduledReportsService {
       OR: [{ messageStatus: { in: ['FAILED', 'UNKNOWN'] } }, { messageStatus: null, messageError: { not: null } }],
     };
     const bought = await rows.count({ where: { status: 'BOUGHT', boughtAt: inWindow } });
-    const buyFailed = await rows.count({ where: { status: 'BUY_FAILED', updatedAt: inWindow } });
+    // A row an admin marked "not bought" is CLOSED — reported apart, never as "purchase failed" / "still failed".
+    const notMarked = { OR: [{ buyFailureSource: null }, { buyFailureSource: { not: 'MARKED_NOT_BOUGHT' } }] };
+    const buyFailed = await rows.count({ where: { status: 'BUY_FAILED', updatedAt: inWindow, ...notMarked } });
     const messageFailed = await rows.count({ where: { ...messageFailedWhere, updatedAt: inWindow } });
     const pending = await rows.count({ where: { status: { in: ['QUEUED', 'BUYING', 'PENDING_RECONCILE'] } } });
-    const buyFailedOpen = await rows.count({ where: { status: 'BUY_FAILED' } });
+    const buyFailedOpen = await rows.count({ where: { status: 'BUY_FAILED', ...notMarked } });
+    const markedClosed = await rows.count({ where: { status: 'BUY_FAILED', buyFailureSource: 'MARKED_NOT_BOUGHT' } });
     const messageFailedOpen = await rows.count({ where: messageFailedWhere });
     const reconcile = await rows.findMany({
       where: { status: 'PENDING_RECONCILE' },
-      select: { placeAttemptAt: true, pendingSince: true },
+      select: { placeAttemptAt: true, pendingSince: true, pendingReason: true },
     });
-    const pendingRetryable = reconcile.filter((r) => {
+    // A pending row whose last Hubble answer was undocumented needs Gifsy tech — not "Retry available" (review L4).
+    const unrecognised = (r: { pendingReason?: string | null }) => (r.pendingReason ?? '').startsWith('HUBBLE_UNKNOWN_STATUS');
+    const unrecognisedStatus = reconcile.filter(unrecognised).length;
+    const pendingRetryable = reconcile.filter((r) => !unrecognised(r)).filter((r) => {
       const anchors = [r.placeAttemptAt, r.pendingSince].filter((d): d is Date => !!d).map((d) => d.getTime());
       return anchors.length > 0 && Math.max(...anchors) + DISPERSAL_RETRY_MIN_AGE_MS <= nowMs;
     }).length;
@@ -925,14 +932,9 @@ export class ScheduledReportsService {
       const b = budgetOf.get(id);
       return b !== undefined && paise > b;
     }).length;
-    // Hubble activity on an EARLIER (retired) order of a row, alerted in the window — not counted against any budget.
-    const earlierOrderAlerts = await this.prisma.auditLog.count({
-      where: {
-        entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
-        createdAt: inWindow,
-        metadata: { path: ['event'], equals: SUPERSEDED_ALERT_EVENT },
-      },
-    });
+    // Hubble activity on an EARLIER (retired) order of a row — one alert per reference, counted when first raised in
+    // the window; never counted against any budget.
+    const earlierOrderAlerts = await this.prisma.voucherDispersalOrderAlert.count({ where: { createdAt: inWindow } });
     const settleErrorCampaigns = await this.prisma.voucherDispersalCampaign.count({ where: { settleFailures: { gte: SETTLE_FAILURES_BEFORE_ALERT } } });
     const lateCompleted = await rows.count({ where: { lateCompletedAt: inWindow } });
     return {
@@ -947,6 +949,8 @@ export class ScheduledReportsService {
       settleErrorCampaigns,
       lateCompleted,
       earlierOrderAlerts,
+      markedClosed,
+      unrecognisedStatus,
     };
   }
 

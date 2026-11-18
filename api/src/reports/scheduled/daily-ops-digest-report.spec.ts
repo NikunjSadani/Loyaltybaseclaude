@@ -401,6 +401,22 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
     ]);
   });
 
+  it('unrecognised Hubble statuses are their own line; the earlier-order figure sits in the window line; closed rows are informational', () => {
+    const d = ok({
+      bought: 0, buyFailed: 0, messageFailed: 0, pending: 1, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0,
+      unrecognisedStatus: 1, earlierOrderAlerts: 1, markedClosed: 2,
+    });
+    expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
+      'Voucher dispersal: Hubble reported activity on 1 earlier order after a retry or a "not bought" mark (in the window) — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)',
+      'Voucher dispersal: 1 purchase with a Hubble status we do not recognise — needs Gifsy tech',
+    ]);
+    const html = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html;
+    const inWindow = html.slice(html.indexOf('In window'), html.indexOf('Right now'));
+    expect(inWindow).toContain('earlier order reported by Hubble');
+    expect(html.slice(html.indexOf('Right now'))).toContain('closed (marked not bought)');
+    expect(html.slice(html.indexOf('Right now'))).toContain('Hubble status not recognised');
+  });
+
   it('a load failure is itself an item', () => {
     expect(gifsyWideAttention({ voucherDispersal: { ok: false, error: 'boom' } })).toEqual([
       "Couldn't load the Voucher dispersal section",

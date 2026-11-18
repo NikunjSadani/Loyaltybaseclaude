@@ -189,13 +189,17 @@ describe('Edit campaign', () => {
           { at: '2026-11-18T10:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 3, referenceId: 'vdA', hubbleStatus: 'SUCCESS' },
           { at: '2026-11-18T09:00:00Z', kind: 'SUPERSEDED', batchNumber: 2, rowNumber: 5, referenceId: 'vdB', hubbleStatus: 'PROCESSING' },
           { at: '2026-11-18T08:00:00Z', kind: 'MARKED_NOT_BOUGHT', batchNumber: 1, rowNumber: 4, referenceId: 'vdC', hubbleStatus: 'SUCCESS' },
+          { at: '2026-11-18T07:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 6, referenceId: 'vdD', hubbleStatus: 'LOOKUP_FAILED' },
+          { at: '2026-11-18T06:00:00Z', kind: 'NOT_APPLIED', batchNumber: 1, rowNumber: 7, referenceId: 'vdE', hubbleStatus: 'SUCCESS', statusHistory: ['PROCESSING', 'SUCCESS'] },
         ],
       },
     } }))];
     render(<DetailPage />);
     const box = await screen.findByTestId('vd-earlier-orders');
     expect(box).toHaveAttribute('role', 'alert');
-    expect(box).toHaveTextContent('Hubble reported activity on 23 earlier orders (the latest 3 are listed).');
+    expect(box).toHaveTextContent('Hubble reported activity on 23 earlier orders (the latest 5 are listed).');
+    expect(box).toHaveTextContent("Batch 1, row 6: couldn't check an earlier order with Hubble — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person).");
+    expect(box).toHaveTextContent('Batch 1, row 7: a completed order from Hubble could not be applied to this row (earlier: PROCESSING) — check with Hubble');
     expect(box).toHaveTextContent('Batch 1, row 3: an earlier order was reported completed by Hubble after a retry — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person).');
     expect(box).toHaveTextContent('Batch 2, row 5: an earlier order was reported PROCESSING by Hubble after a retry — check with Hubble');
     expect(box).toHaveTextContent('Batch 1, row 4: the order of a row marked not bought was reported completed by Hubble — check with Hubble');
@@ -220,7 +224,8 @@ describe('Edit campaign', () => {
     render(<DetailPage />);
     const row = await screen.findByTestId('vd-row-r2');
     expect(within(row).queryByTestId('vd-retry-r2')).not.toBeInTheDocument();
-    expect(within(row).getByTestId('vd-retry-unavailable-r2')).toHaveTextContent("Retry is unavailable: Hubble's answer was not recognised — check with Hubble, then use Mark as not bought.");
+    expect(within(row).getByTestId('vd-retry-unavailable-r2')).toHaveTextContent("Retry is unavailable: Hubble's answer was not recognised — check with Hubble; if it was not bought, Mark as not bought closes the row.");
+    expect(row).not.toHaveTextContent(/then use Mark|new reference/);
   });
 
   it('"Mark as not bought": reason required, sent to the server, the result said in plain words', async () => {
@@ -235,6 +240,8 @@ describe('Edit campaign', () => {
     fireEvent.click(await screen.findByTestId('vd-mark-r2'));
     const dialog = await screen.findByRole('dialog');
     expect(dialog).toHaveTextContent('Mark as not bought?');
+    expect(dialog).toHaveTextContent('This closes the row for good: its ₹300 is released and no voucher will be bought for this person in this campaign. Arrange any replacement with Hubble outside this campaign.');
+    expect(dialog).not.toHaveTextContent(/Retry|new .*reference/i);
     fireEvent.click(within(dialog).getByTestId('vd-dialog-confirm'));
     expect(within(dialog).getByTestId('vd-dialog-error')).toHaveTextContent('Give the reason (at least 5 characters)');
     expect(calls((u) => u.endsWith('/mark-not-bought'))).toHaveLength(0);
@@ -242,7 +249,9 @@ describe('Edit campaign', () => {
     fireEvent.click(within(dialog).getByTestId('vd-dialog-confirm'));
     await waitFor(() => expect(calls((u) => u.endsWith('/rows/r2/mark-not-bought'))).toHaveLength(1));
     expect(JSON.parse(String(calls((u) => u.endsWith('/mark-not-bought'))[0][1].body))).toEqual({ reason: 'Hubble support: ticket 42' });
-    expect(await screen.findByTestId('vd-notice')).toHaveTextContent('Batch 2, row 2 marked as not bought — it no longer counts against the budget. Retry is now available (with a new reference).');
+    const notice = await screen.findByTestId('vd-notice');
+    expect(notice).toHaveTextContent('Batch 2, row 2 marked as not bought — the row is closed: its ₹300 is released and no voucher will be bought for this person in this campaign. Arrange any replacement with Hubble outside this campaign.');
+    expect(notice).not.toHaveTextContent(/Retry|new reference/);
   });
 
   it('queued vouchers that no longer fit are called out apart from "over budget"', async () => {

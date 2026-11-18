@@ -128,7 +128,7 @@ function makePrisma() {
     outletTarget: { groupBy: jest.fn().mockResolvedValue([]) },
     voucherDispersalRow: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]), groupBy: jest.fn().mockResolvedValue([]) },
     voucherDispersalCampaign: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
-    auditLog: { count: jest.fn().mockResolvedValue(0) },
+    voucherDispersalOrderAlert: { count: jest.fn().mockResolvedValue(0) },
   };
 }
 
@@ -707,16 +707,27 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
   it('voucher dispersal: earlier-order alerts in the window are counted (campaign audit rows) and never add to "over budget"', async () => {
     prisma.voucherDispersalRow.groupBy.mockResolvedValue([{ campaignId: 'c1', _sum: { amountPaise: 900_000n } }]); // ₹9,000
     prisma.voucherDispersalCampaign.findMany.mockResolvedValue([{ id: 'c1', budgetPaise: 1_000_000n }]); // ₹10,000
-    prisma.auditLog.count.mockResolvedValue(2);
+    prisma.voucherDispersalOrderAlert.count.mockResolvedValue(2);
     const input = await svc.collect(NOW, '13 Nov 2026', WIN);
     expect(input.voucherDispersal).toMatchObject({ ok: true, data: { overBudgetCampaigns: 0, earlierOrderAlerts: 2 } });
-    expect(prisma.auditLog.count).toHaveBeenCalledWith({
-      where: {
-        entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
-        createdAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) },
-        metadata: { path: ['event'], equals: 'VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY' },
-      },
-    });
+    // One alert per earlier reference (unique key) — counted by when it was first raised.
+    expect(prisma.voucherDispersalOrderAlert.count).toHaveBeenCalledWith({ where: { createdAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) } } });
+  });
+
+  it('voucher dispersal: rows marked "not bought" are CLOSED (not "still failed"); unrecognised-status pending rows are counted apart from "unconfirmed > 2 h"', async () => {
+    prisma.voucherDispersalRow.count.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+      Promise.resolve(where.buyFailureSource === 'MARKED_NOT_BOUGHT' ? 4 : 0),
+    );
+    prisma.voucherDispersalRow.findMany.mockResolvedValue([
+      { placeAttemptAt: new Date(NOW - 3 * HOUR), pendingSince: null, pendingReason: 'HUBBLE_INDETERMINATE' }, // retryable
+      { placeAttemptAt: new Date(NOW - 3 * HOUR), pendingSince: null, pendingReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD' }, // needs tech
+    ]);
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    expect(input.voucherDispersal).toMatchObject({ ok: true, data: { markedClosed: 4, pendingRetryable: 1, unrecognisedStatus: 1 } });
+    const calls = prisma.voucherDispersalRow.count.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);
+    const notMarked = { OR: [{ buyFailureSource: null }, { buyFailureSource: { not: 'MARKED_NOT_BOUGHT' } }] };
+    expect(calls).toContainEqual({ status: 'BUY_FAILED', ...notMarked });
+    expect(calls).toContainEqual({ status: 'BUY_FAILED', updatedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) }, ...notMarked });
   });
 
   it('voucher dispersal: window counts, the 2 h retry gate, and the still-open counts', async () => {
@@ -737,14 +748,15 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       ok: true,
       data: {
         bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 5, messageFailedOpen: 6,
-        overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0, earlierOrderAlerts: 0,
+        overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0, earlierOrderAlerts: 0, markedClosed: 5, unrecognisedStatus: 0,
       },
     });
     const calls = prisma.voucherDispersalRow.count.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);
     const win = { gte: new Date(WIN.startMs), lt: new Date(NOW) };
     expect(calls).toContainEqual({ status: 'BOUGHT', boughtAt: win });
-    expect(calls).toContainEqual({ status: 'BUY_FAILED', updatedAt: win });
-    expect(calls).toContainEqual({ status: 'BUY_FAILED' });
+    const notMarked = { OR: [{ buyFailureSource: null }, { buyFailureSource: { not: 'MARKED_NOT_BOUGHT' } }] };
+    expect(calls).toContainEqual({ status: 'BUY_FAILED', updatedAt: win, ...notMarked });
+    expect(calls).toContainEqual({ status: 'BUY_FAILED', ...notMarked });
     expect(calls).toContainEqual({ status: { in: ['QUEUED', 'BUYING', 'PENDING_RECONCILE'] } });
   });
 

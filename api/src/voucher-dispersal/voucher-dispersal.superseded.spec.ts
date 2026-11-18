@@ -94,7 +94,7 @@ describe('Hubble activity on an EARLIER (retired) order: one loud alert per refe
   it('the page COUNT is the total, not just the latest 20', async () => {
     const { t, id } = await rowIn('BOUGHT', { voucherCode: CODE });
     for (let i = 0; i < 25; i++) {
-      t.audits.push({ id: `a${i}`, entityType: 'VOUCHER_DISPERSAL_CAMPAIGN', entityId: id, createdAt: new Date(), metadata: { event: SUPERSEDED_ALERT_EVENT, kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 3, referenceId: `vd${i}`, hubbleStatus: 'SUCCESS' } });
+      await t.prisma.voucherDispersalOrderAlert.create({ data: { campaignId: id, rowId: 'r', batchNumber: 1, rowNumber: 3, referenceId: `vd${i}`, kind: 'SUPERSEDED', hubbleStatus: 'SUCCESS', statusHistory: ['SUCCESS'] } });
     }
     const d = await t.svc.detail(ADMIN, id);
     expect(d.summary.earlierOrderAlerts.total).toBe(25);

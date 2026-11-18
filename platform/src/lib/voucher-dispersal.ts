@@ -145,6 +145,7 @@ export function pendingReasonText(code: string | null): string {
   if (!code) return PENDING_RECONCILE_NOTE;
   const c = code.toUpperCase();
   const tail = ' It is checked with Hubble automatically and is not counted as bought or failed until then.';
+  if (c === 'NO_ORDER_AT_HUBBLE_YET') return `Hubble has no order for this reference yet.${tail}`;
   if (c === 'STALE_BUYING') return `The purchase call was interrupted before Hubble answered.${tail}`;
   if (c === 'HUBBLE_PROCESSING') return `Hubble is still processing this order.${tail}`;
   if (c === 'HUBBLE_SUCCESS_NO_CODE') return `Hubble reported success but has not returned the voucher code yet.${tail}`;
@@ -248,18 +249,29 @@ export interface VdRowRef {
 
 /** One alert: Hubble reported activity on an EARLIER (retired) order of a row, or on a row marked "not bought". */
 export interface VdEarlierOrderAlert extends VdRowRef {
+  /** Last update of the alert. */
   at: string | null;
-  kind: 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | string;
+  /** When it was first raised. */
+  firstAt: string | null;
+  kind: 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | 'NOT_APPLIED' | string;
   referenceId: string | null;
+  /** Latest Hubble status (or LOOKUP_FAILED). */
   hubbleStatus: string | null;
+  /** Every status reported for this reference, oldest first (one alert per reference). */
+  statusHistory: string[];
 }
 
 /** "Batch 1, row 3: an earlier order was reported completed by Hubble after a retry — check with Hubble (…)." */
 export function earlierOrderAlertText(a: VdEarlierOrderAlert): string {
   const what = a.hubbleStatus === 'SUCCESS' ? 'completed' : (a.hubbleStatus ?? 'with an unknown status');
-  const head = a.kind === 'MARKED_NOT_BOUGHT'
-    ? `the order of a row marked not bought was reported ${what} by Hubble`
-    : `an earlier order was reported ${what} by Hubble after a retry`;
+  const earlier = a.statusHistory.length > 1 ? ` (earlier: ${a.statusHistory.slice(0, -1).join(', ')})` : '';
+  const head = a.hubbleStatus === 'LOOKUP_FAILED'
+    ? "couldn't check an earlier order with Hubble"
+    : a.kind === 'MARKED_NOT_BOUGHT'
+      ? `the order of a row marked not bought was reported ${what} by Hubble${earlier}`
+      : a.kind === 'NOT_APPLIED'
+        ? `a completed order from Hubble could not be applied to this row${earlier}`
+        : `an earlier order was reported ${what} by Hubble after a retry${earlier}`;
   const ref = rowRefText(a);
   return `${ref.charAt(0).toUpperCase()}${ref.slice(1)}: ${head} — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person).`;
 }
@@ -760,6 +772,8 @@ function normalizeEarlierOrderAlerts(raw: unknown): { total: number | null; item
     items: Array.isArray(o.items)
       ? o.items.filter(isObj).map((a) => ({
           at: str(a.at),
+          firstAt: str(a.firstAt),
+          statusHistory: Array.isArray(a.statusHistory) ? a.statusHistory.filter((x): x is string => typeof x === 'string') : [],
           kind: str(a.kind) ?? 'SUPERSEDED',
           batchNumber: num(a.batchNumber),
           rowNumber: num(a.rowNumber),

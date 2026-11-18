@@ -59,7 +59,7 @@ or not) sees every campaign. `GIFSY_STAFF` and every tenant role are refused (co
 | `GET /campaigns/:id/report.xlsx` | — | Batch, Source file, Row, Phone, Name, Amount, Brand, Voucher status, Hubble order ref, Bought at, Failure reason, WhatsApp status, Sent at, Delivered at, Read at, Message failure reason (**no codes**) |
 | `POST /campaigns/:id/rows/:rowId/resend` | — | row — re-sends the WhatsApp for a BOUGHT row (new receipt); never buys; only after the first send has an outcome; max 3 per row |
 | `POST /campaigns/:id/rows/:rowId/retry-buy` | — | `{ message, row }` — rules in §4; idempotent. 409 when Hubble answers with a status we do not recognise ("we cannot tell whether it was bought … use Mark as not bought") |
-| `POST /campaigns/:id/rows/:rowId/mark-not-bought` | `{ reason }` (5–300 chars) | row — GIFSY_ADMIN only; only when the row's last Hubble answer was unrecognised (`row.canMarkNotBought`); audited `VOUCHER_DISPERSAL_MARKED_NOT_BOUGHT` (actor, reason, previous state) in the same transaction; row → BUY_FAILED `MARKED_NOT_BOUGHT` (terminal, off the budget, out of the 2-min lookups); Retry then uses a NEW reference |
+| `POST /campaigns/:id/rows/:rowId/mark-not-bought` | `{ reason }` (5–300 chars) | row — GIFSY_ADMIN only; only when the row's last Hubble answer was unrecognised (`row.canMarkNotBought`); audited `VOUCHER_DISPERSAL_MARKED_NOT_BOUGHT` (actor, reason, previous state) in the same transaction; row → BUY_FAILED `MARKED_NOT_BOUGHT` = CLOSED for good (off the budget, never looked up, never retried — no voucher will be bought for this person in this campaign; any replacement is arranged with Hubble outside it) |
 | `POST /campaigns/:id/cancel` | — | `{ campaign, cancelledRows, stillWithHubble, alreadyBought, discardedPendingBatchRows }` |
 | `PATCH /campaigns/:id` | `{ name?, budgetRupees? }` | campaign. 400: nothing to change / empty name / budget below the floor (the message states the floor, spent and committed); 409 on CANCELLED |
 | `POST /campaigns/:id/batches` | multipart `file` (.xlsx) | `{ batchNumber, batchStatus, previewId, campaign, rows, summary:{ …upload summary, alreadyCommittedRupees, remainingBudgetRupees, crossBatchDuplicates } }` — `overBudget` = this batch > what is LEFT. 409 with the reason unless the campaign is COMPLETED / COMPLETED_WITH_ERRORS with nothing in flight. Re-upload while a batch waits = replaces it (same number, new previewId) |
@@ -396,3 +396,30 @@ I want."* Owner chose **"Add to the same campaign"**.
   had failed/refused" / "N failed purchases are back with Hubble and count again"), else a neutral "spending is above the
   budget; see Budget used". **F6** — the BOUGHT audit's `fromStatus` is the real previous status (one guarded write per
   possible state).
+
+### 10c. Review of `e0513abc` (2026-11-18)
+
+- **Closed means closed (M1):** every write guarded on `status = BUY_FAILED` (buy-apply, back-to-pending, retry re-queue)
+  also excludes `buyFailureSource = MARKED_NOT_BOUGHT` (`NOT_MARKED`), so a webhook / sweep / retry lookup racing a mark can
+  never buy or move the row — it falls through to an alert. All wording says the mark closes the row for good (no "retry
+  after a mark" anywhere).
+- **Earlier-order alerts live in their own table** `voucher_dispersal_order_alerts` (same unapplied migration, idempotent):
+  ONE alert per (campaign, reference) — the unique key makes the dedupe race-safe; a later status updates the same alert
+  (`statusHistory`) and is never a second count (L1). Kinds: `SUPERSEDED` (an earlier, retired reference), `MARKED_NOT_BOUGHT`
+  (the reference of a row marked not bought), `NOT_APPLIED` (a Hubble SUCCESS that could not be stored on the row — M3).
+  Status `LOOKUP_FAILED` = we could not check it ("couldn't check an earlier order — check with Hubble"; M2). Page: total
+  count + latest 20 (per-status wording); digest: alerts first raised in the window, in the "In window" line (L2). Never
+  counted against the budget. Each new alert / status change also writes a campaign audit row + an error log.
+- **The webhook asks Hubble to retry when dispersal processing failed (M2):** `/v1/hubble/webhook` answers **503** when the
+  dispersal reconcile threw or Hubble could not be asked (`LOOKUP_FAILED`); everything else still acks 200. Safe because the
+  dispersal path is lookup-only and idempotent (guarded writes, deduped alerts). (Whether Hubble retries on non-2xx is
+  Hubble's behaviour — the failure is alerted on the campaign either way.)
+- **Alerts rely on Hubble webhooks (L3):** by owner decision there is NO sweep re-checking earlier references; an earlier
+  order is only looked up when Hubble calls the webhook for it (a missed / never-sent webhook means no alert).
+- **The "unrecognised" marker clears (M4):** the LATEST lookup decides — a later documented answer (or "no order yet")
+  makes `canMarkNotBought` false again and Retry follows the normal rules; a pending row's `HUBBLE_UNKNOWN_STATUS:X` reason
+  becomes `NO_ORDER_AT_HUBBLE_YET` when Hubble later has no order.
+- **Digest (M4 / L4 / L2):** rows marked not bought are reported as "closed (marked not bought)" (informational) and are
+  NOT in "purchase failed" / "purchase still failed"; pending rows with an undocumented Hubble status are their own line
+  ("needs Gifsy tech") and are NOT in "unconfirmed > 2 h (Retry available)".
+- Migration re-verified: 14 = 14 statements against Prisma's SQL (base `ab1dbbbb` → current schema).

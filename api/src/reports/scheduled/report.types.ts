@@ -225,6 +225,10 @@ export interface VoucherDispersalSection {
   lateCompleted?: number;
   /** In the window: alerts that Hubble reported activity on an EARLIER (retired) order of a row — not counted as spend. */
   earlierOrderAlerts?: number;
+  /** NOW: rows an admin marked "not bought" — CLOSED (informational; not "still failed"). */
+  markedClosed?: number;
+  /** NOW: pending rows whose last Hubble answer was undocumented — need Gifsy tech (not in `pendingRetryable`). */
+  unrecognisedStatus?: number;
 }
 
 /** Client.status values. */
