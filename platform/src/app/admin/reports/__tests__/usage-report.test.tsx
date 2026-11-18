@@ -141,7 +141,8 @@ describe('Usage Report page', () => {
     expect(screen.getByTestId('usage-totals').getAttribute('aria-busy')).toBe('false');
     fireEvent.change(screen.getByLabelText('Role'), { target: { value: 'SSS' } });
     await waitFor(() => expect(screen.getByTestId('usage-totals').getAttribute('aria-busy')).toBe('true'));
-    expect(screen.getByTestId('usage-totals').className).toMatch(/opacity-40/);
+    expect(screen.getByTestId('usage-totals').className).toMatch(/opacity-40/); // dimmed already during the debounce
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     release(ok(report()));
     await waitFor(() => expect(screen.getByTestId('usage-totals').getAttribute('aria-busy')).toBe('false'));
   });
@@ -151,6 +152,38 @@ describe('Usage Report page', () => {
     render(<UsagePage />);
     expect(await screen.findByText(/not available yet/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
+  });
+
+  it('debounces a burst of filter changes into ONE request carrying all of them', async () => {
+    fetchMock.mockResolvedValue(ok(report()));
+    render(<UsagePage />);
+    await screen.findByText('Asha Retail');
+    const before = jsonCalls().length;
+    fireEvent.change(screen.getByLabelText('Role'), { target: { value: 'SSS' } });
+    fireEvent.change(screen.getByLabelText('Programme'), { target: { value: 'Gold' } });
+    fireEvent.change(screen.getByLabelText('Region'), { target: { value: 'Gujarat' } });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(jsonCalls().length).toBe(before); // still waiting (debounce)
+    await waitFor(() => expect(jsonCalls().length).toBe(before + 1));
+    const q = lastParams();
+    expect([q.get('role'), q.get('program'), q.get('region')]).toEqual(['SSS', 'Gold', 'Gujarat']);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(jsonCalls().length).toBe(before + 1);
+  });
+
+  it('a superseded request is aborted (AbortController)', async () => {
+    const signals: AbortSignal[] = [];
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+      if (init?.signal) signals.push(init.signal);
+      return signals.length === 1 ? new Promise(() => undefined) : Promise.resolve(ok(report()));
+    });
+    render(<UsagePage />);
+    await waitFor(() => expect(signals).toHaveLength(1));
+    fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'name' } });
+    await waitFor(() => expect(signals).toHaveLength(2));
+    expect(signals[0].aborted).toBe(true);
+    expect(signals[1].aborted).toBe(false);
+    await screen.findByText('Asha Retail');
   });
 
   it('pagination: Next asks for page 2', async () => {

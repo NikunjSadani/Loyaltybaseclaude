@@ -11,8 +11,8 @@ const IST_OFFSET_MIN = 5 * 60 + 30;
 export const ACTIVITY_WRITE_THROTTLE_MS = 60_000;
 /** After a failed write, this user's writes on this instance pause for this long (no retry storm on a sick DB). */
 export const ACTIVITY_FAILURE_BACKOFF_MS = 5 * 60_000;
-/** At most this many activity writes in flight per instance; beyond it writes are DROPPED (sampled warn). */
-export const ACTIVITY_MAX_IN_FLIGHT = 5;
+/** At most this many activity writes in flight per instance (the Prisma pool is ~10/instance — activity must stay a small share); beyond it writes are DROPPED (sampled warn). */
+export const ACTIVITY_MAX_IN_FLIGHT = 2;
 /** Warn logs (drops / failures) are sampled to at most one per this many ms per kind. */
 const WARN_SAMPLE_MS = 60_000;
 

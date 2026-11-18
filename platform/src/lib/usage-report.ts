@@ -73,6 +73,8 @@ export interface UsageFilters {
 }
 
 export const USAGE_PAGE_SIZE = 50
+/** Filter / date / page changes wait this long before querying (one request per burst of changes). */
+export const USAGE_DEBOUNCE_MS = 400
 export const USAGE_MAX_RANGE_DAYS = 366
 export const USAGE_ENDPOINT = '/api/reports/usage'
 /** The server's 404 text when an export matches nobody (export kind 'usage-report'). */

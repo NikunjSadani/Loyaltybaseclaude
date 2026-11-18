@@ -22,6 +22,7 @@ import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-downlo
 import {
   USAGE_ENDPOINT as ENDPOINT,
   USAGE_NO_MATCH_RE as NO_MATCH_RE,
+  USAGE_DEBOUNCE_MS,
   USAGE_PAGE_SIZE as PAGE_SIZE,
   defaultIstRange,
   rangeProblem,
@@ -81,20 +82,28 @@ export default function UsageReportPage() {
 
   const problem = useMemo(() => rangeProblem(filters.from, filters.to), [filters.from, filters.to])
 
-  // ── Load (latest request wins — a slow older response never overwrites a newer one) ──
+  // ── Load (latest request wins — a superseded request is ABORTED, and a slow older response never overwrites
+  //    a newer one) ──
+  const abortRef = useRef<AbortController | null>(null)
   const load = useCallback(async (f: UsageFilters, p: number) => {
     const seq = ++reqSeq.current
+    abortRef.current?.abort()
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
+    abortRef.current = ctrl
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`${ENDPOINT}?${usageQuery(f, { page: String(p), pageSize: String(PAGE_SIZE) })}`)
+      const res = await fetch(
+        `${ENDPOINT}?${usageQuery(f, { page: String(p), pageSize: String(PAGE_SIZE) })}`,
+        ctrl ? { signal: ctrl.signal } : undefined,
+      )
       const body = await res.json().catch(() => null)
       if (seq !== reqSeq.current) return
       if (!res.ok) throw new Error(errorText(body, res.status))
       // JSON returns are wrapped in { success, data } (TransformInterceptor) — unwrap .data.
       setData((body as { data: UsageData }).data)
     } catch (e) {
-      if (seq !== reqSeq.current) return
+      if (seq !== reqSeq.current) return // superseded (incl. our own abort) — the newer request owns the state
       setError(e instanceof Error ? e.message : 'Failed to load the report.')
       setData(null)
     } finally {
@@ -102,14 +111,27 @@ export default function UsageReportPage() {
     }
   }, [])
 
+  // Filter / date / page changes are DEBOUNCED (typing a date or flicking through dropdowns sends one request, not
+  // one per keystroke); the very first load is immediate. Totals dim (loading) as soon as something changes.
+  const firstLoad = useRef(true)
   useEffect(() => {
     if (problem) {
       reqSeq.current++ // drop any in-flight answer for the old dates
+      abortRef.current?.abort()
       setLoading(false)
       return
     }
-    void load(filters, page)
+    if (firstLoad.current) {
+      firstLoad.current = false
+      void load(filters, page) // the page opening: load straight away
+      return
+    }
+    setLoading(true)
+    const t = setTimeout(() => { void load(filters, page) }, USAGE_DEBOUNCE_MS)
+    return () => clearTimeout(t)
   }, [filters, page, problem, load])
+
+  useEffect(() => () => abortRef.current?.abort(), [])
 
   const update = (patch: Partial<UsageFilters>) => {
     setFilters((f) => ({ ...f, ...patch }))

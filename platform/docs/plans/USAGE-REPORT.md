@@ -32,7 +32,8 @@ ships (no backfill).
   is consistent with "at least". Visit boundaries are likewise accurate to about ±1 minute: the gap is measured from
   the last WRITTEN action (each write carries its real request time), so an idle gap of 29–30 minutes may be
   counted as a new visit (review M6 — documented, not modelled).
-- **Hot-path guards (review A-M1):** at most 5 activity writes in flight per instance — beyond that a write is
+- **Hot-path guards (review A-M1):** at most 2 activity writes in flight per instance (the Prisma pool is ~10 per
+  instance — activity must stay a small share) — beyond that a write is
   DROPPED (never queued; sampled warn log, at most once a minute). A failed write keeps the user's throttle entry
   and backs that user off for 5 minutes (no retry on the next request — a sick DB never gets one write per
   request); sampled warn log. `ActivityTrackingService.stats()` exposes in-flight / dropped / failed counts.
@@ -108,10 +109,13 @@ server action, not an authenticated `/api` call. Any NEW poll/timer must use `ba
   *tracked* day (pre-ship days excluded), app days, browser days, phone / computer / both, first seen, last seen.
   Sort: minutes (default) / days / last seen / name. "Show users with no activity in this range" lists enabled
   accounts that did not use it. The table has a screen-reader caption.
-- **Performance (M3):** each request builds the report once (5 reads; the per-user aggregate is ONE grouped SQL
-  statement in its own transaction with `SET LOCAL statement_timeout = 20 s` — a timeout → a clear 503 "choose a
-  shorter range"). Paging re-runs the build (no cross-request cache) — fine at Bajaj scale (~9k users, one grouped
-  aggregate); revisit only if it shows up as slow.
+- **Performance (M3 + final round):** each request builds the report once with 5 reads run SEQUENTIALLY (one pooled
+  connection at a time, never 5 in parallel; the per-user aggregate first). The aggregate is ONE grouped SQL
+  statement in its own transaction with `SET LOCAL statement_timeout = 20 s`. A statement timeout (57014) or Prisma
+  P2028 (the transaction could not start — pool busy) → the same clear 503 "took too long… try again, or choose a
+  shorter range". Paging re-runs the build (no cross-request cache) — fine at Bajaj scale (~9k users, one grouped
+  aggregate); revisit only if it shows up as slow. The page debounces filter / date / page changes (400 ms; the first
+  load is immediate) and ABORTS a superseded request (AbortController), so flicking through filters sends one request.
 - **Missing migration (A-M2):** if the columns are not there, the report answers 503 "The usage report is not
   available yet: its database update has not been applied…" (Postgres 42703 / 42P01 mapped), never a bare 500.
 - **Programme / region (what exists):** retailers — `Outlet.programName` / `Outlet.state` of outlets they own (incl.
@@ -135,10 +139,12 @@ server action, not an authenticated `/api` call. Any NEW poll/timer must use `ba
 - **When:** low traffic. `ADD COLUMN … DEFAULT` is metadata-only but needs a brief ACCESS EXCLUSIVE lock on
   `user_activity_day` (written on every authenticated request); `lock_timeout = 5s` makes it fail fast instead of
   queueing requests behind it.
-- **If it fails** (e.g. the lock timeout under load): re-run the deploy at a quieter time. If Prisma recorded the
-  migration as failed: back up, then (owner-approved, via the in-VPC migrate job)
-  `npx prisma migrate resolve --rolled-back 20261118190000_user_activity_usage`, then re-deploy. The SQL is idempotent
-  (`IF NOT EXISTS`), so a partial earlier run is safe.
+- **If it fails on `lock_timeout`** (the deploy stops at the migrate step; the old API keeps serving): Prisma
+  records `20261118190000_user_activity_usage` as FAILED, so the next `migrate deploy` refuses to run until it is
+  resolved. Back up, then (owner-approved, via the in-VPC migrate job)
+  `npx prisma migrate resolve --rolled-back 20261118190000_user_activity_usage`, then re-run the deploy at low
+  traffic. Safe: the SQL is idempotent (`ADD COLUMN IF NOT EXISTS`), so a partial earlier run is harmless.
+  Always deploy this release at low traffic.
 - **If the new API ever runs without the migration:** requests are unaffected; activity writes fail (backed off per
   user, sampled warn `activity write failed … column "visits" does not exist`) and the report shows the clear
   "not available yet" 503. Active-day stamps stop until the migration runs (a gap in the Session Report too), so
@@ -146,8 +152,13 @@ server action, not an authenticated `/api` call. Any NEW poll/timer must use `ba
 
 ## Session Report
 
-Unchanged: it still counts `user_activity_day` rows per month. The throttled writer still creates exactly one row per
-user per IST day.
+It still counts `user_activity_day` rows per month, and the throttled writer still creates exactly one row per user
+per IST day. **One behaviour change:** background requests (`X-Background: 1`) no longer stamp activity, so a day on
+which a user's only traffic was automatic (e.g. a tab left open with the bell polling, a push re-sync) is NO LONGER
+an active day — Session Report active days now count real use only.
+
+Also: the notification bell's unread count no longer polls while the tab is hidden; it refreshes once when the tab
+becomes visible again (then every 60 s while visible).
 
 ## Tests
 

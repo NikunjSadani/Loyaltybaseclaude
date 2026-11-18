@@ -256,12 +256,13 @@ export const USAGE_QUERY_TIMEOUT_MS = 20_000;
 export const USAGE_NOT_MIGRATED_MESSAGE =
   'The usage report is not available yet: its database update has not been applied on this server. Please contact Gifsy.';
 export const USAGE_TIMEOUT_MESSAGE =
-  'The usage report took too long to build. Please choose a shorter date range or narrower filters and try again.';
+  'The usage report took too long to build. Please try again, or choose a shorter date range or narrower filters.';
 
 /**
  * Turn the two failures an admin could actually hit into clear messages instead of a bare 500:
  *  • the migration has not run (Postgres 42703 "column … does not exist" / 42P01) → 503 with a plain message;
- *  • the statement timeout fired (57014) → 503 asking for a narrower range.
+ *  • the statement timeout fired (57014), or Prisma could not start the transaction in time (P2028 — the
+ *    connection pool is busy) → 503 asking for a narrower range / to try again.
  */
 export function usageQueryError(e: unknown): Error {
   const msg = String((e as { message?: unknown })?.message ?? e ?? '');
@@ -269,7 +270,11 @@ export function usageQueryError(e: unknown): Error {
   if (/42703|42P01/.test(code) || /42703|42P01|column .* does not exist|relation .* does not exist/i.test(msg)) {
     return new ServiceUnavailableException(USAGE_NOT_MIGRATED_MESSAGE);
   }
-  if (/57014/.test(code) || /57014|statement timeout|canceling statement due to statement timeout/i.test(msg)) {
+  // 57014 = statement timeout; P2028 = Prisma could not start / hold the transaction (pool wait or tx timeout).
+  if (
+    /57014|P2028/.test(code) ||
+    /57014|P2028|statement timeout|canceling statement due to statement timeout|Unable to start a transaction/i.test(msg)
+  ) {
     return new ServiceUnavailableException(USAGE_TIMEOUT_MESSAGE);
   }
   return e instanceof Error ? e : new Error(msg);
@@ -302,41 +307,41 @@ export async function buildUsageReport(
 ): Promise<UsageReport> {
   const clientId = requireUsageTenant(clientIdRaw);
 
-  const [users, outlets, assignments, agg, started] = await Promise.all([
-    prisma.user.findMany({
-      where: { clientId, deletedAt: null },
-      select: {
-        id: true,
-        name: true,
-        phone: true,
-        role: true,
-        status: true,
-        salesUser: { select: { region: true, zone: true } },
+  // Reads run SEQUENTIALLY (one pooled connection at a time, ~10 per instance) — never 5 in parallel. The heavy one
+  // (the per-user aggregate) runs first so a missing migration / timeout fails fast before the roster reads.
+  const agg = await runAggregate(prisma, clientId, p);
+  const started = await guardUsageQuery(
+    prisma.$queryRaw<Array<{ day: string }>>(Prisma.sql`
+    SELECT to_char(MIN(x."activityDate"), 'YYYY-MM-DD') AS "day"
+      FROM (SELECT "activityDate" FROM "user_activity_day"
+             WHERE "clientId" = ${clientId} AND "visits" > 0
+             ORDER BY "activityDate" ASC LIMIT 1) x`),
+  );
+  const users = await prisma.user.findMany({
+    where: { clientId, deletedAt: null },
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      role: true,
+      status: true,
+      salesUser: { select: { region: true, zone: true } },
+    },
+  });
+  const outlets = await prisma.outlet.findMany({
+    where: { clientId, deletedAt: null },
+    select: { programName: true, state: true, partner: { select: { userId: true } }, parent: { select: { userId: true } } },
+  });
+  const assignments = await prisma.salesUserAssignment.findMany({
+    where: { unassignedAt: null, salesUser: { clientId, deletedAt: null } },
+    select: {
+      salesUser: { select: { userId: true } },
+      outlet: { select: { programName: true, state: true, deletedAt: true, clientId: true } },
+      partner: {
+        select: { clientId: true, outlets: { where: { deletedAt: null }, select: { programName: true, state: true } } },
       },
-    }),
-    prisma.outlet.findMany({
-      where: { clientId, deletedAt: null },
-      select: { programName: true, state: true, partner: { select: { userId: true } }, parent: { select: { userId: true } } },
-    }),
-    prisma.salesUserAssignment.findMany({
-      where: { unassignedAt: null, salesUser: { clientId, deletedAt: null } },
-      select: {
-        salesUser: { select: { userId: true } },
-        outlet: { select: { programName: true, state: true, deletedAt: true, clientId: true } },
-        partner: {
-          select: { clientId: true, outlets: { where: { deletedAt: null }, select: { programName: true, state: true } } },
-        },
-      },
-    }),
-    runAggregate(prisma, clientId, p),
-    guardUsageQuery(
-      prisma.$queryRaw<Array<{ day: string }>>(Prisma.sql`
-      SELECT to_char(MIN(x."activityDate"), 'YYYY-MM-DD') AS "day"
-        FROM (SELECT "activityDate" FROM "user_activity_day"
-               WHERE "clientId" = ${clientId} AND "visits" > 0
-               ORDER BY "activityDate" ASC LIMIT 1) x`),
-    ),
-  ]);
+    },
+  });
 
   // ── programme / region per user + the dropdown catalogues (all tenant outlets) ──
   const links = new Map<string, Link>();

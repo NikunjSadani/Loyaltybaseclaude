@@ -69,13 +69,18 @@ describe('ActivityTrackingService', () => {
       expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
     });
 
-    it('a NEW medium/device inside the 60 s window bypasses the throttle (so the medium is never lost)', () => {
+    it('a NEW medium/device inside the 60 s window bypasses the throttle (so the medium is never lost)', async () => {
       const prisma = makePrisma();
       const svc = new ActivityTrackingService(prisma);
+      // requests are seconds apart in reality — let each write settle (the in-flight cap is 2)
       svc.markActive('u1', 'bajaj', UNKNOWN, at(0)); // e.g. a server-side call with no header
+      await flush();
       svc.markActive('u1', 'bajaj', APP_PHONE, at(5)); // first app+phone request → must write
+      await flush();
       svc.markActive('u1', 'bajaj', APP_PHONE, at(6)); // nothing new → throttled
+      await flush();
       svc.markActive('u1', 'bajaj', BROWSER_PC, at(7)); // browser+computer is new → writes
+      await flush();
       svc.markActive('u1', 'bajaj', { medium: 'app', device: 'computer' }, at(8)); // both already sent → throttled
       expect(prisma.$executeRaw).toHaveBeenCalledTimes(3);
     });
@@ -144,6 +149,7 @@ describe('ActivityTrackingService', () => {
       const prisma = makePrisma(() => new Promise<void>((r) => resolvers.push(r)));
       const svc = new ActivityTrackingService(prisma);
       for (let i = 0; i < 9; i++) svc.markActive(`u${i}`, 'bajaj', APP_PHONE, at(i));
+      expect(ACTIVITY_MAX_IN_FLIGHT).toBe(2); // small share of the ~10-connection pool per instance
       expect(prisma.$executeRaw).toHaveBeenCalledTimes(ACTIVITY_MAX_IN_FLIGHT);
       expect(svc.stats()).toMatchObject({ inFlight: ACTIVITY_MAX_IN_FLIGHT, dropped: 9 - ACTIVITY_MAX_IN_FLIGHT });
       resolvers.forEach((r) => r());

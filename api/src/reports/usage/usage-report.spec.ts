@@ -269,6 +269,41 @@ describe('buildUsageReport', () => {
     );
   });
 
+  it('P2028 (Prisma could not start the transaction — pool busy) → the same friendly 503', async () => {
+    const prisma = fakePrisma();
+    prisma.$transaction.mockRejectedValueOnce(
+      Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' }),
+    );
+    await expect(buildUsageReport(prisma as any, 'bajaj', params(), NOW)).rejects.toThrow(
+      new ServiceUnavailableException(USAGE_TIMEOUT_MESSAGE),
+    );
+  });
+
+  it('reads run SEQUENTIALLY — never more than one DB read in flight (pool is ~10/instance)', async () => {
+    const prisma = fakePrisma();
+    let inFlight = 0;
+    let peak = 0;
+    const wrap = (obj: any, key: string) => {
+      const orig = obj[key];
+      obj[key] = jest.fn(async (...a: unknown[]) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        try {
+          return await orig(...a);
+        } finally {
+          inFlight--;
+        }
+      });
+    };
+    wrap(prisma.user, 'findMany');
+    wrap(prisma.outlet, 'findMany');
+    wrap(prisma.salesUserAssignment, 'findMany');
+    wrap(prisma, '$queryRaw');
+    await buildUsageReport(prisma as any, 'bajaj', params(), NOW);
+    expect(peak).toBe(1);
+  });
+
   it('any other DB error is passed through unchanged', () => {
     const e = new Error('connection reset');
     expect(usageQueryError(e)).toBe(e);
