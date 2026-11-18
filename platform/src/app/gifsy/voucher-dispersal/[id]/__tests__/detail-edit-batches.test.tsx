@@ -166,11 +166,19 @@ describe('Edit campaign', () => {
     expect(b).toHaveTextContent('Over budget by ₹1,000 — a purchase Hubble had refused/failed was completed later.');
   });
 
+  it('queued vouchers that no longer fit are called out apart from "over budget"', async () => {
+    detailQueue = [ok(detail({ summary: { overBudgetRupees: 0, queuedAtRiskRupees: 500 } }))];
+    render(<DetailPage />);
+    expect(await screen.findByTestId('vd-queued-at-risk')).toHaveTextContent("₹500 of queued vouchers can't be bought within the budget");
+    expect(screen.queryByTestId('vd-over-budget')).not.toBeInTheDocument();
+  });
+
   it('no banner when not over budget', async () => {
     render(<DetailPage />);
     await screen.findByTestId('vd-detail');
     expect(screen.queryByTestId('vd-over-budget')).not.toBeInTheDocument();
     expect(screen.queryByTestId('vd-settle-error')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('vd-queued-at-risk')).not.toBeInTheDocument();
   });
 
   it('a status update that keeps failing → banner "contact Gifsy tech"; add-people reason from the server', async () => {

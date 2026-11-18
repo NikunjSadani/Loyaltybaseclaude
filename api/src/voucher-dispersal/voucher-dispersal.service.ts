@@ -35,6 +35,7 @@ import {
   CAMPAIGN_LOCK_TX,
   SETTLE_FAILURES_BEFORE_ALERT,
   budgetBreakdown,
+  overBudget,
   type BudgetBreakdown,
 } from './voucher-dispersal.processor';
 import { maskVoucherCodeForAudit } from '../rewards/voucher-issuance';
@@ -97,7 +98,6 @@ const LIVE_ROW: RS[] = [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT, R
 /** Rows whose purchase is not finished — a new batch waits until there are none. */
 const IN_FLIGHT: RS[] = [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE];
 const EDIT_EVENT = 'VOUCHER_DISPERSAL_EDITED';
-const LATE_EVENT = 'VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER';
 const settleFailing = (c: { settleFailures?: number | null }) => (c.settleFailures ?? 0) >= SETTLE_FAILURES_BEFORE_ALERT;
 /** A batch row marked DUPLICATE because its phone is live in an EARLIER batch (reason text set by uploadBatch). */
 const CROSS_BATCH_REASON = /^Already (sent )?in batch \d+/;
@@ -940,7 +940,7 @@ export class VoucherDispersalService {
       if (batch.status === BS.CONFIRMED && batch.previewId === dto.previewId) return { repeat: true as const };
       if (batch.status === BS.DISCARDED) throw new ConflictException(`Batch ${n} was discarded — upload the file again to add these people.`);
       if (batch.status === BS.CONFIRMED) throw new ConflictException(`Batch ${n} is already confirmed.`);
-      const why = addPeopleBlockedReason(camp.status);
+      const why = addPeopleBlockedReason(camp.status, settleFailing(camp));
       if (why) {
         if (await confirmedHere()) return { repeat: true as const };
         throw new ConflictException(why);
@@ -1140,6 +1140,7 @@ export class VoucherDispersalService {
     const receipts = await this.receiptsFor(rows.map((r) => r.whatsappReceiptId));
     const base = this.previewSummary(rows, camp.budgetPaise);
     const usage = await this.budgetUsage(this.prisma, id);
+    const over = overBudget(usage, BigInt(camp.budgetPaise));
     const n = (s: RS) => rows.filter((r) => r.status === s).length;
     const sumOf = (ss: RS[]) => rows.filter((r) => ss.includes(r.status)).reduce((a, r) => a + (r.amountPaise ?? 0n), 0n);
     let messageSent = 0;
@@ -1171,15 +1172,15 @@ export class VoucherDispersalService {
         spentRupees: rupees(sumOf([RS.BOUGHT])),
         /** The lowest the budget may be edited down to (spent + committed + queued). */
         budgetFloorRupees: rupees(usage.floorPaise),
-        /** > 0 only when what can still cost money exceeds the budget (e.g. a refused purchase Hubble completed later). */
-        overBudgetRupees: usage.floorPaise > BigInt(camp.budgetPaise) ? rupees(usage.floorPaise - BigInt(camp.budgetPaise)) : 0,
-        /** Rows that had FAILED and that Hubble later reported bought / processing (audited loudly). */
-        lateCompletedRows: await this.prisma.auditLog.count({
-          where: {
-            entityType: 'VOUCHER_DISPERSAL_ROW',
-            AND: [{ metadata: { path: ['event'], equals: LATE_EVENT } }, { metadata: { path: ['campaignId'], equals: id } }],
-          },
-        }),
+        /**
+         * > 0 only when money already spent or with Hubble (spent + with Hubble + failed-may-complete — NOT queued)
+         * exceeds the budget, e.g. a refused purchase Hubble completed later (re-review M1).
+         */
+        overBudgetRupees: rupees(over.overPaise),
+        /** Queued vouchers that no longer fit in the budget (the buy step will refuse them). */
+        queuedAtRiskRupees: rupees(over.queuedAtRiskPaise),
+        /** Rows (distinct) that had FAILED and that Hubble later reported bought / processing (audited loudly). */
+        lateCompletedRows: await this.prisma.voucherDispersalRow.count({ where: { campaignId: id, lateCompletedAt: { not: null } } }),
         /** The SAME breakdown the floor, batch confirm and retry checks use (money-audit M1). */
         budgetUsage: {
           spentRupees: rupees(usage.spentPaise),

@@ -217,9 +217,16 @@ refusals) (actor = admin).
   verified 2026-11-18: Postgres logged "SET LOCAL can only be used in transaction blocks" when staging applied
   `20261118130000_sales_day_order_index` (whose 10 s limit therefore did not apply; harmless there — new, small table).
 - **If it fails on `lock_timeout`** (P3018 on the run; afterwards `migrate deploy` refuses with P3009 — a failed migration
-  is recorded): nothing was applied (the migration runs in one transaction). Recover with exactly
-  `npx prisma migrate resolve --rolled-back 20261118160000_voucher_dispersal_batches` (in the in-VPC migrate job), then
-  re-run `npx prisma migrate deploy` in a quieter window.
+  is recorded): because the statements are NOT run in one transaction (above), the ones BEFORE the failing statement
+  may already be applied. Before re-running, check what exists (read-only, `current_database()` guarded): the enum
+  `VoucherDispersalBatchStatus`; columns `voucher_dispersal_rows.batchNumber` / `lateCompletedAt` and
+  `voucher_dispersal_campaigns.settleFailures` / `settleError`; table `voucher_dispersal_batches` (+ its indexes / FK);
+  index `voucher_dispersal_rows_campaignId_batchNumber_rowNumber_key`; and whether
+  `voucher_dispersal_rows_campaignId_rowNumber_key` is still there. Drop what was created (owner OK + shown SQL — they are
+  all new and empty) so the file can run from the top, then `npx prisma migrate resolve --rolled-back
+  20261118160000_voucher_dispersal_batches` (in the in-VPC migrate job), then re-run `npx prisma migrate deploy` in a
+  quieter window. (Option not taken: make each statement idempotent — `IF NOT EXISTS` / guarded `DO` blocks — so a re-run
+  needs no clean-up; ask the owner.)
 - **Old/new revision overlap during that deploy:** for the minutes both API revisions serve traffic, the OLD revision
   does not know about batches and would count an unconfirmed batch's rows in its list summary — harmless, because no
   batch can exist until the new revision is serving (only it can create one).
@@ -316,4 +323,18 @@ I want."* Owner chose **"Add to the same campaign"**.
   preview's "left" is never negative (`overBudgetRupees` instead). L1 — "1e5" / "0x10" / non-ASCII digits → "Enter
   digits only"; a minus → "greater than 0". L2 — `CAMPAIGN_LOCK_TX` = timeout 30 s (incl. the row-lock wait), maxWait
   5 s (pool wait). L3 — `finishCampaigns` settles the longest-waiting campaigns first.
+- **Last review fixes (2026-11-18):** H1 — the drain also re-settles campaigns with settle failures (any status) and
+  finished campaigns with rows back in flight, so a finished campaign is never blocked forever. H2 — a settle failure is
+  counted with one atomic `UPDATE … RETURNING`; the alert fires once when the count crosses 3 (old < 3 ≤ new). M1 —
+  "over budget" = spent + with Hubble + failed-may-complete − budget (QUEUED is not spending); queued vouchers that no
+  longer fit are shown apart ("₹X of queued vouchers can't be bought within the budget", `summary.queuedAtRiskRupees`).
+  M2 — the late event is decided by a guarded write from BUY_FAILED (fires once) and marks the row `lateCompletedAt`;
+  `lateCompletedRows` counts those rows (no audit-log JSON scan). M3 — the Edit dialog checks the floor only when the
+  budget is lowered (rename / partial raise always allowed). M4 — an unrecognised Hubble status on a FAILED row writes
+  `VOUCHER_DISPERSAL_UNKNOWN_STATUS_ON_FAILED_ROW` + an error log and leaves the row. L1 — a lookup that changes nothing
+  on a failed row (`UNCHANGED`) keeps its `updatedAt` and does not re-settle. L2 — the webhook / retry-lookup re-settle
+  uses `WEBHOOK_SETTLE_TX` (3 s) and, on failure, is left to the drain without counting as a settle failure. L3 — batch
+  confirm refuses with the settle-failing reason like the upload. L4 — the Daily Ops Digest's voucher-dispersal block
+  lists campaigns over budget, campaigns whose status update keeps failing, and failed purchases completed later in the
+  window (each a "needs attention" line; sample HTML regenerated).
 

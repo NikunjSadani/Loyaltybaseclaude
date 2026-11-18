@@ -313,6 +313,25 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
       events: d.pendingRetryable,
     });
   }
+  // Owner rule — never silent: money over the budget, a status that cannot be updated, late completions.
+  if ((d.overBudgetCampaigns ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: ${plural(d.overBudgetCampaigns!, 'campaign', 'campaigns')} over budget (a purchase Hubble had refused/failed was completed later)`,
+      events: d.overBudgetCampaigns!,
+    });
+  }
+  if ((d.settleErrorCampaigns ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: ${plural(d.settleErrorCampaigns!, 'campaign', 'campaigns')} whose status update keeps failing (contact Gifsy tech)`,
+      events: d.settleErrorCampaigns!,
+    });
+  }
+  if ((d.lateCompleted ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: ${plural(d.lateCompleted!, 'failed purchase', 'failed purchases')} completed later by Hubble in the window`,
+      events: d.lateCompleted!,
+    });
+  }
   return out;
 }
 
@@ -444,7 +463,10 @@ const dispersalEmpty = (d: VoucherDispersalSection) =>
   d.messageFailed === 0 &&
   d.pending === 0 &&
   d.buyFailedOpen === 0 &&
-  d.messageFailedOpen === 0;
+  d.messageFailedOpen === 0 &&
+  !d.overBudgetCampaigns &&
+  !d.settleErrorCampaigns &&
+  !d.lateCompleted;
 
 /** Gifsy-wide Voucher Dispersal block for the summary ('' when every figure is zero). */
 function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): string {
@@ -453,12 +475,15 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['bought', intIN(d.bought)],
       ['purchase failed', intIN(d.buyFailed), accentIf(d.buyFailed, 'red')],
       ['WhatsApp failed', intIN(d.messageFailed), accentIf(d.messageFailed, 'red')],
+      ['failed purchase completed later', intIN(d.lateCompleted ?? 0), accentIf(d.lateCompleted ?? 0, 'red')],
     ]) +
     metricLine('Right now', [
       ['pending', intIN(d.pending), accentIf(d.pending, 'amber')],
       ['unconfirmed > 2 h', intIN(d.pendingRetryable), accentIf(d.pendingRetryable, 'red')],
       ['purchase still failed', intIN(d.buyFailedOpen), accentIf(d.buyFailedOpen, 'red')],
       ['WhatsApp still failed', intIN(d.messageFailedOpen), accentIf(d.messageFailedOpen, 'red')],
+      ['campaigns over budget', intIN(d.overBudgetCampaigns ?? 0), accentIf(d.overBudgetCampaigns ?? 0, 'red')],
+      ['status update failing', intIN(d.settleErrorCampaigns ?? 0), accentIf(d.settleErrorCampaigns ?? 0, 'red')],
     ]),
   );
 }

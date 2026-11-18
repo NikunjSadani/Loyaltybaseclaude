@@ -134,6 +134,9 @@ Labels used below:
 | | pending | `QUEUED` + `BUYING` + `PENDING_RECONCILE` (now) — the campaign screen's "pending" |
 | | unconfirmed > 2 h | `PENDING_RECONCILE` rows past the retry gate: latest of `placeAttemptAt` / `pendingSince` + `DISPERSAL_RETRY_MIN_AGE_MS` (2 h) ≤ now — the service's `retryAvailableAt` rule |
 | | still open | rows in `BUY_FAILED` now (a Retry moves a row out of it), and `BOUGHT` rows whose WhatsApp is failed now (a Resend clears the status) |
+| | campaigns over budget | campaigns whose Σ(`BUYING` + `PENDING_RECONCILE` + `BOUGHT` + `BUY_FAILED` Hubble may still complete — reference sent, not `REJECTED`) > `budgetPaise` (now) — the campaign page's "over budget" rule (QUEUED not counted). Attention item. |
+| | status update failing | campaigns with `settleFailures ≥ 3` (now). Attention item ("contact Gifsy tech"). |
+| | failed purchase completed later | rows whose `lateCompletedAt` is in the window (a FAILED purchase Hubble later reported bought / processing). Attention item. |
 
 Failures in the message tables are counted when the failure was **recorded** (`updatedAt`), not when the message was
 sent. A delivery report that arrives after the send is therefore still counted, in the next digest.

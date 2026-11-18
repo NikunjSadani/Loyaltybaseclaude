@@ -216,8 +216,10 @@ export interface VdDeliverySummary {
   budgetFloorRupees: number | null;
   /** Detail only: the SAME breakdown the server's floor / batch confirm / retry checks use. */
   budgetUsage: VdBudgetUsage | null;
-  /** Detail only: > 0 when what can still cost money exceeds the budget. */
+  /** Detail only: > 0 when money spent or with Hubble (not queued) exceeds the budget. */
   overBudgetRupees: number | null;
+  /** Detail only: queued vouchers that no longer fit within the budget. */
+  queuedAtRiskRupees: number | null;
   /** Detail only: rows that had failed and that Hubble later reported bought / processing. */
   lateCompletedRows: number | null;
   /** List only: an "Add more people" batch waiting for confirmation (its number), else null. */
@@ -502,6 +504,7 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     budgetFloorRupees: null,
     budgetUsage: null,
     overBudgetRupees: null,
+    queuedAtRiskRupees: null,
     lateCompletedRows: null,
     pendingBatchNumber: num(o.pendingBatchNumber),
   };
@@ -533,6 +536,7 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
         }
       : null,
     overBudgetRupees: num(o.overBudgetRupees),
+    queuedAtRiskRupees: num(o.queuedAtRiskRupees),
     lateCompletedRows: num(o.lateCompletedRows),
     pendingBatchNumber: null,
   };
@@ -948,7 +952,9 @@ export function validateEditForm(f: EditForm, current: Pick<VdCampaign, 'name' |
   else if (raw === '' || !Number.isFinite(b) || b <= 0) errors.budgetRupees = 'Enter a budget in rupees greater than 0.';
   else if (!/^\d+$/.test(raw)) errors.budgetRupees = 'Enter the budget in whole rupees (no paise).';
   else if (b > VD_BUDGET_MAX_RUPEES) errors.budgetRupees = `The budget can be at most ${formatRupees(VD_BUDGET_MAX_RUPEES)} per campaign.`;
-  else if (floorRupees !== null && b < floorRupees) {
+  // The floor only limits LOWERING the budget: a rename or a (partial) raise is always allowed, even when the
+  // floor is above the current budget (e.g. a refused purchase completed later) — the server agrees.
+  else if (floorRupees !== null && current.budgetRupees !== null && b < current.budgetRupees && b < floorRupees) {
     errors.budgetRupees = `The budget can't go below ${formatRupees(floorRupees)} — that much is already spent or committed to purchases in progress.`;
   }
   if (!errors.name && !errors.budgetRupees && name === current.name && b === current.budgetRupees) {

@@ -121,7 +121,7 @@ describe('L2 + L3: lock options and settle order', () => {
   it('finishCampaigns settles the LONGEST-waiting campaigns first (updatedAt asc) so > 50 all get their turn', async () => {
     const t = setup();
     await t.processor.finishCampaigns();
-    const call = t.prisma.voucherDispersalCampaign.findMany.mock.calls.at(-1)[0];
+    const call = t.prisma.voucherDispersalCampaign.findMany.mock.calls.map((c: any[]) => c[0]).find((a: any) => a?.where?.status === 'PROCESSING');
     expect(call).toMatchObject({ where: { status: 'PROCESSING' }, orderBy: { updatedAt: 'asc' }, take: 50 });
   });
 });

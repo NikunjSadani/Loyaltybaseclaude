@@ -369,6 +369,19 @@ describe('rupee input: typed as-is, parsed strictly (decimal point kept, commas 
   });
 });
 
+describe('validateEditForm: the floor only limits LOWERING the budget (last review M3)', () => {
+  // Floor ₹6,000 above the current ₹5,000 budget (e.g. a refused purchase completed later).
+  const cur = { name: 'Diwali', budgetRupees: 5000 };
+  it('rename only, or a partial raise, is allowed even when the floor is above the budget', () => {
+    expect(validateEditForm({ name: 'Diwali 2', budgetRupees: '5000' }, cur, 6000)).toEqual({});
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '5500' }, cur, 6000)).toEqual({});
+  });
+  it('lowering is still checked against the floor', () => {
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '4000' }, cur, 3000)).toEqual({});
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '2999' }, cur, 3000).budgetRupees).toMatch(/can't go below ₹3,000/);
+  });
+});
+
 describe('plurals', () => {
   it('confirm title says "1 voucher" / "N vouchers"', () => {
     expect(confirmDialogTitle({ valid: 1, totalRupees: 500 })).toBe('Buy and send 1 voucher · ₹500 total?');

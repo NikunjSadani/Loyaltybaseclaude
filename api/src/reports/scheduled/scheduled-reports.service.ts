@@ -24,7 +24,11 @@ import { resolveMonthState, shiftMonthKey } from '../../sales-import/months/mont
 import { latestTargetWriteByMonth, targetsNewerThanApply, tenantHasTargetNamesDef } from '../../sales-import/kpi/focus-data';
 import { loadBillingProgress, summarizeBillingProgress } from '../../admin-core/dashboards/billing-progress';
 import { kycAddressableOutletWhere, KYC_LATEST_SUBMISSION_SELECT } from '../../admin-core/dashboards/kyc-pending-sla';
-import { DISPERSAL_RETRY_MIN_AGE_MS } from '../../voucher-dispersal/voucher-dispersal.processor';
+import {
+  DISPERSAL_RETRY_MIN_AGE_MS,
+  SETTLE_FAILURES_BEFORE_ALERT,
+  failedMayStillCompleteWhere,
+} from '../../voucher-dispersal/voucher-dispersal.processor';
 import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../rewards/rewards.service';
 import { buildDailyOpsDigest, failedSections, kycPendingBuckets, MAX_FAILED_REDEMPTION_ROWS } from './daily-ops-digest-report';
 import {
@@ -899,7 +903,39 @@ export class ScheduledReportsService {
       const anchors = [r.placeAttemptAt, r.pendingSince].filter((d): d is Date => !!d).map((d) => d.getTime());
       return anchors.length > 0 && Math.max(...anchors) + DISPERSAL_RETRY_MIN_AGE_MS <= nowMs;
     }).length;
-    return { bought, buyFailed, messageFailed, pending, pendingRetryable, buyFailedOpen, messageFailedOpen };
+    // Never silent (owner rule): campaigns over budget — spent + with Hubble + failed-may-complete (the SAME
+    // rule as the campaign page; QUEUED is not spending) beyond the budget — failing status updates, and FAILED
+    // purchases Hubble completed later in the window.
+    const spend = await rows.groupBy({
+      by: ['campaignId'],
+      where: { OR: [{ status: { in: ['BUYING', 'PENDING_RECONCILE', 'BOUGHT'] } }, failedMayStillCompleteWhere] },
+      _sum: { amountPaise: true },
+    });
+    const budgets = spend.length
+      ? await this.prisma.voucherDispersalCampaign.findMany({
+          where: { id: { in: spend.map((g) => g.campaignId) } },
+          select: { id: true, budgetPaise: true },
+        })
+      : [];
+    const budgetOf = new Map(budgets.map((c) => [c.id, BigInt(c.budgetPaise)]));
+    const overBudgetCampaigns = spend.filter((g) => {
+      const b = budgetOf.get(g.campaignId);
+      return b !== undefined && BigInt(g._sum.amountPaise ?? 0n) > b;
+    }).length;
+    const settleErrorCampaigns = await this.prisma.voucherDispersalCampaign.count({ where: { settleFailures: { gte: SETTLE_FAILURES_BEFORE_ALERT } } });
+    const lateCompleted = await rows.count({ where: { lateCompletedAt: inWindow } });
+    return {
+      bought,
+      buyFailed,
+      messageFailed,
+      pending,
+      pendingRetryable,
+      buyFailedOpen,
+      messageFailedOpen,
+      overBudgetCampaigns,
+      settleErrorCampaigns,
+      lateCompleted,
+    };
   }
 
   // ── Shared inputs ─────────────────────────────────────────────────────────────────────────

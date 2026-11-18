@@ -377,6 +377,21 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
     ]);
   });
 
+  it('over-budget campaigns, failing status updates and late completions are each a line (never silent)', () => {
+    const d = ok({
+      bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0,
+      overBudgetCampaigns: 1, settleErrorCampaigns: 2, lateCompleted: 3,
+    });
+    expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
+      'Voucher dispersal: 1 campaign over budget (a purchase Hubble had refused/failed was completed later)',
+      'Voucher dispersal: 2 campaigns whose status update keeps failing (contact Gifsy tech)',
+      'Voucher dispersal: 3 failed purchases completed later by Hubble in the window',
+    ]);
+    const html = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html;
+    expect(html).toContain('data-section="Voucher dispersal (Gifsy-wide)"');
+    expect(html).toContain('over budget');
+  });
+
   it('a load failure is itself an item', () => {
     expect(gifsyWideAttention({ voucherDispersal: { ok: false, error: 'boom' } })).toEqual([
       "Couldn't load the Voucher dispersal section",

@@ -126,7 +126,8 @@ function makePrisma() {
     salesMonthStatus: { findMany: jest.fn().mockResolvedValue([]) },
     salesKpiDefinition: { count: jest.fn().mockResolvedValue(0) },
     outletTarget: { groupBy: jest.fn().mockResolvedValue([]) },
-    voucherDispersalRow: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
+    voucherDispersalRow: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]), groupBy: jest.fn().mockResolvedValue([]) },
+    voucherDispersalCampaign: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
   };
 }
 
@@ -682,8 +683,29 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(bajaj.billing).toEqual({ ok: false, error: 'pool exhausted' });
   });
 
+  it('voucher dispersal: campaigns over budget (spent + with Hubble + failed-may-complete, NOT queued), failing status updates, late completions in the window', async () => {
+    prisma.voucherDispersalRow.groupBy.mockResolvedValue([
+      { campaignId: 'c1', _sum: { amountPaise: 1_050_000n } }, // ₹10,500 vs ₹10,000 → over
+      { campaignId: 'c2', _sum: { amountPaise: 50_000n } }, // ₹500 vs ₹10,000 → fine
+    ]);
+    prisma.voucherDispersalCampaign.findMany.mockResolvedValue([
+      { id: 'c1', budgetPaise: 1_000_000n },
+      { id: 'c2', budgetPaise: 1_000_000n },
+    ]);
+    prisma.voucherDispersalCampaign.count.mockResolvedValue(2);
+    prisma.voucherDispersalRow.count.mockImplementation(({ where }: { where: { lateCompletedAt?: unknown } }) => Promise.resolve(where.lateCompletedAt ? 3 : 0));
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    expect(input.voucherDispersal).toMatchObject({ ok: true, data: { overBudgetCampaigns: 1, settleErrorCampaigns: 2, lateCompleted: 3 } });
+    const g = prisma.voucherDispersalRow.groupBy.mock.calls[0][0];
+    expect(JSON.stringify(g.where)).not.toContain('QUEUED');
+    expect(prisma.voucherDispersalCampaign.count).toHaveBeenCalledWith({ where: { settleFailures: { gte: 3 } } });
+    const late = prisma.voucherDispersalRow.count.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where).find((w: Record<string, unknown>) => w.lateCompletedAt);
+    expect(late).toEqual({ lateCompletedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) } });
+  });
+
   it('voucher dispersal: window counts, the 2 h retry gate, and the still-open counts', async () => {
-    prisma.voucherDispersalRow.count.mockImplementation(({ where }: { where: { status: unknown; OR?: unknown; updatedAt?: unknown; boughtAt?: unknown } }) => {
+    prisma.voucherDispersalRow.count.mockImplementation(({ where }: { where: { status: unknown; OR?: unknown; updatedAt?: unknown; boughtAt?: unknown; lateCompletedAt?: unknown } }) => {
+      if (where.lateCompletedAt) return Promise.resolve(0);
       if (where.status === 'BOUGHT' && where.OR) return Promise.resolve(where.updatedAt ? 4 : 6);
       if (where.status === 'BOUGHT') return Promise.resolve(180);
       if (where.status === 'BUY_FAILED') return Promise.resolve(where.updatedAt ? 2 : 5);
@@ -697,7 +719,10 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     const input = await svc.collect(NOW, '13 Nov 2026', WIN);
     expect(input.voucherDispersal).toEqual({
       ok: true,
-      data: { bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 5, messageFailedOpen: 6 },
+      data: {
+        bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 5, messageFailedOpen: 6,
+        overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0,
+      },
     });
     const calls = prisma.voucherDispersalRow.count.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);
     const win = { gte: new Date(WIN.startMs), lt: new Date(NOW) };

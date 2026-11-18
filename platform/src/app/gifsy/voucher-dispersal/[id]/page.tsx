@@ -448,6 +448,11 @@ export default function VoucherCampaignDetailPage() {
           {' '}Raise the budget or check with Hubble; nothing more is bought while it is over.
         </p>
       )}
+      {s.queuedAtRiskRupees !== null && s.queuedAtRiskRupees > 0 && (
+        <p role="alert" data-testid="vd-queued-at-risk" className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 break-words">
+          {formatRupees(s.queuedAtRiskRupees)} of queued vouchers can&apos;t be bought within the budget — raise the budget (Edit campaign) or they will fail with a budget reason.
+        </p>
+      )}
       {c.settleError && (
         <p role="alert" data-testid="vd-settle-error" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200 break-words">
           <span className="font-semibold">Status update keeps failing — contact Gifsy tech.</span> The status shown may be out of date. Last error: {c.settleError}

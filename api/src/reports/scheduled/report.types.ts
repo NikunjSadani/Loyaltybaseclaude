@@ -217,6 +217,12 @@ export interface VoucherDispersalSection {
   buyFailedOpen: number;
   /** STILL OPEN (now): BOUGHT rows whose WhatsApp is FAILED / UNKNOWN (a Resend clears the status). */
   messageFailedOpen: number;
+  /** NOW: campaigns whose spent + with-Hubble + failed-may-complete money exceeds the budget (queued not counted). */
+  overBudgetCampaigns?: number;
+  /** NOW: campaigns whose status update has failed SETTLE_FAILURES_BEFORE_ALERT times in a row. */
+  settleErrorCampaigns?: number;
+  /** In the window: FAILED purchases that Hubble later reported bought / processing (row.lateCompletedAt). */
+  lateCompleted?: number;
 }
 
 /** Client.status values. */

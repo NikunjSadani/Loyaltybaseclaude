@@ -60,7 +60,8 @@ function applyData(rec: Rec, data: Rec) {
       else rec[k] = v;
     } else if (v !== undefined) rec[k] = v;
   }
-  rec.updatedAt = tick();
+  // Like Prisma's @updatedAt: set automatically unless the write gives updatedAt explicitly.
+  if (!('updatedAt' in data)) rec.updatedAt = tick();
 }
 
 function sortBy(list: Rec[], orderBy: any): Rec[] {
@@ -203,7 +204,7 @@ export function makeFakePrisma() {
         lastReconcileAt: null, lastReconcileResult: null, voucherCode: null, voucherPin: null, voucherValidTill: null, boughtAt: null,
         buyFailureReason: null, buyFailureSource: null, whatsappReceiptId: null, messageClaimedAt: null, sentAt: null,
         messageError: null, messageStatus: null, messageDeliveredAt: null, messageReadAt: null, messageFailureReason: null,
-        resendCount: 0, attempts: 0, batchNumber: 1, warning: null,
+        resendCount: 0, attempts: 0, batchNumber: 1, warning: null, lateCompletedAt: null,
       }),
       (r, inc) => (inc.campaign ? { ...r, campaign: { ...campaigns.find((c) => c.id === r.campaignId) } } : r),
       [['campaignId', 'dedupePhone'], ['campaignId', 'batchNumber', 'rowNumber'], ['hubbleReferenceId']],

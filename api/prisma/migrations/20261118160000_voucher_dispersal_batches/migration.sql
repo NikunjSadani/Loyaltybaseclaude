@@ -14,7 +14,8 @@ SET lock_timeout = '5s';
 CREATE TYPE "VoucherDispersalBatchStatus" AS ENUM ('PREVIEWED', 'CONFIRMED', 'DISCARDED');
 
 -- AlterTable
-ALTER TABLE "voucher_dispersal_rows" ADD COLUMN "batchNumber" INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE "voucher_dispersal_rows" ADD COLUMN "batchNumber" INTEGER NOT NULL DEFAULT 1,
+ADD COLUMN "lateCompletedAt" TIMESTAMP(3);
 
 -- AlterTable (settle-failure surfacing; constant defaults — metadata-only, no rewrite)
 ALTER TABLE "voucher_dispersal_campaigns" ADD COLUMN "settleFailures" INTEGER NOT NULL DEFAULT 0,
