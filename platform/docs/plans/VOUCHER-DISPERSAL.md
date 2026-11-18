@@ -1,7 +1,8 @@
 # Voucher Dispersal — design, API contract, runbook, safety rules
 
 Owner-approved 2026-11-16. **Money code**: every confirmed row spends real money on the platform Hubble account.
-Branch `feat/vd-api` (server) + `feat/vd-ui` (screens).
+Branch `feat/vd-api` (server) + `feat/vd-ui` (screens). **2026-11-18 (owner-approved, branch `feat/vd-campaign-extend`):**
+clickable campaign cards + per-card Excel, **Edit campaign** (name / budget) and **"Add more people"** batches — §10.
 
 ## 1. What it is
 
@@ -34,7 +35,13 @@ or not) sees every campaign. `GIFSY_STAFF` and every tenant role are refused (co
   whatsappReceiptId (→ `MessageDeliveryReceipt.id`, no FK) + a status mirror, resendCount, attempts.
 - **One voucher per phone per campaign** is DB-enforced by `@@unique([campaignId, dedupePhone])`: `dedupePhone` is set
   only on the FIRST row of the file for a phone (NULLs are distinct, so INVALID/DUPLICATE rows never collide). This is
-  the brief's `@@unique([campaignId, phone])` made workable — a DUPLICATE row must still be stored and shown.
+  the brief's `@@unique([campaignId, phone])` made workable — a DUPLICATE row must still be stored and shown. The key
+  spans **every batch** (§10).
+- Migration `20261118160000_voucher_dispersal_batches`: `VoucherDispersalRow.batchNumber` (default 1 — every existing
+  row is batch 1), table `VoucherDispersalBatch` (batches 2, 3, …: status `PREVIEWED|CONFIRMED|DISCARDED`, previewId,
+  file, uploaded / confirmed / discarded by + at, discardReason; `@@unique([campaignId, batchNumber])`), and the row-number
+  unique widened from `(campaignId, rowNumber)` to `(campaignId, batchNumber, rowNumber)` (new index created before the old
+  one is dropped; no data touched). `SET lock_timeout = '5s'`.
 
 ## 3. API contract (`/v1/admin/voucher-dispersal`, GIFSY_ADMIN, `{ success, data }` envelope; errors `{ success:false, error }`)
 
@@ -46,20 +53,25 @@ or not) sees every campaign. `GIFSY_STAFF` and every tenant role are refused (co
 | `POST /campaigns/:id/upload` | multipart `file` (.xlsx) | `{ previewId, campaign, rows:[{rowNumber, phone, name, amount, brand, brandKey, note, status, invalidReason, warning}], summary:{ total, valid, invalid, duplicates, totalRupees, budgetRupees, overBudget, perBrand:[{brandKey, brand, count, totalRupees}], warningCount, skippedBlankRows, skippedFormulaRows, skippedNote, hiddenRowsIncluded, hiddenNote } }` — re-upload replaces rows while DRAFT/PREVIEWED; every upload gets a NEW `previewId` |
 | `POST /campaigns/:id/confirm` | `{ previewId, expectedValidCount, expectedTotalRupees }` | campaign. Refuses: Hubble not configured (503), 0 valid / over budget (400), previewId not current or numbers changed (409). **Idempotent**: repeating a confirm with the already-confirmed previewId returns the campaign (200) — nothing queued or bought again |
 | `POST /campaigns/:id/process` | — | `{ pass, campaign, hubbleConfigured, summary }` — a bounded in-request processing pass (≤ 25 s, ≤ 25 buys). *Addition to the brief* — see §5 |
-| `GET /campaigns` | `?page=` (50 per page) | `[{ ...campaign, summary:{ total, valid, invalid, duplicates, queued, pending, bought, buyFailed, cancelled, spentRupees } }]` newest first |
-| `GET /campaigns/:id` | — | `{ campaign, hubbleConfigured, summary:{ total, valid, invalid, duplicates, totalRupees, budgetRupees, overBudget, perBrand, queued, buying, pendingReconcile, pending, bought, buyFailed, cancelled, spentRupees, committedRupees, messageSent, delivered, read, messageFailed, messageNotSent } }` |
-| `GET /campaigns/:id/rows` | `?status=&page=` (100 per page) | `{ rows, total, page, pageSize }` |
-| `GET /campaigns/:id/report.xlsx` | — | Row, Phone, Name, Amount, Brand, Voucher status, Hubble order ref, Bought at, Failure reason, WhatsApp status, Sent at, Delivered at, Read at, Message failure reason (**no codes**) |
+| `GET /campaigns` | `?page=` (50 per page) | `[{ ...campaign, summary:{ total, valid, invalid, duplicates, queued, pending, bought, buyFailed, cancelled, spentRupees, pendingBatchNumber } }]` newest first (every CONFIRMED batch; an unconfirmed batch is excluded and named by `pendingBatchNumber`) |
+| `GET /campaigns/:id` | — | `{ campaign, hubbleConfigured, summary:{ total, valid, invalid, duplicates, totalRupees, budgetRupees, overBudget, perBrand, queued, buying, pendingReconcile, pending, bought, buyFailed, cancelled, spentRupees, committedRupees, budgetFloorRupees, messageSent, delivered, read, messageFailed, messageNotSent }, batches:[{ batchNumber, status, sourceFileName, uploadedBy(Id/Name)/At, confirmedBy…/At, discardedBy…/At, discardReason, previewId, total, valid, invalid, duplicates, bought, buyFailed, pending, cancelled, totalRupees, spentRupees }], edits:[{ at, byId, byName, changes:[{ field, from, to }] }] }` (totals cover every CONFIRMED batch) |
+| `GET /campaigns/:id/rows` | `?status=&batch=&page=` (100 per page) | `{ rows, total, page, pageSize }` (an unconfirmed batch's rows only with `batch=` its number) |
+| `GET /campaigns/:id/report.xlsx` | — | Batch, Source file, Row, Phone, Name, Amount, Brand, Voucher status, Hubble order ref, Bought at, Failure reason, WhatsApp status, Sent at, Delivered at, Read at, Message failure reason (**no codes**) |
 | `POST /campaigns/:id/rows/:rowId/resend` | — | row — re-sends the WhatsApp for a BOUGHT row (new receipt); never buys; only after the first send has an outcome; max 3 per row |
 | `POST /campaigns/:id/rows/:rowId/retry-buy` | — | `{ message, row }` — rules in §4; idempotent |
-| `POST /campaigns/:id/cancel` | — | `{ campaign, cancelledRows, stillWithHubble, alreadyBought }` |
+| `POST /campaigns/:id/cancel` | — | `{ campaign, cancelledRows, stillWithHubble, alreadyBought, discardedPendingBatchRows }` |
+| `PATCH /campaigns/:id` | `{ name?, budgetRupees? }` | campaign. 400: nothing to change / empty name / budget below the floor (the message states the floor, spent and committed); 409 on CANCELLED |
+| `POST /campaigns/:id/batches` | multipart `file` (.xlsx) | `{ batchNumber, batchStatus, previewId, campaign, rows, summary:{ …upload summary, alreadyCommittedRupees, remainingBudgetRupees, crossBatchDuplicates } }` — `overBudget` = this batch > what is LEFT. 409 with the reason unless the campaign is COMPLETED / COMPLETED_WITH_ERRORS with nothing in flight. Re-upload while a batch waits = replaces it (same number, new previewId) |
+| `GET /campaigns/:id/batches/:n` | — | the same preview for a batch still PREVIEWED (409 once confirmed / discarded) |
+| `POST /campaigns/:id/batches/:n/confirm` | `{ previewId, expectedValidCount, expectedTotalRupees }` | campaign (→ PROCESSING). 400 over budget ("Raise the budget"), 409 stale preview / changed numbers / still processing / discarded; idempotent per batch |
+| `POST /campaigns/:id/batches/:n/discard` | — | `{ campaign, batchNumber, discardedRows }` — only a PREVIEWED batch |
 
 **Campaign fields:** id, name, programLabel, billedToClient `{id, name} | null` (id = `Client.id`, the same `id`/`slug`
 `GET /v1/gifsy/clients` returns), note, budgetRupees, status, sourceFileName, previewId (only while PREVIEWED), uploadedAt,
 createdById/At, confirmedById/At, cancelledById/At, **completedAt** (set on COMPLETED / COMPLETED_WITH_ERRORS),
-updatedAt, **canCancel**.
+updatedAt, **canCancel**, **canEdit** (not CANCELLED), **addPeopleBlockedReason** (null = "Add more people" available).
 
-**Row fields:** id, rowNumber, phone, name, amount, brand, brandKey, note, status, invalidReason, pendingReason,
+**Row fields:** id, batchNumber, rowNumber, phone, name, amount, brand, brandKey, note, status, invalidReason, pendingReason,
 lastReconcileAt/Result, hubbleReferenceId, hubbleOrderId, boughtAt, buyFailureReason/Source, **voucherCodeMasked**
 (the audit rule `maskVoucherCodeForAudit`: `••••` + last 4 only for a 12+ char code, else `••••`), hasPin, **messageStatus** (`SENT|DELIVERED|READ|FAILED|null`),
 messageSentAt, messageDeliveredAt, messageReadAt, messageFailedAt, messageError, `whatsapp` (detailed view), warning,
@@ -173,7 +185,8 @@ Report (`report.xlsx`): all times in IST ("YYYY-MM-DD HH:mm", headers say "(IST)
 ## 7. Audit (AuditLog)
 
 Campaign (`entityType VOUCHER_DISPERSAL_CAMPAIGN`, actor = admin): CREATED, UPLOADED (counts), CONFIRMED, CANCELLED,
-REPORT_DOWNLOADED, STATUS (system: every COMPLETED / COMPLETED_WITH_ERRORS / re-open change). Row (`VOUCHER_DISPERSAL_ROW`): BOUGHT (masked code), BUY_FAILED, PENDING,
+REPORT_DOWNLOADED, **EDITED** (`metadata.changes` + `oldValues` / `newValues` — shown as the page's Edit history),
+**BATCH_UPLOADED / BATCH_CONFIRMED / BATCH_DISCARDED** (batch number + counts), STATUS (system: every COMPLETED / COMPLETED_WITH_ERRORS / re-open change). Row (`VOUCHER_DISPERSAL_ROW`): BOUGHT (masked code), BUY_FAILED, PENDING,
 NO_ORDER_UNVERIFIED, MESSAGE_FAILED, SUPERSEDED_REFERENCE_ACTIVITY (system); RESENT, RETRY_BUY (+ outcome incl.
 refusals) (actor = admin).
 
@@ -200,3 +213,39 @@ refusals) (actor = admin).
 - **Q2 Reference reuse after FAILED** — we mint a new reference for a Hubble-FAILED row (old kept). Recommendation: confirm
   with Hubble whether a failed reference can be re-placed; if it can, switch to always-same-reference.
 - **Q3 Scheduler** — creating the drain job is an owner infra step (§8).
+
+## 10. Edit + "Add more people" batches (owner-approved 2026-11-18)
+
+Owner's words: *"I should be able to click on [a campaign], do something about it. If the campaign needs to be
+extended, I should be able to edit the budget and again upload files. I should be able to download Excel reports anytime
+I want."* Owner chose **"Add to the same campaign"**.
+
+- **List:** the whole card is one real link (the title, stretched over the card — keyboard focusable; the per-card
+  "Download Excel" button and "Continue setup" link sit above it, never nested). Setup cards go to Continue setup.
+  A card with an unconfirmed batch says "Batch N is waiting for confirmation — nothing in it has been bought."
+- **Edit campaign** (detail page → dialog): name; budget up, or down to the **floor = Σ BUYING + PENDING_RECONCILE +
+  BOUGHT + BUY_FAILED-with-reference-at-Hubble + QUEUED** (the buy engine's `budgetCommittedWhere` + queued), computed
+  under the campaign row lock. Not on a CANCELLED campaign. Audited; listed under "Edit history" (who, when, old → new).
+  Allowed in setup too (floor 0).
+- **Batches:** batch 1 = the first file (its fields stay on the campaign; no batch record). "Add more people" is open only
+  on **COMPLETED / COMPLETED_WITH_ERRORS with nothing QUEUED / BUYING / PENDING_RECONCILE** — otherwise the server's
+  reason is shown ("still being bought — you can add more people once every purchase has finished"). One batch waits at a
+  time; re-uploading replaces it. Same parser / validation as the first file. A phone with a **live** row in an earlier
+  batch (QUEUED / BUYING / PENDING_RECONCILE / BOUGHT / BUY_FAILED) → DUPLICATE "Already sent in batch N" (or "Already in
+  batch N, where its purchase failed — use Retry on that row instead"); a dead earlier row (INVALID / DUPLICATE /
+  CANCELLED) gives its one-voucher key up to the new row. Confirm (under the campaign lock): preview id + numbers must
+  match; **floor + this batch ≤ budget**, else 400 "Raise the budget (Edit campaign)…"; batch PREVIEWED→CONFIRMED by a
+  conditional update; its VALID rows → QUEUED; campaign → PROCESSING; the existing processor buys them and
+  `settleCampaign` re-settles COMPLETED ↔ COMPLETED_WITH_ERRORS over all batches. Idempotent per batch (a repeated /
+  racing confirm with the confirmed preview id returns the campaign). **Discard** deletes an unconfirmed batch's rows
+  (never sent to Hubble) and keeps the batch listed as DISCARDED.
+- **Until confirmed** a batch's rows are in no total (detail summary, list summary, report, default rows list) and never
+  in the buy queue (VALID is not a buy status).
+- **Cancel:** QUEUED rows of every batch → CANCELLED; BUYING / PENDING rows keep reconciling; BOUGHT rows (any batch)
+  stay; an unconfirmed batch is discarded ("Campaign cancelled before this batch was confirmed"). A finished campaign is
+  not cancellable (nothing to stop) — its waiting batch is removed with Discard.
+- **Report:** Batch + Source file columns, every confirmed batch, ordered batch → row.
+- **Consumers traced:** processor (buys ordered campaign → batch → row; settle doc), Hubble webhook (by reference —
+  unaffected), WhatsApp status mirror (receipt → row — unaffected), Daily Ops Digest (row-based counts on statuses /
+  row timestamps — never the campaign status, never VALID rows → a campaign re-opened by a batch is not double-counted;
+  regression spec added), UI contract fixture + platform contract test (new endpoints).

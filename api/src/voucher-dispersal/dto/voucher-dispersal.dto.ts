@@ -55,6 +55,25 @@ export class ConfirmDispersalCampaignDto {
   expectedTotalRupees!: number;
 }
 
+/**
+ * PATCH /campaigns/:id — rename and/or change the budget. At least one field; the budget may go UP, or DOWN
+ * but never below what is already spent + committed (computed server-side under the campaign lock).
+ */
+export class EditDispersalCampaignDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  name?: string;
+
+  /** Whole rupees (same bounds as create). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10_000_000)
+  budgetRupees?: number;
+}
+
 export const DISPERSAL_ROW_STATUSES = [
   'VALID',
   'INVALID',
@@ -67,11 +86,18 @@ export const DISPERSAL_ROW_STATUSES = [
   'CANCELLED',
 ] as const;
 
-/** GET /campaigns/:id/rows?status=&page= */
+/** GET /campaigns/:id/rows?status=&batch=&page= */
 export class ListDispersalRowsQueryDto {
   @IsOptional()
   @IsIn(DISPERSAL_ROW_STATUSES)
   status?: (typeof DISPERSAL_ROW_STATUSES)[number];
+
+  /** Only this upload batch (1 = the first file). An unconfirmed batch is listed ONLY when asked for by number. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  batch?: number;
 
   @IsOptional()
   @Type(() => Number)

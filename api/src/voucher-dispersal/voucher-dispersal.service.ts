@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import {
   Prisma,
+  VoucherDispersalBatchStatus as BS,
   VoucherDispersalCampaignStatus as CS,
   VoucherDispersalRowStatus as RS,
 } from '@prisma/client';
@@ -31,11 +32,13 @@ import {
   LOCAL_FAILURE_SOURCES,
   MAX_RESENDS,
   VoucherDispersalProcessor,
+  budgetCommittedWhere,
 } from './voucher-dispersal.processor';
 import { maskVoucherCodeForAudit } from '../rewards/voucher-issuance';
 import {
   ConfirmDispersalCampaignDto,
   CreateDispersalCampaignDto,
+  EditDispersalCampaignDto,
   ListDispersalCampaignsQueryDto,
   ListDispersalRowsQueryDto,
 } from './dto/voucher-dispersal.dto';
@@ -50,6 +53,8 @@ import {
 
 type CampaignRow = Prisma.VoucherDispersalCampaignGetPayload<Record<string, never>>;
 type DbRow = Prisma.VoucherDispersalRowGetPayload<Record<string, never>>;
+type BatchRow = Prisma.VoucherDispersalBatchGetPayload<Record<string, never>>;
+type Tx = Prisma.TransactionClient;
 type ReceiptLite = { id: string; status: string; sentAt: Date | null; deliveredAt: Date | null; readAt: Date | null; failureReason: string | null; updatedAt?: Date | null };
 
 const ROWS_PAGE_SIZE = 100;
@@ -57,6 +62,23 @@ const CAMPAIGNS_PAGE_SIZE = 50;
 const CREATE_CHUNK = 1000;
 const PREVIEW_STATUSES: RS[] = [RS.VALID, RS.INVALID, RS.DUPLICATE];
 const NOT_VALID: RS[] = [RS.INVALID, RS.DUPLICATE, RS.CANCELLED];
+/** Rows that hold (or held, and may still get) this campaign's voucher for their phone. */
+const LIVE_ROW: RS[] = [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT, RS.BUY_FAILED];
+/** Rows whose purchase is not finished — a new batch waits until there are none. */
+const IN_FLIGHT: RS[] = [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE];
+const EDIT_EVENT = 'VOUCHER_DISPERSAL_EDITED';
+/** A batch row marked DUPLICATE because its phone is live in an EARLIER batch (reason text set by uploadBatch). */
+const CROSS_BATCH_REASON = /^Already (sent )?in batch \d+/;
+
+/** Why "Add more people" is not available for a campaign status (null = available). Re-checked server-side. */
+export function addPeopleBlockedReason(status: CS): string | null {
+  if (status === CS.COMPLETED || status === CS.COMPLETED_WITH_ERRORS) return null;
+  if (status === CS.CANCELLED) return 'This campaign was cancelled — people cannot be added to it.';
+  if (status === CS.DRAFT || status === CS.PREVIEWED) return 'Confirm the first file before adding more people (this campaign is still in setup).';
+  return 'Vouchers in this campaign are still being bought — you can add more people once every purchase has finished (the campaign shows Completed).';
+}
+
+const inr = (paise: bigint | number) => `₹${rupees(paise).toLocaleString('en-IN')}`;
 /** Cross-campaign warning window (coordinator decision: warn, never block). */
 const RECENT_VOUCHER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -458,6 +480,503 @@ export class VoucherDispersalService {
     return this.campaignView(result.updated);
   }
 
+
+  // ─── Edit (name / budget) ─────────────────────────────────────────────────────
+
+  /**
+   * Σ money already spent or committed on this campaign — the lowest the budget may go: every row the
+   * buy engine counts against the budget (BUYING + PENDING_RECONCILE + BOUGHT + a BUY_FAILED row whose
+   * reference reached Hubble — `budgetCommittedWhere`) plus every QUEUED row (confirmed, about to be
+   * bought). Rows of an unconfirmed batch are VALID and never count.
+   */
+  private async budgetUsage(db: Tx | PrismaService, campaignId: string): Promise<{ spentPaise: bigint; floorPaise: bigint }> {
+    const committed = await db.voucherDispersalRow.aggregate({ where: budgetCommittedWhere(campaignId), _sum: { amountPaise: true } });
+    const queued = await db.voucherDispersalRow.aggregate({ where: { campaignId, status: RS.QUEUED }, _sum: { amountPaise: true } });
+    const spent = await db.voucherDispersalRow.aggregate({ where: { campaignId, status: RS.BOUGHT }, _sum: { amountPaise: true } });
+    return {
+      spentPaise: BigInt(spent._sum.amountPaise ?? 0n),
+      floorPaise: BigInt(committed._sum.amountPaise ?? 0n) + BigInt(queued._sum.amountPaise ?? 0n),
+    };
+  }
+
+  /**
+   * PATCH /campaigns/:id — rename and/or change the budget. Not on a CANCELLED campaign. The budget may go
+   * up, or down to (never below) spent + committed, computed under the campaign row lock (the same lock every
+   * buy claim takes, so no purchase can slip in between the check and the write). Every edit is audited
+   * (AuditLog VOUCHER_DISPERSAL_EDITED: actor, time, old → new) and listed on the detail page.
+   */
+  async editCampaign(user: JwtPayload, id: string, dto: EditDispersalCampaignDto) {
+    this.assertAdmin(user);
+    const name = dto.name === undefined ? undefined : dto.name.replace(/\s+/g, ' ').trim();
+    if (name !== undefined && !name) throw new BadRequestException('The campaign name cannot be empty.');
+    if (name === undefined && dto.budgetRupees === undefined) {
+      throw new BadRequestException('Nothing to change — send a new name and/or budget.');
+    }
+    if (dto.budgetRupees !== undefined && (!Number.isInteger(dto.budgetRupees) || dto.budgetRupees <= 0)) {
+      throw new BadRequestException('Budget must be a whole number of rupees above 0.');
+    }
+    const r = await this.prisma.$transaction(async (tx) => {
+      const camp = await tx.voucherDispersalCampaign.update({ where: { id }, data: { updatedAt: new Date() } }).catch(() => null);
+      if (!camp) throw new NotFoundException('Campaign not found.');
+      if (camp.status === CS.CANCELLED) throw new ConflictException('A cancelled campaign cannot be edited.');
+      const changes: { field: 'name' | 'budgetRupees'; from: string | number; to: string | number }[] = [];
+      if (name !== undefined && name !== camp.name) changes.push({ field: 'name', from: camp.name, to: name });
+      const newBudget = dto.budgetRupees !== undefined ? BigInt(dto.budgetRupees) * 100n : BigInt(camp.budgetPaise);
+      if (newBudget !== BigInt(camp.budgetPaise)) changes.push({ field: 'budgetRupees', from: rupees(camp.budgetPaise), to: rupees(newBudget) });
+      if (changes.length === 0) throw new BadRequestException('Nothing to change — the name and budget already have these values.');
+      if (newBudget < BigInt(camp.budgetPaise)) {
+        const { spentPaise, floorPaise } = await this.budgetUsage(tx, id);
+        if (newBudget < floorPaise) {
+          throw new BadRequestException(
+            `The budget can't go below ${inr(floorPaise)} — that much is already spent (${inr(spentPaise)}) or committed to purchases still in progress (${inr(floorPaise - spentPaise)}).`,
+          );
+        }
+      }
+      const updated = await tx.voucherDispersalCampaign.update({
+        where: { id },
+        data: { ...(name !== undefined ? { name } : {}), budgetPaise: newBudget },
+      });
+      return { updated, changes, old: camp };
+    });
+    const pickChanged = (src: { name: string; budgetPaise: bigint }) =>
+      Object.fromEntries(r.changes.map((c) => [c.field, c.field === 'name' ? src.name : rupees(src.budgetPaise)]));
+    await this.auditCampaign(user, id, 'UPDATE', EDIT_EVENT, { changes: r.changes }, { oldValues: pickChanged(r.old), newValues: pickChanged(r.updated) });
+    return this.campaignView(r.updated);
+  }
+
+  /** The campaign's edit history (newest first) for the detail page. */
+  private async editHistory(id: string) {
+    const logs = await this.prisma.auditLog.findMany({
+      where: { entityType: 'VOUCHER_DISPERSAL_CAMPAIGN', entityId: id, metadata: { path: ['event'], equals: EDIT_EVENT } },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+    const names = await this.userNames(logs.map((l) => l.actorId));
+    return logs.map((l) => {
+      const m = (l.metadata ?? {}) as { changes?: { field: string; from: unknown; to: unknown }[] };
+      return {
+        at: l.createdAt,
+        byId: l.actorId,
+        byName: l.actorId ? names.get(l.actorId) ?? null : null,
+        changes: Array.isArray(m.changes) ? m.changes.map((c) => ({ field: c.field, from: c.from, to: c.to })) : [],
+      };
+    });
+  }
+
+  // ─── Add more people (batches 2, 3, …) ────────────────────────────────────────
+
+  /** Lock the campaign row and refuse unless people may be added now (finished, nothing in flight). */
+  private async lockForBatch(tx: Tx, id: string): Promise<CampaignRow> {
+    const camp = await tx.voucherDispersalCampaign.update({ where: { id }, data: { updatedAt: new Date() } }).catch(() => null);
+    if (!camp) throw new NotFoundException('Campaign not found.');
+    const why = addPeopleBlockedReason(camp.status);
+    if (why) throw new ConflictException(why);
+    const inFlight = await tx.voucherDispersalRow.count({ where: { campaignId: id, status: { in: IN_FLIGHT } } });
+    if (inFlight > 0) throw new ConflictException(addPeopleBlockedReason(CS.PROCESSING)!);
+    return camp;
+  }
+
+  /**
+   * POST /campaigns/:id/batches — upload another file to a FINISHED campaign (COMPLETED /
+   * COMPLETED_WITH_ERRORS, nothing in flight). Same parse + validation as the first file. A phone that
+   * already has a live row in an earlier batch (bought, or failed and retryable there) is DUPLICATE with
+   * the batch named; the one-voucher-per-phone DB key spans every batch. Re-uploading while the campaign's
+   * newest batch is still unconfirmed REPLACES that batch's rows (same number, new previewId). Nothing is
+   * bought until confirmBatch; until then the batch's rows count in no total, list summary or report.
+   */
+  async uploadBatch(user: JwtPayload, id: string, file: Express.Multer.File | undefined) {
+    this.assertAdmin(user);
+    const pre = await this.getCampaignOr404(id);
+    const why = addPeopleBlockedReason(pre.status);
+    if (why) throw new ConflictException(why);
+    if (!file?.buffer?.length) throw new BadRequestException('Attach the filled template (.xlsx) as "file".');
+    let parsed: ParsedDispersalRow[];
+    let sheet: ReturnType<typeof readDispersalSheet>;
+    try {
+      sheet = readDispersalSheet(file.buffer);
+      parsed = validateDispersalRows(sheet.rows, await this.resolveBrandLimits());
+    } catch (e) {
+      if (e instanceof DispersalFileError) throw new BadRequestException(e.message);
+      throw e;
+    }
+    const warnings = await this.recentVoucherWarnings(id, parsed);
+    const fileName = (file.originalname ?? 'upload.xlsx').slice(0, 200);
+    const previewId = `pv${randomBytes(12).toString('hex')}`;
+    const now = new Date();
+
+    const res = await this.prisma.$transaction(
+      async (tx) => {
+        const camp = await this.lockForBatch(tx, id);
+        let batch = await tx.voucherDispersalBatch.findFirst({ where: { campaignId: id, status: BS.PREVIEWED } });
+        if (batch) {
+          const live = await tx.voucherDispersalRow.count({
+            where: { campaignId: id, batchNumber: batch.batchNumber, status: { notIn: PREVIEW_STATUSES } },
+          });
+          if (live > 0) throw new ConflictException(`Batch ${batch.batchNumber} already has rows in processing — refresh.`);
+          await tx.voucherDispersalRow.deleteMany({ where: { campaignId: id, batchNumber: batch.batchNumber } });
+          batch = await tx.voucherDispersalBatch.update({
+            where: { id: batch.id },
+            data: { previewId, sourceFileName: fileName, uploadedById: user.sub, uploadedAt: now },
+          });
+        } else {
+          const last = await tx.voucherDispersalBatch.findFirst({ where: { campaignId: id }, orderBy: { batchNumber: 'desc' } });
+          batch = await tx.voucherDispersalBatch.create({
+            data: {
+              campaignId: id,
+              batchNumber: Math.max(1, last?.batchNumber ?? 1) + 1,
+              status: BS.PREVIEWED,
+              previewId,
+              sourceFileName: fileName,
+              uploadedById: user.sub,
+              uploadedAt: now,
+            },
+          });
+        }
+        const n = batch.batchNumber;
+
+        // Earlier batches' rows for these phones.
+        const phones = [...new Set(parsed.map((r) => r.phone).filter((x): x is string => !!x))];
+        const earlier: { id: string; phone: string | null; status: RS; batchNumber: number; dedupePhone: string | null }[] = [];
+        for (let i = 0; i < phones.length; i += 1000) {
+          earlier.push(
+            ...(await tx.voucherDispersalRow.findMany({
+              where: { campaignId: id, batchNumber: { not: n }, phone: { in: phones.slice(i, i + 1000) } },
+              select: { id: true, phone: true, status: true, batchNumber: true, dedupePhone: true },
+              orderBy: [{ batchNumber: 'asc' }, { rowNumber: 'asc' }],
+            })),
+          );
+        }
+        const liveBy = new Map<string, { batchNumber: number; status: RS }>();
+        for (const e of earlier) if (e.phone && LIVE_ROW.includes(e.status) && !liveBy.has(e.phone)) liveBy.set(e.phone, e);
+
+        let crossBatchDuplicates = 0;
+        const built = parsed.map((r) => {
+          let status = r.status as RS;
+          let invalidReason = r.invalidReason;
+          let dedupePhone = r.dedupePhone;
+          const live = r.phone ? liveBy.get(r.phone) : undefined;
+          if (live) {
+            dedupePhone = null;
+            if (status === RS.VALID) {
+              status = RS.DUPLICATE;
+              crossBatchDuplicates++;
+              invalidReason =
+                live.status === RS.BUY_FAILED
+                  ? `Already in batch ${live.batchNumber}, where its purchase failed — use Retry on that row instead (one voucher per phone per campaign)`
+                  : `Already sent in batch ${live.batchNumber} — one voucher per phone per campaign`;
+            }
+          }
+          const amountPaise = r.amountRupees != null && Number.isInteger(r.amountRupees) ? BigInt(r.amountRupees) * 100n : null;
+          return { r, status, invalidReason, dedupePhone, amountPaise, warning: r.phone && status === RS.VALID ? warnings.get(r.phone) ?? null : null };
+        });
+        // A DEAD earlier row (INVALID / DUPLICATE / CANCELLED — never bought, never will be) holding a phone's
+        // one-voucher key gives it up to this batch's row for that phone.
+        const taking = new Set(built.map((b) => b.dedupePhone).filter((x): x is string => !!x));
+        const release = earlier.filter((e) => e.dedupePhone && taking.has(e.dedupePhone) && NOT_VALID.includes(e.status)).map((e) => e.id);
+        if (release.length) await tx.voucherDispersalRow.updateMany({ where: { id: { in: release } }, data: { dedupePhone: null } });
+
+        const data: Prisma.VoucherDispersalRowCreateManyInput[] = built.map((b) => ({
+          campaignId: id,
+          batchNumber: n,
+          rowNumber: b.r.rowNumber,
+          phone: b.r.phone,
+          rawPhone: b.r.rawPhone.slice(0, 40) || null,
+          dedupePhone: b.dedupePhone,
+          name: b.r.name || '',
+          amountPaise: b.amountPaise,
+          brandKey: b.r.brandKey,
+          brandLabel: b.r.brandLabel?.slice(0, 80) ?? null,
+          productId: b.r.productId,
+          note: b.r.note,
+          status: b.status,
+          invalidReason: b.invalidReason?.slice(0, 500) ?? null,
+          warning: b.warning,
+          hubbleReferenceId: b.status === RS.VALID ? `vd${randomBytes(12).toString('hex')}` : null,
+        }));
+        for (let i = 0; i < data.length; i += CREATE_CHUNK) {
+          await tx.voucherDispersalRow.createMany({ data: data.slice(i, i + CREATE_CHUNK) });
+        }
+        const usage = await this.budgetUsage(tx, id);
+        return { camp, batch, built, crossBatchDuplicates, floorPaise: usage.floorPaise };
+      },
+      { timeout: 60_000 },
+    );
+
+    const skippedRows = sheet.skippedBlank + sheet.skippedFormulaOnly;
+    const view = this.batchPreviewView(
+      res.camp,
+      res.batch,
+      res.built.map((b) => ({
+        rowNumber: b.r.rowNumber,
+        phone: b.r.phone ?? b.r.rawPhone,
+        name: b.r.name,
+        amountPaise: b.amountPaise,
+        amountRupees: b.r.amountRupees,
+        brandLabel: b.r.brandLabel,
+        brandKey: b.r.brandKey,
+        note: b.r.note,
+        status: b.status,
+        invalidReason: b.invalidReason,
+        warning: b.warning,
+      })),
+      res.floorPaise,
+      {
+        skippedBlankRows: sheet.skippedBlank,
+        skippedFormulaRows: sheet.skippedFormulaOnly,
+        skippedNote: skippedRows
+          ? `${skippedRows} row${skippedRows === 1 ? '' : 's'} skipped: ${[
+              sheet.skippedBlank ? `${sheet.skippedBlank} blank` : '',
+              sheet.skippedFormulaOnly ? `${sheet.skippedFormulaOnly} with formulas but no saved values (open the file in Excel, save, and upload again)` : '',
+            ]
+              .filter(Boolean)
+              .join('; ')}`
+          : null,
+        hiddenRowsIncluded: sheet.hiddenIncluded,
+        hiddenNote: sheet.hiddenIncluded
+          ? `${sheet.hiddenIncluded} hidden row${sheet.hiddenIncluded === 1 ? '' : 's'} included (they are hidden in Excel but will be sent)`
+          : null,
+      },
+    );
+    await this.auditCampaign(user, id, 'IMPORT', 'VOUCHER_DISPERSAL_BATCH_UPLOADED', {
+      batchNumber: res.batch.batchNumber,
+      fileName,
+      total: view.summary.total,
+      valid: view.summary.valid,
+      invalid: view.summary.invalid,
+      duplicates: view.summary.duplicates,
+      crossBatchDuplicates: res.crossBatchDuplicates,
+      totalRupees: view.summary.totalRupees,
+      remainingBudgetRupees: view.summary.remainingBudgetRupees,
+      overBudget: view.summary.overBudget,
+    });
+    return { ...view, campaign: await this.campaignView(res.camp) };
+  }
+
+  /** GET /campaigns/:id/batches/:n — the preview of a batch that is waiting for confirmation (resume). */
+  async batchPreview(user: JwtPayload, id: string, n: number) {
+    this.assertAdmin(user);
+    const camp = await this.getCampaignOr404(id);
+    const batch = await this.prisma.voucherDispersalBatch.findFirst({ where: { campaignId: id, batchNumber: n } });
+    if (!batch) throw new NotFoundException(`Batch ${n} not found on this campaign.`);
+    if (batch.status !== BS.PREVIEWED) {
+      throw new ConflictException(
+        batch.status === BS.CONFIRMED
+          ? `Batch ${n} is already confirmed — its rows are on the campaign page.`
+          : `Batch ${n} was discarded — upload the file again to add these people.`,
+      );
+    }
+    const rows = await this.prisma.voucherDispersalRow.findMany({ where: { campaignId: id, batchNumber: n }, orderBy: { rowNumber: 'asc' } });
+    const { floorPaise } = await this.budgetUsage(this.prisma, id);
+    const view = this.batchPreviewView(
+      camp,
+      batch,
+      rows.map((r) => ({
+        rowNumber: r.rowNumber,
+        phone: r.phone ?? r.rawPhone,
+        name: r.name,
+        amountPaise: r.amountPaise,
+        amountRupees: r.amountPaise != null ? rupees(r.amountPaise) : null,
+        brandLabel: r.brandLabel,
+        brandKey: r.brandKey,
+        note: r.note,
+        status: r.status,
+        invalidReason: r.invalidReason,
+        warning: r.warning,
+      })),
+      floorPaise,
+      // Skipped / hidden-row notes are only known at upload time (not stored).
+      { skippedBlankRows: null, skippedFormulaRows: null, skippedNote: null, hiddenRowsIncluded: null, hiddenNote: null },
+    );
+    return { ...view, campaign: await this.campaignView(camp) };
+  }
+
+  /** Shared preview shape for a batch (upload reply + resume). The budget is checked against what is LEFT. */
+  private batchPreviewView(
+    camp: CampaignRow,
+    batch: BatchRow,
+    rows: {
+      rowNumber: number;
+      phone: string | null;
+      name: string;
+      amountPaise: bigint | null;
+      amountRupees: number | null;
+      brandLabel: string | null;
+      brandKey: string | null;
+      note: string | null;
+      status: RS;
+      invalidReason: string | null;
+      warning: string | null;
+    }[],
+    floorPaise: bigint,
+    notes: {
+      skippedBlankRows: number | null;
+      skippedFormulaRows: number | null;
+      skippedNote: string | null;
+      hiddenRowsIncluded: number | null;
+      hiddenNote: string | null;
+    },
+  ) {
+    const base = this.previewSummary(rows, camp.budgetPaise);
+    const totalPaise = rows.filter((r) => r.status === RS.VALID).reduce((a, r) => a + (r.amountPaise ?? 0n), 0n);
+    const remaining = BigInt(camp.budgetPaise) - floorPaise;
+    return {
+      batchNumber: batch.batchNumber,
+      batchStatus: batch.status,
+      previewId: batch.status === BS.PREVIEWED ? batch.previewId : null,
+      rows: rows.map((r) => ({
+        rowNumber: r.rowNumber,
+        phone: r.phone,
+        name: r.name,
+        amount: r.amountRupees,
+        brand: r.brandLabel,
+        brandKey: r.brandKey,
+        note: r.note,
+        status: r.status,
+        invalidReason: r.invalidReason,
+        warning: r.warning,
+      })),
+      summary: {
+        ...base,
+        overBudget: totalPaise > remaining,
+        alreadyCommittedRupees: rupees(floorPaise),
+        remainingBudgetRupees: rupees(remaining),
+        crossBatchDuplicates: rows.filter((r) => r.status === RS.DUPLICATE && CROSS_BATCH_REASON.test(r.invalidReason ?? '')).length,
+        warningCount: rows.filter((r) => r.warning).length,
+        ...notes,
+      },
+    };
+  }
+
+  /**
+   * POST /campaigns/:id/batches/:n/confirm — buy this batch's VALID rows. Under the campaign row lock (the lock
+   * every buy claim takes): the campaign must be finished with nothing in flight; the preview id and the
+   * numbers must match what the admin saw; spent + committed + this batch ≤ budget (else refuse — raise the
+   * budget). The batch flips PREVIEWED→CONFIRMED with a conditional update, its VALID rows → QUEUED, and the
+   * campaign → PROCESSING so the existing engine buys them and re-settles the status across ALL batches.
+   * IDEMPOTENT per batch: a repeated / racing confirm quoting the confirmed preview id returns the campaign.
+   */
+  async confirmBatch(user: JwtPayload, id: string, n: number, dto: ConfirmDispersalCampaignDto) {
+    this.assertAdmin(user);
+    if (!this.hubble.isConfigured()) {
+      throw new ServiceUnavailableException('Hubble is not configured in this environment — nothing can be bought.');
+    }
+    const result = await this.prisma.$transaction(async (tx) => {
+      const camp = await tx.voucherDispersalCampaign.update({ where: { id }, data: { updatedAt: new Date() } }).catch(() => null);
+      if (!camp) throw new NotFoundException('Campaign not found.');
+      const readBatch = () => tx.voucherDispersalBatch.findFirst({ where: { campaignId: id, batchNumber: n } });
+      const confirmedHere = async () => {
+        const b = await readBatch();
+        return !!b && b.status === BS.CONFIRMED && !!b.previewId && b.previewId === dto.previewId;
+      };
+      const batch = await readBatch();
+      if (!batch) throw new NotFoundException(n === 1 ? 'Batch 1 is the first file — it is confirmed from the campaign setup.' : `Batch ${n} not found on this campaign.`);
+      if (batch.status === BS.CONFIRMED && batch.previewId === dto.previewId) return { repeat: true as const };
+      if (batch.status === BS.DISCARDED) throw new ConflictException(`Batch ${n} was discarded — upload the file again to add these people.`);
+      if (batch.status === BS.CONFIRMED) throw new ConflictException(`Batch ${n} is already confirmed.`);
+      const why = addPeopleBlockedReason(camp.status);
+      if (why) {
+        if (await confirmedHere()) return { repeat: true as const };
+        throw new ConflictException(why);
+      }
+      const inFlight = await tx.voucherDispersalRow.count({ where: { campaignId: id, status: { in: IN_FLIGHT } } });
+      if (inFlight > 0) {
+        if (await confirmedHere()) return { repeat: true as const };
+        throw new ConflictException(addPeopleBlockedReason(CS.PROCESSING)!);
+      }
+      if (!batch.previewId || batch.previewId !== dto.previewId) {
+        throw new ConflictException('This preview is out of date (the file was re-uploaded, maybe in another tab). Review the current preview and confirm again.');
+      }
+      const valid = await tx.voucherDispersalRow.aggregate({
+        where: { campaignId: id, batchNumber: n, status: RS.VALID },
+        _count: { _all: true },
+        _sum: { amountPaise: true },
+      });
+      const validCount = valid._count._all;
+      const totalPaise = BigInt(valid._sum.amountPaise ?? 0n);
+      if (validCount === 0) throw new BadRequestException('There are no valid rows in this batch to issue.');
+      const { floorPaise } = await this.budgetUsage(tx, id);
+      if (floorPaise + totalPaise > BigInt(camp.budgetPaise)) {
+        throw new BadRequestException(
+          `This batch's valid rows total ${inr(totalPaise)}; with ${inr(floorPaise)} already spent or committed that makes ${inr(floorPaise + totalPaise)}, over the ${inr(camp.budgetPaise)} budget. Raise the budget (Edit campaign) or remove rows, then confirm again.`,
+        );
+      }
+      if (dto.expectedValidCount !== validCount || BigInt(dto.expectedTotalRupees) * 100n !== totalPaise) {
+        throw new ConflictException(
+          `The preview changed: it now has ${validCount} valid row(s) totalling ${inr(totalPaise)} (you confirmed ${dto.expectedValidCount} / ₹${Number(dto.expectedTotalRupees).toLocaleString('en-IN')}). Review the preview again.`,
+        );
+      }
+      const now = new Date();
+      const flip = await tx.voucherDispersalBatch.updateMany({
+        where: { id: batch.id, status: BS.PREVIEWED, previewId: dto.previewId },
+        data: { status: BS.CONFIRMED, confirmedById: user.sub, confirmedAt: now },
+      });
+      if (flip.count !== 1) {
+        if (await confirmedHere()) return { repeat: true as const };
+        throw new ConflictException('This batch changed while confirming — refresh and try again.');
+      }
+      const q = await tx.voucherDispersalRow.updateMany({
+        where: { campaignId: id, batchNumber: n, status: RS.VALID, hubbleReferenceId: { not: null } },
+        data: { status: RS.QUEUED },
+      });
+      if (q.count !== validCount) throw new ConflictException('The rows changed while confirming — refresh and try again.');
+      const updated = await tx.voucherDispersalCampaign.update({ where: { id }, data: { status: CS.PROCESSING, completedAt: null } });
+      return { repeat: false as const, updated, fromStatus: camp.status, validCount, totalRupees: rupees(totalPaise) };
+    });
+    if (result.repeat) return this.campaignView(await this.getCampaignOr404(id));
+    await this.auditCampaign(user, id, 'APPROVE', 'VOUCHER_DISPERSAL_BATCH_CONFIRMED', {
+      batchNumber: n,
+      previewId: dto.previewId,
+      validCount: result.validCount,
+      totalRupees: result.totalRupees,
+      fromStatus: result.fromStatus,
+    });
+    this.processor.kick(id);
+    return this.campaignView(result.updated);
+  }
+
+  /** Discard an unconfirmed batch's rows (inside the caller's campaign-locked transaction). */
+  private async discardPendingBatchTx(tx: Tx, campaignId: string, batch: BatchRow, userId: string, reason: string): Promise<number> {
+    const live = await tx.voucherDispersalRow.count({
+      where: { campaignId, batchNumber: batch.batchNumber, status: { notIn: PREVIEW_STATUSES } },
+    });
+    if (live > 0) throw new ConflictException(`Batch ${batch.batchNumber} already has rows in processing — refresh.`);
+    const del = await tx.voucherDispersalRow.deleteMany({ where: { campaignId, batchNumber: batch.batchNumber, status: { in: PREVIEW_STATUSES } } });
+    const flip = await tx.voucherDispersalBatch.updateMany({
+      where: { id: batch.id, status: BS.PREVIEWED },
+      data: { status: BS.DISCARDED, previewId: null, discardedById: userId, discardedAt: new Date(), discardReason: reason },
+    });
+    if (flip.count !== 1) throw new ConflictException(`Batch ${batch.batchNumber} changed meanwhile — refresh.`);
+    return del.count;
+  }
+
+  /**
+   * POST /campaigns/:id/batches/:n/discard — drop an unconfirmed batch: its rows are deleted (they never
+   * reached Hubble and count in no total) and the batch stays listed as DISCARDED (who / when). A confirmed
+   * batch cannot be discarded (Cancel campaign stops rows not yet bought).
+   */
+  async discardBatch(user: JwtPayload, id: string, n: number) {
+    this.assertAdmin(user);
+    const r = await this.prisma.$transaction(async (tx) => {
+      const camp = await tx.voucherDispersalCampaign.update({ where: { id }, data: { updatedAt: new Date() } }).catch(() => null);
+      if (!camp) throw new NotFoundException('Campaign not found.');
+      const batch = await tx.voucherDispersalBatch.findFirst({ where: { campaignId: id, batchNumber: n } });
+      if (!batch) {
+        if (n === 1) throw new ConflictException('Batch 1 is the first file — it cannot be discarded (use Cancel campaign instead).');
+        throw new NotFoundException(`Batch ${n} not found on this campaign.`);
+      }
+      if (batch.status === BS.DISCARDED) throw new ConflictException(`Batch ${n} was already discarded.`);
+      if (batch.status === BS.CONFIRMED) {
+        throw new ConflictException(
+          `Batch ${n} is already confirmed — its vouchers are being or have been bought, so it cannot be discarded. Use Cancel campaign to stop rows not bought yet.`,
+        );
+      }
+      const discardedRows = await this.discardPendingBatchTx(tx, id, batch, user.sub, 'Discarded by an admin before confirming');
+      return { camp, discardedRows };
+    });
+    await this.auditCampaign(user, id, 'UPDATE', 'VOUCHER_DISPERSAL_BATCH_DISCARDED', { batchNumber: n, discardedRows: r.discardedRows });
+    return { campaign: await this.campaignView(r.camp), batchNumber: n, discardedRows: r.discardedRows };
+  }
+
   // ─── Process (in-request bounded pass) ────────────────────────────────────────
 
   async process(user: JwtPayload, id: string) {
@@ -482,15 +1001,26 @@ export class VoucherDispersalService {
     const ids = camps.map((c) => c.id);
     const groups = ids.length
       ? await this.prisma.voucherDispersalRow.groupBy({
-          by: ['campaignId', 'status'],
+          by: ['campaignId', 'batchNumber', 'status'],
           where: { campaignId: { in: ids } },
           _count: { _all: true },
           _sum: { amountPaise: true },
         })
       : [];
+    const pending = await this.pendingBatchNumbers(ids);
     const names = await this.clientNames(camps.map((c) => c.billedToClientId));
     const items = camps.map((c) => {
-      const g = groups.filter((x) => x.campaignId === c.id);
+      // An unconfirmed batch's rows count in no summary (they are only a preview until confirmed).
+      const p = pending.get(c.id) ?? null;
+      const mine = groups.filter((x) => x.campaignId === c.id && x.batchNumber !== p);
+      const by = new Map<RS, { _count: { _all: number }; _sum: { amountPaise: bigint | null } }>();
+      for (const x of mine) {
+        const cur = by.get(x.status) ?? { _count: { _all: 0 }, _sum: { amountPaise: null } };
+        cur._count._all += x._count._all;
+        if (x._sum.amountPaise != null) cur._sum.amountPaise = BigInt(cur._sum.amountPaise ?? 0n) + BigInt(x._sum.amountPaise);
+        by.set(x.status, cur);
+      }
+      const g = [...by.entries()].map(([status, v]) => ({ status, ...v }));
       const n = (s: RS) => g.find((x) => x.status === s)?._count._all ?? 0;
       const sum = (s: RS) => BigInt(g.find((x) => x.status === s)?._sum.amountPaise ?? 0n);
       return {
@@ -506,6 +1036,7 @@ export class VoucherDispersalService {
           buyFailed: n(RS.BUY_FAILED),
           cancelled: n(RS.CANCELLED),
           spentRupees: rupees(sum(RS.BOUGHT)),
+          pendingBatchNumber: p,
         },
       };
     });
@@ -516,9 +1047,10 @@ export class VoucherDispersalService {
   async detail(user: JwtPayload, id: string) {
     this.assertAdmin(user);
     const camp = await this.getCampaignOr404(id);
-    const rows = await this.prisma.voucherDispersalRow.findMany({
+    const allRows = await this.prisma.voucherDispersalRow.findMany({
       where: { campaignId: id },
       select: {
+        batchNumber: true,
         status: true,
         amountPaise: true,
         brandKey: true,
@@ -533,8 +1065,13 @@ export class VoucherDispersalService {
         messageFailureReason: true,
       },
     });
+    const batchRecords = await this.prisma.voucherDispersalBatch.findMany({ where: { campaignId: id }, orderBy: { batchNumber: 'asc' } });
+    const pendingBatch = batchRecords.find((b) => b.status === BS.PREVIEWED)?.batchNumber ?? null;
+    // Every total covers ALL confirmed batches; an unconfirmed batch is only a preview (shown in `batches`).
+    const rows = allRows.filter((r) => r.batchNumber !== pendingBatch);
     const receipts = await this.receiptsFor(rows.map((r) => r.whatsappReceiptId));
     const base = this.previewSummary(rows, camp.budgetPaise);
+    const { floorPaise } = await this.budgetUsage(this.prisma, id);
     const n = (s: RS) => rows.filter((r) => r.status === s).length;
     const sumOf = (ss: RS[]) => rows.filter((r) => ss.includes(r.status)).reduce((a, r) => a + (r.amountPaise ?? 0n), 0n);
     let messageSent = 0;
@@ -565,25 +1102,119 @@ export class VoucherDispersalService {
         cancelled: n(RS.CANCELLED),
         spentRupees: rupees(sumOf([RS.BOUGHT])),
         committedRupees: rupees(sumOf([RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT])),
+        /** The lowest the budget may be edited down to (spent + committed + queued). */
+        budgetFloorRupees: rupees(floorPaise),
         messageSent,
         delivered,
         read,
         messageFailed,
         messageNotSent,
       },
+      batches: await this.batchViews(camp, batchRecords, allRows),
+      edits: await this.editHistory(id),
     };
+  }
+
+  /** Unconfirmed (PREVIEWED) batch number per campaign — at most one each. */
+  private async pendingBatchNumbers(campaignIds: string[]): Promise<Map<string, number>> {
+    if (campaignIds.length === 0) return new Map();
+    const list = await this.prisma.voucherDispersalBatch.findMany({
+      where: { campaignId: { in: campaignIds }, status: BS.PREVIEWED },
+      select: { campaignId: true, batchNumber: true },
+    });
+    return new Map(list.map((b) => [b.campaignId, b.batchNumber]));
+  }
+
+  /**
+   * Batch list for the detail page. Batch 1 = the campaign's own first file (no batch record: its file /
+   * uploader / confirm fields are the campaign's). Counts come from the rows of each batch.
+   */
+  private async batchViews(camp: CampaignRow, records: BatchRow[], rows: { batchNumber: number; status: RS; amountPaise: bigint | null }[]) {
+    type Entry = {
+      batchNumber: number;
+      status: 'PREVIEWED' | 'CONFIRMED' | 'DISCARDED' | 'CANCELLED';
+      sourceFileName: string | null;
+      uploadedById: string | null;
+      uploadedAt: Date | null;
+      confirmedById: string | null;
+      confirmedAt: Date | null;
+      discardedById: string | null;
+      discardedAt: Date | null;
+      discardReason: string | null;
+      previewId: string | null;
+    };
+    const entries: Entry[] = [];
+    if (camp.uploadedAt || rows.some((r) => r.batchNumber === 1)) {
+      entries.push({
+        batchNumber: 1,
+        status: camp.confirmedAt ? 'CONFIRMED' : camp.status === CS.CANCELLED ? 'CANCELLED' : 'PREVIEWED',
+        sourceFileName: camp.sourceFileName,
+        uploadedById: camp.uploadedById,
+        uploadedAt: camp.uploadedAt,
+        confirmedById: camp.confirmedById,
+        confirmedAt: camp.confirmedAt,
+        discardedById: null,
+        discardedAt: null,
+        discardReason: null,
+        previewId: null,
+      });
+    }
+    for (const b of records) {
+      entries.push({
+        batchNumber: b.batchNumber,
+        status: b.status,
+        sourceFileName: b.sourceFileName,
+        uploadedById: b.uploadedById,
+        uploadedAt: b.uploadedAt,
+        confirmedById: b.confirmedById,
+        confirmedAt: b.confirmedAt,
+        discardedById: b.discardedById,
+        discardedAt: b.discardedAt,
+        discardReason: b.discardReason,
+        previewId: b.status === BS.PREVIEWED ? b.previewId : null,
+      });
+    }
+    const names = await this.userNames(entries.flatMap((e) => [e.uploadedById, e.confirmedById, e.discardedById]));
+    return entries.map((e) => {
+      const mine = rows.filter((r) => r.batchNumber === e.batchNumber);
+      const n = (ss: RS[]) => mine.filter((r) => ss.includes(r.status)).length;
+      const sum = (ss: RS[]) => mine.filter((r) => ss.includes(r.status)).reduce((a, r) => a + (r.amountPaise ?? 0n), 0n);
+      const validStatuses = mine.map((r) => r.status).filter((st) => !NOT_VALID.includes(st));
+      return {
+        ...e,
+        uploadedByName: e.uploadedById ? names.get(e.uploadedById) ?? null : null,
+        confirmedByName: e.confirmedById ? names.get(e.confirmedById) ?? null : null,
+        discardedByName: e.discardedById ? names.get(e.discardedById) ?? null : null,
+        total: mine.length,
+        valid: validStatuses.length,
+        invalid: n([RS.INVALID]),
+        duplicates: n([RS.DUPLICATE]),
+        bought: n([RS.BOUGHT]),
+        buyFailed: n([RS.BUY_FAILED]),
+        pending: n(IN_FLIGHT),
+        cancelled: n([RS.CANCELLED]),
+        totalRupees: rupees(mine.filter((r) => !NOT_VALID.includes(r.status)).reduce((a, r) => a + (r.amountPaise ?? 0n), 0n)),
+        spentRupees: rupees(sum([RS.BOUGHT])),
+      };
+    });
   }
 
   async rows(user: JwtPayload, id: string, q: ListDispersalRowsQueryDto) {
     this.assertAdmin(user);
     const camp = await this.getCampaignOr404(id);
     const page = q.page ?? 1;
-    const where: Prisma.VoucherDispersalRowWhereInput = { campaignId: id, ...(q.status ? { status: q.status as RS } : {}) };
+    // An unconfirmed batch's rows are listed only when asked for by number (its preview).
+    const pending = q.batch ? null : (await this.pendingBatchNumbers([id])).get(id) ?? null;
+    const where: Prisma.VoucherDispersalRowWhereInput = {
+      campaignId: id,
+      ...(q.status ? { status: q.status as RS } : {}),
+      ...(q.batch ? { batchNumber: q.batch } : pending !== null ? { batchNumber: { not: pending } } : {}),
+    };
     const [total, rows] = await Promise.all([
       this.prisma.voucherDispersalRow.count({ where }),
       this.prisma.voucherDispersalRow.findMany({
         where,
-        orderBy: { rowNumber: 'asc' },
+        orderBy: [{ batchNumber: 'asc' }, { rowNumber: 'asc' }],
         skip: (page - 1) * ROWS_PAGE_SIZE,
         take: ROWS_PAGE_SIZE,
       }),
@@ -603,6 +1234,7 @@ export class VoucherDispersalService {
     const retryAt = this.retryAvailableAt(r);
     return {
       id: r.id,
+      batchNumber: r.batchNumber,
       rowNumber: r.rowNumber,
       phone: r.phone ?? r.rawPhone,
       name: r.name,
@@ -661,7 +1293,14 @@ export class VoucherDispersalService {
   async report(user: JwtPayload, id: string): Promise<{ buffer: Buffer; fileName: string }> {
     this.assertAdmin(user);
     const camp = await this.getCampaignOr404(id);
-    const rows = await this.prisma.voucherDispersalRow.findMany({ where: { campaignId: id }, orderBy: { rowNumber: 'asc' } });
+    const batchRecords = await this.prisma.voucherDispersalBatch.findMany({ where: { campaignId: id } });
+    const pending = batchRecords.find((b) => b.status === BS.PREVIEWED)?.batchNumber ?? null;
+    const fileOf = new Map<number, string | null>([[1, camp.sourceFileName], ...batchRecords.map((b) => [b.batchNumber, b.sourceFileName] as [number, string | null])]);
+    // Every CONFIRMED batch; an unconfirmed batch is not part of the report until it is confirmed.
+    const rows = await this.prisma.voucherDispersalRow.findMany({
+      where: { campaignId: id, ...(pending !== null ? { batchNumber: { not: pending } } : {}) },
+      orderBy: [{ batchNumber: 'asc' }, { rowNumber: 'asc' }],
+    });
     const receipts = await this.receiptsFor(rows.map((r) => r.whatsappReceiptId));
     const out: DispersalReportRow[] = rows.map((r) => {
       const m = messageView(r, r.whatsappReceiptId ? receipts.get(r.whatsappReceiptId) : null);
@@ -674,6 +1313,8 @@ export class VoucherDispersalService {
               ? `Pending with Hubble (${r.pendingReason ?? 'reconciling'})`
               : null;
       return {
+        batchNumber: r.batchNumber,
+        sourceFile: fileOf.get(r.batchNumber) ?? null,
         rowNumber: r.rowNumber,
         phone: r.phone ?? r.rawPhone ?? '',
         name: r.name,
@@ -900,8 +1541,10 @@ export class VoucherDispersalService {
 
   /**
    * Before confirm: the whole campaign is cancelled (nothing was ever sent to Hubble).
-   * While processing: QUEUED rows not yet sent to Hubble are cancelled; rows already with Hubble
-   * (BUYING / PENDING_RECONCILE) keep being reconciled and BOUGHT rows are untouched (and still messaged).
+   * While processing: QUEUED rows not yet sent to Hubble are cancelled — across EVERY batch; rows already
+   * with Hubble (BUYING / PENDING_RECONCILE) keep being reconciled and BOUGHT rows (any batch) are untouched
+   * (and still messaged). An unconfirmed batch is discarded. A finished campaign is not cancellable (nothing
+   * left to stop; an unconfirmed batch on it is discarded with Discard).
    */
   async cancel(user: JwtPayload, id: string) {
     this.assertAdmin(user);
@@ -919,7 +1562,7 @@ export class VoucherDispersalService {
           where: { id },
           data: { status: CS.CANCELLED, cancelledAt: new Date(), cancelledById: user.sub },
         });
-        return { c, from, cancelledRows: r.count, inFlight: 0, bought: 0 };
+        return { c, from, cancelledRows: r.count, inFlight: 0, bought: 0, discardedPendingBatchRows: 0 };
       }
       if (from === CS.PROCESSING || from === CS.CONFIRMED) {
         const r = await tx.voucherDispersalRow.updateMany({
@@ -930,11 +1573,17 @@ export class VoucherDispersalService {
           where: { campaignId: id, status: { in: [RS.BUYING, RS.PENDING_RECONCILE] } },
         });
         const bought = await tx.voucherDispersalRow.count({ where: { campaignId: id, status: RS.BOUGHT } });
+        // An unconfirmed "Add more people" batch (possible when a retry re-opened a finished campaign) is
+        // discarded with the campaign — nothing of it was ever sent to Hubble.
+        const pendingBatch = await tx.voucherDispersalBatch.findFirst({ where: { campaignId: id, status: BS.PREVIEWED } });
+        const discardedPendingBatchRows = pendingBatch
+          ? await this.discardPendingBatchTx(tx, id, pendingBatch, user.sub, 'Campaign cancelled before this batch was confirmed')
+          : 0;
         const c = await tx.voucherDispersalCampaign.update({
           where: { id },
           data: { status: CS.CANCELLED, cancelledAt: new Date(), cancelledById: user.sub },
         });
-        return { c, from, cancelledRows: r.count, inFlight, bought };
+        return { c, from, cancelledRows: r.count, inFlight, bought, discardedPendingBatchRows };
       }
       throw new ConflictException(`A ${from} campaign cannot be cancelled.`);
     });
@@ -943,12 +1592,14 @@ export class VoucherDispersalService {
       cancelledRows: result.cancelledRows,
       stillWithHubble: result.inFlight,
       alreadyBought: result.bought,
+      discardedPendingBatchRows: result.discardedPendingBatchRows,
     });
     return {
       campaign: await this.campaignView(result.c),
       cancelledRows: result.cancelledRows,
       stillWithHubble: result.inFlight,
       alreadyBought: result.bought,
+      discardedPendingBatchRows: result.discardedPendingBatchRows,
     };
   }
 
@@ -1016,7 +1667,17 @@ export class VoucherDispersalService {
       updatedAt: c.updatedAt,
       previewId: c.status === CS.PREVIEWED ? c.previewId : null,
       canCancel: c.status === CS.DRAFT || c.status === CS.PREVIEWED || c.status === CS.CONFIRMED || c.status === CS.PROCESSING,
+      canEdit: c.status !== CS.CANCELLED,
+      /** null = "Add more people" is available; otherwise the plain reason it is not (re-checked server-side). */
+      addPeopleBlockedReason: addPeopleBlockedReason(c.status),
     };
+  }
+
+  private async userNames(ids: (string | null | undefined)[]): Promise<Map<string, string>> {
+    const list = [...new Set(ids.filter((x): x is string => !!x))];
+    if (list.length === 0) return new Map();
+    const rows = await this.prisma.user.findMany({ where: { id: { in: list } }, select: { id: true, name: true } });
+    return new Map(rows.map((u) => [u.id, u.name]));
   }
 
   private async auditCampaign(
@@ -1025,6 +1686,7 @@ export class VoucherDispersalService {
     action: 'CREATE' | 'UPDATE' | 'IMPORT' | 'APPROVE' | 'EXPORT',
     event: string,
     metadata: Record<string, unknown>,
+    values: { oldValues?: Record<string, unknown>; newValues?: Record<string, unknown> } = {},
   ): Promise<void> {
     await this.prisma.auditLog
       .create({
@@ -1034,6 +1696,8 @@ export class VoucherDispersalService {
           entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
           entityId: id,
           metadata: { event, ...metadata } as Prisma.InputJsonValue,
+          ...(values.oldValues ? { oldValues: values.oldValues as Prisma.InputJsonValue } : {}),
+          ...(values.newValues ? { newValues: values.newValues as Prisma.InputJsonValue } : {}),
         },
       })
       .catch((e: unknown) => this.logger.error(`[dispersal] audit ${event} failed for campaign ${id}: ${e}`));

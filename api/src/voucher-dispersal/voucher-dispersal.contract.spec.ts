@@ -122,7 +122,28 @@ async function buildContract() {
   const c = await t.svc.createCampaign(ADMIN, { name: 'Oops', programLabel: 'Gifsy Rewards', budgetRupees: 100 });
   const cancel = await t.svc.cancel(ADMIN, c.id);
 
-  return wire({ brands, create, upload, confirm, process: processed, list, detail, rows, resend, retryBuy, cancel });
+  // Campaign A (finished) — edit, then "Add more people": a discarded batch, then a confirmed one.
+  const edit = await t.svc.editCampaign(ADMIN, a.id, { name: 'Earlier (Nov)', budgetRupees: 6000 });
+  const batchUpload = await t.svc.uploadBatch(ADMIN, a.id, file([
+    ['9876543210', 'Asha', 500, 'Amazon Pay'], // already sent in batch 1 → DUPLICATE
+    ['9876543215', 'Kiran', 300, 'Flipkart'],
+  ]));
+  const batchPreview = await t.svc.batchPreview(ADMIN, a.id, batchUpload.batchNumber);
+  const batchDiscard = await t.svc.discardBatch(ADMIN, a.id, batchUpload.batchNumber);
+  const again = await t.svc.uploadBatch(ADMIN, a.id, file([['9876543215', 'Kiran', 300, 'Flipkart']]));
+  const batchConfirm = await t.svc.confirmBatch(ADMIN, a.id, again.batchNumber, {
+    previewId: again.previewId!,
+    expectedValidCount: again.summary.valid,
+    expectedTotalRupees: again.summary.totalRupees,
+  });
+  await t.processor.drain({ campaignId: a.id });
+  const detailWithBatches = await t.svc.detail(ADMIN, a.id);
+  const rowsOfBatch = await t.svc.rows(ADMIN, a.id, { batch: again.batchNumber });
+
+  return wire({
+    brands, create, upload, confirm, process: processed, list, detail, rows, resend, retryBuy, cancel,
+    edit, batchUpload, batchPreview, batchDiscard, batchConfirm, detailWithBatches, rowsOfBatch,
+  });
 }
 
 afterAll(() => {
@@ -138,6 +159,9 @@ describe('voucher-dispersal UI contract fixture', () => {
     expect(live.upload.summary.skippedNote).toEqual(expect.stringContaining('blank'));
     expect(live.rows.rows.some((r: any) => r.voucherCodeMasked)).toBe(true);
     expect(JSON.stringify(live)).not.toContain('AMZN-1234-5678-9999'); // never a full code
+    expect(live.batchUpload.rows.some((r: any) => r.status === 'DUPLICATE' && /batch 1/.test(r.invalidReason))).toBe(true);
+    expect(live.detailWithBatches.batches.map((b: any) => b.status)).toEqual(['CONFIRMED', 'DISCARDED', 'CONFIRMED']);
+    expect(live.detailWithBatches.edits.length).toBe(1);
 
     if (process.env.UPDATE_VD_CONTRACT === '1') {
       fs.mkdirSync(path.dirname(FIXTURE), { recursive: true });

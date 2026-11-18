@@ -461,7 +461,8 @@ export class VoucherDispersalProcessor {
     if (campaigns.length === 0) return out;
     const rows = await this.prisma.voucherDispersalRow.findMany({
       where: { status: RS.QUEUED, campaignId: { in: campaigns.map((c) => c.id) } },
-      orderBy: [{ campaignId: 'asc' }, { rowNumber: 'asc' }],
+      // Batch, then the file's row order ("Add more people" batches restart at Excel row 2).
+      orderBy: [{ campaignId: 'asc' }, { batchNumber: 'asc' }, { rowNumber: 'asc' }],
       take: maxBuys,
     });
     let first = true;
@@ -884,6 +885,9 @@ export class VoucherDispersalProcessor {
    *    COMPLETED_WITH_ERRORS when any row is BUY_FAILED or any bought row's WhatsApp is FAILED / UNKNOWN;
    *  - COMPLETED ↔ COMPLETED_WITH_ERRORS both ways as late WhatsApp statuses / resends change;
    *  - a terminal campaign that has work in flight again → back to PROCESSING.
+   * Counts span EVERY batch of the campaign ("Add more people"): a confirmed batch 2 re-opens the campaign
+   * (confirmBatch sets PROCESSING) and it settles again over all batches. An unconfirmed batch's rows are
+   * VALID / INVALID / DUPLICATE — none of the statuses counted here — so a preview never affects the status.
    * @returns true when the status changed.
    */
   async settleCampaign(id: string): Promise<boolean> {

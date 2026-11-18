@@ -10,6 +10,7 @@ import {
   isProcessInFlight, isUncertainFailure, maskVoucherCode, nextPollDelay, nextProcessFailures, normalizeBrand, normalizeClients,
   normalizeDetail, normalizeListItem, normalizePreview, normalizeRow, normalizeRowsPage, pendingReasonText, plural, pollPhase,
   rowStatusText, shouldNudgeProcessing, validateCreateForm, vdApi, PENDING_RECONCILE_NOTE, POLL_AFTER_COMPLETE_MS, POLL_MAX_MS,
+  batchConfirmBlock, editChangeText, editPayload, validateEditForm, normalizeBatch, normalizeCancelResult,
   type VdPreview, type VdPreviewSummary,
 } from '@/lib/voucher-dispersal';
 
@@ -259,5 +260,62 @@ describe('vdApi.process — single-flight per campaign', () => {
     expect(isProcessInFlight('c1')).toBe(false);
     void vdApi.process('c1');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── Edit campaign + "Add more people" batches (2026-11-18) ──────────────────────
+
+describe('validateEditForm / editPayload', () => {
+  const cur = { name: 'Diwali', budgetRupees: 5000 };
+  it('refuses empty name, non-whole / zero budget, a budget below the server floor, and no change', () => {
+    expect(validateEditForm({ name: '  ', budgetRupees: '5000' }, cur, 0).name).toMatch(/name/);
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '0' }, cur, 0).budgetRupees).toMatch(/greater than 0/);
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '12.5' }, cur, 0).budgetRupees).toMatch(/whole rupees/);
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '1799' }, cur, 1800).budgetRupees).toBe(
+      "The budget can't go below ₹1,800 — that much is already spent or committed to purchases in progress.",
+    );
+    expect(validateEditForm({ name: ' Diwali ', budgetRupees: '5000' }, cur, 0).form).toBe('Nothing has changed.');
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '1800' }, cur, 1800)).toEqual({});
+    // Unknown floor → the server decides (its refusal is shown word for word).
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: '1' }, cur, null)).toEqual({});
+  });
+  it('sends only the changed fields', () => {
+    expect(editPayload({ name: 'Diwali 2', budgetRupees: '5000' }, cur)).toEqual({ name: 'Diwali 2' });
+    expect(editPayload({ name: 'Diwali', budgetRupees: '7000' }, cur)).toEqual({ budgetRupees: 7000 });
+  });
+  it('describes an audited change in plain words', () => {
+    expect(editChangeText({ field: 'budgetRupees', from: 2000, to: 5000 })).toBe('Budget ₹2,000 → ₹5,000');
+    expect(editChangeText({ field: 'name', from: 'A', to: 'B' })).toBe('Name "A" → "B"');
+  });
+});
+
+describe('batchConfirmBlock', () => {
+  const p = (o: Partial<VdPreviewSummary>, remaining: number | null, committed: number | null = 1000) => ({
+    previewId: 'pv-2', summary: summary(o), remainingBudgetRupees: remaining, alreadyCommittedRupees: committed,
+  });
+  it('over what is LEFT of the budget → blocked, advising to raise the budget (Edit campaign)', () => {
+    const b = batchConfirmBlock(p({ totalRupees: 800, budgetRupees: 1500, overBudget: true }, 500));
+    expect(b).toEqual({
+      blocked: true,
+      reason: "This batch's valid rows total ₹800, but only ₹500 of the ₹1,500 budget is left (₹1,000 is already spent or committed). Raise the budget with Edit campaign, or remove rows and upload again.",
+    });
+    // The client-side rule also catches it when the server flag is missing.
+    expect(batchConfirmBlock(p({ totalRupees: 800, overBudget: false }, 500)).blocked).toBe(true);
+  });
+  it('no valid rows / incomplete reply → blocked; otherwise free', () => {
+    expect(batchConfirmBlock(p({ valid: 0, totalRupees: 0 }, 5000))).toMatchObject({ blocked: true, reason: expect.stringMatching(/no valid rows in this batch/) });
+    expect(batchConfirmBlock({ ...p({}, 5000), previewId: null })).toMatchObject({ blocked: true });
+    expect(batchConfirmBlock(p({ totalRupees: 500 }, 500))).toEqual({ blocked: false });
+  });
+});
+
+describe('batch / cancel normalisers', () => {
+  it('an unknown batch status is UNKNOWN (never disguised); missing counts are null', () => {
+    expect(normalizeBatch({ batchNumber: 2, status: 'WEIRD' })).toMatchObject({ batchNumber: 2, status: 'UNKNOWN', rawStatus: 'WEIRD', bought: null });
+    expect(normalizeCancelResult({ campaign: {}, cancelledRows: 1 }).discardedPendingBatchRows).toBeNull();
+  });
+  it('detail without batches / edits → empty lists; list items carry pendingBatchNumber', () => {
+    expect(normalizeDetail({ campaign: {}, summary: {} })).toMatchObject({ batches: [], edits: [] });
+    expect(normalizeListItem({ id: 'c', summary: { pendingBatchNumber: 3 } }).summary.pendingBatchNumber).toBe(3);
   });
 });

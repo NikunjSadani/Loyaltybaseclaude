@@ -22,7 +22,13 @@
  *   GET  /campaigns/:id/report.xlsx                → file
  *   POST /campaigns/:id/rows/:rowId/resend         → row
  *   POST /campaigns/:id/rows/:rowId/retry-buy      → { message, row }
- *   POST /campaigns/:id/cancel                     → { campaign, cancelledRows, stillWithHubble, alreadyBought }
+ *   POST /campaigns/:id/cancel                     → { campaign, cancelledRows, stillWithHubble, alreadyBought, discardedPendingBatchRows }
+ *   PATCH /campaigns/:id {name?, budgetRupees?}    → campaign (budget never below spent + committed; audited)
+ *   POST /campaigns/:id/batches (multipart `file`) → batch preview { batchNumber, batchStatus, previewId, campaign, rows, summary }
+ *   GET  /campaigns/:id/batches/:n                 → the same preview, for a batch still waiting for confirmation
+ *   POST /campaigns/:id/batches/:n/confirm {previewId, expectedValidCount, expectedTotalRupees} → campaign
+ *   POST /campaigns/:id/batches/:n/discard         → { campaign, batchNumber, discardedRows }
+ *   GET  /campaigns/:id/rows?batch=N               → only batch N (an unconfirmed batch is listed only this way)
  *
  * The normalisers read the server's field names EXACTLY (no aliases) — the contract test
  * (src/lib/__tests__/voucher-dispersal.contract.test.ts) runs them over a fixture produced by the real
@@ -37,6 +43,8 @@ import { formatInrPaise } from '@/lib/format-inr';
 export const VD_BASE = '/api/admin/voucher-dispersal';
 export const VD_TEMPLATE_URL = `${VD_BASE}/template.xlsx`;
 export const vdReportUrl = (id: string) => `${VD_BASE}/campaigns/${encodeURIComponent(id)}/report.xlsx`;
+/** Report download file name used when the server sends none. */
+export const vdReportFallbackName = (id: string) => `voucher-campaign-${id}.xlsx`;
 
 // ─── Status unions ──────────────────────────────────────────────────────────────
 
@@ -180,6 +188,10 @@ export interface VdCampaign {
   completedAt: string | null;
   /** Server's own verdict, when it sends one; otherwise the status rule below decides. */
   canCancel: boolean | null;
+  /** Server: name / budget may be edited (every status except CANCELLED). */
+  canEdit: boolean | null;
+  /** Server: null = "Add more people" is available; otherwise the plain reason it is not. */
+  addPeopleBlockedReason: string | null;
 }
 
 /**
@@ -198,6 +210,67 @@ export interface VdDeliverySummary {
   messageFailed: number | null;
   messageNotSent: number | null;
   spentRupees: number | null;
+  /** Detail only: the lowest the budget may be edited down to (already spent + committed). */
+  budgetFloorRupees: number | null;
+  /** List only: an "Add more people" batch waiting for confirmation (its number), else null. */
+  pendingBatchNumber: number | null;
+}
+
+export const BATCH_STATUSES = ['PREVIEWED', 'CONFIRMED', 'DISCARDED', 'CANCELLED'] as const;
+export type BatchStatus = (typeof BATCH_STATUSES)[number] | 'UNKNOWN';
+export const BATCH_STATUS_LABEL: Record<BatchStatus, string> = {
+  PREVIEWED: 'Waiting for confirmation — nothing bought',
+  CONFIRMED: 'Confirmed',
+  DISCARDED: 'Discarded — nothing bought',
+  CANCELLED: 'Cancelled before confirming',
+  UNKNOWN: 'Unknown status',
+};
+export const BATCH_STATUS_TONE: Record<BatchStatus, Tone> = {
+  PREVIEWED: 'info',
+  CONFIRMED: 'success',
+  DISCARDED: 'neutral',
+  CANCELLED: 'neutral',
+  UNKNOWN: 'warning',
+};
+
+/** One upload batch (1 = the campaign's first file; 2, 3, … = "Add more people"). */
+export interface VdBatch {
+  batchNumber: number | null;
+  status: BatchStatus;
+  rawStatus: string;
+  sourceFileName: string | null;
+  uploadedByName: string | null;
+  uploadedAt: string | null;
+  confirmedByName: string | null;
+  confirmedAt: string | null;
+  discardedByName: string | null;
+  discardedAt: string | null;
+  discardReason: string | null;
+  /** Only while waiting for confirmation. */
+  previewId: string | null;
+  total: number | null;
+  valid: number | null;
+  invalid: number | null;
+  duplicates: number | null;
+  bought: number | null;
+  buyFailed: number | null;
+  pending: number | null;
+  cancelled: number | null;
+  totalRupees: number | null;
+  spentRupees: number | null;
+}
+
+export interface VdEditChange {
+  field: 'name' | 'budgetRupees' | string;
+  from: string | number | null;
+  to: string | number | null;
+}
+
+/** One audited campaign edit (who, when, old → new). */
+export interface VdEdit {
+  at: string | null;
+  byName: string | null;
+  changes: VdEditChange[];
 }
 
 export interface VdListItem {
@@ -205,6 +278,10 @@ export interface VdListItem {
   summary: VdDeliverySummary;
   /** Detail / process only: false = Hubble is not configured on this server (nothing can be bought). */
   hubbleConfigured: boolean | null;
+  /** Detail only (empty for list items): every upload batch. */
+  batches: VdBatch[];
+  /** Detail only (empty for list items): name / budget edits, newest first. */
+  edits: VdEdit[];
 }
 
 export interface VdPreviewRow {
@@ -251,8 +328,28 @@ export interface VdPreview {
   previewId: string | null;
 }
 
+/** An "Add more people" batch preview: the budget is checked against what is LEFT of the campaign budget. */
+export interface VdBatchPreview extends VdPreview {
+  batchNumber: number | null;
+  batchStatus: BatchStatus;
+  /** Already spent + committed on the campaign (every earlier batch). */
+  alreadyCommittedRupees: number | null;
+  /** Budget − already spent / committed. */
+  remainingBudgetRupees: number | null;
+  /** Rows marked DUPLICATE because the phone already has a voucher (or a failed purchase) in an earlier batch. */
+  crossBatchDuplicates: number | null;
+}
+
+export interface VdDiscardResult {
+  campaign: VdCampaign;
+  batchNumber: number | null;
+  discardedRows: number | null;
+}
+
 export interface VdRow {
   id: string;
+  /** Upload batch this row came from (1 = the first file). */
+  batchNumber: number | null;
   rowNumber: number | null;
   phone: string;
   name: string;
@@ -297,6 +394,8 @@ export interface VdCancelResult {
   cancelledRows: number | null;
   stillWithHubble: number | null;
   alreadyBought: number | null;
+  /** Rows of an unconfirmed "Add more people" batch removed with the cancel. */
+  discardedPendingBatchRows: number | null;
 }
 
 // ─── Small coercers ─────────────────────────────────────────────────────────────
@@ -354,6 +453,8 @@ export function normalizeCampaign(raw: unknown): VdCampaign {
     cancelledAt: str(o.cancelledAt),
     completedAt: str(o.completedAt),
     canCancel: bool(o.canCancel),
+    canEdit: bool(o.canEdit),
+    addPeopleBlockedReason: str(o.addPeopleBlockedReason),
   };
 }
 
@@ -372,6 +473,8 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     messageFailed: null,
     messageNotSent: null,
     spentRupees: num(o.spentRupees),
+    budgetFloorRupees: null,
+    pendingBatchNumber: num(o.pendingBatchNumber),
   };
 }
 
@@ -390,13 +493,63 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
     messageFailed: num(o.messageFailed),
     messageNotSent: num(o.messageNotSent),
     spentRupees: num(o.spentRupees),
+    budgetFloorRupees: num(o.budgetFloorRupees),
+    pendingBatchNumber: null,
+  };
+}
+
+function asBatchStatus(v: unknown): { status: BatchStatus; rawStatus: string } {
+  const raw = typeof v === 'string' ? v : v == null ? '' : String(v);
+  const s = raw.toUpperCase();
+  return { status: (BATCH_STATUSES as readonly string[]).includes(s) ? (s as BatchStatus) : 'UNKNOWN', rawStatus: raw };
+}
+
+/** One `batches[]` item of GET /campaigns/:id. */
+export function normalizeBatch(raw: unknown): VdBatch {
+  const o = isObj(raw) ? raw : {};
+  return {
+    batchNumber: num(o.batchNumber),
+    ...asBatchStatus(o.status),
+    sourceFileName: str(o.sourceFileName),
+    uploadedByName: str(o.uploadedByName),
+    uploadedAt: str(o.uploadedAt),
+    confirmedByName: str(o.confirmedByName),
+    confirmedAt: str(o.confirmedAt),
+    discardedByName: str(o.discardedByName),
+    discardedAt: str(o.discardedAt),
+    discardReason: str(o.discardReason),
+    previewId: str(o.previewId),
+    total: num(o.total),
+    valid: num(o.valid),
+    invalid: num(o.invalid),
+    duplicates: num(o.duplicates),
+    bought: num(o.bought),
+    buyFailed: num(o.buyFailed),
+    pending: num(o.pending),
+    cancelled: num(o.cancelled),
+    totalRupees: num(o.totalRupees),
+    spentRupees: num(o.spentRupees),
+  };
+}
+
+const scalar = (v: unknown): string | number | null => (typeof v === 'number' && Number.isFinite(v) ? v : typeof v === 'string' ? v : null);
+
+/** One `edits[]` item of GET /campaigns/:id. */
+export function normalizeEdit(raw: unknown): VdEdit {
+  const o = isObj(raw) ? raw : {};
+  return {
+    at: str(o.at),
+    byName: str(o.byName),
+    changes: Array.isArray(o.changes)
+      ? o.changes.filter(isObj).map((c) => ({ field: str(c.field) ?? '', from: scalar(c.from), to: scalar(c.to) }))
+      : [],
   };
 }
 
 /** One GET /campaigns item: the campaign's own fields + `summary`. */
 export function normalizeListItem(raw: unknown): VdListItem {
   const o = isObj(raw) ? raw : {};
-  return { campaign: normalizeCampaign(o), summary: normalizeListSummary(o.summary), hubbleConfigured: null };
+  return { campaign: normalizeCampaign(o), summary: normalizeListSummary(o.summary), hubbleConfigured: null, batches: [], edits: [] };
 }
 
 /** GET /campaigns/:id and POST /campaigns/:id/process: `{ campaign, hubbleConfigured, summary }`. */
@@ -406,6 +559,8 @@ export function normalizeDetail(raw: unknown): VdListItem {
     campaign: normalizeCampaign(o.campaign),
     summary: normalizeDeliverySummary(o.summary),
     hubbleConfigured: bool(o.hubbleConfigured),
+    batches: Array.isArray(o.batches) ? o.batches.map(normalizeBatch) : [],
+    edits: Array.isArray(o.edits) ? o.edits.map(normalizeEdit) : [],
   };
 }
 
@@ -457,6 +612,26 @@ export function normalizePreview(raw: unknown): VdPreview {
   };
 }
 
+/** POST /campaigns/:id/batches and GET /campaigns/:id/batches/:n. */
+export function normalizeBatchPreview(raw: unknown): VdBatchPreview {
+  const o = isObj(raw) ? raw : {};
+  const s = isObj(o.summary) ? o.summary : {};
+  return {
+    ...normalizePreview(raw),
+    batchNumber: num(o.batchNumber),
+    batchStatus: asBatchStatus(o.batchStatus).status,
+    alreadyCommittedRupees: num(s.alreadyCommittedRupees),
+    remainingBudgetRupees: num(s.remainingBudgetRupees),
+    crossBatchDuplicates: num(s.crossBatchDuplicates),
+  };
+}
+
+/** POST /campaigns/:id/batches/:n/discard. */
+export function normalizeDiscardResult(raw: unknown): VdDiscardResult {
+  const o = isObj(raw) ? raw : {};
+  return { campaign: normalizeCampaign(o.campaign), batchNumber: num(o.batchNumber), discardedRows: num(o.discardedRows) };
+}
+
 /** Server `rowView` (GET rows, resend reply, retry-buy reply's `row`). */
 export function normalizeRow(raw: unknown): VdRow {
   const o = isObj(raw) ? raw : {};
@@ -472,6 +647,7 @@ export function normalizeRow(raw: unknown): VdRow {
     ?? (st.status === 'PENDING_RECONCILE' ? pendingReasonText(pendingReason) : null);
   return {
     id: str(o.id) ?? '',
+    batchNumber: num(o.batchNumber),
     rowNumber: num(o.rowNumber),
     phone: str(o.phone) ?? '',
     name: str(o.name) ?? '',
@@ -530,6 +706,7 @@ export function normalizeCancelResult(raw: unknown): VdCancelResult {
     cancelledRows: num(o.cancelledRows),
     stillWithHubble: num(o.stillWithHubble),
     alreadyBought: num(o.alreadyBought),
+    discardedPendingBatchRows: num(o.discardedPendingBatchRows),
   };
 }
 
@@ -640,6 +817,75 @@ export function confirmBlock(p: Pick<VdPreview, 'previewId' | 'summary'>): Confi
   }
   if (s.valid <= 0) return { blocked: true, reason: 'There are no valid rows to issue. Fix the file and upload again.' };
   return { blocked: false };
+}
+
+/**
+ * Why "Buy & send" is blocked for an "Add more people" batch: the server checks spent + committed + this
+ * batch against the budget, so the advice is to RAISE the budget (Edit campaign) — not a new campaign.
+ */
+export function batchConfirmBlock(p: Pick<VdBatchPreview, 'previewId' | 'summary' | 'remainingBudgetRupees' | 'alreadyCommittedRupees'>): ConfirmBlock {
+  const s = p.summary;
+  if (s.overBudget || (s.totalRupees !== null && p.remainingBudgetRupees !== null && s.totalRupees > p.remainingBudgetRupees)) {
+    return {
+      blocked: true,
+      reason: `This batch's valid rows total ${formatRupees(s.totalRupees)}, but only ${formatRupees(p.remainingBudgetRupees)} of the ${formatRupees(s.budgetRupees)} budget is left (${formatRupees(p.alreadyCommittedRupees)} is already spent or committed). Raise the budget with Edit campaign, or remove rows and upload again.`,
+    };
+  }
+  if (s.valid === null || s.totalRupees === null || !p.previewId) {
+    return { blocked: true, reason: "The server's preview reply was incomplete (missing totals or preview id). Upload the file again." };
+  }
+  if (s.valid <= 0) return { blocked: true, reason: 'There are no valid rows in this batch to issue. Fix the file and upload again, or discard the batch.' };
+  return { blocked: false };
+}
+
+/** "Batch 2" / "—". */
+export function batchLabel(n: number | null): string {
+  return n === null ? 'Batch —' : `Batch ${n}`;
+}
+
+/** A plain-words line for one audited edit change. */
+export function editChangeText(c: VdEditChange): string {
+  if (c.field === 'budgetRupees') {
+    const n = (v: string | number | null) => (typeof v === 'number' ? formatRupees(v) : v === null ? '—' : String(v));
+    return `Budget ${n(c.from)} → ${n(c.to)}`;
+  }
+  if (c.field === 'name') return `Name "${c.from ?? '—'}" → "${c.to ?? '—'}"`;
+  return `${c.field}: ${c.from ?? '—'} → ${c.to ?? '—'}`;
+}
+
+export interface EditForm {
+  name: string;
+  budgetRupees: string;
+}
+
+/**
+ * Edit-dialog validation. `floorRupees` = the server's `budgetFloorRupees` (null = unknown → the server decides
+ * and its refusal is shown word-for-word). Nothing changed is an error too (the server refuses it).
+ */
+export function validateEditForm(f: EditForm, current: Pick<VdCampaign, 'name' | 'budgetRupees'>, floorRupees: number | null): Partial<Record<keyof EditForm | 'form', string>> {
+  const errors: Partial<Record<keyof EditForm | 'form', string>> = {};
+  const name = f.name.replace(/\s+/g, ' ').trim();
+  if (!name) errors.name = 'Enter a campaign name.';
+  else if (name.length > VD_NAME_MAX) errors.name = `Keep the campaign name to ${VD_NAME_MAX} characters.`;
+  const raw = f.budgetRupees.trim();
+  const b = Number(raw);
+  if (raw === '' || !Number.isFinite(b) || b <= 0) errors.budgetRupees = 'Enter a budget in rupees greater than 0.';
+  else if (!/^\d+$/.test(raw)) errors.budgetRupees = 'Enter the budget in whole rupees (no paise).';
+  else if (b > VD_BUDGET_MAX_RUPEES) errors.budgetRupees = `The budget can be at most ${formatRupees(VD_BUDGET_MAX_RUPEES)} per campaign.`;
+  else if (floorRupees !== null && b < floorRupees) {
+    errors.budgetRupees = `The budget can't go below ${formatRupees(floorRupees)} — that much is already spent or committed to purchases in progress.`;
+  }
+  if (!errors.name && !errors.budgetRupees && name === current.name && b === current.budgetRupees) {
+    errors.form = 'Nothing has changed.';
+  }
+  return errors;
+}
+
+/** PATCH body: only the fields that changed. */
+export function editPayload(f: EditForm, current: Pick<VdCampaign, 'name' | 'budgetRupees'>): { name?: string; budgetRupees?: number } {
+  const name = f.name.replace(/\s+/g, ' ').trim();
+  const b = Number(f.budgetRupees.trim());
+  return { ...(name !== current.name ? { name } : {}), ...(b !== current.budgetRupees ? { budgetRupees: b } : {}) };
 }
 
 /** Live campaigns (money moving / messages going out). */
@@ -851,9 +1097,10 @@ export const vdApi = {
     return p;
   },
 
-  rows: (id: string, opts: { status?: string; page?: number }) => {
+  rows: (id: string, opts: { status?: string; page?: number; batch?: number }) => {
     const q = new URLSearchParams();
     if (opts.status) q.set('status', opts.status);
+    if (opts.batch) q.set('batch', String(opts.batch));
     const page = opts.page ?? 1;
     q.set('page', String(page));
     return vdRequest(`/campaigns/${cid(id)}/rows?${q.toString()}`, {}, (d) => normalizeRowsPage(d, page));
@@ -865,6 +1112,23 @@ export const vdApi = {
     vdRequest(`/campaigns/${cid(id)}/rows/${cid(rowId)}/retry-buy`, json({}), normalizeRetryResult),
 
   cancel: (id: string) => vdRequest(`/campaigns/${cid(id)}/cancel`, json({}), normalizeCancelResult),
+
+  editCampaign: (id: string, body: { name?: string; budgetRupees?: number }) =>
+    vdRequest(`/campaigns/${cid(id)}`, { ...json(body), method: 'PATCH' }, normalizeCampaign),
+
+  uploadBatch: (id: string, file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return vdRequest(`/campaigns/${cid(id)}/batches`, { method: 'POST', body: fd }, normalizeBatchPreview);
+  },
+
+  getBatch: (id: string, n: number) => vdRequest(`/campaigns/${cid(id)}/batches/${encodeURIComponent(String(n))}`, {}, normalizeBatchPreview),
+
+  confirmBatch: (id: string, n: number, body: ConfirmBody) =>
+    vdRequest(`/campaigns/${cid(id)}/batches/${encodeURIComponent(String(n))}/confirm`, json(body), normalizeCampaign),
+
+  discardBatch: (id: string, n: number) =>
+    vdRequest(`/campaigns/${cid(id)}/batches/${encodeURIComponent(String(n))}/discard`, json({}), normalizeDiscardResult),
 };
 
 const processInFlight = new Map<string, Promise<VdResult<VdListItem>>>();

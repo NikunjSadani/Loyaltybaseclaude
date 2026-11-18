@@ -7,6 +7,8 @@ import {
   Headers,
   HttpCode,
   Param,
+  ParseIntPipe,
+  Patch,
   Post,
   Query,
   StreamableFile,
@@ -22,11 +24,23 @@ import { VoucherDispersalProcessor } from './voucher-dispersal.processor';
 import {
   ConfirmDispersalCampaignDto,
   CreateDispersalCampaignDto,
+  EditDispersalCampaignDto,
   ListDispersalCampaignsQueryDto,
   ListDispersalRowsQueryDto,
 } from './dto/voucher-dispersal.dto';
 
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/** Same .xlsx-only, size-capped multipart interceptor for the first file and every later batch. */
+const xlsxUpload = () =>
+  UseInterceptors(
+    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
+      fileFilter: (_req, file, cb) =>
+        /\.xlsx$/i.test(file.originalname)
+          ? cb(null, true)
+          : cb(new BadRequestException('Only .xlsx files are accepted — download the template and fill it in.'), false),
+    }),
+  );
 
 /**
  * Voucher Dispersal — `/v1/admin/voucher-dispersal/*`. GIFSY_ADMIN ONLY.
@@ -65,15 +79,14 @@ export class VoucherDispersalController {
     return this.svc.detail(user, id);
   }
 
+  /** Rename and/or change the budget (never below spent + committed). Audited. */
+  @Patch('campaigns/:id')
+  edit(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: EditDispersalCampaignDto) {
+    return this.svc.editCampaign(user, id, dto);
+  }
+
   @Post('campaigns/:id/upload')
-  @UseInterceptors(
-    LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES, {
-      fileFilter: (_req, file, cb) =>
-        /\.xlsx$/i.test(file.originalname)
-          ? cb(null, true)
-          : cb(new BadRequestException('Only .xlsx files are accepted — download the template and fill it in.'), false),
-    }),
-  )
+  @xlsxUpload()
   upload(@CurrentUser() user: JwtPayload, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
     return this.svc.upload(user, id, file);
   }
@@ -112,6 +125,36 @@ export class VoucherDispersalController {
   @HttpCode(200)
   retryBuy(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('rowId') rowId: string) {
     return this.svc.retryBuy(user, id, rowId);
+  }
+
+  /** "Add more people": upload another file to a finished campaign → preview (nothing bought yet). */
+  @Post('campaigns/:id/batches')
+  @xlsxUpload()
+  uploadBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+    return this.svc.uploadBatch(user, id, file);
+  }
+
+  /** The preview of a batch still waiting for confirmation (resume after leaving the page). */
+  @Get('campaigns/:id/batches/:n')
+  batchPreview(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('n', ParseIntPipe) n: number) {
+    return this.svc.batchPreview(user, id, n);
+  }
+
+  @Post('campaigns/:id/batches/:n/confirm')
+  @HttpCode(200)
+  confirmBatch(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('n', ParseIntPipe) n: number,
+    @Body() dto: ConfirmDispersalCampaignDto,
+  ) {
+    return this.svc.confirmBatch(user, id, n, dto);
+  }
+
+  @Post('campaigns/:id/batches/:n/discard')
+  @HttpCode(200)
+  discardBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('n', ParseIntPipe) n: number) {
+    return this.svc.discardBatch(user, id, n);
   }
 
   @Post('campaigns/:id/cancel')

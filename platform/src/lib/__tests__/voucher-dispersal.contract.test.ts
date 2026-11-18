@@ -15,6 +15,7 @@ import contract from './fixtures/voucher-dispersal-server-contract.json';
 import {
   normalizeBrand, normalizeCampaign, normalizeCancelResult, normalizeDetail, normalizeListItem, normalizePreview,
   normalizeRetryResult, normalizeRow, normalizeRowsPage, confirmPayload, CAMPAIGN_STATUSES, ROW_STATUSES,
+  normalizeBatchPreview, normalizeDiscardResult, BATCH_STATUSES, batchConfirmBlock,
 } from '@/lib/voucher-dispersal';
 
 type Rec = { missing: Set<string>; read: Set<string> };
@@ -78,21 +79,26 @@ const ROW_IGNORED = [
   'lastReconcileAt', 'lastReconcileResult', 'boughtAt', 'buyFailureSource', 'hasPin', 'attempts', 'resendCount',
   'whatsapp', // detailed message view — the flat message* fields are the UI contract
 ];
+/** Batch list: the ids are not shown (the server's names are). */
+const BATCH_IGNORED = ['uploadedById', 'confirmedById', 'discardedById'];
+const UPLOAD_IGNORED = [
+  ...CAMPAIGN_IGNORED.map((k) => `campaign.${k}`),
+  'rows[].brandKey', 'rows[].note',
+  ...PER_BRAND_IGNORED.map((k) => `summary.perBrand[].${k}`),
+  'summary.skippedBlankRows', 'summary.skippedFormulaRows', 'summary.hiddenRowsIncluded', // the *Note texts are shown
+];
 const IGNORED: Record<string, string[]> = {
   brands: [],
   create: CAMPAIGN_IGNORED,
   confirm: CAMPAIGN_IGNORED,
-  upload: [
-    ...CAMPAIGN_IGNORED.map((k) => `campaign.${k}`),
-    'rows[].brandKey', 'rows[].note',
-    ...PER_BRAND_IGNORED.map((k) => `summary.perBrand[].${k}`),
-    'summary.skippedBlankRows', 'summary.skippedFormulaRows', 'summary.hiddenRowsIncluded', // the *Note texts are shown
-  ],
+  upload: UPLOAD_IGNORED,
   detail: [
     ...CAMPAIGN_IGNORED.map((k) => `campaign.${k}`),
     'summary.total', 'summary.invalid', 'summary.duplicates', 'summary.totalRupees', 'summary.budgetRupees',
     'summary.overBudget', 'summary.perBrand', 'summary.queued', 'summary.buying', 'summary.pendingReconcile',
     'summary.committedRupees',
+    ...BATCH_IGNORED.map((k) => `batches[].${k}`),
+    'edits[].byId', // the server's name is shown
   ],
   list: [
     ...CAMPAIGN_IGNORED.map((k) => `[].${k}`),
@@ -102,8 +108,15 @@ const IGNORED: Record<string, string[]> = {
   resend: ROW_IGNORED,
   retryBuy: ROW_IGNORED.map((k) => `row.${k}`),
   cancel: CAMPAIGN_IGNORED.map((k) => `campaign.${k}`),
+  edit: CAMPAIGN_IGNORED,
+  batchConfirm: CAMPAIGN_IGNORED,
+  batchUpload: UPLOAD_IGNORED,
+  batchPreview: UPLOAD_IGNORED,
+  batchDiscard: CAMPAIGN_IGNORED.map((k) => `campaign.${k}`),
+  rowsOfBatch: [...ROW_IGNORED.map((k) => `rows[].${k}`)],
 };
 IGNORED.process = ['pass', ...IGNORED.detail];
+IGNORED.detailWithBatches = IGNORED.detail;
 
 const C = contract as Record<string, unknown>;
 const NORMALISERS: Record<string, (x: unknown) => unknown> = {
@@ -118,6 +131,13 @@ const NORMALISERS: Record<string, (x: unknown) => unknown> = {
   resend: normalizeRow,
   retryBuy: normalizeRetryResult,
   cancel: normalizeCancelResult,
+  edit: normalizeCampaign,
+  batchUpload: normalizeBatchPreview,
+  batchPreview: normalizeBatchPreview,
+  batchDiscard: normalizeDiscardResult,
+  batchConfirm: normalizeCampaign,
+  detailWithBatches: normalizeDetail,
+  rowsOfBatch: (d) => normalizeRowsPage(d, 1),
 };
 
 /** A key path counts as covered when it, or a parent of it, was read or is ignored. */
@@ -188,5 +208,39 @@ describe('voucher-dispersal UI ⇄ server contract (fixture from the real server
     expect(normalizeRetryResult(C.retryBuy).message).toBeTruthy();
     expect(normalizeCancelResult(C.cancel).cancelledRows).not.toBeNull();
     expect(normalizeBrand((C.brands as unknown[])[0]).available).toBe(true);
+  });
+
+  it('edit + "Add more people" batches: normalised values carry the server data', () => {
+    expect(normalizeCampaign(C.edit)).toMatchObject({ name: 'Earlier (Nov)', budgetRupees: 6000, canEdit: true, addPeopleBlockedReason: null });
+    const processing = normalizeCampaign(C.confirm);
+    expect(processing.addPeopleBlockedReason).toMatch(/still being bought/);
+
+    const b = normalizeBatchPreview(C.batchUpload);
+    expect(b.batchNumber).toBe(2);
+    expect(b.batchStatus).toBe('PREVIEWED');
+    expect(b.previewId).toMatch(/^pv/);
+    expect(b.crossBatchDuplicates).toBe(1);
+    expect(b.alreadyCommittedRupees).toBe(1000);
+    expect(b.remainingBudgetRupees).toBe(5000);
+    expect(b.rows.find((r) => r.status === 'DUPLICATE')?.invalidReason).toMatch(/batch 1/);
+    expect(batchConfirmBlock(b)).toEqual({ blocked: false });
+    expect(confirmPayload(b)).toEqual({ previewId: b.previewId, expectedValidCount: 1, expectedTotalRupees: 300 });
+    expect(normalizeBatchPreview(C.batchPreview).previewId).toBe(b.previewId);
+    expect(normalizeDiscardResult(C.batchDiscard)).toMatchObject({ batchNumber: 2, discardedRows: 2 });
+
+    const d = normalizeDetail(C.detailWithBatches);
+    expect(d.batches.map((x) => [x.batchNumber, x.status])).toEqual([[1, 'CONFIRMED'], [2, 'DISCARDED'], [3, 'CONFIRMED']]);
+    for (const x of d.batches) expect(BATCH_STATUSES as readonly string[]).toContain(x.rawStatus);
+    expect(d.batches[2]).toMatchObject({ uploadedByName: 'Admin One', bought: 1, total: 1 });
+    expect(d.batches[1].discardedByName).toBe('Admin One');
+    expect(d.edits[0]).toMatchObject({ byName: 'Admin One' });
+    expect(d.edits[0].changes.map((c) => c.field)).toEqual(['name', 'budgetRupees']);
+    expect(d.summary.budgetFloorRupees).toBe(1300);
+    expect(d.summary.bought).toBe(2);
+
+    const r = normalizeRowsPage(C.rowsOfBatch, 1);
+    expect(r.rows.map((x) => x.batchNumber)).toEqual([3]);
+    expect(normalizeCancelResult(C.cancel).discardedPendingBatchRows).toBe(0);
+    expect((C.list as unknown[]).map(normalizeListItem).every((i) => i.summary.pendingBatchNumber === null)).toBe(true);
   });
 });

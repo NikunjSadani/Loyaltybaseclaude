@@ -706,4 +706,15 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(calls).toContainEqual({ status: 'BUY_FAILED' });
     expect(calls).toContainEqual({ status: { in: ['QUEUED', 'BUYING', 'PENDING_RECONCILE'] } });
   });
+
+  it('voucher dispersal with "Add more people" batches: row-based, so a campaign re-opened by a new batch is counted per row (an unconfirmed batch preview never counts)', async () => {
+    await svc.collect(NOW, '13 Nov 2026', WIN);
+    const calls: Record<string, unknown>[] = prisma.voucherDispersalRow.count.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);
+    // Never keyed on the campaign status (COMPLETED → PROCESSING → COMPLETED again cannot double-count) …
+    expect(JSON.stringify(calls)).not.toContain('campaign');
+    // … and an unconfirmed batch's VALID / INVALID / DUPLICATE preview rows are in none of the counted statuses.
+    expect(JSON.stringify(calls)).not.toMatch(/"(VALID|INVALID|DUPLICATE)"/);
+    // Per-row window anchors (boughtAt / updatedAt), so a batch-2 purchase counts once, in the window it happened.
+    expect(calls).toContainEqual({ status: 'BOUGHT', boughtAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) } });
+  });
 });
