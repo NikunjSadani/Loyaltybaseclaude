@@ -1,7 +1,8 @@
 # Runbook — activating the daily internal email reports
 
-The scheduled internal Gifsy email reports (**Credits/Payouts summary** + **KYC actionables digest**,
-daily Mon–Sat) ship **fail-closed**: the trigger endpoint 403s until `REPORTS_RUN_SECRET` is set, and
+The scheduled internal Gifsy email — since 2026-11-13 ONE **Daily Operations Digest** (all-tenant summary + one
+section per tenant; design `platform/docs/plans/DAILY-OPS-DIGEST.md`), daily Mon–Sat 09:30 IST — replaced the two
+earlier emails (**Credits/Payouts summary** + **KYC actionables digest**). It ships **fail-closed**: the trigger endpoint 403s until `REPORTS_RUN_SECRET` is set, and
 `sendEmail` no-ops if `MSG91_AUTH_KEY` is unset. So the code is safe to deploy with nothing configured.
 This runbook turns it on. Mirrors the push-drain provisioning pattern (schedulers are created via
 `gcloud`, NOT terraform).
@@ -49,32 +50,68 @@ gcloud scheduler jobs create http reports-run-prod \
   --schedule="30 9 * * 1-6" --time-zone="Asia/Kolkata" \
   --uri="${API_URL}/v1/reports/run" --http-method=POST \
   --headers="Content-Type=application/octet-stream,x-reports-run-secret=${SECRET}" \
-  --message-body=" "
+  --message-body=" " \
+  --attempt-deadline=600s --max-retry-attempts=0
 ```
 `30 9 * * 1-6` = 09:30 IST, Mon–Sat. (For staging, target `gifsy-api-staging` + name `reports-run-staging`.)
+- `--attempt-deadline=600s`: a busy day (Bajaj KYC population + billing progress) can take well over the default
+  180 s; the run lease is 15 min, so a timed-out attempt never blocks the next day.
+- `--max-retry-attempts=0`: no automatic retries — a failure must be SEEN (the job shows failed and alerts) and re-run
+  by a person. The endpoint is idempotent anyway (a second call the same IST day after a success answers
+  `200 skipped`), but a retried `degraded`/`error` run would just repeat the same failure.
+- An existing job: `gcloud scheduler jobs update http reports-run-prod --project "$PROJECT" --location "$REGION"
+  --attempt-deadline=600s --max-retry-attempts=0`.
 
 ## 4. Configure recipients (Gifsy admin)
-Log in as GIFSY_ADMIN → **Settings → Report Recipients** → add the email addresses for each report
-(Credits & Payouts summary, KYC actionables digest) → Save. Empty list = that report is skipped.
+Log in as GIFSY_ADMIN → **`/gifsy/settings` → Report Recipients** → the single **Daily Operations Digest** list → add
+the internal Gifsy addresses → Save. **Internal addresses only, enforced:** allowed domains = env
+`REPORTS_RECIPIENT_DOMAINS` (comma-separated, exact match after `@`; unset → `gifsy.in`). The card rejects other
+addresses inline and the PUT refuses them (400); any non-internal address already in a list (e.g. inherited from a
+legacy list) is NOT sent to — the email footer and the API log name it. Until the first save the card labels the list
+"Inherited from the two old daily emails' lists".
+
+**Storage + fallback:** one platform row `program_settings` (`clientId='gifsy'`, `settingKey='reportRecipients'`),
+value `{ "dailyDigest": [...] }`. **If the row has no `dailyDigest` key** (i.e. nobody has saved the new card yet),
+the digest goes to the **union of the legacy `creditsPayouts` + `kycActionables` lists** — so whoever received the
+old emails keeps receiving the digest with no action. The card shows that effective list; the first Save writes
+`{ dailyDigest }` (dropping the legacy keys) and from then on that list is used as-is — an explicitly empty list =
+nobody, no email.
 
 ## 5. Verify the real send
 ```bash
 # manual trigger (same as the scheduler)
-curl -s -X POST "${API_URL}/v1/reports/run" -H "x-reports-run-secret: ${SECRET}" | jq
+curl -s -w '\nHTTP %{http_code}\n' -X POST "${API_URL}/v1/reports/run" -H "x-reports-run-secret: ${SECRET}"
+# re-send a day that already went out (re-covers today's window up to now)
+curl -s -w '\nHTTP %{http_code}\n' -X POST "${API_URL}/v1/reports/run?force=true" -H "x-reports-run-secret: ${SECRET}"
 ```
-Expect `{ ok:true, dateLabel, reports:[{key,status}, ...] }`. `status`:
-- `sent` — emailed (check the recipient inbox).
-- `suppressed-empty` — credits report skipped (no activity today; expected on a quiet day).
-- `no-recipients` — nobody configured for that report.
-- `error` — the `error` field has the reason (e.g. MSG91 payload mismatch → fix the block in step-0 prereq).
+The body is `{ ok, dateLabel, reports:[{ key:"dailyDigest", status, window, recipients, tenants, tenantsNeedingAttention,
+attentionItems, notices?, droppedRecipients?, error? }] }`. Status → HTTP:
+- `sent` → **200** — emailed with complete data (check the inbox). Sent EVERY run, even on an all-quiet day. The window
+  ran from the end of the last successful send (first run: since the previous working day; capped at 7 days, with a
+  red notice naming any uncovered gap).
+- `skipped` → **200** `{ skipped:"already-sent" }` — today's digest already went out; use `?force=true` to re-send.
+- `degraded` → **500** — emailed, but a shared input (tenant list / holiday calendar / SLA targets / run history)
+  failed; the email has a red "This digest is incomplete" box and the window is NOT advanced (tomorrow re-covers it).
+- `no-recipients` → **409** — the effective list is empty, or every address was non-internal (`droppedRecipients`).
+- `in-progress` → **409** — another run holds the lease (≤ 15 min).
+- `error` → **500** — `error` has the reason (recipient read failed, SMTP failure, or "the email WAS sent, but the
+  run could not be recorded"). A failing DATA section does NOT fail the run: that tenant's section renders "Couldn't
+  load this section (reason)" and the run is `sent`.
+Run history: `program_settings` row `clientId='gifsy'`, `settingKey='dailyDigestRunState'` (`lastSuccess`, `lastAttempt`).
 
-Confirm a recipient actually received the email and it rendered (tables, ₹ amounts, KYC counts).
+Confirm a recipient actually received it and it rendered (summary table, per-tenant sections, ₹ amounts). A
+rendered sample lives at `platform/docs/plans/samples/daily-ops-digest-sample.html`.
 
 ## Notes
-- **Suppression:** Credits/Payouts is suppress-if-empty (no email on a quiet day); KYC actionables always
-  sends (a daily digest — "all clear" when nothing is pending).
-- **All-tenant + platform recipients:** both reports summarise ALL tenants and go to one Gifsy-configured
-  list. They are internal Gifsy reports — tenant admins can READ the recipient list but cannot set it
-  (PUT is GIFSY-only) and do not receive the reports unless explicitly added.
+- **Subject:** `[Gifsy] Daily operations — <date> — all quiet`, or `… — <N> items need attention (<T> tenants +
+  Gifsy-wide)` where N counts EVERY attention item (tenant items, OTP failures, standing open items, run notices);
+  `INCOMPLETE — ` is inserted when a run notice is present. It never says "all quiet" while the body shows red.
+- **Window:** since the end of the last successful send (≤ 7 days); the first tracked run uses "since the same time on
+  the previous working day" (Monday: Saturday 09:30 → Monday 09:30).
+- **All-tenant + platform recipients:** the digest summarises every tenant (ACTIVE always; ONBOARDING/INACTIVE when they
+  have activity or open items, the rest named) and goes to one Gifsy-configured internal list. Tenant admins cannot
+  read or set it (GET + PUT are Gifsy-operator-only) and never receive it.
 - **Rollback:** delete the scheduler job (`gcloud scheduler jobs delete reports-run-prod`) or blank
-  `REPORTS_RUN_SECRET` → the endpoint 403s and nothing sends.
+  `REPORTS_RUN_SECRET` → the endpoint 403s and nothing sends. ⚠️ Rolling the CODE back to before the digest after the
+  new card has been saved would leave the old two reports with no recipients (the saved row only holds `dailyDigest`)
+  — re-enter the two legacy lists in that case.

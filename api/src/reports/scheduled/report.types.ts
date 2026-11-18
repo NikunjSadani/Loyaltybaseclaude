@@ -1,63 +1,280 @@
 /**
- * Shared contract for the scheduled INTERNAL Gifsy email reports (daily Mon–Sat).
+ * Shared contract for the scheduled INTERNAL Gifsy email — the Daily Operations Digest
+ * (owner-approved 2026-11-13, replaces the earlier separate "Credits/Payouts summary" and
+ * "KYC actionables digest" emails). See platform/docs/plans/DAILY-OPS-DIGEST.md.
  *
- * Design (owner-locked 2026-08): two separate all-tenant reports emailed to a Gifsy-configured
- * recipient list — #1 Credits/Payouts summary (suppress-if-empty) and #3 KYC actionables digest
- * (always sent). The RUNNER (scheduled-reports.service.ts) does all the Prisma + assembles the
- * per-report ReportContext, then calls each pure-ish builder, which returns a rendered
- * ReportResult. This seam keeps each builder in its own file (no cross-file contention) and its
- * HTML deterministic + unit-testable.
+ * Seam: the RUNNER (scheduled-reports.service.ts) does ALL the Prisma, per tenant, per section
+ * (each section in its own try/catch), and hands the PURE builder (daily-ops-digest-report.ts)
+ * these plain structs. The builder never touches the DB or the clock — every value it renders
+ * comes from here, so its HTML is deterministic and unit-testable.
  */
 
-import type { PrismaService } from '../../prisma/prisma.service';
-import type { KycSlaTargets } from '../../common/kyc-sla-stage';
+/** Stable report key — also the key the recipient list is stored under (reportRecipients). */
+export type ReportKey = 'dailyDigest';
 
-/** Stable report keys — also the keys under which recipient lists are stored (reportRecipients). */
-export type ReportKey = 'creditsPayouts' | 'kycActionables';
-
-/** Per-run context the runner assembles once and hands to every builder. */
-export interface ReportContext {
-  /** UTC-ms of IST-midnight today — inclusive lower bound of the "today IST" window. */
-  startIst: number;
-  /** UTC-ms of the next IST-midnight — exclusive upper bound. */
-  endIst: number;
-  /** Human date the report covers, e.g. "11 Aug 2026" (IST). */
-  dateLabel: string;
-  /** "now" for SLA age math — passed in (not Date.now()) so builders are pure + deterministic in tests. */
-  nowMs: number;
-  /** clientId → human tenant/brand name (branding.displayName ?? internalName). */
-  tenantNames: Map<string, string>;
-  /** clientIds of all ACTIVE tenants (Client.status === 'ACTIVE'). */
-  activeTenantIds: string[];
+/** The reporting window: [startMs, endMs) in UTC-ms — since the last SUCCESSFUL send (digest-run-state.ts). */
+export interface DigestWindow {
+  startMs: number;
+  endMs: number;
+  /** Human window label, e.g. "Sat 08 Nov, 09:30 → Mon 10 Nov, 09:30 IST". */
+  label: string;
 }
 
-/** A rendered report ready to send. `empty` lets the runner suppress send for suppress-if-empty reports. */
-export interface ReportResult {
-  key: ReportKey;
-  /** Email subject line (already includes the date). */
-  subject: string;
-  /** Full email HTML body. */
-  html: string;
-  /** true when there was nothing material to report (no activity / nothing pending). */
-  empty: boolean;
+/** A section either loaded, or failed (rendered as "couldn't load this section" — never omitted). */
+export type SectionResult<T> = { ok: true; data: T } | { ok: false; error: string };
+
+/** One SLA stage bucket: pending rows, split by how they sit against the stage's business-hours target. */
+export interface SlaBucket {
+  pending: number;
+  /** age < 75% of the target. */
+  within: number;
+  /** 75% of the target ≤ age ≤ target — about to breach. */
+  nearing: number;
+  /** age > target. */
+  breached: number;
+}
+
+export interface KycSection {
+  /** KycSubmission.submittedAt in the window. */
+  submitted: number;
+  /** status APPROVED with approvedAt in the window. */
+  approved: number;
+  /** KycStatusHistory → REJECTED / RE_UPLOAD_REQUIRED / RESUBMISSION_REQUIRED in the window. */
+  rejected: number;
+  /** Pending in the field chain (submitted → reaching Gifsy). */
+  field: SlaBucket;
+  /** Pending at Gifsy (PENDING_GIFSY). */
+  gifsy: SlaBucket;
+  /**
+   * Of `gifsy.pending`: KYCs that went straight to Gifsy through the GIFSY-reject fast-track (Bajaj flag
+   * `gifsyRejectFastTrack`; marker on the DRAFT→PENDING_GIFSY row, `isFastTrackRow`). They had NO field stage.
+   */
+  gifsyFastTracked: number;
+  /**
+   * Fast-tracked KYCs found at a FIELD status (not a path the code has today). They are EXCLUDED from the field SLA
+   * (same rule as the admin dashboard's field-chain exclusion) and called out here instead of being aged.
+   */
+  fieldFastTrackedExcluded: number;
+}
+
+export interface PointsSection {
+  /** Σ PointsLedger EARN points in the window. */
+  credited: number;
+  /** |Σ PointsLedger REDEEM points| in the window. */
+  redeemed: number;
+  /** |Σ PointsLedger EXPIRE points| in the window. */
+  expired: number;
+  /** Wallets with redeemablePoints < 0 right now. */
+  negativeWallets: number;
+}
+
+export interface FailedRedemptionRow {
+  outlet: string;
+  reward: string;
+  reason: string;
+}
+
+export interface RedemptionsSection {
+  /** RedemptionOrder.createdAt in the window. */
+  requested: number;
+  /** STILL OPEN (now, not windowed): orders FAILED but still holding deducted points (pointsDeducted > 0 — never refunded). */
+  failedNotRefunded: number;
+  /** RedemptionStatusHistory → DELIVERED in the window. */
+  completed: number;
+  /** RedemptionStatusHistory → FAILED in the window. */
+  failed: number;
+  /** The most recent failures (≤ 10). */
+  failedRows: FailedRedemptionRow[];
+}
+
+export interface VouchersSection {
+  /** Hubble orders → DELIVERED in the window. */
+  issued: number;
+  /**
+   * Hubble-routed orders → FAILED in the window: voucherProvider 'Hubble' OR the no-Hubble-order refund
+   * (cancelReason HUBBLE_NO_ORDER_REFUND_REASON — that path deliberately does not stamp the provider).
+   * A subset of RedemptionsSection.failed.
+   */
+  failed: number;
+  /** Hubble orders in PROCESSING whose latest PROCESSING history entry is > 30 min old (updatedAt when there is none). */
+  stuckProcessing: number;
+  /** Orders with an open hubbleNeedsReconcile flag right now. */
+  needsReconcile: number;
+}
+
+export interface PayoutsSection {
+  /** Credit batches confirmed in the window (CreditBatch.confirmedAt). */
+  batchesConfirmed: number;
+  /** Σ totalPoints of those batches. */
+  batchPoints: number;
+  /** Σ totalOutlets of those batches (the old Credits email's "Outlets" figure). */
+  batchOutlets: number;
+  /** Σ totalPayoutPaise of those batches (money committed). */
+  batchPayoutPaise: bigint;
+  /**
+   * Credit payouts RECORDED as PAID in the window — CreditPayoutEntry status PAID with updatedAt in the window
+   * (no app path writes a PAID entry again, so updatedAt = the UTR-apply moment; paidAt is the operator's
+   * payment DATE at IST midnight and would fall in an already-sent window).
+   */
+  creditPaid: number;
+  creditPaidPaise: bigint;
+  /** Redemption payouts SUCCESS (PayoutTransaction.completedAt in the window). */
+  redemptionPaid: number;
+  redemptionPaidPaise: bigint;
+  /** Credit entries recorded FAILED + payout transactions → FAILED/REVERSED in the window (updatedAt). */
+  failedOrReturned: number;
+  /** STILL OPEN (now): credit entries FAILED (awaiting re-bank or reversal). */
+  openFailedCredit: number;
+  openFailedCreditPaise: bigint;
+  /** STILL OPEN (now): redemption payout transactions FAILED whose order was NOT failed/refunded (needs ops). */
+  openFailedRedemption: number;
+  /** Credit entries downloaded for the bank file and waiting for the UTR upload (PROCESSING, now). */
+  awaitingUtr: number;
+  awaitingUtrPaise: bigint;
+}
+
+export interface MessagesSection {
+  /** OtpCode.deliveryStatus FAILED, flagged in the window. */
+  otpFailed: number;
+  /** MessageDeliveryReceipt channel SMS, status FAILED, flagged in the window. */
+  smsFailed: number;
+  /** MessageDeliveryReceipt channel WHATSAPP, status FAILED, flagged in the window. */
+  whatsappFailed: number;
+  /** WhatsappBroadcastRecipient status FAILED, flagged in the window. */
+  broadcastFailed: number;
+}
+
+export interface VisibilitySection {
+  /** VisibilityCaptureSubmission rows created in the window (incl. re-submissions). */
+  submitted: number;
+  /** Captures reviewed APPROVED in the window. */
+  approved: number;
+  /** Captures reviewed REJECTED / CHANGES_REQUESTED in the window. */
+  rejected: number;
+  /** Captures awaiting review (SUBMITTED) right now. */
+  pending: number;
+}
+
+export interface SalesOpenMonth {
+  /** 'YYYY-MM'. */
+  month: string;
+  /** SalesMonthStatus.lastAppliedAt (UTC-ms) or null when never applied. */
+  lastAppliedAtMs: number | null;
+  /** Targets written after the last apply (same rule as SalesMonthsService). */
+  targetsChangedSinceApply: boolean;
+}
+
+export interface SalesImportSection {
+  /** Imports that reached READY in the window (finishedAt). */
+  processed: number;
+  /** Imports that went FAILED in the window (finishedAt — the retention purge bumps updatedAt). */
+  failed: number;
+  /** STILL OPEN (now): FAILED imports with no READY import created after them (not superseded). */
+  failedOpen: number;
+  /** OPEN months (last 6, not future), newest first. */
+  openMonths: SalesOpenMonth[];
 }
 
 /**
- * Builder signatures the runner calls. Builders MUST be defensive (never throw into the runner —
- * a failure in one report must not block the other) and MUST HTML-escape every dynamic value
- * (see email-html.ts `esc`).
- *
- *  - Credits/Payouts (#1): day-scoped to [ctx.startIst, ctx.endIst) via CreditBatch.confirmedAt +
- *    PayoutTransaction.completedAt (SUCCESS). empty = no batches AND no payouts today.
- *  - KYC actionables (#3): all-tenant pending-KYC roll-up by stage, business-hours SLA
- *    (businessHoursBetween + the holiday set), per-tenant slaTargetHours. empty = zero pending.
+ * Current-month billing progress for the tenant's report KPI — the SAME numbers as the admin "Billing progress"
+ * dashboard card (`loadBillingProgress` + `summarizeBillingProgress`, unfiltered).
  */
-export type CreditsPayoutsBuilder = (prisma: PrismaService, ctx: ReportContext) => Promise<ReportResult>;
+export interface BillingSection {
+  /** 'YYYY-MM' (the current IST month). */
+  month: string;
+  /** The report KPI's label; null = the tenant has no enabled KPI (the card is hidden on the dashboard too). */
+  kpiLabel: string | null;
+  /** Data date (YYYY-MM-DD) the figures run to; null = no sales uploaded for the month. */
+  asOf: string | null;
+  /** Live-roster outlets with a positive target for the KPI. */
+  withTarget: number;
+  /** Of `withTarget`: outlets with no (or net-negative) billing yet — the NOT_STARTED bucket. */
+  notStarted: number;
+  /** Live outlets in the KPI's scope with no target (not counted). */
+  noTarget: number;
+  /** Live outlets outside the KPI's applies-to scope (not counted). */
+  notCovered: number;
+  /** Positive-target rows whose outlet is not in the live roster (not counted). */
+  targetsOutsideRoster: number;
+}
 
-export type KycActionablesBuilder = (
-  prisma: PrismaService,
-  ctx: ReportContext,
-  holidays: Set<string>,
-  /** clientId → { fieldHrs, gifsyHrs } — the two-stage SLA targets; missing tenants default to 24/96. */
-  slaTargets: Map<string, KycSlaTargets>,
-) => Promise<ReportResult>;
+/**
+ * Gifsy-wide Voucher Dispersal (GIFSY-run Excel → Hubble → WhatsApp campaigns; not tied to a tenant — the
+ * WhatsApp receipts are written under the platform tenant 'gifsy', so no tenant section can see them).
+ */
+export interface VoucherDispersalSection {
+  /** Rows → BOUGHT in the window (boughtAt). */
+  bought: number;
+  /** Rows → BUY_FAILED in the window (updatedAt). */
+  buyFailed: number;
+  /** BOUGHT rows whose WhatsApp is FAILED / UNKNOWN, recorded in the window (updatedAt). */
+  messageFailed: number;
+  /** QUEUED + BUYING + PENDING_RECONCILE right now (the campaign screen's "pending"). */
+  pending: number;
+  /** Of `pending`: PENDING_RECONCILE rows past the 2 h retry gate (an admin may Retry now). */
+  pendingRetryable: number;
+  /** STILL OPEN (now): rows in BUY_FAILED (a Retry moves a row out of BUY_FAILED). */
+  buyFailedOpen: number;
+  /** STILL OPEN (now): BOUGHT rows whose WhatsApp is FAILED / UNKNOWN (a Resend clears the status). */
+  messageFailedOpen: number;
+}
+
+/** Client.status values. */
+export type TenantStatus = 'ACTIVE' | 'ONBOARDING' | 'INACTIVE';
+
+export interface TenantDigest {
+  clientId: string;
+  name: string;
+  /** Client.status. A non-ACTIVE tenant is shown (with its status) only when it has activity or open items. */
+  status?: TenantStatus;
+  /** features.hubbleVoucherEnabled — the Vouchers section is loaded for EVERY tenant (live problems show even when off). */
+  hubbleEnabled?: boolean;
+  kyc: SectionResult<KycSection>;
+  points: SectionResult<PointsSection>;
+  redemptions: SectionResult<RedemptionsSection>;
+  /** Loaded for every tenant; shown when non-empty (labelled "integration switched off" when the flag is off). */
+  vouchers?: SectionResult<VouchersSection>;
+  payouts: SectionResult<PayoutsSection>;
+  messages: SectionResult<MessagesSection>;
+  /** Present ONLY for tenants with the visibilityEnabled setting ON. */
+  visibility?: SectionResult<VisibilitySection>;
+  /** Present ONLY for tenants with features.salesImport. */
+  salesImport?: SectionResult<SalesImportSection>;
+  /** Present ONLY for tenants with features.salesImport (its own try/catch — a failure never hides Sales Import). */
+  billing?: SectionResult<BillingSection>;
+}
+
+export interface DigestInput {
+  window: DigestWindow;
+  /** Date the digest is sent, e.g. "13 Nov 2026" (IST). */
+  dateLabel: string;
+  tenants: TenantDigest[];
+  /** Gifsy-wide OTP delivery failures in the window: pre-login (no user) + Gifsy staff users (clientId 'gifsy'). */
+  gifsyOtpFailed?: SectionResult<{ preLogin: number; gifsyStaff: number }>;
+  /** Gifsy-wide Voucher Dispersal; hidden when every figure is zero, "couldn't load" when it failed. */
+  voucherDispersal?: SectionResult<VoucherDispersalSection>;
+  /**
+   * Run-level problems (a shared loader failed, the window was capped, …). Each is rendered in a red
+   * "This digest is incomplete" box at the top and counts as an attention item.
+   */
+  runNotices?: string[];
+  /** Informational window notes (first tracked run, manual re-run) — shown under the window, not attention. */
+  windowNotes?: string[];
+  /** Configured recipients DROPPED at send time (not on an allowed internal domain) — named in the footer. */
+  droppedRecipients?: string[];
+}
+
+/** The rendered digest. */
+export interface DigestResult {
+  key: ReportKey;
+  subject: string;
+  html: string;
+  /** Tenants with at least one "needs attention" item. */
+  tenantsNeedingAttention: number;
+  /** Total "needs attention" items across tenants + the Gifsy-wide items. */
+  attentionItems: number;
+  /** Gifsy-wide (not tenant) attention items: voucher dispersal, Gifsy-wide OTP failures, run notices. */
+  gifsyWideItems: number;
+  /** Non-ACTIVE tenants left out because they had no activity and no open items (named in the email). */
+  hiddenTenants: number;
+}

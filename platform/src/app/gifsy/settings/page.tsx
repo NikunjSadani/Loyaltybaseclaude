@@ -8,7 +8,10 @@ import {
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { getStoredUser } from '@/lib/auth-client';
 import { fetchHolidays, saveHolidays, type Holiday } from '@/lib/holidays';
-import { fetchReportRecipients, saveReportRecipients, type ReportRecipients } from '@/lib/report-recipients';
+import {
+  fetchReportRecipients, saveReportRecipients, emailDomain, DEFAULT_ALLOWED_DOMAINS,
+  type RecipientsSource, type ReportRecipientsState,
+} from '@/lib/report-recipients';
 
 const INPUT_CLS =
   'w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/30';
@@ -113,68 +116,97 @@ export default function GifsySettingsPage() {
     setTimeout(() => setHolidaysSaved(false), 3000);
   };
 
-  // ── Report recipients (per-report email distribution lists for the daily Mon–Sat operator
-  // digests) ── GET/PUT /api/admin/settings/report-recipients via fetch/saveReportRecipients. Both
-  // GET and PUT are GIFSY_ADMIN-only, so we skip the fetch for anyone else. `recipientsLoaded` gates
-  // Save so we never PUT before the fetch. Each row must be a valid email (mirrors the backend).
+  // ── Report recipients (the ONE internal Daily Operations Digest list, Mon–Sat) ──
+  // GET/PUT /api/admin/settings/report-recipients via fetch/saveReportRecipients. Both GET and PUT
+  // are GIFSY_ADMIN-only, so we skip the fetch for anyone else. Save only renders after a SUCCESSFUL
+  // load — a failed load shows a red error and no editable list, so we can never PUT an empty list
+  // over a list we failed to read. Each row must be a valid email on an allowed (internal) domain —
+  // mirrors the backend, which rejects anything else with a 400.
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  type RecipientList = keyof ReportRecipients; // 'creditsPayouts' | 'kycActionables'
 
-  const [creditsPayouts,   setCreditsPayouts]   = useState<string[]>([]);
-  const [kycActionables,   setKycActionables]   = useState<string[]>([]);
+  const [dailyDigest,      setDailyDigest]      = useState<string[]>([]);
   const [recipientsLoaded, setRecipientsLoaded] = useState(false);
+  const [recipientsLoadError, setRecipientsLoadError] = useState<string | null>(null);
+  const [recipientsSource, setRecipientsSource] = useState<RecipientsSource>('none');
+  const [allowedDomains,   setAllowedDomains]   = useState<string[]>(DEFAULT_ALLOWED_DOMAINS);
+  const [blockedRecipients, setBlockedRecipients] = useState<string[]>([]);
+  // How many recipients the server last reported (load or save) — drives the empty-list copy.
+  const [serverCount,      setServerCount]      = useState(0);
   const [recipientsSaved,  setRecipientsSaved]  = useState(false);
   const [recipientsError,  setRecipientsError]  = useState<string | null>(null);
+
+  const applyRecipientsState = (s: ReportRecipientsState) => {
+    setDailyDigest(s.dailyDigest);
+    setRecipientsSource(s.source);
+    setAllowedDomains(s.allowedDomains);
+    setBlockedRecipients(s.blocked);
+    setServerCount(s.dailyDigest.length);
+  };
 
   useEffect(() => {
     if (!isGifsyAdmin) return;
     fetchReportRecipients()
-      .then(({ creditsPayouts, kycActionables }) => {
-        setCreditsPayouts(creditsPayouts);
-        setKycActionables(kycActionables);
+      .then((res) => {
+        if (res.ok) applyRecipientsState(res.data);
+        else setRecipientsLoadError(res.error);
       })
+      .catch((err: unknown) =>
+        setRecipientsLoadError(err instanceof Error && err.message ? err.message : 'network error'),
+      )
       .finally(() => setRecipientsLoaded(true));
   }, [isGifsyAdmin]);
 
-  // Every row of BOTH lists must be a valid, non-empty email for a save to be allowed.
-  const recipientsValid =
-    [...creditsPayouts, ...kycActionables].every((e) => EMAIL_RE.test(e.trim()));
+  const domainRule = allowedDomains.map((d) => `@${d}`).join(', ');
+  const blockedSet = new Set(blockedRecipients.map((e) => e.trim().toLowerCase()));
+  // Inline per-row error (null = fine, or an empty row which just keeps Save disabled).
+  const recipientRowError = (raw: string): string | null => {
+    const e = raw.trim();
+    if (e === '') return null;
+    if (!EMAIL_RE.test(e)) return 'Not a valid email address';
+    if (!allowedDomains.includes(emailDomain(e)) || blockedSet.has(e.toLowerCase())) {
+      return `Not an internal address — only ${domainRule} is allowed`;
+    }
+    return null;
+  };
 
-  const setRecipientList = (which: RecipientList, next: string[]) => {
-    if (which === 'creditsPayouts') setCreditsPayouts(next); else setKycActionables(next);
-  };
-  const updateRecipient = (which: RecipientList, index: number, value: string) => {
-    const list = which === 'creditsPayouts' ? creditsPayouts : kycActionables;
-    setRecipientList(which, list.map((e, i) => (i === index ? value : e)));
-  };
-  const addRecipientRow = (which: RecipientList) => {
-    const list = which === 'creditsPayouts' ? creditsPayouts : kycActionables;
-    setRecipientList(which, [...list, '']);
-  };
-  const removeRecipientRow = (which: RecipientList, index: number) => {
-    const list = which === 'creditsPayouts' ? creditsPayouts : kycActionables;
-    setRecipientList(which, list.filter((_, i) => i !== index));
-  };
+  // Every row must be a non-empty, valid, internal email for a save to be allowed.
+  const recipientsValid = dailyDigest.every((e) => e.trim() !== '' && recipientRowError(e) === null);
+
+  const updateRecipient = (index: number, value: string) =>
+    setDailyDigest(dailyDigest.map((e, i) => (i === index ? value : e)));
+  const addRecipientRow = () => setDailyDigest([...dailyDigest, '']);
+  const removeRecipientRow = (index: number) => setDailyDigest(dailyDigest.filter((_, i) => i !== index));
 
   const handleRecipientsSave = async () => {
     setRecipientsError(null);
-    const cleanCredits = creditsPayouts.map((e) => e.trim());
-    const cleanKyc     = kycActionables.map((e) => e.trim());
-    const bad = [...cleanCredits, ...cleanKyc].find((e) => !EMAIL_RE.test(e));
+    if (recipientsLoadError) return; // never overwrite a list we failed to load
+    const clean = dailyDigest.map((e) => e.trim());
+    if (clean.some((e) => e === '')) {
+      setRecipientsError('Every recipient row needs an email address.');
+      return;
+    }
+    const bad = clean.find((e) => recipientRowError(e) !== null);
     if (bad !== undefined) {
-      setRecipientsError(bad === '' ? 'Every recipient row needs an email address.' : `"${bad}" is not a valid email address.`);
+      setRecipientsError(`"${bad}": ${recipientRowError(bad)}.`);
       return;
     }
-    const ok = await saveReportRecipients({ creditsPayouts: cleanCredits, kycActionables: cleanKyc });
-    if (!ok) {
-      setRecipientsError('Could not save the report recipients — please try again.');
+    const res = await saveReportRecipients({ dailyDigest: clean });
+    if (!res.ok) {
+      setRecipientsError(`Could not save the report recipients — ${res.error}`);
       return;
     }
-    setCreditsPayouts(cleanCredits);
-    setKycActionables(cleanKyc);
+    applyRecipientsState(res.data);
     setRecipientsSaved(true);
     setTimeout(() => setRecipientsSaved(false), 3000);
   };
+
+  // Truthful empty-list copy: what actually happens to the digest in this state.
+  const emptyRecipientsCopy =
+    serverCount > 0
+      ? 'Unsaved: saving an empty list means nobody gets the digest.'
+      : recipientsSource === 'saved'
+        ? 'The saved list is empty — nobody gets the digest.'
+        : 'No recipients yet — nobody gets the digest until you add one and save.';
 
   return (
     <div className="space-y-6 max-w-2xl">
@@ -253,56 +285,86 @@ export default function GifsySettingsPage() {
       <SettingSection icon={Mail} title="Report Recipients">
         <div data-testid="report-recipients-card" className="space-y-4">
           <PlatformNote>
-            One internal Gifsy distribution list for the daily reports (Mon–Sat). Applies to
-            all tenants — not per-tenant. Only a Gifsy Admin can change it.
+            One internal Gifsy distribution list for the Daily Operations Digest (Mon–Sat, 09:30 IST):
+            an all-tenant summary plus one section per tenant. Internal Gifsy recipients only — not
+            clients. Only a Gifsy Admin can change it.
           </PlatformNote>
 
           {!isGifsyAdmin ? (
             <GifsyAdminOnlyNote thing="report recipients" />
           ) : !recipientsLoaded ? (
             <p className="text-sm text-white/40">Loading recipients…</p>
+          ) : recipientsLoadError ? (
+            <p
+              data-testid="recipients-load-error"
+              role="alert"
+              className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2"
+            >
+              Couldn&apos;t load the report recipients — {recipientsLoadError}. Reload to try again; saving
+              is disabled so the current list isn&apos;t overwritten.
+            </p>
           ) : (
             <>
-              {([
-                ['creditsPayouts', 'Credits & Payouts summary', creditsPayouts] as const,
-                ['kycActionables', 'KYC actionables digest',    kycActionables] as const,
-              ]).map(([which, title, list]) => (
-                <div key={which} data-testid={`recipients-group-${which}`}>
-                  <p className="text-xs font-medium text-white/50 mb-2">{title}</p>
-                  {list.length === 0 ? (
-                    <p className="text-xs text-white/30 italic mb-2">No recipients yet — add one below.</p>
-                  ) : (
-                    <div className="space-y-2 mb-2">
-                      {list.map((email, i) => (
-                        <div key={i} data-testid={`recipient-row-${which}`} className="flex items-center gap-2">
-                          <input
-                            type="email"
-                            data-testid={`recipient-input-${which}`}
-                            aria-label={`${title} recipient email`}
-                            value={email}
-                            onChange={(e) => updateRecipient(which, i, e.target.value)}
-                            placeholder="name@example.com"
-                            className={INPUT_CLS}
-                          />
-                          <button
-                            type="button"
-                            aria-label={`Remove ${email || 'recipient'}`}
-                            onClick={() => removeRecipientRow(which, i)}
-                            className="text-white/40 hover:text-red-400 transition-colors shrink-0"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+              <div data-testid="recipients-group-dailyDigest">
+                <p className="text-xs font-medium text-white/50 mb-1">Daily Operations Digest</p>
+                <p data-testid="recipients-domain-rule" className="text-[11px] text-white/40 mb-2">
+                  Internal Gifsy addresses only: {domainRule}
+                </p>
+                {recipientsSource === 'legacy' && (
+                  <p
+                    data-testid="recipients-inherited"
+                    className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-1.5 mb-2"
+                  >
+                    Inherited from the two old daily emails&apos; lists — not saved yet. Review and Save to
+                    make this the digest list.
+                  </p>
+                )}
+                {dailyDigest.length === 0 ? (
+                  <p className="text-xs text-white/30 italic mb-2">{emptyRecipientsCopy}</p>
+                ) : (
+                  <div className="space-y-2 mb-2">
+                    {dailyDigest.map((email, i) => {
+                      const rowError = recipientRowError(email);
+                      const errId = `recipient-error-dailyDigest-${i}`;
+                      return (
+                        <div key={i} data-testid="recipient-row-dailyDigest">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="email"
+                              data-testid="recipient-input-dailyDigest"
+                              aria-label="Daily Operations Digest recipient email"
+                              aria-invalid={rowError ? true : undefined}
+                              aria-describedby={rowError ? errId : undefined}
+                              value={email}
+                              onChange={(e) => updateRecipient(i, e.target.value)}
+                              placeholder="name@gifsy.in"
+                              className={INPUT_CLS + (rowError ? ' border-red-500/60' : '')}
+                            />
+                            <button
+                              type="button"
+                              aria-label={`Remove ${email || 'recipient'}`}
+                              onClick={() => removeRecipientRow(i)}
+                              className="text-white/40 hover:text-red-400 transition-colors shrink-0"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                          {rowError && (
+                            <p id={errId} data-testid="recipient-error-dailyDigest" className="text-[11px] text-red-400 mt-1">
+                              {rowError}
+                            </p>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  )}
-                  <RowAddButton
-                    data-testid={`recipient-add-${which}`}
-                    onClick={() => addRecipientRow(which)}
-                    label="Add recipient"
-                  />
-                </div>
-              ))}
+                      );
+                    })}
+                  </div>
+                )}
+                <RowAddButton
+                  data-testid="recipient-add-dailyDigest"
+                  onClick={addRecipientRow}
+                  label="Add recipient"
+                />
+              </div>
               {recipientsError && <p className="text-xs text-red-400">{recipientsError}</p>}
               <SaveRow
                 data-testid="recipients-save"
