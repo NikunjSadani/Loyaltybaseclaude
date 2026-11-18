@@ -1523,6 +1523,15 @@ from the step-1 backup if needed).
      APPLY / RECALC, the validated request, who, `requestId`, status QUEUED → RUNNING → DONE / FAILED, claim token +
      heartbeat + attempts) and `sales_apply_job_months` (one per month: status + the ApplyMonthResult). A PARTIAL unique
      index allows ONE active (QUEUED / RUNNING) job per tenant × month.
+   - **⚠️ This migration is NOT re-runnable** (verified on staging 2026-11-18: a second run inside a rolled-back
+     transaction fails with `relation "sales_apply_jobs" already exists`; it uses plain `CREATE TABLE`). It is already
+     recorded as applied on staging, so it is NOT edited (that would change its checksum). **Prod recovery if
+     `migrate deploy` fails part-way through it:** (1) read-only check which of its objects exist
+     (`sales_apply_jobs`, `sales_apply_job_months`, their indexes incl. `sales_apply_job_months_active_month_key`);
+     (2) with the owner's OK and the SQL shown first, `DROP TABLE IF EXISTS "sales_apply_job_months", "sales_apply_jobs"`
+     — both are brand-new and empty at that point, so nothing is lost; (3) `npx prisma migrate resolve --rolled-back
+     20261118170000_sales_apply_jobs`; (4) re-run `migrate deploy`. The other two migrations in this release
+     (`20261118160000_voucher_dispersal_batches`, `20261118180000_tds_payee_snapshot`) re-ran cleanly in the same test.
    - **API**: `POST admin/sales-import/:id/apply` and `POST admin/sales-months/:month/recalculate` run every cheap check
      (all the 4xx as before, except the focus-fingerprint check, which the worker runs before any write), record the job
      and answer **202 `{ job, results }`** (`results` = one "being applied in the background — refresh" line per month for a
