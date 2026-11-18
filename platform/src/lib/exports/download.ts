@@ -16,6 +16,7 @@ import { downloadBlob } from '@/lib/download';
 import { getStoredUser } from '@/lib/auth-client';
 import type { ExportList, ExportQueuedResponse, ExportRequestDto } from '@/lib/exports/types';
 import { EXPORT_MAX_ACTIVE_PER_USER } from '@/lib/exports/types';
+import { backgroundInit } from '@/lib/client-medium';
 
 /** Where the Downloads page lives in the admin portal (every report button links here). */
 export const DOWNLOADS_PAGE_HREF = '/admin/downloads';
@@ -174,11 +175,15 @@ export type ExportListResult =
   | { ok: false; message: string; status?: number };
 
 /** GET /api/admin/exports?cursor= — the caller's own requests, newest first. */
-export async function fetchExportList(cursor?: string | null): Promise<ExportListResult> {
+export async function fetchExportList(
+  cursor?: string | null,
+  opts: { background?: boolean } = {},
+): Promise<ExportListResult> {
   const url = cursor ? `${EXPORTS_BASE}?cursor=${encodeURIComponent(cursor)}` : EXPORTS_BASE;
   let res: Response;
   try {
-    res = await fetch(url);
+    // background → an automatic poll/badge count: X-Background: 1 so the Usage Report does not count it as activity.
+    res = await (opts.background ? fetch(url, backgroundInit()) : fetch(url));
   } catch {
     return { ok: false, message: "Couldn't reach the server. Check your connection and try again." };
   }

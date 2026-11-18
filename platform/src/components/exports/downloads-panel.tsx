@@ -202,10 +202,11 @@ export function DownloadsPanel({ tone = 'light', console: isConsole = false }: {
     return () => { mounted.current = false; };
   }, []);
 
-  /** Load (or re-load) the first page. `silent` = a background refresh: keep the list on screen. */
-  const loadFirst = useCallback(async (silent: boolean) => {
+  /** Load (or re-load) the first page. `silent` = keep the list on screen. `automatic` = a timer / tab-return
+   *  refresh nobody clicked → sent as a background request so the Usage Report does not count it as activity. */
+  const loadFirst = useCallback(async (silent: boolean, automatic = false) => {
     if (silent) setRefreshing(true);
-    const res = await fetchExportList(null);
+    const res = await fetchExportList(null, { background: automatic });
     if (!mounted.current) return;
     setNow(Date.now());
     if (res.ok) {
@@ -240,14 +241,14 @@ export function DownloadsPanel({ tone = 'light', console: isConsole = false }: {
   const delay = nextPollDelay(failures);
   useEffect(() => {
     if (!hasActive || !visible || loading) return;
-    const id = setTimeout(() => { void loadFirst(true); }, delay);
+    const id = setTimeout(() => { void loadFirst(true, true); }, delay);
     return () => clearTimeout(id);
   }, [hasActive, visible, loading, pollTick, delay, loadFirst]);
 
   // Coming back to the tab with work in progress → refresh straight away.
   const wasVisible = useRef(visible);
   useEffect(() => {
-    if (visible && !wasVisible.current && hasActive) void loadFirst(true);
+    if (visible && !wasVisible.current && hasActive) void loadFirst(true, true);
     wasVisible.current = visible;
   }, [visible, hasActive, loadFirst]);
 

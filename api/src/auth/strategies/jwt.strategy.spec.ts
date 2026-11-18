@@ -10,6 +10,7 @@
 import { UnauthorizedException } from '@nestjs/common';
 import { JwtStrategy } from './jwt.strategy';
 import { SESSION_TTL_DAYS } from '../auth.constants';
+import { ActivityTrackingService } from '../../activity/activity-tracking.service';
 
 const mockPrisma = {
   // updateMany drives the fire-and-forget sliding-session bump; default to a resolved
@@ -23,6 +24,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const freshExpiry = () => new Date(Date.now() + SESSION_TTL_DAYS * DAY_MS);
 
 const mockActivity = { markActive: jest.fn() };
+
+/** An installed-app request from an Android phone (how the platform frontend + browser send it). */
+const ANDROID_UA =
+  'Mozilla/5.0 (Linux; Android 14; SM-A146B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36';
+const REQ = { headers: { 'x-client-medium': 'app', 'user-agent': ANDROID_UA } };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -56,15 +62,52 @@ describe('JwtStrategy', () => {
     it('S3: returns the JWT payload when an active session exists', async () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9876543210', name: 'Test' };
-      const result  = await strategy.validate(payload as any);
+      const result  = await strategy.validate(REQ, payload as any);
       expect(result).toEqual(payload);
     });
 
     it('S5: stamps the user active (fire-and-forget) on a valid session', async () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9876543210', name: 'Test' };
-      await strategy.validate(payload as any);
-      expect(mockActivity.markActive).toHaveBeenCalledWith('user_1', 'deoleo');
+      await strategy.validate(REQ, payload as any);
+      expect(mockActivity.markActive).toHaveBeenCalledWith('user_1', 'deoleo', { medium: 'app', device: 'phone' });
+    });
+
+    it('S5b: passes the request medium/device through (browser on a computer; junk header → unknown)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      const payload = { sub: 'user_1', role: 'CLIENT_ADMIN', clientId: 'bajaj' };
+      const pcUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
+      await strategy.validate({ headers: { 'x-client-medium': 'browser', 'user-agent': pcUa } }, payload as any);
+      expect(mockActivity.markActive).toHaveBeenLastCalledWith('user_1', 'bajaj', { medium: 'browser', device: 'computer' });
+      await strategy.validate({ headers: { 'x-client-medium': 'hacker' } }, payload as any);
+      expect(mockActivity.markActive).toHaveBeenLastCalledWith('user_1', 'bajaj', { medium: 'unknown', device: 'unknown' });
+    });
+
+    it('S5d: a BACKGROUND request (X-Background: 1 — bell poll, badge, beacons) is authenticated but NOT activity', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      const payload = { sub: 'user_1', role: 'SSS', clientId: 'bajaj' };
+      await expect(
+        strategy.validate({ headers: { ...REQ.headers, 'x-background': '1' } }, payload as any),
+      ).resolves.toEqual(payload);
+      expect(mockActivity.markActive).not.toHaveBeenCalled();
+      // anything but exactly '1' is a normal request
+      await strategy.validate({ headers: { ...REQ.headers, 'x-background': 'true' } }, payload as any);
+      expect(mockActivity.markActive).toHaveBeenCalledTimes(1);
+    });
+
+    it('S5c: HOT PATH — validate resolves even when the activity DB write never settles or throws', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      const payload = { sub: 'user_1', role: 'SSS', clientId: 'bajaj' };
+      // A REAL ActivityTrackingService whose DB write hangs forever → validate must not wait for it.
+      const hanging = new ActivityTrackingService({ $executeRaw: jest.fn(() => new Promise(() => undefined)) } as any);
+      const s1 = new JwtStrategy(makeConfig('supersecret'), mockPrisma as any, hanging);
+      await expect(s1.validate(REQ, payload as any)).resolves.toEqual(payload);
+      // …and whose DB client throws synchronously → validate must not throw.
+      const throwing = new ActivityTrackingService({ $executeRaw: jest.fn(() => { throw new Error('boom'); }) } as any);
+      const s2 = new JwtStrategy(makeConfig('supersecret'), mockPrisma as any, throwing);
+      await expect(s2.validate(REQ, payload as any)).resolves.toEqual(payload);
+      // …and a request object with no headers at all is fine too.
+      await expect(s2.validate(undefined, payload as any)).resolves.toEqual(payload);
     });
 
     // ── Sliding-session bump (SESSION_TTL_DAYS = 30) ────────────────────────────
@@ -73,7 +116,7 @@ describe('JwtStrategy', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + 2 * DAY_MS) });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9', name: 'T' };
 
-      await strategy.validate(payload as any);
+      await strategy.validate(REQ, payload as any);
 
       expect(mockPrisma.userSession.updateMany).toHaveBeenCalledTimes(1);
       const arg = mockPrisma.userSession.updateMany.mock.calls[0][0];
@@ -91,7 +134,7 @@ describe('JwtStrategy', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + (SESSION_TTL_DAYS - 0.5) * DAY_MS) });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9', name: 'T' };
 
-      await strategy.validate(payload as any);
+      await strategy.validate(REQ, payload as any);
 
       expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
     });
@@ -100,7 +143,7 @@ describe('JwtStrategy', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue(null); // revoked/expired → no row
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9', name: 'T' };
 
-      await expect(strategy.validate(payload as any)).rejects.toThrow(UnauthorizedException);
+      await expect(strategy.validate(REQ, payload as any)).rejects.toThrow(UnauthorizedException);
       expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
     });
 
@@ -110,20 +153,20 @@ describe('JwtStrategy', () => {
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9', name: 'T' };
 
       // Must still resolve with the payload despite the slide write rejecting.
-      await expect(strategy.validate(payload as any)).resolves.toEqual(payload);
+      await expect(strategy.validate(REQ, payload as any)).resolves.toEqual(payload);
     });
 
     it('S6: does NOT stamp activity when the session is invalid', async () => {
       mockPrisma.userSession.findFirst.mockResolvedValue(null);
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9876543210', name: 'Test' };
-      await expect(strategy.validate(payload as any)).rejects.toThrow(UnauthorizedException);
+      await expect(strategy.validate(REQ, payload as any)).rejects.toThrow(UnauthorizedException);
       expect(mockActivity.markActive).not.toHaveBeenCalled();
     });
 
     it('S4: throws UnauthorizedException when session is revoked or expired', async () => {
       mockPrisma.userSession.findFirst.mockResolvedValue(null);
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9876543210', name: 'Test' };
-      await expect(strategy.validate(payload as any)).rejects.toThrow(UnauthorizedException);
+      await expect(strategy.validate(REQ, payload as any)).rejects.toThrow(UnauthorizedException);
     });
   });
 });

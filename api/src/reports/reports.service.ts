@@ -13,6 +13,8 @@ import {
   visibilityStatusWhere,
 } from '../exports/kinds/batch1/visibility-status';
 import { KYC_STATUS_OUTLET_SELECT, kycStatusRows, kycStatusRoutingEnabled } from '../exports/kinds/batch1/kyc-status';
+import { UsageReportQueryDto } from './dto/usage-report.dto';
+import { buildUsageReport, pageOfUsageReport, resolveUsageParams } from './usage/usage-report';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -331,6 +333,19 @@ export class ReportsService {
       months,
       rows,
     });
+  }
+
+  // ── Usage Report ──────────────────────────────────────────────────────────────
+  /**
+   * Usage Report (JSON) — who used the app in an IST date range, how (installed app vs browser; phone vs
+   * computer), and for how long (a minimum). One page of rows + totals over the whole filtered population.
+   * Built by the shared buildUsageReport (also behind the 'usage-report' Excel kind). Tenant = the caller's
+   * JWT clientId, exactly like the Session Report. See reports/usage/usage-report.ts.
+   */
+  async usageReport(user: JwtPayload, q: UsageReportQueryDto): Promise<ReportResult> {
+    const params = resolveUsageParams(q);
+    const report = await buildUsageReport(this.prisma, user.clientId, params);
+    return this.toJson(pageOfUsageReport(report, params));
   }
 
   /** Formats an ISO timestamp as IST 'YYYY-MM-DD HH:mm' (fixed UTC+5:30); '' if null. */

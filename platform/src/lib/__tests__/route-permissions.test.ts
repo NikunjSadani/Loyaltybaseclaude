@@ -46,4 +46,9 @@ describe('requiredPermissionForPath()', () => {
     expect(requiredPermissionForPath('/admin/sales')).toBeNull(); // Sales Data
     expect(requiredPermissionForPath('/admin/does-not-exist')).toBeNull();
   });
+
+  it('Usage Report has the SAME page permission as the Session Report (reports:read)', () => {
+    expect(requiredPermissionForPath('/admin/reports/usage')).toBe('reports:read');
+    expect(requiredPermissionForPath('/admin/reports/usage')).toBe(requiredPermissionForPath('/admin/reports/session'));
+  });
 });

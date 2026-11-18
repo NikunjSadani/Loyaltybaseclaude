@@ -6,6 +6,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/reports.dto';
 import { ExportsService } from '../exports/exports.service';
+import { UsageReportQueryDto } from './dto/usage-report.dto';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -81,6 +82,22 @@ export class ReportsController {
   @RequirePermission('reports:read')
   async sessionReport(@CurrentUser() user: JwtPayload, @Query() query: ReportRangeQueryDto) {
     return this.respond(await this.reports.sessionReport(user, query));
+  }
+
+  /**
+   * GET /v1/reports/usage — per-user Usage Report (same access as the Session Report). JSON = one page of rows +
+   * totals; `format=xlsx` = every filtered row through the 'usage-report' export kind (streams; 404 when none match).
+   */
+  @Get('usage')
+  @Roles('GIFSY_ADMIN', 'MIS_USER', 'CLIENT_ADMIN')
+  @RequirePermission('reports:read')
+  async usage(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: UsageReportQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (query.format === ReportFormat.XLSX) return this.exports.respond(res, user, 'usage-report', query);
+    return this.respond(await this.reports.usageReport(user, query));
   }
 
   @Get('kyc-status')

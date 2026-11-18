@@ -75,7 +75,10 @@ export default function BroadcastDetailPage() {
         setLoading(true);
         setError(null);
       }
-      const res = await api.get<BroadcastDetail>(`/api/admin/whatsapp-broadcasts/${id}`);
+      // `silent` is only the 5 s live-funnel poll → a background request (not counted as activity).
+      const res = silent
+        ? await api.get<BroadcastDetail>(`/api/admin/whatsapp-broadcasts/${id}`, { background: true })
+        : await api.get<BroadcastDetail>(`/api/admin/whatsapp-broadcasts/${id}`);
       if (res.success) {
         setData(res.data);
         setError(null);

@@ -23,6 +23,7 @@
 // -----------------------------------------------------------------------------
 import { useEffect } from 'react';
 import { authHeader } from '@/lib/api-client';
+import { BACKGROUND_HEADER, isStandaloneDisplay } from '@/lib/client-medium';
 
 const BEACON_SENT_KEY = 'pwa-install-beacon-sent';
 
@@ -35,17 +36,9 @@ function detectPlatform(ua: string): InstallPlatform {
   return 'OTHER';
 }
 
-// True when the app is running as an installed PWA: standard display-mode match
-// OR the legacy iOS Safari standalone flag.
-function isStandalone(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    if (window.matchMedia?.('(display-mode: standalone)')?.matches) return true;
-  } catch {
-    /* matchMedia unavailable — fall through to the iOS flag */
-  }
-  return (navigator as unknown as { standalone?: boolean }).standalone === true;
-}
+// "Installed app" detection is shared with the Usage Report's X-Client-Medium tagging
+// (one definition): standard display-mode match OR the legacy iOS Safari standalone flag.
+const isStandalone = isStandaloneDisplay;
 
 export default function InstallBeacon({ tenantSlug }: { tenantSlug?: string }) {
   useEffect(() => {
@@ -69,7 +62,8 @@ export default function InstallBeacon({ tenantSlug }: { tenantSlug?: string }) {
         const ua = navigator.userAgent ?? '';
         void fetch('/api/push/installed', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeader() },
+          // Automatic telemetry → background (X-Background: 1): never counted as activity by the Usage Report.
+          headers: { 'Content-Type': 'application/json', ...authHeader(), [BACKGROUND_HEADER]: '1' },
           body: JSON.stringify({
             platform: detectPlatform(ua),
             userAgent: ua.slice(0, 512),

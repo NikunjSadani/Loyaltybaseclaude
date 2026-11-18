@@ -1,3 +1,4 @@
+import { BACKGROUND_HEADER } from '@/lib/client-medium';
 // -----------------------------------------------------------------------------
 // Web Push subscribe helpers — PWA phase F5 (FE glue). SHIPPED DISABLED.
 //
@@ -40,10 +41,10 @@ export function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuf
  * not configured server-side (empty publicKey) — the caller treats '' as
  * "push unavailable, do nothing".
  */
-export async function getVapidPublicKey(): Promise<string> {
+export async function getVapidPublicKey(opts: { background?: boolean } = {}): Promise<string> {
   try {
     const res = await fetch('/api/push/vapid-public-key', {
-      headers: { Accept: 'application/json' },
+      headers: { Accept: 'application/json', ...(opts.background ? { [BACKGROUND_HEADER]: '1' } : {}) },
     });
     if (!res.ok) return '';
     const body = (await res.json()) as { data?: { publicKey?: string } };
@@ -58,7 +59,11 @@ export async function getVapidPublicKey(): Promise<string> {
  * backend. Idempotent: reuses an existing PushSubscription if present, and the
  * backend upserts by endpoint, so calling it repeatedly is safe.
  */
-export async function subscribeToPush(): Promise<SubscribeResult> {
+/**
+ * `background: true` = an automatic re-sync on page load (not a tap) → X-Background: 1, so the Usage Report does
+ * not count it as activity. A user tapping "Enable" calls it without the flag.
+ */
+export async function subscribeToPush(opts: { background?: boolean } = {}): Promise<SubscribeResult> {
   // Capability gate.
   if (
     typeof navigator === 'undefined' ||
@@ -78,7 +83,7 @@ export async function subscribeToPush(): Promise<SubscribeResult> {
   }
 
   try {
-    const publicKey = await getVapidPublicKey();
+    const publicKey = await getVapidPublicKey(opts);
     if (!publicKey) return 'unavailable';
 
     const reg = await navigator.serviceWorker.ready;
@@ -99,7 +104,7 @@ export async function subscribeToPush(): Promise<SubscribeResult> {
 
     const res = await fetch('/api/push/subscribe', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(opts.background ? { [BACKGROUND_HEADER]: '1' } : {}) },
       body: JSON.stringify({
         endpoint,
         keys: { p256dh, auth },

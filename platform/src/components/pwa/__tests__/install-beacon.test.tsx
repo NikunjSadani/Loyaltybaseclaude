@@ -56,6 +56,8 @@ describe('InstallBeacon', () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('/api/push/installed');
     expect(init.method).toBe('POST');
+    // automatic telemetry → marked background, so the Usage Report never counts it as activity
+    expect(init.headers['X-Background']).toBe('1');
     const body = JSON.parse(init.body as string);
     expect(body.platform).toBe('ANDROID');
     expect(body.userAgent).toBe(ANDROID_UA);
