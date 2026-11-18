@@ -729,6 +729,25 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(prisma.voucherDispersalOrderAlert.count).toHaveBeenCalledWith({ where: { resolvedAt: win } });
   });
 
+  it('voucher dispersal: OPEN alerts NOW (any age), by kind — the "still open" figure', async () => {
+    prisma.voucherDispersalOrderAlert.groupBy.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+      Promise.resolve(
+        where.OR
+          ? [] // nothing new in the window
+          : [
+              { kind: 'SUPERSEDED', hubbleStatus: 'SUCCESS', _count: { _all: 1 } },
+              { kind: 'NOT_APPLIED', hubbleStatus: 'LOOKUP_FAILED', _count: { _all: 2 } },
+            ],
+      ),
+    );
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    expect(input.voucherDispersal).toMatchObject({
+      ok: true,
+      data: { earlierOrderAlerts: 0, earlierOrderAlertsOpen: 3, earlierOrderAlertsOpenBy: { superseded: 1, marked: 0, notApplied: 0, couldNotCheck: 2 } },
+    });
+    expect(prisma.voucherDispersalOrderAlert.groupBy).toHaveBeenCalledWith({ by: ['kind', 'hubbleStatus'], where: { resolvedAt: null }, _count: { _all: true } });
+  });
+
   it('voucher dispersal (L8): FAILED rows (not marked) whose latest lookup was an undocumented status count as "not recognised"', async () => {
     prisma.voucherDispersalRow.count.mockImplementation(({ where }: { where: Record<string, any> }) =>
       Promise.resolve(where.lastReconcileResult ? 2 : 0),
@@ -781,7 +800,8 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       data: {
         bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 5, messageFailedOpen: 6,
         overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0, earlierOrderAlerts: 0,
-        earlierOrderAlertsBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 }, earlierOrderAlertsResolved: 0, markedClosed: 5,
+        earlierOrderAlertsBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 }, earlierOrderAlertsResolved: 0,
+        earlierOrderAlertsOpen: 0, earlierOrderAlertsOpenBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 }, markedClosed: 5,
         unrecognisedStatus: 0,
       },
     });

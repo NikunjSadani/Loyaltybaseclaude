@@ -291,7 +291,18 @@ function alertSubject(kind: string): string {
 }
 
 function alertHistory(a: VdEarlierOrderAlert): string {
-  return a.statusHistory.length > 1 ? ` (reports: ${a.statusHistory.join(' → ')})` : '';
+  const label = (x: string) => (x === 'NO_ORDER_UNVERIFIED' ? 'NO_ORDER (unverified)' : x);
+  return a.statusHistory.length > 1 ? ` (reports: ${a.statusHistory.map(label).join(' → ')})` : '';
+}
+
+/** An open alert whose LATEST report says "failed / no order" — kept open (never resolved over a stronger report). */
+function contradictionNote(a: VdEarlierOrderAlert): string {
+  if (a.hubbleStatus === null || a.hubbleStatus === 'LOOKUP_FAILED') return '';
+  const last = a.statusHistory[a.statusHistory.length - 1];
+  if (last === 'FAILED') return ' Hubble now says the order failed — this contradicts its earlier report, so the alert stays open.';
+  if (last === 'NO_ORDER') return ' Hubble now says there is no order — this contradicts its earlier report, so the alert stays open.';
+  if (last === 'NO_ORDER_UNVERIFIED') return ' Hubble now says there is no order, but that could not be verified, so the alert stays open.';
+  return '';
 }
 
 function alertRef(a: VdEarlierOrderAlert): string {
@@ -326,12 +337,17 @@ export function earlierOrderAlertText(a: VdEarlierOrderAlert): string {
     a.lastCheckFailedAt && st !== 'LOOKUP_FAILED' && st !== null
       ? ` The last check with Hubble failed (${formatWhen(a.lastCheckFailedAt)}) — Hubble may have reported more since.`
       : '';
-  return `${alertRef(a)}: ${alertSubject(a.kind)} — ${status}${alertHistory(a)} — ${tail}.${lastCheck}`;
+  return `${alertRef(a)}: ${alertSubject(a.kind)} — ${status}${alertHistory(a)} — ${tail}.${contradictionNote(a)}${lastCheck}`;
 }
 
 /** A RESOLVED alert: "Batch 1, row 3: an earlier order (retired by a retry) — resolved: Hubble confirmed the order failed (reports: …)." */
 export function resolvedOrderAlertText(a: VdEarlierOrderAlert): string {
-  const why = a.hubbleStatus === 'NO_ORDER' ? 'Hubble confirmed there is no order' : 'Hubble confirmed the order failed';
+  const why =
+    a.hubbleStatus === 'NO_ORDER'
+      ? 'Hubble confirmed there is no order'
+      : a.hubbleStatus === 'APPLIED'
+        ? "Hubble's answer was applied to the row"
+        : 'Hubble confirmed the order failed';
   return `${alertRef(a)}: ${alertSubject(a.kind)} — resolved: ${why}${alertHistory(a)}.`;
 }
 

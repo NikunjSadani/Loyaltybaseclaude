@@ -236,6 +236,10 @@ export interface VoucherDispersalSection {
   earlierOrderAlertsBy?: { superseded: number; marked: number; notApplied: number; couldNotCheck: number };
   /** In the window: alerts RESOLVED (Hubble confirmed the order failed / there is no order) — listed apart. */
   earlierOrderAlertsResolved?: number;
+  /** NOW: every OPEN order alert, of any age — stays an attention item each day until resolved. */
+  earlierOrderAlertsOpen?: number;
+  /** `earlierOrderAlertsOpen` by what happened (same split as `earlierOrderAlertsBy`). */
+  earlierOrderAlertsOpenBy?: { superseded: number; marked: number; notApplied: number; couldNotCheck: number };
   /** NOW: rows an admin marked "not bought" — CLOSED (informational; not "still failed"). */
   markedClosed?: number;
   /**

@@ -192,6 +192,8 @@ describe('Edit campaign', () => {
           { at: '2026-11-18T07:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 6, referenceId: 'vdD', hubbleStatus: 'LOOKUP_FAILED' },
           { at: '2026-11-18T06:00:00Z', kind: 'NOT_APPLIED', batchNumber: 1, rowNumber: 7, referenceId: 'vdE', hubbleStatus: 'SUCCESS', statusHistory: ['PROCESSING', 'SUCCESS'] },
           { at: '2026-11-18T05:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 8, referenceId: 'vdF', hubbleStatus: 'ON_HOLD' },
+          { at: '2026-11-18T04:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 9, referenceId: 'vdG', hubbleStatus: 'SUCCESS', statusHistory: ['SUCCESS', 'FAILED'] },
+          { at: '2026-11-18T03:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 10, referenceId: 'vdH', hubbleStatus: 'PROCESSING', statusHistory: ['PROCESSING', 'NO_ORDER_UNVERIFIED'] },
         ],
         resolvedTotal: 0,
         resolvedItems: [],
@@ -200,7 +202,9 @@ describe('Edit campaign', () => {
     render(<DetailPage />);
     const box = await screen.findByTestId('vd-earlier-orders');
     expect(box).toHaveAttribute('role', 'alert');
-    expect(box).toHaveTextContent('23 open order alerts — Hubble activity on orders this campaign no longer acts on (the latest 6 are listed). Not counted against the budget.');
+    expect(box).toHaveTextContent('23 open order alerts — Hubble activity on orders this campaign no longer acts on (the latest 8 are listed). Not counted against the budget.');
+    expect(box).toHaveTextContent('Batch 1, row 9: an earlier order (retired by a retry) — Hubble reports it completed (reports: SUCCESS → FAILED) — check with Hubble (a voucher may have been issued twice). Hubble now says the order failed — this contradicts its earlier report, so the alert stays open.');
+    expect(box).toHaveTextContent('Batch 1, row 10: an earlier order (retired by a retry) — Hubble reports it still processing (reports: PROCESSING → NO_ORDER (unverified)) — check with Hubble (a voucher may have been issued twice). Hubble now says there is no order, but that could not be verified, so the alert stays open.');
     expect(box).toHaveTextContent('Batch 1, row 3: an earlier order (retired by a retry) — Hubble reports it completed (reports: SUCCESS → LOOKUP_FAILED) — check with Hubble (a voucher may have been issued twice). The last check with Hubble failed');
     expect(box).toHaveTextContent('Batch 2, row 5: an earlier order (retired by a retry) — Hubble reports it still processing — check with Hubble (a voucher may have been issued twice).');
     expect(box).toHaveTextContent('Batch 1, row 4: the order of this row (marked not bought) — Hubble reports it completed — check with Hubble (a voucher may have been issued; the row stays closed).');
@@ -221,6 +225,7 @@ describe('Edit campaign', () => {
         resolvedItems: [
           { at: '2026-11-18T10:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 3, referenceId: 'vdA', hubbleStatus: 'FAILED', statusHistory: ['PROCESSING', 'FAILED'], resolvedAt: '2026-11-18T10:00:00Z' },
           { at: '2026-11-18T09:00:00Z', kind: 'MARKED_NOT_BOUGHT', batchNumber: 1, rowNumber: 4, referenceId: 'vdB', hubbleStatus: 'NO_ORDER', statusHistory: ['PROCESSING', 'NO_ORDER'], resolvedAt: '2026-11-18T09:00:00Z' },
+          { at: '2026-11-18T08:00:00Z', kind: 'NOT_APPLIED', batchNumber: 2, rowNumber: 2, referenceId: 'vdC', hubbleStatus: 'APPLIED', statusHistory: ['LOOKUP_FAILED', 'APPLIED'], resolvedAt: '2026-11-18T08:00:00Z' },
         ],
       },
     } }))];
@@ -230,6 +235,7 @@ describe('Edit campaign', () => {
     expect(box).toHaveTextContent('2 resolved order alerts — nothing to do.');
     expect(box).toHaveTextContent('Batch 1, row 3: an earlier order (retired by a retry) — resolved: Hubble confirmed the order failed (reports: PROCESSING → FAILED).');
     expect(box).toHaveTextContent('Batch 1, row 4: the order of this row (marked not bought) — resolved: Hubble confirmed there is no order (reports: PROCESSING → NO_ORDER).');
+    expect(box).toHaveTextContent("Batch 2, row 2: this row's current order — resolved: Hubble's answer was applied to the row (reports: LOOKUP_FAILED → APPLIED).");
     expect(screen.queryByTestId('vd-earlier-orders')).not.toBeInTheDocument();
   });
 

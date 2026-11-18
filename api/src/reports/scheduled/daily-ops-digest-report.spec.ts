@@ -433,6 +433,19 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
     expect(inWindow).toContain('earlier-order alert resolved (Hubble: failed / no order)');
   });
 
+  it('an alert still OPEN from earlier days stays an attention item every day ("still open", by kind) until resolved', () => {
+    const d = ok({
+      bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0,
+      earlierOrderAlerts: 0, earlierOrderAlertsBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 },
+      earlierOrderAlertsOpen: 4, earlierOrderAlertsOpenBy: { superseded: 1, marked: 1, notApplied: 1, couldNotCheck: 1 },
+    });
+    expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
+      "Voucher dispersal: still open: 4 order alerts (1 earlier order, 1 marked row, 1 order not applied, 1 couldn't check) — open until Hubble confirms the order failed / there is no order; see the campaign pages",
+    ]);
+    const html = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html;
+    expect(html.slice(html.indexOf('Right now'))).toContain('order alerts still open');
+  });
+
   it('only resolved alerts → the section still shows (not empty), no attention item', () => {
     const d = ok({
       bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0,

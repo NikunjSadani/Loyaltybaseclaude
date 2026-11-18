@@ -230,13 +230,18 @@ refusals) (actor = admin).
   `--rolled-back` + re-run — the file is re-runnable).
 - **Verification of the re-runnable file (2026-11-18):** compared statement-by-statement with Prisma's own SQL for
   base schema (`ab1dbbbb`) → current `schema.prisma` (`prisma migrate diff --from-schema … --to-schema … --script`, the
-  idempotency wrappers stripped): 10 = 10 statements (incl. the `lateCompletedAt` index added at pre-merge), none missing
+  idempotency wrappers stripped): 16 = 16 statements (re-verified after the alert columns / indexes of §10d), none missing
   or extra. NOT yet run against a database (no shadow /
   scratch DB was used) — before prod, apply it TWICE to a local / throwaway database and confirm the second run is clean.
 - **This migration must NOT have been applied anywhere under its earlier contents.** `20261118160000_voucher_dispersal_batches`
   was edited several times before release (columns / indexes added, re-runnable rewrite); Prisma checks the file's
   checksum. Before deploying, confirm `_prisma_migrations` on staging AND prod has no row for it (the coordinator checks
   this before deploy). If one exists, stop — do not edit or re-apply; ask engineering.
+- **Edited in place — reset, don't re-run, any database that ran an earlier version.** The file was changed after it
+  may have been applied to a LOCAL dev database (e.g. the order-alert columns `resolvedAt` / `lastCheckFailedAt` /
+  `statusChangedAt` were added to its `CREATE TABLE IF NOT EXISTS`, which an existing table silently skips). Such a
+  database must be RESET (`npx prisma migrate reset` on local dev), never re-run with `migrate deploy` / `resolve` —
+  a re-run would leave the old table without the new columns.
 - **Old/new revision overlap during that deploy:** for the minutes both API revisions serve traffic, the OLD revision
   does not know about batches and would count an unconfirmed batch's rows in its list summary — harmless, because no
   batch can exist until the new revision is serving (only it can create one).
@@ -432,7 +437,8 @@ I want."* Owner chose **"Add to the same campaign"**.
   overwrites a real status — it only sets `lastCheckFailedAt` and adds `LOOKUP_FAILED` to the history (no audit; a warn
   log). An alert whose ONLY report is a lookup failure shows `LOOKUP_FAILED` ("couldn't check it with Hubble — the lookup
   failed; no status known yet"). A lower status after a higher one (SUCCESS then PROCESSING) is kept in the history only.
-- **FAILED / no order RESOLVES an alert (H2):** `resolvedAt` + status + history + audit (`resolved: true`); resolved
+- **FAILED / no order RESOLVES an alert (H2 — narrowed by §10e: only when nothing stronger than PROCESSING was ever seen,
+  and "no order" needs a verified canary):** `resolvedAt` + status + history + audit (`resolved: true`); resolved
   alerts are excluded from the open count and listed apart on the page ("N resolved order alerts — nothing to do", each
   "resolved: Hubble confirmed the order failed / there is no order"). They never create an alert. Activity reported later
   re-opens it (counted as worsened). A lookup failure on a resolved alert keeps it resolved.
@@ -461,3 +467,30 @@ I want."* Owner chose **"Add to the same campaign"**.
   undocumented status (the campaign page's `lastLookupUnrecognised` rule), besides pending rows with `HUBBLE_UNKNOWN_STATUS`.
 - Migration re-verified: **16 = 16** statements against `prisma migrate diff` (base `ab1dbbbb` → current schema); SET
   `lock_timeout` first, RESET last; the widened unique index is still created before the narrower one is dropped.
+
+### 10e. Release-gate review of `e63d928a` (2026-11-18) — nothing may hide a paid voucher
+
+- **H1 — an alert that ever saw SUCCESS / an unrecognised status is NEVER resolved.** FAILED / no order on it only adds a
+  history entry + an error log + audit (`contradictedBy`), and the page adds "Hubble now says the order failed / there is
+  no order — this contradicts its earlier report, so the alert stays open". An alert that saw at most PROCESSING (or only
+  "couldn't check") is resolved by FAILED, or by "no order" ONLY with a verified canary (`verifyNotFoundCanary`, the buy
+  engine's rule, max 3 tries / 10 s) — an unverified "no order" keeps it open (history `NO_ORDER_UNVERIFIED`, shown
+  "NO_ORDER (unverified)").
+- **H2 — a failed webhook lookup on a FAILED row's CURRENT reference** (`HUBBLE_FAILED` / `REJECTED`): the webhook still
+  acks 200, records a `NOT_APPLIED` "couldn't check" alert, and the 2-minute sweep re-checks those rows (last lookup
+  `LOOKUP_FAILED…`, at most `RECHECK_AFTER_LOOKUP_FAILURE_PER_PASS` = 5 per pass, besides the 20 pending rows) until Hubble
+  answers. The answer settles the alert: bought / back with Hubble → resolved `APPLIED` ("Hubble's answer was applied to
+  the row"); FAILED → resolved; "no order" → the canary rule; an unrecognised status → open. (The webhook controller's
+  comment now says exactly which references the sweep re-checks.)
+- **H3 — a webhook for a CANCELLED row** (any status other than BUYING / PENDING_RECONCILE / BUY_FAILED, BOUGHT and
+  QUEUED): looked up; SUCCESS / PROCESSING / an unrecognised status → a `NOT_APPLIED` alert (error log "order completed at
+  Hubble after the campaign was cancelled — check with Hubble", audit with `rowStatus`); FAILED / no order → nothing; a
+  lookup error → a "couldn't check" alert. Never silently SKIPPED. BOUGHT (its own order) and QUEUED (the next buy applies
+  the same reference) are not looked up. Cancelled rows are not swept — the alert stays open.
+- **Digest "still open":** besides the in-window lines, every OPEN alert of any age is one attention item each day
+  ("still open: N order alerts (… earlier order, … marked row, … order not applied, … couldn't check)") and a "Right now"
+  figure, until resolved.
+- **Settle:** rows marked "not bought" are closed, not errors — a campaign whose only non-bought rows are marked settles
+  `COMPLETED`, not `COMPLETED_WITH_ERRORS`.
+- **Noted for follow-up (not fixed):** a marked row can get a second identical alert entry for the same status (deduped in
+  history, no second count); webhook latency (a webhook runs a Hubble lookup — and now possibly a canary — inline).

@@ -91,8 +91,9 @@ describe('H2 — FAILED / no order resolves an alert', () => {
     expect(alertAudits(t).map((x: any) => [x.metadata.hubbleStatus, x.metadata.resolved ?? false])).toEqual([['PROCESSING', false], ['FAILED', true]]);
   });
 
-  it('no order at Hubble on an existing alert → resolved (NO_ORDER); a later SUCCESS re-opens it (worsened)', async () => {
+  it('no order at Hubble (canary-verified) on an existing alert → resolved (NO_ORDER); a later SUCCESS re-opens it (worsened)', async () => {
     const { t, id } = await bought();
+    jest.spyOn(t.processor, 'verifyNotFoundCanary').mockResolvedValue({ ok: true, canaryRef: 'vdCANARY' });
     answers(t, { vdA: [{ status: 'PROCESSING' }, null, { status: 'SUCCESS' }] });
     await t.processor.reconcileByReference('vdA');
     await t.processor.reconcileByReference('vdA');
@@ -206,5 +207,154 @@ describe('L7 — marked rows are "closed", not "buy failed", on the campaign pag
     expect(d.batches[0]).toMatchObject({ buyFailed: 1, markedClosed: 1 });
     const list = await t.svc.list(ADMIN, {} as never);
     expect(list.find((c: any) => c.id === id)!.summary).toMatchObject({ buyFailed: 1, markedClosed: 1 });
+  });
+});
+
+// ─── Release-gate review of e63d928a ────────────────────────────────────────────────────────────────────────────
+
+const ok = (t: any) => jest.spyOn(t.processor, 'verifyNotFoundCanary').mockResolvedValue({ ok: true, canaryRef: 'vdCANARY' });
+const notOk = (t: any) =>
+  jest.spyOn(t.processor, 'verifyNotFoundCanary').mockResolvedValue({ ok: false, canaryRef: null, why: 'no canary verified' } as any);
+
+describe('gate H1 — an alert that ever saw SUCCESS / an unrecognised status is NEVER resolved', () => {
+  it('SUCCESS then FAILED → stays open at SUCCESS; history + a loud "contradicted" audit; still counted open', async () => {
+    const { t, id } = await bought();
+    const errLog = jest.spyOn((t.processor as any).logger, 'error');
+    answers(t, { vdA: [{ status: 'SUCCESS' }, { status: 'FAILED' }] });
+    await t.processor.reconcileByReference('vdA');
+    await t.processor.reconcileByReference('vdA');
+    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'SUCCESS', resolvedAt: null, statusHistory: ['SUCCESS', 'FAILED'] });
+    expect(alertAudits(t).map((x: any) => [x.metadata.hubbleStatus, x.metadata.contradictedBy ?? null])).toEqual([['SUCCESS', null], ['SUCCESS', 'FAILED']]);
+    expect(errLog.mock.calls.some((c) => /NOT resolved/.test(String(c[0])))).toBe(true);
+    expect((await t.svc.detail(ADMIN, id)).summary.earlierOrderAlerts).toMatchObject({ total: 1, resolvedTotal: 0 });
+  });
+
+  it('an unrecognised status then a canary-verified no order → stays open (never resolved)', async () => {
+    const { t } = await bought();
+    ok(t);
+    answers(t, { vdA: [{ status: 'ON_HOLD' }, null] });
+    await t.processor.reconcileByReference('vdA');
+    await t.processor.reconcileByReference('vdA');
+    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'ON_HOLD', resolvedAt: null, statusHistory: ['ON_HOLD', 'NO_ORDER'] });
+  });
+
+  it('PROCESSING then no order WITHOUT a verified canary → stays open ("NO_ORDER_UNVERIFIED" in the history)', async () => {
+    const { t } = await bought();
+    const canary = notOk(t);
+    answers(t, { vdA: [{ status: 'PROCESSING' }, null] });
+    await t.processor.reconcileByReference('vdA');
+    await t.processor.reconcileByReference('vdA');
+    expect(canary).toHaveBeenCalledWith('vdA', expect.anything());
+    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'PROCESSING', resolvedAt: null, statusHistory: ['PROCESSING', 'NO_ORDER_UNVERIFIED'] });
+  });
+
+  it('no order on a reference never alerted → nothing, and no canary call', async () => {
+    const { t } = await bought();
+    const canary = ok(t);
+    answers(t, { vdA: [null] });
+    await t.processor.reconcileByReference('vdA');
+    expect(t.orderAlerts.length).toBe(0);
+    expect(canary).not.toHaveBeenCalled();
+  });
+});
+
+async function failedRow(source: string, extra: Record<string, unknown> = {}) {
+  const t = setup();
+  const id = await finished(t, [['9876543210', 'Asha', 1000, 'Amazon Pay'], ['9876543211', 'Ravi', 1000, 'Amazon Pay']], 3000);
+  const b: any = t.rows[1];
+  const old = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  Object.assign(b, {
+    status: 'BUY_FAILED', buyFailureSource: source, buyFailureReason: 'x', voucherCode: null, boughtAt: null, referenceSentAt: old,
+    placeAttemptAt: old, messageClaimedAt: null, ...extra,
+  });
+  t.campaigns[0].status = 'COMPLETED_WITH_ERRORS';
+  return { t, id, b };
+}
+
+describe('gate H2 — a failed webhook lookup on a FAILED row\'s CURRENT reference is alerted and re-checked by the sweep', () => {
+  it.each(['HUBBLE_FAILED', 'REJECTED'])('%s row: webhook lookup fails → NOT_APPLIED "couldn\'t check" alert; the sweep re-checks; SUCCESS → bought + alert resolved', async (source) => {
+    const { t, b } = await failedRow(source);
+    const ref = b.hubbleReferenceId;
+    answers(t, { [ref]: [new Error('timeout'), new Error('timeout again'), { id: 'H', status: 'SUCCESS', vouchers: [{ cardNumber: CODE }] }] });
+    expect(await t.processor.reconcileByReference(ref)).toBe('LOOKUP_FAILED');
+    expect(alertOf(t, ref)).toMatchObject({ kind: 'NOT_APPLIED', hubbleStatus: 'LOOKUP_FAILED', resolvedAt: null });
+    expect(b.lastReconcileResult).toMatch(/^LOOKUP_FAILED/);
+    // The sweep picks it up (bounded) — still failing: stays in the sweep.
+    b.lastReconcileAt = new Date(Date.now() - 60 * 60 * 1000);
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(b.status).toBe('BUY_FAILED');
+    expect(alertOf(t, ref).lastCheckFailedAt).toBeInstanceOf(Date);
+    // …until a definitive answer: Hubble SUCCESS → the row is bought, the alert resolved ("applied").
+    b.lastReconcileAt = new Date(Date.now() - 60 * 60 * 1000);
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(b.status).toBe('BOUGHT');
+    expect(alertOf(t, ref)).toMatchObject({ hubbleStatus: 'APPLIED' });
+    expect(alertOf(t, ref).resolvedAt).toBeInstanceOf(Date);
+    // Answered → out of the sweep.
+    t.hubble.getOrderByReference.mockClear();
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(t.hubble.getOrderByReference).not.toHaveBeenCalledWith(ref);
+  });
+
+  it('a FAILED row whose last lookup was NOT a failure is not swept (unchanged scope)', async () => {
+    const { t, b } = await failedRow('HUBBLE_FAILED', { lastReconcileResult: 'HUBBLE_FAILED', lastReconcileAt: new Date(Date.now() - 60 * 60 * 1000) });
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(t.hubble.getOrderByReference).not.toHaveBeenCalledWith(b.hubbleReferenceId);
+  });
+
+  it('the sweep gets Hubble FAILED → the "couldn\'t check" alert is resolved (FAILED)', async () => {
+    const { t, b } = await failedRow('HUBBLE_FAILED');
+    const ref = b.hubbleReferenceId;
+    answers(t, { [ref]: [new Error('timeout'), { status: 'FAILED' }] });
+    await t.processor.reconcileByReference(ref);
+    b.lastReconcileAt = new Date(Date.now() - 60 * 60 * 1000);
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(alertOf(t, ref)).toMatchObject({ hubbleStatus: 'FAILED' });
+    expect(alertOf(t, ref).resolvedAt).toBeInstanceOf(Date);
+    expect(b.status).toBe('BUY_FAILED');
+  });
+});
+
+describe('gate H3 — a webhook for a CANCELLED row is looked up, never silently skipped', () => {
+  it('CANCELLED row, Hubble SUCCESS → NOT_APPLIED alert + audit (rowStatus CANCELLED); the row is not changed', async () => {
+    const { t, b } = await failedRow('HUBBLE_FAILED');
+    Object.assign(b, { status: 'CANCELLED', buyFailureSource: null });
+    const errLog = jest.spyOn((t.processor as any).logger, 'error');
+    answers(t, { [b.hubbleReferenceId]: [{ id: 'H', status: 'SUCCESS', vouchers: [{ cardNumber: CODE }] }] });
+    expect(await t.processor.reconcileByReference(b.hubbleReferenceId)).toBe('SKIPPED');
+    expect(alertOf(t, b.hubbleReferenceId)).toMatchObject({ kind: 'NOT_APPLIED', hubbleStatus: 'SUCCESS' });
+    expect(alertAudits(t)[0].metadata).toMatchObject({ kind: 'NOT_APPLIED', rowStatus: 'CANCELLED' });
+    expect(errLog.mock.calls.some((c) => /after the campaign was cancelled/.test(String(c[0])))).toBe(true);
+    expect(b).toMatchObject({ status: 'CANCELLED', voucherCode: null });
+  });
+
+  it('CANCELLED row, Hubble FAILED / no order → no alert; lookup error → "couldn\'t check" alert', async () => {
+    const { t, b } = await failedRow('HUBBLE_FAILED');
+    Object.assign(b, { status: 'CANCELLED', buyFailureSource: null });
+    answers(t, { [b.hubbleReferenceId]: [{ status: 'FAILED' }, null, new Error('down')] });
+    await t.processor.reconcileByReference(b.hubbleReferenceId);
+    await t.processor.reconcileByReference(b.hubbleReferenceId);
+    expect(t.orderAlerts.length).toBe(0);
+    expect(await t.processor.reconcileByReference(b.hubbleReferenceId)).toBe('LOOKUP_FAILED');
+    expect(alertOf(t, b.hubbleReferenceId)).toMatchObject({ kind: 'NOT_APPLIED', hubbleStatus: 'LOOKUP_FAILED' });
+  });
+
+  it('a BOUGHT row (its own order) is not looked up or alerted', async () => {
+    const { t, b } = await bought();
+    await t.processor.reconcileByReference(b.hubbleReferenceId);
+    expect(t.hubble.getOrderByReference).not.toHaveBeenCalledWith(b.hubbleReferenceId);
+    expect(t.orderAlerts.length).toBe(0);
+  });
+});
+
+describe('gate — settle: rows marked "not bought" are CLOSED, not errors', () => {
+  it('all bought except a marked row → COMPLETED (not COMPLETED_WITH_ERRORS)', async () => {
+    const t = setup();
+    const id = await finished(t, [['9876543210', 'Asha', 1000, 'Amazon Pay'], ['9876543211', 'Ravi', 1000, 'Amazon Pay']], 3000);
+    Object.assign(t.rows[0], { status: 'BOUGHT', voucherCode: CODE, messageClaimedAt: new Date(), messageStatus: 'DELIVERED' });
+    Object.assign(t.rows[1], { status: 'BUY_FAILED', buyFailureSource: 'MARKED_NOT_BOUGHT', buyFailureReason: 'Marked as not bought by Admin One: x', messageClaimedAt: null });
+    t.campaigns[0].status = 'COMPLETED_WITH_ERRORS';
+    await t.processor.settleCampaign(id);
+    expect(t.campaigns[0].status).toBe('COMPLETED');
   });
 });

@@ -353,7 +353,22 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
         events: by.couldNotCheck,
       });
     }
-  } else if ((d.earlierOrderAlerts ?? 0) > 0) {
+  }
+  // Every alert still OPEN (any age) — an attention item each day until Hubble resolves it (release-gate review).
+  const open = d.earlierOrderAlertsOpenBy;
+  if (open && (d.earlierOrderAlertsOpen ?? 0) > 0) {
+    const parts = [
+      open.superseded ? plural(open.superseded, 'earlier order', 'earlier orders') : null,
+      open.marked ? plural(open.marked, 'marked row', 'marked rows') : null,
+      open.notApplied ? plural(open.notApplied, 'order not applied', 'orders not applied') : null,
+      open.couldNotCheck ? `${intIN(open.couldNotCheck)} couldn't check` : null,
+    ].filter(Boolean);
+    out.push({
+      text: `Voucher dispersal: still open: ${plural(d.earlierOrderAlertsOpen!, 'order alert', 'order alerts')} (${parts.join(', ')}) — open until Hubble confirms the order failed / there is no order; see the campaign pages`,
+      events: d.earlierOrderAlertsOpen!,
+    });
+  }
+  if (!by && (d.earlierOrderAlerts ?? 0) > 0) {
     out.push({
       text: `Voucher dispersal: Hubble reported activity on ${plural(d.earlierOrderAlerts!, 'earlier order', 'earlier orders')} after a retry or a "not bought" mark (in the window) — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)`,
       events: d.earlierOrderAlerts!,
@@ -507,6 +522,7 @@ const dispersalEmpty = (d: VoucherDispersalSection) =>
   !d.settleErrorCampaigns &&
   !d.earlierOrderAlerts &&
   !d.earlierOrderAlertsResolved &&
+  !d.earlierOrderAlertsOpen &&
   !d.unrecognisedStatus &&
   !d.markedClosed &&
   !d.lateCompleted;
@@ -530,6 +546,7 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['campaigns over budget', intIN(d.overBudgetCampaigns ?? 0), accentIf(d.overBudgetCampaigns ?? 0, 'red')],
       ['status update failing', intIN(d.settleErrorCampaigns ?? 0), accentIf(d.settleErrorCampaigns ?? 0, 'red')],
       ['Hubble status not recognised', intIN(d.unrecognisedStatus ?? 0), accentIf(d.unrecognisedStatus ?? 0, 'red')],
+      ['order alerts still open', intIN(d.earlierOrderAlertsOpen ?? 0), accentIf(d.earlierOrderAlertsOpen ?? 0, 'red')],
       ['closed (marked not bought)', intIN(d.markedClosed ?? 0)],
     ]),
   );

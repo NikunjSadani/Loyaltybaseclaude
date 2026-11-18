@@ -936,20 +936,31 @@ export class ScheduledReportsService {
     // Earlier-order alerts (one per reference; never counted against any budget): OPEN ones created OR worsened in the
     // window (statusChangedAt moves only when the alert gets worse — review of 4d8454ad, M1), by what happened; the
     // RESOLVED ones (Hubble confirmed FAILED / no order) are listed apart.
+    type AlertGroup = { kind: string; hubbleStatus: string; _count: { _all: number } };
+    const split = (groups: AlertGroup[]) => {
+      const by = { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 };
+      for (const g of groups) {
+        const n = g._count._all;
+        if (g.hubbleStatus === 'LOOKUP_FAILED') by.couldNotCheck += n;
+        else if (g.kind === 'MARKED_NOT_BOUGHT') by.marked += n;
+        else if (g.kind === 'NOT_APPLIED') by.notApplied += n;
+        else by.superseded += n;
+      }
+      return { by, total: groups.reduce((a, g) => a + g._count._all, 0) };
+    };
     const alertGroups = await this.prisma.voucherDispersalOrderAlert.groupBy({
       by: ['kind', 'hubbleStatus'],
       where: { resolvedAt: null, OR: [{ createdAt: inWindow }, { statusChangedAt: inWindow }] },
       _count: { _all: true },
     });
-    const earlierOrderAlertsBy = { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 };
-    for (const g of alertGroups) {
-      const n = g._count._all;
-      if (g.hubbleStatus === 'LOOKUP_FAILED') earlierOrderAlertsBy.couldNotCheck += n;
-      else if (g.kind === 'MARKED_NOT_BOUGHT') earlierOrderAlertsBy.marked += n;
-      else if (g.kind === 'NOT_APPLIED') earlierOrderAlertsBy.notApplied += n;
-      else earlierOrderAlertsBy.superseded += n;
-    }
-    const earlierOrderAlerts = alertGroups.reduce((a, g) => a + g._count._all, 0);
+    const { by: earlierOrderAlertsBy, total: earlierOrderAlerts } = split(alertGroups);
+    // …and every alert still OPEN now, of any age (release-gate review): an open SUCCESS alert stays visible daily.
+    const openGroups = await this.prisma.voucherDispersalOrderAlert.groupBy({
+      by: ['kind', 'hubbleStatus'],
+      where: { resolvedAt: null },
+      _count: { _all: true },
+    });
+    const { by: earlierOrderAlertsOpenBy, total: earlierOrderAlertsOpen } = split(openGroups);
     const earlierOrderAlertsResolved = await this.prisma.voucherDispersalOrderAlert.count({ where: { resolvedAt: inWindow } });
     // L8 (review of 4d8454ad): a FAILED row (not marked) whose LATEST lookup was an undocumented Hubble status needs
     // Gifsy tech too — the same rule as the campaign page (lastLookupUnrecognised).
@@ -976,6 +987,8 @@ export class ScheduledReportsService {
       earlierOrderAlerts,
       earlierOrderAlertsBy,
       earlierOrderAlertsResolved,
+      earlierOrderAlertsOpen,
+      earlierOrderAlertsOpenBy,
       markedClosed,
       unrecognisedStatus: pendingUnrecognised + failedUnrecognised,
     };
