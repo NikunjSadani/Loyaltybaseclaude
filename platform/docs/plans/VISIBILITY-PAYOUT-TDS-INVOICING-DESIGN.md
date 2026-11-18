@@ -40,20 +40,21 @@ PAN `AAACT9811F`, West Bengal / code 19, SAC 998361).
   off-portal → a **report of unregistered-retailer payouts with invoice numbers** (RCM computed outside the portal).
 - **D7 — TDS is threshold-gated, retroactive, combined across all 194C tenants by PAN** (TGSL = single deductor).
   **D7 applies to 194C ONLY. 194R is PER CLIENT (owner, 2026-11-18):** a retailer PAN's 194R visibility payouts under
-  tenant A and tenant B are never aggregated — threshold (₹20k/FY), prior base, DEDUCT carry-forward ledger, GROSS_UP
-  recovery and the same-period TDS-invoice idempotency are all evaluated per (client, PAN, FY), and a 194R GROSS_UP
-  recovery is 100% the paying tenant's (D10 pro-rata is 194C-only). This matches the 194R report's client scope
-  (`api/src/tds/tds.service.ts`) — its inputs and method still differ (open items: the report also counts incentive
-  payouts / redemptions / off-platform entries, keys no-PAN per partner, and always uses gross-up). TDS invoice NUMBERS
-  stay globally sequenced per (PAN, FY) (`TGSL-TDS-<PAN>-<FY>-<seq>`).
-  **Legacy rows:** ledger / recovery rows written before this change carry their tenant's `clientId`, so they are
-  re-scoped automatically on the next read (another tenant's 194R row simply stops counting). A legacy 194R recovery
-  row written under the old cross-tenant pro-rata split now counts only toward ITS OWN tenant's 194R top-ups (e.g. a
-  ₹1,000 legacy share attributed to tenant A reduces A's next 194R top-up by ₹1,000; tenant B's legacy share no longer
-  reduces A's). Prod had **0** TDS ledger rows at the change, so no data migration is needed. A same-period TDS
-  invoice with **no recovery rows** (section unknown) still blocks a 194C re-raise for the PAN (as before) and a 194R
-  re-raise for the SAME tenant; another tenant's such invoice never blocks a 194R top-up. Pinned by specs in `credits.service.spec.ts`
-  ("194R per-client scoping").
+  tenant A and tenant B are never aggregated — threshold (₹20k/FY), prior base and DEDUCT carry-forward ledger are all
+  evaluated per (client, PAN, FY). This matches the 194R report's client scope (`api/src/tds/tds.service.ts`) — its
+  inputs and method still differ (open items: the report also counts incentive payouts / redemptions / off-platform
+  entries, keys no-PAN per partner, and always uses gross-up).
+  **TDS INVOICING IS 194C-ONLY (owner, 2026-11-18):** Gifsy deposits 194C TDS and recovers it from the client, so only
+  194C GROSS_UP raises a TDS invoice + `TdsRecoveryEntry` rows. A **194R** GROSS_UP payout raises **no** TDS invoice and
+  **no** recovery row (no-PAN 194R included) — the retailer is paid in full and the client's liability is shown by the
+  194R report. 194R DEDUCT withholding (the carry-forward ledger) is unchanged. TDS invoice NUMBERS stay globally
+  sequenced per (PAN, FY) (`TGSL-TDS-<PAN>-<FY>-<seq>`).
+  **Legacy rows:** ledger rows written before this change carry their tenant's `clientId`, so they are re-scoped
+  automatically on the next read (another tenant's 194R withholding simply stops counting). Any legacy 194R TDS invoice /
+  194R recovery row is ignored by the engine (it never blocks or reduces a 194C top-up) and still lists on the recovery
+  report. Prod had **0** TDS ledger rows at the change, so no data migration is needed. A same-period TDS invoice with
+  **no recovery rows** (section unknown) still blocks a 194C re-raise for the PAN (as before). Pinned by specs in
+  `credits.service.spec.ts` ("194R per-client scoping").
 - **D8 — DEDUCT method:** below threshold pay full; at crossing, TDS on the full aggregate becomes due and is
   **deducted from the crossing payout**; if the catch-up exceeds that payout, **deduct what fits and carry the rest
   forward** to the next payout(s) (per-PAN carry-forward ledger). Retailer bears it (claims via 26AS).
@@ -63,7 +64,7 @@ PAN `AAACT9811F`, West Bengal / code 19, SAC 998361).
   retailer's PAN** (the deposit *settles* the invoice). GST on it follows the normal holdback/settlement. Retailer
   benefit = 26AS credit + GST-on-proof, **no extra cash**. **Reconciles exactly:** TDS deposited = 1% of the base the
   retailer was actually paid.
-- **D10 — Tenant recovery / attribution** (cross-tenant split = 194C only; 194R → 100% the paying tenant, see D7). The grossed-up TDS is **recovered from tenants, pro-rata** by each tenant's
+- **D10 — Tenant recovery / attribution** (194C only; 194R has no TDS invoice and no recovery row, see D7). The grossed-up TDS is **recovered from tenants, pro-rata** by each tenant's
   share of the retailer's aggregate (e.g. X ₹70k + Y ₹40k → ₹1,100 TDS split ₹700 / ₹400). A **per-tenant recovery
   ledger** tracks it; reports tag it **"in lieu of TDS deduction."**
 - **D11 — The "in lieu of TDS" tag appears ONLY in the dashboard/report, NEVER on the invoice face.** The invoice

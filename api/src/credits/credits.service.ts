@@ -228,8 +228,7 @@ export class CreditsService {
    * writes happen inside the caller's download $transaction). PAN aggregation is combined
    * across ALL 194C tenants (TGSL = single deductor, D7) and across the FY. 194R is PER CLIENT
    * (owner 2026-11-18): every "cross-tenant" read below is restricted to THIS tenant for 194R
-   * (prior base, max single, DEDUCT ledger, recovery ledger, same-period TDS-invoice idempotency),
-   * so a 194R GROSS_UP recovery is 100% this tenant's:
+   * (prior base, max single, DEDUCT ledger); 194R raises no TDS invoice / recovery at all (D7):
    *
    *   cumulativeBase = prior committed (PAID|PROCESSING) visibility base for the PAN/section
    *                    in the FY (by period window; 194C = all tenants, 194R = this tenant only)
@@ -245,9 +244,10 @@ export class CreditsService {
    * and append a ledger row. GROSS-UP (computeGrossUpTdsInvoiceBasePaise): the retailer is paid
    * full; at each crossing period we raise a TDS top-up invoice for the delta. 194C: the scope is
    * the PAN across ALL tenants (a crossing by any tenant) and the grossed-up TDS is split pro-rata
-   * across the PAN's contributing tenants (D10). 194R: the scope is (THIS tenant, PAN) and the
-   * recovery is 100% this tenant's. No-PAN visibility payouts are paid full (no deduction, no
-   * invoice) and accrue a per-(tenant, outlet) recovery only (FIX-9).
+   * across the PAN's contributing tenants (D10). 194R (owner D7, 2026-11-18): NO TDS invoice and
+   * NO recovery row — the retailer is paid full and the 194R report shows the client's liability.
+   * No-PAN visibility payouts are paid full (no deduction, no invoice); under 194C they accrue a
+   * per-(tenant, outlet) recovery (FIX-9), under 194R nothing is written (report-only).
    */
   private async buildPayoutTdsPlan(
     // FIX-8: reads run on the download WRITE $transaction client (not this.prisma) so the
@@ -303,7 +303,10 @@ export class CreditsService {
       const info = outletTaxMap.get(e.outletId);
       const pan = info?.panNumber?.trim().toUpperCase();
       if (!pan) {
-        // no-PAN → paid full (no deduction), but accrues a tenant recovery obligation (FIX-9).
+        // no-PAN → paid full (no deduction), but accrues a tenant recovery obligation (FIX-9) —
+        // 194C ONLY. D7 (owner 2026-11-18): 194R writes NO TdsRecoveryEntry; a no-PAN 194R payout is
+        // paid full and its liability is carried by the 194R report (per-client, no-PAN deductee).
+        if (e.tdsSection === TdsSection.SEC_194R) continue;
         const nk = `${e.outletId}${SEP}${e.tdsSection}`;
         let ng = noPanGroups.get(nk);
         if (!ng) {
@@ -554,6 +557,10 @@ export class CreditsService {
         // GROSS_UP — retailer paid full. FIX-1: at EACH crossing period, raise a monthly TOP-UP
         // TDS invoice for the DELTA = grossUp(cumulative) − Σ already-invoiced (recovery ledger),
         // so Σ over the FY == grossUp(full-FY base) instead of under-depositing after the first.
+        // D7 (owner 2026-11-18): TDS INVOICING IS 194C-ONLY (Gifsy deposits the TDS and recovers it
+        // from the client). A 194R GROSS_UP payout raises NO TDS invoice and NO TdsRecoveryEntry — the
+        // retailer is paid in full and the client's liability is shown by the 194R report.
+        if (g.section === TdsSection.SEC_194R) continue;
         if (!thresholdMet) continue;
 
         // Idempotency per (PAN, FY, period): a top-up already raised for THIS period must not
@@ -576,14 +583,12 @@ export class CreditsService {
           });
           for (const r of secRows) if (r.tdsInvoiceId) invSection.set(r.tdsInvoiceId, r.section);
         }
-        // Idempotency SCOPE = this section's aggregation scope: 194C → one top-up per (PAN, FY, period)
-        // across tenants (unchanged); 194R → per (client, PAN, FY, period). An invoice of the OTHER
-        // section never blocks. An invoice whose section can't be resolved (no recovery rows — legacy)
-        // is conservatively treated as this section (the pre-2026-11-18 behaviour).
+        // Idempotency (194C only — D7): one top-up per (PAN, FY, period) across tenants. A legacy 194R
+        // invoice (raised before D7) never blocks. An invoice whose section can't be resolved (no
+        // recovery rows — legacy) is conservatively treated as 194C (the pre-2026-11-18 behaviour).
         const alreadyThisPeriod = samePeriod.some((i) => {
           const sec = i.id ? invSection.get(i.id) : undefined;
-          if (sec && sec !== g.section) return false;
-          return g.section !== TdsSection.SEC_194R || i.clientId === clientId;
+          return !(sec && sec !== g.section);
         });
         if (alreadyThisPeriod) continue; // already topped up this period (in this scope)
 
@@ -593,17 +598,15 @@ export class CreditsService {
         const delta = dueNow - alreadyInvoiced;
         if (delta <= 0n) continue; // fully invoiced already → nothing to top up
 
-        // The NUMBER sequence stays global per (PAN, FY) — TGSL-TDS-<PAN>-<FY>-<seq> is a globally
-        // unique invoice number, so a 194R per-client invoice (or a different section's) takes the
-        // next free seq. Count invoices already planned in THIS plan for the same PAN too, so two
-        // groups for one PAN (e.g. a mixed-section download) never collide on a number.
+        // The NUMBER sequence is global per (PAN, FY) — TGSL-TDS-<PAN>-<FY>-<seq> is a globally unique
+        // invoice number. Only 194C reaches here (D7) and groups are keyed (PAN, section, methodology),
+        // so a plan holds at most ONE GROSS_UP invoice per PAN; plannedSamePan is a defensive guard.
         const plannedSamePan = plan.grossUpInvoices.filter((x) => x.panNumber === g.panNumber).length;
         const seq = priorTds.length + plannedSamePan + 1;
         const isAnchor = seq === 1;
 
         // FIX-A (D10): recovery pro-rata by each tenant's share of the retailer's FY AGGREGATE
-        // GROSS_UP base (cross-tenant) — 194C only. For 194R the prior/recovery maps hold only THIS
-        // tenant (inSectionScope), so the "split" is a single row = 100% to this tenant. Tenant set = every tenant with prior committed GROSS_UP
+        // GROSS_UP base (cross-tenant, 194C). Tenant set = every tenant with prior committed GROSS_UP
         // base for this PAN + this event's tenant + any tenant already carrying recovery (so the
         // per-tenant true-up telescopes EXACTLY: Σ deltas == dueNow − alreadyInvoiced == body).
         const tenantBaseMap = new Map<string, bigint>();

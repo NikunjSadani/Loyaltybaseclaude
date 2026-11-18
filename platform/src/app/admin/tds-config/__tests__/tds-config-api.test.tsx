@@ -199,6 +199,9 @@ describe('TDS Treatment config page', () => {
     expect(text).toMatch(/only changes what is paid on visibility payouts/)
     expect(text).toMatch(/Incentive payouts are\s+never deducted/)
     expect(text).toMatch(/194R report shows their gross-up liability, and no TDS invoice is\s+raised for them/)
+    // D7 (owner 2026-11-18): the TDS invoice + tenant recovery is 194C-only.
+    expect(text).toMatch(/under\s+194C\s+TGSL raises a TDS invoice/)
+    expect(text).toMatch(/194R\s+gross-up raises no TDS invoice/)
     // Section is visibility-only; incentive always 194R.
     expect(text).toMatch(/section applies only to visibility payouts/)
     expect(text).toMatch(/incentive payouts are always 194R/)
