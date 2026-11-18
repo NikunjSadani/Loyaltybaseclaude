@@ -213,7 +213,7 @@ function primeSalesNodes(
     const n = nodes.find(
       (x) => x.userId === uid && !(args?.where && 'deletedAt' in args.where && args.where.deletedAt === null && x.deletedAt),
     );
-    return Promise.resolve(n ? { id: n.id } : null);
+    return Promise.resolve(n ? { id: n.id, deletedAt: n.deletedAt ?? null } : null);
   });
   // Honour a `deletedAt: null` filter like the DB would — so a walker that still filters out deleted nodes
   // (the pre-G3 behaviour) really loses them here and its test fails.
@@ -921,6 +921,36 @@ describe('KycService', () => {
       // the submitter lookup — guard the highest-value invariant of this change.
       // routingCalls()[1] = the first manager-walk lookup (after the submitter lookup).
       expect(routingCalls()[1].clientId).toBe('deoleo');
+    });
+
+    it('K1: routing SNAPSHOTS the submitter\'s reporting chain (direct manager upward, incl. a deleted level)', async () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })
+        .mockResolvedValueOnce({ id: 'so-su', isActive: true, deletedAt: null, reportingToId: 'asm-su', hierarchyLevel: { code: 'SO' } });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'isr-su', reportingToId: 'so-su', userId: 'isr1', isActive: true, deletedAt: null },
+        { id: 'so-su', reportingToId: 'asm-su', userId: 'so1', isActive: true, deletedAt: null },
+        { id: 'asm-su', reportingToId: 'old-su', userId: 'asm1', isActive: true, deletedAt: null },
+        { id: 'old-su', reportingToId: null, userId: 'old1', isActive: true, deletedAt: new Date('2026-01-01') },
+      ]);
+      primeConsentUpToRouting();
+      await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
+      expect(routedUpdate()).toMatchObject({
+        status: 'PENDING_SO_APPROVAL',
+        submitterManagerChain: ['so-su', 'asm-su', 'old-su'],
+      });
+      // Tenant-scoped hierarchy read.
+      expect(mockPrisma.salesUser.findMany.mock.calls.every((c: [{ where: { clientId: string } }]) => c[0].where.clientId === 'deoleo')).toBe(true);
+    });
+
+    it('K1: a non-sales submitter writes NO chain (field untouched — legacy-shaped row)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      primeConsentUpToRouting();
+      await service.consent(
+        { sub: 'retail1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' },
+        { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' },
+      );
+      expect(routedUpdate()).not.toHaveProperty('submitterManagerChain');
     });
 
     it('direct manager resigned (inactive) → escalates to next active manager, escalatedFrom set', async () => {
@@ -4976,7 +5006,9 @@ describe('KycService', () => {
         mockPrisma.kycSubmission.count.mockResolvedValue(0);
         mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
         await service.list(so, {});
-        expect(mockPrisma.kycSubmission.findMany.mock.calls[0][0].where.userId.in).toContain('isr1');
+        // O1 + K1: a LEGACY row (no snapshot) of the removed ISR is matched via the current links.
+        const or = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where.OR as Array<{ userId: { in: string[] }; submitterManagerChain?: { isEmpty?: boolean } }>;
+        expect(or.some((cl) => cl.userId.in.includes('isr1') && cl.submitterManagerChain?.isEmpty === true)).toBe(true);
       });
 
       it('the SO above can OPEN it; a sibling SO cannot', async () => {
@@ -5010,6 +5042,89 @@ describe('KycService', () => {
         filed('PENDING_SO_APPROVAL');
         const res = await service.reject(so, 's1', { reason: 'bad' });
         expect(res.message).toBe('KYC rejected successfully');
+      });
+    });
+
+    // ── K1 — a removed rep's KYC stays with the managers they had WHEN IT WAS FILED (snapshot chain) ──
+    describe('K1 — removed submitter: the snapshot chain, not the frozen live link', () => {
+      const DEL = new Date('2026-11-01');
+      // NOW: rsm ← asm1 ; rsm ← asm2 ← M (SO, MOVED from asm1 to asm2 after the filing) ← isr (REMOVED)
+      const TREE = [
+        { id: 'rsm-su', reportingToId: null, userId: 'rsm1' },
+        { id: 'asm1-su', reportingToId: 'rsm-su', userId: 'asm1' },
+        { id: 'asm2-su', reportingToId: 'rsm-su', userId: 'asm2' },
+        { id: 'm-su', reportingToId: 'asm2-su', userId: 'm1' },
+        { id: 'isr-su', reportingToId: 'm-su', userId: 'isr1', deletedAt: DEL },
+      ];
+      const asm1: JwtPayload = { sub: 'asm1', role: 'SALES_ASM', clientId: 'deoleo', phone: '', name: '' };
+      const asm2: JwtPayload = { sub: 'asm2', role: 'SALES_ASM', clientId: 'deoleo', phone: '', name: '' };
+      const SNAPSHOT = ['m-su', 'asm1-su', 'rsm-su']; // the chain AT FILING (M was under asm1 then)
+      const filed = (status: string, chain: string[]) =>
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'isr1', partnerId: null, outletId: null, status, submitterManagerChain: chain,
+          partner: null, documents: [], statusHistory: [], user: { name: 'n', phone: 'p' },
+        });
+      /** Evaluate the list WHERE (submitter scope) against one KYC row the way Postgres would. */
+      const listSees = async (caller: JwtPayload, row: { userId: string; submitterManagerChain: string[] }) => {
+        mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+        mockPrisma.kycSubmission.count.mockResolvedValue(0);
+        mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+        mockPrisma.kycSubmission.findMany.mockClear();
+        await service.list(caller, {});
+        const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
+        type C = { userId?: { in: string[] }; submitterManagerChain?: { has?: string; isEmpty?: boolean } };
+        const match = (c: C) =>
+          (!c.userId || c.userId.in.includes(row.userId)) &&
+          (!c.submitterManagerChain ||
+            (c.submitterManagerChain.has !== undefined
+              ? row.submitterManagerChain.includes(c.submitterManagerChain.has)
+              : (row.submitterManagerChain.length === 0) === c.submitterManagerChain.isEmpty));
+        return where.OR ? (where.OR as C[]).some(match) : match(where as C);
+      };
+
+      it('the ORIGINAL ASM still sees + opens it; the NEW ASM (M moved there) does not', async () => {
+        primeSalesNodes(TREE);
+        expect(await listSees(asm1, { userId: 'isr1', submitterManagerChain: SNAPSHOT })).toBe(true);
+        expect(await listSees(asm2, { userId: 'isr1', submitterManagerChain: SNAPSHOT })).toBe(false);
+        filed('PENDING_ASM_APPROVAL', SNAPSHOT);
+        mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null);
+        await expect(service.getOne(asm1, 's1')).resolves.toBeDefined();
+        await expect(service.getOne(asm2, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('multi-level: the ORIGINAL ASM approves at its stage; the NEW ASM is refused', async () => {
+        (service as unknown as { tenant: { resolveClient: jest.Mock } }).tenant.resolveClient.mockResolvedValue({
+          features: { multiLevelApproval: true },
+        });
+        primeSalesNodes(TREE);
+        filed('PENDING_ASM_APPROVAL', SNAPSHOT);
+        await expect(service.firstApprove(asm2, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
+        await expect(service.firstApprove(asm1, 's1', {})).resolves.toBeDefined();
+      });
+
+      it('single-stage: the routed approver is the FIRST live+active manager in the snapshot (M), not the new ASM', async () => {
+        primeSalesNodes(TREE);
+        filed('PENDING_SO_APPROVAL', SNAPSHOT);
+        const m: JwtPayload = { sub: 'm1', role: 'SALES_SO', clientId: 'deoleo', phone: '', name: '' };
+        await expect(service.firstApprove(m, 's1', {})).resolves.toMatchObject({ nextStatus: 'PENDING_GIFSY' });
+        filed('PENDING_ASM_APPROVAL', SNAPSHOT);
+        await expect(service.firstApprove(asm2, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('LEGACY row (empty snapshot) keeps the current-link behaviour (the walk through deleted nodes)', async () => {
+        primeSalesNodes(TREE);
+        expect(await listSees(asm2, { userId: 'isr1', submitterManagerChain: [] })).toBe(true);
+        expect(await listSees(asm1, { userId: 'isr1', submitterManagerChain: [] })).toBe(false);
+        filed('PENDING_ASM_APPROVAL', []);
+        mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null);
+        await expect(service.getOne(asm2, 's1')).resolves.toBeDefined();
+        await expect(service.getOne(asm1, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('a LIVE submitter is unchanged (the snapshot is ignored)', async () => {
+        primeSalesNodes(TREE.map((n) => (n.id === 'isr-su' ? { ...n, deletedAt: undefined } : n)));
+        // live isr under M under asm2 now → asm2 sees it even though the snapshot names asm1
+        expect(await listSees(asm2, { userId: 'isr1', submitterManagerChain: SNAPSHOT })).toBe(true);
       });
     });
 
@@ -5068,7 +5183,10 @@ describe('KycService', () => {
         await service.list(asm, {});
         const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
         // O1 (owner 2026-11-18): the deleted SO's OWN KYCs stay with the ASM above them too (submitter scope).
-        expect([...where.userId.in].sort()).toEqual(['asm1', 'isr1', 'so1']);
+        // K1: live submitters in the subtree (asm1, isr1) + the removed SO via the legacy (no-snapshot) clause.
+        const [live, legacy] = where.OR as Array<{ userId: { in: string[] }; submitterManagerChain?: { isEmpty?: boolean } }>;
+        expect([...live.userId.in].sort()).toEqual(['asm1', 'isr1']);
+        expect(legacy).toEqual({ userId: { in: ['so1'] }, submitterManagerChain: { isEmpty: true } });
       });
     });
   });

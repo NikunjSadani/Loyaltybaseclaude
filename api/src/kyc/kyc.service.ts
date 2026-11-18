@@ -158,7 +158,9 @@ import {
 import {
   descendantSalesUserIds,
   firstActiveApproverId,
+  firstActiveInChain,
   HIERARCHY_MAX_HOPS,
+  managerChainOf,
   isSelfOrDescendant,
 } from '../sales/sales-hierarchy-access.helper';
 
@@ -1305,6 +1307,16 @@ export class KycService {
     }
   }
 
+  /**
+   * K1 — the consenting submitter's reporting chain right now (direct manager upward, deleted managers
+   * included, bounded + cycle-safe), from the request's single hierarchy read. [] for a non-sales submitter.
+   */
+  private async submitterManagerChainFor(user: JwtPayload): Promise<string[]> {
+    const nodes = await this.tenantHierarchy(user);
+    const me = nodes.find((n) => n.userId === user.sub && n.deletedAt == null);
+    return me ? managerChainOf(me.id, nodes) : [];
+  }
+
   private async resolveNextActiveManagerLevel(
     approverUserId: string,
     clientId: string,
@@ -1352,8 +1364,15 @@ export class KycService {
     user: JwtPayload,
   ): Promise<{
     callerSalesUserId: string;
+    /** LIVE submitters in the caller's subtree (self + descendants, walked through deleted managers). */
     subtreeUserIds: string[];
     subtreeSalesUserIds: Set<string>;
+    /** O1 legacy: REMOVED submitters reached through the CURRENT links (used only when no snapshot exists). */
+    removedReachedUserIds: Set<string>;
+    /** Every REMOVED sales user's login id in the tenant (a snapshot row is matched by its chain instead). */
+    removedUserIds: Set<string>;
+    /** The KYC-list WHERE for this caller's submitter scope (live subtree + removed submitters, K1). */
+    submitterWhere: Prisma.KycSubmissionWhereInput;
   } | null> {
     const caller = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
@@ -1365,12 +1384,35 @@ export class KycService {
     // callerSalesTeam + the sales outlet picker); descendantSalesUserIds never returns a deleted node.
     const nodes = await this.tenantHierarchy(user);
     const subtree = descendantSalesUserIds(caller.id, nodes);
-    // O1 (owner 2026-11-18): the SUBMITTER scope also covers reps REMOVED after filing — their KYCs stay with
-    // the managers above them (list/queue + view path A). Membership / assignment scope (`subtree`) never
-    // includes a deleted node.
-    const submitterSubtree = descendantSalesUserIds(caller.id, nodes, { includeDeleted: true });
-    const subtreeUserIds = nodes.filter((n) => submitterSubtree.has(n.id)).map((n) => n.userId);
-    return { callerSalesUserId: caller.id, subtreeUserIds, subtreeSalesUserIds: subtree };
+    const subtreeUserIds = nodes.filter((n) => subtree.has(n.id)).map((n) => n.userId);
+    // O1 + K1 (owner 2026-11-18): a KYC filed by a rep REMOVED afterwards stays with the managers that rep had
+    // WHEN IT WAS FILED — the submission's `submitterManagerChain` snapshot (taken at consent routing). A row
+    // with no snapshot (legacy / pre-column) falls back to the CURRENT links (the walk through deleted nodes).
+    // Live submitters are unchanged. Membership / assignment scope (`subtree`) never includes a deleted node.
+    const reachedWithRemoved = descendantSalesUserIds(caller.id, nodes, { includeDeleted: true });
+    const removed = nodes.filter((n) => n.deletedAt != null);
+    const removedReachedUserIds = new Set(removed.filter((n) => reachedWithRemoved.has(n.id)).map((n) => n.userId));
+    const removedUserIds = new Set(removed.map((n) => n.userId));
+    const submitterWhere: Prisma.KycSubmissionWhereInput =
+      removedUserIds.size === 0
+        ? { userId: { in: subtreeUserIds } } // no removed reps in the tenant → byte-identical to before
+        : {
+            OR: [
+              { userId: { in: subtreeUserIds } },
+              ...(removedReachedUserIds.size
+                ? [{ userId: { in: [...removedReachedUserIds] }, submitterManagerChain: { isEmpty: true } }]
+                : []),
+              { userId: { in: [...removedUserIds] }, submitterManagerChain: { has: caller.id } },
+            ],
+          };
+    return {
+      callerSalesUserId: caller.id,
+      subtreeUserIds,
+      subtreeSalesUserIds: subtree,
+      removedReachedUserIds,
+      removedUserIds,
+      submitterWhere,
+    };
   }
 
   /**
@@ -1385,6 +1427,8 @@ export class KycService {
     submitterUserId: string,
     partnerId?: string | null,
     outletId?: string | null,
+    /** K1: the submission's `submitterManagerChain` snapshot (empty = legacy / none). */
+    submitterManagerChain: string[] = [],
   ): Promise<void> {
     if (this.canReadTenantWide(user.role)) return; // admins/Gifsy + MIS read tenant-wide
     if (submitterUserId === user.sub) return; // own submission
@@ -1392,8 +1436,15 @@ export class KycService {
     if (!scope) {
       throw new ForbiddenException('Forbidden'); // partner / non-sales caller → own-only
     }
-    // Path A — the submitter is in the caller's reporting subtree (the historical rule).
+    // Path A — the submitter is in the caller's reporting subtree (the historical rule). O1/K1: a REMOVED
+    // submitter belongs to the managers in the submission's snapshot chain (legacy: the current links).
     if (scope.subtreeUserIds.includes(submitterUserId)) return;
+    if (scope.removedUserIds.has(submitterUserId)) {
+      const chain = submitterManagerChain ?? [];
+      if (chain.length > 0 ? chain.includes(scope.callerSalesUserId) : scope.removedReachedUserIds.has(submitterUserId)) {
+        return;
+      }
+    }
     // Path B (reassignment-aware) — the submission's OUTLET is CURRENTLY assigned
     // (active SalesUserAssignment, unassignedAt null) to a sales user in the caller's
     // subtree. This aligns "can view detail" with "can see in the list" (buildOutlets):
@@ -1437,6 +1488,8 @@ export class KycService {
   private async assertRoutedApprover(
     user: JwtPayload,
     submitterUserId: string,
+    /** K1: the submission's `submitterManagerChain` snapshot (empty = legacy / none). */
+    submitterManagerChain: string[] = [],
   ): Promise<void> {
     if (this.isAdmin(user.role)) return;
 
@@ -1447,7 +1500,7 @@ export class KycService {
     const submitter = await this.prisma.salesUser.findFirst({
       // O1: the submitter may have been REMOVED after filing — their KYC stays with the managers above them.
       where: { userId: submitterUserId, user: { clientId: user.clientId } },
-      select: { id: true },
+      select: { id: true, deletedAt: true },
     });
     if (!caller || !submitter) {
       throw new ForbiddenException('Only the submitting rep’s reporting manager can approve this KYC.');
@@ -1459,6 +1512,20 @@ export class KycService {
     // firstActiveApproverId skips deleted + inactive levels; isSelfOrDescendant never treats a deleted
     // node as the submitter. Before this, the walk stopped at the missing SO and the ASM got a 403.
     const nodes = await this.tenantHierarchy(user);
+
+    // K1: a REMOVED submitter with a snapshot → the approver comes from the managers they had WHEN THE KYC WAS
+    // FILED (the chain), never from the frozen live link (a manager moved to another branch takes nothing
+    // along). Multi-level: any live+active manager IN the chain; single-stage: the first live+active one.
+    const chain = submitterManagerChain ?? [];
+    if (submitter.deletedAt != null && chain.length > 0) {
+      const callerNode = nodes.find((n) => n.id === caller.id);
+      const callerLive = callerNode?.isActive === true && callerNode.deletedAt == null;
+      const allowed = (await this.isMultiLevelApproval(user.clientId))
+        ? callerLive && chain.includes(caller.id)
+        : firstActiveInChain(chain, nodes) === caller.id;
+      if (!allowed) throw new ForbiddenException('Only the submitting rep’s reporting manager can approve this KYC.');
+      return;
+    }
 
     // Multi-stage sales approval (Bajaj, via multiLevelApproval): the routed approver ADVANCES as the
     // submission climbs SO→ASM, so a single "first active approver" check would reject the ASM at the
@@ -3137,10 +3204,13 @@ export class KycService {
     // submitter (KycSubmission.userId = the rep who filed it) must be in the caller's
     // subtree. Admins/MIS/Gifsy stay tenant-wide / cross-tenant.
     let submitterScope: string[] | null = null;
+    let submitterWhere: Prisma.KycSubmissionWhereInput | null = null;
     if (!this.canReadTenantWide(user.role)) {
       const scope = await this.resolveSalesScope(user);
       submitterScope = scope ? scope.subtreeUserIds : [user.sub];
-      where.userId = { in: submitterScope };
+      // K1: the scope WHERE also carries the removed-submitter rows (snapshot chain / legacy current link).
+      submitterWhere = scope ? scope.submitterWhere : { userId: { in: submitterScope } };
+      Object.assign(where, submitterWhere);
     }
 
     if (q.status && this.canReadTenantWide(user.role)) {
@@ -3197,7 +3267,7 @@ export class KycService {
       by: ['status'],
       where: this.canReadTenantWide(user.role)
         ? { ...this.kycTenantFilter(user), NOT: draftNot }
-        : { userId: { in: submitterScope ?? [user.sub] }, ...this.kycTenantFilter(user), NOT: draftNot },
+        : { ...(submitterWhere ?? { userId: { in: submitterScope ?? [user.sub] } }), ...this.kycTenantFilter(user), NOT: draftNot },
       _count: { status: true },
     });
 
@@ -3307,7 +3377,13 @@ export class KycService {
     // non-admin non-owner (a sales reviewer sees PAN/bank as last-4). partnerId widens
     // the read to the outlet's CURRENT assignee chain (reassignment case — matches the
     // list/targets views in buildOutlets), not just the original submitter chain.
-    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId, submission.outletId);
+    await this.assertCanViewSubmission(
+      user,
+      submission.userId,
+      submission.partnerId,
+      submission.outletId,
+      submission.submitterManagerChain ?? [],
+    );
 
     // ── Task 3.4e: DPDP read-masking ─────────────────────────────────────────
     // Mask sensitive fields (bank account, PAN, GST → last 4) for non-admin callers
@@ -3757,7 +3833,7 @@ export class KycService {
 
     // …and only the ROUTED approver (the submitting rep's first active manager up
     // the chain) may act — a same-level manager in a different branch is rejected.
-    await this.assertRoutedApprover(user, submission.userId);
+    await this.assertRoutedApprover(user, submission.userId, submission.submitterManagerChain ?? []);
 
     // ── SO Declaration variant (Bajaj) — the ASM signs the declaration at first-approve ──
     // Gated on the submission's variant so STANDARD first-approve is byte-identical. Require
@@ -4207,7 +4283,7 @@ export class KycService {
     // A field approver may reject only as the ROUTED approver (the submitting rep's
     // first active manager). Gifsy admin is exempt (acts at the final stage).
     if (!isGifsyAdmin) {
-      await this.assertRoutedApprover(user, submission.userId);
+      await this.assertRoutedApprover(user, submission.userId, submission.submitterManagerChain ?? []);
     }
 
     const stage = isGifsyAdmin ? 'GIFSY' : 'FIRST_APPROVER';
@@ -4316,7 +4392,13 @@ export class KycService {
     // same widening as getOne, so the ledger read matches what the list exposes); an
     // out-of-chain manager is Forbidden. (Partner callers are already scoped to their
     // own via the where.userId filter above → a foreign id 404s here.)
-    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId, submission.outletId);
+    await this.assertCanViewSubmission(
+      user,
+      submission.userId,
+      submission.partnerId,
+      submission.outletId,
+      submission.submitterManagerChain ?? [],
+    );
 
     const partner = submission.partner;
     return {
@@ -4494,6 +4576,10 @@ export class KycService {
       // marker (surfaced as `fastTrack` on the detail/queue + the exports' "Routing" column) + an AuditLog row.
       // The normal route is resolved FIRST (read-only): B2 fast-tracks only what would have gone to a manager.
       const initialRouting = await this.resolveInitialRouting(user);
+      // K1: snapshot the submitter's reporting chain NOW (routing time) — if the submitter is removed later, the
+      // KYC stays with these managers. Written only for a sales submitter (empty → field untouched).
+      const managerChain = await this.submitterManagerChainFor(user);
+      const chainData = managerChain.length > 0 ? { submitterManagerChain: managerChain } : {};
       const fastTrack = await this.resolveGifsyRejectFastTrack(user, submission, initialRouting.status);
       if (fastTrack) {
         // stage GIFSY (the KYC now sits with Gifsy); deliberately NO approverRole — nobody approved it.
@@ -4507,7 +4593,7 @@ export class KycService {
         const routedFast = await this.prisma.$transaction(async (tx) => {
           const r = await tx.kycSubmission.updateMany({
             where: { id: submissionId, status: 'DRAFT' },
-            data: { status: 'PENDING_GIFSY', escalatedFrom: null, submittedAt: verifiedAt },
+            data: { status: 'PENDING_GIFSY', escalatedFrom: null, submittedAt: verifiedAt, ...chainData },
           });
           if (r?.count !== 1) return false;
           await tx.kycStatusHistory.create({
@@ -4551,7 +4637,7 @@ export class KycService {
         where: { id: submissionId, status: 'DRAFT' },
         // submittedAt = the consent moment: the KYC only truly reaches the approver now,
         // so approver SLA/aging starts here.
-        data: { status: routedStatus as never, escalatedFrom, submittedAt: verifiedAt },
+        data: { status: routedStatus as never, escalatedFrom, submittedAt: verifiedAt, ...chainData },
       });
       if (routed.count !== 1) return { verified: true, submissionId };
       await this.prisma.kycStatusHistory.create({

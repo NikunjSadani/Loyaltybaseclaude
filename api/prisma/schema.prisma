@@ -1036,6 +1036,13 @@ model KycSubmission {
   // Nullable, no backfill: legacy rows (null) keep the partner-level check.
   outletId String?
 
+  // K1 (2026-11-18): the submitter's reporting chain AT ROUTING TIME (consent) — SalesUser ids from the
+  // submitter's direct manager upward (deleted managers included, cycle-safe, bounded). When the submitter is
+  // later REMOVED (soft-deleted), visibility + approval follow THIS chain (the managers they had when the KYC
+  // was filed), not the frozen live link — moving that manager to another branch no longer moves the KYC.
+  // Empty = legacy row (filed before the column) or a non-sales submitter → the current link is used.
+  submitterManagerChain String[] @default([])
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

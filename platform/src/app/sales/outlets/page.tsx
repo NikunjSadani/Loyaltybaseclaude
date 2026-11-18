@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   ChevronRight, Users, AlertTriangle, LayoutList, LayoutGrid, Eye,
@@ -11,6 +10,8 @@ import { Badge } from '@/components/ui/badge';
 import { PERIODS, CURRENT_MONTH, pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
 import { kycOrderRank } from '@/lib/kyc-order';
 import { KYCStatus } from '@/types';
+import { kycHrefFor, kycFiledViaNote } from '@/lib/sales-kyc-link';
+import { KycCardLink } from '@/components/sales/KycCardLink';
 import { getRole, hasTeamView, childRoleLabelFor, type SalesRole } from '@/lib/sales-role';
 import { classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
@@ -32,6 +33,8 @@ type OutletType = 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST' | 'SSS_TOT';
 interface Outlet {
   id:         string;
   kycId:      string;
+  /** K2: the owner's KYC was filed via ANOTHER outlet this caller cannot open (status shown, no link). */
+  kycFiledViaOutletCode?: string;
   outletCode: string;  // matches Outlet.outletCode in DB (used for target + visibility lookup)
   name:       string;
   location:   string;
@@ -581,20 +584,22 @@ export default function SalesOutletsPage() {
                       // uploaded), `kycId` is empty → `/sales/kyc/` is a dead "KYC not
                       // found" route. Send the rep to the start wizard pre-selected on
                       // this outlet instead. With a kycId, deep-link to the detail.
-                      const href = outlet.kycId
-                        ? `/sales/kyc/${outlet.kycId}`
-                        : `/sales/kyc/new?outletId=${outlet.id}`;
+                      // K2: null when the owner's KYC was filed via another outlet this caller can't open.
+                      const href = kycHrefFor(outlet);
                       return (
                         <tr
                           key={outlet.id}
-                          onClick={() => router.push(href)}
-                          className="hover:bg-gray-50 transition-colors group cursor-pointer"
+                          onClick={() => { if (href) router.push(href); }}
+                          className={`hover:bg-gray-50 transition-colors group ${href ? 'cursor-pointer' : ''}`}
                         >
                           <td className="py-2.5 pl-4 pr-3 sticky left-0 bg-white group-hover:bg-gray-50 z-10 transition-colors">
                             <div className="flex items-center gap-2">
                               <div className="min-w-0">
                                 <p className="text-xs font-semibold text-gray-900 truncate max-w-[110px]">{outlet.name}</p>
                                 <p className="text-[9px] font-mono text-gray-400 leading-tight">{outlet.outletCode}</p>
+                                {kycFiledViaNote(outlet) && (
+                                  <p className="text-[9px] text-gray-500 leading-tight" data-testid="kyc-filed-via">{kycFiledViaNote(outlet)}</p>
+                                )}
                                 <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                                   <Badge variant={kycBadge[outlet.kycStatus].variant} className="text-[8px] px-1 py-0">
                                     {kycBadge[outlet.kycStatus].label}
@@ -703,15 +708,12 @@ export default function SalesOutletsPage() {
                 const stripClass = svK?.target ? paceStrip(svPct, period) : 'bg-gray-100';
 
                 return (
-                  <Link
+                  <KycCardLink
                     key={outlet.id}
                     // No submission yet → start wizard (else the empty kycId yields a dead
-                    // /sales/kyc/ → "KYC not found"). With a kycId → detail deep-link.
-                    href={
-                      outlet.kycId
-                        ? `/sales/kyc/${outlet.kycId}`
-                        : `/sales/kyc/new?outletId=${outlet.id}`
-                    }
+                    // /sales/kyc/ → "KYC not found"). With a kycId → detail deep-link. K2: no link
+                    // (plain card + note) when the owner's KYC was filed via another outlet.
+                    href={kycHrefFor(outlet)}
                     className="block bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-all active:scale-[0.99]"
                   >
                     <div className={`h-1 ${stripClass}`} />
@@ -727,6 +729,9 @@ export default function SalesOutletsPage() {
                           </Badge>
                         </div>
                         <p className="text-[10px] font-mono text-gray-400 leading-tight mt-0.5">{outlet.outletCode}</p>
+                        {kycFiledViaNote(outlet) && (
+                          <p className="text-[10px] text-gray-500 leading-tight" data-testid="kyc-filed-via">{kycFiledViaNote(outlet)}</p>
+                        )}
                       </div>
                       <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />
                     </div>
@@ -798,7 +803,7 @@ export default function SalesOutletsPage() {
                         </span>
                       </div>
                     )}
-                  </Link>
+                  </KycCardLink>
                 );
               })}
             </div>

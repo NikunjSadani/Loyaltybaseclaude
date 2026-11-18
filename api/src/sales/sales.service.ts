@@ -75,23 +75,7 @@ function orderByIds<T extends { id: string }>(rows: T[], ids: string[]): T[] {
   return [...rows].sort((a, b) => (pos.get(a.id) ?? 0) - (pos.get(b.id) ?? 0));
 }
 
-/**
- * F1 — the KYC submission a per-OUTLET row shows: the newest submission filed for THAT outlet
- * (`outletId` match); a legacy submission (`outletId` null, filed before the column existed) counts as the
- * partner's. A newer submission filed for a SIBLING outlet of the same multi-outlet owner is skipped — the
- * row must never link to a KYC the outlet-level view check (R5) would refuse. `subs` = the partner's
- * submissions, newest first. Back-compat: rows loaded without `outletId` behave exactly as before
- * (`undefined` counts as legacy → the partner-latest).
- */
-export function latestKycForOutlet<T extends { outletId?: string | null }>(outletId: string, subs: T[] | undefined): T | null {
-  for (const s of subs ?? []) {
-    if (s.outletId == null || s.outletId === outletId) return s;
-  }
-  return null;
-}
 
-/** How many of a partner's newest submissions each per-outlet list loads (F1 — bounded; a partner has a few). */
-const KYC_PER_PARTNER_WINDOW = 20;
 
 /** A Team-Member filter option on the /sales/outlets screen (direct or promoted report — G3). */
 const OUTLET_FILTER_MEMBER_SELECT = {
@@ -273,6 +257,8 @@ export class SalesService {
         hierarchyLevel: { select: { code: true, name: true, level: true } },
         subordinates: {
           where: { isActive: true, deletedAt: null },
+          // K5: deterministic direct-report order (= the visibility member filter): employeeCode ascending.
+          orderBy: { employeeCode: 'asc' },
           include: TEAM_MEMBER_INCLUDE,
         },
       },
@@ -303,14 +289,34 @@ export class SalesService {
     // submitter userId, so filtering by a manager must return the whole branch (owner
     // 2026-07-03), not just that person's own submissions. Reuses the hierarchy walk.
     const userIdBySalesUserId = new Map(edges.map((s) => [s.id, s.userId]));
+    const edgeById = new Map(edges.map((e) => [e.id, e]));
+    /** Login ids of the REMOVED managers between the caller and a (promoted) member — empty for a direct report. */
+    const removedManagersAbove = (memberId: string): string[] => {
+      const out: string[] = [];
+      const seen = new Set<string>([memberId]);
+      let cur = edgeById.get(memberId)?.reportingToId ?? null;
+      while (cur && cur !== salesUser.id && !seen.has(cur)) {
+        seen.add(cur);
+        const n = edgeById.get(cur);
+        if (!n || n.deletedAt == null) break;
+        out.push(n.userId);
+        cur = n.reportingToId;
+      }
+      return out;
+    };
 
     const members = directReports.map((sub) => {
       const roll = rollups.get(sub.id) ?? { outlets: 0, kycDone: 0, kycPending: 0, targetValue: 0, targetPct: 0 };
       // O1: includeDeleted — a KYC filed by a rep in this branch who was REMOVED afterwards still belongs to
       // the branch (the KYC-list member filter must keep finding it).
-      const submitterUserIds = [...descendantSalesUserIds(sub.id, edges, { includeDeleted: true })]
-        .map((id) => userIdBySalesUserId.get(id))
-        .filter((v): v is string => !!v);
+      // K4: a PROMOTED member (reached through REMOVED managers) also carries those removed managers' OWN login
+      // ids — the KYCs a removed SO filed himself stay findable under the member filter instead of vanishing.
+      // Chosen over a separate "Removed: <name>" option: no new row type on the Team screen (these rows also
+      // drive the team list + tiles), and the removed SO's branch is exactly what the promoted reps now carry.
+      const submitterUserIds = [
+        ...[...descendantSalesUserIds(sub.id, edges, { includeDeleted: true })].map((id) => userIdBySalesUserId.get(id)),
+        ...removedManagersAbove(sub.id),
+      ].filter((v, i, arr): v is string => !!v && arr.indexOf(v) === i);
       return {
         id: sub.id,
         employeeCode: sub.employeeCode,
@@ -470,8 +476,8 @@ export class SalesService {
               select: {
                 kycSubmissions: {
                   orderBy: { createdAt: 'desc' },
-                  take: KYC_PER_PARTNER_WINDOW, // F1: the outlet own latest (latestKycForOutlet)
-                  select: { status: true, outletId: true },
+                  take: 1,
+                  select: { status: true },
                 },
               },
             },
@@ -502,7 +508,7 @@ export class SalesService {
     const outletsByUser = new Map<string, OutletInfo[]>();
     for (const a of assignments) {
       if (!a.outlet) continue;
-      const status = latestKycForOutlet(a.outlet.id, a.outlet.partner?.kycSubmissions)?.status ?? 'NOT_STARTED';
+      const status = a.outlet.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED';
       const arr = outletsByUser.get(a.salesUserId) ?? [];
       arr.push({
         id: a.outlet.id,
@@ -596,6 +602,7 @@ export class SalesService {
           // route (teamSize>0 → team view, else → outlets). An unfiltered count would still show
           // teamSize=1 for a manager whose only subordinate is soft-deleted and route to an empty
           // team view. G3: withPromotedReports adds the active reports BELOW a REMOVED slot.
+          orderBy: { employeeCode: 'asc' }, // K5: deterministic order (team-view re-sorts by score anyway)
           include: TEAM_VIEW_MEMBER_INCLUDE,
         },
       },
@@ -994,14 +1001,7 @@ export class SalesService {
             programCategory: true,
             outletType: { select: { code: true, name: true } },
             partner: {
-              // F1: the outlet's OWN latest submission (latestKycForOutlet), not a sibling outlet's.
-              select: {
-                kycSubmissions: {
-                  orderBy: { createdAt: 'desc' },
-                  take: KYC_PER_PARTNER_WINDOW,
-                  select: { status: true, outletId: true },
-                },
-              },
+              select: { kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true } } },
             },
           },
         },
@@ -1021,7 +1021,7 @@ export class SalesService {
         typeName: o.outletType?.name ?? o.outletType?.code ?? '',
         program: o.programName ?? '',
         subProgram: o.programCategory ?? '',
-        status: latestKycForOutlet(o.id, o.partner?.kycSubmissions)?.status ?? 'NOT_STARTED',
+        status: o.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED',
         isActive: !!o.isActive,
       };
       if (info.typeCode) typeSet.set(info.typeCode, info.typeName);
@@ -1317,8 +1317,8 @@ export class SalesService {
                     id: true,
                     kycSubmissions: {
                       orderBy: { createdAt: 'desc' },
-                      take: KYC_PER_PARTNER_WINDOW, // F1: the outlet own latest (latestKycForOutlet)
-                      select: { id: true, status: true, outletId: true },
+                      take: 1,
+                      select: { id: true, status: true },
                     },
                   },
                 },
@@ -1341,7 +1341,7 @@ export class SalesService {
 
     // A partner-less outlet has no KYC submission → NOT_STARTED (pending action).
     const latestStatusOf = (a: (typeof outletAssignments)[number]): string =>
-      latestKycForOutlet(a.outlet!.id, a.outlet!.partner?.kycSubmissions)?.status ?? 'NOT_STARTED';
+      a.outlet!.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED';
 
     const kycDone = outletAssignments.filter((a) => latestStatusOf(a) === 'APPROVED').length;
 
@@ -1358,7 +1358,7 @@ export class SalesService {
     const outlets = outletAssignments.map((a) => {
       const outlet = a.outlet!;
       const partner = outlet.partner; // null until the outlet is KYC'd
-      const latestKyc = latestKycForOutlet(outlet.id, partner?.kycSubmissions); // F1
+      const latestKyc = partner?.kycSubmissions[0] ?? null;
       return {
         id: outlet.id,
         partnerId: partner?.id ?? null,
@@ -1400,7 +1400,9 @@ export class SalesService {
    * Source: platform sales/team/[memberId]/outlets GET.
    */
   async getMemberOutlets(user: JwtPayload, memberId: string) {
-    await this.assertCanViewMember(user, memberId);
+    const edges = await this.assertCanViewMember(user, memberId);
+    // K2: the VIEWER is the caller (a manager drilling into a member) — their R5 scope decides the KYC links.
+    const viewerNode = edges.find((n) => n.userId === user.sub && n.deletedAt == null);
 
     const member = await this.prisma.salesUser.findFirst({
       where: { id: memberId, deletedAt: null, user: { clientId: user.clientId } },
@@ -1408,7 +1410,11 @@ export class SalesService {
     });
     if (!member) throw new NotFoundException('Member not found');
 
-    const outlets = await this.buildOutlets(memberId, user.clientId);
+    const outlets = await this.buildOutlets(
+      memberId,
+      user.clientId,
+      viewerNode ? { salesUserId: viewerNode.id, edges } : undefined,
+    );
     return { outlets };
   }
 
@@ -1431,6 +1437,7 @@ export class SalesService {
         // + submitterUserIds = the report's own user id + their whole downline's).
         subordinates: {
           where: { isActive: true, deletedAt: null },
+          orderBy: { employeeCode: 'asc' }, // K5: deterministic (= Team + visibility member filters)
           select: OUTLET_FILTER_MEMBER_SELECT,
         },
       },
@@ -1444,12 +1451,11 @@ export class SalesService {
     const edges = await loadSalesHierarchy(this.prisma, user.clientId);
     const subtreeIds = [...descendantSalesUserIds(salesUser.id, edges)];
 
-    // G3 Team-Member filter: the deleted SO's live reports are listed as SELECTABLE members under the
-    // caller (promoted one level, exactly as the Team screen lists them) rather than rolled into some
-    // other member — there is no live person to roll them up into, and the filter must offer the same
-    // people the Team screen shows. Fetched only when a vacant slot exists.
-    // F2: only a REMOVED (deleted) report is walked through; promoted members are ACTIVE (same filter as
-    // the direct `subordinates` list). F8: direct first, then promoted in walk order (= Team screen).
+    // G3 Team-Member filter: a REMOVED (soft-deleted) direct report's ACTIVE reports are listed as SELECTABLE
+    // members under the caller (promoted one level, exactly as the Team screen lists them) rather than rolled
+    // into some other member — there is no live person to roll them up into, and the filter must offer the same
+    // people the Team screen shows. Fetched only when a removed slot exists. F2: an INACTIVE report is never
+    // walked through. Order (F8/K5): direct reports by employeeCode, then promoted ones in walk order.
     const promotedIds = promotedActiveReportIds(salesUser.id, edges);
     const promoted = promotedIds.length
       ? await this.prisma.salesUser.findMany({
@@ -1482,7 +1488,10 @@ export class SalesService {
         .filter((v): v is string => !!v),
     }));
 
-    return { outlets: await this.buildOutlets(subtreeIds, user.clientId), members };
+    return {
+      outlets: await this.buildOutlets(subtreeIds, user.clientId, { salesUserId: salesUser.id, edges }),
+      members,
+    };
   }
 
   /**
@@ -2423,7 +2432,73 @@ export class SalesService {
    * Target/TargetAchievement are dropped, so the partner-target read and the
    * achievement-derived targetPct are removed; targetPct is reported as 0.
    */
-  private async buildOutlets(salesUserId: string | string[], clientId: string) {
+  /**
+   * K2 — which owner-latest KYCs (by submission id → the outlet code it was filed via) this viewer can NOT open
+   * under the R5 view rule (KycService.assertCanViewSubmission), so the list can show the status without a
+   * dead link. Openable when: the KYC has no outlet (legacy → partner-level rule; the viewer holds an outlet of
+   * this owner) · it was filed for this very row's outlet · the submitter is in the viewer's live subtree · a
+   * REMOVED submitter's snapshot chain (legacy: current links) reaches the viewer · or the KYC's outlet is
+   * actively assigned to the viewer's subtree (one batched lookup, only for the still-unresolved rows).
+   */
+  private async kycFiledViaElsewhere(
+    rows: Array<{
+      outlet: {
+        id: string;
+        partner: {
+          kycSubmissions: Array<{
+            id: string;
+            outletId: string | null;
+            userId: string;
+            submitterManagerChain: string[];
+            outlet: { outletCode: string | null } | null;
+          }>;
+        } | null;
+      } | null;
+    }>,
+    viewer: { salesUserId: string; edges: SalesHierarchyNode[] } | undefined,
+    clientId: string,
+  ): Promise<Map<string, string>> {
+    const blocked = new Map<string, string>();
+    if (!viewer) return blocked;
+    const live = descendantSalesUserIds(viewer.salesUserId, viewer.edges);
+    const reachedWithRemoved = descendantSalesUserIds(viewer.salesUserId, viewer.edges, { includeDeleted: true });
+    const liveUserIds = new Set(viewer.edges.filter((n) => live.has(n.id)).map((n) => n.userId));
+    const removedById = new Map(viewer.edges.filter((n) => n.deletedAt != null).map((n) => [n.userId, n]));
+    const pending = new Map<string, { outletId: string; code: string }>(); // submissionId → its outlet
+    for (const a of rows) {
+      const k = a.outlet?.partner?.kycSubmissions?.[0];
+      if (!a.outlet || !k || !k.outletId || k.outletId === a.outlet.id) continue; // legacy / own outlet → open
+      if (liveUserIds.has(k.userId)) continue; // Path A — live submitter in the viewer's subtree
+      const removed = removedById.get(k.userId);
+      if (removed) {
+        const chain = k.submitterManagerChain ?? [];
+        if (chain.length > 0 ? chain.includes(viewer.salesUserId) : reachedWithRemoved.has(removed.id)) continue;
+      }
+      pending.set(k.id, { outletId: k.outletId, code: k.outlet?.outletCode ?? '' });
+    }
+    if (pending.size === 0) return blocked;
+    // Path B — the KYC's outlet is actively assigned to someone in the viewer's subtree (tenant-scoped).
+    const held = await this.prisma.salesUserAssignment.findMany({
+      where: {
+        outletId: { in: [...new Set([...pending.values()].map((v) => v.outletId))] },
+        unassignedAt: null,
+        salesUserId: { in: [...live] },
+        outlet: { clientId },
+      },
+      select: { outletId: true },
+    });
+    const heldIds = new Set((Array.isArray(held) ? held : []).map((h) => h.outletId));
+    for (const [subId, v] of pending) if (!heldIds.has(v.outletId)) blocked.set(subId, v.code);
+    return blocked;
+  }
+
+  private async buildOutlets(
+    salesUserId: string | string[],
+    clientId: string,
+    // K2: the VIEWER (the caller) + the request's hierarchy — decides whether the owner's latest KYC can be
+    // OPENED by this caller (R5). Absent → every row links as before.
+    viewer?: { salesUserId: string; edges: SalesHierarchyNode[] },
+  ) {
     const ids = Array.isArray(salesUserId) ? salesUserId : [salesUserId];
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: {
@@ -2490,10 +2565,20 @@ export class SalesService {
                 wallets: { select: { redeemablePoints: true } },
                 kycSubmissions: {
                   orderBy: { createdAt: 'desc' },
-                  // F1: a window of the partner newest submissions; the row shows the one filed for THIS
-                  // outlet (latestKycForOutlet) — never a sibling outlet KYC the R5 view check would refuse.
-                  take: KYC_PER_PARTNER_WINDOW,
-                  select: { id: true, status: true, createdAt: true, rejectionReason: true, outletId: true },
+                  take: 1,
+                  // K2: the OWNER's latest KYC (status is owner-level, as before). outletId / outlet code /
+                  // submitter / snapshot chain decide only whether THIS caller can OPEN it (R5) — when not,
+                  // the row shows the status with "KYC filed via outlet <code>" instead of a dead link.
+                  select: {
+                    id: true,
+                    status: true,
+                    createdAt: true,
+                    rejectionReason: true,
+                    outletId: true,
+                    userId: true,
+                    submitterManagerChain: true,
+                    outlet: { select: { outletCode: true } },
+                  },
                 },
                 // G1: whether the partner EVER had an APPROVED KYC (a later rejected re-KYC leaves the latest
                 // status REJECTED) — drives `notInterestedBlock` so the FE hides "Not interested" exactly where
@@ -2513,6 +2598,12 @@ export class SalesService {
     // not start enrollment.) Partner-derived fields are null/0 for partner-less
     // outlets; sales-assisted redeem (B1) is gated on an APPROVED partner FE-side.
     const filtered = assignments.filter((a) => a.outlet !== null);
+
+    // K2 (2026-11-18): the KYC status on every row stays OWNER-level (the partner's latest, as before). But R5
+    // made the detail view OUTLET-level, so when the owner's latest KYC was filed for ANOTHER outlet this caller
+    // can't open, the row keeps the status and drops the link: kycId '' + `kycFiledViaOutletCode` (the FE shows
+    // "KYC filed via outlet <code>") — never a dead link, never a fake "Not started".
+    const blockedVia = await this.kycFiledViaElsewhere(filtered, viewer, clientId);
 
     // Resolve each group's canonical identity + PAN once (dedupe by parentId). A grouped child's
     // KYC pre-fills the shared owner-identity (business/owner name, GST, bank, UPI — EDITABLE) and
@@ -2558,7 +2649,7 @@ export class SalesService {
         .map((a) => {
           const outlet = a.outlet!;
           const partner = outlet.partner; // null until the outlet is KYC'd
-          const latestKyc = latestKycForOutlet(outlet.id, partner?.kycSubmissions); // F1: THIS outlet
+          const latestKyc = partner?.kycSubmissions[0] ?? null;
           // Re-entry statuses: the rep re-opens the SAME outlet's KYC wizard
           // pre-filled. Only build existingKyc for these (else null). DRAFT = an
           // un-confirmed KYC (saved at submit, awaiting the outlet-owner OTP) — the rep
@@ -2674,7 +2765,9 @@ export class SalesService {
             // filter keys on this for outlets with no submission yet.
             assignedUserId: a.salesUser?.userId ?? null,
             balance: partner?.wallets[0]?.redeemablePoints ?? 0,
-            kycId: latestKyc?.id ?? '',
+            kycId: latestKyc && blockedVia.has(latestKyc.id) ? '' : (latestKyc?.id ?? ''),
+            // K2: present ONLY when the owner's latest KYC was filed via another outlet this caller cannot open.
+            ...(latestKyc && blockedVia.has(latestKyc.id) ? { kycFiledViaOutletCode: blockedVia.get(latestKyc.id) } : {}),
             outletCode: outlet.outletCode,
             name: outlet.name,
             mobile: outlet.phone ?? partner?.phone ?? '',

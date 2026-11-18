@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils';
 import { type SalesRole, getRole, hasTeamView, canEnroll, childRoleLabelFor } from '@/lib/sales-role';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { kycSubmissionOrderRank } from '@/lib/kyc-order';
+import { kycFiledViaNote } from '@/lib/sales-kyc-link';
 import { api } from '@/lib/api-client';
 
 interface KYCEntry {
@@ -41,6 +42,8 @@ interface KYCEntry {
   /** True for an assigned outlet marked NOT_INTERESTED by a sales rep — shown
    *  distinctly and NON-actionable (only an admin can re-open it for enrollment). */
   isNotInterested?: boolean;
+  /** K2: the owner's KYC was filed via ANOTHER outlet this caller cannot open — status shown, row not a link. */
+  filedViaNote?: string;
   programName?: string;
   programCategory?: string;
   outletType?: string;
@@ -280,6 +283,7 @@ function KYCListContent() {
             updatedAt:   o.kycSubmittedAt ?? '',
             isNotStarted:    o.kycStatus === 'NOT_STARTED',
             isNotInterested: o.kycStatus === 'NOT_INTERESTED',
+            filedViaNote:    kycFiledViaNote(o) ?? undefined,
             assignedUserId:  o.assignedUserId ?? undefined,
             programName:     o.programName ?? '',
             programCategory: o.programCategory ?? '',
@@ -540,9 +544,11 @@ function KYCListContent() {
                       <p className="text-xs text-gray-400 mt-0.5">
                         {entry.isNotInterested
                           ? 'Marked not interested — admin can re-open for enrollment'
-                          : entry.isNotStarted
+                          : entry.filedViaNote
+                            ? entry.filedViaNote
+                            : entry.isNotStarted
                             ? 'Tap to start enrollment'
-                            : `Updated ${relativeDate(entry.updatedAt)}`}
+                              : `Updated ${relativeDate(entry.updatedAt)}`}
                       </p>
                     </div>
                     <ChevronRight
@@ -556,11 +562,13 @@ function KYCListContent() {
 
                 // NOT_INTERESTED outlets are NON-actionable for sales — only an admin can
                 // re-open them — so render a plain (non-navigating) row, not a link.
-                if (entry.isNotInterested) {
+                // K2: a KYC filed via another outlet this caller cannot open is shown (status + note) but never
+                // linked — no dead detail link and no "start KYC" for an owner who already has one.
+                if (entry.isNotInterested || entry.filedViaNote) {
                   return (
                     <div
                       key={entry.id}
-                      data-testid="kyc-not-interested-row"
+                      data-testid={entry.isNotInterested ? 'kyc-not-interested-row' : 'kyc-filed-via-row'}
                       className={`flex items-center gap-3 px-4 py-3.5 ${borderClass}`}
                     >
                       {rowBody}

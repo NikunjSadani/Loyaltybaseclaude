@@ -134,6 +134,39 @@ export function descendantSalesUserIds(
  */
 export const HIERARCHY_MAX_HOPS = 20;
 
+/**
+ * K1 — the reporting chain ABOVE a sales user right now: their direct manager first, then upward, deleted
+ * managers included (they are part of the chain the KYC was routed through). Bounded by HIERARCHY_MAX_HOPS,
+ * cycle-safe. Snapshotted onto a KycSubmission at consent (`submitterManagerChain`).
+ */
+export function managerChainOf(salesUserId: string, edges: SalesUserEdge[]): string[] {
+  const parentOf = new Map<string, string | null>();
+  for (const e of edges) parentOf.set(e.id, e.reportingToId);
+  const out: string[] = [];
+  const seen = new Set<string>([salesUserId]);
+  let cur = parentOf.get(salesUserId) ?? null;
+  while (cur && !seen.has(cur) && out.length < HIERARCHY_MAX_HOPS) {
+    seen.add(cur);
+    out.push(cur);
+    cur = parentOf.get(cur) ?? null;
+  }
+  return out;
+}
+
+/**
+ * K1 — the routed approver for a KYC whose submitter was REMOVED after filing, from the SNAPSHOT chain:
+ * the first manager in the chain who is (still) live + active — routing's rule ("next active level"),
+ * applied to the managers the submitter had when the KYC was filed. null when nobody in the chain is.
+ */
+export function firstActiveInChain(chain: string[], edges: SalesUserEdge[]): string | null {
+  const byId = new Map(edges.map((e) => [e.id, e]));
+  for (const id of chain) {
+    const n = byId.get(id);
+    if (n && isLiveActiveNode(n)) return id;
+  }
+  return null;
+}
+
 /** A node is soft-deleted (REMOVED). Inactive-but-not-deleted is NOT removed. */
 export function isRemovedNode(e: SalesUserEdge): boolean {
   return e.deletedAt != null;
