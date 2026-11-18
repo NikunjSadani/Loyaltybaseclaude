@@ -131,10 +131,16 @@ describe('Digest recorded-time clocks — no code path rewrites a settled payout
     check('payoutTransaction', PAYOUT_TXN_SITES);
   });
 
-  it('no raw-SQL UPDATE on either table', () => {
+  it('no raw-SQL UPDATE on either table (except the reviewed payee-snapshot write)', () => {
+    // REVIEWED raw UPDATE: the TDS payee SNAPSHOT (owner rule 2026-11-18) in the bank-file download tx — it
+    // touches only the entries THAT tx just claimed (PENDING/FAILED → PROCESSING), sets payeePan/
+    // payeePartnerId only, and a raw UPDATE never bumps Prisma's @updatedAt, so no digest clock moves.
+    const reviewed = /UPDATE "credit_payout_entries" AS e SET "payeePan" = v\.pan, "payeePartnerId" = v\.pid FROM unnest\(/g;
     const raw = /UPDATE\s+"?(credit_payout_entries|payout_transactions)"?/i;
-    const hits = sourceFiles(SRC).filter((f) => raw.test(fs.readFileSync(f, 'utf8')));
+    const hits = sourceFiles(SRC).filter((f) => raw.test(fs.readFileSync(f, 'utf8').replace(reviewed, '')));
     expect(hits.map((h) => path.relative(SRC, h))).toEqual([]);
+    const snapshotSites = sourceFiles(SRC).flatMap((f) => fs.readFileSync(f, 'utf8').match(reviewed) ?? []);
+    expect(snapshotSites).toHaveLength(1);
   });
 
   it('the tripwire itself catches a new unguarded write (self-test on a synthetic snippet)', () => {
