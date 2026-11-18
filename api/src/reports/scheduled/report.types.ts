@@ -223,8 +223,8 @@ export interface VoucherDispersalSection {
   settleErrorCampaigns?: number;
   /** In the window: purchases Hubble BOUGHT after they had failed / been refused (row.lateCompletedAt). */
   lateCompleted?: number;
-  /** NOW: rows with an EARLIER reference Hubble completed after a retry (two vouchers may exist; counted as spent). */
-  supersededRows?: number;
+  /** In the window: alerts that Hubble reported activity on an EARLIER (retired) order of a row — not counted as spend. */
+  earlierOrderAlerts?: number;
 }
 
 /** Client.status values. */

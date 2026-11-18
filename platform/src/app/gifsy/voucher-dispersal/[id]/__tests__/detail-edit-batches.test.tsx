@@ -179,17 +179,39 @@ describe('Edit campaign', () => {
     expect(await screen.findByTestId('vd-over-budget')).toHaveTextContent('Over budget by ₹300 — spending is above the budget; see "Budget used" below.');
   });
 
-  it('an earlier order completed after a retry: its own alert, a cause in the over-budget banner, and the spend in "Budget used"', async () => {
+  it('Hubble activity on EARLIER orders: a loud alert with the TOTAL count, wording per status, never in "Budget used" / over-budget causes', async () => {
     detailQueue = [ok(detail({ summary: {
-      overBudgetRupees: 500, lateCompletedRows: 0, failedBackWithHubbleRows: 0, supersededRows: [{ batchNumber: 1, rowNumber: 3 }],
-      budgetUsage: { spentRupees: 1000, supersededRupees: 1000, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 2000 },
+      overBudgetRupees: 0,
+      budgetUsage: { spentRupees: 1000, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 1000 },
+      earlierOrderAlerts: {
+        total: 23,
+        items: [
+          { at: '2026-11-18T10:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 3, referenceId: 'vdA', hubbleStatus: 'SUCCESS' },
+          { at: '2026-11-18T09:00:00Z', kind: 'SUPERSEDED', batchNumber: 2, rowNumber: 5, referenceId: 'vdB', hubbleStatus: 'PROCESSING' },
+          { at: '2026-11-18T08:00:00Z', kind: 'MARKED_NOT_BOUGHT', batchNumber: 1, rowNumber: 4, referenceId: 'vdC', hubbleStatus: 'SUCCESS' },
+        ],
+      },
     } }))];
     render(<DetailPage />);
-    expect(await screen.findByTestId('vd-superseded')).toHaveTextContent(
-      'An earlier order for batch 1, row 3 was completed by Hubble after a retry — two vouchers may have been issued. It is counted as spent; contact Gifsy tech.',
-    );
-    expect(screen.getByTestId('vd-over-budget')).toHaveTextContent('an earlier order for batch 1, row 3 was completed after a retry — two vouchers may have been issued');
-    expect(screen.getByTestId('vd-budget-usage')).toHaveTextContent('earlier orders completed after a retry ₹1,000');
+    const box = await screen.findByTestId('vd-earlier-orders');
+    expect(box).toHaveAttribute('role', 'alert');
+    expect(box).toHaveTextContent('Hubble reported activity on 23 earlier orders (the latest 3 are listed).');
+    expect(box).toHaveTextContent('Batch 1, row 3: an earlier order was reported completed by Hubble after a retry — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person).');
+    expect(box).toHaveTextContent('Batch 2, row 5: an earlier order was reported PROCESSING by Hubble after a retry — check with Hubble');
+    expect(box).toHaveTextContent('Batch 1, row 4: the order of a row marked not bought was reported completed by Hubble — check with Hubble');
+    expect(screen.getByTestId('vd-budget-usage')).not.toHaveTextContent('earlier order');
+    expect(screen.queryByTestId('vd-over-budget')).not.toBeInTheDocument();
+  });
+
+  it('a row marked "not bought" shows the closed note and no Retry / Mark buttons', async () => {
+    const closed = 'Marked as not bought by Admin One — closed. Arrange any replacement with Hubble outside this campaign.';
+    const rows = { ...ROWS, rows: [ROWS.rows[0], { ...ROWS.rows[1], buyFailureReason: 'Marked as not bought by Admin One: ticket 7', canRetryBuy: false, canMarkNotBought: false, closedNote: closed }] };
+    fetchMock.mockImplementation((url: string) => (url.startsWith(`${BASE}/rows?`) ? Promise.resolve(ok(rows)) : Promise.resolve(ok(detail()))));
+    render(<DetailPage />);
+    const row = await screen.findByTestId('vd-row-r2');
+    expect(within(row).getByTestId('vd-closed-r2')).toHaveTextContent(closed);
+    expect(within(row).queryByTestId('vd-retry-r2')).not.toBeInTheDocument();
+    expect(within(row).queryByTestId('vd-mark-r2')).not.toBeInTheDocument();
   });
 
   it('Retry is hidden where it would always be refused (unrecognised Hubble answer) — the reason is shown instead', async () => {

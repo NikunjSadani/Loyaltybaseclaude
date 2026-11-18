@@ -21,9 +21,7 @@ END $$;
 
 -- AlterTable
 ALTER TABLE "voucher_dispersal_rows" ADD COLUMN IF NOT EXISTS "batchNumber" INTEGER NOT NULL DEFAULT 1,
-ADD COLUMN IF NOT EXISTS "lateCompletedAt" TIMESTAMP(3),
-ADD COLUMN IF NOT EXISTS "supersededActiveRefs" TEXT[] DEFAULT ARRAY[]::TEXT[],
-ADD COLUMN IF NOT EXISTS "supersededCheckedAt" TIMESTAMP(3);
+ADD COLUMN IF NOT EXISTS "lateCompletedAt" TIMESTAMP(3);
 
 -- AlterTable (settle-failure surfacing; constant defaults — metadata-only, no rewrite)
 ALTER TABLE "voucher_dispersal_campaigns" ADD COLUMN IF NOT EXISTS "settleFailures" INTEGER NOT NULL DEFAULT 0,

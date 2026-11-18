@@ -392,12 +392,12 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
     expect(html).toContain('over budget');
   });
 
-  it('rows where an earlier order was completed after a retry are a line (two vouchers may have been issued)', () => {
+  it('Hubble activity on earlier (retired) orders in the window is a line — not counted as spend', () => {
     const d = ok({
-      bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0, supersededRows: 2,
+      bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0, earlierOrderAlerts: 2,
     });
     expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
-      'Voucher dispersal: 2 rows where an earlier order was completed by Hubble after a retry — two vouchers may have been issued (counted as spent)',
+      'Voucher dispersal: Hubble reported activity on 2 earlier orders after a retry or a "not bought" mark (in the window) — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)',
     ]);
   });
 

@@ -27,6 +27,7 @@ import { kycAddressableOutletWhere, KYC_LATEST_SUBMISSION_SELECT } from '../../a
 import {
   DISPERSAL_RETRY_MIN_AGE_MS,
   SETTLE_FAILURES_BEFORE_ALERT,
+  SUPERSEDED_ALERT_EVENT,
   failedMayStillCompleteWhere,
 } from '../../voucher-dispersal/voucher-dispersal.processor';
 import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../rewards/rewards.service';
@@ -911,18 +912,8 @@ export class ScheduledReportsService {
       where: { OR: [{ status: { in: ['BUYING', 'PENDING_RECONCILE', 'BOUGHT'] } }, failedMayStillCompleteWhere] },
       _sum: { amountPaise: true },
     });
-    // An EARLIER reference Hubble completed after a retry counts as SPENT (the campaign page's rule).
-    const superseded = (
-      await rows.findMany({
-        where: { supersededActiveRefs: { isEmpty: false } },
-        select: { campaignId: true, amountPaise: true, supersededActiveRefs: true },
-      })
-    ).filter((r) => Array.isArray(r.supersededActiveRefs) && r.supersededActiveRefs.length > 0);
     const spentBy = new Map<string, bigint>();
     for (const g of spend) spentBy.set(g.campaignId, BigInt(g._sum.amountPaise ?? 0n));
-    for (const r of superseded) {
-      spentBy.set(r.campaignId, (spentBy.get(r.campaignId) ?? 0n) + BigInt(r.amountPaise ?? 0n) * BigInt(r.supersededActiveRefs.length));
-    }
     const budgets = spentBy.size
       ? await this.prisma.voucherDispersalCampaign.findMany({
           where: { id: { in: [...spentBy.keys()] } },
@@ -934,7 +925,14 @@ export class ScheduledReportsService {
       const b = budgetOf.get(id);
       return b !== undefined && paise > b;
     }).length;
-    const supersededRows = superseded.length;
+    // Hubble activity on an EARLIER (retired) order of a row, alerted in the window — not counted against any budget.
+    const earlierOrderAlerts = await this.prisma.auditLog.count({
+      where: {
+        entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+        createdAt: inWindow,
+        metadata: { path: ['event'], equals: SUPERSEDED_ALERT_EVENT },
+      },
+    });
     const settleErrorCampaigns = await this.prisma.voucherDispersalCampaign.count({ where: { settleFailures: { gte: SETTLE_FAILURES_BEFORE_ALERT } } });
     const lateCompleted = await rows.count({ where: { lateCompletedAt: inWindow } });
     return {
@@ -948,7 +946,7 @@ export class ScheduledReportsService {
       overBudgetCampaigns,
       settleErrorCampaigns,
       lateCompleted,
-      supersededRows,
+      earlierOrderAlerts,
     };
   }
 

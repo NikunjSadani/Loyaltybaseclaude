@@ -128,6 +128,7 @@ function makePrisma() {
     outletTarget: { groupBy: jest.fn().mockResolvedValue([]) },
     voucherDispersalRow: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]), groupBy: jest.fn().mockResolvedValue([]) },
     voucherDispersalCampaign: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
+    auditLog: { count: jest.fn().mockResolvedValue(0) },
   };
 }
 
@@ -703,15 +704,19 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(late).toEqual({ lateCompletedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) } });
   });
 
-  it('voucher dispersal: superseded spend counts in "over budget" and the rows are counted', async () => {
+  it('voucher dispersal: earlier-order alerts in the window are counted (campaign audit rows) and never add to "over budget"', async () => {
     prisma.voucherDispersalRow.groupBy.mockResolvedValue([{ campaignId: 'c1', _sum: { amountPaise: 900_000n } }]); // ₹9,000
-    prisma.voucherDispersalRow.findMany.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
-      Promise.resolve(where.supersededActiveRefs ? [{ campaignId: 'c1', amountPaise: 200_000n, supersededActiveRefs: ['vdA'] }] : []),
-    );
     prisma.voucherDispersalCampaign.findMany.mockResolvedValue([{ id: 'c1', budgetPaise: 1_000_000n }]); // ₹10,000
+    prisma.auditLog.count.mockResolvedValue(2);
     const input = await svc.collect(NOW, '13 Nov 2026', WIN);
-    // ₹9,000 + ₹2,000 superseded > ₹10,000 → over budget.
-    expect(input.voucherDispersal).toMatchObject({ ok: true, data: { overBudgetCampaigns: 1, supersededRows: 1 } });
+    expect(input.voucherDispersal).toMatchObject({ ok: true, data: { overBudgetCampaigns: 0, earlierOrderAlerts: 2 } });
+    expect(prisma.auditLog.count).toHaveBeenCalledWith({
+      where: {
+        entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+        createdAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) },
+        metadata: { path: ['event'], equals: 'VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY' },
+      },
+    });
   });
 
   it('voucher dispersal: window counts, the 2 h retry gate, and the still-open counts', async () => {
@@ -732,7 +737,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       ok: true,
       data: {
         bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 5, messageFailedOpen: 6,
-        overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0, supersededRows: 0,
+        overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0, earlierOrderAlerts: 0,
       },
     });
     const calls = prisma.voucherDispersalRow.count.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);

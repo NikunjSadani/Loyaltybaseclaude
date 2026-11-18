@@ -136,7 +136,7 @@ Labels used below:
 | | still open | rows in `BUY_FAILED` now (a Retry moves a row out of it), and `BOUGHT` rows whose WhatsApp is failed now (a Resend clears the status) |
 | | campaigns over budget | campaigns whose Σ(`BUYING` + `PENDING_RECONCILE` + `BOUGHT` + `BUY_FAILED` Hubble may still complete — reference sent, not `REJECTED`) > `budgetPaise` (now) — the campaign page's "over budget" rule (QUEUED not counted). Attention item, worded neutrally ("spending is over the budget; see the campaign's budget breakdown"). |
 | | status update failing | campaigns with `settleFailures ≥ 3` (now). Attention item ("contact Gifsy tech"). |
-| | earlier order completed after a retry | rows with `supersededActiveRefs` non-empty (now): an EARLIER reference Hubble holds an order on after a retry — two vouchers may exist; counted as SPENT (also in "campaigns over budget"). Attention item. |
+| | earlier order reported by Hubble | `AuditLog` rows `entityType = VOUCHER_DISPERSAL_CAMPAIGN`, `metadata.event = VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY`, `createdAt` in window: Hubble reported SUCCESS / PROCESSING / an undocumented status on an EARLIER (retired) order of a row, or on a row marked "not bought" (one per reference + status). Attention item ("check with Hubble — a voucher may have been issued twice, or a paid voucher may not have reached the person"). NOT counted as spend. |
 | | bought later after failing | rows whose `lateCompletedAt` is in the window: Hubble BOUGHT a purchase after it had failed / been refused (set once, only on BOUGHT; a failed → processing flip is an informational audit and does not count). Attention item. |
 
 Failures in the message tables are counted when the failure was **recorded** (`updatedAt`), not when the message was

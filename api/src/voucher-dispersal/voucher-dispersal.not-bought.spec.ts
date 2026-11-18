@@ -67,13 +67,13 @@ describe('owner decision (corrected): Hubble documents only SUCCESS / PROCESSING
     expect((await usage(t, id)).withHubbleRupees).toBe(1000);
   });
 
-  it('the report says it in words after an admin marks it: "Marked as not bought by an admin: …"', async () => {
+  it('the report says it in words after an admin marks it: "Marked as not bought by <admin>: …"', async () => {
     const { t, id, b } = await rowIn('BUY_FAILED', { buyFailureSource: 'HUBBLE_FAILED', buyFailureReason: 'x', lastReconcileResult: 'HUBBLE_CANCELLED' });
     await t.svc.markNotBought(ADMIN, id, b.id, { reason: 'Hubble support: ticket 7' });
     const XLSX = await import('xlsx');
     const wb = XLSX.read((await t.svc.report(ADMIN, id)).buffer);
     const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]]);
-    expect(json.find((r) => r.Phone === '9876543211')).toMatchObject({ 'Voucher status': 'BUY_FAILED', 'Failure reason': 'Marked as not bought by an admin: Hubble support: ticket 7' });
+    expect(json.find((r) => r.Phone === '9876543211')).toMatchObject({ 'Voucher status': 'BUY_FAILED', 'Failure reason': 'Marked as not bought by Admin One: Hubble support: ticket 7' });
   });
 });
 
@@ -94,29 +94,25 @@ describe('unrecognised status: Retry refused honestly (F2 too) + "Mark as not bo
     expect(rows.rows.find((r) => r.id !== b.id)!.canMarkNotBought).toBe(false);
   });
 
-  it('Mark as not bought: GIFSY_ADMIN only, reason required, audited; terminal failed state off the budget and out of the 2-min lookups; Retry then uses a NEW reference', async () => {
+  it('Mark as not bought: GIFSY_ADMIN only, reason required, audited; FINAL — off the budget, no lookups, Retry refused (owner: simplify)', async () => {
     const { t, id, b } = await rowIn('BUY_FAILED', { buyFailureSource: 'HUBBLE_FAILED', buyFailureReason: 'x', lastReconcileResult: 'HUBBLE_WEIRD' });
     await expect(t.svc.markNotBought(STAFF, id, b.id, { reason: 'Hubble support confirmed' })).rejects.toBeInstanceOf(ForbiddenException);
     await expect(t.svc.markNotBought(ADMIN, id, b.id, { reason: '  ' })).rejects.toBeInstanceOf(BadRequestException);
     const row = await t.svc.markNotBought(ADMIN, id, b.id, { reason: 'Hubble support confirmed on ticket 123' });
-    expect(row).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'MARKED_NOT_BOUGHT', canRetryBuy: true, canMarkNotBought: false });
-    expect(row.buyFailureReason).toBe('Marked as not bought by an admin: Hubble support confirmed on ticket 123');
+    expect(row).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'MARKED_NOT_BOUGHT', canRetryBuy: false, canMarkNotBought: false });
+    expect(row.buyFailureReason).toBe('Marked as not bought by Admin One: Hubble support confirmed on ticket 123');
     expect(t.audits.find((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_MARKED_NOT_BOUGHT')).toMatchObject({
       actorId: 'admin-1', entityId: b.id, metadata: expect.objectContaining({ campaignId: id, reason: 'Hubble support confirmed on ticket 123', fromStatus: 'BUY_FAILED' }),
     });
     expect((await usage(t, id)).failedMayCompleteRupees).toBe(0);
-    // Out of the 2-min lookups: only the HOURLY re-check of released rows asks about it (once per hour).
-    b.lastReconcileAt = null;
-    await t.processor.drain();
+    // No lookups at all.
     t.hubble.getOrderByReference.mockClear();
     b.lastReconcileAt = null;
     await t.processor.drain();
     expect(t.hubble.getOrderByReference).not.toHaveBeenCalledWith(b.hubbleReferenceId);
-    // Retry → new reference, no lookup needed (the admin's decision).
-    const oldRef = b.hubbleReferenceId;
-    const r = await t.svc.retryBuy(ADMIN, id, b.id);
-    expect(r.row.status).toBe('QUEUED');
-    expect(b.previousReferenceIds).toContain(oldRef);
+    // Retry → refused: the row is closed.
+    await expect(t.svc.retryBuy(ADMIN, id, b.id)).rejects.toThrow(/closed\. Arrange any replacement with Hubble outside this campaign/);
+    expect(b.previousReferenceIds).toEqual([]);
   });
 
   it('Mark as not bought is refused on a row whose last lookup was recognised (with the reason)', async () => {

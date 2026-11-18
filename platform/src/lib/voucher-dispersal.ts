@@ -224,8 +224,8 @@ export interface VdDeliverySummary {
   lateCompletedRows: number | null;
   /** Detail only: rows that had failed and are back with Hubble (pending again) — they count again. */
   failedBackWithHubbleRows: number | null;
-  /** Detail only: rows with an earlier order Hubble completed after a retry (up to 20). */
-  supersededRows: VdRowRef[];
+  /** Detail only: Hubble activity on earlier orders — the TOTAL and the latest (up to 20). Never counted as spend. */
+  earlierOrderAlerts: { total: number | null; items: VdEarlierOrderAlert[] };
   /** List only: an "Add more people" batch waiting for confirmation (its number), else null. */
   pendingBatchNumber: number | null;
 }
@@ -237,21 +237,36 @@ export interface VdBudgetUsage {
   /** Failed purchases whose reference reached Hubble — Hubble may still complete them. */
   failedMayCompleteRupees: number | null;
   queuedRupees: number | null;
-  /** Earlier orders Hubble completed after a retry (two vouchers may exist) — counted as SPENT. */
-  supersededRupees: number | null;
   floorRupees: number | null;
 }
 
-/** A row with an earlier reference Hubble completed after a retry. */
+/** A row reference: "batch 1, row 3". */
 export interface VdRowRef {
   batchNumber: number | null;
   rowNumber: number | null;
 }
 
+/** One alert: Hubble reported activity on an EARLIER (retired) order of a row, or on a row marked "not bought". */
+export interface VdEarlierOrderAlert extends VdRowRef {
+  at: string | null;
+  kind: 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | string;
+  referenceId: string | null;
+  hubbleStatus: string | null;
+}
+
+/** "Batch 1, row 3: an earlier order was reported completed by Hubble after a retry — check with Hubble (…)." */
+export function earlierOrderAlertText(a: VdEarlierOrderAlert): string {
+  const what = a.hubbleStatus === 'SUCCESS' ? 'completed' : (a.hubbleStatus ?? 'with an unknown status');
+  const head = a.kind === 'MARKED_NOT_BOUGHT'
+    ? `the order of a row marked not bought was reported ${what} by Hubble`
+    : `an earlier order was reported ${what} by Hubble after a retry`;
+  const ref = rowRefText(a);
+  return `${ref.charAt(0).toUpperCase()}${ref.slice(1)}: ${head} — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person).`;
+}
+
 /** "spent ₹A · with Hubble (not yet confirmed) ₹B · failed purchases Hubble may still complete ₹C · queued ₹D". */
 export function budgetUsageText(u: VdBudgetUsage): string {
-  const sup = u.supersededRupees !== null && u.supersededRupees > 0 ? ` · earlier orders completed after a retry ${formatRupees(u.supersededRupees)}` : '';
-  return `spent ${formatRupees(u.spentRupees)}${sup} · with Hubble (not yet confirmed) ${formatRupees(u.withHubbleRupees)} · failed purchases Hubble may still complete ${formatRupees(u.failedMayCompleteRupees)} · queued ${formatRupees(u.queuedRupees)}`;
+  return `spent ${formatRupees(u.spentRupees)} · with Hubble (not yet confirmed) ${formatRupees(u.withHubbleRupees)} · failed purchases Hubble may still complete ${formatRupees(u.failedMayCompleteRupees)} · queued ${formatRupees(u.queuedRupees)}`;
 }
 
 export const BATCH_STATUSES = ['PREVIEWED', 'CONFIRMED', 'DISCARDED', 'CANCELLED'] as const;
@@ -417,6 +432,8 @@ export interface VdRow {
   retryAvailableAt: string | null;
   /** Server: Hubble's last answer was a status it does not recognise → an admin may "Mark as not bought". */
   canMarkNotBought: boolean | null;
+  /** Server: the row was marked "not bought" — closed (who + what to do); null otherwise. */
+  closedNote: string | null;
 }
 
 export interface VdRowsPage {
@@ -522,7 +539,7 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     queuedAtRiskRupees: null,
     lateCompletedRows: null,
     failedBackWithHubbleRows: null,
-    supersededRows: [],
+    earlierOrderAlerts: { total: null, items: [] },
     pendingBatchNumber: num(o.pendingBatchNumber),
   };
 }
@@ -549,7 +566,6 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
           withHubbleRupees: num(o.budgetUsage.withHubbleRupees),
           failedMayCompleteRupees: num(o.budgetUsage.failedMayCompleteRupees),
           queuedRupees: num(o.budgetUsage.queuedRupees),
-          supersededRupees: num(o.budgetUsage.supersededRupees),
           floorRupees: num(o.budgetUsage.floorRupees),
         }
       : null,
@@ -557,9 +573,7 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
     queuedAtRiskRupees: num(o.queuedAtRiskRupees),
     lateCompletedRows: num(o.lateCompletedRows),
     failedBackWithHubbleRows: num(o.failedBackWithHubbleRows),
-    supersededRows: Array.isArray(o.supersededRows)
-      ? o.supersededRows.filter(isObj).map((r) => ({ batchNumber: num(r.batchNumber), rowNumber: num(r.rowNumber) }))
-      : [],
+    earlierOrderAlerts: normalizeEarlierOrderAlerts(o.earlierOrderAlerts),
     pendingBatchNumber: null,
   };
 }
@@ -735,6 +749,24 @@ export function normalizeRow(raw: unknown): VdRow {
     canRetryBuy: bool(o.canRetryBuy),
     retryAvailableAt: str(o.retryAvailableAt),
     canMarkNotBought: bool(o.canMarkNotBought),
+    closedNote: str(o.closedNote),
+  };
+}
+
+function normalizeEarlierOrderAlerts(raw: unknown): { total: number | null; items: VdEarlierOrderAlert[] } {
+  const o = isObj(raw) ? raw : {};
+  return {
+    total: num(o.total),
+    items: Array.isArray(o.items)
+      ? o.items.filter(isObj).map((a) => ({
+          at: str(a.at),
+          kind: str(a.kind) ?? 'SUPERSEDED',
+          batchNumber: num(a.batchNumber),
+          rowNumber: num(a.rowNumber),
+          referenceId: str(a.referenceId),
+          hubbleStatus: str(a.hubbleStatus),
+        }))
+      : [],
   };
 }
 
@@ -944,11 +976,8 @@ export function batchConfirmBlock(p: Pick<VdBatchPreview, 'previewId' | 'summary
  * Why the campaign is over budget, from the server's counts (never a guessed cause): purchases bought later after
  * failing, failed purchases back with Hubble, else a neutral pointer to the breakdown.
  */
-export function overBudgetCauseText(s: Pick<VdDeliverySummary, 'lateCompletedRows' | 'failedBackWithHubbleRows' | 'supersededRows'>): string {
+export function overBudgetCauseText(s: Pick<VdDeliverySummary, 'lateCompletedRows' | 'failedBackWithHubbleRows'>): string {
   const parts: string[] = [];
-  for (const r of s.supersededRows ?? []) {
-    parts.push(`an earlier order for ${rowRefText(r)} was completed after a retry — two vouchers may have been issued`);
-  }
   const late = s.lateCompletedRows ?? 0;
   const back = s.failedBackWithHubbleRows ?? 0;
   if (late > 0) parts.push(`${plural(late, 'purchase')} ${late === 1 ? 'was' : 'were'} bought later by Hubble after ${late === 1 ? 'it' : 'they'} had failed/refused`);

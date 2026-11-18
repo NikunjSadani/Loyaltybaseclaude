@@ -32,7 +32,7 @@ describe('M1 owner decision: REJECTED failures stop counting; HUBBLE_FAILED keep
   it('6 bought + 4 REJECTED → floor ₹6,000; a batch of 4 × ₹1,000 is confirmable and actually bought (the claim guard agrees)', async () => {
     const { t, id } = await sixBoughtFourFailed('REJECTED');
     const d = await t.svc.detail(ADMIN, id);
-    expect(d.summary.budgetUsage).toEqual({ spentRupees: 6000, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, supersededRupees: 0, floorRupees: 6000 });
+    expect(d.summary.budgetUsage).toEqual({ spentRupees: 6000, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 6000 });
     expect(d.summary.budgetFloorRupees).toBe(6000);
     const b = await t.svc.uploadBatch(ADMIN, id, file(Array.from({ length: 4 }, (_, i) => [`90000000${10 + i}`, `N${i}`, 1000, 'Amazon Pay'])));
     expect(b.summary).toMatchObject({ alreadyCommittedRupees: 6000, remainingBudgetRupees: 4000, overBudget: false });
@@ -46,7 +46,7 @@ describe('M1 owner decision: REJECTED failures stop counting; HUBBLE_FAILED keep
   it('6 bought + 4 HUBBLE_FAILED → those still count (floor ₹10,000); the same batch is refused — raise the budget', async () => {
     const { t, id } = await sixBoughtFourFailed('HUBBLE_FAILED');
     const d = await t.svc.detail(ADMIN, id);
-    expect(d.summary.budgetUsage).toEqual({ spentRupees: 6000, withHubbleRupees: 0, failedMayCompleteRupees: 4000, queuedRupees: 0, supersededRupees: 0, floorRupees: 10000 });
+    expect(d.summary.budgetUsage).toEqual({ spentRupees: 6000, withHubbleRupees: 0, failedMayCompleteRupees: 4000, queuedRupees: 0, floorRupees: 10000 });
     const b = await t.svc.uploadBatch(ADMIN, id, file(Array.from({ length: 4 }, (_, i) => [`90000000${10 + i}`, `N${i}`, 1000, 'Amazon Pay'])));
     expect(b.summary).toMatchObject({ remainingBudgetRupees: 0, overBudget: true });
     await expect(t.svc.confirmBatch(ADMIN, id, 2, confirmBody(b))).rejects.toThrow(/Raise the budget/);

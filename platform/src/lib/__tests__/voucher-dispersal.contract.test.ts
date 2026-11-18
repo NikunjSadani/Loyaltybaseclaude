@@ -244,16 +244,17 @@ describe('voucher-dispersal UI ⇄ server contract (fixture from the real server
     expect(d.campaign.settleError).toBeNull();
     expect(normalizeBatchPreview(C.batchUpload).overBudgetRupees).toBe(0);
     expect(C.detailWithBatches as { summary: Record<string, unknown> }).not.toHaveProperty('summary.committedRupees');
-    expect(d.summary.budgetUsage).toEqual({ spentRupees: 1300, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, supersededRupees: 0, floorRupees: 1300 });
-    expect(d.summary.supersededRows).toEqual([]);
+    expect(d.summary.budgetUsage).toEqual({ spentRupees: 1300, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 1300 });
+    expect(d.summary.earlierOrderAlerts).toEqual({ total: 0, items: [] });
     expect(d.summary.bought).toBe(2);
 
     const r = normalizeRowsPage(C.rowsOfBatch, 1);
     expect(r.rows.map((x) => x.batchNumber)).toEqual([3]);
     expect(normalizeCancelResult(C.cancel).discardedPendingBatchRows).toBe(0);
     const marked = normalizeRow(C.markNotBought);
-    expect(marked).toMatchObject({ status: 'BUY_FAILED', canMarkNotBought: false, canRetryBuy: true });
-    expect(marked.reason).toMatch(/^Marked as not bought by an admin: /);
+    expect(marked).toMatchObject({ status: 'BUY_FAILED', canMarkNotBought: false, canRetryBuy: false });
+    expect(marked.reason).toMatch(/^Marked as not bought by Admin One: /);
+    expect(marked.closedNote).toBe('Marked as not bought by Admin One — closed. Arrange any replacement with Hubble outside this campaign.');
     expect(d.summary.failedBackWithHubbleRows).toBe(0);
     expect((C.list as unknown[]).map(normalizeListItem).every((i) => i.summary.pendingBatchNumber === null)).toBe(true);
   });

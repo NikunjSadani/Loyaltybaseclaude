@@ -23,7 +23,7 @@ import {
   BATCH_STATUS_LABEL, BATCH_STATUS_TONE, CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE,
   PENDING_RECONCILE_NOTE, POLL_START_MS,
   PROCESS_FAILURES_BEFORE_NOTE, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, batchLabel, billedToText, campaignStatusText,
-  budgetUsageText, overBudgetCauseText, rowRefText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
+  budgetUsageText, earlierOrderAlertText, overBudgetCauseText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
   isProcessInFlight, isSetupCampaign, isUncertainFailure, nextPollDelay, nextProcessFailures, plural, pollPhase, rowStatusText,
   shouldNudgeProcessing, vdApi, vdReportFallbackName, vdReportUrl,
   type CampaignStatus, type RowStatus, type VdBatch, type VdListItem, type VdRow, type VdRowsPage,
@@ -457,12 +457,17 @@ export default function VoucherCampaignDetailPage() {
           {' '}Raise the budget or check with Hubble; nothing more is bought while it is over.
         </p>
       )}
-      {s.supersededRows.length > 0 && (
-        <div role="alert" data-testid="vd-superseded" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200 space-y-1">
-          {s.supersededRows.map((r, i) => (
-            <p key={`${r.batchNumber}-${r.rowNumber}-${i}`} className="break-words">
-              An earlier order for {rowRefText(r)} was completed by Hubble after a retry — two vouchers may have been issued. It is counted as spent; contact Gifsy tech.
-            </p>
+      {(s.earlierOrderAlerts.total ?? s.earlierOrderAlerts.items.length) > 0 && (
+        <div role="alert" data-testid="vd-earlier-orders" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200 space-y-1">
+          <p className="font-semibold">
+            Hubble reported activity on {plural(s.earlierOrderAlerts.total ?? s.earlierOrderAlerts.items.length, 'earlier order')}
+            {s.earlierOrderAlerts.total !== null && s.earlierOrderAlerts.total > s.earlierOrderAlerts.items.length
+              ? ` (the latest ${s.earlierOrderAlerts.items.length} are listed).`
+              : '.'}
+            {' '}This is not counted against the budget.
+          </p>
+          {s.earlierOrderAlerts.items.map((a, i) => (
+            <p key={`${a.referenceId ?? i}-${a.hubbleStatus ?? ''}`} className="break-words">{earlierOrderAlertText(a)}</p>
           ))}
         </div>
       )}
@@ -599,6 +604,9 @@ export default function VoucherCampaignDetailPage() {
                               className="whitespace-nowrap rounded border border-amber-500/40 px-2 py-1 text-xs text-amber-200 hover:bg-amber-500/10 disabled:opacity-50">
                               Retry purchase
                             </button>
+                          )}
+                          {r.closedNote && (
+                            <p data-testid={`vd-closed-${r.id}`} className="max-w-[16rem] text-[11px] text-white/70">{r.closedNote}</p>
                           )}
                           {r.id && r.canMarkNotBought === true && !canRetryRow(r) && (
                             <p data-testid={`vd-retry-unavailable-${r.id}`} className="max-w-[14rem] text-[11px] text-amber-200">

@@ -37,6 +37,7 @@ import {
   budgetBreakdown,
   overBudget,
   HUBBLE_KNOWN_STATUSES,
+  SUPERSEDED_ALERT_EVENT,
   lastLookupUnrecognised,
   type BudgetBreakdown,
 } from './voucher-dispersal.processor';
@@ -169,6 +170,12 @@ const MSG_SENT = new Set(['SENT', 'SENT_UNTRACKED', 'DELIVERED', 'READ']);
  */
 export function maskDispersalCode(code: string | null | undefined): string | null {
   return typeof code === 'string' && code.trim() ? maskVoucherCodeForAudit(code) : null;
+}
+
+/** "Marked as not bought by <admin> — closed. …" from the stored reason ("Marked as not bought by <admin>: <reason>"). */
+export function markedClosedNote(buyFailureReason: string | null): string {
+  const who = /^Marked as not bought by (.+?): /.exec(buyFailureReason ?? '')?.[1] ?? 'an admin';
+  return `Marked as not bought by ${who} — closed. Arrange any replacement with Hubble outside this campaign.`;
 }
 
 /** "Mark as not bought" is offered for a failed / pending row whose last Hubble answer we do not recognise (once). */
@@ -540,7 +547,7 @@ export class VoucherDispersalService {
 
   /** "spent ₹A · with Hubble (not yet confirmed) ₹B · failed purchases Hubble may still complete ₹C · queued ₹D". */
   private usageText(b: BudgetBreakdown): string {
-    return `spent ${inr(b.spentPaise)}${b.supersededPaise > 0n ? ` · earlier orders completed after a retry ${inr(b.supersededPaise)}` : ''} · with Hubble (not yet confirmed) ${inr(b.withHubblePaise)} · failed purchases Hubble may still complete ${inr(b.failedMayCompletePaise)} · queued ${inr(b.queuedPaise)}`;
+    return `spent ${inr(b.spentPaise)} · with Hubble (not yet confirmed) ${inr(b.withHubblePaise)} · failed purchases Hubble may still complete ${inr(b.failedMayCompletePaise)} · queued ${inr(b.queuedPaise)}`;
   }
 
   /**
@@ -1189,15 +1196,8 @@ export class VoucherDispersalService {
         queuedAtRiskRupees: rupees(over.queuedAtRiskPaise),
         /** Rows (distinct) that had FAILED and that Hubble later reported bought / processing (audited loudly). */
         lateCompletedRows: await this.prisma.voucherDispersalRow.count({ where: { campaignId: id, lateCompletedAt: { not: null } } }),
-        /** Rows with an EARLIER reference Hubble completed after a retry — two vouchers may exist (counted as spent). */
-        supersededRows: (
-          await this.prisma.voucherDispersalRow.findMany({
-            where: { campaignId: id, supersededActiveRefs: { isEmpty: false } },
-            select: { batchNumber: true, rowNumber: true },
-            orderBy: [{ batchNumber: 'asc' }, { rowNumber: 'asc' }],
-            take: 20,
-          })
-        ).map((r) => ({ batchNumber: r.batchNumber, rowNumber: r.rowNumber })),
+        /** Hubble activity on an EARLIER (retired) order of a row — alerted, NOT counted against the budget. */
+        earlierOrderAlerts: await this.earlierOrderAlerts(id),
         /** Rows that had FAILED and are back with Hubble (pending again) — they count against the budget again. */
         failedBackWithHubbleRows: await this.prisma.voucherDispersalRow.count({
           where: { campaignId: id, status: RS.PENDING_RECONCILE, buyFailureSource: { not: null } },
@@ -1208,7 +1208,6 @@ export class VoucherDispersalService {
           withHubbleRupees: rupees(usage.withHubblePaise),
           failedMayCompleteRupees: rupees(usage.failedMayCompletePaise),
           queuedRupees: rupees(usage.queuedPaise),
-          supersededRupees: rupees(usage.supersededPaise),
           floorRupees: rupees(usage.floorPaise),
         },
         messageSent,
@@ -1219,6 +1218,36 @@ export class VoucherDispersalService {
       },
       batches: await this.batchViews(camp, batchRecords, allRows),
       edits: await this.editHistory(id),
+    };
+  }
+
+  /**
+   * Earlier-order alerts of a campaign (audit rows indexed by campaign): the TOTAL count and the latest 20 with
+   * row / reference / Hubble status.
+   */
+  private async earlierOrderAlerts(id: string) {
+    const where = {
+      entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+      entityId: id,
+      metadata: { path: ['event'], equals: SUPERSEDED_ALERT_EVENT },
+    } satisfies Prisma.AuditLogWhereInput;
+    const [total, latest] = await Promise.all([
+      this.prisma.auditLog.count({ where }),
+      this.prisma.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, take: 20 }),
+    ]);
+    return {
+      total,
+      items: latest.map((a) => {
+        const m = (a.metadata ?? {}) as Record<string, unknown>;
+        return {
+          at: a.createdAt,
+          kind: typeof m.kind === 'string' ? m.kind : 'SUPERSEDED',
+          batchNumber: typeof m.batchNumber === 'number' ? m.batchNumber : null,
+          rowNumber: typeof m.rowNumber === 'number' ? m.rowNumber : null,
+          referenceId: typeof m.referenceId === 'string' ? m.referenceId : null,
+          hubbleStatus: typeof m.hubbleStatus === 'string' ? m.hubbleStatus : null,
+        };
+      }),
     };
   }
 
@@ -1370,6 +1399,7 @@ export class VoucherDispersalService {
       canResend: r.status === RS.BOUGHT && !!r.voucherCode && firstSendSettled(r) && r.resendCount < MAX_RESENDS,
       canRetryBuy:
         campaignStatus !== CS.CANCELLED &&
+        r.buyFailureSource !== 'MARKED_NOT_BOUGHT' && // closed (owner decision)
         // Never offered where it would always be refused (an unrecognised Hubble answer → "Mark as not bought").
         !canMarkNotBought(r) &&
         ((r.status === RS.BUY_FAILED && !(LOCAL_FAILURE_SOURCES.includes(r.buyFailureSource ?? '') && r.referenceSentAt && (retryAt === null || retryAt.getTime() > Date.now()))) ||
@@ -1377,6 +1407,8 @@ export class VoucherDispersalService {
       retryAvailableAt: r.status === RS.PENDING_RECONCILE ? retryAt : null,
       /** Hubble's last answer was a status we do not recognise → an admin may "Mark as not bought" (with a reason). */
       canMarkNotBought: canMarkNotBought(r),
+      /** A row marked "not bought" is CLOSED: who marked it + what to do (null otherwise). */
+      closedNote: r.status === RS.BUY_FAILED && r.buyFailureSource === 'MARKED_NOT_BOUGHT' ? markedClosedNote(r.buyFailureReason) : null,
     };
   }
 
@@ -1512,6 +1544,7 @@ export class VoucherDispersalService {
     this.assertAdmin(user);
     const reason = String(dto?.reason ?? '').replace(/\s+/g, ' ').trim();
     if (reason.length < 5) throw new BadRequestException('Give the reason (at least 5 characters) — it is kept in the audit trail.');
+    const markerName = ((await this.userNames([user.sub])).get(user.sub) ?? user.name ?? 'an admin').replace(/:/g, ' ').trim() || 'an admin';
     const r = await this.prisma.$transaction(async (tx) => {
       const camp = await tx.voucherDispersalCampaign.update({ where: { id }, data: { updatedAt: new Date() } }).catch(() => null);
       if (!camp) throw new NotFoundException('Campaign not found.');
@@ -1529,7 +1562,7 @@ export class VoucherDispersalService {
         data: {
           status: RS.BUY_FAILED,
           buyFailureSource: 'MARKED_NOT_BOUGHT',
-          buyFailureReason: `Marked as not bought by an admin: ${reason}`.slice(0, 300),
+          buyFailureReason: `Marked as not bought by ${markerName}: ${reason}`.slice(0, 300),
           pendingReason: null,
           claimToken: null,
         },
@@ -1604,43 +1637,17 @@ export class VoucherDispersalService {
     if (row.status !== RS.BUY_FAILED && row.status !== RS.PENDING_RECONCILE) {
       throw new ConflictException(`Retry is only for a failed or long-pending row (row status ${row.status}).`);
     }
+    if (row.status === RS.BUY_FAILED && row.buyFailureSource === 'MARKED_NOT_BOUGHT') {
+      // Owner decision: "Mark as not bought" is FINAL — the row is closed (no retry, no new reference).
+      await audit('REFUSED_MARKED_NOT_BOUGHT');
+      throw new ConflictException(`${markedClosedNote(row.buyFailureReason)}`);
+    }
 
     let newRef: string | null = null;
     let canaryRef: string | null = null;
     let oldReferenceStatus: string | null = null;
     if (localFailure && !row.referenceSentAt) {
       // Never reached Hubble with this reference → nothing to check; reuse it.
-    } else if (row.status === RS.BUY_FAILED && row.buyFailureSource === 'MARKED_NOT_BOUGHT') {
-      // An admin marked it NOT BOUGHT (audited, with a reason). Before a NEW reference, Hubble is asked about the old
-      // one once more: SUCCESS → applied (nothing bought again); PROCESSING → back to pending, refused; FAILED / no
-      // order → new reference; still unrecognised → new reference (the admin's decision stands — recorded).
-      const look = await this.lookup(row.hubbleReferenceId!);
-      if (look.kind === 'ERROR') {
-        await audit('REFUSED_LOOKUP_FAILED', { why: look.why });
-        throw new ConflictException(`Could not reach Hubble to check the earlier order for this row (${look.why}). Try again later.`);
-      }
-      if (look.kind === 'ORDER') {
-        const st = String(look.body.status ?? '').toUpperCase();
-        oldReferenceStatus = st || 'UNKNOWN';
-        if (st === 'SUCCESS') {
-          const outcome = await this.processor.applyBody(row, look.body);
-          await audit('HUBBLE_HAD_BOUGHT_AFTER_MARK', { applied: outcome });
-          if (outcome === 'BOUGHT') await this.processor.sendMessage(row.id);
-          await this.processor.resettle(id);
-          return this.retryResult(row.id, 'Hubble had bought it after all — the voucher was applied and sent; nothing bought again.');
-        }
-        if (st === 'PROCESSING') {
-          await this.processor.applyBody(row, look.body);
-          await audit('REFUSED_HUBBLE_PROCESSING_AFTER_MARK');
-          await this.processor.resettle(id);
-          throw new ConflictException(
-            'Not retried: Hubble is still processing the earlier order for this row — it is back to pending (it counts against the budget again) and is checked automatically.',
-          );
-        }
-      } else {
-        oldReferenceStatus = 'NO_ORDER';
-      }
-      newRef = `vd${randomBytes(12).toString('hex')}`;
     } else {
       if (indeterminate) {
         const at = this.retryAvailableAt(row);
@@ -1690,18 +1697,6 @@ export class VoucherDispersalService {
       }
     }
 
-    if (newRef) {
-      // HIGH (final review): never risk a second voucher unseen — every EARLIER reference is looked up first.
-      const prev = await this.processor.checkPreviousReferences(row);
-      if (!prev.ok) {
-        await audit(prev.error ? 'REFUSED_EARLIER_REFERENCE_UNCHECKED' : 'REFUSED_EARLIER_REFERENCE_ACTIVE', { referenceId: prev.ref, hubbleStatus: prev.status });
-        throw new ConflictException(
-          prev.error
-            ? `Not retried: an earlier order for this row (reference ${prev.ref}) could not be checked at Hubble. Try again later.`
-            : `Not retried: an earlier order for this row (reference ${prev.ref}) was completed by Hubble (${prev.status}) — two vouchers may have been issued. It is counted as spent; contact Gifsy tech.`,
-        );
-      }
-    }
     const r = await this.processor.requeueUnderLock(
       id,
       { id: row.id, status: row.status, updatedAt: row.updatedAt, voucherCode: null },
@@ -1743,7 +1738,6 @@ export class VoucherDispersalService {
       previousFailure: row.buyFailureSource ?? row.pendingReason,
       canaryRef,
       oldReferenceStatus,
-      afterMarkNotBought: row.buyFailureSource === 'MARKED_NOT_BOUGHT',
     });
     this.processor.kick(id);
     return this.retryResult(
