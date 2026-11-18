@@ -3,6 +3,8 @@ import {
   descendantSalesUserIds,
   firstActiveApproverId,
   immediateReporteeForOutlet,
+  effectiveDirectReportIds,
+  promotedReportIds,
 } from './sales-hierarchy-access.helper';
 
 /**
@@ -50,6 +52,57 @@ describe('descendantSalesUserIds', () => {
       { id: 'b', reportingToId: 'a' },
     ];
     expect([...descendantSalesUserIds('a', cyclic)].sort()).toEqual(['a', 'b']);
+  });
+
+  // G3 — a soft-deleted middle manager must not cut the team off from the managers above.
+  describe('G3 — walks THROUGH soft-deleted managers', () => {
+    // asm ─ so (DELETED) ─ isr1, isr2 ; asm ─ so2 ─ isr3
+    const WITH_DELETED = [
+      { id: 'asm', reportingToId: null, deletedAt: null },
+      { id: 'so', reportingToId: 'asm', deletedAt: new Date('2026-01-01') },
+      { id: 'isr1', reportingToId: 'so', deletedAt: null },
+      { id: 'isr2', reportingToId: 'so', deletedAt: null },
+      { id: 'so2', reportingToId: 'asm', deletedAt: null },
+      { id: 'isr3', reportingToId: 'so2', deletedAt: null },
+    ];
+
+    it('an ASM above a deleted SO still reaches that SO\'s ISRs; the deleted SO itself is NOT a team member', () => {
+      const sub = descendantSalesUserIds('asm', WITH_DELETED);
+      expect([...sub].sort()).toEqual(['asm', 'isr1', 'isr2', 'isr3', 'so2']);
+      expect(sub.has('so')).toBe(false);
+    });
+
+    it('a chain of TWO deleted managers is walked through', () => {
+      const edges = [
+        { id: 'rsm', reportingToId: null, deletedAt: null },
+        { id: 'asm', reportingToId: 'rsm', deletedAt: new Date() },
+        { id: 'so', reportingToId: 'asm', deletedAt: new Date() },
+        { id: 'isr', reportingToId: 'so', deletedAt: null },
+      ];
+      expect([...descendantSalesUserIds('rsm', edges)].sort()).toEqual(['isr', 'rsm']);
+    });
+
+    it('a deleted leaf is simply excluded (no team member gained)', () => {
+      const edges = [
+        { id: 'so', reportingToId: null, deletedAt: null },
+        { id: 'isr', reportingToId: 'so', deletedAt: new Date() },
+      ];
+      expect([...descendantSalesUserIds('so', edges)]).toEqual(['so']);
+    });
+
+    it('a cycle running through deleted nodes terminates', () => {
+      const edges = [
+        { id: 'a', reportingToId: 'c', deletedAt: null },
+        { id: 'b', reportingToId: 'a', deletedAt: new Date() },
+        { id: 'c', reportingToId: 'b', deletedAt: new Date() },
+        { id: 'd', reportingToId: 'c', deletedAt: null },
+      ];
+      expect([...descendantSalesUserIds('a', edges)].sort()).toEqual(['a', 'd']);
+    });
+
+    it('edges without a deletedAt field behave exactly as before (back-compat)', () => {
+      expect([...descendantSalesUserIds('so', EDGES)].sort()).toEqual(['so', 'xsr', 'xsr2']);
+    });
   });
 });
 
@@ -146,5 +199,112 @@ describe('isSelfOrDescendant (regression)', () => {
   it('grants a manager access to a descendant and denies a sibling branch', () => {
     expect(isSelfOrDescendant('xsr', 'so', EDGES)).toBe(true);
     expect(isSelfOrDescendant('xsr3', 'so', EDGES)).toBe(false);
+  });
+});
+
+// ── G3 / R1 — every walker passes THROUGH a soft-deleted manager ─────────────────────────────────────
+// asm ─ so (DELETED) ─ isr ; asm ─ so2 (live) ─ isr2 ; isr owns the outlet in the KYC scenarios.
+const DEL = new Date('2026-11-01');
+const BRANCH = [
+  { id: 'rsm', reportingToId: null, isActive: true, deletedAt: null },
+  { id: 'asm', reportingToId: 'rsm', isActive: true, deletedAt: null },
+  { id: 'so', reportingToId: 'asm', isActive: true, deletedAt: DEL },
+  { id: 'isr', reportingToId: 'so', isActive: true, deletedAt: null },
+  { id: 'so2', reportingToId: 'asm', isActive: true, deletedAt: null },
+  { id: 'isr2', reportingToId: 'so2', isActive: true, deletedAt: null },
+];
+
+describe('G3 — isSelfOrDescendant walks through deleted managers, never returns them', () => {
+  it('an ASM above a deleted SO can view that SO\'s ISR', () => {
+    expect(isSelfOrDescendant('isr', 'asm', BRANCH)).toBe(true);
+  });
+  it('the deleted SO itself is never a viewable member', () => {
+    expect(isSelfOrDescendant('so', 'asm', BRANCH)).toBe(false);
+  });
+  it('a sibling branch is still refused', () => {
+    expect(isSelfOrDescendant('isr', 'so2', BRANCH)).toBe(false);
+  });
+  it('a cycle through a deleted node terminates (false)', () => {
+    const cyclic = [
+      { id: 'x', reportingToId: 'y', deletedAt: null },
+      { id: 'y', reportingToId: 'x', deletedAt: DEL },
+    ];
+    expect(isSelfOrDescendant('x', 'v', cyclic)).toBe(false);
+  });
+});
+
+describe('R1 — firstActiveApproverId skips a soft-deleted manager (resolveInitialRouting\'s rule)', () => {
+  it('ISR under a deleted SO → the ASM is the routed approver', () => {
+    expect(firstActiveApproverId('isr', BRANCH)).toBe('asm');
+  });
+  it('a deleted node is skipped even when flagged isActive (deletedAt wins)', () => {
+    const nodes = [
+      { id: 'a', reportingToId: null, isActive: true, deletedAt: DEL },
+      { id: 'i', reportingToId: 'a', isActive: true, deletedAt: null },
+    ];
+    expect(firstActiveApproverId('i', nodes)).toBeNull();
+  });
+  it('a cycle of deleted managers terminates', () => {
+    const nodes = [
+      { id: 'i', reportingToId: 'a', isActive: true, deletedAt: null },
+      { id: 'a', reportingToId: 'b', isActive: true, deletedAt: DEL },
+      { id: 'b', reportingToId: 'a', isActive: true, deletedAt: DEL },
+    ];
+    expect(firstActiveApproverId('i', nodes)).toBeNull();
+  });
+});
+
+describe('G3 — immediateReporteeForOutlet never names a deleted person', () => {
+  it('viewer ASM, deleted SO, assigned ISR → the ISR (the ASM\'s effective direct report)', () => {
+    expect(immediateReporteeForOutlet('asm', ['isr'], BRANCH)).toBe('isr');
+  });
+  it('viewer RSM → the ASM (live direct report), unchanged', () => {
+    expect(immediateReporteeForOutlet('rsm', ['isr'], BRANCH)).toBe('asm');
+  });
+  it('the deleted SO in the middle with a live node below it → that live node', () => {
+    const edges = [
+      { id: 'asm', reportingToId: null, deletedAt: null },
+      { id: 'so', reportingToId: 'asm', deletedAt: DEL },
+      { id: 'tl', reportingToId: 'so', deletedAt: null },
+      { id: 'isr', reportingToId: 'tl', deletedAt: null },
+    ];
+    expect(immediateReporteeForOutlet('asm', ['isr'], edges)).toBe('tl');
+  });
+});
+
+describe('G3 — effectiveDirectReportIds / promotedReportIds (the team list rule)', () => {
+  it('a deleted direct report is replaced by its live reports; never listed itself', () => {
+    expect(effectiveDirectReportIds('asm', BRANCH)).toEqual(['so2', 'isr']);
+    expect(promotedReportIds('asm', BRANCH)).toEqual(['isr']);
+  });
+  it('an inactive (vacant, not deleted) direct report is walked through the same way', () => {
+    const edges = [
+      { id: 'asm', reportingToId: null, isActive: true, deletedAt: null },
+      { id: 'so', reportingToId: 'asm', isActive: false, deletedAt: null },
+      { id: 'isr', reportingToId: 'so', isActive: true, deletedAt: null },
+    ];
+    expect(effectiveDirectReportIds('asm', edges)).toEqual(['isr']);
+  });
+  it('two stacked deleted levels are walked through', () => {
+    const edges = [
+      { id: 'rsm', reportingToId: null, deletedAt: null },
+      { id: 'asm', reportingToId: 'rsm', deletedAt: DEL },
+      { id: 'so', reportingToId: 'asm', deletedAt: DEL },
+      { id: 'isr', reportingToId: 'so', deletedAt: null },
+    ];
+    expect(effectiveDirectReportIds('rsm', edges)).toEqual(['isr']);
+  });
+  it('no vacant slot → no promotions (legacy edges without the optional fields behave as before)', () => {
+    expect(promotedReportIds('asm', EDGES)).toEqual([]);
+    expect(effectiveDirectReportIds('asm', EDGES)).toEqual(['so', 'so2']);
+  });
+  it('a cycle through deleted nodes terminates', () => {
+    const edges = [
+      { id: 'm', reportingToId: 'b', deletedAt: null },
+      { id: 'a', reportingToId: 'm', deletedAt: DEL },
+      { id: 'b', reportingToId: 'a', deletedAt: DEL },
+      { id: 'c', reportingToId: 'b', deletedAt: null },
+    ];
+    expect(effectiveDirectReportIds('m', edges)).toEqual(['c']);
   });
 });

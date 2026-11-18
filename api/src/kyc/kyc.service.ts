@@ -9,6 +9,8 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { NOT_INTERESTED_BLOCKING_KYC_STATUSES, NOT_INTERESTED_REFUSAL } from './kyc-not-interested.constants';
+import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus, EntityType, GstRegistrationType, PaymentDetailsStatus } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -543,15 +545,15 @@ export class KycService {
   async sendConsentOtp(user: JwtPayload, dto: { submissionId: string; mobile: string }): Promise<{ success: boolean; expiresIn: number }> {
     const submission = await this.prisma.kycSubmission.findFirst({
       where: { id: dto.submissionId, userId: user.sub, user: { clientId: user.clientId } },
-      select: { id: true, partnerId: true, proposedPartner: true, partner: { select: { phone: true } } },
+      select: { id: true, partnerId: true, outletId: true, proposedPartner: true, partner: { select: { phone: true } } },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
     // A1: the outlet must STILL be assigned to the sales caller's team when the owner is asked to consent (an outlet
     // reassigned since the draft was started cannot be routed by the old rep). consent() re-checks the same rule
     // before verifying the OTP (R2), so a reassignment between send and verify is also caught.
-    if (submission.partnerId) {
-      await this.assertOutletAssignedToCallerTeam(user, { partnerId: submission.partnerId });
-    }
+    // G2: checked on the submission's OWN outlet when recorded (legacy null rows → the partner-level check).
+    const consentGateTarget = this.consentGateTarget(submission);
+    if (consentGateTarget) await this.assertOutletAssignedToCallerTeam(user, consentGateTarget);
 
     // Bind the consent OTP to THIS submission's outlet owner: the number must be the one persisted on
     // the submission (re-KYC → the proposed phone; new outlet → the partner's phone), never an
@@ -1119,14 +1121,13 @@ export class KycService {
   /**
    * The caller's live (non-deleted) SalesUser in this tenant + their reporting subtree (self + every descendant), from
    * ONE tenant-scoped read. null when the caller has no live SalesUser (admin / partner / soft-deleted rep).
+   * G3: the read INCLUDES soft-deleted nodes so the downline walk passes THROUGH a deleted middle manager (an ASM
+   * above a deleted SO keeps that SO's ISRs) — the same rule as the sales outlet picker (SalesService.getMyOutlets).
+   * Deleted nodes are never team members themselves, and the caller must be live.
    */
   private async callerSalesTeam(user: JwtPayload): Promise<{ salesUserId: string; team: Set<string> } | null> {
-    const nodes = await this.prisma.salesUser.findMany({
-      where: { clientId: user.clientId, deletedAt: null },
-      select: { id: true, reportingToId: true, userId: true },
-    });
-    if (!Array.isArray(nodes)) return null;
-    const me = nodes.find((n) => n.userId === user.sub);
+    const nodes = await loadSalesHierarchy(this.prisma, user.clientId);
+    const me = nodes.find((n) => n.userId === user.sub && n.deletedAt == null);
     if (!me) return null;
     return { salesUserId: me.id, team: descendantSalesUserIds(me.id, nodes) };
   }
@@ -1183,6 +1184,23 @@ export class KycService {
     if (!Array.isArray(rows) || !rows.some((r) => caller.team.has(r.salesUserId))) {
       throw new ForbiddenException(notAssigned);
     }
+  }
+
+  /**
+   * G2 (PLATFORM-WIDE, owner-approved 2026-11-17) — what the consent / OTP gate checks for a submission:
+   *   - `outletId` recorded (every submission created since the column was added) → THAT outlet. A multi-outlet
+   *     partner's other outlets no longer count: a rep who still holds O2 cannot consent an O1 draft once O1 was
+   *     reassigned away;
+   *   - legacy row (`outletId` null) with a partner → the old partner-level check (any outlet of the partner);
+   *   - neither → null (no gate, unchanged).
+   */
+  private consentGateTarget(submission: {
+    outletId?: string | null;
+    partnerId: string | null;
+  }): { outletId: string } | { partnerId: string } | null {
+    if (submission.outletId) return { outletId: submission.outletId };
+    if (submission.partnerId) return { partnerId: submission.partnerId };
+    return null;
   }
 
   /**
@@ -1322,10 +1340,9 @@ export class KycService {
     });
     if (!caller) return null;
 
-    const nodes = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true, userId: true },
-    });
+    // G3: include soft-deleted nodes so the walk passes THROUGH a deleted middle manager (same rule as
+    // callerSalesTeam + the sales outlet picker); descendantSalesUserIds never returns a deleted node.
+    const nodes = await loadSalesHierarchy(this.prisma, user.clientId);
     const subtree = descendantSalesUserIds(caller.id, nodes);
     const subtreeUserIds = nodes.filter((n) => subtree.has(n.id)).map((n) => n.userId);
     return { callerSalesUserId: caller.id, subtreeUserIds, subtreeSalesUserIds: subtree };
@@ -1342,6 +1359,7 @@ export class KycService {
     user: JwtPayload,
     submitterUserId: string,
     partnerId?: string | null,
+    outletId?: string | null,
   ): Promise<void> {
     if (this.canReadTenantWide(user.role)) return; // admins/Gifsy + MIS read tenant-wide
     if (submitterUserId === user.sub) return; // own submission
@@ -1358,14 +1376,24 @@ export class KycService {
     // list and must be able to open it, even though the ORIGINAL submitter is in a
     // different branch. An UNRELATED SO (neither submitter-chain nor current-assignee-
     // chain) still falls through to Forbidden below. Tenant-scoped via outlet.clientId.
-    if (partnerId) {
+    // R5 (PLATFORM-WIDE, owner-approved 2026-11-17): OUTLET-level when the submission records its outlet
+    // (G2 `outletId`) — only THAT outlet's active assignment counts, so a rep holding O2 of a multi-outlet
+    // owner can no longer open the KYC filed for O1. Legacy rows (`outletId` null) keep the partner-level
+    // rule. The routed approver is unaffected: they sit in the submitter's chain → Path A above. The
+    // subtree walks THROUGH soft-deleted managers (resolveSalesScope → loadSalesHierarchy).
+    const outletScope = outletId
+      ? { id: outletId, clientId: user.clientId }
+      : partnerId
+        ? { partnerId, clientId: user.clientId }
+        : null;
+    if (outletScope) {
       const activeAssignment = await this.prisma.salesUserAssignment.findFirst({
         where: {
           unassignedAt: null,
           salesUserId: { in: Array.from(scope.subtreeSalesUserIds) },
           // Outlet carries its own tenant tag (clientId) — scope to this tenant so the
           // assignment lookup can never cross a tenant boundary.
-          outlet: { partnerId, clientId: user.clientId },
+          outlet: outletScope,
         },
         select: { id: true },
       });
@@ -1399,10 +1427,12 @@ export class KycService {
       throw new ForbiddenException('Only the submitting rep’s reporting manager can approve this KYC.');
     }
 
-    const nodes = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true, isActive: true },
-    });
+    // R1/G3: the node list INCLUDES soft-deleted managers (loadSalesHierarchy) so both checks below walk
+    // THROUGH a deleted SO exactly like resolveInitialRouting routed the KYC past it — a KYC routed to the
+    // ASM above a deleted SO is approvable/rejectable by that ASM (the queue and the action agree).
+    // firstActiveApproverId skips deleted + inactive levels; isSelfOrDescendant never treats a deleted
+    // node as the submitter. Before this, the walk stopped at the missing SO and the ASM got a 403.
+    const nodes = await loadSalesHierarchy(this.prisma, user.clientId);
 
     // Multi-stage sales approval (Bajaj, via multiLevelApproval): the routed approver ADVANCES as the
     // submission climbs SO→ASM, so a single "first active approver" check would reject the ASM at the
@@ -1412,7 +1442,8 @@ export class KycService {
     // (Deoleo) keep the strict first-active-approver check below — byte-identical. Same helper as the
     // first-approve climb, so the two can never disagree (even on a transient feature-resolve error).
     if (await this.isMultiLevelApproval(user.clientId)) {
-      const callerActive = nodes.find((n) => n.id === caller.id)?.isActive === true;
+      const callerNode = nodes.find((n) => n.id === caller.id);
+      const callerActive = callerNode?.isActive === true && callerNode.deletedAt == null;
       if (callerActive && caller.id !== submitter.id && isSelfOrDescendant(submitter.id, caller.id, nodes)) {
         return;
       }
@@ -1655,6 +1686,9 @@ export class KycService {
       status: string;
       escalatedFrom: string | null;
       partnerId: string;
+      // G2: the OUTLET this KYC is filed for (the tenant-resolved outlet of dto.outletId) — the consent / OTP
+      // gate checks the assignment on THIS outlet, not on any outlet of a multi-outlet partner.
+      outletId: string;
       inFlightStatuses: string[];
       // PROPOSED (new) identity/payout values PLUS the OUTLET ADDRESS {addressLine1, city, state,
       // pincode} for a re-KYC draft (undefined for a brand-new-outlet draft → column stays NULL).
@@ -1672,7 +1706,7 @@ export class KycService {
       geoLockMs?: number | null;
     },
   ) {
-    const { user, dto, status, escalatedFrom, partnerId, inFlightStatuses, proposedPartner, declarationData, soSignatureKey, geoFenceStatus, geoFenceDistanceM, geoFenceAccuracyM, geoLockMs } = args;
+    const { user, dto, status, escalatedFrom, partnerId, outletId, inFlightStatuses, proposedPartner, declarationData, soSignatureKey, geoFenceStatus, geoFenceDistanceM, geoFenceAccuracyM, geoLockMs } = args;
 
     const existing = await tx.kycSubmission.findFirst({
       where: {
@@ -1689,6 +1723,7 @@ export class KycService {
       data: {
         userId: user.sub,
         partnerId,
+        outletId,
         status: status as never,
         escalatedFrom: escalatedFrom ?? null,
         reviewerNotes: dto.reviewerNotes ?? null,
@@ -2679,6 +2714,7 @@ export class KycService {
         status,
         escalatedFrom,
         partnerId,
+        outletId: outlet.id,
         inFlightStatuses: [...IN_FLIGHT_STATUSES],
         proposedPartner: proposedSnapshot,
         // SO Declaration variant (undefined for STANDARD → DB default STANDARD, NULL JSON/key).
@@ -3245,7 +3281,7 @@ export class KycService {
     // non-admin non-owner (a sales reviewer sees PAN/bank as last-4). partnerId widens
     // the read to the outlet's CURRENT assignee chain (reassignment case — matches the
     // list/targets views in buildOutlets), not just the original submitter chain.
-    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId);
+    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId, submission.outletId);
 
     // ── Task 3.4e: DPDP read-masking ─────────────────────────────────────────
     // Mask sensitive fields (bank account, PAN, GST → last 4) for non-admin callers
@@ -4254,7 +4290,7 @@ export class KycService {
     // same widening as getOne, so the ledger read matches what the list exposes); an
     // out-of-chain manager is Forbidden. (Partner callers are already scoped to their
     // own via the where.userId filter above → a foreign id 404s here.)
-    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId);
+    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId, submission.outletId);
 
     const partner = submission.partner;
     return {
@@ -4348,10 +4384,9 @@ export class KycService {
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
     // A1/R2: re-check the assignment HERE too, before the OTP is claimed — an outlet reassigned between the OTP
-    // send and the verify must not be routed by the old rep.
-    if (submission.partnerId) {
-      await this.assertOutletAssignedToCallerTeam(user, { partnerId: submission.partnerId });
-    }
+    // send and the verify must not be routed by the old rep. G2: on the submission's OWN outlet when recorded.
+    const consentGateTarget = this.consentGateTarget(submission);
+    if (consentGateTarget) await this.assertOutletAssignedToCallerTeam(user, consentGateTarget);
     const mobile = this.consentOwnerPhone(submission);
     if (!mobile || mobile !== this.phoneLast10(dto.mobile)) throw new UnauthorizedOtp('OTP not found or expired');
 
@@ -4594,6 +4629,30 @@ export class KycService {
     // Already marked by someone else on the team — still idempotent (no re-write), now that the caller passed the gate.
     if (!outlet.isActive && outlet.kycIntent === 'NOT_INTERESTED') {
       return { outletId, alreadyMarked: true };
+    }
+
+    // G1 (PLATFORM-WIDE, owner-approved 2026-11-17): "Not interested" deactivates the outlet, so it must never
+    // switch off an outlet the admin PARKED, one whose KYC is APPROVED, or one with a KYC under review. Checked
+    // AFTER the A1 gate (an unassigned caller learns nothing about the outlet's status) and for every role.
+    if (outlet.kycIntent === 'PARKED') {
+      throw new ConflictException(NOT_INTERESTED_REFUSAL.PARKED);
+    }
+    // Submissions about this outlet: its partner's (every KycSubmission is filed ABOUT a partner) + any filed for
+    // this outlet row (G2 `outletId`; covers an outlet whose partner link changed). Tenant-safe: both keys come
+    // from the tenant-scoped outlet read above.
+    const blocking = await this.prisma.kycSubmission.findMany({
+      where: {
+        OR: [...(outlet.partnerId ? [{ partnerId: outlet.partnerId }] : []), { outletId: outlet.id }],
+        status: { in: [...NOT_INTERESTED_BLOCKING_KYC_STATUSES] },
+      },
+      select: { status: true },
+    });
+    if (Array.isArray(blocking) && blocking.length > 0) {
+      throw new ConflictException(
+        blocking.some((s) => s.status === 'APPROVED')
+          ? NOT_INTERESTED_REFUSAL.APPROVED
+          : NOT_INTERESTED_REFUSAL.IN_REVIEW,
+      );
     }
 
     await this.prisma.outlet.update({

@@ -9,11 +9,16 @@ import {
   resolveGroupCarryForwardDocs,
   type GroupIdentity,
 } from '../common/partner-group.helper';
+import type { Prisma } from '@prisma/client';
 import {
   isSelfOrDescendant,
   descendantSalesUserIds,
+  effectiveDirectReportIds,
   immediateReporteeForOutlet,
+  promotedReportIds,
+  type SalesUserEdge,
 } from './sales-hierarchy-access.helper';
+import { loadSalesHierarchy, type SalesHierarchyNode } from './sales-hierarchy.loader';
 import { kpisForScopeFilter, primaryKpiFor } from './sales-kpi-type.helper';
 import { AppliesToOutletFacets, appliesToFilter, kpiAppliesTo } from '../common/applies-to/applies-to';
 import { kpiOutletPredicate, scopedKpiPredicates } from './outlet-kpi-scope.helper';
@@ -27,6 +32,7 @@ import { VisibilityProgramScopeLike, visibilityProgramMatches } from '../visibil
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { pickDeliveryDefaults } from '../partner/delivery-defaults.helper';
 import { mapBounded } from '../common/map-bounded';
+import { NOT_INTERESTED_IN_FLIGHT_STATUSES } from '../kyc/kyc-not-interested.constants';
 
 /**
  * Relation filter that FULLY hides admin-PARKED outlets from sales reps: an outlet whose
@@ -40,6 +46,26 @@ import { mapBounded } from '../common/map-bounded';
 export const NOT_PARKED_OUTLET = {
   OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' as const } }],
 };
+
+/**
+ * The member-row shape of the Team / Team-view screens (a direct report OR a report promoted past a
+ * vacant manager — G3). `_count.subordinates` = LIVE + ACTIVE direct reports only; the vacant-slot
+ * promotions are added on top by `withPromotedReports`, so teamSize = the member's EFFECTIVE team.
+ */
+const TEAM_MEMBER_INCLUDE = {
+  user: { select: { name: true, phone: true } },
+  hierarchyLevel: { select: { code: true, name: true, level: true } },
+  _count: { select: { subordinates: { where: { isActive: true, deletedAt: null } } } },
+} satisfies Prisma.SalesUserInclude;
+type TeamMemberRow = Prisma.SalesUserGetPayload<{ include: typeof TEAM_MEMBER_INCLUDE }>;
+
+/** A Team-Member filter option on the /sales/outlets screen (direct or promoted report — G3). */
+const OUTLET_FILTER_MEMBER_SELECT = {
+  id: true,
+  employeeCode: true,
+  user: { select: { name: true } },
+  hierarchyLevel: { select: { code: true, name: true } },
+} satisfies Prisma.SalesUserSelect;
 
 /**
  * One row of the sales team leaderboard — the exact shape the FE
@@ -213,35 +239,35 @@ export class SalesService {
         hierarchyLevel: { select: { code: true, name: true, level: true } },
         subordinates: {
           where: { isActive: true, deletedAt: null },
-          include: {
-            user: { select: { name: true, phone: true } },
-            hierarchyLevel: { select: { code: true, name: true, level: true } },
-            _count: { select: { subordinates: true } },
-          },
+          include: TEAM_MEMBER_INCLUDE,
         },
       },
     });
 
     if (!salesUser) return { salesUser: null, members: [] };
 
+    // G3: ONE deleted-aware tenant read (loadSalesHierarchy) feeds the member list, the rollups and the
+    // branch-submitter sets, so every walk passes THROUGH a soft-deleted / deactivated manager.
+    const edges = await loadSalesHierarchy(this.prisma, user.clientId);
+    // The caller's EFFECTIVE direct reports: live direct reports + the live reports of a vacant
+    // (deleted / inactive) direct report, promoted one level up (the routing rule). The deleted SO is
+    // never a member row, and their ISRs are not orphaned out of the caller's team list.
+    const directReports = await this.withPromotedReports(salesUser.subordinates, salesUser.id, edges, user.clientId);
+
     const rollups = await this.buildTeamRollups(
       user.clientId,
       salesUser.id,
-      salesUser.subordinates.map((s) => s.id),
+      directReports.map((s) => s.id),
+      edges,
     );
 
     // Branch submitters: for each DIRECT report, the login-User ids of that report
     // PLUS their entire downline. The FE KYC-list member filter keys on a submission's
     // submitter userId, so filtering by a manager must return the whole branch (owner
     // 2026-07-03), not just that person's own submissions. Reuses the hierarchy walk.
-    const allSalesUsers = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true, userId: true },
-    });
-    const edges = allSalesUsers.map((s) => ({ id: s.id, reportingToId: s.reportingToId }));
-    const userIdBySalesUserId = new Map(allSalesUsers.map((s) => [s.id, s.userId]));
+    const userIdBySalesUserId = new Map(edges.map((s) => [s.id, s.userId]));
 
-    const members = salesUser.subordinates.map((sub) => {
+    const members = directReports.map((sub) => {
       const roll = rollups.get(sub.id) ?? { outlets: 0, kycDone: 0, kycPending: 0, targetValue: 0, targetPct: 0 };
       const submitterUserIds = [...descendantSalesUserIds(sub.id, edges)]
         .map((id) => userIdBySalesUserId.get(id))
@@ -282,6 +308,38 @@ export class SalesService {
   }
 
   /**
+   * G3 — a manager's member rows = their live+active direct reports (already loaded via a
+   * `subordinates` include) PLUS the reports PROMOTED past a vacant (soft-deleted / deactivated)
+   * direct report (`promotedReportIds`), fetched with the SAME include, tenant-scoped. The extra query
+   * runs only when there is something to promote. Each row's `_count.subordinates` is widened by that
+   * member's own promotions, so teamSize (and the FE drill-down choice team-view vs outlets) reflects
+   * the member's EFFECTIVE team — a member whose only report is a deleted SO with live ISRs still
+   * drills into a team view instead of an empty outlet list.
+   */
+  private async withPromotedReports(
+    direct: TeamMemberRow[],
+    managerId: string,
+    edges: SalesUserEdge[],
+    clientId: string,
+  ): Promise<TeamMemberRow[]> {
+    const promotedIds = promotedReportIds(managerId, edges);
+    const promoted = promotedIds.length
+      ? await this.prisma.salesUser.findMany({
+          where: { id: { in: promotedIds }, clientId, deletedAt: null },
+          include: TEAM_MEMBER_INCLUDE,
+        })
+      : [];
+    const order = new Map(promotedIds.map((id, i) => [id, i]));
+    const promotedSorted = (Array.isArray(promoted) ? promoted : []).sort(
+      (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
+    );
+    return [...direct, ...promotedSorted].map((m) => ({
+      ...m,
+      _count: { subordinates: (m._count?.subordinates ?? 0) + promotedReportIds(m.id, edges).length },
+    }));
+  }
+
+  /**
    * Per-direct-member WHOLE-SUBTREE rollup for the My-Team summary tiles.
    *
    * Returns a map directMemberId → { outlets, kycDone, kycPending, targetValue,
@@ -316,15 +374,13 @@ export class SalesService {
     clientId: string,
     viewerSalesUserId: string,
     directMemberIds: string[],
+    // G3: the deleted-aware tenant edge list (loadSalesHierarchy) the caller already loaded.
+    edges: SalesUserEdge[],
   ): Promise<Map<string, { outlets: number; kycDone: number; kycPending: number; targetValue: number; targetPct: number }>> {
     const empty = new Map<string, { outlets: number; kycDone: number; kycPending: number; targetValue: number; targetPct: number }>();
     if (directMemberIds.length === 0) return empty;
 
     // ── 1. Tenant edge list → each direct member's subtree ids (in memory). ────
-    const edges = await this.prisma.salesUser.findMany({
-      where: { user: { clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true },
-    });
 
     // The viewer subtree bounds the single assignment query; each direct member's
     // own subtree is a slice of it. (descendantSalesUserIds is cycle-safe.)
@@ -491,15 +547,11 @@ export class SalesService {
         hierarchyLevel: { select: { code: true, name: true, level: true } },
         subordinates: {
           where: { isActive: true, deletedAt: null },
-          include: {
-            user: { select: { name: true, phone: true } },
-            hierarchyLevel: { select: { code: true, name: true } },
-            // ACTIVE direct-report count only — this drives the FE drill-down route
-            // (teamSize>0 → team view, else → outlets). An unfiltered count would still
-            // show teamSize=1 for a manager whose only subordinate is soft-deleted and
-            // route to an empty team view instead of their outlets.
-            _count: { select: { subordinates: { where: { isActive: true, deletedAt: null } } } },
-          },
+          // ACTIVE direct-report count only (TEAM_MEMBER_INCLUDE) — this drives the FE drill-down
+          // route (teamSize>0 → team view, else → outlets). An unfiltered count would still show
+          // teamSize=1 for a manager whose only subordinate is soft-deleted and route to an empty
+          // team view. G3: withPromotedReports adds the live reports BELOW such a vacant slot.
+          include: TEAM_MEMBER_INCLUDE,
         },
       },
     });
@@ -581,7 +633,8 @@ export class SalesService {
     // The SAME builder feeds getTradeComparison, so the two screens never drift on scoping.
     const { edges, rootSubtree, outletsByUser, typeSet, programSet } =
       await this.buildOutletScope(user.clientId, root.id);
-    const directReports = root.subordinates;
+    // G3: effective direct reports — a vacant (deleted / inactive) direct report is replaced by its live reports.
+    const directReports = await this.withPromotedReports(root.subordinates, root.id, edges, user.clientId);
     const memberSubtrees = new Map<string, Set<string>>(
       directReports.map((m) => [m.id, descendantSalesUserIds(m.id, edges)]),
     );
@@ -857,16 +910,14 @@ export class SalesService {
     clientId: string,
     rootId: string,
   ): Promise<{
-    edges: { id: string; reportingToId: string | null }[];
+    edges: SalesHierarchyNode[];
     rootSubtree: Set<string>;
     outletsByUser: Map<string, OutletScopeInfo[]>;
     typeSet: Map<string, string>;
     programSet: Set<string>;
   }> {
-    const edges = await this.prisma.salesUser.findMany({
-      where: { user: { clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true },
-    });
+    // G3: deleted-aware edges → the subtree walks THROUGH a soft-deleted manager (never returns them).
+    const edges = await loadSalesHierarchy(this.prisma, clientId);
     const rootSubtree = descendantSalesUserIds(rootId, edges);
 
     // One assignment batch over the root subtree, with each outlet's type + program + latest KYC.
@@ -1084,21 +1135,21 @@ export class SalesService {
    * tenant-scoped, so a target outside the tenant can never be in the caller's
    * subtree.
    */
-  private async assertCanViewMember(user: JwtPayload, memberId: string): Promise<void> {
+  private async assertCanViewMember(user: JwtPayload, memberId: string): Promise<SalesHierarchyNode[]> {
     const callerSalesUser = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true },
     });
     if (!callerSalesUser) throw new ForbiddenException('Forbidden');
 
-    const edges = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true },
-    });
+    // G3: deleted-aware edges — an ASM above a deleted SO may open that SO's ISRs (the same members the
+    // team list promotes); a deleted member itself is never viewable (isSelfOrDescendant refuses it).
+    const edges = await loadSalesHierarchy(this.prisma, user.clientId);
 
     if (!isSelfOrDescendant(memberId, callerSalesUser.id, edges)) {
       throw new ForbiddenException('Forbidden');
     }
+    return edges;
   }
 
   /**
@@ -1134,11 +1185,10 @@ export class SalesService {
     });
     if (!viewer) return none;
 
-    // Tenant reporting edges → the viewer's whole subtree (the access boundary).
-    const edges = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true },
-    });
+    // Tenant reporting edges → the viewer's whole subtree (the access boundary). G3: deleted-aware — the
+    // reach passes THROUGH a deleted SO, and immediateReporteeForOutlet names the next LIVE person below a
+    // vacant slot (the viewer's effective direct report), never the deleted one.
+    const edges = await loadSalesHierarchy(this.prisma, user.clientId);
     const subtree = descendantSalesUserIds(viewer.id, edges);
 
     // The outlet's active assignments, tenant-scoped via the outlet relation. Only the reps
@@ -1189,14 +1239,13 @@ export class SalesService {
    * the achievement-percent aggregate are removed; targetPct is reported as 0.
    */
   async getMember(user: JwtPayload, memberId: string) {
-    await this.assertCanViewMember(user, memberId);
+    const edges = await this.assertCanViewMember(user, memberId);
 
     const salesUser = await this.prisma.salesUser.findFirst({
       where: { id: memberId, deletedAt: null, user: { clientId: user.clientId } },
       include: {
         user: { select: { name: true, phone: true } },
         hierarchyLevel: { select: { code: true, name: true, level: true } },
-        _count: { select: { subordinates: true } },
         assignments: {
           // Exclude admin-PARKED outlets from the member-detail counts + list (same null-safe
           // OR-wrap as buildOutlets), so a parked outlet is invisible in the team drill-in too.
@@ -1277,7 +1326,9 @@ export class SalesService {
         kycDone,
         kycPending,
         visibilityPending: 0,
-        teamSize: salesUser._count.subordinates,
+        // G3: the member's EFFECTIVE team (live+active direct reports + those promoted past a vacant
+        // slot) — the same count the team list shows, never a deleted/inactive person.
+        teamSize: effectiveDirectReportIds(memberId, edges).length,
         activity: [],
         outlets,
       },
@@ -1321,23 +1372,37 @@ export class SalesService {
         // + submitterUserIds = the report's own user id + their whole downline's).
         subordinates: {
           where: { isActive: true, deletedAt: null },
-          select: {
-            id: true,
-            employeeCode: true,
-            user: { select: { name: true } },
-            hierarchyLevel: { select: { code: true, name: true } },
-          },
+          select: OUTLET_FILTER_MEMBER_SELECT,
         },
       },
     });
 
     if (!salesUser) return { outlets: [], members: [] };
 
-    const edges = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true, userId: true },
-    });
+    // G3: soft-deleted nodes are INCLUDED so the walk passes THROUGH a deleted middle manager (an ASM above a
+    // deleted SO still gets that SO's ISRs' outlets) — the SAME rule as the KYC file/consent gate
+    // (KycService.callerSalesTeam), so the picker and the gate agree. Deleted nodes are never returned.
+    const edges = await loadSalesHierarchy(this.prisma, user.clientId);
     const subtreeIds = [...descendantSalesUserIds(salesUser.id, edges)];
+
+    // G3 Team-Member filter: the deleted SO's live reports are listed as SELECTABLE members under the
+    // caller (promoted one level, exactly as the Team screen lists them) rather than rolled into some
+    // other member — there is no live person to roll them up into, and the filter must offer the same
+    // people the Team screen shows. Fetched only when a vacant slot exists.
+    const promotedIds = promotedReportIds(salesUser.id, edges);
+    const promoted = promotedIds.length
+      ? await this.prisma.salesUser.findMany({
+          where: { id: { in: promotedIds }, clientId: user.clientId, deletedAt: null },
+          select: OUTLET_FILTER_MEMBER_SELECT,
+        })
+      : [];
+    const promotedOrder = new Map(promotedIds.map((id, i) => [id, i]));
+    const directMembers = [
+      ...(salesUser.subordinates ?? []),
+      ...(Array.isArray(promoted) ? promoted : []).sort(
+        (a, b) => (promotedOrder.get(a.id) ?? 0) - (promotedOrder.get(b.id) ?? 0),
+      ),
+    ];
 
     // Team-member filter options: each DIRECT report enriched with the login-User ids
     // of that report PLUS their whole downline (submitterUserIds), so "filter by a
@@ -1348,7 +1413,7 @@ export class SalesService {
     // report is a direct subordinate and descendantSalesUserIds only walks DOWN), so a
     // manager can never see or filter another manager's team. Empty for a leaf rep.
     const userIdBySalesUserId = new Map(edges.map((s) => [s.id, s.userId]));
-    const members = (salesUser.subordinates ?? []).map((sub) => ({
+    const members = directMembers.map((sub) => ({
       id: sub.id,
       name: sub.user.name,
       employeeCode: sub.employeeCode,
@@ -1429,10 +1494,9 @@ export class SalesService {
       select: { id: true },
     });
     if (!su) return { all: [], active: [], facets: new Map() };
-    const edges = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true },
-    });
+    // G3: deleted-aware — targets / outlet-targets / the KPI hero roll up the SAME outlets the picker lists
+    // (through a deleted SO to their ISRs).
+    const edges = await loadSalesHierarchy(this.prisma, user.clientId);
     const subtreeIds = [...descendantSalesUserIds(su.id, edges)];
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: { salesUserId: { in: subtreeIds }, unassignedAt: null, outletId: { not: null } },
@@ -1925,8 +1989,12 @@ export class SalesService {
     //       spans ALL non-deleted users so a subtree rolls up correctly even
     //       through inactive intermediate nodes; the POPULATION is the active
     //       same-level peers per scope. ───────────────────────────────────────
-    const allUsers = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
+    // G3: the read INCLUDES soft-deleted users (with deletedAt) so every walk below passes THROUGH a
+    // resigned manager: subtree roll-ups reach the ISRs under a deleted SO, the ancestor tabs skip the
+    // deleted SO (an ISR under a deleted SO still gets their ASM's tab), and the ZNM territory proxy
+    // skips a deleted ZNM. Deleted users are never in the population, a tab, or a territory name.
+    const tenantUsers = await this.prisma.salesUser.findMany({
+      where: { clientId: user.clientId },
       select: {
         id: true,
         userId: true,
@@ -1935,12 +2003,16 @@ export class SalesService {
         region: true,
         zone: true,
         isActive: true,
+        deletedAt: true,
         user: { select: { name: true } },
       },
     });
+    const everyone = Array.isArray(tenantUsers) ? tenantUsers : [];
+    // Live users only — the population, assignments and every displayed name come from here.
+    const allUsers = everyone.filter((u) => u.deletedAt == null);
 
-    const edges = allUsers.map((u) => ({ id: u.id, reportingToId: u.reportingToId }));
-    const usersById = new Map(allUsers.map((u) => [u.id, u]));
+    const edges = everyone.map((u) => ({ id: u.id, reportingToId: u.reportingToId, deletedAt: u.deletedAt ?? null }));
+    const usersById = new Map(everyone.map((u) => [u.id, u]));
 
     // Territory proxy = the name of a candidate's nearest ancestor (inclusive) at the
     // ZNM (Zonal Manager) level — owner decision: ZNM stands in for "zone" (SalesUser has
@@ -1955,10 +2027,10 @@ export class SalesService {
     const znmTerritory = (startId: string): string => {
       if (!znmLevel) return '';
       let curId: string | null = startId;
-      for (let hops = 0; curId && hops <= allUsers.length; hops++) {
+      for (let hops = 0; curId && hops <= everyone.length; hops++) {
         const u = usersById.get(curId);
         if (!u) break;
-        if (u.hierarchyLevelId === znmLevel.id) return u.user.name ?? '';
+        if (u.deletedAt == null && u.hierarchyLevelId === znmLevel.id) return u.user.name ?? '';
         curId = u.reportingToId;
       }
       return '';
@@ -1981,11 +2053,16 @@ export class SalesService {
       // belt-and-braces second bound.
       const seen = new Set<string>();
       let curId: string | null = caller.reportingToId;
-      for (let hops = 0; curId && ancestors.length < MAX_LEADERBOARD_LEVELS && hops <= allUsers.length; hops++) {
+      for (let hops = 0; curId && ancestors.length < MAX_LEADERBOARD_LEVELS && hops <= everyone.length; hops++) {
         if (seen.has(curId)) break;
         seen.add(curId);
         const a = usersById.get(curId);
         if (!a) break;
+        // G3: a deleted manager is never a tab — walk past them to the next manager up.
+        if (a.deletedAt != null) {
+          curId = a.reportingToId;
+          continue;
+        }
         ancestors.push({
           id: a.id,
           name: a.user.name?.trim() || levelNameById.get(a.hierarchyLevelId) || 'Manager',
@@ -2358,6 +2435,10 @@ export class SalesService {
                   take: 1,
                   select: { id: true, status: true, createdAt: true, rejectionReason: true },
                 },
+                // G1: whether the partner EVER had an APPROVED KYC (a later rejected re-KYC leaves the latest
+                // status REJECTED) — drives `notInterestedBlock` so the FE hides "Not interested" exactly where
+                // the server (KycService.notInterested) refuses it.
+                _count: { select: { kycSubmissions: { where: { status: 'APPROVED' } } } },
               },
             },
           },
@@ -2557,6 +2638,16 @@ export class SalesService {
               : outlet.kycIntent === 'NOT_INTERESTED'
                 ? 'NOT_INTERESTED'
                 : (latestKyc?.status ?? 'NOT_STARTED'),
+            // G1: why "Not interested" is NOT available for this outlet (null = it is). Mirrors the server
+            // refusal in KycService.notInterested: an APPROVED KYC on the partner (ever) wins over a KYC in
+            // flight (the latest submission — the in-flight dup guard means an in-flight one is the newest).
+            // PARKED outlets never reach this list (NOT_PARKED_OUTLET above).
+            notInterestedBlock:
+              (partner?._count?.kycSubmissions ?? 0) > 0
+                ? ('APPROVED' as const)
+                : latestKyc && NOT_INTERESTED_IN_FLIGHT_STATUSES.has(latestKyc.status)
+                  ? ('IN_REVIEW' as const)
+                  : null,
             kycSubmittedAt: latestKyc?.createdAt ? istDateKey(latestKyc.createdAt) : undefined,
             kycRejectionReason: latestKyc?.rejectionReason ?? null,
             reKycFlags: outlet.reKycFlags ?? null,

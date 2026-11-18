@@ -1031,11 +1031,17 @@ model KycSubmission {
   geoFenceAccuracyM Int?
   geoLockMs         Int?
 
+  // The OUTLET this KYC was filed for (create() sets it from dto.outletId). Lets the consent / OTP
+  // permission gate check the assignment on THAT outlet, not on any outlet of a multi-outlet partner.
+  // Nullable, no backfill: legacy rows (null) keep the partner-level check.
+  outletId String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   user              User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   partner           ChannelPartner?       @relation(fields: [partnerId], references: [id], onDelete: SetNull)
+  outlet            Outlet?               @relation(fields: [outletId], references: [id], onDelete: SetNull)
   documents         KycDocument[]
   statusHistory     KycStatusHistory[]
   consentRecords    ConsentRecord[]
@@ -1045,6 +1051,7 @@ model KycSubmission {
   @@index([partnerId])
   @@index([status])
   @@index([submittedAt])
+  @@index([outletId])
   @@map("kyc_submissions")
 }
 
@@ -1275,6 +1282,8 @@ model Outlet {
   outletType            OutletType             @relation(fields: [outletTypeId], references: [id])
   geoHistory            OutletGeoHistory[]
   salesAssignments      SalesUserAssignment[]
+  // KYC submissions filed for this outlet (KycSubmission.outletId; null on legacy rows).
+  kycSubmissions        KycSubmission[]
   // Visibility (POSM) photo-captures anchored to this outlet, one current row per window.
   visibilityCaptures    VisibilityCapture[]
   // Wave-0 scheme data-collection: roster rows that matched (linked to) this outlet.

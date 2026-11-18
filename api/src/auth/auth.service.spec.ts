@@ -160,6 +160,43 @@ describe('AuthService', () => {
       expect((result as any).conversionRate).toBe(2);
     });
 
+    // R3 (G3): the sales profile's "reporting manager" = the NEXT ACTIVE manager (routing's rule), never a deleted one.
+    describe('R3 — sales profile reporting manager', () => {
+      const salesCaller = { sub: 'u-isr', role: 'SALES_ISR', clientId: 'bajaj', phone: '9', name: 'I' } as any;
+      const stub = (reportingTo: unknown) => {
+        (mockPrisma as any).user.findUnique = jest.fn().mockResolvedValue({ name: 'I', phone: '9' });
+        (mockPrisma as any).channelPartner.findUnique.mockResolvedValue(null);
+        (mockPrisma as any).salesUser.findUnique.mockResolvedValue({
+          id: 'isr', employeeCode: 'E1', region: null, zone: null, clientId: 'bajaj', reportingTo,
+        });
+        (mockPrisma as any).salesUser.findMany = jest.fn().mockResolvedValue([
+          { id: 'asm', reportingToId: null, userId: 'u-asm', isActive: true, deletedAt: null },
+          { id: 'so', reportingToId: 'asm', userId: 'u-so', isActive: true, deletedAt: new Date('2026-11-01') },
+          { id: 'isr', reportingToId: 'so', userId: 'u-isr', isActive: true, deletedAt: null },
+        ]);
+        (mockPrisma as any).salesUser.findFirst = jest.fn().mockResolvedValue({
+          id: 'asm', employeeCode: 'E-ASM', user: { name: 'Arun ASM', phone: '8' }, hierarchyLevel: { name: 'ASM', level: 3 },
+        });
+      };
+
+      it('a live, active direct manager is shown as before (no extra query)', async () => {
+        stub({ isActive: true, deletedAt: null, user: { name: 'Sonu SO', phone: '7' }, hierarchyLevel: { name: 'SO' } });
+        const res = await service.getMe(salesCaller);
+        expect((res.user.salesUser as any).reportingTo).toEqual({ user: { name: 'Sonu SO', phone: '7' }, hierarchyLevel: { name: 'SO' } });
+        expect((mockPrisma as any).salesUser.findMany).not.toHaveBeenCalled();
+        // Response shape unchanged: no internal clientId / flags leak.
+        expect(res.user.salesUser).not.toHaveProperty('clientId');
+      });
+
+      it('a soft-deleted direct manager is replaced by the next ACTIVE manager (tenant-scoped walk)', async () => {
+        stub({ isActive: true, deletedAt: new Date('2026-11-01'), user: { name: 'Gone SO', phone: '7' }, hierarchyLevel: { name: 'SO' } });
+        const res = await service.getMe(salesCaller);
+        expect((res.user.salesUser as any).reportingTo).toEqual({ user: { name: 'Arun ASM', phone: '8' }, hierarchyLevel: { name: 'ASM' } });
+        expect((mockPrisma as any).salesUser.findMany.mock.calls[0][0].where).toEqual({ clientId: 'bajaj' });
+        expect((mockPrisma as any).salesUser.findFirst.mock.calls[0][0].where).toEqual({ id: 'asm', clientId: 'bajaj', deletedAt: null, isActive: true });
+      });
+    });
+
     // ── /auth/me re-hydrate carries the partner-shell header identity (one rule with the login reply) ──
     describe('partner display identity on /auth/me', () => {
       // Restore the shared outlet stub shape other blocks rely on.

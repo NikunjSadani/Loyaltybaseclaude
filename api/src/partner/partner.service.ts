@@ -39,6 +39,7 @@ import { pickDeliveryDefaults, DeliveryDefaults } from './delivery-defaults.help
 import { PRIMARY_OUTLET_ORDER_BY, partnerOutletsWhere, pickPrimaryOutletName } from './partner-display.helper';
 import { AppliesToOutletFacets } from '../common/applies-to/applies-to';
 import { kpiAppliesToOutlet, outletPrimaryFallback } from '../sales/outlet-kpi-scope.helper';
+import { resolveNextActiveManager } from '../sales/sales-hierarchy.loader';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -742,7 +743,16 @@ export class PartnerService {
       // Defense-in-depth: a reporting chain is same-tenant by construction, but
       // assert clientId explicitly before surfacing a manager so a bad
       // cross-tenant reportingToId could never leak a foreign contact.
-      if (mgr && mgr.isActive && !mgr.deletedAt && mgr.clientId === user.clientId) add(mgr, 1);
+      if (mgr && mgr.isActive && !mgr.deletedAt && mgr.clientId === user.clientId) {
+        add(mgr, 1);
+      } else if (mgr && a.salesUser) {
+        // R3 (G3, PLATFORM-WIDE owner-approved 2026-11-17): the direct manager is soft-deleted / deactivated
+        // (or, defensively, foreign) → show the NEXT ACTIVE manager up the chain — the person this rep's KYCs
+        // are routed to (resolveInitialRouting's rule) — instead of nobody. Tenant-scoped walk; never a
+        // deleted person. Runs only for a vacant slot (the common case takes the branch above).
+        const next = await resolveNextActiveManager(this.prisma, user.clientId, a.salesUser.id);
+        if (next) add(next, 1);
+      }
     }
 
     // Field reps first (tier), then by seniority within a tier, then name.

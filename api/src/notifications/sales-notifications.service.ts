@@ -6,6 +6,7 @@ import {
   firstActiveApproverId,
   SalesApproverNode,
 } from '../sales/sales-hierarchy-access.helper';
+import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 
 /**
  * SalesNotificationsService — fan-out of PUSH notifications to the SALES team for
@@ -173,13 +174,10 @@ export class SalesNotificationsService implements OnModuleInit {
       if (assignments.length === 0) return;
 
       // One tenant node list for all approver walks.
+      // G3: ONE deleted-aware read serves both the approver walk (past a deleted SO) and the login-id map
+      // (firstActiveApproverId never returns a deleted node, so the map never yields a resigned user).
       const nodes = await this.tenantNodes(clientId);
-      const nodeUserId = new Map(
-        (await this.prisma.salesUser.findMany({
-          where: { clientId, deletedAt: null },
-          select: { id: true, userId: true },
-        })).map((n) => [n.id, n.userId]),
-      );
+      const nodeUserId = new Map(nodes.map((n) => [n.id, n.userId]));
 
       const recipients = new Set<string>();
       for (const a of assignments) {
@@ -241,12 +239,13 @@ export class SalesNotificationsService implements OnModuleInit {
     return this.salesUserLoginId(clientId, approverSalesUserId);
   }
 
-  /** Tenant-scoped reporting node list for the hierarchy walk. */
-  private async tenantNodes(clientId: string): Promise<SalesApproverNode[]> {
-    return this.prisma.salesUser.findMany({
-      where: { clientId, deletedAt: null },
-      select: { id: true, reportingToId: true, isActive: true },
-    });
+  /**
+   * Tenant-scoped reporting node list for the hierarchy walk. G3: INCLUDES soft-deleted nodes so the
+   * approver walk passes a deleted SO and notifies the next ACTIVE manager (the one the KYC was routed
+   * to) instead of stopping at the vacant level and notifying nobody.
+   */
+  private async tenantNodes(clientId: string): Promise<(SalesApproverNode & { userId: string })[]> {
+    return loadSalesHierarchy(this.prisma, clientId);
   }
 
   /**

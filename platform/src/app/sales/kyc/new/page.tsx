@@ -45,6 +45,14 @@ type Step = 'choose' | 'outlet' | 'basic' | 'address' | 'bank' | 'declare' | 'ot
 /** The KYC flow the rep picked on the chooser (SO-Declaration variant only). */
 type FlowVariant = 'STANDARD' | 'SO_DECLARATION';
 
+/** G1 — the server's reasons "Not interested" is refused (same wording as the API's 409). */
+type NotInterestedBlock = 'APPROVED' | 'IN_REVIEW';
+const NOT_INTERESTED_BLOCK_REASON: Record<NotInterestedBlock, string> = {
+  // R4: "was … before" — also true for an outlet approved once whose latest re-KYC was rejected.
+  APPROVED:  "This outlet was KYC-approved before — it can't be marked Not interested.",
+  IN_REVIEW: "This outlet's KYC is under review — it can't be marked Not interested now.",
+};
+
 interface AssignedOutlet {
   /** Internal identity (Prisma CUID) — used as the select key + the Not-Interested POST id. NOT shown to users. */
   outletId: string;
@@ -73,6 +81,9 @@ interface AssignedOutlet {
    *  manually selectable for a NEW KYC. (Re-entry of rejected/re-KYC outlets comes via
    *  the KYC list's "Edit & Resubmit" deep-link, which bypasses this filter.) */
   rawStatus?:    string;
+  /** G1 — why "Not interested" is NOT available (server-computed, mirrors the POST /kyc/not-interested refusal):
+   *  APPROVED = the outlet's KYC was approved (ever); IN_REVIEW = a KYC is in flight. null/absent = allowed. */
+  notInterestedBlock?: NotInterestedBlock | null;
   /** Latest KYC submission id (for deep-link / reference) */
   kycId?:        string;
   /** Fields that must be re-captured; keys match form field names */
@@ -336,6 +347,8 @@ export default function NewKYCPage() {
   const [notInterestedLoading,   setNotInterestedLoading]   = useState(false);
   const [dismissedOutlets,       setDismissedOutlets]       = useState<Set<string>>(new Set());
   const [notInterestedToast,     setNotInterestedToast]     = useState<string | null>(null); // name of last dismissed
+  /** G1: the server refused the mark (e.g. KYC approved / under review / parked) — shown, never swallowed. */
+  const [notInterestedError,     setNotInterestedError]     = useState<string | null>(null);
 
   /* Phone conflict check (no inline OTP — OTP happens post-submit) */
   const [mobileCheck,    setMobileCheck]    = useState<MobileCheckState>('idle');
@@ -510,6 +523,9 @@ export default function NewKYCPage() {
             kycStatus:    RE_ENTRY.includes(o.kycStatus) ? o.kycStatus : undefined,
             // The REAL status (unfiltered) — drives the "startable" picker filter below.
             rawStatus:    o.kycStatus ?? 'NOT_STARTED',
+            // G1: server-computed "Not interested" block (APPROVED / IN_REVIEW / null).
+            notInterestedBlock: o.notInterestedBlock === 'APPROVED' || o.notInterestedBlock === 'IN_REVIEW'
+              ? o.notInterestedBlock : null,
             kycId:        o.kycId,
             existingKyc:  o.existingKyc ?? undefined,
             reKycFlags:   o.reKycFlags ?? undefined,
@@ -1762,14 +1778,29 @@ export default function NewKYCPage() {
     if (!confirmNotInterestedId) return;
     const outletName = assignedOutlets.find((o) => o.outletId === confirmNotInterestedId)?.name ?? confirmNotInterestedId;
     setNotInterestedLoading(true);
+    setNotInterestedError(null);
     try {
-      await fetch('/api/kyc/not-interested', {
-        method:  'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body:    JSON.stringify({ outletId: confirmNotInterestedId }),
-      });
+      let res: Response;
+      try {
+        res = await fetch('/api/kyc/not-interested', {
+          method:  'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body:    JSON.stringify({ outletId: confirmNotInterestedId }),
+        });
+      } catch {
+        setNotInterestedError('Network error — the outlet was NOT marked Not interested. Please try again.');
+        return;
+      }
+      // G1: a refused mark (approved / under review / parked / not assigned) must say so — never show the success
+      // toast or drop the outlet from the list when the server did not mark it.
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({} as Record<string, unknown>));
+        const msg = typeof err.message === 'string' ? err.message : typeof err.error === 'string' ? err.error : null;
+        setNotInterestedError(msg ?? `The outlet was NOT marked Not interested (error ${res.status}). Please try again.`);
+        return;
+      }
       setDismissedOutlets((prev) => new Set([...prev, confirmNotInterestedId]));
       setNotInterestedToast(outletName);
       // If the dismissed outlet was selected, clear the selection
@@ -2435,7 +2466,7 @@ export default function NewKYCPage() {
                         {/* Outlet select area */}
                         <button type="button"
                           data-testid={`outlet-option-${o.outletId}`}
-                          onClick={() => { setSelectedOutlet(o); setDropOpen(false); setOutletSearch(''); }}
+                          onClick={() => { setSelectedOutlet(o); setDropOpen(false); setOutletSearch(''); setNotInterestedError(null); }}
                           className="flex items-center gap-3 flex-1 min-w-0 text-left">
                           <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${o.kycStatus === 'RE_KYC_REQUIRED' ? 'bg-amber-100' : 'bg-gray-100'}`}>
                             {o.kycStatus === 'RE_KYC_REQUIRED'
@@ -2475,17 +2506,38 @@ export default function NewKYCPage() {
               {selectedOutlet?.kycStatus === 'RE_KYC_REQUIRED' ? 'Begin Re-KYC →' : 'Continue →'}
             </Button>
 
-            {/* ── Not Interested button — hidden for Re-KYC outlets ── */}
-            {selectedOutlet?.kycStatus !== 'RE_KYC_REQUIRED' && (
-              <button
-                type="button"
-                data-testid="ni-btn"
-                disabled={!selectedOutlet}
-                onClick={() => setConfirmNotInterestedId(selectedOutlet!.outletId)}
-                className="w-full text-sm font-normal py-2 px-4 rounded-lg bg-gray-600 text-white hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                Not Interested
-              </button>
+            {/* ── Not Interested button — hidden for Re-KYC outlets; DISABLED with the reason when the
+                 outlet's KYC is approved / under review (G1 — the server refuses those too) ── */}
+            {selectedOutlet?.kycStatus !== 'RE_KYC_REQUIRED' && (() => {
+              const block = selectedOutlet?.notInterestedBlock ?? null;
+              const blockReason = block ? NOT_INTERESTED_BLOCK_REASON[block] : null;
+              return (
+                <>
+                  <button
+                    type="button"
+                    data-testid="ni-btn"
+                    disabled={!selectedOutlet || !!blockReason}
+                    aria-describedby={blockReason ? 'ni-blocked-reason' : undefined}
+                    onClick={() => { setNotInterestedError(null); setConfirmNotInterestedId(selectedOutlet!.outletId); }}
+                    className="w-full text-sm font-normal py-2 px-4 rounded-lg bg-gray-600 text-white hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Not Interested
+                  </button>
+                  {blockReason && (
+                    <p id="ni-blocked-reason" data-testid="ni-blocked-reason" className="text-xs text-gray-500 text-center">
+                      {blockReason}
+                    </p>
+                  )}
+                </>
+              );
+            })()}
+
+            {/* ── Not Interested refused by the server (G1) — shown, never swallowed ── */}
+            {notInterestedError && (
+              <div data-testid="not-interested-error" role="alert"
+                className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5">
+                <p className="text-xs font-medium text-red-700">{notInterestedError}</p>
+              </div>
             )}
 
             {/* ── Not Interested success toast ── */}

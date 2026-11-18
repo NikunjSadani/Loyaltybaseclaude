@@ -16,8 +16,10 @@ import {
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   descendantSalesUserIds,
+  promotedReportIds,
   SalesUserEdge,
 } from '../sales/sales-hierarchy-access.helper';
+import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { VisibilityMediaService } from './visibility-media.service';
 import {
   currentWindowKey,
@@ -177,11 +179,9 @@ export class VisibilityCaptureService {
     return { id: su.id, levelCode: su.hierarchyLevel.code };
   }
 
+  /** G3: deleted-aware tenant edges — the reach walks THROUGH a soft-deleted manager (never returns them). */
   private async loadSalesEdges(clientId: string): Promise<SalesUserEdge[]> {
-    return this.prisma.salesUser.findMany({
-      where: { clientId, deletedAt: null },
-      select: { id: true, reportingToId: true },
-    });
+    return loadSalesHierarchy(this.prisma, clientId);
   }
 
   /** The set of outletIds the caller's downline currently holds an active assignment to. */
@@ -243,18 +243,28 @@ export class VisibilityCaptureService {
 
     // Hierarchy edges loaded ONCE (reused for the subtree reach + each direct report's
     // submitter sub-tree) — the SAME walk getMyOutlets uses, no N+1.
-    const edges = await this.prisma.salesUser.findMany({
-      where: { clientId: user.clientId, deletedAt: null },
-      select: { id: true, reportingToId: true, userId: true },
-    });
+    // G3: deleted-aware (loadSalesHierarchy) — the reach and each member's branch pass THROUGH a deleted SO.
+    const edges = await loadSalesHierarchy(this.prisma, user.clientId);
     const userIdBySalesUserId = new Map(edges.map((e) => [e.id, e.userId]));
+
+    // G3 Team-Member filter: a deleted / inactive direct report's live reports are PROMOTED to selectable
+    // members under the caller — the same rule as the Outlets screen (SalesService.getMyOutlets).
+    const promotedIds = promotedReportIds(callerSu.id, edges);
+    const promoted = promotedIds.length
+      ? await this.prisma.salesUser.findMany({
+          where: { id: { in: promotedIds }, clientId: user.clientId, deletedAt: null },
+          select: { id: true, employeeCode: true, user: { select: { name: true } } },
+          orderBy: { employeeCode: 'asc' },
+        })
+      : [];
+    const directMembers = [...(callerSu.subordinates ?? []), ...(Array.isArray(promoted) ? promoted : [])];
 
     // Each DIRECT report enriched with the login-User ids of that report PLUS their whole
     // downline (submitterUserIds). The Team Member filter matches an outlet whose assignedUserId
     // is anywhere in that sub-tree — the SAME sub-tree semantics as the Outlets-screen member
     // filter. Each member's branch is a slice of the caller's own subtree (descendantSalesUserIds
     // walks DOWN only), so a manager can never filter another manager's team.
-    const members = (callerSu.subordinates ?? []).map((sub) => ({
+    const members = directMembers.map((sub) => ({
       id: sub.id,
       name: sub.user?.name ?? '',
       submitterUserIds: [...descendantSalesUserIds(sub.id, edges)]

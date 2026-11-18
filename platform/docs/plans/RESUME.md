@@ -10,7 +10,7 @@
 > [`archive/RESUME-ARCHIVE-2026-11-15.md`](archive/RESUME-ARCHIVE-2026-11-15.md) (the full chronology up to 2026-11-15,
 > incl. the CUTOVER LEDGER #14–#52). **Never trust a SHA written here over `git log` + the serving image (§7).**
 >
-> Last updated: **2026-11-16** (docs sweep after the 2026-11-15 release).
+> Last updated: **2026-11-17** (staging release `71df01f7` + the combined release being assembled — §1, §3, §4).
 
 Multi-tenant FMCG **trade-loyalty** platform. Operator **Gifsy**; live clients **Deoleo** (since July 2026) and
 **Bajaj Consumer Care** (go-live November 2026). Backend `api/` (NestJS + Prisma 7 — owns the DB and ALL business logic)
@@ -19,13 +19,27 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 
 ---
 
-## 1. Where things stand (2026-11-16)
+## 1. Where things stand (2026-11-17)
 
 | | SHA | Since | Notes |
 |---|---|---|---|
-| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import`, `gifsy-exports`) | **`de2f3700`** (verified serving 2026-11-17: api rev `gifsy-api-00091`, frontend rev `gifsy-frontend-00081`; `/health` 200) | 2026-11-17 | `origin/main` = `origin/develop` |
-| **Staging** (`*-staging`) | **`de2f3700`** | 2026-11-17 | same code as prod |
+| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import`, `gifsy-exports`) | **`de2f3700`** (verified serving 2026-11-17: api rev `gifsy-api-00091`, frontend rev `gifsy-frontend-00081`; `/health` 200) | 2026-11-17 | ⚠️ `origin/main` = **`71df01f7`** is pushed but **NOT deployed** — the owner chose to deploy it together with the combined release (§3); do not run the prod workflow until that is ready |
+| **Staging** (`*-staging`) | **`71df01f7`** | 2026-11-17 | `origin/develop` = `71df01f7` (see below) |
 | Previous prod | `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-16 / 11-15 | rollback targets |
+
+**On staging, not on prod — `71df01f7` (2026-11-17), owner-approved, runtime-verified on Bajaj staging with real logins:**
+- **KYC fast-track** (Bajaj flag `gifsyRejectFastTrack`, Gifsy console → Behaviour flags, confirm dialog): a KYC
+  resubmitted after a GIFSY rejection goes straight to PENDING_GIFSY when the previous KYC was rejected by GIFSY *after*
+  the managers approved it; SO Declaration and manager rejections always go through managers; only the outlet's assigned
+  rep (or their managers) gets the shortcut. Visible on the admin KYC banner, approvals-queue badge, sales timeline,
+  exports' "Routing" column. Staging flag ON; **prod flag to be switched ON by the owner after deploy.**
+- **Assigned-rep gate (all tenants):** filing a KYC / "Not interested" / consent OTP only for outlets assigned to the
+  caller or their downline; partner logins only their own outlet; read-only roles refused.
+- **`/admin/approvals`** (dead page whose buttons never saved) → redirects (GIFSY → `/admin/kyc/approvals`, others →
+  `/admin/kyc`).
+- **Dashboards (all tenants):** program filter on Overview / Program Health / KYC; **Monthly billing progress** card on
+  Overview (outlets bucketed by achieved ÷ primary-KPI target, pace to the data date, drill-down + Excel). Staging
+  Bajaj primary KPI was switched Month Target → **Total** to match prod.
 
 **2026-11-16 releases** (release log in `DOCS-INDEX.md`): **Voucher Dispersal** (Gifsy platform admin tool — Excel →
 Hubble buy → WhatsApp; → [`VOUCHER-DISPERSAL.md`](VOUCHER-DISPERSAL.md)) + App Adoption installed-users export
@@ -84,7 +98,13 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 | Work | Branch / worktree | State | Read |
 |---|---|---|---|
 | **Wallet Reversal Engine** (⚠️ platform-wide, owner-approved; money path) | `feat/wallet-reversal-engine` (+ `feat/wre-*`), worktree `.claude/worktrees/reversal-engine` | WP0–WP7 built on the branch (WP7 real-Postgres concurrency suite 2026-11-16); not merged, not deployed. Per-tenant flag `reversalEngine: LEGACY / SHADOW / V2` (default LEGACY). **Owner decisions 2026-11-15/16:** Deoleo stays **LEGACY**; Bajaj → **V2**; a reversal of an already-paid payout becomes a **net receivable**, with **TDS credited back on the PAN**; every reversal shows an **outcome summary** (all tenants). Prod today runs the INTERIM rule (points reversals refused on wallets carrying debt; payout reversals whole-entry only). | `WALLET-REVERSAL-ENGINE-DESIGN.md` **on that branch** (maintained there) |
-| **Daily Operations Digest** (⚠️ platform-wide, owner approved option A) | `feat/daily-ops-digest`, worktree `.claude/worktrees/ops-digest` | One build commit `70744e63` (2026-11-13), not audited/merged; paused behind go-live. | branch |
+| **Combined release (owner: ONE prod deploy)** = `71df01f7` (staging) + the four rows below | merged into one release branch, Prisma client regenerated ONCE from it (worktrees share `node_modules`), full gates, staging verify, then `main` → owner runs the prod workflow once → owner switches `gifsyRejectFastTrack` ON for Bajaj prod | Assembling (2026-11-17) | this table |
+| **KYC hardening** (⚠️ platform-wide, owner-approved) | `feat/gifsy-reject-fast-track` (worktree `fast-track`) `183b38a4` + in progress | "Not interested" refused (409) for approved / in-review / parked outlets; consent check per outlet (`KycSubmission.outletId`, migration `20261118140000`); hierarchy walks pass THROUGH soft-deleted managers everywhere (KYC gate + approvals, picker, dashboards/targets, team, leaderboard, reportee, assisted redeem, visibility, scheme — prod has 0 deleted sales users today, preventive); KYC VIEW check per outlet. Needs its permission audit. | branch |
+| **Day-level sales + MTD comparison** (salesImport tenants = Bajaj) | `feat/sales-day-level` (worktree `sales-day`) | Built + dual-audited + fixed. `OutletSalesDay` / `SalesDaySet` (migrations `20261118120000`, `20261118130000`); "vs last month" (from Dec 2026) and "vs 3-month average" (from Feb 2027) on the billing card + slower-than-usual list. History keeps **programme outlets only**. New deletion rules (history 4 months, import files 7 days) ship **OFF** behind `SALES_RETENTION_V2`; turn on only via the runbook (`SALES-IMPORT-PIPELINE-PLAN.md` §17b: backup → rebuild-days → trim dry-run → owner OK → apply → `SALES_RETENTION_V2=on`). | §17b |
+| **Daily Operations Digest** (⚠️ platform-wide, owner approved option A 2026-11-13) | `feat/daily-ops-digest`, worktree `.claude/worktrees/ops-digest` | Built 2026-11-13 but was never merged (no tracking note — lost across sessions). Revived 2026-11-17: merged with develop, reconciled (fast-track KYCs, voucher-dispersal block, billing line), dual-audited; fix pass in progress (paid-payout counting, failed run → non-2xx, window since last successful send + "still open" counts, `@gifsy.in` recipients only, settings load-failure guard, KYC SLA = dashboard, non-ACTIVE tenants). Staging test-send to the owner + Nikita before prod. | `DAILY-OPS-DIGEST.md` |
+| **Flaky-test follow-ups** | `chore/flaky-test-sweep` `7b1f5eae`, `9cc1a973` | The sweep itself shipped with the 2026-11-16 release; these two apply its rules to tests added since. | branch |
+| **Sales Import in-app guide** (GIFSY-only, like every guide — owner 2026-11-18) | `feat/sales-day-level` `44418252` | Step-by-step guide at `/admin/guides/sales-import`, labels checked against the real screens. Guides are only for multi-step workflows; client-admin visibility to be decided later. | `platform/src/content/guides/sales-import.ts` |
+| **Release branch** | `release/2026-11-18-combined` (worktree `release-combined`) | Assembly branch for the combined release. | — |
 
 ## 4. What's next / waiting on the owner
 
@@ -105,7 +125,12 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
    **Never run a points compute for Apr 2025 – Oct 2026** (paid by the vendor; imported).
 6. Owner process items still open: `gifsy-deployer` over-privilege review; stray `gifsy` `tdsPolicy` row from the F1 bug
    (harmless; delete when convenient); rotate the Hubble client secret (was shared in a screenshot).
-7. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first) → Daily Ops Digest.
+7. **Combined release (§3) → prod**, then (each owner-gated, backup first): Bajaj prod `gifsyRejectFastTrack` ON;
+   sales-history trim + `SALES_RETENTION_V2=on` per §17b; prod DB disk alert at 50% (gifsy-db: 20 GB SSD, auto-grow,
+   ~1.6 GB used on 2026-11-17).
+8. **Hubble:** ask which of Ajio / MakeMyTrip / Myntra / Uber are claim-code-only → add product ids to
+   `HUBBLE_CLAIM_CODE_PRODUCT_IDS`.
+9. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first).
 
 ## 5. Owner process rules (adopted — apply to every change)
 
