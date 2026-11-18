@@ -653,11 +653,25 @@ describe('InvoicesService', () => {
         expect(res.warnings).toEqual([]);
       });
 
-      it('HELD + the invoice no longer has GST → the HELD row is removed (nothing to hold back)', async () => {
+      it('HELD + the invoice no longer has GST → KEPT at ₹0 (still HELD, with a note) — never deleted', async () => {
         refreshWith(unregistered, { id: 'gr1', status: 'HELD', gstPaise: 90_000n });
         await service.generateForPeriod(admin, { period: '2025-01' });
-        expect(mockPrisma.gstReimbursement.deleteMany).toHaveBeenCalledWith({ where: { id: 'gr1', status: 'HELD' } });
-        expect(mockPrisma.gstReimbursement.updateMany).not.toHaveBeenCalled();
+        expect(mockPrisma.gstReimbursement.deleteMany).not.toHaveBeenCalled();
+        expect(mockPrisma.gstReimbursement.updateMany).toHaveBeenCalledTimes(1);
+        const call = mockPrisma.gstReimbursement.updateMany.mock.calls[0][0];
+        expect(call.where).toEqual({ id: 'gr1', status: 'HELD' });
+        expect(call.data.gstPaise).toBe(0n);
+        expect(call.data.notes).toMatch(/₹900\.00/);
+        expect(call.data.notes).toMatch(/no GST/i);
+      });
+
+      it('a ₹0 HELD row is REUSED when GST comes back (amount updated, no second row)', async () => {
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'HELD', gstPaise: 0n });
+        await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.create).not.toHaveBeenCalled();
+        const call = mockPrisma.gstReimbursement.updateMany.mock.calls[0][0];
+        expect(call.where).toEqual({ id: 'gr1', status: 'HELD' });
+        expect(Number(call.data.gstPaise)).toBeGreaterThan(0);
       });
 
       it('HELD + the same GST → untouched', async () => {

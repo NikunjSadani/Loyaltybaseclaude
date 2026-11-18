@@ -1,8 +1,8 @@
 /// <reference types="vitest/globals" />
 /**
- * B-L6 — the "Last Month Payout" card shows money the retailer actually RECEIVED in the latest paid month.
- * When that month was entirely withheld as TDS, it says "₹0 — withheld as TDS" (never an older month's
- * figure, never the gross).
+ * B-L6 — the "Last Month Payout" card keeps its original rule (the single latest PAID payout, by period)
+ * and shows its NET amount (gross − TDS withheld). Only when that payout was fully withheld does it say
+ * "₹0 — withheld as TDS" (never an older month's figure, never the gross).
  */
 import React from 'react';
 import { render, screen } from '@testing-library/react';
@@ -68,10 +68,18 @@ describe('B-L6 — Last Month Payout card', () => {
     expect(t).not.toContain('₹500');
   });
 
-  it('the latest month adds up the money actually received across its payouts (net of TDS)', async () => {
+  it('a partly withheld latest payout shows its NET amount (gross − TDS), no label', async () => {
+    const t = await lastMonthText([APRIL_PAID, MAY_PART_A]);
+    expect(t).toMatch(/May 2026/);
+    expect(t).toContain('₹270'); // ₹300 gross − ₹30 TDS
+    expect(t).not.toContain('₹300');
+    expect(t).not.toContain('withheld as TDS');
+  });
+
+  it('original rule kept: the card shows ONE payout (the latest), never a sum of the month', async () => {
     const t = await lastMonthText([APRIL_PAID, MAY_PART_A, MAY_PART_B]);
     expect(t).toMatch(/May 2026/);
-    expect(t).toContain('₹470'); // ₹270 net + ₹200
-    expect(t).not.toContain('withheld as TDS');
+    expect(t).not.toContain('₹470'); // not ₹270 + ₹200
+    expect(t).toMatch(/₹270|₹200/);
   });
 });

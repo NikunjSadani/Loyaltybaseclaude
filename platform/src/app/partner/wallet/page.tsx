@@ -156,18 +156,14 @@ function PayoutSummary({ payouts }: { payouts: PayoutLedgerEntry[] }) {
   const paidEntries = useMemo(() => payouts.filter((p) => p.status === 'PAID'), [payouts]);
   // payoutAmountPaise is integer paise; accumulate in paise then divide for display
   const lifetimePaid = useMemo(() => paidEntries.reduce((s, p) => s + p.payoutAmountPaise, 0) / 100, [paidEntries]);
-  // B-L6: the latest PAID month, adding up what was actually RECEIVED across its payouts (net of TDS).
-  // If that whole month was withheld as TDS, say so — never show an older month or the gross instead.
-  const lastMonth = useMemo(() => {
-    if (paidEntries.length === 0) return null;
-    const period = paidEntries.reduce((m, p) => (p.period > m ? p.period : m), paidEntries[0].period);
-    const inMonth = paidEntries.filter((p) => p.period === period);
-    const netPaise = inMonth.reduce((s, p) => s + p.payoutAmountPaise, 0);
-    const withheldAll = netPaise === 0 && inMonth.some((p) => p.settledByTds);
-    return { period, netPaise, withheldAll };
-  }, [paidEntries]);
-  const lastMonthAmt   = (lastMonth?.netPaise ?? 0) / 100;
-  const lastMonthLabel = lastMonth ? monthLabel(lastMonth.period) : '—';
+  const lastPaid = useMemo(() =>
+    paidEntries.length > 0
+      ? [...paidEntries].sort((a, b) => b.period.localeCompare(a.period))[0]
+      : null,
+  [paidEntries]);
+  // payoutAmountPaise is already NET (gross − TDS withheld). B-L6: a fully withheld latest payout is labelled.
+  const lastMonthAmt   = (lastPaid?.payoutAmountPaise ?? 0) / 100;
+  const lastMonthLabel = lastPaid ? monthLabel(lastPaid.period) : '—';
 
   return (
     <div data-testid="payout-summary" className="rounded-2xl p-5 text-white" style={{ background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)' }}>
@@ -180,7 +176,7 @@ function PayoutSummary({ payouts }: { payouts: PayoutLedgerEntry[] }) {
           <p className="text-[10px] text-slate-400 font-medium">Last Month Payout</p>
           <p className="text-[10px] text-slate-500 mt-0.5">{lastMonthLabel}</p>
         </div>
-        {lastMonth?.withheldAll ? (
+        {lastPaid?.settledByTds ? (
           <p className="text-sm font-bold text-amber-300">{fmtInr(0)} — withheld as TDS</p>
         ) : (
           <p className="text-xl font-bold text-white">{fmtInr(lastMonthAmt)}</p>

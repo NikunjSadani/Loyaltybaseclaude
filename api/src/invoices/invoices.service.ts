@@ -369,7 +369,8 @@ export class InvoicesService {
   /**
    * B-M3 — bring the GST reimbursement of a REFRESHED invoice in line with its new GST. Returns a
    * plain-words warning (never throws) when the GST was ALREADY RELEASED at a different amount — that
-   * money has gone and must be settled by hand.
+   * money has gone and must be settled by hand. A HELD row is never deleted: when the GST drops to ₹0 it is
+   * kept at ₹0 (still HELD, with a note) for the audit trail, and reused if GST comes back.
    */
   private async reconcileReimbursement(
     clientId: string,
@@ -389,11 +390,16 @@ export class InvoicesService {
     if (existing.gstPaise === undefined || existing.gstPaise === gstPaise) return null;
     if (existing.status === 'HELD') {
       // Guarded on HELD: a release racing this refresh wins and is never rewritten.
-      if (gstPaise > 0n) {
-        await this.prisma.gstReimbursement.updateMany({ where: { id: existing.id, status: 'HELD' }, data: { gstPaise } });
-      } else {
-        await this.prisma.gstReimbursement.deleteMany({ where: { id: existing.id, status: 'HELD' } });
-      }
+      const data: Prisma.GstReimbursementUpdateManyMutationInput =
+        gstPaise > 0n
+          ? { gstPaise }
+          : {
+              gstPaise: 0n,
+              notes:
+                `Regenerated invoice has no GST — held amount changed from ${formatINR(existing.gstPaise)} to ₹0 ` +
+                `on ${new Date().toISOString().slice(0, 10)}.`,
+            };
+      await this.prisma.gstReimbursement.updateMany({ where: { id: existing.id, status: 'HELD' }, data });
       return null;
     }
     if (existing.status === 'RELEASED') {

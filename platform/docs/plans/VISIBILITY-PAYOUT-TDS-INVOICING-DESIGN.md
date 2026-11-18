@@ -301,15 +301,20 @@ Digest has a "TDS (194R)" section (count, total, largest 10) and a Needs-attenti
 - *A-L6:* the dead `summary194R` was removed — `report194R().summary` is the one summary.
 - *B-M1/B-M2:* excess definition (above); the guide's examples match it (example 4 no excess, example 5 a real excess).
 - *B-M3:* regenerating a month (`generateForPeriod` refresh) reconciles the invoice's GST reimbursement — HELD → amount
-  updated (guarded on HELD; GST gone → HELD row removed), none → created, RELEASED at a different amount → never
-  changed, returned in `warnings[]` and shown in red on both generate screens.
+  updated (guarded on HELD; GST gone → the row is KEPT at ₹0, still HELD, with a note — never deleted — and reused if GST
+  comes back), none → created, RELEASED at a different amount → never changed, returned in `warnings[]` and shown in red
+  on both generate screens.
 - *B-L1:* the downloaded wallet statement carries the same TDS note as the screen row (`payoutTdsNote`, shared); a fully
   withheld payout has no UTR.
 - *B-L2/B-L3:* the digest's credit-paid filter OR-wraps `utr IS NULL`; "awaiting UTR" is net of TDS withheld.
 - *B-L5:* invoicing follows each payout's section stamped at confirm (payouts guide).
 - *B-L6:* the Payments report (screen + export) shows "Settled by TDS withholding (no bank payment)" instead of the
-  internal `TDS-WITHHELD-…` reference; the wallet "Last Month Payout" card adds up the money received in the latest paid
-  month, or shows "₹0 — withheld as TDS".
+  internal `TDS-WITHHELD-…` reference; the wallet "Last Month Payout" card keeps its original rule (the single latest
+  PAID payout) at its NET amount, and reads "₹0 — withheld as TDS" when that payout was fully withheld.
+
+**Known limits:**
+- *A-L4:* Delivering a redemption doesn't take the `R194|client|FY` lock; a concurrent delivery can only delay when the
+  ₹20k threshold is noticed — the next run's whole-year recalculation catches it.
 
 **Runbook pre-check before applying `20261118180000_tds_payee_snapshot` (read-only; run on the target DB first, behind
 the usual `current_database()` guard):** how many ledger-booked entries will be backfilled with a key DIFFERENT from the
