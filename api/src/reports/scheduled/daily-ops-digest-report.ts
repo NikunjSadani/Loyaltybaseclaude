@@ -353,6 +353,12 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
         events: by.couldNotCheck,
       });
     }
+    if ((by.noOrderUnverified ?? 0) > 0) {
+      out.push({
+        text: `Voucher dispersal: Hubble said "no order" for ${plural(by.noOrderUnverified, 'order', 'orders')} but it could not be verified yet (in the window) — kept open and re-checked automatically`,
+        events: by.noOrderUnverified,
+      });
+    }
   }
   // Every alert still OPEN (any age) — an attention item each day until Hubble resolves it (release-gate review).
   const open = d.earlierOrderAlertsOpenBy;
@@ -362,6 +368,7 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
       open.marked ? plural(open.marked, 'marked row', 'marked rows') : null,
       open.notApplied ? plural(open.notApplied, 'order not applied', 'orders not applied') : null,
       open.couldNotCheck ? `${intIN(open.couldNotCheck)} couldn't check` : null,
+      open.noOrderUnverified ? `${intIN(open.noOrderUnverified)} no order (unverified)` : null,
     ].filter(Boolean);
     out.push({
       text: `Voucher dispersal: still open: ${plural(d.earlierOrderAlertsOpen!, 'order alert', 'order alerts')} (${parts.join(', ')}) — open until Hubble confirms the order failed / there is no order; see the campaign pages`,

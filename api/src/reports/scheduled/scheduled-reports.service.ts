@@ -29,6 +29,8 @@ import {
   SETTLE_FAILURES_BEFORE_ALERT,
   failedMayStillCompleteWhere,
   HUBBLE_KNOWN_STATUSES,
+  ALERT_LOOKUP_FAILED,
+  ALERT_NO_ORDER_UNVERIFIED,
 } from '../../voucher-dispersal/voucher-dispersal.processor';
 import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../rewards/rewards.service';
 import { buildDailyOpsDigest, failedSections, kycPendingBuckets, MAX_FAILED_REDEMPTION_ROWS } from './daily-ops-digest-report';
@@ -938,10 +940,12 @@ export class ScheduledReportsService {
     // RESOLVED ones (Hubble confirmed FAILED / no order) are listed apart.
     type AlertGroup = { kind: string; hubbleStatus: string; _count: { _all: number } };
     const split = (groups: AlertGroup[]) => {
-      const by = { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 };
+      const by = { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0, noOrderUnverified: 0 };
       for (const g of groups) {
         const n = g._count._all;
-        if (g.hubbleStatus === 'LOOKUP_FAILED') by.couldNotCheck += n;
+        // Our `__` labels — a raw Hubble status (even "LOOKUP_FAILED") is activity, by kind (M2).
+        if (g.hubbleStatus === ALERT_LOOKUP_FAILED) by.couldNotCheck += n;
+        else if (g.hubbleStatus === ALERT_NO_ORDER_UNVERIFIED) by.noOrderUnverified += n;
         else if (g.kind === 'MARKED_NOT_BOUGHT') by.marked += n;
         else if (g.kind === 'NOT_APPLIED') by.notApplied += n;
         else by.superseded += n;

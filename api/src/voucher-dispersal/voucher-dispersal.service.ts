@@ -1098,6 +1098,15 @@ export class VoucherDispersalService {
         })
       : [];
     const markedBy = new Map(markedGroups.map((m) => [m.campaignId, m._count._all]));
+    // Open order alerts per campaign — so a COMPLETED campaign with an open alert is visible on the list (M4).
+    const alertGroupsByCampaign = ids.length
+      ? await this.prisma.voucherDispersalOrderAlert.groupBy({
+          by: ['campaignId'],
+          where: { campaignId: { in: ids }, resolvedAt: null },
+          _count: { _all: true },
+        })
+      : [];
+    const openAlertsBy = new Map(alertGroupsByCampaign.map((m) => [m.campaignId, m._count._all]));
     const pending = await this.pendingBatchNumbers(ids);
     const names = await this.clientNames(camps.map((c) => c.billedToClientId));
     const items = camps.map((c) => {
@@ -1127,6 +1136,8 @@ export class VoucherDispersalService {
           buyFailed: n(RS.BUY_FAILED) - (markedBy.get(c.id) ?? 0),
           /** Rows an admin marked "not bought" — closed (not counted as buy failed). */
           markedClosed: markedBy.get(c.id) ?? 0,
+          /** OPEN order alerts (Hubble activity on orders the campaign no longer acts on) — see the campaign page. */
+          openOrderAlerts: openAlertsBy.get(c.id) ?? 0,
           cancelled: n(RS.CANCELLED),
           spentRupees: rupees(sum(RS.BOUGHT)),
           pendingBatchNumber: p,

@@ -209,6 +209,8 @@ export interface VdDeliverySummary {
   buyFailed: number | null;
   /** Rows an admin marked "not bought" — closed. */
   markedClosed: number | null;
+  /** List only: OPEN order alerts of the campaign (shown as a badge on the card). */
+  openOrderAlerts: number | null;
   cancelled: number | null;
   messageSent: number | null;
   delivered: number | null;
@@ -290,18 +292,27 @@ function alertSubject(kind: string): string {
       : 'an earlier order (retired by a retry)';
 }
 
+/** OUR labels on an alert (the server prefixes them `__`; a raw Hubble status never starts with it). */
+export const VD_ALERT_LABEL: Record<string, string> = {
+  __LOOKUP_FAILED: "couldn't check",
+  __NO_ORDER: 'no order',
+  __NO_ORDER_UNVERIFIED: 'no order (unverified)',
+  __APPLIED: 'applied to the row',
+};
+
 function alertHistory(a: VdEarlierOrderAlert): string {
-  const label = (x: string) => (x === 'NO_ORDER_UNVERIFIED' ? 'NO_ORDER (unverified)' : x);
+  const label = (x: string) => VD_ALERT_LABEL[x] ?? x;
   return a.statusHistory.length > 1 ? ` (reports: ${a.statusHistory.map(label).join(' → ')})` : '';
 }
 
 /** An open alert whose LATEST report says "failed / no order" — kept open (never resolved over a stronger report). */
 function contradictionNote(a: VdEarlierOrderAlert): string {
-  if (a.hubbleStatus === null || a.hubbleStatus === 'LOOKUP_FAILED') return '';
+  if (a.hubbleStatus === null || a.hubbleStatus.startsWith('__')) return '';
   const last = a.statusHistory[a.statusHistory.length - 1];
   if (last === 'FAILED') return ' Hubble now says the order failed — this contradicts its earlier report, so the alert stays open.';
-  if (last === 'NO_ORDER') return ' Hubble now says there is no order — this contradicts its earlier report, so the alert stays open.';
-  if (last === 'NO_ORDER_UNVERIFIED') return ' Hubble now says there is no order, but that could not be verified, so the alert stays open.';
+  if (last === '__NO_ORDER') return ' Hubble now says there is no order — this contradicts its earlier report, so the alert stays open.';
+  if (last === '__NO_ORDER_UNVERIFIED') return ' Hubble now says there is no order, but that could not be verified, so the alert stays open.';
+  if (last === '__APPLIED') return " Hubble's answer was applied to the row since — but it reported more earlier, so the alert stays open.";
   return '';
 }
 
@@ -318,7 +329,9 @@ export function earlierOrderAlertText(a: VdEarlierOrderAlert): string {
   const st = a.hubbleStatus;
   const notApplied = a.kind === 'NOT_APPLIED';
   const status =
-    st === 'LOOKUP_FAILED' || st === null
+    st === '__NO_ORDER_UNVERIFIED'
+      ? 'Hubble says there is no order, but that is not verified yet (re-checked automatically)'
+      : st === '__LOOKUP_FAILED' || st === null
       ? "couldn't check it with Hubble (the lookup failed; no status known yet)"
       : st === 'SUCCESS'
         ? `Hubble reports it completed${notApplied ? ', but it could not be applied to the row' : ''}`
@@ -326,7 +339,7 @@ export function earlierOrderAlertText(a: VdEarlierOrderAlert): string {
           ? `Hubble reports it still processing${notApplied ? ' (not applied to the row)' : ''}`
           : `Hubble reports a status we do not recognise ("${st}")`;
   const tail =
-    st === 'LOOKUP_FAILED' || st === null
+    st === null || st.startsWith('__')
       ? 'check it with Hubble'
       : a.kind === 'MARKED_NOT_BOUGHT'
         ? 'check with Hubble (a voucher may have been issued; the row stays closed)'
@@ -334,7 +347,7 @@ export function earlierOrderAlertText(a: VdEarlierOrderAlert): string {
           ? 'check with Hubble (a paid voucher may not have reached the person)'
           : 'check with Hubble (a voucher may have been issued twice)';
   const lastCheck =
-    a.lastCheckFailedAt && st !== 'LOOKUP_FAILED' && st !== null
+    a.lastCheckFailedAt && st !== null && !st.startsWith('__')
       ? ` The last check with Hubble failed (${formatWhen(a.lastCheckFailedAt)}) — Hubble may have reported more since.`
       : '';
   return `${alertRef(a)}: ${alertSubject(a.kind)} — ${status}${alertHistory(a)} — ${tail}.${contradictionNote(a)}${lastCheck}`;
@@ -343,9 +356,9 @@ export function earlierOrderAlertText(a: VdEarlierOrderAlert): string {
 /** A RESOLVED alert: "Batch 1, row 3: an earlier order (retired by a retry) — resolved: Hubble confirmed the order failed (reports: …)." */
 export function resolvedOrderAlertText(a: VdEarlierOrderAlert): string {
   const why =
-    a.hubbleStatus === 'NO_ORDER'
+    a.hubbleStatus === '__NO_ORDER'
       ? 'Hubble confirmed there is no order'
-      : a.hubbleStatus === 'APPLIED'
+      : a.hubbleStatus === '__APPLIED'
         ? "Hubble's answer was applied to the row"
         : 'Hubble confirmed the order failed';
   return `${alertRef(a)}: ${alertSubject(a.kind)} — resolved: ${why}${alertHistory(a)}.`;
@@ -616,6 +629,7 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     pending: num(o.pending),
     buyFailed: num(o.buyFailed),
     markedClosed: num(o.markedClosed),
+    openOrderAlerts: num(o.openOrderAlerts),
     cancelled: num(o.cancelled),
     messageSent: null,
     delivered: null,
@@ -643,6 +657,7 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
     pending: num(o.pending),
     buyFailed: num(o.buyFailed),
     markedClosed: num(o.markedClosed),
+    openOrderAlerts: null,
     cancelled: num(o.cancelled),
     messageSent: num(o.messageSent),
     delivered: num(o.delivered),

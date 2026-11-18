@@ -712,13 +712,15 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       { kind: 'SUPERSEDED', hubbleStatus: 'ON_HOLD', _count: { _all: 1 } },
       { kind: 'MARKED_NOT_BOUGHT', hubbleStatus: 'PROCESSING', _count: { _all: 1 } },
       { kind: 'NOT_APPLIED', hubbleStatus: 'SUCCESS', _count: { _all: 1 } },
-      { kind: 'SUPERSEDED', hubbleStatus: 'LOOKUP_FAILED', _count: { _all: 3 } },
+      { kind: 'SUPERSEDED', hubbleStatus: '__LOOKUP_FAILED', _count: { _all: 3 } },
+      { kind: 'SUPERSEDED', hubbleStatus: 'LOOKUP_FAILED', _count: { _all: 1 } }, // a RAW Hubble status → unrecognised activity
+      { kind: 'NOT_APPLIED', hubbleStatus: '__NO_ORDER_UNVERIFIED', _count: { _all: 2 } },
     ]);
     prisma.voucherDispersalOrderAlert.count.mockResolvedValue(4);
     const input = await svc.collect(NOW, '13 Nov 2026', WIN);
     expect(input.voucherDispersal).toMatchObject({
       ok: true,
-      data: { overBudgetCampaigns: 0, earlierOrderAlerts: 8, earlierOrderAlertsBy: { superseded: 3, marked: 1, notApplied: 1, couldNotCheck: 3 }, earlierOrderAlertsResolved: 4 },
+      data: { overBudgetCampaigns: 0, earlierOrderAlerts: 11, earlierOrderAlertsBy: { superseded: 4, marked: 1, notApplied: 1, couldNotCheck: 3, noOrderUnverified: 2 }, earlierOrderAlertsResolved: 4 },
     });
     const win = { gte: new Date(WIN.startMs), lt: new Date(NOW) };
     expect(prisma.voucherDispersalOrderAlert.groupBy).toHaveBeenCalledWith({
@@ -736,14 +738,14 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
           ? [] // nothing new in the window
           : [
               { kind: 'SUPERSEDED', hubbleStatus: 'SUCCESS', _count: { _all: 1 } },
-              { kind: 'NOT_APPLIED', hubbleStatus: 'LOOKUP_FAILED', _count: { _all: 2 } },
+              { kind: 'NOT_APPLIED', hubbleStatus: '__LOOKUP_FAILED', _count: { _all: 2 } },
             ],
       ),
     );
     const input = await svc.collect(NOW, '13 Nov 2026', WIN);
     expect(input.voucherDispersal).toMatchObject({
       ok: true,
-      data: { earlierOrderAlerts: 0, earlierOrderAlertsOpen: 3, earlierOrderAlertsOpenBy: { superseded: 1, marked: 0, notApplied: 0, couldNotCheck: 2 } },
+      data: { earlierOrderAlerts: 0, earlierOrderAlertsOpen: 3, earlierOrderAlertsOpenBy: { superseded: 1, marked: 0, notApplied: 0, couldNotCheck: 2, noOrderUnverified: 0 } },
     });
     expect(prisma.voucherDispersalOrderAlert.groupBy).toHaveBeenCalledWith({ by: ['kind', 'hubbleStatus'], where: { resolvedAt: null }, _count: { _all: true } });
   });
@@ -800,8 +802,8 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       data: {
         bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 5, messageFailedOpen: 6,
         overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0, earlierOrderAlerts: 0,
-        earlierOrderAlertsBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 }, earlierOrderAlertsResolved: 0,
-        earlierOrderAlertsOpen: 0, earlierOrderAlertsOpenBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 }, markedClosed: 5,
+        earlierOrderAlertsBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0, noOrderUnverified: 0 }, earlierOrderAlertsResolved: 0,
+        earlierOrderAlertsOpen: 0, earlierOrderAlertsOpenBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0, noOrderUnverified: 0 }, markedClosed: 5,
         unrecognisedStatus: 0,
       },
     });

@@ -233,13 +233,13 @@ export interface VoucherDispersalSection {
    * marked "not bought" / a completed CURRENT order that could not be applied to its row; `couldNotCheck` = the lookup
    * failed and no real status is known yet.
    */
-  earlierOrderAlertsBy?: { superseded: number; marked: number; notApplied: number; couldNotCheck: number };
+  earlierOrderAlertsBy?: VdAlertSplit;
   /** In the window: alerts RESOLVED (Hubble confirmed the order failed / there is no order) — listed apart. */
   earlierOrderAlertsResolved?: number;
   /** NOW: every OPEN order alert, of any age — stays an attention item each day until resolved. */
   earlierOrderAlertsOpen?: number;
   /** `earlierOrderAlertsOpen` by what happened (same split as `earlierOrderAlertsBy`). */
-  earlierOrderAlertsOpenBy?: { superseded: number; marked: number; notApplied: number; couldNotCheck: number };
+  earlierOrderAlertsOpenBy?: VdAlertSplit;
   /** NOW: rows an admin marked "not bought" — CLOSED (informational; not "still failed"). */
   markedClosed?: number;
   /**
@@ -247,6 +247,18 @@ export interface VoucherDispersalSection {
    * marked) whose LATEST lookup was an undocumented status — need Gifsy tech.
    */
   unrecognisedStatus?: number;
+}
+
+/**
+ * Order alerts by what happened. `couldNotCheck` = only lookup failures so far; `noOrderUnverified` = Hubble said "no
+ * order" but the canary is not verified yet (kept open, re-checked by the sweep); the rest = Hubble activity by kind.
+ */
+export interface VdAlertSplit {
+  superseded: number;
+  marked: number;
+  notApplied: number;
+  couldNotCheck: number;
+  noOrderUnverified: number;
 }
 
 /** Client.status values. */

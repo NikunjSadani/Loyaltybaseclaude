@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS "voucher_dispersal_order_alerts" (
     "resolvedAt" TIMESTAMP(3),
     "lastCheckFailedAt" TIMESTAMP(3),
     "statusChangedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "noOrderUnverifiedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -79,6 +80,9 @@ CREATE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_statusChangedAt_idx" 
 
 -- CreateIndex
 CREATE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_resolvedAt_idx" ON "voucher_dispersal_order_alerts"("resolvedAt");
+
+-- CreateIndex
+CREATE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_noOrderUnverifiedAt_idx" ON "voucher_dispersal_order_alerts"("noOrderUnverifiedAt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_campaignId_referenceId_key" ON "voucher_dispersal_order_alerts"("campaignId", "referenceId");

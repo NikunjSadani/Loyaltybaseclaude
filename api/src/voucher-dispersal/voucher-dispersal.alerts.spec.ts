@@ -37,7 +37,7 @@ describe('H1 — a lookup failure never overwrites a real Hubble status', () => 
     expect(await t.processor.reconcileByReference('vdA')).toBe('SKIPPED');
     expect(await t.processor.reconcileByReference('vdA')).toBe('LOOKUP_FAILED');
     const a = alertOf(t, 'vdA');
-    expect(a).toMatchObject({ hubbleStatus: 'SUCCESS', statusHistory: ['SUCCESS', 'LOOKUP_FAILED'], resolvedAt: null });
+    expect(a).toMatchObject({ hubbleStatus: 'SUCCESS', statusHistory: ['SUCCESS', '__LOOKUP_FAILED'], resolvedAt: null });
     expect(a.lastCheckFailedAt).toBeInstanceOf(Date);
     expect(alertAudits(t).length).toBe(1);
   });
@@ -47,12 +47,12 @@ describe('H1 — a lookup failure never overwrites a real Hubble status', () => 
     answers(t, { vdA: [new Error('timeout'), { id: 'x', status: 'SUCCESS' }] });
     await t.processor.reconcileByReference('vdA');
     const first = { ...alertOf(t, 'vdA') };
-    expect(first.hubbleStatus).toBe('LOOKUP_FAILED');
+    expect(first.hubbleStatus).toBe('__LOOKUP_FAILED');
     await t.processor.reconcileByReference('vdA');
     const a = alertOf(t, 'vdA');
-    expect(a).toMatchObject({ hubbleStatus: 'SUCCESS', statusHistory: ['LOOKUP_FAILED', 'SUCCESS'] });
+    expect(a).toMatchObject({ hubbleStatus: 'SUCCESS', statusHistory: ['__LOOKUP_FAILED', 'SUCCESS'] });
     expect(a.statusChangedAt.getTime()).toBeGreaterThanOrEqual(first.statusChangedAt.getTime());
-    expect(alertAudits(t).map((x: any) => x.metadata.hubbleStatus)).toEqual(['LOOKUP_FAILED', 'SUCCESS']);
+    expect(alertAudits(t).map((x: any) => x.metadata.hubbleStatus)).toEqual(['__LOOKUP_FAILED', 'SUCCESS']);
   });
 
   it('the strongest real status is kept: SUCCESS > unrecognised > PROCESSING', async () => {
@@ -91,16 +91,19 @@ describe('H2 — FAILED / no order resolves an alert', () => {
     expect(alertAudits(t).map((x: any) => [x.metadata.hubbleStatus, x.metadata.resolved ?? false])).toEqual([['PROCESSING', false], ['FAILED', true]]);
   });
 
-  it('no order at Hubble (canary-verified) on an existing alert → resolved (NO_ORDER); a later SUCCESS re-opens it (worsened)', async () => {
+  it('no order at Hubble on an existing alert → the SWEEP verifies the canary and resolves (__NO_ORDER); a later SUCCESS re-opens it', async () => {
     const { t, id } = await bought();
     jest.spyOn(t.processor, 'verifyNotFoundCanary').mockResolvedValue({ ok: true, canaryRef: 'vdCANARY' });
-    answers(t, { vdA: [{ status: 'PROCESSING' }, null, { status: 'SUCCESS' }] });
+    answers(t, { vdA: [{ status: 'PROCESSING' }, null, null, { status: 'SUCCESS' }] });
     await t.processor.reconcileByReference('vdA');
-    await t.processor.reconcileByReference('vdA');
-    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'NO_ORDER' });
+    await t.processor.reconcileByReference('vdA'); // webhook: unverified, kept open
+    expect(alertOf(t, 'vdA').resolvedAt).toBeNull();
+    alertOf(t, 'vdA').updatedAt = new Date(Date.now() - 60 * 60 * 1000);
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000); // sweep: no order + canary verified
+    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: '__NO_ORDER' });
     expect(alertOf(t, 'vdA').resolvedAt).toBeInstanceOf(Date);
     await t.processor.reconcileByReference('vdA');
-    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'SUCCESS', resolvedAt: null, statusHistory: ['PROCESSING', 'NO_ORDER', 'SUCCESS'] });
+    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'SUCCESS', resolvedAt: null, statusHistory: ['PROCESSING', '__NO_ORDER_UNVERIFIED', '__NO_ORDER', 'SUCCESS'] });
     expect((await t.svc.detail(ADMIN, id)).summary.earlierOrderAlerts).toMatchObject({ total: 1, resolvedTotal: 0 });
   });
 
@@ -109,7 +112,7 @@ describe('H2 — FAILED / no order resolves an alert', () => {
     answers(t, { vdA: [{ status: 'PROCESSING' }, { status: 'FAILED' }, new Error('down')] });
     for (let i = 0; i < 3; i++) await t.processor.reconcileByReference('vdA');
     const a = alertOf(t, 'vdA');
-    expect(a).toMatchObject({ hubbleStatus: 'FAILED', statusHistory: ['PROCESSING', 'FAILED', 'LOOKUP_FAILED'] });
+    expect(a).toMatchObject({ hubbleStatus: 'FAILED', statusHistory: ['PROCESSING', 'FAILED', '__LOOKUP_FAILED'] });
     expect(a.resolvedAt).toBeInstanceOf(Date);
     expect(a.lastCheckFailedAt).toBeInstanceOf(Date);
   });
@@ -149,13 +152,13 @@ describe('L2 — history capped at 20, consecutive duplicates removed', () => {
     const { t, b } = await bought();
     const row = { id: b.id, campaignId: b.campaignId, rowNumber: b.rowNumber, batchNumber: 1 };
     await t.processor.recordOrderAlert(row, 'vdA', 'SUCCESS', 'SUPERSEDED');
-    await t.processor.recordOrderAlert(row, 'vdA', 'LOOKUP_FAILED', 'SUPERSEDED');
-    await t.processor.recordOrderAlert(row, 'vdA', 'LOOKUP_FAILED', 'SUPERSEDED');
-    expect(alertOf(t, 'vdA').statusHistory).toEqual(['SUCCESS', 'LOOKUP_FAILED']);
-    for (let i = 0; i < 30; i++) await t.processor.recordOrderAlert(row, 'vdA', i % 2 ? 'LOOKUP_FAILED' : 'PROCESSING', 'SUPERSEDED');
+    await t.processor.recordOrderAlert(row, 'vdA', '__LOOKUP_FAILED', 'SUPERSEDED');
+    await t.processor.recordOrderAlert(row, 'vdA', '__LOOKUP_FAILED', 'SUPERSEDED');
+    expect(alertOf(t, 'vdA').statusHistory).toEqual(['SUCCESS', '__LOOKUP_FAILED']);
+    for (let i = 0; i < 30; i++) await t.processor.recordOrderAlert(row, 'vdA', i % 2 ? '__LOOKUP_FAILED' : 'PROCESSING', 'SUPERSEDED');
     const h = alertOf(t, 'vdA').statusHistory;
     expect(h.length).toBe(20);
-    expect(h[h.length - 1]).toBe('LOOKUP_FAILED');
+    expect(h[h.length - 1]).toBe('__LOOKUP_FAILED');
     expect(alertOf(t, 'vdA').hubbleStatus).toBe('SUCCESS');
     expect(alertAudits(t).length).toBe(1); // none of those were real changes
   });
@@ -235,17 +238,24 @@ describe('gate H1 — an alert that ever saw SUCCESS / an unrecognised status is
     answers(t, { vdA: [{ status: 'ON_HOLD' }, null] });
     await t.processor.reconcileByReference('vdA');
     await t.processor.reconcileByReference('vdA');
-    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'ON_HOLD', resolvedAt: null, statusHistory: ['ON_HOLD', 'NO_ORDER'] });
+    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'ON_HOLD', resolvedAt: null, noOrderUnverifiedAt: null, statusHistory: ['ON_HOLD', '__NO_ORDER_UNVERIFIED'] });
   });
 
-  it('PROCESSING then no order WITHOUT a verified canary → stays open ("NO_ORDER_UNVERIFIED" in the history)', async () => {
+  it('PROCESSING then no order: the webhook NEVER runs the canary (kept open, unverified); the sweep re-checks — canary not verified → still open', async () => {
     const { t } = await bought();
     const canary = notOk(t);
-    answers(t, { vdA: [{ status: 'PROCESSING' }, null] });
+    answers(t, { vdA: [{ status: 'PROCESSING' }, null, null] });
     await t.processor.reconcileByReference('vdA');
     await t.processor.reconcileByReference('vdA');
+    expect(canary).not.toHaveBeenCalled();
+    expect(t.hubble.getOrderByReference).toHaveBeenCalledTimes(2); // one lookup per webhook
+    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'PROCESSING', resolvedAt: null, statusHistory: ['PROCESSING', '__NO_ORDER_UNVERIFIED'] });
+    expect(alertOf(t, 'vdA').noOrderUnverifiedAt).toBeInstanceOf(Date);
+    alertOf(t, 'vdA').updatedAt = new Date(Date.now() - 60 * 60 * 1000);
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
     expect(canary).toHaveBeenCalledWith('vdA', expect.anything());
-    expect(alertOf(t, 'vdA')).toMatchObject({ hubbleStatus: 'PROCESSING', resolvedAt: null, statusHistory: ['PROCESSING', 'NO_ORDER_UNVERIFIED'] });
+    expect(alertOf(t, 'vdA')).toMatchObject({ resolvedAt: null });
+    expect(alertOf(t, 'vdA').noOrderUnverifiedAt).toBeInstanceOf(Date);
   });
 
   it('no order on a reference never alerted → nothing, and no canary call', async () => {
@@ -277,7 +287,7 @@ describe('gate H2 — a failed webhook lookup on a FAILED row\'s CURRENT referen
     const ref = b.hubbleReferenceId;
     answers(t, { [ref]: [new Error('timeout'), new Error('timeout again'), { id: 'H', status: 'SUCCESS', vouchers: [{ cardNumber: CODE }] }] });
     expect(await t.processor.reconcileByReference(ref)).toBe('LOOKUP_FAILED');
-    expect(alertOf(t, ref)).toMatchObject({ kind: 'NOT_APPLIED', hubbleStatus: 'LOOKUP_FAILED', resolvedAt: null });
+    expect(alertOf(t, ref)).toMatchObject({ kind: 'NOT_APPLIED', hubbleStatus: '__LOOKUP_FAILED', resolvedAt: null });
     expect(b.lastReconcileResult).toMatch(/^LOOKUP_FAILED/);
     // The sweep picks it up (bounded) — still failing: stays in the sweep.
     b.lastReconcileAt = new Date(Date.now() - 60 * 60 * 1000);
@@ -288,7 +298,7 @@ describe('gate H2 — a failed webhook lookup on a FAILED row\'s CURRENT referen
     b.lastReconcileAt = new Date(Date.now() - 60 * 60 * 1000);
     await t.processor.reconcilePending(undefined, Date.now() + 60_000);
     expect(b.status).toBe('BOUGHT');
-    expect(alertOf(t, ref)).toMatchObject({ hubbleStatus: 'APPLIED' });
+    expect(alertOf(t, ref)).toMatchObject({ hubbleStatus: '__APPLIED' });
     expect(alertOf(t, ref).resolvedAt).toBeInstanceOf(Date);
     // Answered → out of the sweep.
     t.hubble.getOrderByReference.mockClear();
@@ -336,7 +346,7 @@ describe('gate H3 — a webhook for a CANCELLED row is looked up, never silently
     await t.processor.reconcileByReference(b.hubbleReferenceId);
     expect(t.orderAlerts.length).toBe(0);
     expect(await t.processor.reconcileByReference(b.hubbleReferenceId)).toBe('LOOKUP_FAILED');
-    expect(alertOf(t, b.hubbleReferenceId)).toMatchObject({ kind: 'NOT_APPLIED', hubbleStatus: 'LOOKUP_FAILED' });
+    expect(alertOf(t, b.hubbleReferenceId)).toMatchObject({ kind: 'NOT_APPLIED', hubbleStatus: '__LOOKUP_FAILED' });
   });
 
   it('a BOUGHT row (its own order) is not looked up or alerted', async () => {
@@ -356,5 +366,74 @@ describe('gate — settle: rows marked "not bought" are CLOSED, not errors', () 
     t.campaigns[0].status = 'COMPLETED_WITH_ERRORS';
     await t.processor.settleCampaign(id);
     expect(t.campaigns[0].status).toBe('COMPLETED');
+  });
+});
+
+// ─── Release gate on b587d42c (mediums) ────────────────────────────────────────────────────────────────────────────
+
+describe('M2 — raw Hubble strings never collide with our internal labels', () => {
+  it.each(['APPLIED', 'NO_ORDER', 'LOOKUP_FAILED', 'NO_ORDER_UNVERIFIED', '__APPLIED'])(
+    'Hubble status "%s" on a PROCESSING alert → the UNRECOGNISED path (worsened, never resolved, no lookup-failure marker)',
+    async (raw) => {
+      const { t } = await bought();
+      answers(t, { vdA: [{ status: 'PROCESSING' }, { status: raw }] });
+      await t.processor.reconcileByReference('vdA');
+      expect(await t.processor.reconcileByReference('vdA')).toBe('SKIPPED');
+      const a = alertOf(t, 'vdA');
+      expect(a.resolvedAt).toBeNull();
+      expect(a.lastCheckFailedAt).toBeNull();
+      expect(a.hubbleStatus.startsWith('__')).toBe(false);
+      expect(a.hubbleStatus).toBe(raw.replace(/^_+/, ''));
+    },
+  );
+});
+
+describe('M3 — an unverified no-order on a "couldn\'t check" alert keeps the row in the sweep until a definitive answer', () => {
+  it('HUBBLE_FAILED row: lookup fails → sweep: no order + canary NOT verified → still swept, alert "__NO_ORDER_UNVERIFIED"; then verified → resolved, out of the sweep', async () => {
+    const { t, b } = await failedRow('HUBBLE_FAILED');
+    const ref = b.hubbleReferenceId;
+    const canary = jest.spyOn(t.processor, 'verifyNotFoundCanary')
+      .mockResolvedValueOnce({ ok: false, canaryRef: null, why: 'no canary' } as any)
+      .mockResolvedValueOnce({ ok: true, canaryRef: 'vdCANARY' });
+    answers(t, { [ref]: [new Error('timeout'), null, null] });
+    await t.processor.reconcileByReference(ref);
+    const old = () => { b.lastReconcileAt = new Date(Date.now() - 60 * 60 * 1000); };
+    old();
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(alertOf(t, ref)).toMatchObject({ hubbleStatus: '__NO_ORDER_UNVERIFIED', resolvedAt: null, statusHistory: ['__LOOKUP_FAILED', '__NO_ORDER_UNVERIFIED'] });
+    expect(b.lastReconcileResult).toBe('NO_ORDER_UNVERIFIED_RECHECK');
+    old();
+    t.hubble.getOrderByReference.mockClear();
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(t.hubble.getOrderByReference).toHaveBeenCalledWith(ref);
+    expect(canary).toHaveBeenCalledTimes(2);
+    expect(alertOf(t, ref)).toMatchObject({ hubbleStatus: '__NO_ORDER' });
+    expect(alertOf(t, ref).resolvedAt).toBeInstanceOf(Date);
+    expect(b.lastReconcileResult).toBe('NO_ORDER_AT_HUBBLE_YET');
+    old();
+    t.hubble.getOrderByReference.mockClear();
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(t.hubble.getOrderByReference).not.toHaveBeenCalledWith(ref);
+  });
+
+  it('the webhook path on that row never runs the canary either (kept in the sweep, unverified)', async () => {
+    const { t, b } = await failedRow('HUBBLE_FAILED', { lastReconcileResult: 'LOOKUP_FAILED: x' });
+    const canary = ok(t);
+    answers(t, { [b.hubbleReferenceId]: [null] });
+    await t.processor.reconcileByReference(b.hubbleReferenceId);
+    expect(canary).not.toHaveBeenCalled();
+    expect(b.lastReconcileResult).toBe('NO_ORDER_UNVERIFIED_RECHECK');
+  });
+});
+
+describe('M4 — the campaign list shows the open order-alert count', () => {
+  it('summary.openOrderAlerts = OPEN alerts of the campaign (resolved ones not counted)', async () => {
+    const { t, id, b } = await bought();
+    const row = { id: b.id, campaignId: b.campaignId, rowNumber: b.rowNumber, batchNumber: 1 };
+    await t.processor.recordOrderAlert(row, 'vdA', 'SUCCESS', 'SUPERSEDED');
+    await t.processor.recordOrderAlert(row, 'vdB', 'PROCESSING', 'SUPERSEDED');
+    await t.processor.recordOrderAlert(row, 'vdB', 'FAILED', 'SUPERSEDED'); // resolved
+    const list = await t.svc.list(ADMIN, {} as never);
+    expect(list.find((c: any) => c.id === id)!.summary).toMatchObject({ openOrderAlerts: 1 });
   });
 });

@@ -213,6 +213,22 @@ describe('Voucher Dispersal list — clickable cards + Excel per card (2026-11-1
   });
 });
 
+describe('Voucher Dispersal list — open order alerts (release gate M4)', () => {
+  it('a card (even a COMPLETED campaign) with open order alerts shows a loud count badge', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([{ ...CAMPAIGNS[0], status: 'COMPLETED', summary: { ...CAMPAIGNS[0].summary, openOrderAlerts: 2 } }]))));
+    render(<ListPage />);
+    const badge = await screen.findByTestId('vd-card-open-alerts-c1');
+    expect(badge).toHaveTextContent('2 open order alerts — check with Hubble (see the campaign)');
+  });
+
+  it('no badge when there are none', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok([{ ...CAMPAIGNS[0], summary: { ...CAMPAIGNS[0].summary, openOrderAlerts: 0 } }]))));
+    render(<ListPage />);
+    await screen.findByText(CAMPAIGNS[0].name);
+    expect(screen.queryByTestId('vd-card-open-alerts-c1')).not.toBeInTheDocument();
+  });
+});
+
 describe('Voucher Dispersal gating', () => {
   it('route guard admits GIFSY_ADMIN only', () => {
     render(<VdLayout><div>inner</div></VdLayout>);

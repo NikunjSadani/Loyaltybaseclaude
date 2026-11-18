@@ -4205,6 +4205,9 @@ model VoucherDispersalOrderAlert {
   lastCheckFailedAt DateTime?
   /// Created, or WORSENED (status moved up to SUCCESS / PROCESSING / unrecognised, or re-opened) — the digest window key.
   statusChangedAt   DateTime  @default(now())
+  /// Set while the latest answer is an UNVERIFIED "no order" on an alert that could be resolved: the 2-minute sweep
+  /// re-looks it up and runs the canary (never in the webhook); cleared by any other answer.
+  noOrderUnverifiedAt DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -4214,6 +4217,7 @@ model VoucherDispersalOrderAlert {
   @@index([createdAt])
   @@index([statusChangedAt])
   @@index([resolvedAt])
+  @@index([noOrderUnverifiedAt])
   @@map("voucher_dispersal_order_alerts")
 }
 

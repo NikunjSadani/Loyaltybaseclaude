@@ -130,19 +130,38 @@ export const ALERT_UPDATE_TX = { timeout: 5_000, maxWait: 5_000 } as const;
 /** An alert's history keeps the latest N reports (consecutive duplicates removed) — review of 4d8454ad, L2. */
 export const ALERT_HISTORY_CAP = 20;
 /**
- * Answers that may RESOLVE an alert: Hubble FAILED, a canary-verified "no order", or APPLIED (the row itself took
- * Hubble's answer). Only an alert that never saw anything stronger than PROCESSING is resolved (release-gate H1).
+ * OUR labels on an alert (never a Hubble status): prefixed `__` so no raw Hubble string can collide with them. Raw
+ * Hubble statuses are only ever compared with the documented SUCCESS / PROCESSING / FAILED (release gate on b587d42c, M2).
  */
-export const ALERT_RESOLVING_STATUSES: ReadonlySet<string> = new Set(['FAILED', 'NO_ORDER', 'APPLIED']);
-/** History entry for a "no order" whose canary could not be verified — not proof; the alert stays open. */
-export const NO_ORDER_UNVERIFIED = 'NO_ORDER_UNVERIFIED';
+export const ALERT_LOOKUP_FAILED = '__LOOKUP_FAILED';
+export const ALERT_NO_ORDER = '__NO_ORDER';
+/** A "no order" whose canary is not (yet) verified — not proof; the alert stays open. */
+export const ALERT_NO_ORDER_UNVERIFIED = '__NO_ORDER_UNVERIFIED';
+/** The row itself took Hubble's answer (bought / back with Hubble). */
+export const ALERT_APPLIED = '__APPLIED';
+/** A raw Hubble status as stored on an alert: upper-cased, never empty, never starting with our `__` prefix. */
+export function hubbleAlertStatus(raw: unknown): string {
+  return String(raw ?? '').toUpperCase().replace(/^_+/, '') || 'UNKNOWN';
+}
+/**
+ * Answers that may RESOLVE an alert: Hubble FAILED, a canary-verified "no order", or APPLIED. Only an alert that never
+ * saw anything stronger than PROCESSING is resolved (release-gate H1).
+ */
+export const ALERT_RESOLVING_STATUSES: ReadonlySet<string> = new Set(['FAILED', ALERT_NO_ORDER, ALERT_APPLIED]);
+/** Row marker (lastReconcileResult): an unverified "no order" on a failed row — the sweep keeps re-checking it (M3). */
+export const RECHECK_NO_ORDER_UNVERIFIED = 'NO_ORDER_UNVERIFIED_RECHECK';
 /** Failed rows a webhook lookup failure leaves for the sweep to re-check until Hubble answers (release-gate H2). */
 export const RECHECK_AFTER_LOOKUP_FAILURE_SOURCES = ['HUBBLE_FAILED', 'REJECTED'];
 /** At most this many of those rows are re-checked per reconcile pass (the pending rows keep their own 20). */
 export const RECHECK_AFTER_LOOKUP_FAILURE_PER_PASS = 5;
 export type OrderAlertKind = 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | 'NOT_APPLIED';
 /** Context for an alert's log + audit (e.g. the row's status when its own order cannot be applied). */
-export type OrderAlertContext = { rowStatus?: string; onlyIfExists?: boolean };
+export type OrderAlertContext = {
+  rowStatus?: string;
+  onlyIfExists?: boolean;
+  /** For ALERT_NO_ORDER: true only when the caller verified the canary (the sweep — never the webhook). */
+  noOrderVerified?: boolean;
+};
 
 /**
  * How serious a reported status is for an alert — the STRONGEST real one is kept (H1): SUCCESS (a voucher was issued)
@@ -151,7 +170,7 @@ export type OrderAlertContext = { rowStatus?: string; onlyIfExists?: boolean };
 export function alertStatusRank(status: string): number {
   if (status === 'SUCCESS') return 3;
   if (status === 'PROCESSING') return 1;
-  if (status === 'LOOKUP_FAILED' || ALERT_RESOLVING_STATUSES.has(status)) return 0;
+  if (status === 'FAILED' || status.startsWith('__')) return 0; // FAILED or one of OUR labels
   return 2;
 }
 
@@ -394,8 +413,10 @@ export class VoucherDispersalProcessor {
       where: {
         status: RS.BUY_FAILED,
         buyFailureSource: { in: RECHECK_AFTER_LOOKUP_FAILURE_SOURCES },
-        lastReconcileResult: { startsWith: 'LOOKUP_FAILED' },
-        OR: [{ lastReconcileAt: null }, { lastReconcileAt: { lt: cutoff } }],
+        AND: [
+          { OR: [{ lastReconcileResult: { startsWith: 'LOOKUP_FAILED' } }, { lastReconcileResult: RECHECK_NO_ORDER_UNVERIFIED }] },
+          { OR: [{ lastReconcileAt: null }, { lastReconcileAt: { lt: cutoff } }] },
+        ],
         ...(campaignId ? { campaignId } : {}),
       },
       orderBy: { lastReconcileAt: 'asc' },
@@ -409,6 +430,46 @@ export class VoucherDispersalProcessor {
       if (outcome === 'BOUGHT' || outcome === 'PENDING' || outcome === 'BUY_FAILED') touched?.add(row.campaignId);
       n++;
     }
+    if (Date.now() <= deadline) n += await this.recheckUnverifiedNoOrderAlerts(campaignId, deadline, cutoff);
+    return n;
+  }
+
+  /**
+   * M1/M3 (release gate on b587d42c): an alert whose latest answer is an UNVERIFIED "no order" (the webhook never runs
+   * the canary) is re-looked up here and, if Hubble still has no order, the canary decides — resolved only when verified.
+   * Bounded per pass; backs off by the alert's own updatedAt. A failed row's own alert is left to the row re-check above.
+   */
+  async recheckUnverifiedNoOrderAlerts(campaignId: string | undefined, deadline: number, cutoff: Date): Promise<number> {
+    const list = await this.prisma.voucherDispersalOrderAlert.findMany({
+      where: { resolvedAt: null, noOrderUnverifiedAt: { not: null }, updatedAt: { lt: cutoff }, ...(campaignId ? { campaignId } : {}) },
+      orderBy: { noOrderUnverifiedAt: 'asc' },
+      take: RECHECK_AFTER_LOOKUP_FAILURE_PER_PASS,
+    });
+    let n = 0;
+    for (const a of list) {
+      if (Date.now() > deadline) break;
+      const kind = a.kind as OrderAlertKind;
+      if (kind === 'NOT_APPLIED') {
+        const own = await this.prisma.voucherDispersalRow.findFirst({ where: { id: a.rowId }, select: { status: true, buyFailureSource: true, hubbleReferenceId: true } });
+        if (own?.hubbleReferenceId === a.referenceId && own.status === RS.BUY_FAILED && RECHECK_AFTER_LOOKUP_FAILURE_SOURCES.includes(own.buyFailureSource ?? '')) continue;
+      }
+      const row = { id: a.rowId, campaignId: a.campaignId, rowNumber: a.rowNumber, batchNumber: a.batchNumber };
+      n++;
+      let body: HubbleOrderResult | null;
+      try {
+        body = await this.hubble.getOrderByReference(a.referenceId);
+      } catch (e) {
+        this.logger.warn(`[dispersal] re-check of unverified "no order" ${a.referenceId} failed: ${e}`);
+        await this.recordOrderAlert(row, a.referenceId, ALERT_LOOKUP_FAILED, kind);
+        continue;
+      }
+      if (body === null) {
+        const c = await this.verifyNotFoundCanary(a.referenceId, { maxTries: 3, budgetMs: 10_000 }).catch((e: unknown) => ({ ok: false as const, canaryRef: null, why: String(e) }));
+        await this.recordOrderAlert(row, a.referenceId, ALERT_NO_ORDER, kind, { noOrderVerified: c.ok });
+      } else {
+        await this.recordOrderAlert(row, a.referenceId, hubbleAlertStatus(body.status), kind);
+      }
+    }
     return n;
   }
 
@@ -416,7 +477,7 @@ export class VoucherDispersalProcessor {
    * Look the row's CURRENT reference up at Hubble and apply what Hubble says. Never places an order.
    * "No order" is only recorded (never fails the row) — a manual retry decides, under the 2 h + canary rule.
    */
-  async reconcileRow(row: Row): Promise<ReconcileOutcome> {
+  async reconcileRow(row: Row, opts: { webhook?: boolean } = {}): Promise<ReconcileOutcome> {
     if (!this.hubble.isConfigured()) return 'NOT_CONFIGURED';
     if (!row.hubbleReferenceId) return 'SKIPPED';
     // Release-gate H2: the row's previous lookup failed (and may carry a "couldn't check" alert) — whatever Hubble
@@ -424,20 +485,33 @@ export class VoucherDispersalProcessor {
     const followUp =
       row.status === RS.BUY_FAILED &&
       RECHECK_AFTER_LOOKUP_FAILURE_SOURCES.includes(row.buyFailureSource ?? '') &&
-      (row.lastReconcileResult ?? '').startsWith('LOOKUP_FAILED');
-    const settleAlert = async (status: string) => {
-      if (followUp && row.hubbleReferenceId) await this.recordOrderAlert(row, row.hubbleReferenceId, status, 'NOT_APPLIED', { rowStatus: row.status, onlyIfExists: true });
+      ((row.lastReconcileResult ?? '').startsWith('LOOKUP_FAILED') || row.lastReconcileResult === RECHECK_NO_ORDER_UNVERIFIED);
+    const settleAlert = async (status: string, extra: Partial<OrderAlertContext> = {}) => {
+      if (followUp && row.hubbleReferenceId) {
+        await this.recordOrderAlert(row, row.hubbleReferenceId, status, 'NOT_APPLIED', { rowStatus: row.status, onlyIfExists: true, ...extra });
+      }
     };
     let body: HubbleOrderResult | null;
     try {
       body = await this.hubble.getOrderByReference(row.hubbleReferenceId);
     } catch (e) {
       await this.noteReconcile(row, `LOOKUP_FAILED: ${String(e).slice(0, 200)}`);
-      await settleAlert('LOOKUP_FAILED');
+      await settleAlert(ALERT_LOOKUP_FAILED);
       return 'LOOKUP_FAILED';
     }
+    if (body === null && followUp) {
+      // M1/M3: "no order" for a failed row Hubble had news about is definitive only with a verified canary — run by the
+      // sweep, NEVER in the webhook. Unverified → the row keeps a re-check marker (stays in the sweep) and the alert
+      // stays open ("no order (unverified)").
+      const c = opts.webhook
+        ? { ok: false as const, why: 'not run in the webhook' }
+        : await this.verifyNotFoundCanary(row.hubbleReferenceId, { maxTries: 3, budgetMs: 10_000 }).catch((e: unknown) => ({ ok: false as const, why: String(e) }));
+      await this.noteReconcile(row, c.ok ? 'NO_ORDER_AT_HUBBLE_YET' : RECHECK_NO_ORDER_UNVERIFIED);
+      await settleAlert(ALERT_NO_ORDER, { noOrderVerified: c.ok });
+      if (!c.ok) this.logger.warn(`[dispersal] row ${row.id}: Hubble says no order for ${row.hubbleReferenceId} — not verified (${c.why}); re-checked by the sweep`);
+      return 'NO_ORDER';
+    }
     if (body === null) {
-      await settleAlert('NO_ORDER');
       await this.noteReconcile(row, 'NO_ORDER_AT_HUBBLE_YET');
       if (row.status === RS.PENDING_RECONCILE && (row.pendingReason ?? '').startsWith('HUBBLE_UNKNOWN_STATUS')) {
         // A definitive later answer clears the "unrecognised" marker → Retry follows the normal rules again (review M4).
@@ -447,11 +521,10 @@ export class VoucherDispersalProcessor {
       }
       return 'NO_ORDER';
     }
-    const st = String(body.status ?? '').toUpperCase() || 'UNKNOWN';
-    await this.noteReconcile(row, `HUBBLE_${st}`);
+    await this.noteReconcile(row, `HUBBLE_${String(body.status ?? '').toUpperCase() || 'UNKNOWN'}`);
     const outcome = await this.applyBody(row, body);
     // The row itself took Hubble's answer (bought / back with Hubble) → the alert is settled as APPLIED.
-    await settleAlert(outcome === 'BOUGHT' || outcome === 'PENDING' ? 'APPLIED' : st);
+    await settleAlert(outcome === 'BOUGHT' || outcome === 'PENDING' ? ALERT_APPLIED : hubbleAlertStatus(body.status));
     return outcome;
   }
 
@@ -462,7 +535,7 @@ export class VoucherDispersalProcessor {
       // Owner decision: "Mark as not bought" is FINAL — the row is never changed again. Activity Hubble reports on it is
       // alerted loudly (once per status; not counted) for ops to settle with Hubble outside the campaign.
       const r = await this.alertEarlierOrder(row, referenceId, 'MARKED_NOT_BOUGHT');
-      return r.status === 'LOOKUP_FAILED' ? 'LOOKUP_FAILED' : 'SKIPPED';
+      return r.status === ALERT_LOOKUP_FAILED ? 'LOOKUP_FAILED' : 'SKIPPED';
     }
     if (row) {
       // BOUGHT: its own order. QUEUED: the next buy places / finds this same reference and applies it.
@@ -471,16 +544,16 @@ export class VoucherDispersalProcessor {
         // Release-gate H3: e.g. a CANCELLED row whose order reached Hubble — the campaign no longer acts on it, but Hubble
         // may have completed it. Looked up; SUCCESS / PROCESSING / unrecognised → a loud NOT_APPLIED alert. Never silent.
         const r = await this.alertEarlierOrder(row, referenceId, 'NOT_APPLIED', { rowStatus: row.status });
-        return r.status === 'LOOKUP_FAILED' ? 'LOOKUP_FAILED' : 'SKIPPED';
+        return r.status === ALERT_LOOKUP_FAILED ? 'LOOKUP_FAILED' : 'SKIPPED';
       }
       // BUYING: the in-flight call will apply the body itself; a lookup now is harmless (guarded) but
       // would double the Hubble traffic — let the pass that owns the claim finish.
       if (row.status === RS.BUYING) return 'SKIPPED';
-      const outcome = await this.reconcileRow(row);
+      const outcome = await this.reconcileRow(row, { webhook: true }); // one lookup, never a canary (M1)
       if (outcome === 'LOOKUP_FAILED' && row.status === RS.BUY_FAILED && RECHECK_AFTER_LOOKUP_FAILURE_SOURCES.includes(row.buyFailureSource ?? '') && row.hubbleReferenceId) {
         // Release-gate H2: Hubble has news about a FAILED row's CURRENT order but we could not read it — alerted
         // ("couldn't check"), and the 2-minute sweep re-checks the row until Hubble answers. The webhook still acks 200.
-        await this.recordOrderAlert(row, row.hubbleReferenceId, 'LOOKUP_FAILED', 'NOT_APPLIED', { rowStatus: row.status });
+        await this.recordOrderAlert(row, row.hubbleReferenceId, ALERT_LOOKUP_FAILED, 'NOT_APPLIED', { rowStatus: row.status });
       }
       if (outcome === 'BOUGHT') await this.sendMessage(row.id);
       // Money-review M1: a webhook can move a row of a FINISHED campaign back in flight (or finish it) —
@@ -496,7 +569,7 @@ export class VoucherDispersalProcessor {
     // A webhook for a reference this row no longer uses (retired by a retry): looked up and, if Hubble reports activity
     // on it, alerted loudly — once per reference + status, NOT counted against the budget (owner decision).
     const r = await this.alertEarlierOrder(superseded, referenceId, 'SUPERSEDED');
-    return r.status === 'LOOKUP_FAILED' ? 'LOOKUP_FAILED' : 'SKIPPED';
+    return r.status === ALERT_LOOKUP_FAILED ? 'LOOKUP_FAILED' : 'SKIPPED';
   }
 
   /**
@@ -512,16 +585,17 @@ export class VoucherDispersalProcessor {
     kind: OrderAlertKind,
     ctx: OrderAlertContext = {},
   ): Promise<{ status: string; alerted: boolean }> {
+    // Webhook path: ONE lookup, never the canary (M1) — an unverified "no order" is left to the sweep.
     let status: string;
     try {
       const b = await this.hubble.getOrderByReference(ref);
-      status = b === null ? 'NO_ORDER' : String(b.status ?? '').toUpperCase() || 'UNKNOWN';
+      status = b === null ? ALERT_NO_ORDER : hubbleAlertStatus(b.status);
     } catch (e) {
       this.logger.error(`[dispersal] could not look up earlier reference ${ref} (campaign ${row.campaignId} row ${row.rowNumber}): ${e}`);
-      const alerted = await this.recordOrderAlert(row, ref, 'LOOKUP_FAILED', kind, ctx);
-      return { status: 'LOOKUP_FAILED', alerted };
+      const alerted = await this.recordOrderAlert(row, ref, ALERT_LOOKUP_FAILED, kind, ctx);
+      return { status: ALERT_LOOKUP_FAILED, alerted };
     }
-    const alerted = await this.recordOrderAlert(row, ref, status, kind, ctx);
+    const alerted = await this.recordOrderAlert(row, ref, status, kind, { ...ctx, noOrderVerified: false });
     return { status, alerted };
   }
 
@@ -546,20 +620,10 @@ export class VoucherDispersalProcessor {
     ctx: OrderAlertContext = {},
   ): Promise<boolean> {
     const resolving = ALERT_RESOLVING_STATUSES.has(status);
-    const lookupFailed = status === 'LOOKUP_FAILED';
+    const lookupFailed = status === ALERT_LOOKUP_FAILED;
     const where = { campaignId: row.campaignId, referenceId: ref };
-    // Release-gate H1: "no order" resolves only with a verified canary (the buy engine's rule) — checked outside the lock,
-    // and only when there is an open alert it could resolve.
-    let canaryOk = false;
-    if (status === 'NO_ORDER') {
-      const open = await this.prisma.voucherDispersalOrderAlert.findFirst({ where, select: { resolvedAt: true, hubbleStatus: true } }).catch(() => null);
-      if (!open) return false;
-      if (open.resolvedAt === null && alertStatusRank(open.hubbleStatus) < 2) {
-        const c = await this.verifyNotFoundCanary(ref, { maxTries: 3, budgetMs: 10_000 }).catch((e: unknown) => ({ ok: false as const, canaryRef: null, why: String(e) }));
-        canaryOk = c.ok;
-        if (!c.ok) this.logger.warn(`[dispersal] campaign ${row.campaignId} row ${row.rowNumber}: Hubble says no order for ${ref}, but the canary is not verified (${c.why}) — alert kept open`);
-      }
-    }
+    // Release-gate H1 + M1: "no order" resolves only with a canary the CALLER verified (the sweep; never the webhook).
+    const canaryOk = status === ALERT_NO_ORDER && ctx.noOrderVerified === true;
     if (!resolving && !ctx.onlyIfExists) {
       try {
         await this.prisma.voucherDispersalOrderAlert.create({
@@ -596,13 +660,14 @@ export class VoucherDispersalProcessor {
         const cur = await tx.voucherDispersalOrderAlert.findFirst({ where });
         if (!cur) return null;
         const strong = alertStatusRank(cur.hubbleStatus) >= 2; // ever saw SUCCESS / an unrecognised status (kept: strongest)
-        const unverified = status === 'NO_ORDER' && !canaryOk && cur.resolvedAt === null && !strong;
-        const entry = unverified ? NO_ORDER_UNVERIFIED : status;
+        const unverified = status === ALERT_NO_ORDER && !canaryOk && cur.resolvedAt === null;
+        const entry = unverified ? ALERT_NO_ORDER_UNVERIFIED : status;
         const history = cur.statusHistory ?? [];
         const data: Prisma.VoucherDispersalOrderAlertUpdateInput = { statusHistory: appendAlertHistory(history, entry) };
         let change: Res['change'] = null;
         const kindUp = kind === 'SUPERSEDED' && cur.kind === 'NOT_APPLIED';
         if (kindUp) data.kind = 'SUPERSEDED';
+        if (!lookupFailed) data.noOrderUnverifiedAt = unverified && !strong ? cur.noOrderUnverifiedAt ?? now : null;
         if (lookupFailed) {
           data.lastCheckFailedAt = now;
         } else if (resolving) {
@@ -610,7 +675,10 @@ export class VoucherDispersalProcessor {
             if (strong) {
               // NEVER resolved: Hubble reported SUCCESS / an unrecognised status before — a paid voucher may exist.
               if (history[history.length - 1] !== entry) change = 'CONTRADICTED';
-            } else if (!unverified) {
+            } else if (unverified) {
+              // Kept open; the sweep re-checks (noOrderUnverifiedAt). With no real status yet, the label says so (M3).
+              if (alertStatusRank(cur.hubbleStatus) === 0) data.hubbleStatus = ALERT_NO_ORDER_UNVERIFIED;
+            } else {
               Object.assign(data, { resolvedAt: now, hubbleStatus: status });
               change = 'RESOLVED';
             }
@@ -644,7 +712,7 @@ export class VoucherDispersalProcessor {
       // Not a real change -> no audit; still never silent in the logs.
       if (lookupFailed) {
         this.logger.warn(`[dispersal] campaign ${row.campaignId} row ${row.rowNumber}: could not check reference ${ref} with Hubble — alert kept at ${res.kept}`);
-      } else if (status === 'NO_ORDER' && !canaryOk) {
+      } else if (status === ALERT_NO_ORDER && !canaryOk) {
         this.logger.warn(`[dispersal] campaign ${row.campaignId} row ${row.rowNumber}: unverified "no order" for ${ref} — alert kept open at ${res.kept}`);
       } else if (res.prev !== status) {
         this.logger.warn(`[dispersal] campaign ${row.campaignId} row ${row.rowNumber}: Hubble reported ${status} for reference ${ref} — alert kept at ${res.kept} (history updated)`);
@@ -653,14 +721,14 @@ export class VoucherDispersalProcessor {
     }
     if (res.change === 'CONTRADICTED') {
       this.logger.error(
-        `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: alert for reference ${ref} NOT resolved — Hubble now says ${status === 'FAILED' ? 'the order failed' : status === 'APPLIED' ? 'it was applied' : 'there is no order'}, but it reported ${res.kept} earlier; check with Hubble (a paid voucher may exist)`,
+        `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: alert for reference ${ref} NOT resolved — Hubble now says ${status === 'FAILED' ? 'the order failed' : status === ALERT_APPLIED ? 'it was applied' : canaryOk ? 'there is no order' : 'there is no order (unverified)'}, but it reported ${res.kept} earlier; check with Hubble (a paid voucher may exist)`,
       );
       await this.orderAlertAudit(row, ref, k, res.kept, { contradictedBy: status });
       return true;
     }
     if (res.change === 'RESOLVED') {
       this.logger.warn(
-        `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: alert RESOLVED for reference ${ref} — ${status === 'FAILED' ? 'Hubble confirmed the order failed' : status === 'APPLIED' ? "Hubble's answer was applied to the row" : 'Hubble confirmed there is no order (canary verified)'} (was ${res.prev})`,
+        `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: alert RESOLVED for reference ${ref} — ${status === 'FAILED' ? 'Hubble confirmed the order failed' : status === ALERT_APPLIED ? "Hubble's answer was applied to the row" : 'Hubble confirmed there is no order (canary verified)'} (was ${res.prev})`,
       );
       await this.orderAlertAudit(row, ref, k, status, { previousStatus: res.prev, resolved: true });
       return true;
@@ -693,7 +761,7 @@ export class VoucherDispersalProcessor {
               ? "a FAILED row's CURRENT order (Hubble has news about it)"
               : "the row's CURRENT order, completed but not applied to the row";
     const tail =
-      status === 'LOOKUP_FAILED'
+      status === ALERT_LOOKUP_FAILED
         ? "couldn't check it with Hubble (the lookup failed) — check it with Hubble"
         : `Hubble status ${status}; check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)`;
     this.logger.error(`[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: ${prefix} ${what} (reference ${ref}) — ${tail}`);
@@ -957,7 +1025,8 @@ export class VoucherDispersalProcessor {
         const now = await this.prisma.voucherDispersalRow.findFirst({ where: { id: row.id }, select: { buyFailureSource: true, hubbleReferenceId: true } });
         if (now?.buyFailureSource === 'MARKED_NOT_BOUGHT' && now.hubbleReferenceId === row.hubbleReferenceId) {
           const st = reason.startsWith('HUBBLE_UNKNOWN_STATUS:') ? reason.slice('HUBBLE_UNKNOWN_STATUS:'.length) : reason === 'HUBBLE_PROCESSING' ? 'PROCESSING' : reason === 'HUBBLE_SUCCESS_NO_CODE' ? 'SUCCESS' : reason;
-          await this.recordOrderAlert(row, row.hubbleReferenceId, st, 'MARKED_NOT_BOUGHT');
+          // Raw Hubble text never collides with our `__` labels (M2).
+          await this.recordOrderAlert(row, row.hubbleReferenceId, hubbleAlertStatus(st), 'MARKED_NOT_BOUGHT');
         }
       }
     } catch (e) {

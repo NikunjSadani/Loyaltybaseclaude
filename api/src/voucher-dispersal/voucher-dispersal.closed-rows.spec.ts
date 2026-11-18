@@ -79,7 +79,7 @@ describe('M2: an earlier-order lookup that fails is alerted (once) and reported 
     expect(await t.processor.reconcileByReference('vdA')).toBe('LOOKUP_FAILED');
     const d = await t.svc.detail(ADMIN, id);
     expect(d.summary.earlierOrderAlerts.total).toBe(1);
-    expect(d.summary.earlierOrderAlerts.items[0]).toMatchObject({ referenceId: 'vdA', hubbleStatus: 'LOOKUP_FAILED' });
+    expect(d.summary.earlierOrderAlerts.items[0]).toMatchObject({ referenceId: 'vdA', hubbleStatus: '__LOOKUP_FAILED' });
   });
 });
 

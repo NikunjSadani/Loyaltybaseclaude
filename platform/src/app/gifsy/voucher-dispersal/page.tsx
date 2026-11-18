@@ -15,7 +15,7 @@ import Link from 'next/link';
 import { Download, Loader2, Plus, Ticket, RefreshCw } from 'lucide-react';
 import {
   CAMPAIGN_STATUS_TONE, billedToText, campaignStatusText, formatCount, formatRupees, formatWhen,
-  isSetupCampaign, vdApi, vdReportFallbackName, vdReportUrl, VD_CAMPAIGNS_PAGE_SIZE, type VdListItem,
+  isSetupCampaign, plural, vdApi, vdReportFallbackName, vdReportUrl, VD_CAMPAIGNS_PAGE_SIZE, type VdListItem,
 } from '@/lib/voucher-dispersal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
@@ -154,6 +154,11 @@ export default function VoucherDispersalListPage() {
                         {!setup && <CardDownload id={c.id} name={c.name} />}
                       </div>
                     </div>
+                    {gt0(s.openOrderAlerts) && (
+                      <p role="alert" data-testid={`vd-card-open-alerts-${c.id}`} className="relative z-10 mt-2 inline-block rounded-md border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-200">
+                        {plural(s.openOrderAlerts ?? 0, 'open order alert')} — check with Hubble (see the campaign)
+                      </p>
+                    )}
                     {s.pendingBatchNumber !== null && (
                       <p data-testid={`vd-card-pending-batch-${c.id}`} className="mt-2 text-xs text-sky-200">
                         Batch {s.pendingBatchNumber} is waiting for confirmation — nothing in it has been bought.

@@ -230,8 +230,8 @@ refusals) (actor = admin).
   `--rolled-back` + re-run — the file is re-runnable).
 - **Verification of the re-runnable file (2026-11-18):** compared statement-by-statement with Prisma's own SQL for
   base schema (`ab1dbbbb`) → current `schema.prisma` (`prisma migrate diff --from-schema … --to-schema … --script`, the
-  idempotency wrappers stripped): 16 = 16 statements (re-verified after the alert columns / indexes of §10d), none missing
-  or extra. NOT yet run against a database (no shadow /
+  idempotency wrappers stripped): 17 = 17 statements (re-verified after the alert columns / indexes of §10d and §10f), none
+  missing or extra. NOT yet run against a database (no shadow /
   scratch DB was used) — before prod, apply it TWICE to a local / throwaway database and confirm the second run is clean.
 - **This migration must NOT have been applied anywhere under its earlier contents.** `20261118160000_voucher_dispersal_batches`
   was edited several times before release (columns / indexes added, re-runnable rewrite); Prisma checks the file's
@@ -239,7 +239,8 @@ refusals) (actor = admin).
   this before deploy). If one exists, stop — do not edit or re-apply; ask engineering.
 - **Edited in place — reset, don't re-run, any database that ran an earlier version.** The file was changed after it
   may have been applied to a LOCAL dev database (e.g. the order-alert columns `resolvedAt` / `lastCheckFailedAt` /
-  `statusChangedAt` were added to its `CREATE TABLE IF NOT EXISTS`, which an existing table silently skips). Such a
+  `statusChangedAt` / `noOrderUnverifiedAt` were added to its `CREATE TABLE IF NOT EXISTS`, which an existing table
+  silently skips). Such a
   database must be RESET (`npx prisma migrate reset` on local dev), never re-run with `migrate deploy` / `resolve` —
   a re-run would leave the old table without the new columns.
 - **Old/new revision overlap during that deploy:** for the minutes both API revisions serve traffic, the OLD revision
@@ -423,7 +424,7 @@ I want."* Owner chose **"Add to the same campaign"**.
 - **Digest (M4 / L4 / L2):** rows marked not bought are reported as "closed (marked not bought)" (informational) and are
   NOT in "purchase failed" / "purchase still failed"; pending rows with an undocumented Hubble status are their own line
   ("needs Gifsy tech") and are NOT in "unconfirmed > 2 h (Retry available)".
-- Migration re-verified at the time: 14 = 14 statements (now 16 = 16 — §10d).
+- Migration re-verified at the time: 14 = 14 statements (now 17 = 17 — §10d, §10f).
 
 ### 10d. Review of `4d8454ad` — the alert subsystem (2026-11-18)
 
@@ -465,7 +466,7 @@ I want."* Owner chose **"Add to the same campaign"**.
   and the list card, "Closed" column per batch), not in "Buy failed" — the same as the digest.
 - **L8:** the digest's "Hubble status not recognised" also counts FAILED rows (not marked) whose LATEST lookup was an
   undocumented status (the campaign page's `lastLookupUnrecognised` rule), besides pending rows with `HUBBLE_UNKNOWN_STATUS`.
-- Migration re-verified: **16 = 16** statements against `prisma migrate diff` (base `ab1dbbbb` → current schema); SET
+- Migration re-verified at the time: **16 = 16** (now 17 = 17 — §10f) statements against `prisma migrate diff` (base `ab1dbbbb` → current schema); SET
   `lock_timeout` first, RESET last; the widened unique index is still created before the narrower one is dropped.
 
 ### 10e. Release-gate review of `e63d928a` (2026-11-18) — nothing may hide a paid voucher
@@ -475,7 +476,7 @@ I want."* Owner chose **"Add to the same campaign"**.
   no order — this contradicts its earlier report, so the alert stays open". An alert that saw at most PROCESSING (or only
   "couldn't check") is resolved by FAILED, or by "no order" ONLY with a verified canary (`verifyNotFoundCanary`, the buy
   engine's rule, max 3 tries / 10 s) — an unverified "no order" keeps it open (history `NO_ORDER_UNVERIFIED`, shown
-  "NO_ORDER (unverified)").
+  "no order (unverified)"). §10f: the canary is never run in the webhook — the sweep runs it.
 - **H2 — a failed webhook lookup on a FAILED row's CURRENT reference** (`HUBBLE_FAILED` / `REJECTED`): the webhook still
   acks 200, records a `NOT_APPLIED` "couldn't check" alert, and the 2-minute sweep re-checks those rows (last lookup
   `LOOKUP_FAILED…`, at most `RECHECK_AFTER_LOOKUP_FAILURE_PER_PASS` = 5 per pass, besides the 20 pending rows) until Hubble
@@ -493,4 +494,29 @@ I want."* Owner chose **"Add to the same campaign"**.
 - **Settle:** rows marked "not bought" are closed, not errors — a campaign whose only non-bought rows are marked settles
   `COMPLETED`, not `COMPLETED_WITH_ERRORS`.
 - **Noted for follow-up (not fixed):** a marked row can get a second identical alert entry for the same status (deduped in
-  history, no second count); webhook latency (a webhook runs a Hubble lookup — and now possibly a canary — inline).
+  history, no second count); webhook latency (a webhook runs one Hubble lookup inline — the canary moved to the sweep, §10f).
+
+### 10f. Release gate on `b587d42c` — four mediums (2026-11-18)
+
+- **M1 — no canary inside the webhook request.** A webhook does at most ONE Hubble lookup. A "no order" there is recorded as
+  `__NO_ORDER_UNVERIFIED` (alert open; `noOrderUnverifiedAt` set when the alert could be resolved). The 2-minute sweep
+  (`recheckUnverifiedNoOrderAlerts`, max 5 alerts per pass, backing off by the alert's `updatedAt`) looks the reference up
+  again; still no order → `verifyNotFoundCanary` → resolved `__NO_ORDER` only when verified, else still open. A FAILED row's
+  own alert is left to the row re-check (below). New column `noOrderUnverifiedAt` + index (same unapplied, idempotent
+  migration — 17 = 17 statements vs `prisma migrate diff`).
+- **M2 — our labels can't collide with Hubble's.** Our alert labels are prefixed: `__LOOKUP_FAILED` ("couldn't check"),
+  `__NO_ORDER` ("no order"), `__NO_ORDER_UNVERIFIED` ("no order (unverified)"), `__APPLIED` ("applied to the row"). A raw
+  Hubble status is stored via `hubbleAlertStatus` (upper-cased, leading `_` stripped, never empty) and only ever compared
+  with the documented SUCCESS / PROCESSING / FAILED — a Hubble status reading "APPLIED", "NO_ORDER" or "LOOKUP_FAILED" is
+  an UNRECOGNISED status (worsens the alert, never resolves it, never sets `lastCheckFailedAt`). The page maps our labels to
+  words and shows raw statuses as "a status we do not recognise ("X")"; the digest counts only `__LOOKUP_FAILED` as
+  "couldn't check".
+- **M3 — an unverified no-order keeps a FAILED row in the sweep.** For a `HUBBLE_FAILED` / `REJECTED` row being re-checked
+  (last result `LOOKUP_FAILED…`), a "no order" is definitive only with a verified canary (run by the sweep, never the
+  webhook). Unverified → the row's `lastReconcileResult` becomes `NO_ORDER_UNVERIFIED_RECHECK` (so `noteReconcile` never
+  drops it out of the sweep) and its alert reads "no order (unverified)" (`__NO_ORDER_UNVERIFIED`) until the canary verifies
+  (→ `NO_ORDER_AT_HUBBLE_YET`, alert resolved) or Hubble reports something else.
+- **M4 — the list shows open alerts.** `summary.openOrderAlerts` on each list item; the card shows a red badge "N open
+  order alerts — check with Hubble (see the campaign)", also for a COMPLETED campaign.
+- **Digest:** open / in-window alerts split also counts `noOrderUnverified` ("no order (unverified)" — kept open, re-checked
+  automatically).

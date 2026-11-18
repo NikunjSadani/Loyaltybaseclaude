@@ -235,7 +235,7 @@ export function makeFakePrisma(opts: { serializeTransactions?: boolean } = {}) {
       [['campaignId', 'batchNumber']],
     ),
     user: table(users, 'user', () => ({})),
-    voucherDispersalOrderAlert: table(orderAlerts, 'alert', () => ({ statusHistory: [], resolvedAt: null, lastCheckFailedAt: null, statusChangedAt: new Date() }), undefined, [['campaignId', 'referenceId']]),
+    voucherDispersalOrderAlert: table(orderAlerts, 'alert', () => ({ statusHistory: [], resolvedAt: null, lastCheckFailedAt: null, noOrderUnverifiedAt: null, statusChangedAt: new Date() }), undefined, [['campaignId', 'referenceId']]),
     messageDeliveryReceipt: table(receipts, 'rcpt', () => ({ status: 'QUEUED', sentAt: null, deliveredAt: null, readAt: null, failureReason: null })),
     auditLog: table(audits, 'audit', () => ({})),
     client: table(clients, 'client', () => ({})),
