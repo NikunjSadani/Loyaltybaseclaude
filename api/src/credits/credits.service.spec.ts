@@ -3157,7 +3157,8 @@ describe('CreditsService', () => {
       mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }]);
       // Period-1 already recovered 111100; a period-1 anchor TDS invoice exists (different period).
       mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([{ panNumber: 'PAN1', section: 'SEC_194C', clientId: 'deoleo', tenantSharePaise: 111100n }]);
-      mockTx.autoInvoice.findMany.mockResolvedValue([{ period: '2026-05' }]); // seq=2, different period → not idempotent-skip
+      // seq=2 (D8: highest existing 001 + 1), different period → not idempotent-skip
+      mockTx.autoInvoice.findMany.mockResolvedValue([{ period: '2026-05', invoiceNumber: 'TGSL-TDS-PAN1-202627-001' }]);
       mockPrisma.creditPayoutDownload.count.mockResolvedValue(1);
       mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd2', downloadCode: 'PD-2026-06-001' });
 
@@ -3496,7 +3497,7 @@ describe('CreditsService', () => {
             ? [{ tdsInvoiceId: 'inv-other-r', section: 'SEC_194R' }]
             : [{ panNumber: 'PAN1', section: 'SEC_194R', clientId: 'other', tenantSharePaise: 555600n }],
         );
-        mockTx.autoInvoice.findMany.mockResolvedValue([{ id: 'inv-other-r', clientId: 'other', period: '2026-05' }]);
+        mockTx.autoInvoice.findMany.mockResolvedValue([{ id: 'inv-other-r', clientId: 'other', period: '2026-05', invoiceNumber: 'TGSL-TDS-PAN1-202627-001' }]);
 
         await download();
 
@@ -3602,6 +3603,47 @@ describe('CreditsService', () => {
         );
         const recovery = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data as Array<{ section: string }>;
         expect(recovery.every((r) => r.section === 'SEC_194C')).toBe(true);
+      });
+
+      describe('D8: 194C TDS invoice number = highest EXISTING seq + 1 (never a count)', () => {
+        beforeEach(() => {
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([secEntry(11000000n, 'SEC_194C', 'GROSS_UP')]);
+          mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
+          wirePan1BothTenants();
+        });
+        const inv = (n: string, period: string) => ({ id: `inv-${n}`, clientId: 'deoleo', period, invoiceNumber: `TGSL-TDS-PAN1-202627-${n}` });
+
+        it('001 + 002 exist → next is 003', async () => {
+          mockTx.autoInvoice.findMany.mockResolvedValue([inv('001', '2026-04'), inv('002', '2026-04')]);
+          await download();
+          expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(mockTx, expect.objectContaining({ seq: 3, isAnchor: false }));
+        });
+
+        it('a DELETED middle invoice (001, 003 remain) → next is 004, not 003 (a count would collide with 003)', async () => {
+          mockTx.autoInvoice.findMany.mockResolvedValue([inv('003', '2026-04'), inv('001', '2026-04')]);
+          await download();
+          expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(mockTx, expect.objectContaining({ seq: 4, isAnchor: false }));
+        });
+
+        it('a deleted FIRST invoice (only 002 remains) → next is 003 and it is NOT re-anchored as 001', async () => {
+          mockTx.autoInvoice.findMany.mockResolvedValue([inv('002', '2026-04')]);
+          await download();
+          expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(mockTx, expect.objectContaining({ seq: 3, isAnchor: false }));
+        });
+
+        it('numbers sort numerically, not as text (009 + 010 → 011)', async () => {
+          mockTx.autoInvoice.findMany.mockResolvedValue([inv('010', '2026-04'), inv('009', '2026-04')]);
+          await download();
+          expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(mockTx, expect.objectContaining({ seq: 11 }));
+        });
+
+        it('the lookup reads invoiceNumber so the seq is parsed from the real numbers', async () => {
+          mockTx.autoInvoice.findMany.mockResolvedValue([]);
+          await download();
+          const arg = mockTx.autoInvoice.findMany.mock.calls[0][0];
+          expect(arg.select).toEqual(expect.objectContaining({ invoiceNumber: true }));
+          expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(mockTx, expect.objectContaining({ seq: 1, isAnchor: true }));
+        });
       });
 
       it('(c) 194C: a same-period LEGACY TDS invoice with no recovery rows (section unknown) from another tenant still BLOCKS', async () => {

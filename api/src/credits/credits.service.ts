@@ -565,11 +565,11 @@ export class CreditsService {
 
         // Idempotency per (PAN, FY, period): a top-up already raised for THIS period must not
         // double-raise. TDS invoice numbers are TGSL-TDS-<PAN>-<FYnodash>-<seq> and carry the
-        // crossing period; count them for the seq + detect a same-period re-run.
+        // crossing period; read them for the next seq (D8: highest + 1) + detect a same-period re-run.
         const numPrefix = `TGSL-TDS-${g.panNumber}-${fyLabel.replace(/-/g, '')}-`;
         const priorTds = await db.autoInvoice.findMany({
           where: { invoiceKind: 'TDS', invoiceNumber: { startsWith: numPrefix } },
-          select: { id: true, clientId: true, period: true },
+          select: { id: true, clientId: true, period: true, invoiceNumber: true },
         });
         // Section of each prior TDS invoice, from its recovery rows (AutoInvoice has no section
         // column; every invoice is written with ≥1 non-zero recovery row carrying the section).
@@ -601,8 +601,18 @@ export class CreditsService {
         // The NUMBER sequence is global per (PAN, FY) — TGSL-TDS-<PAN>-<FY>-<seq> is a globally unique
         // invoice number. Only 194C reaches here (D7) and groups are keyed (PAN, section, methodology),
         // so a plan holds at most ONE GROSS_UP invoice per PAN; plannedSamePan is a defensive guard.
+        // D8 (owner 2026-11-18): the next number = the HIGHEST seq ever issued for this (PAN, FY) + 1,
+        // parsed from the existing numbers — never a count, so a deleted invoice in the middle can't
+        // make the next one collide with (or re-use) an existing number. Only the platform-first
+        // invoice (seq 1) is the anchor; if 001 was deleted the next one is NOT re-anchored.
+        const seqRe = new RegExp(`^${numPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\d+)$`);
+        const highestSeq = priorTds.reduce((m, i) => {
+          const hit = i.invoiceNumber ? seqRe.exec(i.invoiceNumber) : null;
+          const n = hit ? Number(hit[1]) : 0;
+          return n > m ? n : m;
+        }, 0);
         const plannedSamePan = plan.grossUpInvoices.filter((x) => x.panNumber === g.panNumber).length;
-        const seq = priorTds.length + plannedSamePan + 1;
+        const seq = highestSeq + plannedSamePan + 1;
         const isAnchor = seq === 1;
 
         // FIX-A (D10): recovery pro-rata by each tenant's share of the retailer's FY AGGREGATE

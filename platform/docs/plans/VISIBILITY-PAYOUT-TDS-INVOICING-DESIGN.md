@@ -48,7 +48,16 @@ PAN `AAACT9811F`, West Bengal / code 19, SAC 998361).
   194C GROSS_UP raises a TDS invoice + `TdsRecoveryEntry` rows. A **194R** GROSS_UP payout raises **no** TDS invoice and
   **no** recovery row (no-PAN 194R included) — the retailer is paid in full and the client's liability is shown by the
   194R report. 194R DEDUCT withholding (the carry-forward ledger) is unchanged. TDS invoice NUMBERS stay globally
-  sequenced per (PAN, FY) (`TGSL-TDS-<PAN>-<FY>-<seq>`).
+  sequenced per (PAN, FY) (`TGSL-TDS-<PAN>-<FY>-<seq>`); **the next seq = the highest seq existing for that PAN/FY + 1**
+  (owner D8, 2026-11-18), parsed from the numbers — never a count, so deleting a middle invoice can't cause a collision.
+  Only seq 001 is the anchor (a deleted 001 is not re-anchored). Limit: the numbers are derived from existing rows, so
+  if the HIGHEST invoice is deleted its number is issued again (no persisted counter; TDS invoices are born locked and
+  the app has no delete path — deletion is a manual DB operation).
+  **Planned (194R whole-year true-up, owner D3 — not built yet, waiting on owner Q1–Q6):** benefits are dated by when
+  they were ACTUALLY paid (cash payouts by `paidAt`, redemptions by `deliveredAt`, off-platform by `entryDate`). Chosen
+  rule for payouts without a `paidAt` yet: a PROCESSING entry (already in a bank file) and the entries of the run being
+  built count in the FY of the run date (IST) — so a run always counts what it is paying; once the UTR is recorded the
+  real `paidAt` is used; FAILED / REVERSED entries drop out.
   **Legacy rows:** ledger rows written before this change carry their tenant's `clientId`, so they are re-scoped
   automatically on the next read (another tenant's 194R withholding simply stops counting). Any legacy 194R TDS invoice /
   194R recovery row is ignored by the engine (it never blocks or reduces a 194C top-up) and still lists on the recovery
