@@ -44,12 +44,13 @@ describe('H1: a failed purchase that Hubble completes later is never silent', ()
     expect(d.summary).toMatchObject({ overBudgetRupees: 1000, lateCompletedRows: 1 });
   });
 
-  it('HUBBLE_FAILED → PENDING_RECONCILE (Hubble says PROCESSING) is audited too (no over-budget: it was still counted)', async () => {
+  it('HUBBLE_FAILED → PENDING_RECONCILE (Hubble says PROCESSING) is audited as informational (not a late completion — pre-merge L-1)', async () => {
     const { t, id, b } = await oneFailed('HUBBLE_FAILED');
     t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H-p', status: 'PROCESSING' });
     expect(await t.processor.reconcileByReference(b.hubbleReferenceId)).toBe('PENDING');
-    expect(t.audits.find((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER')!.metadata)
-      .toMatchObject({ campaignId: id, fromSource: 'HUBBLE_FAILED', to: 'PENDING_RECONCILE', amountRupees: 1000 });
+    expect(t.audits.find((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_FAILED_ROW_PENDING_AGAIN')!.metadata)
+      .toMatchObject({ campaignId: id, fromSource: 'HUBBLE_FAILED', amountRupees: 1000 });
+    expect(t.audits.some((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER')).toBe(false);
     expect(t.audits.some((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_OVER_BUDGET')).toBe(false);
     expect((await t.svc.detail(ADMIN, id)).summary).toMatchObject({ overBudgetRupees: 0 });
   });

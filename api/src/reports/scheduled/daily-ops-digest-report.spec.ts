@@ -383,9 +383,9 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
       overBudgetCampaigns: 1, settleErrorCampaigns: 2, lateCompleted: 3,
     });
     expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
-      'Voucher dispersal: 1 campaign over budget (a purchase Hubble had refused/failed was completed later)',
+      "Voucher dispersal: 1 campaign over budget — spending is over the budget; see the campaign's budget breakdown",
       'Voucher dispersal: 2 campaigns whose status update keeps failing (contact Gifsy tech)',
-      'Voucher dispersal: 3 failed purchases completed later by Hubble in the window',
+      'Voucher dispersal: 3 purchases bought later by Hubble after they had failed / been refused (in the window)',
     ]);
     const html = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html;
     expect(html).toContain('data-section="Voucher dispersal (Gifsy-wide)"');

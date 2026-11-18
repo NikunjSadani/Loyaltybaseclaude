@@ -221,7 +221,7 @@ export interface VoucherDispersalSection {
   overBudgetCampaigns?: number;
   /** NOW: campaigns whose status update has failed SETTLE_FAILURES_BEFORE_ALERT times in a row. */
   settleErrorCampaigns?: number;
-  /** In the window: FAILED purchases that Hubble later reported bought / processing (row.lateCompletedAt). */
+  /** In the window: purchases Hubble BOUGHT after they had failed / been refused (row.lateCompletedAt). */
   lateCompleted?: number;
 }
 

@@ -163,7 +163,7 @@ describe('Edit campaign', () => {
     render(<DetailPage />);
     const b = await screen.findByTestId('vd-over-budget');
     expect(b).toHaveAttribute('role', 'alert');
-    expect(b).toHaveTextContent('Over budget by ₹1,000 — a purchase Hubble had refused/failed was completed later.');
+    expect(b).toHaveTextContent('Over budget by ₹1,000 — a purchase was bought later by Hubble after it had failed/refused.');
   });
 
   it('queued vouchers that no longer fit are called out apart from "over budget"', async () => {

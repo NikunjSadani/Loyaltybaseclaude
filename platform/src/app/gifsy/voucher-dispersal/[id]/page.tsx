@@ -444,7 +444,7 @@ export default function VoucherCampaignDetailPage() {
       {s.overBudgetRupees !== null && s.overBudgetRupees > 0 && (
         <p role="alert" data-testid="vd-over-budget" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-200 break-words">
           Over budget by {formatRupees(s.overBudgetRupees)}
-          {(s.lateCompletedRows ?? 0) > 0 ? ' — a purchase Hubble had refused/failed was completed later.' : '.'}
+          {(s.lateCompletedRows ?? 0) > 0 ? ' — a purchase was bought later by Hubble after it had failed/refused.' : '.'}
           {' '}Raise the budget or check with Hubble; nothing more is bought while it is over.
         </p>
       )}

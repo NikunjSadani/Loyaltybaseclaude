@@ -1539,6 +1539,12 @@ export class VoucherDispersalService {
         const st = String(look.body.status ?? '').toUpperCase();
         if (st !== 'FAILED') {
           const outcome = await this.processor.applyBody(row, look.body);
+          if (outcome === 'UNCHANGED') {
+            // Pre-merge M-1: Hubble answered with a status we do not recognise (the processor wrote the anomaly
+            // audit + error log and left the row). Never claim "applied" — refuse honestly.
+            await audit('REFUSED_UNRECOGNISED_HUBBLE_STATUS', { hubbleStatus: st || null });
+            throw new ConflictException(`Hubble reports this order as ${st || 'an unknown status'} — it was not bought. Contact Gifsy tech before retrying.`);
+          }
           await audit(`HUBBLE_HAS_ORDER_${st || 'UNKNOWN'}`, { applied: outcome });
           if (outcome === 'BOUGHT') await this.processor.sendMessage(row.id);
           await this.processor.resettle(id);
@@ -1574,6 +1580,7 @@ export class VoucherDispersalService {
               hubbleOrderId: null,
               placeResponded: null,
               referenceSentAt: null,
+              lateCompletedAt: null, // a new reference starts a new purchase (pre-merge L-1)
             }
           : {}),
       },

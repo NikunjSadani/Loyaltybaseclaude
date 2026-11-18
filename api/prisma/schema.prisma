@@ -4170,6 +4170,7 @@ model VoucherDispersalRow {
   @@unique([campaignId, dedupePhone])
   @@index([campaignId, status])
   @@index([status, updatedAt])
+  @@index([lateCompletedAt])
   @@map("voucher_dispersal_rows")
 }
 

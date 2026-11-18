@@ -316,7 +316,7 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
   // Owner rule — never silent: money over the budget, a status that cannot be updated, late completions.
   if ((d.overBudgetCampaigns ?? 0) > 0) {
     out.push({
-      text: `Voucher dispersal: ${plural(d.overBudgetCampaigns!, 'campaign', 'campaigns')} over budget (a purchase Hubble had refused/failed was completed later)`,
+      text: `Voucher dispersal: ${plural(d.overBudgetCampaigns!, 'campaign', 'campaigns')} over budget — spending is over the budget; see the campaign's budget breakdown`,
       events: d.overBudgetCampaigns!,
     });
   }
@@ -328,7 +328,7 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
   }
   if ((d.lateCompleted ?? 0) > 0) {
     out.push({
-      text: `Voucher dispersal: ${plural(d.lateCompleted!, 'failed purchase', 'failed purchases')} completed later by Hubble in the window`,
+      text: `Voucher dispersal: ${plural(d.lateCompleted!, 'purchase', 'purchases')} bought later by Hubble after ${d.lateCompleted === 1 ? 'it' : 'they'} had failed / been refused (in the window)`,
       events: d.lateCompleted!,
     });
   }
@@ -475,7 +475,7 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['bought', intIN(d.bought)],
       ['purchase failed', intIN(d.buyFailed), accentIf(d.buyFailed, 'red')],
       ['WhatsApp failed', intIN(d.messageFailed), accentIf(d.messageFailed, 'red')],
-      ['failed purchase completed later', intIN(d.lateCompleted ?? 0), accentIf(d.lateCompleted ?? 0, 'red')],
+      ['bought later after failing', intIN(d.lateCompleted ?? 0), accentIf(d.lateCompleted ?? 0, 'red')],
     ]) +
     metricLine('Right now', [
       ['pending', intIN(d.pending), accentIf(d.pending, 'amber')],

@@ -93,13 +93,14 @@ describe('M2: the late event is gated on a guarded write and counted once per ro
     expect((await t.svc.detail(ADMIN, id)).summary.lateCompletedRows).toBe(1);
   });
 
-  it('a stale snapshot that says BUY_FAILED while the row is already PENDING → no late event', async () => {
+  it('decided by the database, not the snapshot: a failed row already flipped to PENDING, then bought → exactly ONE late event (pre-merge L-1)', async () => {
     const { t, b } = await oneFailed('HUBBLE_FAILED');
     const stale = { ...b };
-    Object.assign(b, { status: 'PENDING_RECONCILE', pendingReason: 'HUBBLE_PROCESSING' });
+    Object.assign(b, { status: 'PENDING_RECONCILE', pendingReason: 'HUBBLE_PROCESSING' }); // buyFailureSource kept
+    await t.processor.applyBody(stale as any, { id: 'H', status: 'SUCCESS', vouchers: [{ cardNumber: CODE }] } as any);
     await t.processor.applyBody(stale as any, { id: 'H', status: 'SUCCESS', vouchers: [{ cardNumber: CODE }] } as any);
     expect(b.status).toBe('BOUGHT');
-    expect(t.audits.some((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER')).toBe(false);
+    expect(t.audits.filter((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER').length).toBe(1);
   });
 });
 

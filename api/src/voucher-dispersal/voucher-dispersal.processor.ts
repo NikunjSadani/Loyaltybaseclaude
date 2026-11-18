@@ -245,7 +245,7 @@ export class VoucherDispersalProcessor {
       }
       const mirrored = await this.step('mirror', () => this.mirrorMessageStatuses(opts.campaignId), [] as string[]);
       mirrored.forEach((id) => touched.add(id));
-      s.campaignsFinished = await this.step('finish', () => this.finishCampaigns(opts.campaignId, [...touched]), 0);
+      s.campaignsFinished = await this.step('finish', () => this.finishCampaigns(opts.campaignId, [...touched], deadline), 0);
     } finally {
       this.running = false;
     }
@@ -388,7 +388,9 @@ export class VoucherDispersalProcessor {
   private async noteReconcile(row: Pick<Row, 'id' | 'status' | 'updatedAt'>, result: string): Promise<void> {
     await this.prisma.voucherDispersalRow
       .updateMany({
-        where: { id: row.id },
+        // Restoring updatedAt is guarded on the state read earlier: a row that moved on meanwhile is never set
+        // back to an older updatedAt (pre-merge L-2).
+        where: { id: row.id, ...(row.status === RS.BUY_FAILED ? { status: RS.BUY_FAILED, updatedAt: row.updatedAt } : {}) },
         data: {
           lastReconcileAt: new Date(),
           lastReconcileResult: result.slice(0, 300),
@@ -428,15 +430,22 @@ export class VoucherDispersalProcessor {
       // that later succeeded) — deliver it rather than strand it. Never overwrites a code. The FROM-FAILED write is
       // its own guarded update, so the late event fires exactly once, decided by the database — never by a stale
       // snapshot (re-review M2).
+      // "Completed later" (owner/coordinator meaning, 2026-11-18) = Hubble BOUGHT a row that had FAILED: the row is
+      // still BUY_FAILED, or went failed → PENDING_RECONCILE earlier (that flip keeps buyFailureSource; a normal
+      // pending row has none). Marked once (lateCompletedAt IS NULL).
       const fromFailed = await this.prisma.voucherDispersalRow.updateMany({
-        where: { ...base, status: RS.BUY_FAILED },
+        where: {
+          ...base,
+          lateCompletedAt: null,
+          OR: [{ status: RS.BUY_FAILED }, { status: RS.PENDING_RECONCILE, buyFailureSource: { not: null } }],
+        },
         data: { ...boughtData, lateCompletedAt: new Date() },
       });
       const won =
         fromFailed.count === 1
           ? fromFailed
           : await this.prisma.voucherDispersalRow.updateMany({
-              where: { ...base, status: { in: [RS.BUYING, RS.PENDING_RECONCILE] } },
+              where: { ...base, status: { in: [RS.BUYING, RS.PENDING_RECONCILE, RS.BUY_FAILED] } },
               data: boughtData,
             });
       if (won.count === 0) {
@@ -514,7 +523,9 @@ export class VoucherDispersalProcessor {
     }
     if (row.status === RS.BUY_FAILED) {
       // Re-review M4: an answer we do not understand never moves a FAILED row (or fires the late event) —
-      // the row is left as it is, loudly, for ops.
+      // the row is left as it is, loudly, for ops. Pre-merge M-2: once per status — the sweep asks every
+      // 2 min; only a status different from the row's previous lookup result is logged + audited again.
+      if (row.lastReconcileResult === `HUBBLE_${status || 'UNKNOWN'}`) return 'UNCHANGED';
       this.logger.error(
         `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: unrecognised Hubble status "${status || '(none)'}" for a FAILED row — left as it is; ops review`,
       );
@@ -550,7 +561,7 @@ export class VoucherDispersalProcessor {
       // From FAILED as its own guarded write: the late event fires exactly once (re-review M2).
       const fromFailed = await this.prisma.voucherDispersalRow.updateMany({
         where: { ...base, status: RS.BUY_FAILED },
-        data: { ...data, lateCompletedAt: new Date() },
+        data, // buyFailureSource is KEPT: a later BOUGHT is then recognised as "bought after it had failed"
       });
       const res =
         fromFailed.count === 1
@@ -559,7 +570,7 @@ export class VoucherDispersalProcessor {
       if (res.count === 1 && (row.status !== RS.PENDING_RECONCILE || row.pendingReason !== reason)) {
         await this.audit(row.id, 'VOUCHER_DISPERSAL_PENDING', { reason });
       }
-      if (fromFailed.count === 1) await this.lateFromFailed(row, RS.PENDING_RECONCILE, extra.hubbleOrderId ?? null);
+      if (fromFailed.count === 1) await this.failedBackToPending(row, reason, extra.hubbleOrderId ?? null);
     } catch (e) {
       // Left BUYING → the stale sweep moves it to PENDING_RECONCILE (lookup only). Never re-placed.
       this.logger.error(`[dispersal] could not mark row ${row.id} pending (${reason}); the stale sweep will: ${e}`);
@@ -990,7 +1001,7 @@ export class VoucherDispersalProcessor {
   // ─── 5. Finish ────────────────────────────────────────────────────────────────
 
   /** Settle every PROCESSING campaign (and the `alsoIds` touched by late message changes). */
-  async finishCampaigns(campaignId?: string, alsoIds: string[] = []): Promise<number> {
+  async finishCampaigns(campaignId?: string, alsoIds: string[] = [], deadline?: number): Promise<number> {
     const camps = await this.prisma.voucherDispersalCampaign.findMany({
       where: { status: CS.PROCESSING, ...(campaignId ? { id: campaignId } : {}) },
       select: { id: true },
@@ -1008,7 +1019,12 @@ export class VoucherDispersalProcessor {
     });
     const inFlightGroups = await this.prisma.voucherDispersalRow.groupBy({
       by: ['campaignId'],
-      where: { status: { in: [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE] }, ...(campaignId ? { campaignId } : {}) },
+      where: {
+        status: { in: [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE] },
+        // PROCESSING campaigns are already selected above — keep this per-tick query to FINISHED ones.
+        campaign: { status: { in: [CS.COMPLETED, CS.COMPLETED_WITH_ERRORS] } },
+        ...(campaignId ? { campaignId } : {}),
+      },
     });
     const reopened = inFlightGroups.length
       ? await this.prisma.voucherDispersalCampaign.findMany({
@@ -1020,6 +1036,7 @@ export class VoucherDispersalProcessor {
     const ids = new Set([...camps.map((c) => c.id), ...failing.map((c) => c.id), ...reopened.map((c) => c.id), ...alsoIds]);
     let n = 0;
     for (const id of ids) {
+      if (deadline !== undefined && Date.now() > deadline) break; // the rest settle on the next pass
       try {
         if (await this.settleCampaign(id)) n++;
         await this.prisma.voucherDispersalCampaign
@@ -1039,11 +1056,15 @@ export class VoucherDispersalProcessor {
     try {
       // ONE atomic UPDATE … RETURNING (the row lock serialises concurrent increments): each caller sees its own
       // new value, so exactly one sees the threshold crossed (old < N ≤ new) — never skipped, never doubled.
-      const c = await this.prisma.voucherDispersalCampaign.update({
-        where: { id },
-        data: { settleFailures: { increment: 1 }, settleError: String((e as Error)?.message ?? e).slice(0, 300) },
-        select: { settleFailures: true, settleError: true },
-      });
+      const c = await this.prisma.$transaction(
+        (tx) =>
+          tx.voucherDispersalCampaign.update({
+            where: { id },
+            data: { settleFailures: { increment: 1 }, settleError: String((e as Error)?.message ?? e).slice(0, 300) },
+            select: { settleFailures: true, settleError: true },
+          }),
+        WEBHOOK_SETTLE_TX, // short: never wait long on a busy campaign lock just to count a failure
+      );
       const before = c.settleFailures - 1;
       if (before < SETTLE_FAILURES_BEFORE_ALERT && c.settleFailures >= SETTLE_FAILURES_BEFORE_ALERT) {
         this.logger.error(`[dispersal] campaign ${id}: status update has failed ${c.settleFailures} times in a row — ops review (${c.settleError})`);
@@ -1128,7 +1149,7 @@ export class VoucherDispersalProcessor {
   private async lateFromFailed(row: Row, to: RS, hubbleOrderId: string | null): Promise<void> {
     const amountRupees = Number(row.amountPaise ?? 0) / 100;
     this.logger.error(
-      `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: a purchase that had FAILED (${row.buyFailureSource ?? '?'}) was completed LATER by Hubble → ${to} (₹${amountRupees}) — ops review`,
+      `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: a purchase that had FAILED / been refused (${row.buyFailureSource ?? '?'}) was completed LATER — bought by Hubble (₹${amountRupees}) — ops review`,
     );
     await this.audit(row.id, 'VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER', {
       campaignId: row.campaignId,
@@ -1137,6 +1158,27 @@ export class VoucherDispersalProcessor {
       amountRupees,
       fromSource: row.buyFailureSource,
       to,
+      hubbleOrderId,
+    });
+    await this.checkOverBudget(row.campaignId);
+  }
+
+  /**
+   * A FAILED row that Hubble now reports as still processing: informational (it may yet be bought — counted then,
+   * once). Logged + audited; the over-budget check runs (a REJECTED row counts again while pending).
+   */
+  private async failedBackToPending(row: Row, reason: string, hubbleOrderId: string | null): Promise<void> {
+    const amountRupees = Number(row.amountPaise ?? 0) / 100;
+    this.logger.warn(
+      `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: a FAILED purchase (${row.buyFailureSource ?? '?'}) is pending again at Hubble (${reason}, ₹${amountRupees})`,
+    );
+    await this.audit(row.id, 'VOUCHER_DISPERSAL_FAILED_ROW_PENDING_AGAIN', {
+      campaignId: row.campaignId,
+      batchNumber: row.batchNumber,
+      rowNumber: row.rowNumber,
+      amountRupees,
+      fromSource: row.buyFailureSource,
+      reason,
       hubbleOrderId,
     });
     await this.checkOverBudget(row.campaignId);

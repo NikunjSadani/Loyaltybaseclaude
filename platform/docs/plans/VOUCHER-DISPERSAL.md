@@ -223,9 +223,14 @@ refusals) (actor = admin).
   unique index is still created before the old one is dropped). **No clean-up step.** Recover with exactly
   `npx prisma migrate resolve --rolled-back 20261118160000_voucher_dispersal_batches` (in the in-VPC migrate job), then
   re-run `npx prisma migrate deploy` in a quieter window (drain paused, as above).
+- **Lock contention during that deploy:** the new indexes are built on `voucher_dispersal_rows`; if a large batch upload /
+  confirm (thousands of rows) is running, the build can wait past the 5 s `lock_timeout` and fail. Deploy with the drain
+  PAUSED and **no admin uploads / confirms in progress**; if it still fails, recovery is as above (resolve
+  `--rolled-back` + re-run — the file is re-runnable).
 - **Verification of the re-runnable file (2026-11-18):** compared statement-by-statement with Prisma's own SQL for
   base schema (`ab1dbbbb`) → current `schema.prisma` (`prisma migrate diff --from-schema … --to-schema … --script`, the
-  idempotency wrappers stripped): 9 = 9 statements, none missing or extra. NOT yet run against a database (no shadow /
+  idempotency wrappers stripped): 10 = 10 statements (incl. the `lateCompletedAt` index added at pre-merge), none missing
+  or extra. NOT yet run against a database (no shadow /
   scratch DB was used) — before prod, apply it TWICE to a local / throwaway database and confirm the second run is clean.
 - **Old/new revision overlap during that deploy:** for the minutes both API revisions serve traffic, the OLD revision
   does not know about batches and would count an unconfirmed batch's rows in its list summary — harmless, because no
@@ -315,7 +320,7 @@ I want."* Owner chose **"Add to the same campaign"**.
 - **Final review fixes (2026-11-18):** H1 — a row that had FAILED (any source) and that Hubble later reports bought or
   processing is audited loudly (`VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER`: campaign, batch, row, ₹, source) with an
   error log; if what can still cost money then exceeds the budget, `VOUCHER_DISPERSAL_OVER_BUDGET` + error log, and the
-  campaign page shows "Over budget by ₹X — a purchase Hubble had refused/failed was completed later." (detail
+  campaign page shows "Over budget by ₹X — a purchase was bought later by Hubble after it had failed/refused." (detail
   `summary.overBudgetRupees` / `lateCompletedRows`). H2 — consecutive settle failures are counted on the campaign
   (`settleFailures`, `settleError`; reset on success); at 3 an audit row `VOUCHER_DISPERSAL_SETTLE_FAILING`, the views
   expose `settleError`, the page shows "Status update keeps failing — contact Gifsy tech." and "Add more people" says
@@ -335,6 +340,18 @@ I want."* Owner chose **"Add to the same campaign"**.
   on a failed row (`UNCHANGED`) keeps its `updatedAt` and does not re-settle. L2 — the webhook / retry-lookup re-settle
   uses `WEBHOOK_SETTLE_TX` (3 s) and, on failure, is left to the drain without counting as a settle failure. L3 — batch
   confirm refuses with the settle-failing reason like the upload. L4 — the Daily Ops Digest's voucher-dispersal block
-  lists campaigns over budget, campaigns whose status update keeps failing, and failed purchases completed later in the
+  lists campaigns over budget, campaigns whose status update keeps failing, and purchases bought later after failing (pre-merge wording) in the
   window (each a "needs attention" line; sample HTML regenerated).
+- **Pre-merge review fixes (2026-11-18):** M-1 — a retry whose Hubble lookup returns a status we do not recognise is
+  refused honestly (409 "Hubble reports this order as X — it was not bought. Contact Gifsy tech before retrying."), audit
+  `REFUSED_UNRECOGNISED_HUBBLE_STATUS`; the anomaly audit stays. M-2 — the anomaly is logged / audited once per status
+  (not every 2-min sweep). **L-1 meaning (coordinator decision): "completed later" = Hubble BOUGHT a row that had FAILED /
+  been refused** — `lateCompletedAt` + `VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER` only on BOUGHT, once (`lateCompletedAt
+  IS NULL`); a failed → processing flip writes `VOUCHER_DISPERSAL_FAILED_ROW_PENDING_AGAIN` (informational, keeps
+  `buyFailureSource` so the later BOUGHT is recognised) and does not count; a retry with a new reference clears it. Wording
+  everywhere: "bought later by Hubble after it had failed/refused"; the digest's over-budget line is neutral ("spending is
+  over the budget; see the campaign's budget breakdown"). L-2 — the `updatedAt` restore is guarded on the state read
+  earlier. L-4 — the settle loop stops at the drain deadline; the failure counter is updated in a 3 s transaction. L-5 —
+  the "finished but in flight" grouping only looks at COMPLETED / COMPLETED_WITH_ERRORS campaigns; new index
+  `voucher_dispersal_rows_lateCompletedAt_idx` (same migration, idempotent). L-6 — runbook: no uploads during the deploy.
 

@@ -70,4 +70,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "voucher_dispersal_rows_campaignId_batchNumber
 -- DropIndex
 DROP INDEX IF EXISTS "voucher_dispersal_rows_campaignId_rowNumber_key";
 
+-- CreateIndex (the Daily Ops Digest counts "bought later after failing" by lateCompletedAt in its window)
+CREATE INDEX IF NOT EXISTS "voucher_dispersal_rows_lateCompletedAt_idx" ON "voucher_dispersal_rows"("lateCompletedAt");
+
 RESET lock_timeout;

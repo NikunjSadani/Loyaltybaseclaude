@@ -220,7 +220,7 @@ export interface VdDeliverySummary {
   overBudgetRupees: number | null;
   /** Detail only: queued vouchers that no longer fit within the budget. */
   queuedAtRiskRupees: number | null;
-  /** Detail only: rows that had failed and that Hubble later reported bought / processing. */
+  /** Detail only: rows Hubble BOUGHT after they had failed / been refused. */
   lateCompletedRows: number | null;
   /** List only: an "Add more people" batch waiting for confirmation (its number), else null. */
   pendingBatchNumber: number | null;
