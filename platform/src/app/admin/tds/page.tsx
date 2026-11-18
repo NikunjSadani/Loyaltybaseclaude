@@ -66,6 +66,9 @@ interface Tds194RRow {
   importedVendorDepositPaise?: number | string;
   /** B-M2: e.g. TDS withheld with no benefit counted this year — shown, never silent. */
   note?: string;
+  /** Owner 2026-11-18: TDS taken in excess (flag only — no automatic refund). */
+  excessDeductedPaise?: number | string;
+  carryForwardDroppedPaise?: number | string;
 }
 
 interface Tds194RResponse {
@@ -79,6 +82,8 @@ interface Tds194RResponse {
     totalLiabilityPaise:   number | string;
     totalDepositedPaise:   number | string;
     totalOutstandingPaise: number | string;
+    totalExcessDeductedPaise?: number | string;
+    excessRetailerCount?: number;
   };
   rows: Tds194RRow[];
 }
@@ -692,6 +697,15 @@ export default function AdminTdsPage() {
               <SummaryCard label="TDS Liability"      paise={r194.summary.totalLiabilityPaise}   testId="r194-summary-liability" />
               <SummaryCard label="Deposited"          paise={r194.summary.totalDepositedPaise}   testId="r194-summary-deposited" />
               <SummaryCard label="Outstanding"        paise={r194.summary.totalOutstandingPaise} testId="r194-summary-outstanding" />
+              {p(r194.summary.totalExcessDeductedPaise ?? 0) > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4" data-testid="r194-summary-excess">
+                  <p className="text-xs text-amber-800">TDS taken in excess (flag only — no refund)</p>
+                  <p className="text-lg font-bold text-amber-900 mt-1">{formatINR(p(r194.summary.totalExcessDeductedPaise))}</p>
+                  <p className="text-[11px] text-amber-700">
+                    {r194.summary.excessRetailerCount ?? 0} retailer{(r194.summary.excessRetailerCount ?? 0) === 1 ? '' : 's'}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -770,7 +784,14 @@ export default function AdminTdsPage() {
                               {formatINR(p(row.deductLiabilityPaise ?? 0))} / {formatINR(p(row.clientBorneLiabilityPaise ?? 0))}
                             </td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>
-                            <td className="px-4 py-3 text-right text-gray-700" data-testid="r194-deducted">{formatINR(p(row.deductedPaise ?? 0))}</td>
+                            <td className="px-4 py-3 text-right text-gray-700" data-testid="r194-deducted">
+                              {formatINR(p(row.deductedPaise ?? 0))}
+                              {p(row.excessDeductedPaise ?? 0) > 0 && (
+                                <div className="text-[11px] text-amber-700" data-testid="r194-excess">
+                                  TDS taken in excess: {formatINR(p(row.excessDeductedPaise))}
+                                </div>
+                              )}
+                            </td>
                             <td className="px-4 py-3 text-right text-gray-700">
                               <DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} />
                               {p(row.importedVendorDepositPaise ?? 0) > 0 && (

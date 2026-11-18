@@ -139,6 +139,11 @@ const emailed = (endMs: number, status: 'sent' | 'degraded' = 'sent', startMs = 
   ...(failedSections ? { failedSections } : {}),
 });
 
+/** 194R report used by the digest's TDS section (owner 2026-11-18: over-withholding is flagged). */
+const tdsMock = {
+  report194R: jest.fn().mockResolvedValue({ rows: [], summary: { totalExcessDeductedPaise: 0n, excessRetailerCount: 0 } }),
+};
+
 describe('ScheduledReportsService — Daily Operations Digest', () => {
   let prisma: ReturnType<typeof makePrisma>;
   let store: ReturnType<typeof makeSettingsStore>;
@@ -155,7 +160,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     prisma = makePrisma();
     store = prisma.programSetting;
     sendEmail = jest.fn().mockResolvedValue(undefined);
-    svc = new ScheduledReportsService(prisma as never, { sendEmail } as never);
+    svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never);
   });
 
   describe('recipients', () => {
@@ -279,7 +284,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       prisma = makePrisma();
       store = prisma.programSetting;
       setRecipients({ dailyDigest: ['ops@gifsy.in'] });
-      svc = new ScheduledReportsService(prisma as never, { sendEmail } as never);
+      svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never);
       svc.clock = () => NOW;
       setState({ running: { startedAt: new Date(NOW - 5 * 60_000).toISOString(), token: 'slow' } });
       expect((await svc.runDailyReports(NOW)).reports[0].status).toBe('in-progress');
@@ -568,6 +573,27 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       creditPaidPaise: 280000n, // ₹3,000 gross − ₹200 TDS withheld = what actually went to retailers
       creditSettledByTds: 1,
       creditSettledByTdsPaise: 500000n,
+    });
+  });
+
+  it("TDS: each tenant's 194R excess (current FY) feeds the digest — count, total, largest first", async () => {
+    tdsMock.report194R.mockImplementation(async (clientId: string) => ({
+      rows:
+        clientId === 'bajaj'
+          ? [
+              { panNumber: 'AAAAA1111A', excessDeductedPaise: 100000n },
+              { panNumber: 'BBBBB2222B', excessDeductedPaise: 300000n },
+              { panNumber: 'CCCCC3333C', excessDeductedPaise: 0n },
+            ]
+          : [],
+      summary: {},
+    }));
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
+    expect(bajaj.tds?.ok && bajaj.tds.data).toMatchObject({
+      excessRetailerCount: 2,
+      totalExcessPaise: 400000n,
+      sample: [{ retailer: 'BBBBB2222B', excessPaise: 300000n }, { retailer: 'AAAAA1111A', excessPaise: 100000n }],
     });
   });
 

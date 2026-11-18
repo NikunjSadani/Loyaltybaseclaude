@@ -387,6 +387,8 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
 export async function deducted194RByRetailer(
   db: Tds194RDb,
   a: { clientId: string; fyLabel: string; scope?: { keys: string[]; outletCodes: string[] } },
+  /** Optional sink: the carry-forward recorded on each retailer's LATEST ledger row (report only). */
+  lastCarryForward?: Map<string, bigint>,
 ): Promise<Map<string, bigint>> {
   const { clientId, fyLabel, scope } = a;
   const rows = await db.tdsDeductionEntry.findMany({
@@ -396,7 +398,7 @@ export async function deducted194RByRetailer(
       fyLabel,
       ...(scope ? { OR: [{ panNumber: { in: scope.keys } }, { outletCode: { in: scope.outletCodes } }] } : {}),
     },
-    select: { clientId: true, panNumber: true, outletCode: true, tdsDeductedThisPaise: true },
+    select: { clientId: true, panNumber: true, outletCode: true, tdsDeductedThisPaise: true, carryForwardPaise: true, createdAt: true },
   });
   const mine = (rows ?? []).filter((r) => !r.clientId || r.clientId === clientId);
   const codes = [...new Set(mine.map((r) => r.outletCode).filter((c): c is string => !!c))];
@@ -417,10 +419,18 @@ export async function deducted194RByRetailer(
     );
   }
   const out = new Map<string, bigint>();
+  const latestAt = new Map<string, number>();
   for (const r of mine) {
     const key = (r.outletCode && keyByOutlet.get(r.outletCode)) || (r.panNumber?.trim() ? retailerKeyOfLedgerPan(r.panNumber) : null);
     if (!key) continue;
     out.set(key, (out.get(key) ?? 0n) + r.tdsDeductedThisPaise);
+    if (lastCarryForward && r.carryForwardPaise != null) {
+      const at = r.createdAt ? new Date(r.createdAt).getTime() : 0;
+      if (!latestAt.has(key) || at >= latestAt.get(key)!) {
+        latestAt.set(key, at);
+        lastCarryForward.set(key, r.carryForwardPaise);
+      }
+    }
   }
   return out;
 }

@@ -23,7 +23,7 @@ const row194R = {
   panNumber: 'ABCDE1234F', fyLabel: '2025-26', baseFyTotalPaise: 500000n, liabilityPaise: 50000n, depositedPaise: 30000n,
   outstandingPaise: 20000n, methodology: 'GROSS_UP', ratePct: 10, cashBasePaise: 500000n, nonCashBasePaise: 0n,
   deductBasePaise: 0n, clientBorneBasePaise: 500000n, deductLiabilityPaise: 0n, clientBorneLiabilityPaise: 50000n,
-  deductedPaise: 0n, importedVendorDepositPaise: 0n,
+  deductedPaise: 0n, importedVendorDepositPaise: 0n, excessDeductedPaise: 0n, carryForwardDroppedPaise: 0n,
 };
 const row194C = {
   panNumber: 'GIFSY1234A', entityType: 'COMPANY', fyLabel: '2025-26', baseFyTotalPaise: 200000n, maxSinglePaise: 200000n,
@@ -33,7 +33,10 @@ const row194C = {
 const svc = {
   report194R: jest.fn().mockResolvedValue({
     rows: [row194R],
-    summary: { fyLabel: '2025-26', clientId: 'deoleo', totalBasePaise: 600000n, totalLiabilityPaise: 60000n, totalDepositedPaise: 45000n, totalOutstandingPaise: 15000n, rowCount: 2 },
+    summary: {
+      fyLabel: '2025-26', clientId: 'deoleo', totalBasePaise: 5500000n, totalLiabilityPaise: 611100n, totalDepositedPaise: 600000n,
+      totalOutstandingPaise: 11100n, rowCount: 2, totalExcessDeductedPaise: 0n, excessRetailerCount: 0,
+    },
     importedPayoutsCountedFrom: null,
     importedPayoutsNote: null,
   }),
@@ -54,7 +57,7 @@ describe('TDS report response contract (shared with the admin TDS screen tests)'
     expect(keys(res.summary)).toEqual(keys(contract.r194.summary));
     expect(keys(res.rows[0])).toEqual(keys(contract.r194.rows[0]));
     // Money crosses the wire as strings (BigInt.toString()), as in the fixture.
-    expect(res.summary.totalLiabilityPaise).toBe('60000');
+    expect(res.summary.totalLiabilityPaise).toBe('611100');
   });
 
   it('194C: summary keys are exactly the contract fixture’s (row keys are a superset — the screen reads a subset)', async () => {

@@ -235,6 +235,15 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
     }
   }
 
+  failed('TDS (194R)', t.tds);
+  if (t.tds?.ok && t.tds.data.excessRetailerCount > 0) {
+    const x = t.tds.data;
+    push(
+      `TDS taken in excess for ${plural(x.excessRetailerCount, 'retailer', 'retailers')} (${rupees(x.totalExcessPaise)}) — flagged, no automatic refund`,
+      x.excessRetailerCount,
+    );
+  }
+
   failed('Messages', t.messages);
   if (t.messages.ok) {
     const m = t.messages.data;
@@ -625,6 +634,20 @@ function tenantSections(t: TenantDigest): string {
           : ''),
     ),
     renderSection('Billing progress', t.billing, () => false, billingBody),
+    renderSection(
+      'TDS (194R)',
+      t.tds,
+      (x) => x.excessRetailerCount === 0,
+      (x) =>
+        metricLine(`Taken in excess (${x.fyLabel}, flag only — no refund)`, [
+          ['retailers', intIN(x.excessRetailerCount), 'amber'],
+          ['total', rupees(x.totalExcessPaise), 'amber'],
+        ]) +
+        table(
+          [{ label: 'Retailer' }, { label: 'Taken in excess' }],
+          x.sample.map((r) => [esc(r.retailer), esc(rupees(r.excessPaise))]),
+        ),
+    ),
   ].join('');
 }
 

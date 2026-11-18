@@ -78,7 +78,7 @@ import type { TdsMethodology } from '@prisma/client';
 import { withholdingTdsPaise } from './tds-methodology.helper';
 import type { UploadResult, UploadRowError } from './dto/tds.dto';
 import { buildXlsx } from '../common/xlsx';
-import { paiseToRupees } from '../common/money';
+import { formatINR, paiseToRupees } from '../common/money';
 
 // ─── Result types ─────────────────────────────────────────────────────────────
 
@@ -135,6 +135,17 @@ function summariseRows(
     totalOutstandingPaise: rows.reduce((s, r) => s + r.outstandingPaise, 0n),
     rowCount: rows.length,
   };
+}
+
+/** Owner 2026-11-18: TDS taken from a retailer beyond the whole-year deducted part (flag only). */
+function excessOf(deductPart: bigint, deducted: bigint): bigint {
+  return deducted > deductPart ? deducted - deductPart : 0n;
+}
+
+/** A recorded carry-forward that the current rules no longer ask to withhold (shown as dropped). */
+function droppedOf(lastCarry: bigint, deductPart: bigint, deducted: bigint): bigint {
+  const stillToWithhold = deductPart > deducted ? deductPart - deducted : 0n;
+  return lastCarry > stillToWithhold ? lastCarry - stillToWithhold : 0n;
 }
 
 /**
@@ -220,7 +231,15 @@ export interface TdsRow194R {
   deductedPaise: bigint;
   /** Of `depositedPaise`, the part from imported vendor TDS batches (informational). */
   importedVendorDepositPaise: bigint;
-  /** B-M2: a plain-language flag for a row that needs a look (e.g. withholding with no base this FY). */
+  /**
+   * Owner 2026-11-18 — over-withholding is ONLY FLAGGED: TDS taken from this retailer beyond the whole-year
+   * deducted part (e.g. 20% no-PAN then the PAN was added, or DEDUCT → GROSS_UP after withholding).
+   * No automatic refund.
+   */
+  excessDeductedPaise: bigint;
+  /** A carry-forward recorded on the ledger that is no longer due under the current rules (dropped, shown). */
+  carryForwardDroppedPaise: bigint;
+  /** B-M2 / excess: a plain-language flag for a row that needs a look. */
   note?: string;
   /** "TDS for month" (YYYY-MM, ascending) of the deposits counted on this row — absent when none. */
   depositForPeriods?: string[];
@@ -268,6 +287,9 @@ export interface TdsRow194C {
 export interface TdsSummary194R {
   fyLabel: string;
   clientId: string;
+  /** Owner 2026-11-18: Σ TDS taken in excess (flag only) + how many retailers have any. */
+  totalExcessDeductedPaise?: bigint;
+  excessRetailerCount?: number;
   totalBasePaise: bigint;
   totalLiabilityPaise: bigint;
   totalDepositedPaise: bigint;
@@ -405,7 +427,13 @@ export class TdsService {
     const disclosed = importedCountFromForFy(countFrom, fyLabel);
     return {
       rows,
-      summary: { fyLabel, clientId, ...summariseRows(rows) },
+      summary: {
+        fyLabel,
+        clientId,
+        ...summariseRows(rows),
+        totalExcessDeductedPaise: rows.reduce((s, r) => s + r.excessDeductedPaise, 0n),
+        excessRetailerCount: rows.filter((r) => r.excessDeductedPaise > 0n).length,
+      },
       importedPayoutsCountedFrom: disclosed,
       importedPayoutsNote: disclosed ? importedPayoutsNote(disclosed) : null,
     };
@@ -486,7 +514,8 @@ export class TdsService {
 
     // ── Deducted so far (display only — Q3: deductions never reduce the liability) ──
     // Follows the RETAILER through its outlets (A-M4) — the same function the engine nets with.
-    const deducted = await deducted194RByRetailer(this.prisma, { clientId, fyLabel });
+    const lastCarry = new Map<string, bigint>();
+    const deducted = await deducted194RByRetailer(this.prisma, { clientId, fyLabel }, lastCarry);
 
     const rowFor = (key: string, b: Bases194R): TdsRow194R => {
       const l = liability194R(b, methodology, cfg);
@@ -507,6 +536,8 @@ export class TdsService {
         deductLiabilityPaise: l.deductPartPaise,
         clientBorneLiabilityPaise: l.clientBornePartPaise,
         deductedPaise: deducted.get(key) ?? 0n,
+        excessDeductedPaise: excessOf(l.deductPartPaise, deducted.get(key) ?? 0n),
+        carryForwardDroppedPaise: droppedOf(lastCarry.get(key) ?? 0n, l.deductPartPaise, deducted.get(key) ?? 0n),
         importedVendorDepositPaise: importedDeposited.get(key) ?? 0n,
         ...depositPeriods.fieldFor(key),
       };
@@ -524,11 +555,25 @@ export class TdsService {
       }
     }
     for (const r of rows) {
+      const notes: string[] = [];
       if (r.baseFyTotalPaise === 0n && r.deductedPaise !== 0n) {
-        r.note =
+        notes.push(
           'TDS was withheld from this retailer this year but no benefit is counted this year (for example the payout was ' +
-          'reversed or moved) — check before filing.';
+            'reversed or moved) — check before filing.',
+        );
       }
+      if (r.excessDeductedPaise > 0n) {
+        notes.push(
+          `TDS taken in excess: ${formatINR(r.excessDeductedPaise)} — more was withheld from this retailer than is due for ` +
+            'the year on the current rules. Flagged only: no automatic refund.',
+        );
+      }
+      if (r.carryForwardDroppedPaise > 0n) {
+        notes.push(
+          `A carry-forward of ${formatINR(r.carryForwardDroppedPaise)} is no longer due under the current rules and will not be withheld.`,
+        );
+      }
+      if (notes.length) r.note = notes.join(' ');
     }
     if (unlinkedNoPanDepositPaise > 0n) {
       rows.push({
@@ -1722,6 +1767,8 @@ export class TdsService {
         'TDS — Client-borne Part (₹)': moneyCell(r.clientBorneLiabilityPaise),
         'TDS Amount (₹)': moneyCell(r.liabilityPaise),
         'Deducted from Payouts So Far (₹)': moneyCell(r.deductedPaise),
+        // Owner 2026-11-18: over-withholding is flagged (no automatic refund).
+        'TDS Taken in Excess (₹)': moneyCell(r.excessDeductedPaise),
         'Already Deposited (₹)': moneyCell(r.depositedPaise),
         'of which Imported Vendor TDS (₹)': moneyCell(r.importedVendorDepositPaise),
         'Deposits — TDS for Month(s)': depositMonthsCell(r.depositForPeriods),
@@ -1913,6 +1960,10 @@ export class TdsService {
       depositedPaise: string;
       outstandingPaise: string;
       depositForPeriods?: string[];
+      // 194R only (L4 / owner 2026-11-18): deducted so far, TDS taken in excess (flag), the row note.
+      deductedPaise?: string;
+      excessDeductedPaise?: string;
+      note?: string;
       // 194C only — methodology-aware split (undefined for 194R):
       methodology?: TdsMethodologyLabel;
       withheldPaise?: string;
@@ -1926,6 +1977,8 @@ export class TdsService {
       // 194C only:
       withheldPaise?: string;
       recoveredPaise?: string;
+      // 194R only: Σ TDS taken in excess (flag only).
+      excessDeductedPaise?: string;
     };
   }> {
     if (section === '194R') {
@@ -1952,11 +2005,15 @@ export class TdsService {
           depositedPaise: r.depositedPaise.toString(),
           outstandingPaise: r.outstandingPaise.toString(),
           ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
+          deductedPaise: r.deductedPaise.toString(),
+          excessDeductedPaise: r.excessDeductedPaise.toString(),
+          ...(r.note ? { note: r.note } : {}),
         })),
         totals: {
           liabilityPaise: totalLiability.toString(),
           depositedPaise: totalDeposited.toString(),
           outstandingPaise: totalOutstanding.toString(),
+          excessDeductedPaise: rows.reduce((s, r) => s + r.excessDeductedPaise, 0n).toString(),
         },
       };
     }

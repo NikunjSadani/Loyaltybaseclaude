@@ -1,5 +1,5 @@
 {
-  "_comment": "REAL response shape of GET /v1/admin/tds/194r and /194c (TdsController serializers). Shared contract: api/src/tds/tds.controller.contract.spec.ts asserts the controller emits exactly these keys; the admin TDS screen tests build their mocks from this file. Rename a field in one place and a test fails. Money = integer paise as strings (BigInt.toString()).",
+  "_comment": "REAL response shape of GET /v1/admin/tds/194r and /194c (TdsController serializers). Shared contract: api/src/tds/tds.controller.contract.spec.ts asserts the controller emits exactly these keys; the admin TDS screen tests build their mocks from this file. Rename a field in one place and a test fails. Money = integer paise as strings (BigInt.toString()). Figures are REAL calculations: 194R GROSS_UP 10/90 on bases over Rs 20,000 (25,000 -> 2,778; 30,000 -> 3,333); 194C COMPANY 2/98 on Rs 1,10,000 -> 2,245.",
   "r194": {
     "section": "194R",
     "fyLabel": "2025-26",
@@ -8,48 +8,54 @@
     "summary": {
       "fyLabel": "2025-26",
       "clientId": "deoleo",
-      "totalBasePaise": "600000",
-      "totalLiabilityPaise": "60000",
-      "totalDepositedPaise": "45000",
-      "totalOutstandingPaise": "15000",
-      "rowCount": 2
+      "totalBasePaise": "5500000",
+      "totalLiabilityPaise": "611100",
+      "totalDepositedPaise": "600000",
+      "totalOutstandingPaise": "11100",
+      "rowCount": 2,
+      "totalExcessDeductedPaise": "0",
+      "excessRetailerCount": 0
     },
     "rows": [
       {
         "panNumber": "ABCDE1234F",
         "fyLabel": "2025-26",
-        "baseFyTotalPaise": "500000",
-        "liabilityPaise": "50000",
-        "depositedPaise": "30000",
-        "outstandingPaise": "20000",
+        "baseFyTotalPaise": "2500000",
+        "liabilityPaise": "277800",
+        "depositedPaise": "200000",
+        "outstandingPaise": "77800",
         "methodology": "GROSS_UP",
         "ratePct": 10,
-        "cashBasePaise": "500000",
+        "cashBasePaise": "2500000",
         "nonCashBasePaise": "0",
         "deductBasePaise": "0",
-        "clientBorneBasePaise": "500000",
+        "clientBorneBasePaise": "2500000",
         "deductLiabilityPaise": "0",
-        "clientBorneLiabilityPaise": "50000",
+        "clientBorneLiabilityPaise": "277800",
         "deductedPaise": "0",
-        "importedVendorDepositPaise": "0"
+        "importedVendorDepositPaise": "0",
+        "excessDeductedPaise": "0",
+        "carryForwardDroppedPaise": "0"
       },
       {
         "panNumber": "XYZPQ9876G",
         "fyLabel": "2025-26",
-        "baseFyTotalPaise": "100000",
-        "liabilityPaise": "10000",
-        "depositedPaise": "15000",
-        "outstandingPaise": "-5000",
+        "baseFyTotalPaise": "3000000",
+        "liabilityPaise": "333300",
+        "depositedPaise": "400000",
+        "outstandingPaise": "-66700",
         "methodology": "GROSS_UP",
         "ratePct": 10,
-        "cashBasePaise": "100000",
+        "cashBasePaise": "3000000",
         "nonCashBasePaise": "0",
         "deductBasePaise": "0",
-        "clientBorneBasePaise": "100000",
+        "clientBorneBasePaise": "3000000",
         "deductLiabilityPaise": "0",
-        "clientBorneLiabilityPaise": "10000",
+        "clientBorneLiabilityPaise": "333300",
         "deductedPaise": "0",
-        "importedVendorDepositPaise": "0"
+        "importedVendorDepositPaise": "0",
+        "excessDeductedPaise": "0",
+        "carryForwardDroppedPaise": "0"
       }
     ]
   },
@@ -58,11 +64,11 @@
     "fyLabel": "2025-26",
     "summary": {
       "fyLabel": "2025-26",
-      "totalBasePaise": "200000",
-      "totalLiabilityPaise": "8000",
-      "totalLiabilityNoThresholdPaise": "12000",
-      "totalDepositedPaise": "7000",
-      "totalOutstandingPaise": "1000",
+      "totalBasePaise": "11000000",
+      "totalLiabilityPaise": "224500",
+      "totalLiabilityNoThresholdPaise": "224500",
+      "totalDepositedPaise": "200000",
+      "totalOutstandingPaise": "24500",
       "rowCount": 1
     },
     "rows": [
@@ -70,13 +76,13 @@
         "panNumber": "GIFSY1234A",
         "entityType": "COMPANY",
         "fyLabel": "2025-26",
-        "baseFyTotalPaise": "200000",
-        "maxSinglePaise": "200000",
+        "baseFyTotalPaise": "11000000",
+        "maxSinglePaise": "11000000",
         "thresholdMet": true,
-        "liabilityPaise": "8000",
-        "liabilityNoThresholdPaise": "12000",
-        "depositedPaise": "7000",
-        "outstandingPaise": "1000"
+        "liabilityPaise": "224500",
+        "liabilityNoThresholdPaise": "224500",
+        "depositedPaise": "200000",
+        "outstandingPaise": "24500"
       }
     ]
   }

@@ -134,11 +134,11 @@ describe('TDS — Admin TDS page API wiring', () => {
   });
 
   // TDS2 — paise ÷ 100 display
-  it('TDS2: liabilityPaise=50000 shown as ₹500.00', async () => {
+  it('TDS2: liabilityPaise=277800 shown as ₹2,778.00', async () => {
     vi.stubGlobal('fetch', make194RFetch());
     render(<AdminTdsPage />);
-    // ₹500.00 should appear (in summary card and/or table cell)
-    const els = await screen.findAllByText(/₹500\.00/);
+    // ₹2,778.00 should appear (in the table cell)
+    const els = await screen.findAllByText(/₹2,778\.00/);
     expect(els.length).toBeGreaterThan(0);
   });
 
@@ -148,12 +148,12 @@ describe('TDS — Admin TDS page API wiring', () => {
     render(<AdminTdsPage />);
     // Wait for table to load
     await screen.findByText('ABCDE1234F');
-    // The outstanding ₹200.00 cell in the table row (OutstandingCell component)
+    // The outstanding ₹778.00 cell in the table row (OutstandingCell component)
     // uses className with text-red-600 for positive values
     const redEls = document.querySelectorAll('.text-red-600');
-    // At least one element with text-red-600 should contain ₹200.00
+    // At least one element with text-red-600 should contain ₹778.00
     const hasRedOutstanding = Array.from(redEls).some((el) =>
-      (el.textContent ?? '').includes('₹200.00'),
+      (el.textContent ?? '').includes('₹778.00'),
     );
     expect(hasRedOutstanding).toBe(true);
   });
@@ -162,9 +162,9 @@ describe('TDS — Admin TDS page API wiring', () => {
   it('TDS4: outstanding negative shown as credit (emerald, " cr" suffix)', async () => {
     vi.stubGlobal('fetch', make194RFetch());
     render(<AdminTdsPage />);
-    // outstandingPaise=-5000 → negated → "₹50.00 cr" with emerald class
+    // outstandingPaise=-66700 → negated → "₹667.00 cr" with emerald class
     await screen.findByText('XYZPQ9876G');
-    const creditEl = await screen.findByText(/₹50\.00 cr/);
+    const creditEl = await screen.findByText(/₹667\.00 cr/);
     expect(creditEl.className).toMatch(/emerald/);
   });
 
@@ -382,10 +382,10 @@ describe('TDS — Admin TDS page API wiring', () => {
   it('TDS16: 194R summary cards show the API totals (total* keys from the shared contract)', async () => {
     vi.stubGlobal('fetch', make194RFetch());
     render(<AdminTdsPage />);
-    expect(await screen.findByTestId('r194-summary-base')).toHaveTextContent('₹6,000.00');
-    expect(screen.getByTestId('r194-summary-liability')).toHaveTextContent('₹600.00');
-    expect(screen.getByTestId('r194-summary-deposited')).toHaveTextContent('₹450.00');
-    expect(screen.getByTestId('r194-summary-outstanding')).toHaveTextContent('₹150.00');
+    expect(await screen.findByTestId('r194-summary-base')).toHaveTextContent('₹55,000.00');
+    expect(screen.getByTestId('r194-summary-liability')).toHaveTextContent('₹6,111.00');
+    expect(screen.getByTestId('r194-summary-deposited')).toHaveTextContent('₹6,000.00');
+    expect(screen.getByTestId('r194-summary-outstanding')).toHaveTextContent('₹111.00');
   });
 
   it('TDS17: 194C summary cards show the API totals (total* keys from the shared contract)', async () => {
@@ -395,10 +395,10 @@ describe('TDS — Admin TDS page API wiring', () => {
     ));
     render(<AdminTdsPage />);
     fireEvent.click(await screen.findByRole('button', { name: /194C/ }));
-    expect(await screen.findByTestId('r194c-summary-liability')).toHaveTextContent('₹80.00');
-    expect(screen.getByTestId('r194c-summary-nothreshold')).toHaveTextContent('₹120.00');
-    expect(screen.getByTestId('r194c-summary-deposited')).toHaveTextContent('₹70.00');
-    expect(screen.getByTestId('r194c-summary-outstanding')).toHaveTextContent('₹10.00');
+    expect(await screen.findByTestId('r194c-summary-liability')).toHaveTextContent('₹2,245.00');
+    expect(screen.getByTestId('r194c-summary-nothreshold')).toHaveTextContent('₹2,245.00');
+    expect(screen.getByTestId('r194c-summary-deposited')).toHaveTextContent('₹2,000.00');
+    expect(screen.getByTestId('r194c-summary-outstanding')).toHaveTextContent('₹245.00');
   });
   // TDS18 — B-M2: a withholding row with no base this FY carries a note — shown, never silent.
   it('TDS18: a 194R row with a note shows it under the PAN', async () => {
@@ -410,5 +410,18 @@ describe('TDS — Admin TDS page API wiring', () => {
     }));
     render(<AdminTdsPage />);
     expect(await screen.findByTestId('r194-note')).toHaveTextContent('no benefit is counted this year');
+  });
+  // TDS19 — owner 2026-11-18: over-withholding is FLAGGED on screen (row + summary card), no refund.
+  it('TDS19: TDS taken in excess shows on the row and as a summary card', async () => {
+    const row = { ...CONTRACT.r194.rows[0], deductedPaise: '600000', excessDeductedPaise: '300000' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { ...CONTRACT.r194, rows: [row],
+        summary: { ...CONTRACT.r194.summary, totalExcessDeductedPaise: '300000', excessRetailerCount: 1 } } }),
+    }));
+    render(<AdminTdsPage />);
+    expect(await screen.findByTestId('r194-excess')).toHaveTextContent('TDS taken in excess: ₹3,000.00');
+    expect(screen.getByTestId('r194-summary-excess')).toHaveTextContent('₹3,000.00');
+    expect(screen.getByTestId('r194-summary-excess')).toHaveTextContent('1 retailer');
   });
 });

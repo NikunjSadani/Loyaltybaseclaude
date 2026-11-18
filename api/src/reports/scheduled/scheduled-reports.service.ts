@@ -1,3 +1,5 @@
+import { TdsService } from '../../tds/tds.service';
+import { financialYear } from '../../tds/tds.helpers';
 import { randomUUID } from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -54,8 +56,7 @@ import type {
   TenantStatus,
   VisibilitySection,
   VoucherDispersalSection,
-  VouchersSection,
-} from './report.types';
+  VouchersSection, TdsExcessSection } from './report.types';
 
 const MINUTE_MS = 60 * 1000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
@@ -149,6 +150,8 @@ export class ScheduledReportsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly msg91: Msg91Service,
+    // Owner 2026-11-18: the digest flags 194R TDS taken in excess, from the SAME 194R report the screen shows.
+    private readonly tds: TdsService,
   ) {}
 
   async runDailyReports(
@@ -499,6 +502,7 @@ export class ScheduledReportsService {
         // Loaded for EVERY tenant: a live Hubble problem must show even after the flag was switched off.
         vouchers: await section('vouchers', c, () => this.vouchers(c, window, nowMs)),
         payouts: await section('payouts', c, () => this.payouts(c, window)),
+        tds: await section('tds', c, () => this.tdsExcess(c, nowMs)),
         messages: await section('messages', c, () => this.messages(c, window)),
       };
       if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window));
@@ -690,6 +694,24 @@ export class ScheduledReportsService {
       where: { partner: { clientId }, metadata: { path: ['hubbleNeedsReconcile'], equals: true } },
     });
     return { issued, failed, stuckProcessing, needsReconcile };
+  }
+
+  /** Owner 2026-11-18: 194R retailers with TDS taken in excess this FY (flag only — no refund). */
+  private async tdsExcess(clientId: string, nowMs: number): Promise<TdsExcessSection> {
+    const fyLabel = financialYear(new Date(nowMs)).fyLabel;
+    const report = await this.tds.report194R(clientId, fyLabel);
+    const over = report.rows
+      .filter((r) => (r.excessDeductedPaise ?? 0n) > 0n)
+      .sort((a, b) => (b.excessDeductedPaise > a.excessDeductedPaise ? 1 : b.excessDeductedPaise < a.excessDeductedPaise ? -1 : 0));
+    return {
+      fyLabel,
+      excessRetailerCount: over.length,
+      totalExcessPaise: over.reduce((s, r) => s + r.excessDeductedPaise, 0n),
+      sample: over.slice(0, 10).map((r) => ({
+        retailer: r.noPanDeductee ? `NO PAN — ${r.noPanDeductee.name}` : r.panNumber,
+        excessPaise: r.excessDeductedPaise,
+      })),
+    };
   }
 
   private async payouts(clientId: string, w: DigestWindow): Promise<PayoutsSection> {

@@ -502,6 +502,33 @@ describe('buildDailyOpsDigest', () => {
     expect(html).toContain('credit failed (re-bank / reverse)');
   });
 
+  it('TDS (194R): retailers with TDS taken in excess are listed (count + amount + names) and flagged in Needs attention', () => {
+    const t = {
+      ...quietTenant('bajaj', 'Bajaj'),
+      tds: ok({
+        fyLabel: '2026-27',
+        excessRetailerCount: 2,
+        totalExcessPaise: 450000n,
+        sample: [
+          { retailer: 'ABCDE1234F', excessPaise: 300000n },
+          { retailer: 'NO PAN — Shop B', excessPaise: 150000n },
+        ],
+      }),
+    };
+    const html = buildDailyOpsDigest(input([t])).html;
+    expect(html).toContain('data-section="TDS (194R)"');
+    expect(html).toContain('ABCDE1234F');
+    expect(html).toContain('₹4,500');
+    expect(needsAttention(t)).toContain('TDS taken in excess for 2 retailers (₹4,500) — flagged, no automatic refund');
+  });
+
+  it('TDS (194R): nothing in excess → no section, no attention item', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), tds: ok({ fyLabel: '2026-27', excessRetailerCount: 0, totalExcessPaise: 0n, sample: [] }) };
+    const html = buildDailyOpsDigest(input([t])).html;
+    expect(html).not.toContain('data-section="TDS (194R)"');
+    expect(needsAttention(t)).toEqual([]);
+  });
+
   it('payouts: payouts settled by TDS withholding are a SEPARATE figure, never "paid" money (A-M3/B-M1)', () => {
     const html = buildDailyOpsDigest(input([busyTenant()])).html;
     expect(html).toContain('settled by TDS withholding');

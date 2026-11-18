@@ -310,6 +310,8 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
     clientBorneLiabilityPaise: r.clientBorneLiabilityPaise.toString(),
     deductedPaise: r.deductedPaise.toString(),
     importedVendorDepositPaise: r.importedVendorDepositPaise.toString(),
+    excessDeductedPaise: r.excessDeductedPaise.toString(),
+    carryForwardDroppedPaise: r.carryForwardDroppedPaise.toString(),
     ...(r.note ? { note: r.note } : {}),
     // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
     ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
@@ -344,6 +346,8 @@ function serializeSummary194R(s: import('./tds.service').TdsSummary194R) {
     totalDepositedPaise: s.totalDepositedPaise.toString(),
     totalOutstandingPaise: s.totalOutstandingPaise.toString(),
     rowCount: s.rowCount,
+    totalExcessDeductedPaise: (s.totalExcessDeductedPaise ?? 0n).toString(),
+    excessRetailerCount: s.excessRetailerCount ?? 0,
   };
 }
 

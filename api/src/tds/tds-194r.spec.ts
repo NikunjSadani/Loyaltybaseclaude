@@ -31,7 +31,7 @@ type Data = {
   redemptions: Array<{ clientId: string; partnerId: string; valuePaise: bigint; redemptionMode: string; deliveredAt: Date }>;
   offPlatform: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; entryDate: Date }>;
   deposits: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; forPeriod: string; depositDate: Date; uploadBatchId: string | null }>;
-  ledger: Array<{ clientId: string; panNumber: string; section: string; fyLabel: string; tdsDeductedThisPaise: bigint; outletCode?: string | null }>;
+  ledger: Array<{ clientId: string; panNumber: string; section: string; fyLabel: string; tdsDeductedThisPaise: bigint; outletCode?: string | null; carryForwardPaise?: bigint; createdAt?: Date }>;
   countFrom: string | null;
 };
 const empty = (): Data => ({ entries: [], outlets: [], partners: [], redemptions: [], offPlatform: [], deposits: [], ledger: [], countFrom: null });
@@ -451,6 +451,69 @@ describe('report — audit items B-M2 / B-M3 / B-L7 / A-M5', () => {
     d.deposits = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: null, amountPaise: 300000n, forPeriod: `${FY.fyLabel.slice(0, 4)}-06`, depositDate: inFy(70), uploadBatchId: 'DEP-' + 'c'.repeat(64) }];
     const [row] = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
     expect(row).toMatchObject({ methodology: 'GROSS_UP', liabilityPaise: 444400n, deductedPaise: 300000n, depositedPaise: 300000n, outstandingPaise: 144400n });
+  });
+});
+
+describe('over-withholding — ONLY FLAGGED (owner 2026-11-18): excess column + note, dropped carry-forward, summary total', () => {
+  const base = () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    return d;
+  };
+
+  it('no-PAN 20% withheld, then the PAN is added (10%): ₹6,000 taken vs ₹3,000 due → "TDS taken in excess: ₹3,000"', async () => {
+    const d = base();
+    d.entries = [paidVis('v1', 3000000n)];
+    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p1', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 600000n }];
+    const [row] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row).toMatchObject({ panNumber: 'ABCDE1234F', deductLiabilityPaise: 300000n, deductedPaise: 600000n, excessDeductedPaise: 300000n });
+    expect(row.note).toContain('TDS taken in excess: ₹3,000.00');
+    expect(row.note).toMatch(/no automatic refund/i);
+  });
+
+  it('DEDUCT → GROSS_UP after withholding: everything withheld from the retailer is flagged as excess (outstanding unchanged)', async () => {
+    const d = base();
+    d.entries = [paidVis('v1', 4000000n)];
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
+    d.deposits = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: null, amountPaise: 300000n, forPeriod: `${FY.fyLabel.slice(0, 4)}-06`, depositDate: inFy(70), uploadBatchId: 'DEP-' + 'c'.repeat(64) }];
+    const { tds } = services(d, 'GROSS_UP');
+    const [row] = await tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row).toMatchObject({ excessDeductedPaise: 300000n, outstandingPaise: 144400n });
+  });
+
+  it('a carry-forward that is no longer due is shown as DROPPED (not silently)', async () => {
+    const d = base();
+    d.entries = [paidVis('v1', 10500000n)];
+    d.ledger = [
+      { clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 500000n, carryForwardPaise: 550000n, createdAt: inFy(40) },
+    ];
+    // Client moved to GROSS_UP → nothing more will be withheld → the ₹5,500 still "to withhold" is dropped.
+    const [row] = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row.carryForwardDroppedPaise).toBe(550000n);
+    expect(row.note).toContain('carry-forward of ₹5,500.00 is no longer due');
+  });
+
+  it('L4: the liability tracker carries the note, deducted so far and the excess (rows + totals)', async () => {
+    const d = base();
+    d.entries = [paidVis('v1', 3000000n)];
+    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p1', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 600000n }];
+    const { tds } = services(d, 'DEDUCT');
+    jest.spyOn(tds, 'importedPayoutsCountFrom').mockResolvedValue(null);
+    const res = await tds.getLiability('194R', FY.fyLabel, CLIENT);
+    expect(res.rows[0]).toMatchObject({ deductedPaise: '600000', excessDeductedPaise: '300000' });
+    expect(res.rows[0].note).toContain('TDS taken in excess');
+    expect(res.totals).toMatchObject({ excessDeductedPaise: '300000' });
+  });
+
+  it('the summary carries the total excess (and the count of retailers with excess)', async () => {
+    const d = base();
+    d.entries = [paidVis('v1', 3000000n)];
+    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p1', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 600000n }];
+    const { tds } = services(d, 'DEDUCT');
+    jest.spyOn(tds, 'importedPayoutsCountFrom').mockResolvedValue(null);
+    const rep = await tds.report194R(CLIENT, FY.fyLabel);
+    expect(rep.summary).toMatchObject({ totalExcessDeductedPaise: 300000n, excessRetailerCount: 1 });
   });
 });
 

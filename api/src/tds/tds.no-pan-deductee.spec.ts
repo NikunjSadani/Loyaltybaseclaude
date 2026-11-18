@@ -332,7 +332,7 @@ describe('TdsService — per-deductee no-PAN', () => {
       'S.No', 'Deductee Name', 'PAN', 'Outlet Code', 'Outlet Name', 'Outlet Type', 'Section', 'Amount Paid (₹)',
       'Cash Benefits (₹)', 'Non-cash Benefits (₹)', 'Method', 'TDS Rate %',
       'Base Deducted from Retailer (₹)', 'Base Borne by Client (₹)', 'TDS — Deducted Part (₹)', 'TDS — Client-borne Part (₹)',
-      'TDS Amount (₹)', 'Deducted from Payouts So Far (₹)', 'Already Deposited (₹)', 'of which Imported Vendor TDS (₹)',
+      'TDS Amount (₹)', 'Deducted from Payouts So Far (₹)', 'TDS Taken in Excess (₹)', 'Already Deposited (₹)', 'of which Imported Vendor TDS (₹)',
       'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'Note', 'FY',
     ]);
     expect(parseSheet(buffer)[0]['Outlet Code']).toBe('O1');
@@ -601,8 +601,8 @@ describe('TdsService — per-deductee no-PAN', () => {
       expect(r.outstandingPaise).toBe(r.liabilityPaise - r.depositedPaise);
       // A PAN-only (Deoleo-style) row carries no no-PAN identity / unlinked flag / deposit months.
       expect(Object.keys(r).sort()).toEqual([
-        'baseFyTotalPaise', 'cashBasePaise', 'clientBorneBasePaise', 'clientBorneLiabilityPaise', 'deductBasePaise',
-        'deductLiabilityPaise', 'deductedPaise', 'depositedPaise', 'fyLabel', 'importedVendorDepositPaise',
+        'baseFyTotalPaise', 'carryForwardDroppedPaise', 'cashBasePaise', 'clientBorneBasePaise', 'clientBorneLiabilityPaise', 'deductBasePaise',
+        'deductLiabilityPaise', 'deductedPaise', 'depositedPaise', 'excessDeductedPaise', 'fyLabel', 'importedVendorDepositPaise',
         'liabilityPaise', 'methodology', 'nonCashBasePaise', 'outstandingPaise', 'panNumber', 'ratePct',
       ]);
     }

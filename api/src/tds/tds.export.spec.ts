@@ -74,6 +74,8 @@ const ROW_194R_PAN: TdsRow194R = {
   clientBorneLiabilityPaise: 233300n,
   deductedPaise: 0n,
   importedVendorDepositPaise: 0n,
+  excessDeductedPaise: 0n,
+  carryForwardDroppedPaise: 0n,
 };
 
 const ROW_194R_NOPAN: TdsRow194R = {
@@ -93,6 +95,8 @@ const ROW_194R_NOPAN: TdsRow194R = {
   clientBorneLiabilityPaise: 625_000n,
   deductedPaise: 0n,
   importedVendorDepositPaise: 0n,
+  excessDeductedPaise: 0n,
+  carryForwardDroppedPaise: 0n,
 };
 
 const ROW_194C_INDIVIDUAL: TdsRow194C = {
