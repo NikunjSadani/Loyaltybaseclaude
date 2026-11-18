@@ -395,6 +395,13 @@ describe('InvoicesService', () => {
       expect(mockPrisma.creditPayoutEntry.findMany).not.toHaveBeenCalled();
     });
 
+    it('owner 2026-11-18: the per-period (Path-2) generation reads ONLY 194C visibility entries (null = legacy 194C)', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      await service.generateForPeriod(admin, { period: '2025-01' });
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where.OR).toEqual([{ tdsSection: 'SEC_194C' }, { tdsSection: null }]);
+    });
+
     it('returns early if no payout entries for the period', async () => {
       mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
@@ -977,6 +984,20 @@ describe('InvoicesService', () => {
       expect(res.generated).toBe(0);
       expect(res.skipped[0].reason).toMatch(/KYC not approved/i);
       expect(mockTx.autoInvoice.create).not.toHaveBeenCalled();
+    });
+
+    it('owner 2026-11-18: ONLY visibility frozen 194C is invoiced — the entry read excludes 194R (null = legacy 194C)', async () => {
+      // The DB applies the filter; model it: the confirm's only visibility entry is frozen 194R → none returned.
+      mockTx.creditPayoutEntry.findMany.mockImplementation(async (a: { where: { OR?: unknown } }) =>
+        a.where.OR ? [] : visEntries,
+      );
+      const res = await service.generateForBatch(mockTx as never, {
+        clientId: 'bajaj', period: '2026-05', batchId: 'b1', visibilityFieldIds: ['f-vis'],
+      });
+      expect(mockTx.creditPayoutEntry.findMany.mock.calls[0][0].where.OR).toEqual([{ tdsSection: 'SEC_194C' }, { tdsSection: null }]);
+      expect(res).toEqual({ generated: 0, linked: 0, skipped: [] });
+      expect(mockTx.autoInvoice.create).not.toHaveBeenCalled();
+      expect(mockTx.gstReimbursement.create).not.toHaveBeenCalled();
     });
 
     it('no-ops when there are no visibility fields', async () => {

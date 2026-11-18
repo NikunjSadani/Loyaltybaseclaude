@@ -61,7 +61,7 @@ Set per client on the **TDS Treatment** screen (default **194C + Gross-up**). Wh
 
 ## When it fires (trigger points)
 
-1. **At Confirm** (of the monthly credits batch): every payout is **frozen** with its section + option (incentive → always 194R) (so a later config change can't rewrite it), and a **self-billed service invoice** is raised. *No tax withheld yet.*
+1. **At Confirm** (of the monthly credits batch): every payout is **frozen** with its section + option (incentive → always 194R) (so a later config change can't rewrite it), and a **self-billed service invoice** is raised — **only for visibility payouts under 194C** (a 194R visibility payout gets no service invoice and no GST holdback). *No tax withheld yet.*
 2. **At Generate Bank File** (payout download): for **visibility** payouts only, the tax is **computed and applied** — either deducted from the bank line, or grossed-up (with a TDS invoice raised for **194C** only; a **194R** client's gross-up appears on the 194R report).
 3. **Reports / CA export**: recomputed **on demand** whenever a report is opened — always current.
 
@@ -163,6 +163,7 @@ Every deposit counts against the **financial year of the month whose TDS it pays
 
 ## Invoicing, GST & recovery (visibility payouts)
 
+- **Only 194C:** service invoices and the GST holdback below apply **only to visibility payouts under 194C**. A visibility payout on a client set to **194R** is a benefit, not a service — it gets **no** service invoice and **no** GST holdback (invoices raised before 18 Nov 2026 are left as they are).
 - **Self-billed invoice:** for a visibility service the platform raises the invoice *for* the outlet — seller = the outlet, buyer = TGSL. It locks once the payout UTR is recorded.
 - **GST:** applies only to GST-registered outlets (18%). It's **held back** at payout and **released later** once the outlet proves it deposited that GST (GST Reimbursements screen).
 - **Gross-up recovery (194C only):** when gross-up is used under **194C**, the TDS cost is recovered "in lieu of TDS", split **pro-rata across the contributing clients**, shown on the Recovery screen. **194R** has no TDS invoice and no recovery line — a 194R client's gross-up TDS is its own liability, shown on the **194R report**.

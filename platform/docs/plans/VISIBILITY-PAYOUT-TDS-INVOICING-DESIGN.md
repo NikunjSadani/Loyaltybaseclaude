@@ -233,6 +233,11 @@ rows carry that FY, and the report windows PAID + PROCESSING payouts by `downloa
 client-borne part, liability, deducted so far, deposited (of which imported vendor TDS), outstanding — on screen
 (`/admin/tds`), API (`GET /v1/admin/tds/194r`) and the Excel export.
 
+**Self-billed SERVICE invoices + GST holdback are 194C-only (owner 2026-11-18).** Only visibility payouts whose frozen
+section is 194C (null = legacy 194C) are invoiced — at confirm (`generateForBatch`) and by the per-month Path-2
+generation (`generateForPeriod`), both filtered on `tdsSection`. A 194R visibility payout gets no service invoice and
+no GST holdback; invoices raised earlier are left untouched.
+
 ### 9.2 194C — unchanged (D1/D7/D8)
 Combined **across all tenants by PAN** (TGSL = single deductor): thresholds > ₹30,000 single or > ₹1,00,000 FY; rates 1%
 individual/HUF, 2% others, 20% no-PAN; FY by payout **period**; methodology = the one **frozen** on each entry. DEDUCT →

@@ -94,6 +94,9 @@ export class InvoicesService {
         clientId,
         period,
         fieldId: { in: separateFieldIds },
+        // Owner 2026-11-18: self-billed SERVICE invoices (+ GST holdback) are ONLY for visibility payouts
+        // whose frozen section is 194C (null = a legacy visibility row = 194C). 194R visibility gets none.
+        OR: [{ tdsSection: 'SEC_194C' }, { tdsSection: null }],
       },
       select: { outletId: true, amountPaise: true },
     });
@@ -416,7 +419,9 @@ export class InvoicesService {
 
     // This batch's visibility entries (created moments ago in this same tx).
     const entries = await tx.creditPayoutEntry.findMany({
-      where: { clientId, batchId, fieldId: { in: visibilityFieldIds } },
+      // Owner 2026-11-18: only visibility frozen 194C (null = legacy 194C) gets a SERVICE invoice + GST
+      // holdback; a 194R visibility payout gets neither.
+      where: { clientId, batchId, fieldId: { in: visibilityFieldIds }, OR: [{ tdsSection: 'SEC_194C' }, { tdsSection: null }] },
       select: { id: true, outletId: true, outletName: true, amountPaise: true },
     });
     if (entries.length === 0) return { generated: 0, linked: 0, skipped };
