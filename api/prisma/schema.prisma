@@ -2515,15 +2515,34 @@ model PwaInstall {
 /// login: a 7-day access token means one login spans many active days. `activityDate`
 /// is a DATE in Asia/Kolkata, so grouping by its year-month yields IST months directly.
 /// No backfill — counting begins the day this ships (greenfield).
+///
+/// Usage Report (20261118190000_user_activity_usage, docs/plans/USAGE-REPORT.md): the row is
+/// now written (throttled to ≤1 write per user per 60 s per instance) by ONE atomic SQL upsert
+/// that also accumulates visits + duration + medium:
+///   • visits        — +1 on the first tracked write of the day, or when the gap since
+///                     lastSeenAt is ≥ 30 min (a new visit). 0 = a legacy (pre-tracking) day.
+///   • activeSeconds — += (now − lastSeenAt) when that gap is < 30 min (same visit), else 0.
+///                     A MINIMUM: time between a visit's first and last recorded action.
+///   • appUsed / browserUsed — the platform's X-Client-Medium header (installed PWA vs a
+///                     browser tab) seen at least once that day (OR-accumulated).
+///   • phoneUsed / computerUsed — derived from the User-Agent, OR-accumulated.
+/// Each IST day is independent: a visit spanning midnight is split at the last action
+/// before midnight / first action after it.
 model UserActivityDay {
-  id           String   @id @default(cuid())
-  userId       String
-  clientId     String // active-context clientId from the JWT (tenant index; report scopes by User.clientId)
-  activityDate DateTime @db.Date // IST calendar day (no time component)
-  firstSeenAt  DateTime @default(now())
-  lastSeenAt   DateTime @default(now())
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String   @id @default(cuid())
+  userId        String
+  clientId      String // active-context clientId from the JWT (tenant index; report scopes by User.clientId)
+  activityDate  DateTime @db.Date // IST calendar day (no time component)
+  firstSeenAt   DateTime @default(now())
+  lastSeenAt    DateTime @default(now())
+  visits        Int      @default(0) // 0 = legacy day (tracked before the Usage Report shipped)
+  activeSeconds Int      @default(0) // minimum time in visits (first→last action per visit)
+  appUsed       Boolean  @default(false) // opened as the installed app (PWA standalone) that day
+  browserUsed   Boolean  @default(false) // opened in a browser tab that day
+  phoneUsed     Boolean  @default(false) // a phone/tablet User-Agent that day
+  computerUsed  Boolean  @default(false) // a desktop/laptop User-Agent that day
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

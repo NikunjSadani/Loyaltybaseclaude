@@ -12,6 +12,7 @@ import InstallPrompt from '@/components/pwa/InstallPrompt';
 import PushSubscriptionManager from '@/components/pwa/PushSubscriptionManager';
 import InstallBeacon from '@/components/pwa/InstallBeacon';
 import SessionExpiryGuard from '@/components/auth/SessionExpiryGuard';
+import ClientMediumHeader from '@/components/pwa/ClientMediumHeader';
 import StaleDeploymentGuard from '@/components/StaleDeploymentGuard';
 import PermissionDeniedToast from '@/components/rbac/permission-denied-toast';
 import type { PwaScope } from '@/lib/pwa/manifest';
@@ -95,6 +96,9 @@ export default async function RootLayout({
             <PermissionDeniedToast />
           </ToastProvider>
         </ClientConfigProvider>
+        {/* Usage Report: tags every same-origin /api call with X-Client-Medium (installed app vs
+            browser). Its fetch patch installs at module load — before any page request. All tenants. */}
+        <ClientMediumHeader />
         {/* Bounce to /auth/login on any /api 401 (expired/invalid token) instead of
             surfacing a cryptic "Invalid token" / blank data. App-wide. */}
         <SessionExpiryGuard />

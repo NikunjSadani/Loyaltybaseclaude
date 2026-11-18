@@ -314,6 +314,20 @@ describe('proxy — Step 2: valid token + role gating', () => {
     expect(fwd(res, 'x-user-role')).toBe('GIFSY_ADMIN');
   });
 
+  it('Usage Report: forwards the client X-Client-Medium + User-Agent headers on /api/* to the backend rewrite', async () => {
+    mockJwt.mockResolvedValue({ payload: { role: 'SSS', sub: 'p-1' } } as never);
+    const res = await run(
+      makeReq('/api/wallet', {
+        cookies: { token: 'jwt.abc.def' },
+        headers: { 'X-Client-Medium': 'app', 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) Mobile' },
+      }),
+    );
+    expect(isNext(res)).toBe(true);
+    expect(fwd(res, 'x-client-medium')).toBe('app');
+    expect(fwd(res, 'user-agent')).toBe('Mozilla/5.0 (Linux; Android 14) Mobile');
+    expect(fwd(res, 'authorization')).toBe('Bearer jwt.abc.def');
+  });
+
   it('injects x-partner-id when the JWT carries partnerId', async () => {
     mockJwt.mockResolvedValue({
       payload: { role: 'SSS', sub: 'p-9', partnerId: 'partner-77' },

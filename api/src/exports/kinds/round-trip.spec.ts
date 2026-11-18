@@ -56,6 +56,11 @@ const CASES: Record<string, Array<Record<string, unknown>>> = {
   'points-preview-report': [{ period: '2026-10' }],
   'points-payout-report': [{ period: '2026-10', program: 'Silver' }],
   'app-installed-users': [{}, { roleGroup: 'partner' }, { roleGroup: 'sales', since: '2026-11-01' }],
+  'usage-report': [
+    {},
+    { from: '2026-11-01', to: '2026-11-30', format: 'xlsx' },
+    { from: '2026-01-01', to: '2026-11-30', role: 'SSS', program: 'Gold', region: 'Maharashtra', sort: 'days', includeInactive: 'true' },
+  ],
   'billing-progress-outlets': [
     { bucket: 'BEHIND_PACE' },
     { bucket: 'P0_20', month: '2026-10', program: 'Gold', outletType: 'RETAIL', managerId: 'su-1' },

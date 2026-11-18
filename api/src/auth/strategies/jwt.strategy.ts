@@ -4,6 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ActivityTrackingService } from '../../activity/activity-tracking.service';
+import { activityContextFromRequest } from '../../activity/client-medium';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
 import { SESSION_TTL_DAYS } from '../auth.constants';
 
@@ -22,10 +23,13 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       jwtFromRequest:   ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
       secretOrKey:      secret,
+      // The request is needed ONLY to read how it arrived (X-Client-Medium + User-Agent) for the
+      // Usage Report's activity stamp; auth itself still depends solely on the verified payload.
+      passReqToCallback: true,
     });
   }
 
-  async validate(payload: JwtPayload) {
+  async validate(req: unknown, payload: JwtPayload) {
     // Bind the bearer token to its OWN session row. Tokens minted after the
     // auth-hardening change carry `sid` (the UserSession PK) → match on it, so
     // revoking/rotating that exact session invalidates this access token on its
@@ -71,9 +75,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         .catch(() => {});
     }
 
-    // Stamp this user active for today (IST) — fire-and-forget, deduped in memory,
-    // never blocks or fails the request. Feeds the Session Report's active-days metric.
-    this.activity.markActive(payload.sub, payload.clientId);
+    // Stamp this user active (IST day) with how they arrived — fire-and-forget, throttled in
+    // memory, never blocks or fails the request. Feeds the Session Report's active days and the
+    // Usage Report's visits / duration / medium. activityContextFromRequest never throws.
+    this.activity.markActive(payload.sub, payload.clientId, activityContextFromRequest(req));
 
     return payload; // Becomes req.user
   }
