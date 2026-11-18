@@ -24,6 +24,20 @@ import {
   retailerKeyOfLedgerPan,
 } from '../tds/tds-194r.shared';
 
+/** The ONE advisory-lock key for a 194R retailer's whole-year state (client, retailer key, FY). */
+function r194LockKey(clientId: string, retailerKey: string, fyLabel: string): string {
+  return `R194|${clientId}|${retailerKey}|${fyLabel}`;
+}
+
+/**
+ * A-M3: take every advisory lock in ONE round-trip — a single SELECT over the (already sorted) key
+ * array, so the locks are acquired in that order (deadlock-safe) without one query per key.
+ */
+async function lockAdvisoryKeys(tx: Prisma.TransactionClient, sortedKeys: string[]): Promise<void> {
+  if (sortedKeys.length === 0) return;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(k, 0)) FROM unnest(${sortedKeys}::text[]) WITH ORDINALITY AS t(k, n) ORDER BY n`;
+}
+
 /** 194R retailer key of a payout: its owner's PAN, else the no-PAN owner key (per partner / outlet). */
 function r194RetailerKey(
   clientId: string,
@@ -241,6 +255,26 @@ export class CreditsService {
     return section === TdsSection.SEC_194C
       ? rate194CFrom(cfg, hasPan, entityType)
       : rate194RFrom(cfg, hasPan);
+  }
+
+  /**
+   * A-L: take the 194R retailer lock(s) for withheld 194R entries, resolved from their ORIGINAL ledger
+   * rows (retailer key + the FY the withholding was booked in) — the same keys the engine takes.
+   */
+  private async lock194RForEntries(tx: Prisma.TransactionClient, clientId: string, entryIds: string[]): Promise<void> {
+    if (entryIds.length === 0) return;
+    const rows = await tx.tdsDeductionEntry.findMany({
+      where: { creditPayoutEntryId: { in: entryIds }, section: TdsSection.SEC_194R },
+      select: { panNumber: true, fyLabel: true },
+    });
+    const keys = [
+      ...new Set(
+        (rows ?? [])
+          .filter((r) => r.panNumber?.trim() && r.fyLabel)
+          .map((r) => r194LockKey(clientId, retailerKeyOfLedgerPan(r.panNumber), r.fyLabel)),
+      ),
+    ].sort();
+    if (keys.length) await lockAdvisoryKeys(tx, keys);
   }
 
   /**
@@ -2278,18 +2312,19 @@ export class CreditsService {
     const runFyLabel = financialYear(runAt).fyLabel;
     const lockKeys = new Set<string>();
     for (const e of engineEntries) {
+      if (e.tdsSection === TdsSection.SEC_194R) {
+        // A-M3: a 194R entry takes ONE key per (client, retailer key, run FY) — INSTEAD of the per-PAN
+        // key (194R state is per client). A no-PAN owner's outlets share one key. The same key is taken
+        // by the UTR-upload FAILED path and reversal approvals before they offset a withholding.
+        lockKeys.add(r194LockKey(user.clientId, r194RetailerKey(user.clientId, e.outletId, outletTaxMap.get(e.outletId)).key, runFyLabel));
+        continue;
+      }
       const pan = outletTaxMap.get(e.outletId)?.panNumber?.trim().toUpperCase();
       lockKeys.add(
         pan
           ? `PAN|${pan}|${engineFyLabel}`
           : `NOPAN|${user.clientId}|${e.outletId}|${engineFyLabel}`,
       );
-      // 194R's whole-year read/write is per (client, retailer key, run FY) — serialize on that too
-      // (a no-PAN owner's outlets share one key, so two downloads can't both under-withhold).
-      if (e.tdsSection === TdsSection.SEC_194R) {
-        const rk = r194RetailerKey(user.clientId, e.outletId, outletTaxMap.get(e.outletId)).key;
-        lockKeys.add(`R194|${user.clientId}|${rk}|${runFyLabel}`);
-      }
     }
     // D6/D9: only a download carrying 194R PAN entries needs the client's CURRENT method + the
     // imported-payouts countFrom (both fail CLOSED on a malformed stored value, before any write).
@@ -2309,9 +2344,8 @@ export class CreditsService {
     // downloads for the same PAN serialize and cannot both under-deduct / mis-attribute recovery.
     const { rec: download, deductionByOutlet } = await this.prisma.$transaction(
       async (tx) => {
-        for (const k of sortedLockKeys) {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${k}, 0))`;
-        }
+        // A-M3: all advisory locks in ONE round-trip (sorted → deadlock-safe ordering).
+        await lockAdvisoryKeys(tx, sortedLockKeys);
 
         // downloadCode generated INSIDE the tx under the PDLOCK advisory lock → sequential per
         // tenant even under concurrent downloads (unique per tenant, not globally).
@@ -2790,6 +2824,14 @@ export class CreditsService {
           paidAt: true,
         },
       });
+      // A-L: take the 194R retailer lock(s) of every withheld 194R entry in this download BEFORE any
+      // flip / offset write — the same key the engine holds while it computes withholding.
+      await this.lock194RForEntries(
+        tx,
+        user.clientId,
+        freshEntries.filter((e) => e.tdsSection === TdsSection.SEC_194R && e.tdsDeductedPaise > 0n).map((e) => e.id),
+      );
+
       // GROUP per outlet: a download can hold several entries for one outlet (one per payout row at
       // confirm), summed into ONE bank line — so a file row settles EVERY entry of that outlet.
       const freshByOutlet = new Map<string, typeof freshEntries>();
@@ -3237,6 +3279,14 @@ export class CreditsService {
         let paidReceivablePaise = 0;
         const entryNotes: string[] = [];
 
+        // A-L: lock the 194R retailer key(s) of withheld 194R entries BEFORE flipping / offsetting.
+        await this.lock194RForEntries(
+          tx,
+          user.clientId,
+          payoutEntries
+            .filter((e) => e.tdsSection === TdsSection.SEC_194R && (e.tdsDeductedPaise ?? 0n) > 0n)
+            .map((e) => e.id),
+        );
         for (const payoutEntry of payoutEntries) {
           let cur = {
             status: payoutEntry.status as string,

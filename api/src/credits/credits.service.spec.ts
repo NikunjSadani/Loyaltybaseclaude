@@ -178,6 +178,14 @@ const gifsy: JwtPayload = {
   name: '',
 };
 
+/** Every advisory-lock key taken via tx.$executeRaw (A-M3: one statement over a key ARRAY). */
+function lockKeysTaken(): string[] {
+  return mockTx.$executeRaw.mock.calls.flatMap((c: unknown[]) => {
+    const v = c[1];
+    return Array.isArray(v) ? (v as string[]) : typeof v === 'string' ? [v] : [];
+  });
+}
+
 describe('CreditsService', () => {
   let service: CreditsService;
 
@@ -3820,8 +3828,66 @@ describe('CreditsService', () => {
         mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(500000n)]);
         priorRows({});
         await download();
-        const keys = mockTx.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
-        expect(keys).toContain(`R194|deoleo|PAN1|${runFy}`);
+        // A-M3: a 194R entry takes ONE key per (client, retailer, FY) INSTEAD of the per-PAN key.
+        expect(lockKeysTaken().sort()).toEqual([`PDLOCK|deoleo|2026-05`, `R194|deoleo|PAN1|${runFy}`].sort());
+      });
+
+      it('A-M3 key count: 3 outlets of 2 retailers (194R) → exactly 2 retailer keys + 1 download key, one statement', async () => {
+        policy('DEDUCT');
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+          { ...run(100000n), id: 'a1', outletId: 'O1' },
+          { ...run(100000n), id: 'a2', outletId: 'O2' },
+          { ...run(100000n), id: 'a3', outletId: 'O3' },
+        ]);
+        const o = (code: string, pid: string, pan: string) => ({
+          ...bankOutlet('INDIVIDUAL'), outletCode: code, partner: { ...bankOutlet('INDIVIDUAL').partner, id: pid, panNumber: pan },
+        });
+        mockPrisma.outlet.findMany.mockResolvedValue([o('O1', 'p1', 'PAN1'), o('O2', 'p1', 'PAN1'), o('O3', 'p3', 'PAN3')]);
+        priorRows({});
+        await download();
+        expect(mockTx.$executeRaw).toHaveBeenCalledTimes(1);
+        expect(lockKeysTaken().sort()).toEqual(['PDLOCK|deoleo|2026-05', `R194|deoleo|PAN1|${runFy}`, `R194|deoleo|PAN3|${runFy}`]);
+      });
+
+      it('A-L race: a UTR upload that FAILS a withheld 194R payout takes the SAME retailer lock before writing the offset', async () => {
+        mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+          id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+          entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: 2500000n, tdsDeductedPaise: 250000n, tdsSection: 'SEC_194R', period: '2026-05' }],
+        });
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 2500000n, tdsDeductedPaise: 250000n, tdsSection: 'SEC_194R', period: '2026-05' },
+        ]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'e1', panNumber: 'PAN1', fyLabel: runFy }]);
+        const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', '', 'Failure', 'bounced']];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Payout');
+        const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+
+        await service.uploadUtr(gifsy, 'd1', file, true);
+
+        expect(lockKeysTaken()).toContain(`R194|deoleo|PAN1|${runFy}`);
+        // The retailer lock is taken BEFORE any entry flip / ledger write.
+        const lockOrder = mockTx.$executeRaw.mock.invocationCallOrder[mockTx.$executeRaw.mock.calls.findIndex((c: unknown[]) => Array.isArray(c[1]))];
+        expect(lockOrder).toBeLessThan(mockTx.creditPayoutEntry.updateMany.mock.invocationCallOrder[0]);
+        expect(lockOrder).toBeLessThan(mockTx.tdsDeductionEntry.createMany.mock.invocationCallOrder[0]);
+      });
+
+      it('A-L race: approving a reversal of a withheld 194R payout takes the SAME retailer lock before flipping it', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue({
+          id: 'r1', status: 'PENDING_GIFSY', requestedPaise: 2500000n, awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+        });
+        mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 2500000 }] });
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'pe1', status: 'FAILED', outletId: 'O1', amountPaise: 2500000n, tdsDeductedPaise: 250000n, tdsSection: 'SEC_194R', period: '2026-05' },
+        ]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'pe1', panNumber: 'PAN1', fyLabel: runFy, tdsDeductedThisPaise: 250000n }]);
+
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2500000 });
+
+        expect(lockKeysTaken()).toContain(`R194|deoleo|PAN1|${runFy}`);
+        const lockOrder = mockTx.$executeRaw.mock.invocationCallOrder[mockTx.$executeRaw.mock.calls.findIndex((c: unknown[]) => Array.isArray(c[1]))];
+        expect(lockOrder).toBeLessThan(mockTx.creditPayoutEntry.updateMany.mock.invocationCallOrder[0]);
       });
 
       it('194C-only download (e.g. Deoleo): no 194R reads at all — no policy read, no countFrom read, no shared base read', async () => {
@@ -3923,8 +3989,8 @@ describe('CreditsService', () => {
           mockPrisma.outlet.findMany.mockResolvedValue([noPanOutlet()]);
           priorRows({});
           await download();
-          const keys = mockTx.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
-          expect(keys).toContain(`R194|deoleo|__NO_PAN__:p1|${runFy}`);
+          expect(lockKeysTaken()).toContain(`R194|deoleo|__NO_PAN__:p1|${runFy}`);
+          expect(lockKeysTaken().some((k) => k.startsWith('NOPAN|'))).toBe(false);
         });
       });
     });
@@ -4193,9 +4259,9 @@ describe('CreditsService', () => {
 
       await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
 
-      // The advisory lock is acquired via tx.$executeRaw with the PAN|<PAN>|<FY> key.
-      expect(mockTx.$executeRaw).toHaveBeenCalled();
-      expect(mockTx.$executeRaw.mock.calls[0][1]).toBe('PAN|PAN1|2026-27');
+      // A-M3: ALL advisory locks in ONE round-trip — a single statement over the sorted key array.
+      expect(mockTx.$executeRaw).toHaveBeenCalledTimes(1);
+      expect(mockTx.$executeRaw.mock.calls[0][1]).toEqual(['PAN|PAN1|2026-27', 'PDLOCK|deoleo|2026-05']);
     });
 
     // ── FIX-9: no-PAN visibility recovery (paid full, tenant recovery, no invoice) ──
