@@ -179,7 +179,7 @@ describe('TdsService — export194R outlet columns', () => {
       'Base Deducted from Retailer (₹)', 'Base Borne by Client (₹)',
       'TDS — Deducted Part (₹)', 'TDS — Client-borne Part (₹)', 'TDS Amount (₹)',
       'Deducted from Payouts So Far (₹)', 'Already Deposited (₹)', 'of which Imported Vendor TDS (₹)',
-      'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'FY',
+      'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'Note', 'FY',
     ]);
   });
 

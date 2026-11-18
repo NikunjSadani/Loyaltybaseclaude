@@ -333,7 +333,7 @@ describe('TdsService — per-deductee no-PAN', () => {
       'Cash Benefits (₹)', 'Non-cash Benefits (₹)', 'Method', 'TDS Rate %',
       'Base Deducted from Retailer (₹)', 'Base Borne by Client (₹)', 'TDS — Deducted Part (₹)', 'TDS — Client-borne Part (₹)',
       'TDS Amount (₹)', 'Deducted from Payouts So Far (₹)', 'Already Deposited (₹)', 'of which Imported Vendor TDS (₹)',
-      'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'FY',
+      'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'Note', 'FY',
     ]);
     expect(parseSheet(buffer)[0]['Outlet Code']).toBe('O1');
   });

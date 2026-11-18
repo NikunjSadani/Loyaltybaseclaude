@@ -409,6 +409,51 @@ describe('B-L8: ONE scope rule — padded / lower-case PAN on file + a PARENT pa
   });
 });
 
+describe('report — audit items B-M2 / B-M3 / B-L7 / A-M5', () => {
+  const base = () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    return d;
+  };
+
+  it('B-M2: withholding with NO base and NO deposit this FY still gets its own row (base 0, deducted shown, note) and counts in the rows', async () => {
+    const d = base();
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 120000n }];
+    const rows = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ panNumber: 'ABCDE1234F', baseFyTotalPaise: 0n, liabilityPaise: 0n, deductedPaise: 120000n });
+    expect(rows[0].note).toMatch(/withheld .* but no benefit is counted/i);
+  });
+
+  it('B-M3: a legacy 194R DEDUCT ledger row booked under ANOTHER FY label (old period anchor) is not counted in this FY (current behaviour; prod has none)', async () => {
+    const d = base();
+    const prev = financialYear(new Date(FY.start.getTime() - 86_400_000));
+    d.entries = [paidVis('v1', 2500000n)];
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: prev.fyLabel, tdsDeductedThisPaise: 250000n }];
+    const [row] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row).toMatchObject({ deductLiabilityPaise: 250000n, deductedPaise: 0n });
+  });
+
+  it('B-L7: a portal deposit stored with a DEP-<uuid> batch id (Jun-2026 uploads) is NOT labelled imported', async () => {
+    const { isImportedDepositBatch } = await import('./tds.service');
+    expect(isImportedDepositBatch('DEP-0b7a3c1e-4f2d-4c8b-9a6e-1d2f3a4b5c6d')).toBe(false);
+    expect(isImportedDepositBatch('OP-0b7a3c1e-4f2d-4c8b-9a6e-1d2f3a4b5c6d')).toBe(false);
+    expect(isImportedDepositBatch('DEP-' + 'a'.repeat(64))).toBe(false);
+    expect(isImportedDepositBatch('bajaj-vendor-tds-fy2627-2026-11-13')).toBe(true);
+    expect(isImportedDepositBatch(null)).toBe(false);
+  });
+
+  it('A-M5: DEDUCT → GROSS_UP switch: ₹40,000 visibility, ₹3,000 withheld AND deposited → liability ₹4,444 (gross-up) → outstanding ₹1,444', async () => {
+    const d = base();
+    d.entries = [paidVis('v1', 4000000n)];
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
+    d.deposits = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: null, amountPaise: 300000n, forPeriod: `${FY.fyLabel.slice(0, 4)}-06`, depositDate: inFy(70), uploadBatchId: 'DEP-' + 'c'.repeat(64) }];
+    const [row] = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row).toMatchObject({ methodology: 'GROSS_UP', liabilityPaise: 444400n, deductedPaise: 300000n, depositedPaise: 300000n, outstandingPaise: 144400n });
+  });
+});
+
 describe('PARITY: engine and report give the same 194R TDS for the same data', () => {
   it('the engine’s whole-year due == the report’s deducted part, and deducted-so-far + this withholding == it', async () => {
     const d = empty();

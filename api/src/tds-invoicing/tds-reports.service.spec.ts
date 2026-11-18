@@ -136,5 +136,32 @@ describe('TdsReportsService', () => {
       expect(res.totals.tenantShare).toEqual({ paise: '70000', inr: 700 });
       expect(() => JSON.stringify(res)).not.toThrow();
     });
+
+    it('B-L6: legacy 194R rows (no longer raised, D7) are kept OUT of the 194C rows/totals and shown in their own section', async () => {
+      mockPrisma.tdsRecoveryEntry.findMany.mockResolvedValue([
+        {
+          clientId: 'deoleo', panNumber: 'ABCDE1234F', section: 'SEC_194C', fyLabel: '2026-27',
+          tdsInvoiceId: 'tinv1', panTdsTotalPaise: 110000n, tenantBasePaise: 700000n,
+          panBasePaise: 1100000n, tenantSharePaise: 70000n, createdAt: new Date('2026-07-01T00:00:00Z'),
+        },
+        {
+          clientId: 'deoleo', panNumber: 'ZZZZZ9999Z', section: 'SEC_194R', fyLabel: '2026-27',
+          tdsInvoiceId: 'tinv-old', panTdsTotalPaise: 50000n, tenantBasePaise: 450000n,
+          panBasePaise: 450000n, tenantSharePaise: 50000n, createdAt: new Date('2026-06-01T00:00:00Z'),
+        },
+      ]);
+
+      const res = await service.recoveryReport({ clientId: 'deoleo', fy: '2026-27' });
+
+      expect(res.count).toBe(1);
+      expect(res.rows.map((r) => r.section)).toEqual(['SEC_194C']);
+      expect(res.totals.tenantShare).toEqual({ paise: '70000', inr: 700 });
+      expect(res.earlier194R).toMatchObject({
+        label: 'Earlier 194R recoveries (no longer raised)',
+        count: 1,
+        totalTenantShare: { paise: '50000', inr: 500 },
+      });
+      expect(res.earlier194R.rows[0].panNumber).toBe('ZZZZZ9999Z');
+    });
   });
 });

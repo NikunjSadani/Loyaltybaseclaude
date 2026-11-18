@@ -64,6 +64,8 @@ interface Tds194RRow {
   clientBorneLiabilityPaise?: number | string;
   deductedPaise?: number | string;
   importedVendorDepositPaise?: number | string;
+  /** B-M2: e.g. TDS withheld with no benefit counted this year — shown, never silent. */
+  note?: string;
 }
 
 interface Tds194RResponse {
@@ -751,7 +753,12 @@ export default function AdminTdsPage() {
                       <tbody className="divide-y divide-gray-100">
                         {r194.rows.map((row, i) => (
                           <tr key={i} className="hover:bg-gray-50 transition-colors">
-                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
+                            <td className="px-4 py-3 font-mono text-xs text-gray-800">
+                              {deducteeCellLabel(row)}
+                              {row.note && (
+                                <div className="mt-1 font-sans text-[11px] text-amber-700" data-testid="r194-note">{row.note}</div>
+                              )}
+                            </td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.baseFyTotalPaise))}</td>
                             <td className="px-4 py-3 text-right text-xs text-gray-600" data-testid="r194-cash-noncash">
                               {formatINR(p(row.cashBasePaise ?? 0))} / {formatINR(p(row.nonCashBasePaise ?? 0))}

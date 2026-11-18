@@ -200,6 +200,26 @@ rows carry that FY, and the report windows PAID + PROCESSING payouts by `downloa
    client stayed on GROSS_UP: 1,05,000 × 10/90 = ₹11,667, all client-borne.)
 4. Threshold from mixed benefits: incentive ₹18,000 + UPI redemption ₹1,000 + off-platform ₹500 + visibility ₹5,000 on
    DEDUCT → ₹24,500 → only 10% × 5,000 = ₹500 withheld; 19,500 × 10/90 = ₹2,167 client-borne.
+5. DEDUCT → GROSS_UP switch (audit A-M5): ₹30,000 visibility on DEDUCT → ₹3,000 withheld and deposited; client moves to
+   GROSS_UP and pays ₹10,000 more in full → whole year ₹40,000 × 10/90 = **₹4,444** liability − ₹3,000 deposited =
+   **₹1,444** outstanding (client-borne). Handled by "liability − deposits uploaded" — no special case.
+
+**Audit follow-ups (2026-11-18):**
+- *Already deducted follows the retailer (A-M4):* a ledger row is attributed through its `outletCode` to the outlet's
+  CURRENT owner (PAN or no-PAN key), so a PAN corrected mid-year still nets (`deducted194RByRetailer`, engine + report).
+- *Withholding with no base / deposit this FY (B-M2):* still gets its own report row (base 0, "deducted so far") with a
+  `note`, in the totals and the export ("Note" column).
+- *Legacy 194R DEDUCT ledger rows booked by payout-period FY (B-M3):* none exist on prod. Such a row counts only in the FY
+  its `fyLabel` names (pinned by a spec) — no migration.
+- *Locks (A-M3/A-L):* one advisory key per (client, retailer, FY) for 194R entries (replacing the per-PAN key), all keys
+  in one statement; the UTR FAILED path and reversal approvals take the same key before writing an offset. A Bajaj-scale
+  run takes one lock per distinct retailer in the run (+1 per-download key).
+- *Scope (B-L8):* engine and report use one rule — stored PAN trimmed + upper-cased; a group parent sharing the PAN counts
+  (its redemptions).
+- *Recovery report (B-L6):* legacy 194R recovery rows are listed separately ("Earlier 194R recoveries (no longer raised)")
+  and excluded from the 194C rows/totals.
+- *Imported vendor deposit label (B-L7):* portal ids are `DEP-`/`OP-` + sha256 or + uuid; any other `uploadBatchId` is
+  shown "of which imported".
 
 **Report row fields (D10):** base, cash / non-cash base, deduct base / client-borne base, method, rate %, deduct part /
 client-borne part, liability, deducted so far, deposited (of which imported vendor TDS), outstanding — on screen

@@ -310,6 +310,7 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
     clientBorneLiabilityPaise: r.clientBorneLiabilityPaise.toString(),
     deductedPaise: r.deductedPaise.toString(),
     importedVendorDepositPaise: r.importedVendorDepositPaise.toString(),
+    ...(r.note ? { note: r.note } : {}),
     // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
     ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
   };

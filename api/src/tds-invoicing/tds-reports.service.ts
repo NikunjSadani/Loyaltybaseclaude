@@ -268,7 +268,10 @@ export class TdsReportsService {
     // rows (startsWith prefix) + subtotal them so the CA sees the tenant's no-PAN obligation, now
     // with per-outlet visibility in the panNumber cell.
     const NO_PAN = '__NO_PAN__';
-    const rows = entries.map((e) => ({
+    // B-L6: since D7 (owner 2026-11-18) only 194C is recovered from tenants. Any legacy 194R row (raised
+    // before D7; prod had none) is kept OUT of the 194C rows/totals and listed in its own section.
+    const legacy194R = entries.filter((e) => e.section === 'SEC_194R');
+    const toRow = (e: (typeof entries)[number]) => ({
       clientId: e.clientId,
       panNumber: e.panNumber,
       isNoPan: e.panNumber.startsWith(NO_PAN),
@@ -280,10 +283,12 @@ export class TdsReportsService {
       panBase: this.money(e.panBasePaise),
       tenantShare: this.money(e.tenantSharePaise),
       createdAt: e.createdAt.toISOString(),
-    }));
+    });
+    const current = entries.filter((e) => e.section !== 'SEC_194R');
+    const rows = current.map(toRow);
 
-    const totalTenantSharePaise = entries.reduce((s, e) => s + e.tenantSharePaise, 0n);
-    const noPanTenantSharePaise = entries
+    const totalTenantSharePaise = current.reduce((s, e) => s + e.tenantSharePaise, 0n);
+    const noPanTenantSharePaise = current
       .filter((e) => e.panNumber.startsWith(NO_PAN))
       .reduce((s, e) => s + e.tenantSharePaise, 0n);
 
@@ -296,6 +301,12 @@ export class TdsReportsService {
         noPanTenantShare: this.money(noPanTenantSharePaise),
       },
       rows,
+      earlier194R: {
+        label: 'Earlier 194R recoveries (no longer raised)',
+        count: legacy194R.length,
+        totalTenantShare: this.money(legacy194R.reduce((s, e) => s + e.tenantSharePaise, 0n)),
+        rows: legacy194R.map(toRow),
+      },
     };
   }
 
@@ -320,10 +331,26 @@ export class TdsReportsService {
       { Metric: 'Total Tenant Share — in lieu of TDS (₹)', Value: report.totals.tenantShare.inr },
       { Metric: 'No-PAN Tenant Share — in lieu of TDS (₹)', Value: report.totals.noPanTenantShare.inr },
     ];
-    const buffer = buildXlsx([
+    const sheets = [
       { name: 'Recovery', rows: sheetRows },
       { name: 'Summary', rows: summaryRows },
-    ]);
+    ];
+    // B-L6: legacy 194R rows (no longer raised) on their own sheet — never mixed into the 194C figures.
+    if (report.earlier194R.count > 0) {
+      sheets.push({
+        name: 'Earlier 194R (not raised)',
+        rows: report.earlier194R.rows.map((r, i) => ({
+          'S.No': i + 1,
+          Client: r.clientId,
+          PAN: r.panNumber,
+          FY: r.fyLabel,
+          'Tenant Share (₹)': r.tenantShare.inr,
+          'TDS Invoice ID': r.tdsInvoiceId ?? '',
+          'Recorded At': r.createdAt,
+        })) as unknown as typeof sheetRows,
+      });
+    }
+    const buffer = buildXlsx(sheets);
     const suffix = scope.clientId ? scope.clientId : 'all';
     return { buffer, filename: `tds-recovery-report-${suffix}.xlsx` };
   }

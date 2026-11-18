@@ -400,4 +400,15 @@ describe('TDS — Admin TDS page API wiring', () => {
     expect(screen.getByTestId('r194c-summary-deposited')).toHaveTextContent('₹70.00');
     expect(screen.getByTestId('r194c-summary-outstanding')).toHaveTextContent('₹10.00');
   });
+  // TDS18 — B-M2: a withholding row with no base this FY carries a note — shown, never silent.
+  it('TDS18: a 194R row with a note shows it under the PAN', async () => {
+    const row = { ...CONTRACT.r194.rows[0], baseFyTotalPaise: '0', liabilityPaise: '0', deductedPaise: '120000',
+      note: 'TDS was withheld from this retailer this year but no benefit is counted this year — check before filing.' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { ...CONTRACT.r194, rows: [row] } }),
+    }));
+    render(<AdminTdsPage />);
+    expect(await screen.findByTestId('r194-note')).toHaveTextContent('no benefit is counted this year');
+  });
 });

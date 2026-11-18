@@ -143,7 +143,8 @@ function summariseRows(
  * `OP-<sha256>`. Informational only ("of which imported vendor TDS"); never changes an amount.
  */
 export function isImportedDepositBatch(uploadBatchId: string | null | undefined): boolean {
-  return !!uploadBatchId && !/^(DEP|OP)-[0-9a-f]{64}$/.test(uploadBatchId);
+  // Portal uploads: `DEP-`/`OP-` + a sha256 file hash, or + a uuid (uploads of 2026-06-18..21).
+  return !!uploadBatchId && !/^(DEP|OP)-([0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(uploadBatchId);
 }
 
 /**
@@ -219,6 +220,8 @@ export interface TdsRow194R {
   deductedPaise: bigint;
   /** Of `depositedPaise`, the part from imported vendor TDS batches (informational). */
   importedVendorDepositPaise: bigint;
+  /** B-M2: a plain-language flag for a row that needs a look (e.g. withholding with no base this FY). */
+  note?: string;
   /** "TDS for month" (YYYY-MM, ascending) of the deposits counted on this row — absent when none. */
   depositForPeriods?: string[];
 }
@@ -513,6 +516,20 @@ export class TdsService {
     const rows: TdsRow194R[] = [];
     for (const [key, b] of accum) rows.push(rowFor(key, b));
     for (const key of depositOnlyPanKeys) rows.push(rowFor(key, emptyBases194R(!isNoPanKey(key))));
+    // B-M2: TDS withheld this FY for a retailer with NO benefit counted and NO deposit this FY still gets
+    // its own row (base 0, "deducted so far") — never silently dropped from the report / export.
+    for (const [key, amt] of deducted) {
+      if (amt !== 0n && !accum.has(key) && !depositOnlyPanKeys.has(key)) {
+        rows.push(rowFor(key, emptyBases194R(!isNoPanKey(key))));
+      }
+    }
+    for (const r of rows) {
+      if (r.baseFyTotalPaise === 0n && r.deductedPaise !== 0n) {
+        r.note =
+          'TDS was withheld from this retailer this year but no benefit is counted this year (for example the payout was ' +
+          'reversed or moved) — check before filing.';
+      }
+    }
     if (unlinkedNoPanDepositPaise > 0n) {
       rows.push({
         ...rowFor(UNLINKED_NO_PAN_DEPOSIT_KEY, emptyBases194R(false)),
@@ -1709,6 +1726,7 @@ export class TdsService {
         'of which Imported Vendor TDS (₹)': moneyCell(r.importedVendorDepositPaise),
         'Deposits — TDS for Month(s)': depositMonthsCell(r.depositForPeriods),
         'Outstanding (₹)': moneyCell(r.outstandingPaise),
+        Note: cellSafe(r.note ?? ''),
         FY: fyLabel,
       };
     });
