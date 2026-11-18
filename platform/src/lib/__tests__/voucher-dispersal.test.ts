@@ -11,6 +11,7 @@ import {
   normalizeDetail, normalizeListItem, normalizePreview, normalizeRow, normalizeRowsPage, pendingReasonText, plural, pollPhase,
   rowStatusText, shouldNudgeProcessing, validateCreateForm, vdApi, PENDING_RECONCILE_NOTE, POLL_AFTER_COMPLETE_MS, POLL_MAX_MS,
   batchConfirmBlock, editChangeText, editPayload, validateEditForm, normalizeBatch, normalizeCancelResult,
+  parseRupeeInput, rupeeEcho, RUPEE_COMMA_ERROR,
   type VdPreview, type VdPreviewSummary,
 } from '@/lib/voucher-dispersal';
 
@@ -321,18 +322,36 @@ describe('batch / cancel normalisers', () => {
 });
 
 // ─── UI/UX audit fixes (2026-11-18) ─────────────────────────────────────────────
-describe('rupee input: commas / spaces stripped, the decimal point KEPT (never "2500.00" → 250000)', () => {
-  it('cleanRupeeInput + validation', async () => {
-    const { cleanRupeeInput, rupeeEcho } = await import('@/lib/voucher-dispersal');
-    expect(cleanRupeeInput('2,500')).toBe('2500');
-    expect(cleanRupeeInput(' 2 500 ')).toBe('2500');
-    expect(cleanRupeeInput('2500.00')).toBe('2500.00');
-    expect(validateEditForm({ name: 'Diwali', budgetRupees: cleanRupeeInput('2500.00') }, { name: 'Diwali', budgetRupees: 5000 }, 0).budgetRupees)
-      .toBe('Enter the budget in whole rupees (no paise).');
-    expect(validateCreateForm({ name: 'x', programLabel: 'y', billedToClientId: '', note: '', budgetRupees: cleanRupeeInput('2500.00') }).budgetRupees)
-      .toBe('Enter the budget in whole rupees (no paise).');
+describe('rupee input: typed as-is, parsed strictly (decimal point kept, commas only in real grouping, a leading ₹ ok)', () => {
+  const create = (budgetRupees: string) => validateCreateForm({ name: 'x', programLabel: 'y', billedToClientId: '', note: '', budgetRupees }).budgetRupees;
+  const edit = (budgetRupees: string) => validateEditForm({ name: 'Diwali', budgetRupees }, { name: 'Diwali', budgetRupees: 5000 }, 0).budgetRupees;
+  it('parseRupeeInput', () => {
+    expect(parseRupeeInput('2500')).toEqual({ clean: '2500', error: null });
+    expect(parseRupeeInput('2,500')).toEqual({ clean: '2500', error: null });
+    expect(parseRupeeInput('1,25,000')).toEqual({ clean: '125000', error: null });
+    expect(parseRupeeInput('1,250,000')).toEqual({ clean: '1250000', error: null });
+    expect(parseRupeeInput('₹2,500')).toEqual({ clean: '2500', error: null });
+    expect(parseRupeeInput(' ₹ 2,500 ')).toEqual({ clean: '2500', error: null });
+    expect(parseRupeeInput('2500.00')).toEqual({ clean: '2500.00', error: null });
+    // L1: commas that are not a thousands grouping are refused — never silently "25,00" → ₹2,500.
+    for (const bad of ['25,00', '2,50', '1,2,3', ',2500', '2500,', '2,5000', '12,34,5678']) {
+      expect(parseRupeeInput(bad).error).toBe(RUPEE_COMMA_ERROR);
+    }
+  });
+  it('validation uses it (create + edit): "2500.00" whole rupees; "25,00" comma message; "₹2,500" accepted', () => {
+    expect(create('2500.00')).toBe('Enter the budget in whole rupees (no paise).');
+    expect(edit('2500.00')).toBe('Enter the budget in whole rupees (no paise).');
+    expect(create('25,00')).toBe(RUPEE_COMMA_ERROR);
+    expect(edit('25,00')).toBe(RUPEE_COMMA_ERROR);
+    expect(create('₹2,500')).toBeUndefined();
+    expect(edit('₹2,500')).toBeUndefined();
+    expect(editPayload({ name: 'Diwali', budgetRupees: '₹7,000' }, { name: 'Diwali', budgetRupees: 5000 })).toEqual({ budgetRupees: 7000 });
+  });
+  it('echo', () => {
     expect(rupeeEcho('2500')).toBe('= ₹2,500');
+    expect(rupeeEcho('₹1,25,000')).toBe('= ₹1,25,000');
     expect(rupeeEcho('2500.00')).toBe('= ₹2,500');
+    expect(rupeeEcho('25,00')).toBeNull();
     expect(rupeeEcho('abc')).toBeNull();
     expect(rupeeEcho('')).toBeNull();
   });

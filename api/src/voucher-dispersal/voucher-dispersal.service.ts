@@ -32,6 +32,7 @@ import {
   LOCAL_FAILURE_SOURCES,
   MAX_RESENDS,
   VoucherDispersalProcessor,
+  CAMPAIGN_LOCK_TX,
   budgetBreakdown,
   type BudgetBreakdown,
 } from './voucher-dispersal.processor';
@@ -317,7 +318,7 @@ export class VoucherDispersalService {
         }
         return tx.voucherDispersalCampaign.findUniqueOrThrow({ where: { id } });
       },
-      { timeout: 60_000 },
+      CAMPAIGN_LOCK_TX,
     );
 
     const summary = this.previewSummary(
@@ -475,15 +476,15 @@ export class VoucherDispersalService {
       const validCount = valid._count._all;
       const totalPaise = BigInt(valid._sum.amountPaise ?? 0n);
       if (validCount === 0) throw new BadRequestException('There are no valid rows to issue.');
-      if (totalPaise > BigInt(camp.budgetPaise)) {
-        throw new BadRequestException(
-          `The valid rows total ₹${rupees(totalPaise).toLocaleString('en-IN')}, over the ₹${rupees(camp.budgetPaise).toLocaleString('en-IN')} budget. Remove rows, or Edit campaign to raise the budget.`,
-        );
-      }
-      // Stale-preview protection: confirm exactly what the admin saw.
+      // Stale-preview protection FIRST (re-review L8): confirm exactly what the admin saw, then the budget.
       if (dto.expectedValidCount !== validCount || BigInt(dto.expectedTotalRupees) * 100n !== totalPaise) {
         throw new ConflictException(
           `The preview changed: it now has ${validCount} valid row(s) totalling ₹${rupees(totalPaise).toLocaleString('en-IN')} (you confirmed ${dto.expectedValidCount} / ₹${Number(dto.expectedTotalRupees).toLocaleString('en-IN')}). Review the preview again.`,
+        );
+      }
+      if (totalPaise > BigInt(camp.budgetPaise)) {
+        throw new BadRequestException(
+          `The valid rows total ₹${rupees(totalPaise).toLocaleString('en-IN')}, over the ₹${rupees(camp.budgetPaise).toLocaleString('en-IN')} budget. Remove rows, or Edit campaign to raise the budget.`,
         );
       }
       const q = await tx.voucherDispersalRow.updateMany({
@@ -497,7 +498,7 @@ export class VoucherDispersalService {
         data: { status: CS.PROCESSING, confirmedById: user.sub, confirmedAt: now },
       });
       return { updated, validCount, totalRupees: rupees(totalPaise), repeat: false };
-    });
+    }, CAMPAIGN_LOCK_TX);
     if (result.repeat) return this.campaignView(result.updated);
     await this.auditCampaign(user, id, 'APPROVE', 'VOUCHER_DISPERSAL_CONFIRMED', {
       previewId: dto.previewId,
@@ -536,6 +537,9 @@ export class VoucherDispersalService {
    */
   async editCampaign(user: JwtPayload, id: string, dto: EditDispersalCampaignDto) {
     this.assertAdmin(user);
+    // null is "not a value" — a 400, never a crash (the DTO refuses it too).
+    if ((dto as { name?: unknown }).name === null) throw new BadRequestException('The campaign name cannot be empty.');
+    if ((dto as { budgetRupees?: unknown }).budgetRupees === null) throw new BadRequestException('Budget must be a whole number of rupees above 0.');
     const name = dto.name === undefined ? undefined : dto.name.replace(/\s+/g, ' ').trim();
     if (name !== undefined && !name) throw new BadRequestException('The campaign name cannot be empty.');
     if (name === undefined && dto.budgetRupees === undefined) {
@@ -567,7 +571,7 @@ export class VoucherDispersalService {
         Object.fromEntries(changes.map((c) => [c.field, c.field === 'name' ? src.name : rupees(src.budgetPaise)]));
       await this.auditCampaignTx(tx, user, id, 'UPDATE', EDIT_EVENT, { changes }, { oldValues: pickChanged(camp), newValues: pickChanged(updated) });
       return { updated };
-    });
+    }, CAMPAIGN_LOCK_TX);
     return this.campaignView(r.updated);
   }
 
@@ -803,8 +807,9 @@ export class VoucherDispersalService {
         });
         return { camp, view };
       },
-      // Short: only re-checks + writes run under the lock (≤ 5,000 rows inserted in chunks of 1,000).
-      { timeout: 20_000 },
+      // Only re-checks + writes run under the lock (≤ 5,000 rows inserted in chunks of 1,000); the same
+      // timeout / maxWait as every other campaign-lock transaction, so none of them times out waiting.
+      CAMPAIGN_LOCK_TX,
     );
     return { ...res.view, campaign: await this.campaignView(res.camp) };
   }
@@ -946,15 +951,16 @@ export class VoucherDispersalService {
       const validCount = valid._count._all;
       const totalPaise = BigInt(valid._sum.amountPaise ?? 0n);
       if (validCount === 0) throw new BadRequestException('There are no valid rows in this batch to issue.');
+      // A changed preview is reported before the budget (re-review L8).
+      if (dto.expectedValidCount !== validCount || BigInt(dto.expectedTotalRupees) * 100n !== totalPaise) {
+        throw new ConflictException(
+          `The preview changed: it now has ${validCount} valid row(s) totalling ${inr(totalPaise)} (you confirmed ${dto.expectedValidCount} / ₹${Number(dto.expectedTotalRupees).toLocaleString('en-IN')}). Review the preview again.`,
+        );
+      }
       const { floorPaise } = await this.budgetUsage(tx, id);
       if (floorPaise + totalPaise > BigInt(camp.budgetPaise)) {
         throw new BadRequestException(
           `This batch's valid rows total ${inr(totalPaise)}; with ${inr(floorPaise)} already spent or committed that makes ${inr(floorPaise + totalPaise)}, over the ${inr(camp.budgetPaise)} budget. Raise the budget (Edit campaign) or remove rows, then confirm again.`,
-        );
-      }
-      if (dto.expectedValidCount !== validCount || BigInt(dto.expectedTotalRupees) * 100n !== totalPaise) {
-        throw new ConflictException(
-          `The preview changed: it now has ${validCount} valid row(s) totalling ${inr(totalPaise)} (you confirmed ${dto.expectedValidCount} / ₹${Number(dto.expectedTotalRupees).toLocaleString('en-IN')}). Review the preview again.`,
         );
       }
       const now = new Date();
@@ -980,7 +986,7 @@ export class VoucherDispersalService {
         fromStatus: camp.status,
       });
       return { repeat: false as const, updated };
-    });
+    }, CAMPAIGN_LOCK_TX);
     if (result.repeat) return this.campaignView(await this.getCampaignOr404(id));
     this.processor.kick(id);
     return this.campaignView(result.updated);
@@ -1025,7 +1031,7 @@ export class VoucherDispersalService {
       const discardedRows = await this.discardPendingBatchTx(tx, id, batch, user.sub, 'Discarded by an admin before confirming');
       await this.auditCampaignTx(tx, user, id, 'UPDATE', 'VOUCHER_DISPERSAL_BATCH_DISCARDED', { batchNumber: n, discardedRows });
       return { camp, discardedRows };
-    });
+    }, CAMPAIGN_LOCK_TX);
     return { campaign: await this.campaignView(r.camp), batchNumber: n, discardedRows: r.discardedRows };
   }
 
@@ -1153,7 +1159,6 @@ export class VoucherDispersalService {
         buyFailed: n(RS.BUY_FAILED),
         cancelled: n(RS.CANCELLED),
         spentRupees: rupees(sumOf([RS.BOUGHT])),
-        committedRupees: rupees(sumOf([RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT])),
         /** The lowest the budget may be edited down to (spent + committed + queued). */
         budgetFloorRupees: rupees(usage.floorPaise),
         /** The SAME breakdown the floor, batch confirm and retry checks use (money-audit M1). */
@@ -1654,7 +1659,7 @@ export class VoucherDispersalService {
         return { c, from, cancelledRows: r.count, inFlight, bought, discardedPendingBatchRows };
       }
       throw new ConflictException(`A ${from} campaign cannot be cancelled.`);
-    });
+    }, CAMPAIGN_LOCK_TX);
     await this.auditCampaign(user, id, 'UPDATE', 'VOUCHER_DISPERSAL_CANCELLED', {
       fromStatus: result.from,
       cancelledRows: result.cancelledRows,

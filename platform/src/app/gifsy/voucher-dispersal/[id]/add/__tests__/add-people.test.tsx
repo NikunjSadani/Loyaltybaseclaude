@@ -227,6 +227,19 @@ describe('Add more people', () => {
     expect(screen.getByLabelText('Choose file')).toBeInTheDocument();
   });
 
+  it('a waiting batch on a campaign a retry re-opened: preview shown, but Buy & send replaced by the server reason', async () => {
+    detailRes = ok(detail({
+      campaign: { status: 'PROCESSING', addPeopleBlockedReason: 'Vouchers in this campaign are still being bought — you can add more people once every purchase has finished (the campaign shows Completed).' },
+      batches: [{ batchNumber: 1, status: 'CONFIRMED' }, { batchNumber: 2, status: 'PREVIEWED', previewId: 'pv2', sourceFileName: 'more.xlsx' }],
+    }));
+    render(<AddPeoplePage />);
+    expect(await screen.findByTestId('vd-summary')).toHaveTextContent('Batch 2');
+    expect(screen.queryByTestId('vd-buy-send')).not.toBeInTheDocument();
+    expect(screen.getByTestId('vd-buy-blocked')).toHaveTextContent('still being bought');
+    // Discard stays available (it never buys anything).
+    expect(screen.getByTestId('vd-discard')).toBeInTheDocument();
+  });
+
   it('a campaign that cannot take people now shows the server reason and no upload', async () => {
     detailRes = ok(detail({ campaign: { status: 'PROCESSING', addPeopleBlockedReason: 'Vouchers in this campaign are still being bought — you can add more people once every purchase has finished (the campaign shows Completed).' } }));
     render(<AddPeoplePage />);

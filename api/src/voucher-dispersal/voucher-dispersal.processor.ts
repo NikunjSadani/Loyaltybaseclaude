@@ -52,27 +52,40 @@ import { VARIABLE_CONTRACTS, whatsappTemplateDefault } from '../notification-tem
 export function budgetCommittedWhere(campaignId: string): Prisma.VoucherDispersalRowWhereInput {
   return {
     campaignId,
-    OR: [
-      { status: { in: [RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT] } },
-      { status: RS.BUY_FAILED, referenceSentAt: { not: null } },
-    ],
+    OR: [{ status: { in: [RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT] } }, failedMayStillCompleteWhere],
   };
 }
+
+/**
+ * A BUY_FAILED row Hubble may still complete: its CURRENT reference reached Hubble, and the failure is NOT a
+ * `REJECTED` one (Hubble refused the order AND the canary verified "no order" — owner decision 2026-11-18:
+ * released from the budget). `HUBBLE_FAILED` (Hubble's own FAILED body) keeps counting: `applyBody` still
+ * delivers a later SUCCESS for it. OR-wrapped so a NULL source is never dropped by `not`.
+ */
+export const failedMayStillCompleteWhere: Prisma.VoucherDispersalRowWhereInput = {
+  status: RS.BUY_FAILED,
+  referenceSentAt: { not: null },
+  OR: [{ buyFailureSource: null }, { buyFailureSource: { not: 'REJECTED' } }],
+};
+
+/**
+ * Options for every transaction that takes the campaign row lock (edit, confirm, batch upload / confirm /
+ * discard, cancel, buy claim, retry re-queue, settle). One budget so a lock held by the longest of them
+ * (a batch insert) never times the others out at Prisma's 5 s default (P2028).
+ */
+export const CAMPAIGN_LOCK_TX = { timeout: 30_000, maxWait: 25_000 } as const;
 /**
  * ONE definition of "can still cost this campaign money" — the buy-time guard (`budgetCommittedWhere`, which
  * is this minus QUEUED: the row being claimed is the one queued amount it adds), the budget floor (edit),
  * batch confirm, the retry check and the detail page's budget breakdown all use it:
- *   BOUGHT (spent) · BUYING + PENDING_RECONCILE (with Hubble, not yet confirmed) · BUY_FAILED whose current
- *   reference reached Hubble (failed purchases Hubble may still complete) · QUEUED (confirmed, not yet bought).
+ *   BOUGHT (spent) · BUYING + PENDING_RECONCILE (with Hubble, not yet confirmed) · BUY_FAILED Hubble may still
+ *   complete (`failedMayStillCompleteWhere` — REJECTED excluded) · QUEUED (confirmed, not yet bought).
  */
 export function mayStillCostWhere(campaignId: string, excludeRowId?: string): Prisma.VoucherDispersalRowWhereInput {
   return {
     campaignId,
     ...(excludeRowId ? { id: { not: excludeRowId } } : {}),
-    OR: [
-      { status: { in: [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT] } },
-      { status: RS.BUY_FAILED, referenceSentAt: { not: null } },
-    ],
+    OR: [{ status: { in: [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT] } }, failedMayStillCompleteWhere],
   };
 }
 
@@ -570,7 +583,7 @@ export class VoucherDispersalProcessor {
           },
         });
         return c.count === 1 ? ('CLAIMED' as const) : ('LOST' as const);
-      });
+      }, CAMPAIGN_LOCK_TX);
     } catch (e) {
       this.logger.error(`[dispersal] claim failed for row ${row.id} (left QUEUED): ${e}`);
       return 'LOST';
@@ -917,7 +930,12 @@ export class VoucherDispersalProcessor {
     const ids = new Set([...camps.map((c) => c.id), ...alsoIds]);
     let n = 0;
     for (const id of ids) {
-      if (await this.settleCampaign(id)) n++;
+      try {
+        if (await this.settleCampaign(id)) n++;
+      } catch (e) {
+        // Logged and retried on the next pass — never blocks the other campaigns' settle.
+        this.logger.error(`[dispersal] settle failed for campaign ${id} (retried next pass): ${e}`);
+      }
     }
     return n;
   }
@@ -964,7 +982,7 @@ export class VoucherDispersalProcessor {
         data: { status: to, ...(camp.status === CS.PROCESSING ? { completedAt: new Date() } : {}) },
       });
       return { from: camp.status, to, failed, msgFailed };
-    });
+    }, CAMPAIGN_LOCK_TX);
     if (!r) return false;
     await this.prisma.auditLog
       .create({
@@ -1012,7 +1030,7 @@ export class VoucherDispersalProcessor {
         await tx.voucherDispersalCampaign.update({ where: { id: campaignId }, data: { status: CS.PROCESSING, completedAt: null } });
       }
       return 'OK' as const;
-    });
+    }, CAMPAIGN_LOCK_TX);
   }
 
   /** System audit row for a row event (codes masked by the caller — never in clear). Never throws. */

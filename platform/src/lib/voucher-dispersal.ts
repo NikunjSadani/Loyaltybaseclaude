@@ -816,19 +816,30 @@ export function confirmDialogTitle(s: Pick<VdPreviewSummary, 'valid' | 'totalRup
   return `Buy and send ${formatCount(s.valid)} ${s.valid === 1 ? 'voucher' : 'vouchers'} · ${formatRupees(s.totalRupees)} total?`;
 }
 
+export const RUPEE_COMMA_ERROR =
+  'Use commas only between thousands (e.g. 2,500 or 1,25,000) — or type the amount without commas.';
+
 /**
- * A rupee amount as typed: thousands separators / spaces are dropped, the DECIMAL POINT IS KEPT, so "2500.00"
- * stays visible and the "whole rupees (no paise)" check refuses it (stripping it would silently make ₹2,50,000).
+ * A rupee amount exactly as typed → its plain digits (the box keeps what was typed). A leading ₹ and outer
+ * spaces are dropped; the DECIMAL POINT IS KEPT (so "2500.00" is refused as paise, never read as ₹2,50,000);
+ * commas are accepted ONLY as a real thousands grouping — Indian (1,25,000) or Western (1,250,000) — anything
+ * else ("25,00") is refused with `RUPEE_COMMA_ERROR`, never silently joined into another number.
  */
-export function cleanRupeeInput(v: string): string {
-  return v.replace(/[,\s]/g, '');
+export function parseRupeeInput(raw: string): { clean: string; error: string | null } {
+  const t = raw.trim().replace(/^₹\s*/, '');
+  if (!t.includes(',')) return { clean: t, error: null };
+  const [whole, ...rest] = t.split('.');
+  const indian = /^\d{1,2}(,\d{2})*,\d{3}$/.test(whole);
+  const western = /^\d{1,3}(,\d{3})+$/.test(whole);
+  if (rest.length > 1 || (!indian && !western)) return { clean: t, error: RUPEE_COMMA_ERROR };
+  return { clean: [whole.replace(/,/g, ''), ...rest].join('.'), error: null };
 }
 
-/** "= ₹2,500" echo of what was typed (null when it is not a number). */
+/** "= ₹2,500" echo of what was typed (null when it is not a valid number). */
 export function rupeeEcho(raw: string): string | null {
-  const t = raw.trim();
-  if (!/^\d+(\.\d+)?$/.test(t)) return null;
-  const n = Number(t);
+  const { clean, error } = parseRupeeInput(raw);
+  if (error || !/^\d+(\.\d+)?$/.test(clean)) return null;
+  const n = Number(clean);
   return Number.isFinite(n) && n > 0 ? `= ${formatRupees(n)}` : null;
 }
 
@@ -910,9 +921,10 @@ export function validateEditForm(f: EditForm, current: Pick<VdCampaign, 'name' |
   const name = f.name.replace(/\s+/g, ' ').trim();
   if (!name) errors.name = 'Enter a campaign name.';
   else if (name.length > VD_NAME_MAX) errors.name = `Keep the campaign name to ${VD_NAME_MAX} characters.`;
-  const raw = f.budgetRupees.trim();
+  const { clean: raw, error: rawError } = parseRupeeInput(f.budgetRupees);
   const b = Number(raw);
-  if (raw === '' || !Number.isFinite(b) || b <= 0) errors.budgetRupees = 'Enter a budget in rupees greater than 0.';
+  if (rawError) errors.budgetRupees = rawError;
+  else if (raw === '' || !Number.isFinite(b) || b <= 0) errors.budgetRupees = 'Enter a budget in rupees greater than 0.';
   else if (!/^\d+$/.test(raw)) errors.budgetRupees = 'Enter the budget in whole rupees (no paise).';
   else if (b > VD_BUDGET_MAX_RUPEES) errors.budgetRupees = `The budget can be at most ${formatRupees(VD_BUDGET_MAX_RUPEES)} per campaign.`;
   else if (floorRupees !== null && b < floorRupees) {
@@ -927,7 +939,7 @@ export function validateEditForm(f: EditForm, current: Pick<VdCampaign, 'name' |
 /** PATCH body: only the fields that changed. */
 export function editPayload(f: EditForm, current: Pick<VdCampaign, 'name' | 'budgetRupees'>): { name?: string; budgetRupees?: number } {
   const name = f.name.replace(/\s+/g, ' ').trim();
-  const b = Number(f.budgetRupees.trim());
+  const b = Number(parseRupeeInput(f.budgetRupees).clean);
   return { ...(name !== current.name ? { name } : {}), ...(b !== current.budgetRupees ? { budgetRupees: b } : {}) };
 }
 
@@ -1024,9 +1036,10 @@ export function validateCreateForm(f: CreateForm): Partial<Record<keyof CreateFo
   if (!f.programLabel.trim()) errors.programLabel = 'Enter the programme name shown in the WhatsApp message.';
   else if (f.programLabel.trim().length > VD_PROGRAM_LABEL_MAX) errors.programLabel = `Keep the programme name to ${VD_PROGRAM_LABEL_MAX} characters.`;
   if (f.note.trim().length > VD_NOTE_MAX) errors.note = `Keep the note to ${VD_NOTE_MAX} characters.`;
-  const raw = f.budgetRupees.trim();
+  const { clean: raw, error: rawError } = parseRupeeInput(f.budgetRupees);
   const b = Number(raw);
-  if (raw === '' || !Number.isFinite(b) || b <= 0) errors.budgetRupees = 'Enter a budget in rupees greater than 0.';
+  if (rawError) errors.budgetRupees = rawError;
+  else if (raw === '' || !Number.isFinite(b) || b <= 0) errors.budgetRupees = 'Enter a budget in rupees greater than 0.';
   else if (!/^\d+$/.test(raw)) errors.budgetRupees = 'Enter the budget in whole rupees (no paise).';
   else if (b > VD_BUDGET_MAX_RUPEES) errors.budgetRupees = `The budget can be at most ${formatRupees(VD_BUDGET_MAX_RUPEES)} per campaign.`;
   return errors;

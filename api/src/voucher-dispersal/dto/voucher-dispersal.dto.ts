@@ -1,4 +1,4 @@
-import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength, ValidateIf } from 'class-validator';
 import { Type } from 'class-transformer';
 
 /** POST /v1/admin/voucher-dispersal/campaigns */
@@ -60,13 +60,14 @@ export class ConfirmDispersalCampaignDto {
  * but never below what is already spent + committed (computed server-side under the campaign lock).
  */
 export class EditDispersalCampaignDto {
-  @IsOptional()
+  // ValidateIf (not IsOptional): an omitted field is skipped, but an explicit null is validated → 400.
+  @ValidateIf((o: EditDispersalCampaignDto) => o.name !== undefined)
   @IsString()
   @MaxLength(120)
   name?: string;
 
   /** Whole rupees (same bounds as create). */
-  @IsOptional()
+  @ValidateIf((o: EditDispersalCampaignDto) => o.budgetRupees !== undefined)
   @Type(() => Number)
   @IsInt()
   @Min(1)

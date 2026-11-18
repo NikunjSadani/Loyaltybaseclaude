@@ -96,7 +96,7 @@ const IGNORED: Record<string, string[]> = {
     ...CAMPAIGN_IGNORED.map((k) => `campaign.${k}`),
     'summary.total', 'summary.invalid', 'summary.duplicates', 'summary.totalRupees', 'summary.budgetRupees',
     'summary.overBudget', 'summary.perBrand', 'summary.queued', 'summary.buying', 'summary.pendingReconcile',
-    'summary.committedRupees',
+    // (summary.committedRupees removed from the server 2026-11-18 — budgetUsage is the one breakdown.)
     ...BATCH_IGNORED.map((k) => `batches[].${k}`),
     'edits[].byId', // the server's name is shown
   ],
@@ -236,6 +236,7 @@ describe('voucher-dispersal UI ⇄ server contract (fixture from the real server
     expect(d.edits[0]).toMatchObject({ byName: 'Admin One' });
     expect(d.edits[0].changes.map((c) => c.field)).toEqual(['name', 'budgetRupees']);
     expect(d.summary.budgetFloorRupees).toBe(1300);
+    expect(C.detailWithBatches as { summary: Record<string, unknown> }).not.toHaveProperty('summary.committedRupees');
     expect(d.summary.budgetUsage).toEqual({ spentRupees: 1300, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 1300 });
     expect(d.summary.bought).toBe(2);
 

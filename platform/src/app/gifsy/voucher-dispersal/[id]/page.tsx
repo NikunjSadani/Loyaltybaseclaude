@@ -98,6 +98,12 @@ type Notice = { text: string; tone: 'info' | 'warning' } | null;
 
 const gt0 = (v: number | null) => v !== null && v > 0;
 
+/** "batch 2, row 5" (row numbers restart in every batch's file); "row 5" when the server sent no batch. */
+function rowRef(r: Pick<VdRow, 'batchNumber' | 'rowNumber'>): string {
+  return r.batchNumber !== null ? `batch ${r.batchNumber}, row ${formatCount(r.rowNumber)}` : `row ${formatCount(r.rowNumber)}`;
+}
+const upperFirst = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+
 function MessageCell({ row }: { row: VdRow }) {
   if (!row.messageStatus) {
     return <span className="text-xs text-white/50">{row.status === 'BOUGHT' ? 'Not sent yet' : '—'}</span>;
@@ -283,10 +289,10 @@ export default function VoucherCampaignDetailPage() {
     if (res.ok) {
       let text: string;
       if (d.kind === 'resend') {
-        text = `Resend requested for row ${formatCount(d.row.rowNumber)}. The WhatsApp status below updates when WhatsApp reports back.`;
+        text = `Resend requested for ${rowRef(d.row)}. The WhatsApp status below updates when WhatsApp reports back.`;
       } else if (d.kind === 'retry') {
         const msg = (res.data as { message: string | null }).message;
-        text = `Row ${formatCount(d.row.rowNumber)}: ${msg ?? 'purchase retry requested.'} The voucher status below updates as the server works on it.`;
+        text = `${upperFirst(rowRef(d.row))}: ${msg ?? 'purchase retry requested.'} The voucher status below updates as the server works on it.`;
       } else if (d.kind === 'discard') {
         const r = res.data as { discardedRows: number | null };
         text = `${batchLabel(d.batch.batchNumber)} discarded${r.discardedRows !== null ? `: ${plural(r.discardedRows, 'row')} removed` : ''}. Nothing was bought.`;
@@ -304,7 +310,7 @@ export default function VoucherCampaignDetailPage() {
       setNotice({ tone: 'info', text });
     } else {
       const what = d.kind === 'resend' ? 'the resend' : d.kind === 'retry' ? 'the purchase retry' : d.kind === 'discard' ? 'the discard' : 'the cancel';
-      const where = d.kind === 'cancel' ? 'the campaign status' : d.kind === 'discard' ? 'the batch list' : `row ${formatCount(d.row.rowNumber)}`;
+      const where = d.kind === 'cancel' ? 'the campaign status' : d.kind === 'discard' ? 'the batch list' : rowRef(d.row);
       setNotice({
         tone: 'warning',
         text: `We couldn't tell whether ${what} started (${res.error}). Refreshing — check ${where} below before trying again.`,
@@ -661,7 +667,7 @@ export default function VoucherCampaignDetailPage() {
       >
         {dialog?.kind === 'retry' && (
           <p>
-            Try again to buy a {formatRupees(dialog.row.amount)} {dialog.row.brand} voucher for {dialog.row.phone} (row {formatCount(dialog.row.rowNumber)}).
+            Try again to buy a {formatRupees(dialog.row.amount)} {dialog.row.brand} voucher for {dialog.row.phone} ({rowRef(dialog.row)}).
             If it succeeds, the money is spent and the voucher is sent on WhatsApp. If the server refuses, its reason is shown here.
           </p>
         )}

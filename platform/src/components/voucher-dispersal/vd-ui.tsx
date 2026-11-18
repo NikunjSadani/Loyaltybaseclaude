@@ -6,7 +6,7 @@ import React from 'react';
 import { AlertTriangle, Download, Loader2, RefreshCw } from 'lucide-react';
 import { Modal } from '@/components/ui/modal';
 import {
-  VD_NAME_MAX, VD_TEMPLATE_URL, cleanRupeeInput, editChangeText, rupeeEcho, editPayload, formatRupees, isUncertainFailure, validateEditForm, vdApi,
+  VD_NAME_MAX, VD_TEMPLATE_URL, editChangeText, rupeeEcho, editPayload, formatRupees, isUncertainFailure, validateEditForm, vdApi,
   type EditForm, type Tone, type VdCampaign,
 } from '@/lib/voucher-dispersal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
@@ -173,7 +173,7 @@ export function EditCampaignDialog({
           <input id="vd-edit-budget" className={field} inputMode="decimal" value={form.budgetRupees} disabled={busy}
             aria-invalid={showErrors && !!errors.budgetRupees}
             aria-describedby={`vd-edit-floor${echo ? ' vd-edit-budget-echo' : ''}${showErrors && errors.budgetRupees ? ' vd-edit-budget-error' : ''}`}
-            onChange={(e) => setForm({ ...form, budgetRupees: cleanRupeeInput(e.target.value) })} />
+            onChange={(e) => setForm({ ...form, budgetRupees: e.target.value })} />
           {echo && <p id="vd-edit-budget-echo" data-testid="vd-edit-budget-echo" className="text-xs text-gray-700 mt-1">{echo}</p>}
           <p id="vd-edit-floor" data-testid="vd-edit-floor" className="text-[11px] text-gray-500 mt-1">
             {floorRupees === null

@@ -54,7 +54,7 @@ or not) sees every campaign. `GIFSY_STAFF` and every tenant role are refused (co
 | `POST /campaigns/:id/confirm` | `{ previewId, expectedValidCount, expectedTotalRupees }` | campaign. Refuses: Hubble not configured (503), 0 valid / over budget (400), previewId not current or numbers changed (409). **Idempotent**: repeating a confirm with the already-confirmed previewId returns the campaign (200) — nothing queued or bought again |
 | `POST /campaigns/:id/process` | — | `{ pass, campaign, hubbleConfigured, summary }` — a bounded in-request processing pass (≤ 25 s, ≤ 25 buys). *Addition to the brief* — see §5 |
 | `GET /campaigns` | `?page=` (50 per page) | `[{ ...campaign, summary:{ total, valid, invalid, duplicates, queued, pending, bought, buyFailed, cancelled, spentRupees, pendingBatchNumber } }]` newest first (every CONFIRMED batch; an unconfirmed batch is excluded and named by `pendingBatchNumber`) |
-| `GET /campaigns/:id` | — | `{ campaign, hubbleConfigured, summary:{ total, valid, invalid, duplicates, totalRupees, budgetRupees, overBudget, perBrand, queued, buying, pendingReconcile, pending, bought, buyFailed, cancelled, spentRupees, committedRupees, budgetFloorRupees, messageSent, delivered, read, messageFailed, messageNotSent }, batches:[{ batchNumber, status, sourceFileName, uploadedBy(Id/Name)/At, confirmedBy…/At, discardedBy…/At, discardReason, previewId, total, valid, invalid, duplicates, bought, buyFailed, pending, cancelled, totalRupees, spentRupees }], edits:[{ at, byId, byName, changes:[{ field, from, to }] }] }` (totals cover every CONFIRMED batch) |
+| `GET /campaigns/:id` | — | `{ campaign, hubbleConfigured, summary:{ total, valid, invalid, duplicates, totalRupees, budgetRupees, overBudget, perBrand, queued, buying, pendingReconcile, pending, bought, buyFailed, cancelled, spentRupees, budgetFloorRupees, budgetUsage:{ spentRupees, withHubbleRupees, failedMayCompleteRupees, queuedRupees, floorRupees }, messageSent, delivered, read, messageFailed, messageNotSent }, batches:[{ batchNumber, status, sourceFileName, uploadedBy(Id/Name)/At, confirmedBy…/At, discardedBy…/At, discardReason, previewId, total, valid, invalid, duplicates, bought, buyFailed, pending, cancelled, totalRupees, spentRupees }], edits:[{ at, byId, byName, changes:[{ field, from, to }] }] }` (totals cover every CONFIRMED batch) |
 | `GET /campaigns/:id/rows` | `?status=&batch=&page=` (100 per page) | `{ rows, total, page, pageSize }` (an unconfirmed batch's rows only with `batch=` its number) |
 | `GET /campaigns/:id/report.xlsx` | — | Batch, Source file, Row, Phone, Name, Amount, Brand, Voucher status, Hubble order ref, Bought at, Failure reason, WhatsApp status, Sent at, Delivered at, Read at, Message failure reason (**no codes**) |
 | `POST /campaigns/:id/rows/:rowId/resend` | — | row — re-sends the WhatsApp for a BOUGHT row (new receipt); never buys; only after the first send has an outcome; max 3 per row |
@@ -124,9 +124,11 @@ Brands: default registry Amazon Pay `01HDRPKWFE2SMVM54TWD8S1927` + Flipkart `01G
    - Repeated while queued / buying / bought → returns that state (idempotent).
 5. **Budget can never be exceeded**: checked at upload (overBudget), at confirm under the campaign row lock, and again
    under that lock before EVERY buy: Σ(BUYING + PENDING_RECONCILE + BOUGHT + every BUY_FAILED row whose CURRENT reference
-   reached Hubble — `referenceSentAt` set) + this row ≤ budget, else BUY_FAILED `BUDGET`. A failed row whose reference
-   reached Hubble keeps counting (Hubble may still complete it); a retry releases it only by re-queueing it, and the claim
-   re-checks. A local failure (`BUDGET` / `NOT_SENT`) on a row whose reference reached Hubble EARLIER stays in the
+   reached Hubble — `referenceSentAt` set — EXCEPT a `REJECTED` one) + this row ≤ budget, else BUY_FAILED `BUDGET`. A failed
+   row whose reference reached Hubble keeps counting (Hubble may still complete it); a retry releases it only by
+   re-queueing it, and the claim re-checks. **2026-11-18 owner decision:** a `REJECTED` failure (definitive refusal +
+   canary-verified "no order") is released; `HUBBLE_FAILED` still counts (§10a). Retries are also refused up front when
+   they would take budget promised to queued rows (§10a). A local failure (`BUDGET` / `NOT_SENT`) on a row whose reference reached Hubble EARLIER stays in the
    reconcile sweep (and a retry of it follows the indeterminate rules: 2 h + Hubble asked + canary, same reference).
 6. **Codes**: stored on the row; never logged (WhatsApp failure reasons are scrubbed via `secretValues`), audited masked
    only, never in an admin response or report.xlsx.
@@ -205,10 +207,13 @@ refusals) (actor = admin).
   states why (Hubble unreachable / "no order" unverified). Check Hubble's dashboard for the reference before forcing
   anything; never edit rows by SQL.
 - **Superseded-reference alert:** look up both references at Hubble; if two vouchers exist, recover the extra one with Hubble.
-- **Migration `20261118160000_voucher_dispersal_batches` failed on `lock_timeout`** (a long query held the rows table):
-  Prisma records it as failed (P3009) and refuses further `migrate deploy`. Nothing was applied (each statement is in
-  the migration's transaction). Recover: `npx prisma migrate resolve --rolled-back 20261118160000_voucher_dispersal_batches`
-  (in the in-VPC migrate job), then run `migrate deploy` again at a quieter moment.
+- **Deploying migration `20261118160000_voucher_dispersal_batches`:** deploy during a quiet window (no campaign being
+  bought, the scheduler drain idle) — the migration waits at most 5 s for its locks (`lock_timeout = '5s'`), and queries
+  queued behind it wait at most that long (≤ 5 s).
+- **If it fails on `lock_timeout`** (P3018 on the run; afterwards `migrate deploy` refuses with P3009 — a failed migration
+  is recorded): nothing was applied (the migration runs in one transaction). Recover with exactly
+  `npx prisma migrate resolve --rolled-back 20261118160000_voucher_dispersal_batches` (in the in-VPC migrate job), then
+  re-run `npx prisma migrate deploy` in a quieter window.
 - **Old/new revision overlap during that deploy:** for the minutes both API revisions serve traffic, the OLD revision
   does not know about batches and would count an unconfirmed batch's rows in its list summary — harmless, because no
   batch can exist until the new revision is serving (only it can create one).
@@ -264,13 +269,14 @@ I want."* Owner chose **"Add to the same campaign"**.
   whose current reference reached Hubble) · queued. The budget floor (Edit), batch confirm, the retry check and the
   detail page's "Budget used" line all use it; the claim-time guard is the same minus QUEUED (the claimed row is the
   queued amount it adds). Refusals name each part — never "in progress" for failed rows.
-- **OPEN (owner/coordinator decision, not changed):** whether a BUY_FAILED row Hubble *definitively* failed (source
-  `HUBBLE_FAILED` = Hubble's FAILED body; `REJECTED` = 400/422 + canary-verified "no order") should stop counting.
-  Today both keep counting while their reference reached Hubble — the earlier audit decision "BUYING M1" (spec
-  `voucher-dispersal.service.spec.ts`, "a Hubble-failed row whose reference reached Hubble still counts") and the code
-  (`applyBody` still applies a later SUCCESS to a HUBBLE_FAILED row: "a FAILED that later succeeded") treat HUBBLE_FAILED
-  as possibly completing. The stored `buyFailureSource` CAN tell the sources apart; which of them is safe to release is a
-  policy call.
+- **Owner decision 2026-11-18 — release REJECTED only:** a BUY_FAILED row whose `buyFailureSource` is `REJECTED`
+  (Hubble refused the order — definitive 400/422 — AND the canary verified Hubble holds no order) no longer counts:
+  it is out of `failedMayStillCompleteWhere`, so it is out of the floor, batch confirm, the retry check, the "Budget
+  used" line, a batch preview's "left", and the claim-time guard (`budgetCommittedWhere`). `HUBBLE_FAILED` (Hubble's own
+  FAILED body) KEEPS counting while its reference reached Hubble — `applyBody` still delivers a later SUCCESS for it
+  (earlier audit decision "BUYING M1" stands for it). Local failures (`BUDGET` / `NOT_SENT`) count only if their reference
+  reached Hubble on an earlier attempt, as before. Specs: `voucher-dispersal.rereview.spec.ts` (6 bought + 4 REJECTED →
+  floor ₹6,000, a 4 × ₹1,000 batch confirms and is bought; 6 bought + 4 HUBBLE_FAILED → floor ₹10,000, refused).
 - **Retry vs promised budget:** a retry is refused under the campaign lock when everything else that can still cost
   money (the row itself excluded — it may already be counted) + the row > budget: "Retrying needs ₹X; only ₹Y is left
   after queued rows and purchases already made or with Hubble — raise the budget (Edit campaign), then retry." Audited
@@ -285,4 +291,12 @@ I want."* Owner chose **"Add to the same campaign"**.
   audit carries warningCount / skippedRows / hiddenRowsIncluded like the first file's.
 - **Wording:** first-file over budget → "Remove rows, or Edit campaign to raise the budget."
 - **Bounds:** `:n` and `?batch=` accept 1..100,000 — anything else is a 400.
+- **Re-review fixes (2026-11-18):** budget boxes keep what was typed and parse it strictly — a leading ₹ is fine, commas
+  only in a real Indian (1,25,000) or Western (1,250,000) grouping ("25,00" is refused with a clear message), the decimal
+  point is kept (paise refused); `PATCH {name:null}` / `{budgetRupees:null}` → 400; the detail reply's old
+  `summary.committedRupees` is removed (`budgetUsage` is the one breakdown); every campaign-lock transaction (edit, first
+  upload, confirm, batch upload / confirm / discard, cancel, buy claim, retry re-queue, settle) uses `CAMPAIGN_LOCK_TX`
+  (timeout 30 s, maxWait 25 s) and `finishCampaigns` logs one campaign's settle error and moves on; confirm reports a
+  changed preview before the budget; notices say "Batch 2, row 5"; the add page replaces Buy & send with the server's
+  reason when the campaign cannot take people (e.g. a retry re-opened it).
 

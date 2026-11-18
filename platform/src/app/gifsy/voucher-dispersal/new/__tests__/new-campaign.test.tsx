@@ -23,6 +23,7 @@ vi.mock('next/link', () => ({
 vi.mock('@/lib/download', () => ({ downloadBlob: vi.fn() }));
 
 import NewCampaignPage from '../page';
+import { RUPEE_COMMA_ERROR } from '@/lib/voucher-dispersal';
 
 const BASE = '/api/admin/voucher-dispersal';
 const ok = (data: unknown) => ({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data }) });
@@ -133,8 +134,15 @@ describe('New voucher campaign', () => {
     fireEvent.click(screen.getByTestId('vd-create'));
     expect(await screen.findByText('Enter the budget in whole rupees (no paise).')).toBeInTheDocument();
     expect(callsTo('/campaigns')).toHaveLength(0);
-    fireEvent.change(budget, { target: { value: '2,500' } });
-    expect(budget.value).toBe('2500');
+    // L1: commas only as a real thousands grouping — "25,00" is refused (never ₹2,500).
+    fireEvent.change(budget, { target: { value: '25,00' } });
+    fireEvent.click(screen.getByTestId('vd-create'));
+    expect(await screen.findByText(RUPEE_COMMA_ERROR)).toBeInTheDocument();
+    expect(callsTo('/campaigns')).toHaveLength(0);
+    // L2: a leading ₹ is fine (never "greater than 0").
+    fireEvent.change(budget, { target: { value: '₹2,500' } });
+    expect(budget.value).toBe('₹2,500');
+    expect(screen.queryByText('Enter a budget in rupees greater than 0.')).not.toBeInTheDocument();
     expect(screen.getByTestId('vd-budget-echo')).toHaveTextContent('= ₹2,500');
     fireEvent.click(screen.getByTestId('vd-create'));
     await waitFor(() => expect(callsTo('/campaigns')).toHaveLength(1));

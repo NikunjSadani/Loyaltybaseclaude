@@ -235,6 +235,13 @@ export default function AddPeoplePage() {
   const skipped = s ? (s.invalid ?? 0) + (s.duplicates ?? 0) : 0;
   const blockedReason = !preview ? (isSetupCampaign(c.status) ? 'Confirm the first file before adding more people (this campaign is still in setup).' : c.addPeopleBlockedReason) : null;
   const uploadVisible = !preview || showUpload;
+  /**
+   * The campaign is not in an addable state although a batch is waiting (e.g. a retry re-opened it): show
+   * the server's reason instead of Buy & send (the server would refuse it anyway).
+   */
+  const buyBlockedReason = preview
+    ? c.addPeopleBlockedReason ?? (c.status === 'UNKNOWN' ? 'the campaign status is not recognised by this screen.' : null)
+    : null;
   /** The waiting batch an upload would replace (loaded preview, or one named by the campaign that failed to load). */
   const replacing = preview ? { n: preview.batchNumber, file: waiting?.n === preview.batchNumber ? waiting.file : null } : waiting;
 
@@ -455,14 +462,21 @@ export default function AddPeoplePage() {
                     className="rounded-lg border border-red-500/40 px-3 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/10 disabled:opacity-60">
                     Discard this batch
                   </button>
-                  <button type="button" onClick={() => { setConfirmError(null); setDialog('buy'); }}
-                    disabled={block.blocked || busy || outcomeUnknown}
-                    aria-describedby={block.blocked ? 'vd-block-reason' : undefined}
-                    data-testid="vd-buy-send"
-                    className="rounded-lg bg-[var(--brand-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
-                    Buy &amp; send vouchers
-                  </button>
+                  {buyBlockedReason === null && (
+                    <button type="button" onClick={() => { setConfirmError(null); setDialog('buy'); }}
+                      disabled={block.blocked || busy || outcomeUnknown}
+                      aria-describedby={block.blocked ? 'vd-block-reason' : undefined}
+                      data-testid="vd-buy-send"
+                      className="rounded-lg bg-[var(--brand-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
+                      Buy &amp; send vouchers
+                    </button>
+                  )}
                 </div>
+                {buyBlockedReason !== null && (
+                  <p role="status" data-testid="vd-buy-blocked" className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100 break-words">
+                    This batch can&apos;t be bought right now: {buyBlockedReason} Nothing in it has been bought; it stays waiting (use Refresh later).
+                  </p>
+                )}
               </div>
 
               <ConfirmDialog

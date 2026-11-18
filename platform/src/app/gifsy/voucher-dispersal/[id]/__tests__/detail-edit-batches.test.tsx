@@ -70,6 +70,7 @@ beforeEach(() => {
     if (url === BASE) return Promise.resolve(detailQueue.length > 1 ? detailQueue.shift() : detailQueue[0]);
     if (url.startsWith(`${BASE}/rows?`)) return Promise.resolve(ok(ROWS));
     if (url.endsWith('/discard')) return Promise.resolve(discardResponse);
+    if (url.endsWith('/retry-buy')) return Promise.resolve(ok({ message: 'Queued for purchase again.', row: {} }));
     if (url.endsWith('/cancel')) return Promise.resolve(cancelResponse);
     if (url.endsWith('/process')) return Promise.resolve(ok(detail()));
     return Promise.resolve(fail(404, 'unexpected'));
@@ -121,8 +122,11 @@ describe('Edit campaign', () => {
     fireEvent.click(within(dialog).getByTestId('vd-edit-save'));
     expect(within(dialog).getByTestId('vd-edit-budget-error')).toHaveTextContent('Enter the budget in whole rupees (no paise).');
     expect(calls((u, i) => u === BASE && i?.method === 'PATCH')).toHaveLength(0);
-    fireEvent.change(budget, { target: { value: '2,500' } });
-    expect(budget.value).toBe('2500');
+    fireEvent.change(budget, { target: { value: '25,00' } });
+    fireEvent.click(within(dialog).getByTestId('vd-edit-save'));
+    expect(within(dialog).getByTestId('vd-edit-budget-error')).toHaveTextContent('Use commas only between thousands');
+    expect(calls((u, i) => u === BASE && i?.method === 'PATCH')).toHaveLength(0);
+    fireEvent.change(budget, { target: { value: '₹2,500' } });
     expect(within(dialog).getByTestId('vd-edit-budget-echo')).toHaveTextContent('= ₹2,500');
     fireEvent.click(within(dialog).getByTestId('vd-edit-save'));
     await waitFor(() => expect(calls((u, i) => u === BASE && i?.method === 'PATCH')).toHaveLength(1));
@@ -164,6 +168,22 @@ describe('Edit campaign', () => {
 });
 
 describe('Batches on the campaign page', () => {
+  it('row action notices name the batch ("Batch 2, row 2") — row numbers repeat across batches', async () => {
+    const rows = { ...ROWS, rows: [ROWS.rows[0], { ...ROWS.rows[1], canRetryBuy: true }] };
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.startsWith(`${BASE}/rows?`)) return Promise.resolve(ok(rows));
+      if (url.endsWith('/retry-buy')) return Promise.resolve(ok({ message: 'Queued for purchase again.', row: {} }));
+      if (url === BASE && !init?.method) return Promise.resolve(ok(detail()));
+      return Promise.resolve(ok(detail()));
+    });
+    render(<DetailPage />);
+    fireEvent.click(await screen.findByTestId('vd-retry-r2'));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('(batch 2, row 2)');
+    fireEvent.click(within(dialog).getByTestId('vd-dialog-confirm'));
+    expect(await screen.findByTestId('vd-notice')).toHaveTextContent('Batch 2, row 2: Queued for purchase again.');
+  });
+
   it('an UNKNOWN campaign status with no server reason says why Add more people is unavailable', async () => {
     detailQueue = [ok(detail({ status: 'PAUSED', campaign: { addPeopleBlockedReason: null } }))];
     render(<DetailPage />);
