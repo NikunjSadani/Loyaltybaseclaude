@@ -16,6 +16,9 @@ import { formatDateIST } from '../../common/ist-date';
 import { isFastTrackRow, type KycFastTrackHistoryRow } from '../../kyc/kyc-fast-track.helper';
 import { monthLabel } from '../../sales-import/months/month-state';
 import { emailShell, esc, intIN, rupees, sectionHeading, statRow, table } from './email-html';
+
+/** Mirrors digest-run-state PERSISTENT_FAILURE_RUNS (kept here so this module stays import-cycle free). */
+const PERSISTENT_FAILURE_RUNS = 3;
 import type {
   BillingSection,
   DigestInput,
@@ -142,58 +145,79 @@ export function kycPendingBuckets(
 
 const plural = (n: number, one: string, many: string) => `${intIN(n)} ${n === 1 ? one : many}`;
 
-/** Every abnormal item for one tenant, as plain-text bullets (escaped at render time). */
-export function needsAttention(t: TenantDigest): string[] {
-  const out: string[] = [];
+/**
+ * One "needs attention" bullet and how many EVENTS it stands for (the subject / total count events, not
+ * bullets). A bullet that merges a window figure with the matching "still open now" figure counts the
+ * larger of the two: the two overlap (a failure in the window that is still open is in both) and the
+ * digest does not read which rows they share, so max() is the honest lower bound of distinct events.
+ */
+export interface AttentionItem {
+  text: string;
+  events: number;
+}
+
+/** "N in the window (M still open)" merged wording for a window figure + its standing figure. */
+function windowAndOpen(windowN: number, openN: number, windowText: (n: number) => string, openText: (n: number) => string): AttentionItem | null {
+  if (windowN === 0 && openN === 0) return null;
+  if (windowN === 0) return { text: `Still open: ${openText(openN)}`, events: openN };
+  return { text: `${windowText(windowN)} (${intIN(openN)} still open)`, events: Math.max(windowN, openN) };
+}
+
+/** Every abnormal item for one tenant, with its event count (escaped at render time). */
+export function attentionItems(t: TenantDigest): AttentionItem[] {
+  const out: AttentionItem[] = [];
+  const push = (text: string, events: number) => out.push({ text, events });
   const failed = (label: string, r: SectionResult<unknown> | undefined) => {
-    if (r && !r.ok) out.push(`Couldn't load the ${label} section`);
+    if (r && !r.ok) push(`Couldn't load the ${label} section`, 1);
   };
 
   failed('KYC', t.kyc);
   if (t.kyc.ok) {
     const { gifsy, field } = t.kyc.data;
-    if (gifsy.breached > 0) out.push(`${plural(gifsy.breached, 'KYC', 'KYCs')} breaching the Gifsy SLA`);
-    if (field.breached > 0) out.push(`${plural(field.breached, 'KYC', 'KYCs')} breaching the field SLA`);
+    if (gifsy.breached > 0) push(`${plural(gifsy.breached, 'KYC', 'KYCs')} breaching the Gifsy SLA`, gifsy.breached);
+    if (field.breached > 0) push(`${plural(field.breached, 'KYC', 'KYCs')} breaching the field SLA`, field.breached);
     const ftField = t.kyc.data.fieldFastTrackedExcluded;
     if (ftField > 0) {
-      out.push(`${plural(ftField, 'fast-tracked KYC', 'fast-tracked KYCs')} at a field stage — not on the field SLA, check by hand`);
+      push(`${plural(ftField, 'fast-tracked KYC', 'fast-tracked KYCs')} at a field stage — not on the field SLA, check by hand`, ftField);
     }
   }
 
   failed('Points', t.points);
   if (t.points.ok && t.points.data.negativeWallets > 0) {
-    out.push(plural(t.points.data.negativeWallets, 'negative wallet', 'negative wallets'));
+    push(plural(t.points.data.negativeWallets, 'negative wallet', 'negative wallets'), t.points.data.negativeWallets);
   }
 
-  // Redemption failures and Hubble voucher failures overlap (a Hubble failure IS a failed redemption):
-  // one bullet, with the Hubble share inside it. The Hubble bullet stands alone only when the
-  // Redemptions section itself could not be loaded.
+  // Redemption failures, Hubble voucher failures and "failed but not refunded" overlap: ONE bullet. The Hubble
+  // bullet stands alone only when the Redemptions section itself could not be loaded.
   failed('Redemptions', t.redemptions);
   const hubbleFailed = t.vouchers?.ok ? t.vouchers.data.failed : 0;
   if (t.redemptions.ok) {
     const r = t.redemptions.data;
+    const share = hubbleFailed > 0 ? `, ${intIN(Math.min(hubbleFailed, r.failed))} via Hubble` : '';
+    const held = r.failedNotRefunded;
     if (r.failed > 0) {
-      const share = hubbleFailed > 0 ? ` (${intIN(Math.min(hubbleFailed, r.failed))} via Hubble)` : '';
-      out.push(`${plural(r.failed, 'redemption', 'redemptions')} failed${share}`);
-    }
-    if (r.failedNotRefunded > 0) {
-      out.push(`Still open: ${plural(r.failedNotRefunded, 'failed redemption still holds', 'failed redemptions still hold')} the outlet's points (not refunded)`);
+      push(
+        `${plural(r.failed, 'redemption', 'redemptions')} failed in the window${share}${held > 0 ? ` (${intIN(held)} still holding points, not refunded)` : ''}`,
+        Math.max(r.failed, held),
+      );
+    } else if (held > 0) {
+      push(`Still open: ${plural(held, 'failed redemption still holds', 'failed redemptions still hold')} the outlet's points (not refunded)`, held);
     }
   } else if (hubbleFailed > 0) {
-    out.push(`Hubble: ${plural(hubbleFailed, 'voucher', 'vouchers')} failed`);
+    push(`Hubble: ${plural(hubbleFailed, 'voucher', 'vouchers')} failed`, hubbleFailed);
   }
 
   failed('Vouchers (Hubble)', t.vouchers);
   if (t.vouchers?.ok) {
     const v = t.vouchers.data;
-    if (v.stuckProcessing > 0) out.push(`Hubble: ${plural(v.stuckProcessing, 'voucher', 'vouchers')} stuck in processing > 30 min`);
-    if (v.needsReconcile > 0) out.push(`Hubble: ${plural(v.needsReconcile, 'order needs', 'orders need')} reconcile`);
+    if (v.stuckProcessing > 0) push(`Hubble: ${plural(v.stuckProcessing, 'voucher', 'vouchers')} stuck in processing > 30 min`, v.stuckProcessing);
+    if (v.needsReconcile > 0) push(`Hubble: ${plural(v.needsReconcile, 'order needs', 'orders need')} reconcile`, v.needsReconcile);
   }
 
   failed('Payouts', t.payouts);
   if (t.payouts.ok) {
     const p = t.payouts.data;
-    if (p.failedOrReturned > 0) out.push(`${plural(p.failedOrReturned, 'payout', 'payouts')} failed or returned in the window`);
+    const open = p.openFailedCredit + p.openFailedRedemption;
     const parts: string[] = [];
     if (p.openFailedCredit > 0) {
       parts.push(`${plural(p.openFailedCredit, 'credit payout', 'credit payouts')} (${rupees(p.openFailedCreditPaise)}) awaiting re-bank or reversal`);
@@ -201,14 +225,21 @@ export function needsAttention(t: TenantDigest): string[] {
     if (p.openFailedRedemption > 0) {
       parts.push(`${plural(p.openFailedRedemption, 'redemption payout', 'redemption payouts')} failed without a refund`);
     }
-    if (parts.length > 0) out.push(`Still open: ${parts.join('; ')}`);
+    if (p.failedOrReturned > 0) {
+      push(
+        `${plural(p.failedOrReturned, 'payout', 'payouts')} failed or returned in the window${open > 0 ? ` (still open: ${parts.join('; ')})` : ''}`,
+        Math.max(p.failedOrReturned, open),
+      );
+    } else if (open > 0) {
+      push(`Still open: ${parts.join('; ')}`, open);
+    }
   }
 
   failed('Messages', t.messages);
   if (t.messages.ok) {
     const m = t.messages.data;
     const total = m.otpFailed + m.smsFailed + m.whatsappFailed + m.broadcastFailed;
-    if (total > 0) out.push(`${plural(total, 'message', 'messages')} failed delivery`);
+    if (total > 0) push(`${plural(total, 'message', 'messages')} failed delivery`, total);
   }
 
   failed('Visibility', t.visibility);
@@ -216,12 +247,16 @@ export function needsAttention(t: TenantDigest): string[] {
   failed('Sales Import', t.salesImport);
   if (t.salesImport?.ok) {
     const s = t.salesImport.data;
-    if (s.failed > 0) out.push(`Sales Import: ${plural(s.failed, 'import', 'imports')} failed`);
-    if (s.failedOpen > 0) {
-      out.push(`Still open: ${plural(s.failedOpen, 'failed Sales Import', 'failed Sales Imports')} not yet replaced by a successful upload`);
+    if (s.failed > 0) {
+      push(
+        `Sales Import: ${plural(s.failed, 'import', 'imports')} failed in the window${s.failedOpen > 0 ? ` (${intIN(s.failedOpen)} still not replaced by a successful upload)` : ''}`,
+        Math.max(s.failed, s.failedOpen),
+      );
+    } else if (s.failedOpen > 0) {
+      push(`Still open: ${plural(s.failedOpen, 'failed Sales Import', 'failed Sales Imports')} not yet replaced by a successful upload`, s.failedOpen);
     }
     for (const m of s.openMonths) {
-      if (m.targetsChangedSinceApply) out.push(`Targets changed — recalculate ${monthLabel(m.month)}`);
+      if (m.targetsChangedSinceApply) push(`Targets changed — recalculate ${monthLabel(m.month)}`, 1);
     }
   }
 
@@ -229,41 +264,90 @@ export function needsAttention(t: TenantDigest): string[] {
   return out;
 }
 
+/** The tenant's attention bullets (text only). */
+export function needsAttention(t: TenantDigest): string[] {
+  return attentionItems(t).map((a) => a.text);
+}
+
 /**
- * Gifsy-wide (not tenant) attention items: run notices (a shared loader failed, the window was capped…),
+ * Gifsy-wide (not tenant) attention items: run notices (a shared input failed, the window was capped…),
  * Gifsy-wide OTP failures (pre-login + Gifsy staff, or their load failure) and Voucher Dispersal.
  */
-export function gifsyWideAttention(
-  input: Pick<DigestInput, 'voucherDispersal' | 'gifsyOtpFailed' | 'runNotices'>,
-): string[] {
-  const out: string[] = [...(input.runNotices ?? [])];
+export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gifsyOtpFailed' | 'runNotices'>): AttentionItem[] {
+  const out: AttentionItem[] = (input.runNotices ?? []).map((text) => ({ text, events: 1 }));
   const otp = input.gifsyOtpFailed;
-  if (otp && !otp.ok) out.push(`Couldn't load the Gifsy-wide OTP failures (${otp.error})`);
+  if (otp && !otp.ok) out.push({ text: `Couldn't load the Gifsy-wide OTP failures (${otp.error})`, events: 1 });
   else if (otp && otp.ok) {
-    if (otp.data.preLogin > 0) out.push(`${plural(otp.data.preLogin, 'OTP', 'OTPs')} failed delivery before login (no tenant known)`);
-    if (otp.data.gifsyStaff > 0) out.push(`${plural(otp.data.gifsyStaff, 'OTP', 'OTPs')} to Gifsy staff failed delivery`);
+    if (otp.data.preLogin > 0) {
+      out.push({ text: `${plural(otp.data.preLogin, 'OTP', 'OTPs')} failed delivery before login (no tenant known)`, events: otp.data.preLogin });
+    }
+    if (otp.data.gifsyStaff > 0) {
+      out.push({ text: `${plural(otp.data.gifsyStaff, 'OTP', 'OTPs')} to Gifsy staff failed delivery`, events: otp.data.gifsyStaff });
+    }
   }
   const vd = input.voucherDispersal;
   if (!vd) return out;
   if (!vd.ok) {
-    out.push(`Couldn't load the Voucher dispersal section`);
+    out.push({ text: `Couldn't load the Voucher dispersal section`, events: 1 });
     return out;
   }
   const d = vd.data;
   // Window failures and the standing "still failed now" figures overlap — one bullet per topic.
-  if (d.buyFailed > 0 || d.buyFailedOpen > 0) {
-    out.push(
-      `Voucher dispersal: ${plural(d.buyFailed, 'purchase', 'purchases')} failed in the window; ${intIN(d.buyFailedOpen)} still failed (not retried)`,
-    );
-  }
-  if (d.messageFailed > 0 || d.messageFailedOpen > 0) {
-    out.push(
-      `Voucher dispersal: ${plural(d.messageFailed, 'WhatsApp message', 'WhatsApp messages')} failed in the window; ${intIN(d.messageFailedOpen)} still failed (not resent)`,
-    );
-  }
+  const buy = windowAndOpen(
+    d.buyFailed,
+    d.buyFailedOpen,
+    (n) => `Voucher dispersal: ${plural(n, 'purchase', 'purchases')} failed in the window`,
+    (n) => `Voucher dispersal: ${plural(n, 'purchase', 'purchases')} still failed (not retried)`,
+  );
+  if (buy) out.push(buy);
+  const msg = windowAndOpen(
+    d.messageFailed,
+    d.messageFailedOpen,
+    (n) => `Voucher dispersal: ${plural(n, 'WhatsApp message', 'WhatsApp messages')} failed in the window`,
+    (n) => `Voucher dispersal: ${plural(n, 'WhatsApp message', 'WhatsApp messages')} still failed (not resent)`,
+  );
+  if (msg) out.push(msg);
   if (d.pendingRetryable > 0) {
-    out.push(`Voucher dispersal: ${plural(d.pendingRetryable, 'purchase', 'purchases')} unconfirmed by Hubble for over 2 h (Retry available)`);
+    out.push({
+      text: `Voucher dispersal: ${plural(d.pendingRetryable, 'purchase', 'purchases')} unconfirmed by Hubble for over 2 h (Retry available)`,
+      events: d.pendingRetryable,
+    });
   }
+  return out;
+}
+
+/** Gifsy-wide bullets (text only). */
+export function gifsyWideAttention(input: Pick<DigestInput, 'voucherDispersal' | 'gifsyOtpFailed' | 'runNotices'>): string[] {
+  return gifsyWideItems(input).map((a) => a.text);
+}
+
+const SECTION_KEYS: Array<[keyof TenantDigest, string]> = [
+  ['kyc', 'KYC'],
+  ['points', 'Points'],
+  ['redemptions', 'Redemptions'],
+  ['vouchers', 'Vouchers (Hubble)'],
+  ['payouts', 'Payouts'],
+  ['messages', 'Messages'],
+  ['visibility', 'Visibility'],
+  ['salesImport', 'Sales Import'],
+  ['billing', 'Billing progress'],
+];
+
+/**
+ * Every part of the digest that did not load (a failed tenant section, the Gifsy-wide OTP or voucher-dispersal
+ * section, or a shared input from `sharedFailures`). Any entry makes the run DEGRADED (window not advanced).
+ * `key` is stable across runs (for the consecutive-failure streak); `label` is for people.
+ */
+export function failedSections(input: DigestInput): Array<{ key: string; label: string }> {
+  const out: Array<{ key: string; label: string }> = [...(input.sharedFailures ?? [])];
+  for (const t of input.tenants) {
+    for (const [k, label] of SECTION_KEYS) {
+      const r = t[k] as SectionResult<unknown> | undefined;
+      if (r && typeof r === 'object' && 'ok' in r && !r.ok) out.push({ key: `${t.clientId}/${String(k)}`, label: `${t.name}: ${label}` });
+    }
+  }
+  if (input.gifsyOtpFailed && !input.gifsyOtpFailed.ok) out.push({ key: 'gifsy/otp', label: 'Gifsy-wide OTP failures' });
+  if (input.voucherDispersal && !input.voucherDispersal.ok) out.push({ key: 'gifsy/voucher-dispersal', label: 'Voucher dispersal' });
   return out;
 }
 
@@ -586,7 +670,10 @@ const nameWithStatus = (t: TenantDigest) => (t.status && t.status !== 'ACTIVE' ?
 
 /** Render the digest. Always produces an email (an all-quiet day says so). */
 export function buildDailyOpsDigest(input: DigestInput): DigestResult {
-  const all = input.tenants.map((t) => ({ t, attention: needsAttention(t) }));
+  const all = input.tenants.map((t) => {
+    const items = attentionItems(t);
+    return { t, attention: items.map((a) => a.text), events: items.reduce((n, a) => n + a.events, 0) };
+  });
   // ACTIVE tenants always; ONBOARDING / INACTIVE ones only with activity or open items — the rest are
   // NAMED at the bottom (never silently dropped).
   const rows = all.filter(({ t, attention }) => !t.status || t.status === 'ACTIVE' || hasActivity(t, attention));
@@ -594,9 +681,13 @@ export function buildDailyOpsDigest(input: DigestInput): DigestResult {
   rows.sort((a, b) => b.attention.length - a.attention.length || a.t.name.localeCompare(b.t.name));
 
   const tenantsNeedingAttention = rows.filter((r) => r.attention.length > 0).length;
-  const gifsyWide = gifsyWideAttention(input);
-  const attentionItems = rows.reduce((s, r) => s + r.attention.length, 0) + gifsyWide.length;
-  const incomplete = (input.runNotices?.length ?? 0) > 0;
+  const gifsyWideList = gifsyWideItems(input);
+  const gifsyWide = gifsyWideList.map((a) => a.text);
+  // EVENTS, not bullets (a merged window + still-open bullet counts its distinct lower bound).
+  const totalEvents = rows.reduce((s, r) => s + r.events, 0) + gifsyWideList.reduce((s, a) => s + a.events, 0);
+  const failed = failedSections(input);
+  const incomplete = (input.runNotices?.length ?? 0) > 0 || failed.length > 0;
+  const streak = input.incompleteStreak && input.incompleteStreak.runs >= PERSISTENT_FAILURE_RUNS ? input.incompleteStreak : null;
 
   const summaryTable = table(
     [
@@ -607,9 +698,9 @@ export function buildDailyOpsDigest(input: DigestInput): DigestResult {
       { label: 'Points credited', align: 'right' },
       { label: 'Payouts paid', align: 'right' },
     ],
-    rows.map(({ t, attention }) => [
+    rows.map(({ t, events }) => [
       esc(nameWithStatus(t)),
-      attention.length > 0 ? `<strong style="color:#b91c1c;">${esc(intIN(attention.length))}</strong>` : esc('0'),
+      events > 0 ? `<strong style="color:#b91c1c;">${esc(intIN(events))}</strong>` : esc('0'),
       esc(headline(t.kyc, (k) => intIN(k.field.pending + k.gifsy.pending))),
       esc(headline(t.redemptions, (r) => intIN(r.requested))),
       esc(headline(t.points, (p) => intIN(p.credited))),
@@ -620,19 +711,28 @@ export function buildDailyOpsDigest(input: DigestInput): DigestResult {
 
   // "All quiet" only when there is NOTHING red anywhere: no tenant item, no Gifsy-wide item (incl. OTP
   // failures and run notices).
-  const allQuiet = attentionItems === 0;
-  const runNoticeBox = incomplete
-    ? redList('This digest is incomplete', input.runNotices ?? [], ' data-run-notices="1"')
+  const allQuiet = totalEvents === 0;
+  const incompleteLines = [
+    ...(input.runNotices ?? []),
+    ...(failed.length > (input.sharedFailures?.length ?? 0)
+      ? [`Not loaded: ${failed.slice(input.sharedFailures?.length ?? 0).map((f) => f.label).join('; ')} — those figures are missing below and will be repeated in the next digest.`]
+      : []),
+    ...(streak ? [`${streak.sections.join('; ')} failed to load ${intIN(streak.runs)} runs in a row.`] : []),
+  ];
+  const runNoticeBox = incomplete ? redList('This digest is incomplete', incompleteLines, ' data-run-notices="1"') : '';
+  const repeatBox = input.repeatNotice
+    ? `<div data-repeat-notice="1" style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin:8px 0;font-size:13px;font-weight:600;color:#92400e;">${esc(input.repeatNotice)}</div>`
     : '';
   const otherGifsyWide = gifsyWide.slice(input.runNotices?.length ?? 0);
   const gifsyWideBox = otherGifsyWide.length > 0 ? redList('Needs attention — Gifsy-wide', otherGifsyWide) : '';
   const summary =
+    repeatBox +
     runNoticeBox +
     sectionHeading('All tenants') +
     statRow([
       { label: 'Tenants', value: intIN(rows.length) },
       { label: 'Need attention', value: intIN(tenantsNeedingAttention), accent: tenantsNeedingAttention > 0 ? 'red' : 'green' },
-      { label: 'Attention items', value: intIN(attentionItems), accent: attentionItems > 0 ? 'red' : 'green' },
+      { label: 'Attention items', value: intIN(totalEvents), accent: totalEvents > 0 ? 'red' : 'green' },
     ]) +
     (allQuiet
       ? `<div style="font-size:14px;font-weight:600;color:#047857;margin:6px 0 10px;">All quiet — nothing needs attention.</div>`
@@ -661,8 +761,8 @@ export function buildDailyOpsDigest(input: DigestInput): DigestResult {
         : undefined,
   });
 
-  // Subject: never "0 need attention" while the body shows a red problem — the count is EVERY attention
-  // item (tenant items + Gifsy-wide items incl. OTP failures, standing open items and run notices).
+  // Subject: never "all quiet" while the body shows a red problem — the count is every attention EVENT
+  // (tenant items + Gifsy-wide items incl. OTP failures, standing open items and run notices).
   const where = [
     tenantsNeedingAttention > 0 ? plural(tenantsNeedingAttention, 'tenant', 'tenants') : null,
     gifsyWide.length > 0 ? 'Gifsy-wide' : null,
@@ -670,16 +770,18 @@ export function buildDailyOpsDigest(input: DigestInput): DigestResult {
     .filter(Boolean)
     .join(' + ');
   const status =
-    attentionItems === 0
+    totalEvents === 0
       ? 'all quiet'
-      : `${intIN(attentionItems)} ${attentionItems === 1 ? 'item needs' : 'items need'} attention (${where})`;
+      : `${intIN(totalEvents)} ${totalEvents === 1 ? 'item needs' : 'items need'} attention (${where})`;
+  const incompleteTag = streak ? `INCOMPLETE ${intIN(streak.runs)} days — ` : incomplete ? 'INCOMPLETE — ' : '';
 
   return {
     key: 'dailyDigest',
-    subject: `[Gifsy] Daily operations — ${input.dateLabel} — ${incomplete ? 'INCOMPLETE — ' : ''}${status}`,
+    subject: `[Gifsy] Daily operations — ${input.dateLabel} — ${incompleteTag}${status}`,
     html,
     tenantsNeedingAttention,
-    attentionItems,
+    attentionItems: totalEvents,
+    failedSections: failed,
     gifsyWideItems: gifsyWide.length,
     hiddenTenants: hidden.length,
   };

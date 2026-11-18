@@ -50,7 +50,9 @@ describe('ScheduledReportsController — POST /v1/reports/run', () => {
     }
     runDailyReports.mockResolvedValue(outcome('error', { error: 'smtp down' }));
     const err = await ctrl.run(SECRET).catch((e: HttpException) => e);
-    expect((err as HttpException).getResponse()).toMatchObject({ ok: false, reports: [{ status: 'error', error: 'smtp down' }] });
+    const body = (err as HttpException).getResponse() as { message: string; reports: unknown[] };
+    expect(body.message).toMatch(/^Daily operations digest: error — reason: smtp down — full outcome in the API log line "daily-digest-run [0-9a-f]{8}"$/);
+    expect(body.reports).toEqual([{ key: 'dailyDigest', status: 'error', error: 'smtp down' }]);
   });
 
   it('force=true is passed through; anything else is not force', async () => {
