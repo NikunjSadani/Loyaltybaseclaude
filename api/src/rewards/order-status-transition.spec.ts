@@ -45,6 +45,16 @@ describe('transitionOrderStatus — the single status-write choke point', () => 
       expect(q.values).toEqual(['o1']);
     });
 
+    it('a DELIVERED → DELIVERED re-transition never re-keys an already-snapshotted order (only sets it while payeePan IS NULL)', async () => {
+      const tx = makeTx();
+      await transitionOrderStatus(tx as never, {
+        orderId: 'o1', fromStatus: RedemptionStatus.DELIVERED, toStatus: RedemptionStatus.DELIVERED,
+      });
+      const q = tx.$executeRaw.mock.calls[0][0] as { strings: string[] };
+      const sql = q.strings.join('?');
+      expect(sql).toMatch(/WHERE r\."id" = \? AND r\."payeePan" IS NULL AND p\."id" = r\."partnerId"/);
+    });
+
     it('no snapshot when the guarded claim lost (count 0) or for any other status', async () => {
       const tx = makeTx();
       tx.redemptionOrder.updateMany.mockResolvedValue({ count: 0 });

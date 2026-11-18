@@ -340,6 +340,8 @@ const SECTION_KEYS: Array<[keyof TenantDigest, string]> = [
   ['visibility', 'Visibility'],
   ['salesImport', 'Sales Import'],
   ['billing', 'Billing progress'],
+  // A failed TDS (194R excess) section makes the run DEGRADED like any other section.
+  ['tds', 'TDS (194R)'],
 ];
 
 /**

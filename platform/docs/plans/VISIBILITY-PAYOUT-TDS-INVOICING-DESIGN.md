@@ -223,8 +223,8 @@ runbook pre-check below.
    DEDUCT → ₹24,500 → only 10% × 5,000 = ₹500 withheld; 19,500 × 10/90 = ₹2,167 client-borne.
 5. DEDUCT → GROSS_UP switch (audit A-M5): ₹30,000 visibility on DEDUCT → ₹3,000 withheld and deposited; client moves to
    GROSS_UP and pays ₹10,000 more in full → whole year ₹40,000 × 10/90 = **₹4,444** liability − ₹3,000 deposited =
-   **₹1,444** outstanding (client-borne). Handled by "liability − deposits uploaded" — no special case. Deducted ₹3,000
-   ≤ liability ₹4,444 → **no** excess (B-M1).
+   **₹1,444** outstanding (client-borne). Handled by "liability − deposits uploaded" — no special case. The retailer's
+   share on GROSS_UP is ₹0, so the ₹3,000 taken is **flagged as excess** (owner's choice; no refund).
 
 **Audit follow-ups (2026-11-18):**
 - *A-M4 — REVERSED by the owner rule (2026-11-18):* ledger rows are NOT moved to the outlet's current owner; each nets
@@ -255,10 +255,11 @@ section is 194C (null = legacy 194C) are invoiced — at confirm (`generateForBa
 generation (`generateForPeriod`), both filtered on `tdsSection`. A 194R visibility payout gets no service invoice and
 no GST holdback; invoices raised earlier are left untouched.
 
-**Over-withholding — ONLY FLAGGED (owner 2026-11-18; definition B-M1).** `excessDeductedPaise = deducted so far − the
-WHOLE-YEAR liability` (on the client's current method), when positive — e.g. the year later drops to ₹20,000 or less (the
-"count imported payouts" setting switched off) or the rate is lowered. A DEDUCT → GROSS_UP switch is NOT excess while
-deducted ≤ liability (worked example 5), and adding a PAN never is (the no-PAN and PAN rows are separate keys). The
+**Over-withholding — ONLY FLAGGED (owner 2026-11-18, explicit choice).** `excessDeductedPaise = deducted from the
+retailer so far − the RETAILER'S share` = the whole-year deduct part on the client's CURRENT method, when positive. So a
+DEDUCT → GROSS_UP switch after TDS was taken IS flagged (on GROSS_UP the retailer's share is ₹0 — worked example 5), as is
+a year that later drops to ₹20,000 or less, or ₹4,000 taken against a ₹3,000 share (₹1,000). Adding a PAN never is (the
+no-PAN and PAN rows are separate keys). (A briefly-shipped "− whole-year liability" variant, B-M1, was reverted.) The
 194R report row shows `excessDeductedPaise` ("TDS taken in excess: ₹X — flagged, no automatic refund"), and a
 carry-forward recorded on the ledger that is no longer due shows as `carryForwardDroppedPaise`. The summary carries the
 total + count; the liability tracker, the Excel ("TDS Taken in Excess") and the admin screen show it; the Daily Ops
@@ -296,10 +297,16 @@ Digest has a "TDS (194R)" section (count, total, largest 10) and a Needs-attenti
   `payeePan` / `payeePartnerId` (or `resolvedKey`) with `payeeKeyFor()` — never its own PAN rule.
 - *A-L2:* the DELIVERED snapshot uses `left(pan, 10) <> '__NO_PAN__'` (no LIKE escaping).
 - *A-L3:* the carry-forward note reads the latest ledger group's LAST row in a deterministic `(createdAt, id)` order.
+- *Digest cost:* the 194R excess section runs the full 194R report only for tenants with at least one 194R
+  `TdsDeductionEntry` in the FY (an excess needs a deduction); others get an empty section. `tds` is in `SECTION_KEYS`,
+  so a failed TDS section marks the run degraded.
+- *Redemption snapshot is write-once:* `snapshotPayee` sets `payeePan` / `payeePartnerId` only while `payeePan IS NULL`
+  (a DELIVERED → DELIVERED re-transition never re-keys an order).
 - *A-L5/B-L4:* ONE fully-withheld notice per owner per download (outlets added together). 194R: "The client deposits it
   with the Income Tax Department"; "against your PAN" only when a PAN is on file (else: no PAN → higher rate, add PAN).
 - *A-L6:* the dead `summary194R` was removed — `report194R().summary` is the one summary.
-- *B-M1/B-M2:* excess definition (above); the guide's examples match it (example 4 no excess, example 5 a real excess).
+- *Excess definition (owner's explicit choice; B-M1 reverted):* deducted − the retailer's whole-year deduct part on the
+  current method (above); guide example 4 (Deduct → Gross-up: the ₹3,000 taken is flagged) and example 5 match it.
 - *B-M3:* regenerating a month (`generateForPeriod` refresh) reconciles the invoice's GST reimbursement — HELD → amount
   updated (guarded on HELD; GST gone → the row is KEPT at ₹0, still HELD, with a note — never deleted — and reused if GST
   comes back), none → created, RELEASED at a different amount → never changed, returned in `warnings[]` and shown in red
@@ -320,6 +327,9 @@ Digest has a "TDS (194R)" section (count, total, largest 10) and a Needs-attenti
 the usual `current_database()` guard):** how many ledger-booked entries will be backfilled with a key DIFFERENT from the
 current owner's (their outlet changed owner / PAN after the withholding). Expected 0 on prod (no 194R TDS rows); a
 non-zero count is not an error — those entries keep the PAN they were withheld under — but report it before applying.
+**Data check (2026-11-18, coordinator):** prod and staging both have **0** `credit_payout_entries` with
+`tdsDeductedPaise > 0` or a `TDS-WITHHELD-…` utr — so no withheld / fully-withheld history exists for the backfill to
+re-key.
 
 ```sql
 SELECT count(*) AS entries_keyed_to_an_earlier_payee

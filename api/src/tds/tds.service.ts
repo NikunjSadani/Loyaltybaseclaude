@@ -72,7 +72,6 @@ import {
   ownerPansOf as sharedOwnerPansOf,
   keyForOutletCode,
   normalisePan,
-  payeeKeyFor,
   deducted194RByRetailer,
   type Bases194R,
 } from './tds-194r.shared';
@@ -140,11 +139,12 @@ function summariseRows(
 }
 
 /**
- * Owner 2026-11-18 + B-M1: TDS taken from a retailer beyond the WHOLE-YEAR liability (on the client's current
- * method) — flag only, no refund. A DEDUCT → GROSS_UP switch is NOT excess while deducted ≤ that liability.
+ * Owner 2026-11-18 (explicit choice): TDS taken FROM THE RETAILER beyond the RETAILER'S share — the whole-year
+ * deduct part on the client's CURRENT method — flag only, no refund. So a DEDUCT → GROSS_UP switch after TDS
+ * was taken IS flagged (on Gross-up the retailer's share is ₹0; the client bears the liability).
  */
-function excessOf(liability: bigint, deducted: bigint): bigint {
-  return deducted > liability ? deducted - liability : 0n;
+function excessOf(retailerDeductPart: bigint, deducted: bigint): bigint {
+  return deducted > retailerDeductPart ? deducted - retailerDeductPart : 0n;
 }
 
 /** A recorded carry-forward that the current rules no longer ask to withhold (shown as dropped). */
@@ -237,9 +237,9 @@ export interface TdsRow194R {
   /** Of `depositedPaise`, the part from imported vendor TDS batches (informational). */
   importedVendorDepositPaise: bigint;
   /**
-   * Owner 2026-11-18 + B-M1 — over-withholding is ONLY FLAGGED: TDS taken from this retailer beyond the
-   * WHOLE-YEAR liability on the client's current method (e.g. the year later drops to ₹20,000 or less, or the
-   * rate is lowered). No automatic refund.
+   * Owner 2026-11-18 — over-withholding is ONLY FLAGGED: TDS taken from this retailer beyond the retailer's
+   * whole-year deduct part on the client's current method (e.g. DEDUCT → GROSS_UP after TDS was taken, or the
+   * year later drops to ₹20,000 or less). No automatic refund.
    */
   excessDeductedPaise: bigint;
   /** A carry-forward recorded on the ledger that is no longer due under the current rules (dropped, shown). */
@@ -544,7 +544,7 @@ export class TdsService {
         deductLiabilityPaise: l.deductPartPaise,
         clientBorneLiabilityPaise: l.clientBornePartPaise,
         deductedPaise: deducted.get(key) ?? 0n,
-        excessDeductedPaise: excessOf(l.liabilityPaise, deducted.get(key) ?? 0n),
+        excessDeductedPaise: excessOf(l.deductPartPaise, deducted.get(key) ?? 0n),
         carryForwardDroppedPaise: droppedOf(lastCarry.get(key) ?? 0n, l.deductPartPaise, deducted.get(key) ?? 0n),
         importedVendorDepositPaise: importedDeposited.get(key) ?? 0n,
         ...depositPeriods.fieldFor(key),
@@ -572,8 +572,8 @@ export class TdsService {
       }
       if (r.excessDeductedPaise > 0n) {
         notes.push(
-          `TDS taken in excess: ${formatINR(r.excessDeductedPaise)} — more was withheld from this retailer than the whole ` +
-            "year's TDS on the current rules. Flagged only: no automatic refund.",
+          `TDS taken in excess: ${formatINR(r.excessDeductedPaise)} — more was withheld from this retailer than the ` +
+            "retailer's share of the year's TDS on the current rules. Flagged only: no automatic refund.",
         );
       }
       if (r.carryForwardDroppedPaise > 0n) {

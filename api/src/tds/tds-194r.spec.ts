@@ -529,23 +529,31 @@ describe('over-withholding — ONLY FLAGGED (owner 2026-11-18): excess column + 
     expect(rows[0]).toMatchObject({ deductLiabilityPaise: 600000n, deductedPaise: 600000n, excessDeductedPaise: 0n });
   });
 
-  it('B-M1: excess = deducted − the WHOLE-YEAR liability — a DEDUCT → GROSS_UP switch is NOT excess while deducted ≤ liability', async () => {
+  it('owner rule: excess = deducted from the retailer − the retailer\'s deduct part on the CURRENT method — a DEDUCT → GROSS_UP switch after ₹3,000 was taken IS flagged', async () => {
     const d = base();
     d.entries = [paidVis('v1', 3000000n)];
     d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
     const [row] = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
-    // GROSS_UP whole-year liability ₹3,333 ≥ ₹3,000 deducted → no excess.
-    expect(row).toMatchObject({ liabilityPaise: 333300n, deductedPaise: 300000n, excessDeductedPaise: 0n });
+    // On GROSS_UP the retailer's share is ₹0 → all ₹3,000 taken is excess (the client bears the ₹3,333 liability).
+    expect(row).toMatchObject({ deductLiabilityPaise: 0n, liabilityPaise: 333300n, deductedPaise: 300000n, excessDeductedPaise: 300000n });
+    expect(row.note).toContain('TDS taken in excess: ₹3,000.00');
+    expect(row.note).toMatch(/no automatic refund/i);
   });
 
-  it('B-M1: excess when deducted > the whole-year liability (the year later drops to ₹20,000 or less after TDS was taken)', async () => {
+  it('reviewer case: ₹4,000 taken vs the retailer\'s ₹3,000 deduct part (DEDUCT, whole year) → ₹1,000 flagged', async () => {
     const d = base();
-    d.entries = [paidVis('v1', 1500000n)]; // ₹3,000 was taken while the year was over ₹20,000; it is now ₹15,000
+    d.entries = [paidVis('v1', 3000000n)];
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 400000n }];
+    const [row] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row).toMatchObject({ deductLiabilityPaise: 300000n, deductedPaise: 400000n, excessDeductedPaise: 100000n });
+  });
+
+  it('excess when the year later drops to ₹20,000 or less after TDS was taken (deduct part ₹0)', async () => {
+    const d = base();
+    d.entries = [paidVis('v1', 1500000n)];
     d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
     const [row] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
     expect(row).toMatchObject({ liabilityPaise: 0n, deductedPaise: 300000n, excessDeductedPaise: 300000n });
-    expect(row.note).toContain('TDS taken in excess: ₹3,000.00');
-    expect(row.note).toMatch(/no automatic refund/i);
   });
 
   it('A-L3: the carry-forward is read from the LATEST ledger group (createdAt, then id) — earlier groups never leak in', async () => {

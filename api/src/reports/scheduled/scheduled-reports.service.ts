@@ -699,6 +699,13 @@ export class ScheduledReportsService {
   /** Owner 2026-11-18: 194R retailers with TDS taken in excess this FY (flag only — no refund). */
   private async tdsExcess(clientId: string, nowMs: number): Promise<TdsExcessSection> {
     const fyLabel = financialYear(new Date(nowMs)).fyLabel;
+    // Cost: excess needs TDS deducted from a retailer, and every deduction is a 194R ledger row — so a tenant
+    // with NO 194R ledger row this FY cannot have any excess. Skip the full 194R report for it (cheap pre-check).
+    const anyLedger = await this.prisma.tdsDeductionEntry.findFirst({
+      where: { clientId, section: 'SEC_194R', fyLabel },
+      select: { id: true },
+    });
+    if (!anyLedger) return { fyLabel, excessRetailerCount: 0, totalExcessPaise: 0n, sample: [] };
     const report = await this.tds.report194R(clientId, fyLabel);
     const over = report.rows
       .filter((r) => (r.excessDeductedPaise ?? 0n) > 0n)

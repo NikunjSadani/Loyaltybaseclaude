@@ -441,6 +441,12 @@ describe('buildDailyOpsDigest', () => {
     expect(r.failedSections).toHaveLength(2);
   });
 
+  it('D2t: a failed TDS (194R) section also makes the run DEGRADED (listed by failedSections)', () => {
+    const t = quietTenant('bajaj', 'Bajaj');
+    t.tds = { ok: false, error: 'report failed' };
+    expect(failedSections(input([t]))).toEqual([{ key: 'bajaj/tds', label: 'Bajaj: TDS (194R)' }]);
+  });
+
   it('D2c: a section failing 3 runs in a row → "INCOMPLETE 3 days" in the subject and a red line', () => {
     const t = quietTenant('bajaj', 'Bajaj');
     t.points = { ok: false, error: 'x' };

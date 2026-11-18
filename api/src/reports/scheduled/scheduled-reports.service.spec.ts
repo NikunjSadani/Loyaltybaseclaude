@@ -127,6 +127,8 @@ function makePrisma() {
     salesKpiDefinition: { count: jest.fn().mockResolvedValue(0) },
     outletTarget: { groupBy: jest.fn().mockResolvedValue([]) },
     voucherDispersalRow: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
+    // Digest TDS pre-check: does the tenant have ANY 194R ledger row this FY? Default: none.
+    tdsDeductionEntry: { findFirst: jest.fn().mockResolvedValue(null) },
   };
 }
 
@@ -592,7 +594,22 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(bajaj.payouts.ok && bajaj.payouts.data).toMatchObject({ awaitingUtr: 4, awaitingUtrPaise: 72000n });
   });
 
+  it('TDS cost: the 194R report runs ONLY for tenants with a 194R ledger row this FY (cheap pre-check); others get an empty section', async () => {
+    prisma.tdsDeductionEntry.findFirst.mockImplementation(async ({ where }: { where: { clientId: string; section: string; fyLabel: string } }) =>
+      where.clientId === 'bajaj' && where.section === 'SEC_194R' ? { id: 'l1' } : null,
+    );
+    tdsMock.report194R.mockClear();
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    expect(tdsMock.report194R).toHaveBeenCalledTimes(1);
+    expect(tdsMock.report194R.mock.calls[0][0]).toBe('bajaj');
+    const fy = prisma.tdsDeductionEntry.findFirst.mock.calls[0][0].where.fyLabel;
+    expect(fy).toMatch(/^\d{4}-\d{2}$/);
+    const deoleo = input.tenants.find((t) => t.clientId === 'deoleo')!;
+    expect(deoleo.tds?.ok && deoleo.tds.data).toMatchObject({ excessRetailerCount: 0, totalExcessPaise: 0n, sample: [] });
+  });
+
   it("TDS: each tenant's 194R excess (current FY) feeds the digest — count, total, largest first", async () => {
+    prisma.tdsDeductionEntry.findFirst.mockResolvedValue({ id: 'l1' });
     tdsMock.report194R.mockImplementation(async (clientId: string) => ({
       rows:
         clientId === 'bajaj'

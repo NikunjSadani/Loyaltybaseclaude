@@ -92,7 +92,7 @@ export async function transitionOrderStatus(
  * TDS payee SNAPSHOT at delivery (owner rule 2026-11-18: TDS is keyed by PAN; a PAN change splits the year
  * at the change). Records the partner's normalised PAN (upper/trim) — or, without a real PAN, the no-PAN
  * owner key `__NO_PAN__:<partnerId>` — on the order, in the same tx as the DELIVERED move. Same rule as
- * the 20261118180000_tds_payee_snapshot backfill.
+ * the 20261118180000_tds_payee_snapshot backfill. Write-once: an order that already has a payeePan keeps it.
  */
 async function snapshotPayee(tx: Tx, orderId: string): Promise<void> {
   const pan = PAN_NORMALISE_SQL('p."panNumber"');
@@ -101,7 +101,8 @@ async function snapshotPayee(tx: Tx, orderId: string): Promise<void> {
     Prisma.sql(
       [
         `UPDATE "redemption_orders" AS r SET "payeePartnerId" = r."partnerId", "payeePan" = CASE WHEN p."panNumber" IS NOT NULL AND ${pan} <> '' AND left(${pan}, 10) <> '__NO_PAN__' THEN ${pan} ELSE '__NO_PAN__:' || r."partnerId" END FROM "channel_partners" AS p WHERE r."id" = `,
-        ` AND p."id" = r."partnerId"`,
+        // Only while not yet snapshotted: a DELIVERED → DELIVERED re-transition never re-keys the order.
+        ` AND r."payeePan" IS NULL AND p."id" = r."partnerId"`,
       ],
       orderId,
     ),
