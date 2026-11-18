@@ -128,7 +128,7 @@ function makePrisma() {
     outletTarget: { groupBy: jest.fn().mockResolvedValue([]) },
     voucherDispersalRow: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]), groupBy: jest.fn().mockResolvedValue([]) },
     voucherDispersalCampaign: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
-    voucherDispersalOrderAlert: { count: jest.fn().mockResolvedValue(0) },
+    voucherDispersalOrderAlert: { count: jest.fn().mockResolvedValue(0), groupBy: jest.fn().mockResolvedValue([]) },
   };
 }
 
@@ -704,14 +704,46 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(late).toEqual({ lateCompletedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) } });
   });
 
-  it('voucher dispersal: earlier-order alerts in the window are counted (campaign audit rows) and never add to "over budget"', async () => {
+  it('voucher dispersal: OPEN earlier-order alerts created OR worsened in the window, split by kind / "couldn\'t check"; resolved apart; never "over budget"', async () => {
     prisma.voucherDispersalRow.groupBy.mockResolvedValue([{ campaignId: 'c1', _sum: { amountPaise: 900_000n } }]); // ₹9,000
     prisma.voucherDispersalCampaign.findMany.mockResolvedValue([{ id: 'c1', budgetPaise: 1_000_000n }]); // ₹10,000
-    prisma.voucherDispersalOrderAlert.count.mockResolvedValue(2);
+    prisma.voucherDispersalOrderAlert.groupBy.mockResolvedValue([
+      { kind: 'SUPERSEDED', hubbleStatus: 'SUCCESS', _count: { _all: 2 } },
+      { kind: 'SUPERSEDED', hubbleStatus: 'ON_HOLD', _count: { _all: 1 } },
+      { kind: 'MARKED_NOT_BOUGHT', hubbleStatus: 'PROCESSING', _count: { _all: 1 } },
+      { kind: 'NOT_APPLIED', hubbleStatus: 'SUCCESS', _count: { _all: 1 } },
+      { kind: 'SUPERSEDED', hubbleStatus: 'LOOKUP_FAILED', _count: { _all: 3 } },
+    ]);
+    prisma.voucherDispersalOrderAlert.count.mockResolvedValue(4);
     const input = await svc.collect(NOW, '13 Nov 2026', WIN);
-    expect(input.voucherDispersal).toMatchObject({ ok: true, data: { overBudgetCampaigns: 0, earlierOrderAlerts: 2 } });
-    // One alert per earlier reference (unique key) — counted by when it was first raised.
-    expect(prisma.voucherDispersalOrderAlert.count).toHaveBeenCalledWith({ where: { createdAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) } } });
+    expect(input.voucherDispersal).toMatchObject({
+      ok: true,
+      data: { overBudgetCampaigns: 0, earlierOrderAlerts: 8, earlierOrderAlertsBy: { superseded: 3, marked: 1, notApplied: 1, couldNotCheck: 3 }, earlierOrderAlertsResolved: 4 },
+    });
+    const win = { gte: new Date(WIN.startMs), lt: new Date(NOW) };
+    expect(prisma.voucherDispersalOrderAlert.groupBy).toHaveBeenCalledWith({
+      by: ['kind', 'hubbleStatus'],
+      where: { resolvedAt: null, OR: [{ createdAt: win }, { statusChangedAt: win }] },
+      _count: { _all: true },
+    });
+    expect(prisma.voucherDispersalOrderAlert.count).toHaveBeenCalledWith({ where: { resolvedAt: win } });
+  });
+
+  it('voucher dispersal (L8): FAILED rows (not marked) whose latest lookup was an undocumented status count as "not recognised"', async () => {
+    prisma.voucherDispersalRow.count.mockImplementation(({ where }: { where: Record<string, any> }) =>
+      Promise.resolve(where.lastReconcileResult ? 2 : 0),
+    );
+    prisma.voucherDispersalRow.findMany.mockResolvedValue([
+      { placeAttemptAt: new Date(NOW - 3 * HOUR), pendingSince: null, pendingReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD' },
+    ]);
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    expect(input.voucherDispersal).toMatchObject({ ok: true, data: { unrecognisedStatus: 3 } });
+    const calls = prisma.voucherDispersalRow.count.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);
+    expect(calls).toContainEqual({
+      status: 'BUY_FAILED',
+      OR: [{ buyFailureSource: null }, { buyFailureSource: { not: 'MARKED_NOT_BOUGHT' } }],
+      lastReconcileResult: { startsWith: 'HUBBLE_', notIn: ['HUBBLE_SUCCESS', 'HUBBLE_PROCESSING', 'HUBBLE_FAILED'] },
+    });
   });
 
   it('voucher dispersal: rows marked "not bought" are CLOSED (not "still failed"); unrecognised-status pending rows are counted apart from "unconfirmed > 2 h"', async () => {
@@ -732,7 +764,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
 
   it('voucher dispersal: window counts, the 2 h retry gate, and the still-open counts', async () => {
     prisma.voucherDispersalRow.count.mockImplementation(({ where }: { where: { status: unknown; OR?: unknown; updatedAt?: unknown; boughtAt?: unknown; lateCompletedAt?: unknown } }) => {
-      if (where.lateCompletedAt) return Promise.resolve(0);
+      if (where.lateCompletedAt || (where as { lastReconcileResult?: unknown }).lastReconcileResult) return Promise.resolve(0);
       if (where.status === 'BOUGHT' && where.OR) return Promise.resolve(where.updatedAt ? 4 : 6);
       if (where.status === 'BOUGHT') return Promise.resolve(180);
       if (where.status === 'BUY_FAILED') return Promise.resolve(where.updatedAt ? 2 : 5);
@@ -748,7 +780,9 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       ok: true,
       data: {
         bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 5, messageFailedOpen: 6,
-        overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0, earlierOrderAlerts: 0, markedClosed: 5, unrecognisedStatus: 0,
+        overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0, earlierOrderAlerts: 0,
+        earlierOrderAlertsBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 }, earlierOrderAlertsResolved: 0, markedClosed: 5,
+        unrecognisedStatus: 0,
       },
     });
     const calls = prisma.voucherDispersalRow.count.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);

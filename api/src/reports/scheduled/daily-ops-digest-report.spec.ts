@@ -417,6 +417,31 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
     expect(html.slice(html.indexOf('Right now'))).toContain('Hubble status not recognised');
   });
 
+  it('earlier-order alerts are worded per kind / status; resolved ones are listed apart (not an attention item)', () => {
+    const d = ok({
+      bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0,
+      earlierOrderAlerts: 5, earlierOrderAlertsBy: { superseded: 2, marked: 1, notApplied: 1, couldNotCheck: 1 }, earlierOrderAlertsResolved: 3,
+    });
+    expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
+      'Voucher dispersal: Hubble reported activity on 2 earlier orders retired by a retry (in the window) — check with Hubble (a voucher may have been issued twice)',
+      'Voucher dispersal: Hubble reported activity on the order of 1 row marked "not bought" (in the window) — check with Hubble (a voucher may have been issued; the row stays closed)',
+      'Voucher dispersal: 1 order Hubble completed could not be applied to its row (in the window) — check with Hubble (a paid voucher may not have reached the person)',
+      "Voucher dispersal: couldn't check 1 earlier order with Hubble — the lookup failed and no status is known yet (in the window); check it with Hubble",
+    ]);
+    const html = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html;
+    const inWindow = html.slice(html.indexOf('In window'), html.indexOf('Right now'));
+    expect(inWindow).toContain('earlier-order alert resolved (Hubble: failed / no order)');
+  });
+
+  it('only resolved alerts → the section still shows (not empty), no attention item', () => {
+    const d = ok({
+      bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0,
+      earlierOrderAlerts: 0, earlierOrderAlertsBy: { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 }, earlierOrderAlertsResolved: 1,
+    });
+    expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([]);
+    expect(buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html).toContain('data-section="Voucher dispersal (Gifsy-wide)"');
+  });
+
   it('a load failure is itself an item', () => {
     expect(gifsyWideAttention({ voucherDispersal: { ok: false, error: 'boom' } })).toEqual([
       "Couldn't load the Voucher dispersal section",

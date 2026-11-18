@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS "voucher_dispersal_order_alerts" (
     "kind" TEXT NOT NULL,
     "hubbleStatus" TEXT NOT NULL,
     "statusHistory" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "resolvedAt" TIMESTAMP(3),
+    "lastCheckFailedAt" TIMESTAMP(3),
+    "statusChangedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -70,6 +73,12 @@ CREATE TABLE IF NOT EXISTS "voucher_dispersal_order_alerts" (
 
 -- CreateIndex
 CREATE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_createdAt_idx" ON "voucher_dispersal_order_alerts"("createdAt");
+
+-- CreateIndex
+CREATE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_statusChangedAt_idx" ON "voucher_dispersal_order_alerts"("statusChangedAt");
+
+-- CreateIndex
+CREATE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_resolvedAt_idx" ON "voucher_dispersal_order_alerts"("resolvedAt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX IF NOT EXISTS "voucher_dispersal_order_alerts_campaignId_referenceId_key" ON "voucher_dispersal_order_alerts"("campaignId", "referenceId");

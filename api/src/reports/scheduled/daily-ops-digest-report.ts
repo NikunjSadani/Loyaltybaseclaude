@@ -326,7 +326,34 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
       events: d.settleErrorCampaigns!,
     });
   }
-  if ((d.earlierOrderAlerts ?? 0) > 0) {
+  // Earlier-order alerts created or worsened in the window — worded per kind / status (review of 4d8454ad, M4).
+  const by = d.earlierOrderAlertsBy;
+  if (by) {
+    if (by.superseded > 0) {
+      out.push({
+        text: `Voucher dispersal: Hubble reported activity on ${plural(by.superseded, 'earlier order', 'earlier orders')} retired by a retry (in the window) — check with Hubble (a voucher may have been issued twice)`,
+        events: by.superseded,
+      });
+    }
+    if (by.marked > 0) {
+      out.push({
+        text: `Voucher dispersal: Hubble reported activity on the ${by.marked === 1 ? 'order of 1 row' : `orders of ${intIN(by.marked)} rows`} marked "not bought" (in the window) — check with Hubble (a voucher may have been issued; the row stays closed)`,
+        events: by.marked,
+      });
+    }
+    if (by.notApplied > 0) {
+      out.push({
+        text: `Voucher dispersal: ${plural(by.notApplied, 'order', 'orders')} Hubble completed could not be applied to ${by.notApplied === 1 ? 'its row' : 'their rows'} (in the window) — check with Hubble (a paid voucher may not have reached the person)`,
+        events: by.notApplied,
+      });
+    }
+    if (by.couldNotCheck > 0) {
+      out.push({
+        text: `Voucher dispersal: couldn't check ${plural(by.couldNotCheck, 'earlier order', 'earlier orders')} with Hubble — the lookup failed and no status is known yet (in the window); check ${by.couldNotCheck === 1 ? 'it' : 'them'} with Hubble`,
+        events: by.couldNotCheck,
+      });
+    }
+  } else if ((d.earlierOrderAlerts ?? 0) > 0) {
     out.push({
       text: `Voucher dispersal: Hubble reported activity on ${plural(d.earlierOrderAlerts!, 'earlier order', 'earlier orders')} after a retry or a "not bought" mark (in the window) — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)`,
       events: d.earlierOrderAlerts!,
@@ -479,6 +506,7 @@ const dispersalEmpty = (d: VoucherDispersalSection) =>
   !d.overBudgetCampaigns &&
   !d.settleErrorCampaigns &&
   !d.earlierOrderAlerts &&
+  !d.earlierOrderAlertsResolved &&
   !d.unrecognisedStatus &&
   !d.markedClosed &&
   !d.lateCompleted;
@@ -492,6 +520,7 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['WhatsApp failed', intIN(d.messageFailed), accentIf(d.messageFailed, 'red')],
       ['bought later after failing', intIN(d.lateCompleted ?? 0), accentIf(d.lateCompleted ?? 0, 'red')],
       ['earlier order reported by Hubble', intIN(d.earlierOrderAlerts ?? 0), accentIf(d.earlierOrderAlerts ?? 0, 'red')],
+      ['earlier-order alert resolved (Hubble: failed / no order)', intIN(d.earlierOrderAlertsResolved ?? 0)],
     ]) +
     metricLine('Right now', [
       ['pending', intIN(d.pending), accentIf(d.pending, 'amber')],

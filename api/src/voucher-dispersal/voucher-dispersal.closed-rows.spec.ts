@@ -71,7 +71,7 @@ describe('M1: a row marked "not bought" between a read and a write is never boug
   });
 });
 
-describe('M2: an earlier-order lookup that fails is alerted (once) and reported as failed (the webhook asks Hubble to retry)', () => {
+describe('M2: an earlier-order lookup that fails is alerted (once) and reported as failed (the webhook still acks 200 — review of 4d8454ad M3)', () => {
   it('lookup error on a superseded reference → outcome LOOKUP_FAILED + one alert "could not check"', async () => {
     const { t, id } = await rowIn('BOUGHT', { voucherCode: CODE, previousReferenceIds: ['vdA'] });
     t.hubble.getOrderByReference.mockRejectedValue(new Error('timeout'));

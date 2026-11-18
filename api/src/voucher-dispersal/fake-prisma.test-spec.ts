@@ -4,7 +4,7 @@
  * Supports exactly the query subset the module uses: equality (incl. null / Date / bigint), in, notIn,
  * not, lt, has, OR, AND, JSON path+equals; composite unique keys (rows: campaign+dedupePhone,
  * campaign+batch+rowNumber, hubbleReferenceId; batches: campaign+batchNumber); update data with increment / push; orderBy / skip / take; aggregate (_count,
- * _sum.amountPaise); groupBy (any `by` list, default [campaignId, status]); $transaction(fn) (sequential, no isolation needed).
+ * _sum.amountPaise); groupBy (any `by` list, default [campaignId, status]); $transaction(fn) (sequential, no isolation needed; opt-in FIFO serialization).
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Rec = Record<string, any>;
@@ -46,8 +46,10 @@ export function matches(rec: Rec, where: Rec | undefined): boolean {
       if ('notIn' in cond && (cond.notIn as any[]).some((x) => eq(v, x))) return false;
       if ('not' in cond && eq(v, cond.not)) return false;
       if ('lt' in cond && !(v != null && v < cond.lt)) return false;
+      if ('gt' in cond && !(v != null && v > cond.gt)) return false;
       if ('gte' in cond && !(v != null && v >= cond.gte)) return false;
       if ('has' in cond && !(Array.isArray(v) && v.includes(cond.has))) return false;
+      if ('startsWith' in cond && !(typeof v === 'string' && v.startsWith(cond.startsWith))) return false;
       if ('isEmpty' in cond && (Array.isArray(v) ? v.length === 0 : true) !== cond.isEmpty) return false;
       if ('equals' in cond && !eq(v, cond.equals)) return false;
       continue;
@@ -91,7 +93,10 @@ function checkUnique(store: Rec[], uniques: string[][]) {
     for (const r of store) {
       if (keys.some((k) => r[k] == null)) continue;
       const sig = keys.map((k) => String(r[k])).join('|');
-      if (seen.has(sig)) throw new Error(`Unique constraint failed on the fields: (${keys.join(',')})`);
+      if (seen.has(sig)) {
+        // Prisma's real shape: PrismaClientKnownRequestError with code P2002.
+        throw Object.assign(new Error(`Unique constraint failed on the fields: (${keys.join(',')})`), { code: 'P2002', meta: { target: keys } });
+      }
       seen.add(sig);
     }
   }
@@ -186,7 +191,11 @@ function table(store: Rec[], prefix: string, defaults: () => Rec, include?: (r: 
   };
 }
 
-export function makeFakePrisma() {
+/**
+ * `serializeTransactions`: run $transaction callbacks one at a time (FIFO) — a conservative model of Postgres row
+ * locks, for specs that race writers which lock a row first (e.g. the order-alert update). Off by default.
+ */
+export function makeFakePrisma(opts: { serializeTransactions?: boolean } = {}) {
   const campaigns: Rec[] = [];
   const rows: Rec[] = [];
   const receipts: Rec[] = [];
@@ -226,7 +235,7 @@ export function makeFakePrisma() {
       [['campaignId', 'batchNumber']],
     ),
     user: table(users, 'user', () => ({})),
-    voucherDispersalOrderAlert: table(orderAlerts, 'alert', () => ({ statusHistory: [] }), undefined, [['campaignId', 'referenceId']]),
+    voucherDispersalOrderAlert: table(orderAlerts, 'alert', () => ({ statusHistory: [], resolvedAt: null, lastCheckFailedAt: null, statusChangedAt: new Date() }), undefined, [['campaignId', 'referenceId']]),
     messageDeliveryReceipt: table(receipts, 'rcpt', () => ({ status: 'QUEUED', sentAt: null, deliveredAt: null, readAt: null, failureReason: null })),
     auditLog: table(audits, 'audit', () => ({})),
     client: table(clients, 'client', () => ({})),
@@ -235,7 +244,8 @@ export function makeFakePrisma() {
   // Interactive transaction: runs fn(prisma); if it THROWS, every table is restored to its state before the
   // transaction (rollback). Not isolated from concurrent transactions (no locks) — enough for the specs.
   const allStores = [campaigns, rows, receipts, audits, clients, batches, users, orderAlerts];
-  prisma.$transaction = jest.fn(async (fn: (tx: Rec) => Promise<unknown>) => {
+  let chain: Promise<unknown> = Promise.resolve();
+  const run = async (fn: (tx: Rec) => Promise<unknown>) => {
     const snap = allStores.map((st) => st.map((r) => ({ ...r })));
     try {
       return await fn(prisma);
@@ -243,6 +253,12 @@ export function makeFakePrisma() {
       allStores.forEach((st, i) => st.splice(0, st.length, ...snap[i]));
       throw e;
     }
+  };
+  prisma.$transaction = jest.fn(async (fn: (tx: Rec) => Promise<unknown>) => {
+    if (!opts.serializeTransactions) return run(fn);
+    const mine = chain.then(() => run(fn));
+    chain = mine.catch(() => undefined);
+    return mine;
   });
   return { prisma, campaigns, rows, receipts, audits, clients, batches, users, orderAlerts };
 }

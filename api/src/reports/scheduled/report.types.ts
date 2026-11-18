@@ -223,11 +223,25 @@ export interface VoucherDispersalSection {
   settleErrorCampaigns?: number;
   /** In the window: purchases Hubble BOUGHT after they had failed / been refused (row.lateCompletedAt). */
   lateCompleted?: number;
-  /** In the window: alerts that Hubble reported activity on an EARLIER (retired) order of a row — not counted as spend. */
+  /**
+   * In the window: OPEN earlier-order alerts CREATED or WORSENED (status moved up to SUCCESS / PROCESSING / an
+   * unrecognised status, or re-opened) — one per reference; never counted as spend. Split in `earlierOrderAlertsBy`.
+   */
   earlierOrderAlerts?: number;
+  /**
+   * `earlierOrderAlerts` by what happened: Hubble activity on an EARLIER (retired) reference / on the reference of a row
+   * marked "not bought" / a completed CURRENT order that could not be applied to its row; `couldNotCheck` = the lookup
+   * failed and no real status is known yet.
+   */
+  earlierOrderAlertsBy?: { superseded: number; marked: number; notApplied: number; couldNotCheck: number };
+  /** In the window: alerts RESOLVED (Hubble confirmed the order failed / there is no order) — listed apart. */
+  earlierOrderAlertsResolved?: number;
   /** NOW: rows an admin marked "not bought" — CLOSED (informational; not "still failed"). */
   markedClosed?: number;
-  /** NOW: pending rows whose last Hubble answer was undocumented — need Gifsy tech (not in `pendingRetryable`). */
+  /**
+   * NOW: pending rows whose last Hubble answer was undocumented (not in `pendingRetryable`), plus FAILED rows (not
+   * marked) whose LATEST lookup was an undocumented status — need Gifsy tech.
+   */
   unrecognisedStatus?: number;
 }
 

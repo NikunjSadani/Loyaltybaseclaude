@@ -28,6 +28,7 @@ import {
   DISPERSAL_RETRY_MIN_AGE_MS,
   SETTLE_FAILURES_BEFORE_ALERT,
   failedMayStillCompleteWhere,
+  HUBBLE_KNOWN_STATUSES,
 } from '../../voucher-dispersal/voucher-dispersal.processor';
 import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../rewards/rewards.service';
 import { buildDailyOpsDigest, failedSections, kycPendingBuckets, MAX_FAILED_REDEMPTION_ROWS } from './daily-ops-digest-report';
@@ -906,7 +907,7 @@ export class ScheduledReportsService {
     });
     // A pending row whose last Hubble answer was undocumented needs Gifsy tech — not "Retry available" (review L4).
     const unrecognised = (r: { pendingReason?: string | null }) => (r.pendingReason ?? '').startsWith('HUBBLE_UNKNOWN_STATUS');
-    const unrecognisedStatus = reconcile.filter(unrecognised).length;
+    const pendingUnrecognised = reconcile.filter(unrecognised).length;
     const pendingRetryable = reconcile.filter((r) => !unrecognised(r)).filter((r) => {
       const anchors = [r.placeAttemptAt, r.pendingSince].filter((d): d is Date => !!d).map((d) => d.getTime());
       return anchors.length > 0 && Math.max(...anchors) + DISPERSAL_RETRY_MIN_AGE_MS <= nowMs;
@@ -932,9 +933,33 @@ export class ScheduledReportsService {
       const b = budgetOf.get(id);
       return b !== undefined && paise > b;
     }).length;
-    // Hubble activity on an EARLIER (retired) order of a row — one alert per reference, counted when first raised in
-    // the window; never counted against any budget.
-    const earlierOrderAlerts = await this.prisma.voucherDispersalOrderAlert.count({ where: { createdAt: inWindow } });
+    // Earlier-order alerts (one per reference; never counted against any budget): OPEN ones created OR worsened in the
+    // window (statusChangedAt moves only when the alert gets worse — review of 4d8454ad, M1), by what happened; the
+    // RESOLVED ones (Hubble confirmed FAILED / no order) are listed apart.
+    const alertGroups = await this.prisma.voucherDispersalOrderAlert.groupBy({
+      by: ['kind', 'hubbleStatus'],
+      where: { resolvedAt: null, OR: [{ createdAt: inWindow }, { statusChangedAt: inWindow }] },
+      _count: { _all: true },
+    });
+    const earlierOrderAlertsBy = { superseded: 0, marked: 0, notApplied: 0, couldNotCheck: 0 };
+    for (const g of alertGroups) {
+      const n = g._count._all;
+      if (g.hubbleStatus === 'LOOKUP_FAILED') earlierOrderAlertsBy.couldNotCheck += n;
+      else if (g.kind === 'MARKED_NOT_BOUGHT') earlierOrderAlertsBy.marked += n;
+      else if (g.kind === 'NOT_APPLIED') earlierOrderAlertsBy.notApplied += n;
+      else earlierOrderAlertsBy.superseded += n;
+    }
+    const earlierOrderAlerts = alertGroups.reduce((a, g) => a + g._count._all, 0);
+    const earlierOrderAlertsResolved = await this.prisma.voucherDispersalOrderAlert.count({ where: { resolvedAt: inWindow } });
+    // L8 (review of 4d8454ad): a FAILED row (not marked) whose LATEST lookup was an undocumented Hubble status needs
+    // Gifsy tech too — the same rule as the campaign page (lastLookupUnrecognised).
+    const failedUnrecognised = await rows.count({
+      where: {
+        status: 'BUY_FAILED',
+        ...notMarked,
+        lastReconcileResult: { startsWith: 'HUBBLE_', notIn: [...HUBBLE_KNOWN_STATUSES].map((s) => `HUBBLE_${s}`) },
+      },
+    });
     const settleErrorCampaigns = await this.prisma.voucherDispersalCampaign.count({ where: { settleFailures: { gte: SETTLE_FAILURES_BEFORE_ALERT } } });
     const lateCompleted = await rows.count({ where: { lateCompletedAt: inWindow } });
     return {
@@ -949,8 +974,10 @@ export class ScheduledReportsService {
       settleErrorCampaigns,
       lateCompleted,
       earlierOrderAlerts,
+      earlierOrderAlertsBy,
+      earlierOrderAlertsResolved,
       markedClosed,
-      unrecognisedStatus,
+      unrecognisedStatus: pendingUnrecognised + failedUnrecognised,
     };
   }
 

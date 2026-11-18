@@ -380,10 +380,9 @@ I want."* Owner chose **"Add to the same campaign"**.
 - **Earlier-order alerts (loud, NOT counted):** a webhook reporting SUCCESS / PROCESSING / an undocumented status on an
   EARLIER (retired) reference of a row — or on the reference of a row marked not bought — is looked up and alerted: error
   log + a CAMPAIGN audit row (`VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY`, indexed by campaign) once per reference +
-  status. The campaign page shows the TOTAL count and the latest 20: "Batch B, row N: an earlier order was reported
-  completed (SUCCESS) / reported <status> by Hubble after a retry — check with Hubble (a voucher may have been issued twice,
-  or a paid voucher may not have reached the person)". The Daily Ops Digest has a line for the alerts in its window. They
-  never change a row and never enter any budget figure. FAILED / no order on an earlier reference = nothing to report.
+  status. The campaign page shows the OPEN total and the latest 20, worded per kind and real status (§10d). The Daily Ops
+  Digest has lines for the alerts created or worsened in its window. They never change a row and never enter any budget
+  figure. FAILED / no order on an earlier reference creates nothing — and RESOLVES an existing alert (§10d).
 - **Withdrawn** (final review of `2d1e34e5`): the "superseded spend" counting, the hourly re-check sweep of earlier
   references, and "retry after a mark → new reference" — together with the `supersededActiveRefs` / `supersededCheckedAt`
   columns (removed from the still-unapplied migration; re-verified 10 = 10 statements against Prisma's SQL).
@@ -405,15 +404,12 @@ I want."* Owner chose **"Add to the same campaign"**.
   after a mark" anywhere).
 - **Earlier-order alerts live in their own table** `voucher_dispersal_order_alerts` (same unapplied migration, idempotent):
   ONE alert per (campaign, reference) — the unique key makes the dedupe race-safe; a later status updates the same alert
-  (`statusHistory`) and is never a second count (L1). Kinds: `SUPERSEDED` (an earlier, retired reference), `MARKED_NOT_BOUGHT`
+  (`statusHistory`) and is never a second count (L1; update rules superseded by §10d). Kinds: `SUPERSEDED` (an earlier, retired reference), `MARKED_NOT_BOUGHT`
   (the reference of a row marked not bought), `NOT_APPLIED` (a Hubble SUCCESS that could not be stored on the row — M3).
   Status `LOOKUP_FAILED` = we could not check it ("couldn't check an earlier order — check with Hubble"; M2). Page: total
   count + latest 20 (per-status wording); digest: alerts first raised in the window, in the "In window" line (L2). Never
   counted against the budget. Each new alert / status change also writes a campaign audit row + an error log.
-- **The webhook asks Hubble to retry when dispersal processing failed (M2):** `/v1/hubble/webhook` answers **503** when the
-  dispersal reconcile threw or Hubble could not be asked (`LOOKUP_FAILED`); everything else still acks 200. Safe because the
-  dispersal path is lookup-only and idempotent (guarded writes, deduped alerts). (Whether Hubble retries on non-2xx is
-  Hubble's behaviour — the failure is alerted on the campaign either way.)
+- ~~The webhook answers 503 when dispersal processing failed (M2)~~ — **REVERTED** in §10d (M3): always 200.
 - **Alerts rely on Hubble webhooks (L3):** by owner decision there is NO sweep re-checking earlier references; an earlier
   order is only looked up when Hubble calls the webhook for it (a missed / never-sent webhook means no alert).
 - **The "unrecognised" marker clears (M4):** the LATEST lookup decides — a later documented answer (or "no order yet")
@@ -422,4 +418,46 @@ I want."* Owner chose **"Add to the same campaign"**.
 - **Digest (M4 / L4 / L2):** rows marked not bought are reported as "closed (marked not bought)" (informational) and are
   NOT in "purchase failed" / "purchase still failed"; pending rows with an undocumented Hubble status are their own line
   ("needs Gifsy tech") and are NOT in "unconfirmed > 2 h (Retry available)".
-- Migration re-verified: 14 = 14 statements against Prisma's SQL (base `ab1dbbbb` → current schema).
+- Migration re-verified at the time: 14 = 14 statements (now 16 = 16 — §10d).
+
+### 10d. Review of `4d8454ad` — the alert subsystem (2026-11-18)
+
+- **The webhook ALWAYS answers 200 for dispersal processing (M3, reverts §10c M2):** `/v1/hubble/webhook` also carries
+  the live rewards / gift webhooks of every tenant (incl. Deoleo), and Hubble's retry / auto-disable policy for non-2xx
+  answers is unverified — so no 5xx. A failed lookup answers `{ ok: true, reconciled: false, outcome:
+  "DISPERSAL_LOOKUP_FAILED" }` and is RECORDED on the alert ("couldn't check" / last check failed); a processing error
+  answers `{ ok: true, reconciled: false }` with an error log. Current references are re-checked by the 2-minute reconcile
+  sweep; an EARLIER reference is only looked up again when Hubble calls the webhook for it (§10c L3).
+- **The strongest REAL status is kept (H1):** SUCCESS > an unrecognised status > PROCESSING. A lookup failure never
+  overwrites a real status — it only sets `lastCheckFailedAt` and adds `LOOKUP_FAILED` to the history (no audit; a warn
+  log). An alert whose ONLY report is a lookup failure shows `LOOKUP_FAILED` ("couldn't check it with Hubble — the lookup
+  failed; no status known yet"). A lower status after a higher one (SUCCESS then PROCESSING) is kept in the history only.
+- **FAILED / no order RESOLVES an alert (H2):** `resolvedAt` + status + history + audit (`resolved: true`); resolved
+  alerts are excluded from the open count and listed apart on the page ("N resolved order alerts — nothing to do", each
+  "resolved: Hubble confirmed the order failed / there is no order"). They never create an alert. Activity reported later
+  re-opens it (counted as worsened). A lookup failure on a resolved alert keeps it resolved.
+- **Created OR worsened (M1):** `statusChangedAt` moves only when the alert is created or gets worse (status moved up to
+  SUCCESS / PROCESSING / an unrecognised status, or re-opened). The digest counts OPEN alerts created or worsened in its
+  window, by kind (below), and the alerts resolved in the window apart. New columns `resolvedAt`, `lastCheckFailedAt`,
+  `statusChangedAt` + indexes on `statusChangedAt` and `resolvedAt` — in the same unapplied, idempotent migration.
+- **No lost update (M2):** an alert update runs in a short transaction (`ALERT_UPDATE_TX`, 5 s) that LOCKS the alert row
+  first (an `updatedAt` touch = a Postgres row lock), then reads and merges under the lock — a concurrent report waits and
+  sees the committed state. Nothing is conditional on the old status any more. (The spec races two reports with the fake's
+  serialised transactions, the in-memory model of that row lock.) Any skip is logged.
+- **Wording per kind / status (M4, L3):** `SUPERSEDED` = "an earlier order (retired by a retry)" — a voucher may have been
+  issued twice; `MARKED_NOT_BOUGHT` = "the order of this row (marked not bought)" — the row stays closed; `NOT_APPLIED` =
+  "this row's current order — Hubble reports it completed, but it could not be applied to the row" — a paid voucher may
+  not have reached the person. The page shows the real status + the full history ("reports: PROCESSING → SUCCESS") and,
+  when the last check failed, "The last check with Hubble failed (time) — Hubble may have reported more since." A
+  `NOT_APPLIED` alert whose reference later turns out superseded becomes `SUPERSEDED` (never back).
+- **L1:** only the unique violation (`P2002`) means "already alerted"; any other error → error log "could NOT record the
+  order alert", returned as not recorded. **L2:** history deduped (consecutive) and capped at the latest 20
+  (`ALERT_HISTORY_CAP`); audits / error logs only on real changes (created, worsened, resolved, kind upgraded).
+- **L4:** a SUCCESS that cannot be applied because the row is now QUEUED / BUYING with the SAME reference is not an alert
+  (the next buy / lookup of that reference applies it) — a warn log only.
+- **L7:** rows marked "not bought" are counted as `markedClosed` ("Closed (marked not bought)" tile on the campaign page
+  and the list card, "Closed" column per batch), not in "Buy failed" — the same as the digest.
+- **L8:** the digest's "Hubble status not recognised" also counts FAILED rows (not marked) whose LATEST lookup was an
+  undocumented status (the campaign page's `lastLookupUnrecognised` rule), besides pending rows with `HUBBLE_UNKNOWN_STATUS`.
+- Migration re-verified: **16 = 16** statements against `prisma migrate diff` (base `ab1dbbbb` → current schema); SET
+  `lock_timeout` first, RESET last; the widened unique index is still created before the narrower one is dropped.

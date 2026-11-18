@@ -1089,6 +1089,15 @@ export class VoucherDispersalService {
           _sum: { amountPaise: true },
         })
       : [];
+    // "Mark as not bought" rows are CLOSED, not "buy failed" (review of 4d8454ad, L7 — same as the digest).
+    const markedGroups = ids.length
+      ? await this.prisma.voucherDispersalRow.groupBy({
+          by: ['campaignId'],
+          where: { campaignId: { in: ids }, status: RS.BUY_FAILED, buyFailureSource: 'MARKED_NOT_BOUGHT' },
+          _count: { _all: true },
+        })
+      : [];
+    const markedBy = new Map(markedGroups.map((m) => [m.campaignId, m._count._all]));
     const pending = await this.pendingBatchNumbers(ids);
     const names = await this.clientNames(camps.map((c) => c.billedToClientId));
     const items = camps.map((c) => {
@@ -1115,7 +1124,9 @@ export class VoucherDispersalService {
           queued: n(RS.QUEUED),
           pending: n(RS.QUEUED) + n(RS.BUYING) + n(RS.PENDING_RECONCILE),
           bought: n(RS.BOUGHT),
-          buyFailed: n(RS.BUY_FAILED),
+          buyFailed: n(RS.BUY_FAILED) - (markedBy.get(c.id) ?? 0),
+          /** Rows an admin marked "not bought" — closed (not counted as buy failed). */
+          markedClosed: markedBy.get(c.id) ?? 0,
           cancelled: n(RS.CANCELLED),
           spentRupees: rupees(sum(RS.BOUGHT)),
           pendingBatchNumber: p,
@@ -1134,6 +1145,7 @@ export class VoucherDispersalService {
       select: {
         batchNumber: true,
         status: true,
+        buyFailureSource: true,
         amountPaise: true,
         brandKey: true,
         brandLabel: true,
@@ -1181,7 +1193,9 @@ export class VoucherDispersalService {
         pendingReconcile: n(RS.PENDING_RECONCILE),
         pending: n(RS.QUEUED) + n(RS.BUYING) + n(RS.PENDING_RECONCILE),
         bought: n(RS.BOUGHT),
-        buyFailed: n(RS.BUY_FAILED),
+        // "Mark as not bought" rows are CLOSED, not "buy failed" (review of 4d8454ad, L7 — same as the digest).
+        buyFailed: rows.filter((r) => r.status === RS.BUY_FAILED && r.buyFailureSource !== 'MARKED_NOT_BOUGHT').length,
+        markedClosed: rows.filter((r) => r.status === RS.BUY_FAILED && r.buyFailureSource === 'MARKED_NOT_BOUGHT').length,
         cancelled: n(RS.CANCELLED),
         spentRupees: rupees(sumOf([RS.BOUGHT])),
         /** The lowest the budget may be edited down to (spent + committed + queued). */
@@ -1221,28 +1235,33 @@ export class VoucherDispersalService {
   }
 
   /**
-   * Earlier-order alerts of a campaign (audit rows indexed by campaign): the TOTAL count and the latest 20 with
-   * row / reference / Hubble status.
+   * Earlier-order alerts of a campaign (one per reference — review of 4d8454ad): the OPEN ones (total + latest 20,
+   * most recently created / worsened first) and, separately, the RESOLVED ones (Hubble confirmed FAILED / no order).
    */
   private async earlierOrderAlerts(id: string) {
-    // One alert per (campaign, reference) — its own table (unique key); the TOTAL and the latest 20.
-    const [total, latest] = await Promise.all([
-      this.prisma.voucherDispersalOrderAlert.count({ where: { campaignId: id } }),
-      this.prisma.voucherDispersalOrderAlert.findMany({ where: { campaignId: id }, orderBy: { updatedAt: 'desc' }, take: 20 }),
+    const open = { campaignId: id, resolvedAt: null };
+    const resolved = { campaignId: id, resolvedAt: { not: null } };
+    const [total, latest, resolvedTotal, latestResolved] = await Promise.all([
+      this.prisma.voucherDispersalOrderAlert.count({ where: open }),
+      this.prisma.voucherDispersalOrderAlert.findMany({ where: open, orderBy: { statusChangedAt: 'desc' }, take: 20 }),
+      this.prisma.voucherDispersalOrderAlert.count({ where: resolved }),
+      this.prisma.voucherDispersalOrderAlert.findMany({ where: resolved, orderBy: { resolvedAt: 'desc' }, take: 20 }),
     ]);
-    return {
-      total,
-      items: latest.map((a) => ({
-        at: a.updatedAt,
-        firstAt: a.createdAt,
-        kind: a.kind,
-        batchNumber: a.batchNumber,
-        rowNumber: a.rowNumber,
-        referenceId: a.referenceId,
-        hubbleStatus: a.hubbleStatus,
-        statusHistory: a.statusHistory,
-      })),
-    };
+    const view = (a: (typeof latest)[number]) => ({
+      at: a.statusChangedAt,
+      firstAt: a.createdAt,
+      kind: a.kind,
+      batchNumber: a.batchNumber,
+      rowNumber: a.rowNumber,
+      referenceId: a.referenceId,
+      /** The strongest REAL status Hubble reported (LOOKUP_FAILED only when it could never be checked). */
+      hubbleStatus: a.hubbleStatus,
+      statusHistory: a.statusHistory,
+      /** Last time the lookup itself failed — shown next to the real status. */
+      lastCheckFailedAt: a.lastCheckFailedAt,
+      resolvedAt: a.resolvedAt,
+    });
+    return { total, items: latest.map(view), resolvedTotal, resolvedItems: latestResolved.map(view) };
   }
 
   /** Unconfirmed (PREVIEWED) batch number per campaign — at most one each. */
@@ -1259,7 +1278,11 @@ export class VoucherDispersalService {
    * Batch list for the detail page. Batch 1 = the campaign's own first file (no batch record: its file /
    * uploader / confirm fields are the campaign's). Counts come from the rows of each batch.
    */
-  private async batchViews(camp: CampaignRow, records: BatchRow[], rows: { batchNumber: number; status: RS; amountPaise: bigint | null }[]) {
+  private async batchViews(
+    camp: CampaignRow,
+    records: BatchRow[],
+    rows: { batchNumber: number; status: RS; buyFailureSource: string | null; amountPaise: bigint | null }[],
+  ) {
     type Entry = {
       batchNumber: number;
       status: 'PREVIEWED' | 'CONFIRMED' | 'DISCARDED' | 'CANCELLED';
@@ -1320,7 +1343,8 @@ export class VoucherDispersalService {
         invalid: n([RS.INVALID]),
         duplicates: n([RS.DUPLICATE]),
         bought: n([RS.BOUGHT]),
-        buyFailed: n([RS.BUY_FAILED]),
+        buyFailed: mine.filter((r) => r.status === RS.BUY_FAILED && r.buyFailureSource !== 'MARKED_NOT_BOUGHT').length,
+        markedClosed: mine.filter((r) => r.status === RS.BUY_FAILED && r.buyFailureSource === 'MARKED_NOT_BOUGHT').length,
         pending: n(IN_FLIGHT),
         cancelled: n([RS.CANCELLED]),
         totalRupees: rupees(mine.filter((r) => !NOT_VALID.includes(r.status)).reduce((a, r) => a + (r.amountPaise ?? 0n), 0n)),
@@ -1530,9 +1554,10 @@ export class VoucherDispersalService {
   /**
    * POST /campaigns/:id/rows/:rowId/mark-not-bought — GIFSY_ADMIN only, reason required, audited. Only for a row
    * whose last Hubble answer was a status we do not recognise (Retry is refused for it): the admin, having checked
-   * with Hubble, declares it NOT BOUGHT. The row becomes BUY_FAILED `MARKED_NOT_BOUGHT` — terminal, released from the
-   * budget, out of the 2-min lookups; Retry is then allowed with a NEW reference. Under the campaign lock; the audit
-   * row is written in the same transaction.
+   * with Hubble, declares it NOT BOUGHT. The row becomes BUY_FAILED `MARKED_NOT_BOUGHT` — FINAL and closed (owner
+   * decision): released from the budget, out of the 2-min lookups, never retried (Retry answers 409) and never changed
+   * again; Hubble activity on its reference is only alerted. Under the campaign lock; the audit row is written in the
+   * same transaction.
    */
   async markNotBought(user: JwtPayload, id: string, rowId: string, dto: MarkNotBoughtDto) {
     this.assertAdmin(user);

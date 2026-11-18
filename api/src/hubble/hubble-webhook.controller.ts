@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Headers, Logger, Optional, Post, Req, ServiceUnavailableException } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Headers, Logger, Optional, Post, Req } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
@@ -77,21 +77,22 @@ export class HubbleWebhookController {
     if (/^vd[0-9a-f]{24}$/.test(referenceId)) {
       const d = this.dispersal();
       if (d) {
-        // When the dispersal processing FAILED (Hubble could not be asked, or an error) the webhook answers 503 so
-        // Hubble retries it. Safe: the dispersal path is lookup-only and idempotent (guarded writes, deduped alerts),
-        // and the failure is already alerted on the campaign. Everything else still acks 200 (no retry storms).
-        let outcome: string;
+        // ALWAYS 200 for dispersal processing (coordinator review of 4d8454ad, M3): this endpoint also carries the live
+        // rewards / gift webhooks of every tenant (incl. Deoleo) and Hubble's retry / auto-disable policy for non-2xx
+        // answers is unverified — a 5xx here must never risk those. A failed dispersal lookup is instead RECORDED on the
+        // campaign (earlier-order alert "couldn't check" / last check failed), and current references are re-checked by
+        // the 2-minute reconcile sweep.
         try {
-          outcome = await d.reconcileByReference(referenceId);
+          const outcome = await d.reconcileByReference(referenceId);
+          if (outcome === 'LOOKUP_FAILED') {
+            this.logger.warn(`[hubble webhook] dispersal lookup failed for ${referenceId} — recorded on the campaign; acked 200`);
+            return { ok: true, reconciled: false, outcome: 'DISPERSAL_LOOKUP_FAILED' };
+          }
+          if (outcome !== 'NOT_FOUND') return { ok: true, reconciled: true, outcome: `DISPERSAL_${outcome}` };
         } catch (e) {
           this.logger.error(`[hubble webhook] dispersal reconcile failed for ${referenceId}: ${e}`);
-          throw new ServiceUnavailableException('Voucher dispersal could not process this callback — please retry.');
+          return { ok: true, reconciled: false };
         }
-        if (outcome === 'LOOKUP_FAILED') {
-          this.logger.warn(`[hubble webhook] dispersal lookup failed for ${referenceId} — answering 503 so Hubble retries`);
-          throw new ServiceUnavailableException('Voucher dispersal could not check this order with Hubble — please retry.');
-        }
-        if (outcome !== 'NOT_FOUND') return { ok: true, reconciled: true, outcome: `DISPERSAL_${outcome}` };
       }
     }
 

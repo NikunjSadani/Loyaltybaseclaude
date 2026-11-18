@@ -245,7 +245,8 @@ describe('voucher-dispersal UI ⇄ server contract (fixture from the real server
     expect(normalizeBatchPreview(C.batchUpload).overBudgetRupees).toBe(0);
     expect(C.detailWithBatches as { summary: Record<string, unknown> }).not.toHaveProperty('summary.committedRupees');
     expect(d.summary.budgetUsage).toEqual({ spentRupees: 1300, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 1300 });
-    expect(d.summary.earlierOrderAlerts).toEqual({ total: 0, items: [] });
+    expect(d.summary.earlierOrderAlerts).toEqual({ total: 0, items: [], resolvedTotal: 0, resolvedItems: [] });
+    expect(d.summary.markedClosed).toBe(0);
     expect(d.summary.bought).toBe(2);
 
     const r = normalizeRowsPage(C.rowsOfBatch, 1);

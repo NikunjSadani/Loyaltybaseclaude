@@ -12,12 +12,12 @@ export const ADMIN = { sub: 'admin-1', role: 'GIFSY_ADMIN', clientId: 'gifsy', p
 export const ADMIN2 = { sub: 'admin-2', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'A2' } as never;
 export const CODE = 'AMZN-1234-5678-9999';
 
-export function setup() {
+export function setup(fakeOpts: Parameters<typeof makeFakePrisma>[0] = {}) {
   process.env.VOUCHER_DISPERSAL_BRANDS = JSON.stringify([
     { key: 'AMAZON_PAY', label: 'Amazon Pay', productId: 'P_AMZ' },
     { key: 'FLIPKART', label: 'Flipkart', productId: 'P_FK' },
   ]);
-  const db = makeFakePrisma();
+  const db = makeFakePrisma(fakeOpts);
   const hubble = {
     isConfigured: jest.fn(() => true),
     accountFingerprint: jest.fn(() => 'api.myhubble.money#abcdef0123456789'),

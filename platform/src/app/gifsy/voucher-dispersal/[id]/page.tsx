@@ -23,7 +23,7 @@ import {
   BATCH_STATUS_LABEL, BATCH_STATUS_TONE, CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE,
   PENDING_RECONCILE_NOTE, POLL_START_MS,
   PROCESS_FAILURES_BEFORE_NOTE, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, batchLabel, billedToText, campaignStatusText,
-  budgetUsageText, earlierOrderAlertText, overBudgetCauseText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
+  budgetUsageText, earlierOrderAlertText, resolvedOrderAlertText, overBudgetCauseText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
   isProcessInFlight, isSetupCampaign, isUncertainFailure, nextPollDelay, nextProcessFailures, plural, pollPhase, rowStatusText,
   shouldNudgeProcessing, vdApi, vdReportFallbackName, vdReportUrl,
   type CampaignStatus, type RowStatus, type VdBatch, type VdListItem, type VdRow, type VdRowsPage,
@@ -58,6 +58,7 @@ function BatchesTable({ batches }: { batches: VdBatch[] }) {
             <th scope="col" className="px-3 py-2">Cancelled</th>
             <th scope="col" className="px-3 py-2">Bought</th>
             <th scope="col" className="px-3 py-2">Failed</th>
+            <th scope="col" className="px-3 py-2" title="Marked as not bought — closed">Closed</th>
             <th scope="col" className="px-3 py-2">Pending</th>
           </tr>
         </thead>
@@ -86,6 +87,7 @@ function BatchesTable({ batches }: { batches: VdBatch[] }) {
               <td className="px-3 py-2 text-white/80" data-testid={`vd-batch-${b.batchNumber}-cancelled`}>{formatCount(b.cancelled)}</td>
               <td className="px-3 py-2 text-emerald-300" data-testid={`vd-batch-${b.batchNumber}-bought`}>{formatCount(b.bought)}</td>
               <td className={`px-3 py-2 ${(b.buyFailed ?? 0) > 0 ? 'text-red-300' : 'text-white/80'}`} data-testid={`vd-batch-${b.batchNumber}-failed`}>{formatCount(b.buyFailed)}</td>
+              <td className="px-3 py-2 text-white/80" data-testid={`vd-batch-${b.batchNumber}-closed`}>{formatCount(b.markedClosed)}</td>
               <td className={`px-3 py-2 ${(b.pending ?? 0) > 0 ? 'text-amber-300' : 'text-white/80'}`}>{formatCount(b.pending)}</td>
             </tr>
           ))}
@@ -460,14 +462,27 @@ export default function VoucherCampaignDetailPage() {
       {(s.earlierOrderAlerts.total ?? s.earlierOrderAlerts.items.length) > 0 && (
         <div role="alert" data-testid="vd-earlier-orders" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200 space-y-1">
           <p className="font-semibold">
-            Hubble reported activity on {plural(s.earlierOrderAlerts.total ?? s.earlierOrderAlerts.items.length, 'earlier order')}
+            {plural(s.earlierOrderAlerts.total ?? s.earlierOrderAlerts.items.length, 'open order alert')} — Hubble activity on orders this campaign no longer acts on
             {s.earlierOrderAlerts.total !== null && s.earlierOrderAlerts.total > s.earlierOrderAlerts.items.length
               ? ` (the latest ${s.earlierOrderAlerts.items.length} are listed).`
               : '.'}
-            {' '}This is not counted against the budget.
+            {' '}Not counted against the budget.
           </p>
           {s.earlierOrderAlerts.items.map((a, i) => (
-            <p key={`${a.referenceId ?? i}-${a.hubbleStatus ?? ''}`} className="break-words">{earlierOrderAlertText(a)}</p>
+            <p key={`${a.referenceId ?? i}`} className="break-words">{earlierOrderAlertText(a)}</p>
+          ))}
+        </div>
+      )}
+      {(s.earlierOrderAlerts.resolvedTotal ?? s.earlierOrderAlerts.resolvedItems.length) > 0 && (
+        <div role="status" data-testid="vd-resolved-orders" className="rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-sm text-white/75 space-y-1">
+          <p className="font-semibold">
+            {plural(s.earlierOrderAlerts.resolvedTotal ?? s.earlierOrderAlerts.resolvedItems.length, 'resolved order alert')} — nothing to do.
+            {s.earlierOrderAlerts.resolvedTotal !== null && s.earlierOrderAlerts.resolvedTotal > s.earlierOrderAlerts.resolvedItems.length
+              ? ` The latest ${s.earlierOrderAlerts.resolvedItems.length} are listed.`
+              : ''}
+          </p>
+          {s.earlierOrderAlerts.resolvedItems.map((a, i) => (
+            <p key={`${a.referenceId ?? i}`} className="break-words">{resolvedOrderAlertText(a)}</p>
           ))}
         </div>
       )}
@@ -504,6 +519,7 @@ export default function VoucherCampaignDetailPage() {
         <Tile label="Bought" value={formatCount(s.bought)} tone="success" testId="vd-tile-bought" />
         <Tile label="Pending" value={formatCount(s.pending)} tone={gt0(s.pending) ? 'warning' : 'neutral'} testId="vd-tile-pending" />
         <Tile label="Buy failed" value={formatCount(s.buyFailed)} tone={gt0(s.buyFailed) ? 'danger' : 'neutral'} testId="vd-tile-buyfailed" />
+        {gt0(s.markedClosed) && <Tile label="Closed (marked not bought)" value={formatCount(s.markedClosed)} testId="vd-tile-closed" />}
         <Tile label="WhatsApp sent" value={formatCount(s.messageSent)} testId="vd-tile-sent" />
         <Tile label="Delivered" value={formatCount(s.delivered)} testId="vd-tile-delivered" />
         <Tile label="Read" value={formatCount(s.read)} testId="vd-tile-read" />

@@ -4194,16 +4194,26 @@ model VoucherDispersalOrderAlert {
   referenceId   String
   /// SUPERSEDED | MARKED_NOT_BOUGHT | NOT_APPLIED
   kind          String
-  /// Latest Hubble status reported for the reference (or LOOKUP_FAILED).
-  hubbleStatus  String
-  statusHistory String[] @default([])
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  /// STRONGEST real Hubble status reported for the reference (SUCCESS > unrecognised > PROCESSING); FAILED / NO_ORDER
+  /// when resolved; LOOKUP_FAILED only while no real status was ever seen (a lookup failure never overwrites one).
+  hubbleStatus      String
+  /// Every report, oldest first — consecutive duplicates removed, capped at the latest 20.
+  statusHistory     String[]  @default([])
+  /// Set when Hubble confirmed FAILED / no order (excluded from the open count); cleared if activity is reported again.
+  resolvedAt        DateTime?
+  /// Last time the lookup itself failed ("couldn't check") — kept alongside the real status.
+  lastCheckFailedAt DateTime?
+  /// Created, or WORSENED (status moved up to SUCCESS / PROCESSING / unrecognised, or re-opened) — the digest window key.
+  statusChangedAt   DateTime  @default(now())
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   campaign VoucherDispersalCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
 
   @@unique([campaignId, referenceId])
   @@index([createdAt])
+  @@index([statusChangedAt])
+  @@index([resolvedAt])
   @@map("voucher_dispersal_order_alerts")
 }
 

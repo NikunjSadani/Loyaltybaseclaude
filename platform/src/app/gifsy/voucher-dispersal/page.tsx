@@ -172,6 +172,7 @@ export default function VoucherDispersalListPage() {
                         <Count label="Bought" value={formatCount(s.bought)} />
                         <Count label="Pending" value={formatCount(s.pending)} alert={gt0(s.pending) ? 'warning' : undefined} />
                         <Count label="Buy failed" value={formatCount(s.buyFailed)} alert={gt0(s.buyFailed) ? 'danger' : undefined} />
+                        {gt0(s.markedClosed) && <Count label="Closed (marked not bought)" value={formatCount(s.markedClosed)} />}
                         <Count label="Cancelled" value={formatCount(s.cancelled)} />
                         <Count label="Spent / budget" value={`${formatRupees(s.spentRupees)} / ${formatRupees(c.budgetRupees)}`} wide />
                       </dl>

@@ -124,6 +124,31 @@ export const SETTLE_FAILURES_BEFORE_ALERT = 3;
  * not hold the webhook ~30 s). On failure it is left to the next drain pass and NOT counted as a settle failure.
  */
 export const WEBHOOK_SETTLE_TX = { timeout: 3_000, maxWait: 3_000 } as const;
+/** The earlier-order alert update: lock the alert row, merge, write — short. */
+export const ALERT_UPDATE_TX = { timeout: 5_000, maxWait: 5_000 } as const;
+
+/** An alert's history keeps the latest N reports (consecutive duplicates removed) — review of 4d8454ad, L2. */
+export const ALERT_HISTORY_CAP = 20;
+/** Hubble answers that RESOLVE an earlier-order alert (Hubble confirmed nothing was / will be issued) — H2. */
+export const ALERT_RESOLVING_STATUSES: ReadonlySet<string> = new Set(['FAILED', 'NO_ORDER']);
+export type OrderAlertKind = 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | 'NOT_APPLIED';
+
+/**
+ * How serious a reported status is for an alert — the STRONGEST real one is kept (H1): SUCCESS (a voucher was issued)
+ * > an unrecognised status > PROCESSING. LOOKUP_FAILED / FAILED / NO_ORDER are not activity (0).
+ */
+export function alertStatusRank(status: string): number {
+  if (status === 'SUCCESS') return 3;
+  if (status === 'PROCESSING') return 1;
+  if (status === 'LOOKUP_FAILED' || ALERT_RESOLVING_STATUSES.has(status)) return 0;
+  return 2;
+}
+
+/** Append a report to an alert history: consecutive duplicates removed, latest ALERT_HISTORY_CAP kept. */
+export function appendAlertHistory(history: readonly string[], status: string): string[] {
+  const next = history[history.length - 1] === status ? [...history] : [...history, status];
+  return next.slice(-ALERT_HISTORY_CAP);
+}
 /**
  * ONE definition of "can still cost this campaign money" — the buy-time guard (`budgetCommittedWhere`, which
  * is this minus QUEUED: the row being claimed is the one queued amount it adds), the budget floor (edit),
@@ -427,10 +452,10 @@ export class VoucherDispersalProcessor {
 
   /**
    * Hubble activity on an order this campaign no longer acts on — an EARLIER (superseded) reference of a row, or the
-   * reference of a row an admin marked "not bought". SUCCESS / PROCESSING / an undocumented status → error log +
-   * a CAMPAIGN audit row (indexed by campaign; shown on the page with a total count, and in the digest), once per
-   * reference (a later status updates the same alert). Never changes the row, never counted against the budget. A lookup
-   * error is alerted too ("could not check") and returned as LOOKUP_FAILED — the webhook then answers 503 so Hubble retries.
+   * reference of a row an admin marked "not bought". Never changes the row, never counted against the budget.
+   * SUCCESS / PROCESSING / an undocumented status → a loud alert (one per reference; see recordOrderAlert). FAILED / no
+   * order → RESOLVES an existing alert (never creates one). A lookup error is recorded on the alert ("couldn't check" /
+   * last check failed) and returned as LOOKUP_FAILED — the webhook still answers 200 (review of 4d8454ad, M3).
    */
   async alertEarlierOrder(
     row: { id: string; campaignId: string; rowNumber: number; batchNumber: number },
@@ -442,75 +467,160 @@ export class VoucherDispersalProcessor {
       const b = await this.hubble.getOrderByReference(ref);
       status = b === null ? 'NO_ORDER' : String(b.status ?? '').toUpperCase() || 'UNKNOWN';
     } catch (e) {
-      // Could not check it: alerted (once per reference) AND reported as failed — the webhook answers non-2xx so
-      // Hubble retries (review M2; the dispersal path is idempotent: lookup-only + deduped alerts).
       this.logger.error(`[dispersal] could not look up earlier reference ${ref} (campaign ${row.campaignId} row ${row.rowNumber}): ${e}`);
-      await this.recordOrderAlert(row, ref, 'LOOKUP_FAILED', kind);
-      return { status: 'LOOKUP_FAILED', alerted: true };
+      const alerted = await this.recordOrderAlert(row, ref, 'LOOKUP_FAILED', kind);
+      return { status: 'LOOKUP_FAILED', alerted };
     }
-    if (status === 'NO_ORDER' || status === 'FAILED') return { status, alerted: false };
     const alerted = await this.recordOrderAlert(row, ref, status, kind);
     return { status, alerted };
   }
 
   /**
-   * ONE alert per (campaign, reference) — the table's unique key makes this race-safe. A first alert: error log +
-   * campaign audit row. A later, different status updates the same alert (statusHistory; error log + audit) and is
-   * never a second count. Returns true when something was recorded. Never throws.
+   * ONE alert per (campaign, reference) — the table's unique key makes the first write race-safe. Returns true when a
+   * REAL change was recorded (new alert, worsened, resolved, kind upgraded) — those, and only those, get the error log
+   * + campaign audit row. Never throws. Rules (review of 4d8454ad):
+   * - H1: the strongest real status is kept (SUCCESS > unrecognised > PROCESSING); a lookup failure only sets
+   *   lastCheckFailedAt + a history entry (an alert whose ONLY report is a lookup failure shows LOOKUP_FAILED).
+   * - H2: FAILED / NO_ORDER resolves an open alert (resolvedAt); activity reported later re-opens it (worsened).
+   * - M1: statusChangedAt moves only when the alert is created or worsened (the digest's window key).
+   * - M2: an update locks the alert row first (Postgres row lock in a short transaction) and merges under the lock —
+   *   two concurrent reports never lose one.
+   * - L1: only the unique violation (P2002) means "already alerted"; any other error is logged loudly, not recorded.
+   * - L2: history deduped (consecutive) and capped; L3: kind NOT_APPLIED upgrades to SUPERSEDED (never down).
    */
   async recordOrderAlert(
     row: { id: string; campaignId: string; rowNumber: number; batchNumber: number },
     ref: string,
     status: string,
-    kind: 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | 'NOT_APPLIED',
+    kind: OrderAlertKind,
   ): Promise<boolean> {
+    const resolving = ALERT_RESOLVING_STATUSES.has(status);
+    const lookupFailed = status === 'LOOKUP_FAILED';
+    const where = { campaignId: row.campaignId, referenceId: ref };
+    if (!resolving) {
+      try {
+        await this.prisma.voucherDispersalOrderAlert.create({
+          data: {
+            ...where,
+            rowId: row.id,
+            batchNumber: row.batchNumber,
+            rowNumber: row.rowNumber,
+            kind,
+            hubbleStatus: status,
+            statusHistory: [status],
+            ...(lookupFailed ? { lastCheckFailedAt: new Date() } : {}),
+          },
+        });
+        this.sayOrderAlert(row, ref, kind, status, 'ALERT —');
+        await this.orderAlertAudit(row, ref, kind, status, {});
+        return true;
+      } catch (e) {
+        if ((e as { code?: string } | null)?.code !== 'P2002') {
+          this.logger.error(`[dispersal] could NOT record the order alert for ${ref} (campaign ${row.campaignId} row ${row.rowNumber}, Hubble ${status}): ${e}`);
+          return false;
+        }
+        // Already alerted for this reference → update it below.
+      }
+    }
+    type Res = { change: 'WORSENED' | 'RESOLVED' | 'KIND' | null; prev: string; prevKind: string; kind: string; kept: string };
+    let res: Res | null;
+    try {
+      res = await this.prisma.$transaction(async (tx) => {
+        const now = new Date();
+        // Row lock FIRST: a concurrent report waits here, then reads the committed state below (M2).
+        const locked = await tx.voucherDispersalOrderAlert.updateMany({ where, data: { updatedAt: now } });
+        if (locked.count === 0) return null;
+        const cur = await tx.voucherDispersalOrderAlert.findFirst({ where });
+        if (!cur) return null;
+        const data: Prisma.VoucherDispersalOrderAlertUpdateInput = { statusHistory: appendAlertHistory(cur.statusHistory ?? [], status) };
+        let change: Res['change'] = null;
+        const kindUp = kind === 'SUPERSEDED' && cur.kind === 'NOT_APPLIED';
+        if (kindUp) data.kind = 'SUPERSEDED';
+        if (lookupFailed) {
+          data.lastCheckFailedAt = now;
+        } else if (resolving) {
+          if (cur.resolvedAt === null) {
+            Object.assign(data, { resolvedAt: now, hubbleStatus: status });
+            change = 'RESOLVED';
+          } else if (cur.hubbleStatus !== status) {
+            data.hubbleStatus = status; // FAILED <-> NO_ORDER on a resolved alert: not a change worth an audit
+          }
+        } else {
+          const r = alertStatusRank(status);
+          const c = alertStatusRank(cur.hubbleStatus);
+          const worse = cur.resolvedAt !== null || r > c || (r === 2 && c === 2 && status !== cur.hubbleStatus);
+          if (worse) {
+            Object.assign(data, { hubbleStatus: status, resolvedAt: null, statusChangedAt: now });
+            change = 'WORSENED';
+          }
+        }
+        if (!change && kindUp) change = 'KIND';
+        const upd = await tx.voucherDispersalOrderAlert.update({ where: { id: cur.id }, data });
+        return { change, prev: cur.hubbleStatus, prevKind: cur.kind, kind: upd.kind, kept: upd.hubbleStatus };
+      }, ALERT_UPDATE_TX);
+    } catch (e) {
+      this.logger.error(`[dispersal] could NOT update the order alert for ${ref} (campaign ${row.campaignId} row ${row.rowNumber}, Hubble ${status}): ${e}`);
+      return false;
+    }
+    if (!res) {
+      // Nothing to resolve is normal (FAILED / no order on a reference never alerted); a vanished alert is not.
+      if (!resolving) this.logger.error(`[dispersal] could NOT record the order alert for ${ref} (campaign ${row.campaignId}): the existing alert was not found`);
+      return false;
+    }
+    const k = res.kind as OrderAlertKind;
+    if (res.change === null) {
+      // Not a real change -> no audit; still never silent in the logs.
+      if (lookupFailed) {
+        this.logger.warn(`[dispersal] campaign ${row.campaignId} row ${row.rowNumber}: could not check reference ${ref} with Hubble — alert kept at ${res.kept}`);
+      } else if (res.prev !== status) {
+        this.logger.warn(`[dispersal] campaign ${row.campaignId} row ${row.rowNumber}: Hubble reported ${status} for reference ${ref} — alert kept at ${res.kept} (history updated)`);
+      }
+      return false;
+    }
+    if (res.change === 'RESOLVED') {
+      this.logger.warn(
+        `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: alert RESOLVED for reference ${ref} — Hubble confirmed ${status === 'FAILED' ? 'the order failed' : 'there is no order'} (was ${res.prev})`,
+      );
+      await this.orderAlertAudit(row, ref, k, status, { previousStatus: res.prev, resolved: true });
+      return true;
+    }
+    this.sayOrderAlert(row, ref, k, res.kept, res.change === 'KIND' ? `ALERT UPDATE (now an EARLIER order, was ${res.prevKind}) —` : `ALERT UPDATE (was ${res.prev}) —`);
+    await this.orderAlertAudit(row, ref, k, res.kept, { previousStatus: res.prev, ...(res.change === 'KIND' ? { previousKind: res.prevKind } : {}) });
+    return true;
+  }
+
+  private sayOrderAlert(row: { campaignId: string; batchNumber: number; rowNumber: number }, ref: string, kind: OrderAlertKind, status: string, prefix: string) {
     const what =
       kind === 'SUPERSEDED'
         ? 'an EARLIER order (retired by a retry)'
         : kind === 'MARKED_NOT_BOUGHT'
           ? 'the order of a row marked NOT BOUGHT'
-          : 'a completed order that could not be applied to the row';
-    const say = (prefix: string) =>
-      this.logger.error(
-        `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: ${prefix} ${what} (reference ${ref}) — Hubble status ${status}; check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)`,
-      );
-    const audit = (extra: Record<string, unknown>) =>
-      this.prisma.auditLog
-        .create({
-          data: {
-            actorId: null,
-            action: 'UPDATE',
-            entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
-            entityId: row.campaignId,
-            metadata: { event: SUPERSEDED_ALERT_EVENT, kind, rowId: row.id, batchNumber: row.batchNumber, rowNumber: row.rowNumber, referenceId: ref, hubbleStatus: status, ...extra },
-          },
-        })
-        .catch((e: unknown) => this.logger.error(`[dispersal] order-alert audit failed for ${row.campaignId}: ${e}`));
-    try {
-      await this.prisma.voucherDispersalOrderAlert.create({
-        data: { campaignId: row.campaignId, rowId: row.id, batchNumber: row.batchNumber, rowNumber: row.rowNumber, referenceId: ref, kind, hubbleStatus: status, statusHistory: [status] },
-      });
-      say('ALERT —');
-      await audit({});
-      return true;
-    } catch {
-      // Already alerted for this reference (unique key) — update it when the status changed (never a second count).
-      try {
-        const cur = await this.prisma.voucherDispersalOrderAlert.findFirst({ where: { campaignId: row.campaignId, referenceId: ref } });
-        if (!cur || cur.hubbleStatus === status) return false;
-        const upd = await this.prisma.voucherDispersalOrderAlert.updateMany({
-          where: { id: cur.id, hubbleStatus: cur.hubbleStatus },
-          data: { hubbleStatus: status, statusHistory: { push: status } },
-        });
-        if (upd.count !== 1) return false;
-        say(`ALERT UPDATE (was ${cur.hubbleStatus}) —`);
-        await audit({ previousStatus: cur.hubbleStatus });
-        return true;
-      } catch (e) {
-        this.logger.error(`[dispersal] could not record the order alert for ${ref} (campaign ${row.campaignId}): ${e}`);
-        return false;
-      }
-    }
+          : "the row's CURRENT order, completed but not applied to the row";
+    const tail =
+      status === 'LOOKUP_FAILED'
+        ? "couldn't check it with Hubble (the lookup failed) — check it with Hubble"
+        : `Hubble status ${status}; check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)`;
+    this.logger.error(`[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: ${prefix} ${what} (reference ${ref}) — ${tail}`);
+  }
+
+  private async orderAlertAudit(
+    row: { id: string; campaignId: string; rowNumber: number; batchNumber: number },
+    ref: string,
+    kind: OrderAlertKind,
+    status: string,
+    extra: Record<string, unknown>,
+  ): Promise<void> {
+    await this.prisma.auditLog
+      .create({
+        data: {
+          actorId: null,
+          action: 'UPDATE',
+          entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+          entityId: row.campaignId,
+          metadata: { event: SUPERSEDED_ALERT_EVENT, kind, rowId: row.id, batchNumber: row.batchNumber, rowNumber: row.rowNumber, referenceId: ref, hubbleStatus: status, ...extra },
+        },
+      })
+      .catch((e: unknown) => this.logger.error(`[dispersal] order-alert audit failed for ${row.campaignId}: ${e}`));
   }
 
   /**
@@ -594,6 +704,12 @@ export class VoucherDispersalProcessor {
           select: { status: true, hubbleReferenceId: true, rowNumber: true, campaignId: true, batchNumber: true, buyFailureSource: true },
         });
         if (now?.status === RS.BOUGHT && now.hubbleReferenceId === row.hubbleReferenceId) return 'BOUGHT';
+        if (now && now.hubbleReferenceId === row.hubbleReferenceId && (now.status === RS.QUEUED || now.status === RS.BUYING)) {
+          // Re-queued with the SAME reference (review of 4d8454ad, L4): the next buy / lookup of that reference finds
+          // this order at Hubble and applies it — not an alert.
+          this.logger.warn(`[dispersal] Hubble SUCCESS for reference ${row.hubbleReferenceId} arrived while the row is ${now.status} with the same reference — it is applied by that step`);
+          return 'SKIPPED';
+        }
         // Hubble holds a PAID voucher for a reference this row no longer uses (superseded) or for a row we
         // could not store it on — possible second voucher / stranded money. Never silent.
         this.logger.error(

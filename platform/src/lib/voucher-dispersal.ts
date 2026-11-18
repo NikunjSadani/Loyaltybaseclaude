@@ -205,7 +205,10 @@ export interface VdDeliverySummary {
   valid: number | null;
   bought: number | null;
   pending: number | null;
+  /** Buy failed — rows marked "not bought" are NOT included (they are `markedClosed`). */
   buyFailed: number | null;
+  /** Rows an admin marked "not bought" — closed. */
+  markedClosed: number | null;
   cancelled: number | null;
   messageSent: number | null;
   delivered: number | null;
@@ -225,8 +228,11 @@ export interface VdDeliverySummary {
   lateCompletedRows: number | null;
   /** Detail only: rows that had failed and are back with Hubble (pending again) — they count again. */
   failedBackWithHubbleRows: number | null;
-  /** Detail only: Hubble activity on earlier orders — the TOTAL and the latest (up to 20). Never counted as spend. */
-  earlierOrderAlerts: { total: number | null; items: VdEarlierOrderAlert[] };
+  /**
+   * Detail only: order alerts — the OPEN total + latest (up to 20), and the RESOLVED ones (Hubble confirmed the order
+   * failed / no order) apart. Never counted as spend.
+   */
+  earlierOrderAlerts: VdEarlierOrderAlerts;
   /** List only: an "Add more people" batch waiting for confirmation (its number), else null. */
   pendingBatchNumber: number | null;
 }
@@ -247,33 +253,86 @@ export interface VdRowRef {
   rowNumber: number | null;
 }
 
-/** One alert: Hubble reported activity on an EARLIER (retired) order of a row, or on a row marked "not bought". */
+export interface VdEarlierOrderAlerts {
+  total: number | null;
+  items: VdEarlierOrderAlert[];
+  resolvedTotal: number | null;
+  resolvedItems: VdEarlierOrderAlert[];
+}
+
+/**
+ * One alert (one per Hubble reference): Hubble activity on an order the campaign no longer acts on — an EARLIER
+ * (retired) order of a row, the order of a row marked "not bought", or the row's CURRENT order that completed but
+ * could not be applied (NOT_APPLIED).
+ */
 export interface VdEarlierOrderAlert extends VdRowRef {
-  /** Last update of the alert. */
+  /** When it was created or last got worse. */
   at: string | null;
   /** When it was first raised. */
   firstAt: string | null;
   kind: 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | 'NOT_APPLIED' | string;
   referenceId: string | null;
-  /** Latest Hubble status (or LOOKUP_FAILED). */
+  /** The strongest REAL status Hubble reported; LOOKUP_FAILED only when it could never be checked; FAILED / NO_ORDER when resolved. */
   hubbleStatus: string | null;
-  /** Every status reported for this reference, oldest first (one alert per reference). */
+  /** Every report for this reference, oldest first (latest 20). */
   statusHistory: string[];
+  /** Last time the lookup itself failed. */
+  lastCheckFailedAt: string | null;
+  /** Set when Hubble confirmed the order failed / there is no order. */
+  resolvedAt: string | null;
 }
 
-/** "Batch 1, row 3: an earlier order was reported completed by Hubble after a retry — check with Hubble (…)." */
-export function earlierOrderAlertText(a: VdEarlierOrderAlert): string {
-  const what = a.hubbleStatus === 'SUCCESS' ? 'completed' : (a.hubbleStatus ?? 'with an unknown status');
-  const earlier = a.statusHistory.length > 1 ? ` (earlier: ${a.statusHistory.slice(0, -1).join(', ')})` : '';
-  const head = a.hubbleStatus === 'LOOKUP_FAILED'
-    ? "couldn't check an earlier order with Hubble"
-    : a.kind === 'MARKED_NOT_BOUGHT'
-      ? `the order of a row marked not bought was reported ${what} by Hubble${earlier}`
-      : a.kind === 'NOT_APPLIED'
-        ? `a completed order from Hubble could not be applied to this row${earlier}`
-        : `an earlier order was reported ${what} by Hubble after a retry${earlier}`;
+function alertSubject(kind: string): string {
+  return kind === 'MARKED_NOT_BOUGHT'
+    ? 'the order of this row (marked not bought)'
+    : kind === 'NOT_APPLIED'
+      ? "this row's current order"
+      : 'an earlier order (retired by a retry)';
+}
+
+function alertHistory(a: VdEarlierOrderAlert): string {
+  return a.statusHistory.length > 1 ? ` (reports: ${a.statusHistory.join(' → ')})` : '';
+}
+
+function alertRef(a: VdEarlierOrderAlert): string {
   const ref = rowRefText(a);
-  return `${ref.charAt(0).toUpperCase()}${ref.slice(1)}: ${head} — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person).`;
+  return `${ref.charAt(0).toUpperCase()}${ref.slice(1)}`;
+}
+
+/**
+ * An OPEN alert, worded per kind and the REAL status: "Batch 1, row 3: an earlier order (retired by a retry) — Hubble
+ * reports it completed (reports: …) — check with Hubble (…)." "Couldn't check" only when no real status is known.
+ */
+export function earlierOrderAlertText(a: VdEarlierOrderAlert): string {
+  const st = a.hubbleStatus;
+  const notApplied = a.kind === 'NOT_APPLIED';
+  const status =
+    st === 'LOOKUP_FAILED' || st === null
+      ? "couldn't check it with Hubble (the lookup failed; no status known yet)"
+      : st === 'SUCCESS'
+        ? `Hubble reports it completed${notApplied ? ', but it could not be applied to the row' : ''}`
+        : st === 'PROCESSING'
+          ? `Hubble reports it still processing${notApplied ? ' (not applied to the row)' : ''}`
+          : `Hubble reports a status we do not recognise ("${st}")`;
+  const tail =
+    st === 'LOOKUP_FAILED' || st === null
+      ? 'check it with Hubble'
+      : a.kind === 'MARKED_NOT_BOUGHT'
+        ? 'check with Hubble (a voucher may have been issued; the row stays closed)'
+        : notApplied
+          ? 'check with Hubble (a paid voucher may not have reached the person)'
+          : 'check with Hubble (a voucher may have been issued twice)';
+  const lastCheck =
+    a.lastCheckFailedAt && st !== 'LOOKUP_FAILED' && st !== null
+      ? ` The last check with Hubble failed (${formatWhen(a.lastCheckFailedAt)}) — Hubble may have reported more since.`
+      : '';
+  return `${alertRef(a)}: ${alertSubject(a.kind)} — ${status}${alertHistory(a)} — ${tail}.${lastCheck}`;
+}
+
+/** A RESOLVED alert: "Batch 1, row 3: an earlier order (retired by a retry) — resolved: Hubble confirmed the order failed (reports: …)." */
+export function resolvedOrderAlertText(a: VdEarlierOrderAlert): string {
+  const why = a.hubbleStatus === 'NO_ORDER' ? 'Hubble confirmed there is no order' : 'Hubble confirmed the order failed';
+  return `${alertRef(a)}: ${alertSubject(a.kind)} — resolved: ${why}${alertHistory(a)}.`;
 }
 
 /** "spent ₹A · with Hubble (not yet confirmed) ₹B · failed purchases Hubble may still complete ₹C · queued ₹D". */
@@ -319,6 +378,8 @@ export interface VdBatch {
   duplicates: number | null;
   bought: number | null;
   buyFailed: number | null;
+  /** Rows marked "not bought" — closed (not in `buyFailed`). */
+  markedClosed: number | null;
   pending: number | null;
   cancelled: number | null;
   totalRupees: number | null;
@@ -538,6 +599,7 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     bought: num(o.bought),
     pending: num(o.pending),
     buyFailed: num(o.buyFailed),
+    markedClosed: num(o.markedClosed),
     cancelled: num(o.cancelled),
     messageSent: null,
     delivered: null,
@@ -551,7 +613,7 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     queuedAtRiskRupees: null,
     lateCompletedRows: null,
     failedBackWithHubbleRows: null,
-    earlierOrderAlerts: { total: null, items: [] },
+    earlierOrderAlerts: { total: null, items: [], resolvedTotal: null, resolvedItems: [] },
     pendingBatchNumber: num(o.pendingBatchNumber),
   };
 }
@@ -564,6 +626,7 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
     bought: num(o.bought),
     pending: num(o.pending),
     buyFailed: num(o.buyFailed),
+    markedClosed: num(o.markedClosed),
     cancelled: num(o.cancelled),
     messageSent: num(o.messageSent),
     delivered: num(o.delivered),
@@ -617,6 +680,7 @@ export function normalizeBatch(raw: unknown): VdBatch {
     duplicates: num(o.duplicates),
     bought: num(o.bought),
     buyFailed: num(o.buyFailed),
+    markedClosed: num(o.markedClosed),
     pending: num(o.pending),
     cancelled: num(o.cancelled),
     totalRupees: num(o.totalRupees),
@@ -765,23 +829,26 @@ export function normalizeRow(raw: unknown): VdRow {
   };
 }
 
-function normalizeEarlierOrderAlerts(raw: unknown): { total: number | null; items: VdEarlierOrderAlert[] } {
+function normalizeAlertList(raw: unknown): VdEarlierOrderAlert[] {
+  return Array.isArray(raw)
+    ? raw.filter(isObj).map((a) => ({
+        at: str(a.at),
+        firstAt: str(a.firstAt),
+        statusHistory: Array.isArray(a.statusHistory) ? a.statusHistory.filter((x): x is string => typeof x === 'string') : [],
+        kind: str(a.kind) ?? 'SUPERSEDED',
+        batchNumber: num(a.batchNumber),
+        rowNumber: num(a.rowNumber),
+        referenceId: str(a.referenceId),
+        hubbleStatus: str(a.hubbleStatus),
+        lastCheckFailedAt: str(a.lastCheckFailedAt),
+        resolvedAt: str(a.resolvedAt),
+      }))
+    : [];
+}
+
+function normalizeEarlierOrderAlerts(raw: unknown): VdEarlierOrderAlerts {
   const o = isObj(raw) ? raw : {};
-  return {
-    total: num(o.total),
-    items: Array.isArray(o.items)
-      ? o.items.filter(isObj).map((a) => ({
-          at: str(a.at),
-          firstAt: str(a.firstAt),
-          statusHistory: Array.isArray(a.statusHistory) ? a.statusHistory.filter((x): x is string => typeof x === 'string') : [],
-          kind: str(a.kind) ?? 'SUPERSEDED',
-          batchNumber: num(a.batchNumber),
-          rowNumber: num(a.rowNumber),
-          referenceId: str(a.referenceId),
-          hubbleStatus: str(a.hubbleStatus),
-        }))
-      : [],
-  };
+  return { total: num(o.total), items: normalizeAlertList(o.items), resolvedTotal: num(o.resolvedTotal), resolvedItems: normalizeAlertList(o.resolvedItems) };
 }
 
 /** GET /campaigns/:id/rows: `{ rows, total, page, pageSize }`. */

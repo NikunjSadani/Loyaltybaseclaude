@@ -179,32 +179,70 @@ describe('Edit campaign', () => {
     expect(await screen.findByTestId('vd-over-budget')).toHaveTextContent('Over budget by ₹300 — spending is above the budget; see "Budget used" below.');
   });
 
-  it('Hubble activity on EARLIER orders: a loud alert with the TOTAL count, wording per status, never in "Budget used" / over-budget causes', async () => {
+  it('order alerts: a loud box with the OPEN total, the REAL status + history per kind, "couldn\'t check" only with no status; never in "Budget used"', async () => {
     detailQueue = [ok(detail({ summary: {
       overBudgetRupees: 0,
       budgetUsage: { spentRupees: 1000, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 1000 },
       earlierOrderAlerts: {
         total: 23,
         items: [
-          { at: '2026-11-18T10:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 3, referenceId: 'vdA', hubbleStatus: 'SUCCESS' },
+          { at: '2026-11-18T10:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 3, referenceId: 'vdA', hubbleStatus: 'SUCCESS', statusHistory: ['SUCCESS', 'LOOKUP_FAILED'], lastCheckFailedAt: '2026-11-18T10:05:00Z' },
           { at: '2026-11-18T09:00:00Z', kind: 'SUPERSEDED', batchNumber: 2, rowNumber: 5, referenceId: 'vdB', hubbleStatus: 'PROCESSING' },
           { at: '2026-11-18T08:00:00Z', kind: 'MARKED_NOT_BOUGHT', batchNumber: 1, rowNumber: 4, referenceId: 'vdC', hubbleStatus: 'SUCCESS' },
           { at: '2026-11-18T07:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 6, referenceId: 'vdD', hubbleStatus: 'LOOKUP_FAILED' },
           { at: '2026-11-18T06:00:00Z', kind: 'NOT_APPLIED', batchNumber: 1, rowNumber: 7, referenceId: 'vdE', hubbleStatus: 'SUCCESS', statusHistory: ['PROCESSING', 'SUCCESS'] },
+          { at: '2026-11-18T05:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 8, referenceId: 'vdF', hubbleStatus: 'ON_HOLD' },
         ],
+        resolvedTotal: 0,
+        resolvedItems: [],
       },
     } }))];
     render(<DetailPage />);
     const box = await screen.findByTestId('vd-earlier-orders');
     expect(box).toHaveAttribute('role', 'alert');
-    expect(box).toHaveTextContent('Hubble reported activity on 23 earlier orders (the latest 5 are listed).');
-    expect(box).toHaveTextContent("Batch 1, row 6: couldn't check an earlier order with Hubble — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person).");
-    expect(box).toHaveTextContent('Batch 1, row 7: a completed order from Hubble could not be applied to this row (earlier: PROCESSING) — check with Hubble');
-    expect(box).toHaveTextContent('Batch 1, row 3: an earlier order was reported completed by Hubble after a retry — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person).');
-    expect(box).toHaveTextContent('Batch 2, row 5: an earlier order was reported PROCESSING by Hubble after a retry — check with Hubble');
-    expect(box).toHaveTextContent('Batch 1, row 4: the order of a row marked not bought was reported completed by Hubble — check with Hubble');
+    expect(box).toHaveTextContent('23 open order alerts — Hubble activity on orders this campaign no longer acts on (the latest 6 are listed). Not counted against the budget.');
+    expect(box).toHaveTextContent('Batch 1, row 3: an earlier order (retired by a retry) — Hubble reports it completed (reports: SUCCESS → LOOKUP_FAILED) — check with Hubble (a voucher may have been issued twice). The last check with Hubble failed');
+    expect(box).toHaveTextContent('Batch 2, row 5: an earlier order (retired by a retry) — Hubble reports it still processing — check with Hubble (a voucher may have been issued twice).');
+    expect(box).toHaveTextContent('Batch 1, row 4: the order of this row (marked not bought) — Hubble reports it completed — check with Hubble (a voucher may have been issued; the row stays closed).');
+    expect(box).toHaveTextContent("Batch 1, row 6: an earlier order (retired by a retry) — couldn't check it with Hubble (the lookup failed; no status known yet) — check it with Hubble.");
+    expect(box).toHaveTextContent("Batch 1, row 7: this row's current order — Hubble reports it completed, but it could not be applied to the row (reports: PROCESSING → SUCCESS) — check with Hubble (a paid voucher may not have reached the person).");
+    expect(box).toHaveTextContent('Batch 1, row 8: an earlier order (retired by a retry) — Hubble reports a status we do not recognise ("ON_HOLD") — check with Hubble (a voucher may have been issued twice).');
     expect(screen.getByTestId('vd-budget-usage')).not.toHaveTextContent('earlier order');
     expect(screen.queryByTestId('vd-over-budget')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('vd-resolved-orders')).not.toBeInTheDocument();
+  });
+
+  it('RESOLVED order alerts are listed apart ("resolved: Hubble confirmed …"), not in the red box', async () => {
+    detailQueue = [ok(detail({ summary: {
+      earlierOrderAlerts: {
+        total: 0,
+        items: [],
+        resolvedTotal: 2,
+        resolvedItems: [
+          { at: '2026-11-18T10:00:00Z', kind: 'SUPERSEDED', batchNumber: 1, rowNumber: 3, referenceId: 'vdA', hubbleStatus: 'FAILED', statusHistory: ['PROCESSING', 'FAILED'], resolvedAt: '2026-11-18T10:00:00Z' },
+          { at: '2026-11-18T09:00:00Z', kind: 'MARKED_NOT_BOUGHT', batchNumber: 1, rowNumber: 4, referenceId: 'vdB', hubbleStatus: 'NO_ORDER', statusHistory: ['PROCESSING', 'NO_ORDER'], resolvedAt: '2026-11-18T09:00:00Z' },
+        ],
+      },
+    } }))];
+    render(<DetailPage />);
+    const box = await screen.findByTestId('vd-resolved-orders');
+    expect(box).toHaveAttribute('role', 'status');
+    expect(box).toHaveTextContent('2 resolved order alerts — nothing to do.');
+    expect(box).toHaveTextContent('Batch 1, row 3: an earlier order (retired by a retry) — resolved: Hubble confirmed the order failed (reports: PROCESSING → FAILED).');
+    expect(box).toHaveTextContent('Batch 1, row 4: the order of this row (marked not bought) — resolved: Hubble confirmed there is no order (reports: PROCESSING → NO_ORDER).');
+    expect(screen.queryByTestId('vd-earlier-orders')).not.toBeInTheDocument();
+  });
+
+  it('rows marked "not bought" are counted as CLOSED (tile + batch column), not as "Buy failed"', async () => {
+    detailQueue = [ok(detail({
+      summary: { buyFailed: 1, markedClosed: 2 },
+      batches: [{ ...BATCH1, buyFailed: 1, markedClosed: 2 }],
+    }))];
+    render(<DetailPage />);
+    expect(await screen.findByTestId('vd-tile-closed')).toHaveTextContent('Closed (marked not bought)');
+    expect(screen.getByTestId('vd-tile-closed')).toHaveTextContent('2');
+    expect(screen.getByTestId('vd-tile-buyfailed')).toHaveTextContent('1');
+    expect(screen.getByTestId('vd-batch-1-closed')).toHaveTextContent('2');
   });
 
   it('a row marked "not bought" shows the closed note and no Retry / Mark buttons', async () => {
