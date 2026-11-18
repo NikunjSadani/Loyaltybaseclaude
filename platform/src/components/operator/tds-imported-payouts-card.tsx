@@ -176,7 +176,7 @@ export function TdsImportedPayoutsCard({ isGifsy }: { isGifsy: boolean }) {
         <CardDescription className="mt-1">
           Payout history imported from a previous vendor is left out of 194R by default. When switched on,
           imported payouts <strong>paid on or after the date below</strong> are counted in each retailer&apos;s 194R
-          total (PAN or no-PAN at 20%, ₹20,000 threshold, deposits subtract) — <strong>liability only, no
+          total (10% with a PAN, 20% without, ₹20,000 threshold, deposits subtract) — <strong>liability only, no
           deduction</strong>: nothing is withheld for them, no TDS invoice is raised and nothing is
           recovered automatically. Because nothing was withheld from those payouts, this liability is{' '}
           <strong>payer-borne</strong> for every client. They do count towards the retailer’s ₹20,000 threshold, so a

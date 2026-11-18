@@ -3695,6 +3695,8 @@ describe('CreditsService', () => {
           { id: 'p1', panNumber: 'PAN1' },
           { id: 'p2', panNumber: 'PAN1' },
         ]);
+        // A-L1: the engine's 194R partner scope is ONE exact match on the normalised PAN (raw SQL).
+        mockTx.$queryRaw.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }]);
       }
       async function download() {
         mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
@@ -4066,6 +4068,33 @@ describe('CreditsService', () => {
         mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'pe1', panNumber: 'PAN1', section: 'SEC_194C', fyLabel: '2026-27', tdsDeductedThisPaise: 500000n }]);
         await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 500000 });
         expect(lockKeysTaken()).toContain('PAN|PAN1|2026-27');
+      });
+
+      it('A-L1: the partner scope is ONE exact match on upper(btrim(PAN)) for this client (no per-PAN ILIKE OR)', async () => {
+        policy('DEDUCT');
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(1500000n)]);
+        priorRows({});
+        await download();
+        const call = mockTx.$queryRaw.mock.calls.find((c: unknown[]) => String((c[0] as string[]).join('?')).includes('channel_partners'));
+        expect(call).toBeDefined();
+        const sql = (call![0] as string[]).join('?');
+        expect(sql).toMatch(/upper\(btrim\("panNumber"\)\) = ANY/);
+        expect(call!.slice(1)).toEqual(['deoleo', ['PAN1']]);
+        const ilike = mockTx.channelPartner.findMany.mock.calls.some((c: [{ where?: { OR?: Array<{ panNumber?: { contains?: string } }> } }]) =>
+          (c[0]?.where?.OR ?? []).some((x) => !!x.panNumber?.contains),
+        );
+        expect(ilike).toBe(false);
+      });
+
+      it('L3: a stored "__NO_PAN__" sentinel on the partner is treated as NO PAN (owner key, 20%)', async () => {
+        policy('DEDUCT');
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(3000000n)]);
+        const o = bankOutlet('INDIVIDUAL');
+        (o.partner as { panNumber: string | null }).panNumber = '__NO_PAN__';
+        mockPrisma.outlet.findMany.mockResolvedValue([o]);
+        priorRows({});
+        await download();
+        expect(ledgerRow()).toMatchObject({ panNumber: '__NO_PAN__:p1', tdsDeductedThisPaise: 600000n });
       });
 
       it('194C-only download (e.g. Deoleo): no 194R reads at all — no policy read, no countFrom read, no shared base read', async () => {

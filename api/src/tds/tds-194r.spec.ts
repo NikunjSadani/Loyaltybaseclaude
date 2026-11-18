@@ -47,6 +47,11 @@ function fakeDb(d: Data) {
   /* eslint-disable @typescript-eslint/no-explicit-any */
   return {
     creditField: { findMany: async () => [{ id: 'f-vis' }] },
+    // A-L1: SELECT … FROM channel_partners WHERE "clientId" = $1 AND upper(btrim("panNumber")) = ANY($2)
+    $queryRaw: async (_sql: TemplateStringsArray, clientId: string, pans: string[]) =>
+      d.partners
+        .filter((p) => p.clientId === clientId && !!p.panNumber && pans.includes(p.panNumber.trim().toUpperCase()))
+        .map((p) => ({ id: p.id, panNumber: p.panNumber })),
     programSetting: { findUnique: async () => (d.countFrom ? { settingValue: { countFrom: d.countFrom } } : null) },
     creditPayoutEntry: {
       findMany: async ({ where: w }: any) =>

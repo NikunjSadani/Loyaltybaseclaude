@@ -238,6 +238,35 @@ section is 194C (null = legacy 194C) are invoiced — at confirm (`generateForBa
 generation (`generateForPeriod`), both filtered on `tdsSection`. A 194R visibility payout gets no service invoice and
 no GST holdback; invoices raised earlier are left untouched.
 
+**Over-withholding — ONLY FLAGGED (owner 2026-11-18).** When TDS already withheld from a retailer exceeds the whole-year
+deducted part on the current rules (e.g. 20% no-PAN, then the PAN is added → 10%; DEDUCT → GROSS_UP after withholding),
+the 194R report row shows `excessDeductedPaise` ("TDS taken in excess: ₹X — flagged, no automatic refund"), and a
+carry-forward recorded on the ledger that is no longer due shows as `carryForwardDroppedPaise`. The summary carries the
+total + count; the liability tracker, the Excel ("TDS Taken in Excess") and the admin screen show it; the Daily Ops
+Digest has a "TDS (194R)" section (count, total, largest 10) and a Needs-attention line. Nothing is refunded.
+
+**Final-audit follow-ups (2026-11-18, second round):**
+- *A-M1:* the download row is written with `downloadedAt = runAt` (the instant the 194R ledger FY comes from).
+- *A-M2:* the `R194|client|FY` lock is taken by every path that changes a 194R base: any download moving 194R entries to
+  PROCESSING (STANDARD incentive files included), any UTR upload touching a 194R entry (its bank-file FY), and reversal
+  approvals of withheld entries. Redemption delivery does NOT take it: redemptions are client-borne (never withheld),
+  so a concurrent delivery can only shift WHEN a threshold crossing is seen — the next run's whole-year true-up catches it.
+- *A-L4:* a reversal of a withheld 194C entry takes that entry's 194C PAN lock.
+- *A-M3/B-M1:* the retailer statement shows the NET received (gross − TDS withheld); a fully withheld payout reads
+  "Withheld as TDS ₹X — ₹0 paid to you" with no UTR; lifetime/last-month totals are net; the retailer gets an in-app/push
+  note when a payout is fully withheld; the digest's "credit paid" excludes those and is net of TDS, with a separate
+  "settled by TDS withholding" figure.
+- *A-M4/B-M2:* a fully withheld payout's SERVICE invoice is locked at settle time (as at UTR PAID).
+- *A-L3:* when every payout in a run is fully withheld, no bank file is produced — the API answers JSON with the reason.
+- *B-H1/B-L1/B-L2:* response notice headers are bounded (count + first 20 + "+K more"; full lists in JSON); the file is
+  saved before headers are read; a cut connection says the outcome is unknown (check Download History).
+- *A-L1:* the engine's 194R partner scope is one exact match on `upper(btrim("panNumber"))` for the client (raw SQL).
+- *L3:* a stored `__NO_PAN__` sentinel on a partner is treated as no PAN by the engine (same as the report).
+- *A-L2 (documented, not changed):* an off-platform row that names a PAN stays under that PAN; only no-PAN rows resolve
+  through their outlet. Following the retailer for PAN rows depends on the A-H2 decision (who was PAID) — open.
+- *A-H2 (OPEN — needs a decision):* see the report; current behaviour attributes a past payout / withholding to the
+  outlet's CURRENT owner.
+
 ### 9.2 194C — unchanged (D1/D7/D8)
 Combined **across all tenants by PAN** (TGSL = single deductor): thresholds > ₹30,000 single or > ₹1,00,000 FY; rates 1%
 individual/HUF, 2% others, 20% no-PAN; FY by payout **period**; methodology = the one **frozen** on each entry. DEDUCT →
