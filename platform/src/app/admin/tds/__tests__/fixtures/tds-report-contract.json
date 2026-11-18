@@ -1,0 +1,83 @@
+{
+  "_comment": "REAL response shape of GET /v1/admin/tds/194r and /194c (TdsController serializers). Shared contract: api/src/tds/tds.controller.contract.spec.ts asserts the controller emits exactly these keys; the admin TDS screen tests build their mocks from this file. Rename a field in one place and a test fails. Money = integer paise as strings (BigInt.toString()).",
+  "r194": {
+    "section": "194R",
+    "fyLabel": "2025-26",
+    "clientId": "deoleo",
+    "importedPayoutsCountedFrom": null,
+    "summary": {
+      "fyLabel": "2025-26",
+      "clientId": "deoleo",
+      "totalBasePaise": "600000",
+      "totalLiabilityPaise": "60000",
+      "totalDepositedPaise": "45000",
+      "totalOutstandingPaise": "15000",
+      "rowCount": 2
+    },
+    "rows": [
+      {
+        "panNumber": "ABCDE1234F",
+        "fyLabel": "2025-26",
+        "baseFyTotalPaise": "500000",
+        "liabilityPaise": "50000",
+        "depositedPaise": "30000",
+        "outstandingPaise": "20000",
+        "methodology": "GROSS_UP",
+        "ratePct": 10,
+        "cashBasePaise": "500000",
+        "nonCashBasePaise": "0",
+        "deductBasePaise": "0",
+        "clientBorneBasePaise": "500000",
+        "deductLiabilityPaise": "0",
+        "clientBorneLiabilityPaise": "50000",
+        "deductedPaise": "0",
+        "importedVendorDepositPaise": "0"
+      },
+      {
+        "panNumber": "XYZPQ9876G",
+        "fyLabel": "2025-26",
+        "baseFyTotalPaise": "100000",
+        "liabilityPaise": "10000",
+        "depositedPaise": "15000",
+        "outstandingPaise": "-5000",
+        "methodology": "GROSS_UP",
+        "ratePct": 10,
+        "cashBasePaise": "100000",
+        "nonCashBasePaise": "0",
+        "deductBasePaise": "0",
+        "clientBorneBasePaise": "100000",
+        "deductLiabilityPaise": "0",
+        "clientBorneLiabilityPaise": "10000",
+        "deductedPaise": "0",
+        "importedVendorDepositPaise": "0"
+      }
+    ]
+  },
+  "r194c": {
+    "section": "194C",
+    "fyLabel": "2025-26",
+    "summary": {
+      "fyLabel": "2025-26",
+      "totalBasePaise": "200000",
+      "totalLiabilityPaise": "8000",
+      "totalLiabilityNoThresholdPaise": "12000",
+      "totalDepositedPaise": "7000",
+      "totalOutstandingPaise": "1000",
+      "rowCount": 1
+    },
+    "rows": [
+      {
+        "panNumber": "GIFSY1234A",
+        "entityType": "COMPANY",
+        "fyLabel": "2025-26",
+        "baseFyTotalPaise": "200000",
+        "maxSinglePaise": "200000",
+        "thresholdMet": true,
+        "liabilityPaise": "8000",
+        "liabilityNoThresholdPaise": "12000",
+        "depositedPaise": "7000",
+        "outstandingPaise": "1000"
+      }
+    ]
+  }
+}

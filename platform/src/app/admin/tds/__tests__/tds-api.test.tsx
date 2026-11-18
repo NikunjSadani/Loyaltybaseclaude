@@ -21,6 +21,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 import AdminTdsPage from '../page';
+import CONTRACT from './fixtures/tds-report-contract.json';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -53,62 +54,13 @@ const mockUseAdminSession = vi.mocked(useAdminSession);
 
 // ── Mock data ──────────────────────────────────────────────────────────────────
 
-/** All money fields are integer paise, matching the backend contract */
-const MOCK_194R: { success: true; data: object } = {
-  success: true,
-  data: {
-    section: '194R',
-    fyLabel: '2025-26',
-    summary: {
-      baseFyTotalPaise: 500000,   // ₹5,000.00
-      liabilityPaise:   50000,    // ₹500.00
-      depositedPaise:   30000,    // ₹300.00
-      outstandingPaise: 20000,    // ₹200.00  (positive → red)
-    },
-    rows: [
-      {
-        panNumber:        'ABCDE1234F',
-        baseFyTotalPaise: 500000,
-        liabilityPaise:   50000,
-        depositedPaise:   30000,
-        outstandingPaise: 20000,
-      },
-      {
-        panNumber:        'XYZPQ9876G',
-        baseFyTotalPaise: 100000,
-        liabilityPaise:   10000,
-        depositedPaise:   15000,
-        outstandingPaise: -5000,   // negative → over-deposit / credit
-      },
-    ],
-  },
-};
-
-const MOCK_194C: { success: true; data: object } = {
-  success: true,
-  data: {
-    section: '194C',
-    fyLabel: '2025-26',
-    summary: {
-      liabilityPaise:             8000,
-      liabilityNoThresholdPaise:  12000,
-      depositedPaise:             8000,
-      outstandingPaise:           0,
-    },
-    rows: [
-      {
-        panNumber:                'GIFSY1234A',
-        entityType:               'COMPANY',
-        maxSinglePaise:           200000,
-        thresholdMet:             true,
-        liabilityPaise:           8000,
-        liabilityNoThresholdPaise: 12000,
-        depositedPaise:           8000,
-        outstandingPaise:         0,
-      },
-    ],
-  },
-};
+/**
+ * Built from the SHARED response contract (fixtures/tds-report-contract.json) — the same file
+ * api/src/tds/tds.controller.contract.spec.ts checks the controller against, so these mocks can't
+ * drift from the real API shape again (summary keys are total*; money is paise as strings).
+ */
+const MOCK_194R: { success: true; data: typeof CONTRACT.r194 } = { success: true, data: CONTRACT.r194 };
+const MOCK_194C: { success: true; data: typeof CONTRACT.r194c } = { success: true, data: CONTRACT.r194c };
 
 const MOCK_UPLOAD_PREVIEW: { success: true; data: object } = {
   success: true,
@@ -424,5 +376,28 @@ describe('TDS — Admin TDS page API wiring', () => {
     const methods = await screen.findAllByTestId('r194-method');
     expect(methods[0]).toHaveTextContent('Gross-up');
     expect(screen.queryByTestId('r194-imported')).toBeNull();
+  });
+  // TDS16 — the summary cards read the REAL API names (total*). Before the fix they read
+  // summary.baseFyTotalPaise / liabilityPaise and showed ₹0.00 against the real API.
+  it('TDS16: 194R summary cards show the API totals (total* keys from the shared contract)', async () => {
+    vi.stubGlobal('fetch', make194RFetch());
+    render(<AdminTdsPage />);
+    expect(await screen.findByTestId('r194-summary-base')).toHaveTextContent('₹6,000.00');
+    expect(screen.getByTestId('r194-summary-liability')).toHaveTextContent('₹600.00');
+    expect(screen.getByTestId('r194-summary-deposited')).toHaveTextContent('₹450.00');
+    expect(screen.getByTestId('r194-summary-outstanding')).toHaveTextContent('₹150.00');
+  });
+
+  it('TDS17: 194C summary cards show the API totals (total* keys from the shared contract)', async () => {
+    mockUseAdminSession.mockReturnValue({ role: 'GIFSY_ADMIN', name: 'Op', canManageSchemes: false } as ReturnType<typeof useAdminSession>);
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve(url.includes('/194c') ? MOCK_194C : MOCK_194R) }),
+    ));
+    render(<AdminTdsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /194C/ }));
+    expect(await screen.findByTestId('r194c-summary-liability')).toHaveTextContent('₹80.00');
+    expect(screen.getByTestId('r194c-summary-nothreshold')).toHaveTextContent('₹120.00');
+    expect(screen.getByTestId('r194c-summary-deposited')).toHaveTextContent('₹70.00');
+    expect(screen.getByTestId('r194c-summary-outstanding')).toHaveTextContent('₹10.00');
   });
 });

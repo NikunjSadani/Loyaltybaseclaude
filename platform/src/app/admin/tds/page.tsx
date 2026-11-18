@@ -71,11 +71,12 @@ interface Tds194RResponse {
   fyLabel:  string;
   /** Per-tenant setting: imported (vendor) payouts paid on/after this date are in the base (null/absent = OFF). */
   importedPayoutsCountedFrom?: string | null;
+  /** The API's summary keys (TdsController serializeSummary194R) — total*, NOT the row names. */
   summary: {
-    baseFyTotalPaise: number | string;
-    liabilityPaise:   number | string;
-    depositedPaise:   number | string;
-    outstandingPaise: number | string;
+    totalBasePaise:        number | string;
+    totalLiabilityPaise:   number | string;
+    totalDepositedPaise:   number | string;
+    totalOutstandingPaise: number | string;
   };
   rows: Tds194RRow[];
 }
@@ -97,11 +98,12 @@ interface Tds194CRow {
 interface Tds194CResponse {
   section: string;
   fyLabel: string;
+  /** The API's summary keys (TdsController serializeSummary194C) — total*, NOT the row names. */
   summary: {
-    liabilityPaise:          number | string;
-    liabilityNoThresholdPaise: number | string;
-    depositedPaise:          number | string;
-    outstandingPaise:        number | string;
+    totalLiabilityPaise:            number | string;
+    totalLiabilityNoThresholdPaise: number | string;
+    totalDepositedPaise:            number | string;
+    totalOutstandingPaise:          number | string;
   };
   rows: Tds194CRow[];
 }
@@ -203,9 +205,9 @@ function OutstandingCell({ paise }: { paise: number | string }) {
   return <span className="font-semibold text-red-600">{formatINR(v)}</span>;
 }
 
-function SummaryCard({ label, paise }: { label: string; paise: number | string }) {
+function SummaryCard({ label, paise, testId }: { label: string; paise: number | string; testId?: string }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl p-4">
+    <div className="bg-white border border-gray-200 rounded-xl p-4" data-testid={testId}>
       <p className="text-xs text-gray-500">{label}</p>
       <p className="text-lg font-bold text-gray-900 mt-1">{formatINR(p(paise))}</p>
     </div>
@@ -684,10 +686,10 @@ export default function AdminTdsPage() {
           {/* Summary cards */}
           {r194 && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <SummaryCard label="Total Amount Paid"  paise={r194.summary.baseFyTotalPaise} />
-              <SummaryCard label="TDS Liability"      paise={r194.summary.liabilityPaise} />
-              <SummaryCard label="Deposited"          paise={r194.summary.depositedPaise} />
-              <SummaryCard label="Outstanding"        paise={r194.summary.outstandingPaise} />
+              <SummaryCard label="Total Amount Paid"  paise={r194.summary.totalBasePaise}        testId="r194-summary-base" />
+              <SummaryCard label="TDS Liability"      paise={r194.summary.totalLiabilityPaise}   testId="r194-summary-liability" />
+              <SummaryCard label="Deposited"          paise={r194.summary.totalDepositedPaise}   testId="r194-summary-deposited" />
+              <SummaryCard label="Outstanding"        paise={r194.summary.totalOutstandingPaise} testId="r194-summary-outstanding" />
             </div>
           )}
 
@@ -814,10 +816,10 @@ export default function AdminTdsPage() {
           {/* Summary cards */}
           {r194c && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <SummaryCard label="TDS (with threshold)"    paise={r194c.summary.liabilityPaise} />
-              <SummaryCard label="TDS (no threshold)"     paise={r194c.summary.liabilityNoThresholdPaise} />
-              <SummaryCard label="Deposited"              paise={r194c.summary.depositedPaise} />
-              <SummaryCard label="Outstanding"            paise={r194c.summary.outstandingPaise} />
+              <SummaryCard label="TDS (with threshold)"    paise={r194c.summary.totalLiabilityPaise}            testId="r194c-summary-liability" />
+              <SummaryCard label="TDS (no threshold)"     paise={r194c.summary.totalLiabilityNoThresholdPaise} testId="r194c-summary-nothreshold" />
+              <SummaryCard label="Deposited"              paise={r194c.summary.totalDepositedPaise}            testId="r194c-summary-deposited" />
+              <SummaryCard label="Outstanding"            paise={r194c.summary.totalOutstandingPaise}          testId="r194c-summary-outstanding" />
             </div>
           )}
 
