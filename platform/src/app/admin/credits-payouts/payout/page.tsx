@@ -183,6 +183,16 @@ const REV_PAGE_SIZE = 50;
 
 // ─── Gate wrapper ─────────────────────────────────────────────────────────────
 
+/** B-L2: decode a URI-encoded notice header without ever throwing (malformed → shown raw). */
+function safeDecode(v: string | null | undefined): string | null {
+  if (!v) return null;
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+}
+
 export default function PayoutDownloadPage() {
   const session = useAdminSession();
 
@@ -216,6 +226,8 @@ function PayoutPageInner() {
   const [fullyWithheldNote, setFullyWithheldNote] = useState('');
   // Owner rule "no silent pass-through": KYC-held payouts left out of the file.
   const [heldNote, setHeldNote] = useState('');
+  // A-L3: every payout fully withheld as TDS → the API created no bank file.
+  const [noBankFileMsg, setNoBankFileMsg] = useState('');
 
   // UTR upload state
   const [utrDownloadId,  setUtrDownloadId]  = useState('');
@@ -299,6 +311,7 @@ function PayoutPageInner() {
     setGenError('');
     setFullyWithheldNote('');
     setHeldNote('');
+    setNoBankFileMsg('');
     try {
       const body: Record<string, unknown> = { period, groupType };
       if (groupType === 'SEPARATE' && fieldId) {
@@ -319,30 +332,37 @@ function PayoutPageInner() {
         return;
       }
 
-      // A-H2: never silent — show which payouts were fully withheld as TDS (not in this file).
+      // A-L3: when EVERY payout was fully withheld as TDS the API answers JSON (no file) with the reason.
+      const isJson = (res.headers?.get?.('Content-Type') ?? '').includes('application/json');
+      if (isJson) {
+        const json = await res.json().catch(() => null);
+        setNoBankFileMsg(json?.data?.message ?? json?.message ?? 'No bank file was created for this run.');
+      } else {
+        // B-L2: save the file FIRST — reading the notice headers can never block or break the download.
+        const blob = await res.blob();
+        downloadBlob(blob, `payout-${period}-${groupType.toLowerCase()}.xlsx`);
+      }
+
+      // A-H2 / held: never silent — which payouts are NOT in this file, and why.
       const withheldCount = Number(res.headers?.get?.('X-Fully-Withheld-Count') ?? '0');
-      const withheldNote = res.headers?.get?.('X-Fully-Withheld-Note');
       if (withheldCount > 0) {
         setFullyWithheldNote(
-          withheldNote
-            ? decodeURIComponent(withheldNote)
-            : `${withheldCount} payout(s) fully withheld as TDS — not sent to the bank.`,
+          safeDecode(res.headers?.get?.('X-Fully-Withheld-Note')) ??
+            `${withheldCount} payout(s) fully withheld as TDS — not sent to the bank.`,
         );
       }
-
       const heldCount = Number(res.headers?.get?.('X-Held-Count') ?? '0');
-      const heldHeader = res.headers?.get?.('X-Held-Note');
       if (heldCount > 0) {
-        setHeldNote(heldHeader ? decodeURIComponent(heldHeader) : `${heldCount} payout(s) held — KYC not approved.`);
+        setHeldNote(safeDecode(res.headers?.get?.('X-Held-Note')) ?? `${heldCount} payout(s) held — KYC not approved.`);
       }
 
-      // Binary response — trigger download
-      const blob     = await res.blob();
-      downloadBlob(blob, `payout-${period}-${groupType.toLowerCase()}.xlsx`);
-
       loadAll();
-    } catch (e) {
-      setGenError(String(e));
+    } catch {
+      // B-L1: the request was cut (network / proxy timeout) — the file may or may not exist server-side.
+      setGenError(
+        'The connection was interrupted — the payout file may or may not have been created. Check the Download History below before trying again (generating twice would claim the same payouts only once, but check first).',
+      );
+      loadAll();
     } finally {
       setGenerating(false);
     }
@@ -582,6 +602,17 @@ function PayoutPageInner() {
             {generating ? 'Generating…' : 'Generate & Download'}
           </button>
         </div>
+
+        {noBankFileMsg && (
+          <div
+            data-testid="no-bank-file-notice"
+            role="status"
+            className="flex items-center gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+            <span>{noBankFileMsg}</span>
+          </div>
+        )}
 
         {heldNote && (
           <div

@@ -24,6 +24,11 @@ import {
   noPanPartnerKey,
 } from '../tds/tds-194r.shared';
 
+/** B-H1: a header-safe list — the first 20 items, then "+K more" (full lists stay in the JSON result). */
+function boundedList(items: string[], max = 20): string {
+  return items.length <= max ? items.join(', ') : `${items.slice(0, max).join(', ')} +${items.length - max} more`;
+}
+
 /**
  * The ONE advisory-lock key for a client's 194R whole-year state: (client, FY). All 194R state is per
  * client, so one key per client+FY is as correct as per-retailer keys and keeps a Bajaj-scale run at a
@@ -266,20 +271,30 @@ export class CreditsService {
    * A-L: take the 194R retailer lock(s) for withheld 194R entries, resolved from their ORIGINAL ledger
    * rows (retailer key + the FY the withholding was booked in) — the same keys the engine takes.
    */
-  private async lock194RForEntries(tx: Prisma.TransactionClient, clientId: string, entryIds: string[]): Promise<void> {
-    if (entryIds.length === 0) return;
-    const rows = await tx.tdsDeductionEntry.findMany({
-      where: { creditPayoutEntryId: { in: entryIds }, section: TdsSection.SEC_194R },
-      select: { panNumber: true, fyLabel: true },
-    });
-    const keys = [
-      ...new Set(
-        (rows ?? [])
-          .filter((r) => r.fyLabel)
-          .map((r) => r194LockKey(clientId, r.fyLabel)),
-      ),
-    ].sort();
-    if (keys.length) await lockAdvisoryKeys(tx, keys);
+  private async lock194RForEntries(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    entryIds: string[],
+    /** A-M2: extra FYs whose 194R base this write changes (e.g. the bank-file FY of a FAILED 194R entry). */
+    extra194RFys: string[] = [],
+  ): Promise<void> {
+    const rows = entryIds.length
+      ? await tx.tdsDeductionEntry.findMany({
+          where: { creditPayoutEntryId: { in: entryIds } },
+          select: { panNumber: true, fyLabel: true, section: true },
+        })
+      : [];
+    const keys = new Set<string>(extra194RFys.map((fy) => r194LockKey(clientId, fy)));
+    for (const r of rows ?? []) {
+      if (!r.fyLabel) continue;
+      // A-L4: a 194C withholding is reversed under ITS per-PAN key (the one its download took).
+      if (r.section === TdsSection.SEC_194C) {
+        if (r.panNumber?.trim()) keys.add(`PAN|${r.panNumber.trim().toUpperCase()}|${r.fyLabel}`);
+      } else {
+        keys.add(r194LockKey(clientId, r.fyLabel));
+      }
+    }
+    if (keys.size) await lockAdvisoryKeys(tx, [...keys].sort());
   }
 
   /**
@@ -2056,7 +2071,9 @@ export class CreditsService {
     user: JwtPayload,
     dto: CreatePayoutDownloadDto,
   ): Promise<{
-    buffer: Buffer;
+    /** null when EVERY payable payout was fully withheld as TDS (A-L3) — see noBankFileMessage. */
+    buffer: Buffer | null;
+    noBankFileMessage: string | null;
     downloadCode: string;
     downloadId: string;
     // GLB-1(a): entries excluded from the bank file because the partner is not
@@ -2331,6 +2348,15 @@ export class CreditsService {
     const runAt = new Date();
     const runFyLabel = financialYear(runAt).fyLabel;
     const lockKeys = new Set<string>();
+    // A-M2: ANY 194R entry this download moves to PROCESSING (incentives on a STANDARD file too) changes
+    // the client's 194R base for the run FY → take the per-(client, FY) 194R lock.
+    if (
+      entries.some(
+        (e) => payableSet.has(e.outletId) && (e.tdsSection === TdsSection.SEC_194R || (!e.tdsSection && !separateFieldIds.has(e.fieldId))),
+      )
+    ) {
+      lockKeys.add(r194LockKey(user.clientId, runFyLabel));
+    }
     for (const e of engineEntries) {
       if (e.tdsSection === TdsSection.SEC_194R) {
         // A 194R entry takes the ONE per-(client, run FY) key — INSTEAD of the per-PAN key (194R state is
@@ -2396,6 +2422,8 @@ export class CreditsService {
             fieldId: fieldId ?? null,
             fieldName: fieldName ?? null,
             downloadedBy: user.sub,
+            // A-M1: the bank-file date IS the run time the ledger FY comes from (no 31-Mar drift).
+            downloadedAt: runAt,
             totalAmountPaise: toPaiseBigInt(totalAmountPaise),
             bankSnapshots: bankSnapshots as unknown as Prisma.InputJsonValue,
           },
@@ -2539,6 +2567,12 @@ export class CreditsService {
               `Could not settle ${ids.length - settled.count} fully-withheld payout(s) for period ${period}. Rolled back — retry the download.`,
             );
           }
+          // A-M4/B-M2: lock the self-billed SERVICE invoice of a payout settled here — the same lock a
+          // UTR PAID applies (D12): it is final, its number can no longer be edited.
+          await tx.autoInvoice.updateMany({
+            where: { clientId: user.clientId, outletCode: { in: fullyWithheldCodes }, period, invoiceKind: 'SERVICE', lockedAt: null },
+            data: { lockedAt: runAt },
+          });
           // Nothing left for the bank at all → the download is already fully settled.
           if (fullyWithheldCodes.length === payableCodes.length) {
             await tx.creditPayoutDownload.update({ where: { id: rec.id }, data: { status: 'PAID' } });
@@ -2567,9 +2601,11 @@ export class CreditsService {
         entryIds: info.entryIds,
       };
     });
+    // B-H1: the note travels in a response header → BOUNDED (count + first 20 codes + "+K more"); the
+    // full list stays in the JSON result (fullyWithheld).
     const fullyWithheldNote = fullyWithheld.length
       ? `${fullyWithheld.length} payout${fullyWithheld.length === 1 ? '' : 's'} fully withheld as TDS — not sent to the bank ` +
-        `(outlet${fullyWithheld.length === 1 ? '' : 's'} ${fullyWithheld.map((f) => f.outletId).join(', ')}).`
+        `(outlet${fullyWithheld.length === 1 ? '' : 's'} ${boundedList(fullyWithheld.map((f) => f.outletId))}).`
       : null;
 
     const rows: PayoutBatchRow[] = bankCodes.map((code) => {
@@ -2615,16 +2651,53 @@ export class CreditsService {
       rows,
     };
 
-    const buffer = generatePayoutFileBuffer(payoutBatch);
+    // A-L3: nothing left for the bank → no (empty) file; say why.
+    const buffer = bankCodes.length > 0 ? generatePayoutFileBuffer(payoutBatch) : null;
+    const noBankFileMessage =
+      buffer === null && fullyWithheld.length > 0
+        ? `No bank file — every payout in this run was fully withheld as TDS (${fullyWithheld.length} payout${fullyWithheld.length === 1 ? '' : 's'}). They are settled; nothing needs to be sent to the bank.`
+        : null;
+
+    // A-M3: tell each retailer whose payout was fully withheld, in plain words (free channels only —
+    // no paid template says this). POST-COMMIT + fire-and-forget: never fails the download.
+    for (const f of fullyWithheld) {
+      try {
+        const o = outletDbMap.get(f.outletId);
+        const partnerId = o?.partner?.id;
+        if (!partnerId) continue;
+        const partner = await this.prisma.channelPartner.findFirst({ where: { id: partnerId }, select: { userId: true } });
+        if (!partner?.userId) continue;
+        await this.notifications.notifyUser({
+          userId: partner.userId,
+          subject: 'Payout taken as TDS',
+          body:
+            `${formatINR(BigInt(f.tdsWithheldPaise))} of this payout was taken as TDS — ₹0 paid to you. ` +
+            'It is deposited against your PAN and will show in your TDS statement.',
+          url: '/partner/wallet',
+          event: 'PAYOUT_TDS_WITHHELD',
+        });
+      } catch (e) {
+        this.logger.warn(`[credit-notify] TDS-withheld note failed (client ${user.clientId}): ${e}`);
+      }
+    }
 
     // KYC-held payouts are NOT in this file — say so loudly (owner rule: no silent pass-through).
     const heldOutlets = [...new Map(heldEntries.map((h) => [h.outletId, h])).values()];
     const heldNote = heldOutlets.length
       ? `${heldOutlets.length} payout${heldOutlets.length === 1 ? '' : 's'} held — KYC not approved: ` +
-        heldOutlets.map((h) => `${h.outletId} (${h.outletName})`).join(', ') +
+        boundedList(heldOutlets.map((h) => `${h.outletId} (${h.outletName})`)) +
         '. They stay pending for the next file.'
       : null;
-    return { buffer, downloadCode: download.downloadCode, downloadId: download.id, heldEntries, fullyWithheld, fullyWithheldNote, heldNote };
+    return {
+      buffer,
+      noBankFileMessage,
+      downloadCode: download.downloadCode,
+      downloadId: download.id,
+      heldEntries,
+      fullyWithheld,
+      fullyWithheldNote,
+      heldNote,
+    };
   }
 
   /**
@@ -2893,10 +2966,14 @@ export class CreditsService {
       });
       // A-L: take the 194R retailer lock(s) of every withheld 194R entry in this download BEFORE any
       // flip / offset write — the same key the engine holds while it computes withholding.
+      // A-M2: ANY 194R entry flipped here changes the 194R base of its bank-file FY → take that lock too.
       await this.lock194RForEntries(
         tx,
         user.clientId,
-        freshEntries.filter((e) => e.tdsSection === TdsSection.SEC_194R && e.tdsDeductedPaise > 0n).map((e) => e.id),
+        freshEntries.filter((e) => e.tdsDeductedPaise > 0n).map((e) => e.id),
+        freshEntries.some((e) => e.tdsSection === TdsSection.SEC_194R)
+          ? [financialYear(download.downloadedAt ?? new Date()).fyLabel]
+          : [],
       );
 
       // GROUP per outlet: a download can hold several entries for one outlet (one per payout row at
@@ -3350,9 +3427,9 @@ export class CreditsService {
         await this.lock194RForEntries(
           tx,
           user.clientId,
-          payoutEntries
-            .filter((e) => e.tdsSection === TdsSection.SEC_194R && (e.tdsDeductedPaise ?? 0n) > 0n)
-            .map((e) => e.id),
+          // A-L4: any withheld entry (194R → per-client key; 194C → its per-PAN key). A non-withheld
+          // reversal never changes a 194R base (PENDING/FAILED are not counted; PAID stays PAID).
+          payoutEntries.filter((e) => (e.tdsDeductedPaise ?? 0n) > 0n).map((e) => e.id),
         );
         for (const payoutEntry of payoutEntries) {
           let cur = {
