@@ -35,6 +35,8 @@ function db(
     targets?: Array<{ month: string; updatedAt?: Date; clientId?: string; targetValues?: Record<string, unknown> }>;
     acceptances?: Array<Record<string, unknown>>;
     focusDefs?: Array<Record<string, unknown>>;
+    /** Background jobs: active job rows (activeJobsByMonth shape). */
+    activeJobs?: Array<Record<string, unknown>>;
   } = {},
 ) {
   const log: string[] = [];
@@ -82,6 +84,13 @@ function db(
     },
     salesFocusAcceptance: acceptanceTable(downstream.acceptances ?? [], log),
     $executeRaw: jest.fn(async (q: Prisma.Sql) => { log.push(`lock:${q.values[0]}`); return 1; }),
+    $queryRaw: jest.fn(async (q: Prisma.Sql) => {
+      if (q.strings.join('?').includes('FROM "sales_apply_job_months"')) {
+        const months = q.values[1] as string[];
+        return (downstream.activeJobs ?? []).filter((j) => months.includes(j.month as string));
+      }
+      return [];
+    }),
   };
   d.$transaction = jest.fn(async (cb: (tx: unknown) => unknown) => cb(d));
   return d;
@@ -273,18 +282,18 @@ describe('controllers call the access gate FIRST (flag off → 403, nothing else
     ['config getProfile', () => new SalesImportConfigController(never as never, never as never, tenant as never, prisma as never, never as never).getProfile(clientAdmin)],
     ['config createKpi', () => new SalesImportConfigController(never as never, never as never, tenant as never, prisma as never, never as never).createKpi(clientAdmin, {} as never)],
     ['config historyCombos', () => new SalesImportConfigController(never as never, never as never, tenant as never, prisma as never, never as never).historyCombos(clientAdmin, {})],
-    ['apply preview', () => new SalesImportApplyController(never as never, never as never, tenant as never, prisma as never).getPreview(clientAdmin, 'x')],
-    ['apply apply', () => new SalesImportApplyController(never as never, never as never, tenant as never, prisma as never).postApply(clientAdmin, 'x', {} as never)],
-    ['months close', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).close(clientAdmin, PREV)],
-    ['months recalculate preview', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).recalcPreview(clientAdmin, PREV)],
-    ['months recalculate', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).recalculate(clientAdmin, PREV, {} as never)],
-    ['months reopen', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).reopen(gifsyAssumed, OLD)],
+    ['apply preview', () => new SalesImportApplyController(never as never, never as never, tenant as never, prisma as never, never as never, never as never).getPreview(clientAdmin, 'x')],
+    ['apply apply', () => new SalesImportApplyController(never as never, never as never, tenant as never, prisma as never, never as never, never as never).postApply(clientAdmin, 'x', {} as never)],
+    ['months close', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never, never as never, never as never).close(clientAdmin, PREV)],
+    ['months recalculate preview', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never, never as never, never as never).recalcPreview(clientAdmin, PREV)],
+    ['months recalculate', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never, never as never, never as never).recalculate(clientAdmin, PREV, {} as never)],
+    ['months reopen', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never, never as never, never as never).reopen(gifsyAssumed, OLD)],
   ])('%s → 403 for a tenant without the flag (Deoleo)', async (_n, call) => {
     await expect(call()).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('reopen by an un-assumed GIFSY_ADMIN → 400 at the gate', async () => {
-    const c = new SalesMonthsController(never as never, tenant as never, prisma as never, never as never);
+    const c = new SalesMonthsController(never as never, tenant as never, prisma as never, never as never, never as never, never as never);
     await expect(c.reopen({ ...gifsyAssumed, clientId: 'gifsy', assumed: false }, OLD)).rejects.toBeInstanceOf(BadRequestException);
   });
 });
@@ -526,7 +535,7 @@ describe('Rebuild product list (§10c) + productListCurrent', () => {
     const tenant = { resolveClient: jest.fn(async () => ({ features: {} })) };
     const prisma = { client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: {} })) } };
     const never = new Proxy({}, { get: () => () => { throw new Error('service must not be reached'); } });
-    await expect(new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).rebuildProductList(clientAdmin, PREV))
+    await expect(new SalesMonthsController(never as never, tenant as never, prisma as never, never as never, never as never, never as never).rebuildProductList(clientAdmin, PREV))
       .rejects.toBeInstanceOf(ForbiddenException);
   });
 });
@@ -663,8 +672,33 @@ describe('FOCUS-FROM-TARGETS: months list flag + focus acceptances', () => {
     const tenant = { resolveClient: jest.fn(async () => ({ features: {} })) };
     const prisma = { client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: {} })) } };
     const never = new Proxy({}, { get: () => () => { throw new Error('service must not be reached'); } });
-    const c = new SalesMonthsController(never as never, tenant as never, prisma as never, never as never);
+    const c = new SalesMonthsController(never as never, tenant as never, prisma as never, never as never, never as never, never as never);
     await expect(c.acceptFocus(clientAdmin, PREV, { kpiCode: 'FB1', key: 'X' })).rejects.toBeInstanceOf(ForbiddenException);
     await expect(c.unacceptFocus(clientAdmin, PREV, 'FB1', 'X')).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+describe('background jobs: Close / Reopen refused while an Apply / Recalculate of the month is active (owner 2026-11-18)', () => {
+  const busy = { month: PREV, jobId: 'j1', kind: 'APPLY', status: 'RUNNING', importId: 'imp1', requestedByName: 'Ravi', createdAt: new Date('2026-11-18T05:02:00.000Z') };
+
+  it('close → 409 "… is being applied by Ravi since 10:32 — try again when it finishes." and nothing is locked or written', async () => {
+    const d = db([], { activeJobs: [busy] });
+    const svc = new SalesMonthsService(d as never);
+    await expect(svc.close(clientAdmin, PREV)).rejects.toThrow(`${monthLabel(PREV)} is being applied by Ravi since 10:32 — try again when it finishes.`);
+    expect(d.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('reopen → the same 409 (recalculate wording for a RECALC job)', async () => {
+    const d = db([{ clientId: 't1', month: OLD, state: 'CLOSED' }], { activeJobs: [{ ...busy, month: OLD, kind: 'RECALC' }] });
+    const svc = new SalesMonthsService(d as never);
+    await expect(svc.reopen(gifsyAssumed, OLD, { acknowledgeDownstream: true })).rejects.toThrow(`${monthLabel(OLD)} is being recalculated by Ravi since 10:32 — try again when it finishes.`);
+  });
+
+  it('the months list carries each month activeJob (null when none)', async () => {
+    const d = db([], { activeJobs: [busy] });
+    const rows = await new SalesMonthsService(d as never).list('t1', PREV, PREV);
+    expect(rows[0].activeJob).toEqual({ jobId: 'j1', kind: 'APPLY', status: 'RUNNING', importId: 'imp1', requestedBy: 'Ravi', createdAt: '2026-11-18T05:02:00.000Z' });
+    const none = await new SalesMonthsService(db() as never).list('t1', PREV, PREV);
+    expect(none[0].activeJob).toBeNull();
   });
 });

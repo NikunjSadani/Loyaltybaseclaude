@@ -43,10 +43,18 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<ApiRespo
     // bodyless 2xx is not mistaken for a failure.
     let body: { success?: boolean; data?: T; error?: string } | null = null;
     if (res.status !== 204) {
+      // Kept to tell an EMPTY body (a real bodyless success) from a CUT-OFF one (a proxy dropped the connection mid-reply).
+      const copy = typeof res.clone === 'function' ? res.clone() : null;
       try {
         body = (await res.json()) as { success?: boolean; data?: T; error?: string };
       } catch {
         body = null;
+        const raw = copy ? await copy.text().catch(() => '') : '';
+        if (res.ok && raw.trim() !== '') {
+          // A 2xx whose body is there but unreadable: the action may have happened, and its result is unknown. No
+          // `status`, so callers treat it like any reply that never arrived (lib/request-outcome.ts outcomeUnknown).
+          return { success: false, error: 'The server’s reply was cut off, so its result is not known' };
+        }
       }
     }
     if (!res.ok) {

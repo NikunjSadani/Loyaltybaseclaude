@@ -512,7 +512,7 @@ describe('settings page', () => {
     render(<SettingsPage />);
     fireEvent.click(await screen.findByRole('button', { name: /Add KPI/ }));
     const err = await screen.findByTestId('kpi-list-error');
-    expect(err).toHaveTextContent('HTTP 503');
+    expect(err).toHaveTextContent('the server didn’t give a clear answer (error 503)');
     await act(async () => { fireEvent.click(within(err).getByRole('button', { name: 'Retry' })); });
     expect(await screen.findByRole('option', { name: /KPI X/ })).toBeInTheDocument();
   });

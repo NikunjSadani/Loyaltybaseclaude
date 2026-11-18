@@ -6,6 +6,7 @@ import type { SalesImportDrainResult } from './sales-import.contract';
 import { hasClaimableImports } from './ingest/claim';
 import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
 import { SalesImportRetentionService } from './ingest/sales-import-retention.service';
+import { SalesApplyJobsService } from './apply/sales-apply-jobs.service';
 
 /**
  * POST /v1/sales-import/drain: `@Public`, header `x-drain-secret` = SALES_IMPORT_DRAIN_SECRET,
@@ -30,6 +31,7 @@ export class SalesImportDrainController {
     readonly runner: SalesImportRunnerService,
     readonly prisma: PrismaService,
     readonly retention: SalesImportRetentionService,
+    readonly jobs: SalesApplyJobsService,
   ) {}
 
   @Public()
@@ -42,7 +44,8 @@ export class SalesImportDrainController {
     const got = Buffer.from(secret ?? '');
     const want = Buffer.from(expected);
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ForbiddenException('Invalid drain secret');
-    if (!(await hasClaimableImports(this.prisma))) {
+    // Background Apply / Recalculate jobs (2026-11-18) run in the same worker: a queued (or stale) job is a reason to kick.
+    if (!(await hasClaimableImports(this.prisma)) && !(await this.jobs.hasClaimable())) {
       const deadline = Date.now() + DRAIN_DEADLINE_MS;
       await this.retention.sweep({ limit: 50, deadline }); // never throws; starts nothing that could pass the deadline
       return { kicked: false };

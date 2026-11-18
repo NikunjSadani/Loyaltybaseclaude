@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, type OnModuleInit } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { SalesImportIngestModule } from './ingest/sales-import-ingest.module';
 import { SalesImportKpiModule } from './kpi/sales-import-kpi.module';
@@ -7,6 +7,8 @@ import { SalesImportApplyController } from './sales-import-apply.controller';
 import { SalesImportController } from './sales-import.controller';
 import { SalesMonthsController } from './sales-months.controller';
 import { SalesImportDrainController } from './sales-import-drain.controller';
+import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
+import { SalesApplyJobsService } from './apply/sales-apply-jobs.service';
 
 /**
  * Sales Import: DMS invoice-line file → importer-owned monthly KPI achievements.
@@ -31,4 +33,14 @@ import { SalesImportDrainController } from './sales-import-drain.controller';
     SalesImportDrainController,
   ],
 })
-export class SalesImportModule {}
+export class SalesImportModule implements OnModuleInit {
+  constructor(
+    private readonly runner: SalesImportRunnerService,
+    private readonly jobs: SalesApplyJobsService,
+  ) {}
+
+  /** Inline runner (local / e2e): the same loop also runs the background Apply / Recalculate jobs (2026-11-18). */
+  onModuleInit(): void {
+    this.runner.registerDrain(() => this.jobs.drain());
+  }
+}

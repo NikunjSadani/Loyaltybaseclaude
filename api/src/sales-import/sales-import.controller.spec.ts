@@ -129,12 +129,20 @@ describe('SalesImportDrainController', () => {
     if (saved === undefined) delete process.env.SALES_IMPORT_DRAIN_SECRET;
     else process.env.SALES_IMPORT_DRAIN_SECRET = saved;
   });
-  const make = (claimable: number, kick: string) => {
+  const make = (claimable: number, kick: string, applyJobs = false) => {
     const runner = { kick: jest.fn().mockResolvedValue(kick) };
     const prisma = { $queryRaw: jest.fn().mockResolvedValue([{ n: claimable }]) };
     const retention = { sweep: jest.fn().mockResolvedValue({ abandoned: 0, purged: 0 }) };
-    return { ctrl: new SalesImportDrainController(runner as never, prisma as never, retention as never), runner, retention };
+    const jobs = { hasClaimable: jest.fn().mockResolvedValue(applyJobs) };
+    return { ctrl: new SalesImportDrainController(runner as never, prisma as never, retention as never, jobs as never), runner, retention };
   };
+
+  it('background jobs (2026-11-18): a queued / stale Apply or Recalculate job alone is a reason to kick the worker', async () => {
+    process.env.SALES_IMPORT_DRAIN_SECRET = 's3cret';
+    const r = make(0, 'job', true);
+    await expect(r.ctrl.drain('s3cret')).resolves.toEqual({ kicked: true });
+    expect(r.runner.kick).toHaveBeenCalledTimes(1);
+  });
 
   it('M2: the idle drain bounds the retention sweep by one request deadline (start + 150 s), inside the 170 s attempt deadline', async () => {
     process.env.SALES_IMPORT_DRAIN_SECRET = 's3cret';

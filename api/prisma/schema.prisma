@@ -3181,6 +3181,56 @@ model SalesImportAggregate {
 }
 
 /// Immutable history of every apply (audit + "what was written").
+/// An Apply / Recalculate run in the BACKGROUND by the sales-import worker (owner 2026-11-18; migration
+/// 20261118170000_sales_apply_jobs). Read/written with raw SQL by SalesApplyJobsService.
+model SalesApplyJob {
+  id              String    @id @default(cuid())
+  clientId        String
+  kind            String // APPLY | RECALC
+  importId        String? // APPLY: the import; RECALC: null
+  requestId       String // the page's per-click id (a resend returns the same job)
+  request         Json // the validated request body the worker runs
+  requestedById   String
+  requestedByName String
+  requestedByRole String
+  status          String    @default("QUEUED") // QUEUED | RUNNING | DONE | FAILED
+  claimToken      String?
+  heartbeatAt     DateTime?
+  attempts        Int       @default(0)
+  error           String?
+  createdAt       DateTime  @default(now())
+  startedAt       DateTime?
+  finishedAt      DateTime?
+
+  months SalesApplyJobMonth[]
+
+  @@unique([clientId, requestId])
+  @@index([status, createdAt])
+  @@index([clientId, createdAt])
+  @@map("sales_apply_jobs")
+}
+
+/// One month of a SalesApplyJob: progress + result. NOTE: a PARTIAL unique index
+/// `sales_apply_job_months_active_month_key` ON ("clientId","month") WHERE "status" IN ('QUEUED','RUNNING') — at most ONE
+/// active Apply / Recalculate per tenant × month — is defined in the migration, not here (Prisma can't express partial
+/// indexes). Do NOT drop it: the enqueue maps its violation to 409.
+model SalesApplyJobMonth {
+  id         String    @id @default(cuid())
+  jobId      String
+  clientId   String
+  month      String
+  status     String    @default("QUEUED") // QUEUED | RUNNING | DONE | FAILED
+  result     Json? // ApplyMonthResult once DONE / FAILED
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  job SalesApplyJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, month])
+  @@index([clientId, month])
+  @@map("sales_apply_job_months")
+}
+
 model SalesImportApply {
   id                  String   @id @default(cuid())
   importId            String

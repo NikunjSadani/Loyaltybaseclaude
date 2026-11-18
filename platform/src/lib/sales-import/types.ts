@@ -370,6 +370,8 @@ export interface MonthPreview extends MonthSummary {
   lastApplied: { importId: string; at: string; byName: string; lastInvoiceDate: string | null } | null;
   /** Targets, focus products, blockers and gaps for this month: the one place to check before applying. */
   reconciliation: MonthReconciliation;
+  /** An Apply / Recalculate of this month queued or running now (by anyone): the month cannot be applied until it ends. */
+  activeJob: SalesMonthActiveJob | null;
 }
 
 export interface SalesImportPreview {
@@ -393,6 +395,11 @@ export interface ApplyRequest {
   acknowledgeOlderThanLastApplied?: boolean; // required if any month has OLDER_THAN_LAST_APPLIED (re-checked under the month lock)
   /** month -> MonthReconciliation.focusFingerprint reviewed; required for every month whose fingerprint is non-empty (409 on mismatch). */
   expectedFocusFingerprints?: Record<string, string>;
+  /**
+   * A random id the page makes per click (background jobs, 2026-11-18): resending the same request (no reply arrived)
+   * returns the SAME job instead of queueing a second one. GET admin/sales-import/apply-jobs?requestId= finds it.
+   */
+  requestId?: string;
 }
 /**
  * Day-level data written with a month (OutletSalesDay / SalesDaySet; sales-day-level 2026-11-18). `written: false` =
@@ -417,6 +424,63 @@ export interface ApplyMonthResult {
   dayData?: SalesDayDataResult;
 }
 export interface ApplyResult {
+  results: ApplyMonthResult[];
+}
+
+// ─── Background apply / recalculate jobs (owner 2026-11-18) ────────────────────────
+// Apply and Recalculate no longer run inside the HTTP request (files reach 300–350 MB; one month takes 30–90 s; the
+// Cloudflare Worker cuts tenant-host requests at ~100 s). The POST checks what it can (every 4xx as before), records a
+// job and returns 202; the sales-import worker (Cloud Run Job gifsy-sales-import, full CPU) runs it one month per
+// transaction, marking the month DONE inside that same transaction. At most ONE active (QUEUED / RUNNING) job per
+// tenant × month (DB partial unique index): a second Apply / Recalculate for that month → 409.
+
+export type SalesApplyJobKind = 'APPLY' | 'RECALC';
+export type SalesApplyJobStatus = 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED';
+
+/** A queued / running job is reclaimed by another worker run when its heartbeat is older than this. */
+export const SALES_APPLY_STALE_HEARTBEAT_MINUTES = 10;
+/** A job claimed this many times without finishing → its remaining months FAILED. */
+export const SALES_APPLY_MAX_ATTEMPTS = 3;
+
+export interface SalesApplyJobMonthDto {
+  month: string;
+  status: SalesApplyJobStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** DONE / FAILED: what happened (same shape as the old synchronous apply result). */
+  result: ApplyMonthResult | null;
+}
+export interface SalesApplyJobDto {
+  id: string;
+  kind: SalesApplyJobKind;
+  importId: string | null;
+  requestId: string;
+  /** QUEUED (waiting for the worker) → RUNNING → DONE (every month finished: applied or failed) / FAILED (refused whole). */
+  status: SalesApplyJobStatus;
+  requestedBy: string;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** A whole-job refusal found by the worker before any write (e.g. focus products changed since the preview). */
+  error: string | null;
+  months: SalesApplyJobMonthDto[];
+}
+/** The active (QUEUED / RUNNING) job on a month, shown on the preview and the Months list. */
+export interface SalesMonthActiveJob {
+  jobId: string;
+  kind: SalesApplyJobKind;
+  status: 'QUEUED' | 'RUNNING';
+  importId: string | null;
+  requestedBy: string;
+  createdAt: string;
+}
+/**
+ * POST admin/sales-import/:id/apply and POST admin/sales-months/:month/recalculate → 202 with the job. `results` keeps
+ * the old response shape for a page loaded before this release: one not-ok entry per month saying it runs in the
+ * background (an old page then shows that text instead of crashing). New pages follow `job`.
+ */
+export interface ApplyEnqueued {
+  job: SalesApplyJobDto;
   results: ApplyMonthResult[];
 }
 
@@ -458,6 +522,8 @@ export interface SalesMonthRow {
    * recalculate". false when never applied.
    */
   targetsChangedSinceApply: boolean;
+  /** An Apply / Recalculate of this month queued or running now: Close / Reopen / Recalculate are refused (409) until it ends. */
+  activeJob: SalesMonthActiveJob | null;
 }
 
 /**
@@ -497,6 +563,8 @@ export interface SalesMonthRecalcRequest {
   expectedHistoryAppliedAt: string;
   /** SalesMonthRecalcPreview.reconciliation.focusFingerprint (required when non-empty; 409 on mismatch). */
   expectedFocusFingerprint?: string;
+  /** As ApplyRequest.requestId: resending the same request returns the same job. */
+  requestId?: string;
 }
 /** POST admin/sales-months/:month/recalculate response (recorded as a SalesImportApply with source HISTORY). */
 export type SalesMonthRecalcResult = ApplyMonthResult;

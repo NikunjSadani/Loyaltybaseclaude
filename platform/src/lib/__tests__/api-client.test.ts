@@ -128,6 +128,18 @@ describe('api.del', () => {
     expect(result.success).toBe(true);
   });
 
+  it('L10: a 2xx whose body is CUT OFF (unparseable but not empty) is a failure with no status (= outcome unknown), never data: undefined', async () => {
+    const res = new Response('{"success":true,"data":{"job":{"id":"j1","mon', { status: 202 });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res));
+    const result = await api.post('/api/admin/sales-import/x/apply', {});
+    expect(result).toEqual({ success: false, error: 'The server’s reply was cut off, so its result is not known' });
+  });
+
+  it('a real empty 2xx Response (no body at all) is still a success', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 200 })));
+    expect((await api.del('/api/items/1')).success).toBe(true);
+  });
+
   it('treats an empty 2xx body as success rather than a parse failure', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

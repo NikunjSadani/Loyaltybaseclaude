@@ -27,6 +27,15 @@ export class SalesImportRunnerService {
   private inlineAgain = false;
   /** The in-flight inline loop (tests and shutdown can await it). */
   inlineIdle: Promise<void> = Promise.resolve();
+  /**
+   * More work the SAME worker drains (background Apply / Recalculate jobs, registered by SalesImportModule — the jobs
+   * service lives in the KPI module, which this ingest module must not import). Inline mode runs them after the imports.
+   */
+  private readonly extraDrains: Array<() => Promise<unknown>> = [];
+
+  registerDrain(fn: () => Promise<unknown>): void {
+    this.extraDrains.push(fn);
+  }
 
   constructor(
     private readonly processor: SalesImportProcessorService,
@@ -78,6 +87,7 @@ export class SalesImportRunnerService {
         for (let row = await this.processor.claimNext(); row; row = await this.processor.claimNext()) {
           await this.processor.processClaimed(row);
         }
+        for (const drain of this.extraDrains) await drain();
       } while (this.inlineAgain);
       // S5: the inline drain sweeps retention like the job does (never throws).
       await this.retention?.sweep({ limit: 50 });

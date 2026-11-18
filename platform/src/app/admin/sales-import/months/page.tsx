@@ -22,10 +22,13 @@ import { Spinner } from '@/components/ui/spinner';
 import { useAdminSession } from '@/lib/admin-session';
 import { salesImportApi } from '@/lib/sales-import/api';
 import { dateTimeLabel, monthLabel, sentence } from '@/lib/sales-import/format';
-import { NO_REPLY, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
+import { failureReason, noAnswerReason, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import { usePermissions } from '@/lib/use-permissions';
 import type { SalesMonthRow } from '@/lib/sales-import/types';
 import { RecalculatePanel } from './_components/recalculate-panel';
+
+const clockLabel = (iso: string) =>
+  new Date(iso).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
 
 export default function SalesMonthsPage() {
   const { role } = useAdminSession();
@@ -52,10 +55,19 @@ export default function SalesMonthsPage() {
     (from ? (to && to >= from ? salesImportApi.months(from, to) : salesImportApi.months(from)) : salesImportApi.months()).then((r) => {
       if (cancelled) return;
       if (r.success) setRows([...r.data].sort((a, b) => b.month.localeCompare(a.month)));
-      else setError(r.error);
+      else setError(failureReason(r));
     });
     return () => { cancelled = true; };
   }, [tick]);
+
+  // A month with an Apply / Recalculate queued or running (background jobs, 2026-11-18): re-read the list every 5 s until
+  // none is left, so the "being applied" note and the buttons follow it.
+  const anyActive = !!rows?.some((r) => r.activeJob);
+  useEffect(() => {
+    if (!anyActive) return;
+    const t = setTimeout(() => setTick((x) => x + 1), 5000);
+    return () => clearTimeout(t);
+  }, [anyActive, rows]);
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
@@ -95,8 +107,8 @@ export default function SalesMonthsPage() {
       await settleNoReply(row, {
         done: (now) => now.state === 'CLOSED',
         doneText: closedText,
-        notDoneText: `${label} was not closed: ${NO_REPLY}, and checking again shows it still open. Press Close again.`,
-        unknownText: `We couldn’t confirm whether ${label} was closed: ${NO_REPLY}, and checking again also failed. Refresh this page and check ${label}'s state before trying again.`,
+        notDoneText: `${label} was not closed: ${noAnswerReason(r)}, and checking again shows it still open. Press Close again.`,
+        unknownText: `We couldn’t confirm whether ${label} was closed: ${noAnswerReason(r)}, and checking again also failed. Refresh this page and check ${label}'s state before trying again.`,
       });
       setBusyMonth(null);
       return;
@@ -118,8 +130,8 @@ export default function SalesMonthsPage() {
       await settleNoReply(row, {
         done: (now) => now.productListCurrent === true,
         doneText: `The product list for ${label} is rebuilt. No figures changed.`,
-        notDoneText: `The product list for ${label} was not rebuilt: ${NO_REPLY}, and checking again shows it still out of date. Rebuilding again is safe — it changes no figures.`,
-        unknownText: `We couldn’t confirm whether the product list for ${label} was rebuilt: ${NO_REPLY}, and checking again also failed. Refresh this page to check; rebuilding again is safe — it changes no figures.`,
+        notDoneText: `The product list for ${label} was not rebuilt: ${noAnswerReason(r)}, and checking again shows it still out of date. Rebuilding again is safe — it changes no figures.`,
+        unknownText: `We couldn’t confirm whether the product list for ${label} was rebuilt: ${noAnswerReason(r)}, and checking again also failed. Refresh this page to check; rebuilding again is safe — it changes no figures.`,
       });
       setBusyMonth(null);
       return;
@@ -162,8 +174,8 @@ export default function SalesMonthsPage() {
       await settleNoReply(row, {
         done: (now) => now.state === 'OPEN',
         doneText: `${label} is open again. Close it once the corrected file is applied.`,
-        notDoneText: `${label} was not reopened: ${NO_REPLY}, and checking again shows it still closed. Press Reopen again.`,
-        unknownText: `We couldn’t confirm whether ${label} was reopened: ${NO_REPLY}, and checking again also failed. Refresh this page and check ${label}'s state before trying again.`,
+        notDoneText: `${label} was not reopened: ${noAnswerReason(r)}, and checking again shows it still closed. Press Reopen again.`,
+        unknownText: `We couldn’t confirm whether ${label} was reopened: ${noAnswerReason(r)}, and checking again also failed. Refresh this page and check ${label}'s state before trying again.`,
       });
       setBusyMonth(null);
       return;
@@ -191,24 +203,29 @@ export default function SalesMonthsPage() {
         <Button size="sm" variant="ghost" onClick={reload} aria-label="Refresh months"><RefreshCw className="w-3.5 h-3.5" /> Refresh</Button>
       </div>
 
-      {actionMsg && (
-        <div role={actionMsg.tone === 'err' ? 'alert' : 'status'}
-          className={`rounded-lg border px-4 py-3 text-sm ${
-            actionMsg.tone === 'err' ? 'bg-red-50 border-red-200 text-red-800'
-              : actionMsg.tone === 'warn' ? 'bg-amber-50 border-amber-200 text-amber-800'
-                : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
-          {actionMsg.text}
-        </div>
+      {/* L9: the status region is ALWAYS mounted (a region that appears with its text is not reliably read out); errors
+          are role=alert, which is announced when it appears. */}
+      <div role="status" aria-live="polite">
+        {actionMsg && actionMsg.tone !== 'err' && (
+          <div className={`rounded-lg border px-4 py-3 text-sm ${
+            actionMsg.tone === 'warn' ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
+            {actionMsg.text}
+          </div>
+        )}
+      </div>
+      {actionMsg?.tone === 'err' && (
+        <div role="alert" className="rounded-lg border px-4 py-3 text-sm bg-red-50 border-red-200 text-red-800">{actionMsg.text}</div>
       )}
 
       {recalcMonth && (
-        <RecalculatePanel key={recalcMonth} month={recalcMonth} onClose={() => setRecalcMonth(null)} onApplied={reload} />
+        <RecalculatePanel key={recalcMonth} month={recalcMonth} onClose={() => setRecalcMonth(null)} onApplied={reload}
+          activeJob={rows?.find((r) => r.month === recalcMonth)?.activeJob ?? null} />
       )}
 
       {rows === null ? (
         error ? (
           <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 flex items-center gap-3">
-            Couldn&apos;t load months: {reasonOr(error, NO_REPLY)}
+            Couldn&apos;t load months: {reasonOr(error, 'no reason was given')}
             <Button size="sm" variant="outline" onClick={reload}>Retry</Button>
           </div>
         ) : (
@@ -249,6 +266,14 @@ export default function SalesMonthsPage() {
                             <AlertTriangle className="w-3 h-3" /> Targets changed after the last apply
                           </span>
                         )
+                      )}
+                      {row.activeJob && (
+                        <span data-testid={`active-job-${row.month}`}
+                          className="mt-1 flex w-fit items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border bg-blue-50 text-blue-800 border-blue-200">
+                          <Spinner size="sm" />
+                          {row.activeJob.status === 'QUEUED' ? 'Queued' : row.activeJob.kind === 'RECALC' ? 'Being recalculated' : 'Being applied'}
+                          {' '}by {row.activeJob.requestedBy} since {clockLabel(row.activeJob.createdAt)}
+                        </span>
                       )}
                     </td>
                     <td className="px-4 py-2">

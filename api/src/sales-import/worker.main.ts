@@ -44,14 +44,24 @@ async function main(): Promise<void> {
   const { SalesImportWorkerModule } = await import('./ingest/sales-import-worker.module');
   const { SalesImportProcessorService } = await import('./ingest/sales-import-processor.service');
   const { SalesImportRetentionService } = await import('./ingest/sales-import-retention.service');
+  const { SalesApplyJobsService } = await import('./apply/sales-apply-jobs.service');
   const app = await NestFactory.createApplicationContext(SalesImportWorkerModule, { bufferLogs: true });
   const proc = app.get(SalesImportProcessorService);
+  const jobs = app.get(SalesApplyJobsService);
+  // Background Apply / Recalculate jobs (owner 2026-11-18) go FIRST (an admin is waiting on them; a file read can take
+  // minutes), then the imports, then any job queued meanwhile. Each drain stops claiming once a stop is requested.
+  const applied = await jobs.drain(stop);
   const drained = await drainImports(proc, stop);
+  const appliedAfter = stop.requested ? { finished: 0, released: 0 } : await jobs.drain(stop);
   // S5: every drain also runs a bounded retention sweep across tenants (expired files, abandoned uploads). Skipped when
   // stopping (the next drain runs it).
   const retention = stop.requested ? null : await app.get(SalesImportRetentionService).sweep({ limit: 50 });
   await app.close();
-  console.log(JSON.stringify({ msg: 'sales-import worker done', ...drained, retention, stoppedBy: stop.reason }));
+  console.log(JSON.stringify({
+    msg: 'sales-import worker done', ...drained,
+    applyJobs: { finished: applied.finished + appliedAfter.finished, released: applied.released + appliedAfter.released },
+    retention, stoppedBy: stop.reason,
+  }));
   // Audit L1: a stopped worker exits non-zero so Cloud Run's task retry picks the handed-back import up promptly.
   if (stop.requested) process.exit(WORKER_STOP_EXIT_CODE);
 }

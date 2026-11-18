@@ -13,12 +13,14 @@ import type {
   SalesMonthRebuildProductListResult,
   SalesMonthRecalcPreview,
   SalesMonthRecalcRequest,
-  SalesMonthRecalcResult,
+  ApplyEnqueued,
   SalesMonthReopenRequest,
   SalesMonthReopenResult,
   SalesMonthRow,
 } from './sales-import.contract';
 import { HeavyOp } from '../common/heavy-op-limiter';
+import { SalesApplyJobsService } from './apply/sales-apply-jobs.service';
+import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
 
 /**
  * Sales month state routes (plan §5.2, §7.3):
@@ -28,7 +30,9 @@ import { HeavyOp } from '../common/heavy-op-limiter';
  *                                           uses getAllAndOverride, so the method roles REPLACE the class roles.
  *                                           An un-assumed GIFSY_ADMIN → 400 (access gate + service re-check).
  *   GET  admin/sales-months/:month/recalculate/preview   targets:read   → SalesMonthRecalcPreview (from stored history)
- *   POST admin/sales-months/:month/recalculate           targets:upload → SalesMonthRecalcResult (month OPEN, month lock)
+ *   POST admin/sales-months/:month/recalculate           targets:upload → 202 ApplyEnqueued (a BACKGROUND job run by the
+ *                                                        worker, owner 2026-11-18; follow it at GET admin/sales-import/apply-jobs/:jobId)
+ *   close / reopen → 409 while an Apply / Recalculate of the month is queued or running
  *   POST admin/sales-months/:month/rebuild-product-list  targets:upload → SalesMonthRow (OPEN or CLOSED; month lock;
  *                                                        rebuilds the stored product list only — no figures change; §10c)
  *   POST   admin/sales-months/:month/focus-acceptances   targets:upload → FocusAcceptanceList (FOCUS-FROM-TARGETS: accept an
@@ -44,6 +48,8 @@ export class SalesMonthsController {
     readonly tenant: TenantService,
     readonly prisma: PrismaService,
     readonly apply: SalesApplyService,
+    readonly jobs: SalesApplyJobsService,
+    readonly runner: SalesImportRunnerService,
   ) {}
 
   @Get()
@@ -66,16 +72,18 @@ export class SalesMonthsController {
   }
 
   @Post(':month/recalculate')
-  @HttpCode(200)
+  @HttpCode(202)
   @RequirePermission('targets:upload')
   @HeavyOp()
   async recalculate(
     @CurrentUser() user: JwtPayload,
     @Param('month') month: string,
     @Body() body: SalesMonthRecalcRequest,
-  ): Promise<SalesMonthRecalcResult> {
+  ): Promise<ApplyEnqueued> {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
-    return this.apply.recalculate(user, month, body);
+    const out = await this.jobs.enqueueRecalculate(user, month, body);
+    if (out.job.status === 'QUEUED') await this.runner.kick();
+    return out;
   }
 
   @Post(':month/rebuild-product-list')

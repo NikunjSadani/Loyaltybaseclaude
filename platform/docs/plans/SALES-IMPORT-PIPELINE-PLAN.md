@@ -370,7 +370,7 @@ export interface SalesMonthRow {
 | `GET  admin/sales-import` | targets:read | `?cursor&limit≤50` → `{items: SalesImportSummary[], nextCursor}` |
 | `GET  admin/sales-import/:id` | targets:read | → `SalesImportSummary & {monthSummaries, errorSamples}` (poll every 2 s while QUEUED/PROCESSING) |
 | `GET  admin/sales-import/:id/preview` | targets:read | → `SalesImportPreview` (READY only) |
-| `POST admin/sales-import/:id/apply` | targets:upload | `ApplyRequest` → `ApplyResult` (per month; one month failing does not roll back others) |
+| `POST admin/sales-import/:id/apply` | targets:upload | `ApplyRequest` → **202 `ApplyEnqueued`** since 2026-11-18 (a background job — §18 item 5; was `ApplyResult`; per month; one month failing does not roll back others) |
 | `GET  admin/sales-import/:id/unmatched.csv` | targets:read | streams `sales-imports/<c>/<id>/unmatched.csv` (customer code, name, month, lines, ₹, qty) |
 | `GET  admin/sales-import/:id/errors.xlsx` | targets:read | errorSamples as xlsx (`buildXlsx`, `common/xlsx.ts:132`) |
 | `GET  admin/sales-months` | targets:read | `?from=YYYY-MM&to=YYYY-MM` (default last 6) → `SalesMonthRow[]` |
@@ -1511,18 +1511,53 @@ from the step-1 backup if needed).
    rule (SAMT gate on NON ADHO ≥ ₹200 Elite / ≥ ₹400 Privilege, plus the rest of the rule — dedicated session pending).
 4. **Apply cut off at 30 s → false "Nothing was applied: ." → repeat applies (prod, 2026-11-17/18).** The Next `/api/*`
    rewrite proxy had a 30 s default limit; the Bajaj apply takes ~30+ s, so the browser got a bare 500 while the backend
-   FINISHED (prod DB: 4 applies from 4 clicks on 2026-11-18, 3 the day before). Fix (branch
-   `fix/proxy-timeout-honest-apply`): `experimental.proxyTimeout = 300_000` in `platform/next.config.ts` (= Cloud Run's
-   300 s), and when no definite reply arrives (network error / 408 / any 5xx incl. 502/504/524 / empty error —
-   `platform/src/lib/request-outcome.ts` `outcomeUnknown`) the page never says "nothing happened": Apply shows
-   "Checking what happened…", re-reads the preview and compares each picked month's `lastApplied` (importId + at) with
-   its value at the click → applied (success card + "reply didn't arrive" note) / not applied (Try again + Check again;
-   the server may still be finishing) / can't tell (Apply DISABLED, "Don't apply again yet — press Check again").
-   Same honest handling for Recalculate (compares `SalesMonthRow.lastAppliedAt`, read just before the POST), Close /
-   Reopen / Rebuild product list (re-read the month row), Reprocess / Read again / Cancel / Delete, focus Accept/Undo,
-   KPI Test/Save and mapping Save. Still true: the Cloudflare Worker (`gifsy-proxy`) has its own ~100 s origin limit, and
-   a second apply while the first still runs WAITS on the month lock and then re-applies (no "apply in progress" 409).
-
+   FINISHED (prod DB: 4 applies from 4 clicks on 2026-11-18, 3 the day before). Fixed on branch
+   `fix/proxy-timeout-honest-apply`: `experimental.proxyTimeout = 300_000` in `platform/next.config.ts` (= Cloud Run's
+   300 s) AND item 5 below (Apply / Recalculate no longer run inside the request at all). Every sales-import action that
+   gets no clear answer (network / 408 / 5xx / cut-off 2xx — `platform/src/lib/request-outcome.ts`) says so plainly
+   instead of "nothing happened"; "didn't reply in time" is used only for real timeouts (408 / 504 / 524).
+5. **Apply and Recalculate are BACKGROUND JOBS (owner decision 2026-11-18, platform-wide approved).** Files reach
+   300–350 MB at month end; one month took 21 → 36 s in four days and may reach 60–90 s; the Cloudflare Worker cuts
+   tenant-host requests at ~100 s, and the API runs CPU-throttled once a response is sent.
+   - **Tables** (migration `20261118170000_sales_apply_jobs`, additive): `sales_apply_jobs` (one per click: kind
+     APPLY / RECALC, the validated request, who, `requestId`, status QUEUED → RUNNING → DONE / FAILED, claim token +
+     heartbeat + attempts) and `sales_apply_job_months` (one per month: status + the ApplyMonthResult). A PARTIAL unique
+     index allows ONE active (QUEUED / RUNNING) job per tenant × month.
+   - **API**: `POST admin/sales-import/:id/apply` and `POST admin/sales-months/:month/recalculate` run every cheap check
+     (all the 4xx as before, except the focus-fingerprint check, which the worker runs before any write), record the job
+     and answer **202 `{ job, results }`** (`results` = one "being applied in the background — refresh" line per month for a
+     page loaded before the release). A second Apply / Recalculate of a month with an active job → **409** "<Month> is
+     being applied by X since 10:32…". **Close / Reopen → 409** "<Month> is being applied by X since 10:32 — try again
+     when it finishes." `GET admin/sales-import/apply-jobs/:jobId` = progress; `GET …/apply-jobs?requestId=` = the job a
+     click created (404 = nothing recorded). The preview's months and the Months list carry `activeJob`.
+   - **Worker**: the existing Cloud Run Job `gifsy-sales-import[-staging]` (1 CPU, 2 GiB, 3600 s; same image as the API,
+     updated by every deploy; the API SA holds `roles/run.jobsExecutor` on it — checked read-only 2026-11-18, no IAM
+     change). The POST kicks it (`jobs:run`, ~3 s to schedule + boot); the 10-minute Cloud Scheduler drain also kicks it
+     when a job is waiting or stale. It drains apply jobs FIRST, then imports, then jobs again. Each month is ONE
+     transaction (≤ 300 s) and its month row is set DONE INSIDE that transaction (guarded by the claim token): a crash rolls
+     both back, a reclaimed job (heartbeat > 10 min) re-runs only months not yet written — never twice. After 3 claims the
+     remaining months are FAILED with a reason.
+   - **Page**: Apply / Recalculate send a per-click `requestId`; the page shows Queued → Applying <Month> (started HH:MM)
+     → the result card per month, polling every 2 s; it is refresh-safe and shows another admin's job ("Started by X");
+     Apply / Recalculate are disabled (with the reason read out) while a job runs. With no clear answer the click is
+     looked up by `requestId`: found → follow it; 404 → "Nothing was applied: …, and nothing was recorded" + Try again
+     (resends the SAME requestId — harmless); lookup fails too → "We couldn't confirm whether this apply was recorded…
+     Don't apply again yet" + Check again, Apply disabled. Still queued after 2 min → says the processor will be started
+     again within 10 minutes.
+   - **Rollback runbook** (only if the release is rolled back to code without jobs): the old code ignores the new tables,
+     but a QUEUED / RUNNING job would never run. Before deploying the old image, run on the target DB (with the usual
+     `current_database()` guard, backup confirmed, SQL shown to the owner first):
+     `UPDATE "sales_apply_job_months" SET "status" = 'FAILED', "result" = jsonb_build_object('month', "month", 'ok', false,
+     'error', 'Stopped by a rollback. Nothing was written for this month - apply it again.'), "finishedAt" = (now() AT TIME
+     ZONE 'UTC') WHERE "status" IN ('QUEUED','RUNNING');` then
+     `UPDATE "sales_apply_jobs" SET "status" = 'DONE', "claimToken" = NULL, "finishedAt" = (now() AT TIME ZONE 'UTC')
+     WHERE "status" IN ('QUEUED','RUNNING');` and tell admins to apply those months again. Nothing is half-written (each
+     month is one transaction). The tables can stay (additive).
+   - **Tests**: `api/src/sales-import/apply/sales-apply-jobs.service.spec.ts` (enqueue, 409, resend, worker run, reclaim,
+     stop, attempts cap, lost claim, controllers 202 + kick), `sales-apply.service.spec.ts` (hooks + prechecks + preview
+     `activeJob`), `months/sales-months.spec.ts` (Close / Reopen 409, `activeJob`), `api/test/sales-apply-jobs.e2e-spec.ts`
+     (REAL Postgres, opt-in `SALES_IMPORT_E2E=1`: partial index, SKIP LOCKED, DONE rolls back with the write);
+     platform `import-detail.test.tsx` / `months-and-gate.test.tsx`.
 ---
 
 ## Appendix A — Bajaj configuration (DATA entered via the Settings screen on staging; never in code)

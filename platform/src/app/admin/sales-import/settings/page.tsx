@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { api } from '@/lib/api-client';
 import { salesImportApi } from '@/lib/sales-import/api';
+import { failureReason } from '@/lib/request-outcome';
 import { usePermissions } from '@/lib/use-permissions';
 import { describeFilter } from '@/lib/sales-import/product-set';
 import { measureUnitLabel } from '@/lib/sales-import/format';
@@ -73,9 +74,9 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
     ]).then(([d, k, c, s]) => {
       if (cancelled) return;
       if (d.success) setDefs([...d.data.definitions].sort((a, b) => a.order - b.order || a.kpiCode.localeCompare(b.kpiCode)));
-      else setError(d.error);
+      else setError(failureReason(d));
       if (k.success && Array.isArray(k.data)) { setTenantKpis(k.data); setTenantKpisError(null); }
-      else setTenantKpisError(k.success ? 'unexpected response' : k.error);
+      else setTenantKpisError(k.success ? 'unexpected response' : failureReason(k));
       setCombos(c.success ? c.data : null); // 404 = no processed file yet → no picker list
       setSegments(s.success ? s.data : null); // unavailable → the scope inputs fall back to free text
     });
@@ -90,7 +91,8 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
     if (!d.id) return;
     if (!enabled && !window.confirm(`Stop importing ${d.kpiCode}? It goes back to the manual achievement upload. Values already stored stay as they are.`)) return;
     const r = enabled ? await salesImportApi.patchKpi(d.id, { enabled: true }) : await salesImportApi.disableKpi(d.id);
-    setRowMsg(r.success ? null : r.error);
+    // L6: never an empty message — and with no clear answer, say the change may or may not have been saved.
+    setRowMsg(r.success ? null : `${enabled ? 'Not turned on' : 'Not turned off'}: ${failureReason(r)}. The list below has been reloaded — check ${d.kpiCode} before trying again.`);
     reload();
   }
 
@@ -224,7 +226,7 @@ export default function SalesImportSettingsPage() {
     salesImportApi.getProfile().then((r) => {
       if (cancelled) return;
       if (r.success) setProfile(r.data ?? null);
-      else setProfileError(r.error);
+      else setProfileError(failureReason(r));
     });
     loadDetectedHeaders().then((h) => { if (!cancelled) setDetected(h); }).catch(() => {});
     return () => { cancelled = true; };

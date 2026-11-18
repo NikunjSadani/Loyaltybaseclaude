@@ -9,7 +9,7 @@ import React, { useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { salesImportApi } from '@/lib/sales-import/api';
-import { NO_REPLY, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
+import { noAnswerReason, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import {
   SALES_IMPORT_DIM_KEY_PATTERN, SALES_IMPORT_MAX_DIMENSIONS,
   type SalesColumnMapping, type SalesDimensionMapping,
@@ -114,7 +114,7 @@ export function ColumnMappingForm({
     if (!r.success) {
       setMsg({ tone: 'err', text: outcomeUnknown(r)
         // Saving the mapping replaces it whole, so saving the same mapping again is safe.
-        ? `We couldn’t confirm whether the column mapping was saved: ${NO_REPLY}. Saving the same mapping again is safe — press Save again.`
+        ? `We couldn’t confirm whether the column mapping was saved: ${noAnswerReason(r)}. Saving the same mapping again is safe — press Save again.`
         : `Not saved: ${reasonOr(r.error, 'the server refused it without a reason')}.` });
       return;
     }
