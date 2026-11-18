@@ -57,6 +57,32 @@ export function budgetCommittedWhere(campaignId: string): Prisma.VoucherDispersa
 }
 
 /**
+ * Hubble order statuses that mean NOT BOUGHT (owner decision 2026-11-18). FAILED keeps counting against the budget
+ * (`HUBBLE_FAILED` — `applyBody` still delivers a later SUCCESS); CANCELLED / RETURNED are released (`HUBBLE_CANCELLED`).
+ * REFUNDED is not a Hubble order status anywhere in this code base, so it is not listed.
+ */
+export const HUBBLE_NOT_BOUGHT_STATUSES: ReadonlySet<string> = new Set(['FAILED', 'CANCELLED', 'RETURNED']);
+/** Every Hubble status this engine understands; anything else is an anomaly (never guessed). */
+export const HUBBLE_KNOWN_STATUSES: ReadonlySet<string> = new Set(['SUCCESS', 'PROCESSING', ...HUBBLE_NOT_BOUGHT_STATUSES]);
+/**
+ * BUY_FAILED sources that NO LONGER count against the budget: `REJECTED` (refused + canary-verified no order),
+ * `HUBBLE_CANCELLED` (Hubble reported CANCELLED / RETURNED), `MARKED_NOT_BOUGHT` (an admin decided, with a reason).
+ */
+export const NOT_BOUGHT_FAILURE_SOURCES = ['REJECTED', 'HUBBLE_CANCELLED', 'MARKED_NOT_BOUGHT'];
+
+/** True when the row's last lookup result is a Hubble status we do not recognise (e.g. "HUBBLE_WEIRD"). */
+export function lastLookupUnrecognised(r: { lastReconcileResult: string | null; pendingReason?: string | null; status: string }): boolean {
+  if (r.status === RS.PENDING_RECONCILE && (r.pendingReason ?? '').startsWith('HUBBLE_UNKNOWN_STATUS')) return true;
+  const m = /^HUBBLE_(.*)$/.exec(r.lastReconcileResult ?? '');
+  return !!m && !HUBBLE_KNOWN_STATUSES.has(m[1]);
+}
+
+/** Seconds of every drain pass kept for settling campaigns (capped at a quarter of a short pass). */
+export const SETTLE_RESERVE_MS = 10_000;
+/** Campaigns settled in a pass even when the deadline has passed (besides the ones touched in this pass). */
+export const MIN_SETTLES_PER_PASS = 5;
+
+/**
  * A BUY_FAILED row Hubble may still complete: its CURRENT reference reached Hubble, and the failure is NOT a
  * `REJECTED` one (Hubble refused the order AND the canary verified "no order" — owner decision 2026-11-18:
  * released from the budget). `HUBBLE_FAILED` (Hubble's own FAILED body) keeps counting: `applyBody` still
@@ -65,7 +91,7 @@ export function budgetCommittedWhere(campaignId: string): Prisma.VoucherDispersa
 export const failedMayStillCompleteWhere: Prisma.VoucherDispersalRowWhereInput = {
   status: RS.BUY_FAILED,
   referenceSentAt: { not: null },
-  OR: [{ buyFailureSource: null }, { buyFailureSource: { not: 'REJECTED' } }],
+  OR: [{ buyFailureSource: null }, { buyFailureSource: { notIn: NOT_BOUGHT_FAILURE_SOURCES } }],
 };
 
 /**
@@ -236,7 +262,9 @@ export class VoucherDispersalProcessor {
       s.messagesSent += await this.step('messages', () => this.sendPendingMessages(opts.campaignId, deadline), 0);
       const staleMsg = await this.step('stale-messages', () => this.surfaceStaleMessageClaims(opts.campaignId), [] as string[]);
       staleMsg.forEach((id) => touched.add(id));
-      const buys = await this.step('buy', () => this.buyQueued(opts.campaignId, deadline, opts.maxBuys ?? 50), null);
+      // F3: stop buying early enough that this pass can still settle its campaigns.
+      const reserve = Math.min(SETTLE_RESERVE_MS, Math.floor((opts.budgetMs ?? 45_000) / 4));
+      const buys = await this.step('buy', () => this.buyQueued(opts.campaignId, deadline - reserve, opts.maxBuys ?? 50), null);
       if (buys) {
         s.bought = buys.bought;
         s.pending = buys.pending;
@@ -433,21 +461,29 @@ export class VoucherDispersalProcessor {
       // "Completed later" (owner/coordinator meaning, 2026-11-18) = Hubble BOUGHT a row that had FAILED: the row is
       // still BUY_FAILED, or went failed → PENDING_RECONCILE earlier (that flip keeps buyFailureSource; a normal
       // pending row has none). Marked once (lateCompletedAt IS NULL).
-      const fromFailed = await this.prisma.voucherDispersalRow.updateMany({
-        where: {
-          ...base,
-          lateCompletedAt: null,
-          OR: [{ status: RS.BUY_FAILED }, { status: RS.PENDING_RECONCILE, buyFailureSource: { not: null } }],
-        },
-        data: { ...boughtData, lateCompletedAt: new Date() },
-      });
-      const won =
-        fromFailed.count === 1
-          ? fromFailed
-          : await this.prisma.voucherDispersalRow.updateMany({
-              where: { ...base, status: { in: [RS.BUYING, RS.PENDING_RECONCILE, RS.BUY_FAILED] } },
-              data: boughtData,
-            });
+      // F6: one guarded write per possible previous state, in order — the one that matches tells the REAL previous
+      // status (and whether this is a late completion), decided by the database, never by the snapshot.
+      const attempts: { where: Prisma.VoucherDispersalRowWhereInput; from: RS; late: boolean }[] = [
+        { where: { status: RS.BUY_FAILED, lateCompletedAt: null }, from: RS.BUY_FAILED, late: true },
+        { where: { status: RS.PENDING_RECONCILE, buyFailureSource: { not: null }, lateCompletedAt: null }, from: RS.PENDING_RECONCILE, late: true },
+        { where: { status: RS.BUYING }, from: RS.BUYING, late: false },
+        { where: { status: RS.PENDING_RECONCILE }, from: RS.PENDING_RECONCILE, late: false },
+        { where: { status: RS.BUY_FAILED }, from: RS.BUY_FAILED, late: false },
+      ];
+      let won = { count: 0 };
+      let fromStatus: RS | null = null;
+      let late = false;
+      for (const a of attempts) {
+        won = await this.prisma.voucherDispersalRow.updateMany({
+          where: { ...base, ...a.where },
+          data: a.late ? { ...boughtData, lateCompletedAt: new Date() } : boughtData,
+        });
+        if (won.count === 1) {
+          fromStatus = a.from;
+          late = a.late;
+          break;
+        }
+      }
       if (won.count === 0) {
         const now = await this.prisma.voucherDispersalRow.findFirst({
           where: { id: row.id },
@@ -469,12 +505,12 @@ export class VoucherDispersalProcessor {
         return 'SKIPPED';
       }
       this.logger.log(`[dispersal] row ${row.id} voucher bought`);
-      if (fromFailed.count === 1) await this.lateFromFailed(row, RS.BOUGHT, hubbleOrderId);
+      if (late) await this.lateFromFailed(row, RS.BOUGHT, hubbleOrderId);
       await this.audit(row.id, 'VOUCHER_DISPERSAL_BOUGHT', {
         hubbleOrderId,
         voucherCode: maskVoucherCodeForAudit(code),
         ...(pin ? { voucherPin: '••••' } : {}),
-        fromStatus: fromFailed.count === 1 ? RS.BUY_FAILED : row.status === RS.BUY_FAILED ? RS.PENDING_RECONCILE : row.status,
+        fromStatus,
         ...(claimCodeMissing ? { claimCodeMissing: true } : {}),
       });
       if (claimCodeMissing) {
@@ -491,10 +527,17 @@ export class VoucherDispersalProcessor {
       await this.markPending(row, 'HUBBLE_PROCESSING', { hubbleOrderId, placeResponded: true });
       return 'PENDING';
     }
-    if (status === 'FAILED') {
-      const reason = (body.failureReason ?? 'Hubble reported FAILED').toString().slice(0, 300);
-      const alreadyHubbleFailed = row.status === RS.BUY_FAILED && !LOCAL_FAILURE_SOURCES.includes(row.buyFailureSource ?? '');
-      if (alreadyHubbleFailed) return 'UNCHANGED';
+    if (HUBBLE_NOT_BOUGHT_STATUSES.has(status)) {
+      // FAILED keeps counting (HUBBLE_FAILED); CANCELLED / RETURNED = not bought, released (HUBBLE_CANCELLED).
+      const source = status === 'FAILED' ? 'HUBBLE_FAILED' : 'HUBBLE_CANCELLED';
+      const reason = (status === 'FAILED'
+        ? body.failureReason ?? 'Hubble reported FAILED'
+        : `Hubble reported ${status} — not bought${body.failureReason ? ` (${body.failureReason})` : ''}`
+      ).toString().slice(0, 300);
+      // From: in flight; a local failure; or HUBBLE_FAILED → HUBBLE_CANCELLED (a later cancel releases it). Never
+      // re-counts a released row (REJECTED / HUBBLE_CANCELLED / MARKED_NOT_BOUGHT) as HUBBLE_FAILED.
+      const fromFailedSources = source === 'HUBBLE_CANCELLED' ? [...LOCAL_FAILURE_SOURCES, 'HUBBLE_FAILED'] : LOCAL_FAILURE_SOURCES;
+      if (row.status === RS.BUY_FAILED && !fromFailedSources.includes(row.buyFailureSource ?? '')) return 'UNCHANGED';
       const res = await this.prisma.voucherDispersalRow.updateMany({
         where: {
           id: row.id,
@@ -502,12 +545,12 @@ export class VoucherDispersalProcessor {
           voucherCode: null,
           OR: [
             { status: { in: [RS.BUYING, RS.PENDING_RECONCILE] } },
-            { status: RS.BUY_FAILED, buyFailureSource: { in: LOCAL_FAILURE_SOURCES } },
+            { status: RS.BUY_FAILED, buyFailureSource: { in: fromFailedSources } },
           ],
         },
         data: {
           status: RS.BUY_FAILED,
-          buyFailureSource: 'HUBBLE_FAILED',
+          buyFailureSource: source,
           buyFailureReason: reason,
           hubbleOrderId,
           placeResponded: true,
@@ -516,31 +559,41 @@ export class VoucherDispersalProcessor {
         },
       });
       if (res.count === 1) {
-        await this.audit(row.id, 'VOUCHER_DISPERSAL_BUY_FAILED', { source: 'HUBBLE_FAILED', reason, hubbleOrderId });
+        await this.audit(row.id, 'VOUCHER_DISPERSAL_BUY_FAILED', { source, hubbleStatus: status, reason, hubbleOrderId });
         return 'BUY_FAILED';
       }
       return 'SKIPPED';
     }
     if (row.status === RS.BUY_FAILED) {
       // Re-review M4: an answer we do not understand never moves a FAILED row (or fires the late event) —
-      // the row is left as it is, loudly, for ops. Pre-merge M-2: once per status — the sweep asks every
-      // 2 min; only a status different from the row's previous lookup result is logged + audited again.
-      if (row.lastReconcileResult === `HUBBLE_${status || 'UNKNOWN'}`) return 'UNCHANGED';
-      this.logger.error(
-        `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: unrecognised Hubble status "${status || '(none)'}" for a FAILED row — left as it is; ops review`,
-      );
-      await this.audit(row.id, 'VOUCHER_DISPERSAL_UNKNOWN_STATUS_ON_FAILED_ROW', {
-        campaignId: row.campaignId,
-        batchNumber: row.batchNumber,
-        rowNumber: row.rowNumber,
-        hubbleStatus: status || null,
-        hubbleOrderId,
-        failureSource: row.buyFailureSource,
-      });
+      // the row is left as it is, loudly, for ops ("Mark as not bought" is then offered).
+      await this.recordUnrecognisedStatus(row, status, hubbleOrderId);
       return 'UNCHANGED';
     }
     await this.markPending(row, `HUBBLE_UNKNOWN_STATUS:${status || '(none)'}`.slice(0, 80), { hubbleOrderId });
     return 'PENDING';
+  }
+
+  /**
+   * An unrecognised Hubble status: error log + anomaly audit ONCE per status (pre-merge M-2 — compared with the
+   * row's previous lookup result), and the lookup result is recorded (so "Mark as not bought" is offered).
+   */
+  async recordUnrecognisedStatus(row: Row, status: string, hubbleOrderId: string | null): Promise<void> {
+    const result = `HUBBLE_${status || 'UNKNOWN'}`;
+    if (row.lastReconcileResult === result) return;
+    this.logger.error(
+      `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: unrecognised Hubble status "${status || '(none)'}" (row ${row.status}) — left as it is; ops review`,
+    );
+    await this.audit(row.id, 'VOUCHER_DISPERSAL_UNKNOWN_STATUS_ON_FAILED_ROW', {
+      campaignId: row.campaignId,
+      batchNumber: row.batchNumber,
+      rowNumber: row.rowNumber,
+      rowStatus: row.status,
+      hubbleStatus: status || null,
+      hubbleOrderId,
+      failureSource: row.buyFailureSource,
+    });
+    await this.noteReconcile(row, result);
   }
 
   /** BUYING/PENDING → PENDING_RECONCILE with a reason (first entry audited). Never throws. */
@@ -1035,8 +1088,12 @@ export class VoucherDispersalProcessor {
       : [];
     const ids = new Set([...camps.map((c) => c.id), ...failing.map((c) => c.id), ...reopened.map((c) => c.id), ...alsoIds]);
     let n = 0;
+    const must = new Set(alsoIds); // touched in this pass — always settled (bounded: rows changed in this pass)
+    let done = 0;
     for (const id of ids) {
-      if (deadline !== undefined && Date.now() > deadline) break; // the rest settle on the next pass
+      // The rest settle on the next pass — but never fewer than MIN_SETTLES_PER_PASS, and never a touched one.
+      if (!must.has(id) && deadline !== undefined && Date.now() > deadline && done >= MIN_SETTLES_PER_PASS) continue;
+      done++;
       try {
         if (await this.settleCampaign(id)) n++;
         await this.prisma.voucherDispersalCampaign

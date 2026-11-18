@@ -139,10 +139,14 @@ async function buildContract() {
   await t.processor.drain({ campaignId: a.id });
   const detailWithBatches = await t.svc.detail(ADMIN, a.id);
   const rowsOfBatch = await t.svc.rows(ADMIN, a.id, { batch: again.batchNumber });
+  // A row whose last Hubble answer we do not recognise → "Mark as not bought" (campaign B).
+  const odd = t.rows.find((r: any) => r.campaignId === create.id && r.status === 'BOUGHT')!;
+  Object.assign(odd, { status: 'BUY_FAILED', buyFailureSource: 'HUBBLE_FAILED', buyFailureReason: 'x', voucherCode: null, lastReconcileResult: 'HUBBLE_ON_HOLD' });
+  const markNotBought = await t.svc.markNotBought(ADMIN, create.id, odd.id, { reason: 'Hubble support confirmed not bought' });
 
   return wire({
     brands, create, upload, confirm, process: processed, list, detail, rows, resend, retryBuy, cancel,
-    edit, batchUpload, batchPreview, batchDiscard, batchConfirm, detailWithBatches, rowsOfBatch,
+    edit, batchUpload, batchPreview, batchDiscard, batchConfirm, detailWithBatches, rowsOfBatch, markNotBought,
   });
 }
 

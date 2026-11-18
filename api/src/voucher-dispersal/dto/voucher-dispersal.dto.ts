@@ -75,6 +75,14 @@ export class EditDispersalCampaignDto {
   budgetRupees?: number;
 }
 
+/** POST /campaigns/:id/rows/:rowId/mark-not-bought — the admin's reason (kept in the audit trail). */
+export class MarkNotBoughtDto {
+  @IsString()
+  @MinLength(5)
+  @MaxLength(300)
+  reason!: string;
+}
+
 export const DISPERSAL_ROW_STATUSES = [
   'VALID',
   'INVALID',

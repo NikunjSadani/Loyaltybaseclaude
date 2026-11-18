@@ -27,6 +27,7 @@ import {
   CreateDispersalCampaignDto,
   EditDispersalCampaignDto,
   ListDispersalCampaignsQueryDto,
+  MarkNotBoughtDto,
   ListDispersalRowsQueryDto,
 } from './dto/voucher-dispersal.dto';
 
@@ -138,7 +139,14 @@ export class VoucherDispersalController {
     return this.svc.resend(user, id, rowId);
   }
 
-  @Post('campaigns/:id/rows/:rowId/retry-buy')
+  /** An admin declares a row NOT BOUGHT (only after an unrecognised Hubble status; reason required; audited). */
+  @Post('campaigns/:id/rows/:rowId/mark-not-bought')
+  @HttpCode(200)
+  markNotBought(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('rowId') rowId: string, @Body() dto: MarkNotBoughtDto) {
+    return this.svc.markNotBought(user, id, rowId, dto);
+  }
+
+    @Post('campaigns/:id/rows/:rowId/retry-buy')
   @HttpCode(200)
   retryBuy(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('rowId') rowId: string) {
     return this.svc.retryBuy(user, id, rowId);

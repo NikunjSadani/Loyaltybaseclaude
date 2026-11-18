@@ -71,6 +71,7 @@ beforeEach(() => {
     if (url.startsWith(`${BASE}/rows?`)) return Promise.resolve(ok(ROWS));
     if (url.endsWith('/discard')) return Promise.resolve(discardResponse);
     if (url.endsWith('/retry-buy')) return Promise.resolve(ok({ message: 'Queued for purchase again.', row: {} }));
+    if (url.endsWith('/mark-not-bought')) return Promise.resolve(ok({ id: 'r2', status: 'BUY_FAILED', buyFailureSource: 'MARKED_NOT_BOUGHT' }));
     if (url.endsWith('/cancel')) return Promise.resolve(cancelResponse);
     if (url.endsWith('/process')) return Promise.resolve(ok(detail()));
     return Promise.resolve(fail(404, 'unexpected'));
@@ -158,12 +159,46 @@ describe('Edit campaign', () => {
     expect(line).not.toHaveTextContent('in progress');
   });
 
-  it('over budget (a refused / failed purchase completed later) → a loud banner with the amount', async () => {
-    detailQueue = [ok(detail({ summary: { overBudgetRupees: 1000, lateCompletedRows: 1 } }))];
-    render(<DetailPage />);
+  it('over budget: the banner states the ACTUAL causes (bought later / back with Hubble), or a neutral reason', async () => {
+    detailQueue = [ok(detail({ summary: { overBudgetRupees: 1000, lateCompletedRows: 1, failedBackWithHubbleRows: 0 } }))];
+    const { unmount } = render(<DetailPage />);
     const b = await screen.findByTestId('vd-over-budget');
     expect(b).toHaveAttribute('role', 'alert');
-    expect(b).toHaveTextContent('Over budget by ₹1,000 — a purchase was bought later by Hubble after it had failed/refused.');
+    expect(b).toHaveTextContent('Over budget by ₹1,000 — 1 purchase was bought later by Hubble after it had failed/refused.');
+    unmount();
+
+    detailQueue = [ok(detail({ summary: { overBudgetRupees: 500, lateCompletedRows: 0, failedBackWithHubbleRows: 2 } }))];
+    const r2 = render(<DetailPage />);
+    const b2 = await screen.findByTestId('vd-over-budget');
+    expect(b2).toHaveTextContent('Over budget by ₹500 — 2 failed purchases are back with Hubble and count again (they may still be bought).');
+    expect(b2).not.toHaveTextContent('bought later');
+    r2.unmount();
+
+    detailQueue = [ok(detail({ summary: { overBudgetRupees: 300, lateCompletedRows: 0, failedBackWithHubbleRows: 0 } }))];
+    render(<DetailPage />);
+    expect(await screen.findByTestId('vd-over-budget')).toHaveTextContent('Over budget by ₹300 — spending is above the budget; see "Budget used" below.');
+  });
+
+  it('"Mark as not bought": reason required, sent to the server, the result said in plain words', async () => {
+    const rows = { ...ROWS, rows: [ROWS.rows[0], { ...ROWS.rows[1], canMarkNotBought: true }] };
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.startsWith(`${BASE}/rows?`)) return Promise.resolve(ok(rows));
+      if (url.endsWith('/mark-not-bought')) return Promise.resolve(ok({ id: 'r2', status: 'BUY_FAILED' }));
+      if (url === BASE && !init?.method) return Promise.resolve(ok(detail()));
+      return Promise.resolve(ok(detail()));
+    });
+    render(<DetailPage />);
+    fireEvent.click(await screen.findByTestId('vd-mark-r2'));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('Mark as not bought?');
+    fireEvent.click(within(dialog).getByTestId('vd-dialog-confirm'));
+    expect(within(dialog).getByTestId('vd-dialog-error')).toHaveTextContent('Give the reason (at least 5 characters)');
+    expect(calls((u) => u.endsWith('/mark-not-bought'))).toHaveLength(0);
+    fireEvent.change(within(dialog).getByLabelText(/Reason/), { target: { value: 'Hubble support: ticket 42' } });
+    fireEvent.click(within(dialog).getByTestId('vd-dialog-confirm'));
+    await waitFor(() => expect(calls((u) => u.endsWith('/rows/r2/mark-not-bought'))).toHaveLength(1));
+    expect(JSON.parse(String(calls((u) => u.endsWith('/mark-not-bought'))[0][1].body))).toEqual({ reason: 'Hubble support: ticket 42' });
+    expect(await screen.findByTestId('vd-notice')).toHaveTextContent('Batch 2, row 2 marked as not bought — it no longer counts against the budget. Retry is now available (with a new reference).');
   });
 
   it('queued vouchers that no longer fit are called out apart from "over budget"', async () => {

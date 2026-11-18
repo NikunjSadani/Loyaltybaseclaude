@@ -222,6 +222,8 @@ export interface VdDeliverySummary {
   queuedAtRiskRupees: number | null;
   /** Detail only: rows Hubble BOUGHT after they had failed / been refused. */
   lateCompletedRows: number | null;
+  /** Detail only: rows that had failed and are back with Hubble (pending again) — they count again. */
+  failedBackWithHubbleRows: number | null;
   /** List only: an "Add more people" batch waiting for confirmation (its number), else null. */
   pendingBatchNumber: number | null;
 }
@@ -402,6 +404,8 @@ export interface VdRow {
   canRetryBuy: boolean | null;
   /** PENDING_RECONCILE: when Retry becomes available (2 h after the last attempt). */
   retryAvailableAt: string | null;
+  /** Server: Hubble's last answer was a status it does not recognise → an admin may "Mark as not bought". */
+  canMarkNotBought: boolean | null;
 }
 
 export interface VdRowsPage {
@@ -506,6 +510,7 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     overBudgetRupees: null,
     queuedAtRiskRupees: null,
     lateCompletedRows: null,
+    failedBackWithHubbleRows: null,
     pendingBatchNumber: num(o.pendingBatchNumber),
   };
 }
@@ -538,6 +543,7 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
     overBudgetRupees: num(o.overBudgetRupees),
     queuedAtRiskRupees: num(o.queuedAtRiskRupees),
     lateCompletedRows: num(o.lateCompletedRows),
+    failedBackWithHubbleRows: num(o.failedBackWithHubbleRows),
     pendingBatchNumber: null,
   };
 }
@@ -712,6 +718,7 @@ export function normalizeRow(raw: unknown): VdRow {
     canResend: bool(o.canResend),
     canRetryBuy: bool(o.canRetryBuy),
     retryAvailableAt: str(o.retryAvailableAt),
+    canMarkNotBought: bool(o.canMarkNotBought),
   };
 }
 
@@ -915,6 +922,19 @@ export function batchConfirmBlock(p: Pick<VdBatchPreview, 'previewId' | 'summary
   }
   if (s.valid <= 0) return { blocked: true, reason: 'There are no valid rows in this batch to issue. Fix the file and upload again, or discard the batch.' };
   return { blocked: false };
+}
+
+/**
+ * Why the campaign is over budget, from the server's counts (never a guessed cause): purchases bought later after
+ * failing, failed purchases back with Hubble, else a neutral pointer to the breakdown.
+ */
+export function overBudgetCauseText(s: Pick<VdDeliverySummary, 'lateCompletedRows' | 'failedBackWithHubbleRows'>): string {
+  const parts: string[] = [];
+  const late = s.lateCompletedRows ?? 0;
+  const back = s.failedBackWithHubbleRows ?? 0;
+  if (late > 0) parts.push(`${plural(late, 'purchase')} ${late === 1 ? 'was' : 'were'} bought later by Hubble after ${late === 1 ? 'it' : 'they'} had failed/refused`);
+  if (back > 0) parts.push(`${plural(back, 'failed purchase')} ${back === 1 ? 'is' : 'are'} back with Hubble and count${back === 1 ? 's' : ''} again (${back === 1 ? 'it' : 'they'} may still be bought)`);
+  return parts.length ? parts.join('; ') : 'spending is above the budget; see "Budget used" below';
 }
 
 /** "Batch 2" / "—". */
@@ -1195,6 +1215,10 @@ export const vdApi = {
     vdRequest(`/campaigns/${cid(id)}/rows/${cid(rowId)}/retry-buy`, json({}), normalizeRetryResult),
 
   cancel: (id: string) => vdRequest(`/campaigns/${cid(id)}/cancel`, json({}), normalizeCancelResult),
+
+  /** An admin declares a row NOT BOUGHT (only offered after an unrecognised Hubble status; reason required). */
+  markNotBought: (id: string, rowId: string, reason: string) =>
+    vdRequest(`/campaigns/${cid(id)}/rows/${cid(rowId)}/mark-not-bought`, json({ reason }), normalizeRow),
 
   editCampaign: (id: string, body: { name?: string; budgetRupees?: number }) =>
     vdRequest(`/campaigns/${cid(id)}`, { ...json(body), method: 'PATCH' }, normalizeCampaign),

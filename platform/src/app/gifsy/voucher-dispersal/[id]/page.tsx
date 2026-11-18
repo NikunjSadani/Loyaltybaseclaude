@@ -23,7 +23,7 @@ import {
   BATCH_STATUS_LABEL, BATCH_STATUS_TONE, CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE,
   PENDING_RECONCILE_NOTE, POLL_START_MS,
   PROCESS_FAILURES_BEFORE_NOTE, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, batchLabel, billedToText, campaignStatusText,
-  budgetUsageText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
+  budgetUsageText, overBudgetCauseText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
   isProcessInFlight, isSetupCampaign, isUncertainFailure, nextPollDelay, nextProcessFailures, plural, pollPhase, rowStatusText,
   shouldNudgeProcessing, vdApi, vdReportFallbackName, vdReportUrl,
   type CampaignStatus, type RowStatus, type VdBatch, type VdListItem, type VdRow, type VdRowsPage,
@@ -37,6 +37,7 @@ type DialogState =
   | { kind: 'retry'; row: VdRow }
   | { kind: 'cancel' }
   | { kind: 'discard'; batch: VdBatch }
+  | { kind: 'mark'; row: VdRow }
   | null;
 
 /** Batch list: every upload (1 = the first file) with its own counts. */
@@ -263,13 +264,19 @@ export default function VoucherCampaignDetailPage() {
   /** Row ids (or 'campaign') whose action outcome is unknown — locked until the follow-up refresh lands. */
   const [locked, setLocked] = useState<Set<string>>(new Set());
   const actionInFlight = useRef(false);
-  const openDialog = (d: DialogState) => { setDialog(d); setDialogError(null); setNotice(null); };
+  const [markReason, setMarkReason] = useState('');
+  const openDialog = (d: DialogState) => { setDialog(d); setDialogError(null); setNotice(null); setMarkReason(''); };
   const closeDialog = () => { if (!dialogBusy) { setDialog(null); setDialogError(null); } };
 
   const runDialog = async () => {
     if (!dialog || actionInFlight.current) return;
     const d = dialog;
     if (d.kind === 'discard' && d.batch.batchNumber === null) return; // never guess a batch number
+    const reason = markReason.replace(/\s+/g, ' ').trim();
+    if (d.kind === 'mark' && reason.length < 5) {
+      setDialogError('Give the reason (at least 5 characters) — it is kept in the audit trail.');
+      return;
+    }
     const lockKey = d.kind === 'cancel' || d.kind === 'discard' ? 'campaign' : d.row.id;
     actionInFlight.current = true;
     setDialogBusy(true);
@@ -278,6 +285,7 @@ export default function VoucherCampaignDetailPage() {
       d.kind === 'resend' ? await vdApi.resend(id, d.row.id)
       : d.kind === 'retry' ? await vdApi.retryBuy(id, d.row.id)
       : d.kind === 'discard' ? await vdApi.discardBatch(id, d.batch.batchNumber as number)
+      : d.kind === 'mark' ? await vdApi.markNotBought(id, d.row.id, reason)
       : await vdApi.cancel(id);
     actionInFlight.current = false;
     setDialogBusy(false);
@@ -293,6 +301,8 @@ export default function VoucherCampaignDetailPage() {
       } else if (d.kind === 'retry') {
         const msg = (res.data as { message: string | null }).message;
         text = `${upperFirst(rowRef(d.row))}: ${msg ?? 'purchase retry requested.'} The voucher status below updates as the server works on it.`;
+      } else if (d.kind === 'mark') {
+        text = `${upperFirst(rowRef(d.row))} marked as not bought — it no longer counts against the budget. Retry is now available (with a new reference).`;
       } else if (d.kind === 'discard') {
         const r = res.data as { discardedRows: number | null };
         text = `${batchLabel(d.batch.batchNumber)} discarded${r.discardedRows !== null ? `: ${plural(r.discardedRows, 'row')} removed` : ''}. Nothing was bought.`;
@@ -309,7 +319,7 @@ export default function VoucherCampaignDetailPage() {
       }
       setNotice({ tone: 'info', text });
     } else {
-      const what = d.kind === 'resend' ? 'the resend' : d.kind === 'retry' ? 'the purchase retry' : d.kind === 'discard' ? 'the discard' : 'the cancel';
+      const what = d.kind === 'resend' ? 'the resend' : d.kind === 'retry' ? 'the purchase retry' : d.kind === 'discard' ? 'the discard' : d.kind === 'mark' ? 'marking it as not bought' : 'the cancel';
       const where = d.kind === 'cancel' ? 'the campaign status' : d.kind === 'discard' ? 'the batch list' : rowRef(d.row);
       setNotice({
         tone: 'warning',
@@ -443,8 +453,7 @@ export default function VoucherCampaignDetailPage() {
 
       {s.overBudgetRupees !== null && s.overBudgetRupees > 0 && (
         <p role="alert" data-testid="vd-over-budget" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-200 break-words">
-          Over budget by {formatRupees(s.overBudgetRupees)}
-          {(s.lateCompletedRows ?? 0) > 0 ? ' — a purchase was bought later by Hubble after it had failed/refused.' : '.'}
+          Over budget by {formatRupees(s.overBudgetRupees)} — {overBudgetCauseText(s)}.
           {' '}Raise the budget or check with Hubble; nothing more is bought while it is over.
         </p>
       )}
@@ -582,6 +591,13 @@ export default function VoucherCampaignDetailPage() {
                               Retry purchase
                             </button>
                           )}
+                          {r.id && r.canMarkNotBought === true && (
+                            <button type="button" onClick={() => openDialog({ kind: 'mark', row: r })} data-testid={`vd-mark-${r.id}`}
+                              disabled={locked.has(r.id)}
+                              className="whitespace-nowrap rounded border border-red-500/40 px-2 py-1 text-xs text-red-200 hover:bg-red-500/10 disabled:opacity-50">
+                              Mark as not bought
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -668,6 +684,32 @@ export default function VoucherCampaignDetailPage() {
             Re-send the same voucher ({formatRupees(dialog.row.amount)} {dialog.row.brand}) to {dialog.row.phone} on WhatsApp.{' '}
             <strong>No new voucher is bought.</strong>
           </p>
+        )}
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={dialog?.kind === 'mark'}
+        title="Mark as not bought?"
+        description="Only after checking with Hubble that no voucher was issued. Recorded with your name and reason."
+        confirmLabel="Mark as not bought"
+        busyLabel="Saving…"
+        busy={dialogBusy}
+        error={dialogError}
+        danger
+        onConfirm={() => void runDialog()}
+        onClose={closeDialog}
+      >
+        {dialog?.kind === 'mark' && (
+          <div className="space-y-2">
+            <p>
+              Hubble answered with a status we do not recognise for {rowRef(dialog.row)} ({formatRupees(dialog.row.amount)} {dialog.row.brand}, {dialog.row.phone}).
+              Marking it as not bought stops the automatic checks and frees its {formatRupees(dialog.row.amount)} in the budget; Retry then buys with a NEW Hubble reference.
+            </p>
+            <label htmlFor="vd-mark-reason" className="block text-xs font-semibold text-gray-600">Reason (kept in the audit trail)</label>
+            <textarea id="vd-mark-reason" rows={2} maxLength={300} value={markReason} disabled={dialogBusy}
+              onChange={(e) => setMarkReason(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900" />
+          </div>
         )}
       </ConfirmDialog>
 

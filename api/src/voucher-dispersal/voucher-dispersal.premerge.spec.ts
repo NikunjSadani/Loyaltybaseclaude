@@ -28,12 +28,12 @@ const LATE = 'VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER';
 const ANOMALY = 'VOUCHER_DISPERSAL_UNKNOWN_STATUS_ON_FAILED_ROW';
 
 describe('M-1: retry on an unrecognised Hubble status is refused honestly', () => {
-  it('lookup says CANCELLED → 409 "it was not bought — contact Gifsy tech"; anomaly audit kept; no HUBBLE_HAS_ORDER_* claim', async () => {
+  it('lookup says an unrecognised status → honest 409 (we cannot tell); anomaly audit kept; no HUBBLE_HAS_ORDER_* claim (CANCELLED is now "not bought" — owner rule)', async () => {
     const { t, id, b } = await oneFailed('HUBBLE_FAILED');
-    t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H-c', status: 'CANCELLED' });
+    t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H-c', status: 'ON_HOLD' });
     const err = await t.svc.retryBuy(ADMIN, id, b.id).then(() => new Error('resolved'), (e: Error) => e);
     expect(err).toBeInstanceOf(ConflictException);
-    expect(err.message).toBe('Hubble reports this order as CANCELLED — it was not bought. Contact Gifsy tech before retrying.');
+    expect(err.message).toMatch(/status we do not recognise \(ON_HOLD\) — we cannot tell whether it was bought/);
     expect(b.status).toBe('BUY_FAILED');
     expect(t.audits.some((a) => a.metadata?.event === ANOMALY)).toBe(true);
     const retryAudits = t.audits.filter((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_RETRY_BUY').map((a) => a.metadata.outcome);
@@ -102,11 +102,14 @@ describe('L-2: noteReconcile restores updatedAt only if the row has not changed 
 });
 
 describe('L-4: the settle loop respects the drain deadline; the failure counter uses a short lock wait', () => {
-  it('deadline already passed → no settle in this pass', async () => {
+  it('deadline already passed → only the minimum (5) of the selected campaigns are settled in this pass (F3 rule)', async () => {
     const t = setup();
-    const settle = jest.spyOn(t.processor, 'settleCampaign');
-    await t.processor.finishCampaigns(undefined, ['a', 'b'], Date.now() - 1);
-    expect(settle).not.toHaveBeenCalled();
+    for (let i = 0; i < 7; i++) {
+      await t.prisma.voucherDispersalCampaign.create({ data: { name: `c${i}`, programLabel: 'P', budgetPaise: 100n, status: 'PROCESSING', createdById: 'x' } });
+    }
+    const settle = jest.spyOn(t.processor, 'settleCampaign').mockResolvedValue(false);
+    await t.processor.finishCampaigns(undefined, [], Date.now() - 1);
+    expect(settle).toHaveBeenCalledTimes(5);
   });
 
   it('noteSettleFailure runs in a short transaction (WEBHOOK_SETTLE_TX)', async () => {

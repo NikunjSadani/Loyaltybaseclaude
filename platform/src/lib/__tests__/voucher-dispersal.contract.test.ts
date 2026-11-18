@@ -114,6 +114,7 @@ const IGNORED: Record<string, string[]> = {
   batchPreview: UPLOAD_IGNORED,
   batchDiscard: CAMPAIGN_IGNORED.map((k) => `campaign.${k}`),
   rowsOfBatch: [...ROW_IGNORED.map((k) => `rows[].${k}`)],
+  markNotBought: ROW_IGNORED,
 };
 IGNORED.process = ['pass', ...IGNORED.detail];
 IGNORED.detailWithBatches = IGNORED.detail;
@@ -138,6 +139,7 @@ const NORMALISERS: Record<string, (x: unknown) => unknown> = {
   batchConfirm: normalizeCampaign,
   detailWithBatches: normalizeDetail,
   rowsOfBatch: (d) => normalizeRowsPage(d, 1),
+  markNotBought: normalizeRow,
 };
 
 /** A key path counts as covered when it, or a parent of it, was read or is ignored. */
@@ -248,6 +250,10 @@ describe('voucher-dispersal UI ⇄ server contract (fixture from the real server
     const r = normalizeRowsPage(C.rowsOfBatch, 1);
     expect(r.rows.map((x) => x.batchNumber)).toEqual([3]);
     expect(normalizeCancelResult(C.cancel).discardedPendingBatchRows).toBe(0);
+    const marked = normalizeRow(C.markNotBought);
+    expect(marked).toMatchObject({ status: 'BUY_FAILED', canMarkNotBought: false, canRetryBuy: true });
+    expect(marked.reason).toMatch(/^Marked as not bought by an admin: /);
+    expect(d.summary.failedBackWithHubbleRows).toBe(0);
     expect((C.list as unknown[]).map(normalizeListItem).every((i) => i.summary.pendingBatchNumber === null)).toBe(true);
   });
 });

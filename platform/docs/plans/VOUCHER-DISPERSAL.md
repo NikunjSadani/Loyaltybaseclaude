@@ -58,7 +58,8 @@ or not) sees every campaign. `GIFSY_STAFF` and every tenant role are refused (co
 | `GET /campaigns/:id/rows` | `?status=&batch=&page=` (100 per page) | `{ rows, total, page, pageSize }` (an unconfirmed batch's rows only with `batch=` its number) |
 | `GET /campaigns/:id/report.xlsx` | — | Batch, Source file, Row, Phone, Name, Amount, Brand, Voucher status, Hubble order ref, Bought at, Failure reason, WhatsApp status, Sent at, Delivered at, Read at, Message failure reason (**no codes**) |
 | `POST /campaigns/:id/rows/:rowId/resend` | — | row — re-sends the WhatsApp for a BOUGHT row (new receipt); never buys; only after the first send has an outcome; max 3 per row |
-| `POST /campaigns/:id/rows/:rowId/retry-buy` | — | `{ message, row }` — rules in §4; idempotent |
+| `POST /campaigns/:id/rows/:rowId/retry-buy` | — | `{ message, row }` — rules in §4; idempotent. 409 when Hubble answers with a status we do not recognise ("we cannot tell whether it was bought … use Mark as not bought") |
+| `POST /campaigns/:id/rows/:rowId/mark-not-bought` | `{ reason }` (5–300 chars) | row — GIFSY_ADMIN only; only when the row's last Hubble answer was unrecognised (`row.canMarkNotBought`); audited `VOUCHER_DISPERSAL_MARKED_NOT_BOUGHT` (actor, reason, previous state) in the same transaction; row → BUY_FAILED `MARKED_NOT_BOUGHT` (terminal, off the budget, out of the 2-min lookups); Retry then uses a NEW reference |
 | `POST /campaigns/:id/cancel` | — | `{ campaign, cancelledRows, stillWithHubble, alreadyBought, discardedPendingBatchRows }` |
 | `PATCH /campaigns/:id` | `{ name?, budgetRupees? }` | campaign. 400: nothing to change / empty name / budget below the floor (the message states the floor, spent and committed); 409 on CANCELLED |
 | `POST /campaigns/:id/batches` | multipart `file` (.xlsx) | `{ batchNumber, batchStatus, previewId, campaign, rows, summary:{ …upload summary, alreadyCommittedRupees, remainingBudgetRupees, crossBatchDuplicates } }` — `overBudget` = this batch > what is LEFT. 409 with the reason unless the campaign is COMPLETED / COMPLETED_WITH_ERRORS with nothing in flight. Re-upload while a batch waits = replaces it (same number, new previewId) |
@@ -232,6 +233,10 @@ refusals) (actor = admin).
   idempotency wrappers stripped): 10 = 10 statements (incl. the `lateCompletedAt` index added at pre-merge), none missing
   or extra. NOT yet run against a database (no shadow /
   scratch DB was used) — before prod, apply it TWICE to a local / throwaway database and confirm the second run is clean.
+- **This migration must NOT have been applied anywhere under its earlier contents.** `20261118160000_voucher_dispersal_batches`
+  was edited several times before release (columns / indexes added, re-runnable rewrite); Prisma checks the file's
+  checksum. Before deploying, confirm `_prisma_migrations` on staging AND prod has no row for it (the coordinator checks
+  this before deploy). If one exists, stop — do not edit or re-apply; ask engineering.
 - **Old/new revision overlap during that deploy:** for the minutes both API revisions serve traffic, the OLD revision
   does not know about batches and would count an unconfirmed batch's rows in its list summary — harmless, because no
   batch can exist until the new revision is serving (only it can create one).
@@ -355,3 +360,27 @@ I want."* Owner chose **"Add to the same campaign"**.
   the "finished but in flight" grouping only looks at COMPLETED / COMPLETED_WITH_ERRORS campaigns; new index
   `voucher_dispersal_rows_lateCompletedAt_idx` (same migration, idempotent). L-6 — runbook: no uploads during the deploy.
 
+### 10b. Owner decision — Hubble CANCELLED / RETURNED = NOT BOUGHT; "Mark as not bought" (2026-11-18)
+
+- **CANCELLED / RETURNED** (Hubble order statuses; REFUNDED is not a Hubble order status anywhere in this code, so it is
+  not included) are treated like FAILED: the row → BUY_FAILED with source **`HUBBLE_CANCELLED`** and reason "Hubble
+  reported X — not bought". Unlike `HUBBLE_FAILED`, it **no longer counts against the budget** (`NOT_BOUGHT_FAILURE_SOURCES`
+  = `REJECTED`, `HUBBLE_CANCELLED`, `MARKED_NOT_BOUGHT`, excluded in `failedMayStillCompleteWhere` — floor, confirm, retry
+  check, Budget used, digest). A `HUBBLE_FAILED` row later reported CANCELLED moves to `HUBBLE_CANCELLED` (released); a
+  released row is never re-counted as `HUBBLE_FAILED`. **Retry** asks Hubble again; FAILED / CANCELLED / RETURNED (or a
+  canary-verified "no order") → a NEW reference (old one kept), same rules as `HUBBLE_FAILED`.
+- **Any other status** (`HUBBLE_KNOWN_STATUSES` = SUCCESS, PROCESSING, FAILED, CANCELLED, RETURNED): never applied. The
+  sweep / webhook leaves a failed row as it is (anomaly audit + error log once per status; a pending row stays pending with
+  `HUBBLE_UNKNOWN_STATUS:X`); a **Retry** — failed OR pending row (F2) — is refused with an honest 409 ("… a status we do
+  not recognise (X) — we cannot tell whether it was bought. Contact Gifsy tech; if it was not bought, use "Mark as not
+  bought", then retry."). **Mark as not bought** (row action, confirmation dialog, reason required; GIFSY_ADMIN only) →
+  BUY_FAILED `MARKED_NOT_BOUGHT`, audited; Retry afterwards issues a NEW reference without asking Hubble again (the admin's
+  decision stands; a late SUCCESS on the old reference raises the superseded-reference alert).
+- The report's "Failure reason" carries the words ("Hubble reported CANCELLED — not bought" / "Marked as not bought by an
+  admin: <reason>"); the digest's "purchase failed" counts include them (see DAILY-OPS-DIGEST.md).
+- **F3** — every drain pass keeps the last min(10 s, ¼ of the pass) for settling: buying stops early; campaigns touched in
+  the pass are always settled, plus at least 5 of the others even past the deadline (the rest next pass). **F5** — the
+  over-budget banner states its actual causes from the server's counts ("N purchases were bought later by Hubble after they
+  had failed/refused" / "N failed purchases are back with Hubble and count again"), else a neutral "spending is above the
+  budget; see Budget used". **F6** — the BOUGHT audit's `fromStatus` is the real previous status (one guarded write per
+  possible state).

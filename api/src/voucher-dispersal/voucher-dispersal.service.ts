@@ -36,6 +36,9 @@ import {
   SETTLE_FAILURES_BEFORE_ALERT,
   budgetBreakdown,
   overBudget,
+  HUBBLE_KNOWN_STATUSES,
+  HUBBLE_NOT_BOUGHT_STATUSES,
+  lastLookupUnrecognised,
   type BudgetBreakdown,
 } from './voucher-dispersal.processor';
 import { maskVoucherCodeForAudit } from '../rewards/voucher-issuance';
@@ -45,6 +48,7 @@ import {
   EditDispersalCampaignDto,
   ListDispersalCampaignsQueryDto,
   ListDispersalRowsQueryDto,
+  MarkNotBoughtDto,
 } from './dto/voucher-dispersal.dto';
 
 /**
@@ -166,6 +170,11 @@ const MSG_SENT = new Set(['SENT', 'SENT_UNTRACKED', 'DELIVERED', 'READ']);
  */
 export function maskDispersalCode(code: string | null | undefined): string | null {
   return typeof code === 'string' && code.trim() ? maskVoucherCodeForAudit(code) : null;
+}
+
+/** "Mark as not bought" is offered for a failed / pending row whose last Hubble answer we do not recognise (once). */
+function canMarkNotBought(r: Pick<DbRow, 'status' | 'buyFailureSource' | 'lastReconcileResult' | 'pendingReason'>): boolean {
+  return (r.status === RS.BUY_FAILED || r.status === RS.PENDING_RECONCILE) && r.buyFailureSource !== 'MARKED_NOT_BOUGHT' && lastLookupUnrecognised(r);
 }
 
 /** The first WhatsApp has an outcome (sent, failed or unknown) — only then may an admin resend. */
@@ -1181,6 +1190,10 @@ export class VoucherDispersalService {
         queuedAtRiskRupees: rupees(over.queuedAtRiskPaise),
         /** Rows (distinct) that had FAILED and that Hubble later reported bought / processing (audited loudly). */
         lateCompletedRows: await this.prisma.voucherDispersalRow.count({ where: { campaignId: id, lateCompletedAt: { not: null } } }),
+        /** Rows that had FAILED and are back with Hubble (pending again) — they count against the budget again. */
+        failedBackWithHubbleRows: await this.prisma.voucherDispersalRow.count({
+          where: { campaignId: id, status: RS.PENDING_RECONCILE, buyFailureSource: { not: null } },
+        }),
         /** The SAME breakdown the floor, batch confirm and retry checks use (money-audit M1). */
         budgetUsage: {
           spentRupees: rupees(usage.spentPaise),
@@ -1351,6 +1364,8 @@ export class VoucherDispersalService {
         ((r.status === RS.BUY_FAILED && !(LOCAL_FAILURE_SOURCES.includes(r.buyFailureSource ?? '') && r.referenceSentAt && (retryAt === null || retryAt.getTime() > Date.now()))) ||
           (r.status === RS.PENDING_RECONCILE && retryAt !== null && retryAt.getTime() <= Date.now())),
       retryAvailableAt: r.status === RS.PENDING_RECONCILE ? retryAt : null,
+      /** Hubble's last answer was a status we do not recognise → an admin may "Mark as not bought" (with a reason). */
+      canMarkNotBought: canMarkNotBought(r),
     };
   }
 
@@ -1475,6 +1490,67 @@ export class VoucherDispersalService {
     return this.rowView(fresh, fresh.whatsappReceiptId ? rc.get(fresh.whatsappReceiptId) : null, camp.status);
   }
 
+  /**
+   * POST /campaigns/:id/rows/:rowId/mark-not-bought — GIFSY_ADMIN only, reason required, audited. Only for a row
+   * whose last Hubble answer was a status we do not recognise (Retry is refused for it): the admin, having checked
+   * with Hubble, declares it NOT BOUGHT. The row becomes BUY_FAILED `MARKED_NOT_BOUGHT` — terminal, released from the
+   * budget, out of the 2-min lookups; Retry is then allowed with a NEW reference. Under the campaign lock; the audit
+   * row is written in the same transaction.
+   */
+  async markNotBought(user: JwtPayload, id: string, rowId: string, dto: MarkNotBoughtDto) {
+    this.assertAdmin(user);
+    const reason = String(dto?.reason ?? '').replace(/\s+/g, ' ').trim();
+    if (reason.length < 5) throw new BadRequestException('Give the reason (at least 5 characters) — it is kept in the audit trail.');
+    const r = await this.prisma.$transaction(async (tx) => {
+      const camp = await tx.voucherDispersalCampaign.update({ where: { id }, data: { updatedAt: new Date() } }).catch(() => null);
+      if (!camp) throw new NotFoundException('Campaign not found.');
+      const row = await tx.voucherDispersalRow.findFirst({ where: { id: rowId, campaignId: id } });
+      if (!row) throw new NotFoundException('Row not found in this campaign.');
+      if (!canMarkNotBought(row)) {
+        throw new ConflictException(
+          '"Mark as not bought" is only for a row whose last Hubble answer was a status we do not recognise (a failed or pending row). Use Retry for the others.',
+        );
+      }
+      const res = await tx.voucherDispersalRow.updateMany({
+        where: { id: row.id, status: row.status, updatedAt: row.updatedAt, voucherCode: null },
+        data: {
+          status: RS.BUY_FAILED,
+          buyFailureSource: 'MARKED_NOT_BOUGHT',
+          buyFailureReason: `Marked as not bought by an admin: ${reason}`.slice(0, 300),
+          pendingReason: null,
+          claimToken: null,
+        },
+      });
+      if (res.count !== 1) throw new ConflictException('This row changed meanwhile — refresh and try again.');
+      await tx.auditLog.create({
+        data: {
+          actorId: user.sub,
+          action: 'UPDATE',
+          entityType: 'VOUCHER_DISPERSAL_ROW',
+          entityId: row.id,
+          metadata: {
+            event: 'VOUCHER_DISPERSAL_MARKED_NOT_BOUGHT',
+            campaignId: id,
+            batchNumber: row.batchNumber,
+            rowNumber: row.rowNumber,
+            amountRupees: rupees(row.amountPaise),
+            reason,
+            fromStatus: row.status,
+            previousFailureSource: row.buyFailureSource,
+            lastHubbleAnswer: row.lastReconcileResult,
+            hubbleReferenceId: row.hubbleReferenceId,
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return { camp };
+    }, CAMPAIGN_LOCK_TX);
+    await this.processor.resettle(id);
+    const fresh = await this.prisma.voucherDispersalRow.findFirstOrThrow({ where: { id: rowId } });
+    const rc = await this.receiptsFor([fresh.whatsappReceiptId]);
+    const camp = await this.getCampaignOr404(id);
+    return this.rowView(fresh, fresh.whatsappReceiptId ? rc.get(fresh.whatsappReceiptId) : null, camp.status ?? r.camp.status);
+  }
+
   /** When an indeterminate row may be manually re-placed (2 h after its last place attempt / flag). */
   retryAvailableAt(r: Pick<DbRow, 'placeAttemptAt' | 'pendingSince' | 'createdAt'>): Date | null {
     const anchors = [r.placeAttemptAt, r.pendingSince].filter((d): d is Date => !!d).map((d) => new Date(d).getTime());
@@ -1520,6 +1596,10 @@ export class VoucherDispersalService {
     let canaryRef: string | null = null;
     if (localFailure && !row.referenceSentAt) {
       // Never reached Hubble with this reference → nothing to check; reuse it.
+    } else if (row.status === RS.BUY_FAILED && row.buyFailureSource === 'MARKED_NOT_BOUGHT') {
+      // An admin marked it NOT BOUGHT (audited, with a reason) after Hubble answered with a status we do not
+      // recognise: that decision stands — a NEW reference (the old one is kept; a late SUCCESS on it is alerted).
+      newRef = `vd${randomBytes(12).toString('hex')}`;
     } else {
       if (indeterminate) {
         const at = this.retryAvailableAt(row);
@@ -1537,20 +1617,24 @@ export class VoucherDispersalService {
       }
       if (look.kind === 'ORDER') {
         const st = String(look.body.status ?? '').toUpperCase();
-        if (st !== 'FAILED') {
+        if (!HUBBLE_KNOWN_STATUSES.has(st)) {
+          // Pre-merge M-1 / F2 (any row status): a status we do not recognise — never applied, never "nothing
+          // bought again". Anomaly audit (once per status) + the lookup recorded → "Mark as not bought" is offered.
+          await this.processor.recordUnrecognisedStatus(row, st, (look.body.id ?? look.body.orderId ?? null) as string | null);
+          await audit('REFUSED_UNRECOGNISED_HUBBLE_STATUS', { hubbleStatus: st || null });
+          throw new ConflictException(
+            `Hubble reports this order with a status we do not recognise (${st || 'none'}) — we cannot tell whether it was bought. Contact Gifsy tech; if it was not bought, use "Mark as not bought", then retry.`,
+          );
+        }
+        if (!HUBBLE_NOT_BOUGHT_STATUSES.has(st)) {
           const outcome = await this.processor.applyBody(row, look.body);
-          if (outcome === 'UNCHANGED') {
-            // Pre-merge M-1: Hubble answered with a status we do not recognise (the processor wrote the anomaly
-            // audit + error log and left the row). Never claim "applied" — refuse honestly.
-            await audit('REFUSED_UNRECOGNISED_HUBBLE_STATUS', { hubbleStatus: st || null });
-            throw new ConflictException(`Hubble reports this order as ${st || 'an unknown status'} — it was not bought. Contact Gifsy tech before retrying.`);
-          }
           await audit(`HUBBLE_HAS_ORDER_${st || 'UNKNOWN'}`, { applied: outcome });
           if (outcome === 'BOUGHT') await this.processor.sendMessage(row.id);
           await this.processor.resettle(id);
           return this.retryResult(row.id, `Hubble already holds an order for this row (${st}) — applied, nothing bought again.`);
         }
-        // Hubble DEFINITIVELY failed this reference → a new reference for the new attempt.
+        // Hubble DEFINITIVELY did not buy on this reference (FAILED / CANCELLED / RETURNED — owner decision) → a
+        // new reference for the new attempt.
         newRef = `vd${randomBytes(12).toString('hex')}`;
       } else {
         const canary = await this.processor.verifyNotFoundCanary(row.hubbleReferenceId!);
