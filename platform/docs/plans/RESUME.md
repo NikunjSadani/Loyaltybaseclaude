@@ -84,7 +84,6 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 | Work | Branch / worktree | State | Read |
 |---|---|---|---|
 | **Wallet Reversal Engine** (⚠️ platform-wide, owner-approved; money path) | `feat/wallet-reversal-engine` (+ `feat/wre-*`), worktree `.claude/worktrees/reversal-engine` | WP0–WP7 built on the branch (WP7 real-Postgres concurrency suite 2026-11-16); not merged, not deployed. Per-tenant flag `reversalEngine: LEGACY / SHADOW / V2` (default LEGACY). **Owner decisions 2026-11-15/16:** Deoleo stays **LEGACY**; Bajaj → **V2**; a reversal of an already-paid payout becomes a **net receivable**, with **TDS credited back on the PAN**; every reversal shows an **outcome summary** (all tenants). Prod today runs the INTERIM rule (points reversals refused on wallets carrying debt; payout reversals whole-entry only). | `WALLET-REVERSAL-ENGINE-DESIGN.md` **on that branch** (maintained there) |
-| **Flaky-test sweep** (test/tooling only) | `chore/flaky-test-sweep` (6 commits, 2026-11-16) | Not merged. Suite-wide async headroom (RTL `asyncUtilTimeout` 15 s, 30 s test timeouts, jest `testTimeout` 30 s), sync `getBy` after await → `findBy`, `eslint-plugin-testing-library` rules. | branch commits |
 | **Daily Operations Digest** (⚠️ platform-wide, owner approved option A) | `feat/daily-ops-digest`, worktree `.claude/worktrees/ops-digest` | One build commit `70744e63` (2026-11-13), not audited/merged; paused behind go-live. | branch |
 
 ## 4. What's next / waiting on the owner
@@ -106,7 +105,7 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
    **Never run a points compute for Apr 2025 – Oct 2026** (paid by the vendor; imported).
 6. Owner process items still open: `gifsy-deployer` over-privilege review; stray `gifsy` `tdsPolicy` row from the F1 bug
    (harmless; delete when convenient); rotate the Hubble client secret (was shared in a screenshot).
-7. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first) → merge the flaky-test sweep → Daily Ops Digest.
+7. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first) → Daily Ops Digest.
 
 ## 5. Owner process rules (adopted — apply to every change)
 
@@ -205,9 +204,11 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
 - `terraform` config has drifted from live in places — plan first, never blind-apply.
 
 **Tests**
-- **CI-runner flakes:** GitHub runners are slower than the dev box. Use `findBy`/awaited queries (never a sync `getBy`
-  right after a request), generous `waitFor` and per-test timeouts, no wall-clock budgets. A flaky test blocked the
-  2026-11-15 prod run. Systemic fix on `chore/flaky-test-sweep` (not merged).
+- **CI-runner flakes:** GitHub runners are slower than the dev box. Rules: `findBy`/`await waitFor` for anything that
+  appears after a request or an `await` (never a sync `getBy`); never pass a timeout BELOW the suite defaults (RTL 15 s,
+  vitest test 30 s, jest 30 s — raise only); no wall-clock budgets (use fake timers); fake timers always restored; dates
+  relative to now. Enforced by `platform/vitest.setup.ts` + `vitest.config.ts`, `api` jest `testTimeout`, and the
+  `eslint-plugin-testing-library` rules in `platform/eslint.config.mjs` (sweep shipped in the 2026-11-16 release).
 - Local api jest runs at `--maxWorkers=50%` (all workers starved the 18-thread box).
 - A local **PostgreSQL 15** (Windows service `postgresql-x64-15`, port **55432**) exists on the dev machine **only for
   disposable test databases** (e.g. the WP7 reversal-engine concurrency suite via `WRE_PG_ADMIN_URL`). Prod and staging

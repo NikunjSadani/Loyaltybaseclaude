@@ -37,7 +37,7 @@ import KYCDetailPage from '../page';
 // F3: one plain wording across surfaces (the backend history note uses the same sentence).
 const HEADLINE = 'Resubmitted after a GIFSY rejection — sent directly to GIFSY; managers did not re-approve.';
 const HISTORY_NOTE = 'Resubmitted after a GIFSY rejection — sent directly to GIFSY; managers did not re-approve.';
-const LOAD = { timeout: 10_000 };
+const LOAD = { timeout: 15_000 }; // never below the suite asyncUtilTimeout (vitest.setup.ts)
 
 // Relative to now — never a hardcoded date.
 const rejectedAt = new Date(Date.now() - 3 * 86_400_000).toISOString();

@@ -30,7 +30,7 @@ import SalesKYCDetailPage from '../page';
 const NOTE = 'Sent directly to Gifsy. Your manager does not need to approve it again.';
 const SKIPPED = 'Not needed — resent after Gifsy rejection';
 const HISTORY_NOTE = 'Resubmitted after a GIFSY rejection — sent directly to GIFSY; managers did not re-approve.';
-const LOAD = { timeout: 10_000 };
+const LOAD = { timeout: 15_000 }; // never below the suite asyncUtilTimeout (vitest.setup.ts)
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
 const FAST = { previousSubmissionId: 'kyc-prev', previousRejectedAt: daysAgo(3) };
