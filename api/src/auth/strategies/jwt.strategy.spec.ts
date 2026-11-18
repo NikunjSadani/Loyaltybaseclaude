@@ -83,6 +83,18 @@ describe('JwtStrategy', () => {
       expect(mockActivity.markActive).toHaveBeenLastCalledWith('user_1', 'bajaj', { medium: 'unknown', device: 'unknown' });
     });
 
+    it('S5d: a BACKGROUND request (X-Background: 1 — bell poll, badge, beacons) is authenticated but NOT activity', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      const payload = { sub: 'user_1', role: 'SSS', clientId: 'bajaj' };
+      await expect(
+        strategy.validate({ headers: { ...REQ.headers, 'x-background': '1' } }, payload as any),
+      ).resolves.toEqual(payload);
+      expect(mockActivity.markActive).not.toHaveBeenCalled();
+      // anything but exactly '1' is a normal request
+      await strategy.validate({ headers: { ...REQ.headers, 'x-background': 'true' } }, payload as any);
+      expect(mockActivity.markActive).toHaveBeenCalledTimes(1);
+    });
+
     it('S5c: HOT PATH — validate resolves even when the activity DB write never settles or throws', async () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
       const payload = { sub: 'user_1', role: 'SSS', clientId: 'bajaj' };

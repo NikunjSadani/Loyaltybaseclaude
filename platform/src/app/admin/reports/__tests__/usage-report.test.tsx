@@ -34,8 +34,8 @@ function report(over: Partial<UsageReportPage> = {}): UsageReportPage {
     notes: { duration: 'x', region: 'Programme and region come from outlets: a retailer’s own outlets.' },
     filters: { roles: ['CLIENT_ADMIN', 'SALES_SO', 'SSS'], programs: ['Gold', 'Silver'], regions: ['Gujarat', 'Maharashtra'] },
     totals: {
-      usersInScope: 7, usersActive: 4, usersInactive: 3, avgDaysActive: 4.8, totalMinutes: 72,
-      avgMinutesPerActiveUser: 18, appUsers: 2, browserUsers: 2, phoneUsers: 3, computerUsers: 1,
+      usersInScope: 7, usersActive: 4, usersInactive: 3, disabledAccountsExcluded: 2, avgDaysActive: 4.8, totalMinutes: 72,
+      usersTracked: 3, avgMinutesPerTrackedUser: 24, appUsers: 2, browserUsers: 2, phoneUsers: 3, computerUsers: 1,
     },
     page: 1, pageSize: 50, pageCount: 1, totalRows: 1, rows: [row()],
     ...over,
@@ -98,7 +98,10 @@ describe('Usage Report page', () => {
     const totals = screen.getByTestId('usage-totals');
     expect(within(totals).getByText('4 of 7')).toBeTruthy();
     expect(within(totals).getByText('72')).toBeTruthy();
-    expect(within(totals).getByText('3 did not use it')).toBeTruthy();
+    expect(within(totals).getByText('3 did not use it · 2 deactivated/suspended not counted')).toBeTruthy();
+    expect(within(totals).getByText('avg 24 per user with tracked days (3)')).toBeTruthy();
+    expect(note.textContent).toMatch(/Automatic refreshes .* are not counted/);
+    expect(screen.getByText(/Usage per user, 2026-10-22 to 2026-11-20/)).toBeTruthy(); // table caption
     const tr = screen.getByText('Asha Retail').closest('tr')!;
     expect(within(tr).getByText('Gold')).toBeTruthy();
     expect(within(tr).getByText('Phone')).toBeTruthy();
@@ -124,9 +127,30 @@ describe('Usage Report page', () => {
     await waitFor(() => expect(lastParams().get('region')).toBe('Gujarat'));
     fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'lastSeen' } });
     await waitFor(() => expect(lastParams().get('sort')).toBe('lastSeen'));
-    fireEvent.click(screen.getByLabelText(/Show inactive users/));
+    fireEvent.click(screen.getByLabelText(/Show users with no activity in this range/));
     await waitFor(() => expect(lastParams().get('includeInactive')).toBe('true'));
     expect(lastParams().get('page')).toBe('1');
+  });
+
+  it('M5: totals are dimmed (aria-busy) while new filters load', async () => {
+    fetchMock.mockResolvedValueOnce(ok(report()));
+    let release!: (v: unknown) => void;
+    fetchMock.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    render(<UsagePage />);
+    await screen.findByText('Asha Retail');
+    expect(screen.getByTestId('usage-totals').getAttribute('aria-busy')).toBe('false');
+    fireEvent.change(screen.getByLabelText('Role'), { target: { value: 'SSS' } });
+    await waitFor(() => expect(screen.getByTestId('usage-totals').getAttribute('aria-busy')).toBe('true'));
+    expect(screen.getByTestId('usage-totals').className).toMatch(/opacity-40/);
+    release(ok(report()));
+    await waitFor(() => expect(screen.getByTestId('usage-totals').getAttribute('aria-busy')).toBe('false'));
+  });
+
+  it('a 503 "not available yet" (migration not applied) is shown as a plain message, with Retry', async () => {
+    fetchMock.mockResolvedValue(fail(503, 'The usage report is not available yet: its database update has not been applied on this server. Please contact Gifsy.'));
+    render(<UsagePage />);
+    expect(await screen.findByText(/not available yet/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
   });
 
   it('pagination: Next asks for page 2', async () => {
@@ -161,7 +185,7 @@ describe('Usage Report page', () => {
     render(<UsagePage />);
     expect(await screen.findByText(/No one used the app in this range/)).toBeTruthy();
     expect((screen.getByRole('button', { name: /export excel/i }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(screen.getByLabelText(/Show inactive users/));
+    fireEvent.click(screen.getByLabelText(/Show users with no activity in this range/));
     expect(await screen.findByText('No users match these filters.')).toBeTruthy();
   });
 

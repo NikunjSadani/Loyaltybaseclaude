@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  ACTIVITY_FAILURE_BACKOFF_MS,
+  ACTIVITY_MAX_IN_FLIGHT,
   ACTIVITY_WRITE_THROTTLE_MS,
   ActivityTrackingService,
   buildActivityUpsertSql,
@@ -107,16 +109,24 @@ describe('ActivityTrackingService', () => {
       expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
     });
 
-    it('never throws when the DB write rejects, and frees the user for a retry', async () => {
-      const prisma = makePrisma(() => Promise.reject(new Error('db down')));
+    it('a rejected write never throws, KEEPS the throttle entry and backs the user off for 5 min (no retry storm)', async () => {
+      const prisma = makePrisma(() => Promise.reject(new Error('column "visits" does not exist')));
       const svc = new ActivityTrackingService(prisma);
       expect(() => svc.markActive('u1', 'bajaj', APP_PHONE, at(0))).not.toThrow();
       await flush();
-      svc.markActive('u1', 'bajaj', APP_PHONE, at(1)); // inside 60 s, but the failed write was forgotten
+      svc.markActive('u1', 'bajaj', APP_PHONE, at(1)); // next request: NOT retried
+      svc.markActive('u1', 'bajaj', BROWSER_PC, at(90)); // even a new medium waits for the backoff
+      svc.markActive('u1', 'bajaj', APP_PHONE, at(4 * 60 + 59));
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+      svc.markActive('u1', 'bajaj', APP_PHONE, at(ACTIVITY_FAILURE_BACKOFF_MS / 1000)); // backoff over → writes
       expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+      // the failed write's flags were un-marked, so the post-backoff write carries them again
+      expect(prisma.$executeRaw.mock.calls[1][0].values.slice(-4)).toEqual([true, false, true, false]);
+      await flush();
+      expect(svc.stats()).toMatchObject({ failed: 2, inFlight: 0 });
     });
 
-    it('never throws when the client throws synchronously', () => {
+    it('a client that throws synchronously never throws to the caller and is backed off too', () => {
       const prisma = {
         $executeRaw: jest.fn(() => {
           throw new Error('sync boom');
@@ -125,7 +135,23 @@ describe('ActivityTrackingService', () => {
       const svc = new ActivityTrackingService(prisma);
       expect(() => svc.markActive('u1', 'bajaj', APP_PHONE, at(0))).not.toThrow();
       expect(() => svc.markActive('u1', 'bajaj', APP_PHONE, at(1))).not.toThrow();
-      expect(prisma.$executeRaw).toHaveBeenCalledTimes(2); // the sync failure also frees the user
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+      expect(svc.stats().inFlight).toBe(0); // the counter never leaks
+    });
+
+    it(`caps in-flight writes per instance at ${ACTIVITY_MAX_IN_FLIGHT}; beyond that writes are dropped, not queued`, async () => {
+      const resolvers: Array<() => void> = [];
+      const prisma = makePrisma(() => new Promise<void>((r) => resolvers.push(r)));
+      const svc = new ActivityTrackingService(prisma);
+      for (let i = 0; i < 9; i++) svc.markActive(`u${i}`, 'bajaj', APP_PHONE, at(i));
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(ACTIVITY_MAX_IN_FLIGHT);
+      expect(svc.stats()).toMatchObject({ inFlight: ACTIVITY_MAX_IN_FLIGHT, dropped: 9 - ACTIVITY_MAX_IN_FLIGHT });
+      resolvers.forEach((r) => r());
+      await flush();
+      expect(svc.stats().inFlight).toBe(0);
+      // a dropped user was not marked as sent → their next request writes
+      svc.markActive('u8', 'bajaj', APP_PHONE, at(20));
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(ACTIVITY_MAX_IN_FLIGHT + 1);
     });
 
     it('ignores a missing userId / clientId', () => {
@@ -300,8 +326,11 @@ describe('ActivityTrackingService', () => {
       const svc = new ActivityTrackingService({
         $executeRaw: (sql: any) => db.query(sql.text, sql.values),
       } as any);
-      for (let s = 0; s <= 20 * 60; s += 10) svc.markActive('u1', 'bajaj', APP_PHONE, at(s));
-      await new Promise((r) => setTimeout(r, 200));
+      for (let s = 0; s <= 20 * 60; s += 10) {
+        svc.markActive('u1', 'bajaj', APP_PHONE, at(s));
+        // real requests are seconds apart — let each write land (the in-flight cap would drop a burst)
+        while (svc.stats().inFlight > 0) await new Promise((r) => setTimeout(r, 2));
+      }
       const [r] = await rows();
       expect(r.visits).toBe(1);
       expect(r.activeSeconds).toBe(20 * 60); // writes at 0,60,…,1200 — the last action lands on a write

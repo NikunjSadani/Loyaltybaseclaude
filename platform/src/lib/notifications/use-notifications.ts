@@ -103,9 +103,13 @@ export function useNotifications(): UseNotifications {
 
   /* ── unread-count polling ─────────────────────────────────────────────────
      Fetch immediately on mount, then every UNREAD_POLL_MS. A failed poll leaves
-     the last known count untouched (a blip must never zero the badge). */
+     the last known count untouched (a blip must never zero the badge).
+     Usage Report: every count fetch is AUTOMATIC → sent as a background request
+     (X-Background: 1) so a tab left open never counts as someone using the app.
+     The poll PAUSES while the tab is hidden and refreshes once when it is shown
+     again. */
   const refreshCount = useCallback(async () => {
-    const res = await api.get<{ count: number }>('/api/notifications/unread-count');
+    const res = await api.get<{ count: number }>('/api/notifications/unread-count', { background: true });
     // Skip the write if a mark-read/mark-all POST is in flight: its optimistic
     // decrement is authoritative until it resolves, and a stale poll value must
     // not transiently bump the badge back up.
@@ -115,9 +119,26 @@ export function useNotifications(): UseNotifications {
   }, []);
 
   useEffect(() => {
-    void refreshCount();
-    const id = setInterval(() => { void refreshCount(); }, UNREAD_POLL_MS);
-    return () => clearInterval(id);
+    const hidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    let id: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (id !== null) return;
+      id = setInterval(() => { if (!hidden()) void refreshCount(); }, UNREAD_POLL_MS);
+    };
+    const stop = () => {
+      if (id !== null) clearInterval(id);
+      id = null;
+    };
+    const onVisibility = () => {
+      if (hidden()) stop();
+      else { void refreshCount(); start(); }
+    };
+    if (!hidden()) { void refreshCount(); start(); }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stop();
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [refreshCount]);
 
   /* ── feed loading (lazy + paged) ──────────────────────────────────────────*/

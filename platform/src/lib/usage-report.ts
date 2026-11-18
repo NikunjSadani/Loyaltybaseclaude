@@ -28,12 +28,18 @@ export interface UsageRow {
 }
 
 export interface UsageTotals {
+  /** Enabled accounts in the filters + deactivated/suspended accounts that were active in the range. */
   usersInScope: number
   usersActive: number
+  /** Enabled accounts with no activity in the range. */
   usersInactive: number
+  /** Deactivated / suspended accounts with no activity — not counted above. */
+  disabledAccountsExcluded: number
   avgDaysActive: number | null
   totalMinutes: number
-  avgMinutesPerActiveUser: number | null
+  /** Users with ≥ 1 tracked (post-ship) day — the base of the minutes average. */
+  usersTracked: number
+  avgMinutesPerTrackedUser: number | null
   appUsers: number
   browserUsers: number
   phoneUsers: number

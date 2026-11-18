@@ -4,7 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ActivityTrackingService } from '../../activity/activity-tracking.service';
-import { activityContextFromRequest } from '../../activity/client-medium';
+import { activityContextFromRequest, isBackgroundRequest } from '../../activity/client-medium';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
 import { SESSION_TTL_DAYS } from '../auth.constants';
 
@@ -78,7 +78,11 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     // Stamp this user active (IST day) with how they arrived — fire-and-forget, throttled in
     // memory, never blocks or fails the request. Feeds the Session Report's active days and the
     // Usage Report's visits / duration / medium. activityContextFromRequest never throws.
-    this.activity.markActive(payload.sub, payload.clientId, activityContextFromRequest(req));
+    // An AUTOMATIC request (X-Background: 1 — bell poll, badge counts, job polling, beacons) is NOT activity:
+    // no active day, no visit, no duration, no medium (owner rule: only real actions count).
+    if (!isBackgroundRequest(req)) {
+      this.activity.markActive(payload.sub, payload.clientId, activityContextFromRequest(req));
+    }
 
     return payload; // Becomes req.user
   }

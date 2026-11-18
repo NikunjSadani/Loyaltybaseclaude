@@ -32,6 +32,7 @@
  *     "Unknown status: X" (never "Invalid", never setup / nothing-spent wording) and keeps polling.
  * ───────────────────────────────────────────────────────────────────────────────── */
 
+import { backgroundInit } from '@/lib/client-medium';
 import { formatInrPaise } from '@/lib/format-inr';
 
 export const VD_BASE = '/api/admin/voucher-dispersal';
@@ -810,6 +811,10 @@ const json = (body: unknown): RequestInit => ({
 
 const cid = (id: string) => encodeURIComponent(id);
 
+/** Usage Report: `background` marks an automatic poll / processing nudge (X-Background: 1) — not counted as activity. */
+type BgOpt = { background?: boolean };
+const bg = (init: RequestInit, o?: BgOpt): RequestInit => (o?.background ? backgroundInit(init) : init);
+
 /** GET /campaigns page size (server CAMPAIGNS_PAGE_SIZE). A full page means there may be another. */
 export const VD_CAMPAIGNS_PAGE_SIZE = 50;
 
@@ -821,7 +826,7 @@ export const vdApi = {
   listCampaigns: (page = 1) =>
     vdRequest(`/campaigns?page=${encodeURIComponent(String(page))}`, {}, (d) => asArray(d).map(normalizeListItem)),
 
-  getCampaign: (id: string) => vdRequest(`/campaigns/${cid(id)}`, {}, normalizeDetail),
+  getCampaign: (id: string, o?: BgOpt) => vdRequest(`/campaigns/${cid(id)}`, bg({}, o), normalizeDetail),
 
   createCampaign: (body: { name: string; programLabel: string; billedToClientId?: string; note?: string; budgetRupees: number }) =>
     vdRequest('/campaigns', json(body), normalizeCampaign),
@@ -841,22 +846,22 @@ export const vdApi = {
    * per campaign across the whole tab: a call made right after confirm and the detail page's poll-time
    * calls share one request — never two in flight for the same campaign.
    */
-  process: (id: string): Promise<VdResult<VdListItem>> => {
+  process: (id: string, o?: BgOpt): Promise<VdResult<VdListItem>> => {
     const cur = processInFlight.get(id);
     if (cur) return cur;
-    const p = vdRequest(`/campaigns/${cid(id)}/process`, json({}), normalizeDetail).finally(() => {
+    const p = vdRequest(`/campaigns/${cid(id)}/process`, bg(json({}), o), normalizeDetail).finally(() => {
       processInFlight.delete(id);
     });
     processInFlight.set(id, p);
     return p;
   },
 
-  rows: (id: string, opts: { status?: string; page?: number }) => {
+  rows: (id: string, opts: { status?: string; page?: number; background?: boolean }) => {
     const q = new URLSearchParams();
     if (opts.status) q.set('status', opts.status);
     const page = opts.page ?? 1;
     q.set('page', String(page));
-    return vdRequest(`/campaigns/${cid(id)}/rows?${q.toString()}`, {}, (d) => normalizeRowsPage(d, page));
+    return vdRequest(`/campaigns/${cid(id)}/rows?${q.toString()}`, bg({}, opts), (d) => normalizeRowsPage(d, page));
   },
 
   resend: (id: string, rowId: string) => vdRequest(`/campaigns/${cid(id)}/rows/${cid(rowId)}/resend`, json({}), normalizeRow),

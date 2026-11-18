@@ -134,7 +134,12 @@ export default function VoucherCampaignDetailPage() {
     const seq = ++seqRef.current;
     if (mode === 'load' && !itemRef.current) { setLoading(true); setLoadError(null); }
     if (mode === 'manual') setRefreshing(true);
-    const [c, r] = await Promise.all([vdApi.getCampaign(id), vdApi.rows(id, { status: filter || undefined, page })]);
+    // A 'poll' refresh is automatic → background requests (the Usage Report does not count them as activity).
+    const background = mode === 'poll';
+    const [c, r] = await Promise.all([
+      background ? vdApi.getCampaign(id, { background }) : vdApi.getCampaign(id),
+      vdApi.rows(id, background ? { status: filter || undefined, page, background } : { status: filter || undefined, page }),
+    ]);
     if (!mounted.current || seq !== seqRef.current) return; // a newer request superseded this one
     if (c.ok) {
       const st = c.data.campaign.status;
@@ -180,7 +185,7 @@ export default function VoucherCampaignDetailPage() {
   const nudge = shouldNudgeProcessing(phase);
   useEffect(() => {
     if (!nudge || hidden || !id || isProcessInFlight(id)) return;
-    void vdApi.process(id).then((res) => {
+    void vdApi.process(id, { background: true }).then((res) => { // automatic nudge → background
       if (!mounted.current) return;
       processFailures.current = nextProcessFailures(processFailures.current, res);
       if (res.ok) setProcessNote(null);

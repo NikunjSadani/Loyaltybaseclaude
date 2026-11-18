@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -6,11 +6,20 @@ import {
   pageOfUsageReport,
   resolveUsageParams,
   usageAggregateSql,
+  usageQueryError,
   USAGE_DURATION_NOTE,
+  USAGE_NOT_MIGRATED_MESSAGE,
+  USAGE_QUERY_TIMEOUT_MS,
+  USAGE_TIMEOUT_MESSAGE,
   type UsageParams,
 } from './usage-report';
 import { ReportsService } from '../reports.service';
-import { USAGE_REPORT_HEADERS, USAGE_REPORT_KIND, USAGE_REPORT_NONE_MESSAGE } from '../../exports/kinds/batch2/usage-report.kind';
+import {
+  USAGE_ABOUT_SHEET,
+  USAGE_REPORT_HEADERS,
+  USAGE_REPORT_KIND,
+  USAGE_REPORT_NONE_MESSAGE,
+} from '../../exports/kinds/batch2/usage-report.kind';
 import { startPgliteTestDb, type PgliteTestDb } from '../../common/testing/pglite-testkit-spec';
 
 // 2026-11-20 12:00 IST
@@ -66,7 +75,9 @@ function fixtures() {
     { id: 's1', clientId: 'bajaj', name: 'Sunil SO', phone: '919876500004', role: 'SALES_SO', status: 'ACTIVE', salesUser: { region: null, zone: null } },
     { id: 's2', clientId: 'bajaj', name: 'Zara ASM', phone: '919876500005', role: 'SALES_ASM', status: 'ACTIVE', salesUser: { region: 'West', zone: null } },
     { id: 'a1', clientId: 'bajaj', name: 'Client Admin', phone: '919876500006', role: 'CLIENT_ADMIN', status: 'ACTIVE', salesUser: null },
-    { id: 'idle', clientId: 'bajaj', name: 'Idle Retail', phone: '919876500007', role: 'SSS', status: 'INACTIVE', salesUser: null },
+    { id: 'idle', clientId: 'bajaj', name: 'Idle Retail', phone: '919876500007', role: 'SSS', status: 'ACTIVE', salesUser: null },
+    // a deactivated account with no activity → not in the population, reported separately
+    { id: 'off', clientId: 'bajaj', name: 'Off Retail', phone: '919876500008', role: 'SSS', status: 'INACTIVE', salesUser: null },
     // other tenant — must NEVER appear in a bajaj report
     { id: 'd1', clientId: 'deoleo', name: 'Deoleo Retail', phone: '919800000001', role: 'SSS', status: 'ACTIVE', salesUser: null },
   ];
@@ -100,8 +111,10 @@ function fixtures() {
 }
 
 function fakePrisma(fx = fixtures()) {
+  // eslint-disable-next-line prefer-const
+  let prismaRef: any;
   const usersOf = (clientId: string) => new Set(fx.users.filter((u) => u.clientId === clientId).map((u) => u.id));
-  return {
+  const prisma = {
     fx,
     user: {
       findMany: jest.fn(async ({ where }: any) => fx.users.filter((u) => u.clientId === where.clientId)),
@@ -114,6 +127,8 @@ function fakePrisma(fx = fixtures()) {
         fx.assignments.filter((a) => a.salesUser.clientId === where.salesUser.clientId),
       ),
     },
+    $executeRawUnsafe: jest.fn(async () => 0),
+    $transaction: jest.fn(async (fn: any, _opts?: any) => fn(prismaRef)),
     $queryRaw: jest.fn(async (sql: any) => {
       if (String(sql.text).includes('GROUP BY')) {
         const ids = usersOf(sql.values[0]);
@@ -123,6 +138,8 @@ function fakePrisma(fx = fixtures()) {
     }),
     auditLog: { create: jest.fn().mockResolvedValue({}) },
   };
+  prismaRef = prisma;
+  return prisma;
 }
 
 // ─── Params ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -189,10 +206,12 @@ describe('buildUsageReport', () => {
     expect(r.totals).toEqual({
       usersInScope: 7,
       usersActive: 4, // r1, r2, s1, a1
-      usersInactive: 3, // p1, s2, idle
+      usersInactive: 3, // p1, s2, idle (enabled accounts with no activity)
+      disabledAccountsExcluded: 1, // 'off' — deactivated, no activity
       avgDaysActive: Math.round(((5 + 2 + 9 + 3) / 4) * 10) / 10, // 4.8
       totalMinutes: 72,
-      avgMinutesPerActiveUser: Math.round(((3_000 + 120 + 1_200) / 60 / 4) * 10) / 10, // 18
+      usersTracked: 3, // a1 has only pre-ship days → excluded from the minutes average
+      avgMinutesPerTrackedUser: 24, // 72 min ÷ 3 tracked users (not ÷ 4)
       appUsers: 2, // r1, s1
       browserUsers: 2, // r2, s1
       phoneUsers: 3, // r1, r2, s1
@@ -212,6 +231,47 @@ describe('buildUsageReport', () => {
     const idle = all.rows.find((x) => x.userId === 'idle')!;
     expect(idle).toMatchObject({ daysActive: 0, visits: 0, minutes: 0, avgMinutesPerDay: null, device: '', lastSeenAt: null });
     expect(all.totals).toEqual(active.totals); // the toggle changes the list, never the totals
+  });
+
+  it('a deactivated / suspended account counts only if it was active in the range', async () => {
+    const fx = fixtures();
+    fx.activity.push(agg('off', { activeSeconds: 60 }));
+    const r = await buildUsageReport(fakePrisma(fx) as any, 'bajaj', params({ includeInactive: true }), NOW);
+    expect(r.rows.map((x) => x.userId)).toContain('off');
+    expect(r.totals).toMatchObject({ usersActive: 5, usersInScope: 8, disabledAccountsExcluded: 0 });
+    const r2 = await buildUsageReport(fakePrisma() as any, 'bajaj', params({ includeInactive: true }), NOW);
+    expect(r2.rows.map((x) => x.userId)).not.toContain('off');
+  });
+
+  it('runs the aggregate in a transaction with a statement timeout', async () => {
+    const prisma = fakePrisma();
+    await buildUsageReport(prisma as any, 'bajaj', params(), NOW);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toMatchObject({ timeout: USAGE_QUERY_TIMEOUT_MS + 5_000 });
+    expect(prisma.$executeRawUnsafe).toHaveBeenCalledWith(`SET LOCAL statement_timeout = ${USAGE_QUERY_TIMEOUT_MS}`);
+  });
+
+  it('migration not applied (42703) → a clear 503, not a bare 500', async () => {
+    const prisma = fakePrisma();
+    prisma.$transaction.mockRejectedValueOnce(
+      Object.assign(new Error('Raw query failed. Code: `42703`. Message: `column a.visits does not exist`'), { code: 'P2010', meta: { code: '42703' } }),
+    );
+    await expect(buildUsageReport(prisma as any, 'bajaj', params(), NOW)).rejects.toThrow(
+      new ServiceUnavailableException(USAGE_NOT_MIGRATED_MESSAGE),
+    );
+  });
+
+  it('statement timeout (57014) → a clear 503 asking for a narrower range', async () => {
+    const prisma = fakePrisma();
+    prisma.$transaction.mockRejectedValueOnce(new Error('canceling statement due to statement timeout (57014)'));
+    await expect(buildUsageReport(prisma as any, 'bajaj', params(), NOW)).rejects.toThrow(
+      new ServiceUnavailableException(USAGE_TIMEOUT_MESSAGE),
+    );
+  });
+
+  it('any other DB error is passed through unchanged', () => {
+    const e = new Error('connection reset');
+    expect(usageQueryError(e)).toBe(e);
   });
 
   it('row maths: minutes floor, avg per TRACKED day (legacy days excluded), device label, ISO times', async () => {
@@ -400,10 +460,16 @@ describe("export kind 'usage-report'", () => {
     });
     const ctx = { prisma, user, clientId: 'bajaj', now: NOW, moduleRef: {} } as any;
     const res = await USAGE_REPORT_KIND.run(ctx, params({ includeInactive: true, pageSize: 2 }), w.out);
-    expect(res.rowCount).toBe(7);
-    expect(w.rows).toHaveLength(7);
-    expect(order).toEqual(['audit', 'sheet']);
+    expect(res.rowCount).toBe(7); // data rows only (the About sheet is not counted)
+    expect(w.rows.length).toBeGreaterThan(7);
+    expect(order).toEqual(['audit', 'sheet', 'sheet']);
     expect(w.sheets[0].headers).toEqual([...USAGE_REPORT_HEADERS]);
+    // M2: the notes sheet carries the duration rule + tracking start date
+    expect(w.sheets[1].name).toBe(USAGE_ABOUT_SHEET);
+    const about = w.rows.slice(7).map((r) => r.join(' | ')).join(' // ');
+    expect(about).toMatch(/first and last action in each visit/);
+    expect(about).toMatch(/Tracking started on \| 2026-11-18/);
+    expect(about).toMatch(/not counted/);
     const audit = prisma.auditLog.create.mock.calls[0][0].data;
     expect(audit).toMatchObject({ action: 'EXPORT', entityType: 'USAGE_REPORT', entityId: 'bajaj', actorId: 'admin-1' });
     expect(audit.metadata).toMatchObject({ rowCount: 7, filters: { includeInactive: true } });
@@ -411,7 +477,8 @@ describe("export kind 'usage-report'", () => {
     expect(first[0]).toBe('Asha Retail');
     expect(first[1]).toBe('9876500001');
     expect(first[8]).toBe(50); // minutes
-    expect(w.rows.map((r) => r[0])).not.toContain('Deoleo Retail');
+    expect(w.rows.slice(0, 7).map((r) => r[0])).not.toContain('Deoleo Retail');
+    expect(w.rows.slice(0, 7).map((r) => r[0])).not.toContain('Off Retail');
   });
 
   it('0 matching users → 404 with the plain message, no audit row, no sheet', async () => {

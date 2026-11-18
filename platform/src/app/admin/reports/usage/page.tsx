@@ -162,7 +162,8 @@ export default function UsageReportPage() {
         <div className="space-y-1">
           <p>
             Duration counts the time between a user&apos;s first and last action in each visit (a new visit starts
-            after 30 minutes idle), so it is a minimum — read it as &quot;at least&quot;.{' '}
+            after 30 minutes idle), so it is a minimum — read it as &quot;at least&quot;. Automatic refreshes
+            (notification bell, download badge, status polling) are not counted — only real actions.{' '}
             {data?.trackingStartedOn
               ? <>Tracking started on <strong>{fmtIstDay(data.trackingStartedOn)}</strong>; earlier days count as active days but show no duration or medium.</>
               : <>Duration and medium tracking has not recorded any activity for this programme yet; earlier days count as active days only.</>}
@@ -226,7 +227,7 @@ export default function UsageReportPage() {
           <label className="flex items-center gap-2 col-span-2 pb-1.5">
             <input type="checkbox" checked={filters.includeInactive}
               onChange={(e) => update({ includeInactive: e.target.checked })} />
-            <span className="text-gray-700">Show inactive users (no activity in this range)</span>
+            <span className="text-gray-700">Show users with no activity in this range</span>
           </label>
         </CardContent>
       </Card>
@@ -237,14 +238,19 @@ export default function UsageReportPage() {
 
       {/* Totals */}
       {t && !problem && (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3" data-testid="usage-totals">
+        <div
+          className={`grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 transition-opacity ${loading ? 'opacity-40' : ''}`}
+          data-testid="usage-totals"
+          aria-busy={loading}
+          title={loading ? 'Updating for the new filters…' : undefined}
+        >
           {[
-            { label: 'Users active', value: `${fmtInt(t.usersActive)} of ${fmtInt(t.usersInScope)}`, sub: `${fmtInt(t.usersInactive)} did not use it` },
+            { label: 'Users active', value: `${fmtInt(t.usersActive)} of ${fmtInt(t.usersInScope)}`, sub: `${fmtInt(t.usersInactive)} did not use it` + (t.disabledAccountsExcluded ? ` · ${fmtInt(t.disabledAccountsExcluded)} deactivated/suspended not counted` : '') },
             { label: 'Avg days active', value: fmtNum(t.avgDaysActive), sub: `per active user · ${data!.range.days}-day range` },
-            { label: 'Total minutes (at least)', value: fmtInt(t.totalMinutes), sub: `avg ${fmtNum(t.avgMinutesPerActiveUser)} per active user` },
+            { label: 'Total minutes (at least)', value: fmtInt(t.totalMinutes), sub: `avg ${fmtNum(t.avgMinutesPerTrackedUser)} per user with tracked days (${fmtInt(t.usersTracked)})` },
             { label: 'Installed app users', value: fmtInt(t.appUsers), sub: `${fmtInt(t.browserUsers)} used a browser` },
             { label: 'Phone users', value: fmtInt(t.phoneUsers), sub: `${fmtInt(t.computerUsers)} used a computer` },
-            { label: 'Rows listed', value: fmtInt(data!.totalRows), sub: filters.includeInactive ? 'incl. inactive users' : 'active users only' },
+            { label: 'Rows listed', value: fmtInt(data!.totalRows), sub: filters.includeInactive ? 'incl. users with no activity' : 'users with activity only' },
           ].map((c) => (
             <Card key={c.label}>
               <CardContent className="p-3">
@@ -290,7 +296,7 @@ export default function UsageReportPage() {
             <CardContent className="py-12 text-center text-sm text-gray-500">
               {filters.includeInactive
                 ? 'No users match these filters.'
-                : 'No one used the app in this range with these filters. Tick "Show inactive users" to see who did not.'}
+                : 'No one used the app in this range with these filters. Tick "Show users with no activity in this range" to see who did not.'}
             </CardContent>
           </Card>
         ) : (
@@ -304,6 +310,9 @@ export default function UsageReportPage() {
             <CardContent className="p-0">
               <div className="overflow-x-auto">
                 <table className="text-xs border-collapse w-full">
+                  <caption className="sr-only">
+                    Usage per user, {data.range.from} to {data.range.to}. Minutes are a minimum.
+                  </caption>
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-300 text-gray-700 text-left">
                       {['User', 'Role', 'Mobile', 'Programme', 'Region'].map((h) => (

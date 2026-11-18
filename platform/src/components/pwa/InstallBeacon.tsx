@@ -23,7 +23,7 @@
 // -----------------------------------------------------------------------------
 import { useEffect } from 'react';
 import { authHeader } from '@/lib/api-client';
-import { isStandaloneDisplay } from '@/lib/client-medium';
+import { BACKGROUND_HEADER, isStandaloneDisplay } from '@/lib/client-medium';
 
 const BEACON_SENT_KEY = 'pwa-install-beacon-sent';
 
@@ -62,7 +62,8 @@ export default function InstallBeacon({ tenantSlug }: { tenantSlug?: string }) {
         const ua = navigator.userAgent ?? '';
         void fetch('/api/push/installed', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeader() },
+          // Automatic telemetry → background (X-Background: 1): never counted as activity by the Usage Report.
+          headers: { 'Content-Type': 'application/json', ...authHeader(), [BACKGROUND_HEADER]: '1' },
           body: JSON.stringify({
             platform: detectPlatform(ua),
             userAgent: ua.slice(0, 512),

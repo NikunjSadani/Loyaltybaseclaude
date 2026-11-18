@@ -53,6 +53,23 @@ export function deviceFromUserAgent(raw: unknown): DeviceKind {
 
 type HeaderBag = Record<string, string | string[] | undefined>;
 
+/** Marks an AUTOMATIC request (poll / refresh timer / beacon) sent by the platform — see platform lib/client-medium.ts. */
+export const BACKGROUND_HEADER = 'x-background';
+
+/**
+ * True ONLY for `X-Background: 1` exactly (strict: '1' after trimming; 'true', '0', arrays, junk → false). A
+ * background request is NOT activity (owner rule: only real actions count) — JwtStrategy skips markActive entirely.
+ * Misuse can only HIDE the caller's own activity, never inflate anyone's. Never throws.
+ */
+export function isBackgroundRequest(req: unknown): boolean {
+  try {
+    const v = (req as { headers?: HeaderBag } | null | undefined)?.headers?.[BACKGROUND_HEADER];
+    return typeof v === 'string' && v.trim() === '1';
+  } catch {
+    return false;
+  }
+}
+
 /** Medium + device from an Express-style request. Never throws (a missing/odd request → unknown/unknown). */
 export function activityContextFromRequest(req: unknown): ActivityContext {
   try {

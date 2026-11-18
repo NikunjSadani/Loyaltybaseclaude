@@ -74,8 +74,9 @@ export default function PushSubscriptionManager({ tenantSlug }: { tenantSlug?: s
     const permission = Notification.permission;
 
     if (permission === 'granted') {
-      // Already granted: re-sync the subscription (idempotent). No UI.
-      void subscribeToPush();
+      // Already granted: re-sync the subscription (idempotent). No UI. Automatic → background
+      // (the Usage Report does not count it as activity).
+      void subscribeToPush({ background: true });
       return;
     }
 
@@ -104,7 +105,7 @@ export default function PushSubscriptionManager({ tenantSlug }: { tenantSlug?: s
         if (result === 'granted') {
           // subscribe failure must NOT surface the "Enable" banner (permission is already
           // granted) — PwaAppSettings offers a manual retry if the sync didn't land.
-          try { await subscribeToPush(); } catch { /* idempotent; retried elsewhere */ }
+          try { await subscribeToPush({ background: true }); } catch { /* idempotent; retried elsewhere */ }
           return;
         }
         if (result === 'denied') return;

@@ -22,7 +22,7 @@
  *   • admins / Gifsy staff / vendors: none.
  * Filtering by programme or region therefore keeps only users who have one.
  */
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
 import { ActivityTrackingService } from '../../activity/activity-tracking.service';
@@ -83,12 +83,20 @@ export interface UsageRow {
 }
 
 export interface UsageTotals {
+  /** Enabled accounts matching the filters + deactivated/suspended accounts that WERE active in the range. */
   usersInScope: number;
+  /** Users with ≥ 1 active day in the range. */
   usersActive: number;
+  /** Enabled accounts with NO activity in the range (who did not use it). */
   usersInactive: number;
+  /** Deactivated / suspended accounts with no activity in the range — NOT counted anywhere above. */
+  disabledAccountsExcluded: number;
   avgDaysActive: number | null;
   totalMinutes: number;
-  avgMinutesPerActiveUser: number | null;
+  /** Users with ≥ 1 TRACKED day (duration/medium recorded — i.e. after the feature shipped). */
+  usersTracked: number;
+  /** totalMinutes ÷ usersTracked (pre-ship-only users would otherwise drag the average down). */
+  avgMinutesPerTrackedUser: number | null;
   appUsers: number;
   browserUsers: number;
   phoneUsers: number;
@@ -242,6 +250,49 @@ function compareRows(sort: UsageSort): (a: UsageRow, b: UsageRow) => number {
   }
 }
 
+/** Max time the per-user aggregate may run (SET LOCAL statement_timeout inside its own transaction). */
+export const USAGE_QUERY_TIMEOUT_MS = 20_000;
+
+export const USAGE_NOT_MIGRATED_MESSAGE =
+  'The usage report is not available yet: its database update has not been applied on this server. Please contact Gifsy.';
+export const USAGE_TIMEOUT_MESSAGE =
+  'The usage report took too long to build. Please choose a shorter date range or narrower filters and try again.';
+
+/**
+ * Turn the two failures an admin could actually hit into clear messages instead of a bare 500:
+ *  • the migration has not run (Postgres 42703 "column … does not exist" / 42P01) → 503 with a plain message;
+ *  • the statement timeout fired (57014) → 503 asking for a narrower range.
+ */
+export function usageQueryError(e: unknown): Error {
+  const msg = String((e as { message?: unknown })?.message ?? e ?? '');
+  const code = String((e as { code?: unknown; meta?: { code?: unknown } })?.meta?.code ?? (e as { code?: unknown })?.code ?? '');
+  if (/42703|42P01/.test(code) || /42703|42P01|column .* does not exist|relation .* does not exist/i.test(msg)) {
+    return new ServiceUnavailableException(USAGE_NOT_MIGRATED_MESSAGE);
+  }
+  if (/57014/.test(code) || /57014|statement timeout|canceling statement due to statement timeout/i.test(msg)) {
+    return new ServiceUnavailableException(USAGE_TIMEOUT_MESSAGE);
+  }
+  return e instanceof Error ? e : new Error(msg);
+}
+
+async function guardUsageQuery<T>(q: Promise<T>): Promise<T> {
+  try {
+    return await q;
+  } catch (e) {
+    throw usageQueryError(e);
+  }
+}
+
+/** The aggregate in its own short transaction with a statement timeout (a huge tenant can never hang a request). */
+async function runAggregate(prisma: PrismaService, clientId: string, p: UsageParams): Promise<AggRow[]> {
+  return guardUsageQuery(
+    prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${USAGE_QUERY_TIMEOUT_MS}`);
+      return tx.$queryRaw<AggRow[]>(usageAggregateSql(clientId, p.from, p.to));
+    }, { maxWait: 5_000, timeout: USAGE_QUERY_TIMEOUT_MS + 5_000 }), // Prisma's 5 s interactive default is too short
+  );
+}
+
 /** Build the whole report (all matching rows, sorted). Reads: users, outlets, assignments, one grouped aggregate. */
 export async function buildUsageReport(
   prisma: PrismaService,
@@ -277,12 +328,14 @@ export async function buildUsageReport(
         },
       },
     }),
-    prisma.$queryRaw<AggRow[]>(usageAggregateSql(clientId, p.from, p.to)),
-    prisma.$queryRaw<Array<{ day: string }>>(Prisma.sql`
+    runAggregate(prisma, clientId, p),
+    guardUsageQuery(
+      prisma.$queryRaw<Array<{ day: string }>>(Prisma.sql`
       SELECT to_char(MIN(x."activityDate"), 'YYYY-MM-DD') AS "day"
         FROM (SELECT "activityDate" FROM "user_activity_day"
                WHERE "clientId" = ${clientId} AND "visits" > 0
                ORDER BY "activityDate" ASC LIMIT 1) x`),
+    ),
   ]);
 
   // ── programme / region per user + the dropdown catalogues (all tenant outlets) ──
@@ -359,22 +412,30 @@ export async function buildUsageReport(
     });
   }
 
+  // Deactivated / suspended accounts count only if they actually used the app in the range (they did use it);
+  // otherwise they are left out of the population and reported as one separate number.
+  const DISABLED = new Set(['INACTIVE', 'SUSPENDED']);
   const active = inScope.filter((r) => r.daysActive > 0);
+  const idleEnabled = inScope.filter((r) => r.daysActive === 0 && !DISABLED.has(r.status));
+  const disabledIdle = inScope.length - active.length - idleEnabled.length;
+  const tracked = active.filter((r) => r.trackedDays > 0);
   const totalSeconds = active.reduce((s, r) => s + r.activeSeconds, 0);
   const totals: UsageTotals = {
-    usersInScope: inScope.length,
+    usersInScope: active.length + idleEnabled.length,
     usersActive: active.length,
-    usersInactive: inScope.length - active.length,
+    usersInactive: idleEnabled.length,
+    disabledAccountsExcluded: disabledIdle,
     avgDaysActive: active.length ? Math.round((active.reduce((s, r) => s + r.daysActive, 0) / active.length) * 10) / 10 : null,
     totalMinutes: Math.floor(totalSeconds / 60),
-    avgMinutesPerActiveUser: active.length ? Math.round((totalSeconds / 60 / active.length) * 10) / 10 : null,
+    usersTracked: tracked.length,
+    avgMinutesPerTrackedUser: tracked.length ? Math.round((totalSeconds / 60 / tracked.length) * 10) / 10 : null,
     appUsers: active.filter((r) => r.appDays > 0).length,
     browserUsers: active.filter((r) => r.browserDays > 0).length,
     phoneUsers: active.filter((r) => r.phoneDays > 0).length,
     computerUsers: active.filter((r) => r.computerDays > 0).length,
   };
 
-  const rows = (p.includeInactive ? inScope : active).sort(compareRows(p.sort));
+  const rows = (p.includeInactive ? [...active, ...idleEnabled] : active).sort(compareRows(p.sort));
   const range = {
     from: p.from,
     to: p.to,

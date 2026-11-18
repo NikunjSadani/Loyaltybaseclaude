@@ -67,9 +67,12 @@ function useImportDetail(importId: string | undefined) {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
+    // The first load is the person opening/refreshing the page; every timer-driven re-load after it is an
+    // automatic poll → sent as a background request (the Usage Report does not count it as activity).
+    let polls = 0;
     const load = async () => {
       const seq = ++seqRef.current;
-      const r = await salesImportApi.get(importId);
+      const r = await (polls++ === 0 ? salesImportApi.get(importId) : salesImportApi.get(importId, { background: true }));
       if (cancelled || seq !== seqRef.current) return; // stale response
       if (!r.success) {
         const final = finalErrorText(r.status);

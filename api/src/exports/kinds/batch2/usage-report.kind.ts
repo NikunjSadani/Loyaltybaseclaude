@@ -6,6 +6,8 @@
  * Scope: the caller's JWT clientId only (see usage-report.ts). One row per user — a tenant's users (≈ 9k for Bajaj)
  * from one grouped SQL aggregate → light → always streams instantly.
  *
+ * A second sheet, "About", carries the duration note and the tracking start date (same wording as the page).
+ *
  * Personal data (names + mobile numbers) leaves the system → exactly like the installed-users export:
  *   • 0 rows → 404 "0 users matched these filters." (no file, no audit row);
  *   • otherwise ONE AuditLog row (action EXPORT, entityType USAGE_REPORT: who, tenant, row count, filters) is written
@@ -21,7 +23,10 @@ import {
   buildUsageReport,
   requireUsageTenant,
   resolveUsageParams,
+  USAGE_DURATION_NOTE,
+  USAGE_REGION_NOTE,
   type UsageParams,
+  type UsageReport,
   type UsageRow,
 } from '../../../reports/usage/usage-report';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
@@ -46,6 +51,35 @@ export const USAGE_REPORT_HEADERS = [
 ] as const;
 
 export const USAGE_REPORT_NONE_MESSAGE = '0 users matched these filters.';
+export const USAGE_ABOUT_SHEET = 'About';
+
+/** The notes sheet: duration rule, tracking start date, programme/region rule, range, filters, totals basis. */
+export function usageAboutRows(report: UsageReport, p: UsageParams, now: Date): XlsxCell[][] {
+  return [
+    ['Date range (IST)', `${report.range.from} to ${report.range.to} (${report.range.days} days)`],
+    ['Duration', `${USAGE_DURATION_NOTE} Shown as "Minutes (at least)"; visit boundaries are accurate to about ±1 minute.`],
+    [
+      'Tracking started on',
+      report.trackingStartedOn
+        ? `${report.trackingStartedOn} — earlier days count as active days but have no duration or medium.`
+        : 'No tracked activity yet — all days count as active days only (no duration or medium).',
+    ],
+    ['Programme / region', USAGE_REGION_NOTE],
+    ['Avg minutes per tracked day', 'Minutes ÷ days with tracking (days before tracking started are left out).'],
+    ['Phone / computer', 'From the browser identity. Tablets count as phones; an iPad asking for the desktop site counts as a computer.'],
+    ['Background activity', 'Automatic refreshes (notification bell, download badge, status polling) are not counted — only real actions.'],
+    [
+      'Filters',
+      [
+        p.role ? `role ${p.role}` : 'all roles',
+        p.program ? `programme ${p.program}` : 'all programmes',
+        p.region ? `region ${p.region}` : 'all regions',
+        p.includeInactive ? 'includes users with no activity in this range' : 'users with activity only',
+      ].join(' · '),
+    ],
+    ['Generated (IST)', istDateTimeCell(now)],
+  ];
+}
 
 const STATUS_LABEL: Record<string, string> = {
   ACTIVE: 'Active',
@@ -111,6 +145,10 @@ async function run(ctx: ExportRunContext, p: UsageParams, out: XlsxStreamWriter)
     widths: [26, 14, 16, 12, 22, 22, 11, 9, 12, 14, 10, 12, 14, 18, 18],
   });
   for (const r of report.rows) await sheet.addRow(usageReportCells(r));
+
+  // 4. "About this report": how to read the numbers (same wording as the page). Not counted as data rows.
+  const about = await out.addSheet(USAGE_ABOUT_SHEET, ['About this report', ''], { widths: [28, 110] });
+  for (const line of usageAboutRows(report, p, ctx.now)) await about.addRow(line);
   return { rowCount: report.rows.length };
 }
 

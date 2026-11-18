@@ -1,4 +1,4 @@
-import { activityContextFromRequest, deviceFromUserAgent, parseClientMedium } from './client-medium';
+import { activityContextFromRequest, deviceFromUserAgent, isBackgroundRequest, parseClientMedium } from './client-medium';
 
 const UA = {
   androidChrome:
@@ -79,5 +79,21 @@ describe('activityContextFromRequest', () => {
       },
     };
     expect(activityContextFromRequest(hostile)).toEqual({ medium: 'unknown', device: 'unknown' });
+  });
+});
+
+describe('isBackgroundRequest (strict X-Background: 1)', () => {
+  it('only exactly "1" (trimmed) is background', () => {
+    expect(isBackgroundRequest({ headers: { 'x-background': '1' } })).toBe(true);
+    expect(isBackgroundRequest({ headers: { 'x-background': ' 1 ' } })).toBe(true);
+  });
+  it.each([[undefined], ['true'], ['0'], ['yes'], ['11'], [['1', '1']], ['']])('%p → not background', (v) => {
+    expect(isBackgroundRequest({ headers: { 'x-background': v } })).toBe(false);
+  });
+  it('missing / odd request → false, never throws', () => {
+    expect(isBackgroundRequest(undefined)).toBe(false);
+    expect(isBackgroundRequest({})).toBe(false);
+    const hostile = { get headers(): never { throw new Error('x'); } };
+    expect(isBackgroundRequest(hostile)).toBe(false);
   });
 });

@@ -20,6 +20,20 @@ export type ClientMedium = 'app' | 'browser';
 export const CLIENT_MEDIUM_HEADER = 'X-Client-Medium';
 
 /**
+ * Marks an AUTOMATIC request — a poll, refresh timer or beacon, not something a person did. The API skips activity
+ * tracking entirely for it (no active day, no visit, no duration, no medium): owner rule, only REAL actions count.
+ * Value is exactly '1'. Use `backgroundInit()` for raw fetch, or `api.get(url, { background: true })`.
+ */
+export const BACKGROUND_HEADER = 'X-Background';
+
+/** The same fetch init, marked as an automatic/background request. */
+export function backgroundInit(init: RequestInit = {}): RequestInit {
+  const headers = new Headers(init.headers);
+  headers.set(BACKGROUND_HEADER, '1');
+  return { ...init, headers };
+}
+
+/**
  * True when the app is running as an installed PWA: the standard display-mode media query OR the legacy iOS
  * Safari `navigator.standalone` flag. (Shared with InstallBeacon — one definition of "installed app".)
  */

@@ -11,6 +11,8 @@
      if (result.success) { ... result.data ... }
 ─────────────────────────────────────────────────────────────────────────────── */
 
+import { BACKGROUND_HEADER, CLIENT_MEDIUM_HEADER, detectClientMedium } from '@/lib/client-medium';
+
 export type ApiResponse<T> =
   | { success: true; data: T }
   | { success: false; error: string; status?: number };
@@ -25,7 +27,26 @@ export function authHeader(): Record<string, string> {
   return {};
 }
 
-async function request<T>(url: string, init: RequestInit = {}): Promise<ApiResponse<T>> {
+/** Per-call options. `background: true` marks an AUTOMATIC request (a poll / beacon, not a person's action) so
+ *  the Usage Report does not count it as activity (X-Background: 1 — see lib/client-medium.ts). */
+export interface ApiRequestOptions {
+  background?: boolean;
+}
+
+/** Usage Report headers the shared client always sends explicitly (so they are present even if some code holds a
+ *  fetch reference captured before the global tagger was installed). */
+function usageHeaders(opts: ApiRequestOptions): Record<string, string> {
+  try {
+    return {
+      [CLIENT_MEDIUM_HEADER]: detectClientMedium(),
+      ...(opts.background ? { [BACKGROUND_HEADER]: '1' } : {}),
+    };
+  } catch {
+    return opts.background ? { [BACKGROUND_HEADER]: '1' } : {};
+  }
+}
+
+async function request<T>(url: string, init: RequestInit = {}, opts: ApiRequestOptions = {}): Promise<ApiResponse<T>> {
   const method = init.method ?? 'GET';
   const hasBody = ['POST', 'PUT', 'PATCH'].includes(method);
   try {
@@ -34,6 +55,7 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<ApiRespo
       headers: {
         ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
         ...authHeader(),
+        ...usageHeaders(opts),
         ...(init.headers as Record<string, string> | undefined ?? {}),
       },
     });
@@ -67,8 +89,8 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<ApiRespo
 }
 
 export const api = {
-  get:   <T>(url: string)                => request<T>(url),
-  post:  <T>(url: string, body: unknown) => request<T>(url, { method: 'POST',   body: JSON.stringify(body) }),
+  get:   <T>(url: string, opts?: ApiRequestOptions)                => request<T>(url, {}, opts),
+  post:  <T>(url: string, body: unknown, opts?: ApiRequestOptions) => request<T>(url, { method: 'POST',   body: JSON.stringify(body) }, opts),
   put:   <T>(url: string, body: unknown) => request<T>(url, { method: 'PUT',    body: JSON.stringify(body) }),
   patch: <T>(url: string, body: unknown) => request<T>(url, { method: 'PATCH',  body: JSON.stringify(body) }),
   del:   <T>(url: string)                => request<T>(url, { method: 'DELETE' }),

@@ -70,7 +70,8 @@ export const salesImportApi = {
   // Imports
   list: (cursor?: string | null, limit = 20) =>
     api.get<SalesImportList>(`${BASE}?limit=${limit}${cursor ? `&cursor=${id(cursor)}` : ''}`),
-  get: (importId: string) => api.get<SalesImportDetail>(`${BASE}/${id(importId)}`),
+  /** `background` = an automatic status poll (not a click) → not counted as activity by the Usage Report. */
+  get: (importId: string, opts?: { background?: boolean }) => api.get<SalesImportDetail>(`${BASE}/${id(importId)}`, opts),
   reprocess: (importId: string) => api.post<SalesImportSummary>(`${BASE}/${id(importId)}/reprocess`, {}),
   /** Applied import whose mapping changed (canReprocessAsNew) → a NEW import from the same stored file (QUEUED). */
   reprocessAsNew: (importId: string) => api.post<SalesImportSummary>(`${BASE}/${id(importId)}/reprocess-as-new`, {}),

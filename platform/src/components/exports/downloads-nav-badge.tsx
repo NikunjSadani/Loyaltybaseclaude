@@ -30,7 +30,8 @@ export function useUnseenDownloadsCount(seenKey: string): number {
   }, [seenKey]);
 
   const load = useCallback(async () => {
-    const res = await fetchExportList(null);
+    // Every badge count is automatic (mount / page change / event / poll) → background: never counts as activity.
+    const res = await fetchExportList(null, { background: true });
     itemsRef.current = res;
     setHasActive(res.ok && res.data.items.some((i) => i.status === 'QUEUED' || i.status === 'RUNNING'));
     recount();

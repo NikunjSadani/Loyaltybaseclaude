@@ -9,6 +9,13 @@ const IST_OFFSET_MIN = 5 * 60 + 30;
 
 /** At most one DB write per user per this many ms, per instance (unless a NEW medium/device shows up). */
 export const ACTIVITY_WRITE_THROTTLE_MS = 60_000;
+/** After a failed write, this user's writes on this instance pause for this long (no retry storm on a sick DB). */
+export const ACTIVITY_FAILURE_BACKOFF_MS = 5 * 60_000;
+/** At most this many activity writes in flight per instance; beyond it writes are DROPPED (sampled warn). */
+export const ACTIVITY_MAX_IN_FLIGHT = 5;
+/** Warn logs (drops / failures) are sampled to at most one per this many ms per kind. */
+const WARN_SAMPLE_MS = 60_000;
+
 /** A gap of at least this many seconds between recorded actions starts a NEW visit (owner-approved: 30 min). */
 export const VISIT_GAP_SECONDS = 30 * 60;
 
@@ -97,6 +104,8 @@ interface ThrottleEntry {
   at: number;
   /** medium/device flags already sent for the user today (a new flag bypasses the throttle). */
   flags: number;
+  /** Set after a failed write: no write for this user before this ms timestamp (not even for a new flag). */
+  blockedUntil?: number;
 }
 
 /**
@@ -122,6 +131,12 @@ export class ActivityTrackingService {
   private dayKey = '';
   /** userId → last write sent (for `dayKey`). */
   private readonly sent = new Map<string, ThrottleEntry>();
+  /** Activity writes currently in flight on this instance (capped at ACTIVITY_MAX_IN_FLIGHT). */
+  private inFlight = 0;
+  private dropped = 0;
+  private failed = 0;
+  private lastDropWarn = 0;
+  private lastFailWarn = 0;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -156,22 +171,74 @@ export class ActivityTrackingService {
       const flags = contextFlags(ctx ?? UNKNOWN_ACTIVITY_CONTEXT);
       const nowMs = now.getTime();
       const prev = this.sent.get(userId);
-      if (prev && nowMs - prev.at < ACTIVITY_WRITE_THROTTLE_MS && (prev.flags | flags) === prev.flags) return;
+      // Backing off after a failed write for this user: drop (the next request after the backoff writes).
+      if (prev?.blockedUntil !== undefined && nowMs < prev.blockedUntil) return;
+      if (prev && prev.blockedUntil === undefined && nowMs - prev.at < ACTIVITY_WRITE_THROTTLE_MS && (prev.flags | flags) === prev.flags) {
+        return;
+      }
 
-      const entry: ThrottleEntry = { at: nowMs, flags: (prev?.flags ?? 0) | flags };
+      // Instance-wide cap: a slow / sick DB must never pile up activity writes. Dropped writes leave the
+      // throttle entry untouched, so the user's next request simply tries again.
+      if (this.inFlight >= ACTIVITY_MAX_IN_FLIGHT) {
+        this.dropped++;
+        if (nowMs - this.lastDropWarn >= WARN_SAMPLE_MS) {
+          this.lastDropWarn = nowMs;
+          this.logger.warn(`activity writes dropped: ${this.dropped} so far (${this.inFlight} in flight, cap ${ACTIVITY_MAX_IN_FLIGHT})`);
+        }
+        return;
+      }
+
+      const sentBefore = prev && prev.blockedUntil === undefined ? prev.flags : 0;
+      const entry: ThrottleEntry = { at: nowMs, flags: sentBefore | flags };
       this.sent.set(userId, entry);
 
-      void this.prisma
-        .$executeRaw(buildActivityUpsertSql({ id: randomUUID(), userId, clientId, day, now, flags }))
-        .catch((e: unknown) => {
-          // Forget this write so the user's next request retries (unless a newer write already replaced it).
-          if (this.sent.get(userId) === entry) this.sent.delete(userId);
-          this.logger.debug(`activity stamp failed for ${userId}: ${(e as Error)?.message ?? String(e)}`);
-        });
+      this.inFlight++;
+      let promise: Promise<unknown>;
+      try {
+        promise = this.prisma.$executeRaw(buildActivityUpsertSql({ id: randomUUID(), userId, clientId, day, now, flags }));
+      } catch (e) {
+        this.inFlight--;
+        this.onWriteFailed(userId, entry, sentBefore, e);
+        return;
+      }
+      void Promise.resolve(promise).then(
+        () => {
+          this.inFlight--;
+        },
+        (e: unknown) => {
+          this.inFlight--;
+          this.onWriteFailed(userId, entry, sentBefore, e);
+        },
+      );
     } catch (e) {
-      // A synchronous failure (e.g. the client threw before returning a promise): never reaches the request.
-      this.sent.delete(userId);
       this.logger.debug(`markActive error: ${(e as Error)?.message ?? String(e)}`);
     }
+  }
+
+  /**
+   * A failed write KEEPS the user's throttle entry and blocks their writes for ACTIVITY_FAILURE_BACKOFF_MS (no retry
+   * on the very next request — a sick DB must not get one write per request). The flags of the failed write are
+   * un-marked so the first write after the backoff sends them again. Sampled warn (e.g. the migration has not run).
+   */
+  private onWriteFailed(userId: string, entry: ThrottleEntry, sentBefore: number, e: unknown): void {
+    try {
+      if (this.sent.get(userId) === entry) {
+        entry.flags = sentBefore;
+        entry.blockedUntil = entry.at + ACTIVITY_FAILURE_BACKOFF_MS;
+      }
+      this.failed++;
+      const msg = (e as Error)?.message ?? String(e);
+      if (entry.at - this.lastFailWarn >= WARN_SAMPLE_MS || this.lastFailWarn === 0) {
+        this.lastFailWarn = entry.at;
+        this.logger.warn(`activity write failed (${this.failed} so far; backing off ${ACTIVITY_FAILURE_BACKOFF_MS / 60_000} min per user): ${msg}`);
+      }
+    } catch {
+      /* never throw from the failure path */
+    }
+  }
+
+  /** Ops/test visibility into the hot-path guards. */
+  stats(): { inFlight: number; dropped: number; failed: number; trackedUsers: number } {
+    return { inFlight: this.inFlight, dropped: this.dropped, failed: this.failed, trackedUsers: this.sent.size };
   }
 }
