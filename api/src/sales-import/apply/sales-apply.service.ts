@@ -85,15 +85,25 @@ export class TransientApplyError extends Error {
 }
 
 /**
+ * Prisma's interactive transaction is gone because the CONNECTION / engine went away ("Transaction not found …
+ * obtained before disconnecting") — a retry may succeed, so this is TRANSIENT (final review M1), checked BEFORE the
+ * timeout test (its text also says "closed").
+ */
+export function isTxLost(e: unknown): boolean {
+  return /Transaction not found|obtained before disconnecting|Transaction ID is invalid/i.test(String((e as { message?: string })?.message ?? ''));
+}
+
+/**
  * The month's transaction ran past its own timeout (APPLY_TX_TIMEOUT_MS = 300 s) and was rolled back: Prisma P2028
- * "Transaction already closed / expired". Retrying would only run as long again — so this is FINAL (re-review M1).
+ * "Transaction already closed: A commit / query cannot be executed on an expired transaction. The timeout for this
+ * transaction was … ms". Retrying would only run as long again — so this is FINAL (re-review M1). A lost transaction
+ * (isTxLost) and a busy pool ("Unable to start a transaction") are NOT timeouts.
  */
 export function isTxTimeout(e: unknown): boolean {
-  const err = e as { code?: string; message?: string };
-  const msg = String(err?.message ?? '');
-  if (/Unable to start a transaction/i.test(msg)) return false; // maxWait: the pool was busy — retryable
-  return /Transaction already closed|expired transaction|transaction.*(timed out|timeout)|A commit cannot be executed on an expired transaction/i.test(msg)
-    || (String(err?.code ?? '') === 'P2028' && /closed|expired|timeout/i.test(msg));
+  if (isTxLost(e)) return false;
+  const msg = String((e as { message?: string })?.message ?? '');
+  if (/Unable to start a transaction/i.test(msg)) return false;
+  return /Transaction already closed/i.test(msg) && /expired transaction|timeout for this transaction/i.test(msg);
 }
 
 /** "<Month> took longer than 5 minutes to write…" — the plain words for a month whose write ran out of time. */
@@ -107,6 +117,7 @@ export function txTimeoutMessage(month: string): string {
  * definite business refusal or a transaction that simply ran out of time (isTxTimeout, FINAL)?
  */
 export function isTransientDbError(e: unknown): boolean {
+  if (isTxLost(e)) return true;
   if (isTxTimeout(e)) return false;
   const err = e as { code?: string; meta?: { code?: string }; message?: string };
   const code = String(err?.code ?? '');

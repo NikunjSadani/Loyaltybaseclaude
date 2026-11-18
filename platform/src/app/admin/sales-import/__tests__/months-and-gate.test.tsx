@@ -707,15 +707,29 @@ describe('months — re-review fixes', () => {
     spinners.forEach((sv) => expect(sv.closest('[aria-hidden="true"]')).not.toBeNull());
   });
 
-  it('L6: a FINAL 403 on the first poll of a running job shows why and re-enables Recalculate (never "waiting" forever)', async () => {
-    apiMock.months.mockResolvedValue(ok([histRow({ activeJob: { ...active, kind: 'RECALC', importId: null } })]));
+  it('L6 + final review L5: a FINAL 403 while following says it may still be running; Recalculate stays held until the Months list shows no active job', async () => {
+    const running = histRow({ activeJob: { ...active, kind: 'RECALC', importId: null } });
+    apiMock.months
+      .mockResolvedValueOnce(ok([running]))   // page load
+      .mockResolvedValueOnce(ok([running]))   // re-read after the lost follow: still running
+      .mockResolvedValue(ok([histRow()]));    // later: finished
     apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
     apiMock.getApplyJob.mockResolvedValue({ success: false, error: 'Forbidden', status: 403 });
-    render(<MonthsPage />);
-    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
-    await screen.findByTestId('recalc-preview');
-    expect(await screen.findByTestId('recalc-job-stopped')).toHaveTextContent('You no longer have access to follow this apply');
-    expect(screen.queryByTestId('recalc-job')).not.toBeInTheDocument();
-    expect(screen.getByTestId('recalc-apply')).not.toBeDisabled();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const view = render(<MonthsPage />);
+    try {
+      fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+      await screen.findByTestId('recalc-preview');
+      const stopped = await screen.findByTestId('recalc-job-stopped');
+      expect(stopped).toHaveTextContent(/We couldn.t follow the recalculation — it may still be running; refresh before trying again\. \(You no longer have access/);
+      expect(screen.queryByTestId('recalc-job')).not.toBeInTheDocument(); // never "waiting" forever
+      await waitFor(() => expect(apiMock.months).toHaveBeenCalledTimes(2));
+      expect(screen.getByTestId('recalc-apply')).toBeDisabled(); // the list still shows it running
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); }); // the list polls while a job is active
+      await waitFor(() => expect(screen.getByTestId('recalc-apply')).not.toBeDisabled());
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
   });
 });

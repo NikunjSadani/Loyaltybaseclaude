@@ -1313,6 +1313,18 @@ describe('background-job hooks + prechecks', () => {
     expect(r.results[1]).toEqual(expect.objectContaining({ month: CUR, ok: true })); // the next month still runs
   });
 
+  it('final review M1: exact Prisma texts — a LOST transaction (connection drop / engine restart) is TRANSIENT, only an expired one is FINAL', async () => {
+    const { isTxTimeout, isTxLost, isTransientDbError, TransientApplyError } = await import('./sales-apply.service');
+    const lost = Object.assign(new Error("Transaction API error: Transaction not found. Transaction ID is invalid, refers to an old closed transaction Prisma doesn't have information about anymore, or was obtained before disconnecting."), { code: 'P2028' });
+    const expiredCommit = Object.assign(new Error('Transaction already closed: A commit cannot be executed on an expired transaction. The timeout for this transaction was 300000 ms, however 300012 ms passed since the start of the transaction. Consider increasing the interactive transaction timeout or doing less work in the transaction.'), { code: 'P2028' });
+    const expiredQuery = Object.assign(new Error('Transaction already closed: A query cannot be executed on an expired transaction. The timeout for this transaction was 300000 ms, however 301500 ms passed since the start of the transaction. Consider increasing the interactive transaction timeout or doing less work in the transaction.'), { code: 'P2028' });
+    expect([isTxLost(lost), isTxTimeout(lost), isTransientDbError(lost)]).toEqual([true, false, true]);
+    for (const e of [expiredCommit, expiredQuery]) expect([isTxLost(e), isTxTimeout(e), isTransientDbError(e)]).toEqual([false, true, false]);
+    const db = makeDb();
+    db.salesUploadBatch.create.mockRejectedValueOnce(lost);
+    await expect(services(db).apply.apply(user, 'imp1', body([PREV]), {})).rejects.toBeInstanceOf(TransientApplyError); // retried, not "too large"
+  });
+
   it('precheckRecalculate: 400 bad body, 404 no history, 409 stale history / definitions — no transaction', async () => {
     const none = makeDb();
     await expect(services(none).apply.precheckRecalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() })).rejects.toBeInstanceOf(NotFoundException);

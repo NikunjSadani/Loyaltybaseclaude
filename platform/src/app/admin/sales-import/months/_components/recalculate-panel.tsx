@@ -34,11 +34,13 @@ function legacyResult(data: unknown): ApplyMonthResult[] | null {
   return data && typeof data === 'object' && 'ok' in (data as object) ? [data as ApplyMonthResult] : null;
 }
 
-export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }: {
+export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, listVersion = 0 }: {
   month: string;
   onClose(): void;
   /** The month's queued / running Apply or Recalculate (SalesMonthRow.activeJob): followed until it ends. */
   activeJob?: SalesMonthActiveJob | null;
+  /** Bumped by the Months page on every successful list read (final review L5: "the list has confirmed"). */
+  listVersion?: number;
   /** After a successful recalculation (re-fetch the months). */
   onApplied(): void;
 }) {
@@ -113,7 +115,14 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
   // Re-review L6: a FINAL 401 / 403 / 404 while following ends the wait (the message says why) and re-enables
   // Recalculate — never "Waiting for it to finish" forever.
   const jobRunning = !followProblem?.final && ((!!job && !jobEnded(job)) || (!!activeJob && !job));
-  const busy = applying || checking || !!unknown || jobRunning;
+  // Final review L5: after a FINAL 401 / 403 / 404 the recalculation may still be running. Re-read the Months list and
+  // keep Recalculate held until a list read made AFTER the stop shows no active job for this month.
+  const [stoppedAtList, setStoppedAtList] = useState<number | null>(null);
+  useEffect(() => {
+    if (followProblem?.final && stoppedAtList === null) { setStoppedAtList(listVersion); onApplied(); }
+  }, [followProblem?.final, stoppedAtList, listVersion, onApplied]);
+  const awaitingList = stoppedAtList !== null && (listVersion === stoppedAtList || !!activeJob);
+  const busy = applying || checking || !!unknown || jobRunning || awaitingList;
   const queuedTooLong = !!job && job.status === 'QUEUED' && job.attempts === 0 && Date.now() - Date.parse(job.createdAt) > JOB_QUEUED_TOO_LONG_MS;
   const progress = job ? job.months.map((m) => monthProgressText(job, m.month, monthLabel(m.month))).join('. ') : '';
   const problem = followProblem;
@@ -202,7 +211,8 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
     await settle(out, unknown.requestId);
   }
 
-  const recalcWhy = unknown ? 'Recalculate is held until the page can confirm whether the last one was recorded.'
+  const recalcWhy = awaitingList ? 'Recalculate is held until the Months list shows the earlier recalculation has finished.'
+    : unknown ? 'Recalculate is held until the page can confirm whether the last one was recorded.'
     : jobRunning ? `${label} is being ${job?.kind === 'APPLY' ? 'applied' : 'recalculated'} — wait for it to finish.`
       : checking ? 'Checking what happened to the last recalculation.' : '';
   // B-M6: the result is announced too (the visible result card has no live role of its own).
@@ -255,7 +265,8 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
       </div>
       {problem?.final && (
         <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" data-testid="recalc-job-stopped">
-          {problem.text}
+          We couldn&apos;t follow the recalculation — it may still be running; refresh before trying again. ({problem.text})
+          {awaitingList && ' Recalculate stays unavailable until the Months list shows it has finished.'}
         </div>
       )}
       {jobRunning && (

@@ -1574,6 +1574,28 @@ from the step-1 backup if needed).
      (M2); polling reads select explicit columns, never `focusBasis` (M3); a lost claim inside the write is a stop, and
      a hand-back is one statement (L1) that is awaited after SIGTERM (L2); a whole-job refusal after a partial success
      names the months already applied and those not run (L3); Gifsy staff also need their per-tenant grant (L4).
+   - **Final review of `f616a390` fixed**: a LOST transaction (Prisma P2028 "Transaction not found … obtained before
+     disconnecting" — connection drop / engine restart) is retried, never reported as "file too large"; only an EXPIRED
+     transaction ("Transaction already closed: … expired transaction … timeout for this transaction") is final (M1). A
+     stop hand-back is awaited even when the run then finishes, and its failure is logged, never thrown (L1). Close /
+     Reopen check for an active job UNDER the month lock, in the transaction that changes the state (L4). After a final
+     401 / 403 / 404 while following, the Recalculate panel says the job may still be running and keeps Recalculate held
+     until a Months-list read made after that shows no active job (L5).
+   - **Worker DB connections (L2)**: the `gifsy-sales-import` job uses the SAME `DATABASE_URL` secret as the API
+     (`deploy.yml` / `deploy-staging.yml` set no extra query parameters; any `connection_limit` lives inside the secret,
+     which was NOT read for this note). Prisma's default pool is `num_cpus × 2 + 1` = **3** on the job's 1 CPU. A month
+     write holds ONE connection for up to 300 s, so the SIGTERM hand-back (started at once from the signal, before the
+     month is aborted) gets its own pooled connection. ⚠️ If the secret ever sets `connection_limit=1`, the hand-back
+     waits behind the month's transaction and the job is only recovered by the 10-minute stale-heartbeat reclaim — keep
+     the worker's pool at ≥ 2 (check before changing the secret).
+   - **RBAC parity (L3)**: the worker's `targets:upload` re-check reads `RBAC_ENFORCEMENT` from its own env, which the job
+     does not set — exactly like the API service today (neither workflow sets it). If it is ever turned on for the API,
+     set it on the `gifsy-sales-import` job too.
+   - **Import actions vs a running job (L4)**: Reprocess / Read again / Cancel / Delete check for an active job of the
+     import BEFORE taking the import's row lock. The race left open is covered loudly by the worker: each month write holds
+     the import row `FOR SHARE` (Reprocess / Cancel / Delete need `FOR UPDATE NOWAIT` → 409 while a month is writing), and
+     a job whose import was reprocessed / cancelled / deleted between months fails WHOLE with the server's reason ("This
+     file was reprocessed after the preview…" / "not READY"), shown on every month — never silently.
    - **Rollback runbook** (only if the release is rolled back to code without jobs): the old code ignores the new tables,
      but a QUEUED / RUNNING job would never run. Before deploying the old image, run on the target DB (with the usual
      `current_database()` guard, backup confirmed, SQL shown to the owner first):

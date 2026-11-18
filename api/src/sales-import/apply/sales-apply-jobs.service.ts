@@ -308,11 +308,17 @@ export class SalesApplyJobsService {
     // instead of waiting 10 min for the heartbeat to go stale. A month still writing cannot commit DONE any more (its
     // inTx is guarded by the cleared claim token), so it rolls back whole and is simply run again.
     let releasing: Promise<void> | null = null;
-    const off = stop.onStop?.(() => { releasing ??= this.release(job, token, { countAttempt: false }); });
+    /** A hand-back that never rejects (a failure is logged; the stale-heartbeat reclaim is the backstop). */
+    const releaseOnce = (o: { countAttempt: boolean; lastError?: string; month?: string }) =>
+      (releasing ??= this.release(job, token, o).catch((e: unknown) => {
+        this.log.error(`apply job ${job.id}: hand-back failed (${(e as Error)?.message}); it is reclaimed when its heartbeat goes stale`);
+      }));
+    // Final review L2: the stop hand-back is started AT ONCE from the signal (before the in-flight month's transaction
+    // is aborted), on its own pooled connection — the month holds one; the pool must allow at least 2 (see plan §18).
+    const off = stop.onStop?.(() => { void releaseOnce({ countAttempt: false }); });
     /** Hand back once (a stop may already be doing it) and WAIT for it before reporting 'released' (re-review L2). */
     const handBack = async (o: { countAttempt: boolean; lastError?: string; month?: string }) => {
-      releasing ??= this.release(job, token, o);
-      await releasing;
+      await releaseOnce(o);
     };
     try {
       // Months left RUNNING by a dead run were never written (DONE is set in the write's own transaction) → run again.
@@ -370,6 +376,8 @@ export class SalesApplyJobsService {
     } finally {
       clearInterval(beat);
       off?.();
+      // Final review L1: a stop hand-back started during a run that then FINISHED is still awaited — no dangling write.
+      if (releasing) await releasing;
     }
   }
 
@@ -406,6 +414,9 @@ export class SalesApplyJobsService {
       if (!r?.permissions.includes('targets:upload')) return false;
       return new GifsyTenantGrantService(this.prisma).hasGrantUncached(userId, clientId);
     }
+    // Final review L3: same rule as PermissionGuard — RBAC_ENFORCEMENT is read from THIS process's env. The worker job is
+    // deployed without it, exactly like the API service today (deploy.yml sets it on neither), so the worker and the API
+    // agree. If RBAC_ENFORCEMENT is ever turned on for the API, set it on the gifsy-sales-import job too.
     if (process.env.RBAC_ENFORCEMENT !== 'true') return true;
     const c = await this.prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
     const enforced = (c?.features as Record<string, unknown> | null)?.rbacEnforcement === true;

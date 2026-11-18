@@ -149,11 +149,13 @@ export class SalesMonthsService {
   async close(user: JwtPayload, month: string): Promise<SalesMonthRow> {
     if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
     const clientId = user.clientId;
-    // Owner 2026-11-18: never close a month while an Apply / Recalculate of it is queued or running.
-    await assertNoActiveJob(this.prisma, clientId, month);
     const row = await this.prisma.$transaction(
       async (tx) => {
         await lockSalesMonth(tx, clientId, month);
+        // Owner 2026-11-18: never close a month while an Apply / Recalculate of it is queued or running — checked UNDER the
+        // month lock, in the same transaction as the state change (final review L4). An apply queued just after this
+        // close is refused loudly by the worker ("<Month> is CLOSED") when it re-checks under the same lock.
+        await assertNoActiveJob(tx, clientId, month);
         const current = currentMonthKey();
         const existing = await tx.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
         const st = resolveMonthState(month, current, existing);
@@ -197,13 +199,13 @@ export class SalesMonthsService {
     if (!user.assumed) throw new BadRequestException('Assume the tenant to reopen a month.');
     if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
     const clientId = user.clientId;
-    await assertNoActiveJob(this.prisma, clientId, month);
     const ack = body?.acknowledgeDownstream === true;
     let warnings: string[] = [];
     let downstream: Downstream = { ...NO_DOWNSTREAM };
     const row = await this.prisma.$transaction(
       async (tx) => {
         await lockSalesMonth(tx, clientId, month);
+        await assertNoActiveJob(tx, clientId, month); // under the month lock (final review L4)
         const existing = await tx.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
         const st = resolveMonthState(month, currentMonthKey(), existing);
         if (st.relation === 'CURRENT' || st.relation === 'FUTURE') {

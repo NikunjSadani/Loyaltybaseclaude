@@ -687,7 +687,9 @@ describe('background jobs: Close / Reopen refused while an Apply / Recalculate o
     const d = db([], { activeJobs: [busy] });
     const svc = new SalesMonthsService(d as never);
     await expect(svc.close(clientAdmin, PREV)).rejects.toThrow(new RegExp(`^${monthLabel(PREV)} is being applied by Ravi since (\d+ \w+, )?10:32 — try again when it finishes\.$`));
-    expect(d.$transaction).not.toHaveBeenCalled();
+    // final review L4: checked UNDER the month lock, in the transaction of the state change — and nothing is written
+    expect(d.log).toEqual([`lock:sales-month:t1:${PREV}`]);
+    expect(d.salesMonthStatus.upsert).not.toHaveBeenCalled();
   });
 
   it('reopen → the same 409 (recalculate wording for a RECALC job)', async () => {

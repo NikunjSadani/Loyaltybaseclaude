@@ -75,6 +75,58 @@ d('SalesApplyJobsService × real Postgres', () => {
     expect(await svc.hasClaimable()).toBe(false);
   });
 
+  describe('release — ONE statement: job back to QUEUED + its unwritten months, guarded by the claim token', () => {
+    type Release = (j: unknown, t: string, o: { countAttempt: boolean; lastError?: string; month?: string }) => Promise<void>;
+    const release = () => (svc as unknown as { release: Release }).release.bind(svc);
+    async function claimedWithRunningMonth(months: string[], requestId: string) {
+      await prisma.$executeRawUnsafe(`DELETE FROM "sales_apply_jobs"`);
+      const { job } = await svc.enqueueApply(user, 'imp1', { months, expectedDefinitionsHash: 'h', processingVersion: 1, requestId });
+      const claimed = (await svc.claimNext())!;
+      await prisma.$executeRawUnsafe(`UPDATE "sales_apply_job_months" SET "status" = 'RUNNING' WHERE "jobId" = '${job.id}' AND "month" = '${months[0]}'`);
+      return { job, claimed };
+    }
+    const state = async (jobId: string) => ({
+      job: (await prisma.$queryRawUnsafe<Array<{ status: string; claimToken: string | null; heartbeatAt: Date | null; attempts: number }>>(
+        `SELECT "status","claimToken","heartbeatAt","attempts" FROM "sales_apply_jobs" WHERE "id" = '${jobId}'`))[0],
+      months: await prisma.$queryRawUnsafe<Array<{ month: string; status: string; lastError: string | null; startedAt: Date | null }>>(
+        `SELECT "month","status","lastError","startedAt" FROM "sales_apply_job_months" WHERE "jobId" = '${jobId}' ORDER BY "month"`),
+    });
+
+    it('countAttempt false (a stop): attempts back down, heartbeat cleared, RUNNING month QUEUED, no lastError', async () => {
+      const { job, claimed } = await claimedWithRunningMonth(['2026-06', '2026-07'], 'req-real-rel-1');
+      await release()(claimed, claimed.claimToken!, { countAttempt: false });
+      const s = await state(job.id);
+      expect(s.job).toEqual(expect.objectContaining({ status: 'QUEUED', claimToken: null, heartbeatAt: null, attempts: 0 }));
+      expect(s.months.map((m) => [m.month, m.status, m.lastError])).toEqual([['2026-06', 'QUEUED', null], ['2026-07', 'QUEUED', null]]);
+      expect(s.months[0].startedAt).toBeNull();
+    });
+
+    it('countAttempt true + lastError for ONE month: the attempt is kept; only that month carries the error', async () => {
+      const { job, claimed } = await claimedWithRunningMonth(['2026-06', '2026-07'], 'req-real-rel-2');
+      await release()(claimed, claimed.claimToken!, { countAttempt: true, lastError: 'deadlock detected', month: '2026-06' });
+      const s = await state(job.id);
+      expect(s.job.attempts).toBe(1);
+      expect(s.months.map((m) => [m.month, m.status, m.lastError])).toEqual([['2026-06', 'QUEUED', 'deadlock detected'], ['2026-07', 'QUEUED', null]]);
+    });
+
+    it('lastError without a month: every unwritten month carries it; a DONE month is untouched', async () => {
+      const { job, claimed } = await claimedWithRunningMonth(['2026-05', '2026-06', '2026-07'], 'req-real-rel-3');
+      await prisma.$executeRawUnsafe(`UPDATE "sales_apply_job_months" SET "status" = 'DONE' WHERE "jobId" = '${job.id}' AND "month" = '2026-07'`);
+      await release()(claimed, claimed.claimToken!, { countAttempt: true, lastError: 'connection reset' });
+      const s = await state(job.id);
+      expect(s.months.map((m) => [m.month, m.status, m.lastError])).toEqual([
+        ['2026-05', 'QUEUED', 'connection reset'], ['2026-06', 'QUEUED', 'connection reset'], ['2026-07', 'DONE', null]]);
+    });
+
+    it('a stale token changes NOTHING (neither the job nor any month)', async () => {
+      const { job, claimed } = await claimedWithRunningMonth(['2026-06'], 'req-real-rel-4');
+      await release()(claimed, 'not-the-holder', { countAttempt: false, lastError: 'x' });
+      const s = await state(job.id);
+      expect(s.job).toEqual(expect.objectContaining({ status: 'RUNNING', claimToken: claimed.claimToken, attempts: 1 }));
+      expect(s.months[0]).toEqual(expect.objectContaining({ status: 'RUNNING', lastError: null }));
+    });
+  });
+
   it('DONE inside a transaction that rolls back stays RUNNING (DONE commits only with the write)', async () => {
     await prisma.$executeRawUnsafe(`DELETE FROM "sales_apply_jobs"`);
     const { job } = await svc.enqueueApply(user, 'imp1', { months: ['2026-08'], expectedDefinitionsHash: 'h', processingVersion: 1, requestId: 'req-real-0005' });

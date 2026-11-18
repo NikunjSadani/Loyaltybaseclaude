@@ -640,6 +640,39 @@ describe('re-review fixes (ab1dbbbb..91e4cc46)', () => {
     expect((db.months.find((m) => m.month === '2026-10')!.result as { error: string }).error).toMatch(/Nothing was written for October 2026\.$/);
   });
 
+  it('final review L1: a stop hand-back started during a run that then FINISHES is awaited, and its failure never escapes (no unhandled rejection)', async () => {
+    const { db, svc } = await queued(['2026-10'], { userStatus: 'SUSPENDED' });
+    let fail: (e: Error) => void = () => {};
+    db.gateRelease(new Promise<void>((_res, rej) => { fail = rej; }));
+    const ls: Array<(r: string) => void> = [];
+    const stop = { requested: false, onStop: (cb: (r: string) => void) => { ls.push(cb); return () => undefined; } };
+    db.user.findUnique.mockImplementationOnce(async () => {
+      ls.forEach((l) => l('SIGTERM')); // the signal lands while the requester is being re-checked
+      return { status: 'SUSPENDED', deletedAt: null, role: 'CLIENT_ADMIN', gifsyRoleId: null };
+    });
+    const onUnhandled = jest.fn();
+    process.on('unhandledRejection', onUnhandled);
+    let settled = false;
+    const run = svc.drain(stop).then((r) => { settled = true; return r; });
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(settled).toBe(false); // the run waits for the stop hand-back
+    fail(new Error('connection reset'));
+    expect(await run).toEqual({ finished: 1, released: 0 });
+    await new Promise((r) => setImmediate(r));
+    process.off('unhandledRejection', onUnhandled);
+    expect(onUnhandled).not.toHaveBeenCalled();
+  });
+
+  it('final review M1: a Recalculate whose transaction was LOST (connection drop) is handed back for a retry, not failed as "too large"', async () => {
+    const db = fakeDb();
+    const apply = applyMock();
+    const svc = new SalesApplyJobsService(db as never, apply as never);
+    await svc.enqueueRecalculate(user, '2026-10', { expectedDefinitionsHash: 'h', expectedHistoryAppliedAt: 'x', requestId: 'req-recalc-lost' });
+    apply.recalculate.mockRejectedValue(Object.assign(new Error("Transaction API error: Transaction not found. Transaction ID is invalid, refers to an old closed transaction Prisma doesn't have information about anymore, or was obtained before disconnecting."), { code: 'P2028' }));
+    expect(await svc.drain()).toEqual({ finished: 0, released: 1 });
+    expect(db.months[0]).toEqual(expect.objectContaining({ status: 'QUEUED', lastError: expect.stringMatching(/temporary database problem/) }));
+  });
+
   it('M1: a Recalculate whose write ran out of time is FAILED with its own words (never retried as "temporary")', async () => {
     const db = fakeDb();
     const apply = applyMock();

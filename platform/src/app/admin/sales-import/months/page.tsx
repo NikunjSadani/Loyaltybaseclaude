@@ -41,6 +41,8 @@ export default function SalesMonthsPage() {
   const [recalcMonth, setRecalcMonth] = useState<string | null>(null);
   /** B-L7: bumped by every action that writes a row — a list fetch that started before it is stale and is re-run. */
   const writeSeq = useRef(0);
+  /** Successful list reads so far — the Recalculate panel waits for a read made after a lost follow (final review L5). */
+  const [listVersion, setListVersion] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +57,11 @@ export default function SalesMonthsPage() {
     (from ? (to && to >= from ? salesImportApi.months(from, to) : salesImportApi.months(from)) : salesImportApi.months()).then((r) => {
       if (cancelled) return;
       if (writeSeq.current !== startedAt) { setTick((x) => x + 1); return; } // an action changed a row meanwhile
-      if (r.success && Array.isArray(r.data)) { setError(null); setRows([...r.data].sort((a, b) => b.month.localeCompare(a.month))); }
+      if (r.success && Array.isArray(r.data)) {
+        setError(null);
+        setRows([...r.data].sort((a, b) => b.month.localeCompare(a.month)));
+        setListVersion((v) => v + 1);
+      }
       else setError(r.success ? 'the server’s reply was incomplete' : failureReason(r));
     });
     return () => { cancelled = true; };
@@ -243,7 +249,7 @@ export default function SalesMonthsPage() {
 
       {recalcMonth && (
         <RecalculatePanel key={recalcMonth} month={recalcMonth} onClose={() => setRecalcMonth(null)} onApplied={reload}
-          activeJob={rows?.find((r) => r.month === recalcMonth)?.activeJob ?? null} />
+          activeJob={rows?.find((r) => r.month === recalcMonth)?.activeJob ?? null} listVersion={listVersion} />
       )}
 
       {rows === null ? (
