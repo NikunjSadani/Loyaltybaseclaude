@@ -226,7 +226,10 @@ export class CreditsService {
   /**
    * Build the DEDUCT/GROSS-UP write plan for a visibility payout download (reads only; the
    * writes happen inside the caller's download $transaction). PAN aggregation is combined
-   * across ALL 194C tenants (TGSL = single deductor, D7) and across the FY:
+   * across ALL 194C tenants (TGSL = single deductor, D7) and across the FY. 194R is PER CLIENT
+   * (owner 2026-11-18): every "cross-tenant" read below is restricted to THIS tenant for 194R
+   * (prior base, max single, DEDUCT ledger, recovery ledger, same-period TDS-invoice idempotency),
+   * so a 194R GROSS_UP recovery is 100% this tenant's:
    *
    *   cumulativeBase = prior committed (PAID|PROCESSING) visibility base for the PAN/section
    *                    in the FY (cross-tenant, by period window) + this event's payable base.
@@ -319,7 +322,16 @@ export class CreditsService {
     }
     if (groups.size === 0 && noPanGroups.size === 0) return plan;
 
-    // ── Cross-tenant prior FY aggregation per (PAN, section) ──────────────────
+    // ── SECTION SCOPE (owner 2026-11-18) ───────────────────────────────────────
+    // 194C is aggregated ACROSS ALL TENANTS by PAN (TGSL = single deductor, D7). 194R is PER CLIENT:
+    // a PAN's 194R payouts under tenant A and tenant B are NEVER aggregated (matches the per-clientId
+    // 194R report in tds.service.ts). Every cross-tenant read below (prior base, max single, DEDUCT
+    // ledger, recovery ledger, prior TDS invoices) therefore drops ANOTHER tenant's 194R rows. Every
+    // group in this plan belongs to `clientId` (one download = one tenant), so keys stay (PAN, section).
+    const inSectionScope = (section: TdsSection | null | undefined, rowClientId: string | null | undefined): boolean =>
+      section !== TdsSection.SEC_194R || rowClientId === clientId;
+
+    // ── Prior FY aggregation per (PAN, section): cross-tenant for 194C, this tenant for 194R ──
     const priorBaseByPS = new Map<string, bigint>();
     const priorMaxSingleByPS = new Map<string, bigint>();
     // FIX-D: prior committed base partitioned by (PAN, section, methodology) — the AMOUNT basis
@@ -376,6 +388,7 @@ export class CreditsService {
       for (const pe of priorEntries) {
         const pan = outletKeyToPan.get(`${pe.clientId}${SEP}${pe.outletId}`);
         if (!pan || !pe.tdsSection) continue; // outletCode belongs to a different tenant's outlet
+        if (!inSectionScope(pe.tdsSection, pe.clientId)) continue; // another tenant's 194R base
         const ps = `${pan}${SEP}${pe.tdsSection}`;
         priorBaseByPS.set(ps, (priorBaseByPS.get(ps) ?? 0n) + pe.amountPaise);
         if (pe.amountPaise > (priorMaxSingleByPS.get(ps) ?? 0n)) priorMaxSingleByPS.set(ps, pe.amountPaise);
@@ -394,14 +407,15 @@ export class CreditsService {
       }
     }
 
-    // Running DEDUCT carry-forward (cross-tenant ledger, PAN/section/FY).
+    // Running DEDUCT carry-forward (PAN/section/FY ledger — cross-tenant for 194C, this tenant for 194R).
     const priorDeductedByPS = new Map<string, bigint>();
     if (panSet.size) {
       const ledgerRows = await db.tdsDeductionEntry.findMany({
         where: { panNumber: { in: [...panSet] }, section: { in: [...sectionSet] }, fyLabel },
-        select: { panNumber: true, section: true, tdsDeductedThisPaise: true },
+        select: { clientId: true, panNumber: true, section: true, tdsDeductedThisPaise: true },
       });
       for (const lr of ledgerRows) {
+        if (!inSectionScope(lr.section, lr.clientId)) continue; // another tenant's 194R withholding
         const ps = `${lr.panNumber}${SEP}${lr.section}`;
         priorDeductedByPS.set(ps, (priorDeductedByPS.get(ps) ?? 0n) + lr.tdsDeductedThisPaise);
       }
@@ -420,6 +434,8 @@ export class CreditsService {
         select: { panNumber: true, section: true, clientId: true, tenantSharePaise: true },
       });
       for (const r of recRows) {
+        // 194R: only THIS tenant's recovery telescopes its top-ups (no cross-tenant pro-rata).
+        if (!inSectionScope(r.section, r.clientId)) continue;
         const ps = `${r.panNumber}${SEP}${r.section}`;
         recoveredByPS.set(ps, (recoveredByPS.get(ps) ?? 0n) + r.tenantSharePaise);
         let tmap = recoveredByPSByTenant.get(ps);
@@ -542,9 +558,30 @@ export class CreditsService {
         const numPrefix = `TGSL-TDS-${g.panNumber}-${fyLabel.replace(/-/g, '')}-`;
         const priorTds = await db.autoInvoice.findMany({
           where: { invoiceKind: 'TDS', invoiceNumber: { startsWith: numPrefix } },
-          select: { period: true },
+          select: { id: true, clientId: true, period: true },
         });
-        if (priorTds.some((i) => i.period === period)) continue; // already topped up this period
+        // Section of each prior TDS invoice, from its recovery rows (AutoInvoice has no section
+        // column; every invoice is written with ≥1 non-zero recovery row carrying the section).
+        const samePeriod = priorTds.filter((i) => i.period === period);
+        const invSection = new Map<string, TdsSection>();
+        const samePeriodIds = samePeriod.map((i) => i.id).filter((id): id is string => !!id);
+        if (samePeriodIds.length > 0) {
+          const secRows = await db.tdsRecoveryEntry.findMany({
+            where: { tdsInvoiceId: { in: samePeriodIds } },
+            select: { tdsInvoiceId: true, section: true },
+          });
+          for (const r of secRows) if (r.tdsInvoiceId) invSection.set(r.tdsInvoiceId, r.section);
+        }
+        // Idempotency SCOPE = this section's aggregation scope: 194C → one top-up per (PAN, FY, period)
+        // across tenants (unchanged); 194R → per (client, PAN, FY, period). An invoice of the OTHER
+        // section never blocks. An invoice whose section can't be resolved (no recovery rows — legacy)
+        // is conservatively treated as this section (the pre-2026-11-18 behaviour).
+        const alreadyThisPeriod = samePeriod.some((i) => {
+          const sec = i.id ? invSection.get(i.id) : undefined;
+          if (sec && sec !== g.section) return false;
+          return g.section !== TdsSection.SEC_194R || i.clientId === clientId;
+        });
+        if (alreadyThisPeriod) continue; // already topped up this period (in this scope)
 
         // FIX-D: dueNow on the GROSS_UP-methodology cumulative base only.
         const dueNow = computeGrossUpTdsInvoiceBasePaise(methodologyCumulativeBase, rate, thresholdMet);
@@ -552,11 +589,17 @@ export class CreditsService {
         const delta = dueNow - alreadyInvoiced;
         if (delta <= 0n) continue; // fully invoiced already → nothing to top up
 
-        const seq = priorTds.length + 1;
+        // The NUMBER sequence stays global per (PAN, FY) — TGSL-TDS-<PAN>-<FY>-<seq> is a globally
+        // unique invoice number, so a 194R per-client invoice (or a different section's) takes the
+        // next free seq. Count invoices already planned in THIS plan for the same PAN too, so two
+        // groups for one PAN (e.g. a mixed-section download) never collide on a number.
+        const plannedSamePan = plan.grossUpInvoices.filter((x) => x.panNumber === g.panNumber).length;
+        const seq = priorTds.length + plannedSamePan + 1;
         const isAnchor = seq === 1;
 
         // FIX-A (D10): recovery pro-rata by each tenant's share of the retailer's FY AGGREGATE
-        // GROSS_UP base (cross-tenant). Tenant set = every tenant with prior committed GROSS_UP
+        // GROSS_UP base (cross-tenant) — 194C only. For 194R the prior/recovery maps hold only THIS
+        // tenant (inSectionScope), so the "split" is a single row = 100% to this tenant. Tenant set = every tenant with prior committed GROSS_UP
         // base for this PAN + this event's tenant + any tenant already carrying recovery (so the
         // per-tenant true-up telescopes EXACTLY: Σ deltas == dueNow − alreadyInvoiced == body).
         const tenantBaseMap = new Map<string, bigint>();
@@ -649,10 +692,12 @@ export class CreditsService {
         noPanRecByKS.set(k, (noPanRecByKS.get(k) ?? 0n) + r.tenantSharePaise);
       }
 
-      // No-PAN 194C rate is 20/80 (grossed-up). Once the outlet's cumulative base crosses, the
-      // TARGET recovery is grossUp20(cumulative); the DELTA to record = target − already-recorded.
-      const noPanRate = rate194CFrom(cfg, false, null);
+      // No-PAN rate (grossed-up) per the group's OWN section: 194C → c194cNoPan, 194R → r194rNoPan
+      // (both default 20/80; previously the 194C value was used for 194R too, which diverged only if
+      // the FY statutory config set them differently). Once the outlet's cumulative base crosses, the
+      // TARGET recovery is grossUp(cumulative); the DELTA to record = target − already-recorded.
       for (const ng of noPanGroups.values()) {
+        const noPanRate = this.tdsRateFor(ng.section, false, null, cfg);
         const os = `${ng.outletCode}${SEP}${ng.section}`;
         const thisEventBase = ng.entries.reduce((s, e) => s + e.amountPaise, 0n);
         const priorBase = priorNoPanByOS.get(os) ?? 0n;

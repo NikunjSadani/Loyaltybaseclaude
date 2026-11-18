@@ -39,6 +39,11 @@ PAN `AAACT9811F`, West Bengal / code 19, SAC 998361).
 - **D6 — Unregistered retailers:** no GST on invoice (it is effectively the RCM self-invoice). TGSL owes RCM
   off-portal → a **report of unregistered-retailer payouts with invoice numbers** (RCM computed outside the portal).
 - **D7 — TDS is threshold-gated, retroactive, combined across all 194C tenants by PAN** (TGSL = single deductor).
+  **D7 applies to 194C ONLY. 194R is PER CLIENT (owner, 2026-11-18):** a retailer PAN's 194R visibility payouts under
+  tenant A and tenant B are never aggregated — threshold (₹20k/FY), prior base, DEDUCT carry-forward ledger, GROSS_UP
+  recovery and the same-period TDS-invoice idempotency are all evaluated per (client, PAN, FY), and a 194R GROSS_UP
+  recovery is 100% the paying tenant's (D10 pro-rata is 194C-only). This matches the per-clientId 194R report
+  (`api/src/tds/tds.service.ts`). TDS invoice NUMBERS stay globally sequenced per (PAN, FY) (`TGSL-TDS-<PAN>-<FY>-<seq>`).
 - **D8 — DEDUCT method:** below threshold pay full; at crossing, TDS on the full aggregate becomes due and is
   **deducted from the crossing payout**; if the catch-up exceeds that payout, **deduct what fits and carry the rest
   forward** to the next payout(s) (per-PAN carry-forward ledger). Retailer bears it (claims via 26AS).
@@ -48,7 +53,7 @@ PAN `AAACT9811F`, West Bengal / code 19, SAC 998361).
   retailer's PAN** (the deposit *settles* the invoice). GST on it follows the normal holdback/settlement. Retailer
   benefit = 26AS credit + GST-on-proof, **no extra cash**. **Reconciles exactly:** TDS deposited = 1% of the base the
   retailer was actually paid.
-- **D10 — Tenant recovery / attribution.** The grossed-up TDS is **recovered from tenants, pro-rata** by each tenant's
+- **D10 — Tenant recovery / attribution** (cross-tenant split = 194C only; 194R → 100% the paying tenant, see D7). The grossed-up TDS is **recovered from tenants, pro-rata** by each tenant's
   share of the retailer's aggregate (e.g. X ₹70k + Y ₹40k → ₹1,100 TDS split ₹700 / ₹400). A **per-tenant recovery
   ledger** tracks it; reports tag it **"in lieu of TDS deduction."**
 - **D11 — The "in lieu of TDS" tag appears ONLY in the dashboard/report, NEVER on the invoice face.** The invoice
