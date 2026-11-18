@@ -52,6 +52,9 @@ function BatchesTable({ batches }: { batches: VdBatch[] }) {
             <th scope="col" className="px-3 py-2">Uploaded</th>
             <th scope="col" className="px-3 py-2">Status</th>
             <th scope="col" className="px-3 py-2">Rows</th>
+            <th scope="col" className="px-3 py-2">Valid</th>
+            <th scope="col" className="px-3 py-2">Not issued</th>
+            <th scope="col" className="px-3 py-2">Cancelled</th>
             <th scope="col" className="px-3 py-2">Bought</th>
             <th scope="col" className="px-3 py-2">Failed</th>
             <th scope="col" className="px-3 py-2">Pending</th>
@@ -74,6 +77,12 @@ function BatchesTable({ batches }: { batches: VdBatch[] }) {
                 )}
               </td>
               <td className="px-3 py-2 text-white/80">{formatCount(b.total)}</td>
+              <td className="px-3 py-2 text-white/80" data-testid={`vd-batch-${b.batchNumber}-valid`}>{formatCount(b.valid)}</td>
+              <td className={`px-3 py-2 ${((b.invalid ?? 0) + (b.duplicates ?? 0)) > 0 ? 'text-amber-300' : 'text-white/80'}`} data-testid={`vd-batch-${b.batchNumber}-not-issued`}
+                title={b.invalid !== null && b.duplicates !== null ? `${plural(b.invalid, 'invalid row')} + ${plural(b.duplicates, 'duplicate')}` : undefined}>
+                {b.invalid === null && b.duplicates === null ? '—' : formatCount((b.invalid ?? 0) + (b.duplicates ?? 0))}
+              </td>
+              <td className="px-3 py-2 text-white/80" data-testid={`vd-batch-${b.batchNumber}-cancelled`}>{formatCount(b.cancelled)}</td>
               <td className="px-3 py-2 text-emerald-300" data-testid={`vd-batch-${b.batchNumber}-bought`}>{formatCount(b.bought)}</td>
               <td className={`px-3 py-2 ${(b.buyFailed ?? 0) > 0 ? 'text-red-300' : 'text-white/80'}`} data-testid={`vd-batch-${b.batchNumber}-failed`}>{formatCount(b.buyFailed)}</td>
               <td className={`px-3 py-2 ${(b.pending ?? 0) > 0 ? 'text-amber-300' : 'text-white/80'}`}>{formatCount(b.pending)}</td>
@@ -254,6 +263,7 @@ export default function VoucherCampaignDetailPage() {
   const runDialog = async () => {
     if (!dialog || actionInFlight.current) return;
     const d = dialog;
+    if (d.kind === 'discard' && d.batch.batchNumber === null) return; // never guess a batch number
     const lockKey = d.kind === 'cancel' || d.kind === 'discard' ? 'campaign' : d.row.id;
     actionInFlight.current = true;
     setDialogBusy(true);
@@ -261,7 +271,7 @@ export default function VoucherCampaignDetailPage() {
     const res =
       d.kind === 'resend' ? await vdApi.resend(id, d.row.id)
       : d.kind === 'retry' ? await vdApi.retryBuy(id, d.row.id)
-      : d.kind === 'discard' ? await vdApi.discardBatch(id, d.batch.batchNumber ?? 0)
+      : d.kind === 'discard' ? await vdApi.discardBatch(id, d.batch.batchNumber as number)
       : await vdApi.cancel(id);
     actionInFlight.current = false;
     setDialogBusy(false);
@@ -363,13 +373,13 @@ export default function VoucherCampaignDetailPage() {
             Cancel campaign
           </button>
         )}
-        {canEdit && (
-          <button type="button" onClick={() => { setNotice(null); setEditOpen(true); }} data-testid="vd-edit" disabled={locked.has('campaign')}
-            className="inline-flex items-center gap-2 rounded-lg border border-white/20 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10 disabled:opacity-50">
-            <Pencil className="w-4 h-4" aria-hidden="true" /> Edit campaign
-          </button>
-        )}
-        {!setup && !pendingBatch && c.addPeopleBlockedReason === null && c.status !== 'UNKNOWN' && (
+        {/* Always shown: disabled with the reason when the server says it can't be edited (never silently missing). */}
+        <button type="button" onClick={() => { if (canEdit) { setNotice(null); setEditOpen(true); } }} data-testid="vd-edit"
+          disabled={!canEdit || locked.has('campaign')} aria-describedby={!canEdit ? 'vd-edit-blocked' : undefined}
+          className="inline-flex items-center gap-2 rounded-lg border border-white/20 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10 disabled:opacity-50">
+          <Pencil className="w-4 h-4" aria-hidden="true" /> Edit campaign
+        </button>
+        {!setup && !pendingBatch && c.addPeopleBlockedReason === null && c.status !== 'UNKNOWN' && c.status !== 'CANCELLED' && (
           <Link href={addHref}
             className="inline-flex items-center gap-2 rounded-lg bg-[var(--brand-primary)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90">
             <UserPlus className="w-4 h-4" aria-hidden="true" /> Add more people
@@ -382,9 +392,15 @@ export default function VoucherCampaignDetailPage() {
           </Link>
         )}
       </div>
-      {!setup && !pendingBatch && c.addPeopleBlockedReason !== null && (
+      {!canEdit && (
+        <p id="vd-edit-blocked" data-testid="vd-edit-blocked" className="text-xs text-white/60">
+          {c.status === 'CANCELLED' ? "A cancelled campaign can't be edited." : "This campaign can't be edited right now."}
+        </p>
+      )}
+      {!setup && !pendingBatch && (c.addPeopleBlockedReason !== null || c.status === 'UNKNOWN') && (
         <p data-testid="vd-add-people-blocked" className="text-xs text-white/60">
-          <span className="font-semibold text-white/80">Add more people:</span> {c.addPeopleBlockedReason}
+          <span className="font-semibold text-white/80">Add more people:</span>{' '}
+          {c.addPeopleBlockedReason ?? 'Add more people is unavailable while the status is not recognised.'}
         </p>
       )}
 
@@ -602,7 +618,7 @@ export default function VoucherCampaignDetailPage() {
       >
         {dialog?.kind === 'discard' && (
           <p>
-            {formatCount(dialog.batch.total)} uploaded rows{dialog.batch.sourceFileName ? ` from ${dialog.batch.sourceFileName}` : ''} will be removed. To add these people later, upload the file again.
+            {dialog.batch.total !== null ? `${plural(dialog.batch.total, 'uploaded row')}` : 'The uploaded rows'}{dialog.batch.sourceFileName ? ` from ${dialog.batch.sourceFileName}` : ''} will be removed. To add these people later, upload the file again.
           </p>
         )}
       </ConfirmDialog>

@@ -16,7 +16,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeft, FileSpreadsheet, Loader2, Upload } from 'lucide-react';
 import {
-  ROW_STATUS_TONE, billedToText, checkUploadFile, confirmBlock, confirmDialogTitle, confirmPayload, defaultProgramLabel,
+  ROW_STATUS_TONE, billedToText, checkUploadFile, cleanRupeeInput, rupeeEcho, confirmBlock, confirmDialogTitle, confirmPayload, defaultProgramLabel,
   fetchBillableClients, formatCount, formatRupees, isOverBudget, isSetupCampaign, isUncertainFailure, plural, rowStatusText,
   validateCreateForm, vdApi, VD_NAME_MAX, VD_NOTE_MAX, VD_PROGRAM_LABEL_MAX,
   type CreateForm, type RowStatus, type VdBrand, type VdCampaign, type VdClient, type VdPreview,
@@ -354,10 +354,13 @@ function NewCampaignFlow() {
             </div>
             <div>
               <label htmlFor="vd-budget" className="block text-xs font-semibold text-white/70 mb-1">Budget (₹)</label>
-              <input id="vd-budget" className={inputCls} inputMode="numeric" value={form.budgetRupees} disabled={creating}
+              <input id="vd-budget" className={inputCls} inputMode="decimal" value={form.budgetRupees} disabled={creating}
                 aria-invalid={showErrors && !!errors.budgetRupees}
-                aria-describedby={`vd-budget-help${showErrors && errors.budgetRupees ? ' vd-budget-err' : ''}`}
-                onChange={(e) => setForm({ ...form, budgetRupees: e.target.value.replace(/[^\d]/g, '') })} />
+                aria-describedby={`vd-budget-help${rupeeEcho(form.budgetRupees) ? ' vd-budget-echo' : ''}${showErrors && errors.budgetRupees ? ' vd-budget-err' : ''}`}
+                onChange={(e) => setForm({ ...form, budgetRupees: cleanRupeeInput(e.target.value) })} />
+              {rupeeEcho(form.budgetRupees) && (
+                <p id="vd-budget-echo" data-testid="vd-budget-echo" className="text-xs text-white/70 mt-1">{rupeeEcho(form.budgetRupees)}</p>
+              )}
               <p id="vd-budget-help" className="text-[11px] text-white/40 mt-1">Whole rupees. The purchase is blocked if the valid rows add up to more than this.</p>
               <FieldError id="vd-budget-err" msg={showErrors ? errors.budgetRupees : undefined} />
             </div>

@@ -101,7 +101,8 @@ describe('Add more people', () => {
     expect(screen.getByTestId('vd-prow-2')).toHaveTextContent('Already sent in batch 1');
     fireEvent.click(screen.getByTestId('vd-buy-send'));
     const dialog = await screen.findByRole('dialog');
-    expect(dialog).toHaveTextContent('Buy and send 1 vouchers · ₹500 total?');
+    expect(dialog).toHaveTextContent('Buy and send 1 voucher · ₹500 total?');
+    expect(dialog).toHaveTextContent('Only the 1 valid row of batch 2 is bought.');
     fireEvent.click(within(dialog).getByTestId('vd-dialog-confirm'));
     await waitFor(() => expect(push).toHaveBeenCalledWith('/gifsy/voucher-dispersal/c1'));
     const body = JSON.parse(String(calls((u) => u === `${BASE}/batches/2/confirm`)[0][1].body));
@@ -109,31 +110,106 @@ describe('Add more people', () => {
     expect(calls((u) => u === `${BASE}/process`)).toHaveLength(1);
   });
 
-  it('over what is left of the budget → Buy blocked with the reason; "Raise the budget" edits it and re-reads the preview', async () => {
+  it('over what is left of the budget → Buy blocked; "Raise the budget" states + prefills the amount needed, then re-checks the preview', async () => {
     uploadRes = ok(preview({}, { totalRupees: 4000, overBudget: true, remainingBudgetRupees: 3500 }));
-    batchRes = ok(preview({}, { totalRupees: 4000, overBudget: false, remainingBudgetRupees: 7500, budgetRupees: 9000 }));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    batchRes = gate.then(() => ok(preview({}, { totalRupees: 4000, overBudget: false, remainingBudgetRupees: 7500, budgetRupees: 9000 })));
     render(<AddPeoplePage />);
     await uploadFile();
     expect(screen.getByTestId('vd-block-reason')).toHaveTextContent("This batch's valid rows total ₹4,000, but only ₹3,500 of the ₹5,000 budget is left");
     expect(screen.getByTestId('vd-buy-send')).toBeDisabled();
     fireEvent.click(screen.getByTestId('vd-raise-budget'));
     const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByTestId('vd-edit-hint')).toHaveTextContent('To buy batch 2 the budget must be at least ₹5,500 (already committed ₹1,500 + this batch ₹4,000).');
+    expect((within(dialog).getByLabelText('Budget (₹)') as HTMLInputElement).value).toBe('5500');
     fireEvent.change(within(dialog).getByLabelText('Budget (₹)'), { target: { value: '9000' } });
     fireEvent.click(within(dialog).getByTestId('vd-edit-save'));
-    await waitFor(() => expect(calls((u) => u === `${BASE}/batches/2`)).toHaveLength(1));
-    await waitFor(() => expect(screen.getByTestId('vd-buy-send')).not.toBeDisabled());
+    // While the preview is re-read: "Re-checking…", and no claim it was re-checked yet.
+    expect(await screen.findByTestId('vd-rechecking')).toHaveTextContent('Re-checking');
+    expect(screen.getByTestId('vd-notice')).not.toHaveTextContent('re-checked against the new budget');
+    release();
+    await waitFor(() => expect(screen.getByTestId('vd-notice')).toHaveTextContent('re-checked against the new budget'));
     expect(screen.getByTestId('vd-notice')).toHaveTextContent('Budget ₹5,000 → ₹9,000');
+    expect(screen.queryByTestId('vd-rechecking')).not.toBeInTheDocument();
+    expect(screen.getByTestId('vd-buy-send')).not.toBeDisabled();
   });
 
-  it('a server refusal on confirm is shown word for word in the dialog (nothing bought)', async () => {
-    confirmRes = fail(409, 'Vouchers in this campaign are still being bought — you can add more people once every purchase has finished (the campaign shows Completed).');
+  it('a 409 refusal on confirm (e.g. stale preview) closes the dialog, says why and reloads the current state', async () => {
+    confirmRes = fail(409, 'This preview is out of date (the file was re-uploaded, maybe in another tab). Review the current preview and confirm again.');
+    render(<AddPeoplePage />);
+    await uploadFile();
+    const before = calls((u) => u === BASE).length;
+    fireEvent.click(screen.getByTestId('vd-buy-send'));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByTestId('vd-dialog-confirm'));
+    expect(await screen.findByTestId('vd-notice')).toHaveTextContent('This preview is out of date');
+    await waitFor(() => expect(calls((u) => u === BASE).length).toBeGreaterThan(before));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it('a 409 because the batch is ALREADY confirmed (other tab) opens the campaign page', async () => {
+    confirmRes = fail(409, 'Batch 2 is already confirmed.');
+    render(<AddPeoplePage />);
+    await uploadFile();
+    detailRes = ok(detail({ batches: [{ batchNumber: 1, status: 'CONFIRMED' }, { batchNumber: 2, status: 'CONFIRMED' }] }));
+    fireEvent.click(screen.getByTestId('vd-buy-send'));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByTestId('vd-dialog-confirm'));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/gifsy/voucher-dispersal/c1'));
+  });
+
+  it('a 400 refusal on confirm (over budget) stays in the dialog word for word', async () => {
+    confirmRes = fail(400, "This batch's valid rows total ₹500; with ₹4,800 already spent or committed that makes ₹5,300, over the ₹5,000 budget. Raise the budget (Edit campaign) or remove rows, then confirm again.");
     render(<AddPeoplePage />);
     await uploadFile();
     fireEvent.click(screen.getByTestId('vd-buy-send'));
     const dialog = await screen.findByRole('dialog');
     fireEvent.click(within(dialog).getByTestId('vd-dialog-confirm'));
-    expect(await within(dialog).findByTestId('vd-dialog-error')).toHaveTextContent('still being bought');
+    expect(await within(dialog).findByTestId('vd-dialog-error')).toHaveTextContent('Raise the budget');
     expect(push).not.toHaveBeenCalled();
+  });
+
+  it('a 409 refusal on discard (already confirmed elsewhere) reloads and opens the campaign', async () => {
+    discardRes = fail(409, 'Batch 2 is already confirmed — its vouchers are being or have been bought, so it cannot be discarded. Use Cancel campaign to stop rows not bought yet.');
+    render(<AddPeoplePage />);
+    await uploadFile();
+    detailRes = ok(detail({ batches: [{ batchNumber: 1, status: 'CONFIRMED' }, { batchNumber: 2, status: 'CONFIRMED' }] }));
+    fireEvent.click(screen.getByTestId('vd-discard'));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByTestId('vd-dialog-confirm'));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/gifsy/voucher-dispersal/c1'));
+  });
+
+  it('Refresh re-reads the campaign and the waiting batch', async () => {
+    render(<AddPeoplePage />);
+    await screen.findByLabelText('Choose file');
+    const before = calls((u) => u === BASE).length;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(calls((u) => u === BASE).length).toBe(before + 1));
+  });
+
+  it('a waiting batch that fails to load: error + Try again, and upload is offered only as "Replace batch 2" with an overwrite warning', async () => {
+    detailRes = ok(detail({ batches: [{ batchNumber: 1, status: 'CONFIRMED' }, { batchNumber: 2, status: 'PREVIEWED', sourceFileName: 'more.xlsx' }] }));
+    batchRes = fail(500, 'Internal error');
+    render(<AddPeoplePage />);
+    expect(await screen.findByTestId('vd-preview-error')).toHaveTextContent("Couldn't load the waiting batch 2: Internal error");
+    expect(screen.getByRole('button', { name: /Try again/ })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Upload the new list' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Replace batch 2' })).toBeInTheDocument();
+    expect(screen.getByTestId('vd-replace-warning')).toHaveTextContent('Uploading here replaces the file waiting in batch 2 (more.xlsx)');
+  });
+
+  it('the Choose file control is greyed out while a file is being checked', async () => {
+    let release!: () => void;
+    uploadRes = new Promise((r) => { release = () => r(ok(preview())); });
+    render(<AddPeoplePage />);
+    fireEvent.change(await screen.findByLabelText('Choose file'), { target: { files: [xlsx()] } });
+    fireEvent.click(screen.getByTestId('vd-upload'));
+    const label = await screen.findByTestId('vd-choose-file');
+    await waitFor(() => expect(label).toHaveAttribute('aria-disabled', 'true'));
+    expect(label.className).toMatch(/opacity-50/);
+    release();
+    await screen.findByTestId('vd-summary');
   });
 
   it('resumes an unconfirmed batch from the campaign, and Discard removes it (back to upload, says so)', async () => {

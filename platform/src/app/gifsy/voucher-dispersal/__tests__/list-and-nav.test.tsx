@@ -73,7 +73,9 @@ describe('Voucher Dispersal list', () => {
     const c2 = screen.getByTestId('vd-campaign-c2');
     expect(c2).toHaveTextContent('Billed to: —');
     expect(c2).toHaveTextContent('Not confirmed — nothing has been bought.');
-    expect(screen.getByRole('link', { name: 'Continue setup' })).toHaveAttribute('href', '/gifsy/voucher-dispersal/new?campaign=c2');
+    // The card's own link resumes setup; the visible "Continue setup" text link is a mouse shortcut (aria-hidden).
+    expect(screen.getByRole('link', { name: 'Draft one' })).toHaveAttribute('href', '/gifsy/voucher-dispersal/new?campaign=c2');
+    expect(screen.getByTestId('vd-continue-setup-c2')).toHaveAttribute('href', '/gifsy/voucher-dispersal/new?campaign=c2');
     expect(screen.getByRole('link', { name: /New campaign/ })).toHaveAttribute('href', '/gifsy/voucher-dispersal/new');
   });
 
@@ -180,6 +182,28 @@ describe('Voucher Dispersal list — clickable cards + Excel per card (2026-11-1
     fireEvent.click(btn);
     await waitFor(() => expect(downloadBlob).toHaveBeenCalledWith(expect.any(Blob), 'voucher-campaign-c1.xlsx'));
     expect(fetchMock.mock.calls.some((c) => c[0] === '/api/admin/voucher-dispersal/campaigns/c1/report.xlsx')).toBe(true);
+  });
+
+  it('keyboard focus ring is on the card link overlay (focus-visible only, not on mouse click); Download Excel has its own', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok(CAMPAIGNS))));
+    render(<ListPage />);
+    const link = await screen.findByRole('link', { name: 'Diwali thank-you' });
+    expect(link.className).toMatch(/focus-visible:after:ring-2/);
+    // No focus-within ring on the card (that also fires on a mouse click).
+    expect(screen.getByTestId('vd-campaign-c1').className).not.toMatch(/focus-within:ring/);
+    expect(screen.getByTestId('vd-card-download-c1').className).toMatch(/focus-visible:ring-2/);
+  });
+
+  it('setup cards: the second "Continue setup" link is out of the tab order and hidden from AT (the title link is the one link)', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok(CAMPAIGNS))));
+    render(<ListPage />);
+    await screen.findByText('Draft one');
+    const extra = screen.getByTestId('vd-continue-setup-c2');
+    expect(extra).toHaveAttribute('tabindex', '-1');
+    expect(extra).toHaveAttribute('aria-hidden', 'true');
+    // The card's numbers / programme line sit above the overlay so they can be selected (not interactive).
+    expect(screen.getByTestId('vd-card-meta-c1').className).toMatch(/relative/);
+    expect(screen.getByTestId('vd-card-meta-c1').className).toMatch(/select-text/);
   });
 
   it('a card with an unconfirmed "Add more people" batch says so (never silent)', async () => {

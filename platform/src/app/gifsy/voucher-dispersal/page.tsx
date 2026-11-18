@@ -33,7 +33,7 @@ function CardDownload({ id, name }: { id: string; name: string }) {
         disabled={action.blocked}
         aria-busy={action.busy}
         onClick={() => void action.run(vdReportUrl(id), { fallbackFileName: vdReportFallbackName(id) })}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-white/20 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-white/10 disabled:opacity-60"
+        className="inline-flex items-center gap-1.5 rounded-lg border border-white/20 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-white/10 disabled:opacity-60 outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
       >
         {action.busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> : <Download className="w-3.5 h-3.5" aria-hidden="true" />}
         {downloadButtonLabel(action, 'Download Excel')}
@@ -48,7 +48,8 @@ function Count({ label, value, alert, wide }: { label: string; value: string; al
   return (
     <div className={`min-w-0 ${wide ? 'col-span-2' : ''}`}>
       <dt className="text-[10px] uppercase tracking-wide text-white/40">{label}</dt>
-      <dd className={`text-sm font-semibold break-words ${color}`}>{value}</dd>
+      {/* The value sits above the card's link overlay so it can be selected / copied. */}
+      <dd className={`relative z-10 w-fit select-text cursor-text text-sm font-semibold break-words ${color}`}>{value}</dd>
     </div>
   );
 }
@@ -136,14 +137,15 @@ export default function VoucherDispersalListPage() {
                   : `/gifsy/voucher-dispersal/${encodeURIComponent(c.id)}`;
                 return (
                   <li key={c.id} data-testid={`vd-campaign-${c.id}`}
-                    className="relative rounded-xl border border-white/10 bg-white/5 p-4 transition-colors hover:border-white/25 hover:bg-white/[0.08] focus-within:ring-2 focus-within:ring-sky-400">
+                    className="relative rounded-xl border border-white/10 bg-white/5 p-4 transition-colors hover:border-white/25 hover:bg-white/[0.08]">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0">
                         <Link href={href} data-testid={`vd-card-link-${c.id}`}
-                          className="text-base font-semibold text-white hover:underline break-words outline-none after:absolute after:inset-0 after:rounded-xl after:content-['']">
+                          className="text-base font-semibold text-white hover:underline break-words outline-none after:absolute after:inset-0 after:rounded-xl after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-sky-400">
                           {c.name || 'Untitled campaign'}
                         </Link>
-                        <p className="text-xs text-white/50 mt-0.5 break-words">
+                        {/* Above the link overlay so it can be selected / copied (plain text — nothing interactive). */}
+                        <p data-testid={`vd-card-meta-${c.id}`} className="relative z-10 w-fit select-text cursor-text text-xs text-white/50 mt-0.5 break-words">
                           Programme: {c.programLabel || '—'} · Billed to: {billedToText(c)} · Created {formatWhen(c.createdAt)}
                         </p>
                       </div>
@@ -160,7 +162,9 @@ export default function VoucherDispersalListPage() {
                     {setup ? (
                       <p className="mt-3 text-xs text-white/60">
                         Not confirmed — nothing has been bought.{' '}
-                        <Link href={href} className="relative z-10 font-semibold text-sky-300 underline underline-offset-2">Continue setup</Link>
+                        {/* Mouse shortcut only: the card's own title link is THE link for keyboard / screen readers. */}
+                        <Link href={href} tabIndex={-1} aria-hidden="true" data-testid={`vd-continue-setup-${c.id}`}
+                          className="relative z-10 font-semibold text-sky-300 underline underline-offset-2">Continue setup</Link>
                       </p>
                     ) : (
                       <dl className="mt-3 grid grid-cols-3 sm:grid-cols-8 gap-3">

@@ -786,7 +786,23 @@ export function isOverBudget(s: Pick<VdPreviewSummary, 'overBudget' | 'totalRupe
 
 /** Confirm-dialog title: `Buy and send N vouchers · ₹X total?` */
 export function confirmDialogTitle(s: Pick<VdPreviewSummary, 'valid' | 'totalRupees'>): string {
-  return `Buy and send ${formatCount(s.valid)} vouchers · ${formatRupees(s.totalRupees)} total?`;
+  return `Buy and send ${formatCount(s.valid)} ${s.valid === 1 ? 'voucher' : 'vouchers'} · ${formatRupees(s.totalRupees)} total?`;
+}
+
+/**
+ * A rupee amount as typed: thousands separators / spaces are dropped, the DECIMAL POINT IS KEPT, so "2500.00"
+ * stays visible and the "whole rupees (no paise)" check refuses it (stripping it would silently make ₹2,50,000).
+ */
+export function cleanRupeeInput(v: string): string {
+  return v.replace(/[,\s]/g, '');
+}
+
+/** "= ₹2,500" echo of what was typed (null when it is not a number). */
+export function rupeeEcho(raw: string): string | null {
+  const t = raw.trim();
+  if (!/^\d+(\.\d+)?$/.test(t)) return null;
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0 ? `= ${formatRupees(n)}` : null;
 }
 
 export interface ConfirmBody {

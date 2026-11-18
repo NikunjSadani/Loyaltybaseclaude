@@ -15,7 +15,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, FileSpreadsheet, Loader2, Upload, X } from 'lucide-react';
+import { ArrowLeft, FileSpreadsheet, Loader2, RefreshCw, Upload, X } from 'lucide-react';
 import {
   ROW_STATUS_TONE, batchConfirmBlock, batchLabel, checkUploadFile, confirmDialogTitle, confirmPayload, formatCount,
   formatRupees, isSetupCampaign, isUncertainFailure, plural, rowStatusText, vdApi,
@@ -43,6 +43,9 @@ export default function AddPeoplePage() {
   const [preview, setPreview] = useState<VdBatchPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
+  /** The batch waiting for confirmation (from the campaign), even when its preview failed to load. */
+  const [waiting, setWaiting] = useState<{ n: number; file: string | null } | null>(null);
+  const [rechecking, setRechecking] = useState(false);
   const inFlight = useRef(false);
 
   /** Load the campaign; if a batch is waiting for confirmation, load its preview (resume). */
@@ -53,22 +56,27 @@ export default function AddPeoplePage() {
     if (!r.ok) { setLoadError(r.error); setLoading(false); return; }
     setItem(r.data);
     const pending = r.data.batches.find((b) => b.status === 'PREVIEWED' && (b.batchNumber ?? 0) >= 2);
+    setWaiting(pending?.batchNumber ? { n: pending.batchNumber, file: pending.sourceFileName } : null);
     if (pending?.batchNumber) {
       const p = await vdApi.getBatch(id, pending.batchNumber);
       if (p.ok) { setPreview(p.data); setPreviewError(null); } else setPreviewError(p.error);
     } else {
       setPreview(null);
+      setPreviewError(null);
     }
     setLoading(false);
   }, [id]);
   useEffect(() => { void load(); }, [load]);
 
-  /** Re-read the batch preview (after a budget edit the budget LEFT changes). */
-  const reloadPreview = useCallback(async (n: number) => {
+  /** Re-read the batch preview (after a budget edit the budget LEFT changes). Returns the error, if any. */
+  const reloadPreview = useCallback(async (n: number): Promise<string | null> => {
+    setRechecking(true);
     const p = await vdApi.getBatch(id, n);
     if (p.ok) { setPreview(p.data); setPreviewError(null); } else setPreviewError(p.error);
     const c = await vdApi.getCampaign(id);
     if (c.ok) setItem(c.data);
+    setRechecking(false);
+    return p.ok ? null : p.error;
   }, [id]);
 
   // ── upload ──
@@ -143,6 +151,24 @@ export default function AddPeoplePage() {
     setNotice({ tone: 'info', text: `Checked: ${batchLabel(n).toLowerCase()} is still not confirmed, so nothing in it was bought. You can try again.` });
   }, [id, router, campaignHref]);
 
+  /**
+   * A definite 409 from confirm / discard means the page is out of date (stale preview, discarded or
+   * confirmed elsewhere): close the dialog, say why, and reload — or open the campaign if the batch is now
+   * confirmed.
+   */
+  const onConflict = async (error: string, n: number) => {
+    setDialog(null);
+    setConfirmError(null);
+    setNotice({ tone: 'warning', text: `${error} This page has been reloaded with the current state.` });
+    const r = await vdApi.getCampaign(id);
+    if (r.ok && r.data.batches.some((b) => b.batchNumber === n && b.status === 'CONFIRMED')) {
+      router.push(campaignHref);
+      return;
+    }
+    setShowUpload(false);
+    await load();
+  };
+
   const onBuy = async () => {
     if (!preview || preview.batchNumber === null || block.blocked || outcomeUnknown || inFlight.current) return;
     const body = confirmPayload(preview);
@@ -165,7 +191,8 @@ export default function AddPeoplePage() {
       await recheck(preview.batchNumber);
       return;
     }
-    setConfirmError(r.error); // a definite refusal — word for word; the dialog stays open
+    if (r.status === 409) { await onConflict(r.error, preview.batchNumber); return; }
+    setConfirmError(r.error); // a definite refusal (e.g. over budget) — word for word; the dialog stays open
   };
 
   const onDiscard = async () => {
@@ -177,6 +204,7 @@ export default function AddPeoplePage() {
     const r = await vdApi.discardBatch(id, n);
     inFlight.current = false;
     setBusy(false);
+    if (!r.ok && r.status === 409) { await onConflict(r.error, n); return; }
     if (!r.ok && !isUncertainFailure(r.status)) { setConfirmError(r.error); return; }
     setDialog(null);
     if (r.ok) {
@@ -200,15 +228,28 @@ export default function AddPeoplePage() {
     </Link>
   );
   const s = preview?.summary;
+  /** What the budget must be for this batch to fit: already spent / committed + this batch. */
+  const neededBudget = preview && s && preview.alreadyCommittedRupees !== null && s.totalRupees !== null
+    ? preview.alreadyCommittedRupees + s.totalRupees
+    : null;
   const skipped = s ? (s.invalid ?? 0) + (s.duplicates ?? 0) : 0;
   const blockedReason = !preview ? (isSetupCampaign(c.status) ? 'Confirm the first file before adding more people (this campaign is still in setup).' : c.addPeopleBlockedReason) : null;
   const uploadVisible = !preview || showUpload;
+  /** The waiting batch an upload would replace (loaded preview, or one named by the campaign that failed to load). */
+  const replacing = preview ? { n: preview.batchNumber, file: waiting?.n === preview.batchNumber ? waiting.file : null } : waiting;
 
   return (
     <div className="space-y-6" data-testid="vd-add">
       <div className="space-y-2">
         {back}
-        <h1 className="text-xl font-bold text-white break-words">Add more people — {c.name || 'Untitled campaign'}</h1>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <h1 className="text-xl font-bold text-white break-words">Add more people — {c.name || 'Untitled campaign'}</h1>
+          <button type="button" onClick={() => void load()} disabled={loading || busy || uploading}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white/80 hover:bg-white/10 disabled:opacity-60">
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
         <p className="text-xs text-white/60 break-words">
           Budget {formatRupees(c.budgetRupees)}. Vouchers already bought in this campaign stay as they are.{' '}
           <span data-testid="vd-add-nothing-spent">Nothing in this new file is bought until you confirm it.</span>
@@ -225,19 +266,32 @@ export default function AddPeoplePage() {
         </div>
       )}
 
+      {rechecking && (
+        <p role="status" data-testid="vd-rechecking" className="inline-flex items-center gap-2 text-xs text-sky-200">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> Re-checking the preview against the new budget…
+        </p>
+      )}
+
       {blockedReason ? (
         <div role="alert" data-testid="vd-add-blocked" className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 break-words">
           {blockedReason}
         </div>
       ) : (
         <>
-          {previewError && <ErrorPanel message={`Couldn't load the waiting batch: ${previewError}`} onRetry={() => void load()} testId="vd-preview-error" />}
+          {previewError && (
+            <ErrorPanel message={`Couldn't load the waiting ${waiting ? batchLabel(waiting.n).toLowerCase() : 'batch'}: ${previewError}`} onRetry={() => void load()} testId="vd-preview-error" />
+          )}
 
           {uploadVisible && (
             <section aria-labelledby="vd-add-upload-heading" className="space-y-4">
               <h2 id="vd-add-upload-heading" className="text-base font-semibold text-white">
-                {preview ? `Replace ${batchLabel(preview.batchNumber).toLowerCase()} with another file` : 'Upload the new list'}
+                {replacing ? `Replace ${batchLabel(replacing.n).toLowerCase()}` : 'Upload the new list'}
               </h2>
+              {replacing && (
+                <p role="note" data-testid="vd-replace-warning" className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                  Uploading here replaces the file waiting in {batchLabel(replacing.n).toLowerCase()}{replacing.file ? ` (${replacing.file})` : ''} — its rows are overwritten by the new file. Nothing from it has been bought.
+                </p>
+              )}
               <p className="text-xs text-white/60">
                 Same template as the first file. A phone that already got a voucher (or has a failed purchase) in this campaign is marked Duplicate and is not bought again.
               </p>
@@ -250,7 +304,8 @@ export default function AddPeoplePage() {
               >
                 <FileSpreadsheet className="w-8 h-8 mx-auto text-white/40" aria-hidden="true" />
                 <p className="text-sm text-white/70 mt-2">Drag the filled-in template here, or</p>
-                <label htmlFor="vd-add-file" className="mt-2 inline-block cursor-pointer rounded-lg border border-white/20 px-3 py-1.5 text-sm font-semibold text-white hover:bg-white/10">
+                <label htmlFor="vd-add-file" data-testid="vd-choose-file" aria-disabled={uploading || undefined}
+                  className={`mt-2 inline-block rounded-lg border border-white/20 px-3 py-1.5 text-sm font-semibold text-white ${uploading ? 'opacity-50 cursor-not-allowed pointer-events-none' : 'cursor-pointer hover:bg-white/10'}`}>
                   Choose file
                 </label>
                 <input id="vd-add-file" type="file" accept={ACCEPT} className="sr-only" disabled={uploading}
@@ -422,7 +477,9 @@ export default function AddPeoplePage() {
                 onConfirm={() => void onBuy()}
                 onClose={() => setDialog(null)}
               >
-                <p>Only the {formatCount(s.valid)} valid rows of {batchLabel(preview.batchNumber).toLowerCase()} are bought. Earlier batches are not touched.</p>
+                <p>
+                  Only the {s.valid === 1 ? '1 valid row' : `${formatCount(s.valid)} valid rows`} of {batchLabel(preview.batchNumber).toLowerCase()} {s.valid === 1 ? 'is' : 'are'} bought. Earlier batches are not touched.
+                </p>
               </ConfirmDialog>
 
               <ConfirmDialog
@@ -443,11 +500,19 @@ export default function AddPeoplePage() {
                   open={editOpen}
                   campaign={{ id: c.id || id, name: c.name, budgetRupees: c.budgetRupees }}
                   floorRupees={item.summary.budgetFloorRupees}
+                  hint={neededBudget !== null
+                    ? `To buy ${batchLabel(preview.batchNumber).toLowerCase()} the budget must be at least ${formatRupees(neededBudget)} (already committed ${formatRupees(preview.alreadyCommittedRupees)} + this batch ${formatRupees(s.totalRupees)}).`
+                    : null}
+                  suggestedBudgetRupees={neededBudget !== null && (c.budgetRupees === null || neededBudget > c.budgetRupees) ? neededBudget : null}
                   onClose={() => setEditOpen(false)}
-                  onSaved={(summary) => {
+                  onSaved={async (summary) => {
                     setEditOpen(false);
-                    setNotice({ tone: 'info', text: `Campaign updated: ${summary}. The preview below is re-checked against the new budget.` });
-                    if (preview.batchNumber !== null) void reloadPreview(preview.batchNumber);
+                    setNotice({ tone: 'info', text: `Campaign updated: ${summary}. Re-checking the preview against the new budget…` });
+                    if (preview.batchNumber === null) return;
+                    const err = await reloadPreview(preview.batchNumber);
+                    setNotice(err
+                      ? { tone: 'warning', text: `Campaign updated: ${summary}. The preview could not be re-checked (${err}) — use Refresh.` }
+                      : { tone: 'info', text: `Campaign updated: ${summary}. The preview below was re-checked against the new budget.` });
                   }}
                   onUncertain={(error) => {
                     setEditOpen(false);

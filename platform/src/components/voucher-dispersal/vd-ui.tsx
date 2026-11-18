@@ -6,7 +6,7 @@ import React from 'react';
 import { AlertTriangle, Download, Loader2, RefreshCw } from 'lucide-react';
 import { Modal } from '@/components/ui/modal';
 import {
-  VD_NAME_MAX, VD_TEMPLATE_URL, editChangeText, editPayload, formatRupees, isUncertainFailure, validateEditForm, vdApi,
+  VD_NAME_MAX, VD_TEMPLATE_URL, cleanRupeeInput, editChangeText, rupeeEcho, editPayload, formatRupees, isUncertainFailure, validateEditForm, vdApi,
   type EditForm, type Tone, type VdCampaign,
 } from '@/lib/voucher-dispersal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
@@ -106,26 +106,34 @@ export function EditCampaignDialog({
   onClose,
   onSaved,
   onUncertain,
+  hint,
+  suggestedBudgetRupees,
 }: {
   open: boolean;
   campaign: Pick<VdCampaign, 'id' | 'name' | 'budgetRupees'>;
   floorRupees: number | null;
+  /** Why the dialog was opened (e.g. "To buy batch 2 the budget must be at least …"). */
+  hint?: string | null;
+  /** Prefill for the budget box (e.g. the amount a waiting batch needs). */
+  suggestedBudgetRupees?: number | null;
   onClose: () => void;
   onSaved: (summary: string) => void;
   onUncertain: (error: string) => void;
 }) {
-  const [form, setForm] = React.useState<EditForm>({ name: campaign.name, budgetRupees: campaign.budgetRupees === null ? '' : String(campaign.budgetRupees) });
+  const initialBudget = suggestedBudgetRupees ?? campaign.budgetRupees;
+  const [form, setForm] = React.useState<EditForm>({ name: campaign.name, budgetRupees: initialBudget === null ? '' : String(initialBudget) });
   const [showErrors, setShowErrors] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const inFlight = React.useRef(false);
   React.useEffect(() => {
     if (open) {
-      setForm({ name: campaign.name, budgetRupees: campaign.budgetRupees === null ? '' : String(campaign.budgetRupees) });
+      setForm({ name: campaign.name, budgetRupees: initialBudget === null ? '' : String(initialBudget) });
       setShowErrors(false);
       setError(null);
     }
-  }, [open, campaign.name, campaign.budgetRupees]);
+  }, [open, campaign.name, initialBudget]);
+  const echo = rupeeEcho(form.budgetRupees);
   const errors = validateEditForm(form, campaign, floorRupees);
   const save = async () => {
     setShowErrors(true);
@@ -152,6 +160,7 @@ export function EditCampaignDialog({
   return (
     <Modal open={open} onOpenChange={(o) => { if (!o && !busy) onClose(); }} title="Edit campaign" description="Rename the campaign or change its budget. Every change is recorded with your name.">
       <form className="space-y-4 text-sm text-gray-700" noValidate onSubmit={(e) => { e.preventDefault(); void save(); }}>
+        {hint && <p data-testid="vd-edit-hint" className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sky-800">{hint}</p>}
         <div>
           <label htmlFor="vd-edit-name" className="block text-xs font-semibold text-gray-600 mb-1">Campaign name</label>
           <input id="vd-edit-name" className={field} value={form.name} maxLength={VD_NAME_MAX} disabled={busy}
@@ -161,14 +170,17 @@ export function EditCampaignDialog({
         </div>
         <div>
           <label htmlFor="vd-edit-budget" className="block text-xs font-semibold text-gray-600 mb-1">Budget (₹)</label>
-          <input id="vd-edit-budget" className={field} inputMode="numeric" value={form.budgetRupees} disabled={busy}
+          <input id="vd-edit-budget" className={field} inputMode="decimal" value={form.budgetRupees} disabled={busy}
             aria-invalid={showErrors && !!errors.budgetRupees}
-            aria-describedby={`vd-edit-floor${showErrors && errors.budgetRupees ? ' vd-edit-budget-error' : ''}`}
-            onChange={(e) => setForm({ ...form, budgetRupees: e.target.value.replace(/[^\d]/g, '') })} />
+            aria-describedby={`vd-edit-floor${echo ? ' vd-edit-budget-echo' : ''}${showErrors && errors.budgetRupees ? ' vd-edit-budget-error' : ''}`}
+            onChange={(e) => setForm({ ...form, budgetRupees: cleanRupeeInput(e.target.value) })} />
+          {echo && <p id="vd-edit-budget-echo" data-testid="vd-edit-budget-echo" className="text-xs text-gray-700 mt-1">{echo}</p>}
           <p id="vd-edit-floor" data-testid="vd-edit-floor" className="text-[11px] text-gray-500 mt-1">
             {floorRupees === null
               ? 'Raise it, or lower it — never below what is already spent or committed (the server checks).'
-              : `The budget can go down to ${formatRupees(floorRupees)} at the lowest — that much is already spent or committed.`}
+              : floorRupees < 1
+                ? 'The budget can go down to ₹1 at the lowest (nothing is spent or committed yet).'
+                : `The budget can go down to ${formatRupees(floorRupees)} at the lowest — that much is already spent or committed.`}
           </p>
           {showErrors && errors.budgetRupees && <p id="vd-edit-budget-error" data-testid="vd-edit-budget-error" className="text-xs text-red-600 mt-1">{errors.budgetRupees}</p>}
         </div>

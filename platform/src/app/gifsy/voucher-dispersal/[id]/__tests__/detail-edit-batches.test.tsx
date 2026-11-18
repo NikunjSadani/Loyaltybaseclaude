@@ -111,11 +111,38 @@ describe('Edit campaign', () => {
     expect(await within(dialog).findByTestId('vd-dialog-error')).toHaveTextContent("The budget can't go below ₹2,400 — that much is already spent (₹2,000) or committed to purchases still in progress (₹400).");
   });
 
-  it('no Edit on a cancelled campaign (server canEdit=false)', async () => {
+  it('budget box keeps the decimal point: "2500.00" is refused, nothing saved; "2,500" saves ₹2,500 (echoed)', async () => {
+    render(<DetailPage />);
+    fireEvent.click(await screen.findByTestId('vd-edit'));
+    const dialog = await screen.findByRole('dialog');
+    const budget = within(dialog).getByLabelText('Budget (₹)') as HTMLInputElement;
+    fireEvent.change(budget, { target: { value: '2500.00' } });
+    expect(budget.value).toBe('2500.00');
+    fireEvent.click(within(dialog).getByTestId('vd-edit-save'));
+    expect(within(dialog).getByTestId('vd-edit-budget-error')).toHaveTextContent('Enter the budget in whole rupees (no paise).');
+    expect(calls((u, i) => u === BASE && i?.method === 'PATCH')).toHaveLength(0);
+    fireEvent.change(budget, { target: { value: '2,500' } });
+    expect(budget.value).toBe('2500');
+    expect(within(dialog).getByTestId('vd-edit-budget-echo')).toHaveTextContent('= ₹2,500');
+    fireEvent.click(within(dialog).getByTestId('vd-edit-save'));
+    await waitFor(() => expect(calls((u, i) => u === BASE && i?.method === 'PATCH')).toHaveLength(1));
+    expect(JSON.parse(String(calls((u, i) => u === BASE && i?.method === 'PATCH')[0][1].body))).toEqual({ budgetRupees: 2500 });
+  });
+
+  it('a zero floor is stated as "at least ₹1" (the smallest budget allowed)', async () => {
+    detailQueue = [ok(detail({ summary: { budgetFloorRupees: 0 } }))];
+    render(<DetailPage />);
+    fireEvent.click(await screen.findByTestId('vd-edit'));
+    expect(within(await screen.findByRole('dialog')).getByTestId('vd-edit-floor')).toHaveTextContent('The budget can go down to ₹1 at the lowest');
+  });
+
+  it('a cancelled campaign shows Edit DISABLED with the reason (server canEdit=false) — never silently missing', async () => {
     detailQueue = [ok(detail({ status: 'CANCELLED', campaign: { canEdit: false, addPeopleBlockedReason: 'This campaign was cancelled — people cannot be added to it.' } }))];
     render(<DetailPage />);
     await screen.findByTestId('vd-detail');
-    expect(screen.queryByTestId('vd-edit')).not.toBeInTheDocument();
+    expect(screen.getByTestId('vd-edit')).toBeDisabled();
+    expect(screen.getByTestId('vd-edit')).toHaveAccessibleDescription("A cancelled campaign can't be edited.");
+    expect(screen.getByTestId('vd-edit-blocked')).toHaveTextContent("A cancelled campaign can't be edited.");
     expect(screen.getByTestId('vd-add-people-blocked')).toHaveTextContent('This campaign was cancelled — people cannot be added to it.');
   });
 
@@ -129,6 +156,33 @@ describe('Edit campaign', () => {
 });
 
 describe('Batches on the campaign page', () => {
+  it('an UNKNOWN campaign status with no server reason says why Add more people is unavailable', async () => {
+    detailQueue = [ok(detail({ status: 'PAUSED', campaign: { addPeopleBlockedReason: null } }))];
+    render(<DetailPage />);
+    expect(await screen.findByTestId('vd-add-people-blocked')).toHaveTextContent('Add more people is unavailable while the status is not recognised.');
+    expect(screen.queryByRole('link', { name: 'Add more people' })).not.toBeInTheDocument();
+  });
+
+  it('the batch table adds up: Rows = Valid + Not issued (invalid + duplicate) + Cancelled', async () => {
+    detailQueue = [ok(detail({ batches: [{ ...BATCH1, total: 5, valid: 2, invalid: 1, duplicates: 1, cancelled: 1 }] }))];
+    render(<DetailPage />);
+    const row = await screen.findByTestId('vd-batch-1');
+    expect(within(row).getByTestId('vd-batch-1-valid')).toHaveTextContent('2');
+    expect(within(row).getByTestId('vd-batch-1-not-issued')).toHaveTextContent('2');
+    expect(within(row).getByTestId('vd-batch-1-cancelled')).toHaveTextContent('1');
+    const heads = within(screen.getByTestId('vd-batches')).getAllByRole('columnheader').map((h) => h.textContent);
+    expect(heads).toEqual(expect.arrayContaining(['Valid', 'Not issued', 'Cancelled']));
+  });
+
+  it('discard of a waiting batch with no row count never prints "—" in the sentence', async () => {
+    detailQueue = [ok(detail({ batches: [BATCH1, { ...PENDING3, total: null }] }))];
+    render(<DetailPage />);
+    fireEvent.click(within(await screen.findByTestId('vd-pending-batch')).getByTestId('vd-discard-batch'));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('The uploaded rows from third.xlsx will be removed.');
+    expect(dialog).not.toHaveTextContent('—');
+  });
+
   it('lists every batch with file, uploader, rows, bought, failed; the rows table filters by batch', async () => {
     render(<DetailPage />);
     const t = await screen.findByTestId('vd-batches');

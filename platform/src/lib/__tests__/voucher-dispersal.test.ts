@@ -319,3 +319,28 @@ describe('batch / cancel normalisers', () => {
     expect(normalizeListItem({ id: 'c', summary: { pendingBatchNumber: 3 } }).summary.pendingBatchNumber).toBe(3);
   });
 });
+
+// ─── UI/UX audit fixes (2026-11-18) ─────────────────────────────────────────────
+describe('rupee input: commas / spaces stripped, the decimal point KEPT (never "2500.00" → 250000)', () => {
+  it('cleanRupeeInput + validation', async () => {
+    const { cleanRupeeInput, rupeeEcho } = await import('@/lib/voucher-dispersal');
+    expect(cleanRupeeInput('2,500')).toBe('2500');
+    expect(cleanRupeeInput(' 2 500 ')).toBe('2500');
+    expect(cleanRupeeInput('2500.00')).toBe('2500.00');
+    expect(validateEditForm({ name: 'Diwali', budgetRupees: cleanRupeeInput('2500.00') }, { name: 'Diwali', budgetRupees: 5000 }, 0).budgetRupees)
+      .toBe('Enter the budget in whole rupees (no paise).');
+    expect(validateCreateForm({ name: 'x', programLabel: 'y', billedToClientId: '', note: '', budgetRupees: cleanRupeeInput('2500.00') }).budgetRupees)
+      .toBe('Enter the budget in whole rupees (no paise).');
+    expect(rupeeEcho('2500')).toBe('= ₹2,500');
+    expect(rupeeEcho('2500.00')).toBe('= ₹2,500');
+    expect(rupeeEcho('abc')).toBeNull();
+    expect(rupeeEcho('')).toBeNull();
+  });
+});
+
+describe('plurals', () => {
+  it('confirm title says "1 voucher" / "N vouchers"', () => {
+    expect(confirmDialogTitle({ valid: 1, totalRupees: 500 })).toBe('Buy and send 1 voucher · ₹500 total?');
+    expect(confirmDialogTitle({ valid: 3, totalRupees: 1500 })).toBe('Buy and send 3 vouchers · ₹1,500 total?');
+  });
+});
