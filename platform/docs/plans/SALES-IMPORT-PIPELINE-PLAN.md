@@ -1563,6 +1563,17 @@ from the step-1 backup if needed).
      frontend alone ahead of this API: a new page against an old API would get a plain 404 from the requestId lookup —
      the page treats any 404 WITHOUT the server's own "No apply was recorded for this request." text as UNKNOWN (Apply
      held + Check again), never as "nothing recorded", and says "nothing recorded" only after a second lookup ~5 s later.
+   - **Migration notes — keep the partial index.** `sales_apply_job_months_active_month_key` (one active job per
+     tenant × month) exists only in migration `20261118170000_sales_apply_jobs`; Prisma cannot express it, so any later
+     `prisma migrate dev` WILL generate `DROP INDEX "sales_apply_job_months_active_month_key"` — delete that line from the
+     generated migration. `api/src/sales-import/apply/active-month-index.spec.ts` fails if a later migration drops it
+     without re-creating it.
+   - **Re-review of `91e4cc46` fixed**: a month whose write runs past the 300 s transaction timeout is FINAL ("<Month>
+     took longer than 5 minutes to write and was rolled back — nothing changed…", logged loudly) — only connection-level
+     errors and "Unable to start a transaction" are retried (M1); the worker keeps ONE hand-back list for its whole run
+     (M2); polling reads select explicit columns, never `focusBasis` (M3); a lost claim inside the write is a stop, and
+     a hand-back is one statement (L1) that is awaited after SIGTERM (L2); a whole-job refusal after a partial success
+     names the months already applied and those not run (L3); Gifsy staff also need their per-tenant grant (L4).
    - **Rollback runbook** (only if the release is rolled back to code without jobs): the old code ignores the new tables,
      but a QUEUED / RUNNING job would never run. Before deploying the old image, run on the target DB (with the usual
      `current_database()` guard, backup confirmed, SQL shown to the owner first):

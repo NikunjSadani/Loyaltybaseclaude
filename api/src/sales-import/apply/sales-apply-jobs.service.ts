@@ -19,8 +19,9 @@ import { SQL_NOW_UTC } from '../sql-time';
 import { monthLabel } from '../months/month-state';
 import { isSalesImportEnabledUncached } from '../sales-import-access';
 import {
-  ApplyStopError, SalesApplyService, TransientApplyError, isTransientDbError, type MonthWriteHooks,
+  ApplyStopError, SalesApplyService, TransientApplyError, isTransientDbError, isTxTimeout, txTimeoutMessage, type MonthWriteHooks,
 } from './sales-apply.service';
+import { GifsyTenantGrantService } from '../../common/rbac/gifsy-tenant-grant.service';
 import { activeJobsByMonth, busyText } from './apply-jobs-data';
 
 /** How often a running job refreshes its heartbeat (well inside SALES_APPLY_STALE_HEARTBEAT_MINUTES). */
@@ -43,7 +44,8 @@ export interface JobRow {
   claimToken: string | null;
   attempts: number;
   error: string | null;
-  focusBasis: unknown;
+  /** Only on a claimed row (the claim RETURNS it); read paths do not select it. */
+  focusBasis?: unknown;
   createdAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -68,6 +70,13 @@ export interface StopToken {
 }
 
 const iso = (d: Date | null) => (d ? new Date(d).toISOString() : null);
+
+/**
+ * The job columns the READ paths need (getJob / findByRequestId, polled every 2 s) — never `focusBasis`, a JSONB snapshot
+ * of the stored product lists that only the worker's claim needs (re-review M3).
+ */
+const JOB_COLUMNS = Prisma.sql`"id","clientId","kind","importId","requestId","request","requestedById","requestedByName",
+  "requestedByRole","status","claimToken","attempts","error","createdAt","startedAt","finishedAt"`;
 const RECALC_GENERIC_FAIL = 'Recalculate failed for this month. Nothing was changed for it.';
 const sameMonths = (a: string[], b: string[]) => a.length === b.length && [...a].sort().every((m, i) => m === [...b].sort()[i]);
 
@@ -155,14 +164,14 @@ export class SalesApplyJobsService {
 
   async getJob(clientId: string, jobId: string): Promise<SalesApplyJobDto> {
     const rows = await this.prisma.$queryRaw<JobRow[]>(Prisma.sql`
-      SELECT * FROM "sales_apply_jobs" WHERE "id" = ${jobId} AND "clientId" = ${clientId}`);
+      SELECT ${JOB_COLUMNS} FROM "sales_apply_jobs" WHERE "id" = ${jobId} AND "clientId" = ${clientId}`);
     if (!rows[0]) throw new NotFoundException('This apply job was not found.');
     return this.toDto(rows[0]);
   }
 
   async findByRequestId(clientId: string, requestId: string): Promise<SalesApplyJobDto | null> {
     const rows = await this.prisma.$queryRaw<JobRow[]>(Prisma.sql`
-      SELECT * FROM "sales_apply_jobs" WHERE "clientId" = ${clientId} AND "requestId" = ${requestId}`);
+      SELECT ${JOB_COLUMNS} FROM "sales_apply_jobs" WHERE "clientId" = ${clientId} AND "requestId" = ${requestId}`);
     return rows[0] ? this.toDto(rows[0]) : null;
   }
 
@@ -269,11 +278,13 @@ export class SalesApplyJobsService {
   }
 
   /** Claim → run until nothing is claimable or a stop is requested. Returns how many jobs were finished / released. */
-  async drain(stop: StopToken = { requested: false }): Promise<{ finished: number; released: number }> {
+  /**
+   * `handedBack`: jobs this PROCESS handed back (transient error / stop / lost claim) — not claimed again by it; the next
+   * run (kick or the 10-minute drain) retries them, a natural back-off instead of a hot retry loop. The worker passes ONE
+   * list for its whole run, so its second drain cannot re-claim them either (re-review M2).
+   */
+  async drain(stop: StopToken = { requested: false }, handedBack: string[] = []): Promise<{ finished: number; released: number }> {
     const out = { finished: 0, released: 0 };
-    // A job handed back in THIS drain (transient error / lost claim) is not claimed again by it: the next run (kick or
-    // the 10-minute drain) retries it — a natural back-off instead of a hot retry loop.
-    const handedBack: string[] = [];
     while (!stop.requested) {
       const job = await this.claimNext(randomUUID(), handedBack);
       if (!job) break;
@@ -296,8 +307,13 @@ export class SalesApplyJobsService {
     // A-M2: on SIGTERM hand the job back AT ONCE (QUEUED, no heartbeat), so Cloud Run's retry / the next run picks it up
     // instead of waiting 10 min for the heartbeat to go stale. A month still writing cannot commit DONE any more (its
     // inTx is guarded by the cleared claim token), so it rolls back whole and is simply run again.
-    let released = false;
-    const off = stop.onStop?.(() => { released = true; void this.release(job, token, { countAttempt: false }); });
+    let releasing: Promise<void> | null = null;
+    const off = stop.onStop?.(() => { releasing ??= this.release(job, token, { countAttempt: false }); });
+    /** Hand back once (a stop may already be doing it) and WAIT for it before reporting 'released' (re-review L2). */
+    const handBack = async (o: { countAttempt: boolean; lastError?: string; month?: string }) => {
+      releasing ??= this.release(job, token, o);
+      await releasing;
+    };
     try {
       // Months left RUNNING by a dead run were never written (DONE is set in the write's own transaction) → run again.
       await this.resetRunningMonths(job.id, token);
@@ -311,6 +327,7 @@ export class SalesApplyJobsService {
         await this.failRemaining(job, token, () => refusal, refusal);
         return 'finished';
       }
+      if (releasing) { await releasing; return 'released'; }
       const pending = (await this.prisma.$queryRaw<Array<{ month: string }>>(Prisma.sql`
         SELECT "month" FROM "sales_apply_job_months" WHERE "jobId" = ${job.id} AND "status" = 'QUEUED' ORDER BY "month"`))
         .map((r) => r.month);
@@ -322,13 +339,13 @@ export class SalesApplyJobsService {
           else await this.runRecalc(job, user, pending[0], hooks, token);
         } catch (e) {
           if (e instanceof ApplyStopError) {
-            if (!released) await this.release(job, token, { countAttempt: false });
+            await handBack({ countAttempt: false });
             return 'released';
           }
           if (e instanceof TransientApplyError) {
             // A-L2: the month rolled back; retry later, remembering the reason in case the attempts run out (A-L3).
             this.log.warn(`apply job ${job.id}: ${e.message} — handed back for a retry`);
-            await this.release(job, token, { countAttempt: true, lastError: e.message, month: e.month });
+            await handBack({ countAttempt: true, lastError: e.message, month: e.month });
             return 'released';
           }
           if (e instanceof HttpException) {
@@ -338,12 +355,12 @@ export class SalesApplyJobsService {
           }
           // Unexpected (DB unreachable before the first month…): hand it back; SALES_APPLY_MAX_ATTEMPTS bounds it.
           this.log.error(`apply job ${job.id} run failed: ${(e as Error)?.message}`);
-          await this.release(job, token, { countAttempt: true, lastError: (e as Error)?.message ?? 'unknown error' });
+          await handBack({ countAttempt: true, lastError: (e as Error)?.message ?? 'unknown error' });
           return 'released';
         }
       }
-      if (released || stop.requested) {
-        if (!released) await this.release(job, token, { countAttempt: false });
+      if (releasing || stop.requested) {
+        await handBack({ countAttempt: false });
         return 'released';
       }
       await this.prisma.$executeRaw(Prisma.sql`
@@ -363,28 +380,31 @@ export class SalesApplyJobsService {
   private async requesterRefusal(job: JobRow): Promise<string | null> {
     const what = job.kind === 'RECALC' ? 'recalculation' : 'apply';
     if (!(await isSalesImportEnabledUncached(this.prisma, job.clientId))) {
-      return `Sales Import was turned off for this client before this ${what} ran. Nothing was written.`;
+      return `Sales Import was turned off for this client before this ${what} ran.`;
     }
     const u = await this.prisma.user.findUnique({
       where: { id: job.requestedById },
       select: { status: true, deletedAt: true, role: true, gifsyRoleId: true },
     });
     if (!u || u.deletedAt || u.status !== 'ACTIVE') {
-      return `${job.requestedByName}'s account is no longer active, so this ${what} was not run. Nothing was written — someone with access can do it again.`;
+      return `${job.requestedByName}'s account is no longer active, so this ${what} was not run — someone with access can do it again.`;
     }
-    if (!(await this.mayUpload(u.role, u.gifsyRoleId, job.clientId))) {
-      return `${job.requestedByName} is no longer allowed to apply sales files, so this ${what} was not run. Nothing was written.`;
+    if (!(await this.mayUpload(job.requestedById, u.role, u.gifsyRoleId, job.clientId))) {
+      return `${job.requestedByName} is no longer allowed to apply sales files, so this ${what} was not run.`;
     }
     return null;
   }
 
   /** targets:upload for the requester, mirroring PermissionGuard (GIFSY_STAFF: its GifsyRole; others: RBAC if enforced). */
-  private async mayUpload(role: string, gifsyRoleId: string | null, clientId: string): Promise<boolean> {
+  private async mayUpload(userId: string, role: string, gifsyRoleId: string | null, clientId: string): Promise<boolean> {
     if (!['CLIENT_ADMIN', 'GIFSY_ADMIN', 'GIFSY_STAFF'].includes(role)) return false;
     if (role === 'GIFSY_STAFF') {
+      // FEATURE axis (its GifsyRole holds targets:upload) AND TENANT axis (it still holds a grant for this tenant —
+      // authoritative, uncached read; re-review L4).
       if (!gifsyRoleId) return false;
       const r = await this.prisma.gifsyRole.findFirst({ where: { id: gifsyRoleId, deletedAt: null }, select: { permissions: true } });
-      return !!r?.permissions.includes('targets:upload');
+      if (!r?.permissions.includes('targets:upload')) return false;
+      return new GifsyTenantGrantService(this.prisma).hasGrantUncached(userId, clientId);
     }
     if (process.env.RBAC_ENFORCEMENT !== 'true') return true;
     const c = await this.prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
@@ -410,7 +430,9 @@ export class SalesApplyJobsService {
             FROM "sales_apply_jobs" j
            WHERE m."jobId" = j."id" AND j."id" = ${job.id} AND j."claimToken" = ${token}
              AND m."month" = ${res.month} AND m."status" = 'RUNNING'`);
-        if (Number(n) !== 1) throw new Error('apply job claim lost — this month is rolled back');
+        // Lost claim (another run took the job, or a stop handed it back): roll this month back and STOP — the run that
+        // holds the job writes it (re-review L1). Never recorded as a business failure.
+        if (Number(n) !== 1) throw new ApplyStopError('apply job claim lost — this month is rolled back');
       },
     };
   }
@@ -439,6 +461,11 @@ export class SalesApplyJobsService {
       if (!(e instanceof HttpException) && isTransientDbError(e)) {
         throw new TransientApplyError(month, `${monthLabel(month)}: a temporary database problem (${(e as Error)?.message ?? 'unknown'})`);
       }
+      if (isTxTimeout(e)) {
+        this.log.error(JSON.stringify({ msg: 'sales-import recalculate: month write TIMED OUT and was rolled back', jobId: job.id, month, error: (e as Error)?.message }));
+        await this.failMonth(job, token, { month, ok: false, error: txTimeoutMessage(month) });
+        return;
+      }
       const msg = e instanceof HttpException ? e.message : RECALC_GENERIC_FAIL;
       if (!(e instanceof HttpException)) this.log.error(`recalculate job ${job.id} ${month} failed: ${(e as Error)?.message}`);
       await this.failMonth(job, token, { month, ok: false, error: msg });
@@ -455,13 +482,30 @@ export class SalesApplyJobsService {
          AND m."month" = ${r.month} AND m."status" IN ('QUEUED','RUNNING')`);
   }
 
-  /** Every month not yet written → FAILED with `reason(lastError)`; the job ends (FAILED when refused as a whole, else DONE). */
+  /**
+   * Every month not yet written → FAILED with `reason(lastError)` + "Nothing was written for <Month>."; the job ends
+   * (FAILED when refused as a whole, else DONE). A job-level `jobError` says WHICH months an earlier run already wrote and
+   * which were not run — never "nothing was written" after a partial success (re-review L3).
+   */
   private async failRemaining(job: JobRow, token: string, reason: (lastError: string | null) => string, jobError?: string): Promise<void> {
-    const pending = await this.prisma.$queryRaw<Array<{ month: string; lastError: string | null }>>(Prisma.sql`
-      SELECT "month", "lastError" FROM "sales_apply_job_months" WHERE "jobId" = ${job.id} AND "status" IN ('QUEUED','RUNNING')`);
-    for (const p of pending) await this.failMonth(job, token, { month: p.month, ok: false, error: reason(p.lastError ?? null) });
+    const rows = await this.prisma.$queryRaw<Array<{ month: string; status: string; lastError: string | null }>>(Prisma.sql`
+      SELECT "month", "status", "lastError" FROM "sales_apply_job_months" WHERE "jobId" = ${job.id} ORDER BY "month"`);
+    const pending = rows.filter((r) => r.status === 'QUEUED' || r.status === 'RUNNING');
+    const done = rows.filter((r) => r.status === 'DONE').map((r) => monthLabel(r.month));
+    for (const p of pending) {
+      const why = reason(p.lastError ?? null).trim();
+      const tail = /written|changed/i.test(why) ? '' : ` Nothing was written for ${monthLabel(p.month)}.`;
+      await this.failMonth(job, token, { month: p.month, ok: false, error: `${why}${tail}` });
+    }
+    const list = (xs: string[]) => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+    const be = (xs: string[]) => (xs.length > 1 ? 'were' : 'was');
+    const notRun = pending.map((p) => monthLabel(p.month));
+    const jobText = jobError === undefined ? null
+      : `${jobError.trim()} ${done.length
+        ? `${list(done)} ${be(done)} already applied by an earlier run${notRun.length ? `; ${list(notRun)} ${be(notRun)} not run` : ''}.`
+        : 'Nothing was written.'}`;
     await this.prisma.$executeRaw(Prisma.sql`
-      UPDATE "sales_apply_jobs" SET "status" = ${jobError ? 'FAILED' : 'DONE'}, "error" = ${jobError ?? null},
+      UPDATE "sales_apply_jobs" SET "status" = ${jobText ? 'FAILED' : 'DONE'}, "error" = ${jobText},
              "finishedAt" = ${SQL_NOW_UTC}, "claimToken" = NULL
        WHERE "id" = ${job.id} AND "claimToken" = ${token}`);
   }
@@ -480,19 +524,23 @@ export class SalesApplyJobsService {
    * the month's lastError (A-L3).
    */
   private async release(job: JobRow, token: string, o: { countAttempt: boolean; lastError?: string; month?: string }): Promise<void> {
-    if (o.lastError) {
-      await this.prisma.$executeRaw(Prisma.sql`
-        UPDATE "sales_apply_job_months" m SET "lastError" = ${o.lastError}
-          FROM "sales_apply_jobs" j
-         WHERE m."jobId" = j."id" AND j."id" = ${job.id} AND j."claimToken" = ${token}
-           AND m."status" IN ('QUEUED','RUNNING') AND (${o.month ?? null}::text IS NULL OR m."month" = ${o.month ?? null})`);
-    }
-    await this.resetRunningMonths(job.id, token);
+    // ONE statement (re-review L1): the job goes back to QUEUED and its unwritten months back to QUEUED (with the
+    // retryable error kept) together, and only while this run still holds the claim.
     await this.prisma.$executeRaw(Prisma.sql`
-      UPDATE "sales_apply_jobs"
-         SET "status" = 'QUEUED', "claimToken" = NULL, "heartbeatAt" = NULL,
-             "attempts" = GREATEST(0, "attempts" - ${o.countAttempt ? 0 : 1})
-       WHERE "id" = ${job.id} AND "claimToken" = ${token}`);
+      WITH j AS (
+        UPDATE "sales_apply_jobs"
+           SET "status" = 'QUEUED', "claimToken" = NULL, "heartbeatAt" = NULL,
+               "attempts" = GREATEST(0, "attempts" - ${o.countAttempt ? 0 : 1})
+         WHERE "id" = ${job.id} AND "claimToken" = ${token}
+        RETURNING "id"
+      )
+      UPDATE "sales_apply_job_months" m
+         SET "status" = 'QUEUED',
+             "startedAt" = CASE WHEN m."status" = 'RUNNING' THEN NULL ELSE m."startedAt" END,
+             "lastError" = CASE WHEN ${o.lastError ?? null}::text IS NOT NULL AND (${o.month ?? null}::text IS NULL OR m."month" = ${o.month ?? null})
+                                THEN ${o.lastError ?? null} ELSE m."lastError" END
+        FROM j
+       WHERE m."jobId" = j."id" AND m."status" IN ('QUEUED','RUNNING')`);
   }
 }
 

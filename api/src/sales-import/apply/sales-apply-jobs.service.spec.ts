@@ -19,11 +19,14 @@ const user: JwtPayload = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phon
 type Job = Record<string, unknown> & { id: string; status: string; claimToken: string | null; attempts: number };
 type Month = { jobId: string; clientId: string; month: string; status: string; result: unknown; lastError?: string | null; startedAt: Date | null; finishedAt: Date | null };
 
-function fakeDb(opts: { flag?: boolean; userStatus?: string; userRole?: string; deleted?: boolean } = {}) {
+function fakeDb(opts: { flag?: boolean; userStatus?: string; userRole?: string; deleted?: boolean; grant?: boolean; gifsyRole?: string[] | null } = {}) {
   const jobs: Job[] = [];
   const months: Month[] = [];
   const log: string[] = [];
+  const reads: string[] = [];
   let failInsertWith: unknown = null;
+  /** When set, the next release statement waits for this promise (re-review L2 test). */
+  let releaseGate: Promise<void> | null = null;
   const text = (q: Prisma.Sql) => q.strings.join('?').replace(/\s+/g, ' ');
   const v = (q: Prisma.Sql) => q.values as unknown[];
   const jobOf = (id: unknown) => jobs.find((j) => j.id === id);
@@ -36,14 +39,21 @@ function fakeDb(opts: { flag?: boolean; userStatus?: string; userRole?: string; 
         .map((m) => ({ month: m.month, jobId: m.jobId, kind: jobOf(m.jobId)!.kind, status: m.status, importId: jobOf(m.jobId)!.importId,
           requestedByName: jobOf(m.jobId)!.requestedByName, createdAt: jobOf(m.jobId)!.createdAt }));
     }
-    if (t.includes('SELECT * FROM "sales_apply_jobs" WHERE "id" =')) return jobs.filter((j) => j.id === vals[0] && j.clientId === vals[1]);
-    if (t.includes('SELECT * FROM "sales_apply_jobs" WHERE "clientId" =')) return jobs.filter((j) => j.clientId === vals[0] && j.requestId === vals[1]);
+    const withoutBasis = (j: Job) => { const { focusBasis, ...rest } = j; void focusBasis; return rest; };
+    if (t.includes('FROM "sales_apply_jobs" WHERE "id" =')) {
+      reads.push(t);
+      return jobs.filter((j) => j.id === vals[0] && j.clientId === vals[1]).map(withoutBasis);
+    }
+    if (t.includes('FROM "sales_apply_jobs" WHERE "clientId" =')) {
+      reads.push(t);
+      return jobs.filter((j) => j.clientId === vals[0] && j.requestId === vals[1]).map(withoutBasis);
+    }
     if (t.includes('SELECT "month","status","result"')) return months.filter((m) => m.jobId === vals[0]).sort((a, b) => a.month.localeCompare(b.month));
     if (t.includes('SELECT "month" FROM "sales_apply_job_months" WHERE "jobId" = ? AND "status" = \'QUEUED\'')) {
       return months.filter((m) => m.jobId === vals[0] && m.status === 'QUEUED').sort((a, b) => a.month.localeCompare(b.month));
     }
-    if (t.includes('SELECT "month", "lastError" FROM "sales_apply_job_months" WHERE "jobId" = ? AND "status" IN')) {
-      return months.filter((m) => m.jobId === vals[0] && ['QUEUED', 'RUNNING'].includes(m.status));
+    if (t.includes('SELECT "month", "status", "lastError" FROM "sales_apply_job_months" WHERE "jobId" = ? ORDER BY')) {
+      return months.filter((m) => m.jobId === vals[0]).sort((a, b) => a.month.localeCompare(b.month));
     }
     if (t.includes('UPDATE "sales_apply_jobs" SET "status" = \'RUNNING\'')) {
       const token = vals[0] as string;
@@ -59,7 +69,7 @@ function fakeDb(opts: { flag?: boolean; userStatus?: string; userRole?: string; 
   const executeRaw = jest.fn(async (q: Prisma.Sql) => {
     const t = text(q);
     const vals = v(q);
-    if (t.includes('WITH j AS')) {
+    if (t.includes('INSERT INTO "sales_apply_jobs"')) {
       if (failInsertWith) throw failInsertWith;
       const [id, clientId, kind, importId, requestId, request, requestedById, requestedByName, requestedByRole] = vals as string[];
       jobs.push({ id, clientId, kind, importId, requestId, request: JSON.parse(request), requestedById, requestedByName, requestedByRole,
@@ -128,6 +138,21 @@ function fakeDb(opts: { flag?: boolean; userStatus?: string; userRole?: string; 
       log.push(`job:${status}`);
       return 1;
     }
+    if (t.includes('WITH j AS ( UPDATE "sales_apply_jobs" SET "status" = \'QUEUED\', "claimToken" = NULL, "heartbeatAt" = NULL')) {
+      if (releaseGate) await releaseGate;
+      // values: dec, jobId, token, lastError, month, month, lastError
+      const [dec, jobId, token, lastError, monthA] = vals as [number, string, string, string | null, string | null];
+      if (!held(jobId, token)) { log.push('job:release-refused'); return 0; }
+      const j = jobOf(jobId)!;
+      Object.assign(j, { status: 'QUEUED', claimToken: null, attempts: Math.max(0, j.attempts - dec) });
+      for (const m of months) {
+        if (m.jobId !== jobId || !['QUEUED', 'RUNNING'].includes(m.status)) continue;
+        m.status = 'QUEUED';
+        if (lastError != null && (monthA == null || m.month === monthA)) m.lastError = lastError;
+      }
+      log.push(dec ? 'job:released(not counted)' : 'job:released(counted)');
+      return 1;
+    }
     if (t.includes('UPDATE "sales_apply_jobs" SET "status" = \'QUEUED\', "claimToken" = NULL, "heartbeatAt" = NULL')) {
       const [dec, jobId, token] = vals as [number, string, string];
       if (held(jobId, token)) {
@@ -140,11 +165,13 @@ function fakeDb(opts: { flag?: boolean; userStatus?: string; userRole?: string; 
     throw new Error(`unexpected statement: ${t}`);
   });
   const db = {
-    jobs, months, log, $queryRaw: queryRaw, $executeRaw: executeRaw, failInsert: (e: unknown) => { failInsertWith = e; },
+    jobs, months, log, reads, $queryRaw: queryRaw, $executeRaw: executeRaw, failInsert: (e: unknown) => { failInsertWith = e; },
+    gateRelease: (p: Promise<void> | null) => { releaseGate = p; },
+    gifsyStaffTenantGrant: { findUnique: jest.fn(async () => (opts.grant === false ? null : { userId: 'u1' })) },
     // requester re-check (A-L4)
     client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: { salesImport: opts.flag ?? true } })) },
-    user: { findUnique: jest.fn(async () => ({ status: opts.userStatus ?? 'ACTIVE', deletedAt: opts.deleted ? new Date() : null, role: opts.userRole ?? 'CLIENT_ADMIN', gifsyRoleId: null })) },
-    gifsyRole: { findFirst: jest.fn(async () => null) },
+    user: { findUnique: jest.fn(async () => ({ status: opts.userStatus ?? 'ACTIVE', deletedAt: opts.deleted ? new Date() : null, role: opts.userRole ?? 'CLIENT_ADMIN', gifsyRoleId: opts.userRole === 'GIFSY_STAFF' ? 'gr1' : null })) },
+    gifsyRole: { findFirst: jest.fn(async () => (opts.gifsyRole === null ? null : { permissions: opts.gifsyRole ?? ['targets:upload'] })) },
   };
   return db;
 }
@@ -449,7 +476,7 @@ describe('audit fixes (dual audit of e1ce98d8)', () => {
       throw new Error('Connection terminated');
     });
     await svc.drain();
-    expect(db.log).toEqual(['running:2026-10', 'reset:refused', 'job:release-refused']);
+    expect(db.log).toEqual(['running:2026-10', 'job:release-refused']);
     expect(db.months[0].status).toBe('RUNNING'); // the newer run's month is untouched
     expect(db.jobs[0].claimToken).toBe('newer-run');
   });
@@ -478,10 +505,12 @@ describe('audit fixes (dual audit of e1ce98d8)', () => {
   });
 
   it.each([
-    [{ flag: false }, /Sales Import was turned off for this client before this apply ran\. Nothing was written\./],
-    [{ userStatus: 'SUSPENDED' }, /Asha.s account is no longer active, so this apply was not run\. Nothing was written/],
+    [{ flag: false }, /Sales Import was turned off for this client before this apply ran\. Nothing was written/],
+    [{ userStatus: 'SUSPENDED' }, /Asha.s account is no longer active, so this apply was not run — someone with access can do it again\. Nothing was written/],
     [{ deleted: true }, /Asha.s account is no longer active/],
-    [{ userRole: 'SALES_USER' }, /Asha is no longer allowed to apply sales files, so this apply was not run\. Nothing was written\./],
+    [{ userRole: 'SALES_USER' }, /Asha is no longer allowed to apply sales files, so this apply was not run\. Nothing was written/],
+    [{ userRole: 'GIFSY_STAFF', grant: false }, /Asha is no longer allowed to apply sales files/],
+    [{ userRole: 'GIFSY_STAFF', gifsyRole: ['targets:read'] }, /Asha is no longer allowed to apply sales files/],
   ])('A-L4: the worker re-checks the tenant flag and the requester before running (%j) → every month FAILED with the reason, nothing applied', async (o, why) => {
     const { db, apply, svc } = await queued(['2026-10', '2026-11'], o as never);
     await svc.drain();
@@ -524,5 +553,101 @@ describe('audit fixes (dual audit of e1ce98d8)', () => {
     expect(r.job.attempts).toBe(0);
     // B-L3: an old page renders "<Month>: not applied" above this text — it starts by saying it is simply not finished yet.
     expect(r.results[0].error).toMatch(/^Not finished yet: October 2026 is being recalculated in the background/);
+  });
+});
+
+describe('re-review fixes (ab1dbbbb..91e4cc46)', () => {
+  type Hooks = { beforeMonth(m: string): Promise<void>; inTx(tx: unknown, r: unknown): Promise<void> };
+  async function queued(months = ['2026-10'], o: Parameters<typeof fakeDb>[0] = {}) {
+    const db = fakeDb(o);
+    const apply = applyMock();
+    const svc = new SalesApplyJobsService(db as never, apply as never);
+    await svc.enqueueApply(user, 'imp1', { ...body, months });
+    db.log.length = 0;
+    return { db, apply, svc };
+  }
+
+  it('M2: one hand-back list across drains — a job handed back by the first drain is NOT re-claimed by the second', async () => {
+    const { db, apply, svc } = await queued();
+    apply.apply.mockRejectedValue(new Error('Connection terminated'));
+    const handedBack: string[] = [];
+    expect(await svc.drain({ requested: false }, handedBack)).toEqual({ finished: 0, released: 1 });
+    expect(await svc.drain({ requested: false }, handedBack)).toEqual({ finished: 0, released: 0 });
+    expect(apply.apply).toHaveBeenCalledTimes(1);
+    expect(handedBack).toEqual([db.jobs[0].id]);
+  });
+
+  it('M3: polling reads (getJob / requestId lookup) never select focusBasis (or *)', async () => {
+    const { db, svc } = await queued();
+    db.jobs[0].focusBasis = [{ dims: 'big' }];
+    db.reads.length = 0;
+    const j = await svc.getJob('t1', db.jobs[0].id);
+    await svc.findByRequestId('t1', body.requestId);
+    expect(db.reads).toHaveLength(2);
+    for (const t of db.reads) {
+      expect(t).not.toMatch(/focusBasis|SELECT \*/);
+      expect(t).toMatch(/"id","clientId","kind"/);
+    }
+    expect(j).not.toHaveProperty('focusBasis');
+  });
+
+  it('L1: a lost claim inside the write transaction is a STOP (rolls the month back, nothing recorded as failed); release is ONE statement', async () => {
+    const { db, apply, svc } = await queued();
+    apply.apply.mockImplementation(async (_u: JwtPayload, _i: string, req: { months: string[] }, hooks: Hooks) => {
+      await hooks.beforeMonth(req.months[0]);
+      db.jobs[0].claimToken = 'newer-run';
+      await expect(hooks.inTx(db, { month: req.months[0], ok: true })).rejects.toBeInstanceOf(ApplyStopError);
+      throw new ApplyStopError('claim lost');
+    });
+    expect(await svc.drain()).toEqual({ finished: 0, released: 1 });
+    expect(db.log).toEqual(['running:2026-10', 'job:release-refused']); // never done:/failed:
+    const releases = db.$executeRaw.mock.calls.map((c) => (c[0] as Prisma.Sql).strings.join('?')).filter((t) => /SET "status" = 'QUEUED', "claimToken" = NULL/.test(t));
+    expect(releases).toHaveLength(1);
+    expect(releases[0]).toMatch(/WITH j AS \(\s*UPDATE "sales_apply_jobs"[\s\S]*UPDATE "sales_apply_job_months" m/);
+  });
+
+  it('L2: after SIGTERM the run reports "released" only once the hand-back has been written', async () => {
+    const { db, apply, svc } = await queued();
+    let open: () => void = () => {};
+    db.gateRelease(new Promise<void>((res) => { open = res; }));
+    const ls: Array<(r: string) => void> = [];
+    const stop = { requested: false, onStop: (cb: (r: string) => void) => { ls.push(cb); return () => undefined; } };
+    apply.apply.mockImplementation(async (_u: JwtPayload, _i: string, req: { months: string[] }, hooks: Hooks) => {
+      await hooks.beforeMonth(req.months[0]);
+      stop.requested = true;
+      ls.forEach((l) => l('SIGTERM'));
+      throw new ApplyStopError('worker stopping');
+    });
+    let settled = false;
+    const run = svc.drain(stop).then((r) => { settled = true; return r; });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(settled).toBe(false); // still waiting for the release to land
+    open();
+    expect(await run).toEqual({ finished: 0, released: 1 });
+    expect(db.jobs[0]).toEqual(expect.objectContaining({ status: 'QUEUED', claimToken: null }));
+  });
+
+  it('L3: a whole-job refusal AFTER an earlier run wrote some months says which were applied and which were not run', async () => {
+    const { db, svc } = await queued(['2026-09', '2026-10', '2026-11'], { userStatus: 'SUSPENDED' });
+    db.months.find((m) => m.month === '2026-09')!.status = 'DONE';
+    await svc.drain();
+    expect(db.jobs[0].status).toBe('FAILED');
+    expect(db.jobs[0].error).toBe(
+      "Asha's account is no longer active, so this apply was not run — someone with access can do it again. " +
+      'September 2026 was already applied by an earlier run; October 2026 and November 2026 were not run.');
+    expect(db.jobs[0].error).not.toMatch(/Nothing was written\./);
+    expect((db.months.find((m) => m.month === '2026-10')!.result as { error: string }).error).toMatch(/Nothing was written for October 2026\.$/);
+  });
+
+  it('M1: a Recalculate whose write ran out of time is FAILED with its own words (never retried as "temporary")', async () => {
+    const db = fakeDb();
+    const apply = applyMock();
+    const svc = new SalesApplyJobsService(db as never, apply as never);
+    await svc.enqueueRecalculate(user, '2026-10', { expectedDefinitionsHash: 'h', expectedHistoryAppliedAt: 'x', requestId: 'req-recalc-tx1' });
+    apply.recalculate.mockRejectedValue(Object.assign(new Error('Transaction already closed: A commit cannot be executed on an expired transaction. The timeout for this transaction was 300000 ms'), { code: 'P2028' }));
+    expect(await svc.drain()).toEqual({ finished: 1, released: 0 });
+    expect(db.months[0]).toEqual(expect.objectContaining({ status: 'FAILED', result: expect.objectContaining({
+      error: 'October 2026 took longer than 5 minutes to write and was rolled back — nothing changed. The file may be too large for one apply; contact Gifsy tech.' }) }));
   });
 });

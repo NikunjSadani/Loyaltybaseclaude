@@ -50,9 +50,12 @@ async function main(): Promise<void> {
   const jobs = app.get(SalesApplyJobsService);
   // Background Apply / Recalculate jobs (owner 2026-11-18) go FIRST (an admin is waiting on them; a file read can take
   // minutes), then the imports, then any job queued meanwhile. Each drain stops claiming once a stop is requested.
-  const applied = await jobs.drain(stop);
+  // ONE hand-back list for this whole process run: a job handed back by the first drain is not re-claimed by the second
+  // (re-review M2) — the next execution / the 10-minute drain retries it.
+  const handedBack: string[] = [];
+  const applied = await jobs.drain(stop, handedBack);
   const drained = await drainImports(proc, stop);
-  const appliedAfter = stop.requested ? { finished: 0, released: 0 } : await jobs.drain(stop);
+  const appliedAfter = stop.requested ? { finished: 0, released: 0 } : await jobs.drain(stop, handedBack);
   // S5: every drain also runs a bounded retention sweep across tenants (expired files, abandoned uploads). Skipped when
   // stopping (the next drain runs it).
   const retention = stop.requested ? null : await app.get(SalesImportRetentionService).sweep({ limit: 50 });

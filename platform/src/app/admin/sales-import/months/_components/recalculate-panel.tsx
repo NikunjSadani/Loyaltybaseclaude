@@ -109,11 +109,14 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
   }, [activeJob, follow]);
 
   const job = jobId ? jobs[jobId] ?? null : null;
-  const jobRunning = (!!job && !jobEnded(job)) || (!!activeJob && !job);
+  const followProblem = jobId ? problems[jobId] ?? null : null;
+  // Re-review L6: a FINAL 401 / 403 / 404 while following ends the wait (the message says why) and re-enables
+  // Recalculate — never "Waiting for it to finish" forever.
+  const jobRunning = !followProblem?.final && ((!!job && !jobEnded(job)) || (!!activeJob && !job));
   const busy = applying || checking || !!unknown || jobRunning;
   const queuedTooLong = !!job && job.status === 'QUEUED' && job.attempts === 0 && Date.now() - Date.parse(job.createdAt) > JOB_QUEUED_TOO_LONG_MS;
   const progress = job ? job.months.map((m) => monthProgressText(job, m.month, monthLabel(m.month))).join('. ') : '';
-  const problem = jobId ? problems[jobId] ?? null : null;
+  const problem = followProblem;
 
   async function apply() {
     if (!preview || !preview.canApply || busy) return;
@@ -250,6 +253,11 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null }
         </div>
       )}
       </div>
+      {problem?.final && (
+        <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" data-testid="recalc-job-stopped">
+          {problem.text}
+        </div>
+      )}
       {jobRunning && (
         <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 space-y-1" data-testid="recalc-job">
           <p className="font-semibold flex items-center gap-2"><Spinner size="sm" />

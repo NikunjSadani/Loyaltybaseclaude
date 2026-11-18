@@ -84,13 +84,36 @@ export class TransientApplyError extends Error {
   }
 }
 
-/** Is this a database error a retry can fix (as opposed to a definite business refusal)? */
+/**
+ * The month's transaction ran past its own timeout (APPLY_TX_TIMEOUT_MS = 300 s) and was rolled back: Prisma P2028
+ * "Transaction already closed / expired". Retrying would only run as long again — so this is FINAL (re-review M1).
+ */
+export function isTxTimeout(e: unknown): boolean {
+  const err = e as { code?: string; message?: string };
+  const msg = String(err?.message ?? '');
+  if (/Unable to start a transaction/i.test(msg)) return false; // maxWait: the pool was busy — retryable
+  return /Transaction already closed|expired transaction|transaction.*(timed out|timeout)|A commit cannot be executed on an expired transaction/i.test(msg)
+    || (String(err?.code ?? '') === 'P2028' && /closed|expired|timeout/i.test(msg));
+}
+
+/** "<Month> took longer than 5 minutes to write…" — the plain words for a month whose write ran out of time. */
+export function txTimeoutMessage(month: string): string {
+  return `${monthLabel(month)} took longer than ${Math.round(APPLY_TX_TIMEOUT_MS / 60_000)} minutes to write and was rolled back — nothing changed. ` +
+    'The file may be too large for one apply; contact Gifsy tech.';
+}
+
+/**
+ * Is this a database error a retry can fix (connection lost, deadlock / serialization, pool busy) — as opposed to a
+ * definite business refusal or a transaction that simply ran out of time (isTxTimeout, FINAL)?
+ */
 export function isTransientDbError(e: unknown): boolean {
+  if (isTxTimeout(e)) return false;
   const err = e as { code?: string; meta?: { code?: string }; message?: string };
   const code = String(err?.code ?? '');
-  if (['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2028', 'P2034'].includes(code)) return true;
+  if (['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2034'].includes(code)) return true;
+  if (code === 'P2028') return /Unable to start a transaction/i.test(String(err?.message ?? ''));
   if (['40001', '40P01', '57P01', '57P02', '57P03', '08000', '08003', '08006'].includes(String(err?.meta?.code ?? ''))) return true;
-  return /Connection terminated|ECONNRESET|ECONNREFUSED|Can't reach database|Server has closed the connection|could not serialize|deadlock detected|Transaction already closed|Transaction API error|terminating connection/i
+  return /Connection terminated|ECONNRESET|ECONNREFUSED|Can't reach database|Server has closed the connection|could not serialize|deadlock detected|Unable to start a transaction|terminating connection/i
     .test(String(err?.message ?? ''));
 }
 
@@ -179,6 +202,13 @@ export class SalesApplyService {
         // A background job retries a transient DB problem (the month's transaction rolled back); a direct call reports it.
         if (hooks && !(e instanceof MonthApplyError) && isTransientDbError(e)) {
           throw new TransientApplyError(month, `${monthLabel(month)}: a temporary database problem (${(e as Error)?.message ?? 'unknown'})`);
+        }
+        if (isTxTimeout(e)) {
+          // FINAL, and loud: the month is too big to write inside APPLY_TX_TIMEOUT_MS (re-review M1).
+          this.log.error(JSON.stringify({ msg: 'sales-import apply: month write TIMED OUT and was rolled back', importId: imp.id, month,
+            timeoutMs: APPLY_TX_TIMEOUT_MS, error: (e as Error)?.message }));
+          results.push({ month, ok: false, error: txTimeoutMessage(month) });
+          continue;
         }
         const msg = e instanceof MonthApplyError ? e.message : 'Apply failed for this month. Nothing was changed for it.';
         if (!(e instanceof MonthApplyError)) this.log.error(`apply ${imp.id} ${month} failed: ${(e as Error)?.message}`);

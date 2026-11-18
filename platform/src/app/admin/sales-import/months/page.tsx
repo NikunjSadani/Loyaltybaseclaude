@@ -68,11 +68,14 @@ export default function SalesMonthsPage() {
   useEffect(() => {
     if (!anyActive) return;
     let t: ReturnType<typeof setTimeout> | null = null;
-    const schedule = () => { t = setTimeout(() => setTick((x) => x + 1), 5000); };
-    const onVisible = () => { if (document.visibilityState !== 'hidden' && !t) schedule(); };
-    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') document.addEventListener('visibilitychange', onVisible);
-    else schedule();
-    return () => { if (t) clearTimeout(t); document.removeEventListener('visibilitychange', onVisible); };
+    const schedule = () => { if (!t) t = setTimeout(() => { t = null; setTick((x) => x + 1); }, 5000); };
+    // Re-review L5: listen for the WHOLE time — a tab hidden after polling started stops polling, and resumes when shown.
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') { if (t) { clearTimeout(t); t = null; } } else schedule();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    if (document.visibilityState !== 'hidden') schedule();
+    return () => { if (t) clearTimeout(t); document.removeEventListener('visibilitychange', onVisibility); };
   }, [anyActive, tick]);
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
@@ -291,7 +294,7 @@ export default function SalesMonthsPage() {
                       {row.activeJob && (
                         <span data-testid={`active-job-${row.month}`}
                           className="mt-1 flex w-fit items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border bg-blue-50 text-blue-800 border-blue-200">
-                          <Spinner size="sm" />
+                          <span aria-hidden="true" className="inline-flex"><Spinner size="sm" /></span>
                           {row.activeJob.status === 'QUEUED' ? 'Queued' : row.activeJob.kind === 'RECALC' ? 'Being recalculated' : 'Being applied'}
                           {' '}by {row.activeJob.requestedBy} since {whenLabel(row.activeJob.createdAt)}
                         </span>

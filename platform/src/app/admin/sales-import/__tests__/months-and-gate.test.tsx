@@ -667,3 +667,55 @@ describe('months — dual-audit fixes (background jobs)', () => {
     expect(screen.getByTestId('recalc-live')).toHaveTextContent('October 2026: recalculated');
   });
 });
+
+describe('months — re-review fixes', () => {
+  const active = { jobId: 'job7', kind: 'APPLY' as const, status: 'RUNNING' as const, importId: 'imp3', requestedBy: 'Ravi', createdAt: new Date().toISOString() };
+  const histRow = (over: Partial<SalesMonthRow> = {}) => row({
+    month: '2026-10', hasHistory: true, historySourceImportId: 'i1', historyAppliedAt: '2026-11-02T05:00:00.000Z', ...over,
+  });
+
+  it('L5: polling stops when the tab is hidden AFTER it started, and resumes when shown', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let state: DocumentVisibilityState = 'visible';
+    const spy = vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => state);
+    try {
+      apiMock.months.mockResolvedValue(ok([row({ month: '2026-10', activeJob: active })]));
+      render(<MonthsPage />);
+      await screen.findByTestId('active-job-2026-10');
+      expect(apiMock.months).toHaveBeenCalledTimes(1);
+      state = 'hidden';
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(apiMock.months).toHaveBeenCalledTimes(1);
+      state = 'visible';
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(apiMock.months).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('the "being applied" badge spinner is hidden from screen readers (no stray "Loading")', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10', activeJob: active })]));
+    render(<MonthsPage />);
+    const badge = await screen.findByTestId('active-job-2026-10');
+    // every "Loading" spinner in the badge sits inside an aria-hidden wrapper
+    const spinners = badge.querySelectorAll('svg[aria-label="Loading"]');
+    expect(spinners.length).toBeGreaterThan(0);
+    spinners.forEach((sv) => expect(sv.closest('[aria-hidden="true"]')).not.toBeNull());
+  });
+
+  it('L6: a FINAL 403 on the first poll of a running job shows why and re-enables Recalculate (never "waiting" forever)', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow({ activeJob: { ...active, kind: 'RECALC', importId: null } })]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.getApplyJob.mockResolvedValue({ success: false, error: 'Forbidden', status: 403 });
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    await screen.findByTestId('recalc-preview');
+    expect(await screen.findByTestId('recalc-job-stopped')).toHaveTextContent('You no longer have access to follow this apply');
+    expect(screen.queryByTestId('recalc-job')).not.toBeInTheDocument();
+    expect(screen.getByTestId('recalc-apply')).not.toBeDisabled();
+  });
+});

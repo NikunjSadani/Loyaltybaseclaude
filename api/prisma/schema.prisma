@@ -3180,7 +3180,6 @@ model SalesImportAggregate {
   @@map("sales_import_aggregates")
 }
 
-/// Immutable history of every apply (audit + "what was written").
 /// An Apply / Recalculate run in the BACKGROUND by the sales-import worker (owner 2026-11-18; migration
 /// 20261118170000_sales_apply_jobs). Read/written with raw SQL by SalesApplyJobsService.
 model SalesApplyJob {
@@ -3214,7 +3213,10 @@ model SalesApplyJob {
 /// One month of a SalesApplyJob: progress + result. NOTE: a PARTIAL unique index
 /// `sales_apply_job_months_active_month_key` ON ("clientId","month") WHERE "status" IN ('QUEUED','RUNNING') — at most ONE
 /// active Apply / Recalculate per tenant × month — is defined in the migration, not here (Prisma can't express partial
-/// indexes). Do NOT drop it: the enqueue maps its violation to 409.
+/// indexes). ⚠️ Do NOT drop it: the enqueue maps its violation to 409, and WITHOUT it two applies of one month can be
+/// queued and both run. `prisma migrate dev` diffs from this schema and WILL generate `DROP INDEX
+/// "sales_apply_job_months_active_month_key"` — delete that line from any generated migration (pinned by
+/// src/sales-import/apply/active-month-index.spec.ts; see SALES-IMPORT-PIPELINE-PLAN.md §18 item 5, migration notes).
 model SalesApplyJobMonth {
   id         String    @id @default(cuid())
   jobId      String
@@ -3233,6 +3235,7 @@ model SalesApplyJobMonth {
   @@map("sales_apply_job_months")
 }
 
+/// Immutable history of every apply (audit + "what was written").
 model SalesImportApply {
   id                  String   @id @default(cuid())
   importId            String

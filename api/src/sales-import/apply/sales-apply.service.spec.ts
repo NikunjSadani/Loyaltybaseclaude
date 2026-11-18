@@ -1291,10 +1291,26 @@ describe('background-job hooks + prechecks', () => {
     await expect(services(db).apply.apply(user, 'imp1', body([PREV]), {})).rejects.toBeInstanceOf(TransientApplyError);
     const direct = await services(db).apply.apply(user, 'imp1', body([PREV]));
     expect(direct.results[0]).toEqual(expect.objectContaining({ ok: false, error: 'Apply failed for this month. Nothing was changed for it.' }));
-    for (const e of [{ code: 'P1001' }, { code: 'P2034' }, { code: 'P2028' }, { code: 'P2010', meta: { code: '40001' } }, new Error('Connection terminated unexpectedly')]) {
+    for (const e of [{ code: 'P1001' }, { code: 'P2034' }, { code: 'P2028', message: 'Transaction API error: Unable to start a transaction in the given time.' }, { code: 'P2010', meta: { code: '40001' } }, new Error('Connection terminated unexpectedly')]) {
       expect(isTransientDbError(e)).toBe(true);
     }
     for (const e of [new Error('null value in column'), { code: 'P2002' }, new ConflictException('closed')]) expect(isTransientDbError(e)).toBe(false);
+  });
+
+  it('M1: a month whose transaction ran past APPLY_TX_TIMEOUT_MS is FINAL with its own words — never retried as a temporary problem', async () => {
+    const { isTxTimeout, isTransientDbError } = await import('./sales-apply.service');
+    const timedOut = Object.assign(new Error('Transaction already closed: A commit cannot be executed on an expired transaction. The timeout for this transaction was 300000 ms, however 300012 ms passed since the start of the transaction.'), { code: 'P2028' });
+    expect(isTxTimeout(timedOut)).toBe(true);
+    expect(isTransientDbError(timedOut)).toBe(false);
+    const busyPool = Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' });
+    expect(isTxTimeout(busyPool)).toBe(false);
+    expect(isTransientDbError(busyPool)).toBe(true);
+    const db = makeDb();
+    db.salesUploadBatch.create.mockRejectedValueOnce(timedOut);
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV, CUR]), {}); // a background job (hooks)
+    expect(r.results[0]).toEqual({ month: PREV, ok: false,
+      error: `${monthLabelOf(PREV)} took longer than 5 minutes to write and was rolled back — nothing changed. The file may be too large for one apply; contact Gifsy tech.` });
+    expect(r.results[1]).toEqual(expect.objectContaining({ month: CUR, ok: true })); // the next month still runs
   });
 
   it('precheckRecalculate: 400 bad body, 404 no history, 409 stale history / definitions — no transaction', async () => {
