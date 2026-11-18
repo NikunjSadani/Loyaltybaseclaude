@@ -31,27 +31,45 @@ helper, behaviour-identical for the dashboard). Owner approved the digest as opt
   admin KYC dashboard's rule via `dashboards/kyc-pending-sla.ts`, not the rounded `kycStageSla`.)
 
 ## Window and run state
-The window runs **from the end of the last SUCCESSFUL send to now**, so a missed or failed day is never lost: the next
-digest covers it. Run state lives in one platform `program_settings` row (`clientId='gifsy'`,
-`settingKey='dailyDigestRunState'`) — no migration. (The `ScheduledReport` model was not used: it is a per-tenant,
-per-user scheduled export with a required user FK, not a platform run log.) The row holds:
-- `lastSuccess` — `windowStartMs`, `windowEndMs`, `sentAt`, `recipients`, `forced`. Written ONLY by a `sent` run.
-- `lastAttempt` — `at`, `status`, the window, `recipients`, `error` — written by every run (any outcome).
-- `running` — `startedAt` + `token`: a lease while a run is in flight.
+The window runs **from the end of the last COMPLETE send to now**, so neither a missed day nor an incomplete email ever
+loses data: the next digest covers (and, after an incomplete one, repeats) it. Run state lives in one platform
+`program_settings` row (`clientId='gifsy'`, `settingKey='dailyDigestRunState'`) — no migration. (The `ScheduledReport`
+model was not used: it is a per-tenant, per-user scheduled export with a required user FK, not a platform run log.)
+The row holds:
+- `lastSuccess` — the last email with COMPLETE data: `windowStartMs`, `windowEndMs`, `sentAt`, `recipients`, `forced`.
+  Written ONLY by a `sent` run.
+- `lastAttempted` — the last email that went out at all (`sent` or `degraded`), with `failedSections` when degraded.
+- `failStreaks` — section key → how many emailed runs in a row it failed (reset when it loads).
+- `lastAttempt` — every run, any outcome (`at`, `status`, window, `recipients`, `error`).
+- `running` — `startedAt` + `token`: the lease while a run is in flight.
 
 Rules (`planDigestWindow`):
-- **First run** (no `lastSuccess`): the old fixed rule — since the same time on the previous working day (Monday:
+- **First run** (nothing ever emailed): the old fixed rule — since the same time on the previous working day (Monday:
   Saturday 09:30 → Monday 09:30, 48 h; other days 24 h). The intro says it is the first tracked run.
-- **Idempotent:** a successful send already exists for today (IST day) → the run is skipped, `200
+- **One email per IST day:** if ANY email (complete or incomplete) already went out today → skipped, `200
   { skipped:'already-sent' }`. A scheduler retry or a double trigger never sends twice.
-- **`force=true`** (same secret): re-sends today, re-covering today's window from its start to now; the intro says
-  "manual re-run".
-- **Cap 7 days:** if the last success is older, the window starts 7 days back and a red run notice names the exact
-  uncovered period ("… is NOT in any digest").
-- **Lease:** a run takes the lease with optimistic concurrency on the row's `updatedAt` (or a create that collides on
-  the unique key). A concurrent trigger gets `409 in-progress`. A lease older than 15 min is treated as dead.
+- **`force=true`** (same secret): re-sends today — from the last complete send's end, or, when today's complete send
+  already went out, re-covering its window up to now; the intro says "manual re-run".
+- **After an incomplete email** the window still starts at `lastSuccess.windowEndMs` (never sent complete → the first
+  emailed window's start). The email says plainly at the top: "This email repeats <from → to> because the <date> digest
+  was incomplete (<sections>). Don't add these figures to that day's."
+- **Cap 7 days.** The dropped span is named in red and split honestly: the part that only went out in INCOMPLETE
+  digests ("appeared only in INCOMPLETE digests … never reported complete"), and — only for a span never emailed at all —
+  "… is NOT in any digest".
+- **Lease** (TTL 6 min, just over the 240 s run budget): taken by compare-and-set on the row's `updatedAt` after a fresh
+  read (or a create that collides on the unique key). A concurrent trigger gets `409 in-progress`; `force=true` may break
+  a lease older than the run budget.
+- **Every state write is conditional.** `finishRun` re-reads the row, writes only while `running.token` is still this
+  run's, merges into the FRESH state, and compare-and-sets on `updatedAt` (≤ 3 retries). A runner whose lease expired and
+  was taken over writes nothing and never clears the newer lease — it reports `error` ("no longer holds the run lease").
+  `recordAttempt` (no-recipients / early error) changes only `lastAttempt`, also by compare-and-set.
 - If the run-state row **cannot be read**, the run still sends on the fixed rule, says so in red, is `degraded`, and
-  never writes the state back (so the last-success record can't be erased).
+  never writes the state back (so the history can't be erased).
+
+## Time budget
+Cloud Run's request timeout is **300 s** on `gifsy-api` and `gifsy-api-staging`. The run budget is 240 s from the start
+of the request: a section not STARTED by then is not run — it shows "Couldn't load this section (not loaded (time
+budget))", which makes the run `degraded` (window repeated next time). The email is built and sent within the request.
 
 ## Tenants
 The digest loads every `Client` except the Gifsy operator row (`gifsy`). Each tenant is shown under its display name:
@@ -121,17 +139,18 @@ Failures in the message tables are counted when the failure was **recorded** (`u
 sent. A delivery report that arrives after the send is therefore still counted, in the next digest.
 
 ## Needs attention
-Each tenant section starts with a bullet list of every abnormal item:
+Each tenant section starts with a bullet list of every abnormal item. A window figure and its matching "still open now"
+figure are ONE bullet (they overlap), e.g. "1 payout failed or returned in the window (still open: …)":
 - KYCs breaching the Gifsy SLA or the field SLA
 - negative wallets
-- failed redemptions — ONE bullet with the Hubble share inside it ("3 redemptions failed (2 via Hubble)"); a separate
-  "Hubble: N vouchers failed" bullet appears only if the Redemptions section itself failed to load
-- still open: failed redemptions that still hold the outlet's points
+- failed redemptions — ONE bullet with the Hubble share and the not-refunded count inside it ("3 redemptions failed in
+  the window, 2 via Hubble (1 still holding points, not refunded)"); a separate "Hubble: N vouchers failed" bullet
+  appears only if the Redemptions section itself failed to load; with no failure in the window: "Still open: …"
 - Hubble: vouchers stuck in processing for more than 30 min, orders that need reconcile
-- payouts that failed or were returned in the window; still open: failed credit payouts (₹) awaiting re-bank or
-  reversal, failed redemption payouts without a refund
+- payouts failed or returned in the window, with the still-open failed credit payouts (₹, awaiting re-bank or
+  reversal) and failed redemption payouts without a refund in the same bullet
 - messages that failed delivery
-- failed Sales Imports; still open: failed imports not yet replaced by a successful upload
+- Sales Imports failed in the window, with the not-yet-replaced count in the same bullet
 - "Targets changed — recalculate <month>"
 - fast-tracked KYCs found at a field stage (not on the field SLA — check by hand)
 - every section that could not be loaded (incl. Billing progress)
@@ -140,8 +159,14 @@ Each tenant section starts with a bullet list of every abnormal item:
 to Gifsy staff (or that query failing), Voucher dispersal purchases / WhatsApp messages failed in the window with the
 still-failed counts in the same bullet, purchases unconfirmed by Hubble for over 2 h (Retry available), or the section
 could not be loaded. **Run notices** (a shared input failed, or the window was capped) sit in a red "This digest is
-incomplete" box at the very top and are Gifsy-wide items too. All of them count in the attention-item total and stop
-the "All quiet" line.
+incomplete" box at the very top and are Gifsy-wide items too; the same box lists every section that did not load and,
+after 3 runs in a row, "<section> failed to load N runs in a row". The "this email repeats …" line (amber, above it) is
+not an attention item.
+
+**Counting:** the attention total counts EVENTS, not bullets — 12 breaching KYCs = 12, a section that couldn't load = 1,
+a run notice = 1. A merged window + still-open bullet counts the larger of its two figures (they overlap, and the digest
+doesn't read which rows they share, so the larger is the honest lower bound of distinct events). The per-tenant
+"Needs attention" column shows the same event count.
 
 The summary at the top has one row per tenant: the number of attention items, KYC pending, redemptions requested, points
 credited and payouts paid. Tenants are ordered by attention count (highest first), then by name.
@@ -151,9 +176,10 @@ pending review. These sections are hidden when every figure is zero. A tenant wi
 its name, then "All quiet — nothing to report."
 
 Subject: `[Gifsy] Daily operations — <date> — all quiet`, or `[Gifsy] Daily operations — <date> — <N> items need
-attention (<T> tenants + Gifsy-wide)`, where N is EVERY attention item (tenant items, Gifsy-wide items incl. OTP
-failures, standing open items and run notices). With any run notice the status reads `INCOMPLETE — …`. The subject can
-therefore never say "all quiet" / 0 while the body shows a red problem.
+attention (<T> tenants + Gifsy-wide)`, where N is every attention EVENT (tenant items, Gifsy-wide items incl. OTP
+failures, standing open items and run notices). When anything did not load (or a run notice is present) the status
+reads `INCOMPLETE — …`; when the same section has failed 3 runs in a row, `INCOMPLETE 3 days — …` (N = the longest
+streak). The subject can therefore never say "all quiet" while the body shows a red problem.
 
 A Sales-Import tenant always shows its Billing progress block, so it is never "All quiet" on its own.
 
@@ -164,19 +190,24 @@ answers 2xx (`httpStatusFor`):
 | Outcome | When | HTTP | Window advanced? |
 |---|---|---|---|
 | `sent` | emailed with complete data | 200 | yes |
-| `skipped` | today's digest already sent (no `force`) | 200 `{ skipped:'already-sent' }` | — |
-| `degraded` | emailed, but a SHARED input failed: tenant list, holiday calendar, SLA targets, or the run-state read | 500 | no — the next run re-covers it |
+| `skipped` | an email (complete or not) already went out today (no `force`) | 200 `{ skipped:'already-sent' }` | — |
+| `degraded` | emailed, but SOMETHING did not load: any tenant section, the Gifsy-wide OTP / voucher-dispersal section, a section skipped by the time budget, a shared input (tenant list, holiday calendar, SLA targets) or the run-state read | 500 | no — the next run re-covers (repeats) it |
 | `no-recipients` | the effective list is empty (or every address was non-internal) | 409 | no |
 | `in-progress` | another run holds the lease | 409 | no |
-| `error` | recipient read failed, collect/send threw, or the email went out but the run could not be recorded | 500 | no |
+| `error` | recipient read failed, collect/send threw, the email went out but the run could not be recorded, or the run's lease was taken over before it finished | 500 | no |
 
-- **One section fails** (a query throws): that tenant's section shows "Couldn't load this section (reason)" and it
-  becomes an attention item; everything else renders and the run is still `sent` (unchanged design).
+- **One section fails** (a query throws, or the time budget skipped it): that section shows "Couldn't load this
+  section (reason)" and it becomes an attention item; everything else renders and the email goes out, but the run is
+  `degraded` — its window is NOT advanced, so tomorrow's email repeats it complete (and says so).
 - **A shared input fails:** the email still goes out with a red "This digest is incomplete" notice naming what failed
   and what that means — tenant list: no tenant sections, only Gifsy-wide figures; holidays: SLA ages skip weekends
   only (may overstate breaches); SLA targets: 24 h / 96 h defaults for every tenant. Run = `degraded`.
 - **Recipient list can't be read** → `error` (never mistaken for "no recipients").
-- The response body always carries the outcome (`status`, `window`, `notices`, `droppedRecipients`, `error`).
+- **Response body.** 200 → `{ success:true, data:{ ok, dateLabel, reports:[outcome] } }`. Non-2xx → the global
+  `AllExceptionsFilter` forwards only an exception's `message`, so the body is `{ success:false, error:"<summary>" }`
+  where the summary is one readable line — status, reason, what didn't load, dropped recipients, notices, window — ending
+  `full outcome in the API log line "daily-digest-run <id>"`. That log line (every run writes exactly one, ERROR level
+  for non-2xx) is `daily-digest-run <id> {"httpStatus":…, "dateLabel":…, "reports":[<full outcome>]}`.
 
 ## Recipients
 The recipient list is `reportRecipients.dailyDigest`, stored in a platform `program_settings` row (`clientId='gifsy'`).
@@ -235,3 +266,32 @@ Two audits' findings, all fixed on this branch (tests in `api/src/reports/schedu
 - Outlets figure restored; Hubble failed includes the unstamped no-order refund; stuck measured from the PROCESSING
   history row; vouchers shown even with the Hubble flag off; Gifsy-staff OTP failures on a Gifsy-wide line;
   `rupees()` one rounding rule (half away from zero) for BigInt and number; Hubble/redemption failures de-duplicated.
+
+## Fix round 2026-11-18 (independent re-check)
+- **D1** non-2xx bodies are readable through the global filter (summary `message` + one structured log line with the
+  full outcome) — tested through the real Nest HTTP stack (`scheduled-reports.http.spec.ts`).
+- **D2** ANY section that did not load → `degraded` (window not advanced, repeated next time with a plain "this email
+  repeats …" line); one email per IST day even when degraded (`force=true` to re-send); "INCOMPLETE N days" after 3 runs
+  in a row; the "NOT in any digest" notice only for spans never emailed.
+- **D3** 240 s run budget inside Cloud Run's 300 s limit; lease TTL 6 min; every state write compare-and-set on a fresh
+  read, gated on the run's own lease token.
+- **D4** a window figure and its still-open figure are one bullet; the attention total counts events.
+- **D5** tripwire spec `digest-recorded-time-guard.spec.ts` lists every write site on `CreditPayoutEntry` and
+  `PayoutTransaction`; a new or changed one fails until reviewed.
+
+## Recorded-time clocks — what must stay true
+The digest counts **credit payouts PAID / FAILED by `CreditPayoutEntry.updatedAt`** and **redemption payouts FAILED /
+REVERSED by `PayoutTransaction.updatedAt`**. That is only right while no code path writes a row that is already PAID
+(credit entry) or FAILED / REVERSED (payout transaction) without changing its status.
+- Audit 2026-11-18, `CreditPayoutEntry` (6 write sites): download claim (PENDING/FAILED → PROCESSING), the TDS stamp on
+  entries that same download just claimed, the UTR apply (the only PROCESSING → PAID/FAILED flip), the reversal
+  (PENDING/FAILED → REVERSED; a PAID entry is skipped before the write), and two `generateForBatch` invoice links on
+  entries created moments earlier in the same confirm transaction. None touches a PAID row.
+- Audit 2026-11-18, `PayoutTransaction` (3 write sites, `payouts.service.ts`): assign-to-batch (PENDING only),
+  disburse (PENDING → INITIATED only), UTR report (terminal rows skipped, except FAILED/REVERSED → SUCCESS when paid off
+  the platform — the status changes, so the row leaves the FAILED/REVERSED count). No path rewrites a FAILED / REVERSED
+  row in place; no code sets REVERSED today. DB-level `ON DELETE SET NULL` does not touch `updatedAt` (Prisma stamps it,
+  not Postgres). **Result: safe today.**
+- ⚠️ **Wallet reversal engine (in build)** and any future writer: must NOT update a PAID `CreditPayoutEntry` (or a
+  FAILED/REVERSED `PayoutTransaction`) in place — or it must add a dedicated stamp (e.g. `paidRecordedAt`) and switch
+  the digest to it. The tripwire spec fails on any new write site until this is decided.

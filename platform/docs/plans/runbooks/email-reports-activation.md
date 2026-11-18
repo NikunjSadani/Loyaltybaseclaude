@@ -51,16 +51,18 @@ gcloud scheduler jobs create http reports-run-prod \
   --uri="${API_URL}/v1/reports/run" --http-method=POST \
   --headers="Content-Type=application/octet-stream,x-reports-run-secret=${SECRET}" \
   --message-body=" " \
-  --attempt-deadline=600s --max-retry-attempts=0
+  --attempt-deadline=300s --max-retry-attempts=0
 ```
 `30 9 * * 1-6` = 09:30 IST, Mon–Sat. (For staging, target `gifsy-api-staging` + name `reports-run-staging`.)
-- `--attempt-deadline=600s`: a busy day (Bajaj KYC population + billing progress) can take well over the default
-  180 s; the run lease is 15 min, so a timed-out attempt never blocks the next day.
+- `--attempt-deadline=300s`: matches Cloud Run's request timeout (300 s on `gifsy-api` and `gifsy-api-staging`).
+  The run limits itself to a 240 s budget — sections not started by then are marked "not loaded (time budget)" (the
+  run is then `degraded` and its window repeated tomorrow) and the email is sent within the request. The run lease
+  is 6 min, so a dead attempt never blocks the next day.
 - `--max-retry-attempts=0`: no automatic retries — a failure must be SEEN (the job shows failed and alerts) and re-run
   by a person. The endpoint is idempotent anyway (a second call the same IST day after a success answers
   `200 skipped`), but a retried `degraded`/`error` run would just repeat the same failure.
 - An existing job: `gcloud scheduler jobs update http reports-run-prod --project "$PROJECT" --location "$REGION"
-  --attempt-deadline=600s --max-retry-attempts=0`.
+  --attempt-deadline=300s --max-retry-attempts=0`.
 
 ## 4. Configure recipients (Gifsy admin)
 Log in as GIFSY_ADMIN → **`/gifsy/settings` → Report Recipients** → the single **Daily Operations Digest** list → add
@@ -89,15 +91,22 @@ attentionItems, notices?, droppedRecipients?, error? }] }`. Status → HTTP:
 - `sent` → **200** — emailed with complete data (check the inbox). Sent EVERY run, even on an all-quiet day. The window
   ran from the end of the last successful send (first run: since the previous working day; capped at 7 days, with a
   red notice naming any uncovered gap).
-- `skipped` → **200** `{ skipped:"already-sent" }` — today's digest already went out; use `?force=true` to re-send.
-- `degraded` → **500** — emailed, but a shared input (tenant list / holiday calendar / SLA targets / run history)
-  failed; the email has a red "This digest is incomplete" box and the window is NOT advanced (tomorrow re-covers it).
+- `skipped` → **200** `{ skipped:"already-sent" }` — an email (complete or incomplete) already went out today; use
+  `?force=true` to re-send.
+- `degraded` → **500** — emailed, but something did not load (any section, a section skipped by the 240 s budget, or a
+  shared input: tenant list / holiday calendar / SLA targets / run history). The email has a red "This digest is
+  incomplete" box; the window is NOT advanced, so the next email repeats it and says so at the top ("This email repeats
+  … Don't add these figures to that day's."). Same section failing 3 runs in a row → subject `INCOMPLETE 3 days`.
 - `no-recipients` → **409** — the effective list is empty, or every address was non-internal (`droppedRecipients`).
-- `in-progress` → **409** — another run holds the lease (≤ 15 min).
+- `in-progress` → **409** — another run holds the lease (TTL 6 min; `?force=true` may break one older than 240 s).
 - `error` → **500** — `error` has the reason (recipient read failed, SMTP failure, or "the email WAS sent, but the
   run could not be recorded"). A failing DATA section does NOT fail the run: that tenant's section renders "Couldn't
   load this section (reason)" and the run is `sent`.
-Run history: `program_settings` row `clientId='gifsy'`, `settingKey='dailyDigestRunState'` (`lastSuccess`, `lastAttempt`).
+A non-2xx body is `{ success:false, error:"Daily operations digest: <status> — reason: … — not loaded: … — not sent to
+(non-internal): … — notices: … — window: … — full outcome in the API log line \"daily-digest-run <id>\"" }`. Find the
+full outcome in Cloud Logging: `textPayload:"daily-digest-run <id>"` (one line per run).
+Run history: `program_settings` row `clientId='gifsy'`, `settingKey='dailyDigestRunState'` (`lastSuccess`,
+`lastAttempted`, `failStreaks`, `lastAttempt`, `running`).
 
 Confirm a recipient actually received it and it rendered (summary table, per-tenant sections, ₹ amounts). A
 rendered sample lives at `platform/docs/plans/samples/daily-ops-digest-sample.html`.

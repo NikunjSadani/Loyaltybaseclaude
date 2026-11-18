@@ -26,14 +26,16 @@ import { loadBillingProgress, summarizeBillingProgress } from '../../admin-core/
 import { kycAddressableOutletWhere, KYC_LATEST_SUBMISSION_SELECT } from '../../admin-core/dashboards/kyc-pending-sla';
 import { DISPERSAL_RETRY_MIN_AGE_MS } from '../../voucher-dispersal/voucher-dispersal.processor';
 import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../rewards/rewards.service';
-import { buildDailyOpsDigest, kycPendingBuckets, MAX_FAILED_REDEMPTION_ROWS } from './daily-ops-digest-report';
+import { buildDailyOpsDigest, failedSections, kycPendingBuckets, MAX_FAILED_REDEMPTION_ROWS } from './daily-ops-digest-report';
 import {
   DIGEST_RUN_STATE_KEY,
   DigestRunState,
   DigestRunStatus,
+  leaseIsLive,
+  nextFailStreaks,
   parseRunState,
   planDigestWindow,
-  RUN_LEASE_MS,
+  RUN_BUDGET_MS,
   WindowPlan,
 } from './digest-run-state';
 import type {
@@ -74,9 +76,9 @@ export interface ReportOutcome {
   key: ReportKey;
   /**
    * sent        — emailed with complete data (window recorded as the last successful send).
-   * degraded    — emailed, but a shared input failed (tenants / holidays / SLA targets / run state) — NOT a
+   * degraded    — emailed, but something did not load (any section, a time-budget skip, a shared input, the run state) — NOT a
    *               successful send: the window is not advanced and the HTTP status is 500.
-   * skipped     — a successful send for today already exists (idempotent); force=true re-runs.
+   * skipped     — an email (complete or not) already went out today (one per IST day); force=true re-runs.
    * no-recipients / in-progress / error — nothing sent (409 / 409 / 500).
    */
   status: DigestRunStatus;
@@ -87,6 +89,8 @@ export interface ReportOutcome {
   window?: { startMs: number; endMs: number; label: string };
   /** Configured addresses NOT sent to (not on an allowed internal domain). */
   droppedRecipients?: string[];
+  /** What did not load (degraded runs): tenant sections, Gifsy-wide sections, shared inputs, time budget. */
+  failedSections?: string[];
   /** Run-level problems shown in the email's "incomplete" box. */
   notices?: string[];
   /** 'already-sent' with the time of that send, when skipped. */
@@ -109,6 +113,13 @@ const num = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 const big = (v: unknown): bigint => (typeof v === 'bigint' ? v : 0n);
+/** When the last email (complete or not) went out. */
+const lastEmailedAt = (s: DigestRunState): string | undefined => {
+  const all = [s.lastSuccess?.sentAt, s.lastAttempted?.sentAt].filter((x): x is string => !!x);
+  return all.sort().pop();
+};
+/** The error a section skipped by the time budget carries. */
+export const TIME_BUDGET_SKIP = 'not loaded (time budget)';
 const short = (e: unknown) => ((e as Error)?.message ?? String(e)).split('\n')[0].slice(0, 160);
 
 /**
@@ -116,20 +127,24 @@ const short = (e: unknown) => ((e as Error)?.message ?? String(e)).split('\n')[0
  * it replaced the separate Credits/Payouts + KYC actionables emails). Driven by Cloud Scheduler →
  * the secret-gated POST /v1/reports/run endpoint (Mon–Sat 09:30 IST).
  *
- * Lifecycle of one run (digest-run-state.ts): read the run state → plan the window (since the last
- * SUCCESSFUL send, ≤ 7 days; skip if today's already went out unless force) → load recipients (internal
- * domains only; others dropped loudly) → take a lease (a concurrent trigger loses) → collect → send →
- * record the outcome. Every failure is visible: the endpoint answers non-2xx for degraded / error /
- * no-recipients / in-progress so Cloud Scheduler marks the run failed.
+ * Lifecycle of one run (digest-run-state.ts): read the run state → plan the window (from the last COMPLETE
+ * send, ≤ 7 days; skip when an email already went out today unless force) → load recipients (internal domains
+ * only; others dropped loudly) → take the lease (compare-and-set) → collect within the time budget → send →
+ * record the outcome (compare-and-set, only while still holding the lease). Every failure is visible: the
+ * endpoint answers non-2xx for degraded / error / no-recipients / in-progress so Cloud Scheduler marks the
+ * run failed.
  *
  * Collect does ALL the Prisma: per tenant, per section, each section in its own try/catch — a failing
- * section is passed to the builder as `{ ok:false }` and renders "couldn't load this section" for that
- * tenant. The SHARED inputs (tenant list, holiday calendar, SLA targets) are guarded too: a failure
- * still sends the email with a red "This digest is incomplete" notice and marks the run degraded.
+ * section is passed to the builder as `{ ok:false }` and renders "couldn't load this section". ANY part
+ * that did not load (a tenant section, the Gifsy-wide OTP / dispersal sections, a shared input, or a section
+ * skipped by the time budget) makes the run DEGRADED: the email still goes out, but the window is not
+ * advanced, so the next email repeats it (and says so at the top).
  */
 @Injectable()
 export class ScheduledReportsService {
   private readonly logger = new Logger(ScheduledReportsService.name);
+  /** Wall clock for the time budget + lease (overridable in specs; the report clock is `nowMs`). */
+  clock: () => number = () => Date.now();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -150,33 +165,22 @@ export class ScheduledReportsService {
 
   private async runDigest(nowMs: number, dateLabel: string, force: boolean): Promise<ReportOutcome> {
     const key: ReportKey = 'dailyDigest';
+    const deadlineMs = this.clock() + RUN_BUDGET_MS;
 
-    // 1. Run state → window. A read failure falls back to the fixed rule and DEGRADES the run (no
-    //    idempotency / no "since last send" guarantee this time — said loudly in the email).
-    let stateRow: { id: string; updatedAt: Date; settingValue: unknown } | null = null;
+    // 1. Run state → window (fast path; re-checked under the lease). A read failure falls back to the fixed
+    //    rule and DEGRADES the run, and the state is then never written back (it would erase the history).
+    let state: DigestRunState = {};
     let stateReadError: string | null = null;
     try {
-      stateRow = await this.prisma.programSetting.findUnique({
-        where: { clientId_settingKey: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY } },
-        select: { id: true, updatedAt: true, settingValue: true },
-      });
+      state = parseRunState((await this.readStateRow())?.settingValue);
     } catch (e) {
       stateReadError = short(e);
       this.logger.error(`Digest run state could not be read: ${stateReadError}`);
     }
-    const state = parseRunState(stateRow?.settingValue);
-    const plan: WindowPlan = stateReadError
-      ? { ...planDigestWindow(nowMs, {}, force), notes: [] }
-      : planDigestWindow(nowMs, state, force);
-    if (stateReadError) {
-      plan.notices.push(
-        `Couldn't read the digest run history (${stateReadError}) — the window is the fixed "since the previous working day" rule, so activity since the last successful send may be missed or repeated, and a repeat send today is not blocked.`,
-      );
-    }
-    // Never write the state back when it could not be read — that would erase the last-success record.
+    let plan: WindowPlan = planDigestWindow(nowMs, stateReadError ? {} : state, force);
     const persist = !stateReadError;
     if (plan.skip) {
-      return { key, status: 'skipped', skipped: 'already-sent', lastSentAt: state.lastSuccess?.sentAt, window: plan.window };
+      return { key, status: 'skipped', skipped: 'already-sent', lastSentAt: lastEmailedAt(state), window: plan.window };
     }
 
     // 2. Recipients — internal domains only. A read failure is an ERROR (never mistaken for "nobody").
@@ -189,47 +193,69 @@ export class ScheduledReportsService {
       dropped = split.blocked;
     } catch (e) {
       const error = `couldn't read the recipient list: ${short(e)}`;
-      if (persist) await this.recordAttempt(state, { status: 'error', error, window: plan.window });
+      if (persist) await this.recordAttempt({ status: 'error', error, window: plan.window });
       return { key, status: 'error', error, window: plan.window };
     }
     if (dropped.length > 0) {
       this.logger.warn(`Daily operations digest: NOT sending to non-internal address(es): ${dropped.join(', ')}`);
     }
     if (to.length === 0) {
-      if (persist) await this.recordAttempt(state, { status: 'no-recipients', window: plan.window });
+      if (persist) await this.recordAttempt({ status: 'no-recipients', window: plan.window });
       return { key, status: 'no-recipients', droppedRecipients: dropped, window: plan.window };
     }
 
-    // 3. Lease — only when the state row is readable (otherwise the run is already degraded/unguarded).
+    // 3. Lease — compare-and-set on a FRESH read; the plan is recomputed from that same state.
     let token: string | null = null;
-    if (!stateReadError) {
-      token = await this.claimLease(state, stateRow, nowMs);
-      if (token === null) {
+    if (persist) {
+      const claim = await this.claimLease(nowMs, force);
+      if (claim.result === 'in-progress') {
         return { key, status: 'in-progress', error: 'another digest run is in progress', window: plan.window };
       }
+      if (claim.result === 'already-sent') {
+        return { key, status: 'skipped', skipped: 'already-sent', lastSentAt: lastEmailedAt(claim.state), window: claim.plan.window };
+      }
+      token = claim.token;
+      state = claim.state;
+      plan = claim.plan;
     }
 
-    // 4. Collect → build → send → record.
+    // 4. Collect (within the budget) → build → send → record.
     try {
-      const input = await this.collect(nowMs, dateLabel, plan.window);
+      const input = await this.collect(nowMs, dateLabel, plan.window, deadlineMs);
+      if (stateReadError) {
+        input.sharedFailures = [{ key: 'shared/run-history', label: 'run history' }, ...(input.sharedFailures ?? [])];
+        input.runNotices = [
+          `Couldn't read the digest run history (${stateReadError}) — the window is the fixed "since the previous working day" rule, so activity since the last complete send may be missed or repeated, and a repeat send today is not blocked.`,
+          ...(input.runNotices ?? []),
+        ];
+      }
       input.runNotices = [...plan.notices, ...(input.runNotices ?? [])];
       input.windowNotes = plan.notes;
+      input.repeatNotice = plan.repeatNotice;
       input.droppedRecipients = dropped;
+      const failed = failedSections(input);
+      const streaks = nextFailStreaks(state.failStreaks, failed.map((f) => f.key));
+      const maxRuns = Math.max(0, ...Object.values(streaks));
+      if (maxRuns > 0) {
+        input.incompleteStreak = {
+          runs: maxRuns,
+          sections: failed.filter((f) => streaks[f.key] === maxRuns).map((f) => f.label),
+        };
+      }
       const result = buildDailyOpsDigest(input);
       await this.msg91.sendEmail({ to, subject: result.subject, html: result.html });
-      // A capped window is complete for what it covers — it doesn't hold back the next window. Any other
-      // notice means a shared input failed → degraded (the window is NOT advanced; the next run re-covers it).
-      const degraded = (input.runNotices?.length ?? 0) > plan.notices.length || !!stateReadError;
-      const status: DigestRunStatus = degraded ? 'degraded' : 'sent';
+      const status: DigestRunStatus = failed.length > 0 ? 'degraded' : 'sent';
       const saveError = !persist
         ? null
-        : await this.finishRun(state, nowMs, {
-        status,
-        window: plan.window,
-        recipients: to.length,
-        forced: plan.forced,
-        error: degraded ? input.runNotices?.join(' | ').slice(0, 500) : undefined,
-      });
+        : await this.finishRun(token, nowMs, {
+            status,
+            window: plan.window,
+            recipients: to.length,
+            forced: plan.forced,
+            failedSections: failed.map((f) => f.label),
+            failStreaks: streaks,
+            error: failed.length > 0 ? `not loaded: ${failed.map((f) => f.label).join('; ')}`.slice(0, 500) : undefined,
+          });
       return {
         key,
         status: saveError ? 'error' : status,
@@ -238,6 +264,7 @@ export class ScheduledReportsService {
         tenantsNeedingAttention: result.tenantsNeedingAttention,
         attentionItems: result.attentionItems,
         window: plan.window,
+        ...(failed.length > 0 ? { failedSections: failed.map((f) => f.label) } : {}),
         ...(dropped.length > 0 ? { droppedRecipients: dropped } : {}),
         ...((input.runNotices?.length ?? 0) > 0 ? { notices: input.runNotices } : {}),
         ...(saveError ? { error: `the email WAS sent, but the run could not be recorded (${saveError}) — the next run may repeat this window` } : {}),
@@ -245,80 +272,151 @@ export class ScheduledReportsService {
     } catch (e) {
       const error = short(e);
       this.logger.error(`Daily operations digest failed: ${error}`);
-      if (persist) await this.finishRun(state, nowMs, { status: 'error', window: plan.window, error });
+      if (persist) await this.finishRun(token, nowMs, { status: 'error', window: plan.window, error });
       return { key, status: 'error', error, window: plan.window };
     }
   }
 
-  // ── Run state persistence ───────────────────────────────────────────────────────────────────
+  // ── Run state persistence (compare-and-set on a fresh read; never a blind overwrite) ─────────
 
-  /**
-   * Take the run lease with optimistic concurrency on the state row's updatedAt (or a create that
-   * collides on the unique key). Returns the lease token, or null when another run holds a live lease
-   * or won the race.
-   */
-  private async claimLease(
-    state: DigestRunState,
-    row: { id: string; updatedAt: Date } | null,
-    nowMs: number,
-  ): Promise<string | null> {
-    if (state.running && nowMs - new Date(state.running.startedAt).getTime() < RUN_LEASE_MS) return null;
-    const token = randomUUID();
-    const value = { ...state, running: { startedAt: new Date(nowMs).toISOString(), token } } as unknown as Prisma.InputJsonValue;
-    if (row) {
-      const won = await this.prisma.programSetting.updateMany({
-        where: { id: row.id, updatedAt: row.updatedAt },
-        data: { settingValue: value },
-      });
-      return won.count === 1 ? token : null;
-    }
-    try {
-      await this.prisma.programSetting.create({
-        data: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY, settingValue: value, category: 'reports', isEditable: false },
-      });
-      return token;
-    } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') return null;
-      throw e;
-    }
+  private readStateRow() {
+    return this.prisma.programSetting.findUnique({
+      where: { clientId_settingKey: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY } },
+      select: { id: true, updatedAt: true, settingValue: true },
+    });
   }
 
-  /** Write the outcome and clear the lease. Returns an error string when the write failed (never throws). */
-  private async finishRun(
-    state: DigestRunState,
+  /**
+   * Apply `mutate` to the CURRENT state: read fresh, compute, write with `updateMany where {id, updatedAt}`
+   * (or a create that collides on the unique key). A concurrent write makes the CAS miss → re-read and retry
+   * (≤ 3). `mutate` returning null = precondition failed (nothing written).
+   */
+  private async mutateRunState(
+    mutate: (cur: DigestRunState) => DigestRunState | null,
+  ): Promise<'written' | 'precondition' | 'contended'> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const row = await this.readStateRow();
+      const next = mutate(parseRunState(row?.settingValue));
+      if (next === null) return 'precondition';
+      const value = next as unknown as Prisma.InputJsonValue;
+      if (row) {
+        const won = await this.prisma.programSetting.updateMany({
+          where: { id: row.id, updatedAt: row.updatedAt },
+          data: { settingValue: value },
+        });
+        if (won.count === 1) return 'written';
+        continue;
+      }
+      try {
+        await this.prisma.programSetting.create({
+          data: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY, settingValue: value, category: 'reports', isEditable: false },
+        });
+        return 'written';
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') continue;
+        throw e;
+      }
+    }
+    return 'contended';
+  }
+
+  /**
+   * Take the lease. Refused while another run's lease is live (TTL RUN_LEASE_MS; a forced run may break a
+   * lease older than the run budget) or when — on the fresh state — an email already went out today.
+   */
+  private async claimLease(
     nowMs: number,
-    o: { status: DigestRunStatus; window: DigestWindow; recipients?: number; forced?: boolean; error?: string },
+    force: boolean,
+  ): Promise<
+    | { result: 'claimed'; token: string; state: DigestRunState; plan: WindowPlan }
+    | { result: 'in-progress' }
+    | { result: 'already-sent'; state: DigestRunState; plan: WindowPlan }
+  > {
+    const token = randomUUID();
+    // Filled in by the mutator (the LAST attempt's fresh read wins).
+    const seen: { why: 'in-progress' | 'already-sent'; state: DigestRunState; plan: WindowPlan | null } = {
+      why: 'in-progress',
+      state: {},
+      plan: null,
+    };
+    const res = await this.mutateRunState((cur) => {
+      seen.state = cur;
+      if (leaseIsLive(cur, this.clock(), force)) {
+        seen.why = 'in-progress';
+        return null;
+      }
+      const plan = planDigestWindow(nowMs, cur, force);
+      seen.plan = plan;
+      if (plan.skip) {
+        seen.why = 'already-sent';
+        return null;
+      }
+      return { ...cur, running: { startedAt: new Date(this.clock()).toISOString(), token } };
+    });
+    if (res === 'written' && seen.plan) return { result: 'claimed', token, state: seen.state, plan: seen.plan };
+    if (res === 'precondition' && seen.why === 'already-sent' && seen.plan) {
+      return { result: 'already-sent', state: seen.state, plan: seen.plan };
+    }
+    return { result: 'in-progress' };
+  }
+
+  /**
+   * Record the outcome and release the lease — ONLY while this run still holds it (token match on the fresh
+   * state), merged into that fresh state. A runner whose lease expired and was taken over writes nothing (its
+   * outcome is reported as an error instead). Returns an error string when nothing could be recorded.
+   */
+  private async finishRun(
+    token: string | null,
+    nowMs: number,
+    o: {
+      status: DigestRunStatus;
+      window: DigestWindow;
+      recipients?: number;
+      forced?: boolean;
+      failedSections?: string[];
+      failStreaks?: Record<string, number>;
+      error?: string;
+    },
   ): Promise<string | null> {
     const at = new Date(nowMs).toISOString();
-    const next: DigestRunState = {
-      ...state,
-      running: null,
-      lastAttempt: {
-        at,
-        status: o.status,
-        windowStartMs: o.window.startMs,
-        windowEndMs: o.window.endMs,
-        ...(o.recipients !== undefined ? { recipients: o.recipients } : {}),
-        ...(o.error ? { error: o.error } : {}),
-      },
-    };
-    if (o.status === 'sent') {
-      next.lastSuccess = {
-        windowStartMs: o.window.startMs,
-        windowEndMs: o.window.endMs,
-        sentAt: at,
-        recipients: o.recipients ?? 0,
-        ...(o.forced ? { forced: true } : {}),
-      };
-    }
     try {
-      const value = next as unknown as Prisma.InputJsonValue;
-      await this.prisma.programSetting.upsert({
-        where: { clientId_settingKey: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY } },
-        create: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY, settingValue: value, category: 'reports', isEditable: false },
-        update: { settingValue: value },
+      const res = await this.mutateRunState((cur) => {
+        if (!token || cur.running?.token !== token) return null;
+        const next: DigestRunState = {
+          ...cur,
+          running: null,
+          lastAttempt: {
+            at,
+            status: o.status,
+            windowStartMs: o.window.startMs,
+            windowEndMs: o.window.endMs,
+            ...(o.recipients !== undefined ? { recipients: o.recipients } : {}),
+            ...(o.error ? { error: o.error } : {}),
+          },
+        };
+        if (o.status === 'sent' || o.status === 'degraded') {
+          const emailed = {
+            windowStartMs: o.window.startMs,
+            windowEndMs: o.window.endMs,
+            sentAt: at,
+            recipients: o.recipients ?? 0,
+            status: o.status,
+            ...(o.failedSections && o.failedSections.length > 0 ? { failedSections: o.failedSections } : {}),
+            ...(o.forced ? { forced: true } : {}),
+          };
+          next.lastAttempted = emailed;
+          next.failStreaks = o.failStreaks ?? {};
+          if (o.status === 'sent') next.lastSuccess = { ...emailed, status: 'sent' };
+        }
+        return next;
       });
-      return null;
+      if (res === 'written') return null;
+      const err =
+        res === 'precondition'
+          ? 'this run no longer holds the run lease (it expired and another run took over) — its outcome was not recorded'
+          : 'the run state kept changing under concurrent writes';
+      this.logger.error(`Digest run state not written (${o.status}): ${err}`);
+      return err;
     } catch (e) {
       const err = short(e);
       this.logger.error(`Digest run state could not be written (${o.status}): ${err}`);
@@ -326,28 +424,19 @@ export class ScheduledReportsService {
     }
   }
 
-  /** Record an attempt that never took the lease (no-recipients / early error). Best effort. */
-  private async recordAttempt(
-    state: DigestRunState,
-    o: { status: DigestRunStatus; window: DigestWindow; error?: string },
-  ): Promise<void> {
-    const next: DigestRunState = {
-      ...state,
-      lastAttempt: {
-        at: new Date().toISOString(),
-        status: o.status,
-        windowStartMs: o.window.startMs,
-        windowEndMs: o.window.endMs,
-        ...(o.error ? { error: o.error } : {}),
-      },
-    };
+  /** Record an attempt that never took the lease (no-recipients / early error): ONLY lastAttempt changes. */
+  private async recordAttempt(o: { status: DigestRunStatus; window: DigestWindow; error?: string }): Promise<void> {
     try {
-      const value = next as unknown as Prisma.InputJsonValue;
-      await this.prisma.programSetting.upsert({
-        where: { clientId_settingKey: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY } },
-        create: { clientId: REPORTS_CLIENT_ID, settingKey: DIGEST_RUN_STATE_KEY, settingValue: value, category: 'reports', isEditable: false },
-        update: { settingValue: value },
-      });
+      await this.mutateRunState((cur) => ({
+        ...cur,
+        lastAttempt: {
+          at: new Date(this.clock()).toISOString(),
+          status: o.status,
+          windowStartMs: o.window.startMs,
+          windowEndMs: o.window.endMs,
+          ...(o.error ? { error: o.error } : {}),
+        },
+      }));
     } catch (e) {
       this.logger.error(`Digest run state could not be written (${o.status}): ${short(e)}`);
     }
@@ -356,8 +445,10 @@ export class ScheduledReportsService {
   // ── Collect ─────────────────────────────────────────────────────────────────────────────────
 
   /** Assemble the builder input for `window`. Public for the runner spec (exercises section isolation). */
-  async collect(nowMs: number, dateLabel: string, window: DigestWindow): Promise<DigestInput> {
+  async collect(nowMs: number, dateLabel: string, window: DigestWindow, deadlineMs = Infinity): Promise<DigestInput> {
     const runNotices: string[] = [];
+    const sharedFailures: Array<{ key: string; label: string }> = [];
+    const section = <T,>(label: string, clientId: string, load: () => Promise<T>) => this.section(label, clientId, load, deadlineMs);
     const defaultTargets: KycSlaTargets = { fieldHrs: KYC_FIELD_SLA_DEFAULT, gifsyHrs: KYC_GIFSY_SLA_DEFAULT };
 
     let tenants: TenantMeta[] = [];
@@ -366,6 +457,7 @@ export class ScheduledReportsService {
     } catch (e) {
       const err = short(e);
       this.logger.error(`Digest: tenant list failed: ${err}`);
+      sharedFailures.push({ key: 'shared/tenants', label: 'tenant list' });
       runNotices.push(`Couldn't load the tenant list (${err}) — this digest has NO tenant sections. Only the Gifsy-wide figures below are real.`);
     }
     let holidays = new Set<string>();
@@ -374,6 +466,7 @@ export class ScheduledReportsService {
     } catch (e) {
       const err = short(e);
       this.logger.error(`Digest: holiday calendar failed: ${err}`);
+      sharedFailures.push({ key: 'shared/holidays', label: 'holiday calendar' });
       runNotices.push(
         `Couldn't load the national holiday calendar (${err}) — KYC SLA ages below skip weekends only, so they may OVERSTATE breaches.`,
       );
@@ -384,6 +477,7 @@ export class ScheduledReportsService {
     } catch (e) {
       const err = short(e);
       this.logger.error(`Digest: KYC SLA targets failed: ${err}`);
+      sharedFailures.push({ key: 'shared/sla-targets', label: 'KYC SLA targets' });
       runNotices.push(
         `Couldn't load the per-tenant KYC SLA targets (${err}) — every tenant's KYC SLA below uses the defaults (${KYC_FIELD_SLA_DEFAULT} h field / ${KYC_GIFSY_SLA_DEFAULT} h Gifsy).`,
       );
@@ -399,18 +493,18 @@ export class ScheduledReportsService {
         name: t.name,
         status: t.status,
         hubbleEnabled: t.hubble,
-        kyc: await this.section('kyc', c, () => this.kyc(c, window, slaTargets.get(c) ?? defaultTargets, holidays, nowMs)),
-        points: await this.section('points', c, () => this.points(c, window)),
-        redemptions: await this.section('redemptions', c, () => this.redemptions(c, window)),
+        kyc: await section('kyc', c, () => this.kyc(c, window, slaTargets.get(c) ?? defaultTargets, holidays, nowMs)),
+        points: await section('points', c, () => this.points(c, window)),
+        redemptions: await section('redemptions', c, () => this.redemptions(c, window)),
         // Loaded for EVERY tenant: a live Hubble problem must show even after the flag was switched off.
-        vouchers: await this.section('vouchers', c, () => this.vouchers(c, window, nowMs)),
-        payouts: await this.section('payouts', c, () => this.payouts(c, window)),
-        messages: await this.section('messages', c, () => this.messages(c, window)),
+        vouchers: await section('vouchers', c, () => this.vouchers(c, window, nowMs)),
+        payouts: await section('payouts', c, () => this.payouts(c, window)),
+        messages: await section('messages', c, () => this.messages(c, window)),
       };
-      if (t.visibility) digest.visibility = await this.section('visibility', c, () => this.visibility(c, window));
+      if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window));
       if (t.salesImport) {
-        digest.salesImport = await this.section('salesImport', c, () => this.salesImport(c, window, nowMs));
-        digest.billing = await this.section('billing', c, () => this.billing(c, nowMs));
+        digest.salesImport = await section('salesImport', c, () => this.salesImport(c, window, nowMs));
+        digest.billing = await section('billing', c, () => this.billing(c, nowMs));
       }
       out.push(digest);
     }
@@ -423,18 +517,26 @@ export class ScheduledReportsService {
     });
     // Gifsy-wide OTP failures: pre-login (no user) + Gifsy staff (users of the operator row, which the
     // tenant loop excludes) — attributed to a Gifsy-wide line, never dropped.
-    const gifsyOtpFailed = await this.section('otp-gifsy-wide', 'gifsy', async () => ({
+    const gifsyOtpFailed = await section('otp-gifsy-wide', 'gifsy', async () => ({
       preLogin: await this.prisma.otpCode.count({ where: otpWindow({ userId: null }) }),
       gifsyStaff: await this.prisma.otpCode.count({ where: otpWindow({ user: { clientId: REPORTS_CLIENT_ID } }) }),
     }));
 
-    const voucherDispersal = await this.section('voucher-dispersal', 'gifsy', () => this.voucherDispersal(window, nowMs));
+    const voucherDispersal = await section('voucher-dispersal', 'gifsy', () => this.voucherDispersal(window, nowMs));
 
-    return { window, dateLabel, tenants: out, gifsyOtpFailed, voucherDispersal, runNotices };
+    return { window, dateLabel, tenants: out, gifsyOtpFailed, voucherDispersal, runNotices, sharedFailures };
   }
 
-  /** Run one section loader, isolating any failure to that section. */
-  private async section<T>(label: string, clientId: string, load: () => Promise<T>): Promise<SectionResult<T>> {
+  /**
+   * Run one section loader, isolating any failure to that section. A section not STARTED before the run's
+   * deadline is not run at all — it is `{ ok:false, error: TIME_BUDGET_SKIP }` (the run is then degraded, so
+   * its window is re-covered next time) — keeping the whole run inside Cloud Run's 300 s request limit.
+   */
+  private async section<T>(label: string, clientId: string, load: () => Promise<T>, deadlineMs = Infinity): Promise<SectionResult<T>> {
+    if (this.clock() >= deadlineMs) {
+      this.logger.error(`Digest section "${label}" for ${clientId} skipped: run time budget used up`);
+      return { ok: false, error: TIME_BUDGET_SKIP };
+    }
     try {
       return { ok: true, data: await load() };
     } catch (e) {

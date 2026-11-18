@@ -1,6 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { buildDailyOpsDigest, digestWindow, gifsyWideAttention, kycPendingBuckets, needsAttention } from './daily-ops-digest-report';
+import {
+  attentionItems,
+  buildDailyOpsDigest,
+  digestWindow,
+  failedSections,
+  gifsyWideAttention,
+  gifsyWideItems,
+  kycPendingBuckets,
+  needsAttention,
+} from './daily-ops-digest-report';
 import type { DigestInput, SectionResult, TenantDigest } from './report.types';
 
 const IST = 330 * 60 * 1000;
@@ -258,10 +267,9 @@ describe('needsAttention', () => {
       '2 KYCs breaching the Gifsy SLA',
       '12 KYCs breaching the field SLA',
       '5 negative wallets',
-      '3 redemptions failed (2 via Hubble)',
+      '3 redemptions failed in the window, 2 via Hubble',
       'Hubble: 1 voucher stuck in processing > 30 min',
-      '3 payouts failed or returned in the window',
-      'Still open: 4 credit payouts (₹8,000) awaiting re-bank or reversal',
+      '3 payouts failed or returned in the window (still open: 4 credit payouts (₹8,000) awaiting re-bank or reversal)',
       '8 messages failed delivery',
       'Targets changed — recalculate November 2026',
     ]);
@@ -271,9 +279,30 @@ describe('needsAttention', () => {
     const t = quietTenant('x', 'X');
     t.redemptions = ok({ requested: 2, completed: 0, failed: 2, failedNotRefunded: 0, failedRows: [] });
     t.vouchers = ok({ issued: 0, failed: 2, stuckProcessing: 0, needsReconcile: 0 });
-    expect(needsAttention(t)).toEqual(['2 redemptions failed (2 via Hubble)']);
+    expect(needsAttention(t)).toEqual(['2 redemptions failed in the window, 2 via Hubble']);
     t.redemptions = { ok: false, error: 'boom' };
     expect(needsAttention(t)).toEqual(["Couldn't load the Redemptions section", 'Hubble: 2 vouchers failed']);
+  });
+
+  it('D4: a window figure and its still-open figure are ONE bullet; events = the larger of the two (no double count)', () => {
+    const t = quietTenant('x', 'X');
+    t.redemptions = ok({ requested: 1, completed: 0, failed: 1, failedNotRefunded: 1, failedRows: [] });
+    if (t.payouts.ok) Object.assign(t.payouts.data, { failedOrReturned: 1, openFailedCredit: 1, openFailedCreditPaise: 50000n });
+    t.salesImport = ok({ processed: 0, failed: 2, failedOpen: 1, openMonths: [] });
+    expect(attentionItems(t)).toEqual([
+      { text: '1 redemption failed in the window (1 still holding points, not refunded)', events: 1 },
+      { text: '1 payout failed or returned in the window (still open: 1 credit payout (₹500) awaiting re-bank or reversal)', events: 1 },
+      { text: 'Sales Import: 2 imports failed in the window (1 still not replaced by a successful upload)', events: 2 },
+    ]);
+    const r = buildDailyOpsDigest(input([t]));
+    expect(r.attentionItems).toBe(4);
+    expect(r.subject).toContain('— 4 items need attention (1 tenant)');
+  });
+
+  it('D4: attention counts EVENTS (12 breaching KYCs = 12), not bullets', () => {
+    const t = quietTenant('x', 'X');
+    if (t.kyc.ok) t.kyc.data.field = { pending: 12, within: 0, nearing: 0, breached: 12 };
+    expect(buildDailyOpsDigest(input([t])).attentionItems).toBe(12);
   });
 
   it('standing "still open" items count even with no window activity', () => {
@@ -298,7 +327,7 @@ describe('needsAttention', () => {
     const t = quietTenant('x', 'X');
     t.vouchers = ok({ issued: 0, failed: 0, stuckProcessing: 0, needsReconcile: 2 });
     t.salesImport = ok({ processed: 0, failed: 1, failedOpen: 0, openMonths: [] });
-    expect(needsAttention(t)).toEqual(['Hubble: 2 orders need reconcile', 'Sales Import: 1 import failed']);
+    expect(needsAttention(t)).toEqual(['Hubble: 2 orders need reconcile', 'Sales Import: 1 import failed in the window']);
   });
 
   it('a fast-tracked KYC at a field stage and a failed Billing progress section are attention items', () => {
@@ -324,16 +353,16 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
 
   it('failed purchases, failed WhatsApps and pending > 2 h are called out', () => {
     expect(gifsyWideAttention({ voucherDispersal: busyDispersal() })).toEqual([
-      'Voucher dispersal: 2 purchases failed in the window; 3 still failed (not retried)',
-      'Voucher dispersal: 4 WhatsApp messages failed in the window; 4 still failed (not resent)',
+      'Voucher dispersal: 2 purchases failed in the window (3 still open)',
+      'Voucher dispersal: 4 WhatsApp messages failed in the window (4 still open)',
       'Voucher dispersal: 1 purchase unconfirmed by Hubble for over 2 h (Retry available)',
     ]);
   });
 
   it('standing dispersal failures count even with nothing new in the window', () => {
     const d = ok({ bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 2, messageFailedOpen: 0 });
-    expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
-      'Voucher dispersal: 0 purchases failed in the window; 2 still failed (not retried)',
+    expect(gifsyWideItems({ voucherDispersal: d })).toEqual([
+      { text: 'Still open: Voucher dispersal: 2 purchases still failed (not retried)', events: 2 },
     ]);
   });
 
@@ -358,10 +387,11 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
 describe('buildDailyOpsDigest', () => {
   it('subject: [Gifsy] prefix, the date and EVERY attention item (tenants + Gifsy-wide)', () => {
     const r = buildDailyOpsDigest(input([busyTenant(), quietTenant('deoleo', 'Deoleo')]));
-    expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — 9 items need attention (1 tenant)');
+    // events: 2 + 12 + 5 + 3 + 1 + max(3, 4) + 8 + 1
+    expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — 36 items need attention (1 tenant)');
     expect(r.key).toBe('dailyDigest');
     expect(r.tenantsNeedingAttention).toBe(1);
-    expect(r.attentionItems).toBe(9);
+    expect(r.attentionItems).toBe(36);
   });
 
   it('all quiet → still a full email that says so', () => {
@@ -373,19 +403,59 @@ describe('buildDailyOpsDigest', () => {
 
   it('subject never says "all quiet"/0 while a red OTP problem is in the body', () => {
     const r = buildDailyOpsDigest(input([quietTenant('d', 'D')], { gifsyOtpFailed: ok({ preLogin: 2, gifsyStaff: 0 }) }));
-    expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — 1 item needs attention (Gifsy-wide)');
-    expect(r.attentionItems).toBe(1);
+    expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — 2 items need attention (Gifsy-wide)');
+    expect(r.attentionItems).toBe(2);
     const failed = buildDailyOpsDigest(input([quietTenant('d', 'D')], { gifsyOtpFailed: { ok: false, error: 'boom' } }));
-    expect(failed.subject).toContain('1 item needs attention');
+    expect(failed.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — INCOMPLETE — 1 item needs attention (Gifsy-wide)');
     expect(failed.html).not.toContain('All quiet — nothing needs attention.');
   });
 
   it('run notices: red "incomplete" box at the top, attention items, INCOMPLETE in the subject', () => {
-    const r = buildDailyOpsDigest(input([quietTenant('d', 'D')], { runNotices: ["Couldn't load the tenant list (x)"] }));
+    const r = buildDailyOpsDigest(
+      input([quietTenant('d', 'D')], {
+        runNotices: ["Couldn't load the tenant list (x)"],
+        sharedFailures: [{ key: 'shared/tenants', label: 'tenant list' }],
+      }),
+    );
     expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — INCOMPLETE — 1 item needs attention (Gifsy-wide)');
     expect(r.html).toContain('data-run-notices="1"');
     expect(r.html).toContain('This digest is incomplete');
     expect(r.html.indexOf('This digest is incomplete')).toBeLessThan(r.html.indexOf('All tenants'));
+  });
+
+  it('D2: any failed section makes the digest INCOMPLETE (subject + red box) and is listed by failedSections', () => {
+    const t = quietTenant('bajaj', 'Bajaj');
+    t.points = { ok: false, error: 'not loaded (time budget)' };
+    const inp = input([t], { voucherDispersal: { ok: false, error: 'x' } });
+    expect(failedSections(inp)).toEqual([
+      { key: 'bajaj/points', label: 'Bajaj: Points' },
+      { key: 'gifsy/voucher-dispersal', label: 'Voucher dispersal' },
+    ]);
+    const r = buildDailyOpsDigest(inp);
+    expect(r.subject).toContain('INCOMPLETE — ');
+    expect(r.html).toContain('Not loaded: Bajaj: Points; Voucher dispersal — those figures are missing below and will be repeated in the next digest.');
+    expect(r.failedSections).toHaveLength(2);
+  });
+
+  it('D2c: a section failing 3 runs in a row → "INCOMPLETE 3 days" in the subject and a red line', () => {
+    const t = quietTenant('bajaj', 'Bajaj');
+    t.points = { ok: false, error: 'x' };
+    const r = buildDailyOpsDigest(input([t], { incompleteStreak: { runs: 3, sections: ['Bajaj: Points'] } }));
+    expect(r.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — INCOMPLETE 3 days — 1 item needs attention (1 tenant)');
+    expect(r.html).toContain('Bajaj: Points failed to load 3 runs in a row.');
+    const two = buildDailyOpsDigest(input([t], { incompleteStreak: { runs: 2, sections: ['Bajaj: Points'] } }));
+    expect(two.subject).toContain('— INCOMPLETE — ');
+  });
+
+  it('D2a: the repeat notice is shown plainly at the top (not an attention item)', () => {
+    const r = buildDailyOpsDigest(
+      input([quietTenant('d', 'D')], {
+        repeatNotice: "This email repeats X because the 12 Nov 2026 digest was incomplete (Bajaj: Points). Don't add these figures to that day's.",
+      }),
+    );
+    expect(r.html).toContain('data-repeat-notice="1"');
+    expect(r.html.indexOf('data-repeat-notice')).toBeLessThan(r.html.indexOf('All tenants'));
+    expect(r.attentionItems).toBe(0);
   });
 
   it('non-ACTIVE tenants: shown (marked) with activity / open items, otherwise NAMED as not shown', () => {
@@ -516,9 +586,10 @@ describe('buildDailyOpsDigest', () => {
     expect(zero.html).toContain('All quiet — nothing needs attention.');
 
     const busy = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: busyDispersal() }));
-    expect(busy.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — 3 items need attention (Gifsy-wide)');
+    // events: max(2, 3) + max(4, 4) + 1
+    expect(busy.subject).toBe('[Gifsy] Daily operations — 13 Nov 2026 — 8 items need attention (Gifsy-wide)');
     expect(busy.gifsyWideItems).toBe(3);
-    expect(busy.attentionItems).toBe(3);
+    expect(busy.attentionItems).toBe(8);
     expect(busy.html).toContain('Needs attention — Gifsy-wide');
     expect(busy.html).toContain('data-section="Voucher dispersal (Gifsy-wide)"');
     expect(busy.html).not.toContain('All quiet — nothing needs attention.');

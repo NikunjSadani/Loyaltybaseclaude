@@ -262,6 +262,12 @@ export interface DigestInput {
   windowNotes?: string[];
   /** Configured recipients DROPPED at send time (not on an allowed internal domain) — named in the footer. */
   droppedRecipients?: string[];
+  /** Shared inputs that failed (tenant list, holidays, SLA targets, run history): stable key + label. */
+  sharedFailures?: Array<{ key: string; label: string }>;
+  /** "This email repeats <from–to> because the <date> digest was incomplete (…)" — shown at the top. */
+  repeatNotice?: string;
+  /** The longest run of consecutive incomplete digests for the same section (≥ 3 → "INCOMPLETE N days"). */
+  incompleteStreak?: { runs: number; sections: string[] };
 }
 
 /** The rendered digest. */
@@ -271,8 +277,10 @@ export interface DigestResult {
   html: string;
   /** Tenants with at least one "needs attention" item. */
   tenantsNeedingAttention: number;
-  /** Total "needs attention" items across tenants + the Gifsy-wide items. */
+  /** Total attention EVENTS across tenants + Gifsy-wide (a merged window + still-open bullet counts max of the two). */
   attentionItems: number;
+  /** Everything that failed to load (any entry = a DEGRADED run). */
+  failedSections: Array<{ key: string; label: string }>;
   /** Gifsy-wide (not tenant) attention items: voucher dispersal, Gifsy-wide OTP failures, run notices. */
   gifsyWideItems: number;
   /** Non-ACTIVE tenants left out because they had no activity and no open items (named in the email). */
