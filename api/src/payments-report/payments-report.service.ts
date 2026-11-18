@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { CreditEntryStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { PAYMENT_ENTRY_SELECT, paymentsOrderBy, paymentsTotals, paymentsWhere } from './payments-report.query';
+import { isSettledByTds, PAYMENT_ENTRY_SELECT, paymentsOrderBy, paymentsTotals, paymentsWhere } from './payments-report.query';
 import { PAYMENTS_DEFAULT_PAGE_SIZE, PAYMENTS_MAX_PAGE_SIZE } from './dto/payments-report.dto';
 
 /**
@@ -203,7 +203,9 @@ export class PaymentsReportService {
         salesRepRole: rep?.hierarchyLevel?.code ?? null,
         reportingChain: rep ? this.reportingChain(rep.id, salesMap) : null,
         amount: this.money(e.amountPaise),
-        utr: e.utr ?? null,
+        // B-L6: a TDS-withheld settlement has no UTR — labelled via settledByTds (screen + export).
+        utr: isSettledByTds(e.utr) ? null : (e.utr ?? null),
+        settledByTds: isSettledByTds(e.utr),
         status: e.status,
         payoutHeader: e.download?.downloadCode ?? null,
         groupType: e.download?.groupType ?? null,

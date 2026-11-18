@@ -408,7 +408,16 @@ export default function AdminPaymentsReportPage() {
                     </td>
                     <td className="px-3 py-3 text-gray-500">{r.reportingChain ?? '—'}</td>
                     <td className="px-3 py-3 text-right font-medium text-gray-800">{formatInr(r.amount)}</td>
-                    <td className="px-3 py-3 font-mono text-[11px] text-gray-600">{r.utr ?? '—'}</td>
+                    <td className="px-3 py-3 font-mono text-[11px] text-gray-600">
+                      {r.settledByTds ? (
+                        // B-L6: settled by TDS withholding — no bank payment, so no UTR.
+                        <span data-testid="payment-settled-by-tds" className="font-sans text-amber-700">
+                          Settled by TDS withholding (no bank payment)
+                        </span>
+                      ) : (
+                        (r.utr ?? '—')
+                      )}
+                    </td>
                     <td className="px-3 py-3 text-center">
                       <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium ${statusBadge(r.status)}`}>
                         {r.status ?? '—'}

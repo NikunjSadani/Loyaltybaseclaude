@@ -1,6 +1,7 @@
 import React from 'react';
 import { istDateKey } from '@/lib/ist-date';
 import type { PayoutLedgerEntry } from '@/types';
+import { payoutTdsNote } from '@/lib/payout-tds-note';
 
 /* ─── Payout statement row (INR entry inside a combined statement) ──────────────
    Shared by the partner's own wallet (partner/wallet) AND the sales outlet ledger
@@ -28,6 +29,7 @@ export function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
   const key = dateSrc ? istDateKey(dateSrc) : '';
   const day = key ? key.slice(8, 10) : '—';
   const mon = key ? MONTH_SHORT[Number(key.slice(5, 7))] : '';
+  const tdsNote = payoutTdsNote(p);
 
   return (
     <div className="flex items-center gap-3 py-3.5">
@@ -41,11 +43,9 @@ export function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
       <div className="flex-1 min-w-0">
         <p className="text-[13px] text-gray-800 leading-snug truncate">{p.kpiLabel} · {monthLabel(p.period)}</p>
         {p.utr && !p.settledByTds && <p className="text-[10px] text-gray-400 font-mono">UTR {p.utr}</p>}
-        {!!p.tdsWithheldPaise && (
+        {tdsNote && (
           <p data-testid="payout-tds-note" className="text-[10px] text-amber-700 mt-0.5 leading-snug">
-            {p.settledByTds
-              ? `Withheld as TDS ${fmtInr(p.tdsWithheldPaise / 100)} — ₹0 paid to you`
-              : `TDS ${fmtInr(p.tdsWithheldPaise / 100)} withheld from ${fmtInr((p.grossAmountPaise ?? p.payoutAmountPaise + p.tdsWithheldPaise) / 100)}`}
+            {tdsNote}
           </p>
         )}
         {!isPaid && (

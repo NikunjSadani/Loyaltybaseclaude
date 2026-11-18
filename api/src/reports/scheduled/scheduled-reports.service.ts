@@ -730,7 +730,8 @@ export class ScheduledReportsService {
     // moment it was recorded. Money actually PAID = gross − TDS withheld; a payout settled entirely by TDS
     // withholding is NOT paid money and is reported separately ("settled by TDS withholding").
     const creditPaid = await this.prisma.creditPayoutEntry.aggregate({
-      where: { clientId, status: 'PAID', updatedAt: inWindow, NOT: { utr: { startsWith: 'TDS-WITHHELD-' } } },
+      // B-L2: OR-wrapped — a bare NOT(utr LIKE …) is NULL (= excluded) for a PAID entry with no UTR.
+      where: { clientId, status: 'PAID', updatedAt: inWindow, OR: [{ utr: null }, { NOT: { utr: { startsWith: 'TDS-WITHHELD-' } } }] },
       _count: { _all: true },
       _sum: { amountPaise: true, tdsDeductedPaise: true },
     });
@@ -750,10 +751,11 @@ export class ScheduledReportsService {
     const txnFailed = await this.prisma.payoutTransaction.count({
       where: { partner: { clientId }, status: { in: ['FAILED', 'REVERSED'] }, updatedAt: inWindow },
     });
+    // B-L3: awaiting UTR = what the bank will actually pay = gross − TDS withheld at the bank file.
     const awaiting = await this.prisma.creditPayoutEntry.aggregate({
       where: { clientId, status: 'PROCESSING' },
       _count: { _all: true },
-      _sum: { amountPaise: true },
+      _sum: { amountPaise: true, tdsDeductedPaise: true },
     });
     // STILL OPEN (not windowed): a FAILED credit entry waits for a re-bank download or a reversal (both move it).
     const openCredit = await this.prisma.creditPayoutEntry.aggregate({
@@ -788,7 +790,7 @@ export class ScheduledReportsService {
       redemptionPaidPaise: big(redemptionPaid._sum?.amountPaise),
       failedOrReturned: creditFailed + txnFailed,
       awaitingUtr: num(awaiting._count?._all),
-      awaitingUtrPaise: big(awaiting._sum?.amountPaise),
+      awaitingUtrPaise: big(awaiting._sum?.amountPaise) - big(awaiting._sum?.tdsDeductedPaise),
       openFailedCredit: num(openCredit._count?._all),
       openFailedCreditPaise: big(openCredit._sum?.amountPaise),
       openFailedRedemption: failedTxns.length - closed,

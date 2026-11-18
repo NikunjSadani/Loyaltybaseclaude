@@ -23,6 +23,8 @@ import { platformWide } from '../../../common/tenant-scope';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import { PaymentsReportQueryDto } from '../../../payments-report/dto/payments-report.dto';
 import {
+  isSettledByTds,
+  SETTLED_BY_TDS_LABEL,
   PAYMENT_ENTRY_SELECT,
   paymentsOrderBy,
   paymentsTotals,
@@ -184,7 +186,8 @@ async function runIn(
           'Sales Rep Role': rep?.hierarchyLevel?.code ?? '',
           'Reporting Chain': (rep && nodes ? reportingChain(rep.id, nodes) : null) ?? '',
           'Amount (₹)': inr(e.amountPaise),
-          UTR: e.utr ?? '',
+          // B-L6: never the internal TDS-WITHHELD reference — the same label the screen shows.
+          UTR: isSettledByTds(e.utr) ? SETTLED_BY_TDS_LABEL : (e.utr ?? ''),
           Status: e.status,
           'Payout Header': e.download?.downloadCode ?? '',
           'Group Type': e.download?.groupType ?? '',

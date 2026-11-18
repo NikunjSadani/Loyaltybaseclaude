@@ -2678,21 +2678,54 @@ export class CreditsService {
         ? `No bank file — every payout in this run was fully withheld as TDS (${fullyWithheld.length} payout${fullyWithheld.length === 1 ? '' : 's'}). They are settled; nothing needs to be sent to the bank.`
         : null;
 
-    // A-M3: tell each retailer whose payout was fully withheld, in plain words (free channels only —
-    // no paid template says this). POST-COMMIT + fire-and-forget: never fails the download.
+    // A-M3 + A-L5/B-L4: tell each retailer whose payout was fully withheld, in plain words — ONE notice per
+    // owner per download (all their fully withheld outlets added together). The wording follows the facts:
+    // 194R → the CLIENT deposits it; "against your PAN" only when a PAN is on file. Free channels only (no
+    // paid template says this). POST-COMMIT + fire-and-forget: never fails the download.
+    const sectionsByOutlet = new Map<string, Set<string>>();
+    for (const e of entries) {
+      if (!e.tdsSection) continue;
+      const set = sectionsByOutlet.get(e.outletId) ?? new Set<string>();
+      set.add(e.tdsSection);
+      sectionsByOutlet.set(e.outletId, set);
+    }
+    const byOwner = new Map<string, { partnerId: string; userId: string | null; hasPan: boolean; paise: bigint; outlets: number; is194R: boolean }>();
     for (const f of fullyWithheld) {
+      const p = outletDbMap.get(f.outletId)?.partner;
+      if (!p?.id) continue;
+      const cur = byOwner.get(p.id) ?? {
+        partnerId: p.id,
+        userId: p.userId ?? null,
+        hasPan: !isNoPanCell(p.panNumber),
+        paise: 0n,
+        outlets: 0,
+        is194R: false,
+      };
+      cur.paise += BigInt(f.tdsWithheldPaise);
+      cur.outlets += 1;
+      if (sectionsByOutlet.get(f.outletId)?.has(TdsSection.SEC_194R)) cur.is194R = true;
+      byOwner.set(p.id, cur);
+    }
+    for (const n of byOwner.values()) {
       try {
-        const o = outletDbMap.get(f.outletId);
-        const partnerId = o?.partner?.id;
-        if (!partnerId) continue;
-        const partner = await this.prisma.channelPartner.findFirst({ where: { id: partnerId }, select: { userId: true } });
-        if (!partner?.userId) continue;
+        let userId = n.userId;
+        if (!userId) {
+          const partner = await this.prisma.channelPartner.findFirst({ where: { id: n.partnerId }, select: { userId: true } });
+          userId = partner?.userId ?? null;
+        }
+        if (!userId) continue;
+        const what =
+          n.outlets === 1
+            ? `${formatINR(n.paise)} of this payout was taken as TDS — ₹0 paid to you.`
+            : `${formatINR(n.paise)} of this payout (${n.outlets} outlets) was taken as TDS — ₹0 paid to you.`;
+        const who = n.is194R ? 'The client deposits it with the Income Tax Department' : 'It is deposited with the Income Tax Department';
+        const pan = n.hasPan
+          ? ' against your PAN, and it will show in your TDS statement.'
+          : '. You have no PAN on file, so TDS was taken at the higher no-PAN rate — add your PAN in your profile.';
         await this.notifications.notifyUser({
-          userId: partner.userId,
+          userId,
           subject: 'Payout taken as TDS',
-          body:
-            `${formatINR(BigInt(f.tdsWithheldPaise))} of this payout was taken as TDS — ₹0 paid to you. ` +
-            'It is deposited against your PAN and will show in your TDS statement.',
+          body: `${what} ${who}${pan}`,
           url: '/partner/wallet',
           event: 'PAYOUT_TDS_WITHHELD',
         });

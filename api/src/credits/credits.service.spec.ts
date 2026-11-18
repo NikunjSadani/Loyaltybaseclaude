@@ -4012,6 +4012,48 @@ describe('CreditsService', () => {
           expect(res.fullyWithheldNote).toContain('+480 more');
         });
 
+        it('A-L5/B-L4: ONE notice per owner per download (outlets aggregated); 194R says the CLIENT deposits it, against the PAN', async () => {
+          policy('DEDUCT');
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(500000n), { ...run(300000n), id: 'e2', outletId: 'O2', outletName: 'B' }]);
+          mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL'), { ...bankOutlet('INDIVIDUAL'), outletCode: 'O2', name: 'B' }]);
+          mockTx.outlet.findMany.mockResolvedValue([
+            { outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' },
+            { outletCode: 'O2', clientId: 'deoleo', partnerId: 'p1' },
+          ]);
+          priorRows({ paid: [prior('v1', 10000000n)] }); // ₹1,00,000 earlier → ₹10,800 due ≥ this ₹8,000 → all withheld
+          mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'partnerUser1' });
+
+          const res = await download();
+
+          expect(res.fullyWithheld.map((f) => f.outletId).sort()).toEqual(['O1', 'O2']);
+          expect(mockNotifications.notifyUser).toHaveBeenCalledTimes(1);
+          const body = mockNotifications.notifyUser.mock.calls[0][0].body as string;
+          expect(body).toContain('₹8,000.00');
+          expect(body).toMatch(/2 outlets/);
+          expect(body).toMatch(/The client deposits it/);
+          expect(body).toMatch(/against your PAN/);
+        });
+
+        it('A-L5: a NO-PAN owner is never told it is "deposited against your PAN"', async () => {
+          policy('DEDUCT');
+          mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(500000n)]);
+          const noPan = bankOutlet('INDIVIDUAL');
+          mockPrisma.outlet.findMany.mockResolvedValue([{ ...noPan, partner: { ...noPan.partner, panNumber: null } }]);
+          mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: null }]);
+          mockTx.$queryRaw.mockResolvedValue([]);
+          priorRows({ paid: [prior('v1', 10000000n)] });
+          mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'partnerUser1' });
+
+          const res = await download();
+
+          expect(res.fullyWithheld.map((f) => f.outletId)).toEqual(['O1']);
+          expect(mockNotifications.notifyUser).toHaveBeenCalledTimes(1);
+          const body = mockNotifications.notifyUser.mock.calls[0][0].body as string;
+          expect(body).not.toMatch(/against your PAN/);
+          expect(body).toMatch(/no PAN/i);
+          expect(body).toMatch(/The client deposits it/);
+        });
+
         it('a partly withheld outlet stays in the bank file at its net amount; nothing is settled without the bank', async () => {
           policy('DEDUCT');
           mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(1500000n)]);

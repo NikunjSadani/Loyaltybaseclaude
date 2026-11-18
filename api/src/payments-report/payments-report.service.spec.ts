@@ -250,6 +250,18 @@ describe('PaymentsReportService', () => {
     });
   });
 
+  describe('B-L6: a payout settled by TDS withholding is labelled — never shown with a UTR', () => {
+    it('utr TDS-WITHHELD-… → utr null + settledByTds; a bank-paid row keeps its UTR', async () => {
+      const [bank] = twoStreamEntries();
+      const withheld = { ...bank, id: 'e9', utr: 'TDS-WITHHELD-PD-2026-06-001', tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT', tdsDeductedPaise: 500000n };
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([bank, withheld]);
+      const res = await service.paymentReport({ clientId: 'deoleo' });
+      expect(res.rows[0]).toMatchObject({ utr: 'UTR-1', settledByTds: false });
+      expect(res.rows[1]).toMatchObject({ utr: null, settledByTds: true });
+      expect(JSON.stringify(res.rows)).not.toContain('TDS-WITHHELD');
+    });
+  });
+
   describe('enrichment + sales reporting chain', () => {
     it('joins outlet geo + partner, builds the rep code/name/role and full reporting chain', async () => {
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([twoStreamEntries()[0]]);

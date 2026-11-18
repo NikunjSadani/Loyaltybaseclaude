@@ -141,7 +141,7 @@ This layer runs **only** for payout columns marked as **visibility payouts**. Or
 
 **What happens, and when:**
 
-1. **At confirm (Step 2 of Flow A):** for each visibility outlet **on a client set to 194C**, the system generates a **self-billed service invoice** (an invoice made on the outlet's behalf) and decides the tax treatment. A client set to **194R** gets **no** service invoice and **no** GST holdback for its visibility payouts.
+1. **At confirm (Step 2 of Flow A):** each visibility payout is **stamped with its tax section** (194C or 194R) as the client is set **at that moment**, and invoicing follows that stamp — not the client's later setting. A payout stamped **194C** gets a **self-billed service invoice** (an invoice made on the outlet's behalf) and a GST holdback; a payout stamped **194R** gets **no** service invoice and **no** GST holdback. If the client's section is changed later, payouts already confirmed keep their stamp (and their invoice, or lack of one); only payouts confirmed after the change follow the new section.
 2. **At bank-file generation (Step 3):** the system applies **TDS** in one of two ways (configured per client):
    - **Deduct** — the tax is *withheld* from the outlet's payout. The outlet receives the amount **minus** TDS; the platform sends the TDS to the tax authority. (The outlet bears the tax.)
    - **Gross-up** — the outlet is paid the **full** amount and the tax is borne **on top** by the client. Under **194C** the platform pays it, raising a separate **TDS invoice** and recovering it from the client; under **194R** no TDS invoice is raised — the **194R report** shows it as the client's liability.

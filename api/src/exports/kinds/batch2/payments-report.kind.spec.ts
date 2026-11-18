@@ -5,6 +5,7 @@ import { istDateKey } from '../../../common/ist-date';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import { PaymentsReportService, type PaymentsReportScope } from '../../../payments-report/payments-report.service';
 import { PAYMENTS_REPORT_KIND } from './payments-report.kind';
+import { SETTLED_BY_TDS_LABEL } from '../../../payments-report/payments-report.query';
 import { ctxFor, expectSameWorkbook, fakeModel, maxPage, readBook, renderKind } from './parity.support-spec';
 
 type Row = Record<string, unknown>;
@@ -45,7 +46,7 @@ async function screenDownload(prisma: unknown, scope: PaymentsReportScope): Prom
     'Sales Rep Role': r.salesRepRole ?? '',
     'Reporting Chain': r.reportingChain ?? '',
     'Amount (₹)': r.amount.inr,
-    'UTR': r.utr ?? '',
+    'UTR': r.settledByTds ? SETTLED_BY_TDS_LABEL : (r.utr ?? ''),
     'Status': r.status,
     'Payout Header': r.payoutHeader ?? '',
     'Group Type': r.groupType ?? '',
@@ -142,6 +143,16 @@ describe('payments-report export kind', () => {
     expect(p.aoa[0]).toHaveLength(29 + 1); // S.No + 29 report columns
     expect(p.aoa.flat()).toContain("'=cmd()");
     expect(p.aoa.flat()).not.toContain('FOREIGN');
+  }, XLSX_TIMEOUT);
+
+  it('B-L6: a payout settled by TDS withholding shows the label in the UTR column — never the internal TDS-WITHHELD reference', async () => {
+    const prisma = world(20, [entry(78, { utr: 'TDS-WITHHELD-PD-9', tdsSection: 'SEC_194R', tdsDeductedPaise: 10_078n })]); // 78: a PAID row (every 7th is FAILED)
+    const params = PAYMENTS_REPORT_KIND.parseParams({}, CLIENT);
+    const { buffer } = await renderKind(PAYMENTS_REPORT_KIND, ctxFor(CLIENT, prisma), params);
+    expectSameWorkbook(buffer, await screenDownload(prisma, { clientId: 'bajaj' }));
+    const cells = readBook(buffer).sheets.Payments.aoa.flat();
+    expect(cells).toContain(SETTLED_BY_TDS_LABEL);
+    expect(cells.some((c) => String(c).includes('TDS-WITHHELD'))).toBe(false);
   }, XLSX_TIMEOUT);
 
   it('parity: non-PAID status filter (attemptedAt ↓ nulls last) and a date range', async () => {

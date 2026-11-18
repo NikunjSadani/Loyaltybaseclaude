@@ -134,6 +134,7 @@ export interface PayoutsSection {
   openFailedRedemption: number;
   /** Credit entries downloaded for the bank file and waiting for the UTR upload (PROCESSING, now). */
   awaitingUtr: number;
+  /** B-L3: NET of TDS withheld at the bank file (what the bank will actually pay). */
   awaitingUtrPaise: bigint;
 }
 

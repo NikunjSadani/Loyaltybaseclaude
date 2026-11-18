@@ -537,7 +537,8 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       clientId: 'bajaj',
       status: 'PAID',
       updatedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) },
-      NOT: { utr: { startsWith: 'TDS-WITHHELD-' } },
+      // B-L2: a NULL utr is paid money too (SQL NOT(utr LIKE …) is NULL for a NULL utr → OR-wrapped).
+      OR: [{ utr: null }, { NOT: { utr: { startsWith: 'TDS-WITHHELD-' } } }],
     });
     expect(paidWhere.paidAt).toBeUndefined();
     expect(bajaj.payouts.ok && bajaj.payouts.data).toMatchObject({
@@ -566,14 +567,29 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
     const paidWhere = prisma.creditPayoutEntry.aggregate.mock.calls
       .map((c: [{ where: Record<string, unknown> }]) => c[0].where)
-      .find((w: Record<string, unknown>) => w.status === 'PAID' && w.NOT)!;
-    expect(paidWhere.NOT).toEqual({ utr: { startsWith: 'TDS-WITHHELD-' } });
+      .find((w: Record<string, unknown>) => w.status === 'PAID' && w.OR)!;
+    expect(paidWhere.OR).toEqual([{ utr: null }, { NOT: { utr: { startsWith: 'TDS-WITHHELD-' } } }]);
     expect(bajaj.payouts.ok && bajaj.payouts.data).toMatchObject({
       creditPaid: 2,
       creditPaidPaise: 280000n, // ₹3,000 gross − ₹200 TDS withheld = what actually went to retailers
       creditSettledByTds: 1,
       creditSettledByTdsPaise: 500000n,
     });
+  });
+
+  it('payouts (B-L3): "awaiting UTR" is the money the bank will actually pay — NET of TDS withheld', async () => {
+    prisma.creditPayoutEntry.aggregate.mockImplementation(({ where }: { where: { status: string } }) =>
+      Promise.resolve(
+        where.status === 'PROCESSING'
+          ? { _count: { _all: 4 }, _sum: { amountPaise: 80000n, tdsDeductedPaise: 8000n } }
+          : { _count: { _all: 0 }, _sum: { amountPaise: 0n, tdsDeductedPaise: 0n } },
+      ),
+    );
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
+    const awaitingCall = prisma.creditPayoutEntry.aggregate.mock.calls.find((c: [{ where: { status: string } }]) => c[0].where.status === 'PROCESSING')[0];
+    expect(awaitingCall._sum).toEqual({ amountPaise: true, tdsDeductedPaise: true });
+    expect(bajaj.payouts.ok && bajaj.payouts.data).toMatchObject({ awaitingUtr: 4, awaitingUtrPaise: 72000n });
   });
 
   it("TDS: each tenant's 194R excess (current FY) feeds the digest — count, total, largest first", async () => {
