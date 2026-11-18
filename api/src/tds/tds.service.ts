@@ -71,7 +71,7 @@ import {
   outletsByCodeCI as sharedOutletsByCodeCI,
   ownerPansOf as sharedOwnerPansOf,
   keyForOutletCode,
-  retailerKeyOfLedgerPan,
+  deducted194RByRetailer,
   type Bases194R,
 } from './tds-194r.shared';
 import type { TdsMethodology } from '@prisma/client';
@@ -482,18 +482,8 @@ export class TdsService {
     }
 
     // ── Deducted so far (display only — Q3: deductions never reduce the liability) ──
-    const deductions = await this.prisma.tdsDeductionEntry.findMany({
-      where: { clientId, section: 'SEC_194R', fyLabel },
-      select: { panNumber: true, tdsDeductedThisPaise: true },
-    });
-    const deducted = new Map<string, bigint>();
-    for (const d of deductions ?? []) {
-      // The ledger's panNumber is the retailer key: a PAN, or the no-PAN owner key (owner 2026-11-18:
-      // no-PAN visibility is withheld at 20% on DEDUCT). A blank legacy value has no retailer → skipped.
-      if (!d.panNumber?.trim()) continue;
-      const k = retailerKeyOfLedgerPan(d.panNumber);
-      deducted.set(k, (deducted.get(k) ?? 0n) + d.tdsDeductedThisPaise);
-    }
+    // Follows the RETAILER through its outlets (A-M4) — the same function the engine nets with.
+    const deducted = await deducted194RByRetailer(this.prisma, { clientId, fyLabel });
 
     const rowFor = (key: string, b: Bases194R): TdsRow194R => {
       const l = liability194R(b, methodology, cfg);

@@ -22,6 +22,8 @@ type Entry = {
   id: string; clientId: string; status: string; paidAt: Date | null; downloadedAt?: Date | null;
   outletId: string; amountPaise: bigint; fieldId: string; tdsSection: string | null; sourceKind?: string | null;
 };
+const ciContains = (v: string | null, f?: { contains?: string }) =>
+  !f?.contains || (!!v && v.toUpperCase().includes(f.contains.toUpperCase()));
 type Data = {
   entries: Entry[];
   outlets: Array<{ outletCode: string; clientId: string; partnerId: string | null }>;
@@ -29,7 +31,7 @@ type Data = {
   redemptions: Array<{ clientId: string; partnerId: string; valuePaise: bigint; redemptionMode: string; deliveredAt: Date }>;
   offPlatform: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; entryDate: Date }>;
   deposits: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; forPeriod: string; depositDate: Date; uploadBatchId: string | null }>;
-  ledger: Array<{ clientId: string; panNumber: string; section: string; fyLabel: string; tdsDeductedThisPaise: bigint }>;
+  ledger: Array<{ clientId: string; panNumber: string; section: string; fyLabel: string; tdsDeductedThisPaise: bigint; outletCode?: string | null }>;
   countFrom: string | null;
 };
 const empty = (): Data => ({ entries: [], outlets: [], partners: [], redemptions: [], offPlatform: [], deposits: [], ledger: [], countFrom: null });
@@ -76,10 +78,10 @@ function fakeDb(d: Data) {
       findMany: async ({ where: w }: any) =>
         d.partners.filter(
           (p) =>
-            !p.isParent &&
+            (w.isParent === undefined || !!p.isParent === w.isParent) &&
             (!w.clientId || p.clientId === w.clientId) &&
             inList(p.id, w.id) &&
-            (!w.OR || w.OR.some((c: any) => ciEq(p.panNumber, c.panNumber))),
+            (!w.OR || w.OR.some((c: any) => ciEq(p.panNumber, c.panNumber) && ciContains(p.panNumber, c.panNumber))),
         ),
     },
     redemptionOrder: {
@@ -112,7 +114,8 @@ function fakeDb(d: Data) {
             (!w.clientId || l.clientId === w.clientId) &&
             (!w.section || l.section === w.section) &&
             (!w.fyLabel || l.fyLabel === w.fyLabel) &&
-            ciIn(l.panNumber, w.panNumber),
+            ciIn(l.panNumber, w.panNumber) &&
+            (!w.OR || w.OR.some((c: any) => (c.panNumber ? ciIn(l.panNumber, c.panNumber) : inList(l.outletCode ?? null, c.outletCode)))),
         ),
     },
   } as any;
@@ -337,6 +340,72 @@ describe('owner FY rule: a payout belongs to the FY its BANK FILE was made', () 
     });
     // This FY: only this run's ₹10,000 → below ₹20,000 → nothing withheld (the March file stays in its own FY).
     expect(plan.deductionLedger).toHaveLength(0);
+  });
+});
+
+describe('A-M4: "already deducted" follows the RETAILER (its outlets), not the PAN string', () => {
+  const data = () => {
+    const d = empty();
+    d.partners = [pan('p1', 'NEWPN1234N')]; // PAN corrected mid-year: OLDPN → NEWPN
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [paidVis('v1', 1500000n)];
+    // ₹1,500 was withheld earlier under the OLD PAN (the ledger row carries the outlet code).
+    d.ledger = [{ clientId: CLIENT, panNumber: 'OLDPN1234O', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 150000n }];
+    return d;
+  };
+
+  it('report: the old-PAN withholding shows under the retailer’s current row (no orphan old-PAN row)', async () => {
+    const rows = await services(data(), 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(rows.map((r) => r.panNumber)).toEqual(['NEWPN1234N']);
+    expect(rows[0].deductedPaise).toBe(150000n);
+  });
+
+  it('engine: the old-PAN withholding is netted — this run withholds only the remainder', async () => {
+    const d = data();
+    const { credits } = services(d, 'DEDUCT');
+    const plan = await (credits as unknown as {
+      buildPayoutTdsPlan: (db: unknown, p: unknown) => Promise<{ deductionLedger: Array<{ tdsDeductedPriorPaise: bigint; tdsDeductedThisPaise: bigint }> }>;
+    }).buildPayoutTdsPlan(fakeDb(d), {
+      clientId: CLIENT,
+      period: '2026-05',
+      engineEntries: [{ id: 'run1', outletId: 'O1', amountPaise: 1000000n, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' }],
+      outletTaxMap: new Map([['O1', { partnerId: 'p1', panNumber: 'NEWPN1234N', entityType: 'INDIVIDUAL' }]]),
+      runAt: NOW,
+      currentMethodology: 'DEDUCT',
+      importedCountFrom: null,
+    });
+    // due 10% × ₹25,000 = ₹2,500; ₹1,500 already withheld under the old PAN → ₹1,000 now.
+    expect(plan.deductionLedger[0]).toMatchObject({ tdsDeductedPriorPaise: 150000n, tdsDeductedThisPaise: 100000n });
+  });
+});
+
+describe('B-L8: ONE scope rule — padded / lower-case PAN on file + a PARENT partner sharing the PAN', () => {
+  it('engine and report both count the parent’s redemption and the padded-PAN partner (parity)', async () => {
+    const d = empty();
+    d.partners = [
+      { id: 'p1', clientId: CLIENT, panNumber: ' abcde1234f ' }, // stored padded + lower-case
+      { id: 'pp', clientId: CLIENT, panNumber: 'ABCDE1234F', isParent: true }, // the group parent
+    ];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [paidVis('v1', 1000000n)];
+    d.redemptions = [{ clientId: CLIENT, partnerId: 'pp', valuePaise: 800000n, redemptionMode: 'UPI', deliveredAt: inFy(15) }];
+    const { credits } = services(d, 'DEDUCT');
+    const plan = await (credits as unknown as {
+      buildPayoutTdsPlan: (db: unknown, p: unknown) => Promise<{ deductionLedger: Array<{ tdsDueCumulativePaise: bigint }> }>;
+    }).buildPayoutTdsPlan(fakeDb(d), {
+      clientId: CLIENT,
+      period: '2026-05',
+      engineEntries: [{ id: 'run1', outletId: 'O1', amountPaise: 500000n, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' }],
+      outletTaxMap: new Map([['O1', { partnerId: 'p1', panNumber: ' abcde1234f ', entityType: 'INDIVIDUAL' }]]),
+      runAt: NOW,
+      currentMethodology: 'DEDUCT',
+      importedCountFrom: null,
+    });
+    // ₹10,000 + ₹5,000 visibility + the parent's ₹8,000 UPI redemption = ₹23,000 > ₹20,000 → due 10% × ₹15,000.
+    expect(plan.deductionLedger[0].tdsDueCumulativePaise).toBe(150000n);
+    const after = { ...d, entries: [...d.entries, { id: 'run1', clientId: CLIENT, status: 'PROCESSING', paidAt: null, downloadedAt: NOW, outletId: 'O1', amountPaise: 500000n, fieldId: 'f-vis', tdsSection: 'SEC_194R' }] };
+    const [row] = await services(after, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row).toMatchObject({ panNumber: 'ABCDE1234F', baseFyTotalPaise: 2300000n, deductLiabilityPaise: 150000n });
   });
 });
 

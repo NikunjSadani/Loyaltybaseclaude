@@ -17,6 +17,7 @@ import { financialYear, grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, ty
 import {
   collect194RBases,
   emptyBases194R,
+  deducted194RByRetailer,
   importedPayoutsCountFromOrThrow,
   liability194R,
   noPanOutletKey,
@@ -380,11 +381,16 @@ export class CreditsService {
     const pans = [...a.byPan.entries()].filter(([, v]) => v.hasPan).map(([k]) => k);
     // Scope the shared read to THIS client's (non-parent) partners holding these PANs + the no-PAN
     // owners in this run, and all their outlets.
+    // B-L8 (one rule with the report): match the stored PAN trimmed + upper-cased, and include a group
+    // PARENT sharing the PAN (its redemptions count for the retailer, exactly as in the report).
+    const panSet = new Set(pans);
     const scopePartners = pans.length
-      ? await db.channelPartner.findMany({
-          where: { clientId, isParent: false, OR: pans.map((p) => ({ panNumber: { equals: p, mode: 'insensitive' as const } })) },
-          select: { id: true },
-        })
+      ? (
+          await db.channelPartner.findMany({
+            where: { clientId, OR: pans.map((p) => ({ panNumber: { contains: p, mode: 'insensitive' as const } })) },
+            select: { id: true, panNumber: true },
+          })
+        ).filter((p) => !!p.panNumber && panSet.has(p.panNumber.trim().toUpperCase()))
       : [];
     const noPanOwners = [...a.byPan.values()].filter((v) => !v.hasPan && v.partnerId).map((v) => v.partnerId!);
     const partnerIds = [...new Set([...scopePartners.map((p) => p.id), ...noPanOwners])];
@@ -397,18 +403,13 @@ export class CreditsService {
       importedCountFrom: a.importedCountFrom,
       scope: { outletCodes: [...new Set(scopeOutlets.map((o) => o.outletCode))], partnerIds, pans },
     });
-    // Already deducted for this (client, retailer key, FY) — net of FAILED/reversal negative rows. The
-    // ledger's panNumber holds the retailer key (a PAN, or the no-PAN owner key `__NO_PAN__:…`).
-    const ledgerRows = await db.tdsDeductionEntry.findMany({
-      where: { clientId, section: TdsSection.SEC_194R, fyLabel, panNumber: { in: keys } },
-      select: { clientId: true, panNumber: true, tdsDeductedThisPaise: true },
+    // Already deducted for this (client, retailer, FY) — net of FAILED/reversal negative rows — following
+    // the RETAILER through its outlets (A-M4: a PAN corrected mid-year still nets). Shared with the report.
+    const priorByPan = await deducted194RByRetailer(db, {
+      clientId,
+      fyLabel,
+      scope: { keys, outletCodes: [...new Set(scopeOutlets.map((o) => o.outletCode))] },
     });
-    const priorByPan = new Map<string, bigint>();
-    for (const lr of ledgerRows) {
-      if (lr.clientId && lr.clientId !== clientId) continue; // per client (defensive; the query scopes it)
-      const k = retailerKeyOfLedgerPan(lr.panNumber);
-      priorByPan.set(k, (priorByPan.get(k) ?? 0n) + lr.tdsDeductedThisPaise);
-    }
     for (const [pan, { hasPan, entries }] of a.byPan) {
       const rate = rate194RFrom(cfg, hasPan);
       const runBase = entries.reduce((s, e) => s + e.amountPaise, 0n);

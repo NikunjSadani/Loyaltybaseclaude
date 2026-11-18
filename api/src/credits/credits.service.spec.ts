@@ -4018,7 +4018,8 @@ describe('CreditsService', () => {
           expect(ledgerRow()).toMatchObject({ tdsDeductedPriorPaise: 200000n, tdsDeductedThisPaise: 400000n });
           const where = mockTx.tdsDeductionEntry.findMany.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where)
             .find((w: Record<string, unknown>) => w.section === 'SEC_194R');
-          expect(where).toMatchObject({ clientId: 'deoleo', panNumber: { in: ['__NO_PAN__:p1'] } });
+          // A-M4: by retailer key OR by the retailer's outlets (a PAN corrected mid-year still nets).
+          expect(where).toMatchObject({ clientId: 'deoleo', OR: [{ panNumber: { in: ['__NO_PAN__:p1'] } }, { outletCode: { in: ['O1'] } }] });
         });
 
         it('GROSS_UP client: a no-PAN retailer is still paid in full (client-borne on the report)', async () => {

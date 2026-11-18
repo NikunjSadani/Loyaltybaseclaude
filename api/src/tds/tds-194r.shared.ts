@@ -375,3 +375,52 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
   }
   return out;
 }
+
+/**
+ * TDS already deducted from each 194R retailer's payouts this FY (net of FAILED / reversal offsets),
+ * keyed by the retailer's CURRENT key — audit A-M4: it follows the RETAILER, not the PAN string. A
+ * ledger row is attributed through its outlet (outletCode → the outlet's current owner → PAN / no-PAN
+ * key), so withholding booked under an old PAN (or as no-PAN before a PAN was added) nets against the
+ * same retailer after the correction. A row without a resolvable outlet falls back to its stored key.
+ * Shared by the engine (scope = this run's retailers) and the 194R report (scope omitted = whole client).
+ */
+export async function deducted194RByRetailer(
+  db: Tds194RDb,
+  a: { clientId: string; fyLabel: string; scope?: { keys: string[]; outletCodes: string[] } },
+): Promise<Map<string, bigint>> {
+  const { clientId, fyLabel, scope } = a;
+  const rows = await db.tdsDeductionEntry.findMany({
+    where: {
+      clientId,
+      section: 'SEC_194R',
+      fyLabel,
+      ...(scope ? { OR: [{ panNumber: { in: scope.keys } }, { outletCode: { in: scope.outletCodes } }] } : {}),
+    },
+    select: { clientId: true, panNumber: true, outletCode: true, tdsDeductedThisPaise: true },
+  });
+  const mine = (rows ?? []).filter((r) => !r.clientId || r.clientId === clientId);
+  const codes = [...new Set(mine.map((r) => r.outletCode).filter((c): c is string => !!c))];
+  const outlets = codes.length
+    ? await db.outlet.findMany({ where: { clientId, outletCode: { in: codes } }, select: { outletCode: true, partnerId: true } })
+    : [];
+  const ownerIds = [...new Set(outlets.map((o) => o.partnerId).filter((x): x is string => !!x))];
+  const owners = ownerIds.length
+    ? await db.channelPartner.findMany({ where: { id: { in: ownerIds } }, select: { id: true, panNumber: true } })
+    : [];
+  const ownerPan = new Map(owners.map((o) => [o.id, o.panNumber]));
+  const keyByOutlet = new Map<string, string>();
+  for (const o of outlets) {
+    const pan = o.partnerId ? ownerPan.get(o.partnerId) : null;
+    keyByOutlet.set(
+      o.outletCode,
+      !isNoPanCell(pan) ? pan!.trim().toUpperCase() : o.partnerId ? noPanPartnerKey(o.partnerId) : noPanOutletKey(clientId, o.outletCode),
+    );
+  }
+  const out = new Map<string, bigint>();
+  for (const r of mine) {
+    const key = (r.outletCode && keyByOutlet.get(r.outletCode)) || (r.panNumber?.trim() ? retailerKeyOfLedgerPan(r.panNumber) : null);
+    if (!key) continue;
+    out.set(key, (out.get(key) ?? 0n) + r.tdsDeductedThisPaise);
+  }
+  return out;
+}
