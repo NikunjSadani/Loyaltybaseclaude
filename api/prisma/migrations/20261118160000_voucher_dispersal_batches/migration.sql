@@ -5,12 +5,10 @@
 -- (campaignId, batchNumber, rowNumber) — a later batch's file restarts at Excel row 2. The new index is
 -- created FIRST, so a uniqueness guarantee holds at every moment; dropping the narrower index removes no data
 -- (every existing row is batch 1, so the old guarantee is exactly preserved for them). Rollback = recreate it.
--- SET LOCAL: scoped to the transaction the migration runs in, so it never leaks to the session / a pooled
--- connection. Expected to apply because the file is sent as one multi-statement script, which Postgres runs as one
--- implicit transaction block (in which SET LOCAL takes effect). NOT yet verified against a real database — check on
--- a local / throwaway DB first (VOUCHER-DISPERSAL.md §8): if Postgres warns "SET LOCAL can only be used in
--- transaction blocks", the 5 s limit did NOT apply.
-SET LOCAL lock_timeout = '5s';
+-- lock_timeout: a plain session SET (Prisma sends migration statements OUTSIDE a transaction block, so SET LOCAL is
+-- ignored — verified 2026-11-18: Postgres logged "SET LOCAL can only be used in transaction blocks" when staging applied
+-- 20261118130000). RESET at the end so the setting does not leak to later migrations in the same run.
+SET lock_timeout = '5s';
 
 -- CreateEnum
 CREATE TYPE "VoucherDispersalBatchStatus" AS ENUM ('PREVIEWED', 'CONFIRMED', 'DISCARDED');
@@ -60,3 +58,5 @@ CREATE UNIQUE INDEX "voucher_dispersal_rows_campaignId_batchNumber_rowNumber_key
 
 -- DropIndex
 DROP INDEX "voucher_dispersal_rows_campaignId_rowNumber_key";
+
+RESET lock_timeout;

@@ -41,7 +41,7 @@ or not) sees every campaign. `GIFSY_STAFF` and every tenant role are refused (co
   row is batch 1), table `VoucherDispersalBatch` (batches 2, 3, …: status `PREVIEWED|CONFIRMED|DISCARDED`, previewId,
   file, uploaded / confirmed / discarded by + at, discardReason; `@@unique([campaignId, batchNumber])`), and the row-number
   unique widened from `(campaignId, rowNumber)` to `(campaignId, batchNumber, rowNumber)` (new index created before the old
-  one is dropped; no data touched). `SET LOCAL lock_timeout = '5s'`; also `settleFailures` / `settleError` on campaigns.
+  one is dropped; no data touched). `SET lock_timeout = '5s'` … `RESET lock_timeout`; also `settleFailures` / `settleError` on campaigns.
 
 ## 3. API contract (`/v1/admin/voucher-dispersal`, GIFSY_ADMIN, `{ success, data }` envelope; errors `{ success:false, error }`)
 
@@ -211,11 +211,11 @@ refusals) (actor = admin).
   being bought). Order: (1) **pause the drain** — pause the Cloud Scheduler job `voucher-dispersal-drain-prod` (and/or set
   `VOUCHER_DISPERSAL_WORKER_ENABLED=false` on the API service so the 30 s timer stops); (2) run `npx prisma migrate deploy`
   (in-VPC migrate job); (3) deploy the new API revision; (4) **resume** the scheduler job / unset the flag. The migration
-  sets `SET LOCAL lock_timeout = '5s'` (scoped to its own transaction): it waits at most 5 s for its locks, and queries
-  queued behind it wait at most that long (≤ 5 s).
-- **Verify `SET LOCAL` once before prod (not yet done):** apply the migration to a local / throwaway database and confirm
-  Postgres did NOT print "SET LOCAL can only be used in transaction blocks" (that warning would mean the 5 s limit did not
-  apply — then switch back to a session `SET lock_timeout`).
+  sets `SET lock_timeout = '5s'` (a plain session SET, `RESET` at the end of the file): it waits at most 5 s for its
+  locks, and queries queued behind it wait at most that long (≤ 5 s).
+- **Why not `SET LOCAL`:** Prisma sends migration statements outside a transaction block, so `SET LOCAL` is ignored —
+  verified 2026-11-18: Postgres logged "SET LOCAL can only be used in transaction blocks" when staging applied
+  `20261118130000_sales_day_order_index` (whose 10 s limit therefore did not apply; harmless there — new, small table).
 - **If it fails on `lock_timeout`** (P3018 on the run; afterwards `migrate deploy` refuses with P3009 — a failed migration
   is recorded): nothing was applied (the migration runs in one transaction). Recover with exactly
   `npx prisma migrate resolve --rolled-back 20261118160000_voucher_dispersal_batches` (in the in-VPC migrate job), then
