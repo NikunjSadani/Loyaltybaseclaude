@@ -236,6 +236,7 @@ describe('voucher-dispersal UI ⇄ server contract (fixture from the real server
     expect(d.edits[0]).toMatchObject({ byName: 'Admin One' });
     expect(d.edits[0].changes.map((c) => c.field)).toEqual(['name', 'budgetRupees']);
     expect(d.summary.budgetFloorRupees).toBe(1300);
+    expect(d.summary.budgetUsage).toEqual({ spentRupees: 1300, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 1300 });
     expect(d.summary.bought).toBe(2);
 
     const r = normalizeRowsPage(C.rowsOfBatch, 1);

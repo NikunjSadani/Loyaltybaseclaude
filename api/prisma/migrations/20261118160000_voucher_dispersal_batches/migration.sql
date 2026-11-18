@@ -28,6 +28,9 @@ CREATE TABLE "voucher_dispersal_batches" (
     "discardedById" TEXT,
     "discardedAt" TIMESTAMP(3),
     "discardReason" TEXT,
+    "skippedBlankRows" INTEGER,
+    "skippedFormulaRows" INTEGER,
+    "hiddenRowsIncluded" INTEGER,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 

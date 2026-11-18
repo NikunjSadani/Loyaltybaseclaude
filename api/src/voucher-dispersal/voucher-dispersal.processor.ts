@@ -58,6 +58,50 @@ export function budgetCommittedWhere(campaignId: string): Prisma.VoucherDispersa
     ],
   };
 }
+/**
+ * ONE definition of "can still cost this campaign money" — the buy-time guard (`budgetCommittedWhere`, which
+ * is this minus QUEUED: the row being claimed is the one queued amount it adds), the budget floor (edit),
+ * batch confirm, the retry check and the detail page's budget breakdown all use it:
+ *   BOUGHT (spent) · BUYING + PENDING_RECONCILE (with Hubble, not yet confirmed) · BUY_FAILED whose current
+ *   reference reached Hubble (failed purchases Hubble may still complete) · QUEUED (confirmed, not yet bought).
+ */
+export function mayStillCostWhere(campaignId: string, excludeRowId?: string): Prisma.VoucherDispersalRowWhereInput {
+  return {
+    campaignId,
+    ...(excludeRowId ? { id: { not: excludeRowId } } : {}),
+    OR: [
+      { status: { in: [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT] } },
+      { status: RS.BUY_FAILED, referenceSentAt: { not: null } },
+    ],
+  };
+}
+
+export interface BudgetBreakdown {
+  spentPaise: bigint;
+  withHubblePaise: bigint;
+  failedMayCompletePaise: bigint;
+  queuedPaise: bigint;
+  /** Σ of the four — the lowest the budget may go; budget − floor is what is left. */
+  floorPaise: bigint;
+}
+
+/** The breakdown of `mayStillCostWhere` (optionally without one row — e.g. the row being retried). */
+export async function budgetBreakdown(db: Prisma.TransactionClient | PrismaService, campaignId: string, excludeRowId?: string): Promise<BudgetBreakdown> {
+  const groups = await db.voucherDispersalRow.groupBy({
+    by: ['status'],
+    where: mayStillCostWhere(campaignId, excludeRowId),
+    _sum: { amountPaise: true },
+  });
+  const sum = (ss: RS[]) => groups.filter((g) => ss.includes(g.status)).reduce((a, g) => a + BigInt(g._sum.amountPaise ?? 0n), 0n);
+  const b = {
+    spentPaise: sum([RS.BOUGHT]),
+    withHubblePaise: sum([RS.BUYING, RS.PENDING_RECONCILE]),
+    failedMayCompletePaise: sum([RS.BUY_FAILED]),
+    queuedPaise: sum([RS.QUEUED]),
+  };
+  return { ...b, floorPaise: b.spentPaise + b.withHubblePaise + b.failedMayCompletePaise + b.queuedPaise };
+}
+
 /** BUY_FAILED sources that are decided by US (not by Hubble) — when the reference reached Hubble earlier, the row stays in the reconcile sweep. */
 export const LOCAL_FAILURE_SOURCES = ['BUDGET', 'NOT_SENT'];
 /** A BUYING claim older than this is treated as "the worker died mid-call" → reconcile by lookup only. */
@@ -944,15 +988,24 @@ export class VoucherDispersalProcessor {
     campaignId: string,
     where: Prisma.VoucherDispersalRowWhereInput,
     data: Prisma.VoucherDispersalRowUpdateManyMutationInput,
-  ): Promise<'OK' | 'LOST' | 'CAMPAIGN_CLOSED'> {
+    budget?: { rowId: string; amountPaise: bigint },
+  ): Promise<'OK' | 'LOST' | 'CAMPAIGN_CLOSED' | { refused: 'BUDGET'; needPaise: bigint; leftPaise: bigint }> {
     return this.prisma.$transaction(async (tx) => {
       const camp = await tx.voucherDispersalCampaign.update({
         where: { id: campaignId },
         data: { updatedAt: new Date() },
-        select: { status: true },
+        select: { status: true, budgetPaise: true },
       });
       const open: CS[] = [CS.PROCESSING, CS.COMPLETED, CS.COMPLETED_WITH_ERRORS];
       if (!open.includes(camp.status)) return 'CAMPAIGN_CLOSED' as const;
+      if (budget) {
+        // Money-audit M2: a retry must not take budget already promised to queued rows (e.g. a confirmed
+        // "Add more people" batch). Everything else that can still cost money (this row excluded — it may
+        // already be counted) + this row must fit, under the same lock every buy claim takes.
+        const b = await budgetBreakdown(tx, campaignId, budget.rowId);
+        const left = BigInt(camp.budgetPaise) - b.floorPaise;
+        if (budget.amountPaise > left) return { refused: 'BUDGET' as const, needPaise: budget.amountPaise, leftPaise: left < 0n ? 0n : left };
+      }
       const res = await tx.voucherDispersalRow.updateMany({ where: { ...where, campaignId }, data: { ...data, status: RS.QUEUED } });
       if (res.count !== 1) return 'LOST' as const;
       if (camp.status !== CS.PROCESSING) {

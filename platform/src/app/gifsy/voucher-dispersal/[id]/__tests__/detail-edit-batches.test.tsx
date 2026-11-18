@@ -146,6 +146,14 @@ describe('Edit campaign', () => {
     expect(screen.getByTestId('vd-add-people-blocked')).toHaveTextContent('This campaign was cancelled — people cannot be added to it.');
   });
 
+  it('shows the SAME budget breakdown the floor uses (failed rows never called "in progress")', async () => {
+    detailQueue = [ok(detail({ summary: { budgetFloorRupees: 2000, budgetUsage: { spentRupees: 1000, withHubbleRupees: 500, failedMayCompleteRupees: 300, queuedRupees: 200, floorRupees: 2000 } } }))];
+    render(<DetailPage />);
+    const line = await screen.findByTestId('vd-budget-usage');
+    expect(line).toHaveTextContent('Budget used: ₹2,000 of ₹5,000 — spent ₹1,000 · with Hubble (not yet confirmed) ₹500 · failed purchases Hubble may still complete ₹300 · queued ₹200');
+    expect(line).not.toHaveTextContent('in progress');
+  });
+
   it('shows the edit history (who, when, old → new)', async () => {
     render(<DetailPage />);
     const h = await screen.findByTestId('vd-edit-history');

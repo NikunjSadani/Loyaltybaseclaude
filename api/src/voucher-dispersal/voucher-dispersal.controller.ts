@@ -6,9 +6,10 @@ import {
   Get,
   Headers,
   HttpCode,
+  Injectable,
   Param,
-  ParseIntPipe,
   Patch,
+  PipeTransform,
   Post,
   Query,
   StreamableFile,
@@ -30,6 +31,22 @@ import {
 } from './dto/voucher-dispersal.dto';
 
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/** Highest batch number accepted in a path / query (a bigger value is a 400, never a DB Int overflow 500). */
+export const MAX_BATCH_NUMBER = 100_000;
+
+/** `:n` batch number — a whole number 1..MAX_BATCH_NUMBER, else 400 (money-audit M7). */
+@Injectable()
+export class BatchNumberPipe implements PipeTransform<string, number> {
+  transform(value: string): number {
+    const v = String(value ?? '').trim();
+    const n = /^\d{1,9}$/.test(v) ? Number(v) : NaN;
+    if (!Number.isInteger(n) || n < 1 || n > MAX_BATCH_NUMBER) {
+      throw new BadRequestException(`Batch number must be a whole number from 1 to ${MAX_BATCH_NUMBER}.`);
+    }
+    return n;
+  }
+}
 
 /** Same .xlsx-only, size-capped multipart interceptor for the first file and every later batch. */
 const xlsxUpload = () =>
@@ -136,7 +153,7 @@ export class VoucherDispersalController {
 
   /** The preview of a batch still waiting for confirmation (resume after leaving the page). */
   @Get('campaigns/:id/batches/:n')
-  batchPreview(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('n', ParseIntPipe) n: number) {
+  batchPreview(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('n', BatchNumberPipe) n: number) {
     return this.svc.batchPreview(user, id, n);
   }
 
@@ -145,7 +162,7 @@ export class VoucherDispersalController {
   confirmBatch(
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
-    @Param('n', ParseIntPipe) n: number,
+    @Param('n', BatchNumberPipe) n: number,
     @Body() dto: ConfirmDispersalCampaignDto,
   ) {
     return this.svc.confirmBatch(user, id, n, dto);
@@ -153,7 +170,7 @@ export class VoucherDispersalController {
 
   @Post('campaigns/:id/batches/:n/discard')
   @HttpCode(200)
-  discardBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('n', ParseIntPipe) n: number) {
+  discardBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Param('n', BatchNumberPipe) n: number) {
     return this.svc.discardBatch(user, id, n);
   }
 

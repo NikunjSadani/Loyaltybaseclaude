@@ -224,6 +224,17 @@ export function makeFakePrisma() {
     client: table(clients, 'client', () => ({})),
     redemptionOrder: { findMany: jest.fn(async () => []) },
   };
-  prisma.$transaction = jest.fn(async (fn: (tx: Rec) => Promise<unknown>) => fn(prisma));
+  // Interactive transaction: runs fn(prisma); if it THROWS, every table is restored to its state before the
+  // transaction (rollback). Not isolated from concurrent transactions (no locks) — enough for the specs.
+  const allStores = [campaigns, rows, receipts, audits, clients, batches, users];
+  prisma.$transaction = jest.fn(async (fn: (tx: Rec) => Promise<unknown>) => {
+    const snap = allStores.map((st) => st.map((r) => ({ ...r })));
+    try {
+      return await fn(prisma);
+    } catch (e) {
+      allStores.forEach((st, i) => st.splice(0, st.length, ...snap[i]));
+      throw e;
+    }
+  });
   return { prisma, campaigns, rows, receipts, audits, clients, batches, users };
 }

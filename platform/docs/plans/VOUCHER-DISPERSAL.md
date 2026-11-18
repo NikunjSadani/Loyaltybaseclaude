@@ -205,6 +205,13 @@ refusals) (actor = admin).
   states why (Hubble unreachable / "no order" unverified). Check Hubble's dashboard for the reference before forcing
   anything; never edit rows by SQL.
 - **Superseded-reference alert:** look up both references at Hubble; if two vouchers exist, recover the extra one with Hubble.
+- **Migration `20261118160000_voucher_dispersal_batches` failed on `lock_timeout`** (a long query held the rows table):
+  Prisma records it as failed (P3009) and refuses further `migrate deploy`. Nothing was applied (each statement is in
+  the migration's transaction). Recover: `npx prisma migrate resolve --rolled-back 20261118160000_voucher_dispersal_batches`
+  (in the in-VPC migrate job), then run `migrate deploy` again at a quieter moment.
+- **Old/new revision overlap during that deploy:** for the minutes both API revisions serve traffic, the OLD revision
+  does not know about batches and would count an unconfirmed batch's rows in its list summary — harmless, because no
+  batch can exist until the new revision is serving (only it can create one).
 
 ## 9. Open questions
 
@@ -249,3 +256,33 @@ I want."* Owner chose **"Add to the same campaign"**.
   unaffected), WhatsApp status mirror (receipt → row — unaffected), Daily Ops Digest (row-based counts on statuses /
   row timestamps — never the campaign status, never VALID rows → a campaign re-opened by a batch is not double-counted;
   regression spec added), UI contract fixture + platform contract test (new endpoints).
+
+### 10a. Money-audit round (2026-11-18, two independent audits of `bc6a54ab` — no overspend / double-buy found)
+
+- **One "can still cost money" definition** (`mayStillCostWhere` / `budgetBreakdown`, processor): spent (BOUGHT) ·
+  with Hubble, not yet confirmed (BUYING + PENDING_RECONCILE) · failed purchases Hubble may still complete (BUY_FAILED
+  whose current reference reached Hubble) · queued. The budget floor (Edit), batch confirm, the retry check and the
+  detail page's "Budget used" line all use it; the claim-time guard is the same minus QUEUED (the claimed row is the
+  queued amount it adds). Refusals name each part — never "in progress" for failed rows.
+- **OPEN (owner/coordinator decision, not changed):** whether a BUY_FAILED row Hubble *definitively* failed (source
+  `HUBBLE_FAILED` = Hubble's FAILED body; `REJECTED` = 400/422 + canary-verified "no order") should stop counting.
+  Today both keep counting while their reference reached Hubble — the earlier audit decision "BUYING M1" (spec
+  `voucher-dispersal.service.spec.ts`, "a Hubble-failed row whose reference reached Hubble still counts") and the code
+  (`applyBody` still applies a later SUCCESS to a HUBBLE_FAILED row: "a FAILED that later succeeded") treat HUBBLE_FAILED
+  as possibly completing. The stored `buyFailureSource` CAN tell the sources apart; which of them is safe to release is a
+  policy call.
+- **Retry vs promised budget:** a retry is refused under the campaign lock when everything else that can still cost
+  money (the row itself excluded — it may already be counted) + the row > budget: "Retrying needs ₹X; only ₹Y is left
+  after queued rows and purchases already made or with Hubble — raise the budget (Edit campaign), then retry." Audited
+  `REFUSED_BUDGET`.
+- **Upload outside the lock:** parsing, live Hubble limits, warnings and the cross-batch duplicate lookup run before the
+  campaign row lock; the locked transaction (20 s) re-checks the batch state and the duplicate set (rebuilds if it
+  changed) and writes.
+- **Audits in the transaction:** edit, batch upload / confirm / discard write their AuditLog row inside the same
+  transaction — a failed audit write rolls the change back.
+- **Batch notes kept:** `VoucherDispersalBatch.skippedBlankRows / skippedFormulaRows / hiddenRowsIncluded` (same
+  migration — not yet deployed anywhere); a reopened waiting batch shows the same skipped / hidden notes; the upload
+  audit carries warningCount / skippedRows / hiddenRowsIncluded like the first file's.
+- **Wording:** first-file over budget → "Remove rows, or Edit campaign to raise the budget."
+- **Bounds:** `:n` and `?batch=` accept 1..100,000 — anything else is a 400.
+

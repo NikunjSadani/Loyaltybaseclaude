@@ -23,7 +23,7 @@ import {
   BATCH_STATUS_LABEL, BATCH_STATUS_TONE, CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE,
   PENDING_RECONCILE_NOTE, POLL_START_MS,
   PROCESS_FAILURES_BEFORE_NOTE, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, batchLabel, billedToText, campaignStatusText,
-  canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
+  budgetUsageText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
   isProcessInFlight, isSetupCampaign, isUncertainFailure, nextPollDelay, nextProcessFailures, plural, pollPhase, rowStatusText,
   shouldNudgeProcessing, vdApi, vdReportFallbackName, vdReportUrl,
   type CampaignStatus, type RowStatus, type VdBatch, type VdListItem, type VdRow, type VdRowsPage,
@@ -463,6 +463,11 @@ export default function VoucherCampaignDetailPage() {
         <Tile label="Msg failed" value={formatCount(s.messageFailed)} tone={gt0(s.messageFailed) ? 'danger' : 'neutral'} testId="vd-tile-msgfailed" />
         <Tile label="Spent / budget" value={`${formatRupees(s.spentRupees)} / ${formatRupees(c.budgetRupees)}`} testId="vd-tile-spent" wide />
       </div>
+      {s.budgetUsage && (
+        <p data-testid="vd-budget-usage" className="text-xs text-white/70 break-words">
+          Budget used: {formatRupees(s.budgetUsage.floorRupees)} of {formatRupees(c.budgetRupees)} — {budgetUsageText(s.budgetUsage)}
+        </p>
+      )}
 
       {item.batches.length > 0 && (
         <section aria-labelledby="vd-batches-heading" className="space-y-2">

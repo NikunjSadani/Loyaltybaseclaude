@@ -212,8 +212,25 @@ export interface VdDeliverySummary {
   spentRupees: number | null;
   /** Detail only: the lowest the budget may be edited down to (already spent + committed). */
   budgetFloorRupees: number | null;
+  /** Detail only: the SAME breakdown the server's floor / batch confirm / retry checks use. */
+  budgetUsage: VdBudgetUsage | null;
   /** List only: an "Add more people" batch waiting for confirmation (its number), else null. */
   pendingBatchNumber: number | null;
+}
+
+export interface VdBudgetUsage {
+  spentRupees: number | null;
+  /** BUYING + PENDING_RECONCILE: with Hubble, not yet confirmed. */
+  withHubbleRupees: number | null;
+  /** Failed purchases whose reference reached Hubble — Hubble may still complete them. */
+  failedMayCompleteRupees: number | null;
+  queuedRupees: number | null;
+  floorRupees: number | null;
+}
+
+/** "spent ₹A · with Hubble (not yet confirmed) ₹B · failed purchases Hubble may still complete ₹C · queued ₹D". */
+export function budgetUsageText(u: VdBudgetUsage): string {
+  return `spent ${formatRupees(u.spentRupees)} · with Hubble (not yet confirmed) ${formatRupees(u.withHubbleRupees)} · failed purchases Hubble may still complete ${formatRupees(u.failedMayCompleteRupees)} · queued ${formatRupees(u.queuedRupees)}`;
 }
 
 export const BATCH_STATUSES = ['PREVIEWED', 'CONFIRMED', 'DISCARDED', 'CANCELLED'] as const;
@@ -474,6 +491,7 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     messageNotSent: null,
     spentRupees: num(o.spentRupees),
     budgetFloorRupees: null,
+    budgetUsage: null,
     pendingBatchNumber: num(o.pendingBatchNumber),
   };
 }
@@ -494,6 +512,15 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
     messageNotSent: num(o.messageNotSent),
     spentRupees: num(o.spentRupees),
     budgetFloorRupees: num(o.budgetFloorRupees),
+    budgetUsage: isObj(o.budgetUsage)
+      ? {
+          spentRupees: num(o.budgetUsage.spentRupees),
+          withHubbleRupees: num(o.budgetUsage.withHubbleRupees),
+          failedMayCompleteRupees: num(o.budgetUsage.failedMayCompleteRupees),
+          queuedRupees: num(o.budgetUsage.queuedRupees),
+          floorRupees: num(o.budgetUsage.floorRupees),
+        }
+      : null,
     pendingBatchNumber: null,
   };
 }
@@ -825,7 +852,7 @@ export function confirmBlock(p: Pick<VdPreview, 'previewId' | 'summary'>): Confi
   if (isOverBudget(s)) {
     return {
       blocked: true,
-      reason: `The valid rows total ${formatRupees(s.totalRupees)}, which is over the ${formatRupees(s.budgetRupees)} budget. Fix the file (or create a campaign with a bigger budget) and upload again.`,
+      reason: `The valid rows total ${formatRupees(s.totalRupees)}, which is over the ${formatRupees(s.budgetRupees)} budget. Remove rows and upload again, or raise the budget with Edit campaign on the campaign page.`,
     };
   }
   if (s.valid === null || s.totalRupees === null || !p.previewId) {

@@ -32,7 +32,8 @@ import {
   LOCAL_FAILURE_SOURCES,
   MAX_RESENDS,
   VoucherDispersalProcessor,
-  budgetCommittedWhere,
+  budgetBreakdown,
+  type BudgetBreakdown,
 } from './voucher-dispersal.processor';
 import { maskVoucherCodeForAudit } from '../rewards/voucher-issuance';
 import {
@@ -55,6 +56,33 @@ type CampaignRow = Prisma.VoucherDispersalCampaignGetPayload<Record<string, neve
 type DbRow = Prisma.VoucherDispersalRowGetPayload<Record<string, never>>;
 type BatchRow = Prisma.VoucherDispersalBatchGetPayload<Record<string, never>>;
 type Tx = Prisma.TransactionClient;
+type EarlierRow = { id: string; phone: string | null; status: RS; batchNumber: number; dedupePhone: string | null };
+type SheetNotes = {
+  skippedBlankRows: number | null;
+  skippedFormulaRows: number | null;
+  skippedNote: string | null;
+  hiddenRowsIncluded: number | null;
+  hiddenNote: string | null;
+};
+
+/** The upload notes for skipped (blank / formula-only) and hidden rows — null counts = not recorded. */
+export function sheetNotes(blank: number | null, formulaOnly: number | null, hidden: number | null): SheetNotes {
+  const skipped = (blank ?? 0) + (formulaOnly ?? 0);
+  return {
+    skippedBlankRows: blank,
+    skippedFormulaRows: formulaOnly,
+    skippedNote: skipped
+      ? `${skipped} row${skipped === 1 ? '' : 's'} skipped: ${[
+          blank ? `${blank} blank` : '',
+          formulaOnly ? `${formulaOnly} with formulas but no saved values (open the file in Excel, save, and upload again)` : '',
+        ]
+          .filter(Boolean)
+          .join('; ')}`
+      : null,
+    hiddenRowsIncluded: hidden,
+    hiddenNote: hidden ? `${hidden} hidden row${hidden === 1 ? '' : 's'} included (they are hidden in Excel but will be sent)` : null,
+  };
+}
 type ReceiptLite = { id: string; status: string; sentAt: Date | null; deliveredAt: Date | null; readAt: Date | null; failureReason: string | null; updatedAt?: Date | null };
 
 const ROWS_PAGE_SIZE = 100;
@@ -449,7 +477,7 @@ export class VoucherDispersalService {
       if (validCount === 0) throw new BadRequestException('There are no valid rows to issue.');
       if (totalPaise > BigInt(camp.budgetPaise)) {
         throw new BadRequestException(
-          `The valid rows total ₹${rupees(totalPaise).toLocaleString('en-IN')}, over the ₹${rupees(camp.budgetPaise).toLocaleString('en-IN')} budget. Remove rows or raise the budget (new campaign).`,
+          `The valid rows total ₹${rupees(totalPaise).toLocaleString('en-IN')}, over the ₹${rupees(camp.budgetPaise).toLocaleString('en-IN')} budget. Remove rows, or Edit campaign to raise the budget.`,
         );
       }
       // Stale-preview protection: confirm exactly what the admin saw.
@@ -484,26 +512,27 @@ export class VoucherDispersalService {
   // ─── Edit (name / budget) ─────────────────────────────────────────────────────
 
   /**
-   * Σ money already spent or committed on this campaign — the lowest the budget may go: every row the
-   * buy engine counts against the budget (BUYING + PENDING_RECONCILE + BOUGHT + a BUY_FAILED row whose
-   * reference reached Hubble — `budgetCommittedWhere`) plus every QUEUED row (confirmed, about to be
-   * bought). Rows of an unconfirmed batch are VALID and never count.
+   * Money that can still be spent on this campaign — the lowest the budget may go. ONE definition shared
+   * with the buy engine (`mayStillCostWhere` / `budgetBreakdown` in the processor): spent (BOUGHT) · with
+   * Hubble, not yet confirmed (BUYING + PENDING_RECONCILE) · failed purchases Hubble may still complete
+   * (BUY_FAILED whose reference reached Hubble) · queued (confirmed, not yet bought). Rows of an unconfirmed
+   * batch are VALID and never count.
    */
-  private async budgetUsage(db: Tx | PrismaService, campaignId: string): Promise<{ spentPaise: bigint; floorPaise: bigint }> {
-    const committed = await db.voucherDispersalRow.aggregate({ where: budgetCommittedWhere(campaignId), _sum: { amountPaise: true } });
-    const queued = await db.voucherDispersalRow.aggregate({ where: { campaignId, status: RS.QUEUED }, _sum: { amountPaise: true } });
-    const spent = await db.voucherDispersalRow.aggregate({ where: { campaignId, status: RS.BOUGHT }, _sum: { amountPaise: true } });
-    return {
-      spentPaise: BigInt(spent._sum.amountPaise ?? 0n),
-      floorPaise: BigInt(committed._sum.amountPaise ?? 0n) + BigInt(queued._sum.amountPaise ?? 0n),
-    };
+  private async budgetUsage(db: Tx | PrismaService, campaignId: string): Promise<BudgetBreakdown> {
+    return budgetBreakdown(db, campaignId);
+  }
+
+  /** "spent ₹A · with Hubble (not yet confirmed) ₹B · failed purchases Hubble may still complete ₹C · queued ₹D". */
+  private usageText(b: BudgetBreakdown): string {
+    return `spent ${inr(b.spentPaise)} · with Hubble (not yet confirmed) ${inr(b.withHubblePaise)} · failed purchases Hubble may still complete ${inr(b.failedMayCompletePaise)} · queued ${inr(b.queuedPaise)}`;
   }
 
   /**
    * PATCH /campaigns/:id — rename and/or change the budget. Not on a CANCELLED campaign. The budget may go
-   * up, or down to (never below) spent + committed, computed under the campaign row lock (the same lock every
-   * buy claim takes, so no purchase can slip in between the check and the write). Every edit is audited
-   * (AuditLog VOUCHER_DISPERSAL_EDITED: actor, time, old → new) and listed on the detail page.
+   * up, or down to (never below) the floor (`budgetUsage`), computed under the campaign row lock (the same lock
+   * every buy claim takes, so no purchase can slip in between the check and the write). Every edit is audited
+   * INSIDE the same transaction (AuditLog VOUCHER_DISPERSAL_EDITED: actor, time, old → new) — no edit without
+   * history — and listed on the detail page.
    */
   async editCampaign(user: JwtPayload, id: string, dto: EditDispersalCampaignDto) {
     this.assertAdmin(user);
@@ -525,22 +554,20 @@ export class VoucherDispersalService {
       if (newBudget !== BigInt(camp.budgetPaise)) changes.push({ field: 'budgetRupees', from: rupees(camp.budgetPaise), to: rupees(newBudget) });
       if (changes.length === 0) throw new BadRequestException('Nothing to change — the name and budget already have these values.');
       if (newBudget < BigInt(camp.budgetPaise)) {
-        const { spentPaise, floorPaise } = await this.budgetUsage(tx, id);
-        if (newBudget < floorPaise) {
-          throw new BadRequestException(
-            `The budget can't go below ${inr(floorPaise)} — that much is already spent (${inr(spentPaise)}) or committed to purchases still in progress (${inr(floorPaise - spentPaise)}).`,
-          );
+        const usage = await this.budgetUsage(tx, id);
+        if (newBudget < usage.floorPaise) {
+          throw new BadRequestException(`The budget can't go below ${inr(usage.floorPaise)} — ${this.usageText(usage)}.`);
         }
       }
       const updated = await tx.voucherDispersalCampaign.update({
         where: { id },
         data: { ...(name !== undefined ? { name } : {}), budgetPaise: newBudget },
       });
-      return { updated, changes, old: camp };
+      const pickChanged = (src: { name: string; budgetPaise: bigint }) =>
+        Object.fromEntries(changes.map((c) => [c.field, c.field === 'name' ? src.name : rupees(src.budgetPaise)]));
+      await this.auditCampaignTx(tx, user, id, 'UPDATE', EDIT_EVENT, { changes }, { oldValues: pickChanged(camp), newValues: pickChanged(updated) });
+      return { updated };
     });
-    const pickChanged = (src: { name: string; budgetPaise: bigint }) =>
-      Object.fromEntries(r.changes.map((c) => [c.field, c.field === 'name' ? src.name : rupees(src.budgetPaise)]));
-    await this.auditCampaign(user, id, 'UPDATE', EDIT_EVENT, { changes: r.changes }, { oldValues: pickChanged(r.old), newValues: pickChanged(r.updated) });
     return this.campaignView(r.updated);
   }
 
@@ -577,12 +604,83 @@ export class VoucherDispersalService {
   }
 
   /**
+   * Rows of OTHER batches for these phones that matter to a new batch: live rows (they own the phone — the new
+   * row is DUPLICATE) and dead rows still holding a phone's one-voucher key (they give it up). A plain read;
+   * run once OUTSIDE the lock to build the preview, and again UNDER the lock to re-check.
+   */
+  private async earlierRowsFor(db: Tx | PrismaService, campaignId: string, phones: string[], excludeBatch: number | null) {
+    const out: EarlierRow[] = [];
+    for (let i = 0; i < phones.length; i += 1000) {
+      out.push(
+        ...(await db.voucherDispersalRow.findMany({
+          where: {
+            campaignId,
+            phone: { in: phones.slice(i, i + 1000) },
+            ...(excludeBatch !== null ? { batchNumber: { not: excludeBatch } } : {}),
+            OR: [{ status: { in: LIVE_ROW } }, { dedupePhone: { not: null } }],
+          },
+          select: { id: true, phone: true, status: true, batchNumber: true, dedupePhone: true },
+          orderBy: [{ batchNumber: 'asc' }, { rowNumber: 'asc' }],
+        })),
+      );
+    }
+    return out;
+  }
+
+  /** Stable signature of what the duplicate check depends on (to detect a change between the two reads). */
+  private earlierSignature(rows: EarlierRow[]): string {
+    return rows.map((r) => `${r.id}:${r.status}:${r.dedupePhone ?? ''}`).sort().join('|');
+  }
+
+  /** Pure: the new batch's rows given the earlier batches' rows (cross-batch DUPLICATE + key hand-over). */
+  private buildBatchRows(parsed: ParsedDispersalRow[], warnings: Map<string, string>, earlier: EarlierRow[]) {
+    const liveBy = new Map<string, { batchNumber: number; status: RS }>();
+    for (const e of earlier) if (e.phone && LIVE_ROW.includes(e.status) && !liveBy.has(e.phone)) liveBy.set(e.phone, e);
+    let crossBatchDuplicates = 0;
+    const built = parsed.map((r) => {
+      let status = r.status as RS;
+      let invalidReason = r.invalidReason;
+      let dedupePhone = r.dedupePhone;
+      const live = r.phone ? liveBy.get(r.phone) : undefined;
+      if (live) {
+        dedupePhone = null;
+        if (status === RS.VALID) {
+          status = RS.DUPLICATE;
+          crossBatchDuplicates++;
+          invalidReason =
+            live.status === RS.BUY_FAILED
+              ? `Already in batch ${live.batchNumber}, where its purchase failed — use Retry on that row instead (one voucher per phone per campaign)`
+              : `Already sent in batch ${live.batchNumber} — one voucher per phone per campaign`;
+        }
+      }
+      const amountPaise = r.amountRupees != null && Number.isInteger(r.amountRupees) ? BigInt(r.amountRupees) * 100n : null;
+      return {
+        r,
+        status,
+        invalidReason,
+        dedupePhone,
+        amountPaise,
+        warning: r.phone && status === RS.VALID ? warnings.get(r.phone) ?? null : null,
+        // The Hubble idempotency key is fixed NOW — before anything can reach Hubble.
+        hubbleReferenceId: status === RS.VALID ? `vd${randomBytes(12).toString('hex')}` : null,
+      };
+    });
+    // A DEAD earlier row (INVALID / DUPLICATE / CANCELLED — never bought, never will be) holding a phone's
+    // one-voucher key gives it up to this batch's row for that phone.
+    const taking = new Set(built.map((b) => b.dedupePhone).filter((x): x is string => !!x));
+    const release = earlier.filter((e) => e.dedupePhone && taking.has(e.dedupePhone) && NOT_VALID.includes(e.status)).map((e) => e.id);
+    return { built, crossBatchDuplicates, release };
+  }
+
+  /**
    * POST /campaigns/:id/batches — upload another file to a FINISHED campaign (COMPLETED /
    * COMPLETED_WITH_ERRORS, nothing in flight). Same parse + validation as the first file. A phone that
    * already has a live row in an earlier batch (bought, or failed and retryable there) is DUPLICATE with
    * the batch named; the one-voucher-per-phone DB key spans every batch. Re-uploading while the campaign's
    * newest batch is still unconfirmed REPLACES that batch's rows (same number, new previewId). Nothing is
    * bought until confirmBatch; until then the batch's rows count in no total, list summary or report.
+   * Money-audit M3: parsing, the live Hubble limits, the warnings and the duplicate lookup all run OUTSIDE the
+   * campaign row lock; the locked transaction only re-checks (batch state + the duplicate set) and writes.
    */
   async uploadBatch(user: JwtPayload, id: string, file: Express.Multer.File | undefined) {
     this.assertAdmin(user);
@@ -602,12 +700,19 @@ export class VoucherDispersalService {
     const warnings = await this.recentVoucherWarnings(id, parsed);
     const fileName = (file.originalname ?? 'upload.xlsx').slice(0, 200);
     const previewId = `pv${randomBytes(12).toString('hex')}`;
+    const phones = [...new Set(parsed.map((r) => r.phone).filter((x): x is string => !!x))];
+    // Outside the lock: which batch would be replaced, and the duplicate check against earlier batches.
+    const waitingBefore = await this.prisma.voucherDispersalBatch.findFirst({ where: { campaignId: id, status: BS.PREVIEWED } });
+    const earlierBefore = await this.earlierRowsFor(this.prisma, id, phones, waitingBefore?.batchNumber ?? null);
+    let plan = this.buildBatchRows(parsed, warnings, earlierBefore);
+    const notes = sheetNotes(sheet.skippedBlank, sheet.skippedFormulaOnly, sheet.hiddenIncluded);
     const now = new Date();
 
     const res = await this.prisma.$transaction(
       async (tx) => {
         const camp = await this.lockForBatch(tx, id);
         let batch = await tx.voucherDispersalBatch.findFirst({ where: { campaignId: id, status: BS.PREVIEWED } });
+        const sheetCounts = { skippedBlankRows: sheet.skippedBlank, skippedFormulaRows: sheet.skippedFormulaOnly, hiddenRowsIncluded: sheet.hiddenIncluded };
         if (batch) {
           const live = await tx.voucherDispersalRow.count({
             where: { campaignId: id, batchNumber: batch.batchNumber, status: { notIn: PREVIEW_STATUSES } },
@@ -616,7 +721,7 @@ export class VoucherDispersalService {
           await tx.voucherDispersalRow.deleteMany({ where: { campaignId: id, batchNumber: batch.batchNumber } });
           batch = await tx.voucherDispersalBatch.update({
             where: { id: batch.id },
-            data: { previewId, sourceFileName: fileName, uploadedById: user.sub, uploadedAt: now },
+            data: { previewId, sourceFileName: fileName, uploadedById: user.sub, uploadedAt: now, ...sheetCounts },
           });
         } else {
           const last = await tx.voucherDispersalBatch.findFirst({ where: { campaignId: id }, orderBy: { batchNumber: 'desc' } });
@@ -629,53 +734,17 @@ export class VoucherDispersalService {
               sourceFileName: fileName,
               uploadedById: user.sub,
               uploadedAt: now,
+              ...sheetCounts,
             },
           });
         }
         const n = batch.batchNumber;
+        // Re-check the duplicate set under the lock: anything that changed since the outside read → rebuild.
+        const earlierNow = await this.earlierRowsFor(tx, id, phones, n);
+        if (this.earlierSignature(earlierNow) !== this.earlierSignature(earlierBefore)) plan = this.buildBatchRows(parsed, warnings, earlierNow);
+        if (plan.release.length) await tx.voucherDispersalRow.updateMany({ where: { id: { in: plan.release } }, data: { dedupePhone: null } });
 
-        // Earlier batches' rows for these phones.
-        const phones = [...new Set(parsed.map((r) => r.phone).filter((x): x is string => !!x))];
-        const earlier: { id: string; phone: string | null; status: RS; batchNumber: number; dedupePhone: string | null }[] = [];
-        for (let i = 0; i < phones.length; i += 1000) {
-          earlier.push(
-            ...(await tx.voucherDispersalRow.findMany({
-              where: { campaignId: id, batchNumber: { not: n }, phone: { in: phones.slice(i, i + 1000) } },
-              select: { id: true, phone: true, status: true, batchNumber: true, dedupePhone: true },
-              orderBy: [{ batchNumber: 'asc' }, { rowNumber: 'asc' }],
-            })),
-          );
-        }
-        const liveBy = new Map<string, { batchNumber: number; status: RS }>();
-        for (const e of earlier) if (e.phone && LIVE_ROW.includes(e.status) && !liveBy.has(e.phone)) liveBy.set(e.phone, e);
-
-        let crossBatchDuplicates = 0;
-        const built = parsed.map((r) => {
-          let status = r.status as RS;
-          let invalidReason = r.invalidReason;
-          let dedupePhone = r.dedupePhone;
-          const live = r.phone ? liveBy.get(r.phone) : undefined;
-          if (live) {
-            dedupePhone = null;
-            if (status === RS.VALID) {
-              status = RS.DUPLICATE;
-              crossBatchDuplicates++;
-              invalidReason =
-                live.status === RS.BUY_FAILED
-                  ? `Already in batch ${live.batchNumber}, where its purchase failed — use Retry on that row instead (one voucher per phone per campaign)`
-                  : `Already sent in batch ${live.batchNumber} — one voucher per phone per campaign`;
-            }
-          }
-          const amountPaise = r.amountRupees != null && Number.isInteger(r.amountRupees) ? BigInt(r.amountRupees) * 100n : null;
-          return { r, status, invalidReason, dedupePhone, amountPaise, warning: r.phone && status === RS.VALID ? warnings.get(r.phone) ?? null : null };
-        });
-        // A DEAD earlier row (INVALID / DUPLICATE / CANCELLED — never bought, never will be) holding a phone's
-        // one-voucher key gives it up to this batch's row for that phone.
-        const taking = new Set(built.map((b) => b.dedupePhone).filter((x): x is string => !!x));
-        const release = earlier.filter((e) => e.dedupePhone && taking.has(e.dedupePhone) && NOT_VALID.includes(e.status)).map((e) => e.id);
-        if (release.length) await tx.voucherDispersalRow.updateMany({ where: { id: { in: release } }, data: { dedupePhone: null } });
-
-        const data: Prisma.VoucherDispersalRowCreateManyInput[] = built.map((b) => ({
+        const data: Prisma.VoucherDispersalRowCreateManyInput[] = plan.built.map((b) => ({
           campaignId: id,
           batchNumber: n,
           rowNumber: b.r.rowNumber,
@@ -691,65 +760,53 @@ export class VoucherDispersalService {
           status: b.status,
           invalidReason: b.invalidReason?.slice(0, 500) ?? null,
           warning: b.warning,
-          hubbleReferenceId: b.status === RS.VALID ? `vd${randomBytes(12).toString('hex')}` : null,
+          hubbleReferenceId: b.hubbleReferenceId,
         }));
         for (let i = 0; i < data.length; i += CREATE_CHUNK) {
           await tx.voucherDispersalRow.createMany({ data: data.slice(i, i + CREATE_CHUNK) });
         }
         const usage = await this.budgetUsage(tx, id);
-        return { camp, batch, built, crossBatchDuplicates, floorPaise: usage.floorPaise };
+        const view = this.batchPreviewView(
+          camp,
+          batch,
+          plan.built.map((b) => ({
+            rowNumber: b.r.rowNumber,
+            phone: b.r.phone ?? b.r.rawPhone,
+            name: b.r.name,
+            amountPaise: b.amountPaise,
+            amountRupees: b.r.amountRupees,
+            brandLabel: b.r.brandLabel,
+            brandKey: b.r.brandKey,
+            note: b.r.note,
+            status: b.status,
+            invalidReason: b.invalidReason,
+            warning: b.warning,
+          })),
+          usage.floorPaise,
+          notes,
+        );
+        // Inside the transaction (money-audit M4): no batch without its audit row.
+        await this.auditCampaignTx(tx, user, id, 'IMPORT', 'VOUCHER_DISPERSAL_BATCH_UPLOADED', {
+          batchNumber: n,
+          fileName,
+          warningCount: view.summary.warningCount,
+          skippedRows: sheet.skippedBlank + sheet.skippedFormulaOnly,
+          hiddenRowsIncluded: sheet.hiddenIncluded,
+          total: view.summary.total,
+          valid: view.summary.valid,
+          invalid: view.summary.invalid,
+          duplicates: view.summary.duplicates,
+          crossBatchDuplicates: view.summary.crossBatchDuplicates,
+          totalRupees: view.summary.totalRupees,
+          remainingBudgetRupees: view.summary.remainingBudgetRupees,
+          overBudget: view.summary.overBudget,
+        });
+        return { camp, view };
       },
-      { timeout: 60_000 },
+      // Short: only re-checks + writes run under the lock (≤ 5,000 rows inserted in chunks of 1,000).
+      { timeout: 20_000 },
     );
-
-    const skippedRows = sheet.skippedBlank + sheet.skippedFormulaOnly;
-    const view = this.batchPreviewView(
-      res.camp,
-      res.batch,
-      res.built.map((b) => ({
-        rowNumber: b.r.rowNumber,
-        phone: b.r.phone ?? b.r.rawPhone,
-        name: b.r.name,
-        amountPaise: b.amountPaise,
-        amountRupees: b.r.amountRupees,
-        brandLabel: b.r.brandLabel,
-        brandKey: b.r.brandKey,
-        note: b.r.note,
-        status: b.status,
-        invalidReason: b.invalidReason,
-        warning: b.warning,
-      })),
-      res.floorPaise,
-      {
-        skippedBlankRows: sheet.skippedBlank,
-        skippedFormulaRows: sheet.skippedFormulaOnly,
-        skippedNote: skippedRows
-          ? `${skippedRows} row${skippedRows === 1 ? '' : 's'} skipped: ${[
-              sheet.skippedBlank ? `${sheet.skippedBlank} blank` : '',
-              sheet.skippedFormulaOnly ? `${sheet.skippedFormulaOnly} with formulas but no saved values (open the file in Excel, save, and upload again)` : '',
-            ]
-              .filter(Boolean)
-              .join('; ')}`
-          : null,
-        hiddenRowsIncluded: sheet.hiddenIncluded,
-        hiddenNote: sheet.hiddenIncluded
-          ? `${sheet.hiddenIncluded} hidden row${sheet.hiddenIncluded === 1 ? '' : 's'} included (they are hidden in Excel but will be sent)`
-          : null,
-      },
-    );
-    await this.auditCampaign(user, id, 'IMPORT', 'VOUCHER_DISPERSAL_BATCH_UPLOADED', {
-      batchNumber: res.batch.batchNumber,
-      fileName,
-      total: view.summary.total,
-      valid: view.summary.valid,
-      invalid: view.summary.invalid,
-      duplicates: view.summary.duplicates,
-      crossBatchDuplicates: res.crossBatchDuplicates,
-      totalRupees: view.summary.totalRupees,
-      remainingBudgetRupees: view.summary.remainingBudgetRupees,
-      overBudget: view.summary.overBudget,
-    });
-    return { ...view, campaign: await this.campaignView(res.camp) };
+    return { ...res.view, campaign: await this.campaignView(res.camp) };
   }
 
   /** GET /campaigns/:id/batches/:n — the preview of a batch that is waiting for confirmation (resume). */
@@ -784,8 +841,8 @@ export class VoucherDispersalService {
         warning: r.warning,
       })),
       floorPaise,
-      // Skipped / hidden-row notes are only known at upload time (not stored).
-      { skippedBlankRows: null, skippedFormulaRows: null, skippedNote: null, hiddenRowsIncluded: null, hiddenNote: null },
+      // The skipped / hidden-row counts are kept on the batch (money-audit M5); null = not recorded.
+      sheetNotes(batch.skippedBlankRows, batch.skippedFormulaRows, batch.hiddenRowsIncluded),
     );
     return { ...view, campaign: await this.campaignView(camp) };
   }
@@ -808,13 +865,7 @@ export class VoucherDispersalService {
       warning: string | null;
     }[],
     floorPaise: bigint,
-    notes: {
-      skippedBlankRows: number | null;
-      skippedFormulaRows: number | null;
-      skippedNote: string | null;
-      hiddenRowsIncluded: number | null;
-      hiddenNote: string | null;
-    },
+    notes: SheetNotes,
   ) {
     const base = this.previewSummary(rows, camp.budgetPaise);
     const totalPaise = rows.filter((r) => r.status === RS.VALID).reduce((a, r) => a + (r.amountPaise ?? 0n), 0n);
@@ -850,9 +901,10 @@ export class VoucherDispersalService {
   /**
    * POST /campaigns/:id/batches/:n/confirm — buy this batch's VALID rows. Under the campaign row lock (the lock
    * every buy claim takes): the campaign must be finished with nothing in flight; the preview id and the
-   * numbers must match what the admin saw; spent + committed + this batch ≤ budget (else refuse — raise the
-   * budget). The batch flips PREVIEWED→CONFIRMED with a conditional update, its VALID rows → QUEUED, and the
-   * campaign → PROCESSING so the existing engine buys them and re-settles the status across ALL batches.
+   * numbers must match what the admin saw; floor (spent + with Hubble + failed-may-complete + queued) + this
+   * batch ≤ budget (else refuse — raise the budget). The batch flips PREVIEWED→CONFIRMED with a conditional
+   * update, its VALID rows → QUEUED, and the campaign → PROCESSING so the existing engine buys them and
+   * re-settles the status across ALL batches. The audit row is written in the same transaction.
    * IDEMPOTENT per batch: a repeated / racing confirm quoting the confirmed preview id returns the campaign.
    */
   async confirmBatch(user: JwtPayload, id: string, n: number, dto: ConfirmDispersalCampaignDto) {
@@ -920,16 +972,16 @@ export class VoucherDispersalService {
       });
       if (q.count !== validCount) throw new ConflictException('The rows changed while confirming — refresh and try again.');
       const updated = await tx.voucherDispersalCampaign.update({ where: { id }, data: { status: CS.PROCESSING, completedAt: null } });
-      return { repeat: false as const, updated, fromStatus: camp.status, validCount, totalRupees: rupees(totalPaise) };
+      await this.auditCampaignTx(tx, user, id, 'APPROVE', 'VOUCHER_DISPERSAL_BATCH_CONFIRMED', {
+        batchNumber: n,
+        previewId: dto.previewId,
+        validCount,
+        totalRupees: rupees(totalPaise),
+        fromStatus: camp.status,
+      });
+      return { repeat: false as const, updated };
     });
     if (result.repeat) return this.campaignView(await this.getCampaignOr404(id));
-    await this.auditCampaign(user, id, 'APPROVE', 'VOUCHER_DISPERSAL_BATCH_CONFIRMED', {
-      batchNumber: n,
-      previewId: dto.previewId,
-      validCount: result.validCount,
-      totalRupees: result.totalRupees,
-      fromStatus: result.fromStatus,
-    });
     this.processor.kick(id);
     return this.campaignView(result.updated);
   }
@@ -952,7 +1004,7 @@ export class VoucherDispersalService {
   /**
    * POST /campaigns/:id/batches/:n/discard — drop an unconfirmed batch: its rows are deleted (they never
    * reached Hubble and count in no total) and the batch stays listed as DISCARDED (who / when). A confirmed
-   * batch cannot be discarded (Cancel campaign stops rows not yet bought).
+   * batch cannot be discarded (Cancel campaign stops rows not yet bought). Audited in the same transaction.
    */
   async discardBatch(user: JwtPayload, id: string, n: number) {
     this.assertAdmin(user);
@@ -971,9 +1023,9 @@ export class VoucherDispersalService {
         );
       }
       const discardedRows = await this.discardPendingBatchTx(tx, id, batch, user.sub, 'Discarded by an admin before confirming');
+      await this.auditCampaignTx(tx, user, id, 'UPDATE', 'VOUCHER_DISPERSAL_BATCH_DISCARDED', { batchNumber: n, discardedRows });
       return { camp, discardedRows };
     });
-    await this.auditCampaign(user, id, 'UPDATE', 'VOUCHER_DISPERSAL_BATCH_DISCARDED', { batchNumber: n, discardedRows: r.discardedRows });
     return { campaign: await this.campaignView(r.camp), batchNumber: n, discardedRows: r.discardedRows };
   }
 
@@ -1071,7 +1123,7 @@ export class VoucherDispersalService {
     const rows = allRows.filter((r) => r.batchNumber !== pendingBatch);
     const receipts = await this.receiptsFor(rows.map((r) => r.whatsappReceiptId));
     const base = this.previewSummary(rows, camp.budgetPaise);
-    const { floorPaise } = await this.budgetUsage(this.prisma, id);
+    const usage = await this.budgetUsage(this.prisma, id);
     const n = (s: RS) => rows.filter((r) => r.status === s).length;
     const sumOf = (ss: RS[]) => rows.filter((r) => ss.includes(r.status)).reduce((a, r) => a + (r.amountPaise ?? 0n), 0n);
     let messageSent = 0;
@@ -1103,7 +1155,15 @@ export class VoucherDispersalService {
         spentRupees: rupees(sumOf([RS.BOUGHT])),
         committedRupees: rupees(sumOf([RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT])),
         /** The lowest the budget may be edited down to (spent + committed + queued). */
-        budgetFloorRupees: rupees(floorPaise),
+        budgetFloorRupees: rupees(usage.floorPaise),
+        /** The SAME breakdown the floor, batch confirm and retry checks use (money-audit M1). */
+        budgetUsage: {
+          spentRupees: rupees(usage.spentPaise),
+          withHubbleRupees: rupees(usage.withHubblePaise),
+          failedMayCompleteRupees: rupees(usage.failedMayCompletePaise),
+          queuedRupees: rupees(usage.queuedPaise),
+          floorRupees: rupees(usage.floorPaise),
+        },
         messageSent,
         delivered,
         read,
@@ -1491,7 +1551,15 @@ export class VoucherDispersalService {
             }
           : {}),
       },
+      // Money-audit M2: never take budget promised to queued rows (e.g. a confirmed "Add more people" batch).
+      { rowId: row.id, amountPaise: BigInt(row.amountPaise ?? 0n) },
     );
+    if (typeof r === 'object') {
+      await audit('REFUSED_BUDGET', { needRupees: rupees(r.needPaise), leftRupees: rupees(r.leftPaise) });
+      throw new ConflictException(
+        `Retrying needs ${inr(r.needPaise)}; only ${inr(r.leftPaise)} is left after queued rows and purchases already made or with Hubble — raise the budget (Edit campaign), then retry.`,
+      );
+    }
     if (r === 'CAMPAIGN_CLOSED') {
       await audit('REFUSED_CAMPAIGN_CLOSED');
       throw new ConflictException('The campaign was cancelled meanwhile — nothing re-queued.');
@@ -1678,6 +1746,29 @@ export class VoucherDispersalService {
     if (list.length === 0) return new Map();
     const rows = await this.prisma.user.findMany({ where: { id: { in: list } }, select: { id: true, name: true } });
     return new Map(rows.map((u) => [u.id, u.name]));
+  }
+
+  /** Campaign audit row written INSIDE the caller's transaction (a failure aborts it — no change without history). */
+  private async auditCampaignTx(
+    tx: Tx,
+    user: JwtPayload,
+    id: string,
+    action: 'CREATE' | 'UPDATE' | 'IMPORT' | 'APPROVE' | 'EXPORT',
+    event: string,
+    metadata: Record<string, unknown>,
+    values: { oldValues?: Record<string, unknown>; newValues?: Record<string, unknown> } = {},
+  ): Promise<void> {
+    await tx.auditLog.create({
+      data: {
+        actorId: user.sub,
+        action,
+        entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+        entityId: id,
+        metadata: { event, ...metadata } as Prisma.InputJsonValue,
+        ...(values.oldValues ? { oldValues: values.oldValues as Prisma.InputJsonValue } : {}),
+        ...(values.newValues ? { newValues: values.newValues as Prisma.InputJsonValue } : {}),
+      },
+    });
   }
 
   private async auditCampaign(

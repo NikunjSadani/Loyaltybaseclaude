@@ -4191,6 +4191,10 @@ model VoucherDispersalBatch {
   discardedById  String?
   discardedAt    DateTime?
   discardReason  String?
+  /// Upload notes kept so a waiting batch reopened later shows them (null = not recorded).
+  skippedBlankRows   Int?
+  skippedFormulaRows Int?
+  hiddenRowsIncluded Int?
   createdAt      DateTime                    @default(now())
   updatedAt      DateTime                    @updatedAt
 

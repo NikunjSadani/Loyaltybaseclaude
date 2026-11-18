@@ -97,6 +97,7 @@ export class ListDispersalRowsQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(100_000) // = MAX_BATCH_NUMBER (controller) — over it is a 400, never a DB Int overflow
   batch?: number;
 
   @IsOptional()
