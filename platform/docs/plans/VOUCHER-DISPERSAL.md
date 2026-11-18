@@ -360,24 +360,43 @@ I want."* Owner chose **"Add to the same campaign"**.
   the "finished but in flight" grouping only looks at COMPLETED / COMPLETED_WITH_ERRORS campaigns; new index
   `voucher_dispersal_rows_lateCompletedAt_idx` (same migration, idempotent). L-6 — runbook: no uploads during the deploy.
 
-### 10b. Owner decision — Hubble CANCELLED / RETURNED = NOT BOUGHT; "Mark as not bought" (2026-11-18)
+### 10b. Owner decision — only Hubble's documented statuses; "Mark as not bought"; earlier references (2026-11-18)
 
-- **CANCELLED / RETURNED** (Hubble order statuses; REFUNDED is not a Hubble order status anywhere in this code, so it is
-  not included) are treated like FAILED: the row → BUY_FAILED with source **`HUBBLE_CANCELLED`** and reason "Hubble
-  reported X — not bought". Unlike `HUBBLE_FAILED`, it **no longer counts against the budget** (`NOT_BOUGHT_FAILURE_SOURCES`
-  = `REJECTED`, `HUBBLE_CANCELLED`, `MARKED_NOT_BOUGHT`, excluded in `failedMayStillCompleteWhere` — floor, confirm, retry
-  check, Budget used, digest). A `HUBBLE_FAILED` row later reported CANCELLED moves to `HUBBLE_CANCELLED` (released); a
-  released row is never re-counted as `HUBBLE_FAILED`. **Retry** asks Hubble again; FAILED / CANCELLED / RETURNED (or a
-  canary-verified "no order") → a NEW reference (old one kept), same rules as `HUBBLE_FAILED`.
-- **Any other status** (`HUBBLE_KNOWN_STATUSES` = SUCCESS, PROCESSING, FAILED, CANCELLED, RETURNED): never applied. The
-  sweep / webhook leaves a failed row as it is (anomaly audit + error log once per status; a pending row stays pending with
-  `HUBBLE_UNKNOWN_STATUS:X`); a **Retry** — failed OR pending row (F2) — is refused with an honest 409 ("… a status we do
-  not recognise (X) — we cannot tell whether it was bought. Contact Gifsy tech; if it was not bought, use "Mark as not
-  bought", then retry."). **Mark as not bought** (row action, confirmation dialog, reason required; GIFSY_ADMIN only) →
-  BUY_FAILED `MARKED_NOT_BOUGHT`, audited; Retry afterwards issues a NEW reference without asking Hubble again (the admin's
-  decision stands; a late SUCCESS on the old reference raises the superseded-reference alert).
-- The report's "Failure reason" carries the words ("Hubble reported CANCELLED — not bought" / "Marked as not bought by an
-  admin: <reason>"); the digest's "purchase failed" counts include them (see DAILY-OPS-DIGEST.md).
+- **Hubble documents only SUCCESS / PROCESSING / FAILED** (`HUBBLE_KNOWN_STATUSES`). CANCELLED / RETURNED are OUR
+  redemption status names (rewards module), not Hubble's — an earlier build that released "CANCELLED / RETURNED" rows was
+  withdrawn (owner decision). **Any undocumented status takes the single safe path:** never applied; the budget STAYS
+  reserved (a `HUBBLE_FAILED` / local-failure row keeps counting; a pending row stays pending with
+  `HUBBLE_UNKNOWN_STATUS:X`; a `REJECTED` row — released because the canary said "no order" — goes BACK to pending,
+  reserved again, since Hubble now holds an order for it); error log + anomaly audit `VOUCHER_DISPERSAL_UNKNOWN_STATUS_ON_FAILED_ROW`
+  once per status; **Retry is refused** with an honest 409 ("… a status we do not recognise (X) — we cannot tell whether it
+  was bought. Contact Gifsy tech; if it was not bought, use "Mark as not bought", then retry.") and is hidden on the page
+  (the reason is shown instead).
+- **Mark as not bought** (the ONLY release; row action, confirmation dialog, reason required, GIFSY_ADMIN only, audited
+  `VOUCHER_DISPERSAL_MARKED_NOT_BOUGHT` in the same transaction; idempotent — a repeat returns the row): BUY_FAILED
+  `MARKED_NOT_BOUGHT`, off the budget (`NOT_BOUGHT_FAILURE_SOURCES` = `REJECTED`, `MARKED_NOT_BOUGHT`), out of the 2-min
+  lookups. The report's "Failure reason" says "Marked as not bought by an admin: <reason>".
+- **Every retry that issues a NEW reference first looks the OLD reference(s) up at Hubble** (final review HIGH):
+  - after a mark, the row's own reference: SUCCESS → applied (bought, sent, nothing bought again); PROCESSING → back to
+    pending (reserved), retry refused; FAILED / no order → new reference; still unrecognised → new reference (the admin's
+    decision stands — recorded in the retry audit as `oldReferenceStatus`); lookup error → refused;
+  - every EARLIER reference (`previousReferenceIds`): Hubble holding an order on one (SUCCESS / PROCESSING / an
+    unrecognised status) → retry refused ("… was completed by Hubble — two vouchers may have been issued. It is counted
+    as spent; contact Gifsy tech."); a lookup error → refused.
+- **Superseded-reference activity is SPENT:** an earlier reference Hubble holds an order on is recorded on the row
+  (`supersededActiveRefs`, once per reference) and counts the row's amount as spent — in the budget breakdown
+  (`supersededRupees`), the floor, batch confirm, the retry check AND the buy-time guard; error log + audit
+  `VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY` (also for a lookup error, not counted). Shown on the campaign page
+  ("An earlier order for batch B, row N was completed by Hubble after a retry — two vouchers may have been issued"), as a
+  cause in the over-budget banner, and in the Daily Ops Digest. Found by the webhook, a retry's check, or the sweep below.
+- **Hourly re-check sweep** (within the drain's time budget): rows released (REJECTED / MARKED_NOT_BOUGHT — their current
+  reference) or retried (their earlier references), changed in the last 14 days, are looked up at most once an hour
+  (`supersededCheckedAt`; updatedAt kept) — a missed webhook is still caught (a released row Hubble now holds: SUCCESS →
+  bought, a late completion; PROCESSING → pending, reserved).
+- **Drain time caps:** the reconcile / re-check / message steps are skipped once the pass deadline has passed; settles past
+  the deadline continue only within a 5 s grace (touched campaigns first, then a minimum of 5); touched campaigns a pass
+  could not settle are carried over to the next pass on that instance.
+- Migration `20261118160000` (still unapplied anywhere) gained `voucher_dispersal_rows.supersededActiveRefs` /
+  `supersededCheckedAt` (idempotent `ADD COLUMN IF NOT EXISTS`); re-verified 10 = 10 statements against Prisma's SQL.
 - **F3** — every drain pass keeps the last min(10 s, ¼ of the pass) for settling: buying stops early; campaigns touched in
   the pass are always settled, plus at least 5 of the others even past the deadline (the rest next pass). **F5** — the
   over-budget banner states its actual causes from the server's counts ("N purchases were bought later by Hubble after they

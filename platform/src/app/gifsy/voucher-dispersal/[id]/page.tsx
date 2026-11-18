@@ -23,7 +23,7 @@ import {
   BATCH_STATUS_LABEL, BATCH_STATUS_TONE, CAMPAIGN_STATUS_TONE, MESSAGE_STATUS_LABEL, MESSAGE_STATUS_TONE,
   PENDING_RECONCILE_NOTE, POLL_START_MS,
   PROCESS_FAILURES_BEFORE_NOTE, ROW_STATUSES, ROW_STATUS_LABEL, ROW_STATUS_TONE, batchLabel, billedToText, campaignStatusText,
-  budgetUsageText, overBudgetCauseText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
+  budgetUsageText, overBudgetCauseText, rowRefText, canCancelCampaign, canResendRow, canRetryRow, editChangeText, formatCount, formatRupees, formatWhen, isLiveCampaign,
   isProcessInFlight, isSetupCampaign, isUncertainFailure, nextPollDelay, nextProcessFailures, plural, pollPhase, rowStatusText,
   shouldNudgeProcessing, vdApi, vdReportFallbackName, vdReportUrl,
   type CampaignStatus, type RowStatus, type VdBatch, type VdListItem, type VdRow, type VdRowsPage,
@@ -457,6 +457,15 @@ export default function VoucherCampaignDetailPage() {
           {' '}Raise the budget or check with Hubble; nothing more is bought while it is over.
         </p>
       )}
+      {s.supersededRows.length > 0 && (
+        <div role="alert" data-testid="vd-superseded" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200 space-y-1">
+          {s.supersededRows.map((r, i) => (
+            <p key={`${r.batchNumber}-${r.rowNumber}-${i}`} className="break-words">
+              An earlier order for {rowRefText(r)} was completed by Hubble after a retry — two vouchers may have been issued. It is counted as spent; contact Gifsy tech.
+            </p>
+          ))}
+        </div>
+      )}
       {s.queuedAtRiskRupees !== null && s.queuedAtRiskRupees > 0 && (
         <p role="alert" data-testid="vd-queued-at-risk" className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 break-words">
           {formatRupees(s.queuedAtRiskRupees)} of queued vouchers can&apos;t be bought within the budget — raise the budget (Edit campaign) or they will fail with a budget reason.
@@ -590,6 +599,11 @@ export default function VoucherCampaignDetailPage() {
                               className="whitespace-nowrap rounded border border-amber-500/40 px-2 py-1 text-xs text-amber-200 hover:bg-amber-500/10 disabled:opacity-50">
                               Retry purchase
                             </button>
+                          )}
+                          {r.id && r.canMarkNotBought === true && !canRetryRow(r) && (
+                            <p data-testid={`vd-retry-unavailable-${r.id}`} className="max-w-[14rem] text-[11px] text-amber-200">
+                              Retry is unavailable: Hubble&apos;s answer was not recognised — check with Hubble, then use Mark as not bought.
+                            </p>
                           )}
                           {r.id && r.canMarkNotBought === true && (
                             <button type="button" onClick={() => openDialog({ kind: 'mark', row: r })} data-testid={`vd-mark-${r.id}`}

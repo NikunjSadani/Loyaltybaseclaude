@@ -911,17 +911,30 @@ export class ScheduledReportsService {
       where: { OR: [{ status: { in: ['BUYING', 'PENDING_RECONCILE', 'BOUGHT'] } }, failedMayStillCompleteWhere] },
       _sum: { amountPaise: true },
     });
-    const budgets = spend.length
+    // An EARLIER reference Hubble completed after a retry counts as SPENT (the campaign page's rule).
+    const superseded = (
+      await rows.findMany({
+        where: { supersededActiveRefs: { isEmpty: false } },
+        select: { campaignId: true, amountPaise: true, supersededActiveRefs: true },
+      })
+    ).filter((r) => Array.isArray(r.supersededActiveRefs) && r.supersededActiveRefs.length > 0);
+    const spentBy = new Map<string, bigint>();
+    for (const g of spend) spentBy.set(g.campaignId, BigInt(g._sum.amountPaise ?? 0n));
+    for (const r of superseded) {
+      spentBy.set(r.campaignId, (spentBy.get(r.campaignId) ?? 0n) + BigInt(r.amountPaise ?? 0n) * BigInt(r.supersededActiveRefs.length));
+    }
+    const budgets = spentBy.size
       ? await this.prisma.voucherDispersalCampaign.findMany({
-          where: { id: { in: spend.map((g) => g.campaignId) } },
+          where: { id: { in: [...spentBy.keys()] } },
           select: { id: true, budgetPaise: true },
         })
       : [];
     const budgetOf = new Map(budgets.map((c) => [c.id, BigInt(c.budgetPaise)]));
-    const overBudgetCampaigns = spend.filter((g) => {
-      const b = budgetOf.get(g.campaignId);
-      return b !== undefined && BigInt(g._sum.amountPaise ?? 0n) > b;
+    const overBudgetCampaigns = [...spentBy.entries()].filter(([id, paise]) => {
+      const b = budgetOf.get(id);
+      return b !== undefined && paise > b;
     }).length;
+    const supersededRows = superseded.length;
     const settleErrorCampaigns = await this.prisma.voucherDispersalCampaign.count({ where: { settleFailures: { gte: SETTLE_FAILURES_BEFORE_ALERT } } });
     const lateCompleted = await rows.count({ where: { lateCompletedAt: inWindow } });
     return {
@@ -935,6 +948,7 @@ export class ScheduledReportsService {
       overBudgetCampaigns,
       settleErrorCampaigns,
       lateCompleted,
+      supersededRows,
     };
   }
 

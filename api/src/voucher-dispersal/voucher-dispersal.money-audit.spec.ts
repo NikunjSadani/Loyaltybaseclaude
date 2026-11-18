@@ -22,7 +22,7 @@ describe('M1: ONE budget breakdown — floor, edit refusal and the detail page a
     t.rows.push({ ...base, id: 'rN', rowNumber: 22, phone: '9000000003', hubbleReferenceId: 'vdn', status: 'BUY_FAILED', buyFailureSource: 'NOT_SENT', referenceSentAt: null, amountPaise: 70000n });
     t.rows.push({ ...base, id: 'rQ', rowNumber: 23, phone: '9000000004', hubbleReferenceId: 'vdq', status: 'QUEUED', amountPaise: 20000n });
     const d = await t.svc.detail(ADMIN, id);
-    expect(d.summary.budgetUsage).toEqual({ spentRupees: 1000, withHubbleRupees: 500, failedMayCompleteRupees: 300, queuedRupees: 200, floorRupees: 2000 });
+    expect(d.summary.budgetUsage).toEqual({ spentRupees: 1000, withHubbleRupees: 500, failedMayCompleteRupees: 300, queuedRupees: 200, supersededRupees: 0, floorRupees: 2000 });
     expect(d.summary.budgetFloorRupees).toBe(2000);
     const err = await t.svc.editCampaign(ADMIN, id, { budgetRupees: 1999 }).then(() => new Error("resolved"), (e: Error) => e);
     expect(err.message).toBe(

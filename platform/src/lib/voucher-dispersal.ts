@@ -224,6 +224,8 @@ export interface VdDeliverySummary {
   lateCompletedRows: number | null;
   /** Detail only: rows that had failed and are back with Hubble (pending again) — they count again. */
   failedBackWithHubbleRows: number | null;
+  /** Detail only: rows with an earlier order Hubble completed after a retry (up to 20). */
+  supersededRows: VdRowRef[];
   /** List only: an "Add more people" batch waiting for confirmation (its number), else null. */
   pendingBatchNumber: number | null;
 }
@@ -235,12 +237,21 @@ export interface VdBudgetUsage {
   /** Failed purchases whose reference reached Hubble — Hubble may still complete them. */
   failedMayCompleteRupees: number | null;
   queuedRupees: number | null;
+  /** Earlier orders Hubble completed after a retry (two vouchers may exist) — counted as SPENT. */
+  supersededRupees: number | null;
   floorRupees: number | null;
+}
+
+/** A row with an earlier reference Hubble completed after a retry. */
+export interface VdRowRef {
+  batchNumber: number | null;
+  rowNumber: number | null;
 }
 
 /** "spent ₹A · with Hubble (not yet confirmed) ₹B · failed purchases Hubble may still complete ₹C · queued ₹D". */
 export function budgetUsageText(u: VdBudgetUsage): string {
-  return `spent ${formatRupees(u.spentRupees)} · with Hubble (not yet confirmed) ${formatRupees(u.withHubbleRupees)} · failed purchases Hubble may still complete ${formatRupees(u.failedMayCompleteRupees)} · queued ${formatRupees(u.queuedRupees)}`;
+  const sup = u.supersededRupees !== null && u.supersededRupees > 0 ? ` · earlier orders completed after a retry ${formatRupees(u.supersededRupees)}` : '';
+  return `spent ${formatRupees(u.spentRupees)}${sup} · with Hubble (not yet confirmed) ${formatRupees(u.withHubbleRupees)} · failed purchases Hubble may still complete ${formatRupees(u.failedMayCompleteRupees)} · queued ${formatRupees(u.queuedRupees)}`;
 }
 
 export const BATCH_STATUSES = ['PREVIEWED', 'CONFIRMED', 'DISCARDED', 'CANCELLED'] as const;
@@ -511,6 +522,7 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     queuedAtRiskRupees: null,
     lateCompletedRows: null,
     failedBackWithHubbleRows: null,
+    supersededRows: [],
     pendingBatchNumber: num(o.pendingBatchNumber),
   };
 }
@@ -537,6 +549,7 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
           withHubbleRupees: num(o.budgetUsage.withHubbleRupees),
           failedMayCompleteRupees: num(o.budgetUsage.failedMayCompleteRupees),
           queuedRupees: num(o.budgetUsage.queuedRupees),
+          supersededRupees: num(o.budgetUsage.supersededRupees),
           floorRupees: num(o.budgetUsage.floorRupees),
         }
       : null,
@@ -544,6 +557,9 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
     queuedAtRiskRupees: num(o.queuedAtRiskRupees),
     lateCompletedRows: num(o.lateCompletedRows),
     failedBackWithHubbleRows: num(o.failedBackWithHubbleRows),
+    supersededRows: Array.isArray(o.supersededRows)
+      ? o.supersededRows.filter(isObj).map((r) => ({ batchNumber: num(r.batchNumber), rowNumber: num(r.rowNumber) }))
+      : [],
     pendingBatchNumber: null,
   };
 }
@@ -928,13 +944,21 @@ export function batchConfirmBlock(p: Pick<VdBatchPreview, 'previewId' | 'summary
  * Why the campaign is over budget, from the server's counts (never a guessed cause): purchases bought later after
  * failing, failed purchases back with Hubble, else a neutral pointer to the breakdown.
  */
-export function overBudgetCauseText(s: Pick<VdDeliverySummary, 'lateCompletedRows' | 'failedBackWithHubbleRows'>): string {
+export function overBudgetCauseText(s: Pick<VdDeliverySummary, 'lateCompletedRows' | 'failedBackWithHubbleRows' | 'supersededRows'>): string {
   const parts: string[] = [];
+  for (const r of s.supersededRows ?? []) {
+    parts.push(`an earlier order for ${rowRefText(r)} was completed after a retry — two vouchers may have been issued`);
+  }
   const late = s.lateCompletedRows ?? 0;
   const back = s.failedBackWithHubbleRows ?? 0;
   if (late > 0) parts.push(`${plural(late, 'purchase')} ${late === 1 ? 'was' : 'were'} bought later by Hubble after ${late === 1 ? 'it' : 'they'} had failed/refused`);
   if (back > 0) parts.push(`${plural(back, 'failed purchase')} ${back === 1 ? 'is' : 'are'} back with Hubble and count${back === 1 ? 's' : ''} again (${back === 1 ? 'it' : 'they'} may still be bought)`);
   return parts.length ? parts.join('; ') : 'spending is above the budget; see "Budget used" below';
+}
+
+/** "batch 1, row 3" (row numbers restart in every batch's file). */
+export function rowRefText(r: VdRowRef): string {
+  return r.batchNumber !== null ? `batch ${r.batchNumber}, row ${formatCount(r.rowNumber)}` : `row ${formatCount(r.rowNumber)}`;
 }
 
 /** "Batch 2" / "—". */

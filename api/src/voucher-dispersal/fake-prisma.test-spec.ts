@@ -32,6 +32,10 @@ export function matches(rec: Rec, where: Rec | undefined): boolean {
       if (!(cond as Rec[]).every((c) => matches(rec, c))) return false;
       continue;
     }
+    if (k === 'NOT') {
+      if (matches(rec, cond as Rec)) return false;
+      continue;
+    }
     let v = rec[k];
     if (cond !== null && typeof cond === 'object' && !(cond instanceof Date) && Array.isArray((cond as Rec).path)) {
       // JSON path filter (Prisma `{ path: ['a'], equals: x }`).
@@ -44,6 +48,7 @@ export function matches(rec: Rec, where: Rec | undefined): boolean {
       if ('lt' in cond && !(v != null && v < cond.lt)) return false;
       if ('gte' in cond && !(v != null && v >= cond.gte)) return false;
       if ('has' in cond && !(Array.isArray(v) && v.includes(cond.has))) return false;
+      if ('isEmpty' in cond && (Array.isArray(v) ? v.length === 0 : true) !== cond.isEmpty) return false;
       if ('equals' in cond && !eq(v, cond.equals)) return false;
       continue;
     }
@@ -204,7 +209,7 @@ export function makeFakePrisma() {
         lastReconcileAt: null, lastReconcileResult: null, voucherCode: null, voucherPin: null, voucherValidTill: null, boughtAt: null,
         buyFailureReason: null, buyFailureSource: null, whatsappReceiptId: null, messageClaimedAt: null, sentAt: null,
         messageError: null, messageStatus: null, messageDeliveredAt: null, messageReadAt: null, messageFailureReason: null,
-        resendCount: 0, attempts: 0, batchNumber: 1, warning: null, lateCompletedAt: null,
+        resendCount: 0, attempts: 0, batchNumber: 1, warning: null, lateCompletedAt: null, supersededActiveRefs: [], supersededCheckedAt: null,
       }),
       (r, inc) => (inc.campaign ? { ...r, campaign: { ...campaigns.find((c) => c.id === r.campaignId) } } : r),
       [['campaignId', 'dedupePhone'], ['campaignId', 'batchNumber', 'rowNumber'], ['hubbleReferenceId']],

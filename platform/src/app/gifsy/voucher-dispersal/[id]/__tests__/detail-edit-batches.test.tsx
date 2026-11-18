@@ -179,6 +179,28 @@ describe('Edit campaign', () => {
     expect(await screen.findByTestId('vd-over-budget')).toHaveTextContent('Over budget by ₹300 — spending is above the budget; see "Budget used" below.');
   });
 
+  it('an earlier order completed after a retry: its own alert, a cause in the over-budget banner, and the spend in "Budget used"', async () => {
+    detailQueue = [ok(detail({ summary: {
+      overBudgetRupees: 500, lateCompletedRows: 0, failedBackWithHubbleRows: 0, supersededRows: [{ batchNumber: 1, rowNumber: 3 }],
+      budgetUsage: { spentRupees: 1000, supersededRupees: 1000, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 2000 },
+    } }))];
+    render(<DetailPage />);
+    expect(await screen.findByTestId('vd-superseded')).toHaveTextContent(
+      'An earlier order for batch 1, row 3 was completed by Hubble after a retry — two vouchers may have been issued. It is counted as spent; contact Gifsy tech.',
+    );
+    expect(screen.getByTestId('vd-over-budget')).toHaveTextContent('an earlier order for batch 1, row 3 was completed after a retry — two vouchers may have been issued');
+    expect(screen.getByTestId('vd-budget-usage')).toHaveTextContent('earlier orders completed after a retry ₹1,000');
+  });
+
+  it('Retry is hidden where it would always be refused (unrecognised Hubble answer) — the reason is shown instead', async () => {
+    const rows = { ...ROWS, rows: [ROWS.rows[0], { ...ROWS.rows[1], canRetryBuy: false, canMarkNotBought: true }] };
+    fetchMock.mockImplementation((url: string) => (url.startsWith(`${BASE}/rows?`) ? Promise.resolve(ok(rows)) : Promise.resolve(ok(detail()))));
+    render(<DetailPage />);
+    const row = await screen.findByTestId('vd-row-r2');
+    expect(within(row).queryByTestId('vd-retry-r2')).not.toBeInTheDocument();
+    expect(within(row).getByTestId('vd-retry-unavailable-r2')).toHaveTextContent("Retry is unavailable: Hubble's answer was not recognised — check with Hubble, then use Mark as not bought.");
+  });
+
   it('"Mark as not bought": reason required, sent to the server, the result said in plain words', async () => {
     const rows = { ...ROWS, rows: [ROWS.rows[0], { ...ROWS.rows[1], canMarkNotBought: true }] };
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {

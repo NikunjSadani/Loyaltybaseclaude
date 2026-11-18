@@ -326,6 +326,12 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
       events: d.settleErrorCampaigns!,
     });
   }
+  if ((d.supersededRows ?? 0) > 0) {
+    out.push({
+      text: `Voucher dispersal: ${plural(d.supersededRows!, 'row', 'rows')} where an earlier order was completed by Hubble after a retry — two vouchers may have been issued (counted as spent)`,
+      events: d.supersededRows!,
+    });
+  }
   if ((d.lateCompleted ?? 0) > 0) {
     out.push({
       text: `Voucher dispersal: ${plural(d.lateCompleted!, 'purchase', 'purchases')} bought later by Hubble after ${d.lateCompleted === 1 ? 'it' : 'they'} had failed / been refused (in the window)`,
@@ -466,6 +472,7 @@ const dispersalEmpty = (d: VoucherDispersalSection) =>
   d.messageFailedOpen === 0 &&
   !d.overBudgetCampaigns &&
   !d.settleErrorCampaigns &&
+  !d.supersededRows &&
   !d.lateCompleted;
 
 /** Gifsy-wide Voucher Dispersal block for the summary ('' when every figure is zero). */
@@ -484,6 +491,7 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['WhatsApp still failed', intIN(d.messageFailedOpen), accentIf(d.messageFailedOpen, 'red')],
       ['campaigns over budget', intIN(d.overBudgetCampaigns ?? 0), accentIf(d.overBudgetCampaigns ?? 0, 'red')],
       ['status update failing', intIN(d.settleErrorCampaigns ?? 0), accentIf(d.settleErrorCampaigns ?? 0, 'red')],
+      ['earlier order completed after a retry', intIN(d.supersededRows ?? 0), accentIf(d.supersededRows ?? 0, 'red')],
     ]),
   );
 }

@@ -57,18 +57,24 @@ export function budgetCommittedWhere(campaignId: string): Prisma.VoucherDispersa
 }
 
 /**
- * Hubble order statuses that mean NOT BOUGHT (owner decision 2026-11-18). FAILED keeps counting against the budget
- * (`HUBBLE_FAILED` — `applyBody` still delivers a later SUCCESS); CANCELLED / RETURNED are released (`HUBBLE_CANCELLED`).
- * REFUNDED is not a Hubble order status anywhere in this code base, so it is not listed.
+ * The ONLY order statuses Hubble documents (owner decision 2026-11-18 — CANCELLED / RETURNED are OUR redemption status
+ * names, not Hubble's). Any other answer is an anomaly: never applied, the budget stays reserved, Retry is refused, and
+ * an admin's audited "Mark as not bought" is the only way to release it.
  */
-export const HUBBLE_NOT_BOUGHT_STATUSES: ReadonlySet<string> = new Set(['FAILED', 'CANCELLED', 'RETURNED']);
-/** Every Hubble status this engine understands; anything else is an anomaly (never guessed). */
-export const HUBBLE_KNOWN_STATUSES: ReadonlySet<string> = new Set(['SUCCESS', 'PROCESSING', ...HUBBLE_NOT_BOUGHT_STATUSES]);
+export const HUBBLE_KNOWN_STATUSES: ReadonlySet<string> = new Set(['SUCCESS', 'PROCESSING', 'FAILED']);
 /**
- * BUY_FAILED sources that NO LONGER count against the budget: `REJECTED` (refused + canary-verified no order),
- * `HUBBLE_CANCELLED` (Hubble reported CANCELLED / RETURNED), `MARKED_NOT_BOUGHT` (an admin decided, with a reason).
+ * BUY_FAILED sources that NO LONGER count against the budget: `REJECTED` (refused + canary-verified no order) and
+ * `MARKED_NOT_BOUGHT` (an admin decided, with a reason, after an unrecognised Hubble answer).
  */
-export const NOT_BOUGHT_FAILURE_SOURCES = ['REJECTED', 'HUBBLE_CANCELLED', 'MARKED_NOT_BOUGHT'];
+export const NOT_BOUGHT_FAILURE_SOURCES = ['REJECTED', 'MARKED_NOT_BOUGHT'];
+/** Released rows (off the budget) whose reference the hourly sweep keeps re-checking. */
+export const RELEASED_FAILURE_SOURCES = NOT_BOUGHT_FAILURE_SOURCES;
+/** Re-check earlier references of released / retried rows at most this often … */
+export const SUPERSEDED_RECHECK_MS = 60 * 60 * 1000;
+/** … for rows changed within this window. */
+export const SUPERSEDED_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+/** After the pass deadline, settles continue only within this grace (the request must still answer in time). */
+export const SETTLE_GRACE_MS = 5_000;
 
 /** True when the row's last lookup result is a Hubble status we do not recognise (e.g. "HUBBLE_WEIRD"). */
 export function lastLookupUnrecognised(r: { lastReconcileResult: string | null; pendingReason?: string | null; status: string }): boolean {
@@ -131,8 +137,19 @@ export interface BudgetBreakdown {
   withHubblePaise: bigint;
   failedMayCompletePaise: bigint;
   queuedPaise: bigint;
-  /** Σ of the four — the lowest the budget may go; budget − floor is what is left. */
+  /** Earlier references Hubble completed after a retry (row amount × active superseded references) — SPENT. */
+  supersededPaise: bigint;
+  /** Σ of the five — the lowest the budget may go; budget − floor is what is left. */
   floorPaise: bigint;
+}
+
+/** Σ row amount × number of superseded references Hubble reported active (two vouchers may exist). */
+export async function supersededSpendPaise(db: Prisma.TransactionClient | PrismaService, campaignId: string, excludeRowId?: string): Promise<bigint> {
+  const rows = await db.voucherDispersalRow.findMany({
+    where: { campaignId, supersededActiveRefs: { isEmpty: false }, ...(excludeRowId ? { id: { not: excludeRowId } } : {}) },
+    select: { amountPaise: true, supersededActiveRefs: true },
+  });
+  return rows.reduce((a, r) => a + BigInt(r.amountPaise ?? 0n) * BigInt(r.supersededActiveRefs.length), 0n);
 }
 
 /**
@@ -141,7 +158,7 @@ export interface BudgetBreakdown {
  * reported apart as "at risk" (the buy-time guard will refuse them).
  */
 export function overBudget(b: BudgetBreakdown, budgetPaise: bigint): { committedPaise: bigint; overPaise: bigint; queuedAtRiskPaise: bigint } {
-  const committedPaise = b.spentPaise + b.withHubblePaise + b.failedMayCompletePaise;
+  const committedPaise = b.spentPaise + b.supersededPaise + b.withHubblePaise + b.failedMayCompletePaise;
   const overPaise = committedPaise > budgetPaise ? committedPaise - budgetPaise : 0n;
   const left = budgetPaise - committedPaise;
   const fits = left > 0n ? left : 0n;
@@ -162,8 +179,9 @@ export async function budgetBreakdown(db: Prisma.TransactionClient | PrismaServi
     withHubblePaise: sum([RS.BUYING, RS.PENDING_RECONCILE]),
     failedMayCompletePaise: sum([RS.BUY_FAILED]),
     queuedPaise: sum([RS.QUEUED]),
+    supersededPaise: await supersededSpendPaise(db, campaignId),
   };
-  return { ...b, floorPaise: b.spentPaise + b.withHubblePaise + b.failedMayCompletePaise + b.queuedPaise };
+  return { ...b, floorPaise: b.spentPaise + b.supersededPaise + b.withHubblePaise + b.failedMayCompletePaise + b.queuedPaise };
 }
 
 /** BUY_FAILED sources that are decided by US (not by Hubble) — when the reference reached Hubble earlier, the row stays in the reconcile sweep. */
@@ -217,6 +235,8 @@ export type ReconcileOutcome =
 export class VoucherDispersalProcessor {
   private readonly logger = new Logger(VoucherDispersalProcessor.name);
   private running = false;
+  /** Touched campaigns a pass ran out of time to settle — settled first by the next pass on this instance. */
+  private readonly carryOver = new Set<string>();
   /** Test seam: the pause between buys. */
   sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -258,12 +278,14 @@ export class VoucherDispersalProcessor {
     try {
       s.staleRecovered = await this.step('stale', () => this.recoverStaleBuying(opts.campaignId), 0);
       const touched = new Set<string>();
-      s.reconciled = await this.step('reconcile', () => this.reconcilePending(opts.campaignId, deadline, touched), 0);
-      s.messagesSent += await this.step('messages', () => this.sendPendingMessages(opts.campaignId, deadline), 0);
+      const timeLeft = () => Date.now() <= deadline;
+      if (timeLeft()) s.reconciled = await this.step('reconcile', () => this.reconcilePending(opts.campaignId, deadline, touched), 0);
+      if (timeLeft()) await this.step('superseded', () => this.recheckSuperseded(opts.campaignId, deadline, touched), 0);
+      if (timeLeft()) s.messagesSent += await this.step('messages', () => this.sendPendingMessages(opts.campaignId, deadline), 0);
       const staleMsg = await this.step('stale-messages', () => this.surfaceStaleMessageClaims(opts.campaignId), [] as string[]);
       staleMsg.forEach((id) => touched.add(id));
       // F3: stop buying early enough that this pass can still settle its campaigns.
-      const reserve = Math.min(SETTLE_RESERVE_MS, Math.floor((opts.budgetMs ?? 45_000) / 4));
+      const reserve = Math.max(0, Math.min(SETTLE_RESERVE_MS, Math.floor((opts.budgetMs ?? 45_000) / 4)));
       const buys = await this.step('buy', () => this.buyQueued(opts.campaignId, deadline - reserve, opts.maxBuys ?? 50), null);
       if (buys) {
         s.bought = buys.bought;
@@ -388,25 +410,121 @@ export class VoucherDispersalProcessor {
     }
     const superseded = await this.prisma.voucherDispersalRow.findFirst({
       where: { previousReferenceIds: { has: referenceId } },
-      select: { id: true, campaignId: true, rowNumber: true },
+      select: { id: true, campaignId: true, rowNumber: true, batchNumber: true, amountPaise: true },
     });
     if (!superseded) return 'NOT_FOUND';
-    // A webhook for a reference we retired after Hubble DEFINITIVELY failed it. If Hubble now reports it
-    // SUCCESS, the recipient may hold two vouchers — never silent: loud log + audit for ops.
-    let status = 'UNKNOWN';
-    try {
-      const b = await this.hubble.getOrderByReference(referenceId);
-      status = b === null ? 'NO_ORDER' : String(b.status ?? '').toUpperCase();
-    } catch (e) {
-      status = `LOOKUP_FAILED`;
-    }
-    if (status === 'SUCCESS' || status === 'PROCESSING' || status === 'LOOKUP_FAILED') {
-      this.logger.error(
-        `[dispersal] webhook for SUPERSEDED reference on campaign ${superseded.campaignId} row ${superseded.rowNumber}: Hubble status ${status} — possible second voucher; ops review`,
-      );
-      await this.audit(superseded.id, 'VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY', { referenceId, hubbleStatus: status });
-    }
+    // A webhook for a reference this row no longer uses (retired by a retry): checked and, if Hubble holds an order
+    // for it, counted as SPENT + alerted (two vouchers may exist).
+    await this.checkSupersededRef(superseded, referenceId);
+    await this.resettle(superseded.campaignId);
     return 'SKIPPED';
+  }
+
+  /**
+   * Look ONE earlier reference up. SUCCESS / PROCESSING / an unrecognised status = Hubble holds (or may hold) an order
+   * on it → counted as SPENT on the row (once per reference) + error log + audit. FAILED / no order = fine. A lookup
+   * error is alerted (not counted — unknown). Returns what Hubble said.
+   */
+  async checkSupersededRef(
+    row: { id: string; campaignId: string; rowNumber: number; batchNumber: number; amountPaise: bigint | null },
+    ref: string,
+  ): Promise<{ status: string; active: boolean; error: boolean }> {
+    let status: string;
+    try {
+      const b = await this.hubble.getOrderByReference(ref);
+      status = b === null ? 'NO_ORDER' : String(b.status ?? '').toUpperCase() || 'UNKNOWN';
+    } catch {
+      status = 'LOOKUP_FAILED';
+    }
+    const active = status === 'SUCCESS' || status === 'PROCESSING' || (status !== 'NO_ORDER' && status !== 'LOOKUP_FAILED' && !HUBBLE_KNOWN_STATUSES.has(status));
+    if (status === 'LOOKUP_FAILED' || active) {
+      const amountRupees = Number(row.amountPaise ?? 0) / 100;
+      this.logger.error(
+        `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: EARLIER reference ${ref} — Hubble status ${status}${active ? ` (counted as spent ₹${amountRupees}; two vouchers may have been issued)` : ''} — ops review`,
+      );
+      await this.audit(row.id, 'VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY', {
+        campaignId: row.campaignId,
+        batchNumber: row.batchNumber,
+        rowNumber: row.rowNumber,
+        referenceId: ref,
+        hubbleStatus: status,
+        countedAsSpent: active,
+        amountRupees,
+      });
+    }
+    if (active) {
+      const res = await this.prisma.voucherDispersalRow.updateMany({
+        where: { id: row.id, NOT: { supersededActiveRefs: { has: ref } } },
+        data: { supersededActiveRefs: { push: ref } },
+      });
+      if (res.count === 1) await this.checkOverBudget(row.campaignId);
+    }
+    return { status, active, error: status === 'LOOKUP_FAILED' };
+  }
+
+  /**
+   * Before ANY retry that issues a NEW reference: every EARLIER reference is looked up. The first that Hubble holds
+   * an order on (counted as spent) or that cannot be checked stops the retry.
+   */
+  async checkPreviousReferences(row: Row): Promise<{ ok: true } | { ok: false; ref: string; status: string; error: boolean }> {
+    for (const ref of row.previousReferenceIds ?? []) {
+      const r = await this.checkSupersededRef(row, ref);
+      if (r.active || r.error) return { ok: false, ref, status: r.status, error: r.error };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Hourly (per row) re-check, within the pass time budget, of rows RELEASED from the budget (REJECTED /
+   * MARKED_NOT_BOUGHT — their CURRENT reference) or RETRIED (their earlier references), changed in the last 14 days —
+   * so a missed webhook is still caught. A released row Hubble now holds an order for is applied (SUCCESS → bought,
+   * a late completion; PROCESSING → back to pending, reserved). updatedAt is kept (a check is not a change).
+   */
+  async recheckSuperseded(campaignId: string | undefined, deadline: number, touched?: Set<string>): Promise<number> {
+    const now = Date.now();
+    const rows = await this.prisma.voucherDispersalRow.findMany({
+      where: {
+        ...(campaignId ? { campaignId } : {}),
+        updatedAt: { gte: new Date(now - SUPERSEDED_WINDOW_MS) },
+        AND: [
+          { OR: [{ supersededCheckedAt: null }, { supersededCheckedAt: { lt: new Date(now - SUPERSEDED_RECHECK_MS) } }] },
+          {
+            OR: [
+              { previousReferenceIds: { isEmpty: false } },
+              { status: RS.BUY_FAILED, buyFailureSource: { in: RELEASED_FAILURE_SOURCES }, referenceSentAt: { not: null } },
+            ],
+          },
+        ],
+      },
+      orderBy: { updatedAt: 'asc' },
+      take: 20,
+    });
+    let n = 0;
+    for (const row of rows) {
+      if (Date.now() > deadline) break;
+      if (row.status === RS.BUY_FAILED && RELEASED_FAILURE_SOURCES.includes(row.buyFailureSource ?? '') && row.hubbleReferenceId) {
+        try {
+          const body = await this.hubble.getOrderByReference(row.hubbleReferenceId);
+          const st = body ? String(body.status ?? '').toUpperCase() : 'NO_ORDER';
+          if (body && st !== 'FAILED') {
+            const outcome = await this.applyBody(row, body);
+            if (outcome === 'BOUGHT') await this.sendMessage(row.id);
+            touched?.add(row.campaignId);
+          }
+        } catch (e) {
+          this.logger.warn(`[dispersal] re-check of released row ${row.id} failed (next hour): ${e}`);
+        }
+      }
+      await this.checkPreviousReferences(row).catch(() => undefined);
+      const fresh = await this.prisma.voucherDispersalRow.findFirst({ where: { id: row.id }, select: { updatedAt: true } });
+      if (fresh) {
+        await this.prisma.voucherDispersalRow
+          .updateMany({ where: { id: row.id, updatedAt: fresh.updatedAt }, data: { supersededCheckedAt: new Date(), updatedAt: fresh.updatedAt } })
+          .catch(() => undefined);
+      }
+      n++;
+    }
+    return n;
   }
 
   /**
@@ -527,16 +645,11 @@ export class VoucherDispersalProcessor {
       await this.markPending(row, 'HUBBLE_PROCESSING', { hubbleOrderId, placeResponded: true });
       return 'PENDING';
     }
-    if (HUBBLE_NOT_BOUGHT_STATUSES.has(status)) {
-      // FAILED keeps counting (HUBBLE_FAILED); CANCELLED / RETURNED = not bought, released (HUBBLE_CANCELLED).
-      const source = status === 'FAILED' ? 'HUBBLE_FAILED' : 'HUBBLE_CANCELLED';
-      const reason = (status === 'FAILED'
-        ? body.failureReason ?? 'Hubble reported FAILED'
-        : `Hubble reported ${status} — not bought${body.failureReason ? ` (${body.failureReason})` : ''}`
-      ).toString().slice(0, 300);
-      // From: in flight; a local failure; or HUBBLE_FAILED → HUBBLE_CANCELLED (a later cancel releases it). Never
-      // re-counts a released row (REJECTED / HUBBLE_CANCELLED / MARKED_NOT_BOUGHT) as HUBBLE_FAILED.
-      const fromFailedSources = source === 'HUBBLE_CANCELLED' ? [...LOCAL_FAILURE_SOURCES, 'HUBBLE_FAILED'] : LOCAL_FAILURE_SOURCES;
+    if (status === 'FAILED') {
+      const source = 'HUBBLE_FAILED';
+      const reason = (body.failureReason ?? 'Hubble reported FAILED').toString().slice(0, 300);
+      // From: in flight, or a local failure. A row already failed by Hubble, or released, is left as it is.
+      const fromFailedSources = LOCAL_FAILURE_SOURCES;
       if (row.status === RS.BUY_FAILED && !fromFailedSources.includes(row.buyFailureSource ?? '')) return 'UNCHANGED';
       const res = await this.prisma.voucherDispersalRow.updateMany({
         where: {
@@ -559,15 +672,20 @@ export class VoucherDispersalProcessor {
         },
       });
       if (res.count === 1) {
-        await this.audit(row.id, 'VOUCHER_DISPERSAL_BUY_FAILED', { source, hubbleStatus: status, reason, hubbleOrderId });
+        await this.audit(row.id, 'VOUCHER_DISPERSAL_BUY_FAILED', { source, reason, hubbleOrderId });
         return 'BUY_FAILED';
       }
       return 'SKIPPED';
     }
     if (row.status === RS.BUY_FAILED) {
-      // Re-review M4: an answer we do not understand never moves a FAILED row (or fires the late event) —
-      // the row is left as it is, loudly, for ops ("Mark as not bought" is then offered).
+      // An answer we do not understand never RELEASES or buys a row (anomaly once; "Mark as not bought" offered).
       await this.recordUnrecognisedStatus(row, status, hubbleOrderId);
+      // A REJECTED row was released (canary said "no order") — but Hubble now HAS an order for it: reserve the
+      // budget again (back to pending, checked automatically). Other failed rows already count — left as they are.
+      if (row.buyFailureSource === 'REJECTED') {
+        await this.markPending(row, `HUBBLE_UNKNOWN_STATUS:${status || '(none)'}`.slice(0, 80), { hubbleOrderId });
+        return 'PENDING';
+      }
       return 'UNCHANGED';
     }
     await this.markPending(row, `HUBBLE_UNKNOWN_STATUS:${status || '(none)'}`.slice(0, 80), { hubbleOrderId });
@@ -690,7 +808,8 @@ export class VoucherDispersalProcessor {
           where: budgetCommittedWhere(row.campaignId),
           _sum: { amountPaise: true },
         });
-        const committed = BigInt(agg._sum.amountPaise ?? 0n);
+        // Superseded spend (an earlier reference Hubble completed after a retry) is SPENT too.
+        const committed = BigInt(agg._sum.amountPaise ?? 0n) + (await supersededSpendPaise(tx, row.campaignId));
         const amount = BigInt(row.amountPaise ?? 0n);
         if (amount <= 0n || committed + amount > BigInt(camp.budgetPaise)) {
           const f = await tx.voucherDispersalRow.updateMany({
@@ -1086,14 +1205,21 @@ export class VoucherDispersalProcessor {
           take: 50,
         })
       : [];
-    const ids = new Set([...camps.map((c) => c.id), ...failing.map((c) => c.id), ...reopened.map((c) => c.id), ...alsoIds]);
+    const carried = [...this.carryOver];
+    const ids = new Set([...carried, ...alsoIds, ...camps.map((c) => c.id), ...failing.map((c) => c.id), ...reopened.map((c) => c.id)]);
     let n = 0;
-    const must = new Set(alsoIds); // touched in this pass — always settled (bounded: rows changed in this pass)
+    const must = new Set([...alsoIds, ...carried]); // touched (this pass or carried over) — settled first
     let done = 0;
     for (const id of ids) {
-      // The rest settle on the next pass — but never fewer than MIN_SETTLES_PER_PASS, and never a touched one.
+      if (deadline !== undefined && Date.now() > deadline + SETTLE_GRACE_MS) {
+        // Out of time: touched campaigns are carried to the next pass (never lost); the others are re-selected.
+        if (must.has(id)) this.carryOver.add(id);
+        continue;
+      }
+      // Past the soft deadline: touched ones + a minimum of MIN_SETTLES_PER_PASS, the rest next pass.
       if (!must.has(id) && deadline !== undefined && Date.now() > deadline && done >= MIN_SETTLES_PER_PASS) continue;
       done++;
+      this.carryOver.delete(id);
       try {
         if (await this.settleCampaign(id)) n++;
         await this.prisma.voucherDispersalCampaign

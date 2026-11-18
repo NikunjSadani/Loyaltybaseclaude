@@ -7,7 +7,7 @@
  */
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { ADMIN, CODE, finished, setup } from './dispersal-test-kit.test-spec';
-import { HUBBLE_NOT_BOUGHT_STATUSES } from './voucher-dispersal.processor';
+import { HUBBLE_KNOWN_STATUSES, NOT_BOUGHT_FAILURE_SOURCES } from './voucher-dispersal.processor';
 
 const STAFF = { sub: 's', role: 'GIFSY_STAFF', clientId: 'gifsy', phone: '', name: 'S' } as never;
 
@@ -29,47 +29,51 @@ async function rowIn(status: string, extra: Record<string, unknown> = {}, budget
 }
 const usage = async (t: any, id: string) => (await t.svc.detail(ADMIN, id)).summary.budgetUsage;
 
-describe('owner rule: Hubble CANCELLED / RETURNED = not bought', () => {
-  it('the set is CANCELLED + RETURNED (+ FAILED); REFUNDED is not a Hubble order status anywhere in the code', () => {
-    expect([...HUBBLE_NOT_BOUGHT_STATUSES].sort()).toEqual(['CANCELLED', 'FAILED', 'RETURNED']);
+describe('owner decision (corrected): Hubble documents only SUCCESS / PROCESSING / FAILED — anything else is never a release', () => {
+  it('HUBBLE_KNOWN_STATUSES = SUCCESS, PROCESSING, FAILED (CANCELLED / RETURNED are OUR redemption status names)', () => {
+    expect([...HUBBLE_KNOWN_STATUSES].sort()).toEqual(['FAILED', 'PROCESSING', 'SUCCESS']);
+    expect(NOT_BOUGHT_FAILURE_SOURCES.sort()).toEqual(['MARKED_NOT_BOUGHT', 'REJECTED']);
   });
 
   for (const st of ['CANCELLED', 'RETURNED']) {
-    it(`a pending row reported ${st} → BUY_FAILED HUBBLE_CANCELLED, released from the budget; Retry issues a NEW reference`, async () => {
+    it(`a pending row reported "${st}" (undocumented) stays pending — still counts; Retry refused; "Mark as not bought" offered`, async () => {
       const { t, id, b } = await rowIn('PENDING_RECONCILE', { pendingReason: 'HUBBLE_INDETERMINATE' });
-      expect((await usage(t, id)).withHubbleRupees).toBe(1000);
-      t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H', status: st });
+      t.hubble.getOrderByReference.mockResolvedValue({ id: 'H', status: st });
       await t.processor.reconcileByReference(b.hubbleReferenceId);
-      expect(b).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'HUBBLE_CANCELLED' });
-      expect(b.buyFailureReason).toMatch(new RegExp(`Hubble reported ${st} — not bought`));
-      expect(await usage(t, id)).toMatchObject({ withHubbleRupees: 0, failedMayCompleteRupees: 0, floorRupees: 1000 });
-      // Retry: Hubble asked again (still CANCELLED) → a new reference, old one kept.
-      const oldRef = b.hubbleReferenceId;
-      t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H', status: st });
-      const r = await t.svc.retryBuy(ADMIN, id, b.id);
-      expect(r.row.status).toBe('QUEUED');
-      expect(b.hubbleReferenceId).not.toBe(oldRef);
-      expect(b.previousReferenceIds).toContain(oldRef);
+      expect(b).toMatchObject({ status: 'PENDING_RECONCILE', pendingReason: `HUBBLE_UNKNOWN_STATUS:${st}` });
+      expect((await usage(t, id)).withHubbleRupees).toBe(1000);
+      await expect(t.svc.retryBuy(ADMIN, id, b.id)).rejects.toThrow(new RegExp(`status we do not recognise \\(${st}\\)`));
+      const row = (await t.svc.rows(ADMIN, id, {})).rows.find((r) => r.id === b.id)!;
+      expect(row).toMatchObject({ canMarkNotBought: true, canRetryBuy: false });
     });
   }
 
-  it('the report says it in words: "Hubble reported CANCELLED — not bought" / "Marked as not bought by an admin: …"', async () => {
-    const { t, id, b } = await rowIn('PENDING_RECONCILE', { pendingReason: 'HUBBLE_INDETERMINATE' });
-    t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H', status: 'CANCELLED' });
+  it('a HUBBLE_FAILED row later reported CANCELLED is left as it is — still counts; anomaly audited once', async () => {
+    const { t, id, b } = await rowIn('BUY_FAILED', { buyFailureSource: 'HUBBLE_FAILED', buyFailureReason: 'x' });
+    t.hubble.getOrderByReference.mockResolvedValue({ id: 'H', status: 'CANCELLED' });
     await t.processor.reconcileByReference(b.hubbleReferenceId);
+    await t.processor.reconcileByReference(b.hubbleReferenceId);
+    expect(b).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'HUBBLE_FAILED' });
+    expect((await usage(t, id)).failedMayCompleteRupees).toBe(1000);
+    expect(t.audits.filter((a) => a.metadata?.event === 'VOUCHER_DISPERSAL_UNKNOWN_STATUS_ON_FAILED_ROW').length).toBe(1);
+  });
+
+  it('a REJECTED (released) row for which Hubble now answers an undocumented status → reserved again (back to pending)', async () => {
+    const { t, id, b } = await rowIn('BUY_FAILED', { buyFailureSource: 'REJECTED', buyFailureReason: 'x' });
+    expect((await usage(t, id)).failedMayCompleteRupees).toBe(0);
+    t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H', status: 'ON_HOLD' });
+    await t.processor.reconcileByReference(b.hubbleReferenceId);
+    expect(b).toMatchObject({ status: 'PENDING_RECONCILE', pendingReason: 'HUBBLE_UNKNOWN_STATUS:ON_HOLD' });
+    expect((await usage(t, id)).withHubbleRupees).toBe(1000);
+  });
+
+  it('the report says it in words after an admin marks it: "Marked as not bought by an admin: …"', async () => {
+    const { t, id, b } = await rowIn('BUY_FAILED', { buyFailureSource: 'HUBBLE_FAILED', buyFailureReason: 'x', lastReconcileResult: 'HUBBLE_CANCELLED' });
+    await t.svc.markNotBought(ADMIN, id, b.id, { reason: 'Hubble support: ticket 7' });
     const XLSX = await import('xlsx');
     const wb = XLSX.read((await t.svc.report(ADMIN, id)).buffer);
     const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]]);
-    expect(json.find((r) => r.Phone === '9876543211')).toMatchObject({ 'Voucher status': 'BUY_FAILED', 'Failure reason': 'Hubble reported CANCELLED — not bought' });
-  });
-
-  it('a HUBBLE_FAILED row later reported CANCELLED stops counting (FAILED keeps counting)', async () => {
-    const { t, id, b } = await rowIn('BUY_FAILED', { buyFailureSource: 'HUBBLE_FAILED', buyFailureReason: 'x' });
-    expect((await usage(t, id)).failedMayCompleteRupees).toBe(1000);
-    t.hubble.getOrderByReference.mockResolvedValueOnce({ id: 'H', status: 'CANCELLED' });
-    await t.processor.reconcileByReference(b.hubbleReferenceId);
-    expect(b.buyFailureSource).toBe('HUBBLE_CANCELLED');
-    expect((await usage(t, id)).failedMayCompleteRupees).toBe(0);
+    expect(json.find((r) => r.Phone === '9876543211')).toMatchObject({ 'Voucher status': 'BUY_FAILED', 'Failure reason': 'Marked as not bought by an admin: Hubble support: ticket 7' });
   });
 });
 
@@ -101,7 +105,9 @@ describe('unrecognised status: Retry refused honestly (F2 too) + "Mark as not bo
       actorId: 'admin-1', entityId: b.id, metadata: expect.objectContaining({ campaignId: id, reason: 'Hubble support confirmed on ticket 123', fromStatus: 'BUY_FAILED' }),
     });
     expect((await usage(t, id)).failedMayCompleteRupees).toBe(0);
-    // Out of the sweep: a drain asks Hubble nothing about it.
+    // Out of the 2-min lookups: only the HOURLY re-check of released rows asks about it (once per hour).
+    b.lastReconcileAt = null;
+    await t.processor.drain();
     t.hubble.getOrderByReference.mockClear();
     b.lastReconcileAt = null;
     await t.processor.drain();

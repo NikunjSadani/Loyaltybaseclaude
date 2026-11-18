@@ -4161,6 +4161,11 @@ model VoucherDispersalRow {
   attempts             Int                       @default(0)
   /// Set (once, by a guarded write) when a FAILED row is later reported bought / processing by Hubble.
   lateCompletedAt      DateTime?
+  /// EARLIER references of this row (previousReferenceIds) that Hubble reported bought / processing / unrecognised
+  /// after a retry — each counts the row's amount as SPENT (two vouchers may have been issued; ops review).
+  supersededActiveRefs String[]                  @default([])
+  /// Last hourly re-check of this row's earlier references (released / retried rows, 14 days).
+  supersededCheckedAt  DateTime?
   createdAt            DateTime                  @default(now())
   updatedAt            DateTime                  @updatedAt
 

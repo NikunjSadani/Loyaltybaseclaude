@@ -37,7 +37,6 @@ import {
   budgetBreakdown,
   overBudget,
   HUBBLE_KNOWN_STATUSES,
-  HUBBLE_NOT_BOUGHT_STATUSES,
   lastLookupUnrecognised,
   type BudgetBreakdown,
 } from './voucher-dispersal.processor';
@@ -541,7 +540,7 @@ export class VoucherDispersalService {
 
   /** "spent ₹A · with Hubble (not yet confirmed) ₹B · failed purchases Hubble may still complete ₹C · queued ₹D". */
   private usageText(b: BudgetBreakdown): string {
-    return `spent ${inr(b.spentPaise)} · with Hubble (not yet confirmed) ${inr(b.withHubblePaise)} · failed purchases Hubble may still complete ${inr(b.failedMayCompletePaise)} · queued ${inr(b.queuedPaise)}`;
+    return `spent ${inr(b.spentPaise)}${b.supersededPaise > 0n ? ` · earlier orders completed after a retry ${inr(b.supersededPaise)}` : ''} · with Hubble (not yet confirmed) ${inr(b.withHubblePaise)} · failed purchases Hubble may still complete ${inr(b.failedMayCompletePaise)} · queued ${inr(b.queuedPaise)}`;
   }
 
   /**
@@ -1190,6 +1189,15 @@ export class VoucherDispersalService {
         queuedAtRiskRupees: rupees(over.queuedAtRiskPaise),
         /** Rows (distinct) that had FAILED and that Hubble later reported bought / processing (audited loudly). */
         lateCompletedRows: await this.prisma.voucherDispersalRow.count({ where: { campaignId: id, lateCompletedAt: { not: null } } }),
+        /** Rows with an EARLIER reference Hubble completed after a retry — two vouchers may exist (counted as spent). */
+        supersededRows: (
+          await this.prisma.voucherDispersalRow.findMany({
+            where: { campaignId: id, supersededActiveRefs: { isEmpty: false } },
+            select: { batchNumber: true, rowNumber: true },
+            orderBy: [{ batchNumber: 'asc' }, { rowNumber: 'asc' }],
+            take: 20,
+          })
+        ).map((r) => ({ batchNumber: r.batchNumber, rowNumber: r.rowNumber })),
         /** Rows that had FAILED and are back with Hubble (pending again) — they count against the budget again. */
         failedBackWithHubbleRows: await this.prisma.voucherDispersalRow.count({
           where: { campaignId: id, status: RS.PENDING_RECONCILE, buyFailureSource: { not: null } },
@@ -1200,6 +1208,7 @@ export class VoucherDispersalService {
           withHubbleRupees: rupees(usage.withHubblePaise),
           failedMayCompleteRupees: rupees(usage.failedMayCompletePaise),
           queuedRupees: rupees(usage.queuedPaise),
+          supersededRupees: rupees(usage.supersededPaise),
           floorRupees: rupees(usage.floorPaise),
         },
         messageSent,
@@ -1361,6 +1370,8 @@ export class VoucherDispersalService {
       canResend: r.status === RS.BOUGHT && !!r.voucherCode && firstSendSettled(r) && r.resendCount < MAX_RESENDS,
       canRetryBuy:
         campaignStatus !== CS.CANCELLED &&
+        // Never offered where it would always be refused (an unrecognised Hubble answer → "Mark as not bought").
+        !canMarkNotBought(r) &&
         ((r.status === RS.BUY_FAILED && !(LOCAL_FAILURE_SOURCES.includes(r.buyFailureSource ?? '') && r.referenceSentAt && (retryAt === null || retryAt.getTime() > Date.now()))) ||
           (r.status === RS.PENDING_RECONCILE && retryAt !== null && retryAt.getTime() <= Date.now())),
       retryAvailableAt: r.status === RS.PENDING_RECONCILE ? retryAt : null,
@@ -1506,6 +1517,8 @@ export class VoucherDispersalService {
       if (!camp) throw new NotFoundException('Campaign not found.');
       const row = await tx.voucherDispersalRow.findFirst({ where: { id: rowId, campaignId: id } });
       if (!row) throw new NotFoundException('Row not found in this campaign.');
+      // Idempotent: a repeat (double click / second tab) returns the row as it is — no second audit.
+      if (row.status === RS.BUY_FAILED && row.buyFailureSource === 'MARKED_NOT_BOUGHT') return { camp, repeat: true as const };
       if (!canMarkNotBought(row)) {
         throw new ConflictException(
           '"Mark as not bought" is only for a row whose last Hubble answer was a status we do not recognise (a failed or pending row). Use Retry for the others.',
@@ -1542,9 +1555,9 @@ export class VoucherDispersalService {
           } as Prisma.InputJsonValue,
         },
       });
-      return { camp };
+      return { camp, repeat: false as const };
     }, CAMPAIGN_LOCK_TX);
-    await this.processor.resettle(id);
+    if (!r.repeat) await this.processor.resettle(id);
     const fresh = await this.prisma.voucherDispersalRow.findFirstOrThrow({ where: { id: rowId } });
     const rc = await this.receiptsFor([fresh.whatsappReceiptId]);
     const camp = await this.getCampaignOr404(id);
@@ -1594,11 +1607,39 @@ export class VoucherDispersalService {
 
     let newRef: string | null = null;
     let canaryRef: string | null = null;
+    let oldReferenceStatus: string | null = null;
     if (localFailure && !row.referenceSentAt) {
       // Never reached Hubble with this reference → nothing to check; reuse it.
     } else if (row.status === RS.BUY_FAILED && row.buyFailureSource === 'MARKED_NOT_BOUGHT') {
-      // An admin marked it NOT BOUGHT (audited, with a reason) after Hubble answered with a status we do not
-      // recognise: that decision stands — a NEW reference (the old one is kept; a late SUCCESS on it is alerted).
+      // An admin marked it NOT BOUGHT (audited, with a reason). Before a NEW reference, Hubble is asked about the old
+      // one once more: SUCCESS → applied (nothing bought again); PROCESSING → back to pending, refused; FAILED / no
+      // order → new reference; still unrecognised → new reference (the admin's decision stands — recorded).
+      const look = await this.lookup(row.hubbleReferenceId!);
+      if (look.kind === 'ERROR') {
+        await audit('REFUSED_LOOKUP_FAILED', { why: look.why });
+        throw new ConflictException(`Could not reach Hubble to check the earlier order for this row (${look.why}). Try again later.`);
+      }
+      if (look.kind === 'ORDER') {
+        const st = String(look.body.status ?? '').toUpperCase();
+        oldReferenceStatus = st || 'UNKNOWN';
+        if (st === 'SUCCESS') {
+          const outcome = await this.processor.applyBody(row, look.body);
+          await audit('HUBBLE_HAD_BOUGHT_AFTER_MARK', { applied: outcome });
+          if (outcome === 'BOUGHT') await this.processor.sendMessage(row.id);
+          await this.processor.resettle(id);
+          return this.retryResult(row.id, 'Hubble had bought it after all — the voucher was applied and sent; nothing bought again.');
+        }
+        if (st === 'PROCESSING') {
+          await this.processor.applyBody(row, look.body);
+          await audit('REFUSED_HUBBLE_PROCESSING_AFTER_MARK');
+          await this.processor.resettle(id);
+          throw new ConflictException(
+            'Not retried: Hubble is still processing the earlier order for this row — it is back to pending (it counts against the budget again) and is checked automatically.',
+          );
+        }
+      } else {
+        oldReferenceStatus = 'NO_ORDER';
+      }
       newRef = `vd${randomBytes(12).toString('hex')}`;
     } else {
       if (indeterminate) {
@@ -1626,15 +1667,15 @@ export class VoucherDispersalService {
             `Hubble reports this order with a status we do not recognise (${st || 'none'}) — we cannot tell whether it was bought. Contact Gifsy tech; if it was not bought, use "Mark as not bought", then retry.`,
           );
         }
-        if (!HUBBLE_NOT_BOUGHT_STATUSES.has(st)) {
+        if (st !== 'FAILED') {
           const outcome = await this.processor.applyBody(row, look.body);
           await audit(`HUBBLE_HAS_ORDER_${st || 'UNKNOWN'}`, { applied: outcome });
           if (outcome === 'BOUGHT') await this.processor.sendMessage(row.id);
           await this.processor.resettle(id);
           return this.retryResult(row.id, `Hubble already holds an order for this row (${st}) — applied, nothing bought again.`);
         }
-        // Hubble DEFINITIVELY did not buy on this reference (FAILED / CANCELLED / RETURNED — owner decision) → a
-        // new reference for the new attempt.
+        // Hubble DEFINITIVELY failed this reference → a new reference for the new attempt.
+        oldReferenceStatus = 'FAILED';
         newRef = `vd${randomBytes(12).toString('hex')}`;
       } else {
         const canary = await this.processor.verifyNotFoundCanary(row.hubbleReferenceId!);
@@ -1649,6 +1690,18 @@ export class VoucherDispersalService {
       }
     }
 
+    if (newRef) {
+      // HIGH (final review): never risk a second voucher unseen — every EARLIER reference is looked up first.
+      const prev = await this.processor.checkPreviousReferences(row);
+      if (!prev.ok) {
+        await audit(prev.error ? 'REFUSED_EARLIER_REFERENCE_UNCHECKED' : 'REFUSED_EARLIER_REFERENCE_ACTIVE', { referenceId: prev.ref, hubbleStatus: prev.status });
+        throw new ConflictException(
+          prev.error
+            ? `Not retried: an earlier order for this row (reference ${prev.ref}) could not be checked at Hubble. Try again later.`
+            : `Not retried: an earlier order for this row (reference ${prev.ref}) was completed by Hubble (${prev.status}) — two vouchers may have been issued. It is counted as spent; contact Gifsy tech.`,
+        );
+      }
+    }
     const r = await this.processor.requeueUnderLock(
       id,
       { id: row.id, status: row.status, updatedAt: row.updatedAt, voucherCode: null },
@@ -1686,7 +1739,12 @@ export class VoucherDispersalService {
       if (inflight) return inflight;
       throw new ConflictException('This row changed meanwhile — refresh and try again.');
     }
-    await audit(newRef ? 'REQUEUED_NEW_REFERENCE' : 'REQUEUED_SAME_REFERENCE', { previousFailure: row.buyFailureSource ?? row.pendingReason, canaryRef });
+    await audit(newRef ? 'REQUEUED_NEW_REFERENCE' : 'REQUEUED_SAME_REFERENCE', {
+      previousFailure: row.buyFailureSource ?? row.pendingReason,
+      canaryRef,
+      oldReferenceStatus,
+      afterMarkNotBought: row.buyFailureSource === 'MARKED_NOT_BOUGHT',
+    });
     this.processor.kick(id);
     return this.retryResult(
       row.id,

@@ -392,6 +392,15 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
     expect(html).toContain('over budget');
   });
 
+  it('rows where an earlier order was completed after a retry are a line (two vouchers may have been issued)', () => {
+    const d = ok({
+      bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0, supersededRows: 2,
+    });
+    expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
+      'Voucher dispersal: 2 rows where an earlier order was completed by Hubble after a retry — two vouchers may have been issued (counted as spent)',
+    ]);
+  });
+
   it('a load failure is itself an item', () => {
     expect(gifsyWideAttention({ voucherDispersal: { ok: false, error: 'boom' } })).toEqual([
       "Couldn't load the Voucher dispersal section",

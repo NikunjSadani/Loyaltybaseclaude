@@ -703,6 +703,17 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(late).toEqual({ lateCompletedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) } });
   });
 
+  it('voucher dispersal: superseded spend counts in "over budget" and the rows are counted', async () => {
+    prisma.voucherDispersalRow.groupBy.mockResolvedValue([{ campaignId: 'c1', _sum: { amountPaise: 900_000n } }]); // ₹9,000
+    prisma.voucherDispersalRow.findMany.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+      Promise.resolve(where.supersededActiveRefs ? [{ campaignId: 'c1', amountPaise: 200_000n, supersededActiveRefs: ['vdA'] }] : []),
+    );
+    prisma.voucherDispersalCampaign.findMany.mockResolvedValue([{ id: 'c1', budgetPaise: 1_000_000n }]); // ₹10,000
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    // ₹9,000 + ₹2,000 superseded > ₹10,000 → over budget.
+    expect(input.voucherDispersal).toMatchObject({ ok: true, data: { overBudgetCampaigns: 1, supersededRows: 1 } });
+  });
+
   it('voucher dispersal: window counts, the 2 h retry gate, and the still-open counts', async () => {
     prisma.voucherDispersalRow.count.mockImplementation(({ where }: { where: { status: unknown; OR?: unknown; updatedAt?: unknown; boughtAt?: unknown; lateCompletedAt?: unknown } }) => {
       if (where.lateCompletedAt) return Promise.resolve(0);
@@ -721,7 +732,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       ok: true,
       data: {
         bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 5, messageFailedOpen: 6,
-        overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0,
+        overBudgetCampaigns: 0, settleErrorCampaigns: 0, lateCompleted: 0, supersededRows: 0,
       },
     });
     const calls = prisma.voucherDispersalRow.count.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);
