@@ -549,18 +549,19 @@ describe('TdsService', () => {
   // ─── FIX-4: VISIBILITY FY anchor = payout PERIOD (not paidAt) ─────────────────
 
   describe('D3 (owner 2026-11-18): 194R is dated by when ACTUALLY paid (replaces the FIX-4 period anchor)', () => {
-    it("PAID payouts are windowed by paidAt (no payout-period filter); PROCESSING ones by their bank file's date", async () => {
+    it("owner FY rule: PAID and PROCESSING payouts are windowed by the date their BANK FILE was made; only a PAID payout with no bank file falls back to paidAt", async () => {
       mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
       await service.compute194R(CLIENT_ID, '2025-26');
       const wheres = mockPrisma.creditPayoutEntry.findMany.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);
-      const paid = wheres.find((w: Record<string, unknown>) => w.status === 'PAID')!;
-      const processing = wheres.find((w: Record<string, unknown>) => w.status === 'PROCESSING')!;
-      // FY 2025-26 = 1 Apr 2025 00:00 IST … 1 Apr 2026 00:00 IST.
-      expect(paid.paidAt).toEqual({ gte: new Date('2025-03-31T18:30:00.000Z'), lt: new Date('2026-03-31T18:30:00.000Z') });
-      expect(paid).not.toHaveProperty('period');
-      expect(processing.download).toEqual({ downloadedAt: { gte: new Date('2025-03-31T18:30:00.000Z'), lt: new Date('2026-03-31T18:30:00.000Z') } });
-      // No query is anchored on the payout period any more.
+      const fy = { gte: new Date('2025-03-31T18:30:00.000Z'), lt: new Date('2026-03-31T18:30:00.000Z') };
+      const banked = wheres.find((w: Record<string, unknown>) => (w.status as { in?: string[] })?.in)!;
+      expect(banked.status).toEqual({ in: ['PAID', 'PROCESSING'] });
+      expect(banked.download).toEqual({ downloadedAt: fy });
+      expect(banked).not.toHaveProperty('paidAt');
+      const noFile = wheres.find((w: Record<string, unknown>) => w.status === 'PAID' && w.downloadId === null)!;
+      expect(noFile.paidAt).toEqual(fy);
+      // No query is anchored on the payout period.
       expect(wheres.some((w: Record<string, unknown>) => 'period' in w)).toBe(false);
     });
 
@@ -568,8 +569,8 @@ describe('TdsService', () => {
       mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
       const paid = mkEntry('outlet1', 'vis-field', 1_500_000n, new Date('2025-06-01'), { tdsSection: 'SEC_194R' });
       const processing = { ...mkEntry('outlet1', 'vis-field', 800_000n, new Date('2025-07-01'), { tdsSection: 'SEC_194R', period: '2025-07' }), id: 'proc-1', status: 'PROCESSING', paidAt: null };
-      mockPrisma.creditPayoutEntry.findMany.mockImplementation(async (a: { where: { status?: string } }) =>
-        a.where.status === 'PROCESSING' ? [processing, paid] : a.where.status === 'PAID' ? [paid] : [],
+      mockPrisma.creditPayoutEntry.findMany.mockImplementation(async (a: { where: { status?: unknown } }) =>
+        (a.where.status as { in?: string[] })?.in ? [processing, paid] : a.where.status === 'PAID' ? [paid] : [],
       );
       mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
       mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'cp1', panNumber: 'ABCDE1234F' }]);

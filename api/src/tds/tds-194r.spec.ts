@@ -50,7 +50,10 @@ function fakeDb(d: Data) {
       findMany: async ({ where: w }: any) =>
         d.entries.filter((e) => {
           if (w.clientId && e.clientId !== w.clientId) return false;
-          if (w.status && e.status !== w.status) return false;
+          if (typeof w.status === 'string' && e.status !== w.status) return false;
+          if (w.status?.in && !w.status.in.includes(e.status)) return false;
+          if (w.downloadId === null && e.downloadedAt) return false; // "no bank file"
+          if (w.download && !e.downloadedAt) return false;
           if (w.paidAt && !inRange(e.paidAt, w.paidAt)) return false;
           if (w.download && !inRange(e.downloadedAt, w.download.downloadedAt)) return false;
           if (w.fieldId && e.fieldId !== w.fieldId) return false;
@@ -293,6 +296,47 @@ describe('194R report (compute194R) on the shared definition', () => {
     const rows = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ baseFyTotalPaise: 1500000n, liabilityPaise: 0n });
+  });
+});
+
+describe('owner FY rule: a payout belongs to the FY its BANK FILE was made', () => {
+  // The 30-March-file / 2-April-paid case, in the FY before the current one (computed from now).
+  const prev = financialYear(new Date(FY.start.getTime() - 86_400_000));
+  const fileDate = new Date(prev.endExclusive.getTime() - 2 * 86_400_000); // 30 Mar (IST-ish)
+  const paidDate = new Date(prev.endExclusive.getTime() + 1 * 86_400_000); // 2 Apr
+  const data = () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [{ ...paidVis('v1', 2500000n), paidAt: paidDate, downloadedAt: fileDate }];
+    // Its withholding was booked in the file's FY.
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: prev.fyLabel, tdsDeductedThisPaise: 250000n }];
+    return d;
+  };
+
+  it('report: counted ONLY in the bank-file FY (paid in April does not move it)', async () => {
+    const before = await services(data(), 'DEDUCT').tds.compute194R(CLIENT, prev.fyLabel, null);
+    const after = await services(data(), 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(before[0]).toMatchObject({ baseFyTotalPaise: 2500000n, deductLiabilityPaise: 250000n, deductedPaise: 250000n });
+    expect(after.find((r) => r.panNumber === 'ABCDE1234F' && r.baseFyTotalPaise > 0n)).toBeUndefined();
+  });
+
+  it('engine: a new run in April does not re-count the March file nor withhold it again', async () => {
+    const d = data();
+    const { credits } = services(d, 'DEDUCT');
+    const plan = await (credits as unknown as {
+      buildPayoutTdsPlan: (db: unknown, p: unknown) => Promise<{ deductionLedger: Array<{ cumulativeBasePaise: bigint; tdsDeductedThisPaise: bigint }> }>;
+    }).buildPayoutTdsPlan(fakeDb(d), {
+      clientId: CLIENT,
+      period: '2026-05',
+      engineEntries: [{ id: 'run1', outletId: 'O1', amountPaise: 1000000n, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' }],
+      outletTaxMap: new Map([['O1', { partnerId: 'p1', panNumber: 'ABCDE1234F', entityType: 'INDIVIDUAL' }]]),
+      runAt: NOW,
+      currentMethodology: 'DEDUCT',
+      importedCountFrom: null,
+    });
+    // This FY: only this run's ₹10,000 → below ₹20,000 → nothing withheld (the March file stays in its own FY).
+    expect(plan.deductionLedger).toHaveLength(0);
   });
 });
 

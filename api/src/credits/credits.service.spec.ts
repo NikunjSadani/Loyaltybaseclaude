@@ -3633,13 +3633,15 @@ describe('CreditsService', () => {
       });
       /** Route the shared read's three payout queries (PAID / imported / PROCESSING) to row sets. */
       const priorRows = (r: { paid?: unknown[]; processing?: unknown[]; imported?: unknown[] }) =>
-        mockTx.creditPayoutEntry.findMany.mockImplementation(async (a: { where?: { status?: string; batch?: { sourceKind?: string } } }) => {
-          const w = a?.where ?? {};
-          if (w.status === 'PROCESSING') return r.processing ?? [];
-          if (w.status === 'PAID' && w.batch?.sourceKind === 'VENDOR_IMPORT') return r.imported ?? [];
-          if (w.status === 'PAID') return r.paid ?? [];
-          return [];
-        });
+        mockTx.creditPayoutEntry.findMany.mockImplementation(
+          async (a: { where?: { status?: string | { in?: string[] }; batch?: { sourceKind?: string }; downloadId?: null } }) => {
+            const w = a?.where ?? {};
+            // Owner FY rule: PAID + PROCESSING payouts that went through a bank file — one read, by file date.
+            if (typeof w.status === 'object' && w.status?.in) return [...(r.paid ?? []), ...(r.processing ?? [])];
+            if (w.status === 'PAID' && w.batch?.sourceKind === 'VENDOR_IMPORT') return r.imported ?? [];
+            return []; // PAID without a bank file (none in these fixtures)
+          },
+        );
       function wire() {
         mockTx.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
         mockTx.outlet.findMany.mockResolvedValue([
@@ -3767,7 +3769,7 @@ describe('CreditsService', () => {
         expect(ledgerRow()).toMatchObject({ cumulativeBasePaise: 2500000n, tdsDueCumulativePaise: 250000n, tdsDeductedThisPaise: 250000n });
         const statuses = mockTx.creditPayoutEntry.findMany.mock.calls
           .map((c: [{ where?: { status?: unknown } }]) => c[0]?.where?.status)
-          .filter((x: unknown) => typeof x === 'string');
+          .flatMap((x: unknown) => (typeof x === 'string' ? [x] : ((x as { in?: string[] })?.in ?? [])));
         expect(statuses).toEqual(expect.arrayContaining(['PAID', 'PROCESSING']));
         expect(statuses).not.toContain('FAILED');
         expect(statuses).not.toContain('PENDING');

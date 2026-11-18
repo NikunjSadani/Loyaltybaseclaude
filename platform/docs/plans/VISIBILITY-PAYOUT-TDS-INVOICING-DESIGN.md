@@ -145,17 +145,19 @@ spec (`api/src/tds/tds-194r.spec.ts`) runs one dataset through both and asserts 
 
 **What counts** (never across clients):
 
-| Benefit | Dated by (D3) | Bucket |
+| Benefit | Dated by (owner FY rule) | Bucket |
 |---|---|---|
-| Incentive payouts (always 194R) | `paidAt`; a PROCESSING payout (in a bank file, no UTR) by its bank file's `downloadedAt` | cash, client-borne |
+| Incentive payouts (always 194R) | the BANK FILE date `download.downloadedAt` — PAID or PROCESSING (the UTR/payment date never moves it); a PAID payout with no bank file by `paidAt` | cash, client-borne |
 | Visibility payouts whose section was **frozen 194R at confirm** (Q6 — no re-classification) | same | cash ("vis") |
 | Imported vendor incentive payouts (`VENDOR_IMPORT`, `historical-incentive-payout`), only paid on/after the client's `tdsImportedPayouts.countFrom` (D9; fail-closed on a malformed value) | `paidAt` | cash, client-borne |
 | Delivered redemptions — UPI / BANK_TRANSFER | `deliveredAt` | cash, client-borne |
 | Delivered redemptions — GIFT_CARD / PHYSICAL_GIFT | `deliveredAt` | non-cash |
 | `TdsOffPlatformEntry` (194R) | `entryDate` | non-cash |
 
-FAILED / REVERSED / PENDING payouts never count. The engine counts the run it is building at the run date (`runAt`), so
-a 194R run's FY is the run date's FY (194C keeps its period FY — unchanged). Bajaj's imported payout history and the §10
+FAILED / REVERSED / PENDING payouts never count. **Owner FY rule (2026-11-18):** a payout and its TDS belong to the FY the
+bank file was made — the engine counts the run it is building at the run date (`runAt` = that file's date), its ledger
+rows carry that FY, and the report windows PAID + PROCESSING payouts by `download.downloadedAt`. A 30-Mar file paid on
+2-Apr is in the March FY only (no double counting / withholding). 194C keeps its period FY — unchanged. Bajaj's imported payout history and the §10
 "Outlet Points" off-platform rows are different benefits and both count (Q5).
 
 **Who** (D4): PAN → one row per PAN. No PAN → all outlets of one ChannelPartner = one retailer

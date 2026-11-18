@@ -73,14 +73,14 @@ Set per client on the **TDS Treatment** screen (default **194C + Gross-up**). Wh
 
 | Benefit | Counted on | Cash or non-cash |
 |---|---|---|
-| **Incentive payouts** | the date the payout was **paid** (UTR date) | Cash |
-| **Visibility payouts** on a client set to **194R** | the date **paid** — or, while it is still in a bank file without a UTR, the bank file's date | Cash |
+| **Incentive payouts** | the date the **bank file was made** (Generate Bank File) — whether it is already paid or still waiting for its UTR | Cash |
+| **Visibility payouts** on a client set to **194R** | the date the **bank file was made** — paid or still waiting for its UTR | Cash |
 | **Cash redemptions** (UPI / bank) | the date the redemption was **delivered** | Cash |
 | **Gifts and vouchers** redeemed | the date **delivered** | Non-cash |
 | **Off-platform benefits** (uploaded) | the entry date in the file | Non-cash |
 | **Imported vendor payouts** (only if the client's "count imported payouts" date is set) | the date paid, **on or after** that date | Cash |
 
-A failed, reversed or not-yet-sent payout does not count.
+A failed, reversed or not-yet-sent payout does not count. The payment (UTR) date never moves a payout to another year: a bank file made on 30 March and paid on 2 April belongs to the March year, and its TDS too. (A payout that never went through a bank file — e.g. imported history — counts on its paid date.)
 
 **Who is "one retailer":** a retailer with a PAN is one row per PAN. Without a PAN, **all the outlets of one owner are one retailer** (one row); an outlet with no owner attached counts on its own.
 

@@ -11,10 +11,11 @@
  *                             GIFT_CARD / PHYSICAL_GIFT (vouchers, gifts)        → "nonCash"
  *    - TdsOffPlatformEntry (194R)                                                → "nonCash"
  *
- *  DATES (D3 — the date ACTUALLY paid): a PAID payout by `paidAt`; a PROCESSING payout (already in a
- *  bank file, UTR not yet recorded) by its bank file's `downloadedAt` (the run date) — the engine
- *  counts the run it is building at the run date; redemptions by `deliveredAt`; off-platform by
- *  `entryDate`. FAILED / REVERSED / PENDING payouts are not counted.
+ *  DATES (owner FY rule 2026-11-18): a payout that went through a bank file — PAID or PROCESSING —
+ *  belongs to the FY its BANK FILE was made (`download.downloadedAt`; the engine counts the run it is
+ *  building at the run date = that file's date); the UTR / payment date never moves it. A PAID payout
+ *  with no bank file and imported vendor payouts count by `paidAt`; redemptions by `deliveredAt`;
+ *  off-platform by `entryDate`. FAILED / REVERSED / PENDING payouts are not counted.
  *
  *  WHO (D4): a PAN holder is keyed by PAN. Without a PAN, all outlets of one ChannelPartner are ONE
  *  retailer (`__NO_PAN__:<partnerId>`); an outlet with no partner counts alone
@@ -253,13 +254,28 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
   const outletFilter = scope ? { outletId: { in: scope.outletCodes } } : {};
   const sel = { id: true, clientId: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true } as const;
 
-  // ── Source 1: payouts (PAID by paidAt; PROCESSING by its bank file's date; imported from countFrom) ──
-  const paid = await db.creditPayoutEntry.findMany({
+  // ── Source 1: payouts. OWNER FY RULE (2026-11-18): a payout that went through a bank file belongs to
+  // the FY the BANK FILE was made (download.downloadedAt) — PAID or PROCESSING alike; the UTR /
+  // payment date never moves it (a 30-Mar file paid on 2-Apr stays in the March FY, matching the
+  // engine's ledger FY = run date). A PAID payout with NO bank file falls back to paidAt; imported
+  // vendor payouts (no bank file) count by paidAt from the client's countFrom date. ──
+  const banked = await db.creditPayoutEntry.findMany({
+    where: {
+      clientId,
+      status: { in: ['PAID', 'PROCESSING'] },
+      download: { downloadedAt: { gte: start, lt: endExclusive } },
+      // NULL-safe exclusion of VENDOR_IMPORT history (counted below only from countFrom).
+      batch: { OR: [{ sourceKind: null }, { sourceKind: { not: 'VENDOR_IMPORT' } }] },
+      ...outletFilter,
+    },
+    select: sel,
+  });
+  const paidNoFile = await db.creditPayoutEntry.findMany({
     where: {
       clientId,
       status: 'PAID',
+      downloadId: null,
       paidAt: { gte: start, lt: endExclusive },
-      // NULL-safe exclusion of VENDOR_IMPORT history (counted below only from countFrom).
       batch: { OR: [{ sourceKind: null }, { sourceKind: { not: 'VENDOR_IMPORT' } }] },
       ...outletFilter,
     },
@@ -280,18 +296,8 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
           select: sel,
         })
       : [];
-  const processing = await db.creditPayoutEntry.findMany({
-    where: {
-      clientId,
-      status: 'PROCESSING',
-      download: { downloadedAt: { gte: start, lt: endExclusive } },
-      ...outletFilter,
-    },
-    select: sel,
-  });
-  const byId = new Map<string, (typeof paid)[number]>();
-  for (const e of [...paid, ...imported]) byId.set(e.id, e);
-  for (const e of processing) if (!byId.has(e.id)) byId.set(e.id, e);
+  const byId = new Map<string, (typeof banked)[number]>();
+  for (const e of [...banked, ...paidNoFile, ...imported]) if (!byId.has(e.id)) byId.set(e.id, e);
   const entries = [...byId.values()].filter(
     (e) => (!e.clientId || e.clientId === clientId) && effectiveEntrySection(e.tdsSection, visIds.has(e.fieldId)) === 'SEC_194R',
   );
