@@ -41,7 +41,7 @@ or not) sees every campaign. `GIFSY_STAFF` and every tenant role are refused (co
   row is batch 1), table `VoucherDispersalBatch` (batches 2, 3, …: status `PREVIEWED|CONFIRMED|DISCARDED`, previewId,
   file, uploaded / confirmed / discarded by + at, discardReason; `@@unique([campaignId, batchNumber])`), and the row-number
   unique widened from `(campaignId, rowNumber)` to `(campaignId, batchNumber, rowNumber)` (new index created before the old
-  one is dropped; no data touched). `SET lock_timeout = '5s'`.
+  one is dropped; no data touched). `SET LOCAL lock_timeout = '5s'`; also `settleFailures` / `settleError` on campaigns.
 
 ## 3. API contract (`/v1/admin/voucher-dispersal`, GIFSY_ADMIN, `{ success, data }` envelope; errors `{ success:false, error }`)
 
@@ -207,9 +207,15 @@ refusals) (actor = admin).
   states why (Hubble unreachable / "no order" unverified). Check Hubble's dashboard for the reference before forcing
   anything; never edit rows by SQL.
 - **Superseded-reference alert:** look up both references at Hubble; if two vouchers exist, recover the extra one with Hubble.
-- **Deploying migration `20261118160000_voucher_dispersal_batches`:** deploy during a quiet window (no campaign being
-  bought, the scheduler drain idle) — the migration waits at most 5 s for its locks (`lock_timeout = '5s'`), and queries
+- **Deploying migration `20261118160000_voucher_dispersal_batches` (prod):** deploy during a quiet window (no campaign
+  being bought). Order: (1) **pause the drain** — pause the Cloud Scheduler job `voucher-dispersal-drain-prod` (and/or set
+  `VOUCHER_DISPERSAL_WORKER_ENABLED=false` on the API service so the 30 s timer stops); (2) run `npx prisma migrate deploy`
+  (in-VPC migrate job); (3) deploy the new API revision; (4) **resume** the scheduler job / unset the flag. The migration
+  sets `SET LOCAL lock_timeout = '5s'` (scoped to its own transaction): it waits at most 5 s for its locks, and queries
   queued behind it wait at most that long (≤ 5 s).
+- **Verify `SET LOCAL` once before prod (not yet done):** apply the migration to a local / throwaway database and confirm
+  Postgres did NOT print "SET LOCAL can only be used in transaction blocks" (that warning would mean the 5 s limit did not
+  apply — then switch back to a session `SET lock_timeout`).
 - **If it fails on `lock_timeout`** (P3018 on the run; afterwards `migrate deploy` refuses with P3009 — a failed migration
   is recorded): nothing was applied (the migration runs in one transaction). Recover with exactly
   `npx prisma migrate resolve --rolled-back 20261118160000_voucher_dispersal_batches` (in the in-VPC migrate job), then
@@ -296,7 +302,18 @@ I want."* Owner chose **"Add to the same campaign"**.
   point is kept (paise refused); `PATCH {name:null}` / `{budgetRupees:null}` → 400; the detail reply's old
   `summary.committedRupees` is removed (`budgetUsage` is the one breakdown); every campaign-lock transaction (edit, first
   upload, confirm, batch upload / confirm / discard, cancel, buy claim, retry re-queue, settle) uses `CAMPAIGN_LOCK_TX`
-  (timeout 30 s, maxWait 25 s) and `finishCampaigns` logs one campaign's settle error and moves on; confirm reports a
+  (timeout 30 s; maxWait later cut to 5 s — see below) and `finishCampaigns` logs one campaign's settle error and moves on; confirm reports a
   changed preview before the budget; notices say "Batch 2, row 5"; the add page replaces Buy & send with the server's
   reason when the campaign cannot take people (e.g. a retry re-opened it).
+- **Final review fixes (2026-11-18):** H1 — a row that had FAILED (any source) and that Hubble later reports bought or
+  processing is audited loudly (`VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER`: campaign, batch, row, ₹, source) with an
+  error log; if what can still cost money then exceeds the budget, `VOUCHER_DISPERSAL_OVER_BUDGET` + error log, and the
+  campaign page shows "Over budget by ₹X — a purchase Hubble had refused/failed was completed later." (detail
+  `summary.overBudgetRupees` / `lateCompletedRows`). H2 — consecutive settle failures are counted on the campaign
+  (`settleFailures`, `settleError`; reset on success); at 3 an audit row `VOUCHER_DISPERSAL_SETTLE_FAILING`, the views
+  expose `settleError`, the page shows "Status update keeps failing — contact Gifsy tech." and "Add more people" says
+  so. M1 — a webhook / sweep / retry lookup that changes a row re-settles its campaign (terminal ones too). M2 — a batch
+  preview's "left" is never negative (`overBudgetRupees` instead). L1 — "1e5" / "0x10" / non-ASCII digits → "Enter
+  digits only"; a minus → "greater than 0". L2 — `CAMPAIGN_LOCK_TX` = timeout 30 s (incl. the row-lock wait), maxWait
+  5 s (pool wait). L3 — `finishCampaigns` settles the longest-waiting campaigns first.
 

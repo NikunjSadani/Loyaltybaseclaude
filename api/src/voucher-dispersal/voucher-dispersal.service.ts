@@ -33,6 +33,7 @@ import {
   MAX_RESENDS,
   VoucherDispersalProcessor,
   CAMPAIGN_LOCK_TX,
+  SETTLE_FAILURES_BEFORE_ALERT,
   budgetBreakdown,
   type BudgetBreakdown,
 } from './voucher-dispersal.processor';
@@ -96,11 +97,17 @@ const LIVE_ROW: RS[] = [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE, RS.BOUGHT, R
 /** Rows whose purchase is not finished — a new batch waits until there are none. */
 const IN_FLIGHT: RS[] = [RS.QUEUED, RS.BUYING, RS.PENDING_RECONCILE];
 const EDIT_EVENT = 'VOUCHER_DISPERSAL_EDITED';
+const LATE_EVENT = 'VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER';
+const settleFailing = (c: { settleFailures?: number | null }) => (c.settleFailures ?? 0) >= SETTLE_FAILURES_BEFORE_ALERT;
 /** A batch row marked DUPLICATE because its phone is live in an EARLIER batch (reason text set by uploadBatch). */
 const CROSS_BATCH_REASON = /^Already (sent )?in batch \d+/;
 
 /** Why "Add more people" is not available for a campaign status (null = available). Re-checked server-side. */
-export function addPeopleBlockedReason(status: CS): string | null {
+export const SETTLE_FAILING_REASON = "This campaign's status update keeps failing — contact Gifsy tech.";
+
+export function addPeopleBlockedReason(status: CS, settleFailing = false): string | null {
+  // A campaign whose status settle keeps failing stays PROCESSING — say so, never "still being bought".
+  if (settleFailing) return SETTLE_FAILING_REASON;
   if (status === CS.COMPLETED || status === CS.COMPLETED_WITH_ERRORS) return null;
   if (status === CS.CANCELLED) return 'This campaign was cancelled — people cannot be added to it.';
   if (status === CS.DRAFT || status === CS.PREVIEWED) return 'Confirm the first file before adding more people (this campaign is still in setup).';
@@ -600,7 +607,7 @@ export class VoucherDispersalService {
   private async lockForBatch(tx: Tx, id: string): Promise<CampaignRow> {
     const camp = await tx.voucherDispersalCampaign.update({ where: { id }, data: { updatedAt: new Date() } }).catch(() => null);
     if (!camp) throw new NotFoundException('Campaign not found.');
-    const why = addPeopleBlockedReason(camp.status);
+    const why = addPeopleBlockedReason(camp.status, settleFailing(camp));
     if (why) throw new ConflictException(why);
     const inFlight = await tx.voucherDispersalRow.count({ where: { campaignId: id, status: { in: IN_FLIGHT } } });
     if (inFlight > 0) throw new ConflictException(addPeopleBlockedReason(CS.PROCESSING)!);
@@ -689,7 +696,7 @@ export class VoucherDispersalService {
   async uploadBatch(user: JwtPayload, id: string, file: Express.Multer.File | undefined) {
     this.assertAdmin(user);
     const pre = await this.getCampaignOr404(id);
-    const why = addPeopleBlockedReason(pre.status);
+    const why = addPeopleBlockedReason(pre.status, settleFailing(pre));
     if (why) throw new ConflictException(why);
     if (!file?.buffer?.length) throw new BadRequestException('Attach the filled template (.xlsx) as "file".');
     let parsed: ParsedDispersalRow[];
@@ -874,7 +881,8 @@ export class VoucherDispersalService {
   ) {
     const base = this.previewSummary(rows, camp.budgetPaise);
     const totalPaise = rows.filter((r) => r.status === RS.VALID).reduce((a, r) => a + (r.amountPaise ?? 0n), 0n);
-    const remaining = BigInt(camp.budgetPaise) - floorPaise;
+    const rawLeft = BigInt(camp.budgetPaise) - floorPaise;
+    const remaining = rawLeft < 0n ? 0n : rawLeft;
     return {
       batchNumber: batch.batchNumber,
       batchStatus: batch.status,
@@ -893,9 +901,11 @@ export class VoucherDispersalService {
       })),
       summary: {
         ...base,
-        overBudget: totalPaise > remaining,
+        overBudget: totalPaise > remaining || rawLeft < 0n,
         alreadyCommittedRupees: rupees(floorPaise),
         remainingBudgetRupees: rupees(remaining),
+        /** > 0 when spending ALREADY exceeds the budget (nothing is left; shown as "over budget by ₹X"). */
+        overBudgetRupees: rawLeft < 0n ? rupees(-rawLeft) : 0,
         crossBatchDuplicates: rows.filter((r) => r.status === RS.DUPLICATE && CROSS_BATCH_REASON.test(r.invalidReason ?? '')).length,
         warningCount: rows.filter((r) => r.warning).length,
         ...notes,
@@ -1161,6 +1171,15 @@ export class VoucherDispersalService {
         spentRupees: rupees(sumOf([RS.BOUGHT])),
         /** The lowest the budget may be edited down to (spent + committed + queued). */
         budgetFloorRupees: rupees(usage.floorPaise),
+        /** > 0 only when what can still cost money exceeds the budget (e.g. a refused purchase Hubble completed later). */
+        overBudgetRupees: usage.floorPaise > BigInt(camp.budgetPaise) ? rupees(usage.floorPaise - BigInt(camp.budgetPaise)) : 0,
+        /** Rows that had FAILED and that Hubble later reported bought / processing (audited loudly). */
+        lateCompletedRows: await this.prisma.auditLog.count({
+          where: {
+            entityType: 'VOUCHER_DISPERSAL_ROW',
+            AND: [{ metadata: { path: ['event'], equals: LATE_EVENT } }, { metadata: { path: ['campaignId'], equals: id } }],
+          },
+        }),
         /** The SAME breakdown the floor, batch confirm and retry checks use (money-audit M1). */
         budgetUsage: {
           spentRupees: rupees(usage.spentPaise),
@@ -1521,6 +1540,7 @@ export class VoucherDispersalService {
           const outcome = await this.processor.applyBody(row, look.body);
           await audit(`HUBBLE_HAS_ORDER_${st || 'UNKNOWN'}`, { applied: outcome });
           if (outcome === 'BOUGHT') await this.processor.sendMessage(row.id);
+          await this.processor.resettle(id);
           return this.retryResult(row.id, `Hubble already holds an order for this row (${st}) — applied, nothing bought again.`);
         }
         // Hubble DEFINITIVELY failed this reference → a new reference for the new attempt.
@@ -1742,7 +1762,9 @@ export class VoucherDispersalService {
       canCancel: c.status === CS.DRAFT || c.status === CS.PREVIEWED || c.status === CS.CONFIRMED || c.status === CS.PROCESSING,
       canEdit: c.status !== CS.CANCELLED,
       /** null = "Add more people" is available; otherwise the plain reason it is not (re-checked server-side). */
-      addPeopleBlockedReason: addPeopleBlockedReason(c.status),
+      addPeopleBlockedReason: addPeopleBlockedReason(c.status, settleFailing(c)),
+      /** Set once the status settle has failed SETTLE_FAILURES_BEFORE_ALERT times in a row (null otherwise). */
+      settleError: settleFailing(c) ? c.settleError ?? 'Unknown error' : null,
     };
   }
 

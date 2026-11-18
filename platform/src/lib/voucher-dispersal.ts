@@ -192,6 +192,8 @@ export interface VdCampaign {
   canEdit: boolean | null;
   /** Server: null = "Add more people" is available; otherwise the plain reason it is not. */
   addPeopleBlockedReason: string | null;
+  /** Server: the last error once the campaign's status update has failed repeatedly (else null). */
+  settleError: string | null;
 }
 
 /**
@@ -214,6 +216,10 @@ export interface VdDeliverySummary {
   budgetFloorRupees: number | null;
   /** Detail only: the SAME breakdown the server's floor / batch confirm / retry checks use. */
   budgetUsage: VdBudgetUsage | null;
+  /** Detail only: > 0 when what can still cost money exceeds the budget. */
+  overBudgetRupees: number | null;
+  /** Detail only: rows that had failed and that Hubble later reported bought / processing. */
+  lateCompletedRows: number | null;
   /** List only: an "Add more people" batch waiting for confirmation (its number), else null. */
   pendingBatchNumber: number | null;
 }
@@ -351,8 +357,10 @@ export interface VdBatchPreview extends VdPreview {
   batchStatus: BatchStatus;
   /** Already spent + committed on the campaign (every earlier batch). */
   alreadyCommittedRupees: number | null;
-  /** Budget − already spent / committed. */
+  /** Budget − already spent / committed (never below 0). */
   remainingBudgetRupees: number | null;
+  /** > 0 when spending already exceeds the budget. */
+  overBudgetRupees: number | null;
   /** Rows marked DUPLICATE because the phone already has a voucher (or a failed purchase) in an earlier batch. */
   crossBatchDuplicates: number | null;
 }
@@ -472,6 +480,7 @@ export function normalizeCampaign(raw: unknown): VdCampaign {
     canCancel: bool(o.canCancel),
     canEdit: bool(o.canEdit),
     addPeopleBlockedReason: str(o.addPeopleBlockedReason),
+    settleError: str(o.settleError),
   };
 }
 
@@ -492,6 +501,8 @@ export function normalizeListSummary(raw: unknown): VdDeliverySummary {
     spentRupees: num(o.spentRupees),
     budgetFloorRupees: null,
     budgetUsage: null,
+    overBudgetRupees: null,
+    lateCompletedRows: null,
     pendingBatchNumber: num(o.pendingBatchNumber),
   };
 }
@@ -521,6 +532,8 @@ export function normalizeDeliverySummary(raw: unknown): VdDeliverySummary {
           floorRupees: num(o.budgetUsage.floorRupees),
         }
       : null,
+    overBudgetRupees: num(o.overBudgetRupees),
+    lateCompletedRows: num(o.lateCompletedRows),
     pendingBatchNumber: null,
   };
 }
@@ -649,6 +662,7 @@ export function normalizeBatchPreview(raw: unknown): VdBatchPreview {
     batchStatus: asBatchStatus(o.batchStatus).status,
     alreadyCommittedRupees: num(s.alreadyCommittedRupees),
     remainingBudgetRupees: num(s.remainingBudgetRupees),
+    overBudgetRupees: num(s.overBudgetRupees),
     crossBatchDuplicates: num(s.crossBatchDuplicates),
   };
 }
@@ -816,6 +830,9 @@ export function confirmDialogTitle(s: Pick<VdPreviewSummary, 'valid' | 'totalRup
   return `Buy and send ${formatCount(s.valid)} ${s.valid === 1 ? 'voucher' : 'vouchers'} · ${formatRupees(s.totalRupees)} total?`;
 }
 
+export const RUPEE_DIGITS_ERROR = 'Enter digits only (e.g. 2500 or 2,500).';
+const RUPEE_GT0_ERROR = 'Enter a budget in rupees greater than 0.';
+
 export const RUPEE_COMMA_ERROR =
   'Use commas only between thousands (e.g. 2,500 or 1,25,000) — or type the amount without commas.';
 
@@ -827,6 +844,10 @@ export const RUPEE_COMMA_ERROR =
  */
 export function parseRupeeInput(raw: string): { clean: string; error: string | null } {
   const t = raw.trim().replace(/^₹\s*/, '');
+  // A minus is "not above 0"; anything but ASCII digits / comma / point (1e5, 0x10, other scripts' digits,
+  // inner spaces) is refused in plain words — never parsed into some other number.
+  if (t.startsWith('-')) return { clean: t, error: RUPEE_GT0_ERROR };
+  if (!/^[0-9.,]*$/.test(t)) return { clean: t, error: RUPEE_DIGITS_ERROR };
   if (!t.includes(',')) return { clean: t, error: null };
   const [whole, ...rest] = t.split('.');
   const indian = /^\d{1,2}(,\d{2})*,\d{3}$/.test(whole);

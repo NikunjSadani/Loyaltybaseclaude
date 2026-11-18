@@ -11,7 +11,7 @@ import {
   normalizeDetail, normalizeListItem, normalizePreview, normalizeRow, normalizeRowsPage, pendingReasonText, plural, pollPhase,
   rowStatusText, shouldNudgeProcessing, validateCreateForm, vdApi, PENDING_RECONCILE_NOTE, POLL_AFTER_COMPLETE_MS, POLL_MAX_MS,
   batchConfirmBlock, editChangeText, editPayload, validateEditForm, normalizeBatch, normalizeCancelResult,
-  parseRupeeInput, rupeeEcho, RUPEE_COMMA_ERROR,
+  parseRupeeInput, rupeeEcho, RUPEE_COMMA_ERROR, RUPEE_DIGITS_ERROR,
   type VdPreview, type VdPreviewSummary,
 } from '@/lib/voucher-dispersal';
 
@@ -347,6 +347,18 @@ describe('rupee input: typed as-is, parsed strictly (decimal point kept, commas 
     expect(edit('₹2,500')).toBeUndefined();
     expect(editPayload({ name: 'Diwali', budgetRupees: '₹7,000' }, { name: 'Diwali', budgetRupees: 5000 })).toEqual({ budgetRupees: 7000 });
   });
+  it('final review L1: clear reasons for non-digits and negatives', () => {
+    for (const bad of ['1e5', '0x10', '२५००', '２５００', '25a0', '2 500']) {
+      expect(create(bad)).toBe(RUPEE_DIGITS_ERROR);
+      expect(edit(bad)).toBe(RUPEE_DIGITS_ERROR);
+    }
+    expect(create('-1,000')).toBe('Enter a budget in rupees greater than 0.');
+    expect(edit('-1000')).toBe('Enter a budget in rupees greater than 0.');
+    expect(create('2500.')).toBe('Enter the budget in whole rupees (no paise).');
+    expect(rupeeEcho('1e5')).toBeNull();
+    expect(rupeeEcho('-1000')).toBeNull();
+  });
+
   it('echo', () => {
     expect(rupeeEcho('2500')).toBe('= ₹2,500');
     expect(rupeeEcho('₹1,25,000')).toBe('= ₹1,25,000');

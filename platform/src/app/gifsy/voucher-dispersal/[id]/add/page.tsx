@@ -351,6 +351,9 @@ export default function AddPeoplePage() {
                 </dl>
                 <p className="text-xs text-white/80 mt-2 break-words" data-testid="vd-sum-budget-left">
                   This batch {formatRupees(s.totalRupees)} · already spent or committed {formatRupees(preview.alreadyCommittedRupees)} · left {formatRupees(preview.remainingBudgetRupees)} of the {formatRupees(s.budgetRupees)} budget
+                  {preview.overBudgetRupees !== null && preview.overBudgetRupees > 0 && (
+                    <span className="block font-semibold text-red-200">Spending is over budget by {formatRupees(preview.overBudgetRupees)}.</span>
+                  )}
                 </p>
                 {preview.crossBatchDuplicates !== null && preview.crossBatchDuplicates > 0 && (
                   <p className="text-xs text-amber-200 mt-2" data-testid="vd-sum-cross-batch">

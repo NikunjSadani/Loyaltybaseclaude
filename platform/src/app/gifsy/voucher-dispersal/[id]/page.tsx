@@ -441,6 +441,19 @@ export default function VoucherCampaignDetailPage() {
         </div>
       )}
 
+      {s.overBudgetRupees !== null && s.overBudgetRupees > 0 && (
+        <p role="alert" data-testid="vd-over-budget" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-200 break-words">
+          Over budget by {formatRupees(s.overBudgetRupees)}
+          {(s.lateCompletedRows ?? 0) > 0 ? ' — a purchase Hubble had refused/failed was completed later.' : '.'}
+          {' '}Raise the budget or check with Hubble; nothing more is bought while it is over.
+        </p>
+      )}
+      {c.settleError && (
+        <p role="alert" data-testid="vd-settle-error" className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200 break-words">
+          <span className="font-semibold">Status update keeps failing — contact Gifsy tech.</span> The status shown may be out of date. Last error: {c.settleError}
+        </p>
+      )}
+
       {pendingBatch && (
         <div data-testid="vd-pending-batch" role="status" className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-100 space-y-2">
           <p className="break-words">

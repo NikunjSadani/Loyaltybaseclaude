@@ -191,7 +191,7 @@ export function makeFakePrisma() {
   const prisma: Rec = {
     voucherDispersalCampaign: table(campaigns, 'camp', () => ({
       note: null, status: 'DRAFT', sourceFileName: null, uploadedAt: null, uploadedById: null, confirmedById: null,
-      confirmedAt: null, cancelledById: null, cancelledAt: null, completedAt: null, billedToClientId: null,
+      confirmedAt: null, cancelledById: null, cancelledAt: null, completedAt: null, billedToClientId: null, settleFailures: 0, settleError: null,
     })),
     voucherDispersalRow: table(
       rows,

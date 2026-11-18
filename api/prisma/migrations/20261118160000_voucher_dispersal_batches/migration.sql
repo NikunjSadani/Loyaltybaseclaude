@@ -5,13 +5,22 @@
 -- (campaignId, batchNumber, rowNumber) — a later batch's file restarts at Excel row 2. The new index is
 -- created FIRST, so a uniqueness guarantee holds at every moment; dropping the narrower index removes no data
 -- (every existing row is batch 1, so the old guarantee is exactly preserved for them). Rollback = recreate it.
-SET lock_timeout = '5s';
+-- SET LOCAL: scoped to the transaction the migration runs in, so it never leaks to the session / a pooled
+-- connection. Expected to apply because the file is sent as one multi-statement script, which Postgres runs as one
+-- implicit transaction block (in which SET LOCAL takes effect). NOT yet verified against a real database — check on
+-- a local / throwaway DB first (VOUCHER-DISPERSAL.md §8): if Postgres warns "SET LOCAL can only be used in
+-- transaction blocks", the 5 s limit did NOT apply.
+SET LOCAL lock_timeout = '5s';
 
 -- CreateEnum
 CREATE TYPE "VoucherDispersalBatchStatus" AS ENUM ('PREVIEWED', 'CONFIRMED', 'DISCARDED');
 
 -- AlterTable
 ALTER TABLE "voucher_dispersal_rows" ADD COLUMN "batchNumber" INTEGER NOT NULL DEFAULT 1;
+
+-- AlterTable (settle-failure surfacing; constant defaults — metadata-only, no rewrite)
+ALTER TABLE "voucher_dispersal_campaigns" ADD COLUMN "settleFailures" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN "settleError" TEXT;
 
 -- CreateTable
 CREATE TABLE "voucher_dispersal_batches" (

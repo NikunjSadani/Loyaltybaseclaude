@@ -135,6 +135,16 @@ describe('Add more people', () => {
     expect(screen.getByTestId('vd-buy-send')).not.toBeDisabled();
   });
 
+  it('spending already over the budget: "left ₹0" plus "Spending is over budget by ₹X" (never a negative amount)', async () => {
+    uploadRes = ok(preview({}, { overBudget: true, remainingBudgetRupees: 0, overBudgetRupees: 500, alreadyCommittedRupees: 5500 }));
+    render(<AddPeoplePage />);
+    await uploadFile();
+    const line = screen.getByTestId('vd-sum-budget-left');
+    expect(line).toHaveTextContent('left ₹0 of the ₹5,000 budget');
+    expect(line).toHaveTextContent('Spending is over budget by ₹500.');
+    expect(line).not.toHaveTextContent('-');
+  });
+
   it('a 409 refusal on confirm (e.g. stale preview) closes the dialog, says why and reloads the current state', async () => {
     confirmRes = fail(409, 'This preview is out of date (the file was re-uploaded, maybe in another tab). Review the current preview and confirm again.');
     render(<AddPeoplePage />);

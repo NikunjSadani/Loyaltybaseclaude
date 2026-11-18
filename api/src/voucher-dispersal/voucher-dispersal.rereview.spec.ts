@@ -82,7 +82,7 @@ describe('L4: the detail reply has no second "committed" figure that disagrees w
 
 describe('L5: campaign-lock transactions share explicit timeout / maxWait; one failing settle never stops the rest', () => {
   it('edit / batch upload / confirm / discard / settle pass CAMPAIGN_LOCK_TX', async () => {
-    expect(CAMPAIGN_LOCK_TX).toEqual({ timeout: 30_000, maxWait: 25_000 });
+    expect(CAMPAIGN_LOCK_TX).toEqual({ timeout: 30_000, maxWait: 5_000 });
     const t = setup();
     const id = await finished(t, [['9876543210', 'Asha', 1000, 'Amazon Pay']]);
     const opts = () => t.prisma.$transaction.mock.calls.at(-1)[1];

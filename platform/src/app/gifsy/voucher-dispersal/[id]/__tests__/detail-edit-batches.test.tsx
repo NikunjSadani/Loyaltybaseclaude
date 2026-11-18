@@ -158,6 +158,31 @@ describe('Edit campaign', () => {
     expect(line).not.toHaveTextContent('in progress');
   });
 
+  it('over budget (a refused / failed purchase completed later) → a loud banner with the amount', async () => {
+    detailQueue = [ok(detail({ summary: { overBudgetRupees: 1000, lateCompletedRows: 1 } }))];
+    render(<DetailPage />);
+    const b = await screen.findByTestId('vd-over-budget');
+    expect(b).toHaveAttribute('role', 'alert');
+    expect(b).toHaveTextContent('Over budget by ₹1,000 — a purchase Hubble had refused/failed was completed later.');
+  });
+
+  it('no banner when not over budget', async () => {
+    render(<DetailPage />);
+    await screen.findByTestId('vd-detail');
+    expect(screen.queryByTestId('vd-over-budget')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('vd-settle-error')).not.toBeInTheDocument();
+  });
+
+  it('a status update that keeps failing → banner "contact Gifsy tech"; add-people reason from the server', async () => {
+    detailQueue = [ok(detail({ status: 'PROCESSING', campaign: { canCancel: true, settleError: 'P2028 Transaction API error', addPeopleBlockedReason: "This campaign's status update keeps failing — contact Gifsy tech." } }))];
+    render(<DetailPage />);
+    const b = await screen.findByTestId('vd-settle-error');
+    expect(b).toHaveTextContent('Status update keeps failing — contact Gifsy tech.');
+    expect(b).toHaveTextContent('P2028 Transaction API error');
+    expect(screen.getByTestId('vd-add-people-blocked')).toHaveTextContent('keeps failing — contact Gifsy tech');
+    expect(screen.getByTestId('vd-add-people-blocked')).not.toHaveTextContent('still being bought');
+  });
+
   it('shows the edit history (who, when, old → new)', async () => {
     render(<DetailPage />);
     const h = await screen.findByTestId('vd-edit-history');

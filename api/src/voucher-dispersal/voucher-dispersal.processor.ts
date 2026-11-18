@@ -70,10 +70,15 @@ export const failedMayStillCompleteWhere: Prisma.VoucherDispersalRowWhereInput =
 
 /**
  * Options for every transaction that takes the campaign row lock (edit, confirm, batch upload / confirm /
- * discard, cancel, buy claim, retry re-queue, settle). One budget so a lock held by the longest of them
- * (a batch insert) never times the others out at Prisma's 5 s default (P2028).
+ * discard, cancel, buy claim, retry re-queue, settle). `maxWait` = how long to wait for a CONNECTION from the
+ * pool (kept short: 5 s, so a click never hangs ~a minute); `timeout` = the whole transaction INCLUDING the wait
+ * for the campaign row lock (30 s — longer than the longest holder, a ≤ 5,000-row batch insert, so the others
+ * don't fail with P2028 at Prisma's 5 s default).
  */
-export const CAMPAIGN_LOCK_TX = { timeout: 30_000, maxWait: 25_000 } as const;
+export const CAMPAIGN_LOCK_TX = { timeout: 30_000, maxWait: 5_000 } as const;
+
+/** Consecutive failed settles of one campaign before it is surfaced (audit + `settleError` + banner). */
+export const SETTLE_FAILURES_BEFORE_ALERT = 3;
 /**
  * ONE definition of "can still cost this campaign money" — the buy-time guard (`budgetCommittedWhere`, which
  * is this minus QUEUED: the row being claimed is the one queued amount it adds), the budget floor (edit),
@@ -204,9 +209,9 @@ export class VoucherDispersalProcessor {
     const deadline = Date.now() + (opts.budgetMs ?? 45_000);
     try {
       s.staleRecovered = await this.step('stale', () => this.recoverStaleBuying(opts.campaignId), 0);
-      s.reconciled = await this.step('reconcile', () => this.reconcilePending(opts.campaignId, deadline), 0);
-      s.messagesSent += await this.step('messages', () => this.sendPendingMessages(opts.campaignId, deadline), 0);
       const touched = new Set<string>();
+      s.reconciled = await this.step('reconcile', () => this.reconcilePending(opts.campaignId, deadline, touched), 0);
+      s.messagesSent += await this.step('messages', () => this.sendPendingMessages(opts.campaignId, deadline), 0);
       const staleMsg = await this.step('stale-messages', () => this.surfaceStaleMessageClaims(opts.campaignId), [] as string[]);
       staleMsg.forEach((id) => touched.add(id));
       const buys = await this.step('buy', () => this.buyQueued(opts.campaignId, deadline, opts.maxBuys ?? 50), null);
@@ -260,7 +265,7 @@ export class VoucherDispersalProcessor {
 
   // ─── 2. Reconcile ─────────────────────────────────────────────────────────────
 
-  async reconcilePending(campaignId: string | undefined, deadline: number): Promise<number> {
+  async reconcilePending(campaignId: string | undefined, deadline: number, touched?: Set<string>): Promise<number> {
     if (!this.hubble.isConfigured()) return 0;
     const cutoff = new Date(Date.now() - RECONCILE_EVERY_MS);
     const rows = await this.prisma.voucherDispersalRow.findMany({
@@ -284,7 +289,9 @@ export class VoucherDispersalProcessor {
     let n = 0;
     for (const row of rows) {
       if (Date.now() > deadline) break;
-      await this.reconcileRow(row);
+      const outcome = await this.reconcileRow(row);
+      // A row that changed state may move a FINISHED campaign back in flight (or settle it) — re-settle.
+      if (outcome === 'BOUGHT' || outcome === 'PENDING' || outcome === 'BUY_FAILED') touched?.add(row.campaignId);
       n++;
     }
     return n;
@@ -324,6 +331,9 @@ export class VoucherDispersalProcessor {
       if (row.status === RS.BUYING) return 'SKIPPED';
       const outcome = await this.reconcileRow(row);
       if (outcome === 'BOUGHT') await this.sendMessage(row.id);
+      // Money-review M1: a webhook can move a row of a FINISHED campaign back in flight (or finish it) —
+      // re-settle now so the campaign status (and "add more people") never contradicts its rows.
+      if (outcome === 'BOUGHT' || outcome === 'PENDING' || outcome === 'BUY_FAILED') await this.resettle(row.campaignId);
       return outcome;
     }
     const superseded = await this.prisma.voucherDispersalRow.findFirst({
@@ -411,6 +421,7 @@ export class VoucherDispersalProcessor {
         return 'SKIPPED';
       }
       this.logger.log(`[dispersal] row ${row.id} voucher bought`);
+      if (row.status === RS.BUY_FAILED) await this.lateFromFailed(row, RS.BOUGHT, hubbleOrderId);
       await this.audit(row.id, 'VOUCHER_DISPERSAL_BOUGHT', {
         hubbleOrderId,
         voucherCode: maskVoucherCodeForAudit(code),
@@ -491,6 +502,7 @@ export class VoucherDispersalProcessor {
       if (res.count === 1 && (row.status !== RS.PENDING_RECONCILE || row.pendingReason !== reason)) {
         await this.audit(row.id, 'VOUCHER_DISPERSAL_PENDING', { reason });
       }
+      if (res.count === 1 && row.status === RS.BUY_FAILED) await this.lateFromFailed(row, RS.PENDING_RECONCILE, extra.hubbleOrderId ?? null);
     } catch (e) {
       // Left BUYING → the stale sweep moves it to PENDING_RECONCILE (lookup only). Never re-placed.
       this.logger.error(`[dispersal] could not mark row ${row.id} pending (${reason}); the stale sweep will: ${e}`);
@@ -925,6 +937,8 @@ export class VoucherDispersalProcessor {
     const camps = await this.prisma.voucherDispersalCampaign.findMany({
       where: { status: CS.PROCESSING, ...(campaignId ? { id: campaignId } : {}) },
       select: { id: true },
+      // Longest-waiting first (settle takes the row lock → updatedAt moves) so > 50 all get their turn.
+      orderBy: { updatedAt: 'asc' },
       take: 50,
     });
     const ids = new Set([...camps.map((c) => c.id), ...alsoIds]);
@@ -932,12 +946,41 @@ export class VoucherDispersalProcessor {
     for (const id of ids) {
       try {
         if (await this.settleCampaign(id)) n++;
+        await this.prisma.voucherDispersalCampaign
+          .updateMany({ where: { id, settleFailures: { not: 0 } }, data: { settleFailures: 0, settleError: null } })
+          .catch((e: unknown) => this.logger.warn(`[dispersal] could not clear settle failures on ${id}: ${e}`));
       } catch (e) {
-        // Logged and retried on the next pass — never blocks the other campaigns' settle.
+        // Logged and retried on the next pass — never blocks the other campaigns' settle. Counted: after
+        // SETTLE_FAILURES_BEFORE_ALERT in a row it is surfaced (audit + settleError on the campaign views).
         this.logger.error(`[dispersal] settle failed for campaign ${id} (retried next pass): ${e}`);
+        await this.noteSettleFailure(id, e);
       }
     }
     return n;
+  }
+
+  private async noteSettleFailure(id: string, e: unknown): Promise<void> {
+    try {
+      await this.prisma.voucherDispersalCampaign.updateMany({
+        where: { id },
+        data: { settleFailures: { increment: 1 }, settleError: String((e as Error)?.message ?? e).slice(0, 300) },
+      });
+      const c = await this.prisma.voucherDispersalCampaign.findUnique({ where: { id }, select: { settleFailures: true, settleError: true } });
+      if (c && c.settleFailures === SETTLE_FAILURES_BEFORE_ALERT) {
+        this.logger.error(`[dispersal] campaign ${id}: status update has failed ${c.settleFailures} times in a row — ops review (${c.settleError})`);
+        await this.prisma.auditLog.create({
+          data: {
+            actorId: null,
+            action: 'UPDATE',
+            entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+            entityId: id,
+            metadata: { event: 'VOUCHER_DISPERSAL_SETTLE_FAILING', failures: c.settleFailures, error: c.settleError },
+          },
+        });
+      }
+    } catch (err) {
+      this.logger.error(`[dispersal] could not record the settle failure of campaign ${id}: ${err}`);
+    }
   }
 
   /**
@@ -996,6 +1039,65 @@ export class VoucherDispersalProcessor {
       })
       .catch((e: unknown) => this.logger.error(`[dispersal] campaign status audit failed for ${id}: ${e}`));
     return true;
+  }
+
+  /**
+   * NEVER SILENT (owner rule): a row that had FAILED (any source — REJECTED / HUBBLE_FAILED / a local failure
+   * whose reference reached Hubble earlier) and that Hubble now reports bought or still processing. A REJECTED
+   * one was released from the budget, so spend may now exceed it → the over-budget check runs too.
+   */
+  private async lateFromFailed(row: Row, to: RS, hubbleOrderId: string | null): Promise<void> {
+    const amountRupees = Number(row.amountPaise ?? 0) / 100;
+    this.logger.error(
+      `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: a purchase that had FAILED (${row.buyFailureSource ?? '?'}) was completed LATER by Hubble → ${to} (₹${amountRupees}) — ops review`,
+    );
+    await this.audit(row.id, 'VOUCHER_DISPERSAL_FAILED_ROW_COMPLETED_LATER', {
+      campaignId: row.campaignId,
+      batchNumber: row.batchNumber,
+      rowNumber: row.rowNumber,
+      amountRupees,
+      fromSource: row.buyFailureSource,
+      to,
+      hubbleOrderId,
+    });
+    await this.checkOverBudget(row.campaignId);
+  }
+
+  /** Loud audit + error log when what can still cost money (spent + with Hubble + …) exceeds the budget. */
+  async checkOverBudget(campaignId: string): Promise<void> {
+    try {
+      const camp = await this.prisma.voucherDispersalCampaign.findUnique({ where: { id: campaignId }, select: { budgetPaise: true } });
+      if (!camp) return;
+      const b = await budgetBreakdown(this.prisma, campaignId);
+      const over = b.floorPaise - BigInt(camp.budgetPaise);
+      if (over <= 0n) return;
+      const r = (p: bigint) => Number(p) / 100;
+      this.logger.error(`[dispersal] campaign ${campaignId} is OVER BUDGET by ₹${r(over)} (committed ₹${r(b.floorPaise)} > budget ₹${r(BigInt(camp.budgetPaise))}) — ops review`);
+      await this.prisma.auditLog
+        .create({
+          data: {
+            actorId: null,
+            action: 'UPDATE',
+            entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+            entityId: campaignId,
+            metadata: {
+              event: 'VOUCHER_DISPERSAL_OVER_BUDGET',
+              budgetRupees: r(BigInt(camp.budgetPaise)),
+              committedRupees: r(b.floorPaise),
+              overByRupees: r(over),
+              spentRupees: r(b.spentPaise),
+            },
+          },
+        })
+        .catch((e: unknown) => this.logger.error(`[dispersal] over-budget audit failed for ${campaignId}: ${e}`));
+    } catch (e) {
+      this.logger.error(`[dispersal] over-budget check failed for ${campaignId}: ${e}`);
+    }
+  }
+
+  /** Re-settle one campaign after a row changed outside a drain pass (webhook / retry lookup). Never throws. */
+  async resettle(campaignId: string): Promise<void> {
+    await this.finishCampaigns(campaignId, [campaignId]).catch((e: unknown) => this.logger.error(`[dispersal] re-settle failed for ${campaignId}: ${e}`));
   }
 
   /**

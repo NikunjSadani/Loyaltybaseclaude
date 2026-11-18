@@ -236,6 +236,10 @@ describe('voucher-dispersal UI ⇄ server contract (fixture from the real server
     expect(d.edits[0]).toMatchObject({ byName: 'Admin One' });
     expect(d.edits[0].changes.map((c) => c.field)).toEqual(['name', 'budgetRupees']);
     expect(d.summary.budgetFloorRupees).toBe(1300);
+    expect(d.summary.overBudgetRupees).toBe(0);
+    expect(d.summary.lateCompletedRows).toBe(0);
+    expect(d.campaign.settleError).toBeNull();
+    expect(normalizeBatchPreview(C.batchUpload).overBudgetRupees).toBe(0);
     expect(C.detailWithBatches as { summary: Record<string, unknown> }).not.toHaveProperty('summary.committedRupees');
     expect(d.summary.budgetUsage).toEqual({ spentRupees: 1300, withHubbleRupees: 0, failedMayCompleteRupees: 0, queuedRupees: 0, floorRupees: 1300 });
     expect(d.summary.bought).toBe(2);

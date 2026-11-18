@@ -4076,6 +4076,10 @@ model VoucherDispersalCampaign {
   cancelledById    String?
   cancelledAt      DateTime?
   completedAt      DateTime?
+  /// Consecutive failed status settles (reset on success); surfaced from SETTLE_FAILURES_BEFORE_ALERT (3).
+  settleFailures   Int                            @default(0)
+  /// The last settle error (shown once settleFailures reaches the alert threshold).
+  settleError      String?
   createdAt        DateTime                       @default(now())
   updatedAt        DateTime                       @updatedAt
 
