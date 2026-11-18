@@ -62,4 +62,13 @@ describe('Generate payout file — fully withheld payouts', () => {
     await screen.findByText('Generate & Download');
     expect(screen.queryByTestId('fully-withheld-notice')).toBeNull();
   });
+  it('shows an amber notice listing payouts HELD (KYC not approved) — never silent', async () => {
+    const note = '2 payouts held — KYC not approved: O3 (Shop C), O9 (Shop K). They stay pending for the next file.';
+    mockFetch({ 'X-Fully-Withheld-Count': '0', 'X-Held-Count': '2', 'X-Held-Note': encodeURIComponent(note) });
+    render(<PayoutDownloadPage />);
+    fireEvent.click(await screen.findByText('Generate & Download'));
+    const banner = await screen.findByTestId('held-notice');
+    expect(banner).toHaveTextContent(note);
+    expect(banner.className).toMatch(/amber/);
+  });
 });

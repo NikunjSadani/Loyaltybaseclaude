@@ -22,12 +22,16 @@ import {
   liability194R,
   noPanOutletKey,
   noPanPartnerKey,
-  retailerKeyOfLedgerPan,
 } from '../tds/tds-194r.shared';
 
-/** The ONE advisory-lock key for a 194R retailer's whole-year state (client, retailer key, FY). */
-function r194LockKey(clientId: string, retailerKey: string, fyLabel: string): string {
-  return `R194|${clientId}|${retailerKey}|${fyLabel}`;
+/**
+ * The ONE advisory-lock key for a client's 194R whole-year state: (client, FY). All 194R state is per
+ * client, so one key per client+FY is as correct as per-retailer keys and keeps a Bajaj-scale run at a
+ * single lock (Cloud SQL lock table ≈ 6,400 slots shared). Taken by the download engine, the UTR
+ * FAILED path and reversal approvals.
+ */
+function r194LockKey(clientId: string, fyLabel: string): string {
+  return `R194|${clientId}|${fyLabel}`;
 }
 
 /**
@@ -271,8 +275,8 @@ export class CreditsService {
     const keys = [
       ...new Set(
         (rows ?? [])
-          .filter((r) => r.panNumber?.trim() && r.fyLabel)
-          .map((r) => r194LockKey(clientId, retailerKeyOfLedgerPan(r.panNumber), r.fyLabel)),
+          .filter((r) => r.fyLabel)
+          .map((r) => r194LockKey(clientId, r.fyLabel)),
       ),
     ].sort();
     if (keys.length) await lockAdvisoryKeys(tx, keys);
@@ -2078,6 +2082,8 @@ export class CreditsService {
       entryIds: string[];
     }>;
     fullyWithheldNote: string | null;
+    /** Owner rule "no silent pass-through": the KYC-held entries in plain words (null when none). */
+    heldNote: string | null;
   }> {
     const { period, groupType, fieldId, fieldName } = dto;
 
@@ -2327,10 +2333,9 @@ export class CreditsService {
     const lockKeys = new Set<string>();
     for (const e of engineEntries) {
       if (e.tdsSection === TdsSection.SEC_194R) {
-        // A-M3: a 194R entry takes ONE key per (client, retailer key, run FY) — INSTEAD of the per-PAN
-        // key (194R state is per client). A no-PAN owner's outlets share one key. The same key is taken
-        // by the UTR-upload FAILED path and reversal approvals before they offset a withholding.
-        lockKeys.add(r194LockKey(user.clientId, r194RetailerKey(user.clientId, e.outletId, outletTaxMap.get(e.outletId)).key, runFyLabel));
+        // A 194R entry takes the ONE per-(client, run FY) key — INSTEAD of the per-PAN key (194R state is
+        // per client). The same key is taken by the UTR FAILED path and reversal approvals.
+        lockKeys.add(r194LockKey(user.clientId, runFyLabel));
         continue;
       }
       const pan = outletTaxMap.get(e.outletId)?.panNumber?.trim().toUpperCase();
@@ -2612,7 +2617,14 @@ export class CreditsService {
 
     const buffer = generatePayoutFileBuffer(payoutBatch);
 
-    return { buffer, downloadCode: download.downloadCode, downloadId: download.id, heldEntries, fullyWithheld, fullyWithheldNote };
+    // KYC-held payouts are NOT in this file — say so loudly (owner rule: no silent pass-through).
+    const heldOutlets = [...new Map(heldEntries.map((h) => [h.outletId, h])).values()];
+    const heldNote = heldOutlets.length
+      ? `${heldOutlets.length} payout${heldOutlets.length === 1 ? '' : 's'} held — KYC not approved: ` +
+        heldOutlets.map((h) => `${h.outletId} (${h.outletName})`).join(', ') +
+        '. They stay pending for the next file.'
+      : null;
+    return { buffer, downloadCode: download.downloadCode, downloadId: download.id, heldEntries, fullyWithheld, fullyWithheldNote, heldNote };
   }
 
   /**
@@ -3356,40 +3368,78 @@ export class CreditsService {
               break;
             }
             if (cur.status === 'PAID') {
-              paidReceivablePaise += Number(cur.amountPaise);
-              entryNotes.push(`entry ${payoutEntry.id} (PAID ${formatINR(cur.amountPaise)}) → recoverable receivable`);
-              settled = true;
-              break;
-            }
-            if (cur.status === 'PROCESSING') throw sentToBank();
-            // PENDING / FAILED — guarded on the status (and withholding stamp) we read, so a
-            // concurrent bank-file download / UTR apply can't be overwritten.
-            const offsetIt = cur.tdsDeductedPaise > 0n && !!payoutEntry.tdsSection;
-            const flip = await tx.creditPayoutEntry.updateMany({
-              where: {
-                id: payoutEntry.id,
-                status: cur.status as CreditEntryStatus,
-                ...(offsetIt ? { tdsDeductedPaise: cur.tdsDeductedPaise } : {}),
-              },
-              data: { status: 'REVERSED', downloadId: null, ...(offsetIt ? { tdsDeductedPaise: 0n } : {}) },
-            });
-            if (flip.count === 1) {
-              const offset = offsetIt
-                ? await this.offsetWithholdingOnReversal(tx, user.clientId, {
+              const withheld = cur.tdsDeductedPaise;
+              if (withheld > 0n && withheld >= cur.amountPaise && !!payoutEntry.tdsSection) {
+                // FULLY withheld as TDS (A-H2, never sent to the bank): the retailer received NOTHING, so
+                // there is no receivable — reverse the withholding instead (offset row in its original FY,
+                // under the 194R lock taken above) and mark the entry REVERSED. Guarded on what we read.
+                const flipW = await tx.creditPayoutEntry.updateMany({
+                  where: { id: payoutEntry.id, status: 'PAID', tdsDeductedPaise: withheld },
+                  data: { status: 'REVERSED', tdsDeductedPaise: 0n },
+                });
+                if (flipW.count === 1) {
+                  const offset = await this.offsetWithholdingOnReversal(tx, user.clientId, {
                     id: payoutEntry.id,
                     outletId: payoutEntry.outletId,
                     period: payoutEntry.period,
                     tdsSection: payoutEntry.tdsSection!,
-                    tdsDeductedPaise: cur.tdsDeductedPaise,
-                  })
-                : 0n;
-              reversedCount++;
-              entryNotes.push(
-                `entry ${payoutEntry.id} (was ${cur.status}) → REVERSED` +
-                  (offset > 0n ? ` (withheld TDS ${formatINR(offset)} offset)` : ''),
-              );
-              settled = true;
-              break;
+                    tdsDeductedPaise: withheld,
+                  });
+                  reversedCount++;
+                  entryNotes.push(
+                    `entry ${payoutEntry.id} (PAID ${formatINR(cur.amountPaise)}, fully withheld as TDS — nothing reached the retailer) → REVERSED` +
+                      (offset > 0n ? ` (withheld TDS ${formatINR(offset)} offset)` : ''),
+                  );
+                  settled = true;
+                  break;
+                }
+              } else {
+                // Receivable = only the NET amount actually released to the retailer (any withheld TDS
+                // went to the government, not to the retailer).
+                const net = cur.amountPaise - (withheld > 0n ? withheld : 0n);
+                paidReceivablePaise += Number(net > 0n ? net : 0n);
+                entryNotes.push(
+                  `entry ${payoutEntry.id} (PAID ${formatINR(cur.amountPaise)}` +
+                    (withheld > 0n ? `, net released ${formatINR(net)} after TDS ${formatINR(withheld)}` : '') +
+                    `) → recoverable receivable`,
+                );
+                settled = true;
+                break;
+              }
+            }
+            if (cur.status === 'PAID') {
+              // The fully-withheld flip lost a race — fall through to the fresh re-read below.
+            } else if (cur.status === 'PROCESSING') throw sentToBank();
+            else {
+              // PENDING / FAILED — guarded on the status (and withholding stamp) we read, so a
+              // concurrent bank-file download / UTR apply can't be overwritten.
+              const offsetIt = cur.tdsDeductedPaise > 0n && !!payoutEntry.tdsSection;
+              const flip = await tx.creditPayoutEntry.updateMany({
+                where: {
+                  id: payoutEntry.id,
+                  status: cur.status as CreditEntryStatus,
+                  ...(offsetIt ? { tdsDeductedPaise: cur.tdsDeductedPaise } : {}),
+                },
+                data: { status: 'REVERSED', downloadId: null, ...(offsetIt ? { tdsDeductedPaise: 0n } : {}) },
+              });
+              if (flip.count === 1) {
+                const offset = offsetIt
+                  ? await this.offsetWithholdingOnReversal(tx, user.clientId, {
+                      id: payoutEntry.id,
+                      outletId: payoutEntry.outletId,
+                      period: payoutEntry.period,
+                      tdsSection: payoutEntry.tdsSection!,
+                      tdsDeductedPaise: cur.tdsDeductedPaise,
+                    })
+                  : 0n;
+                reversedCount++;
+                entryNotes.push(
+                  `entry ${payoutEntry.id} (was ${cur.status}) → REVERSED` +
+                    (offset > 0n ? ` (withheld TDS ${formatINR(offset)} offset)` : ''),
+                );
+                settled = true;
+                break;
+              }
             }
             const fresh = await tx.creditPayoutEntry.findFirst({
               where: { id: payoutEntry.id },

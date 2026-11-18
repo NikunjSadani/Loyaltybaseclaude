@@ -233,7 +233,7 @@ export class CreditsController {
     @Body() dto: CreatePayoutDownloadDto,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { buffer, downloadCode, downloadId, fullyWithheld, fullyWithheldNote } = await this.credits.createPayoutDownload(
+    const { buffer, downloadCode, downloadId, fullyWithheld, fullyWithheldNote, heldEntries, heldNote } = await this.credits.createPayoutDownload(
       user,
       dto,
     );
@@ -242,6 +242,9 @@ export class CreditsController {
     // A-H2: payouts fully withheld as TDS are NOT in the file — tell the operator (never silent).
     res.setHeader('X-Fully-Withheld-Count', String(fullyWithheld.length));
     if (fullyWithheldNote) res.setHeader('X-Fully-Withheld-Note', encodeURIComponent(fullyWithheldNote));
+    // KYC-held payouts are NOT in the file either — never silent.
+    res.setHeader('X-Held-Count', String(new Set(heldEntries.map((h) => h.outletId)).size));
+    if (heldNote) res.setHeader('X-Held-Note', encodeURIComponent(heldNote));
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="payout-${downloadCode}.xlsx"`,

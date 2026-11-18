@@ -187,7 +187,13 @@ rows carry that FY, and the report windows PAID + PROCESSING payouts by `downloa
   download time, guarded on this download's PROCESSING claim); the download result + `X-Fully-Withheld-Count/-Note`
   headers name them and the payout screen shows an amber note; no "credited" message is sent (that only happens on a
   UTR apply). FAILED / re-bank never touch them (re-bank reads PENDING/FAILED; a UTR row for an all-PAID outlet is a
-  notice, never a write). Open: a later reversal of such an entry follows the PAID path (receivable) — owner to decide.
+  notice, never a write).
+- **Reversing a withheld PAID payout:** a FULLY withheld (TDS-WITHHELD) entry reached the retailer as ₹0, so a reversal
+  records NO receivable — it reverses the withholding (negative ledger row in the original FY, under the 194R lock) and
+  marks the entry REVERSED. A PARTLY withheld PAID entry becomes a receivable of only the NET amount actually released
+  (amount − TDS withheld), 194R and 194C alike.
+- **KYC-held payouts** left out of a download are listed in the result (`heldNote`), the `X-Held-Count/-Note` headers
+  and an amber note on the payout screen (owner rule: no silent pass-through).
 
 **Worked examples (PAN = 10%, no PAN = 20%):**
 1. Client on DEDUCT, PAN: visibility ₹15,000 + gift ₹8,000 = ₹23,000 > ₹20,000 → deduct part 10% × 15,000 = **₹1,500**
@@ -211,9 +217,11 @@ rows carry that FY, and the report windows PAID + PROCESSING payouts by `downloa
   `note`, in the totals and the export ("Note" column).
 - *Legacy 194R DEDUCT ledger rows booked by payout-period FY (B-M3):* none exist on prod. Such a row counts only in the FY
   its `fyLabel` names (pinned by a spec) — no migration.
-- *Locks (A-M3/A-L):* one advisory key per (client, retailer, FY) for 194R entries (replacing the per-PAN key), all keys
-  in one statement; the UTR FAILED path and reversal approvals take the same key before writing an offset. A Bajaj-scale
-  run takes one lock per distinct retailer in the run (+1 per-download key).
+- *Locks (A-M3/A-L):* ONE advisory key per (client, FY) — `R194|<client>|<FY>` — for 194R entries (replacing the per-PAN
+  key; all 194R state is per client, so it is equally correct), all keys in one statement; the UTR FAILED path and
+  reversal approvals take the same key before writing an offset. A Bajaj-scale 194R run takes 1 lock (+1 per-download
+  key) — far under the ~6,400 lock slots (db-g1-small, max_connections 100 × max_locks_per_transaction 64). 194C keeps
+  its per-PAN keys.
 - *Scope (B-L8):* engine and report use one rule — stored PAN trimmed + upper-cased; a group parent sharing the PAN counts
   (its redemptions).
 - *Recovery report (B-L6):* legacy 194R recovery rows are listed separately ("Earlier 194R recoveries (no longer raised)")

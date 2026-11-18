@@ -1475,6 +1475,40 @@ describe('CreditsService', () => {
         expect(res.payoutClawbackNote).toContain('withheld TDS ₹400.00 offset');
       });
 
+      it('FULLY withheld (TDS-WITHHELD) PAID entry: NO receivable — the withholding is reversed (offset in its original FY, under the 194R lock) and the entry REVERSED', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(500_000));
+        mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 500_000 }] });
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'pe1', status: 'PAID', outletId: 'O1', amountPaise: 500_000n, tdsDeductedPaise: 500_000n, tdsSection: 'SEC_194R', period: '2026-05', utr: 'TDS-WITHHELD-PD-2026-05-001' },
+        ]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ panNumber: 'ABCDE1234F', fyLabel: '2026-27', tdsDeductedThisPaise: 500_000n }]);
+
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 500_000 });
+
+        expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+          where: { id: 'pe1', status: 'PAID', tdsDeductedPaise: 500_000n },
+          data: { status: 'REVERSED', tdsDeductedPaise: 0n },
+        });
+        const [row] = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data;
+        expect(row).toMatchObject({ panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: '2026-27', tdsDeductedThisPaise: -500_000n });
+        expect(res.clawbackShortfall).toBe(0);
+        expect(res.payoutClawbackNote).toContain('fully withheld as TDS');
+        expect(lockKeysTaken()).toContain('R194|deoleo|2026-27');
+      });
+
+      it('PARTLY withheld PAID entry: the receivable is only the NET amount actually released (₹25,000 − ₹2,500 = ₹22,500)', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_500_000));
+        mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 2_500_000 }] });
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'pe1', status: 'PAID', outletId: 'O1', amountPaise: 2_500_000n, tdsDeductedPaise: 250_000n, tdsSection: 'SEC_194R', period: '2026-05', utr: 'UTR1' },
+        ]);
+
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_500_000 });
+
+        expect(res.clawbackShortfall).toBe(2_250_000);
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+      });
+
       it('idempotent: withholding ALREADY offset in the ledger (net 0) → no second offset', async () => {
         mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
         mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]);
@@ -1504,7 +1538,8 @@ describe('CreditsService', () => {
         mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'PAID', amountPaise: 2_000_000n, tdsDeductedPaise: 40_000n });
         const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
         expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
-        expect(res.clawbackShortfall).toBe(2_000_000);
+        // Receivable = the NET actually released (₹20,000 − ₹400 TDS withheld), not the gross.
+        expect(res.clawbackShortfall).toBe(1_960_000);
       });
 
       it('race: FAILED→(re-read) still FAILED with the stamp cleared by a concurrent UTR apply → reversed once, NO offset', async () => {
@@ -3828,11 +3863,11 @@ describe('CreditsService', () => {
         mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(500000n)]);
         priorRows({});
         await download();
-        // A-M3: a 194R entry takes ONE key per (client, retailer, FY) INSTEAD of the per-PAN key.
-        expect(lockKeysTaken().sort()).toEqual([`PDLOCK|deoleo|2026-05`, `R194|deoleo|PAN1|${runFy}`].sort());
+        // A 194R entry takes the ONE per-(client, FY) key INSTEAD of the per-PAN key (all 194R state is per client).
+        expect(lockKeysTaken().sort()).toEqual([`PDLOCK|deoleo|2026-05`, `R194|deoleo|${runFy}`].sort());
       });
 
-      it('A-M3 key count: 3 outlets of 2 retailers (194R) → exactly 2 retailer keys + 1 download key, one statement', async () => {
+      it('lock count: 3 outlets of 2 retailers (194R) → ONE per-(client, FY) key + 1 download key, one statement', async () => {
         policy('DEDUCT');
         mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
           { ...run(100000n), id: 'a1', outletId: 'O1' },
@@ -3846,7 +3881,7 @@ describe('CreditsService', () => {
         priorRows({});
         await download();
         expect(mockTx.$executeRaw).toHaveBeenCalledTimes(1);
-        expect(lockKeysTaken().sort()).toEqual(['PDLOCK|deoleo|2026-05', `R194|deoleo|PAN1|${runFy}`, `R194|deoleo|PAN3|${runFy}`]);
+        expect(lockKeysTaken().sort()).toEqual(['PDLOCK|deoleo|2026-05', `R194|deoleo|${runFy}`]);
       });
 
       it('A-L race: a UTR upload that FAILS a withheld 194R payout takes the SAME retailer lock before writing the offset', async () => {
@@ -3866,7 +3901,7 @@ describe('CreditsService', () => {
 
         await service.uploadUtr(gifsy, 'd1', file, true);
 
-        expect(lockKeysTaken()).toContain(`R194|deoleo|PAN1|${runFy}`);
+        expect(lockKeysTaken()).toContain(`R194|deoleo|${runFy}`);
         // The retailer lock is taken BEFORE any entry flip / ledger write.
         const lockOrder = mockTx.$executeRaw.mock.invocationCallOrder[mockTx.$executeRaw.mock.calls.findIndex((c: unknown[]) => Array.isArray(c[1]))];
         expect(lockOrder).toBeLessThan(mockTx.creditPayoutEntry.updateMany.mock.invocationCallOrder[0]);
@@ -3885,9 +3920,23 @@ describe('CreditsService', () => {
 
         await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2500000 });
 
-        expect(lockKeysTaken()).toContain(`R194|deoleo|PAN1|${runFy}`);
+        expect(lockKeysTaken()).toContain(`R194|deoleo|${runFy}`);
         const lockOrder = mockTx.$executeRaw.mock.invocationCallOrder[mockTx.$executeRaw.mock.calls.findIndex((c: unknown[]) => Array.isArray(c[1]))];
         expect(lockOrder).toBeLessThan(mockTx.creditPayoutEntry.updateMany.mock.invocationCallOrder[0]);
+      });
+
+      it('KYC-held payouts are listed loudly in the result (heldNote), never silent', async () => {
+        policy('GROSS_UP');
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(500000n), { ...run(300000n), id: 'e2', outletId: 'O2', outletName: 'B' }]);
+        const held = { ...bankOutlet('INDIVIDUAL'), outletCode: 'O2', name: 'B', partner: { ...bankOutlet('INDIVIDUAL').partner, id: 'p2', kycSubmissions: [] } };
+        mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL'), held]);
+        priorRows({});
+
+        const res = await download();
+
+        expect(res.heldEntries.map((h) => h.outletId)).toEqual(['O2']);
+        expect(res.heldNote).toMatch(/^1 payout held — KYC not approved/);
+        expect(res.heldNote).toContain('O2');
       });
 
       describe('A-H2: a payout FULLY withheld as TDS never becomes a ₹0 bank line', () => {
@@ -4040,7 +4089,7 @@ describe('CreditsService', () => {
           mockPrisma.outlet.findMany.mockResolvedValue([noPanOutlet()]);
           priorRows({});
           await download();
-          expect(lockKeysTaken()).toContain(`R194|deoleo|__NO_PAN__:p1|${runFy}`);
+          expect(lockKeysTaken()).toContain(`R194|deoleo|${runFy}`);
           expect(lockKeysTaken().some((k) => k.startsWith('NOPAN|'))).toBe(false);
         });
       });

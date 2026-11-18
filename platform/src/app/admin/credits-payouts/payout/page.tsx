@@ -214,6 +214,8 @@ function PayoutPageInner() {
   const [genError,   setGenError]   = useState('');
   // A-H2: payouts fully withheld as TDS are NOT in the bank file — the API names them in headers.
   const [fullyWithheldNote, setFullyWithheldNote] = useState('');
+  // Owner rule "no silent pass-through": KYC-held payouts left out of the file.
+  const [heldNote, setHeldNote] = useState('');
 
   // UTR upload state
   const [utrDownloadId,  setUtrDownloadId]  = useState('');
@@ -296,6 +298,7 @@ function PayoutPageInner() {
     setGenerating(true);
     setGenError('');
     setFullyWithheldNote('');
+    setHeldNote('');
     try {
       const body: Record<string, unknown> = { period, groupType };
       if (groupType === 'SEPARATE' && fieldId) {
@@ -325,6 +328,12 @@ function PayoutPageInner() {
             ? decodeURIComponent(withheldNote)
             : `${withheldCount} payout(s) fully withheld as TDS — not sent to the bank.`,
         );
+      }
+
+      const heldCount = Number(res.headers?.get?.('X-Held-Count') ?? '0');
+      const heldHeader = res.headers?.get?.('X-Held-Note');
+      if (heldCount > 0) {
+        setHeldNote(heldHeader ? decodeURIComponent(heldHeader) : `${heldCount} payout(s) held — KYC not approved.`);
       }
 
       // Binary response — trigger download
@@ -573,6 +582,17 @@ function PayoutPageInner() {
             {generating ? 'Generating…' : 'Generate & Download'}
           </button>
         </div>
+
+        {heldNote && (
+          <div
+            data-testid="held-notice"
+            role="status"
+            className="flex items-center gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+            <span>{heldNote}</span>
+          </div>
+        )}
 
         {fullyWithheldNote && (
           <div
