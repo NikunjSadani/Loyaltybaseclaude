@@ -417,15 +417,11 @@ export class CreditsService {
       clientId,
       fyLabel,
       importedCountFrom: a.importedCountFrom,
-      scope: { outletCodes: [...new Set(scopeOutlets.map((o) => o.outletCode))], partnerIds, pans },
+      scope: { outletCodes: [...new Set(scopeOutlets.map((o) => o.outletCode))], partnerIds, pans, keys },
     });
-    // Already deducted for this (client, retailer, FY) — net of FAILED/reversal negative rows — following
-    // the RETAILER through its outlets (A-M4: a PAN corrected mid-year still nets). Shared with the report.
-    const priorByPan = await deducted194RByRetailer(db, {
-      clientId,
-      fyLabel,
-      scope: { keys, outletCodes: [...new Set(scopeOutlets.map((o) => o.outletCode))] },
-    });
+    // Already deducted for this (client, PAN-or-no-PAN key, FY) — net of FAILED/reversal negative rows —
+    // by the ledger row's OWN stored key (owner rule 2026-11-18: by PAN; a PAN change splits the year).
+    const priorByPan = await deducted194RByRetailer(db, { clientId, fyLabel, scope: { keys } });
     for (const [pan, { hasPan, entries }] of a.byPan) {
       const rate = rate194RFrom(cfg, hasPan);
       const runBase = entries.reduce((s, e) => s + e.amountPaise, 0n);
@@ -2451,6 +2447,25 @@ export class CreditsService {
               `Payout claim race for period ${period}: expected ${payableEntryIds.length} ` +
                 `entries but claimed ${claimed.count}. Rolled back — retry the download.`,
             );
+          }
+
+          // TDS payee SNAPSHOT (owner rule 2026-11-18: TDS is keyed by PAN; a PAN change splits the year at
+          // the change): each payout records WHO it was paid to — the owner's normalised PAN, else the no-PAN
+          // owner key — in this same tx, ONE statement for the whole file.
+          const snapIds: string[] = [];
+          const snapPans: string[] = [];
+          const snapPartners: Array<string | null> = [];
+          for (const code of payableCodes) {
+            const info = outletTaxMap.get(code);
+            const key = r194RetailerKey(user.clientId, code, info).key;
+            for (const id of outletMap.get(code)!.entryIds) {
+              snapIds.push(id);
+              snapPans.push(key);
+              snapPartners.push(info?.partnerId ?? null);
+            }
+          }
+          if (snapIds.length > 0) {
+            await tx.$executeRaw`UPDATE "credit_payout_entries" AS e SET "payeePan" = v.pan, "payeePartnerId" = v.pid FROM unnest(${snapIds}::text[], ${snapPans}::text[], ${snapPartners}::text[]) AS v(id, pan, pid) WHERE e."id" = v.id`;
           }
         }
 

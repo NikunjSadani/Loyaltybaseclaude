@@ -87,6 +87,8 @@ const mockPrisma = {
   // Last-resort ATOMIC jsonb merge (`metadata || patch`) — values: [json, now, id]; OPEN = still open.
   $executeRaw: jest.fn(async (strings: TemplateStringsArray, ...vals: unknown[]) => {
     const sql = strings.join('?');
+    // DELIVERED moves also snapshot the TDS payee (owner rule 2026-11-18) — not the metadata merge.
+    if (sql.includes('"payeePan"')) return 1;
     const id = vals[vals.length - 1] as string;
     const now = vals[vals.length - 2] as Date;
     if (id !== row.id) return 0;

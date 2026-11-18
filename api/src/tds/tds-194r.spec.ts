@@ -21,6 +21,8 @@ const inFy = (days: number) => new Date(FY.start.getTime() + days * 86_400_000);
 type Entry = {
   id: string; clientId: string; status: string; paidAt: Date | null; downloadedAt?: Date | null;
   outletId: string; amountPaise: bigint; fieldId: string; tdsSection: string | null; sourceKind?: string | null;
+  /** Payee SNAPSHOT at payment time (owner rule 2026-11-18). */
+  payeePan?: string | null;
 };
 const ciContains = (v: string | null, f?: { contains?: string }) =>
   !f?.contains || (!!v && v.toUpperCase().includes(f.contains.toUpperCase()));
@@ -28,7 +30,7 @@ type Data = {
   entries: Entry[];
   outlets: Array<{ outletCode: string; clientId: string; partnerId: string | null }>;
   partners: Array<{ id: string; clientId: string; panNumber: string | null; isParent?: boolean }>;
-  redemptions: Array<{ clientId: string; partnerId: string; valuePaise: bigint; redemptionMode: string; deliveredAt: Date }>;
+  redemptions: Array<{ clientId: string; partnerId: string; valuePaise: bigint; redemptionMode: string; deliveredAt: Date; payeePan?: string | null }>;
   offPlatform: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; entryDate: Date }>;
   deposits: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; forPeriod: string; depositDate: Date; uploadBatchId: string | null }>;
   ledger: Array<{ clientId: string; panNumber: string; section: string; fyLabel: string; tdsDeductedThisPaise: bigint; outletCode?: string | null; carryForwardPaise?: bigint; createdAt?: Date }>;
@@ -66,6 +68,11 @@ function fakeDb(d: Data) {
           if (w.fieldId && e.fieldId !== w.fieldId) return false;
           if (w.batch?.sourceKind === 'VENDOR_IMPORT' && e.sourceKind !== 'VENDOR_IMPORT') return false;
           if (w.batch?.OR && e.sourceKind === 'VENDOR_IMPORT') return false;
+          if (w.OR) {
+            return w.OR.some((c: any) =>
+              c.payeePan?.in ? !!e.payeePan && c.payeePan.in.includes(e.payeePan) : !e.payeePan && inList(e.outletId, c.outletId),
+            );
+          }
           return inList(e.outletId, w.outletId);
         }),
     },
@@ -92,10 +99,17 @@ function fakeDb(d: Data) {
     redemptionOrder: {
       findMany: async ({ where: w }: any) =>
         d.redemptions
-          .filter((r) => r.clientId === w.partner.clientId && inRange(r.deliveredAt, w.deliveredAt) && inList(r.partnerId, w.partnerId))
+          .filter(
+            (r) =>
+              r.clientId === w.partner.clientId &&
+              inRange(r.deliveredAt, w.deliveredAt) &&
+              (!w.OR ||
+                w.OR.some((c: any) => (c.payeePan?.in ? !!r.payeePan && c.payeePan.in.includes(r.payeePan) : !r.payeePan && inList(r.partnerId, c.partnerId)))),
+          )
           .map((r) => ({
             valuePaise: r.valuePaise,
             redemptionMode: r.redemptionMode,
+            payeePan: r.payeePan ?? null,
             partner: { id: r.partnerId, panNumber: d.partners.find((p) => p.id === r.partnerId)?.panNumber ?? null },
           })),
     },
@@ -348,39 +362,78 @@ describe('owner FY rule: a payout belongs to the FY its BANK FILE was made', () 
   });
 });
 
-describe('A-M4: "already deducted" follows the RETAILER (its outlets), not the PAN string', () => {
-  const data = () => {
-    const d = empty();
-    d.partners = [pan('p1', 'NEWPN1234N')]; // PAN corrected mid-year: OLDPN → NEWPN
-    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
-    d.entries = [paidVis('v1', 1500000n)];
-    // ₹1,500 was withheld earlier under the OLD PAN (the ledger row carries the outlet code).
-    d.ledger = [{ clientId: CLIENT, panNumber: 'OLDPN1234O', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 150000n }];
-    return d;
-  };
-
-  it('report: the old-PAN withholding shows under the retailer’s current row (no orphan old-PAN row)', async () => {
-    const rows = await services(data(), 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
-    expect(rows.map((r) => r.panNumber)).toEqual(['NEWPN1234N']);
-    expect(rows[0].deductedPaise).toBe(150000n);
-  });
-
-  it('engine: the old-PAN withholding is netted — this run withholds only the remainder', async () => {
-    const d = data();
+describe('owner rule 2026-11-18: TDS is keyed by PAN — a PAN change SPLITS the year at the change', () => {
+  const engine = async (d: Data, entries: Array<{ id: string; outletId: string; amountPaise: bigint }>, payee: { partnerId: string; panNumber: string | null }) => {
     const { credits } = services(d, 'DEDUCT');
-    const plan = await (credits as unknown as {
-      buildPayoutTdsPlan: (db: unknown, p: unknown) => Promise<{ deductionLedger: Array<{ tdsDeductedPriorPaise: bigint; tdsDeductedThisPaise: bigint }> }>;
+    return (credits as unknown as {
+      buildPayoutTdsPlan: (db: unknown, p: unknown) => Promise<{ deductionLedger: Array<{ panNumber: string; cumulativeBasePaise: bigint; tdsDueCumulativePaise: bigint; tdsDeductedPriorPaise: bigint; tdsDeductedThisPaise: bigint }> }>;
     }).buildPayoutTdsPlan(fakeDb(d), {
       clientId: CLIENT,
       period: '2026-05',
-      engineEntries: [{ id: 'run1', outletId: 'O1', amountPaise: 1000000n, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' }],
-      outletTaxMap: new Map([['O1', { partnerId: 'p1', panNumber: 'NEWPN1234N', entityType: 'INDIVIDUAL' }]]),
+      engineEntries: entries.map((e) => ({ ...e, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' })),
+      outletTaxMap: new Map(entries.map((e) => [e.outletId, { ...payee, entityType: 'INDIVIDUAL' }])),
       runAt: NOW,
       currentMethodology: 'DEDUCT',
       importedCountFrom: null,
     });
-    // due 10% × ₹25,000 = ₹2,500; ₹1,500 already withheld under the old PAN → ₹1,000 now.
-    expect(plan.deductionLedger[0]).toMatchObject({ tdsDeductedPriorPaise: 150000n, tdsDeductedThisPaise: 100000n });
+  };
+
+  it('PAN corrected mid-year: the OLD PAN keeps its ₹30k base + ₹3k deducted; the NEW PAN starts from 0 (₹5k → nothing due)', async () => {
+    const d = empty();
+    d.partners = [pan('p1', 'NEWPN1234N')]; // the partner's PAN today
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [{ ...paidVis('v1', 3000000n), payeePan: 'OLDPN1234O' }]; // paid under the OLD PAN
+    d.ledger = [{ clientId: CLIENT, panNumber: 'OLDPN1234O', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
+
+    const plan = await engine(d, [{ id: 'run1', outletId: 'O1', amountPaise: 500000n }], { partnerId: 'p1', panNumber: 'NEWPN1234N' });
+    expect(plan.deductionLedger).toHaveLength(0); // NEW PAN: ₹5,000 only → below ₹20,000
+
+    const after = { ...d, entries: [...d.entries, { id: 'run1', clientId: CLIENT, status: 'PROCESSING', paidAt: null, downloadedAt: NOW, outletId: 'O1', amountPaise: 500000n, fieldId: 'f-vis', tdsSection: 'SEC_194R', payeePan: 'NEWPN1234N' }] };
+    const rows = await services(after, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    const by = Object.fromEntries(rows.map((r) => [r.panNumber, r]));
+    expect(Object.keys(by).sort()).toEqual(['NEWPN1234N', 'OLDPN1234O']); // the report shows BOTH PAN rows
+    expect(by['OLDPN1234O']).toMatchObject({ baseFyTotalPaise: 3000000n, deductLiabilityPaise: 300000n, deductedPaise: 300000n, excessDeductedPaise: 0n });
+    expect(by['NEWPN1234N']).toMatchObject({ baseFyTotalPaise: 500000n, liabilityPaise: 0n, deductedPaise: 0n });
+  });
+
+  it('no PAN, then a PAN is added: earlier payouts stay on the no-PAN owner key (20%); later ones go to the PAN', async () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F')]; // PAN added later
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [{ ...paidVis('v1', 2500000n), payeePan: '__NO_PAN__:p1' }];
+    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p1', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 500000n }];
+    const plan = await engine(d, [{ id: 'run1', outletId: 'O1', amountPaise: 1000000n }], { partnerId: 'p1', panNumber: 'ABCDE1234F' });
+    expect(plan.deductionLedger).toHaveLength(0); // the PAN starts from 0: ₹10,000
+
+    const after = { ...d, entries: [...d.entries, { id: 'run1', clientId: CLIENT, status: 'PROCESSING', paidAt: null, downloadedAt: NOW, outletId: 'O1', amountPaise: 1000000n, fieldId: 'f-vis', tdsSection: 'SEC_194R', payeePan: 'ABCDE1234F' }] };
+    const rows = await services(after, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    const by = Object.fromEntries(rows.map((r) => [r.panNumber, r]));
+    expect(by['__NO_PAN__:p1']).toMatchObject({ ratePct: 20, baseFyTotalPaise: 2500000n, deductLiabilityPaise: 500000n, deductedPaise: 500000n });
+    expect(by['ABCDE1234F']).toMatchObject({ ratePct: 10, baseFyTotalPaise: 1000000n, liabilityPaise: 0n });
+  });
+
+  it('parity after a PAN change: the NEW PAN crossing on its own payments — engine due == report deducted part', async () => {
+    const d = empty();
+    d.partners = [pan('p1', 'NEWPN1234N')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [
+      { ...paidVis('v1', 3000000n), payeePan: 'OLDPN1234O' },
+      { ...paidVis('v2', 1500000n), id: 'v2', payeePan: 'NEWPN1234N' },
+    ];
+    const plan = await engine(d, [{ id: 'run1', outletId: 'O1', amountPaise: 1000000n }], { partnerId: 'p1', panNumber: 'NEWPN1234N' });
+    expect(plan.deductionLedger[0]).toMatchObject({ panNumber: 'NEWPN1234N', cumulativeBasePaise: 2500000n, tdsDueCumulativePaise: 250000n });
+    const after = { ...d, entries: [...d.entries, { id: 'run1', clientId: CLIENT, status: 'PROCESSING', paidAt: null, downloadedAt: NOW, outletId: 'O1', amountPaise: 1000000n, fieldId: 'f-vis', tdsSection: 'SEC_194R', payeePan: 'NEWPN1234N' }] };
+    const rows = await services(after, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(rows.find((r) => r.panNumber === 'NEWPN1234N')!.deductLiabilityPaise).toBe(plan.deductionLedger[0].tdsDueCumulativePaise);
+  });
+
+  it('a redemption delivered under the OLD PAN stays with the old PAN', async () => {
+    const d = empty();
+    d.partners = [pan('p1', 'NEWPN1234N')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.redemptions = [{ clientId: CLIENT, partnerId: 'p1', valuePaise: 2500000n, redemptionMode: 'UPI', deliveredAt: inFy(10), payeePan: 'OLDPN1234O' }];
+    const rows = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(rows.map((r) => r.panNumber)).toEqual(['OLDPN1234O']);
   });
 });
 
@@ -467,12 +520,21 @@ describe('over-withholding — ONLY FLAGGED (owner 2026-11-18): excess column + 
     return d;
   };
 
-  it('no-PAN 20% withheld, then the PAN is added (10%): ₹6,000 taken vs ₹3,000 due → "TDS taken in excess: ₹3,000"', async () => {
+  it('no-PAN 20% withheld, then the PAN is added: NOT excess — the 20% stays with the no-PAN key (the year splits at the PAN change)', async () => {
+    const d = base();
+    d.entries = [{ ...paidVis('v1', 3000000n), payeePan: '__NO_PAN__:p1' }];
+    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p1', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 600000n }];
+    const rows = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(rows.map((r) => r.panNumber)).toEqual(['__NO_PAN__:p1']);
+    expect(rows[0]).toMatchObject({ deductLiabilityPaise: 600000n, deductedPaise: 600000n, excessDeductedPaise: 0n });
+  });
+
+  it('excess arises when the client switches DEDUCT → GROSS_UP after withholding: "TDS taken in excess" note', async () => {
     const d = base();
     d.entries = [paidVis('v1', 3000000n)];
-    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p1', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 600000n }];
-    const [row] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
-    expect(row).toMatchObject({ panNumber: 'ABCDE1234F', deductLiabilityPaise: 300000n, deductedPaise: 600000n, excessDeductedPaise: 300000n });
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
+    const [row] = await services(d, 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row).toMatchObject({ excessDeductedPaise: 300000n });
     expect(row.note).toContain('TDS taken in excess: ₹3,000.00');
     expect(row.note).toMatch(/no automatic refund/i);
   });
@@ -502,11 +564,11 @@ describe('over-withholding — ONLY FLAGGED (owner 2026-11-18): excess column + 
   it('L4: the liability tracker carries the note, deducted so far and the excess (rows + totals)', async () => {
     const d = base();
     d.entries = [paidVis('v1', 3000000n)];
-    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p1', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 600000n }];
-    const { tds } = services(d, 'DEDUCT');
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
+    const { tds } = services(d, 'GROSS_UP');
     jest.spyOn(tds, 'importedPayoutsCountFrom').mockResolvedValue(null);
     const res = await tds.getLiability('194R', FY.fyLabel, CLIENT);
-    expect(res.rows[0]).toMatchObject({ deductedPaise: '600000', excessDeductedPaise: '300000' });
+    expect(res.rows[0]).toMatchObject({ deductedPaise: '300000', excessDeductedPaise: '300000' });
     expect(res.rows[0].note).toContain('TDS taken in excess');
     expect(res.totals).toMatchObject({ excessDeductedPaise: '300000' });
   });
@@ -514,8 +576,8 @@ describe('over-withholding — ONLY FLAGGED (owner 2026-11-18): excess column + 
   it('the summary carries the total excess (and the count of retailers with excess)', async () => {
     const d = base();
     d.entries = [paidVis('v1', 3000000n)];
-    d.ledger = [{ clientId: CLIENT, panNumber: '__NO_PAN__:p1', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 600000n }];
-    const { tds } = services(d, 'DEDUCT');
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', outletCode: 'O1', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 300000n }];
+    const { tds } = services(d, 'GROSS_UP');
     jest.spyOn(tds, 'importedPayoutsCountFrom').mockResolvedValue(null);
     const rep = await tds.report194R(CLIENT, FY.fyLabel);
     expect(rep.summary).toMatchObject({ totalExcessDeductedPaise: 300000n, excessRetailerCount: 1 });

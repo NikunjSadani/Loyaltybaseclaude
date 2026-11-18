@@ -180,10 +180,12 @@ const gifsy: JwtPayload = {
 
 /** Every advisory-lock key taken via tx.$executeRaw (A-M3: one statement over a key ARRAY). */
 function lockKeysTaken(): string[] {
-  return mockTx.$executeRaw.mock.calls.flatMap((c: unknown[]) => {
+  return mockTx.$executeRaw.mock.calls
+    .filter((c: unknown[]) => String((c[0] as string[]).join('?')).includes('pg_advisory_xact_lock'))
+    .flatMap((c: unknown[]) => {
     const v = c[1];
     return Array.isArray(v) ? (v as string[]) : typeof v === 'string' ? [v] : [];
-  });
+    });
 }
 
 describe('CreditsService', () => {
@@ -3882,7 +3884,7 @@ describe('CreditsService', () => {
         mockPrisma.outlet.findMany.mockResolvedValue([o('O1', 'p1', 'PAN1'), o('O2', 'p1', 'PAN1'), o('O3', 'p3', 'PAN3')]);
         priorRows({});
         await download();
-        expect(mockTx.$executeRaw).toHaveBeenCalledTimes(1);
+        expect(mockTx.$executeRaw.mock.calls.filter((c: unknown[]) => (c[0] as string[]).join('?').includes('pg_advisory_xact_lock'))).toHaveLength(1);
         expect(lockKeysTaken().sort()).toEqual(['PDLOCK|deoleo|2026-05', `R194|deoleo|${runFy}`]);
       });
 
@@ -4097,6 +4099,20 @@ describe('CreditsService', () => {
         expect(ledgerRow()).toMatchObject({ panNumber: '__NO_PAN__:p1', tdsDeductedThisPaise: 600000n });
       });
 
+      it("owner rule 2026-11-18: the bank file SNAPSHOTS each payout's payee (PAN or no-PAN owner key) in the download tx", async () => {
+        policy('GROSS_UP');
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([run(500000n), { ...run(300000n), id: 'e2', outletId: 'O2', outletName: 'B' }]);
+        const noPan = { ...bankOutlet('INDIVIDUAL'), outletCode: 'O2', name: 'B', partner: { ...bankOutlet('INDIVIDUAL').partner, id: 'p2', panNumber: null } };
+        mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL'), noPan]);
+        priorRows({});
+        await download();
+        const call = mockTx.$executeRaw.mock.calls.find((c: unknown[]) => String((c[0] as string[]).join('?')).includes('UPDATE "credit_payout_entries"'));
+        expect(call).toBeDefined();
+        const [ids, pans, pids] = call!.slice(1) as [string[], string[], Array<string | null>];
+        const byId = Object.fromEntries(ids.map((id, i) => [id, [pans[i], pids[i]]]));
+        expect(byId).toEqual({ e1: ['PAN1', 'p1'], e2: ['__NO_PAN__:p2', 'p2'] });
+      });
+
       it('194C-only download (e.g. Deoleo): no 194R reads at all — no policy read, no countFrom read, no shared base read', async () => {
         mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([{ ...run(5000000n), tdsSection: 'SEC_194C' }]);
         mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
@@ -4175,8 +4191,8 @@ describe('CreditsService', () => {
           expect(ledgerRow()).toMatchObject({ tdsDeductedPriorPaise: 200000n, tdsDeductedThisPaise: 400000n });
           const where = mockTx.tdsDeductionEntry.findMany.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where)
             .find((w: Record<string, unknown>) => w.section === 'SEC_194R');
-          // A-M4: by retailer key OR by the retailer's outlets (a PAN corrected mid-year still nets).
-          expect(where).toMatchObject({ clientId: 'deoleo', OR: [{ panNumber: { in: ['__NO_PAN__:p1'] } }, { outletCode: { in: ['O1'] } }] });
+          // Owner rule 2026-11-18: netted by the ledger row's OWN key (PAN / no-PAN owner key at withholding).
+          expect(where).toMatchObject({ clientId: 'deoleo', panNumber: { in: ['__NO_PAN__:p1'] } });
         });
 
         it('GROSS_UP client: a no-PAN retailer is still paid in full (client-borne on the report)', async () => {
@@ -4467,9 +4483,11 @@ describe('CreditsService', () => {
 
       await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
 
-      // A-M3: ALL advisory locks in ONE round-trip — a single statement over the sorted key array.
-      expect(mockTx.$executeRaw).toHaveBeenCalledTimes(1);
-      expect(mockTx.$executeRaw.mock.calls[0][1]).toEqual(['PAN|PAN1|2026-27', 'PDLOCK|deoleo|2026-05']);
+      // A-M3: ALL advisory locks in ONE round-trip — a single statement over the sorted key array (the other
+      // $executeRaw in the tx is the payee snapshot UPDATE).
+      const lockCalls = mockTx.$executeRaw.mock.calls.filter((c: unknown[]) => (c[0] as string[]).join('?').includes('pg_advisory_xact_lock'));
+      expect(lockCalls).toHaveLength(1);
+      expect(lockCalls[0][1]).toEqual(['PAN|PAN1|2026-27', 'PDLOCK|deoleo|2026-05']);
     });
 
     // ── FIX-9: no-PAN visibility recovery (paid full, tenant recovery, no invoice) ──

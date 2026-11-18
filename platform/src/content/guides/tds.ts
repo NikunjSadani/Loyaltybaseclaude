@@ -82,6 +82,8 @@ Set per client on the **TDS Treatment** screen (default **194C + Gross-up**). Wh
 
 A failed, reversed or not-yet-sent payout does not count. The payment (UTR) date never moves a payout to another year: a bank file made on 30 March and paid on 2 April belongs to the March year, and its TDS too. (A payout that never went through a bank file — e.g. imported history — counts on its paid date.)
 
+**Everything is by PAN — a PAN change splits the year at the change.** Each payout remembers the PAN it was paid under (from the day the bank file was made; a redemption from the day it was delivered). If a retailer's PAN changes, everything paid **before** the change stays with the **old** PAN and everything **after** goes to the **new** PAN — the threshold, TDS, deducted so far and carry-forward are worked out separately for each, and the report shows both rows. Example: ₹30,000 paid under the old PAN (₹3,000 deducted), then the PAN is corrected and ₹5,000 is paid → the old PAN row keeps ₹30,000 and ₹3,000; the new PAN starts at ₹5,000, below ₹20,000, so nothing is due on it. If a retailer had **no PAN** and one is added later, the earlier payouts stay on the no-PAN row (20%) and the later ones go to the PAN (10%).
+
 **Who is "one retailer":** a retailer with a PAN is one row per PAN. Without a PAN, **all the outlets of one owner are one retailer** (one row); an outlet with no owner attached counts on its own.
 
 ### How the amount is worked out

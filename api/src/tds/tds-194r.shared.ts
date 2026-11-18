@@ -17,7 +17,11 @@
  *  with no bank file and imported vendor payouts count by `paidAt`; redemptions by `deliveredAt`;
  *  off-platform by `entryDate`. FAILED / REVERSED / PENDING payouts are not counted.
  *
- *  WHO (D4): a PAN holder is keyed by PAN. Without a PAN, all outlets of one ChannelPartner are ONE
+ *  WHO (owner rule 2026-11-18): TDS is keyed by PAN, using the payee SNAPSHOT taken when the payout went
+ *  into a bank file (CreditPayoutEntry.payeePan) or the redemption was delivered (RedemptionOrder.payeePan):
+ *  a PAN change SPLITS the year at the change — everything paid before stays with the OLD PAN (or the no-PAN
+ *  owner key), everything after goes to the NEW PAN. A row without a snapshot falls back to the current owner.
+ *  (D4) A PAN holder is keyed by PAN. Without a PAN, all outlets of one ChannelPartner are ONE
  *  retailer (`__NO_PAN__:<partnerId>`); an outlet with no partner counts alone
  *  (`__NO_PAN__:outlet:<clientId>:<outletCode>`).
  *
@@ -225,7 +229,7 @@ export interface Collect194RArgs {
    * redemptions, and off-platform rows naming these PANs / outlet codes are read. Omitted → the whole
    * client (the report).
    */
-  scope?: { outletCodes: string[]; partnerIds: string[]; pans: string[] };
+  scope?: { outletCodes: string[]; partnerIds: string[]; pans: string[]; keys?: string[] };
   /** DISPLAY-ONLY sink: deductee key → contributing outlet code (export columns). */
   noteOutlet?: (key: string, outletCode: string) => void;
 }
@@ -251,8 +255,12 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
     select: { id: true },
   });
   const visIds = new Set(visibilityFields.map((f) => f.id));
-  const outletFilter = scope ? { outletId: { in: scope.outletCodes } } : {};
-  const sel = { id: true, clientId: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true } as const;
+  // Engine scope: rows SNAPSHOTTED to one of the run's retailer keys, or (no snapshot) on their outlets.
+  const scopeKeys = scope ? (scope.keys ?? scope.pans) : [];
+  const outletFilter = scope
+    ? { OR: [{ payeePan: { in: scopeKeys } }, { payeePan: null, outletId: { in: scope.outletCodes } }] }
+    : {};
+  const sel = { id: true, clientId: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, payeePan: true } as const;
 
   // ── Source 1: payouts. OWNER FY RULE (2026-11-18): a payout that went through a bank file belongs to
   // the FY the BANK FILE was made (download.downloadedAt) — PAID or PROCESSING alike; the UTR /
@@ -315,7 +323,10 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
   for (const e of entries) {
     const partnerId = outletToPartner.get(e.outletId) ?? null;
     const pan = partnerId ? (partnerPan.get(partnerId) ?? null) : null;
-    const { key, hasPan } = keyOf(pan, partnerId ? noPanPartnerKey(partnerId) : noPanOutletKey(clientId, e.outletId));
+    // The payee SNAPSHOT (PAN or no-PAN key at payment time) wins; no snapshot → the current owner.
+    const { key, hasPan } = e.payeePan
+      ? { key: e.payeePan, hasPan: !isNoPanKey(e.payeePan) }
+      : keyOf(pan, partnerId ? noPanPartnerKey(partnerId) : noPanOutletKey(clientId, e.outletId));
     add(key, hasPan, visIds.has(e.fieldId) ? 'visPaise' : 'cashPaise', e.amountPaise);
     noteOutlet?.(key, e.outletId);
   }
@@ -327,13 +338,15 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
       deliveredAt: { gte: start, lt: endExclusive },
       partner: { clientId },
       valuePaise: { not: null },
-      ...(scope ? { partnerId: { in: scope.partnerIds } } : {}),
+      ...(scope ? { OR: [{ payeePan: { in: scopeKeys } }, { payeePan: null, partnerId: { in: scope.partnerIds } }] } : {}),
     },
-    select: { valuePaise: true, redemptionMode: true, partner: { select: { id: true, panNumber: true } } },
+    select: { valuePaise: true, redemptionMode: true, payeePan: true, partner: { select: { id: true, panNumber: true } } },
   });
   for (const r of redemptions) {
     if (r.valuePaise == null) continue;
-    const { key, hasPan } = keyOf(r.partner?.panNumber, r.partner?.id ? noPanPartnerKey(r.partner.id) : NO_PAN_KEY);
+    const { key, hasPan } = r.payeePan
+      ? { key: r.payeePan, hasPan: !isNoPanKey(r.payeePan) }
+      : keyOf(r.partner?.panNumber, r.partner?.id ? noPanPartnerKey(r.partner.id) : NO_PAN_KEY);
     add(key, hasPan, CASH_REDEMPTION_MODES.has(String(r.redemptionMode)) ? 'cashPaise' : 'nonCashPaise', r.valuePaise);
   }
 
@@ -377,16 +390,14 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
 }
 
 /**
- * TDS already deducted from each 194R retailer's payouts this FY (net of FAILED / reversal offsets),
- * keyed by the retailer's CURRENT key — audit A-M4: it follows the RETAILER, not the PAN string. A
- * ledger row is attributed through its outlet (outletCode → the outlet's current owner → PAN / no-PAN
- * key), so withholding booked under an old PAN (or as no-PAN before a PAN was added) nets against the
- * same retailer after the correction. A row without a resolvable outlet falls back to its stored key.
- * Shared by the engine (scope = this run's retailers) and the 194R report (scope omitted = whole client).
+ * TDS already deducted from each 194R retailer this FY (net of FAILED / reversal offsets), keyed by the
+ * ledger row's OWN stored key — the PAN (or no-PAN owner key) at the time of withholding. Owner rule
+ * 2026-11-18: TDS is by PAN, a PAN change splits the year, so a row is never moved to another PAN.
+ * Shared by the engine (scope = this run's retailer keys) and the 194R report (no scope = whole client).
  */
 export async function deducted194RByRetailer(
   db: Tds194RDb,
-  a: { clientId: string; fyLabel: string; scope?: { keys: string[]; outletCodes: string[] } },
+  a: { clientId: string; fyLabel: string; scope?: { keys: string[] } },
   /** Optional sink: the carry-forward recorded on each retailer's LATEST ledger row (report only). */
   lastCarryForward?: Map<string, bigint>,
 ): Promise<Map<string, bigint>> {
@@ -396,33 +407,16 @@ export async function deducted194RByRetailer(
       clientId,
       section: 'SEC_194R',
       fyLabel,
-      ...(scope ? { OR: [{ panNumber: { in: scope.keys } }, { outletCode: { in: scope.outletCodes } }] } : {}),
+      ...(scope ? { panNumber: { in: scope.keys } } : {}),
     },
     select: { clientId: true, panNumber: true, outletCode: true, tdsDeductedThisPaise: true, carryForwardPaise: true, createdAt: true },
   });
   const mine = (rows ?? []).filter((r) => !r.clientId || r.clientId === clientId);
-  const codes = [...new Set(mine.map((r) => r.outletCode).filter((c): c is string => !!c))];
-  const outlets = codes.length
-    ? await db.outlet.findMany({ where: { clientId, outletCode: { in: codes } }, select: { outletCode: true, partnerId: true } })
-    : [];
-  const ownerIds = [...new Set(outlets.map((o) => o.partnerId).filter((x): x is string => !!x))];
-  const owners = ownerIds.length
-    ? await db.channelPartner.findMany({ where: { id: { in: ownerIds } }, select: { id: true, panNumber: true } })
-    : [];
-  const ownerPan = new Map(owners.map((o) => [o.id, o.panNumber]));
-  const keyByOutlet = new Map<string, string>();
-  for (const o of outlets) {
-    const pan = o.partnerId ? ownerPan.get(o.partnerId) : null;
-    keyByOutlet.set(
-      o.outletCode,
-      !isNoPanCell(pan) ? pan!.trim().toUpperCase() : o.partnerId ? noPanPartnerKey(o.partnerId) : noPanOutletKey(clientId, o.outletCode),
-    );
-  }
   const out = new Map<string, bigint>();
   const latestAt = new Map<string, number>();
   for (const r of mine) {
-    const key = (r.outletCode && keyByOutlet.get(r.outletCode)) || (r.panNumber?.trim() ? retailerKeyOfLedgerPan(r.panNumber) : null);
-    if (!key) continue;
+    if (!r.panNumber?.trim()) continue; // a legacy blank key has no retailer
+    const key = retailerKeyOfLedgerPan(r.panNumber);
     out.set(key, (out.get(key) ?? 0n) + r.tdsDeductedThisPaise);
     if (lastCarryForward && r.carryForwardPaise != null) {
       const at = r.createdAt ? new Date(r.createdAt).getTime() : 0;

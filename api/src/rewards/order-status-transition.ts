@@ -71,7 +71,10 @@ export async function transitionOrderStatus(
       where: { id: orderId, ...args.guard },
       data: { status: toStatus, ...(args.data ?? {}) },
     });
-    if (claim.count > 0) await history();
+    if (claim.count > 0) {
+      await history();
+      if (toStatus === RedemptionStatus.DELIVERED) await snapshotPayee(tx, orderId);
+    }
     return claim;
   }
 
@@ -80,7 +83,18 @@ export async function transitionOrderStatus(
     data: { status: toStatus, ...(args.data ?? {}) },
   });
   if (fromStatus !== toStatus) await history();
+  if (toStatus === RedemptionStatus.DELIVERED) await snapshotPayee(tx, orderId);
   return updated;
+}
+
+/**
+ * TDS payee SNAPSHOT at delivery (owner rule 2026-11-18: TDS is keyed by PAN; a PAN change splits the year
+ * at the change). Records the partner's normalised PAN (upper/trim) — or, without a real PAN, the no-PAN
+ * owner key `__NO_PAN__:<partnerId>` — on the order, in the same tx as the DELIVERED move. Same rule as
+ * the 20261118180000_tds_payee_snapshot backfill.
+ */
+async function snapshotPayee(tx: Tx, orderId: string): Promise<void> {
+  await tx.$executeRaw`UPDATE "redemption_orders" AS r SET "payeePartnerId" = r."partnerId", "payeePan" = CASE WHEN p."panNumber" IS NOT NULL AND btrim(p."panNumber") <> '' AND upper(btrim(p."panNumber")) NOT LIKE '\_\_NO\_PAN\_\_%' THEN upper(btrim(p."panNumber")) ELSE '__NO_PAN__:' || r."partnerId" END FROM "channel_partners" AS p WHERE r."id" = ${orderId} AND p."id" = r."partnerId"`;
 }
 
 export const ORDER_STATUS_CONFLICT_MESSAGE = 'Order status changed — refresh and try again';

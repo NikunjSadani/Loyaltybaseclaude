@@ -160,8 +160,19 @@ rows carry that FY, and the report windows PAID + PROCESSING payouts by `downloa
 2-Apr is in the March FY only (no double counting / withholding). 194C keeps its period FY — unchanged. Bajaj's imported payout history and the §10
 "Outlet Points" off-platform rows are different benefits and both count (Q5).
 
-**Who** (D4): PAN → one row per PAN. No PAN → all outlets of one ChannelPartner = one retailer
-(`__NO_PAN__:<partnerId>`); an outlet with no partner counts alone (`__NO_PAN__:outlet:<clientId>:<outletCode>`).
+**Who — everything is by PAN; a PAN change SPLITS the year at the change (owner rule 2026-11-18).** Each payout records
+WHO it was paid to when it went into a bank file (`CreditPayoutEntry.payeePan` / `payeePartnerId`, written in the
+download tx — also for fully-withheld settles), and each redemption when it was delivered (`RedemptionOrder.payeePan`,
+written by `transitionOrderStatus` on DELIVERED). Base, threshold, liability, deducted so far and carry-forward are all
+per that key (within the client and FY): everything paid BEFORE a PAN change stays with the OLD PAN; everything after
+goes to the NEW PAN. No PAN → PAN added: the earlier payouts stay on the no-PAN owner key at 20%, the later ones go to
+the PAN. Ledger rows net by their own stored `panNumber` (the PAN at withholding). A row without a snapshot (not yet in
+a bank file, or pre-snapshot data the backfill could not resolve) falls back to the current owner; off-platform rows
+carry their own PAN; imported vendor payouts were snapshotted at import = the owner at the backfill (history was not
+recorded before 2026-11-18). Without a PAN, all outlets of one ChannelPartner = one retailer (`__NO_PAN__:<partnerId>`);
+an outlet with no partner counts alone (`__NO_PAN__:outlet:<clientId>:<outletCode>`). Migration
+`20261118180000_tds_payee_snapshot` (additive, idempotent, backfills PROCESSING/PAID entries + DELIVERED orders from
+the CURRENT owner; prod had 0 194R TDS rows) — not applied anywhere yet.
 
 **How much** (D5/D6/Q1/Q3): total base > ₹20,000 (FY statutory config) → TDS on the **whole year**. Rate 10% PAN /
 20% no-PAN from the statutory config (never a fixed fraction). The whole year uses the client's **current** method:
@@ -211,8 +222,8 @@ rows carry that FY, and the report windows PAID + PROCESSING payouts by `downloa
    **₹1,444** outstanding (client-borne). Handled by "liability − deposits uploaded" — no special case.
 
 **Audit follow-ups (2026-11-18):**
-- *Already deducted follows the retailer (A-M4):* a ledger row is attributed through its `outletCode` to the outlet's
-  CURRENT owner (PAN or no-PAN key), so a PAN corrected mid-year still nets (`deducted194RByRetailer`, engine + report).
+- *A-M4 — REVERSED by the owner rule (2026-11-18):* ledger rows are NOT moved to the outlet's current owner; each nets
+  under its own stored PAN (a PAN change splits the year).
 - *Withholding with no base / deposit this FY (B-M2):* still gets its own report row (base 0, "deducted so far") with a
   `note`, in the totals and the export ("Note" column).
 - *Legacy 194R DEDUCT ledger rows booked by payout-period FY (B-M3):* none exist on prod. Such a row counts only in the FY
@@ -262,10 +273,10 @@ Digest has a "TDS (194R)" section (count, total, largest 10) and a Needs-attenti
   saved before headers are read; a cut connection says the outcome is unknown (check Download History).
 - *A-L1:* the engine's 194R partner scope is one exact match on `upper(btrim("panNumber"))` for the client (raw SQL).
 - *L3:* a stored `__NO_PAN__` sentinel on a partner is treated as no PAN by the engine (same as the report).
-- *A-L2 (documented, not changed):* an off-platform row that names a PAN stays under that PAN; only no-PAN rows resolve
-  through their outlet. Following the retailer for PAN rows depends on the A-H2 decision (who was PAID) — open.
-- *A-H2 (OPEN — needs a decision):* see the report; current behaviour attributes a past payout / withholding to the
-  outlet's CURRENT owner.
+- *A-L2:* an off-platform row that names a PAN stays under that PAN (consistent with "everything is by PAN"); only
+  no-PAN rows resolve through their outlet to the owner's current key.
+- *A-H2 — RESOLVED by the payee snapshot:* a past payout / withholding stays with the PAN it was paid / withheld under,
+  even if the outlet later changes owner.
 
 ### 9.2 194C — unchanged (D1/D7/D8)
 Combined **across all tenants by PAN** (TGSL = single deductor): thresholds > ₹30,000 single or > ₹1,00,000 FY; rates 1%

@@ -1702,6 +1702,9 @@ model RedemptionOrder {
   // name/address/phone with the fulfilment vendor. Set only for vendor-sourced redemptions.
   vendorPiiConsentAt   DateTime?
   consentVersion       String?
+  // TDS payee SNAPSHOT at delivery (owner rule 2026-11-18, see CreditPayoutEntry.payeePan).
+  payeePan             String?
+  payeePartnerId       String?
   createdAt            DateTime         @default(now())
   updatedAt            DateTime         @updatedAt
 
@@ -3591,6 +3594,12 @@ model CreditPayoutEntry {
   tdsSection       TdsSection?
   tdsMethodology   TdsMethodology?
   tdsDeductedPaise BigInt          @default(0) // DEDUCT-method net withheld at download; 0 for gross-up/incentive
+  // TDS payee SNAPSHOT (owner rule 2026-11-18: TDS is keyed by PAN; a PAN change splits the year at the
+  // change). Set when the bank file is made: the payee's normalised PAN (upper/trim) or, without a PAN,
+  // the no-PAN owner key (`__NO_PAN__:<partnerId>` / `__NO_PAN__:outlet:<clientId>:<outletCode>`). Null =
+  // not yet in a bank file (or a pre-snapshot row the backfill could not resolve) → current owner.
+  payeePan         String?
+  payeePartnerId   String?
   // Non-success payout capture (recording rejected/failed payouts). Both nullable → additive,
   // zero backfill, Deoleo byte-identical. failureReason = the raw bank/vendor reason from the UTR
   // upload's Remarks cell; attemptedAt = the uploaded failure/attempt date (distinct from paidAt,
@@ -3610,6 +3619,7 @@ model CreditPayoutEntry {
   @@index([period])
   @@index([status])
   @@index([autoInvoiceId])
+  @@index([clientId, payeePan])
   @@map("credit_payout_entries")
 }
 

@@ -16,10 +16,42 @@ function makeTx() {
       findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'o1', status: 'DISPATCHED' }),
     },
     redemptionStatusHistory: { create: jest.fn().mockResolvedValue({}) },
+    $executeRaw: jest.fn().mockResolvedValue(1),
   };
 }
 
 describe('transitionOrderStatus — the single status-write choke point', () => {
+  describe('TDS payee snapshot at DELIVERED (owner rule 2026-11-18: TDS by PAN; a PAN change splits the year)', () => {
+    it('a guarded move to DELIVERED snapshots the payee PAN / no-PAN key in the same tx', async () => {
+      const tx = makeTx();
+      await transitionOrderStatus(tx as never, {
+        orderId: 'o1',
+        guard: { status: { in: [RedemptionStatus.CONFIRMED] } },
+        fromStatus: null,
+        toStatus: RedemptionStatus.DELIVERED,
+        data: { deliveredAt: new Date() },
+      });
+      expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      const sql = (tx.$executeRaw.mock.calls[0][0] as string[]).join('?');
+      expect(sql).toContain('UPDATE "redemption_orders"');
+      expect(sql).toContain('"payeePan"');
+      expect(sql).toContain("'__NO_PAN__:'");
+      expect(tx.$executeRaw.mock.calls[0][1]).toBe('o1');
+    });
+
+    it('no snapshot when the guarded claim lost (count 0) or for any other status', async () => {
+      const tx = makeTx();
+      tx.redemptionOrder.updateMany.mockResolvedValue({ count: 0 });
+      await transitionOrderStatus(tx as never, {
+        orderId: 'o1', guard: { status: { in: [RedemptionStatus.CONFIRMED] } }, fromStatus: null, toStatus: RedemptionStatus.DELIVERED,
+      });
+      await transitionOrderStatus(tx as never, {
+        orderId: 'o1', fromStatus: RedemptionStatus.PROCESSING, toStatus: RedemptionStatus.DISPATCHED,
+      });
+      expect(tx.$executeRaw).not.toHaveBeenCalled();
+    });
+  });
+
   describe('unguarded (update) form', () => {
     it('updates the order with status + extra columns and returns the updated row', async () => {
       const tx = makeTx();
