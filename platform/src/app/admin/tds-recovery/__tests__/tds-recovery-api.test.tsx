@@ -44,8 +44,14 @@ function asRole(role: Role) {
   })
 }
 
-function makeReport(rows: unknown[]) {
+function makeReport(rows: unknown[], earlier194R: unknown[] = []) {
   return {
+    earlier194R: {
+      label: 'Earlier 194R recoveries (no longer raised)',
+      count: earlier194R.length,
+      totalTenantShare: { paise: '50000', inr: 500 },
+      rows: earlier194R,
+    },
     label: 'in lieu of TDS deduction',
     scope: { clientId: null, fy: null },
     count: rows.length,
@@ -77,7 +83,7 @@ const ROW_NO_PAN = {
   tenantShare: { paise: '100000', inr: 1000 },
 }
 
-function stubFetch(opts: { rows?: unknown[]; fail?: boolean } = {}) {
+function stubFetch(opts: { rows?: unknown[]; fail?: boolean; earlier194R?: unknown[] } = {}) {
   const fetchMock = vi.fn((url: string) => {
     if (url.startsWith('/api/admin/tds-reports/recovery/export')) {
       return Promise.resolve({
@@ -90,7 +96,7 @@ function stubFetch(opts: { rows?: unknown[]; fail?: boolean } = {}) {
       if (opts.fail) {
         return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ success: false, error: 'boom' }) })
       }
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: makeReport(opts.rows ?? [ROW_WITH_PAN]) }) })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: makeReport(opts.rows ?? [ROW_WITH_PAN], opts.earlier194R) }) })
     }
     return Promise.reject(new Error('unexpected fetch in test: ' + url))
   })
@@ -158,6 +164,24 @@ describe('/admin/tds-recovery — recovery / attribution report', () => {
     stubFetch({ rows: [ROW_NO_PAN] })
     render(<TdsRecoveryPage />)
     expect(await screen.findByText('No PAN')).toBeInTheDocument()
+  })
+
+  it('B-L6: legacy 194R recoveries are shown in their OWN section, never mixed into the 194C table', async () => {
+    asRole('GIFSY_ADMIN')
+    stubFetch({ earlier194R: [{ ...ROW_WITH_PAN, panNumber: 'ZZZZZ9999Z', section: 'SEC_194R', tenantShare: { paise: '50000', inr: 500 } }] })
+    render(<TdsRecoveryPage />)
+    const box = await screen.findByTestId('tds-recovery-earlier-194r')
+    expect(box).toHaveTextContent('Earlier 194R recoveries (no longer raised)')
+    expect(box).toHaveTextContent('ZZZZZ9999Z')
+    expect(box).toHaveTextContent('1 row')
+  })
+
+  it('B-L6: no legacy section when there are no legacy 194R rows', async () => {
+    asRole('GIFSY_ADMIN')
+    stubFetch()
+    render(<TdsRecoveryPage />)
+    await screen.findByText('ABCDE1234F')
+    expect(screen.queryByTestId('tds-recovery-earlier-194r')).toBeNull()
   })
 
   it('shows an error card on a failed fetch (never fabricates)', async () => {

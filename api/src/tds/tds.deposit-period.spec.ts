@@ -32,6 +32,10 @@ import {
   fyLabelForPeriod,
   type ParsedDepositRow,
 } from './tds.helpers';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+const mockTdsTenantSettings = {
+  resolveTdsPolicy: jest.fn().mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' }),
+};
 
 // ─── Relative calendar ───────────────────────────────────────────────────────
 
@@ -316,6 +320,8 @@ describe('TdsService — deposits by "TDS for month" FY', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -401,7 +407,7 @@ describe('TdsService — deposits by "TDS for month" FY', () => {
     const b = rows.find((r) => r.panNumber === 'BBBBB2222B')!;
     expect(b).toMatchObject({ baseFyTotalPaise: 0n, depositedPaise: 50_000n, outstandingPaise: -50_000n, depositForPeriods: [`${Y}-10`] });
 
-    const summary = await service.summary194R(CLIENT, FY);
+    const summary = (await service.report194R(CLIENT, FY)).summary;
     expect(summary.totalDepositedPaise).toBe(rows.reduce((s, r) => s + r.depositedPaise, 0n));
     expect(summary.totalOutstandingPaise).toBe(rows.reduce((s, r) => s + r.outstandingPaise, 0n));
     expect(summary.totalOutstandingPaise).toBe(-50_000n);
@@ -577,6 +583,8 @@ describe('TdsService.uploadDeposit — stores forPeriod; dedup is per (…, forP
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -734,6 +742,8 @@ describe('TdsService.uploadDeposit — cross-upload duplicates (any earlier file
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);

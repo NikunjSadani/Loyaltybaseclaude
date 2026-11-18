@@ -232,13 +232,24 @@ export class CreditsController {
     @CurrentUser() user: JwtPayload,
     @Body() dto: CreatePayoutDownloadDto,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<StreamableFile> {
-    const { buffer, downloadCode, downloadId } = await this.credits.createPayoutDownload(
+  ): Promise<StreamableFile | Record<string, unknown>> {
+    const { buffer, noBankFileMessage, downloadCode, downloadId, fullyWithheld, fullyWithheldNote, heldEntries, heldNote } =
+      await this.credits.createPayoutDownload(
       user,
       dto,
     );
     res.setHeader('X-Download-Code', downloadCode);
     res.setHeader('X-Download-Id', downloadId);
+    // A-H2: payouts fully withheld as TDS are NOT in the file — tell the operator (never silent).
+    res.setHeader('X-Fully-Withheld-Count', String(fullyWithheld.length));
+    if (fullyWithheldNote) res.setHeader('X-Fully-Withheld-Note', encodeURIComponent(fullyWithheldNote));
+    // KYC-held payouts are NOT in the file either — never silent.
+    res.setHeader('X-Held-Count', String(new Set(heldEntries.map((h) => h.outletId)).size));
+    if (heldNote) res.setHeader('X-Held-Note', encodeURIComponent(heldNote));
+    // A-L3: nothing for the bank → a JSON answer with the reason + the FULL lists, never an empty file.
+    if (buffer === null) {
+      return { noBankFile: true, message: noBankFileMessage, downloadCode, downloadId, fullyWithheld, heldEntries };
+    }
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="payout-${downloadCode}.xlsx"`,

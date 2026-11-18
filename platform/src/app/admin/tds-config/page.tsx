@@ -231,8 +231,9 @@ export default function TdsConfigPage() {
               The <strong>methodology</strong> is recorded on every credit-upload ₹ payout (visibility
               and incentive), but it only changes what is paid on <strong>visibility</strong> payouts:{' '}
               <strong>Deduct-then-pay</strong> withholds the TDS from the retailer&apos;s bank line;{' '}
-              <strong>Gross-up</strong> pays the retailer in full while TGSL raises a TDS invoice,
-              deposits the TDS and recovers it from the tenant. <strong>Incentive</strong> payouts are
+              <strong>Gross-up</strong> pays the retailer in full; under <strong>194C</strong> TGSL raises a TDS invoice,
+              deposits the TDS and recovers it from the tenant, while <strong>194R</strong> gross-up raises no TDS invoice
+              (the 194R report shows it as the client&apos;s liability). <strong>Incentive</strong> payouts are
               never deducted — the 194R report shows their gross-up liability, and no TDS invoice is
               raised for them. The <strong>section</strong> applies only to visibility payouts
               (<strong>194C</strong> = visibility service with a self-billed invoice;{' '}

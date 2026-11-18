@@ -14,6 +14,10 @@ import { TdsService, ContributingOutlets194R } from './tds.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { DEFAULT_RESOLVED_TDS_STATUTORY } from './tds.helpers';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+const mockTdsTenantSettings = {
+  resolveTdsPolicy: jest.fn().mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' }),
+};
 
 const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
 
@@ -92,6 +96,7 @@ const mockPrisma = {
   redemptionOrder: { findMany: jest.fn().mockResolvedValue([]) },
   tdsOffPlatformEntry: { findMany: jest.fn(async () => offPlatform) },
   tdsDeposit: { findMany: jest.fn(async () => deposits) },
+  tdsDeductionEntry: { findMany: jest.fn(async () => []) },
 };
 
 function parseSheet(buffer: Buffer, idx = 0) {
@@ -154,6 +159,8 @@ describe('TdsService — export194R outlet columns', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -166,8 +173,13 @@ describe('TdsService — export194R outlet columns', () => {
     const { buffer } = await service.export194R(CLIENT, FY);
     expect(headers(buffer)).toEqual([
       'S.No', 'Deductee Name', 'PAN', 'Outlet Code', 'Outlet Name', 'Outlet Type', 'Section',
-      'Amount Paid (₹)', 'TDS Rate %', 'TDS Amount (₹)', 'Already Deposited (₹)',
-      'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'FY',
+      'Amount Paid (₹)',
+      // D10 (owner 2026-11-18): base split + how the year's TDS was worked out.
+      'Cash Benefits (₹)', 'Non-cash Benefits (₹)', 'Method', 'TDS Rate %',
+      'Base Deducted from Retailer (₹)', 'Base Borne by Client (₹)',
+      'TDS — Deducted Part (₹)', 'TDS — Client-borne Part (₹)', 'TDS Amount (₹)',
+      'Deducted from Payouts So Far (₹)', 'TDS Taken in Excess (₹)', 'Already Deposited (₹)', 'of which Imported Vendor TDS (₹)',
+      'Deposits — TDS for Month(s)', 'Outstanding (₹)', 'Note', 'FY',
     ]);
   });
 

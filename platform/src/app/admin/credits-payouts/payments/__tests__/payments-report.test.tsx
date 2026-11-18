@@ -217,6 +217,20 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
     expect(await screen.findByText('UTR-FAIL')).toBeInTheDocument() // UTR kept on FAILED
   })
 
+  it('B-L6: a payout settled by TDS withholding is labelled in the UTR column (no UTR)', async () => {
+    asRole('GIFSY_ADMIN')
+    const withheldRow = { ...ROW, utr: null, settledByTds: true, tdsSection: 'SEC_194R' }
+    vi.stubGlobal('fetch', vi.fn((url: string) =>
+      url.startsWith('/api/admin/payments-report')
+        ? Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { ...report(), rows: [withheldRow] } }) })
+        : Promise.reject(new Error('unexpected fetch in test: ' + url)),
+    ))
+    render(<AdminPaymentsReportPage />)
+    await screen.findByText('Shop A')
+    expect(await screen.findByTestId('payment-settled-by-tds')).toHaveTextContent('Settled by TDS withholding (no bank payment)')
+    expect(screen.queryByText('UTR12345')).not.toBeInTheDocument()
+  })
+
   it('Export button fetches the export URL carrying the current filters', async () => {
     asRole('GIFSY_ADMIN')
     const fetchMock = stubFetch()

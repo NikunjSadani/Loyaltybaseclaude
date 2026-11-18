@@ -47,6 +47,8 @@ export interface PaymentRow {
   reportingChain: string | null;
   amount: Money;
   utr: string | null;
+  /** B-L6: the WHOLE payout was withheld as TDS — settled without a bank payment (utr is null). */
+  settledByTds?: boolean;
   status: string | null;
   /** Payout batch / header this payment belongs to. */
   payoutHeader: string | null;

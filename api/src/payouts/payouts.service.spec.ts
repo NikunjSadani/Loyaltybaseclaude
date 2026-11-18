@@ -26,6 +26,8 @@ const mockTx = {
   },
   // Shared order-status transition writes the status-history row inside the same tx.
   redemptionStatusHistory: { create: jest.fn() },
+  // DELIVERED moves also snapshot the TDS payee (owner rule 2026-11-18) — one raw UPDATE.
+  $executeRaw: jest.fn().mockResolvedValue(1),
   // capture-bank-at-redemption: the PAID/FAILED verify-stamp updates the partner's
   // paymentDetailsStatus inside the disbursement tx (guarded on UNVERIFIED). findFirst reads the
   // partner's CURRENT upiId for the case-insensitive UPI snapshot match on PAID.

@@ -48,6 +48,28 @@ function payout(p: Partial<PayoutLedgerEntry> & { id: string }): PayoutLedgerEnt
 
 const meta = { outletName: 'Anil Traders', outletCode: 'OUT-1', from: '2026-04', to: '2026-06' };
 
+describe('B-L1: the downloaded statement carries the SAME TDS context as the screen row', () => {
+  it('a partly withheld payout: net amount + "TDS ₹X withheld from ₹Y" in the description, UTR kept', () => {
+    const doc = buildStatementDoc(api([]), [payout({ id: 'p1', payoutAmountPaise: 27_000, grossAmountPaise: 30_000, tdsWithheldPaise: 3_000 })], meta);
+    const l = doc.lines[0];
+    expect(l.kind === 'payout' && l.amountInr).toBe(270);
+    expect(l.description).toContain('TDS ₹30 withheld from ₹300');
+    expect(l.kind === 'payout' && l.utr).toBe('UTR1');
+  });
+
+  it('a fully withheld payout: ₹0, "Withheld as TDS ₹X — ₹0 paid to you", NO UTR (the internal reference never leaks)', () => {
+    const doc = buildStatementDoc(
+      api([]),
+      [payout({ id: 'p2', payoutAmountPaise: 0, grossAmountPaise: 50_000, tdsWithheldPaise: 50_000, settledByTds: true, utr: undefined })],
+      meta,
+    );
+    const l = doc.lines[0];
+    expect(l.kind === 'payout' && l.amountInr).toBe(0);
+    expect(l.description).toContain('Withheld as TDS ₹500 — ₹0 paid to you');
+    expect(l.kind === 'payout' && l.utr).toBe('');
+  });
+});
+
 describe('buildStatementDoc', () => {
   it('has the fixed title "Wallet Statement" and the outlet + period header', () => {
     const doc = buildStatementDoc(api([]), [], meta);

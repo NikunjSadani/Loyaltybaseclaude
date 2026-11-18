@@ -43,6 +43,8 @@ function quietTenant(clientId: string, name: string): TenantDigest {
       batchPayoutPaise: 0n,
       creditPaid: 0,
       creditPaidPaise: 0n,
+      creditSettledByTds: 0,
+      creditSettledByTdsPaise: 0n,
       redemptionPaid: 0,
       redemptionPaidPaise: 0n,
       failedOrReturned: 0,
@@ -90,6 +92,8 @@ function busyTenant(): TenantDigest {
       batchPayoutPaise: 1_25_000_00n,
       creditPaid: 412,
       creditPaidPaise: 8_43_500_00n,
+      creditSettledByTds: 3,
+      creditSettledByTdsPaise: 15_000_00n,
       redemptionPaid: 9,
       redemptionPaidPaise: 18_000_00n,
       failedOrReturned: 3,
@@ -515,6 +519,12 @@ describe('buildDailyOpsDigest', () => {
     expect(r.failedSections).toHaveLength(2);
   });
 
+  it('D2t: a failed TDS (194R) section also makes the run DEGRADED (listed by failedSections)', () => {
+    const t = quietTenant('bajaj', 'Bajaj');
+    t.tds = { ok: false, error: 'report failed' };
+    expect(failedSections(input([t]))).toEqual([{ key: 'bajaj/tds', label: 'Bajaj: TDS (194R)' }]);
+  });
+
   it('D2c: a section failing 3 runs in a row → "INCOMPLETE 3 days" in the subject and a red line', () => {
     const t = quietTenant('bajaj', 'Bajaj');
     t.points = { ok: false, error: 'x' };
@@ -574,6 +584,39 @@ describe('buildDailyOpsDigest', () => {
     const html = buildDailyOpsDigest(input([busyTenant()])).html;
     expect(html).toContain('outlets <strong style="color:#111827;">412</strong>');
     expect(html).toContain('credit failed (re-bank / reverse)');
+  });
+
+  it('TDS (194R): retailers with TDS taken in excess are listed (count + amount + names) and flagged in Needs attention', () => {
+    const t = {
+      ...quietTenant('bajaj', 'Bajaj'),
+      tds: ok({
+        fyLabel: '2026-27',
+        excessRetailerCount: 2,
+        totalExcessPaise: 450000n,
+        sample: [
+          { retailer: 'ABCDE1234F', excessPaise: 300000n },
+          { retailer: 'NO PAN — Shop B', excessPaise: 150000n },
+        ],
+      }),
+    };
+    const html = buildDailyOpsDigest(input([t])).html;
+    expect(html).toContain('data-section="TDS (194R)"');
+    expect(html).toContain('ABCDE1234F');
+    expect(html).toContain('₹4,500');
+    expect(needsAttention(t)).toContain('TDS taken in excess for 2 retailers (₹4,500) — flagged, no automatic refund');
+  });
+
+  it('TDS (194R): nothing in excess → no section, no attention item', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), tds: ok({ fyLabel: '2026-27', excessRetailerCount: 0, totalExcessPaise: 0n, sample: [] }) };
+    const html = buildDailyOpsDigest(input([t])).html;
+    expect(html).not.toContain('data-section="TDS (194R)"');
+    expect(needsAttention(t)).toEqual([]);
+  });
+
+  it('payouts: payouts settled by TDS withholding are a SEPARATE figure, never "paid" money (A-M3/B-M1)', () => {
+    const html = buildDailyOpsDigest(input([busyTenant()])).html;
+    expect(html).toContain('settled by TDS withholding');
+    expect(html).toContain('3 (₹15,000)');
   });
 
   it('a quiet tenant renders as just its name + one line (every section hidden)', () => {

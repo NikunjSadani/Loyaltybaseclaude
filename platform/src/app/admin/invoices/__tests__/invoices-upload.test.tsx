@@ -78,6 +78,22 @@ describe('ADMIU — Generate Visibility Invoices (upload page)', () => {
     expect(await screen.findByText(/no confirmed payout/i)).toBeInTheDocument();
   });
 
+  it('ADMIU6 (B-M3): a GST already released that no longer matches the regenerated invoice is shown LOUDLY', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: { generated: 1, skipped: [], warnings: [{ outletCode: 'OUT007', reason: "GST of ₹900.00 was already released" }] },
+      }),
+    }));
+    render(<InvoiceUploadPage />);
+    pickPeriod('2026-07');
+    fireEvent.click(screen.getByRole('button', { name: /generate invoices/i }));
+    const box = await screen.findByTestId('generate-gst-warnings');
+    expect(box).toHaveTextContent('OUT007');
+    expect(box).toHaveTextContent('GST of ₹900.00 was already released');
+  });
+
   it('ADMIU4: surfaces a backend error verbatim', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: false,

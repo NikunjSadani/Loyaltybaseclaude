@@ -34,6 +34,15 @@ export interface PayoutRow {
   paidAt?: string; // ISO — when money hit
   status: 'PAID' | 'PENDING' | 'PROCESSING' | 'FAILED';
   narration?: string;
+  // ── TDS withheld from a credit payout (owner audit A-M3/B-M1, 2026-11-18) ──
+  // payoutAmountPaise is the NET that reached the retailer (gross − TDS withheld), so the wallet's
+  // lifetime / last-month totals count only money actually received.
+  /** The payout before TDS (present only when TDS was withheld). */
+  grossAmountPaise?: number;
+  /** TDS withheld from this payout (present only when > 0). */
+  tdsWithheldPaise?: number;
+  /** The WHOLE payout was withheld as TDS — ₹0 reached the retailer (no bank transfer, no UTR). */
+  settledByTds?: true;
 }
 
 /** PayoutTransaction row shape consumed here (redemption rail). */
@@ -58,6 +67,7 @@ interface CreditEntryRow {
   utr: string | null;
   paidAt: Date | null;
   createdAt: Date;
+  tdsDeductedPaise?: bigint | null;
 }
 
 /** The minimal Prisma shape this helper needs (PrismaService or a tx client both satisfy it).
@@ -148,6 +158,7 @@ export async function buildPayoutStatement(
             utr: true,
             paidAt: true,
             createdAt: true,
+            tdsDeductedPaise: true,
           },
           orderBy: { createdAt: 'desc' },
         })
@@ -168,19 +179,28 @@ export async function buildPayoutStatement(
     _sortAt: (t.completedAt ?? t.createdAt).getTime(),
   }));
 
-  const creditPayouts = creditEntries.map((e) => ({
+  const creditPayouts = creditEntries.map((e) => {
+    const tds = e.tdsDeductedPaise && e.tdsDeductedPaise > 0n ? e.tdsDeductedPaise : 0n;
+    const net = e.amountPaise - tds > 0n ? e.amountPaise - tds : 0n;
+    // A payout settled entirely by TDS withholding never went to the bank: its stored reference
+    // (`TDS-WITHHELD-…`) is NOT a UTR and must never be shown as one.
+    const settledByTds = tds > 0n && net === 0n;
+    return {
     id: e.id,
     period: e.period, // already 'YYYY-MM' (the credit month) — no server-TZ derivation
     kpiLabel: e.fieldName || 'Credit Payout',
     achievedPct: 100,
-    payoutAmountPaise: Number(e.amountPaise),
+    payoutAmountPaise: Number(net),
+    ...(tds > 0n ? { grossAmountPaise: Number(e.amountPaise), tdsWithheldPaise: Number(tds) } : {}),
+    ...(settledByTds ? { settledByTds: true as const } : {}),
     uploadedAt: e.createdAt.toISOString(),
-    utr: e.utr ?? undefined,
+    utr: settledByTds || e.utr?.startsWith('TDS-WITHHELD-') ? undefined : (e.utr ?? undefined),
     paidAt: e.paidAt?.toISOString() ?? undefined,
     status: mapCreditEntryStatus(e.status),
     narration: e.narration || undefined,
     _sortAt: (e.paidAt ?? e.createdAt).getTime(),
-  }));
+    };
+  });
 
   return [...redemptionPayouts, ...creditPayouts]
     .sort((a, b) => b._sortAt - a._sortAt)

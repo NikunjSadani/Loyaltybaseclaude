@@ -1,5 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import { Prisma, RedemptionOrder, RedemptionStatus } from '@prisma/client';
+import { PAN_NORMALISE_SQL } from '../tds/tds-194r.shared';
 
 /**
  * THE single write path for `RedemptionOrder.status` (order-timeline plan, owner D1).
@@ -71,7 +72,10 @@ export async function transitionOrderStatus(
       where: { id: orderId, ...args.guard },
       data: { status: toStatus, ...(args.data ?? {}) },
     });
-    if (claim.count > 0) await history();
+    if (claim.count > 0) {
+      await history();
+      if (toStatus === RedemptionStatus.DELIVERED) await snapshotPayee(tx, orderId);
+    }
     return claim;
   }
 
@@ -80,7 +84,29 @@ export async function transitionOrderStatus(
     data: { status: toStatus, ...(args.data ?? {}) },
   });
   if (fromStatus !== toStatus) await history();
+  if (toStatus === RedemptionStatus.DELIVERED) await snapshotPayee(tx, orderId);
   return updated;
+}
+
+/**
+ * TDS payee SNAPSHOT at delivery (owner rule 2026-11-18: TDS is keyed by PAN; a PAN change splits the year
+ * at the change). Records the partner's normalised PAN (upper/trim) — or, without a real PAN, the no-PAN
+ * owner key `__NO_PAN__:<partnerId>` — on the order, in the same tx as the DELIVERED move. Same rule as
+ * the 20261118180000_tds_payee_snapshot backfill. Write-once: an order that already has a payeePan keeps it.
+ */
+async function snapshotPayee(tx: Tx, orderId: string): Promise<void> {
+  const pan = PAN_NORMALISE_SQL('p."panNumber"');
+  // A-L2: a plain prefix compare (left(...) <> '__NO_PAN__'), no LIKE escaping.
+  await tx.$executeRaw(
+    Prisma.sql(
+      [
+        `UPDATE "redemption_orders" AS r SET "payeePartnerId" = r."partnerId", "payeePan" = CASE WHEN p."panNumber" IS NOT NULL AND ${pan} <> '' AND left(${pan}, 10) <> '__NO_PAN__' THEN ${pan} ELSE '__NO_PAN__:' || r."partnerId" END FROM "channel_partners" AS p WHERE r."id" = `,
+        // Only while not yet snapshotted: a DELIVERED → DELIVERED re-transition never re-keys the order.
+        ` AND r."payeePan" IS NULL AND p."id" = r."partnerId"`,
+      ],
+      orderId,
+    ),
+  );
 }
 
 export const ORDER_STATUS_CONFLICT_MESSAGE = 'Order status changed — refresh and try again';

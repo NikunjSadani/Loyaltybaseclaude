@@ -60,6 +60,17 @@ export function paymentsOrderBy(f: PaymentsFilter): Prisma.CreditPayoutEntryOrde
     : [{ paidAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }];
 }
 
+/**
+ * B-L6: a payout whose WHOLE amount was withheld as TDS is settled PAID by the bank-file run itself with the
+ * internal reference `TDS-WITHHELD-<downloadCode>` — that is NOT a bank UTR. The screen and the export show
+ * this label instead (and never the internal reference).
+ */
+export const TDS_WITHHELD_UTR_PREFIX = 'TDS-WITHHELD-';
+export const SETTLED_BY_TDS_LABEL = 'Settled by TDS withholding (no bank payment)';
+export function isSettledByTds(utr: string | null | undefined): boolean {
+  return !!utr && utr.startsWith(TDS_WITHHELD_UTR_PREFIX);
+}
+
 /** The per-row columns both the screen and the export read (relations are batched into the same query). */
 export const PAYMENT_ENTRY_SELECT = {
   id: true,

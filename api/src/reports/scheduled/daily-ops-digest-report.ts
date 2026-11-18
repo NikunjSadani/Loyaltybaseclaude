@@ -235,6 +235,15 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
     }
   }
 
+  failed('TDS (194R)', t.tds);
+  if (t.tds?.ok && t.tds.data.excessRetailerCount > 0) {
+    const x = t.tds.data;
+    push(
+      `TDS taken in excess for ${plural(x.excessRetailerCount, 'retailer', 'retailers')} (${rupees(x.totalExcessPaise)}) — flagged, no automatic refund`,
+      x.excessRetailerCount,
+    );
+  }
+
   failed('Messages', t.messages);
   if (t.messages.ok) {
     const m = t.messages.data;
@@ -411,6 +420,8 @@ const SECTION_KEYS: Array<[keyof TenantDigest, string]> = [
   ['visibility', 'Visibility'],
   ['salesImport', 'Sales Import'],
   ['billing', 'Billing progress'],
+  // A failed TDS (194R excess) section makes the run DEGRADED like any other section.
+  ['tds', 'TDS (194R)'],
 ];
 
 /**
@@ -641,6 +652,7 @@ function tenantSections(t: TenantDigest): string {
       (p) =>
         p.batchesConfirmed === 0 &&
         p.creditPaid === 0 &&
+        p.creditSettledByTds === 0 &&
         p.redemptionPaid === 0 &&
         p.failedOrReturned === 0 &&
         p.awaitingUtr === 0 &&
@@ -658,6 +670,9 @@ function tenantSections(t: TenantDigest): string {
         metricLine('Paid', [
           ['credit payouts', `${intIN(p.creditPaid)} (${rupees(p.creditPaidPaise)})`],
           ['redemption payouts', `${intIN(p.redemptionPaid)} (${rupees(p.redemptionPaidPaise)})`],
+          ...(p.creditSettledByTds > 0
+            ? ([['settled by TDS withholding (₹0 to the retailer)', `${intIN(p.creditSettledByTds)} (${rupees(p.creditSettledByTdsPaise)})`]] as Array<[string, string]>)
+            : []),
         ]) +
         metricLine('Issues', [
           ['failed / returned', intIN(p.failedOrReturned), accentIf(p.failedOrReturned, 'red')],
@@ -717,6 +732,20 @@ function tenantSections(t: TenantDigest): string {
           : ''),
     ),
     renderSection('Billing progress', t.billing, () => false, billingBody),
+    renderSection(
+      'TDS (194R)',
+      t.tds,
+      (x) => x.excessRetailerCount === 0,
+      (x) =>
+        metricLine(`Taken in excess (${x.fyLabel}, flag only — no refund)`, [
+          ['retailers', intIN(x.excessRetailerCount), 'amber'],
+          ['total', rupees(x.totalExcessPaise), 'amber'],
+        ]) +
+        table(
+          [{ label: 'Retailer' }, { label: 'Taken in excess' }],
+          x.sample.map((r) => [esc(r.retailer), esc(rupees(r.excessPaise))]),
+        ),
+    ),
   ].join('');
 }
 

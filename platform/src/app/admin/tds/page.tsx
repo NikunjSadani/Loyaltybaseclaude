@@ -55,6 +55,20 @@ interface Tds194RRow {
   outstandingPaise: number | string;
   /** "TDS for month" (YYYY-MM) of the deposits counted on this row. */
   depositForPeriods?: string[];
+  // ── D10 (owner 2026-11-18): how the year's TDS was worked out ──
+  methodology?: 'DEDUCT' | 'GROSS_UP';
+  ratePct?: number;
+  cashBasePaise?: number | string;
+  nonCashBasePaise?: number | string;
+  deductLiabilityPaise?: number | string;
+  clientBorneLiabilityPaise?: number | string;
+  deductedPaise?: number | string;
+  importedVendorDepositPaise?: number | string;
+  /** B-M2: e.g. TDS withheld with no benefit counted this year — shown, never silent. */
+  note?: string;
+  /** Owner 2026-11-18: TDS taken in excess (flag only — no automatic refund). */
+  excessDeductedPaise?: number | string;
+  carryForwardDroppedPaise?: number | string;
 }
 
 interface Tds194RResponse {
@@ -62,11 +76,14 @@ interface Tds194RResponse {
   fyLabel:  string;
   /** Per-tenant setting: imported (vendor) payouts paid on/after this date are in the base (null/absent = OFF). */
   importedPayoutsCountedFrom?: string | null;
+  /** The API's summary keys (TdsController serializeSummary194R) — total*, NOT the row names. */
   summary: {
-    baseFyTotalPaise: number | string;
-    liabilityPaise:   number | string;
-    depositedPaise:   number | string;
-    outstandingPaise: number | string;
+    totalBasePaise:        number | string;
+    totalLiabilityPaise:   number | string;
+    totalDepositedPaise:   number | string;
+    totalOutstandingPaise: number | string;
+    totalExcessDeductedPaise?: number | string;
+    excessRetailerCount?: number;
   };
   rows: Tds194RRow[];
 }
@@ -88,11 +105,12 @@ interface Tds194CRow {
 interface Tds194CResponse {
   section: string;
   fyLabel: string;
+  /** The API's summary keys (TdsController serializeSummary194C) — total*, NOT the row names. */
   summary: {
-    liabilityPaise:          number | string;
-    liabilityNoThresholdPaise: number | string;
-    depositedPaise:          number | string;
-    outstandingPaise:        number | string;
+    totalLiabilityPaise:            number | string;
+    totalLiabilityNoThresholdPaise: number | string;
+    totalDepositedPaise:            number | string;
+    totalOutstandingPaise:          number | string;
   };
   rows: Tds194CRow[];
 }
@@ -194,9 +212,9 @@ function OutstandingCell({ paise }: { paise: number | string }) {
   return <span className="font-semibold text-red-600">{formatINR(v)}</span>;
 }
 
-function SummaryCard({ label, paise }: { label: string; paise: number | string }) {
+function SummaryCard({ label, paise, testId }: { label: string; paise: number | string; testId?: string }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl p-4">
+    <div className="bg-white border border-gray-200 rounded-xl p-4" data-testid={testId}>
       <p className="text-xs text-gray-500">{label}</p>
       <p className="text-lg font-bold text-gray-900 mt-1">{formatINR(p(paise))}</p>
     </div>
@@ -675,10 +693,19 @@ export default function AdminTdsPage() {
           {/* Summary cards */}
           {r194 && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <SummaryCard label="Total Amount Paid"  paise={r194.summary.baseFyTotalPaise} />
-              <SummaryCard label="TDS Liability"      paise={r194.summary.liabilityPaise} />
-              <SummaryCard label="Deposited"          paise={r194.summary.depositedPaise} />
-              <SummaryCard label="Outstanding"        paise={r194.summary.outstandingPaise} />
+              <SummaryCard label="Total Amount Paid"  paise={r194.summary.totalBasePaise}        testId="r194-summary-base" />
+              <SummaryCard label="TDS Liability"      paise={r194.summary.totalLiabilityPaise}   testId="r194-summary-liability" />
+              <SummaryCard label="Deposited"          paise={r194.summary.totalDepositedPaise}   testId="r194-summary-deposited" />
+              <SummaryCard label="Outstanding"        paise={r194.summary.totalOutstandingPaise} testId="r194-summary-outstanding" />
+              {p(r194.summary.totalExcessDeductedPaise ?? 0) > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4" data-testid="r194-summary-excess">
+                  <p className="text-xs text-amber-800">TDS taken in excess (flag only — no refund)</p>
+                  <p className="text-lg font-bold text-amber-900 mt-1">{formatINR(p(r194.summary.totalExcessDeductedPaise))}</p>
+                  <p className="text-[11px] text-amber-700">
+                    {r194.summary.excessRetailerCount ?? 0} retailer{(r194.summary.excessRetailerCount ?? 0) === 1 ? '' : 's'}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -728,7 +755,11 @@ export default function AdminTdsPage() {
                         <tr className="bg-gray-50 border-b border-gray-100">
                           <th className="text-left px-4 py-3 text-xs font-semibold text-gray-600">Deductee PAN</th>
                           <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600">Amount Paid</th>
+                          <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600" title="Cash = visibility + incentive payouts + UPI/bank redemptions; non-cash = gifts, vouchers, off-platform">Cash / Non-cash</th>
+                          <th className="text-left px-4 py-3 text-xs font-semibold text-gray-600">Method · Rate</th>
+                          <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600" title="Deducted part = TDS withheld from the retailer's visibility payouts; client-borne = gross-up the client pays">Deducted part / Client-borne</th>
                           <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600">TDS Liability</th>
+                          <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600" title="TDS already withheld from payouts — shown for reference, not subtracted from the liability">Deducted so far</th>
                           <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600">Deposited</th>
                           <th className="text-right px-4 py-3 text-xs font-semibold text-gray-600">Outstanding</th>
                         </tr>
@@ -736,10 +767,39 @@ export default function AdminTdsPage() {
                       <tbody className="divide-y divide-gray-100">
                         {r194.rows.map((row, i) => (
                           <tr key={i} className="hover:bg-gray-50 transition-colors">
-                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
+                            <td className="px-4 py-3 font-mono text-xs text-gray-800">
+                              {deducteeCellLabel(row)}
+                              {row.note && (
+                                <div className="mt-1 font-sans text-[11px] text-amber-700" data-testid="r194-note">{row.note}</div>
+                              )}
+                            </td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.baseFyTotalPaise))}</td>
+                            <td className="px-4 py-3 text-right text-xs text-gray-600" data-testid="r194-cash-noncash">
+                              {formatINR(p(row.cashBasePaise ?? 0))} / {formatINR(p(row.nonCashBasePaise ?? 0))}
+                            </td>
+                            <td className="px-4 py-3 text-xs text-gray-600" data-testid="r194-method">
+                              {row.methodology === 'DEDUCT' ? 'Deduct' : 'Gross-up'}{row.ratePct != null ? ` · ${row.ratePct}%` : ''}
+                            </td>
+                            <td className="px-4 py-3 text-right text-xs text-gray-600" data-testid="r194-parts">
+                              {formatINR(p(row.deductLiabilityPaise ?? 0))} / {formatINR(p(row.clientBorneLiabilityPaise ?? 0))}
+                            </td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>
-                            <td className="px-4 py-3 text-right text-gray-700"><DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} /></td>
+                            <td className="px-4 py-3 text-right text-gray-700" data-testid="r194-deducted">
+                              {formatINR(p(row.deductedPaise ?? 0))}
+                              {p(row.excessDeductedPaise ?? 0) > 0 && (
+                                <div className="text-[11px] text-amber-700" data-testid="r194-excess">
+                                  TDS taken in excess: {formatINR(p(row.excessDeductedPaise))}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-700">
+                              <DepositedCell paise={row.depositedPaise} periods={row.depositForPeriods} />
+                              {p(row.importedVendorDepositPaise ?? 0) > 0 && (
+                                <div className="text-[11px] text-gray-500" data-testid="r194-imported">
+                                  of which imported vendor TDS {formatINR(p(row.importedVendorDepositPaise ?? 0))}
+                                </div>
+                              )}
+                            </td>
                             <td className="px-4 py-3 text-right">
                               <OutstandingCell paise={row.outstandingPaise} />
                             </td>
@@ -784,10 +844,10 @@ export default function AdminTdsPage() {
           {/* Summary cards */}
           {r194c && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <SummaryCard label="TDS (with threshold)"    paise={r194c.summary.liabilityPaise} />
-              <SummaryCard label="TDS (no threshold)"     paise={r194c.summary.liabilityNoThresholdPaise} />
-              <SummaryCard label="Deposited"              paise={r194c.summary.depositedPaise} />
-              <SummaryCard label="Outstanding"            paise={r194c.summary.outstandingPaise} />
+              <SummaryCard label="TDS (with threshold)"    paise={r194c.summary.totalLiabilityPaise}            testId="r194c-summary-liability" />
+              <SummaryCard label="TDS (no threshold)"     paise={r194c.summary.totalLiabilityNoThresholdPaise} testId="r194c-summary-nothreshold" />
+              <SummaryCard label="Deposited"              paise={r194c.summary.totalDepositedPaise}            testId="r194c-summary-deposited" />
+              <SummaryCard label="Outstanding"            paise={r194c.summary.totalOutstandingPaise}          testId="r194c-summary-outstanding" />
             </div>
           )}
 

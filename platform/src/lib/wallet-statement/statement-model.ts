@@ -11,6 +11,7 @@
  */
 import type { PayoutLedgerEntry } from '@/types';
 import { istMonthKey } from '@/lib/ist-date';
+import { payoutTdsNote } from '@/lib/payout-tds-note';
 
 /** One row of the backend statement response (shared by both statement endpoints). */
 export interface StatementApiRow {
@@ -101,14 +102,16 @@ function pointsLine(r: StatementApiRow): StatementLine {
 function payoutLine(p: PayoutLedgerEntry): StatementLine {
   // Same dating as the on-screen statement: paid date once money hit, else when it was added.
   const date = p.paidAt ? new Date(p.paidAt) : p.uploadedAt ? new Date(p.uploadedAt) : istMonthStart(p.period);
+  // B-L1: the same TDS note as the on-screen row; a payout settled by TDS has no UTR.
+  const tdsNote = payoutTdsNote(p);
   return {
     kind: 'payout',
     id: p.id,
     date,
-    description: `${p.kpiLabel} · ${monthKeyLabel(p.period)}`,
+    description: `${p.kpiLabel} · ${monthKeyLabel(p.period)}${tdsNote ? ` · ${tdsNote}` : ''}`,
     type: p.status === 'PAID' ? 'Payout' : 'Payout (Pending)',
     amountInr: p.payoutAmountPaise / 100,
-    utr: p.utr ?? '',
+    utr: p.settledByTds ? '' : (p.utr ?? ''),
   };
 }
 

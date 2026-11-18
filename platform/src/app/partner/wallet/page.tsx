@@ -161,6 +161,7 @@ function PayoutSummary({ payouts }: { payouts: PayoutLedgerEntry[] }) {
       ? [...paidEntries].sort((a, b) => b.period.localeCompare(a.period))[0]
       : null,
   [paidEntries]);
+  // payoutAmountPaise is already NET (gross − TDS withheld). B-L6: a fully withheld latest payout is labelled.
   const lastMonthAmt   = (lastPaid?.payoutAmountPaise ?? 0) / 100;
   const lastMonthLabel = lastPaid ? monthLabel(lastPaid.period) : '—';
 
@@ -170,12 +171,16 @@ function PayoutSummary({ payouts }: { payouts: PayoutLedgerEntry[] }) {
         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Lifetime Payout</p>
         <p className="text-3xl font-extrabold tracking-tight">{fmtInr(lifetimePaid)}</p>
       </div>
-      <div className="bg-white/10 rounded-xl px-4 py-3 flex items-center justify-between">
+      <div data-testid="payout-last-month" className="bg-white/10 rounded-xl px-4 py-3 flex items-center justify-between">
         <div>
           <p className="text-[10px] text-slate-400 font-medium">Last Month Payout</p>
           <p className="text-[10px] text-slate-500 mt-0.5">{lastMonthLabel}</p>
         </div>
-        <p className="text-xl font-bold text-white">{fmtInr(lastMonthAmt)}</p>
+        {lastPaid?.settledByTds ? (
+          <p className="text-sm font-bold text-amber-300">{fmtInr(0)} — withheld as TDS</p>
+        ) : (
+          <p className="text-xl font-bold text-white">{fmtInr(lastMonthAmt)}</p>
+        )}
       </div>
     </div>
   );

@@ -129,6 +129,8 @@ function makePrisma() {
     voucherDispersalRow: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]), groupBy: jest.fn().mockResolvedValue([]) },
     voucherDispersalCampaign: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
     voucherDispersalOrderAlert: { count: jest.fn().mockResolvedValue(0), groupBy: jest.fn().mockResolvedValue([]) },
+    // Digest TDS pre-check: does the tenant have ANY 194R ledger row this FY? Default: none.
+    tdsDeductionEntry: { findFirst: jest.fn().mockResolvedValue(null) },
   };
 }
 
@@ -140,6 +142,11 @@ const emailed = (endMs: number, status: 'sent' | 'degraded' = 'sent', startMs = 
   status,
   ...(failedSections ? { failedSections } : {}),
 });
+
+/** 194R report used by the digest's TDS section (owner 2026-11-18: over-withholding is flagged). */
+const tdsMock = {
+  report194R: jest.fn().mockResolvedValue({ rows: [], summary: { totalExcessDeductedPaise: 0n, excessRetailerCount: 0 } }),
+};
 
 describe('ScheduledReportsService — Daily Operations Digest', () => {
   let prisma: ReturnType<typeof makePrisma>;
@@ -157,7 +164,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     prisma = makePrisma();
     store = prisma.programSetting;
     sendEmail = jest.fn().mockResolvedValue(undefined);
-    svc = new ScheduledReportsService(prisma as never, { sendEmail } as never);
+    svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never);
   });
 
   describe('recipients', () => {
@@ -281,7 +288,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       prisma = makePrisma();
       store = prisma.programSetting;
       setRecipients({ dailyDigest: ['ops@gifsy.in'] });
-      svc = new ScheduledReportsService(prisma as never, { sendEmail } as never);
+      svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never);
       svc.clock = () => NOW;
       setState({ running: { startedAt: new Date(NOW - 5 * 60_000).toISOString(), token: 'slow' } });
       expect((await svc.runDailyReports(NOW)).reports[0].status).toBe('in-progress');
@@ -530,7 +537,13 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     const input = await svc.collect(NOW, '13 Nov 2026', WIN);
     const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
     const paidWhere = prisma.creditPayoutEntry.aggregate.mock.calls.find((c: [{ where: { status: string } }]) => c[0].where.status === 'PAID')[0].where;
-    expect(paidWhere).toEqual({ clientId: 'bajaj', status: 'PAID', updatedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) } });
+    expect(paidWhere).toEqual({
+      clientId: 'bajaj',
+      status: 'PAID',
+      updatedAt: { gte: new Date(WIN.startMs), lt: new Date(NOW) },
+      // B-L2: a NULL utr is paid money too (SQL NOT(utr LIKE …) is NULL for a NULL utr → OR-wrapped).
+      OR: [{ utr: null }, { NOT: { utr: { startsWith: 'TDS-WITHHELD-' } } }],
+    });
     expect(paidWhere.paidAt).toBeUndefined();
     expect(bajaj.payouts.ok && bajaj.payouts.data).toMatchObject({
       batchOutlets: 37,
@@ -540,6 +553,82 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       openFailedCredit: 3,
       openFailedCreditPaise: 30000n,
       openFailedRedemption: 2, // 3 failed txns, 1 whose order was failed/refunded
+    });
+  });
+
+  it('payouts (A-M3/B-M1): a payout settled by TDS withholding is NOT counted as paid money; paid = NET of TDS; shown separately', async () => {
+    prisma.creditPayoutEntry.aggregate.mockImplementation(
+      ({ where }: { where: { status: string; utr?: { startsWith?: string }; NOT?: unknown } }) =>
+        Promise.resolve(
+          where.status === 'PAID' && where.utr?.startsWith === 'TDS-WITHHELD-'
+            ? { _count: { _all: 1 }, _sum: { amountPaise: 500000n, tdsDeductedPaise: 500000n } }
+            : where.status === 'PAID'
+              ? { _count: { _all: 2 }, _sum: { amountPaise: 300000n, tdsDeductedPaise: 20000n } }
+              : { _count: { _all: 0 }, _sum: { amountPaise: 0n } },
+        ),
+    );
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
+    const paidWhere = prisma.creditPayoutEntry.aggregate.mock.calls
+      .map((c: [{ where: Record<string, unknown> }]) => c[0].where)
+      .find((w: Record<string, unknown>) => w.status === 'PAID' && w.OR)!;
+    expect(paidWhere.OR).toEqual([{ utr: null }, { NOT: { utr: { startsWith: 'TDS-WITHHELD-' } } }]);
+    expect(bajaj.payouts.ok && bajaj.payouts.data).toMatchObject({
+      creditPaid: 2,
+      creditPaidPaise: 280000n, // ₹3,000 gross − ₹200 TDS withheld = what actually went to retailers
+      creditSettledByTds: 1,
+      creditSettledByTdsPaise: 500000n,
+    });
+  });
+
+  it('payouts (B-L3): "awaiting UTR" is the money the bank will actually pay — NET of TDS withheld', async () => {
+    prisma.creditPayoutEntry.aggregate.mockImplementation(({ where }: { where: { status: string } }) =>
+      Promise.resolve(
+        where.status === 'PROCESSING'
+          ? { _count: { _all: 4 }, _sum: { amountPaise: 80000n, tdsDeductedPaise: 8000n } }
+          : { _count: { _all: 0 }, _sum: { amountPaise: 0n, tdsDeductedPaise: 0n } },
+      ),
+    );
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
+    const awaitingCall = prisma.creditPayoutEntry.aggregate.mock.calls.find((c: [{ where: { status: string } }]) => c[0].where.status === 'PROCESSING')[0];
+    expect(awaitingCall._sum).toEqual({ amountPaise: true, tdsDeductedPaise: true });
+    expect(bajaj.payouts.ok && bajaj.payouts.data).toMatchObject({ awaitingUtr: 4, awaitingUtrPaise: 72000n });
+  });
+
+  it('TDS cost: the 194R report runs ONLY for tenants with a 194R ledger row this FY (cheap pre-check); others get an empty section', async () => {
+    prisma.tdsDeductionEntry.findFirst.mockImplementation(async ({ where }: { where: { clientId: string; section: string; fyLabel: string } }) =>
+      where.clientId === 'bajaj' && where.section === 'SEC_194R' ? { id: 'l1' } : null,
+    );
+    tdsMock.report194R.mockClear();
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    expect(tdsMock.report194R).toHaveBeenCalledTimes(1);
+    expect(tdsMock.report194R.mock.calls[0][0]).toBe('bajaj');
+    const fy = prisma.tdsDeductionEntry.findFirst.mock.calls[0][0].where.fyLabel;
+    expect(fy).toMatch(/^\d{4}-\d{2}$/);
+    const deoleo = input.tenants.find((t) => t.clientId === 'deoleo')!;
+    expect(deoleo.tds?.ok && deoleo.tds.data).toMatchObject({ excessRetailerCount: 0, totalExcessPaise: 0n, sample: [] });
+  });
+
+  it("TDS: each tenant's 194R excess (current FY) feeds the digest — count, total, largest first", async () => {
+    prisma.tdsDeductionEntry.findFirst.mockResolvedValue({ id: 'l1' });
+    tdsMock.report194R.mockImplementation(async (clientId: string) => ({
+      rows:
+        clientId === 'bajaj'
+          ? [
+              { panNumber: 'AAAAA1111A', excessDeductedPaise: 100000n },
+              { panNumber: 'BBBBB2222B', excessDeductedPaise: 300000n },
+              { panNumber: 'CCCCC3333C', excessDeductedPaise: 0n },
+            ]
+          : [],
+      summary: {},
+    }));
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
+    expect(bajaj.tds?.ok && bajaj.tds.data).toMatchObject({
+      excessRetailerCount: 2,
+      totalExcessPaise: 400000n,
+      sample: [{ retailer: 'BBBBB2222B', excessPaise: 300000n }, { retailer: 'AAAAA1111A', excessPaise: 100000n }],
     });
   });
 

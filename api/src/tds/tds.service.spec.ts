@@ -7,6 +7,10 @@ import { TdsService } from './tds.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { DEFAULT_RESOLVED_TDS_STATUTORY } from './tds.helpers';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+const mockTdsTenantSettings = {
+  resolveTdsPolicy: jest.fn().mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' }),
+};
 
 // The statutory resolver falls back to the built-in code defaults; these specs assert against
 // exactly those default rates/thresholds, so a mock returning DEFAULT keeps behavior identical.
@@ -76,6 +80,8 @@ describe('TdsService', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -441,9 +447,9 @@ describe('TdsService', () => {
     });
   });
 
-  // ─── summary194R ──────────────────────────────────────────────────────────
+  // ─── report194R summary ──────────────────────────────────────────────────────────
 
-  describe('summary194R', () => {
+  describe('report194R summary', () => {
     it('aggregates totals across rows', async () => {
       // Two PANs both above threshold
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
@@ -459,7 +465,7 @@ describe('TdsService', () => {
         { id: 'cp2', panNumber: 'PAN002' },
       ]);
 
-      const summary = await service.summary194R(CLIENT_ID, FY);
+      const summary = (await service.report194R(CLIENT_ID, FY)).summary;
 
       expect(summary.totalBasePaise).toBe(5_100_000n);
       expect(summary.totalLiabilityPaise).toBeGreaterThan(0n);
@@ -542,29 +548,36 @@ describe('TdsService', () => {
 
   // ─── FIX-4: VISIBILITY FY anchor = payout PERIOD (not paidAt) ─────────────────
 
-  describe('FIX-4 FY anchor (visibility bucketed by period)', () => {
-    it('a period=2026-03 visibility-194R entry PAID in April 2026 stays in FY 2025-26', async () => {
-      // Two visibility-194R entries for the SAME PAN, both PAID in April 2026 (FY 2026-27 by
-      // paidAt) but with DIFFERENT payout periods: 2026-03 (FY 2025-26) and 2026-04 (FY 2026-27).
-      // For FY 2025-26 only the period=2026-03 row belongs — proving the PERIOD anchor, not paidAt.
+  describe('D3 (owner 2026-11-18): 194R is dated by when ACTUALLY paid (replaces the FIX-4 period anchor)', () => {
+    it("owner FY rule: PAID and PROCESSING payouts are windowed by the date their BANK FILE was made; only a PAID payout with no bank file falls back to paidAt", async () => {
       mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
-      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
-        mkEntry('outlet1', 'vis-field', 2_100_000n, new Date('2026-04-15'), {
-          tdsSection: 'SEC_194R',
-          period: '2026-03',
-        }),
-        mkEntry('outlet1', 'vis-field', 5_000_000n, new Date('2026-04-15'), {
-          tdsSection: 'SEC_194R',
-          period: '2026-04',
-        }),
-      ]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      await service.compute194R(CLIENT_ID, '2025-26');
+      const wheres = mockPrisma.creditPayoutEntry.findMany.mock.calls.map((c: [{ where: Record<string, unknown> }]) => c[0].where);
+      const fy = { gte: new Date('2025-03-31T18:30:00.000Z'), lt: new Date('2026-03-31T18:30:00.000Z') };
+      const banked = wheres.find((w: Record<string, unknown>) => (w.status as { in?: string[] })?.in)!;
+      expect(banked.status).toEqual({ in: ['PAID', 'PROCESSING'] });
+      expect(banked.download).toEqual({ downloadedAt: fy });
+      expect(banked).not.toHaveProperty('paidAt');
+      const noFile = wheres.find((w: Record<string, unknown>) => w.status === 'PAID' && w.downloadId === null)!;
+      expect(noFile.paidAt).toEqual(fy);
+      // No query is anchored on the payout period.
+      expect(wheres.some((w: Record<string, unknown>) => 'period' in w)).toBe(false);
+    });
+
+    it('a PROCESSING entry (no paidAt yet) counts; an entry returned by both reads is counted once', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
+      const paid = mkEntry('outlet1', 'vis-field', 1_500_000n, new Date('2025-06-01'), { tdsSection: 'SEC_194R' });
+      const processing = { ...mkEntry('outlet1', 'vis-field', 800_000n, new Date('2025-07-01'), { tdsSection: 'SEC_194R', period: '2025-07' }), id: 'proc-1', status: 'PROCESSING', paidAt: null };
+      mockPrisma.creditPayoutEntry.findMany.mockImplementation(async (a: { where: { status?: unknown } }) =>
+        (a.where.status as { in?: string[] })?.in ? [processing, paid] : a.where.status === 'PAID' ? [paid] : [],
+      );
       mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
       mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'cp1', panNumber: 'ABCDE1234F' }]);
 
       const rows = await service.compute194R(CLIENT_ID, '2025-26');
       expect(rows).toHaveLength(1);
-      // Only the period=2026-03 payout (₹21,000) is in FY 2025-26; the 2026-04 one is next FY.
-      expect(rows[0].baseFyTotalPaise).toBe(2_100_000n);
+      expect(rows[0].baseFyTotalPaise).toBe(2_300_000n); // ₹15,000 paid + ₹8,000 in a bank file
     });
   });
 

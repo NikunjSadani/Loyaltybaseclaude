@@ -227,6 +227,10 @@ describe('TdsImportedPayoutsCard', () => {
     expect(card).toHaveTextContent('this liability is payer-borne for every client')
     expect(card).not.toHaveTextContent(/gross-up client/i)
     expect(card).toHaveTextContent('must be uploaded as deposits only — never as off-platform benefits')
+    // Owner D9 (2026-11-18): they also count towards the threshold the payout engine uses.
+    expect(card).toHaveTextContent('They do count towards the retailer’s ₹20,000 threshold')
+    // L5: the rate wording is the real rule — 10% with a PAN, 20% without.
+    expect(card).toHaveTextContent('10% with a PAN, 20% without')
   })
 
   it('helpers: formatCountFrom, currentFyStart, importedMaxDate', () => {

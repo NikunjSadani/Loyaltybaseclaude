@@ -65,6 +65,8 @@ interface RecoveryResponse {
   count: number;
   totals: { tenantShare: Money; noPanTenantShare: Money };
   rows: RecoveryRow[];
+  /** B-L6: legacy 194R recoveries (no longer raised since D7) — shown separately, never in the 194C figures. */
+  earlier194R?: { label: string; count: number; totalTenantShare: Money; rows: RecoveryRow[] };
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────
@@ -251,6 +253,26 @@ export default function TdsRecoveryPage() {
         </div>
       )}
 
+
+      {data?.earlier194R && data.earlier194R.count > 0 && (
+        <div
+          data-testid="tds-recovery-earlier-194r"
+          className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-800 space-y-1"
+        >
+          <p className="font-semibold">
+            {data.earlier194R.label} — {data.earlier194R.count} row{data.earlier194R.count === 1 ? '' : 's'},{' '}
+            {money(data.earlier194R.totalTenantShare)}
+          </p>
+          <p>194R is no longer recovered from clients (it is shown on the 194R report). These older rows are listed for reference only and are not in the totals above.</p>
+          <ul className="list-disc pl-5">
+            {data.earlier194R.rows.map((r, i) => (
+              <li key={`${r.clientId}-${r.panNumber}-${i}`}>
+                {isGifsy ? `${r.clientId} · ` : ''}{r.isNoPan ? 'No PAN' : r.panNumber} · {r.fyLabel} · {money(r.tenantShare)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Table */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">

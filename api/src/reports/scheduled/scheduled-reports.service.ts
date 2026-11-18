@@ -1,3 +1,5 @@
+import { TdsService } from '../../tds/tds.service';
+import { financialYear } from '../../tds/tds.helpers';
 import { randomUUID } from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -61,8 +63,7 @@ import type {
   TenantStatus,
   VisibilitySection,
   VoucherDispersalSection,
-  VouchersSection,
-} from './report.types';
+  VouchersSection, TdsExcessSection } from './report.types';
 
 const MINUTE_MS = 60 * 1000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
@@ -156,6 +157,8 @@ export class ScheduledReportsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly msg91: Msg91Service,
+    // Owner 2026-11-18: the digest flags 194R TDS taken in excess, from the SAME 194R report the screen shows.
+    private readonly tds: TdsService,
   ) {}
 
   async runDailyReports(
@@ -506,6 +509,7 @@ export class ScheduledReportsService {
         // Loaded for EVERY tenant: a live Hubble problem must show even after the flag was switched off.
         vouchers: await section('vouchers', c, () => this.vouchers(c, window, nowMs)),
         payouts: await section('payouts', c, () => this.payouts(c, window)),
+        tds: await section('tds', c, () => this.tdsExcess(c, nowMs)),
         messages: await section('messages', c, () => this.messages(c, window)),
       };
       if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window));
@@ -699,6 +703,31 @@ export class ScheduledReportsService {
     return { issued, failed, stuckProcessing, needsReconcile };
   }
 
+  /** Owner 2026-11-18: 194R retailers with TDS taken in excess this FY (flag only — no refund). */
+  private async tdsExcess(clientId: string, nowMs: number): Promise<TdsExcessSection> {
+    const fyLabel = financialYear(new Date(nowMs)).fyLabel;
+    // Cost: excess needs TDS deducted from a retailer, and every deduction is a 194R ledger row — so a tenant
+    // with NO 194R ledger row this FY cannot have any excess. Skip the full 194R report for it (cheap pre-check).
+    const anyLedger = await this.prisma.tdsDeductionEntry.findFirst({
+      where: { clientId, section: 'SEC_194R', fyLabel },
+      select: { id: true },
+    });
+    if (!anyLedger) return { fyLabel, excessRetailerCount: 0, totalExcessPaise: 0n, sample: [] };
+    const report = await this.tds.report194R(clientId, fyLabel);
+    const over = report.rows
+      .filter((r) => (r.excessDeductedPaise ?? 0n) > 0n)
+      .sort((a, b) => (b.excessDeductedPaise > a.excessDeductedPaise ? 1 : b.excessDeductedPaise < a.excessDeductedPaise ? -1 : 0));
+    return {
+      fyLabel,
+      excessRetailerCount: over.length,
+      totalExcessPaise: over.reduce((s, r) => s + r.excessDeductedPaise, 0n),
+      sample: over.slice(0, 10).map((r) => ({
+        retailer: r.noPanDeductee ? `NO PAN — ${r.noPanDeductee.name}` : r.panNumber,
+        excessPaise: r.excessDeductedPaise,
+      })),
+    };
+  }
+
   private async payouts(clientId: string, w: DigestWindow): Promise<PayoutsSection> {
     const inWindow = this.range(w);
     const batches = await this.prisma.creditBatch.aggregate({
@@ -707,14 +736,23 @@ export class ScheduledReportsService {
       _sum: { totalPoints: true, totalPayoutPaise: true, totalOutlets: true },
     });
     // Credit payouts are counted when the payment was RECORDED, not by paidAt: paidAt is the operator's
-    // Payment Date (IST midnight), almost always inside an already-sent window. No app path writes a
-    // PAID entry again (credits.service: UTR apply is the only PROCESSING→PAID/FAILED flip; a reversal
-    // leaves a PAID entry untouched; invoices only link fresh PENDING entries at confirm), so for a PAID
-    // or FAILED entry updatedAt IS the apply moment. Failures use the same clock.
+    // Payment Date (IST midnight), almost always inside an already-sent window. No app path rewrites a
+    // PAID entry that stays PAID (the write sites are pinned by digest-recorded-time-guard.spec): an entry
+    // becomes PAID either by the UTR apply (PROCESSING → PAID/FAILED) or — when its WHOLE amount was
+    // withheld as TDS — by the download itself (PROCESSING → PAID, utr `TDS-WITHHELD-…`); a reversal of
+    // a fully withheld entry moves it PAID → REVERSED. So for a PAID or FAILED entry updatedAt IS the
+    // moment it was recorded. Money actually PAID = gross − TDS withheld; a payout settled entirely by TDS
+    // withholding is NOT paid money and is reported separately ("settled by TDS withholding").
     const creditPaid = await this.prisma.creditPayoutEntry.aggregate({
-      where: { clientId, status: 'PAID', updatedAt: inWindow },
+      // B-L2: OR-wrapped — a bare NOT(utr LIKE …) is NULL (= excluded) for a PAID entry with no UTR.
+      where: { clientId, status: 'PAID', updatedAt: inWindow, OR: [{ utr: null }, { NOT: { utr: { startsWith: 'TDS-WITHHELD-' } } }] },
       _count: { _all: true },
-      _sum: { amountPaise: true },
+      _sum: { amountPaise: true, tdsDeductedPaise: true },
+    });
+    const creditSettledByTds = await this.prisma.creditPayoutEntry.aggregate({
+      where: { clientId, status: 'PAID', updatedAt: inWindow, utr: { startsWith: 'TDS-WITHHELD-' } },
+      _count: { _all: true },
+      _sum: { amountPaise: true, tdsDeductedPaise: true },
     });
     const redemptionPaid = await this.prisma.payoutTransaction.aggregate({
       where: { partner: { clientId }, status: 'SUCCESS', completedAt: inWindow },
@@ -727,10 +765,11 @@ export class ScheduledReportsService {
     const txnFailed = await this.prisma.payoutTransaction.count({
       where: { partner: { clientId }, status: { in: ['FAILED', 'REVERSED'] }, updatedAt: inWindow },
     });
+    // B-L3: awaiting UTR = what the bank will actually pay = gross − TDS withheld at the bank file.
     const awaiting = await this.prisma.creditPayoutEntry.aggregate({
       where: { clientId, status: 'PROCESSING' },
       _count: { _all: true },
-      _sum: { amountPaise: true },
+      _sum: { amountPaise: true, tdsDeductedPaise: true },
     });
     // STILL OPEN (not windowed): a FAILED credit entry waits for a re-bank download or a reversal (both move it).
     const openCredit = await this.prisma.creditPayoutEntry.aggregate({
@@ -757,12 +796,15 @@ export class ScheduledReportsService {
       batchOutlets: num(batches._sum?.totalOutlets),
       batchPayoutPaise: big(batches._sum?.totalPayoutPaise),
       creditPaid: num(creditPaid._count?._all),
-      creditPaidPaise: big(creditPaid._sum?.amountPaise),
+      // NET actually paid to retailers (gross − any TDS withheld from those bank lines).
+      creditPaidPaise: big(creditPaid._sum?.amountPaise) - big(creditPaid._sum?.tdsDeductedPaise),
+      creditSettledByTds: num(creditSettledByTds._count?._all),
+      creditSettledByTdsPaise: big(creditSettledByTds._sum?.tdsDeductedPaise),
       redemptionPaid: num(redemptionPaid._count?._all),
       redemptionPaidPaise: big(redemptionPaid._sum?.amountPaise),
       failedOrReturned: creditFailed + txnFailed,
       awaitingUtr: num(awaiting._count?._all),
-      awaitingUtrPaise: big(awaiting._sum?.amountPaise),
+      awaitingUtrPaise: big(awaiting._sum?.amountPaise) - big(awaiting._sum?.tdsDeductedPaise),
       openFailedCredit: num(openCredit._count?._all),
       openFailedCreditPaise: big(openCredit._sum?.amountPaise),
       openFailedRedemption: failedTxns.length - closed,

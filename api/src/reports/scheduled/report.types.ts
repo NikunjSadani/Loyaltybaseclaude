@@ -117,7 +117,11 @@ export interface PayoutsSection {
    * payment DATE at IST midnight and would fall in an already-sent window).
    */
   creditPaid: number;
+  /** NET actually paid (gross − TDS withheld on those bank lines). */
   creditPaidPaise: bigint;
+  /** Credit payouts settled ENTIRELY by TDS withholding (never sent to the bank — not paid money). */
+  creditSettledByTds: number;
+  creditSettledByTdsPaise: bigint;
   /** Redemption payouts SUCCESS (PayoutTransaction.completedAt in the window). */
   redemptionPaid: number;
   redemptionPaidPaise: bigint;
@@ -130,6 +134,7 @@ export interface PayoutsSection {
   openFailedRedemption: number;
   /** Credit entries downloaded for the bank file and waiting for the UTR upload (PROCESSING, now). */
   awaitingUtr: number;
+  /** B-L3: NET of TDS withheld at the bank file (what the bank will actually pay). */
   awaitingUtrPaise: bigint;
 }
 
@@ -264,6 +269,18 @@ export interface VdAlertSplit {
 /** Client.status values. */
 export type TenantStatus = 'ACTIVE' | 'ONBOARDING' | 'INACTIVE';
 
+/**
+ * Owner 2026-11-18: over-withholding is ONLY FLAGGED. The tenant's 194R retailers (current FY) from whom
+ * more TDS was taken than is due for the year — count, total and the largest few (no automatic refund).
+ */
+export interface TdsExcessSection {
+  fyLabel: string;
+  excessRetailerCount: number;
+  totalExcessPaise: bigint;
+  /** Largest first, at most 10 (the 194R report lists them all). */
+  sample: Array<{ retailer: string; excessPaise: bigint }>;
+}
+
 export interface TenantDigest {
   clientId: string;
   name: string;
@@ -277,6 +294,8 @@ export interface TenantDigest {
   /** Loaded for every tenant; shown when non-empty (labelled "integration switched off" when the flag is off). */
   vouchers?: SectionResult<VouchersSection>;
   payouts: SectionResult<PayoutsSection>;
+  /** 194R TDS taken in excess (flag only). */
+  tds?: SectionResult<TdsExcessSection>;
   messages: SectionResult<MessagesSection>;
   /** Present ONLY for tenants with the visibilityEnabled setting ON. */
   visibility?: SectionResult<VisibilitySection>;

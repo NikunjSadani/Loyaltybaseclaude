@@ -21,6 +21,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 import AdminTdsPage from '../page';
+import CONTRACT from './fixtures/tds-report-contract.json';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -53,62 +54,13 @@ const mockUseAdminSession = vi.mocked(useAdminSession);
 
 // ── Mock data ──────────────────────────────────────────────────────────────────
 
-/** All money fields are integer paise, matching the backend contract */
-const MOCK_194R: { success: true; data: object } = {
-  success: true,
-  data: {
-    section: '194R',
-    fyLabel: '2025-26',
-    summary: {
-      baseFyTotalPaise: 500000,   // ₹5,000.00
-      liabilityPaise:   50000,    // ₹500.00
-      depositedPaise:   30000,    // ₹300.00
-      outstandingPaise: 20000,    // ₹200.00  (positive → red)
-    },
-    rows: [
-      {
-        panNumber:        'ABCDE1234F',
-        baseFyTotalPaise: 500000,
-        liabilityPaise:   50000,
-        depositedPaise:   30000,
-        outstandingPaise: 20000,
-      },
-      {
-        panNumber:        'XYZPQ9876G',
-        baseFyTotalPaise: 100000,
-        liabilityPaise:   10000,
-        depositedPaise:   15000,
-        outstandingPaise: -5000,   // negative → over-deposit / credit
-      },
-    ],
-  },
-};
-
-const MOCK_194C: { success: true; data: object } = {
-  success: true,
-  data: {
-    section: '194C',
-    fyLabel: '2025-26',
-    summary: {
-      liabilityPaise:             8000,
-      liabilityNoThresholdPaise:  12000,
-      depositedPaise:             8000,
-      outstandingPaise:           0,
-    },
-    rows: [
-      {
-        panNumber:                'GIFSY1234A',
-        entityType:               'COMPANY',
-        maxSinglePaise:           200000,
-        thresholdMet:             true,
-        liabilityPaise:           8000,
-        liabilityNoThresholdPaise: 12000,
-        depositedPaise:           8000,
-        outstandingPaise:         0,
-      },
-    ],
-  },
-};
+/**
+ * Built from the SHARED response contract (fixtures/tds-report-contract.json) — the same file
+ * api/src/tds/tds.controller.contract.spec.ts checks the controller against, so these mocks can't
+ * drift from the real API shape again (summary keys are total*; money is paise as strings).
+ */
+const MOCK_194R: { success: true; data: typeof CONTRACT.r194 } = { success: true, data: CONTRACT.r194 };
+const MOCK_194C: { success: true; data: typeof CONTRACT.r194c } = { success: true, data: CONTRACT.r194c };
 
 const MOCK_UPLOAD_PREVIEW: { success: true; data: object } = {
   success: true,
@@ -182,11 +134,11 @@ describe('TDS — Admin TDS page API wiring', () => {
   });
 
   // TDS2 — paise ÷ 100 display
-  it('TDS2: liabilityPaise=50000 shown as ₹500.00', async () => {
+  it('TDS2: liabilityPaise=277800 shown as ₹2,778.00', async () => {
     vi.stubGlobal('fetch', make194RFetch());
     render(<AdminTdsPage />);
-    // ₹500.00 should appear (in summary card and/or table cell)
-    const els = await screen.findAllByText(/₹500\.00/);
+    // ₹2,778.00 should appear (in the table cell)
+    const els = await screen.findAllByText(/₹2,778\.00/);
     expect(els.length).toBeGreaterThan(0);
   });
 
@@ -196,12 +148,12 @@ describe('TDS — Admin TDS page API wiring', () => {
     render(<AdminTdsPage />);
     // Wait for table to load
     await screen.findByText('ABCDE1234F');
-    // The outstanding ₹200.00 cell in the table row (OutstandingCell component)
+    // The outstanding ₹778.00 cell in the table row (OutstandingCell component)
     // uses className with text-red-600 for positive values
     const redEls = document.querySelectorAll('.text-red-600');
-    // At least one element with text-red-600 should contain ₹200.00
+    // At least one element with text-red-600 should contain ₹778.00
     const hasRedOutstanding = Array.from(redEls).some((el) =>
-      (el.textContent ?? '').includes('₹200.00'),
+      (el.textContent ?? '').includes('₹778.00'),
     );
     expect(hasRedOutstanding).toBe(true);
   });
@@ -210,9 +162,9 @@ describe('TDS — Admin TDS page API wiring', () => {
   it('TDS4: outstanding negative shown as credit (emerald, " cr" suffix)', async () => {
     vi.stubGlobal('fetch', make194RFetch());
     render(<AdminTdsPage />);
-    // outstandingPaise=-5000 → negated → "₹50.00 cr" with emerald class
+    // outstandingPaise=-66700 → negated → "₹667.00 cr" with emerald class
     await screen.findByText('XYZPQ9876G');
-    const creditEl = await screen.findByText(/₹50\.00 cr/);
+    const creditEl = await screen.findByText(/₹667\.00 cr/);
     expect(creditEl.className).toMatch(/emerald/);
   });
 
@@ -395,5 +347,81 @@ describe('TDS — Admin TDS page API wiring', () => {
         ),
       ).toBe(true);
     });
+  });
+  // TDS14 — D10 (owner 2026-11-18): the 194R row shows how the year's TDS was worked out.
+  it('TDS14: 194R row shows cash/non-cash base, method · rate, deducted/client-borne parts, deducted so far and imported vendor TDS', async () => {
+    const row = {
+      panNumber: 'ABCDE1234F',
+      baseFyTotalPaise: 2300000, liabilityPaise: 238900, depositedPaise: 100000, outstandingPaise: 138900,
+      methodology: 'DEDUCT', ratePct: 10,
+      cashBasePaise: 1500000, nonCashBasePaise: 800000,
+      deductLiabilityPaise: 150000, clientBorneLiabilityPaise: 88900,
+      deductedPaise: 150000, importedVendorDepositPaise: 40000,
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { ...MOCK_194R.data, rows: [row] } }),
+    }));
+    render(<AdminTdsPage />);
+    expect(await screen.findByTestId('r194-method')).toHaveTextContent('Deduct · 10%');
+    expect(screen.getByTestId('r194-cash-noncash')).toHaveTextContent('₹15,000.00 / ₹8,000.00');
+    expect(screen.getByTestId('r194-parts')).toHaveTextContent('₹1,500.00 / ₹889.00');
+    expect(screen.getByTestId('r194-deducted')).toHaveTextContent('₹1,500.00');
+    expect(screen.getByTestId('r194-imported')).toHaveTextContent('of which imported vendor TDS ₹400.00');
+  });
+
+  it('TDS15: a row without the D10 fields (older API) still renders (Gross-up, ₹0 parts, no imported note)', async () => {
+    vi.stubGlobal('fetch', make194RFetch());
+    render(<AdminTdsPage />);
+    const methods = await screen.findAllByTestId('r194-method');
+    expect(methods[0]).toHaveTextContent('Gross-up');
+    expect(screen.queryByTestId('r194-imported')).toBeNull();
+  });
+  // TDS16 — the summary cards read the REAL API names (total*). Before the fix they read
+  // summary.baseFyTotalPaise / liabilityPaise and showed ₹0.00 against the real API.
+  it('TDS16: 194R summary cards show the API totals (total* keys from the shared contract)', async () => {
+    vi.stubGlobal('fetch', make194RFetch());
+    render(<AdminTdsPage />);
+    expect(await screen.findByTestId('r194-summary-base')).toHaveTextContent('₹55,000.00');
+    expect(screen.getByTestId('r194-summary-liability')).toHaveTextContent('₹6,111.00');
+    expect(screen.getByTestId('r194-summary-deposited')).toHaveTextContent('₹6,000.00');
+    expect(screen.getByTestId('r194-summary-outstanding')).toHaveTextContent('₹111.00');
+  });
+
+  it('TDS17: 194C summary cards show the API totals (total* keys from the shared contract)', async () => {
+    mockUseAdminSession.mockReturnValue({ role: 'GIFSY_ADMIN', name: 'Op', canManageSchemes: false } as ReturnType<typeof useAdminSession>);
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve(url.includes('/194c') ? MOCK_194C : MOCK_194R) }),
+    ));
+    render(<AdminTdsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /194C/ }));
+    expect(await screen.findByTestId('r194c-summary-liability')).toHaveTextContent('₹2,245.00');
+    expect(screen.getByTestId('r194c-summary-nothreshold')).toHaveTextContent('₹2,245.00');
+    expect(screen.getByTestId('r194c-summary-deposited')).toHaveTextContent('₹2,000.00');
+    expect(screen.getByTestId('r194c-summary-outstanding')).toHaveTextContent('₹245.00');
+  });
+  // TDS18 — B-M2: a withholding row with no base this FY carries a note — shown, never silent.
+  it('TDS18: a 194R row with a note shows it under the PAN', async () => {
+    const row = { ...CONTRACT.r194.rows[0], baseFyTotalPaise: '0', liabilityPaise: '0', deductedPaise: '120000',
+      note: 'TDS was withheld from this retailer this year but no benefit is counted this year — check before filing.' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { ...CONTRACT.r194, rows: [row] } }),
+    }));
+    render(<AdminTdsPage />);
+    expect(await screen.findByTestId('r194-note')).toHaveTextContent('no benefit is counted this year');
+  });
+  // TDS19 — owner 2026-11-18: over-withholding is FLAGGED on screen (row + summary card), no refund.
+  it('TDS19: TDS taken in excess shows on the row and as a summary card', async () => {
+    const row = { ...CONTRACT.r194.rows[0], deductedPaise: '600000', excessDeductedPaise: '300000' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { ...CONTRACT.r194, rows: [row],
+        summary: { ...CONTRACT.r194.summary, totalExcessDeductedPaise: '300000', excessRetailerCount: 1 } } }),
+    }));
+    render(<AdminTdsPage />);
+    expect(await screen.findByTestId('r194-excess')).toHaveTextContent('TDS taken in excess: ₹3,000.00');
+    expect(screen.getByTestId('r194-summary-excess')).toHaveTextContent('₹3,000.00');
+    expect(screen.getByTestId('r194-summary-excess')).toHaveTextContent('1 retailer');
   });
 });

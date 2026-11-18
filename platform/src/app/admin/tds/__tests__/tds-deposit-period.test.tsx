@@ -24,7 +24,7 @@ const MOCK_194R = {
   data: {
     section: '194R',
     fyLabel: '2025-26',
-    summary: { baseFyTotalPaise: 0, liabilityPaise: 0, depositedPaise: 0, outstandingPaise: 0 },
+    summary: { totalBasePaise: '0', totalLiabilityPaise: '0', totalDepositedPaise: '0', totalOutstandingPaise: '0' },
     rows: [
       {
         panNumber: 'ABCDE1234F',

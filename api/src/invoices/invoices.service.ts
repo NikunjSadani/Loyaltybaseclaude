@@ -23,6 +23,7 @@ import {
   UpdateInvoiceNumberDto,
 } from './dto/invoices.dto';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
+import { formatINR } from '../common/money';
 
 /**
  * Self-bill visibility invoicing service (P6.7).
@@ -82,7 +83,7 @@ export class InvoicesService {
 
     // If there are no separate-payout fields yet, nothing to invoice.
     if (separateFieldIds.length === 0) {
-      return { generated: 0, skipped: [], message: 'No separate-payout fields configured.' };
+      return { generated: 0, skipped: [], warnings: [], message: 'No separate-payout fields configured.' };
     }
 
     // ── Step 2: sum CreditPayoutEntry per outletCode for the period ─────────
@@ -94,12 +95,15 @@ export class InvoicesService {
         clientId,
         period,
         fieldId: { in: separateFieldIds },
+        // Owner 2026-11-18: self-billed SERVICE invoices (+ GST holdback) are ONLY for visibility payouts
+        // whose frozen section is 194C (null = a legacy visibility row = 194C). 194R visibility gets none.
+        OR: [{ tdsSection: 'SEC_194C' }, { tdsSection: null }],
       },
       select: { outletId: true, amountPaise: true },
     });
 
     if (entries.length === 0) {
-      return { generated: 0, skipped: [], message: `No visibility payout entries found for period ${period}.` };
+      return { generated: 0, skipped: [], warnings: [], message: `No visibility payout entries found for period ${period}.` };
     }
 
     // Group by outletCode (outletId is stored as outletCode in CreditPayoutEntry).
@@ -148,6 +152,8 @@ export class InvoicesService {
 
     // ── Step 4: per-outlet: KYC guard + GST compute + upsert ────────────────
     const skipped: { outletCode: string; reason: string }[] = [];
+    // B-M3: a regenerated invoice whose GST no longer matches an ALREADY-RELEASED reimbursement (loud, never silent).
+    const warnings: { outletCode: string; reason: string }[] = [];
     let generated = 0;
 
     // Existing count for this (clientId, period) — used for sequential invoice number.
@@ -326,18 +332,24 @@ export class InvoicesService {
             data: refreshData,
           });
           if (refreshed.count > 0) {
-            // SELF-HEAL (D5): a regenerate that brings an invoice from ₹0 → GST (e.g. a retailer
-            // reclassified to REGULAR after the first generation) never created its HELD
-            // reimbursement row — so it was missing from the release queue. Create it now if the
-            // refreshed invoice has GST and has no reimbursement yet (idempotent).
-            if (gst.gstApplicable) {
-              const inv = await this.prisma.autoInvoice.findFirst({
-                where: { clientId, outletCode, period, invoiceKind: 'SERVICE' },
-                select: { id: true },
-              });
-              if (inv) {
-                await this.ensureHeldReimbursement(clientId, inv.id, partner.id, outletCode, gst.gstPaise);
-              }
+            // The GST holdback follows the REFRESHED invoice (D5 + B-M3):
+            //   • no reimbursement yet + GST now  → SELF-HEAL: create the HELD row (e.g. a retailer
+            //     reclassified to REGULAR after the first generation);
+            //   • HELD + a different GST          → the held amount is updated (0 GST → the HELD row goes);
+            //   • RELEASED + a different GST      → never changed; flagged loudly in `warnings`.
+            const inv = await this.prisma.autoInvoice.findFirst({
+              where: { clientId, outletCode, period, invoiceKind: 'SERVICE' },
+              select: { id: true },
+            });
+            if (inv) {
+              const warning = await this.reconcileReimbursement(
+                clientId,
+                inv.id,
+                partner.id,
+                outletCode,
+                gst.gstApplicable ? gst.gstPaise : 0n,
+              );
+              if (warning) warnings.push({ outletCode, reason: warning });
             }
             generated += 1;
           } else {
@@ -351,7 +363,52 @@ export class InvoicesService {
       }
     }
 
-    return { generated, skipped };
+    return { generated, skipped, warnings };
+  }
+
+  /**
+   * B-M3 — bring the GST reimbursement of a REFRESHED invoice in line with its new GST. Returns a
+   * plain-words warning (never throws) when the GST was ALREADY RELEASED at a different amount — that
+   * money has gone and must be settled by hand. A HELD row is never deleted: when the GST drops to ₹0 it is
+   * kept at ₹0 (still HELD, with a note) for the audit trail, and reused if GST comes back.
+   */
+  private async reconcileReimbursement(
+    clientId: string,
+    autoInvoiceId: string,
+    partnerId: string,
+    outletCode: string,
+    gstPaise: bigint,
+  ): Promise<string | null> {
+    const existing = await this.prisma.gstReimbursement.findUnique({
+      where: { autoInvoiceId },
+      select: { id: true, status: true, gstPaise: true },
+    });
+    if (!existing) {
+      if (gstPaise > 0n) await this.ensureHeldReimbursement(clientId, autoInvoiceId, partnerId, outletCode, gstPaise);
+      return null;
+    }
+    if (existing.gstPaise === undefined || existing.gstPaise === gstPaise) return null;
+    if (existing.status === 'HELD') {
+      // Guarded on HELD: a release racing this refresh wins and is never rewritten.
+      const data: Prisma.GstReimbursementUpdateManyMutationInput =
+        gstPaise > 0n
+          ? { gstPaise }
+          : {
+              gstPaise: 0n,
+              notes:
+                `Regenerated invoice has no GST — held amount changed from ${formatINR(existing.gstPaise)} to ₹0 ` +
+                `on ${new Date().toISOString().slice(0, 10)}.`,
+            };
+      await this.prisma.gstReimbursement.updateMany({ where: { id: existing.id, status: 'HELD' }, data });
+      return null;
+    }
+    if (existing.status === 'RELEASED') {
+      return (
+        `GST of ${formatINR(existing.gstPaise)} was already released for this invoice, but the regenerated ` +
+        `invoice's GST is ${formatINR(gstPaise)} — settle the difference by hand.`
+      );
+    }
+    return null;
   }
 
   /**
@@ -416,7 +473,9 @@ export class InvoicesService {
 
     // This batch's visibility entries (created moments ago in this same tx).
     const entries = await tx.creditPayoutEntry.findMany({
-      where: { clientId, batchId, fieldId: { in: visibilityFieldIds } },
+      // Owner 2026-11-18: only visibility frozen 194C (null = legacy 194C) gets a SERVICE invoice + GST
+      // holdback; a 194R visibility payout gets neither.
+      where: { clientId, batchId, fieldId: { in: visibilityFieldIds }, OR: [{ tdsSection: 'SEC_194C' }, { tdsSection: null }] },
       select: { id: true, outletId: true, outletName: true, amountPaise: true },
     });
     if (entries.length === 0) return { generated: 0, linked: 0, skipped };

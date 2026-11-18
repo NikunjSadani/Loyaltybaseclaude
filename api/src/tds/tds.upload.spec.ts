@@ -22,6 +22,10 @@ import {
   buildOffPlatformTemplate,
   buildDepositTemplate,
 } from './tds.helpers';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+const mockTdsTenantSettings = {
+  resolveTdsPolicy: jest.fn().mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' }),
+};
 
 // ─── Mock Prisma ──────────────────────────────────────────────────────────────
 
@@ -286,6 +290,8 @@ describe('TdsService — uploadOffPlatform', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -366,6 +372,9 @@ describe('TdsService — uploadOffPlatform', () => {
     const callArg = mockPrisma.tdsOffPlatformEntry.createMany.mock.calls[0][0];
     expect(callArg.data).toHaveLength(2);
     expect(callArg.data[0]).toMatchObject({ panNumber: '__NO_PAN__', outletCode: 'out001' });
+    // A-H1: the retailer key AS OF this upload is stored (no-PAN owner key; a PAN row → its normalised PAN).
+    expect(callArg.data[0].resolvedKey).toBe('__NO_PAN__:cpN');
+    expect(callArg.data[1].resolvedKey).toBe('ABCDE1234F');
   });
 
   it('a marker row whose outlet owner HAS a PAN on file is kept and flagged in warnings', async () => {
@@ -499,6 +508,8 @@ describe('TdsService — uploadDeposit', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -531,6 +542,8 @@ describe('TdsService — uploadDeposit', () => {
     expect(row.clientId).toBe(CLIENT_ID);
     expect(row.amountPaise).toBe(300000n); // ₹3000 × 100
     expect(row.uploadBatchId).toMatch(/^DEP-/);
+    // A-H1: a 194R deposit stores the retailer key AS OF the upload.
+    expect(row.resolvedKey).toBe('ABCDE1234F');
   });
 
   it('194C deposit: depositorType=GIFSY, clientId=null', async () => {
@@ -646,6 +659,8 @@ describe('TdsService — getLiability (liability tracker)', () => {
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = module.get(TdsService);

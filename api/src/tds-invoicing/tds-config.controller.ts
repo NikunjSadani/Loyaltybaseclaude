@@ -120,9 +120,11 @@ export class TdsConfigController {
   }
 
   /**
-   * SET the per-tenant imported-payouts date (GIFSY_ADMIN-only). REPORT/LIABILITY-ONLY: it widens
-   * the 194R report base (TdsService.compute194R) and nothing else — no withholding, TDS invoice or
-   * recovery reads it. Written via upsertSetting with allowPlatformOnlyKey (the generic settings PUT
+   * SET the per-tenant imported-payouts date (GIFSY_ADMIN-only). It widens the 194R base of the ONE
+   * shared definition (tds-194r.shared — the 194R report AND the payout engine, owner D9 2026-11-18):
+   * imported payouts are client-borne (never withheld themselves) but count towards the retailer's
+   * ₹20,000 threshold, so a 194R visibility payout on DEDUCT can start being withheld sooner. No TDS
+   * invoice or recovery reads it. Written via upsertSetting with allowPlatformOnlyKey (the generic settings PUT
    * is fenced off for this key), which appends the generic + a dedicated `TdsImportedPayouts`
    * AuditLog (old→new) and busts the settings cache. An ASSUMED operator may only set the tenant
    * they are assumed into.

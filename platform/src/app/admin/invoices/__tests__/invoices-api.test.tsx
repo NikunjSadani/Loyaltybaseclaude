@@ -279,6 +279,27 @@ describe('ADMI — Admin Invoice list API wiring', () => {
     expect(screen.getByText(/generate invoices for a month/i)).toBeInTheDocument();
   });
 
+  it('ADMI16 (B-M3): Generate shows released-GST mismatches loudly', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, init?: { method?: string }) =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(
+          url.includes('/generate') && init?.method === 'POST'
+            ? { success: true, data: { generated: 1, skipped: [], warnings: [{ outletCode: 'OUT001', reason: 'GST of ₹900.00 was already released' }] } }
+            : { success: true, data: wrap([]) },
+        ),
+      }),
+    ));
+    const { container } = render(<AdminInvoiceListPage />);
+    await screen.findByText(/no invoices match your filters/i);
+    fireEvent.click(screen.getByText(/generate invoices/i));
+    fireEvent.change(container.querySelector('input[type="month"]')!, { target: { value: '2026-04' } });
+    fireEvent.click(screen.getByRole('button', { name: /^generate$/i }));
+    const box = await screen.findByTestId('generate-gst-warnings');
+    expect(box).toHaveTextContent('OUT001');
+    expect(box).toHaveTextContent('already released');
+  });
+
   it('ADMI11: "Export Excel" button calls the backend export endpoint (#44)', async () => {
     // createObjectURL/revokeObjectURL are not in jsdom — stub them.
     const createObjectURL = vi.fn(() => 'blob:mock');

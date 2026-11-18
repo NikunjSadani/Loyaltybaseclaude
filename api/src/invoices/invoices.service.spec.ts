@@ -312,7 +312,12 @@ const mockPrisma = {
     updateMany: jest.fn(),
   },
   // generateForPeriod ensures a HELD reimbursement (create + refresh self-heal); default: none exists.
-  gstReimbursement: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() },
+  gstReimbursement: {
+    findUnique: jest.fn().mockResolvedValue(null),
+    create: jest.fn(),
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+  },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -393,6 +398,13 @@ describe('InvoicesService', () => {
       const result = await service.generateForPeriod(admin, { period: '2025-01' });
       expect(result.generated).toBe(0);
       expect(mockPrisma.creditPayoutEntry.findMany).not.toHaveBeenCalled();
+    });
+
+    it('owner 2026-11-18: the per-period (Path-2) generation reads ONLY 194C visibility entries (null = legacy 194C)', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      await service.generateForPeriod(admin, { period: '2025-01' });
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where.OR).toEqual([{ tdsSection: 'SEC_194C' }, { tdsSection: null }]);
     });
 
     it('returns early if no payout entries for the period', async () => {
@@ -613,6 +625,76 @@ describe('InvoicesService', () => {
       await service.generateForPeriod(admin, { period: '2025-01' });
 
       expect(mockPrisma.gstReimbursement.create).not.toHaveBeenCalled();
+    });
+
+    describe('B-M3: a regenerate that changes the GST reconciles the HELD reimbursement (never leaves it stale)', () => {
+      const refreshWith = (outlet: unknown, reimb: unknown) => {
+        mockPrisma.autoInvoice.count.mockResolvedValue(1);
+        mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([{ outletId: 'O1', amountPaise: 500000n }]);
+        mockPrisma.outlet.findMany.mockResolvedValue([outlet]);
+        const p2002 = new Prisma.PrismaClientKnownRequestError('x', { code: 'P2002', clientVersion: '5.0.0' });
+        mockPrisma.autoInvoice.create.mockRejectedValue(p2002);
+        mockPrisma.autoInvoice.findFirst.mockResolvedValue({ id: 'inv1' });
+        mockPrisma.autoInvoice.updateMany.mockResolvedValue({ count: 1 });
+        mockPrisma.gstReimbursement.findUnique.mockResolvedValue(reimb);
+      };
+      const unregistered = { ...kycApprovedWBOutlet, partner: { ...kycApprovedWBOutlet.partner, gstRegistrationType: 'UNREGISTERED', gstNumber: null } };
+
+      it('HELD + a LOWER GST base → the held amount is updated to the invoice GST (guarded on HELD)', async () => {
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'HELD', gstPaise: 999_999n });
+        const res = await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.updateMany).toHaveBeenCalledTimes(1);
+        const call = mockPrisma.gstReimbursement.updateMany.mock.calls[0][0];
+        expect(call.where).toEqual({ id: 'gr1', status: 'HELD' });
+        expect(call.data.gstPaise).not.toBe(999_999n);
+        expect(Number(call.data.gstPaise)).toBeGreaterThan(0);
+        expect(mockPrisma.gstReimbursement.create).not.toHaveBeenCalled();
+        expect(res.warnings).toEqual([]);
+      });
+
+      it('HELD + the invoice no longer has GST → KEPT at ₹0 (still HELD, with a note) — never deleted', async () => {
+        refreshWith(unregistered, { id: 'gr1', status: 'HELD', gstPaise: 90_000n });
+        await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.deleteMany).not.toHaveBeenCalled();
+        expect(mockPrisma.gstReimbursement.updateMany).toHaveBeenCalledTimes(1);
+        const call = mockPrisma.gstReimbursement.updateMany.mock.calls[0][0];
+        expect(call.where).toEqual({ id: 'gr1', status: 'HELD' });
+        expect(call.data.gstPaise).toBe(0n);
+        expect(call.data.notes).toMatch(/₹900\.00/);
+        expect(call.data.notes).toMatch(/no GST/i);
+      });
+
+      it('a ₹0 HELD row is REUSED when GST comes back (amount updated, no second row)', async () => {
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'HELD', gstPaise: 0n });
+        await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.create).not.toHaveBeenCalled();
+        const call = mockPrisma.gstReimbursement.updateMany.mock.calls[0][0];
+        expect(call.where).toEqual({ id: 'gr1', status: 'HELD' });
+        expect(Number(call.data.gstPaise)).toBeGreaterThan(0);
+      });
+
+      it('HELD + the same GST → untouched', async () => {
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'HELD', gstPaise: 90_000n });
+        await service.generateForPeriod(admin, { period: '2025-01' });
+        const newGst = mockPrisma.autoInvoice.updateMany.mock.calls[0][0].data.gstPaise as bigint;
+        mockPrisma.gstReimbursement.updateMany.mockClear();
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'HELD', gstPaise: newGst });
+        await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.updateMany).not.toHaveBeenCalled();
+        expect(mockPrisma.gstReimbursement.deleteMany).not.toHaveBeenCalled();
+      });
+
+      it('already RELEASED with a different amount → NOT changed, flagged LOUDLY in the result', async () => {
+        refreshWith(kycApprovedWBOutlet, { id: 'gr1', status: 'RELEASED', gstPaise: 999_999n });
+        const res = await service.generateForPeriod(admin, { period: '2025-01' });
+        expect(mockPrisma.gstReimbursement.updateMany).not.toHaveBeenCalled();
+        expect(mockPrisma.gstReimbursement.deleteMany).not.toHaveBeenCalled();
+        expect(res.warnings).toHaveLength(1);
+        expect(res.warnings[0].outletCode).toBe('O1');
+        expect(res.warnings[0].reason).toMatch(/already released/i);
+        expect(res.warnings[0].reason).toContain('₹9,999.99');
+      });
     });
 
     it('does NOT mutate a PAID (finalized) invoice on re-run — guarded updateMany skips it', async () => {
@@ -977,6 +1059,20 @@ describe('InvoicesService', () => {
       expect(res.generated).toBe(0);
       expect(res.skipped[0].reason).toMatch(/KYC not approved/i);
       expect(mockTx.autoInvoice.create).not.toHaveBeenCalled();
+    });
+
+    it('owner 2026-11-18: ONLY visibility frozen 194C is invoiced — the entry read excludes 194R (null = legacy 194C)', async () => {
+      // The DB applies the filter; model it: the confirm's only visibility entry is frozen 194R → none returned.
+      mockTx.creditPayoutEntry.findMany.mockImplementation(async (a: { where: { OR?: unknown } }) =>
+        a.where.OR ? [] : visEntries,
+      );
+      const res = await service.generateForBatch(mockTx as never, {
+        clientId: 'bajaj', period: '2026-05', batchId: 'b1', visibilityFieldIds: ['f-vis'],
+      });
+      expect(mockTx.creditPayoutEntry.findMany.mock.calls[0][0].where.OR).toEqual([{ tdsSection: 'SEC_194C' }, { tdsSection: null }]);
+      expect(res).toEqual({ generated: 0, linked: 0, skipped: [] });
+      expect(mockTx.autoInvoice.create).not.toHaveBeenCalled();
+      expect(mockTx.gstReimbursement.create).not.toHaveBeenCalled();
     });
 
     it('no-ops when there are no visibility fields', async () => {

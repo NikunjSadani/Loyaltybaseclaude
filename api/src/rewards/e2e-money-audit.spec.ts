@@ -24,6 +24,10 @@ import { TdsService } from '../tds/tds.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
 import { DEFAULT_RESOLVED_TDS_STATUTORY } from '../tds/tds.helpers';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+const mockTdsTenantSettings = {
+  resolveTdsPolicy: jest.fn().mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' }),
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // A. CANONICAL VALUE FREEZE — exhaustive money-exactness edges (pure helper)
@@ -191,6 +195,7 @@ describe('C. compute194R Source-2 — RedemptionOrder.valuePaise cumulation', ()
     redemptionOrder: { findMany: jest.fn() },
     tdsOffPlatformEntry: { findMany: jest.fn() },
     tdsDeposit: { findMany: jest.fn() },
+    tdsDeductionEntry: { findMany: jest.fn().mockResolvedValue([]) },
   };
   let service: TdsService;
   const CLIENT = 'deoleo';
@@ -203,6 +208,8 @@ describe('C. compute194R Source-2 — RedemptionOrder.valuePaise cumulation', ()
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TdsStatutoryConfigService, useValue: mockStatutory },
+        // D6: the 194R report reads the client's CURRENT methodology (default policy = GROSS_UP).
+        { provide: TenantSettingsService, useValue: mockTdsTenantSettings },
       ],
     }).compile();
     service = mod.get(TdsService);
