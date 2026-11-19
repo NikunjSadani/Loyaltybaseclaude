@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { getStoredUser, getRoleHome } from '@/lib/auth-client';
+import { loginUrlWithNext } from '@/lib/return-to';
 
 /**
  * Client-side route guard. Renders its children only when (a) a session token is present and
@@ -31,7 +32,8 @@ export function RequireAuth({
   useEffect(() => {
     const user = getStoredUser();
     if (!user) {
-      router.replace('/auth/login');
+      // Keep where the user was going (same-origin relative path only — see lib/return-to).
+      router.replace(loginUrlWithNext(`${window.location.pathname}${window.location.search}`));
       return;
     }
     if (rolesKey) {

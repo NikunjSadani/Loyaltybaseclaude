@@ -4,79 +4,83 @@ Status: built on `feat/ticket-assign-escalate` (2026-11-19), unmerged. **PLATFOR
 Deoleo included) — owner-approved 2026-11-19.
 
 Code: `api/src/tickets/*` (service, controller, `ticket-submitter.ts`, `ticket-link.ts`) ·
-`platform/src/app/admin/tickets/page.tsx` · migration `20261120110000_ticket_waiting_on_client_status`.
+`platform/src/app/admin/tickets/page.tsx` · `platform/src/lib/return-to.ts`.
+Migrations: `20261120110000_ticket_waiting_on_client_status` (TicketStatus += WAITING_ON_CLIENT) ·
+`20261120110100_ticket_note_visibility` (enum `TicketNoteVisibility` + nullable `ticket_messages.internalVisibility`).
+Both additive + idempotent, no backfill.
 
-## Who can do what
+## Readers (who sees what)
+
+| Reader | Roles | Sees |
+|---|---|---|
+| GIFSY | GIFSY_ADMIN, GIFSY_STAFF (while assumed into the tenant) | everything |
+| CLIENT desk | CLIENT_ADMIN, MIS_USER | all tenant tickets; non-internal messages + internal notes that are `SHARED_WITH_CLIENT` or legacy (`NULL`) — never `GIFSY_ONLY` |
+| FIELD | outlet owner (SSS/WHOLESALER/SUB_STOCKIST), SALES_* | own tickets only, via an allow-listed projection: **no** assignee, priority, metadata or reference; WAITING_ON_CLIENT **and ESCALATED** shown as IN_PROGRESS (a field `IN_PROGRESS` filter matches all three; filtering on the masked states matches nothing); non-internal messages only |
+
+Internal-note visibility: `GIFSY_ONLY` = assign / escalation / email-outcome notes; `SHARED_WITH_CLIENT` = the
+remarks request, the client's reply, cancellations, and any internal note the client desk writes. A Gifsy
+generic internal note (the "Internal Note" composer) keeps the legacy `NULL` (visible to all support admins, as
+before). Old notes are untouched.
+
+## Endpoints
 
 | Action | Endpoint | Who |
 |---|---|---|
-| Picker options | `GET /v1/tickets/:id/assignees` | Gifsy operators (`@Roles('GIFSY_ADMIN')` + `support:write`; GIFSY_STAFF via their GifsyRole) |
-| Assign / unassign | `POST /v1/tickets/:id/assign {assigneeId \| null}` | Gifsy operators |
-| Escalate (internal) | `POST /v1/tickets/:id/escalate {escalateTo, reason, priority?}` | Gifsy operators (`support:escalate`) |
-| Ask client for remarks | `POST /v1/tickets/:id/request-client-remarks {clientAdminId, note}` | Gifsy operators (`support:escalate`) |
-| Reply with remarks | `POST /v1/tickets/:id/client-remarks {message}` | CLIENT_ADMIN of the ticket's own tenant only (role re-checked in the service — GIFSY_ADMIN passes every `@Roles`) |
+| Picker options | `GET /v1/tickets/:id/assignees` | Gifsy (`@Roles('GIFSY_ADMIN')` + `support:write`; staff via GifsyRole) |
+| Assign / unassign | `POST /v1/tickets/:id/assign {assigneeId \| null}` | Gifsy |
+| Escalate (internal) | `POST /v1/tickets/:id/escalate {escalateTo, reason, priority?}` | Gifsy (`support:escalate`) |
+| Ask client for remarks | `POST /v1/tickets/:id/request-client-remarks {clientAdminId, note}` | Gifsy (`support:escalate`) |
+| Reply with remarks | `POST /v1/tickets/:id/client-remarks {message}` | CLIENT_ADMIN of the ticket's tenant (role re-checked in the service) |
+| List "awaiting me" | `GET /v1/tickets?awaitingMine=true` | CLIENT_ADMIN |
 
-Gifsy works on a ticket only while **assumed** into its tenant (every lookup is pinned to the JWT `clientId`,
-same as the rest of the tickets API). CLIENT_ADMIN keeps the read-only "Assigned" field.
+Assignable set: active GIFSY_ADMIN (home `gifsy`) · active GIFSY_STAFF with a grant for the tenant **and** a live
+GifsyRole holding `support:read` · active CLIENT_ADMINs of the ticket's tenant. Anything else → 400.
+Escalation targets are Gifsy only.
 
-**Assignable / escalation set** (`assignableUsers`): active GIFSY_ADMIN (home tenant `gifsy`) · active
-GIFSY_STAFF holding a `GifsyStaffTenantGrant` for the ticket's tenant · active CLIENT_ADMINs of the ticket's
-tenant (staff must also hold a live GifsyRole with `support:read`, so they can open what they are given).
-Anyone else (another tenant's admin, an ungranted/inactive staff, an outlet, MIS) → 400. Escalation
-targets are Gifsy users only; involving the client goes through "ask for remarks".
+Every state-changing action (assign, escalate, request remarks, set status) is guarded optimistically
+(`status` + `updatedAt` unchanged since read) → 409 "reload" instead of resurrecting / clobbering. The client
+reply is pinned to the request it read (`metadata.clientRemarks.requestedAt`).
 
-## Escalate vs ask-for-remarks (one "Escalate" control, two modes)
+## Ask-for-remarks lifecycle
 
-- **Escalate to Gifsy support** — no longer needs a prior assignment (the old button "escalated" to the
-  existing assignee and so was permanently disabled). Priority bump (default HIGH) + `ESCALATED` + the picked
-  user becomes assignee; internal note, audit, bell to the target.
-- **Ask client admin for remarks** — status `WAITING_ON_CLIENT`; marker in `Ticket.metadata.clientRemarks`
-  `{requestedFromId, requestedFromName, requestedById, requestedByName, note, requestedAt}`; internal note +
-  audit; **bell + email** to that client admin. The email (MSG91 SMTP via `Msg91Service.sendEmail`, same as
-  scheduled reports) carries a short subject + a link to `/admin/tickets?ticket=<id>` on the tenant's host
-  (primary `ClientDomain`, else `<slug>.gifsy.in`; `uat-` prefixed when the caller is on a `uat-` host). It is
-  the ONLY email the tickets module sends. No address on file / relay failure → the request still stands, the
-  response says `emailSent:false` + reason, the UI shows a warning, and an internal note records it.
-- **Client admin reply** — stored as an INTERNAL message (Gifsy + the tenant's admin desk see it; outlet/sales
-  never). Ticket → `IN_PROGRESS`, marker cleared, bell to the requester (+ a Gifsy assignee). Conditional update:
-  if Gifsy changed the status meanwhile → 409, nothing resurrected. Any CLIENT_ADMIN of the tenant may answer.
-- Gifsy can still reply / change status / close at any time; any status change or escalation clears the marker.
-- Concurrency: escalate and ask-for-remarks update only if the ticket is unchanged since it was read (status +
-  updatedAt), the client reply only if the marker it read is still the live one — otherwise 409 "reload", never a
-  closed ticket resurrected or a newer request wiped.
-- While a ticket waits on the client, the client admin's outlet-reply composer is hidden (remarks box only), so
-  remarks can't be posted to the outlet by mistake. Email is reported as NOT sent when SMTP isn't configured.
-
-## Visibility rules (security)
-
-Outlet- and sales-facing reads (`GET /tickets`, `GET /tickets/:id` for non-support roles) never return
-internal messages (DB filter), the `metadata` blob, or the `WAITING_ON_CLIENT` status (masked as
-`IN_PROGRESS`; a field reader's `IN_PROGRESS` filter matches both, `WAITING_ON_CLIENT` matches nothing). No other
-API path returns ticket messages. The list returns `awaitingClient {total, mine}` to support admins only.
+1. Gifsy asks → `WAITING_ON_CLIENT`; marker `metadata.clientRemarks {requestedFromId/Name, requestedById/Name, note,
+   requestedAt, fromStatus}`; SHARED note; audit; bell to the client admin.
+   - Same client admin already pending → `alreadyPending`, nothing changed or re-sent (retry-safe).
+   - Different client admin → replaces; the old one gets a "cancelled" SHARED note + bell.
+2. Email (MSG91 SMTP, the scheduled-reports sender) runs **after commit, fire-and-forget**; the response says
+   `emailStatus: SENDING` (outcome then written back as a GIFSY_ONLY note — "Email sent…" / "NOT sent…") or
+   `NOT_SENT` + reason when known up front (no address / SMTP not configured).
+   Link host comes from **server config** (`ticket-link.ts`): `TENANT_LINK_ENV` → Cloud Run `K_SERVICE`
+   (`*staging*` → staging) → DB name (`gifsy_staging` / `gifsy_prod`) → `NODE_ENV`. Staging always links
+   `uat-<tenant host>`; prod the tenant's primary domain / `<slug>.gifsy.in`; never derived from the caller's host.
+3. Client admin replies → SHARED internal message; status back to **ESCALATED if it was escalated before the
+   request, else IN_PROGRESS**; marker cleared; bell to the requester (+ a Gifsy assignee).
+4. While waiting, the client desk (CLIENT_ADMIN/MIS) **cannot** resolve / close / reopen (409 "send your remarks
+   first") and its outlet-reply composer is hidden. Gifsy can still do anything: escalating or changing status
+   cancels the request explicitly (SHARED note "Remarks request to X cancelled — <reason>" + bell to X).
 
 ## Raised by / outlet
 
-Derived from what the model stores (`ticket-submitter.ts`):
-- **Raised by** — creator role SSS/WHOLESALER/SUB_STOCKIST → "Outlet owner — <ChannelPartner.ownerName>";
-  SALES_* → "<name> · <SalesUser.hierarchyLevel.name>" (the tenant's own level label); others → "<name> · <role>".
-- **Outlet** — `referenceType='OUTLET'` + `referenceId` (stored at create when the sales app's "For an Outlet"
-  is used, validated against the rep's downline assignments; a partner may name only their own outlet). A
-  partner-raised ticket without one shows the owner's primary outlet (flagged when they own several). Sales
-  "own issue" tickets — and sales tickets created before this change (outlet only in the subject text) — show "—".
-- Shown in the list (outlet name + code, "Raised by") and the ticket dialog header; the Ticket Aging Excel
-  replaces "Created By" with **Raised by** and adds **Outlet code**.
+`ticket-submitter.ts`: partner raiser → "Outlet owner — <owner name>"; SALES_* → "<name> · <hierarchy level
+name>"; staff → "<name> · <role label>". Outlet = `referenceType 'OUTLET'` (stored by the sales "For an Outlet" flow,
+validated against the rep's downline; soft-deleted outlets are no longer offered) → else the outlet owner's primary
+outlet (flagged when they own several) → else "—". Thread messages carry the same labels (`senderLabel`).
+Ticket Aging Excel: all existing columns unchanged (incl. **Created By**); **Raised by** and **Outlet code** appended
+at the end.
 
 ## UI
 
-`/admin/tickets` (Gifsy and client admin): ticket opens as a centred Radix dialog (focus trap, Escape, focus
-returns to the row; rows are keyboard-openable). Gifsy: "Assign to" picker, "Escalate" panel, "Awaiting client"
-count card + filter (fetched server-side). Client admin: "N tickets awaiting your remarks" banner (only when >0),
-"Awaiting your remarks" section with the note + reply box. `?ticket=<id>` deep-links (bell / email).
-The admin header now renders the shared notification bell.
+`/admin/tickets`: centred Radix dialog (focus trap, Escape, focus back to the row); keyboard-openable rows;
+"Load more" paging with a total; Gifsy: pick-then-**Assign** button, Escalate panel (Gifsy escalation / ask
+client), "Awaiting client" card + filter (server-side); client admin: "N awaiting your remarks" banner → **Show**
+lists only theirs; remarks box. Admin header renders the shared bell. Sales "New ticket" shows the server error.
+
+Sign-in return-to: the proxy, `RequireAuth` and `SessionExpiryGuard` send signed-out users to
+`/auth/login?next=<path+query>`; the login page honours it only for a same-origin relative path into a portal the
+role may open (`/admin`, `/sales`; partners always go through the outlet picker).
 
 ## Known limits
 
-- The default list is one page (20, newest first) — pre-existing; the "Awaiting client" view is fetched
-  server-side (up to 100).
-- The bell/email deep link works for a Gifsy operator only once assumed into the ticket's tenant.
-- `platform/src/lib/ticket-aging-export.ts` (legacy FE Excel builder, only its own test uses it) is unchanged.
+- Older sales tickets stored the outlet only in the subject text → "—".
+- A bell/email deep link works for Gifsy only once assumed into the ticket's programme (the page says so).
+- `platform/src/lib/ticket-aging-export.ts` (legacy FE Excel builder, only its own test imports it) is unchanged.

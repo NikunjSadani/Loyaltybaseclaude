@@ -51,13 +51,21 @@ const ASSIGNEES = [
   { id: 'cadmin1', name: 'Deoleo Admin', role: 'CLIENT_ADMIN', kind: 'CLIENT_ADMIN' },
 ];
 
-function routeGet(opts: { list: any[]; detail?: any; awaiting?: { total: number; mine: number }; waitingList?: any[] }) {
+function routeGet(opts: {
+  list: any[]; detail?: any; awaiting?: { total: number; mine: number }; waitingList?: any[]; mineList?: any[];
+  page2?: any[]; total?: number;
+}) {
   getMock.mockImplementation((url: string) => {
     if (url.endsWith('/assignees')) return Promise.resolve({ success: true, data: { assignees: ASSIGNEES } });
-    if (url.startsWith('/api/tickets?status=WAITING_ON_CLIENT')) {
-      return Promise.resolve({ success: true, data: { tickets: opts.waitingList ?? [], awaitingClient: opts.awaiting } });
+    if (url.startsWith('/api/tickets?')) {
+      const q = new URLSearchParams(url.split('?')[1]);
+      const page = Number(q.get('page') ?? '1');
+      const rows = q.get('status') === 'WAITING_ON_CLIENT' ? (opts.waitingList ?? [])
+        : q.get('awaitingMine') === 'true' ? (opts.mineList ?? [])
+        : page === 2 ? (opts.page2 ?? []) : opts.list;
+      const total = q.get('status') || q.get('awaitingMine') ? rows.length : (opts.total ?? opts.list.length);
+      return Promise.resolve({ success: true, data: { tickets: rows, pagination: { total }, awaitingClient: opts.awaiting } });
     }
-    if (url === '/api/tickets') return Promise.resolve({ success: true, data: { tickets: opts.list, awaitingClient: opts.awaiting } });
     if (url.startsWith('/api/tickets/')) return Promise.resolve({ success: true, data: { ticket: opts.detail ?? opts.list[0] } });
     return Promise.resolve({ success: true, data: {} });
   });
@@ -85,8 +93,14 @@ describe('Gifsy: assign picker', () => {
     expect(within(picker).getByRole('group', { name: 'Gifsy support' })).toBeInTheDocument();
     expect(within(picker).getByRole('group', { name: 'Client admins' })).toBeInTheDocument();
 
+    // Picking alone never fires a request (keyboard arrowing is safe) — the explicit button does.
+    expect(screen.getByRole('button', { name: 'Unassign' })).toBeDisabled();
+    fireEvent.change(picker, { target: { value: 'staff1' } });
     fireEvent.change(picker, { target: { value: 'cadmin1' } });
+    expect(postMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Assign' }));
     await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/tickets/t1/assign', { assigneeId: 'cadmin1' }));
+    expect(postMock).toHaveBeenCalledTimes(1);
   });
 
   it('"Unassigned" sends assigneeId null', async () => {
@@ -96,6 +110,7 @@ describe('Gifsy: assign picker', () => {
     const picker = await screen.findByLabelText('Assign to');
     await waitFor(() => expect((picker as HTMLSelectElement).value).toBe('staff1'));
     fireEvent.change(picker, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Unassign' }));
     await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/tickets/t1/assign', { assigneeId: null }));
   });
 
@@ -138,7 +153,7 @@ describe('Gifsy: escalate dialog', () => {
 
   it('asks a client admin for remarks and warns loudly when the email was not sent', async () => {
     routeGet({ list: [baseTicket()] });
-    postMock.mockResolvedValue({ success: true, data: { emailSent: false, emailError: 'the client admin has no email address on file' } });
+    postMock.mockResolvedValue({ success: true, data: { emailStatus: 'NOT_SENT', emailError: 'the client admin has no email address on file' } });
     render(<AdminTicketsPage />);
     await openFirstTicket();
     fireEvent.click(await screen.findByRole('button', { name: /Escalate/ }));
@@ -237,7 +252,7 @@ describe('Gifsy: "Awaiting client" filter + count', () => {
     expect(chip).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(chip);
 
-    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/api/tickets?status=WAITING_ON_CLIENT&limit=100'));
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/api/tickets?status=WAITING_ON_CLIENT&page=1&limit=25'));
     expect(await screen.findByText('Awaiting client', { selector: 'span' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Awaiting client (3)' })).toHaveAttribute('aria-pressed', 'true');
   });
@@ -386,9 +401,10 @@ describe('audit regressions', () => {
     const picker = await within(dialog).findByLabelText('Assign to');
     await waitFor(() => expect(within(picker).getByRole('option', { name: 'Staff One' })).toBeInTheDocument());
     fireEvent.change(picker, { target: { value: 'staff1' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Assign' }));
     await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/tickets/t1/assign', { assigneeId: 'staff1' }));
     // list reloaded (reloadKey) — table stays mounted, no spinner flash
-    await waitFor(() => expect(getMock.mock.calls.filter(([u]) => u === '/api/tickets').length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(getMock.mock.calls.filter(([u]) => String(u).startsWith('/api/tickets?')).length).toBeGreaterThanOrEqual(2));
     fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await waitFor(() => expect(document.activeElement?.getAttribute('data-ticket-row')).toBe('t1'));
@@ -402,10 +418,75 @@ describe('audit regressions', () => {
     await waitFor(() => expect(getMock.mock.calls.filter(([u]) => u === '/api/tickets/t1').length).toBe(1));
   });
 
-  it('the awaiting view says when it is capped', async () => {
-    routeGet({ list: [baseTicket()], awaiting: { total: 150, mine: 0 }, waitingList: [waitingTicket()] });
+  it('paging: "Load more" fetches the next page and shows the total', async () => {
+    routeGet({ list: [baseTicket()], page2: [baseTicket({ id: 't2', ticketNumber: 'TKT-2', subject: 'Second page ticket' })], total: 2 });
     render(<AdminTicketsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Awaiting client (150)' }));
-    expect(await screen.findByText(/showing the newest 1 of 150 awaiting/)).toBeInTheDocument();
+    expect(await screen.findByText('Showing 1 of 2')).toBeInTheDocument();
+    expect(getMock).toHaveBeenCalledWith('/api/tickets?page=1&limit=25');
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    expect(await screen.findByText('Second page ticket')).toBeInTheDocument();
+    expect(getMock).toHaveBeenCalledWith('/api/tickets?page=2&limit=25');
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument());
+  });
+
+  it('client admin "Show" lists ONLY the tickets awaiting this admin (count and list agree)', async () => {
+    session = { role: 'CLIENT_ADMIN', name: 'Deoleo Admin', userId: 'cadmin1', canManageSchemes: false };
+    routeGet({ list: [baseTicket(), waitingTicket('cadmin2')], awaiting: { total: 2, mine: 1 }, mineList: [waitingTicket('cadmin1')] });
+    render(<AdminTicketsPage />);
+    expect(await screen.findByText('1 ticket awaiting your remarks')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show' }));
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/api/tickets?awaitingMine=true&page=1&limit=25'));
+    expect(await screen.findByRole('button', { name: /Awaiting your remarks \(1\)/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole('row', { name: /Open ticket/ })).toHaveLength(1));
+  });
+
+  it('the client desk cannot change status while Gifsy waits on its remarks', async () => {
+    session = { role: 'CLIENT_ADMIN', name: 'Deoleo Admin', userId: 'cadmin1', canManageSchemes: false };
+    routeGet({ list: [waitingTicket()], awaiting: { total: 1, mine: 1 } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/status changes are paused/)).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /Mark Resolved/ })).not.toBeInTheDocument();
+  });
+
+  it('remarks request: alreadyPending and email SENDING are both reported honestly', async () => {
+    routeGet({ list: [baseTicket()] });
+    postMock.mockResolvedValue({ success: true, data: { alreadyPending: true, message: 'A remarks request to Deoleo Admin is already pending' } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const ask = async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /Escalate/ }));
+      const dialog = await screen.findByRole('group', { name: 'Escalate ticket' });
+      fireEvent.click(within(dialog).getByLabelText('Ask client admin for remarks'));
+      const sel = within(dialog).getByLabelText('Client admin');
+      await waitFor(() => expect(within(sel).getByRole('option', { name: 'Deoleo Admin' })).toBeInTheDocument());
+      fireEvent.change(sel, { target: { value: 'cadmin1' } });
+      fireEvent.change(within(dialog).getByLabelText('What do you need from the client admin?'), { target: { value: 'x' } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Send request' }));
+    };
+    await ask();
+    expect(await screen.findByText(/Nothing was re-sent/)).toBeInTheDocument();
+    postMock.mockResolvedValue({ success: true, data: { emailStatus: 'SENDING' } });
+    await ask();
+    expect(await screen.findByText(/email is being sent/)).toBeInTheDocument();
+  });
+
+  it('labels thread messages: outlet owner, sales rep · designation, Gifsy, client admin', async () => {
+    const t = baseTicket({
+      messages: [
+        { id: 'a', message: 'm1', isInternal: false, createdAt: now(), senderLabel: 'Outlet owner — Ramesh Gupta', senderKind: 'OUTLET_OWNER', sender: { id: 'u1', name: 'Ramesh', role: 'WHOLESALER' } },
+        { id: 'b', message: 'm2', isInternal: false, createdAt: now(), senderLabel: 'Meera Iyer · ISR', senderKind: 'SALES', sender: { id: 'u2', name: 'Meera Iyer', role: 'SALES_ISR' } },
+        { id: 'c', message: 'm3', isInternal: false, createdAt: now(), senderLabel: 'Owner · Gifsy support', senderKind: 'STAFF', sender: { id: 'admin1', name: 'Owner', role: 'GIFSY_ADMIN' } },
+        { id: 'd', message: 'm4', isInternal: false, createdAt: now(), senderLabel: 'Anita · Client admin', senderKind: 'STAFF', sender: { id: 'ca', name: 'Anita', role: 'CLIENT_ADMIN' } },
+      ],
+    });
+    routeGet({ list: [t] });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    for (const label of ['Outlet owner — Ramesh Gupta', 'Meera Iyer · ISR', 'Owner · Gifsy support', 'Anita · Client admin']) {
+      expect(await within(dialog).findByText(label, { selector: 'p' })).toBeInTheDocument();
+    }
   });
 });

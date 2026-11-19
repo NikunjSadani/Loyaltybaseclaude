@@ -507,6 +507,20 @@ describe('proxy — page-nav silent refresh (expired/absent access + valid refre
     expect(loc.pathname).toBe('/auth/login');
     expect(loc.searchParams.get('expired')).toBeNull();
   });
+
+  it('a signed-out deep link (ticket email) survives login: ?next=<path+query>, same-origin relative only', async () => {
+    const res = await run(makeReq('/admin/tickets?ticket=t1'));
+    const loc = new URL(res.headers.get('location') as string);
+    expect(loc.pathname).toBe('/auth/login');
+    expect(loc.searchParams.get('next')).toBe('/admin/tickets?ticket=t1');
+    // expired-session bounce keeps it too
+    mockJwt.mockRejectedValue(new Error('exp'));
+    mockRefresh.mockResolvedValue(null);
+    const res2 = await run(makeReq('/admin/tickets?ticket=t1', { cookies: { token: 'x', refresh_token: 'dead' } }));
+    const loc2 = new URL(res2.headers.get('location') as string);
+    expect(loc2.searchParams.get('expired')).toBe('1');
+    expect(loc2.searchParams.get('next')).toBe('/admin/tickets?ticket=t1');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

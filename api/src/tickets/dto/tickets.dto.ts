@@ -118,6 +118,11 @@ export class ListTicketsQueryDto {
   @IsEnum(TicketCategory)
   category?: TicketCategory;
 
+  /** CLIENT_ADMIN only: just the tickets waiting on THIS admin's remarks. */
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  awaitingMine?: 'true' | 'false';
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()

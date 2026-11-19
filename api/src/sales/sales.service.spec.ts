@@ -599,7 +599,7 @@ describe('SalesService', () => {
         unassignedAt: null,
         // PARKED outlets are FULLY hidden from reps via a null-safe OR-wrap (keeps null +
         // NOT_INTERESTED, drops only PARKED).
-        outlet: { OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] },
+        outlet: { OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }], deletedAt: null },
       });
 
       expect(res.outlets).toHaveLength(3);
@@ -840,7 +840,9 @@ describe('SalesService', () => {
       await service.getMyOutlets(caller);
 
       const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
-      expect(where.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] });
+      expect(where.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }], deletedAt: null });
+      // Soft-deleted outlets are hidden from the rep too (they can't be picked for a ticket).
+      expect(where.outlet.deletedAt).toBeNull();
       // The wrap keeps null-kycIntent rows: the `{ kycIntent: null }` OR branch is present.
       expect(where.outlet.OR).toContainEqual({ kycIntent: null });
       // NOT_INTERESTED is NOT excluded — only PARKED is named in the `not`.

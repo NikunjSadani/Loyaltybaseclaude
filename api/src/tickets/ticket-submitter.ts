@@ -46,6 +46,15 @@ export const TICKET_CREATOR_SELECT = {
 
 export type TicketCreator = Prisma.UserGetPayload<{ select: typeof TICKET_CREATOR_SELECT }>;
 
+/** Message sender projection for SUPPORT-ADMIN reads — enough to label every thread message. */
+export const TICKET_SENDER_SELECT = {
+  id: true,
+  name: true,
+  role: true,
+  channelPartner: { select: { ownerName: true } },
+  salesUser: { select: { hierarchyLevel: { select: { name: true, code: true } } } },
+} as const satisfies Prisma.UserSelect;
+
 export interface RaisedBy {
   kind: 'OUTLET_OWNER' | 'SALES' | 'STAFF';
   name: string;
@@ -66,14 +75,25 @@ export interface TicketOutlet {
 }
 
 const STAFF_ROLE_LABEL: Record<string, string> = {
-  GIFSY_ADMIN: 'Gifsy',
-  GIFSY_STAFF: 'Gifsy',
+  GIFSY_ADMIN: 'Gifsy support',
+  GIFSY_STAFF: 'Gifsy support',
   CLIENT_ADMIN: 'Client admin',
   MIS_USER: 'MIS',
   VENDOR: 'Vendor',
 };
 
-export function describeRaisedBy(creator: Partial<TicketCreator> | null | undefined): RaisedBy {
+/** Structural shape describeRaisedBy needs (a ticket creator OR a message sender). */
+export type PersonLike =
+  | {
+      name?: string | null;
+      role?: unknown;
+      channelPartner?: { ownerName?: string | null } | null;
+      salesUser?: { hierarchyLevel?: { name?: string | null; code?: string | null } | null } | null;
+    }
+  | null
+  | undefined;
+
+export function describeRaisedBy(creator: PersonLike): RaisedBy {
   const role = String(creator?.role ?? '');
   const userName = creator?.name?.trim() || 'Unknown';
   if (PARTNER_ROLES.has(role)) {

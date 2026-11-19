@@ -550,15 +550,6 @@ export class Msg91Service {
    * @param params.subject the email subject line
    * @param params.html    the email body (HTML)
    */
-  /**
-   * Whether sendEmail will actually attempt an SMTP send (MSG91_SMTP_PASS set). sendEmail itself
-   * silently returns when unconfigured (DEV bypass); callers that report "email sent" to a user
-   * check this first so an unconfigured environment is never reported as delivered.
-   */
-  isEmailConfigured(): boolean {
-    return !!this.config.get<string>('MSG91_SMTP_PASS')?.trim();
-  }
-
   async sendEmail(params: { to: string[]; subject: string; html: string }): Promise<void> {
     const { to, subject, html } = params;
 
@@ -616,5 +607,14 @@ export class Msg91Service {
     } finally {
       transporter.close();
     }
+  }
+
+  /**
+   * Whether sendEmail will actually attempt an SMTP send (MSG91_SMTP_PASS set). sendEmail itself
+   * silently returns when unconfigured (DEV bypass); callers that report "email sent" to a user
+   * check this first so an unconfigured environment is never reported as delivered.
+   */
+  isEmailConfigured(): boolean {
+    return !!this.config.get<string>('MSG91_SMTP_PASS')?.trim();
   }
 }

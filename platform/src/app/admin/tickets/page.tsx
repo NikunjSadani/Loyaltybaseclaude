@@ -46,7 +46,17 @@ interface ClientRemarksRequest {
   requestedAt: string;
 }
 
-type AdminTicketMessage = TicketMessage & { senderRole?: string };
+type AdminTicketMessage = TicketMessage & { senderRole?: string; senderName?: string };
+
+const PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
+/** Which side of the thread a message sits on: the outlet owner / a sales rep / the support desk. */
+function messageSide(m: any): 'outlet' | 'sales' | 'admin' {
+  const kind = m.senderKind as string | undefined;
+  const role = String(m.sender?.role ?? '');
+  if (kind === 'OUTLET_OWNER' || PARTNER_ROLES.includes(role)) return 'outlet';
+  if (kind === 'SALES' || role.startsWith('SALES_')) return 'sales';
+  return 'admin';
+}
 
 /** Who raised the ticket (server-derived, tickets/ticket-submitter.ts). */
 interface RaisedBy { kind: 'OUTLET_OWNER' | 'SALES' | 'STAFF'; name: string; designation: string | null; label: string }
@@ -90,8 +100,10 @@ function mapDbTicket(t: any): AdminTicket {
     updatedAt:       t.updatedAt,
     messages:        (t.messages ?? []).map((m: any) => ({
       id:         m.id,
-      from:       m.sender?.role && m.sender.role !== 'OUTLET' ? ('admin' as const) : ('outlet' as const),
-      fromName:   m.sender?.name ?? 'Unknown',
+      from:       messageSide(m),
+      // Server-derived label: "Outlet owner — <name>", "<name> · <designation>", "<name> · Gifsy support"…
+      fromName:   m.senderLabel ?? m.sender?.name ?? 'Unknown',
+      senderName: m.sender?.name ?? '',
       text:       m.message,
       createdAt:  m.createdAt,
       isInternal: m.isInternal,
@@ -125,6 +137,9 @@ function statusDisplay(t: AdminTicket, viewerId: string, viewerRole: string) {
   }
   return { label: STATUS_LABELS[t.status], ...STATUS_STYLE[t.status] };
 }
+
+/** Tickets per page of the admin list ("Load more" fetches the next page). */
+const TICKETS_PAGE_SIZE = 25;
 
 const isGifsyRole = (role: string) => role === 'GIFSY_ADMIN' || role === 'GIFSY_STAFF';
 
@@ -232,14 +247,18 @@ function EscalatePanel({ ticketId, assignees, onDone, onCancel }: {
       setBusy(false);
       if (res.success) onDone(null); else setError(res.error);
     } else {
-      const res = await api.post<{ emailSent?: boolean; emailError?: string }>(
+      const res = await api.post<{ emailStatus?: 'SENDING' | 'NOT_SENT'; emailError?: string; alreadyPending?: boolean; message?: string }>(
         `/api/tickets/${ticketId}/request-client-remarks`, { clientAdminId: target, note: text.trim() },
       );
       setBusy(false);
       if (!res.success) { setError(res.error); return; }
-      onDone(res.data?.emailSent === false
-        ? `Remarks requested, but the email was NOT sent (${res.data.emailError ?? 'unknown reason'}). The client admin was notified in-app only.`
-        : null);
+      if (res.data?.alreadyPending) {
+        onDone(`${res.data.message ?? 'A remarks request to this client admin is already pending'}. Nothing was re-sent.`);
+      } else if (res.data?.emailStatus === 'NOT_SENT') {
+        onDone(`Remarks requested, but the email was NOT sent (${res.data.emailError ?? 'unknown reason'}). The client admin was notified in-app only.`);
+      } else {
+        onDone('Remarks requested. The client admin was notified in-app; the email is being sent — its outcome will appear in the thread.');
+      }
     }
   };
 
@@ -362,9 +381,15 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
     setSending(false);
   };
 
-  const handleAssign = async (assigneeId: string) => {
+  // Pick first, then an explicit "Assign" — arrowing through the list never fires a request.
+  const [pendingAssignee, setPendingAssignee] = useState<string>(initial.assignedToId ?? '');
+  useEffect(() => { setPendingAssignee(ticket.assignedToId ?? ''); }, [ticket.assignedToId]);
+  const assignChanged = pendingAssignee !== (ticket.assignedToId ?? '');
+
+  const handleAssign = async () => {
+    if (!assignChanged) return;
     setAssignBusy(true); setActionError(null);
-    const res = await api.post(`/api/tickets/${ticket.id}/assign`, { assigneeId: assigneeId || null });
+    const res = await api.post(`/api/tickets/${ticket.id}/assign`, { assigneeId: pendingAssignee || null });
     if (res.success) { await refresh(); onChanged(); } else setActionError(res.error);
     setAssignBusy(false);
   };
@@ -499,9 +524,9 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
                   <UserPlus className="h-3.5 w-3.5 text-gray-400 shrink-0" />
                   <select
                     aria-label="Assign to"
-                    value={ticket.assignedToId ?? ''}
+                    value={pendingAssignee}
                     disabled={assignBusy || isClosed}
-                    onChange={(e) => handleAssign(e.target.value)}
+                    onChange={(e) => setPendingAssignee(e.target.value)}
                     className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white disabled:opacity-50"
                   >
                     <option value="">Unassigned</option>
@@ -517,7 +542,9 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
                       </optgroup>
                     )}
                   </select>
-                  {assignBusy && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
+                  <Button size="sm" variant="secondary" loading={assignBusy} disabled={!assignChanged || assignBusy || isClosed} onClick={handleAssign}>
+                    {pendingAssignee ? 'Assign' : 'Unassign'}
+                  </Button>
                 </div>
               ) : (
                 <span className="text-xs font-medium text-gray-700">{ticket.assignedTo ?? 'Unassigned'}</span>
@@ -525,10 +552,13 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
             </div>
             {isGifsy && assigneesErr && <p className="text-[11px] text-red-600">Could not load assignees: {assigneesErr}</p>}
 
-            {/* Status actions — Resolve / Close, or Reopen once done */}
+            {/* Status actions — Resolve / Close, or Reopen once done. While Gifsy waits on the client
+                desk's remarks, the desk replies first (the server refuses a status change). */}
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs text-gray-400 w-16 shrink-0">Status</span>
-              {isDone ? (
+              {waiting && !isGifsy ? (
+                <span className="text-xs text-gray-500">Send your remarks first — status changes are paused while Gifsy waits for them.</span>
+              ) : isDone ? (
                 <Button variant="secondary" size="sm" loading={statusBusy} onClick={() => handleSetStatus('IN_PROGRESS')}>
                   <Clock className="h-3.5 w-3.5" /> Reopen
                 </Button>
@@ -581,7 +611,7 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
               return (
                 <div key={msg.id} className={`flex gap-2 ${isAdmin ? 'flex-row-reverse' : 'flex-row'}`}>
                   <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${isAdmin ? 'bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]' : msg.from === 'sales' ? 'bg-orange-100 text-orange-600' : 'bg-gray-100 text-gray-600'}`}>
-                    {isAdmin ? 'A' : msg.fromName.split(' ').map((w) => w[0]).join('').slice(0, 2)}
+                    {(msg.senderName || msg.fromName).split(' ').map((w) => w[0]).filter(Boolean).join('').slice(0, 2).toUpperCase() || (isAdmin ? 'A' : '?')}
                   </div>
                   <div className={`max-w-[75%] flex flex-col gap-0.5 ${isAdmin ? 'items-end' : 'items-start'}`}>
                     <div className="flex items-center gap-1.5">
@@ -674,30 +704,65 @@ export default function AdminTicketsPage() {
   const [selected, setSelected] = useState<AdminTicket | null>(null);
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
   const [awaiting, setAwaiting] = useState<{ total: number; mine: number }>({ total: 0, mine: 0 });
-  const [awaitingOnly, setAwaitingOnly] = useState(false);
+  // Which server-side view: every ticket, every ticket awaiting the client (Gifsy), or only the
+  // tickets awaiting THIS client admin's remarks (so the list matches the banner count).
+  const [view, setView] = useState<'all' | 'awaitingClient' | 'awaitingMine'>('all');
+  const awaitingOnly = view !== 'all';
   const [reloadKey, setReloadKey] = useState(0);
+  // Paging ("Load more"): pages loaded so far + the server total for the current view.
+  const [pagesLoaded, setPagesLoaded] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [filters,  setFilters]  = useState<FilterState>({
     search: '', status: 'all', priority: 'all', category: 'all', source: 'all',
   });
 
+  type ListRes = { tickets: any[]; pagination?: { total: number }; awaitingClient?: { total: number; mine: number } };
+  const pageUrl = useCallback((page: number) => {
+    const q = view === 'awaitingClient' ? 'status=WAITING_ON_CLIENT&' : view === 'awaitingMine' ? 'awaitingMine=true&' : '';
+    return `/api/tickets?${q}page=${page}&limit=${TICKETS_PAGE_SIZE}`;
+  }, [view]);
+
+  // A view change starts again from page 1.
+  useEffect(() => { setPagesLoaded(1); }, [view]);
+
+  // (Re)load every page loaded so far — after an action the list stays as long as it was.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    // "Awaiting client" is filtered SERVER-side (the default list is one page), so the view
-    // shows every waiting ticket, not just the ones that happen to be on the first page.
-    const url = awaitingOnly ? '/api/tickets?status=WAITING_ON_CLIENT&limit=100' : '/api/tickets';
-    api.get<{ tickets: any[]; awaitingClient?: { total: number; mine: number } }>(url).then((res) => {
+    const pages = Array.from({ length: pagesLoaded }, (_, i) => i + 1);
+    Promise.all(pages.map((p) => api.get<ListRes>(pageUrl(p)))).then((results) => {
       if (cancelled) return;
-      if (res.success) {
-        setTickets((res.data.tickets ?? []).map(mapDbTicket));
-        if (res.data.awaitingClient) setAwaiting(res.data.awaitingClient);
-        setError(null);
-      } else {
-        setError(res.error);
-      }
+      const failed = results.find((r) => !r.success);
+      if (failed && !failed.success) { setError(failed.error); return; }
+      const ok = results.filter((r): r is { success: true; data: ListRes } => r.success);
+      const seen = new Set<string>();
+      const rows = ok.flatMap((r) => r.data.tickets ?? []).filter((t) => (seen.has(t.id) ? false : (seen.add(t.id), true)));
+      setTickets(rows.map(mapDbTicket));
+      const first = ok[0]?.data;
+      setTotal(first?.pagination?.total ?? rows.length);
+      if (first?.awaitingClient) setAwaiting(first.awaitingClient);
+      setError(null);
     }).finally(() => { if (!cancelled) { setLoading(false); setLoadedOnce(true); } });
     return () => { cancelled = true; };
-  }, [awaitingOnly, reloadKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageUrl, reloadKey]);
+
+  const loadMore = async () => {
+    setLoadingMore(true);
+    const res = await api.get<ListRes>(pageUrl(pagesLoaded + 1));
+    if (res.success) {
+      setTickets((prev) => {
+        const have = new Set(prev.map((t) => t.id));
+        return [...prev, ...(res.data.tickets ?? []).filter((t) => !have.has(t.id)).map(mapDbTicket)];
+      });
+      setTotal(res.data.pagination?.total ?? total);
+      setPagesLoaded((n) => n + 1);
+    } else {
+      setError(res.error);
+    }
+    setLoadingMore(false);
+  };
 
   const filtered = useMemo(() => {
     return tickets.filter((t) => {
@@ -784,7 +849,7 @@ export default function AdminTicketsPage() {
             <Hourglass className="h-4 w-4" />
             {awaiting.mine} ticket{awaiting.mine !== 1 ? 's' : ''} awaiting your remarks
           </p>
-          <Button size="sm" variant="secondary" onClick={() => setAwaitingOnly(true)}>Show</Button>
+          <Button size="sm" variant="secondary" onClick={() => setView('awaitingMine')}>Show</Button>
         </div>
       )}
 
@@ -810,7 +875,7 @@ export default function AdminTicketsPage() {
               <button
                 type="button"
                 aria-label={`Awaiting client: ${awaiting.total}`}
-                onClick={() => setAwaitingOnly((v) => !v)}
+                onClick={() => setView((v) => (v === 'awaitingClient' ? 'all' : 'awaitingClient'))}
                 className={`text-left rounded-xl border p-4 transition-colors ${awaitingOnly ? 'border-violet-400 bg-violet-100' : 'border-violet-200 bg-violet-50 hover:bg-violet-100'}`}
               >
                 <p className="text-2xl font-bold text-violet-700">{awaiting.total}</p>
@@ -833,14 +898,24 @@ export default function AdminTicketsPage() {
             <div className="flex gap-2 flex-wrap items-center">
               <SlidersHorizontal className="h-4 w-4 text-gray-400 shrink-0" />
 
-              {(isGifsy || awaitingOnly) && (
+              {isGifsy && (
                 <button
                   type="button"
-                  aria-pressed={awaitingOnly}
-                  onClick={() => setAwaitingOnly((v) => !v)}
-                  className={`text-xs border rounded-lg px-2 py-1.5 transition-colors ${awaitingOnly ? 'bg-violet-600 text-white border-violet-600' : 'border-violet-200 text-violet-700 bg-violet-50 hover:bg-violet-100'}`}
+                  aria-pressed={view === 'awaitingClient'}
+                  onClick={() => setView((v) => (v === 'awaitingClient' ? 'all' : 'awaitingClient'))}
+                  className={`text-xs border rounded-lg px-2 py-1.5 transition-colors ${view === 'awaitingClient' ? 'bg-violet-600 text-white border-violet-600' : 'border-violet-200 text-violet-700 bg-violet-50 hover:bg-violet-100'}`}
                 >
                   Awaiting client ({awaiting.total})
+                </button>
+              )}
+              {isClientAdmin && view === 'awaitingMine' && (
+                <button
+                  type="button"
+                  aria-pressed
+                  onClick={() => setView('all')}
+                  className="text-xs border rounded-lg px-2 py-1.5 bg-violet-600 text-white border-violet-600"
+                >
+                  Awaiting your remarks ({awaiting.mine}) ✕
                 </button>
               )}
 
@@ -882,9 +957,7 @@ export default function AdminTicketsPage() {
 
               <span className="ml-auto text-xs text-gray-400">
                 {filtered.length} ticket{filtered.length !== 1 ? 's' : ''}
-                {awaitingOnly && awaiting.total > tickets.length && (
-                  <span className="text-amber-700"> · showing the newest {tickets.length} of {awaiting.total} awaiting</span>
-                )}
+                {total > tickets.length && <> · showing {tickets.length} of {total}</>}
               </span>
             </div>
           </div>
@@ -895,7 +968,9 @@ export default function AdminTicketsPage() {
               <div className="flex flex-col items-center gap-3 py-16 text-center">
                 <MessageSquare className="h-10 w-10 text-gray-200" />
                 <p className="text-sm text-gray-400">
-                  {awaitingOnly ? 'No tickets are waiting on the client.' : 'No tickets match the current filters.'}
+                  {view === 'awaitingMine'
+                    ? 'No tickets are waiting for your remarks.'
+                    : awaitingOnly ? 'No tickets are waiting on the client.' : 'No tickets match the current filters.'}
                 </p>
               </div>
             ) : (
@@ -918,6 +993,12 @@ export default function AdminTicketsPage() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {total > tickets.length && (
+              <div className="flex items-center justify-center gap-3 border-t border-gray-100 py-3">
+                <span className="text-xs text-gray-400">Showing {tickets.length} of {total}</span>
+                <Button size="sm" variant="secondary" loading={loadingMore} onClick={loadMore}>Load more</Button>
               </div>
             )}
           </div>

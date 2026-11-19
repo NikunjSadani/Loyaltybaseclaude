@@ -119,10 +119,10 @@ describe('TicketsService — raised-by / outlet wiring', () => {
     expect(prisma.ticket.findMany.mock.calls[0][0].include.createdBy.select.salesUser).toBeDefined();
   });
 
-  it('field readers keep the old lean createdBy (no partner/sales identity, no raisedBy)', async () => {
+  it('field readers get the lean createdBy (no partner/sales identity, no raisedBy)', async () => {
     prisma.ticket.findMany.mockResolvedValue([{ id: 't1', createdById: 'u1', createdBy: { id: 'u1', name: 'x' } }]);
     const res = await service.list(partner, {});
-    expect(prisma.ticket.findMany.mock.calls[0][0].include.createdBy).toEqual({ select: { id: true, name: true, phone: true } });
+    expect(prisma.ticket.findMany.mock.calls[0][0].select.createdBy).toEqual({ select: { id: true, name: true, phone: true } });
     expect(res.tickets[0]).not.toHaveProperty('raisedBy');
   });
 
@@ -188,6 +188,9 @@ describe('ticket-aging Excel: Raised by + Outlet code columns', () => {
     expect(a['Raised by']).toBe('Meera Iyer · ISR');
     expect(a['Outlet code']).toBe('DEO-0042');
     expect(b['Outlet code']).toBe('—');
-    expect(a).not.toHaveProperty('Created By');
+    // existing columns unchanged (name + order); the new ones are appended at the end
+    expect(a['Created By']).toBe('Meera Iyer');
+    expect(Object.keys(a).slice(-2)).toEqual(['Raised by', 'Outlet code']);
+    expect(Object.keys(a).indexOf('Created By')).toBe(5);
   });
 });

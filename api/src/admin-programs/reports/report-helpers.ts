@@ -308,7 +308,7 @@ export function summarizeAging(rows: TicketAgingRow[]): TicketAgingSummary {
 
 const isoToDate = (iso: string): string => istDateKey(new Date(iso));
 
-/** Flatten ticket-aging rows to xlsx row objects (14 columns, source order). */
+/** Flatten ticket-aging rows to xlsx row objects (15 columns, source order; new ones appended). */
 export function ticketAgingXlsxRows(rows: TicketAgingRow[]): Record<string, unknown>[] {
   return rows.map((r) => ({
     'Ticket #': r.ticketNumber,
@@ -316,8 +316,7 @@ export function ticketAgingXlsxRows(rows: TicketAgingRow[]): Record<string, unkn
     Category: r.category,
     Priority: r.priority,
     Status: r.status,
-    'Raised by': r.raisedBy,
-    'Outlet code': r.outletCode || '—',
+    'Created By': r.createdByName,
     'Assigned To': r.assignedToName ?? '',
     Created: isoToDate(r.createdAt),
     'Age (days)': r.ageDays,
@@ -325,6 +324,10 @@ export function ticketAgingXlsxRows(rows: TicketAgingRow[]): Record<string, unkn
     'First response (hrs)': r.firstResponseHours === null ? 'Pending' : r.firstResponseHours,
     'SLA breached': r.slaBreached ? 'Yes' : 'No',
     'Last updated': isoToDate(r.lastUpdatedAt),
+    // Appended (2026-11-19) — existing columns keep their names + positions so saved
+    // spreadsheets / macros keep working.
+    'Raised by': r.raisedBy,
+    'Outlet code': r.outletCode || '—',
   }));
 }
 

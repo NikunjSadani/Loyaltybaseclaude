@@ -358,6 +358,11 @@ enum TicketStatus {
   WAITING_ON_CLIENT
 }
 
+enum TicketNoteVisibility {
+  GIFSY_ONLY
+  SHARED_WITH_CLIENT
+}
+
 enum TicketPriority {
   LOW
   MEDIUM
@@ -2383,6 +2388,11 @@ model TicketMessage {
   senderId    String
   message     String
   isInternal  Boolean  @default(false)
+  // Who may read an INTERNAL note (2026-11-19, SUPPORT-TICKETS.md). GIFSY_ONLY = Gifsy operators
+  // only (assign / escalation / email-status notes); SHARED_WITH_CLIENT = Gifsy + the tenant's
+  // admin desk (remarks request, the client's reply, cancellations). NULL = legacy / generic
+  // internal note — visible to every support admin exactly as before. Ignored when !isInternal.
+  internalVisibility TicketNoteVisibility?
   attachments Json?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

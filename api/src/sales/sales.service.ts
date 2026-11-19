@@ -2506,8 +2506,9 @@ export class SalesService {
         outletId: { not: null },
         unassignedAt: null,
         // FULLY hide admin-PARKED outlets from the rep (list, counts, dashboard). Null-safe
-        // OR-wrap keeps normal + NOT_INTERESTED outlets; drops only PARKED.
-        outlet: NOT_PARKED_OUTLET,
+        // OR-wrap keeps normal + NOT_INTERESTED outlets; drops only PARKED. Soft-deleted outlets
+        // are hidden too (2026-11-19) — the ticket outlet check (and every pick) refuses them.
+        outlet: { ...NOT_PARKED_OUTLET, deletedAt: null },
       },
       include: {
         // The assigned rep's login-User id — lets the FE KYC-list member filter match

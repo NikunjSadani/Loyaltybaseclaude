@@ -62,3 +62,33 @@ describe('Sales new ticket — outlet link', () => {
     expect(body).not.toHaveProperty('outletId');
   });
 });
+
+describe('Sales tickets — honest errors + masked states', () => {
+  it('a refused outlet (server 400) is shown in the form, not swallowed', async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const ok = (data: unknown) => Promise.resolve({ json: () => Promise.resolve({ success: true, data }) });
+      if (url === '/api/sales/outlets') return ok({ outlets: [{ id: 'outlet-1', name: 'Gupta Stores', mobile: '9800000000' }] });
+      if (url === '/api/tickets' && init?.method === 'POST') {
+        return Promise.resolve({ json: () => Promise.resolve({ success: false, error: 'That outlet is not (or no longer) assigned to you or your team' }) });
+      }
+      if (url === '/api/tickets') return ok({ tickets: [] });
+      return ok({});
+    });
+    await fillAndSubmit(true);
+    expect(await screen.findByRole('alert')).toHaveTextContent('no longer) assigned to you');
+  });
+
+  it('an ESCALATED ticket shows as In Progress (never falls back to Open)', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      const ok = (data: unknown) => Promise.resolve({ json: () => Promise.resolve({ success: true, data }) });
+      if (url === '/api/tickets') {
+        return ok({ tickets: [{ id: 't9', ticketNumber: 'TKT-9', subject: 'Escalated one', category: 'POINTS', status: 'ESCALATED', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: [] }] });
+      }
+      return ok({ outlets: [] });
+    });
+    render(<SalesSupportPage />);
+    expect(await screen.findByText('Escalated one')).toBeInTheDocument();
+    expect(screen.getAllByText('In Progress').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Open', { selector: 'span' })).not.toBeInTheDocument();
+  });
+});

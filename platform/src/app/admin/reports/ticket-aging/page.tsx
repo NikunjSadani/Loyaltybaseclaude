@@ -299,8 +299,9 @@ export default function TicketAgingPage() {
                     <tr className="bg-gray-50 border-b border-gray-300 text-gray-700">
                       {[
                         'Ticket #', 'Subject', 'Category', 'Priority', 'Status',
-                        'Raised by', 'Outlet code', 'Assigned To', 'Created', 'Age (days)',
+                        'Created By', 'Assigned To', 'Created', 'Age (days)',
                         'Aging bucket', 'First response (hrs)', 'SLA breached', 'Last updated',
+                        'Raised by', 'Outlet code',
                       ].map(h => (
                         <th
                           key={h}
@@ -322,8 +323,7 @@ export default function TicketAgingPage() {
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{row.category}</td>
                         <td className={`px-3 py-1.5 whitespace-nowrap ${priorityClass(row.priority)}`}>{row.priority}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{statusLabel(row.status)}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{row.raisedBy ?? row.createdByName}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap font-mono text-gray-600">{row.outletCode || '—'}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{row.createdByName}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-500">{row.assignedToName ?? '—'}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-500">{isoToDate(row.createdAt)}</td>
                         <td className="px-3 py-1.5 text-right whitespace-nowrap text-gray-700">{row.ageDays}</td>
@@ -345,6 +345,8 @@ export default function TicketAgingPage() {
                           )}
                         </td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-500">{isoToDate(row.lastUpdatedAt)}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{row.raisedBy ?? '—'}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap font-mono text-gray-600">{row.outletCode || '—'}</td>
                       </tr>
                     ))}
                   </tbody>

@@ -35,6 +35,9 @@ const CAT_FROM_DB: Record<string, TicketCategory> = {
 const STATUS_FROM_DB: Record<string, TicketStatus> = {
   OPEN: 'open', IN_PROGRESS: 'in_progress', WAITING: 'waiting',
   RESOLVED: 'resolved', CLOSED: 'closed',
+  // Support-internal states are masked by the API for field readers; mapped here too so an
+  // escalated ticket can never fall through to the 'open' default.
+  ESCALATED: 'in_progress',
   // Defense in depth: the API masks WAITING_ON_CLIENT as IN_PROGRESS for sales anyway.
   WAITING_ON_CLIENT: 'in_progress',
 };
@@ -220,6 +223,7 @@ export default function SalesSupportPage() {
   const [newOpen,    setNewOpen]   = useState(false);
   const [selected,   setSelected]  = useState<Ticket | null>(null);
   const [submitting, setSubmitting]= useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [form, setForm] = useState<NewForm>({
     ticketFor: 'outlet', outletSearch: '', outlet: null, category: '',
     priority: 'medium', title: '', description: '',
@@ -251,6 +255,7 @@ export default function SalesSupportPage() {
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
+    setSubmitError(null);
     const outletPrefix = !isSelf && form.outlet ? `[${form.outlet.name}] ` : '';
     const outletDesc   = !isSelf && form.outlet ? `Outlet: ${form.outlet.name} (${form.outlet.mobile})\n\n` : '';
     try {
@@ -270,8 +275,13 @@ export default function SalesSupportPage() {
         setTickets((prev) => [mapDbTicket(body.data.ticket), ...prev]);
         setForm(BLANK_FORM);
         setNewOpen(false);
+      } else {
+        // Never fail silently — e.g. the outlet is no longer assigned to this rep's team.
+        setSubmitError(body.error ?? 'Could not raise the ticket. Please try again.');
       }
-    } catch {}
+    } catch {
+      setSubmitError('Could not raise the ticket. Please check your connection and try again.');
+    }
     setSubmitting(false);
   };
 
@@ -537,6 +547,9 @@ export default function SalesSupportPage() {
                   className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2.5 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]" />
               </div>
 
+              {submitError && (
+                <p role="alert" className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{submitError}</p>
+              )}
               <Button variant="primary" className="w-full" loading={submitting} onClick={handleSubmit} disabled={!canSubmit}>
                 Submit Ticket
               </Button>
