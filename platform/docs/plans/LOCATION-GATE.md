@@ -1,7 +1,7 @@
 # Location gate + Location Report — design note
 
-**Status:** built on `feat/location-gate` (worktree `.claude/worktrees/location-gate`, from `7ba69566`), not merged,
-not deployed, not runtime-verified on a phone.
+**Status:** ✅ LIVE on prod `1fa2305c` (2026-11-19 night release), DORMANT — flag `features.requireLocation` default OFF;
+owner switches it ON for Bajaj prod (Deoleo OFF). Real-phone check (Android + iPhone) on Bajaj prod after the switch.
 **Scope:** TENANT-SCOPED in effect — the gate, the Location Report (tile + API) and the Daily Ops Digest "Location"
 line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing new). The code paths are shared
 (KYC / visibility services, reports, digest) — owner-approved 2026-11-18.
