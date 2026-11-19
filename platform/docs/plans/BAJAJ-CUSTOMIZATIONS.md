@@ -342,5 +342,5 @@ and the Performance trend (`GET /partner/targets/trend`).
 - ON: a sales rep can't start or submit a KYC / visibility capture until location is allowed for the site AND the phone
   gets a fix (phone-specific guide + Test again); the API refuses fix-less submissions; "outside the 200 m fence"
   refusals are recorded for the Location Report. Independent of `outletMasterGeo` (the 200 m fence).
-- Location Report `/admin/reports/location` (all tenants) + Daily Ops Digest "Location" line. Detail:
+- Location Report `/admin/reports/location` + Daily Ops Digest "Location" line — both only for switch-on tenants. Detail:
   `LOCATION-GATE.md`.

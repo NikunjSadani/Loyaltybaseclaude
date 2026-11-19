@@ -54,6 +54,11 @@ export class SubmitCaptureDto {
   @IsOptional()
   @IsObject()
   captureGeo?: Record<string, unknown>;
+
+  /** Location gate: the phone's clock at submit (ISO) — fix ages are judged on the phone's own clock (±24 h bound). */
+  @IsOptional()
+  @IsString()
+  clientNow?: string;
 }
 
 /** POST /v1/visibility/captures/:id/resubmit — re-capture after a rejection (D11). */
@@ -69,6 +74,11 @@ export class ResubmitCaptureDto {
   @IsOptional()
   @IsObject()
   captureGeo?: Record<string, unknown>;
+
+  /** Location gate: the phone's clock at submit (ISO) — fix ages are judged on the phone's own clock (±24 h bound). */
+  @IsOptional()
+  @IsString()
+  clientNow?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

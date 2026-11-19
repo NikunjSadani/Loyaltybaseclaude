@@ -1,7 +1,8 @@
 import { visibilityLocationRefusal, VISIBILITY_FORM_HAS_NO_LOCATION_MESSAGE } from './visibility-location.helper';
 import type { VisibilityFormSchema } from './visibility-types';
 
-const fix = { lat: 12.9, lng: 77.5, accuracy: 12, capturedAt: '2026-11-18T05:00:00.000Z' };
+// Fixes are relative to now (never a hardcoded date — the rule checks freshness).
+const fix = { lat: 12.9, lng: 77.5, accuracy: 12, capturedAt: new Date().toISOString() };
 const none = new Set<string>();
 
 const perPhoto: VisibilityFormSchema = {
@@ -73,6 +74,27 @@ describe('visibilityLocationRefusal (requireLocation ON)', () => {
     expect(fresh(legacy, { photo: 'k', gps: { lat: 'x', lng: 1 } })).not.toBeNull();
     expect(fresh(legacy, { photo: 'k', gps: fix })).toBeNull();
     expect(fresh(legacy, { photo: 'k' }, fix)).toBeNull();
+  });
+
+  // ── AUDIT #7: freshness (same window as KYC) ──
+  it('AUDIT #7: a new photo whose fix is older than an hour → refused naming the photo ("too old")', () => {
+    const old = { ...fix, capturedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() };
+    expect(fresh(perPhoto, { p1: { key: 'k1', geo: old } })).toMatch(/"Shelf photo" is too old/);
+  });
+
+  it('AUDIT #7: a stale or untimed captureGeo / GPS value is not a fresh fix', () => {
+    const old = { ...fix, capturedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() };
+    expect(fresh(perPhoto, { p3: 'k3' }, old)).not.toBeNull();
+    expect(fresh(perPhoto, { p3: 'k3' }, { lat: 12.9, lng: 77.5 })).not.toBeNull(); // no time
+    expect(fresh(legacy, { photo: 'k', gps: old })).not.toBeNull();
+  });
+
+  it('AUDIT #7: ages use the phone clock (clientNow) so a phone whose clock is off is not refused', () => {
+    const phoneNow = new Date(Date.now() - 3 * 3_600_000);
+    const phoneFix = { ...fix, capturedAt: new Date(phoneNow.getTime() - 60_000).toISOString() };
+    const v = { p1: { key: 'k1', geo: phoneFix } };
+    expect(visibilityLocationRefusal(perPhoto, v, none, v)).not.toBeNull();
+    expect(visibilityLocationRefusal(perPhoto, v, none, v, undefined, { clientNow: phoneNow.toISOString() })).toBeNull();
   });
 
   it('a form with NO location field and no captureGeo → names the FORM problem', () => {

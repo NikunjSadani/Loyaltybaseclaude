@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
 import { DownloadActionStatus } from '@/components/exports/download-action-status'
+import { useTenantFeatures } from '@/lib/tenant-features'
 
 interface ReportConfig {
   id: string
@@ -18,9 +19,11 @@ interface ReportConfig {
   filters: string[]
   /** When set, ReportCard shows an "Open report" button that navigates to this path. */
   href?: string
+  /** Listed only when this tenant feature is ON (the API refuses it otherwise). */
+  requiresFeature?: 'requireLocation'
 }
 
-const reports: ReportConfig[] = [
+const allReports: ReportConfig[] = [
   // Operational
   { id: 'outlet-master', name: 'Outlet Master', description: 'Complete outlet dump with KYC status, banking details, account holder name, signature, sales hierarchy, and lifecycle timestamps', category: 'operational', endpoint: '/api/admin/reports/outlet-master', filters: [] },
   { id: 'kyc-status', name: 'KYC Status Report', description: 'Full snapshot of every outlet and its current KYC status (including outlets that never started KYC) — one row per outlet', category: 'operational', endpoint: '/api/reports/kyc-status', filters: [] },
@@ -42,7 +45,7 @@ const reports: ReportConfig[] = [
   // Engagement
   { id: 'session-report', name: 'Session Report', description: 'Per-user portal usage: last login plus active-day counts for each of the last 12 months and the current month. "Active" = a day the user actually used the app (not a login).', category: 'engagement', endpoint: '/api/reports/session-report', href: '/admin/reports/session', filters: [] },
   { id: 'usage-report', name: 'Usage Report', description: 'Per-user usage for a date range: days active, visits, minutes in the app (a minimum), installed app vs browser, and phone vs computer. Filter by role, programme and region; optionally list users who did not use it.', category: 'engagement', endpoint: '/api/reports/usage', href: '/admin/reports/usage', filters: [] },
-  { id: 'location-compliance', name: 'Location Report', description: 'Per sales rep for a date range: KYCs and visibility captures, how many had no GPS, accuracy worse than 50 m, were unverifiable or were blocked outside the 200 m fence, plus median accuracy and KYC lock time. Filter by role and region.', category: 'engagement', endpoint: '/api/reports/location-compliance', href: '/admin/reports/location', filters: [] },
+  { id: 'location-compliance', name: 'Location Report', description: 'Per sales rep for a date range: KYCs and visibility captures, how many had no GPS, accuracy worse than 50 m, were unverifiable or were blocked outside the 200 m fence, plus median accuracy and KYC lock time. Filter by role and region.', category: 'engagement', endpoint: '/api/reports/location-compliance', href: '/admin/reports/location', filters: [], requiresFeature: 'requireLocation' },
 ]
 
 const categoryLabels = {
@@ -119,6 +122,10 @@ function ReportCard({ report }: { report: ReportConfig }) {
 
 export default function ReportsPage() {
   const [activeCategory, setActiveCategory] = useState<string>('all')
+  // Audit #4: the Location report only for programmes with "Require location" ON (hidden while features load, and
+  // for every switch-off tenant — Deoleo's list is unchanged).
+  const { features, loading: featuresLoading } = useTenantFeatures('/api/admin/settings/config')
+  const reports = allReports.filter((r) => !r.requiresFeature || (!featuresLoading && features[r.requiresFeature] === true))
   const categories = ['all', 'operational', 'business', 'finance', 'engagement']
   const filtered = activeCategory === 'all' ? reports : reports.filter(r => r.category === activeCategory)
 

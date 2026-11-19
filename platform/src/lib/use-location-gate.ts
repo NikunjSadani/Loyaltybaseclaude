@@ -76,7 +76,9 @@ export function useLocationGate(enabled: boolean): LocationGateState {
       const r = await checkLocation();
       if (!mounted.current) return r.ok ? r.fix : null;
       if (opts.quiet) setSubmitChecking(false);
-      if (mine !== seq.current) return r.ok ? r.fix : null; // superseded — the newer check owns the state
+      // Superseded (a permission revoke, or a newer check, arrived while this one ran) → NOT a usable answer: return
+      // null so a submit never proceeds on a fix taken before the permission was revoked (audit #9).
+      if (mine !== seq.current) return null;
       setTesting(false);
       if (r.ok) {
         setFix(r.fix);

@@ -37,6 +37,7 @@ import { usePreciseGpsPreWarm } from '@/lib/use-precise-gps';
 import { useLocationGate } from '@/lib/use-location-gate';
 import { LocationGatePanel } from '@/components/location/LocationGatePanel';
 import { isSignatureCanvasBlank } from '@/lib/signature-canvas';
+import { isFixStale } from '@/lib/location-gate';
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -426,7 +427,7 @@ export default function NewKYCPage() {
    * self-declaration document — the Address Proof upload itself stays REQUIRED either
    * way. While features load, DEFAULT_FEATURES has the flag OFF → the SAFE default of
    * requiring the self-declaration on a declared mismatch. */
-  const { features, loading: featuresLoading, error: featuresError } = useTenantFeatures('/api/sales/me');
+  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
   /* Tenant name for programme copy (was hard-coded "Deoleo" — showed on Bajaj; owner 2026-11-14). */
   const tenantDisplayName = useClientConfig().branding.displayName;
   const waiverEnabled = features.kycAddressProofWaiver;
@@ -1518,6 +1519,7 @@ export default function NewKYCPage() {
 
   /* ── D: Submit → OTP step ── */
   const handleSubmit = async () => {
+    let boardGeoForSubmit = boardPhotoGeo;
     // KYC-M5: never POST /api/kyc twice for the same completed submission. Once the first
     // POST has succeeded a submissionId exists; pressing Back from the OTP screen and hitting
     // submit again must NOT create a second submission — just return to the OTP step (which
@@ -1544,6 +1546,12 @@ export default function NewKYCPage() {
       if (!locationOk) {
         setSubmitting(false);
         return;
+      }
+      // Audit #3: a board-photo fix that is too old by now (long KYC, or pre-filled) is refreshed with this fresh
+      // submit-time fix — the rep is at the outlet submitting — so the server's freshness rule passes honestly.
+      if (!boardPhotoGeo || isFixStale(boardPhotoGeo.ts)) {
+        boardGeoForSubmit = { lat: locationOk.lat, lng: locationOk.lng, accuracy: locationOk.accuracy, ts: new Date().toISOString() };
+        setBoardPhotoGeo(boardGeoForSubmit);
       }
     }
     setSubmitting(true);
@@ -1691,7 +1699,9 @@ export default function NewKYCPage() {
                 // Provenance of the VPA (QR vs typed) — UPI mode only; omitted when unknown.
                 ...(upiCaptureMethod ? { upiCaptureMethod } : {}),
               }),
-          boardPhotoGeo:    boardPhotoGeo ?? undefined,
+          boardPhotoGeo:    boardGeoForSubmit ?? undefined,
+          // Location gate only: the phone's clock at submit — the server judges the board fix's age on it (bounded).
+          ...(locationGate.enabled ? { clientNow: new Date().toISOString() } : {}),
           // Instrumentation (geo-fence tenants only; undefined otherwise → Deoleo byte-identical).
           boardPhotoLockMs: boardPhotoLockMs ?? undefined,
           paymentGeo:       paymentGeo   ?? undefined,
@@ -2338,14 +2348,6 @@ export default function NewKYCPage() {
       </>
     );
   };
-  /* Features could not be read: the gate can't know the programme's rule, so it stays open here — the server still
-   * refuses a KYC without a location where it is required. Shown only on that failure. */
-  const featuresNote = featuresError ? (
-    <p data-testid="features-load-note" className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-      Couldn&apos;t load this programme&apos;s settings. If location is required here, it will be checked when you submit.
-    </p>
-  ) : null;
-
   if (step === 'choose') {
     return withLocationGate(
       <div className="space-y-5 fade-in">
@@ -2464,7 +2466,6 @@ export default function NewKYCPage() {
       )}
 
       <StepBar />
-      {featuresNote}
 
       {/* Global file-size error */}
       {fileError && (
@@ -3080,7 +3081,7 @@ export default function NewKYCPage() {
                   </div>
                   {/* KYC-H2: recovery — hard block stays, but the rep can re-attempt the fix.
                       Disabled for the whole in-flight duration so it can't be double-fired. */}
-                  {!boardPhotoGeo && (
+                  {(!boardPhotoGeo || (locationGate.enabled && isFixStale(boardPhotoGeo.ts))) && (
                     <button
                       type="button"
                       data-testid="board-photo-geo-retry"

@@ -22,7 +22,7 @@ import {
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { VisibilityMediaService } from './visibility-media.service';
 import { visibilityLocationRefusal } from './visibility-location.helper';
-import { isLocationRequiredFor, recordFenceBlock } from '../common/location-gate.helper';
+import { isLocationRequiredFor, isRealFix, recordFenceBlock } from '../common/location-gate.helper';
 import {
   currentWindowKey,
   isWindowClosed,
@@ -498,7 +498,7 @@ export class VisibilityCaptureService {
     }
 
     const outlet = await this.loadInScopeOutlet(user.clientId, dto.outletId, config);
-    return this.persistCapture(user, config, caller, outlet, dto.formValues, null, dto.captureGeo);
+    return this.persistCapture(user, config, caller, outlet, dto.formValues, null, { captureGeo: dto.captureGeo, clientNow: dto.clientNow });
   }
 
   /** Re-capture after a rejection (D11) — only a REJECTED capture, re-authorized. */
@@ -541,7 +541,7 @@ export class VisibilityCaptureService {
     }
 
     const outlet = await this.loadInScopeOutlet(user.clientId, capture.outletId, config);
-    return this.persistCapture(user, config, caller, outlet, dto.formValues, capture, dto.captureGeo);
+    return this.persistCapture(user, config, caller, outlet, dto.formValues, capture, { captureGeo: dto.captureGeo, clientNow: dto.clientNow });
   }
 
   /**
@@ -613,8 +613,8 @@ export class VisibilityCaptureService {
       formValues?: Prisma.JsonValue | null;
       photoReviews?: Prisma.JsonValue | null;
     } | null,
-    /** Location gate: the phone's submit-time fix (requireLocation tenants only; see visibility-location.helper). */
-    captureGeo?: unknown,
+    /** Location gate: the phone's submit-time fix + clock (requireLocation tenants only; see visibility-location.helper). */
+    gateInput: { captureGeo?: unknown; clientNow?: unknown } = {},
   ) {
     const form = await this.prisma.visibilityForm.findUnique({
       where: { clientId: user.clientId },
@@ -726,7 +726,9 @@ export class VisibilityCaptureService {
     // NOW must carry a valid fix (carried-forward approved photos are not re-checked), else 400 before any write.
     const locationRequired = isLocationRequiredFor(geoFeatures, user.role);
     if (locationRequired) {
-      const refusal = visibilityLocationRefusal(schema, values, new Set(Object.keys(carriedReviews)), cleaned, captureGeo);
+      const refusal = visibilityLocationRefusal(schema, values, new Set(Object.keys(carriedReviews)), cleaned, gateInput.captureGeo, {
+        clientNow: gateInput.clientNow,
+      });
       if (refusal) throw new BadRequestException(refusal);
     }
     const recordOutside = (distanceM: number | null, accuracyM: number | null) =>
@@ -922,6 +924,18 @@ export class VisibilityCaptureService {
       }
       if (geo.accuracy != null && geo.accuracy > LOW_ACCURACY_FLAG_M) flags.push('LOW_ACCURACY');
       if (geoFenceOk === null && fenceEnabled) flags.push('GEO_UNVERIFIABLE');
+    }
+
+    // ── LOCATION GATE (switch-on tenants only) — always STORE a representative real fix (audit #1) ──
+    // The fence above only sets the map-pin columns when it could measure a distance (outlet coordinates on file, a
+    // usable accuracy, or a GPS_POINT form). Without that, a capture whose photos DID carry a fix would be stored with
+    // NULL captureLat/Lng and counted as "No GPS" by the Location report / digest. Fallback order: the first real
+    // tagged-photo fix, else the phone's submit-time captureGeo, else a GPS field. Only the stored location columns
+    // change — the fence verdict (geoFenceOk / distanceMeters) and the flags are untouched, so a poor-accuracy fix is
+    // reported as poor accuracy. Switch-off tenants (Deoleo) store exactly what they stored before.
+    if (locationRequired && (repGeo.lat == null || repGeo.lng == null)) {
+      const fallback = this.firstRealFix(schema, values, gateInput.captureGeo);
+      if (fallback) repGeo = this.photoToCaptureGeo(fallback);
     }
 
     // Hash the capture photos BEFORE the transaction (network I/O outside the tx).
@@ -1122,6 +1136,39 @@ export class VisibilityCaptureService {
    * CaptureGeo shape used for the map-pin columns. `null` (no representative photo) →
    * all-null. Mirrors extractCaptureGeo's accuracy/capturedAt coercion.
    */
+  /** Location gate: the first real fix of the capture — tagged photos, then the submit-time fix, then a GPS field. */
+  private firstRealFix(
+    schema: VisibilityFormSchema,
+    values: Record<string, unknown>,
+    captureGeo: unknown,
+  ): GpsCapture | null {
+    const asCapture = (raw: unknown): GpsCapture | null => {
+      const val = typeof raw === 'string' ? (() => { try { return JSON.parse(raw) as unknown; } catch { return null; } })() : raw;
+      const p = parseGpsPoint(val);
+      if (!p || !isRealFix(p)) return null;
+      const o = (val ?? {}) as Record<string, unknown>;
+      return {
+        lat: p.lat,
+        lng: p.lng,
+        accuracy: typeof o.accuracy === 'number' && Number.isFinite(o.accuracy) ? o.accuracy : undefined,
+        capturedAt: typeof o.capturedAt === 'string' ? o.capturedAt : undefined,
+      };
+    };
+    for (const f of schema.fields ?? []) {
+      if (f.type !== 'CAMERA' || !(f.geoFenceRequired === true || f.geotag === true)) continue;
+      const g = readMediaValue(values[f.id]).geo;
+      if (g && isRealFix(g)) return g;
+    }
+    const submitFix = asCapture(captureGeo);
+    if (submitFix) return submitFix;
+    for (const f of schema.fields ?? []) {
+      if (f.type !== 'GPS_POINT') continue;
+      const g = asCapture(values[f.id]);
+      if (g) return g;
+    }
+    return null;
+  }
+
   private photoToCaptureGeo(g: GpsCapture | null): CaptureGeo {
     if (!g) return { lat: null, lng: null, accuracy: null, capturedAt: null };
     let capturedAt: Date | null = null;

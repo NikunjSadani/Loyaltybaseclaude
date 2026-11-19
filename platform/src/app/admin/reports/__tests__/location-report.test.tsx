@@ -113,10 +113,24 @@ describe('Location Report page', () => {
 });
 
 describe('Reports index', () => {
-  it('lists the Location Report with an Open report link to /admin/reports/location', () => {
+  const featuresFetch = (requireLocation: boolean) =>
+    fetchMock.mockImplementation((url: string) =>
+      Promise.resolve(String(url).includes('/api/admin/settings/config') ? ok({ features: { requireLocation } }) : ok({})),
+    );
+
+  it('switch ON → lists the Location Report with an Open report link to /admin/reports/location', async () => {
+    featuresFetch(true);
     render(<ReportsPage />);
-    let el: HTMLElement | null = screen.getByText('Location Report');
+    let el: HTMLElement | null = await screen.findByText('Location Report');
     while (el && !el.querySelector('a[href="/admin/reports/location"]')) el = el.parentElement;
     expect(el).toBeTruthy();
+  });
+
+  it('AUDIT #4: switch OFF (Deoleo) → no Location Report tile (list unchanged)', async () => {
+    featuresFetch(false);
+    render(<ReportsPage />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await screen.findByText('Usage Report');
+    expect(screen.queryByText('Location Report')).toBeNull();
   });
 });

@@ -11,7 +11,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { checkLocation, detectLocationPlatform, locationGuide } from '../location-gate';
+import { checkLocation, detectLocationPlatform, isFixStale, locationGuide } from '../location-gate';
 import { useLocationGate } from '../use-location-gate';
 import { LocationGatePanel } from '@/components/location/LocationGatePanel';
 
@@ -129,6 +129,16 @@ describe('checkLocation', () => {
   });
 });
 
+describe('isFixStale (audit #3)', () => {
+  it('stale after 55 min on the phone clock, or with no / bad ts', () => {
+    const now = Date.now();
+    expect(isFixStale(new Date(now - 10 * 60_000).toISOString(), now)).toBe(false);
+    expect(isFixStale(new Date(now - 56 * 60_000).toISOString(), now)).toBe(true);
+    expect(isFixStale(undefined, now)).toBe(true);
+    expect(isFixStale('nope', now)).toBe(true);
+  });
+});
+
 describe('platform guide', () => {
   it('LG7: detects the platform and gives the matching, honest steps', () => {
     const android = 'Mozilla/5.0 (Linux; Android 14; SM-A146B) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36';
@@ -219,6 +229,26 @@ describe('useLocationGate + LocationGatePanel', () => {
     await waitFor(() => expect(btn.textContent).toMatch(/Test again/));
     expect(screen.getByTestId('location-gate-still-blocked')).toBeTruthy();
     expect(screen.getByTestId('location-gate-live').textContent).toMatch(/Still no location/);
+  });
+
+  it('AUDIT #9: the permission is revoked while a submit-time check is in flight → the check returns null (no submit)', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    let onPerm: (() => void) | null = null;
+    const ps = { state: 'granted' as PermissionState, addEventListener: (_e: string, cb: () => void) => { onPerm = cb; }, removeEventListener: vi.fn() };
+    Object.defineProperty(navigator, 'permissions', { value: { query: vi.fn().mockResolvedValue(ps) }, configurable: true });
+    const results: boolean[] = [];
+    render(<Harness enabled onSubmit={(ok) => results.push(ok)} />);
+    await screen.findByText('THE FLOW');
+    await waitFor(() => expect(onPerm).not.toBeNull());
+    let deliver: PositionCallback | null = null;
+    getCurrentPosition.mockImplementation((cb: PositionCallback) => { deliver = cb; });
+    fireEvent.click(screen.getByText('submit'));
+    await waitFor(() => expect(deliver).not.toBeNull());
+    ps.state = 'denied';
+    await act(async () => onPerm!());
+    await act(async () => fixOk(deliver!)); // the in-flight fix arrives AFTER the revoke
+    await waitFor(() => expect(results).toEqual([false]));
+    expect(await screen.findByTestId('location-gate-blocked')).toBeTruthy();
   });
 
   it('LG11: submit-time quiet re-check — OK keeps the flow; a lost fix switches to the guide and reports false', async () => {

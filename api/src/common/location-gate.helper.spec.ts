@@ -1,6 +1,6 @@
 import {
   BOARD_FIX_MAX_AGE_MS,
-  isFreshBoardFix,
+  isFreshFixTime,
   isRealFix,
   FENCE_BLOCK_ENTITY,
   LOCATION_REQUIRED_FEATURE,
@@ -66,7 +66,7 @@ describe('location-gate.helper', () => {
 });
 
 
-describe('isRealFix / isFreshBoardFix', () => {
+describe('isRealFix / isFreshFixTime', () => {
   it('a real fix is finite, in range, and not 0,0', () => {
     expect(isRealFix({ lat: 12.9, lng: 77.5 })).toBe(true);
     expect(isRealFix({ lat: 0, lng: 0 })).toBe(false);
@@ -76,12 +76,24 @@ describe('isRealFix / isFreshBoardFix', () => {
 
   it('board-photo fix must be recent (server clock), tolerating a little phone-clock skew', () => {
     const now = new Date();
-    expect(isFreshBoardFix(new Date(now.getTime() - 5 * 60_000).toISOString(), now)).toBe(true);
-    expect(isFreshBoardFix(new Date(now.getTime() - BOARD_FIX_MAX_AGE_MS - 1_000).toISOString(), now)).toBe(false);
-    expect(isFreshBoardFix(new Date(now.getTime() - 3 * 86_400_000).toISOString(), now)).toBe(false); // pre-filled re-KYC geo
-    expect(isFreshBoardFix(new Date(now.getTime() + 5 * 60_000).toISOString(), now)).toBe(true);
-    expect(isFreshBoardFix(new Date(now.getTime() + 60 * 60_000).toISOString(), now)).toBe(false);
-    expect(isFreshBoardFix('garbage', now)).toBe(false);
-    expect(isFreshBoardFix(undefined, now)).toBe(false);
+    expect(isFreshFixTime(new Date(now.getTime() - 5 * 60_000).toISOString(), now)).toBe(true);
+    expect(isFreshFixTime(new Date(now.getTime() - BOARD_FIX_MAX_AGE_MS - 1_000).toISOString(), now)).toBe(false);
+    expect(isFreshFixTime(new Date(now.getTime() - 3 * 86_400_000).toISOString(), now)).toBe(false); // pre-filled re-KYC geo
+    expect(isFreshFixTime(new Date(now.getTime() + 5 * 60_000).toISOString(), now)).toBe(true);
+    expect(isFreshFixTime(new Date(now.getTime() + 60 * 60_000).toISOString(), now)).toBe(false);
+    expect(isFreshFixTime('garbage', now)).toBe(false);
+    expect(isFreshFixTime(undefined, now)).toBe(false);
+  });
+
+  it('AUDIT #3: a phone clock that is off is judged on the PHONE clock (clientNow), within a 24 h bound', () => {
+    const now = new Date();
+    const phoneNow = new Date(now.getTime() - 3 * 3_600_000); // phone 3 h behind
+    const ts = new Date(phoneNow.getTime() - 5 * 60_000).toISOString(); // fix 5 min ago on the phone clock
+    expect(isFreshFixTime(ts, now)).toBe(false); // server clock alone would refuse
+    expect(isFreshFixTime(ts, now, phoneNow.toISOString())).toBe(true);
+    // A days-old pre-filled fix still fails even if the phone claims an old "now" beyond the 24 h bound.
+    const old = new Date(now.getTime() - 3 * 86_400_000);
+    expect(isFreshFixTime(new Date(old.getTime() - 60_000).toISOString(), now, old.toISOString())).toBe(false);
+    expect(isFreshFixTime(ts, now, 'garbage')).toBe(false);
   });
 });

@@ -1875,6 +1875,18 @@ describe('KycService', () => {
         expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
       });
 
+      it('AUDIT #3: a phone whose clock is 3 h behind is judged on its own clock (clientNow) → accepted', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true, outletMasterGeo: true } });
+        primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+        const phoneNow = new Date(Date.now() - 3 * 3_600_000);
+        const res = await service.create(so, {
+          ...baseDto,
+          boardPhotoGeo: { ...nearGeo, ts: new Date(phoneNow.getTime() - 5 * 60_000).toISOString() },
+          clientNow: phoneNow.toISOString(),
+        } as never);
+        expect(res).toMatchObject({ submissionId: 'sub1' });
+      });
+
       it('ON + the 0,0 default fix → 400 (not a real fix)', async () => {
         mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
         mockPrisma.outlet.findFirst.mockResolvedValueOnce({

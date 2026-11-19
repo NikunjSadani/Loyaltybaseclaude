@@ -35,20 +35,36 @@ export function isRealFix(g: unknown): g is { lat: number; lng: number } {
   return !!g && typeof g === 'object' && isUsableReference(g as { lat: number; lng: number });
 }
 
-/** Re-KYC stale-geo guard: a board-photo fix older than this (vs the server clock) is refused when the gate is on. */
+/** Freshness window for a fix (KYC board photo, visibility photo / submit fix) when the gate is on. */
 export const BOARD_FIX_MAX_AGE_MS = 60 * 60 * 1000;
-/** Tolerated phone-clock skew into the future for the board-photo fix timestamp. */
+/** Tolerated "fix taken in the future" (clock jitter between the fix and the phone's submit clock). */
 export const BOARD_FIX_FUTURE_SKEW_MS = 10 * 60 * 1000;
+/**
+ * A phone clock further than this from the server clock is not trusted as the reference — the server clock is used
+ * instead. Bounds how far `clientNow` can move the window (a phone set a day wrong cannot make a days-old fix pass).
+ */
+export const CLIENT_CLOCK_MAX_SKEW_MS = 24 * 60 * 60 * 1000;
 
 export const STALE_BOARD_FIX_MESSAGE =
   'The store board photo location is too old (or has no time) — take a fresh board photo location at the outlet (tap Retry location), then submit again.';
 
-/** True when the board-photo fix timestamp is within the allowed window of `now`. */
-export function isFreshBoardFix(ts: unknown, now: Date = new Date()): boolean {
+/**
+ * True when a fix's timestamp `ts` is within the window. Ages are measured on ONE clock: when the phone sends its own
+ * `clientNow` (at submit) and it is within CLIENT_CLOCK_MAX_SKEW_MS of the server clock, age = clientNow − ts (both on
+ * the phone clock, so a phone whose clock is off is not falsely refused); otherwise age = serverNow − ts.
+ * Not a security boundary — ts itself is client-supplied; the rule exists to refuse an honest OLD fix (a re-KYC
+ * pre-fill from days ago), and the 24 h bound keeps `clientNow` from widening it materially.
+ */
+export function isFreshFixTime(ts: unknown, now: Date = new Date(), clientNow?: unknown): boolean {
   if (typeof ts !== 'string' || !ts) return false;
   const t = Date.parse(ts);
   if (!Number.isFinite(t)) return false;
-  const age = now.getTime() - t;
+  let ref = now.getTime();
+  if (typeof clientNow === 'string' && clientNow) {
+    const c = Date.parse(clientNow);
+    if (Number.isFinite(c) && Math.abs(c - ref) <= CLIENT_CLOCK_MAX_SKEW_MS) ref = c;
+  }
+  const age = ref - t;
   return age <= BOARD_FIX_MAX_AGE_MS && age >= -BOARD_FIX_FUTURE_SKEW_MS;
 }
 

@@ -123,6 +123,17 @@ export async function checkLocation(
   });
 }
 
+/**
+ * A fix is "stale" on the phone a little BEFORE the server's 60-minute window closes (55 min, by the phone clock), so
+ * the submit-time refresh / Retry location happen before the server would refuse it. Missing / unreadable ts = stale.
+ */
+export const FIX_STALE_AFTER_MS = 55 * 60_000;
+export function isFixStale(ts: string | null | undefined, now: number = Date.now()): boolean {
+  if (!ts) return true;
+  const t = Date.parse(ts);
+  return !Number.isFinite(t) || now - t > FIX_STALE_AFTER_MS;
+}
+
 // ─── Which guide ──────────────────────────────────────────────────────────────
 
 export type LocationPlatform = 'android' | 'ios-safari' | 'ios-app' | 'desktop';

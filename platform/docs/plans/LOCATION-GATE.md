@@ -2,9 +2,38 @@
 
 **Status:** built on `feat/location-gate` (worktree `.claude/worktrees/location-gate`, from `7ba69566`), not merged,
 not deployed, not runtime-verified on a phone.
-**Scope:** the gate itself is TENANT-SCOPED (per-tenant flag, default OFF — Deoleo byte-identical). The Location
-Report and the Daily Ops Digest "Location" line are ⚠️ PLATFORM-WIDE (every tenant's admins / the internal email) —
-owner-approved 2026-11-18 together with the gate.
+**Scope:** TENANT-SCOPED in effect — the gate, the Location Report (tile + API) and the Daily Ops Digest "Location"
+line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing new). The code paths are shared
+(KYC / visibility services, reports, digest) — owner-approved 2026-11-18.
+
+## Independent audit fixes (2026-11-19, on 7cf3c24c) — all 9 findings confirmed in the code, none refuted
+
+1. **Stored location** (switch-on only): the fence sets `captureLat/Lng/Accuracy` only when it could measure a distance,
+   so captures with a fix were stored as "No GPS" (no outlet coordinates, fix worse than 200 m, geotag-without-fence
+   forms). Now a representative real fix is ALWAYS stored: first tagged-photo fix → submit-time `captureGeo` → GPS
+   field. The fence verdict / distance / flags are untouched, so a poor fix is reported as poor accuracy. Switch-off
+   tenants store exactly what they stored before.
+2. **geoFenceRequired without geotag**: on switch-on tenants such a photo now records a shutter-time fix (the server
+   requires one). Switch-off: unchanged (geotag only).
+3. **Stale board fix**: at submit, a board-photo fix older than 55 min (phone clock) is refreshed with the fresh
+   submit-time fix (position + time; it is then fenced like any board fix); "Retry location" also shows for a stale
+   fix. Clock skew: the phone sends `clientNow`; the server measures the fix age on the phone clock when `clientNow` is
+   within 24 h of the server clock (else the server clock). `ts` is client-supplied anyway — the rule refuses honest
+   OLD fixes (re-KYC pre-fill), and the 24 h bound keeps `clientNow` from widening it.
+4. **Location Report** tile listed only when the tenant has `requireLocation` ON (reports index reads the tenant
+   features); the API refuses switch-off tenants with 403 "available only for programmes with Require location…".
+5. **No settings-failure note**: removed — Deoleo sees nothing new; the gate stays open on a settings failure and the
+   server refuses with a clear message.
+6. **Settings still loading**: the visibility camera's shutter is held (existing disabled button, no new screen) until
+   the programme settings load, so a photo can't be taken before the location rule is known. (KYC: the board photo is
+   steps away from the first screen and always records a fix.)
+7. **Visibility freshness** (switch-on only): new photo fixes, GPS values and `captureGeo` must be ≤ 60 min old /
+   ≤ 10 min "future" (same window and same `clientNow` clock rule as KYC). Too old → "the location on "X" is too old —
+   retake".
+8. **Photo fix budget** (switch-on only, non-precise path): 20 s timeout + cached fix ≤ 30 s, matching the gate.
+   Switch-off tenants keep `{ enableHighAccuracy, timeout: 10 s }`.
+9. **Revoked mid-check**: a check superseded while in flight (e.g. permission revoked) now returns null, so a submit
+   never proceeds on a fix taken before the revoke.
 
 ## Release-gate review fixes (2026-11-19)
 
@@ -35,8 +64,8 @@ owner-approved 2026-11-18 together with the gate.
 - **Photo with no fix**: "Couldn't get a location for this photo — move to open sky and retake." The uploaded file is
   NOT deleted — there is no delete endpoint for sales media (same as today's accuracy-cap rejection); it stays an
   unreferenced object in the media bucket.
-- **Features fetch failure**: the gate stays open on the phone (the server still refuses), with a small note
-  "Couldn't load this programme's settings…".
+- **Features fetch failure**: the gate stays open on the phone (the server still refuses). (The note added in the
+  review round was removed after the audit — see audit fix 5.)
 - LOW: 0,0 is never a fix (phone + server); the report's roster reads run inside its statement-timeout transaction; the
   visibility form's live cameras are closed while the guide shows; Chrome wording "Permissions → turn Location on".
 
@@ -124,7 +153,7 @@ No in-app Help guide: switching it on is one toggle.
 
 ## Location Report
 
-- **Page** `/admin/reports/location` (listed on `/admin/reports`, Engagement). **API**
+- **Page** `/admin/reports/location` (listed on `/admin/reports`, Engagement — only for switch-on tenants; the API answers 403 for others). **API**
   `GET /v1/reports/location-compliance?from&to&role&region&sort&page&pageSize[&format=xlsx]` —
   `@Roles('GIFSY_ADMIN','MIS_USER','CLIENT_ADMIN')` + `reports:read`, exactly the Usage Report's gate; page permission
   inherits `/admin/reports` (`reports:read`). IST dates inclusive, default last 30 days, max 366.

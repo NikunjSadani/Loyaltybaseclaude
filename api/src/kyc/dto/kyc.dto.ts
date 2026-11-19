@@ -204,6 +204,12 @@ export class CreateKycDto {
   @Min(0)
   boardPhotoLockMs?: number;
 
+  // Location gate (requireLocation tenants): the phone's clock at submit (ISO). Lets the server judge the board-photo
+  // fix's age on the phone's own clock (bounded to ±24 h of the server clock). Ignored otherwise.
+  @IsOptional()
+  @IsString()
+  clientNow?: string;
+
   // Documents (including signature)
   @IsOptional()
   @IsArray()

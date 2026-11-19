@@ -2,6 +2,7 @@ import { ForbiddenException, NotFoundException, ServiceUnavailableException } fr
 import {
   buildLocationReport,
   istBounds,
+  LOCATION_REPORT_OFF_MESSAGE,
   LOCATION_TIMEOUT_MESSAGE,
   locationAggregateSql,
   pageOfLocationReport,
@@ -153,9 +154,12 @@ describe('buildLocationReport', () => {
     expect(r.totals.medianAccuracyM).toBeNull();
   });
 
-  it('Deoleo (setting absent, no fence): reports setting OFF and fence OFF', async () => {
-    const r = await buildLocationReport(fakePrisma() as any, 'deoleo', params(), NOW);
-    expect(r.setting).toEqual({ requireLocation: false, fenceOn: false, outletMasterFence: false });
+  it('AUDIT #4: Deoleo (switch off) → 403 with a clear message, before any roster read', async () => {
+    const prisma = fakePrisma();
+    await expect(buildLocationReport(prisma as any, 'deoleo', params(), NOW)).rejects.toThrow(
+      new ForbiddenException(LOCATION_REPORT_OFF_MESSAGE),
+    );
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
   });
 
   it('statement timeout → a clear 503 worded for this report', async () => {

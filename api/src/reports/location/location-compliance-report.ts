@@ -35,6 +35,10 @@ import {
 export const LOCATION_TIMEOUT_MESSAGE =
   'The location report took too long to build. Please try again, or choose a shorter date range or narrower filters.';
 
+/** Audit #4: the report exists only for programmes with "Require location" ON (Deoleo sees nothing new). */
+export const LOCATION_REPORT_OFF_MESSAGE =
+  'The Location report is available only for programmes with "Require location" switched on (Gifsy console → Behaviour flags).';
+
 export const SALES_ROLES = ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'] as const;
 
 export const LOCATION_NOTES = {
@@ -252,6 +256,7 @@ export async function buildLocationReport(
 
   const client = await prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
   const features = ((client?.features ?? {}) as Record<string, unknown>) ?? {};
+  if (features[LOCATION_REQUIRED_FEATURE] !== true) throw new ForbiddenException(LOCATION_REPORT_OFF_MESSAGE);
   const visCfg = await prisma.programSetting.findUnique({
     where: { clientId_settingKey: { clientId, settingKey: 'visibilityConfig' } },
     select: { settingValue: true },

@@ -29,7 +29,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import {
-  isFreshBoardFix,
+  isFreshFixTime,
   isLocationRequiredFor,
   isRealFix,
   LOCATION_REQUIRED_KYC_MESSAGE,
@@ -1926,7 +1926,9 @@ export class KycService {
     if (locationRequired) {
       if (!isRealFix(dto.boardPhotoGeo ?? null)) throw new BadRequestException(LOCATION_REQUIRED_KYC_MESSAGE);
       // Re-KYC stale-geo guard: a board-photo fix pre-filled from an earlier submission (or with no time) is refused.
-      if (!isFreshBoardFix(dto.boardPhotoGeo?.ts)) throw new BadRequestException(STALE_BOARD_FIX_MESSAGE);
+      if (!isFreshFixTime(dto.boardPhotoGeo?.ts, new Date(), dto.clientNow)) {
+        throw new BadRequestException(STALE_BOARD_FIX_MESSAGE);
+      }
     }
     if (outletMasterGeoEnabled) {
       const reference =

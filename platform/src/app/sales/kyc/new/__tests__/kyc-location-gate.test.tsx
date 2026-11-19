@@ -17,9 +17,8 @@ vi.mock('next/link', () => ({
 vi.mock('jsqr', () => ({ default: vi.fn().mockReturnValue(null) }));
 
 let REQUIRE_LOCATION = false;
-let FEATURES_ERROR = false;
 vi.mock('@/lib/tenant-features', () => ({
-  useTenantFeatures: () => ({ features: { outletMasterGeo: false, requireLocation: REQUIRE_LOCATION }, loading: false, error: FEATURES_ERROR }),
+  useTenantFeatures: () => ({ features: { outletMasterGeo: false, requireLocation: REQUIRE_LOCATION }, loading: false }),
 }));
 
 import NewKYCPage from '../page';
@@ -82,17 +81,6 @@ describe('KYC-LG — KYC wizard location gate', () => {
     }
   });
 
-  it('REVIEW: features could not be loaded → the gate stays open but a note says location will be checked at submit', async () => {
-    REQUIRE_LOCATION = false;
-    FEATURES_ERROR = true;
-    try {
-      render(<NewKYCPage />);
-      expect(screen.getByTestId('features-load-note').textContent).toMatch(/checked when you submit/);
-    } finally {
-      FEATURES_ERROR = false;
-    }
-  });
-
   it('KLG2: ON + a fix → the wizard shows', async () => {
     REQUIRE_LOCATION = true;
     getCurrentPosition.mockImplementation(fix);
@@ -106,7 +94,6 @@ describe('KYC-LG — KYC wizard location gate', () => {
     render(<NewKYCPage />);
     expect(screen.getByTestId('kyc-new-root')).toBeTruthy();
     expect(screen.queryByTestId('kyc-flow')).toBeNull(); // no wrapper at all for switch-off tenants
-    expect(screen.queryByTestId('features-load-note')).toBeNull();
     await waitFor(() => expect(screen.queryByTestId('location-gate-checking')).toBeNull());
     expect(getCurrentPosition).not.toHaveBeenCalled();
   });

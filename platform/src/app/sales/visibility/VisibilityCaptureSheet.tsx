@@ -72,7 +72,7 @@ export function VisibilityCaptureSheet({
   const [view, setView] = useState<View>('form');
   // Geo-fence tenants (Bajaj, features.outletMasterGeo) use the timed high-accuracy acquire for
   // each photo's GPS fix; every other tenant (Deoleo) keeps the single getCurrentPosition call.
-  const { features, loading: featuresLoading, error: featuresError } = useTenantFeatures('/api/sales/me');
+  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
   const preciseGps = features.outletMasterGeo;
   // LOCATION GATE (features.requireLocation; docs/plans/LOCATION-GATE.md). OFF (Deoleo, every other tenant) → the hook
   // does nothing. ON → the capture form stays hidden behind the location guide until location is allowed AND a fix
@@ -150,7 +150,9 @@ export function VisibilityCaptureSheet({
         }
         captureGeo = { lat: fix.lat, lng: fix.lng, accuracy: fix.accuracy, capturedAt: new Date().toISOString() };
       }
-      const geoPart = captureGeo ? { captureGeo } : {};
+      // clientNow: the phone's clock at submit — the server judges fix ages on it (bounded), so a phone whose clock is
+      // off is not refused.
+      const geoPart = captureGeo ? { captureGeo, clientNow: new Date().toISOString() } : {};
       const res = isResubmit
         ? await visibilityApi.resubmitCapture(outlet.captureId as string, { formValues, ...geoPart })
         : await visibilityApi.submitCapture({ outletId: outlet.outletId, formValues, ...geoPart });
@@ -229,11 +231,6 @@ export function VisibilityCaptureSheet({
                 Checking location…
               </p>
             )}
-            {featuresError && (
-              <p data-testid="features-load-note" className="mb-3 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                Couldn&apos;t load this programme&apos;s settings. If location is required here, it will be checked when you submit.
-              </p>
-            )}
             <div hidden={locationGate.blocking} data-testid="visibility-form-area">
             {loadError ? (
               // OUTAGE — the load failed. Distinct from "nothing configured": offer a retry.
@@ -288,6 +285,9 @@ export function VisibilityCaptureSheet({
                 requireLocation={locationGate.enabled}
                 // While the guide covers the form, live cameras are closed (no hidden stream); photos already taken stay.
                 cameraPaused={locationGate.blocking}
+                // Audit #6: no shutter while the programme settings are still loading (a geotag photo taken then would
+                // miss the location rule). Just the existing disabled camera button — no new screen for anyone.
+                captureHold={featuresLoading}
               />
             )}
             </div>
