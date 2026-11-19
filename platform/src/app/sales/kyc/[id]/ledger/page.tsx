@@ -13,6 +13,7 @@ import {
   type ApiWalletTransaction,
 } from '@/components/wallet/outlet-wallet-view';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import { statementOutlet } from '@/lib/wallet-statement/statement-outlet';
 import type { PayoutLedgerEntry, WalletBalance, WalletTransaction } from '@/types';
 
 /* The sales app's view of an outlet's wallet. Everything below the header — the summary cards
@@ -83,9 +84,20 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
     const res = await fetch(`/api/kyc/${id}/ledger/statement?from=${from}&to=${to}`);
     const json = await res.json();
     if (!res.ok || !json?.success || !Array.isArray(json.data?.rows)) throw new Error('statement unavailable');
-    return buildStatementDoc(json.data as StatementApiResponse, payouts, {
-      outletName: outlet?.name ?? '',
-      outletCode: outlet?.outletCode ?? '',
+    const api = json.data as StatementApiResponse & { outletCode?: string; outletName?: string | null };
+    // SAME outlet-name source as the partner download: the statement response's own
+    // Outlet.name + outletCode pair (via the shared statementOutlet). Only when an older backend
+    // sends no name does it fall back to this page's (already-loaded, same-outlet) header name.
+    const named = statementOutlet(api, {
+      resolved: true,
+      outletName: null,
+      businessName: outlet?.name ?? '',
+      operableOutlets: [],
+      activePartnerId: null,
+    });
+    return buildStatementDoc(api, payouts, {
+      outletName: named.outletName,
+      outletCode: named.outletCode || outlet?.outletCode || '',
       from,
       to,
     });

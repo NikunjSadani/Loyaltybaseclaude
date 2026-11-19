@@ -5093,7 +5093,7 @@ describe('KycService', () => {
         mockPrisma.kycSubmission.findFirst.mockResolvedValue({
           id: 's1', userId: 'sss1', partnerId: 'p1',
           partner: {
-            clientId: 'deoleo', businessName: 'Biz', phone: '98', outlets: [{ outletCode: 'OUT-1' }],
+            clientId: 'deoleo', businessName: 'Biz', phone: '98', outlets: [{ outletCode: 'OUT-1', name: 'Biz Outlet (master)' }],
             wallets: [{ id: 'w1', redeemablePoints, lifetimeEarned: 0, lifetimeRedeemed: 0 }],
           },
         });
@@ -5125,6 +5125,16 @@ describe('KycService', () => {
         });
         expect(res.statement.currentBalance).toBe(2500);
         expect(res.statement.outletCode).toBe('OUT-1');
+        // CONTRACT (one release of overlap, 2026-11-19): the LEGACY `transactions` array is still
+        // returned ALONGSIDE `statement`, so an old FE bundle against this API keeps its statement.
+        // TODO(2026-11-19): drop this half of the contract when `transactions` is removed.
+        expect(res.transactions).toHaveLength(250);
+        expect(res.transactions[0]).toEqual({
+          id: 't0249', date: '2025-01-11', description: '', type: 'earn',
+          points: 10, balance: 2500, ref: undefined, fieldName: null,
+        });
+        expect(res.transactions[249].id).toBe('t0000');
+        expect(res.transactions.map((t) => t.id)).toEqual([...res.statement.rows].reverse().map((r) => r.id));
         // The loader's query is per-wallet and unpaginated.
         const args = mockPrisma.walletTransaction.findMany.mock.calls[0][0];
         expect(args.where.walletId).toBe('w1');
@@ -5155,6 +5165,9 @@ describe('KycService', () => {
         expect(all.closingBalance).toBe(30);
         expect(all.currentBalance).toBe(30);
         expect(all.outletCode).toBe('OUT-1');
+        // Same outlet-name source as the partner download (GET /v1/wallet/statement → Outlet.name of
+        // the primary outlet, paired with that SAME row's code) — not the ChannelPartner businessName.
+        expect(all.outletName).toBe('Biz Outlet (master)');
         expect(all.rows.map((r) => r.id)).toEqual(['t0000', 't0001', 't0002']);
         expect(all.rows[0]).toMatchObject({ description: 'Points earned', narration: null, balanceBefore: 0, balanceAfter: 10 });
 
@@ -5170,7 +5183,17 @@ describe('KycService', () => {
           partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [], wallets: [] },
         });
         await expect(service.ledgerStatement(sss, 's1', {})).resolves.toEqual({
-          openingBalance: 0, closingBalance: 0, currentBalance: 0, outletCode: '', rows: [],
+          openingBalance: 0, closingBalance: 0, currentBalance: 0, outletCode: '', outletName: null, rows: [],
+        });
+      });
+
+      it('ledgerStatement() for a no-wallet (payout-only) outlet still names it with the outlet code + Outlet.name pair', async () => {
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'sss1', partnerId: 'p1',
+          partner: { clientId: 'deoleo', businessName: 'Biz', phone: 'p', outlets: [{ outletCode: 'OUT-7', name: 'Seven Stores' }], wallets: [] },
+        });
+        await expect(service.ledgerStatement(sss, 's1', {})).resolves.toMatchObject({
+          outletCode: 'OUT-7', outletName: 'Seven Stores', rows: [],
         });
       });
 

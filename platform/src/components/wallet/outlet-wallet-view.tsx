@@ -16,7 +16,7 @@
  *   - neither → no cards; the statement below always renders.
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useId } from 'react';
 import { Coins, Calendar, X } from 'lucide-react';
 import { StatementDownloadButton } from '@/components/wallet/statement-download-button';
 import type { StatementDoc } from '@/lib/wallet-statement/statement-model';
@@ -155,12 +155,13 @@ type PointsRow = { kind: 'points'; date: Date; label?: string; tx: WalletTransac
 type PayoutRow = { kind: 'payout'; date: Date; label?: string; entry: PayoutLedgerEntry };
 type LedgerRow = PointsRow | PayoutRow;
 
-/** Current calendar month as a `YYYY-MM` month-input value, computed from `new Date()`.
+/** Current calendar month as a `YYYY-MM` month-input value, computed from `new Date()` in IST —
+ *  the SAME clock the row months use (toMonthKey) and the download uses, so "this month" and a row's
+ *  month can never disagree on a non-IST device near a month edge (deliberate, 2026-11-19).
  *  Used as the FIRST-paint default (before live data arrives) and as the empty-history
  *  fallback — never a hardcoded date, so the wallet opens on "today", not a fixed past month. */
 export function currentMonthInput(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  return istMonthKey(new Date());
 }
 
 /* ─── Points summary card ─────────────────────────────────────────────────────── */
@@ -360,6 +361,25 @@ export function OutletWalletView({
     return [...filtered].sort((a, b) => +b.date - +a.date);
   }, [periodRows, kpiFilter]);
 
+  /* A KPI picked earlier that no longer exists in the current options (the period or the
+     Earn/Burn chip changed) falls back to "All Parameters" — never a stale, invisible selection
+     filtering the list down to nothing. Adjusted during render (React's "adjust state when a
+     prop/derived value changes" pattern), so there is no empty intermediate frame. */
+  if (kpiFilter && !kpiOptions.includes(kpiFilter)) setKpiFilter('');
+
+  /* Escape closes the period popover. */
+  useEffect(() => {
+    if (!calOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setCalOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [calOpen]);
+
+  const idBase   = useId();
+  const fromId   = `${idBase}-from`;
+  const toId     = `${idBase}-to`;
+  const dialogId = `${idBase}-period`;
+
   const periodDisp = rangeLabel(activeFrom, activeTo);
 
   return (
@@ -390,6 +410,9 @@ export function OutletWalletView({
             <div className="relative">
               <button
                 data-testid="period-picker-btn"
+                aria-haspopup="dialog"
+                aria-expanded={calOpen}
+                aria-controls={calOpen ? dialogId : undefined}
                 onClick={() => { setPendingFrom(activeFrom); setPendingTo(activeTo); setCalOpen(o => !o); }}
                 className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
                   calOpen
@@ -404,24 +427,24 @@ export function OutletWalletView({
               {calOpen && (
                 <>
                   <div className="fixed inset-0 z-10" onClick={() => setCalOpen(false)} />
-                  <div className="absolute top-full right-0 mt-2 bg-white rounded-2xl border border-gray-100 shadow-xl p-4 z-20 w-64">
+                  <div id={dialogId} role="dialog" aria-label="Select period" className="absolute top-full right-0 mt-2 bg-white rounded-2xl border border-gray-100 shadow-xl p-4 z-20 w-64">
                     <div className="flex items-center justify-between mb-3">
                       <p className="text-xs font-bold text-gray-800">Select Period</p>
-                      <button onClick={() => setCalOpen(false)} className="p-1 rounded-full hover:bg-gray-100 text-gray-400">
+                      <button onClick={() => setCalOpen(false)} aria-label="Close period picker" className="p-1 rounded-full hover:bg-gray-100 text-gray-400">
                         <X className="h-3.5 w-3.5" />
                       </button>
                     </div>
                     <div className="space-y-3">
                       <div>
-                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide block mb-1">From</label>
-                        <input type="month" value={pendingFrom} min={pickerMin} max={pendingTo}
+                        <label htmlFor={fromId} className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide block mb-1">From</label>
+                        <input id={fromId} type="month" value={pendingFrom} min={pickerMin} max={pendingTo}
                           onChange={e => setPendingFrom(e.target.value)}
                           className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-[var(--brand-primary)] focus:ring-1 focus:ring-[var(--brand-primary)]/20"
                         />
                       </div>
                       <div>
-                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide block mb-1">To</label>
-                        <input type="month" value={pendingTo} min={pendingFrom} max={pickerMax}
+                        <label htmlFor={toId} className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide block mb-1">To</label>
+                        <input id={toId} type="month" value={pendingTo} min={pendingFrom} max={pickerMax}
                           onChange={e => setPendingTo(e.target.value)}
                           className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-[var(--brand-primary)] focus:ring-1 focus:ring-[var(--brand-primary)]/20"
                         />

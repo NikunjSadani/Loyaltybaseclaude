@@ -4407,7 +4407,9 @@ export class KycService {
             outlets: {
               where: { deletedAt: null },
               orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-              select: { outletCode: true },
+              // name: the statement's outletName — the SAME Outlet row (and source) as the partner
+              // download's GET /v1/wallet/statement, so both documents name the outlet identically.
+              select: { outletCode: true, name: true },
               take: 1,
             },
             // The passbook rows are NOT nested here any more (that carried a `take: 200`
@@ -4452,6 +4454,7 @@ export class KycService {
       partner,
       wallet: partner?.wallets[0] ?? null,
       outletCode: partner?.outlets[0]?.outletCode ?? '',
+      outletName: partner?.outlets[0]?.name ?? null,
       clientId: partner?.clientId ?? user.clientId,
     };
   }
@@ -4460,15 +4463,19 @@ export class KycService {
   private async ledgerStatementFor(
     ctx: Awaited<ReturnType<KycService['resolveLedgerContext']>>,
     range: { from?: string; to?: string },
-  ): Promise<StatementApiResponse> {
-    if (!ctx.wallet) return { ...EMPTY_STATEMENT, rows: [] };
-    return buildStatementResponse(this.prisma, this.logger, {
+  ): Promise<StatementApiResponse & { outletName: string | null }> {
+    // Same outlet name/code pairing as GET /v1/wallet/statement (WalletService.statement): the
+    // primary outlet row supplies BOTH, including for a no-wallet (payout-only / pre-KYC) outlet.
+    const { outletCode, outletName } = ctx;
+    if (!ctx.wallet) return { ...EMPTY_STATEMENT, outletCode, outletName, rows: [] };
+    const stmt = await buildStatementResponse(this.prisma, this.logger, {
       wallet: ctx.wallet,
       clientId: ctx.clientId,
-      outletCode: ctx.outletCode,
+      outletCode,
       from: range.from,
       to: range.to,
     });
+    return { ...stmt, outletName };
   }
 
   async ledger(user: JwtPayload, id: string) {
@@ -4526,6 +4533,21 @@ export class KycService {
       // ISO instants, per-type default description) — the sales screen renders it with the
       // partner wallet's own row mapping, so the two can never drift.
       statement,
+      // LEGACY on-screen contract (pre-2026-11-19 sales FE): newest first, IST date key, coarse type.
+      // Kept for ONE release so an old FE served against this API (deploy skew / cached bundle) still
+      // renders its statement instead of silently showing it empty.
+      // TODO(2026-11-19): remove `transactions` (+ mapTxType) after the next release ships the
+      // shared-wallet FE everywhere — the current FE reads `statement` only.
+      transactions: [...statement.rows].reverse().map((tx) => ({
+        id: tx.id,
+        date: istDateKey(new Date(tx.date)),
+        description: tx.narration ?? '',
+        type: mapTxType(tx.transactionType),
+        points: tx.points,
+        balance: tx.balanceAfter,
+        ref: tx.referenceId ?? undefined,
+        fieldName: tx.fieldName,
+      })),
       payouts,
     };
   }
@@ -6754,6 +6776,31 @@ export class KycService {
       ownerPhotoUrl: await sign(byType('SELFIE')),
       chequeUrl: await sign(byType('CANCELLED_CHEQUE')),
     };
+  }
+}
+
+/**
+ * Maps a wallet transaction type to the LEGACY ledger view's coarse type (`transactions` only).
+ * TODO(2026-11-19): remove with `transactions` after the next release.
+ */
+function mapTxType(type: string): 'earn' | 'redeem' | 'hold' | 'expire' | 'credit' {
+  switch (type) {
+    case 'CREDIT_POINTS_EARNED':
+      return 'earn';
+    case 'CREDIT_BONUS':
+    case 'CREDIT_ADJUSTMENT':
+    case 'CREDIT_REVERSAL':
+    case 'UNLOCK_HOLDING':
+      return 'credit';
+    case 'DEBIT_REDEMPTION':
+    case 'DEBIT_ADJUSTMENT':
+      return 'redeem';
+    case 'DEBIT_EXPIRY':
+      return 'expire';
+    case 'LOCK_HOLDING':
+      return 'hold';
+    default:
+      return 'credit';
   }
 }
 

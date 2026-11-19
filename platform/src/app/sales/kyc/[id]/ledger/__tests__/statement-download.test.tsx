@@ -118,6 +118,26 @@ describe('SLD — sales ledger statement download', () => {
     expect(downloadBlob.mock.calls[0][1]).toBe('wallet-statement-OUT-111-2026-04_2026-05.pdf');
   });
 
+  it('SLD5: the document names the outlet from the statement response (Outlet.name), exactly like the partner download', async () => {
+    stub();
+    const base = vi.mocked(global.fetch).getMockImplementation()!;
+    vi.mocked(global.fetch).mockImplementation((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).startsWith('/api/kyc/k1/ledger/statement')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: { ...STATEMENT, outletName: 'Verma Outlet (master)' } }),
+        } as Response);
+      }
+      return base(url, init);
+    });
+    await renderLedger();
+    await pick('Excel (.xlsx)');
+    const doc = statementToXlsxBlob.mock.calls[0][0];
+    // Not the page header's businessName ("Verma Traders"): the statement's own Outlet.name + code pair.
+    expect(doc.outletName).toBe('Verma Outlet (master)');
+    expect(doc.outletCode).toBe('OUT-111');
+  });
+
   it('SLD4: the Download button is disabled when the selected period has no rows', async () => {
     stub([], []);
     await renderLedger();
