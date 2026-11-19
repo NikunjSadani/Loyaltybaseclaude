@@ -1355,7 +1355,7 @@ describe('preview × background jobs', () => {
     const prev = p.months.find((m) => m.month === PREV)!;
     expect(prev.activeJob).toEqual({ jobId: 'j1', kind: 'APPLY', status: 'RUNNING', importId: 'imp1', requestedBy: 'Ravi', createdAt: '2026-11-18T05:02:00.000Z' });
     expect(prev.canApply).toBe(false);
-    expect(prev.blockedReason).toMatch(new RegExp(`^${monthLabelOf(PREV)} is being applied by Ravi since (\d+ \w+, )?10:32\. Wait for it to finish\.$`));
+    expect(prev.blockedReason).toMatch(new RegExp(`^${monthLabelOf(PREV)} is being applied by Ravi since (\\d+ \\w+, )?10:32\\. Wait for it to finish\\.$`));
     const cur = p.months.find((m) => m.month === CUR)!;
     expect(cur.activeJob).toBeNull();
     expect(cur.canApply).toBe(true);

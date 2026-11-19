@@ -686,7 +686,7 @@ describe('background jobs: Close / Reopen refused while an Apply / Recalculate o
   it('close → 409 "… is being applied by Ravi since 10:32 — try again when it finishes." and nothing is locked or written', async () => {
     const d = db([], { activeJobs: [busy] });
     const svc = new SalesMonthsService(d as never);
-    await expect(svc.close(clientAdmin, PREV)).rejects.toThrow(new RegExp(`^${monthLabel(PREV)} is being applied by Ravi since (\d+ \w+, )?10:32 — try again when it finishes\.$`));
+    await expect(svc.close(clientAdmin, PREV)).rejects.toThrow(new RegExp(`^${monthLabel(PREV)} is being applied by Ravi since (\\d+ \\w+, )?10:32 — try again when it finishes\\.$`));
     // final review L4: checked UNDER the month lock, in the transaction of the state change — and nothing is written
     expect(d.log).toEqual([`lock:sales-month:t1:${PREV}`]);
     expect(d.salesMonthStatus.upsert).not.toHaveBeenCalled();
@@ -695,7 +695,7 @@ describe('background jobs: Close / Reopen refused while an Apply / Recalculate o
   it('reopen → the same 409 (recalculate wording for a RECALC job)', async () => {
     const d = db([{ clientId: 't1', month: OLD, state: 'CLOSED' }], { activeJobs: [{ ...busy, month: OLD, kind: 'RECALC' }] });
     const svc = new SalesMonthsService(d as never);
-    await expect(svc.reopen(gifsyAssumed, OLD, { acknowledgeDownstream: true })).rejects.toThrow(new RegExp(`^${monthLabel(OLD)} is being recalculated by Ravi since (\d+ \w+, )?10:32 — try again when it finishes\.$`));
+    await expect(svc.reopen(gifsyAssumed, OLD, { acknowledgeDownstream: true })).rejects.toThrow(new RegExp(`^${monthLabel(OLD)} is being recalculated by Ravi since (\\d+ \\w+, )?10:32 — try again when it finishes\\.$`));
   });
 
   it('the months list carries each month activeJob (null when none)', async () => {
