@@ -15,6 +15,7 @@ import { Msg91Service } from '../notifications/msg91.service';
 import {
   AddMessageDto,
   AssignTicketDto,
+  CancelClientRemarksDto,
   ClientRemarksReplyDto,
   CreateTicketDto,
   EscalateTicketDto,
@@ -88,6 +89,15 @@ function withoutRemarks(metadata: unknown): Prisma.InputJsonValue {
 
 type Reader = 'GIFSY' | 'CLIENT' | 'FIELD';
 
+/** Tenant-wide stat-card counts for the admin list. */
+export interface TicketSummary {
+  total: number;
+  open: number;
+  inProgress: number;
+  resolved: number;
+  highPriority: number;
+}
+
 /**
  * Field (outlet / sales) projection — an explicit allow-list so the assignee, priority, the
  * remarks marker (metadata) and any future admin-only column are never even selected.
@@ -127,8 +137,6 @@ type TicketRow = Prisma.TicketGetPayload<object>;
 @Injectable()
 export class TicketsService {
   private readonly logger = new Logger(TicketsService.name);
-  /** Background email jobs (fire-and-forget after commit). Exposed for tests to await. */
-  readonly emailJobs: Promise<void>[] = [];
 
   constructor(
     private readonly prisma: PrismaService,
@@ -250,6 +258,67 @@ export class TicketsService {
     }
   }
 
+  /**
+   * Support-admin list filters, evaluated in the DB so they cover EVERY ticket (not just a loaded
+   * page): priorities (comma list), source (outlet owner vs sales rep), and free-text `q` over ticket
+   * number, subject, the raiser's name, and outlet name / code (the owner's outlets, or the outlet a
+   * sales ticket references — resolved to ids first, tenant-pinned).
+   */
+  private async adminListFilters(user: JwtPayload, q: ListTicketsQueryDto): Promise<Prisma.TicketWhereInput> {
+    const and: Prisma.TicketWhereInput[] = [];
+    if (q.priorities) {
+      const valid: TicketPriority[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+      const list = q.priorities.split(',').map((p) => p.trim().toUpperCase()).filter((p): p is TicketPriority => valid.includes(p as TicketPriority));
+      if (list.length === 0) throw new BadRequestException(`Invalid priorities '${q.priorities}'`);
+      and.push({ priority: { in: list } });
+    }
+    if (q.source === 'outlet') and.push({ createdBy: { role: { in: [...PARTNER_ROLES] as never[] } } });
+    if (q.source === 'sales') {
+      and.push({ createdBy: { role: { in: ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'] } } });
+    }
+    const text = q.q?.trim();
+    if (text) {
+      const contains = { contains: text, mode: 'insensitive' as const };
+      const outletIds = (
+        await this.prisma.outlet.findMany({
+          where: { clientId: user.clientId, OR: [{ outletCode: contains }, { name: contains }] },
+          select: { id: true },
+          take: 500,
+        })
+      ).map((o) => o.id);
+      and.push({
+        OR: [
+          { ticketNumber: contains },
+          { subject: contains },
+          { createdBy: { name: contains } },
+          { createdBy: { channelPartner: { ownerName: contains } } },
+          { createdBy: { channelPartner: { outlets: { some: { OR: [{ outletCode: contains }, { name: contains }] } } } } },
+          ...(outletIds.length ? [{ referenceType: OUTLET_REFERENCE_TYPE, referenceId: { in: outletIds } }] : []),
+        ],
+      });
+    }
+    return and.length ? { AND: and } : {};
+  }
+
+  /** Tenant-wide counts for the admin stat cards (independent of paging / filters). */
+  private async summary(clientId: string): Promise<TicketSummary> {
+    const [byStatus, highOpen] = await Promise.all([
+      this.prisma.ticket.groupBy({ by: ['status'], where: { clientId }, _count: { _all: true } }),
+      this.prisma.ticket.count({
+        where: { clientId, priority: { in: ['HIGH', 'CRITICAL'] }, status: { notIn: ['RESOLVED', 'CLOSED'] } },
+      }),
+    ]);
+    const n = (st: TicketStatus[]) =>
+      (Array.isArray(byStatus) ? byStatus : []).filter((r) => st.includes(r.status as TicketStatus)).reduce((a, r) => a + (r._count?._all ?? 0), 0);
+    return {
+      total: n(['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'RESOLVED', 'CLOSED', 'ESCALATED', 'WAITING_ON_CLIENT']),
+      open: n(['OPEN']),
+      inProgress: n(['IN_PROGRESS', 'ESCALATED', 'WAITING_ON_CLIENT', 'PENDING_USER']),
+      resolved: n(['RESOLVED', 'CLOSED']),
+      highPriority: highOpen ?? 0,
+    };
+  }
+
   async list(user: JwtPayload, q: ListTicketsQueryDto) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
@@ -271,6 +340,7 @@ export class TicketsService {
       }
     }
     if (q.category) where.category = q.category;
+    if (reader !== 'FIELD') Object.assign(where, await this.adminListFilters(user, q));
     if (q.awaitingMine === 'true' && user.role === 'CLIENT_ADMIN') {
       where.status = 'WAITING_ON_CLIENT';
       where.metadata = { path: ['clientRemarks', 'requestedFromId'], equals: user.sub };
@@ -306,6 +376,7 @@ export class TicketsService {
       tickets: unknown[];
       pagination: { page: number; limit: number; total: number; pages: number };
       awaitingClient?: { total: number; mine: number };
+      summary?: TicketSummary;
     } = {
       tickets: reader === 'FIELD' ? rows.map((t) => this.maskForField(t)) : await this.withSubmitter(user.clientId, rows),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
@@ -324,6 +395,7 @@ export class TicketsService {
           : Promise.resolve(0),
       ]);
       result.awaitingClient = { total: awaitTotal ?? 0, mine: awaitMine ?? 0 };
+      result.summary = await this.summary(user.clientId);
     }
 
     return result;
@@ -638,9 +710,10 @@ export class TicketsService {
    * (`alreadyPending`), never re-sent (a retry after a timeout can't double-email). Asking a
    * DIFFERENT client admin replaces the request and cancels the old one explicitly.
    *
-   * Email: sent AFTER commit and never blocks the response. Known-up-front failures (no address,
-   * SMTP not configured) are returned as emailStatus NOT_SENT + recorded; otherwise the send runs
-   * in the background (emailStatus SENDING) and its outcome is written back as a Gifsy-only note.
+   * Email: sent AFTER commit, IN the request (bounded by Msg91Service's 10 s connect / 20 s socket
+   * caps — a background send can be lost when Cloud Run throttles CPU after the response). The
+   * response carries `emailSent` + `emailError`; the outcome is also written to the thread as a
+   * Gifsy-only note. A retried click hits the idempotency guard above, so it never re-sends.
    */
   async requestClientRemarks(user: JwtPayload, id: string, dto: RequestClientRemarksDto, callerOrigin: string) {
     this.assertGifsyOperator(user);
@@ -707,12 +780,12 @@ export class TicketsService {
       variables: { event: 'TICKET_CLIENT_REMARKS_REQUESTED', ticketId: id },
     });
 
-    const email = await this.startRemarksEmail({ ticket, targetId: target.id, targetName: target.name, by, note: text, callerOrigin, actorId: user.sub });
+    const email = await this.sendRemarksEmail({ ticket, targetId: target.id, targetName: target.name, by, note: text, callerOrigin, actorId: user.sub });
     return {
       message: `Remarks requested from ${target.name}`,
       requestedFrom: target,
-      emailStatus: email.status,
-      ...(email.status === 'NOT_SENT' ? { emailError: email.reason } : {}),
+      emailSent: email.sent,
+      ...(email.sent ? {} : { emailError: email.reason }),
     };
   }
 
@@ -725,7 +798,7 @@ export class TicketsService {
     }
   }
 
-  private async startRemarksEmail(p: {
+  private async sendRemarksEmail(p: {
     ticket: TicketRow;
     targetId: string;
     targetName: string;
@@ -733,7 +806,7 @@ export class TicketsService {
     note: string;
     callerOrigin: string;
     actorId: string;
-  }): Promise<{ status: 'SENDING' } | { status: 'NOT_SENT'; reason: string }> {
+  }): Promise<{ sent: true } | { sent: false; reason: string }> {
     let to = '';
     let link = '';
     try {
@@ -755,7 +828,7 @@ export class TicketsService {
     }
     const notSent = async (reason: string) => {
       await this.recordEmailOutcome(p.ticket.id, p.actorId, `Email to ${p.targetName} was NOT sent: ${reason}. They were notified in-app only.`);
-      return { status: 'NOT_SENT' as const, reason };
+      return { sent: false as const, reason };
     };
     if (!to) return notSent('the client admin has no email address on file');
     // sendEmail silently no-ops when SMTP is unconfigured — never report that as sent.
@@ -770,25 +843,54 @@ export class TicketsService {
       `<p style="color:#888;font-size:12px">Your reply is visible to Gifsy support and your admin team only — never to the outlet or sales team.</p>`,
     ].join('\n');
 
-    // Fire-and-forget AFTER commit: the HTTP response never waits on SMTP (a slow relay can't
-    // turn into a client timeout + retry). The outcome is written back to the thread.
-    const job = Promise.resolve()
-      .then(() => this.msg91.sendEmail({ to: [to], subject: `Remarks needed: ticket ${p.ticket.ticketNumber}`, html }))
-      .then(() => this.recordEmailOutcome(p.ticket.id, p.actorId, `Email sent to ${p.targetName} (${to}).`))
-      .catch(async (e) => {
-        this.logger.error(`[tickets] remarks email for ${p.ticket.id} failed: ${(e as Error)?.message ?? e}`);
-        await this.recordEmailOutcome(
-          p.ticket.id,
-          p.actorId,
-          `Email to ${p.targetName} was NOT sent: the mail relay refused or timed out. They were notified in-app only.`,
-        );
+    try {
+      await this.msg91.sendEmail({ to: [to], subject: `Remarks needed: ticket ${p.ticket.ticketNumber}`, html });
+    } catch (e) {
+      this.logger.error(`[tickets] remarks email for ${p.ticket.id} failed: ${(e as Error)?.message ?? e}`);
+      return notSent('the mail relay refused or timed out');
+    }
+    await this.recordEmailOutcome(p.ticket.id, p.actorId, `Email sent to ${p.targetName} (${to}).`);
+    return { sent: true };
+  }
+
+  /**
+   * POST :id/cancel-client-remarks — Gifsy withdraws a pending remarks request and RESUMES the
+   * ticket at its pre-request status (ESCALATED / OPEN / PENDING_USER as stored, else IN_PROGRESS).
+   * Shared note ("Remarks request to X cancelled — <reason>") + bell to the client admin + audit.
+   * Guarded like every other transition (409 on a concurrent change).
+   */
+  async cancelClientRemarks(user: JwtPayload, id: string, dto: CancelClientRemarksDto) {
+    this.assertGifsyOperator(user);
+    const ticket = await this.loadTenantTicket(user, id);
+    const pending = ticket.status === 'WAITING_ON_CLIENT' ? (readMeta(ticket.metadata).clientRemarks ?? null) : null;
+    if (!pending) throw new BadRequestException('This ticket is not waiting on a client remarks request');
+    const by = await this.actorName(user);
+    const extra = dto.reason?.trim();
+    const reason = `withdrawn by ${by}${extra ? `: ${extra}` : ''}`;
+    const resumable: TicketStatus[] = ['OPEN', 'IN_PROGRESS', 'ESCALATED', 'PENDING_USER'];
+    const backTo: TicketStatus = resumable.includes(pending.fromStatus as TicketStatus)
+      ? (pending.fromStatus as TicketStatus)
+      : 'IN_PROGRESS';
+
+    await this.prisma.$transaction(async (tx) => {
+      const moved = await tx.ticket.updateMany({
+        where: this.unchangedSince(user, ticket),
+        data: { status: backTo, metadata: withoutRemarks(ticket.metadata), updatedAt: new Date() },
       });
-    this.emailJobs.push(job);
-    void job.finally(() => {
-      const i = this.emailJobs.indexOf(job);
-      if (i >= 0) this.emailJobs.splice(i, 1);
+      if (moved.count !== 1) throw new ConflictException(TicketsService.CONFLICT);
+      await this.recordRemarksCancelled(tx, ticket, user.sub, reason);
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: 'TICKET',
+          entityId: id,
+          actorId: user.sub,
+          metadata: { action: 'CANCEL_CLIENT_REMARKS', requestedFromId: pending.requestedFromId, status: backTo, reason: extra ?? null },
+        },
+      });
     });
-    return { status: 'SENDING' };
+    await this.bellCancelled(ticket, pending, reason);
+    return { message: `Request to ${pending.requestedFromName} cancelled`, status: backTo };
   }
 
   /**
@@ -918,21 +1020,56 @@ export class TicketsService {
     return { message: 'Ticket status updated' };
   }
 
+  /**
+   * Post a message. Internal-note visibility: a Gifsy operator's note defaults to GIFSY_ONLY (they
+   * may choose SHARED_WITH_CLIENT); a client-desk note is always SHARED_WITH_CLIENT.
+   *
+   * Concurrency: the message and the ticket touch commit together, guarded on the status the
+   * decision was based on — a reply racing a close/escalate never revives a CLOSED ticket and
+   * never overwrites ESCALATED with IN_PROGRESS (409 "reload"; nothing is written). A status
+   * transition (OPEN → IN_PROGRESS, RESOLVED → IN_PROGRESS) is additionally pinned to updatedAt.
+   */
   async addMessage(user: JwtPayload, id: string, dto: AddMessageDto) {
     const ticket = await this.prisma.ticket.findFirst({ where: { id, clientId: user.clientId } });
     await this.assertAccess(user, ticket);
-    if (ticket!.status === 'CLOSED') throw new BadRequestException('Cannot add message to a closed ticket');
+    const t = ticket as TicketRow;
+    if (t.status === 'CLOSED') throw new BadRequestException('Cannot add message to a closed ticket');
     const isInternal = dto.isInternal ?? false;
     if (isInternal && !this.isSupportAdmin(user)) {
       throw new ForbiddenException('Forbidden - Internal notes are admin only');
     }
-    // A client-desk internal note is SHARED (Gifsy + the desk); a Gifsy generic internal note keeps
-    // the legacy NULL visibility (all support admins, exactly as before).
-    const internalVisibility: TicketNoteVisibility | null =
-      isInternal && this.reader(user) === 'CLIENT' ? 'SHARED_WITH_CLIENT' : null;
+    const reader = this.reader(user);
+    const internalVisibility: TicketNoteVisibility | null = !isInternal
+      ? null
+      : reader === 'GIFSY'
+        ? (dto.visibility ?? 'GIFSY_ONLY')
+        : 'SHARED_WITH_CLIENT';
 
     const message = await this.prisma.$transaction(async (tx) => {
-      const msg = await tx.ticketMessage.create({
+      const nowTs = new Date();
+      const isAdmin = reader !== 'FIELD';
+      const patch: {
+        status?: 'IN_PROGRESS';
+        firstResponseAt?: Date;
+        resolvedAt?: null;
+      } = {};
+      // First-response = the first non-internal reply from support (real first-response TAT).
+      if (isAdmin && !isInternal && t.firstResponseAt == null) patch.firstResponseAt = nowTs;
+      // A support admin replying to an OPEN ticket moves it to IN_PROGRESS.
+      if (isAdmin && t.status === 'OPEN') patch.status = 'IN_PROGRESS';
+      // The raiser replying to a RESOLVED ticket reopens it (clear resolvedAt so MTTR is real).
+      if (!isAdmin && t.status === 'RESOLVED') {
+        patch.status = 'IN_PROGRESS';
+        patch.resolvedAt = null;
+      }
+      const guard: Prisma.TicketWhereInput = patch.status
+        ? this.unchangedSince(user, t)
+        : { id, clientId: user.clientId, status: t.status };
+      const touched = await tx.ticket.updateMany({ where: guard, data: { ...patch, updatedAt: nowTs } });
+      if (touched.count !== 1) {
+        throw new ConflictException('The ticket changed meanwhile (it may have been closed or escalated) — reload and try again');
+      }
+      return tx.ticketMessage.create({
         data: {
           ticketId: id,
           message: dto.message,
@@ -942,31 +1079,6 @@ export class TicketsService {
           ...(internalVisibility ? { internalVisibility } : {}),
         },
       });
-      // Stamp first-response (first non-internal reply by support) + drive the status
-      // transitions, in ONE update.
-      const nowTs = new Date();
-      const isAdmin = this.isSupportAdmin(user);
-      const patch: {
-        status?: 'IN_PROGRESS';
-        updatedAt?: Date;
-        firstResponseAt?: Date;
-        resolvedAt?: null;
-      } = {};
-      if (isAdmin && !isInternal && ticket!.firstResponseAt == null) {
-        patch.firstResponseAt = nowTs;
-      }
-      if (isAdmin && ticket!.status === 'OPEN') {
-        patch.status = 'IN_PROGRESS';
-      }
-      if (!isAdmin && ticket!.status === 'RESOLVED') {
-        patch.status = 'IN_PROGRESS';
-        patch.resolvedAt = null;
-      }
-      if (Object.keys(patch).length > 0) {
-        patch.updatedAt = nowTs;
-        await tx.ticket.update({ where: { id }, data: patch });
-      }
-      return msg;
     });
 
     return { message };

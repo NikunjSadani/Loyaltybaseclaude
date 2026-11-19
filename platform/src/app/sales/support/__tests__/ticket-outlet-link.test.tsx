@@ -92,3 +92,21 @@ describe('Sales tickets — honest errors + masked states', () => {
     expect(screen.queryByText('Open', { selector: 'span' })).not.toBeInTheDocument();
   });
 });
+
+describe('Sales tickets — no priority UI for field readers', () => {
+  it('neither the list nor the new-ticket form shows a priority (the API never returns one to a rep)', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      const ok = (data: unknown) => Promise.resolve({ json: () => Promise.resolve({ success: true, data }) });
+      if (url === '/api/tickets') {
+        return ok({ tickets: [{ id: 't9', ticketNumber: 'TKT-9', subject: 'Some issue', category: 'POINTS', status: 'OPEN', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: [] }] });
+      }
+      return ok({ outlets: [] });
+    });
+    render(<SalesSupportPage />);
+    expect(await screen.findByText('Some issue')).toBeInTheDocument();
+    expect(screen.queryByText('Medium')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /New Ticket/ }));
+    expect(screen.queryByText('Priority')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'High' })).not.toBeInTheDocument();
+  });
+});

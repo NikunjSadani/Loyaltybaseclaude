@@ -62,3 +62,26 @@ export function readNextParam(search: string | null | undefined): string | null 
     return null;
   }
 }
+
+/**
+ * The `next` to carry on an edge login redirect — ONLY for a real document navigation (a user
+ * opening the URL). RSC fetches, router prefetches and other non-document requests get no `next`
+ * (their URL is an internal fetch, not where the user was going). `_rsc` is stripped. Self-contained
+ * so the proxy's redirect branches can call it in one place. Returns null when no `next` applies.
+ */
+export function returnToForEdgeRedirect(
+  pathname: string,
+  search: string,
+  headers: { get(name: string): string | null },
+): string | null {
+  const h = (n: string) => (headers.get(n) ?? '').toLowerCase();
+  if (h('rsc') === '1' || h('next-router-prefetch') || h('next-router-state-tree')) return null;
+  if (h('purpose') === 'prefetch' || h('sec-purpose').includes('prefetch')) return null;
+  const dest = h('sec-fetch-dest');
+  const isDocument = dest ? dest === 'document' : h('accept').includes('text/html');
+  if (!isDocument) return null;
+  const params = new URLSearchParams(search);
+  params.delete('_rsc');
+  const qs = params.toString();
+  return safeReturnPath(`${pathname}${qs ? `?${qs}` : ''}`);
+}

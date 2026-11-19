@@ -36,7 +36,7 @@ function matchUser(u: FakeUser, where: Record<string, any> = {}): boolean {
 }
 
 const mockPrisma = {
-  ticket: { findMany: jest.fn(), count: jest.fn(), create: jest.fn(), findFirst: jest.fn() },
+  ticket: { findMany: jest.fn(), count: jest.fn(), create: jest.fn(), findFirst: jest.fn(), groupBy: jest.fn() },
   user: {
     findFirst: jest.fn(async ({ where }: { where: Record<string, any> }) => USERS.find((u) => matchUser(u, where)) ?? null),
     findMany: jest.fn(async ({ where }: { where: Record<string, any> }) => USERS.filter((u) => matchUser(u, where))),
@@ -82,8 +82,6 @@ describe('TicketsService', () => {
   let service: TicketsService;
   const prevLinkEnv = process.env.TENANT_LINK_ENV;
 
-  const flushEmail = () => Promise.all([...service.emailJobs]);
-
   beforeEach(async () => {
     jest.clearAllMocks();
     USERS = [
@@ -103,6 +101,7 @@ describe('TicketsService', () => {
     mockPrisma.ticketMessage.create.mockResolvedValue({ id: 'n' });
     mockPrisma.ticket.findMany.mockResolvedValue([]);
     mockPrisma.ticket.count.mockResolvedValue(0);
+    mockPrisma.ticket.groupBy.mockResolvedValue([]);
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
     mockNotifications.writeInApp.mockResolvedValue({ id: 'n1' });
@@ -236,8 +235,8 @@ describe('TicketsService', () => {
       mockTx.ticketMessage.create.mockResolvedValue({ id: 'm1' });
       const res = await service.addMessage(gifsy, 't1', { message: 'on it' });
       expect(res).toEqual({ message: { id: 'm1' } });
-      expect(mockTx.ticket.update).toHaveBeenCalledWith({
-        where: { id: 't1' },
+      expect(mockTx.ticket.updateMany).toHaveBeenCalledWith({
+        where: { id: 't1', clientId: 'deoleo', status: 'OPEN', updatedAt: T0 },
         data: { firstResponseAt: expect.any(Date), status: 'IN_PROGRESS', updatedAt: expect.any(Date) },
       });
     });
@@ -245,24 +244,50 @@ describe('TicketsService', () => {
     it('does NOT overwrite firstResponseAt on a later admin reply', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow({ firstResponseAt: new Date(Date.now() - 86_400_000) }));
       await service.addMessage(gifsy, 't1', { message: 'update' });
-      expect(mockTx.ticket.update).not.toHaveBeenCalled();
+      // no transition → only a status-pinned touch (no firstResponseAt overwrite)
+      expect(mockTx.ticket.updateMany).toHaveBeenCalledWith({
+        where: { id: 't1', clientId: 'deoleo', status: 'IN_PROGRESS' },
+        data: { updatedAt: expect.any(Date) },
+      });
     });
 
     it('reopens a RESOLVED ticket to IN_PROGRESS when the creator replies', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow({ status: 'RESOLVED' }));
       await service.addMessage(partner, 't1', { message: 'still broken' });
-      expect(mockTx.ticket.update).toHaveBeenCalledWith({
-        where: { id: 't1' },
+      expect(mockTx.ticket.updateMany).toHaveBeenCalledWith({
+        where: { id: 't1', clientId: 'deoleo', status: 'RESOLVED', updatedAt: T0 },
         data: { status: 'IN_PROGRESS', resolvedAt: null, updatedAt: expect.any(Date) },
       });
     });
 
-    it('note visibility: a client-desk internal note is SHARED; a Gifsy generic internal note stays legacy (NULL)', async () => {
+    it('note visibility: Gifsy internal note defaults to GIFSY_ONLY, may be shared; client-desk note is always SHARED', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
-      await service.addMessage(clientAdmin, 't1', { message: 'n', isInternal: true });
-      expect(mockTx.ticketMessage.create.mock.calls[0][0].data.internalVisibility).toBe('SHARED_WITH_CLIENT');
       await service.addMessage(gifsy, 't1', { message: 'n', isInternal: true });
-      expect(mockTx.ticketMessage.create.mock.calls[1][0].data).not.toHaveProperty('internalVisibility');
+      expect(mockTx.ticketMessage.create.mock.calls[0][0].data.internalVisibility).toBe('GIFSY_ONLY');
+      await service.addMessage(gifsyStaff, 't1', { message: 'n', isInternal: true, visibility: 'SHARED_WITH_CLIENT' });
+      expect(mockTx.ticketMessage.create.mock.calls[1][0].data.internalVisibility).toBe('SHARED_WITH_CLIENT');
+      await service.addMessage(clientAdmin, 't1', { message: 'n', isInternal: true, visibility: 'GIFSY_ONLY' });
+      expect(mockTx.ticketMessage.create.mock.calls[2][0].data.internalVisibility).toBe('SHARED_WITH_CLIENT');
+      await service.addMessage(gifsy, 't1', { message: 'public reply' });
+      expect(mockTx.ticketMessage.create.mock.calls[3][0].data).not.toHaveProperty('internalVisibility');
+    });
+
+    it('race: a reply never revives a ticket closed / escalated meanwhile (409, no message written)', async () => {
+      for (const status of ['OPEN', 'RESOLVED', 'IN_PROGRESS']) {
+        mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow({ status }));
+        mockTx.ticket.updateMany.mockResolvedValueOnce({ count: 0 }); // closed / escalated after the read
+        const who = status === 'RESOLVED' ? partner : gifsy;
+        await expect(service.addMessage(who, 't1', { message: 'x' })).rejects.toBeInstanceOf(ConflictException);
+      }
+      expect(mockTx.ticketMessage.create).not.toHaveBeenCalled();
+    });
+
+    it('an ESCALATED ticket stays ESCALATED when anyone replies', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow({ status: 'ESCALATED', firstResponseAt: new Date(Date.now() - 1000) }));
+      await service.addMessage(gifsy, 't1', { message: 'x' });
+      const call = mockTx.ticket.updateMany.mock.calls[0][0];
+      expect(call.where.status).toBe('ESCALATED');
+      expect(call.data).not.toHaveProperty('status');
     });
   });
 
@@ -451,9 +476,7 @@ describe('TicketsService', () => {
       });
       expect(mockTx.ticketMessage.create.mock.calls[0][0].data).toMatchObject({ internalVisibility: 'SHARED_WITH_CLIENT' });
       expect(mockNotifications.writeInApp).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cadmin1', url: '/admin/tickets?ticket=t1' }));
-      expect(res).toMatchObject({ emailStatus: 'SENDING' });
-
-      await flushEmail();
+      expect(res).toMatchObject({ emailSent: true });
       expect(mockMsg91.sendEmail).toHaveBeenCalledTimes(1);
       const mail = mockMsg91.sendEmail.mock.calls[0][0];
       expect(mail.to).toEqual(['ca@deoleo.example']);
@@ -466,22 +489,22 @@ describe('TicketsService', () => {
       });
     });
 
-    it('the response never waits on SMTP (email still running when it returns)', async () => {
+    it('the email is sent IN the request (after commit) — the response reports the real outcome', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
-      let release!: () => void;
-      mockMsg91.sendEmail.mockReturnValue(new Promise<void>((r) => { release = r; }));
+      const order: string[] = [];
+      mockTx.auditLog.create.mockImplementation(async () => { order.push('commit'); });
+      mockMsg91.sendEmail.mockImplementation(async () => { order.push('email'); });
       const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'x' }, ORIGIN);
-      expect(res).toMatchObject({ emailStatus: 'SENDING' });
-      expect(service.emailJobs.length).toBe(1);
-      release();
-      await flushEmail();
+      expect(order).toEqual(['commit', 'email']);
+      expect(res).toMatchObject({ emailSent: true });
+      expect(res).not.toHaveProperty('emailError');
     });
 
-    it('relay failure → outcome written back as a GIFSY_ONLY note (never silent)', async () => {
+    it('relay failure → emailSent=false + reason, and a GIFSY_ONLY note (never silent)', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
       mockMsg91.sendEmail.mockRejectedValue(new Error('relay down'));
-      await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'x' }, ORIGIN);
-      await flushEmail();
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'x' }, ORIGIN);
+      expect(res).toMatchObject({ emailSent: false, emailError: expect.stringContaining('relay') });
       expect(mockPrisma.ticketMessage.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ internalVisibility: 'GIFSY_ONLY', message: expect.stringContaining('NOT sent') }),
       });
@@ -490,11 +513,10 @@ describe('TicketsService', () => {
     it('no address / SMTP not configured → NOT_SENT + reason in the response and the thread; no send', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
       const a = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin2', note: 'x' }, ORIGIN);
-      expect(a).toMatchObject({ emailStatus: 'NOT_SENT', emailError: expect.stringContaining('no email') });
+      expect(a).toMatchObject({ emailSent: false, emailError: expect.stringContaining('no email') });
       mockMsg91.isEmailConfigured.mockReturnValue(false);
       const b = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'x' }, ORIGIN);
-      expect(b).toMatchObject({ emailStatus: 'NOT_SENT', emailError: expect.stringContaining('not configured') });
-      await flushEmail();
+      expect(b).toMatchObject({ emailSent: false, emailError: expect.stringContaining('not configured') });
       expect(mockMsg91.sendEmail).not.toHaveBeenCalled();
       expect(mockPrisma.ticketMessage.create).toHaveBeenCalledTimes(2);
     });
@@ -505,7 +527,6 @@ describe('TicketsService', () => {
       expect(res).toMatchObject({ alreadyPending: true });
       expect(mockTx.ticket.updateMany).not.toHaveBeenCalled();
       expect(mockNotifications.writeInApp).not.toHaveBeenCalled();
-      await flushEmail();
       expect(mockMsg91.sendEmail).not.toHaveBeenCalled();
     });
 
@@ -535,7 +556,6 @@ describe('TicketsService', () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
       mockTx.ticket.updateMany.mockResolvedValue({ count: 0 });
       await expect(service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'x' }, ORIGIN)).rejects.toBeInstanceOf(ConflictException);
-      await flushEmail();
       expect(mockNotifications.writeInApp).not.toHaveBeenCalled();
       expect(mockMsg91.sendEmail).not.toHaveBeenCalled();
     });
@@ -546,7 +566,6 @@ describe('TicketsService', () => {
       await service.escalate(gifsy, 't1', { escalateTo: 'staff1', reason: 'x' });
       await service.setStatus(gifsy, 't1', { status: 'RESOLVED' });
       await service.addMessage(gifsy, 't1', { message: 'hi' });
-      await flushEmail();
       expect(mockMsg91.sendEmail).not.toHaveBeenCalled();
     });
   });
@@ -663,6 +682,78 @@ describe('TicketsService', () => {
       const res = await service.list(clientAdmin, {});
       expect((res.tickets[0] as any).status).toBe('WAITING_ON_CLIENT');
       expect(res.awaitingClient).toEqual({ total: 2, mine: 2 });
+    });
+  });
+
+  // ─── round 2: cancel request & resume; server-side list filters + summary ────
+
+  describe('cancelClientRemarks', () => {
+    it('Gifsy cancels: back to the pre-request status, marker cleared, SHARED note, client bell, audit', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow({ fromStatus: 'ESCALATED' }));
+      const res = await service.cancelClientRemarks(gifsy, 't1', { reason: 'solved by phone' });
+      expect(mockTx.ticket.updateMany).toHaveBeenCalledWith({
+        where: { id: 't1', clientId: 'deoleo', status: 'WAITING_ON_CLIENT', updatedAt: T0 },
+        data: { status: 'ESCALATED', metadata: { keep: 1 }, updatedAt: expect.any(Date) },
+      });
+      const note = mockTx.ticketMessage.create.mock.calls[0][0].data;
+      expect(note).toMatchObject({ internalVisibility: 'SHARED_WITH_CLIENT' });
+      expect(note.message).toBe('Remarks request to Deoleo Admin cancelled — withdrawn by Owner: solved by phone.');
+      expect(mockNotifications.writeInApp).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cadmin1' }));
+      expect(mockTx.auditLog.create.mock.calls[0][0].data.metadata).toMatchObject({ action: 'CANCEL_CLIENT_REMARKS' });
+      expect(res.status).toBe('ESCALATED');
+    });
+
+    it('unknown / waiting pre-status falls back to IN_PROGRESS; not waiting → 400; client desk → 403; race → 409', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow({ fromStatus: undefined }));
+      expect((await service.cancelClientRemarks(gifsy, 't1', {})).status).toBe('IN_PROGRESS');
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      await expect(service.cancelClientRemarks(gifsy, 't1', {})).rejects.toBeInstanceOf(BadRequestException);
+      for (const u of [clientAdmin, misUser, partner]) {
+        await expect(service.cancelClientRemarks(u, 't1', {})).rejects.toBeInstanceOf(ForbiddenException);
+      }
+      mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow());
+      mockTx.ticket.updateMany.mockResolvedValueOnce({ count: 0 });
+      await expect(service.cancelClientRemarks(gifsy, 't1', {})).rejects.toBeInstanceOf(ConflictException);
+    });
+  });
+
+  describe('admin list: server-side filters + tenant summary', () => {
+    it('priorities / source / q are applied in the DB (q also matches referenced outlets by code)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o9' }]);
+      await service.list(gifsy, { priorities: 'high,CRITICAL', source: 'sales', q: 'DEO-09' });
+      const where = mockPrisma.ticket.findMany.mock.calls[0][0].where;
+      expect(where.clientId).toBe('deoleo');
+      expect(where.AND[0]).toEqual({ priority: { in: ['HIGH', 'CRITICAL'] } });
+      expect(where.AND[1].createdBy.role.in).toContain('SALES_ISR');
+      const or = where.AND[2].OR;
+      expect(or).toContainEqual({ ticketNumber: { contains: 'DEO-09', mode: 'insensitive' } });
+      expect(or).toContainEqual({ referenceType: 'OUTLET', referenceId: { in: ['o9'] } });
+      expect(mockPrisma.outlet.findMany.mock.calls[0][0].where.clientId).toBe('deoleo');
+      // the total counts the FILTERED set
+      expect(mockPrisma.ticket.count.mock.calls[0][0].where).toEqual(where);
+    });
+
+    it('invalid priorities → 400; field readers ignore admin filters', async () => {
+      await expect(service.list(gifsy, { priorities: 'BOGUS' })).rejects.toBeInstanceOf(BadRequestException);
+      await service.list(partner, { priorities: 'HIGH', q: 'x', source: 'sales' });
+      expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', createdById: 'user1' });
+    });
+
+    it('summary is tenant-wide (not the loaded page) and only for support admins', async () => {
+      mockPrisma.ticket.groupBy.mockResolvedValue([
+        { status: 'OPEN', _count: { _all: 3 } },
+        { status: 'IN_PROGRESS', _count: { _all: 2 } },
+        { status: 'ESCALATED', _count: { _all: 1 } },
+        { status: 'WAITING_ON_CLIENT', _count: { _all: 1 } },
+        { status: 'RESOLVED', _count: { _all: 4 } },
+        { status: 'CLOSED', _count: { _all: 5 } },
+      ]);
+      mockPrisma.ticket.count.mockResolvedValue(2);
+      const res = await service.list(clientAdmin, {});
+      expect(res.summary).toEqual({ total: 16, open: 3, inProgress: 4, resolved: 9, highPriority: 2 });
+      expect(mockPrisma.ticket.groupBy.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
+      const field = await service.list(partner, {});
+      expect(field).not.toHaveProperty('summary');
     });
   });
 });

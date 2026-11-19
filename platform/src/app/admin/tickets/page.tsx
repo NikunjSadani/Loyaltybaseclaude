@@ -1,6 +1,6 @@
 'use client';
 
-import React, { Suspense, useState, useEffect, useMemo, useCallback } from 'react';
+import React, { Suspense, useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import {
-  type Ticket, type TicketMessage, type TicketStatus, type TicketPriority, type TicketCategory, type TicketSource,
+  type Ticket, type TicketMessage, type TicketStatus, type TicketPriority, type TicketCategory,
   CATEGORY_LABELS, STATUS_LABELS, PRIORITY_LABELS,
 } from '@/lib/tickets';
 import { api } from '@/lib/api-client';
@@ -46,7 +46,12 @@ interface ClientRemarksRequest {
   requestedAt: string;
 }
 
-type AdminTicketMessage = TicketMessage & { senderRole?: string; senderName?: string };
+type AdminTicketMessage = TicketMessage & {
+  senderRole?: string;
+  senderName?: string;
+  /** GIFSY_ONLY | SHARED_WITH_CLIENT; null = legacy note (client admins could always read it → "Shared"). */
+  internalVisibility?: 'GIFSY_ONLY' | 'SHARED_WITH_CLIENT' | null;
+};
 
 const PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
 /** Which side of the thread a message sits on: the outlet owner / a sales rep / the support desk. */
@@ -108,6 +113,7 @@ function mapDbTicket(t: any): AdminTicket {
       createdAt:  m.createdAt,
       isInternal: m.isInternal,
       senderRole: m.sender?.role,
+      internalVisibility: m.internalVisibility ?? null,
     })),
   };
 }
@@ -247,17 +253,17 @@ function EscalatePanel({ ticketId, assignees, onDone, onCancel }: {
       setBusy(false);
       if (res.success) onDone(null); else setError(res.error);
     } else {
-      const res = await api.post<{ emailStatus?: 'SENDING' | 'NOT_SENT'; emailError?: string; alreadyPending?: boolean; message?: string }>(
+      const res = await api.post<{ emailSent?: boolean; emailError?: string; alreadyPending?: boolean; message?: string }>(
         `/api/tickets/${ticketId}/request-client-remarks`, { clientAdminId: target, note: text.trim() },
       );
       setBusy(false);
       if (!res.success) { setError(res.error); return; }
       if (res.data?.alreadyPending) {
         onDone(`${res.data.message ?? 'A remarks request to this client admin is already pending'}. Nothing was re-sent.`);
-      } else if (res.data?.emailStatus === 'NOT_SENT') {
+      } else if (res.data?.emailSent === false) {
         onDone(`Remarks requested, but the email was NOT sent (${res.data.emailError ?? 'unknown reason'}). The client admin was notified in-app only.`);
       } else {
-        onDone('Remarks requested. The client admin was notified in-app; the email is being sent — its outcome will appear in the thread.');
+        onDone('Remarks requested. The client admin was notified in-app and by email.');
       }
     }
   };
@@ -336,6 +342,9 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
   const [ticket,        setTicket]        = useState(initial);
   const [reply,         setReply]         = useState('');
   const [isInt,         setIsInt]         = useState(false);
+  // Gifsy internal notes: Gifsy-only by default; sharing with the client admin is an explicit choice.
+  const [shareNote,     setShareNote]     = useState(false);
+  const [cancelBusy,    setCancelBusy]    = useState(false);
   const [sending,       setSending]       = useState(false);
   const [statusBusy,    setStatusBusy]    = useState(false);
   const [assignees,     setAssignees]     = useState<Assignee[]>([]);
@@ -376,6 +385,7 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
     setSending(true); setActionError(null);
     const res = await api.post<{ message: any }>(`/api/tickets/${ticket.id}/messages`, {
       message: reply.trim(), isInternal: isInt,
+      ...(isInt && isGifsy ? { visibility: shareNote ? 'SHARED_WITH_CLIENT' : 'GIFSY_ONLY' } : {}),
     });
     if (res.success) { setReply(''); await refresh(); } else setActionError(res.error);
     setSending(false);
@@ -399,6 +409,15 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
     const res = await api.post(`/api/tickets/${ticket.id}/status`, { status });
     if (res.success) { await refresh(); onChanged(); } else setActionError(res.error);
     setStatusBusy(false);
+  };
+
+  // Gifsy escape hatch: withdraw the remarks request and resume at the pre-request status.
+  const handleCancelRequest = async () => {
+    setCancelBusy(true); setActionError(null);
+    const res = await api.post(`/api/tickets/${ticket.id}/cancel-client-remarks`, {});
+    if (res.success) { setNotice('Request cancelled — the client admin was notified and the ticket resumed.'); await refresh(); onChanged(); }
+    else setActionError(res.error);
+    setCancelBusy(false);
   };
 
   const handleSendRemarks = async () => {
@@ -484,7 +503,11 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
             <section aria-label="Awaiting client remarks" className="mx-5 mt-4 rounded-xl border border-violet-200 bg-violet-50 p-3 space-y-2">
               <p className="text-sm font-semibold text-violet-800 flex items-center gap-1.5">
                 <Hourglass className="h-4 w-4" />
-                {waitingOnMe ? 'Awaiting your remarks' : `Awaiting remarks from ${waiting.requestedFromName}`}
+                {waitingOnMe
+                  ? 'Awaiting your remarks'
+                  : viewerRole === 'MIS_USER'
+                    ? `Waiting for ${waiting.requestedFromName}'s remarks`
+                    : `Awaiting remarks from ${waiting.requestedFromName}`}
               </p>
               <p className="text-xs text-violet-700">
                 {waiting.requestedByName} (Gifsy support) asked{waiting.requestedAt ? ` on ${formatDateTime(waiting.requestedAt)}` : ''}:
@@ -506,6 +529,13 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
                       Send remarks
                     </Button>
                   </div>
+                </div>
+              )}
+              {isGifsy && (
+                <div className="flex justify-end">
+                  <Button size="sm" variant="secondary" loading={cancelBusy} onClick={handleCancelRequest}>
+                    Cancel request &amp; resume
+                  </Button>
                 </div>
               )}
             </section>
@@ -557,7 +587,11 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs text-gray-400 w-16 shrink-0">Status</span>
               {waiting && !isGifsy ? (
-                <span className="text-xs text-gray-500">Send your remarks first — status changes are paused while Gifsy waits for them.</span>
+                <span className="text-xs text-gray-500">
+                  {viewerRole === 'MIS_USER'
+                    ? `Status changes are paused while Gifsy waits for ${waiting.requestedFromName}'s remarks.`
+                    : 'Send your remarks first — status changes are paused while Gifsy waits for them.'}
+                </span>
               ) : isDone ? (
                 <Button variant="secondary" size="sm" loading={statusBusy} onClick={() => handleSetStatus('IN_PROGRESS')}>
                   <Clock className="h-3.5 w-3.5" /> Reopen
@@ -618,7 +652,9 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
                       <p className="text-[10px] text-gray-400">{msg.fromName}</p>
                       {isClientRemark
                         ? <span className="text-[9px] bg-violet-100 text-violet-700 px-1 rounded font-semibold">Client remarks</span>
-                        : isInternal && <span className="text-[9px] bg-amber-100 text-amber-600 px-1 rounded font-semibold">Internal</span>}
+                        : isInternal && (msg.internalVisibility === 'GIFSY_ONLY'
+                          ? <span className="text-[9px] bg-gray-800 text-white px-1 rounded font-semibold">Gifsy only</span>
+                          : <span className="text-[9px] bg-amber-100 text-amber-700 px-1 rounded font-semibold">Shared with client</span>)}
                     </div>
                     <div className={`px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap ${
                       isClientRemark ? 'bg-violet-50 text-violet-900 border border-violet-100 rounded-tr-sm' :
@@ -655,10 +691,23 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
               Internal Note
             </button>
           </div>
+          {isInt && isGifsy && (
+            <div role="radiogroup" aria-label="Who can read this note" className="flex gap-3 text-[11px] text-gray-600">
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input type="radio" name="note-vis" checked={!shareNote} onChange={() => setShareNote(false)} /> Gifsy only
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input type="radio" name="note-vis" checked={shareNote} onChange={() => setShareNote(true)} /> Share with client admin
+              </label>
+            </div>
+          )}
+          {isInt && !isGifsy && (
+            <p className="text-[11px] text-gray-500">Internal notes are shared with Gifsy support — never with the outlet or sales team.</p>
+          )}
           <div className="flex gap-2">
             <textarea rows={2} value={reply} onChange={(e) => setReply(e.target.value)}
               aria-label="Reply"
-              placeholder={isInt ? 'Add internal note (not visible to outlet)…' : 'Type reply to outlet…'}
+              placeholder={isInt ? (isGifsy && !shareNote ? 'Add a Gifsy-only note…' : 'Add internal note (not visible to outlet)…') : 'Type reply to outlet…'}
               className={`flex-1 text-sm border rounded-xl px-3 py-2 resize-none focus:outline-none focus:ring-2 ${isInt ? 'border-amber-200 bg-amber-50 focus:ring-amber-200 focus:border-amber-400' : 'border-gray-200 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]'}`} />
             <button onClick={handleSend} disabled={!reply.trim() || sending}
               className="px-3 py-2 bg-[var(--brand-primary)] text-white rounded-xl text-sm font-semibold hover:bg-[var(--brand-primary-dark)] disabled:opacity-40 transition-colors flex items-center shrink-0">
@@ -684,13 +733,46 @@ function TicketDeepLink({ onOpen }: { onOpen: (id: string) => void }) {
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
+/** Server-side filters (DB values) — they cover EVERY ticket, not just the loaded pages. */
 type FilterState = {
   search: string;
-  status: TicketStatus | 'all';
-  priority: TicketPriority | 'all';
-  category: TicketCategory | 'all';
-  source: TicketSource | 'all';
+  status: string;   // TicketStatus (DB) | 'all'
+  priority: 'all' | 'high' | 'medium' | 'low';
+  category: string; // TicketCategory (DB) | 'all'
+  source: 'all' | 'outlet' | 'sales';
 };
+
+const EMPTY_FILTERS: FilterState = { search: '', status: 'all', priority: 'all', category: 'all', source: 'all' };
+
+const DB_STATUS_OPTIONS: [string, string][] = [
+  ['OPEN', 'Open'], ['IN_PROGRESS', 'In Progress'], ['ESCALATED', 'Escalated'], ['WAITING_ON_CLIENT', 'Awaiting client'],
+  ['PENDING_USER', 'Waiting on Outlet'], ['RESOLVED', 'Resolved'], ['CLOSED', 'Closed'],
+];
+const DB_CATEGORY_OPTIONS: [string, string][] = [
+  ['KYC', 'KYC Help'], ['POINTS', 'Points Not Credited'], ['REDEMPTION', 'Redemption Issue'], ['PAYOUT', 'Billing / Payout'],
+  ['SCHEME', 'Scheme'], ['TECHNICAL', 'Technical Problem'], ['ACCOUNT', 'Account'], ['OTHER', 'Other'],
+];
+const PRIORITY_TO_DB: Record<Exclude<FilterState['priority'], 'all'>, string> = {
+  high: 'HIGH,CRITICAL', medium: 'MEDIUM', low: 'LOW',
+};
+
+type ListView = 'all' | 'awaitingClient' | 'awaitingMine';
+interface Summary { total: number; open: number; inProgress: number; resolved: number; highPriority: number }
+
+/** The list query for a view + filters + page (pure; exported for tests via the URL it builds). */
+function listUrl(view: ListView, f: FilterState, page: number): string {
+  const p = new URLSearchParams();
+  if (view === 'awaitingClient') p.set('status', 'WAITING_ON_CLIENT');
+  else if (view === 'awaitingMine') p.set('awaitingMine', 'true');
+  else if (f.status !== 'all') p.set('status', f.status);
+  if (f.priority !== 'all') p.set('priorities', PRIORITY_TO_DB[f.priority]);
+  if (f.category !== 'all') p.set('category', f.category);
+  if (f.source !== 'all') p.set('source', f.source);
+  if (f.search.trim()) p.set('q', f.search.trim());
+  p.set('page', String(page));
+  p.set('limit', String(TICKETS_PAGE_SIZE));
+  return `/api/tickets?${p.toString()}`;
+}
 
 export default function AdminTicketsPage() {
   const session = useAdminSession();
@@ -704,34 +786,43 @@ export default function AdminTicketsPage() {
   const [selected, setSelected] = useState<AdminTicket | null>(null);
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
   const [awaiting, setAwaiting] = useState<{ total: number; mine: number }>({ total: 0, mine: 0 });
-  // Which server-side view: every ticket, every ticket awaiting the client (Gifsy), or only the
-  // tickets awaiting THIS client admin's remarks (so the list matches the banner count).
-  const [view, setView] = useState<'all' | 'awaitingClient' | 'awaitingMine'>('all');
-  const awaitingOnly = view !== 'all';
+  const [summary, setSummary] = useState<Summary | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  // Paging ("Load more"): pages loaded so far + the server total for the current view.
-  const [pagesLoaded, setPagesLoaded] = useState(1);
+  // View + filters + pages loaded live in ONE state: changing the view or a filter resets to page 1
+  // in the same update, so the fetch can never combine the new view with an old page count.
+  const [query, setQuery] = useState<{ view: ListView; filters: FilterState; pages: number }>({
+    view: 'all', filters: EMPTY_FILTERS, pages: 1,
+  });
+  const { view, filters, pages } = query;
+  const awaitingOnly = view !== 'all';
+  const [searchDraft, setSearchDraft] = useState('');
   const [total, setTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [filters,  setFilters]  = useState<FilterState>({
-    search: '', status: 'all', priority: 'all', category: 'all', source: 'all',
-  });
 
-  type ListRes = { tickets: any[]; pagination?: { total: number }; awaitingClient?: { total: number; mine: number } };
-  const pageUrl = useCallback((page: number) => {
-    const q = view === 'awaitingClient' ? 'status=WAITING_ON_CLIENT&' : view === 'awaitingMine' ? 'awaitingMine=true&' : '';
-    return `/api/tickets?${q}page=${page}&limit=${TICKETS_PAGE_SIZE}`;
-  }, [view]);
+  const setView = (v: ListView | ((cur: ListView) => ListView)) =>
+    setQuery((q) => ({ ...q, view: typeof v === 'function' ? v(q.view) : v, pages: 1 }));
+  const setFilter = <K extends keyof FilterState>(key: K, val: FilterState[K]) =>
+    setQuery((q) => ({ ...q, filters: { ...q.filters, [key]: val }, pages: 1 }));
 
-  // A view change starts again from page 1.
-  useEffect(() => { setPagesLoaded(1); }, [view]);
+  // Debounced server search.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQuery((q) => (q.filters.search === searchDraft ? q : { ...q, filters: { ...q.filters, search: searchDraft }, pages: 1 }));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchDraft]);
 
-  // (Re)load every page loaded so far — after an action the list stays as long as it was.
+  type ListRes = {
+    tickets: any[]; pagination?: { total: number };
+    awaitingClient?: { total: number; mine: number }; summary?: Summary;
+  };
+
+  // (Re)load every page loaded so far for the current view + filters.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    const pages = Array.from({ length: pagesLoaded }, (_, i) => i + 1);
-    Promise.all(pages.map((p) => api.get<ListRes>(pageUrl(p)))).then((results) => {
+    const pageNums = Array.from({ length: pages }, (_, i) => i + 1);
+    Promise.all(pageNums.map((p) => api.get<ListRes>(listUrl(view, filters, p)))).then((results) => {
       if (cancelled) return;
       const failed = results.find((r) => !r.success);
       if (failed && !failed.success) { setError(failed.error); return; }
@@ -742,50 +833,28 @@ export default function AdminTicketsPage() {
       const first = ok[0]?.data;
       setTotal(first?.pagination?.total ?? rows.length);
       if (first?.awaitingClient) setAwaiting(first.awaitingClient);
+      if (first?.summary) setSummary(first.summary);
       setError(null);
     }).finally(() => { if (!cancelled) { setLoading(false); setLoadedOnce(true); } });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageUrl, reloadKey]);
+  }, [view, filters, pages, reloadKey]);
 
   const loadMore = async () => {
     setLoadingMore(true);
-    const res = await api.get<ListRes>(pageUrl(pagesLoaded + 1));
+    const res = await api.get<ListRes>(listUrl(view, filters, pages + 1));
     if (res.success) {
       setTickets((prev) => {
         const have = new Set(prev.map((t) => t.id));
         return [...prev, ...(res.data.tickets ?? []).filter((t) => !have.has(t.id)).map(mapDbTicket)];
       });
       setTotal(res.data.pagination?.total ?? total);
-      setPagesLoaded((n) => n + 1);
+      // Functional update: only advance if the view/filters didn't change meanwhile.
+      setQuery((q) => (q.view === view && q.filters === filters ? { ...q, pages: q.pages + 1 } : q));
     } else {
       setError(res.error);
     }
     setLoadingMore(false);
   };
-
-  const filtered = useMemo(() => {
-    return tickets.filter((t) => {
-      if (filters.status   !== 'all' && t.status   !== filters.status)   return false;
-      if (filters.priority !== 'all' && t.priority !== filters.priority) return false;
-      if (filters.category !== 'all' && t.category !== filters.category) return false;
-      if (filters.source   !== 'all' && t.source   !== filters.source)   return false;
-      if (filters.search) {
-        const q = filters.search.toLowerCase();
-        return t.title.toLowerCase().includes(q) || t.outletName.toLowerCase().includes(q) || t.ticketNumber.toLowerCase().includes(q)
-          || (t.outlet?.outletCode ?? '').toLowerCase().includes(q) || raisedByText(t).toLowerCase().includes(q);
-      }
-      return true;
-    });
-  }, [tickets, filters]);
-
-  const stats = useMemo(() => ({
-    total:       tickets.length,
-    open:        tickets.filter((t) => t.status === 'open').length,
-    inProgress:  tickets.filter((t) => t.status === 'in_progress').length,
-    resolved:    tickets.filter((t) => t.status === 'resolved' || t.status === 'closed').length,
-    highPriority:tickets.filter((t) => t.priority === 'high' && t.status !== 'closed' && t.status !== 'resolved').length,
-  }), [tickets]);
 
   const handleUpdate = (upd: AdminTicket) => {
     setTickets((prev) => prev.map((t) => (t.id === upd.id ? upd : t)));
@@ -811,17 +880,15 @@ export default function AdminTicketsPage() {
     }
   };
 
-  const setFilter = <K extends keyof FilterState>(key: K, val: FilterState[K]) =>
-    setFilters((f) => ({ ...f, [key]: val }));
-
   const activeFilters = Object.entries(filters).filter(([k, v]) => k !== 'search' && v !== 'all').length;
 
+  // Tenant-wide counts from the server (never "of the loaded page").
   const statCards = [
-    { label: 'Total',        value: stats.total,        color: 'text-gray-700',    bg: 'bg-gray-50',    border: 'border-gray-200' },
-    { label: 'Open',         value: stats.open,         color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-200' },
-    { label: 'In Progress',  value: stats.inProgress,   color: 'text-blue-600',    bg: 'bg-blue-50',    border: 'border-blue-200' },
-    { label: 'Resolved',     value: stats.resolved,     color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' },
-    { label: 'High Priority',value: stats.highPriority, color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-200' },
+    { label: 'Total',        value: summary?.total,        color: 'text-gray-700',    bg: 'bg-gray-50',    border: 'border-gray-200' },
+    { label: 'Open',         value: summary?.open,         color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-200' },
+    { label: 'In Progress',  value: summary?.inProgress,   color: 'text-blue-600',    bg: 'bg-blue-50',    border: 'border-blue-200' },
+    { label: 'Resolved',     value: summary?.resolved,     color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' },
+    { label: 'High Priority',value: summary?.highPriority, color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-200' },
   ];
 
   return (
@@ -863,11 +930,11 @@ export default function AdminTicketsPage() {
         </div>
       ) : (
         <>
-          {/* Stats */}
+          {/* Stats — tenant-wide, from the server */}
           <div className={`grid grid-cols-2 ${isGifsy ? 'md:grid-cols-6' : 'md:grid-cols-5'} gap-3`}>
             {statCards.map((s) => (
               <div key={s.label} className={`rounded-xl border ${s.border} ${s.bg} p-4`}>
-                <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
+                <p className={`text-2xl font-bold ${s.color}`} data-testid={`stat-${s.label}`}>{s.value ?? '—'}</p>
                 <p className="text-xs text-gray-400 mt-0.5">{s.label}</p>
               </div>
             ))}
@@ -876,7 +943,7 @@ export default function AdminTicketsPage() {
                 type="button"
                 aria-label={`Awaiting client: ${awaiting.total}`}
                 onClick={() => setView((v) => (v === 'awaitingClient' ? 'all' : 'awaitingClient'))}
-                className={`text-left rounded-xl border p-4 transition-colors ${awaitingOnly ? 'border-violet-400 bg-violet-100' : 'border-violet-200 bg-violet-50 hover:bg-violet-100'}`}
+                className={`text-left rounded-xl border p-4 transition-colors ${view === 'awaitingClient' ? 'border-violet-400 bg-violet-100' : 'border-violet-200 bg-violet-50 hover:bg-violet-100'}`}
               >
                 <p className="text-2xl font-bold text-violet-700">{awaiting.total}</p>
                 <p className="text-xs text-gray-400 mt-0.5">Awaiting client</p>
@@ -884,17 +951,16 @@ export default function AdminTicketsPage() {
             )}
           </div>
 
-          {/* Filters */}
+          {/* Filters — all applied on the server */}
           <div className="bg-white rounded-2xl border border-gray-200 p-4 space-y-3">
-            {/* Search */}
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-              <input type="text" value={filters.search} onChange={(e) => setFilter('search', e.target.value)}
-                placeholder="Search by ticket number, title, outlet or outlet code…"
+              <input type="text" value={searchDraft} onChange={(e) => setSearchDraft(e.target.value)}
+                aria-label="Search tickets"
+                placeholder="Search by ticket number, title, raiser, outlet or outlet code…"
                 className="w-full pl-9 pr-3 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]" />
             </div>
 
-            {/* Filter chips row */}
             <div className="flex gap-2 flex-wrap items-center">
               <SlidersHorizontal className="h-4 w-4 text-gray-400 shrink-0" />
 
@@ -919,52 +985,50 @@ export default function AdminTicketsPage() {
                 </button>
               )}
 
-              {/* Status */}
-              <select value={filters.status} onChange={(e) => setFilter('status', e.target.value as TicketStatus | 'all')}
-                className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] text-gray-600 bg-white">
+              <select aria-label="Status" value={filters.status} disabled={awaitingOnly} onChange={(e) => setFilter('status', e.target.value)}
+                className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] text-gray-600 bg-white disabled:opacity-50">
                 <option value="all">All Statuses</option>
-                {Object.entries(STATUS_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                {DB_STATUS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
 
-              {/* Priority */}
-              <select value={filters.priority} onChange={(e) => setFilter('priority', e.target.value as TicketPriority | 'all')}
+              <select aria-label="Priority" value={filters.priority} onChange={(e) => setFilter('priority', e.target.value as FilterState['priority'])}
                 className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] text-gray-600 bg-white">
                 <option value="all">All Priorities</option>
-                {Object.entries(PRIORITY_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
               </select>
 
-              {/* Category */}
-              <select value={filters.category} onChange={(e) => setFilter('category', e.target.value as TicketCategory | 'all')}
+              <select aria-label="Category" value={filters.category} onChange={(e) => setFilter('category', e.target.value)}
                 className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] text-gray-600 bg-white">
                 <option value="all">All Categories</option>
-                {Object.entries(CATEGORY_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                {DB_CATEGORY_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
 
-              {/* Source */}
-              <select value={filters.source} onChange={(e) => setFilter('source', e.target.value as TicketSource | 'all')}
+              <select aria-label="Source" value={filters.source} onChange={(e) => setFilter('source', e.target.value as FilterState['source'])}
                 className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] text-gray-600 bg-white">
                 <option value="all">All Sources</option>
-                <option value="outlet">Outlet</option>
+                <option value="outlet">Outlet owner</option>
                 <option value="sales">Via Sales Team</option>
               </select>
 
-              {activeFilters > 0 && (
-                <button onClick={() => setFilters({ search: '', status: 'all', priority: 'all', category: 'all', source: 'all' })}
+              {(activeFilters > 0 || filters.search) && (
+                <button onClick={() => { setSearchDraft(''); setQuery((q) => ({ ...q, filters: EMPTY_FILTERS, pages: 1 })); }}
                   className="flex items-center gap-1 text-xs text-red-500 hover:text-red-700 border border-red-100 bg-red-50 px-2 py-1 rounded-lg transition-colors">
-                  <X className="h-3 w-3" /> Clear ({activeFilters})
+                  <X className="h-3 w-3" /> Clear ({activeFilters + (filters.search ? 1 : 0)})
                 </button>
               )}
 
-              <span className="ml-auto text-xs text-gray-400">
-                {filtered.length} ticket{filtered.length !== 1 ? 's' : ''}
-                {total > tickets.length && <> · showing {tickets.length} of {total}</>}
+              <span className="ml-auto text-xs text-gray-400" data-testid="match-count">
+                {total} matching ticket{total !== 1 ? 's' : ''}
+                {total > tickets.length && <> · showing {tickets.length}</>}
               </span>
             </div>
           </div>
 
           {/* Ticket table */}
           <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-            {filtered.length === 0 ? (
+            {tickets.length === 0 ? (
               <div className="flex flex-col items-center gap-3 py-16 text-center">
                 <MessageSquare className="h-10 w-10 text-gray-200" />
                 <p className="text-sm text-gray-400">
@@ -988,7 +1052,7 @@ export default function AdminTicketsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filtered.map((t) => (
+                    {tickets.map((t) => (
                       <TicketRow key={t.id} ticket={t} viewerId={session.userId} viewerRole={session.role} onClick={() => handleSelectTicket(t)} />
                     ))}
                   </tbody>

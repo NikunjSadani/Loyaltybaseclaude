@@ -18,7 +18,7 @@ import { jwtVerify, type JWTPayload } from 'jose'
 import { resolveTenantSync } from '@/lib/platform/tenant-resolution'
 import { ensureWarm, refreshIfStale } from '@/lib/platform/tenant-routing-cache'
 import { resolveTrustedHost } from '@/lib/platform/edge-trust'
-import { loginUrlWithNext } from '@/lib/return-to'
+import { loginUrlWithNext, returnToForEdgeRedirect } from '@/lib/return-to'
 import {
   REFRESH_MAX_AGE,
   accessCookieMaxAge,
@@ -263,13 +263,13 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
     // alive; deleting would strand other tabs). Bounce to login WITH ?expired=1 so the login
     // page surfaces the "session expired" notice.
     return NextResponse.redirect(
-      new URL(loginUrlWithNext(`${pathname}${request.nextUrl.search}`, { expired: '1' }), request.url),
+      new URL(loginUrlWithNext(returnToForEdgeRedirect(pathname, request.nextUrl.search, request.headers), { expired: '1' }), request.url),
     )
   }
 
   // No refresh token at all → never established a session (or fully logged out) → login, carrying
   // a safe same-origin `next` so a deep link (e.g. the ticket-remarks email) survives sign-in.
-  return NextResponse.redirect(new URL(loginUrlWithNext(`${pathname}${request.nextUrl.search}`), request.url))
+  return NextResponse.redirect(new URL(loginUrlWithNext(returnToForEdgeRedirect(pathname, request.nextUrl.search, request.headers)), request.url))
 }
 
 /**

@@ -153,7 +153,7 @@ describe('Gifsy: escalate dialog', () => {
 
   it('asks a client admin for remarks and warns loudly when the email was not sent', async () => {
     routeGet({ list: [baseTicket()] });
-    postMock.mockResolvedValue({ success: true, data: { emailStatus: 'NOT_SENT', emailError: 'the client admin has no email address on file' } });
+    postMock.mockResolvedValue({ success: true, data: { emailSent: false, emailError: 'the client admin has no email address on file' } });
     render(<AdminTicketsPage />);
     await openFirstTicket();
     fireEvent.click(await screen.findByRole('button', { name: /Escalate/ }));
@@ -228,7 +228,7 @@ describe('Client admin: "Awaiting your remarks" + reply', () => {
     render(<AdminTicketsPage />);
     expect(await screen.findByText('Points missing')).toBeInTheDocument();
     expect(screen.queryByText(/awaiting your remarks/)).not.toBeInTheDocument();
-    expect(screen.queryByText('Awaiting client')).not.toBeInTheDocument();
+    expect(screen.queryByText('Awaiting client', { selector: 'p' })).not.toBeInTheDocument();
   });
 
   it('labels a client admin internal reply as "Client remarks" in the thread', async () => {
@@ -361,13 +361,12 @@ describe('outlet ID + unambiguous "Raised by"', () => {
     expect(within(dialog).getByTestId('ticket-outlet')).toHaveTextContent("owner's primary of 3 outlets");
   });
 
-  it('search matches the outlet code', async () => {
-    routeGet({ list: [baseTicket(), baseTicket({ id: 't2', ticketNumber: 'TKT-2', subject: 'Unrelated issue', outlet: null })] });
+  it('search is sent to the SERVER (covers every ticket, not just loaded pages) and resets to page 1', async () => {
+    routeGet({ list: [baseTicket()] });
     render(<AdminTicketsPage />);
-    await screen.findByText('Unrelated issue');
-    fireEvent.change(screen.getByPlaceholderText(/outlet code/), { target: { value: 'deo-0042' } });
-    await waitFor(() => expect(screen.queryByText('Unrelated issue')).not.toBeInTheDocument());
-    expect(screen.getByText('Points missing')).toBeInTheDocument();
+    await screen.findByText('Points missing');
+    fireEvent.change(screen.getByLabelText('Search tickets'), { target: { value: 'DEO-0042' } });
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/api/tickets?q=DEO-0042&page=1&limit=25'));
   });
 });
 
@@ -467,9 +466,9 @@ describe('audit regressions', () => {
     };
     await ask();
     expect(await screen.findByText(/Nothing was re-sent/)).toBeInTheDocument();
-    postMock.mockResolvedValue({ success: true, data: { emailStatus: 'SENDING' } });
+    postMock.mockResolvedValue({ success: true, data: { emailSent: true } });
     await ask();
-    expect(await screen.findByText(/email is being sent/)).toBeInTheDocument();
+    expect(await screen.findByText(/notified in-app and by email/)).toBeInTheDocument();
   });
 
   it('labels thread messages: outlet owner, sales rep · designation, Gifsy, client admin', async () => {
@@ -488,5 +487,114 @@ describe('audit regressions', () => {
     for (const label of ['Outlet owner — Ramesh Gupta', 'Meera Iyer · ISR', 'Owner · Gifsy support', 'Anita · Client admin']) {
       expect(await within(dialog).findByText(label, { selector: 'p' })).toBeInTheDocument();
     }
+  });
+});
+
+describe('round 2', () => {
+  it('switching view always shows page 1 of the new view (never the old page count)', async () => {
+    routeGet({ list: [baseTicket()], page2: [baseTicket({ id: 't2', ticketNumber: 'TKT-2', subject: 'Second page ticket' })], total: 2, awaiting: { total: 1, mine: 0 }, waitingList: [waitingTicket()] });
+    render(<AdminTicketsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    expect(await screen.findByText('Second page ticket')).toBeInTheDocument();
+    getMock.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Awaiting client (1)' }));
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/api/tickets?status=WAITING_ON_CLIENT&page=1&limit=25'));
+    const listCalls = getMock.mock.calls.map(([u]) => String(u)).filter((u) => u.startsWith('/api/tickets?'));
+    expect(listCalls.every((u) => u.includes('page=1&'))).toBe(true);
+    expect(listCalls.some((u) => u.includes('page=2'))).toBe(false);
+    await waitFor(() => expect(screen.queryByText('Second page ticket')).not.toBeInTheDocument());
+  });
+
+  it('filters are server-side: status / priority / category / source become query params', async () => {
+    routeGet({ list: [baseTicket()] });
+    render(<AdminTicketsPage />);
+    await screen.findByText('Points missing');
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'ESCALATED' } });
+    fireEvent.change(screen.getByLabelText('Priority'), { target: { value: 'high' } });
+    fireEvent.change(screen.getByLabelText('Category'), { target: { value: 'KYC' } });
+    fireEvent.change(screen.getByLabelText('Source'), { target: { value: 'sales' } });
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith(
+      '/api/tickets?status=ESCALATED&priorities=HIGH%2CCRITICAL&category=KYC&source=sales&page=1&limit=25',
+    ));
+  });
+
+  it('stat cards show the SERVER summary (tenant-wide), not counts of the loaded page', async () => {
+    getMock.mockImplementation((url: string) => {
+      if (url.startsWith('/api/tickets?')) {
+        return Promise.resolve({ success: true, data: {
+          tickets: [baseTicket()], pagination: { total: 1 }, awaitingClient: { total: 0, mine: 0 },
+          summary: { total: 412, open: 37, inProgress: 55, resolved: 300, highPriority: 9 },
+        } });
+      }
+      return Promise.resolve({ success: true, data: { ticket: baseTicket(), assignees: ASSIGNEES } });
+    });
+    render(<AdminTicketsPage />);
+    expect(await screen.findByTestId('stat-Total')).toHaveTextContent('412');
+    expect(screen.getByTestId('stat-Open')).toHaveTextContent('37');
+    expect(screen.getByTestId('stat-High Priority')).toHaveTextContent('9');
+  });
+
+  it('Gifsy internal note: "Gifsy only" by default, "Share with client admin" on request', async () => {
+    routeGet({ list: [baseTicket()] });
+    postMock.mockResolvedValue({ success: true, data: { message: {} } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Internal Note' }));
+    const group = within(dialog).getByRole('radiogroup', { name: 'Who can read this note' });
+    expect(within(group).getByLabelText('Gifsy only')).toBeChecked();
+    fireEvent.change(within(dialog).getByLabelText('Reply'), { target: { value: 'private' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/tickets/t1/messages', { message: 'private', isInternal: true, visibility: 'GIFSY_ONLY' }));
+    fireEvent.click(within(group).getByLabelText('Share with client admin'));
+    fireEvent.change(within(dialog).getByLabelText('Reply'), { target: { value: 'shared' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/tickets/t1/messages', { message: 'shared', isInternal: true, visibility: 'SHARED_WITH_CLIENT' }));
+  });
+
+  it('client admin internal notes carry no visibility choice (always shared)', async () => {
+    session = { role: 'CLIENT_ADMIN', name: 'Deoleo Admin', userId: 'cadmin1', canManageSchemes: false };
+    routeGet({ list: [baseTicket()] });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Internal Note' }));
+    expect(within(dialog).queryByRole('radiogroup')).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/shared with Gifsy support/)).toBeInTheDocument();
+  });
+
+  it('thread badges: "Gifsy only" vs "Shared with client" (legacy NULL shown as shared)', async () => {
+    const msg = (id: string, vis: string | null) => ({
+      id, message: `note ${id}`, isInternal: true, internalVisibility: vis, createdAt: now(),
+      senderLabel: 'Owner · Gifsy support', senderKind: 'STAFF', sender: { id: 'admin1', name: 'Owner', role: 'GIFSY_ADMIN' },
+    });
+    routeGet({ list: [baseTicket({ messages: [msg('a', 'GIFSY_ONLY'), msg('b', 'SHARED_WITH_CLIENT'), msg('c', null)] })] });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('note a');
+    expect(within(dialog).getAllByText('Gifsy only', { selector: 'span' })).toHaveLength(1);
+    expect(within(dialog).getAllByText('Shared with client', { selector: 'span' })).toHaveLength(2);
+  });
+
+  it('Gifsy can "Cancel request & resume" a waiting ticket', async () => {
+    routeGet({ list: [waitingTicket()], awaiting: { total: 1, mine: 0 } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const section = await screen.findByRole('region', { name: 'Awaiting client remarks' });
+    fireEvent.click(within(section).getByRole('button', { name: 'Cancel request & resume' }));
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/tickets/t1/cancel-client-remarks', {}));
+    expect(await screen.findByText(/Request cancelled/)).toBeInTheDocument();
+  });
+
+  it('MIS sees "Waiting for <client admin>\'s remarks" (it cannot reply)', async () => {
+    session = { role: 'MIS_USER', name: 'MIS', userId: 'mis1', canManageSchemes: false };
+    routeGet({ list: [waitingTicket()], awaiting: { total: 1, mine: 0 } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const section = await screen.findByRole('region', { name: 'Awaiting client remarks' });
+    expect(within(section).getByText("Waiting for Deoleo Admin's remarks")).toBeInTheDocument();
+    expect(within(section).queryByLabelText('Your remarks')).not.toBeInTheDocument();
+    expect(within(section).queryByRole('button', { name: /Cancel request/ })).not.toBeInTheDocument();
   });
 });

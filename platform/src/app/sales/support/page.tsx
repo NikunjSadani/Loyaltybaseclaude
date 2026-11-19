@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import {
   type Ticket, type TicketCategory, type TicketPriority, type TicketStatus,
-  CATEGORY_LABELS, STATUS_LABELS, PRIORITY_LABELS,
+  CATEGORY_LABELS, STATUS_LABELS,
 } from '@/lib/tickets';
 import { roleLabelFor, getRole, type SalesRole } from '@/lib/sales-role';
 import { useClientConfig } from '@/lib/platform/client-config-context';
@@ -98,12 +98,6 @@ const SELF_CATEGORIES: { value: TicketCategory; label: string; emoji: string }[]
   { value: 'delivery',   label: 'Field Tool Problem',       emoji: '🔧' },
   { value: 'kyc',        label: 'Training Request',         emoji: '📚' },
   { value: 'other',      label: 'Other',                    emoji: '💬' },
-];
-
-const PRIORITIES: { value: TicketPriority; label: string; color: string }[] = [
-  { value: 'high',   label: 'High',   color: 'text-red-600 bg-red-50 border-red-200' },
-  { value: 'medium', label: 'Medium', color: 'text-amber-600 bg-amber-50 border-amber-200' },
-  { value: 'low',    label: 'Low',    color: 'text-gray-600 bg-gray-50 border-gray-200' },
 ];
 
 function formatTime(iso: string) {
@@ -369,10 +363,6 @@ export default function SalesSupportPage() {
                             <span className="text-[10px] text-gray-400">{t.ticketNumber}</span>
                             <span className="text-[10px] text-gray-300">·</span>
                             <span className="text-[10px] text-gray-400">{CATEGORY_LABELS[t.category]}</span>
-                            <span className="text-[10px] text-gray-300">·</span>
-                            <span className={`text-[10px] font-semibold ${t.priority === 'high' ? 'text-red-500' : t.priority === 'medium' ? 'text-amber-500' : 'text-gray-400'}`}>
-                              {PRIORITY_LABELS[t.priority]}
-                            </span>
                           </div>
                         </div>
                         <ChevronRight className="h-4 w-4 text-gray-300 shrink-0 mt-1" />
@@ -513,19 +503,6 @@ export default function SalesSupportPage() {
                       className={`flex items-center gap-2 p-2.5 rounded-xl border text-left transition-all ${form.category === c.value ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)]/5 text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 hover:border-gray-300'}`}>
                       <span className="text-base">{c.emoji}</span>
                       <span className="text-xs font-medium leading-tight">{c.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* ── Priority ── */}
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Priority</label>
-                <div className="flex gap-2">
-                  {PRIORITIES.map((p) => (
-                    <button key={p.value} onClick={() => setForm((f) => ({ ...f, priority: p.value }))}
-                      className={`flex-1 py-2 rounded-xl border text-xs font-semibold transition-all ${form.priority === p.value ? p.color + ' border-current' : 'border-gray-200 text-gray-400 hover:border-gray-300'}`}>
-                      {p.label}
                     </button>
                   ))}
                 </div>

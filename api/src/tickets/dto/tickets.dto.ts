@@ -13,7 +13,7 @@ import {
   Max,
 } from 'class-validator';
 import { PAGE_SIZE_MAX } from '../../common/validators/page-size';
-import { TicketCategory, TicketPriority, TicketStatus } from '@prisma/client';
+import { TicketCategory, TicketNoteVisibility, TicketPriority, TicketStatus } from '@prisma/client';
 
 export class CreateTicketDto {
   @IsEnum(TicketCategory)
@@ -107,6 +107,22 @@ export class AddMessageDto {
   @IsOptional()
   @IsBoolean()
   isInternal?: boolean; // defaults to false
+
+  /**
+   * Internal notes only. A Gifsy operator's note defaults to GIFSY_ONLY; SHARED_WITH_CLIENT shares it
+   * with the tenant's admin desk. A client-desk note is always SHARED_WITH_CLIENT (this is ignored).
+   */
+  @IsOptional()
+  @IsEnum(TicketNoteVisibility)
+  visibility?: TicketNoteVisibility;
+}
+
+/** Gifsy cancels a pending remarks request and resumes the ticket. */
+export class CancelClientRemarksDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }
 
 export class ListTicketsQueryDto {
@@ -117,6 +133,23 @@ export class ListTicketsQueryDto {
   @IsOptional()
   @IsEnum(TicketCategory)
   category?: TicketCategory;
+
+  /** Support admins: comma-separated priorities, e.g. "HIGH,CRITICAL". */
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  priorities?: string;
+
+  /** Support admins: who raised it — "outlet" (outlet owner) or "sales" (a sales rep). */
+  @IsOptional()
+  @IsIn(['outlet', 'sales'])
+  source?: 'outlet' | 'sales';
+
+  /** Support admins: free-text search (ticket number, subject, raiser name, outlet name / code). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  q?: string;
 
   /** CLIENT_ADMIN only: just the tickets waiting on THIS admin's remarks. */
   @IsOptional()

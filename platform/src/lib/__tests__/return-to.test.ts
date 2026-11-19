@@ -3,7 +3,7 @@
  * Run: npx vitest run src/lib/__tests__/return-to.test.ts
  */
 import { describe, it, expect } from 'vitest';
-import { loginUrlWithNext, readNextParam, returnPathForRole, safeReturnPath } from '../return-to';
+import { loginUrlWithNext, readNextParam, returnPathForRole, returnToForEdgeRedirect, safeReturnPath } from '../return-to';
 
 describe('safeReturnPath', () => {
   it('keeps a same-origin relative path with its query', () => {
@@ -59,5 +59,19 @@ describe('loginUrlWithNext / readNextParam', () => {
     expect(loginUrlWithNext('/admin/x', { expired: '1' })).toBe('/auth/login?expired=1&next=%2Fadmin%2Fx');
     expect(loginUrlWithNext('/auth/login')).toBe('/auth/login');
     expect(loginUrlWithNext('//evil.example')).toBe('/auth/login');
+  });
+});
+
+describe('returnToForEdgeRedirect (document navigations only)', () => {
+  const H = (h: Record<string, string>) => new Headers(h);
+  it('a document navigation keeps path + query, minus _rsc', () => {
+    expect(returnToForEdgeRedirect('/admin/tickets', '?ticket=t1&_rsc=x', H({ 'sec-fetch-dest': 'document' }))).toBe('/admin/tickets?ticket=t1');
+    expect(returnToForEdgeRedirect('/admin/tickets', '?ticket=t1', H({ accept: 'text/html,application/xhtml+xml' }))).toBe('/admin/tickets?ticket=t1');
+  });
+  it('RSC fetches / prefetches / non-document requests → null', () => {
+    for (const h of <Record<string, string>[]>[{ rsc: '1' }, { 'next-router-prefetch': '1' }, { 'next-router-state-tree': 'x' }, { purpose: 'prefetch' },
+      { 'sec-purpose': 'prefetch;prerender' }, { 'sec-fetch-dest': 'empty' }, { accept: '*/*' }, {}]) {
+      expect(returnToForEdgeRedirect('/admin/tickets', '?ticket=t1', H(h))).toBeNull();
+    }
   });
 });

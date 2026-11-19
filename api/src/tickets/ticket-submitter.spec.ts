@@ -71,7 +71,7 @@ describe('resolveTicketOutlet', () => {
 describe('TicketsService — raised-by / outlet wiring', () => {
   const tx = { ticket: { update: jest.fn(), updateMany: jest.fn() }, ticketMessage: { create: jest.fn() }, auditLog: { create: jest.fn() } };
   const prisma = {
-    ticket: { findMany: jest.fn(), count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'new' }), findFirst: jest.fn() },
+    ticket: { findMany: jest.fn(), count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'new' }), findFirst: jest.fn(), groupBy: jest.fn().mockResolvedValue([]) },
     outlet: { findMany: jest.fn(), findFirst: jest.fn() },
     salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
     salesUserAssignment: { findFirst: jest.fn() },

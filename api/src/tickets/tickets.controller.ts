@@ -8,6 +8,7 @@ import { externalOrigin } from '../exports/exports.service';
 import {
   AddMessageDto,
   AssignTicketDto,
+  CancelClientRemarksDto,
   ClientRemarksReplyDto,
   CreateTicketDto,
   EscalateTicketDto,
@@ -78,6 +79,14 @@ export class TicketsController {
     @Req() req: Request,
   ) {
     return this.tickets.requestClientRemarks(user, id, dto, externalOrigin(req));
+  }
+
+  /** Gifsy withdraws a pending remarks request and resumes the ticket at its pre-request status. */
+  @Post(':id/cancel-client-remarks')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('support:escalate')
+  cancelClientRemarks(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: CancelClientRemarksDto) {
+    return this.tickets.cancelClientRemarks(user, id, dto);
   }
 
   /** The client admin's reply to a remarks request (stored INTERNAL). */
