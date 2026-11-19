@@ -2,6 +2,7 @@ import { Body, Controller, ForbiddenException, Headers, Logger, Optional, Post, 
 import { ModuleRef } from '@nestjs/core';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
+import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/roles.decorator';
 import { RewardsService } from '../rewards/rewards.service';
 import { VoucherDispersalProcessor } from '../voucher-dispersal/voucher-dispersal.processor';
@@ -55,6 +56,12 @@ export class HubbleWebhookController {
     }
   }
 
+  // @SkipThrottle: Hubble posts order-status callbacks from a few shared IPs — a voucher dispersal
+  // or a burst of redemptions can exceed the global 60/min IP bucket, and a 429 risks Hubble
+  // retry storms / auto-disabling the webhook (same failure as MSG91's paused DLR webhook,
+  // prod 2026-11-19). The HMAC X-Verify check below is the guard (forged calls 403 before any
+  // Hubble lookup), and each valid call is an idempotent reconcile.
+  @SkipThrottle()
   @Public()
   @Post('webhook')
   async webhook(

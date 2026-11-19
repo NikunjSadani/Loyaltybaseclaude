@@ -9,6 +9,8 @@ import { MessageDeliveryStatusService } from '../../notifications/message-delive
 import { WhatsappOpsController } from '../../whatsapp-broadcasts/whatsapp-ops.controller';
 import { WhatsappStatusService } from '../../whatsapp-broadcasts/whatsapp-status.service';
 import { WhatsappSendWorker } from '../../whatsapp-broadcasts/whatsapp-send.worker';
+import { HubbleWebhookController } from '../../hubble/hubble-webhook.controller';
+import { RewardsService } from '../../rewards/rewards.service';
 import { IdentityThrottlerGuard } from './identity-throttler.guard';
 
 jest.setTimeout(60_000);
@@ -25,22 +27,25 @@ describe('MSG91 status webhooks are not throttled', () => {
   const SECRET = 'test-webhook-secret';
   const dlr = { handleWebhook: jest.fn().mockResolvedValue({ processed: 1, updated: 0 }), reconcile: jest.fn().mockResolvedValue({ checked: 0, updated: 0 }) };
   const wa = { handleWebhook: jest.fn().mockResolvedValue({ processed: 1, updated: 0 }) };
-  const saved = { n: process.env.NOTIFICATIONS_STATUS_SECRET, w: process.env.WHATSAPP_STATUS_SECRET };
+  const rewards = { reconcileHubbleOrder: jest.fn() };
+  const saved = { n: process.env.NOTIFICATIONS_STATUS_SECRET, w: process.env.WHATSAPP_STATUS_SECRET, h: process.env.HUBBLE_WEBHOOK_SECRET };
 
   beforeEach(async () => {
     process.env.NOTIFICATIONS_STATUS_SECRET = SECRET;
     process.env.WHATSAPP_STATUS_SECRET = SECRET;
+    process.env.HUBBLE_WEBHOOK_SECRET = SECRET;
     jest.clearAllMocks();
     const mod = await Test.createTestingModule({
       imports: [
         ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
         ThrottlerModule.forRoot({ throttlers: [{ name: 'default', ttl: 60_000, limit: 60 }] }),
       ],
-      controllers: [NotificationsStatusController, WhatsappOpsController],
+      controllers: [NotificationsStatusController, WhatsappOpsController, HubbleWebhookController],
       providers: [
         { provide: MessageDeliveryStatusService, useValue: dlr },
         { provide: WhatsappStatusService, useValue: wa },
         { provide: WhatsappSendWorker, useValue: {} },
+        { provide: RewardsService, useValue: rewards },
         { provide: APP_GUARD, useClass: IdentityThrottlerGuard },
       ],
     }).compile();
@@ -51,6 +56,7 @@ describe('MSG91 status webhooks are not throttled', () => {
   afterAll(() => {
     if (saved.n === undefined) delete process.env.NOTIFICATIONS_STATUS_SECRET; else process.env.NOTIFICATIONS_STATUS_SECRET = saved.n;
     if (saved.w === undefined) delete process.env.WHATSAPP_STATUS_SECRET; else process.env.WHATSAPP_STATUS_SECRET = saved.w;
+    if (saved.h === undefined) delete process.env.HUBBLE_WEBHOOK_SECRET; else process.env.HUBBLE_WEBHOOK_SECRET = saved.h;
   });
 
   it('both status handlers carry @SkipThrottle metadata; reconcile does not', () => {
@@ -79,5 +85,14 @@ describe('MSG91 status webhooks are not throttled', () => {
     const res = await request(app.getHttpServer()).post('/notifications/status').set('x-webhook-secret', 'wrong').send({});
     expect(res.status).toBe(403);
     expect(dlr.handleWebhook).not.toHaveBeenCalled();
+  });
+
+  it('POST /hubble/webhook carries @SkipThrottle: 120 calls in a minute are never 429 (bad signature → 403, no reconcile)', async () => {
+    expect(Reflect.getMetadata('THROTTLER:SKIPdefault', HubbleWebhookController.prototype.webhook)).toBe(true);
+    for (let i = 0; i < 120; i++) {
+      const res = await request(app.getHttpServer()).post('/hubble/webhook').set('x-verify', 'forged').send({ referenceId: `r${i}` });
+      expect(res.status).toBe(403);
+    }
+    expect(rewards.reconcileHubbleOrder).not.toHaveBeenCalled();
   });
 });
