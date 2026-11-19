@@ -179,7 +179,7 @@ jobs:
             --task-timeout=3600 \
             --max-retries=1 \
             --tasks=1 \
-            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},NODE_OPTIONS=--max-old-space-size=1700" \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},NODE_OPTIONS=--max-old-space-size=1700,SALES_RETENTION_V2=on" \
             --set-secrets="DATABASE_URL=DATABASE_URL:latest,GCS_BUCKET=GCS_BUCKET:latest,GCP_PROJECT_ID=GCP_PROJECT_ID:latest" \
             --network=gifsy-vpc \
             --subnet=gifsy-subnet-asia-south1 \
@@ -260,7 +260,7 @@ jobs:
             --subnet=gifsy-subnet-asia-south1 \
             --vpc-egress=private-ranges-only \
             --startup-probe=httpGet.path=/health/ready,httpGet.port=4000,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=3,failureThreshold=30 \
-            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,MSG91_WHATSAPP_NUMBER=917003202293,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.myhubble.money,SALES_IMPORT_RUNNER=job,SALES_IMPORT_JOB=gifsy-sales-import,EXPORTS_RUNNER=job,EXPORTS_JOB=gifsy-exports,DELIVERY_RECEIPTS_ENABLED=true,NOTIFICATIONS_RETENTION_ENABLED=true,GCP_PROJECT=${{ env.PROJECT_ID }}" \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,MSG91_WHATSAPP_NUMBER=917003202293,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.myhubble.money,SALES_IMPORT_RUNNER=job,SALES_IMPORT_JOB=gifsy-sales-import,EXPORTS_RUNNER=job,EXPORTS_JOB=gifsy-exports,DELIVERY_RECEIPTS_ENABLED=true,NOTIFICATIONS_RETENTION_ENABLED=true,SALES_RETENTION_V2=on,GCP_PROJECT=${{ env.PROJECT_ID }}" \
             --set-secrets="\
               DATABASE_URL=DATABASE_URL:latest,\
               JWT_SECRET=JWT_SECRET:latest,\
