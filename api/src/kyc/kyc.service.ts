@@ -1382,6 +1382,8 @@ export class KycService {
     removedReachedUserIds: Set<string>;
     /** Every REMOVED sales user's login id in the tenant (a snapshot row is matched by its chain instead). */
     removedUserIds: Set<string>;
+    /** REMOVED sales user's login id → their SalesUser.id (the KYC-list member filter's filing-time keys). */
+    removedSalesIdByUserId: Map<string, string>;
     /** The KYC-list WHERE for this caller's submitter scope (live subtree + removed submitters, K1). */
     submitterWhere: Prisma.KycSubmissionWhereInput;
   } | null> {
@@ -1422,6 +1424,7 @@ export class KycService {
       subtreeSalesUserIds: subtree,
       removedReachedUserIds,
       removedUserIds,
+      removedSalesIdByUserId: new Map(removed.map((n) => [n.userId, n.id])),
       submitterWhere,
     };
   }
@@ -3239,8 +3242,10 @@ export class KycService {
     // subtree. Admins/MIS/Gifsy stay tenant-wide / cross-tenant.
     let submitterScope: string[] | null = null;
     let submitterWhere: Prisma.KycSubmissionWhereInput | null = null;
+    let removedSalesIdByUserId: Map<string, string> | null = null;
     if (!this.canReadTenantWide(user.role)) {
       const scope = await this.resolveSalesScope(user);
+      removedSalesIdByUserId = scope?.removedSalesIdByUserId ?? null;
       submitterScope = scope ? scope.subtreeUserIds : [user.sub];
       // K1: the scope WHERE also carries the removed-submitter rows (snapshot chain / legacy current link).
       submitterWhere = scope ? scope.submitterWhere : { userId: { in: submitterScope } };
@@ -3329,6 +3334,15 @@ export class KycService {
         !isKycInFlight(s.status) && s.partner?.outlets?.some((o) => isReKycPending(o.reKycFlags))
           ? ('RE_KYC_REQUIRED' as (typeof s)['status'])
           : s.status;
+      // K1 follow-up (2026-11-19) — the sales KYC-list Team-Member filter must place a REMOVED rep's KYC in the
+      // branch it was FILED in, like the list scope + approval gate (the snapshot chain), not by today's links
+      // (a moved manager would drag it to the wrong member, or to none). `filingBranchKeys` = the snapshot
+      // chain + the removed submitter's own SalesUser.id; the FE matches it against each member's `branchKeys`
+      // (GET /sales/team). Only on removed-submitter rows WITH a chain: live submitters + legacy (no chain)
+      // rows carry no key and keep the current-link match (`submitterUserIds`), byte-identical to before.
+      const removedSalesId = removedSalesIdByUserId?.get(s.userId);
+      const chain = s.submitterManagerChain ?? [];
+      const filingBranchKeys = removedSalesId && chain.length > 0 ? [...chain, removedSalesId] : null;
       // FIX 2: never ship the internal payoutCarried bookkeeping (it may hold a hidden live value).
       return {
         ...rest,
@@ -3336,6 +3350,7 @@ export class KycService {
         status,
         gifsyEnteredAt,
         ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
+        ...(filingBranchKeys ? { filingBranchKeys } : {}),
       };
     });
 

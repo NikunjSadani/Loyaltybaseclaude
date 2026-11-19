@@ -5268,6 +5268,49 @@ describe('KycService', () => {
         // live isr under M under asm2 now → asm2 sees it even though the snapshot names asm1
         expect(await listSees(asm2, { userId: 'isr1', submitterManagerChain: SNAPSHOT })).toBe(true);
       });
+
+      // K1 follow-up (2026-11-19): the list rows carry the FILING-TIME branch keys the Team-Member filter matches.
+      describe('member-filter keys (filingBranchKeys) on the list rows', () => {
+        const rsm: JwtPayload = { sub: 'rsm1', role: 'SALES_STATE_HEAD', clientId: 'deoleo', phone: '', name: '' };
+        const row = (id: string, userId: string, chain: string[]) => ({
+          id, userId, status: 'PENDING_ASM_APPROVAL', submitterManagerChain: chain, partner: null,
+          proposedPartner: null, documents: [], statusHistory: [], user: { id: userId, name: 'n', phone: 'p' },
+        });
+        const listRows = async (caller: JwtPayload, rows: unknown[]) => {
+          mockPrisma.kycSubmission.findMany.mockResolvedValue(rows);
+          mockPrisma.kycSubmission.count.mockResolvedValue(rows.length);
+          mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+          const res = await service.list(caller, {});
+          return res.submissions as Array<{ id: string; filingBranchKeys?: string[] }>;
+        };
+
+        it('rep REMOVED + manager MOVED: the row names the filing-time chain (asm1 branch), not today\'s link (asm2)', async () => {
+          primeSalesNodes(TREE);
+          const [r] = await listRows(rsm, [row('s1', 'isr1', SNAPSHOT)]);
+          // chain + the removed rep's own SalesUser id; asm2 (where M sits NOW) is absent → the RSM's
+          // "asm1" member keeps it, "asm2" does not.
+          expect(r.filingBranchKeys).toEqual(['m-su', 'asm1-su', 'rsm-su', 'isr-su']);
+          expect(r.filingBranchKeys).not.toContain('asm2-su');
+        });
+
+        it('LEGACY removed-rep row (no snapshot) carries no keys → the FE keeps the current-link match', async () => {
+          primeSalesNodes(TREE);
+          const [r] = await listRows(asm2, [row('s1', 'isr1', [])]);
+          expect(r).not.toHaveProperty('filingBranchKeys');
+        });
+
+        it('a LIVE submitter carries no keys even with a snapshot (current links, unchanged)', async () => {
+          primeSalesNodes(TREE.map((n) => (n.id === 'isr-su' ? { ...n, deletedAt: undefined } : n)));
+          const [r] = await listRows(asm2, [row('s1', 'isr1', SNAPSHOT)]);
+          expect(r).not.toHaveProperty('filingBranchKeys');
+        });
+
+        it('a tenant with no removed reps: no row carries keys (response shape unchanged)', async () => {
+          primeSalesNodes(TREE.filter((n) => n.id !== 'isr-su'));
+          const [r] = await listRows(asm2, [row('s1', 'm1', ['asm2-su', 'rsm-su'])]);
+          expect(r).not.toHaveProperty('filingBranchKeys');
+        });
+      });
     });
 
     // ── R1 — the approve ACTION walks past a soft-deleted SO exactly like routing did ───────────────
