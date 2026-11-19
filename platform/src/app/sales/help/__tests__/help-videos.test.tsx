@@ -13,6 +13,10 @@
  * HV-S6b Retry in the error box re-fetches the guide (fresh token) and shows the player again.
  * HV-S7  Guide without a video → steps only (no <video>).
  * HV-S8  API 404 (flag OFF / not visible) → "not available", no crash.
+ * HV-S9  List labels: video guide → play icon + "Video · 3 steps"; steps-only → list icon + "3 steps" (no bare number).
+ * HV-S10 Player sizing: portrait by default (before metadata); a 780×1688 recording stays portrait (fills the width,
+ *        height ≤ 75vh, object-fit contain); a 1280×720 recording switches to landscape. Native controls (incl.
+ *        full screen) are kept.
  */
 
 import React from 'react';
@@ -32,6 +36,7 @@ vi.mock('@/components/pwa/PwaAppSettings', () => ({ default: () => null }));
 import SalesProfilePage from '../../profile/page';
 import SalesHelpPage from '../page';
 import SalesHelpTopicPage from '../[id]/page';
+import { guideMetaLabel, playerStyle, DEFAULT_VIDEO_RATIO } from '@/components/help/help-topics';
 
 function json(body: unknown, status = 200) {
   const text = JSON.stringify(body);
@@ -186,5 +191,49 @@ describe('HV-S — list + detail', () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(() => json({ success: false, error: 'Help & videos is not available.' }, 404)));
     render(<SalesHelpPage />);
     expect(await screen.findByTestId('help-unavailable', {}, { timeout: 15_000 })).toBeInTheDocument();
+  });
+
+  it('HV-S9: list labels — "Video · N steps" with a play icon; steps-only "N steps" with a list icon', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => json({ success: true, data: { topics: [TOPIC_VIDEO, TOPIC_STEPS_ONLY] } })));
+    render(<SalesHelpPage />);
+    const items = await screen.findAllByTestId('help-list-item', {}, { timeout: 15_000 });
+    expect(items[0].querySelector('[data-testid="help-list-meta"]')?.textContent).toBe('Video · 3 steps');
+    expect(items[0].querySelector('[data-testid="help-list-icon-video"]')).not.toBeNull();
+    expect(items[1].querySelector('[data-testid="help-list-meta"]')?.textContent).toBe('3 steps');
+    expect(items[1].querySelector('[data-testid="help-list-icon-steps"]')).not.toBeNull();
+    // the old bare count badge is gone: the icon box holds no text
+    expect(items[1].firstElementChild?.textContent).toBe('');
+    expect(guideMetaLabel({ videoUrl: null, steps: ['one'] })).toBe('1 step');
+    expect(guideMetaLabel({ videoUrl: 'u', steps: ['a', 'b', 'c', 'd', 'e'] })).toBe('Video · 5 steps');
+  });
+
+  it('HV-S10: portrait by default; 780×1688 stays portrait; 1280×720 becomes landscape; controls kept', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => json({ success: true, data: TOPIC_VIDEO })));
+    await act(async () => { render(<SalesHelpTopicPage params={Promise.resolve({ id: 'kyc-upi' })} />); });
+    const video = (await screen.findByTestId('help-video', {}, { timeout: 15_000 })) as HTMLVideoElement;
+    expect(video.getAttribute('data-orientation')).toBe('portrait'); // before metadata
+    expect(video.hasAttribute('controls')).toBe(true);
+    expect(video.getAttribute('controlslist')).toBeNull(); // full screen not disabled
+
+    const setDims = (w: number, h: number) => {
+      Object.defineProperty(video, 'videoWidth', { configurable: true, value: w });
+      Object.defineProperty(video, 'videoHeight', { configurable: true, value: h });
+      fireEvent.loadedMetadata(video);
+    };
+    setDims(780, 1688);
+    await waitFor(() => expect(video.getAttribute('data-orientation')).toBe('portrait'));
+    setDims(1280, 720);
+    await waitFor(() => expect(video.getAttribute('data-orientation')).toBe('landscape'));
+    // a broken/zero size never changes the box
+    setDims(0, 0);
+    expect(video.getAttribute('data-orientation')).toBe('landscape');
+  });
+
+  it('HV-S10b: playerStyle — full width, aspect from the video, height capped at 75vh, contain (never crop)', () => {
+    expect(playerStyle(780 / 1688)).toEqual({ width: '100%', aspectRatio: String(780 / 1688), maxHeight: '75vh', objectFit: 'contain' });
+    expect(playerStyle(16 / 9)).toMatchObject({ width: '100%', aspectRatio: String(16 / 9), maxHeight: '75vh', objectFit: 'contain' });
+    expect(DEFAULT_VIDEO_RATIO).toBeLessThan(1); // portrait default
+    expect(playerStyle(Number.NaN).aspectRatio).toBe(String(DEFAULT_VIDEO_RATIO));
+    expect(playerStyle(0).aspectRatio).toBe(String(DEFAULT_VIDEO_RATIO));
   });
 });
