@@ -18,6 +18,7 @@
 | **Fix round (2026-11-19, dual audit)** | Owner D1 = a PAID 194C payout can't be reversed (every tenant); D2 = a fully withheld PAID 194R payout reversed on V2 gets a TDS credit (replaces M1); audit A2/A4/A5/B2–B9 — §8.4 |
 | **Fix round 3 (2026-11-19, dual re-audit)** | Usable-only credits (A1), D2 entries keep their report flags (A2), LEGACY approve re-checks D1 + row locks (A3), bank-file FY everywhere (A4), honest gross-up text + "netted" row line (A5), section-less D2 (A6); migrations = 44 files, one live table each (B1/B6); V2 modal loading/error (B2); gross-era backfill BLOCKING (B3); B4/B5/B7/B8 — §8.5 |
 | **Over-reversal = debt (owner 2026-11-19)** | V2 POINTS reversal larger than what the wallet holds → the rest becomes wallet DEBT repaid from future earnings, nothing written off (R2 changed); plain-words POINTS outcome summary on every tenant (LEGACY keeps its floor-0 write-off wording) — branch `fix/wre-overreversal-debt`, §8.6 |
+| **Fix round (2026-11-19, dual audit + owner decisions 1–2)** | Expired points are not recovered twice (V2: the reversed credit's own expired points count as recovered); the retailer sees a negative balance as it is (no ₹, plain-words note, self-explaining passbook row); liability KPIs / group total exclude debt; Debt column; wallets-in-debt list + Excel; V6b INFO; oracle handles pre-rule rows — §8.7 |
 | **Not built** | WP7 missing tests · WP8 shadow-diff report · REPLAY tool (rollout: replay Bajaj's past reversals on a data copy → V2) · dual money audit · staging run |
 | **Remaining effort** | ~7–8 h wall-clock with parallel agents (§13) |
 
@@ -82,7 +83,7 @@ Invariants: **I1** `D ≥ 0`; **I2** `H ≥ 0`; **I3** `0 ≤ O_X ≤ a_X`; **I4
 | **Spend** `s` (redemption, admin debit — guarded `B ≥ s`) | `B −= s`; FIFO lots (as today); spent = history (R4) |
 | **Expiry** of lot with remaining `h` | `e = min(h, max(0, B))` (today's clamp); `B −= e`; excess `h − e` was covering debt → `D −= (h − e)`, owner credit `O += (h − e)`. With D = 0: `e = h` (identical to today) |
 | **Legacy debt-creating debit** `d` (vendor-import "Points reversed" history only) | `B −= d`; `D += max(0, d − H)` |
-| **Reversal** of X by `r ≤ a_X − ρ_X` | `p = min(r, O_X)` (restore the debt X paid off); `c = min(r − p, H)` (remove points still held); **owed `s = r − p − c`** (already spent); `B −= r`; `D += p + s`; `O_X −= p`; `ρ_X += r`; shortfall 0 (owner 2026-11-19 — before: `B −= p + c`, `D += p`, shortfall = s). H drops by exactly c. |
+| **Reversal** of X by `r ≤ a_X − ρ_X` | `p = min(r, O_X)` (restore the debt X paid off); `c = min(r − p, H)` (remove points still held); **`q = min(r − p, E_X − ε_X)`** (X's own points that already expired — counted as recovered, owner decision 1, §8.7); `c = min(r − p − q, H)`; **owed `s = r − p − q − c`** (already spent); `B −= r − q`; `D += p + s`; `O_X −= p`; `ε_X += q`; `ρ_X += r`; shortfall 0 (owner 2026-11-19 — before: `B −= p + c`, `D += p`, shortfall = s). H drops by exactly c. |
 
 ### 3.3 The one rule and how the owner rules fall out
 Floor of a reversal of X = `−(D + O_X)`.
@@ -114,7 +115,7 @@ totals don't (Q2). **Still holds after 2026-11-19:** `B_final = B_0 − Σr` tri
 order-free, so `D_final = D_0 + Σp + Σs` is too; the *split* of owed between reversals follows Q2 (first approved
 recovers first).
 
-## 4. Data model (WP1 ✅ built — `f5677f1e`, migration originally `20261117120000`; since the 2026-11-19 fix round (B3) split — since fix round 3 (B1/B6) into 44 files `api/prisma/migrations/20261119120000_wre_columns_wallets` … `20261119124300_wre_validate_…`, one live table per file, §8.5; + `20261119124400_wre_allocation_over_reversal_debt` = 45, §8.6)
+## 4. Data model (WP1 ✅ built — `f5677f1e`, migration originally `20261117120000`; since the 2026-11-19 fix round (B3) split — since fix round 3 (B1/B6) into 44 files `api/prisma/migrations/20261119120000_wre_columns_wallets` … `20261119124300_wre_validate_…`, one live table per file, §8.5; + `20261119124400_wre_allocation_over_reversal_debt` + `…124500` = 46, §8.6–8.7)
 Purely additive; existing code keeps working.
 - **`Wallet`**: `debtPoints Int @default(0)`, `movementSeq Int @default(0)`, relation `creditPositions`.
 - **`WalletTransaction`**: `seq Int?` (unique `(walletId, seq)`; NULLs allowed pre-backfill), `pointsDelta Int?` (actual
@@ -175,11 +176,11 @@ approve POINTS reversal (credit batch B, outlet O, field F, amount r):
   guarded flip CreditReversal PENDING_GIFSY → APPROVED/PARTIAL                        -- never twice
   for pos in positions (oldest seq first) while remaining > 0:
      r_i = min(remaining, pos.amount − pos.reversedPoints)
-     lock wallet pos.walletId FOR UPDATE; (p, c, s) = WP0.reverse(state, pos, r_i)    -- s = r_i − p − c (owed)
-     applyMovement(DEBIT_ADJUSTMENT, points −r_i, pointsDelta −r_i, debt += p + s, reversedCreditTxId, creditReversalId)
+     lock wallet pos.walletId FOR UPDATE; (p, q, c, s) = WP0.reverse(state, pos + E_X/ε_X, r_i) -- q expired, s owed
+     applyMovement(DEBIT_ADJUSTMENT, points −r_i, pointsDelta −(r_i − q), debt += p + s, reversedCreditTxId, creditReversalId)
      lots: draw c from pos.lotId first, then FIFO                                    -- Q7
      pos.offsetPoints −= p; pos.reversedPoints += r_i
-     insert CreditReversalAllocation(r_i, p, c, owed s, overReversalDebt s > 0, shortfall 0) -- unique → idempotent
+     insert CreditReversalAllocation(r_i, p, c, owed s, alreadyExpired q, overReversalDebt s > 0, shortfall 0) -- unique
   CreditReversal.shortfallPaise unchanged (0 — nothing written off; owner 2026-11-19)
 create cap = Σ(amount − reversedPoints) − Σ pending requested
 ```
@@ -484,12 +485,49 @@ WP0 `reverse()` (`api/src/wallet/reversal-model.ts`) carries the rule; `planV2Re
 **Outcome summary (every tenant, display only).** `pointsOutcome` on the PATCH approve/reject response and on every
 APPROVED / PARTIAL POINTS reversal in `GET /admin/credits/reversals` (`api/src/credits/points-reversal-outcome.ts`):
 V2 "Approved · 10,000 pts reversed · 7,014 taken from the wallet · 2,986 recorded as debt, repaid from future earnings";
-LEGACY "… · 2,986 not recovered — already spent, written off (settle off-platform)"; a credit that had repaid debt adds
+LEGACY "… · 2,986 not recovered — already redeemed or expired, written off"; a credit that had repaid debt adds
 "N of earlier debt this credit had paid off is owed again"; partial "Partially approved (X pts requested) · …"; reject
 "Rejected · nothing was reversed — the wallet is unchanged". The list builds it from the allocation rows when they cover the
 approved amount, else approvedPaise / shortfallPaise — so a reversal approved before 2026-11-19 keeps its recorded
 write-off. Shown on the payout screen (approve result + "Outcome:" line in the Reversal Report); the status screen's
 create-form note and the Payouts help guide describe the V2 rule (LEGACY wording unchanged).
+
+### 8.7 Fix round — dual audit + owner decisions 1–2 (2026-11-19) — branch `fix/wre-overreversal-debt`
+**Owner decision 1 — expired points are not recovered twice (V2 only).** A credit's points that already EXPIRED count
+as recovered: nothing is taken from other credits' points for them and no debt is booked. WP0 `reverse()` now has
+`q = min(r − p, E_X − ε_X)` between p and c (E_X = points of X's own lot that expired from the balance — the lot's
+DEBIT_EXPIRY row, `balanceBefore − balanceAfter`, exact on both write paths; ε_X = Σ `alreadyExpired` of X's earlier
+allocations); `c = min(r − p − q, H)`, `s = r − p − q − c`; `B −= r − q`, `D += p + s`. Partial reversals count the
+expired part FIRST and never twice; p and q are private to X so R3 still holds. Examples (tested in WP0 + service):
+X 10,000 fully expired, Y 5,000 → reverse X → nothing taken, no debt; X 10,000 (4,000 redeemed, 6,000 expired), Y 5,000
+→ 6,000 expired, 4,000 taken, no debt; X 10,000 (7,000 redeemed, 3,000 expired), Y 2,000 → 3,000 expired, 2,000 taken,
+5,000 debt. Stored in `credit_reversal_allocations.alreadyExpired`; parts CHECK is now
+`credit_reversal_allocations_parts_v2_chk` (p + c + owed + shortfall + alreadyExpired = requested — migration
+`20261119124400` adds it NOT VALID and drops the old one, `20261119124500` VALIDATEs; one table each file, idempotent,
+verified on PGlite). Outcome: "… · X already expired — nothing to recover". LEGACY keeps its floor-0 rule (tested).
+
+**Owner decision 2 — the retailer sees the negative balance as it is.** `GET /v1/wallet`, the sales ledger and the admin
+outlet summary add `owedPoints` (= −balance) and `owedFromReversal` for a NEGATIVE wallet only (`negative-balance.helper.ts`
+— nothing added and no query for a wallet ≥ 0, so every Deoleo summary is byte-identical). Partner card / sales outlet view
+(shared `OutletWalletView` → `BalanceCard`): "Available to Redeem −2,986 pts" + "You owe 2,986 pts from a reversed credit —
+it's repaid from your next earnings." (generic wording when not from a reversal). Rewards screens (header, cash, voucher,
+gift, catalogue tiles) and the sales "redeem for outlet" picker: no ₹ value and no negative "max"/"need N more" — "Not
+available while your balance is negative". The V2 passbook row: "Credit reversed (Volume · 2026-10) −10,000 · 2,986 owed,
+repaid from future earnings" (credits.service passes `passbookLabel` = field · period; LEGACY description unchanged).
+Admin outlet wallet + sales view also show "Reversal ref <id>" under the row; the admin headline shows the negative
+balance + note instead of a ₹ value; group page shows a negative child with no ₹.
+
+**Audit items:** (1) liability KPIs (finance, program health, admin home) = Σ POSITIVE balances; "points owed" = Σ
+debtPoints reported separately (finance + program-health cards show it only when > 0) — unchanged for a tenant with no
+negative wallet. (2) group roll-up: available total = positive balances, `owedPoints` separate. (3) Reversal Report: a
+Debt column (owed + debt restored) appears only when a listed reversal booked debt — Reversed = supposed − pending − debt
+(LEGACY report unchanged). (4) copy "can't redeem while the balance is below zero". (5) LEGACY outcome "not recovered —
+already redeemed or expired, written off". (6) Payouts guide: "On the standard engine … / On the new reversal engine (where
+enabled) …" (the guide has no tenant gating). (7) V6b: negatives from V2 over-reversals (`overReversalDebt`) are left out
+of the comparison and listed as V6c INFO — V6b still FAILs a changed cutover negative. (8) oracle replay: a V2 allocation
+approved before these rules (owed 0, alreadyExpired 0, shortfall > 0) is replayed by the old rule. (9) "Wallets in debt":
+`GET /v1/admin/credits/reversal-engine/wallets-in-debt` (tenant-scoped, wallet / outlets / balance / debt / owed / the
+reversal(s) behind it with date) + a section on the credits status screen (non-LEGACY tenants) with an Excel download.
 
 ## 9. One-off backfill (WP6, NOT built) + rollout
 **Backfill** (per wallet, own tx, advisory lock + wallet FOR UPDATE, resumable: skip wallets with movementSeq > 0):
@@ -755,6 +793,7 @@ add debt `max(0, |δ| − H)`; the model never emits −0.
 | T-d | −1000, D +1200, E +500, reverse D, X +300; reverse E, X | B −1000, sf 0 (patched code: −700 vs −1000 ✗) |
 | T-R2* | −100, X +100, Z +200, redeem 200, Y +200; reverse X & Y | B −100 (Q1); + Z → B −300, Z's 200 owed |
 | T-debt | +10,000, redeem 2,986; reverse 10,000 (owner 2026-11-19) | B −2,986, D 2,986, owed 2,986, sf 0; no redeem; next +5,000 → B 2,014, D 0 |
+| T-exp1..3 | X 10,000 expired (full / 6,000 after 4,000 redeemed / 3,000 after 7,000 redeemed), Y credit; reverse X (owner decision 1) | nothing taken, no debt / 4,000 taken, no debt / 2,000 taken, 5,000 debt |
 | T-g1..3 | partial reversals | cap enforced; B identical across orders |
 | T-x1 | expiry with debt | = today's clamp |
 | T-e1..3 | concurrent credits / reversal vs redeem / double approval | seq contiguous; never below floor; one allocation (WP7) |
