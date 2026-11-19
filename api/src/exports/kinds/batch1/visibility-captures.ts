@@ -16,7 +16,13 @@ import { istDateTimeCell } from '../../../common/ist-date';
 import { TenantService } from '../../../tenant/tenant.service';
 import { TenantSettingsService } from '../../../tenant/tenant-settings.service';
 import { readMediaValue } from '../../../visibility/visibility-form.helper';
-import { evaluatePhotoFence, haversineMeters } from '../../../visibility/geo-fence.helper';
+import {
+  classifyPhotoFence,
+  evaluatePhotoFence,
+  haversineMeters,
+  outletMasterFencePolicy,
+  type PhotoFencePolicy,
+} from '../../../visibility/geo-fence.helper';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import { BATCH1_PAGE_SIZE, optionalString, rawObject, utcDateKey } from './common';
 
@@ -31,7 +37,7 @@ export const VISIBILITY_CAPTURES_HEADERS = [
   'Photo Distance (m)', 'Photo Status',
 ] as const;
 
-type FormSchema = { fields?: Array<{ id: string; type: string }> };
+type FormSchema = { fields?: Array<{ id: string; type: string; geoFenceRequired?: boolean }> };
 type Photo = { link: string; geo: string; distance: string; status: string };
 
 /**
@@ -64,6 +70,57 @@ function capturePhotos(
     }
   }
   return photos;
+}
+
+/**
+ * Outlet-master tenants (Bajaj, features.outletMasterGeo): per-photo status / distance with the capture verdict's OWN
+ * policy (geo-fence.helper — outlet-master coordinates guarded by isUsableReference, forced 200 m, accuracy buffer,
+ * 0,0 = unverifiable). Only stored photos of FENCE fields get a status / distance (the verdict fences nothing else;
+ * hidden or empty slots are never stored, so they never appear). Other stored photos keep their link + geo only.
+ */
+function capturePhotosOutletMaster(
+  formValues: Prisma.JsonValue | null,
+  schema: FormSchema | undefined,
+  policy: PhotoFencePolicy,
+): Photo[] {
+  if (!formValues || typeof formValues !== 'object') return [];
+  if (!schema?.fields) return [];
+  const vals = formValues as Record<string, unknown>;
+  const photos: Photo[] = [];
+  for (const f of schema.fields) {
+    if (f.type !== 'CAMERA') continue;
+    const { key, geo } = readMediaValue(vals[f.id]);
+    if (!key) continue;
+    const link = `/v1/visibility/captures/media?key=${encodeURIComponent(key)}`;
+    if (!geo) {
+      photos.push({ link, geo: '', distance: '', status: f.geoFenceRequired === true ? 'unverifiable' : '' });
+      continue;
+    }
+    const acc = geo.accuracy != null ? ` (±${Math.round(geo.accuracy)}m)` : '';
+    if (f.geoFenceRequired !== true) {
+      photos.push({ link, geo: `${geo.lat}, ${geo.lng}${acc}`, distance: '', status: '' });
+      continue;
+    }
+    const { status } = classifyPhotoFence(geo, policy);
+    const nullIsland = geo.lat === 0 && geo.lng === 0;
+    const distance =
+      policy.reference != null && !nullIsland ? String(Math.round(haversineMeters(geo, policy.reference) * 100) / 100) : '';
+    photos.push({ link, geo: `${geo.lat}, ${geo.lng}${acc}`, distance, status });
+  }
+  return photos;
+}
+
+/** Outlet-master coordinates of the page's outlets (outlet-master tenants only). */
+async function outletMasterPolicyByOutletId(ctx: ExportRunContext, outletIds: string[]): Promise<Map<string, PhotoFencePolicy>> {
+  const map = new Map<string, PhotoFencePolicy>();
+  const ids = [...new Set(outletIds.filter((id): id is string => !!id))];
+  if (ids.length === 0) return map;
+  const outlets = await ctx.prisma.outlet.findMany({
+    where: { id: { in: ids }, clientId: ctx.clientId },
+    select: { id: true, latitude: true, longitude: true },
+  });
+  for (const o of outlets) map.set(o.id, outletMasterFencePolicy(o));
+  return map;
 }
 
 /**
@@ -148,6 +205,9 @@ async function runVisibilityCaptures(
   }
   const settings = ctx.moduleRef.get(TenantSettingsService, { strict: false });
   const radiusMeters = (await settings.getEffectiveSettings(clientId)).visibilityConfig.geoFence.radiusMeters;
+  // Outlet-master tenants use the capture verdict's own per-photo policy; every other tenant is byte-identical.
+  const client = await prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
+  const outletMasterGeo = ((client?.features ?? {}) as Record<string, unknown>).outletMasterGeo === true;
 
   const sheet = await out.addSheet('Captures', VISIBILITY_CAPTURES_HEADERS);
   const schemaByVersion = new Map<number, FormSchema | undefined>();
@@ -207,15 +267,26 @@ async function runVisibilityCaptures(
       for (const v of missingVersions) schemaByVersion.set(v, undefined);
       for (const s of snaps) schemaByVersion.set(s.version, s.formSchema as unknown as FormSchema);
     }
-    const referenceByOutletId = await referenceGeoByOutletId(ctx, captures.map((c) => c.outletId));
+    const referenceByOutletId = outletMasterGeo
+      ? new Map<string, { lat: number; lng: number }>()
+      : await referenceGeoByOutletId(ctx, captures.map((c) => c.outletId));
+    const policyByOutletId = outletMasterGeo
+      ? await outletMasterPolicyByOutletId(ctx, captures.map((c) => c.outletId))
+      : new Map<string, PhotoFencePolicy>();
 
     for (const c of captures) {
-      const photos = capturePhotos(
-        c.formValues,
-        schemaByVersion.get(c.formVersion),
-        referenceByOutletId.get(c.outletId) ?? null,
-        radiusMeters,
-      );
+      const photos = outletMasterGeo
+        ? capturePhotosOutletMaster(
+            c.formValues,
+            schemaByVersion.get(c.formVersion),
+            policyByOutletId.get(c.outletId) ?? outletMasterFencePolicy({}),
+          )
+        : capturePhotos(
+            c.formValues,
+            schemaByVersion.get(c.formVersion),
+            referenceByOutletId.get(c.outletId) ?? null,
+            radiusMeters,
+          );
       await sheet.addRow([
         c.outletCode,
         c.outletName,

@@ -551,22 +551,25 @@ export function presentCameraFieldIds(
 
 /**
  * The CAMERA fields (matching `predicate`, e.g. fence-required / location-tagged) that APPLY to this capture:
- * visible under `evalValues` (its `visibleWhen`, evaluated exactly like submit validation) AND either required (its
- * `required` / `requiredWhen`) or actually holding a photo. A hidden conditional slot (e.g. a Privilege-only 2nd photo
- * at an Elite outlet) or a visible optional empty slot does NOT apply. `evalValues` must carry the server outlet
- * context (`outletContextValues`) merged over the submitted values, like `validateSubmittedValues` receives it.
- * (Prod bug 2026-11-19: the fence evaluated a hidden Window 2 → "Unverifiable".)
+ * visible AND (required OR actually holding a photo). Visibility / required-ness are evaluated on `evalValues`, which
+ * must be the EXACT map submit validation evaluated (`{ ...submittedOrMergedRaw, ...outletContextValues(outlet) }`), so
+ * applicability matches validation even for chained conditions (a clause keyed on a field that is itself hidden).
+ * Photo presence is read from `storedValues` (the validated, projected values) when given — i.e. the visible set
+ * intersected with what is actually stored. A hidden conditional slot (a Privilege-only 2nd photo at an Elite outlet)
+ * or a visible optional empty slot does NOT apply. (Prod bug 2026-11-19: the fence evaluated a hidden Window 2.)
  */
 export function applicableCameraFields(
   schema: VisibilityFormSchema | null | undefined,
   evalValues: Record<string, unknown>,
   predicate: (f: FormField) => boolean = () => true,
+  storedValues?: Record<string, unknown>,
 ): FormField[] {
   if (!schema) return [];
+  const stored = storedValues ?? evalValues;
   return (schema.fields ?? [])
     .filter((f) => f.type === 'CAMERA' && predicate(f))
     .filter((f) => evaluateVisibleWhen(f, evalValues))
-    .filter((f) => isFieldRequired(f, evalValues) || hasPhoto(evalValues[f.id]));
+    .filter((f) => isFieldRequired(f, evalValues) || hasPhoto(stored[f.id]));
 }
 
 /**

@@ -31,6 +31,13 @@ with the server outlet context, exactly like submit validation): only photos tha
   ONE shared resolution in `geo-fence.helper.ts` (`outletMasterReference` / `outletMasterFencePolicy` /
   `classifyPhotoFence`: reference guarded by `isUsableReference`, forced 200 m, a fix with accuracy worse than 200 m →
   unverifiable). Non-gated tenants keep the KYC board reference + configured radius, no buffer (byte-identical).
+- **Audit follow-ups** (same branch): the visibility **captures Excel** ("Photo Status" / "Photo Distance (m)") uses the
+  same policy on `outletMasterGeo` tenants (status/distance only for stored fence-field photos); non-gated tenants are
+  byte-identical (parity spec). Applicability is evaluated on the EXACT map validation uses (`{ ...raw/merged, ...ctx }`)
+  and intersected with the stored values (chained conditions match validation). The location helper's "form has no
+  location field" check looks at the whole form; only visible GPS fields count as a fresh fix. A photo fix at 0,0 is
+  unverifiable (never "far from the outlet") on `outletMasterGeo` tenants, in the per-photo and GPS-field paths.
+  Other per-photo fence consumers: none (the Location report and the digest read the stored `geoFenceOk` only).
 
 ## Final-audit fixes (round 4, 2026-11-19, on b2570896) — 7 items, all confirmed (none refuted)
 

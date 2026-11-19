@@ -38,8 +38,10 @@ interface Db {
   captures: CaptureRec[];
   hashes: { clientId: string; captureId: string; hash: string }[];
   versions: { clientId: string; version: number; formSchema: unknown }[];
-  outlets: { id: string; clientId: string; partnerId: string | null }[];
+  outlets: { id: string; clientId: string; partnerId: string | null; latitude?: number | null; longitude?: number | null }[];
   partners: { id: string; clientId: string; geo: { lat: Prisma.Decimal; lng: Prisma.Decimal } | null }[];
+  /** clients.features (absent = no flags — every parity fixture). */
+  features?: Record<string, unknown>;
 }
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -53,6 +55,12 @@ function fakePrisma(db: Db) {
     (c.windowKey === or[2].windowKey && c.outletCode === or[2].outletCode && c.id > or[2].id.gt);
   return {
     calls,
+    client: {
+      findUnique: async (a: unknown) => {
+        log('client.findUnique', a);
+        return db.features ? { features: db.features } : null;
+      },
+    },
     visibilityCapture: {
       findMany: async (a: { where: Record<string, any>; take?: number }) => {
         log('visibilityCapture.findMany', a);
@@ -85,7 +93,9 @@ function fakePrisma(db: Db) {
     outlet: {
       findMany: async (a: { where: { id: { in: string[] }; clientId: string } }) => {
         log('outlet.findMany', a);
-        return db.outlets.filter((o) => a.where.id.in.includes(o.id) && o.clientId === a.where.clientId).map(({ id, partnerId }) => ({ id, partnerId }));
+        return db.outlets
+          .filter((o) => a.where.id.in.includes(o.id) && o.clientId === a.where.clientId)
+          .map(({ id, partnerId, latitude, longitude }) => ({ id, partnerId, latitude: latitude ?? null, longitude: longitude ?? null }));
       },
     },
     channelPartner: {
@@ -293,6 +303,52 @@ describe('visibility-captures export kind', () => {
     const { buffer } = await both(bigDb('bajaj', 10));
     const rows = readBack(buffer).rows.Captures;
     expect(rows.some((r) => r[1] === "'=cmd()")).toBe(true);
+  });
+
+  // ── Outlet-master tenants: the capture verdict's own per-photo policy (prod finding 2026-11-19) ──
+  it('outlet-master tenant: Photo Status / Distance use the outlet master + 200 m + buffer; 0,0 unverifiable; non-fence photos no status', async () => {
+    const at = (lat: number, lng: number, accuracy: number) => ({ lat, lng, accuracy });
+    const db: Db = {
+      features: { outletMasterGeo: true },
+      outlets: [{ id: 'o1', clientId: 'bajaj', partnerId: 'p1', latitude: 12.9, longitude: 77.5 }],
+      // A far KYC board geo that must NOT be used on an outlet-master tenant.
+      partners: [{ id: 'p1', clientId: 'bajaj', geo: { lat: new Prisma.Decimal('13.5'), lng: new Prisma.Decimal('78.5') } }],
+      versions: [{
+        clientId: 'bajaj', version: 1,
+        formSchema: { fields: [
+          { id: 'w1', type: 'CAMERA', geoFenceRequired: true },
+          { id: 'w2', type: 'CAMERA', geoFenceRequired: true },
+          { id: 'plain', type: 'CAMERA' },
+        ] },
+      }],
+      hashes: [],
+      captures: [
+        { id: 'c1', clientId: 'bajaj', outletId: 'o1', outletCode: 'A', outletName: 'Elite', windowKey: '2026-11-P1', status: 'SUBMITTED',
+          geoFenceOk: true, distanceMeters: 34, captureAccuracy: 20, capturedAt: null, receivedAt: new Date('2026-11-19T05:00:00Z'),
+          rejectionReasonCode: null, rejectionReason: null, formVersion: 1, submittedBy: null,
+          formValues: { w1: { key: 'k/w1.jpg', geo: at(12.9003, 77.5001, 20) }, plain: { key: 'k/p.jpg', geo: at(12.9003, 77.5001, 5) } } },
+        { id: 'c2', clientId: 'bajaj', outletId: 'o1', outletCode: 'B', outletName: 'Edge', windowKey: '2026-11-P1', status: 'SUBMITTED',
+          geoFenceOk: null, distanceMeters: null, captureAccuracy: null, capturedAt: null, receivedAt: new Date('2026-11-19T05:00:00Z'),
+          rejectionReasonCode: null, rejectionReason: null, formVersion: 1, submittedBy: null,
+          formValues: { w1: { key: 'k/w1b.jpg', geo: at(12.9003, 77.5001, 350) }, w2: { key: 'k/w2b.jpg', geo: at(0, 0, 5) } } },
+      ],
+    };
+    const { buffer } = await runKindToBuffer(VISIBILITY_CAPTURES_KIND, {}, { prisma: fakePrisma(db), moduleRef: services(), user });
+    const rows = readBack(buffer).rows.Captures;
+    const header = rows[0] as string[];
+    const col = (name: string) => header.indexOf(name);
+    const r1 = rows[1] as string[];
+    const r2 = rows[2] as string[];
+    expect(r1[col('Photo Status')]).toBe('inside | ');
+    expect(Number(String(r1[col('Photo Distance (m)')]).split(' | ')[0])).toBeLessThan(40);
+    expect(r2[col('Photo Status')]).toBe('unverifiable | unverifiable'); // ±350 m buffer; 0,0 never "outside"
+    expect(String(r2[col('Photo Distance (m)')]).split(' | ')[1]).toBe('');
+  });
+
+  it('non-gated tenant: the per-photo columns are unchanged (KYC board reference + configured radius)', async () => {
+    const db = bigDb('bajaj', 50);
+    const { old, buffer } = await both(db);
+    expectSameWorkbook(buffer, old);
   });
 
   it('403 when the tenant\'s Visibility switch is off (worker re-check)', async () => {

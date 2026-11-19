@@ -122,6 +122,8 @@ export interface PhotoFencePolicy {
   radiusMeters: number;
   /** Outlet-master tenants: a fix whose own accuracy is worse than the radius is 'unverifiable', never in/out. */
   accuracyBuffer: boolean;
+  /** Outlet-master tenants: a photo fix at 0,0 (the "no location" default) is 'unverifiable', never "outside". */
+  nullIslandUnverifiable?: boolean;
 }
 
 /** The outlet-master reference (Prisma Decimal / number / numeric string), guarded by isUsableReference. */
@@ -133,7 +135,12 @@ export function outletMasterReference(o: { latitude?: unknown; longitude?: unkno
 
 /** The outlet-master (Bajaj) policy: outlet coordinates, forced 200 m, accuracy buffer ON. */
 export function outletMasterFencePolicy(o: { latitude?: unknown; longitude?: unknown }): PhotoFencePolicy {
-  return { reference: outletMasterReference(o), radiusMeters: OUTLET_MASTER_GEOFENCE_RADIUS_M, accuracyBuffer: true };
+  return {
+    reference: outletMasterReference(o),
+    radiusMeters: OUTLET_MASTER_GEOFENCE_RADIUS_M,
+    accuracyBuffer: true,
+    nullIslandUnverifiable: true,
+  };
 }
 
 /**
@@ -144,6 +151,9 @@ export function classifyPhotoFence(
   geo: GpsCapture | null | undefined,
   policy: PhotoFencePolicy,
 ): { status: PhotoFenceStatus; accuracyTooLow: boolean } {
+  if (policy.nullIslandUnverifiable && geo && geo.lat === 0 && geo.lng === 0) {
+    return { status: 'unverifiable', accuracyTooLow: false };
+  }
   const status = evaluatePhotoFence(geo, policy.reference, policy.radiusMeters);
   const accuracyTooLow =
     policy.accuracyBuffer &&

@@ -483,3 +483,30 @@ describe('applicableCameraFields', () => {
     expect(ids('Elite', { wtk11hn: photo, opt: photo })).toEqual(['wtk11hn', 'opt']);
   });
 });
+
+describe('applicableCameraFields — chained condition (audit #3: same map as validation)', () => {
+  // B (text) only shows for Privilege; photo A shows / is required when B == 'x'. At an Elite outlet B is hidden, but
+  // validation evaluates A's clause on the RAW submitted map (B = 'x' was sent) → A is visible + required there.
+  const schema: VisibilityFormSchema = {
+    fields: [
+      { id: 'B', type: 'TEXT', label: 'B', required: false, order: 1, visibleWhen: { fieldId: '__subProgram__', op: 'eq', value: 'Privilege' } } as FormField,
+      cameraField({ id: 'A', label: 'A', required: false, geoFenceRequired: true, visibleWhen: { fieldId: 'B', op: 'eq', value: 'x' }, requiredWhen: { fieldId: 'B', op: 'eq', value: 'x' } }),
+    ],
+  } as VisibilityFormSchema;
+  const raw = { B: 'x', A: { key: 'k', geo: { lat: 12.9, lng: 77.5 } } };
+  const ctx = outletContextValues({ programCategory: 'Elite' });
+
+  it('validation treats A as visible + required on the raw map (chained clause)', () => {
+    const { errors, values } = validateSubmittedValues(schema, { ...raw, ...ctx });
+    expect(errors).toEqual([]);
+    expect(values).toHaveProperty('A');
+    expect(values).not.toHaveProperty('B'); // B projected out (hidden)
+  });
+
+  it('applicability evaluated on the SAME raw map keeps A (on the projected map it would wrongly drop it)', () => {
+    const { values } = validateSubmittedValues(schema, { ...raw, ...ctx });
+    const fence = (f: FormField) => f.geoFenceRequired === true;
+    expect(applicableCameraFields(schema, { ...raw, ...ctx }, fence, values).map((f) => f.id)).toEqual(['A']);
+    expect(applicableCameraFields(schema, { ...values, ...ctx }, fence).map((f) => f.id)).toEqual([]); // the old, mismatching map
+  });
+});

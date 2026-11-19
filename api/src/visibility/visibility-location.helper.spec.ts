@@ -131,3 +131,40 @@ describe('visibilityLocationRefusal — applicable fields only (prod fix 2026-11
     ).toMatch(/"Window 2"/);
   });
 });
+
+describe('visibilityLocationRefusal — audit #4 / #5', () => {
+  const privilegeOnly = { fieldId: '__subProgram__', op: 'eq', value: 'Privilege' };
+  const fix = { lat: 12.9, lng: 77.5, accuracy: 12, capturedAt: new Date().toISOString() };
+
+  it('#4: a form WITH location fields never gets "no location field", even when none applies to this outlet', () => {
+    const form = {
+      fields: [
+        { id: 'p', type: 'CAMERA', label: 'Plain', required: false },
+        { id: 'w2', type: 'CAMERA', label: 'Window 2', required: false, geotag: true, geoFenceRequired: true, visibleWhen: privilegeOnly, requiredWhen: privilegeOnly },
+        { id: 'g2', type: 'GPS_POINT', label: 'Geo Tag 2', required: false, visibleWhen: privilegeOnly, requiredWhen: privilegeOnly },
+      ],
+    } as never;
+    const v = { p: 'k' };
+    const r = visibilityLocationRefusal(form, v, new Set(), v, undefined, { evalValues: { ...v, __subProgram__: 'Elite' } });
+    expect(r).not.toBe(VISIBILITY_FORM_HAS_NO_LOCATION_MESSAGE);
+    expect(r).toMatch(/Location is required/);
+  });
+
+  it('#5: a GPS value sent for the HIDDEN Geo Tag 2 is not a fresh fix; a visible GPS value is', () => {
+    const form = {
+      fields: [
+        { id: 'p', type: 'CAMERA', label: 'Plain', required: false },
+        { id: 'g1', type: 'GPS_POINT', label: 'Geo tag 1', required: false },
+        { id: 'g2', type: 'GPS_POINT', label: 'Geo Tag 2', required: false, visibleWhen: privilegeOnly, requiredWhen: privilegeOnly },
+      ],
+    } as never;
+    const hiddenOnly = { p: 'k', g2: fix };
+    expect(
+      visibilityLocationRefusal(form, { p: 'k' }, new Set(), hiddenOnly, undefined, { evalValues: { ...hiddenOnly, __subProgram__: 'Elite' } }),
+    ).toMatch(/Location is required/);
+    const visible = { p: 'k', g1: fix };
+    expect(
+      visibilityLocationRefusal(form, visible, new Set(), visible, undefined, { evalValues: { ...visible, __subProgram__: 'Elite' } }),
+    ).toBeNull();
+  });
+});

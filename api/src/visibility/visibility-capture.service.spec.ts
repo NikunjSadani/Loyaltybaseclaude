@@ -546,6 +546,28 @@ describe('VisibilityCaptureService', () => {
       expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
     });
 
+    it('audit #6: outlet-master tenant, Window 1 fix at 0,0 → unverifiable (allow + flag), never "far from the outlet"', async () => {
+      outlet('Elite');
+      const res = await service.submitCapture(user, {
+        outletId: 'o1',
+        formValues: { wtk11hn: { key: 'visibility-media/t1/w1.jpg', geo: { lat: 0, lng: 0, accuracy: 5 } } },
+      });
+      expect(res.geoFenceOk).toBeNull();
+      expect(res.flags).toContain('GEO_UNVERIFIABLE');
+      expect(mockPrisma.visibilityCapture.create.mock.calls[0][0].data.distanceMeters).toBeNull();
+    });
+
+    it('audit #6: NON-gated tenant, a 0,0 fix → unchanged (fenced against the KYC board reference → blocked)', async () => {
+      outlet('Elite', false);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5));
+      await expect(
+        service.submitCapture(user, {
+          outletId: 'o1',
+          formValues: { wtk11hn: { key: 'visibility-media/t1/w1.jpg', geo: { lat: 0, lng: 0, accuracy: 5 } } },
+        }),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
     it('NON-gated tenant (Deoleo) → unchanged: the hidden fence slot still reads unverifiable (all fence fields, as before)', async () => {
       outlet('Elite', false);
       mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5));
