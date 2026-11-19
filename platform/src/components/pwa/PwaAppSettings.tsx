@@ -18,6 +18,70 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { isIosSafari } from '@/lib/pwa/platform-detect';
 import { useInstallPrompt } from '@/lib/pwa/install-prompt-store';
 import { subscribeToPush, unsubscribeFromPush } from '@/lib/pwa/push';
+import { useClientConfig } from '@/lib/platform/client-config-context';
+import { currentLocationPlatform } from '@/lib/location-gate';
+import { blockedSteps } from '@/lib/pwa/notification-guide';
+import { pwaAppName } from '@/lib/pwa/manifest';
+
+/**
+ * Bajaj only (owner 2026-11-19): when notifications are blocked, show the device-specific re-enable steps (same
+ * wording as the NotificationReminder) + "Done — check again" instead of the generic sentence. Other tenants keep
+ * the generic sentence, unchanged.
+ */
+function BajajBlockedSteps({ onChanged }: { onChanged: (now: NotificationPermission) => Promise<void> }) {
+  const config = useClientConfig();
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  // Only ever rendered client-side (after the parent's effect read permission 'denied'), so window is available.
+  const path = typeof window !== 'undefined' ? window.location.pathname : '';
+  const scope = path === '/sales' || path.startsWith('/sales/') ? 'sales' : 'partner';
+  const steps = blockedSteps(
+    currentLocationPlatform(),
+    typeof window !== 'undefined' ? window.location.host : 'this site',
+    `the ${pwaAppName(config, scope)} app`,
+  );
+
+  const checkAgain = async () => {
+    if (busy) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const now = Notification.permission;
+      if (now === 'denied') {
+        setMessage('Still blocked — check the steps above, then tap “Done — check again”.');
+        return;
+      }
+      // 'granted' → the parent subscribes and shows On; 'default' → it shows "Enable notifications".
+      await onChanged(now);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div data-testid="pwa-notif-blocked-steps">
+      <p className="text-sm text-gray-700">Notifications are blocked. The app can&apos;t ask again — turn them back on:</p>
+      <ol className="mt-2 list-decimal pl-5 space-y-1 text-sm text-gray-800">
+        {steps.map((s) => (
+          <li key={s}>{s}</li>
+        ))}
+      </ol>
+      <button
+        type="button"
+        onClick={() => void checkAgain()}
+        disabled={busy}
+        aria-busy={busy}
+        style={{ ...primaryBtnStyle, marginTop: '0.75rem' }}
+      >
+        {busy ? 'Checking…' : 'Done — check again'}
+      </button>
+      <p role="status" aria-live="polite" className="mt-2 text-xs text-amber-800">
+        {message}
+      </p>
+    </div>
+  );
+}
 
 function pushSupported(): boolean {
   return (
@@ -88,7 +152,7 @@ function InstallSection() {
 
 /* ─── Notifications section ────────────────────────────────────────────────── */
 
-function NotificationsSection() {
+function NotificationsSection({ bajaj = false }: { bajaj?: boolean }) {
   // 'unsupported' marks browsers without the Push API (render nothing for them).
   const [permission, setPermission] = useState<NotificationPermission | 'unsupported'>(
     'unsupported',
@@ -171,6 +235,22 @@ function NotificationsSection() {
         </button>
       </div>
     );
+  } else if (permission === 'denied' && bajaj) {
+    body = (
+      <BajajBlockedSteps
+        onChanged={async (now) => {
+          setPermission(now);
+          if (now === 'granted') {
+            try {
+              await subscribeToPush();
+            } catch {
+              /* idempotent — the next app open re-syncs */
+            }
+            setPushOff(false);
+          }
+        }}
+      />
+    );
   } else if (permission === 'denied') {
     body = (
       <p className="text-sm text-gray-600">
@@ -204,6 +284,7 @@ function NotificationsSection() {
 
 export default function PwaAppSettings() {
   const [supportsPush, setSupportsPush] = useState(false);
+  const bajaj = useClientConfig().slug.trim().toLowerCase() === 'bajaj';
 
   useEffect(() => {
     setSupportsPush(pushSupported());
@@ -232,7 +313,7 @@ export default function PwaAppSettings() {
       <CardContent>
         <div className="space-y-4">
           {showInstall && <InstallSection />}
-          {showNotifications && <NotificationsSection />}
+          {showNotifications && <NotificationsSection bajaj={bajaj} />}
         </div>
       </CardContent>
     </Card>

@@ -22,13 +22,69 @@
 // Self-contained: no toast/context dependency, matching ServiceWorkerRegister /
 // InstallPrompt. Uses the global --brand-primary CSS var for the Enable button so
 // it picks up the tenant colour.
+//
+// BAJAJ ONLY (owner 2026-11-19) — the bottom bar is replaced by NotificationReminder:
+//   • shown once per session (sessionStorage, keyed to the signed-in user) whenever
+//     notifications are NOT granted — default, denied, install-first (iPhone tab),
+//     too-old iOS or unsupported — with device-specific steps;
+//   • "Remind me later" / × / Escape hide it for the rest of the session; it comes
+//     back on the next app open until notifications are allowed;
+//   • the 3-day `pwa-push-snooze` is neither read nor written for Bajaj (it would
+//     hide the reminder for 3 days, which conflicts with "every app open");
+//   • the auto-request at load is kept (Android shows the native prompt directly);
+//     the reminder appears only if that didn't end in 'granted'.
+// Every other tenant keeps the original bar + snooze below, byte-identical.
 // -----------------------------------------------------------------------------
 import { useEffect, useState } from 'react';
 import { subscribeToPush } from '@/lib/pwa/push';
+import { currentLocationPlatform } from '@/lib/location-gate';
+import { isIosSafari } from '@/lib/pwa/platform-detect';
+import { parseIosVersion, type NotificationState } from '@/lib/pwa/notification-guide';
+import NotificationReminder from './NotificationReminder';
 
 const SCOPED_PREFIXES = ['/sales', '/partner'];
 const SNOOZE_KEY = 'pwa-push-snooze';
 const SNOOZE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+/** Bajaj reminder: set (to the signed-in user's id) once the reminder has been shown this session. */
+export const REMINDER_SESSION_KEY = 'pwa-notif-reminder';
+
+/** The signed-in user's id from the non-sensitive stored user (login writes it), or '' if unknown. */
+function storedUserId(): string {
+  try {
+    const raw = localStorage.getItem('user');
+    if (!raw) return '';
+    const id = (JSON.parse(raw) as { id?: unknown })?.id;
+    return typeof id === 'string' || typeof id === 'number' ? String(id) : '';
+  } catch {
+    return '';
+  }
+}
+
+/** True when this user already saw the reminder in this session (a different user signing in sees it again). */
+function reminderSeenThisSession(): boolean {
+  try {
+    const v = sessionStorage.getItem(REMINDER_SESSION_KEY);
+    return v !== null && v === storedUserId();
+  } catch {
+    return false;
+  }
+}
+
+function markReminderSeen() {
+  try {
+    sessionStorage.setItem(REMINDER_SESSION_KEY, storedUserId());
+  } catch {
+    /* storage blocked — the reminder may show again on a full reload, never worse than that */
+  }
+}
+
+interface ReminderSetup {
+  platform: ReturnType<typeof currentLocationPlatform>;
+  state: NotificationState;
+  iosVersion: ReturnType<typeof parseIosVersion>;
+  inSafari: boolean;
+  host: string;
+}
 
 function inScope(pathname: string): boolean {
   return SCOPED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
@@ -56,8 +112,16 @@ function pushSupported(): boolean {
   );
 }
 
-export default function PushSubscriptionManager({ tenantSlug }: { tenantSlug?: string }) {
+export default function PushSubscriptionManager({
+  tenantSlug,
+  appName,
+}: {
+  tenantSlug?: string;
+  /** Tenant display name, used only in the Bajaj reminder's Settings steps. */
+  appName?: string;
+}) {
   const [showPrompt, setShowPrompt] = useState(false);
+  const [reminder, setReminder] = useState<ReminderSetup | null>(null);
 
   useEffect(() => {
     // Gate 1: the global flag OR the tenant being Bajaj. Flag read here (not at module
@@ -68,6 +132,9 @@ export default function PushSubscriptionManager({ tenantSlug }: { tenantSlug?: s
     if (typeof window === 'undefined') return;
     // Gate 2: only inside the /sales + /partner shells.
     if (!inScope(window.location.pathname)) return;
+
+    if (bajaj) return runBajaj();
+
     // Gate 3: unsupported browser => no-op silently.
     if (!pushSupported() || typeof Notification === 'undefined') return;
 
@@ -88,40 +155,67 @@ export default function PushSubscriptionManager({ tenantSlug }: { tenantSlug?: s
     // permission === 'default':
     if (isSnoozed()) return;
 
-    if (bajaj) {
-      // Bajaj: ask AUTOMATICALLY at login (no in-app banner first). Chromium/Android
-      // shows the browser prompt without a gesture; browsers that REQUIRE a user gesture
-      // (Safari/Firefox) resolve 'default' or throw → fall back to the in-app "Enable"
-      // banner so the user can still trigger it with a tap.
-      let cancelled = false;
-      void (async () => {
-        let result: NotificationPermission | undefined;
-        try {
-          result = await Notification.requestPermission();
-        } catch {
-          result = 'default'; // gesture-required browser → treat as unanswered
-        }
-        if (cancelled) return;
-        if (result === 'granted') {
-          // subscribe failure must NOT surface the "Enable" banner (permission is already
-          // granted) — PwaAppSettings offers a manual retry if the sync didn't land.
-          try { await subscribeToPush({ background: true }); } catch { /* idempotent; retried elsewhere */ }
-          return;
-        }
-        if (result === 'denied') return;
-        // 'default'/undefined: the native prompt never actually SHOWED (gesture-required
-        // browsers like desktop Chrome resolve 'default' without showing it). Do NOT snooze
-        // here — snoozing would hide the in-app "Enable" banner on later loads (isSnoozed()
-        // is checked early) and strip the user's easy tap-to-grant path. Only an EXPLICIT
-        // dismiss ("Not now") snoozes. The auto-request still fires once per load, with the
-        // banner as the persistent fallback.
-        setShowPrompt(true);
-      })();
-      return () => { cancelled = true; };
-    }
-
     // Non-Bajaj (flag on): offer the in-app opt-in banner (unchanged behaviour).
     setShowPrompt(true);
+
+    // ── Bajaj: once-per-session reminder with device-specific steps ──────────────
+    function runBajaj(): (() => void) | undefined {
+      const supported = pushSupported() && typeof Notification !== 'undefined';
+      const permission: NotificationState = supported ? Notification.permission : 'unsupported';
+
+      if (permission === 'granted') {
+        // Already granted: re-sync the subscription (idempotent). No UI.
+        void subscribeToPush({ background: true });
+        return;
+      }
+      // Already reminded this session ("Remind me later" = rest of the session) → no auto-ask, no reminder.
+      if (reminderSeenThisSession()) return;
+
+      const platform = currentLocationPlatform();
+      const base = {
+        platform,
+        iosVersion: parseIosVersion(navigator.userAgent),
+        inSafari: isIosSafari(),
+        host: window.location.host,
+      };
+      const show = (state: NotificationState) => {
+        markReminderSeen();
+        setReminder({ ...base, state });
+      };
+
+      // Can still ask, and not an iPhone browser tab (push can't work there) → ask AUTOMATICALLY first.
+      // Chromium/Android shows the native prompt without a gesture; gesture-required browsers (Safari/
+      // Firefox, iOS Home Screen app) resolve 'default' or throw → the reminder's Enable button (a tap).
+      if (permission === 'default' && platform !== 'ios-safari') {
+        let cancelled = false;
+        void (async () => {
+          let result: NotificationPermission | undefined;
+          try {
+            result = await Notification.requestPermission();
+          } catch {
+            result = 'default';
+          }
+          if (cancelled) return;
+          if (result === 'granted') {
+            // subscribe failure must NOT surface the reminder (permission is granted) — the next load
+            // re-syncs, and PwaAppSettings offers a manual retry.
+            try { await subscribeToPush({ background: true }); } catch { /* idempotent; retried elsewhere */ }
+            return;
+          }
+          // Re-read the REAL state: some browsers resolve 'denied' for an un-shown, gesture-less request.
+          const real = Notification.permission;
+          if (real === 'granted') {
+            try { await subscribeToPush({ background: true }); } catch { /* idempotent */ }
+            return;
+          }
+          show(real);
+        })();
+        return () => { cancelled = true; };
+      }
+
+      show(permission);
+      return;
+    }
   }, [tenantSlug]);
 
   const persistSnooze = () => {
@@ -150,6 +244,20 @@ export default function PushSubscriptionManager({ tenantSlug }: { tenantSlug?: s
     setShowPrompt(false);
     persistSnooze();
   };
+
+  if (reminder) {
+    return (
+      <NotificationReminder
+        platform={reminder.platform}
+        initialState={reminder.state}
+        iosVersion={reminder.iosVersion}
+        inSafari={reminder.inSafari}
+        host={reminder.host}
+        appName={appName}
+        onClose={() => setReminder(null)}
+      />
+    );
+  }
 
   if (!showPrompt) return null;
 

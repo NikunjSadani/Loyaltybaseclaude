@@ -8,6 +8,29 @@
 > worker (which must not run over churning UI) is now safe to build. Owner confirmed minor future tweaks are
 > expected — handled by the SW update strategy below (content-hashed assets + versioned precache + update prompt).
 
+## Notification reminder — Bajaj only (owner 2026-11-19, branch `feat/notif-reminder`, unmerged)
+A reminder after login / on app open for users who haven't allowed notifications, with **device-specific steps**
+(wording = the Bajaj training deck). No WhatsApp. **TENANT-SCOPED** — gated on slug `bajaj` exactly like
+`PushSubscriptionManager`; Deoleo + every other tenant keep the old one-line bar / generic sentence, unchanged.
+- **Where:** `components/pwa/NotificationReminder.tsx` (modal: heading focused on open, Escape/×/backdrop close,
+  focus trapped + restored, polite live region), content from `lib/pwa/notification-guide.ts`, device from the
+  location gate's `currentLocationPlatform()` (+ an iOS-version read for the 16.4 floor). Mounted only by
+  `PushSubscriptionManager`'s Bajaj branch — it **replaces** the old bottom bar for Bajaj (never both).
+- **States:** default → "Enable notifications" (requestPermission from the tap, subscribe on grant) · iPhone browser
+  tab → "Add the app to your Home Screen first" steps, no Enable · iPhone Home Screen app → Enable · iOS < 16.4 → one
+  line · denied → numbered Android / iPhone / desktop re-enable steps + "Done — check again" (re-reads
+  `Notification.permission`, subscribes if now granted, says "Still blocked" otherwise) · no Push API → one line ·
+  granted → nothing (silent re-sync as before).
+- **When:** once per session (`sessionStorage['pwa-notif-reminder']` = signed-in user id; a different user in the
+  same tab sees it again). "Remind me later" = rest of the session; back on the next app open until allowed. The
+  auto-ask at load is kept (skipped on iPhone tabs and once reminded this session).
+- **3-day snooze:** NOT used for Bajaj (neither read nor written) — it would hide the reminder for 3 days, which
+  conflicts with "every app open". Non-Bajaj keeps it.
+- **Profile → Notifications** (`PwaAppSettings`): for Bajaj, "blocked" shows the same device steps + "Done — check
+  again" instead of the generic sentence.
+- **Not yet done:** real-device runtime check on Bajaj staging (Android Chrome + iPhone Safari tab + iPhone Home
+  Screen app). If the install modal (`InstallPrompt`) is also open, it sits on top; the reminder is underneath.
+
 ## Status — PWA ROUND COMPLETE + DEVICE-VERIFIED ON STAGING (2026-06-29)
 **2026-06-29:** the PWA round is **DONE on staging** (gate-green api jest 1246 / FE vitest 1694 / tsc 0; audited where security-relevant; runtime-verified incl. a real push delivered to the owner's Android):
 1. **Sales push notifications** (`f11d5d1`, audit SHIP) — global `SalesNotificationsService` enqueues PUSH to the sales team on 4 POST-COMMIT, fire-and-forget, tenant-scoped triggers: new KYC assigned → assigned rep (aggregated per-rep across bulk upload + on reassign) + routed approver up-chain; KYC rejected/RE_UPLOAD → responsible rep (via active SalesUserAssignment); targets uploaded → assigned XSR + first active manager (SO) per outlet, de-duped. Owner: KYC=rep+approver, targets=XSR+SO.

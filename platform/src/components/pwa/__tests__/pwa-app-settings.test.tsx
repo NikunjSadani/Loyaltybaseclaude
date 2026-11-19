@@ -24,6 +24,8 @@ vi.mock('@/lib/pwa/platform-detect', () => ({
 }));
 
 import PwaAppSettings from '../PwaAppSettings';
+import { ClientConfigProvider } from '@/lib/platform/client-config-context';
+import { DEFAULT_CLIENT_CONFIG } from '@/lib/platform/default-client-config';
 
 function stubNotification(permission: NotificationPermission, requestResult = permission) {
   const requestPermission = vi.fn().mockResolvedValue(requestResult);
@@ -126,6 +128,50 @@ describe('PwaAppSettings', () => {
     render(<PwaAppSettings />);
     expect(screen.getByText(/Notifications are blocked/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Enable notifications' })).toBeNull();
+  });
+
+  it('non-Bajaj (default config) blocked → the generic sentence, no device steps', () => {
+    vi.stubEnv('NEXT_PUBLIC_PWA_PUSH_ENABLED', 'true');
+    stubNotification('denied');
+    render(<PwaAppSettings />);
+    expect(
+      screen.getByText(/To re-enable, allow notifications for this site in\s+your browser settings\./),
+    ).toBeTruthy();
+    expect(screen.queryByTestId('pwa-notif-blocked-steps')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Done — check again' })).toBeNull();
+  });
+
+  it('Bajaj blocked → Android device steps + "Done — check again" that subscribes once allowed', async () => {
+    vi.stubEnv('NEXT_PUBLIC_PWA_PUSH_ENABLED', 'true');
+    window.history.pushState({}, '', '/sales/profile');
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36',
+    );
+    const fake = { permission: 'denied' as NotificationPermission, requestPermission: vi.fn() };
+    vi.stubGlobal('Notification', fake);
+    render(
+      <ClientConfigProvider config={{ ...DEFAULT_CLIENT_CONFIG, slug: 'bajaj', branding: { ...DEFAULT_CLIENT_CONFIG.branding, displayName: 'Bajaj' } }}>
+        <PwaAppSettings />
+      </ClientConfigProvider>,
+    );
+    expect(screen.getByTestId('pwa-notif-blocked-steps')).toBeTruthy();
+    expect(screen.getByText(/Site settings → Notifications/)).toBeTruthy();
+    expect(screen.getByText(/the Bajaj Sales app \(or Chrome\)/)).toBeTruthy();
+    expect(screen.queryByText(/allow notifications for this site in/)).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Done — check again' }));
+    });
+    expect(screen.getByText(/Still blocked/)).toBeTruthy();
+    expect(subscribeToPush).not.toHaveBeenCalled();
+
+    fake.permission = 'granted';
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Done — check again' }));
+    });
+    expect(subscribeToPush).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Notifications: On/)).toBeTruthy();
+    vi.restoreAllMocks();
   });
 
   it('renders "On" + Turn off when permission is "granted"', async () => {
