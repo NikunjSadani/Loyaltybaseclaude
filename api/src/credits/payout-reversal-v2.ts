@@ -220,7 +220,7 @@ export async function selectPayoutEntriesV2(
 ): Promise<PayoutReversalCandidate[]> {
   if (!Array.isArray(entryIds) || entryIds.length === 0) {
     throw new BadRequestException(
-      'Select the payout entries to reverse (payoutEntryIds) — a payout reversal covers whole payout entries',
+      'Select the payout entries to reverse — a payout reversal covers whole payout entries. If the list of entries did not appear, reload the page and try again.',
     );
   }
   if (new Set(entryIds).size !== entryIds.length) {
@@ -417,8 +417,9 @@ export function paidEntryOutcomeText(x: {
   coversOtherPayoutsPaise: bigint;
   handBackPaise: bigint;
   belowThresholdAfterReversal: boolean;
-  /** A5: on GROSS_UP the would-be credit stays as the report's flagged excess. */
+  /** A5 / re-audit A1: the would-be credit that could never be used (stays in the ledger — nets or is flagged). */
   flaggedExcessPaise?: bigint;
+  flaggedExcessReason?: string | null;
 }): string {
   const who = whoOf(x.panMasked);
   const owed =
@@ -433,7 +434,8 @@ export function paidEntryOutcomeText(x: {
   else if (x.coversOtherPayoutsPaise === 0n && !(x.flaggedExcessPaise && x.flaggedExcessPaise > 0n)) parts.push('no TDS credit');
   if (x.flaggedExcessPaise && x.flaggedExcessPaise > 0n) {
     parts.push(
-      `${formatINR(x.flaggedExcessPaise)} withheld TDS not credited — the programme is on gross-up now; flagged as TDS taken in excess on the 194R report`,
+      `${formatINR(x.flaggedExcessPaise)} withheld TDS not credited — ${x.flaggedExcessReason ?? 'it could not be used'}; ` +
+        'nets on a later 194R withholding of the same FY, otherwise flagged as TDS taken in excess on the 194R report',
     );
   }
   if (x.coversOtherPayoutsPaise > 0n) {
@@ -476,8 +478,10 @@ export function fullyWithheldOutcomeText(x: {
 
 /** A PAID payout whose whole amount was withheld as TDS (settled `TDS-WITHHELD-…`, never sent to the bank). */
 function isFullyWithheld(e: { amountPaise: bigint; tdsDeductedPaise?: bigint | null; tdsSection?: TdsSection | null }): boolean {
+  // Re-audit A6: no section condition — every PAID entry that reaches the approve path is 194R (owner D1 refuses a
+  // PAID 194C one first, by its EFFECTIVE section), and the 194R base counts a section-less incentive as 194R.
   const w = e.tdsDeductedPaise ?? 0n;
-  return w > 0n && w >= e.amountPaise && !!e.tdsSection;
+  return w > 0n && w >= e.amountPaise;
 }
 
 /**
@@ -488,7 +492,9 @@ async function entryBaseFyLabel(
   tx: Prisma.TransactionClient,
   e: { tdsSection?: TdsSection | null; period: string; downloadId?: string | null; paidAt?: Date | null },
 ): Promise<string> {
-  if (e.tdsSection !== TdsSection.SEC_194R) return fyLabelOf(e.period);
+  // Re-audit A4: every PAID entry that reaches the receivable path is 194R in the base (owner D1 refuses a PAID 194C
+  // one by its effective section) — incl. a section-less incentive — so ALWAYS the 194R owner FY rule: the FY of its
+  // BANK FILE (collect194RBases), else paidAt; the period FY only when neither is known.
   if (e.downloadId) {
     const d = await tx.creditPayoutDownload.findFirst({ where: { id: e.downloadId }, select: { downloadedAt: true } });
     if (d?.downloadedAt) return financialYear(d.downloadedAt).fyLabel;
@@ -774,6 +780,7 @@ export async function patchPayoutReversalV2(
             handBackPaise: t.handBackPaise,
             belowThresholdAfterReversal: t.belowThresholdAfterReversal,
             flaggedExcessPaise: t.flaggedExcessPaise,
+            flaggedExcessReason: t.flaggedExcessReason,
           }),
         });
       }
@@ -799,7 +806,7 @@ export async function patchPayoutReversalV2(
         });
       }
       // Policy round B: TDS credit this unpaid entry had used goes back to the credit (never silent).
-      const back = await releaseCreditApplications(tx, [e.id], 'ENTRY_CANCELLED_BY_REVERSAL');
+      const back = await releaseCreditApplications(tx, [e.id], 'ENTRY_CANCELLED_BY_REVERSAL', reversal.clientId);
       const backPaise = back.reduce((s, r) => s + r.amountPaise, 0n);
       state = 'APPLIED_CANCELLED';
       cancelled++;
@@ -986,7 +993,7 @@ export type PayoutBackfillFlagCode =
   | 'ENTRY_NOT_SETTLED' // a consumed entry is PENDING / FAILED / PROCESSING (should be REVERSED or PAID)
   | 'AMOUNT_MISMATCH' // Σ consumed entries ≠ approvedPaise
   | 'DOUBLE_CONSUMPTION' // an entry is already allocated to an earlier reversal (audited bug §8 (1))
-  | 'SHORTFALL_MISMATCH' // Σ PAID (receivables) ≠ the recorded shortfallPaise (WARNING: rows still written)
+  | 'SHORTFALL_MISMATCH' // Σ PAID net receivables ≠ the recorded shortfallPaise (BLOCKING: no rows — re-audit B3)
   | 'AMBIGUOUS_LEGACY' // pre-column approval: no unique set of entries explains it
   | 'DERIVED_LEGACY' // pre-column approval: entries derived from history (WARNING: rows written)
   | 'PENDING_LEGACY'; // a pending reversal with no reservation: it will be approved through the interim path (INFO)
@@ -1053,10 +1060,22 @@ export function planPayoutAllocationBackfill(input: {
     }));
   const commit = (r: BackfillPayoutReversal, es: BackfillPayoutEntry[]) => {
     const receivable = es.filter((e) => e.status === 'PAID').reduce((s, e) => s + netOf(e), 0n);
-    if (receivable !== r.shortfallPaise) {
-      flag(r, 'SHORTFALL_MISMATCH', 'WARNING', `receivables ${receivable} paise vs recorded shortfall ${r.shortfallPaise} paise`);
-    }
+    // The entries ARE consumed by this approval either way (never offered to another reversal).
     for (const e of es) taken.add(e.id);
+    if (receivable !== r.shortfallPaise) {
+      // Re-audit B3: BLOCKING — no allocation rows for this reversal. Never silently rewrite a recorded receivable to
+      // the net rule: Gifsy decides (listed in the backfill report / ATTENTION block / verify V9b).
+      const gross = es.filter((e) => e.status === 'PAID').reduce((s, e) => s + e.amountPaise, 0n);
+      flag(
+        r,
+        'SHORTFALL_MISMATCH',
+        'BLOCKING',
+        gross === r.shortfallPaise && gross !== receivable
+          ? `approved under the old gross rule — needs a decision: recorded receivable ${r.shortfallPaise} paise (gross) vs ${receivable} paise net of TDS withheld; no allocation rows written`
+          : `receivables ${receivable} paise (net of TDS withheld) vs recorded shortfall ${r.shortfallPaise} paise — needs a decision; no allocation rows written`,
+      );
+      return;
+    }
     allocations.push(...toRows(r, es));
   };
 

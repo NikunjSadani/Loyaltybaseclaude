@@ -1247,7 +1247,7 @@ describe('WP6 × WP5 — PAYOUT reversal allocation backfill', () => {
   it('a reversal approved between planning and the locked insert → CHANGED: nothing inserted, exit 3, the next run inserts', async () => {
     const s = store();
     s.beforePayoutApply = () => {
-      s.payoutInput.get('bajaj')!.reversals.push(prev('PR4', 30000, ['E3']));
+      s.payoutInput.get('bajaj')!.reversals.push(prev('PR4', 30000, ['E3'], { shortfallPaise: 30000n })); // receivable recorded = net (re-audit B3)
       s.beforePayoutApply = null;
     };
     const r = await runBackfill(s, applyCfg({ tenants: ['bajaj'] }), silent);

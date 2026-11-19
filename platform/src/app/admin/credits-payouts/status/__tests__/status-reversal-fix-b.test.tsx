@@ -185,6 +185,38 @@ describe('Payout status — reversal fix round B', () => {
     expect(submitBtn().disabled).toBe(false);
   });
 
+  it('re-audit B2 — V2 tenant: "Loading payout entries…" and Submit waits (no amount form) while the lookup is pending', async () => {
+    mockApi({ engineMode: 'V2', entries: ['pending'] });
+    render(<PayoutStatusPage />);
+    await waitFor(() => expect(vi.mocked(global.fetch).mock.calls.some((c) => String(c[0]).includes('/reversal-engine/attention'))).toBe(true));
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    // the mode is known before the modal opens
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.click(await screen.findByRole('button', { name: /Reverse/ }));
+    await screen.findByRole('dialog');
+    expect((await screen.findByTestId('payout-entries-loading')).textContent).toBe('Loading payout entries…');
+    expect(screen.queryByText('Reversal Amount (₹)')).toBeNull();
+    expect(submitBtn().disabled).toBe(true);
+  });
+
+  it('re-audit B2 — V2 tenant: a failed lookup shows an error with Retry (never a silent fallback); Retry loads the picker', async () => {
+    const api = mockApi({ engineMode: 'V2', entries: ['fail', { mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] }] });
+    render(<PayoutStatusPage />);
+    await waitFor(() => expect(api.attentionCalls.length).toBeGreaterThan(0));
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.click(await screen.findByRole('button', { name: /Reverse/ }));
+    await screen.findByRole('dialog');
+    const err = await screen.findByTestId('payout-entries-error');
+    expect(err.textContent).toContain("Couldn't load payout entries — retry");
+    expect(screen.queryByText('Reversal Amount (₹)')).toBeNull();
+    expect(submitBtn().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByTestId('payout-entry-picker');
+    expect(api.entryCalls).toHaveLength(2);
+    expect(submitBtn().disabled).toBe(false);
+  });
+
   it('#5b: a V2 answer switches the modal to the entry picker', async () => {
     mockApi({ entries: [{ mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] }] });
     await openModal();

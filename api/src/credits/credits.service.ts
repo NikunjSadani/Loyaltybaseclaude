@@ -1700,7 +1700,22 @@ export class CreditsService {
       // tenants (Deoleo) skip this: their reversal locks one wallet, so there is no lock cycle — and nothing changes.
       if (pointsRows.length > 0 && reversalEngineMode && reversalEngineMode !== 'LEGACY') {
         const codes = [...new Set(pointsRows.map((r) => r.outletId))];
+        // B9 first: lock every EXISTING target wallet in ascending id (the reversal engine's order) — so the get-or-create
+        // below never waits on an existing row.
         await tx.$queryRaw`SELECT w."id" FROM "wallets" w JOIN "outlets" o ON o."partnerId" = w."partnerId" WHERE o."clientId" = ${user.clientId} AND o."outletCode" = ANY(${codes}::text[]) ORDER BY w."id" FOR UPDATE OF w`;
+        // Re-audit B8: two confirms that both create the SAME new wallets in CSV order can deadlock on the unique
+        // partnerId insert. Create every missing target wallet first, in ascending partnerId order (the same
+        // get-or-create the loop below does — ensureOutletAccount + upsert, a no-op for an existing wallet), so
+        // concurrent confirms insert in one global order. The in-loop get-or-create then finds them. LEGACY untouched.
+        const owners = await tx.outlet.findMany({
+          where: { clientId: user.clientId, outletCode: { in: codes } },
+          select: { partnerId: true },
+        });
+        const partnerIdsSorted = [...new Set((owners ?? []).map((o) => o.partnerId).filter((p): p is string => !!p))].sort();
+        for (const partnerId of partnerIdsSorted) {
+          const accountId = await ensureOutletAccount(tx, partnerId);
+          await tx.wallet.upsert({ where: { partnerId }, create: { partnerId, accountId }, update: {} });
+        }
       }
 
       // ── POINTS rows → wallet creditEarn (gap #16) ────────────────────────
@@ -1884,7 +1899,7 @@ export class CreditsService {
 
     // Input shape check for EVERY engine path (incl. the V2 POINTS path below): entry selection is PAYOUT-only.
     if (dto.payoutEntryIds !== undefined && dto.awardType !== 'PAYOUT') {
-      throw new BadRequestException('payoutEntryIds applies to PAYOUT reversals only');
+      throw new BadRequestException('Payout entries can only be chosen for a payout (₹) reversal');
     }
 
     try {
@@ -1944,7 +1959,7 @@ export class CreditsService {
         // WP5 (reversal engine V2 — SHADOW = LEGACY for payouts since 2026-11-16): PAYOUT reversals name their whole entries and RESERVE them.
         let payoutReservation: Awaited<ReturnType<typeof selectPayoutEntriesV2>> | null = null;
         if (dto.payoutEntryIds !== undefined && dto.awardType !== 'PAYOUT') {
-          throw new BadRequestException('payoutEntryIds applies to PAYOUT reversals only');
+          throw new BadRequestException('Payout entries can only be chosen for a payout (₹) reversal');
         }
         // SHADOW (WP4): what the v2 position-based create cap would have said — read-only, computed before the
         // create (its pending sum must not include this request), recorded after it. LEGACY decides.
@@ -3882,7 +3897,7 @@ export class CreditsService {
       // Policy round B: a FAILED payout never paid → the TDS credit it used goes back to the credit (re-applied on
       // re-bank). No credits on the tenant → one indexed read, no writes.
       if (failedEntryIdsAll.length > 0) {
-        tdsCreditReleased.push(...(await releaseCreditApplications(tx, failedEntryIdsAll, 'PAYOUT_FAILED')));
+        tdsCreditReleased.push(...(await releaseCreditApplications(tx, failedEntryIdsAll, 'PAYOUT_FAILED', user.clientId)));
       }
 
       // Download status from the entries' LIVE statuses, re-read in this tx AFTER the flips (never
@@ -4063,7 +4078,7 @@ export class CreditsService {
         tdsOffsetPaise: true,
         receivablePaise: true,
         tdsCreditPaise: true,
-        payoutEntry: { select: { status: true, period: true, createdAt: true, tdsDeductedPaise: true } },
+        payoutEntry: { select: { status: true, period: true, createdAt: true, tdsDeductedPaise: true, utr: true } },
       },
     });
     if (rows.length === 0) return reversals;
@@ -4081,7 +4096,11 @@ export class CreditsService {
         period: r.payoutEntry.period,
         createdAt: r.payoutEntry.createdAt,
         // Owner D2 / B4: a PAID payout FULLY withheld as TDS that the reversal marked REVERSED — not "cancelled".
-        ...(r.state === 'APPLIED_CANCELLED' && (r.payoutEntry.tdsDeductedPaise ?? 0n) >= r.amountPaise && r.amountPaise > 0n
+        // Re-audit B5: the LEGACY / shipped rule zeroes the stamp when it reverses the withholding, so also detect it by
+        // the settle reference the fully-withheld path writes (`TDS-WITHHELD-<download>`, kept by the REVERSED flip).
+        ...(r.state === 'APPLIED_CANCELLED' &&
+        r.amountPaise > 0n &&
+        ((r.payoutEntry.tdsDeductedPaise ?? 0n) >= r.amountPaise || (r.payoutEntry.utr ?? '').startsWith('TDS-WITHHELD-'))
           ? { fullyWithheld: true }
           : {}),
       });
@@ -4360,6 +4379,13 @@ export class CreditsService {
           // B6: a cancelled entry gives back the TDS credit it used — its credit's key too (no credits → nothing extra).
           payoutEntries.map((e) => e.id),
         );
+        // Re-audit A3: the bank download does NOT take the credit_batches lock, so a LEGACY approval locks the chosen
+        // entries itself (ascending id) — AFTER the advisory locks, the same order the download uses (advisory → entry
+        // rows), so the two never deadlock. From here the re-reads below are stable.
+        await tx.$queryRaw`SELECT id FROM credit_payout_entries WHERE "clientId" = ${user.clientId} AND id IN (${Prisma.join(
+          [...payoutEntries.map((e) => e.id)].sort(),
+        )}) ORDER BY id FOR UPDATE`;
+        let visIdsForD1: Set<string> | null = null;
         for (const payoutEntry of payoutEntries) {
           let cur = {
             status: payoutEntry.status as string,
@@ -4379,6 +4405,11 @@ export class CreditsService {
               break;
             }
             if (cur.status === 'PAID') {
+              // Re-audit A3: an entry that became PAID after the selection (the retry re-read) — owner D1 still holds.
+              if (payoutEntry.status !== 'PAID') {
+                visIdsForD1 ??= await visibilityFieldIdsOf(tx, user.clientId, payoutEntries.map((e) => e.fieldId));
+                assertNoPaid194C([{ ...payoutEntry, status: 'PAID' }], visIdsForD1);
+              }
               const withheld = cur.tdsDeductedPaise;
               if (withheld > 0n && withheld >= cur.amountPaise && !!payoutEntry.tdsSection) {
                 // FULLY withheld as TDS (A-H2, never sent to the bank): the retailer received NOTHING, so
@@ -4397,7 +4428,7 @@ export class CreditsService {
                     tdsDeductedPaise: withheld,
                   });
                   // WRE policy round B: TDS credit this payout had used goes back (none on a tenant without credits).
-                  const backW = await releaseCreditApplications(tx, [payoutEntry.id], 'ENTRY_CANCELLED_BY_REVERSAL');
+                  const backW = await releaseCreditApplications(tx, [payoutEntry.id], 'ENTRY_CANCELLED_BY_REVERSAL', user.clientId);
                   const backWPaise = backW.reduce((s, r) => s + r.amountPaise, 0n);
                   reversedCount++;
                   entryNotes.push(
@@ -4498,7 +4529,7 @@ export class CreditsService {
                     (offset > 0n ? ` (withheld TDS ${formatINR(offset)} offset)` : ''),
                 );
                 // Policy round B: TDS credit this unpaid entry had used goes back (none on a tenant without credits).
-                const back = await releaseCreditApplications(tx, [payoutEntry.id], 'ENTRY_CANCELLED_BY_REVERSAL');
+                const back = await releaseCreditApplications(tx, [payoutEntry.id], 'ENTRY_CANCELLED_BY_REVERSAL', user.clientId);
                 const backPaise = back.reduce((s, r) => s + r.amountPaise, 0n);
                 // B4: the same wording as the V2 path — never "no TDS withheld" when TDS was withheld but not offset.
                 const legacyWithheld = cur.tdsDeductedPaise;

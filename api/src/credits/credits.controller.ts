@@ -94,8 +94,9 @@ export class CreditsController {
   @Get('batches/:id/reversals')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('credits:read')
-  listBatchReversals(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.credits.listBatchReversals(user, id);
+  async listBatchReversals(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    // Re-audit B4: same response shape as 7ba69566 when no remarks were typed.
+    return (await this.credits.listBatchReversals(user, id)).map((r) => omitNullRequestRemarks(r));
   }
 
   @Post('batches/:id/reversals')

@@ -39,6 +39,7 @@ import type { TdsRate } from '../tds/tds.helpers';
 import { formatINR } from '../common/money';
 import { isNoPanKey, payeeKeyFor, retailerKeyOfLedgerPan } from '../tds/tds-194r.shared';
 import { r194LockKey } from './r194-lock';
+import { financialYear } from '../tds/tds.helpers';
 
 /** IST FY label ("2026-27") for a "YYYY-MM" payout period — same rule as CreditsService.fyForPeriod. */
 export function fyLabelOf(period: string): string {
@@ -325,10 +326,12 @@ export async function releaseCreditApplications(
   tx: Prisma.TransactionClient,
   entryIds: string[],
   reason: 'PAYOUT_FAILED' | 'ENTRY_CANCELLED_BY_REVERSAL',
+  /** Re-audit B7: the CALLER's tenant — the read and the guarded UPDATE are restricted to it (defence in depth). */
+  clientId: string,
 ): Promise<ReleasedApplication[]> {
   if (entryIds.length === 0) return [];
   const live = await tx.tdsCreditApplication.findMany({
-    where: { payoutEntryId: { in: entryIds }, releasedAt: null },
+    where: { payoutEntryId: { in: entryIds }, releasedAt: null, clientId },
     orderBy: { id: 'asc' },
     select: { id: true, tdsCreditId: true, payoutEntryId: true, amountPaise: true, clientId: true },
   });
@@ -340,7 +343,7 @@ export async function releaseCreditApplications(
     });
     if (flip.count !== 1) continue; // released concurrently — nothing to give back twice
     const n = await tx.$executeRaw`UPDATE tds_credits SET "appliedPaise" = "appliedPaise" - ${a.amountPaise}, "updatedAt" = now()
-      WHERE id = ${a.tdsCreditId} AND "appliedPaise" >= ${a.amountPaise} AND "clientId" = ${a.clientId}`; // B7: defence in depth
+      WHERE id = ${a.tdsCreditId} AND "appliedPaise" >= ${a.amountPaise} AND "clientId" = ${clientId}`; // B7: the caller's tenant
     if (n !== 1) throw new Error(`TDS credit ${a.tdsCreditId} is inconsistent (release of ${a.amountPaise} paise) — contact Gifsy`);
     out.push({ applicationId: a.id, tdsCreditId: a.tdsCreditId, payoutEntryId: a.payoutEntryId, amountPaise: a.amountPaise });
   }
@@ -410,8 +413,10 @@ export interface ReceivableTdsOutcome {
   belowThresholdAfterReversal: boolean;
   /** Withheld on the entry but not traceable to a PAN in the TDS ledger (e.g. imported history) — no credit. */
   untrackedWithheldPaise: bigint;
-  /** A5: what would have been a credit while the client's 194R method is GROSS_UP — left as the report's flagged excess. */
+  /** A5 / re-audit A1: what would have been a credit but could never be used — left as the report's flagged excess. */
   flaggedExcessPaise: bigint;
+  /** Why it could not be used (closed FY / gross-up / PAN changed); null when nothing was left uncredited. */
+  flaggedExcessReason: string | null;
   note: string;
 }
 
@@ -541,6 +546,8 @@ export async function recordReceivableTds(
     panPosition: PanPositionLoader;
     /** The client's CURRENT 194R method (audit A5). */
     currentMethodology: string;
+    /** Test hook: "now" for the current-FY usability test (defaults to the real clock). */
+    now?: Date;
   },
 ): Promise<ReceivableTdsOutcome> {
   if (e.tdsSection === TdsSection.SEC_194C) {
@@ -587,9 +594,26 @@ export async function recordReceivableTds(
   const candidate = pan ? ownWithheld + earlier : 0n;
   const deduct = ctx.currentMethodology === 'DEDUCT';
   const cap = reversalCreditCap(candidate, position);
-  // A5: on GROSS_UP no credit — the would-be credit stays withheld TDS the report flags as excess.
-  const credit = deduct ? cap.creditPaise : 0n;
-  const flaggedExcess = deduct ? 0n : cap.creditPaise;
+  // Re-audit A1 (2026-11-19): a credit is created only when it is USABLE at creation — the SAME three conditions the
+  // payout run uses a credit under (and the 194R report subtracts it under): (a) its FY is the current, open FY (the
+  // run only reads the run date's FY); (b) the client's current method is DEDUCT (only then is 194R withheld again);
+  // (c) its key is the key this retailer's future payouts use (the run looks credits up by the CURRENT payee key).
+  // Choice: an unusable credit is NOT created (nothing would ever draw it, and a credit row that silently cannot be
+  // used would only hide the excess). The withheld TDS stays in the ledger, where the 194R report counts it as excess
+  // (owner rule: flag only) — the outcome says exactly that and why.
+  const currentFy = financialYear(ctx.now ?? new Date()).fyLabel;
+  const currentKey = pan ? await currentRetailerKeyOfOutlet(tx, e.clientId, e.outletId) : null;
+  const unusableReason: string | null = !pan
+    ? null
+    : creditFy !== currentFy
+      ? `the TDS was withheld in FY ${creditFy}, which is closed (later-year reversal) — no later withholding of FY ${creditFy} can use it`
+      : !deduct
+        ? "this programme's 194R method is now gross-up — no TDS is withheld that it could reduce"
+        : currentKey !== pan
+          ? `the retailer's PAN has changed since (TDS was withheld under ${maskPan(pan)}, payouts now go under ${maskPan(currentKey ?? '')})`
+          : null;
+  const credit = unusableReason ? 0n : cap.creditPaise;
+  const flaggedExcess = unusableReason ? cap.creditPaise : 0n;
   const below = position.thresholdMetBefore && !position.thresholdMetAfter;
   const panM = maskPan(capPan);
   const who = isNoPanKey(capPan.toUpperCase()) ? 'this no-PAN retailer' : `PAN ${panM}`;
@@ -601,9 +625,18 @@ export async function recordReceivableTds(
     extra.push(`${formatINR(cap.coversOtherPayoutsPaise)} of this TDS covers the retailer's other payouts — no credit.`);
   }
   if (flaggedExcess > 0n) {
+    // Re-audit A5: honest about what happens to it — it stays in the 194R ledger of its FY. If (and only if) the
+    // programme withholds 194R again for this retailer in that same FY, the whole-year true-up nets it automatically
+    // (the 194R report shows that as "netted"); otherwise the report flags it as TDS taken in excess.
     extra.push(
-      `${formatINR(flaggedExcess)} withheld TDS is not turned into a credit: this programme's 194R method is now gross-up, ` +
-        'so no TDS is withheld again that it could reduce — it stays on the 194R report as TDS taken in excess (flagged, no automatic refund).',
+      creditFy !== currentFy
+        ? `${formatINR(flaggedExcess)} withheld TDS is not turned into a credit: ${unusableReason}. It stays deposited in ` +
+            `FY ${creditFy}'s 194R ledger and the FY ${creditFy} 194R report flags it as TDS taken in excess (no automatic ` +
+            'refund — the retailer can claim it in that year\'s return).'
+        : `${formatINR(flaggedExcess)} withheld TDS is not turned into a credit: ${unusableReason}. It stays deposited and ` +
+            `in the 194R ledger of FY ${creditFy}: if this programme withholds 194R from this retailer again in FY ${creditFy} ` +
+            '(e.g. after switching back to deduct), the year\'s true-up nets it automatically and the 194R report says so; ' +
+            'otherwise the 194R report flags it as TDS taken in excess (no automatic refund).',
     );
   }
   if (cap.handBackPaise > 0n && deduct) {
@@ -625,6 +658,7 @@ export async function recordReceivableTds(
     belowThresholdAfterReversal: below,
     untrackedWithheldPaise: untracked,
     flaggedExcessPaise: flaggedExcess,
+    flaggedExcessReason: unusableReason,
   };
   const owedText = e.fullyWithheld
     ? 'The whole payout had been withheld as TDS — nothing reached the retailer, nothing owed.'

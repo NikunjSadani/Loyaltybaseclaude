@@ -36,9 +36,9 @@ type Data = {
   redemptions: Array<{ clientId: string; partnerId: string; valuePaise: bigint; redemptionMode: string; deliveredAt: Date; payeePan?: string | null }>;
   offPlatform: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; entryDate: Date; resolvedKey?: string | null }>;
   deposits: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; forPeriod: string; depositDate: Date; uploadBatchId: string | null; resolvedKey?: string | null }>;
-  ledger: Array<{ clientId: string; panNumber: string; section: string; fyLabel: string; tdsDeductedThisPaise: bigint; outletCode?: string | null; carryForwardPaise?: bigint; createdAt?: Date }>;
+  ledger: Array<{ clientId: string; panNumber: string; section: string; fyLabel: string; tdsDeductedThisPaise: bigint; outletCode?: string | null; carryForwardPaise?: bigint; createdAt?: Date; creditPayoutEntryId?: string }>;
   /** WRE (merge decision A): TDS credits raised by V2 reversals of PAID payouts. */
-  credits: Array<{ id: string; clientId: string; panNumber: string; section: string; fyLabel: string; amountPaise: bigint; appliedPaise: bigint; createdAt: Date }>;
+  credits: Array<{ id: string; clientId: string; panNumber: string; section: string; fyLabel: string; amountPaise: bigint; appliedPaise: bigint; createdAt: Date; sourcePayoutEntryId?: string }>;
   countFrom: string | null;
 };
 const empty = (): Data => ({ entries: [], outlets: [], partners: [], redemptions: [], offPlatform: [], deposits: [], ledger: [], credits: [], countFrom: null });
@@ -63,6 +63,8 @@ function fakeDb(d: Data) {
     creditPayoutEntry: {
       findMany: async ({ where: w }: any) =>
         d.entries.filter((e) => {
+          if (w.id?.in && !w.id.in.includes(e.id)) return false;
+          if (w.tdsBaseReversedAt?.not === null && !e.tdsBaseReversedAt) return false;
           if (w.clientId && e.clientId !== w.clientId) return false;
           if (typeof w.status === 'string' && e.status !== w.status) return false;
           if (w.status?.in && !w.status.in.includes(e.status)) return false;
@@ -82,14 +84,17 @@ function fakeDb(d: Data) {
         }),
     },
     outlet: {
-      findMany: async ({ where: w }: any) =>
-        d.outlets.filter(
-          (o) =>
-            (!w.clientId || o.clientId === w.clientId) &&
-            inList(o.outletCode, w.outletCode) &&
-            inList(o.partnerId, w.partnerId) &&
-            (!w.OR || w.OR.some((c: any) => ciEq(o.outletCode, c.outletCode))),
-        ),
+      findMany: async ({ where: w, select }: any) =>
+        d.outlets
+          .filter(
+            (o) =>
+              (!w.clientId || o.clientId === w.clientId) &&
+              inList(o.outletCode, w.outletCode) &&
+              inList(o.partnerId, w.partnerId) &&
+              (!w.OR || w.OR.some((c: any) => ciEq(o.outletCode, c.outletCode))),
+          )
+          // re-audit A1 usability read: `select: { partner: { select: { id, panNumber } } }`
+          .map((o) => (select?.partner ? { ...o, partner: d.partners.find((p) => p.id === o.partnerId) ?? null } : o)),
     },
     channelPartner: {
       findMany: async ({ where: w }: any) =>
@@ -694,7 +699,7 @@ describe('PARITY: engine and report give the same 194R TDS for the same data', (
       { ...paidVis('vB', 1000000n), tdsBaseReversedAt: inFy(60), period: '2026-05' },
     ];
     d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 250000n }];
-    d.credits = [{ id: 'c1', clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: FY.fyLabel, amountPaise: 100000n, appliedPaise: 0n, createdAt: inFy(60) }];
+    d.credits = [{ id: 'c1', clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: FY.fyLabel, amountPaise: 100000n, appliedPaise: 0n, createdAt: inFy(60), sourcePayoutEntryId: 'vB' }];
 
     // ── Report BEFORE the next run: vB is off the base (₹15,000 ≤ ₹20,000 → nothing due); flagged on the row.
     const [before] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
@@ -740,6 +745,67 @@ describe('PARITY: engine and report give the same 194R TDS for the same data', (
     expect(row.deductedPaise + withheldNow).toBe(row.deductLiabilityPaise);
     expect(row.excessDeductedPaise).toBe(0n);
     expect(row.openTdsCreditPaise).toBeUndefined();
+  });
+
+  // ── Re-audit A2: a fully withheld payout the engine REVERSED (owner D2, TDS retained) still reports ──
+  it('re-audit A2: A ₹19,000 · B ₹1,500 fully withheld + REVERSED (D2) · D ₹600 → B never in the base, but the row keeps its reversal flag + below-threshold', async () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [
+      paidVis('A', 1900000n),
+      { ...paidVis('B', 150000n), status: 'REVERSED', tdsBaseReversedAt: inFy(70), period: '2026-06' },
+      paidVis('D', 60000n),
+    ];
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 150000n, creditPayoutEntryId: 'B' }];
+    const [row] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row.baseFyTotalPaise).toBe(1960000n); // A + D only — B never counts
+    expect(row.reversal).toMatchObject({ reversedPaise: 150000n, belowThresholdAfterReversal: true }); // ₹21,100 → ₹19,600
+    expect(row.reversal!.items[0]).toMatchObject({ amountPaise: 150000n, period: '2026-06' });
+    // its TDS was kept without a credit here (none in the data) → said on the row (re-audit A5)
+    expect(row.reversal!.notes.join(' ')).toMatch(/₹1,500\.00 TDS withheld on the reversed payout\(s\) was kept in FY .* ledger without a credit/);
+  });
+
+  // ── Re-audit A1: only USABLE open credits lower the excess; unusable ones stay excess, with a note ──
+  const creditData = () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [paidVis('v1', 1500000n), { ...paidVis('vB', 1000000n), tdsBaseReversedAt: inFy(60), period: '2026-05' }];
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 250000n }];
+    d.credits = [{ id: 'c1', clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: FY.fyLabel, amountPaise: 100000n, appliedPaise: 0n, createdAt: inFy(60), sourcePayoutEntryId: 'vB' } as never];
+    return d;
+  };
+  it('re-audit A1 — usable credit (current FY · DEDUCT · same key): subtracted from the excess', async () => {
+    const [row] = await services(creditData(), 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row.openTdsCreditPaise).toBe(100000n);
+    expect(row.unusableTdsCreditPaise).toBeUndefined();
+    expect(row.excessDeductedPaise).toBe(150000n); // ₹2,500 − ₹1,000 usable − share ₹0
+  });
+  it('re-audit A1 — method flipped to gross-up: the credit can no longer be used → counted as excess, with the note', async () => {
+    const [row] = await services(creditData(), 'GROSS_UP').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row.openTdsCreditPaise).toBe(0n);
+    expect(row.unusableTdsCreditPaise).toBe(100000n);
+    expect(row.excessDeductedPaise).toBe(250000n);
+    expect(row.note).toMatch(/₹1,000\.00 TDS credit can no longer be used \(later-year reversal \/ method changed \/ PAN changed — here: method changed to gross-up\) — counted as excess/);
+  });
+  it('re-audit A1 — PAN changed since: unusable → excess + note', async () => {
+    const d = creditData();
+    d.partners = [pan('p1', 'ZZZZZ9999Z')];
+    const rows = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    const row = rows.find((r) => r.panNumber === 'ABCDE1234F')!;
+    expect(row.unusableTdsCreditPaise).toBe(100000n);
+    expect(row.note).toMatch(/here: PAN changed\) — counted as excess/);
+  });
+  it('re-audit A1 — a closed FY (later-year view): unusable → excess + note', async () => {
+    const d = creditData();
+    const prev = financialYear(new Date(FY.start.getTime() - 86_400_000)).fyLabel;
+    for (const l of d.ledger) l.fyLabel = prev;
+    d.credits = d.credits.map((c) => ({ ...c, fyLabel: prev }));
+    d.entries = d.entries.map((e) => ({ ...e, paidAt: new Date(FY.start.getTime() - 40 * 86_400_000) }));
+    const [row] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, prev, null);
+    expect(row.unusableTdsCreditPaise).toBe(100000n);
+    expect(row.note).toMatch(/here: later-year reversal \/ FY closed\)/);
   });
 
   it('WRE D1: without any reversal marker the shared definition is unchanged (no reversal flag, no credit field)', async () => {

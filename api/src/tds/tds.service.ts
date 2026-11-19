@@ -73,7 +73,7 @@ import {
   keyForOutletCode,
   normalisePan,
   deducted194RByRetailer,
-  openCredits194RByRetailer,
+  openCredits194RUsability,
   type Reversed194RItem,
   type Bases194R,
 } from './tds-194r.shared';
@@ -292,8 +292,11 @@ export interface TdsRow194R {
    * year later drops to ₹20,000 or less). No automatic refund.
    */
   excessDeductedPaise: bigint;
-  /** WRE: open 194R TDS credit for this retailer this FY (absent when none) — subtracted before the excess test. */
+  /** WRE: USABLE open 194R TDS credit for this retailer this FY (absent when none) — subtracted before the excess test. */
   openTdsCreditPaise?: bigint;
+  /** Re-audit A1: open credit that can never be used (closed FY / gross-up / PAN changed) — stays counted as excess. */
+  unusableTdsCreditPaise?: bigint;
+  unusableTdsCreditReasons?: string[];
   /** A carry-forward recorded on the ledger that is no longer due under the current rules (dropped, shown). */
   carryForwardDroppedPaise: bigint;
   /** B-M2 / excess: a plain-language flag for a row that needs a look. */
@@ -589,8 +592,10 @@ export class TdsService {
     // reversal turned it into a credit the next 194R withholding uses — so it is never also flagged as excess.
     // Applied credits are NOT subtracted: once applied, that TDS covers the later payout it reduced (it sits inside
     // the retailer's share). No credits (every tenant without V2 reversals) → empty map → excess unchanged.
-    const openCredits = await openCredits194RByRetailer(this.prisma, { clientId, fyLabel });
-    const deductedNetOfCredits = (key: string): bigint => (deducted.get(key) ?? 0n) - (openCredits.get(key) ?? 0n);
+    // Re-audit A1: only a USABLE open credit (current FY · DEDUCT now · the retailer's current payee key — exactly what
+    // the payout run draws) is subtracted; an unusable one stays counted as excess (flag only) and is said on the row.
+    const creditsByKey = await openCredits194RUsability(this.prisma, { clientId, fyLabel, methodology });
+    const deductedNetOfCredits = (key: string): bigint => (deducted.get(key) ?? 0n) - (creditsByKey.get(key)?.usable ?? 0n);
 
     const rowFor = (key: string, b: Bases194R): TdsRow194R => {
       const l = liability194R(b, methodology, cfg);
@@ -613,7 +618,14 @@ export class TdsService {
         deductedPaise: deducted.get(key) ?? 0n,
         excessDeductedPaise: excessOf(l.deductPartPaise, deductedNetOfCredits(key)),
         carryForwardDroppedPaise: droppedOf(lastCarry.get(key) ?? 0n, l.deductPartPaise, deductedNetOfCredits(key)),
-        ...(openCredits.has(key) ? { openTdsCreditPaise: openCredits.get(key)! } : {}),
+        ...(creditsByKey.has(key)
+          ? {
+              openTdsCreditPaise: creditsByKey.get(key)!.usable,
+              ...(creditsByKey.get(key)!.unusable > 0n
+                ? { unusableTdsCreditPaise: creditsByKey.get(key)!.unusable, unusableTdsCreditReasons: creditsByKey.get(key)!.reasons }
+                : {}),
+            }
+          : {}),
         importedVendorDepositPaise: importedDeposited.get(key) ?? 0n,
         ...depositPeriods.fieldFor(key),
       };
@@ -651,6 +663,13 @@ export class TdsService {
             "this retailer's next 194R withholding, so it is not counted as excess.",
         );
       }
+      // Re-audit A1: a credit that can never be used is NOT subtracted — it stays in the excess, and the row says why.
+      if (r.unusableTdsCreditPaise !== undefined && r.unusableTdsCreditPaise > 0n) {
+        notes.push(
+          `${formatINR(r.unusableTdsCreditPaise)} TDS credit can no longer be used (later-year reversal / method changed / ` +
+            `PAN changed — here: ${(r.unusableTdsCreditReasons ?? []).join(', ')}) — counted as excess.`,
+        );
+      }
       if (r.carryForwardDroppedPaise > 0n) {
         notes.push(
           `A carry-forward of ${formatINR(r.carryForwardDroppedPaise)} is no longer due under the current rules and will not be withheld.`,
@@ -670,6 +689,32 @@ export class TdsService {
     // Fix round B (D1/M2): payouts an engine reversal took off a row's base — flag the row (a PAN whose whole base was
     // reversed still gets a base-0 row so the reversal is never silent). No reversals → no change.
     // The very items the shared definition left out of the base (reversedSink) — the engine uses the same split.
+    // Re-audit A5: per retailer, the ledger TDS of its reversed payouts minus the credits created for them (no
+    // reversed payouts → no query).
+    const retainedNoCredit = new Map<string, bigint>();
+    const reversedIds = [...reversed194R.values()].flat().map((i) => i.entryId);
+    if (reversedIds.length > 0) {
+      const keyOfEntry = new Map<string, string>();
+      for (const [k, items] of reversed194R) for (const i of items) keyOfEntry.set(i.entryId, k);
+      const [ledgerRows, creditRows] = await Promise.all([
+        this.prisma.tdsDeductionEntry.findMany({
+          where: { clientId, section: 'SEC_194R', creditPayoutEntryId: { in: reversedIds } },
+          select: { creditPayoutEntryId: true, tdsDeductedThisPaise: true },
+        }),
+        this.prisma.tdsCredit.findMany({
+          where: { clientId, section: 'SEC_194R', sourcePayoutEntryId: { in: reversedIds } },
+          select: { sourcePayoutEntryId: true, amountPaise: true },
+        }),
+      ]);
+      for (const l of ledgerRows ?? []) {
+        const k = l.creditPayoutEntryId ? keyOfEntry.get(l.creditPayoutEntryId) : undefined;
+        if (k) retainedNoCredit.set(k, (retainedNoCredit.get(k) ?? 0n) + l.tdsDeductedThisPaise);
+      }
+      for (const c of creditRows ?? []) {
+        const k = keyOfEntry.get(c.sourcePayoutEntryId);
+        if (k) retainedNoCredit.set(k, (retainedNoCredit.get(k) ?? 0n) - c.amountPaise);
+      }
+    }
     for (const [key, items] of reversed194R) {
       let row = rows.find((r) => r.panNumber === key);
       if (!row) {
@@ -680,6 +725,7 @@ export class TdsService {
       const before = row.baseFyTotalPaise + reversedPaise > cfg.thr194rFyPaise;
       const after = row.baseFyTotalPaise > cfg.thr194rFyPaise;
       const open = row.openTdsCreditPaise ?? 0n;
+      const kept = retainedNoCredit.get(key) ?? 0n;
       row.reversal = buildRowReversal(
         items.map((i) => ({
           amountPaise: i.amountPaise,
@@ -692,9 +738,22 @@ export class TdsService {
         })),
         fyLabel,
         before && !after,
-        open > 0n
-          ? [`${formatINR(open)} TDS credit open for this retailer (FY ${fyLabel}) — used against the next 194R withholding; not flagged as excess`]
-          : [],
+        [
+          ...(open > 0n
+            ? [`${formatINR(open)} TDS credit open for this retailer (FY ${fyLabel}) — used against the next 194R withholding; not flagged as excess`]
+            : []),
+          // Re-audit A5: TDS withheld on the reversed payout(s) that did NOT become a credit (gross-up / closed FY / PAN
+          // changed at the time) stays in this year's ledger — never silently: it nets against a later 194R
+          // withholding of this FY (already inside "deducted so far"), else it is the flagged excess above.
+          ...(kept > 0n
+            ? [
+                `${formatINR(kept)} TDS withheld on the reversed payout(s) was kept in FY ${fyLabel}'s ledger without a credit — ` +
+                  (methodology === 'DEDUCT'
+                    ? "it nets against this retailer's later 194R withholding this FY (counted in 'deducted so far'); any part not needed is flagged as excess"
+                    : 'counted as TDS taken in excess while the method is gross-up; if the programme switches back to deduct this FY, it nets against the next withholding'),
+              ]
+            : []),
+        ],
       );
     }
     await this.attachNoPanDeductees(rows, clientId);

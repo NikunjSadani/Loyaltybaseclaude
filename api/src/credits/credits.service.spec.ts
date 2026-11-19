@@ -1548,15 +1548,29 @@ describe('CreditsService', () => {
         expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
       });
 
-      it('race: the entry was PAID meanwhile → recorded as a receivable, not REVERSED, no offset', async () => {
+      it('race: a 194R entry was PAID meanwhile → recorded as a receivable, not REVERSED, no offset', async () => {
         mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
-        mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ ...failedWithStamp, tdsSection: 'SEC_194R' }]);
         mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
         mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'PAID', amountPaise: 2_000_000n, tdsDeductedPaise: 40_000n });
         const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
         expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
         // Receivable = the NET actually released (₹20,000 − ₹400 TDS withheld), not the gross.
         expect(res.clawbackShortfall).toBe(1_960_000);
+      });
+
+      it('re-audit A3: a 194C entry PAID meanwhile (the retry re-read) is refused with the owner D1 message — nothing written', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]); // SEC_194C, FAILED at selection
+        mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
+        mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'PAID', amountPaise: 2_000_000n, tdsDeductedPaise: 40_000n });
+        await expect(service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 })).rejects.toThrow(
+          /^194C payouts can't be reversed once paid/,
+        );
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+        // the chosen entries were row-locked (ascending id) after the advisory locks — the download takes no batch lock
+        const lockSql = mockTx.$queryRaw.mock.calls.map((c: unknown[]) => (c[0] as string[]).join('?')).find((q: string) => q.includes('FROM credit_payout_entries'));
+        expect(lockSql).toMatch(/ORDER BY id FOR UPDATE/);
       });
 
       it('race: FAILED→(re-read) still FAILED with the stamp cleared by a concurrent UTR apply → reversed once, NO offset', async () => {

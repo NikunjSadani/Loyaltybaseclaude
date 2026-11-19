@@ -213,8 +213,10 @@ runbook pre-check below.
   - *V2 tenants only:* a reversed PAID 194R payout is marked `tdsBaseReversedAt` and `collect194RBases` leaves it out
     of the base (engine + report alike); the withheld TDS it carried — also for a FULLY withheld payout (owner D2: the
     entry is REVERSED, nothing owed) — becomes a capped, client-scoped `TdsCredit` in the ledger row's FY, created only
-    while the client is on DEDUCT (on GROSS_UP it stays the flagged excess). The report's excess subtracts OPEN credits
-    and shows them ("Open TDS Credit"). No marker / no credit (every LEGACY tenant, Deoleo) → everything above is unchanged.
+    only when USABLE (current FY, DEDUCT, the retailer's current payee key — otherwise the TDS stays in the ledger:
+    nets on a later withholding of that FY or is flagged excess, said so). The report's excess subtracts only USABLE open
+    credits ("Open TDS Credit"); an unusable one stays excess with a note. A D2 REVERSED payout still shows its row
+    reversal flag (never in the base). No marker / no credit (every LEGACY tenant, Deoleo) → everything above is unchanged.
 - **KYC-held payouts** left out of a download are listed in the result (`heldNote`), the `X-Held-Count/-Note` headers
   and an amber note on the payout screen (owner rule: no silent pass-through).
 

@@ -158,8 +158,10 @@ export default function PayoutStatusPage() {
   // WP5 entry picker: set only when the tenant's reversal engine is V2 (LEGACY and SHADOW keep the amount form).
   const [revEntries,  setRevEntries]  = useState<PayoutReversalEntry[] | null>(null);
   const [revSelected, setRevSelected] = useState<string[]>([]);
-  // Load state of the payout-entries read (B5: informational — the amount form never waits on it).
-  const [, setRevEntryLoad] = useState<EntryLoad>('idle');
+  // Load state of the payout-entries read. Re-audit B2: on a tenant KNOWN to be V2 the modal waits for it (loading →
+  // picker, or an error with Retry — never a silent fallback); on LEGACY / SHADOW (or before the mode is known) the
+  // amount form shows at once, exactly as in 7ba69566.
+  const [revEntryLoad, setRevEntryLoad] = useState<EntryLoad>('idle');
   const revRequestRef = useRef(0);
   const revDialogRef  = useRef<HTMLDivElement>(null);
   const revTriggerRef = useRef<HTMLElement | null>(null);
@@ -292,9 +294,10 @@ export default function PayoutStatusPage() {
 
   /**
    * WP5: under the V2 reversal engine a payout reversal picks whole entries; LEGACY → the amount form as before.
-   * Audit B5 (LEGACY / Deoleo identical): while this loads, or if it fails, the modal shows the amount form exactly as
-   * in 7ba69566 and Submit works — a V2 tenant's server refuses an amount-only request with a clear message
-   * ("Select the payout entries to reverse"), so nothing passes silently. Only an answered V2 switches to the picker.
+   * Audit B5 / re-audit B2: on a tenant known to be V2 (the attention read above) the modal shows "Loading payout
+   * entries…" and Submit waits; a failed read shows an error with Retry. On LEGACY / SHADOW — or while the tenant's mode
+   * is not known yet — the amount form shows at once exactly as in 7ba69566; an answered V2 still switches to the picker
+   * (and a V2 server refuses an amount-only request in plain words).
    * `keepSelection` (after a failed submit, #6): keep only the previously ticked entries that are still selectable.
    */
   async function loadPayoutEntries(batchId: string, outletId: string, fieldId: string, keepSelection?: string[]) {
@@ -325,6 +328,11 @@ export default function PayoutStatusPage() {
       if (reqId !== revRequestRef.current) return;
       setRevEntryLoad('error');
     }
+  }
+
+  function retryPayoutEntries() {
+    if (!revTarget) return;
+    void loadPayoutEntries(revTarget.batchId, revTarget.outletId, revTarget.fieldId, revEntries ? revSelected : undefined);
   }
 
   function closeReversal() {
@@ -743,7 +751,22 @@ export default function PayoutStatusPage() {
 
             {revMsg?.type !== 'ok' && (
               <>
-                {revEntries ? (
+                {engineMode === 'V2' && revTarget.awardType === 'PAYOUT' && revEntryLoad === 'loading' && !revEntries ? (
+                  <p role="status" data-testid="payout-entries-loading" className="text-xs text-gray-500 animate-pulse">
+                    Loading payout entries…
+                  </p>
+                ) : engineMode === 'V2' && revTarget.awardType === 'PAYOUT' && revEntryLoad === 'error' && !revEntries ? (
+                  <div role="alert" data-testid="payout-entries-error" className="flex items-center justify-between gap-3 rounded-xl bg-red-50 px-4 py-3 text-xs text-red-700">
+                    <span>Couldn&apos;t load payout entries — retry</span>
+                    <button
+                      type="button"
+                      onClick={retryPayoutEntries}
+                      className="px-2.5 py-1 rounded-lg border border-red-200 bg-white text-red-700 hover:bg-red-50"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : revEntries ? (
                 <fieldset className="space-y-2" data-testid="payout-entry-picker">
                   <legend className="text-xs font-medium text-gray-700">Payout entries to reverse</legend>
                   {revEntries.length === 0 ? (
@@ -825,7 +848,11 @@ export default function PayoutStatusPage() {
                 <div className="flex gap-3 pt-2">
                   <button
                     onClick={submitReversal}
-                    disabled={revLoading || (!!revEntries && revSelected.length === 0)}
+                    disabled={
+                      revLoading ||
+                      (engineMode === 'V2' && revTarget.awardType === 'PAYOUT' && !revEntries) ||
+                      (!!revEntries && revSelected.length === 0)
+                    }
                     className="flex-1 py-2.5 bg-amber-600 text-white rounded-xl text-sm font-semibold hover:bg-amber-700 disabled:opacity-50"
                   >
                     {revLoading ? 'Submitting…' : 'Submit Reversal Request'}

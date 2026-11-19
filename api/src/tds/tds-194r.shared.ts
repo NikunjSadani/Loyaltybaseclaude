@@ -41,6 +41,7 @@ import { InternalServerErrorException } from '@nestjs/common';
 import type { Prisma, TdsMethodology } from '@prisma/client';
 import {
   effectiveEntrySection,
+  financialYear,
   fyFromLabel,
   grossUpTdsPaise,
   IMPORTED_INCENTIVE_PAYOUT_FIELD_ID,
@@ -314,7 +315,7 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
     : {};
   const sel = {
     id: true, clientId: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, payeePan: true,
-    period: true, tdsBaseReversedAt: true,
+    period: true, tdsBaseReversedAt: true, status: true,
   } as const;
 
   // ── Source 1: payouts. OWNER FY RULE (2026-11-18): a payout that went through a bank file belongs to
@@ -359,8 +360,32 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
           select: sel,
         })
       : [];
+  // Re-audit A2: a PAID payout FULLY withheld as TDS that a V2 reversal turned REVERSED (owner D2 — the TDS stays
+  // deposited) is no longer PAID, so the two reads above miss it. It must still REPORT (reversedSink): the row keeps its
+  // reversal flag, "below threshold after reversal", the M2 revise-return warning and the engine's hand-back priorDue.
+  // Never counted in the base (it carries the marker → the loop below sends it to the sink). Only V2 sets the marker.
+  const reversedRetained = reversedSink
+    ? await db.creditPayoutEntry.findMany({
+        where: {
+          clientId,
+          status: 'REVERSED',
+          tdsBaseReversedAt: { not: null },
+          OR: [
+            { download: { downloadedAt: { gte: start, lt: endExclusive } } },
+            { downloadId: null, paidAt: { gte: start, lt: endExclusive } },
+          ],
+          batch: { OR: [{ sourceKind: null }, { sourceKind: { not: 'VENDOR_IMPORT' } }] },
+          ...(scope ? { AND: [outletFilter] } : {}),
+        },
+        select: sel,
+      })
+    : [];
   const byId = new Map<string, (typeof banked)[number]>();
   for (const e of [...banked, ...paidNoFile, ...imported]) if (!byId.has(e.id)) byId.set(e.id, e);
+  // (a REVERSED row without the marker can never count — guarded in JS too)
+  for (const e of reversedRetained ?? []) {
+    if (e.tdsBaseReversedAt && String(e.status) === 'REVERSED' && !byId.has(e.id)) byId.set(e.id, e);
+  }
   const entries = [...byId.values()].filter(
     (e) => (!e.clientId || e.clientId === clientId) && effectiveEntrySection(e.tdsSection, visIds.has(e.fieldId)) === 'SEC_194R',
   );
@@ -485,6 +510,71 @@ export async function openCredits194RByRetailer(
     if (open <= 0n || !r.panNumber?.trim()) continue;
     const key = retailerKeyOfLedgerPan(r.panNumber);
     out.set(key, (out.get(key) ?? 0n) + open);
+  }
+  return out;
+}
+
+/**
+ * Re-audit A1 (2026-11-19) — the open 194R TDS credits of one client for one FY, split into USABLE and UNUSABLE by the
+ * SAME three conditions under which the payout run draws a credit (credits.service plan194RDeductions loads credits
+ * for the run date's FY and the run's CURRENT payee keys only, and only runs on DEDUCT):
+ *   (a) the credit's FY is the current (open) FY;  (b) the client's current method is DEDUCT;
+ *   (c) the credit's key equals the key this retailer's future payouts use (its source payout's outlet owner today).
+ * The 194R report subtracts only the usable part from "deducted so far" before the excess test; the unusable part
+ * stays counted as excess (owner rule: flag only) and is called out on the row.
+ */
+export interface OpenCredits194R {
+  usable: bigint;
+  unusable: bigint;
+  reasons: string[];
+}
+export async function openCredits194RUsability(
+  db: Tds194RDb,
+  a: { clientId: string; fyLabel: string; methodology: string; now?: Date },
+): Promise<Map<string, OpenCredits194R>> {
+  const rows = await db.tdsCredit.findMany({
+    where: { clientId: a.clientId, section: 'SEC_194R', fyLabel: a.fyLabel },
+    select: { panNumber: true, amountPaise: true, appliedPaise: true, sourcePayoutEntryId: true },
+  });
+  const open = (rows ?? []).filter((r) => r.amountPaise - r.appliedPaise > 0n && r.panNumber?.trim());
+  const out = new Map<string, OpenCredits194R>();
+  if (open.length === 0) return out;
+  const currentFy = financialYear(a.now ?? new Date()).fyLabel;
+  // (c) the key the retailer's future payouts use: the source payout's outlet owner TODAY (payeeKeyFor).
+  const src = await db.creditPayoutEntry.findMany({
+    where: { id: { in: open.map((r) => r.sourcePayoutEntryId) } },
+    select: { id: true, outletId: true },
+  });
+  const codes = [...new Set((src ?? []).map((e) => e.outletId))];
+  const outlets = codes.length
+    ? await db.outlet.findMany({
+        where: { clientId: a.clientId, outletCode: { in: codes } },
+        select: { outletCode: true, partner: { select: { id: true, panNumber: true } } },
+      })
+    : [];
+  const ownerOf = new Map((outlets ?? []).map((o) => [o.outletCode, o.partner ?? null]));
+  const outletOf = new Map((src ?? []).map((e) => [e.id, e.outletId]));
+  for (const r of open) {
+    const key = retailerKeyOfLedgerPan(r.panNumber);
+    const outlet = outletOf.get(r.sourcePayoutEntryId) ?? null;
+    const nowKey = outlet ? payeeKeyFor(a.clientId, outlet, ownerOf.get(outlet) ?? null) : null;
+    const reason =
+      a.fyLabel !== currentFy
+        ? 'later-year reversal / FY closed'
+        : a.methodology !== 'DEDUCT'
+          ? 'method changed to gross-up'
+          : nowKey !== key
+            ? 'PAN changed'
+            : null;
+    const b = out.get(key) ?? { usable: 0n, unusable: 0n, reasons: [] };
+    const amt = r.amountPaise - r.appliedPaise;
+    if (reason) {
+      b.unusable += amt;
+      if (!b.reasons.includes(reason)) b.reasons.push(reason);
+    } else {
+      b.usable += amt;
+    }
+    out.set(key, b);
   }
   return out;
 }

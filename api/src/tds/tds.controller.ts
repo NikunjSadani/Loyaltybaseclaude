@@ -318,6 +318,10 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
     ...(r.reversal ? { reversal: serializeReversal(r.reversal) } : {}),
     // Audit A4: an open TDS credit (WRE V2 reversal) lowers the row's excess — say how much (only when there is one).
     ...(r.openTdsCreditPaise !== undefined ? { openTdsCreditPaise: r.openTdsCreditPaise.toString() } : {}),
+    // Re-audit A1: credit that can never be used — counted as excess, with why.
+    ...(r.unusableTdsCreditPaise !== undefined
+      ? { unusableTdsCreditPaise: r.unusableTdsCreditPaise.toString(), unusableTdsCreditReasons: r.unusableTdsCreditReasons ?? [] }
+      : {}),
   };
 }
 
