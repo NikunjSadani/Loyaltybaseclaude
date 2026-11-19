@@ -48,7 +48,10 @@ export interface NotificationGuideInput {
   androidBrowser?: AndroidBrowser;
   /** The site host shown in the browser's site-settings list (e.g. bajaj.gifsy.in). */
   host?: string;
-  /** The app's name as it appears in phone Settings (e.g. "Bajaj Sales"). */
+  /**
+   * The app's name as it appears in phone Settings — the install manifest's name (`pwaAppName()`), e.g.
+   * "Bajaj Consumer Care Ltd" (/partner) or "Bajaj Consumer Care Ltd Sales" (/sales). Callers pass it; never hard-coded.
+   */
   appName?: string;
 }
 

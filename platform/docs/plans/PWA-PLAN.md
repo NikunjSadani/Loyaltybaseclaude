@@ -12,7 +12,7 @@
 A reminder after login / on app open for users who haven't allowed notifications, with **device-specific steps**
 (wording = the Bajaj training deck). No WhatsApp. **TENANT-SCOPED** — gated on slug `bajaj` exactly like
 `PushSubscriptionManager`; Deoleo + every other tenant keep the old one-line bar / generic sentence, unchanged.
-- **Where:** `components/pwa/NotificationReminder.tsx` (modal: heading focused on open, Escape/×/backdrop close,
+- **Where:** `components/pwa/NotificationReminder.tsx` (modal: heading focused on open, Escape/× close,
   focus trapped + restored, polite live region), content from `lib/pwa/notification-guide.ts`, device from the
   location gate's `currentLocationPlatform()` (+ an iOS-version read for the 16.4 floor). Mounted only by
   `PushSubscriptionManager`'s Bajaj branch — it **replaces** the old bottom bar for Bajaj (never both).
@@ -23,9 +23,17 @@ A reminder after login / on app open for users who haven't allowed notifications
   granted → nothing (silent re-sync as before).
 - **When:** only after the session is CONFIRMED live (background-tagged `GET /api/auth/me`) — a page about to bounce
   to login never reminds, auto-asks or uses up the flag. Once per session (`sessionStorage['pwa-notif-reminder']` =
-  the confirmed user id, written when the reminder is actually on screen; a different user in the same tab sees it
-  again). "Remind me later" / × / Escape = rest of the session (a backdrop tap does NOT dismiss); back on the next
-  app open until allowed.
+  the confirmed user id; a different user in the same tab sees it again). The flag is written ONLY after the reminder
+  has been on screen ≥ 3 s, or on a dismiss / Enable / "check again" — never at render: on a brand-new session the
+  service worker's first `clients.claim()` fires `controllerchange` ~1 s in and `ServiceWorkerRegister` reloads the
+  page, which used to burn the flag on exactly the first open (fix `fix/notif-reminder-sw-reload`, 2026-11-19). The
+  dwell rule was chosen over "wait for a pending SW claim" because a pending first claim can't be detected reliably
+  and the dwell rule also survives any other early reload; the cost is the reminder may flash ~1 s then re-appear
+  after that reload. "Remind me later" / × / Escape = rest of the session (a backdrop tap does NOT dismiss); back on
+  the next app open until allowed.
+- **App name in the steps** comes from the install manifest (`pwaAppName()` → the manifest `name`/`short_name`):
+  "Bajaj Consumer Care Ltd" on /partner, "Bajaj Consumer Care Ltd Sales" on /sales — what the phone lists. Never
+  hard-coded.
 - **Auto-ask at load:** kept on Android/desktop, raced with an 8 s timeout (Chrome's quiet chip / an ignored bubble
   never resolves) — on timeout the reminder shows, and a late Allow subscribes + closes it. Skipped on iPhone/iPad
   (iOS needs a tap → the Enable button). Enable trusts `Notification.permission` over the promise: 'denied' answer
