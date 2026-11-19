@@ -19,6 +19,7 @@ import {
 } from 'recharts';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
+import { liabilitySplitNote } from '@/lib/wallet-negative';
 import { redemptionModeLabel, canonicalRedemptionMode } from '@/lib/redemption-mode';
 import { useDashboardProgram, withProgramParam, isTenantWideMetric, MIN_PROGRAMS_FOR_FILTER } from '@/lib/dashboard-program';
 import { ProgramFilter, TenantWideNote } from '@/components/admin/dashboard/ProgramFilter';
@@ -62,8 +63,9 @@ interface ProgramHealthData {
     redeemed: number;
     outstandingLiabilityPoints: number;
     outstandingLiabilityRupees: number;
-    /** Audit item 1 (2026-11-19): Σ debt of negative wallets — reported separately, never netted. */
+    /** Owner D1/D2 (2026-11-19): Σ |negative balances| + how many wallets — reported separately, never netted. */
     owedPoints?: number;
+    owedWallets?: number;
     breakagePct: number;
     expiringIn30dPoints: number;
   };
@@ -562,7 +564,7 @@ export default function AdminProgramHealthDashboardPage() {
             <StatCard label="Redeemed (period)" value={fmtInt(pointsEconomy.redeemed)} sub="REDEEM points" tenantWide={tw('pointsEconomy.redeemed')}
               icon={Gift} iconBg="bg-purple-100" iconColor="text-purple-600" valColor="text-purple-700" />
             <StatCard label="Outstanding Liability" value={fmtInt(pointsEconomy.outstandingLiabilityPoints)}
-              sub={`${fmtRupees(pointsEconomy.outstandingLiabilityRupees)} redeemable${(pointsEconomy.owedPoints ?? 0) > 0 ? ` · ${fmtInt(pointsEconomy.owedPoints ?? 0)} pts owed (debt, not netted)` : ''}`} tenantWide={tw('pointsEconomy.outstandingLiabilityPoints')}
+              sub={`${fmtRupees(pointsEconomy.outstandingLiabilityRupees)} redeemable${liabilitySplitNote(pointsEconomy.owedPoints, pointsEconomy.owedWallets) ? ` · ${liabilitySplitNote(pointsEconomy.owedPoints, pointsEconomy.owedWallets)}` : ''}`} tenantWide={tw('pointsEconomy.outstandingLiabilityPoints')}
               icon={Coins} iconBg="bg-blue-100" iconColor="text-blue-600" valColor="text-blue-700" />
             <StatCard label="Liability (₹)" value={fmtRupees(pointsEconomy.outstandingLiabilityRupees)} sub="at tenant rate" tenantWide={tw('pointsEconomy.outstandingLiabilityRupees')}
               icon={Coins} iconBg="bg-sky-100" iconColor="text-sky-600" valColor="text-sky-700" />

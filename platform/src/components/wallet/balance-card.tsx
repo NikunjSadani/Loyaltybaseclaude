@@ -1,16 +1,18 @@
 import React from 'react';
 import { formatPoints } from '@/lib/utils';
 import type { WalletBalance } from '@/types';
-import { formatSignedPoints, negativeBalanceNote } from '@/lib/wallet-negative';
+import { formatSignedPoints, negativeBalanceNote, type NoteAudience } from '@/lib/wallet-negative';
 
 export { formatSignedPoints, negativeBalanceNote };
 
 interface BalanceCardProps {
   balance: WalletBalance;
+  /** 'staff' when a sales rep / admin views the outlet's wallet ("This outlet owes …"), else the retailer's own words. */
+  audience?: NoteAudience;
 }
 
-export function BalanceCard({ balance }: BalanceCardProps) {
-  const note = negativeBalanceNote(balance);
+export function BalanceCard({ balance, audience = 'partner' }: BalanceCardProps) {
+  const note = negativeBalanceNote(balance, audience);
   return (
     <div className="bg-gradient-to-br from-[#1A1A2E] to-[#16213E] rounded-2xl px-5 py-4 text-white shadow-xl">
       {/* Lifetime Earned — primary */}

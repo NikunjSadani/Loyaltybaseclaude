@@ -503,12 +503,14 @@ export default function OutletWalletPage() {
                 {wallet.redeemablePoints < 0 ? (
                   // Owner decision 2 (2026-11-19): a negative balance shown as it is, with what it means — never a ₹ value.
                   <p data-testid="admin-negative-balance-note" className="text-xs text-amber-700 mt-1">
-                    {negativeBalanceNote({
-                      redeemable: wallet.redeemablePoints,
-                      owedPoints: wallet.owedPoints,
-                      owedFromReversal: wallet.owedFromReversal,
-                    })}{' '}
-                    Not available to redeem while the balance is negative.
+                    {negativeBalanceNote(
+                      {
+                        redeemable: wallet.redeemablePoints,
+                        owedPoints: wallet.owedPoints,
+                        owedFromReversal: wallet.owedFromReversal,
+                      },
+                      'staff',
+                    )}
                   </p>
                 ) : (
                   <p className="text-xs text-gray-500 mt-1">

@@ -33,6 +33,13 @@ describe('BalanceCard — negative balance', () => {
     expect(negativeBalanceNote({ redeemable: -841 })).toBe("You owe 841 pts — it's repaid from your next earnings.");
   });
 
+  it('B6: staff (sales outlet view / admin) read "This outlet owes …", never the retailer wording "You owe …"', () => {
+    render(<BalanceCard balance={bal(-2986, { owedPoints: 2986, owedFromReversal: true })} audience="staff" />);
+    expect(screen.getByTestId('negative-balance-note').textContent).toBe(
+      "This outlet owes 2,986 pts from a reversed credit — repaid from its next earnings; it can't redeem until its balance is back above zero.",
+    );
+  });
+
   it('0 or above: unchanged — no note', () => {
     render(<BalanceCard balance={bal(7014)} />);
     expect(screen.getByTestId('available-to-redeem').textContent).toBe('7,014 pts');

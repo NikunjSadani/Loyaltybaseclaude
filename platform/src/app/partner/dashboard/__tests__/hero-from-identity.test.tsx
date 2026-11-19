@@ -142,4 +142,20 @@ describe('HFI — hero keyed off authoritative /partner/me identity', () => {
     // MT hero has NO Available wallet zone.
     expect(screen.queryByText('Available')).not.toBeInTheDocument();
   });
+
+  it('owner decision 2 (2026-11-19): the hero shows a negative balance as it is, with the note', async () => {
+    identityRef.current = identity('WHOLESALER');
+    const base = stubFetch();
+    vi.stubGlobal('fetch', vi.fn((url: string) =>
+      url.includes('/api/auth/me')
+        ? Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ success: true, data: { user: { channelPartner: { wallets: [{ redeemablePoints: -2986 }] } } } }),
+          })
+        : base(url),
+    ));
+    render(<PartnerDashboardPage />);
+    expect((await screen.findByTestId('hero-available')).textContent).toBe('−2,986pts');
+    expect(screen.getByTestId('hero-negative-note').textContent).toBe("You owe 2,986 pts — it's repaid from your next earnings.");
+  });
 });

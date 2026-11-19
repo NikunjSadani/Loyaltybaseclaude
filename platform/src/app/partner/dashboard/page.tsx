@@ -18,6 +18,7 @@ import {
   type Banner, type Popup,
 } from '@/lib/banner';
 import { formatPoints } from '@/lib/utils';
+import { formatSignedPoints, negativeBalanceNote } from '@/lib/wallet-negative';
 import { formatInrCompact, formatCompact, isInrUnit, formatKpiAmount, formatKpiSoFar } from '@/lib/format-inr';
 import type { PayoutLedgerEntry } from '@/types';
 import { buildCasesToGoMsg, classifyPaceGap, fmtKpiNum, fmtRemaining, remainingOf } from '@/lib/pace';
@@ -841,10 +842,19 @@ function WholesalerHero({
       <div className={`border-t border-white/10 bg-black/25 px-4 flex items-center justify-between ${v2 ? 'py-4' : 'py-3'}`}>
         <div>
           <p className="text-[10px] text-white/40 font-medium mb-0.5">Available</p>
-          <p className={`font-extrabold text-white ${v2 ? 'text-3xl leading-none' : 'text-base'}`}>
-            {walletPoints === null ? '—' : formatPoints(walletPoints)}
+          <p
+            data-testid="hero-available"
+            className={`font-extrabold ${walletPoints !== null && walletPoints < 0 ? 'text-amber-300' : 'text-white'} ${v2 ? 'text-3xl leading-none' : 'text-base'}`}
+          >
+            {walletPoints === null ? '—' : formatSignedPoints(walletPoints)}
             <span className={`font-medium text-white/50 ml-1 ${v2 ? 'text-base' : 'text-sm'}`}>pts</span>
           </p>
+          {/* Owner decision 2 (2026-11-19): a negative balance is shown as it is, with what it means */}
+          {walletPoints !== null && walletPoints < 0 && (
+            <p data-testid="hero-negative-note" className="text-[10px] text-amber-200 mt-1 max-w-[14rem] leading-snug">
+              {negativeBalanceNote({ redeemable: walletPoints })}
+            </p>
+          )}
         </div>
         <Link href="/partner/rewards"
           className={`flex items-center gap-1.5 bg-white rounded-lg font-bold text-[var(--brand-primary)] hover:bg-white/90 active:scale-95 transition-all ${v2 ? 'px-5 py-3 text-base' : 'px-3 py-1.5 text-xs'}`}>

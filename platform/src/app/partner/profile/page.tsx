@@ -10,7 +10,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Modal } from '@/components/ui/modal';
-import { formatPoints, maskAccountNumber } from '@/lib/utils';
+import { maskAccountNumber } from '@/lib/utils';
+import { formatSignedPoints, negativeBalanceNote } from '@/lib/wallet-negative';
 import { KYCStatus } from '@/types';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { api } from '@/lib/api-client';
@@ -311,10 +312,19 @@ export default function ProfilePage() {
           <CardContent>
             <div className="flex justify-center">
               <div className="text-center p-3 bg-gray-50 rounded-xl w-full">
-                <p className="text-lg font-bold text-[var(--brand-primary)]">
-                  {formatPoints(profile.wallet.redeemable)}
+                <p
+                  data-testid="profile-redeemable"
+                  className={`text-lg font-bold ${profile.wallet.redeemable < 0 ? 'text-amber-700' : 'text-[var(--brand-primary)]'}`}
+                >
+                  {formatSignedPoints(profile.wallet.redeemable)}
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">Redeemable</p>
+                {/* Owner decision 2 (2026-11-19): a negative balance is shown as it is, with what it means */}
+                {profile.wallet.redeemable < 0 && (
+                  <p data-testid="profile-negative-note" className="text-xs text-amber-700 mt-1">
+                    {negativeBalanceNote({ redeemable: profile.wallet.redeemable })}
+                  </p>
+                )}
               </div>
             </div>
           </CardContent>

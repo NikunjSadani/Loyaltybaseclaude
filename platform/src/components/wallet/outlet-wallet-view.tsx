@@ -172,9 +172,9 @@ export function currentMonthInput(): string {
 
 /* ─── Points summary card ─────────────────────────────────────────────────────── */
 
-function PointsSummary({ balance }: { balance: WalletBalance | null }) {
+function PointsSummary({ balance, audience }: { balance: WalletBalance | null; audience: 'partner' | 'staff' }) {
   if (!balance) return null;
-  return <BalanceCard balance={balance} />;
+  return <BalanceCard balance={balance} audience={audience} />;
 }
 
 /* ─── Payout (INR) summary card ───────────────────────────────────────────────── */
@@ -251,6 +251,8 @@ export interface OutletWalletViewProps {
   statementErrorMessage?: string;
   /** Sales / admin views: show the reversal reference under a "Credit reversed" row (owner decision 2, 2026-11-19). */
   showReversalReference?: boolean;
+  /** Who is looking: the outlet itself ('partner', default) or a sales rep / admin ('staff' — "This outlet owes …"). */
+  audience?: 'partner' | 'staff';
 }
 
 const DEFAULT_STATEMENT_ERROR = "Couldn't load your statement. Please try again.";
@@ -258,7 +260,7 @@ const DEFAULT_STATEMENT_ERROR = "Couldn't load your statement. Please try again.
 export function OutletWalletView({
   balance, transactions, payouts, statementError,
   showPointsCard, showPayoutCard, inclActivationNote, loyaltyEnabled, outletType, outletCode,
-  loadStatementDoc, statementErrorMessage, showReversalReference = false,
+  loadStatementDoc, statementErrorMessage, showReversalReference = false, audience = 'partner',
 }: OutletWalletViewProps) {
   /* Earn / Burn filter (points rows only) */
   const [earnBurnFilter, setEarnBurnFilter] = useState<'all' | 'earn' | 'burn'>('all');
@@ -393,7 +395,7 @@ export function OutletWalletView({
   return (
     <>
       {/* ── Summary cards — presence-based (points, payout, both, or none) ── */}
-      {showPointsCard && <PointsSummary balance={balance} />}
+      {showPointsCard && <PointsSummary balance={balance} audience={audience} />}
       {showPayoutCard && (
         <PayoutSummary payouts={payouts} inclActivationNote={inclActivationNote} />
       )}

@@ -300,15 +300,29 @@ interface PointsOutcome {
   owed: number;
   /** V2: the credit's own points that had already expired — counted as recovered (owner 2026-11-19). */
   alreadyExpired?: number;
+  /** V2: how far below zero this reversal took the balance — the points owed it added (owner D1). */
+  belowZero?: number;
+  /** The part of the balance drop that stayed at or above zero ("taken from the wallet"). */
+  taken?: number;
   shortfall: number;
 }
 
 const rupees = formatInrPaise;
 
-/** Audit item 3: the points of an approved POINTS reversal that became wallet debt (V2 — owner 2026-11-19). */
-function pointsDebtOf(rev: Pick<Reversal, 'awardType' | 'pointsOutcome'>): number {
-  if (rev.awardType === 'PAYOUT' || !rev.pointsOutcome) return 0;
-  return Math.max(0, Number(rev.pointsOutcome.owed ?? 0) + Number(rev.pointsOutcome.debtRestored ?? 0));
+/**
+ * Fix round 3 (A5/B5 + owner D1): what an approved POINTS reversal did to the outlet's balance, as the report shows it —
+ * the four parts add up to the points reversed: taken (balance drop that stayed ≥ 0), already expired (nothing to
+ * recover), owed (how far below zero it took the balance), pending (written off). From the server's pointsOutcome;
+ * a reversal without one (PAYOUT / older API) is taken = supposed − pending.
+ */
+function reportPartsOf(rev: Pick<Reversal, 'awardType' | 'pointsOutcome' | 'approvedPaise' | 'shortfallPaise'>) {
+  const supposed = Number(rev.approvedPaise ?? 0);
+  const pending = Number(rev.shortfallPaise ?? 0);
+  const o = rev.awardType === 'PAYOUT' ? undefined : rev.pointsOutcome;
+  const expired = Math.max(0, Number(o?.alreadyExpired ?? 0));
+  const owed = Math.max(0, Number(o?.belowZero ?? 0));
+  const taken = o && typeof o.taken === 'number' ? o.taken : Math.max(0, supposed - pending - expired - owed);
+  return { supposed, pending, expired, owed, taken };
 }
 
 function describePayoutOutcome(o: PayoutOutcome, rev?: { outletName: string; fieldName: string }): { title: string; lines: string[] } {
@@ -492,7 +506,9 @@ function PayoutPageInner() {
   const [revLoading,         setRevLoading]         = useState(false);
   const [processedReversals, setProcessedReversals] = useState<Reversal[]>([]);
   // The Debt column appears only when a listed reversal booked debt (V2) — a LEGACY tenant's report is unchanged.
-  const processedHasDebt = processedReversals.some((r) => pointsDebtOf(r) > 0);
+  const processedHasDebt = processedReversals.some((r) => reportPartsOf(r).owed > 0);
+  const processedHasExpired = processedReversals.some((r) => reportPartsOf(r).expired > 0);
+  const processedCols = 7 + (processedHasDebt ? 1 : 0) + (processedHasExpired ? 1 : 0);
 
   // Pagination for the two REVERSALS lists (pending + processed). The downloads/fields
   // fetches are left un-paginated per scope.
@@ -1554,10 +1570,15 @@ function PayoutPageInner() {
           Approved reversals. <strong>Pending</strong> = the portion that could not be reclaimed
           (the partner had already redeemed those points) — the client settles this off-platform;
           the platform takes no further action.
+          {processedHasExpired && (
+            <>
+              {' '}<strong>Already expired</strong> = points of that credit that had already expired — nothing to recover.
+            </>
+          )}
           {processedHasDebt && (
             <>
-              {' '}<strong>Debt</strong> = points the wallet no longer held: recorded as debt on that wallet and repaid
-              from its future earnings — not reversed yet, and not pending.
+              {' '}<strong>Owed</strong> = how far below zero the reversal took the outlet&apos;s balance — repaid from its
+              future earnings (not pending, not written off).
             </>
           )}
         </p>
@@ -1574,7 +1595,8 @@ function PayoutPageInner() {
                   <th className="py-2 pr-3 font-medium">Period</th>
                   <th className="py-2 pr-3 font-medium text-right">Supposed</th>
                   <th className="py-2 pr-3 font-medium text-right">Reversed</th>
-                  {processedHasDebt && <th className="py-2 pr-3 font-medium text-right">Debt</th>}
+                  {processedHasExpired && <th className="py-2 pr-3 font-medium text-right">Already expired</th>}
+                  {processedHasDebt && <th className="py-2 pr-3 font-medium text-right">Owed</th>}
                   <th className="py-2 pr-3 font-medium text-right">Pending</th>
                   <th className="py-2 font-medium">Approved</th>
                 </tr>
@@ -1584,11 +1606,9 @@ function PayoutPageInner() {
                   const isPayout = rev.awardType === 'PAYOUT';
                   // approvedPaise = "supposed"; shortfallPaise = "pending"; reversed = supposed - pending.
                   // PAYOUT values are integer paise (÷100 for ₹); POINTS are whole points (as-is).
-                  const supposed = Number(rev.approvedPaise ?? 0);
-                  const pending  = Number(rev.shortfallPaise ?? 0);
-                  // Audit item 3 (2026-11-19): on V2 the part the wallet no longer held is DEBT — never shown as reversed.
-                  const debt     = pointsDebtOf(rev);
-                  const reversed = supposed - pending - debt;
+                  // Fix round 3 (A5/B5): Reversed = only what was taken from a balance at or above zero; the credit's
+                  // own expired points and what went below zero (owed) are their own columns — never shown as reversed.
+                  const { supposed, pending, expired, owed: debt, taken: reversed } = reportPartsOf(rev);
                   const fmt = (v: number) =>
                     isPayout ? rupees(v) : `${v.toLocaleString('en-IN')} pts`;
                   const entries = rev.payoutEntries ?? [];
@@ -1605,6 +1625,11 @@ function PayoutPageInner() {
                       <td className="py-2 pr-3 text-gray-700">{monthLabel(rev.period)}</td>
                       <td className="py-2 pr-3 text-right font-medium text-gray-800">{fmt(supposed)}</td>
                       <td className="py-2 pr-3 text-right font-medium text-emerald-700">{fmt(reversed)}</td>
+                      {processedHasExpired && (
+                        <td className="py-2 pr-3 text-right font-medium text-gray-600" data-testid={`processed-expired-${rev.id}`}>
+                          {fmt(expired)}
+                        </td>
+                      )}
                       {processedHasDebt && (
                         <td className="py-2 pr-3 text-right font-medium" data-testid={`processed-debt-${rev.id}`}>
                           {debt > 0 ? (
@@ -1627,7 +1652,7 @@ function PayoutPageInner() {
                     </tr>
                     {hasDetails && (
                       <tr className="border-b border-gray-100" data-testid={`processed-details-${rev.id}`}>
-                        <td colSpan={processedHasDebt ? 8 : 7} className="pb-2 pr-3 text-gray-600 space-y-0.5">
+                        <td colSpan={processedCols} className="pb-2 pr-3 text-gray-600 space-y-0.5">
                           {outcomeText && (
                             <p className="break-words" data-testid={`points-outcome-${rev.id}`}>
                               <span className="text-gray-400">Outcome:</span> {outcomeText}

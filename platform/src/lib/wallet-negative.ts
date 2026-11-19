@@ -11,11 +11,29 @@ export function formatSignedPoints(n: number): string {
   return n < 0 ? `−${formatPoints(-n)}` : formatPoints(n);
 }
 
+/**
+ * Owner decision D2 (2026-11-19, every tenant): the one-line explanation next to any liability figure when some wallets
+ * are below zero. Null when nothing is owed (a tenant with no negative wallet renders exactly as before).
+ */
+export function liabilitySplitNote(owedPoints: number | undefined, owedWallets: number | undefined): string | null {
+  const owed = owedPoints ?? 0;
+  if (!(owed > 0)) return null;
+  const n = owedWallets ?? 0;
+  return `Liability counts positive balances only; ${formatPoints(owed)} pts owed by ${formatPoints(n)} outlet${n === 1 ? '' : 's'} with a negative balance ${n === 1 ? 'is' : 'are'} shown separately.`;
+}
+
+/** Who reads the note: the retailer ("You owe …") or Gifsy / sales / client staff looking at an outlet (B6). */
+export type NoteAudience = 'partner' | 'staff';
+
 /** What a negative wallet owes, in plain words. Null for a balance at 0 or above. */
 export function negativeBalanceNote(
   balance: Pick<WalletBalance, 'redeemable' | 'owedPoints' | 'owedFromReversal'>,
+  audience: NoteAudience = 'partner',
 ): string | null {
   if (!(balance.redeemable < 0)) return null;
-  const owed = balance.owedPoints ?? -balance.redeemable;
-  return `You owe ${formatPoints(owed)} pts${balance.owedFromReversal ? ' from a reversed credit' : ''} — it's repaid from your next earnings.`;
+  const owed = formatPoints(balance.owedPoints ?? -balance.redeemable);
+  const why = balance.owedFromReversal ? ' from a reversed credit' : '';
+  return audience === 'staff'
+    ? `This outlet owes ${owed} pts${why} — repaid from its next earnings; it can't redeem until its balance is back above zero.`
+    : `You owe ${owed} pts${why} — it's repaid from your next earnings.`;
 }

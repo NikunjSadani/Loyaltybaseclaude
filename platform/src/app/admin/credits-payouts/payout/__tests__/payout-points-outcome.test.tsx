@@ -34,7 +34,7 @@ const base = {
 };
 
 const V2_OUTCOME = {
-  reversed: 10000, recovered: 7014, debtRestored: 0, owed: 2986, shortfall: 0,
+  reversed: 10000, recovered: 7014, debtRestored: 0, owed: 2986, shortfall: 0, alreadyExpired: 0, belowZero: 2986, taken: 7014,
   headline: 'Approved · 10,000 pts reversed · 7,014 taken from the wallet · 2,986 recorded as debt, repaid from future earnings',
   summary: '10,000 pts reversed · 7,014 taken from the wallet · 2,986 recorded as debt, repaid from future earnings',
   lines: ['7,014 taken from the wallet', '2,986 recorded as debt, repaid from future earnings'],
@@ -129,7 +129,7 @@ describe('Reversal Report — audit item 3 (debt is never shown as reversed)', (
     } as ReturnType<typeof useAdminSession>);
   });
 
-  it('a Debt column appears when a reversal booked debt: 10,000 supposed = 7,014 reversed + 2,986 debt + 0 pending', async () => {
+  it('an Owed column appears when a reversal took a balance below zero: 10,000 supposed = 7,014 reversed + 2,986 owed + 0 pending', async () => {
     const json = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload, blob: async () => new Blob() });
     global.fetch = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -151,11 +151,12 @@ describe('Reversal Report — audit item 3 (debt is never shown as reversed)', (
     const row = debt.closest('tr')!;
     expect(row.textContent).toContain('7,014 pts'); // reversed (green) = taken only
     expect(row.textContent).not.toMatch(/10,000 pts.*10,000 pts/); // never "Reversed 10,000"
-    expect(screen.getByRole('columnheader', { name: 'Debt' })).toBeTruthy();
-    expect(document.body.textContent).toMatch(/Debt = points the wallet no longer held/);
+    expect(screen.getByRole('columnheader', { name: 'Owed' })).toBeTruthy();
+    expect(document.body.textContent).toMatch(/Owed = how far below zero the reversal took the outlet.s balance/);
+    expect(screen.queryByRole('columnheader', { name: 'Already expired' })).toBeNull();
   });
 
-  it('no reversal with debt (every LEGACY tenant): no Debt column — the report is unchanged', async () => {
+  it('no reversal with debt (every LEGACY tenant): no Owed / Already-expired column — the report is unchanged', async () => {
     const json = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload, blob: async () => new Blob() });
     global.fetch = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -182,6 +183,46 @@ describe('Reversal Report — audit item 3 (debt is never shown as reversed)', (
     }) as unknown as typeof fetch;
     render(<PayoutDownloadPage />);
     await screen.findByTestId('points-outcome-r-done-legacy');
-    expect(screen.queryByRole('columnheader', { name: 'Debt' })).toBeNull();
+    expect(screen.queryByRole('columnheader', { name: 'Owed' })).toBeNull();
+    expect(screen.queryByRole('columnheader', { name: 'Already expired' })).toBeNull();
+  });
+});
+
+describe('Reversal Report — fix round 3 A5/B5 (expired points and debt restored are never shown as "Reversed")', () => {
+  beforeEach(() => {
+    vi.mocked(useAdminSession).mockReturnValue({
+      role: 'GIFSY_ADMIN', clientId: 'gifsy', name: 'Test Admin', userId: '', canManageSchemes: true,
+    } as ReturnType<typeof useAdminSession>);
+  });
+
+  it('10,000 supposed = 2,000 reversed + 3,000 already expired + 5,000 owed', async () => {
+    const json = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload, blob: async () => new Blob() });
+    global.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/reversals') && url.includes('APPROVED')) {
+        return json({
+          success: true,
+          data: {
+            reversals: [{
+              ...base, id: 'r-exp', requestedPaise: 10000, approvedPaise: 10000, shortfallPaise: 0, status: 'APPROVED',
+              approvedAt: '2026-11-19T00:00:00.000Z',
+              pointsOutcome: {
+                reversed: 10000, recovered: 2000, debtRestored: 0, owed: 5000, alreadyExpired: 3000, belowZero: 5000, taken: 2000, shortfall: 0,
+                headline: 'h', summary: '10,000 pts reversed · 2,000 taken from the wallet · 3,000 already expired — nothing to recover · 5,000 recorded as debt, repaid from future earnings', lines: [],
+              },
+            }],
+            pagination: { page: 1, limit: 50, total: 1, pages: 1 },
+          },
+        });
+      }
+      if (url.includes('/reversals')) return json({ success: true, data: { reversals: [], pagination: null } });
+      return json({ success: true, data: [] });
+    }) as unknown as typeof fetch;
+    render(<PayoutDownloadPage />);
+    expect((await screen.findByTestId('processed-expired-r-exp')).textContent).toBe('3,000 pts');
+    expect(screen.getByTestId('processed-debt-r-exp').textContent).toBe('5,000 pts');
+    const row = screen.getByTestId('processed-debt-r-exp').closest('tr')!;
+    expect(row.textContent).toContain('2,000 pts');
+    expect(document.body.textContent).toMatch(/Already expired = points of that credit that had already expired/);
   });
 });

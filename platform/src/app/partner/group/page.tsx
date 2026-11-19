@@ -45,6 +45,8 @@ interface GroupTotals {
   redeemablePoints: number;
   /** What the group's negative outlets owe, repaid from their future earnings (absent on older APIs → 0). */
   owedPoints?:      number;
+  /** How many of the group's outlets are below zero (owner D2). */
+  owedWallets?:     number;
   earnedPoints:     number;
   redeemedPoints:   number;
   expiredPoints:    number;
@@ -172,7 +174,7 @@ function GroupTotalsCard({ totals, conversionRate }: { totals: GroupTotals; conv
 
       {(totals.owedPoints ?? 0) > 0 && (
         <p data-testid="group-owed-points" className="mt-2 text-[11px] leading-snug text-amber-200">
-          Outlets in this group owe {formatPoints(totals.owedPoints ?? 0)} pts — repaid from their next earnings (not counted above).
+          {totals.owedWallets ? `${formatPoints(totals.owedWallets)} outlet${totals.owedWallets === 1 ? '' : 's'}` : 'Outlets'} in this group owe {formatPoints(totals.owedPoints ?? 0)} pts — repaid from their next earnings (not counted above).
         </p>
       )}
 
