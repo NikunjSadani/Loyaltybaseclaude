@@ -1,4 +1,4 @@
-import { escapeHtml, linkEnvironment, ticketEmailLink, ticketPath } from './ticket-link';
+import { escapeHtml, linkEnvironment, pickTenantDomain, ticketEmailLink, ticketPath } from './ticket-link';
 
 // The environment comes from SERVER config, never from the caller's host.
 const STAGING = { NODE_ENV: 'production', K_SERVICE: 'gifsy-api-staging', DATABASE_URL: 'postgresql://u:p@10.0.0.3:5432/gifsy_staging' };
@@ -58,5 +58,22 @@ describe('ticketEmailLink', () => {
   it('path + escaping helpers', () => {
     expect(ticketPath('abc')).toBe('/admin/tickets?ticket=abc');
     expect(escapeHtml(`<a href="x">'&`)).toBe('&lt;a href=&quot;x&quot;&gt;&#39;&amp;');
+  });
+});
+
+describe('pickTenantDomain (strict primary; never a staging host in prod)', () => {
+  it('uses only the row flagged primary', () => {
+    expect(pickTenantDomain([{ domain: 'a.gifsy.in', isPrimary: false }, { domain: 'b.gifsy.in', isPrimary: true }], 'bajaj', PROD))
+      .toEqual({ domain: 'b.gifsy.in', note: null });
+  });
+  it('no primary → null + a note (never the alphabetically-first row, e.g. a uat- domain)', () => {
+    const r = pickTenantDomain([{ domain: 'uat-bajajloyalty.gifsy.in', isPrimary: false }], 'bajaj', PROD);
+    expect(r.domain).toBeNull();
+    expect(r.note).toMatch(/no primary domain.*bajaj\.gifsy\.in/);
+  });
+  it('prod refuses a staging-looking primary; staging accepts it', () => {
+    const rows = [{ domain: 'uat-bajajloyalty.gifsy.in', isPrimary: true }];
+    expect(pickTenantDomain(rows, 'bajaj', PROD)).toMatchObject({ domain: null, note: expect.stringMatching(/looks like a staging host/) });
+    expect(pickTenantDomain(rows, 'bajaj', STAGING)).toEqual({ domain: 'uat-bajajloyalty.gifsy.in', note: null });
   });
 });

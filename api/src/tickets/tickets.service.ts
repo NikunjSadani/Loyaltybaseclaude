@@ -24,7 +24,7 @@ import {
   SetTicketStatusDto,
   SETTABLE_TICKET_STATUSES,
 } from './dto/tickets.dto';
-import { escapeHtml, ticketEmailLink, ticketPath } from './ticket-link';
+import { escapeHtml, pickTenantDomain, ticketEmailLink, ticketPath } from './ticket-link';
 import {
   OUTLET_REFERENCE_TYPE,
   PARTNER_ROLES,
@@ -76,6 +76,17 @@ export interface TicketAssignee {
 
 type TicketMeta = Record<string, unknown> & { clientRemarks?: ClientRemarksRequest | null };
 
+/**
+ * ONE rule for where a ticket goes when a remarks request ends — whether the client admin replied
+ * or Gifsy withdrew it: ESCALATED stays ESCALATED and PENDING_USER (waiting on the outlet) stays
+ * PENDING_USER — those states are about something else and the request didn't change them;
+ * everything else (OPEN, IN_PROGRESS, unknown) resumes as IN_PROGRESS — asking the client was
+ * already support work, so the ticket is no longer untouched/OPEN.
+ */
+export function resumeStatusAfterRemarks(fromStatus: string | undefined | null): TicketStatus {
+  return fromStatus === 'ESCALATED' || fromStatus === 'PENDING_USER' ? fromStatus : 'IN_PROGRESS';
+}
+
 function readMeta(metadata: unknown): TicketMeta {
   return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...(metadata as TicketMeta) } : {};
 }
@@ -88,6 +99,13 @@ function withoutRemarks(metadata: unknown): Prisma.InputJsonValue {
 }
 
 type Reader = 'GIFSY' | 'CLIENT' | 'FIELD';
+
+/** The client-visible cancellation note (neutral unless a client-safe reason is given). */
+function cancellationText(requestedFromName: string, clientReason?: string): string {
+  return clientReason
+    ? `Gifsy support has withdrawn the request for remarks from ${requestedFromName} — ${clientReason}.`
+    : `Gifsy support has withdrawn the request for remarks from ${requestedFromName}.`;
+}
 
 /** Tenant-wide stat-card counts for the admin list. */
 export interface TicketSummary {
@@ -279,13 +297,17 @@ export class TicketsService {
     const text = q.q?.trim();
     if (text) {
       const contains = { contains: text, mode: 'insensitive' as const };
-      const outletIds = (
-        await this.prisma.outlet.findMany({
-          where: { clientId: user.clientId, OR: [{ outletCode: contains }, { name: contains }] },
-          select: { id: true },
-          take: 500,
-        })
-      ).map((o) => o.id);
+      // Tickets that REFERENCE a matching outlet (sales "For an Outlet"): resolved with one join in the
+      // DB, so the match is exact and uncapped. The result is bounded by the tenant's referencing
+      // TICKETS (never by how many outlets match the text).
+      const like = `%${text.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+      const refRows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT t."id" FROM "tickets" t
+        JOIN "outlets" o ON o."id" = t."referenceId" AND o."clientId" = t."clientId"
+        WHERE t."clientId" = ${user.clientId}
+          AND t."referenceType" = ${OUTLET_REFERENCE_TYPE}
+          AND (o."outletCode" ILIKE ${like} OR o."name" ILIKE ${like})`);
+      const refTicketIds = (Array.isArray(refRows) ? refRows : []).map((r) => r.id);
       and.push({
         OR: [
           { ticketNumber: contains },
@@ -293,7 +315,7 @@ export class TicketsService {
           { createdBy: { name: contains } },
           { createdBy: { channelPartner: { ownerName: contains } } },
           { createdBy: { channelPartner: { outlets: { some: { OR: [{ outletCode: contains }, { name: contains }] } } } } },
-          ...(outletIds.length ? [{ referenceType: OUTLET_REFERENCE_TYPE, referenceId: { in: outletIds } }] : []),
+          ...(refTicketIds.length ? [{ id: { in: refTicketIds } }] : []),
         ],
       });
     }
@@ -303,9 +325,9 @@ export class TicketsService {
   /** Tenant-wide counts for the admin stat cards (independent of paging / filters). */
   private async summary(clientId: string): Promise<TicketSummary> {
     const [byStatus, highOpen] = await Promise.all([
-      this.prisma.ticket.groupBy({ by: ['status'], where: { clientId }, _count: { _all: true } }),
+      this.prisma.ticket.groupBy({ by: ['status'], where: { clientId, deletedAt: null }, _count: { _all: true } }),
       this.prisma.ticket.count({
-        where: { clientId, priority: { in: ['HIGH', 'CRITICAL'] }, status: { notIn: ['RESOLVED', 'CLOSED'] } },
+        where: { clientId, deletedAt: null, priority: { in: ['HIGH', 'CRITICAL'] }, status: { notIn: ['RESOLVED', 'CLOSED'] } },
       }),
     ]);
     const n = (st: TicketStatus[]) =>
@@ -323,7 +345,8 @@ export class TicketsService {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const reader = this.reader(user);
-    const where: Prisma.TicketWhereInput = { clientId: user.clientId };
+    // Soft-deleted tickets are never listed or counted (same rule as the aging report / ops dashboard).
+    const where: Prisma.TicketWhereInput = { clientId: user.clientId, deletedAt: null };
     // Field roles see only their own tickets; support admins see all tenant tickets.
     if (reader === 'FIELD') where.createdById = user.sub;
     if (q.status) {
@@ -384,8 +407,9 @@ export class TicketsService {
 
     // Support admins get the tenant-wide "awaiting client" count (independent of paging /
     // filters) + how many of those wait on THIS caller (a CLIENT_ADMIN's "awaiting your remarks").
-    if (reader !== 'FIELD') {
-      const base: Prisma.TicketWhereInput = { clientId: user.clientId, status: 'WAITING_ON_CLIENT' };
+    // Counts are tenant-wide and identical for every page — computed once, on page 1 only.
+    if (reader !== 'FIELD' && page === 1) {
+      const base: Prisma.TicketWhereInput = { clientId: user.clientId, deletedAt: null, status: 'WAITING_ON_CLIENT' };
       const [awaitTotal, awaitMine] = await Promise.all([
         this.prisma.ticket.count({ where: base }),
         user.role === 'CLIENT_ADMIN'
@@ -570,22 +594,25 @@ export class TicketsService {
     tx: Prisma.TransactionClient,
     ticket: TicketRow,
     actorId: string,
-    reason: string,
+    /** Client-safe reason (shown to the client desk) — never internal Gifsy detail. Omit for the neutral text. */
+    clientReason?: string,
   ): Promise<ClientRemarksRequest | null> {
     const pending = ticket.status === 'WAITING_ON_CLIENT' ? (readMeta(ticket.metadata).clientRemarks ?? null) : null;
     if (!pending) return null;
     await tx.ticketMessage.create({
-      data: this.note(ticket.id, actorId, `Remarks request to ${pending.requestedFromName} cancelled — ${reason}.`, 'SHARED_WITH_CLIENT'),
+      data: this.note(ticket.id, actorId, cancellationText(pending.requestedFromName, clientReason), 'SHARED_WITH_CLIENT'),
     });
     return pending;
   }
 
-  private async bellCancelled(ticket: TicketRow, cancelled: ClientRemarksRequest | null, reason: string) {
+  private async bellCancelled(ticket: TicketRow, cancelled: ClientRemarksRequest | null, clientReason?: string) {
     if (!cancelled) return;
     await this.notifications.writeInApp({
       userId: cancelled.requestedFromId,
       subject: `Remarks no longer needed on ticket ${ticket.ticketNumber}`,
-      body: `Gifsy support cancelled the request for your remarks — ${reason}.`,
+      body: clientReason
+        ? `Gifsy support has withdrawn the request for your remarks — ${clientReason}.`
+        : 'Gifsy support has withdrawn the request for your remarks.',
       url: ticketPath(ticket.id),
       variables: { event: 'TICKET_CLIENT_REMARKS_CANCELLED', ticketId: ticket.id },
     });
@@ -658,7 +685,6 @@ export class TicketsService {
     const target = await this.resolveAssignee(ticket.clientId, dto.escalateTo, 'GIFSY');
     const priority: TicketPriority = dto.priority ?? 'HIGH';
     const by = await this.actorName(user);
-    const cancelReason = `ticket escalated within Gifsy support by ${by}`;
 
     const cancelled = await this.prisma.$transaction(async (tx) => {
       const moved = await tx.ticket.updateMany({
@@ -672,9 +698,14 @@ export class TicketsService {
         },
       });
       if (moved.count !== 1) throw new ConflictException(TicketsService.CONFLICT);
-      const c = await this.recordRemarksCancelled(tx, ticket, user.sub, cancelReason);
+      const c = await this.recordRemarksCancelled(tx, ticket, user.sub);
       await tx.ticketMessage.create({
-        data: this.note(id, user.sub, `Ticket escalated to ${target.name} by ${by} (priority ${priority}). Reason: ${dto.reason}`, 'GIFSY_ONLY'),
+        data: this.note(
+          id,
+          user.sub,
+          `Ticket escalated to ${target.name} by ${by} (priority ${priority}). Reason: ${dto.reason}${c ? ` — this withdrew the pending remarks request to ${c.requestedFromName}.` : ''}`,
+          'GIFSY_ONLY',
+        ),
       });
       await tx.auditLog.create({
         data: {
@@ -688,7 +719,7 @@ export class TicketsService {
       return c;
     });
 
-    await this.bellCancelled(ticket, cancelled, cancelReason);
+    await this.bellCancelled(ticket, cancelled);
     if (target.id !== user.sub) {
       await this.notifications.writeInApp({
         userId: target.id,
@@ -698,7 +729,12 @@ export class TicketsService {
         variables: { event: 'TICKET_ESCALATED', ticketId: id },
       });
     }
-    return { message: 'Ticket escalated successfully', escalatedTo: target };
+    return {
+      message: 'Ticket escalated successfully',
+      escalatedTo: target,
+      // Surfaced so the UI can say so — a withdrawn request is never silent.
+      cancelledRemarksFrom: cancelled ? cancelled.requestedFromName : null,
+    };
   }
 
   /**
@@ -807,30 +843,39 @@ export class TicketsService {
     callerOrigin: string;
     actorId: string;
   }): Promise<{ sent: true } | { sent: false; reason: string }> {
-    let to = '';
-    let link = '';
-    try {
-      const u = await this.prisma.user.findFirst({ where: { id: p.targetId }, select: { email: true } });
-      to = (u?.email ?? '').trim();
-      const domain = await this.prisma.clientDomain.findFirst({
-        where: { clientId: p.ticket.clientId },
-        orderBy: [{ isPrimary: 'desc' }, { domain: 'asc' }],
-        select: { domain: true },
-      });
-      link = ticketEmailLink({
-        callerOrigin: p.callerOrigin,
-        tenantPrimaryDomain: domain?.domain ?? null,
-        clientId: p.ticket.clientId,
-        ticketId: p.ticket.id,
-      });
-    } catch (e) {
-      this.logger.error(`[tickets] remarks email prep for ${p.ticket.id} failed: ${e}`);
-    }
     const notSent = async (reason: string) => {
       await this.recordEmailOutcome(p.ticket.id, p.actorId, `Email to ${p.targetName} was NOT sent: ${reason}. They were notified in-app only.`);
       return { sent: false as const, reason };
     };
+    // Each prep step reports its OWN failure — a lookup error is never passed off as "no email on file".
+    let to = '';
+    try {
+      const u = await this.prisma.user.findFirst({ where: { id: p.targetId }, select: { email: true } });
+      to = (u?.email ?? '').trim();
+    } catch (e) {
+      this.logger.error(`[tickets] remarks email recipient lookup for ${p.ticket.id} failed: ${e}`);
+      return notSent("the client admin's email address could not be looked up (database error)");
+    }
     if (!to) return notSent('the client admin has no email address on file');
+    let link = '';
+    let linkNote: string | null = null;
+    try {
+      const rows = await this.prisma.clientDomain.findMany({
+        where: { clientId: p.ticket.clientId },
+        select: { domain: true, isPrimary: true },
+      });
+      const picked = pickTenantDomain(Array.isArray(rows) ? rows : [], p.ticket.clientId);
+      linkNote = picked.note;
+      link = ticketEmailLink({
+        callerOrigin: p.callerOrigin,
+        tenantPrimaryDomain: picked.domain,
+        clientId: p.ticket.clientId,
+        ticketId: p.ticket.id,
+      });
+    } catch (e) {
+      this.logger.error(`[tickets] remarks email link for ${p.ticket.id} failed: ${e}`);
+      return notSent("the programme's web address could not be resolved (database error)");
+    }
     // sendEmail silently no-ops when SMTP is unconfigured — never report that as sent.
     if (!this.msg91.isEmailConfigured()) return notSent('email (SMTP) is not configured on this environment');
     if (!link) return notSent('the ticket link could not be built');
@@ -849,13 +894,17 @@ export class TicketsService {
       this.logger.error(`[tickets] remarks email for ${p.ticket.id} failed: ${(e as Error)?.message ?? e}`);
       return notSent('the mail relay refused or timed out');
     }
-    await this.recordEmailOutcome(p.ticket.id, p.actorId, `Email sent to ${p.targetName} (${to}).`);
+    await this.recordEmailOutcome(
+      p.ticket.id,
+      p.actorId,
+      `Email sent to ${p.targetName} (${to}) with link ${link}.${linkNote ? ` Note: ${linkNote}.` : ''}`,
+    );
     return { sent: true };
   }
 
   /**
-   * POST :id/cancel-client-remarks — Gifsy withdraws a pending remarks request and RESUMES the
-   * ticket at its pre-request status (ESCALATED / OPEN / PENDING_USER as stored, else IN_PROGRESS).
+   * POST :id/cancel-client-remarks — Gifsy withdraws a pending remarks request and resumes the
+   * ticket per resumeStatusAfterRemarks (the same rule as a client reply).
    * Shared note ("Remarks request to X cancelled — <reason>") + bell to the client admin + audit.
    * Guarded like every other transition (409 on a concurrent change).
    */
@@ -864,13 +913,8 @@ export class TicketsService {
     const ticket = await this.loadTenantTicket(user, id);
     const pending = ticket.status === 'WAITING_ON_CLIENT' ? (readMeta(ticket.metadata).clientRemarks ?? null) : null;
     if (!pending) throw new BadRequestException('This ticket is not waiting on a client remarks request');
-    const by = await this.actorName(user);
     const extra = dto.reason?.trim();
-    const reason = `withdrawn by ${by}${extra ? `: ${extra}` : ''}`;
-    const resumable: TicketStatus[] = ['OPEN', 'IN_PROGRESS', 'ESCALATED', 'PENDING_USER'];
-    const backTo: TicketStatus = resumable.includes(pending.fromStatus as TicketStatus)
-      ? (pending.fromStatus as TicketStatus)
-      : 'IN_PROGRESS';
+    const backTo = resumeStatusAfterRemarks(pending.fromStatus);
 
     await this.prisma.$transaction(async (tx) => {
       const moved = await tx.ticket.updateMany({
@@ -878,7 +922,10 @@ export class TicketsService {
         data: { status: backTo, metadata: withoutRemarks(ticket.metadata), updatedAt: new Date() },
       });
       if (moved.count !== 1) throw new ConflictException(TicketsService.CONFLICT);
-      await this.recordRemarksCancelled(tx, ticket, user.sub, reason);
+      await this.recordRemarksCancelled(tx, ticket, user.sub);
+      if (extra) {
+        await tx.ticketMessage.create({ data: this.note(id, user.sub, `Remarks request withdrawn: ${extra}`, 'GIFSY_ONLY') });
+      }
       await tx.auditLog.create({
         data: {
           action: 'UPDATE',
@@ -889,7 +936,7 @@ export class TicketsService {
         },
       });
     });
-    await this.bellCancelled(ticket, pending, reason);
+    await this.bellCancelled(ticket, pending);
     return { message: `Request to ${pending.requestedFromName} cancelled`, status: backTo };
   }
 
@@ -910,7 +957,7 @@ export class TicketsService {
     const message = dto.message.trim();
     if (!message) throw new BadRequestException('Remarks cannot be empty');
     const request = readMeta(ticket.metadata).clientRemarks ?? null;
-    const backTo: TicketStatus = request?.fromStatus === 'ESCALATED' ? 'ESCALATED' : 'IN_PROGRESS';
+    const backTo = resumeStatusAfterRemarks(request?.fromStatus);
 
     await this.prisma.$transaction(async (tx) => {
       // Conditional transition pinned to the request we read: a status change or a re-request
@@ -927,7 +974,7 @@ export class TicketsService {
         data: { status: backTo, metadata: withoutRemarks(ticket.metadata), updatedAt: new Date() },
       });
       if (moved.count !== 1) throw new ConflictException('The ticket changed while you were replying — please reload');
-      await tx.ticketMessage.create({ data: this.note(id, user.sub, message, 'SHARED_WITH_CLIENT') });
+      await tx.ticketMessage.create({ data: { ...this.note(id, user.sub, message, 'SHARED_WITH_CLIENT'), isClientRemarks: true } });
       await tx.auditLog.create({
         data: {
           action: 'UPDATE',
@@ -977,8 +1024,7 @@ export class TicketsService {
     if (ticket.status === 'WAITING_ON_CLIENT' && this.reader(user) === 'CLIENT') {
       throw new ConflictException('Gifsy support is waiting for your remarks on this ticket — send your remarks first.');
     }
-    const by = await this.actorName(user);
-    const cancelReason = `ticket ${STATUS_ACTION_LABEL[status] ?? `set to ${status}`} by ${by}`;
+    const cancelReason = `the ticket was ${STATUS_ACTION_LABEL[status] ?? `set to ${status}`}`;
     const hasMarker = readMeta(ticket.metadata).clientRemarks != null;
 
     const cancelled = await this.prisma.$transaction(async (tx) => {
@@ -1017,7 +1063,7 @@ export class TicketsService {
     });
 
     await this.bellCancelled(ticket, cancelled, cancelReason);
-    return { message: 'Ticket status updated' };
+    return { message: 'Ticket status updated', cancelledRemarksFrom: cancelled ? cancelled.requestedFromName : null };
   }
 
   /**

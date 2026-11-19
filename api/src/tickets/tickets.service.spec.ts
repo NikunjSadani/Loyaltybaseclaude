@@ -41,7 +41,7 @@ const mockPrisma = {
     findFirst: jest.fn(async ({ where }: { where: Record<string, any> }) => USERS.find((u) => matchUser(u, where)) ?? null),
     findMany: jest.fn(async ({ where }: { where: Record<string, any> }) => USERS.filter((u) => matchUser(u, where))),
   },
-  clientDomain: { findFirst: jest.fn() },
+  clientDomain: { findFirst: jest.fn(), findMany: jest.fn() },
   outlet: { findMany: jest.fn(), findFirst: jest.fn() },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findFirst: jest.fn() },
@@ -49,6 +49,7 @@ const mockPrisma = {
   ticketMessage: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+  $queryRaw: jest.fn(),
 };
 
 const mockNotifications = { writeInApp: jest.fn() };
@@ -104,6 +105,8 @@ describe('TicketsService', () => {
     mockPrisma.ticket.groupBy.mockResolvedValue([]);
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
+    mockPrisma.clientDomain.findMany.mockResolvedValue([]);
+    mockPrisma.$queryRaw.mockResolvedValue([]);
     mockNotifications.writeInApp.mockResolvedValue({ id: 'n1' });
     mockMsg91.sendEmail.mockResolvedValue(undefined);
     mockMsg91.isEmailConfigured.mockReturnValue(true);
@@ -129,23 +132,23 @@ describe('TicketsService', () => {
   describe('list', () => {
     it('scopes non-admins to their own tickets', async () => {
       await service.list(partner, {});
-      expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', createdById: 'user1' });
+      expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', deletedAt: null, createdById: 'user1' });
     });
 
     it('does NOT add a createdById filter for GIFSY admins', async () => {
       await service.list(gifsy, { status: 'OPEN' as never });
-      expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', status: 'OPEN' });
+      expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', deletedAt: null, status: 'OPEN' });
     });
 
     it('does NOT add a createdById filter for CLIENT_ADMIN (sees all tenant tickets)', async () => {
       await service.list(clientAdmin, {});
-      expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
+      expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', deletedAt: null });
     });
 
     it('client admin "awaiting mine" view: only tickets waiting on THIS admin', async () => {
       await service.list(clientAdmin, { awaitingMine: 'true' });
       expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({
-        clientId: 'deoleo', status: 'WAITING_ON_CLIENT',
+        clientId: 'deoleo', deletedAt: null, status: 'WAITING_ON_CLIENT',
         metadata: { path: ['clientRemarks', 'requestedFromId'], equals: 'cadmin1' },
       });
     });
@@ -344,9 +347,9 @@ describe('TicketsService', () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow());
       await service.setStatus(gifsy, 't1', { status: 'CLOSED' });
       expect(mockTx.ticket.updateMany.mock.calls[0][0].data).toMatchObject({ status: 'CLOSED', metadata: { keep: 1 } });
-      const cancel = mockTx.ticketMessage.create.mock.calls.map((c) => c[0].data).find((d) => /cancelled/.test(d.message));
+      const cancel = mockTx.ticketMessage.create.mock.calls.map((c) => c[0].data).find((d) => /withdrawn the request/.test(d.message));
       expect(cancel).toMatchObject({ isInternal: true, internalVisibility: 'SHARED_WITH_CLIENT' });
-      expect(cancel.message).toMatch(/^Remarks request to Deoleo Admin cancelled — ticket Closed by Owner\.$/);
+      expect(cancel.message).toBe('Gifsy support has withdrawn the request for remarks from Deoleo Admin — the ticket was Closed.');
       expect(mockNotifications.writeInApp).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cadmin1', subject: expect.stringMatching(/no longer needed/) }));
     });
   });
@@ -441,9 +444,16 @@ describe('TicketsService', () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow());
       await service.escalate(gifsy, 't1', { escalateTo: 'staff1', reason: 'x' });
       expect(mockTx.ticket.updateMany.mock.calls[0][0].data.metadata).toEqual({ keep: 1 });
-      const cancel = mockTx.ticketMessage.create.mock.calls.map((c) => c[0].data).find((d) => /cancelled/.test(d.message));
+      const cancel = mockTx.ticketMessage.create.mock.calls.map((c) => c[0].data).find((d) => /withdrawn the request/.test(d.message));
       expect(cancel).toMatchObject({ internalVisibility: 'SHARED_WITH_CLIENT' });
-      expect(mockNotifications.writeInApp).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cadmin1' }));
+      // client-visible text is NEUTRAL — the internal escalation is never named to the client
+      expect(cancel.message).toBe('Gifsy support has withdrawn the request for remarks from Deoleo Admin.');
+      const shared = mockTx.ticketMessage.create.mock.calls.map((c) => c[0].data).filter((d) => d.internalVisibility === 'SHARED_WITH_CLIENT');
+      expect(shared.every((d) => !/escalat/i.test(d.message))).toBe(true);
+      const internal = mockTx.ticketMessage.create.mock.calls.map((c) => c[0].data).find((d) => d.internalVisibility === 'GIFSY_ONLY');
+      expect(internal.message).toMatch(/withdrew the pending remarks request to Deoleo Admin/);
+      const bell = mockNotifications.writeInApp.mock.calls.map((c) => c[0]).find((b) => b.userId === 'cadmin1');
+      expect(bell.body).toBe('Gifsy support has withdrawn the request for your remarks.');
     });
 
     it('race: closed meanwhile → 409, no note, no bell; NotFound / Forbidden as before', async () => {
@@ -465,7 +475,7 @@ describe('TicketsService', () => {
 
     it('WAITING_ON_CLIENT + marker (with fromStatus) + SHARED note + audit + bell; email AFTER commit, outcome noted', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow({ status: 'ESCALATED', metadata: { keep: 1 } }));
-      mockPrisma.clientDomain.findFirst.mockResolvedValue({ domain: 'deoleoloyalty.gifsy.in' });
+      mockPrisma.clientDomain.findMany.mockResolvedValue([{ domain: 'deoleoloyalty.gifsy.in', isPrimary: true }]);
       const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'Please confirm <b>' }, ORIGIN);
 
       const data = mockTx.ticket.updateMany.mock.calls[0][0].data;
@@ -534,7 +544,7 @@ describe('TicketsService', () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow({ fromStatus: 'ESCALATED' }));
       await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin2', note: 'x' }, ORIGIN);
       expect(mockTx.ticket.updateMany.mock.calls[0][0].data.metadata.clientRemarks).toMatchObject({ requestedFromId: 'cadmin2', fromStatus: 'ESCALATED' });
-      expect(mockTx.ticketMessage.create.mock.calls.some((c) => /Remarks request to Deoleo Admin cancelled/.test(c[0].data.message))).toBe(true);
+      expect(mockTx.ticketMessage.create.mock.calls.some((c) => /withdrawn the request for remarks from Deoleo Admin/.test(c[0].data.message))).toBe(true);
       expect(mockNotifications.writeInApp.mock.calls.map((c) => c[0].userId)).toEqual(expect.arrayContaining(['cadmin1', 'cadmin2']));
     });
 
@@ -585,7 +595,7 @@ describe('TicketsService', () => {
         data: { status: 'IN_PROGRESS', metadata: { keep: 1 }, updatedAt: expect.any(Date) },
       });
       expect(mockTx.ticketMessage.create).toHaveBeenCalledWith({
-        data: { ticketId: 't1', senderId: 'cadmin1', message: 'Invoice is valid', isInternal: true, internalVisibility: 'SHARED_WITH_CLIENT' },
+        data: { ticketId: 't1', senderId: 'cadmin1', message: 'Invoice is valid', isInternal: true, internalVisibility: 'SHARED_WITH_CLIENT', isClientRemarks: true },
       });
       expect(mockNotifications.writeInApp.mock.calls.map((c) => c[0].userId).sort()).toEqual(['admin1', 'staff1']);
       expect(res.status).toBe('IN_PROGRESS');
@@ -697,7 +707,9 @@ describe('TicketsService', () => {
       });
       const note = mockTx.ticketMessage.create.mock.calls[0][0].data;
       expect(note).toMatchObject({ internalVisibility: 'SHARED_WITH_CLIENT' });
-      expect(note.message).toBe('Remarks request to Deoleo Admin cancelled — withdrawn by Owner: solved by phone.');
+      expect(note.message).toBe('Gifsy support has withdrawn the request for remarks from Deoleo Admin.');
+      // the typed reason is Gifsy-only
+      expect(mockTx.ticketMessage.create.mock.calls[1][0].data).toMatchObject({ internalVisibility: 'GIFSY_ONLY', message: 'Remarks request withdrawn: solved by phone' });
       expect(mockNotifications.writeInApp).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cadmin1' }));
       expect(mockTx.auditLog.create.mock.calls[0][0].data.metadata).toMatchObject({ action: 'CANCEL_CLIENT_REMARKS' });
       expect(res.status).toBe('ESCALATED');
@@ -719,7 +731,7 @@ describe('TicketsService', () => {
 
   describe('admin list: server-side filters + tenant summary', () => {
     it('priorities / source / q are applied in the DB (q also matches referenced outlets by code)', async () => {
-      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o9' }]);
+      mockPrisma.$queryRaw.mockResolvedValue([{ id: 't-ref' }]);
       await service.list(gifsy, { priorities: 'high,CRITICAL', source: 'sales', q: 'DEO-09' });
       const where = mockPrisma.ticket.findMany.mock.calls[0][0].where;
       expect(where.clientId).toBe('deoleo');
@@ -727,8 +739,13 @@ describe('TicketsService', () => {
       expect(where.AND[1].createdBy.role.in).toContain('SALES_ISR');
       const or = where.AND[2].OR;
       expect(or).toContainEqual({ ticketNumber: { contains: 'DEO-09', mode: 'insensitive' } });
-      expect(or).toContainEqual({ referenceType: 'OUTLET', referenceId: { in: ['o9'] } });
-      expect(mockPrisma.outlet.findMany.mock.calls[0][0].where.clientId).toBe('deoleo');
+      expect(or).toContainEqual({ id: { in: ['t-ref'] } });
+      // one uncapped DB join (no `take`, no outlet id list), tenant-pinned
+      const sql = mockPrisma.$queryRaw.mock.calls[0][0];
+      expect(sql.strings.join('?')).toMatch(/JOIN "outlets"/);
+      expect(sql.strings.join('?')).not.toMatch(/LIMIT/i);
+      expect(sql.values).toEqual(['deoleo', 'OUTLET', '%DEO-09%', '%DEO-09%']);
+      expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
       // the total counts the FILTERED set
       expect(mockPrisma.ticket.count.mock.calls[0][0].where).toEqual(where);
     });
@@ -736,7 +753,7 @@ describe('TicketsService', () => {
     it('invalid priorities → 400; field readers ignore admin filters', async () => {
       await expect(service.list(gifsy, { priorities: 'BOGUS' })).rejects.toBeInstanceOf(BadRequestException);
       await service.list(partner, { priorities: 'HIGH', q: 'x', source: 'sales' });
-      expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', createdById: 'user1' });
+      expect(mockPrisma.ticket.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', deletedAt: null, createdById: 'user1' });
     });
 
     it('summary is tenant-wide (not the loaded page) and only for support admins', async () => {
@@ -751,9 +768,68 @@ describe('TicketsService', () => {
       mockPrisma.ticket.count.mockResolvedValue(2);
       const res = await service.list(clientAdmin, {});
       expect(res.summary).toEqual({ total: 16, open: 3, inProgress: 4, resolved: 9, highPriority: 2 });
-      expect(mockPrisma.ticket.groupBy.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
+      expect(mockPrisma.ticket.groupBy.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', deletedAt: null });
+      expect(mockPrisma.ticket.count.mock.calls.every((c) => c[0].where.deletedAt === null)).toBe(true);
       const field = await service.list(partner, {});
       expect(field).not.toHaveProperty('summary');
+    });
+  });
+
+  // ─── round 3 ─────────────────────────────────────────────────────────────────
+
+  describe('round 3', () => {
+    it('one resume rule for reply AND cancel: ESCALATED / PENDING_USER kept, OPEN / IN_PROGRESS → IN_PROGRESS', async () => {
+      for (const [from, expected] of [['ESCALATED', 'ESCALATED'], ['PENDING_USER', 'PENDING_USER'], ['OPEN', 'IN_PROGRESS'], ['IN_PROGRESS', 'IN_PROGRESS']]) {
+        mockTx.ticket.updateMany.mockClear();
+        mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow({ fromStatus: from }));
+        expect((await service.replyClientRemarks(clientAdmin, 't1', { message: 'ok' })).status).toBe(expected);
+        mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow({ fromStatus: from }));
+        expect((await service.cancelClientRemarks(gifsy, 't1', {})).status).toBe(expected);
+      }
+    });
+
+    it('a recipient lookup failure is reported as such — never as "no email on file"', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.user.findFirst.mockImplementationOnce(async () => { throw new Error('db down'); });
+      // (the first user.findFirst is actorName → JWT name is set, so the lookup above is the recipient)
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'x' }, 'x');
+      expect(res).toMatchObject({ emailSent: false, emailError: expect.stringContaining('could not be looked up') });
+      expect((res as any).emailError).not.toMatch(/no email/);
+    });
+
+    it('a domain lookup failure is reported as such', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.clientDomain.findMany.mockRejectedValue(new Error('db down'));
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'x' }, 'x');
+      expect(res).toMatchObject({ emailSent: false, emailError: expect.stringContaining('web address could not be resolved') });
+      expect(mockMsg91.sendEmail).not.toHaveBeenCalled();
+    });
+
+    it('no primary domain → slug host, and the outcome note says so', async () => {
+      process.env.TENANT_LINK_ENV = 'production';
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.clientDomain.findMany.mockResolvedValue([{ domain: 'uat-deoleoloyalty.gifsy.in', isPrimary: false }]);
+      await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'x' }, 'x');
+      expect(mockMsg91.sendEmail.mock.calls[0][0].html).toContain('https://deoleo.gifsy.in/admin/tickets?ticket=t1');
+      expect(mockPrisma.ticketMessage.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ message: expect.stringContaining('no primary domain is registered') }),
+      });
+    });
+
+    it('escalate / setStatus report which pending request they cancelled (UI shows it — never silent)', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow());
+      expect(await service.escalate(gifsy, 't1', { escalateTo: 'staff1', reason: 'x' })).toMatchObject({ cancelledRemarksFrom: 'Deoleo Admin' });
+      mockPrisma.ticket.findFirst.mockResolvedValue(waitingRow());
+      expect(await service.setStatus(gifsy, 't1', { status: 'RESOLVED' })).toMatchObject({ cancelledRemarksFrom: 'Deoleo Admin' });
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      expect(await service.setStatus(gifsy, 't1', { status: 'RESOLVED' })).toMatchObject({ cancelledRemarksFrom: null });
+    });
+
+    it('counts (summary + awaiting) are computed on page 1 only — Load more never recomputes them', async () => {
+      const res = await service.list(gifsy, { page: 2 });
+      expect(res).not.toHaveProperty('summary');
+      expect(res).not.toHaveProperty('awaitingClient');
+      expect(mockPrisma.ticket.groupBy).not.toHaveBeenCalled();
     });
   });
 });

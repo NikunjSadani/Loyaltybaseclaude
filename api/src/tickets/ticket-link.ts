@@ -80,3 +80,28 @@ export function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+/** A hostname that is a staging / UAT form (never valid for a production link). */
+function isNonProdHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return h.startsWith('uat-') || h.startsWith('uat.') || h.includes('staging') || h.includes('localhost');
+}
+
+/**
+ * Which registered tenant domain the email link may use. STRICTLY the row flagged isPrimary, and in
+ * production never a staging / UAT-looking hostname. Returns null (→ the caller falls back to
+ * `<slug>.<platform domain>`) plus a human note saying why, so the outcome is never silent.
+ */
+export function pickTenantDomain(
+  rows: { domain: string; isPrimary: boolean }[],
+  clientId: string,
+  env: Env = process.env,
+): { domain: string | null; note: string | null } {
+  const slugHost = `${clientId}.${platformDomain(env)}`;
+  const primary = rows.find((r) => r.isPrimary)?.domain?.trim().toLowerCase() ?? '';
+  if (!primary) return { domain: null, note: `no primary domain is registered for this programme — the link uses ${slugHost}` };
+  if (linkEnvironment(env) === 'production' && isNonProdHost(primary)) {
+    return { domain: null, note: `the primary domain ${primary} looks like a staging host — the link uses ${slugHost}` };
+  }
+  return { domain: primary, note: null };
+}

@@ -2393,6 +2393,9 @@ model TicketMessage {
   // admin desk (remarks request, the client's reply, cancellations). NULL = legacy / generic
   // internal note — visible to every support admin exactly as before. Ignored when !isInternal.
   internalVisibility TicketNoteVisibility?
+  // True only for a client admin's REPLY to a remarks request (the thread badges exactly those as
+  // "Client remarks" — a client admin's ordinary internal note is not one). Additive, default false.
+  isClientRemarks Boolean @default(false)
   attachments Json?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

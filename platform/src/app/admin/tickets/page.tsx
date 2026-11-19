@@ -1,6 +1,6 @@
 'use client';
 
-import React, { Suspense, useState, useEffect, useCallback } from 'react';
+import React, { Suspense, useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
@@ -17,6 +17,7 @@ import {
 } from '@/lib/tickets';
 import { api } from '@/lib/api-client';
 import { useAdminSession } from '@/lib/admin-session';
+import { usePermissions } from '@/lib/use-permissions';
 
 /* ─── DB ↔ local category / status / priority mappings ─────────────────────── */
 
@@ -51,6 +52,8 @@ type AdminTicketMessage = TicketMessage & {
   senderName?: string;
   /** GIFSY_ONLY | SHARED_WITH_CLIENT; null = legacy note (client admins could always read it → "Shared"). */
   internalVisibility?: 'GIFSY_ONLY' | 'SHARED_WITH_CLIENT' | null;
+  /** True only for a client admin's reply to a remarks request. */
+  isClientRemarks?: boolean;
 };
 
 const PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
@@ -114,6 +117,7 @@ function mapDbTicket(t: any): AdminTicket {
       isInternal: m.isInternal,
       senderRole: m.sender?.role,
       internalVisibility: m.internalVisibility ?? null,
+      isClientRemarks: m.isClientRemarks === true,
     })),
   };
 }
@@ -225,11 +229,18 @@ function TicketRow({ ticket, viewerId, viewerRole, onClick }: { ticket: AdminTic
  *  - "Escalate to Gifsy support" → priority bump + ESCALATED + the picked Gifsy user is assigned;
  *  - "Ask client admin for remarks" → WAITING_ON_CLIENT + bell + email to the picked client admin.
  */
-function EscalatePanel({ ticketId, assignees, onDone, onCancel }: {
+function EscalatePanel({ ticketId, assignees, assigneesError, onRetryAssignees, waitingOn, onDone, onCancel, onConflict }: {
   ticketId: string;
   assignees: Assignee[];
+  /** The picker options failed to load — show the failure + Retry, never "no users". */
+  assigneesError: string | null;
+  onRetryAssignees: () => void;
+  /** Name of the client admin a pending remarks request is waiting on (escalating cancels it). */
+  waitingOn: string | null;
   onDone: (notice: string | null) => void;
   onCancel: () => void;
+  /** A 409: the ticket changed meanwhile — the parent reloads it. Typed input is kept here. */
+  onConflict: (serverMessage: string) => void;
 }) {
   const gifsy = assignees.filter((a) => a.kind === 'GIFSY');
   const clientAdmins = assignees.filter((a) => a.kind === 'CLIENT_ADMIN');
@@ -239,25 +250,38 @@ function EscalatePanel({ ticketId, assignees, onDone, onCancel }: {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Escalating a ticket that waits on the client cancels that request — confirm first (never silent).
+  const [confirming, setConfirming] = useState(false);
 
-  useEffect(() => { setTarget(''); setError(null); }, [mode]);
+  useEffect(() => { setTarget(''); setError(null); setConfirming(false); }, [mode]);
 
   const options = mode === 'gifsy' ? gifsy : clientAdmins;
   const canSubmit = !!target && !!text.trim() && !busy;
 
   const submit = async () => {
     if (!canSubmit) return;
+    if (mode === 'gifsy' && waitingOn && !confirming) { setConfirming(true); return; }
     setBusy(true); setError(null);
     if (mode === 'gifsy') {
-      const res = await api.post(`/api/tickets/${ticketId}/escalate`, { escalateTo: target, reason: text.trim(), priority });
-      setBusy(false);
-      if (res.success) onDone(null); else setError(res.error);
+      const res = await api.post<{ cancelledRemarksFrom?: string | null }>(
+        `/api/tickets/${ticketId}/escalate`, { escalateTo: target, reason: text.trim(), priority },
+      );
+      setBusy(false); setConfirming(false);
+      if (res.success) {
+        onDone(res.data?.cancelledRemarksFrom
+          ? `Escalated. The pending request to ${res.data.cancelledRemarksFrom} was cancelled and they were notified.`
+          : null);
+      } else if (res.status === 409) {
+        onConflict(res.error);
+      } else {
+        setError(res.error);
+      }
     } else {
       const res = await api.post<{ emailSent?: boolean; emailError?: string; alreadyPending?: boolean; message?: string }>(
         `/api/tickets/${ticketId}/request-client-remarks`, { clientAdminId: target, note: text.trim() },
       );
       setBusy(false);
-      if (!res.success) { setError(res.error); return; }
+      if (!res.success) { if (res.status === 409) onConflict(res.error); else setError(res.error); return; }
       if (res.data?.alreadyPending) {
         onDone(`${res.data.message ?? 'A remarks request to this client admin is already pending'}. Nothing was re-sent.`);
       } else if (res.data?.emailSent === false) {
@@ -290,7 +314,12 @@ function EscalatePanel({ ticketId, assignees, onDone, onCancel }: {
         <option value="">{mode === 'gifsy' ? 'Choose a Gifsy support user…' : 'Choose a client admin…'}</option>
         {options.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
       </select>
-      {options.length === 0 && (
+      {assigneesError ? (
+        <p role="alert" className="text-[11px] text-red-600 flex items-center gap-2">
+          Could not load the people you can pick: {assigneesError}
+          <button type="button" className="underline font-semibold" onClick={onRetryAssignees}>Retry</button>
+        </p>
+      ) : options.length === 0 && (
         <p className="text-[11px] text-amber-700">
           {mode === 'gifsy' ? 'No active Gifsy support users can work on this programme.' : 'This programme has no active client admin.'}
         </p>
@@ -316,10 +345,15 @@ function EscalatePanel({ ticketId, assignees, onDone, onCancel }: {
         <p className="text-[11px] text-gray-500">The ticket moves to &quot;Awaiting client&quot;. Their reply is internal — never shown to the outlet or sales team.</p>
       )}
       {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
+      {confirming && waitingOn && (
+        <p role="alert" className="text-xs rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800">
+          This cancels the pending request to {waitingOn} — they&apos;ll be notified. Press &quot;Confirm escalate&quot; to continue.
+        </p>
+      )}
       <div className="flex gap-2 justify-end">
         <Button variant="secondary" size="sm" onClick={onCancel} disabled={busy}>Cancel</Button>
         <Button size="sm" loading={busy} disabled={!canSubmit} onClick={submit}>
-          {mode === 'gifsy' ? 'Escalate' : 'Send request'}
+          {mode === 'gifsy' ? (confirming ? 'Confirm escalate' : 'Escalate') : 'Send request'}
         </Button>
       </div>
     </div>
@@ -340,6 +374,7 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
   const isGifsy = isGifsyRole(viewerRole);
   const isClientAdmin = viewerRole === 'CLIENT_ADMIN';
   const [ticket,        setTicket]        = useState(initial);
+  const waiting = ticket.dbStatus === 'WAITING_ON_CLIENT' ? ticket.clientRemarks : null;
   const [reply,         setReply]         = useState('');
   const [isInt,         setIsInt]         = useState(false);
   // Gifsy internal notes: Gifsy-only by default; sharing with the client admin is an explicit choice.
@@ -355,6 +390,11 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
   const [remarksBusy,   setRemarksBusy]   = useState(false);
   const [actionError,   setActionError]   = useState<string | null>(null);
   const [notice,        setNotice]        = useState<string | null>(null);
+  // A status change that would cancel a pending remarks request waits for an explicit confirm.
+  const [confirmStatus, setConfirmStatus] = useState<'RESOLVED' | 'CLOSED' | null>(null);
+  const perms = usePermissions();
+  const canEscalate = !isGifsy || perms.has('support:escalate');
+  const canWrite = !isGifsy || perms.has('support:write');
 
   // Keep the panel in sync when the parent loads the full thread via GET :id.
   useEffect(() => { setTicket(initial); }, [initial]);
@@ -368,17 +408,42 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
     }
   };
 
+  const loadAssignees = useCallback(() => {
+    setAssigneesErr(null);
+    api.get<{ assignees: Assignee[] }>(`/api/tickets/${initial.id}/assignees`).then((res) => {
+      if (res.success) { setAssignees(res.data.assignees ?? []); setAssigneesErr(null); }
+      else setAssigneesErr(res.error);
+    });
+  }, [initial.id]);
+
   // Load the full thread when the panel opens; Gifsy also loads the assign/escalate options.
   useEffect(() => {
     void refresh();
-    if (isGifsy) {
-      api.get<{ assignees: Assignee[] }>(`/api/tickets/${ticket.id}/assignees`).then((res) => {
-        if (res.success) { setAssignees(res.data.assignees ?? []); setAssigneesErr(null); }
-        else setAssigneesErr(res.error);
-      });
-    }
+    if (isGifsy) loadAssignees();
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [ticket.id, isGifsy]);
+
+  /**
+   * A 409 means someone changed the ticket meanwhile: reload it automatically and say what it is
+   * now. Typed text (reply / remarks / escalate form) is never cleared on this path.
+   */
+  const handleConflict = async (serverMessage: string) => {
+    const before = ticket;
+    const res = await api.get<{ ticket: any }>(`/api/tickets/${ticket.id}`);
+    if (!res.success) { setActionError(serverMessage); return; }
+    const upd = mapDbTicket(res.data.ticket);
+    setTicket(upd); onUpdate(upd); onChanged();
+    const was = statusDisplay(before, viewerId, viewerRole).label;
+    const now = statusDisplay(upd, viewerId, viewerRole).label;
+    setActionError(
+      `This ticket was changed by someone else while you were working${was !== now ? ` (status: ${was} → ${now})` : ''}. ` +
+      'It has been reloaded — your text is kept; review it and try again.',
+    );
+  };
+  /** Shared failure handling for every action: 409 → reload + explain; anything else → the error. */
+  const failed = async (res: { success: false; error: string; status?: number }) => {
+    if (res.status === 409) await handleConflict(res.error); else setActionError(res.error);
+  };
 
   const handleSend = async () => {
     if (!reply.trim()) return;
@@ -387,7 +452,7 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
       message: reply.trim(), isInternal: isInt,
       ...(isInt && isGifsy ? { visibility: shareNote ? 'SHARED_WITH_CLIENT' : 'GIFSY_ONLY' } : {}),
     });
-    if (res.success) { setReply(''); await refresh(); } else setActionError(res.error);
+    if (res.success) { setReply(''); await refresh(); } else await failed(res);
     setSending(false);
   };
 
@@ -400,14 +465,24 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
     if (!assignChanged) return;
     setAssignBusy(true); setActionError(null);
     const res = await api.post(`/api/tickets/${ticket.id}/assign`, { assigneeId: pendingAssignee || null });
-    if (res.success) { await refresh(); onChanged(); } else setActionError(res.error);
+    if (res.success) { await refresh(); onChanged(); } else await failed(res);
     setAssignBusy(false);
   };
 
-  const handleSetStatus = async (status: 'RESOLVED' | 'CLOSED' | 'IN_PROGRESS') => {
+  const handleSetStatus = async (status: 'RESOLVED' | 'CLOSED' | 'IN_PROGRESS', confirmed = false) => {
+    // Resolving / closing a ticket that waits on the client cancels that request — confirm first.
+    if (waiting && status !== 'IN_PROGRESS' && !confirmed) { setConfirmStatus(status); return; }
+    setConfirmStatus(null);
     setStatusBusy(true); setActionError(null);
-    const res = await api.post(`/api/tickets/${ticket.id}/status`, { status });
-    if (res.success) { await refresh(); onChanged(); } else setActionError(res.error);
+    const res = await api.post<{ cancelledRemarksFrom?: string | null }>(`/api/tickets/${ticket.id}/status`, { status });
+    if (res.success) {
+      if (res.data?.cancelledRemarksFrom) {
+        setNotice(`The pending request to ${res.data.cancelledRemarksFrom} was cancelled and they were notified.`);
+      }
+      await refresh(); onChanged();
+    } else {
+      await failed(res);
+    }
     setStatusBusy(false);
   };
 
@@ -416,7 +491,7 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
     setCancelBusy(true); setActionError(null);
     const res = await api.post(`/api/tickets/${ticket.id}/cancel-client-remarks`, {});
     if (res.success) { setNotice('Request cancelled — the client admin was notified and the ticket resumed.'); await refresh(); onChanged(); }
-    else setActionError(res.error);
+    else await failed(res);
     setCancelBusy(false);
   };
 
@@ -425,14 +500,13 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
     setRemarksBusy(true); setActionError(null);
     const res = await api.post(`/api/tickets/${ticket.id}/client-remarks`, { message: remarks.trim() });
     if (res.success) { setRemarks(''); setNotice('Remarks sent to Gifsy support.'); await refresh(); onChanged(); }
-    else setActionError(res.error);
+    else await failed(res);
     setRemarksBusy(false);
   };
 
   const isDone = ticket.status === 'resolved' || ticket.status === 'closed';
   const isClosed = ticket.dbStatus === 'CLOSED';
   const st = statusDisplay(ticket, viewerId, viewerRole);
-  const waiting = ticket.dbStatus === 'WAITING_ON_CLIENT' ? ticket.clientRemarks : null;
   const waitingOnMe = !!waiting && isClientAdmin && waiting.requestedFromId === viewerId;
 
   const gifsyOpts = assignees.filter((a) => a.kind === 'GIFSY');
@@ -531,7 +605,7 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
                   </div>
                 </div>
               )}
-              {isGifsy && (
+              {isGifsy && canEscalate && (
                 <div className="flex justify-end">
                   <Button size="sm" variant="secondary" loading={cancelBusy} onClick={handleCancelRequest}>
                     Cancel request &amp; resume
@@ -555,7 +629,7 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
                   <select
                     aria-label="Assign to"
                     value={pendingAssignee}
-                    disabled={assignBusy || isClosed}
+                    disabled={assignBusy || isClosed || !canWrite}
                     onChange={(e) => setPendingAssignee(e.target.value)}
                     className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white disabled:opacity-50"
                   >
@@ -580,7 +654,15 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
                 <span className="text-xs font-medium text-gray-700">{ticket.assignedTo ?? 'Unassigned'}</span>
               )}
             </div>
-            {isGifsy && assigneesErr && <p className="text-[11px] text-red-600">Could not load assignees: {assigneesErr}</p>}
+            {isGifsy && assigneesErr && (
+              <p role="alert" className="text-[11px] text-red-600 flex items-center gap-2">
+                Could not load assignees: {assigneesErr}
+                <button type="button" className="underline font-semibold" onClick={loadAssignees}>Retry</button>
+              </p>
+            )}
+            {isGifsy && !canWrite && perms.ready && (
+              <p className="text-[11px] text-gray-500">Your Gifsy role does not include support:write — you can view this ticket but not assign it.</p>
+            )}
 
             {/* Status actions — Resolve / Close, or Reopen once done. While Gifsy waits on the client
                 desk's remarks, the desk replies first (the server refuses a status change). */}
@@ -607,6 +689,19 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
                 </>
               )}
             </div>
+            {confirmStatus && waiting && (
+              <div role="alertdialog" aria-label="Confirm cancelling the remarks request" className="rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-2">
+                <p>
+                  {confirmStatus === 'RESOLVED' ? 'Marking this resolved' : 'Closing this ticket'} cancels the pending request to {waiting.requestedFromName} — they&apos;ll be notified.
+                </p>
+                <div className="flex gap-2 justify-end">
+                  <Button size="sm" variant="secondary" onClick={() => setConfirmStatus(null)}>Keep waiting</Button>
+                  <Button size="sm" loading={statusBusy} onClick={() => handleSetStatus(confirmStatus, true)}>
+                    {confirmStatus === 'RESOLVED' ? 'Resolve & cancel request' : 'Close & cancel request'}
+                  </Button>
+                </div>
+              </div>
+            )}
 
             {/* Escalate — Gifsy operators; no longer needs a prior assignment */}
             {isGifsy && (
@@ -616,17 +711,25 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={isClosed || showEscalate}
+                    disabled={isClosed || showEscalate || !canEscalate}
+                    title={!canEscalate ? 'Your Gifsy role does not include support:escalate' : undefined}
                     onClick={() => { setShowEscalate(true); setNotice(null); }}
                   >
                     <AlertCircle className="h-3.5 w-3.5" /> Escalate
                   </Button>
+                  {!canEscalate && perms.ready && (
+                    <span className="text-[11px] text-gray-500">Your Gifsy role does not include escalation (support:escalate).</span>
+                  )}
                 </div>
-                {showEscalate && (
+                {showEscalate && canEscalate && (
                   <EscalatePanel
                     ticketId={ticket.id}
                     assignees={assignees}
+                    assigneesError={assigneesErr}
+                    onRetryAssignees={loadAssignees}
+                    waitingOn={waiting ? waiting.requestedFromName : null}
                     onCancel={() => setShowEscalate(false)}
+                    onConflict={(m) => { void handleConflict(m); }}
                     onDone={async (n) => { setShowEscalate(false); setNotice(n); await refresh(); onChanged(); }}
                   />
                 )}
@@ -641,7 +744,8 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
             {ticket.messages.map((msg) => {
               const isAdmin = msg.from === 'admin';
               const isInternal = msg.isInternal;
-              const isClientRemark = isInternal && msg.senderRole === 'CLIENT_ADMIN';
+              // Only an actual reply to a remarks request — not any client-admin internal note.
+              const isClientRemark = isInternal && msg.isClientRemarks === true;
               return (
                 <div key={msg.id} className={`flex gap-2 ${isAdmin ? 'flex-row-reverse' : 'flex-row'}`}>
                   <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${isAdmin ? 'bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]' : msg.from === 'sales' ? 'bg-orange-100 text-orange-600' : 'bg-gray-100 text-gray-600'}`}>
@@ -682,13 +786,14 @@ function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onU
         ) : (
         <div className="px-5 py-4 border-t border-gray-100 shrink-0 space-y-2">
           <div className="flex items-center gap-2">
-            <button onClick={() => setIsInt(false)}
-              className={`text-xs font-medium px-3 py-1 rounded-full border transition-all ${!isInt ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]' : 'border-gray-200 text-gray-400 hover:border-gray-300'}`}>
-              Reply to Outlet
+            {/* aria-pressed + a check mark: the selected mode is never conveyed by colour alone */}
+            <button type="button" aria-pressed={!isInt} onClick={() => setIsInt(false)}
+              className={`text-xs font-medium px-3 py-1 rounded-full border transition-all inline-flex items-center gap-1 ${!isInt ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)] underline underline-offset-2' : 'border-gray-200 text-gray-500 hover:border-gray-300'}`}>
+              {!isInt && <CheckCircle aria-hidden className="h-3 w-3" />}Reply to Outlet
             </button>
-            <button onClick={() => setIsInt(true)}
-              className={`text-xs font-medium px-3 py-1 rounded-full border transition-all ${isInt ? 'bg-amber-500 text-white border-amber-500' : 'border-gray-200 text-gray-400 hover:border-gray-300'}`}>
-              Internal Note
+            <button type="button" aria-pressed={isInt} onClick={() => setIsInt(true)}
+              className={`text-xs font-medium px-3 py-1 rounded-full border transition-all inline-flex items-center gap-1 ${isInt ? 'bg-amber-500 text-white border-amber-500 underline underline-offset-2' : 'border-gray-200 text-gray-500 hover:border-gray-300'}`}>
+              {isInt && <CheckCircle aria-hidden className="h-3 w-3" />}Internal Note
             </button>
           </div>
           {isInt && isGifsy && (
@@ -790,24 +895,29 @@ export default function AdminTicketsPage() {
   const [reloadKey, setReloadKey] = useState(0);
   // View + filters + pages loaded live in ONE state: changing the view or a filter resets to page 1
   // in the same update, so the fetch can never combine the new view with an old page count.
-  const [query, setQuery] = useState<{ view: ListView; filters: FilterState; pages: number }>({
-    view: 'all', filters: EMPTY_FILTERS, pages: 1,
-  });
-  const { view, filters, pages } = query;
+  const [query, setQuery] = useState<{ view: ListView; filters: FilterState }>({ view: 'all', filters: EMPTY_FILTERS });
+  const { view, filters } = query;
   const awaitingOnly = view !== 'all';
   const [searchDraft, setSearchDraft] = useState('');
   const [total, setTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Request generation: every list (re)load bumps it; a response from an older generation (e.g. a
+  // Load-more that was in flight when the search changed) is dropped, never appended.
+  const genRef = useRef(0);
+  // Pages currently shown — read by reloads (after an action) without being an effect dependency,
+  // so "Load more" fetches ONLY the next page.
+  const pagesRef = useRef(1);
 
+  // A view / filter change always starts again at page 1 (pagesRef reset in the load effect).
   const setView = (v: ListView | ((cur: ListView) => ListView)) =>
-    setQuery((q) => ({ ...q, view: typeof v === 'function' ? v(q.view) : v, pages: 1 }));
+    setQuery((q) => ({ ...q, view: typeof v === 'function' ? v(q.view) : v }));
   const setFilter = <K extends keyof FilterState>(key: K, val: FilterState[K]) =>
-    setQuery((q) => ({ ...q, filters: { ...q.filters, [key]: val }, pages: 1 }));
+    setQuery((q) => ({ ...q, filters: { ...q.filters, [key]: val } }));
 
   // Debounced server search.
   useEffect(() => {
     const t = setTimeout(() => {
-      setQuery((q) => (q.filters.search === searchDraft ? q : { ...q, filters: { ...q.filters, search: searchDraft }, pages: 1 }));
+      setQuery((q) => (q.filters.search === searchDraft ? q : { ...q, filters: { ...q.filters, search: searchDraft } }));
     }, 300);
     return () => clearTimeout(t);
   }, [searchDraft]);
@@ -817,13 +927,15 @@ export default function AdminTicketsPage() {
     awaitingClient?: { total: number; mine: number }; summary?: Summary;
   };
 
-  // (Re)load every page loaded so far for the current view + filters.
+  // A view/filter change resets to page 1; a reload after an action (reloadKey) keeps the pages shown.
+  const lastQueryRef = useRef(query);
   useEffect(() => {
-    let cancelled = false;
+    if (lastQueryRef.current !== query) { pagesRef.current = 1; lastQueryRef.current = query; }
+    const gen = ++genRef.current;
     setLoading(true);
-    const pageNums = Array.from({ length: pages }, (_, i) => i + 1);
+    const pageNums = Array.from({ length: pagesRef.current }, (_, i) => i + 1);
     Promise.all(pageNums.map((p) => api.get<ListRes>(listUrl(view, filters, p)))).then((results) => {
-      if (cancelled) return;
+      if (gen !== genRef.current) return; // superseded by a newer load
       const failed = results.find((r) => !r.success);
       if (failed && !failed.success) { setError(failed.error); return; }
       const ok = results.filter((r): r is { success: true; data: ListRes } => r.success);
@@ -835,21 +947,24 @@ export default function AdminTicketsPage() {
       if (first?.awaitingClient) setAwaiting(first.awaitingClient);
       if (first?.summary) setSummary(first.summary);
       setError(null);
-    }).finally(() => { if (!cancelled) { setLoading(false); setLoadedOnce(true); } });
-    return () => { cancelled = true; };
-  }, [view, filters, pages, reloadKey]);
+    }).finally(() => { if (gen === genRef.current) { setLoading(false); setLoadedOnce(true); } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, reloadKey]);
 
+  /** Fetches ONLY the next page; dropped if the view/filters changed while it was in flight. */
   const loadMore = async () => {
+    const gen = genRef.current;
+    const next = pagesRef.current + 1;
     setLoadingMore(true);
-    const res = await api.get<ListRes>(listUrl(view, filters, pages + 1));
+    const res = await api.get<ListRes>(listUrl(view, filters, next));
+    if (gen !== genRef.current) { setLoadingMore(false); return; } // stale: a newer search/view won
     if (res.success) {
       setTickets((prev) => {
         const have = new Set(prev.map((t) => t.id));
         return [...prev, ...(res.data.tickets ?? []).filter((t) => !have.has(t.id)).map(mapDbTicket)];
       });
-      setTotal(res.data.pagination?.total ?? total);
-      // Functional update: only advance if the view/filters didn't change meanwhile.
-      setQuery((q) => (q.view === view && q.filters === filters ? { ...q, pages: q.pages + 1 } : q));
+      if (res.data.pagination?.total != null) setTotal(res.data.pagination.total);
+      pagesRef.current = next;
     } else {
       setError(res.error);
     }
@@ -920,14 +1035,8 @@ export default function AdminTicketsPage() {
         </div>
       )}
 
-      {loading && !loadedOnce ? (
+      {loading && !loadedOnce && !error ? (
         <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>
-      ) : error ? (
-        <div className="flex flex-col items-center gap-3 py-16 text-center">
-          <MessageSquare className="h-10 w-10 text-red-200" />
-          <p className="text-sm font-medium text-red-500">Could not load tickets</p>
-          <p className="text-xs text-gray-400">{error}</p>
-        </div>
       ) : (
         <>
           {/* Stats — tenant-wide, from the server */}
@@ -1013,7 +1122,7 @@ export default function AdminTicketsPage() {
               </select>
 
               {(activeFilters > 0 || filters.search) && (
-                <button onClick={() => { setSearchDraft(''); setQuery((q) => ({ ...q, filters: EMPTY_FILTERS, pages: 1 })); }}
+                <button onClick={() => { setSearchDraft(''); setQuery((q) => ({ ...q, filters: EMPTY_FILTERS })); }}
                   className="flex items-center gap-1 text-xs text-red-500 hover:text-red-700 border border-red-100 bg-red-50 px-2 py-1 rounded-lg transition-colors">
                   <X className="h-3 w-3" /> Clear ({activeFilters + (filters.search ? 1 : 0)})
                 </button>
@@ -1026,9 +1135,21 @@ export default function AdminTicketsPage() {
             </div>
           </div>
 
-          {/* Ticket table */}
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-            {tickets.length === 0 ? (
+          {/* Ticket table — errors stay inline (filters remain usable; Retry or changing a filter recovers) */}
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden relative" aria-busy={loading}>
+            {loading && loadedOnce && (
+              <div role="status" className="flex items-center gap-2 px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Updating tickets…
+              </div>
+            )}
+            {error ? (
+              <div role="alert" className="flex flex-col items-center gap-3 py-12 text-center">
+                <MessageSquare className="h-10 w-10 text-red-200" />
+                <p className="text-sm font-medium text-red-500">Could not load tickets</p>
+                <p className="text-xs text-gray-400">{error}</p>
+                <Button size="sm" variant="secondary" onClick={() => setReloadKey((k) => k + 1)}>Retry</Button>
+              </div>
+            ) : tickets.length === 0 ? (
               <div className="flex flex-col items-center gap-3 py-16 text-center">
                 <MessageSquare className="h-10 w-10 text-gray-200" />
                 <p className="text-sm text-gray-400">
@@ -1059,7 +1180,7 @@ export default function AdminTicketsPage() {
                 </table>
               </div>
             )}
-            {total > tickets.length && (
+            {!error && total > tickets.length && (
               <div className="flex items-center justify-center gap-3 border-t border-gray-100 py-3">
                 <span className="text-xs text-gray-400">Showing {tickets.length} of {total}</span>
                 <Button size="sm" variant="secondary" loading={loadingMore} onClick={loadMore}>Load more</Button>

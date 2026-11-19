@@ -22,6 +22,15 @@ vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => session }));
 let searchParams = new URLSearchParams();
 vi.mock('next/navigation', () => ({ useSearchParams: () => searchParams }));
 
+// Staff permission layer: everyone has everything unless a test narrows it.
+let grantedPerms: string[] | null = null; // null = not gated
+vi.mock('@/lib/use-permissions', () => ({
+  usePermissions: () => ({
+    role: null, permissions: grantedPerms ?? [], ready: true, error: false, retry: () => {},
+    has: (perm: string) => grantedPerms === null || grantedPerms.includes(perm),
+  }),
+}));
+
 import AdminTicketsPage from '../page';
 
 const now = () => new Date().toISOString();
@@ -75,6 +84,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   session = { role: 'GIFSY_ADMIN', name: 'Owner', userId: 'admin1', canManageSchemes: true };
   searchParams = new URLSearchParams();
+  grantedPerms = null;
   postMock.mockResolvedValue({ success: true, data: {} });
 });
 
@@ -233,12 +243,17 @@ describe('Client admin: "Awaiting your remarks" + reply', () => {
 
   it('labels a client admin internal reply as "Client remarks" in the thread', async () => {
     const t = baseTicket({
-      messages: [{ id: 'm1', message: 'Amount is correct', isInternal: true, createdAt: now(), sender: { id: 'cadmin1', name: 'Deoleo Admin', role: 'CLIENT_ADMIN' } }],
+      messages: [
+        { id: 'm1', message: 'Amount is correct', isInternal: true, isClientRemarks: true, createdAt: now(), sender: { id: 'cadmin1', name: 'Deoleo Admin', role: 'CLIENT_ADMIN' } },
+        { id: 'm2', message: 'Just an internal note', isInternal: true, isClientRemarks: false, internalVisibility: 'SHARED_WITH_CLIENT', createdAt: now(), sender: { id: 'cadmin1', name: 'Deoleo Admin', role: 'CLIENT_ADMIN' } },
+      ],
     });
     routeGet({ list: [t] });
     render(<AdminTicketsPage />);
     await openFirstTicket();
-    expect(await screen.findByText('Client remarks')).toBeInTheDocument();
+    // only the actual REPLY is badged "Client remarks"; the ordinary internal note is "Shared with client"
+    expect(await screen.findAllByText('Client remarks')).toHaveLength(1);
+    expect(screen.getAllByText('Shared with client', { selector: 'span' })).toHaveLength(1);
   });
 });
 
@@ -596,5 +611,176 @@ describe('round 2', () => {
     expect(within(section).getByText("Waiting for Deoleo Admin's remarks")).toBeInTheDocument();
     expect(within(section).queryByLabelText('Your remarks')).not.toBeInTheDocument();
     expect(within(section).queryByRole('button', { name: /Cancel request/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('round 3', () => {
+  const deferred = <T,>() => {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => { resolve = r; });
+    return { promise, resolve };
+  };
+
+  it('a Load-more in flight when the search changes is DROPPED (no old-filter rows, total not overwritten)', async () => {
+    routeGet({ list: [baseTicket()], total: 2 });
+    const page2 = deferred<any>();
+    const base = getMock.getMockImplementation()!;
+    getMock.mockImplementation((url: string) => (url.includes('page=2') ? page2.promise : base(url)));
+    render(<AdminTicketsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    fireEvent.change(screen.getByLabelText('Search tickets'), { target: { value: 'zzz' } });
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/api/tickets?q=zzz&page=1&limit=25'));
+    page2.resolve({ success: true, data: { tickets: [baseTicket({ id: 'old', ticketNumber: 'TKT-OLD', subject: 'Stale old-filter row' })], pagination: { total: 99 } } });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.queryByText('Stale old-filter row')).not.toBeInTheDocument();
+    expect(screen.queryByText(/99/)).not.toBeInTheDocument();
+  });
+
+  it('Load more fetches ONLY the next page (no refetch of page 1)', async () => {
+    routeGet({ list: [baseTicket()], page2: [baseTicket({ id: 't2', ticketNumber: 'TKT-2', subject: 'Second' })], total: 2 });
+    render(<AdminTicketsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await screen.findByText('Second');
+    const listCalls = getMock.mock.calls.map(([u]) => String(u)).filter((u) => u.startsWith('/api/tickets?'));
+    expect(listCalls).toEqual(['/api/tickets?page=1&limit=25', '/api/tickets?page=2&limit=25']);
+  });
+
+  it('a filter change shows a loading state while the server answers', async () => {
+    routeGet({ list: [baseTicket()] });
+    render(<AdminTicketsPage />);
+    await screen.findByText('Points missing');
+    const pending = deferred<any>();
+    getMock.mockImplementation(() => pending.promise);
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'OPEN' } });
+    expect(await screen.findByText('Updating tickets…')).toBeInTheDocument();
+    pending.resolve({ success: true, data: { tickets: [], pagination: { total: 0 } } });
+    await waitFor(() => expect(screen.queryByText('Updating tickets…')).not.toBeInTheDocument());
+  });
+
+  it('a list error keeps the filters visible, shows Retry, and Retry / clearing recovers', async () => {
+    let fail = true;
+    getMock.mockImplementation((url: string) => {
+      if (url.startsWith('/api/tickets?')) {
+        return Promise.resolve(fail ? { success: false, error: 'Server exploded' } : { success: true, data: { tickets: [baseTicket()], pagination: { total: 1 } } });
+      }
+      return Promise.resolve({ success: true, data: {} });
+    });
+    render(<AdminTicketsPage />);
+    expect(await screen.findByText('Server exploded')).toBeInTheDocument();
+    expect(screen.getByLabelText('Search tickets')).toBeInTheDocument();
+    expect(screen.getByLabelText('Status')).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('Points missing')).toBeInTheDocument();
+    expect(screen.queryByText('Server exploded')).not.toBeInTheDocument();
+  });
+
+  it('Mark Resolved on an Awaiting-client ticket asks to confirm, then says the request was cancelled', async () => {
+    routeGet({ list: [waitingTicket()], awaiting: { total: 1, mine: 0 } });
+    postMock.mockResolvedValue({ success: true, data: { cancelledRemarksFrom: 'Deoleo Admin' } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: /Mark Resolved/ }));
+    const confirm = await within(dialog).findByRole('alertdialog', { name: 'Confirm cancelling the remarks request' });
+    expect(confirm).toHaveTextContent("cancels the pending request to Deoleo Admin — they'll be notified");
+    expect(postMock).not.toHaveBeenCalled();
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Resolve & cancel request' }));
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/tickets/t1/status', { status: 'RESOLVED' }));
+    expect(await within(dialog).findByText(/pending request to Deoleo Admin was cancelled and they were notified/)).toBeInTheDocument();
+  });
+
+  it('"Keep waiting" backs out of the confirm without any request', async () => {
+    routeGet({ list: [waitingTicket()], awaiting: { total: 1, mine: 0 } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: /Close$/ }));
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Keep waiting' }));
+    expect(within(dialog).queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(postMock).not.toHaveBeenCalled();
+  });
+
+  it('Escalate on an Awaiting-client ticket requires "Confirm escalate" and reports the cancellation', async () => {
+    routeGet({ list: [waitingTicket()], awaiting: { total: 1, mine: 0 } });
+    postMock.mockResolvedValue({ success: true, data: { cancelledRemarksFrom: 'Deoleo Admin' } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    fireEvent.click(await screen.findByRole('button', { name: /Escalate/ }));
+    const panel = await screen.findByRole('group', { name: 'Escalate ticket' });
+    const sel = within(panel).getByLabelText('Escalate to');
+    await waitFor(() => expect(within(sel).getByRole('option', { name: 'Staff One' })).toBeInTheDocument());
+    fireEvent.change(sel, { target: { value: 'staff1' } });
+    fireEvent.change(within(panel).getByLabelText('Reason'), { target: { value: 'urgent' } });
+    fireEvent.click(within(panel).getByRole('button', { name: 'Escalate' }));
+    expect(await within(panel).findByText(/cancels the pending request to Deoleo Admin/)).toBeInTheDocument();
+    expect(postMock).not.toHaveBeenCalled();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Confirm escalate' }));
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/tickets/t1/escalate', { escalateTo: 'staff1', reason: 'urgent', priority: 'HIGH' }));
+    expect(await screen.findByText(/pending request to Deoleo Admin was cancelled and they were notified/)).toBeInTheDocument();
+  });
+
+  it('409 → the ticket reloads automatically, the user is told what changed, typed text is kept', async () => {
+    let detailStatus = 'IN_PROGRESS';
+    routeGet({ list: [baseTicket()] });
+    const base = getMock.getMockImplementation()!;
+    getMock.mockImplementation((url: string) =>
+      url === '/api/tickets/t1' ? Promise.resolve({ success: true, data: { ticket: baseTicket({ status: detailStatus }) } }) : base(url));
+    postMock.mockResolvedValue({ success: false, error: 'The ticket changed meanwhile', status: 409 });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Reply'), { target: { value: 'my long reply' } });
+    detailStatus = 'CLOSED';
+    const before = getMock.mock.calls.filter(([u]) => u === '/api/tickets/t1').length;
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
+    expect(await within(dialog).findByText(/changed by someone else.*In Progress → Closed.*your text is kept/)).toBeInTheDocument();
+    expect(getMock.mock.calls.filter(([u]) => u === '/api/tickets/t1').length).toBeGreaterThan(before);
+    expect(within(dialog).getByLabelText('Reply')).toHaveValue('my long reply');
+  });
+
+  it('assignee load failure shows the failure + Retry (not "no users")', async () => {
+    let failAssignees = true;
+    routeGet({ list: [baseTicket()] });
+    const base = getMock.getMockImplementation()!;
+    getMock.mockImplementation((url: string) =>
+      url.endsWith('/assignees') && failAssignees ? Promise.resolve({ success: false, error: 'Gateway timeout' }) : base(url));
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    fireEvent.click(await screen.findByRole('button', { name: /Escalate/ }));
+    const panel = await screen.findByRole('group', { name: 'Escalate ticket' });
+    expect(await within(panel).findByText(/Could not load the people you can pick: Gateway timeout/)).toBeInTheDocument();
+    expect(within(panel).queryByText(/No active Gifsy support users/)).not.toBeInTheDocument();
+    failAssignees = false;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(within(within(panel).getByLabelText('Escalate to')).getByRole('option', { name: 'Staff One' })).toBeInTheDocument());
+  });
+
+  it('staff without support:escalate: Escalate disabled with the reason (no 403 surprise)', async () => {
+    session = { role: 'GIFSY_STAFF', name: 'Staff One', userId: 'staff1', canManageSchemes: true };
+    grantedPerms = ['support:read', 'support:write'];
+    routeGet({ list: [waitingTicket()], awaiting: { total: 1, mine: 0 } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('button', { name: /Escalate/ })).toBeDisabled();
+    expect(within(dialog).getByText(/does not include escalation \(support:escalate\)/)).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /Cancel request/ })).not.toBeInTheDocument();
+  });
+
+  it('Reply / Internal toggles expose aria-pressed and a non-colour cue', async () => {
+    routeGet({ list: [baseTicket()] });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    const dialog = await screen.findByRole('dialog');
+    const reply = within(dialog).getByRole('button', { name: 'Reply to Outlet' });
+    const internal = within(dialog).getByRole('button', { name: 'Internal Note' });
+    expect(reply).toHaveAttribute('aria-pressed', 'true');
+    expect(internal).toHaveAttribute('aria-pressed', 'false');
+    expect(reply.querySelector('svg')).not.toBeNull();
+    fireEvent.click(internal);
+    expect(internal).toHaveAttribute('aria-pressed', 'true');
+    expect(reply).toHaveAttribute('aria-pressed', 'false');
+    expect(internal.querySelector('svg')).not.toBeNull();
   });
 });
