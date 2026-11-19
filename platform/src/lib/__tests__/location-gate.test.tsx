@@ -288,16 +288,63 @@ describe('useLocationGate + LocationGatePanel', () => {
 
   it('ROUND 4 #6: clock guide "Test again" re-reads the server clock; fixed → the block clears and location is checked', async () => {
     getCurrentPosition.mockImplementation(fixOk);
-    const recheckClock = vi.fn().mockResolvedValueOnce(3 * 86_400_000).mockResolvedValueOnce(2_000);
+    // 1st = the confirmation on open (still wrong -> block), 2nd = Test again (still wrong), 3rd = Test again (fixed).
+    const recheckClock = vi.fn()
+      .mockResolvedValueOnce(3 * 86_400_000)
+      .mockResolvedValueOnce(3 * 86_400_000)
+      .mockResolvedValueOnce(2_000);
     render(<Harness enabled serverSkewMs={3 * 86_400_000} recheckClock={recheckClock} />);
     await screen.findByTestId('location-gate-blocked');
     expect(screen.getByText(/Then tap Test again/)).toBeTruthy();
+    expect(recheckClock).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByTestId('location-gate-test-again')); // still wrong
-    await waitFor(() => expect(recheckClock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(recheckClock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId('location-gate-test-again').textContent).toMatch(/Test again/));
     expect(screen.getByTestId('location-gate-blocked').getAttribute('data-reason')).toBe('clock');
     fireEvent.click(screen.getByTestId('location-gate-test-again')); // fixed
     expect(await screen.findByText('THE FLOW')).toBeTruthy();
     expect(getCurrentPosition).toHaveBeenCalled();
+  });
+
+  it('ITEM 5: a cached-old Date (passive skew > 24 h) but a FRESH confirmation -> no clock block', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const recheckClock = vi.fn().mockResolvedValue(1_500);
+    render(<Harness enabled serverSkewMs={30 * 3_600_000} recheckClock={recheckClock} />);
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+    expect(recheckClock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('location-gate-blocked')).toBeNull();
+  });
+
+  it('ITEM 5: passive AND confirmation both skewed > 24 h -> clock block (one confirmation)', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const recheckClock = vi.fn().mockResolvedValue(30 * 3_600_000);
+    render(<Harness enabled serverSkewMs={30 * 3_600_000} recheckClock={recheckClock} />);
+    expect((await screen.findByTestId('location-gate-blocked')).getAttribute('data-reason')).toBe('clock');
+    expect(recheckClock).toHaveBeenCalledTimes(1);
+    expect(getCurrentPosition).not.toHaveBeenCalled();
+  });
+
+  it('ITEM 5: a FAILED confirmation never blocks on the clock (the server still refuses)', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const recheckClock = vi.fn().mockResolvedValue(null);
+    render(<Harness enabled serverSkewMs={30 * 3_600_000} recheckClock={recheckClock} />);
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+  });
+
+  it('ITEM 5: switch OFF -> no confirmation request, even with a skewed passive clock', async () => {
+    const recheckClock = vi.fn().mockResolvedValue(30 * 3_600_000);
+    render(<Harness enabled={false} serverSkewMs={30 * 3_600_000} recheckClock={recheckClock} />);
+    expect(screen.getByText('THE FLOW')).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(recheckClock).not.toHaveBeenCalled();
+  });
+
+  it('ITEM 5: an in-range passive skew -> no confirmation request', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const recheckClock = vi.fn();
+    render(<Harness enabled serverSkewMs={60_000} recheckClock={recheckClock} />);
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+    expect(recheckClock).not.toHaveBeenCalled();
   });
 
   it('LG11: submit-time quiet re-check — OK keeps the flow; a lost fix switches to the guide and reports false', async () => {

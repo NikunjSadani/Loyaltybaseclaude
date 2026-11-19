@@ -86,10 +86,16 @@ export function useLocationGate(
     async ({ quiet = false }: { quiet?: boolean } = {}): Promise<LocationFix | null> => {
       if (!enabled) return null;
       if (clockWrongRef.current) {
-        // "Test again" re-reads the server clock; a fixed phone clock clears the block and the location check runs.
-        const skew = !quiet && statusRef.current === 'blocked' && recheckClockRef.current ? await recheckClockRef.current() : null;
-        const fixed = typeof skew === 'number' && Number.isFinite(skew) && Math.abs(skew) <= PHONE_CLOCK_MAX_SKEW_MS;
-        if (!fixed) {
+        // The passive skew (from the normal settings response — possibly a cached Date) looks > 24 h. CONFIRM with one
+        // no-store request before blocking (also what "Test again" does). Block only when the confirmation is skewed
+        // too; a failed confirmation (null) never blocks on the clock — the server still refuses with its message.
+        // A quiet (submit-time) check never fetches: by then the first check has already confirmed.
+        const confirm = !quiet && recheckClockRef.current ? await recheckClockRef.current() : undefined;
+        const stillWrong =
+          confirm === undefined
+            ? true
+            : typeof confirm === 'number' && Number.isFinite(confirm) && Math.abs(confirm) > PHONE_CLOCK_MAX_SKEW_MS;
+        if (stillWrong) {
           if (!mounted.current) return null;
           setTesting(false);
           setReason('clock');

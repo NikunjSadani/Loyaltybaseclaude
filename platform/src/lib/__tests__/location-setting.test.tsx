@@ -67,7 +67,7 @@ describe('useTenantFeatures — server clock skew', () => {
   }
   afterEach(() => vi.unstubAllGlobals());
 
-  it('reads the Date header (phone 48 h ahead → ~48 h skew) with a no-store request', async () => {
+  it('ITEM 5: reads the Date header PASSIVELY off the original request (no cache option, no extra request)', async () => {
     const fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       headers: { get: (h: string) => (h.toLowerCase() === 'date' ? new Date(Date.now() - 48 * 3_600_000).toUTCString() : null) },
@@ -76,7 +76,30 @@ describe('useTenantFeatures — server clock skew', () => {
     vi.stubGlobal('fetch', fetchSpy);
     render(<F />);
     await waitFor(() => expect(screen.getByTestId('f').textContent).toBe('48|false'));
-    expect(fetchSpy.mock.calls[0][1]).toMatchObject({ cache: 'no-store' });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls[0][1]).not.toHaveProperty('cache'); // byte-identical original request
+  });
+
+  it('ITEM 5: refetchClock is the no-store confirmation; a failure resolves null and clears the skew', async () => {
+    let api: ReturnType<typeof useTenantFeatures> | null = null;
+    function G() {
+      api = useTenantFeatures('/api/sales/me', { clock: true });
+      return <p data-testid="g">{api.loading ? 'loading' : String(api.serverSkewMs == null ? 'null' : Math.round(api.serverSkewMs / 3_600_000))}</p>;
+    }
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: (h: string) => (h.toLowerCase() === 'date' ? new Date(Date.now() - 48 * 3_600_000).toUTCString() : null) },
+      json: () => Promise.resolve({ data: { features: {} } }),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    render(<G />);
+    await waitFor(() => expect(screen.getByTestId('g').textContent).toBe('48'));
+    fetchSpy.mockRejectedValueOnce(new Error('offline'));
+    let out: number | null | undefined;
+    await act(async () => { out = await api!.refetchClock!(); });
+    expect(out).toBeNull();
+    expect(fetchSpy.mock.calls[1][1]).toMatchObject({ cache: 'no-store' });
+    expect(screen.getByTestId('g').textContent).toBe('null');
   });
 
   it('ROUND 4 #5: a cached response (Age header) is corrected — Date 30 h old with Age 30 h → ~0 skew', async () => {

@@ -123,9 +123,10 @@ export function serverSkewFromResponse(r: { headers?: { get?: (h: string) => str
  * DEFAULT_FEATURES while loading and on error (settles loading either way, so a
  * consumer that gates on the flags can resolve without hanging).
  *
- * `opts.clock` (location gate pages only — KYC wizard, visibility capture): the request is `cache: 'no-store'` so its
- * `Date` header is the server's clock now, and `refetchClock()` re-reads it (the clock guide's Test again). Every other
- * caller is unchanged.
+ * `opts.clock` (location gate pages only — KYC wizard, visibility capture): the SAME original request (no extra option)
+ * is read PASSIVELY for its `Date` / `Age` headers → `serverSkewMs`. `refetchClock()` is a separate `cache: 'no-store'`
+ * confirmation the location gate makes ONLY when it is enabled and the passive skew looks > 24 h (and on the clock
+ * guide's Test again). Switch-off tenants therefore send exactly the original request and never the confirmation.
  */
 export function useTenantFeatures(endpoint: string, opts: { clock?: boolean } = {}): TenantFeaturesState {
   const clock = opts.clock === true;
@@ -137,7 +138,7 @@ export function useTenantFeatures(endpoint: string, opts: { clock?: boolean } = 
   useEffect(() => {
     let cancelled = false;
     let serverSkewMs: number | null = null;
-    fetch(endpoint, clock ? { headers: { ...authHeader() }, cache: 'no-store' } : { headers: { ...authHeader() } })
+    fetch(endpoint, { headers: { ...authHeader() } })
       .then((r) => {
         serverSkewMs = clock ? serverSkewFromResponse(r) : null;
         return r.ok ? r.json() : null;
@@ -154,16 +155,21 @@ export function useTenantFeatures(endpoint: string, opts: { clock?: boolean } = 
     };
   }, [endpoint, clock]);
 
-  /** Re-read the server clock (same no-store request) and update `serverSkewMs`; resolves the new skew (or null). */
+  /**
+   * Confirmation read of the server clock (`cache: 'no-store'`); updates `serverSkewMs`. A failed / header-less
+   * confirmation resolves null and clears the skew — the phone then never blocks on the clock (the server still refuses
+   * a wrong clock with its own message).
+   */
   const refetchClock = useCallback(async (): Promise<number | null> => {
+    let skew: number | null = null;
     try {
       const r = await fetch(endpoint, { headers: { ...authHeader() }, cache: 'no-store' });
-      const skew = serverSkewFromResponse(r);
-      setState((prev) => ({ ...prev, serverSkewMs: skew }));
-      return skew;
+      skew = serverSkewFromResponse(r);
     } catch {
-      return null;
+      skew = null;
     }
+    setState((prev) => ({ ...prev, serverSkewMs: skew }));
+    return skew;
   }, [endpoint]);
 
   return { ...state, refetchClock };

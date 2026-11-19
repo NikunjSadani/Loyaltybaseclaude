@@ -22,12 +22,13 @@ line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing 
    location" (the Retry button shows whenever there is no fix).
 4. **Failed Retry on a stale fix**: the green "Location captured" line / icon / green box are hidden while the fix is
    stale (amber box + amber stale line + the red error only). Switch-off tenants render exactly as before.
-5. **Clock offset**: on the two gate pages (KYC wizard, visibility capture) the settings request is `cache: 'no-store'`
-   and the offset is `now − (Date + Age)` (defensive: either header may be missing). Every other `useTenantFeatures`
-   caller is unchanged (no cache option, no skew). Only a corrected skew > 24 h blocks. Note: Deoleo reps on those two
-   pages also send that one settings request with `cache: 'no-store'` (same URL / headers; only the browser cache
-   mode differs).
-6. **Clock guide "Test again"** re-reads the server clock (same no-store request) and clears the block when the clock
+5. **Clock offset** (byte-identical for switch-off tenants — follow-up): every tenant sends the ORIGINAL settings
+   request unchanged. On the two gate pages its `Date` / `Age` headers are read passively → offset `now − (Date + Age)`
+   (defensive: either may be missing). Only when the gate is ENABLED and that offset is > 24 h does the phone make ONE
+   confirmation request (`cache: 'no-store'`) and recompute; it blocks on the clock only if the confirmation is > 24 h
+   too. A failed confirmation never blocks on the clock (the server still refuses with its message). Switch-off
+   tenants never make the confirmation request.
+6. **Clock guide "Test again"** re-reads the server clock (the same no-store confirmation request) and clears the block when the clock
    is now right; the guide says "Then tap Test again".
 7. **Wording**: visibility's stale photo message says "older than 60 minutes" (the server limit), and a future /
    missing photo time says "has a wrong time".
