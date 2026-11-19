@@ -56,6 +56,7 @@ const DEFAULT_FEATURES: Record<FeatureKey, boolean> = {
   offerTiles:              false,
   salesImport:             false,
   wholesalerPayoutInclActivation: false,
+  helpVideos:              false,
 };
 
 const FEATURE_META: Record<FeatureKey, { label: string; description: string }> = {
@@ -77,6 +78,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   offerTiles:               { label: "This month's offers", description: "Turns on the whole offers feature: the This Month's Offers admin page and the offer tiles on the partner dashboard. When off, partners see no offers section." },
   salesImport:              { label: 'Sales Import (DMS file)', description: "Upload the distributor invoice-line file to compute importer-owned KPI achievements per month. Leave OFF unless the tenant's column mapping and KPIs are configured." },
   wholesalerPayoutInclActivation: { label: 'Wallet: "Incl. Activation" (wholesalers)', description: 'Show a small "Incl. Activation" line under "Lifetime Payout" on a wholesaler\'s wallet card. Display only; retailers never see it.' },
+  helpVideos:               { label: 'Help & videos', description: 'Show a "Help & videos" entry on the sales and partner Profile: short how-to videos with numbered steps. Manage the guides from the Help & videos link at the top of the client page. When off, no entry is shown and the help endpoints refuse.' },
 };
 
 const STEPS: { key: Step; label: string }[] = [

@@ -70,6 +70,7 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
     offerTiles:              bool(f.offerTiles,              d.offerTiles),
     salesImport:             bool(f.salesImport,             d.salesImport),
     wholesalerPayoutInclActivation: bool(f.wholesalerPayoutInclActivation, d.wholesalerPayoutInclActivation),
+    helpVideos:              bool(f.helpVideos,              d.helpVideos),
     partnerApp: {
       showSchemes:     bool(pa.showSchemes,     d.partnerApp.showSchemes),
       showInvoices:    bool(pa.showInvoices,    d.partnerApp.showInvoices),

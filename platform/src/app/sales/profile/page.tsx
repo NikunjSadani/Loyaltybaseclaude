@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   User, Phone, Mail, Award, LogOut,
-  ChevronRight, Shield, Bell, X,
+  ChevronRight, Shield, Bell, X, PlayCircle,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
@@ -12,6 +13,7 @@ import { useClientConfig } from '@/lib/platform/client-config-context';
 import { api, authHeader } from '@/lib/api-client';
 import { logout } from '@/lib/auth-client';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
+import { useSalesFeatures } from '@/lib/sales-features-context';
 
 interface SalesProfile {
   name: string;
@@ -98,6 +100,8 @@ function mapUserToProfile(user: {
 
 export default function SalesProfilePage() {
   const slug = useClientConfig().slug;
+  // Tenant flag from the sales layout's existing /api/sales/me read (no extra request). OFF / not loaded → no entry.
+  const showHelpVideos = useSalesFeatures()?.helpVideos === true;
   const [profile, setProfile] = useState<SalesProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -232,6 +236,28 @@ export default function SalesProfilePage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Help & videos (tenant flag helpVideos) */}
+      {showHelpVideos && (
+        <Card>
+          <CardContent className="px-0 py-1">
+            <Link
+              href="/sales/help"
+              data-testid="profile-help-videos"
+              className="w-full flex items-center gap-3 px-4 py-3.5 hover:bg-gray-50 active:bg-gray-100 transition-colors text-left"
+            >
+              <div className="p-2 rounded-lg shrink-0 bg-gray-50">
+                <span className="text-gray-500"><PlayCircle className="h-4 w-4" /></span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-gray-800">Help &amp; videos</p>
+                <p className="text-xs text-gray-400 mt-0.5 truncate">Short videos on how to use the app</p>
+              </div>
+              <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />
+            </Link>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Settings */}
       <Card>
