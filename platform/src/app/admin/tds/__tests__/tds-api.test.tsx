@@ -22,6 +22,12 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 import AdminTdsPage from '../page';
 
+// jsdom has no URL.revokeObjectURL. lib/download revokes on a 1 s timer, which can fire after a test's URL stub has
+// been restored (afterEach → unstubAllGlobals) while later tests in this file still run → an unhandled TypeError.
+if (typeof URL.revokeObjectURL !== 'function') {
+  Object.defineProperty(URL, 'revokeObjectURL', { value: () => {}, configurable: true, writable: true });
+}
+
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -395,5 +401,52 @@ describe('TDS — Admin TDS page API wiring', () => {
         ),
       ).toBe(true);
     });
+  });
+  // Fix round B (D1/D3/M2) — a PAN with a reversed payout carries an amber flag + the API's notes; others unchanged.
+  it('TDS14: 194R/194C rows with a `reversal` show the flag + notes and a summary line; rows without it are unchanged', async () => {
+    mockUseAdminSession.mockReturnValue({ role: 'GIFSY_ADMIN', name: 'G', userId: '', canManageSchemes: true });
+    const flag = {
+      reversedPaise: '1000000',
+      items: [{ amountPaise: '1000000', reversedAt: '2026-11-16T00:00:00.000Z', period: '2026-10', outletCode: 'O1', retroactive: true }],
+      belowThresholdAfterReversal: true,
+      notes: [
+        '₹10,000.00 reversed on 16 Nov 2026',
+        'PAN below threshold after reversal',
+        'Changed after reversal on 16 Nov 2026 — revise return if already filed',
+        '₹1,000.00 over-deducted — handed back on the next payout on this PAN',
+      ],
+    };
+    const r = MOCK_194R.data as { rows: object[]; summary: object };
+    const c = MOCK_194C.data as { rows: object[]; summary: object };
+    const r194 = { success: true, data: { ...r, summary: { ...r.summary, reversalFlags: 1 }, rows: [{ ...r.rows[0], reversal: flag }, r.rows[1]] } };
+    const r194c = { success: true, data: { ...c, rows: [{ ...c.rows[0], reversal: { ...flag, belowThresholdAfterReversal: false, notes: ['₹10,000.00 reversed on 16 Nov 2026'] } }] } };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve(url.includes('/194c') ? r194c : r194) }),
+    ));
+    render(<AdminTdsPage />);
+    const flags = await screen.findAllByTestId('tds-reversal-flag');
+    expect(flags).toHaveLength(1); // only the flagged 194R row
+    expect(flags[0].textContent).toContain('Reversed ₹10,000.00 · below threshold · changed after reversal');
+    expect(flags[0].textContent).toContain('Changed after reversal on 16 Nov 2026 — revise return if already filed');
+    expect(flags[0].textContent).toContain('₹1,000.00 over-deducted — handed back on the next payout on this PAN');
+    expect(screen.getByTestId('tds-194r-reversal-summary').textContent).toMatch(/1 PAN changed after a payout reversal/);
+    // the unflagged row's PAN cell is just the PAN
+    expect(screen.getByText('XYZPQ9876G').closest('td')!.textContent).toBe('XYZPQ9876G');
+
+    fireEvent.click(screen.getByText('194C — Contractor (Gifsy)'));
+    const cflags = await screen.findAllByTestId('tds-reversal-flag');
+    expect(cflags).toHaveLength(1);
+    expect(cflags[0].textContent).toContain('Reversed ₹10,000.00 · changed after reversal');
+    expect(cflags[0].textContent).not.toContain('below threshold');
+    expect(screen.getByTestId('tds-194c-reversal-summary').textContent).toMatch(/1 PAN changed/);
+  });
+
+  it('TDS15: no reversal on any row → no flag, no summary line', async () => {
+    vi.stubGlobal('fetch', make194RFetch());
+    render(<AdminTdsPage />);
+    await screen.findByText('194R Liability — 2025-26');
+    await screen.findAllByText(/₹500\.00/);
+    expect(screen.queryByTestId('tds-reversal-flag')).toBeNull();
+    expect(screen.queryByTestId('tds-194r-reversal-summary')).toBeNull();
   });
 });

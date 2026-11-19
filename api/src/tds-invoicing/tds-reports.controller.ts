@@ -48,7 +48,11 @@ export class TdsReportsController {
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   payouts(@CurrentUser() user: JwtPayload, @Query() q: PayoutReportQueryDto) {
     const scope: ReportScope = { clientId: this.resolveClientId(user, q.clientId), period: q.period };
-    return this.reports.payoutReport(scope);
+    // Fix round B (#21): the TDS credits panel is paged server-side (default 25 per page); `creditsOnly` serves a
+    // page flip without re-reading the payout rows.
+    const creditPage = { page: q.creditPage ?? 1, limit: q.creditLimit ?? 25 };
+    if (q.creditsOnly === 'true') return this.reports.creditsOnly(scope, creditPage);
+    return this.reports.payoutReport(scope, creditPage);
   }
 
   @Get('payouts/export')

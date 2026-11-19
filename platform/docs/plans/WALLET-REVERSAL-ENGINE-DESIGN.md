@@ -231,6 +231,9 @@ engine path only when the flag is `V2`; `GET …/payout-reversal-entries` return
 reject still dispatch on allocation rows (a reversal reserved under SHADOW before this change still completes).
 
 **B2 — reversing a PAID entry whose TDS was DEDUCTED (V2 only; LEGACY/SHADOW keep the full-amount receivable).**
+⚠️ Superseded in part by §8.2 (fix round B): the credit is CAPPED (H1), scoped by DEDUCTOR not tenant (D4 — 194C credits
+are usable by every programme on the PAN), and the base exclusion uses the `tdsBaseReversedAt` marker for every V2
+PAID reversal (D1). Read §8.2 for the current rules.
 - Receivable = `amountPaise − tdsDeductedPaise` (net cash received), stored on the allocation (`receivablePaise`) and
   summed into `CreditReversal.shortfallPaise`.
 - Credit = the entry's own withholding as booked in the TDS ledger (Σ `tdsDeductedThisPaise` for the entry, capped at
@@ -289,14 +292,72 @@ SHADOW = LEGACY + LEGACY outcome summary with data unchanged; `credits.service.s
 `tds-reports.service.spec.ts`, `tds-payouts.kind.spec.ts` (extra sheet, Payouts/Summary parity); platform
 `payout-reversal-held-entries.test.tsx`, `tds-payouts-api.test.tsx`.
 
-**Open questions (owner)** — O1: a DEDUCT entry with NO TDS withheld (below threshold) that is reversed keeps its base in
-the PAN's cumulative (owner rule "no credit"); strictly the income was reversed too. Recommendation: keep (no silent
-TDS movement). O2: credits are per FY — a credit unused at 31 March stays outstanding on the report but is not applied
-to next FY's TDS. Recommendation: keep FY-scoped (TDS deposits belong to their FY; the retailer claims the excess in
-their return) and show it on the report. O3: when removing the reversed base un-crosses the threshold, deposits beyond
-the explicit credit (other entries' catch-up TDS) become an over-deduction the cumulative ledger already gives to the
-next payout on that PAN (any tenant), as it does today for any base reduction. Recommendation: accept (correct tax
-math; rare) or ask for a report flag.
+**Open questions (owner)** — answered 2026-11-16, see §8.2: O1 → D1 (the reversed base ALWAYS leaves), O2 → D2 (stays
+in its FY, said on the report/export), O3 → D3 (keep the automatic hand-back, make it visible + flag the PAN).
+
+**L4 — a reservation made earlier still dispatches by DATA.** Approve / reject look only at the reversal's allocation
+rows (`patchPayoutReversalV2` returns null when there are none): a PAYOUT reversal reserved while the tenant was V2 (or
+SHADOW before B1) completes on the engine path even after the flag goes back to LEGACY/SHADOW, and a reversal raised
+under LEGACY keeps the interim path even after the flag becomes V2. The flag only decides how NEW requests are created.
+
+### 8.2 Fix round B (owner decisions D1–D5 + money/screens audit, 2026-11-16) — as built on `feat/wre-fix-b`
+**Schema** (inside the never-applied `20261117130000` migration; Prisma client regenerated in the shared
+`node_modules`): `credit_payout_entries.tdsBaseReversedAt` / `tdsBaseReversalId` (D1 marker) and
+`credit_reversals.requestRemarks` (D5). Nullable, metadata-only ALTERs.
+
+- **D1 — a reversed PAID payout ALWAYS leaves the PAN's yearly TDS base** (V2 approve marks the entry whether or not TDS
+  was withheld; LEGACY and backfilled receivables are NOT marked — Q13). Every base read uses the marker instead of
+  `tdsCredit: { is: null }`: `buildPayoutTdsPlan` (PAN + no-PAN paths), `panPositionForReversal`, `tds.service`
+  194R/194C. The 194R/194C liability rows carry an optional `reversal { reversedPaise, items[], belowThresholdAfterReversal,
+  notes[] }` — "₹X reversed on <date>", "PAN below threshold after reversal" — and a PAN whose whole base was reversed
+  still gets a base-0 row. Rows without a reversal are byte-identical (summary gains `reversalFlags` only when > 0).
+- **H1 — credit cap.** `credit = min(own + earlier, max(0, Σ ledger − Σ outstanding credits − due(remaining base)))` in the
+  deductor scope, threshold on the remaining COMBINED base (`reversalCreditCap` + `CreditsService.panPositionForReversal`,
+  run after the marker, under the PAN locks — now also the PAN the base counts under today). The rest of own + earlier
+  is called out: "₹X of this TDS covers the retailer's other payouts — no credit". Auditor example (194R 10 %, ₹20,000):
+  A ₹15k · B ₹10k (₹2,500 withheld) · C ₹10k (₹1,000) → reversing B credits ₹1,000 (was ₹2,500); D ₹10k next → the
+  ₹1,000 credit covers D's own TDS exactly. Cross-tenant 194C case (Bajaj's catch-up covered Deoleo's payouts): credit =
+  the drop in the PAN's TDS due only.
+- **D2 — unused credit stays in its FY**: TDS payouts report / export "TDS Credits" sheet say "₹X unused credit for FY …,
+  not carried forward" once the FY has closed; every credit shows its scope ("Scoped to FY … · 194C · usable by any
+  programme on this PAN" / "· 194R · this programme only", L2).
+- **D3 — hand-back made visible.** The withholding is unchanged (`computeDeduction(prior = ledger)`), but when the PAN has
+  engine-reversed base in scope the plan explains the difference: `deductWithCredits(priorDuePaise)` splits the TDS due
+  on the payout into hand-back + credit + withheld. Line on the payout's TDS: "₹X less TDS: adjusted after a reversal
+  brought PAN below the limit" (download response `tdsAdjustments[]`, header `X-Tds-Adjustment-*`, audit
+  `TDS_REVERSAL_ADJUSTMENT`, TDS payout report row `tdsNote`); approve outcome says "₹X over-deducted TDS handed back on
+  the next payout"; the 194C liability row flags "₹X TDS withheld beyond what is now due — handed back on the next payout".
+  No reversal on the PAN → the old branch, no line (Deoleo identical).
+- **D4 — scope by deductor** (`deductorScopeClientId` / `inDeductorScope`): 194C (Gifsy) → base, ledger and credits across
+  ALL tenants incl. Deoleo; a credit raised by another programme is used and said so ("₹X adjusted from earlier TDS
+  credit (another programme)"; `otherProgrammePaise`; the guarded UPDATE allows a 194C credit for any payer).
+  194R (the client) → base, ledger, credits and gross-up recovery strictly within the client (plan + position + report).
+  ⚠️ This also changes the 194R plan for a PAN paid by TWO clients' visibility 194R streams in one FY (it used to be
+  pooled) — see open question F1.
+- **D5 — remarks on every tenant**: `CreateReversalDto.remarks` (≤ 1,000) → `requestRemarks` (written only when typed);
+  approve/reject `remarks` trimmed (blank → null), ≤ 1,000; both in the reversal list + V2 audit rows (CREATE / APPROVE /
+  REJECT); screens send and show them (status page both create paths, payout page approve/reject + cards).
+- **M2** — a reversal after the payout's month closed flags the liability row "Changed after reversal on <date> — revise
+  return if already filed" (`items[].retroactive`).
+- **L1** — payments report rows: `reversal { receivablePaise, tdsCreditPaise, reversedAt, note }` and `tdsCreditPaise` /
+  `tdsNote` (same page query; the export is unchanged). TDS payout report rows: `reversedNote`, `tdsNote`, `clientName`.
+- **L3** — shortfall written on every approval that recorded a receivable, also ₹0; headline "₹0.00 owed — the whole
+  amount paid was withheld as TDS". **L5** — one wording for a reversed PAID entry (`paidEntryOutcomeText`: net owed,
+  TDS withheld, credit or why none, H1/D1/D3) and one for a download TDS line (`tdsAdjustmentNote`); the screens share
+  `platform/src/lib/payout-reversal-copy.ts`. **L6** — a credit whose source outlet's retailer now has another PAN:
+  "Credit on previous PAN XXXXX — not applied automatically".
+- **Screens**: bank-file notices read `GET …/payout-downloads/:id/summary` (or `latest-summary?period&groupType&fieldId`)
+  JSON after each download (headers are only a fallback); picker loading / failed-load retry / Submit gating, no PAID
+  pre-tick, reload after a taken entry, Approve disabled while a held entry is PROCESSING, outcome cleared per action,
+  `finally` on every submit, notices cleared on period change, one 2-decimal ₹ formatter (`lib/money-format.ts`), dialog
+  a11y (role/aria-modal/Escape/focus trap/return focus), TDS credits panel server-paged (`creditPage`/`creditLimit`,
+  `creditsOnly=true` for a page flip) with tenant name + masked PAN. The attention banner mounts only when the attention
+  response `mode` is not LEGACY (Deoleo's status screen is unchanged).
+
+**Open question F1 (owner)** — D4 makes the 194R payout plan per client. A retailer PAN paid by two clients' 194R
+visibility streams in the same FY used to be pooled (one threshold, one ledger across both); it is now per client, which
+is what the 194R liability report already did. Deoleo's numbers change only for such a shared PAN. Recommendation: keep
+(the client is the deductor, the report already works this way); check prod for shared 194R PANs before release.
 
 ## 9. One-off backfill (WP6, NOT built) + rollout
 **Backfill** (per wallet, own tx, advisory lock + wallet FOR UPDATE, resumable: skip wallets with movementSeq > 0):
@@ -440,6 +501,11 @@ credit batches on prod yet. Worth doing properly once Bajaj runs monthly credits
 | B1 (2026-11-16) | SHADOW mode for PAYOUT reversals | Behaves exactly like LEGACY; only V2 picks / reserves entries (§8.1) | SHADOW = V2 for payouts (WP5 as built) |
 | B2 (2026-11-16) | Reversing a PAID payout whose TDS was DEDUCTED (V2) | Receivable = net received; withheld TDS → TDS credit on the PAN (same tenant), auto-applied to the next TDS due, carried forward, released if that payout fails / is cancelled; GROSS_UP → full receivable, no credit, called out (§8.1) | Q11 (full receivable, TDS corrected off-platform) |
 | B3 (2026-11-16) | Approve/reject outcome summary | On every tenant incl. LEGACY/Deoleo — display only, data unchanged (⚠️ platform-wide, owner-approved) | Engine reversals only |
+| D1 (2026-11-16) | Reversed PAID payout with no TDS withheld | ALWAYS leaves the PAN's yearly base; report "₹X reversed on <date>" + "PAN below threshold after reversal" (§8.2) | Keep it in the base (O1) |
+| D2 (2026-11-16) | TDS credit unused at FY end | Stays in its FY; report/export "₹X unused credit for FY …, not carried forward" | Carry into next FY |
+| D3 (2026-11-16) | Reversal drops a PAN below the threshold | Keep the automatic hand-back on the next payout, visible on that payout's TDS line + PAN flagged | Explicit credit for it |
+| D4 (2026-11-16) | Credits across clients | By deductor: 194C (Gifsy) across all tenants incl. Deoleo, "(another programme)" line; 194R (client) strictly within the client | Tenant-scoped for both |
+| D5 (2026-11-16) | Typed reversal remarks | Sent + saved on create/approve/reject on every tenant incl. Deoleo (⚠️ platform-wide, owner-approved) | — |
 
 ### 12.1 Policy round A — owner decisions 2026-11-15/16 (as built on `feat/wre-pol-a`)
 Owner rule for all of them: **no silent pass-throughs** — every refusal / skip / blocked wallet / unmapped credit / owed
@@ -466,6 +532,11 @@ amount / paused state is called out to whoever can act (call-outs table below).
 | PAYOUT reversal backfill flags (AMBIGUOUS / DOUBLE_CONSUMPTION / …) | Gifsy / owner | run log `PAYOUT_<code>` lines + ATTENTION; verify V9b WARN | resolve by hand (no rows written for BLOCKING) |
 | Historical clawback beyond holdings | Gifsy / owner | run log (WARNING `CLAWBACK_OWED`, summary line), verify V8, banner + `owedClawbacks[]` "recovered X, owed Y" | recover the owed points off-platform or leave as debt |
 | SHADOW v2 refusal | Gifsy | audit `REVERSAL_ENGINE_SHADOW` `v2.refused` (same wording) | review before V2 |
+| (fix round B) Reversed PAID base / PAN below threshold / revise return (D1, M2) | Gifsy / client (194R) | 194R/194C liability rows `reversal.notes`; summary `reversalFlags` | revise the TDS return if already filed |
+| (fix round B) Credit capped — TDS covers other payouts (H1) | Gifsy | approve outcome line + `tdsNote`; audit APPROVE metadata | none |
+| (fix round B) Over-deduction handed back (D3) | Gifsy | approve outcome; download `tdsAdjustments` + JSON summary + audit `TDS_REVERSAL_ADJUSTMENT`; TDS payout row `tdsNote`; 194C row note | none (ledger corrects itself) |
+| (fix round B) Credit from another programme used (D4, 194C) | Gifsy | download line "(another programme)"; credits panel application `otherProgramme` (other tenant's payout details hidden in a tenant view) | none |
+| (fix round B) Unused credit at FY end / credit on previous PAN (D2, L6) | Gifsy / client | TDS payouts report credits panel + export "TDS Credits" sheet notes | retailer claims in return / settle off-platform |
 
 ### 12.2 Fix round A — money-audit findings, points side (2026-11-16, branch `feat/wre-fix-a`)
 | # | Finding | Fix (as built) |

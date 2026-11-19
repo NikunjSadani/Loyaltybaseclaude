@@ -2,7 +2,7 @@
 /**
  * /admin/credits-payouts/status — WP5 payout reversal entry picker (Wallet Reversal Engine §8, Q9/Q10).
  *  - LEGACY engine (default, Deoleo): the Request Reversal modal is exactly the amount form it was.
- *  - SHADOW/V2: the modal lists the outlet+field's payout entries, preselects every available one, shows the
+ *  - V2: the modal lists the outlet+field's payout entries, preselects the available UNPAID ones, shows the
  *    blocked ones with the reason, and submits the selected ids with requestedPaise = Σ selected.
  */
 
@@ -111,21 +111,24 @@ describe('Payout status — payout reversal entry picker (WP5)', () => {
     ]);
   });
 
-  it('V2: lists entries (available preselected, blocked disabled with reason) and submits the selected ids + their sum', async () => {
+  it('V2: lists entries (only unpaid preselected, blocked disabled with reason) and submits the selected ids + their sum', async () => {
     const api = mockApi('V2');
     await openModal();
     await screen.findByTestId('payout-entry-picker');
     expect(screen.queryByText('Reversal Amount (₹)')).toBeNull();
-    const a = screen.getByLabelText('Payout entry ₹300 (PAID)') as HTMLInputElement;
-    const b = screen.getByLabelText('Payout entry ₹500 (PENDING)') as HTMLInputElement;
-    const x = screen.getByLabelText('Payout entry ₹100 (REVERSED)') as HTMLInputElement;
-    expect([a.checked, b.checked, x.checked, x.disabled]).toEqual([true, true, false, true]);
+    const a = screen.getByLabelText('Payout entry ₹300.00 (PAID)') as HTMLInputElement;
+    const b = screen.getByLabelText('Payout entry ₹500.00 (PENDING)') as HTMLInputElement;
+    const x = screen.getByLabelText('Payout entry ₹100.00 (REVERSED) — not selectable: Already reversed') as HTMLInputElement;
+    // #7: a PAID entry is never pre-ticked (it becomes money owed back — an explicit choice).
+    expect([a.checked, b.checked, x.checked, x.disabled]).toEqual([false, true, false, true]);
     expect(screen.getByText('Already reversed')).toBeTruthy();
-    expect(screen.getByText(/becomes a receivable/)).toBeTruthy();
-    expect(screen.getByText(/Reversal amount:/).textContent).toMatch(/₹800 \(2 of 2 available/);
+    expect(screen.getByText('Already paid — becomes owed (net of TDS withheld) · withheld TDS becomes a TDS credit')).toBeTruthy();
+    expect(screen.getByText(/Reversal amount:/).textContent).toMatch(/₹500\.00 \(1 of 2 available/);
 
-    fireEvent.click(a); // deselect the paid entry — the exact-subset case (T-pay2)
-    expect(screen.getByText(/Reversal amount:/).textContent).toMatch(/₹500 \(1 of 2 available/);
+    fireEvent.click(a); // tick the paid entry too
+    expect(screen.getByText(/Reversal amount:/).textContent).toMatch(/₹800\.00 \(2 of 2 available/);
+    fireEvent.click(a); // and untick it again — the exact-subset case (T-pay2)
+    expect(screen.getByText(/Reversal amount:/).textContent).toMatch(/₹500\.00 \(1 of 2 available/);
     fireEvent.click(screen.getByRole('button', { name: 'Submit Reversal Request' }));
     await screen.findByText(/held out of bank files until Gifsy approves or rejects/);
     expect(api.posts).toEqual([
@@ -140,8 +143,7 @@ describe('Payout status — payout reversal entry picker (WP5)', () => {
     mockApi('V2');
     await openModal();
     await screen.findByTestId('payout-entry-picker');
-    fireEvent.click(screen.getByLabelText('Payout entry ₹300 (PAID)'));
-    fireEvent.click(screen.getByLabelText('Payout entry ₹500 (PENDING)'));
+    fireEvent.click(screen.getByLabelText('Payout entry ₹500.00 (PENDING)')); // the only pre-ticked entry
     expect((screen.getByRole('button', { name: 'Submit Reversal Request' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

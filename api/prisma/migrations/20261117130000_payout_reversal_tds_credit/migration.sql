@@ -7,6 +7,12 @@
 ALTER TABLE "payout_reversal_allocations" ADD COLUMN "receivablePaise" BIGINT NOT NULL DEFAULT 0,
 ADD COLUMN "tdsCreditPaise" BIGINT NOT NULL DEFAULT 0;
 
+-- Fix round B (owner D1/D5, 2026-11-16): a V2-reversed PAID entry leaves the PAN's yearly TDS base (marker), and the
+-- requester's remarks are kept separately from the approver's. Nullable, no default → metadata-only ALTERs.
+ALTER TABLE "credit_payout_entries" ADD COLUMN "tdsBaseReversedAt" TIMESTAMP(3),
+ADD COLUMN "tdsBaseReversalId" TEXT;
+ALTER TABLE "credit_reversals" ADD COLUMN "requestRemarks" TEXT;
+
 -- CreateTable
 CREATE TABLE "tds_credits" (
     "id" TEXT NOT NULL,

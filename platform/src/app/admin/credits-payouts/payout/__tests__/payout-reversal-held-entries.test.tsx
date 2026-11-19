@@ -63,11 +63,17 @@ describe('Payout page — held payout entries on pending reversals (WP5)', () =>
                 ...base, id: 'r-v2', requestedPaise: 80000,
                 payoutEntries: [
                   { payoutEntryId: 'pe-a', amountPaise: 30000, allocationState: 'RESERVED', entryStatus: 'PAID' },
-                  { payoutEntryId: 'pe-b', amountPaise: 50000, allocationState: 'RESERVED', entryStatus: 'PROCESSING' },
+                  { payoutEntryId: 'pe-b', amountPaise: 50000, allocationState: 'RESERVED', entryStatus: 'PENDING' },
+                ],
+              },
+              {
+                ...base, id: 'r-proc', requestedPaise: 40000,
+                payoutEntries: [
+                  { payoutEntryId: 'pe-p', amountPaise: 40000, allocationState: 'RESERVED', entryStatus: 'PROCESSING' },
                 ],
               },
             ],
-            pagination: { page: 1, limit: 50, total: 2, pages: 1 },
+            pagination: { page: 1, limit: 50, total: 3, pages: 1 },
           },
         });
       }
@@ -79,8 +85,9 @@ describe('Payout page — held payout entries on pending reversals (WP5)', () =>
   it('lists the held entries + their approval outcome for the engine reversal only', async () => {
     render(<PayoutDownloadPage />);
     const held = await screen.findByTestId('held-entries-r-v2');
-    expect(held.textContent).toContain('₹300 — already paid → recorded as owed (the net amount received; any TDS withheld becomes a TDS credit on the PAN)');
-    expect(held.textContent).toMatch(/₹500 — with the bank now → approval refused until the UTR \/ failure is recorded/);
+    expect(held.textContent).toContain('₹300.00 — Already paid — becomes owed (net of TDS withheld) · withheld TDS becomes a TDS credit');
+    expect(held.textContent).toContain('₹500.00 — Not yet sent to the bank — will be cancelled');
+    expect(screen.getByTestId('held-entries-r-proc').textContent).toContain('₹400.00 — With the bank now — approval waits for the bank result');
     expect(screen.queryByTestId('held-entries-r-legacy')).toBeNull();
   });
 
@@ -94,7 +101,7 @@ describe('Payout page — held payout entries on pending reversals (WP5)', () =>
     downloadHeaders = { 'X-Reversal-Held-Count': '2', 'X-Reversal-Held-Paise': '80000' };
     fireEvent.click(await screen.findByRole('button', { name: /Generate & Download/ }));
     const notice = await screen.findByTestId('reversal-held-notice');
-    expect(notice.textContent).toMatch(/2 payout entries \(₹800\) were held out of this bank file because a reversal request is pending/);
+    expect(notice.textContent).toMatch(/2 payout entries \(₹800\.00\) were held out of this bank file because a reversal request is pending/);
   });
 
   it('approve: shows what happened to every entry (cancelled / receivable / TDS)', async () => {
@@ -113,8 +120,8 @@ describe('Payout page — held payout entries on pending reversals (WP5)', () =>
     fireEvent.click(screen.getByRole('button', { name: 'Confirm Approve' }));
     const out = await screen.findByTestId('reversal-outcome');
     expect(out.textContent).toMatch(/Reversal approved — Outlet One \/ Volume/);
-    expect(out.textContent).toMatch(/₹500 entry \(bank payment had failed\) cancelled — withheld TDS ₹10\.00 offset/);
-    expect(out.textContent).toMatch(/₹300 entry was already PAID — recorded as a receivable/);
+    expect(out.textContent).toMatch(/₹500\.00 entry \(bank payment had failed\) cancelled — withheld TDS ₹10\.00 offset/);
+    expect(out.textContent).toMatch(/₹300\.00 entry was already PAID — recorded as a receivable/);
     expect(out.textContent).toMatch(/Total receivable ₹300/);
   });
 
@@ -128,7 +135,7 @@ describe('Payout page — held payout entries on pending reversals (WP5)', () =>
     downloadHeaders = { 'X-Tds-Credit-Applied-Count': '1', 'X-Tds-Credit-Applied-Paise': '20000' };
     fireEvent.click(await screen.findByRole('button', { name: /Generate & Download/ }));
     const notice = await screen.findByTestId('tds-credit-applied-notice');
-    expect(notice.textContent).toMatch(/₹200 of TDS on 1 payout entry was adjusted from earlier TDS credit/);
+    expect(notice.textContent).toMatch(/₹200\.00 of TDS on 1 payout entry was adjusted from earlier TDS credit/);
   });
 
   it('approve (V2): shows the server summary — net receivable + TDS credit carried forward on the PAN', async () => {

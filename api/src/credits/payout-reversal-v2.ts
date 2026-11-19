@@ -25,7 +25,12 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { CreditEntryStatus, PayoutAllocationState, Prisma, TdsSection } from '@prisma/client';
 import { formatINR } from '../common/money';
-import { receivablePanLockKey, recordReceivableTds, releaseCreditApplications } from './tds-credit';
+import {
+  receivablePanLockKeys,
+  recordReceivableTds,
+  releaseCreditApplications,
+  type PanPositionLoader,
+} from './tds-credit';
 
 /** Allocation states that hold an entry (the partial unique index's predicate). RELEASED does not. */
 export const LIVE_PAYOUT_ALLOCATION_STATES: PayoutAllocationState[] = [
@@ -234,7 +239,7 @@ export async function reservePayoutEntries(
   tx: Prisma.TransactionClient,
   creditReversalId: string,
   chosen: Pick<PayoutReversalCandidate, 'id' | 'amountPaise' | 'status'>[],
-  audit: PayoutReversalKey & { actorId: string },
+  audit: PayoutReversalKey & { actorId: string; remarks?: string | null },
 ): Promise<void> {
   try {
     await tx.payoutReversalAllocation.createMany({
@@ -266,6 +271,7 @@ export async function reservePayoutEntries(
       fieldId: audit.fieldId,
       totalPaise: chosen.reduce((n, c) => n + c.amountPaise, 0n),
       entries: chosen.map((c) => ({ entryId: c.id, amountPaise: c.amountPaise, status: c.status })),
+      remarks: audit.remarks ?? null,
     },
   });
 }
@@ -289,6 +295,8 @@ export interface PatchPayoutV2Deps {
     tdsSection: TdsSection;
     tdsDeductedPaise: bigint;
   }) => Promise<bigint>;
+  /** Fix round B (H1): the PAN's TDS position after a reversed PAID entry left the base (CreditsService). */
+  panPosition: PanPositionLoader;
 }
 
 /**
@@ -308,6 +316,11 @@ export interface PayoutOutcome {
     tdsCreditPaise: number;
     panMasked: string | null;
     tdsNote: string;
+    /** Fix round B (V2 only; absent on LEGACY): H1 / D3 / D1 detail. */
+    tdsWithheldPaise?: number;
+    coversOtherPayoutsPaise?: number;
+    handBackPaise?: number;
+    belowThresholdAfterReversal?: boolean;
   }>;
   /** Σ receivable recorded (integer paise) = CreditReversal.shortfallPaise. */
   receivablePaise: number;
@@ -323,9 +336,55 @@ export function approvedHeadline(o: PayoutOutcome): string {
     const t = o.cancelled.reduce((n, c) => n + c.amountPaise, 0);
     parts.push(`${o.cancelled.length} entr${o.cancelled.length === 1 ? 'y' : 'ies'} cancelled (${formatINR(BigInt(t))}) — will not be paid`);
   }
-  if (o.receivable.length > 0) parts.push(`${formatINR(BigInt(o.receivablePaise))} recorded as owed`);
+  if (o.receivable.length > 0) {
+    // L3: a payout fully withheld as TDS leaves nothing owed — say so instead of a bare "₹0 recorded as owed".
+    parts.push(
+      o.receivablePaise > 0
+        ? `${formatINR(BigInt(o.receivablePaise))} recorded as owed`
+        : `${formatINR(0n)} owed — the whole amount paid was withheld as TDS`,
+    );
+  }
   if (o.tdsCreditPaise > 0) parts.push(`${formatINR(BigInt(o.tdsCreditPaise))} TDS credit carried forward`);
   if (o.cancelled.length === 0 && o.receivable.length === 0) parts.push('no payout entry changed');
+  return parts.join(' · ');
+}
+
+/**
+ * L5 — THE one wording of a reversed PAID entry's outcome (V2), shared by the approve outcome line, the audit row
+ * and the reports: net amount owed, TDS withheld, TDS credit (or why none), H1 / D3 / D1 call-outs.
+ */
+export function paidEntryOutcomeText(x: {
+  amountPaise: bigint;
+  receivablePaise: bigint;
+  tdsWithheldPaise: bigint;
+  tdsCreditPaise: bigint;
+  panMasked: string | null;
+  methodology: string | null;
+  untrackedWithheldPaise: bigint;
+  coversOtherPayoutsPaise: bigint;
+  handBackPaise: bigint;
+  belowThresholdAfterReversal: boolean;
+}): string {
+  const owed =
+    x.receivablePaise > 0n
+      ? `Recorded as owed · ${formatINR(x.receivablePaise)}` +
+        (x.tdsWithheldPaise > 0n ? ` (net of ${formatINR(x.tdsWithheldPaise)} TDS withheld from ${formatINR(x.amountPaise)})` : '')
+      : `Nothing owed · the whole ${formatINR(x.amountPaise)} was withheld as TDS`;
+  const parts = [owed];
+  if (x.tdsCreditPaise > 0n) parts.push(`${formatINR(x.tdsCreditPaise)} TDS credit carried forward on PAN ${x.panMasked}`);
+  else if (x.methodology === 'GROSS_UP') parts.push('no TDS was withheld from the retailer (the program paid it on top) — no TDS credit');
+  else if (x.tdsWithheldPaise === 0n) parts.push('no TDS withheld — no TDS credit');
+  else if (x.coversOtherPayoutsPaise === 0n) parts.push('no TDS credit');
+  if (x.coversOtherPayoutsPaise > 0n) {
+    parts.push(`${formatINR(x.coversOtherPayoutsPaise)} of this TDS covers the retailer's other payouts — no credit`);
+  }
+  if (x.belowThresholdAfterReversal) parts.push(`PAN ${x.panMasked} now below the TDS threshold`);
+  if (x.handBackPaise > 0n) {
+    parts.push(`${formatINR(x.handBackPaise)} over-deducted TDS handed back on the next payout on PAN ${x.panMasked}`);
+  }
+  if (x.untrackedWithheldPaise > 0n) {
+    parts.push(`${formatINR(x.untrackedWithheldPaise)} TDS not in Gifsy's TDS ledger — correct it off-platform`);
+  }
   return parts.join(' · ');
 }
 
@@ -373,7 +432,7 @@ export async function patchPayoutReversalV2(
       action: 'REJECT',
       creditReversalId: reversal.id,
       actorId: p.actorId,
-      metadata: { step: 'RELEASED', clientId: reversal.clientId, batchId: reversal.batchId, outletId: reversal.outletId, fieldId: reversal.fieldId, entries: released },
+      metadata: { step: 'RELEASED', clientId: reversal.clientId, batchId: reversal.batchId, outletId: reversal.outletId, fieldId: reversal.fieldId, entries: released, remarks: p.remarks },
     });
     const finalReversal = await tx.creditReversal.findFirst({ where: { id: reversal.id } });
     const releasedTotal = released.reduce((n, r) => n + r.amountPaise, 0);
@@ -454,8 +513,9 @@ export async function patchPayoutReversalV2(
   for (const a of allocations) {
     const e = entryById.get(a.payoutEntryId)!;
     if (e.status !== 'PAID') continue;
-    const k = await receivablePanLockKey(tx, { id: e.id, period: e.period, tdsDeductedPaise: e.tdsDeductedPaise ?? 0n });
-    if (k) panKeys.add(k);
+    for (const k of await receivablePanLockKeys(tx, { id: e.id, clientId: reversal.clientId, outletId: e.outletId, period: e.period })) {
+      panKeys.add(k);
+    }
   }
   for (const k of [...panKeys].sort()) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${k}, 0))`;
@@ -487,13 +547,14 @@ export async function patchPayoutReversalV2(
         {
           id: e.id,
           clientId: reversal.clientId,
+          outletId: e.outletId,
           amountPaise: e.amountPaise,
           period: e.period,
           tdsSection: e.tdsSection ?? null,
           tdsMethodology: e.tdsMethodology ?? null,
           tdsDeductedPaise: e.tdsDeductedPaise ?? 0n,
         },
-        { creditReversalId: reversal.id, actorId: p.actorId },
+        { creditReversalId: reversal.id, actorId: p.actorId, panPosition: deps.panPosition },
       );
       receivablePaise = t.receivablePaise;
       tdsCreditPaise = t.tdsCreditPaise;
@@ -504,6 +565,7 @@ export async function patchPayoutReversalV2(
           (t.tdsCreditPaise > 0n ? ` + TDS credit ${formatINR(t.tdsCreditPaise)} on PAN ${t.panMasked}` : ''),
       );
       outcome.tdsCreditPaise += Number(t.tdsCreditPaise);
+      const withheldPaise = e.tdsDeductedPaise ?? 0n;
       outcome.receivable.push({
         entryId: e.id,
         amountPaise: Number(e.amountPaise),
@@ -511,22 +573,26 @@ export async function patchPayoutReversalV2(
         tdsCreditPaise: Number(t.tdsCreditPaise),
         panMasked: t.panMasked,
         tdsNote: t.note,
+        tdsWithheldPaise: Number(withheldPaise),
+        coversOtherPayoutsPaise: Number(t.coversOtherPayoutsPaise),
+        handBackPaise: Number(t.handBackPaise),
+        belowThresholdAfterReversal: t.belowThresholdAfterReversal,
       });
       outcome.lines.push({
         kind: 'RECEIVABLE',
         entryId: e.id,
-        text:
-          `Recorded as owed · ${formatINR(t.receivablePaise)}` +
-          (t.tdsCreditPaise > 0n
-            ? ` · ${formatINR(t.tdsCreditPaise)} TDS credit carried forward on PAN ${t.panMasked}`
-            : e.tdsMethodology === 'GROSS_UP'
-              ? ' · no TDS was withheld from the retailer (the program paid it on top) — no TDS credit'
-              : t.untrackedWithheldPaise > 0n
-                ? ` · net of ${formatINR(t.untrackedWithheldPaise)} TDS withheld — no TDS credit`
-                : ' · no TDS withheld — no TDS credit') +
-          (t.untrackedWithheldPaise > 0n
-            ? ` · ${formatINR(t.untrackedWithheldPaise)} TDS not in Gifsy's TDS ledger — correct it off-platform`
-            : ''),
+        text: paidEntryOutcomeText({
+          amountPaise: e.amountPaise,
+          receivablePaise: t.receivablePaise,
+          tdsWithheldPaise: withheldPaise,
+          tdsCreditPaise: t.tdsCreditPaise,
+          panMasked: t.panMasked,
+          methodology: e.tdsMethodology ?? null,
+          untrackedWithheldPaise: t.untrackedWithheldPaise,
+          coversOtherPayoutsPaise: t.coversOtherPayoutsPaise,
+          handBackPaise: t.handBackPaise,
+          belowThresholdAfterReversal: t.belowThresholdAfterReversal,
+        }),
       });
     } else {
       // PENDING / FAILED: cash never left → cancel. Rows are locked, so the guarded flip must hit exactly one row.
@@ -587,7 +653,9 @@ export async function patchPayoutReversalV2(
     if (upd.count !== 1) throw new ConflictException('A payout reservation changed during approval — please retry');
   }
 
-  if (receivable > 0n) {
+  // L3: written whenever the approval recorded a receivable — also ₹0 (a payout fully withheld as TDS), so the
+  // reversal row and the outcome always agree.
+  if (outcome.receivable.length > 0) {
     await tx.creditReversal.update({ where: { id: reversal.id }, data: { shortfallPaise: receivable } });
   }
   const payoutClawbackNote = [
@@ -601,7 +669,7 @@ export async function patchPayoutReversalV2(
     action: 'APPROVE',
     creditReversalId: reversal.id,
     actorId: p.actorId,
-    metadata: { step: 'APPLIED', clientId: reversal.clientId, batchId: reversal.batchId, outletId: reversal.outletId, fieldId: reversal.fieldId, ...outcome },
+    metadata: { step: 'APPLIED', clientId: reversal.clientId, batchId: reversal.batchId, outletId: reversal.outletId, fieldId: reversal.fieldId, remarks: p.remarks, ...outcome },
   });
   const finalReversal = await tx.creditReversal.findFirst({ where: { id: reversal.id } });
   return { ...finalReversal, clawbackShortfall: Number(receivable), payoutClawbackNote, payoutOutcome: outcome };
