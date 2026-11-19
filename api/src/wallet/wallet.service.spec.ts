@@ -13,12 +13,18 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { AdjustType } from './dto/wallet.dto';
 
 // Plain object (NOT jest.fn) so the per-tenant rate survives jest.resetAllMocks() in beforeEach.
-const mockTenantSettings = { getConversionRate: async () => 1 };
+const mockTenantSettings = {
+  getConversionRate: async () => 1,
+  // Reversal engine flag (WP2/WP3): every tenant in these suites is on the default LEGACY engine.
+  getReversalEngineModeUncached: async () => 'LEGACY' as const,
+};
 
 // The transaction client mock — every mutation composes through this inside $transaction.
 const mockTx = {
   wallet: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
-  walletTransaction: { create: jest.fn() },
+  // findFirst: applyMovement asks whether the wallet is tracked by the reversal engine (any prior row →
+  // not pristine → the LEGACY write path these jest.fn tests pin). Default set in beforeEach.
+  walletTransaction: { create: jest.fn(), findFirst: jest.fn() },
   // findMany/findUnique added for the FIFO change: consumeFifoLots lists spendable lots and
   // the expiry sweep re-reads the claimed lot's frozen remainingPoints.
   pointsLedger: {
@@ -64,6 +70,10 @@ describe('WalletService', () => {
     mockTx.pointsLedger.updateMany.mockResolvedValue({ count: 1 });
     // consumeFifoLots lists spendable lots inside a debit; default = no lot mirror to touch.
     mockTx.pointsLedger.findMany.mockResolvedValue([]);
+    // Reversal engine (WP2): an existing passbook row → the wallet is NOT engine-tracked → legacy write path.
+    mockTx.walletTransaction.findFirst.mockResolvedValue({ id: 'legacy-row' });
+    // movementPath resolves the wallet's tenant (-> reversal engine flag, LEGACY here).
+    mockTx.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', clientId: 'deoleo' });
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         WalletService,
@@ -268,6 +278,10 @@ describe('WalletService', () => {
   });
 
   describe('adjust', () => {
+    // applyMovement locks + re-reads the wallet through the TX client (WP2 lock-first) — mirror the pre-tx read.
+    beforeEach(() => {
+      mockTx.wallet.findFirst.mockImplementation(() => mockPrisma.wallet.findFirst.mock.results[0]?.value ?? null);
+    });
     it('throws NotFound when the partner wallet is outside the tenant', async () => {
       mockPrisma.wallet.findFirst.mockResolvedValue(null);
       await expect(
@@ -369,7 +383,7 @@ describe('WalletService', () => {
     it('is a no-op when no lots are due', async () => {
       mockPrisma.pointsLedger.findMany.mockResolvedValue([]);
       const res = await service.expireDuePoints();
-      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
 
@@ -386,7 +400,7 @@ describe('WalletService', () => {
 
       const res = await service.expireDuePoints();
 
-      expect(res).toEqual({ expiredLots: 1, expiredPoints: 30 });
+      expect(res).toEqual({ expiredLots: 1, expiredPoints: 30, failedLots: 0, failures: [] });
       // Source lot claimed with a guarded updateMany (concurrency-safe idempotency).
       expect(mockTx.pointsLedger.updateMany).toHaveBeenCalledWith({
         where: { id: 'lot1', isExpired: false },
@@ -422,7 +436,7 @@ describe('WalletService', () => {
 
       const res = await service.expireDuePoints();
 
-      expect(res).toEqual({ expiredLots: 1, expiredPoints: 10 });
+      expect(res).toEqual({ expiredLots: 1, expiredPoints: 10, failedLots: 0, failures: [] });
       expect(mockTx.wallet.update).toHaveBeenCalledWith({
         where: { id: 'w1' },
         data: {
@@ -443,7 +457,7 @@ describe('WalletService', () => {
 
       const res = await service.expireDuePoints();
 
-      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
       // No wallet read, no balance mutation, no movement rows once the claim is lost.
       expect(mockTx.wallet.findFirst).not.toHaveBeenCalled();
       expect(mockTx.wallet.update).not.toHaveBeenCalled();
@@ -1081,7 +1095,16 @@ function buildHarness(initial: InitialState = {}) {
     lifetimeEarned: 0,
     lifetimeRedeemed: 0,
     lifetimeExpired: 0,
+    // Reversal engine columns (schema defaults).
+    debtPoints: 0,
+    movementSeq: 0,
     ...(initial.wallet ?? {}),
+  };
+  const positions: AnyRow[] = [];
+  const allocations: AnyRow[] = [];
+  const positionView = (p: AnyRow) => {
+    const c = walletTxns.find((t) => t.id === p.creditTxId);
+    return { ...p, creditTx: { seq: c?.seq ?? null, createdAt: c?.createdAt ?? NOW } };
   };
   const walletTxns: AnyRow[] = [];
   const rawWalletTxCreates: AnyRow[] = [];
@@ -1133,6 +1156,28 @@ function buildHarness(initial: InitialState = {}) {
     },
     creditReversal: {
       findFirst: async ({ where }: any) => (initial.reversals ?? []).find((r) => matchWhere(r, where ?? {})) ?? null,
+    },
+    walletCreditPosition: {
+      create: async ({ data }: any) => {
+        const row = { id: `pos${++seq}`, offsetPoints: 0, reversedPoints: 0, ...data };
+        positions.push(row);
+        return row;
+      },
+      findMany: async ({ where }: any = {}) => positions.filter((p) => matchWhere(p, where ?? {})).map(positionView),
+      findFirst: async ({ where }: any = {}) => positions.find((p) => matchWhere(p, where ?? {})) ?? null,
+      count: async ({ where }: any = {}) => positions.filter((p) => matchWhere(p, where ?? {})).length,
+      updateMany: async ({ where, data }: any) => {
+        const rows = positions.filter((p) => matchWhere(p, where));
+        rows.forEach((r) => applyData(r, data));
+        return { count: rows.length };
+      },
+    },
+    creditReversalAllocation: {
+      create: async ({ data }: any) => {
+        const row = { id: `alloc${++seq}`, ...data };
+        allocations.push(row);
+        return row;
+      },
     },
     pointsLedger: {
       create: async ({ data }: any) => {
@@ -1207,6 +1252,8 @@ function buildHarness(initial: InitialState = {}) {
     walletTxns,
     rawWalletTxCreates,
     auditLogs,
+    positions,
+    allocations,
     lot: (id: string) => ledger.find((r) => r.id === id),
     spendableLots: () => ledger.filter((r) => SPENDABLE.includes(r.transactionType) && !r.isExpired),
     rowsOfType: (t: string) => ledger.filter((r) => r.transactionType === t),
@@ -1270,7 +1317,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
     const res = await h.service.expireDuePoints({ now: daysFromNow(2) });
 
     // Only A is due; it backs just 20 spendable points → expire 20 (pre-fix wrongly expired 70).
-    expect(res).toEqual({ expiredLots: 1, expiredPoints: 20 });
+    expect(res).toEqual({ expiredLots: 1, expiredPoints: 20, failedLots: 0, failures: [] });
     // NOTE: the brief’s prose says \"redeemablePoints stays 70\", but that contradicts both
     // invariant #8 (redeemable === Σ remaining over live lots → 50) and \"expiredPoints += 20\".
     // The invariant-consistent outcome after expiring 20 is 50; asserting 50 (flagged to integrator).
@@ -1295,7 +1342,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
 
     // The money-safe outcome (contract #4): a lot with 0 unspent points expires 0 — no
     // balance move, no EXPIRE movement row, counters flat.
-    expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+    expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
     expect(h.rowsOfType('EXPIRE').length).toBe(0);
     expect(h.wallet.redeemablePoints).toBe(0);
     expect(h.wallet.expiredPoints).toBe(0);
@@ -1318,7 +1365,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
     await h.service.expireDuePoints({ now: daysFromNow(2) });
     const second = await h.service.expireDuePoints({ now: daysFromNow(2) });
 
-    expect(second).toEqual({ expiredLots: 0, expiredPoints: 0 });
+    expect(second).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
     expect(h.lot('A')!.isExpired).toBe(true);
     // Exactly ONE EXPIRE movement total across the two runs (isExpired guard held).
     expect(h.rowsOfType('EXPIRE').length).toBe(1);
@@ -1352,7 +1399,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
       });
       const res = await h.service.expireDuePoints({ now: daysFromNow(2) });
 
-      expect(res).toEqual({ expiredLots: 1, expiredPoints: 20 });
+      expect(res).toEqual({ expiredLots: 1, expiredPoints: 20, failedLots: 0, failures: [] });
       expect(h.lot('R')!.isExpired).toBe(true);
       expect(h.lot('R')!.remainingPoints).toBe(0);
       expect(h.wallet.redeemablePoints).toBe(0);
@@ -1426,7 +1473,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
         ],
       });
       const res = await h.service.expireDuePoints({ now: daysFromNow(2) });
-      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
       expect(h.wallet.redeemablePoints).toBe(-100);
       expect(h.wallet.expiredPoints).toBe(0);
       expect(h.rowsOfType('EXPIRE').length).toBe(0);
@@ -1928,7 +1975,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
         lots: [{ id: 'A', walletId: 'w1', transactionType: 'EARN', points: 50, remainingPoints: 50, expiresAt: daysFromNow(10), createdAt: daysFromNow(-1) }],
       });
       const res = await h.service.expireDuePoints({ now: daysFromNow(2) });
-      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0, failedLots: 0, failures: [] });
       expect(h.lot('A')!.isExpired).toBe(false);
       expect(h.wallet.redeemablePoints).toBe(50);
     });

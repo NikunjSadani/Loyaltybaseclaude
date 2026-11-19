@@ -1,0 +1,1345 @@
+{
+  "generatedFrom": "./__origin_main_wallet.service",
+  "log": [
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "partnerId": "cp1"
+        }
+      }
+    },
+    {
+      "op": "pointExpiryConfig.findFirst",
+      "args": {
+        "where": {
+          "clientId": "deoleo",
+          "isDefault": true,
+          "isActive": true
+        }
+      }
+    },
+    {
+      "op": "wallet.update",
+      "args": {
+        "where": {
+          "id": "w1"
+        },
+        "data": {
+          "lastTransactionAt": "<now>",
+          "redeemablePoints": {
+            "increment": 500
+          },
+          "earnedPoints": {
+            "increment": 500
+          },
+          "lifetimeEarned": {
+            "increment": 500
+          }
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "transactionType": "CREDIT_POINTS_EARNED",
+          "points": 500,
+          "balanceBefore": 1000,
+          "balanceAfter": 1500,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "CREDIT_BATCH",
+          "referenceId": "B1",
+          "description": "credit B1",
+          "metadata": {
+            "fieldId": "F",
+            "outletCode": "O1"
+          },
+          "createdAt": "<now>"
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "EARN",
+          "points": 500,
+          "remainingPoints": 500,
+          "expiresAt": null,
+          "sourceType": "CREDIT_FIELD",
+          "sourceId": "F",
+          "notes": "credit B1"
+        }
+      }
+    },
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "partnerId": "cp1"
+        }
+      }
+    },
+    {
+      "op": "pointExpiryConfig.findFirst",
+      "args": {
+        "where": {
+          "clientId": "deoleo",
+          "isDefault": true,
+          "isActive": true
+        }
+      }
+    },
+    {
+      "op": "wallet.update",
+      "args": {
+        "where": {
+          "id": "w1"
+        },
+        "data": {
+          "lastTransactionAt": "<now>",
+          "redeemablePoints": {
+            "increment": 100
+          },
+          "earnedPoints": {
+            "increment": 100
+          },
+          "lifetimeEarned": {
+            "increment": 100
+          }
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "transactionType": "CREDIT_POINTS_EARNED",
+          "points": 100,
+          "balanceBefore": 1500,
+          "balanceAfter": 1600,
+          "balanceType": "REDEEMABLE",
+          "referenceType": null,
+          "referenceId": null,
+          "description": "plain credit"
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "EARN",
+          "points": 100,
+          "remainingPoints": 100,
+          "expiresAt": null,
+          "sourceType": null,
+          "sourceId": null,
+          "notes": "plain credit"
+        }
+      }
+    },
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "partnerId": "cp1"
+        }
+      }
+    },
+    {
+      "op": "wallet.updateMany",
+      "args": {
+        "where": {
+          "id": "w1",
+          "redeemablePoints": {
+            "gte": 200
+          }
+        },
+        "data": {
+          "lastTransactionAt": "<now>",
+          "redeemablePoints": {
+            "decrement": 200
+          },
+          "redeemedPoints": {
+            "increment": 200
+          },
+          "lifetimeRedeemed": {
+            "increment": 200
+          }
+        }
+      }
+    },
+    {
+      "op": "wallet.findUniqueOrThrow",
+      "args": {
+        "where": {
+          "id": "w1"
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "transactionType": "DEBIT_REDEMPTION",
+          "points": -200,
+          "balanceBefore": 1600,
+          "balanceAfter": 1400,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "REDEMPTION_ORDER",
+          "referenceId": "ord-1",
+          "description": null
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "REDEEM",
+          "points": -200,
+          "remainingPoints": 0,
+          "expiresAt": null,
+          "sourceType": null,
+          "sourceId": null,
+          "notes": null
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.findMany",
+      "args": {
+        "where": {
+          "walletId": "w1",
+          "isExpired": false,
+          "remainingPoints": {
+            "gt": 0
+          },
+          "points": {
+            "gt": 0
+          },
+          "transactionType": {
+            "in": [
+              "EARN",
+              "REVERSE",
+              "ADJUST"
+            ]
+          }
+        },
+        "orderBy": [
+          {
+            "createdAt": "asc"
+          },
+          {
+            "id": "asc"
+          }
+        ]
+      }
+    },
+    {
+      "op": "pointsLedger.updateMany",
+      "args": {
+        "where": {
+          "id": "pl-open",
+          "isExpired": false,
+          "remainingPoints": {
+            "gte": 200
+          }
+        },
+        "data": {
+          "remainingPoints": {
+            "decrement": 200
+          }
+        }
+      }
+    },
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "partnerId": "cp1"
+        }
+      }
+    },
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "partnerId": "cp1"
+        }
+      }
+    },
+    {
+      "op": "channelPartner.findFirst",
+      "args": {
+        "where": {
+          "id": "cp1"
+        },
+        "select": {
+          "clientId": true
+        }
+      }
+    },
+    {
+      "op": "pointExpiryConfig.findFirst",
+      "args": {
+        "where": {
+          "clientId": "deoleo",
+          "isDefault": true,
+          "isActive": true
+        }
+      }
+    },
+    {
+      "op": "wallet.update",
+      "args": {
+        "where": {
+          "id": "w1"
+        },
+        "data": {
+          "lastTransactionAt": "<now>",
+          "redeemablePoints": {
+            "increment": 50
+          }
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "transactionType": "CREDIT_REVERSAL",
+          "points": 50,
+          "balanceBefore": 1400,
+          "balanceAfter": 1450,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "REDEMPTION_ORDER",
+          "referenceId": "ord-1",
+          "description": null
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "REVERSE",
+          "points": 50,
+          "remainingPoints": 50,
+          "expiresAt": null,
+          "sourceType": null,
+          "sourceId": null,
+          "notes": null
+        }
+      }
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "partnerId": "cp1",
+          "partner": {
+            "user": {
+              "clientId": "deoleo"
+            }
+          }
+        }
+      }
+    },
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "pointExpiryConfig.findFirst",
+      "args": {
+        "where": {
+          "clientId": "deoleo",
+          "isDefault": true,
+          "isActive": true
+        }
+      }
+    },
+    {
+      "op": "wallet.update",
+      "args": {
+        "where": {
+          "id": "w1"
+        },
+        "data": {
+          "lastTransactionAt": "<now>",
+          "redeemablePoints": {
+            "increment": 30
+          },
+          "earnedPoints": {
+            "increment": 30
+          },
+          "lifetimeEarned": {
+            "increment": 30
+          }
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "transactionType": "CREDIT_ADJUSTMENT",
+          "points": 30,
+          "balanceBefore": 1450,
+          "balanceAfter": 1480,
+          "balanceType": "REDEEMABLE",
+          "referenceType": null,
+          "referenceId": null,
+          "description": "Manual credit by admin. Reason: r"
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "ADJUST",
+          "points": 30,
+          "remainingPoints": 30,
+          "expiresAt": null,
+          "sourceType": "ADMIN_ADJUSTMENT",
+          "sourceId": "g1",
+          "notes": "Manual credit by admin. Reason: r"
+        }
+      }
+    },
+    {
+      "op": "auditLog.create",
+      "args": {
+        "data": {
+          "action": "UPDATE",
+          "entityType": "WALLET",
+          "entityId": "w1",
+          "actorId": "g1",
+          "metadata": {
+            "partnerId": "cp1",
+            "amount": 30,
+            "type": "CREDIT",
+            "reason": "r",
+            "approvedBy": "a",
+            "transactionId": "walletTransaction-9"
+          }
+        }
+      }
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "partnerId": "cp1",
+          "partner": {
+            "user": {
+              "clientId": "deoleo"
+            }
+          }
+        }
+      }
+    },
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "wallet.updateMany",
+      "args": {
+        "where": {
+          "id": "w1",
+          "redeemablePoints": {
+            "gte": 20
+          }
+        },
+        "data": {
+          "lastTransactionAt": "<now>",
+          "redeemablePoints": {
+            "decrement": 20
+          }
+        }
+      }
+    },
+    {
+      "op": "wallet.findUniqueOrThrow",
+      "args": {
+        "where": {
+          "id": "w1"
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "transactionType": "DEBIT_ADJUSTMENT",
+          "points": -20,
+          "balanceBefore": 1480,
+          "balanceAfter": 1460,
+          "balanceType": "REDEEMABLE",
+          "referenceType": null,
+          "referenceId": null,
+          "description": "Manual debit by admin. Reason: r"
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "ADJUST",
+          "points": -20,
+          "remainingPoints": 0,
+          "expiresAt": null,
+          "sourceType": "ADMIN_ADJUSTMENT",
+          "sourceId": "g1",
+          "notes": "Manual debit by admin. Reason: r"
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.findMany",
+      "args": {
+        "where": {
+          "walletId": "w1",
+          "isExpired": false,
+          "remainingPoints": {
+            "gt": 0
+          },
+          "points": {
+            "gt": 0
+          },
+          "transactionType": {
+            "in": [
+              "EARN",
+              "REVERSE",
+              "ADJUST"
+            ]
+          }
+        },
+        "orderBy": [
+          {
+            "createdAt": "asc"
+          },
+          {
+            "id": "asc"
+          }
+        ]
+      }
+    },
+    {
+      "op": "pointsLedger.updateMany",
+      "args": {
+        "where": {
+          "id": "pl-open",
+          "isExpired": false,
+          "remainingPoints": {
+            "gte": 20
+          }
+        },
+        "data": {
+          "remainingPoints": {
+            "decrement": 20
+          }
+        }
+      }
+    },
+    {
+      "op": "auditLog.create",
+      "args": {
+        "data": {
+          "action": "UPDATE",
+          "entityType": "WALLET",
+          "entityId": "w1",
+          "actorId": "g1",
+          "metadata": {
+            "partnerId": "cp1",
+            "amount": 20,
+            "type": "DEBIT",
+            "reason": "r",
+            "approvedBy": "a",
+            "transactionId": "walletTransaction-12"
+          }
+        }
+      }
+    },
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "outlet.findFirst",
+      "args": {
+        "where": {
+          "clientId": "deoleo",
+          "outletCode": "O1"
+        },
+        "select": {
+          "partnerId": true
+        }
+      }
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "partnerId": "cp1"
+        },
+        "select": {
+          "id": true,
+          "redeemablePoints": true
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.findMany",
+      "args": {
+        "where": {
+          "walletId": "w1",
+          "transactionType": "CREDIT_POINTS_EARNED",
+          "referenceType": "CREDIT_BATCH",
+          "referenceId": "B1"
+        },
+        "orderBy": [
+          {
+            "createdAt": "asc"
+          },
+          {
+            "id": "asc"
+          }
+        ],
+        "select": {
+          "id": true,
+          "createdAt": true,
+          "balanceBefore": true,
+          "points": true,
+          "metadata": true
+        }
+      }
+    },
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "partnerId": "cp1"
+        },
+        "select": {
+          "id": true
+        }
+      }
+    },
+    {
+      "op": "$queryRaw",
+      "args": "SELECT id FROM wallets WHERE id = ? FOR UPDATE"
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "id": "w1"
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.findMany",
+      "args": {
+        "where": {
+          "walletId": "w1",
+          "transactionType": "CREDIT_POINTS_EARNED",
+          "referenceType": "CREDIT_BATCH",
+          "referenceId": "B1"
+        },
+        "orderBy": [
+          {
+            "createdAt": "asc"
+          },
+          {
+            "id": "asc"
+          }
+        ],
+        "select": {
+          "id": true,
+          "createdAt": true,
+          "balanceBefore": true,
+          "points": true,
+          "metadata": true
+        }
+      }
+    },
+    {
+      "op": "wallet.update",
+      "args": {
+        "where": {
+          "id": "w1"
+        },
+        "data": {
+          "lastTransactionAt": "<now>",
+          "redeemablePoints": {
+            "decrement": 120
+          }
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "transactionType": "DEBIT_ADJUSTMENT",
+          "points": -120,
+          "balanceBefore": 1460,
+          "balanceAfter": 1340,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "CREDIT_REVERSAL",
+          "referenceId": "R1",
+          "description": "Clawback for reversal R1",
+          "metadata": {
+            "reversedCreditTxId": "walletTransaction-1"
+          },
+          "createdAt": "<now>"
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "ADJUST",
+          "points": -120,
+          "remainingPoints": 0,
+          "expiresAt": null,
+          "sourceType": "CREDIT_FIELD",
+          "sourceId": "F",
+          "notes": "Clawback for reversal R1"
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.findMany",
+      "args": {
+        "where": {
+          "walletId": "w1",
+          "isExpired": false,
+          "remainingPoints": {
+            "gt": 0
+          },
+          "points": {
+            "gt": 0
+          },
+          "transactionType": {
+            "in": [
+              "EARN",
+              "REVERSE",
+              "ADJUST"
+            ]
+          }
+        },
+        "orderBy": [
+          {
+            "createdAt": "asc"
+          },
+          {
+            "id": "asc"
+          }
+        ]
+      }
+    },
+    {
+      "op": "pointsLedger.updateMany",
+      "args": {
+        "where": {
+          "id": "pl-open",
+          "isExpired": false,
+          "remainingPoints": {
+            "gte": 120
+          }
+        },
+        "data": {
+          "remainingPoints": {
+            "decrement": 120
+          }
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.findMany",
+      "args": {
+        "where": {
+          "transactionType": {
+            "in": [
+              "EARN",
+              "REVERSE",
+              "ADJUST"
+            ]
+          },
+          "isExpired": false,
+          "points": {
+            "gt": 0
+          },
+          "remainingPoints": {
+            "gt": 0
+          },
+          "expiresAt": {
+            "lte": "<clock+0>"
+          }
+        },
+        "orderBy": {
+          "expiresAt": "asc"
+        },
+        "take": 1000
+      }
+    },
+    {
+      "op": "$transaction",
+      "args": null
+    },
+    {
+      "op": "$queryRaw",
+      "args": "SELECT id FROM wallets WHERE id = ? FOR UPDATE"
+    },
+    {
+      "op": "pointsLedger.updateMany",
+      "args": {
+        "where": {
+          "id": "pl-open",
+          "isExpired": false
+        },
+        "data": {
+          "isExpired": true
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.findUnique",
+      "args": {
+        "where": {
+          "id": "pl-open"
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.update",
+      "args": {
+        "where": {
+          "id": "pl-open"
+        },
+        "data": {
+          "remainingPoints": 0
+        }
+      }
+    },
+    {
+      "op": "wallet.findFirst",
+      "args": {
+        "where": {
+          "id": "w1"
+        }
+      }
+    },
+    {
+      "op": "wallet.update",
+      "args": {
+        "where": {
+          "id": "w1"
+        },
+        "data": {
+          "lastTransactionAt": "<now>",
+          "redeemablePoints": {
+            "decrement": 660
+          },
+          "expiredPoints": {
+            "increment": 660
+          },
+          "lifetimeExpired": {
+            "increment": 660
+          }
+        }
+      }
+    },
+    {
+      "op": "walletTransaction.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "transactionType": "DEBIT_EXPIRY",
+          "points": -660,
+          "balanceBefore": 1340,
+          "balanceAfter": 680,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "POINTS_LEDGER",
+          "referenceId": "pl-open",
+          "description": "Points expired"
+        }
+      }
+    },
+    {
+      "op": "pointsLedger.create",
+      "args": {
+        "data": {
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "EXPIRE",
+          "points": -660,
+          "remainingPoints": 0,
+          "expiresAt": null,
+          "sourceType": "EXPIRY_SWEEP",
+          "sourceId": "pl-open",
+          "notes": "Points expired"
+        }
+      }
+    }
+  ],
+  "snapshot": {
+    "out": {
+      "errors": [
+        "BadRequestException: Insufficient wallet balance for redemption"
+      ],
+      "credit1": {
+        "transactionId": "walletTransaction-1",
+        "newRedeemable": 1500,
+        "ledgerId": "pointsLedger-2"
+      },
+      "credit2": {
+        "transactionId": "walletTransaction-3",
+        "newRedeemable": 1600,
+        "ledgerId": "pointsLedger-4"
+      },
+      "redeem": {
+        "transactionId": "walletTransaction-5",
+        "newRedeemable": 1400,
+        "ledgerId": "pointsLedger-6"
+      },
+      "refund": {
+        "transactionId": "walletTransaction-7",
+        "newRedeemable": 1450,
+        "ledgerId": "pointsLedger-8"
+      },
+      "adjustCredit": {
+        "transactionId": "walletTransaction-9",
+        "newBalance": 1480
+      },
+      "adjustDebit": {
+        "transactionId": "walletTransaction-12",
+        "newBalance": 1460
+      },
+      "gate": {
+        "partnerId": "cp1",
+        "walletId": "w1"
+      },
+      "clawback": {
+        "transactionId": "walletTransaction-15",
+        "newRedeemable": 1340,
+        "ledgerId": "pointsLedger-16",
+        "shortfall": 0
+      },
+      "sweep": {
+        "expiredLots": 1,
+        "expiredPoints": 660
+      }
+    },
+    "tables": {
+      "wallet": [
+        {
+          "id": "w1",
+          "partnerId": "cp1",
+          "redeemablePoints": 680,
+          "earnedPoints": 1630,
+          "lockedPoints": 0,
+          "redeemedPoints": 200,
+          "expiredPoints": 660,
+          "lifetimeEarned": 1630,
+          "lifetimeRedeemed": 200,
+          "lifetimeExpired": 660,
+          "debtPoints": 0,
+          "movementSeq": 0,
+          "backfillStatus": null,
+          "backfillBlockedReason": null,
+          "lastTransactionAt": "<now>"
+        }
+      ],
+      "walletTransaction": [
+        {
+          "id": "wt-open",
+          "walletId": "w1",
+          "transactionType": "CREDIT_POINTS_EARNED",
+          "points": 1000,
+          "balanceBefore": 0,
+          "balanceAfter": 1000,
+          "referenceType": null,
+          "referenceId": null,
+          "metadata": null,
+          "createdAt": "<clock-5000000>"
+        },
+        {
+          "id": "walletTransaction-1",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<now>",
+          "walletId": "w1",
+          "transactionType": "CREDIT_POINTS_EARNED",
+          "points": 500,
+          "balanceBefore": 1000,
+          "balanceAfter": 1500,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "CREDIT_BATCH",
+          "referenceId": "B1",
+          "description": "credit B1",
+          "metadata": {
+            "fieldId": "F",
+            "outletCode": "O1"
+          }
+        },
+        {
+          "id": "walletTransaction-3",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+3>",
+          "walletId": "w1",
+          "transactionType": "CREDIT_POINTS_EARNED",
+          "points": 100,
+          "balanceBefore": 1500,
+          "balanceAfter": 1600,
+          "balanceType": "REDEEMABLE",
+          "referenceType": null,
+          "referenceId": null,
+          "description": "plain credit"
+        },
+        {
+          "id": "walletTransaction-5",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+5>",
+          "walletId": "w1",
+          "transactionType": "DEBIT_REDEMPTION",
+          "points": -200,
+          "balanceBefore": 1600,
+          "balanceAfter": 1400,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "REDEMPTION_ORDER",
+          "referenceId": "ord-1",
+          "description": null
+        },
+        {
+          "id": "walletTransaction-7",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+7>",
+          "walletId": "w1",
+          "transactionType": "CREDIT_REVERSAL",
+          "points": 50,
+          "balanceBefore": 1400,
+          "balanceAfter": 1450,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "REDEMPTION_ORDER",
+          "referenceId": "ord-1",
+          "description": null
+        },
+        {
+          "id": "walletTransaction-9",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+9>",
+          "walletId": "w1",
+          "transactionType": "CREDIT_ADJUSTMENT",
+          "points": 30,
+          "balanceBefore": 1450,
+          "balanceAfter": 1480,
+          "balanceType": "REDEEMABLE",
+          "referenceType": null,
+          "referenceId": null,
+          "description": "Manual credit by admin. Reason: r"
+        },
+        {
+          "id": "walletTransaction-12",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+12>",
+          "walletId": "w1",
+          "transactionType": "DEBIT_ADJUSTMENT",
+          "points": -20,
+          "balanceBefore": 1480,
+          "balanceAfter": 1460,
+          "balanceType": "REDEEMABLE",
+          "referenceType": null,
+          "referenceId": null,
+          "description": "Manual debit by admin. Reason: r"
+        },
+        {
+          "id": "walletTransaction-15",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<now>",
+          "walletId": "w1",
+          "transactionType": "DEBIT_ADJUSTMENT",
+          "points": -120,
+          "balanceBefore": 1460,
+          "balanceAfter": 1340,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "CREDIT_REVERSAL",
+          "referenceId": "R1",
+          "description": "Clawback for reversal R1",
+          "metadata": {
+            "reversedCreditTxId": "walletTransaction-1"
+          }
+        },
+        {
+          "id": "walletTransaction-17",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+17>",
+          "walletId": "w1",
+          "transactionType": "DEBIT_EXPIRY",
+          "points": -660,
+          "balanceBefore": 1340,
+          "balanceAfter": 680,
+          "balanceType": "REDEEMABLE",
+          "referenceType": "POINTS_LEDGER",
+          "referenceId": "pl-open",
+          "description": "Points expired"
+        }
+      ],
+      "pointsLedger": [
+        {
+          "id": "pl-open",
+          "walletId": "w1",
+          "transactionType": "EARN",
+          "points": 1000,
+          "remainingPoints": 0,
+          "isExpired": true,
+          "expiresAt": "<clock-1000>",
+          "schemeId": null,
+          "createdAt": "<clock-5000000>"
+        },
+        {
+          "id": "pointsLedger-2",
+          "isExpired": false,
+          "remainingPoints": 500,
+          "createdAt": "<clock+2>",
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "EARN",
+          "points": 500,
+          "expiresAt": null,
+          "sourceType": "CREDIT_FIELD",
+          "sourceId": "F",
+          "notes": "credit B1"
+        },
+        {
+          "id": "pointsLedger-4",
+          "isExpired": false,
+          "remainingPoints": 100,
+          "createdAt": "<clock+4>",
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "EARN",
+          "points": 100,
+          "expiresAt": null,
+          "sourceType": null,
+          "sourceId": null,
+          "notes": "plain credit"
+        },
+        {
+          "id": "pointsLedger-6",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+6>",
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "REDEEM",
+          "points": -200,
+          "expiresAt": null,
+          "sourceType": null,
+          "sourceId": null,
+          "notes": null
+        },
+        {
+          "id": "pointsLedger-8",
+          "isExpired": false,
+          "remainingPoints": 50,
+          "createdAt": "<clock+8>",
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "REVERSE",
+          "points": 50,
+          "expiresAt": null,
+          "sourceType": null,
+          "sourceId": null,
+          "notes": null
+        },
+        {
+          "id": "pointsLedger-10",
+          "isExpired": false,
+          "remainingPoints": 30,
+          "createdAt": "<clock+10>",
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "ADJUST",
+          "points": 30,
+          "expiresAt": null,
+          "sourceType": "ADMIN_ADJUSTMENT",
+          "sourceId": "g1",
+          "notes": "Manual credit by admin. Reason: r"
+        },
+        {
+          "id": "pointsLedger-13",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+13>",
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "ADJUST",
+          "points": -20,
+          "expiresAt": null,
+          "sourceType": "ADMIN_ADJUSTMENT",
+          "sourceId": "g1",
+          "notes": "Manual debit by admin. Reason: r"
+        },
+        {
+          "id": "pointsLedger-16",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+16>",
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "ADJUST",
+          "points": -120,
+          "expiresAt": null,
+          "sourceType": "CREDIT_FIELD",
+          "sourceId": "F",
+          "notes": "Clawback for reversal R1"
+        },
+        {
+          "id": "pointsLedger-18",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+18>",
+          "walletId": "w1",
+          "schemeId": null,
+          "transactionType": "EXPIRE",
+          "points": -660,
+          "expiresAt": null,
+          "sourceType": "EXPIRY_SWEEP",
+          "sourceId": "pl-open",
+          "notes": "Points expired"
+        }
+      ],
+      "channelPartner": [
+        {
+          "id": "cp1",
+          "clientId": "deoleo"
+        }
+      ],
+      "outlet": [
+        {
+          "clientId": "deoleo",
+          "outletCode": "O1",
+          "partnerId": "cp1"
+        }
+      ],
+      "creditBatch": [
+        {
+          "id": "B1",
+          "clientId": "deoleo",
+          "rows": [
+            {
+              "outletId": "O1",
+              "fieldId": "F",
+              "amount": 500,
+              "awardType": "POINTS",
+              "status": "OK"
+            }
+          ]
+        }
+      ],
+      "pointExpiryConfig": [],
+      "auditLog": [
+        {
+          "id": "auditLog-11",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+11>",
+          "action": "UPDATE",
+          "entityType": "WALLET",
+          "entityId": "w1",
+          "actorId": "g1",
+          "metadata": {
+            "partnerId": "cp1",
+            "amount": 30,
+            "type": "CREDIT",
+            "reason": "r",
+            "approvedBy": "a",
+            "transactionId": "walletTransaction-9"
+          }
+        },
+        {
+          "id": "auditLog-14",
+          "isExpired": false,
+          "remainingPoints": 0,
+          "createdAt": "<clock+14>",
+          "action": "UPDATE",
+          "entityType": "WALLET",
+          "entityId": "w1",
+          "actorId": "g1",
+          "metadata": {
+            "partnerId": "cp1",
+            "amount": 20,
+            "type": "DEBIT",
+            "reason": "r",
+            "approvedBy": "a",
+            "transactionId": "walletTransaction-12"
+          }
+        }
+      ],
+      "walletCreditPosition": [],
+      "programSetting": []
+    }
+  }
+}

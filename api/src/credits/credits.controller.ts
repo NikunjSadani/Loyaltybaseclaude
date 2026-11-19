@@ -32,10 +32,14 @@ import {
   ListPayoutDownloadsQueryDto,
   ListReversalsQueryDto,
   PatchFieldDto,
+  PayoutDownloadSummaryQueryDto,
   PatchReversalDto,
+  PayoutReversalEntriesQueryDto,
   UtrUploadQueryDto,
 } from './dto/credits.dto';
 import { HeavyOp } from '../common/heavy-op-limiter';
+import { WalletService } from '../wallet/wallet.service';
+import { ReversalAttentionQueryDto, ReversalEngineModeDto, ReversalPauseDto } from './dto/reversal-engine.dto';
 
 /**
  * Awards & Credits (§12a) — re-homed from
@@ -54,6 +58,7 @@ export class CreditsController {
   constructor(
     private readonly credits: CreditsService,
     private readonly evidence: CreditEvidenceService,
+    private readonly wallet: WalletService,
   ) {}
 
   // ─── Batches ───────────────────────────────────────────────────────────────
@@ -102,6 +107,18 @@ export class CreditsController {
     @Body() dto: CreateReversalDto,
   ) {
     return this.credits.createReversal(user, id, dto);
+  }
+
+  // WP5: entries a PAYOUT reversal may select (+ the tenant's reversal engine mode, which picks the form).
+  @Get('batches/:id/payout-reversal-entries')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:request_reversal')
+  listPayoutReversalEntries(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Query() query: PayoutReversalEntriesQueryDto,
+  ) {
+    return this.credits.listPayoutReversalEntries(user, id, query);
   }
 
   // ─── Batch audit-evidence attachments (B1) ─────────────────────────────────
@@ -233,13 +250,33 @@ export class CreditsController {
     @Body() dto: CreatePayoutDownloadDto,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile | Record<string, unknown>> {
-    const { buffer, noBankFileMessage, downloadCode, downloadId, fullyWithheld, fullyWithheldNote, heldEntries, heldNote } =
-      await this.credits.createPayoutDownload(
+    const {
+      buffer, noBankFileMessage, downloadCode, downloadId, fullyWithheld, fullyWithheldNote, heldEntries, heldNote,
+      reversalHeld, tdsCreditApplied, tdsAdjustments,
+    } = await this.credits.createPayoutDownload(
       user,
       dto,
     );
+    // Policy round B: entries whose TDS an earlier TDS credit covered → the screen says so (never silent). Only sent
+    // when there are any (a tenant without TDS credits — every LEGACY tenant — gets the response unchanged).
+    if (tdsCreditApplied && tdsCreditApplied.length > 0) {
+      res.setHeader('X-Tds-Credit-Applied-Count', String(tdsCreditApplied.length));
+      res.setHeader('X-Tds-Credit-Applied-Paise', String(tdsCreditApplied.reduce((n, a) => n + a.creditPaise, 0)));
+    }
+    // Fix round B (D3): entries whose TDS the ledger lowered after a reversal took the PAN's base down. Headers are a
+    // secondary path only — the screen reads GET …/payout-downloads/:id/summary (or latest-summary) as JSON.
+    if (tdsAdjustments && tdsAdjustments.length > 0) {
+      res.setHeader('X-Tds-Adjustment-Count', String(tdsAdjustments.length));
+      res.setHeader('X-Tds-Adjustment-Paise', String(tdsAdjustments.reduce((n, a) => n + a.handBackPaise, 0)));
+    }
     res.setHeader('X-Download-Code', downloadCode);
     res.setHeader('X-Download-Id', downloadId);
+    // WP5: entries left out because a pending reversal holds them → the screen tells the admin (never silent).
+    // Only sent when there are any (never on a LEGACY-engine tenant → response unchanged there).
+    if (reversalHeld.length > 0) {
+      res.setHeader('X-Reversal-Held-Count', String(reversalHeld.length));
+      res.setHeader('X-Reversal-Held-Paise', String(reversalHeld.reduce((n, h) => n + h.amountPaise, 0)));
+    }
     // A-H2: payouts fully withheld as TDS are NOT in the file — tell the operator (never silent).
     res.setHeader('X-Fully-Withheld-Count', String(fullyWithheld.length));
     if (fullyWithheldNote) res.setHeader('X-Fully-Withheld-Note', encodeURIComponent(fullyWithheldNote));
@@ -248,12 +285,31 @@ export class CreditsController {
     if (heldNote) res.setHeader('X-Held-Note', encodeURIComponent(heldNote));
     // A-L3: nothing for the bank → a JSON answer with the reason + the FULL lists, never an empty file.
     if (buffer === null) {
-      return { noBankFile: true, message: noBankFileMessage, downloadCode, downloadId, fullyWithheld, heldEntries };
+      return {
+        noBankFile: true, message: noBankFileMessage, downloadCode, downloadId, fullyWithheld, heldEntries,
+        // WRE call-outs travel with the JSON answer too (empty on a tenant without engine reversals / TDS credits).
+        reversalHeld, tdsCreditApplied, tdsAdjustments,
+      };
     }
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="payout-${downloadCode}.xlsx"`,
     });
+  }
+
+  // Fix round B (screens #1): the download's call-outs as JSON (held entries, TDS credit applied, D3 adjustments).
+  @Get('payout-downloads/latest-summary')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:download_bank_file')
+  latestPayoutDownloadSummary(@CurrentUser() user: JwtPayload, @Query() query: PayoutDownloadSummaryQueryDto) {
+    return this.credits.payoutDownloadSummary(user, query);
+  }
+
+  @Get('payout-downloads/:id/summary')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:download_bank_file')
+  payoutDownloadSummary(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.credits.payoutDownloadSummary(user, { id });
   }
 
   @Post('payout-downloads/:id/utr')
@@ -292,5 +348,33 @@ export class CreditsController {
     @Body() dto: PatchReversalDto,
   ) {
     return this.credits.patchReversal(user, id, dto);
+  }
+
+  // ─── Wallet reversal engine call-outs (policy round A — "no silent pass-throughs") ─────────────────────
+  // What blocks POINTS reversals for this tenant and why: approvals paused, wallets needing Gifsy attention,
+  // unmapped credits, historical clawbacks "recovered X, owed Y". Read by the credits reversal screen banner.
+  @Get('reversal-engine/attention')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  reversalAttention(@CurrentUser() user: JwtPayload, @Query() query: ReversalAttentionQueryDto) {
+    return this.wallet.reversalAttention(user.clientId, { limit: query.limit });
+  }
+
+  // GIFSY lifts (or sets) the POINTS reversal maintenance pause by hand — e.g. after a crashed backfill run.
+  @Post('reversal-engine/pause')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:approve_reversal')
+  setReversalPause(@CurrentUser() user: JwtPayload, @Body() dto: ReversalPauseDto) {
+    // L6: the program worked in, or an explicit clientId — never silently Gifsy's own home tenant.
+    return this.wallet.setPointsReversalPause(user, { paused: dto.paused, reason: dto.reason ?? null, clientId: dto.clientId ?? null });
+  }
+
+  // Fix round A, M2 — the ONLY way to set the tenant's points reversal engine (LEGACY | SHADOW | V2). Validated, audited;
+  // refuses V2 while wallets are not prepared by the backfill or approvals are paused; LEGACY (rollback) always allowed.
+  @Post('reversal-engine/mode')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:approve_reversal')
+  setReversalEngineMode(@CurrentUser() user: JwtPayload, @Body() dto: ReversalEngineModeDto) {
+    return this.wallet.setReversalEngineMode(user, { mode: dto.mode, reason: dto.reason ?? null, clientId: dto.clientId ?? null });
   }
 }

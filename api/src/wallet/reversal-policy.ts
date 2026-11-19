@@ -1,0 +1,129 @@
+/**
+ * Wallet Reversal Engine — POLICY ROUND A (owner decisions 2026-11-15/16, WALLET-REVERSAL-ENGINE-DESIGN.md §12 P-A1..P-A5).
+ *
+ * The refusals a POINTS reversal can hit because something needs GIFSY's attention, with their exact owner-approved
+ * wording, plus the per-tenant "approvals paused" gate. Owner rule: NO SILENT PASS-THROUGHS — every one of these is
+ * (1) a clear API error naming the reason and what to do, (2) an audit row (CreditsService.auditReversalRefusal),
+ * (3) listed by GET /v1/admin/credits/reversal-engine/attention, and (4) counted in the backfill / verify reports.
+ */
+import { ConflictException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import type { PointsReversalPause, TenantSettingsService } from '../tenant/tenant-settings.service';
+
+export type ReversalAttentionCode = 'WALLET_NEEDS_ATTENTION' | 'CREDIT_UNMAPPED' | 'APPROVALS_PAUSED';
+
+/** A POINTS reversal refused because Gifsy must act first (409). `detail` goes to the audit row + the client. */
+export class ReversalAttentionException extends ConflictException {
+  constructor(
+    public readonly code: ReversalAttentionCode,
+    message: string,
+    public readonly detail: Record<string, unknown> = {},
+  ) {
+    super(message);
+  }
+}
+
+/** Q3 (owner wording, verbatim). */
+export function creditUnmappedMessage(outletCode: string): string {
+  return `Can't reverse: the original credit for outlet ${outletCode} in this batch couldn't be identified — Gifsy must map it first.`;
+}
+
+/** Q1: the receiving wallet was not prepared by the backfill (BLOCKED with a reason, or never processed). */
+export function walletNeedsAttentionMessage(outletCode: string, reason: string): string {
+  return (
+    `Can't reverse: the wallet that received this credit for outlet ${outletCode} needs Gifsy attention (${reason}). ` +
+    `Gifsy must fix that wallet's points history and re-run the wallet backfill — earning and redeeming on it keep working meanwhile.`
+  );
+}
+
+/** Reason text for a wallet the backfill has never processed (status NULL, history present). */
+export const WALLET_NOT_YET_BACKFILLED_REASON = 'not yet prepared by the wallet backfill';
+
+/** Q5 (owner wording, verbatim + the start time). */
+export function approvalsPausedMessage(p: PointsReversalPause): string {
+  if (p.malformed) {
+    return `Points reversal approvals are paused — the pause setting is unreadable (${p.reason ?? 'unknown'}); contact Gifsy`;
+  }
+  return `Points reversal approvals are paused — wallet maintenance in progress (started ${p.since ?? 'at an unknown time'})`;
+}
+
+/**
+ * The advisory-lock key shared by every POINTS reversal create/approve (SHARED, per transaction) and the backfill's
+ * drain step (EXCLUSIVE, momentary): after the backfill commits the pause, taking the exclusive lock waits until every
+ * reversal transaction that read "not paused" has finished — so nothing that started before the pause can commit
+ * during APPLY.
+ */
+export function pointsReversalLockKey(clientId: string): string {
+  return `wallet-reversal-engine:points-reversal:${clientId}`;
+}
+
+/**
+ * Fix round A, L4: take the SHARED engine lock (same key) at the START of a transaction that must run wholly on one
+ * engine mode — a POINTS batch confirm — and read the mode after it. The dedicated mode endpoint
+ * (WalletService.setReversalEngineMode) takes the EXCLUSIVE lock, so a flip waits for in-flight holders and later
+ * holders see the new mode. Must be the transaction's first lock (before any wallet row lock): exclusive holders never
+ * wait on row locks, so this can't deadlock.
+ */
+export async function lockReversalEngineShared(tx: Prisma.TransactionClient, clientId: string): Promise<void> {
+  const key = pointsReversalLockKey(clientId);
+  await tx.$queryRaw`SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock_shared(hashtextextended(${key}, 0))) AS l`;
+}
+
+/**
+ * The Q5 gate, run FIRST inside every POINTS reversal create / approve transaction (all engine modes — the backfill
+ * runs while a tenant is still LEGACY). Takes the shared advisory lock, then reads the switch through the SAME `tx`.
+ */
+export async function assertPointsReversalsNotPaused(
+  tx: Prisma.TransactionClient,
+  tenantSettings: Pick<TenantSettingsService, 'getPointsReversalPauseUncached'>,
+  clientId: string,
+): Promise<void> {
+  const key = pointsReversalLockKey(clientId);
+  await tx.$queryRaw`SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock_shared(hashtextextended(${key}, 0))) AS l`;
+  const pause = await tenantSettings.getPointsReversalPauseUncached(clientId, tx);
+  if (pause.paused) {
+    throw new ReversalAttentionException('APPROVALS_PAUSED', approvalsPausedMessage(pause), {
+      since: pause.since,
+      by: pause.by,
+      reason: pause.reason,
+      malformed: pause.malformed ?? false,
+    });
+  }
+}
+
+/**
+ * Q3 narrowing (PURE): does an UNRESOLVED credit position of this batch possibly belong to the (outlet, field) line?
+ *  - a position whose recorded outletCode / fieldId names ANOTHER outlet / field can't be this line's credit;
+ *  - otherwise it could, UNLESS the line is already fully identified: the batch row(s) for (outlet, field) total
+ *    exactly what the RESOLVED positions of the key total (each confirmed row produces one credit).
+ * Returns the blocking positions (empty ⇒ the line is reversible on its resolved positions).
+ */
+export function unresolvedBlockingLine<P extends { outletCode: string | null; fieldId: string | null }>(
+  unresolved: P[],
+  key: { outletCode: string; fieldId: string },
+  resolvedAmount: number,
+  lineAmountFromBatch: number | null,
+): P[] {
+  const compatible = unresolved.filter(
+    (u) => (u.outletCode === null || u.outletCode === key.outletCode) && (u.fieldId === null || u.fieldId === key.fieldId),
+  );
+  if (compatible.length === 0) return [];
+  // An UNRESOLVED position carrying EXACTLY this key (backfill downgrade: an approved reversal of the key could not be
+  // attributed) is this line's own credit — always blocking.
+  if (compatible.some((u) => u.outletCode === key.outletCode && u.fieldId === key.fieldId)) return compatible;
+  if (lineAmountFromBatch !== null && lineAmountFromBatch > 0 && resolvedAmount === lineAmountFromBatch) return [];
+  return compatible;
+}
+
+/** Σ amount of the batch's POINTS / OK / amount > 0 rows for (outlet, field) — what confirm credited; null = unknown. */
+export function batchLineAmount(rows: unknown, key: { outletCode: string; fieldId: string }): number | null {
+  if (!Array.isArray(rows)) return null;
+  let sum = 0;
+  for (const r of rows as Record<string, unknown>[]) {
+    if (!r || r.awardType !== 'POINTS' || r.status !== 'OK') continue;
+    if (r.outletId !== key.outletCode || r.fieldId !== key.fieldId) continue;
+    if (typeof r.amount !== 'number' || !(r.amount > 0)) continue;
+    sum += r.amount;
+  }
+  return sum;
+}

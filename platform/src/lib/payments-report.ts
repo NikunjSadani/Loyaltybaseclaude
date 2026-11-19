@@ -65,6 +65,12 @@ export interface PaymentRow {
   gstRegistrationType: string | null;
   panNumber: string | null;
   phone: string | null;
+  /** A PAID payment later reversed (newer API; absent otherwise). Paise are integers; `note` is API-authored. */
+  reversal?: { receivablePaise: number | string; tdsCreditPaise: number | string; reversedAt: string; note: string };
+  /** TDS lowered on this payment by a TDS credit (integer paise; newer API). */
+  tdsCreditPaise?: number | string;
+  /** Why TDS was lowered — API-authored, shown verbatim (newer API). */
+  tdsNote?: string;
 }
 
 export interface PaymentsReport {

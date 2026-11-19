@@ -57,6 +57,20 @@ const CREDIT_ENTRY_SITES: Site[] = [
     reason: 'reversal of a FULLY withheld entry: PAID → REVERSED (a status change, guarded on the withholding read)',
   },
   {
+    file: 'credits/payout-reversal-v2.ts',
+    fingerprint: /where: \{ id: e\.id, status: 'PAID', tdsDeductedPaise: withheld \}/,
+    reason:
+      'WRE V2 reversal of a FULLY withheld entry (merge decision 1, the shipped rule): PAID → REVERSED — a status ' +
+      'change, guarded on the status + withholding read under the entry row lock',
+  },
+  {
+    file: 'credits/payout-reversal-v2.ts',
+    fingerprint: /where: \{ id: e\.id, status: e\.status, \.\.\.\(offsetIt/,
+    reason:
+      'WRE V2 reversal: PENDING / FAILED → REVERSED (PROCESSING is refused and PAID takes the receivable / fully-withheld ' +
+      'branches before this; guarded on the status read under the entry row lock)',
+  },
+  {
     file: 'invoices/invoices.service.ts',
     fingerprint: /where: \{ id: \{ in: info\.entryIds \} \},\s*data: \{ autoInvoiceId: existing\.id \}/,
     reason: 'generateForBatch: links entries created moments ago in the same confirm tx (PENDING)',
@@ -131,16 +145,26 @@ describe('Digest recorded-time clocks — no code path rewrites a settled payout
     check('payoutTransaction', PAYOUT_TXN_SITES);
   });
 
-  it('no raw-SQL UPDATE on either table (except the reviewed payee-snapshot write)', () => {
+  it('no raw-SQL UPDATE on either table (except the reviewed payee-snapshot + WRE base-marker writes)', () => {
     // REVIEWED raw UPDATE: the TDS payee SNAPSHOT (owner rule 2026-11-18) in the bank-file download tx — it
     // touches only the entries THAT tx just claimed (PENDING/FAILED → PROCESSING), sets payeePan/
     // payeePartnerId only, and a raw UPDATE never bumps Prisma's @updatedAt, so no digest clock moves.
     const reviewed = /UPDATE "credit_payout_entries" AS e SET "payeePan" = v\.pan, "payeePartnerId" = v\.pid FROM unnest\(/g;
+    // REVIEWED raw UPDATE (Wallet Reversal Engine D1, credits/tds-credit.ts recordReceivableTds): a V2 reversal of a
+    // PAID entry stamps ONLY tdsBaseReversedAt / tdsBaseReversalId (guarded "tdsBaseReversedAt" IS NULL → once). It IS a
+    // PAID row and its status does not change — which is exactly why it is raw SQL: a Prisma update would bump
+    // @updatedAt and re-count the old payment as paid today; a raw UPDATE leaves updatedAt alone.
+    const reviewedMarker =
+      /UPDATE "credit_payout_entries" SET "tdsBaseReversedAt" = \$\{new Date\(\)\}, "tdsBaseReversalId" = \$\{ctx\.creditReversalId\} WHERE "id" = \$\{e\.id\} AND "tdsBaseReversedAt" IS NULL`/g;
     const raw = /UPDATE\s+"?(credit_payout_entries|payout_transactions)"?/i;
-    const hits = sourceFiles(SRC).filter((f) => raw.test(fs.readFileSync(f, 'utf8').replace(reviewed, '')));
+    const hits = sourceFiles(SRC).filter((f) =>
+      raw.test(fs.readFileSync(f, 'utf8').replace(reviewed, '').replace(reviewedMarker, '')),
+    );
     expect(hits.map((h) => path.relative(SRC, h))).toEqual([]);
     const snapshotSites = sourceFiles(SRC).flatMap((f) => fs.readFileSync(f, 'utf8').match(reviewed) ?? []);
     expect(snapshotSites).toHaveLength(1);
+    const markerSites = sourceFiles(SRC).flatMap((f) => fs.readFileSync(f, 'utf8').match(reviewedMarker) ?? []);
+    expect(markerSites).toHaveLength(1);
   });
 
   it('the tripwire itself catches a new unguarded write (self-test on a synthetic snippet)', () => {

@@ -266,6 +266,24 @@ export interface Collect194RArgs {
   scope?: { outletCodes: string[]; partnerIds: string[]; pans: string[]; keys?: string[] };
   /** DISPLAY-ONLY sink: deductee key → contributing outlet code (export columns). */
   noteOutlet?: (key: string, outletCode: string) => void;
+  /**
+   * Wallet Reversal Engine D1 (owner 2026-11-16, kept by the 2026-11-19 merge decision A): a PAID payout that a V2
+   * reversal took off the base (`tdsBaseReversedAt` set) is NOT counted — the income was reversed. It is reported
+   * here instead (same key / bucket it would have counted under), for the report's call-outs, the engine's hand-back
+   * explanation and the reversal credit cap. Only V2 reversals set the marker → every other tenant is unchanged.
+   */
+  reversedSink?: (key: string, item: Reversed194RItem) => void;
+}
+
+/** A payout taken off the 194R base by a V2 reversal (D1). */
+export interface Reversed194RItem {
+  entryId: string;
+  hasPan: boolean;
+  bucket: 'visPaise' | 'cashPaise';
+  amountPaise: bigint;
+  reversedAt: Date;
+  period: string;
+  outletCode: string;
 }
 
 /**
@@ -273,7 +291,7 @@ export interface Collect194RArgs {
  * vis / cash / nonCash. The single source of "what counts" for the engine AND the report.
  */
 export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Promise<Map<string, Bases194R>> {
-  const { clientId, fyLabel, importedCountFrom, scope, noteOutlet } = args;
+  const { clientId, fyLabel, importedCountFrom, scope, noteOutlet, reversedSink } = args;
   const { start, endExclusive } = fyFromLabel(fyLabel);
   const out = new Map<string, Bases194R>();
   const add = (key: string, hasPan: boolean, bucket: keyof Omit<Bases194R, 'hasPan'>, amount: bigint): void => {
@@ -294,7 +312,10 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
   const outletFilter = scope
     ? { OR: [{ payeePan: { in: scopeKeys } }, { payeePan: null, outletId: { in: scope.outletCodes } }] }
     : {};
-  const sel = { id: true, clientId: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, payeePan: true } as const;
+  const sel = {
+    id: true, clientId: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, payeePan: true,
+    period: true, tdsBaseReversedAt: true,
+  } as const;
 
   // ── Source 1: payouts. OWNER FY RULE (2026-11-18): a payout that went through a bank file belongs to
   // the FY the BANK FILE was made (download.downloadedAt) — PAID or PROCESSING alike; the UTR /
@@ -361,7 +382,16 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
     const { key, hasPan } = e.payeePan
       ? { key: e.payeePan, hasPan: !isNoPanKey(e.payeePan) }
       : keyOf(pan, partnerId ? noPanPartnerKey(partnerId) : noPanOutletKey(clientId, e.outletId));
-    add(key, hasPan, visIds.has(e.fieldId) ? 'visPaise' : 'cashPaise', e.amountPaise);
+    const bucket = visIds.has(e.fieldId) ? 'visPaise' : 'cashPaise';
+    if (e.tdsBaseReversedAt) {
+      // D1: reversed by the engine → off the base; said instead of counted.
+      reversedSink?.(key, {
+        entryId: e.id, hasPan, bucket, amountPaise: e.amountPaise, reversedAt: new Date(e.tdsBaseReversedAt),
+        period: e.period, outletCode: e.outletId,
+      });
+      continue;
+    }
+    add(key, hasPan, bucket, e.amountPaise);
     noteOutlet?.(key, e.outletId);
   }
 
@@ -426,6 +456,35 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
       const m = isNoPanCell(e.panNumber) ? byCode.get(e.outletCode.trim().toUpperCase()) : undefined;
       noteOutlet(key, m && m.length === 1 ? m[0].outletCode : e.outletCode);
     }
+  }
+  return out;
+}
+
+/**
+ * Wallet Reversal Engine (merge decision A, 2026-11-19) — OPEN 194R TDS credits (amount − applied > 0) of ONE client
+ * for ONE FY, keyed by the retailer key the credit was raised on (the ledger row's own PAN / no-PAN key). A credit is
+ * TDS already in the ledger (`deducted194RByRetailer`) that belongs to reversed income: the report's excess and the
+ * engine's credit explanation subtract it. Credits are strictly per client (194R: the client is the deductor).
+ */
+export async function openCredits194RByRetailer(
+  db: Tds194RDb,
+  a: { clientId: string; fyLabel: string; scope?: { keys: string[] } },
+): Promise<Map<string, bigint>> {
+  const rows = await db.tdsCredit.findMany({
+    where: {
+      clientId: a.clientId,
+      section: 'SEC_194R',
+      fyLabel: a.fyLabel,
+      ...(a.scope ? { panNumber: { in: a.scope.keys } } : {}),
+    },
+    select: { panNumber: true, amountPaise: true, appliedPaise: true },
+  });
+  const out = new Map<string, bigint>();
+  for (const r of rows ?? []) {
+    const open = r.amountPaise - r.appliedPaise;
+    if (open <= 0n || !r.panNumber?.trim()) continue;
+    const key = retailerKeyOfLedgerPan(r.panNumber);
+    out.set(key, (out.get(key) ?? 0n) + open);
   }
   return out;
 }

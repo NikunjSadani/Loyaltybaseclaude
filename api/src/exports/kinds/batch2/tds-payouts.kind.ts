@@ -14,6 +14,7 @@ import type { Prisma } from '@prisma/client';
 import { platformWide } from '../../../common/tenant-scope';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import { PayoutReportQueryDto } from '../../../tds-invoicing/dto/tds-reports.dto';
+import { TdsReportsService } from '../../../tds-invoicing/tds-reports.service';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { JsonSheet, keysetPages, monthWords, parseQueryDto } from './kind-support';
@@ -102,6 +103,63 @@ async function run(ctx: ExportRunContext, p: TdsPayoutsParams, out: XlsxStreamWr
   await summary.add({ Metric: 'Total Amount (₹)', Value: inr(totalAmount) });
   await summary.add({ Metric: 'Total TDS Deducted (₹)', Value: inr(totalTds) });
   await summary.end();
+
+  // Policy round B (WALLET-REVERSAL-ENGINE-DESIGN.md §8.1): TDS credits from reversed PAID payouts — created, applied
+  // to later payouts, outstanding. A SEPARATE sheet, written only when the scope has any credit, so the "Payouts" and
+  // "Summary" sheets stay byte-identical to the old builder (parity) and a tenant without credits gets the same file.
+  const credits = await new TdsReportsService(ctx.prisma as never).tdsCreditSection(ctx.prisma as never, {
+    ...(clientId ? { clientId } : {}),
+    ...(p.period ? { period: p.period } : {}),
+  });
+  if (credits.count > 0) {
+    const sheetC = new JsonSheet(out, 'TDS Credits');
+    for (const c of credits.rows) {
+      await sheetC.add({
+        Line: 'Credit created',
+        Client: c.clientId,
+        PAN: c.panNumber,
+        Section: c.section,
+        FY: c.fyLabel,
+        'Credit ID': c.creditId,
+        'Outlet Code': c.sourceOutletCode ?? '',
+        'Outlet Name': c.sourceOutletName ?? '',
+        Period: c.sourcePeriod ?? '',
+        'Amount (₹)': c.credit.inr,
+        'Applied (₹)': c.applied.inr,
+        'Outstanding (₹)': c.outstanding.inr,
+        Date: c.createdAt,
+        // Fix round B: the credit's scope (L2), D2 "unused … not carried forward" and L6 previous-PAN call-outs.
+        Note: [
+          `TDS withheld on the reversed PAID payout ${c.sourceEntryId ?? ''} (payout ${c.sourceAmount.inr}) stays deposited — carried forward on this PAN`,
+          c.scopeNote,
+          c.unusedNote,
+          c.previousPanNote,
+        ].filter(Boolean).join(' · '),
+      });
+      for (const a of c.applications) {
+        await sheetC.add({
+          Line: a.released ? 'Applied — released' : 'Applied',
+          Client: c.clientId,
+          PAN: c.panNumber,
+          Section: c.section,
+          FY: c.fyLabel,
+          'Credit ID': c.creditId,
+          'Outlet Code': a.outletCode ?? '',
+          'Outlet Name': a.outletName ?? '',
+          Period: a.period ?? '',
+          'Amount (₹)': a.amount.inr,
+          'Applied (₹)': '',
+          'Outstanding (₹)': '',
+          Date: a.released ? (a.releasedAt ?? '') : a.appliedAt,
+          Note: a.note,
+        });
+      }
+    }
+    await sheetC.add({ Line: 'TOTAL created', 'Amount (₹)': credits.totals.created.inr });
+    await sheetC.add({ Line: 'TOTAL applied', 'Amount (₹)': credits.totals.applied.inr });
+    await sheetC.add({ Line: 'TOTAL outstanding', 'Amount (₹)': credits.totals.outstanding.inr });
+    await sheetC.end();
+  }
   return { rowCount };
 }
 

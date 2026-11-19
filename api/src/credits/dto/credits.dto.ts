@@ -1,7 +1,11 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  ArrayUnique,
   IsArray,
   IsBoolean,
+  IsNotEmpty,
   IsEnum,
   IsInt,
   IsNumber,
@@ -11,6 +15,7 @@ import {
   IsString,
   Matches,
   Max,
+  MaxLength,
   Min,
   MinLength,
   ValidateNested,
@@ -284,6 +289,35 @@ export class CreateReversalDto {
   @IsInt()
   @IsPositive()
   requestedPaise!: number;
+
+  /**
+   * WP5 (reversal engine V2 only — SHADOW = LEGACY for payouts): the WHOLE payout entries this PAYOUT reversal covers; requestedPaise
+   * must equal their sum. Refused for POINTS and for a tenant on the LEGACY engine (which matches entries itself).
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(500)
+  @ArrayUnique()
+  @IsString({ each: true })
+  payoutEntryIds?: string[];
+
+  /** Fix round B (owner D5, every tenant): what the requester typed — saved as CreditReversal.requestRemarks. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  remarks?: string;
+}
+
+/** GET /admin/credits/batches/:id/payout-reversal-entries — the entries a PAYOUT reversal may select (WP5). */
+export class PayoutReversalEntriesQueryDto {
+  @IsString()
+  @IsNotEmpty()
+  outletId!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  fieldId!: string;
 }
 
 /** Reversal approve/reject action. */
@@ -305,7 +339,22 @@ export class PatchReversalDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(1000)
   remarks?: string;
+}
+
+/** GET /admin/credits/payout-downloads/latest-summary — this user's latest download for the scope (fix round B). */
+export class PayoutDownloadSummaryQueryDto {
+  @Matches(PERIOD_RE)
+  period!: string;
+
+  @IsOptional()
+  @IsEnum(PayoutGroupType)
+  groupType?: PayoutGroupType;
+
+  @IsOptional()
+  @IsString()
+  fieldId?: string;
 }
 
 /** Query flag for the UTR upload — ?apply=true applies, otherwise preview. */

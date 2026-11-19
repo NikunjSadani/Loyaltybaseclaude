@@ -29,6 +29,8 @@ const mockPrisma = {
   tdsOffPlatformEntry: { findMany: jest.fn() },
   tdsDeposit: { findMany: jest.fn() },
   tdsDeductionEntry: { findMany: jest.fn() },
+  // WRE (merge decision A): open 194R TDS credits — none here.
+  tdsCredit: { findMany: jest.fn(async () => []) },
   tdsRecoveryEntry: { findMany: jest.fn() },
 };
 
@@ -639,6 +641,68 @@ describe('TdsService', () => {
       expect(rows[0].withheldPaise).toBe(240000n);
       // liability − deposited(0) − withheld(240000) = 0 — the whole obligation is collected.
       expect(rows[0].outstandingPaise).toBe(0n);
+    });
+  });
+
+  // ─── Fix round B (owner D1 / D3 / M2): payouts an engine reversal took off the base ──────────
+  describe('fix round B — reversed payouts leave the base and are flagged on the row', () => {
+    /** findMany that answers the reversed-entries query (tdsBaseReversedAt: { not: null }) separately. */
+    const byReversal = (base: unknown[], reversed: unknown[]) =>
+      async (args: { where?: { tdsBaseReversedAt?: unknown } }) =>
+        args?.where?.tdsBaseReversedAt && typeof args.where.tdsBaseReversedAt === 'object' ? reversed : base;
+
+    it('194C: base excludes the reversed payout; row says reversed on <date>, below threshold, revise return, over-deduction handed back', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
+      const base = mkEntry('outlet1', 'vis-field', 2_500_000n, new Date('2025-08-01'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT', clientId: CLIENT_ID });
+      const rev = {
+        ...mkEntry('outlet1', 'vis-field', 8_000_000n, new Date('2025-08-01'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT', clientId: CLIENT_ID }),
+        tdsBaseReversedAt: new Date('2025-12-01T06:00:00Z'),
+      };
+      mockPrisma.creditPayoutEntry.findMany.mockImplementation(byReversal([base], [rev]));
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1', clientId: CLIENT_ID }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'cp1', panNumber: 'ABCDE1234F', entityType: 'INDIVIDUAL' }]);
+      mockPrisma.tdsDeductionEntry.findMany.mockResolvedValue([{ panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 105_000n }]);
+
+      const rows = await service.compute194C(FY);
+      // the base query excludes engine-reversed payouts
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where).toMatchObject({ tdsBaseReversedAt: null });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ baseFyTotalPaise: 2_500_000n, thresholdMet: false, liabilityPaise: 0n, withheldPaise: 105_000n });
+      expect(rows[0].reversal).toMatchObject({ reversedPaise: 8_000_000n, belowThresholdAfterReversal: true });
+      expect(rows[0].reversal!.items[0]).toMatchObject({ retroactive: true, period: '2025-08', outletCode: 'outlet1' });
+      expect(rows[0].reversal!.notes).toEqual([
+        '₹80,000.00 reversed on 1 Dec 2025 (payout 2025-08, outlet outlet1)',
+        'PAN below threshold after reversal — no TDS due for FY 2025-26 on what remains',
+        'Changed after reversal on 1 Dec 2025 — revise return if already filed',
+        '₹1,050.00 TDS withheld beyond what is now due — handed back on the next payout on this PAN by the programme that reversed it',
+      ]);
+    });
+
+    it('194R: a PAN whose whole base was reversed still gets a (base 0) row — the reversal is never silent', async () => {
+      // Merge decision A (2026-11-19): the shared definition (collect194RBases) reads the payout and leaves it out of
+      // the base itself because of its marker — the report gets it from the reversedSink, not a separate query.
+      const rev = { ...mkEntry('outlet1', 'inc', 2_500_000n, new Date('2025-08-01'), { clientId: CLIENT_ID }), tdsBaseReversedAt: new Date('2025-08-20T06:00:00Z') };
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([rev]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1', clientId: CLIENT_ID }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'cp1', panNumber: 'ABCDE1234F' }]);
+      const rows = await service.compute194R(CLIENT_ID, FY, null);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ panNumber: 'ABCDE1234F', baseFyTotalPaise: 0n, liabilityPaise: 0n });
+      expect(rows[0].reversal).toMatchObject({ reversedPaise: 2_500_000n, belowThresholdAfterReversal: true });
+      // reversed inside its own month → no "revise return" flag
+      expect(rows[0].reversal!.notes).toEqual([
+        '₹25,000.00 reversed on 20 Aug 2025 (payout 2025-08, outlet outlet1)',
+        'PAN below threshold after reversal — no TDS due for FY 2025-26 on what remains',
+      ]);
+    });
+
+    it('no reversed payout → rows carry no reversal field (byte-identical)', async () => {
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([mkEntry('outlet1', 'inc', 2_500_000n)]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'cp1', panNumber: 'ABCDE1234F' }]);
+      const rows = await service.compute194R(CLIENT_ID, FY, null);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).not.toHaveProperty('reversal');
     });
   });
 

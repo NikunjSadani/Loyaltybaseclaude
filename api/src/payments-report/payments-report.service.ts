@@ -3,6 +3,8 @@ import { CreditEntryStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isSettledByTds, PAYMENT_ENTRY_SELECT, paymentsOrderBy, paymentsTotals, paymentsWhere } from './payments-report.query';
 import { PAYMENTS_DEFAULT_PAGE_SIZE, PAYMENTS_MAX_PAGE_SIZE } from './dto/payments-report.dto';
+import { formatINR } from '../common/money';
+import { istDate } from '../credits/tds-credit';
 
 /**
  * Payments Report service — a READ-ONLY report of all payout PAYMENTS in a date range, across
@@ -108,7 +110,17 @@ export class PaymentsReportService {
           orderBy,
           skip: (p - 1) * pageSize,
           take: pageSize,
-          select: PAYMENT_ENTRY_SELECT,
+          // Fix round B (L1): + the reversal / TDS-credit marks, in the SAME query (screen only — the export kind keeps
+          // PAYMENT_ENTRY_SELECT). Prisma loads the two relations for this page's ids only.
+          select: {
+            ...PAYMENT_ENTRY_SELECT,
+            tdsBaseReversedAt: true,
+            reversalAllocations: { where: { state: 'APPLIED_RECEIVABLE' }, select: { receivablePaise: true, tdsCreditPaise: true } },
+            tdsCreditApplications: {
+              where: { releasedAt: null },
+              select: { amountPaise: true, tdsCredit: { select: { clientId: true } } },
+            },
+          },
         });
         return { totals: t, page: p, entries: rows };
       },
@@ -221,6 +233,8 @@ export class PaymentsReportService {
         gstRegistrationType: o?.partner?.gstRegistrationType ?? null,
         panNumber: o?.partner?.panNumber ?? null,
         phone: o?.partner?.phone ?? null,
+        // Fix round B (L1): only on a reversed / credit-adjusted entry — every other row is shaped exactly as before.
+        ...this.reversalMarks(e),
       };
     });
 
@@ -245,6 +259,52 @@ export class PaymentsReportService {
       },
       rows,
     };
+  }
+
+  /**
+   * L1 — one row's marks: `reversal` (a PAID entry later reversed by the engine: owed back, TDS credit, date) and
+   * `tdsCreditPaise` / `tdsNote` (its TDS was lowered by an earlier TDS credit — own or another programme's, 194C).
+   */
+  private reversalMarks(r: {
+    clientId: string;
+    amountPaise: bigint;
+    tdsBaseReversedAt?: Date | null;
+    reversalAllocations?: Array<{ receivablePaise: bigint; tdsCreditPaise: bigint }>;
+    tdsCreditApplications?: Array<{ amountPaise: bigint; tdsCredit: { clientId: string } | null }>;
+  }): {
+    reversal?: { receivablePaise: number; tdsCreditPaise: number; reversedAt: string; note: string };
+    tdsCreditPaise?: number;
+    tdsNote?: string;
+  } {
+    const m: {
+      reversal?: { receivablePaise: number; tdsCreditPaise: number; reversedAt: string; note: string };
+      tdsCreditPaise?: number;
+      tdsNote?: string;
+    } = {};
+    if (r.tdsBaseReversedAt) {
+      const a = r.reversalAllocations?.[0];
+      const owed = a ? a.receivablePaise : r.amountPaise;
+      const credit = a ? a.tdsCreditPaise : 0n;
+      m.reversal = {
+        receivablePaise: Number(owed),
+        tdsCreditPaise: Number(credit),
+        reversedAt: r.tdsBaseReversedAt.toISOString(),
+        note:
+          `Reversed on ${istDate(r.tdsBaseReversedAt)} — ` +
+          (owed > 0n ? `${formatINR(owed)} owed back (receivable)` : 'nothing owed back (the whole amount was withheld as TDS)') +
+          (credit > 0n ? `; ${formatINR(credit)} TDS credit carried forward` : ''),
+      };
+    }
+    const apps = r.tdsCreditApplications ?? [];
+    const credit = apps.reduce((s, x) => s + x.amountPaise, 0n);
+    if (credit > 0n) {
+      const other = apps.filter((x) => x.tdsCredit && x.tdsCredit.clientId !== r.clientId).reduce((s, x) => s + x.amountPaise, 0n);
+      m.tdsCreditPaise = Number(credit);
+      m.tdsNote =
+        `TDS lowered by ${formatINR(credit)} adjusted from earlier TDS credit` +
+        (other > 0n ? ` (${formatINR(other)} from another programme)` : '');
+    }
+    return m;
   }
 
   // The .xlsx twin (GET …/payments-report/export) is the 'payments-report' export kind

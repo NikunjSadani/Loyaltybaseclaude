@@ -1,0 +1,620 @@
+{
+  "out": {
+    "errors": [
+      "BadRequestException: Reversal exceeds the amount credited for this outlet and field in this batch (credited 300 pts, already reversed or pending 120 pts, requested 181 pts)",
+      "BadRequestException: Nothing was credited for this outlet and field in this batch",
+      "BadRequestException: Cannot claw back: this partner's wallet has no credit from batch B1 for outlet O3 / field F (outlet relinked or row not credited) — settle it off-platform and reject this reversal",
+      "ConflictException: This wallet carries debt; reversals on it are paused until the new reversal engine is live — contact Gifsy"
+    ],
+    "confirm1": {
+      "batch": {
+        "id": "B1",
+        "clientId": "bajaj",
+        "status": "CONFIRMED",
+        "period": "2026-05",
+        "uploadedBy": "client-admin",
+        "totalOutlets": 4,
+        "totalPoints": 1050,
+        "totalPayoutPaise": "0n",
+        "rows": [
+          {
+            "outletId": "O1",
+            "outletName": "Outlet O1",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 500,
+            "narration": "credit B1",
+            "awardType": "POINTS",
+            "status": "OK"
+          },
+          {
+            "outletId": "O2",
+            "outletName": "Outlet O2",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 300,
+            "narration": "credit B1",
+            "awardType": "POINTS",
+            "status": "OK"
+          },
+          {
+            "outletId": "O3",
+            "outletName": "Outlet O3",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 200,
+            "narration": "credit B1",
+            "awardType": "POINTS",
+            "status": "OK"
+          },
+          {
+            "outletId": "O9",
+            "outletName": "Outlet O9",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 50,
+            "narration": "credit B1",
+            "awardType": "POINTS",
+            "status": "OK"
+          }
+        ],
+        "confirmedBy": "client-admin",
+        "confirmedAt": "<date>"
+      },
+      "payoutEntriesCreated": 0,
+      "pointsCredited": 3,
+      "pointsCreditedTotal": 1000,
+      "skipped": [
+        {
+          "outletId": "O9",
+          "fieldName": "Field",
+          "points": 50,
+          "reason": "OUTLET_NOT_FOUND"
+        }
+      ]
+    },
+    "approve1": {
+      "id": "rev9",
+      "status": "APPROVED",
+      "approvedPaise": "500n",
+      "shortfallPaise": "400n",
+      "clientId": "bajaj",
+      "batchId": "B1",
+      "outletId": "O1",
+      "outletName": "Outlet O1",
+      "fieldId": "F",
+      "fieldName": "Field",
+      "period": "2026-05",
+      "awardType": "POINTS",
+      "originalPaise": "500n",
+      "requestedPaise": "500n",
+      "requestedBy": "client-admin",
+      "approvedBy": "gifsy-admin",
+      "approvedAt": "<date>",
+      "remarks": null,
+      "clawbackShortfall": 400,
+      "payoutClawbackNote": null
+    },
+    "approve2": {
+      "id": "rev12",
+      "status": "PARTIAL",
+      "approvedPaise": "120n",
+      "shortfallPaise": null,
+      "clientId": "bajaj",
+      "batchId": "B1",
+      "outletId": "O2",
+      "outletName": "Outlet O2",
+      "fieldId": "F",
+      "fieldName": "Field",
+      "period": "2026-05",
+      "awardType": "POINTS",
+      "originalPaise": "300n",
+      "requestedPaise": "300n",
+      "requestedBy": "client-admin",
+      "approvedBy": "gifsy-admin",
+      "approvedAt": "<date>",
+      "remarks": null,
+      "clawbackShortfall": 0,
+      "payoutClawbackNote": null
+    },
+    "reject3": {
+      "id": "rev15",
+      "status": "REJECTED",
+      "approvedPaise": null,
+      "shortfallPaise": null,
+      "clientId": "bajaj",
+      "batchId": "B1",
+      "outletId": "O2",
+      "outletName": "Outlet O2",
+      "fieldId": "F",
+      "fieldName": "Field",
+      "period": "2026-05",
+      "awardType": "POINTS",
+      "originalPaise": "300n",
+      "requestedPaise": "180n",
+      "requestedBy": "client-admin",
+      "approvedBy": "gifsy-admin",
+      "approvedAt": "<date>",
+      "remarks": null,
+      "clawbackShortfall": 0,
+      "payoutClawbackNote": null
+    },
+    "confirm2": {
+      "batch": {
+        "id": "B2",
+        "clientId": "bajaj",
+        "status": "CONFIRMED",
+        "period": "2026-05",
+        "uploadedBy": "client-admin",
+        "totalOutlets": 1,
+        "totalPoints": 500,
+        "totalPayoutPaise": "0n",
+        "rows": [
+          {
+            "outletId": "O4",
+            "outletName": "Outlet O4",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 500,
+            "narration": "credit B2",
+            "awardType": "POINTS",
+            "status": "OK"
+          }
+        ],
+        "confirmedBy": "client-admin",
+        "confirmedAt": "<date>"
+      },
+      "payoutEntriesCreated": 0,
+      "pointsCredited": 1,
+      "pointsCreditedTotal": 500,
+      "skipped": []
+    }
+  },
+  "tables": {
+    "wallets": [
+      {
+        "id": "w-cp3",
+        "partnerId": "cp3",
+        "earnedPoints": 500,
+        "lockedPoints": 0,
+        "redeemablePoints": 400,
+        "redeemedPoints": 0,
+        "expiredPoints": 0,
+        "lifetimeEarned": 500,
+        "lifetimeRedeemed": 0,
+        "lifetimeExpired": 0,
+        "debtPoints": 0,
+        "movementSeq": 0,
+        "lastTransactionAt": "<date>"
+      },
+      {
+        "id": "w-cp1",
+        "partnerId": "cp1",
+        "earnedPoints": 700,
+        "lockedPoints": 0,
+        "redeemablePoints": 0,
+        "redeemedPoints": 600,
+        "expiredPoints": 0,
+        "lifetimeEarned": 700,
+        "lifetimeRedeemed": 600,
+        "lifetimeExpired": 0,
+        "debtPoints": 0,
+        "movementSeq": 0,
+        "accountId": "acc-x",
+        "lastTransactionAt": "<date>"
+      },
+      {
+        "id": "w-cp2",
+        "partnerId": "cp2",
+        "earnedPoints": 300,
+        "lockedPoints": 0,
+        "redeemablePoints": 180,
+        "redeemedPoints": 0,
+        "expiredPoints": 0,
+        "lifetimeEarned": 300,
+        "lifetimeRedeemed": 0,
+        "lifetimeExpired": 0,
+        "debtPoints": 0,
+        "movementSeq": 0,
+        "accountId": "acc-x",
+        "lastTransactionAt": "<date>"
+      }
+    ],
+    "walletTxns": [
+      {
+        "id": "wt1",
+        "walletId": "w-cp1",
+        "transactionType": "CREDIT_POINTS_EARNED",
+        "points": 500,
+        "balanceBefore": 0,
+        "balanceAfter": 500,
+        "balanceType": "REDEEMABLE",
+        "referenceType": "CREDIT_BATCH",
+        "referenceId": "B1",
+        "description": "credit B1",
+        "metadata": {
+          "fieldId": "F",
+          "outletCode": "O1"
+        },
+        "createdAt": "<clock+1>"
+      },
+      {
+        "id": "wt3",
+        "walletId": "w-cp2",
+        "transactionType": "CREDIT_POINTS_EARNED",
+        "points": 300,
+        "balanceBefore": 0,
+        "balanceAfter": 300,
+        "balanceType": "REDEEMABLE",
+        "referenceType": "CREDIT_BATCH",
+        "referenceId": "B1",
+        "description": "credit B1",
+        "metadata": {
+          "fieldId": "F",
+          "outletCode": "O2"
+        },
+        "createdAt": "<clock+3>"
+      },
+      {
+        "id": "wt5",
+        "walletId": "w-cp1",
+        "transactionType": "CREDIT_POINTS_EARNED",
+        "points": 200,
+        "balanceBefore": 500,
+        "balanceAfter": 700,
+        "balanceType": "REDEEMABLE",
+        "referenceType": "CREDIT_BATCH",
+        "referenceId": "B1",
+        "description": "credit B1",
+        "metadata": {
+          "fieldId": "F",
+          "outletCode": "O3"
+        },
+        "createdAt": "<clock+5>"
+      },
+      {
+        "id": "wt7",
+        "walletId": "w-cp1",
+        "transactionType": "DEBIT_REDEMPTION",
+        "points": -600,
+        "balanceBefore": 700,
+        "balanceAfter": 100,
+        "balanceType": "REDEEMABLE",
+        "referenceType": "REDEMPTION_ORDER",
+        "referenceId": "ord-600",
+        "description": null,
+        "createdAt": "<clock+7>"
+      },
+      {
+        "id": "wt10",
+        "walletId": "w-cp1",
+        "transactionType": "DEBIT_ADJUSTMENT",
+        "points": -500,
+        "balanceBefore": 100,
+        "balanceAfter": 0,
+        "balanceType": "REDEEMABLE",
+        "referenceType": "CREDIT_REVERSAL",
+        "referenceId": "rev9",
+        "description": "Clawback for reversal rev9 — batch POINTS reversal [SHORTFALL: 400 pts already redeemed — owner review required]",
+        "metadata": {
+          "reversedCreditTxId": "wt1"
+        },
+        "createdAt": "<clock+10>"
+      },
+      {
+        "id": "wt13",
+        "walletId": "w-cp2",
+        "transactionType": "DEBIT_ADJUSTMENT",
+        "points": -120,
+        "balanceBefore": 300,
+        "balanceAfter": 180,
+        "balanceType": "REDEEMABLE",
+        "referenceType": "CREDIT_REVERSAL",
+        "referenceId": "rev12",
+        "description": "Clawback for reversal rev12 — batch POINTS reversal",
+        "metadata": {
+          "reversedCreditTxId": "wt3"
+        },
+        "createdAt": "<clock+13>"
+      },
+      {
+        "id": "wt16",
+        "walletId": "w-cp3",
+        "transactionType": "CREDIT_POINTS_EARNED",
+        "points": 500,
+        "balanceBefore": -100,
+        "balanceAfter": 400,
+        "balanceType": "REDEEMABLE",
+        "referenceType": "CREDIT_BATCH",
+        "referenceId": "B2",
+        "description": "credit B2",
+        "metadata": {
+          "fieldId": "F",
+          "outletCode": "O4"
+        },
+        "createdAt": "<clock+16>"
+      }
+    ],
+    "ledger": [
+      {
+        "id": "pl2",
+        "isExpired": false,
+        "remainingPoints": 0,
+        "walletId": "w-cp1",
+        "schemeId": null,
+        "transactionType": "EARN",
+        "points": 500,
+        "expiresAt": null,
+        "sourceType": "CREDIT_FIELD",
+        "sourceId": "F",
+        "notes": "credit B1",
+        "createdAt": "<clock+2>"
+      },
+      {
+        "id": "pl4",
+        "isExpired": false,
+        "remainingPoints": 180,
+        "walletId": "w-cp2",
+        "schemeId": null,
+        "transactionType": "EARN",
+        "points": 300,
+        "expiresAt": null,
+        "sourceType": "CREDIT_FIELD",
+        "sourceId": "F",
+        "notes": "credit B1",
+        "createdAt": "<clock+4>"
+      },
+      {
+        "id": "pl6",
+        "isExpired": false,
+        "remainingPoints": 0,
+        "walletId": "w-cp1",
+        "schemeId": null,
+        "transactionType": "EARN",
+        "points": 200,
+        "expiresAt": null,
+        "sourceType": "CREDIT_FIELD",
+        "sourceId": "F",
+        "notes": "credit B1",
+        "createdAt": "<clock+6>"
+      },
+      {
+        "id": "pl8",
+        "isExpired": false,
+        "remainingPoints": 0,
+        "walletId": "w-cp1",
+        "schemeId": null,
+        "transactionType": "REDEEM",
+        "points": -600,
+        "expiresAt": null,
+        "sourceType": null,
+        "sourceId": null,
+        "notes": null,
+        "createdAt": "<clock+8>"
+      },
+      {
+        "id": "pl11",
+        "isExpired": false,
+        "remainingPoints": 0,
+        "walletId": "w-cp1",
+        "schemeId": null,
+        "transactionType": "ADJUST",
+        "points": -500,
+        "expiresAt": null,
+        "sourceType": "CREDIT_FIELD",
+        "sourceId": "F",
+        "notes": "Clawback for reversal rev9 — batch POINTS reversal [SHORTFALL: 400 pts already redeemed — owner review required]",
+        "createdAt": "<clock+11>"
+      },
+      {
+        "id": "pl14",
+        "isExpired": false,
+        "remainingPoints": 0,
+        "walletId": "w-cp2",
+        "schemeId": null,
+        "transactionType": "ADJUST",
+        "points": -120,
+        "expiresAt": null,
+        "sourceType": "CREDIT_FIELD",
+        "sourceId": "F",
+        "notes": "Clawback for reversal rev12 — batch POINTS reversal",
+        "createdAt": "<clock+14>"
+      },
+      {
+        "id": "pl17",
+        "isExpired": false,
+        "remainingPoints": 500,
+        "walletId": "w-cp3",
+        "schemeId": null,
+        "transactionType": "EARN",
+        "points": 500,
+        "expiresAt": null,
+        "sourceType": "CREDIT_FIELD",
+        "sourceId": "F",
+        "notes": "credit B2",
+        "createdAt": "<clock+17>"
+      }
+    ],
+    "positions": [],
+    "allocations": [],
+    "auditLogs": [],
+    "batches": [
+      {
+        "id": "B1",
+        "clientId": "bajaj",
+        "status": "CONFIRMED",
+        "period": "2026-05",
+        "uploadedBy": "client-admin",
+        "totalOutlets": 4,
+        "totalPoints": 1050,
+        "totalPayoutPaise": "0n",
+        "rows": [
+          {
+            "outletId": "O1",
+            "outletName": "Outlet O1",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 500,
+            "narration": "credit B1",
+            "awardType": "POINTS",
+            "status": "OK"
+          },
+          {
+            "outletId": "O2",
+            "outletName": "Outlet O2",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 300,
+            "narration": "credit B1",
+            "awardType": "POINTS",
+            "status": "OK"
+          },
+          {
+            "outletId": "O3",
+            "outletName": "Outlet O3",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 200,
+            "narration": "credit B1",
+            "awardType": "POINTS",
+            "status": "OK"
+          },
+          {
+            "outletId": "O9",
+            "outletName": "Outlet O9",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 50,
+            "narration": "credit B1",
+            "awardType": "POINTS",
+            "status": "OK"
+          }
+        ],
+        "confirmedBy": "client-admin",
+        "confirmedAt": "<date>"
+      },
+      {
+        "id": "B2",
+        "clientId": "bajaj",
+        "status": "CONFIRMED",
+        "period": "2026-05",
+        "uploadedBy": "client-admin",
+        "totalOutlets": 1,
+        "totalPoints": 500,
+        "totalPayoutPaise": "0n",
+        "rows": [
+          {
+            "outletId": "O4",
+            "outletName": "Outlet O4",
+            "fieldId": "F",
+            "fieldName": "Field",
+            "amount": 500,
+            "narration": "credit B2",
+            "awardType": "POINTS",
+            "status": "OK"
+          }
+        ],
+        "confirmedBy": "client-admin",
+        "confirmedAt": "<date>"
+      }
+    ],
+    "reversals": [
+      {
+        "id": "rev9",
+        "status": "APPROVED",
+        "approvedPaise": "500n",
+        "shortfallPaise": "400n",
+        "clientId": "bajaj",
+        "batchId": "B1",
+        "outletId": "O1",
+        "outletName": "Outlet O1",
+        "fieldId": "F",
+        "fieldName": "Field",
+        "period": "2026-05",
+        "awardType": "POINTS",
+        "originalPaise": "500n",
+        "requestedPaise": "500n",
+        "requestedBy": "client-admin",
+        "approvedBy": "gifsy-admin",
+        "approvedAt": "<date>",
+        "remarks": null
+      },
+      {
+        "id": "rev12",
+        "status": "PARTIAL",
+        "approvedPaise": "120n",
+        "shortfallPaise": null,
+        "clientId": "bajaj",
+        "batchId": "B1",
+        "outletId": "O2",
+        "outletName": "Outlet O2",
+        "fieldId": "F",
+        "fieldName": "Field",
+        "period": "2026-05",
+        "awardType": "POINTS",
+        "originalPaise": "300n",
+        "requestedPaise": "300n",
+        "requestedBy": "client-admin",
+        "approvedBy": "gifsy-admin",
+        "approvedAt": "<date>",
+        "remarks": null
+      },
+      {
+        "id": "rev15",
+        "status": "REJECTED",
+        "approvedPaise": null,
+        "shortfallPaise": null,
+        "clientId": "bajaj",
+        "batchId": "B1",
+        "outletId": "O2",
+        "outletName": "Outlet O2",
+        "fieldId": "F",
+        "fieldName": "Field",
+        "period": "2026-05",
+        "awardType": "POINTS",
+        "originalPaise": "300n",
+        "requestedPaise": "180n",
+        "requestedBy": "client-admin",
+        "approvedBy": "gifsy-admin",
+        "approvedAt": "<date>",
+        "remarks": null
+      }
+    ],
+    "partners": [
+      {
+        "id": "cp1",
+        "clientId": "bajaj"
+      },
+      {
+        "id": "cp2",
+        "clientId": "bajaj"
+      },
+      {
+        "id": "cp3",
+        "clientId": "bajaj"
+      }
+    ],
+    "outlets": [
+      {
+        "clientId": "bajaj",
+        "outletCode": "O1",
+        "partnerId": "cp1"
+      },
+      {
+        "clientId": "bajaj",
+        "outletCode": "O2",
+        "partnerId": "cp2"
+      },
+      {
+        "clientId": "bajaj",
+        "outletCode": "O3",
+        "partnerId": "cp2"
+      },
+      {
+        "clientId": "bajaj",
+        "outletCode": "O4",
+        "partnerId": "cp3"
+      }
+    ]
+  }
+}

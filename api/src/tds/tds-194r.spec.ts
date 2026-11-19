@@ -23,6 +23,9 @@ type Entry = {
   outletId: string; amountPaise: bigint; fieldId: string; tdsSection: string | null; sourceKind?: string | null;
   /** Payee SNAPSHOT at payment time (owner rule 2026-11-18). */
   payeePan?: string | null;
+  /** WRE D1: a V2 reversal took this PAID payout off the base. */
+  tdsBaseReversedAt?: Date | null;
+  period?: string;
 };
 const ciContains = (v: string | null, f?: { contains?: string }) =>
   !f?.contains || (!!v && v.toUpperCase().includes(f.contains.toUpperCase()));
@@ -34,9 +37,11 @@ type Data = {
   offPlatform: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; entryDate: Date; resolvedKey?: string | null }>;
   deposits: Array<{ clientId: string; panNumber: string; outletCode: string | null; amountPaise: bigint; forPeriod: string; depositDate: Date; uploadBatchId: string | null; resolvedKey?: string | null }>;
   ledger: Array<{ clientId: string; panNumber: string; section: string; fyLabel: string; tdsDeductedThisPaise: bigint; outletCode?: string | null; carryForwardPaise?: bigint; createdAt?: Date }>;
+  /** WRE (merge decision A): TDS credits raised by V2 reversals of PAID payouts. */
+  credits: Array<{ id: string; clientId: string; panNumber: string; section: string; fyLabel: string; amountPaise: bigint; appliedPaise: bigint; createdAt: Date }>;
   countFrom: string | null;
 };
-const empty = (): Data => ({ entries: [], outlets: [], partners: [], redemptions: [], offPlatform: [], deposits: [], ledger: [], countFrom: null });
+const empty = (): Data => ({ entries: [], outlets: [], partners: [], redemptions: [], offPlatform: [], deposits: [], ledger: [], credits: [], countFrom: null });
 
 const inRange = (d: Date | null | undefined, r?: { gte?: Date; lt?: Date }) =>
   !r || (!!d && (!r.gte || d >= r.gte) && (!r.lt || d < r.lt));
@@ -125,6 +130,16 @@ function fakeDb(d: Data) {
     tdsDeposit: {
       findMany: async ({ where: w }: any) =>
         d.deposits.filter((x) => (w.clientId === undefined || x.clientId === w.clientId) && x.forPeriod >= w.OR[0].forPeriod.gte && x.forPeriod <= w.OR[0].forPeriod.lte),
+    },
+    tdsCredit: {
+      findMany: async ({ where: w }: any) =>
+        d.credits.filter(
+          (c) =>
+            (!w.clientId || c.clientId === w.clientId) &&
+            (!w.section || (typeof w.section === 'string' ? c.section === w.section : inList(c.section, w.section))) &&
+            (!w.fyLabel || c.fyLabel === w.fyLabel) &&
+            inList(c.panNumber, w.panNumber),
+        ),
     },
     tdsDeductionEntry: {
       findMany: async ({ where: w }: any) =>
@@ -665,6 +680,79 @@ describe('A-H1: a no-PAN DEPOSIT / OFF-PLATFORM row keeps the retailer key AS OF
 });
 
 describe('PARITY: engine and report give the same 194R TDS for the same data', () => {
+  // Wallet Reversal Engine merge decision A (2026-11-19): the D1 "reversed payout leaves the base" filter lives in the
+  // SHARED definition, so engine and report agree; an open TDS credit is ledger TDS of reversed income — never also
+  // flagged as excess, and the next payout's TDS due is covered by it (withholding = computeDeduction(prior = ledger)).
+  it('WRE D1 + credit: a V2-reversed PAID payout leaves the base for BOTH; the open credit is not excess; the next run uses it', async () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    // v1 ₹15,000 + vB ₹10,000 crossed ₹20,000 → ₹2,500 withheld (ledger); then vB was reversed by the engine (V2):
+    // net receivable, the base marker set, and ₹1,000 (vB's own share) became an open TDS credit on the PAN.
+    d.entries = [
+      paidVis('v1', 1500000n),
+      { ...paidVis('vB', 1000000n), tdsBaseReversedAt: inFy(60), period: '2026-05' },
+    ];
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 250000n }];
+    d.credits = [{ id: 'c1', clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: FY.fyLabel, amountPaise: 100000n, appliedPaise: 0n, createdAt: inFy(60) }];
+
+    // ── Report BEFORE the next run: vB is off the base (₹15,000 ≤ ₹20,000 → nothing due); flagged on the row.
+    const [before] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(before.baseFyTotalPaise).toBe(1500000n);
+    expect(before.deductLiabilityPaise).toBe(0n);
+    expect(before.reversal).toMatchObject({ reversedPaise: 1000000n, belowThresholdAfterReversal: true });
+    expect(before.openTdsCreditPaise).toBe(100000n);
+    // excess = deducted ₹2,500 − open credit ₹1,000 − share ₹0 = ₹1,500 (v1's catch-up — the year dropped ≤ ₹20,000);
+    // the credited ₹1,000 is NOT flagged on top.
+    expect(before.excessDeductedPaise).toBe(150000n);
+
+    // ── Engine: the next run pays ₹10,000 → base ₹25,000 (vB excluded) → due ₹2,500; ledger ₹2,500 → ₹0 withheld;
+    // the ₹1,000 credit covers this payout's own ₹1,000 TDS (drawn), the rest is the ledger hand-back.
+    const { credits } = services(d, 'DEDUCT');
+    const plan = await (credits as unknown as {
+      buildPayoutTdsPlan: (db: unknown, p: unknown) => Promise<{
+        deductionLedger: Array<{ tdsDueCumulativePaise: bigint; tdsDeductedThisPaise: bigint }>;
+        creditDraws: Array<{ tdsCreditId: string; amountPaise: bigint }>;
+      }>;
+    }).buildPayoutTdsPlan(fakeDb(d), {
+      clientId: CLIENT,
+      period: '2026-05',
+      engineEntries: [{ id: 'run1', outletId: 'O1', amountPaise: 1000000n, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' }],
+      outletTaxMap: new Map([['O1', { partnerId: 'p1', panNumber: 'ABCDE1234F', entityType: 'INDIVIDUAL' }]]),
+      runAt: NOW,
+      currentMethodology: 'DEDUCT',
+      importedCountFrom: null,
+    });
+    const engineDue = plan.deductionLedger[0].tdsDueCumulativePaise;
+    const withheldNow = plan.deductionLedger.reduce((s, r) => s + r.tdsDeductedThisPaise, 0n);
+    expect(engineDue).toBe(250000n);
+    expect(withheldNow).toBe(0n);
+    expect(plan.creditDraws).toEqual([expect.objectContaining({ tdsCreditId: 'c1', amountPaise: 100000n })]);
+
+    // ── Report AFTER the run (credit applied, run entry PROCESSING): same due as the engine; nothing in excess.
+    const after: Data = {
+      ...d,
+      entries: [...d.entries, { id: 'run1', clientId: CLIENT, status: 'PROCESSING', paidAt: null, downloadedAt: NOW, outletId: 'O1', amountPaise: 1000000n, fieldId: 'f-vis', tdsSection: 'SEC_194R' }],
+      credits: [{ ...d.credits[0], appliedPaise: 100000n }],
+    };
+    const [row] = await services(after, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row.deductLiabilityPaise).toBe(engineDue);
+    expect(row.deductedPaise + withheldNow).toBe(row.deductLiabilityPaise);
+    expect(row.excessDeductedPaise).toBe(0n);
+    expect(row.openTdsCreditPaise).toBeUndefined();
+  });
+
+  it('WRE D1: without any reversal marker the shared definition is unchanged (no reversal flag, no credit field)', async () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ABCDE1234F')];
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [paidVis('v1', 1500000n), paidVis('v2', 1000000n)];
+    const [row] = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    expect(row.baseFyTotalPaise).toBe(2500000n);
+    expect(row.reversal).toBeUndefined();
+    expect(row).not.toHaveProperty('openTdsCreditPaise');
+  });
+
   it('the engine’s whole-year due == the report’s deducted part, and deducted-so-far + this withholding == it', async () => {
     const d = empty();
     d.partners = [pan('p1', 'ABCDE1234F')];

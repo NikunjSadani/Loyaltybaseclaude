@@ -14,7 +14,7 @@
  *  5. Pending reversal requests shown for approval/rejection
  */
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { Fragment, useState, useRef, useCallback, useEffect } from 'react';
 import {
   Download,
   Upload,
@@ -31,7 +31,17 @@ import {
   RotateCcw,
   ThumbsUp,
   ThumbsDown,
+  Info,
 } from 'lucide-react';
+import { formatInrPaise } from '@/lib/money-format';
+import {
+  ENTRY_STATUS_TEXT,
+  PROCESSING_BLOCK_TEXT,
+  PAID_ENTRY_OUTCOME,
+  HELD_NOTICE,
+  TDS_CREDIT_NOTICE,
+  TDS_ADJUSTMENT_NOTICE,
+} from '@/lib/payout-reversal-copy';
 import { useAdminSession } from '@/lib/admin-session';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { downloadBlob } from '@/lib/download';
@@ -169,7 +179,160 @@ interface Reversal {
   requestedAt:    string;
   approvedAt?:    string;
   status:         string;
-  remarks?:       string;
+  /** What the approver / rejecter typed (D5). */
+  remarks?:       string | null;
+  /** What the requester typed when raising the reversal (D5). */
+  requestRemarks?: string | null;
+  /**
+   * WP5 — present only for a PAYOUT reversal raised under the V2 reversal engine (or SHADOW before 2026-11-16): the whole entries it
+   * holds (RESERVED while pending) or consumed. Absent for every LEGACY-engine reversal.
+   */
+  payoutEntries?: Array<{
+    payoutEntryId:   string;
+    /** Integer paise. */
+    amountPaise:     number;
+    allocationState: 'RESERVED' | 'APPLIED_CANCELLED' | 'APPLIED_RECEIVABLE' | 'RELEASED' | string;
+    entryStatus:     string;
+    tdsOffsetPaise?: number;
+    /** Approved receivable only: the net amount owed back (amount less the TDS withheld). */
+    receivablePaise?: number;
+    /** Approved receivable only: the withheld TDS carried as a TDS credit on the PAN. */
+    tdsCreditPaise?:  number;
+  }>;
+}
+
+/** GET /payout-downloads/latest-summary | /:id/summary — what the last bank file held back / adjusted (never silent). */
+interface PayoutDownloadSummary {
+  downloadId:   string;
+  downloadCode: string;
+  period:       string;
+  createdAt:    string;
+  reversalHeld: {
+    count: number;
+    paise: number;
+    entries: Array<{ entryId: string; outletId: string; outletName: string; fieldName: string; amountPaise: number; status: string; creditReversalId: string }>;
+  };
+  tdsCreditApplied: {
+    count: number;
+    paise: number;
+    lines: Array<{ entryId: string; outletId: string; outletName: string; duePaise: number; creditPaise: number; withheldPaise: number; otherProgrammePaise: number; panMasked: string; note: string }>;
+  };
+  tdsAdjustments?: {
+    count: number;
+    paise: number;
+    lines: Array<{ entryId: string; outletId: string; outletName: string; panMasked: string; handBackPaise: number; note: string }>;
+  };
+}
+
+/** The notices shown under "Generate & Download" — from the summary endpoint, or (fallback) the response headers. */
+interface DownloadNotices {
+  held:   { count: number; paise: number; entries: PayoutDownloadSummary['reversalHeld']['entries'] } | null;
+  credit: { count: number; paise: number; lines: PayoutDownloadSummary['tdsCreditApplied']['lines'] } | null;
+  adjust: { count: number; paise: number; lines: NonNullable<PayoutDownloadSummary['tdsAdjustments']>['lines'] } | null;
+}
+
+function isDownloadSummary(d: unknown): d is PayoutDownloadSummary {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
+  const s = d as Partial<PayoutDownloadSummary>;
+  return !!s.reversalHeld && typeof s.reversalHeld.count === 'number'
+    && !!s.tdsCreditApplied && typeof s.tdsCreditApplied.count === 'number';
+}
+
+function noticesFromSummary(s: PayoutDownloadSummary): DownloadNotices {
+  const arr = <T,>(v: T[] | undefined) => (Array.isArray(v) ? v : []);
+  return {
+    held: s.reversalHeld.count > 0
+      ? { count: s.reversalHeld.count, paise: Number(s.reversalHeld.paise) || 0, entries: arr(s.reversalHeld.entries) }
+      : null,
+    credit: s.tdsCreditApplied.count > 0
+      ? { count: s.tdsCreditApplied.count, paise: Number(s.tdsCreditApplied.paise) || 0, lines: arr(s.tdsCreditApplied.lines) }
+      : null,
+    adjust: s.tdsAdjustments && s.tdsAdjustments.count > 0
+      ? { count: s.tdsAdjustments.count, paise: Number(s.tdsAdjustments.paise) || 0, lines: arr(s.tdsAdjustments.lines) }
+      : null,
+  };
+}
+
+/** Secondary path only — the proxy may strip these headers. */
+function noticesFromHeaders(h: Headers | undefined): DownloadNotices {
+  const num = (name: string) => Number(h?.get?.(name) ?? 0) || 0;
+  const heldCount = num('X-Reversal-Held-Count');
+  const creditCount = num('X-Tds-Credit-Applied-Count');
+  const adjustCount = num('X-Tds-Adjustment-Count');
+  return {
+    held:   heldCount > 0 ? { count: heldCount, paise: num('X-Reversal-Held-Paise'), entries: [] } : null,
+    credit: creditCount > 0 ? { count: creditCount, paise: num('X-Tds-Credit-Applied-Paise'), lines: [] } : null,
+    adjust: adjustCount > 0 ? { count: adjustCount, paise: num('X-Tds-Adjustment-Paise'), lines: [] } : null,
+  };
+}
+
+/**
+ * The approve/reject result of a PAYOUT reversal (PATCH response `payoutOutcome`). Since policy round B
+ * (owner 2026-11-16) every tenant gets it — LEGACY included — with a server-written `headline` + `lines`
+ * ("Entry cancelled · ₹5,000 · will not be paid", "Recorded as owed · ₹9,800 · ₹200 TDS credit carried forward…").
+ */
+interface PayoutOutcome {
+  headline?:       string;
+  lines?:          Array<{ kind: string; entryId: string | null; text: string }>;
+  cancelled:       Array<{ entryId: string; amountPaise: number; wasStatus: string; tdsOffsetPaise: number; tdsNote: string }>;
+  receivable:      Array<{ entryId: string; amountPaise: number; receivablePaise?: number; tdsCreditPaise?: number; tdsNote: string }>;
+  receivablePaise: number;
+  tdsCreditPaise?: number;
+  released:        Array<{ entryId: string; amountPaise: number }>;
+}
+
+const rupees = formatInrPaise;
+
+function describePayoutOutcome(o: PayoutOutcome, rev?: { outletName: string; fieldName: string }): { title: string; lines: string[] } {
+  const who = rev ? ` — ${rev.outletName} / ${rev.fieldName}` : '';
+  // Server-written summary (every tenant since policy round B) — shown verbatim, one line per entry.
+  if (o.headline && Array.isArray(o.lines)) {
+    return {
+      title: `${o.headline}${who}`,
+      lines: [
+        ...o.lines.map((l) => l.text),
+        ...(o.receivablePaise > 0
+          ? [`Total recorded as owed ${rupees(o.receivablePaise)} — shown as "Pending" in Processed Reversals below.`]
+          : []),
+      ],
+    };
+  }
+  if (o.released.length > 0 && o.cancelled.length === 0 && o.receivable.length === 0) {
+    return {
+      title: `Reversal rejected${who}`,
+      lines: o.released.map((r) => `${rupees(r.amountPaise)} entry released — it goes into the next bank file again.`),
+    };
+  }
+  return {
+    title: `Reversal approved${who}`,
+    lines: [
+      ...o.cancelled.map((c) => `${rupees(c.amountPaise)} entry (${c.wasStatus === 'FAILED' ? 'bank payment had failed' : 'not yet sent to the bank'}) cancelled — ${c.tdsNote}.`),
+      ...o.receivable.map((r) => `${rupees(r.amountPaise)} entry was already PAID — recorded as a receivable to recover off-platform; ${r.tdsNote}.`),
+      ...(o.receivablePaise > 0
+        ? [`Total receivable ${rupees(o.receivablePaise)} — shown as "Pending" in Processed Reversals below.`]
+        : []),
+    ],
+  };
+}
+
+type ReversalEntry = NonNullable<Reversal['payoutEntries']>[number];
+
+/** What an approved / rejected reversal did to one of its entries (Processed Reversals — L1/L3/L5). */
+function processedEntryText(pe: ReversalEntry): string {
+  const amount = rupees(pe.amountPaise);
+  switch (pe.allocationState) {
+    case 'APPLIED_RECEIVABLE': {
+      const net = pe.receivablePaise ?? pe.amountPaise;
+      const withheld = pe.receivablePaise != null ? Math.max(0, pe.amountPaise - pe.receivablePaise) : 0;
+      return `${amount} entry (was paid) — ${PAID_ENTRY_OUTCOME(net, withheld, pe.tdsCreditPaise ?? 0)}`;
+    }
+    case 'APPLIED_CANCELLED':
+      return `${amount} entry — cancelled · will not be paid${(pe.tdsOffsetPaise ?? 0) > 0 ? ` · ${rupees(pe.tdsOffsetPaise ?? 0)} withheld TDS offset` : ''}`;
+    case 'RELEASED':
+      return `${amount} entry — released · goes into the next bank file`;
+    default:
+      return `${amount} entry — ${pe.allocationState}`;
+  }
 }
 
 interface Pagination {
@@ -180,6 +343,20 @@ interface Pagination {
 }
 
 const REV_PAGE_SIZE = 50;
+
+/** #18: info icon with an explanatory hover title + screen-reader text. */
+function InfoHint({ text }: { text: string }) {
+  return (
+    <span role="img" aria-label={text} title={text} className="flex-shrink-0 mt-0.5">
+      <Info className="w-3.5 h-3.5" aria-hidden />
+    </span>
+  );
+}
+
+/** #8: approval of a payout reversal waits while any held entry is with the bank (PROCESSING). */
+function hasProcessingEntry(rev: Reversal): boolean {
+  return (rev.payoutEntries ?? []).some((pe) => pe.entryStatus === 'PROCESSING');
+}
 
 // ─── Gate wrapper ─────────────────────────────────────────────────────────────
 
@@ -228,6 +405,24 @@ function PayoutPageInner() {
   const [heldNote, setHeldNote] = useState('');
   // A-L3: every payout fully withheld as TDS → the API created no bank file.
   const [noBankFileMsg, setNoBankFileMsg] = useState('');
+  // What the last bank file held back (pending reversals) or adjusted (TDS credit / TDS hand-back) — never silent.
+  // Read from the summary endpoint after each download; the response headers are only a fallback.
+  const [genNotices, setGenNotices] = useState<DownloadNotices | null>(null);
+  // #18: the notices belong to one period / group / field — a change clears them, and a late summary for an old
+  // scope is dropped.
+  const scopeKey = `${period}|${groupType}|${fieldId}`;
+  const scopeKeyRef = useRef(scopeKey);
+  useEffect(() => {
+    scopeKeyRef.current = scopeKey;
+    setGenNotices(null);
+  }, [scopeKey]);
+  // WP5: what approving / rejecting an engine payout reversal did (cancelled / receivable / TDS / released).
+  const [revOutcome, setRevOutcome] = useState<{ title: string; lines: string[] } | null>(null);
+  const revOutcomeRef = useRef<HTMLDivElement>(null);
+  // #20: move focus to the outcome summary once it appears.
+  useEffect(() => {
+    if (revOutcome) revOutcomeRef.current?.focus();
+  }, [revOutcome]);
 
   // UTR upload state
   const [utrDownloadId,  setUtrDownloadId]  = useState('');
@@ -245,6 +440,8 @@ function PayoutPageInner() {
     message?: string;
     /** OK rows the apply could not record — always shown in amber, never behind a green banner. */
     notApplied: UtrNotAppliedRow[];
+    /** Policy round B: TDS credit given back because the payout it covered failed (sent only when any). */
+    tdsCreditReleased: Array<{ entryId: string; amountPaise: number; note: string }>;
   } | null>(null);
   const [utrMsg,         setUtrMsg]         = useState('');
   const [expandedUtr,    setExpandedUtr]    = useState(false);
@@ -306,12 +503,34 @@ function PayoutPageInner() {
 
   // ─── Generate payout file ─────────────────────────────────────────────────
 
+  /** The summary of the download just made: by id when the header is readable, else the caller's latest for the scope. */
+  async function fetchDownloadSummary(downloadId: string | null, body: Record<string, unknown>): Promise<PayoutDownloadSummary | null> {
+    const read = async (url: string): Promise<PayoutDownloadSummary | null> => {
+      try {
+        const res  = await fetch(url);
+        const json = await res.json();
+        return json?.success && isDownloadSummary(json.data) ? json.data : null;
+      } catch {
+        return null;
+      }
+    };
+    if (downloadId) {
+      const byId = await read(`/api/admin/credits/payout-downloads/${encodeURIComponent(downloadId)}/summary`);
+      if (byId) return byId;
+    }
+    const q = new URLSearchParams({ period: String(body.period), groupType: String(body.groupType) });
+    if (body.fieldId) q.set('fieldId', String(body.fieldId));
+    return read(`/api/admin/credits/payout-downloads/latest-summary?${q.toString()}`);
+  }
+
   async function handleGeneratePayoutFile() {
     setGenerating(true);
     setGenError('');
     setFullyWithheldNote('');
     setHeldNote('');
     setNoBankFileMsg('');
+    setGenNotices(null);
+    const key = scopeKey;
     try {
       const body: Record<string, unknown> = { period, groupType };
       if (groupType === 'SEPARATE' && fieldId) {
@@ -334,9 +553,12 @@ function PayoutPageInner() {
 
       // A-L3: when EVERY payout was fully withheld as TDS the API answers JSON (no file) with the reason.
       const isJson = (res.headers?.get?.('Content-Type') ?? '').includes('application/json');
+      const headerNotices = noticesFromHeaders(res.headers);
+      let downloadId = res.headers?.get?.('X-Download-Id') ?? null;
       if (isJson) {
         const json = await res.json().catch(() => null);
         setNoBankFileMsg(json?.data?.message ?? json?.message ?? 'No bank file was created for this run.');
+        downloadId = downloadId ?? json?.data?.downloadId ?? json?.downloadId ?? null;
       } else {
         // B-L2: save the file FIRST — reading the notice headers can never block or break the download.
         const blob = await res.blob();
@@ -357,6 +579,11 @@ function PayoutPageInner() {
       }
 
       loadAll();
+
+      // WRE #1: what this file held back / adjusted — from the summary endpoint (headers may be stripped by the proxy).
+      const summary = await fetchDownloadSummary(downloadId, body);
+      if (scopeKeyRef.current !== key) return; // the operator moved to another period / group / field
+      setGenNotices(summary ? noticesFromSummary(summary) : headerNotices);
     } catch {
       // B-L1: the request was cut (network / proxy timeout) — the file may or may not exist server-side.
       setGenError(
@@ -461,6 +688,7 @@ function PayoutPageInner() {
         noop,
         message: serverMsg,
         notApplied: readNotApplied(json.data?.notApplied),
+        tdsCreditReleased: Array.isArray(json.data?.tdsCreditReleased) ? json.data.tdsCreditReleased : [],
       });
       setUtrMsg(
         noop
@@ -487,32 +715,46 @@ function PayoutPageInner() {
 
   async function handleReversalAction() {
     if (!revAction) return;
+    const actionRev = reversals.find((r) => r.id === revAction.id);
+    if (revAction.action === 'approve' && actionRev && hasProcessingEntry(actionRev)) {
+      setRevMsg(PROCESSING_BLOCK_TEXT);
+      return;
+    }
     setRevLoading(true);
     setRevMsg('');
+    setRevOutcome(null); // #16: never leave the previous decision's summary on screen
 
     const body: Record<string, unknown> = { action: revAction.action };
-    const actionRev = reversals.find((r) => r.id === revAction.id);
     // PAYOUT reversals are approved in full (whole payout entries) — no amount is sent.
     if (revAction.action === 'approve' && revAmount && actionRev?.awardType !== 'PAYOUT') {
       body.approvedPaise = Number(revAmount);
     }
-    if (revRemarks) body.remarks = revRemarks;
+    // D5: the approver's / rejecter's typed note is sent for every tenant (owner-approved platform-wide).
+    const remarks = revRemarks.trim();
+    if (remarks) body.remarks = remarks;
 
-    const res  = await fetch(`/api/admin/credits/reversals/${revAction.id}`, {
-      method:  'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
-    });
-    const json = await res.json();
-    setRevLoading(false);
+    try {
+      const res  = await fetch(`/api/admin/credits/reversals/${revAction.id}`, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(body),
+      });
+      const json = await res.json().catch(() => null);
 
-    if (!json.success) {
-      setRevMsg(json.error ?? 'Failed to process reversal');
-    } else {
-      setRevAction(null);
-      setRevAmount('');
-      setRevRemarks('');
-      loadAll();
+      if (!json?.success) {
+        setRevMsg(json?.error ?? `Failed to process reversal (HTTP ${res.status})`);
+      } else {
+        const o = json.data?.payoutOutcome as PayoutOutcome | undefined;
+        setRevOutcome(o ? describePayoutOutcome(o, actionRev) : null);
+        setRevAction(null);
+        setRevAmount('');
+        setRevRemarks('');
+        loadAll();
+      }
+    } catch (e) {
+      setRevMsg(`Couldn't reach the server — refresh to check whether the reversal was processed before trying again. (${String(e)})`);
+    } finally {
+      setRevLoading(false);
     }
   }
 
@@ -639,6 +881,67 @@ function PayoutPageInner() {
           </div>
         )}
 
+        {genNotices?.held && (
+          <div role="status" data-testid="reversal-held-notice" className="flex items-start gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" aria-hidden />
+            <div className="min-w-0 space-y-1">
+              <p>{HELD_NOTICE(genNotices.held.count, genNotices.held.paise)}</p>
+              {genNotices.held.entries.length > 0 && (
+                <ul className="max-h-40 overflow-auto list-disc pl-4 space-y-0.5">
+                  {genNotices.held.entries.map((e) => (
+                    <li key={e.entryId}>
+                      {e.outletName} ({e.outletId}) · {e.fieldName} · {rupees(e.amountPaise)}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
+
+        {genNotices?.credit && (
+          <div role="status" data-testid="tds-credit-applied-notice" className="flex items-start gap-2 text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+            <InfoHint text="TDS credit: TDS already deposited for a reversed payout on the same PAN is used before withholding new TDS" />
+            <div className="min-w-0 space-y-1">
+              <p>{TDS_CREDIT_NOTICE(genNotices.credit.count, genNotices.credit.paise)}</p>
+              {genNotices.credit.lines.length > 0 && (
+                <ul className="max-h-40 overflow-auto list-disc pl-4 space-y-0.5">
+                  {genNotices.credit.lines.map((l) => (
+                    <li key={l.entryId}>
+                      {l.outletName} · PAN {l.panMasked} · {rupees(l.creditPaise)} credit used
+                      {l.otherProgrammePaise > 0 && (
+                        <span className="ml-1 inline-block rounded bg-blue-100 px-1.5 text-[10px] font-medium">
+                          another programme · {rupees(l.otherProgrammePaise)}
+                        </span>
+                      )}
+                      {l.note && <span className="block text-blue-700">{l.note}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
+
+        {genNotices?.adjust && (
+          <div role="status" data-testid="tds-adjustment-notice" className="flex items-start gap-2 text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+            <InfoHint text="TDS adjustment: a reversal brought the PAN below the TDS limit, so TDS already deducted is handed back" />
+            <div className="min-w-0 space-y-1">
+              <p>{TDS_ADJUSTMENT_NOTICE(genNotices.adjust.count, genNotices.adjust.paise)}</p>
+              {genNotices.adjust.lines.length > 0 && (
+                <ul className="max-h-40 overflow-auto list-disc pl-4 space-y-0.5">
+                  {genNotices.adjust.lines.map((l) => (
+                    <li key={l.entryId}>
+                      {l.outletName} · PAN {l.panMasked} · {rupees(l.handBackPaise)} handed back
+                      {l.note && <span className="block text-blue-700">{l.note}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
+
         {genError && (
           <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 rounded-xl px-4 py-3">
             <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
@@ -661,7 +964,7 @@ function PayoutPageInner() {
                   </div>
                   <div className="flex items-center gap-3">
                     {/* totalAmountPaise is integer paise; divide by 100 for human display */}
-                    <span className="text-gray-600">₹{(Number(d.totalAmountPaise) / 100).toLocaleString('en-IN')}</span>
+                    <span className="text-gray-600">{rupees(d.totalAmountPaise)}</span>
                     <span className={`px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[d.status] ?? 'bg-gray-100 text-gray-600'}`}>
                       {d.status}
                     </span>
@@ -912,6 +1215,15 @@ function PayoutPageInner() {
               </div>
             )}
 
+            {utrApplied && utrApplyResult && utrApplyResult.tdsCreditReleased.length > 0 && (
+              <div role="status" data-testid="utr-tds-credit-released" className="rounded-xl p-4 border bg-blue-50 border-blue-200 space-y-1 text-xs text-blue-800">
+                <p className="text-sm font-semibold">TDS credit returned</p>
+                <ul className="list-disc pl-5 space-y-0.5">
+                  {utrApplyResult.tdsCreditReleased.map((r) => <li key={r.entryId}>{r.note}</li>)}
+                </ul>
+              </div>
+            )}
+
             {utrApplied && utrApplyResult?.noop && (
               // Nothing changed (every row was already applied) — a neutral note with the server's own
               // message, never the green "UTR results applied · 0 paid · 0 failed · N skipped" banner.
@@ -974,6 +1286,24 @@ function PayoutPageInner() {
           )}
         </h3>
 
+        {revOutcome && (
+          <div
+            ref={revOutcomeRef}
+            tabIndex={-1}
+            role="status"
+            data-testid="reversal-outcome"
+            className="text-xs text-gray-800 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 space-y-1 focus:outline-none focus:ring-2 focus:ring-blue-300"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <p className="font-semibold">{revOutcome.title}</p>
+              <button onClick={() => setRevOutcome(null)} className="text-gray-500 hover:text-gray-800" aria-label="Dismiss">×</button>
+            </div>
+            <ul className="list-disc pl-4 space-y-0.5">
+              {revOutcome.lines.map((l, i) => <li key={i}>{l}</li>)}
+            </ul>
+          </div>
+        )}
+
         {reversals.length === 0 ? (
           <p className="text-xs text-gray-400 text-center py-4">No pending reversal requests.</p>
         ) : (
@@ -1002,8 +1332,7 @@ function PayoutPageInner() {
                     <p className="text-gray-500">Requested Amount</p>
                     <p className="font-medium text-gray-800">
                       {rev.awardType === 'PAYOUT'
-                        // requestedPaise is integer paise; divide by 100 for human display
-                        ? `₹${(Number(rev.requestedPaise) / 100).toLocaleString('en-IN')}`
+                        ? rupees(rev.requestedPaise)
                         : `${Number(rev.requestedPaise).toLocaleString('en-IN')} pts`}
                     </p>
                   </div>
@@ -1013,6 +1342,42 @@ function PayoutPageInner() {
                   </div>
                 </div>
 
+                {rev.requestRemarks && (
+                  <p className="text-xs text-gray-700 break-words" data-testid={`request-remarks-${rev.id}`}>
+                    <span className="text-gray-500">Requester&apos;s note:</span> {rev.requestRemarks}
+                  </p>
+                )}
+
+                {rev.payoutEntries && rev.payoutEntries.length > 0 && (
+                  <div className="text-xs" data-testid={`held-entries-${rev.id}`}>
+                    <p className="text-gray-500">
+                      Payout entries held for this request (kept out of bank files) · {rev.payoutEntries.length}{' '}
+                      {rev.payoutEntries.length === 1 ? 'entry' : 'entries'}
+                    </p>
+                    <ul className="mt-1 space-y-0.5 max-h-40 overflow-auto pr-1">
+                      {rev.payoutEntries.map((pe) => (
+                        <li key={pe.payoutEntryId} className="text-gray-800">
+                          <span className="font-medium">{rupees(pe.amountPaise)}</span>
+                          {' — '}
+                          <span className="text-gray-600">{ENTRY_STATUS_TEXT[pe.entryStatus] ?? pe.entryStatus}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {hasProcessingEntry(rev) && (
+                  <p
+                    role="note"
+                    id={`processing-block-${rev.id}`}
+                    data-testid={`processing-block-${rev.id}`}
+                    className="flex items-start gap-1.5 text-xs text-amber-800"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" aria-hidden />
+                    {PROCESSING_BLOCK_TEXT}
+                  </p>
+                )}
+
                 {revAction?.id === rev.id ? (
                   <div className="bg-white rounded-xl p-3 space-y-3 border border-gray-200">
                     <p className="text-xs font-semibold text-gray-800 capitalize">{revAction.action} Reversal</p>
@@ -1021,7 +1386,7 @@ function PayoutPageInner() {
                       // when it was raised, so a payout reversal is approved in full or rejected.
                       <p className="text-xs text-gray-600">
                         Payout reversals are approved for the full requested amount (
-                        {`₹${(Number(rev.requestedPaise) / 100).toLocaleString('en-IN')}`}) — whole payout entries only.
+                        {rupees(rev.requestedPaise)}) — whole payout entries only.
                         Unpaid entries are cancelled; an already-paid entry becomes a receivable to recover off-platform.
                         To change the amount, reject this request and raise a new one.
                       </p>
@@ -1043,19 +1408,22 @@ function PayoutPageInner() {
                       </div>
                     )}
                     <div className="space-y-1">
-                      <label className="text-xs text-gray-600">Remarks (optional)</label>
+                      <label htmlFor={`rev-remarks-${rev.id}`} className="text-xs text-gray-600">Remarks (optional)</label>
                       <input
+                        id={`rev-remarks-${rev.id}`}
                         type="text"
                         value={revRemarks}
                         onChange={(e) => setRevRemarks(e.target.value)}
+                        maxLength={1000}
                         className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none"
                       />
                     </div>
-                    {revMsg && <p className="text-xs text-red-600">{revMsg}</p>}
+                    {revMsg && <p role="alert" className="text-xs text-red-600">{revMsg}</p>}
                     <div className="flex gap-2">
                       <button
                         onClick={handleReversalAction}
-                        disabled={revLoading}
+                        disabled={revLoading || (revAction.action === 'approve' && hasProcessingEntry(rev))}
+                        aria-describedby={revAction.action === 'approve' && hasProcessingEntry(rev) ? `processing-block-${rev.id}` : undefined}
                         className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white rounded-lg disabled:opacity-50
                           ${revAction.action === 'approve' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-red-600 hover:bg-red-700'}`}
                       >
@@ -1073,7 +1441,10 @@ function PayoutPageInner() {
                   <div className="flex gap-2">
                     <button
                       onClick={() => { setRevAction({ id: rev.id, action: 'approve' }); setRevAmount(''); setRevRemarks(''); setRevMsg(''); }}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded-lg hover:bg-emerald-700"
+                      disabled={hasProcessingEntry(rev)}
+                      aria-describedby={hasProcessingEntry(rev) ? `processing-block-${rev.id}` : undefined}
+                      title={hasProcessingEntry(rev) ? PROCESSING_BLOCK_TEXT : undefined}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <ThumbsUp className="w-3.5 h-3.5" />
                       Approve
@@ -1162,9 +1533,12 @@ function PayoutPageInner() {
                   const pending  = Number(rev.shortfallPaise ?? 0);
                   const reversed = supposed - pending;
                   const fmt = (v: number) =>
-                    isPayout ? `₹${(v / 100).toLocaleString('en-IN')}` : `${v.toLocaleString('en-IN')} pts`;
+                    isPayout ? rupees(v) : `${v.toLocaleString('en-IN')} pts`;
+                  const entries = rev.payoutEntries ?? [];
+                  const hasDetails = entries.length > 0 || !!rev.requestRemarks || !!rev.remarks;
                   return (
-                    <tr key={rev.id} className="border-b border-gray-100">
+                    <Fragment key={rev.id}>
+                    <tr className={hasDetails ? '' : 'border-b border-gray-100'}>
                       <td className="py-2 pr-3">
                         <span className="font-medium text-gray-800">{rev.outletName}</span>
                         <span className="block text-gray-400 font-mono">{rev.outletId}</span>
@@ -1184,6 +1558,26 @@ function PayoutPageInner() {
                         {rev.approvedAt ? new Date(rev.approvedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}
                       </td>
                     </tr>
+                    {hasDetails && (
+                      <tr className="border-b border-gray-100" data-testid={`processed-details-${rev.id}`}>
+                        <td colSpan={7} className="pb-2 pr-3 text-gray-600 space-y-0.5">
+                          {rev.requestRemarks && (
+                            <p className="break-words"><span className="text-gray-400">Requester&apos;s note:</span> {rev.requestRemarks}</p>
+                          )}
+                          {rev.remarks && (
+                            <p className="break-words"><span className="text-gray-400">Decision note:</span> {rev.remarks}</p>
+                          )}
+                          {entries.length > 0 && (
+                            <ul className="list-disc pl-4 space-y-0.5 max-h-40 overflow-auto">
+                              {entries.map((pe) => (
+                                <li key={pe.payoutEntryId}>{processedEntryText(pe)}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>
