@@ -977,6 +977,38 @@ describe('fix round A — L3 / L4 lock order and mode reads under the engine loc
     expect(legacy.T.rawSql.some((q: string) => q.includes('FOR UPDATE OF w'))).toBe(false);
   });
 
+  it('re-audit B8: a V2 / SHADOW confirm creates the MISSING wallets in ascending partnerId order before crediting any row; LEGACY keeps its CSV-order get-or-create', async () => {
+    const csv = [{ outlet: 'O3', amount: 10 }, { outlet: 'O1', amount: 5 }, { outlet: 'O2', amount: 7 }];
+    const outlets = { O3: 'cp3', O1: 'cp1', O2: 'cp2' };
+    /** The order wallets were created and rows credited, as one event log. */
+    const trace = (h: ReturnType<typeof world>) => {
+      const log: string[] = [];
+      const wPush = h.T.wallets.push.bind(h.T.wallets);
+      h.T.wallets.push = (...rows: Row[]) => {
+        rows.forEach((r) => log.push(`wallet:${r.partnerId}`));
+        return wPush(...rows);
+      };
+      const tPush = h.T.walletTxns.push.bind(h.T.walletTxns);
+      h.T.walletTxns.push = (...rows: Row[]) => {
+        rows.forEach((r) => log.push(`credit:${h.T.wallets.find((w) => w.id === r.walletId)?.partnerId}`));
+        return tPush(...rows);
+      };
+      return log;
+    };
+    for (const mode of ['V2', 'SHADOW'] as const) {
+      const h = world({ mode, outlets, partners: ['cp1', 'cp2', 'cp3'] });
+      const log = trace(h);
+      await h.confirm(`B8-${mode}`, csv);
+      // every missing wallet first, ascending partnerId; then the credits in CSV order
+      expect(log).toEqual(['wallet:cp1', 'wallet:cp2', 'wallet:cp3', 'credit:cp3', 'credit:cp1', 'credit:cp2']);
+    }
+    const legacy = world({ mode: 'LEGACY', outlets, partners: ['cp1', 'cp2', 'cp3'] });
+    const legacyLog = trace(legacy);
+    await legacy.confirm('B8-LEGACY', csv);
+    // LEGACY unchanged: get-or-create + credit row by row in CSV order
+    expect(legacyLog).toEqual(['wallet:cp3', 'credit:cp3', 'wallet:cp1', 'credit:cp1', 'wallet:cp2', 'credit:cp2']);
+  });
+
   it('L4: a POINTS confirm takes the SHARED engine lock as its first statement and reads the mode inside the tx; a PAYOUT-only one does neither', async () => {
     const h = world({ mode: 'LEGACY', outlets: { O1: 'cp1' } });
     h.T.rawSql.length = 0;
