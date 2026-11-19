@@ -53,6 +53,19 @@ Object.defineProperty(globalThis.HTMLVideoElement.prototype, 'pause', {
 // jsdom does not implement scrollIntoView — stub it
 Element.prototype.scrollIntoView = vi.fn();
 
+// jsdom does not implement URL.createObjectURL / revokeObjectURL. Tests stub them per file
+// (vi.stubGlobal('URL', …)) and unstub in afterEach, but src/lib/download.ts revokes the blob URL
+// in a 1 s setTimeout — under full-suite load that timer fires AFTER the unstub and threw an
+// uncaught "URL.revokeObjectURL is not a function" (failed the 2026-11-19 pre-push gate with all
+// tests green). Real no-op fallbacks on jsdom's own URL make that late call harmless; per-file stubs
+// still override them while a test runs.
+if (typeof URL.createObjectURL !== 'function') {
+  Object.defineProperty(URL, 'createObjectURL', { value: () => 'blob:jsdom-fallback', configurable: true, writable: true });
+}
+if (typeof URL.revokeObjectURL !== 'function') {
+  Object.defineProperty(URL, 'revokeObjectURL', { value: () => undefined, configurable: true, writable: true });
+}
+
 Object.defineProperty(globalThis.navigator, 'geolocation', {
   value: { getCurrentPosition: vi.fn(), watchPosition: vi.fn(), clearWatch: vi.fn() },
   configurable: true,
