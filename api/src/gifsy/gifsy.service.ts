@@ -142,6 +142,8 @@ function consoleFeatures(features: Record<string, unknown>) {
     allowPayoutWithoutPan: !!features.allowPayoutWithoutPan,
     // Bajaj: a KYC resubmitted after a GIFSY rejection (post-manager-approval) skips the managers.
     gifsyRejectFastTrack: !!features.gifsyRejectFastTrack,
+    // "No location, no use" for sales-rep KYC + visibility capture (LOCATION-GATE.md). Default OFF.
+    requireLocation: !!features.requireLocation,
     partnerApp,
   };
 }
@@ -156,7 +158,7 @@ const BOOLEAN_FEATURE_KEYS = [
   'referralModule', 'selfEnrollmentAllowed', 'nonKycOutletCampaigns', 'multiLevelApproval', 'rbacEnforcement',
   'hubbleVoucherEnabled', 'rlpBscView', 'catalogueMrpSlash', 'partnerDashboardV2', 'captureBankAtRedemption',
   'offerTiles', 'salesImport', 'outletMasterGeo', 'soDeclarationKyc', 'kycAddressProofWaiver',
-  'allowPayoutWithoutPan', 'gifsyRejectFastTrack',
+  'allowPayoutWithoutPan', 'gifsyRejectFastTrack', 'requireLocation',
 ] as const;
 
 /**

@@ -43,6 +43,8 @@ import {
 import { VisibilityCaptureForm } from '@/components/visibility/VisibilityCaptureForm';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { usePreciseGpsPreWarm } from '@/lib/use-precise-gps';
+import { useLocationGate } from '@/lib/use-location-gate';
+import { LocationGatePanel } from '@/components/location/LocationGatePanel';
 
 /** Human labels for the non-blocking server flags surfaced on a successful capture. */
 const FLAG_LABELS: Record<string, string> = {
@@ -70,8 +72,12 @@ export function VisibilityCaptureSheet({
   const [view, setView] = useState<View>('form');
   // Geo-fence tenants (Bajaj, features.outletMasterGeo) use the timed high-accuracy acquire for
   // each photo's GPS fix; every other tenant (Deoleo) keeps the single getCurrentPosition call.
-  const { features } = useTenantFeatures('/api/sales/me');
+  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
   const preciseGps = features.outletMasterGeo;
+  // LOCATION GATE (features.requireLocation; docs/plans/LOCATION-GATE.md). OFF (Deoleo, every other tenant) → the hook
+  // does nothing. ON → the capture form stays hidden behind the location guide until location is allowed AND a fix
+  // arrives; submit re-checks first. The form stays MOUNTED while hidden, so photos already taken are kept.
+  const locationGate = useLocationGate(features.requireLocation && !featuresLoading);
   // PRE-WARM: start the high-accuracy GPS watch as soon as the sheet opens (geo-fence tenants
   // only) so a precise fix is usually already in hand when the rep captures a photo.
   const gpsWatch = usePreciseGpsPreWarm(preciseGps);
@@ -133,6 +139,10 @@ export function VisibilityCaptureSheet({
   const handleSubmit = async (formValues: Record<string, unknown>) => {
     setSubmitting(true);
     try {
+      if (locationGate.enabled && !(await locationGate.recheck({ quiet: true }))) {
+        // The guide replaces the form; this message waits under the form for when the rep comes back.
+        throw new Error('Location is needed to submit. Follow the location steps, then submit again.');
+      }
       const res = isResubmit
         ? await visibilityApi.resubmitCapture(outlet.captureId as string, { formValues })
         : await visibilityApi.submitCapture({ outletId: outlet.outletId, formValues });
@@ -203,6 +213,10 @@ export function VisibilityCaptureSheet({
               </div>
             )}
 
+            {locationGate.blocking && (
+              <LocationGatePanel gate={locationGate} purpose="capture visibility" className="mb-4" />
+            )}
+            <div hidden={locationGate.blocking} data-testid="visibility-form-area">
             {loadError ? (
               // OUTAGE — the load failed. Distinct from "nothing configured": offer a retry.
               <div
@@ -252,8 +266,11 @@ export function VisibilityCaptureSheet({
                 // consuming the pre-warmed watch started when the sheet opened.
                 preciseGps={preciseGps}
                 gpsWatch={gpsWatch}
+                // Location gate: a photo without a fix is not kept (requireLocation tenants only).
+                requireLocation={locationGate.enabled}
               />
             )}
+            </div>
           </div>
         )}
 

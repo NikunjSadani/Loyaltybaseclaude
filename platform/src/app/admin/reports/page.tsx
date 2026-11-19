@@ -42,6 +42,7 @@ const reports: ReportConfig[] = [
   // Engagement
   { id: 'session-report', name: 'Session Report', description: 'Per-user portal usage: last login plus active-day counts for each of the last 12 months and the current month. "Active" = a day the user actually used the app (not a login).', category: 'engagement', endpoint: '/api/reports/session-report', href: '/admin/reports/session', filters: [] },
   { id: 'usage-report', name: 'Usage Report', description: 'Per-user usage for a date range: days active, visits, minutes in the app (a minimum), installed app vs browser, and phone vs computer. Filter by role, programme and region; optionally list users who did not use it.', category: 'engagement', endpoint: '/api/reports/usage', href: '/admin/reports/usage', filters: [] },
+  { id: 'location-compliance', name: 'Location Report', description: 'Per sales rep for a date range: KYCs and visibility captures, how many had no GPS, accuracy worse than 50 m, were unverifiable or were blocked outside the 200 m fence, plus median accuracy and KYC lock time. Filter by role and region.', category: 'engagement', endpoint: '/api/reports/location-compliance', href: '/admin/reports/location', filters: [] },
 ]
 
 const categoryLabels = {

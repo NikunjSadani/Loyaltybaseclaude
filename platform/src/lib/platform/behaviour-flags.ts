@@ -10,7 +10,7 @@
  */
 import type { FeatureFlags } from './client-config';
 
-export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan' | 'gifsyRejectFastTrack'>;
+export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan' | 'gifsyRejectFastTrack' | 'requireLocation'>;
 
 export interface BehaviourFlagMeta {
   label: string;
@@ -63,6 +63,22 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = 
         'SO Declaration KYCs always go through managers.',
       ],
       confirmLabel: 'Yes, send resubmissions straight to GIFSY',
+    },
+  },
+  requireLocation: {
+    label: 'Require location for KYC and visibility capture',
+    description:
+      "Sales reps can't start or submit a KYC or a visibility capture until location is allowed for the site AND the phone gets a GPS fix. Submissions without a location are also refused by the server. The rest of the sales app is unaffected.",
+    // It blocks field work for reps whose phones can't get a fix — confirm before switching ON (OFF never asks).
+    confirmOn: {
+      title: 'Require location for KYC and visibility capture?',
+      points: [
+        "Reps can't start or submit a KYC or visibility capture without location allowed for the site and a GPS fix.",
+        'They see a step-by-step guide for their phone (Android Chrome, iPhone Safari, installed app) with a "Test again" button.',
+        'An old app or page that sends no location is refused by the server too.',
+        'Refusals for being more than 200 m from the outlet are recorded for the Location report.',
+      ],
+      confirmLabel: 'Yes, require location',
     },
   },
 };

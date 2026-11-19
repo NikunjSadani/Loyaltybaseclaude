@@ -106,7 +106,17 @@ export interface VisibilityCaptureFormProps {
    * `preciseGps`; when absent the component does a fresh one-shot acquire instead.
    */
   gpsWatch?: PreciseWatchHandle | null;
+  /**
+   * LOCATION GATE (tenant `features.requireLocation`; docs/plans/LOCATION-GATE.md): when true a location-tagged photo
+   * taken WITHOUT a fix is not kept (the rep is told to turn location on and retake), and a submit-time GPS fill that
+   * gets no fix stops the submit. False/undefined (Deoleo, every other tenant) → unchanged: no fix = saved + flagged.
+   */
+  requireLocation?: boolean;
 }
+
+/** Shown when a photo / submit had no location on a requireLocation tenant. */
+export const LOCATION_REQUIRED_PHOTO_MESSAGE =
+  'No location was captured — location is required here. Turn on location for this site and the phone, then retake.';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Client-side image compression (best-practice #4)
@@ -214,6 +224,7 @@ export function VisibilityCaptureForm({
   partialRecapture = false,
   preciseGps = false,
   gpsWatch = null,
+  requireLocation = false,
 }: VisibilityCaptureFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>(() => ({ ...(initialValues ?? {}) }));
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -362,6 +373,10 @@ export function VisibilityCaptureForm({
       const fix = await captureGps();
       if (fix) {
         for (const f of gpsToFill) if (working[f.id] == null) working[f.id] = fix;
+      } else if (requireLocation && gpsToFill.some((f) => working[f.id] == null)) {
+        // Location gate: no fix → nothing is sent (the server would refuse it anyway).
+        setSubmitError(LOCATION_REQUIRED_PHOTO_MESSAGE);
+        return;
       }
     }
 
@@ -398,7 +413,7 @@ export function VisibilityCaptureForm({
     } finally {
       setBusy(false);
     }
-  }, [values, fields, schema, captureGps, onSubmit, reservedValues, partial, rejectedIds]);
+  }, [values, fields, schema, captureGps, onSubmit, reservedValues, partial, rejectedIds, requireLocation]);
 
   // Block submit while ANY field is still uploading (L2): an optional CAMERA photo mid-
   // upload would otherwise be silently omitted from formValues by a submit that races it.
@@ -447,6 +462,7 @@ export function VisibilityCaptureForm({
                   uploadFile={uploadFile}
                   captureGps={captureGps}
                   preciseGps={preciseGps}
+                  requireLocation={requireLocation}
                 />
               </div>
             );
@@ -464,6 +480,7 @@ export function VisibilityCaptureForm({
             uploadFile={uploadFile}
             captureGps={captureGps}
             preciseGps={preciseGps}
+            requireLocation={requireLocation}
           />
         );
       })}
@@ -526,6 +543,8 @@ interface FieldRendererProps {
   captureGps: () => Promise<GpsCapture | null>;
   /** Geo-fence tenants (Bajaj): drives the "Getting a precise location…" capture label. */
   preciseGps: boolean;
+  /** Location gate: a location-tagged photo without a fix is not kept. */
+  requireLocation?: boolean;
 }
 
 function FieldRenderer(props: FieldRendererProps) {
@@ -685,7 +704,7 @@ function Labeled({
 
 // ── Camera field (native rear-camera, instruction + sample thumbnail, D9/D16) ──
 
-function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, req }: FieldRendererProps & { req: boolean }) {
+function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, requireLocation = false, req }: FieldRendererProps & { req: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   // Read back through readMediaValue so BOTH a legacy bare-key string and a per-photo
   // `{ key, geo }` value resolve to the same shape (full backward-compat).
@@ -734,6 +753,11 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
           captureGps(),
         ]);
         if (!uploadedKey) return; // upload failed — error already surfaced (submitError)
+        // Location gate (requireLocation tenants only): a location-tagged photo with NO fix is not kept.
+        if (!fix && requireLocation) {
+          setCapError(LOCATION_REQUIRED_PHOTO_MESSAGE);
+          return; // photo NOT stored → the rep retakes once location works
+        }
         // D2 accuracy cap: a PRESENT-but-too-imprecise fix rejects the shot. A missing fix
         // (denied / timed out) does NOT block — store `{ key }` and let the backend flag it
         // (geo-fence unverifiable).

@@ -418,6 +418,7 @@ const SECTION_KEYS: Array<[keyof TenantDigest, string]> = [
   ['payouts', 'Payouts'],
   ['messages', 'Messages'],
   ['visibility', 'Visibility'],
+  ['location', 'Location'],
   ['salesImport', 'Sales Import'],
   ['billing', 'Billing progress'],
   // A failed TDS (194R excess) section makes the run DEGRADED like any other section.
@@ -707,6 +708,23 @@ function tenantSections(t: TenantDigest): string {
           ['approved', intIN(v.approved)],
           ['rejected', intIN(v.rejected)],
         ]) + metricLine('Right now', [['pending review', intIN(v.pending), accentIf(v.pending, 'amber')]]),
+    ),
+    // Location compliance (LOCATION-GATE.md): only for a tenant with "Require location" ON or with any capture.
+    renderSection(
+      'Location',
+      t.location,
+      (l) => !l.requireLocation && l.kycs === 0 && l.captures === 0 && l.blockedOutside === 0,
+      (l) =>
+        (l.requireLocation ? note('"Require location" is ON — reps cannot start or submit a KYC or visibility capture without a location fix.') : '') +
+        metricLine('In window', [
+          ['KYCs', intIN(l.kycs)],
+          ['visibility captures', intIN(l.captures)],
+          ['without GPS', intIN(l.noGps), accentIf(l.noGps, 'amber')],
+          ['accuracy worse than 50 m', intIN(l.poorAccuracy), accentIf(l.poorAccuracy, 'amber')],
+          ...(l.requireLocation || l.blockedOutside > 0
+            ? ([['blocked outside the 200 m fence', intIN(l.blockedOutside), accentIf(l.blockedOutside, 'amber')]] as Array<[string, string, ('red' | 'amber')?]>)
+            : []),
+        ]),
     ),
     renderSection(
       'Sales Import',

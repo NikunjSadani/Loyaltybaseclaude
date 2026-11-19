@@ -334,3 +334,13 @@ and the Performance trend (`GET /partner/targets/trend`).
   average" from Feb 2027, plus "outlets billing slower than usual" (below 80% of their own last-month pace).
 - Sales history keeps programme outlets only, 4 months; import files 7 days — the deletion rules ship OFF
   (`SALES_RETENTION_V2`) and are switched on via `SALES-IMPORT-PIPELINE-PLAN.md` §17b. Decision log F15.
+
+## 14. Location gate — flag `requireLocation` (2026-11-18; built on `feat/location-gate`, not deployed)
+- Gifsy console → Clients → Bajaj → **Behaviour flags** → "Require location for KYC and visibility capture" (confirm
+  dialog). Default OFF for every tenant; Deoleo OFF. Owner switches it ON for Bajaj (staging first, then prod) after the
+  release — Claude does not write the flag.
+- ON: a sales rep can't start or submit a KYC / visibility capture until location is allowed for the site AND the phone
+  gets a fix (phone-specific guide + Test again); the API refuses fix-less submissions; "outside the 200 m fence"
+  refusals are recorded for the Location Report. Independent of `outletMasterGeo` (the 200 m fence).
+- Location Report `/admin/reports/location` (all tenants) + Daily Ops Digest "Location" line. Detail:
+  `LOCATION-GATE.md`.

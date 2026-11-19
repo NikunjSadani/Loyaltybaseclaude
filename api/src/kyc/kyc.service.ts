@@ -28,6 +28,11 @@ import { captureOtpDeliveryHandle } from '../notifications/otp-delivery';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
+import {
+  isLocationRequiredFor,
+  LOCATION_REQUIRED_KYC_MESSAGE,
+  recordFenceBlock,
+} from '../common/location-gate.helper';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
@@ -1911,6 +1916,13 @@ export class KycService {
     });
     const outletMasterGeoEnabled =
       (geoClient?.features as Record<string, unknown> | null)?.outletMasterGeo === true;
+    // ── LOCATION GATE ("no location, no use" — features.requireLocation, sales reps only; LOCATION-GATE.md) ──
+    // OFF (default, every tenant incl. Deoleo) → nothing here runs. ON → a rep's KYC without a valid board-photo
+    // GPS fix is refused before any write (the phone gate blocks it first; this stops an old page / crafted call).
+    const locationRequired = isLocationRequiredFor(geoClient?.features, user.role);
+    if (locationRequired && !isValidGeo(dto.boardPhotoGeo ?? null)) {
+      throw new BadRequestException(LOCATION_REQUIRED_KYC_MESSAGE);
+    }
     if (outletMasterGeoEnabled) {
       const reference =
         outlet.latitude != null && outlet.longitude != null
@@ -1943,6 +1955,17 @@ export class KycService {
         } else {
           const distance = haversineMeters({ lat: subject.lat, lng: subject.lng }, reference);
           if (distance > OUTLET_MASTER_GEOFENCE_RADIUS_M) {
+            // Location-gate tenants record the refusal (best-effort) for the location-compliance report.
+            if (locationRequired) {
+              await recordFenceBlock(this.prisma, {
+                actorId: user.sub,
+                clientId: user.clientId,
+                flow: 'KYC',
+                outletId: outlet.id,
+                distanceM: distance,
+                accuracyM: subjectAccuracy,
+              });
+            }
             throw new BadRequestException(
               'You are far from the outlet. Please go to the outlet and try again.',
             );

@@ -21,6 +21,8 @@ import {
 } from '../sales/sales-hierarchy-access.helper';
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { VisibilityMediaService } from './visibility-media.service';
+import { visibilityLocationRefusal } from './visibility-location.helper';
+import { isLocationRequiredFor, recordFenceBlock } from '../common/location-gate.helper';
 import {
   currentWindowKey,
   isWindowClosed,
@@ -714,7 +716,28 @@ export class VisibilityCaptureService {
     // message. Missing outlet-master coords OR no photo GPS fix → 'unverifiable' (allow + flag),
     // never a hard-block. When OFF → EXACTLY today's behavior (KYC board-photo ref + the tenant's
     // visibilityConfig.geoFence), byte-identical for Deoleo / every non-gated tenant.
-    const outletMasterGeoEnabled = await this.resolveOutletMasterGeo(user.clientId);
+    const geoFeatures = await this.resolveGeoFeatures(user.clientId);
+    const outletMasterGeoEnabled = geoFeatures.outletMasterGeo === true;
+
+    // ── LOCATION GATE ("no location, no use" — features.requireLocation, sales reps only; LOCATION-GATE.md) ──
+    // OFF (default, every tenant incl. Deoleo) → nothing here runs. ON → every location-tagged photo the rep submits
+    // NOW must carry a valid fix (carried-forward approved photos are not re-checked), else 400 before any write.
+    const locationRequired = isLocationRequiredFor(geoFeatures, user.role);
+    if (locationRequired) {
+      const refusal = visibilityLocationRefusal(schema, values, new Set(Object.keys(carriedReviews)));
+      if (refusal) throw new BadRequestException(refusal);
+    }
+    const recordOutside = (distanceM: number | null, accuracyM: number | null) =>
+      locationRequired
+        ? recordFenceBlock(this.prisma, {
+            actorId: user.sub,
+            clientId: user.clientId,
+            flow: 'VISIBILITY',
+            outletId: outlet.id,
+            distanceM,
+            accuracyM,
+          })
+        : Promise.resolve();
     // isUsableReference (not just a null-check) guards the OUTLET-MASTER coords: a 0/0 sentinel
     // or out-of-range master value → treated as NO reference → 'unverifiable' (allow+flag) in
     // both fence paths below, never a spurious block of a rep at the real outlet.
@@ -821,6 +844,7 @@ export class VisibilityCaptureService {
 
       if (fenceEnabled) {
         if (anyOutside) {
+          await recordOutside(worstDistance, typeof worstGeo?.accuracy === 'number' ? worstGeo.accuracy : null);
           throw new ForbiddenException(
             outletMasterGeoEnabled
               ? OUTSIDE_FENCE_MESSAGE
@@ -880,6 +904,7 @@ export class VisibilityCaptureService {
           );
         }
         if (geoFenceOk === false) {
+          await recordOutside(res.distanceMeters, geo.accuracy);
           throw new ForbiddenException(
             outletMasterGeoEnabled
               ? OUTSIDE_FENCE_MESSAGE
@@ -1144,12 +1169,12 @@ export class VisibilityCaptureService {
    * admin-outlets.service.ts uses — a direct Client.features read. OFF for every other tenant
    * (incl. live Deoleo), so the gated behavior never touches them.
    */
-  private async resolveOutletMasterGeo(clientId: string): Promise<boolean> {
+  private async resolveGeoFeatures(clientId: string): Promise<Record<string, unknown>> {
     const c = await this.prisma.client.findUnique({
       where: { id: clientId },
       select: { features: true },
     });
-    return (c?.features as Record<string, unknown> | null)?.outletMasterGeo === true;
+    return ((c?.features ?? {}) as Record<string, unknown>) ?? {};
   }
 
   /**

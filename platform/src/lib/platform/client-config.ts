@@ -45,6 +45,11 @@ export interface FeatureFlags {
   // SO Declaration KYCs still go through the managers. Bajaj-only; runtime behaviour flag, NOT a
   // console module toggle (excluded from FeatureKey below). Default OFF; Deoleo stays OFF.
   gifsyRejectFastTrack: boolean;
+  // Location gate ("no location, no use"): when ON, a sales rep cannot start or submit a KYC or a visibility
+  // capture until the site's location permission is granted AND a real GPS fix arrives; the API also refuses a
+  // submission without a fix. Runtime behaviour flag, NOT a console module toggle (excluded from FeatureKey below).
+  // Default OFF; Deoleo stays OFF. See docs/plans/LOCATION-GATE.md.
+  requireLocation: boolean;
   selfEnrollmentAllowed: boolean;   // Partners can self-accept schemes
   nonKycOutletCampaigns: boolean;   // Campaigns can target non-KYC outlets
   multiLevelApproval: boolean;      // ≥2 approval levels in hierarchy
@@ -107,7 +112,7 @@ export interface FeatureFlags {
 // The gifsy-console module toggles. Excludes `partnerApp` (nested) and
 // `kycAddressProofWaiver` (a runtime KYC behaviour flag set via clients.features, not a
 // console module) so the console's exhaustive feature Records stay to the module set.
-export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProofWaiver' | 'soDeclarationKyc' | 'outletMasterGeo' | 'allowPayoutWithoutPan' | 'gifsyRejectFastTrack'>;
+export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProofWaiver' | 'soDeclarationKyc' | 'outletMasterGeo' | 'allowPayoutWithoutPan' | 'gifsyRejectFastTrack' | 'requireLocation'>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Branding

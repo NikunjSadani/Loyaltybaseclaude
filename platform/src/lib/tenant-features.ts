@@ -53,6 +53,7 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
     outletMasterGeo:         bool(f.outletMasterGeo,         d.outletMasterGeo),
     allowPayoutWithoutPan:   bool(f.allowPayoutWithoutPan,   d.allowPayoutWithoutPan),
     gifsyRejectFastTrack:    bool(f.gifsyRejectFastTrack,    d.gifsyRejectFastTrack),
+    requireLocation:         bool(f.requireLocation,         d.requireLocation),
     campaignEnrollmentForm:  bool(f.campaignEnrollmentForm,  d.campaignEnrollmentForm),
     salesTeamApp:            bool(f.salesTeamApp,            d.salesTeamApp),
     walletModule:            bool(f.walletModule,            d.walletModule),

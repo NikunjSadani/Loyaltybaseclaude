@@ -680,6 +680,44 @@ describe('buildDailyOpsDigest', () => {
     expect(busy).toContain('Yes — recalculate');
   });
 
+  describe('Location line (LOCATION-GATE.md)', () => {
+    const loc = (o: Partial<{ requireLocation: boolean; kycs: number; captures: number; noGps: number; poorAccuracy: number; blockedOutside: number }> = {}) =>
+      ok({ requireLocation: false, kycs: 0, captures: 0, noGps: 0, poorAccuracy: 0, blockedOutside: 0, ...o });
+
+    it('hidden for a tenant with the setting OFF and no captures (Deoleo on a quiet day)', () => {
+      const t = quietTenant('deoleo', 'Deoleo');
+      t.location = loc();
+      expect(buildDailyOpsDigest(input([t])).html).not.toContain('data-section="Location"');
+    });
+
+    it('shown with the setting OFF when there were captures — no GPS / poor accuracy counts, no blocked column', () => {
+      const t = quietTenant('deoleo', 'Deoleo');
+      t.location = loc({ kycs: 12, captures: 3, noGps: 2, poorAccuracy: 4 });
+      const html = buildDailyOpsDigest(input([t])).html;
+      expect(html).toContain('data-section="Location"');
+      expect(html).toMatch(/without GPS <strong style="color:#b45309;">2<\/strong>/);
+      expect(html).toMatch(/accuracy worse than 50 m <strong style="color:#b45309;">4<\/strong>/);
+      expect(html).toContain('accuracy worse than 50 m');
+      expect(html).not.toContain('blocked outside');
+      expect(html).not.toContain('Require location');
+    });
+
+    it('shown for a tenant with the setting ON even with zero captures, incl. the blocked count', () => {
+      const t = quietTenant('bajaj', 'Bajaj');
+      t.location = loc({ requireLocation: true, blockedOutside: 3 });
+      const html = buildDailyOpsDigest(input([t])).html;
+      expect(html).toContain('data-section="Location"');
+      expect(html).toContain('&quot;Require location&quot; is ON');
+      expect(html).toContain('blocked outside the 200 m fence');
+    });
+
+    it('a failed Location load degrades the run like any section', () => {
+      const t = quietTenant('bajaj', 'Bajaj');
+      t.location = { ok: false, error: 'boom' };
+      expect(failedSections(input([t]))).toContainEqual({ key: 'bajaj/location', label: 'Bajaj: Location' });
+    });
+  });
+
   it('lists failed redemptions and caps the rows at 10', () => {
     const t = quietTenant('x', 'X');
     const rows = Array.from({ length: 14 }, (_, i) => ({ outlet: `Outlet ${i}`, reward: 'R', reason: 'why' }));

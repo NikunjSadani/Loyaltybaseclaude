@@ -34,6 +34,8 @@ import { SoDeclarationView } from '@/components/so-declaration-view';
 import { getStoredUser } from '@/lib/auth-client';
 import { acquirePreciseFix } from '@/lib/geo-acquire';
 import { usePreciseGpsPreWarm } from '@/lib/use-precise-gps';
+import { useLocationGate } from '@/lib/use-location-gate';
+import { LocationGatePanel } from '@/components/location/LocationGatePanel';
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -438,6 +440,12 @@ export default function NewKYCPage() {
   // Only a Sales Officer may file an SO Declaration (owner rule 2026-10-15); an ISR always uses the
   // normal document flow and never sees the chooser. Mirrors the server-side gate in KycService.create.
   const soFlag = features.soDeclarationKyc && getStoredUser()?.role === 'SALES_SO';
+
+  /* ── Location gate ("no location, no use" — features.requireLocation; docs/plans/LOCATION-GATE.md) ──
+   * OFF (default — Deoleo, every other tenant): the hook does nothing and the page is byte-identical. ON: the rep
+   * cannot START the KYC (the wizard is replaced by a "location needed" guide) until location is allowed AND a
+   * real fix arrives, and cannot SUBMIT without passing a fresh check (the API refuses a fix-less KYC too). */
+  const locationGate = useLocationGate(features.requireLocation && !featuresLoading);
   const [flowVariant, setFlowVariant] = useState<FlowVariant | null>(null);
   const isSoVariant = soFlag && flowVariant === 'SO_DECLARATION';
 
@@ -1505,6 +1513,16 @@ export default function NewKYCPage() {
       setSubmitError('A GSTIN is required for this outlet — add it in the Basic details step before submitting.');
       return;
     }
+    // Location gate (requireLocation tenants only): a fresh check right before submitting. On failure the wizard is
+    // replaced by the location guide (its state is kept) and nothing is sent.
+    if (locationGate.enabled) {
+      setSubmitting(true);
+      const locationOk = await locationGate.recheck({ quiet: true });
+      if (!locationOk) {
+        setSubmitting(false);
+        return;
+      }
+    }
     setSubmitting(true);
     setSubmitError('');
     try {
@@ -2271,6 +2289,26 @@ export default function NewKYCPage() {
    * chooses how to complete ITS KYC. Reached from the outlet step's Continue (and the re-KYC
    * deep-link) only when soFlag && no flow picked yet; STANDARD = today's document flow, SO
    * Declaration = the variant. ISR / non-bajaj never route here (Deoleo unaffected). */
+  /* Location gate (requireLocation tenants only): while location is not usable, the KYC flow is replaced by the
+   * location guide. The OTP / done steps return earlier (they come after the submission) and are never gated. All
+   * wizard state lives in this component, so it is intact when the rep comes back. */
+  if (locationGate.blocking) {
+    return (
+      <div className="space-y-5 fade-in" data-testid="kyc-location-gate">
+        <div className="flex items-center gap-3">
+          <Link href="/sales/kyc" aria-label="Back to KYC list" className="p-2 rounded-lg hover:bg-gray-100 transition-colors">
+            <ArrowLeft className="h-4 w-4 text-gray-600" />
+          </Link>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-lg font-bold text-gray-900">{isReKYC ? 'Re-KYC' : 'New KYC'}</h1>
+            <p className="text-xs text-gray-500 truncate">{selectedOutlet ? selectedOutlet.name : 'Location check'}</p>
+          </div>
+        </div>
+        <LocationGatePanel gate={locationGate} purpose="start or submit a KYC" />
+      </div>
+    );
+  }
+
   if (step === 'choose') {
     return (
       <div className="space-y-5 fade-in">

@@ -76,3 +76,45 @@ describe('CFG — VisibilityCaptureForm GPS gating', () => {
     expect(watchPosition).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * CFG-LG — location gate (features.requireLocation; docs/plans/LOCATION-GATE.md).
+ * LG-F1: requireLocation + a geotag photo whose fix FAILS → the photo is NOT kept and the rep is told why.
+ * LG-F2: requireLocation OFF (Deoleo) + the same failed fix → photo kept "without location" exactly as before.
+ * LG-F3: requireLocation + submit-time GPS fill with no fix → nothing is submitted.
+ */
+describe('CFG-LG — requireLocation', () => {
+  const failGps = () => getCurrentPosition.mockImplementation((_s: unknown, err: (e: { code: number }) => void) => err({ code: 2 }));
+
+  it('LG-F1: no fix → the photo is not kept; the location message shows', async () => {
+    failGps();
+    const { container, findByText, queryByText } = render(
+      <VisibilityCaptureForm schema={schema} onSubmit={vi.fn()} requireLocation />,
+    );
+    fireCapture(container);
+    expect(await findByText(/No location was captured — location is required here/)).toBeTruthy();
+    expect(queryByText('Photo captured')).toBeNull();
+  });
+
+  it('LG-F2: requireLocation OFF (Deoleo) → saved without location, as today', async () => {
+    failGps();
+    const { container, findByText } = render(<VisibilityCaptureForm schema={schema} onSubmit={vi.fn()} />);
+    fireCapture(container);
+    expect(await findByText(/saved without location/)).toBeTruthy();
+  });
+
+  it('LG-F3: submit-time GPS fill with no fix → onSubmit is never called', async () => {
+    failGps();
+    const gpsSchema: VisibilityFormSchema = {
+      captureGpsOnSubmit: true,
+      fields: [{ id: 'gps', type: 'GPS_POINT', label: 'Location', required: false, order: 1 }],
+    };
+    const onSubmit = vi.fn();
+    const { getByRole, findByText } = render(
+      <VisibilityCaptureForm schema={gpsSchema} onSubmit={onSubmit} requireLocation />,
+    );
+    fireEvent.click(getByRole('button', { name: /submit/i }));
+    expect(await findByText(/No location was captured/)).toBeTruthy();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});

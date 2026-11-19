@@ -29,6 +29,8 @@ import { windowKeyForDate } from './visibility-window.helper';
 const mockPrisma = {
   // persistCapture reads clients.features for the outlet-master geo-fence gate (outletMasterGeo).
   client: { findUnique: jest.fn() },
+  // Location gate: an "outside the fence" refusal is recorded (features.requireLocation tenants only).
+  auditLog: { create: jest.fn().mockResolvedValue({}) },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
   outlet: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -290,6 +292,63 @@ describe('VisibilityCaptureService', () => {
       const res = await service.submitCapture(user, { outletId: 'o1', formValues: imprecise });
       expect(res.geoFenceOk).toBe(true);
       expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+    });
+
+    // ── LOCATION GATE (features.requireLocation — owner 2026-11-18; LOCATION-GATE.md) ──────────
+    describe('requireLocation', () => {
+      const NO_LOC = /Location is required to submit a visibility capture/;
+      const requireOn = (extra: Record<string, unknown> = {}) =>
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true, ...extra } });
+
+      it('ON + no GPS on the capture → 400 before any write (legacy GPS_POINT form)', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        await expect(service.submitCapture(user, { outletId: 'o1', formValues: noGeo })).rejects.toThrow(NO_LOC);
+        expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+      });
+
+      it('ON + a valid fix near the outlet → accepted, nothing recorded', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        const res = await service.submitCapture(user, { outletId: 'o1', formValues: nearMaster });
+        expect(res.geoFenceOk).toBe(true);
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
+
+      it('ON + per-photo form, a fence photo WITHOUT a fix → 400 naming the photo', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+          clientId: 't1', version: 4,
+          formSchema: { fields: [{ id: 'shelf', type: 'CAMERA', label: 'Shelf', required: true, order: 1, geoFenceRequired: true }] },
+        });
+        await expect(
+          service.submitCapture(user, { outletId: 'o1', formValues: { shelf: { key: 'visibility-media/t1/x.jpg' } } }),
+        ).rejects.toThrow(/"Shelf"/);
+        expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+      });
+
+      it('ON + outside the fence → owner message AND one LOCATION_FENCE_BLOCK audit row (flow VISIBILITY)', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(13.5, 78.5));
+        await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearMaster })).rejects.toThrow(BLOCK_MSG);
+        expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
+        expect(mockPrisma.auditLog.create.mock.calls[0][0].data).toMatchObject({
+          action: 'REJECT', entityType: 'LOCATION_FENCE_BLOCK', entityId: 'o1', actorId: 'u1',
+          metadata: { flow: 'VISIBILITY', clientId: 't1' },
+        });
+      });
+
+      it('OFF (default) → no GPS still allowed + flagged and an outside block records NOTHING (Deoleo parity)', async () => {
+        gatedOn();
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        const res = await service.submitCapture(user, { outletId: 'o1', formValues: noGeo });
+        expect(res.flags).toContain('GEO_UNVERIFIABLE');
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(13.5, 78.5));
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValue(null);
+        await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearMaster })).rejects.toThrow(BLOCK_MSG);
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
     });
   });
 

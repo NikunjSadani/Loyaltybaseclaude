@@ -84,6 +84,9 @@ Optional sections:
   `features.hubbleVoucherEnabled` was switched off (then titled "Vouchers (Hubble) — integration switched off").
 - **Sales Import** and **Billing progress**: `features.salesImport === true`.
 - **Visibility**: the `visibilityEnabled` program setting is `true`. This is the same rule `TenantSettingsService` uses.
+- **Location** (`LOCATION-GATE.md`): loaded for every tenant; shown when `features.requireLocation` is ON (then even with
+  zeros, with a "Require location is ON" note and the blocked count) or when the window has any sales-rep KYC, visibility
+  capture or recorded fence block. Amber figures, not an attention item.
 
 One section is **Gifsy-wide** (not a tenant) and sits in the summary at the top: **Voucher dispersal** (GIFSY-run
 Excel → Hubble → WhatsApp campaigns, `VOUCHER-DISPERSAL.md`). It is hidden when every figure is zero. Its WhatsApp
@@ -124,6 +127,9 @@ Labels used below:
 | Visibility | submitted | `VisibilityCaptureSubmission.createdAt` in window (includes re-submissions) |
 | | approved / rejected | `VisibilityCapture.status = APPROVED` / `REJECTED`/`CHANGES_REQUESTED`, `reviewedAt` in window |
 | | pending | `VisibilityCapture.status = SUBMITTED` (now) |
+| Location | KYCs / without GPS / worse than 50 m | `KycSubmission.submittedAt` in window, filed by a `SALES_*` user of the tenant; no GPS = `boardPhotoLat`/`Lng` NULL; worse = `boardPhotoGeoAccuracy > 50` |
+| | visibility captures / without GPS / worse than 50 m | `VisibilityCaptureSubmission.createdAt` in window; no GPS = `captureLat`/`Lng` NULL; worse = `captureAccuracy > 50` |
+| | blocked outside the 200 m fence | `AuditLog` `entityType = LOCATION_FENCE_BLOCK`, `createdAt` in window, actor in the tenant (recorded only while `requireLocation` is ON) |
 | Sales Import | processed / failed | `SalesImport` `READY` / `FAILED` with **`finishedAt`** in window (the processor stamps it on both; the retention purge bumps `updatedAt`, which would re-count old failures) |
 | | still open: failed, not replaced | `FAILED` imports created after the tenant's latest `READY` import (all of them if there is none) (now) |
 | | open months | The last 6 months, kept when `resolveMonthState` says OPEN and the month is not in the future. Each shows `SalesMonthStatus.lastAppliedAt` and `targetsChangedSinceApply`. That flag uses the same rule as `SalesMonthsService`: `tenantHasTargetNamesDef`, then `latestTargetWriteByMonth`, then `targetsNewerThanApply`. Focus-product blockers are deliberately left out because they are too heavy to compute here. |

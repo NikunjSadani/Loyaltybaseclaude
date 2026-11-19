@@ -52,6 +52,7 @@ import type {
   DigestInput,
   DigestWindow,
   KycSection,
+  LocationSection,
   MessagesSection,
   PayoutsSection,
   PointsSection,
@@ -64,6 +65,8 @@ import type {
   VisibilitySection,
   VoucherDispersalSection,
   VouchersSection, TdsExcessSection } from './report.types';
+import { FENCE_BLOCK_ENTITY, LOCATION_REQUIRED_FEATURE, POOR_ACCURACY_M } from '../../common/location-gate.helper';
+import { SALES_ROLES } from '../location/location-compliance-report';
 
 const MINUTE_MS = 60 * 1000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
@@ -114,6 +117,8 @@ interface TenantMeta {
   hubble: boolean;
   salesImport: boolean;
   visibility: boolean;
+  /** features.requireLocation (location gate). */
+  requireLocation: boolean;
 }
 
 const num = (v: unknown): number => {
@@ -513,6 +518,8 @@ export class ScheduledReportsService {
         messages: await section('messages', c, () => this.messages(c, window)),
       };
       if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window));
+      // Loaded for every tenant (a few indexed counts); the builder shows it only with the setting ON or any capture.
+      digest.location = await section('location', c, () => this.location(c, window, t.requireLocation));
       if (t.salesImport) {
         digest.salesImport = await section('salesImport', c, () => this.salesImport(c, window, nowMs));
         digest.billing = await section('billing', c, () => this.billing(c, nowMs));
@@ -846,6 +853,42 @@ export class ScheduledReportsService {
   }
 
   /**
+   * Location compliance in the window (LOCATION-GATE.md): sales-rep KYCs by submittedAt (board-photo fix) and
+   * visibility capture submissions by createdAt — how many had no GPS / a fix worse than ±50 m — plus the recorded
+   * "outside the fence" refusals. Same definitions as the location-compliance report.
+   */
+  private async location(clientId: string, w: DigestWindow, requireLocation: boolean): Promise<LocationSection> {
+    const inWindow = this.range(w);
+    const kycWhere = { submittedAt: inWindow, user: { clientId, role: { in: [...SALES_ROLES] } } };
+    const kycs = await this.prisma.kycSubmission.count({ where: kycWhere });
+    const kycNoGps = await this.prisma.kycSubmission.count({
+      where: { ...kycWhere, OR: [{ boardPhotoLat: null }, { boardPhotoLng: null }] },
+    });
+    const kycPoor = await this.prisma.kycSubmission.count({
+      where: { ...kycWhere, boardPhotoLat: { not: null }, boardPhotoLng: { not: null }, boardPhotoGeoAccuracy: { gt: POOR_ACCURACY_M } },
+    });
+    const visWhere = { clientId, createdAt: inWindow };
+    const captures = await this.prisma.visibilityCaptureSubmission.count({ where: visWhere });
+    const visNoGps = await this.prisma.visibilityCaptureSubmission.count({
+      where: { ...visWhere, OR: [{ captureLat: null }, { captureLng: null }] },
+    });
+    const visPoor = await this.prisma.visibilityCaptureSubmission.count({
+      where: { ...visWhere, captureLat: { not: null }, captureLng: { not: null }, captureAccuracy: { gt: POOR_ACCURACY_M } },
+    });
+    const blockedOutside = await this.prisma.auditLog.count({
+      where: { entityType: FENCE_BLOCK_ENTITY, createdAt: inWindow, actor: { clientId } },
+    });
+    return {
+      requireLocation,
+      kycs,
+      captures,
+      noGps: kycNoGps + visNoGps,
+      poorAccuracy: kycPoor + visPoor,
+      blockedOutside,
+    };
+  }
+
+  /**
    * Imports processed/failed in the window (both by finishedAt — the processor stamps it on READY and
    * FAILED; the retention purge bumps updatedAt, so updatedAt would re-count old failures) + FAILED imports
    * not superseded by a later READY one + every OPEN month (last 6, not future) with its last apply and the
@@ -1073,6 +1116,7 @@ export class ScheduledReportsService {
         hubble: features.hubbleVoucherEnabled === true,
         salesImport: features.salesImport === true,
         visibility: visibilityOn.has(c.id),
+        requireLocation: features[LOCATION_REQUIRED_FEATURE] === true,
       };
     });
   }
