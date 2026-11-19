@@ -20,7 +20,11 @@ vi.mock('@/lib/pwa/platform-detect', () => ({
   isStandalone: () => platform === 'ios-app',
 }));
 
-import PushSubscriptionManager, { AUTO_ASK_TIMEOUT_MS, REMINDER_SESSION_KEY } from '../PushSubscriptionManager';
+import PushSubscriptionManager, {
+  AUTO_ASK_TIMEOUT_MS,
+  REMINDER_SEEN_AFTER_MS,
+  REMINDER_SESSION_KEY,
+} from '../PushSubscriptionManager';
 import InstallPrompt from '../InstallPrompt';
 
 const UA = {
@@ -71,7 +75,7 @@ function setUa(ua: string) {
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ua);
 }
 
-const renderBajaj = () => render(<PushSubscriptionManager tenantSlug="bajaj" appName="Bajaj Sales" />);
+const renderBajaj = () => render(<PushSubscriptionManager tenantSlug="bajaj" appName="Bajaj Consumer Care Ltd Sales" />);
 
 describe('Bajaj notification reminder', () => {
   beforeEach(() => {
@@ -122,7 +126,56 @@ describe('Bajaj notification reminder', () => {
     mockSession('u-1');
     renderBajaj();
     expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
+  it('service-worker reload right after the first render (brand-new session) → the reminder shows again after the reload', async () => {
+    stubNotification('denied');
+    const first = renderBajaj();
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    // ~1 s in, the SW's first clients.claim() → controllerchange → ServiceWorkerRegister reloads the page.
+    expect(sessionStorage.getItem(REMINDER_SESSION_KEY)).toBeNull(); // not burned at render time
+    first.unmount();
+
+    // The reloaded page (same session).
+    renderBajaj();
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
+  it('"seen" is recorded only after the reminder has been on screen for REMINDER_SEEN_AFTER_MS', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    stubNotification('denied');
+    const first = renderBajaj();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REMINDER_SEEN_AFTER_MS - 100);
+    });
+    expect(sessionStorage.getItem(REMINDER_SESSION_KEY)).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
     expect(sessionStorage.getItem(REMINDER_SESSION_KEY)).toBe('u-1');
+    first.unmount();
+    vi.useRealTimers();
+
+    // A later reload in the same session → not shown again.
+    const second = renderBajaj();
+    await waitFor(() => expect(meFetch).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(second.container.firstChild).toBeNull();
+  });
+
+  it('tapping Enable records "seen" at once (a reload mid-prompt does not re-show it)', async () => {
+    const n = stubNotification('default', 'default');
+    const first = renderBajaj();
+    await screen.findByRole('dialog');
+    expect(sessionStorage.getItem(REMINDER_SESSION_KEY)).toBeNull();
+    n.requestPermission.mockImplementationOnce(() => new Promise<NotificationPermission>(() => {})); // prompt open
+    fireEvent.click(screen.getByRole('button', { name: 'Enable notifications' }));
+    expect(sessionStorage.getItem(REMINDER_SESSION_KEY)).toBe('u-1');
+    first.unmount();
   });
 
   it('Android, permission default → reminder with an Enable button that asks from the tap and subscribes on grant', async () => {
@@ -291,7 +344,7 @@ describe('Bajaj notification reminder', () => {
     expect(n.requestPermission).not.toHaveBeenCalled();
     expect(screen.getByText(/⋮ \(top right\) → Settings → Site settings → Notifications/)).toBeTruthy();
     expect(screen.getByText(`Under Blocked, tap ${window.location.host} → Allow.`)).toBeTruthy();
-    expect(screen.getByText(/the Bajaj Sales app \(or Chrome\)/)).toBeTruthy();
+    expect(screen.getByText(/the Bajaj Consumer Care Ltd Sales app \(or Chrome\)/)).toBeTruthy();
     expect(screen.getByText(/Do Not Disturb/)).toBeTruthy();
 
     await act(async () => {
@@ -314,7 +367,7 @@ describe('Bajaj notification reminder', () => {
     renderBajaj();
     await screen.findByRole('dialog');
     expect(screen.getByText(/Open Samsung Internet and tap ≡ \(menu\) → Settings → Sites and downloads/)).toBeTruthy();
-    expect(screen.getByText(/the Bajaj Sales app \(or Samsung Internet\)/)).toBeTruthy();
+    expect(screen.getByText(/the Bajaj Consumer Care Ltd Sales app \(or Samsung Internet\)/)).toBeTruthy();
     expect(screen.queryByText(/⋮/)).toBeNull();
   });
 
@@ -325,7 +378,7 @@ describe('Bajaj notification reminder', () => {
     renderBajaj();
     await screen.findByRole('dialog');
     expect(screen.getByText('Open the iPhone Settings app → Notifications.')).toBeTruthy();
-    expect(screen.getByText(/Tap the Bajaj Sales app in the list and turn on Allow Notifications/)).toBeTruthy();
+    expect(screen.getByText(/Tap the Bajaj Consumer Care Ltd Sales app in the list and turn on Allow Notifications/)).toBeTruthy();
   });
 
   it('granted after "check again" but the subscription fails → honest heading + message', async () => {
@@ -450,7 +503,7 @@ describe('Bajaj notification reminder', () => {
     render(
       <>
         <InstallPrompt tenantSlug="bajaj" />
-        <PushSubscriptionManager tenantSlug="bajaj" appName="Bajaj Sales" />
+        <PushSubscriptionManager tenantSlug="bajaj" appName="Bajaj Consumer Care Ltd Sales" />
       </>,
     );
     expect(await screen.findByRole('dialog', { name: 'Install app' })).toBeTruthy();
@@ -464,6 +517,7 @@ describe('Bajaj notification reminder', () => {
     const reminder = await screen.findByTestId('notif-reminder');
     expect(reminder.getAttribute('data-kind')).toBe('install-first');
     expect(document.querySelectorAll('[aria-modal="true"]')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Remind me later' }));
     expect(sessionStorage.getItem(REMINDER_SESSION_KEY)).toBe('u-1');
   });
 });

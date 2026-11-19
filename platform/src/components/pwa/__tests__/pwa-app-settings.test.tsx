@@ -150,13 +150,14 @@ describe('PwaAppSettings', () => {
     const fake = { permission: 'denied' as NotificationPermission, requestPermission: vi.fn() };
     vi.stubGlobal('Notification', fake);
     render(
-      <ClientConfigProvider config={{ ...DEFAULT_CLIENT_CONFIG, slug: 'bajaj', branding: { ...DEFAULT_CLIENT_CONFIG.branding, displayName: 'Bajaj' } }}>
+      <ClientConfigProvider config={{ ...DEFAULT_CLIENT_CONFIG, slug: 'bajaj', branding: { ...DEFAULT_CLIENT_CONFIG.branding, displayName: 'Bajaj Consumer Care Ltd' } }}>
         <PwaAppSettings />
       </ClientConfigProvider>,
     );
     expect(screen.getByTestId('pwa-notif-blocked-steps')).toBeTruthy();
     expect(screen.getByText(/Site settings → Notifications/)).toBeTruthy();
-    expect(screen.getByText(/the Bajaj Sales app \(or Chrome\)/)).toBeTruthy();
+    // App name from the manifest helper (pwaAppName → "<displayName> Sales" on /sales), not hard-coded.
+    expect(screen.getByText(/the Bajaj Consumer Care Ltd Sales app \(or Chrome\)/)).toBeTruthy();
     expect(screen.queryByText(/allow notifications for this site in/)).toBeNull();
 
     await act(async () => {

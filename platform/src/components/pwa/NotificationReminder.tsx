@@ -56,9 +56,16 @@ function readPermission(): NotificationState {
 export interface NotificationReminderProps extends Omit<NotificationGuideInput, 'state'> {
   initialState: NotificationState;
   onClose: () => void;
+  /** The user acted on it (Enable / Done — check again) — the parent records it as seen for this session. */
+  onEngaged?: () => void;
 }
 
-export default function NotificationReminder({ initialState, onClose, ...guideInput }: NotificationReminderProps) {
+export default function NotificationReminder({
+  initialState,
+  onClose,
+  onEngaged,
+  ...guideInput
+}: NotificationReminderProps) {
   const [state, setState] = useState<NotificationState>(initialState);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -146,6 +153,7 @@ export default function NotificationReminder({ initialState, onClose, ...guideIn
 
   const enable = async () => {
     if (busy) return;
+    onEngaged?.();
     setBusy(true);
     setMessage('');
     try {
@@ -187,6 +195,7 @@ export default function NotificationReminder({ initialState, onClose, ...guideIn
 
   const checkAgain = async () => {
     if (busy) return;
+    onEngaged?.();
     setBusy(true);
     setMessage('');
     try {
