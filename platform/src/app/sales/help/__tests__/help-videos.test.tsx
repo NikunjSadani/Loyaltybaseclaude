@@ -8,7 +8,9 @@
  * HV-S3  List renders published guides from /api/sales/help-topics.
  * HV-S4  Empty list → "No guides yet".
  * HV-S5  Detail: <video controls playsinline preload="metadata">, never autoplay, + numbered steps.
- * HV-S6  Video fails to load → an explanation shows and the steps STILL show.
+ * HV-S6  Video fails to load → one SILENT refresh (fresh token, e.g. expired after a long pause); a second failure
+ *        shows the explanation + Retry, and the steps STILL show throughout.
+ * HV-S6b Retry in the error box re-fetches the guide (fresh token) and shows the player again.
  * HV-S7  Guide without a video → steps only (no <video>).
  * HV-S8  API 404 (flag OFF / not visible) → "not available", no crash.
  */
@@ -129,14 +131,47 @@ describe('HV-S — list + detail', () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/sales/help-topics/kyc-upi');
   });
 
-  it('HV-S6: video error → message + steps still shown', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => json({ success: true, data: TOPIC_VIDEO })));
+  it('HV-S6: first video error → silent refresh with a FRESH token; second error → message + steps still shown', async () => {
+    let n = 0;
+    const fetchMock = vi.fn().mockImplementation(() => {
+      n += 1;
+      return json({ success: true, data: { ...TOPIC_VIDEO, videoUrl: `/api/help/media?token=t${n}` } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
     await act(async () => { render(<SalesHelpTopicPage params={Promise.resolve({ id: 'kyc-upi' })} />); });
-    const video = await screen.findByTestId('help-video', {}, { timeout: 15_000 });
-    fireEvent.error(video);
+    const first = await screen.findByTestId('help-video', {}, { timeout: 15_000 });
+    expect(first.getAttribute('src')).toBe('/api/help/media?token=t1');
+    fireEvent.error(first);
+    // silent refresh: same page, new token, no error box, steps never disappear
+    await waitFor(() => expect(screen.getByTestId('help-video').getAttribute('src')).toBe('/api/help/media?token=t2'));
+    expect(screen.queryByTestId('help-video-error')).toBeNull();
+    expect(screen.getByTestId('help-steps').querySelectorAll('li')).toHaveLength(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // a second failure right away → the error box (no silent loop)
+    fireEvent.error(screen.getByTestId('help-video'));
     await waitFor(() => expect(screen.queryByTestId('help-video')).toBeNull());
     expect(screen.getByTestId('help-video-error')).toHaveTextContent(/could not be loaded/i);
     expect(screen.getByTestId('help-steps').querySelectorAll('li')).toHaveLength(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('HV-S6b: Retry re-fetches the guide (fresh token) and shows the player again', async () => {
+    let n = 0;
+    const fetchMock = vi.fn().mockImplementation(() => {
+      n += 1;
+      return json({ success: true, data: { ...TOPIC_VIDEO, videoUrl: `/api/help/media?token=t${n}` } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await act(async () => { render(<SalesHelpTopicPage params={Promise.resolve({ id: 'kyc-upi' })} />); });
+    fireEvent.error(await screen.findByTestId('help-video', {}, { timeout: 15_000 }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId('help-video').getAttribute('src')).toBe('/api/help/media?token=t2'));
+    fireEvent.error(screen.getByTestId('help-video'));
+    fireEvent.click(await screen.findByTestId('help-video-retry'));
+    await waitFor(() => expect(screen.getByTestId('help-video').getAttribute('src')).toBe('/api/help/media?token=t3'));
+    expect(screen.queryByTestId('help-video-error')).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[2][0])).toBe('/api/sales/help-topics/kyc-upi');
   });
 
   it('HV-S7: no video → steps only', async () => {

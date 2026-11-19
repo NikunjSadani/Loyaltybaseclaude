@@ -75,8 +75,8 @@ export class HelpMemberService {
       title: t.title,
       description: t.description,
       steps: t.steps,
-      videoUrl: t.videoKey ? this.media.mintUrl(t.id, t.clientId, 'video') : null,
-      posterUrl: t.posterKey ? this.media.mintUrl(t.id, t.clientId, 'poster') : null,
+      videoUrl: t.videoKey ? this.media.mintUrl(t.id, t.clientId, 'video', t.videoKey) : null,
+      posterUrl: t.posterKey ? this.media.mintUrl(t.id, t.clientId, 'poster', t.posterKey) : null,
     };
   }
 

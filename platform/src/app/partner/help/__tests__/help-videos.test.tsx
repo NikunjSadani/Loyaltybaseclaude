@@ -102,8 +102,11 @@ describe('HV-P — list + detail', () => {
     expect(video.hasAttribute('playsinline')).toBe(true);
     expect(video.getAttribute('preload')).toBe('metadata');
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/partner/help-topics/wallet');
-    fireEvent.error(video);
+    fireEvent.error(video); // 1st error → silent token refresh
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    fireEvent.error(await screen.findByTestId('help-video')); // 2nd → error box
     await waitFor(() => expect(screen.getByTestId('help-video-error')).toBeInTheDocument());
+    expect(screen.getByTestId('help-video-retry')).toBeInTheDocument();
     expect(screen.getByTestId('help-steps').querySelectorAll('li')).toHaveLength(3);
   });
 });

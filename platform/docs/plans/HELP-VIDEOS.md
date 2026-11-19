@@ -31,7 +31,7 @@ table is touched. The migration is idempotent and uses `SET lock_timeout='5s'` /
 | `isPublished` | members see only published guides. Publishing needs 3–6 steps. |
 | `videoKey`, `videoBytes`, `posterKey` | object keys in OUR uploads bucket, under `help-videos/<slug>/<topicId>/…` |
 | `steps text[]` | ordered steps, ≤ 6, each ≤ 200 characters |
-| `createdById`, `updatedById`, `deletedAt` | soft delete: the row and its files are kept |
+| `createdById`, `updatedById`, `deletedAt` | soft delete: the row is kept for the audit trail; its video + poster objects are deleted from the bucket |
 
 A table, not the tenant config: guides are content with media, ordering and an audit trail, not a flag.
 
@@ -46,26 +46,30 @@ A table, not the tenant config: guides are content with media, ordering and an a
 | `POST …/:id/poster` (multipart `file`) · `DELETE …/:id/poster` | `tenancy:write` | PNG / JPG / WEBP ≤ 5 MB, checked by its actual bytes (not the file name or the browser's type) |
 | `POST …/:id/video-uploads?bytes=` → `{uploadId, partBytes}` | `tenancy:write` | starts a chunked upload |
 | `POST …/:id/video-uploads/:uploadId/parts/:n` (multipart `file`) | `tenancy:write` | ≤ 8 MiB per part. Part 0 must be an MP4 (`ftyp` box). QuickTime and HEIF are refused. |
-| `POST …/:id/video-uploads/:uploadId/complete` | `tenancy:write` | checks the parts are contiguous and total ≤ 50 MB, joins them in GCS, sets `video/mp4`, swaps the video in |
+| `POST …/:id/video-uploads/:uploadId/complete` | `tenancy:write` | checks the parts are contiguous and total ≤ 50 MB, joins them in GCS, sets `video/mp4`, swaps the video in ONLY if it is still the one read before (else 409 "changed by someone else — reload" and the new object is deleted; same for the poster) |
 | `DELETE …/:id/video` | `tenancy:write` | removes the video; the steps stay |
 | `GET /v1/sales/help-topics[/:id]` | SALES_* roles | published SALES guides for the caller's tenant and role |
 | `GET /v1/partner/help-topics[/:id]` | SSS / WHOLESALER / SUB_STOCKIST | published PARTNER guides for the caller's tenant, login role and outlet types |
-| `GET /v1/help/media?token=` | public; the token is the only authority | streams the video or poster, with Range / 206 support |
+| `GET` / `HEAD /v1/help/media?token=` | public; the token is the only authority | streams the video or poster, with Range / 206 support (an inverted range is ignored → 200). HEAD returns the headers without opening the object. Limited per token (600/min, 4 concurrent streams) plus a per-IP backstop (6000/min — behind the Next rewrite `req.ip` is the frontend, so this is a per-instance cap) → 429 + Retry-After |
 
 **Why the video goes up in parts.** The Next `/api` proxy truncates request bodies over 15 MB
 (`proxyClientMaxBodySize`), and multer buffers every part in API memory. So the console sends the file as
 8 MiB parts and GCS joins them on the server. No byte is held over 8 MiB, and no shared setting changes.
+Parts go under `help-uploads/<client>/<topic>/<uploadId>/` and are deleted on complete or failure; an abandoned
+upload is swept by a 1-day GCS lifecycle Delete rule on `help-uploads/` (**added to `terraform/gcs-memorystore.tf`,
+NOT applied** — apply it with the next terraform run).
 
 **Signed URL.** A member or console response carries
-`/api/help/media?token=<HS256 JWT, 60 min, {typ:'helpmedia', sub: topicId, c: clientId, k: video|poster, p?: preview}>`.
+`/api/help/media?token=<HS256 JWT, 60 min, {typ:'helpmedia', sub: topicId, c: clientId, k: video|poster, h: fingerprint of the object key, p?: preview}>`.
 On every request the server checks:
 
 - the token's signature, type and expiry;
 - the topic belongs to the token's tenant and is not deleted;
 - for a member token, the topic is published and the tenant flag is ON (a console preview token skips these two);
+- the topic's CURRENT object key still matches the token's fingerprint — replacing a video ends old streams with 404 instead of serving the new file's bytes mid-playback;
 - the object exists and is within the size cap.
 
-The object key is never in the token. Any failure returns a bare 404. GCS V4 signed URLs were not used because
+The object key itself is never in the token (only its fingerprint). Any failure returns a bare 404. GCS V4 signed URLs were not used because
 blob-signing on Cloud Run is unreliable here: the KYC dump links already fail that way. This is the same
 tokenized-stream pattern as KYC `docview` and scheme `schememedia`. The video bytes pass through the API as a
 stream, never buffered.
@@ -94,11 +98,13 @@ transaction** as the change.
 - **Member screens** (`components/help/help-topics.tsx`, routes `/sales/help`, `/sales/help/[id]`, `/partner/help`, `/partner/help/[id]`):
   - The list, with an empty state ("No guides yet").
   - The detail: `<video controls playsinline preload="metadata">`, never autoplay, with the poster when there is one, and the numbered steps.
-  - If the video errors, an amber note ("The video could not be loaded. Follow the steps below.") replaces the player and the steps stay.
+  - If the video errors, the guide is first re-read SILENTLY once (fresh token — the usual cause is a token that expired during a long pause) and playback resumes where it stopped. A second failure within a minute shows an amber note ("The video could not be loaded. Follow the steps below.") with a **Retry** button (re-reads the guide with a fresh token). The steps stay on screen throughout.
+- **Console entry** ("Help & videos" link on the client page) is shown only to a GIFSY_ADMIN — the API is GIFSY_ADMIN-only, so GIFSY_STAFF never lands on a page that can only 403 (the page itself says "Only Gifsy admins can manage Help & videos." on a 403).
+- **Roles must match the audience:** saving a guide whose role filter contains a role of the other app (e.g. after changing "Shown in") is refused with a message naming the role.
 
 ### Not done / follow-ups
 
-- Soft-deleted guides keep their files in the bucket (recoverable). There is no purge job.
+- Cost item: the bucket-wide NEARLINE@90d lifecycle rule also applies to `help-videos/` (GCS conditions can only include prefixes, so it cannot be excluded without rewriting that rule for every prefix). NEARLINE reads cost ~$0.01/GB — negligible at the expected volume; noted in the terraform file.
 - Video transcoding / compression is not done. Upload a phone-friendly H.264 MP4, 720p, ideally < 20 MB.
 - Usage analytics (who watched what) are not recorded.
 

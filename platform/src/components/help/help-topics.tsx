@@ -10,7 +10,7 @@
    See platform/docs/plans/HELP-VIDEOS.md.
 ─────────────────────────────────────────────────────────────────────────────── */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, ChevronRight, PlayCircle, RefreshCw, VideoOff } from 'lucide-react';
 import { api } from '@/lib/api-client';
@@ -27,7 +27,11 @@ export interface HelpTopicMember {
 
 type Load<T> = { state: 'loading' } | { state: 'error'; message: string; notFound: boolean } | { state: 'ok'; data: T };
 
-function useHelpLoad<T>(url: string): [Load<T>, () => void] {
+/**
+ * Load `url`. `retry` reloads with a spinner; `refresh` re-reads SILENTLY (keeps the current data on screen) and
+ * resolves true when fresh data arrived — used to get a new short-lived media token without blanking the page.
+ */
+function useHelpLoad<T>(url: string): [Load<T>, () => void, () => Promise<boolean>] {
   const [load, setLoad] = useState<Load<T>>({ state: 'loading' });
   const [nonce, setNonce] = useState(0);
   useEffect(() => {
@@ -43,8 +47,21 @@ function useHelpLoad<T>(url: string): [Load<T>, () => void] {
     };
   }, [url, nonce]);
   const retry = useCallback(() => setNonce((n) => n + 1), []);
-  return [load, retry];
+  const refresh = useCallback(async (): Promise<boolean> => {
+    const r = await api.get<T>(url);
+    if (r.success) {
+      setLoad({ state: 'ok', data: r.data });
+      return true;
+    }
+    // The guide itself is gone (unpublished / feature turned off) → say so; a transient failure keeps the page.
+    if (r.status === 404) setLoad({ state: 'error', message: r.error || 'Not found', notFound: true });
+    return false;
+  }, [url]);
+  return [load, retry, refresh];
 }
+
+/** At most one SILENT token refresh per this window — a video that keeps failing then shows the error box. */
+const AUTO_REFRESH_WINDOW_MS = 60_000;
 
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
@@ -125,8 +142,49 @@ export function HelpTopicList({ apiBase, hrefBase, backHref }: { apiBase: string
 
 /** One guide: the video (if any) + the numbered steps. */
 export function HelpTopicDetail({ apiBase, id, listHref }: { apiBase: string; id: string; listHref: string }) {
-  const [load, retry] = useHelpLoad<HelpTopicMember>(`${apiBase}/${encodeURIComponent(id)}`);
+  const [load, retry, refresh] = useHelpLoad<HelpTopicMember>(`${apiBase}/${encodeURIComponent(id)}`);
   const [videoFailed, setVideoFailed] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const lastAutoRefresh = useRef(0);
+  const resumeAt = useRef(0);
+
+  // A <video> error gives no status code. The usual cause after a long pause is an EXPIRED media token (60 min),
+  // so the first error re-reads the guide SILENTLY (fresh token) and resumes where it stopped; only a second
+  // failure inside the window shows the error box. The steps stay on screen throughout.
+  const onVideoError = () => {
+    const now = Date.now();
+    if (now - lastAutoRefresh.current > AUTO_REFRESH_WINDOW_MS) {
+      lastAutoRefresh.current = now;
+      resumeAt.current = videoRef.current?.currentTime ?? 0;
+      void refresh().then((ok) => {
+        if (!ok) setVideoFailed(true);
+      });
+      return;
+    }
+    setVideoFailed(true);
+  };
+
+  const onLoadedMetadata = () => {
+    const v = videoRef.current;
+    if (v && resumeAt.current > 0) {
+      try {
+        v.currentTime = resumeAt.current;
+      } catch {
+        /* seeking unsupported — start from the beginning */
+      }
+    }
+    resumeAt.current = 0;
+  };
+
+  // "Retry" in the error box: fetch the guide again (fresh token) and show the player again.
+  const retryVideo = async () => {
+    setRetrying(true);
+    lastAutoRefresh.current = Date.now(); // a failure right after a manual retry shows the box, no silent loop
+    const ok = await refresh();
+    setRetrying(false);
+    if (ok) setVideoFailed(false);
+  };
 
   return (
     <div className="space-y-4 fade-in">
@@ -158,6 +216,8 @@ export function HelpTopicDetail({ apiBase, id, listHref }: { apiBase: string; id
 
           {load.data.videoUrl && !videoFailed && (
             <video
+              key={load.data.videoUrl}
+              ref={videoRef}
               data-testid="help-video"
               className="w-full rounded-2xl bg-black aspect-video"
               src={load.data.videoUrl}
@@ -165,7 +225,8 @@ export function HelpTopicDetail({ apiBase, id, listHref }: { apiBase: string; id
               controls
               playsInline
               preload="metadata"
-              onError={() => setVideoFailed(true)}
+              onError={onVideoError}
+              onLoadedMetadata={onLoadedMetadata}
             />
           )}
           {load.data.videoUrl && videoFailed && (
@@ -175,7 +236,16 @@ export function HelpTopicDetail({ apiBase, id, listHref }: { apiBase: string; id
               className="flex items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
             >
               <VideoOff className="h-5 w-5 shrink-0" />
-              <span>The video could not be loaded. Follow the steps below.</span>
+              <span className="flex-1">The video could not be loaded. Follow the steps below.</span>
+              <button
+                type="button"
+                onClick={() => void retryVideo()}
+                disabled={retrying}
+                data-testid="help-video-retry"
+                className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-amber-300 bg-white text-amber-900 disabled:opacity-50"
+              >
+                <RefreshCw className="h-3.5 w-3.5" /> {retrying ? 'Retrying…' : 'Retry'}
+              </button>
             </div>
           )}
 

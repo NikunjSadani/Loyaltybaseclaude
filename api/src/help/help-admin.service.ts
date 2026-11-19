@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -25,6 +26,7 @@ import {
   HELP_STEPS_MIN_TO_PUBLISH,
   HELP_TITLE_MAX,
   HELP_TOPICS_MAX_PER_TENANT,
+  HELP_UPLOAD_PREFIX,
   HELP_VIDEO_MAX_BYTES,
   HELP_VIDEO_MAX_PARTS,
   HELP_VIDEO_PART_BYTES,
@@ -109,8 +111,8 @@ export class HelpAdminService {
       steps: t.steps,
       hasVideo: !!t.videoKey,
       videoBytes: t.videoBytes,
-      videoUrl: t.videoKey ? this.media.mintUrl(t.id, t.clientId, 'video', true) : null,
-      posterUrl: t.posterKey ? this.media.mintUrl(t.id, t.clientId, 'poster', true) : null,
+      videoUrl: t.videoKey ? this.media.mintUrl(t.id, t.clientId, 'video', t.videoKey, true) : null,
+      posterUrl: t.posterKey ? this.media.mintUrl(t.id, t.clientId, 'poster', t.posterKey, true) : null,
       updatedAt: t.updatedAt,
     };
   }
@@ -192,9 +194,13 @@ export class HelpAdminService {
   }
 
   /** Role-filter choices per audience: login roles + this tenant's hierarchy levels / outlet types. */
-  async roleOptions(user: JwtPayload, slug: string): Promise<{ SALES: HelpRoleOption[]; PARTNER: HelpRoleOption[] }> {
+  async roleOptions(user: JwtPayload, slug: string): Promise<Record<HelpAudience, HelpRoleOption[]>> {
     this.assertGifsy(user);
     const clientId = await this.requireClient(slug);
+    return this.optionsFor(clientId);
+  }
+
+  private async optionsFor(clientId: string): Promise<Record<HelpAudience, HelpRoleOption[]>> {
     const [levels, outletTypes] = await Promise.all([
       this.prisma.salesHierarchyLevel.findMany({ where: { clientId }, orderBy: { level: 'asc' }, select: { code: true, name: true } }),
       this.prisma.outletTypeClientConfig.findMany({
@@ -234,6 +240,24 @@ export class HelpAdminService {
     };
   }
 
+  /**
+   * Every role in the filter must belong to the guide's audience (its login roles + this tenant's hierarchy levels
+   * for SALES / outlet types for PARTNER). Catches an audience change that kept the other app's roles (which would
+   * silently hide the guide from everyone) and stale codes — refused with a clear message, never dropped silently.
+   */
+  private async assertRolesFit(clientId: string, audience: HelpAudience, roles: string[]): Promise<void> {
+    if (roles.length === 0) return;
+    const allowed = new Set((await this.optionsFor(clientId))[audience].map((o) => o.code));
+    const bad = roles.filter((r) => !allowed.has(r));
+    if (bad.length > 0) {
+      const app = audience === 'SALES' ? 'Sales app' : 'Partner app';
+      const one = bad.length === 1;
+      throw new BadRequestException(
+        `${bad.join(', ')} ${one ? 'is not a' : 'are not'} ${app} role${one ? '' : 's'} for this client — untick ${one ? 'it' : 'them'} (if you changed "Shown in", choose the roles again).`,
+      );
+    }
+  }
+
   // ─── writes ─────────────────────────────────────────────────────────────────
 
   async create(user: JwtPayload, slug: string, dto: CreateHelpTopicDto): Promise<HelpTopicAdminView> {
@@ -246,6 +270,7 @@ export class HelpAdminService {
       steps: dto.steps ?? [],
       isPublished: false,
     });
+    await this.assertRolesFit(clientId, dto.audience, v.roles);
     const created = await this.prisma.$transaction(async (tx) => {
       const count = await tx.helpTopic.count({ where: { clientId, deletedAt: null } });
       if (count >= HELP_TOPICS_MAX_PER_TENANT) {
@@ -296,6 +321,7 @@ export class HelpAdminService {
       };
       const v = this.validate(merged);
       const audience = dto.audience ?? (before.audience as HelpAudience);
+      await this.assertRolesFit(clientId, audience, v.roles);
       const data: Prisma.HelpTopicUpdateInput = {
         title: v.title,
         description: v.description,
@@ -361,16 +387,27 @@ export class HelpAdminService {
     return rows.map((r) => this.view(r));
   }
 
-  /** Soft delete (the row + its stored files are kept, recoverable by an engineer); audited. */
+  /**
+   * Soft delete of the ROW (kept for the audit trail), audited; its video + poster OBJECTS are deleted from the
+   * bucket after the commit (best-effort — a failed delete is logged; nothing serves a deleted topic's media).
+   */
   async remove(user: JwtPayload, slug: string, id: string): Promise<{ id: string; deleted: true }> {
     this.assertGifsy(user);
     const clientId = await this.requireClient(slug);
-    await this.prisma.$transaction(async (tx) => {
+    const keys = await this.prisma.$transaction(async (tx) => {
       const before = await tx.helpTopic.findFirst({ where: { id, clientId, deletedAt: null } });
       if (!before) throw new NotFoundException('Help topic not found');
       await tx.helpTopic.update({ where: { id }, data: { deletedAt: new Date(), isPublished: false, updatedById: user.sub } });
-      await this.audit(tx, user, 'DELETE', id, slug, 'delete', { title: before.title, audience: before.audience, isPublished: before.isPublished });
+      await this.audit(tx, user, 'DELETE', id, slug, 'delete', {
+        title: before.title,
+        audience: before.audience,
+        isPublished: before.isPublished,
+        videoKey: before.videoKey,
+        posterKey: before.posterKey,
+      });
+      return [before.videoKey, before.posterKey].filter((k): k is string => !!k);
     });
+    for (const k of keys) await this.bestEffortDelete(k);
     return { id, deleted: true };
   }
 
@@ -388,13 +425,20 @@ export class HelpAdminService {
     }
     const key = this.storage.generateKey(`help-videos/${clientId}/${id}`, `poster.${sniffed.ext}`);
     await this.storage.uploadFile(file.buffer, key, sniffed.mime);
-    const { row, oldKey } = await this.prisma.$transaction(async (tx) => {
-      const before = await tx.helpTopic.findFirst({ where: { id, clientId, deletedAt: null } });
-      if (!before) throw new NotFoundException('Help topic not found');
-      const row = await tx.helpTopic.update({ where: { id }, data: { posterKey: key, updatedById: user.sub } });
-      await this.audit(tx, user, 'UPDATE', id, slug, 'poster-upload', { posterKey: before.posterKey }, { posterKey: key, bytes: file.size });
-      return { row, oldKey: before.posterKey };
-    });
+    let result: { row: HelpTopic; oldKey: string | null };
+    try {
+      result = await this.prisma.$transaction(async (tx) => {
+        const before = await tx.helpTopic.findFirst({ where: { id, clientId, deletedAt: null } });
+        if (!before) throw new NotFoundException('Help topic not found');
+        const row = await this.swapKey(tx, before, { posterKey: key, updatedById: user.sub }, 'posterKey', 'poster');
+        await this.audit(tx, user, 'UPDATE', id, slug, 'poster-upload', { posterKey: before.posterKey }, { posterKey: key, bytes: file.size });
+        return { row, oldKey: before.posterKey };
+      });
+    } catch (e) {
+      await this.bestEffortDelete(key);
+      throw e;
+    }
+    const { row, oldKey } = result;
     if (oldKey && oldKey !== key) await this.bestEffortDelete(oldKey);
     return this.view(row);
   }
@@ -429,7 +473,8 @@ export class HelpAdminService {
 
   private partsPrefix(clientId: string, topicId: string, uploadId: string): string {
     if (!UUID_RE.test(uploadId)) throw new BadRequestException('Invalid upload id.');
-    return `help-videos/${clientId}/${topicId}/uploads/${uploadId}/`;
+    // Dedicated prefix: a 1-day GCS lifecycle Delete rule (terraform/gcs-memorystore.tf) sweeps abandoned uploads.
+    return `${HELP_UPLOAD_PREFIX}${clientId}/${topicId}/${uploadId}/`;
   }
 
   /** Start a chunked upload: the console then sends ≤ partBytes parts 0..n-1 and calls complete. */
@@ -511,7 +556,7 @@ export class HelpAdminService {
       result = await this.prisma.$transaction(async (tx) => {
         const before = await tx.helpTopic.findFirst({ where: { id, clientId, deletedAt: null } });
         if (!before) throw new NotFoundException('Help topic not found');
-        const row = await tx.helpTopic.update({ where: { id }, data: { videoKey: key, videoBytes: total, updatedById: user.sub } });
+        const row = await this.swapKey(tx, before, { videoKey: key, videoBytes: total, updatedById: user.sub }, 'videoKey', 'video');
         await this.audit(tx, user, 'UPDATE', id, slug, 'video-upload', { videoKey: before.videoKey, videoBytes: before.videoBytes }, { videoKey: key, videoBytes: total });
         return { row, oldKey: before.videoKey };
       });
@@ -523,6 +568,29 @@ export class HelpAdminService {
     }
     if (result.oldKey && result.oldKey !== key) await this.bestEffortDelete(result.oldKey);
     return this.view(result.row);
+  }
+
+  /**
+   * Optimistic swap of a media key: update ONLY if the key is still the one read as `before` (a concurrent
+   * upload / complete / remove changed it → 409, and the caller deletes the object it just stored).
+   */
+  private async swapKey(
+    tx: Prisma.TransactionClient,
+    before: HelpTopic,
+    data: Prisma.HelpTopicUpdateManyMutationInput,
+    field: 'videoKey' | 'posterKey',
+    label: 'video' | 'poster',
+  ): Promise<HelpTopic> {
+    const res = await tx.helpTopic.updateMany({
+      where: { id: before.id, clientId: before.clientId, deletedAt: null, [field]: before[field] },
+      data,
+    });
+    if (res.count !== 1) {
+      throw new ConflictException(`The ${label} was changed by someone else — reload the page and try again.`);
+    }
+    const row = await tx.helpTopic.findFirst({ where: { id: before.id, clientId: before.clientId } });
+    if (!row) throw new NotFoundException('Help topic not found');
+    return row;
   }
 
   private async bestEffortDelete(key: string): Promise<void> {

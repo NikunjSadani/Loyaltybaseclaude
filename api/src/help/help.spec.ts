@@ -4,7 +4,7 @@
 
 import 'reflect-metadata';
 import { Readable } from 'node:stream';
-import { BadRequestException, ForbiddenException, INestApplication, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, INestApplication, NotFoundException } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
@@ -20,10 +20,14 @@ import { HelpAdminController, HelpMediaController, PartnerHelpController, SalesH
 import { HelpAdminService } from './help-admin.service';
 import { HelpMemberService } from './help-member.service';
 import { HelpMediaService } from './help-media.service';
+import { HelpMediaLimiter } from './help-media-limiter';
 import {
   HELP_VIDEO_MAX_BYTES,
   HELP_VIDEO_MAX_PARTS,
   HELP_VIDEO_PART_BYTES,
+  HELP_MEDIA_MAX_CONCURRENT_PER_TOKEN,
+  HELP_MEDIA_PER_TOKEN_PER_MIN,
+  keyFingerprint,
   mp4Problem,
   parseByteRange,
   roleFilterAdmits,
@@ -36,6 +40,7 @@ const SECRET = 'help-test-secret';
 // ─── fixtures ──────────────────────────────────────────────────────────────────
 
 const gifsy: JwtPayload = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'Op' };
+const staff: JwtPayload = { sub: 'st1', role: 'GIFSY_STAFF', clientId: 'bajaj', phone: '', name: 'Staff', assumed: true };
 const clientAdmin: JwtPayload = { sub: 'c1', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '', name: '' };
 const so: JwtPayload = { sub: 's1', role: 'SALES_SO', clientId: 'bajaj', phone: '9000000001', name: 'SO' };
 const partner: JwtPayload = { sub: 'p1', role: 'WHOLESALER', clientId: 'bajaj', phone: '9000000002', name: 'P' };
@@ -87,6 +92,7 @@ function makeDeps() {
       count: jest.fn(async () => 0),
       create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => topic({ ...data, id: 'new1' })),
       update: jest.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => topic({ id: where.id, ...data })),
+      updateMany: jest.fn(async () => ({ count: 1 })),
     },
     auditLog: { create: jest.fn(async () => ({})) },
     salesHierarchyLevel: { findMany: jest.fn(async () => [{ code: 'SO', name: 'Sales Officer' }]) },
@@ -148,9 +154,14 @@ describe('guards (route metadata)', () => {
     expect(Reflect.getMetadata('THROTTLER:SKIPdefault', fn)).toBe(true);
   });
 
-  it('service refuses a non-GIFSY caller even if reached directly', async () => {
+  it('service refuses a non-GIFSY_ADMIN caller even if reached directly (incl. GIFSY_STAFF)', async () => {
     const { admin } = makeDeps();
     await expect(admin.list(clientAdmin, 'bajaj')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(admin.list(staff, 'bajaj')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(admin.roleOptions(staff, 'bajaj')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(admin.update(staff, 'bajaj', 't', { title: 'x' })).rejects.toBeInstanceOf(ForbiddenException);
+    // and the controller admits GIFSY_ADMIN only — GIFSY_STAFF is not in @Roles
+    expect(new Reflector().get(ROLES_KEY, HelpAdminController)).not.toContain('GIFSY_STAFF');
     await expect(admin.create(so, 'bajaj', { audience: 'SALES', title: 'x' })).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
@@ -185,6 +196,7 @@ describe('helpers', () => {
     expect(parseByteRange('bytes=-10', 100)).toEqual({ start: 90, end: 99 });
     expect(parseByteRange('bytes=100-', 100)).toBe('unsatisfiable');
     expect(parseByteRange('bytes=0-1,5-6', 100)).toBeNull();
+    expect(parseByteRange('bytes=5-3', 100)).toBeNull(); // inverted → invalid → ignored (200 full body), RFC 7233
   });
 
   it('a 50 MB video fits in the max part count and parts stay under the 15 MB proxy cap', () => {
@@ -205,7 +217,7 @@ describe('HelpAdminService — CRUD + audit', () => {
     expect(out.flagOn).toBe(true);
     expect(out.topics[0].videoUrl).toMatch(/^\/api\/help\/media\?token=/);
     const claims = jwt.verify(tokenOf(out.topics[0].videoUrl!), { secret: SECRET });
-    expect(claims).toMatchObject({ typ: 'helpmedia', sub: 'a', c: 'bajaj', k: 'video', p: 1 });
+    expect(claims).toMatchObject({ typ: 'helpmedia', sub: 'a', c: 'bajaj', k: 'video', p: 1, h: keyFingerprint('help-videos/bajaj/a/v.mp4') });
     const off = await admin.list(gifsy, 'deoleo');
     expect(off.flagOn).toBe(false);
   });
@@ -218,9 +230,9 @@ describe('HelpAdminService — CRUD + audit', () => {
   it('create: trims, uppercases roles, appends to the audience order, starts UNPUBLISHED, audits in the same tx', async () => {
     const { admin, prisma } = makeDeps();
     prisma.helpTopic.findFirst.mockResolvedValueOnce({ sortOrder: 4 });
-    const out = await admin.create(gifsy, 'bajaj', { audience: 'SALES', title: '  Allow location ', roles: ['so', ' asm', 'SO'], steps: ['one', ' ', 'two'] });
+    const out = await admin.create(gifsy, 'bajaj', { audience: 'SALES', title: '  Allow location ', roles: ['so', ' sales_asm', 'SO'], steps: ['one', ' ', 'two'] });
     const data = prisma.helpTopic.create.mock.calls[0][0].data;
-    expect(data).toMatchObject({ clientId: 'bajaj', audience: 'SALES', title: 'Allow location', roles: ['SO', 'ASM'], steps: ['one', 'two'], sortOrder: 5, isPublished: false, createdById: 'g1' });
+    expect(data).toMatchObject({ clientId: 'bajaj', audience: 'SALES', title: 'Allow location', roles: ['SO', 'SALES_ASM'], steps: ['one', 'two'], sortOrder: 5, isPublished: false, createdById: 'g1' });
     expect(out.isPublished).toBe(false);
     expect(prisma.$transaction).toHaveBeenCalled();
     expect(prisma.auditLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'CREATE', entityType: 'HelpTopic', entityId: 'new1', actorId: 'g1' }) });
@@ -261,6 +273,28 @@ describe('HelpAdminService — CRUD + audit', () => {
     expect(prisma.auditLog.create.mock.calls[0][0].data).toMatchObject({ action: 'DELETE', entityId: 'd' });
   });
 
+  it('roles must belong to the audience: an audience change that keeps the other app\'s roles is refused, clearly', async () => {
+    const { admin, prisma } = makeDeps();
+    prisma.helpTopic.findFirst.mockResolvedValueOnce(topic({ id: 'm', audience: 'SALES', roles: ['SO'] }));
+    await expect(admin.update(gifsy, 'bajaj', 'm', { audience: 'PARTNER' })).rejects.toThrow(/SO is not a Partner app role.*choose the roles again/);
+    expect(prisma.helpTopic.update).not.toHaveBeenCalled();
+    // moving WITH roles of the new audience (or none) is fine
+    prisma.helpTopic.findFirst.mockResolvedValueOnce(topic({ id: 'm', audience: 'SALES', roles: ['SO'] })).mockResolvedValueOnce({ sortOrder: 2 });
+    await admin.update(gifsy, 'bajaj', 'm', { audience: 'PARTNER', roles: ['RETAILER'] });
+    expect(prisma.helpTopic.update.mock.calls[0][0].data).toMatchObject({ audience: 'PARTNER', roles: ['RETAILER'], sortOrder: 3 });
+    // and create refuses a role from the other app
+    await expect(admin.create(gifsy, 'bajaj', { audience: 'PARTNER', title: 't', roles: ['SALES_SO'] })).rejects.toThrow(/SALES_SO is not a Partner app role/);
+  });
+
+  it('delete also removes the topic\'s video + poster objects (after the commit)', async () => {
+    const { admin, prisma, storage } = makeDeps();
+    prisma.helpTopic.findFirst.mockResolvedValueOnce(topic({ id: 'd2', videoKey: 'help-videos/bajaj/d2/v.mp4', posterKey: 'help-videos/bajaj/d2/p.png' }));
+    await admin.remove(gifsy, 'bajaj', 'd2');
+    expect(storage.deleteFile).toHaveBeenCalledWith('help-videos/bajaj/d2/v.mp4');
+    expect(storage.deleteFile).toHaveBeenCalledWith('help-videos/bajaj/d2/p.png');
+    expect(prisma.auditLog.create.mock.calls[0][0].data.oldValues).toMatchObject({ videoKey: 'help-videos/bajaj/d2/v.mp4' });
+  });
+
   it('reorder: must name exactly the current set; writes 0..n-1; audited', async () => {
     const { admin, prisma } = makeDeps();
     prisma.helpTopic.findMany.mockResolvedValueOnce([{ id: 'a' }, { id: 'b' }]);
@@ -288,6 +322,7 @@ describe('HelpAdminService — uploads', () => {
     prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'p' }));
     await admin.uploadPoster(gifsy, 'bajaj', 'p', file(PNG));
     expect(storage.uploadFile).toHaveBeenCalledWith(PNG, 'help-videos/bajaj/p/2026-11/uuid-poster.png', 'image/png');
+    expect(prisma.helpTopic.updateMany.mock.calls[0][0].where).toMatchObject({ id: 'p', posterKey: null });
     expect(prisma.auditLog.create.mock.calls[0][0].data.metadata).toMatchObject({ op: 'poster-upload' });
     await expect(admin.uploadPoster(gifsy, 'bajaj', 'p', file(Buffer.from('%PDF-1.7 ...........')))).rejects.toThrow(/PNG, JPG or WEBP/);
     await expect(admin.uploadPoster(gifsy, 'bajaj', 'p', undefined)).rejects.toThrow(/No image/);
@@ -310,31 +345,50 @@ describe('HelpAdminService — uploads', () => {
     await expect(admin.putVideoPart(gifsy, 'bajaj', 'v', up, String(HELP_VIDEO_MAX_PARTS), file(mp4Head()))).rejects.toThrow(/too large/);
     await expect(admin.putVideoPart(gifsy, 'bajaj', 'v', '../../etc', '0', file(mp4Head()))).rejects.toThrow(/Invalid upload id/);
     await admin.putVideoPart(gifsy, 'bajaj', 'v', up, '0', file(mp4Head()));
-    expect(storage.uploadFile).toHaveBeenCalledWith(expect.any(Buffer), `help-videos/bajaj/v/uploads/${up}/00000`, 'application/octet-stream');
+    expect(storage.uploadFile).toHaveBeenCalledWith(expect.any(Buffer), `help-uploads/bajaj/v/${up}/00000`, 'application/octet-stream');
   });
 
   it('video complete: composes contiguous parts into one video/mp4 object, audits, cleans parts, drops the old video', async () => {
     const { admin, prisma, storage } = makeDeps();
     const up = '0f8fad5b-d9cb-469f-a165-70867728950e';
-    const prefix = `help-videos/bajaj/v/uploads/${up}/`;
+    const prefix = `help-uploads/bajaj/v/${up}/`;
     prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', videoKey: 'help-videos/bajaj/v/old.mp4' }));
     storage.listPrefix.mockResolvedValueOnce([
       { name: `${prefix}00001`, size: 1000 },
       { name: `${prefix}00000`, size: HELP_VIDEO_PART_BYTES },
     ]);
-    const out = await admin.completeVideoUpload(gifsy, 'bajaj', 'v', up);
+    await admin.completeVideoUpload(gifsy, 'bajaj', 'v', up);
     expect(storage.combineFiles).toHaveBeenCalledWith([`${prefix}00000`, `${prefix}00001`], 'help-videos/bajaj/v/2026-11/uuid-video.mp4', 'video/mp4');
-    expect(prisma.helpTopic.update.mock.calls[0][0].data).toMatchObject({ videoKey: 'help-videos/bajaj/v/2026-11/uuid-video.mp4', videoBytes: HELP_VIDEO_PART_BYTES + 1000 });
+    // version-checked swap: only if videoKey is still the one read before
+    expect(prisma.helpTopic.updateMany.mock.calls[0][0]).toMatchObject({
+      where: { id: 'v', clientId: 'bajaj', deletedAt: null, videoKey: 'help-videos/bajaj/v/old.mp4' },
+      data: { videoKey: 'help-videos/bajaj/v/2026-11/uuid-video.mp4', videoBytes: HELP_VIDEO_PART_BYTES + 1000 },
+    });
     expect(prisma.auditLog.create.mock.calls[0][0].data.metadata).toMatchObject({ op: 'video-upload' });
     expect(storage.deletePrefix).toHaveBeenCalledWith(prefix);
     expect(storage.deleteFile).toHaveBeenCalledWith('help-videos/bajaj/v/old.mp4');
-    expect(out.hasVideo).toBe(true);
+  });
+
+  it('concurrent complete: the loser gets 409, its composed object is deleted, the winner\'s video is kept', async () => {
+    const { admin, prisma, storage } = makeDeps();
+    const up = '0f8fad5b-d9cb-469f-a165-70867728950e';
+    const prefix = `help-uploads/bajaj/v/${up}/`;
+    prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', videoKey: 'help-videos/bajaj/v/old.mp4' }));
+    storage.listPrefix.mockResolvedValueOnce([{ name: `${prefix}00000`, size: 1000 }]);
+    prisma.helpTopic.updateMany.mockResolvedValueOnce({ count: 0 }); // someone else swapped the key first
+    const err = await admin.completeVideoUpload(gifsy, 'bajaj', 'v', up).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictException);
+    expect((err as ConflictException).message).toMatch(/changed by someone else — reload/);
+    expect(storage.deleteFile).toHaveBeenCalledWith('help-videos/bajaj/v/2026-11/uuid-video.mp4'); // our new object
+    expect(storage.deleteFile).not.toHaveBeenCalledWith('help-videos/bajaj/v/old.mp4'); // the winner's file is untouched
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    expect(storage.deletePrefix).toHaveBeenCalledWith(prefix);
   });
 
   it('video complete: missing part / over 50 MB / nothing uploaded → 400 and the parts are deleted', async () => {
     const { admin, prisma, storage } = makeDeps();
     const up = '0f8fad5b-d9cb-469f-a165-70867728950e';
-    const prefix = `help-videos/bajaj/v/uploads/${up}/`;
+    const prefix = `help-uploads/bajaj/v/${up}/`;
     prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v' }));
     storage.listPrefix.mockResolvedValueOnce([{ name: `${prefix}00001`, size: 10 }]);
     await expect(admin.completeVideoUpload(gifsy, 'bajaj', 'v', up)).rejects.toThrow(/missing/);
@@ -397,7 +451,7 @@ describe('HelpMemberService — flag, tenant, audience, role filter', () => {
     prisma.helpTopic.findMany.mockResolvedValue([topic({ id: 'v', videoKey: 'k', posterKey: null }), topic({ id: 'n' })]);
     const out = await member.list(so, 'SALES');
     const claims = jwt.verify(tokenOf(out.topics[0].videoUrl!), { secret: SECRET }) as Record<string, unknown>;
-    expect(claims).toMatchObject({ typ: 'helpmedia', sub: 'v', c: 'bajaj', k: 'video' });
+    expect(claims).toMatchObject({ typ: 'helpmedia', sub: 'v', c: 'bajaj', k: 'video', h: keyFingerprint('k') });
     expect(claims.p).toBeUndefined();
     expect(out.topics[0].posterUrl).toBeNull();
     expect(out.topics[1].videoUrl).toBeNull();
@@ -415,7 +469,7 @@ describe('HelpMediaService — token checks', () => {
   it('valid member token for a published topic streams video/mp4', async () => {
     const { media, prisma } = makeDeps();
     prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', isPublished: true, videoKey: 'k' }));
-    const out = await media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video')), undefined);
+    const out = await media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video', 'k')), undefined);
     expect(out).toMatchObject({ contentType: 'video/mp4', size: 1000, length: 1000, range: null });
     expect(prisma.helpTopic.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'v', clientId: 'bajaj', deletedAt: null } }));
   });
@@ -424,30 +478,46 @@ describe('HelpMediaService — token checks', () => {
     const { media, prisma, jwt, storage } = makeDeps();
     await denied(media.open('garbage', undefined));
     await denied(media.open(undefined, undefined));
-    await denied(media.open(new JwtService({ secret: 'other' }).sign({ typ: 'helpmedia', sub: 'v', c: 'bajaj', k: 'video' }), undefined));
-    await denied(media.open(jwt.sign({ typ: 'docview', sub: 'v', c: 'bajaj', k: 'video' }), undefined));
-    await denied(media.open(jwt.sign({ typ: 'helpmedia', sub: 'v', c: 'bajaj', k: 'video', exp: Math.floor(Date.now() / 1000) - 10 }), undefined));
+    await denied(media.open(new JwtService({ secret: 'other' }).sign({ typ: 'helpmedia', sub: 'v', c: 'bajaj', k: 'video', h: keyFingerprint('k') }), undefined));
+    await denied(media.open(jwt.sign({ typ: 'docview', sub: 'v', c: 'bajaj', k: 'video', h: keyFingerprint('k') }), undefined));
+    await denied(media.open(jwt.sign({ typ: 'helpmedia', sub: 'v', c: 'bajaj', k: 'video', h: keyFingerprint('k'), exp: Math.floor(Date.now() / 1000) - 10 }), undefined));
 
     prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', isPublished: false, videoKey: 'k' }));
-    await denied(media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video')), undefined));
+    await denied(media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video', 'k')), undefined));
     // …but a console PREVIEW token may view an unpublished topic
-    await expect(media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video', true)), undefined)).resolves.toBeDefined();
+    await expect(media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video', 'k', true)), undefined)).resolves.toBeDefined();
 
     prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', clientId: 'deoleo', isPublished: true, videoKey: 'k' }));
-    await denied(media.open(tokenOf(media.mintUrl('v', 'deoleo', 'video')), undefined)); // flag OFF
+    await denied(media.open(tokenOf(media.mintUrl('v', 'deoleo', 'video', 'k')), undefined)); // flag OFF
+    // …a console PREVIEW token still works on a flag-OFF tenant (and on an unpublished topic, above)
+    prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', clientId: 'deoleo', isPublished: false, videoKey: 'k' }));
+    await expect(media.open(tokenOf(media.mintUrl('v', 'deoleo', 'video', 'k', true)), undefined)).resolves.toMatchObject({ contentType: 'video/mp4' });
 
     prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', isPublished: true, videoKey: null }));
-    await denied(media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video')), undefined));
+    await denied(media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video', 'k')), undefined));
 
     prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', isPublished: true, videoKey: 'k' }));
     storage.statObject.mockResolvedValueOnce({ size: HELP_VIDEO_MAX_BYTES + 1, contentType: 'video/mp4' });
-    await denied(media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video')), undefined));
+    await denied(media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video', 'k')), undefined));
+  });
+
+  it('replace during playback: a token minted for the OLD video 404s once the video is replaced (no new bytes)', async () => {
+    const { media, prisma, storage } = makeDeps();
+    const oldUrl = media.mintUrl('v', 'bajaj', 'video', 'help-videos/bajaj/v/old.mp4');
+    prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', isPublished: true, videoKey: 'help-videos/bajaj/v/old.mp4' }));
+    await expect(media.open(tokenOf(oldUrl), 'bytes=0-')).resolves.toBeDefined();
+    prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', isPublished: true, videoKey: 'help-videos/bajaj/v/new.mp4' }));
+    storage.openReadStream.mockClear();
+    await denied(media.open(tokenOf(oldUrl), 'bytes=1000-'));
+    expect(storage.openReadStream).not.toHaveBeenCalled();
+    // a fresh URL for the new key works
+    await expect(media.open(tokenOf(media.mintUrl('v', 'bajaj', 'video', 'help-videos/bajaj/v/new.mp4')), undefined)).resolves.toBeDefined();
   });
 
   it('cross-tenant: a token for tenant A cannot read tenant B\'s topic (lookup is scoped by the token tenant)', async () => {
     const { media, prisma } = makeDeps();
     prisma.helpTopic.findFirst.mockResolvedValue(null); // id exists only under another clientId
-    await denied(media.open(tokenOf(media.mintUrl('b-topic', 'bajaj', 'video')), undefined));
+    await denied(media.open(tokenOf(media.mintUrl('b-topic', 'bajaj', 'video', 'k')), undefined));
     expect(prisma.helpTopic.findFirst.mock.calls[0][0].where).toEqual({ id: 'b-topic', clientId: 'bajaj', deletedAt: null });
   });
 });
@@ -456,9 +526,11 @@ describe('GET /help/media (HTTP, Range)', () => {
   let app: INestApplication;
   const body = Buffer.from('0123456789');
   let deps: ReturnType<typeof makeDeps>;
+  let limiter: HelpMediaLimiter;
 
   beforeEach(async () => {
     deps = makeDeps();
+    limiter = new HelpMediaLimiter();
     deps.prisma.helpTopic.findFirst.mockResolvedValue(topic({ id: 'v', isPublished: true, videoKey: 'k', posterKey: 'p' }));
     deps.storage.statObject.mockResolvedValue({ size: body.length, contentType: 'image/png' });
     deps.storage.openReadStream.mockImplementation((_k: string, r?: { start: number; end: number }) =>
@@ -467,7 +539,7 @@ describe('GET /help/media (HTTP, Range)', () => {
     const mod = await Test.createTestingModule({
       imports: [ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true })],
       controllers: [HelpMediaController],
-      providers: [{ provide: HelpMediaService, useValue: deps.media }],
+      providers: [{ provide: HelpMediaService, useValue: deps.media }, { provide: HelpMediaLimiter, useValue: limiter }],
     }).compile();
     app = mod.createNestApplication();
     await app.init();
@@ -475,7 +547,7 @@ describe('GET /help/media (HTTP, Range)', () => {
   afterEach(async () => { await app.close(); });
 
   it('full GET → 200 video/mp4, Accept-Ranges, no-store, nosniff', async () => {
-    const url = deps.media.mintUrl('v', 'bajaj', 'video').replace('/api/', '/');
+    const url = deps.media.mintUrl('v', 'bajaj', 'video', 'k').replace('/api/', '/');
     const res = await request(app.getHttpServer()).get(url).buffer(true).parse((r, cb) => {
       const chunks: Buffer[] = [];
       r.on('data', (c: Buffer) => chunks.push(c));
@@ -490,7 +562,7 @@ describe('GET /help/media (HTTP, Range)', () => {
   });
 
   it('Range → 206 with Content-Range and only those bytes', async () => {
-    const url = deps.media.mintUrl('v', 'bajaj', 'video').replace('/api/', '/');
+    const url = deps.media.mintUrl('v', 'bajaj', 'video', 'k').replace('/api/', '/');
     const res = await request(app.getHttpServer()).get(url).set('Range', 'bytes=2-5').buffer(true).parse((r, cb) => {
       const chunks: Buffer[] = [];
       r.on('data', (c: Buffer) => chunks.push(c));
@@ -502,12 +574,76 @@ describe('GET /help/media (HTTP, Range)', () => {
     expect((res.body as Buffer).toString()).toBe('2345');
   });
 
+  it('HEAD → same headers (length, range) and NO stream opened', async () => {
+    const url = deps.media.mintUrl('v', 'bajaj', 'video', 'k').replace('/api/', '/');
+    const res = await request(app.getHttpServer()).head(url);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/video\/mp4/);
+    expect(res.headers['content-length']).toBe('10');
+    expect(res.headers['accept-ranges']).toBe('bytes');
+    const ranged = await request(app.getHttpServer()).head(url).set('Range', 'bytes=2-5');
+    expect(ranged.status).toBe(206);
+    expect(ranged.headers['content-range']).toBe('bytes 2-5/10');
+    expect(ranged.headers['content-length']).toBe('4');
+    expect(deps.storage.openReadStream).not.toHaveBeenCalled();
+    expect((await request(app.getHttpServer()).head('/help/media?token=nope')).status).toBe(404);
+  });
+
+  it('inverted Range (bytes=5-3) is ignored → 200 with the full body', async () => {
+    const url = deps.media.mintUrl('v', 'bajaj', 'video', 'k').replace('/api/', '/');
+    const res = await request(app.getHttpServer()).get(url).set('Range', 'bytes=5-3');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-range']).toBeUndefined();
+    expect(res.headers['content-length']).toBe('10');
+  });
+
+  it('per-token limit → 429 with Retry-After; concurrent-stream cap per token → 429', async () => {
+    const url = deps.media.mintUrl('v', 'bajaj', 'video', 'k').replace('/api/', '/');
+    const token = tokenOf(url);
+    const key = HelpMediaLimiter.tokenKey(token);
+    for (let i = 0; i < HELP_MEDIA_PER_TOKEN_PER_MIN; i++) limiter.check(key, '1.1.1.1');
+    const res = await request(app.getHttpServer()).get(url);
+    expect(res.status).toBe(429);
+    expect(res.headers['retry-after']).toBe('10');
+    // a different token is unaffected
+    const other = deps.media.mintUrl('v', 'bajaj', 'video', 'k', true).replace('/api/', '/');
+    const releases = Array.from({ length: HELP_MEDIA_MAX_CONCURRENT_PER_TOKEN }, () => limiter.acquireStream(HelpMediaLimiter.tokenKey(tokenOf(other))));
+    const busy = await request(app.getHttpServer()).get(other);
+    expect(busy.status).toBe(429);
+    releases.forEach((r) => r());
+    expect((await request(app.getHttpServer()).get(other)).status).toBe(200);
+    // the slot is released when the response closes
+    await new Promise((r) => setTimeout(r, 20));
+    expect(limiter.openStreams(HelpMediaLimiter.tokenKey(tokenOf(other)))).toBe(0);
+  });
+
   it('unsatisfiable Range → 416; bad token → bare 404', async () => {
-    const url = deps.media.mintUrl('v', 'bajaj', 'video').replace('/api/', '/');
+    const url = deps.media.mintUrl('v', 'bajaj', 'video', 'k').replace('/api/', '/');
     const r416 = await request(app.getHttpServer()).get(url).set('Range', 'bytes=50-');
     expect(r416.status).toBe(416);
     expect(r416.headers['content-range']).toBe('bytes */10');
     const r404 = await request(app.getHttpServer()).get('/help/media?token=nope');
     expect(r404.status).toBe(404);
+  });
+});
+
+describe('HelpMediaLimiter', () => {
+  it('window resets after a minute; per-IP backstop applies across tokens', () => {
+    const l = new HelpMediaLimiter();
+    let t = 1_000_000;
+    l.now = () => t;
+    for (let i = 0; i < HELP_MEDIA_PER_TOKEN_PER_MIN; i++) l.check('tok', 'ip');
+    expect(() => l.check('tok', 'ip')).toThrow(/Too many requests/);
+    t += 60_001;
+    expect(() => l.check('tok', 'ip')).not.toThrow();
+  });
+
+  it('concurrent slots release exactly once', () => {
+    const l = new HelpMediaLimiter();
+    const r = l.acquireStream('a');
+    expect(l.openStreams('a')).toBe(1);
+    r();
+    r();
+    expect(l.openStreams('a')).toBe(0);
   });
 });

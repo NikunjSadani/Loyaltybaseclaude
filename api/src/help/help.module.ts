@@ -6,6 +6,7 @@ import { HelpAdminController, HelpMediaController, PartnerHelpController, SalesH
 import { HelpAdminService } from './help-admin.service';
 import { HelpMemberService } from './help-member.service';
 import { HelpMediaService } from './help-media.service';
+import { HelpMediaLimiter } from './help-media-limiter';
 
 /**
  * Help & videos (Bajaj, tenant flag `helpVideos`). StorageService + TenantService are @Global. JwtModule is
@@ -23,6 +24,6 @@ import { HelpMediaService } from './help-media.service';
     }),
   ],
   controllers: [HelpAdminController, SalesHelpController, PartnerHelpController, HelpMediaController],
-  providers: [HelpAdminService, HelpMemberService, HelpMediaService],
+  providers: [HelpAdminService, HelpMemberService, HelpMediaService, HelpMediaLimiter],
 })
 export class HelpModule {}

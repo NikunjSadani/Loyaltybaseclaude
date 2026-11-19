@@ -13,6 +13,7 @@ import type { ClientConfig, FeatureKey, FeatureFlags } from '@/lib/platform/clie
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
 import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
+import { useCanManageHelpVideos } from '@/lib/help-videos-access';
 import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,6 +195,8 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
   const [saved, setSaved]   = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Help & videos authoring is GIFSY_ADMIN-only (API-enforced) — hide the link from GIFSY_STAFF.
+  const canManageHelpVideos = useCanManageHelpVideos();
 
   // The console's OWN host decides whether a tenant link needs the `uat-` staging marker, so a
   // staging console links to the staging site (not prod, which 404s for a staging-only tenant).
@@ -450,13 +453,15 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
 
         {/* Status pill + saved indicator */}
         <div className="flex items-center gap-2 shrink-0">
-          <Link
-            href={`/gifsy/clients/${encodeURIComponent(config.slug)}/help-videos`}
-            data-testid="client-help-videos-link"
-            className="text-xs text-sky-400 hover:text-sky-300 border border-white/10 px-3 py-1.5 rounded-lg"
-          >
-            Help &amp; videos
-          </Link>
+          {canManageHelpVideos && (
+            <Link
+              href={`/gifsy/clients/${encodeURIComponent(config.slug)}/help-videos`}
+              data-testid="client-help-videos-link"
+              className="text-xs text-sky-400 hover:text-sky-300 border border-white/10 px-3 py-1.5 rounded-lg"
+            >
+              Help &amp; videos
+            </Link>
+          )}
           {saved && (
             <span className="flex items-center gap-1.5 text-xs text-green-400 bg-green-500/10 border border-green-500/20 px-3 py-1.5 rounded-lg">
               <CheckCircle className="w-3.5 h-3.5" />

@@ -16,7 +16,7 @@ import React, { act } from 'react';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-vi.mock('@/lib/auth-client', () => ({ getToken: () => null }));
+vi.mock('@/lib/auth-client', () => ({ getToken: () => null, getStoredUser: () => null }));
 vi.mock('@/components/admin/outlet-type-config-section', () => ({
   OutletTypeConfigSection: () => <div data-testid="outlet-type-config-stub" />,
 }));

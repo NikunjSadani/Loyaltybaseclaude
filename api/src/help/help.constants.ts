@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * Help & videos — shared limits + pure helpers (no Nest / Prisma imports, so specs and the FE contract can
  * reason about them directly). See platform/docs/plans/HELP-VIDEOS.md.
@@ -86,26 +88,31 @@ export function parseByteRange(header: string | undefined, size: number): { star
     end = size - 1;
   } else {
     start = Number(a);
+    // RFC 7233 §2.1: last-byte-pos < first-byte-pos makes the spec INVALID → ignore the header (200, full body).
+    if (b !== '' && Number(b) < start) return null;
     end = b === '' ? size - 1 : Math.min(Number(b), size - 1);
   }
   if (!Number.isFinite(start) || !Number.isFinite(end) || start >= size || start > end) return 'unsatisfiable';
   return { start, end };
 }
 
+/** Short, stable fingerprint of an object key, carried in a media token so a REPLACED video/poster invalidates it. */
+export function keyFingerprint(key: string): string {
+  return createHash('sha256').update(key).digest('hex').slice(0, 16);
+}
+
+/** Prefix for in-progress chunked uploads (a 1-day GCS lifecycle Delete rule sweeps abandoned ones). */
+export const HELP_UPLOAD_PREFIX = 'help-uploads/';
+
+/** Per-token request ceiling on the public media route (a video plays as a handful of Range requests). */
+export const HELP_MEDIA_PER_TOKEN_PER_MIN = 600;
+/** Per-IP ceiling. Behind the Next `/api` rewrite `req.ip` is the frontend, so this is a per-instance backstop. */
+export const HELP_MEDIA_PER_IP_PER_MIN = 6000;
+/** Simultaneous open streams per token (Chrome/Safari use 1–3 for one <video>). */
+export const HELP_MEDIA_MAX_CONCURRENT_PER_TOKEN = 4;
+
 /** Normalise the steps list: trim, drop blanks. */
 export function cleanSteps(steps: unknown): string[] {
   if (!Array.isArray(steps)) return [];
   return steps.filter((s): s is string => typeof s === 'string').map((s) => s.trim()).filter((s) => s.length > 0);
-}
-
-/** Normalise a roles filter: trim, uppercase, dedupe, drop blanks. */
-export function cleanRoles(roles: unknown): string[] {
-  if (!Array.isArray(roles)) return [];
-  const out: string[] = [];
-  for (const r of roles) {
-    if (typeof r !== 'string') continue;
-    const v = r.trim().toUpperCase();
-    if (v && /^[A-Z0-9_-]{1,40}$/.test(v) && !out.includes(v)) out.push(v);
-  }
-  return out;
 }

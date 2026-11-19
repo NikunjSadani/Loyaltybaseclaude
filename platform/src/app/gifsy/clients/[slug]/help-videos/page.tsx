@@ -394,7 +394,11 @@ export default function HelpVideosConsolePage({ params }: { params: Promise<{ sl
       api.get<Record<Audience, RoleOption[]>>(`${base}/role-options`),
     ]);
     if (!list.success) {
-      setLoadError(list.error || 'Could not load the guides.');
+      setLoadError(
+        list.status === 403
+          ? 'Only Gifsy admins can manage Help & videos.'
+          : list.error || 'Could not load the guides.',
+      );
       return;
     }
     setTopics(list.data.topics);

@@ -7,6 +7,8 @@
  * HV-C3  Publish → PATCH { isPublished: true }; the server's refusal is shown (not swallowed).
  * HV-C4  Video upload: a non-MP4 or > 50 MB file is refused in the browser with no request.
  * HV-C5  Video upload: MP4 goes start → parts → complete, and the card updates.
+ * HV-C6  GIFSY_STAFF (API 403) → "Only Gifsy admins can manage Help & videos."
+ * HV-C7  The client-page entry hook is true ONLY for a stored GIFSY_ADMIN (GIFSY_STAFF / none → hidden).
  */
 
 import React from 'react';
@@ -19,7 +21,9 @@ vi.mock('next/link', () => ({
   ),
 }));
 
+import { renderHook } from '@testing-library/react';
 import HelpVideosConsolePage from '../page';
+import { useCanManageHelpVideos } from '@/lib/help-videos-access';
 
 function json(body: unknown, status = 200) {
   const text = JSON.stringify(body);
@@ -114,5 +118,24 @@ describe('HV-C — console page', () => {
       '/api/gifsy/clients/bajaj/help-topics/t1/video-uploads/u1/parts/2',
     ]);
     expect(urls.some((u) => u.endsWith('/complete'))).toBe(true);
+  });
+
+  it('HV-C6: GIFSY_STAFF → API 403 → honest message, no guides', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => json({ success: false, error: 'Forbidden' }, 403)));
+    await act(async () => { render(<HelpVideosConsolePage params={Promise.resolve({ slug: 'bajaj' })} />); });
+    expect(await screen.findByText('Only Gifsy admins can manage Help & videos.')).toBeInTheDocument();
+    expect(screen.queryByTestId('help-topic-card')).toBeNull();
+  });
+
+  it('HV-C7: entry link shown only for a stored GIFSY_ADMIN', async () => {
+    const cases: Array<[string | null, boolean]> = [['GIFSY_ADMIN', true], ['GIFSY_STAFF', false], ['CLIENT_ADMIN', false], [null, false]];
+    for (const [role, expected] of cases) {
+      if (role) localStorage.setItem('user', JSON.stringify({ name: 'x', role }));
+      else localStorage.removeItem('user');
+      const { result, unmount } = renderHook(() => useCanManageHelpVideos());
+      await waitFor(() => expect(result.current).toBe(expected));
+      unmount();
+    }
+    localStorage.removeItem('user');
   });
 });

@@ -12,6 +12,7 @@ import {
   HELP_MEDIA_TOKEN_TYP,
   HELP_POSTER_MAX_BYTES,
   HELP_VIDEO_MAX_BYTES,
+  keyFingerprint,
   parseByteRange,
 } from './help.constants';
 
@@ -25,18 +26,24 @@ interface HelpMediaClaims {
   c: string;
   /** which object */
   k: HelpMediaKind;
+  /** fingerprint of the object key the token was minted for */
+  h: string;
   /** console preview (unpublished topics / flag OFF allowed) */
   p?: 1;
 }
 
-export interface HelpMediaStream {
-  stream: Readable;
+export interface HelpMediaTarget {
+  key: string;
   contentType: string;
   /** Bytes in THIS response (the range length for a 206). */
   length: number;
   /** Full object size. */
   size: number;
   range: { start: number; end: number } | null;
+}
+
+export interface HelpMediaStream extends HelpMediaTarget {
+  stream: Readable;
 }
 
 /**
@@ -59,19 +66,31 @@ export class HelpMediaService {
     private readonly tenant: TenantService,
   ) {}
 
-  /** Mint a media URL. `preview` = console (Gifsy) view: unpublished topics + flag-OFF tenants allowed. */
-  mintUrl(topicId: string, clientId: string, kind: HelpMediaKind, preview = false): string {
-    const claims: HelpMediaClaims = { typ: HELP_MEDIA_TOKEN_TYP, sub: topicId, c: clientId, k: kind, ...(preview ? { p: 1 as const } : {}) };
+  /**
+   * Mint a media URL. `key` = the object the URL is for: its fingerprint rides in the token, so REPLACING the
+   * video/poster invalidates every URL minted for the old one (old streams end with 404 instead of switching to
+   * the new file's bytes mid-playback). `preview` = console (Gifsy) view: unpublished topics + flag-OFF allowed.
+   */
+  mintUrl(topicId: string, clientId: string, kind: HelpMediaKind, key: string, preview = false): string {
+    const claims: HelpMediaClaims = {
+      typ: HELP_MEDIA_TOKEN_TYP,
+      sub: topicId,
+      c: clientId,
+      k: kind,
+      h: keyFingerprint(key),
+      ...(preview ? { p: 1 as const } : {}),
+    };
     const token = this.jwt.sign(claims, { secret: this.config.get('JWT_SECRET'), expiresIn: HELP_MEDIA_TOKEN_TTL_SEC });
     return `${HELP_MEDIA_ROUTE}?token=${encodeURIComponent(token)}`;
   }
 
   /**
-   * Resolve a token to a (ranged) object stream. ANY failure → bare 404 (no detail): bad / expired / foreign
-   * token, wrong typ, topic missing / deleted / other tenant, unpublished (member token), tenant flag OFF (member
-   * token), no object of that kind, object missing or over the cap.
+   * Validate a token and size the object WITHOUT opening it (HEAD uses only this). ANY failure → bare 404 (no
+   * detail): bad / expired / foreign token, wrong typ, topic missing / deleted / other tenant, unpublished (member
+   * token), tenant flag OFF (member token), no object of that kind, object REPLACED since the token was minted,
+   * object missing or over the cap.
    */
-  async open(token: string | undefined, rangeHeader: string | undefined): Promise<HelpMediaStream | { unsatisfiable: true; size: number }> {
+  async inspect(token: string | undefined, rangeHeader: string | undefined): Promise<HelpMediaTarget | { unsatisfiable: true; size: number }> {
     const deny = () => new NotFoundException();
     if (!token || typeof token !== 'string' || token.length > 4096) throw deny();
 
@@ -82,7 +101,7 @@ export class HelpMediaService {
       throw deny();
     }
     if (claims.typ !== HELP_MEDIA_TOKEN_TYP) throw deny();
-    if (typeof claims.sub !== 'string' || typeof claims.c !== 'string') throw deny();
+    if (typeof claims.sub !== 'string' || typeof claims.c !== 'string' || typeof claims.h !== 'string') throw deny();
     if (claims.k !== 'video' && claims.k !== 'poster') throw deny();
 
     const topic = await this.prisma.helpTopic.findFirst({
@@ -98,25 +117,35 @@ export class HelpMediaService {
     }
 
     const key = claims.k === 'video' ? topic.videoKey : topic.posterKey;
-    if (!key) throw deny();
+    if (!key || keyFingerprint(key) !== claims.h) throw deny();
     const cap = claims.k === 'video' ? HELP_VIDEO_MAX_BYTES : HELP_POSTER_MAX_BYTES;
     const meta = await this.storage.statObject(key);
     if (!meta || meta.size <= 0 || meta.size > cap) throw deny();
 
     const range = claims.k === 'video' ? parseByteRange(rangeHeader, meta.size) : null;
     if (range === 'unsatisfiable') return { unsatisfiable: true, size: meta.size };
-    const contentType = claims.k === 'video' ? 'video/mp4' : meta.contentType;
+    return {
+      key,
+      contentType: claims.k === 'video' ? 'video/mp4' : meta.contentType,
+      size: meta.size,
+      length: range ? range.end - range.start + 1 : meta.size,
+      range,
+    };
+  }
+
+  /** Open the (ranged) read stream for a target `inspect` returned. */
+  openStream(target: HelpMediaTarget): Readable {
     try {
-      const stream = range ? this.storage.openReadStream(key, range) : this.storage.openReadStream(key);
-      return {
-        stream,
-        contentType,
-        size: meta.size,
-        length: range ? range.end - range.start + 1 : meta.size,
-        range,
-      };
+      return target.range ? this.storage.openReadStream(target.key, target.range) : this.storage.openReadStream(target.key);
     } catch {
-      throw deny();
+      throw new NotFoundException();
     }
+  }
+
+  /** inspect + openStream (GET). */
+  async open(token: string | undefined, rangeHeader: string | undefined): Promise<HelpMediaStream | { unsatisfiable: true; size: number }> {
+    const target = await this.inspect(token, rangeHeader);
+    if ('unsatisfiable' in target) return target;
+    return { ...target, stream: this.openStream(target) };
   }
 }

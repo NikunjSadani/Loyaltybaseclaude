@@ -23,6 +23,11 @@ resource "google_storage_bucket" "uploads" {
     max_age_seconds = 3600
   }
 
+  # NOTE (Help & videos, 2026-11-20): this whole-bucket rule also moves help-videos/ objects to NEARLINE at 90d.
+  # GCS lifecycle conditions can only INCLUDE prefixes (matches_prefix) — there is no "all except help-videos/"
+  # — so excluding them would mean rewriting this rule as an explicit include-list of every other prefix (a
+  # bucket-wide change, not done here). Cost item: a NEARLINE read is ~$0.01/GB, i.e. a 20 MB guide watched
+  # 1,000 times ≈ 20 GB ≈ $0.20/month — negligible at the expected volume; revisit if guides get heavy traffic.
   lifecycle_rule {
     action {
       type          = "SetStorageClass"
@@ -30,6 +35,17 @@ resource "google_storage_bucket" "uploads" {
     }
     condition {
       age = 90
+    }
+  }
+
+  # Help & videos chunked uploads (2026-11-20): parts land under help-uploads/<client>/<topic>/<uploadId>/ and
+  # are deleted by the API on complete/failure; an ABANDONED upload (tab closed mid-way) is swept here after 1 day.
+  # The finished videos live under help-videos/ and are NOT matched. See platform/docs/plans/HELP-VIDEOS.md.
+  lifecycle_rule {
+    action { type = "Delete" }
+    condition {
+      age            = 1
+      matches_prefix = ["help-uploads/"]
     }
   }
 
