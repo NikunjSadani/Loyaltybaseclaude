@@ -28,6 +28,7 @@ const getCapture = vi.fn();
 const approveCapture = vi.fn();
 const rejectCapture = vi.fn();
 const reviewPhoto = vi.fn();
+const getConfig = vi.fn();
 
 vi.mock('@/lib/visibility', () => ({
   visibilityApi: {
@@ -36,12 +37,14 @@ vi.mock('@/lib/visibility', () => ({
     approveCapture: (...a: unknown[]) => approveCapture(...a),
     rejectCapture: (...a: unknown[]) => rejectCapture(...a),
     reviewPhoto: (...a: unknown[]) => reviewPhoto(...a),
+    getConfig: (...a: unknown[]) => getConfig(...a),
   },
   mediaViewUrl: (k: string) => `/api/visibility/captures/media?key=${k}`,
   rewriteMediaViewPath: (p: string) => p.replace(/^\/v1\//, '/api/'),
 }));
 
 import { VisibilityCaptureQueue } from '../VisibilityCaptureQueue';
+import { currentWindowKey } from '@/lib/visibility-window';
 
 const ROW = {
   id: 'cap-1',
@@ -95,6 +98,9 @@ beforeEach(() => {
   approveCapture.mockReset();
   rejectCapture.mockReset();
   reviewPhoto.mockReset();
+  getConfig.mockReset();
+  getConfig.mockResolvedValue({ success: true, data: { frequencyPerMonth: 2 } });
+  document.querySelectorAll('[data-operator-banner]').forEach((n) => n.remove());
   listCaptures.mockResolvedValue({ success: true, data: { captures: [ROW], pagination: { page: 1, limit: 25, total: 1, pages: 1 } } });
   getCapture.mockResolvedValue({ success: true, data: { capture: DETAIL } });
   approveCapture.mockResolvedValue({ success: true, data: { capture: { ...ROW, status: 'APPROVED' } } });
@@ -526,14 +532,24 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     confirmSpy.mockRestore();
   });
 
-  it('VISQ27: the decision bar is sticky at the bottom of the scroll area; photos capped to fit', async () => {
+  it('VISQ27: the decision bar is a real footer — outside the scroll area, after it, with the details above it', async () => {
     getCapture.mockResolvedValue({ success: true, data: { capture: TWO_PHOTO_DETAIL } });
     render(<VisibilityCaptureQueue />);
     fireEvent.click(await screen.findByRole('button', { name: /review/i }));
     const decision = await screen.findByTestId('capture-review-decision');
-    expect(decision.className).toMatch(/sticky/);
-    expect(decision.className).toMatch(/bottom-0/);
-    expect(screen.getByTestId('capture-review-scroll').contains(decision)).toBe(true);
+    const scroll = screen.getByTestId('capture-review-scroll');
+    expect(decision.tagName).toBe('FOOTER');
+    expect(decision.className).toMatch(/shrink-0/);
+    expect(scroll.contains(decision)).toBe(false);
+    expect(scroll.className).toMatch(/flex-1/);
+    expect(scroll.className).toMatch(/overflow-y-auto/);
+    // The footer is the dialog's last child (pinned to the bottom of the flex column).
+    expect(screen.getByRole('dialog').lastElementChild).toBe(decision);
+    // Geo-fence / Captured values / History live INSIDE the scroll area, above the footer.
+    for (const t of ['Geo-fence', 'Captured values', /Submission history/]) {
+      const el = within(scroll).getByText(t);
+      expect(el.compareDocumentPosition(decision) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
   });
 
   it('VISQ28: with duplicate matches shown, two-photo heights use the tighter cap', async () => {
@@ -541,6 +557,79 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     render(<VisibilityCaptureQueue />);
     fireEvent.click(await screen.findByRole('button', { name: /review/i }));
     expect((await screen.findByTestId('photo-img-w1')).className).toMatch(/sm:h-\[calc\(90vh-28rem\)\]/);
+  });
+
+  // ── Staging polish (2026-11-19) ─────────────────────────────────────────────
+  it('VISQ30: the dialog starts BELOW the Gifsy operator banner (header + X never covered)', async () => {
+    const banner = document.createElement('div');
+    banner.setAttribute('data-operator-banner', '');
+    banner.getBoundingClientRect = () => ({ top: 0, bottom: 64, left: 0, right: 390, width: 390, height: 64, x: 0, y: 0, toJSON: () => ({}) });
+    document.body.prepend(banner);
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    await screen.findByTestId('capture-review-header');
+    expect(screen.getByTestId('capture-review-overlay').style.top).toBe('64px');
+    expect(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' })).toBeVisible();
+    banner.remove();
+  });
+
+  it('VISQ31: without an operator banner the overlay starts at the top', async () => {
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    await screen.findByTestId('capture-review-header');
+    expect(screen.getByTestId('capture-review-overlay').style.top).toBe('0px');
+  });
+
+  it('VISQ32: footer actions — Approve is the right-aligned primary with Reject beside it (not half-width)', async () => {
+    for (const cap of [DETAIL, TWO_PHOTO_DETAIL]) {
+      getCapture.mockResolvedValue({ success: true, data: { capture: cap } });
+      const { unmount } = render(<VisibilityCaptureQueue />);
+      fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+      const actions = await screen.findByTestId('capture-review-actions');
+      expect(actions.className).toMatch(/sm:justify-end/);
+      expect(actions.className).toMatch(/flex-col-reverse/); // phone: Approve on top
+      const [first, second] = Array.from(actions.querySelectorAll('button'));
+      expect(first.textContent).toMatch(cap === DETAIL ? /Reject$/ : /Reject all/);
+      expect(second.textContent).toMatch(cap === DETAIL ? /Approve$/ : /Approve all/); // rightmost on sm+
+      for (const btn of [first, second]) expect(btn.className).not.toMatch(/flex-1/);
+      unmount();
+    }
+  });
+
+  it('VISQ33: contrast — geo-fence gloss, "this photo" and "±m" labels are gray-600', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: TWO_PHOTO_DETAIL } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    expect((await screen.findByTestId('geo-fence-gloss')).className).toMatch(/text-gray-600/);
+    expect(within(screen.getByTestId('photo-fence-w1')).getByText('this photo').className).toMatch(/text-gray-600/);
+    expect(within(screen.getByTestId('capture-review-header')).getByText(/±12 m/).className).toMatch(/text-gray-600/);
+    expect(screen.getByText(/±12 m accuracy/).className).toMatch(/text-gray-600/);
+  });
+
+  it("VISQ34: the Window filter placeholder is TODAY's window for the tenant frequency (not hardcoded)", async () => {
+    render(<VisibilityCaptureQueue />);
+    const input = screen.getByLabelText('Window');
+    await waitFor(() => expect(getConfig).toHaveBeenCalled());
+    await waitFor(() => expect(input).toHaveAttribute('placeholder', currentWindowKey(new Date(), 2)));
+    expect(input.getAttribute('placeholder')).toMatch(/^\d{4}-\d{2}-P[1-4]$/);
+  });
+
+  it('VISQ35: the Window placeholder falls back to frequency 1 when the config cannot load', async () => {
+    getConfig.mockResolvedValue({ success: false, error: 'nope' });
+    render(<VisibilityCaptureQueue />);
+    await waitFor(() => expect(getConfig).toHaveBeenCalled());
+    expect(screen.getByLabelText('Window')).toHaveAttribute('placeholder', currentWindowKey(new Date(), 1));
+  });
+
+  it('VISQ36: the geo-tag dot is green in fence, red outside, grey unverifiable', async () => {
+    const cases: Array<[boolean | null, RegExp]> = [[true, /bg-green-500/], [false, /bg-red-500/], [null, /bg-gray-400/]];
+    for (const [ok, cls] of cases) {
+      getCapture.mockResolvedValue({ success: true, data: { capture: { ...DETAIL, geoFence: { ...DETAIL.geoFence, geoFenceOk: ok } } } });
+      const { unmount } = render(<VisibilityCaptureQueue />);
+      fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+      expect((await screen.findByTestId('geo-pin-dot-gps')).className).toMatch(cls);
+      unmount();
+    }
   });
 
   it('VISQ29: Program / Sub-Program chip labels use the -700 shades (contrast)', async () => {

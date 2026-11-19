@@ -21,7 +21,7 @@
  * It does NOT import the scheme feature.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ClipboardList, AlertCircle, X, Loader2, MapPin, ExternalLink, History,
   Image as ImageIcon, XCircle, CheckCircle2, Filter, Copy, Check, ChevronRight,
@@ -29,6 +29,7 @@ import {
 import {
   visibilityApi, rewriteMediaViewPath,
 } from '@/lib/visibility';
+import { currentWindowKey } from '@/lib/visibility-window';
 import type {
   AdminListCapturesQuery,
 } from '@/lib/visibility';
@@ -142,6 +143,21 @@ export function VisibilityCaptureQueue() {
 
   const hasFilters = !!(windowKey || outletCode || status);
 
+  // Window filter example = TODAY's window (IST) for the tenant's capture frequency — never
+  // a hardcoded date. Frequency comes from the visibility config; until it loads (or if it
+  // can't), frequency 1 still gives a correctly formatted current key.
+  const [frequency, setFrequency] = useState(1);
+  useEffect(() => {
+    let alive = true;
+    visibilityApi.getConfig()
+      .then((r) => { if (alive && r.success && r.data?.frequencyPerMonth) setFrequency(r.data.frequencyPerMonth); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const windowPlaceholder = useMemo(() => {
+    try { return currentWindowKey(new Date(), frequency); } catch { return currentWindowKey(new Date(), 1); }
+  }, [frequency]);
+
   return (
     <div className="space-y-4">
       {/* Filters */}
@@ -155,7 +171,7 @@ export function VisibilityCaptureQueue() {
             <option value="REJECTED">Rejected</option>
           </select>
         </FilterField>
-        <FilterField label="Window (YYYY-MM-Pn)"><input value={windowKey} onChange={(e) => setWindowKey(e.target.value)} className={selCls} placeholder="2026-07-P2" /></FilterField>
+        <FilterField label="Window (YYYY-MM-Pn)"><input value={windowKey} onChange={(e) => setWindowKey(e.target.value)} className={selCls} placeholder={windowPlaceholder} aria-label="Window" /></FilterField>
         <FilterField label="Outlet code"><input value={outletCode} onChange={(e) => setOutletCode(e.target.value)} className={selCls} placeholder="outlet code" /></FilterField>
         {hasFilters && (
           <button onClick={() => { setStatus(''); setWindowKey(''); setOutletCode(''); }}
@@ -392,7 +408,7 @@ function PhotoCard({
             )}
             {m.fenceStatus && (
               <span className="inline-flex items-center gap-1" data-testid={`photo-fence-${m.fieldId}`}>
-                <span className="text-gray-500">this photo</span>
+                <span className="text-gray-600">this photo</span>
                 <PhotoFenceBadge status={m.fenceStatus} />
               </span>
             )}
@@ -577,6 +593,26 @@ function ReviewDialog({ onClose, onRestoreFocusFallback, children }: {
 
   const requestClose = () => { if (confirmDiscardNote()) onCloseRef.current(); };
 
+  // The Gifsy operator banner ("working in <brand>", sticky, z-60) sits above this z-50
+  // overlay. Start the overlay BELOW it (measured — it wraps to two lines on a phone) so the
+  // dialog header + close button are never covered, while the brand guardrail stays visible.
+  const overlayRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const place = () => {
+      const banner = document.querySelector<HTMLElement>('[data-operator-banner]');
+      const bottom = banner ? Math.max(0, Math.round(banner.getBoundingClientRect().bottom)) : 0;
+      overlay.style.top = `${bottom}px`;
+    };
+    place();
+    window.addEventListener('resize', place);
+    const banner = document.querySelector<HTMLElement>('[data-operator-banner]');
+    const ro = banner && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null;
+    if (banner && ro) ro.observe(banner);
+    return () => { window.removeEventListener('resize', place); ro?.disconnect(); };
+  }, []);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Escape') {
       e.stopPropagation();
@@ -600,7 +636,7 @@ function ReviewDialog({ onClose, onRestoreFocusFallback, children }: {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center sm:p-4">
+    <div ref={overlayRef} className="fixed inset-0 z-50 flex items-center justify-center sm:p-4" data-testid="capture-review-overlay">
       <div className="absolute inset-0 bg-black/50" onClick={requestClose} aria-hidden data-testid="capture-review-backdrop" />
       <div
         ref={panelRef}
@@ -610,7 +646,7 @@ function ReviewDialog({ onClose, onRestoreFocusFallback, children }: {
         tabIndex={-1}
         onKeyDown={onKeyDown}
         data-testid="capture-review-dialog"
-        className="relative bg-white shadow-2xl flex flex-col overflow-hidden w-full h-full sm:w-[90vw] sm:h-[90vh] sm:max-w-[1600px] sm:rounded-xl focus:outline-none"
+        className="relative bg-white shadow-2xl flex flex-col overflow-hidden w-full h-full sm:w-[90vw] sm:h-[90vh] sm:max-h-full sm:max-w-[1600px] sm:rounded-xl focus:outline-none"
       >
         {children}
       </div>
@@ -804,7 +840,7 @@ function CaptureReview({
               {receivedAt && <span>{receivedAt}</span>}
               <span className="inline-flex items-center gap-1">
                 <GeoBadge geoFenceOk={detail.geoFence.geoFenceOk} distanceMeters={detail.geoFence.distanceMeters} />
-                {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-500">±{Math.round(detail.geoFence.captureAccuracy)} m</span>}
+                {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-600">±{Math.round(detail.geoFence.captureAccuracy)} m</span>}
               </span>
               {detail.duplicateMatches.length > 0 && (
                 <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-700 border border-amber-200 inline-flex items-center gap-1">
@@ -866,14 +902,75 @@ function CaptureReview({
           </Section>
         )}
 
-        {/* ── Decision area (below the photos) — STICKY at the bottom of the scroll area so
-            Approve / Reject stay on screen on a 1366×768 laptop whatever the content. ── */}
-        <div className="sticky bottom-0 z-10 bg-white border-t border-gray-200 -mx-4 sm:-mx-6 px-4 sm:px-6 py-3 space-y-3 shadow-[0_-6px_12px_-8px_rgba(0,0,0,0.2)]" data-testid="capture-review-decision">
-          {actionError && <p className="text-xs text-red-500 flex items-center gap-1" role="alert"><AlertCircle className="w-3 h-3" />{actionError}</p>}
+        {/* ── Details (inside the scroll area, above the footer) ── */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 border-t border-gray-100 pt-4 pb-4">
+          <Section title="Geo-fence">
+            <div className="flex items-center gap-2 mb-2">
+              <GeoBadge geoFenceOk={detail.geoFence.geoFenceOk} distanceMeters={detail.geoFence.distanceMeters} />
+              {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-600">±{Math.round(detail.geoFence.captureAccuracy)} m accuracy</span>}
+            </div>
+            {/* Plain-language gloss (first place the reviewer meets these verdicts). */}
+            <p className="text-[11px] text-gray-600 mb-2 leading-relaxed" data-testid="geo-fence-gloss">
+              In fence = the photo&apos;s location is within the outlet&apos;s allowed radius. Outside = it was taken too far away. Unverifiable = the phone couldn&apos;t confirm where the photo was taken.
+            </p>
+            <div className="space-y-2">
+              {detail.geo.map((g) => (
+                <GeoPin key={g.fieldId} geo={g} distanceMeters={detail.geoFence.distanceMeters} geoFenceOk={detail.geoFence.geoFenceOk} />
+              ))}
+              {detail.geo.length === 0 && detail.geoFence.captureLat != null && detail.geoFence.captureLng != null && (
+                <GeoPin geo={{ fieldId: 'submit', label: 'Capture location', value: { lat: detail.geoFence.captureLat, lng: detail.geoFence.captureLng, accuracy: detail.geoFence.captureAccuracy ?? undefined } }} distanceMeters={detail.geoFence.distanceMeters} geoFenceOk={detail.geoFence.geoFenceOk} />
+              )}
+            </div>
+          </Section>
+
+          <Section title="Captured values">
+            {capturedEntries.length === 0 ? (
+              <p className="text-xs text-gray-600">No text values captured.</p>
+            ) : (
+              <dl className="space-y-1.5">
+                {capturedEntries.map(([k, v]) => (
+                  <div key={k} className="flex justify-between gap-3 text-xs">
+                    <dt className="text-gray-600 font-mono truncate">{k}</dt>
+                    <dd className="text-gray-800 font-medium text-right break-words">{formatValue(v)}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </Section>
+
+          {detail.submissions.length > 0 && (
+            <Section title={`Submission history (${detail.submissions.length})`}>
+              <ul className="space-y-2">
+                {detail.submissions.map((s) => (
+                  <li key={s.id} className="flex items-start gap-2 text-xs">
+                    <History className="w-3.5 h-3.5 text-gray-400 mt-0.5 shrink-0" aria-hidden />
+                    <div>
+                      <span className="font-medium text-gray-700">v{s.version}</span>
+                      <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(s.status)}</span>
+                      <span className="ml-2 text-gray-600">{new Date(s.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </Section>
+          )}
+        </div>
+      </div>
+
+      {/* ── Decision FOOTER: pinned to the bottom of the dialog, OUTSIDE the scroll area, so
+          Approve / Reject are always on screen and never end up mid-dialog. Desktop: notes
+          on the left, actions right-aligned (Approve = primary, rightmost; Reject beside it).
+          Phone: full-width, Approve on top. ── */}
+      {(detail.status !== 'APPROVED' || decided || actionError) && (
+        <footer
+          className="shrink-0 max-h-[50%] overflow-y-auto bg-white border-t border-gray-200 px-4 sm:px-6 py-3 space-y-3 shadow-[0_-6px_12px_-8px_rgba(0,0,0,0.2)]"
+          data-testid="capture-review-decision"
+        >
+          {actionError && <p className="text-xs text-red-600 flex items-center gap-1" role="alert"><AlertCircle className="w-3 h-3" />{actionError}</p>}
 
           {detail.status !== 'APPROVED' && (
             rejectOpen ? (
-              <div className="space-y-2 max-w-2xl"
+              <div className="space-y-2 w-full sm:max-w-xl sm:ml-auto"
                 // Escape inside the reject form closes only the form (the note is kept).
                 onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setRejectOpen(false); setActionError(null); } }}>
                 <label className="block text-xs font-medium text-gray-700">Rejection reason</label>
@@ -897,24 +994,28 @@ function CaptureReview({
                 </div>
               </div>
             ) : (
-              <div className="space-y-2">
-                <div className="flex flex-col sm:flex-row gap-2 max-w-2xl">
-                  <button onClick={approve} disabled={busy || photoBusy != null || anyRejected}
-                    title={anyRejected ? 'Re-capture the flagged photos before approving the whole capture.' : undefined}
-                    className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
-                    {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />} {multiPhoto ? 'Approve all' : 'Approve'}
-                  </button>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3" data-testid="capture-review-actions-row">
+                <div className="flex-1 min-w-0">
+                  {anyRejected && (
+                    <p className="text-[11px] text-orange-700 flex items-center gap-1">
+                      <AlertCircle className="w-3 h-3 shrink-0" />
+                      Some photos are rejected — the rep must re-capture them before the capture can be approved.
+                    </p>
+                  )}
+                </div>
+                {/* DOM order Reject → Approve: on sm+ (row, right-aligned) Approve is the
+                    rightmost primary; on a phone (column-reverse) Approve sits on top. */}
+                <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 shrink-0" data-testid="capture-review-actions">
                   <button ref={rejectAllBtnRef} onClick={() => setRejectOpen(true)} disabled={busy || photoBusy != null}
-                    className="flex-1 flex items-center justify-center gap-2 py-2.5 border border-red-200 text-red-600 rounded-lg text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-60">
+                    className="flex items-center justify-center gap-2 py-2.5 px-5 sm:min-w-[9rem] border border-red-200 text-red-600 rounded-lg text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-60">
                     <XCircle className="w-4 h-4" /> {multiPhoto ? 'Reject all' : 'Reject'}
                   </button>
+                  <button onClick={approve} disabled={busy || photoBusy != null || anyRejected}
+                    title={anyRejected ? 'Re-capture the flagged photos before approving the whole capture.' : undefined}
+                    className="flex items-center justify-center gap-2 py-2.5 px-5 sm:min-w-[9rem] bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+                    {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />} {multiPhoto ? 'Approve all' : 'Approve'}
+                  </button>
                 </div>
-                {anyRejected && (
-                  <p className="text-[11px] text-orange-600 flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3 shrink-0" />
-                    Some photos are rejected — the rep must re-capture them before the capture can be approved.
-                  </p>
-                )}
               </div>
             )
           )}
@@ -923,74 +1024,20 @@ function CaptureReview({
               capture in the loaded list (never automatic). */}
           {decided && (
             <div ref={nextBoxRef} tabIndex={-1} role="status"
-              className="flex flex-wrap items-center gap-3 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none" data-testid="capture-review-next">
-              <span className="text-xs text-gray-600">Decision saved — {statusLabel(detail.status)}.</span>
+              className="flex flex-wrap items-center justify-end gap-3 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none" data-testid="capture-review-next">
+              <span className="text-xs text-gray-700 mr-auto">Decision saved — {statusLabel(detail.status)}.</span>
               {nextId ? (
                 <button ref={nextBtnRef} onClick={() => onNext(nextId)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-[var(--brand-primary)] text-white rounded-lg hover:opacity-90">
-                  Next capture <ChevronRight className="w-3.5 h-3.5" />
+                  className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-[var(--brand-primary)] text-white rounded-lg hover:opacity-90">
+                  Next capture <ChevronRight className="w-4 h-4" />
                 </button>
               ) : (
-                <span className="text-xs text-gray-500">No more submitted captures on this page of the list.</span>
+                <span className="text-xs text-gray-600">No more submitted captures on this page of the list.</span>
               )}
             </div>
           )}
-        </div>
-
-        {/* ── Details (compact, below the decision) ── */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 pt-1 pb-4">
-          <Section title="Geo-fence">
-            <div className="flex items-center gap-2 mb-2">
-              <GeoBadge geoFenceOk={detail.geoFence.geoFenceOk} distanceMeters={detail.geoFence.distanceMeters} />
-              {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-500">±{Math.round(detail.geoFence.captureAccuracy)} m accuracy</span>}
-            </div>
-            {/* Plain-language gloss (first place the reviewer meets these verdicts). */}
-            <p className="text-[11px] text-gray-400 mb-2 leading-relaxed">
-              In fence = the photo&apos;s location is within the outlet&apos;s allowed radius. Outside = it was taken too far away. Unverifiable = the phone couldn&apos;t confirm where the photo was taken.
-            </p>
-            <div className="space-y-2">
-              {detail.geo.map((g) => (
-                <GeoPin key={g.fieldId} geo={g} distanceMeters={detail.geoFence.distanceMeters} />
-              ))}
-              {detail.geo.length === 0 && detail.geoFence.captureLat != null && detail.geoFence.captureLng != null && (
-                <GeoPin geo={{ fieldId: 'submit', label: 'Capture location', value: { lat: detail.geoFence.captureLat, lng: detail.geoFence.captureLng, accuracy: detail.geoFence.captureAccuracy ?? undefined } }} distanceMeters={detail.geoFence.distanceMeters} />
-              )}
-            </div>
-          </Section>
-
-          <Section title="Captured values">
-            {capturedEntries.length === 0 ? (
-              <p className="text-xs text-gray-400">No text values captured.</p>
-            ) : (
-              <dl className="space-y-1.5">
-                {capturedEntries.map(([k, v]) => (
-                  <div key={k} className="flex justify-between gap-3 text-xs">
-                    <dt className="text-gray-500 font-mono truncate">{k}</dt>
-                    <dd className="text-gray-800 font-medium text-right break-words">{formatValue(v)}</dd>
-                  </div>
-                ))}
-              </dl>
-            )}
-          </Section>
-
-          {detail.submissions.length > 0 && (
-            <Section title={`Submission history (${detail.submissions.length})`}>
-              <ul className="space-y-2">
-                {detail.submissions.map((s) => (
-                  <li key={s.id} className="flex items-start gap-2 text-xs">
-                    <History className="w-3.5 h-3.5 text-gray-300 mt-0.5 shrink-0" />
-                    <div>
-                      <span className="font-medium text-gray-700">v{s.version}</span>
-                      <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(s.status)}</span>
-                      <span className="ml-2 text-gray-400">{new Date(s.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </Section>
-          )}
-        </div>
-      </div>
+        </footer>
+      )}
     </>
   );
 }
@@ -1018,8 +1065,11 @@ function isGps(v: unknown): v is { lat: number; lng: number; accuracy?: number }
   return !!v && typeof v === 'object' && typeof (v as { lat: unknown }).lat === 'number' && typeof (v as { lng: unknown }).lng === 'number';
 }
 
-function GeoPin({ geo, distanceMeters }: { geo: VisibilityGeoRef; distanceMeters: number | null }) {
-  if (!isGps(geo.value)) return <p className="text-xs text-gray-400">{geo.label}: no fix captured.</p>;
+function GeoPin({ geo, distanceMeters, geoFenceOk }: { geo: VisibilityGeoRef; distanceMeters: number | null; geoFenceOk: boolean | null }) {
+  if (!isGps(geo.value)) return <p className="text-xs text-gray-600">{geo.label}: no fix captured.</p>;
+  // The dot mirrors the fence verdict: green = in fence, red = outside, grey = unverifiable
+  // (it used to be red unconditionally, which read as "problem" on in-fence captures).
+  const dot = geoFenceOk === true ? 'bg-green-500' : geoFenceOk === false ? 'bg-red-500' : 'bg-gray-400';
   const cap = geo.value;
   const osm = `https://www.openstreetmap.org/?mlat=${cap.lat}&mlon=${cap.lng}#map=17/${cap.lat}/${cap.lng}`;
   const dist = distanceMeters != null
@@ -1028,12 +1078,12 @@ function GeoPin({ geo, distanceMeters }: { geo: VisibilityGeoRef; distanceMeters
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden">
       <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
-        <span className="text-xs font-medium text-gray-700 flex items-center gap-1"><MapPin className="w-3.5 h-3.5 text-green-500" />{geo.label}</span>
+        <span className="text-xs font-medium text-gray-700 flex items-center gap-1"><MapPin className="w-3.5 h-3.5 text-gray-500" aria-hidden />{geo.label}</span>
         <a href={osm} target="_blank" rel="noopener noreferrer" className="text-[10px] text-[var(--brand-primary)] hover:underline flex items-center gap-0.5">Map <ExternalLink className="w-2.5 h-2.5" /></a>
       </div>
       <div className="px-3 py-2 text-[11px] text-gray-600 space-y-0.5">
-        <p><span className="inline-block w-2 h-2 rounded-full bg-red-500 mr-1" />Captured: {cap.lat.toFixed(6)}, {cap.lng.toFixed(6)}{cap.accuracy != null ? ` (±${Math.round(cap.accuracy)}m)` : ''}</p>
-        {dist != null && <p className="text-gray-500">{dist} from the outlet&apos;s registered location</p>}
+        <p><span className={`inline-block w-2 h-2 rounded-full mr-1 ${dot}`} aria-hidden data-testid={`geo-pin-dot-${geo.fieldId}`} />Captured: {cap.lat.toFixed(6)}, {cap.lng.toFixed(6)}{cap.accuracy != null ? ` (±${Math.round(cap.accuracy)}m)` : ''}</p>
+        {dist != null && <p className="text-gray-600">{dist} from the outlet&apos;s registered location</p>}
       </div>
     </div>
   );
