@@ -13,6 +13,30 @@
 > Task 0 (staging DB chain audit) still to be run before the push. No schema change, no migration, no new npm
 > dependency, no font asset.
 
+> ## 🔁 Follow-up 2026-11-19: ONE shared outlet-wallet view (branch `fix/shared-outlet-wallet`, ⚠️ PLATFORM-WIDE, owner-approved incl. Deoleo)
+> The sales ledger drew its own always-on points card and never the payout card, so a payout-only retailer (Bajaj SSS)
+> showed "0 pts" and no Lifetime Payout. Now:
+> - **Backend:** card signals come from ONE helper, `api/src/common/outlet-wallet-activity.helper.ts`
+>   (`resolveOutletWalletActivity`), used by `GET /v1/partner/me` (response unchanged) and `GET /v1/kyc/:id/ledger`.
+>   The ledger `meta` adds `outletType`, `hasPointsActivity`, `hasPayoutActivity`, `loyaltyEnabled`,
+>   `wholesalerPayoutInclActivation` and `walletBalance` (the same fields as `GET /v1/wallet`). The ledger's points rows
+>   are now `statement` (the `GET /v1/wallet/statement` shape, oldest first). The legacy `transactions` array is
+>   STILL returned alongside it for one release (deploy-skew safety); **TODO: remove `transactions` + `mapTxType` in
+>   `kyc.service.ts` after the next release.** Access and scoping are unchanged
+>   (`resolveLedgerContext` → `assertCanViewSubmission`). `/kyc/:id/ledger/statement` now returns `outletName`
+>   (primary `Outlet.name`, the same source as `/v1/wallet/statement`), and the sales download names the outlet through
+>   the same `statementOutlet` helper as the partner download.
+> - **Frontend:** `platform/src/components/wallet/outlet-wallet-view.tsx` (`OutletWalletView`) holds the cards and the
+>   statement: period picker, KPI filter, chips, rows and error states. `/partner/wallet` and `/sales/kyc/[id]/ledger`
+>   both render it and keep only their own data loading and header. The partner DOM was diffed before and after
+>   across 25 states and is byte-identical. The sales subtitle is now the tenant's `salesApp.ledgerLabel`.
+> - **Deliberate:** statement months, the payout fallback date AND "current month" all use the **IST** clock on both
+>   pages (this matches the download). Viewers in IST see no change; a non-IST device now buckets month-edge rows by
+>   IST month.
+> - Shared-view behaviour for both pages: a KPI selection that is no longer among the options (after a period or
+>   Earn/Burn change) resets to "All Parameters". The period popover has `aria-haspopup`/`aria-expanded`, a labelled
+>   close button and From/To labels bound to their inputs, and Escape closes it.
+
 ---
 
 ## 0. Read this first (zero-context primer)

@@ -38,6 +38,7 @@ import {
   overBudget,
   HUBBLE_KNOWN_STATUSES,
   lastLookupUnrecognised,
+  SUPERSEDED_ALERT_EVENT,
   type BudgetBreakdown,
 } from './voucher-dispersal.processor';
 import { maskVoucherCodeForAudit } from '../rewards/voucher-issuance';
@@ -1618,6 +1619,40 @@ export class VoucherDispersalService {
           } as Prisma.InputJsonValue,
         },
       });
+      // VD follow-up (2026-11-19): an alert already raised on THIS row's current order (kind NOT_APPLIED — e.g. a
+      // "couldn't check" / unrecognised status on a failed row) now concerns a row marked not bought. Its kind follows
+      // the mark, so the page + digest + logs say "the order of a row marked not bought — the row stays closed" instead
+      // of "could not be applied to the row". Kind only moves up (alertKindRank); status / history / open state are
+      // untouched. Same transaction as the mark; one campaign audit per alert changed.
+      if (row.hubbleReferenceId) {
+        const stale = await tx.voucherDispersalOrderAlert.findMany({
+          where: { campaignId: id, referenceId: row.hubbleReferenceId, kind: 'NOT_APPLIED' },
+          select: { id: true, hubbleStatus: true },
+        });
+        for (const a of stale) {
+          const up = await tx.voucherDispersalOrderAlert.updateMany({ where: { id: a.id, kind: 'NOT_APPLIED' }, data: { kind: 'MARKED_NOT_BOUGHT' } });
+          if (up.count !== 1) continue;
+          await tx.auditLog.create({
+            data: {
+              actorId: user.sub,
+              action: 'UPDATE',
+              entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+              entityId: id,
+              metadata: {
+                event: SUPERSEDED_ALERT_EVENT,
+                kind: 'MARKED_NOT_BOUGHT',
+                previousKind: 'NOT_APPLIED',
+                rowId: row.id,
+                batchNumber: row.batchNumber,
+                rowNumber: row.rowNumber,
+                referenceId: row.hubbleReferenceId,
+                hubbleStatus: a.hubbleStatus,
+                reason: 'row marked not bought',
+              } as Prisma.InputJsonValue,
+            },
+          });
+        }
+      }
       return { camp, repeat: false as const };
     }, CAMPAIGN_LOCK_TX);
     if (!r.repeat) await this.processor.resettle(id);

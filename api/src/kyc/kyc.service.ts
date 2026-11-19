@@ -83,6 +83,7 @@ import {
 } from '../common/kyc-sla-stage';
 import { buildStatementResponse, EMPTY_STATEMENT, StatementApiResponse } from '../common/points-statement.helper';
 import { buildPayoutStatement } from '../common/payout-statement.helper';
+import { resolveOutletWalletActivity } from '../common/outlet-wallet-activity.helper';
 import {
   isPaymentModeAllowed,
   allowedPaymentModes,
@@ -1382,6 +1383,8 @@ export class KycService {
     removedReachedUserIds: Set<string>;
     /** Every REMOVED sales user's login id in the tenant (a snapshot row is matched by its chain instead). */
     removedUserIds: Set<string>;
+    /** REMOVED sales user's login id → their SalesUser.id (the KYC-list member filter's filing-time keys). */
+    removedSalesIdByUserId: Map<string, string>;
     /** The KYC-list WHERE for this caller's submitter scope (live subtree + removed submitters, K1). */
     submitterWhere: Prisma.KycSubmissionWhereInput;
   } | null> {
@@ -1422,6 +1425,7 @@ export class KycService {
       subtreeSalesUserIds: subtree,
       removedReachedUserIds,
       removedUserIds,
+      removedSalesIdByUserId: new Map(removed.map((n) => [n.userId, n.id])),
       submitterWhere,
     };
   }
@@ -3239,8 +3243,10 @@ export class KycService {
     // subtree. Admins/MIS/Gifsy stay tenant-wide / cross-tenant.
     let submitterScope: string[] | null = null;
     let submitterWhere: Prisma.KycSubmissionWhereInput | null = null;
+    let removedSalesIdByUserId: Map<string, string> | null = null;
     if (!this.canReadTenantWide(user.role)) {
       const scope = await this.resolveSalesScope(user);
+      removedSalesIdByUserId = scope?.removedSalesIdByUserId ?? null;
       submitterScope = scope ? scope.subtreeUserIds : [user.sub];
       // K1: the scope WHERE also carries the removed-submitter rows (snapshot chain / legacy current link).
       submitterWhere = scope ? scope.submitterWhere : { userId: { in: submitterScope } };
@@ -3329,6 +3335,15 @@ export class KycService {
         !isKycInFlight(s.status) && s.partner?.outlets?.some((o) => isReKycPending(o.reKycFlags))
           ? ('RE_KYC_REQUIRED' as (typeof s)['status'])
           : s.status;
+      // K1 follow-up (2026-11-19) — the sales KYC-list Team-Member filter must place a REMOVED rep's KYC in the
+      // branch it was FILED in, like the list scope + approval gate (the snapshot chain), not by today's links
+      // (a moved manager would drag it to the wrong member, or to none). `filingBranchKeys` = the snapshot
+      // chain + the removed submitter's own SalesUser.id; the FE matches it against each member's `branchKeys`
+      // (GET /sales/team). Only on removed-submitter rows WITH a chain: live submitters + legacy (no chain)
+      // rows carry no key and keep the current-link match (`submitterUserIds`), byte-identical to before.
+      const removedSalesId = removedSalesIdByUserId?.get(s.userId);
+      const chain = s.submitterManagerChain ?? [];
+      const filingBranchKeys = removedSalesId && chain.length > 0 ? [...chain, removedSalesId] : null;
       // FIX 2: never ship the internal payoutCarried bookkeeping (it may hold a hidden live value).
       return {
         ...rest,
@@ -3336,6 +3351,7 @@ export class KycService {
         status,
         gifsyEnteredAt,
         ...(fastTrackById ? { fastTrack: fastTrackById.get(s.id) ?? null } : {}),
+        ...(filingBranchKeys ? { filingBranchKeys } : {}),
       };
     });
 
@@ -4406,13 +4422,26 @@ export class KycService {
             outlets: {
               where: { deletedAt: null },
               orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-              select: { outletCode: true },
+              // name: the statement's outletName — the SAME Outlet row (and source) as the partner
+              // download's GET /v1/wallet/statement, so both documents name the outlet identically.
+              select: { outletCode: true, name: true },
               take: 1,
             },
             // The passbook rows are NOT nested here any more (that carried a `take: 200`
             // newest-rows cap). They are read in full by the shared loadPointsStatement.
+            // The balance fields the partner wallet's points card reads (GET /v1/wallet), so the
+            // sales ledger draws the SAME card from the SAME numbers.
             wallets: {
-              select: { id: true, redeemablePoints: true, lifetimeEarned: true, lifetimeRedeemed: true },
+              select: {
+                id: true,
+                earnedPoints: true,
+                lockedPoints: true,
+                redeemablePoints: true,
+                redeemedPoints: true,
+                expiredPoints: true,
+                lifetimeEarned: true,
+                lifetimeRedeemed: true,
+              },
             },
           },
         },
@@ -4440,6 +4469,7 @@ export class KycService {
       partner,
       wallet: partner?.wallets[0] ?? null,
       outletCode: partner?.outlets[0]?.outletCode ?? '',
+      outletName: partner?.outlets[0]?.name ?? null,
       clientId: partner?.clientId ?? user.clientId,
     };
   }
@@ -4448,15 +4478,19 @@ export class KycService {
   private async ledgerStatementFor(
     ctx: Awaited<ReturnType<KycService['resolveLedgerContext']>>,
     range: { from?: string; to?: string },
-  ): Promise<StatementApiResponse> {
-    if (!ctx.wallet) return { ...EMPTY_STATEMENT, rows: [] };
-    return buildStatementResponse(this.prisma, this.logger, {
+  ): Promise<StatementApiResponse & { outletName: string | null }> {
+    // Same outlet name/code pairing as GET /v1/wallet/statement (WalletService.statement): the
+    // primary outlet row supplies BOTH, including for a no-wallet (payout-only / pre-KYC) outlet.
+    const { outletCode, outletName } = ctx;
+    if (!ctx.wallet) return { ...EMPTY_STATEMENT, outletCode, outletName, rows: [] };
+    const stmt = await buildStatementResponse(this.prisma, this.logger, {
       wallet: ctx.wallet,
       clientId: ctx.clientId,
-      outletCode: ctx.outletCode,
+      outletCode,
       from: range.from,
       to: range.to,
     });
+    return { ...stmt, outletName };
   }
 
   async ledger(user: JwtPayload, id: string) {
@@ -4476,6 +4510,15 @@ export class KycService {
       ? await buildPayoutStatement(this.prisma, ctx.clientId, submission.partnerId)
       : [];
 
+    // Which wallet cards this outlet gets — from the SAME shared helper as the partner's own
+    // GET /v1/partner/me, so the sales view and the outlet's own wallet draw the same cards.
+    // Scoped to the submission's partner + its tenant; access already gated above.
+    const activity = submission.partnerId
+      ? await resolveOutletWalletActivity(this.prisma, ctx.clientId, submission.partnerId)
+      : { outletType: null, hasPointsActivity: false, hasPayoutActivity: false, loyaltyEnabled: true };
+    // The tenant's "Incl. Activation" note flag (fails SOFT to off), from the OUTLET's tenant.
+    const features = await resolveTenantFeatures(this.tenant, ctx.clientId);
+
     return {
       meta: {
         name: partner?.businessName ?? 'Unknown',
@@ -4484,8 +4527,32 @@ export class KycService {
         balance: wallet?.redeemablePoints ?? 0,
         lifetime: wallet?.lifetimeEarned ?? 0,
         redeemed: wallet?.lifetimeRedeemed ?? 0,
+        // ── Shared-wallet signals (mirror GET /v1/partner/me) ──
+        outletType: activity.outletType,
+        hasPointsActivity: activity.hasPointsActivity,
+        hasPayoutActivity: activity.hasPayoutActivity,
+        loyaltyEnabled: activity.loyaltyEnabled,
+        wholesalerPayoutInclActivation: features.wholesalerPayoutInclActivation === true,
+        // The SAME balance fields GET /v1/wallet returns (zeros when there is no wallet yet).
+        walletBalance: {
+          earnedPoints: wallet?.earnedPoints ?? 0,
+          lockedPoints: wallet?.lockedPoints ?? 0,
+          redeemablePoints: wallet?.redeemablePoints ?? 0,
+          redeemedPoints: wallet?.redeemedPoints ?? 0,
+          expiredPoints: wallet?.expiredPoints ?? 0,
+          lifetimeEarned: wallet?.lifetimeEarned ?? 0,
+          lifetimeRedeemed: wallet?.lifetimeRedeemed ?? 0,
+        },
       },
-      // Existing on-screen contract (unchanged shape): newest first, IST date key.
+      // The FULL points statement in the SAME shape as GET /v1/wallet/statement (oldest first,
+      // ISO instants, per-type default description) — the sales screen renders it with the
+      // partner wallet's own row mapping, so the two can never drift.
+      statement,
+      // LEGACY on-screen contract (pre-2026-11-19 sales FE): newest first, IST date key, coarse type.
+      // Kept for ONE release so an old FE served against this API (deploy skew / cached bundle) still
+      // renders its statement instead of silently showing it empty.
+      // TODO(2026-11-19): remove `transactions` (+ mapTxType) after the next release ships the
+      // shared-wallet FE everywhere — the current FE reads `statement` only.
       transactions: [...statement.rows].reverse().map((tx) => ({
         id: tx.id,
         date: istDateKey(new Date(tx.date)),
@@ -4494,7 +4561,6 @@ export class KycService {
         points: tx.points,
         balance: tx.balanceAfter,
         ref: tx.referenceId ?? undefined,
-        // Credit rows resolve to their batch field name; everything else is null.
         fieldName: tx.fieldName,
       })),
       payouts,
@@ -6728,7 +6794,10 @@ export class KycService {
   }
 }
 
-/** Maps a wallet transaction type to the ledger view's coarse type. */
+/**
+ * Maps a wallet transaction type to the LEGACY ledger view's coarse type (`transactions` only).
+ * TODO(2026-11-19): remove with `transactions` after the next release.
+ */
 function mapTxType(type: string): 'earn' | 'redeem' | 'hold' | 'expire' | 'credit' {
   switch (type) {
     case 'CREDIT_POINTS_EARNED':

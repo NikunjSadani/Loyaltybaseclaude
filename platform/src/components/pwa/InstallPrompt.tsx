@@ -25,6 +25,7 @@
 import { useEffect, useState } from 'react';
 import { isIosSafari } from '@/lib/pwa/platform-detect';
 import { useInstallPrompt } from '@/lib/pwa/install-prompt-store';
+import { setInstallDialogOpen } from '@/lib/pwa/install-dialog-state';
 
 const SCOPED_PREFIXES = ['/sales', '/partner'];
 const SNOOZE_KEY = 'pwa-install-snooze';
@@ -87,6 +88,14 @@ export default function InstallPrompt({ tenantSlug }: { tenantSlug?: string }) {
     await promptInstall();
     setMode(null);
   };
+
+  // Publish whether the modal is on screen (read only by the Bajaj notification reminder, so the two modals never
+  // stack). No effect on this component's own output.
+  const visible = !!mode && !(mode === 'android' && !canInstall);
+  useEffect(() => {
+    setInstallDialogOpen(visible);
+    return () => setInstallDialogOpen(false);
+  }, [visible]);
 
   if (!mode) return null;
   // Android banner only makes sense when the store actually has a deferred prompt.

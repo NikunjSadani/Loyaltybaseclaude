@@ -45,7 +45,7 @@ describe('LG — sales outlet ledger loading guard', () => {
     // The bug threw here during render; a throw would reject this render.
     await renderLedger('k1');
     // Title block (which dereferences the outlet) is NOT rendered during loading.
-    expect(screen.queryByText('Points Ledger')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('ledger-label')).not.toBeInTheDocument();
   });
 
   it('LG2: renders the outlet title once the ledger resolves', async () => {
@@ -54,12 +54,13 @@ describe('LG — sales outlet ledger loading guard', () => {
         success: true,
         data: {
           meta: { name: 'Verma Traders', outletCode: 'OUT-2026-00111', mobile: '9876543210', balance: 0, lifetime: 0, redeemed: 0 },
-          transactions: [],
+          statement: { rows: [] },
         },
       }),
     }));
     await renderLedger('k1');
     expect(await screen.findByText('Verma Traders')).toBeInTheDocument();
-    expect(await screen.findByText('Points Ledger')).toBeInTheDocument();
+    // The subtitle is the tenant's salesApp.ledgerLabel (default settings → "Wallet").
+    expect((await screen.findByTestId('ledger-label')).textContent).toBe('Wallet');
   });
 });

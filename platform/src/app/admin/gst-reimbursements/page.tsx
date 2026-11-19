@@ -21,7 +21,7 @@
  * data fetch are gated on isGifsy — a CLIENT_ADMIN sees a not-permitted card and NO fetch fires.
  */
 
-import { useState, useEffect, useCallback, Fragment } from 'react';
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
 import {
   BadgePercent,
   Download,
@@ -32,6 +32,7 @@ import {
   X,
   Loader2,
   Receipt,
+  Info,
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
 import { api } from '@/lib/api-client';
@@ -45,6 +46,8 @@ interface Money {
 }
 
 type ReimbursementStatus = 'HELD' | 'RELEASED';
+/** List filter: HELD_ZERO = HELD rows kept at ₹0 after a regenerate (nothing to release). */
+type StatusFilter = ReimbursementStatus | 'HELD_ZERO';
 
 interface ReimbursementItem {
   id: string;
@@ -66,11 +69,13 @@ interface ReimbursementItem {
 }
 
 interface ReimbursementListResponse {
-  status: ReimbursementStatus;
+  status: StatusFilter;
   clientId: string | null;
   period: string | null;
   count: number;
   totalGst: Money;
+  /** HELD only: rows held at ₹0 that are left out of the release queue; null otherwise. */
+  zeroHeldCount?: number | null;
   items: ReimbursementItem[];
 }
 
@@ -200,7 +205,7 @@ export default function GstReimbursementsPage() {
   const session = useAdminSession();
   const isGifsy = session.role === 'GIFSY_ADMIN';
 
-  const [statusFilter, setStatusFilter] = useState<ReimbursementStatus>('HELD');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('HELD');
   const [clientId, setClientId] = useState('');
   const [period, setPeriod] = useState('');
 
@@ -208,10 +213,22 @@ export default function GstReimbursementsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [releasingId, setReleasingId] = useState<string | null>(null);
+  // Request sequencing: only the LATEST request may write state — a slow response for an older filter (e.g. Held)
+  // arriving after a newer one (e.g. Released) is dropped, so the list never shows the wrong filter's rows.
+  const requestSeq = useRef(0);
+
+  // A filter change clears the old list at once (loading state) — never the previous filter's rows/totals under the
+  // new filter's labels during the 250 ms debounce + the fetch.
+  useEffect(() => {
+    setData(null);
+    setReleasingId(null);
+    setLoading(true);
+  }, [statusFilter, clientId, period]);
 
   const load = useCallback(async () => {
     // GIFSY-only surface: never fetch for a non-Gifsy session.
     if (!isGifsy) return;
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError('');
     const params = new URLSearchParams({ status: statusFilter });
@@ -220,6 +237,7 @@ export default function GstReimbursementsPage() {
     const res = await api.get<ReimbursementListResponse>(
       `/api/admin/gst-reimbursements?${params.toString()}`,
     );
+    if (seq !== requestSeq.current) return; // a newer request superseded this one
     if (res.success) {
       setData(res.data);
     } else {
@@ -268,10 +286,11 @@ export default function GstReimbursementsPage() {
         <select
           aria-label="Status"
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as ReimbursementStatus)}
+          onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
           className="text-xs border border-gray-200 rounded-lg px-3 py-2 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
         >
           <option value="HELD">Held (release queue)</option>
+          <option value="HELD_ZERO">Held at ₹0 (no GST to release)</option>
           <option value="RELEASED">Released</option>
         </select>
         <input
@@ -296,13 +315,29 @@ export default function GstReimbursementsPage() {
           <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
             <p className="text-[10px] text-gray-400 uppercase tracking-wide">Rows</p>
             <p className="text-base font-bold text-gray-900 mt-1">{data.count}</p>
-            <p className="text-[10px] text-gray-400">{statusFilter === 'HELD' ? 'awaiting release' : 'released'}</p>
+            <p className="text-[10px] text-gray-400">
+              {statusFilter === 'HELD' ? 'awaiting release' : statusFilter === 'HELD_ZERO' ? 'held at ₹0 — nothing to release' : 'released'}
+            </p>
           </div>
           <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
             <p className="text-[10px] text-gray-400 uppercase tracking-wide">Total GST</p>
             <p className="text-base font-bold text-gray-900 mt-1">{money(data.totalGst)}</p>
             <p className="text-[10px] text-gray-400">held-back GST value</p>
           </div>
+        </div>
+      )}
+
+      {/* ₹0 held rows are left out of the release queue — say so, and where to see them. */}
+      {data && statusFilter === 'HELD' && (data.zeroHeldCount ?? 0) > 0 && (
+        <div
+          className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-xs text-blue-800"
+          data-testid="gst-reimb-zero-note"
+        >
+          <Info className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+          <span>
+            {data.zeroHeldCount} {data.zeroHeldCount === 1 ? 'row has' : 'rows have'} ₹0 GST held (nothing to release) —
+            shown under &lsquo;Held at ₹0&rsquo;.
+          </span>
         </div>
       )}
 
@@ -323,7 +358,11 @@ export default function GstReimbursementsPage() {
           <div className="py-16 flex flex-col items-center gap-2 text-gray-400" data-testid="gst-reimb-empty">
             <Receipt className="w-8 h-8" />
             <p className="text-sm">
-              {statusFilter === 'HELD' ? 'No GST reimbursements awaiting release' : 'No released GST reimbursements'}
+              {statusFilter === 'HELD'
+                ? 'No GST reimbursements awaiting release'
+                : statusFilter === 'HELD_ZERO'
+                  ? 'No held rows at ₹0'
+                  : 'No released GST reimbursements'}
             </p>
           </div>
         ) : (
@@ -362,7 +401,9 @@ export default function GstReimbursementsPage() {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right">
-                        {it.status === 'HELD' ? (
+                        {it.status === 'HELD' && it.gst.paise === '0' ? (
+                          <span className="text-[10px] text-gray-400 whitespace-nowrap">Nothing to release</span>
+                        ) : it.status === 'HELD' ? (
                           <button
                             onClick={() => setReleasingId(releasingId === it.id ? null : it.id)}
                             className="text-[10px] px-2 py-1 rounded bg-[var(--brand-primary)] text-white font-semibold hover:opacity-90 whitespace-nowrap"
@@ -374,7 +415,7 @@ export default function GstReimbursementsPage() {
                         )}
                       </td>
                     </tr>
-                    {releasingId === it.id && it.status === 'HELD' && (
+                    {releasingId === it.id && it.status === 'HELD' && it.gst.paise !== '0' && (
                       <tr>
                         <td colSpan={7} className="p-0">
                           <ReleaseForm
