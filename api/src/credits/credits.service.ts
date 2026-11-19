@@ -13,7 +13,6 @@ import {
   computeDeduction,
   computeGrossUpTdsInvoiceBasePaise,
   allocateProRataRecovery,
-  withholdingTdsPaise,
 } from '../tds/tds-methodology.helper';
 import { financialYear, grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, type ResolvedTdsStatutory } from '../tds/tds.helpers';
 import {
@@ -39,6 +38,7 @@ function boundedList(items: string[], max = 20): string {
 
 // The (client, FY) 194R advisory-lock key — shared with the reversal engine's TDS-credit code.
 import { r194LockKey } from './r194-lock';
+import { assertNoPaid194C, isPaid194C, visibilityFieldIdsOf } from './reversal-194c';
 
 /**
  * A-M3: take every advisory lock in ONE round-trip — a single SELECT over the (already sorted) key
@@ -62,7 +62,6 @@ function r194RetailerKey(
 import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
 import {
   deductWithCredits,
-  inDeductorScope,
   istDate,
   loadOpenTdsCredits,
   maskPan,
@@ -392,9 +391,26 @@ export class CreditsService {
     entryIds: string[],
     /** A-M2: extra FYs whose 194R base this write changes (e.g. the bank-file FY of a FAILED 194R entry). */
     extra194RFys: string[] = [],
+    /** Audit B6: entries whose LIVE TDS-credit applications this write may release — their credits' keys too. */
+    creditEntryIds: string[] = [],
   ): Promise<void> {
-    const keys = await this.tdsLockKeysForEntries(tx, clientId, entryIds, extra194RFys);
-    if (keys.length) await lockAdvisoryKeys(tx, keys);
+    const keys = new Set(await this.tdsLockKeysForEntries(tx, clientId, entryIds, extra194RFys));
+    if (creditEntryIds.length > 0) {
+      const apps = await tx.tdsCreditApplication.findMany({
+        where: { payoutEntryId: { in: creditEntryIds }, releasedAt: null },
+        select: { tdsCredit: { select: { section: true, panNumber: true, fyLabel: true } } },
+      });
+      for (const a of apps ?? []) {
+        const c = a.tdsCredit;
+        if (!c?.fyLabel) continue;
+        if (c.section === TdsSection.SEC_194C) {
+          if (c.panNumber?.trim()) keys.add(`PAN|${c.panNumber.trim().toUpperCase()}|${c.fyLabel}`);
+        } else {
+          keys.add(r194LockKey(clientId, c.fyLabel));
+        }
+      }
+    }
+    if (keys.size) await lockAdvisoryKeys(tx, [...keys].sort());
   }
 
   /** The keys lock194RForEntries takes (sorted) — also merged into a V2 reversal approval's single lock statement. */
@@ -673,79 +689,20 @@ export class CreditsService {
   }
 
   /**
-   * Fix round B (H1 / D1 / D3) — the TDS position AFTER a reversed PAID entry left the base (the caller marked it
-   * `tdsBaseReversedAt` first and holds the advisory lock). Feeds `reversalCreditCap`:
+   * Fix round B (H1 / D1 / D3) — the 194R TDS position AFTER a reversed PAID entry left the base (the caller marked it
+   * `tdsBaseReversedAt` first and holds the `R194|client|FY` lock). Feeds `reversalCreditCap`:
    *   surplus = Σ ledger − Σ outstanding credits − TDS due on the remaining base.
-   *  - 194R (merge decision A, 2026-11-19): the SHIPPED whole-year definition — `collect194RBases` (D1 filter inside)
-   *    for this client / retailer key / FY, TDS due = `liability194R(…, CURRENT method).deductPartPaise` (the very
-   *    figure the 194R report shows), ledger = `deducted194RByRetailer`, credits = this client's open 194R credits.
-   *  - 194C: committed (PAID | PROCESSING) visibility entries of the PAN's outlets in the period FY, every tenant
-   *    (Gifsy deducts), but only THIS tenant's engine-reversed entries leave the base (merge decision 2026-11-19 —
-   *    exactly the view this tenant's next download plan takes); threshold on the COMBINED base + single payment;
-   *    ledger across tenants; outstanding credits of every tenant on the PAN (all of them are TDS in that ledger).
+   * Merge decision A (2026-11-19): the SHIPPED whole-year definition (panPosition194R). Owner D1 (2026-11-19): a PAID
+   * 194C payout can't be reversed, so there is no 194C position (refused earlier — never reached).
    */
   private async panPositionForReversal(
     db: Prisma.TransactionClient,
     q: { pan: string; section: TdsSection; fyLabel: string; clientId: string; reversedAmountPaise: bigint },
   ): Promise<PanCreditPosition> {
-    if (q.section === TdsSection.SEC_194R) return this.panPosition194R(db, q);
-    const startYear = parseInt(q.fyLabel.slice(0, 4), 10);
-    const startPeriod = `${startYear}-04`;
-    const endPeriod = `${startYear + 1}-03`;
-    const cfg = await this.statutory.getForFy(q.fyLabel);
-    const partners = await db.channelPartner.findMany({
-      where: { panNumber: q.pan, isParent: false },
-      select: { id: true, entityType: true },
-    });
-    const partnerIds = (partners ?? []).map((p) => p.id);
-    const outlets = partnerIds.length
-      ? await db.outlet.findMany({ where: { partnerId: { in: partnerIds } }, select: { outletCode: true, clientId: true } })
-      : [];
-    const keys = new Set((outlets ?? []).map((o) => `${o.clientId}|${o.outletCode}`));
-    let combined = 0n;
-    let deductBase = 0n;
-    let maxSingle = 0n;
-    if (keys.size > 0) {
-      const entries = await db.creditPayoutEntry.findMany({
-        where: {
-          tdsSection: q.section,
-          status: { in: ['PAID', 'PROCESSING'] },
-          period: { gte: startPeriod, lte: endPeriod },
-          outletId: { in: [...new Set((outlets ?? []).map((o) => o.outletCode))] },
-          NOT: { tdsBaseReversedAt: { not: null }, clientId: q.clientId },
-        },
-        select: { clientId: true, outletId: true, amountPaise: true, tdsMethodology: true },
-      });
-      for (const e of entries ?? []) {
-        if (!keys.has(`${e.clientId}|${e.outletId}`) || !inDeductorScope(q.section, q.clientId, e.clientId)) continue;
-        combined += e.amountPaise;
-        if (e.tdsMethodology === TdsMethodology.DEDUCT) deductBase += e.amountPaise;
-        if (e.amountPaise > maxSingle) maxSingle = e.amountPaise;
-      }
+    if (q.section !== TdsSection.SEC_194R) {
+      throw new BadRequestException("194C payouts can't be reversed once paid");
     }
-    const ledgerRows = await db.tdsDeductionEntry.findMany({
-      where: { panNumber: q.pan, section: q.section, fyLabel: q.fyLabel },
-      select: { clientId: true, tdsDeductedThisPaise: true },
-    });
-    const ledgerPaise = (ledgerRows ?? [])
-      .filter((r) => inDeductorScope(q.section, q.clientId, r.clientId))
-      .reduce((s, r) => s + r.tdsDeductedThisPaise, 0n);
-    const credits = await loadOpenTdsCredits(db, { pans: [q.pan], sections: [q.section], fyLabel: q.fyLabel });
-    const outstandingCreditsPaise = credits
-      .filter((c) => inDeductorScope(c.section, q.clientId, c.clientId))
-      .reduce((s, c) => s + (c.amountPaise - c.appliedPaise), 0n);
-    const entityType = (partners ?? []).find((p) => p.entityType)?.entityType ?? null;
-    const rate = this.tdsRateFor(q.section, true, entityType ? String(entityType) : null, cfg);
-    const thresholdMetAfter = this.tdsThresholdMet(q.section, combined, maxSingle, cfg);
-    const rev = q.reversedAmountPaise;
-    const thresholdMetBefore = this.tdsThresholdMet(q.section, combined + rev, rev > maxSingle ? rev : maxSingle, cfg);
-    return {
-      ledgerPaise,
-      outstandingCreditsPaise,
-      dueRemainingPaise: thresholdMetAfter ? withholdingTdsPaise(deductBase, rate) : 0n,
-      thresholdMetBefore,
-      thresholdMetAfter,
-    };
+    return this.panPosition194R(db, q);
   }
 
   /** 194R half of panPositionForReversal — the shipped whole-year definition, one client, one retailer key, one FY. */
@@ -968,11 +925,6 @@ export class CreditsService {
           status: { in: ['PAID', 'PROCESSING'] },
           period: { gte: startPeriod, lte: endPeriod },
           outletId: { in: [...priorOutletCodes] },
-          // WRE D1: a PAID entry reversed by the engine is no longer income — its base leaves the cumulative whether
-          // or not TDS was withheld (a credit, if any, carries the TDS deposited for it). Merge decision 2026-11-19:
-          // only for the tenant that reversed it — another programme's 194C figures (Deoleo) never move because of a
-          // V2 tenant's reversal (byte-identical). No engine reversals → no row excluded.
-          NOT: { tdsBaseReversedAt: { not: null }, clientId },
         },
         // FIX-D: tdsMethodology partitions the cumulative base for the AMOUNT math. A legacy row
         // with a null methodology only feeds the COMBINED threshold base (no such visibility rows
@@ -982,8 +934,6 @@ export class CreditsService {
       for (const pe of priorEntries) {
         const pan = outletKeyToPan.get(`${pe.clientId}${SEP}${pe.outletId}`);
         if (!pan || !pe.tdsSection) continue; // outletCode belongs to a different tenant's outlet
-        // Owner D4: 194R is deducted by the CLIENT → only this client's base counts; 194C (Gifsy) → every tenant.
-        if (!inDeductorScope(pe.tdsSection, clientId, pe.clientId)) continue;
         const ps = `${pan}${SEP}${pe.tdsSection}`;
         priorBaseByPS.set(ps, (priorBaseByPS.get(ps) ?? 0n) + pe.amountPaise);
         if (pe.amountPaise > (priorMaxSingleByPS.get(ps) ?? 0n)) priorMaxSingleByPS.set(ps, pe.amountPaise);
@@ -1002,30 +952,7 @@ export class CreditsService {
       }
     }
 
-    // Fix round B (D3): (PAN, section) pairs whose FY base lost an engine-reversed PAID entry OF THIS TENANT (merge
-    // decision 2026-11-19: tenant-scoped) — only these get the "less TDS: adjusted after a reversal" call-out.
-    // None → nothing changes.
-    const reversedPS = new Set<string>();
-    if (priorOutletCodes.size > 0) {
-      const reversedEntries = await db.creditPayoutEntry.findMany({
-        where: {
-          clientId,
-          tdsSection: { in: [...sectionSet] },
-          period: { gte: startPeriod, lte: endPeriod },
-          outletId: { in: [...priorOutletCodes] },
-          tdsBaseReversedAt: { not: null },
-        },
-        select: { clientId: true, outletId: true, tdsSection: true, tdsBaseReversedAt: true },
-      });
-      for (const re of reversedEntries ?? []) {
-        if (!re.tdsBaseReversedAt) continue;
-        const pan = outletKeyToPan.get(`${re.clientId}${SEP}${re.outletId}`);
-        if (!pan || !re.tdsSection || re.clientId !== clientId) continue;
-        reversedPS.add(`${pan}${SEP}${re.tdsSection}`);
-      }
-    }
-
-    // Running DEDUCT carry-forward (ledger, PAN/section/FY — every tenant for 194C, this client for 194R: D4).
+    // Running DEDUCT carry-forward (PAN/section/FY ledger — cross-tenant, 194C).
     const priorDeductedByPS = new Map<string, bigint>();
     if (panSet.size) {
       const ledgerRows = await db.tdsDeductionEntry.findMany({
@@ -1033,23 +960,8 @@ export class CreditsService {
         select: { clientId: true, panNumber: true, section: true, tdsDeductedThisPaise: true },
       });
       for (const lr of ledgerRows) {
-        if (!inDeductorScope(lr.section, clientId, lr.clientId)) continue;
         const ps = `${lr.panNumber}${SEP}${lr.section}`;
         priorDeductedByPS.set(ps, (priorDeductedByPS.get(ps) ?? 0n) + lr.tdsDeductedThisPaise);
-      }
-    }
-
-    // Open TDS credits on these PANs raised by THIS tenant (merge decision 2026-11-19: a credit is applied only by
-    // the client that raised it — 194C too; Deoleo never sees another programme's credit). None (and no reversed
-    // base) → every DEDUCT group below takes the unchanged path.
-    const creditsByPS = new Map<string, OpenTdsCredit[]>();
-    if (panSet.size) {
-      for (const c of await loadOpenTdsCredits(db, { pans: [...panSet], sections: [...sectionSet], fyLabel, clientId })) {
-        if (c.clientId !== clientId) continue;
-        const ps = `${c.panNumber}${SEP}${c.section}`;
-        const list = creditsByPS.get(ps) ?? [];
-        list.push(c);
-        creditsByPS.set(ps, list);
       }
     }
 
@@ -1066,7 +978,6 @@ export class CreditsService {
         select: { panNumber: true, section: true, clientId: true, tenantSharePaise: true },
       });
       for (const r of recRows) {
-        if (!inDeductorScope(r.section, clientId, r.clientId)) continue; // D4: 194R recovery is per client
         const ps = `${r.panNumber}${SEP}${r.section}`;
         recoveredByPS.set(ps, (recoveredByPS.get(ps) ?? 0n) + r.tenantSharePaise);
         let tmap = recoveredByPSByTenant.get(ps);
@@ -1110,66 +1021,27 @@ export class CreditsService {
 
       if (g.methodology === TdsMethodology.DEDUCT) {
         const priorDeducted = priorDeductedByPS.get(ps) ?? 0n;
-        const psCredits = creditsByPS.get(ps) ?? [];
-        if (psCredits.length === 0 && !reversedPS.has(ps)) {
-          // No TDS credit and no reversed base of THIS tenant on this PAN — exactly the shipped computation
-          // (every LEGACY tenant, Deoleo: byte-identical).
-          const { tdsDueCumulativePaise, tdsDeductThisPaise, carryForwardPaise } = computeDeduction({
-            cumulativeBasePaise: methodologyCumulativeBase, // FIX-D: DEDUCT-methodology base only
-            priorDeductedPaise: priorDeducted,
-            thisPayoutPaise: thisEventBase,
-            rate,
-            thresholdMetOnCumulative: thresholdMet, // FIX-D: combined per-PAN threshold
-          });
-          this.pushDeduction(plan, {
-            clientId,
-            panNumber: g.panNumber,
-            section: g.section,
-            fyLabel,
-            entries: g.entries,
-            eventBasePaise: thisEventBase,
-            cumulativeBasePaise: methodologyCumulativeBase,
-            rateNum: rate.num,
-            tdsDueCumulativePaise,
-            priorDeductedPaise: priorDeducted,
-            tdsDeductThisPaise,
-            carryForwardPaise,
-          });
-        } else {
-          // WRE: this tenant's own TDS credits applied FIFO + the D3 hand-back explained (tds-credit.ts). The
-          // withholding itself is computeDeduction(prior = ledger) exactly as in the branch above.
-          const priorDue =
-            reversedPS.has(ps) && this.tdsThresholdMet(g.section, priorBaseByPS.get(ps) ?? 0n, priorMaxSingle, cfg)
-              ? withholdingTdsPaise(priorBaseByPSM.get(psm) ?? 0n, rate)
-              : 0n;
-          const d = deductWithCredits({
-            clientId,
-            cumulativeBasePaise: methodologyCumulativeBase,
-            priorDeductedPaise: priorDeducted,
-            thisPayoutPaise: thisEventBase,
-            rate,
-            thresholdMetOnCumulative: thresholdMet,
-            entries: g.entries.map((e) => ({ id: e.id, amountPaise: e.amountPaise })),
-            credits: psCredits,
-            priorDuePaise: reversedPS.has(ps) ? priorDue : null,
-          });
-          this.recordCreditExplanation(plan, d, g.panNumber);
-          this.pushDeduction(plan, {
-            clientId,
-            panNumber: g.panNumber,
-            section: g.section,
-            fyLabel,
-            entries: g.entries,
-            eventBasePaise: thisEventBase,
-            cumulativeBasePaise: methodologyCumulativeBase,
-            rateNum: rate.num,
-            tdsDueCumulativePaise: d.tdsDueCumulativePaise,
-            priorDeductedPaise: priorDeducted,
-            tdsDeductThisPaise: d.withheldThisPaise,
-            carryForwardPaise: d.carryForwardPaise,
-            shareByEntry: new Map(d.perEntry.map((x): [string, bigint] => [x.entryId, x.withheldPaise])),
-          });
-        }
+        const { tdsDueCumulativePaise, tdsDeductThisPaise, carryForwardPaise } = computeDeduction({
+          cumulativeBasePaise: methodologyCumulativeBase, // FIX-D: DEDUCT-methodology base only
+          priorDeductedPaise: priorDeducted,
+          thisPayoutPaise: thisEventBase,
+          rate,
+          thresholdMetOnCumulative: thresholdMet, // FIX-D: combined per-PAN threshold
+        });
+        this.pushDeduction(plan, {
+          clientId,
+          panNumber: g.panNumber,
+          section: g.section,
+          fyLabel,
+          entries: g.entries,
+          eventBasePaise: thisEventBase,
+          cumulativeBasePaise: methodologyCumulativeBase,
+          rateNum: rate.num,
+          tdsDueCumulativePaise,
+          priorDeductedPaise: priorDeducted,
+          tdsDeductThisPaise,
+          carryForwardPaise,
+        });
       } else {
         // GROSS_UP — retailer paid full. FIX-1: at EACH crossing period, raise a monthly TOP-UP
         // TDS invoice for the DELTA = grossUp(cumulative) − Σ already-invoiced (recovery ledger),
@@ -1290,7 +1162,6 @@ export class CreditsService {
           tdsSection: { in: [...new Set([...noPanGroups.values()].map((g) => g.section))] },
           status: { in: ['PAID', 'PROCESSING'] },
           period: { gte: startPeriod, lte: endPeriod },
-          tdsBaseReversedAt: null, // fix round B (D1): engine-reversed income is not income (none → no-op)
         },
         select: { outletId: true, amountPaise: true, tdsSection: true },
       });
@@ -1821,6 +1692,15 @@ export class CreditsService {
             visibilityFieldIds: [...visibilityFieldIds],
           });
         }
+      }
+
+      // Audit B9 (deadlock-free lock order, design §5): on a SHADOW / V2 tenant a POINTS reversal locks its wallets in
+      // ascending id order — so the confirm takes every EXISTING target wallet's row lock up front in the SAME order
+      // (one statement) before crediting in CSV order. The credits themselves (order, amounts) are unchanged. LEGACY
+      // tenants (Deoleo) skip this: their reversal locks one wallet, so there is no lock cycle — and nothing changes.
+      if (pointsRows.length > 0 && reversalEngineMode && reversalEngineMode !== 'LEGACY') {
+        const codes = [...new Set(pointsRows.map((r) => r.outletId))];
+        await tx.$queryRaw`SELECT w."id" FROM "wallets" w JOIN "outlets" o ON o."partnerId" = w."partnerId" WHERE o."clientId" = ${user.clientId} AND o."outletCode" = ANY(${codes}::text[]) ORDER BY w."id" FOR UPDATE OF w`;
       }
 
       // ── POINTS rows → wallet creditEarn (gap #16) ────────────────────────
@@ -2509,6 +2389,9 @@ export class CreditsService {
         'No payout entries left to reverse for this outlet and field in this batch (all already reversed or recorded as a receivable)',
       );
     }
+    // Owner D1 (2026-11-19): a PAID 194C payout can't be reversed — prefer a fitting subset without one; refuse below
+    // when every fitting subset needs one.
+    const visIds = await visibilityFieldIdsOf(tx, clientId, open.map((e) => e.fieldId));
     const MAX_ENTRIES = 16;
     if (open.length > MAX_ENTRIES) {
       throw new BadRequestException(
@@ -2521,6 +2404,7 @@ export class CreditsService {
       let count = 0;
       let processing = 0;
       let paid = 0n;
+      let paid194C = 0;
       const idx: number[] = [];
       for (let i = 0; i < open.length; i++) {
         if (!(mask & (1 << i))) continue;
@@ -2529,11 +2413,12 @@ export class CreditsService {
         idx.push(i);
         if (open[i].status === 'PROCESSING') processing = 1;
         if (open[i].status === 'PAID') paid += open[i].amountPaise;
+        if (isPaid194C(open[i], visIds)) paid194C = 1;
       }
       if (sum !== amount) continue;
-      // Never pick an entry already with the bank if avoidable, then prefer cancelling unpaid
-      // entries over raising receivables, then the fewest entries, then the oldest.
-      const key = [processing, Number(paid), count, ...idx];
+      // Never a PAID 194C entry if avoidable (D1), never an entry already with the bank if avoidable, then prefer
+      // cancelling unpaid entries over raising receivables, then the fewest entries, then the oldest.
+      const key = [paid194C, processing, Number(paid), count, ...idx];
       const better =
         !best ||
         (() => {
@@ -2554,7 +2439,9 @@ export class CreditsService {
       );
     }
     const chosen = best.mask;
-    return open.filter((_e, i) => chosen & (1 << i));
+    const picked = open.filter((_e, i) => chosen & (1 << i));
+    assertNoPaid194C(picked, visIds); // D1 — at create AND at approve (the entry may have been paid in between)
+    return picked;
   }
 
   // ─── GET /v1/admin/credits/eligible-outlets ────────────────────────────────
@@ -3824,6 +3711,9 @@ export class CreditsService {
       // A-L: take the 194R retailer lock(s) of every withheld 194R entry in this download BEFORE any
       // flip / offset write — the same key the engine holds while it computes withholding.
       // A-M2: ANY 194R entry flipped here changes the 194R base of its bank-file FY → take that lock too.
+      // Audit B6: an entry whose TDS a credit covered (tdsDeductedPaise may be 0) gets its credit back if it FAILED —
+      // take that credit's lock too (194R `R194|client|FY` of the credit's FY), so a concurrent download / approval
+      // never reads a half-released credit. No credit applications (every tenant without V2 credits) → same keys.
       await this.lock194RForEntries(
         tx,
         user.clientId,
@@ -3831,6 +3721,7 @@ export class CreditsService {
         freshEntries.some((e) => e.tdsSection === TdsSection.SEC_194R)
           ? [financialYear(download.downloadedAt ?? new Date()).fyLabel]
           : [],
+        freshEntries.map((e) => e.id),
       );
 
       // GROUP per outlet: a download can hold several entries for one outlet (one per payout row at
@@ -4172,7 +4063,7 @@ export class CreditsService {
         tdsOffsetPaise: true,
         receivablePaise: true,
         tdsCreditPaise: true,
-        payoutEntry: { select: { status: true, period: true, createdAt: true } },
+        payoutEntry: { select: { status: true, period: true, createdAt: true, tdsDeductedPaise: true } },
       },
     });
     if (rows.length === 0) return reversals;
@@ -4189,6 +4080,10 @@ export class CreditsService {
         entryStatus: r.payoutEntry.status,
         period: r.payoutEntry.period,
         createdAt: r.payoutEntry.createdAt,
+        // Owner D2 / B4: a PAID payout FULLY withheld as TDS that the reversal marked REVERSED — not "cancelled".
+        ...(r.state === 'APPLIED_CANCELLED' && (r.payoutEntry.tdsDeductedPaise ?? 0n) >= r.amountPaise && r.amountPaise > 0n
+          ? { fullyWithheld: true }
+          : {}),
       });
       by.set(r.creditReversalId, list);
     }
@@ -4332,6 +4227,7 @@ export class CreditsService {
             offsetWithholding: (e) => this.offsetWithholdingOnReversal(tx, user.clientId, e),
             panPosition: (q) => this.panPositionForReversal(tx, q),
             tdsLockKeys: (ids) => this.tdsLockKeysForEntries(tx, user.clientId, ids),
+            currentMethodology194R: async () => (await this.tenantSettings.resolveTdsPolicy(user.clientId)).methodology,
           },
           reversal,
           {
@@ -4460,6 +4356,9 @@ export class CreditsService {
           // A-L4: any withheld entry (194R → per-client key; 194C → its per-PAN key). A non-withheld
           // reversal never changes a 194R base (PENDING/FAILED are not counted; PAID stays PAID).
           payoutEntries.filter((e) => (e.tdsDeductedPaise ?? 0n) > 0n).map((e) => e.id),
+          [],
+          // B6: a cancelled entry gives back the TDS credit it used — its credit's key too (no credits → nothing extra).
+          payoutEntries.map((e) => e.id),
         );
         for (const payoutEntry of payoutEntries) {
           let cur = {
@@ -4505,19 +4404,25 @@ export class CreditsService {
                     `entry ${payoutEntry.id} (PAID ${formatINR(cur.amountPaise)}, fully withheld as TDS — nothing reached the retailer) → REVERSED` +
                       (offset > 0n ? ` (withheld TDS ${formatINR(offset)} offset)` : ''),
                   );
-                  // Owner decision 3 (outcome summary, display only) — worded on what this path did.
-                  legacyOutcome?.cancelled.push({
-                    entryId: payoutEntry.id,
-                    amountPaise: Number(cur.amountPaise),
-                    wasStatus: 'PAID',
-                    tdsOffsetPaise: Number(offset),
-                    tdsNote:
-                      offset > 0n
-                        ? `fully withheld as TDS — withheld TDS ${formatINR(offset)} reversed in the TDS ledger`
-                        : 'fully withheld as TDS — nothing reached the retailer',
-                  });
+                  // Owner decision 3 (outcome summary, display only) — worded on what this path did. B4: a fully
+                  // withheld PAID payout is not "cancelled" — it was settled as TDS; reversed, nothing owed.
+                  if (legacyOutcome) {
+                    legacyOutcome.reversedWithheld = legacyOutcome.reversedWithheld ?? [];
+                    legacyOutcome.reversedWithheld.push({
+                      entryId: payoutEntry.id,
+                      amountPaise: Number(cur.amountPaise),
+                      tdsWithheldPaise: Number(withheld),
+                      tdsCreditPaise: 0,
+                      panMasked: null,
+                      tdsOffsetPaise: Number(offset),
+                      tdsNote:
+                        offset > 0n
+                          ? `fully withheld as TDS — withheld TDS ${formatINR(offset)} reversed in the TDS ledger`
+                          : 'fully withheld as TDS — withholding already reversed earlier (no second offset)',
+                    });
+                  }
                   legacyOutcome?.lines.push({
-                    kind: 'CANCELLED',
+                    kind: 'REVERSED_WITHHELD',
                     entryId: payoutEntry.id,
                     text:
                       `Entry reversed · ${formatINR(cur.amountPaise)} · the whole payout had been withheld as TDS, nothing reached the retailer — nothing owed` +
@@ -4595,12 +4500,20 @@ export class CreditsService {
                 // Policy round B: TDS credit this unpaid entry had used goes back (none on a tenant without credits).
                 const back = await releaseCreditApplications(tx, [payoutEntry.id], 'ENTRY_CANCELLED_BY_REVERSAL');
                 const backPaise = back.reduce((s, r) => s + r.amountPaise, 0n);
+                // B4: the same wording as the V2 path — never "no TDS withheld" when TDS was withheld but not offset.
+                const legacyWithheld = cur.tdsDeductedPaise;
                 legacyOutcome?.cancelled.push({
                   entryId: payoutEntry.id,
                   amountPaise: Number(cur.amountPaise),
                   wasStatus: cur.status,
                   tdsOffsetPaise: Number(offset),
-                  tdsNote: offset > 0n ? `withheld TDS ${formatINR(offset)} offset in the TDS ledger` : 'no TDS withheld',
+                  tdsNote: !offsetIt
+                    ? legacyWithheld > 0n
+                      ? `TDS ${formatINR(legacyWithheld)} stamped but no TDS section on the entry — not offset; check with Gifsy`
+                      : 'no TDS withheld'
+                    : offset > 0n
+                      ? `withheld TDS ${formatINR(offset)} offset in the TDS ledger`
+                      : `withheld TDS already offset earlier (or no PAN on the deduction) — no second offset`,
                 });
                 legacyOutcome?.lines.push({
                   kind: 'CANCELLED',

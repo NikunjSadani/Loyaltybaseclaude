@@ -10,7 +10,7 @@ import { approvalsPausedMessage, batchLineAmount, creditUnmappedMessage, unresol
 function attentionHarness(
   mode: 'LEGACY' | 'SHADOW' | 'V2' | 'BAD',
   pauseValue: unknown = undefined,
-  opts: { expiryRows?: any[]; refusalRows?: any[]; walletCount?: number } = {},
+  opts: { expiryRows?: any[]; refusalRows?: any[]; walletCount?: number; cappedRows?: any[] } = {},
 ) {
   const calls: Record<string, any[]> = {};
   const rec = (k: string, ret: unknown) =>
@@ -24,6 +24,9 @@ function attentionHarness(
   const pending = [{ id: 'w-n', partnerId: 'p-n', backfillStatus: null, backfillBlockedReason: null, backfillCheckedAt: null, partner: { businessName: 'Shop N' } }];
   const expiryRows = opts.expiryRows ?? [];
   const refusalRows = opts.refusalRows ?? [];
+  const cappedRows = opts.cappedRows ?? [];
+  const auditRows = (a: any) =>
+    a.where.entityType === 'POINTS_EXPIRY_FAILURE' ? expiryRows : a.where.entityType === 'POINTS_EXPIRY_OFFSET_CAPPED' ? cappedRows : refusalRows;
   const prisma = {
     wallet: {
       // `NOT` = the V2-flip "not prepared by the backfill" query (fix round A, M2)
@@ -58,8 +61,8 @@ function attentionHarness(
     },
     auditLog: {
       create: rec('auditLog.create', {}),
-      count: rec('auditLog.count', (a: any) => (a.where.entityType === 'POINTS_EXPIRY_FAILURE' ? expiryRows.length : refusalRows.length)),
-      findMany: rec('auditLog.findMany', (a: any) => (a.where.entityType === 'POINTS_EXPIRY_FAILURE' ? expiryRows : refusalRows)),
+      count: rec('auditLog.count', (a: any) => auditRows(a).length),
+      findMany: rec('auditLog.findMany', (a: any) => auditRows(a)),
     },
     client: { findFirst: rec('client.findFirst', (a: any) => (a.where.id === 'nope' ? null : { id: a.where.id })) },
     $queryRaw: rec('$queryRaw', []),
@@ -218,6 +221,23 @@ describe('fix round A — M1 attention call-outs', () => {
       metadata: { path: ['clientId'], equals: 'bajaj' },
       NOT: { metadata: { path: ['code'], equals: 'APPROVALS_PAUSED' } },
     });
+  });
+});
+
+describe('audit B8 (2026-11-19) — an expiry that repaid debt beyond the credit position is never log-only', () => {
+  it('is listed on the attention endpoint (this tenant, last 30 days) with the amount not booked and what to do', async () => {
+    const at = new Date();
+    const { svc, calls } = attentionHarness('V2', undefined, {
+      cappedRows: [{ createdAt: at, entityId: 'w9', metadata: { clientId: 'bajaj', walletId: 'w9', lotId: 'L9', batchId: 'B9', outletCode: 'O9', offsetNotRecorded: 40 } }],
+    });
+    const r = await svc.reversalAttention('bajaj');
+    expect(r.expiryOffsetCappedTotal).toBe(1);
+    expect(r.expiryOffsetCapped[0]).toMatchObject({
+      walletId: 'w9', lotId: 'L9', batchId: 'B9', outletCode: 'O9', offsetNotRecorded: 40,
+      action: expect.stringMatching(/a later reversal of that credit restores that much less debt/),
+    });
+    const capped = calls['auditLog.count'].map((a: any) => a.where).find((w: any) => w.entityType === 'POINTS_EXPIRY_OFFSET_CAPPED');
+    expect(capped).toMatchObject({ metadata: { path: ['clientId'], equals: 'bajaj' } });
   });
 });
 

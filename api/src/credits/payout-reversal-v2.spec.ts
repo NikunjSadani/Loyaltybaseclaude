@@ -495,7 +495,7 @@ describe.each(['LEGACY', 'SHADOW'] as const)('WP5 — %s tenant keeps the interi
 
   it('PAID entry with TDS withheld: receivable = NET received (shipped rule 7ba69566), no TDS credit — and said so', async () => {
     const s = setup(mode);
-    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT', tdsDeductedPaise: 600n });
+    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT', tdsDeductedPaise: 600n });
     s.db.t('tdsDeductionEntry').push({ id: 't2', creditPayoutEntryId: 'pe-a', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 600n, createdAt: new Date('2026-11-03') });
     const r = await s.service.createReversal(admin, 'b1', req(30_000));
     const done = (await approve(s, r.id)) as Row;
@@ -511,8 +511,8 @@ describe.each(['LEGACY', 'SHADOW'] as const)('WP5 — %s tenant keeps the interi
 
   it('PAID entry FULLY withheld as TDS: reversed, the withholding offset in its FY, nothing owed (shipped rule) — said so', async () => {
     const s = setup(mode);
-    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT', tdsDeductedPaise: 30_000n, utr: 'TDS-WITHHELD-X' });
-    s.db.t('tdsDeductionEntry').push({ id: 't3', clientId: TENANT, creditPayoutEntryId: 'pe-a', panNumber: 'ABCDE1234F', section: 'SEC_194C', fyLabel: '2026-27', tdsDeductedThisPaise: 30_000n, createdAt: new Date('2026-11-03') });
+    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT', tdsDeductedPaise: 30_000n, utr: 'TDS-WITHHELD-X' });
+    s.db.t('tdsDeductionEntry').push({ id: 't3', clientId: TENANT, creditPayoutEntryId: 'pe-a', panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: '2026-27', tdsDeductedThisPaise: 30_000n, createdAt: new Date('2026-11-03') });
     const r = await s.service.createReversal(admin, 'b1', req(30_000));
     const done = (await approve(s, r.id)) as Row;
     expect(s.e('pe-a')).toMatchObject({ status: 'REVERSED', tdsDeductedPaise: 0n });
@@ -713,13 +713,14 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
     expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_CANCELLED' }]);
   });
 
-  it('T-pay5 TDS offset: an unpaid entry’s withholding is offset ONCE; a PAID entry gets none (receivable only)', async () => {
+  it('T-pay5 TDS offset: an unpaid entry’s withholding is offset ONCE; a PAID 194R entry gets none (receivable + credit); 194C PAID is refused (D1)', async () => {
     const s = setup(mode);
+    s.settings.resolveTdsPolicy.mockImplementation(async () => ({ section: 'SEC_194R', methodology: 'DEDUCT' })); // A5
     Object.assign(s.e('pe-b'), { status: 'FAILED', tdsSection: 'SEC_194C', tdsDeductedPaise: 1_000n });
-    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194C', tdsDeductedPaise: 600n });
+    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194R', tdsDeductedPaise: 600n });
     s.db.t('tdsDeductionEntry').push(
       { id: 't1', clientId: TENANT, section: 'SEC_194C', fyLabel: '2026-27', creditPayoutEntryId: 'pe-b', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 1_000n, createdAt: new Date('2026-11-03') },
-      { id: 't2', clientId: TENANT, section: 'SEC_194C', fyLabel: '2026-27', creditPayoutEntryId: 'pe-a', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 600n, createdAt: new Date('2026-11-03') },
+      { id: 't2', clientId: TENANT, section: 'SEC_194R', fyLabel: '2026-27', creditPayoutEntryId: 'pe-a', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 600n, createdAt: new Date('2026-11-03') },
     );
     const r = await s.service.createReversal(admin, 'b1', req(80_000, ['pe-a', 'pe-b']));
     await approve(s, r.id);
@@ -739,7 +740,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   it('T-pay5 call-outs: the approval result names each TDS outcome (offset / not reversed on a paid entry)', async () => {
     const s = setup(mode);
     Object.assign(s.e('pe-b'), { status: 'FAILED', tdsSection: 'SEC_194C', tdsDeductedPaise: 1_000n });
-    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194C', tdsDeductedPaise: 600n });
+    Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194R', tdsDeductedPaise: 600n });
     s.db.t('tdsDeductionEntry').push({ id: 't1', creditPayoutEntryId: 'pe-b', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 1_000n, createdAt: new Date('2026-11-03') });
     const r = await s.service.createReversal(admin, 'b1', req(80_000, ['pe-a', 'pe-b']));
     const done = (await approve(s, r.id)) as Row;
@@ -877,6 +878,25 @@ describe('planPayoutAllocationBackfill (pure)', () => {
     ]);
   });
 
+  it('audit B2: a PAID entry with TDS withheld records the NET receivable (amount − TDS withheld), as prod 7ba69566 approves it', () => {
+    const plan = planPayoutAllocationBackfill({
+      reversals: [R('r1', { approvedPaise: 300n, shortfallPaise: 294n, consumedPayoutEntryIds: ['a'] })],
+      entries: [E('a', 300n, 'PAID', '2026-11-01', { tdsDeductedPaise: 6n })],
+      existingAllocations: [],
+    });
+    expect(plan.flags).toEqual([]); // shortfall 294 = net → no SHORTFALL_MISMATCH
+    expect(plan.allocations).toEqual([
+      { creditReversalId: 'r1', payoutEntryId: 'a', amountPaise: 300n, state: 'APPLIED_RECEIVABLE', tdsOffsetPaise: 0n, receivablePaise: 294n, tdsCreditPaise: 0n },
+    ]);
+    // an approval from before 7ba69566 recorded the GROSS amount → flagged (WARNING), the row still records the net
+    const old = planPayoutAllocationBackfill({
+      reversals: [R('r2', { approvedPaise: 300n, shortfallPaise: 300n, consumedPayoutEntryIds: ['a'] })],
+      entries: [E('a', 300n, 'PAID', '2026-11-01', { tdsDeductedPaise: 6n })],
+      existingAllocations: [],
+    });
+    expect(old.flags.map((f) => [f.code, f.severity])).toEqual([['SHORTFALL_MISMATCH', 'WARNING']]);
+  });
+
   it('flags double consumption (first approved wins), a missing / unsettled entry and an amount mismatch — no rows for them', () => {
     const plan = planPayoutAllocationBackfill({
       reversals: [
@@ -950,6 +970,12 @@ describe('planPayoutAllocationBackfill (pure)', () => {
 const PAN = 'ABCDE1234F';
 const FY = '2026-27';
 
+/**
+ * Owner D1 (2026-11-19): a PAID 194C payout can't be reversed, so the TDS-credit path is 194R only. This fixture is
+ * 194R on the SHIPPED whole-year definition: the client's CURRENT method is DEDUCT (only then is 194R visibility
+ * withheld and — audit A5 — only then is a credit created), the PAID payouts went through a bank file made in FY
+ * 2026-27, 10% with a PAN, ₹20,000 FY limit.
+ */
 function visSetup() {
   const s = setup('V2');
   const db = s.db;
@@ -965,17 +991,21 @@ function visSetup() {
   const o1 = db.t('outlet').find((o) => o.outletCode === 'O1')!;
   o1.partnerId = 'p1';
   Object.assign(o1.partner, { panNumber: PAN, entityType: 'INDIVIDUAL' });
-  db.t('channelPartner').push({ id: 'p1', panNumber: PAN, isParent: false, entityType: 'INDIVIDUAL' });
+  db.t('channelPartner').push({ id: 'p1', clientId: TENANT, panNumber: PAN, isParent: false, entityType: 'INDIVIDUAL' });
+  s.settings.resolveTdsPolicy.mockImplementation(async () => ({ section: 'SEC_194R', methodology: 'DEDUCT' }));
+  db.t('creditPayoutDownload').push({ id: 'dl-old', clientId: TENANT, downloadCode: 'OLD', downloadedAt: new Date('2026-11-01T06:00:00Z') });
   const vis = (id: string, batchId: string, amountPaise: bigint, status: string, extra: Row = {}) =>
     entry(id, amountPaise, status, {
-      batchId, fieldId: 'fv', fieldName: 'Visibility', tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT', ...extra,
+      batchId, fieldId: 'fv', fieldName: 'Visibility', tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT', ...extra,
     });
-  // va: ₹40,000 PAID with ₹400 (1%) withheld + booked in the TDS ledger under the PAN.
-  db.t('creditPayoutEntry').push(vis('va', 'b2', 4_000_000n, 'PAID', { tdsDeductedPaise: 40_000n }));
-  db.t('tdsDeductionEntry').push({
-    id: 'led-va', clientId: TENANT, panNumber: PAN, section: 'SEC_194C', fyLabel: FY, creditPayoutEntryId: 'va',
-    tdsDeductedThisPaise: 40_000n, createdAt: new Date('2026-11-01'),
-  });
+  const led = (entryId: string, paise: bigint, clientId = TENANT) =>
+    db.t('tdsDeductionEntry').push({
+      id: `led-${entryId}-${db.t('tdsDeductionEntry').length}`, clientId, panNumber: PAN, section: 'SEC_194R', fyLabel: FY,
+      creditPayoutEntryId: entryId, tdsDeductedThisPaise: paise, createdAt: new Date('2026-11-01'),
+    });
+  // va: ₹40,000 PAID (year ₹40,000 > ₹20,000) with ₹4,000 (10%) withheld + booked in the TDS ledger under the PAN.
+  db.t('creditPayoutEntry').push(vis('va', 'b2', 4_000_000n, 'PAID', { tdsDeductedPaise: 400_000n }));
+  led('va', 400_000n);
   const visDownload = () =>
     s.service.createPayoutDownload(gifsy, { period: '2026-10', groupType: PayoutGroupType.SEPARATE, fieldId: 'fv', fieldName: 'Visibility' });
   const reverse = async (batchId: string, ids: string[], amount: number) => {
@@ -984,51 +1014,49 @@ function visSetup() {
   };
   const credit = () => db.t('tdsCredit');
   const apps = () => db.t('tdsCreditApplication');
-  const ledgerSum = () => db.t("tdsDeductionEntry").reduce((n: bigint, t) => n + (t.tdsDeductedThisPaise as bigint), 0n);
-  return { ...s, vis, visDownload, reverse, credit, apps, ledgerSum };
+  const ledgerSum = () => db.t('tdsDeductionEntry').reduce((n: bigint, t) => n + (t.tdsDeductedThisPaise as bigint), 0n);
+  const r194Locked = () =>
+    s.db.execCalls.some(
+      (c) => c.sql.includes('pg_advisory_xact_lock') && Array.isArray(c.values[0]) && (c.values[0] as string[]).includes(`R194|${TENANT}|${FY}`),
+    );
+  return { ...s, vis, led, visDownload, reverse, credit, apps, ledgerSum, r194Locked };
 }
 
-describe('Policy round B — reversing a PAID payout whose TDS was DEDUCTED (V2)', () => {
-  it('receivable = net received (₹39,600 of ₹40,000); ₹400 becomes a TDS credit on the PAN; said so; PAN lock taken', async () => {
+describe('Policy round B — reversing a PAID 194R payout whose TDS was DEDUCTED (V2)', () => {
+  it('receivable = net received (₹36,000 of ₹40,000); ₹4,000 becomes a TDS credit; said so; R194 client+FY lock taken', async () => {
     const s = visSetup();
     const { r, done } = await s.reverse('b2', ['va'], 4_000_000);
-    expect(s.e('va')).toMatchObject({ status: 'PAID', tdsDeductedPaise: 40_000n }); // entry untouched
-    expect(s.reversal(r.id).shortfallPaise).toBe(3_960_000n);
-    expect(done.clawbackShortfall).toBe(3_960_000);
-    expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_RECEIVABLE', receivablePaise: 3_960_000n, tdsCreditPaise: 40_000n }]);
+    expect(s.e('va')).toMatchObject({ status: 'PAID', tdsDeductedPaise: 400_000n }); // entry untouched
+    expect(s.reversal(r.id).shortfallPaise).toBe(3_600_000n);
+    expect(done.clawbackShortfall).toBe(3_600_000);
+    expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_RECEIVABLE', receivablePaise: 3_600_000n, tdsCreditPaise: 400_000n }]);
     expect(s.credit()).toMatchObject([
       {
-        clientId: TENANT, panNumber: PAN, section: 'SEC_194C', fyLabel: FY, sourcePayoutEntryId: 'va', creditReversalId: r.id,
-        amountPaise: 40_000n, appliedPaise: 0n, createdBy: 'gifsy-admin',
+        clientId: TENANT, panNumber: PAN, section: 'SEC_194R', fyLabel: FY, sourcePayoutEntryId: 'va', creditReversalId: r.id,
+        amountPaise: 400_000n, appliedPaise: 0n, createdBy: 'gifsy-admin',
       },
     ]);
-    expect(done.payoutOutcome.headline).toBe('Approved · ₹39,600.00 recorded as owed · ₹400.00 TDS credit carried forward');
+    expect(done.payoutOutcome.headline).toBe('Approved · ₹36,000.00 recorded as owed · ₹4,000.00 TDS credit carried forward');
     expect(done.payoutOutcome.lines).toEqual([
       {
         kind: 'RECEIVABLE',
         entryId: 'va',
         text:
-          'Recorded as owed · ₹39,600.00 (net of ₹400.00 TDS withheld from ₹40,000.00) · ₹400.00 TDS credit carried forward on PAN XXXXX1234F · ' +
+          'Recorded as owed · ₹36,000.00 (net of ₹4,000.00 TDS withheld from ₹40,000.00) · ₹4,000.00 TDS credit carried forward on PAN XXXXX1234F · ' +
           'PAN XXXXX1234F now below the TDS threshold',
       },
     ]);
     expect(done.payoutOutcome.receivable[0].tdsNote).toMatch(
-      /₹400\.00 TDS credit carried forward on PAN XXXXX1234F \(of ₹400\.00 withheld from this payout\)/,
+      /₹4,000\.00 TDS credit carried forward on PAN XXXXX1234F \(of ₹4,000\.00 withheld from this payout\)/,
     );
-    // the TDS ledger is NOT touched (the TDS stays deposited)
-    expect(s.ledgerSum()).toBe(40_000n);
-    // D1: the entry left the PAN's yearly TDS base (marker + reversal id)
-    expect(s.e('va').tdsBaseReversedAt).toBeInstanceOf(Date);
+    // A2: the note cites the 194R base of the bank-file FY
+    expect(done.payoutOutcome.receivable[0].tdsNote).toMatch(/taken off PAN XXXXX1234F's FY 2026-27 194R base \(the FY of its bank file\)/);
+    expect(s.ledgerSum()).toBe(400_000n); // the TDS stays deposited — the ledger is NOT touched
+    expect(s.e('va').tdsBaseReversedAt).toBeInstanceOf(Date); // D1: off the yearly base
     expect(s.e('va').tdsBaseReversalId).toBe(r.id);
-    // the bank download's PAN advisory lock serialises credit creation with downloads
-    expect(
-      s.db.execCalls.some(
-        (c) => c.sql.includes('pg_advisory_xact_lock') && Array.isArray(c.values[0]) && (c.values[0] as string[]).includes(`PAN|${PAN}|${FY}`),
-      ),
-    ).toBe(true);
-    // audit row carries the outcome
+    expect(s.r194Locked()).toBe(true);
     expect(s.db.t('auditLog').find((a) => a.action === 'APPROVE')!.metadata).toMatchObject({
-      tdsCreditPaise: 40_000, receivablePaise: 3_960_000,
+      tdsCreditPaise: 400_000, receivablePaise: 3_600_000,
     });
   });
 
@@ -1052,48 +1080,61 @@ describe('Policy round B — reversing a PAID payout whose TDS was DEDUCTED (V2)
     );
   });
 
-  it('next payout: TDS due ₹500, ₹400 adjusted from the credit, only ₹100 withheld — file, entry, ledger, audit, notice', async () => {
+  it('A5: the client is on GROSS_UP now → no credit (it could never be used); the withheld TDS stays the flagged excess — said so', async () => {
+    const s = visSetup();
+    s.settings.resolveTdsPolicy.mockImplementation(async () => ({ section: 'SEC_194R', methodology: 'GROSS_UP' }));
+    const { r, done } = await s.reverse('b2', ['va'], 4_000_000);
+    expect(s.credit()).toHaveLength(0);
+    expect(s.reversal(r.id).shortfallPaise).toBe(3_600_000n);
+    expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_RECEIVABLE', tdsCreditPaise: 0n }]);
+    expect(done.payoutOutcome.lines[0].text).toContain(
+      '₹4,000.00 withheld TDS not credited — the programme is on gross-up now; flagged as TDS taken in excess on the 194R report',
+    );
+    expect(done.payoutOutcome.receivable[0].tdsNote).toMatch(/stays on the 194R report as TDS taken in excess/);
+  });
+
+  it('next payout: TDS due ₹5,000, ₹4,000 adjusted from the credit, only ₹1,000 withheld — file, entry, ledger, audit, notice', async () => {
     const s = visSetup();
     await s.reverse('b2', ['va'], 4_000_000);
     s.db.t('creditPayoutEntry').push(s.vis('vb', 'b3', 5_000_000n, 'PENDING'));
     const dl = await s.visDownload();
-    expect(s.e('vb')).toMatchObject({ status: 'PROCESSING', tdsDeductedPaise: 10_000n });
+    expect(s.e('vb')).toMatchObject({ status: 'PROCESSING', tdsDeductedPaise: 100_000n });
     expect(dl.tdsCreditApplied).toEqual([
       {
-        entryId: 'vb', outletId: 'O1', outletName: 'Outlet One', duePaise: 50_000, creditPaise: 40_000, otherProgrammePaise: 0,
-        withheldPaise: 10_000, panMasked: 'XXXXX1234F',
-        note: 'TDS due ₹500.00 · ₹400.00 adjusted from earlier TDS credit · ₹100.00 withheld from this payout',
+        entryId: 'vb', outletId: 'O1', outletName: 'Outlet One', duePaise: 500_000, creditPaise: 400_000, otherProgrammePaise: 0,
+        withheldPaise: 100_000, panMasked: 'XXXXX1234F',
+        note: 'TDS due ₹5,000.00 · ₹4,000.00 adjusted from earlier TDS credit · ₹1,000.00 withheld from this payout',
       },
     ]);
-    expect(s.credit()[0].appliedPaise).toBe(40_000n);
-    expect(s.apps()).toMatchObject([{ payoutEntryId: 'vb', amountPaise: 40_000n, downloadId: dl.downloadId, releasedAt: null }]);
-    // the ledger records the NEW cash withheld; Σ deposited (₹400 + ₹100) = 1% of the income still standing (₹50,000)
-    expect(s.ledgerSum()).toBe(50_000n);
-    expect(s.db.t('creditPayoutDownload')[0].totalAmountPaise).toBe(4_990_000n);
+    expect(s.credit()[0].appliedPaise).toBe(400_000n);
+    expect(s.apps()).toMatchObject([{ payoutEntryId: 'vb', amountPaise: 400_000n, downloadId: dl.downloadId, releasedAt: null }]);
+    // the ledger records the NEW cash withheld; Σ deposited (₹4,000 + ₹1,000) = 10% of the income still standing (₹50,000)
+    expect(s.ledgerSum()).toBe(500_000n);
+    expect(s.db.t('creditPayoutDownload').find((d) => d.id !== 'dl-old')!.totalAmountPaise).toBe(4_900_000n);
     expect(s.db.t('auditLog').find((a) => a.entityType === 'TDS_CREDIT_APPLIED')).toMatchObject({ entityId: dl.downloadId, action: 'EXPORT' });
   });
 
-  it('partial use + carry forward: ₹310 due → all from credit (₹90 left); next ₹100 due → ₹90 credit + ₹10 withheld', async () => {
+  it('partial use + carry forward: ₹3,100 due → all from credit (₹900 left); next ₹1,000 due → ₹900 credit + ₹100 withheld', async () => {
     const s = visSetup();
     await s.reverse('b2', ['va'], 4_000_000);
     s.db.t('creditPayoutEntry').push(s.vis('vb', 'b3', 3_100_000n, 'PENDING'));
     const d1 = await s.visDownload();
     expect(s.e('vb').tdsDeductedPaise).toBe(0n);
-    expect(d1.tdsCreditApplied[0]).toMatchObject({ duePaise: 31_000, creditPaise: 31_000, withheldPaise: 0 });
-    expect(s.credit()[0].appliedPaise).toBe(31_000n); // ₹90 carried forward
+    expect(d1.tdsCreditApplied[0]).toMatchObject({ duePaise: 310_000, creditPaise: 310_000, withheldPaise: 0 });
+    expect(s.credit()[0].appliedPaise).toBe(310_000n); // ₹900 carried forward
     Object.assign(s.e('vb'), { status: 'PAID' }); // UTR recorded
     s.db.t('creditPayoutEntry').push(s.vis('vc', 'b4', 1_000_000n, 'PENDING'));
     const d2 = await s.visDownload();
-    expect(d2.tdsCreditApplied[0]).toMatchObject({ entryId: 'vc', duePaise: 10_000, creditPaise: 9_000, withheldPaise: 1_000 });
-    expect(s.e('vc').tdsDeductedPaise).toBe(1_000n);
-    expect(s.credit()[0].appliedPaise).toBe(40_000n); // fully used
-    expect(s.ledgerSum()).toBe(41_000n); // = 1% of the ₹41,000 income actually standing (va reversed)
+    expect(d2.tdsCreditApplied[0]).toMatchObject({ entryId: 'vc', duePaise: 100_000, creditPaise: 90_000, withheldPaise: 10_000 });
+    expect(s.e('vc').tdsDeductedPaise).toBe(10_000n);
+    expect(s.credit()[0].appliedPaise).toBe(400_000n); // fully used
+    expect(s.ledgerSum()).toBe(410_000n); // = 10% of the ₹41,000 income actually standing (va reversed)
     // a third payout gets no credit any more (and no notice)
     Object.assign(s.e('vc'), { status: 'PAID' });
     s.db.t('creditPayoutEntry').push(s.vis('vd', 'b4', 1_000_000n, 'PENDING'));
     const d3 = await s.visDownload();
     expect(d3.tdsCreditApplied).toEqual([]);
-    expect(s.e('vd').tdsDeductedPaise).toBe(10_000n);
+    expect(s.e('vd').tdsDeductedPaise).toBe(100_000n);
   });
 
   it('concurrency: a credit used by a racing download between plan and write → download rolled back; retry withholds in full', async () => {
@@ -1104,56 +1145,51 @@ describe('Policy round B — reversing a PAID payout whose TDS was DEDUCTED (V2)
     s.db.onDownloadCreate = () => {
       if (fired) return;
       fired = true;
-      s.credit()[0].appliedPaise = 40_000n; // another download used the whole credit
+      s.credit()[0].appliedPaise = 400_000n; // another download used the whole credit
     };
     await expect(s.visDownload()).rejects.toThrow(/TDS credit .* changed while the payout file was being built/);
     expect(s.e('vb')).toMatchObject({ status: 'PENDING', tdsDeductedPaise: 0n });
     expect(s.apps()).toHaveLength(0);
-    expect(s.db.t('creditPayoutDownload')).toHaveLength(0);
-    // The racing download committed (its writes survive our rollback): it paid vx ₹50,000 using the whole ₹400
-    // credit (+ ₹100 withheld). The retry sees no credit left and withholds vb's TDS in full.
-    s.db.t('creditPayoutEntry').push(s.vis('vx', 'b4', 5_000_000n, 'PROCESSING', { tdsDeductedPaise: 10_000n }));
-    s.db.t('tdsDeductionEntry').push({
-      id: 'led-vx', clientId: TENANT, panNumber: PAN, section: 'SEC_194C', fyLabel: FY, creditPayoutEntryId: 'vx',
-      tdsDeductedThisPaise: 10_000n, createdAt: new Date(),
-    });
+    // The racing download committed (its writes survive our rollback): it paid vx ₹50,000 using the whole ₹4,000
+    // credit (+ ₹1,000 withheld). The retry sees no credit left and withholds vb's TDS in full.
+    s.db.t('creditPayoutEntry').push(s.vis('vx', 'b4', 5_000_000n, 'PROCESSING', { tdsDeductedPaise: 100_000n }));
+    s.led('vx', 100_000n);
     s.db.t('tdsCreditApplication').push({
       id: 'app-vx', tdsCreditId: s.credit()[0].id, clientId: TENANT, payoutEntryId: 'vx', downloadId: 'dl-x',
-      amountPaise: 40_000n, releasedAt: null, releaseReason: null, createdAt: new Date(),
+      amountPaise: 400_000n, releasedAt: null, releaseReason: null, createdAt: new Date(),
     });
-    s.credit()[0].appliedPaise = 40_000n;
+    s.credit()[0].appliedPaise = 400_000n;
     const dl = await s.visDownload();
     expect(dl.tdsCreditApplied).toEqual([]);
-    expect(s.e('vb').tdsDeductedPaise).toBe(50_000n);
-    // never double-used: Σ deposited (₹400 + ₹100 + ₹500) = 1% of the ₹1,00,000 income standing (vx + vb)
-    expect(s.ledgerSum()).toBe(100_000n);
+    expect(s.e('vb').tdsDeductedPaise).toBe(500_000n);
+    // never double-used: Σ deposited (₹4,000 + ₹1,000 + ₹5,000) = 10% of the ₹1,00,000 income standing (vx + vb)
+    expect(s.ledgerSum()).toBe(1_000_000n);
     expect(s.apps()).toHaveLength(1);
   });
 
-  it('undo: the payout that used the credit is cancelled by a reversal → the credit comes back, and a later payout uses it', async () => {
+  it('undo: the payout that used the credit is cancelled by a reversal → the credit comes back (under its lock), and a later payout uses it', async () => {
     const s = visSetup();
     await s.reverse('b2', ['va'], 4_000_000);
     s.db.t('creditPayoutEntry').push(s.vis('vb', 'b3', 5_000_000n, 'PENDING'));
     await s.visDownload();
-    // the bank rejects vb (the UTR FAILED path clears the stamp + offsets the ₹100 in the ledger — simulated here)
+    // the bank rejects vb (the UTR FAILED path clears the stamp + offsets the ₹1,000 in the ledger — simulated here)
     Object.assign(s.e('vb'), { status: 'FAILED', tdsDeductedPaise: 0n });
-    s.db.t('tdsDeductionEntry').push({
-      id: 'neg-vb', clientId: TENANT, panNumber: PAN, section: 'SEC_194C', fyLabel: FY, creditPayoutEntryId: 'vb',
-      tdsDeductedThisPaise: -10_000n, createdAt: new Date(),
-    });
+    s.led('vb', -100_000n);
+    s.db.execCalls = [];
     const { done } = await s.reverse('b3', ['vb'], 5_000_000);
+    expect(s.r194Locked()).toBe(true); // the credit's lock, although vb carries no withholding any more
     expect(s.e('vb').status).toBe('REVERSED');
     expect(s.apps()).toMatchObject([{ payoutEntryId: 'vb', releaseReason: 'ENTRY_CANCELLED_BY_REVERSAL' }]);
     expect(s.apps()[0].releasedAt).toBeInstanceOf(Date);
     expect(s.credit()[0].appliedPaise).toBe(0n);
     expect(done.payoutOutcome.lines[0].text).toBe(
-      'Entry cancelled · ₹50,000.00 · will not be paid (the bank payment had failed) · ₹400.00 TDS credit it had used returned to the credit balance',
+      'Entry cancelled · ₹50,000.00 · will not be paid (the bank payment had failed) · ₹4,000.00 TDS credit it had used returned to the credit balance',
     );
     // a later payout re-applies it
     s.db.t('creditPayoutEntry').push(s.vis('vc', 'b4', 5_000_000n, 'PENDING'));
     const dl = await s.visDownload();
-    expect(dl.tdsCreditApplied[0]).toMatchObject({ entryId: 'vc', creditPaise: 40_000, withheldPaise: 10_000 });
-    expect(s.ledgerSum()).toBe(50_000n);
+    expect(dl.tdsCreditApplied[0]).toMatchObject({ entryId: 'vc', creditPaise: 400_000, withheldPaise: 100_000 });
+    expect(s.ledgerSum()).toBe(500_000n);
   });
 
   it('reversing a PAID payout that itself used a credit: the credit = its own withholding + the earlier credit it used', async () => {
@@ -1163,40 +1199,24 @@ describe('Policy round B — reversing a PAID payout whose TDS was DEDUCTED (V2)
     await s.visDownload();
     Object.assign(s.e('vb'), { status: 'PAID' });
     const { r, done } = await s.reverse('b3', ['vb'], 5_000_000);
-    expect(s.reversal(r.id).shortfallPaise).toBe(4_990_000n); // net received
+    expect(s.reversal(r.id).shortfallPaise).toBe(4_900_000n); // net received
     const c = s.credit().find((x) => x.sourcePayoutEntryId === 'vb')!;
-    expect(c.amountPaise).toBe(50_000n); // ₹100 withheld + ₹400 earlier credit — all deposited, all attributable to vb
+    expect(c.amountPaise).toBe(500_000n); // ₹1,000 withheld + ₹4,000 earlier credit — all deposited, all attributable to vb
     expect(done.payoutOutcome.receivable[0].tdsNote).toMatch(
-      /₹100\.00 withheld from this payout \+ ₹400\.00 earlier TDS credit that had been used for this payout/,
+      /₹1,000\.00 withheld from this payout \+ ₹4,000\.00 earlier TDS credit that had been used for this payout/,
     );
-    // no income left on the PAN → Σ open credit (₹500) = Σ deposited (₹500)
+    // no income left on the PAN → Σ open credit (₹5,000) = Σ deposited (₹5,000)
     const open = s.credit().reduce((n: bigint, x) => n + (x.amountPaise as bigint) - (x.appliedPaise as bigint), 0n);
     expect(open).toBe(s.ledgerSum());
   });
 
-  it('194C credit raised by ANOTHER programme is NOT used here (merge decision 2026-11-19: tenant-scoped, Deoleo byte-identical)', async () => {
-    const s = visSetup();
-    await s.reverse('b2', ['va'], 4_000_000);
-    s.credit()[0].clientId = 'deoleo'; // the credit was raised by another programme
-    s.db.t('creditPayoutEntry').push(s.vis('vb', 'b3', 5_000_000n, 'PENDING'));
-    const dl = await s.visDownload();
-    expect(dl.tdsCreditApplied).toEqual([]);
-    expect(s.credit()[0].appliedPaise).toBe(0n);
-    expect(s.apps()).toEqual([]);
-    const sum = await s.service.payoutDownloadSummary(gifsy, { period: '2026-10', groupType: 'SEPARATE', fieldId: 'fv' });
-    expect(sum).toMatchObject({ downloadId: dl.downloadId, tdsCreditApplied: { count: 0, paise: 0, lines: [] } });
-  });
-
   it('D4 — 194R (the client deducts): another client’s credit, ledger and base never count here', async () => {
     const s = visSetup();
-    as194R(s);
-    for (const e of s.db.t('creditPayoutEntry')) if (e.fieldId === 'fv') e.tdsSection = 'SEC_194R';
-    for (const l of s.db.t('tdsDeductionEntry')) l.section = 'SEC_194R';
     await s.reverse('b2', ['va'], 4_000_000);
-    expect(s.credit()).toMatchObject([{ section: 'SEC_194R', amountPaise: 40_000n }]);
+    expect(s.credit()).toMatchObject([{ section: 'SEC_194R', amountPaise: 400_000n }]);
     s.credit()[0].clientId = 'deoleo'; // now it is another client's credit (+ its deposit is another client's)
     for (const l of s.db.t('tdsDeductionEntry')) l.clientId = 'deoleo';
-    s.db.t('creditPayoutEntry').push(s.vis('vb', 'b3', 5_000_000n, 'PENDING', { tdsSection: 'SEC_194R' }));
+    s.db.t('creditPayoutEntry').push(s.vis('vb', 'b3', 5_000_000n, 'PENDING'));
     const dl = await s.visDownload();
     expect(dl.tdsCreditApplied).toEqual([]);
     expect(s.credit()[0].appliedPaise).toBe(0n);
@@ -1205,21 +1225,64 @@ describe('Policy round B — reversing a PAID payout whose TDS was DEDUCTED (V2)
   });
 });
 
+describe('Owner D1 (2026-11-19, every tenant): a 194C payout can not be reversed once PAID', () => {
+  const as194CPaid = (s: ReturnType<typeof setup>) => Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT' });
+
+  it.each(['LEGACY', 'SHADOW'] as const)('%s: a request that needs the PAID 194C entry is refused with the owner wording', async (mode) => {
+    const s = setup(mode);
+    as194CPaid(s);
+    await expect(s.service.createReversal(admin, 'b1', req(30_000))).rejects.toThrow(
+      /^194C payouts can't be reversed once paid — this payout \(₹300\.00\) already reached the retailer/,
+    );
+    // an unpaid entry of the same outlet + field still reverses as before
+    const r = await s.service.createReversal(admin, 'b1', req(50_000));
+    await approve(s, r.id);
+    expect(s.e('pe-b').status).toBe('REVERSED');
+    expect(s.e('pe-a').status).toBe('PAID');
+  });
+
+  it('LEGACY: an entry paid AFTER the request was raised is refused at approval (the admin rejects it instead)', async () => {
+    const s = setup('LEGACY');
+    Object.assign(s.e('pe-b'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT' });
+    const r = await s.service.createReversal(admin, 'b1', req(50_000));
+    Object.assign(s.e('pe-b'), { status: 'PAID' }); // the UTR came in meanwhile
+    await expect(approve(s, r.id)).rejects.toThrow(/194C payouts can't be reversed once paid/);
+    expect(s.reversal(r.id).status).toBe('PENDING_GIFSY');
+  });
+
+  it('LEGACY: a legacy visibility row with no frozen section is 194C by default — refused too', async () => {
+    const s = setup('LEGACY');
+    s.db.t('creditField').push({ id: 'f1', clientId: TENANT, payoutStream: 'VISIBILITY', isActive: true });
+    await expect(s.service.createReversal(admin, 'b1', req(30_000))).rejects.toThrow(/194C payouts can't be reversed once paid/);
+  });
+
+  it('V2: the picker shows the PAID 194C entry blocked with the reason; selecting it is refused; approve refuses one paid since', async () => {
+    const s = setup('V2');
+    as194CPaid(s);
+    const res = await s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' });
+    expect(res.entries.find((c) => c.id === 'pe-a')).toMatchObject({ selectable: false, blockedBy: 'PAID_194C' });
+    await expect(s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']))).rejects.toThrow(
+      /cannot be reversed: it is a paid 194C payout — 194C payouts can't be reversed once paid/,
+    );
+    Object.assign(s.e('pe-b'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT' });
+    const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
+    Object.assign(s.e('pe-b'), { status: 'PAID' });
+    await expect(approve(s, r.id)).rejects.toThrow(/194C payouts can't be reversed once paid/);
+    expect(s.allocs(r.id)).toMatchObject([{ state: 'RESERVED' }]);
+    expect(s.db.t('tdsCredit')).toHaveLength(0);
+    expect(s.e('pe-b').tdsBaseReversedAt).toBeNull();
+  });
+});
+
 /**
  * 194R on the SHIPPED whole-year definition (merge decision A, 2026-11-19): the client's CURRENT method is DEDUCT
  * (only then is 194R visibility withheld), and the PAID payouts went through a bank file made in FY 2026-27 (the
  * shared definition dates a payout by its bank file).
  */
-function as194R(s: ReturnType<typeof visSetup>) {
-  s.settings.resolveTdsPolicy.mockImplementation(async () => ({ section: 'SEC_194R', methodology: 'DEDUCT' }));
-  s.db.t('channelPartner').find((p) => p.id === 'p1')!.clientId = TENANT;
-  s.db.t('creditPayoutDownload').push({ id: 'dl-old', clientId: TENANT, downloadCode: 'OLD', downloadedAt: new Date('2026-11-01T06:00:00Z') });
-}
-
 // ─── Fix round B (owner 2026-11-16): H1 credit cap, D1 base always leaves, D3 hand-back visible, D5 remarks ───
+// (visSetup is 194R / DEDUCT / bank file in FY 2026-27 since the 2026-11-19 fix round.)
 function h1Setup(section: 'SEC_194R' | 'SEC_194C' = 'SEC_194R') {
   const s = visSetup();
-  if (section === 'SEC_194R') as194R(s);
   s.db.tables.creditPayoutEntry = s.db.t('creditPayoutEntry').filter((e) => e.id !== 'va');
   s.db.tables.tdsDeductionEntry = [];
   const led = (entryId: string, paise: bigint, clientId = TENANT) =>
@@ -1259,26 +1322,15 @@ describe('Fix round B — H1 / D1 / D3 / D4 / D5', () => {
     expect(s.ledgerSum()).toBe(350_000n);
   });
 
-  it('H1 cross-tenant (194C): this programme’s catch-up TDS covered Deoleo’s payouts on the PAN → only the drop in TDS due is credited', async () => {
+  it('owner D1: a PAID 194C payout can not be reversed on V2 either — no 194C credit, no 194C base change, ever', async () => {
     const s = h1Setup('SEC_194C');
-    // Deoleo: four ₹23,750 payouts (each below ₹30,000, Σ ₹95,000 < ₹1,00,000) on the same PAN, no TDS.
-    s.db.t('outlet').push({ clientId: 'deoleo', outletCode: 'D1', name: 'Deo One', isActive: true, partnerId: 'p1', partner: { panNumber: PAN } });
-    const deo = (id: string, amountPaise: bigint, extra: Row = {}) =>
-      entry(id, amountPaise, 'PAID', { clientId: 'deoleo', outletId: 'D1', batchId: 'bd', fieldId: 'fd', tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT', ...extra });
-    s.db.t('creditPayoutEntry').push(
-      deo('X1', 2_375_000n), deo('X2', 2_375_000n), deo('X3', 2_375_000n), deo('X4', 2_375_000n),
-      // Bajaj B ₹10,000 crosses ₹1,00,000 → 1% of ₹1,05,000 = ₹1,050 withheld from B (₹950 of it is Deoleo's catch-up)
-      s.vis('B', 'b2', 1_000_000n, 'PAID', { tdsSection: 'SEC_194C', tdsDeductedPaise: 105_000n }),
-      // Deoleo C ₹10,000 later → ₹100 withheld
-      deo('C', 1_000_000n, { tdsDeductedPaise: 10_000n }),
-    );
+    s.db.t('creditPayoutEntry').push(s.vis('B', 'b2', 1_000_000n, 'PAID', { tdsSection: 'SEC_194C', tdsDeductedPaise: 105_000n }));
     s.led('B', 105_000n);
-    s.led('C', 10_000n, 'deoleo');
-    const { done } = await s.reverse('b2', ['B'], 1_000_000);
-    // remaining ₹1,05,000 still owes ₹1,050; ₹1,150 deposited → only ₹100 is surplus → credit ₹100, ₹950 covers Deoleo's payouts
-    expect(s.credit()).toMatchObject([{ sourcePayoutEntryId: 'B', amountPaise: 10_000n }]);
-    expect(done.payoutOutcome.receivable[0]).toMatchObject({ tdsCreditPaise: 10_000, coversOtherPayoutsPaise: 95_000 });
-    expect(done.payoutOutcome.lines[0].text).toContain("₹950.00 of this TDS covers the retailer's other payouts — no credit");
+    await expect(
+      s.service.createReversal(admin, 'b2', { ...req(1_000_000, ['B']), originalPaise: 1_000_000, fieldId: 'fv', fieldName: 'Visibility' }),
+    ).rejects.toThrow(/194C payouts can't be reversed once paid/);
+    expect(s.db.t('tdsCredit')).toHaveLength(0);
+    expect(s.e('B').tdsBaseReversedAt).toBeNull();
   });
 
   it('D1 + D3: reversing a PAID payout with NO TDS still leaves the base; the PAN falls below the limit; the over-deduction is handed back on the next payout — visibly', async () => {
@@ -1314,33 +1366,71 @@ describe('Fix round B — H1 / D1 / D3 / D4 / D5', () => {
   });
 
   // ── Merge with 7ba69566 (2026-11-19) ──────────────────────────────────────────────────────────────────────────
-  it('merge decision 1: V2 reversal of a PAID entry FULLY withheld as TDS → the shipped rule: REVERSED, withholding offset in its original FY, no receivable, cancelled allocation', async () => {
+  // ── Owner D2 (2026-11-19): a FULLY withheld PAID 194R payout reversed on V2 → REVERSED, nothing owed, TDS credit ──
+  it('owner D2: V2 reversal of a PAID 194R entry FULLY withheld as TDS → REVERSED, nothing owed, the deposited TDS becomes a credit (no negative ledger row)', async () => {
     const s = h1Setup();
     s.db.t('creditPayoutEntry').push(
-      s.vis('W', 'b2', 1_000_000n, 'PAID', { ...s.sec, tdsDeductedPaise: 1_000_000n, utr: 'TDS-WITHHELD-DL1' }),
+      s.vis('A', 'b3', 1_900_000n, 'PAID', s.sec), // ₹19,000 — under the limit, no TDS
+      s.vis('W', 'b2', 150_000n, 'PAID', { ...s.sec, tdsDeductedPaise: 150_000n, utr: 'TDS-WITHHELD-DL1' }), // ₹1,500, all withheld
     );
-    s.led('W', 1_000_000n);
-    const { r, done } = await s.reverse('b2', ['W'], 1_000_000);
-    expect(s.e('W')).toMatchObject({ status: 'REVERSED', tdsDeductedPaise: 0n, tdsBaseReversedAt: null });
-    expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_CANCELLED', tdsOffsetPaise: 1_000_000n, receivablePaise: 0n, tdsCreditPaise: 0n }]);
-    expect(s.credit()).toHaveLength(0);
+    s.led('W', 150_000n);
+    const { r, done } = await s.reverse('b2', ['W'], 150_000);
+    // REVERSED, the TDS stamp + ledger kept (it is deposited), nothing owed
+    expect(s.e('W')).toMatchObject({ status: 'REVERSED', tdsDeductedPaise: 150_000n });
+    expect(s.ledgerSum()).toBe(150_000n);
+    expect(s.db.t('tdsDeductionEntry').some((x) => (x.tdsDeductedThisPaise as bigint) < 0n)).toBe(false);
     expect(s.reversal(r.id).shortfallPaise).toBe(0n);
-    // negative ledger row in the FY the withholding was booked in, under the retailer key it was withheld under
-    expect(s.db.t('tdsDeductionEntry').find((x) => x.tdsDeductedThisPaise === -1_000_000n)).toMatchObject({
-      fyLabel: FY, panNumber: PAN, section: 'SEC_194R', creditPayoutEntryId: 'W',
-    });
-    expect(s.ledgerSum()).toBe(0n);
-    // the R194 client+FY lock (the engine's / UTR path's key) is taken in the one sorted lock statement
-    expect(
-      s.db.execCalls.some(
-        (c) => c.sql.includes('pg_advisory_xact_lock') && Array.isArray(c.values[0]) && (c.values[0] as string[]).includes(`R194|${TENANT}|${FY}`),
-      ),
-    ).toBe(true);
-    expect(done.payoutOutcome.headline).toBe('Approved · 1 entry cancelled (₹10,000.00) — will not be paid');
-    expect(done.payoutOutcome.lines[0].text).toBe(
-      'Entry reversed · ₹10,000.00 · the whole payout had been withheld as TDS, nothing reached the retailer — nothing owed · ' +
-        'withheld TDS ₹10,000.00 reversed in the TDS ledger',
+    expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_CANCELLED', receivablePaise: 0n, tdsCreditPaise: 150_000n, tdsOffsetPaise: 0n }]);
+    expect(s.credit()).toMatchObject([{ sourcePayoutEntryId: 'W', amountPaise: 150_000n, section: 'SEC_194R', fyLabel: FY, panNumber: PAN }]);
+    expect(s.r194Locked()).toBe(true);
+    expect(done.payoutOutcome.headline).toBe(
+      'Approved · 1 fully-withheld payout reversed (₹1,500.00) — nothing reached the retailer, nothing owed · ₹1,500.00 TDS credit carried forward',
     );
+    expect(done.payoutOutcome.lines).toEqual([
+      {
+        kind: 'REVERSED_WITHHELD',
+        entryId: 'W',
+        text:
+          'Entry reversed · ₹1,500.00 · the whole payout had been withheld as TDS (₹1,500.00), nothing reached the retailer — nothing owed · ' +
+          '₹1,500.00 TDS credit carried forward on PAN XXXXX1234F — used against the next TDS so it is never deducted twice',
+      },
+    ]);
+    expect(done.payoutOutcome.cancelled).toEqual([]); // B4: not "cancelled"
+    expect(done.payoutOutcome.reversedWithheld).toMatchObject([{ entryId: 'W', tdsCreditPaise: 150_000 }]);
+    // the processed-reversals list marks it (B4) — "fully withheld", not "cancelled"
+    const list = await s.service.listReversals(gifsy, {});
+    expect((list.reversals as Row[]).find((x) => x.id === r.id)!.payoutEntries).toMatchObject([
+      { payoutEntryId: 'W', allocationState: 'APPLIED_CANCELLED', tdsCreditPaise: 150_000, fullyWithheld: true },
+    ]);
+  });
+
+  it('owner D2 worked example (Ramesh): ₹19,000 · ₹1,500 fully withheld, reversed · next ₹10,000 → ₹1,400 withheld → Ramesh gets ₹8,600 (not ₹7,100)', async () => {
+    const s = h1Setup();
+    s.db.t('creditPayoutEntry').push(
+      s.vis('A', 'b3', 1_900_000n, 'PAID', s.sec),
+      s.vis('W', 'b2', 150_000n, 'PAID', { ...s.sec, tdsDeductedPaise: 150_000n, utr: 'TDS-WITHHELD-DL1' }),
+    );
+    s.led('W', 150_000n);
+    await s.reverse('b2', ['W'], 150_000);
+    s.db.t('creditPayoutEntry').push(s.vis('N', 'b4', 1_000_000n, 'PENDING', s.sec));
+    const dl = await s.visDownload();
+    // year without W: ₹19,000 + ₹10,000 = ₹29,000 → ₹2,900 due; ₹1,500 already deposited (the credit) → ₹1,400 withheld
+    expect(s.e('N').tdsDeductedPaise).toBe(140_000n);
+    expect(dl.tdsCreditApplied).toEqual([expect.objectContaining({ entryId: 'N', duePaise: 290_000, creditPaise: 150_000, withheldPaise: 140_000 })]);
+    expect(1_000_000n - (s.e('N').tdsDeductedPaise as bigint)).toBe(860_000n); // Ramesh receives ₹8,600
+    // never deducted twice: Σ deposited ₹1,500 + ₹1,400 = ₹2,900 = 10% of the ₹29,000 standing
+    expect(s.ledgerSum()).toBe(290_000n);
+  });
+
+  it('owner D2 on GROSS_UP now (A5): REVERSED, nothing owed, NO credit — the withheld TDS stays the flagged excess, said so', async () => {
+    const s = h1Setup();
+    s.settings.resolveTdsPolicy.mockImplementation(async () => ({ section: 'SEC_194R', methodology: 'GROSS_UP' }));
+    s.db.t('creditPayoutEntry').push(s.vis('W', 'b2', 150_000n, 'PAID', { ...s.sec, tdsDeductedPaise: 150_000n }));
+    s.led('W', 150_000n);
+    const { done } = await s.reverse('b2', ['W'], 150_000);
+    expect(s.e('W').status).toBe('REVERSED');
+    expect(s.credit()).toHaveLength(0);
+    expect(done.payoutOutcome.lines[0].text).toMatch(/nothing owed · no TDS credit — .*stays on the 194R report as TDS taken in excess/);
   });
 
   it('194R credit lives in the ledger row FY under the R194 client+FY lock and is keyed on the ledger row key', async () => {

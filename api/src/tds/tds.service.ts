@@ -341,8 +341,6 @@ export interface TdsRow194C {
   recoveryByTenant: TdsRecoveryAttribution[]; // GROSS-UP per-tenant recovery split (report-only)
   /** See TdsRow194R.depositForPeriods. */
   depositForPeriods?: string[];
-  /** See TdsRow194R.reversal. */
-  reversal?: TdsRowReversal;
 }
 
 export interface TdsSummary194R {
@@ -646,6 +644,13 @@ export class TdsService {
             "retailer's share of the year's TDS on the current rules. Flagged only: no automatic refund.",
         );
       }
+      // Audit A4 (no silent pass-through): an open TDS credit lowers the excess — say so with its amount.
+      if (r.openTdsCreditPaise !== undefined && r.openTdsCreditPaise > 0n) {
+        notes.push(
+          `${formatINR(r.openTdsCreditPaise)} open TDS credit (TDS withheld on a reversed payout) — it is used against ` +
+            "this retailer's next 194R withholding, so it is not counted as excess.",
+        );
+      }
       if (r.carryForwardDroppedPaise > 0n) {
         notes.push(
           `A carry-forward of ${formatINR(r.carryForwardDroppedPaise)} is no longer due under the current rules and will not be withheld.`,
@@ -705,73 +710,6 @@ export class TdsService {
     });
 
     return rows;
-  }
-
-  /**
-   * Fix round B (D1): the PAID payouts an engine reversal took off the yearly base, in this FY + effective section,
-   * keyed exactly like the report rows (PAN, else the per-deductee no-PAN key). 194R: one client (`clientId`);
-   * 194C: every tenant (null). Imported (vendor) history never counts. One query when there are none.
-   */
-  private async reversedBaseByKey(
-    section: 'SEC_194C',
-    fyLabel: string,
-    clientId: string | null,
-    visibilityFieldIds: Set<string>,
-  ): Promise<Map<string, TdsRowReversal['items']>> {
-    const out = new Map<string, TdsRowReversal['items']>();
-    const { start, endExclusive } = fyFromLabel(fyLabel);
-    const { startPeriod, endPeriod } = periodWindowForFy(fyLabel);
-    const entries = await this.prisma.creditPayoutEntry.findMany({
-      where: {
-        ...(clientId ? { clientId } : {}),
-        status: 'PAID',
-        tdsBaseReversedAt: { not: null },
-        OR: [{ period: { gte: startPeriod, lte: endPeriod } }, { paidAt: { gte: start, lt: endExclusive } }],
-        batch: { OR: [{ sourceKind: null }, { sourceKind: { not: 'VENDOR_IMPORT' } }] },
-      },
-      select: {
-        clientId: true, outletId: true, amountPaise: true, period: true, paidAt: true, fieldId: true,
-        tdsSection: true, tdsBaseReversedAt: true, status: true,
-      },
-    });
-    const mine = (entries ?? []).filter((e) => {
-      if (!e.tdsBaseReversedAt || e.status !== 'PAID') return false;
-      const isVis = visibilityFieldIds.has(e.fieldId) || e.tdsSection === 'SEC_194C';
-      if (effectiveEntrySection(e.tdsSection, isVis) !== section) return false;
-      return isVis
-        ? fyLabelForPeriod(e.period) === fyLabel
-        : !!e.paidAt && e.paidAt >= start && e.paidAt < endExclusive;
-    });
-    if (mine.length === 0) return out;
-    const outlets = await this.prisma.outlet.findMany({
-      where: { outletCode: { in: [...new Set(mine.map((e) => e.outletId))] }, ...(clientId ? { clientId } : {}) },
-      select: { outletCode: true, clientId: true, partnerId: true },
-    });
-    const partnerOf = new Map(outlets.map((o) => [`${o.clientId}:${o.outletCode}`, o.partnerId]));
-    const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter(Boolean))] as string[];
-    const partners = partnerIds.length
-      ? await this.prisma.channelPartner.findMany({ where: { id: { in: partnerIds } }, select: { id: true, panNumber: true } })
-      : [];
-    const panOf = new Map(partners.map((p) => [p.id, p.panNumber]));
-    for (const e of mine) {
-      const partnerId = partnerOf.get(`${e.clientId}:${e.outletId}`) ?? null;
-      const pan = partnerId ? (panOf.get(partnerId) ?? null) : null;
-      // 194C only (194R reversed payouts come from collect194RBases' reversedSink — merge decision A).
-      const key = !isNoPanCell(pan) ? pan!.trim().toUpperCase() : noPanOutletKey(e.clientId, e.outletId);
-      const reversedAt = e.tdsBaseReversedAt!;
-      const list = out.get(key) ?? [];
-      list.push({
-        amountPaise: e.amountPaise,
-        reversedAt,
-        period: e.period,
-        outletCode: e.outletId,
-        clientId: e.clientId,
-        // M2: reversed after the payout's month closed → that month's TDS return may already be filed.
-        retroactive: reversedAt >= nextMonthStartIst(e.period),
-      });
-      out.set(key, list);
-    }
-    return out;
   }
 
   /**
@@ -945,8 +883,6 @@ export class TdsService {
         status: 'PAID',
         // FIX-4: bucket by payout PERIOD's FY (matches the ledger), not paidAt.
         period: { gte: startPeriod, lte: endPeriod },
-        // Fix round B (owner D1): a PAID entry an engine reversal took off the base is no longer income (none → no-op).
-        tdsBaseReversedAt: null,
         OR: [
           { fieldId: { in: [...visFieldIds] } },
           { tdsSection: 'SEC_194C' },
@@ -1238,32 +1174,6 @@ export class TdsService {
         unlinkedNoPanDeposit: true as const,
         ...depositPeriods.fieldFor(UNLINKED_NO_PAN_DEPOSIT_KEY),
       });
-    }
-    // Fix round B (D1/D3/M2): flag rows whose base lost engine-reversed payouts. A reversed-only PAN with no other
-    // amount still gets a base-0 row so the reversal is never silent. No reversals → no change.
-    const reversed194C = await this.reversedBaseByKey('SEC_194C', fyLabel, null, visFieldIds);
-    for (const [key, items] of reversed194C) {
-      let row = rows.find((r) => r.panNumber === key);
-      if (!row) {
-        row = {
-          panNumber: key, entityType: 'OTHERS', fyLabel, baseFyTotalPaise: 0n, maxSinglePaise: 0n, thresholdMet: false,
-          liabilityPaise: 0n, liabilityNoThresholdPaise: 0n, depositedPaise: 0n, outstandingPaise: 0n, methodology: null,
-          withheldPaise: 0n, recoveredPaise: 0n, recoveryByTenant: [],
-        };
-        rows.push(row);
-      }
-      const reversedPaise = items.reduce((s, i) => s + i.amountPaise, 0n);
-      const maxRev = items.reduce((m, i) => (i.amountPaise > m ? i.amountPaise : m), 0n);
-      const before =
-        (maxRev > row.maxSinglePaise ? maxRev : row.maxSinglePaise) > cfg.thr194cSinglePaise ||
-        row.baseFyTotalPaise + reversedPaise > cfg.thr194cFyPaise;
-      const extra: string[] = [];
-      // D3: TDS withheld this FY beyond what the PAN now owes → the next payout on this PAN withholds that much less.
-      const over = row.withheldPaise - row.liabilityPaise;
-      if (over > 0n) {
-        extra.push(`${formatINR(over)} TDS withheld beyond what is now due — handed back on the next payout on this PAN by the programme that reversed it`);
-      }
-      row.reversal = buildRowReversal(items, fyLabel, before && !row.thresholdMet, extra);
     }
     await this.attachNoPanDeductees(rows, null);
 
@@ -1958,6 +1868,8 @@ export class TdsService {
     }
 
     const outletCols = await this.outletColumns194R(clientId, rows, contributing, partners);
+    // Audit A4: the "Open TDS Credit" column only when a row has one (an export without WRE credits is unchanged).
+    const anyOpenCredit = rows.some((r) => r.openTdsCreditPaise !== undefined);
     const detailRows = rows.map((r, i) => {
       const hasPan = !isNoPanKey(r.panNumber);
       const deducteeName = hasPan ? (panToName.get(r.panNumber) ?? '') : noPanDeducteeName(r.noPanDeductee, r.unlinkedNoPanDeposit);
@@ -1985,6 +1897,7 @@ export class TdsService {
         'Deducted from Payouts So Far (₹)': moneyCell(r.deductedPaise),
         // Owner 2026-11-18: over-withholding is flagged (no automatic refund).
         'TDS Taken in Excess (₹)': moneyCell(r.excessDeductedPaise),
+        ...(anyOpenCredit ? { 'Open TDS Credit (₹)': moneyCell(r.openTdsCreditPaise ?? 0n) } : {}),
         'Already Deposited (₹)': moneyCell(r.depositedPaise),
         'of which Imported Vendor TDS (₹)': moneyCell(r.importedVendorDepositPaise),
         'Deposits — TDS for Month(s)': depositMonthsCell(r.depositForPeriods),

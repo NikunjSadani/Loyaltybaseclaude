@@ -102,26 +102,31 @@ describe('TdsReportsService', () => {
       expect(mockPrisma.tdsCredit.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { clientId: 'bajaj', fyLabel: '2026-27' } }),
       );
-      expect(res.tdsCredits.totals).toEqual({
+      expect(res.tdsCredits!.totals).toEqual({
         created: { paise: '40000', inr: 400 },
         applied: { paise: '31000', inr: 310 },
         outstanding: { paise: '9000', inr: 90 },
       });
-      expect(res.tdsCredits.rows[0]).toMatchObject({ sourceEntryId: 'va', outstanding: { paise: '9000', inr: 90 } });
-      expect(res.tdsCredits.rows[0].applications.map((a) => [a.entryId, a.released, a.releaseReason])).toEqual([
+      expect(res.tdsCredits!.rows[0]).toMatchObject({ sourceEntryId: 'va', outstanding: { paise: '9000', inr: 90 } });
+      expect(res.tdsCredits!.rows[0].applications.map((a) => [a.entryId, a.released, a.releaseReason])).toEqual([
         ['vb', false, null],
         ['vz', true, 'PAYOUT_FAILED'],
       ]);
       expect(() => JSON.stringify(res)).not.toThrow();
     });
 
-    it('policy round B: no credits → an empty section (count 0)', async () => {
+    it('audit B5: no credits (every LEGACY tenant, Deoleo) → no tdsCredits block and no clientName — the 7ba69566 response shape', async () => {
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e1', clientId: 'deoleo', outletId: 'O1', outletName: 'Shop', fieldName: 'Vis', period: '2026-11', amountPaise: 100000n,
+          status: 'PAID', tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT', tdsDeductedPaise: 1000n, autoInvoiceId: null, autoInvoice: null,
+          downloadId: null, tdsBaseReversedAt: null, reversalAllocations: [], tdsCreditApplications: [] },
+      ]);
       const res = await service.payoutReport({ clientId: 'deoleo' });
-      expect(res.tdsCredits).toEqual({
-        count: 0,
-        totals: { created: { paise: '0', inr: 0 }, applied: { paise: '0', inr: 0 }, outstanding: { paise: '0', inr: 0 } },
-        rows: [],
-      });
+      expect(res).not.toHaveProperty('tdsCredits');
+      expect(res.rows[0]).not.toHaveProperty('clientName');
+      // the screen's credits-only page still answers (empty) when asked for it explicitly
+      const page = await service.creditsOnly({ clientId: 'deoleo' }, { page: 1, limit: 20 });
+      expect(page.tdsCredits).toMatchObject({ count: 0, rows: [] });
     });
   });
 

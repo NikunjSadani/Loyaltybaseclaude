@@ -58,10 +58,10 @@ const CREDIT_ENTRY_SITES: Site[] = [
   },
   {
     file: 'credits/payout-reversal-v2.ts',
-    fingerprint: /where: \{ id: e\.id, status: 'PAID', tdsDeductedPaise: withheld \}/,
+    fingerprint: /where: \{ id: e\.id, status: 'PAID', tdsDeductedPaise: withheldPaise \}/,
     reason:
-      'WRE V2 reversal of a FULLY withheld entry (merge decision 1, the shipped rule): PAID → REVERSED — a status ' +
-      'change, guarded on the status + withholding read under the entry row lock',
+      'WRE V2 reversal of a FULLY withheld entry (owner D2 2026-11-19 — reversed, TDS credit, nothing owed): PAID → ' +
+      'REVERSED — a status change, guarded on the status + withholding read under the entry row lock',
   },
   {
     file: 'credits/payout-reversal-v2.ts',
@@ -155,7 +155,7 @@ describe('Digest recorded-time clocks — no code path rewrites a settled payout
     // PAID row and its status does not change — which is exactly why it is raw SQL: a Prisma update would bump
     // @updatedAt and re-count the old payment as paid today; a raw UPDATE leaves updatedAt alone.
     const reviewedMarker =
-      /UPDATE "credit_payout_entries" SET "tdsBaseReversedAt" = \$\{new Date\(\)\}, "tdsBaseReversalId" = \$\{ctx\.creditReversalId\} WHERE "id" = \$\{e\.id\} AND "tdsBaseReversedAt" IS NULL`/g;
+      /UPDATE "credit_payout_entries" SET "tdsBaseReversedAt" = \$\{new Date\(\)\}, "tdsBaseReversalId" = \$\{ctx\.creditReversalId\} WHERE "id" = \$\{e\.id\} AND "clientId" = \$\{e\.clientId\} AND "tdsBaseReversedAt" IS NULL`/g;
     const raw = /UPDATE\s+"?(credit_payout_entries|payout_transactions)"?/i;
     const hits = sourceFiles(SRC).filter((f) =>
       raw.test(fs.readFileSync(f, 'utf8').replace(reviewed, '').replace(reviewedMarker, '')),

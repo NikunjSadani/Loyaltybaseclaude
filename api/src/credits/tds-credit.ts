@@ -330,7 +330,7 @@ export async function releaseCreditApplications(
   const live = await tx.tdsCreditApplication.findMany({
     where: { payoutEntryId: { in: entryIds }, releasedAt: null },
     orderBy: { id: 'asc' },
-    select: { id: true, tdsCreditId: true, payoutEntryId: true, amountPaise: true },
+    select: { id: true, tdsCreditId: true, payoutEntryId: true, amountPaise: true, clientId: true },
   });
   const out: ReleasedApplication[] = [];
   for (const a of live ?? []) {
@@ -340,7 +340,7 @@ export async function releaseCreditApplications(
     });
     if (flip.count !== 1) continue; // released concurrently — nothing to give back twice
     const n = await tx.$executeRaw`UPDATE tds_credits SET "appliedPaise" = "appliedPaise" - ${a.amountPaise}, "updatedAt" = now()
-      WHERE id = ${a.tdsCreditId} AND "appliedPaise" >= ${a.amountPaise}`;
+      WHERE id = ${a.tdsCreditId} AND "appliedPaise" >= ${a.amountPaise} AND "clientId" = ${a.clientId}`; // B7: defence in depth
     if (n !== 1) throw new Error(`TDS credit ${a.tdsCreditId} is inconsistent (release of ${a.amountPaise} paise) — contact Gifsy`);
     out.push({ applicationId: a.id, tdsCreditId: a.tdsCreditId, payoutEntryId: a.payoutEntryId, amountPaise: a.amountPaise });
   }
@@ -410,59 +410,64 @@ export interface ReceivableTdsOutcome {
   belowThresholdAfterReversal: boolean;
   /** Withheld on the entry but not traceable to a PAN in the TDS ledger (e.g. imported history) — no credit. */
   untrackedWithheldPaise: bigint;
+  /** A5: what would have been a credit while the client's 194R method is GROSS_UP — left as the report's flagged excess. */
+  flaggedExcessPaise: bigint;
   note: string;
 }
 
 /**
- * The advisory-lock keys an entry's receivable needs (read-only), taken by the approve BEFORE any entry is processed,
- * all sorted together (deadlock-free against downloads and other approvals):
- *  - 194R (merge decision A, 2026-11-19): `R194|client|FY` for the FY whose base the entry counts in (its bank-file
- *    FY — D1 moves that base even when no TDS was withheld), every FY its withholding was booked in, and the FY of any
- *    credit it used — the same key the download engine and the UTR FAILED path take;
- *  - 194C: `PAN|pan|FY` for the PAN it was deducted under (ledger), the PAN of a credit it used, and the PAN its base
- *    counts under today (the outlet's partner), in the payout-period FY (unchanged 194C rule).
+ * The advisory-lock keys an entry's receivable / reversal credit needs (read-only), taken by the approve BEFORE any
+ * entry is processed, all sorted together (deadlock-free against downloads and other approvals).
+ *
+ * Every PAID entry that reaches here is 194R: owner D1 (2026-11-19) refuses a PAID 194C reversal earlier, and an
+ * incentive payout with no frozen section IS 194R in the base (effectiveEntrySection — audit A2), so it takes the
+ * same keys as the shipped 194R engine: `R194|client|FY` for the FY whose base the entry counts in (its bank-file FY),
+ * every FY its withholding was booked in, and the FY of any credit it used.
  */
 export async function receivablePanLockKeys(
   tx: Prisma.TransactionClient,
   e: { id: string; clientId: string; outletId: string; period: string; tdsSection?: TdsSection | null; baseFyLabel?: string },
 ): Promise<string[]> {
-  if (e.tdsSection === TdsSection.SEC_194R) {
-    const fys = new Set<string>([e.baseFyLabel ?? fyLabelOf(e.period)]);
-    const ledger = await tx.tdsDeductionEntry.findMany({
-      where: { creditPayoutEntryId: e.id },
-      select: { fyLabel: true },
-    });
-    for (const r of ledger ?? []) if (r.fyLabel) fys.add(r.fyLabel);
-    const apps = await tx.tdsCreditApplication.findMany({
-      where: { payoutEntryId: e.id, releasedAt: null },
-      select: { tdsCredit: { select: { fyLabel: true } } },
-    });
-    for (const a of apps ?? []) if (a.tdsCredit?.fyLabel) fys.add(a.tdsCredit.fyLabel);
-    return [...fys].map((fy) => r194LockKey(e.clientId, fy));
-  }
-  const fy = fyLabelOf(e.period);
-  const pans = new Set<string>();
-  const ledgerPan = (await ledgerOfEntry(tx, e.id)).pan;
-  if (ledgerPan) pans.add(ledgerPan.trim().toUpperCase());
-  const appPan = await creditAppPanOfEntry(tx, e.id);
-  if (appPan) pans.add(appPan);
-  const cur = await currentPanOfOutlet(tx, e.clientId, e.outletId);
-  if (cur) pans.add(cur);
-  return [...pans].map((p) => panLockKey(p, fy));
+  const fys = new Set<string>([e.baseFyLabel ?? fyLabelOf(e.period)]);
+  const ledger = await tx.tdsDeductionEntry.findMany({
+    where: { creditPayoutEntryId: e.id },
+    select: { fyLabel: true },
+  });
+  for (const r of ledger ?? []) if (r.fyLabel) fys.add(r.fyLabel);
+  const apps = await tx.tdsCreditApplication.findMany({
+    where: { payoutEntryId: e.id, releasedAt: null },
+    select: { tdsCredit: { select: { fyLabel: true } } },
+  });
+  for (const a of apps ?? []) if (a.tdsCredit?.fyLabel) fys.add(a.tdsCredit.fyLabel);
+  return [...fys].map((fy) => r194LockKey(e.clientId, fy));
 }
 
-/** The PAN the outlet's base counts under today (its partner's PAN, upper-cased) — null when none. */
-export async function currentPanOfOutlet(
+/**
+ * Audit B6 (same rule on the approve path): the lock keys of the LIVE credit applications of `entryIds` — cancelling
+ * such an entry releases the credit it used, so it takes that credit's key even when the entry carries no withholding
+ * (a credit covered it). 194R → `R194|client|FY` of the credit's FY; 194C (none created any more — owner D1) → its PAN key.
+ */
+export async function creditLockKeysOfEntries(
   tx: Prisma.TransactionClient,
   clientId: string,
-  outletCode: string,
-): Promise<string | null> {
-  const o = await tx.outlet.findFirst({
-    where: { clientId, outletCode },
-    select: { partner: { select: { panNumber: true } } },
+  entryIds: string[],
+): Promise<string[]> {
+  if (entryIds.length === 0) return [];
+  const apps = await tx.tdsCreditApplication.findMany({
+    where: { payoutEntryId: { in: entryIds }, releasedAt: null },
+    select: { tdsCredit: { select: { section: true, panNumber: true, fyLabel: true } } },
   });
-  const p = o?.partner?.panNumber?.trim().toUpperCase();
-  return p ? p : null;
+  const keys = new Set<string>();
+  for (const a of apps ?? []) {
+    const c = a.tdsCredit;
+    if (!c?.fyLabel) continue;
+    if (c.section === TdsSection.SEC_194C) {
+      if (c.panNumber?.trim()) keys.add(panLockKey(c.panNumber.trim().toUpperCase(), c.fyLabel));
+    } else {
+      keys.add(r194LockKey(clientId, c.fyLabel));
+    }
+  }
+  return [...keys];
 }
 
 /** 194R: the outlet's retailer key today (payeeKeyFor — the same rule the bank-file snapshot uses). */
@@ -493,28 +498,23 @@ async function ledgerOfEntry(
   return { net, pan: pos?.panNumber ?? null, fyLabel: pos?.fyLabel ?? null };
 }
 
-async function creditAppPanOfEntry(tx: Prisma.TransactionClient, entryId: string): Promise<string | null> {
-  const app = await tx.tdsCreditApplication.findFirst({
-    where: { payoutEntryId: entryId, releasedAt: null },
-    select: { tdsCredit: { select: { panNumber: true } } },
-  });
-  return app?.tdsCredit?.panNumber ?? null;
-}
-
 /**
- * V2 approve of a PAID entry that reached the retailer (NOT fully withheld — that one is reversed by the shipped rule
- * in payout-reversal-v2: entry REVERSED + ledger offset in its original FY, no receivable). The caller holds the batch
- * lock, the entry row lock and — via receivablePanLockKeys — the TDS advisory locks. Decides the receivable, takes
- * the entry off the yearly TDS base (D1) and creates the TDS credit:
- *  - receivable = amount − tdsDeductedPaise (net cash received);
- *  - the entry is marked `tdsBaseReversedAt` (every PAID reversal, with or without TDS) — 194R: collect194RBases
- *    leaves it out (engine + report alike); 194C: buildPayoutTdsPlan leaves it out for this tenant only;
+ * V2 approve of a PAID 194R entry (the caller holds the batch lock, the entry row lock and — via
+ * receivablePanLockKeys — the `R194|client|FY` locks). Decides the receivable, takes the entry off the yearly 194R base
+ * (D1) and creates the TDS credit:
+ *  - receivable = amount − tdsDeductedPaise (net cash received); a payout FULLY withheld as TDS (`fullyWithheld`,
+ *    owner D2 2026-11-19) reached the retailer as ₹0 → receivable 0, the caller marks the entry REVERSED;
+ *  - the entry is marked `tdsBaseReversedAt` (every PAID reversal, with or without TDS) — collect194RBases leaves it
+ *    out (payout engine + 194R report alike);
  *  - credit candidate = the entry's own withholding as booked in the TDS ledger (net Σ for the entry, capped at the
- *    stamp) + any earlier credit that had been applied to this payout; credit = min(candidate, the drop in the TDS
- *    due) (H1, reversalCreditCap — 194R: the report's own liability194R deduct part on the remaining base);
- *  - the credit is keyed on the ledger row's own key (194R: the retailer key at withholding = payee snapshot) and
- *    lives in the ledger row's FY; it is used only by this client;
- *  - GROSS_UP (nothing withheld) → no credit; withheld but untraceable → no credit, called out.
+ *    stamp) + any earlier credit that had been applied to this payout; credit = min(candidate, the drop in the TDS due)
+ *    (H1, reversalCreditCap — the report's own liability194R deduct part on the remaining base);
+ *  - audit A5: a credit is created ONLY while the client's CURRENT 194R method is DEDUCT (only then is 194R withheld
+ *    again, so only then can it ever be used). On GROSS_UP the withheld TDS stays where it is — the 194R report flags
+ *    it as TDS taken in excess — and the outcome says so;
+ *  - the credit is keyed on the ledger row's own key (the payee snapshot key at withholding) and lives in the ledger
+ *    row's FY; it is used only by this client;
+ *  - nothing withheld → no credit; withheld but untraceable → no credit, called out.
  * One credit per entry (`sourcePayoutEntryId` unique).
  */
 export async function recordReceivableTds(
@@ -528,18 +528,31 @@ export async function recordReceivableTds(
     tdsSection: TdsSection | null;
     tdsMethodology: string | null;
     tdsDeductedPaise: bigint;
-    /** 194R: the payee snapshot written when the payout went into a bank file (null → current owner). */
+    /** The payee snapshot written when the payout went into a bank file (null → current owner). */
     payeePan?: string | null;
-    /** The FY whose base the entry counts in (194R: its bank-file FY; 194C: its period FY). */
+    /** The FY whose 194R base the entry counts in (its bank-file FY). */
     baseFyLabel?: string;
+    /** Owner D2: the whole payout was withheld as TDS (nothing reached the retailer). */
+    fullyWithheld?: boolean;
   },
-  ctx: { creditReversalId: string; actorId: string; panPosition: PanPositionLoader },
+  ctx: {
+    creditReversalId: string;
+    actorId: string;
+    panPosition: PanPositionLoader;
+    /** The client's CURRENT 194R method (audit A5). */
+    currentMethodology: string;
+  },
 ): Promise<ReceivableTdsOutcome> {
-  const is194R = e.tdsSection === TdsSection.SEC_194R;
+  if (e.tdsSection === TdsSection.SEC_194C) {
+    // Owner D1: refused before this point (assertNoPaid194C) — never create a 194C credit or move a 194C base.
+    throw new Error(`Payout entry ${e.id} is a PAID 194C payout — ${'194C payouts cannot be reversed once paid'}`);
+  }
+  const section = TdsSection.SEC_194R; // a null frozen section on a PAID incentive payout is 194R (A2)
   const withheld = e.tdsDeductedPaise > 0n ? e.tdsDeductedPaise : 0n;
-  const receivablePaise = e.amountPaise - withheld;
+  const net = e.amountPaise - withheld;
+  const receivablePaise = e.fullyWithheld || net < 0n ? 0n : net;
   const led = await ledgerOfEntry(tx, e.id);
-  const ledgerKey = led.pan ? (is194R ? retailerKeyOfLedgerPan(led.pan) : led.pan.trim().toUpperCase()) : null;
+  const ledgerKey = led.pan ? retailerKeyOfLedgerPan(led.pan) : null;
   const ownWithheld = ledgerKey && withheld > 0n ? (led.net < withheld ? (led.net > 0n ? led.net : 0n) : withheld) : 0n;
   const untracked = withheld - ownWithheld;
 
@@ -549,7 +562,7 @@ export async function recordReceivableTds(
   });
   const earlier = (apps ?? []).reduce((s, a) => s + a.amountPaise, 0n);
   const appCredit = (apps ?? []).find((a) => a.tdsCredit?.panNumber)?.tdsCredit ?? null;
-  const pan = ledgerKey ?? appCredit?.panNumber ?? null;
+  const pan = ledgerKey ?? (appCredit?.panNumber ? retailerKeyOfLedgerPan(appCredit.panNumber) : null);
   const baseFy = e.baseFyLabel ?? fyLabelOf(e.period);
   // The credit lives in the FY its TDS was booked in (the ledger row's FY); a credit-only payout → that credit's FY.
   const creditFy = led.fyLabel ?? appCredit?.fyLabel ?? baseFy;
@@ -557,38 +570,43 @@ export async function recordReceivableTds(
   // D1: the income was reversed → it leaves the yearly base (guarded: exactly once per entry). RAW UPDATE on purpose:
   // the entry is PAID, and a Prisma update would bump its @updatedAt — the Daily Ops Digest counts PAID payouts by
   // updatedAt, so an old payment would be re-counted as paid today (digest-recorded-time-guard.spec.ts, reviewed site).
-  const marked = await tx.$executeRaw`UPDATE "credit_payout_entries" SET "tdsBaseReversedAt" = ${new Date()}, "tdsBaseReversalId" = ${ctx.creditReversalId} WHERE "id" = ${e.id} AND "tdsBaseReversedAt" IS NULL`;
+  // "clientId" in the WHERE is defence in depth (audit B7).
+  const marked = await tx.$executeRaw`UPDATE "credit_payout_entries" SET "tdsBaseReversedAt" = ${new Date()}, "tdsBaseReversalId" = ${ctx.creditReversalId} WHERE "id" = ${e.id} AND "clientId" = ${e.clientId} AND "tdsBaseReversedAt" IS NULL`;
   if (marked !== 1) {
     throw new Error(`Payout entry ${e.id} was already taken off the TDS base by another reversal — contact Gifsy`);
   }
 
-  // The position AFTER the base left: the deducted-under key, else the key the base counted under.
-  const capPan =
-    pan ??
-    (is194R
-      ? (e.payeePan?.trim() ? e.payeePan.trim() : await currentRetailerKeyOfOutlet(tx, e.clientId, e.outletId))
-      : await currentPanOfOutlet(tx, e.clientId, e.outletId));
+  // The position AFTER the base left, under the key the base counted under: the deducted-under key, else the payee
+  // snapshot taken when the payout went into its bank file, else the outlet's owner today (audit A2: the note cites
+  // exactly this key and the bank-file FY).
+  const capPan = pan ?? (e.payeePan?.trim() ? e.payeePan.trim() : await currentRetailerKeyOfOutlet(tx, e.clientId, e.outletId));
   const posFy = pan ? creditFy : baseFy;
-  const position =
-    capPan && e.tdsSection
-      ? await ctx.panPosition({ pan: capPan, section: e.tdsSection, fyLabel: posFy, clientId: e.clientId, reversedAmountPaise: e.amountPaise })
-      : null;
-  const candidate = ownWithheld + earlier;
-  const cap = position
-    ? reversalCreditCap(pan && e.tdsSection ? candidate : 0n, position)
-    : { creditPaise: 0n, coversOtherPayoutsPaise: pan && e.tdsSection ? candidate : 0n, handBackPaise: 0n };
-  const credit = cap.creditPaise;
-  const below = !!position && position.thresholdMetBefore && !position.thresholdMetAfter;
-  const panM = capPan ? maskPan(capPan) : null;
-  const who = capPan && isNoPanKey(capPan.toUpperCase()) ? 'this no-PAN retailer' : `PAN ${panM}`;
+  const position = await ctx.panPosition({
+    pan: capPan, section, fyLabel: posFy, clientId: e.clientId, reversedAmountPaise: e.amountPaise,
+  });
+  const candidate = pan ? ownWithheld + earlier : 0n;
+  const deduct = ctx.currentMethodology === 'DEDUCT';
+  const cap = reversalCreditCap(candidate, position);
+  // A5: on GROSS_UP no credit — the would-be credit stays withheld TDS the report flags as excess.
+  const credit = deduct ? cap.creditPaise : 0n;
+  const flaggedExcess = deduct ? 0n : cap.creditPaise;
+  const below = position.thresholdMetBefore && !position.thresholdMetAfter;
+  const panM = maskPan(capPan);
+  const who = isNoPanKey(capPan.toUpperCase()) ? 'this no-PAN retailer' : `PAN ${panM}`;
 
   const extra: string[] = [];
-  if (capPan) extra.push(`${formatINR(e.amountPaise)} taken off ${who}'s FY ${posFy} TDS base.`);
+  extra.push(`${formatINR(e.amountPaise)} taken off ${who}'s FY ${posFy} 194R base (the FY of its bank file).`);
   if (below) extra.push(`${who} is below the TDS threshold for FY ${posFy} after this reversal.`);
   if (cap.coversOtherPayoutsPaise > 0n) {
     extra.push(`${formatINR(cap.coversOtherPayoutsPaise)} of this TDS covers the retailer's other payouts — no credit.`);
   }
-  if (cap.handBackPaise > 0n) {
+  if (flaggedExcess > 0n) {
+    extra.push(
+      `${formatINR(flaggedExcess)} withheld TDS is not turned into a credit: this programme's 194R method is now gross-up, ` +
+        'so no TDS is withheld again that it could reduce — it stays on the 194R report as TDS taken in excess (flagged, no automatic refund).',
+    );
+  }
+  if (cap.handBackPaise > 0n && deduct) {
     extra.push(
       `${formatINR(cap.handBackPaise)} TDS already withheld from ${who} is more than now due — the next payout of this ` +
         `programme on it withholds that much less (adjusted after a reversal brought it below the limit).`,
@@ -603,12 +621,16 @@ export async function recordReceivableTds(
     ownWithheldPaise: ownWithheld,
     earlierCreditPaise: earlier,
     coversOtherPayoutsPaise: cap.coversOtherPayoutsPaise,
-    handBackPaise: cap.handBackPaise,
+    handBackPaise: deduct ? cap.handBackPaise : 0n,
     belowThresholdAfterReversal: below,
     untrackedWithheldPaise: untracked,
+    flaggedExcessPaise: flaggedExcess,
   };
+  const owedText = e.fullyWithheld
+    ? 'The whole payout had been withheld as TDS — nothing reached the retailer, nothing owed.'
+    : `Receivable = net received ${formatINR(receivablePaise)}.`;
 
-  if (credit <= 0n || !pan || !e.tdsSection) {
+  if (credit <= 0n || !pan) {
     const isGrossUp = e.tdsMethodology === 'GROSS_UP';
     return {
       ...common,
@@ -620,7 +642,7 @@ export async function recordReceivableTds(
           ? 'No TDS was withheld from the retailer (gross-up: the program paid the TDS on top) — receivable = amount paid, no TDS credit.'
           : withheld === 0n
             ? 'No TDS was withheld on this entry — receivable = amount paid, no TDS credit.'
-            : `Receivable = net received ${formatINR(receivablePaise)} — no TDS credit.`) + tail,
+            : `${owedText} No TDS credit.`) + tail,
     };
   }
 
@@ -628,7 +650,7 @@ export async function recordReceivableTds(
     data: {
       clientId: e.clientId,
       panNumber: pan,
-      section: e.tdsSection,
+      section,
       fyLabel: creditFy,
       sourcePayoutEntryId: e.id,
       creditReversalId: ctx.creditReversalId,
@@ -641,16 +663,15 @@ export async function recordReceivableTds(
     ownWithheld > 0n ? `${formatINR(ownWithheld)} withheld from this payout` : null,
     earlier > 0n ? `${formatINR(earlier)} earlier TDS credit that had been used for this payout` : null,
   ].filter(Boolean);
-  const sec = e.tdsSection === TdsSection.SEC_194C ? '194C' : '194R';
   return {
     ...common,
     tdsCreditPaise: credit,
     tdsCreditId: created.id,
-    panMasked: maskPan(pan),
+    panMasked: panM,
     note:
-      `${formatINR(credit)} TDS credit carried forward on ${who} (of ${parts.join(' + ')}) — it stays deposited ` +
-      `with the government and is adjusted against this programme's next ${sec} TDS for it in FY ${creditFy} ` +
-      `(scoped to FY ${creditFy}; not carried into the next FY).` +
+      `${owedText} ${formatINR(credit)} TDS credit carried forward on ${who} (of ${parts.join(' + ')}) — it stays deposited ` +
+      `with the government and is adjusted against this programme's next 194R TDS for it in FY ${creditFy}, so it is ` +
+      `never deducted twice (scoped to FY ${creditFy}; not carried into the next FY).` +
       tail,
   };
 }

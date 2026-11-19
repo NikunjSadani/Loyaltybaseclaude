@@ -164,26 +164,41 @@ describe('Payout status — reversal fix round B', () => {
     expect(api.posts[1]).not.toHaveProperty('remarks');
   });
 
-  it('#4: shows "Loading payout entries…" and keeps Submit disabled until the lookup answers', async () => {
+  it('#4 (audit B5 — LEGACY / Deoleo identical): the amount form is there at once and Submit works while the lookup is pending', async () => {
     const api = mockApi({ entries: ['pending'] });
     await openModal();
-    expect(screen.getByTestId('payout-entries-loading').textContent).toBe('Loading payout entries…');
-    expect(submitBtn().disabled).toBe(true);
+    expect(screen.queryByTestId('payout-entries-loading')).toBeNull();
+    expect(screen.getByText('Reversal Amount (₹)')).toBeTruthy();
+    expect(submitBtn().disabled).toBe(false);
     api.release();
-    await screen.findByText('Reversal Amount (₹)');
+    await waitFor(() => expect(api.entryCalls).toHaveLength(1));
+    expect(screen.getByText('Reversal Amount (₹)')).toBeTruthy(); // LEGACY answer → the same form
     expect(submitBtn().disabled).toBe(false);
   });
 
-  it('#5: a failed lookup shows Retry (Submit disabled); Retry loads the picker', async () => {
-    const api = mockApi({ entries: ['fail', { mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] }] });
+  it('#5 (audit B5): a failed lookup keeps the amount form (the server refuses an amount-only request on a V2 tenant with a clear message); a V2 answer switches to the picker', async () => {
+    const failed = mockApi({ entries: ['fail'] });
     await openModal();
-    const err = await screen.findByTestId('payout-entries-error');
-    expect(err.textContent).toContain("Couldn't load payout entries — retry");
-    expect(submitBtn().disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    await screen.findByTestId('payout-entry-picker');
-    expect(api.entryCalls).toHaveLength(2);
+    await waitFor(() => expect(failed.entryCalls).toHaveLength(1));
+    expect(screen.queryByTestId('payout-entries-error')).toBeNull();
+    expect(screen.getByText('Reversal Amount (₹)')).toBeTruthy();
     expect(submitBtn().disabled).toBe(false);
+  });
+
+  it('#5b: a V2 answer switches the modal to the entry picker', async () => {
+    mockApi({ entries: [{ mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] }] });
+    await openModal();
+    await screen.findByTestId('payout-entry-picker');
+    expect(submitBtn().disabled).toBe(false);
+  });
+
+  it('owner D1: a PAID 194C entry shows why it can not be picked', async () => {
+    mockApi({ entries: [{ mode: 'V2', entries: [entry('pe-a', 30000, 'PAID', false, 'PAID_194C'), entry('pe-b', 50000, 'PENDING')] }] });
+    await openModal();
+    await screen.findByTestId('payout-entry-picker');
+    expect(
+      screen.getByLabelText("Payout entry ₹300.00 (PAID) — not selectable: Paid 194C payout — 194C payouts can't be reversed once paid"),
+    ).toBeTruthy();
   });
 
   it('#6: a failed V2 submit keeps the form, reloads entries and drops ticks no longer selectable', async () => {

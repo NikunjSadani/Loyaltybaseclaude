@@ -101,12 +101,12 @@ export class CreditsController {
   @Post('batches/:id/reversals')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('credits:request_reversal')
-  createReversal(
+  async createReversal(
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
     @Body() dto: CreateReversalDto,
   ) {
-    return this.credits.createReversal(user, id, dto);
+    return omitNullRequestRemarks(await this.credits.createReversal(user, id, dto));
   }
 
   // WP5: entries a PAYOUT reversal may select (+ the tenant's reversal engine mode, which picks the form).
@@ -335,19 +335,20 @@ export class CreditsController {
   @Get('reversals')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('credits:read')
-  listReversals(@CurrentUser() user: JwtPayload, @Query() query: ListReversalsQueryDto) {
-    return this.credits.listReversals(user, query);
+  async listReversals(@CurrentUser() user: JwtPayload, @Query() query: ListReversalsQueryDto) {
+    const res = await this.credits.listReversals(user, query);
+    return { ...res, reversals: res.reversals.map((r) => omitNullRequestRemarks(r)) };
   }
 
   @Patch('reversals/:id')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('credits:approve_reversal')
-  patchReversal(
+  async patchReversal(
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
     @Body() dto: PatchReversalDto,
   ) {
-    return this.credits.patchReversal(user, id, dto);
+    return omitNullRequestRemarks(await this.credits.patchReversal(user, id, dto));
   }
 
   // ─── Wallet reversal engine call-outs (policy round A — "no silent pass-throughs") ─────────────────────
@@ -377,4 +378,17 @@ export class CreditsController {
   setReversalEngineMode(@CurrentUser() user: JwtPayload, @Body() dto: ReversalEngineModeDto) {
     return this.wallet.setReversalEngineMode(user, { mode: dto.mode, reason: dto.reason ?? null, clientId: dto.clientId ?? null });
   }
+}
+
+/**
+ * Audit B5 (LEGACY / Deoleo byte-identity): `CreditReversal.requestRemarks` (owner D5, 2026-11-16) is only in a
+ * response when the requester actually typed remarks — a reversal without them is shaped exactly as in 7ba69566.
+ */
+function omitNullRequestRemarks<T>(r: T): T {
+  if (r && typeof r === 'object' && 'requestRemarks' in r && (r as { requestRemarks?: unknown }).requestRemarks == null) {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { requestRemarks, ...rest } = r as T & { requestRemarks?: unknown };
+    return rest as T;
+  }
+  return r;
 }

@@ -28,7 +28,9 @@ import { BadRequestException, ConflictException } from '@nestjs/common';
 import { CreditEntryStatus, PayoutAllocationState, Prisma, TdsSection } from '@prisma/client';
 import { formatINR } from '../common/money';
 import { financialYear } from '../tds/tds.helpers';
+import { assertNoPaid194C, isPaid194C, PAID_194C_REFUSAL, visibilityFieldIdsOf } from './reversal-194c';
 import {
+  creditLockKeysOfEntries,
   fyLabelOf,
   receivablePanLockKeys,
   recordReceivableTds,
@@ -58,7 +60,8 @@ export type PayoutCandidateBlock =
   | 'REVERSED' // already clawed back (terminal)
   | 'RESERVED' // held by a pending reversal
   | 'CONSUMED' // taken by an approved reversal (cancelled, or recorded as a receivable)
-  | 'ZERO'; // a zero-amount entry has nothing to reverse
+  | 'ZERO' // a zero-amount entry has nothing to reverse
+  | 'PAID_194C'; // owner D1 (2026-11-19): a 194C payout can't be reversed once paid
 
 export interface PayoutCandidateEntry {
   id: string;
@@ -69,6 +72,8 @@ export interface PayoutCandidateEntry {
   tdsDeductedPaise: bigint | null;
   tdsSection: string | null;
   outletId: string;
+  /** For the effective-section rule (a legacy visibility row without a frozen section is 194C). */
+  fieldId?: string | null;
 }
 
 export interface PayoutReversalCandidate extends PayoutCandidateEntry {
@@ -101,6 +106,8 @@ export function classifyPayoutCandidates(
   entries: PayoutCandidateEntry[],
   liveAllocations: LiveAllocationRow[],
   approvedReversals: ApprovedPayoutReversalRow[],
+  /** Visibility field ids (effective-section rule for D1). Absent → frozen section only. */
+  visibilityFieldIds: Set<string> = new Set(),
 ): PayoutReversalCandidate[] {
   const consumed = new Set<string>();
   let legacyCutoff: number | null = null;
@@ -130,6 +137,9 @@ export function classifyPayoutCandidates(
     ) {
       blockedBy = 'CONSUMED';
     } else if (e.amountPaise <= 0n) blockedBy = 'ZERO';
+    else if (isPaid194C({ status: String(e.status), tdsSection: e.tdsSection, fieldId: e.fieldId ?? null }, visibilityFieldIds)) {
+      blockedBy = 'PAID_194C';
+    }
     else if (!(REVERSIBLE_STATUSES as string[]).includes(String(e.status))) blockedBy = 'CONSUMED';
     return { ...e, selectable: blockedBy === null, blockedBy, heldByReversalId: al?.creditReversalId ?? null };
   });
@@ -152,6 +162,7 @@ export async function loadPayoutReversalCandidates(
       tdsDeductedPaise: true,
       tdsSection: true,
       outletId: true,
+      fieldId: true,
     },
   });
   const ids = entries.map((e) => e.id);
@@ -176,6 +187,7 @@ export async function loadPayoutReversalCandidates(
     entries.map((e) => ({ ...e, tdsSection: e.tdsSection ?? null, tdsDeductedPaise: e.tdsDeductedPaise ?? 0n })),
     liveAllocations,
     approved,
+    await visibilityFieldIdsOf(tx, key.clientId, [key.fieldId]),
   );
 }
 
@@ -184,6 +196,7 @@ const BLOCK_TEXT: Record<PayoutCandidateBlock, string> = {
   RESERVED: 'held by another pending reversal',
   CONSUMED: 'already taken by an approved reversal',
   ZERO: 'has no amount',
+  PAID_194C: `a paid 194C payout — ${PAID_194C_REFUSAL}`,
 };
 
 /** Row-lock the given entries in ascending id order (§5 lock order: credit_batches → … → credit_payout_entries). */
@@ -301,6 +314,8 @@ export interface PatchPayoutV2Deps {
   }) => Promise<bigint>;
   /** Fix round B (H1): the PAN's TDS position after a reversed PAID entry left the base (CreditsService). */
   panPosition: PanPositionLoader;
+  /** Audit A5: the client's CURRENT 194R method — a TDS credit is created only on DEDUCT. */
+  currentMethodology194R: () => Promise<string>;
   /**
    * The shipped TDS locks for entries whose withholding this approval may offset (CreditsService.tdsLockKeysForEntries:
    * 194R → `R194|client|FY` of each ledger row, 194C → `PAN|pan|FY`). Merged with the receivable keys and taken in ONE
@@ -315,13 +330,33 @@ export interface PatchPayoutV2Deps {
  */
 export interface PayoutOutcome {
   headline?: string;
-  lines: Array<{ kind: 'CANCELLED' | 'RECEIVABLE' | 'RELEASED' | 'ALREADY_REVERSED' | 'NOTHING'; entryId: string | null; text: string }>;
+  lines: Array<{
+    kind: 'CANCELLED' | 'RECEIVABLE' | 'REVERSED_WITHHELD' | 'RELEASED' | 'ALREADY_REVERSED' | 'NOTHING';
+    entryId: string | null;
+    text: string;
+  }>;
+  /** UNPAID entries (PENDING / FAILED) cancelled — they will not be paid. */
   cancelled: Array<{ entryId: string; amountPaise: number; wasStatus: string; tdsOffsetPaise: number; tdsNote: string }>;
+  /**
+   * PAID entries FULLY withheld as TDS (nothing reached the retailer) that the reversal marked REVERSED — nothing owed.
+   * V2 (owner D2): the deposited TDS becomes a TDS credit; LEGACY (shipped rule): the withholding is reversed in the TDS
+   * ledger. Absent when there are none.
+   */
+  reversedWithheld?: Array<{
+    entryId: string;
+    amountPaise: number;
+    tdsWithheldPaise: number;
+    tdsCreditPaise: number;
+    panMasked: string | null;
+    tdsNote: string;
+    /** LEGACY: withholding reversed in the TDS ledger. */
+    tdsOffsetPaise?: number;
+  }>;
   receivable: Array<{
     entryId: string;
     /** The entry's gross amount (integer paise). */
     amountPaise: number;
-    /** The receivable recorded = net cash received (V2) / the full amount (LEGACY, unchanged rule). */
+    /** The receivable recorded = the NET cash the retailer received (amount − TDS withheld) — V2 and LEGACY alike. */
     receivablePaise: number;
     tdsCreditPaise: number;
     panMasked: string | null;
@@ -346,6 +381,14 @@ export function approvedHeadline(o: PayoutOutcome): string {
     const t = o.cancelled.reduce((n, c) => n + c.amountPaise, 0);
     parts.push(`${o.cancelled.length} entr${o.cancelled.length === 1 ? 'y' : 'ies'} cancelled (${formatINR(BigInt(t))}) — will not be paid`);
   }
+  const rw = o.reversedWithheld ?? [];
+  if (rw.length > 0) {
+    // B4: a fully withheld PAID payout is not "cancelled" — it was settled as TDS; the reversal leaves nothing owed.
+    const t = rw.reduce((n, c) => n + c.amountPaise, 0);
+    parts.push(
+      `${rw.length} fully-withheld payout${rw.length === 1 ? '' : 's'} reversed (${formatINR(BigInt(t))}) — nothing reached the retailer, nothing owed`,
+    );
+  }
   if (o.receivable.length > 0) {
     // L3: a payout fully withheld as TDS leaves nothing owed — say so instead of a bare "₹0 recorded as owed".
     parts.push(
@@ -355,7 +398,7 @@ export function approvedHeadline(o: PayoutOutcome): string {
     );
   }
   if (o.tdsCreditPaise > 0) parts.push(`${formatINR(BigInt(o.tdsCreditPaise))} TDS credit carried forward`);
-  if (o.cancelled.length === 0 && o.receivable.length === 0) parts.push('no payout entry changed');
+  if (o.cancelled.length === 0 && o.receivable.length === 0 && rw.length === 0) parts.push('no payout entry changed');
   return parts.join(' · ');
 }
 
@@ -374,28 +417,61 @@ export function paidEntryOutcomeText(x: {
   coversOtherPayoutsPaise: bigint;
   handBackPaise: bigint;
   belowThresholdAfterReversal: boolean;
+  /** A5: on GROSS_UP the would-be credit stays as the report's flagged excess. */
+  flaggedExcessPaise?: bigint;
 }): string {
+  const who = whoOf(x.panMasked);
   const owed =
     x.receivablePaise > 0n
       ? `Recorded as owed · ${formatINR(x.receivablePaise)}` +
         (x.tdsWithheldPaise > 0n ? ` (net of ${formatINR(x.tdsWithheldPaise)} TDS withheld from ${formatINR(x.amountPaise)})` : '')
       : `Nothing owed · the whole ${formatINR(x.amountPaise)} was withheld as TDS`;
   const parts = [owed];
-  if (x.tdsCreditPaise > 0n) parts.push(`${formatINR(x.tdsCreditPaise)} TDS credit carried forward on PAN ${x.panMasked}`);
+  if (x.tdsCreditPaise > 0n) parts.push(`${formatINR(x.tdsCreditPaise)} TDS credit carried forward on ${who}`);
   else if (x.methodology === 'GROSS_UP') parts.push('no TDS was withheld from the retailer (the program paid it on top) — no TDS credit');
   else if (x.tdsWithheldPaise === 0n) parts.push('no TDS withheld — no TDS credit');
-  else if (x.coversOtherPayoutsPaise === 0n) parts.push('no TDS credit');
+  else if (x.coversOtherPayoutsPaise === 0n && !(x.flaggedExcessPaise && x.flaggedExcessPaise > 0n)) parts.push('no TDS credit');
+  if (x.flaggedExcessPaise && x.flaggedExcessPaise > 0n) {
+    parts.push(
+      `${formatINR(x.flaggedExcessPaise)} withheld TDS not credited — the programme is on gross-up now; flagged as TDS taken in excess on the 194R report`,
+    );
+  }
   if (x.coversOtherPayoutsPaise > 0n) {
     parts.push(`${formatINR(x.coversOtherPayoutsPaise)} of this TDS covers the retailer's other payouts — no credit`);
   }
-  if (x.belowThresholdAfterReversal) parts.push(`PAN ${x.panMasked} now below the TDS threshold`);
+  if (x.belowThresholdAfterReversal) parts.push(`${who} now below the TDS threshold`);
   if (x.handBackPaise > 0n) {
-    parts.push(`${formatINR(x.handBackPaise)} over-deducted TDS handed back on the next payout on PAN ${x.panMasked}`);
+    parts.push(`${formatINR(x.handBackPaise)} over-deducted TDS handed back on the next payout on ${who}`);
   }
   if (x.untrackedWithheldPaise > 0n) {
     parts.push(`${formatINR(x.untrackedWithheldPaise)} TDS not in Gifsy's TDS ledger — correct it off-platform`);
   }
   return parts.join(' · ');
+}
+
+/** "PAN XXXXX1234F", or "this no-PAN retailer" for a 194R no-PAN key (maskPan's "no PAN …" wording). */
+function whoOf(panMasked: string | null): string {
+  if (!panMasked) return 'the retailer';
+  return panMasked.startsWith('no PAN') ? 'this no-PAN retailer' : `PAN ${panMasked}`;
+}
+
+/**
+ * Owner D2 (2026-11-19) — the outcome line of a reversed PAID payout that was FULLY withheld as TDS (V2): reversed,
+ * nothing owed, and the deposited TDS carried forward as a credit (or why not).
+ */
+export function fullyWithheldOutcomeText(x: {
+  amountPaise: bigint;
+  tdsWithheldPaise: bigint;
+  tdsCreditPaise: bigint;
+  panMasked: string | null;
+  note: string;
+}): string {
+  const head =
+    `Entry reversed · ${formatINR(x.amountPaise)} · the whole payout had been withheld as TDS ` +
+    `(${formatINR(x.tdsWithheldPaise)}), nothing reached the retailer — nothing owed`;
+  return x.tdsCreditPaise > 0n
+    ? `${head} · ${formatINR(x.tdsCreditPaise)} TDS credit carried forward on ${whoOf(x.panMasked)} — used against the next TDS so it is never deducted twice`
+    : `${head} · no TDS credit — ${x.note}`;
 }
 
 /** A PAID payout whose whole amount was withheld as TDS (settled `TDS-WITHHELD-…`, never sent to the bank). */
@@ -520,10 +596,13 @@ export async function patchPayoutReversalV2(
       throw new ConflictException(`Reserved payout entry ${a.payoutEntryId} no longer matches this reversal — contact Gifsy`);
     }
     if (e.status === 'PROCESSING') throw new BadRequestException(SENT_TO_BANK_MESSAGE);
+    // Owner D1: reserved while unpaid, PAID since → refused (whole approval); the admin must reject it instead.
     if (e.status === 'REVERSED') {
       throw new ConflictException(`Reserved payout entry ${a.payoutEntryId} is already REVERSED — contact Gifsy`);
     }
   }
+  // Owner D1 (2026-11-19): an entry reserved while unpaid and PAID since — if 194C — can't be reversed any more.
+  assertNoPaid194C(entries, await visibilityFieldIdsOf(tx, reversal.clientId, entries.map((e) => e.fieldId)));
 
   const claimed = await tx.creditReversal.updateMany({
     where: { id: reversal.id, status: 'PENDING_GIFSY' },
@@ -540,18 +619,27 @@ export async function patchPayoutReversalV2(
   if (claimed.count === 0) throw new BadRequestException('Reversal already processed');
 
   // Every TDS advisory lock this approval needs, up front and sorted, in ONE statement (deadlock-free against
-  // downloads, UTR uploads and other approvals): the shipped keys of every withheld entry (its withholding may be
-  // offset — 194R `R194|client|FY`, 194C `PAN|pan|FY`) + a reached-the-retailer PAID entry's receivable keys (its base
-  // leaves — D1 — and a TDS credit may be created: 194R `R194|client|FY`, 194C `PAN|pan|FY`).
+  // downloads, UTR uploads and other approvals): the shipped keys of every withheld entry (an unpaid one's withholding
+  // is offset — 194R `R194|client|FY`, 194C `PAN|pan|FY`) + every PAID entry's 194R keys (its base leaves — D1 — and a
+  // TDS credit may be created: `R194|client|FY` of its bank-file FY + ledger / credit FYs). A PAID 194C entry never
+  // gets here (owner D1 refusal above).
   const lockKeys = new Set<string>(
     await deps.tdsLockKeys(
       allocations.map((a) => entryById.get(a.payoutEntryId)!).filter((e) => (e.tdsDeductedPaise ?? 0n) > 0n).map((e) => e.id),
     ),
   );
+  // B6: an unpaid entry being cancelled gives back any TDS credit it used — take that credit's key too.
+  for (const k of await creditLockKeysOfEntries(
+    tx,
+    reversal.clientId,
+    allocations.map((a) => entryById.get(a.payoutEntryId)!).filter((e) => e.status !== 'PAID').map((e) => e.id),
+  )) {
+    lockKeys.add(k);
+  }
   const baseFyById = new Map<string, string>();
   for (const a of allocations) {
     const e = entryById.get(a.payoutEntryId)!;
-    if (e.status !== 'PAID' || isFullyWithheld(e)) continue;
+    if (e.status !== 'PAID') continue;
     const baseFyLabel = await entryBaseFyLabel(tx, e);
     baseFyById.set(e.id, baseFyLabel);
     for (const k of await receivablePanLockKeys(tx, {
@@ -582,55 +670,14 @@ export async function patchPayoutReversalV2(
     let tdsOffset = 0n;
     let receivablePaise = 0n;
     let tdsCreditPaise = 0n;
-    if (e.status === 'PAID' && isFullyWithheld(e)) {
-      // Merge decision 1 (2026-11-19) — the SHIPPED rule: a payout FULLY withheld as TDS reached the retailer as ₹0,
-      // so there is no receivable. The entry is REVERSED and its withholding reversed (negative ledger row in its
-      // original FY, under the lock taken above) — exactly as LEGACY does; recorded as a cancelled allocation.
-      const withheld = e.tdsDeductedPaise ?? 0n;
-      const flipW = await tx.creditPayoutEntry.updateMany({
-        where: { id: e.id, status: 'PAID', tdsDeductedPaise: withheld },
-        data: { status: 'REVERSED', tdsDeductedPaise: 0n },
-      });
-      if (flipW.count !== 1) {
-        throw new ConflictException('A payout entry changed while the reversal was being approved — please retry');
-      }
-      tdsOffset = await deps.offsetWithholding({
-        id: e.id,
-        outletId: e.outletId,
-        period: e.period,
-        tdsSection: e.tdsSection!,
-        tdsDeductedPaise: withheld,
-      });
-      const backW = await releaseCreditApplications(tx, [e.id], 'ENTRY_CANCELLED_BY_REVERSAL');
-      const backWPaise = backW.reduce((s, r) => s + r.amountPaise, 0n);
-      state = 'APPLIED_CANCELLED';
-      cancelled++;
-      outcome.lines.push({
-        kind: 'CANCELLED',
-        entryId: e.id,
-        text:
-          `Entry reversed · ${formatINR(e.amountPaise)} · the whole payout had been withheld as TDS, nothing reached the retailer — nothing owed` +
-          (tdsOffset > 0n ? ` · withheld TDS ${formatINR(tdsOffset)} reversed in the TDS ledger` : '') +
-          (backWPaise > 0n ? ` · ${formatINR(backWPaise)} TDS credit it had used returned to the credit balance` : ''),
-      });
-      outcome.cancelled.push({
-        entryId: e.id,
-        amountPaise: Number(e.amountPaise),
-        wasStatus: 'PAID',
-        tdsOffsetPaise: Number(tdsOffset),
-        tdsNote:
-          tdsOffset > 0n
-            ? `fully withheld as TDS — withheld TDS ${formatINR(tdsOffset)} reversed in the TDS ledger`
-            : 'fully withheld as TDS — withholding already offset earlier (no second offset)',
-      });
-      notes.push(
-        `entry ${e.id} (PAID ${formatINR(e.amountPaise)}, fully withheld as TDS) → REVERSED` +
-          (tdsOffset > 0n ? ` (withheld TDS ${formatINR(tdsOffset)} offset)` : ''),
-      );
-    } else if (e.status === 'PAID') {
+    if (e.status === 'PAID') {
       // Q11 + owner decision 2 (2026-11-16): cash left — the receivable is the NET cash the retailer received; the
-      // withheld TDS stays deposited and becomes a TDS credit on the PAN. The entry stays PAID, unreachable to later
-      // reversals.
+      // withheld TDS stays deposited and becomes a TDS credit on the retailer (194R only — owner D1 2026-11-19 refuses
+      // a PAID 194C reversal). The entry stays PAID, unreachable to later reversals.
+      // Owner D2 (2026-11-19): a payout FULLY withheld as TDS (nothing reached the retailer) gets the SAME credit —
+      // the deposited TDS is used against the retailer's next payouts so it is never deducted twice — and the entry
+      // is REVERSED; the retailer owes nothing. (Replaces the negative-ledger-row rule of the 2026-11-19 merge.)
+      const full = isFullyWithheld(e);
       const t = await recordReceivableTds(
         tx,
         {
@@ -644,47 +691,92 @@ export async function patchPayoutReversalV2(
           tdsDeductedPaise: e.tdsDeductedPaise ?? 0n,
           payeePan: e.payeePan ?? null,
           baseFyLabel: baseFyById.get(e.id),
+          fullyWithheld: full,
         },
-        { creditReversalId: reversal.id, actorId: p.actorId, panPosition: deps.panPosition },
+        {
+          creditReversalId: reversal.id,
+          actorId: p.actorId,
+          panPosition: deps.panPosition,
+          currentMethodology: await deps.currentMethodology194R(),
+        },
       );
       receivablePaise = t.receivablePaise;
       tdsCreditPaise = t.tdsCreditPaise;
-      receivable += t.receivablePaise;
-      state = 'APPLIED_RECEIVABLE';
-      notes.push(
-        `entry ${e.id} (PAID ${formatINR(e.amountPaise)}) → receivable ${formatINR(t.receivablePaise)}` +
-          (t.tdsCreditPaise > 0n ? ` + TDS credit ${formatINR(t.tdsCreditPaise)} on PAN ${t.panMasked}` : ''),
-      );
       outcome.tdsCreditPaise += Number(t.tdsCreditPaise);
       const withheldPaise = e.tdsDeductedPaise ?? 0n;
-      outcome.receivable.push({
-        entryId: e.id,
-        amountPaise: Number(e.amountPaise),
-        receivablePaise: Number(t.receivablePaise),
-        tdsCreditPaise: Number(t.tdsCreditPaise),
-        panMasked: t.panMasked,
-        tdsNote: t.note,
-        tdsWithheldPaise: Number(withheldPaise),
-        coversOtherPayoutsPaise: Number(t.coversOtherPayoutsPaise),
-        handBackPaise: Number(t.handBackPaise),
-        belowThresholdAfterReversal: t.belowThresholdAfterReversal,
-      });
-      outcome.lines.push({
-        kind: 'RECEIVABLE',
-        entryId: e.id,
-        text: paidEntryOutcomeText({
-          amountPaise: e.amountPaise,
-          receivablePaise: t.receivablePaise,
-          tdsWithheldPaise: withheldPaise,
-          tdsCreditPaise: t.tdsCreditPaise,
+      if (full) {
+        // The TDS stays withheld (stamp kept, ledger untouched — it is deposited); only the status changes. Guarded on
+        // what we read under the row lock.
+        const flipW = await tx.creditPayoutEntry.updateMany({
+          where: { id: e.id, status: 'PAID', tdsDeductedPaise: withheldPaise },
+          data: { status: 'REVERSED' },
+        });
+        if (flipW.count !== 1) {
+          throw new ConflictException('A payout entry changed while the reversal was being approved — please retry');
+        }
+        state = 'APPLIED_CANCELLED';
+        cancelled++;
+        outcome.reversedWithheld = outcome.reversedWithheld ?? [];
+        outcome.reversedWithheld.push({
+          entryId: e.id,
+          amountPaise: Number(e.amountPaise),
+          tdsWithheldPaise: Number(withheldPaise),
+          tdsCreditPaise: Number(t.tdsCreditPaise),
           panMasked: t.panMasked,
-          methodology: e.tdsMethodology ?? null,
-          untrackedWithheldPaise: t.untrackedWithheldPaise,
-          coversOtherPayoutsPaise: t.coversOtherPayoutsPaise,
-          handBackPaise: t.handBackPaise,
+          tdsNote: t.note,
+        });
+        outcome.lines.push({
+          kind: 'REVERSED_WITHHELD',
+          entryId: e.id,
+          text: fullyWithheldOutcomeText({
+            amountPaise: e.amountPaise,
+            tdsWithheldPaise: withheldPaise,
+            tdsCreditPaise: t.tdsCreditPaise,
+            panMasked: t.panMasked,
+            note: t.note,
+          }),
+        });
+        notes.push(
+          `entry ${e.id} (PAID ${formatINR(e.amountPaise)}, fully withheld as TDS) → REVERSED, nothing owed` +
+            (t.tdsCreditPaise > 0n ? ` + TDS credit ${formatINR(t.tdsCreditPaise)} (${t.panMasked})` : ''),
+        );
+      } else {
+        receivable += t.receivablePaise;
+        state = 'APPLIED_RECEIVABLE';
+        notes.push(
+          `entry ${e.id} (PAID ${formatINR(e.amountPaise)}) → receivable ${formatINR(t.receivablePaise)}` +
+            (t.tdsCreditPaise > 0n ? ` + TDS credit ${formatINR(t.tdsCreditPaise)} (${t.panMasked})` : ''),
+        );
+        outcome.receivable.push({
+          entryId: e.id,
+          amountPaise: Number(e.amountPaise),
+          receivablePaise: Number(t.receivablePaise),
+          tdsCreditPaise: Number(t.tdsCreditPaise),
+          panMasked: t.panMasked,
+          tdsNote: t.note,
+          tdsWithheldPaise: Number(withheldPaise),
+          coversOtherPayoutsPaise: Number(t.coversOtherPayoutsPaise),
+          handBackPaise: Number(t.handBackPaise),
           belowThresholdAfterReversal: t.belowThresholdAfterReversal,
-        }),
-      });
+        });
+        outcome.lines.push({
+          kind: 'RECEIVABLE',
+          entryId: e.id,
+          text: paidEntryOutcomeText({
+            amountPaise: e.amountPaise,
+            receivablePaise: t.receivablePaise,
+            tdsWithheldPaise: withheldPaise,
+            tdsCreditPaise: t.tdsCreditPaise,
+            panMasked: t.panMasked,
+            methodology: e.tdsMethodology ?? null,
+            untrackedWithheldPaise: t.untrackedWithheldPaise,
+            coversOtherPayoutsPaise: t.coversOtherPayoutsPaise,
+            handBackPaise: t.handBackPaise,
+            belowThresholdAfterReversal: t.belowThresholdAfterReversal,
+            flaggedExcessPaise: t.flaggedExcessPaise,
+          }),
+        });
+      }
     } else {
       // PENDING / FAILED: cash never left → cancel. Rows are locked, so the guarded flip must hit exactly one row.
       const withheld = e.tdsDeductedPaise ?? 0n;
@@ -875,6 +967,8 @@ export interface BackfillPayoutEntry {
   amountPaise: bigint;
   status: string;
   createdAt: Date;
+  /** TDS withheld from the payout (audit B2: the receivable recorded is the NET cash received). Absent → 0. */
+  tdsDeductedPaise?: bigint | null;
 }
 
 export interface PlannedPayoutAllocation {
@@ -937,6 +1031,10 @@ export function planPayoutAllocationBackfill(input: {
       .map((a) => a.payoutEntryId),
   );
   const offsetOf = (id: string) => input.tdsOffsetByEntry?.get(id) ?? 0n;
+  const netOf = (e: BackfillPayoutEntry) => {
+    const n = e.amountPaise - (e.tdsDeductedPaise ?? 0n);
+    return n > 0n ? n : 0n;
+  };
   const flag = (r: BackfillPayoutReversal, code: PayoutBackfillFlagCode, severity: PayoutBackfillFlag['severity'], detail: string) =>
     flags.push({ creditReversalId: r.id, code, severity, detail });
   const sameKey = (r: BackfillPayoutReversal, e: BackfillPayoutEntry) =>
@@ -948,12 +1046,13 @@ export function planPayoutAllocationBackfill(input: {
       amountPaise: e.amountPaise,
       state: e.status === 'PAID' ? 'APPLIED_RECEIVABLE' : 'APPLIED_CANCELLED',
       tdsOffsetPaise: e.status === 'PAID' ? 0n : offsetOf(e.id),
-      // Approved under the legacy/interim rule: the receivable was the full amount, no TDS credit (round B is V2-only).
-      receivablePaise: e.status === 'PAID' ? e.amountPaise : 0n,
+      // Audit B2: the receivable is the NET cash the retailer received (amount − TDS withheld) — prod's interim rule
+      // since 7ba69566 (credits.service patchReversal). No TDS credit (credits are V2-only).
+      receivablePaise: e.status === 'PAID' ? netOf(e) : 0n,
       tdsCreditPaise: 0n,
     }));
   const commit = (r: BackfillPayoutReversal, es: BackfillPayoutEntry[]) => {
-    const receivable = es.filter((e) => e.status === 'PAID').reduce((s, e) => s + e.amountPaise, 0n);
+    const receivable = es.filter((e) => e.status === 'PAID').reduce((s, e) => s + netOf(e), 0n);
     if (receivable !== r.shortfallPaise) {
       flag(r, 'SHORTFALL_MISMATCH', 'WARNING', `receivables ${receivable} paise vs recorded shortfall ${r.shortfallPaise} paise`);
     }

@@ -239,6 +239,8 @@ function isRecordNotFound(e: unknown): boolean {
 const ATTENTION_WINDOW_DAYS = 30;
 /** Audit entityType of a per-lot expiry-sweep failure (fix round A, M1) — entityId = the tenant's clientId. */
 export const POINTS_EXPIRY_FAILURE_ENTITY = 'POINTS_EXPIRY_FAILURE';
+/** Audit B8: an expiry repaid debt beyond the expired lot's credit-position room (legacy lot mirror drift). */
+export const POINTS_EXPIRY_OFFSET_CAPPED_ENTITY = 'POINTS_EXPIRY_OFFSET_CAPPED';
 /** Audit entityType of an expiry that only repaid debt (no balance change, no passbook row — fix round A, L1). */
 export const POINTS_EXPIRY_DEBT_ONLY_ENTITY = 'POINTS_EXPIRY_DEBT_REPAID';
 /** Audit entityType of a reversal-engine mode change via the dedicated GIFSY endpoint (fix round A, M2). */
@@ -1006,7 +1008,32 @@ export class WalletService {
     if (pos && x > 0) {
       const add = Math.min(x, pos.amount - pos.offsetPoints);
       if (add < x) {
+        // Audit B8: REACHABLE — the WP6 backfill never rewrites lots, so a backfilled wallet's legacy-era lot can hold
+        // more than its position's room (a − O). Debt is still repaid in full (D above); only the position's offset is
+        // capped, so a later reversal of that credit restores less debt than it repaid. Never log-only: an audit row
+        // in this tx + the Gifsy attention endpoint / banner ("expiryOffsetCapped").
         this.logger.warn(`expiry: lot ${lot.id} excess ${x} exceeds position ${pos.id} room; offset +${add} only`);
+        const owner = await tx.channelPartner.findFirst({ where: { id: w.partnerId }, select: { clientId: true } });
+        await tx.auditLog.create({
+          data: {
+            action: 'UPDATE',
+            entityType: POINTS_EXPIRY_OFFSET_CAPPED_ENTITY,
+            entityId: w.id,
+            actorId: null,
+            metadata: {
+              clientId: owner?.clientId ?? null,
+              walletId: w.id,
+              lotId: lot.id,
+              positionId: pos.id,
+              creditTxId: pos.creditTxId,
+              batchId: pos.batchId,
+              outletCode: pos.outletCode,
+              debtRepaid: x,
+              offsetAdded: add,
+              offsetNotRecorded: x - add,
+            } as Prisma.InputJsonValue,
+          },
+        });
       }
       if (add > 0) {
         const res = await tx.walletCreditPosition.updateMany({
@@ -2717,6 +2744,16 @@ export class WalletService {
       this.prisma.auditLog.findMany({ where: refusalWhere, select: auditSelect, orderBy: { createdAt: 'desc' }, take: limit }),
     ]);
 
+    // Audit B8: expiries whose debt repayment could not all be booked on the credit's position (last 30 days).
+    const cappedWhere: Prisma.AuditLogWhereInput = {
+      entityType: POINTS_EXPIRY_OFFSET_CAPPED_ENTITY,
+      createdAt: { gte: since },
+      metadata: { path: ['clientId'], equals: clientId },
+    };
+    const [cappedTotal, capped] = await Promise.all([
+      this.prisma.auditLog.count({ where: cappedWhere }),
+      this.prisma.auditLog.findMany({ where: cappedWhere, select: auditSelect, orderBy: { createdAt: 'desc' }, take: limit }),
+    ]);
     return {
       clientId,
       mode,
@@ -2768,6 +2805,21 @@ export class WalletService {
         };
       }),
       expiryFailuresTotal,
+      expiryOffsetCapped: (capped ?? []).map((c) => {
+        const m = (c.metadata ?? {}) as Record<string, unknown>;
+        return {
+          at: c.createdAt,
+          walletId: typeof m.walletId === 'string' ? m.walletId : c.entityId,
+          lotId: typeof m.lotId === 'string' ? m.lotId : null,
+          batchId: typeof m.batchId === 'string' ? m.batchId : null,
+          outletCode: typeof m.outletCode === 'string' ? m.outletCode : null,
+          offsetNotRecorded: typeof m.offsetNotRecorded === 'number' ? m.offsetNotRecorded : null,
+          action:
+            "The wallet's debt was repaid in full, but this credit's record of it is short by the amount shown — a later " +
+            'reversal of that credit restores that much less debt. Gifsy: check the wallet history (legacy lot drift).',
+        };
+      }),
+      expiryOffsetCappedTotal: cappedTotal ?? 0,
       // M3 (+ every other Gifsy-must-act refusal): POINTS reversals refused in the last 30 days, with the reason.
       refusals: refusals.map((r) => {
         const m = (r.metadata ?? {}) as Record<string, unknown>;

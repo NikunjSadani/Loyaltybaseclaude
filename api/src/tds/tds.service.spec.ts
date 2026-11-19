@@ -651,31 +651,16 @@ describe('TdsService', () => {
       async (args: { where?: { tdsBaseReversedAt?: unknown } }) =>
         args?.where?.tdsBaseReversedAt && typeof args.where.tdsBaseReversedAt === 'object' ? reversed : base;
 
-    it('194C: base excludes the reversed payout; row says reversed on <date>, below threshold, revise return, over-deduction handed back', async () => {
+    it('owner D1 (2026-11-19): the 194C report is back to 7ba69566 — no reversed-base filter, no reversal flag (a PAID 194C payout is never reversed)', async () => {
       mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
       const base = mkEntry('outlet1', 'vis-field', 2_500_000n, new Date('2025-08-01'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT', clientId: CLIENT_ID });
-      const rev = {
-        ...mkEntry('outlet1', 'vis-field', 8_000_000n, new Date('2025-08-01'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT', clientId: CLIENT_ID }),
-        tdsBaseReversedAt: new Date('2025-12-01T06:00:00Z'),
-      };
-      mockPrisma.creditPayoutEntry.findMany.mockImplementation(byReversal([base], [rev]));
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([base]);
       mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1', clientId: CLIENT_ID }]);
       mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'cp1', panNumber: 'ABCDE1234F', entityType: 'INDIVIDUAL' }]);
-      mockPrisma.tdsDeductionEntry.findMany.mockResolvedValue([{ panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 105_000n }]);
-
       const rows = await service.compute194C(FY);
-      // the base query excludes engine-reversed payouts
-      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where).toMatchObject({ tdsBaseReversedAt: null });
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where).not.toHaveProperty('tdsBaseReversedAt');
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ baseFyTotalPaise: 2_500_000n, thresholdMet: false, liabilityPaise: 0n, withheldPaise: 105_000n });
-      expect(rows[0].reversal).toMatchObject({ reversedPaise: 8_000_000n, belowThresholdAfterReversal: true });
-      expect(rows[0].reversal!.items[0]).toMatchObject({ retroactive: true, period: '2025-08', outletCode: 'outlet1' });
-      expect(rows[0].reversal!.notes).toEqual([
-        '₹80,000.00 reversed on 1 Dec 2025 (payout 2025-08, outlet outlet1)',
-        'PAN below threshold after reversal — no TDS due for FY 2025-26 on what remains',
-        'Changed after reversal on 1 Dec 2025 — revise return if already filed',
-        '₹1,050.00 TDS withheld beyond what is now due — handed back on the next payout on this PAN by the programme that reversed it',
-      ]);
+      expect(rows[0]).not.toHaveProperty('reversal');
     });
 
     it('194R: a PAN whose whole base was reversed still gets a (base 0) row — the reversal is never silent', async () => {

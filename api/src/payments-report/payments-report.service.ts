@@ -115,7 +115,7 @@ export class PaymentsReportService {
           select: {
             ...PAYMENT_ENTRY_SELECT,
             tdsBaseReversedAt: true,
-            reversalAllocations: { where: { state: 'APPLIED_RECEIVABLE' }, select: { receivablePaise: true, tdsCreditPaise: true } },
+            reversalAllocations: { where: { state: { in: ['APPLIED_RECEIVABLE', 'APPLIED_CANCELLED'] } } /* owner D2: a fully withheld PAID payout reversed → CANCELLED, owed 0 */, select: { receivablePaise: true, tdsCreditPaise: true } },
             tdsCreditApplications: {
               where: { releasedAt: null },
               select: { amountPaise: true, tdsCredit: { select: { clientId: true } } },

@@ -962,6 +962,21 @@ describe('fix round A — L3 / L4 lock order and mode reads under the engine loc
     expect(h.T.rawSql.filter((s) => /FROM credit_batches WHERE id = \? FOR UPDATE/.test(s))).toHaveLength(1); // no re-lock
   });
 
+  it('audit B9: a V2 confirm pre-locks every target wallet in ascending id (the reversal engine order) in ONE statement before crediting; LEGACY does not', async () => {
+    const v2 = world({ mode: 'V2', outlets: { O2: 'cp2', O1: 'cp1' }, partners: ['cp1', 'cp2'] });
+    v2.T.rawSql.length = 0;
+    await v2.confirm('B9', [{ outlet: 'O2', amount: 10 }, { outlet: 'O1', amount: 5 }]);
+    const pre = v2.T.rawSql.filter((q: string) => q.includes('FOR UPDATE OF w'));
+    expect(pre).toHaveLength(1);
+    expect(pre[0]).toContain('ORDER BY w."id"');
+    // it runs after the shared engine lock and before the first credit's own wallet lock
+    expect(v2.T.rawSql.findIndex((q: string) => q.includes('FOR UPDATE OF w'))).toBe(1);
+    const legacy = world({ mode: 'LEGACY', outlets: { O2: 'cp2', O1: 'cp1' }, partners: ['cp1', 'cp2'] });
+    legacy.T.rawSql.length = 0;
+    await legacy.confirm('B9', [{ outlet: 'O2', amount: 10 }, { outlet: 'O1', amount: 5 }]);
+    expect(legacy.T.rawSql.some((q: string) => q.includes('FOR UPDATE OF w'))).toBe(false);
+  });
+
   it('L4: a POINTS confirm takes the SHARED engine lock as its first statement and reads the mode inside the tx; a PAYOUT-only one does neither', async () => {
     const h = world({ mode: 'LEGACY', outlets: { O1: 'cp1' } });
     h.T.rawSql.length = 0;

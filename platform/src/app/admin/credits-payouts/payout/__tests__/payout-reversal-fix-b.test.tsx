@@ -236,4 +236,20 @@ describe('Payout page — reversal fix round B', () => {
     expect(d.textContent).toContain('₹3,000.00 entry (was paid) — ₹0.00 owed back — the whole amount was withheld as TDS; ₹3,000.00 TDS credit');
     expect(d.textContent).toContain('₹2,000.00 entry — cancelled · will not be paid');
   });
+
+  it('B4 / owner D2: a fully withheld PAID payout reversed is "reversed · nothing owed" (+ its TDS credit), never "cancelled"', async () => {
+    processed = [{
+      ...base, id: 'p2', status: 'APPROVED', requestedPaise: 150000, approvedPaise: 150000, shortfallPaise: 0,
+      approvedAt: '2026-11-19T00:00:00.000Z',
+      payoutEntries: [
+        { payoutEntryId: 'w1', amountPaise: 150000, allocationState: 'APPLIED_CANCELLED', entryStatus: 'REVERSED', tdsOffsetPaise: 0, tdsCreditPaise: 150000, fullyWithheld: true },
+      ],
+    }];
+    render(<PayoutDownloadPage />);
+    const d = await screen.findByTestId('processed-details-p2');
+    expect(d.textContent).toContain(
+      '₹1,500.00 entry (was paid — fully withheld as TDS) — reversed · nothing reached the retailer, nothing owed · ₹1,500.00 TDS credit carried forward',
+    );
+    expect(d.textContent).not.toContain('cancelled');
+  });
 });

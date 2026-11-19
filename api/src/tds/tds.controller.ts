@@ -101,7 +101,7 @@ export class TdsController {
     return {
       section: '194C',
       fyLabel,
-      summary: { ...serializeSummary194C(summary), ...reversalFlags(rows) },
+      summary: serializeSummary194C(summary),
       rows: rows.map(serializeRow194C),
     };
   }
@@ -316,6 +316,8 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
     // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
     ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
     ...(r.reversal ? { reversal: serializeReversal(r.reversal) } : {}),
+    // Audit A4: an open TDS credit (WRE V2 reversal) lowers the row's excess — say how much (only when there is one).
+    ...(r.openTdsCreditPaise !== undefined ? { openTdsCreditPaise: r.openTdsCreditPaise.toString() } : {}),
   };
 }
 
@@ -351,7 +353,6 @@ function serializeRow194C(r: import('./tds.service').TdsRow194C) {
     outstandingPaise: r.outstandingPaise.toString(),
     // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
     ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
-    ...(r.reversal ? { reversal: serializeReversal(r.reversal) } : {}),
   };
 }
 

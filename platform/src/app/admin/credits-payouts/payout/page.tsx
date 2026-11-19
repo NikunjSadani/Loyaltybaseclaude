@@ -198,6 +198,8 @@ interface Reversal {
     receivablePaise?: number;
     /** Approved receivable only: the withheld TDS carried as a TDS credit on the PAN. */
     tdsCreditPaise?:  number;
+    /** Owner D2: a PAID payout fully withheld as TDS, reversed — nothing reached the retailer, nothing owed. */
+    fullyWithheld?:   boolean;
   }>;
 }
 
@@ -327,6 +329,14 @@ function processedEntryText(pe: ReversalEntry): string {
       return `${amount} entry (was paid) — ${PAID_ENTRY_OUTCOME(net, withheld, pe.tdsCreditPaise ?? 0)}`;
     }
     case 'APPLIED_CANCELLED':
+      // B4 / owner D2: a fully withheld PAID payout is not "cancelled" — it was settled as TDS; reversed, nothing owed.
+      if (pe.fullyWithheld) {
+        return (
+          `${amount} entry (was paid — fully withheld as TDS) — reversed · nothing reached the retailer, nothing owed` +
+          ((pe.tdsCreditPaise ?? 0) > 0 ? ` · ${rupees(pe.tdsCreditPaise ?? 0)} TDS credit carried forward` : '') +
+          ((pe.tdsOffsetPaise ?? 0) > 0 ? ` · ${rupees(pe.tdsOffsetPaise ?? 0)} withheld TDS reversed in the TDS ledger` : '')
+        );
+      }
       return `${amount} entry — cancelled · will not be paid${(pe.tdsOffsetPaise ?? 0) > 0 ? ` · ${rupees(pe.tdsOffsetPaise ?? 0)} withheld TDS offset` : ''}`;
     case 'RELEASED':
       return `${amount} entry — released · goes into the next bank file`;

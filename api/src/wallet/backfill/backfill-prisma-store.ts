@@ -198,7 +198,10 @@ async function loadPayoutInput(db: Db, clientId: string): Promise<PayoutBackfill
   const [entries, existing] = await Promise.all([
     db.creditPayoutEntry.findMany({
       where: { clientId, batchId: { in: batchIds } },
-      select: { id: true, clientId: true, batchId: true, outletId: true, fieldId: true, amountPaise: true, status: true, createdAt: true },
+      select: {
+        id: true, clientId: true, batchId: true, outletId: true, fieldId: true, amountPaise: true, status: true, createdAt: true,
+        tdsDeductedPaise: true, // audit B2: net receivable
+      },
       orderBy: { id: 'asc' },
     }),
     db.payoutReversalAllocation.findMany({

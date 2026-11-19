@@ -67,6 +67,17 @@ export interface ReversalAttention {
   owedTotal: number;
   expiryFailures?: ExpiryFailure[];
   expiryFailuresTotal?: number;
+  /** Audit B8: expiries whose debt repayment could not all be booked on the credit (legacy lot drift). */
+  expiryOffsetCapped?: Array<{
+    at: string;
+    walletId: string;
+    lotId: string | null;
+    batchId: string | null;
+    outletCode: string | null;
+    offsetNotRecorded: number | null;
+    action: string;
+  }>;
+  expiryOffsetCappedTotal?: number;
   refusals?: Refusal[];
   refusalsTotal?: number;
 }
@@ -148,6 +159,9 @@ export default function ReversalEngineAttentionBanner({ canLiftPause = false }: 
   const expiryFailures = data.expiryFailures ?? [];
   const refusals = data.refusals ?? [];
   if (expiryTotal > 0) parts.push(`${expiryTotal} points-expiry failure${expiryTotal === 1 ? '' : 's'} (last 30 days)`);
+  const cappedTotal = data.expiryOffsetCappedTotal ?? 0;
+  const capped = data.expiryOffsetCapped ?? [];
+  if (cappedTotal > 0) parts.push(`${cappedTotal} points expir${cappedTotal === 1 ? 'y' : 'ies'} with debt not fully booked on the credit (last 30 days)`);
   if (refusalTotal > 0) parts.push(`${refusalTotal} points reversal${refusalTotal === 1 ? '' : 's'} refused — Gifsy must act (last 30 days)`);
   if (data.modeError && !data.modeWarning) parts.push('reversal engine setting unreadable');
   if (!paused && parts.length === 0 && !data.modeWarning) return null;
@@ -222,6 +236,21 @@ export default function ReversalEngineAttentionBanner({ canLiftPause = false }: 
                 ))}
               </ul>
               {refusalTotal > refusals.length && <p>…and {refusalTotal - refusals.length} more</p>}
+            </div>
+          )}
+          {capped.length > 0 && (
+            <div data-testid="attention-expiry-offset-capped">
+              <p className="font-semibold mb-1">Expiry repaid debt beyond the credit&apos;s record ({cappedTotal})</p>
+              <ul className="space-y-1">
+                {capped.map((c, i) => (
+                  <li key={`${c.lotId}-${c.at}-${i}`} className="break-words">
+                    {fmtSince(c.at)} · wallet {c.walletId}
+                    {c.outletCode ? ` · outlet ${c.outletCode}` : ''}
+                    {c.offsetNotRecorded != null ? ` · ${c.offsetNotRecorded} pts not booked on the credit` : ''} — {c.action}
+                  </li>
+                ))}
+              </ul>
+              {cappedTotal > capped.length && <p>…and {cappedTotal - capped.length} more</p>}
             </div>
           )}
           {expiryFailures.length > 0 && (

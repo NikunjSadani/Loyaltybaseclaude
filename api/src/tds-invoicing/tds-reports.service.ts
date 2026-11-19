@@ -101,7 +101,7 @@ export class TdsReportsService {
         downloadId: true,
         tdsBaseReversedAt: true,
         reversalAllocations: {
-          where: { state: 'APPLIED_RECEIVABLE' },
+          where: { state: { in: ['APPLIED_RECEIVABLE', 'APPLIED_CANCELLED'] } } /* owner D2: a fully withheld PAID payout reversed → CANCELLED, owed 0 */,
           select: { receivablePaise: true, tdsCreditPaise: true },
         },
         tdsCreditApplications: {
@@ -137,18 +137,22 @@ export class TdsReportsService {
         })
       : [];
     const outletMap = new Map(outlets.map((o) => [`${o.clientId}|${o.outletCode}`, o]));
-    const clientNames = await this.clientNames([...new Set(entries.map((e) => e.clientId))]);
     // D3: the "less TDS after a reversal" lines of the downloads these rows went out in (none → no rows read).
     const handBackByEntry = await this.handBackByEntry(
       [...new Set(entries.filter((e) => e.downloadId).map((e) => e.downloadId!))],
     );
+    // Audit B5 (LEGACY / Deoleo byte-identity): the WRE call-outs — and the tenant name that goes with them — only on
+    // rows that carry one; every other row is shaped exactly as in 7ba69566 (and no extra query when none do).
+    const notesByEntry = new Map(entries.map((e) => [e.id, this.rowTdsNotes(e, handBackByEntry.get(e.id) ?? 0n)]));
+    const noted = entries.filter((e) => Object.keys(notesByEntry.get(e.id) ?? {}).length > 0);
+    const clientNames = noted.length > 0 ? await this.clientNames([...new Set(noted.map((e) => e.clientId))]) : new Map<string, string>();
 
     const rows = entries.map((e) => {
       const o = outletMap.get(`${e.clientId}|${e.outletId}`);
-      const notes = this.rowTdsNotes(e, handBackByEntry.get(e.id) ?? 0n);
+      const notes = notesByEntry.get(e.id) ?? {};
       return {
         clientId: e.clientId,
-        clientName: clientNames.get(e.clientId) ?? null,
+        ...(Object.keys(notes).length > 0 ? { clientName: clientNames.get(e.clientId) ?? null } : {}),
         outletCode: e.outletId,
         outletName: e.outletName,
         businessName: o?.partner?.businessName ?? null,
@@ -168,6 +172,7 @@ export class TdsReportsService {
 
     const totalAmountPaise = entries.reduce((s, e) => s + e.amountPaise, 0n);
     const totalTdsDeductedPaise = entries.reduce((s, e) => s + e.tdsDeductedPaise, 0n);
+    const credits = await this.tdsCreditSection(this.prisma, scope, creditPage);
 
     return {
       scope: { clientId: scope.clientId ?? null, period: scope.period ?? null },
@@ -178,7 +183,8 @@ export class TdsReportsService {
       },
       rows,
       // Policy round B: TDS credits from reversed PAID payouts — created / applied / outstanding (never silent).
-      tdsCredits: await this.tdsCreditSection(this.prisma, scope, creditPage),
+      // Audit B5: only when the scope HAS credits (a tenant without V2 reversals gets the 7ba69566 response shape).
+      ...(credits.count > 0 ? { tdsCredits: credits } : {}),
     };
   }
 

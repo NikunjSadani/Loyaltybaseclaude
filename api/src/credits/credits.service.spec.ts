@@ -4116,7 +4116,20 @@ describe('CreditsService', () => {
         expect(lockKeysTaken()).toContain(`R194|deoleo|${runFy}`);
       });
 
-      it('A-L4: reversing a fully withheld 194C entry takes its 194C PAN lock (from the original ledger row)', async () => {
+      it('A-L4: reversing a fully withheld 194R entry takes the R194 client+FY lock of its original ledger row', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue({
+          id: 'r1', status: 'PENDING_GIFSY', requestedPaise: 500000n, awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+        });
+        mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 500000 }] });
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'pe1', status: 'PAID', outletId: 'O1', amountPaise: 500000n, tdsDeductedPaise: 500000n, tdsSection: 'SEC_194R', period: '2026-05' },
+        ]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'pe1', panNumber: 'PAN1', section: 'SEC_194R', fyLabel: '2026-27', tdsDeductedThisPaise: 500000n }]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 500000 });
+        expect(lockKeysTaken()).toContain('R194|deoleo|2026-27');
+      });
+
+      it('owner D1 (2026-11-19, every tenant): a PAID 194C entry can not be reversed — refused before any lock or write', async () => {
         mockPrisma.creditReversal.findFirst.mockResolvedValue({
           id: 'r1', status: 'PENDING_GIFSY', requestedPaise: 500000n, awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1', batchId: 'b1',
         });
@@ -4124,9 +4137,11 @@ describe('CreditsService', () => {
         mockTx.creditPayoutEntry.findMany.mockResolvedValue([
           { id: 'pe1', status: 'PAID', outletId: 'O1', amountPaise: 500000n, tdsDeductedPaise: 500000n, tdsSection: 'SEC_194C', period: '2026-05' },
         ]);
-        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'pe1', panNumber: 'PAN1', section: 'SEC_194C', fyLabel: '2026-27', tdsDeductedThisPaise: 500000n }]);
-        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 500000 });
-        expect(lockKeysTaken()).toContain('PAN|PAN1|2026-27');
+        await expect(service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 500000 })).rejects.toThrow(
+          /^194C payouts can't be reversed once paid/,
+        );
+        expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
       });
 
       it('A-L1: the partner scope is ONE exact match on the normalised PAN (PAN_NORMALISE_SQL) for this client (no per-PAN ILIKE OR)', async () => {
@@ -4367,9 +4382,10 @@ describe('CreditsService', () => {
         id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 5000000n,
         tdsDeductedPaise: 0n, tdsSection: 'SEC_194C', period: '2026-05', // the credit covered the whole TDS
       }]);
-      mockTx.tdsCreditApplication.findMany.mockResolvedValueOnce([
-        { id: 'a1', tdsCreditId: 'c1', payoutEntryId: 'e1', amountPaise: 40000n },
-      ]);
+      // B6: the UTR upload first reads the credit's key (select tdsCredit) to lock it, then releases the application.
+      mockTx.tdsCreditApplication.findMany
+        .mockResolvedValueOnce([{ tdsCredit: { section: 'SEC_194R', panNumber: 'PAN1', fyLabel: '2026-27' } }])
+        .mockResolvedValueOnce([{ id: 'a1', tdsCreditId: 'c1', payoutEntryId: 'e1', amountPaise: 40000n, clientId: 'deoleo' }]);
       mockTx.tdsCreditApplication.updateMany.mockResolvedValueOnce({ count: 1 });
       mockTx.$executeRaw.mockResolvedValue(1);
       const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', '', 'Failure', 'bounced']];
@@ -4387,6 +4403,7 @@ describe('CreditsService', () => {
         where: { id: 'a1', releasedAt: null },
         data: { releasedAt: expect.any(Date), releaseReason: 'PAYOUT_FAILED' },
       });
+      expect(lockKeysTaken()).toContain('R194|deoleo|2026-27'); // B6 — although e1 carries no withholding
       expect(res.tdsCreditReleased).toEqual([
         { entryId: 'e1', amountPaise: 40000, note: expect.stringMatching(/^₹400.00 TDS credit returned to the PAN.s credit balance — this payout failed/) },
       ]);
