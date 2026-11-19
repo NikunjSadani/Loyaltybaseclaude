@@ -87,7 +87,32 @@ export async function replayWalletThroughOracle(
   const kinds: string[] = [];
   let m = emptyModel();
 
+  // A6 (fix round 3): a V2 reversal fully covered by the credit's own EXPIRED points writes NO wallet row (it moves
+  // nothing). Replay those allocations by time, before the first row created after them, without consuming a seq.
+  const posById = new Map(positions.map((p) => [p.id, p]));
+  const rowFor = (a: (typeof allocations)[number]) =>
+    rows.some((r) => r.creditReversalId === a.creditReversalId && r.reversedCreditTxId === posById.get(a.positionId)?.creditTxId);
+  const expiredOnly = allocations
+    .filter((a) => a.engineSource === 'V2' && a.alreadyExpired === a.requested && !rowFor(a))
+    .sort((x, y) => x.createdAt.getTime() - y.createdAt.getTime());
+  const applyExpiredOnly = (until: Date | null) => {
+    while (expiredOnly.length && (until === null || expiredOnly[0].createdAt.getTime() <= until.getTime())) {
+      const a = expiredOnly.shift()!;
+      const creditId = posById.get(a.positionId)?.creditTxId;
+      try {
+        const st = oReverse(m, creditId!, a.requested);
+        if (st.movement.pointsDelta !== 0 || st.movement.alreadyExpired !== a.requested) {
+          mismatches.push(`allocation ${a.id}: expired-only reversal (no wallet row) but the oracle moves ${st.movement.pointsDelta}`);
+        }
+        m = { ...st.model, state: { ...st.model.state, seq: m.state.seq } };
+      } catch (e) {
+        mismatches.push(`allocation ${a.id}: oracle refused the expired-only reversal — ${(e as Error).message}`);
+      }
+    }
+  };
+
   rows.forEach((r, i) => {
+    applyExpiredOnly(r.createdAt);
     if (r.seq !== i + 1)
       mismatches.push(
         `row ${r.id}: seq ${r.seq} at position ${i + 1} (gap / duplicate / NULL)`,
@@ -112,10 +137,17 @@ export async function replayWalletThroughOracle(
         kinds.push('REVERSAL');
         const pos = posByCredit.get(r.reversedCreditTxId);
         const alloc = allocations.find((a) => a.creditReversalId === r.creditReversalId && a.positionId === pos?.id);
-        const preRule = !!alloc && alloc.owed === 0 && (alloc.alreadyExpired ?? 0) === 0 && alloc.shortfall > 0;
-        step = preRule
-          ? preDebtRuleReverse(m, r.reversedCreditTxId, -r.points)
-          : oReverse(m, r.reversedCreditTxId, -r.points);
+        // A6: the row's points are the balance change −(r − q); r comes from the allocation.
+        const requested = alloc?.requested ?? -r.points;
+        // A7/B7 (fix round 3): decided by the row that WROTE the allocation, never by its shape — a LEGACY clawback on a
+        // sequenced wallet (engineSource 'LEGACY': floor 0, the rest written off) and a V2 row approved before the
+        // 2026-11-19 rules are replayed by the old floor rule; NULL (pre-column, staging only) falls back to the shape.
+        const oldRule =
+          alloc?.engineSource === 'LEGACY' ||
+          (alloc?.engineSource == null && !!alloc && alloc.owed === 0 && (alloc.alreadyExpired ?? 0) === 0 && alloc.shortfall > 0);
+        step = oldRule
+          ? preDebtRuleReverse(m, r.reversedCreditTxId, requested)
+          : oReverse(m, r.reversedCreditTxId, requested);
       } else if (r.transactionType === 'DEBIT_EXPIRY') {
         kinds.push('EXPIRY');
         const owner = txByLedger.get(r.referenceId ?? '');
@@ -171,6 +203,7 @@ export async function replayWalletThroughOracle(
           alloc.recovered !== mv.recovered ||
           alloc.owed !== mv.owed ||
           (alloc.alreadyExpired ?? 0) !== mv.alreadyExpired ||
+          (alloc.debtExposed ?? 0) !== mv.debtExposed ||
           alloc.shortfall !== mv.shortfall
         ) {
           mismatches.push(
@@ -182,6 +215,7 @@ export async function replayWalletThroughOracle(
     }
     m = step.model;
   });
+  applyExpiredOnly(null);
 
   if (wallet.redeemablePoints !== m.state.B)
     mismatches.push(

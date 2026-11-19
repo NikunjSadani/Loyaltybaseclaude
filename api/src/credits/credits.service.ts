@@ -4079,16 +4079,31 @@ export class CreditsService {
     if (approved.length === 0) return reversals;
     const rows = await this.prisma.creditReversalAllocation.findMany({
       where: { creditReversalId: { in: approved.map((r) => r.id) } },
-      select: { creditReversalId: true, requested: true, debtRestored: true, recovered: true, owed: true, alreadyExpired: true, shortfall: true },
+      select: {
+        creditReversalId: true, requested: true, debtRestored: true, recovered: true, owed: true, alreadyExpired: true,
+        debtExposed: true, engineSource: true, shortfall: true,
+      },
     });
     const by = new Map<string, typeof rows>();
     for (const a of rows ?? []) by.set(a.creditReversalId, [...(by.get(a.creditReversalId) ?? []), a]);
+    // The V2 reversals' own wallet rows: how far below zero each took its wallet (owner D1 "points owed" — A5).
+    const v2Ids = [...by.entries()].filter(([, list]) => list.every((a) => a.engineSource === 'V2')).map(([id]) => id);
+    const moves = v2Ids.length
+      ? await this.prisma.walletTransaction.findMany({
+          where: { creditReversalId: { in: v2Ids }, referenceType: 'CREDIT_REVERSAL' },
+          select: { creditReversalId: true, balanceBefore: true, balanceAfter: true },
+        })
+      : [];
+    const movesBy = new Map<string, { balanceBefore: number; balanceAfter: number }[]>();
+    for (const m of moves ?? []) if (m.creditReversalId) movesBy.set(m.creditReversalId, [...(movesBy.get(m.creditReversalId) ?? []), m]);
     const ids = new Set(approved.map((r) => r.id));
     return reversals.map((r) =>
       ids.has(r.id)
         ? {
             ...r,
-            pointsOutcome: pointsOutcome(storedPointsSplit(r, by.get(r.id) ?? []), { requested: Number(r.requestedPaise) }),
+            pointsOutcome: pointsOutcome(storedPointsSplit(r, by.get(r.id) ?? [], movesBy.get(r.id) ?? []), {
+              requested: Number(r.requestedPaise),
+            }),
           }
         : r,
     );
@@ -4373,6 +4388,8 @@ export class CreditsService {
           debtRestored: res.debtRestored,
           owed: res.owed,
           alreadyExpired: res.alreadyExpired,
+          debtExposed: res.debtExposed,
+          belowZero: res.balanceBelowZero,
           shortfall: res.shortfall,
         };
       } else if (pointsTarget) {

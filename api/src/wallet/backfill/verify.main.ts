@@ -8,7 +8,8 @@
  *                                                      since ("live activity since the APPLY baseline: +X earned /
  *                                                      −Y redeemed — explained"); an unexplained change FAILS]
  *   [NEVER_NEGATIVE_TENANTS=deoleo]                  ← default "deoleo" (V5)
- *   [EXPECTED_NEGATIVE_BALANCES='{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}']  ← V6b (Bajaj PROD values)
+ *   [EXPECTED_NEGATIVE_BALANCES='{"bajaj":{"<walletId>":-840,…}}']  ← V6b, by wallet id (or the legacy list of values
+ *     '{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}'); compared with each wallet's balance at the CUTOVER
  *     node dist/wallet/backfill/verify.main.js
  *
  * Exit codes: 0 all PASS/INFO/SKIP · 1 crash · 2 guard refused · 5 at least one FAIL.
@@ -24,7 +25,7 @@ export interface VerifyConfig {
   tenants?: string[];
   v0Baseline: Map<string, V0Snapshot>;
   neverNegativeTenants: Set<string>;
-  expectedNegatives: Map<string, number[]>;
+  expectedNegatives: Map<string, number[] | Record<string, number>>;
 }
 
 export function verifyConfigFromEnv(env: NodeJS.ProcessEnv): VerifyConfig {
@@ -40,9 +41,10 @@ export function verifyConfigFromEnv(env: NodeJS.ProcessEnv): VerifyConfig {
     const parsed = JSON.parse(env.V0_BASELINE_JSON) as V0Snapshot | V0Snapshot[];
     for (const s of Array.isArray(parsed) ? parsed : [parsed]) baseline.set(s.clientId, s);
   }
-  const negatives = new Map<string, number[]>();
+  // Per tenant: { walletId: balance } (preferred — fix round 3, B2) or a list of balances (multiset, legacy form).
+  const negatives = new Map<string, number[] | Record<string, number>>();
   if (env.EXPECTED_NEGATIVE_BALANCES) {
-    const parsed = JSON.parse(env.EXPECTED_NEGATIVE_BALANCES) as Record<string, number[]>;
+    const parsed = JSON.parse(env.EXPECTED_NEGATIVE_BALANCES) as Record<string, number[] | Record<string, number>>;
     for (const [k, v] of Object.entries(parsed)) negatives.set(k, v);
   }
   return {

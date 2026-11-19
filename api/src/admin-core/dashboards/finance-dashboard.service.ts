@@ -83,10 +83,10 @@ export class FinanceDashboardService {
     // on ChannelPartner — the same denormalised filter TDS/redemptions use).
     const walletAgg = await this.prisma.wallet.aggregate({
       where: { partner: { clientId } },
-      _sum: { lockedPoints: true, debtPoints: true },
+      _sum: { lockedPoints: true },
     });
     // Audit item 1 (2026-11-19): liability = Σ POSITIVE balances only — a negative wallet's debt never nets against what
-    // the other wallets can redeem; it is reported separately as "points owed" (Σ debtPoints). Unchanged for a tenant
+    // the other wallets can redeem; it is reported separately as "points owed" (Σ |negative balances|). Unchanged for a tenant
     // with no negative wallet (every Deoleo wallet).
     const positiveAgg = await this.prisma.wallet.aggregate({
       where: { partner: { clientId }, redeemablePoints: { gt: 0 } },
@@ -95,7 +95,16 @@ export class FinanceDashboardService {
     // Wallet point columns are Int → _sum returns `number | null`.
     const redeemablePoints = positiveAgg._sum.redeemablePoints ?? 0;
     const lockedPoints = walletAgg._sum.lockedPoints ?? 0;
-    const owedPoints = walletAgg._sum.debtPoints ?? 0;
+    // Owner decisions D1/D2 (2026-11-19, every tenant): "points owed" = Σ |negative balances| (how far below zero), with
+    // how many wallets — never netted into the liability. One more aggregate; 0 / 0 for a tenant with no negative wallet.
+    const owedAgg = await this.prisma.wallet.aggregate({
+      where: { partner: { clientId }, redeemablePoints: { lt: 0 } },
+      _sum: { redeemablePoints: true },
+      _count: { _all: true },
+    });
+    const negSum = owedAgg?._sum?.redeemablePoints ?? 0;
+    const owedPoints = Math.max(0, -negSum);
+    const owedWallets = owedPoints > 0 ? owedAgg?._count?._all ?? 0 : 0;
 
     // ── Breakage: PERIOD-ONLY (current calendar month) ──────────────────────────
     // expiredPoints = Σ PointsLedger.points (transactionType=EXPIRE) in the period;
@@ -168,6 +177,7 @@ export class FinanceDashboardService {
         lockedRupees: FinanceDashboardService.pointsToRupees(lockedPoints, conversionRate),
         // "Points owed (debt)" — owed back by negative wallets, repaid from future earnings; never netted above.
         owedPoints,
+        owedWallets,
       },
       breakage: {
         period: periodLabel,

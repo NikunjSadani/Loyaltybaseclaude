@@ -14,6 +14,12 @@ SET lock_timeout = '5s';
 
 ALTER TABLE "credit_reversal_allocations" ADD COLUMN IF NOT EXISTS "overReversalDebt" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "credit_reversal_allocations" ADD COLUMN IF NOT EXISTS "alreadyExpired" INTEGER NOT NULL DEFAULT 0;
+-- (3) fix round 3 (2026-11-19): "debtExposed" = the part of the points taken (recovered) that was backing EXISTING debt,
+--     so the reversal took the balance below zero (B 60 / D 40 → reverse 100 → B −40) — recorded so it is never silent;
+--     "engineSource" = which path wrote the row: 'V2' | 'LEGACY' (live floor-0 clawback on a sequenced wallet) |
+--     'BACKFILL' (WP6 history). NULL = written before this column (staging rows only).
+ALTER TABLE "credit_reversal_allocations" ADD COLUMN IF NOT EXISTS "debtExposed" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "credit_reversal_allocations" ADD COLUMN IF NOT EXISTS "engineSource" TEXT;
 
 ALTER TABLE "credit_reversal_allocations" DROP CONSTRAINT IF EXISTS "credit_reversal_allocations_parts_chk";
 DO $$ BEGIN
@@ -21,6 +27,8 @@ DO $$ BEGIN
     ALTER TABLE "credit_reversal_allocations" ADD CONSTRAINT "credit_reversal_allocations_parts_v2_chk" CHECK (
   "requested" > 0 AND "debtRestored" >= 0 AND "recovered" >= 0 AND "owed" >= 0 AND "shortfall" >= 0 AND "alreadyExpired" >= 0
   AND "debtRestored" + "recovered" + "owed" + "shortfall" + "alreadyExpired" = "requested"
+  AND "debtExposed" >= 0 AND "debtExposed" <= "recovered"
+  AND ("engineSource" IS NULL OR "engineSource" IN ('V2', 'LEGACY', 'BACKFILL'))
 ) NOT VALID;
   END IF;
 END $$;

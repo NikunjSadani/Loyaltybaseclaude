@@ -24,6 +24,8 @@ const mockPrisma = {
   outletVisibilityRecord: { findMany: jest.fn() },
   leaderboardSnapshot: { findFirst: jest.fn() },
   leaderboardEntry: { findMany: jest.fn() },
+  // fix round 3: the wallet totals + negative split are read in ONE array transaction
+  $transaction: jest.fn(async (ops: Promise<unknown>[]) => Promise.all(ops)),
 };
 
 const mockTenantSettings = { getConversionRate: jest.fn() };
@@ -142,6 +144,7 @@ describe('GroupService.getWalletRollup', () => {
     expect(result.conversionRate).toBe(10);
     expect(result.totals).toEqual({
       owedPoints: 0,
+      owedWallets: 0,
       redeemablePoints: 300,
       earnedPoints: 500,
       redeemedPoints: 150,
@@ -215,6 +218,7 @@ describe('GroupService.getWalletRollup', () => {
     if (!result.available) throw new Error('unreachable'); // narrows the union for TS
     expect(result.totals).toEqual({
       owedPoints: 0,
+      owedWallets: 0,
       redeemablePoints: 0,
       earnedPoints: 0,
       redeemedPoints: 0,
@@ -301,11 +305,12 @@ describe('GroupService.getWalletRollup', () => {
     // all wallets: 5,000 + (−2,986) = 2,014; negative wallets only: −2,986
     mockPrisma.wallet.aggregate
       .mockResolvedValueOnce({ _sum: { redeemablePoints: 2014 } })
-      .mockResolvedValueOnce({ _sum: { redeemablePoints: -2986 } });
+      .mockResolvedValueOnce({ _sum: { redeemablePoints: -2986 }, _count: { _all: 1 } });
     mockPrisma.outlet.findMany.mockResolvedValueOnce([]);
     const result = await makeService().getWalletRollup(user);
     if (!result.available) throw new Error('unreachable');
-    expect(result.totals).toMatchObject({ redeemablePoints: 5000, owedPoints: 2986 });
+    expect(result.totals).toMatchObject({ redeemablePoints: 5000, owedPoints: 2986, owedWallets: 1 });
+    expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
     expect(mockPrisma.wallet.aggregate.mock.calls[1][0].where.redeemablePoints).toEqual({ lt: 0 });
   });
 
@@ -324,6 +329,7 @@ describe('GroupService.getWalletRollup', () => {
     if (!result.available) throw new Error('unreachable'); // narrows the union for TS
     expect(result.totals).toEqual({
       owedPoints: 0,
+      owedWallets: 0,
       redeemablePoints: 42,
       earnedPoints: 0,
       redeemedPoints: 0,

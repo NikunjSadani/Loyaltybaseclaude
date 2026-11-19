@@ -101,6 +101,11 @@ export interface Movement {
    * nothing taken and no debt for them (owner decision 2026-11-19, expired points are not recovered twice).
    */
   alreadyExpired: number;
+  /**
+   * reversal only (fix round 3, 2026-11-19): the part of c that was backing EXISTING debt — how much further below zero
+   * the balance went than p + s explain (B 60 / D 40, reverse 100 → c 100, B −40 → 40). Informational: c includes it.
+   */
+  debtExposed: number;
   /** reversal only: p (debt restored) */
   debtRestored: number;
   /** reversal only: c (recovered from holdings) */
@@ -166,6 +171,7 @@ function movement(
     shortfall: 0,
     owed: 0,
     alreadyExpired: 0,
+    debtExposed: 0,
     debtRestored: 0,
     recovered: 0,
   };
@@ -348,7 +354,9 @@ export function reverse(m0: WalletModel, creditId: string, r: number): Step {
   const q = Math.min(r - p, Math.max(0, (pos.expired ?? 0) - (pos.expiredCounted ?? 0)));
   const c = Math.min(r - p - q, H);
   const s = r - p - q - c;
+  const negBefore = Math.max(0, -m.state.B);
   m.state.B -= r - q;
+  const exposed = Math.max(0, Math.max(0, -m.state.B) - negBefore - p - s);
   m.state.D += p + s;
   pos.offset -= p;
   pos.reversed += r;
@@ -363,6 +371,7 @@ export function reverse(m0: WalletModel, creditId: string, r: number): Step {
   mv.alreadyExpired = q;
   mv.recovered = c;
   mv.owed = s;
+  mv.debtExposed = exposed;
   mv.shortfall = 0;
   mv.lotDraws = drawLots(m, c, creditId);
   return { model: m, movement: mv };

@@ -23,6 +23,8 @@ export interface VWallet {
   lockedPoints: number;
   /** wallets.backfillStatus (policy round A): 'BLOCKED' wallets are excluded from V1/V2/V3/V7 and listed by V10 */
   backfillStatus?: string | null;
+  /** when the backfill prepared the wallet — V6b's cutover point (absent → the current balance is the cutover) */
+  backfillCheckedAt?: Date | string | null;
 }
 
 export interface VTx {
@@ -37,6 +39,8 @@ export interface VTx {
   referenceType: string | null;
   referenceId: string | null;
   points: number;
+  /** V6b: rows created after the wallet's backfillCheckedAt are post-cutover movement */
+  createdAt?: Date | string | null;
 }
 
 export interface VPosition {
@@ -405,8 +409,11 @@ export interface VerifyOptions {
   v0Baseline?: V0Snapshot;
   /** V5 applies: tenants whose wallets must never carry debt (default: deoleo) */
   neverNegativeTenant: boolean;
-  /** V6b: expected multiset of negative balances for this tenant (e.g. Bajaj prod's 8); absent → not checked */
-  expectedNegativeBalances?: number[];
+  /**
+   * V6b: the tenant's negative balances at the CUTOVER (backfill) — { walletId: balance } (preferred, B2) or a plain list
+   * of values (compared as a multiset). Absent → not checked.
+   */
+  expectedNegativeBalances?: number[] | Record<string, number>;
 }
 
 const CAP = 20;
@@ -518,35 +525,53 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
           .join('; ')}`,
   });
   if (opts.expectedNegativeBalances) {
-    // Audit item 7 (2026-11-19): once V2 is live, an over-reversal legitimately takes a wallet below 0 (owner decision —
-    // the rest becomes debt). Those wallets (any `overReversalDebt` allocation on their positions) are NOT backfill
-    // regressions: they are reported as INFO and left out of the comparison, so V6b keeps catching a backfill that
-    // changed a pre-existing negative balance (the cutover check it was built for) without failing every later run.
-    const posWallet = new Map(snap.positions.map((p) => [p.id, p.walletId]));
-    const debtWallets = new Set(
-      snap.allocations.filter((a) => a.overReversalDebt).map((a) => posWallet.get(a.positionId)).filter((x): x is string => !!x),
-    );
-    const fromV2 = negatives.filter((w) => debtWallets.has(w.id));
-    const compared = negatives.filter((w) => !debtWallets.has(w.id));
-    const want = [...opts.expectedNegativeBalances].sort((a, b) => a - b);
-    const got = compared.map((w) => w.redeemablePoints).sort((a, b) => a - b);
-    const same = want.length === got.length && want.every((v, i) => v === got[i]);
-    out.push({
-      check: 'V6b expected negative balances unchanged',
-      clientId: c,
-      status: same ? 'PASS' : 'FAIL',
-      detail:
-        `expected [${want.join(', ')}] (Σ ${want.reduce((s, v) => s + v, 0)}), found [${got.join(', ')}] (Σ ${got.reduce((s, v) => s + v, 0)})` +
-        (fromV2.length ? `; ${fromV2.length} other negative wallet(s) from V2 over-reversals left out (see V6c)` : ''),
-      ids: compared.map((w) => w.id).slice(0, CAP),
-    });
-    if (fromV2.length) {
+    // Fix round 3 (B1/B2, 2026-11-19): V6b checks the CUTOVER — each wallet's balance at the moment the backfill
+    // prepared it (its balance now minus the balance changes of its rows created after `backfillCheckedAt`), keyed BY
+    // WALLET ID when the expected set is given as { walletId: balance } (a plain list of values is still accepted and
+    // compared as a multiset of cutover balances). Later legitimate movement — earnings, V2 reversals, redemptions —
+    // never fails it. Wallets that went (further) below zero AFTER the cutover are listed by V6c (INFO) with their cause.
+    const cutover = new Map<string, number>();
+    const afterRows = new Map<string, VTx[]>();
+    for (const w of snap.wallets) {
+      const at = w.backfillCheckedAt ? new Date(w.backfillCheckedAt).getTime() : null;
+      const later = at === null ? [] : snap.txs.filter((t) => t.walletId === w.id && t.createdAt && new Date(t.createdAt).getTime() > at);
+      afterRows.set(w.id, later);
+      cutover.set(w.id, w.redeemablePoints - later.reduce((n, t) => n + (t.balanceAfter - t.balanceBefore), 0));
+    }
+    const exp = opts.expectedNegativeBalances;
+    let pass: boolean;
+    let detail: string;
+    let ids: string[];
+    const negAtCutover = snap.wallets.filter((w) => (cutover.get(w.id) ?? 0) < 0);
+    if (Array.isArray(exp)) {
+      const want = [...exp].sort((a, b) => a - b);
+      const got = negAtCutover.map((w) => cutover.get(w.id)!).sort((a, b) => a - b);
+      pass = want.length === got.length && want.every((v, i) => v === got[i]);
+      detail = `expected cutover balances [${want.join(', ')}] (Σ ${want.reduce((n, v) => n + v, 0)}), found [${got.join(', ')}] (Σ ${got.reduce((n, v) => n + v, 0)})`;
+      ids = negAtCutover.map((w) => w.id);
+    } else {
+      const wrong = Object.entries(exp).filter(([id, b]) => cutover.get(id) !== b).map(([id]) => id);
+      const unexpected = negAtCutover.filter((w) => !(w.id in exp)).map((w) => w.id);
+      pass = wrong.length === 0 && unexpected.length === 0;
+      detail = pass
+        ? `${Object.keys(exp).length} expected wallet(s) at their cutover balance`
+        : `${wrong.length} expected wallet(s) not at their cutover balance (${wrong
+            .map((id) => `${id}: expected ${exp[id]}, cutover ${cutover.has(id) ? cutover.get(id) : 'missing'}`)
+            .join('; ')}); ${unexpected.length} unexpected wallet(s) negative at the cutover`;
+      ids = [...wrong, ...unexpected];
+    }
+    out.push({ check: 'V6b expected negative balances at the cutover', clientId: c, status: pass ? 'PASS' : 'FAIL', detail, ids: ids.slice(0, CAP) });
+    const laterNeg = negatives.filter((w) => w.redeemablePoints < Math.min(0, cutover.get(w.id) ?? 0));
+    if (laterNeg.length) {
+      const fromReversal = laterNeg.filter((w) => (afterRows.get(w.id) ?? []).some((t) => t.referenceType === 'CREDIT_REVERSAL'));
       out.push({
-        check: 'V6c negative wallets from V2 over-reversals (owner 2026-11-19 — debt, repaid from future earnings)',
+        check: 'V6c wallets that went (further) below zero after the cutover',
         clientId: c,
         status: 'INFO',
-        detail: `${fromV2.length} wallet(s), Σ balance ${fromV2.reduce((s, w) => s + w.redeemablePoints, 0)}, Σ debt ${fromV2.reduce((s, w) => s + w.debtPoints, 0)}`,
-        ids: fromV2.map((w) => w.id).slice(0, CAP),
+        detail:
+          `${laterNeg.length} wallet(s) (${fromReversal.length} after a credit reversal — owner 2026-11-19: debt, repaid from future earnings), ` +
+          `Σ balance ${laterNeg.reduce((n, w) => n + w.redeemablePoints, 0)}`,
+        ids: laterNeg.map((w) => w.id).slice(0, CAP),
       });
     }
   }

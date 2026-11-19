@@ -3909,6 +3909,12 @@ model CreditReversalAllocation {
   // q — V2 (owner decision 2026-11-19, expired points are not recovered twice): the reversed credit's own points that
   // had already EXPIRED; counted as already recovered — nothing taken, no debt. 0 for LEGACY / historical rows.
   alreadyExpired   Int      @default(0)
+  // Fix round 3 (2026-11-19): part of `recovered` that was backing EXISTING debt — the reversal took the balance below
+  // zero by this much (B 60 / D 40 → reverse 100 → B −40). Never silent: outcome, passbook, wallets-in-debt.
+  debtExposed      Int      @default(0)
+  // Which path wrote the row: 'V2' | 'LEGACY' (live floor-0 clawback on a sequenced wallet) | 'BACKFILL' (WP6 history).
+  // NULL = written before this column existed (staging only).
+  engineSource     String?
   shortfall        Int // r − p − c − owed − alreadyExpired (written off: LEGACY floor-0 clawbacks / historical; always 0 for V2)
   createdAt        DateTime @default(now())
 

@@ -102,7 +102,7 @@ export class GroupService {
     // the tenant conversion rate. Every query is tenant-scoped by clientId; the
     // `groupId: parentId` / `parentId` filters inherently exclude parents (no wallet)
     // and every other group.
-    const [parent, totalsAgg, outlets, conversionRate] = await Promise.all([
+    const [parent, [totalsAgg, negAgg], outlets, conversionRate] = await Promise.all([
       this.prisma.channelPartner.findFirst({
         where: { id: parentId, clientId, deletedAt: null },
         select: { businessName: true, ownerName: true },
@@ -113,18 +113,27 @@ export class GroupService {
       // whose groupId trigger has lagged would show in the drill-down rows but be missed by the
       // totals (audit LOW-2). The `parentId` filter is also the guardrail against summing the
       // whole tenant. (Aggregates over Wallet rows, one per partner → no per-outlet double-count.)
-      this.prisma.wallet.aggregate({
-        where: { partner: { outlets: { some: { parentId, clientId, deletedAt: null } } } },
-        _sum: {
-          redeemablePoints: true,
-          earnedPoints: true,
-          redeemedPoints: true,
-          expiredPoints: true,
-          lockedPoints: true,
-          lifetimeEarned: true,
-          lifetimeRedeemed: true,
-        },
-      }),
+      // Fix round 3 (B-risk): the totals and the negative-balance split come from ONE transaction (one snapshot), so a
+      // movement between two separate reads can never make them disagree.
+      this.prisma.$transaction([
+        this.prisma.wallet.aggregate({
+          where: { partner: { outlets: { some: { parentId, clientId, deletedAt: null } } } },
+          _sum: {
+            redeemablePoints: true,
+            earnedPoints: true,
+            redeemedPoints: true,
+            expiredPoints: true,
+            lockedPoints: true,
+            lifetimeEarned: true,
+            lifetimeRedeemed: true,
+          },
+        }),
+        this.prisma.wallet.aggregate({
+          where: { partner: { outlets: { some: { parentId, clientId, deletedAt: null } } }, redeemablePoints: { lt: 0 } },
+          _sum: { redeemablePoints: true },
+          _count: { _all: true },
+        }),
+      ]),
       // Per-outlet drill-down over the group's child outlets.
       this.prisma.outlet.findMany({
         where: { parentId, clientId, deletedAt: null },
@@ -160,16 +169,13 @@ export class GroupService {
     const sum = totalsAgg._sum;
     // Audit item 2 (2026-11-19): a child wallet in debt (negative balance) must not net against what the other outlets
     // can redeem — the group's available total counts POSITIVE balances only, and the debt is reported separately as
-    // `owedPoints` (what the negative children must earn back). One extra aggregate over the same group predicate;
-    // 0 / unchanged totals for a group with no negative child.
-    const negAgg = await this.prisma.wallet.aggregate({
-      where: { partner: { outlets: { some: { parentId, clientId, deletedAt: null } } }, redeemablePoints: { lt: 0 } },
-      _sum: { redeemablePoints: true },
-    });
-    const negativeSum = negAgg?._sum?.redeemablePoints ?? 0;
+    // `owedPoints` (owner D1: Σ |negative balances|) + `owedWallets` (owner D2: shown with the split). 0 / unchanged
+    // totals for a group with no negative child.
+    const negativeSum = Math.min(0, negAgg?._sum?.redeemablePoints ?? 0);
     const totals = {
       redeemablePoints: (sum.redeemablePoints ?? 0) - negativeSum,
-      owedPoints: negativeSum === 0 ? 0 : -negativeSum,
+      owedPoints: Math.max(0, -negativeSum),
+      owedWallets: negativeSum < 0 ? (negAgg?._count as { _all?: number } | undefined)?._all ?? 0 : 0,
       earnedPoints: sum.earnedPoints ?? 0,
       redeemedPoints: sum.redeemedPoints ?? 0,
       expiredPoints: sum.expiredPoints ?? 0,

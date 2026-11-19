@@ -281,12 +281,16 @@ export class ProgramHealthDashboardService {
     const redeemed = Math.abs(redeemAgg._sum.points ?? 0);
     const expiredInPeriod = Math.abs(expireAgg._sum.points ?? 0);
     const outstandingLiabilityPoints = liabilityAgg._sum.redeemablePoints ?? 0;
-    // "Points owed (debt)" = Σ debtPoints — shown next to the liability, never netted into it.
+    // Owner decisions D1/D2 (2026-11-19, every tenant): "points owed" = Σ |negative balances| (how far below zero), with
+    // how many wallets — shown next to the liability, never netted into it.
     const owedAgg = await this.prisma.wallet.aggregate({
-      _sum: { debtPoints: true },
-      where: { partner: { user: { clientId }, ...partnerScope }, debtPoints: { gt: 0 } },
+      _sum: { redeemablePoints: true },
+      _count: { _all: true },
+      where: { partner: { user: { clientId }, ...partnerScope }, redeemablePoints: { lt: 0 } },
     });
-    const owedPoints = owedAgg?._sum?.debtPoints ?? 0;
+    const negSum = owedAgg?._sum?.redeemablePoints ?? 0;
+    const owedPoints = Math.max(0, -negSum);
+    const owedWallets = owedPoints > 0 ? owedAgg?._count?._all ?? 0 : 0;
     const outstandingLiabilityRupees =
       conversionRate > 0
         ? ProgramHealthDashboardService.round1(outstandingLiabilityPoints / conversionRate)
@@ -504,6 +508,7 @@ export class ProgramHealthDashboardService {
         outstandingLiabilityPoints,
         outstandingLiabilityRupees,
         owedPoints,
+        owedWallets,
         breakagePct,
         expiringIn30dPoints,
       },

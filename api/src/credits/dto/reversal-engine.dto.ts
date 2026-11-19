@@ -12,6 +12,23 @@ export class ReversalAttentionQueryDto {
   limit?: number;
 }
 
+/**
+ * GET /v1/admin/credits/reversal-engine/wallets-in-debt — `limit` up to 5,000 (the Excel download asks for the most;
+ * the response says when it is still cut), optional `programName` (same program scope as the admin dashboards).
+ */
+export class WalletsInDebtQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(5000)
+  limit?: number;
+
+  @IsOptional()
+  @IsString()
+  programName?: string;
+}
+
 /** POST /v1/admin/credits/reversal-engine/pause — GIFSY turns the POINTS reversal pause on / off (audited). */
 export class ReversalPauseDto {
   @IsBoolean()

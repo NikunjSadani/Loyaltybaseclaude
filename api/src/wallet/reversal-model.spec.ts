@@ -309,6 +309,18 @@ describe('reversal-model transitions (§1.2)', () => {
     });
   });
 
+  it('fix round 3 A4: taking holdings that were backing EXISTING debt is recorded (debtExposed) — B 60 / D 40, reverse Y 100 → B −40', () => {
+    // −40 (D 40), X +100 (O_X 40, B 60), Y +100 (B 160), reverse X 40 (p 40 → B 120, D 40), redeem 60 → B 60, D 40, H 100
+    const m = run([...opening(-40), cr('X', 100), cr('Y', 100), rev('X', 40), sp(60)]).model;
+    expect(m.state).toMatchObject({ B: 60, D: 40 });
+    const s = reverse(m, 'Y', 100);
+    expect(s.model.state).toMatchObject({ B: -40, D: 40 });
+    expect(s.movement).toMatchObject({ recovered: 100, owed: 0, debtRestored: 0, debtExposed: 40, shortfall: 0 });
+    // a reversal that stays ≥ 0, or whose negative is fully explained by p / owed, exposes nothing
+    expect(reverse(run([cr('X', 10000), sp(2986)]).model, 'X', 10000).movement.debtExposed).toBe(0);
+    expect(reverse(run([...opening(-841), cr('X', 500)]).model, 'X', 500).movement.debtExposed).toBe(0);
+  });
+
   it('spend is guarded B ≥ s', () => {
     const m = run([cr('X', 100)]).model;
     expect(() => spend(m, 101)).toThrow(ReversalModelError);
