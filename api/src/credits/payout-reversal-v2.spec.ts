@@ -717,6 +717,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
     const s = setup(mode);
     // re-audit A1: the credit is usable only under the retailer's CURRENT key — the outlet owner holds the PAN it was withheld under
     s.db.t('outlet').find((o) => o.outletCode === 'O1')!.partner.panNumber = 'ABCDE1234F';
+    s.db.t('channelPartner').push({ id: 'p1', clientId: TENANT, panNumber: 'ABCDE1234F', isParent: false }); // the retailer still holds it
     s.settings.resolveTdsPolicy.mockImplementation(async () => ({ section: 'SEC_194R', methodology: 'DEDUCT' })); // A5
     Object.assign(s.e('pe-b'), { status: 'FAILED', tdsSection: 'SEC_194C', tdsDeductedPaise: 1_000n });
     Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194R', tdsDeductedPaise: 600n });
@@ -1092,8 +1093,8 @@ describe('Policy round B — reversing a PAID 194R payout whose TDS was DEDUCTED
     expect(s.reversal(r.id).shortfallPaise).toBe(3_600_000n);
     expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_RECEIVABLE', tdsCreditPaise: 0n }]);
     expect(done.payoutOutcome.lines[0].text).toContain(
-      "₹4,000.00 withheld TDS not credited — this programme's 194R method is now gross-up — no TDS is withheld that it could reduce; " +
-        'nets on a later 194R withholding of the same FY, otherwise flagged as TDS taken in excess on the 194R report',
+      "₹4,000.00 withheld TDS not credited or handed back — this programme's 194R method is now gross-up — no TDS is withheld that it could reduce; " +
+        'nets on a later 194R withholding of the same FY if the programme deducts again, otherwise flagged as TDS taken in excess on the 194R report',
     );
     // re-audit A5: honest — it nets automatically if the programme deducts again this FY, else it is the flagged excess
     expect(done.payoutOutcome.receivable[0].tdsNote).toMatch(/the year's true-up nets it automatically and the 194R report says so; otherwise the 194R report flags it as TDS taken in excess/);
@@ -1451,17 +1452,51 @@ describe('Fix round B — H1 / D1 / D3 / D4 / D5', () => {
     expect(done.payoutOutcome.receivable[0].tdsNote).toMatch(
       /withheld in FY 2025-26, which is closed \(later-year reversal\).*the FY 2025-26 194R report flags it as TDS taken in excess/,
     );
-    expect(done.payoutOutcome.lines[0].text).toMatch(/₹1,000\.00 withheld TDS not credited — the TDS was withheld in FY 2025-26, which is closed/);
+    // final item 2: a closed FY can NOT net — no "nets on a later withholding" promise
+    expect(done.payoutOutcome.lines[0].text).toMatch(
+      /₹1,000\.00 withheld TDS not credited or handed back — the TDS was withheld in FY 2025-26, which is closed.*stays in that FY's ledger and is flagged as TDS taken in excess/,
+    );
+    expect(done.payoutOutcome.lines[0].text).not.toMatch(/nets on a later/);
   });
 
-  it('re-audit A1 — PAN changed since the withholding: no credit (future payouts go under the new PAN); said so', async () => {
+  it('re-audit A1 / final item 4 — the RETAILER paid (payee snapshot) now has another PAN: no credit; said so, no netting promised', async () => {
     const s = h1Setup();
-    s.db.t('creditPayoutEntry').push(s.vis('B', 'b2', 1_000_000n, 'PAID', { ...s.sec, tdsDeductedPaise: 100_000n }));
+    s.db.t('creditPayoutEntry').push(s.vis('B', 'b2', 1_000_000n, 'PAID', { ...s.sec, tdsDeductedPaise: 100_000n, payeePartnerId: 'p1' }));
     s.led('B', 100_000n);
-    s.db.t('outlet').find((o) => o.outletCode === 'O1')!.partner.panNumber = 'ZZZZZ9999Z'; // the owner's PAN changed
+    s.db.t('channelPartner').find((p) => p.id === 'p1')!.panNumber = 'ZZZZZ9999Z'; // the retailer's PAN changed
     const { done } = await s.reverse('b2', ['B'], 1_000_000);
     expect(s.credit()).toHaveLength(0);
-    expect(done.payoutOutcome.lines[0].text).toMatch(/not credited — the retailer's PAN has changed since \(TDS was withheld under XXXXX1234F, payouts now go under XXXXX9999Z\)/);
+    expect(done.payoutOutcome.lines[0].text).toMatch(
+      /not credited or handed back — the retailer's PAN has changed since \(TDS was withheld under XXXXX1234F, this retailer's payouts now go under XXXXX9999Z\); stays in that FY's ledger/,
+    );
+    expect(done.payoutOutcome.lines[0].text).not.toMatch(/nets on a later/);
+  });
+
+  it('final item 4 — a DIFFERENT partner now owning the source outlet does NOT make the credit unusable (the retailer keeps its PAN)', async () => {
+    const s = h1Setup();
+    s.db.t('creditPayoutEntry').push(s.vis('B', 'b2', 1_000_000n, 'PAID', { ...s.sec, tdsDeductedPaise: 100_000n, payeePartnerId: 'p1' }));
+    s.led('B', 100_000n);
+    s.db.t('outlet').find((o) => o.outletCode === 'O1')!.partner.panNumber = 'ZZZZZ9999Z'; // the outlet's owner changed
+    await s.reverse('b2', ['B'], 1_000_000);
+    expect(s.credit()).toMatchObject([{ sourcePayoutEntryId: 'B', amountPaise: 100_000n }]);
+  });
+
+  it('final item 1 — a ledger surplus that can not be handed back (programme on gross-up now) is said plainly: not handed back, stays in the FY ledger, flagged as excess', async () => {
+    const s = h1Setup();
+    s.settings.resolveTdsPolicy.mockImplementation(async () => ({ section: 'SEC_194R', methodology: 'GROSS_UP' }));
+    s.db.t('creditPayoutEntry').push(
+      s.vis('A', 'b2', 1_500_000n, 'PAID', s.sec), // no TDS on A
+      s.vis('B', 'b3', 1_000_000n, 'PAID', { ...s.sec, tdsDeductedPaise: 250_000n }),
+    );
+    s.led('B', 250_000n);
+    const { done } = await s.reverse('b2', ['A'], 1_500_000);
+    const t = done.payoutOutcome.lines[0].text as string;
+    expect(t).not.toMatch(/handed back on the next payout/);
+    expect(done.payoutOutcome.receivable[0].handBackPaise).toBe(0);
+    expect(done.payoutOutcome.receivable[0].tdsNote).toMatch(
+      /₹2,500\.00 TDS already withheld from PAN XXXXX1234F is more than now due, but it is not handed back: this programme's 194R method is now gross-up.*stays in FY 2026-27's 194R ledger and is flagged as TDS taken in excess/,
+    );
+    expect(t).toMatch(/₹2,500\.00 withheld TDS not credited or handed back — this programme's 194R method is now gross-up/);
   });
 
   it('re-audit A6: a fully withheld PAID payout WITHOUT a frozen section (a 194R incentive in the base) follows owner D2', async () => {

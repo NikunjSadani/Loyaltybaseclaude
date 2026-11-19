@@ -1,4 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { creditUnusableReason, currentRetailerKeys, type CreditUnusableReason } from '../tds/tds-194r.shared';
+import { financialYear } from '../tds/tds.helpers';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildXlsx } from '../common/xlsx';
@@ -54,7 +57,12 @@ type CreditDb = Pick<PrismaService, 'tdsCredit'> & Partial<Pick<PrismaService, '
 
 @Injectable()
 export class TdsReportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    // Final item 6: the client's current 194R method for the shared credit-usability rule (TenantSettingsService is
+    // @Global; optional so the unit fixtures that build this service with a prisma fake alone keep working).
+    @Optional() private readonly tenantSettings?: TenantSettingsService,
+  ) {}
 
   private money(paise: bigint): { paise: string; inr: number } {
     return { paise: paise.toString(), inr: Number(paise) / 100 };
@@ -276,7 +284,7 @@ export class TdsReportsService {
         appliedPaise: true,
         createdAt: true,
         creditReversalId: true,
-        sourcePayoutEntry: { select: { id: true, outletId: true, outletName: true, period: true, amountPaise: true } },
+        sourcePayoutEntry: { select: { id: true, outletId: true, outletName: true, period: true, amountPaise: true, payeePartnerId: true } },
         applications: {
           orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
           select: {
@@ -329,8 +337,39 @@ export class TdsReportsService {
       for (const c of cs ?? []) names.set(c.id, c.internalName);
     }
     const now = new Date();
+    // Final item 6: the ONE shared usability rule (creditUnusableReason — the same as credit creation and the 194R
+    // report): FY closed / method gross-up / the RETAILER's current key differs. Method per client (fail-soft: an
+    // unreadable policy skips only the method test); retailer key from the payout's payee snapshot.
+    const r194 = pageRows.filter((c) => c.section === 'SEC_194R');
+    const methodOf = new Map<string, string | null>();
+    for (const cid of [...new Set(r194.map((c) => c.clientId))]) {
+      try {
+        methodOf.set(cid, this.tenantSettings ? (await this.tenantSettings.resolveTdsPolicy(cid)).methodology : null);
+      } catch {
+        methodOf.set(cid, null);
+      }
+    }
+    const reasonOf = new Map<string, CreditUnusableReason | null>();
+    for (const cid of methodOf.keys()) {
+      const mine = r194.filter((c) => c.clientId === cid);
+      const nowKeys = await currentRetailerKeys(
+        this.prisma,
+        cid,
+        mine.map((c) => ({ key: c.panNumber, payeePartnerId: c.sourcePayoutEntry?.payeePartnerId ?? null })),
+      );
+      mine.forEach((c, i) =>
+        reasonOf.set(
+          c.id,
+          creditUnusableReason(
+            { fyLabel: c.fyLabel, key: c.panNumber },
+            { currentFy: financialYear(now).fyLabel, methodology: methodOf.get(cid), currentKey: nowKeys[i] },
+          ),
+        ),
+      );
+    }
     let unusedCount = 0;
     let previousPanCount = 0;
+    let methodCount = 0;
     const rows = pageRows.map((c) => {
       const left = c.amountPaise - c.appliedPaise;
       const fyClosed = now >= fyEndExclusive(c.fyLabel);
@@ -340,12 +379,22 @@ export class TdsReportsService {
           ? `${formatINR(left)} unused credit for FY ${c.fyLabel}, not carried forward — the retailer can claim it in their return for that year`
           : null;
       if (unusedNote) unusedCount++;
+      const shared = reasonOf.get(c.id) ?? null;
       const nowPan = c.sourcePayoutEntry?.outletId ? curPan.get(`${c.clientId}|${c.sourcePayoutEntry.outletId}`) : undefined;
+      const panChanged = reasonOf.has(c.id)
+        ? shared === 'PAN_CHANGED'
+        : !!nowPan && nowPan !== c.panNumber.trim().toUpperCase();
       const previousPanNote =
-        left > 0n && nowPan && nowPan !== c.panNumber.trim().toUpperCase()
-          ? `Credit on previous PAN ${maskPan(c.panNumber)} — not applied automatically (the retailer's PAN is now ${maskPan(nowPan)}); settle it off-platform`
+        left > 0n && panChanged
+          ? `Credit on previous PAN ${maskPan(c.panNumber)} — not applied automatically (the retailer's key is now ` +
+            `${nowPan ? maskPan(nowPan) : 'different'}); counted as excess on the 194R report — settle it off-platform`
           : null;
       if (previousPanNote) previousPanCount++;
+      const methodNote =
+        left > 0n && shared === 'GROSS_UP'
+          ? `${formatINR(left)} credit can no longer be used — this programme's 194R method is gross-up now (no 194R is withheld); counted as excess on the 194R report`
+          : null;
+      if (methodNote) methodCount++;
       return {
         creditId: c.id,
         clientId: c.clientId,
@@ -355,6 +404,7 @@ export class TdsReportsService {
         scopeNote: creditScopeNote(c.section, c.fyLabel),
         unusedNote,
         previousPanNote,
+        ...(methodNote ? { methodNote } : {}),
         section: c.section,
         fyLabel: c.fyLabel,
         createdAt: c.createdAt.toISOString(),
@@ -400,6 +450,9 @@ export class TdsReportsService {
     }
     if (previousPanCount > 0) {
       notes.push(`${previousPanCount} credit${previousPanCount === 1 ? ' is' : 's are'} on a retailer's previous PAN — not applied automatically.`);
+    }
+    if (methodCount > 0) {
+      notes.push(`${methodCount} credit${methodCount === 1 ? '' : 's'} can no longer be used — the programme is on gross-up now (counted as excess).`);
     }
     return {
       count: total,

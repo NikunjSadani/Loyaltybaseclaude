@@ -285,6 +285,8 @@ export interface Reversed194RItem {
   reversedAt: Date;
   period: string;
   outletCode: string;
+  /** The partner paid (bank-file snapshot) — the retailer whose current key decides "PAN changed". */
+  payeePartnerId?: string | null;
 }
 
 /**
@@ -315,7 +317,7 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
     : {};
   const sel = {
     id: true, clientId: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, payeePan: true,
-    period: true, tdsBaseReversedAt: true, status: true,
+    period: true, tdsBaseReversedAt: true, status: true, payeePartnerId: true,
   } as const;
 
   // ── Source 1: payouts. OWNER FY RULE (2026-11-18): a payout that went through a bank file belongs to
@@ -412,7 +414,7 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
       // D1: reversed by the engine → off the base; said instead of counted.
       reversedSink?.(key, {
         entryId: e.id, hasPan, bucket, amountPaise: e.amountPaise, reversedAt: new Date(e.tdsBaseReversedAt),
-        period: e.period, outletCode: e.outletId,
+        period: e.period, outletCode: e.outletId, payeePartnerId: e.payeePartnerId ?? null,
       });
       continue;
     }
@@ -540,43 +542,110 @@ export async function openCredits194RUsability(
   const out = new Map<string, OpenCredits194R>();
   if (open.length === 0) return out;
   const currentFy = financialYear(a.now ?? new Date()).fyLabel;
-  // (c) the key the retailer's future payouts use: the source payout's outlet owner TODAY (payeeKeyFor).
+  // (c) the retailer the credit belongs to = the payee recorded on its source payout (payeePartnerId snapshot).
   const src = await db.creditPayoutEntry.findMany({
     where: { id: { in: open.map((r) => r.sourcePayoutEntryId) } },
-    select: { id: true, outletId: true },
+    select: { id: true, payeePartnerId: true },
   });
-  const codes = [...new Set((src ?? []).map((e) => e.outletId))];
-  const outlets = codes.length
-    ? await db.outlet.findMany({
-        where: { clientId: a.clientId, outletCode: { in: codes } },
-        select: { outletCode: true, partner: { select: { id: true, panNumber: true } } },
-      })
-    : [];
-  const ownerOf = new Map((outlets ?? []).map((o) => [o.outletCode, o.partner ?? null]));
-  const outletOf = new Map((src ?? []).map((e) => [e.id, e.outletId]));
-  for (const r of open) {
-    const key = retailerKeyOfLedgerPan(r.panNumber);
-    const outlet = outletOf.get(r.sourcePayoutEntryId) ?? null;
-    const nowKey = outlet ? payeeKeyFor(a.clientId, outlet, ownerOf.get(outlet) ?? null) : null;
-    const reason =
-      a.fyLabel !== currentFy
-        ? 'later-year reversal / FY closed'
-        : a.methodology !== 'DEDUCT'
-          ? 'method changed to gross-up'
-          : nowKey !== key
-            ? 'PAN changed'
-            : null;
+  const payeeOf = new Map((src ?? []).map((e) => [e.id, e.payeePartnerId ?? null]));
+  const keys = open.map((r) => retailerKeyOfLedgerPan(r.panNumber));
+  const nowKeys = await currentRetailerKeys(
+    db,
+    a.clientId,
+    open.map((r, i) => ({ key: keys[i], payeePartnerId: payeeOf.get(r.sourcePayoutEntryId) ?? null })),
+  );
+  open.forEach((r, i) => {
+    const key = keys[i];
+    const reason = creditUnusableReason(
+      { fyLabel: a.fyLabel, key },
+      { currentFy, methodology: a.methodology, currentKey: nowKeys[i] },
+    );
     const b = out.get(key) ?? { usable: 0n, unusable: 0n, reasons: [] };
     const amt = r.amountPaise - r.appliedPaise;
     if (reason) {
       b.unusable += amt;
-      if (!b.reasons.includes(reason)) b.reasons.push(reason);
+      if (!b.reasons.includes(UNUSABLE_REASON_TEXT[reason])) b.reasons.push(UNUSABLE_REASON_TEXT[reason]);
     } else {
       b.usable += amt;
     }
     out.set(key, b);
-  }
+  });
   return out;
+}
+
+/** Why a 194R TDS credit (or an automatic ledger hand-back) can not be used — null when it can. */
+export type CreditUnusableReason = 'FY_CLOSED' | 'GROSS_UP' | 'PAN_CHANGED';
+export const UNUSABLE_REASON_TEXT: Record<CreditUnusableReason, string> = {
+  FY_CLOSED: 'later-year reversal / FY closed',
+  GROSS_UP: 'method changed to gross-up',
+  PAN_CHANGED: 'PAN changed',
+};
+
+/**
+ * Final dual-audit (2026-11-19) — the ONE usability rule, shared by credit creation (recordReceivableTds), the hand-back
+ * call-out, the 194R report and the TDS credits register. The payout run draws a credit / nets a ledger surplus only
+ * for (a) the run date's FY, (b) a client on DEDUCT, (c) the retailer's CURRENT payee key — so:
+ */
+export function creditUnusableReason(
+  c: { fyLabel: string; key: string },
+  ctx: { currentFy: string; methodology: string | null | undefined; currentKey: string | null },
+): CreditUnusableReason | null {
+  if (c.fyLabel !== ctx.currentFy) return 'FY_CLOSED';
+  if (ctx.methodology != null && ctx.methodology !== 'DEDUCT') return 'GROSS_UP';
+  if (ctx.currentKey !== retailerKeyOfLedgerPan(c.key)) return 'PAN_CHANGED';
+  return null;
+}
+
+/**
+ * Final dual-audit item 4 — the key the payout run would use TODAY for the RETAILER a ledger key belongs to (not the
+ * source outlet's current owner): the retailer is the partner paid (the payout's `payeePartnerId` snapshot, when known),
+ * else the partner behind a no-PAN owner key, else the client's partner(s) holding that PAN. Its current key is
+ * `payeeKeyFor` of that partner (its PAN today, else its no-PAN key). A PAN no partner of the client holds any more →
+ * null (changed). An owner-less outlet key resolves through the outlet's owner today.
+ */
+export async function currentRetailerKeys(
+  db: Tds194RDb,
+  clientId: string,
+  items: Array<{ key: string; payeePartnerId?: string | null }>,
+): Promise<Array<string | null>> {
+  const OUTLET = `${NO_PAN_KEY}:outlet:${clientId}:`;
+  const partnerIdOf = (it: { key: string; payeePartnerId?: string | null }): string | null => {
+    const k = retailerKeyOfLedgerPan(it.key);
+    if (it.payeePartnerId) return it.payeePartnerId;
+    if (isNoPanKey(k) && !k.startsWith(`${NO_PAN_KEY}:outlet:`) && k.startsWith(`${NO_PAN_KEY}:`)) return k.slice(NO_PAN_KEY.length + 1);
+    return null;
+  };
+  const ids = [...new Set(items.map(partnerIdOf).filter((x): x is string => !!x))];
+  const partners = ids.length
+    ? await db.channelPartner.findMany({ where: { id: { in: ids } }, select: { id: true, panNumber: true } })
+    : [];
+  const byId = new Map((partners ?? []).map((p) => [p.id, p]));
+  const outletCodes = items.map((it) => retailerKeyOfLedgerPan(it.key)).filter((k) => k.startsWith(OUTLET)).map((k) => k.slice(OUTLET.length));
+  const outlets = outletCodes.length
+    ? await db.outlet.findMany({
+        where: { clientId, outletCode: { in: [...new Set(outletCodes)] } },
+        select: { outletCode: true, partner: { select: { id: true, panNumber: true } } },
+      })
+    : [];
+  const ownerOf = new Map((outlets ?? []).map((o) => [o.outletCode, o.partner ?? null]));
+  const needPanHolders = items.some((it) => !partnerIdOf(it) && !isNoPanKey(retailerKeyOfLedgerPan(it.key)));
+  const holders = needPanHolders
+    ? await db.channelPartner.findMany({ where: { clientId }, select: { id: true, panNumber: true } })
+    : [];
+  const heldPans = new Set((holders ?? []).filter((p) => !isNoPanCell(p.panNumber)).map((p) => normalisePan(p.panNumber!)));
+  return items.map((it) => {
+    const k = retailerKeyOfLedgerPan(it.key);
+    const pid = partnerIdOf(it);
+    if (pid) {
+      const p = byId.get(pid);
+      return p ? payeeKeyFor(clientId, null, p) : null;
+    }
+    if (k.startsWith(OUTLET)) {
+      const code = k.slice(OUTLET.length);
+      return payeeKeyFor(clientId, code, ownerOf.get(code) ?? null);
+    }
+    return heldPans.has(k) ? k : null;
+  });
 }
 
 /**

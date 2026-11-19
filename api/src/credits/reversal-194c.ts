@@ -48,7 +48,7 @@ export function assertNoPaid194C(
     throw new BadRequestException(
       `${PAID_194C_REFUSAL} — ${hit.length === 1 ? 'this payout' : `${hit.length} payouts`} (` +
         hit.map((e) => formatINR(e.amountPaise)).join(', ') +
-        ') already reached the retailer with 194C TDS settled. Settle it with the retailer off-platform.',
+        ') already reached the retailer with 194C TDS settled. Reject this reversal request; settle with the retailer off-platform.',
     );
   }
 }

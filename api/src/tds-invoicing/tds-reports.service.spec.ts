@@ -130,6 +130,38 @@ describe('TdsReportsService', () => {
     });
   });
 
+  describe('final item 6 — the credits register uses the ONE shared usability rule', () => {
+    it('a 194R credit of a client now on GROSS_UP is flagged "can no longer be used — counted as excess" (same rule as the 194R report)', async () => {
+      const fy = (() => {
+        const d = new Date(Date.now() + 330 * 60_000);
+        const y = d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
+        return `${y}-${String((y + 1) % 100).padStart(2, '0')}`;
+      })();
+      const settings = { resolveTdsPolicy: jest.fn().mockResolvedValue({ section: 'SEC_194R', methodology: 'GROSS_UP' }) };
+      const prisma = {
+        ...mockPrisma,
+        channelPartner: { findMany: jest.fn().mockResolvedValue([{ id: 'p1', panNumber: 'ABCDE1234F' }]) },
+      };
+      const svc = new TdsReportsService(prisma as unknown as PrismaService, settings as never);
+      const db = {
+        tdsCredit: { findMany: jest.fn().mockResolvedValue([{
+          id: 'c9', clientId: 'bajaj', panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: fy,
+          amountPaise: 40000n, appliedPaise: 0n, createdAt: new Date(), creditReversalId: 'r1',
+          sourcePayoutEntry: { id: 'src', outletId: 'O1', outletName: 'Shop 1', period: '2026-10', amountPaise: 400000n, payeePartnerId: 'p1' },
+          applications: [],
+        }]) },
+        outlet: { findMany: jest.fn().mockResolvedValue([{ clientId: 'bajaj', outletCode: 'O1', partner: { panNumber: 'ABCDE1234F' } }]) },
+      };
+      const res = await svc.tdsCreditSection(db as never, { clientId: 'bajaj' }, { page: 1, limit: 20 });
+      expect(res.rows[0]).toMatchObject({
+        methodNote: "₹400.00 credit can no longer be used — this programme's 194R method is gross-up now (no 194R is withheld); counted as excess on the 194R report",
+        previousPanNote: null,
+        unusedNote: null,
+      });
+      expect(res.notes).toEqual(['1 credit can no longer be used — the programme is on gross-up now (counted as excess).']);
+    });
+  });
+
   describe('fix round B — TDS credits panel + row call-outs', () => {
     const credit = (id: string, extra: Record<string, unknown> = {}) => ({
       id, clientId: 'bajaj', panNumber: 'ABCDE1234F', section: 'SEC_194C', fyLabel: '2025-26',
@@ -164,7 +196,8 @@ describe('TdsReportsService', () => {
         panMasked: 'XXXXX1234F',
         scopeNote: "Scoped to FY 2025-26 · 194C · this programme only (used against this programme's next 194C withholding)",
         unusedNote: '₹300.00 unused credit for FY 2025-26, not carried forward — the retailer can claim it in their return for that year',
-        previousPanNote: "Credit on previous PAN XXXXX1234F — not applied automatically (the retailer's PAN is now XXXXX9999Z); settle it off-platform",
+        previousPanNote:
+          "Credit on previous PAN XXXXX1234F — not applied automatically (the retailer's key is now XXXXX9999Z); counted as excess on the 194R report — settle it off-platform",
       });
       expect(r.applications[0]).toMatchObject({
         otherProgramme: true, entryId: null, outletCode: null, outletName: null, downloadId: null,

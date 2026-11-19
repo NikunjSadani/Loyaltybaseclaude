@@ -1559,13 +1559,45 @@ describe('CreditsService', () => {
         expect(res.clawbackShortfall).toBe(1_960_000);
       });
 
+      it('final item 5 (Deoleo path, locking only): PDLOCK|client|period BEFORE the selection and row locks; the TDS keys come from the re-read under the row lock', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue({ ...payoutRev(2_000_000), period: '2026-05' });
+        const pendingNoStamp = { ...failedWithStamp, status: 'PENDING', tdsDeductedPaise: 0n, tdsSection: 'SEC_194R' };
+        mockTx.creditPayoutEntry.findMany
+          .mockResolvedValueOnce([pendingNoStamp]) // the selection read (before the row lock): nothing withheld yet
+          .mockResolvedValueOnce([{ id: 'pe1', status: 'PENDING', tdsDeductedPaise: 40_000n }]); // the re-read under the lock
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([
+          { creditPayoutEntryId: 'pe1', panNumber: 'PAN1', section: 'SEC_194R', fyLabel: '2026-27', tdsDeductedThisPaise: 40_000n },
+        ]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        const keys = lockKeysTaken();
+        expect(keys).toContain('PDLOCK|deoleo|2026-05');
+        expect(keys).toContain('R194|deoleo|2026-27'); // only the re-read showed the withholding
+        // order: PDLOCK advisory → entry row lock → R194 advisory
+        const seq: string[] = [];
+        const ex = mockTx.$executeRaw.mock.invocationCallOrder;
+        const qr = mockTx.$queryRaw.mock.invocationCallOrder;
+        mockTx.$executeRaw.mock.calls.forEach((c: unknown[], i: number) => {
+          const v = c[1];
+          const ks = Array.isArray(v) ? (v as string[]) : [];
+          if (ks.some((k) => k.startsWith('PDLOCK|'))) seq.push(`${ex[i]}:PDLOCK`);
+          if (ks.some((k) => k.startsWith('R194|'))) seq.push(`${ex[i]}:R194`);
+        });
+        mockTx.$queryRaw.mock.calls.forEach((c: unknown[], i: number) => {
+          if ((c[0] as string[]).join('?').includes('FROM credit_payout_entries') && (c[0] as string[]).join('?').includes('FOR UPDATE')) seq.push(`${qr[i]}:ROWS`);
+        });
+        const ordered = seq.sort((a, b) => Number(a.split(':')[0]) - Number(b.split(':')[0])).map((s) => s.split(':')[1]);
+        expect(ordered).toEqual(['PDLOCK', 'ROWS', 'R194']);
+        // identical outputs: the entry is reversed and its (re-read) withholding offset once
+        expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1);
+      });
+
       it('re-audit A3: a 194C entry PAID meanwhile (the retry re-read) is refused with the owner D1 message — nothing written', async () => {
         mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
         mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]); // SEC_194C, FAILED at selection
         mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
         mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'PAID', amountPaise: 2_000_000n, tdsDeductedPaise: 40_000n });
         await expect(service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 })).rejects.toThrow(
-          /^194C payouts can't be reversed once paid/,
+          /^194C payouts can't be reversed once paid .*Reject this reversal request; settle with the retailer off-platform\.$/,
         );
         expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
         // the chosen entries were row-locked (ascending id) after the advisory locks — the download takes no batch lock

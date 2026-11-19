@@ -406,19 +406,34 @@ Ramesh, ₹550 carried forward). Payout 2 is reversed. Next payout ₹10,000 →
 ₹1,500 of his TDS already sits with the government. *D2 (credit):* the ₹1,500 stays deposited as a credit → only ₹1,400
 withheld → **Ramesh gets ₹8,600**; deposited in total ₹1,500 + ₹1,400 = ₹2,900 = the TDS due on ₹29,000 — never twice.
 
-**Migration runbook (B3, fix round 3 B1).** Run the prod deploy in a QUIET WINDOW (night — no confirms, bank downloads or
-UTR uploads running). `migrate deploy` applies the 44 files in order, each in its own transaction with
+**Migration runbook (B3, fix round 3 B1, final item 9).** Run the prod deploy in a QUIET WINDOW (night — no confirms,
+bank downloads or UTR uploads running). The reason: every file locks at most one live table EXCEPT the two FKs between
+two live tables — `20261119121100_wre_nv_wallet_transactions_creditReversalId_fkey` (wallet_transactions +
+credit_reversals) and `20261119121200_wre_nv_wallet_transactions_pointsLedgerId_fkey` (wallet_transactions +
+points_ledger) — which take both tables' locks at once (their VALIDATE files `…122800…` / `…122900…` only take SHARE
+UPDATE EXCLUSIVE). `migrate deploy` applies the 44 files in order, each in its own transaction with
 `SET lock_timeout = '5s'`. If a file fails (e.g. `lock_timeout` on a busy table) Prisma records it as failed and refuses
 further deploys with **P3009**. Recovery: (1) look at what failed (`_prisma_migrations.logs`); (2) mark it rolled back —
 `npx prisma migrate resolve --rolled-back <migration_name>` (the in-VPC migrate job, same image, `--command=npx` args
-`prisma,migrate,resolve,--rolled-back,<name>`); (3) re-run the normal deploy job. Every file is idempotent (IF NOT EXISTS /
-guarded DO blocks / VALIDATE is a no-op when valid), so a re-run after a partial apply is safe. Run it off-peak; never
+`prisma,migrate,resolve,--rolled-back,<name>`); (3) **re-dispatch "Deploy — Production" via "Run workflow" on `main`
+for the SAME SHA (never "Re-run" an old run), then "Review deployments" → Approve.** Every file is idempotent (IF NOT
+EXISTS / guarded DO blocks / VALIDATE is a no-op when valid), so a re-run after a partial apply is safe. Never
 `--applied` a file that did not finish.
+
+**Final dual-audit round (2026-11-19).** One shared usability rule (`creditUnusableReason` + `currentRetailerKeys` in
+`tds-194r.shared.ts`) now gates the credit, the ledger hand-back call-out, the 194R report and the TDS credits register:
+current open FY · DEDUCT · the RETAILER's current key (the payee partner snapshot → its key today, not the outlet's
+owner). A hand-back that can't happen is said plainly ("not handed back … stays in FY X's ledger and is flagged as
+excess"); only a gross-up reason can still net in the same FY. LEGACY approve (Deoleo path — locking only, identical
+outputs) takes `PDLOCK|client|period` before its selection, then the entry rows, then the TDS keys from a re-read under
+the row lock. The D1 refusal now says "Reject this reversal request; settle with the retailer off-platform". The V2
+modal enables Submit once the entries read answers (LEGACY → amount form) and, if V2 arrives after an amount was typed,
+says it was cleared and pre-ticks nothing.
 
 ### 8.5 Fix round 3 (dual re-audit, 2026-11-19) — as built on `feat/wre-release`
 | # | Finding | As built |
 |---|---|---|
-| A1 | Unusable credits hid excess | A credit is USABLE only when (a) its FY is the current open FY, (b) the client's current method is DEDUCT, (c) its key = the key the retailer's future payouts use (source payout's outlet owner today) — exactly what the payout run draws. **Creation:** an unusable credit is NOT created (choice: nothing could ever draw it; a silent unusable row would only hide excess) — the TDS stays in its FY's ledger; the outcome says why (closed FY / gross-up / PAN changed) and what happens (closed FY → that FY's report flags it; same FY → nets on a later withholding, else flagged). **Report** (`openCredits194RUsability`): only usable credits are subtracted; unusable ones stay excess, row field `unusableTdsCreditPaise` + note "₹X TDS credit can no longer be used (later-year reversal / method changed / PAN changed — here: …) — counted as excess". Tests: later-FY reversal, PAN change (creation); method flip, PAN change, closed FY (report). |
+| A1 | Unusable credits hid excess | A credit is USABLE only when (a) its FY is the current open FY, (b) the client's current method is DEDUCT, (c) its key = the key the retailer's future payouts use (the payee partner snapshot's key today — final round item 4) — exactly what the payout run draws. **Creation:** an unusable credit is NOT created (choice: nothing could ever draw it; a silent unusable row would only hide excess) — the TDS stays in its FY's ledger; the outcome says why (closed FY / gross-up / PAN changed) and what happens (closed FY → that FY's report flags it; same FY → nets on a later withholding, else flagged). **Report** (`openCredits194RUsability`): only usable credits are subtracted; unusable ones stay excess, row field `unusableTdsCreditPaise` + note "₹X TDS credit can no longer be used (later-year reversal / method changed / PAN changed — here: …) — counted as excess". Tests: later-FY reversal, PAN change (creation); method flip, PAN change, closed FY (report). |
 | A2 | D2 REVERSED entries vanished from the report flags | `collect194RBases` also reads REVERSED + `tdsBaseReversedAt` entries (only when a sink is asked for) → sink only, never the base; the row keeps "reversed on", below-threshold, M2 and the engine's priorDue. Test A ₹19,000 · B ₹1,500 (D2) · D ₹600. |
 | A3 | LEGACY retry re-read of a now-PAID entry skipped D1 | Re-checked (refuse + roll back). The bank download takes NO `credit_batches` lock → the LEGACY approve now row-locks the chosen entries (ascending id) right AFTER its advisory locks (the download's order: advisory → rows — no deadlock). |
 | A4 | Period FY for section-less incentives | `entryBaseFyLabel` always uses the 194R bank-file FY rule (every PAID entry reaching it is 194R in the base). |

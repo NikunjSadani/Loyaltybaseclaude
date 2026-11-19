@@ -417,9 +417,10 @@ export function paidEntryOutcomeText(x: {
   coversOtherPayoutsPaise: bigint;
   handBackPaise: bigint;
   belowThresholdAfterReversal: boolean;
-  /** A5 / re-audit A1: the would-be credit that could never be used (stays in the ledger — nets or is flagged). */
+  /** A5 / re-audit A1: the would-be credit / hand-back that could never be used (stays in the ledger — nets or is flagged). */
   flaggedExcessPaise?: bigint;
   flaggedExcessReason?: string | null;
+  flaggedExcessKind?: 'FY_CLOSED' | 'GROSS_UP' | 'PAN_CHANGED' | null;
 }): string {
   const who = whoOf(x.panMasked);
   const owed =
@@ -433,9 +434,12 @@ export function paidEntryOutcomeText(x: {
   else if (x.tdsWithheldPaise === 0n) parts.push('no TDS withheld — no TDS credit');
   else if (x.coversOtherPayoutsPaise === 0n && !(x.flaggedExcessPaise && x.flaggedExcessPaise > 0n)) parts.push('no TDS credit');
   if (x.flaggedExcessPaise && x.flaggedExcessPaise > 0n) {
+    // Final item 2: only a gross-up reason can still net in the same FY; a closed FY or a changed PAN can not.
     parts.push(
-      `${formatINR(x.flaggedExcessPaise)} withheld TDS not credited — ${x.flaggedExcessReason ?? 'it could not be used'}; ` +
-        'nets on a later 194R withholding of the same FY, otherwise flagged as TDS taken in excess on the 194R report',
+      `${formatINR(x.flaggedExcessPaise)} withheld TDS not credited or handed back — ${x.flaggedExcessReason ?? 'it could not be used'}; ` +
+        (x.flaggedExcessKind === 'GROSS_UP'
+          ? 'nets on a later 194R withholding of the same FY if the programme deducts again, otherwise flagged as TDS taken in excess on the 194R report'
+          : "stays in that FY's ledger and is flagged as TDS taken in excess on the 194R report"),
     );
   }
   if (x.coversOtherPayoutsPaise > 0n) {
@@ -696,6 +700,7 @@ export async function patchPayoutReversalV2(
           tdsMethodology: e.tdsMethodology ?? null,
           tdsDeductedPaise: e.tdsDeductedPaise ?? 0n,
           payeePan: e.payeePan ?? null,
+          payeePartnerId: e.payeePartnerId ?? null,
           baseFyLabel: baseFyById.get(e.id),
           fullyWithheld: full,
         },
@@ -781,6 +786,7 @@ export async function patchPayoutReversalV2(
             belowThresholdAfterReversal: t.belowThresholdAfterReversal,
             flaggedExcessPaise: t.flaggedExcessPaise,
             flaggedExcessReason: t.flaggedExcessReason,
+            flaggedExcessKind: t.flaggedExcessKind,
           }),
         });
       }

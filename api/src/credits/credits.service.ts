@@ -4277,6 +4277,11 @@ export class CreditsService {
       // PAYOUT: the exact whole entries this reversal consumes — never one an earlier approval took.
       let payoutEntries: Awaited<ReturnType<CreditsService['selectPayoutEntriesForReversal']>> = [];
       if (action === ReversalAction.approve && reversal.awardType === 'PAYOUT' && (finalApprovedPaise ?? 0n) > 0n) {
+        // Final item 5 (Deoleo path — locking only, identical outputs): the bank download serialises per (client,
+        // period) on `PDLOCK|client|period` and claims entry rows only under it. Taking that SAME advisory lock here,
+        // before the selection and before any row lock, means no download / re-bank of this period can claim one of
+        // these entries meanwhile, and lock order is the download's: advisory first, rows after.
+        await lockAdvisoryKeys(tx, [`PDLOCK|${user.clientId}|${reversal.period}`]);
         payoutEntries = await this.selectPayoutEntriesForReversal(
           tx, user.clientId,
           { batchId: reversal.batchId, outletId: reversal.outletId, fieldId: reversal.fieldId },
@@ -4368,7 +4373,23 @@ export class CreditsService {
         let paidReceivablePaise = 0;
         const entryNotes: string[] = [];
 
-        // A-L: lock the 194R retailer key(s) of withheld 194R entries BEFORE flipping / offsetting.
+        // Lock order (final item 5): PDLOCK|client|period (taken before the selection, above) → the chosen entry rows
+        // (ascending id) → the 194R / 194C TDS keys from a RE-READ under the row lock. The download takes PDLOCK
+        // (+ its TDS keys) before claiming rows, so it can never hold one of these rows while waiting for us; a UTR
+        // upload only touches PROCESSING rows, which a LEGACY approval refuses. The re-read replaces the pre-lock values.
+        await tx.$queryRaw`SELECT id FROM credit_payout_entries WHERE "clientId" = ${user.clientId} AND id IN (${Prisma.join(
+          [...payoutEntries.map((e) => e.id)].sort(),
+        )}) ORDER BY id FOR UPDATE`;
+        const lockedNow = await tx.creditPayoutEntry.findMany({
+          where: { clientId: user.clientId, id: { in: payoutEntries.map((e) => e.id) } },
+          select: { id: true, status: true, tdsDeductedPaise: true },
+        });
+        const nowById = new Map((lockedNow ?? []).map((x) => [x.id, x]));
+        payoutEntries = payoutEntries.map((e) => {
+          const n = nowById.get(e.id);
+          return n ? { ...e, status: n.status, tdsDeductedPaise: n.tdsDeductedPaise } : e;
+        });
+        // A-L: the 194R retailer key(s) of withheld entries — from the re-read — BEFORE flipping / offsetting.
         await this.lock194RForEntries(
           tx,
           user.clientId,
@@ -4379,12 +4400,6 @@ export class CreditsService {
           // B6: a cancelled entry gives back the TDS credit it used — its credit's key too (no credits → nothing extra).
           payoutEntries.map((e) => e.id),
         );
-        // Re-audit A3: the bank download does NOT take the credit_batches lock, so a LEGACY approval locks the chosen
-        // entries itself (ascending id) — AFTER the advisory locks, the same order the download uses (advisory → entry
-        // rows), so the two never deadlock. From here the re-reads below are stable.
-        await tx.$queryRaw`SELECT id FROM credit_payout_entries WHERE "clientId" = ${user.clientId} AND id IN (${Prisma.join(
-          [...payoutEntries.map((e) => e.id)].sort(),
-        )}) ORDER BY id FOR UPDATE`;
         let visIdsForD1: Set<string> | null = null;
         for (const payoutEntry of payoutEntries) {
           let cur = {

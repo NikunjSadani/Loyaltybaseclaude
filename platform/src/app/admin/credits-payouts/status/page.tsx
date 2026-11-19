@@ -152,6 +152,10 @@ export default function PayoutStatusPage() {
   // Reversal state
   const [revTarget,  setRevTarget]  = useState<ReversalTarget | null>(null);
   const [revAmount,  setRevAmount]  = useState('');
+  // Final item 8: an amount the user TYPED in the amount form (mode not known yet) — never dropped silently if the
+  // entries read then says V2 (refs: read inside the async loader, after the user may have typed).
+  const revAmountTypedRef = useRef<string | null>(null);
+  const [revSwitchNotice, setRevSwitchNotice] = useState<string | null>(null);
   const [revRemarks, setRevRemarks] = useState('');
   const [revMsg,     setRevMsg]     = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [revLoading, setRevLoading] = useState(false);
@@ -287,6 +291,8 @@ export default function PayoutStatusPage() {
     setRevMsg(null);
     setRevEntries(null);
     setRevSelected([]);
+    revAmountTypedRef.current = null;
+    setRevSwitchNotice(null);
     setRevEntryLoad(row.awardType === 'PAYOUT' ? 'loading' : 'idle');
     if (row.awardType === 'PAYOUT') void loadPayoutEntries(batch.id, row.outletId, row.fieldId);
     else revRequestRef.current++;
@@ -313,11 +319,23 @@ export default function PayoutStatusPage() {
       if (data.mode !== 'LEGACY' && Array.isArray(data.entries)) {
         const entries = data.entries as PayoutReversalEntry[];
         setRevEntries(entries);
-        setRevSelected(
-          keepSelection
-            ? keepSelection.filter((id) => entries.some((e) => e.id === id && e.selectable))
-            : entries.filter((e) => e.selectable && PRE_TICK_STATUSES.has(e.status)).map((e) => e.id),
-        );
+        const typed = !keepSelection && revAmountTypedRef.current !== null ? revAmountTypedRef.current : null;
+        if (typed !== null) {
+          // The user typed an amount in the amount form before the answer came: say it was cleared, pre-tick nothing.
+          const rupeesTyped = Number(typed);
+          setRevSwitchNotice(
+            `This programme now reverses by payout entry — your typed amount ` +
+              `${Number.isFinite(rupeesTyped) ? inr(Math.round(rupeesTyped * 100)) : typed} was cleared; pick entries`,
+          );
+          setRevAmount('');
+          setRevSelected([]);
+        } else {
+          setRevSelected(
+            keepSelection
+              ? keepSelection.filter((id) => entries.some((e) => e.id === id && e.selectable))
+              : entries.filter((e) => e.selectable && PRE_TICK_STATUSES.has(e.status)).map((e) => e.id),
+          );
+        }
       } else if (data.mode === 'LEGACY' || data.mode === 'SHADOW') {
         setRevEntries(null); // amount form (SHADOW = LEGACY for payouts)
       } else {
@@ -768,6 +786,11 @@ export default function PayoutStatusPage() {
                   </div>
                 ) : revEntries ? (
                 <fieldset className="space-y-2" data-testid="payout-entry-picker">
+                  {revSwitchNotice && (
+                    <p role="status" data-testid="payout-mode-switch-notice" className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      {revSwitchNotice}
+                    </p>
+                  )}
                   <legend className="text-xs font-medium text-gray-700">Payout entries to reverse</legend>
                   {revEntries.length === 0 ? (
                     <p className="text-xs text-gray-500">No payout entries exist for this outlet and field in this batch.</p>
@@ -821,7 +844,10 @@ export default function PayoutStatusPage() {
                   <input
                     type="number"
                     value={revAmount}
-                    onChange={(e) => setRevAmount(e.target.value)}
+                    onChange={(e) => {
+                      revAmountTypedRef.current = e.target.value;
+                      setRevAmount(e.target.value);
+                    }}
                     max={revTarget.awardType === 'PAYOUT' ? revTarget.originalPaise / 100 : revTarget.originalPaise}
                     min={1}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
@@ -850,7 +876,9 @@ export default function PayoutStatusPage() {
                     onClick={submitReversal}
                     disabled={
                       revLoading ||
-                      (engineMode === 'V2' && revTarget.awardType === 'PAYOUT' && !revEntries) ||
+                      // Final item 8: on a known-V2 tenant Submit waits for the entries read; once it has answered
+                      // (picker, or LEGACY → the amount form) Submit is available.
+                      (engineMode === 'V2' && revTarget.awardType === 'PAYOUT' && revEntryLoad !== 'ready') ||
                       (!!revEntries && revSelected.length === 0)
                     }
                     className="flex-1 py-2.5 bg-amber-600 text-white rounded-xl text-sm font-semibold hover:bg-amber-700 disabled:opacity-50"

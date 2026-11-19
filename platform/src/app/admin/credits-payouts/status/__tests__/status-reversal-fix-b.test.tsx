@@ -46,6 +46,8 @@ interface ApiOpts {
   /** Sequence of responses for the entries lookup ('fail' = network error); the last one repeats. */
   entries?: Array<{ mode: string; entries: Entry[] } | 'fail' | 'pending'>;
   postFail?: boolean;
+  /** What a 'pending' lookup answers once released (default LEGACY, no entries). */
+  pendingAnswer?: { mode: string; entries: Entry[] };
 }
 
 function mockApi(opts: ApiOpts) {
@@ -76,7 +78,7 @@ function mockApi(opts: ApiOpts) {
       const r = seq[Math.min(entryCalls.length, seq.length - 1)];
       entryCalls.push(url);
       if (r === 'fail') return Promise.reject(new TypeError('Failed to fetch'));
-      if (r === 'pending') return new Promise((resolve) => { release = () => resolve({ ok: true, status: 200, json: async () => ({ success: true, data: { mode: 'LEGACY', entries: [] } }) }); });
+      if (r === 'pending') return new Promise((resolve) => { release = () => resolve({ ok: true, status: 200, json: async () => ({ success: true, data: opts.pendingAnswer ?? { mode: 'LEGACY', entries: [] } }) }); });
       return ok({ success: true, data: r });
     }
     if (url.endsWith('/reversals') && init?.method === 'POST') {
@@ -215,6 +217,31 @@ describe('Payout status — reversal fix round B', () => {
     await screen.findByTestId('payout-entry-picker');
     expect(api.entryCalls).toHaveLength(2);
     expect(submitBtn().disabled).toBe(false);
+  });
+
+  it('final item 8 — page mode V2 but the entries read answers LEGACY: the amount form, Submit enabled', async () => {
+    const api = mockApi({ engineMode: 'V2', entries: [{ mode: 'LEGACY', entries: [] }] });
+    render(<PayoutStatusPage />);
+    await waitFor(() => expect(api.attentionCalls.length).toBeGreaterThan(0));
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.click(await screen.findByRole('button', { name: /Reverse/ }));
+    await screen.findByRole('dialog');
+    await screen.findByText('Reversal Amount (₹)');
+    await waitFor(() => expect(submitBtn().disabled).toBe(false));
+  });
+
+  it('final item 8 — V2 arrives after the user typed an amount: a notice says it was cleared, nothing is pre-ticked', async () => {
+    const api = mockApi({ entries: ['pending'], pendingAnswer: { mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] } });
+    await openModal();
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '250' } }); // the amount form's number input
+    api.release();
+    await screen.findByTestId('payout-entry-picker');
+    expect(screen.getByTestId('payout-mode-switch-notice').textContent).toBe(
+      'This programme now reverses by payout entry — your typed amount ₹250.00 was cleared; pick entries',
+    );
+    expect((screen.getByLabelText('Payout entry ₹500.00 (PENDING)') as HTMLInputElement).checked).toBe(false);
+    expect(submitBtn().disabled).toBe(true); // nothing picked yet
   });
 
   it('#5b: a V2 answer switches the modal to the entry picker', async () => {

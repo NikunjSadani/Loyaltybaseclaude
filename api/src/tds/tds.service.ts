@@ -36,6 +36,7 @@
 import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  financialYear,
   fyFromLabel,
   fyLabelForPeriod,
   periodWindowForFy,
@@ -74,6 +75,8 @@ import {
   normalisePan,
   deducted194RByRetailer,
   openCredits194RUsability,
+  currentRetailerKeys,
+  creditUnusableReason,
   type Reversed194RItem,
   type Bases194R,
 } from './tds-194r.shared';
@@ -726,6 +729,15 @@ export class TdsService {
       const after = row.baseFyTotalPaise > cfg.thr194rFyPaise;
       const open = row.openTdsCreditPaise ?? 0n;
       const kept = retainedNoCredit.get(key) ?? 0n;
+      // Final item 3: can that kept TDS still net? Only in the current FY, under the retailer's current key.
+      let keptCanNet: 'YES' | 'FY_CLOSED' | 'PAN_CHANGED' = 'YES';
+      if (kept > 0n) {
+        const [nowKey] = await currentRetailerKeys(this.prisma, clientId, [
+          { key, payeePartnerId: items.find((i) => i.payeePartnerId)?.payeePartnerId ?? null },
+        ]);
+        const why = creditUnusableReason({ fyLabel, key }, { currentFy: financialYear(new Date()).fyLabel, methodology: null, currentKey: nowKey });
+        keptCanNet = why === 'FY_CLOSED' ? 'FY_CLOSED' : why === 'PAN_CHANGED' ? 'PAN_CHANGED' : 'YES';
+      }
       row.reversal = buildRowReversal(
         items.map((i) => ({
           amountPaise: i.amountPaise,
@@ -748,9 +760,13 @@ export class TdsService {
           ...(kept > 0n
             ? [
                 `${formatINR(kept)} TDS withheld on the reversed payout(s) was kept in FY ${fyLabel}'s ledger without a credit — ` +
-                  (methodology === 'DEDUCT'
-                    ? "it nets against this retailer's later 194R withholding this FY (counted in 'deducted so far'); any part not needed is flagged as excess"
-                    : 'counted as TDS taken in excess while the method is gross-up; if the programme switches back to deduct this FY, it nets against the next withholding'),
+                  (keptCanNet === 'FY_CLOSED'
+                    ? 'FY closed: it cannot net against a later withholding — counted as excess'
+                    : keptCanNet === 'PAN_CHANGED'
+                      ? "the retailer's PAN has changed: it cannot net against the retailer's later withholding — counted as excess"
+                      : methodology === 'DEDUCT'
+                        ? "it nets against this retailer's later 194R withholding this FY (counted in 'deducted so far'); any part not needed is flagged as excess"
+                        : 'counted as TDS taken in excess while the method is gross-up; if the programme switches back to deduct this FY, it nets against the next withholding'),
               ]
             : []),
         ],

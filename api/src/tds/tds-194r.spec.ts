@@ -23,6 +23,7 @@ type Entry = {
   outletId: string; amountPaise: bigint; fieldId: string; tdsSection: string | null; sourceKind?: string | null;
   /** Payee SNAPSHOT at payment time (owner rule 2026-11-18). */
   payeePan?: string | null;
+  payeePartnerId?: string | null;
   /** WRE D1: a V2 reversal took this PAID payout off the base. */
   tdsBaseReversedAt?: Date | null;
   period?: string;
@@ -75,11 +76,21 @@ function fakeDb(d: Data) {
           if (w.fieldId && e.fieldId !== w.fieldId) return false;
           if (w.batch?.sourceKind === 'VENDOR_IMPORT' && e.sourceKind !== 'VENDOR_IMPORT') return false;
           if (w.batch?.OR && e.sourceKind === 'VENDOR_IMPORT') return false;
-          if (w.OR) {
-            return w.OR.some((c: any) =>
+          // scope / snapshot filter: { OR: [{ payeePan: { in } }, { payeePan: null, outletId: { in } }] } — directly, or
+          // nested in AND (the D2 retained-REVERSED read, whose own OR is the FY window: bank file date / paidAt)
+          const scopeOk = (or: any[]) =>
+            or.some((c: any) =>
               c.payeePan?.in ? !!e.payeePan && c.payeePan.in.includes(e.payeePan) : !e.payeePan && inList(e.outletId, c.outletId),
             );
+          const isWindowOr = (or: any[]) => or.some((c: any) => 'download' in c || 'downloadId' in c);
+          if (w.OR && isWindowOr(w.OR)) {
+            const inWindow = w.OR.some((c: any) =>
+              c.download ? !!e.downloadedAt && inRange(e.downloadedAt, c.download.downloadedAt) : !e.downloadedAt && inRange(e.paidAt, c.paidAt),
+            );
+            if (!inWindow) return false;
+            return w.AND ? w.AND.every((a: any) => !a.OR || scopeOk(a.OR)) : true;
           }
+          if (w.OR) return scopeOk(w.OR);
           return inList(e.outletId, w.outletId);
         }),
     },
@@ -764,6 +775,20 @@ describe('PARITY: engine and report give the same 194R TDS for the same data', (
     expect(row.reversal!.items[0]).toMatchObject({ amountPaise: 150000n, period: '2026-06' });
     // its TDS was kept without a credit here (none in the data) → said on the row (re-audit A5)
     expect(row.reversal!.notes.join(' ')).toMatch(/₹1,500\.00 TDS withheld on the reversed payout\(s\) was kept in FY .* ledger without a credit/);
+  });
+
+  it('final item 3: the retailer paid now has another PAN → the kept TDS "cannot net — counted as excess" (no netting promised)', async () => {
+    const d = empty();
+    d.partners = [pan('p1', 'ZZZZZ9999Z')]; // the retailer's PAN changed after the payout
+    d.outlets = [{ outletCode: 'O1', clientId: CLIENT, partnerId: 'p1' }];
+    d.entries = [
+      { ...paidVis('B', 150000n), status: 'REVERSED', tdsBaseReversedAt: inFy(70), period: '2026-06', payeePan: 'ABCDE1234F', payeePartnerId: 'p1' } as never,
+    ];
+    d.ledger = [{ clientId: CLIENT, panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: FY.fyLabel, tdsDeductedThisPaise: 150000n, creditPayoutEntryId: 'B' }];
+    const rows = await services(d, 'DEDUCT').tds.compute194R(CLIENT, FY.fyLabel, null);
+    const row = rows.find((r) => r.panNumber === 'ABCDE1234F')!;
+    expect(row.reversal!.notes.join(' ')).toMatch(/kept in FY .* ledger without a credit — the retailer's PAN has changed: it cannot net .* counted as excess/);
+    expect(row.reversal!.notes.join(' ')).not.toMatch(/it nets against/);
   });
 
   // ── Re-audit A1: only USABLE open credits lower the excess; unusable ones stay excess, with a note ──

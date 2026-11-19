@@ -196,6 +196,8 @@ describe('C. compute194R Source-2 — RedemptionOrder.valuePaise cumulation', ()
     tdsOffPlatformEntry: { findMany: jest.fn() },
     tdsDeposit: { findMany: jest.fn() },
     tdsDeductionEntry: { findMany: jest.fn().mockResolvedValue([]) },
+    // WRE: compute194R reads the client's open 194R TDS credits (usable vs not) — none here.
+    tdsCredit: { findMany: jest.fn().mockResolvedValue([]) },
   };
   let service: TdsService;
   const CLIENT = 'deoleo';
