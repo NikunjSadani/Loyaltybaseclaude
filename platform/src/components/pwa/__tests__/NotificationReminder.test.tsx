@@ -459,7 +459,9 @@ describe('Bajaj notification reminder', () => {
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     const heading = screen.getByRole('heading', { name: 'Notifications are blocked' });
     expect(dialog.getAttribute('aria-labelledby')).toBe(heading.id);
-    expect(document.activeElement).toBe(heading);
+    // Heading focus is applied in an effect — under full-suite load it can land a tick after the
+    // dialog renders (pre-push flake 2026-11-19), so wait for it instead of asserting synchronously.
+    await waitFor(() => expect(document.activeElement).toBe(heading));
     expect(document.body.style.overflow).toBe('hidden');
     expect(outside.hasAttribute('inert')).toBe(true);
     expect(outside.getAttribute('aria-hidden')).toBe('true');
