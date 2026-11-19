@@ -42,6 +42,20 @@ import { isGifsyOperator } from '../common/tenant-scope';
 export const VISIBILITY_REJECT_REASONS = VISIBILITY_REJECT_REASON_CODES;
 
 /**
+ * The outlet's programme (`Outlet.programName`, e.g. Bajaj "Unnati"/"SAMT") and
+ * sub-programme (`Outlet.programCategory`, e.g. "Elite"/"Privilege") for the review
+ * queue + detail — additive fields; null when the outlet has none (or the relation is absent).
+ */
+function outletProgram(
+  outlet: { programName: string | null; programCategory: string | null } | null | undefined,
+): { programName: string | null; programCategory: string | null } {
+  return {
+    programName: outlet?.programName ?? null,
+    programCategory: outlet?.programCategory ?? null,
+  };
+}
+
+/**
  * VisibilityReviewService — GIFSY_ADMIN review of Visibility (POSM) captures (Stream B,
  * design D12). Approve / reject-with-reason (reject re-opens the window), plus the
  * captured-data queue: list (filters) + single-capture detail (values + auth-gated media
@@ -326,6 +340,8 @@ export class VisibilityReviewService {
           // Per-photo review map so the queue can badge partial/changes-requested captures.
           photoReviews: true,
           submittedBy: { select: { id: true, employeeCode: true } },
+          // The outlet's programme / sub-programme (reviewer context) — flattened below.
+          outlet: { select: { programName: true, programCategory: true } },
         },
         orderBy: { receivedAt: 'desc' },
         skip: (page - 1) * limit,
@@ -335,7 +351,9 @@ export class VisibilityReviewService {
     ]);
 
     return {
-      captures: rows,
+      // Additive: programName / programCategory flattened from the live outlet master
+      // (Outlet.programName = programme, Outlet.programCategory = sub-programme).
+      captures: rows.map(({ outlet, ...r }) => ({ ...r, ...outletProgram(outlet) })),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
   }
@@ -354,10 +372,12 @@ export class VisibilityReviewService {
         imageHashes: { select: { hash: true } },
         submittedBy: { select: { id: true, employeeCode: true } },
         approvedBy: { select: { id: true, name: true } },
+        outlet: { select: { programName: true, programCategory: true } },
       },
     });
     if (!capture) throw new NotFoundException('Capture not found.');
     await this.assertEnabled(capture.clientId);
+    const { outlet: captureOutlet, ...captureRow } = capture;
 
     const schema = await this.resolveFormSnapshot(capture.clientId, capture.formVersion);
     // Per-photo geo-fence: the SAME policy the capture verdict uses (geo-fence.helper), so a badge can never disagree
@@ -380,7 +400,9 @@ export class VisibilityReviewService {
 
     return {
       capture: {
-        ...capture,
+        ...captureRow,
+        // Additive: the outlet's programme / sub-programme for the review header.
+        ...outletProgram(captureOutlet),
         photoReviews: reviews,
         media,
         geo,
