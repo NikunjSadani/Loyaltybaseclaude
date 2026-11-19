@@ -33,16 +33,35 @@ export class GstReimbursementService {
 
   /**
    * GET /v1/admin/gst-reimbursements — list reimbursement rows (default the HELD release queue).
-   * Optional filters: status (HELD|RELEASED), clientId (single tenant), period (linked invoice period).
+   * Optional filters: status (HELD = release queue, GST > ₹0 | HELD_ZERO = held at ₹0 after a
+   * regenerate, nothing to release | RELEASED), clientId (single tenant), period (linked invoice period).
    * Ordered oldest-held first so the release queue is FIFO.
    */
   async list(query: ListGstReimbursementQueryDto) {
     const status = query.status ?? 'HELD';
 
-    const where: Prisma.GstReimbursementWhereInput = { status };
-    if (query.clientId) where.clientId = query.clientId;
+    // Shared tenant/period scope for the list AND the ₹0-held side count.
+    const scope: Prisma.GstReimbursementWhereInput = {};
+    if (query.clientId) scope.clientId = query.clientId;
     // period lives on the linked SERVICE invoice, not the holdback row.
-    if (query.period) where.autoInvoice = { period: query.period };
+    if (query.period) scope.autoInvoice = { period: query.period };
+
+    // A regenerated invoice whose GST dropped to ₹0 keeps its HELD row at ₹0 (never deleted — audit
+    // trail, reused if GST comes back; see InvoicesService.reconcileReimbursement). It has nothing
+    // to release, so the HELD release queue (+ its count/total) lists only rows with GST > ₹0.
+    // The ₹0 rows stay visible under status=HELD_ZERO, and the HELD response carries their count
+    // so the page can say so out loud (no silent hiding). RELEASED is unaffected.
+    const where: Prisma.GstReimbursementWhereInput =
+      status === 'HELD'
+        ? { ...scope, status: 'HELD', gstPaise: { gt: 0n } }
+        : status === 'HELD_ZERO'
+          ? { ...scope, status: 'HELD', gstPaise: 0n }
+          : { ...scope, status: 'RELEASED' };
+
+    const zeroHeldCount =
+      status === 'HELD'
+        ? await this.prisma.gstReimbursement.count({ where: { ...scope, status: 'HELD', gstPaise: 0n } })
+        : null;
 
     const rows = await this.prisma.gstReimbursement.findMany({
       where,
@@ -81,6 +100,8 @@ export class GstReimbursementService {
       period: query.period ?? null,
       count: items.length,
       totalGst: this.money(totalGstPaise),
+      /** HELD only: rows held at ₹0 that are NOT in this queue (see status=HELD_ZERO); else null. */
+      zeroHeldCount,
       items,
     };
   }
