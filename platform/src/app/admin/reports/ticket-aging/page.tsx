@@ -23,8 +23,9 @@ import { downloadBlob } from '@/lib/download'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const ALL_STATUSES = ['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'ESCALATED', 'RESOLVED', 'CLOSED'] as const
-const DEFAULT_STATUSES = new Set(['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'ESCALATED'])
+const ALL_STATUSES = ['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'ESCALATED', 'WAITING_ON_CLIENT', 'RESOLVED', 'CLOSED'] as const
+// WAITING_ON_CLIENT = Gifsy asked the client admin for remarks; still an open ticket.
+const DEFAULT_STATUSES = new Set(['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'ESCALATED', 'WAITING_ON_CLIENT'])
 
 const CATEGORIES = ['KYC', 'POINTS', 'REDEMPTION', 'PAYOUT', 'SCHEME', 'TECHNICAL', 'ACCOUNT', 'OTHER'] as const
 const PRIORITIES  = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const
@@ -40,6 +41,9 @@ interface TicketAgingRow {
   priority:           string
   status:             string
   createdByName:      string
+  /** "Outlet owner — <name>" or "<name> · <designation>" (older API: absent → createdByName). */
+  raisedBy?:          string
+  outletCode?:        string
   assignedToName?:    string
   createdAt:          string
   ageDays:            number
@@ -295,7 +299,7 @@ export default function TicketAgingPage() {
                     <tr className="bg-gray-50 border-b border-gray-300 text-gray-700">
                       {[
                         'Ticket #', 'Subject', 'Category', 'Priority', 'Status',
-                        'Created By', 'Assigned To', 'Created', 'Age (days)',
+                        'Raised by', 'Outlet code', 'Assigned To', 'Created', 'Age (days)',
                         'Aging bucket', 'First response (hrs)', 'SLA breached', 'Last updated',
                       ].map(h => (
                         <th
@@ -318,7 +322,8 @@ export default function TicketAgingPage() {
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{row.category}</td>
                         <td className={`px-3 py-1.5 whitespace-nowrap ${priorityClass(row.priority)}`}>{row.priority}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{statusLabel(row.status)}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{row.createdByName}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{row.raisedBy ?? row.createdByName}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap font-mono text-gray-600">{row.outletCode || '—'}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-500">{row.assignedToName ?? '—'}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-500">{isoToDate(row.createdAt)}</td>
                         <td className="px-3 py-1.5 text-right whitespace-nowrap text-gray-700">{row.ageDays}</td>

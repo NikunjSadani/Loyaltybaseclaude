@@ -256,7 +256,7 @@ describe('ReportsService', () => {
     const where = mockPrisma.ticket.findMany.mock.calls[0][0].where;
     expect(where.clientId).toBe('deoleo');
     expect(where.deletedAt).toBeNull();
-    expect(where.status.in).toEqual(['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'ESCALATED']);
+    expect(where.status.in).toEqual(['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'ESCALATED', 'WAITING_ON_CLIENT']);
     expect(res).toHaveProperty('summary');
   });
 });

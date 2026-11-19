@@ -351,6 +351,11 @@ enum TicketStatus {
   RESOLVED
   CLOSED
   ESCALATED
+  // Gifsy asked one of the ticket tenant's CLIENT_ADMINs for remarks; the request (who/what/
+  // when) lives in Ticket.metadata.clientRemarks. Cleared back to IN_PROGRESS when the client
+  // admin replies (or by any Gifsy status change). Masked as IN_PROGRESS on every outlet/sales
+  // read. Additive enum value (lone ALTER TYPE ADD VALUE). See platform/docs/plans/SUPPORT-TICKETS.md.
+  WAITING_ON_CLIENT
 }
 
 enum TicketPriority {

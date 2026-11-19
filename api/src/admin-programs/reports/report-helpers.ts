@@ -201,6 +201,10 @@ export interface TicketAgingRow {
   priority: string;
   status: string;
   createdByName: string;
+  /** Unambiguous raiser: "Outlet owner — <name>" or "<name> · <designation>". */
+  raisedBy: string;
+  /** The ticket's outlet code, '' when none is known (shown as —). */
+  outletCode: string;
   assignedToName?: string;
   createdAt: string;
   ageDays: number;
@@ -223,6 +227,8 @@ export interface TicketInput {
   priority: string;
   status: string;
   createdByName: string;
+  raisedBy?: string;
+  outletCode?: string;
   assignedToName?: string;
   createdAt: Date | string;
   updatedAt: Date | string;
@@ -275,6 +281,8 @@ export function buildTicketAgingRow(t: TicketInput, asOf: Date | string): Ticket
     priority: t.priority,
     status: t.status,
     createdByName: t.createdByName,
+    raisedBy: t.raisedBy ?? t.createdByName,
+    outletCode: t.outletCode ?? '',
     assignedToName: t.assignedToName,
     createdAt: toISO(t.createdAt),
     ageDays: days,
@@ -300,7 +308,7 @@ export function summarizeAging(rows: TicketAgingRow[]): TicketAgingSummary {
 
 const isoToDate = (iso: string): string => istDateKey(new Date(iso));
 
-/** Flatten ticket-aging rows to xlsx row objects (13 columns, source order). */
+/** Flatten ticket-aging rows to xlsx row objects (14 columns, source order). */
 export function ticketAgingXlsxRows(rows: TicketAgingRow[]): Record<string, unknown>[] {
   return rows.map((r) => ({
     'Ticket #': r.ticketNumber,
@@ -308,7 +316,8 @@ export function ticketAgingXlsxRows(rows: TicketAgingRow[]): Record<string, unkn
     Category: r.category,
     Priority: r.priority,
     Status: r.status,
-    'Created By': r.createdByName,
+    'Raised by': r.raisedBy,
+    'Outlet code': r.outletCode || '—',
     'Assigned To': r.assignedToName ?? '',
     Created: isoToDate(r.createdAt),
     'Age (days)': r.ageDays,

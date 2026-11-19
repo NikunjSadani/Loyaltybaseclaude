@@ -1,20 +1,21 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { Suspense, useState, useEffect, useMemo, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
+import * as Dialog from '@radix-ui/react-dialog';
 import {
-  Search, Filter, X, MessageSquare, ChevronDown,
+  Search, X, MessageSquare,
   CheckCircle, Clock, AlertCircle, Building2,
-  User, Loader2, Tag, Shield, SlidersHorizontal,
+  Loader2, SlidersHorizontal, UserPlus, Hourglass,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import {
-  type Ticket, type TicketStatus, type TicketPriority, type TicketCategory, type TicketSource,
+  type Ticket, type TicketMessage, type TicketStatus, type TicketPriority, type TicketCategory, type TicketSource,
   CATEGORY_LABELS, STATUS_LABELS, PRIORITY_LABELS,
 } from '@/lib/tickets';
 import { api } from '@/lib/api-client';
-import { getAssumedBrand } from '@/lib/auth-client';
 import { useAdminSession } from '@/lib/admin-session';
 
 /* ─── DB ↔ local category / status / priority mappings ─────────────────────── */
@@ -27,13 +28,46 @@ const CAT_FROM_DB: Record<string, TicketCategory> = {
 const STATUS_FROM_DB: Record<string, TicketStatus> = {
   OPEN: 'open', IN_PROGRESS: 'in_progress', PENDING_USER: 'waiting',
   WAITING: 'waiting', ESCALATED: 'in_progress', RESOLVED: 'resolved', CLOSED: 'closed',
+  // Waiting on the client admin's remarks — still being worked; shown with its own badge
+  // (see statusDisplay) wherever the raw status is known.
+  WAITING_ON_CLIENT: 'in_progress',
 };
 const PRIO_FROM_DB: Record<string, TicketPriority> = {
   CRITICAL: 'high', HIGH: 'high', MEDIUM: 'medium', LOW: 'low',
 };
 
+/** The pending "remarks requested from a client admin" marker (Ticket.metadata.clientRemarks). */
+interface ClientRemarksRequest {
+  requestedFromId: string;
+  requestedFromName: string;
+  requestedById: string;
+  requestedByName: string;
+  note: string;
+  requestedAt: string;
+}
+
+type AdminTicketMessage = TicketMessage & { senderRole?: string };
+
+/** Who raised the ticket (server-derived, tickets/ticket-submitter.ts). */
+interface RaisedBy { kind: 'OUTLET_OWNER' | 'SALES' | 'STAFF'; name: string; designation: string | null; label: string }
+/** The ticket's outlet — stored on the ticket, or the raising owner's primary outlet; null = unknown (—). */
+interface TicketOutlet { id: string; outletCode: string; name: string; source: 'TICKET' | 'OWNER_PRIMARY'; ownerOutletCount?: number }
+
+/** The local Ticket plus the admin-only fields this console needs. */
+type AdminTicket = Omit<Ticket, 'messages'> & {
+  dbStatus: string;
+  assignedToId: string | null;
+  clientRemarks: ClientRemarksRequest | null;
+  raisedBy: RaisedBy | null;
+  outlet: TicketOutlet | null;
+  messages: AdminTicketMessage[];
+};
+
+interface Assignee { id: string; name: string; role: string; kind: 'GIFSY' | 'CLIENT_ADMIN' }
+
 /** Maps an enveloped backend ticket onto the local Ticket shape used by the UI. */
-function mapDbTicket(t: any): Ticket {
+function mapDbTicket(t: any): AdminTicket {
+  const remarks = t.metadata?.clientRemarks;
   return {
     id:              t.id,
     ticketNumber:    t.ticketNumber,
@@ -42,11 +76,16 @@ function mapDbTicket(t: any): Ticket {
     category:        CAT_FROM_DB[t.category]  ?? 'other',
     priority:        PRIO_FROM_DB[t.priority] ?? 'medium',
     status:          STATUS_FROM_DB[t.status] ?? 'open',
+    dbStatus:        t.status ?? 'OPEN',
     source:          'outlet',
-    outletId:        t.createdById ?? t.id,
-    outletName:      t.createdBy?.name ?? '',
-    raisedByName:    t.createdBy?.name ?? '',
+    outletId:        t.outlet?.id ?? '',
+    outletName:      t.outlet?.name ?? '',
+    raisedByName:    t.raisedBy?.label ?? t.createdBy?.name ?? '',
+    raisedBy:        t.raisedBy ?? null,
+    outlet:          t.outlet ?? null,
     assignedTo:      t.assignedTo?.name,
+    assignedToId:    t.assignedTo?.id ?? t.assignedToId ?? null,
+    clientRemarks:   t.status === 'WAITING_ON_CLIENT' && remarks && typeof remarks === 'object' ? (remarks as ClientRemarksRequest) : null,
     createdAt:       t.createdAt,
     updatedAt:       t.updatedAt,
     messages:        (t.messages ?? []).map((m: any) => ({
@@ -56,6 +95,7 @@ function mapDbTicket(t: any): Ticket {
       text:       m.message,
       createdAt:  m.createdAt,
       isInternal: m.isInternal,
+      senderRole: m.sender?.role,
     })),
   };
 }
@@ -69,12 +109,29 @@ const STATUS_STYLE: Record<TicketStatus, { variant: 'success' | 'warning' | 'dan
   resolved:    { variant: 'success',  dot: 'bg-emerald-400', badge: 'bg-emerald-100 text-emerald-700' },
   closed:      { variant: 'default',  dot: 'bg-gray-300',    badge: 'bg-gray-50 text-gray-400' },
 };
+const AWAITING_STYLE = { variant: 'warning' as const, dot: 'bg-violet-400', badge: 'bg-violet-100 text-violet-700' };
 
 const PRIORITY_STYLE: Record<TicketPriority, string> = {
   high:   'text-red-600 bg-red-50',
   medium: 'text-amber-600 bg-amber-50',
   low:    'text-gray-500 bg-gray-50',
 };
+
+/** Status label + style, with the "waiting on client" state called out for admins. */
+function statusDisplay(t: AdminTicket, viewerId: string, viewerRole: string) {
+  if (t.dbStatus === 'WAITING_ON_CLIENT') {
+    const mine = viewerRole === 'CLIENT_ADMIN' && t.clientRemarks?.requestedFromId === viewerId;
+    return { label: mine ? 'Awaiting your remarks' : 'Awaiting client', ...AWAITING_STYLE };
+  }
+  return { label: STATUS_LABELS[t.status], ...STATUS_STYLE[t.status] };
+}
+
+const isGifsyRole = (role: string) => role === 'GIFSY_ADMIN' || role === 'GIFSY_STAFF';
+
+/** "Raised by" line — always says whether it was the outlet owner or a sales person (+ designation). */
+function raisedByText(t: AdminTicket): string {
+  return t.raisedBy?.label ?? (t.raisedByName || '—');
+}
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: '2-digit' });
@@ -86,13 +143,20 @@ function formatDateTime(iso: string) {
 
 /* ─── Ticket row ─────────────────────────────────────────────────────────────── */
 
-function TicketRow({ ticket, onClick }: { ticket: Ticket; onClick: () => void }) {
-  const { dot } = STATUS_STYLE[ticket.status];
+function TicketRow({ ticket, viewerId, viewerRole, onClick }: { ticket: AdminTicket; viewerId: string; viewerRole: string; onClick: () => void }) {
+  const st = statusDisplay(ticket, viewerId, viewerRole);
   return (
-    <tr onClick={onClick} className="hover:bg-gray-50 cursor-pointer transition-colors border-b border-gray-50 last:border-0">
+    <tr
+      onClick={onClick}
+      // Keyboard-openable; focus returns here when the ticket dialog closes.
+      tabIndex={0}
+      data-ticket-row={ticket.id}
+      aria-label={`Open ticket ${ticket.ticketNumber}: ${ticket.title}`}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
+      className="hover:bg-gray-50 focus:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--brand-primary)] cursor-pointer transition-colors border-b border-gray-50 last:border-0">
       <td className="py-3 pl-4 pr-2">
         <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
+          <span className={`w-2 h-2 rounded-full shrink-0 ${st.dot}`} />
           <div>
             <p className="text-xs font-mono text-gray-400">{ticket.ticketNumber}</p>
             <p className="text-sm font-medium text-gray-900 max-w-[200px] truncate">{ticket.title}</p>
@@ -100,10 +164,15 @@ function TicketRow({ ticket, onClick }: { ticket: Ticket; onClick: () => void })
         </div>
       </td>
       <td className="py-3 px-2 hidden md:table-cell">
-        <p className="text-sm text-gray-700 truncate max-w-[140px]">{ticket.outletName}</p>
-        {ticket.salesPersonName && (
-          <p className="text-[10px] text-gray-400 truncate">via {ticket.salesPersonName}</p>
+        {ticket.outlet ? (
+          <>
+            <p className="text-sm text-gray-700 truncate max-w-[180px]">{ticket.outlet.name}</p>
+            <p className="text-[11px] font-mono text-gray-500">{ticket.outlet.outletCode}</p>
+          </>
+        ) : (
+          <p className="text-sm text-gray-400" title="No outlet is recorded on this ticket">—</p>
         )}
+        <p className="text-[10px] text-gray-400 truncate max-w-[200px]">Raised by: {raisedByText(ticket)}</p>
       </td>
       <td className="py-3 px-2 hidden lg:table-cell">
         <span className="text-xs text-gray-500">{CATEGORY_LABELS[ticket.category]}</span>
@@ -114,8 +183,8 @@ function TicketRow({ ticket, onClick }: { ticket: Ticket; onClick: () => void })
         </span>
       </td>
       <td className="py-3 px-2">
-        <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLE[ticket.status].badge}`}>
-          {STATUS_LABELS[ticket.status]}
+        <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium ${st.badge}`}>
+          {st.label}
         </span>
       </td>
       <td className="py-3 px-2 hidden sm:table-cell">
@@ -128,21 +197,136 @@ function TicketRow({ ticket, onClick }: { ticket: Ticket; onClick: () => void })
   );
 }
 
+/* ─── Escalate panel (Gifsy) ─────────────────────────────────────────────────── */
+
+/**
+ * Two ways to escalate, one control:
+ *  - "Escalate to Gifsy support" → priority bump + ESCALATED + the picked Gifsy user is assigned;
+ *  - "Ask client admin for remarks" → WAITING_ON_CLIENT + bell + email to the picked client admin.
+ */
+function EscalatePanel({ ticketId, assignees, onDone, onCancel }: {
+  ticketId: string;
+  assignees: Assignee[];
+  onDone: (notice: string | null) => void;
+  onCancel: () => void;
+}) {
+  const gifsy = assignees.filter((a) => a.kind === 'GIFSY');
+  const clientAdmins = assignees.filter((a) => a.kind === 'CLIENT_ADMIN');
+  const [mode, setMode] = useState<'gifsy' | 'client'>('gifsy');
+  const [target, setTarget] = useState('');
+  const [priority, setPriority] = useState<'HIGH' | 'CRITICAL'>('HIGH');
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => { setTarget(''); setError(null); }, [mode]);
+
+  const options = mode === 'gifsy' ? gifsy : clientAdmins;
+  const canSubmit = !!target && !!text.trim() && !busy;
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setBusy(true); setError(null);
+    if (mode === 'gifsy') {
+      const res = await api.post(`/api/tickets/${ticketId}/escalate`, { escalateTo: target, reason: text.trim(), priority });
+      setBusy(false);
+      if (res.success) onDone(null); else setError(res.error);
+    } else {
+      const res = await api.post<{ emailSent?: boolean; emailError?: string }>(
+        `/api/tickets/${ticketId}/request-client-remarks`, { clientAdminId: target, note: text.trim() },
+      );
+      setBusy(false);
+      if (!res.success) { setError(res.error); return; }
+      onDone(res.data?.emailSent === false
+        ? `Remarks requested, but the email was NOT sent (${res.data.emailError ?? 'unknown reason'}). The client admin was notified in-app only.`
+        : null);
+    }
+  };
+
+  return (
+    <div role="group" aria-label="Escalate ticket" className="rounded-xl border border-gray-200 bg-gray-50 p-3 space-y-2.5">
+      <div className="flex gap-3 text-xs">
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input type="radio" name="esc-mode" checked={mode === 'gifsy'} onChange={() => setMode('gifsy')} />
+          Escalate to Gifsy support
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input type="radio" name="esc-mode" checked={mode === 'client'} onChange={() => setMode('client')} />
+          Ask client admin for remarks
+        </label>
+      </div>
+
+      <select
+        aria-label={mode === 'gifsy' ? 'Escalate to' : 'Client admin'}
+        value={target}
+        onChange={(e) => setTarget(e.target.value)}
+        className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white"
+      >
+        <option value="">{mode === 'gifsy' ? 'Choose a Gifsy support user…' : 'Choose a client admin…'}</option>
+        {options.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+      </select>
+      {options.length === 0 && (
+        <p className="text-[11px] text-amber-700">
+          {mode === 'gifsy' ? 'No active Gifsy support users can work on this programme.' : 'This programme has no active client admin.'}
+        </p>
+      )}
+
+      {mode === 'gifsy' && (
+        <select aria-label="Priority" value={priority} onChange={(e) => setPriority(e.target.value as 'HIGH' | 'CRITICAL')}
+          className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white">
+          <option value="HIGH">Priority: High</option>
+          <option value="CRITICAL">Priority: Critical</option>
+        </select>
+      )}
+
+      <textarea
+        aria-label={mode === 'gifsy' ? 'Reason' : 'What do you need from the client admin?'}
+        rows={3}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={mode === 'gifsy' ? 'Why is this being escalated?' : 'What do you need from the client admin? They get this by email and in-app.'}
+        className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 resize-none bg-white"
+      />
+      {mode === 'client' && (
+        <p className="text-[11px] text-gray-500">The ticket moves to &quot;Awaiting client&quot;. Their reply is internal — never shown to the outlet or sales team.</p>
+      )}
+      {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
+      <div className="flex gap-2 justify-end">
+        <Button variant="secondary" size="sm" onClick={onCancel} disabled={busy}>Cancel</Button>
+        <Button size="sm" loading={busy} disabled={!canSubmit} onClick={submit}>
+          {mode === 'gifsy' ? 'Escalate' : 'Send request'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Ticket detail panel ────────────────────────────────────────────────────── */
 
-function TicketDetailPanel({ ticket: initial, canEscalate, onClose, onUpdate }: {
-  ticket: Ticket;
-  canEscalate: boolean;
+function TicketDetailPanel({ ticket: initial, viewerRole, viewerId, onClose, onUpdate, onChanged }: {
+  ticket: AdminTicket;
+  viewerRole: string;
+  viewerId: string;
   onClose: () => void;
-  onUpdate: (t: Ticket) => void;
+  onUpdate: (t: AdminTicket) => void;
+  /** Something changed that can move list counts (assign / escalate / remarks). */
+  onChanged: () => void;
 }) {
+  const isGifsy = isGifsyRole(viewerRole);
+  const isClientAdmin = viewerRole === 'CLIENT_ADMIN';
   const [ticket,        setTicket]        = useState(initial);
-  const [assignedToId,  setAssignedToId]  = useState<string | null>(null);
   const [reply,         setReply]         = useState('');
   const [isInt,         setIsInt]         = useState(false);
   const [sending,       setSending]       = useState(false);
-  const [escalating,    setEscalating]    = useState(false);
   const [statusBusy,    setStatusBusy]    = useState(false);
+  const [assignees,     setAssignees]     = useState<Assignee[]>([]);
+  const [assigneesErr,  setAssigneesErr]  = useState<string | null>(null);
+  const [assignBusy,    setAssignBusy]    = useState(false);
+  const [showEscalate,  setShowEscalate]  = useState(false);
+  const [remarks,       setRemarks]       = useState('');
+  const [remarksBusy,   setRemarksBusy]   = useState(false);
+  const [actionError,   setActionError]   = useState<string | null>(null);
+  const [notice,        setNotice]        = useState<string | null>(null);
 
   // Keep the panel in sync when the parent loads the full thread via GET :id.
   useEffect(() => { setTicket(initial); }, [initial]);
@@ -152,174 +336,284 @@ function TicketDetailPanel({ ticket: initial, canEscalate, onClose, onUpdate }: 
     const res = await api.get<{ ticket: any }>(`/api/tickets/${ticket.id}`);
     if (res.success) {
       const upd = mapDbTicket(res.data.ticket);
-      setTicket(upd); setAssignedToId(res.data.ticket.assignedTo?.id ?? null); onUpdate(upd);
+      setTicket(upd); onUpdate(upd);
     }
   };
 
-  // Load the full thread (with raw assignee id) when the panel opens.
-  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [ticket.id]);
+  // Load the full thread when the panel opens; Gifsy also loads the assign/escalate options.
+  useEffect(() => {
+    void refresh();
+    if (isGifsy) {
+      api.get<{ assignees: Assignee[] }>(`/api/tickets/${ticket.id}/assignees`).then((res) => {
+        if (res.success) { setAssignees(res.data.assignees ?? []); setAssigneesErr(null); }
+        else setAssigneesErr(res.error);
+      });
+    }
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [ticket.id, isGifsy]);
 
   const handleSend = async () => {
     if (!reply.trim()) return;
-    setSending(true);
+    setSending(true); setActionError(null);
     const res = await api.post<{ message: any }>(`/api/tickets/${ticket.id}/messages`, {
       message: reply.trim(), isInternal: isInt,
     });
-    if (res.success) { setReply(''); await refresh(); }
+    if (res.success) { setReply(''); await refresh(); } else setActionError(res.error);
     setSending(false);
   };
 
-  const handleEscalate = async () => {
-    if (!assignedToId) return;
-    setEscalating(true);
-    const res = await api.post(`/api/tickets/${ticket.id}/escalate`, {
-      escalateTo: assignedToId,
-      reason: 'Escalated from admin console',
-    });
-    if (res.success) await refresh();
-    setEscalating(false);
+  const handleAssign = async (assigneeId: string) => {
+    setAssignBusy(true); setActionError(null);
+    const res = await api.post(`/api/tickets/${ticket.id}/assign`, { assigneeId: assigneeId || null });
+    if (res.success) { await refresh(); onChanged(); } else setActionError(res.error);
+    setAssignBusy(false);
   };
 
   const handleSetStatus = async (status: 'RESOLVED' | 'CLOSED' | 'IN_PROGRESS') => {
-    setStatusBusy(true);
+    setStatusBusy(true); setActionError(null);
     const res = await api.post(`/api/tickets/${ticket.id}/status`, { status });
-    if (res.success) await refresh();
+    if (res.success) { await refresh(); onChanged(); } else setActionError(res.error);
     setStatusBusy(false);
   };
 
+  const handleSendRemarks = async () => {
+    if (!remarks.trim()) return;
+    setRemarksBusy(true); setActionError(null);
+    const res = await api.post(`/api/tickets/${ticket.id}/client-remarks`, { message: remarks.trim() });
+    if (res.success) { setRemarks(''); setNotice('Remarks sent to Gifsy support.'); await refresh(); onChanged(); }
+    else setActionError(res.error);
+    setRemarksBusy(false);
+  };
+
   const isDone = ticket.status === 'resolved' || ticket.status === 'closed';
+  const isClosed = ticket.dbStatus === 'CLOSED';
+  const st = statusDisplay(ticket, viewerId, viewerRole);
+  const waiting = ticket.dbStatus === 'WAITING_ON_CLIENT' ? ticket.clientRemarks : null;
+  const waitingOnMe = !!waiting && isClientAdmin && waiting.requestedFromId === viewerId;
 
-  const { variant } = STATUS_STYLE[ticket.status];
+  const gifsyOpts = assignees.filter((a) => a.kind === 'GIFSY');
+  const clientOpts = assignees.filter((a) => a.kind === 'CLIENT_ADMIN');
+  // Keep the current assignee selectable even if they are no longer in the eligible set.
+  const currentMissing = !!ticket.assignedToId && !assignees.some((a) => a.id === ticket.assignedToId);
 
-  // The persistent GIFSY operator banner (sticky, z-60) overlays this fixed drawer
-  // (z-50) and would otherwise hide the panel's top header (close button / status).
-  // When an operator is in an assumed-tenant context, push the panel below the banner.
-  const [bannerOffset, setBannerOffset] = useState(0);
-  useEffect(() => { setBannerOffset(getAssumedBrand() ? 40 : 0); }, []);
+  const outlet = ticket.outlet;
+  // Focus restore: Radix returns focus to a Dialog.Trigger, and this dialog is opened from a
+  // table row (no Trigger) — so remember what had focus when it opened and return there.
+  const [returnFocusTo] = useState<HTMLElement | null>(() =>
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement ? document.activeElement : null,
+  );
 
+  // Centred dialog (Radix): focus is trapped inside while open, Escape / the overlay / the close
+  // button close it, and focus returns to the element that opened it (the ticket row).
   return (
-    <div className="fixed inset-0 z-50 flex">
-      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      {/* Slide-in panel from right */}
-      <div
-        className="relative ml-auto bg-white w-full max-w-md h-full flex flex-col shadow-2xl border-l border-gray-100"
-        style={{ paddingTop: bannerOffset }}
-      >
+    <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-[70] bg-black/40" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            if (returnFocusTo && returnFocusTo.isConnected) { returnFocusTo.focus(); return; }
+            // The list may have re-rendered after an action — fall back to this ticket's row.
+            document.querySelector<HTMLElement>(`[data-ticket-row="${CSS.escape(ticket.id)}"]`)?.focus();
+          }}
+          className="fixed left-1/2 top-1/2 z-[70] -translate-x-1/2 -translate-y-1/2 w-[calc(100vw-2rem)] max-w-3xl h-[85vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden focus:outline-none"
+        >
         {/* Header */}
         <div className="flex items-start justify-between p-5 border-b border-gray-100 shrink-0">
           <div className="flex-1 min-w-0 pr-3">
             <div className="flex items-center gap-2 flex-wrap mb-1">
               <span className="text-xs font-mono text-gray-400">{ticket.ticketNumber}</span>
-              <Badge variant={variant}>{STATUS_LABELS[ticket.status]}</Badge>
+              <Badge variant={st.variant}>{st.label}</Badge>
               <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${PRIORITY_STYLE[ticket.priority]}`}>
                 {PRIORITY_LABELS[ticket.priority]}
               </span>
             </div>
-            <p className="text-sm font-semibold text-gray-900 leading-snug">{ticket.title}</p>
-            <p className="text-xs text-gray-500 mt-0.5 flex items-center gap-1">
-              <Building2 className="h-3 w-3" /> {ticket.outletName}
-              {ticket.salesPersonName && <span className="text-gray-300"> · {ticket.salesPersonName}</span>}
-            </p>
+            <Dialog.Title className="text-base font-semibold text-gray-900 leading-snug">{ticket.title}</Dialog.Title>
+            <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs">
+              <dt className="text-gray-400 flex items-center gap-1"><Building2 className="h-3 w-3" /> Outlet</dt>
+              <dd className="text-gray-700" data-testid="ticket-outlet">
+                {outlet ? (
+                  <>
+                    {outlet.name} · <span className="font-mono font-semibold text-gray-900">ID {outlet.outletCode}</span>
+                    {outlet.source === 'OWNER_PRIMARY' && (outlet.ownerOutletCount ?? 1) > 1 && (
+                      <span className="text-gray-400"> (owner&apos;s primary of {outlet.ownerOutletCount} outlets)</span>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-gray-400" title="No outlet is recorded on this ticket">—</span>
+                )}
+              </dd>
+              <dt className="text-gray-400">Raised by</dt>
+              <dd className="text-gray-700" data-testid="ticket-raised-by">{raisedByText(ticket)}</dd>
+            </dl>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-full hover:bg-gray-100 text-gray-400 shrink-0">
+          <Dialog.Close aria-label="Close ticket" className="p-1.5 rounded-full hover:bg-gray-100 text-gray-400 shrink-0">
             <X className="h-4 w-4" />
-          </button>
+          </Dialog.Close>
         </div>
 
-        {/* Controls */}
-        <div className="px-5 py-3 border-b border-gray-100 shrink-0 space-y-2.5">
-          {/* Assigned-to (read-only — server-derived) */}
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-gray-400 w-16 shrink-0">Assigned</span>
-            <span className="text-xs font-medium text-gray-700">{ticket.assignedTo ?? 'Unassigned'}</span>
-          </div>
+        <div className="flex-1 overflow-y-auto">
+          {/* Awaiting client remarks */}
+          {waiting && (
+            <section aria-label="Awaiting client remarks" className="mx-5 mt-4 rounded-xl border border-violet-200 bg-violet-50 p-3 space-y-2">
+              <p className="text-sm font-semibold text-violet-800 flex items-center gap-1.5">
+                <Hourglass className="h-4 w-4" />
+                {waitingOnMe ? 'Awaiting your remarks' : `Awaiting remarks from ${waiting.requestedFromName}`}
+              </p>
+              <p className="text-xs text-violet-700">
+                {waiting.requestedByName} (Gifsy support) asked{waiting.requestedAt ? ` on ${formatDateTime(waiting.requestedAt)}` : ''}:
+              </p>
+              <p className="text-sm text-violet-900 whitespace-pre-wrap bg-white/70 rounded-lg px-3 py-2 border border-violet-100">{waiting.note}</p>
+              {isClientAdmin && (
+                <div className="space-y-1.5">
+                  <textarea
+                    aria-label="Your remarks"
+                    rows={3}
+                    value={remarks}
+                    onChange={(e) => setRemarks(e.target.value)}
+                    placeholder="Write your remarks for Gifsy support…"
+                    className="w-full text-sm border border-violet-200 rounded-lg px-3 py-2 resize-none bg-white focus:outline-none focus:ring-2 focus:ring-violet-200"
+                  />
+                  <p className="text-[11px] text-violet-700">Visible to Gifsy support and your admin team only — never to the outlet or sales team.</p>
+                  <div className="flex justify-end">
+                    <Button size="sm" loading={remarksBusy} disabled={!remarks.trim() || remarksBusy} onClick={handleSendRemarks}>
+                      Send remarks
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+          {notice && (
+            <p role="status" className="mx-5 mt-3 text-xs rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800">{notice}</p>
+          )}
 
-          {/* Status actions — Resolve / Close, or Reopen once done */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-gray-400 w-16 shrink-0">Status</span>
-            {isDone ? (
-              <Button
-                variant="secondary"
-                size="sm"
-                loading={statusBusy}
-                onClick={() => handleSetStatus('IN_PROGRESS')}
-              >
-                <Clock className="h-3.5 w-3.5" /> Reopen
-              </Button>
-            ) : (
-              <>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  loading={statusBusy}
-                  onClick={() => handleSetStatus('RESOLVED')}
-                >
-                  <CheckCircle className="h-3.5 w-3.5" /> Mark Resolved
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  loading={statusBusy}
-                  onClick={() => handleSetStatus('CLOSED')}
-                >
-                  <X className="h-3.5 w-3.5" /> Close
-                </Button>
-              </>
-            )}
-          </div>
-
-          {/* Escalate — GIFSY-only, requires an assignee */}
-          {canEscalate && (
+          {/* Controls */}
+          <div className="px-5 py-3 border-b border-gray-100 space-y-2.5">
+            {/* Assigned-to: a picker for Gifsy operators, read-only for everyone else */}
             <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-400 w-16 shrink-0">Actions</span>
-              <Button
-                variant="secondary"
-                size="sm"
-                loading={escalating}
-                disabled={!assignedToId || ticket.status === 'closed'}
-                onClick={handleEscalate}
-              >
-                <AlertCircle className="h-3.5 w-3.5" /> Escalate
-              </Button>
-              {!assignedToId && (
-                <span className="text-[10px] text-gray-400">Assign first to escalate</span>
+              <span className="text-xs text-gray-400 w-16 shrink-0">Assigned</span>
+              {isGifsy ? (
+                <div className="flex-1 flex items-center gap-2">
+                  <UserPlus className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                  <select
+                    aria-label="Assign to"
+                    value={ticket.assignedToId ?? ''}
+                    disabled={assignBusy || isClosed}
+                    onChange={(e) => handleAssign(e.target.value)}
+                    className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white disabled:opacity-50"
+                  >
+                    <option value="">Unassigned</option>
+                    {currentMissing && <option value={ticket.assignedToId!}>{ticket.assignedTo ?? 'Current assignee'}</option>}
+                    {gifsyOpts.length > 0 && (
+                      <optgroup label="Gifsy support">
+                        {gifsyOpts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      </optgroup>
+                    )}
+                    {clientOpts.length > 0 && (
+                      <optgroup label="Client admins">
+                        {clientOpts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      </optgroup>
+                    )}
+                  </select>
+                  {assignBusy && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
+                </div>
+              ) : (
+                <span className="text-xs font-medium text-gray-700">{ticket.assignedTo ?? 'Unassigned'}</span>
               )}
             </div>
-          )}
-        </div>
+            {isGifsy && assigneesErr && <p className="text-[11px] text-red-600">Could not load assignees: {assigneesErr}</p>}
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-          <p className="text-[10px] text-gray-400 text-center">{CATEGORY_LABELS[ticket.category]} · Opened {formatDateTime(ticket.createdAt)}</p>
-          {ticket.messages.map((msg) => {
-            const isAdmin = msg.from === 'admin';
-            const isInternal = msg.isInternal;
-            return (
-              <div key={msg.id} className={`flex gap-2 ${isAdmin ? 'flex-row-reverse' : 'flex-row'}`}>
-                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${isAdmin ? 'bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]' : msg.from === 'sales' ? 'bg-orange-100 text-orange-600' : 'bg-gray-100 text-gray-600'}`}>
-                  {isAdmin ? 'A' : msg.fromName.split(' ').map((w) => w[0]).join('').slice(0, 2)}
+            {/* Status actions — Resolve / Close, or Reopen once done */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-gray-400 w-16 shrink-0">Status</span>
+              {isDone ? (
+                <Button variant="secondary" size="sm" loading={statusBusy} onClick={() => handleSetStatus('IN_PROGRESS')}>
+                  <Clock className="h-3.5 w-3.5" /> Reopen
+                </Button>
+              ) : (
+                <>
+                  <Button variant="secondary" size="sm" loading={statusBusy} onClick={() => handleSetStatus('RESOLVED')}>
+                    <CheckCircle className="h-3.5 w-3.5" /> Mark Resolved
+                  </Button>
+                  <Button variant="secondary" size="sm" loading={statusBusy} onClick={() => handleSetStatus('CLOSED')}>
+                    <X className="h-3.5 w-3.5" /> Close
+                  </Button>
+                </>
+              )}
+            </div>
+
+            {/* Escalate — Gifsy operators; no longer needs a prior assignment */}
+            {isGifsy && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-gray-400 w-16 shrink-0">Actions</span>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={isClosed || showEscalate}
+                    onClick={() => { setShowEscalate(true); setNotice(null); }}
+                  >
+                    <AlertCircle className="h-3.5 w-3.5" /> Escalate
+                  </Button>
                 </div>
-                <div className={`max-w-[75%] flex flex-col gap-0.5 ${isAdmin ? 'items-end' : 'items-start'}`}>
-                  <div className="flex items-center gap-1.5">
-                    <p className="text-[10px] text-gray-400">{msg.fromName}</p>
-                    {isInternal && <span className="text-[9px] bg-amber-100 text-amber-600 px-1 rounded font-semibold">Internal</span>}
-                  </div>
-                  <div className={`px-3 py-2 rounded-2xl text-sm leading-relaxed ${
-                    isInternal ? 'bg-amber-50 text-amber-900 border border-amber-100 rounded-tr-sm' :
-                    isAdmin ? 'bg-[var(--brand-primary)] text-white rounded-tr-sm' :
-                    msg.from === 'sales' ? 'bg-orange-50 text-gray-800 rounded-tl-sm' :
-                    'bg-gray-100 text-gray-800 rounded-tl-sm'
-                  }`}>
-                    {msg.text}
-                  </div>
-                  <p className="text-[9px] text-gray-300">{formatDateTime(msg.createdAt)}</p>
-                </div>
+                {showEscalate && (
+                  <EscalatePanel
+                    ticketId={ticket.id}
+                    assignees={assignees}
+                    onCancel={() => setShowEscalate(false)}
+                    onDone={async (n) => { setShowEscalate(false); setNotice(n); await refresh(); onChanged(); }}
+                  />
+                )}
               </div>
-            );
-          })}
+            )}
+            {actionError && <p role="alert" className="text-xs text-red-600">{actionError}</p>}
+          </div>
+
+          {/* Messages */}
+          <div className="px-5 py-4 space-y-4">
+            <p className="text-[10px] text-gray-400 text-center">{CATEGORY_LABELS[ticket.category]} · Opened {formatDateTime(ticket.createdAt)}</p>
+            {ticket.messages.map((msg) => {
+              const isAdmin = msg.from === 'admin';
+              const isInternal = msg.isInternal;
+              const isClientRemark = isInternal && msg.senderRole === 'CLIENT_ADMIN';
+              return (
+                <div key={msg.id} className={`flex gap-2 ${isAdmin ? 'flex-row-reverse' : 'flex-row'}`}>
+                  <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${isAdmin ? 'bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]' : msg.from === 'sales' ? 'bg-orange-100 text-orange-600' : 'bg-gray-100 text-gray-600'}`}>
+                    {isAdmin ? 'A' : msg.fromName.split(' ').map((w) => w[0]).join('').slice(0, 2)}
+                  </div>
+                  <div className={`max-w-[75%] flex flex-col gap-0.5 ${isAdmin ? 'items-end' : 'items-start'}`}>
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-[10px] text-gray-400">{msg.fromName}</p>
+                      {isClientRemark
+                        ? <span className="text-[9px] bg-violet-100 text-violet-700 px-1 rounded font-semibold">Client remarks</span>
+                        : isInternal && <span className="text-[9px] bg-amber-100 text-amber-600 px-1 rounded font-semibold">Internal</span>}
+                    </div>
+                    <div className={`px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap ${
+                      isClientRemark ? 'bg-violet-50 text-violet-900 border border-violet-100 rounded-tr-sm' :
+                      isInternal ? 'bg-amber-50 text-amber-900 border border-amber-100 rounded-tr-sm' :
+                      isAdmin ? 'bg-[var(--brand-primary)] text-white rounded-tr-sm' :
+                      msg.from === 'sales' ? 'bg-orange-50 text-gray-800 rounded-tl-sm' :
+                      'bg-gray-100 text-gray-800 rounded-tl-sm'
+                    }`}>
+                      {msg.text}
+                    </div>
+                    <p className="text-[9px] text-gray-300">{formatDateTime(msg.createdAt)}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
-        {/* Reply */}
+        {/* Reply — while a ticket waits on the client admin's remarks, their only composer is the
+            remarks box (internal); the outlet reply is hidden so remarks can't reach the outlet. */}
+        {isClientAdmin && waiting ? (
+          <p className="px-5 py-3 border-t border-gray-100 shrink-0 text-xs text-gray-500">
+            Use &quot;Send remarks&quot; above — replies to the outlet are paused while Gifsy waits for your remarks.
+          </p>
+        ) : (
         <div className="px-5 py-4 border-t border-gray-100 shrink-0 space-y-2">
           <div className="flex items-center gap-2">
             <button onClick={() => setIsInt(false)}
@@ -333,6 +627,7 @@ function TicketDetailPanel({ ticket: initial, canEscalate, onClose, onUpdate }: 
           </div>
           <div className="flex gap-2">
             <textarea rows={2} value={reply} onChange={(e) => setReply(e.target.value)}
+              aria-label="Reply"
               placeholder={isInt ? 'Add internal note (not visible to outlet)…' : 'Type reply to outlet…'}
               className={`flex-1 text-sm border rounded-xl px-3 py-2 resize-none focus:outline-none focus:ring-2 ${isInt ? 'border-amber-200 bg-amber-50 focus:ring-amber-200 focus:border-amber-400' : 'border-gray-200 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]'}`} />
             <button onClick={handleSend} disabled={!reply.trim() || sending}
@@ -341,9 +636,20 @@ function TicketDetailPanel({ ticket: initial, canEscalate, onClose, onUpdate }: 
             </button>
           </div>
         </div>
-      </div>
-    </div>
+        )}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
+}
+
+/* ─── Deep link (?ticket=<id>, e.g. from the bell or the remarks email) ──────── */
+
+function TicketDeepLink({ onOpen }: { onOpen: (id: string) => void }) {
+  const params = useSearchParams();
+  const id = params?.get('ticket') ?? null;
+  useEffect(() => { if (id) onOpen(id); }, [id, onOpen]);
+  return null;
 }
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
@@ -358,10 +664,18 @@ type FilterState = {
 
 export default function AdminTicketsPage() {
   const session = useAdminSession();
-  const [tickets,  setTickets]  = useState<Ticket[]>([]);
+  const isGifsy = isGifsyRole(session.role);
+  const isClientAdmin = session.role === 'CLIENT_ADMIN';
+  const [tickets,  setTickets]  = useState<AdminTicket[]>([]);
   const [loading,  setLoading]  = useState(true);
+  // After the first load, refreshes keep the table mounted (no spinner flash, focus restore works).
+  const [loadedOnce, setLoadedOnce] = useState(false);
   const [error,    setError]    = useState<string | null>(null);
-  const [selected, setSelected] = useState<Ticket | null>(null);
+  const [selected, setSelected] = useState<AdminTicket | null>(null);
+  const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
+  const [awaiting, setAwaiting] = useState<{ total: number; mine: number }>({ total: 0, mine: 0 });
+  const [awaitingOnly, setAwaitingOnly] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [filters,  setFilters]  = useState<FilterState>({
     search: '', status: 'all', priority: 'all', category: 'all', source: 'all',
   });
@@ -369,17 +683,21 @@ export default function AdminTicketsPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    api.get<{ tickets: any[] }>('/api/tickets').then((res) => {
+    // "Awaiting client" is filtered SERVER-side (the default list is one page), so the view
+    // shows every waiting ticket, not just the ones that happen to be on the first page.
+    const url = awaitingOnly ? '/api/tickets?status=WAITING_ON_CLIENT&limit=100' : '/api/tickets';
+    api.get<{ tickets: any[]; awaitingClient?: { total: number; mine: number } }>(url).then((res) => {
       if (cancelled) return;
       if (res.success) {
         setTickets((res.data.tickets ?? []).map(mapDbTicket));
+        if (res.data.awaitingClient) setAwaiting(res.data.awaitingClient);
         setError(null);
       } else {
         setError(res.error);
       }
-    }).finally(() => { if (!cancelled) setLoading(false); });
+    }).finally(() => { if (!cancelled) { setLoading(false); setLoadedOnce(true); } });
     return () => { cancelled = true; };
-  }, []);
+  }, [awaitingOnly, reloadKey]);
 
   const filtered = useMemo(() => {
     return tickets.filter((t) => {
@@ -389,7 +707,8 @@ export default function AdminTicketsPage() {
       if (filters.source   !== 'all' && t.source   !== filters.source)   return false;
       if (filters.search) {
         const q = filters.search.toLowerCase();
-        return t.title.toLowerCase().includes(q) || t.outletName.toLowerCase().includes(q) || t.ticketNumber.toLowerCase().includes(q);
+        return t.title.toLowerCase().includes(q) || t.outletName.toLowerCase().includes(q) || t.ticketNumber.toLowerCase().includes(q)
+          || (t.outlet?.outletCode ?? '').toLowerCase().includes(q) || raisedByText(t).toLowerCase().includes(q);
       }
       return true;
     });
@@ -403,15 +722,28 @@ export default function AdminTicketsPage() {
     highPriority:tickets.filter((t) => t.priority === 'high' && t.status !== 'closed' && t.status !== 'resolved').length,
   }), [tickets]);
 
-  const handleUpdate = (upd: Ticket) => {
+  const handleUpdate = (upd: AdminTicket) => {
     setTickets((prev) => prev.map((t) => (t.id === upd.id ? upd : t)));
-    if (selected?.id === upd.id) setSelected(upd);
+    setSelected((cur) => (cur?.id === upd.id ? upd : cur));
   };
 
-  const handleSelectTicket = async (ticket: Ticket) => {
-    setSelected(ticket);
-    const res = await api.get<{ ticket: any }>(`/api/tickets/${ticket.id}`);
-    if (res.success) setSelected(mapDbTicket(res.data.ticket));
+  const openById = useCallback(async (id: string) => {
+    const res = await api.get<{ ticket: any }>(`/api/tickets/${id}`);
+    if (res.success) { setDeepLinkError(null); setSelected(mapDbTicket(res.data.ticket)); }
+    else setDeepLinkError(
+      `Could not open the linked ticket (${res.error}). It may belong to another programme — Gifsy support must switch to the ticket's programme first.`,
+    );
+  }, []);
+
+  // The dialog loads the full thread itself on open (one GET per open).
+  const handleSelectTicket = (ticket: AdminTicket) => { setSelected(ticket); };
+
+  const handleClose = () => {
+    setSelected(null);
+    // Drop a consumed ?ticket= deep link so the same bell item can open it again later.
+    if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('ticket')) {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
   };
 
   const setFilter = <K extends keyof FilterState>(key: K, val: FilterState[K]) =>
@@ -419,8 +751,20 @@ export default function AdminTicketsPage() {
 
   const activeFilters = Object.entries(filters).filter(([k, v]) => k !== 'search' && v !== 'all').length;
 
+  const statCards = [
+    { label: 'Total',        value: stats.total,        color: 'text-gray-700',    bg: 'bg-gray-50',    border: 'border-gray-200' },
+    { label: 'Open',         value: stats.open,         color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-200' },
+    { label: 'In Progress',  value: stats.inProgress,   color: 'text-blue-600',    bg: 'bg-blue-50',    border: 'border-blue-200' },
+    { label: 'Resolved',     value: stats.resolved,     color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' },
+    { label: 'High Priority',value: stats.highPriority, color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-200' },
+  ];
+
   return (
     <div className="space-y-6">
+      <Suspense fallback={null}>
+        <TicketDeepLink onOpen={openById} />
+      </Suspense>
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -429,7 +773,22 @@ export default function AdminTicketsPage() {
         </div>
       </div>
 
-      {loading ? (
+      {deepLinkError && (
+        <p role="alert" className="text-xs rounded-lg px-3 py-2 bg-red-50 border border-red-200 text-red-700">{deepLinkError}</p>
+      )}
+
+      {/* Client admin: tickets waiting on THEIR remarks (shown only when there are some) */}
+      {isClientAdmin && awaiting.mine > 0 && (
+        <div role="status" className="flex items-center justify-between gap-3 rounded-xl border border-violet-200 bg-violet-50 px-4 py-3">
+          <p className="text-sm text-violet-800 flex items-center gap-2">
+            <Hourglass className="h-4 w-4" />
+            {awaiting.mine} ticket{awaiting.mine !== 1 ? 's' : ''} awaiting your remarks
+          </p>
+          <Button size="sm" variant="secondary" onClick={() => setAwaitingOnly(true)}>Show</Button>
+        </div>
+      )}
+
+      {loading && !loadedOnce ? (
         <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>
       ) : error ? (
         <div className="flex flex-col items-center gap-3 py-16 text-center">
@@ -440,19 +799,24 @@ export default function AdminTicketsPage() {
       ) : (
         <>
           {/* Stats */}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            {[
-              { label: 'Total',        value: stats.total,        color: 'text-gray-700',    bg: 'bg-gray-50',    border: 'border-gray-200' },
-              { label: 'Open',         value: stats.open,         color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-200' },
-              { label: 'In Progress',  value: stats.inProgress,   color: 'text-blue-600',    bg: 'bg-blue-50',    border: 'border-blue-200' },
-              { label: 'Resolved',     value: stats.resolved,     color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' },
-              { label: 'High Priority',value: stats.highPriority, color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-200' },
-            ].map((s) => (
+          <div className={`grid grid-cols-2 ${isGifsy ? 'md:grid-cols-6' : 'md:grid-cols-5'} gap-3`}>
+            {statCards.map((s) => (
               <div key={s.label} className={`rounded-xl border ${s.border} ${s.bg} p-4`}>
                 <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
                 <p className="text-xs text-gray-400 mt-0.5">{s.label}</p>
               </div>
             ))}
+            {isGifsy && (
+              <button
+                type="button"
+                aria-label={`Awaiting client: ${awaiting.total}`}
+                onClick={() => setAwaitingOnly((v) => !v)}
+                className={`text-left rounded-xl border p-4 transition-colors ${awaitingOnly ? 'border-violet-400 bg-violet-100' : 'border-violet-200 bg-violet-50 hover:bg-violet-100'}`}
+              >
+                <p className="text-2xl font-bold text-violet-700">{awaiting.total}</p>
+                <p className="text-xs text-gray-400 mt-0.5">Awaiting client</p>
+              </button>
+            )}
           </div>
 
           {/* Filters */}
@@ -461,13 +825,24 @@ export default function AdminTicketsPage() {
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
               <input type="text" value={filters.search} onChange={(e) => setFilter('search', e.target.value)}
-                placeholder="Search by ticket number, title, or outlet…"
+                placeholder="Search by ticket number, title, outlet or outlet code…"
                 className="w-full pl-9 pr-3 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]" />
             </div>
 
             {/* Filter chips row */}
             <div className="flex gap-2 flex-wrap items-center">
               <SlidersHorizontal className="h-4 w-4 text-gray-400 shrink-0" />
+
+              {(isGifsy || awaitingOnly) && (
+                <button
+                  type="button"
+                  aria-pressed={awaitingOnly}
+                  onClick={() => setAwaitingOnly((v) => !v)}
+                  className={`text-xs border rounded-lg px-2 py-1.5 transition-colors ${awaitingOnly ? 'bg-violet-600 text-white border-violet-600' : 'border-violet-200 text-violet-700 bg-violet-50 hover:bg-violet-100'}`}
+                >
+                  Awaiting client ({awaiting.total})
+                </button>
+              )}
 
               {/* Status */}
               <select value={filters.status} onChange={(e) => setFilter('status', e.target.value as TicketStatus | 'all')}
@@ -505,7 +880,12 @@ export default function AdminTicketsPage() {
                 </button>
               )}
 
-              <span className="ml-auto text-xs text-gray-400">{filtered.length} ticket{filtered.length !== 1 ? 's' : ''}</span>
+              <span className="ml-auto text-xs text-gray-400">
+                {filtered.length} ticket{filtered.length !== 1 ? 's' : ''}
+                {awaitingOnly && awaiting.total > tickets.length && (
+                  <span className="text-amber-700"> · showing the newest {tickets.length} of {awaiting.total} awaiting</span>
+                )}
+              </span>
             </div>
           </div>
 
@@ -514,7 +894,9 @@ export default function AdminTicketsPage() {
             {filtered.length === 0 ? (
               <div className="flex flex-col items-center gap-3 py-16 text-center">
                 <MessageSquare className="h-10 w-10 text-gray-200" />
-                <p className="text-sm text-gray-400">No tickets match the current filters.</p>
+                <p className="text-sm text-gray-400">
+                  {awaitingOnly ? 'No tickets are waiting on the client.' : 'No tickets match the current filters.'}
+                </p>
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -522,7 +904,7 @@ export default function AdminTicketsPage() {
                   <thead className="border-b border-gray-100">
                     <tr className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide">
                       <th className="py-3 pl-4 pr-2">Ticket</th>
-                      <th className="py-3 px-2 hidden md:table-cell">Outlet</th>
+                      <th className="py-3 px-2 hidden md:table-cell">Outlet / raised by</th>
                       <th className="py-3 px-2 hidden lg:table-cell">Category</th>
                       <th className="py-3 px-2">Priority</th>
                       <th className="py-3 px-2">Status</th>
@@ -532,7 +914,7 @@ export default function AdminTicketsPage() {
                   </thead>
                   <tbody>
                     {filtered.map((t) => (
-                      <TicketRow key={t.id} ticket={t} onClick={() => handleSelectTicket(t)} />
+                      <TicketRow key={t.id} ticket={t} viewerId={session.userId} viewerRole={session.role} onClick={() => handleSelectTicket(t)} />
                     ))}
                   </tbody>
                 </table>
@@ -546,9 +928,11 @@ export default function AdminTicketsPage() {
       {selected && (
         <TicketDetailPanel
           ticket={selected}
-          canEscalate={session.role === 'GIFSY_ADMIN'}
-          onClose={() => setSelected(null)}
+          viewerRole={session.role}
+          viewerId={session.userId}
+          onClose={handleClose}
           onUpdate={handleUpdate}
+          onChanged={() => setReloadKey((k) => k + 1)}
         />
       )}
     </div>

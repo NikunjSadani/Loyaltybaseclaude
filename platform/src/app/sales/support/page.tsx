@@ -35,6 +35,8 @@ const CAT_FROM_DB: Record<string, TicketCategory> = {
 const STATUS_FROM_DB: Record<string, TicketStatus> = {
   OPEN: 'open', IN_PROGRESS: 'in_progress', WAITING: 'waiting',
   RESOLVED: 'resolved', CLOSED: 'closed',
+  // Defense in depth: the API masks WAITING_ON_CLIENT as IN_PROGRESS for sales anyway.
+  WAITING_ON_CLIENT: 'in_progress',
 };
 const PRIO_FROM_DB: Record<string, TicketPriority> = {
   HIGH: 'high', MEDIUM: 'medium', LOW: 'low',
@@ -259,6 +261,8 @@ export default function SalesSupportPage() {
           category:    CAT_TO_DB[form.category as TicketCategory],
           subject:     `${outletPrefix}${form.title.trim()}`,
           description: `${outletDesc}${form.description.trim()}`,
+          // Structured outlet link (support console shows its outlet code); omitted for "own issue".
+          ...(!isSelf && form.outlet ? { outletId: form.outlet.id } : {}),
         }),
       });
       const body = await res.json();
