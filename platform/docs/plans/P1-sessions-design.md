@@ -126,3 +126,34 @@ The revoke-on-phone-change rule attaches wherever a phone is actually mutated:
 - **Outlets/partners** — phone changed via the **re-KYC route** → wire the revoke into re-KYC in **P3**
   (3.x). TODO marker for P3.
 The mechanism (`revokeAllSessionsForUser`) is ready; P2/P3 just call it when they implement phone edits.
+
+### 2026-11-19 — concurrent-refresh race fix (branch `fix/auth-refresh-race`, NOT yet on staging/prod)
+> This file is the closest in-repo session design doc; the rolling-session epic itself (60m access
+> token, 30d sliding window, proxy page-nav silent refresh, lenient reuse detection) is recorded in
+> the auth-rolling-session memory. This note covers only the race fix.
+
+- **Symptom (prod, 2026-11-19 10:38:23 UTC):** one cold page load after the 60m access token expired
+  fired ~10 parallel `POST /v1/auth/refresh` (proxy, UA `node`) with the SAME refresh token: 7×200,
+  3×401 inside ~20 ms. Any proxy hit that got the 401 redirected to `/auth/login?expired=1`, so a user
+  with a valid session could be logged out.
+- **Root cause:** `refreshToken` claimed the predecessor (atomic `updateMany … revokedAt:null`) and
+  INSERTED the successor as two separate autocommitted statements, with awaited gate reads in between
+  (staff grant / partner-deactivated / vendor). A concurrent loser whose claim lost during that window
+  looked for the live successor BEFORE it existed → "no live successor, in grace" → 401. (Not a grace
+  window or chain problem: the 5s grace only classified the loser, it never waited for the winner.)
+  Reproduced in `api/src/auth/auth.service.refresh-race.spec.ts` (row-lock fake DB): 9/10 → 401 before.
+- **Backend fix:** gates now run first (read-only, outside any lock; a gate failure still consumes the
+  predecessor and re-throws). Then claim + successor INSERT run in ONE interactive transaction
+  (`generateTokens(…, { db: tx })`). The claim's row lock is held until the successor commits, so a
+  concurrent refresh of the same token blocks, sees `revokedAt` set (count 0) and then finds the
+  committed successor → every caller gets the SAME successor pair. A tx failure rolls the claim back
+  (predecessor stays live, retryable). Unchanged: unknown/expired/logged-out → 401; logout-all stamp
+  checks (before + post-mint re-read); reuse of an old rotated token past grace with no live successor
+  → lineage kill + `SECURITY_EVENT`; assumed-tenant scope + staff grant check.
+- **Proxy fix (`platform/src/proxy.ts`):** a failed refresh on a NON-document request (RSC payload,
+  router/browser prefetch, server action, sub-resource by `Sec-Fetch-Dest`) returns `401 no-store`
+  instead of redirecting (an RSC nav falls back to a document nav; prefetches are dropped). A document
+  navigation retries the refresh ONCE after 200 ms before redirecting to `/auth/login?expired=1`.
+  Concurrent proxy hits for the same refresh cookie share ONE in-flight backend refresh per instance
+  (map keyed by SHA-256 of the token, entry dropped on settle; token never logged). Cookies unchanged
+  (host-only, lax, same max-ages); `/api/*` still 401s without a server refresh (SessionExpiryGuard).

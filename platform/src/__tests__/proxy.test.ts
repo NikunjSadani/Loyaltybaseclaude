@@ -470,7 +470,7 @@ describe('proxy — page-nav silent refresh (expired/absent access + valid refre
     expect(res.cookies.get('token')?.value).toBe('fresh.jwt.tok');
   });
 
-  it('expired access + DEAD refresh (backend refresh fails) → redirect to /auth/login?expired=1', async () => {
+  it('expired access + DEAD refresh (backend refresh fails) → ONE retry, then redirect to /auth/login?expired=1', async () => {
     mockJwt.mockRejectedValue(new Error('exp'));
     mockRefresh.mockResolvedValue(null); // refresh token truly dead
 
@@ -478,7 +478,7 @@ describe('proxy — page-nav silent refresh (expired/absent access + valid refre
       makeReq('/admin', { cookies: { token: 'expired.jwt.tok', refresh_token: 'r-dead' } }),
     );
 
-    expect(mockRefresh).toHaveBeenCalledTimes(1);
+    expect(mockRefresh).toHaveBeenCalledTimes(2); // initial + exactly one retry
     expect(res.status).toBe(307);
     const loc = new URL(res.headers.get('location') as string);
     expect(loc.pathname).toBe('/auth/login');
@@ -506,6 +506,131 @@ describe('proxy — page-nav silent refresh (expired/absent access + valid refre
     const loc = new URL(res.headers.get('location') as string);
     expect(loc.pathname).toBe('/auth/login');
     expect(loc.searchParams.get('expired')).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Concurrent-refresh race (prod 2026-11-19): a cold page load fans out into many parallel
+// proxy hits after the 60m access token expired. A sub-request whose refresh fails must NOT
+// bounce a valid session to login; a document retries once; concurrent hits share one refresh.
+describe('proxy — refresh failure handling by request kind + dedupe', () => {
+  const expiredWithRefresh = (path: string, headers: Record<string, string> = {}, refresh = 'r-1') =>
+    makeReq(path, { cookies: { token: 'expired', refresh_token: refresh }, headers });
+
+  beforeEach(() => {
+    mockJwt.mockRejectedValue(new Error('exp'));
+    mockRefresh.mockResolvedValue(null);
+  });
+
+  it.each([
+    ['RSC payload fetch', { rsc: '1' }],
+    ['router prefetch', { rsc: '1', 'next-router-prefetch': '1' }],
+    ['browser prefetch (Sec-Purpose)', { 'sec-purpose': 'prefetch', 'sec-fetch-dest': 'document' }],
+    ['server action POST', { 'next-action': 'abc123' }],
+    ['image sub-resource', { 'sec-fetch-dest': 'image' }],
+    ['script sub-resource', { 'sec-fetch-dest': 'script' }],
+    ['fetch()/XHR (dest=empty)', { 'sec-fetch-dest': 'empty' }],
+  ])('%s with a failed refresh → 401 no-store, NO login redirect, NO retry, cookies untouched', async (_l, headers) => {
+    const res = await run(expiredWithRefresh('/admin/users', headers));
+    expect(res.status).toBe(401);
+    expect(res.headers.get('location')).toBeNull();
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(mockRefresh).toHaveBeenCalledTimes(1);
+    expect(res.cookies.get('token')?.value).toBeUndefined();
+    expect(res.cookies.get('refresh_token')?.value).toBeUndefined();
+  });
+
+  it('an RSC fetch whose refresh SUCCEEDS still continues with rotated cookies', async () => {
+    mockJwt
+      .mockRejectedValueOnce(new Error('exp'))
+      .mockResolvedValueOnce({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
+    mockRefresh.mockResolvedValue({ accessToken: 'new.jwt', refreshToken: 'r-2' });
+    const res = await run(expiredWithRefresh('/admin/users', { rsc: '1' }));
+    expect(isNext(res)).toBe(true);
+    expect(res.cookies.get('refresh_token')?.value).toBe('r-2');
+  });
+
+  it('document (Sec-Fetch-Dest: document): failed refresh → waits, retries ONCE, then /auth/login?expired=1', async () => {
+    // Fake ONLY setTimeout (the retry pause); the token hash (crypto.subtle) stays real.
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      const p = run(expiredWithRefresh('/admin', { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate' }));
+      for (let i = 0; i < 50 && mockRefresh.mock.calls.length === 0; i++) {
+        await new Promise((r) => setImmediate(r));
+      }
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+      expect(mockRefresh).toHaveBeenCalledTimes(1); // retry is NOT immediate
+      await vi.advanceTimersByTimeAsync(200);
+      const res = await p;
+      expect(mockRefresh).toHaveBeenCalledTimes(2);
+      expect(res.status).toBe(307);
+      const loc = new URL(res.headers.get('location') as string);
+      expect(loc.pathname).toBe('/auth/login');
+      expect(loc.searchParams.get('expired')).toBe('1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('document: first refresh fails transiently, the retry succeeds → continues (no login bounce)', async () => {
+    mockJwt
+      .mockRejectedValueOnce(new Error('exp'))
+      .mockResolvedValueOnce({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
+    mockRefresh
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ accessToken: 'new.jwt', refreshToken: 'r-2' });
+    const res = await run(expiredWithRefresh('/admin', { 'sec-fetch-dest': 'document' }));
+    expect(mockRefresh).toHaveBeenCalledTimes(2);
+    expect(isNext(res)).toBe(true);
+    expect(res.cookies.get('token')?.value).toBe('new.jwt');
+    expect(res.cookies.get('refresh_token')?.value).toBe('r-2');
+  });
+
+  it('dedupe: 10 concurrent hits with the SAME refresh cookie share ONE backend refresh and all get the same pair', async () => {
+    let resolveRefresh!: (v: { accessToken: string; refreshToken: string }) => void;
+    mockRefresh.mockImplementation(
+      () => new Promise((resolve) => { resolveRefresh = resolve; }),
+    );
+    // Every jwtVerify: the expired cookie token throws; the refreshed one verifies.
+    mockJwt.mockImplementation((async (tok: string) => {
+      if (tok === 'expired') throw new Error('exp');
+      return { payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } };
+    }) as never);
+
+    const reqs = Array.from({ length: 10 }, (_, i) =>
+      run(expiredWithRefresh(`/admin/users?i=${i}`, i === 0 ? { 'sec-fetch-dest': 'document' } : { rsc: '1' })),
+    );
+    await vi.waitFor(() => expect(mockRefresh).toHaveBeenCalledTimes(1));
+    resolveRefresh({ accessToken: 'shared.jwt', refreshToken: 'r-shared' });
+    const results = await Promise.all(reqs);
+
+    expect(mockRefresh).toHaveBeenCalledTimes(1);
+    for (const res of results) {
+      expect(isNext(res)).toBe(true);
+      expect(res.cookies.get('refresh_token')?.value).toBe('r-shared');
+    }
+  });
+
+  it('dedupe is per refresh token: two different refresh cookies make two backend calls', async () => {
+    mockRefresh.mockResolvedValue({ accessToken: 'a', refreshToken: 'b' });
+    mockJwt.mockImplementation((async (tok: string) => {
+      if (tok === 'expired') throw new Error('exp');
+      return { payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } };
+    }) as never);
+    await Promise.all([
+      run(expiredWithRefresh('/admin', { rsc: '1' }, 'r-A')),
+      run(expiredWithRefresh('/admin', { rsc: '1' }, 'r-B')),
+    ]);
+    expect(mockRefresh).toHaveBeenCalledTimes(2);
+    expect(mockRefresh).toHaveBeenCalledWith('r-A');
+    expect(mockRefresh).toHaveBeenCalledWith('r-B');
+  });
+
+  it('dedupe does not outlive the burst: a later refresh with the same token makes a fresh call', async () => {
+    mockRefresh.mockResolvedValue(null);
+    await run(expiredWithRefresh('/admin', { rsc: '1' }));
+    await run(expiredWithRefresh('/admin', { rsc: '1' }));
+    expect(mockRefresh).toHaveBeenCalledTimes(2);
   });
 });
 

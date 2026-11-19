@@ -36,7 +36,12 @@ const mockPrisma = {
   programSetting: { findMany: jest.fn().mockResolvedValue([]) },
   // The OTP attempt claim (common/otp-attempt) is ONE `UPDATE … RETURNING "attempts"` via $queryRaw.
   $queryRaw: jest.fn(),
+  $transaction: jest.fn(),
 };
+// refreshToken runs its claim + successor mint in ONE interactive transaction; the unit
+// mock runs the callback against this same mock (the race semantics live in
+// auth.service.refresh-race.spec.ts, against a row-lock fake DB).
+mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) => fn(mockPrisma));
 
 const gifsyOp = { sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any;
 

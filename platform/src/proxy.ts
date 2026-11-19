@@ -230,37 +230,111 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
   // is still valid. Silently refresh SERVER-SIDE so the user isn't bounced to login ~hourly.
   const refreshToken = request.cookies.get('refresh_token')?.value
   if (refreshToken) {
-    // A single refresh (retried only on a 429, inside refreshTokensViaBackend). Parallel page requests may each land here; the backend's
-    // rotation grace returns the successor tokens idempotently, so concurrent refreshes are safe.
-    const refreshed = await refreshTokensViaBackend(refreshToken)
-    if (refreshed) {
-      let newPayload: JWTPayload | null = null
-      try {
-        newPayload = (await jwtVerify(refreshed.accessToken, secret)).payload
-      } catch {
-        newPayload = null
-      }
-      if (newPayload) {
-        const res = forwardAuthed(request, headers, refreshed.accessToken, newPayload)
-        // Persist the rotated pair on the outgoing response (access maxAge tracks the new
-        // token's exp; refresh at 30d). Setting Set-Cookie is valid on both the next() and the
-        // role-redirect responses forwardAuthed may return.
-        res.cookies.set('token', refreshed.accessToken, sessionCookieOptions(accessCookieMaxAge(refreshed.accessToken)))
-        if (refreshed.refreshToken) {
-          res.cookies.set('refresh_token', refreshed.refreshToken, sessionCookieOptions(REFRESH_MAX_AGE))
-        }
-        return res
-      }
+    // One cold page load fans out into many parallel proxy hits (the document, RSC payloads,
+    // prefetches, un-excluded assets) that ALL carry the same refresh cookie. They share ONE
+    // in-flight backend refresh per refresh token in this instance (dedupe), and the backend
+    // makes concurrent refreshes of the same token converge on one successor pair (claim +
+    // mint in a single row-locked transaction) — see auth.service.ts refreshToken.
+    const isDocument = isDocumentRequest(request)
+    let verified = await refreshAndVerify(refreshToken, secret)
+    if (!verified && isDocument) {
+      // A document navigation decides the user's fate, so one transient failure (a blip, a
+      // contended refresh) must not log them out: retry ONCE after a short pause.
+      await new Promise((resolve) => setTimeout(resolve, DOCUMENT_REFRESH_RETRY_DELAY_MS))
+      verified = await refreshAndVerify(refreshToken, secret)
     }
-    // The refresh itself failed → the refresh token is truly dead/expired. Do NOT delete the
-    // cookies (a contended/just-rotated refresh can fail transiently while the session is still
-    // alive; deleting would strand other tabs). Bounce to login WITH ?expired=1 so the login
-    // page surfaces the "session expired" notice.
+    if (verified) {
+      const { refreshed, payload: newPayload } = verified
+      const res = forwardAuthed(request, headers, refreshed.accessToken, newPayload)
+      // Persist the rotated pair on the outgoing response (access maxAge tracks the new
+      // token's exp; refresh at 30d). Setting Set-Cookie is valid on both the next() and the
+      // role-redirect responses forwardAuthed may return.
+      res.cookies.set('token', refreshed.accessToken, sessionCookieOptions(accessCookieMaxAge(refreshed.accessToken)))
+      if (refreshed.refreshToken) {
+        res.cookies.set('refresh_token', refreshed.refreshToken, sessionCookieOptions(REFRESH_MAX_AGE))
+      }
+      return res
+    }
+    // The refresh failed. Do NOT delete the cookies either way (a contended/just-rotated refresh
+    // can fail transiently while the session is still alive; deleting would strand other tabs).
+    if (!isDocument) {
+      // NOT a document (RSC payload / prefetch / server action / asset): never redirect to login
+      // from here — one such sub-request losing a race must not bounce a valid session. A plain
+      // 401 lets the page-level request decide: an RSC navigation that gets a non-OK response
+      // falls back to a full document navigation (which retries above), a prefetch is dropped.
+      return NextResponse.json(
+        { success: false, error: 'Unauthorized' },
+        { status: 401, headers: { 'cache-control': 'no-store' } },
+      )
+    }
+    // A document whose refresh failed twice → the session is genuinely dead/expired. Bounce to
+    // login WITH ?expired=1 so the login page surfaces the "session expired" notice.
     return NextResponse.redirect(new URL('/auth/login?expired=1', request.url))
   }
 
   // No refresh token at all → never established a session (or fully logged out) → plain login.
   return NextResponse.redirect(new URL('/auth/login', request.url))
+}
+
+/** Pause before the single retry of a failed DOCUMENT-navigation refresh. */
+export const DOCUMENT_REFRESH_RETRY_DELAY_MS = 200
+
+/**
+ * Is this a top-level DOCUMENT navigation (the request that decides whether to show login)?
+ * Everything else — RSC payload fetches (`RSC: 1`), router/browser prefetches, server-action
+ * POSTs (`Next-Action`), and sub-resources (`Sec-Fetch-Dest` image/script/style/empty/…) — is
+ * NOT, and must never redirect to login on a failed refresh. With no Sec-Fetch-Dest at all
+ * (an old or non-browser client) we keep the pre-existing behaviour and treat it as a document.
+ */
+export function isDocumentRequest(request: NextRequest): boolean {
+  const h = request.headers
+  if (h.get('rsc') || h.get('next-router-prefetch') || h.get('next-action')) return false
+  const purpose = `${h.get('purpose') ?? ''} ${h.get('sec-purpose') ?? ''}`.toLowerCase()
+  if (purpose.includes('prefetch')) return false
+  const dest = h.get('sec-fetch-dest')
+  if (dest) return dest === 'document' || dest === 'iframe' || dest === 'frame'
+  return true
+}
+
+type RefreshResult = Awaited<ReturnType<typeof refreshTokensViaBackend>>
+
+/**
+ * In-flight refreshes keyed by a SHA-256 of the refresh token (the raw token is never used as
+ * a key, logged, or retained after settle). Concurrent proxy hits for the same refresh cookie
+ * in this instance share ONE backend call; the entry is removed as soon as it settles, so a
+ * later (retry) attempt always makes a fresh call and nothing outlives the request burst.
+ */
+const inflightRefreshes = new Map<string, Promise<RefreshResult>>()
+
+async function refreshKey(refreshToken: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(refreshToken))
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** Exported for tests: one backend refresh per refresh token at a time, in this instance. */
+export async function dedupedRefresh(refreshToken: string): Promise<RefreshResult> {
+  const key = await refreshKey(refreshToken)
+  const existing = inflightRefreshes.get(key)
+  if (existing) return existing
+  const pending = refreshTokensViaBackend(refreshToken).finally(() => {
+    inflightRefreshes.delete(key)
+  })
+  inflightRefreshes.set(key, pending)
+  return pending
+}
+
+/** Refresh (deduped) and verify the new access token; null on any failure. */
+async function refreshAndVerify(
+  refreshToken: string,
+  secret: Uint8Array,
+): Promise<{ refreshed: NonNullable<RefreshResult>; payload: JWTPayload } | null> {
+  const refreshed = await dedupedRefresh(refreshToken)
+  if (!refreshed) return null
+  try {
+    return { refreshed, payload: (await jwtVerify(refreshed.accessToken, secret)).payload }
+  } catch {
+    return null
+  }
 }
 
 /**
