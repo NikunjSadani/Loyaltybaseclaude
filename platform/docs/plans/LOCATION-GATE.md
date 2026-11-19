@@ -22,8 +22,15 @@ with the server outlet context, exactly like submit validation): only photos tha
 - **Location gate** (`visibility-location.helper.ts`): runs only under `requireLocation`; it now considers only
   applicable tagged photos (it already skipped hidden/empty ones for the per-photo check; the change makes the
   "form has no location field" decision applicability-aware too).
-- **Stored location** (`firstRealFix`) and **review badges** (`visibility-review.service.ts`) already read only photos
-  that are present in the stored (validation-projected) values, so a hidden slot never reached them — unchanged.
+- **Stored location** (`firstRealFix`) already reads only photos present in the stored (validation-projected) values,
+  so a hidden slot never reached it — unchanged. Review badges likewise only cover stored photos (hidden / empty slots
+  get no badge, as before).
+- **Review badges now use the verdict's own policy**: on `outletMasterGeo` tenants the per-photo badge in
+  `visibility-review.service.ts` used the KYC board-photo reference + the configured radius while the capture verdict
+  used the outlet-master coordinates + 200 m (+ accuracy buffer) — a badge could disagree with the verdict. Both now use
+  ONE shared resolution in `geo-fence.helper.ts` (`outletMasterReference` / `outletMasterFencePolicy` /
+  `classifyPhotoFence`: reference guarded by `isUsableReference`, forced 200 m, a fix with accuracy worse than 200 m →
+  unverifiable). Non-gated tenants keep the KYC board reference + configured radius, no buffer (byte-identical).
 
 ## Final-audit fixes (round 4, 2026-11-19, on b2570896) — 7 items, all confirmed (none refuted)
 

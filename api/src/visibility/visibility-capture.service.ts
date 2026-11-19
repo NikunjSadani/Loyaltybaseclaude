@@ -51,10 +51,11 @@ import {
   outletContextValues,
 } from './visibility-types';
 import {
-  evaluatePhotoFence,
   isValidGeo,
-  isUsableReference,
   OUTLET_MASTER_GEOFENCE_RADIUS_M,
+  outletMasterReference,
+  classifyPhotoFence,
+  PhotoFencePolicy,
 } from './geo-fence.helper';
 import { SubmitCaptureDto, ResubmitCaptureDto } from './dto/visibility-capture.dto';
 import { visibilityProgramMatches, withVisibilityProgramWhere } from './visibility-scope.helper';
@@ -754,11 +755,8 @@ export class VisibilityCaptureService {
     // isUsableReference (not just a null-check) guards the OUTLET-MASTER coords: a 0/0 sentinel
     // or out-of-range master value → treated as NO reference → 'unverifiable' (allow+flag) in
     // both fence paths below, never a spurious block of a rep at the real outlet.
-    const outletMasterRefRaw =
-      outletMasterGeoEnabled && outlet.latitude != null && outlet.longitude != null
-        ? { lat: Number(outlet.latitude), lng: Number(outlet.longitude) }
-        : null;
-    const outletMasterRef = isUsableReference(outletMasterRefRaw) ? outletMasterRefRaw : null;
+    // Shared with the review badges (geo-fence.helper outletMasterReference) so the two never drift.
+    const outletMasterRef = outletMasterGeoEnabled ? outletMasterReference(outlet) : null;
     // Effective fence params: forced on at the shared 200 m under the gate; the tenant's config otherwise.
     const fenceEnabled = outletMasterGeoEnabled ? true : config.geoFence.enabled;
     const fenceRadius = outletMasterGeoEnabled
@@ -813,23 +811,16 @@ export class VisibilityCaptureService {
       let worstGeo: GpsCapture | null = null; // representative pin = the worst (farthest) fixed photo
 
       if (evaluatedFenceFields.length === 0) anyUnverifiable = true; // nothing applicable with a photo = "no fix", as today
+      // ONE policy for every photo — the SAME resolution the reviewer's per-photo badges use
+      // (geo-fence.helper classifyPhotoFence). ACCURACY BUFFER (outlet-master tenants only): a fix whose OWN reported
+      // accuracy is worse than the fence radius cannot place the photo in/out → 'unverifiable' (allow + flag), never a
+      // block. Non-gated tenants: no buffer (byte-identical).
+      const policy: PhotoFencePolicy = { reference, radiusMeters: radius, accuracyBuffer: outletMasterGeoEnabled };
       for (const f of evaluatedFenceFields) {
         const g = readMediaValue(values[f.id]).geo ?? null;
-        let status = evaluatePhotoFence(g, reference, radius);
-        // ACCURACY BUFFER (gated path only): a fix whose OWN reported accuracy is worse than
-        // the fence radius cannot be trusted to place the photo in/out — a genuinely-at-the-
-        // outlet rep could read as 'outside' purely from GPS error. Downgrade such a verdict to
-        // 'unverifiable' (allow + flag), never block. A good-accuracy / absent-accuracy fix is
-        // unchanged. Non-gated tenants never take this branch (byte-identical).
-        const accuracyTooLow =
-          outletMasterGeoEnabled &&
-          status !== 'unverifiable' &&
-          isValidGeo(g) &&
-          typeof g.accuracy === 'number' &&
-          Number.isFinite(g.accuracy) &&
-          g.accuracy > radius;
+        const { status, accuracyTooLow } = classifyPhotoFence(g, policy);
         if (accuracyTooLow) {
-          status = 'unverifiable';
+          // unverifiable — no distance for an untrustworthy fix
         } else if (reference && isValidGeo(g)) {
           const d = haversineMeters(g.lat, g.lng, reference.lat, reference.lng);
           const rounded = Math.round(d * 100) / 100;
