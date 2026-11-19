@@ -182,8 +182,8 @@ describe('/admin/gst-reimbursements — GST-holdback release queue', () => {
     render(<GstReimbursementsPage />)
 
     const note = await screen.findByTestId('gst-reimb-zero-note')
-    expect(note.textContent).toMatch(/2 held rows are at ₹0/)
-    expect(note.textContent).toMatch(/Held at ₹0/)
+    expect(note.textContent).toMatch(/2 rows have ₹0 GST held \(nothing to release\)/)
+    expect(note.textContent).toMatch(/shown under .Held at ₹0./)
 
     fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'HELD_ZERO' } })
     expect(await screen.findByText('INV-GST-0')).toBeInTheDocument()
@@ -201,5 +201,44 @@ describe('/admin/gst-reimbursements — GST-holdback release queue', () => {
     render(<GstReimbursementsPage />)
     expect(await screen.findByText('INV-GST-1')).toBeInTheDocument()
     expect(screen.queryByTestId('gst-reimb-zero-note')).not.toBeInTheDocument()
+  })
+
+  it('a slow response for an OLD filter never overwrites the newer filter\'s list (request sequencing); a filter change clears the old rows at once', async () => {
+    asRole('GIFSY_ADMIN')
+    let releaseHeld: (v: unknown) => void = () => {}
+    const RELEASED_ITEM = { ...HELD_ITEM, id: 'r9', invoiceNumber: 'INV-REL-9', status: 'RELEASED', releasePayoutRef: 'UTR-9' }
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes('status=HELD') && !url.includes('HELD_ZERO')) {
+        // The HELD request hangs until we let it go — after the RELEASED one has rendered.
+        return new Promise((resolve) => {
+          releaseHeld = () => resolve({ ok: true, json: () => Promise.resolve({ success: true, data: listResponse(url) }) })
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: { status: 'RELEASED', clientId: null, period: null, count: 1, totalGst: { paise: '250000', inr: 2500 }, zeroHeldCount: null, items: [RELEASED_ITEM] },
+        }),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<GstReimbursementsPage />)
+    await waitFor(() => expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('status=HELD'))).toBe(true))
+
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'RELEASED' } })
+    expect(await screen.findByText('INV-REL-9')).toBeInTheDocument()
+
+    // The stale HELD answer lands now — it must be ignored.
+    releaseHeld(undefined)
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.getByText('INV-REL-9')).toBeInTheDocument()
+    expect(screen.queryByText('INV-GST-1')).not.toBeInTheDocument()
+    expect(screen.queryByText('Release GST')).not.toBeInTheDocument()
+
+    // Switching back clears the released rows at once (loading), before the new answer arrives.
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'HELD' } })
+    expect(screen.queryByText('INV-REL-9')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Loading')).toBeInTheDocument()
   })
 })

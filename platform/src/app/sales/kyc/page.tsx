@@ -328,8 +328,22 @@ function KYCListContent() {
         // kycIntent + reKycFlags aware). On an outletCode collision they WIN over the
         // submitter-scoped /api/kyc submission (which only knows the raw stored status), so a
         // re-KYC'd or not-interested outlet reads correctly and never duplicates.
-        const synth = synthesised ?? [];
-        const synthCodes = new Set(synth.map((e) => e.outletCode).filter(Boolean));
+        const synthRaw = synthesised ?? [];
+        const synthCodes = new Set(synthRaw.map((e) => e.outletCode).filter(Boolean));
+        // K1 follow-up (audit #6): the synthesised entry wins a collision, but it must not drop the submission's
+        // filing-time branch keys — a removed rep's KYC would otherwise lose its snapshot placement in the member
+        // filter. Keys from the outlet's latest colliding submission(s) are merged in (union). Nothing else is taken.
+        const keysByCode = new Map<string, Set<string>>();
+        for (const sub of subs ?? []) {
+          if (!sub.outletCode || !synthCodes.has(sub.outletCode) || !sub.filingBranchKeys?.length) continue;
+          const set = keysByCode.get(sub.outletCode) ?? new Set<string>();
+          sub.filingBranchKeys.forEach((k) => set.add(k));
+          keysByCode.set(sub.outletCode, set);
+        }
+        const synth = synthRaw.map((e) => {
+          const keys = e.outletCode ? keysByCode.get(e.outletCode) : undefined;
+          return keys ? { ...e, filingBranchKeys: [...new Set([...(e.filingBranchKeys ?? []), ...keys])] } : e;
+        });
         const subsNoCollision = (subs ?? []).filter((s) => !s.outletCode || !synthCodes.has(s.outletCode));
         setEntries([...synth, ...dedupeByOutlet(subsNoCollision)]);
       })
@@ -349,6 +363,10 @@ function KYCListContent() {
   // K1 follow-up: a removed rep's KYC carries its FILING-TIME branch (filingBranchKeys) and belongs to the
   // member whose branchKeys it shares — same snapshot rule as the list scope + the approval gate.
   const selectedMemberBranchKeys = memberFilter ? new Set(selectedMember?.branchKeys ?? []) : null;
+  // Audit #3: a snapshot that names NO current member option (e.g. a new layer was inserted between the viewer and
+  // the filing-time branch, so none of today's direct reports is in the chain) would vanish from every member. Such a
+  // row falls back to today's reporting links (submitterUserIds), like a legacy row.
+  const allMemberBranchKeys = new Set(teamMembers.flatMap((m) => m.branchKeys));
 
   // XSRs are field reps who don't approve KYCs — the "Approval Pending" (pending-my-
   // approval) filter is meaningless for them, so drop it from the XSR status dropdown.
@@ -363,9 +381,10 @@ function KYCListContent() {
       // that have no submission) — so "filter by member" returns ALL their outlets.
       // A removed rep's KYC with a filing-time snapshot matches ONLY by that snapshot (a manager who moved
       // since does not take it along); live submitters + legacy rows keep today's reporting links.
+      const snapshotPlaced = !!e.filingBranchKeys?.some((k) => allMemberBranchKeys.has(k));
       const matchesMember = !selectedMemberUserIds
-        || (e.filingBranchKeys
-          ? e.filingBranchKeys.some((k) => selectedMemberBranchKeys!.has(k))
+        || (snapshotPlaced
+          ? e.filingBranchKeys!.some((k) => selectedMemberBranchKeys!.has(k))
           : !!e.submittedById && selectedMemberUserIds.has(e.submittedById))
         || (!!e.assignedUserId && selectedMemberUserIds.has(e.assignedUserId));
       const matchesType = !typeFilter || e.outletType === typeFilter;

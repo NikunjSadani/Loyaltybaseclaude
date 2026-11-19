@@ -164,6 +164,21 @@ export type OrderAlertKind = 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | 'NOT_APPLIED';
 export function alertKindRank(kind: string): number {
   return kind === 'SUPERSEDED' ? 2 : kind === 'MARKED_NOT_BOUGHT' ? 1 : 0;
 }
+/**
+ * The kind a NOT_APPLIED report really is, given the row as it is NOW: the reference retired by a retry → SUPERSEDED;
+ * the row marked "not bought" on this same reference → MARKED_NOT_BOUGHT; else unchanged. Only ever moves the kind up.
+ */
+export function kindForRowNow(
+  row: { status: string; buyFailureSource: string | null; hubbleReferenceId: string | null; previousReferenceIds?: string[] | null } | null | undefined,
+  ref: string,
+  kind: OrderAlertKind,
+): OrderAlertKind {
+  if (!row) return kind;
+  let now: OrderAlertKind = kind;
+  if (row.hubbleReferenceId !== ref && (row.previousReferenceIds ?? []).includes(ref)) now = 'SUPERSEDED';
+  else if (row.hubbleReferenceId === ref && row.status === RS.BUY_FAILED && row.buyFailureSource === 'MARKED_NOT_BOUGHT') now = 'MARKED_NOT_BOUGHT';
+  return alertKindRank(now) > alertKindRank(kind) ? now : kind;
+}
 /** Plain words for an alert kind (logs). */
 export function alertKindWords(kind: string): string {
   return kind === 'SUPERSEDED'
@@ -450,7 +465,50 @@ export class VoucherDispersalProcessor {
       n++;
     }
     if (Date.now() <= deadline) n += await this.recheckUnverifiedNoOrderAlerts(campaignId, deadline, cutoff);
+    if (Date.now() <= deadline) await this.upgradeStaleAlertKinds(campaignId);
     return n;
+  }
+
+  /** At most this many open NOT_APPLIED alerts are checked per pass by upgradeStaleAlertKinds. */
+  static readonly ALERT_KIND_CHECK_PER_PASS = 200;
+
+  /**
+   * VD follow-up (2026-11-19, audit #2): an alert raised as NOT_APPLIED (the row's current order) whose row has SINCE been
+   * marked "not bought" (same reference) or retried (reference retired) is upgraded to MARKED_NOT_BOUGHT / SUPERSEDED.
+   * The mark itself upgrades the alerts it can see (same transaction) and recordOrderAlert re-reads the row, but a webhook
+   * that created the alert concurrently with the mark can still leave it NOT_APPLIED — this pass closes that race.
+   * No Hubble call; one read of the open NOT_APPLIED alerts + one read of their rows. Never throws.
+   */
+  async upgradeStaleAlertKinds(campaignId?: string): Promise<number> {
+    try {
+      const alerts = await this.prisma.voucherDispersalOrderAlert.findMany({
+        where: { kind: 'NOT_APPLIED', resolvedAt: null, ...(campaignId ? { campaignId } : {}) },
+        select: { id: true, rowId: true, referenceId: true, campaignId: true, rowNumber: true, batchNumber: true, hubbleStatus: true },
+        orderBy: { createdAt: 'asc' },
+        take: VoucherDispersalProcessor.ALERT_KIND_CHECK_PER_PASS,
+      });
+      if (alerts.length === 0) return 0;
+      const rows = await this.prisma.voucherDispersalRow.findMany({
+        where: { id: { in: [...new Set(alerts.map((a) => a.rowId))] } },
+        select: { id: true, status: true, buyFailureSource: true, hubbleReferenceId: true, previousReferenceIds: true },
+      });
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      let n = 0;
+      for (const a of alerts) {
+        const k = kindForRowNow(byId.get(a.rowId), a.referenceId, 'NOT_APPLIED');
+        if (k === 'NOT_APPLIED') continue;
+        const up = await this.prisma.voucherDispersalOrderAlert.updateMany({ where: { id: a.id, kind: 'NOT_APPLIED' }, data: { kind: k } });
+        if (up.count !== 1) continue;
+        n++;
+        const row = { id: a.rowId, campaignId: a.campaignId, rowNumber: a.rowNumber, batchNumber: a.batchNumber };
+        this.sayOrderAlert(row, a.referenceId, k, a.hubbleStatus, `ALERT UPDATE (now ${alertKindWords(k)}, was ${alertKindWords('NOT_APPLIED')}) —`);
+        await this.orderAlertAudit(row, a.referenceId, k, a.hubbleStatus, { previousKind: 'NOT_APPLIED', upgradedBy: 'sweep' });
+      }
+      return n;
+    } catch (e) {
+      this.logger.error(`[dispersal] could not check order-alert kinds: ${e}`);
+      return 0;
+    }
   }
 
   /**
@@ -606,15 +664,21 @@ export class VoucherDispersalProcessor {
   ): Promise<{ status: string; alerted: boolean }> {
     // Webhook path: ONE lookup, never the canary (M1) — an unverified "no order" is left to the sweep.
     let status: string;
+    let orderId: string | null = null;
     try {
       const b = await this.hubble.getOrderByReference(ref);
       status = b === null ? ALERT_NO_ORDER : hubbleAlertStatus(b.status);
+      orderId = b ? ((b.id ?? (b as { orderId?: string | null }).orderId ?? null) as string | null) : null;
     } catch (e) {
       this.logger.error(`[dispersal] could not look up earlier reference ${ref} (campaign ${row.campaignId} row ${row.rowNumber}): ${e}`);
       const alerted = await this.recordOrderAlert(row, ref, ALERT_LOOKUP_FAILED, kind, ctx);
       return { status: ALERT_LOOKUP_FAILED, alerted };
     }
-    const alerted = await this.recordOrderAlert(row, ref, status, kind, { ...ctx, noOrderVerified: false });
+    const alerted = await this.recordOrderAlert(row, ref, status, kind, {
+      ...ctx,
+      noOrderVerified: false,
+      ...(orderId ? { auditExtra: { ...ctx.auditExtra, hubbleOrderId: orderId } } : {}),
+    });
     return { status, alerted };
   }
 
@@ -641,6 +705,15 @@ export class VoucherDispersalProcessor {
     const resolving = ALERT_RESOLVING_STATUSES.has(status);
     const lookupFailed = status === ALERT_LOOKUP_FAILED;
     const where = { campaignId: row.campaignId, referenceId: ref };
+    // Audit #2: the caller's view of the row may be stale — a row marked "not bought" (or retried) after the caller read
+    // it must never get a fresh NOT_APPLIED alert. Re-read it; the kind only moves up. (The sweep's
+    // upgradeStaleAlertKinds closes the remaining window of a create racing the mark's transaction.)
+    if (kind === 'NOT_APPLIED') {
+      const now = await this.prisma.voucherDispersalRow
+        .findFirst({ where: { id: row.id }, select: { status: true, buyFailureSource: true, hubbleReferenceId: true, previousReferenceIds: true } })
+        .catch(() => null);
+      kind = kindForRowNow(now, ref, kind);
+    }
     // Release-gate H1 + M1: "no order" resolves only with a canary the CALLER verified (the sweep; never the webhook).
     const canaryOk = status === ALERT_NO_ORDER && ctx.noOrderVerified === true;
     if (!resolving && !ctx.onlyIfExists) {
@@ -730,6 +803,15 @@ export class VoucherDispersalProcessor {
     }
     const k = res.kind as OrderAlertKind;
     if (res.change === null) {
+      // Audit #1: the same SUCCESS but a DIFFERENT Hubble order id than any already audited for this alert — the order id
+      // is the one fact ops need to chase the voucher, so it is never lost: one more alert audit (a repeat of the same id
+      // adds nothing). The alert row itself has no order-id column.
+      const orderId = ctx.auditExtra?.hubbleOrderId;
+      if (status === 'SUCCESS' && typeof orderId === 'string' && orderId && !(await this.orderIdAudited(row.campaignId, ref, orderId))) {
+        this.logger.error(`[dispersal] campaign ${row.campaignId} row ${row.rowNumber}: Hubble SUCCESS for reference ${ref} carries a NEW order id ${orderId} — alert kept at ${res.kept}; check with Hubble`);
+        await this.orderAlertAudit(row, ref, k, res.kept, { newHubbleOrderId: true, ...(ctx.rowStatus ? { rowStatus: ctx.rowStatus } : {}), ...ctx.auditExtra });
+        return true;
+      }
       // Not a real change -> no audit; still never silent in the logs.
       if (lookupFailed) {
         this.logger.warn(`[dispersal] campaign ${row.campaignId} row ${row.rowNumber}: could not check reference ${ref} with Hubble — alert kept at ${res.kept}`);
@@ -770,6 +852,25 @@ export class VoucherDispersalProcessor {
       ...ctx.auditExtra,
     });
     return true;
+  }
+
+  /** Has a campaign alert audit for this reference already recorded this Hubble order id? */
+  private async orderIdAudited(campaignId: string, ref: string, orderId: string): Promise<boolean> {
+    const hit = await this.prisma.auditLog
+      .findFirst({
+        where: {
+          entityType: 'VOUCHER_DISPERSAL_CAMPAIGN',
+          entityId: campaignId,
+          AND: [
+            { metadata: { path: ['event'], equals: SUPERSEDED_ALERT_EVENT } },
+            { metadata: { path: ['referenceId'], equals: ref } },
+            { metadata: { path: ['hubbleOrderId'], equals: orderId } },
+          ],
+        },
+        select: { id: true },
+      })
+      .catch(() => null);
+    return !!hit;
   }
 
   private sayOrderAlert(
@@ -908,7 +1009,7 @@ export class VoucherDispersalProcessor {
         // the order facts. VD follow-up 2026-11-19: no second, row-level audit of the same event any more — it was
         // written again on every repeat of the same SUCCESS (the duplicate alert entry; the alert itself was deduped).
         this.logger.error(
-          `[dispersal] Hubble SUCCESS for reference ${row.hubbleReferenceId} not applied (campaign ${now?.campaignId} row ${now?.rowNumber}, row status ${now?.status}, current reference ${now?.hubbleReferenceId === row.hubbleReferenceId ? 'same' : 'different'}) — ops review`,
+          `[dispersal] Hubble SUCCESS for reference ${row.hubbleReferenceId} (Hubble order ${hubbleOrderId ?? 'unknown'}) not applied (campaign ${now?.campaignId} row ${now?.rowNumber}, row status ${now?.status}, current reference ${now?.hubbleReferenceId === row.hubbleReferenceId ? 'same' : 'different'}) — ops review`,
         );
         if (!row.hubbleReferenceId) {
           // Defensive: no reference = no alert key; keep a row-level audit so it is never silent.

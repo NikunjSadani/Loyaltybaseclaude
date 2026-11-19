@@ -59,17 +59,21 @@ const TEAM = {
   },
 };
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  localStorage.setItem('loyaltybase_sales_role', 'RSM');
+function serve(team: unknown = TEAM, outlets: unknown[] = []) {
   fetchMock.mockImplementation((url: string) => {
     const body = url.startsWith('/api/kyc')
       ? KYC
       : url.startsWith('/api/sales/team')
-        ? TEAM
-        : { success: true, data: { outlets: [] } };
+        ? team
+        : { success: true, data: { outlets } };
     return Promise.resolve({ json: () => Promise.resolve(body) });
   });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  localStorage.setItem('loyaltybase_sales_role', 'RSM');
+  serve();
 });
 
 afterEach(() => localStorage.clear());
@@ -106,5 +110,39 @@ describe('Sales KYC list — member filter uses the filing-time branch', () => {
     expect(await screen.findByText('Live Store')).toBeInTheDocument();
     expect(screen.getByText('Legacy Store')).toBeInTheDocument();
     expect(screen.getByText('Removed Rep Store')).toBeInTheDocument();
+  });
+
+  it('audit #3 — a NEW layer inserted between (the snapshot names no current member) → falls back to today’s links, never vanishes', async () => {
+    // RSM's only direct report is now a new ZSM above asm1/asm2 — no member's branchKeys are in the snapshot chain.
+    serve({
+      success: true,
+      data: {
+        members: [
+          { id: 'zsm-su', name: 'Zsm New', employeeCode: 'E0', submitterUserIds: ['u-zsm', 'u-asm1', 'u-asm2', 'u-m1', 'u-isr1', 'u-isr2'], branchKeys: ['zsm-su'] },
+        ],
+      },
+    });
+    const select = await renderLoaded();
+    fireEvent.change(select, { target: { value: 'zsm-su' } });
+    // All three rows (incl. the removed rep's snapshot row) sit under the only member, by today's links.
+    expect(await screen.findByText('Removed Rep Store')).toBeInTheDocument();
+    expect(screen.getByText('Legacy Store')).toBeInTheDocument();
+    expect(screen.getByText('Live Store')).toBeInTheDocument();
+  });
+
+  it('audit #6 — an /api/sales/outlets entry with the SAME outletCode wins the collision but KEEPS the submission’s filing-time keys', async () => {
+    serve(TEAM, [
+      // The roster row for the removed rep's outlet — now assigned to someone in NO member's branch.
+      { id: 'o-r', kycId: 'k-removed', outletCode: 'OUT-R', name: 'Roster Outlet R', kycStatus: 'PENDING_ASM_APPROVAL', kycSubmittedAt: '2026-11-10T00:00:00.000Z', assignedUserId: 'u-nobody' },
+    ]);
+    render(<KYCListPage />);
+    expect(await screen.findByText('Roster Outlet R')).toBeInTheDocument();
+    expect(screen.queryByText('Removed Rep Store')).not.toBeInTheDocument(); // one row per outlet (roster wins)
+    const select = (await screen.findByLabelText('Team Member')) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'asm1-su' } });
+    await waitFor(() => expect(screen.queryByText('Live Store')).not.toBeInTheDocument());
+    expect(screen.getByText('Roster Outlet R')).toBeInTheDocument(); // placed by the merged snapshot keys
+    fireEvent.change(select, { target: { value: 'asm2-su' } });
+    await waitFor(() => expect(screen.queryByText('Roster Outlet R')).not.toBeInTheDocument());
   });
 });

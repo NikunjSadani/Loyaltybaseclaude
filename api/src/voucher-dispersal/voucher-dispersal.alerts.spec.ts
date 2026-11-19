@@ -167,14 +167,15 @@ describe('L2 — history capped at 20, consecutive duplicates removed', () => {
 describe('L3 — kind upgrades when the same reference later turns out superseded', () => {
   it('NOT_APPLIED → SUPERSEDED (audited as a change)', async () => {
     const { t, b } = await bought();
+    // 'vdZ' is no earlier reference of this row (vdA/vdB are), so the row re-read keeps NOT_APPLIED.
     const row = { id: b.id, campaignId: b.campaignId, rowNumber: b.rowNumber, batchNumber: 1 };
-    await t.processor.recordOrderAlert(row, 'vdA', 'SUCCESS', 'NOT_APPLIED');
-    await t.processor.recordOrderAlert(row, 'vdA', 'SUCCESS', 'SUPERSEDED');
-    expect(alertOf(t, 'vdA')).toMatchObject({ kind: 'SUPERSEDED', hubbleStatus: 'SUCCESS' });
+    await t.processor.recordOrderAlert(row, 'vdZ', 'SUCCESS', 'NOT_APPLIED');
+    await t.processor.recordOrderAlert(row, 'vdZ', 'SUCCESS', 'SUPERSEDED');
+    expect(alertOf(t, 'vdZ')).toMatchObject({ kind: 'SUPERSEDED', hubbleStatus: 'SUCCESS' });
     expect(alertAudits(t).map((x: any) => x.metadata.kind)).toEqual(['NOT_APPLIED', 'SUPERSEDED']);
     // Never downgraded back.
-    await t.processor.recordOrderAlert(row, 'vdA', 'SUCCESS', 'NOT_APPLIED');
-    expect(alertOf(t, 'vdA').kind).toBe('SUPERSEDED');
+    await t.processor.recordOrderAlert(row, 'vdZ', 'SUCCESS', 'NOT_APPLIED');
+    expect(alertOf(t, 'vdZ').kind).toBe('SUPERSEDED');
   });
 });
 
@@ -473,12 +474,12 @@ describe('follow-up — alert kind after a later mark', () => {
   it('a report arriving with kind MARKED_NOT_BOUGHT upgrades an existing NOT_APPLIED alert (audited with previousKind), SUPERSEDED still wins', async () => {
     const { t, b } = await bought();
     const row = { id: b.id, campaignId: b.campaignId, rowNumber: b.rowNumber, batchNumber: 1 };
-    await t.processor.recordOrderAlert(row, 'vdA', 'PROCESSING', 'NOT_APPLIED');
-    await t.processor.recordOrderAlert(row, 'vdA', 'PROCESSING', 'MARKED_NOT_BOUGHT');
-    expect(alertOf(t, 'vdA').kind).toBe('MARKED_NOT_BOUGHT');
+    await t.processor.recordOrderAlert(row, 'vdZ', 'PROCESSING', 'NOT_APPLIED');
+    await t.processor.recordOrderAlert(row, 'vdZ', 'PROCESSING', 'MARKED_NOT_BOUGHT');
+    expect(alertOf(t, 'vdZ').kind).toBe('MARKED_NOT_BOUGHT');
     // Worsened AND kind-upgraded in one report → one audit carrying both.
-    await t.processor.recordOrderAlert(row, 'vdA', 'SUCCESS', 'SUPERSEDED');
-    expect(alertOf(t, 'vdA')).toMatchObject({ kind: 'SUPERSEDED', hubbleStatus: 'SUCCESS' });
+    await t.processor.recordOrderAlert(row, 'vdZ', 'SUCCESS', 'SUPERSEDED');
+    expect(alertOf(t, 'vdZ')).toMatchObject({ kind: 'SUPERSEDED', hubbleStatus: 'SUCCESS' });
     expect(alertAudits(t).map((x: any) => [x.metadata.kind, x.metadata.previousKind ?? null])).toEqual([
       ['NOT_APPLIED', null],
       ['MARKED_NOT_BOUGHT', 'NOT_APPLIED'],
@@ -511,5 +512,70 @@ describe('follow-up — no duplicate alert entry for a marked row', () => {
     expect(JSON.stringify(entries)).not.toContain(CODE);
     // Never silent: the "not applied" error log fires on every report.
     expect(errors.mock.calls.filter((c) => String(c[0]).includes('not applied')).length).toBe(2);
+  });
+});
+
+// ── Fix round (independent audit of the follow-ups) ──
+describe('audit #1 — a Hubble order id is never lost', () => {
+  it('a repeat SUCCESS with a DIFFERENT order id → one more alert audit (newHubbleOrderId); the same id again → nothing', async () => {
+    const { t, b } = await failedRow('MARKED_NOT_BOUGHT', { buyFailureReason: 'Marked as not bought by Admin One: x' });
+    const errors = jest.spyOn((t.processor as any).logger, 'error');
+    const snapshot: any = { ...b, status: 'PENDING_RECONCILE' };
+    const success = (id: string) => t.processor.applyBody(snapshot, { id, status: 'SUCCESS', vouchers: [{ cardNumber: CODE }] });
+    await success('H7');
+    await success('H7');
+    expect(alertAudits(t).map((x: any) => x.metadata.hubbleOrderId)).toEqual(['H7']);
+    await success('H8');
+    const audits = alertAudits(t);
+    expect(audits.map((x: any) => x.metadata.hubbleOrderId)).toEqual(['H7', 'H8']);
+    expect(audits[1].metadata).toMatchObject({ newHubbleOrderId: true, kind: 'MARKED_NOT_BOUGHT', hubbleStatus: 'SUCCESS' });
+    await success('H8');
+    expect(alertAudits(t).length).toBe(2);
+    expect(t.orderAlerts.length).toBe(1);
+    // The error log names the order id every time.
+    expect(errors.mock.calls.some((c) => String(c[0]).includes('Hubble order H8'))).toBe(true);
+    expect(JSON.stringify(t.audits)).not.toContain(CODE);
+  });
+
+  it('the webhook path records the order id too, and a new id on a later webhook is audited once', async () => {
+    const { t } = await bought();
+    answers(t, { vdA: [{ id: 'O1', status: 'SUCCESS' }, { id: 'O1', status: 'SUCCESS' }, { id: 'O2', status: 'SUCCESS' }] });
+    for (let i = 0; i < 3; i++) await t.processor.reconcileByReference('vdA');
+    expect(alertAudits(t).map((x: any) => [x.metadata.hubbleOrderId, x.metadata.newHubbleOrderId ?? false])).toEqual([['O1', false], ['O2', true]]);
+  });
+});
+
+describe('audit #2 — an alert raised after the mark (stale caller) is never left NOT_APPLIED', () => {
+  it('interleaving: webhook reads the row (failed) → admin marks it → the webhook then records a NOT_APPLIED alert → created as MARKED_NOT_BOUGHT', async () => {
+    const { t, id, b } = await failedRow('HUBBLE_FAILED', { lastReconcileResult: 'HUBBLE_ON_HOLD' });
+    const ref = b.hubbleReferenceId;
+    const staleRow = { id: b.id, campaignId: b.campaignId, rowNumber: b.rowNumber, batchNumber: 1 }; // read before the mark
+    await t.svc.markNotBought(ADMIN, id, b.id, { reason: 'Hubble support: ticket 44' });
+    expect(t.orderAlerts.length).toBe(0); // nothing to upgrade at mark time
+    await t.processor.recordOrderAlert(staleRow, ref, '__LOOKUP_FAILED', 'NOT_APPLIED', { rowStatus: 'BUY_FAILED' });
+    expect(alertOf(t, ref)).toMatchObject({ kind: 'MARKED_NOT_BOUGHT', hubbleStatus: '__LOOKUP_FAILED' });
+  });
+
+  it('the narrow window (alert created between the mark\'s alert scan and its commit) is closed by the sweep — upgraded + audited once', async () => {
+    const { t, b } = await failedRow('HUBBLE_FAILED', { lastReconcileResult: 'HUBBLE_ON_HOLD' });
+    const ref = b.hubbleReferenceId;
+    const rowRef = { id: b.id, campaignId: b.campaignId, rowNumber: b.rowNumber, batchNumber: 1 };
+    await t.processor.recordOrderAlert(rowRef, ref, 'ON_HOLD', 'NOT_APPLIED'); // row not marked yet → NOT_APPLIED
+    // …the mark commits afterwards (its alert scan ran before the create).
+    Object.assign(b, { buyFailureSource: 'MARKED_NOT_BOUGHT', buyFailureReason: 'Marked as not bought by Admin One: x' });
+    expect(alertOf(t, ref).kind).toBe('NOT_APPLIED');
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(alertOf(t, ref)).toMatchObject({ kind: 'MARKED_NOT_BOUGHT', hubbleStatus: 'ON_HOLD', resolvedAt: null });
+    const upgrades = alertAudits(t).filter((x: any) => x.metadata.upgradedBy === 'sweep');
+    expect(upgrades.map((x: any) => [x.metadata.kind, x.metadata.previousKind])).toEqual([['MARKED_NOT_BOUGHT', 'NOT_APPLIED']]);
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(alertAudits(t).filter((x: any) => x.metadata.upgradedBy === 'sweep').length).toBe(1);
+  });
+
+  it('the sweep leaves a NOT_APPLIED alert alone while its row is still unmarked on the same reference', async () => {
+    const { t, b } = await failedRow('HUBBLE_FAILED', { lastReconcileResult: 'HUBBLE_ON_HOLD' });
+    await t.processor.recordOrderAlert({ id: b.id, campaignId: b.campaignId, rowNumber: b.rowNumber, batchNumber: 1 }, b.hubbleReferenceId, 'ON_HOLD', 'NOT_APPLIED');
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000);
+    expect(alertOf(t, b.hubbleReferenceId).kind).toBe('NOT_APPLIED');
   });
 });

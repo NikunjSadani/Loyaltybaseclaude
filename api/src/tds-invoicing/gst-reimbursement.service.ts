@@ -113,12 +113,15 @@ export class GstReimbursementService {
    * { id, status: HELD }. If it updates 0 rows we disambiguate:
    *   - row does not exist            → 404 NotFound
    *   - row exists but already RELEASED → 409 Conflict (idempotent no-op signal; never double-releases)
+   *   - row HELD at ₹0 (GST ≤ 0)       → 409 Conflict "Nothing to release" (never released, never audited)
    */
   async release(user: JwtPayload, id: string, dto: ReleaseGstReimbursementDto) {
     const now = new Date();
 
+    // Guarded on GST > ₹0 too: a HELD row kept at ₹0 (its invoice was regenerated without GST) has nothing to
+    // release — the guard is in the same conditional write, so a regenerate racing the release can't slip through.
     const { count } = await this.prisma.gstReimbursement.updateMany({
-      where: { id, status: 'HELD' },
+      where: { id, status: 'HELD', gstPaise: { gt: 0n } },
       data: {
         status: 'RELEASED',
         proofUrl: dto.proofUrl,
@@ -132,9 +135,14 @@ export class GstReimbursementService {
     if (count === 0) {
       const existing = await this.prisma.gstReimbursement.findUnique({
         where: { id },
-        select: { status: true },
+        select: { status: true, gstPaise: true },
       });
       if (!existing) throw new NotFoundException('GST reimbursement not found');
+      if (existing.status === 'HELD') {
+        throw new ConflictException(
+          'Nothing to release: this held GST is ₹0 (the invoice was regenerated without GST). It is kept only for the record.',
+        );
+      }
       // Already RELEASED — do not re-stamp proof/payout/releasedBy; report a conflict.
       throw new ConflictException('GST reimbursement is already released');
     }

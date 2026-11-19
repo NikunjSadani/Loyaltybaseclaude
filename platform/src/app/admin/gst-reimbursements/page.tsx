@@ -21,7 +21,7 @@
  * data fetch are gated on isGifsy — a CLIENT_ADMIN sees a not-permitted card and NO fetch fires.
  */
 
-import { useState, useEffect, useCallback, Fragment } from 'react';
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
 import {
   BadgePercent,
   Download,
@@ -32,6 +32,7 @@ import {
   X,
   Loader2,
   Receipt,
+  Info,
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
 import { api } from '@/lib/api-client';
@@ -212,10 +213,22 @@ export default function GstReimbursementsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [releasingId, setReleasingId] = useState<string | null>(null);
+  // Request sequencing: only the LATEST request may write state — a slow response for an older filter (e.g. Held)
+  // arriving after a newer one (e.g. Released) is dropped, so the list never shows the wrong filter's rows.
+  const requestSeq = useRef(0);
+
+  // A filter change clears the old list at once (loading state) — never the previous filter's rows/totals under the
+  // new filter's labels during the 250 ms debounce + the fetch.
+  useEffect(() => {
+    setData(null);
+    setReleasingId(null);
+    setLoading(true);
+  }, [statusFilter, clientId, period]);
 
   const load = useCallback(async () => {
     // GIFSY-only surface: never fetch for a non-Gifsy session.
     if (!isGifsy) return;
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError('');
     const params = new URLSearchParams({ status: statusFilter });
@@ -224,6 +237,7 @@ export default function GstReimbursementsPage() {
     const res = await api.get<ReimbursementListResponse>(
       `/api/admin/gst-reimbursements?${params.toString()}`,
     );
+    if (seq !== requestSeq.current) return; // a newer request superseded this one
     if (res.success) {
       setData(res.data);
     } else {
@@ -313,17 +327,16 @@ export default function GstReimbursementsPage() {
         </div>
       )}
 
-      {/* ₹0 held rows are left out of the release queue — say so, and how to see them. */}
+      {/* ₹0 held rows are left out of the release queue — say so, and where to see them. */}
       {data && statusFilter === 'HELD' && (data.zeroHeldCount ?? 0) > 0 && (
         <div
           className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-xs text-blue-800"
           data-testid="gst-reimb-zero-note"
         >
-          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <Info className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
           <span>
-            {data.zeroHeldCount} held {data.zeroHeldCount === 1 ? 'row is' : 'rows are'} at ₹0 because the invoice was
-            regenerated without GST. There is nothing to release, so {data.zeroHeldCount === 1 ? 'it is' : 'they are'} not
-            listed or counted here. They are kept for the record — choose “Held at ₹0” in the status filter to see them.
+            {data.zeroHeldCount} {data.zeroHeldCount === 1 ? 'row has' : 'rows have'} ₹0 GST held (nothing to release) —
+            shown under &lsquo;Held at ₹0&rsquo;.
           </span>
         </div>
       )}

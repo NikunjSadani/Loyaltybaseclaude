@@ -140,7 +140,7 @@ describe('GstReimbursementService', () => {
 
       expect(mockPrisma.gstReimbursement.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'r1', status: 'HELD' },
+          where: { id: 'r1', status: 'HELD', gstPaise: { gt: 0n } },
           data: expect.objectContaining({
             status: 'RELEASED',
             proofUrl: 'https://proof/1',
@@ -160,6 +160,19 @@ describe('GstReimbursementService', () => {
       mockPrisma.gstReimbursement.findUnique.mockResolvedValue({ status: 'RELEASED' });
 
       await expect(service.release(GIFSY, 'r1', dto)).rejects.toBeInstanceOf(ConflictException);
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('a HELD row kept at ₹0 → 409 "Nothing to release", never released or audited', async () => {
+      mockPrisma.gstReimbursement.updateMany.mockResolvedValue({ count: 0 }); // the GST > 0 guard matched nothing
+      mockPrisma.gstReimbursement.findUnique.mockResolvedValue({ status: 'HELD', gstPaise: 0n });
+
+      const err = await service.release(GIFSY, 'r0', dto).catch((e) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(err.message).toMatch(/Nothing to release/);
+      expect(mockPrisma.gstReimbursement.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'r0', status: 'HELD', gstPaise: { gt: 0n } } }),
+      );
       expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
     });
 
