@@ -16,6 +16,9 @@ import { RequireAuth } from '@/components/auth/require-auth';
 import { PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { NotificationBell } from '@/components/notifications/notification-bell';
+import { SalesFeaturesContext } from '@/lib/sales-features-context';
+import { normalizeFeatures } from '@/lib/tenant-features';
+import type { FeatureFlags } from '@/lib/platform/client-config';
 
 const BASE_NAV: NavItem[] = [
   { href: '/sales/dashboard',   label: 'Dashboard', icon: LayoutDashboard },
@@ -37,6 +40,9 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
   // personas and role switcher have been retired.
   const [userName, setUserName] = useState('');
   const [empId, setEmpId] = useState('');
+  // Tenant flags from the SAME /api/sales/me response (no extra request) — published to sales pages via
+  // SalesFeaturesContext (e.g. Profile's "Help & videos" entry). null until it resolves → every flag reads OFF.
+  const [features, setFeatures] = useState<FeatureFlags | null>(null);
 
   useEffect(() => {
     setRoleState(getRole());
@@ -46,6 +52,7 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
         if (res?.success) {
           setUserName(res.data.name ?? getStoredUser()?.name ?? '');
           setEmpId(res.data.employeeCode ?? '');
+          setFeatures(normalizeFeatures(res.data.features));
         } else {
           setUserName(getStoredUser()?.name ?? '');
         }
@@ -106,7 +113,7 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
       </header>
 
       {/* Main content */}
-      <main className="flex-1 pb-20 px-4 py-5"><RequireAuth allowedRoles={PORTAL_ROLES.sales}>{children}</RequireAuth><SiteFooter /></main>
+      <main className="flex-1 pb-20 px-4 py-5"><RequireAuth allowedRoles={PORTAL_ROLES.sales}><SalesFeaturesContext.Provider value={features}>{children}</SalesFeaturesContext.Provider></RequireAuth><SiteFooter /></main>
 
       {/* Mobile bottom nav */}
       <NavBottom items={navItems} />

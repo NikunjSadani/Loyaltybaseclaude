@@ -4587,3 +4587,40 @@ model VoucherDispersalBatch {
   @@index([campaignId, status])
   @@map("voucher_dispersal_batches")
 }
+
+// ─── MODULE: HELP & VIDEOS (Bajaj, 2026-11-20) ────────────────────────────────
+// Per-tenant in-app help topics: a short how-to video (our private bucket, streamed through a short-lived
+// signed token URL) + 3–6 numbered written steps. Authored in the Gifsy console; shown in the sales app
+// (audience SALES) and the partner app (audience PARTNER) only when the tenant flag `helpVideos` is ON.
+// See platform/docs/plans/HELP-VIDEOS.md.
+enum HelpTopicAudience {
+  SALES
+  PARTNER
+}
+
+model HelpTopic {
+  id          String            @id @default(cuid())
+  clientId    String
+  audience    HelpTopicAudience
+  /// Optional role filter — EMPTY = everyone in the audience. SALES: UserRole (SALES_SO …) or the tenant's
+  /// SalesHierarchyLevel.code; PARTNER: UserRole (WHOLESALER …) or the partner's OutletType.code.
+  roles       String[]          @default([])
+  title       String
+  description String?
+  sortOrder   Int               @default(0)
+  isPublished Boolean           @default(false)
+  /// Object key in the uploads bucket (`help-videos/<slug>/<topicId>/…`); null = no video (steps only).
+  videoKey    String?
+  videoBytes  Int?
+  posterKey   String?
+  /// Ordered written steps (one short line each). Publishing requires 3–6.
+  steps       String[]          @default([])
+  createdById String
+  updatedById String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  deletedAt   DateTime?
+
+  @@index([clientId, audience, deletedAt, sortOrder])
+  @@map("help_topics")
+}

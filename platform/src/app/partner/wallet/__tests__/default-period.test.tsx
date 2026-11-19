@@ -36,6 +36,7 @@ vi.mock('@/lib/partner-identity', () => ({
 
 import WalletPage from '../page';
 import { statementPayload } from './statement-fixture';
+import { currentMonthInput } from '@/components/wallet/outlet-wallet-view';
 
 /* ── Relative-date helpers (never hardcode a month) ───────────────────────────── */
 const MONTH_SHORT = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -86,16 +87,19 @@ describe('D — Wallet default period (regression: no hardcoded month)', () => {
 
   it('D2: a partner with NO activity opens on the CURRENT month, empty, picker usable', async () => {
     await renderWallet([]);
-    const now = new Date();
+    // The page's "current month" is the IST month (same helper the component uses), not the
+    // device-local month — they differ near month-end on a non-IST (e.g. UTC CI) machine.
+    const currentIst = currentMonthInput(); // 'YYYY-MM'
+    const [cy, cm] = currentIst.split('-').map(Number);
     const pickerBtn = await screen.findByTestId('period-picker-btn');
-    expect(pickerBtn.textContent).toContain(pickerLabel(now));
+    expect(pickerBtn.textContent).toContain(`${MONTH_SHORT[cm]} ${cy}`);
     expect(await screen.findByText(/No transactions for this period/i)).toBeInTheDocument();
 
-    // Picker opens and the To field allows up to the current month (max >= today).
+    // Picker opens and the To field allows up to the current month (max >= this IST month).
     fireEvent.click(pickerBtn);
     await waitFor(() => expect(document.querySelectorAll('input[type="month"]').length).toBe(2));
     const toInput = document.querySelectorAll('input[type="month"]')[1] as HTMLInputElement;
-    expect(toInput.max >= ym(now)).toBe(true);
+    expect(toInput.max >= currentIst).toBe(true);
   });
 
   it('D3: a manually picked narrower range is NOT overridden on a later re-render', async () => {

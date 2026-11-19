@@ -13,13 +13,17 @@ import { IsIn, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class
 
 const PERIOD_RE = /^\d{4}-\d{2}$/;
 
-/** ?status=HELD|RELEASED (default HELD) &clientId= &period=YYYY-MM for the reimbursement list. */
+/**
+ * ?status=HELD|HELD_ZERO|RELEASED (default HELD) &clientId= &period=YYYY-MM for the reimbursement list.
+ * HELD = the release queue (GST > ₹0). HELD_ZERO = HELD rows kept at ₹0 after their invoice was
+ * regenerated without GST (nothing to release; listed for the audit trail). Not a DB status.
+ */
 export class ListGstReimbursementQueryDto {
   /** Reimbursement status filter. Defaults to HELD (the Gifsy release queue) when omitted. */
   @IsOptional()
   @IsString()
-  @IsIn(['HELD', 'RELEASED'])
-  status?: 'HELD' | 'RELEASED';
+  @IsIn(['HELD', 'HELD_ZERO', 'RELEASED'])
+  status?: 'HELD' | 'HELD_ZERO' | 'RELEASED';
 
   /**
    * GIFSY may scope the list to a single tenant. CLIENT_ADMIN never reaches this endpoint

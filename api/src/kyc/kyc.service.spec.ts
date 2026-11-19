@@ -97,7 +97,11 @@ const mockPrisma = {
   // reviewQueue/reviewDump resolve each row's per-tenant outlet-type displayName (scoped to the
   // submission's own tenant). Default [] (set in beforeEach after the reset loop) → empty map →
   // the original outletType.name passes through (Deoleo parity).
-  outletTypeClientConfig: { findMany: jest.fn().mockResolvedValue([]) },
+  // findUnique: ledger() → shared resolveOutletWalletActivity → isLoyaltyEnabledForPartner.
+  outletTypeClientConfig: { findMany: jest.fn().mockResolvedValue([]), findUnique: jest.fn() },
+  // ledger() → resolveOutletWalletActivity (points presence: wallet balances, then any ledger row).
+  wallet: { findFirst: jest.fn() },
+  pointsLedger: { findFirst: jest.fn() },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   // assertCanViewSubmission's reassignment-aware allow-path looks up the outlet's
   // CURRENT active assignment (unassignedAt null) to a salesUser in the caller's subtree.
@@ -111,8 +115,9 @@ const mockPrisma = {
   walletTransaction: { findMany: jest.fn().mockResolvedValue([]) },
   // ledger() also unions the outlet's payouts via buildPayoutStatement (shared with the
   // partner wallet) → these findMany must exist (default: no payouts, so ledger resolves).
-  payoutTransaction: { findMany: jest.fn().mockResolvedValue([]) },
-  creditPayoutEntry: { findMany: jest.fn().mockResolvedValue([]) },
+  // findFirst: ledger() → resolveOutletWalletActivity (payout presence).
+  payoutTransaction: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn() },
+  creditPayoutEntry: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn() },
   consentRecord: { create: jest.fn() },
   kycVerificationItem: { upsert: jest.fn() },
   // slaMetrics resolves the TWO per-tenant SLA targets (field/gifsy) via findMany; the holiday
@@ -4898,6 +4903,124 @@ describe('KycService', () => {
       await expect(service.ledger(sss, 's1')).rejects.toBeInstanceOf(NotFoundException);
     });
 
+    // ── Shared-wallet meta: the SAME card signals as GET /v1/partner/me ──────────
+    describe('shared-wallet meta (cards match the partner wallet)', () => {
+      const resolveClient = () =>
+        (service as unknown as { tenant: { resolveClient: jest.Mock } }).tenant.resolveClient;
+      const seed = (wallet: Record<string, number> | null, outletTypeCode = 'SSS') => {
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'sss1', partnerId: 'p1',
+          partner: {
+            clientId: 'deoleo', businessName: 'Biz', phone: '98', outlets: [{ outletCode: 'OUT-1' }],
+            wallets: wallet ? [{ id: 'w1', ...wallet }] : [],
+          },
+        });
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          { name: 'Shop', outletCode: 'OUT-1', outletTypeId: 'ot1', outletType: { code: outletTypeCode } },
+        ]);
+        mockPrisma.wallet.findFirst.mockResolvedValue(
+          wallet ? { id: 'w1', redeemablePoints: wallet.redeemablePoints, lifetimeEarned: wallet.lifetimeEarned } : null,
+        );
+      };
+
+      it('payout-only retailer: hasPayoutActivity true, hasPointsActivity false, outletType from the primary outlet', async () => {
+        seed(null, 'SSS');
+        mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue({ id: 'cpe1' });
+        resolveClient().mockResolvedValue({ features: {} });
+        const res = await service.ledger(sss, 's1');
+        expect(res.meta).toMatchObject({
+          outletType: 'SSS', hasPointsActivity: false, hasPayoutActivity: true,
+          loyaltyEnabled: true, wholesalerPayoutInclActivation: false,
+        });
+        // Zeros (not undefined) when there is no wallet yet — the card reads these numbers.
+        expect(res.meta.walletBalance).toEqual({
+          earnedPoints: 0, lockedPoints: 0, redeemablePoints: 0, redeemedPoints: 0,
+          expiredPoints: 0, lifetimeEarned: 0, lifetimeRedeemed: 0,
+        });
+        // Tenant + partner scoped: the submission partner's outlets, in ITS tenant.
+        expect(mockPrisma.outlet.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', partnerId: 'p1', deletedAt: null });
+        expect(mockPrisma.creditPayoutEntry.findFirst.mock.calls[0][0].where).toEqual({
+          clientId: 'deoleo', outletId: { in: ['OUT-1'] }, status: { in: ['PENDING', 'PROCESSING', 'PAID'] },
+        });
+        expect(mockPrisma.payoutTransaction.findFirst.mock.calls[0][0].where).toEqual({
+          partnerId: 'p1', status: { notIn: ['FAILED', 'REVERSED'] },
+        });
+      });
+
+      it('wholesaler with points + payout: both flags, the partner-card balance fields, and the tenant Incl.-Activation flag ON', async () => {
+        seed({
+          earnedPoints: 1200, lockedPoints: 0, redeemablePoints: 700, redeemedPoints: 500,
+          expiredPoints: 0, lifetimeEarned: 1200, lifetimeRedeemed: 500,
+        }, 'WHOLESALER');
+        mockPrisma.payoutTransaction.findFirst.mockResolvedValue({ id: 'pt1' });
+        resolveClient().mockResolvedValue({ features: { wholesalerPayoutInclActivation: true } });
+        const res = await service.ledger(sss, 's1');
+        expect(res.meta).toMatchObject({
+          outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: true,
+          wholesalerPayoutInclActivation: true,
+        });
+        expect(res.meta.walletBalance).toEqual({
+          earnedPoints: 1200, lockedPoints: 0, redeemablePoints: 700, redeemedPoints: 500,
+          expiredPoints: 0, lifetimeEarned: 1200, lifetimeRedeemed: 500,
+        });
+        // The flag is read from the OUTLET's tenant.
+        expect(resolveClient()).toHaveBeenCalledWith('deoleo');
+      });
+
+      it('Incl.-Activation flag OFF (and a failed feature resolve) → false', async () => {
+        seed(null, 'WHOLESALER');
+        resolveClient().mockRejectedValue(new Error('db blip'));
+        const res = await service.ledger(sss, 's1');
+        expect(res.meta.wholesalerPayoutInclActivation).toBe(false);
+      });
+
+      it('points presence via a PointsLedger row when balances are zero; loyalty OFF from the outlet-type config', async () => {
+        seed({
+          earnedPoints: 0, lockedPoints: 0, redeemablePoints: 0, redeemedPoints: 0,
+          expiredPoints: 0, lifetimeEarned: 0, lifetimeRedeemed: 0,
+        });
+        mockPrisma.pointsLedger.findFirst.mockResolvedValue({ id: 'pl1' });
+        mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1' });
+        mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ loyaltyEnabled: false });
+        resolveClient().mockResolvedValue({ features: {} });
+        const res = await service.ledger(sss, 's1');
+        expect(res.meta.hasPointsActivity).toBe(true);
+        expect(res.meta.hasPayoutActivity).toBe(false);
+        expect(res.meta.loyaltyEnabled).toBe(false);
+        expect(mockPrisma.pointsLedger.findFirst.mock.calls[0][0].where).toEqual({ walletId: 'w1' });
+      });
+
+      it('scoping unchanged: an out-of-subtree SO is Forbidden BEFORE any activity/feature lookup', async () => {
+        primeSalesNodes([
+          { id: 'so-su', reportingToId: null, userId: 'so1' },
+          { id: 'far-su', reportingToId: null, userId: 'far-submitter' },
+        ]);
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'far-submitter', partnerId: 'p1',
+          partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [], wallets: [] },
+        });
+        mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null);
+        resolveClient().mockClear(); // the tenant mock is not part of the per-test prisma reset
+        await expect(service.ledger(so, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+        expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
+        expect(mockPrisma.creditPayoutEntry.findFirst).not.toHaveBeenCalled();
+        expect(resolveClient()).not.toHaveBeenCalled();
+      });
+
+      it('scoping unchanged: an in-subtree SO reads the meta; the submission where is tenant-scoped, not userId-restricted', async () => {
+        primeSalesNodes([
+          { id: 'so-su', reportingToId: null, userId: 'so1' },
+          { id: 'xsr-su', reportingToId: 'so-su', userId: 'sss1' },
+        ]);
+        seed(null, 'SSS');
+        mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue({ id: 'cpe1' });
+        resolveClient().mockResolvedValue({ features: {} });
+        const res = await service.ledger(so, 's1');
+        expect(mockPrisma.kycSubmission.findFirst.mock.calls[0][0].where).toEqual({ id: 's1', user: { clientId: 'deoleo' } });
+        expect(res.meta.hasPayoutActivity).toBe(true);
+      });
+    });
+
     // ── field-name resolution from the CreditBatch rows JSON ──────────────────
     describe('credit field-name resolution', () => {
       const wt = (over: Partial<Record<string, unknown>>) => ({
@@ -4929,7 +5052,7 @@ describe('KycService', () => {
           { id: 'b1', rows: [{ outletId: 'OUT-1', fieldName: 'Monthly Scheme', amount: 300, narration: '', awardType: 'POINTS' }] },
         ]);
         const res = await service.ledger(sss, 's1');
-        const tx = res.transactions.find((t) => t.id === 'c1');
+        const tx = res.statement.rows.find((t) => t.id === 'c1');
         expect(tx?.fieldName).toBe('Monthly Scheme');
         // Tenant-scoped batch query.
         expect(mockPrisma.creditBatch.findMany.mock.calls[0][0].where).toEqual({
@@ -4950,8 +5073,8 @@ describe('KycService', () => {
           ] },
         ]);
         const res = await service.ledger(sss, 's1');
-        expect(res.transactions.find((t) => t.id === 'c-old')?.fieldName).toBe('Field A');
-        expect(res.transactions.find((t) => t.id === 'c-new')?.fieldName).toBe('Field B');
+        expect(res.statement.rows.find((t) => t.id === 'c-old')?.fieldName).toBe('Field A');
+        expect(res.statement.rows.find((t) => t.id === 'c-new')?.fieldName).toBe('Field B');
       });
 
       it('gives a redeem (non-credit) tx fieldName null', async () => {
@@ -4959,7 +5082,7 @@ describe('KycService', () => {
           wt({ id: 'r1', transactionType: 'DEBIT_REDEMPTION', referenceType: 'REDEMPTION_ORDER', referenceId: 'ord1', points: -20 }),
         ]);
         const res = await service.ledger(sss, 's1');
-        expect(res.transactions.find((t) => t.id === 'r1')?.fieldName).toBeNull();
+        expect(res.statement.rows.find((t) => t.id === 'r1')?.fieldName).toBeNull();
         expect(mockPrisma.creditBatch.findMany).not.toHaveBeenCalled();
       });
     });
@@ -4970,7 +5093,7 @@ describe('KycService', () => {
         mockPrisma.kycSubmission.findFirst.mockResolvedValue({
           id: 's1', userId: 'sss1', partnerId: 'p1',
           partner: {
-            clientId: 'deoleo', businessName: 'Biz', phone: '98', outlets: [{ outletCode: 'OUT-1' }],
+            clientId: 'deoleo', businessName: 'Biz', phone: '98', outlets: [{ outletCode: 'OUT-1', name: 'Biz Outlet (master)' }],
             wallets: [{ id: 'w1', redeemablePoints, lifetimeEarned: 0, lifetimeRedeemed: 0 }],
           },
         });
@@ -4988,15 +5111,30 @@ describe('KycService', () => {
         return rows;
       };
 
-      it('ledger() returns ALL 250 points rows (was capped at 200), newest first, in the existing shape', async () => {
+      it('ledger() returns ALL 250 points rows (was capped at 200), oldest first, in the /wallet/statement row shape', async () => {
         seedWallet(chain(250), 2500);
         const res = await service.ledger(sss, 's1');
+        expect(res.statement.rows).toHaveLength(250);
+        expect(res.statement.rows[0].id).toBe('t0000');
+        // The SAME row shape GET /v1/wallet/statement returns (the partner wallet's mapping input).
+        expect(res.statement.rows[249]).toEqual({
+          id: 't0249', date: new Date(Date.UTC(2025, 0, 1) + 249 * 3_600_000).toISOString(),
+          transactionType: 'CREDIT_POINTS_EARNED', description: 'Points earned', narration: null,
+          fieldName: null, points: 10, balanceBefore: 2490, balanceAfter: 2500,
+          referenceType: null, referenceId: null,
+        });
+        expect(res.statement.currentBalance).toBe(2500);
+        expect(res.statement.outletCode).toBe('OUT-1');
+        // CONTRACT (one release of overlap, 2026-11-19): the LEGACY `transactions` array is still
+        // returned ALONGSIDE `statement`, so an old FE bundle against this API keeps its statement.
+        // TODO(2026-11-19): drop this half of the contract when `transactions` is removed.
         expect(res.transactions).toHaveLength(250);
         expect(res.transactions[0]).toEqual({
           id: 't0249', date: '2025-01-11', description: '', type: 'earn',
           points: 10, balance: 2500, ref: undefined, fieldName: null,
         });
         expect(res.transactions[249].id).toBe('t0000');
+        expect(res.transactions.map((t) => t.id)).toEqual([...res.statement.rows].reverse().map((r) => r.id));
         // The loader's query is per-wallet and unpaginated.
         const args = mockPrisma.walletTransaction.findMany.mock.calls[0][0];
         expect(args.where.walletId).toBe('w1');
@@ -5012,8 +5150,12 @@ describe('KycService', () => {
           partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [], wallets: [] },
         });
         const res = await service.ledger(sss, 's1');
-        expect(res.transactions).toEqual([]);
+        expect(res.statement.rows).toEqual([]);
         expect(mockPrisma.walletTransaction.findMany).not.toHaveBeenCalled();
+        // No partner → no activity → the sales screen draws NO cards (loyalty defaults ON).
+        expect(res.meta).toMatchObject({
+          outletType: null, hasPointsActivity: false, hasPayoutActivity: false, loyaltyEnabled: true,
+        });
       });
 
       it('ledgerStatement() returns the shared statement shape (oldest first, opening/closing, currentBalance) for the range', async () => {
@@ -5023,6 +5165,9 @@ describe('KycService', () => {
         expect(all.closingBalance).toBe(30);
         expect(all.currentBalance).toBe(30);
         expect(all.outletCode).toBe('OUT-1');
+        // Same outlet-name source as the partner download (GET /v1/wallet/statement → Outlet.name of
+        // the primary outlet, paired with that SAME row's code) — not the ChannelPartner businessName.
+        expect(all.outletName).toBe('Biz Outlet (master)');
         expect(all.rows.map((r) => r.id)).toEqual(['t0000', 't0001', 't0002']);
         expect(all.rows[0]).toMatchObject({ description: 'Points earned', narration: null, balanceBefore: 0, balanceAfter: 10 });
 
@@ -5038,7 +5183,17 @@ describe('KycService', () => {
           partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [], wallets: [] },
         });
         await expect(service.ledgerStatement(sss, 's1', {})).resolves.toEqual({
-          openingBalance: 0, closingBalance: 0, currentBalance: 0, outletCode: '', rows: [],
+          openingBalance: 0, closingBalance: 0, currentBalance: 0, outletCode: '', outletName: null, rows: [],
+        });
+      });
+
+      it('ledgerStatement() for a no-wallet (payout-only) outlet still names it with the outlet code + Outlet.name pair', async () => {
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'sss1', partnerId: 'p1',
+          partner: { clientId: 'deoleo', businessName: 'Biz', phone: 'p', outlets: [{ outletCode: 'OUT-7', name: 'Seven Stores' }], wallets: [] },
+        });
+        await expect(service.ledgerStatement(sss, 's1', {})).resolves.toMatchObject({
+          outletCode: 'OUT-7', outletName: 'Seven Stores', rows: [],
         });
       });
 
@@ -5267,6 +5422,49 @@ describe('KycService', () => {
         primeSalesNodes(TREE.map((n) => (n.id === 'isr-su' ? { ...n, deletedAt: undefined } : n)));
         // live isr under M under asm2 now → asm2 sees it even though the snapshot names asm1
         expect(await listSees(asm2, { userId: 'isr1', submitterManagerChain: SNAPSHOT })).toBe(true);
+      });
+
+      // K1 follow-up (2026-11-19): the list rows carry the FILING-TIME branch keys the Team-Member filter matches.
+      describe('member-filter keys (filingBranchKeys) on the list rows', () => {
+        const rsm: JwtPayload = { sub: 'rsm1', role: 'SALES_STATE_HEAD', clientId: 'deoleo', phone: '', name: '' };
+        const row = (id: string, userId: string, chain: string[]) => ({
+          id, userId, status: 'PENDING_ASM_APPROVAL', submitterManagerChain: chain, partner: null,
+          proposedPartner: null, documents: [], statusHistory: [], user: { id: userId, name: 'n', phone: 'p' },
+        });
+        const listRows = async (caller: JwtPayload, rows: unknown[]) => {
+          mockPrisma.kycSubmission.findMany.mockResolvedValue(rows);
+          mockPrisma.kycSubmission.count.mockResolvedValue(rows.length);
+          mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+          const res = await service.list(caller, {});
+          return res.submissions as Array<{ id: string; filingBranchKeys?: string[] }>;
+        };
+
+        it('rep REMOVED + manager MOVED: the row names the filing-time chain (asm1 branch), not today\'s link (asm2)', async () => {
+          primeSalesNodes(TREE);
+          const [r] = await listRows(rsm, [row('s1', 'isr1', SNAPSHOT)]);
+          // chain + the removed rep's own SalesUser id; asm2 (where M sits NOW) is absent → the RSM's
+          // "asm1" member keeps it, "asm2" does not.
+          expect(r.filingBranchKeys).toEqual(['m-su', 'asm1-su', 'rsm-su', 'isr-su']);
+          expect(r.filingBranchKeys).not.toContain('asm2-su');
+        });
+
+        it('LEGACY removed-rep row (no snapshot) carries no keys → the FE keeps the current-link match', async () => {
+          primeSalesNodes(TREE);
+          const [r] = await listRows(asm2, [row('s1', 'isr1', [])]);
+          expect(r).not.toHaveProperty('filingBranchKeys');
+        });
+
+        it('a LIVE submitter carries no keys even with a snapshot (current links, unchanged)', async () => {
+          primeSalesNodes(TREE.map((n) => (n.id === 'isr-su' ? { ...n, deletedAt: undefined } : n)));
+          const [r] = await listRows(asm2, [row('s1', 'isr1', SNAPSHOT)]);
+          expect(r).not.toHaveProperty('filingBranchKeys');
+        });
+
+        it('a tenant with no removed reps: no row carries keys (response shape unchanged)', async () => {
+          primeSalesNodes(TREE.filter((n) => n.id !== 'isr-su'));
+          const [r] = await listRows(asm2, [row('s1', 'm1', ['asm2-su', 'rsm-su'])]);
+          expect(r).not.toHaveProperty('filingBranchKeys');
+        });
       });
     });
 

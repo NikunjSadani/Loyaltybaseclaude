@@ -273,6 +273,16 @@ describe('proxy — Step 2: passthroughs before auth', () => {
     expect(fwd(res, 'authorization')).toBeNull();
   });
 
+  // Help & videos: the <video> element's Range requests carry only the signed query token.
+  it('PUBLIC_EXACT_PATHS (/api/help/media) passes through without a token cookie; siblings do not', async () => {
+    const res = await run(makeReq('/api/help/media?token=t'));
+    expect(isNext(res)).toBe(true);
+    expect(res.status).not.toBe(401);
+    expect(fwd(res, 'authorization')).toBeNull();
+    expect((await run(makeReq('/api/help/media-other'))).status).toBe(401);
+    expect((await run(makeReq('/api/help'))).status).toBe(401);
+  });
+
   it('other /api/public/* paths are NOT exempt → 401 without a token', async () => {
     const res = await run(makeReq('/api/public/something-else'));
     expect(res.status).toBe(401);

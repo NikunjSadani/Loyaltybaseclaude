@@ -290,16 +290,16 @@ export class SalesService {
     // 2026-07-03), not just that person's own submissions. Reuses the hierarchy walk.
     const userIdBySalesUserId = new Map(edges.map((s) => [s.id, s.userId]));
     const edgeById = new Map(edges.map((e) => [e.id, e]));
-    /** Login ids of the REMOVED managers between the caller and a (promoted) member — empty for a direct report. */
-    const removedManagersAbove = (memberId: string): string[] => {
-      const out: string[] = [];
+    /** The REMOVED managers (nodes) between the caller and a (promoted) member — empty for a direct report. */
+    const removedManagersAbove = (memberId: string): SalesHierarchyNode[] => {
+      const out: SalesHierarchyNode[] = [];
       const seen = new Set<string>([memberId]);
       let cur = edgeById.get(memberId)?.reportingToId ?? null;
       while (cur && cur !== salesUser.id && !seen.has(cur)) {
         seen.add(cur);
         const n = edgeById.get(cur);
         if (!n || n.deletedAt == null) break;
-        out.push(n.userId);
+        out.push(n);
         cur = n.reportingToId;
       }
       return out;
@@ -313,10 +313,16 @@ export class SalesService {
       // ids — the KYCs a removed SO filed himself stay findable under the member filter instead of vanishing.
       // Chosen over a separate "Removed: <name>" option: no new row type on the Team screen (these rows also
       // drive the team list + tiles), and the removed SO's branch is exactly what the promoted reps now carry.
+      const removedAbove = removedManagersAbove(sub.id);
       const submitterUserIds = [
         ...[...descendantSalesUserIds(sub.id, edges, { includeDeleted: true })].map((id) => userIdBySalesUserId.get(id)),
-        ...removedManagersAbove(sub.id),
+        ...removedAbove.map((n) => n.userId),
       ].filter((v, i, arr): v is string => !!v && arr.indexOf(v) === i);
+      // K1 follow-up (2026-11-19): the FILING-TIME keys of this member's branch — the member's own SalesUser.id
+      // + the removed managers above a promoted member (K4: a removed SO's own KYCs ride with them). A KYC row
+      // carrying `filingBranchKeys` (a REMOVED rep's KYC with a snapshot chain, GET /kyc) belongs to this member
+      // when the two intersect; such rows are matched ONLY this way, never by `submitterUserIds`.
+      const branchKeys = [sub.id, ...removedAbove.map((n) => n.id)];
       return {
         id: sub.id,
         employeeCode: sub.employeeCode,
@@ -328,6 +334,8 @@ export class SalesService {
         teamSize: sub._count.subordinates,
         // Login-User ids of this report + their whole downline (KYC-list branch filter).
         submitterUserIds,
+        // Filing-time branch keys (KYC-list filter for removed reps' snapshot-chain KYCs).
+        branchKeys,
         joinedAt: sub.joinedAt.toISOString(),
         // Whole-subtree rollup (self + downline) — drives the FE My-Team tiles.
         outlets: roll.outlets,

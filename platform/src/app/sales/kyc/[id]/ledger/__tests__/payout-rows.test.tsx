@@ -23,8 +23,10 @@ vi.mock('next/link', () => ({
 
 import OutletLedgerPage from '../page';
 
+// `statement.rows` — the SAME row shape as GET /api/wallet/statement.
 const TXS = [
-  { id: 't1', date: '2026-05-05', description: 'Q1 push', type: 'credit', points: 300, balance: 300, ref: 'r1', fieldName: 'Monthly Scheme' },
+  { id: 't1', date: '2026-05-05T06:00:00.000Z', transactionType: 'CREDIT_BONUS', description: 'Q1 push', narration: 'Q1 push',
+    fieldName: 'Monthly Scheme', points: 300, balanceBefore: 0, balanceAfter: 300, referenceType: 'CREDIT_BATCH', referenceId: 'r1' },
 ];
 const PAYOUTS = [
   // PAID credit payout — ₹5,000 with a UTR
@@ -40,8 +42,10 @@ function stubLedger() {
     json: () => Promise.resolve({
       success: true,
       data: {
-        meta: { name: 'Verma Traders', outletCode: 'OUT-2026-00111', mobile: '9876543210', balance: 300, lifetime: 300, redeemed: 0 },
-        transactions: TXS,
+        meta: { name: 'Verma Traders', outletCode: 'OUT-2026-00111', mobile: '9876543210', balance: 300, lifetime: 300, redeemed: 0,
+          // SSS keeps the "Visibility" KPI option (same rule as the partner wallet).
+          outletType: 'SSS', hasPointsActivity: true, hasPayoutActivity: true, loyaltyEnabled: true },
+        statement: { rows: TXS },
         payouts: PAYOUTS,
       },
     }),
@@ -68,7 +72,10 @@ describe('PL — sales outlet ledger payout rows', () => {
     stubLedger();
     await renderLedger('k1');
     expect(await screen.findByText('Visibility · May 2026')).toBeInTheDocument();
-    expect(await screen.findByText('₹5,000')).toBeInTheDocument();
+    // ₹5,000 appears on the row AND (now that the payout card is drawn, as on the partner wallet)
+    // on the card's Lifetime/Last-month figures — assert the ROW carries it.
+    const header = await screen.findByText('Visibility · May 2026');
+    expect(header.closest('div.flex')?.textContent ?? '').toContain('₹5,000');
     expect(await screen.findByText(/UTR9/)).toBeInTheDocument();
   });
 
@@ -96,8 +103,9 @@ describe('PL — sales outlet ledger payout rows', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          meta: { name: 'Verma Traders', outletCode: 'OUT-1', mobile: '9', balance: 0, lifetime: 0, redeemed: 0 },
-          transactions: [],
+          meta: { name: 'Verma Traders', outletCode: 'OUT-1', mobile: '9', balance: 0, lifetime: 0, redeemed: 0,
+            outletType: 'SSS', hasPointsActivity: false, hasPayoutActivity: true, loyaltyEnabled: true },
+          statement: { rows: [] },
           payouts: [{ id: 'p9', period: '2026-03', kpiLabel: 'Edge', achievedPct: 100, payoutAmountPaise: 100000,
             uploadedAt: '2026-03-31T19:00:00.000Z', paidAt: '2026-03-31T19:00:00.000Z', utr: 'U', status: 'PAID' }],
         },
