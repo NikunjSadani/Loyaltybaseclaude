@@ -578,6 +578,10 @@ export interface VisibilityCaptureRow {
   receivedAt: string | null;
   rejectionReasonCode: VisibilityRejectReasonCode | string | null;
   submittedBy: { id: string; employeeCode: string } | null;
+  /** The outlet's programme (`Outlet.programName`, e.g. "Unnati"); null/absent when unset. */
+  programName?: string | null;
+  /** The outlet's sub-programme (`Outlet.programCategory`, e.g. "Elite"); null/absent when unset. */
+  programCategory?: string | null;
 }
 
 export interface VisibilityCaptureListResponse {
@@ -660,6 +664,10 @@ export interface VisibilityCaptureDetail extends VisibilityCapture {
   submissions: VisibilityCaptureSubmission[];
   submittedBy: { id: string; employeeCode: string } | null;
   approvedBy: { id: string; name: string } | null;
+  /** The outlet's programme (`Outlet.programName`); null/absent when unset. */
+  programName?: string | null;
+  /** The outlet's sub-programme (`Outlet.programCategory`); null/absent when unset. */
+  programCategory?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

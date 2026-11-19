@@ -4,10 +4,15 @@
  * VisibilityCaptureQueue — the REAL GIFSY_ADMIN approve/reject queue for Visibility
  * (POSM) captures (VISIBILITY-POSM-DESIGN.md D12). Replaces the dead fake photo queue.
  *
- * A filterable capture list (window / status / outlet) + a detail drawer (cloned-and-
- * adapted from the Scheme EnrollmentDrawer) showing:
- *   - captured field values,
- *   - a media grid (auth-gated via rewriteMediaViewPath),
+ * A filterable capture list (window / status / outlet; Program + Sub-Program column) + a
+ * CENTRED review dialog (~90% viewport; full-screen on a phone; owner request 2026-11-19):
+ *   - header: outlet name + code, Program (Outlet.programName) + Sub-Program
+ *     (Outlet.programCategory), window, rep, geo-fence verdict, duplicate flag,
+ *   - the photos LARGE (object-contain): two side by side (stacked on narrow screens),
+ *     one large + centred; label + per-photo fence badge under each; click = full size,
+ *   - the decision area BELOW the photos, then an explicit "Next capture" button,
+ *   - then compact details: captured field values,
+ *   - (photos are auth-gated via rewriteMediaViewPath),
  *   - a geo pin + geo-fence badge (distanceMeters + ok / outside / unverifiable),
  *   - duplicate-photo matches ("same photo also on outlet X / window Y"),
  *   - the append-only submission history,
@@ -16,10 +21,10 @@
  * It does NOT import the scheme feature.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ClipboardList, AlertCircle, X, Loader2, MapPin, ExternalLink, History,
-  Image as ImageIcon, XCircle, CheckCircle2, Filter, Copy, Check,
+  Image as ImageIcon, XCircle, CheckCircle2, Filter, Copy, Check, ChevronRight,
 } from 'lucide-react';
 import {
   visibilityApi, rewriteMediaViewPath,
@@ -55,6 +60,19 @@ function statusLabel(status: string): string {
   return VISIBILITY_CAPTURE_STATUS_LABELS[status as VisibilityCaptureStatus] ?? status;
 }
 
+/**
+ * The next capture awaiting review (status SUBMITTED) in the loaded list, after `currentId`
+ * in list order (wrapping to the top), excluding the current one. If the current capture
+ * dropped out of the list after a decision (e.g. the default "Submitted" filter), the search
+ * starts at the top — which is where the next one now sits. Only the loaded page is
+ * considered; null = none on this page.
+ */
+function nextPendingId(rows: VisibilityCaptureRow[], currentId: string): string | null {
+  const idx = rows.findIndex((r) => r.id === currentId);
+  const ordered = idx < 0 ? rows : [...rows.slice(idx + 1), ...rows.slice(0, idx)];
+  return ordered.find((r) => r.id !== currentId && r.status === 'SUBMITTED')?.id ?? null;
+}
+
 export function VisibilityCaptureQueue() {
   const [rows, setRows] = useState<VisibilityCaptureRow[]>([]);
   const [pagination, setPagination] = useState<Pagination | null>(null);
@@ -88,6 +106,37 @@ export function VisibilityCaptureQueue() {
     setLoading(false);
   }, [query]);
 
+  // Quiet refresh after a review decision: the rows stay mounted (an inline "Refreshing…"
+  // shows instead of the full-list spinner) so the row's Review button — the dialog's
+  // focus-restore target — survives. A failed quiet refresh keeps the rows and says so.
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    setRefreshError(null);
+    const res = await visibilityApi.listCaptures(query);
+    if (res.success) {
+      setRows(res.data.captures);
+      setPagination(res.data.pagination ?? null);
+    } else {
+      setRefreshError(res.error);
+    }
+    setRefreshing(false);
+  }, [query]);
+
+  // Focus restore when the review dialog closes and its opener is gone (the reviewed row
+  // dropped out of the filtered list): that row's Review button if still listed, else the
+  // list heading.
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const lastOpenIdRef = useRef<string | null>(null);
+  useEffect(() => { if (openId) lastOpenIdRef.current = openId; }, [openId]);
+  const restoreFocusFallback = useCallback(() => {
+    const id = lastOpenIdRef.current;
+    const btn = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-review-id]'))
+      .find((b) => b.dataset.reviewId === id);
+    (btn ?? headingRef.current)?.focus();
+  }, []);
+
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { setPage(1); }, [status, windowKey, outletCode]);
 
@@ -114,6 +163,24 @@ export function VisibilityCaptureQueue() {
         )}
       </div>
 
+      {/* List heading (also the focus-restore fallback) + quiet-refresh status */}
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 ref={headingRef} tabIndex={-1} className="text-sm font-semibold text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] rounded">
+          Captures{pagination ? ` (${pagination.total})` : ''}
+        </h2>
+        {refreshing && (
+          <span className="inline-flex items-center gap-1 text-xs text-gray-500" role="status">
+            <Loader2 className="w-3 h-3 animate-spin" /> Refreshing…
+          </span>
+        )}
+        {refreshError && (
+          <span className="inline-flex items-center gap-1 text-xs text-red-600" role="alert">
+            <AlertCircle className="w-3 h-3" /> Couldn&apos;t refresh the list: {refreshError}
+            <button onClick={() => void refresh()} className="ml-1 text-[var(--brand-primary)] hover:underline">Retry</button>
+          </span>
+        )}
+      </div>
+
       {/* List */}
       {loading ? (
         <div className="flex items-center justify-center py-16"><Loader2 className="w-6 h-6 text-gray-300 animate-spin" aria-label="Loading" /></div>
@@ -131,7 +198,7 @@ export function VisibilityCaptureQueue() {
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
-                  {['Outlet', 'Window', 'Geo-fence', 'Rep', 'Status', ''].map((h) => (
+                  {['Outlet', 'Program', 'Window', 'Geo-fence', 'Rep', 'Status', ''].map((h) => (
                     <th key={h} className="px-4 py-2.5 text-left text-xs font-medium text-gray-500">{h}</th>
                   ))}
                 </tr>
@@ -143,6 +210,12 @@ export function VisibilityCaptureQueue() {
                       <p className="font-medium text-gray-900">{r.outletName || <span className="text-gray-400 italic">Unnamed</span>}</p>
                       <p className="text-xs text-gray-400 font-mono">{r.outletCode}</p>
                     </td>
+                    {/* Program (Outlet.programName) over Sub-Program (Outlet.programCategory) —
+                        the same stacked layout as the Outlets list. */}
+                    <td className="px-4 py-2.5" data-testid={`row-program-${r.id}`}>
+                      <p className="text-xs font-medium text-gray-700">{r.programName || '—'}</p>
+                      <p className="text-[11px] text-gray-500">{r.programCategory || '—'}</p>
+                    </td>
                     <td className="px-4 py-2.5 text-xs text-gray-600 font-mono">{r.windowKey}</td>
                     <td className="px-4 py-2.5"><GeoBadge geoFenceOk={r.geoFenceOk} distanceMeters={r.distanceMeters} /></td>
                     <td className="px-4 py-2.5 text-xs text-gray-600 font-mono">{r.submittedBy?.employeeCode ?? '—'}</td>
@@ -150,7 +223,7 @@ export function VisibilityCaptureQueue() {
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[r.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(r.status)}{r.currentVersion > 1 ? ` · v${r.currentVersion}` : ''}</span>
                     </td>
                     <td className="px-4 py-2.5 text-right">
-                      <button onClick={() => setOpenId(r.id)} className="text-xs text-[var(--brand-primary)] font-medium hover:underline">Review</button>
+                      <button onClick={() => setOpenId(r.id)} data-review-id={r.id} className="text-xs text-[var(--brand-primary)] font-medium hover:underline">Review</button>
                     </td>
                   </tr>
                 ))}
@@ -170,7 +243,18 @@ export function VisibilityCaptureQueue() {
       )}
 
       {openId && (
-        <CaptureDrawer captureId={openId} onClose={() => setOpenId(null)} onChanged={load} />
+        <ReviewDialog onClose={() => setOpenId(null)} onRestoreFocusFallback={restoreFocusFallback}>
+          {/* Keyed by capture so "Next capture" starts a fresh review (state reset) while the
+              dialog shell — and its focus-restore target — stays mounted. */}
+          <CaptureReview
+            key={openId}
+            captureId={openId}
+            onClose={() => setOpenId(null)}
+            onChanged={() => { void refresh(); }}
+            nextId={nextPendingId(rows, openId)}
+            onNext={(id) => setOpenId(id)}
+          />
+        </ReviewDialog>
       )}
     </div>
   );
@@ -215,15 +299,43 @@ function PhotoFenceBadge({ status }: { status: PhotoFenceStatus }) {
 // ── Per-photo card (image + geotag + per-photo review controls) ────────────────
 
 /**
- * One photo in the capture-review drawer: the image (opens full-size), its per-photo
- * geotag/fence badge, and — for a MULTI-photo capture — its own review state + Approve/
- * Reject controls. For a single-photo capture `showReview` is false and the decision lives
- * on the whole-capture Approve/Reject at the bottom (identical to today).
+ * One photo in the capture-review dialog: the image shown LARGE (object-contain, so the
+ * whole frame is judgeable without opening it; clicking opens it full-size in a new tab),
+ * the field label + its per-photo geotag/fence badge UNDER it, and — for a MULTI-photo
+ * capture — its own review state + Approve/Reject controls. For a single-photo capture
+ * `showReview` is false and the decision lives on the whole-capture Approve/Reject below
+ * the photos (identical behaviour to before).
  */
+/**
+ * Photo height, sized so header + photo(s) + caption (+ per-photo controls) + the sticky
+ * decision bar fit inside the 90vh dialog on a 1366×768 laptop (90vh ≈ 691 px):
+ *   - phone (< sm, full-screen dialog, photos stacked): a fixed share of the viewport;
+ *   - sm+: 90vh minus the measured chrome (header ≈ 7.5rem, section title, caption,
+ *     per-photo controls ≈ 3rem, decision bar ≈ 4rem, paddings), with a floor;
+ *   - `tight` (duplicate-match flags or a rejection banner above the photos) takes
+ *     another ~5rem off so the photos still end above the decision bar.
+ * The decision bar is ALSO sticky, so it stays reachable whatever the content height.
+ */
+function photoHeightClass(single: boolean, tight: boolean): string {
+  if (single) {
+    return tight
+      ? 'h-[45vh] sm:h-[calc(90vh-24rem)] min-h-[12rem]'
+      : 'h-[45vh] sm:h-[calc(90vh-19rem)] min-h-[12rem]';
+  }
+  return tight
+    ? 'h-[40vh] sm:h-[calc(90vh-28rem)] min-h-[10rem]'
+    : 'h-[40vh] sm:h-[calc(90vh-23rem)] min-h-[10rem]';
+}
+
 function PhotoCard({
-  media: m, showReview, reviewable, busy, disabled, onReview,
+  media: m, outletName, single, tight, showReview, reviewable, busy, disabled, onReview,
 }: {
   media: VisibilityMediaRef;
+  outletName: string;
+  /** The only photo on the capture → shown larger and centred. */
+  single: boolean;
+  /** Extra content above the photos (duplicates / rejection banner) → shorter photos. */
+  tight: boolean;
   showReview: boolean;
   reviewable: boolean;
   busy: boolean;
@@ -237,55 +349,56 @@ function PhotoCard({
 }) {
   const href = rewriteMediaViewPath(m.viewPath);
   const geo = m.geo;
+  const imgHeight = photoHeightClass(single, tight);
   return (
-    <div className="border border-gray-200 rounded-lg overflow-hidden" data-testid={`photo-card-${m.fieldId}`}>
+    <figure
+      className={`border border-gray-200 rounded-lg overflow-hidden flex flex-col bg-white ${single ? 'w-full max-w-4xl mx-auto' : 'w-full'}`}
+      data-testid={`photo-card-${m.fieldId}`}
+    >
       <a href={href} target="_blank" rel="noopener noreferrer"
-        className="block hover:border-[var(--brand-primary)] transition-colors group">
+        title="Open full size in a new tab"
+        aria-label={`Open ${m.label} full size`}
+        className="block bg-gray-900/5 hover:bg-gray-900/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--brand-primary)]">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={href} alt={m.label} className="w-full h-24 object-cover bg-gray-50" />
-        <div className="px-2 py-1.5 flex items-center gap-1 text-[10px] text-gray-600">
-          <ImageIcon className="w-3 h-3" />
-          <span className="truncate flex-1">{m.label}</span>
-          <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-[var(--brand-primary)]" />
-        </div>
+        <img
+          src={href}
+          alt={`${m.label} — ${outletName || 'outlet'}`}
+          data-testid={`photo-img-${m.fieldId}`}
+          className={`w-full ${imgHeight} object-contain`}
+        />
+      </a>
+      <figcaption className="px-3 py-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs border-t border-gray-100">
+        <span className="flex items-center gap-1 font-medium text-gray-700 min-w-0">
+          <ImageIcon className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+          <span className="truncate">{m.label}</span>
+          <a href={href} target="_blank" rel="noopener noreferrer" tabIndex={-1} aria-hidden
+            className="text-gray-300 hover:text-[var(--brand-primary)]"><ExternalLink className="w-3 h-3" /></a>
+        </span>
         {/* Per-photo geotag: this photo's own GPS + its fence status. Absent for a legacy
             bare-string photo (no geo, no per-photo status). */}
-        {(m.geo || m.fenceStatus) && (
-          <div className="px-2 pb-1.5 flex items-center justify-between gap-1 text-[10px]">
-            {geo ? (
-              <span
-                role="link"
-                tabIndex={0}
+        {(geo || m.fenceStatus) && (
+          <span className="flex items-center gap-2 text-[11px]">
+            {geo && (
+              <a
+                href={`https://www.google.com/maps?q=${geo.lat},${geo.lng}`}
+                target="_blank"
+                rel="noopener noreferrer"
                 title="Open in Google Maps"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  window.open(`https://www.google.com/maps?q=${geo.lat},${geo.lng}`, '_blank', 'noopener,noreferrer');
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    window.open(`https://www.google.com/maps?q=${geo.lat},${geo.lng}`, '_blank', 'noopener,noreferrer');
-                  }
-                }}
-                className="inline-flex items-center gap-0.5 text-[var(--brand-primary)] hover:underline cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-1"
+                className="inline-flex items-center gap-0.5 text-[var(--brand-primary)] hover:underline rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-1"
               >
-                <MapPin className="w-2.5 h-2.5" />
+                <MapPin className="w-3 h-3" />
                 {geo.lat.toFixed(5)}, {geo.lng.toFixed(5)}
-              </span>
-            ) : (
-              <span />
+              </a>
             )}
             {m.fenceStatus && (
-              <span className="inline-flex items-center gap-1">
-                <span className="text-gray-400">this photo</span>
+              <span className="inline-flex items-center gap-1" data-testid={`photo-fence-${m.fieldId}`}>
+                <span className="text-gray-500">this photo</span>
                 <PhotoFenceBadge status={m.fenceStatus} />
               </span>
             )}
-          </div>
+          </span>
         )}
-      </a>
+      </figcaption>
       {showReview && (
         <PhotoReviewControls
           fieldId={m.fieldId}
@@ -296,7 +409,7 @@ function PhotoCard({
           onReview={onReview}
         />
       )}
-    </div>
+    </figure>
   );
 }
 
@@ -327,6 +440,14 @@ function PhotoReviewControls({
   const status = review?.status ?? null;
   const spin = busy;
 
+  // Closing the reject form (Cancel / Escape) returns focus to its Reject trigger.
+  const rejectBtnRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (wasOpen.current && !rejectOpen) rejectBtnRef.current?.focus();
+    wasOpen.current = rejectOpen;
+  }, [rejectOpen]);
+
   // Current-decision badge (always shown).
   const badge =
     status === 'APPROVED' ? (
@@ -341,7 +462,7 @@ function PhotoReviewControls({
           : ''}
       </span>
     ) : (
-      <span data-testid={`photo-review-${fieldId}`} className="text-[11px] font-medium text-gray-400">Pending</span>
+      <span data-testid={`photo-review-${fieldId}`} className="text-[11px] font-medium text-gray-500">Pending</span>
     );
 
   if (!reviewable) {
@@ -349,7 +470,7 @@ function PhotoReviewControls({
   }
 
   return (
-    <div className="px-2 py-2 border-t border-gray-100 bg-gray-50 space-y-2">
+    <div className="px-2 py-2 border-t border-gray-100 bg-gray-50 space-y-2" data-photo-controls={fieldId}>
       <div className="flex items-center justify-between gap-2">
         {badge}
         {review?.reason && (
@@ -358,7 +479,10 @@ function PhotoReviewControls({
       </div>
 
       {rejectOpen ? (
-        <div className="space-y-1.5">
+        <div className="space-y-1.5"
+          // Escape inside the reject form closes only the form (the typed note is kept) —
+          // never the whole dialog.
+          onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setRejectOpen(false); } }}>
           <select value={reasonCode} onChange={(e) => setReasonCode(e.target.value as VisibilityRejectReasonCode)}
             aria-label={`Reject reason for ${fieldId}`}
             className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-red-400">
@@ -367,13 +491,14 @@ function PhotoReviewControls({
             ))}
           </select>
           <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2}
+            aria-label={`Reject detail for ${fieldId} (optional)`}
             placeholder="Optional detail — the rep re-captures only this photo."
             className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-red-400 resize-none" />
           <div className="flex gap-2 justify-end">
             <button onClick={() => { setRejectOpen(false); }} className="px-2 py-1 text-[11px] border border-gray-200 rounded-lg text-gray-600 hover:bg-white">Cancel</button>
             <button
               onClick={() => { onReview(fieldId, 'REJECTED', reasonCode, reason.trim() || undefined); setRejectOpen(false); setReason(''); }}
-              disabled={spin}
+              disabled={spin || disabled}
               className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-60">
               {spin ? <Loader2 className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3" />} Reject photo
             </button>
@@ -391,6 +516,7 @@ function PhotoReviewControls({
           )}
           {status !== 'REJECTED' && (
             <button
+              ref={rejectBtnRef}
               onClick={() => setRejectOpen(true)}
               disabled={spin || disabled}
               className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium border border-red-200 text-red-600 rounded-lg hover:bg-red-50 disabled:opacity-60">
@@ -403,31 +529,147 @@ function PhotoReviewControls({
   );
 }
 
-// ── Detail drawer ─────────────────────────────────────────────────────────────
+// ── Review dialog (centred modal shell) ──────────────────────────────────────
 
-function CaptureDrawer({
-  captureId, onClose, onChanged,
-}: { captureId: string; onClose: () => void; onChanged: () => void }) {
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Guard for closing the dialog while a rejection note is typed (whole-capture or per-photo
+ * reject form): asks "Discard the rejection note?" — true = OK to close.
+ */
+function confirmDiscardNote(): boolean {
+  const dialog = document.querySelector('[data-testid="capture-review-dialog"]');
+  const dirty = !!dialog && Array.from(dialog.querySelectorAll('textarea')).some((t) => t.value.trim() !== '');
+  return !dirty || window.confirm('Discard the rejection note?');
+}
+
+/**
+ * The centred review modal: ~90% of the viewport on desktop, full-screen on a phone.
+ * Accessibility: role=dialog + aria-modal, focus moves inside on open, Tab/Shift+Tab are
+ * trapped inside, Escape closes (an Escape inside an open reject form closes only that
+ * form; closing with a typed rejection note asks first), and focus returns to the element
+ * that opened it (the row's "Review" button) — or, if that row left the list, to
+ * `onRestoreFocusFallback`. The shell stays mounted across "Next capture" so the restore
+ * target is the original opener.
+ */
+function ReviewDialog({ onClose, onRestoreFocusFallback, children }: {
+  onClose: () => void;
+  onRestoreFocusFallback: () => void;
+  children: React.ReactNode;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  const fallbackRef = useRef(onRestoreFocusFallback);
+  useEffect(() => { onCloseRef.current = onClose; fallbackRef.current = onRestoreFocusFallback; }, [onClose, onRestoreFocusFallback]);
+
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    panelRef.current?.focus();
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      if (opener && opener !== document.body && typeof opener.focus === 'function' && document.contains(opener)) opener.focus();
+      else fallbackRef.current();
+    };
+  }, []);
+
+  const requestClose = () => { if (confirmDiscardNote()) onCloseRef.current(); };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      requestClose();
+      return;
+    }
+    if (e.key !== 'Tab' || !panelRef.current) return;
+    const nodes = Array.from(panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE))
+      .filter((n) => n.getAttribute('aria-hidden') !== 'true');
+    if (nodes.length === 0) { e.preventDefault(); return; }
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === panelRef.current)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center sm:p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={requestClose} aria-hidden data-testid="capture-review-backdrop" />
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Capture review"
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
+        data-testid="capture-review-dialog"
+        className="relative bg-white shadow-2xl flex flex-col overflow-hidden w-full h-full sm:w-[90vw] sm:h-[90vh] sm:max-w-[1600px] sm:rounded-xl focus:outline-none"
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ── Review content (header → photos → decision → details) ─────────────────────
+
+function CaptureReview({
+  captureId, onClose, onChanged, nextId, onNext,
+}: {
+  captureId: string;
+  onClose: () => void;
+  onChanged: () => void;
+  /** The next SUBMITTED capture in the loaded list (null = none on this page). */
+  nextId: string | null;
+  onNext: (id: string) => void;
+}) {
   const [detail, setDetail] = useState<VisibilityCaptureDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Set once a decision in THIS dialog has moved the capture out of review → offer "Next capture".
+  const [decided, setDecided] = useState(false);
 
   const [rejectOpen, setRejectOpen] = useState(false);
   const [reasonCode, setReasonCode] = useState<VisibilityRejectReasonCode>('BLURRY');
   const [reason, setReason] = useState('');
+  // Closing the whole-capture reject form (Cancel / Escape) returns focus to "Reject".
+  const rejectAllBtnRef = useRef<HTMLButtonElement>(null);
+  const rejectWasOpen = useRef(false);
+  useEffect(() => {
+    if (rejectWasOpen.current && !rejectOpen) rejectAllBtnRef.current?.focus();
+    rejectWasOpen.current = rejectOpen;
+  }, [rejectOpen]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // The spinner shows only on the first load (this component is keyed per capture); a
+  // reload after a decision refreshes in place so focus stays inside the dialog.
+  const load = useCallback(async (): Promise<VisibilityCaptureDetail | null> => {
     setError(null);
     const res = await visibilityApi.getCapture(captureId);
-    if (res.success) setDetail(res.data.capture);
+    let fresh: VisibilityCaptureDetail | null = null;
+    if (res.success) { fresh = res.data.capture; setDetail(fresh); }
     else setError(res.error);
     setLoading(false);
+    return fresh;
   }, [captureId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // After a decision the Approve/Reject buttons may unmount (e.g. APPROVED) — move focus to
+  // "Next capture" (or the saved notice) so keyboard focus never falls out of the dialog.
+  const nextBoxRef = useRef<HTMLDivElement>(null);
+  const nextBtnRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (decided) (nextBtnRef.current ?? nextBoxRef.current)?.focus();
+  }, [decided]);
 
   // Per-photo review (per CAMERA field). Tracks which field is mid-call so only that
   // card's controls disable. After each decision we reload the detail (the backend
@@ -444,16 +686,41 @@ function CaptureDrawer({
     setActionError(null);
     const res = await visibilityApi.reviewPhoto(captureId, { fieldId, decision, reasonCode, reason });
     setPhotoBusy(null);
-    if (res.success) { await load(); onChanged(); }
-    else setActionError(res.error);
+    if (res.success) {
+      // Focus target for after the reload: the next still-pending photo's controls.
+      focusAfterPhotoRef.current = fieldId;
+      const fresh = await load();
+      onChanged();
+      // A per-photo decision completes the review only when NO photo is still pending —
+      // rejecting photo 1 of 3 already derives CHANGES_REQUESTED server-side, but the
+      // reviewer still has photos 2 and 3 to judge, so the review stays open.
+      if (fresh && fresh.media.length > 0 && fresh.media.every((m) => m.review?.status)) setDecided(true);
+    } else setActionError(res.error);
   };
+
+  // After a per-photo decision re-renders the cards, move focus to the next pending photo's
+  // first enabled control (in photo order, wrapping) so the reviewer can carry on by keyboard.
+  const focusAfterPhotoRef = useRef<string | null>(null);
+  useEffect(() => {
+    const from = focusAfterPhotoRef.current;
+    if (!from || !detail) return;
+    focusAfterPhotoRef.current = null;
+    const media = detail.media;
+    const idx = media.findIndex((m) => m.fieldId === from);
+    const ordered = [...media.slice(idx + 1), ...media.slice(0, Math.max(idx, 0))];
+    const target = ordered.find((m) => !m.review?.status);
+    if (!target) return; // all decided → the "Next capture" focus effect takes over
+    const box = Array.from(document.querySelectorAll<HTMLElement>('[data-photo-controls]'))
+      .find((n) => n.dataset.photoControls === target.fieldId);
+    box?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus();
+  }, [detail]);
 
   const approve = async () => {
     setBusy(true);
     setActionError(null);
     const res = await visibilityApi.approveCapture(captureId);
     setBusy(false);
-    if (res.success) { await load(); onChanged(); }
+    if (res.success) { await load(); onChanged(); setDecided(true); }
     else setActionError(res.error);
   };
 
@@ -462,196 +729,269 @@ function CaptureDrawer({
     setActionError(null);
     const res = await visibilityApi.rejectCapture(captureId, { reasonCode, reason: reason.trim() || undefined });
     setBusy(false);
-    if (res.success) { setRejectOpen(false); setReason(''); await load(); onChanged(); }
+    if (res.success) { setRejectOpen(false); setReason(''); await load(); onChanged(); setDecided(true); }
     else setActionError(res.error);
   };
 
   const captured = (detail?.formValues ?? {}) as Record<string, unknown>;
   const specialIds = new Set<string>([...(detail?.media ?? []).map((m) => m.fieldId), ...(detail?.geo ?? []).map((g) => g.fieldId)]);
+  const capturedEntries = Object.entries(captured).filter(([k]) => !specialIds.has(k));
 
   // Per-photo review surface. `anyRejected` blocks the whole-capture Approve (a rejected
   // photo must be re-captured first). `multiPhoto` decides whether per-photo controls show:
-  // a single-photo capture collapses to the whole-capture decision (identical to today).
+  // a single-photo capture collapses to the whole-capture decision (identical to before).
   // `reviewable` = the capture is still open for review (not fully APPROVED).
   const anyRejected =
     hasRejectedPhoto(detail?.photoReviews) ||
     (detail?.media ?? []).some((m) => m.review?.status === 'REJECTED');
   const multiPhoto = (detail?.media?.length ?? 0) > 1;
   const reviewable = detail != null && detail.status !== 'APPROVED';
+  // Extra rows above the photos → shorter photos so the decision bar still fits (item: 1366×768).
+  const tight = (detail?.duplicateMatches.length ?? 0) > 0 ||
+    (detail?.status === 'REJECTED' && !!(detail.rejectionReason || detail.rejectionReasonCode));
+
+  const closeBtn = (
+    <button onClick={() => { if (confirmDiscardNote()) onClose(); }} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)]" aria-label="Close">
+      <X className="w-5 h-5" />
+    </button>
+  );
+
+  if (loading) {
+    return (
+      <>
+        <div className="flex justify-end px-4 py-3 border-b border-gray-200">{closeBtn}</div>
+        <div className="flex-1 flex items-center justify-center"><Loader2 className="w-6 h-6 text-gray-300 animate-spin" aria-label="Loading" /></div>
+      </>
+    );
+  }
+  if (error || !detail) {
+    return (
+      <>
+        <div className="flex justify-end px-4 py-3 border-b border-gray-200">{closeBtn}</div>
+        <div className="flex-1 flex items-center justify-center"><p className="text-sm text-red-500">{error ?? 'Not found'}</p></div>
+      </>
+    );
+  }
+
+  const receivedAt = detail.receivedAt
+    ? new Date(detail.receivedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+    : null;
 
   return (
-    <div className="fixed inset-0 z-50 flex">
-      <div className="flex-1 bg-black/30" onClick={onClose} aria-hidden />
-      <div className="w-full max-w-lg bg-white h-full overflow-y-auto shadow-xl">
-        <div className="sticky top-0 bg-white border-b border-gray-200 px-5 py-3 flex items-center justify-between z-10">
-          <h2 className="text-sm font-bold text-gray-900">Capture review</h2>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500" aria-label="Close"><X className="w-4 h-4" /></button>
+    <>
+      {/* ── Header: outlet + code · Program / Sub-Program · window · rep · verdicts ── */}
+      <header className="shrink-0 border-b border-gray-200 px-4 sm:px-6 py-3" data-testid="capture-review-header">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <h2 className="text-base sm:text-lg font-bold text-gray-900 truncate">{detail.outletName || 'Outlet'}</h2>
+              <span className="text-xs text-gray-500 font-mono">{detail.outletCode}</span>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[detail.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(detail.status)}</span>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="capture-review-program">
+              <span className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 border border-indigo-200 px-2.5 py-1 text-sm">
+                <span className="text-[11px] uppercase tracking-wide font-medium text-indigo-700">Program</span>
+                <strong className="text-indigo-900">{detail.programName || '—'}</strong>
+              </span>
+              <span className="inline-flex items-center gap-1.5 rounded-lg bg-violet-50 border border-violet-200 px-2.5 py-1 text-sm">
+                <span className="text-[11px] uppercase tracking-wide font-medium text-violet-700">Sub-Program</span>
+                <strong className="text-violet-900">{detail.programCategory || '—'}</strong>
+              </span>
+            </div>
+            <p className="mt-2 text-xs text-gray-500 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span>Window <span className="font-mono text-gray-700">{detail.windowKey}</span> · v{detail.currentVersion}</span>
+              <span>Rep <span className="font-mono text-gray-700">{detail.submittedBy?.employeeCode ?? '—'}</span></span>
+              {receivedAt && <span>{receivedAt}</span>}
+              <span className="inline-flex items-center gap-1">
+                <GeoBadge geoFenceOk={detail.geoFence.geoFenceOk} distanceMeters={detail.geoFence.distanceMeters} />
+                {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-500">±{Math.round(detail.geoFence.captureAccuracy)} m</span>}
+              </span>
+              {detail.duplicateMatches.length > 0 && (
+                <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-700 border border-amber-200 inline-flex items-center gap-1">
+                  <Copy className="w-3 h-3" /> Duplicate photo
+                </span>
+              )}
+            </p>
+          </div>
+          {closeBtn}
         </div>
+      </header>
 
-        {loading ? (
-          <div className="flex items-center justify-center py-20"><Loader2 className="w-6 h-6 text-gray-300 animate-spin" aria-label="Loading" /></div>
-        ) : error || !detail ? (
-          <div className="py-20 text-center"><p className="text-sm text-red-500">{error ?? 'Not found'}</p></div>
-        ) : (
-          <div className="p-5 space-y-5">
-            {/* Outlet + status */}
-            <div>
-              <div className="flex items-center justify-between">
-                <p className="text-base font-bold text-gray-900">{detail.outletName || 'Outlet'}</p>
-                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[detail.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(detail.status)}</span>
-              </div>
-              <p className="text-xs text-gray-400 font-mono">{detail.outletCode}</p>
-              <p className="text-xs text-gray-500 mt-1">
-                Window <span className="font-mono">{detail.windowKey}</span> · v{detail.currentVersion}
-                {detail.receivedAt ? ` · ${new Date(detail.receivedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}` : ''}
-              </p>
-              {detail.status === 'REJECTED' && (detail.rejectionReason || detail.rejectionReasonCode) && (
-                <div className="mt-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-600">
-                  <strong>Rejected:</strong> {detail.rejectionReasonCode ? (VISIBILITY_REJECT_REASON_LABELS[detail.rejectionReasonCode as VisibilityRejectReasonCode] ?? detail.rejectionReasonCode) : ''}{detail.rejectionReason ? ` — ${detail.rejectionReason}` : ''}
+      <div className="flex-1 overflow-y-auto px-4 sm:px-6 pt-4 space-y-5" data-testid="capture-review-scroll">
+        {detail.status === 'REJECTED' && (detail.rejectionReason || detail.rejectionReasonCode) && (
+          <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-600">
+            <strong>Rejected:</strong> {detail.rejectionReasonCode ? (VISIBILITY_REJECT_REASON_LABELS[detail.rejectionReasonCode as VisibilityRejectReasonCode] ?? detail.rejectionReasonCode) : ''}{detail.rejectionReason ? ` — ${detail.rejectionReason}` : ''}
+          </div>
+        )}
+
+        {/* Duplicate photo matches — a decision-relevant flag, so it sits above the photos. */}
+        {detail.duplicateMatches.length > 0 && (
+          <Section title={`Duplicate photo matches (${detail.duplicateMatches.length})`}>
+            <div className="flex flex-wrap gap-1.5">
+              {detail.duplicateMatches.map((d) => (
+                <div key={d.captureId + d.hash} className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
+                  <Copy className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  <span>Same photo also on outlet <strong className="font-mono">{d.outletCode}</strong> · window <strong className="font-mono">{d.windowKey}</strong></span>
                 </div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* ── Photos: large; two (or more) side by side on desktop, stacked on narrow
+            screens; a single photo large + centred. A multi-photo capture gets per-photo
+            Approve/Reject controls under each photo (keyed by CAMERA field id). ── */}
+        {detail.media.length > 0 && (
+          <Section title={`Photos (${detail.media.length})`}>
+            <div
+              data-testid="capture-review-photos"
+              className={!multiPhoto ? 'flex justify-center' : detail.media.length >= 3 ? 'grid grid-cols-1 md:grid-cols-3 gap-4' : 'grid grid-cols-1 md:grid-cols-2 gap-4'}
+            >
+              {detail.media.map((m) => (
+                <PhotoCard
+                  key={m.fieldId + m.key}
+                  media={m}
+                  outletName={detail.outletName}
+                  single={!multiPhoto}
+                  tight={tight}
+                  showReview={multiPhoto}
+                  reviewable={reviewable}
+                  busy={photoBusy === m.fieldId}
+                  // A whole-capture call in flight (busy) locks every per-photo control too.
+                  disabled={busy || (photoBusy != null && photoBusy !== m.fieldId)}
+                  onReview={reviewPhoto}
+                />
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* ── Decision area (below the photos) — STICKY at the bottom of the scroll area so
+            Approve / Reject stay on screen on a 1366×768 laptop whatever the content. ── */}
+        <div className="sticky bottom-0 z-10 bg-white border-t border-gray-200 -mx-4 sm:-mx-6 px-4 sm:px-6 py-3 space-y-3 shadow-[0_-6px_12px_-8px_rgba(0,0,0,0.2)]" data-testid="capture-review-decision">
+          {actionError && <p className="text-xs text-red-500 flex items-center gap-1" role="alert"><AlertCircle className="w-3 h-3" />{actionError}</p>}
+
+          {detail.status !== 'APPROVED' && (
+            rejectOpen ? (
+              <div className="space-y-2 max-w-2xl"
+                // Escape inside the reject form closes only the form (the note is kept).
+                onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setRejectOpen(false); setActionError(null); } }}>
+                <label className="block text-xs font-medium text-gray-700">Rejection reason</label>
+                <select value={reasonCode} onChange={(e) => setReasonCode(e.target.value as VisibilityRejectReasonCode)}
+                  aria-label="Rejection reason code"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400">
+                  {VISIBILITY_REJECT_REASON_CODES.map((c) => (
+                    <option key={c} value={c}>{VISIBILITY_REJECT_REASON_LABELS[c]}</option>
+                  ))}
+                </select>
+                <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2}
+                  aria-label="Rejection detail (optional)"
+                  placeholder="Optional detail — the rep re-captures for this window (D11)."
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400 resize-none" />
+                <div className="flex gap-2 justify-end">
+                  <button onClick={() => { setRejectOpen(false); setActionError(null); }} className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50">Cancel</button>
+                  <button onClick={submitReject} disabled={busy || photoBusy != null}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-60">
+                    {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />} Reject capture
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex flex-col sm:flex-row gap-2 max-w-2xl">
+                  <button onClick={approve} disabled={busy || photoBusy != null || anyRejected}
+                    title={anyRejected ? 'Re-capture the flagged photos before approving the whole capture.' : undefined}
+                    className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+                    {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />} {multiPhoto ? 'Approve all' : 'Approve'}
+                  </button>
+                  <button ref={rejectAllBtnRef} onClick={() => setRejectOpen(true)} disabled={busy || photoBusy != null}
+                    className="flex-1 flex items-center justify-center gap-2 py-2.5 border border-red-200 text-red-600 rounded-lg text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-60">
+                    <XCircle className="w-4 h-4" /> {multiPhoto ? 'Reject all' : 'Reject'}
+                  </button>
+                </div>
+                {anyRejected && (
+                  <p className="text-[11px] text-orange-600 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3 shrink-0" />
+                    Some photos are rejected — the rep must re-capture them before the capture can be approved.
+                  </p>
+                )}
+              </div>
+            )
+          )}
+
+          {/* Reviewer speed: after a decision, an EXPLICIT button to the next pending
+              capture in the loaded list (never automatic). */}
+          {decided && (
+            <div ref={nextBoxRef} tabIndex={-1} role="status"
+              className="flex flex-wrap items-center gap-3 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none" data-testid="capture-review-next">
+              <span className="text-xs text-gray-600">Decision saved — {statusLabel(detail.status)}.</span>
+              {nextId ? (
+                <button ref={nextBtnRef} onClick={() => onNext(nextId)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-[var(--brand-primary)] text-white rounded-lg hover:opacity-90">
+                  Next capture <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              ) : (
+                <span className="text-xs text-gray-500">No more submitted captures on this page of the list.</span>
               )}
             </div>
+          )}
+        </div>
 
-            {/* Geo-fence */}
-            <Section title="Geo-fence">
-              <div className="flex items-center gap-2 mb-2">
-                <GeoBadge geoFenceOk={detail.geoFence.geoFenceOk} distanceMeters={detail.geoFence.distanceMeters} />
-                {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-500">±{Math.round(detail.geoFence.captureAccuracy)} m accuracy</span>}
-              </div>
-              {/* Plain-language gloss (first place the reviewer meets these verdicts). */}
-              <p className="text-[11px] text-gray-400 mb-2 leading-relaxed">
-                In fence = the photo&apos;s location is within the outlet&apos;s allowed radius. Outside = it was taken too far away. Unverifiable = the phone couldn&apos;t confirm where the photo was taken.
-              </p>
+        {/* ── Details (compact, below the decision) ── */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 pt-1 pb-4">
+          <Section title="Geo-fence">
+            <div className="flex items-center gap-2 mb-2">
+              <GeoBadge geoFenceOk={detail.geoFence.geoFenceOk} distanceMeters={detail.geoFence.distanceMeters} />
+              {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-500">±{Math.round(detail.geoFence.captureAccuracy)} m accuracy</span>}
+            </div>
+            {/* Plain-language gloss (first place the reviewer meets these verdicts). */}
+            <p className="text-[11px] text-gray-400 mb-2 leading-relaxed">
+              In fence = the photo&apos;s location is within the outlet&apos;s allowed radius. Outside = it was taken too far away. Unverifiable = the phone couldn&apos;t confirm where the photo was taken.
+            </p>
+            <div className="space-y-2">
               {detail.geo.map((g) => (
                 <GeoPin key={g.fieldId} geo={g} distanceMeters={detail.geoFence.distanceMeters} />
               ))}
               {detail.geo.length === 0 && detail.geoFence.captureLat != null && detail.geoFence.captureLng != null && (
                 <GeoPin geo={{ fieldId: 'submit', label: 'Capture location', value: { lat: detail.geoFence.captureLat, lng: detail.geoFence.captureLng, accuracy: detail.geoFence.captureAccuracy ?? undefined } }} distanceMeters={detail.geoFence.distanceMeters} />
               )}
-            </Section>
+            </div>
+          </Section>
 
-            {/* Media + per-photo review. A multi-photo capture gets per-photo Approve/Reject
-                controls (keyed by CAMERA field id); a single-photo capture collapses to the
-                whole-capture decision at the bottom (identical to today). */}
-            {detail.media.length > 0 && (
-              <Section title={`Photos (${detail.media.length})`}>
-                <div className={multiPhoto ? 'space-y-3' : 'grid grid-cols-2 gap-2'}>
-                  {detail.media.map((m) => (
-                    <PhotoCard
-                      key={m.fieldId + m.key}
-                      media={m}
-                      showReview={multiPhoto}
-                      reviewable={reviewable}
-                      busy={photoBusy === m.fieldId}
-                      disabled={photoBusy != null && photoBusy !== m.fieldId}
-                      onReview={reviewPhoto}
-                    />
-                  ))}
-                </div>
-              </Section>
-            )}
-
-            {/* Duplicate photo matches */}
-            {detail.duplicateMatches.length > 0 && (
-              <Section title={`Duplicate photo matches (${detail.duplicateMatches.length})`}>
-                <div className="space-y-1.5">
-                  {detail.duplicateMatches.map((d) => (
-                    <div key={d.captureId + d.hash} className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
-                      <Copy className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                      <span>Same photo also on outlet <strong className="font-mono">{d.outletCode}</strong> · window <strong className="font-mono">{d.windowKey}</strong></span>
-                    </div>
-                  ))}
-                </div>
-              </Section>
-            )}
-
-            {/* Captured values */}
-            <Section title="Captured values">
-              {Object.keys(captured).filter((k) => !specialIds.has(k)).length === 0 ? (
-                <p className="text-xs text-gray-400">No text values captured.</p>
-              ) : (
-                <dl className="space-y-1.5">
-                  {Object.entries(captured).filter(([k]) => !specialIds.has(k)).map(([k, v]) => (
-                    <div key={k} className="flex justify-between gap-3 text-xs">
-                      <dt className="text-gray-500 font-mono truncate">{k}</dt>
-                      <dd className="text-gray-800 font-medium text-right break-words">{formatValue(v)}</dd>
-                    </div>
-                  ))}
-                </dl>
-              )}
-            </Section>
-
-            {/* Submission history */}
-            {detail.submissions.length > 0 && (
-              <Section title={`Submission history (${detail.submissions.length})`}>
-                <ul className="space-y-2">
-                  {detail.submissions.map((s) => (
-                    <li key={s.id} className="flex items-start gap-2 text-xs">
-                      <History className="w-3.5 h-3.5 text-gray-300 mt-0.5 shrink-0" />
-                      <div>
-                        <span className="font-medium text-gray-700">v{s.version}</span>
-                        <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(s.status)}</span>
-                        <span className="ml-2 text-gray-400">{new Date(s.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </Section>
-            )}
-
-            {actionError && <p className="text-xs text-red-500 flex items-center gap-1"><AlertCircle className="w-3 h-3" />{actionError}</p>}
-
-            {/* Actions */}
-            {detail.status !== 'APPROVED' && (
-              <div className="border-t border-gray-100 pt-4 space-y-3">
-                {rejectOpen ? (
-                  <div className="space-y-2">
-                    <label className="block text-xs font-medium text-gray-700">Rejection reason</label>
-                    <select value={reasonCode} onChange={(e) => setReasonCode(e.target.value as VisibilityRejectReasonCode)}
-                      aria-label="Rejection reason code"
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400">
-                      {VISIBILITY_REJECT_REASON_CODES.map((c) => (
-                        <option key={c} value={c}>{VISIBILITY_REJECT_REASON_LABELS[c]}</option>
-                      ))}
-                    </select>
-                    <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2}
-                      placeholder="Optional detail — the rep re-captures for this window (D11)."
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400 resize-none" />
-                    <div className="flex gap-2 justify-end">
-                      <button onClick={() => { setRejectOpen(false); setActionError(null); }} className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50">Cancel</button>
-                      <button onClick={submitReject} disabled={busy}
-                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-60">
-                        {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />} Reject capture
-                      </button>
-                    </div>
+          <Section title="Captured values">
+            {capturedEntries.length === 0 ? (
+              <p className="text-xs text-gray-400">No text values captured.</p>
+            ) : (
+              <dl className="space-y-1.5">
+                {capturedEntries.map(([k, v]) => (
+                  <div key={k} className="flex justify-between gap-3 text-xs">
+                    <dt className="text-gray-500 font-mono truncate">{k}</dt>
+                    <dd className="text-gray-800 font-medium text-right break-words">{formatValue(v)}</dd>
                   </div>
-                ) : (
-                  <div className="space-y-2">
-                    <div className="flex gap-2">
-                      <button onClick={approve} disabled={busy || anyRejected}
-                        title={anyRejected ? 'Re-capture the flagged photos before approving the whole capture.' : undefined}
-                        className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
-                        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />} {multiPhoto ? 'Approve all' : 'Approve'}
-                      </button>
-                      <button onClick={() => setRejectOpen(true)} disabled={busy}
-                        className="flex-1 flex items-center justify-center gap-2 py-2.5 border border-red-200 text-red-600 rounded-lg text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-60">
-                        <XCircle className="w-4 h-4" /> {multiPhoto ? 'Reject all' : 'Reject'}
-                      </button>
-                    </div>
-                    {anyRejected && (
-                      <p className="text-[11px] text-orange-600 flex items-center gap-1">
-                        <AlertCircle className="w-3 h-3 shrink-0" />
-                        Some photos are rejected — the rep must re-capture them before the capture can be approved.
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
+                ))}
+              </dl>
             )}
-          </div>
-        )}
+          </Section>
+
+          {detail.submissions.length > 0 && (
+            <Section title={`Submission history (${detail.submissions.length})`}>
+              <ul className="space-y-2">
+                {detail.submissions.map((s) => (
+                  <li key={s.id} className="flex items-start gap-2 text-xs">
+                    <History className="w-3.5 h-3.5 text-gray-300 mt-0.5 shrink-0" />
+                    <div>
+                      <span className="font-medium text-gray-700">v{s.version}</span>
+                      <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(s.status)}</span>
+                      <span className="ml-2 text-gray-400">{new Date(s.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </Section>
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
