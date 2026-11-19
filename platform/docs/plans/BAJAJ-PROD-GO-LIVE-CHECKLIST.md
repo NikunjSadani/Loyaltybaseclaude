@@ -161,7 +161,7 @@ Each Hubble brand is either **FIXED** (Hubble issues only certain face values) o
    `C:\Users\nikun\Downloads\Bajaj Loyalty training deck - with install and location.pptx`. The phone screens on those
    slides are illustrations, not real screenshots.
 
-### J. After the combined release (2026-11-17 batch) reaches prod
+### J. After the combined release reached prod (`7ba69566`, 2026-11-19 ~00:30 IST — verified; steps below still to do)
 
 1. **Owner** (Claude does not log into prod): `app.gifsy.in` → Clients → Bajaj Consumer Care → Behaviour flags → switch
    on **"Send GIFSY-rejected KYC resubmissions straight to GIFSY"** → confirm. Claude then verifies the flag read-only.

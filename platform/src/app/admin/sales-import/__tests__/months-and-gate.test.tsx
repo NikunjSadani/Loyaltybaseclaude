@@ -542,7 +542,7 @@ describe('recalculate — a background job (owner 2026-11-18)', () => {
     apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
     apiMock.getApplyJob.mockResolvedValue(ok(job({ id: 'job7', kind: 'APPLY', importId: 'imp3', status: 'RUNNING', requestedBy: 'Ravi', createdAt: '2026-11-18T05:02:00.000Z' }, { status: 'RUNNING', startedAt: '2026-11-18T05:03:00.000Z' })));
     render(<MonthsPage />);
-    expect(await screen.findByTestId('active-job-2026-10')).toHaveTextContent('Being applied by Ravi since 10:32');
+    expect(await screen.findByTestId('active-job-2026-10')).toHaveTextContent(/Being applied by Ravi since (\d+ \w+, )?10:32/); // "18 Nov, " appears once the fixture day has passed
     fireEvent.click(screen.getByTestId('recalc-open-2026-10'));
     await screen.findByTestId('recalc-preview');
     expect(await screen.findByTestId('recalc-job')).toHaveTextContent('October 2026 is being applied from a sales file');

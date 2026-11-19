@@ -106,7 +106,24 @@ export interface VisibilityCaptureFormProps {
    * `preciseGps`; when absent the component does a fresh one-shot acquire instead.
    */
   gpsWatch?: PreciseWatchHandle | null;
+  /**
+   * LOCATION GATE (tenant `features.requireLocation`; docs/plans/LOCATION-GATE.md): when true a location-tagged photo
+   * taken WITHOUT a fix is not kept (the rep is told to turn location on and retake), and a submit-time GPS fill that
+   * gets no fix stops the submit. False/undefined (Deoleo, every other tenant) → unchanged: no fix = saved + flagged.
+   */
+  requireLocation?: boolean;
+  /** Location gate: while the location guide covers the form, live camera previews are closed (values are kept). */
+  cameraPaused?: boolean;
+  /** Audit #6: hold the shutter (camera button disabled) while the programme settings are still loading. */
+  captureHold?: boolean;
 }
+
+/** Shown when a photo had no location on a requireLocation tenant (the shot is not kept). */
+export const LOCATION_REQUIRED_PHOTO_MESSAGE =
+  "Couldn't get a location for this photo — move to open sky and retake. Location is required here.";
+/** Shown when a submit-time location fill got no fix on a requireLocation tenant. */
+export const LOCATION_REQUIRED_SUBMIT_MESSAGE =
+  "Couldn't get your location — move to open sky and submit again. Location is required here.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Client-side image compression (best-practice #4)
@@ -214,6 +231,9 @@ export function VisibilityCaptureForm({
   partialRecapture = false,
   preciseGps = false,
   gpsWatch = null,
+  requireLocation = false,
+  cameraPaused = false,
+  captureHold = false,
 }: VisibilityCaptureFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>(() => ({ ...(initialValues ?? {}) }));
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -308,10 +328,12 @@ export function VisibilityCaptureForm({
             capturedAt: new Date().toISOString(),
           }),
         () => resolve(null),
-        { enableHighAccuracy: true, timeout: 10_000 },
+        // Location gate (switch-on tenants): same budget as the gate check — 20 s, a cached fix up to 30 s old
+        // (audit #8). Switch-off tenants keep the exact existing options.
+        requireLocation ? { enableHighAccuracy: true, timeout: 20_000, maximumAge: 30_000 } : { enableHighAccuracy: true, timeout: 10_000 },
       );
     });
-  }, [preciseGps, gpsWatch]);
+  }, [preciseGps, gpsWatch, requireLocation]);
 
   // ── Submit ──────────────────────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
@@ -362,6 +384,10 @@ export function VisibilityCaptureForm({
       const fix = await captureGps();
       if (fix) {
         for (const f of gpsToFill) if (working[f.id] == null) working[f.id] = fix;
+      } else if (requireLocation && gpsToFill.some((f) => working[f.id] == null)) {
+        // Location gate: no fix → nothing is sent (the server would refuse it anyway).
+        setSubmitError(LOCATION_REQUIRED_SUBMIT_MESSAGE);
+        return;
       }
     }
 
@@ -398,7 +424,7 @@ export function VisibilityCaptureForm({
     } finally {
       setBusy(false);
     }
-  }, [values, fields, schema, captureGps, onSubmit, reservedValues, partial, rejectedIds]);
+  }, [values, fields, schema, captureGps, onSubmit, reservedValues, partial, rejectedIds, requireLocation]);
 
   // Block submit while ANY field is still uploading (L2): an optional CAMERA photo mid-
   // upload would otherwise be silently omitted from formValues by a submit that races it.
@@ -447,6 +473,9 @@ export function VisibilityCaptureForm({
                   uploadFile={uploadFile}
                   captureGps={captureGps}
                   preciseGps={preciseGps}
+                  requireLocation={requireLocation}
+                  cameraPaused={cameraPaused}
+                  captureHold={captureHold}
                 />
               </div>
             );
@@ -464,6 +493,9 @@ export function VisibilityCaptureForm({
             uploadFile={uploadFile}
             captureGps={captureGps}
             preciseGps={preciseGps}
+            requireLocation={requireLocation}
+            cameraPaused={cameraPaused}
+            captureHold={captureHold}
           />
         );
       })}
@@ -526,6 +558,12 @@ interface FieldRendererProps {
   captureGps: () => Promise<GpsCapture | null>;
   /** Geo-fence tenants (Bajaj): drives the "Getting a precise location…" capture label. */
   preciseGps: boolean;
+  /** Location gate: a location-tagged photo without a fix is not kept. */
+  requireLocation?: boolean;
+  /** Location gate: the live camera preview is closed while the location guide covers the form. */
+  cameraPaused?: boolean;
+  /** Shutter held while the programme settings load. */
+  captureHold?: boolean;
 }
 
 function FieldRenderer(props: FieldRendererProps) {
@@ -685,7 +723,7 @@ function Labeled({
 
 // ── Camera field (native rear-camera, instruction + sample thumbnail, D9/D16) ──
 
-function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, req }: FieldRendererProps & { req: boolean }) {
+function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, requireLocation = false, cameraPaused = false, captureHold = false, req }: FieldRendererProps & { req: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   // Read back through readMediaValue so BOTH a legacy bare-key string and a per-photo
   // `{ key, geo }` value resolve to the same shape (full backward-compat).
@@ -724,7 +762,9 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
   // submit payload all keep working regardless of how the File was obtained.
   const handleFile = async (file: File) => {
     setCapError('');
-    if (field.geotag) {
+    // Location gate (switch-on tenants): a fence-required photo records its fix even without `geotag` — the server
+    // requires a fix on every location-tagged photo (audit #2). Switch-off tenants: unchanged (geotag only).
+    if (field.geotag || (requireLocation && field.geoFenceRequired === true)) {
       // Per-photo geotag: fetch a GPS fix AT SHUTTER TIME (the moment the photo is taken),
       // concurrently with the upload. `store: false` — this caller owns the stored shape.
       setBusy(true);
@@ -734,6 +774,11 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
           captureGps(),
         ]);
         if (!uploadedKey) return; // upload failed — error already surfaced (submitError)
+        // Location gate (requireLocation tenants only): a location-tagged photo with NO fix is not kept.
+        if (!fix && requireLocation) {
+          setCapError(LOCATION_REQUIRED_PHOTO_MESSAGE);
+          return; // photo NOT stored → the rep retakes once location works
+        }
         // D2 accuracy cap: a PRESENT-but-too-imprecise fix rejects the shot. A missing fix
         // (denied / timed out) does NOT block — store `{ key }` and let the backend flag it
         // (geo-fence unverifiable).
@@ -833,13 +878,16 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
             </p>
           ) : null}
         </div>
+      ) : cameraOnly && cameraPaused ? (
+        // Location gate: the guide covers the form — no live camera stream while hidden (it reopens on return).
+        <p data-testid={`camera-${field.id}-paused`} className="text-xs text-gray-500">Camera paused until location is on.</p>
       ) : cameraOnly ? (
         // TRUE in-app live camera (getUserMedia) — the device gallery can NEVER open.
         // The captured File feeds the EXACT same handler the gallery input used.
         <div className="space-y-1">
           <CameraCapture
             onCapture={handleFile}
-            disabled={uploading || busy}
+            disabled={uploading || busy || captureHold}
             facingMode="environment"
             testIdPrefix={`camera-${field.id}`}
             aria-label={field.label}
@@ -855,7 +903,7 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
-          disabled={uploading || busy}
+          disabled={uploading || busy || captureHold}
           className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-500 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:opacity-50 transition-colors"
         >
           {uploading || busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}

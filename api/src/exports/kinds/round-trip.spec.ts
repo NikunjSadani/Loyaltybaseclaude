@@ -61,6 +61,11 @@ const CASES: Record<string, Array<Record<string, unknown>>> = {
     { from: '2026-11-01', to: '2026-11-30', format: 'xlsx' },
     { from: '2026-01-01', to: '2026-11-30', role: 'SSS', program: 'Gold', region: 'Maharashtra', sort: 'days', includeInactive: 'true' },
   ],
+  'location-compliance': [
+    {},
+    { from: '2026-11-01', to: '2026-11-30', format: 'xlsx' },
+    { from: '2026-01-01', to: '2026-11-30', role: 'SALES_ISR', region: 'Maharashtra', sort: 'name' },
+  ],
   'billing-progress-outlets': [
     { bucket: 'BEHIND_PACE' },
     { bucket: 'P0_20', month: '2026-10', program: 'Gold', outletType: 'RETAIL', managerId: 'su-1' },

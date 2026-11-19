@@ -75,6 +75,8 @@ const mockPrisma = {
   // create() reads clients.features for the outlet-master geo-fence gate (outletMasterGeo).
   // findMany: an un-assumed GIFSY read checks whether ANY tenant has gifsyRejectFastTrack ON (D2/D1).
   client: { findUnique: jest.fn(), findMany: jest.fn() },
+  // Location gate (features.requireLocation): an "outside the fence" refusal is recorded outside any tx.
+  auditLog: { create: jest.fn() },
   // count: the A1/R1 partner-ownership check (a partner may act only on their own partner/outlet).
   channelPartner: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), count: jest.fn() },
   // rejectedExport resolves the rejecter's display name in one round-trip.
@@ -1853,6 +1855,146 @@ describe('KycService', () => {
       const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
       expect(data.geoFenceAccuracyM).toBeNull();
       expect(data.geoLockMs).toBeNull();
+    });
+
+    // ── LOCATION GATE (features.requireLocation — owner 2026-11-18; LOCATION-GATE.md) ──────────
+    describe('requireLocation', () => {
+      const NO_LOC = /Location is required to submit a KYC/;
+      // Fresh fixes (the gate refuses a board-photo fix older than an hour — re-KYC stale-geo guard).
+      const nearNow = () => ({ ...nearGeo, ts: new Date().toISOString() });
+      const farNow = () => ({ ...farGeo, ts: new Date().toISOString() });
+
+      it('ON + a STALE board-photo fix (pre-filled from an earlier submission) → 400 pointing at Retry location', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        });
+        const old = { ...nearGeo, ts: new Date(Date.now() - 3 * 86_400_000).toISOString() };
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: old } as never)).rejects.toThrow(/older than 55 minutes. Go back to the Address step and tap "Retry location"/);
+        expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+      });
+
+      it('AUDIT #3: a phone whose clock is 3 h behind is judged on its own clock (clientNow) → accepted', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true, outletMasterGeo: true } });
+        primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+        const phoneNow = new Date(Date.now() - 3 * 3_600_000);
+        const res = await service.create(so, {
+          ...baseDto,
+          boardPhotoGeo: { ...nearGeo, ts: new Date(phoneNow.getTime() - 5 * 60_000).toISOString() },
+          clientNow: phoneNow.toISOString(),
+        } as never);
+        expect(res).toMatchObject({ submissionId: 'sub1' });
+      });
+
+      it('ROUND 4 #1: a future-timed or untimed board fix → "has a wrong time" (not "older than 55 minutes")', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        const outletRow = {
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        };
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce(outletRow);
+        const future = { ...nearGeo, ts: new Date(Date.now() + 30 * 60_000).toISOString() };
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: future } as never)).rejects.toThrow(/has a wrong time/);
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce(outletRow);
+        const untimed = { lat: 12.9001, lng: 77.5001, accuracy: 10 };
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: untimed } as never)).rejects.toThrow(/has a wrong time/);
+      });
+
+      it('ROUND 3 #3: phone clock more than 24 h off → 400 "set date and time to automatic"', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        });
+        const phoneNow = new Date(Date.now() - 3 * 86_400_000);
+        await expect(
+          service.create(so, { ...baseDto, boardPhotoGeo: { ...nearGeo, ts: phoneNow.toISOString() }, clientNow: phoneNow.toISOString() } as never),
+        ).rejects.toThrow(/date and time are wrong — set them to automatic/);
+      });
+
+      it('ON + the 0,0 default fix → 400 (not a real fix)', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        });
+        await expect(
+          service.create(so, { ...baseDto, boardPhotoGeo: { lat: 0, lng: 0, accuracy: 5, ts: new Date().toISOString() } } as never),
+        ).rejects.toThrow(NO_LOC);
+      });
+
+      it('ON + sales rep + NO board-photo fix → 400 before any write', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true, outletMasterGeo: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK', latitude: 12.9, longitude: 77.5,
+        });
+        await expect(service.create(so, { ...baseDto } as never)).rejects.toThrow(NO_LOC);
+        expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+      });
+
+      it('ON + garbage fix (out of range) → 400', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        });
+        await expect(
+          service.create(so, { ...baseDto, boardPhotoGeo: { lat: 999, lng: 77, accuracy: 5, ts: 'x' } } as never),
+        ).rejects.toThrow(NO_LOC);
+      });
+
+      it('ON + valid fix near the outlet → accepted (OK), nothing recorded as a block', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true, outletMasterGeo: true } });
+        primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+        await service.create(so, { ...baseDto, boardPhotoGeo: nearNow() } as never);
+        expect(mockTx.kycSubmission.create.mock.calls[0][0].data.geoFenceStatus).toBe('OK');
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
+
+      it('ON + outside the fence → same owner message AND one LOCATION_FENCE_BLOCK audit row', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true, outletMasterGeo: true } });
+        mockPrisma.auditLog.create.mockResolvedValue({});
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK', latitude: 12.9, longitude: 77.5,
+        });
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: farNow() } as never)).rejects.toThrow(BLOCK_MSG);
+        expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
+        expect(mockPrisma.auditLog.create.mock.calls[0][0].data).toMatchObject({
+          action: 'REJECT', entityType: 'LOCATION_FENCE_BLOCK', entityId: 'outlet-1', actorId: 'so1',
+          metadata: { flow: 'KYC', clientId: 'deoleo' },
+        });
+      });
+
+      it('OFF (Deoleo default) + outside the fence → refusal unchanged, NOTHING recorded', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK', latitude: 12.9, longitude: 77.5,
+        });
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: farNow() } as never)).rejects.toThrow(BLOCK_MSG);
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
+
+      it('OFF (Deoleo default) + no fix at all → still accepted exactly as today', async () => {
+        primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+        const res = await service.create(so, { ...baseDto } as never);
+        expect(res).toMatchObject({ submissionId: 'sub1' });
+      });
+
+      it('ON but a NON-sales initiator (CLIENT_ADMIN) without a fix → not gated', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        const admin = { ...so, sub: 'ca1', role: 'CLIENT_ADMIN' } as JwtPayload;
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'deoleo', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        });
+        // The admin path continues past the gate; whatever it does next, it must NOT be the location refusal.
+        const err = await service.create(admin, { ...baseDto } as never).then(() => null, (e: Error) => e);
+        expect(err?.message ?? '').not.toMatch(NO_LOC);
+      });
     });
   });
 

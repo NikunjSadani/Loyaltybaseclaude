@@ -76,4 +76,11 @@ describe('normalizeFeatures', () => {
     expect(normalizeFeatures({ gifsyRejectFastTrack: true }).gifsyRejectFastTrack).toBe(true);
     expect(normalizeFeatures({ gifsyRejectFastTrack: 'true' }).gifsyRejectFastTrack).toBe(false);
   });
+
+  it('carries the requireLocation behaviour flag (location gate), defaulting OFF', () => {
+    expect(DEFAULT_FEATURES.requireLocation).toBe(false);
+    expect(normalizeFeatures({}).requireLocation).toBe(false);
+    expect(normalizeFeatures({ requireLocation: true }).requireLocation).toBe(true);
+    expect(normalizeFeatures({ requireLocation: 'true' }).requireLocation).toBe(false);
+  });
 });

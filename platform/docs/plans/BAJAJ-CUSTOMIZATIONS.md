@@ -328,9 +328,19 @@ and the Performance trend (`GET /partner/targets/trend`).
 - Code: `api/src/kyc/kyc-fast-track.helper.ts`, `resolveGifsyRejectFastTrack` in `kyc.service.ts`; FE copy
   `platform/src/lib/kyc-fast-track.ts`. Decision log F13.
 
-## 13. Day-level sales + MTD comparisons (Sales Import tenants; 2026-11-17, in the combined release)
+## 13. Day-level sales + MTD comparisons (Sales Import tenants; 2026-11-17; LIVE on prod `7ba69566` 2026-11-19 — retention rules still OFF)
 - Each applied DMS file also stores per-outlet per-day cumulative month-to-date KPI values (`OutletSalesDay`,
   `SalesDaySet`) for programme outlets. Billing card shows "vs last month (to day D)" from Dec 2026 and "vs 3-month
   average" from Feb 2027, plus "outlets billing slower than usual" (below 80% of their own last-month pace).
 - Sales history keeps programme outlets only, 4 months; import files 7 days — the deletion rules ship OFF
   (`SALES_RETENTION_V2`) and are switched on via `SALES-IMPORT-PIPELINE-PLAN.md` §17b. Decision log F15.
+
+## 14. Location gate — flag `requireLocation` (2026-11-18; built on `feat/location-gate`, not deployed)
+- Gifsy console → Clients → Bajaj → **Behaviour flags** → "Require location for KYC and visibility capture" (confirm
+  dialog). Default OFF for every tenant; Deoleo OFF. Owner switches it ON for Bajaj (staging first, then prod) after the
+  release — Claude does not write the flag.
+- ON: a sales rep can't start or submit a KYC / visibility capture until location is allowed for the site AND the phone
+  gets a fix (phone-specific guide + Test again); the API refuses fix-less submissions; "outside the 200 m fence"
+  refusals are recorded for the Location Report. Independent of `outletMasterGeo` (the 200 m fence).
+- Location Report `/admin/reports/location` + Daily Ops Digest "Location" line — both only for switch-on tenants. Detail:
+  `LOCATION-GATE.md`.

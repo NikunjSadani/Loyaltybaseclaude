@@ -14,6 +14,7 @@ import { TARGET_VS_SALES_KIND } from './batch2/target-vs-sales.kind';
 import { TARGET_EXPORT_KINDS } from './batch2/targets.kinds';
 import { TDS_PAYOUTS_KIND } from './batch2/tds-payouts.kind';
 import { USAGE_REPORT_KIND } from './batch2/usage-report.kind';
+import { LOCATION_COMPLIANCE_KIND } from './batch2/location-compliance.kind';
 
 export const BATCH2_EXPORT_KINDS: readonly AnyExportKind[] = [
   TARGET_VS_SALES_KIND,
@@ -26,4 +27,5 @@ export const BATCH2_EXPORT_KINDS: readonly AnyExportKind[] = [
   BILLING_PROGRESS_OUTLETS_KIND,
   BILLING_COMPARISON_SLOWER_KIND,
   USAGE_REPORT_KIND,
+  LOCATION_COMPLIANCE_KIND,
 ];

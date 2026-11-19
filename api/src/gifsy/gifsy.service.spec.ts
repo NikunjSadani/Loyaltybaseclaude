@@ -721,6 +721,32 @@ describe('GifsyService', () => {
       expect(mockPrisma.client.update).not.toHaveBeenCalled();
     });
 
+    it('requireLocation (location gate): PATCH merges + echoes it; absent → OFF; non-boolean → 400', async () => {
+      const stored = { walletModule: true, outletMasterGeo: true };
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: stored,
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features ?? stored,
+      }));
+      const on = await service.updateClient(gifsy, 'bajaj', { features: { requireLocation: true } });
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({ ...stored, requireLocation: true });
+      expect((on.features as Record<string, unknown>).requireLocation).toBe(true);
+
+      const off = await service.updateClient(gifsy, 'bajaj', { status: 'ACTIVE' });
+      expect((off.features as Record<string, unknown>).requireLocation).toBe(false);
+
+      mockPrisma.client.update.mockClear();
+      for (const v of ['true', 1, null]) {
+        await expect(
+          service.updateClient(gifsy, 'bajaj', { features: { requireLocation: v } } as never),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      expect(mockPrisma.client.update).not.toHaveBeenCalled();
+    });
+
     // ── Feature-change audit trail (log-only) ───────────────────────────────────
     const bajajRow = (features: Record<string, unknown>) => ({
       id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),

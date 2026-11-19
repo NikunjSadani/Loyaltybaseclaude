@@ -1,6 +1,6 @@
 # Visibility-Led Payouts — 194C Auto-Invoicing + Configurable TDS — DESIGN (for sign-off)
 
-**Status:** SPEC — awaiting owner sign-off. NO code yet. Author reconciled against current code via a 3-stream
+**Status (2026-11-19):** 194C engine LIVE since #17/#36; the **194R rules of §9 are LIVE on prod `7ba69566`** (per client, PAN-keyed payee snapshots, whole-year true-up, no 194R TDS/service invoices, excess flagged). §1–§8 below are the original 194C spec (historical). Original status: SPEC — awaiting owner sign-off. NO code yet. Author reconciled against current code via a 3-stream
 audit (TDS engine, invoicing engine, payout origination). Money path → dual adversarial audit is mandatory before done.
 
 ## 1. Scope

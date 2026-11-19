@@ -1516,7 +1516,7 @@ from the step-1 backup if needed).
    300 s) AND item 5 below (Apply / Recalculate no longer run inside the request at all). Every sales-import action that
    gets no clear answer (network / 408 / 5xx / cut-off 2xx — `platform/src/lib/request-outcome.ts`) says so plainly
    instead of "nothing happened"; "didn't reply in time" is used only for real timeouts (408 / 504 / 524).
-5. **Apply and Recalculate are BACKGROUND JOBS (owner decision 2026-11-18, platform-wide approved).** Files reach
+5. **Apply and Recalculate are BACKGROUND JOBS (owner decision 2026-11-18, platform-wide approved).** ✅ **LIVE on prod `7ba69566` (2026-11-19)**; staging-verified 2026-11-18 (202 → worker started in 13 s → November applied in 18 s; a second apply → 409 naming who/since; same requestId → same job). Before 30 Nov: run a 200 MB+ real file on staging (owner to send). Next release: processing as a Cloud Run Job + direct-to-storage resumable uploads. Files reach
    300–350 MB at month end; one month took 21 → 36 s in four days and may reach 60–90 s; the Cloudflare Worker cuts
    tenant-host requests at ~100 s, and the API runs CPU-throttled once a response is sent.
    - **Tables** (migration `20261118170000_sales_apply_jobs`, additive): `sales_apply_jobs` (one per click: kind

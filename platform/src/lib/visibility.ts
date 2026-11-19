@@ -108,11 +108,15 @@ export interface ScopeOutletsQuery {
 export interface SubmitCaptureInput {
   outletId: string;
   formValues?: Record<string, unknown>;
+  /** Location gate (requireLocation tenants): the phone's submit-time fix — this request's fresh location. */
+  captureGeo?: { lat: number; lng: number; accuracy?: number; capturedAt?: string };
 }
 
 /** POST /captures/:id/resubmit — re-capture after a rejection. */
 export interface ResubmitCaptureInput {
   formValues?: Record<string, unknown>;
+  /** Location gate (requireLocation tenants): the phone's submit-time fix — this request's fresh location. */
+  captureGeo?: { lat: number; lng: number; accuracy?: number; capturedAt?: string };
 }
 
 /** GET /captures — GIFSY review-queue filters. */

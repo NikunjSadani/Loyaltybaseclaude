@@ -76,3 +76,81 @@ describe('CFG — VisibilityCaptureForm GPS gating', () => {
     expect(watchPosition).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * CFG-LG — location gate (features.requireLocation; docs/plans/LOCATION-GATE.md).
+ * LG-F1: requireLocation + a geotag photo whose fix FAILS → the photo is NOT kept and the rep is told why.
+ * LG-F2: requireLocation OFF (Deoleo) + the same failed fix → photo kept "without location" exactly as before.
+ * LG-F3: requireLocation + submit-time GPS fill with no fix → nothing is submitted.
+ */
+describe('CFG-LG — requireLocation', () => {
+  const failGps = () => getCurrentPosition.mockImplementation((_s: unknown, err: (e: { code: number }) => void) => err({ code: 2 }));
+
+  it('LG-F1: no fix → the photo is not kept; the location message shows', async () => {
+    failGps();
+    const { container, findByText, queryByText } = render(
+      <VisibilityCaptureForm schema={schema} onSubmit={vi.fn()} requireLocation />,
+    );
+    fireCapture(container);
+    expect(await findByText(/Couldn't get a location for this photo — move to open sky and retake/)).toBeTruthy();
+    expect(queryByText('Photo captured')).toBeNull();
+  });
+
+  it('LG-F2: requireLocation OFF (Deoleo) → saved without location, as today', async () => {
+    failGps();
+    const { container, findByText } = render(<VisibilityCaptureForm schema={schema} onSubmit={vi.fn()} />);
+    fireCapture(container);
+    expect(await findByText(/saved without location/)).toBeTruthy();
+  });
+
+  it('LG-F3: submit-time GPS fill with no fix → onSubmit is never called', async () => {
+    failGps();
+    const gpsSchema: VisibilityFormSchema = {
+      captureGpsOnSubmit: true,
+      fields: [{ id: 'gps', type: 'GPS_POINT', label: 'Location', required: false, order: 1 }],
+    };
+    const onSubmit = vi.fn();
+    const { getByRole, findByText } = render(
+      <VisibilityCaptureForm schema={gpsSchema} onSubmit={onSubmit} requireLocation />,
+    );
+    fireEvent.click(getByRole('button', { name: /submit/i }));
+    expect(await findByText(/Couldn't get your location — move to open sky and submit again/)).toBeTruthy();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Audit fixes (LOCATION-GATE.md): #2 a geoFenceRequired photo without `geotag` records a fix on switch-on tenants
+ * only; #8 the photo fix uses the gate's budget (20 s, cached ≤ 30 s) on switch-on tenants only; #6 the shutter is
+ * held while the programme settings load.
+ */
+describe('CFG-AUDIT', () => {
+  const fenceOnly: VisibilityFormSchema = {
+    captureGpsOnSubmit: false,
+    fields: [{ id: 'photo', type: 'CAMERA', label: 'Shelf', required: false, order: 1, geoFenceRequired: true, noGallery: false }],
+  };
+
+  it('AUDIT #2 + #8: switch ON → a fence-required photo (no geotag) gets a fix, with the 20 s / 30 s-cache options', async () => {
+    const { container, findByText } = render(<VisibilityCaptureForm schema={fenceOnly} onSubmit={vi.fn()} requireLocation />);
+    fireCapture(container);
+    await waitFor(() => expect(getCurrentPosition).toHaveBeenCalledTimes(1));
+    expect(getCurrentPosition.mock.calls[0][2]).toEqual({ enableHighAccuracy: true, timeout: 20_000, maximumAge: 30_000 });
+    expect(await findByText(/location captured/)).toBeTruthy();
+  });
+
+  it('AUDIT #2 + #8: switch OFF (Deoleo) → unchanged: no fix for a fence-only photo; geotag photos keep the 10 s options', async () => {
+    const { container } = render(<VisibilityCaptureForm schema={fenceOnly} onSubmit={vi.fn()} />);
+    fireCapture(container);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(getCurrentPosition).not.toHaveBeenCalled();
+    const second = render(<VisibilityCaptureForm schema={schema} onSubmit={vi.fn()} />);
+    fireCapture(second.container);
+    await waitFor(() => expect(getCurrentPosition).toHaveBeenCalledTimes(1));
+    expect(getCurrentPosition.mock.calls[0][2]).toEqual({ enableHighAccuracy: true, timeout: 10_000 });
+  });
+
+  it('AUDIT #6: captureHold → the capture button is disabled (no shutter while settings load)', () => {
+    const { getByRole } = render(<VisibilityCaptureForm schema={schema} onSubmit={vi.fn()} captureHold />);
+    expect((getByRole('button', { name: /capture photo/i }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});

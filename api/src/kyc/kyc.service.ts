@@ -28,6 +28,17 @@ import { captureOtpDeliveryHandle } from '../notifications/otp-delivery';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
+import {
+  fixTimeProblem,
+  isLocationRequiredFor,
+  isPhoneClockWrong,
+  isRealFix,
+  LOCATION_REQUIRED_KYC_MESSAGE,
+  PHONE_CLOCK_WRONG_MESSAGE,
+  recordFenceBlock,
+  STALE_BOARD_FIX_MESSAGE,
+  WRONG_TIME_BOARD_FIX_MESSAGE,
+} from '../common/location-gate.helper';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
@@ -1911,6 +1922,18 @@ export class KycService {
     });
     const outletMasterGeoEnabled =
       (geoClient?.features as Record<string, unknown> | null)?.outletMasterGeo === true;
+    // ── LOCATION GATE ("no location, no use" — features.requireLocation, sales reps only; LOCATION-GATE.md) ──
+    // OFF (default, every tenant incl. Deoleo) → nothing here runs. ON → a rep's KYC without a valid board-photo
+    // GPS fix is refused before any write (the phone gate blocks it first; this stops an old page / crafted call).
+    const locationRequired = isLocationRequiredFor(geoClient?.features, user.role);
+    if (locationRequired) {
+      if (isPhoneClockWrong(dto.clientNow)) throw new BadRequestException(PHONE_CLOCK_WRONG_MESSAGE);
+      if (!isRealFix(dto.boardPhotoGeo ?? null)) throw new BadRequestException(LOCATION_REQUIRED_KYC_MESSAGE);
+      // Re-KYC stale-geo guard: a board-photo fix pre-filled from an earlier submission (or with no time) is refused.
+      const timeProblem = fixTimeProblem(dto.boardPhotoGeo?.ts, new Date(), dto.clientNow);
+      if (timeProblem === 'old') throw new BadRequestException(STALE_BOARD_FIX_MESSAGE);
+      if (timeProblem) throw new BadRequestException(WRONG_TIME_BOARD_FIX_MESSAGE); // missing / future
+    }
     if (outletMasterGeoEnabled) {
       const reference =
         outlet.latitude != null && outlet.longitude != null
@@ -1943,6 +1966,17 @@ export class KycService {
         } else {
           const distance = haversineMeters({ lat: subject.lat, lng: subject.lng }, reference);
           if (distance > OUTLET_MASTER_GEOFENCE_RADIUS_M) {
+            // Location-gate tenants record the refusal (best-effort) for the location-compliance report.
+            if (locationRequired) {
+              await recordFenceBlock(this.prisma, {
+                actorId: user.sub,
+                clientId: user.clientId,
+                flow: 'KYC',
+                outletId: outlet.id,
+                distanceM: distance,
+                accuracyM: subjectAccuracy,
+              });
+            }
             throw new BadRequestException(
               'You are far from the outlet. Please go to the outlet and try again.',
             );

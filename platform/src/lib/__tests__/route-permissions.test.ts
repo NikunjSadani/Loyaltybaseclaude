@@ -50,5 +50,7 @@ describe('requiredPermissionForPath()', () => {
   it('Usage Report has the SAME page permission as the Session Report (reports:read)', () => {
     expect(requiredPermissionForPath('/admin/reports/usage')).toBe('reports:read');
     expect(requiredPermissionForPath('/admin/reports/usage')).toBe(requiredPermissionForPath('/admin/reports/session'));
+    // Location-compliance report (LOCATION-GATE.md) — same gate as the Usage report.
+    expect(requiredPermissionForPath('/admin/reports/location')).toBe('reports:read');
   });
 });

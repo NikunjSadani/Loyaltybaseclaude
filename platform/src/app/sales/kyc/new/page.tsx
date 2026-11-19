@@ -34,6 +34,12 @@ import { SoDeclarationView } from '@/components/so-declaration-view';
 import { getStoredUser } from '@/lib/auth-client';
 import { acquirePreciseFix } from '@/lib/geo-acquire';
 import { usePreciseGpsPreWarm } from '@/lib/use-precise-gps';
+import { useLocationGate } from '@/lib/use-location-gate';
+import { LocationGatePanel } from '@/components/location/LocationGatePanel';
+import { isSignatureCanvasBlank } from '@/lib/signature-canvas';
+import { BOARD_FIX_MESSAGES, fixTimeProblem, isFixStale } from '@/lib/location-gate';
+import { SETTINGS_FAILED_LOCATION_NOTE, useLocationSetting } from '@/lib/use-location-setting';
+
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -423,7 +429,7 @@ export default function NewKYCPage() {
    * self-declaration document — the Address Proof upload itself stays REQUIRED either
    * way. While features load, DEFAULT_FEATURES has the flag OFF → the SAFE default of
    * requiring the self-declaration on a declared mismatch. */
-  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
+  const { features, loading: featuresLoading, error: featuresError, serverSkewMs, refetchClock } = useTenantFeatures('/api/sales/me', { clock: true });
   /* Tenant name for programme copy (was hard-coded "Deoleo" — showed on Bajaj; owner 2026-11-14). */
   const tenantDisplayName = useClientConfig().branding.displayName;
   const waiverEnabled = features.kycAddressProofWaiver;
@@ -438,6 +444,37 @@ export default function NewKYCPage() {
   // Only a Sales Officer may file an SO Declaration (owner rule 2026-10-15); an ISR always uses the
   // normal document flow and never sees the chooser. Mirrors the server-side gate in KycService.create.
   const soFlag = features.soDeclarationKyc && getStoredUser()?.role === 'SALES_SO';
+
+  /* ── Location gate ("no location, no use" — features.requireLocation; docs/plans/LOCATION-GATE.md) ──
+   * OFF (default — Deoleo, every other tenant): the hook does nothing and the page is byte-identical. ON: the rep
+   * cannot START the KYC (the wizard is replaced by a "location needed" guide) until location is allowed AND a
+   * real fix arrives, and cannot SUBMIT without passing a fresh check (the API refuses a fix-less KYC too). */
+  const locationGate = useLocationGate(features.requireLocation && !featuresLoading, { serverSkewMs, recheckClock: refetchClock });
+  // Last-known setting (browser storage): only drives the settings-failure note for reps whose programme required
+  // location last time. Deoleo reps (last-known false) never see it.
+  const locationSetting = useLocationSetting(features.requireLocation, featuresLoading, featuresError);
+  // Round-3 #2/#6: a ticking clock so a board-photo fix that ages past 55 minutes shows "Retry location" + its line on
+  // its own (no network; only on gate tenants with a board fix in hand).
+  const [geoClockMs, setGeoClockMs] = useState(() => Date.now());
+  // The board-photo location must be FRESH under the gate: a fix pre-filled from an earlier submission (re-KYC) is
+  // cleared so the rep re-acquires it at the outlet (the server refuses one older than an hour too).
+  const boardGeoPrefilledRef = useRef(false);
+  useEffect(() => {
+    if (!locationGate.enabled || !boardPhotoGeo) return;
+    const t = setInterval(() => setGeoClockMs(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, [locationGate.enabled, boardPhotoGeo]);
+  const boardFixStale = !!boardPhotoGeo && isFixStale(boardPhotoGeo.ts, geoClockMs);
+  useEffect(() => {
+    if (locationGate.enabled && boardGeoPrefilledRef.current && boardPhotoGeo) {
+      boardGeoPrefilledRef.current = false;
+      setBoardPhotoGeo(null);
+    }
+  }, [locationGate.enabled, boardPhotoGeo]);
+  // While the guide covers the flow, close the camera overlay (its stream must not keep running hidden).
+  useEffect(() => {
+    if (locationGate.blocking) setCameraDocKey(null);
+  }, [locationGate.blocking]);
   const [flowVariant, setFlowVariant] = useState<FlowVariant | null>(null);
   const isSoVariant = soFlag && flowVariant === 'SO_DECLARATION';
 
@@ -910,6 +947,7 @@ export default function NewKYCPage() {
         };
         const lat1 = fin(sub.boardPhotoLat), lng1 = fin(sub.boardPhotoLng);
         if (lat1 != null && lng1 != null) {
+          boardGeoPrefilledRef.current = true;
           setBoardPhotoGeo({
             lat: lat1, lng: lng1,
             accuracy: Math.round(fin(sub.boardPhotoGeoAccuracy) ?? 0),
@@ -997,6 +1035,7 @@ export default function NewKYCPage() {
         setBoardPhotoGeoLoading(false);
         setBoardPhotoGeoPrecise(false);
         if (fix) {
+          boardGeoPrefilledRef.current = false;
           setBoardPhotoGeo({ lat: fix.lat, lng: fix.lng, accuracy: fix.accuracy, ts: new Date().toISOString() });
           setBoardPhotoLockMs(fix.lockMs);
         } else {
@@ -1009,6 +1048,7 @@ export default function NewKYCPage() {
     // ── NON-GATED TENANTS (Deoleo / every other tenant) — unchanged single-shot call ─────
     navigator.geolocation.getCurrentPosition(
       (pos) => {
+        boardGeoPrefilledRef.current = false;
         setBoardPhotoGeo({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy), ts: new Date().toISOString() });
         boardPhotoGeoLoadingRef.current = false;
         setBoardPhotoGeoLoading(false);
@@ -1505,6 +1545,33 @@ export default function NewKYCPage() {
       setSubmitError('A GSTIN is required for this outlet — add it in the Basic details step before submitting.');
       return;
     }
+    // Location gate (requireLocation tenants only): a fresh check right before submitting. On failure the wizard is
+    // replaced by the location guide (its state is kept) and nothing is sent.
+    if (locationGate.enabled) {
+      // Never send a blank consent signature: a pad marked signed whose canvas is empty is reset to "Signature required".
+      if (hasSigned && isSignatureCanvasBlank(signatureCanvasRef.current)) {
+        setHasSigned(false);
+        setSubmitError('Signature required — the signature pad is empty. Ask the outlet owner to sign again.');
+        return;
+      }
+      // Round-3 #2: the board-photo fix stays the PHOTO's own location — never swapped for the submit-time fix. A
+      // stale one is refreshed only by the rep's explicit "Retry location" (same timed acquire as the photo).
+      if (!boardPhotoGeo) {
+        setSubmitError(BOARD_FIX_MESSAGES.none);
+        return;
+      }
+      const boardTimeProblem = fixTimeProblem(boardPhotoGeo.ts);
+      if (boardTimeProblem) {
+        setSubmitError(boardTimeProblem === 'old' ? BOARD_FIX_MESSAGES.old : BOARD_FIX_MESSAGES.wrongTime);
+        return;
+      }
+      setSubmitting(true);
+      const locationOk = await locationGate.recheck({ quiet: true });
+      if (!locationOk) {
+        setSubmitting(false);
+        return;
+      }
+    }
     setSubmitting(true);
     setSubmitError('');
     try {
@@ -1651,6 +1718,8 @@ export default function NewKYCPage() {
                 ...(upiCaptureMethod ? { upiCaptureMethod } : {}),
               }),
           boardPhotoGeo:    boardPhotoGeo ?? undefined,
+          // Location gate only: the phone's clock at submit — the server judges the board fix's age on it (bounded).
+          ...(locationGate.enabled ? { clientNow: new Date().toISOString() } : {}),
           // Instrumentation (geo-fence tenants only; undefined otherwise → Deoleo byte-identical).
           boardPhotoLockMs: boardPhotoLockMs ?? undefined,
           paymentGeo:       paymentGeo   ?? undefined,
@@ -2211,6 +2280,9 @@ export default function NewKYCPage() {
   if (!docs.storeBoardPhoto) addressMissing.push('Store board photo');
   if (selfDeclarationRequiredEff && !docs.selfDeclaration) addressMissing.push('Signed self-declaration');
   // Board location: only actionable once a photo exists (no photo → already blocked above).
+  // Gate tenants: a board fix older than 55 minutes must be refreshed (Retry location) before continuing.
+  if (locationGate.enabled && docs.storeBoardPhoto && boardFixStale && !boardPhotoGeoLoading)
+    addressMissing.push('A fresh store board location (tap Retry location)');
   if (docs.storeBoardPhoto && !boardPhotoGeo && !boardPhotoGeoLoading)
     addressMissing.push('Store board location (retake photo or tap Retry location)');
   const addressBlocked = addressMissing.length > 0 || addressBusy !== null;
@@ -2271,8 +2343,34 @@ export default function NewKYCPage() {
    * chooses how to complete ITS KYC. Reached from the outlet step's Continue (and the re-KYC
    * deep-link) only when soFlag && no flow picked yet; STANDARD = today's document flow, SO
    * Declaration = the variant. ISR / non-bajaj never route here (Deoleo unaffected). */
-  if (step === 'choose') {
+  /* Location gate (requireLocation tenants only): while location is not usable, the location guide is shown and the
+   * KYC flow behind it stays MOUNTED but hidden (release-gate review CRITICAL: unmounting destroyed the signature
+   * canvas while hasSigned stayed true → a blank consent signature). The OTP / done steps return earlier and are never
+   * gated. Tenants without the switch get the flow exactly as before (no wrapper). */
+  const withLocationGate = (flow: React.ReactNode): React.ReactNode => {
+    if (!locationGate.enabled) return flow;
     return (
+      <>
+        {locationGate.blocking && (
+          <div className="space-y-5 fade-in" data-testid="kyc-location-gate">
+            <div className="flex items-center gap-3">
+              <Link href="/sales/kyc" aria-label="Back to KYC list" className="p-2 rounded-lg hover:bg-gray-100 transition-colors">
+                <ArrowLeft className="h-4 w-4 text-gray-600" />
+              </Link>
+              <div className="flex-1 min-w-0">
+                <h1 className="text-lg font-bold text-gray-900">{isReKYC ? 'Re-KYC' : 'New KYC'}</h1>
+                <p className="text-xs text-gray-500 truncate">{selectedOutlet ? selectedOutlet.name : 'Location check'}</p>
+              </div>
+            </div>
+            <LocationGatePanel gate={locationGate} purpose="start or submit a KYC" />
+          </div>
+        )}
+        <div hidden={locationGate.blocking} data-testid="kyc-flow">{flow}</div>
+      </>
+    );
+  };
+  if (step === 'choose') {
+    return withLocationGate(
       <div className="space-y-5 fade-in">
         <div className="flex items-center gap-3">
           <button
@@ -2324,7 +2422,7 @@ export default function NewKYCPage() {
   }
 
   /* ── Page shell ── */
-  return (
+  return withLocationGate(
     <div
       ref={pageRootRef}
       data-testid="kyc-new-root"
@@ -2389,6 +2487,11 @@ export default function NewKYCPage() {
       )}
 
       <StepBar />
+      {locationSetting.settingsNote && (
+        <p data-testid="location-settings-note" className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          {SETTINGS_FAILED_LOCATION_NOTE}
+        </p>
+      )}
 
       {/* Global file-size error */}
       {fileError && (
@@ -2978,19 +3081,23 @@ export default function NewKYCPage() {
               {docs.storeBoardPhoto && (
                 <div className="space-y-2">
                   <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-xs ${
-                    boardPhotoGeo
+                    boardPhotoGeo && !(locationGate.enabled && boardFixStale)
                       ? 'bg-emerald-50 border-emerald-200'
+                      : boardPhotoGeoError
+                      ? 'bg-red-50 border-red-200'
+                      : boardPhotoGeo
+                      ? 'bg-amber-50 border-amber-200'
                       : boardPhotoGeoError
                       ? 'bg-red-50 border-red-200'
                       : 'bg-blue-50 border-blue-200'
                   }`}>
                     {boardPhotoGeoLoading && <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0" />}
-                    {boardPhotoGeo        && <Navigation className="h-4 w-4 text-emerald-600 shrink-0" />}
+                    {boardPhotoGeo && !(locationGate.enabled && boardFixStale) && <Navigation className="h-4 w-4 text-emerald-600 shrink-0" />}
                     {boardPhotoGeoError   && <AlertCircle data-testid="board-photo-geo-error" className="h-4 w-4 text-red-500 shrink-0" />}
                     {!boardPhotoGeoLoading && !boardPhotoGeo && !boardPhotoGeoError && <Navigation className="h-4 w-4 text-blue-500 shrink-0" />}
                     <div className="flex-1 min-w-0">
                       {boardPhotoGeoLoading && <p className="text-blue-700 font-medium">{boardPhotoGeoPrecise ? 'Getting a precise location…' : 'Getting location…'}</p>}
-                      {boardPhotoGeo        && <p className="text-emerald-700 font-medium">Location captured · {boardPhotoGeo.lat.toFixed(5)}, {boardPhotoGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{boardPhotoGeo.accuracy}m)</span></p>}
+                      {boardPhotoGeo && !(locationGate.enabled && boardFixStale) && <p className="text-emerald-700 font-medium">Location captured · {boardPhotoGeo.lat.toFixed(5)}, {boardPhotoGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{boardPhotoGeo.accuracy}m)</span></p>}
                       {boardPhotoGeoError   && (
                         <div>
                           <p data-testid="board-photo-geo-error" className="text-red-700 font-medium">Location required</p>
@@ -3004,7 +3111,14 @@ export default function NewKYCPage() {
                   </div>
                   {/* KYC-H2: recovery — hard block stays, but the rep can re-attempt the fix.
                       Disabled for the whole in-flight duration so it can't be double-fired. */}
-                  {!boardPhotoGeo && (
+                  {locationGate.enabled && boardFixStale && !boardPhotoGeoLoading && (
+                    <p data-testid="board-photo-geo-stale" role="status" className="text-[11px] font-medium text-amber-700">
+                      {boardPhotoGeo && fixTimeProblem(boardPhotoGeo.ts, geoClockMs) === 'old'
+                        ? 'This location is older than 55 minutes — tap Retry location.'
+                        : 'This location has a wrong time — tap Retry location.'}
+                    </p>
+                  )}
+                  {(!boardPhotoGeo || (locationGate.enabled && boardFixStale)) && (
                     <button
                       type="button"
                       data-testid="board-photo-geo-retry"
@@ -3389,7 +3503,7 @@ export default function NewKYCPage() {
                   disabled={!isSubmitted && bankBlocked}>
                   {/* KYC-M5: once submitted the handler only navigates to the OTP step (it never
                       re-POSTs), so the label reads as navigation, not a re-submit. */}
-                  {isSubmitted ? 'Continue to verification →' : 'Send OTP to Outlet Owner'}
+                  {locationGate.submitChecking ? 'Checking location…' : isSubmitted ? 'Continue to verification →' : 'Send OTP to Outlet Owner'}
                 </Button>
               )}
             </div>
@@ -3472,7 +3586,7 @@ export default function NewKYCPage() {
               <Button variant="outline" className="flex-1" onClick={() => setStep('bank')}>← Back</Button>
               <Button variant="primary" className="flex-1" loading={submitting} onClick={handleSubmit}
                 disabled={!soConfirmed || !soHasSigned || declPanInvalid || declGstInvalid}>
-                Continue to verification →
+                {locationGate.submitChecking ? 'Checking location…' : 'Continue to verification →'}
               </Button>
             </div>
             <p className="text-[11px] text-gray-400 text-center pt-1">

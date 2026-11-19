@@ -7,6 +7,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/reports.dto';
 import { ExportsService } from '../exports/exports.service';
 import { UsageReportQueryDto } from './dto/usage-report.dto';
+import { LocationComplianceQueryDto } from './dto/location-compliance.dto';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -98,6 +99,34 @@ export class ReportsController {
   ) {
     if (query.format === ReportFormat.XLSX) return this.exports.respond(res, user, 'usage-report', query);
     return this.respond(await this.reports.usageReport(user, query));
+  }
+
+  /**
+   * GET /v1/reports/location-compliance/enabled — `{ enabled }` for the caller's tenant (features.requireLocation), with
+   * EXACTLY the report's roles + permission, so the reports index shows the tile exactly when the report would answer
+   * (MIS_USER cannot read /admin/settings/config). Declared before the report route.
+   */
+  @Get('location-compliance/enabled')
+  @Roles('GIFSY_ADMIN', 'MIS_USER', 'CLIENT_ADMIN')
+  @RequirePermission('reports:read')
+  async locationComplianceEnabled(@CurrentUser() user: JwtPayload) {
+    return this.reports.locationComplianceEnabled(user);
+  }
+
+  /**
+   * GET /v1/reports/location-compliance — per-rep location compliance (LOCATION-GATE.md). Same access as the Usage
+   * report. `format=xlsx` = every filtered row through the 'location-compliance' export kind (streams; 404 when none).
+   */
+  @Get('location-compliance')
+  @Roles('GIFSY_ADMIN', 'MIS_USER', 'CLIENT_ADMIN')
+  @RequirePermission('reports:read')
+  async locationCompliance(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: LocationComplianceQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (query.format === ReportFormat.XLSX) return this.exports.respond(res, user, 'location-compliance', query);
+    return this.respond(await this.reports.locationCompliance(user, query));
   }
 
   @Get('kyc-status')

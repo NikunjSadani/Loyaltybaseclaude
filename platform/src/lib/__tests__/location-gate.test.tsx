@@ -1,0 +1,364 @@
+/**
+ * Location gate (docs/plans/LOCATION-GATE.md) — the pure check, the platform guide, the hook and the panel.
+ *
+ * LG1-LG6  checkLocation: permission denied (no request made) · granted + real fix → ok · POSITION_UNAVAILABLE ·
+ *          TIMEOUT · no geolocation · Permissions API missing (Safari) → relies on the request result.
+ * LG7      detectLocationPlatform + a guide per platform/reason (Android site settings + Google Location Accuracy;
+ *          iPhone Safari Websites "While Using"; installed iPhone app; desktop).
+ * LG8-LG11 useLocationGate + LocationGatePanel: OFF (Deoleo) never touches geolocation; ON shows "checking" then the
+ *          flow on a fix; a block shows the guide and "Test again" recovers; quiet submit re-check.
+ */
+import React from 'react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { checkLocation, detectLocationPlatform, isFixStale, locationGuide } from '../location-gate';
+import { useLocationGate } from '../use-location-gate';
+import { LocationGatePanel } from '@/components/location/LocationGatePanel';
+
+const realGeo = navigator.geolocation;
+const realPerms = (navigator as Navigator & { permissions?: Permissions }).permissions;
+
+let getCurrentPosition: ReturnType<typeof vi.fn>;
+let permissionState: PermissionState | null;
+
+function installGeo() {
+  Object.defineProperty(navigator, 'geolocation', {
+    value: { getCurrentPosition, watchPosition: vi.fn(), clearWatch: vi.fn() },
+    configurable: true,
+  });
+  Object.defineProperty(navigator, 'permissions', {
+    value:
+      permissionState === null
+        ? undefined
+        : { query: vi.fn().mockResolvedValue({ state: permissionState, addEventListener: vi.fn(), removeEventListener: vi.fn() }) },
+    configurable: true,
+  });
+}
+
+const fixOk = (cb: PositionCallback) =>
+  cb({ coords: { latitude: 12.9, longitude: 77.5, accuracy: 14.4 } } as GeolocationPosition);
+const fail = (code: number) => (_ok: PositionCallback, err: PositionErrorCallback) =>
+  err({ code } as GeolocationPositionError);
+
+beforeEach(() => {
+  getCurrentPosition = vi.fn();
+  permissionState = 'prompt';
+  installGeo();
+});
+afterEach(() => {
+  Object.defineProperty(navigator, 'geolocation', { value: realGeo, configurable: true });
+  Object.defineProperty(navigator, 'permissions', { value: realPerms, configurable: true });
+});
+
+describe('checkLocation', () => {
+  it('LG1: permission DENIED → blocked "denied" without even asking for a position', async () => {
+    permissionState = 'denied';
+    installGeo();
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'denied' });
+    expect(getCurrentPosition).not.toHaveBeenCalled();
+  });
+
+  it('LG2: granted + a real fix → ok with the rounded accuracy (high accuracy requested)', async () => {
+    permissionState = 'granted';
+    installGeo();
+    getCurrentPosition.mockImplementation(fixOk);
+    expect(await checkLocation()).toEqual({ ok: true, fix: { lat: 12.9, lng: 77.5, accuracy: 14 } });
+    expect(getCurrentPosition.mock.calls[0][2]).toMatchObject({ enableHighAccuracy: true });
+  });
+
+  it('LG3: allowed but no fix (phone Location off) → "unavailable"', async () => {
+    getCurrentPosition.mockImplementation(fail(2));
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'unavailable' });
+  });
+
+  it('LG4: TIMEOUT → "timeout"; the user refusing at the prompt → "denied"', async () => {
+    getCurrentPosition.mockImplementation(fail(3));
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'timeout' });
+    getCurrentPosition.mockImplementation(fail(1));
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'denied' });
+  });
+
+  it('LG5: no geolocation in the browser → "unsupported"', async () => {
+    Object.defineProperty(navigator, 'geolocation', { value: undefined, configurable: true });
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'unsupported' });
+  });
+
+  it('LG6: no Permissions API (older Safari) → relies on the request result', async () => {
+    permissionState = null;
+    installGeo();
+    getCurrentPosition.mockImplementation(fixOk);
+    expect((await checkLocation()).ok).toBe(true);
+  });
+
+  it('REVIEW: code 1 while the SITE permission reads granted → "device" (phone/app-level block)', async () => {
+    permissionState = 'granted';
+    installGeo();
+    getCurrentPosition.mockImplementation(fail(1));
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'device' });
+  });
+
+  it('REVIEW: the 0,0 default is not a fix', async () => {
+    getCurrentPosition.mockImplementation((cb: PositionCallback) =>
+      cb({ coords: { latitude: 0, longitude: 0, accuracy: 5 } } as GeolocationPosition),
+    );
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'unavailable' });
+  });
+
+  it('REVIEW: the never-called-back guard waits longer while a permission prompt may be open (45 s), short when granted', async () => {
+    vi.useFakeTimers();
+    try {
+      getCurrentPosition.mockImplementation(() => undefined); // never calls back
+      const p = checkLocation();
+      await vi.advanceTimersByTimeAsync(44_000);
+      let settled = false;
+      void p.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await p).toEqual({ ok: false, reason: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a garbage fix (NaN) is not a fix', async () => {
+    getCurrentPosition.mockImplementation((cb: PositionCallback) =>
+      cb({ coords: { latitude: NaN, longitude: 77.5, accuracy: 5 } } as GeolocationPosition),
+    );
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'unavailable' });
+  });
+});
+
+describe('isFixStale (audit #3)', () => {
+  it('ROUND 4 #1: a fix timed more than 10 min in the FUTURE is stale too (mirrors the server)', () => {
+    const now = Date.now();
+    expect(isFixStale(new Date(now + 11 * 60_000).toISOString(), now)).toBe(true);
+    expect(isFixStale(new Date(now + 5 * 60_000).toISOString(), now)).toBe(false);
+  });
+
+  it('stale after 55 min on the phone clock, or with no / bad ts', () => {
+    const now = Date.now();
+    expect(isFixStale(new Date(now - 10 * 60_000).toISOString(), now)).toBe(false);
+    expect(isFixStale(new Date(now - 56 * 60_000).toISOString(), now)).toBe(true);
+    expect(isFixStale(undefined, now)).toBe(true);
+    expect(isFixStale('nope', now)).toBe(true);
+  });
+});
+
+describe('platform guide', () => {
+  it('LG7: detects the platform and gives the matching, honest steps', () => {
+    const android = 'Mozilla/5.0 (Linux; Android 14; SM-A146B) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36';
+    const iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Version/18.1 Mobile/15E148 Safari/604.1';
+    const win = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36';
+    expect(detectLocationPlatform(android, false)).toBe('android');
+    expect(detectLocationPlatform(iphone, false)).toBe('ios-safari');
+    expect(detectLocationPlatform(iphone, true)).toBe('ios-app');
+    expect(detectLocationPlatform(win, false)).toBe('desktop');
+
+    expect(locationGuide('android', 'denied').steps.join(' ')).toMatch(/Site settings → Location/);
+    expect(locationGuide('android', 'unavailable').steps.join(' ')).toMatch(/Google Location Accuracy/);
+    expect(locationGuide('ios-safari', 'denied').steps.join(' ')).toMatch(/Safari Websites → choose “While Using the App”/);
+    expect(locationGuide('ios-app', 'denied').steps.join(' ')).toMatch(/home screen/);
+    expect(locationGuide('desktop', 'denied').steps.join(' ')).toMatch(/address bar/);
+    // REVIEW: an app-level block on Android points at the phone's Chrome app permission.
+    expect(locationGuide('android', 'device').steps.join(' ')).toMatch(/Settings → Apps → Chrome → Permissions → Location → Allow/);
+    expect(locationGuide('android', 'device').steps.join(' ')).toMatch(/turn on Location/);
+    // Honest: the page cannot see the phone's Location switch.
+    expect(locationGuide('android', 'timeout').footnote).toMatch(/can't tell us whether the phone's Location switch is on/);
+  });
+});
+
+// ─── Hook + panel ──────────────────────────────────────────────────────────────
+
+function Harness({ enabled, onSubmit, serverSkewMs, recheckClock }: { enabled: boolean; onSubmit?: (ok: boolean) => void; serverSkewMs?: number | null; recheckClock?: () => Promise<number | null> }) {
+  const gate = useLocationGate(enabled, { serverSkewMs, recheckClock });
+  if (gate.blocking) return <LocationGatePanel gate={gate} purpose="start or submit a KYC" />;
+  return (
+    <div>
+      <p>THE FLOW</p>
+      <button onClick={async () => onSubmit?.(Boolean(await gate.recheck({ quiet: true })))}>submit</button>
+    </div>
+  );
+}
+
+describe('useLocationGate + LocationGatePanel', () => {
+  it('LG8: OFF (Deoleo) → the flow renders and geolocation / permissions are never touched', () => {
+    render(<Harness enabled={false} />);
+    expect(screen.getByText('THE FLOW')).toBeTruthy();
+    expect(getCurrentPosition).not.toHaveBeenCalled();
+    expect((navigator.permissions as unknown as { query: ReturnType<typeof vi.fn> }).query).not.toHaveBeenCalled();
+  });
+
+  it('LG9: ON → "Checking your location…" first, then the flow once a fix arrives', async () => {
+    let deliver: PositionCallback | null = null;
+    getCurrentPosition.mockImplementation((cb: PositionCallback) => {
+      deliver = cb;
+    });
+    render(<Harness enabled />);
+    expect(await screen.findByTestId('location-gate-checking')).toBeTruthy();
+    expect(screen.queryByText('THE FLOW')).toBeNull();
+    await waitFor(() => expect(deliver).not.toBeNull());
+    await act(async () => fixOk(deliver!));
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+  });
+
+  it('LG10: ON + no fix → the guide (heading focused, steps, footnote); "Test again" recovers', async () => {
+    getCurrentPosition.mockImplementation(fail(2));
+    render(<Harness enabled />);
+    const panel = await screen.findByTestId('location-gate-blocked');
+    expect(panel.getAttribute('data-reason')).toBe('unavailable');
+    const heading = screen.getByRole('heading', { name: /Couldn't get your location/ });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    expect(screen.getByText(/Location is required to start or submit a KYC/)).toBeTruthy();
+
+    getCurrentPosition.mockImplementation(fixOk);
+    fireEvent.click(screen.getByTestId('location-gate-test-again'));
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+  });
+
+  it('REVIEW: "Test again" keeps the guide on screen (button "Checking…", focus kept) and announces a repeat failure', async () => {
+    getCurrentPosition.mockImplementation(fail(2));
+    render(<Harness enabled />);
+    await screen.findByTestId('location-gate-blocked');
+    let deliverErr: PositionErrorCallback | null = null;
+    getCurrentPosition.mockImplementation((_ok: PositionCallback, err: PositionErrorCallback) => { deliverErr = err; });
+    const btn = screen.getByTestId('location-gate-test-again');
+    btn.focus();
+    fireEvent.click(btn);
+    await waitFor(() => expect(btn.textContent).toMatch(/Checking…/));
+    expect(screen.getByTestId('location-gate-blocked')).toBeTruthy(); // guide stays
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(btn);
+    expect(screen.getByTestId('location-gate-live').textContent).toMatch(/Checking your location/);
+    await waitFor(() => expect(deliverErr).not.toBeNull());
+    await act(async () => deliverErr!({ code: 2 } as GeolocationPositionError));
+    await waitFor(() => expect(btn.textContent).toMatch(/Test again/));
+    expect(screen.getByTestId('location-gate-still-blocked')).toBeTruthy();
+    expect(screen.getByTestId('location-gate-live').textContent).toMatch(/Still no location/);
+  });
+
+  it('AUDIT #9: the permission is revoked while a submit-time check is in flight → the check returns null (no submit)', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    let onPerm: (() => void) | null = null;
+    const ps = { state: 'granted' as PermissionState, addEventListener: (_e: string, cb: () => void) => { onPerm = cb; }, removeEventListener: vi.fn() };
+    Object.defineProperty(navigator, 'permissions', { value: { query: vi.fn().mockResolvedValue(ps) }, configurable: true });
+    const results: boolean[] = [];
+    render(<Harness enabled onSubmit={(ok) => results.push(ok)} />);
+    await screen.findByText('THE FLOW');
+    await waitFor(() => expect(onPerm).not.toBeNull());
+    let deliver: PositionCallback | null = null;
+    getCurrentPosition.mockImplementation((cb: PositionCallback) => { deliver = cb; });
+    fireEvent.click(screen.getByText('submit'));
+    await waitFor(() => expect(deliver).not.toBeNull());
+    ps.state = 'denied';
+    await act(async () => onPerm!());
+    await act(async () => fixOk(deliver!)); // the in-flight fix arrives AFTER the revoke
+    await waitFor(() => expect(results).toEqual([false]));
+    expect(await screen.findByTestId('location-gate-blocked')).toBeTruthy();
+  });
+
+  it('ROUND 3 #7: a "granted" change event mid-submit does NOT cancel the submit check', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    let onPerm: (() => void) | null = null;
+    const ps = { state: 'granted' as PermissionState, addEventListener: (_e: string, cb: () => void) => { onPerm = cb; }, removeEventListener: vi.fn() };
+    Object.defineProperty(navigator, 'permissions', { value: { query: vi.fn().mockResolvedValue(ps) }, configurable: true });
+    const results: boolean[] = [];
+    render(<Harness enabled onSubmit={(ok) => results.push(ok)} />);
+    await screen.findByText('THE FLOW');
+    await waitFor(() => expect(onPerm).not.toBeNull());
+    const pending: PositionCallback[] = [];
+    getCurrentPosition.mockImplementation((cb: PositionCallback) => { pending.push(cb); });
+    fireEvent.click(screen.getByText('submit'));
+    await waitFor(() => expect(pending.length).toBe(1));
+    await act(async () => onPerm!()); // "granted" → a newer recheck starts
+    await waitFor(() => expect(pending.length).toBe(2));
+    await act(async () => { fixOk(pending[0]); fixOk(pending[1]); });
+    await waitFor(() => expect(results).toEqual([true]));
+    expect(screen.getByText('THE FLOW')).toBeTruthy();
+  });
+
+  it('ROUND 3 #3: phone clock > 24 h off (from the settings response) → blocked "date and time are wrong", no location request', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    render(<Harness enabled serverSkewMs={3 * 86_400_000} />);
+    const panel = await screen.findByTestId('location-gate-blocked');
+    expect(panel.getAttribute('data-reason')).toBe('clock');
+    expect(screen.getByRole('heading', { name: /date and time are wrong/ })).toBeTruthy();
+    expect(getCurrentPosition).not.toHaveBeenCalled();
+  });
+
+  it('ROUND 4 #6: clock guide "Test again" re-reads the server clock; fixed → the block clears and location is checked', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    // 1st = the confirmation on open (still wrong -> block), 2nd = Test again (still wrong), 3rd = Test again (fixed).
+    const recheckClock = vi.fn()
+      .mockResolvedValueOnce(3 * 86_400_000)
+      .mockResolvedValueOnce(3 * 86_400_000)
+      .mockResolvedValueOnce(2_000);
+    render(<Harness enabled serverSkewMs={3 * 86_400_000} recheckClock={recheckClock} />);
+    await screen.findByTestId('location-gate-blocked');
+    expect(screen.getByText(/Then tap Test again/)).toBeTruthy();
+    expect(recheckClock).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('location-gate-test-again')); // still wrong
+    await waitFor(() => expect(recheckClock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId('location-gate-test-again').textContent).toMatch(/Test again/));
+    expect(screen.getByTestId('location-gate-blocked').getAttribute('data-reason')).toBe('clock');
+    fireEvent.click(screen.getByTestId('location-gate-test-again')); // fixed
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+    expect(getCurrentPosition).toHaveBeenCalled();
+  });
+
+  it('ITEM 5: a cached-old Date (passive skew > 24 h) but a FRESH confirmation -> no clock block', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const recheckClock = vi.fn().mockResolvedValue(1_500);
+    render(<Harness enabled serverSkewMs={30 * 3_600_000} recheckClock={recheckClock} />);
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+    expect(recheckClock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('location-gate-blocked')).toBeNull();
+  });
+
+  it('ITEM 5: passive AND confirmation both skewed > 24 h -> clock block (one confirmation)', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const recheckClock = vi.fn().mockResolvedValue(30 * 3_600_000);
+    render(<Harness enabled serverSkewMs={30 * 3_600_000} recheckClock={recheckClock} />);
+    expect((await screen.findByTestId('location-gate-blocked')).getAttribute('data-reason')).toBe('clock');
+    expect(recheckClock).toHaveBeenCalledTimes(1);
+    expect(getCurrentPosition).not.toHaveBeenCalled();
+  });
+
+  it('ITEM 5: a FAILED confirmation never blocks on the clock (the server still refuses)', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const recheckClock = vi.fn().mockResolvedValue(null);
+    render(<Harness enabled serverSkewMs={30 * 3_600_000} recheckClock={recheckClock} />);
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+  });
+
+  it('ITEM 5: switch OFF -> no confirmation request, even with a skewed passive clock', async () => {
+    const recheckClock = vi.fn().mockResolvedValue(30 * 3_600_000);
+    render(<Harness enabled={false} serverSkewMs={30 * 3_600_000} recheckClock={recheckClock} />);
+    expect(screen.getByText('THE FLOW')).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(recheckClock).not.toHaveBeenCalled();
+  });
+
+  it('ITEM 5: an in-range passive skew -> no confirmation request', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const recheckClock = vi.fn();
+    render(<Harness enabled serverSkewMs={60_000} recheckClock={recheckClock} />);
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+    expect(recheckClock).not.toHaveBeenCalled();
+  });
+
+  it('LG11: submit-time quiet re-check — OK keeps the flow; a lost fix switches to the guide and reports false', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const results: boolean[] = [];
+    render(<Harness enabled onSubmit={(ok) => results.push(ok)} />);
+    await screen.findByText('THE FLOW');
+    fireEvent.click(screen.getByText('submit'));
+    await waitFor(() => expect(results).toEqual([true]));
+    expect(screen.getByText('THE FLOW')).toBeTruthy();
+
+    getCurrentPosition.mockImplementation(fail(3));
+    fireEvent.click(screen.getByText('submit'));
+    await waitFor(() => expect(results).toEqual([true, false]));
+    expect((await screen.findByTestId('location-gate-blocked')).getAttribute('data-reason')).toBe('timeout');
+  });
+});

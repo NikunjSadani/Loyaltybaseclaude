@@ -122,6 +122,8 @@ function makePrisma() {
     whatsappBroadcastRecipient: { count: jest.fn().mockResolvedValue(0) },
     visibilityCapture: { count: jest.fn().mockResolvedValue(0) },
     visibilityCaptureSubmission: { count: jest.fn().mockResolvedValue(0) },
+    // Location line: recorded "outside the fence" refusals (LOCATION_FENCE_BLOCK audit rows).
+    auditLog: { count: jest.fn().mockResolvedValue(0) },
     salesImport: { count: jest.fn().mockResolvedValue(0), findFirst: jest.fn().mockResolvedValue(null) },
     salesMonthStatus: { findMany: jest.fn().mockResolvedValue([]) },
     salesKpiDefinition: { count: jest.fn().mockResolvedValue(0) },
@@ -165,6 +167,36 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     store = prisma.programSetting;
     sendEmail = jest.fn().mockResolvedValue(undefined);
     svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never);
+  });
+
+  describe('Location line (LOCATION-GATE.md)', () => {
+    it('loads per tenant, scoped to the tenant: shown for the requireLocation tenant, hidden for a quiet Deoleo', async () => {
+      prisma.client.findMany.mockResolvedValue([
+        { id: 'bajaj', internalName: 'bajaj', status: 'ACTIVE', branding: { displayName: 'Bajaj' }, features: { requireLocation: true } },
+        { id: 'deoleo', internalName: 'Deoleo', status: 'ACTIVE', branding: {}, features: {} },
+      ]);
+      prisma.auditLog.count.mockImplementation(async ({ where }: any) => (where.metadata.equals === 'bajaj' ? 2 : 0));
+      setRecipients({ dailyDigest: ['ops@gifsy.in'] });
+      await svc.runDailyReports(NOW);
+      const html: string = sendEmail.mock.calls[0][0].html;
+      const bajaj = html.slice(html.indexOf('data-tenant="bajaj"'), html.indexOf('data-tenant="deoleo"'));
+      const deoleo = html.slice(html.indexOf('data-tenant="deoleo"'));
+      expect(bajaj).toContain('data-section="Location"');
+      expect(bajaj).toContain('blocked outside the 200 m fence <strong style="color:#b45309;">2</strong>');
+      expect(deoleo).not.toContain('data-section="Location"');
+      // Loaded ONLY for the switch-on tenant — Deoleo is never queried.
+      expect(prisma.auditLog.count).toHaveBeenCalledTimes(1);
+      for (const [arg] of prisma.auditLog.count.mock.calls) {
+        expect(arg.where.entityType).toBe('LOCATION_FENCE_BLOCK');
+        expect(arg.where.metadata).toEqual({ path: ['clientId'], equals: 'bajaj' });
+      }
+      const locKyc = prisma.kycSubmission.count.mock.calls.filter(([a]: any) => a.where?.user?.role);
+      expect(locKyc.length).toBeGreaterThan(0);
+      for (const [arg] of locKyc) {
+        expect((arg as any).where.user.clientId).toBe('bajaj');
+        expect((arg as any).where.user.role.in).toEqual(expect.arrayContaining(['SALES_ISR', 'SALES_SO']));
+      }
+    });
   });
 
   describe('recipients', () => {

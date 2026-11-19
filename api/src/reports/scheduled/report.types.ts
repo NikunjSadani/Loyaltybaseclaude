@@ -160,6 +160,23 @@ export interface VisibilitySection {
   pending: number;
 }
 
+/**
+ * Location compliance in the window (LOCATION-GATE.md): sales-rep KYCs (by submittedAt, board-photo fix) and visibility
+ * capture submissions (by createdAt). Loaded and shown ONLY for tenants with features.requireLocation ON.
+ */
+export interface LocationSection {
+  /** features.requireLocation for this tenant. */
+  requireLocation: boolean;
+  kycs: number;
+  captures: number;
+  /** KYCs + captures saved with no GPS fix. */
+  noGps: number;
+  /** KYCs + captures whose fix was worse than ±50 m. */
+  poorAccuracy: number;
+  /** "Outside the 200 m fence" refusals recorded in the window (recorded only while requireLocation is ON). */
+  blockedOutside: number;
+}
+
 export interface SalesOpenMonth {
   /** 'YYYY-MM'. */
   month: string;
@@ -299,6 +316,8 @@ export interface TenantDigest {
   messages: SectionResult<MessagesSection>;
   /** Present ONLY for tenants with the visibilityEnabled setting ON. */
   visibility?: SectionResult<VisibilitySection>;
+  /** Present ONLY for tenants with features.requireLocation ON. */
+  location?: SectionResult<LocationSection>;
   /** Present ONLY for tenants with features.salesImport. */
   salesImport?: SectionResult<SalesImportSection>;
   /** Present ONLY for tenants with features.salesImport (its own try/catch — a failure never hides Sales Import). */

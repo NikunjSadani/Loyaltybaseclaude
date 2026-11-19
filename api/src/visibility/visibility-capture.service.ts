@@ -21,6 +21,14 @@ import {
 } from '../sales/sales-hierarchy-access.helper';
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { VisibilityMediaService } from './visibility-media.service';
+import { visibilityLocationRefusal } from './visibility-location.helper';
+import {
+  isLocationRequiredFor,
+  isPhoneClockWrong,
+  isRealFix,
+  PHONE_CLOCK_WRONG_MESSAGE,
+  recordFenceBlock,
+} from '../common/location-gate.helper';
 import {
   currentWindowKey,
   isWindowClosed,
@@ -496,7 +504,7 @@ export class VisibilityCaptureService {
     }
 
     const outlet = await this.loadInScopeOutlet(user.clientId, dto.outletId, config);
-    return this.persistCapture(user, config, caller, outlet, dto.formValues, null);
+    return this.persistCapture(user, config, caller, outlet, dto.formValues, null, { captureGeo: dto.captureGeo, clientNow: dto.clientNow });
   }
 
   /** Re-capture after a rejection (D11) — only a REJECTED capture, re-authorized. */
@@ -539,7 +547,7 @@ export class VisibilityCaptureService {
     }
 
     const outlet = await this.loadInScopeOutlet(user.clientId, capture.outletId, config);
-    return this.persistCapture(user, config, caller, outlet, dto.formValues, capture);
+    return this.persistCapture(user, config, caller, outlet, dto.formValues, capture, { captureGeo: dto.captureGeo, clientNow: dto.clientNow });
   }
 
   /**
@@ -611,6 +619,8 @@ export class VisibilityCaptureService {
       formValues?: Prisma.JsonValue | null;
       photoReviews?: Prisma.JsonValue | null;
     } | null,
+    /** Location gate: the phone's submit-time fix + clock (requireLocation tenants only; see visibility-location.helper). */
+    gateInput: { captureGeo?: unknown; clientNow?: unknown } = {},
   ) {
     const form = await this.prisma.visibilityForm.findUnique({
       where: { clientId: user.clientId },
@@ -714,7 +724,31 @@ export class VisibilityCaptureService {
     // message. Missing outlet-master coords OR no photo GPS fix → 'unverifiable' (allow + flag),
     // never a hard-block. When OFF → EXACTLY today's behavior (KYC board-photo ref + the tenant's
     // visibilityConfig.geoFence), byte-identical for Deoleo / every non-gated tenant.
-    const outletMasterGeoEnabled = await this.resolveOutletMasterGeo(user.clientId);
+    const geoFeatures = await this.resolveGeoFeatures(user.clientId);
+    const outletMasterGeoEnabled = geoFeatures.outletMasterGeo === true;
+
+    // ── LOCATION GATE ("no location, no use" — features.requireLocation, sales reps only; LOCATION-GATE.md) ──
+    // OFF (default, every tenant incl. Deoleo) → nothing here runs. ON → every location-tagged photo the rep submits
+    // NOW must carry a valid fix (carried-forward approved photos are not re-checked), else 400 before any write.
+    const locationRequired = isLocationRequiredFor(geoFeatures, user.role);
+    if (locationRequired) {
+      if (isPhoneClockWrong(gateInput.clientNow)) throw new BadRequestException(PHONE_CLOCK_WRONG_MESSAGE);
+      const refusal = visibilityLocationRefusal(schema, values, new Set(Object.keys(carriedReviews)), cleaned, gateInput.captureGeo, {
+        clientNow: gateInput.clientNow,
+      });
+      if (refusal) throw new BadRequestException(refusal);
+    }
+    const recordOutside = (distanceM: number | null, accuracyM: number | null) =>
+      locationRequired
+        ? recordFenceBlock(this.prisma, {
+            actorId: user.sub,
+            clientId: user.clientId,
+            flow: 'VISIBILITY',
+            outletId: outlet.id,
+            distanceM,
+            accuracyM,
+          })
+        : Promise.resolve();
     // isUsableReference (not just a null-check) guards the OUTLET-MASTER coords: a 0/0 sentinel
     // or out-of-range master value → treated as NO reference → 'unverifiable' (allow+flag) in
     // both fence paths below, never a spurious block of a rep at the real outlet.
@@ -746,6 +780,8 @@ export class VisibilityCaptureService {
     // `repGeo` = the representative photo used for the map-pin columns (the FIRST
     // fence-required photo that had a fix; legacy path → the single GPS_POINT fix).
     let repGeo: CaptureGeo;
+    // The fence reference, kept for the location-gate STORED location below (switch-on tenants only).
+    let storeReference: { lat: number; lng: number } | null = null;
 
     if (fenceFields.length > 0) {
       // ── NEW PER-PHOTO PATH ──────────────────────────────────────────────────────
@@ -756,6 +792,7 @@ export class VisibilityCaptureService {
         ? outletMasterRef
         : await this.outletReferenceGeo(user.clientId, outlet.partnerId);
       const radius = fenceRadius;
+      storeReference = reference;
 
       let anyInside = false;
       let anyOutside = false;
@@ -821,6 +858,7 @@ export class VisibilityCaptureService {
 
       if (fenceEnabled) {
         if (anyOutside) {
+          await recordOutside(worstDistance, typeof worstGeo?.accuracy === 'number' ? worstGeo.accuracy : null);
           throw new ForbiddenException(
             outletMasterGeoEnabled
               ? OUTSIDE_FENCE_MESSAGE
@@ -866,6 +904,9 @@ export class VisibilityCaptureService {
       distanceMeters = accuracyTooLow ? null : res.distanceMeters;
       geoFenceOk = accuracyTooLow ? null : res.geoFenceOk;
       repGeo = geo;
+      if (locationRequired) {
+        storeReference = outletMasterGeoEnabled ? outletMasterRef : await this.outletReferenceGeo(user.clientId, outlet.partnerId);
+      }
 
       const captureGeoPresent = geo.lat != null && geo.lng != null;
       if (fenceEnabled) {
@@ -880,6 +921,7 @@ export class VisibilityCaptureService {
           );
         }
         if (geoFenceOk === false) {
+          await recordOutside(res.distanceMeters, geo.accuracy);
           throw new ForbiddenException(
             outletMasterGeoEnabled
               ? OUTSIDE_FENCE_MESSAGE
@@ -895,6 +937,30 @@ export class VisibilityCaptureService {
       }
       if (geo.accuracy != null && geo.accuracy > LOW_ACCURACY_FLAG_M) flags.push('LOW_ACCURACY');
       if (geoFenceOk === null && fenceEnabled) flags.push('GEO_UNVERIFIABLE');
+    }
+
+    // ── LOCATION GATE (switch-on tenants only) — always STORE a representative real fix (audit #1) ──
+    // The fence above only sets the map-pin columns when it could measure a distance (outlet coordinates on file, a
+    // usable accuracy, or a GPS_POINT form). Without that, a capture whose photos DID carry a fix would be stored with
+    // NULL captureLat/Lng and counted as "No GPS" by the Location report / digest. Fallback order: the first real
+    // tagged-photo fix, else the phone's submit-time captureGeo, else a GPS field. Only the stored location columns
+    // change — the fence verdict (geoFenceOk / distanceMeters) and the flags are untouched, so a poor-accuracy fix is
+    // reported as poor accuracy. Switch-off tenants (Deoleo) store exactly what they stored before.
+    // Round 4 #2: on switch-on tenants the STORED representative location is ALWAYS chosen fresh-first (new photos of
+    // this request → captureGeo → GPS sent now → carried-forward), never the farthest of the MERGED values (which can be
+    // an old carried photo). The fence VERDICT (geoFenceOk, blocking, flags) still uses every photo as before. The stored
+    // distance is recomputed for that same stored fix (pin and distance always describe one fix; null without a
+    // reference or when the fix's own accuracy is worse than the fence radius — the same buffer rule as the fence).
+    if (locationRequired) {
+      const chosen = this.firstRealFix(schema, values, gateInput.captureGeo, cleaned, new Set(Object.keys(carriedReviews)));
+      if (chosen) {
+        repGeo = this.photoToCaptureGeo(chosen);
+        const acc = typeof chosen.accuracy === 'number' && Number.isFinite(chosen.accuracy) ? chosen.accuracy : null;
+        distanceMeters =
+          storeReference && !(acc != null && acc > fenceRadius)
+            ? Math.round(haversineMeters(chosen.lat, chosen.lng, storeReference.lat, storeReference.lng) * 100) / 100
+            : null;
+      }
     }
 
     // Hash the capture photos BEFORE the transaction (network I/O outside the tx).
@@ -1095,6 +1161,48 @@ export class VisibilityCaptureService {
    * CaptureGeo shape used for the map-pin columns. `null` (no representative photo) →
    * all-null. Mirrors extractCaptureGeo's accuracy/capturedAt coercion.
    */
+  /**
+   * Location gate: the representative real fix to STORE — FRESH sources first (round-3 #8): new tagged photos of this
+   * request, then the submit-time `captureGeo`, then GPS fields sent in this request; carried-forward photos / merged
+   * GPS values only when nothing fresh exists (the gate rule normally guarantees a fresh one).
+   */
+  private firstRealFix(
+    schema: VisibilityFormSchema,
+    values: Record<string, unknown>,
+    captureGeo: unknown,
+    requestValues: Record<string, unknown> = {},
+    carried: ReadonlySet<string> = new Set(),
+  ): GpsCapture | null {
+    const inRequest = (id: string) => Object.prototype.hasOwnProperty.call(requestValues, id) && !carried.has(id);
+    const asCapture = (raw: unknown): GpsCapture | null => {
+      const val = typeof raw === 'string' ? (() => { try { return JSON.parse(raw) as unknown; } catch { return null; } })() : raw;
+      const p = parseGpsPoint(val);
+      if (!p || !isRealFix(p)) return null;
+      const o = (val ?? {}) as Record<string, unknown>;
+      return {
+        lat: p.lat,
+        lng: p.lng,
+        accuracy: typeof o.accuracy === 'number' && Number.isFinite(o.accuracy) ? o.accuracy : undefined,
+        capturedAt: typeof o.capturedAt === 'string' ? o.capturedAt : undefined,
+      };
+    };
+    const fields = schema.fields ?? [];
+    const tagged = fields.filter((f) => f.type === 'CAMERA' && (f.geoFenceRequired === true || f.geotag === true));
+    const gps = fields.filter((f) => f.type === 'GPS_POINT');
+    const photoFix = (id: string) => {
+      const g = readMediaValue(values[id]).geo;
+      return g && isRealFix(g) ? g : null;
+    };
+    for (const f of tagged) if (inRequest(f.id)) { const g = photoFix(f.id); if (g) return g; }
+    const submitFix = asCapture(captureGeo);
+    if (submitFix) return submitFix;
+    for (const f of gps) if (inRequest(f.id)) { const g = asCapture(values[f.id]); if (g) return g; }
+    // Nothing fresh — fall back to carried-forward / merged-back values.
+    for (const f of tagged) { const g = photoFix(f.id); if (g) return g; }
+    for (const f of gps) { const g = asCapture(values[f.id]); if (g) return g; }
+    return null;
+  }
+
   private photoToCaptureGeo(g: GpsCapture | null): CaptureGeo {
     if (!g) return { lat: null, lng: null, accuracy: null, capturedAt: null };
     let capturedAt: Date | null = null;
@@ -1144,12 +1252,12 @@ export class VisibilityCaptureService {
    * admin-outlets.service.ts uses — a direct Client.features read. OFF for every other tenant
    * (incl. live Deoleo), so the gated behavior never touches them.
    */
-  private async resolveOutletMasterGeo(clientId: string): Promise<boolean> {
+  private async resolveGeoFeatures(clientId: string): Promise<Record<string, unknown>> {
     const c = await this.prisma.client.findUnique({
       where: { id: clientId },
       select: { features: true },
     });
-    return (c?.features as Record<string, unknown> | null)?.outletMasterGeo === true;
+    return ((c?.features ?? {}) as Record<string, unknown>) ?? {};
   }
 
   /**

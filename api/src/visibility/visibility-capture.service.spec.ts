@@ -29,6 +29,8 @@ import { windowKeyForDate } from './visibility-window.helper';
 const mockPrisma = {
   // persistCapture reads clients.features for the outlet-master geo-fence gate (outletMasterGeo).
   client: { findUnique: jest.fn() },
+  // Location gate: an "outside the fence" refusal is recorded (features.requireLocation tenants only).
+  auditLog: { create: jest.fn().mockResolvedValue({}) },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
   outlet: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -290,6 +292,195 @@ describe('VisibilityCaptureService', () => {
       const res = await service.submitCapture(user, { outletId: 'o1', formValues: imprecise });
       expect(res.geoFenceOk).toBe(true);
       expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+    });
+
+    // ── LOCATION GATE (features.requireLocation — owner 2026-11-18; LOCATION-GATE.md) ──────────
+    describe('requireLocation', () => {
+      const NO_LOC = /Location is required to submit a visibility capture/;
+      // Gate fixes carry a recent capturedAt (the rule checks freshness — never a hardcoded date).
+      const nearNow = () => ({ photo: 'visibility-media/t1/x.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy: 10, capturedAt: new Date().toISOString() } });
+      const requireOn = (extra: Record<string, unknown> = {}) =>
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true, ...extra } });
+
+      it('ON + no GPS on the capture → 400 before any write (legacy GPS_POINT form)', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        await expect(service.submitCapture(user, { outletId: 'o1', formValues: noGeo })).rejects.toThrow(NO_LOC);
+        expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+      });
+
+      it('ON + no GPS field value but the phone sent a submit-time captureGeo → accepted (fresh fix of this request)', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        const res = await service.submitCapture(user, {
+          outletId: 'o1', formValues: noGeo, captureGeo: { lat: 12.9001, lng: 77.5001, accuracy: 9, capturedAt: new Date().toISOString() },
+        } as never);
+        expect(res.version).toBe(1);
+        expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+      });
+
+      // ── AUDIT #1: a capture whose photos carried a fix is never stored as "No GPS" ──
+      const perPhotoForm = {
+        clientId: 't1', version: 4,
+        formSchema: { fields: [{ id: 'shelf', type: 'CAMERA', label: 'Shelf', required: true, order: 1, geoFenceRequired: true }] },
+      };
+      const shelf = (accuracy: number) => ({
+        shelf: { key: 'visibility-media/t1/x.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy, capturedAt: new Date().toISOString() } },
+      });
+
+      it('AUDIT #1: ON + outlet WITHOUT master coordinates → the photo fix is still stored (unverifiable, not "No GPS")', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(null, null));
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue(perPhotoForm);
+        const res = await service.submitCapture(user, { outletId: 'o1', formValues: shelf(12) });
+        expect(res.geoFenceOk).toBeNull();
+        const data = mockPrisma.visibilityCapture.create.mock.calls[0][0].data;
+        expect(data).toMatchObject({ captureLat: 12.9001, captureLng: 77.5001, captureAccuracy: 12, distanceMeters: null });
+        expect(mockPrisma.visibilityCaptureSubmission.create.mock.calls[0][0].data.captureLat).toBe(12.9001);
+      });
+
+      it('AUDIT #1: ON + a fix worse than 200 m → stored with its accuracy (reported as poor accuracy), verdict unchanged', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue(perPhotoForm);
+        const res = await service.submitCapture(user, { outletId: 'o1', formValues: shelf(350) });
+        expect(res.geoFenceOk).toBeNull();
+        expect(res.distanceMeters).toBeNull();
+        expect(mockPrisma.visibilityCapture.create.mock.calls[0][0].data).toMatchObject({ captureLat: 12.9001, captureAccuracy: 350 });
+      });
+
+      it('ROUND 3 #3: phone clock more than 24 h off → 400 "set date and time to automatic"', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        await expect(
+          service.submitCapture(user, { outletId: 'o1', formValues: nearNow(), clientNow: new Date(Date.now() + 2 * 86_400_000).toISOString() } as never),
+        ).rejects.toThrow(/date and time are wrong/);
+        expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+      });
+
+      it('ROUND 3 #8: the stored fix prefers the fresh captureGeo of this request over a carried-forward photo', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(null, null)); // no reference → fallback path
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+          clientId: 't1', version: 4,
+          formSchema: { fields: [
+            { id: 'old', type: 'CAMERA', label: 'Old', required: false, order: 1, geotag: true },
+            { id: 'plain', type: 'CAMERA', label: 'Plain', required: false, order: 2 },
+          ] },
+        });
+        // A CHANGES_REQUESTED row whose APPROVED photo carries an old location elsewhere.
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValueOnce({
+          id: 'cap1', status: 'CHANGES_REQUESTED', currentVersion: 1,
+          formValues: { old: { key: 'visibility-media/t1/o.jpg', geo: { lat: 13.5, lng: 78.5, accuracy: 5, capturedAt: '2026-01-01T00:00:00.000Z' } }, plain: 'visibility-media/t1/p.jpg' },
+          photoReviews: { old: { status: 'APPROVED' }, plain: { status: 'REJECTED' } },
+        });
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValueOnce({ id: 'cap1', status: 'CHANGES_REQUESTED', currentVersion: 1 });
+        await service.submitCapture(user, {
+          outletId: 'o1',
+          formValues: { plain: 'visibility-media/t1/p2.jpg' },
+          captureGeo: { lat: 12.9001, lng: 77.5001, accuracy: 7, capturedAt: new Date().toISOString() },
+        } as never);
+        const data = mockPrisma.visibilityCapture.update.mock.calls[0][0].data;
+        expect(data).toMatchObject({ captureLat: 12.9001, captureLng: 77.5001, captureAccuracy: 7 });
+      });
+
+      it('ROUND 4 #2: fence path — the STORED fix is the fresh photo of this request, not the farther carried one; verdict unchanged', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+          clientId: 't1', version: 4,
+          formSchema: { fields: [
+            { id: 'a', type: 'CAMERA', label: 'A', required: false, order: 1, geoFenceRequired: true },
+            { id: 'b', type: 'CAMERA', label: 'B', required: false, order: 2, geoFenceRequired: true },
+          ] },
+        });
+        // Carried APPROVED photo ~145 m away (inside 200 m, the farthest); the re-shot photo ~15 m away.
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValueOnce({
+          id: 'cap1', status: 'CHANGES_REQUESTED', currentVersion: 1,
+          formValues: { a: { key: 'visibility-media/t1/a.jpg', geo: { lat: 12.9013, lng: 77.5, accuracy: 8, capturedAt: '2026-01-01T00:00:00.000Z' } }, b: { key: 'visibility-media/t1/b.jpg' } },
+          photoReviews: { a: { status: 'APPROVED' }, b: { status: 'REJECTED' } },
+        });
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValueOnce({ id: 'cap1', status: 'CHANGES_REQUESTED', currentVersion: 1 });
+        const res = await service.submitCapture(user, {
+          outletId: 'o1',
+          formValues: { b: { key: 'visibility-media/t1/b2.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy: 6, capturedAt: new Date().toISOString() } } },
+        } as never);
+        expect(res.geoFenceOk).toBe(true); // verdict from every photo, as before
+        const data = mockPrisma.visibilityCapture.update.mock.calls[0][0].data;
+        expect(data).toMatchObject({ captureLat: 12.9001, captureLng: 77.5001, captureAccuracy: 6 });
+        expect(data.distanceMeters).toBeLessThan(30); // distance of the SAME stored fix (not the carried 145 m)
+      });
+
+      it('ROUND 4 #2: OFF (Deoleo-like, outletMasterGeo only) → the fence path keeps storing the farthest photo as before', async () => {
+        gatedOn();
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+          clientId: 't1', version: 4,
+          formSchema: { fields: [
+            { id: 'a', type: 'CAMERA', label: 'A', required: false, order: 1, geoFenceRequired: true },
+            { id: 'b', type: 'CAMERA', label: 'B', required: false, order: 2, geoFenceRequired: true },
+          ] },
+        });
+        await service.submitCapture(user, {
+          outletId: 'o1',
+          formValues: {
+            a: { key: 'visibility-media/t1/a.jpg', geo: { lat: 12.9013, lng: 77.5, accuracy: 8 } },
+            b: { key: 'visibility-media/t1/b.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy: 6 } },
+          },
+        } as never);
+        expect(mockPrisma.visibilityCapture.create.mock.calls[0][0].data).toMatchObject({ captureLat: 12.9013, captureAccuracy: 8 });
+      });
+
+      it('AUDIT #1: OFF (Deoleo) → stored values unchanged (no fallback: NULL location columns as before)', async () => {
+        gatedOn();
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(null, null));
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue(perPhotoForm);
+        await service.submitCapture(user, { outletId: 'o1', formValues: shelf(12) });
+        expect(mockPrisma.visibilityCapture.create.mock.calls[0][0].data.captureLat).toBeNull();
+      });
+
+      it('ON + a valid fix near the outlet → accepted, nothing recorded', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        const res = await service.submitCapture(user, { outletId: 'o1', formValues: nearNow() });
+        expect(res.geoFenceOk).toBe(true);
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
+
+      it('ON + per-photo form, a fence photo WITHOUT a fix → 400 naming the photo', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+          clientId: 't1', version: 4,
+          formSchema: { fields: [{ id: 'shelf', type: 'CAMERA', label: 'Shelf', required: true, order: 1, geoFenceRequired: true }] },
+        });
+        await expect(
+          service.submitCapture(user, { outletId: 'o1', formValues: { shelf: { key: 'visibility-media/t1/x.jpg' } } }),
+        ).rejects.toThrow(/"Shelf"/);
+        expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+      });
+
+      it('ON + outside the fence → owner message AND one LOCATION_FENCE_BLOCK audit row (flow VISIBILITY)', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(13.5, 78.5));
+        await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearNow() })).rejects.toThrow(BLOCK_MSG);
+        expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
+        expect(mockPrisma.auditLog.create.mock.calls[0][0].data).toMatchObject({
+          action: 'REJECT', entityType: 'LOCATION_FENCE_BLOCK', entityId: 'o1', actorId: 'u1',
+          metadata: { flow: 'VISIBILITY', clientId: 't1' },
+        });
+      });
+
+      it('OFF (default) → no GPS still allowed + flagged and an outside block records NOTHING (Deoleo parity)', async () => {
+        gatedOn();
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        const res = await service.submitCapture(user, { outletId: 'o1', formValues: noGeo });
+        expect(res.flags).toContain('GEO_UNVERIFIABLE');
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(13.5, 78.5));
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValue(null);
+        await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearNow() })).rejects.toThrow(BLOCK_MSG);
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
     });
   });
 

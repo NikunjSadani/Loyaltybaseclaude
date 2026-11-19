@@ -55,3 +55,13 @@ describe('ReportsController — usage report', () => {
     expect(exportsSvc.respond).toHaveBeenCalledWith(res, user, 'usage-report', q);
   });
 });
+
+describe('ReportsController — location report (LOCATION-GATE.md)', () => {
+  it('the report AND its /enabled probe have EXACTLY the Usage report access (incl. MIS_USER)', () => {
+    const usage = rolesOf(ReportsController.prototype.usage);
+    expect(rolesOf(ReportsController.prototype.locationCompliance)).toEqual(usage);
+    expect(rolesOf(ReportsController.prototype.locationComplianceEnabled)).toEqual(usage);
+    expect(usage).toContain('MIS_USER');
+    expect(Reflect.getMetadata(PERMISSION_KEY, ReportsController.prototype.locationComplianceEnabled)).toBe('reports:read');
+  });
+});
