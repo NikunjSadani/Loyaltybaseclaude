@@ -222,6 +222,9 @@ describe('useLocationGate + LocationGatePanel', () => {
     await screen.findByTestId('location-gate-blocked');
     let deliverErr: PositionErrorCallback | null = null;
     getCurrentPosition.mockImplementation((_ok: PositionCallback, err: PositionErrorCallback) => { deliverErr = err; });
+    // The panel moves focus to its heading when it opens (a11y). Under full-suite load that effect can run
+    // AFTER btn.focus() and steal it (pre-push flake 2026-11-19) — wait for the heading focus to settle first.
+    await waitFor(() => expect(document.activeElement?.id).toBe('location-gate-title'));
     const btn = screen.getByTestId('location-gate-test-again');
     btn.focus();
     fireEvent.click(btn);
