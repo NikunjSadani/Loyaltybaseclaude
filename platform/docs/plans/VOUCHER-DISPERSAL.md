@@ -496,8 +496,9 @@ I want."* Owner chose **"Add to the same campaign"**.
   figure, until resolved.
 - **Settle:** rows marked "not bought" are closed, not errors — a campaign whose only non-bought rows are marked settles
   `COMPLETED`, not `COMPLETED_WITH_ERRORS`.
-- **Noted for follow-up (not fixed):** a marked row can get a second identical alert entry for the same status (deduped in
-  history, no second count); webhook latency (a webhook runs one Hubble lookup inline — the canary moved to the sweep, §10f).
+- **Noted for follow-up:** ~~a marked row can get a second identical alert entry for the same status~~ — **fixed
+  2026-11-19 (§10g)**; webhook latency (a webhook runs one Hubble lookup inline — the canary moved to the sweep, §10f) —
+  still open.
 
 ### 10f. Release gate on `b587d42c` — four mediums (2026-11-18)
 
@@ -523,3 +524,18 @@ I want."* Owner chose **"Add to the same campaign"**.
   order alerts — check with Hubble (see the campaign)", also for a COMPLETED campaign.
 - **Digest:** open / in-window alerts split also counts `noOrderUnverified` ("no order (unverified)" — kept open, re-checked
   automatically).
+
+### 10g. Follow-ups from the 2026-11-19 release — alert entry + alert kind (branch `fix/release-followups`)
+
+- **No duplicate alert entry.** A Hubble SUCCESS that could not be applied to a row (a superseded reference, or a row
+  marked "not bought" read from a stale snapshot) used to write a row-level audit with the alert event on EVERY report,
+  in addition to the campaign alert's own audit. A repeat of the same SUCCESS therefore produced a second identical
+  entry, even though the alert itself was deduped. Now only the campaign alert audit is written, and only on a real change.
+  It carries Hubble's order id, the row status and whether the reference was superseded. The error log still fires on
+  every report.
+- **The alert kind follows a later mark.** An alert's kind only moves up: `NOT_APPLIED` → `MARKED_NOT_BOUGHT` →
+  `SUPERSEDED`. A report of a higher kind upgrades the alert; a lower one never downgrades it. **Mark as not bought**
+  also upgrades, in the same transaction, any `NOT_APPLIED` alert on the row's current reference, with one campaign
+  audit carrying `previousKind`. This covers, for example, a "couldn't check" or unrecognised-status alert on a failed
+  row. Afterwards the page, digest and logs say "the order of this row (marked not bought) — the row stays closed"
+  instead of "could not be applied to the row". The alert's status, history and open state are unchanged.

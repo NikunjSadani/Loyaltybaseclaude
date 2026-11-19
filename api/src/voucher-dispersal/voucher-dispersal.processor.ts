@@ -155,12 +155,31 @@ export const RECHECK_AFTER_LOOKUP_FAILURE_SOURCES = ['HUBBLE_FAILED', 'REJECTED'
 /** At most this many of those rows are re-checked per reconcile pass (the pending rows keep their own 20). */
 export const RECHECK_AFTER_LOOKUP_FAILURE_PER_PASS = 5;
 export type OrderAlertKind = 'SUPERSEDED' | 'MARKED_NOT_BOUGHT' | 'NOT_APPLIED';
+/**
+ * What an alert's reference IS to its row only ever moves one way (VD follow-up 2026-11-19): the row's current order
+ * that could not be applied (NOT_APPLIED) -> the order of a row an admin then marked not bought (MARKED_NOT_BOUGHT) ->
+ * an earlier order retired by a retry (SUPERSEDED). A report arriving with a higher kind upgrades the alert (audited
+ * as a kind change); a lower one never downgrades it (e.g. a stale sweep snapshot still calling it NOT_APPLIED).
+ */
+export function alertKindRank(kind: string): number {
+  return kind === 'SUPERSEDED' ? 2 : kind === 'MARKED_NOT_BOUGHT' ? 1 : 0;
+}
+/** Plain words for an alert kind (logs). */
+export function alertKindWords(kind: string): string {
+  return kind === 'SUPERSEDED'
+    ? 'an EARLIER order (retired by a retry)'
+    : kind === 'MARKED_NOT_BOUGHT'
+      ? 'the order of a row marked NOT BOUGHT'
+      : "the row's CURRENT order";
+}
 /** Context for an alert's log + audit (e.g. the row's status when its own order cannot be applied). */
 export type OrderAlertContext = {
   rowStatus?: string;
   onlyIfExists?: boolean;
   /** For ALERT_NO_ORDER: true only when the caller verified the canary (the sweep — never the webhook). */
   noOrderVerified?: boolean;
+  /** Extra facts for the campaign alert audit (e.g. Hubble's order id) — written only when the alert really changes. */
+  auditExtra?: Record<string, unknown>;
 };
 
 /**
@@ -639,7 +658,7 @@ export class VoucherDispersalProcessor {
           },
         });
         this.sayOrderAlert(row, ref, kind, status, 'ALERT —', ctx);
-        await this.orderAlertAudit(row, ref, kind, status, ctx.rowStatus ? { rowStatus: ctx.rowStatus } : {});
+        await this.orderAlertAudit(row, ref, kind, status, { ...(ctx.rowStatus ? { rowStatus: ctx.rowStatus } : {}), ...ctx.auditExtra });
         return true;
       } catch (e) {
         if ((e as { code?: string } | null)?.code !== 'P2002') {
@@ -665,8 +684,10 @@ export class VoucherDispersalProcessor {
         const history = cur.statusHistory ?? [];
         const data: Prisma.VoucherDispersalOrderAlertUpdateInput = { statusHistory: appendAlertHistory(history, entry) };
         let change: Res['change'] = null;
-        const kindUp = kind === 'SUPERSEDED' && cur.kind === 'NOT_APPLIED';
-        if (kindUp) data.kind = 'SUPERSEDED';
+        // Kind only moves up (NOT_APPLIED -> MARKED_NOT_BOUGHT -> SUPERSEDED): after a later mark the alert reads as
+        // the marked row's order, not "could not be applied to the row" (VD follow-up 2026-11-19).
+        const kindUp = alertKindRank(kind) > alertKindRank(cur.kind);
+        if (kindUp) data.kind = kind;
         if (!lookupFailed) data.noOrderUnverifiedAt = unverified && !strong ? cur.noOrderUnverifiedAt ?? now : null;
         if (lookupFailed) {
           data.lastCheckFailedAt = now;
@@ -723,7 +744,7 @@ export class VoucherDispersalProcessor {
       this.logger.error(
         `[dispersal] campaign ${row.campaignId} batch ${row.batchNumber} row ${row.rowNumber}: alert for reference ${ref} NOT resolved — Hubble now says ${status === 'FAILED' ? 'the order failed' : status === ALERT_APPLIED ? 'it was applied' : canaryOk ? 'there is no order' : 'there is no order (unverified)'}, but it reported ${res.kept} earlier; check with Hubble (a paid voucher may exist)`,
       );
-      await this.orderAlertAudit(row, ref, k, res.kept, { contradictedBy: status });
+      await this.orderAlertAudit(row, ref, k, res.kept, { contradictedBy: status, ...ctx.auditExtra });
       return true;
     }
     if (res.change === 'RESOLVED') {
@@ -733,11 +754,20 @@ export class VoucherDispersalProcessor {
       await this.orderAlertAudit(row, ref, k, status, { previousStatus: res.prev, resolved: true });
       return true;
     }
-    this.sayOrderAlert(row, ref, k, res.kept, res.change === 'KIND' ? `ALERT UPDATE (now an EARLIER order, was ${res.prevKind}) —` : `ALERT UPDATE (was ${res.prev}) —`, ctx);
+    this.sayOrderAlert(
+      row,
+      ref,
+      k,
+      res.kept,
+      res.change === 'KIND' ? `ALERT UPDATE (now ${alertKindWords(k)}, was ${alertKindWords(res.prevKind)}) —` : `ALERT UPDATE (was ${res.prev}) —`,
+      ctx,
+    );
     await this.orderAlertAudit(row, ref, k, res.kept, {
       previousStatus: res.prev,
-      ...(res.change === 'KIND' ? { previousKind: res.prevKind } : {}),
+      // A kind change can ride along with a worsened status — both are recorded on the one audit row.
+      ...(res.kind !== res.prevKind ? { previousKind: res.prevKind } : {}),
       ...(ctx.rowStatus ? { rowStatus: ctx.rowStatus } : {}),
+      ...ctx.auditExtra,
     });
     return true;
   }
@@ -751,11 +781,9 @@ export class VoucherDispersalProcessor {
     ctx: OrderAlertContext = {},
   ) {
     const what =
-      kind === 'SUPERSEDED'
-        ? 'an EARLIER order (retired by a retry)'
-        : kind === 'MARKED_NOT_BOUGHT'
-          ? 'the order of a row marked NOT BOUGHT'
-          : ctx.rowStatus === RS.CANCELLED
+      kind !== 'NOT_APPLIED'
+        ? alertKindWords(kind)
+        : ctx.rowStatus === RS.CANCELLED
             ? 'the order of a CANCELLED row (order completed at Hubble after the campaign was cancelled)'
             : ctx.rowStatus === RS.BUY_FAILED
               ? "a FAILED row's CURRENT order (Hubble has news about it)"
@@ -875,18 +903,17 @@ export class VoucherDispersalProcessor {
           return 'SKIPPED';
         }
         // Hubble holds a PAID voucher for a reference this row no longer uses (superseded) or for a row we
-        // could not store it on — possible second voucher / stranded money. Never silent.
+        // could not store it on — possible second voucher / stranded money. Never silent: an error log on EVERY report,
+        // and the campaign-level alert (counted on the page + in the digest; one per reference), whose audit row carries
+        // the order facts. VD follow-up 2026-11-19: no second, row-level audit of the same event any more — it was
+        // written again on every repeat of the same SUCCESS (the duplicate alert entry; the alert itself was deduped).
         this.logger.error(
           `[dispersal] Hubble SUCCESS for reference ${row.hubbleReferenceId} not applied (campaign ${now?.campaignId} row ${now?.rowNumber}, row status ${now?.status}, current reference ${now?.hubbleReferenceId === row.hubbleReferenceId ? 'same' : 'different'}) — ops review`,
         );
-        await this.audit(row.id, 'VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY', {
-          referenceId: row.hubbleReferenceId,
-          hubbleStatus: 'SUCCESS',
-          hubbleOrderId,
-          rowStatus: now?.status ?? null,
-          referenceSuperseded: now ? now.hubbleReferenceId !== row.hubbleReferenceId : null,
-        });
-        // …and the campaign-level alert (counted on the page + in the digest; one per reference).
+        if (!row.hubbleReferenceId) {
+          // Defensive: no reference = no alert key; keep a row-level audit so it is never silent.
+          await this.audit(row.id, 'VOUCHER_DISPERSAL_SUPERSEDED_REFERENCE_ACTIVITY', { referenceId: null, hubbleStatus: 'SUCCESS', hubbleOrderId, rowStatus: now?.status ?? null });
+        }
         if (row.hubbleReferenceId) {
           await this.recordOrderAlert(
             { id: row.id, campaignId: row.campaignId, batchNumber: now?.batchNumber ?? row.batchNumber, rowNumber: now?.rowNumber ?? row.rowNumber },
@@ -897,6 +924,13 @@ export class VoucherDispersalProcessor {
               : now?.buyFailureSource === 'MARKED_NOT_BOUGHT'
                 ? 'MARKED_NOT_BOUGHT'
                 : 'NOT_APPLIED',
+            {
+              auditExtra: {
+                hubbleOrderId,
+                rowStatus: now?.status ?? null,
+                referenceSuperseded: now ? now.hubbleReferenceId !== row.hubbleReferenceId : null,
+              },
+            },
           );
         }
         return 'SKIPPED';

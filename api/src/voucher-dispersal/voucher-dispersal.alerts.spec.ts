@@ -437,3 +437,79 @@ describe('M4 — the campaign list shows the open order-alert count', () => {
     expect(list.find((c: any) => c.id === id)!.summary).toMatchObject({ openOrderAlerts: 1 });
   });
 });
+
+// ── VD follow-ups from the 2026-11-19 release: the duplicate MARKED alert entry + the alert kind after a later mark ──
+describe('follow-up — alert kind after a later mark', () => {
+  it('a "couldn\'t check" alert on a FAILED row\'s current order, then an unrecognised status, then the admin marks the row → the alert becomes MARKED_NOT_BOUGHT (status + open state kept, one audit); later reports add nothing', async () => {
+    const { t, id, b } = await failedRow('HUBBLE_FAILED');
+    const ref = b.hubbleReferenceId;
+    answers(t, { [ref]: [new Error('timeout'), { id: 'H', status: 'ON_HOLD' }, { id: 'H', status: 'ON_HOLD' }] });
+    await t.processor.reconcileByReference(ref); // webhook: lookup fails → NOT_APPLIED "couldn't check"
+    b.lastReconcileAt = new Date(Date.now() - 60 * 60 * 1000);
+    await t.processor.reconcilePending(undefined, Date.now() + 60_000); // sweep: Hubble says ON_HOLD
+    expect(alertOf(t, ref)).toMatchObject({ kind: 'NOT_APPLIED', hubbleStatus: 'ON_HOLD', resolvedAt: null });
+    const before = alertAudits(t).length;
+
+    await t.svc.markNotBought(ADMIN, id, b.id, { reason: 'Hubble support: ticket 42' });
+    expect(b.buyFailureSource).toBe('MARKED_NOT_BOUGHT');
+    expect(alertOf(t, ref)).toMatchObject({ kind: 'MARKED_NOT_BOUGHT', hubbleStatus: 'ON_HOLD', resolvedAt: null });
+    const kindAudits = alertAudits(t).slice(before);
+    expect(kindAudits.map((x: any) => [x.metadata.kind, x.metadata.previousKind, x.metadata.hubbleStatus])).toEqual([['MARKED_NOT_BOUGHT', 'NOT_APPLIED', 'ON_HOLD']]);
+
+    // Hubble reports the same status again on the marked row → recorded as MARKED, no new audit, never downgraded.
+    await t.processor.reconcileByReference(ref);
+    expect(alertOf(t, ref).kind).toBe('MARKED_NOT_BOUGHT');
+    expect(alertAudits(t).length).toBe(before + 1);
+    // A stale caller still naming it NOT_APPLIED never downgrades it.
+    await t.processor.recordOrderAlert({ id: b.id, campaignId: b.campaignId, rowNumber: b.rowNumber, batchNumber: 1 }, ref, 'ON_HOLD', 'NOT_APPLIED');
+    expect(alertOf(t, ref).kind).toBe('MARKED_NOT_BOUGHT');
+    // The detail page lists it with the new kind.
+    const s: any = (await t.svc.detail(ADMIN, id)).summary.earlierOrderAlerts;
+    expect(s.total).toBe(1);
+    expect(JSON.stringify(s)).toContain('MARKED_NOT_BOUGHT');
+    expect(JSON.stringify(s)).not.toContain('NOT_APPLIED');
+  });
+
+  it('a report arriving with kind MARKED_NOT_BOUGHT upgrades an existing NOT_APPLIED alert (audited with previousKind), SUPERSEDED still wins', async () => {
+    const { t, b } = await bought();
+    const row = { id: b.id, campaignId: b.campaignId, rowNumber: b.rowNumber, batchNumber: 1 };
+    await t.processor.recordOrderAlert(row, 'vdA', 'PROCESSING', 'NOT_APPLIED');
+    await t.processor.recordOrderAlert(row, 'vdA', 'PROCESSING', 'MARKED_NOT_BOUGHT');
+    expect(alertOf(t, 'vdA').kind).toBe('MARKED_NOT_BOUGHT');
+    // Worsened AND kind-upgraded in one report → one audit carrying both.
+    await t.processor.recordOrderAlert(row, 'vdA', 'SUCCESS', 'SUPERSEDED');
+    expect(alertOf(t, 'vdA')).toMatchObject({ kind: 'SUPERSEDED', hubbleStatus: 'SUCCESS' });
+    expect(alertAudits(t).map((x: any) => [x.metadata.kind, x.metadata.previousKind ?? null])).toEqual([
+      ['NOT_APPLIED', null],
+      ['MARKED_NOT_BOUGHT', 'NOT_APPLIED'],
+      ['SUPERSEDED', 'MARKED_NOT_BOUGHT'],
+    ]);
+  });
+
+  it('a mark with no alert on the row\'s order touches no alert and writes no alert audit', async () => {
+    const { t, id, b } = await failedRow('HUBBLE_FAILED', { lastReconcileResult: 'HUBBLE_ON_HOLD' });
+    await t.svc.markNotBought(ADMIN, id, b.id, { reason: 'Hubble support: ticket 43' });
+    expect(t.orderAlerts.length).toBe(0);
+    expect(alertAudits(t).length).toBe(0);
+  });
+});
+
+describe('follow-up — no duplicate alert entry for a marked row', () => {
+  it('Hubble SUCCESS reaching a marked row twice (stale snapshot) → ONE alert, ONE alert audit (with Hubble\'s order id), an error log each time', async () => {
+    const { t, b } = await failedRow('MARKED_NOT_BOUGHT', { buyFailureReason: 'Marked as not bought by Admin One: x' });
+    const errors = jest.spyOn((t.processor as any).logger, 'error');
+    const snapshot: any = { ...b, status: 'PENDING_RECONCILE' };
+    for (let i = 0; i < 2; i++) {
+      expect(await t.processor.applyBody(snapshot, { id: 'H7', status: 'SUCCESS', vouchers: [{ cardNumber: CODE }] })).toBe('SKIPPED');
+    }
+    expect(b).toMatchObject({ status: 'BUY_FAILED', buyFailureSource: 'MARKED_NOT_BOUGHT', voucherCode: null });
+    expect(t.orderAlerts.map((a: any) => [a.kind, a.hubbleStatus, a.statusHistory])).toEqual([['MARKED_NOT_BOUGHT', 'SUCCESS', ['SUCCESS']]]);
+    const entries = t.audits.filter((x: any) => x.metadata?.event === SUPERSEDED_ALERT_EVENT);
+    expect(entries.length).toBe(1);
+    expect(entries[0]).toMatchObject({ entityType: 'VOUCHER_DISPERSAL_CAMPAIGN' });
+    expect(entries[0].metadata).toMatchObject({ kind: 'MARKED_NOT_BOUGHT', hubbleOrderId: 'H7', referenceSuperseded: false, rowStatus: 'BUY_FAILED' });
+    expect(JSON.stringify(entries)).not.toContain(CODE);
+    // Never silent: the "not applied" error log fires on every report.
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes('not applied')).length).toBe(2);
+  });
+});
