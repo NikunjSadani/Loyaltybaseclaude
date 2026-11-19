@@ -8,6 +8,42 @@
 > worker (which must not run over churning UI) is now safe to build. Owner confirmed minor future tweaks are
 > expected — handled by the SW update strategy below (content-hashed assets + versioned precache + update prompt).
 
+## Notification reminder — Bajaj only (owner 2026-11-19, branch `feat/notif-reminder`, unmerged)
+A reminder after login / on app open for users who haven't allowed notifications, with **device-specific steps**
+(wording = the Bajaj training deck). No WhatsApp. **TENANT-SCOPED** — gated on slug `bajaj` exactly like
+`PushSubscriptionManager`; Deoleo + every other tenant keep the old one-line bar / generic sentence, unchanged.
+- **Where:** `components/pwa/NotificationReminder.tsx` (modal: heading focused on open, Escape/×/backdrop close,
+  focus trapped + restored, polite live region), content from `lib/pwa/notification-guide.ts`, device from the
+  location gate's `currentLocationPlatform()` (+ an iOS-version read for the 16.4 floor). Mounted only by
+  `PushSubscriptionManager`'s Bajaj branch — it **replaces** the old bottom bar for Bajaj (never both).
+- **States:** default → "Enable notifications" (requestPermission from the tap, subscribe on grant) · iPhone browser
+  tab → "Add the app to your Home Screen first" steps, no Enable · iPhone Home Screen app → Enable · iOS < 16.4 → one
+  line · denied → numbered Android / iPhone / desktop re-enable steps + "Done — check again" (re-reads
+  `Notification.permission`, subscribes if now granted, says "Still blocked" otherwise) · no Push API → one line ·
+  granted → nothing (silent re-sync as before).
+- **When:** only after the session is CONFIRMED live (background-tagged `GET /api/auth/me`) — a page about to bounce
+  to login never reminds, auto-asks or uses up the flag. Once per session (`sessionStorage['pwa-notif-reminder']` =
+  the confirmed user id, written when the reminder is actually on screen; a different user in the same tab sees it
+  again). "Remind me later" / × / Escape = rest of the session (a backdrop tap does NOT dismiss); back on the next
+  app open until allowed.
+- **Auto-ask at load:** kept on Android/desktop, raced with an 8 s timeout (Chrome's quiet chip / an ignored bubble
+  never resolves) — on timeout the reminder shows, and a late Allow subscribes + closes it. Skipped on iPhone/iPad
+  (iOS needs a tap → the Enable button). Enable trusts `Notification.permission` over the promise: 'denied' answer
+  but permission still 'default' (Chrome embargo) → "Chrome is blocking the prompt for now…", not the Blocked steps.
+- **Browsers:** Android steps per browser — Chrome (⋮ → Site settings), Samsung Internet (≡ → Settings → Sites and
+  downloads / Site permissions), others generic ("your browser's site settings"). iPhone in Chrome: Share is in the
+  address bar / ••• (iOS 16.4+), Safari as fallback. iPad Home Screen app with an unknown iOS version → neutral line.
+- **No stacked modals:** `InstallPrompt` publishes its open state (`lib/pwa/install-dialog-state.ts`, no UI effect);
+  the reminder waits while the install modal is up and opens after it closes. While open: body scroll locked, rest
+  of the page `inert` + `aria-hidden`.
+- **3-day snooze:** NOT used for Bajaj (neither read nor written) — it would hide the reminder for 3 days, which
+  conflicts with "every app open". Non-Bajaj keeps it.
+- **Profile → Notifications** (`PwaAppSettings`): for Bajaj, "blocked" shows the same device steps + "Done — check
+  again" instead of the generic sentence; if permission is granted but the subscription fails it shows "Off" + an
+  honest note (never "On").
+- **Not yet done:** real-device runtime check on Bajaj staging (Android Chrome + Samsung Internet + iPhone Safari tab
+  + iPhone Home Screen app).
+
 ## Status — PWA ROUND COMPLETE + DEVICE-VERIFIED ON STAGING (2026-06-29)
 **2026-06-29:** the PWA round is **DONE on staging** (gate-green api jest 1246 / FE vitest 1694 / tsc 0; audited where security-relevant; runtime-verified incl. a real push delivered to the owner's Android):
 1. **Sales push notifications** (`f11d5d1`, audit SHIP) — global `SalesNotificationsService` enqueues PUSH to the sales team on 4 POST-COMMIT, fire-and-forget, tenant-scoped triggers: new KYC assigned → assigned rep (aggregated per-rep across bulk upload + on reassign) + routed approver up-chain; KYC rejected/RE_UPLOAD → responsible rep (via active SalesUserAssignment); targets uploaded → assigned XSR + first active manager (SO) per outlet, de-duped. Owner: KYC=rep+approver, targets=XSR+SO.

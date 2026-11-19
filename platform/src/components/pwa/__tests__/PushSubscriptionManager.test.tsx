@@ -37,6 +37,12 @@ function enablePushSupport() {
 describe('PushSubscriptionManager', () => {
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
+    // Bajaj confirms the live session (GET /api/auth/me) before auto-asking / reminding.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { user: { id: 'u-1' } } }) })),
+    );
     vi.unstubAllEnvs();
     subscribeToPush.mockClear();
     setPath('/sales');
@@ -157,41 +163,26 @@ describe('PushSubscriptionManager', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('Bajaj auto-ask falls back to the in-app banner when the browser needs a gesture (default)', async () => {
+  // Bajaj (2026-11-19): the old bottom bar is replaced by NotificationReminder — full coverage in
+  // NotificationReminder.test.tsx. These pin the consolidation: no bar, no 3-day snooze.
+  it('Bajaj auto-ask falls back to the reminder (not the old bar) when the browser needs a gesture', async () => {
     const requestPermission = stubNotification('default', 'default');
     render(<PushSubscriptionManager tenantSlug="bajaj" />);
-    expect(await screen.findByRole('button', { name: 'Enable' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Enable notifications' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Not now' })).toBeNull();
+    expect(screen.queryByText('Enable notifications to get timely updates.')).toBeNull();
     expect(requestPermission).toHaveBeenCalledTimes(1);
     expect(subscribeToPush).not.toHaveBeenCalled();
   });
 
-  it('Bajaj auto-ask "default" does NOT snooze, so the banner keeps showing on later loads', async () => {
-    // The native prompt never showed (gesture-required browser resolved 'default'). A silent
-    // auto-request must NOT write a snooze — else isSnoozed() would hide the banner next load.
-    stubNotification('default', 'default');
-    const { unmount } = render(<PushSubscriptionManager tenantSlug="bajaj" />);
-    expect(await screen.findByRole('button', { name: 'Enable' })).toBeTruthy();
-    expect(localStorage.getItem(SNOOZE_KEY)).toBeNull();
-    unmount();
-
-    // Simulate a later load: no snooze present → the banner must appear again.
+  it('Bajaj neither reads nor writes the 3-day snooze', async () => {
+    sessionStorage.clear();
+    localStorage.setItem(SNOOZE_KEY, String(Date.now() - 1 * DAY)); // an old-bar snooze still "active"
     stubNotification('default', 'default');
     render(<PushSubscriptionManager tenantSlug="bajaj" />);
-    expect(await screen.findByRole('button', { name: 'Enable' })).toBeTruthy();
-    expect(localStorage.getItem(SNOOZE_KEY)).toBeNull();
-  });
-
-  it('Bajaj explicit "Not now" DOES snooze (the only path that snoozes)', async () => {
-    stubNotification('default', 'default');
-    render(<PushSubscriptionManager tenantSlug="bajaj" />);
-    expect(await screen.findByRole('button', { name: 'Not now' })).toBeTruthy();
-    const before = Date.now();
-    fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
-    const stored = Number(localStorage.getItem(SNOOZE_KEY));
-    expect(Number.isFinite(stored)).toBe(true);
-    // Fresh timestamp written by THIS click (bracketed, no wall-clock budget to flake under load).
-    expect(stored).toBeGreaterThanOrEqual(before);
-    expect(stored).toBeLessThanOrEqual(Date.now());
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Remind me later' }));
+    expect(Number(localStorage.getItem(SNOOZE_KEY))).toBeLessThan(Date.now() - DAY / 2); // untouched
   });
 
   it('renders nothing for a non-Bajaj tenant with the flag OFF (byte-identical)', () => {
