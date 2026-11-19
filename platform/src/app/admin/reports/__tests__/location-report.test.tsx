@@ -113,9 +113,10 @@ describe('Location Report page', () => {
 });
 
 describe('Reports index', () => {
-  const featuresFetch = (requireLocation: boolean) =>
+  // Round-3 #1: the tile follows the report's own probe (same roles as the report, incl. MIS_USER).
+  const featuresFetch = (enabled: boolean) =>
     fetchMock.mockImplementation((url: string) =>
-      Promise.resolve(String(url).includes('/api/admin/settings/config') ? ok({ features: { requireLocation } }) : ok({})),
+      Promise.resolve(String(url) === '/api/reports/location-compliance/enabled' ? ok({ enabled }) : ok({})),
     );
 
   it('switch ON → lists the Location Report with an Open report link to /admin/reports/location', async () => {

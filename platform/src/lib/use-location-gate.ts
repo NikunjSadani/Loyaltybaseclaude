@@ -23,6 +23,7 @@ import {
   type LocationBlockReason,
   type LocationFix,
   type LocationPlatform,
+  PHONE_CLOCK_MAX_SKEW_MS,
 } from './location-gate';
 
 export type LocationGateStatus = 'off' | 'checking' | 'ok' | 'blocked';
@@ -45,7 +46,13 @@ export interface LocationGateState {
   recheck: (opts?: { quiet?: boolean }) => Promise<LocationFix | null>;
 }
 
-export function useLocationGate(enabled: boolean): LocationGateState {
+export function useLocationGate(
+  enabled: boolean,
+  /** Phone clock − server clock (ms) when known (from the settings response): > 24 h off → blocked with reason 'clock'. */
+  opts: { serverSkewMs?: number | null } = {},
+): LocationGateState {
+  const clockWrong =
+    typeof opts.serverSkewMs === 'number' && Number.isFinite(opts.serverSkewMs) && Math.abs(opts.serverSkewMs) > PHONE_CLOCK_MAX_SKEW_MS;
   const [status, setStatus] = useState<LocationGateStatus>(enabled ? 'checking' : 'off');
   const [reason, setReason] = useState<LocationBlockReason | null>(null);
   const [fix, setFix] = useState<LocationFix | null>(null);
@@ -54,6 +61,8 @@ export function useLocationGate(enabled: boolean): LocationGateState {
   const [submitChecking, setSubmitChecking] = useState(false);
   const [attempts, setAttempts] = useState(0);
   const seq = useRef(0);
+  // Bumped ONLY by a permission revoke: an in-flight check that started before a revoke returns null (round-3 #7).
+  const revokes = useRef(0);
   const mounted = useRef(true);
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -66,19 +75,28 @@ export function useLocationGate(enabled: boolean): LocationGateState {
   }, []);
 
   const recheck = useCallback(
-    async (opts: { quiet?: boolean } = {}): Promise<LocationFix | null> => {
+    async ({ quiet = false }: { quiet?: boolean } = {}): Promise<LocationFix | null> => {
       if (!enabled) return null;
+      if (clockWrong) {
+        setReason('clock');
+        setStatus('blocked');
+        setAttempts((n) => n + 1);
+        return null;
+      }
       const mine = ++seq.current;
+      const revokesAtStart = revokes.current;
       const wasBlocked = statusRef.current === 'blocked';
-      if (opts.quiet) setSubmitChecking(true);
+      if (quiet) setSubmitChecking(true);
       else if (wasBlocked) setTesting(true); // keep the guide (and focus) on screen while testing
       else setStatus('checking');
       const r = await checkLocation();
       if (!mounted.current) return r.ok ? r.fix : null;
-      if (opts.quiet) setSubmitChecking(false);
-      // Superseded (a permission revoke, or a newer check, arrived while this one ran) → NOT a usable answer: return
-      // null so a submit never proceeds on a fix taken before the permission was revoked (audit #9).
-      if (mine !== seq.current) return null;
+      if (quiet) setSubmitChecking(false);
+      // A permission REVOKE while this check ran → never a usable answer (audit #9).
+      if (revokes.current !== revokesAtStart) return null;
+      // Superseded by a newer check (e.g. a "granted" change event) → the newer check owns the state, but this check's
+      // own valid result still answers its caller (round-3 #7: only a revoke cancels a submit check).
+      if (mine !== seq.current) return r.ok ? r.fix : null;
       setTesting(false);
       if (r.ok) {
         setFix(r.fix);
@@ -91,7 +109,7 @@ export function useLocationGate(enabled: boolean): LocationGateState {
       setAttempts((n) => n + 1);
       return null;
     },
-    [enabled],
+    [enabled, clockWrong],
   );
 
   // First check when the gate turns on (features loaded with the flag ON); reset when it turns off.
@@ -116,6 +134,7 @@ export function useLocationGate(enabled: boolean): LocationGateState {
       if (!ps) return;
       if (ps.state === 'denied') {
         seq.current++;
+        revokes.current++;
         setTesting(false);
         setReason('denied');
         setStatus('blocked');

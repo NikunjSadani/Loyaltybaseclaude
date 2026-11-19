@@ -164,8 +164,8 @@ describe('platform guide', () => {
 
 // ─── Hook + panel ──────────────────────────────────────────────────────────────
 
-function Harness({ enabled, onSubmit }: { enabled: boolean; onSubmit?: (ok: boolean) => void }) {
-  const gate = useLocationGate(enabled);
+function Harness({ enabled, onSubmit, serverSkewMs }: { enabled: boolean; onSubmit?: (ok: boolean) => void; serverSkewMs?: number | null }) {
+  const gate = useLocationGate(enabled, { serverSkewMs });
   if (gate.blocking) return <LocationGatePanel gate={gate} purpose="start or submit a KYC" />;
   return (
     <div>
@@ -249,6 +249,35 @@ describe('useLocationGate + LocationGatePanel', () => {
     await act(async () => fixOk(deliver!)); // the in-flight fix arrives AFTER the revoke
     await waitFor(() => expect(results).toEqual([false]));
     expect(await screen.findByTestId('location-gate-blocked')).toBeTruthy();
+  });
+
+  it('ROUND 3 #7: a "granted" change event mid-submit does NOT cancel the submit check', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    let onPerm: (() => void) | null = null;
+    const ps = { state: 'granted' as PermissionState, addEventListener: (_e: string, cb: () => void) => { onPerm = cb; }, removeEventListener: vi.fn() };
+    Object.defineProperty(navigator, 'permissions', { value: { query: vi.fn().mockResolvedValue(ps) }, configurable: true });
+    const results: boolean[] = [];
+    render(<Harness enabled onSubmit={(ok) => results.push(ok)} />);
+    await screen.findByText('THE FLOW');
+    await waitFor(() => expect(onPerm).not.toBeNull());
+    const pending: PositionCallback[] = [];
+    getCurrentPosition.mockImplementation((cb: PositionCallback) => { pending.push(cb); });
+    fireEvent.click(screen.getByText('submit'));
+    await waitFor(() => expect(pending.length).toBe(1));
+    await act(async () => onPerm!()); // "granted" → a newer recheck starts
+    await waitFor(() => expect(pending.length).toBe(2));
+    await act(async () => { fixOk(pending[0]); fixOk(pending[1]); });
+    await waitFor(() => expect(results).toEqual([true]));
+    expect(screen.getByText('THE FLOW')).toBeTruthy();
+  });
+
+  it('ROUND 3 #3: phone clock > 24 h off (from the settings response) → blocked "date and time are wrong", no location request', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    render(<Harness enabled serverSkewMs={3 * 86_400_000} />);
+    const panel = await screen.findByTestId('location-gate-blocked');
+    expect(panel.getAttribute('data-reason')).toBe('clock');
+    expect(screen.getByRole('heading', { name: /date and time are wrong/ })).toBeTruthy();
+    expect(getCurrentPosition).not.toHaveBeenCalled();
   });
 
   it('LG11: submit-time quiet re-check — OK keeps the flow; a lost fix switches to the guide and reports false', async () => {

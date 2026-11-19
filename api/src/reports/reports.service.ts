@@ -16,6 +16,7 @@ import { KYC_STATUS_OUTLET_SELECT, kycStatusRows, kycStatusRoutingEnabled } from
 import { UsageReportQueryDto } from './dto/usage-report.dto';
 import { buildUsageReport, pageOfUsageReport, resolveUsageParams } from './usage/usage-report';
 import { LocationComplianceQueryDto } from './dto/location-compliance.dto';
+import { LOCATION_REQUIRED_FEATURE } from '../common/location-gate.helper';
 import { buildLocationReport, pageOfLocationReport, resolveLocationParams } from './location/location-compliance-report';
 
 /**
@@ -355,6 +356,14 @@ export class ReportsService {
    * unverifiable, blocked outside the fence, medians. Built by the shared buildLocationReport (also behind the
    * 'location-compliance' Excel kind). Tenant = the caller's JWT clientId, exactly like the Usage report.
    */
+  /** Whether the Location report is available for the caller's tenant (features.requireLocation === true). */
+  async locationComplianceEnabled(user: JwtPayload): Promise<{ enabled: boolean }> {
+    const clientId = (user.clientId ?? '').trim();
+    if (!clientId) return { enabled: false };
+    const c = await this.prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
+    return { enabled: ((c?.features ?? {}) as Record<string, unknown>)[LOCATION_REQUIRED_FEATURE] === true };
+  }
+
   async locationCompliance(user: JwtPayload, q: LocationComplianceQueryDto): Promise<ReportResult> {
     const params = resolveLocationParams(q);
     const report = await buildLocationReport(this.prisma, user.clientId, params);

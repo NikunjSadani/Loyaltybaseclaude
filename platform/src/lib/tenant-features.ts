@@ -84,6 +84,13 @@ export interface TenantFeaturesState {
   features: FeatureFlags;
   /** True until the endpoint resolves OR errors — gate feature-off UI on this. */
   loading: boolean;
+  /** True when the features could NOT be read (non-2xx / network) — `features` are then the conservative defaults. */
+  error?: boolean;
+  /**
+   * Phone clock minus the server clock (ms), from the response's `Date` header (null when absent). Used ONLY by the
+   * location gate to notice a phone whose date/time is wrong (LOCATION-GATE.md). Same single request as before.
+   */
+  serverSkewMs?: number | null;
 }
 
 /**
@@ -100,14 +107,23 @@ export function useTenantFeatures(endpoint: string): TenantFeaturesState {
 
   useEffect(() => {
     let cancelled = false;
+    let serverSkewMs: number | null = null;
     fetch(endpoint, { headers: { ...authHeader() } })
-      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => {
+        try {
+          const d = Date.parse(r.headers?.get?.('date') ?? '');
+          serverSkewMs = Number.isFinite(d) ? Date.now() - d : null;
+        } catch {
+          serverSkewMs = null;
+        }
+        return r.ok ? r.json() : null;
+      })
       .then((res) => {
         if (cancelled) return;
-        setState({ features: normalizeFeatures(res?.data?.features), loading: false });
+        setState({ features: normalizeFeatures(res?.data?.features), loading: false, error: !res, serverSkewMs });
       })
       .catch(() => {
-        if (!cancelled) setState((prev) => ({ ...prev, loading: false }));
+        if (!cancelled) setState((prev) => ({ ...prev, loading: false, error: true }));
       });
     return () => {
       cancelled = true;

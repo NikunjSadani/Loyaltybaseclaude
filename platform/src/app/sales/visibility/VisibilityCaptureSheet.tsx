@@ -45,6 +45,7 @@ import { useTenantFeatures } from '@/lib/tenant-features';
 import { usePreciseGpsPreWarm } from '@/lib/use-precise-gps';
 import { useLocationGate } from '@/lib/use-location-gate';
 import { LocationGatePanel } from '@/components/location/LocationGatePanel';
+import { SETTINGS_FAILED_LOCATION_NOTE, useLocationSetting } from '@/lib/use-location-setting';
 
 /** Human labels for the non-blocking server flags surfaced on a successful capture. */
 const FLAG_LABELS: Record<string, string> = {
@@ -72,12 +73,16 @@ export function VisibilityCaptureSheet({
   const [view, setView] = useState<View>('form');
   // Geo-fence tenants (Bajaj, features.outletMasterGeo) use the timed high-accuracy acquire for
   // each photo's GPS fix; every other tenant (Deoleo) keeps the single getCurrentPosition call.
-  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
+  const { features, loading: featuresLoading, error: featuresError, serverSkewMs } = useTenantFeatures('/api/sales/me');
   const preciseGps = features.outletMasterGeo;
   // LOCATION GATE (features.requireLocation; docs/plans/LOCATION-GATE.md). OFF (Deoleo, every other tenant) → the hook
   // does nothing. ON → the capture form stays hidden behind the location guide until location is allowed AND a fix
   // arrives; submit re-checks first. The form stays MOUNTED while hidden, so photos already taken are kept.
-  const locationGate = useLocationGate(features.requireLocation && !featuresLoading);
+  const locationGate = useLocationGate(features.requireLocation && !featuresLoading, { serverSkewMs });
+  // Round-3 #4/#5: last-known setting (browser storage) → hold the camera only for reps whose programme required
+  // location last time, at most 5 s while settings load; a "location may be required" note on a settings failure for
+  // the same reps. Deoleo reps (last-known false) see neither; unknown (first ever load) → no hold.
+  const locationSetting = useLocationSetting(features.requireLocation, featuresLoading, featuresError);
   // PRE-WARM: start the high-accuracy GPS watch as soon as the sheet opens (geo-fence tenants
   // only) so a precise fix is usually already in hand when the rep captures a photo.
   const gpsWatch = usePreciseGpsPreWarm(preciseGps);
@@ -226,6 +231,11 @@ export function VisibilityCaptureSheet({
             {locationGate.blocking && (
               <LocationGatePanel gate={locationGate} purpose="capture visibility" className="mb-4" />
             )}
+            {locationSetting.settingsNote && (
+              <p data-testid="location-settings-note" className="mb-3 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                {SETTINGS_FAILED_LOCATION_NOTE}
+              </p>
+            )}
             {locationGate.submitChecking && (
               <p role="status" aria-live="polite" data-testid="visibility-checking-location" className="mb-3 text-xs font-semibold text-[var(--brand-primary)]">
                 Checking location…
@@ -285,9 +295,8 @@ export function VisibilityCaptureSheet({
                 requireLocation={locationGate.enabled}
                 // While the guide covers the form, live cameras are closed (no hidden stream); photos already taken stay.
                 cameraPaused={locationGate.blocking}
-                // Audit #6: no shutter while the programme settings are still loading (a geotag photo taken then would
-                // miss the location rule). Just the existing disabled camera button — no new screen for anyone.
-                captureHold={featuresLoading}
+                // Shutter held only for last-known "require location" reps, ≤ 5 s, while settings load (round-3 #4).
+                captureHold={locationSetting.captureHold}
               />
             )}
             </div>

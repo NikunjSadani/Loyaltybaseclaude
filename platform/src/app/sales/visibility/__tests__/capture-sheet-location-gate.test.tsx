@@ -30,8 +30,8 @@ vi.mock('@/lib/visibility', () => ({
 
 // The form is mocked: it exposes requireLocation and lets the test trigger the sheet's submit handler.
 vi.mock('@/components/visibility/VisibilityCaptureForm', () => ({
-  VisibilityCaptureForm: ({ requireLocation, cameraPaused, onSubmit }: { requireLocation?: boolean; cameraPaused?: boolean; onSubmit: (v: unknown) => Promise<void> }) => (
-    <div data-testid="form" data-require={String(!!requireLocation)} data-camera-paused={String(!!cameraPaused)}>
+  VisibilityCaptureForm: ({ requireLocation, cameraPaused, captureHold, onSubmit }: { requireLocation?: boolean; cameraPaused?: boolean; captureHold?: boolean; onSubmit: (v: unknown) => Promise<void> }) => (
+    <div data-testid="form" data-require={String(!!requireLocation)} data-camera-paused={String(!!cameraPaused)} data-hold={String(!!captureHold)}>
       <button onClick={() => onSubmit({ photo: 'k' }).catch(() => undefined)}>do-submit</button>
     </div>
   ),
@@ -111,6 +111,8 @@ describe('VCS-LG — capture sheet location gate', () => {
     REQUIRE_LOCATION = false;
     render(<VisibilityCaptureSheet outlet={outlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
     expect((await screen.findByTestId('form')).getAttribute('data-require')).toBe('false');
+    expect(screen.getByTestId('form').getAttribute('data-hold')).toBe('false'); // round-3 #4: never held for Deoleo
+    expect(screen.queryByTestId('location-settings-note')).toBeNull();
     expect(screen.queryByTestId('location-gate-blocked')).toBeNull();
     expect(screen.queryByTestId('location-gate-checking')).toBeNull();
     expect(getCurrentPosition).not.toHaveBeenCalled();

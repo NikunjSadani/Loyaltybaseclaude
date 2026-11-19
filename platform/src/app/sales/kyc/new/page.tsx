@@ -38,6 +38,11 @@ import { useLocationGate } from '@/lib/use-location-gate';
 import { LocationGatePanel } from '@/components/location/LocationGatePanel';
 import { isSignatureCanvasBlank } from '@/lib/signature-canvas';
 import { isFixStale } from '@/lib/location-gate';
+import { SETTINGS_FAILED_LOCATION_NOTE, useLocationSetting } from '@/lib/use-location-setting';
+
+/** Round-3 #2: shown when a submit finds the board-photo fix older than 55 minutes (server wording matches). */
+const BOARD_FIX_STALE_SUBMIT_MESSAGE =
+  'The store board photo location is older than 55 minutes. Go back to the Address step and tap "Retry location" under the store board photo (at the outlet), then submit again.';
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -427,7 +432,7 @@ export default function NewKYCPage() {
    * self-declaration document — the Address Proof upload itself stays REQUIRED either
    * way. While features load, DEFAULT_FEATURES has the flag OFF → the SAFE default of
    * requiring the self-declaration on a declared mismatch. */
-  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
+  const { features, loading: featuresLoading, error: featuresError, serverSkewMs } = useTenantFeatures('/api/sales/me');
   /* Tenant name for programme copy (was hard-coded "Deoleo" — showed on Bajaj; owner 2026-11-14). */
   const tenantDisplayName = useClientConfig().branding.displayName;
   const waiverEnabled = features.kycAddressProofWaiver;
@@ -447,10 +452,22 @@ export default function NewKYCPage() {
    * OFF (default — Deoleo, every other tenant): the hook does nothing and the page is byte-identical. ON: the rep
    * cannot START the KYC (the wizard is replaced by a "location needed" guide) until location is allowed AND a
    * real fix arrives, and cannot SUBMIT without passing a fresh check (the API refuses a fix-less KYC too). */
-  const locationGate = useLocationGate(features.requireLocation && !featuresLoading);
+  const locationGate = useLocationGate(features.requireLocation && !featuresLoading, { serverSkewMs });
+  // Last-known setting (browser storage): only drives the settings-failure note for reps whose programme required
+  // location last time. Deoleo reps (last-known false) never see it.
+  const locationSetting = useLocationSetting(features.requireLocation, featuresLoading, featuresError);
+  // Round-3 #2/#6: a ticking clock so a board-photo fix that ages past 55 minutes shows "Retry location" + its line on
+  // its own (no network; only on gate tenants with a board fix in hand).
+  const [geoClockMs, setGeoClockMs] = useState(() => Date.now());
   // The board-photo location must be FRESH under the gate: a fix pre-filled from an earlier submission (re-KYC) is
   // cleared so the rep re-acquires it at the outlet (the server refuses one older than an hour too).
   const boardGeoPrefilledRef = useRef(false);
+  useEffect(() => {
+    if (!locationGate.enabled || !boardPhotoGeo) return;
+    const t = setInterval(() => setGeoClockMs(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, [locationGate.enabled, boardPhotoGeo]);
+  const boardFixStale = !!boardPhotoGeo && isFixStale(boardPhotoGeo.ts, geoClockMs);
   useEffect(() => {
     if (locationGate.enabled && boardGeoPrefilledRef.current && boardPhotoGeo) {
       boardGeoPrefilledRef.current = false;
@@ -1519,7 +1536,6 @@ export default function NewKYCPage() {
 
   /* ── D: Submit → OTP step ── */
   const handleSubmit = async () => {
-    let boardGeoForSubmit = boardPhotoGeo;
     // KYC-M5: never POST /api/kyc twice for the same completed submission. Once the first
     // POST has succeeded a submissionId exists; pressing Back from the OTP screen and hitting
     // submit again must NOT create a second submission — just return to the OTP step (which
@@ -1541,17 +1557,17 @@ export default function NewKYCPage() {
         setSubmitError('Signature required — the signature pad is empty. Ask the outlet owner to sign again.');
         return;
       }
+      // Round-3 #2: the board-photo fix stays the PHOTO's own location — never swapped for the submit-time fix. A
+      // stale one is refreshed only by the rep's explicit "Retry location" (same timed acquire as the photo).
+      if (!boardPhotoGeo || isFixStale(boardPhotoGeo.ts)) {
+        setSubmitError(BOARD_FIX_STALE_SUBMIT_MESSAGE);
+        return;
+      }
       setSubmitting(true);
       const locationOk = await locationGate.recheck({ quiet: true });
       if (!locationOk) {
         setSubmitting(false);
         return;
-      }
-      // Audit #3: a board-photo fix that is too old by now (long KYC, or pre-filled) is refreshed with this fresh
-      // submit-time fix — the rep is at the outlet submitting — so the server's freshness rule passes honestly.
-      if (!boardPhotoGeo || isFixStale(boardPhotoGeo.ts)) {
-        boardGeoForSubmit = { lat: locationOk.lat, lng: locationOk.lng, accuracy: locationOk.accuracy, ts: new Date().toISOString() };
-        setBoardPhotoGeo(boardGeoForSubmit);
       }
     }
     setSubmitting(true);
@@ -1699,7 +1715,7 @@ export default function NewKYCPage() {
                 // Provenance of the VPA (QR vs typed) — UPI mode only; omitted when unknown.
                 ...(upiCaptureMethod ? { upiCaptureMethod } : {}),
               }),
-          boardPhotoGeo:    boardGeoForSubmit ?? undefined,
+          boardPhotoGeo:    boardPhotoGeo ?? undefined,
           // Location gate only: the phone's clock at submit — the server judges the board fix's age on it (bounded).
           ...(locationGate.enabled ? { clientNow: new Date().toISOString() } : {}),
           // Instrumentation (geo-fence tenants only; undefined otherwise → Deoleo byte-identical).
@@ -2262,6 +2278,9 @@ export default function NewKYCPage() {
   if (!docs.storeBoardPhoto) addressMissing.push('Store board photo');
   if (selfDeclarationRequiredEff && !docs.selfDeclaration) addressMissing.push('Signed self-declaration');
   // Board location: only actionable once a photo exists (no photo → already blocked above).
+  // Gate tenants: a board fix older than 55 minutes must be refreshed (Retry location) before continuing.
+  if (locationGate.enabled && docs.storeBoardPhoto && boardFixStale && !boardPhotoGeoLoading)
+    addressMissing.push('A fresh store board location (tap Retry location)');
   if (docs.storeBoardPhoto && !boardPhotoGeo && !boardPhotoGeoLoading)
     addressMissing.push('Store board location (retake photo or tap Retry location)');
   const addressBlocked = addressMissing.length > 0 || addressBusy !== null;
@@ -2466,6 +2485,11 @@ export default function NewKYCPage() {
       )}
 
       <StepBar />
+      {locationSetting.settingsNote && (
+        <p data-testid="location-settings-note" className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          {SETTINGS_FAILED_LOCATION_NOTE}
+        </p>
+      )}
 
       {/* Global file-size error */}
       {fileError && (
@@ -3081,7 +3105,12 @@ export default function NewKYCPage() {
                   </div>
                   {/* KYC-H2: recovery — hard block stays, but the rep can re-attempt the fix.
                       Disabled for the whole in-flight duration so it can't be double-fired. */}
-                  {(!boardPhotoGeo || (locationGate.enabled && isFixStale(boardPhotoGeo.ts))) && (
+                  {locationGate.enabled && boardFixStale && !boardPhotoGeoLoading && (
+                    <p data-testid="board-photo-geo-stale" role="status" className="text-[11px] font-medium text-amber-700">
+                      This location is older than 55 minutes — tap Retry location.
+                    </p>
+                  )}
+                  {(!boardPhotoGeo || (locationGate.enabled && boardFixStale)) && (
                     <button
                       type="button"
                       data-testid="board-photo-geo-retry"

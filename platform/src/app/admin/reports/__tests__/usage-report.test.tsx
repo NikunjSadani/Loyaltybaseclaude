@@ -270,8 +270,8 @@ describe('Usage Report page', () => {
 
 describe('Reports index', () => {
   it('lists the Usage Report with an Open report link to /admin/reports/usage', () => {
-    // The index reads the tenant features (Location report tile, LOCATION-GATE.md).
-    fetchMock.mockResolvedValue(ok({ features: {} }));
+    // The index probes whether the Location report is enabled (LOCATION-GATE.md).
+    fetchMock.mockResolvedValue(ok({ enabled: false }));
     render(<ReportsPage />);
     const title = screen.getByText('Usage Report');
     let el: HTMLElement | null = title;

@@ -31,8 +31,10 @@ import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import {
   isFreshFixTime,
   isLocationRequiredFor,
+  isPhoneClockWrong,
   isRealFix,
   LOCATION_REQUIRED_KYC_MESSAGE,
+  PHONE_CLOCK_WRONG_MESSAGE,
   recordFenceBlock,
   STALE_BOARD_FIX_MESSAGE,
 } from '../common/location-gate.helper';
@@ -1924,6 +1926,7 @@ export class KycService {
     // GPS fix is refused before any write (the phone gate blocks it first; this stops an old page / crafted call).
     const locationRequired = isLocationRequiredFor(geoClient?.features, user.role);
     if (locationRequired) {
+      if (isPhoneClockWrong(dto.clientNow)) throw new BadRequestException(PHONE_CLOCK_WRONG_MESSAGE);
       if (!isRealFix(dto.boardPhotoGeo ?? null)) throw new BadRequestException(LOCATION_REQUIRED_KYC_MESSAGE);
       // Re-KYC stale-geo guard: a board-photo fix pre-filled from an earlier submission (or with no time) is refused.
       if (!isFreshFixTime(dto.boardPhotoGeo?.ts, new Date(), dto.clientNow)) {

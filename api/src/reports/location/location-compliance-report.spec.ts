@@ -257,6 +257,13 @@ describe('locationAggregateSql — real Postgres', () => {
 });
 
 describe('ReportsService.locationCompliance + export kind', () => {
+  it('ROUND 3 #1: /enabled answers per tenant (bajaj on, deoleo off, no tenant → off)', async () => {
+    const svc = new ReportsService(fakePrisma() as any, {} as any);
+    await expect(svc.locationComplianceEnabled({ clientId: 'bajaj' } as any)).resolves.toEqual({ enabled: true });
+    await expect(svc.locationComplianceEnabled({ clientId: 'deoleo' } as any)).resolves.toEqual({ enabled: false });
+    await expect(svc.locationComplianceEnabled({ clientId: ' ' } as any)).resolves.toEqual({ enabled: false });
+  });
+
   it('JSON: one page + totals for the caller tenant', async () => {
     const svc = new ReportsService(fakePrisma() as any, {} as any);
     const res: any = await svc.locationCompliance({ sub: 'u', role: 'CLIENT_ADMIN', clientId: 'bajaj' } as any, { pageSize: 1 } as any);

@@ -39,7 +39,7 @@ describe('Reports page — Export Excel', () => {
     fireEvent.click(within(card('Outlet Master')).getByRole('button', { name: /export excel/i }));
     await waitFor(() => expect(downloadBlob).toHaveBeenCalledTimes(1));
     expect(downloadBlob.mock.calls[0][1]).toBe('outlet-master.xlsx');
-    // (the index also reads the tenant features on load — LOCATION-GATE.md — so find the export call itself)
+    // (the index also probes the Location report on load — LOCATION-GATE.md — so find the export call itself)
     expect(fetchMock.mock.calls.map((c) => String(c[0])).find((u) => u.includes('format=xlsx'))).toMatch(/^\/api\/admin\/reports\/outlet-master\?format=xlsx/);
     expect(screen.queryByTestId('download-queued')).not.toBeInTheDocument();
   });

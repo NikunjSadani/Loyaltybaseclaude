@@ -97,3 +97,14 @@ describe('isRealFix / isFreshFixTime', () => {
     expect(isFreshFixTime(ts, now, 'garbage')).toBe(false);
   });
 });
+
+describe('isPhoneClockWrong (round 3 #3)', () => {
+  it('only a sent clock more than 24 h away from the server clock is "wrong"', () => {
+    const { isPhoneClockWrong } = jest.requireActual('./location-gate.helper') as typeof import('./location-gate.helper');
+    const now = new Date();
+    expect(isPhoneClockWrong(undefined, now)).toBe(false); // old clients: not judged
+    expect(isPhoneClockWrong(new Date(now.getTime() - 3_600_000).toISOString(), now)).toBe(false);
+    expect(isPhoneClockWrong(new Date(now.getTime() - 25 * 3_600_000).toISOString(), now)).toBe(true);
+    expect(isPhoneClockWrong(new Date(now.getTime() + 25 * 3_600_000).toISOString(), now)).toBe(true);
+  });
+});

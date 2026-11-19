@@ -22,7 +22,13 @@ import {
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { VisibilityMediaService } from './visibility-media.service';
 import { visibilityLocationRefusal } from './visibility-location.helper';
-import { isLocationRequiredFor, isRealFix, recordFenceBlock } from '../common/location-gate.helper';
+import {
+  isLocationRequiredFor,
+  isPhoneClockWrong,
+  isRealFix,
+  PHONE_CLOCK_WRONG_MESSAGE,
+  recordFenceBlock,
+} from '../common/location-gate.helper';
 import {
   currentWindowKey,
   isWindowClosed,
@@ -726,6 +732,7 @@ export class VisibilityCaptureService {
     // NOW must carry a valid fix (carried-forward approved photos are not re-checked), else 400 before any write.
     const locationRequired = isLocationRequiredFor(geoFeatures, user.role);
     if (locationRequired) {
+      if (isPhoneClockWrong(gateInput.clientNow)) throw new BadRequestException(PHONE_CLOCK_WRONG_MESSAGE);
       const refusal = visibilityLocationRefusal(schema, values, new Set(Object.keys(carriedReviews)), cleaned, gateInput.captureGeo, {
         clientNow: gateInput.clientNow,
       });
@@ -934,7 +941,7 @@ export class VisibilityCaptureService {
     // change — the fence verdict (geoFenceOk / distanceMeters) and the flags are untouched, so a poor-accuracy fix is
     // reported as poor accuracy. Switch-off tenants (Deoleo) store exactly what they stored before.
     if (locationRequired && (repGeo.lat == null || repGeo.lng == null)) {
-      const fallback = this.firstRealFix(schema, values, gateInput.captureGeo);
+      const fallback = this.firstRealFix(schema, values, gateInput.captureGeo, cleaned, new Set(Object.keys(carriedReviews)));
       if (fallback) repGeo = this.photoToCaptureGeo(fallback);
     }
 
@@ -1136,12 +1143,19 @@ export class VisibilityCaptureService {
    * CaptureGeo shape used for the map-pin columns. `null` (no representative photo) →
    * all-null. Mirrors extractCaptureGeo's accuracy/capturedAt coercion.
    */
-  /** Location gate: the first real fix of the capture — tagged photos, then the submit-time fix, then a GPS field. */
+  /**
+   * Location gate: the representative real fix to STORE — FRESH sources first (round-3 #8): new tagged photos of this
+   * request, then the submit-time `captureGeo`, then GPS fields sent in this request; carried-forward photos / merged
+   * GPS values only when nothing fresh exists (the gate rule normally guarantees a fresh one).
+   */
   private firstRealFix(
     schema: VisibilityFormSchema,
     values: Record<string, unknown>,
     captureGeo: unknown,
+    requestValues: Record<string, unknown> = {},
+    carried: ReadonlySet<string> = new Set(),
   ): GpsCapture | null {
+    const inRequest = (id: string) => Object.prototype.hasOwnProperty.call(requestValues, id) && !carried.has(id);
     const asCapture = (raw: unknown): GpsCapture | null => {
       const val = typeof raw === 'string' ? (() => { try { return JSON.parse(raw) as unknown; } catch { return null; } })() : raw;
       const p = parseGpsPoint(val);
@@ -1154,18 +1168,20 @@ export class VisibilityCaptureService {
         capturedAt: typeof o.capturedAt === 'string' ? o.capturedAt : undefined,
       };
     };
-    for (const f of schema.fields ?? []) {
-      if (f.type !== 'CAMERA' || !(f.geoFenceRequired === true || f.geotag === true)) continue;
-      const g = readMediaValue(values[f.id]).geo;
-      if (g && isRealFix(g)) return g;
-    }
+    const fields = schema.fields ?? [];
+    const tagged = fields.filter((f) => f.type === 'CAMERA' && (f.geoFenceRequired === true || f.geotag === true));
+    const gps = fields.filter((f) => f.type === 'GPS_POINT');
+    const photoFix = (id: string) => {
+      const g = readMediaValue(values[id]).geo;
+      return g && isRealFix(g) ? g : null;
+    };
+    for (const f of tagged) if (inRequest(f.id)) { const g = photoFix(f.id); if (g) return g; }
     const submitFix = asCapture(captureGeo);
     if (submitFix) return submitFix;
-    for (const f of schema.fields ?? []) {
-      if (f.type !== 'GPS_POINT') continue;
-      const g = asCapture(values[f.id]);
-      if (g) return g;
-    }
+    for (const f of gps) if (inRequest(f.id)) { const g = asCapture(values[f.id]); if (g) return g; }
+    // Nothing fresh — fall back to carried-forward / merged-back values.
+    for (const f of tagged) { const g = photoFix(f.id); if (g) return g; }
+    for (const f of gps) { const g = asCapture(values[f.id]); if (g) return g; }
     return null;
   }
 

@@ -1864,14 +1864,14 @@ describe('KycService', () => {
       const nearNow = () => ({ ...nearGeo, ts: new Date().toISOString() });
       const farNow = () => ({ ...farGeo, ts: new Date().toISOString() });
 
-      it('ON + a STALE board-photo fix (pre-filled from an earlier submission) → 400 "take a fresh board photo location"', async () => {
+      it('ON + a STALE board-photo fix (pre-filled from an earlier submission) → 400 pointing at Retry location', async () => {
         mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
         mockPrisma.outlet.findFirst.mockResolvedValueOnce({
           id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
           outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
         });
         const old = { ...nearGeo, ts: new Date(Date.now() - 3 * 86_400_000).toISOString() };
-        await expect(service.create(so, { ...baseDto, boardPhotoGeo: old } as never)).rejects.toThrow(/take a fresh board photo location/);
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: old } as never)).rejects.toThrow(/older than 55 minutes. Go back to the Address step and tap "Retry location"/);
         expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
       });
 
@@ -1885,6 +1885,18 @@ describe('KycService', () => {
           clientNow: phoneNow.toISOString(),
         } as never);
         expect(res).toMatchObject({ submissionId: 'sub1' });
+      });
+
+      it('ROUND 3 #3: phone clock more than 24 h off → 400 "set date and time to automatic"', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        });
+        const phoneNow = new Date(Date.now() - 3 * 86_400_000);
+        await expect(
+          service.create(so, { ...baseDto, boardPhotoGeo: { ...nearGeo, ts: phoneNow.toISOString() }, clientNow: phoneNow.toISOString() } as never),
+        ).rejects.toThrow(/date and time are wrong — set them to automatic/);
       });
 
       it('ON + the 0,0 default fix → 400 (not a real fix)', async () => {

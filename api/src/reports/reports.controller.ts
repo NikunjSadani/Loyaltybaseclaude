@@ -102,6 +102,18 @@ export class ReportsController {
   }
 
   /**
+   * GET /v1/reports/location-compliance/enabled — `{ enabled }` for the caller's tenant (features.requireLocation), with
+   * EXACTLY the report's roles + permission, so the reports index shows the tile exactly when the report would answer
+   * (MIS_USER cannot read /admin/settings/config). Declared before the report route.
+   */
+  @Get('location-compliance/enabled')
+  @Roles('GIFSY_ADMIN', 'MIS_USER', 'CLIENT_ADMIN')
+  @RequirePermission('reports:read')
+  async locationComplianceEnabled(@CurrentUser() user: JwtPayload) {
+    return this.reports.locationComplianceEnabled(user);
+  }
+
+  /**
    * GET /v1/reports/location-compliance — per-rep location compliance (LOCATION-GATE.md). Same access as the Usage
    * report. `format=xlsx` = every filtered row through the 'location-compliance' export kind (streams; 404 when none).
    */

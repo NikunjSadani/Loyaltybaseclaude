@@ -46,7 +46,19 @@ export const BOARD_FIX_FUTURE_SKEW_MS = 10 * 60 * 1000;
 export const CLIENT_CLOCK_MAX_SKEW_MS = 24 * 60 * 60 * 1000;
 
 export const STALE_BOARD_FIX_MESSAGE =
-  'The store board photo location is too old (or has no time) — take a fresh board photo location at the outlet (tap Retry location), then submit again.';
+  'The store board photo location is older than 55 minutes. Go back to the Address step and tap "Retry location" under the store board photo (at the outlet), then submit again.';
+
+/** Round-3 #3: a phone clock more than CLIENT_CLOCK_MAX_SKEW_MS off — every fix would look stale; retrying can't help. */
+export const PHONE_CLOCK_WRONG_MESSAGE =
+  "Your phone's date and time are wrong — set them to automatic (Settings → Date & time) and try again.";
+
+/** True when the phone sent its clock (`clientNow`) and it is more than 24 h away from the server clock. */
+export function isPhoneClockWrong(clientNow: unknown, now: Date = new Date()): boolean {
+  if (typeof clientNow !== 'string' || !clientNow) return false;
+  const c = Date.parse(clientNow);
+  if (!Number.isFinite(c)) return false;
+  return Math.abs(c - now.getTime()) > CLIENT_CLOCK_MAX_SKEW_MS;
+}
 
 /**
  * True when a fix's timestamp `ts` is within the window. Ages are measured on ONE clock: when the phone sends its own

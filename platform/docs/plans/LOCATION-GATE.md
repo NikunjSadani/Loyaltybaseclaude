@@ -6,6 +6,33 @@ not deployed, not runtime-verified on a phone.
 line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing new). The code paths are shared
 (KYC / visibility services, reports, digest) — owner-approved 2026-11-18.
 
+## Re-audit fixes (round 3, 2026-11-19, on e4696bcf) — 8 findings, all confirmed (none refuted)
+
+1. **Location Report tile for MIS_USER**: the index read `/admin/settings/config` (GIFSY_ADMIN / CLIENT_ADMIN only).
+   It now calls `GET /v1/reports/location-compliance/enabled` → `{ enabled }` with EXACTLY the report's roles
+   (GIFSY_ADMIN, MIS_USER, CLIENT_ADMIN + `reports:read`), so the tile shows exactly when the report would answer.
+2. **No submit-time swap of the board fix** (supersedes audit fix 3's swap): the board-photo fix always stays the
+   photo's own location + lock time. When it is older than 55 minutes, "Retry location" (the same timed precise acquire
+   as the photo, replacing fix and lock time together) and the line "This location is older than 55 minutes — tap
+   Retry location" appear on their own (a 30 s on-device timer, gate tenants with a board fix only). The address step
+   asks for a fresh board location, and a submit with a stale one stops with the same wording as the server refusal
+   ("…Go back to the Address step and tap "Retry location" under the store board photo…").
+3. **Phone date/time wrong (> 24 h)**: the API refuses KYC and visibility on switch-on tenants with "Your phone's date
+   and time are wrong — set them to automatic (Settings → Date & time) and try again" (when the phone sends
+   `clientNow`). The phone notices it first: the settings request's `Date` header gives the server clock (same single
+   request — `useTenantFeatures` exposes `serverSkewMs`), and the gate blocks with reason `clock` and that guide.
+4. **Camera hold** (supersedes audit fix 6): the last-known "Require location" per signed-in user + tenant host is kept
+   in browser storage (try/catch-wrapped). The camera is held only when the last-known value is TRUE and settings are
+   still loading, for at most 5 s; unknown (first ever load) and false → never held (the server enforces). Deoleo reps
+   never see a held camera.
+5. **Settings failure note** returns, only for last-known-TRUE reps: "Couldn't load programme settings — location may
+   be required; keep location on." Deoleo never sees it.
+6. Covered by the timer in 2.
+7. **Only a revoke cancels a submit check**: a newer check (e.g. a "granted" change event) no longer turns the submit
+   check into null — it answers with its own valid result; only a permission revoke (`denied`) cancels it.
+8. **Stored visibility location prefers fresh sources**: new photos of this request → `captureGeo` → GPS fields sent
+   now → only then carried-forward photos / merged-back GPS values.
+
 ## Independent audit fixes (2026-11-19, on 7cf3c24c) — all 9 findings confirmed in the code, none refuted
 
 1. **Stored location** (switch-on only): the fence sets `captureLat/Lng/Accuracy` only when it could measure a distance,
@@ -15,17 +42,16 @@ line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing 
    tenants store exactly what they stored before.
 2. **geoFenceRequired without geotag**: on switch-on tenants such a photo now records a shutter-time fix (the server
    requires one). Switch-off: unchanged (geotag only).
-3. **Stale board fix**: at submit, a board-photo fix older than 55 min (phone clock) is refreshed with the fresh
-   submit-time fix (position + time; it is then fenced like any board fix); "Retry location" also shows for a stale
-   fix. Clock skew: the phone sends `clientNow`; the server measures the fix age on the phone clock when `clientNow` is
+3. **Stale board fix**: "Retry location" also shows for a stale fix. (The submit-time swap added here was REMOVED in
+   round 3 — see re-audit fix 2.) Clock skew: the phone sends `clientNow`; the server measures the fix age on the phone clock when `clientNow` is
    within 24 h of the server clock (else the server clock). `ts` is client-supplied anyway — the rule refuses honest
    OLD fixes (re-KYC pre-fill), and the 24 h bound keeps `clientNow` from widening it.
-4. **Location Report** tile listed only when the tenant has `requireLocation` ON (reports index reads the tenant
-   features); the API refuses switch-off tenants with 403 "available only for programmes with Require location…".
+4. **Location Report** tile listed only when the tenant has `requireLocation` ON (round 3: via the report's own
+   `/enabled` probe); the API refuses switch-off tenants with 403 "available only for programmes with Require location…".
 5. **No settings-failure note**: removed — Deoleo sees nothing new; the gate stays open on a settings failure and the
    server refuses with a clear message.
-6. **Settings still loading**: the visibility camera's shutter is held (existing disabled button, no new screen) until
-   the programme settings load, so a photo can't be taken before the location rule is known. (KYC: the board photo is
+6. **Settings still loading**: the visibility camera's shutter is held while settings load (round 3 narrowed this to
+   last-known-TRUE reps, ≤ 5 s — see re-audit fix 4). (KYC: the board photo is
    steps away from the first screen and always records a fix.)
 7. **Visibility freshness** (switch-on only): new photo fixes, GPS values and `captureGeo` must be ≤ 60 min old /
    ≤ 10 min "future" (same window and same `clientNow` clock rule as KYC). Too old → "the location on "X" is too old —

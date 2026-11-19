@@ -349,6 +349,41 @@ describe('VisibilityCaptureService', () => {
         expect(mockPrisma.visibilityCapture.create.mock.calls[0][0].data).toMatchObject({ captureLat: 12.9001, captureAccuracy: 350 });
       });
 
+      it('ROUND 3 #3: phone clock more than 24 h off → 400 "set date and time to automatic"', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        await expect(
+          service.submitCapture(user, { outletId: 'o1', formValues: nearNow(), clientNow: new Date(Date.now() + 2 * 86_400_000).toISOString() } as never),
+        ).rejects.toThrow(/date and time are wrong/);
+        expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+      });
+
+      it('ROUND 3 #8: the stored fix prefers the fresh captureGeo of this request over a carried-forward photo', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(null, null)); // no reference → fallback path
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+          clientId: 't1', version: 4,
+          formSchema: { fields: [
+            { id: 'old', type: 'CAMERA', label: 'Old', required: false, order: 1, geotag: true },
+            { id: 'plain', type: 'CAMERA', label: 'Plain', required: false, order: 2 },
+          ] },
+        });
+        // A CHANGES_REQUESTED row whose APPROVED photo carries an old location elsewhere.
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValueOnce({
+          id: 'cap1', status: 'CHANGES_REQUESTED', currentVersion: 1,
+          formValues: { old: { key: 'visibility-media/t1/o.jpg', geo: { lat: 13.5, lng: 78.5, accuracy: 5, capturedAt: '2026-01-01T00:00:00.000Z' } }, plain: 'visibility-media/t1/p.jpg' },
+          photoReviews: { old: { status: 'APPROVED' }, plain: { status: 'REJECTED' } },
+        });
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValueOnce({ id: 'cap1', status: 'CHANGES_REQUESTED', currentVersion: 1 });
+        await service.submitCapture(user, {
+          outletId: 'o1',
+          formValues: { plain: 'visibility-media/t1/p2.jpg' },
+          captureGeo: { lat: 12.9001, lng: 77.5001, accuracy: 7, capturedAt: new Date().toISOString() },
+        } as never);
+        const data = mockPrisma.visibilityCapture.update.mock.calls[0][0].data;
+        expect(data).toMatchObject({ captureLat: 12.9001, captureLng: 77.5001, captureAccuracy: 7 });
+      });
+
       it('AUDIT #1: OFF (Deoleo) → stored values unchanged (no fallback: NULL location columns as before)', async () => {
         gatedOn();
         mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(null, null));

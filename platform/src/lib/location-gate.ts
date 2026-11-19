@@ -20,7 +20,12 @@
  * phone/app level (Android: Chrome's own Location permission is off, or phone Location is off and its system
  * dialog was declined).
  */
-export type LocationBlockReason = 'unsupported' | 'insecure' | 'denied' | 'device' | 'unavailable' | 'timeout';
+export type LocationBlockReason = 'unsupported' | 'insecure' | 'denied' | 'device' | 'unavailable' | 'timeout' | 'clock';
+
+/** A phone clock this far from the server clock makes every fix look stale (server bound, LOCATION-GATE.md). */
+export const PHONE_CLOCK_MAX_SKEW_MS = 24 * 60 * 60 * 1000;
+export const PHONE_CLOCK_WRONG_MESSAGE =
+  "Your phone's date and time are wrong — set them to automatic (Settings → Date & time) and try again.";
 
 export interface LocationFix {
   lat: number;
@@ -195,6 +200,21 @@ export function locationGuide(platform: LocationPlatform, reason: LocationBlockR
       title: 'Location needs the secure address',
       intro: 'Browsers only share location with sites opened over https://.',
       steps: ['Open the app from its usual https:// link or the installed app icon.', 'Then tap Test again.'],
+    };
+  }
+
+  if (reason === 'clock') {
+    return {
+      title: "Your phone's date and time are wrong",
+      intro: 'Locations are timed with the phone clock, so with a wrong date every location looks out of date.',
+      steps: [
+        platform === 'android'
+          ? 'Open the phone Settings → System → Date & time → turn on “Set time automatically” (and “Set time zone automatically”).'
+          : platform === 'ios-safari' || platform === 'ios-app'
+            ? 'Open the Settings app → General → Date & Time → turn on “Set Automatically”.'
+            : 'Set the computer’s date and time to automatic in its settings.',
+        'Reopen this page, then tap Test again.',
+      ],
     };
   }
 
