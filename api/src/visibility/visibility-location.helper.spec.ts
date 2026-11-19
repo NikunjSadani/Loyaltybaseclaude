@@ -108,3 +108,26 @@ describe('visibilityLocationRefusal (requireLocation ON)', () => {
     expect(fresh(noGeo, { photo: 'k' }, { lat: 0, lng: 0 })).toBe(VISIBILITY_FORM_HAS_NO_LOCATION_MESSAGE);
   });
 });
+
+describe('visibilityLocationRefusal — applicable fields only (prod fix 2026-11-19)', () => {
+  const privilegeOnly = { fieldId: '__subProgram__', op: 'eq', value: 'Privilege' };
+  const form = {
+    fields: [
+      { id: 'w1', type: 'CAMERA', label: 'Window 1', required: true, geotag: true, geoFenceRequired: true },
+      { id: 'w2', type: 'CAMERA', label: 'Window 2', required: false, geotag: true, geoFenceRequired: true, visibleWhen: privilegeOnly, requiredWhen: privilegeOnly },
+    ],
+  } as never;
+  const fix = { lat: 12.9, lng: 77.5, accuracy: 12, capturedAt: new Date().toISOString() };
+
+  it('Elite outlet: the hidden Window 2 is not considered; Window 1 with a fix passes', () => {
+    const v = { w1: { key: 'k1', geo: fix } };
+    expect(visibilityLocationRefusal(form, v, new Set(), v, undefined, { evalValues: { ...v, __subProgram__: 'Elite' } })).toBeNull();
+  });
+
+  it('Privilege outlet: Window 2 applies — a new Window 2 photo without a fix is refused by name', () => {
+    const v = { w1: { key: 'k1', geo: fix }, w2: { key: 'k2' } };
+    expect(
+      visibilityLocationRefusal(form, v, new Set(), v, undefined, { evalValues: { ...v, __subProgram__: 'Privilege' } }),
+    ).toMatch(/"Window 2"/);
+  });
+});

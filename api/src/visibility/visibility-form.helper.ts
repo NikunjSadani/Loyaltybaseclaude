@@ -550,6 +550,26 @@ export function presentCameraFieldIds(
 }
 
 /**
+ * The CAMERA fields (matching `predicate`, e.g. fence-required / location-tagged) that APPLY to this capture:
+ * visible under `evalValues` (its `visibleWhen`, evaluated exactly like submit validation) AND either required (its
+ * `required` / `requiredWhen`) or actually holding a photo. A hidden conditional slot (e.g. a Privilege-only 2nd photo
+ * at an Elite outlet) or a visible optional empty slot does NOT apply. `evalValues` must carry the server outlet
+ * context (`outletContextValues`) merged over the submitted values, like `validateSubmittedValues` receives it.
+ * (Prod bug 2026-11-19: the fence evaluated a hidden Window 2 → "Unverifiable".)
+ */
+export function applicableCameraFields(
+  schema: VisibilityFormSchema | null | undefined,
+  evalValues: Record<string, unknown>,
+  predicate: (f: FormField) => boolean = () => true,
+): FormField[] {
+  if (!schema) return [];
+  return (schema.fields ?? [])
+    .filter((f) => f.type === 'CAMERA' && predicate(f))
+    .filter((f) => evaluateVisibleWhen(f, evalValues))
+    .filter((f) => isFieldRequired(f, evalValues) || hasPhoto(evalValues[f.id]));
+}
+
+/**
  * The REQUIRED, visible CAMERA fields for this capture — the photos that MUST be present
  * (mirrors submit-time `isFieldRequired`, including a `requiredWhen` that keys on an outlet
  * attribute, so `mergedValues` must already carry the server outlet context). This is the

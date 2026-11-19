@@ -6,6 +6,25 @@ not deployed, not runtime-verified on a phone.
 line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing new). The code paths are shared
 (KYC / visibility services, reports, digest) — owner-approved 2026-11-18.
 
+## Prod fix 2026-11-19 — conditional fence photos (`fix/vis-fence-conditional-fields`, owner-approved)
+
+Bug: Bajaj's visibility form has a Privilege-only "Window 2" (`geoFenceRequired`, `visibleWhen`/`requiredWhen`
+`__subProgram__ == Privilege`). At Elite / Unnati outlets the phone correctly hides it, but the server's per-photo fence
+iterated EVERY `geoFenceRequired` field, read the hidden empty slot as `'unverifiable'`, and stored `geoFenceOk = null`
+(+ `GEO_UNVERIFIABLE`) even though Window 1 was 7–34 m from the outlet.
+
+Fix (helper `applicableCameraFields` in `visibility-form.helper.ts` — reuses `evaluateVisibleWhen` / `isFieldRequired`
+with the server outlet context, exactly like submit validation): only photos that APPLY to the outlet — visible AND
+(required OR actually captured) — are considered.
+- **Fence verdict** (`visibility-capture.service.ts`): gated on `outletMasterGeoEnabled` (the per-photo fence's Bajaj
+  tenant gate). Every other tenant evaluates all fence fields as before (Deoleo byte-identical). The per-photo vs legacy
+  PATH still follows the schema; an empty applicable list stays "unverifiable" as today.
+- **Location gate** (`visibility-location.helper.ts`): runs only under `requireLocation`; it now considers only
+  applicable tagged photos (it already skipped hidden/empty ones for the per-photo check; the change makes the
+  "form has no location field" decision applicability-aware too).
+- **Stored location** (`firstRealFix`) and **review badges** (`visibility-review.service.ts`) already read only photos
+  that are present in the stored (validation-projected) values, so a hidden slot never reached them — unchanged.
+
 ## Final-audit fixes (round 4, 2026-11-19, on b2570896) — 7 items, all confirmed (none refuted)
 
 1. **Future-timed / untimed board fix**: the phone's `isFixStale` now matches the server exactly — missing / unreadable

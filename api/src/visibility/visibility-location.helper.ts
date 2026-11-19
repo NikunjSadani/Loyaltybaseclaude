@@ -16,7 +16,7 @@
  * it is within 24 h of the server clock (see isFreshFixTime). Returns the message, or null.
  */
 import { fixTimeProblem, isFreshFixTime, isRealFix, LOCATION_REQUIRED_VISIBILITY_MESSAGE } from '../common/location-gate.helper';
-import { parseGpsPoint } from './visibility-form.helper';
+import { applicableCameraFields, parseGpsPoint } from './visibility-form.helper';
 import { readMediaValue, type VisibilityFormSchema } from './visibility-types';
 
 export const VISIBILITY_FORM_HAS_NO_LOCATION_MESSAGE =
@@ -42,12 +42,19 @@ export function visibilityLocationRefusal(
   requestValues: Record<string, unknown> | undefined,
   /** The phone's submit-time fix (optional, new clients). */
   captureGeo?: unknown,
-  opts: { now?: Date; clientNow?: unknown } = {},
+  /**
+   * `evalValues` = the stored values merged with the server outlet context (`outletContextValues`). When given, only
+   * the location-tagged photos that APPLY to this outlet are considered (visible + required-or-captured — prod bug
+   * 2026-11-19); without it, every tagged field (previous behaviour).
+   */
+  opts: { now?: Date; clientNow?: unknown; evalValues?: Record<string, unknown> } = {},
 ): string | null {
   const now = opts.now ?? new Date();
   const fresh = (g: unknown) => isFreshFixTime(fixTime(g), now, opts.clientNow);
   const fields = schema.fields ?? [];
-  const tagged = fields.filter((f) => f.type === 'CAMERA' && (f.geoFenceRequired === true || f.geotag === true));
+  const isTagged = (f: { type: string; geoFenceRequired?: boolean; geotag?: boolean }) =>
+    f.type === 'CAMERA' && (f.geoFenceRequired === true || f.geotag === true);
+  const tagged = opts.evalValues ? applicableCameraFields(schema, opts.evalValues, isTagged) : fields.filter(isTagged);
   const gpsPoints = fields.filter((f) => f.type === 'GPS_POINT');
 
   // 1 + 2 — new tagged photos in this request must each carry a real, recent fix.

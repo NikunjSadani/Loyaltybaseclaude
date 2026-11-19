@@ -451,3 +451,35 @@ describe('per-photo review helpers', () => {
     expect(gatingCameraFieldIds(allOptional, { opt: 'visibility-media/t1/o.jpg' })).toEqual(['opt']);
   });
 });
+
+// ─── applicableCameraFields (prod bug 2026-11-19: hidden conditional fence photo → "Unverifiable") ───
+import { applicableCameraFields } from './visibility-form.helper';
+
+describe('applicableCameraFields', () => {
+  const privilegeOnly = { fieldId: '__subProgram__', op: 'eq' as const, value: 'Privilege' };
+  const bajajForm: VisibilityFormSchema = {
+    fields: [
+      cameraField({ id: 'wtk11hn', label: 'Window 1', required: true, geotag: true, geoFenceRequired: true }),
+      { id: 'g1', type: 'GPS_POINT', label: 'Geo tag 1', required: false, order: 2 } as FormField,
+      cameraField({ id: 'np9d0cc', label: 'Window 2', required: false, geotag: true, geoFenceRequired: true, visibleWhen: privilegeOnly, requiredWhen: privilegeOnly }),
+      cameraField({ id: 'opt', label: 'Optional extra', required: false, geotag: true, geoFenceRequired: true }),
+    ],
+  } as VisibilityFormSchema;
+  const fence = (f: FormField) => f.geoFenceRequired === true;
+  const photo = { key: 'k', geo: { lat: 12.9, lng: 77.5 } };
+  const ids = (ctx: string, v: Record<string, unknown>) =>
+    applicableCameraFields(bajajForm, { ...v, ...outletContextValues({ programCategory: ctx }) }, fence).map((f) => f.id);
+
+  it('Elite / Unnati outlet: the Privilege-only Window 2 does not apply; an optional empty slot is skipped', () => {
+    expect(ids('Elite', { wtk11hn: photo })).toEqual(['wtk11hn']);
+    expect(ids('Unnati', { wtk11hn: photo })).toEqual(['wtk11hn']);
+  });
+
+  it('Privilege outlet: Window 2 applies (required by requiredWhen) even when empty — the required rule still bites', () => {
+    expect(ids('Privilege', { wtk11hn: photo })).toEqual(['wtk11hn', 'np9d0cc']);
+  });
+
+  it('a visible optional slot WITH a photo applies', () => {
+    expect(ids('Elite', { wtk11hn: photo, opt: photo })).toEqual(['wtk11hn', 'opt']);
+  });
+});

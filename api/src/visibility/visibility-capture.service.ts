@@ -43,6 +43,7 @@ import {
   readMediaValue,
   readPhotoReviews,
   PhotoReviews,
+  applicableCameraFields,
 } from './visibility-form.helper';
 import {
   VisibilityFormSchema,
@@ -735,6 +736,7 @@ export class VisibilityCaptureService {
       if (isPhoneClockWrong(gateInput.clientNow)) throw new BadRequestException(PHONE_CLOCK_WRONG_MESSAGE);
       const refusal = visibilityLocationRefusal(schema, values, new Set(Object.keys(carriedReviews)), cleaned, gateInput.captureGeo, {
         clientNow: gateInput.clientNow,
+        evalValues: { ...values, ...ctx },
       });
       if (refusal) throw new BadRequestException(refusal);
     }
@@ -773,6 +775,15 @@ export class VisibilityCaptureService {
     const fenceFields = (schema.fields ?? []).filter(
       (f) => f.type === 'CAMERA' && f.geoFenceRequired === true,
     );
+    // Which fence photos are EVALUATED. Outlet-master fence tenants (Bajaj): only the fence photos that APPLY to this
+    // outlet — visible under its visibleWhen (incl. the outlet's Sub-Program) and required or actually captured. A
+    // hidden conditional slot (Privilege-only Window 2 at an Elite outlet) or an optional empty slot is no longer read
+    // as an "unverifiable" photo (prod bug 2026-11-19). A required-but-empty slot never gets here — validation already
+    // refused it. Every other tenant (Deoleo): all fence fields, exactly as before. The PATH choice (per-photo vs legacy)
+    // still follows the schema, so a capture whose applicable list is empty stays on the per-photo path (unverifiable).
+    const evaluatedFenceFields = outletMasterGeoEnabled
+      ? applicableCameraFields(schema, { ...values, ...ctx }, (f) => f.geoFenceRequired === true)
+      : fenceFields;
 
     const flags: string[] = [];
     let distanceMeters: number | null;
@@ -801,7 +812,8 @@ export class VisibilityCaptureService {
       let worstDistance: number | null = null; // max distance among fence photos with a fix
       let worstGeo: GpsCapture | null = null; // representative pin = the worst (farthest) fixed photo
 
-      for (const f of fenceFields) {
+      if (evaluatedFenceFields.length === 0) anyUnverifiable = true; // nothing applicable with a photo = "no fix", as today
+      for (const f of evaluatedFenceFields) {
         const g = readMediaValue(values[f.id]).geo ?? null;
         let status = evaluatePhotoFence(g, reference, radius);
         // ACCURACY BUFFER (gated path only): a fix whose OWN reported accuracy is worse than
