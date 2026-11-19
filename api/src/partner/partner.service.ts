@@ -34,9 +34,9 @@ import {
   isPaymentModeAllowed,
   PaymentMode,
 } from '../common/payment-type.helper';
-import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
+import { resolveOutletWalletActivity } from '../common/outlet-wallet-activity.helper';
 import { pickDeliveryDefaults, DeliveryDefaults } from './delivery-defaults.helper';
-import { PRIMARY_OUTLET_ORDER_BY, partnerOutletsWhere, pickPrimaryOutletName } from './partner-display.helper';
+import { pickPrimaryOutletName } from './partner-display.helper';
 import { AppliesToOutletFacets } from '../common/applies-to/applies-to';
 import { kpiAppliesToOutlet, outletPrimaryFallback } from '../sales/outlet-kpi-scope.helper';
 import { resolveNextActiveManager, type DisplayManager } from '../sales/sales-hierarchy.loader';
@@ -222,81 +222,19 @@ export class PartnerService {
     loyaltyEnabled: boolean;
     deliveryDefaults: DeliveryDefaults | null;
   }> {
-    // Partner's outlets — outletCode (payout-entry scoping) + primary-outlet type + name in one query.
-    // NB: CreditPayoutEntry.outletId stores the outlet CODE (not the Outlet PK) — it is a
-    // bare string set from the uploaded "Outlet ID", resolved elsewhere via outletCode
-    // (credits.service confirmBatch). So the credit-payout scope MUST key on outletCode.
-    // Primary-outlet rule shared with the OTP-login reply (partner-display.helper) so the header
-    // name painted at login is the SAME one /partner/me later confirms.
-    const outlets = await this.prisma.outlet.findMany({
-      where: partnerOutletsWhere(clientId, partnerId),
-      orderBy: PRIMARY_OUTLET_ORDER_BY,
-      select: {
-        name: true,
-        outletCode: true,
-        outletTypeId: true,
-        outletType: { select: { code: true } },
-        // Delivery-address pre-fill reads the SAME primary-outlet row (no extra query).
-        addressLine1: true,
-        addressLine2: true,
-        city: true,
-        state: true,
-        pincode: true,
-      },
-    });
-    const outletType = outlets[0]?.outletType?.code ?? null;
+    // The presence signals (outletType / points / payout / loyalty) come from the SHARED
+    // resolveOutletWalletActivity — the same helper the sales outlet ledger uses (GET
+    // /v1/kyc/:id/ledger meta), so the sales view and the partner's own wallet always draw the
+    // same cards. Its outlet query is the partner's outlets, PRIMARY first (rule shared with the
+    // OTP-login reply via partner-display.helper).
+    const { outlets, outletType, hasPointsActivity, hasPayoutActivity, loyaltyEnabled } =
+      await resolveOutletWalletActivity(this.prisma, clientId, partnerId);
     // The ACTIVE outlet's MASTER name (the admin-roster Outlet.name) for the partner-shell header,
     // resolved from the SAME primary-outlet selection as outletType. Null when the partner has no
     // outlet — the FE then falls back to businessName so the header never shows blank.
     const outletName = pickPrimaryOutletName(outlets);
-    const outletCodes = outlets.map((o) => o.outletCode);
     // Redeem-form address pre-fill from the SAME primary-outlet row (outlet address only).
     const deliveryDefaults = pickDeliveryDefaults(outlets[0] ?? null);
-
-    // Per-outlet-type Loyalty (Rewards) gate — resolved via the shared helper (single source
-    // of truth, also used by the rewards-service enforcement). Defaults true when there is no
-    // OutletTypeClientConfig row for the primary outlet's type, or no outlet/type at all.
-    const loyaltyEnabled = await isLoyaltyEnabledForPartner(this.prisma, clientId, partnerId);
-
-    // Wallet reality — the partner's wallet balances + any ledger row.
-    const wallet = await this.prisma.wallet.findFirst({
-      where: { partnerId },
-      select: { id: true, redeemablePoints: true, lifetimeEarned: true },
-    });
-    let hasPointsActivity =
-      !!wallet && (wallet.redeemablePoints > 0 || wallet.lifetimeEarned > 0);
-    if (!hasPointsActivity && wallet) {
-      const ledgerRow = await this.prisma.pointsLedger.findFirst({
-        where: { walletId: wallet.id },
-        select: { id: true },
-      });
-      hasPointsActivity = !!ledgerRow;
-    }
-
-    // Payout reality — a credit payout entry against one of the partner's outlets,
-    // or a payout transaction for the partner. Either presence flips the flag.
-    // The status set MUST match the one surfaced by getPayouts (PENDING/PROCESSING/
-    // PAID) so the payout CARD and the payout LIST can never disagree — otherwise a
-    // partner with only in-flight credit payouts sees the card but an empty list.
-    const [payoutEntry, payoutTxn] = await Promise.all([
-      outletCodes.length
-        ? this.prisma.creditPayoutEntry.findFirst({
-            where: {
-              clientId,
-              outletId: { in: outletCodes },
-              status: { in: ['PENDING', 'PROCESSING', 'PAID'] },
-            },
-            select: { id: true },
-          })
-        : Promise.resolve(null),
-      // Match the LIST rail: a FAILED/REVERSED redemption is hidden from the statement,
-      // so it must not flip the card on either (else card shows, list empty).
-      this.prisma.payoutTransaction.findFirst({
-        where: { partnerId, status: { notIn: ['FAILED', 'REVERSED'] } },
-        select: { id: true },
-      }),
-    ]);
-    const hasPayoutActivity = !!payoutEntry || !!payoutTxn;
 
     return { outletType, outletName, hasPointsActivity, hasPayoutActivity, loyaltyEnabled, deliveryDefaults };
   }

@@ -132,6 +132,8 @@ describe('SalesService', () => {
           teamSize: 3,
           // sub1 has no downline of its own → its branch is just itself.
           submitterUserIds: ['u-sub1'],
+          // Filing-time branch keys (K1 follow-up): a direct report → just its own SalesUser id.
+          branchKeys: ['sub1'],
           joinedAt: '2024-01-01T00:00:00.000Z',
           // No outlets/targets → rollup is all-zero (but the FIELDS are present).
           outlets: 0,
@@ -3155,6 +3157,9 @@ describe('SalesService', () => {
       const so2 = res.members.find((m: { id: string }) => m.id === 'so2')!;
       expect([...isr.submitterUserIds].sort()).toEqual(['u-isr', 'u-so']); // the removed SO's own KYCs ride with isr
       expect(so2.submitterUserIds).not.toContain('u-so'); // a direct (non-promoted) member does not
+      // K1 follow-up: filing-time branch keys — own SalesUser id, + the removed SO for the promoted member.
+      expect(isr.branchKeys).toEqual(['isr', 'so']);
+      expect(so2.branchKeys).toEqual(['so2']);
       // K5: the direct reports are loaded in a deterministic order (employeeCode), like the visibility filter.
       expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].include.subordinates.orderBy).toEqual({ employeeCode: 'asc' });
     });

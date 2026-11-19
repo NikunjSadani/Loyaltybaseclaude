@@ -33,11 +33,8 @@ vi.mock('@/lib/wallet-statement/statement-pdf', () => ({
 
 import OutletLedgerPage from '../page';
 
-const META = { name: 'Verma Traders', outletCode: 'OUT-111', mobile: '98', balance: 250, lifetime: 300, redeemed: 50 };
-const LEDGER_TXS = [
-  { id: 't2', date: '2026-05-08', description: 'Redeemed', type: 'redeem', points: -50, balance: 250, fieldName: null },
-  { id: 't1', date: '2026-04-05', description: 'Q1 push', type: 'credit', points: 300, balance: 300, ref: 'r1', fieldName: 'Monthly Scheme' },
-];
+const META = { name: 'Verma Traders', outletCode: 'OUT-111', mobile: '98', balance: 250, lifetime: 300, redeemed: 50,
+  outletType: 'SSS', hasPointsActivity: true, hasPayoutActivity: true, loyaltyEnabled: true };
 const PAYOUTS = [
   { id: 'p1', period: '2026-05', kpiLabel: 'Visibility', achievedPct: 100, payoutAmountPaise: 500000,
     uploadedAt: '2026-05-02T00:00:00.000Z', utr: 'UTR9', paidAt: '2026-05-10T00:00:00.000Z', status: 'PAID' },
@@ -52,14 +49,15 @@ const STATEMENT = {
   ],
 };
 
-function stub(txs: unknown[] = LEDGER_TXS, payouts: unknown[] = PAYOUTS) {
+// The on-screen ledger carries the SAME statement rows (GET /api/kyc/k1/ledger → data.statement).
+function stub(txs: unknown[] = STATEMENT.rows, payouts: unknown[] = PAYOUTS) {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
     const u = String(url);
     if (u.startsWith('/api/kyc/k1/ledger/statement'))
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: STATEMENT }) });
     return Promise.resolve({
       ok: true,
-      json: () => Promise.resolve({ success: true, data: { meta: META, transactions: txs, payouts } }),
+      json: () => Promise.resolve({ success: true, data: { meta: META, statement: { rows: txs }, payouts } }),
     });
   }));
 }
@@ -118,6 +116,26 @@ describe('SLD — sales ledger statement download', () => {
     await pick('PDF');
     expect(statementToPdfBlob).toHaveBeenCalledTimes(1);
     expect(downloadBlob.mock.calls[0][1]).toBe('wallet-statement-OUT-111-2026-04_2026-05.pdf');
+  });
+
+  it('SLD5: the document names the outlet from the statement response (Outlet.name), exactly like the partner download', async () => {
+    stub();
+    const base = vi.mocked(global.fetch).getMockImplementation()!;
+    vi.mocked(global.fetch).mockImplementation((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).startsWith('/api/kyc/k1/ledger/statement')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: { ...STATEMENT, outletName: 'Verma Outlet (master)' } }),
+        } as Response);
+      }
+      return base(url, init);
+    });
+    await renderLedger();
+    await pick('Excel (.xlsx)');
+    const doc = statementToXlsxBlob.mock.calls[0][0];
+    // Not the page header's businessName ("Verma Traders"): the statement's own Outlet.name + code pair.
+    expect(doc.outletName).toBe('Verma Outlet (master)');
+    expect(doc.outletCode).toBe('OUT-111');
   });
 
   it('SLD4: the Download button is disabled when the selected period has no rows', async () => {
