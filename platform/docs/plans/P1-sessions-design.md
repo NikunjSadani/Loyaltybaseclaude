@@ -157,3 +157,29 @@ The mechanism (`revokeAllSessionsForUser`) is ready; P2/P3 just call it when the
   Concurrent proxy hits for the same refresh cookie share ONE in-flight backend refresh per instance
   (map keyed by SHA-256 of the token, entry dropped on settle; token never logged). Cookies unchanged
   (host-only, lax, same max-ages); `/api/*` still 401s without a server refresh (SessionExpiryGuard).
+
+#### 2026-11-19 — audit fix round (same branch, owner-approved platform-wide)
+- **S1 — handoff only in grace (REVERSES the 2026-08-14 "lenient" decision):** a revoked refresh token
+  is handed its live successor ONLY if it was revoked ≤5s ago (`ROTATION_GRACE_MS`) or this request's
+  own claim lost to a concurrent sibling. Outside grace any revoked token = reuse → stamp, revoke all,
+  `SECURITY_EVENT`. **Trade-off:** a client whose refresh RESPONSE was lost still holds the old token;
+  its next refresh after 5s is indistinguishable from theft → that user is logged out everywhere.
+- **S2:** the refresh claim+mint tx first takes `SELECT … FROM "users" … FOR SHARE` and re-checks
+  `sessionsInvalidBefore`. Stamp+sweep inside ONE tx (admin-outlets deactivation, KYC phone change) is
+  now safe in both lock orders (stamp first → refresh waits then refuses; refresh first → stamper waits,
+  its sweep sees the successor). Lock order user → session everywhere (no deadlock).
+- **S3:** a gate error consumes the predecessor only for 401/403; transient errors leave it live.
+- **S4:** exit-tenant revokes the WHOLE assumed lineage by walking `rotatedFromId` hop by hop (complete
+  even against an in-flight refresh, because claim+mint hold the predecessor's row lock).
+- **S5:** no migration — `user_sessions_rotatedFromId_idx` already exists (migration 20260812120000).
+- **B1:** the proxy marks the forwarded request `x-session-refreshed: 1` (stripped from client input);
+  `refreshSession` then reuses the proxy-rotated pair instead of rotating again.
+- **B2:** moot under S1 — the handed-back access token was minted in the same tx as the revoke (≤5s old).
+- **B3:** `refreshTokensViaBackend` returns `ok | dead | transient`; the proxy retries a document refresh
+  only on `transient`; non-document `dead` → 401, `transient` → 503. `refreshSession` returns
+  `transient:true` and `SessionExpiryGuard` does not bounce to login on it. Per-attempt timeout 12s → 4s
+  so a retried, already-committed refresh still lands inside the 5s grace.
+- **B4:** no `Sec-Fetch-Dest` → still a document, but static-asset paths (by extension) skip the retry.
+  `public/guides/*` stays behind auth (admin screenshots), so no matcher change.
+- **B5:** `api/test/auth-refresh-race.e2e-spec.ts` (WP7 disposable-Postgres harness). Server-mode
+  (real two-connection) scenarios need `WRE_PG_ADMIN_URL` + a local Postgres — NOT run yet.

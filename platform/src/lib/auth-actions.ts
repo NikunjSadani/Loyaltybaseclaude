@@ -14,7 +14,7 @@
  * can restore it without a re-login.
  */
 
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { jwtVerify } from 'jose';
 import { resolveClientConfig } from '@/lib/platform/tenant-resolution';
 import { refreshIfStale } from '@/lib/platform/tenant-routing-cache';
@@ -173,22 +173,33 @@ export async function exitTenantAction(): Promise<{ success: boolean }> {
  * other tabs on a session that is actually still alive. A genuinely dead session simply keeps
  * 401ing and SessionExpiryGuard bounces to login; logoutAction still clears cookies on real logout.
  */
-export async function refreshSession(): Promise<{ ok: boolean }> {
+export async function refreshSession(): Promise<{ ok: boolean; transient?: boolean }> {
+  // B1 — no DOUBLE rotation. This action is a POST through the proxy; when the access cookie had
+  // expired, the proxy already rotated the pair in THIS request (its Set-Cookie rides this
+  // response and Next merges it into cookies()). It marks the forwarded request with
+  // x-session-refreshed (an internal header the proxy strips from client input), so reuse that
+  // pair instead of exchanging the just-issued refresh token again.
+  const requestHeaders = await headers();
+  if (requestHeaders.get(SESSION_REFRESHED_HEADER) === '1') return { ok: true };
+
   const cookieStore = await cookies();
   const refreshToken = cookieStore.get('refresh_token')?.value;
   if (!refreshToken) return { ok: false };
 
-  const refreshed = await refreshTokensViaBackend(refreshToken);
-  if (!refreshed) {
-    // Do NOT delete the refresh cookie here: a contended/just-rotated refresh (multi-tab) can
-    // fail transiently while the session is still alive. Leave the cookies intact — a truly dead
-    // session keeps 401ing and SessionExpiryGuard bounces to login.
-    return { ok: false };
+  const outcome = await refreshTokensViaBackend(refreshToken);
+  if (outcome.kind !== 'ok') {
+    // Do NOT delete the refresh cookie here: on a transient failure the session is still alive.
+    // Leave the cookies intact — a truly dead session keeps 401ing and SessionExpiryGuard bounces
+    // to login. `transient` lets the guard avoid a login bounce on a blip.
+    return outcome.kind === 'transient' ? { ok: false, transient: true } : { ok: false };
   }
-  cookieStore.set('token', refreshed.accessToken, cookieOptions(accessCookieMaxAge(refreshed.accessToken)));
-  if (refreshed.refreshToken) cookieStore.set('refresh_token', refreshed.refreshToken, cookieOptions(REFRESH_MAX_AGE));
+  cookieStore.set('token', outcome.accessToken, cookieOptions(accessCookieMaxAge(outcome.accessToken)));
+  if (outcome.refreshToken) cookieStore.set('refresh_token', outcome.refreshToken, cookieOptions(REFRESH_MAX_AGE));
   return { ok: true };
 }
+
+/** Mirror of proxy.ts SESSION_REFRESHED_HEADER (proxy.ts can't be imported into a server action). */
+const SESSION_REFRESHED_HEADER = 'x-session-refreshed';
 
 /**
  * Server-truth source for the operator banner: read the httpOnly token cookie, verify

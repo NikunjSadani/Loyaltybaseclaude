@@ -29,17 +29,17 @@ describe('refreshTokensViaBackend — 429 handling', () => {
     vi.stubGlobal('fetch', fetchMock);
     const p = refreshTokensViaBackend('r1');
     await vi.runAllTimersAsync();
-    await expect(p).resolves.toEqual({ accessToken: 'a2', refreshToken: 'r2' });
+    await expect(p).resolves.toEqual({ kind: 'ok', accessToken: 'a2', refreshToken: 'r2' });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     for (const call of fetchMock.mock.calls) expect(JSON.parse(call[1].body)).toEqual({ refreshToken: 'r1' });
   });
 
-  it('persistent 429 → bounded retries (3 attempts total), then null (cookies left intact by callers)', async () => {
+  it('persistent 429 → bounded retries (3 attempts total), then a TRANSIENT outcome (cookies left intact by callers)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(tooMany('1'));
     vi.stubGlobal('fetch', fetchMock);
     const p = refreshTokensViaBackend('r1');
     await vi.runAllTimersAsync();
-    await expect(p).resolves.toBeNull();
+    await expect(p).resolves.toEqual({ kind: 'transient', reason: 'throttled' });
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -48,7 +48,7 @@ describe('refreshTokensViaBackend — 429 handling', () => {
     vi.stubGlobal('fetch', fetchMock);
     const p = refreshTokensViaBackend('r1');
     await vi.advanceTimersByTimeAsync(2_000); // cap
-    await expect(p).resolves.toEqual({ accessToken: 'a2', refreshToken: 'r2' });
+    await expect(p).resolves.toEqual({ kind: 'ok', accessToken: 'a2', refreshToken: 'r2' });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -58,7 +58,7 @@ describe('refreshTokensViaBackend — 429 handling', () => {
     vi.stubGlobal('fetch', fetchMock);
     const p = refreshTokensViaBackend('r1');
     await vi.runAllTimersAsync();
-    await expect(p).resolves.toEqual({ accessToken: 'a2', refreshToken: 'r2' });
+    await expect(p).resolves.toEqual({ kind: 'ok', accessToken: 'a2', refreshToken: 'r2' });
     expect(cancels).toHaveLength(2);
     for (const c of cancels) expect(c).toHaveBeenCalledTimes(1);
   });
@@ -69,7 +69,7 @@ describe('refreshTokensViaBackend — 429 handling', () => {
     vi.stubGlobal('fetch', fetchMock);
     const p = refreshTokensViaBackend('r1');
     await vi.runAllTimersAsync();
-    await expect(p).resolves.toEqual({ accessToken: 'a2', refreshToken: 'r2' });
+    await expect(p).resolves.toEqual({ kind: 'ok', accessToken: 'a2', refreshToken: 'r2' });
   });
 
   it('a non-429 failure (401 dead session) is NOT retried', async () => {
@@ -77,14 +77,53 @@ describe('refreshTokensViaBackend — 429 handling', () => {
     vi.stubGlobal('fetch', fetchMock);
     const p = refreshTokensViaBackend('r1');
     await vi.runAllTimersAsync();
-    await expect(p).resolves.toBeNull();
+    await expect(p).resolves.toEqual({ kind: 'dead', status: 401 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('success on the first try makes exactly one call', async () => {
     const fetchMock = vi.fn().mockResolvedValue(ok);
     vi.stubGlobal('fetch', fetchMock);
-    await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ accessToken: 'a2', refreshToken: 'r2' });
+    await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ kind: 'ok', accessToken: 'a2', refreshToken: 'r2' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// B3 — callers retry ONLY what is retryable, so the outcome must say which it is.
+describe('refreshTokensViaBackend — typed outcome (dead vs transient)', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+  const status = (s: number) => ({ ok: s < 400, status: s, headers: new Headers(), body: { cancel: vi.fn().mockResolvedValue(undefined) }, json: () => Promise.resolve({}) });
+
+  it.each([401, 403, 400, 404])('%i → dead (definite refusal, never retried)', async (s) => {
+    const fetchMock = vi.fn().mockResolvedValue(status(s));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ kind: 'dead', status: s });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([500, 502, 503, 504])('%i → transient (server)', async (s) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(status(s)));
+    await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ kind: 'transient', reason: 'server' });
+  });
+
+  it('a network error → transient (network)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+    await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ kind: 'transient', reason: 'network' });
+  });
+
+  it('a timeout (AbortSignal.timeout) → transient (timeout)', async () => {
+    const err = Object.assign(new Error('timed out'), { name: 'TimeoutError' });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(err));
+    await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ kind: 'transient', reason: 'timeout' });
+  });
+
+  it('a 2xx without an access token → transient (malformed), never "ok"', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve({ data: {} }) }));
+    await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ kind: 'transient', reason: 'malformed' });
+  });
+
+  it('the per-attempt timeout stays BELOW the backend 5s rotation grace (retry of a committed refresh still converges)', async () => {
+    const { REFRESH_TIMEOUT_MS } = await import('@/lib/auth-refresh');
+    expect(REFRESH_TIMEOUT_MS + 200).toBeLessThan(5_000);
   });
 });

@@ -25,7 +25,12 @@ const mockPrisma = {
   // defaults to undefined so the guard is a no-op unless a test opts in.
   user:    { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
   otpCode: { create: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
-  userSession: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+  userSession: {
+    create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(),
+    // findUnique: refreshToken's lost-claim re-read of the predecessor's REAL revokedAt.
+    // findMany: exitTenant's lineage walk (children of each hop).
+    findUnique: jest.fn(), findMany: jest.fn(),
+  },
   client:  { findFirst: jest.fn() },
   auditLog: { create: jest.fn() },
   // Deactivated-outlet login gate: default to "no partner" so non-partner logins
@@ -40,8 +45,12 @@ const mockPrisma = {
 };
 // refreshToken runs its claim + successor mint in ONE interactive transaction; the unit
 // mock runs the callback against this same mock (the race semantics live in
-// auth.service.refresh-race.spec.ts, against a row-lock fake DB).
-mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) => fn(mockPrisma));
+// auth.service.refresh-race.spec.ts, against a row-lock fake DB). Inside the tx the user row
+// is read FOR SHARE via $queryRaw — default: the user exists with no logout-all stamp.
+const txUserStamp = jest.fn();
+mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
+  fn({ ...mockPrisma, $queryRaw: txUserStamp }),
+);
 
 const gifsyOp = { sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any;
 
@@ -112,6 +121,8 @@ describe('AuthService', () => {
 
     service = module.get<AuthService>(AuthService);
     jest.clearAllMocks();
+    txUserStamp.mockResolvedValue([{ sessionsInvalidBefore: null }]);
+    mockPrisma.userSession.findMany.mockResolvedValue([]);
   });
 
   it('should be defined', () => {
@@ -996,17 +1007,24 @@ describe('AuthService', () => {
       expect(res.refreshToken).toBeTruthy();
     });
 
-    it('REVOKES the assumed session (and its rotated successors) so the assumed refresh cannot self-renew', async () => {
+    it('REVOKES the assumed session AND its WHOLE rotation lineage (multi-hop, S4) so it cannot self-renew', async () => {
       mockPrisma.user.findFirst.mockResolvedValue({ id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any);
+      // Lineage sid_A → sid_B → sid_C (two hops: a prior tab rotated twice), then no more children.
+      mockPrisma.userSession.findMany
+        .mockResolvedValueOnce([{ id: 'sid_B' }])
+        .mockResolvedValueOnce([{ id: 'sid_C' }])
+        .mockResolvedValueOnce([]);
 
       await service.exitTenant(assumedOp);
 
-      const call = (mockPrisma.userSession.updateMany as jest.Mock).mock.calls.at(-1)![0];
-      expect(call.where).toMatchObject({ userId: 'op1', revokedAt: null });
-      expect(call.where.OR).toEqual(
-        expect.arrayContaining([{ id: 'sid_A' }, { rotatedFromId: 'sid_A' }]),
-      );
-      expect(call.data).toEqual({ revokedAt: expect.any(Date) });
+      const revokes = (mockPrisma.userSession.updateMany as jest.Mock).mock.calls.map((c) => c[0]);
+      expect(revokes.map((r) => r.where.id.in)).toEqual([['sid_A'], ['sid_B'], ['sid_C']]);
+      for (const r of revokes) {
+        expect(r.where).toMatchObject({ userId: 'op1', revokedAt: null });
+        expect(r.data).toEqual({ revokedAt: expect.any(Date) });
+      }
+      // Each hop's children are looked up scoped to the caller's own userId.
+      expect(mockPrisma.userSession.findMany.mock.calls[0][0].where).toEqual({ userId: 'op1', rotatedFromId: { in: ['sid_A'] } });
     });
 
     it('writes an EXIT_TENANT audit log attributed to the real operator', async () => {
@@ -1152,6 +1170,43 @@ describe('AuthService', () => {
 
       expect(res).toEqual({ accessToken: 'succ.access', refreshToken: 'succ-refresh' });
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+      // A lost claim is a PROVEN concurrent sibling (the row was live when this request read it)
+      // → never a lineage kill, however long the winner's transaction took.
+      expect(mockPrisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('S2: a logout-all stamp visible INSIDE the claim transaction (user row FOR SHARE) → 401, no claim, no mint', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ ...liveSession, createdAt: new Date(Date.now() - 60_000) });
+      txUserStamp.mockResolvedValueOnce([{ sessionsInvalidBefore: new Date() }]);
+
+      await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+      // The in-tx read is a FOR SHARE lock on the user row.
+      const sql = (txUserStamp.mock.calls[0][0] as TemplateStringsArray).join('?');
+      expect(sql).toMatch(/FROM "users" WHERE "id" = \? FOR SHARE/);
+    });
+
+    it('S3: a TRANSIENT gate failure (DB error) does NOT consume the predecessor → a retry can still succeed', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue(liveSession);
+      mockPrisma.channelPartner.findFirst.mockRejectedValueOnce(new Error('connection timeout'));
+
+      await expect(service.refreshToken('rt')).rejects.toThrow('connection timeout');
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled(); // predecessor left LIVE
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+    });
+
+    it('S3: a DELIBERATE gate refusal (deactivated partner → 403) still consumes the predecessor', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue(liveSession);
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({ id: 'cp1', isActive: false });
+      mockPrisma.outlet.count.mockResolvedValueOnce(0);
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+
+      await expect(service.refreshToken('rt')).rejects.toThrow(ForbiddenException);
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { refreshToken: 'rt', revokedAt: null }, data: { revokedAt: expect.any(Date) },
+      });
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
     });
 
     it('reuse: an already-revoked token replayed AFTER the 5s grace with NO live successor → 401', async () => {
@@ -1162,16 +1217,14 @@ describe('AuthService', () => {
         expiresAt: new Date(Date.now() + 3600_000),
         user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
-      // Predecessor read → revoked; successor lookup → none (successor already rotated away).
-      mockPrisma.userSession.findFirst
-        .mockResolvedValueOnce(staleRevoked)
-        .mockResolvedValueOnce(null);
+      // Predecessor read → revoked outside grace → reuse (the successor is never looked up).
+      mockPrisma.userSession.findFirst.mockResolvedValueOnce(staleRevoked);
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 0 });
       mockPrisma.user.update.mockResolvedValue({});
 
       await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
-      // Predecessor read + successor lookup = 2 findFirsts; never mints a new session.
-      expect(mockPrisma.userSession.findFirst).toHaveBeenCalledTimes(2);
+      // Only the predecessor read; never mints a new session.
+      expect(mockPrisma.userSession.findFirst).toHaveBeenCalledTimes(1);
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
     });
 
@@ -1409,31 +1462,54 @@ describe('AuthService', () => {
       (mockPrisma as any).outlet = { count: jest.fn() };
     });
 
-    it('replay >5s grace WITH a live successor → hands back the successor tokens, NO lineage kill (legit collision)', async () => {
-      // Under the 60m access token, a page-nav proxy refresh and an in-flight XHR refresh can
-      // collide MORE than 5s apart. The 2nd (revoked-predecessor) replay must converge on the
-      // live successor, NOT nuke the whole active user.
-      const revokedPredecessor = {
+    it('S1: replay of a rotated token DAYS later while its successor is still LIVE → reuse detection, NOT a handoff', async () => {
+      // The old lenient path handed a live successor to ANY replay of a revoked predecessor,
+      // regardless of age — so a stolen, already-rotated token obtained the live session with
+      // no time limit. Outside the grace window this is now treated as reuse.
+      const rotatedLongAgo = {
         id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt',
-        revokedAt: new Date(Date.now() - 7_000), // 7s ago — OUTSIDE the 5s grace
+        revokedAt: new Date(Date.now() - 3 * 24 * 3600_000), // rotated 3 days ago
+        createdAt: new Date(Date.now() - 4 * 24 * 3600_000),
+        expiresAt: new Date(Date.now() + 3600_000),
+        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+      };
+      mockPrisma.userSession.findFirst.mockResolvedValueOnce(rotatedLongAgo);
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.user.update.mockResolvedValue({});
+
+      await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
+
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+      // The live successor is NOT looked up / handed back…
+      expect(mockPrisma.userSession.findFirst).toHaveBeenCalledTimes(1);
+      // …and the lineage is killed (stamp + revoke all live sessions).
+      expect(mockPrisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u1' }, data: { sessionsInvalidBefore: expect.any(Date) },
+      });
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u1', revokedAt: null }, data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('S1: replay WITHIN the grace window with a live successor → handoff of the successor pair (no kill)', async () => {
+      const justRotated = {
+        id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt',
+        revokedAt: new Date(Date.now() - 1_000), // 1s ago — inside the 5s grace
         createdAt: new Date(Date.now() - 3600_000),
         expiresAt: new Date(Date.now() + 3600_000),
         user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       const successor = { id: 'sess_y', token: 'succ.access', refreshToken: 'succ-refresh', revokedAt: null };
       mockPrisma.userSession.findFirst
-        .mockResolvedValueOnce(revokedPredecessor) // predecessor read
-        .mockResolvedValueOnce(successor);         // live successor exists
+        .mockResolvedValueOnce(justRotated)
+        .mockResolvedValueOnce(successor);
 
       const res = await service.refreshToken('rt');
 
-      // Converges on the successor's STORED tokens (no 401, no second mint).
       expect(res).toEqual({ accessToken: 'succ.access', refreshToken: 'succ-refresh' });
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
-      // Crucially: NO lineage kill — an active user is not logged out everywhere.
       expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
       expect(mockPrisma.user.update).not.toHaveBeenCalled();
-      // The successor lookup requires revokedAt:null (a swept lineage can't be resurrected).
       expect(mockPrisma.userSession.findFirst.mock.calls[1][0].where).toEqual({
         rotatedFromId: 'sess_x', revokedAt: null,
       });
@@ -1448,16 +1524,14 @@ describe('AuthService', () => {
         user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       // Predecessor revoked, NO live successor (already rotated away) → genuine theft signal.
-      mockPrisma.userSession.findFirst
-        .mockResolvedValueOnce(staleRevoked)
-        .mockResolvedValueOnce(null);
+      mockPrisma.userSession.findFirst.mockResolvedValueOnce(staleRevoked);
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
       mockPrisma.user.update.mockResolvedValue({});
 
       await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
 
-      // Predecessor read + successor lookup = 2 findFirsts; never mints.
-      expect(mockPrisma.userSession.findFirst).toHaveBeenCalledTimes(2);
+      // Outside grace: only the predecessor read (no successor lookup); never mints.
+      expect(mockPrisma.userSession.findFirst).toHaveBeenCalledTimes(1);
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
       // STAMP-BEFORE-REVOKE: the user stamp is written BEFORE the session revoke.
       const stampOrder = mockPrisma.user.update.mock.invocationCallOrder[0];
@@ -1486,9 +1560,7 @@ describe('AuthService', () => {
         user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       // Predecessor read → expired; successor lookup (a login session has no rotation) → none.
-      mockPrisma.userSession.findFirst
-        .mockResolvedValueOnce(expired)
-        .mockResolvedValueOnce(null);
+      mockPrisma.userSession.findFirst.mockResolvedValueOnce(expired);
 
       await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
       // revokedAt === null → not reuse → the user-wide revoke + stamp must NOT run.
@@ -1516,9 +1588,7 @@ describe('AuthService', () => {
         expiresAt: new Date(Date.now() + 3600_000),
         user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
-      mockPrisma.userSession.findFirst
-        .mockResolvedValueOnce(staleRevoked)
-        .mockResolvedValueOnce(null);
+      mockPrisma.userSession.findFirst.mockResolvedValueOnce(staleRevoked);
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
       mockPrisma.user.update.mockResolvedValue({});
 
@@ -1546,9 +1616,7 @@ describe('AuthService', () => {
         expiresAt: new Date(Date.now() + 3600_000),
         user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
-      mockPrisma.userSession.findFirst
-        .mockResolvedValueOnce(staleRevoked)
-        .mockResolvedValueOnce(null);
+      mockPrisma.userSession.findFirst.mockResolvedValueOnce(staleRevoked);
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
       mockPrisma.user.update.mockResolvedValue({});
       // Audit write blows up — the caller must still get the 401, not a 500.
@@ -1557,7 +1625,7 @@ describe('AuthService', () => {
       await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
     });
 
-    it('legit collision (>5s grace WITH a live successor) writes NO SECURITY_EVENT row', async () => {
+    it('S1: a replay >5s past grace WITH a live successor IS reuse now → ONE SECURITY_EVENT row (no handoff)', async () => {
       const revokedPredecessor = {
         id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt',
         revokedAt: new Date(Date.now() - 7_000),
@@ -1565,13 +1633,12 @@ describe('AuthService', () => {
         expiresAt: new Date(Date.now() + 3600_000),
         user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
-      const successor = { id: 'sess_y', token: 'succ.access', refreshToken: 'succ-refresh', revokedAt: null };
-      mockPrisma.userSession.findFirst
-        .mockResolvedValueOnce(revokedPredecessor)
-        .mockResolvedValueOnce(successor);
+      mockPrisma.userSession.findFirst.mockResolvedValueOnce(revokedPredecessor);
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.user.update.mockResolvedValue({});
 
-      await service.refreshToken('rt');
-      expect(securityEventCalls()).toHaveLength(0);
+      await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
+      expect(securityEventCalls()).toHaveLength(1);
     });
 
     it('in-grace loser (revoked < 5s ago, no live successor) writes NO SECURITY_EVENT row', async () => {

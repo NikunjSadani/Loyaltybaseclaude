@@ -39,38 +39,66 @@ class FakeDb {
   gateLatencyMs = 15;
   partner: Row | null = null;
   activeOutlets = 1;
+  /** Test hook: how long refresh holds the user-row SHARE lock before claiming (0 = no pause). */
+  shareLockHoldMs = 0;
+  shareLocksTaken = 0;
 
-  private locks = new Map<string, { owner: symbol; released: Promise<void>; release: () => void }>();
+  // ── Row locks: S (FOR SHARE) is shared; X (UPDATE / FOR UPDATE) is exclusive. Held until the
+  // owning transaction ends (autocommit statements release immediately). ──
+  private locks = new Map<string, { mode: 'S' | 'X'; owners: Set<symbol> }>();
+  private changed: Promise<void> = Promise.resolve();
+  private signal: () => void = () => undefined;
   private txSeq = 0;
 
-  private async lockRow(id: string, owner: symbol) {
+  constructor() {
+    this.resetSignal();
+  }
+  private resetSignal() {
+    this.changed = new Promise<void>((r) => (this.signal = r));
+  }
+
+  private async lock(key: string, mode: 'S' | 'X', owner: symbol) {
     for (;;) {
-      const l = this.locks.get(id);
-      if (!l || l.owner === owner) break;
-      await l.released;
-    }
-    if (!this.locks.has(id)) {
-      let release!: () => void;
-      const released = new Promise<void>((r) => (release = r));
-      this.locks.set(id, { owner, released, release });
+      const l = this.locks.get(key);
+      const onlyMine = !!l && l.owners.size === 1 && l.owners.has(owner);
+      if (!l) {
+        this.locks.set(key, { mode, owners: new Set([owner]) });
+        return;
+      }
+      if (onlyMine) {
+        if (mode === 'X') l.mode = 'X'; // upgrade
+        return;
+      }
+      if (mode === 'S' && l.mode === 'S') {
+        l.owners.add(owner);
+        return;
+      }
+      if (l.owners.has(owner) && mode === 'S') return; // already hold a stronger/equal lock
+      await this.changed; // wait for any release, then re-check
     }
   }
   private unlockAll(owner: symbol) {
-    for (const [id, l] of [...this.locks]) {
-      if (l.owner === owner) {
-        this.locks.delete(id);
-        l.release();
+    let any = false;
+    for (const [key, l] of [...this.locks]) {
+      if (l.owners.delete(owner)) {
+        any = true;
+        if (l.owners.size === 0) this.locks.delete(key);
       }
+    }
+    if (any) {
+      const fire = this.signal;
+      this.resetSignal();
+      fire();
     }
   }
 
-  /** UPDATE … WHERE: lock each candidate (blocking), re-check WHERE on the committed row, write. */
-  private async updateMany(where: Row, data: Row, owner: symbol, pending: Array<() => void> | null) {
+  /** UPDATE user_sessions … WHERE: lock each candidate (X, blocking), re-check WHERE on the committed row. */
+  private async updateSessions(where: Row, data: Row, owner: symbol, pending: Array<() => void> | null) {
     await tick();
     const candidates = [...this.sessions.values()].filter((r) => matches(r, where)).map((r) => r.id);
     let count = 0;
     for (const id of candidates) {
-      await this.lockRow(id, owner);
+      await this.lock(`session:${id}`, 'X', owner);
       const row = this.sessions.get(id)!;
       if (!matches(row, where)) continue; // EvalPlanQual re-check after the lock wait
       count++;
@@ -80,6 +108,19 @@ class FakeDb {
     }
     if (!pending) this.unlockAll(owner); // autocommit
     return { count };
+  }
+
+  /** UPDATE users … : X lock on each matching user row. */
+  private async updateUsers(ids: string[], data: Row, owner: symbol, pending: Array<() => void> | null) {
+    await tick();
+    for (const id of ids) {
+      await this.lock(`user:${id}`, 'X', owner);
+      const apply = () => Object.assign(this.users.get(id)!, data);
+      if (pending) pending.push(apply);
+      else apply();
+    }
+    if (!pending) this.unlockAll(owner);
+    return { count: ids.length };
   }
 
   private sessionApi(owner: symbol, pending: Array<() => void> | null) {
@@ -92,7 +133,12 @@ class FakeDb {
         if (include?.user) copy.user = { ...this.users.get(row.userId) };
         return copy;
       },
-      updateMany: ({ where, data }: { where: Row; data: Row }) => this.updateMany(where, data, owner, pending),
+      findUnique: async ({ where }: { where: Row }) => {
+        await tick();
+        const row = this.sessions.get(where.id);
+        return row ? { ...row } : null;
+      },
+      updateMany: ({ where, data }: { where: Row; data: Row }) => this.updateSessions(where, data, owner, pending),
       create: async ({ data }: { data: Row }) => {
         await tick();
         const row: Row = { revokedAt: null, rotatedFromId: null, createdAt: new Date(), ...data };
@@ -107,26 +153,28 @@ class FakeDb {
     };
   }
 
+  private userApi(owner: () => symbol, pending: Array<() => void> | null) {
+    return {
+      findUnique: async ({ where }: any) => {
+        await tick();
+        const u = this.users.get(where.id);
+        return u ? { sessionsInvalidBefore: u.sessionsInvalidBefore ?? null } : null;
+      },
+      update: ({ where, data }: any) => this.updateUsers([where.id], data, owner(), pending),
+      updateMany: ({ where, data }: any) => this.updateUsers(where.id.in as string[], data, owner(), pending),
+    };
+  }
+
   client(): any {
     const autoOwner = () => Symbol('autocommit');
     return {
       userSession: {
         findFirst: (a: any) => this.sessionApi(autoOwner(), null).findFirst(a),
+        findUnique: (a: any) => this.sessionApi(autoOwner(), null).findUnique(a),
         updateMany: (a: any) => this.sessionApi(autoOwner(), null).updateMany(a),
         create: (a: any) => this.sessionApi(autoOwner(), null).create(a),
       },
-      user: {
-        findUnique: async ({ where }: any) => {
-          await tick();
-          const u = this.users.get(where.id);
-          return u ? { sessionsInvalidBefore: u.sessionsInvalidBefore ?? null } : null;
-        },
-        update: async ({ where, data }: any) => {
-          await tick();
-          Object.assign(this.users.get(where.id)!, data);
-          return this.users.get(where.id);
-        },
-      },
+      user: this.userApi(autoOwner, null),
       channelPartner: {
         findFirst: async () => {
           await sleep(this.gateLatencyMs);
@@ -152,6 +200,19 @@ class FakeDb {
         const pending: Array<() => void> = [];
         const tx = {
           userSession: this.sessionApi(owner, pending),
+          user: this.userApi(() => owner, pending),
+          // The only raw query refreshToken issues in its tx:
+          //   SELECT "sessionsInvalidBefore" FROM "users" WHERE "id" = $1 FOR SHARE
+          $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+            if (!/FOR SHARE/.test(strings.join('?'))) throw new Error('unexpected raw query');
+            const id = values[0] as string;
+            await tick();
+            await this.lock(`user:${id}`, 'S', owner);
+            this.shareLocksTaken++;
+            if (this.shareLockHoldMs) await sleep(this.shareLockHoldMs); // test hook: widen the window
+            const u = this.users.get(id);
+            return u ? [{ sessionsInvalidBefore: u.sessionsInvalidBefore ?? null }] : [];
+          },
         };
         try {
           const result = await fn(tx);
@@ -162,6 +223,13 @@ class FakeDb {
         }
       },
     };
+  }
+
+  /** Is any session of this user still live (unrevoked, unexpired)? */
+  liveSessions(userId: string) {
+    return [...this.sessions.values()].filter(
+      (r) => r.userId === userId && r.revokedAt === null && r.expiresAt > new Date(),
+    );
   }
 }
 
@@ -315,5 +383,77 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     expect(reasons.every((e) => e instanceof ForbiddenException)).toBe(true);
     expect(db.createCount).toBe(0);
     expect(db.sessions.get('s0')!.revokedAt).toBeInstanceOf(Date); // the session is still consumed
+  });
+
+  // ── S1: no successor handoff outside the grace window ─────────────────────────────────────
+  it('S1: a stolen rotated token replayed DAYS later while its successor is LIVE → reuse kill, attacker gets nothing', async () => {
+    const db = new FakeDb();
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    const DAY = 24 * 60 * 60_000;
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0', createdAt: new Date(Date.now() - 4 * DAY), revokedAt: new Date(Date.now() - 3 * DAY) });
+    seedSession(db, { id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', rotatedFromId: 's0', createdAt: new Date(Date.now() - 3 * DAY) });
+    const { svc } = buildService(db);
+
+    await expect(svc.refreshToken('R0')).rejects.toBeInstanceOf(UnauthorizedException);
+
+    expect(db.liveSessions('u1')).toHaveLength(0); // the live successor s1 is killed, not handed out
+    expect(db.users.get('u1')!.sessionsInvalidBefore).toBeInstanceOf(Date);
+    expect(db.audit.filter((a) => a.metadata?.event === 'refresh_token_reuse')).toHaveLength(1);
+  });
+
+  it('B2 trade-off: refresh response LOST, client returns 70 min later with the old token → forced re-login (indistinguishable from theft)', async () => {
+    const db = new FakeDb();
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    // R0 was rotated to R1 70 minutes ago; the browser never received R1 (lost response).
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0', createdAt: new Date(Date.now() - 2 * 60 * 60_000), revokedAt: new Date(Date.now() - 70 * 60_000) });
+    seedSession(db, { id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', rotatedFromId: 's0', createdAt: new Date(Date.now() - 70 * 60_000) });
+    const { svc } = buildService(db);
+
+    await expect(svc.refreshToken('R0')).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(db.liveSessions('u1')).toHaveLength(0);
+  });
+
+  // ── S2: a logout-all style stamp + sweep inside ONE transaction vs a concurrent refresh ─────
+  const stampAndSweepInOneTx = (db: FakeDb, userId: string, holdMs: number) =>
+    db.client().$transaction(async (tx: any) => {
+      // Same shape as admin-outlets deactivation / KYC phone change: stamp, (work), sweep.
+      await tx.user.updateMany({ where: { id: { in: [userId] } }, data: { sessionsInvalidBefore: new Date() } });
+      await sleep(holdMs);
+      await tx.userSession.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
+    });
+
+  it('S2: stamper FIRST (uncommitted stamp held), refresh arrives meanwhile → refresh waits, then refuses; nothing survives', async () => {
+    const db = new FakeDb();
+    db.gateLatencyMs = 0;
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' });
+    const { svc } = buildService(db);
+
+    const sweep = stampAndSweepInOneTx(db, 'u1', 40);
+    await sleep(5); // the stamp is written (uncommitted) and its user-row lock held
+    const refresh = svc.refreshToken('R0').then(() => 'ok', (e) => e);
+
+    await sweep;
+    const result = await refresh;
+    expect(result).toBeInstanceOf(UnauthorizedException);
+    expect(db.createCount).toBe(0);
+    expect(db.liveSessions('u1')).toHaveLength(0);
+  });
+
+  it('S2: refresh FIRST (holds the user-row share lock), stamper arrives meanwhile → its sweep still kills the new successor', async () => {
+    const db = new FakeDb();
+    db.gateLatencyMs = 0;
+    db.shareLockHoldMs = 30;
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' });
+    const { svc } = buildService(db);
+
+    const refresh = svc.refreshToken('R0').then(() => 'ok', (e) => e);
+    while (db.shareLocksTaken === 0) await tick(); // refresh now holds FOR SHARE on the user row
+    const sweep = stampAndSweepInOneTx(db, 'u1', 0);
+
+    await Promise.all([refresh, sweep]);
+    // Whatever the refresh returned, NOTHING minted for the pre-stamp lineage is still live.
+    expect(db.liveSessions('u1')).toHaveLength(0);
   });
 });

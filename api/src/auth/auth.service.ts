@@ -701,20 +701,14 @@ export class AuthService {
     // Minted FIRST, so a failure in the revoke below can never leave the operator session-less.
     const tokens = await this.generateTokens(opUser, { expiresIn: ACCESS_TTL });
 
-    // AUTHORITATIVE termination (audit F1): revoke the assumed session being exited AND any live
-    // successor it rotated into, so the assumed refresh-token lineage can no longer self-renew for
+    // AUTHORITATIVE termination (audit F1, S4): revoke the assumed session being exited AND its
+    // WHOLE rotation lineage (every hop, incl. an in-flight refresh's successor — see
+    // revokeSessionLineage), so the assumed refresh-token lineage can no longer self-renew for
     // the 30-day session window after Exit — a second device / prior tab still holding the assumed
     // refresh token is cut off (its next refresh hits a revoked row → 401). Scoped to the caller's
     // own userId (defense-in-depth). Skipped only for legacy tokens with no `sid`.
     if (operator.sid) {
-      await this.prisma.userSession.updateMany({
-        where: {
-          userId: operator.sub,
-          revokedAt: null,
-          OR: [{ id: operator.sid }, { rotatedFromId: operator.sid }],
-        },
-        data: { revokedAt: new Date() },
-      });
+      await this.revokeSessionLineage(operator.sub, operator.sid);
     }
 
     await this.prisma.auditLog.create({
@@ -736,6 +730,37 @@ export class AuthService {
     );
 
     return { ...tokens, clientId: opUser.clientId };
+  }
+
+  /**
+   * Revoke a session AND every session that rotated out of it, however many hops deep (S4).
+   * The old exit-tenant revoke covered only `sid` + its DIRECT successor, so a second hop (a
+   * prior tab that had already rotated twice) or an IN-FLIGHT refresh of the tip survived.
+   *
+   * Why the walk is complete even against an in-flight refresh: refresh claims the predecessor
+   * and inserts its successor in ONE transaction holding the predecessor's row lock. Our revoke
+   * of a frontier row therefore either (a) runs first → that refresh's claim later sees it
+   * revoked and mints nothing, or (b) blocks on the refresh's lock until it COMMITS → the
+   * successor is committed before our revoke returns, so the next `findMany` sees it and the
+   * walk revokes it too. Scoped to the caller's own userId (defense-in-depth).
+   */
+  private async revokeSessionLineage(userId: string, rootSessionId: string): Promise<void> {
+    const now = new Date();
+    const seen = new Set<string>([rootSessionId]);
+    let frontier = [rootSessionId];
+    // Bounded: a lineage is a chain (one successor per rotation); 10k hops ≈ a year of hourly use.
+    for (let hop = 0; frontier.length > 0 && hop < 10_000; hop++) {
+      await this.prisma.userSession.updateMany({
+        where: { userId, id: { in: frontier }, revokedAt: null },
+        data:  { revokedAt: now },
+      });
+      const children = await this.prisma.userSession.findMany({
+        where:  { userId, rotatedFromId: { in: frontier } },
+        select: { id: true },
+      });
+      frontier = children.map((c) => c.id).filter((id) => !seen.has(id));
+      frontier.forEach((id) => seen.add(id));
+    }
   }
 
   // ── Refresh token ────────────────────────────────────────────────────────────
@@ -767,6 +792,11 @@ export class AuthService {
       throw new UnauthorizedException('Session expired — please log in again.');
     }
 
+    // The predecessor's revocation time as READ — what the grace window is judged against for a
+    // replay of an already-revoked token. A claim lost below marks a proven concurrent sibling.
+    const predecessorRevokedAt: Date | null = session.revokedAt;
+    let lostConcurrentClaim = false;
+
     // ── Live path: the token is unrevoked and unexpired ──────────────────────────
     if (session.revokedAt === null && new Date() <= session.expiresAt) {
       // ATOMIC single-use claim + successor mint in ONE transaction (concurrent-refresh race
@@ -783,9 +813,7 @@ export class AuthService {
       // The access GATES (grant / partner / vendor) run BEFORE the transaction, on the shared
       // client: they are read-only, and keeping them out of the lock-holding transaction means
       // the transaction never needs a SECOND pool connection while it holds the row lock (no
-      // pool-starvation deadlock when many concurrent refreshes are blocked on that lock). A
-      // gate FAILURE still CONSUMES the predecessor (atomic claim, then re-throw) — a blocked
-      // user loses the session exactly as before.
+      // pool-starvation deadlock when many concurrent refreshes are blocked on that lock).
       const claimPredecessor = (db: Prisma.TransactionClient) =>
         db.userSession.updateMany({
           where: { refreshToken, revokedAt: null },
@@ -797,8 +825,7 @@ export class AuthService {
         // Preserve the operator-context (A2): an assumed session's row carries the
         // TENANT clientId while its user's home clientId is `gifsy`. Refresh must keep
         // the assumed tenant scope (otherwise the operator is silently reverted to the
-        // platform context mid-flow). Only preserve while the operator is still a
-        // GIFSY_ADMIN — a demoted operator falls back to their home scope.
+        // platform context mid-flow).
         // RBAC Option-X (P5): an ASSUMED session is one whose token clientId differs from the
         // operator's home clientId. Both the owner (GIFSY_ADMIN) AND a scoped GIFSY_STAFF can be
         // assumed into a tenant — this MUST include GIFSY_STAFF, otherwise a staff's assumed
@@ -811,9 +838,8 @@ export class AuthService {
         // Defense-in-depth (P5): if a staff's grant for the assumed tenant was revoked, do NOT
         // roll the assumed scope forward. Grant removal already revokes the staff's sessions
         // (GifsyStaffService stamp-before-sweep), so a swept token 401s before reaching here;
-        // this is the backstop for a missed sweep — the predecessor is consumed by the atomic
-        // claim in the catch below, so the staff must re-login (and can only re-assume a still-granted
-        // tenant). Cached resolver → no hot-path DB cost in the common case.
+        // this is the backstop for a missed sweep — the predecessor is consumed in the catch
+        // below, so the staff must re-login (and can only re-assume a still-granted tenant).
         if (isAssumed && session.user.role === 'GIFSY_STAFF') {
           // AUTHORITATIVE (uncached) — a revoked grant must not roll forward from a stale cache
           // even if the session-sweep was somehow missed on this instance (P5 audit F1).
@@ -822,17 +848,14 @@ export class AuthService {
           }
         }
 
-        // Re-apply the deactivated-outlet gate on every refresh. The session row is
-        // revoked by the atomic claim in the catch below, so a deactivated partner who
-        // tries to refresh is denied AND loses the session (must re-login, which is
-        // also blocked). Scoped to the user's HOME tenant — an assumed operator is a
-        // GIFSY_ADMIN with no ChannelPartner, so this is a no-op for that flow.
+        // Re-apply the deactivated-outlet gate on every refresh. A deactivated partner who
+        // tries to refresh is denied AND loses the session (consumed in the catch below; must
+        // re-login, which is also blocked). Scoped to the user's HOME tenant — an assumed
+        // operator is a GIFSY_ADMIN with no ChannelPartner, so this is a no-op for that flow.
         await this.assertPartnerNotDeactivated(session.user.id, session.user.clientId);
 
-        // VENDOR login gate on refresh too — a vendor suspended/revoked mid-session
-        // loses the ability to roll their session forward (review CRITICAL #2). The
-        // predecessor is revoked by the atomic claim in the catch below, so a blocked vendor
-        // must re-login (which is also blocked) → hard stop within the access-token TTL.
+        // VENDOR login gate on refresh too — a vendor suspended/revoked mid-session loses the
+        // ability to roll their session forward (review CRITICAL #2): denied AND consumed.
         await this.assertVendorLoginAllowed({
           id: session.user.id,
           role: session.user.role,
@@ -840,42 +863,63 @@ export class AuthService {
           clientId: session.user.clientId,
         });
       } catch (gateError) {
-        // Consume the predecessor (best-effort — never mask the gate's own error), then refuse.
-        await claimPredecessor(this.prisma).catch(() => undefined);
+        // Only a DELIBERATE refusal (the gates throw 401/403) consumes the predecessor. A
+        // transient failure (DB timeout, connection reset, …) leaves it LIVE so the caller's
+        // retry can succeed instead of turning a blip into a forced logout.
+        if (gateError instanceof UnauthorizedException || gateError instanceof ForbiddenException) {
+          await claimPredecessor(this.prisma).catch(() => undefined); // never mask the refusal
+        }
         throw gateError;
       }
 
-      // Claim + mint, atomically. Only the claim UPDATE and the successor INSERT run inside, on
-      // the transaction's own connection. A transaction failure (e.g. the INSERT errors) ROLLS
-      // BACK the claim, so the predecessor stays live and the caller can simply retry.
-      const tokens = await this.prisma.$transaction(async (tx) => {
-        const claim = await claimPredecessor(tx);
-        if (claim.count !== 1) return null; // lost — a concurrent winner has COMMITTED its successor
+      // Claim + mint, atomically, on the transaction's own connection. A transaction failure
+      // (e.g. the INSERT errors) ROLLS BACK the claim, so the predecessor stays live (retryable).
+      const outcome = await this.prisma.$transaction(async (tx) => {
+        // ── logout-all authority INSIDE the lock (S2) ─────────────────────────────────────
+        // Take a SHARE lock on the user row FIRST, then read the stamp. Every stamper writes
+        // users.sessionsInvalidBefore with an UPDATE (row lock that conflicts with FOR SHARE):
+        //  - a stamp written but NOT YET COMMITTED (e.g. stamp+sweep inside one interactive
+        //    transaction in admin-outlets / KYC) makes us WAIT until it commits, and we then
+        //    read it → refuse, nothing minted;
+        //  - a stamper arriving while we hold the share lock waits for OUR commit, so our
+        //    successor is committed before its stamp and before its sweep statement starts →
+        //    the sweep's snapshot includes (and revokes) our successor.
+        // Lock order is user → session, the same order every stamper uses (stamp, then
+        // sweep), so this cannot deadlock against them.
+        const rows =
+          (await tx.$queryRaw<Array<{ sessionsInvalidBefore: Date | null }>>`
+            SELECT "sessionsInvalidBefore" FROM "users" WHERE "id" = ${session.user.id} FOR SHARE`) ?? [];
+        const stamp = rows[0]?.sessionsInvalidBefore ?? null;
+        if (rows.length === 0 || (stamp && session.createdAt < stamp)) {
+          return { kind: 'swept' as const };
+        }
 
-        // Mint the successor, chaining rotatedFromId back to THIS predecessor so a
-        // concurrent/slow sibling replay is handed the successor's stored tokens.
-        // The assumed access token uses the SHORT ACCESS_TTL (60m) — same as normal;
-        // the successor SESSION row is 30d (SESSION_TTL_DAYS) inside generateTokens.
-        return this.generateTokens(
+        const claim = await claimPredecessor(tx);
+        if (claim.count !== 1) return { kind: 'lost' as const }; // a concurrent winner COMMITTED first
+
+        // Mint the successor, chaining rotatedFromId back to THIS predecessor so a concurrent
+        // sibling (in grace) is handed the successor's stored tokens. The assumed access token
+        // uses the SHORT ACCESS_TTL (60m) — same as normal; the successor SESSION row is 30d.
+        const minted = await this.generateTokens(
           session.user,
           isAssumed
             ? { clientIdOverride: session.clientId, assumed: true, expiresIn: ACCESS_TTL, rotatedFromId: session.id, db: tx }
             : { rotatedFromId: session.id, db: tx },
         );
+        return { kind: 'won' as const, tokens: minted };
       }, REFRESH_TX_OPTS);
 
-      if (tokens) {
-        // ── logout-all authority (1b), DURING-refresh race — clock-skew robust ─────
-        // A concurrent "log out everywhere" can land AFTER our predecessor read but
-        // AROUND the successor create — the classic "successor survives the sweep" hole.
-        // RE-READ the stamp now and compare it to the PREDECESSOR's createdAt. BOTH are
-        // DB-written timestamps and the predecessor was created well before any logout, so
-        // this is robust to cross-instance app-clock skew (unlike comparing the stamp to
-        // THIS instance's wall clock). If a logout-all whose stamp post-dates the refreshed
-        // lineage's start is now visible, the successor we just minted is illegitimate →
-        // revoke it and 401, so nothing live survives "log out everywhere". (Stampers write
-        // sessionsInvalidBefore BEFORE revoking, so a sweep that missed our successor is
-        // always preceded by a committed stamp this re-read observes.)
+      if (outcome.kind === 'swept') {
+        throw new UnauthorizedException('Session expired — please log in again.');
+      }
+
+      if (outcome.kind === 'won') {
+        const tokens = outcome.tokens;
+        // ── logout-all authority (1b), post-mint re-read — belt-and-braces ─────────────────
+        // The in-transaction share lock above already orders us against every stamper. This
+        // committed re-read stays as a second, independent check: if a stamp that post-dates
+        // the refreshed lineage's start is visible, the successor is illegitimate → revoke it
+        // and 401. (DB-anchored predecessor.createdAt compare — robust to app-clock skew.)
         const fresh = await this.prisma.user.findUnique({
           where:  { id: session.user.id },
           select: { sessionsInvalidBefore: true },
@@ -890,43 +934,52 @@ export class AuthService {
 
         return tokens;
       }
-      // claim LOST (count===0): a concurrent winner revoked this row ~now. Because the claim
-      // blocked on the winner's row lock until its transaction COMMITTED, the winner's
-      // successor (if it minted one) is already visible to the lookup below. Fall through
-      // (predecessorRevokedAt resolves to ~now → in-grace, never treated as reuse).
+
+      // claim LOST: our read saw the row LIVE at the start of THIS request and the claim found
+      // it revoked, so the revoke happened DURING this request — by construction a concurrent
+      // sibling (or a logout / sweep racing us), never a stale replay. Our claim blocked on the
+      // winner's row lock until it COMMITTED, so its successor (if any) is visible now. Treat it
+      // as in-grace regardless of how long the winner's transaction took: judging it by the
+      // measured age would turn a slow (>5s) winner into a mass "reuse" kill of every sibling.
+      // (A revoke by logout/sweep leaves no LIVE successor → the in-grace branch just 401s.)
+      lostConcurrentClaim = true;
     }
 
-    // ── Revoked/expired predecessor: converge on a LIVE successor if one exists ───
-    // The token is revoked (an already-revoked replay, or a concurrent winner just revoked
-    // it out from under our claim) or naturally expired. FIRST look for a LIVE successor
-    // (the row this predecessor rotated INTO, still non-revoked) — REGARDLESS of the grace
-    // window. If one exists, this is a benign concurrent/rotated refresh (multi-tab, or a
-    // page-nav proxy refresh colliding with an in-flight XHR/prefetch refresh — which under
-    // the 60m access token can be MORE than the grace window apart), so hand back the
-    // successor's STORED tokens and converge instead of nuking a legit active user. A
-    // successor revoked by a logout-all is excluded by revokedAt:null, so a swept lineage
-    // is never resurrected here.
-    const successor = await this.prisma.userSession.findFirst({
-      where: { rotatedFromId: session.id, revokedAt: null },
-    });
-    if (successor && successor.refreshToken) {
-      return { accessToken: successor.token, refreshToken: successor.refreshToken };
-    }
+    const withinGrace =
+      lostConcurrentClaim ||
+      (predecessorRevokedAt !== null &&
+        Date.now() - predecessorRevokedAt.getTime() <= ROTATION_GRACE_MS);
 
-    // No live successor. Distinguish a transient in-grace loser from genuine reuse.
-    const predecessorRevokedAt = session.revokedAt ?? new Date(); // lost-claim → ~now
-    const withinGrace = Date.now() - predecessorRevokedAt.getTime() <= ROTATION_GRACE_MS;
+    // ── Converge on the LIVE successor — ONLY inside the grace window (S1) ─────────────────
+    // A predecessor revoked within the last ROTATION_GRACE_MS is a concurrent sibling of the
+    // refresh that rotated it (parallel proxy hits, two tabs, proxy + server action). Since the
+    // claim+mint is now one row-locked transaction, every such sibling arrives within
+    // milliseconds, so the window can stay tight. Hand back the successor's STORED pair (minted
+    // in the same transaction as the revoke → its access token is seconds old, never expired).
+    // A successor revoked by a logout / sweep is excluded by revokedAt:null (no resurrection).
+    if (withinGrace) {
+      const successor = await this.prisma.userSession.findFirst({
+        where: { rotatedFromId: session.id, revokedAt: null },
+      });
+      if (successor && successor.refreshToken) {
+        return { accessToken: successor.token, refreshToken: successor.refreshToken };
+      }
+      // In grace but nothing live to converge on (just logged out / swept) → plain 401.
+      throw new UnauthorizedException('Session expired — please log in again.');
+    }
 
     // ── Reuse detection (1c) ─────────────────────────────────────────────────────
-    // Nuke the lineage ONLY when the predecessor was ALREADY REVOKED (previously rotated),
-    // is being replayed AFTER the grace window, AND has NO live successor to hand back — a
-    // single-use rotated token resurfacing with its successor gone is a strong theft signal.
-    // STAMP sessionsInvalidBefore FIRST, then revoke every live session (stamp-before-revoke,
-    // same authority logout-all uses), so any in-flight refresh's post-mint re-read observes
-    // the stamp and drops its successor. A merely EXPIRED-but-never-revoked session
-    // (revokedAt === null) is NOT reuse, and an in-grace loser is transient — both just 401.
+    // A REVOKED refresh token presented OUTSIDE the grace window is treated as reuse — whether
+    // or not its successor is still live (S1, 2026-11-19: the old "hand back a live successor
+    // regardless of grace" path let a stolen, already-rotated token obtain the live session
+    // with no time limit). STAMP sessionsInvalidBefore FIRST, then revoke every live session
+    // (stamp-before-revoke, same authority logout-all uses), and write the security event.
+    // Trade-off (owner-approved 2026-11-19): a client whose refresh RESPONSE was lost keeps
+    // the old token; its next refresh after the grace window is indistinguishable from theft
+    // and logs that user out everywhere (re-login required).
+    // A merely EXPIRED-but-never-revoked session (revokedAt === null) is NOT reuse → just 401.
     // Best-effort: a failed lineage-kill must never mask the 401 below.
-    if (!withinGrace && session.revokedAt !== null) {
+    if (predecessorRevokedAt !== null) {
       const now = new Date();
       try {
         await this.prisma.user.update({

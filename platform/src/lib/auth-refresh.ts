@@ -75,47 +75,75 @@ const REFRESH_429_BACKOFF_MS = [300, 900];
 const REFRESH_429_MAX_WAIT_MS = 2_000;
 
 /**
+ * Per-attempt timeout for the backend refresh call. Deliberately SHORTER than the backend's
+ * rotation grace window (ROTATION_GRACE_MS = 5s in api/src/auth/auth.service.ts): a timed-out
+ * refresh may still have been committed server-side, and the caller's single retry presents the
+ * SAME (now rotated) token. That retry is only answered with the successor while it lands inside
+ * the grace window — past it, a replay of a rotated token is treated as theft (logout everywhere).
+ * A normal refresh takes milliseconds; 4s + the 200ms proxy retry delay keeps the retry in grace.
+ */
+export const REFRESH_TIMEOUT_MS = 4_000;
+
+/** Result of one refresh exchange. `dead` = the backend definitively refused; `transient` = retryable. */
+export type RefreshOutcome =
+  | { kind: 'ok'; accessToken: string; refreshToken?: string }
+  | { kind: 'dead'; status: number }
+  | { kind: 'transient'; reason: 'network' | 'timeout' | 'server' | 'throttled' | 'malformed' };
+
+/**
  * Exchange a (single-use, rotating) refresh token for a fresh access + refresh pair via the
- * backend. Returns the new tokens on success, or `null` on ANY failure (network error, non-2xx,
- * or a missing access token in the body).
+ * backend. Returns a TYPED outcome so callers retry only what is retryable:
+ *  - `ok`        — the new pair;
+ *  - `dead`      — a definite refusal (401/403/400/… any non-429 4xx): the session is gone, never retry;
+ *  - `transient` — network error, timeout, 5xx, a 429 that outlived its bounded retries, or a 2xx
+ *                  without a token: the session may well be alive, a retry may succeed.
  *
  * A 429 is "retry later", NOT "session dead": the backend's throttler rejects BEFORE the refresh
- * token is looked at, so the same token is still valid — retry it (bounded backoff, honouring a
- * short Retry-After) instead of returning null, which both callers turn into a bounce to login.
+ * token is looked at, so the same token is still valid — retry it here (bounded backoff, honouring
+ * a short Retry-After).
  *
- * On failure the caller MUST leave the existing cookies intact: with the backend returning the
- * successor tokens on a contended/just-rotated refresh (multi-tab / parallel page requests),
- * deleting the refresh cookie would strand sessions that are actually still alive. A genuinely
- * dead session simply keeps failing and the caller bounces to login.
+ * On ANY failure the caller MUST leave the existing cookies intact: deleting the refresh cookie on
+ * a transient failure would strand a session that is actually still alive.
  */
-export async function refreshTokensViaBackend(
-  refreshToken: string,
-): Promise<{ accessToken: string; refreshToken?: string } | null> {
+export async function refreshTokensViaBackend(refreshToken: string): Promise<RefreshOutcome> {
   try {
     for (let attempt = 0; ; attempt++) {
       const res = await fetch(`${API_URL}/v1/auth/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refreshToken }),
-        signal: AbortSignal.timeout(12_000),
+        signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
       });
-      if (res.status === 429 && attempt < REFRESH_429_BACKOFF_MS.length) {
-        const retryAfterSecs = Number(res.headers?.get?.('Retry-After'));
-        const wait = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
-          ? Math.min(retryAfterSecs * 1000, REFRESH_429_MAX_WAIT_MS)
-          : REFRESH_429_BACKOFF_MS[attempt];
-        // Release the unread 429 body first so its connection isn't held open across the wait.
+      if (res.status === 429) {
+        if (attempt < REFRESH_429_BACKOFF_MS.length) {
+          const retryAfterSecs = Number(res.headers?.get?.('Retry-After'));
+          const wait = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
+            ? Math.min(retryAfterSecs * 1000, REFRESH_429_MAX_WAIT_MS)
+            : REFRESH_429_BACKOFF_MS[attempt];
+          // Release the unread 429 body first so its connection isn't held open across the wait.
+          await res.body?.cancel().catch(() => {});
+          await new Promise((resolve) => setTimeout(resolve, wait));
+          continue;
+        }
         await res.body?.cancel().catch(() => {});
-        await new Promise((resolve) => setTimeout(resolve, wait));
-        continue;
+        return { kind: 'transient', reason: 'throttled' };
+      }
+      if (res.status >= 500) {
+        await res.body?.cancel().catch(() => {});
+        return { kind: 'transient', reason: 'server' };
+      }
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        return { kind: 'dead', status: res.status };
       }
       const body = await res.json().catch(() => null);
       const accessToken: string | undefined = body?.data?.accessToken;
       const newRefresh: string | undefined = body?.data?.refreshToken;
-      if (!res.ok || !accessToken) return null;
-      return { accessToken, refreshToken: newRefresh };
+      if (!accessToken) return { kind: 'transient', reason: 'malformed' };
+      return { kind: 'ok', accessToken, refreshToken: newRefresh };
     }
-  } catch {
-    return null;
+  } catch (err) {
+    const name = (err as { name?: string } | null)?.name;
+    return { kind: 'transient', reason: name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'network' };
   }
 }

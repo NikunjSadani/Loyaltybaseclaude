@@ -1712,10 +1712,15 @@ export class AdminOutletsService {
           });
           const userIds = partners.map((p) => p.userId).filter((u): u is string => !!u);
           if (userIds.length > 0) {
-            // AUTHORITATIVE (1b): STAMP BEFORE REVOKE — stamp the stranded owners so a
-            // concurrent refresh can't mint a surviving successor of a now-deactivated
-            // outlet's owner, then revoke their live sessions. Consistent with logout-all /
-            // KYC-phone-change (see auth.service.refreshToken's post-mint re-read).
+            // AUTHORITATIVE (1b): STAMP BEFORE REVOKE — stamp the stranded owners, then revoke
+            // their live sessions. NOTE (S2, 2026-11-19): stamp + sweep share THIS interactive
+            // transaction, so the stamp is NOT visible to other sessions until commit — the
+            // "committed stamp" a refresh's post-mint re-read relies on does not exist yet. What
+            // actually closes the race is auth.service.refreshToken taking a FOR SHARE lock on
+            // the user row inside its claim+mint transaction: our stamp UPDATE (row lock) either
+            // makes that refresh WAIT until we commit and then refuse on the stamp, or waits for
+            // the refresh to commit first, so its successor is in our sweep's snapshot below.
+            // Keep the order user-stamp → session-sweep (same lock order as refresh: no deadlock).
             await tx.user.updateMany({
               where: { id: { in: userIds } },
               data: { sessionsInvalidBefore: now },

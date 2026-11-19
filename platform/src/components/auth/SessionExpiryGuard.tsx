@@ -56,12 +56,16 @@ let redirecting = false;
 // Single-flight refresh: several /api calls expiring together share ONE refresh so the
 // single-use refresh token is rotated exactly once (concurrent refreshes would revoke
 // each other and spuriously log the user out — the classic trap this guards against).
-let refreshing: Promise<boolean> | null = null;
-function refreshOnce(): Promise<boolean> {
+// 'transient' = the refresh could not be completed right now (network / 5xx / proxy 503) but the
+// session may be alive → do NOT bounce to login; the caller gets the original 401 and can retry.
+let refreshing: Promise<'ok' | 'dead' | 'transient'> | null = null;
+function refreshOnce(): Promise<'ok' | 'dead' | 'transient'> {
   if (!refreshing) {
     refreshing = refreshSession()
-      .then((r) => r.ok)
-      .catch(() => false)
+      .then((r) => (r.ok ? 'ok' : r.transient ? 'transient' : 'dead') as 'ok' | 'dead' | 'transient')
+      // The action call itself failed (network, or the proxy answered 401/503 before the action
+      // ran). We can't tell dead from transient here — keep the pre-existing behaviour (dead).
+      .catch(() => 'dead' as const)
       .finally(() => {
         refreshing = null;
       });
@@ -100,7 +104,11 @@ export default function SessionExpiryGuard() {
         ) {
           // Try a silent refresh before giving up (single-flight across concurrent 401s).
           const refreshed = await refreshOnce();
-          if (refreshed && !redirecting) {
+          if (refreshed === 'transient') {
+            // A blip, not a dead session: surface the original 401 to the caller, stay on the page.
+            return res;
+          }
+          if (refreshed === 'ok' && !redirecting) {
             // New cookie is set — retry the original request once (unpatched, so a
             // second 401 can't recurse into another refresh).
             const retry = await originalFetch(input, init);

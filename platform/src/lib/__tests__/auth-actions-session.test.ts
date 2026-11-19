@@ -24,7 +24,12 @@ const cookieStore = {
   }),
   delete: vi.fn((name: string) => { store.delete(name); deleted.push(name); }),
 };
-vi.mock('next/headers', () => ({ cookies: () => Promise.resolve(cookieStore) }));
+// Request headers as forwarded by the proxy (B1: x-session-refreshed marks a proxy rotation).
+const requestHeaders = new Headers();
+vi.mock('next/headers', () => ({
+  cookies: () => Promise.resolve(cookieStore),
+  headers: () => Promise.resolve(requestHeaders),
+}));
 vi.mock('@/lib/platform/tenant-resolution', () => ({ resolveClientConfig: () => null }));
 vi.mock('@/lib/platform/tenant-routing-cache', () => ({ refreshIfStale: () => {} }));
 
@@ -45,6 +50,55 @@ beforeEach(() => {
   cookieStore.set.mockClear();
   cookieStore.delete.mockClear();
   cookieStore.get.mockClear();
+  requestHeaders.delete('x-session-refreshed');
+});
+
+describe('refreshSession — B1 no double rotation + B3 transient', () => {
+  it('when the PROXY already rotated in this request (x-session-refreshed) → reuses that pair: NO backend call, NO cookie writes', async () => {
+    // Next merges the proxy's Set-Cookie into cookies(): the store already holds the NEW pair.
+    store.set('token', jwtWithExp(nowSecs() + ONE_HOUR));
+    store.set('refresh_token', 'r-from-proxy');
+    requestHeaders.set('x-session-refreshed', '1');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await refreshSession();
+
+    expect(res).toEqual({ ok: true });
+    expect(fetchMock).not.toHaveBeenCalled(); // the just-issued r-from-proxy is NOT rotated again
+    expect(setCalls).toHaveLength(0);
+    expect(store.get('refresh_token')).toBe('r-from-proxy');
+  });
+
+  it('without the marker it still rotates normally (one backend call)', async () => {
+    store.set('refresh_token', 'r-old');
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ data: { accessToken: jwtWithExp(nowSecs() + ONE_HOUR), refreshToken: 'r-new' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(refreshSession()).resolves.toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(setOf('refresh_token')?.value).toBe('r-new');
+  });
+
+  it('a TRANSIENT backend failure (5xx) → { ok:false, transient:true } and cookies untouched', async () => {
+    store.set('refresh_token', 'r-alive');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503, body: { cancel: vi.fn().mockResolvedValue(undefined) }, json: () => Promise.resolve({}) }));
+
+    await expect(refreshSession()).resolves.toEqual({ ok: false, transient: true });
+    expect(deleted).toHaveLength(0);
+    expect(setCalls).toHaveLength(0);
+  });
+
+  it('a DEFINITE refusal (401) → { ok:false } (no transient flag) and cookies untouched', async () => {
+    store.set('refresh_token', 'r-dead');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401, json: () => Promise.resolve({}) }));
+
+    await expect(refreshSession()).resolves.toEqual({ ok: false });
+    expect(deleted).toHaveLength(0);
+  });
 });
 
 describe('refreshSession — multi-tab safety + 7-day TTL', () => {

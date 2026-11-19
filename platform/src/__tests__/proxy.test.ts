@@ -44,6 +44,8 @@ import { refreshTokensViaBackend } from '@/lib/auth-refresh';
 const mockResolve = vi.mocked(resolveTenantSync);
 const mockJwt = vi.mocked(jwtVerify);
 const mockRefresh = vi.mocked(refreshTokensViaBackend);
+const DEAD = { kind: 'dead' as const, status: 401 };
+const TRANSIENT = { kind: 'transient' as const, reason: 'server' as const };
 
 const VALID_TENANT = {
   slug: 'deoleo',
@@ -436,7 +438,7 @@ describe('proxy — DEMO_MODE auth bypass', () => {
 // against the backend and CONTINUE the navigation instead of bouncing to login.
 describe('proxy — page-nav silent refresh (expired/absent access + valid refresh)', () => {
   it('absent access + valid refresh → refreshes, forwards new Bearer, sets rotated cookies, NO redirect', async () => {
-    mockRefresh.mockResolvedValue({ accessToken: 'new.jwt.tok', refreshToken: 'r-new' });
+    mockRefresh.mockResolvedValue({ kind: 'ok', accessToken: 'new.jwt.tok', refreshToken: 'r-new' });
     // The refreshed access token verifies to a valid identity.
     mockJwt.mockResolvedValue({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
 
@@ -457,7 +459,7 @@ describe('proxy — page-nav silent refresh (expired/absent access + valid refre
     mockJwt
       .mockRejectedValueOnce(new Error('exp'))
       .mockResolvedValueOnce({ payload: { role: 'GIFSY_ADMIN', sub: 'g-1' } } as never);
-    mockRefresh.mockResolvedValue({ accessToken: 'fresh.jwt.tok', refreshToken: 'r-rotated' });
+    mockRefresh.mockResolvedValue({ kind: 'ok', accessToken: 'fresh.jwt.tok', refreshToken: 'r-rotated' });
 
     const res = await run(
       makeReq('/admin', { cookies: { token: 'expired.jwt.tok', refresh_token: 'r-valid' } }),
@@ -470,15 +472,15 @@ describe('proxy — page-nav silent refresh (expired/absent access + valid refre
     expect(res.cookies.get('token')?.value).toBe('fresh.jwt.tok');
   });
 
-  it('expired access + DEAD refresh (backend refresh fails) → ONE retry, then redirect to /auth/login?expired=1', async () => {
+  it('expired access + DEAD refresh (backend 401) → NO retry (B3), redirect to /auth/login?expired=1', async () => {
     mockJwt.mockRejectedValue(new Error('exp'));
-    mockRefresh.mockResolvedValue(null); // refresh token truly dead
+    mockRefresh.mockResolvedValue(DEAD); // refresh token truly dead
 
     const res = await run(
       makeReq('/admin', { cookies: { token: 'expired.jwt.tok', refresh_token: 'r-dead' } }),
     );
 
-    expect(mockRefresh).toHaveBeenCalledTimes(2); // initial + exactly one retry
+    expect(mockRefresh).toHaveBeenCalledTimes(1); // a definite refusal is never retried
     expect(res.status).toBe(307);
     const loc = new URL(res.headers.get('location') as string);
     expect(loc.pathname).toBe('/auth/login');
@@ -489,7 +491,7 @@ describe('proxy — page-nav silent refresh (expired/absent access + valid refre
 
   it('a failed refresh does NOT expose new cookies (good cookie is never overwritten with empties)', async () => {
     mockJwt.mockRejectedValue(new Error('exp'));
-    mockRefresh.mockResolvedValue(null);
+    mockRefresh.mockResolvedValue(DEAD);
 
     const res = await run(
       makeReq('/sales/outlets', { cookies: { token: 'expired', refresh_token: 'r-dead' } }),
@@ -519,7 +521,7 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
 
   beforeEach(() => {
     mockJwt.mockRejectedValue(new Error('exp'));
-    mockRefresh.mockResolvedValue(null);
+    mockRefresh.mockResolvedValue(DEAD);
   });
 
   it.each([
@@ -544,13 +546,14 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
     mockJwt
       .mockRejectedValueOnce(new Error('exp'))
       .mockResolvedValueOnce({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
-    mockRefresh.mockResolvedValue({ accessToken: 'new.jwt', refreshToken: 'r-2' });
+    mockRefresh.mockResolvedValue({ kind: 'ok', accessToken: 'new.jwt', refreshToken: 'r-2' });
     const res = await run(expiredWithRefresh('/admin/users', { rsc: '1' }));
     expect(isNext(res)).toBe(true);
     expect(res.cookies.get('refresh_token')?.value).toBe('r-2');
   });
 
-  it('document (Sec-Fetch-Dest: document): failed refresh → waits, retries ONCE, then /auth/login?expired=1', async () => {
+  it('document (Sec-Fetch-Dest: document): TRANSIENT refresh failure → waits, retries ONCE, then /auth/login?expired=1', async () => {
+    mockRefresh.mockResolvedValue(TRANSIENT);
     // Fake ONLY setTimeout (the retry pause); the token hash (crypto.subtle) stays real.
     vi.useFakeTimers({ toFake: ['setTimeout'] });
     try {
@@ -577,8 +580,8 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
       .mockRejectedValueOnce(new Error('exp'))
       .mockResolvedValueOnce({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
     mockRefresh
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ accessToken: 'new.jwt', refreshToken: 'r-2' });
+      .mockResolvedValueOnce(TRANSIENT)
+      .mockResolvedValueOnce({ kind: 'ok', accessToken: 'new.jwt', refreshToken: 'r-2' });
     const res = await run(expiredWithRefresh('/admin', { 'sec-fetch-dest': 'document' }));
     expect(mockRefresh).toHaveBeenCalledTimes(2);
     expect(isNext(res)).toBe(true);
@@ -587,7 +590,7 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
   });
 
   it('dedupe: 10 concurrent hits with the SAME refresh cookie share ONE backend refresh and all get the same pair', async () => {
-    let resolveRefresh!: (v: { accessToken: string; refreshToken: string }) => void;
+    let resolveRefresh!: (v: { kind: 'ok'; accessToken: string; refreshToken: string }) => void;
     mockRefresh.mockImplementation(
       () => new Promise((resolve) => { resolveRefresh = resolve; }),
     );
@@ -601,7 +604,7 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
       run(expiredWithRefresh(`/admin/users?i=${i}`, i === 0 ? { 'sec-fetch-dest': 'document' } : { rsc: '1' })),
     );
     await vi.waitFor(() => expect(mockRefresh).toHaveBeenCalledTimes(1));
-    resolveRefresh({ accessToken: 'shared.jwt', refreshToken: 'r-shared' });
+    resolveRefresh({ kind: 'ok', accessToken: 'shared.jwt', refreshToken: 'r-shared' });
     const results = await Promise.all(reqs);
 
     expect(mockRefresh).toHaveBeenCalledTimes(1);
@@ -612,7 +615,7 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
   });
 
   it('dedupe is per refresh token: two different refresh cookies make two backend calls', async () => {
-    mockRefresh.mockResolvedValue({ accessToken: 'a', refreshToken: 'b' });
+    mockRefresh.mockResolvedValue({ kind: 'ok', accessToken: 'a', refreshToken: 'b' });
     mockJwt.mockImplementation((async (tok: string) => {
       if (tok === 'expired') throw new Error('exp');
       return { payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } };
@@ -627,10 +630,72 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
   });
 
   it('dedupe does not outlive the burst: a later refresh with the same token makes a fresh call', async () => {
-    mockRefresh.mockResolvedValue(null);
+    mockRefresh.mockResolvedValue(DEAD);
     await run(expiredWithRefresh('/admin', { rsc: '1' }));
     await run(expiredWithRefresh('/admin', { rsc: '1' }));
     expect(mockRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  // ── B3: retry only what is retryable ──
+  it('B3: document + DEFINITE refusal (dead) → NO retry, straight to /auth/login?expired=1', async () => {
+    mockRefresh.mockResolvedValue(DEAD);
+    const res = await run(expiredWithRefresh('/admin', { 'sec-fetch-dest': 'document' }));
+    expect(mockRefresh).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(307);
+    expect(new URL(res.headers.get('location') as string).searchParams.get('expired')).toBe('1');
+  });
+
+  it('B3: non-document + TRANSIENT failure → 503 no-store (retryable), not 401, no redirect, no retry', async () => {
+    mockRefresh.mockResolvedValue(TRANSIENT);
+    const res = await run(expiredWithRefresh('/admin/users', { rsc: '1' }));
+    expect(res.status).toBe(503);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('B3: a refreshed access token that fails verification counts as DEAD (no retry)', async () => {
+    mockRefresh.mockResolvedValue({ kind: 'ok', accessToken: 'unverifiable', refreshToken: 'r-2' });
+    mockJwt.mockRejectedValue(new Error('bad signature'));
+    const res = await run(expiredWithRefresh('/admin', { 'sec-fetch-dest': 'document' }));
+    expect(mockRefresh).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(307);
+    expect(res.cookies.get('refresh_token')?.value).toBeUndefined();
+  });
+
+  // ── B4: no Sec-Fetch-Dest = still a document, but static-asset paths never get the retry ──
+  it.each(['/Brand/deoleo.png', '/guides/tds/194r-report.png', '/some/file.svg', '/manifest.json'])(
+    'B4: %s with NO Sec-Fetch-Dest + transient failure → treated as a document (redirect) but NOT retried',
+    async (path) => {
+      mockRefresh.mockResolvedValue(TRANSIENT);
+      const res = await run(expiredWithRefresh(path));
+      expect(mockRefresh).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe(307);
+    },
+  );
+
+  it('B4: a page path with NO Sec-Fetch-Dest keeps the document retry', async () => {
+    mockRefresh.mockResolvedValueOnce(TRANSIENT).mockResolvedValueOnce(TRANSIENT);
+    await run(expiredWithRefresh('/admin/users'));
+    expect(mockRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  // ── B1: mark the forwarded request so refreshSession does not rotate a second time ──
+  it('B1: a successful proxy refresh marks the FORWARDED request with x-session-refreshed: 1', async () => {
+    mockJwt
+      .mockRejectedValueOnce(new Error('exp'))
+      .mockResolvedValueOnce({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
+    mockRefresh.mockResolvedValue({ kind: 'ok', accessToken: 'new.jwt', refreshToken: 'r-2' });
+    const res = await run(expiredWithRefresh('/admin/users', { 'next-action': 'refreshSessionId' }));
+    expect(isNext(res)).toBe(true);
+    expect(fwd(res, 'x-session-refreshed')).toBe('1');
+  });
+
+  it('B1: a CLIENT-sent x-session-refreshed is stripped (cannot fake a proxy rotation)', async () => {
+    mockJwt.mockResolvedValue({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
+    const res = await run(makeReq('/admin/users', { cookies: { token: 'valid' }, headers: { 'x-session-refreshed': '1' } }));
+    expect(isNext(res)).toBe(true);
+    expect(fwd(res, 'x-session-refreshed')).toBeNull();
   });
 });
 
