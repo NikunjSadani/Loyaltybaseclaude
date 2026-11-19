@@ -25,6 +25,8 @@ const mockPrisma = {
   // Per-photo geotag: the review resolves the outlet reference geo (outlet → partner KYC).
   outlet: { findFirst: jest.fn() },
   channelPartner: { findFirst: jest.fn() },
+  // The per-photo badge policy reads clients.features.outletMasterGeo (default: not set → legacy KYC-board policy).
+  client: { findUnique: jest.fn() },
   // Per-photo review persists the capture row + the version snapshot in one tx.
   $transaction: jest.fn(),
 };
@@ -47,6 +49,7 @@ describe('VisibilityReviewService', () => {
     });
     mockPrisma.outlet.findFirst.mockResolvedValue(null);
     mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+    mockPrisma.client.findUnique.mockResolvedValue(null);
     mockPrisma.visibilityCapture.findFirst.mockResolvedValue({
       id: 'cap1',
       clientId: 't1',
@@ -179,6 +182,63 @@ describe('VisibilityReviewService', () => {
   });
 
   // ── Per-photo review (VISIBILITY-PER-PHOTO-APPROVAL) ──────────────────────────
+  // ── Per-photo badges use the capture verdict's policy (prod finding 2026-11-19) ─────────────────────────────
+  describe('per-photo fence badges', () => {
+    const bajajCapture = {
+      id: 'cap1', clientId: 't1', outletId: 'o1', status: 'SUBMITTED', formVersion: 1, photoReviews: null,
+      geoFenceOk: true, distanceMeters: 34, captureLat: 12.9003, captureLng: 77.5001, captureAccuracy: 20,
+      formValues: { wtk11hn: { key: 'visibility-media/t1/w1.jpg', geo: { lat: 12.9003, lng: 77.5001, accuracy: 20 } } },
+      submissions: [], imageHashes: [], submittedBy: null, approvedBy: null,
+    };
+    const privilegeOnly = { op: 'eq', value: 'Privilege', fieldId: '__subProgram__' };
+    const bajajSchema = {
+      formSchema: { fields: [
+        { id: 'wtk11hn', type: 'CAMERA', label: 'Window 1', required: true, order: 1, geotag: true, geoFenceRequired: true },
+        { id: 'np9d0cc', type: 'CAMERA', label: 'Window 2', required: false, order: 3, geotag: true, geoFenceRequired: true, visibleWhen: privilegeOnly, requiredWhen: privilegeOnly },
+      ] },
+    };
+    beforeEach(() => {
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue(bajajCapture);
+      mockPrisma.visibilityFormVersion.findUnique.mockResolvedValue(bajajSchema);
+      mockPrisma.visibilityImageHash.findMany.mockResolvedValue([]);
+    });
+
+    it('outlet-master tenant: Elite outlet, Window 1 at 34 m / ±20 m → badge "inside" (matches the verdict true); hidden Window 2 has no badge', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ latitude: 12.9, longitude: 77.5 });
+      // The legacy KYC board reference is far away — it must NOT be used on an outlet-master tenant.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ kycSubmissions: [{ boardPhotoLat: 13.5, boardPhotoLng: 78.5 }] });
+      const res = await service.adminGetCapture(gifsy, 'cap1');
+      expect(res.capture.media.map((m: { fieldId: string }) => m.fieldId)).toEqual(['wtk11hn']);
+      expect(res.capture.media[0].fenceStatus).toBe('inside');
+      expect(res.capture.geoFence.geoFenceOk).toBe(true);
+    });
+
+    it('outlet-master tenant: a fix with accuracy worse than 200 m → badge "unverifiable" (same buffer as the verdict)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ latitude: 12.9, longitude: 77.5 });
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({
+        ...bajajCapture,
+        formValues: { wtk11hn: { key: 'visibility-media/t1/w1.jpg', geo: { lat: 12.9003, lng: 77.5001, accuracy: 350 } } },
+      });
+      const res = await service.adminGetCapture(gifsy, 'cap1');
+      expect(res.capture.media[0].fenceStatus).toBe('unverifiable');
+    });
+
+    it('NON-gated tenant: unchanged — KYC board reference + configured 50 m radius, no buffer', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ kycSubmissions: [{ boardPhotoLat: 12.9, boardPhotoLng: 77.5 }] });
+      const res = await service.adminGetCapture(gifsy, 'cap1');
+      expect(res.capture.media[0].fenceStatus).toBe('inside'); // 34 m < 50 m against the KYC board geo
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ kycSubmissions: [{ boardPhotoLat: 12.9006, boardPhotoLng: 77.5 }] });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      const far = await service.adminGetCapture(gifsy, 'cap1');
+      // ~33 m from the photo — still inside 50 m; the outlet-master path was not consulted.
+      expect(far.capture.media[0].fenceStatus).toBe('inside');
+      expect(mockPrisma.outlet.findFirst.mock.calls.every(([a]: [{ select?: Record<string, unknown> }]) => !a.select?.latitude)).toBe(true);
+    });
+  });
+
   describe('reviewPhoto + derived status', () => {
     // A two-required-photo form + a capture that submitted both photos (no reviews yet).
     const twoPhotoForm = {

@@ -55,6 +55,7 @@ const DEFAULT_FEATURES: Record<FeatureKey, boolean> = {
   captureBankAtRedemption: false,
   offerTiles:              false,
   salesImport:             false,
+  wholesalerPayoutInclActivation: false,
 };
 
 const FEATURE_META: Record<FeatureKey, { label: string; description: string }> = {
@@ -75,6 +76,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   captureBankAtRedemption:  { label: 'Capture bank/UPI at redemption', description: 'Let a wholesaler with no beneficiary on file add bank/UPI in-flow at Redeem → Cash (same form/rules as KYC). Captured details stay hidden from Store Information until a payout on them completes.' },
   offerTiles:               { label: "This month's offers", description: "Turns on the whole offers feature: the This Month's Offers admin page and the offer tiles on the partner dashboard. When off, partners see no offers section." },
   salesImport:              { label: 'Sales Import (DMS file)', description: "Upload the distributor invoice-line file to compute importer-owned KPI achievements per month. Leave OFF unless the tenant's column mapping and KPIs are configured." },
+  wholesalerPayoutInclActivation: { label: 'Wallet: "Incl. Activation" (wholesalers)', description: 'Show a small "Incl. Activation" line under "Lifetime Payout" on a wholesaler\'s wallet card. Display only; retailers never see it.' },
 };
 
 const STEPS: { key: Step; label: string }[] = [

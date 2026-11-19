@@ -151,7 +151,7 @@ function PointsSummary({ balance }: { balance: WalletBalance | null }) {
 
 /* ─── Payout (INR) summary card ───────────────────────────────────────────────── */
 
-function PayoutSummary({ payouts }: { payouts: PayoutLedgerEntry[] }) {
+function PayoutSummary({ payouts, inclActivationNote = false }: { payouts: PayoutLedgerEntry[]; inclActivationNote?: boolean }) {
   // Only confirmed PAID entries feed the lifetime/last-month figures.
   const paidEntries = useMemo(() => payouts.filter((p) => p.status === 'PAID'), [payouts]);
   // payoutAmountPaise is integer paise; accumulate in paise then divide for display
@@ -168,7 +168,15 @@ function PayoutSummary({ payouts }: { payouts: PayoutLedgerEntry[] }) {
   return (
     <div data-testid="payout-summary" className="rounded-2xl p-5 text-white" style={{ background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)' }}>
       <div className="flex items-baseline justify-between gap-3 mb-4">
-        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Lifetime Payout</p>
+        {inclActivationNote ? (
+          // Tenant flag wholesalerPayoutInclActivation (Bajaj, wholesalers only): a smaller sub-line under the label.
+          <div>
+            <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Lifetime Payout</p>
+            <p data-testid="payout-incl-activation" className="text-[10px] text-slate-400 mt-0.5">Incl. Activation</p>
+          </div>
+        ) : (
+          <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Lifetime Payout</p>
+        )}
         <p className="text-3xl font-extrabold tracking-tight">{fmtInr(lifetimePaid)}</p>
       </div>
       <div data-testid="payout-last-month" className="bg-white/10 rounded-xl px-4 py-3 flex items-center justify-between">
@@ -394,7 +402,12 @@ export default function WalletPage() {
         <>
           {/* ── Summary cards — presence-based (points, payout, or both) ── */}
           {identity.hasPointsActivity && <PointsSummary balance={balance} />}
-          {identity.hasPayoutActivity && <PayoutSummary payouts={payouts} />}
+          {identity.hasPayoutActivity && (
+            <PayoutSummary
+              payouts={payouts}
+              inclActivationNote={identity.outletType === 'WHOLESALER' && !!identity.features?.wholesalerPayoutInclActivation}
+            />
+          )}
 
           {/* ── Combined statement — ALWAYS the full history (points + payouts) ── */}
           <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">

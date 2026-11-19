@@ -108,3 +108,59 @@ export function evaluatePhotoFence(
   const distance = haversineMeters({ lat: geo.lat, lng: geo.lng }, reference);
   return distance <= radiusMeters ? 'inside' : 'outside';
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared per-photo fence POLICY — resolved once, used by BOTH the capture verdict
+// (visibility-capture.service) and the reviewer's per-photo badges (visibility-review.service),
+// so the two can never drift (prod finding 2026-11-19: badges used the KYC board ref + config radius
+// on an outlet-master tenant while the verdict used the outlet master + 200 m).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Reference + radius + whether the accuracy buffer applies. */
+export interface PhotoFencePolicy {
+  reference: { lat: number; lng: number } | null;
+  radiusMeters: number;
+  /** Outlet-master tenants: a fix whose own accuracy is worse than the radius is 'unverifiable', never in/out. */
+  accuracyBuffer: boolean;
+  /** Outlet-master tenants: a photo fix at 0,0 (the "no location" default) is 'unverifiable', never "outside". */
+  nullIslandUnverifiable?: boolean;
+}
+
+/** The outlet-master reference (Prisma Decimal / number / numeric string), guarded by isUsableReference. */
+export function outletMasterReference(o: { latitude?: unknown; longitude?: unknown }): { lat: number; lng: number } | null {
+  if (o.latitude == null || o.longitude == null) return null;
+  const ref = { lat: Number(o.latitude), lng: Number(o.longitude) };
+  return isUsableReference(ref) ? ref : null;
+}
+
+/** The outlet-master (Bajaj) policy: outlet coordinates, forced 200 m, accuracy buffer ON. */
+export function outletMasterFencePolicy(o: { latitude?: unknown; longitude?: unknown }): PhotoFencePolicy {
+  return {
+    reference: outletMasterReference(o),
+    radiusMeters: OUTLET_MASTER_GEOFENCE_RADIUS_M,
+    accuracyBuffer: true,
+    nullIslandUnverifiable: true,
+  };
+}
+
+/**
+ * One photo's status under a policy: evaluatePhotoFence, then (buffer on) a valid fix whose reported accuracy is worse
+ * than the radius is downgraded to 'unverifiable'. `accuracyTooLow` tells the caller the downgrade happened.
+ */
+export function classifyPhotoFence(
+  geo: GpsCapture | null | undefined,
+  policy: PhotoFencePolicy,
+): { status: PhotoFenceStatus; accuracyTooLow: boolean } {
+  if (policy.nullIslandUnverifiable && geo && geo.lat === 0 && geo.lng === 0) {
+    return { status: 'unverifiable', accuracyTooLow: false };
+  }
+  const status = evaluatePhotoFence(geo, policy.reference, policy.radiusMeters);
+  const accuracyTooLow =
+    policy.accuracyBuffer &&
+    status !== 'unverifiable' &&
+    isValidGeo(geo) &&
+    typeof geo.accuracy === 'number' &&
+    Number.isFinite(geo.accuracy) &&
+    geo.accuracy > policy.radiusMeters;
+  return { status: accuracyTooLow ? 'unverifiable' : status, accuracyTooLow };
+}

@@ -57,6 +57,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     captureBankAtRedemption: false,
     offerTiles: false,
     salesImport: false,
+    wholesalerPayoutInclActivation: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: false,

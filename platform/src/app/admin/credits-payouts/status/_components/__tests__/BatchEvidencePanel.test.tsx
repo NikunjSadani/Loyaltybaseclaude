@@ -161,10 +161,14 @@ describe('BatchEvidencePanel — one file per request', () => {
 
     release();
     await screen.findByText('Uploaded 1 of 1 file(s).');
-    expect(onUploadingChange).toHaveBeenLastCalledWith(false);
-    const ev2 = new Event('beforeunload', { cancelable: true });
-    window.dispatchEvent(ev2);
-    expect(ev2.defaultPrevented).toBe(false);
+    await waitFor(() => expect(onUploadingChange).toHaveBeenLastCalledWith(false));
+    // The beforeunload listener is removed in an effect cleanup AFTER the "Uploaded" text renders —
+    // under full-suite load a synchronous check raced it (pre-push gate 2026-11-19). Poll a fresh event.
+    await waitFor(() => {
+      const ev2 = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(ev2);
+      expect(ev2.defaultPrevented).toBe(false);
+    });
   });
 
   it('unmount mid-upload aborts the in-flight request, stops the loop and sets no state', async () => {

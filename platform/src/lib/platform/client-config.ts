@@ -98,6 +98,11 @@ export interface FeatureFlags {
   // toggle (included in FeatureKey). Default OFF; Deoleo stays OFF. See
   // platform/docs/plans/SALES-IMPORT-PIPELINE-PLAN.md.
   salesImport: boolean;
+  // Wallet "Incl. Activation" note: when ON, a WHOLESALER partner's wallet Lifetime Payout card shows a small
+  // "Incl. Activation" line under the "Lifetime Payout" label (their lifetime payout includes activation
+  // payouts). Display-only; retailers never see it. This IS a gifsy-console toggle (included in FeatureKey).
+  // Default OFF; Bajaj ON (owner 2026-11-19); Deoleo stays OFF.
+  wholesalerPayoutInclActivation: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {

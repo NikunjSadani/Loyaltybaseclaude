@@ -451,3 +451,62 @@ describe('per-photo review helpers', () => {
     expect(gatingCameraFieldIds(allOptional, { opt: 'visibility-media/t1/o.jpg' })).toEqual(['opt']);
   });
 });
+
+// ─── applicableCameraFields (prod bug 2026-11-19: hidden conditional fence photo → "Unverifiable") ───
+import { applicableCameraFields } from './visibility-form.helper';
+
+describe('applicableCameraFields', () => {
+  const privilegeOnly = { fieldId: '__subProgram__', op: 'eq' as const, value: 'Privilege' };
+  const bajajForm: VisibilityFormSchema = {
+    fields: [
+      cameraField({ id: 'wtk11hn', label: 'Window 1', required: true, geotag: true, geoFenceRequired: true }),
+      { id: 'g1', type: 'GPS_POINT', label: 'Geo tag 1', required: false, order: 2 } as FormField,
+      cameraField({ id: 'np9d0cc', label: 'Window 2', required: false, geotag: true, geoFenceRequired: true, visibleWhen: privilegeOnly, requiredWhen: privilegeOnly }),
+      cameraField({ id: 'opt', label: 'Optional extra', required: false, geotag: true, geoFenceRequired: true }),
+    ],
+  } as VisibilityFormSchema;
+  const fence = (f: FormField) => f.geoFenceRequired === true;
+  const photo = { key: 'k', geo: { lat: 12.9, lng: 77.5 } };
+  const ids = (ctx: string, v: Record<string, unknown>) =>
+    applicableCameraFields(bajajForm, { ...v, ...outletContextValues({ programCategory: ctx }) }, fence).map((f) => f.id);
+
+  it('Elite / Unnati outlet: the Privilege-only Window 2 does not apply; an optional empty slot is skipped', () => {
+    expect(ids('Elite', { wtk11hn: photo })).toEqual(['wtk11hn']);
+    expect(ids('Unnati', { wtk11hn: photo })).toEqual(['wtk11hn']);
+  });
+
+  it('Privilege outlet: Window 2 applies (required by requiredWhen) even when empty — the required rule still bites', () => {
+    expect(ids('Privilege', { wtk11hn: photo })).toEqual(['wtk11hn', 'np9d0cc']);
+  });
+
+  it('a visible optional slot WITH a photo applies', () => {
+    expect(ids('Elite', { wtk11hn: photo, opt: photo })).toEqual(['wtk11hn', 'opt']);
+  });
+});
+
+describe('applicableCameraFields — chained condition (audit #3: same map as validation)', () => {
+  // B (text) only shows for Privilege; photo A shows / is required when B == 'x'. At an Elite outlet B is hidden, but
+  // validation evaluates A's clause on the RAW submitted map (B = 'x' was sent) → A is visible + required there.
+  const schema: VisibilityFormSchema = {
+    fields: [
+      { id: 'B', type: 'TEXT', label: 'B', required: false, order: 1, visibleWhen: { fieldId: '__subProgram__', op: 'eq', value: 'Privilege' } } as FormField,
+      cameraField({ id: 'A', label: 'A', required: false, geoFenceRequired: true, visibleWhen: { fieldId: 'B', op: 'eq', value: 'x' }, requiredWhen: { fieldId: 'B', op: 'eq', value: 'x' } }),
+    ],
+  } as VisibilityFormSchema;
+  const raw = { B: 'x', A: { key: 'k', geo: { lat: 12.9, lng: 77.5 } } };
+  const ctx = outletContextValues({ programCategory: 'Elite' });
+
+  it('validation treats A as visible + required on the raw map (chained clause)', () => {
+    const { errors, values } = validateSubmittedValues(schema, { ...raw, ...ctx });
+    expect(errors).toEqual([]);
+    expect(values).toHaveProperty('A');
+    expect(values).not.toHaveProperty('B'); // B projected out (hidden)
+  });
+
+  it('applicability evaluated on the SAME raw map keeps A (on the projected map it would wrongly drop it)', () => {
+    const { values } = validateSubmittedValues(schema, { ...raw, ...ctx });
+    const fence = (f: FormField) => f.geoFenceRequired === true;
+    expect(applicableCameraFields(schema, { ...raw, ...ctx }, fence, values).map((f) => f.id)).toEqual(['A']);
+    expect(applicableCameraFields(schema, { ...values, ...ctx }, fence).map((f) => f.id)).toEqual([]); // the old, mismatching map
+  });
+});

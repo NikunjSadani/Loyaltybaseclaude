@@ -484,6 +484,99 @@ describe('VisibilityCaptureService', () => {
     });
   });
 
+  // ── Prod bug 2026-11-19: conditional (Privilege-only) fence photo hidden at an Elite/Unnati outlet ───────────
+  // Bajaj form version cmwdgt7u2001e01s6ty73t1z5: Window 1 (required, fence) + Window 2 (fence, visible/required only
+  // when __subProgram__ == Privilege) + the two GPS points. Outlet-master coords (12.9, 77.5).
+  describe('conditional fence photos (outletMasterGeo tenants)', () => {
+    const privilegeOnly = { op: 'eq', value: 'Privilege', fieldId: '__subProgram__' };
+    const bajajForm = {
+      clientId: 't1', version: 7,
+      formSchema: {
+        fields: [
+          { id: 'wtk11hn', type: 'CAMERA', label: 'Window 1', required: true, order: 1, geotag: true, geoFenceRequired: true },
+          { id: 'g1', type: 'GPS_POINT', label: 'Geo tag 1', required: false, order: 2 },
+          { id: 'np9d0cc', type: 'CAMERA', label: 'Window 2', required: false, order: 3, geotag: true, geoFenceRequired: true, visibleWhen: privilegeOnly, requiredWhen: privilegeOnly },
+          { id: 'g2', type: 'GPS_POINT', label: 'Geo Tag 2', required: false, order: 4, visibleWhen: privilegeOnly, requiredWhen: privilegeOnly },
+        ],
+      },
+    };
+    const near = (key: string) => ({ key: `visibility-media/t1/${key}.jpg`, geo: { lat: 12.9003, lng: 77.5001, accuracy: 20 } }); // ~34 m
+    const far = (key: string) => ({ key: `visibility-media/t1/${key}.jpg`, geo: { lat: 12.95, lng: 77.55, accuracy: 10 } });
+    const outlet = (programCategory: string, gate = true) => {
+      mockPrisma.client.findUnique.mockResolvedValue(gate ? { features: { outletMasterGeo: true } } : null);
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: 12.9, longitude: 77.5, programCategory });
+      mockPrisma.visibilityForm.findUnique.mockResolvedValue(bajajForm);
+    };
+
+    it.each(['Elite', 'Unnati'])('%s outlet, only Window 1 inside → geoFenceOk TRUE, no GEO_UNVERIFIABLE', async (cat) => {
+      outlet(cat);
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: { wtk11hn: near('w1') } });
+      expect(res.geoFenceOk).toBe(true);
+      expect(res.flags).not.toContain('GEO_UNVERIFIABLE');
+      expect(mockPrisma.visibilityCapture.create.mock.calls[0][0].data.geoFenceOk).toBe(true);
+      expect(mockPrisma.visibilityCaptureSubmission.create.mock.calls[0][0].data.geoFenceOk).toBe(true);
+    });
+
+    it('Privilege outlet, both windows inside → TRUE', async () => {
+      outlet('Privilege');
+      const res = await service.submitCapture(user, {
+        outletId: 'o1',
+        formValues: { wtk11hn: near('w1'), np9d0cc: near('w2'), g2: { lat: 12.9003, lng: 77.5001, accuracy: 20 } },
+      });
+      expect(res.geoFenceOk).toBe(true);
+      expect(res.flags).not.toContain('GEO_UNVERIFIABLE');
+    });
+
+    it('Privilege outlet, Window 2 missing → the required-field error (as today)', async () => {
+      outlet('Privilege');
+      await expect(
+        service.submitCapture(user, { outletId: 'o1', formValues: { wtk11hn: near('w1'), g2: { lat: 12.9, lng: 77.5 } } }),
+      ).rejects.toThrow(/Window 2.*is required/);
+      expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+    });
+
+    it('Privilege outlet, Window 2 outside → BLOCKED', async () => {
+      outlet('Privilege');
+      await expect(
+        service.submitCapture(user, {
+          outletId: 'o1',
+          formValues: { wtk11hn: near('w1'), np9d0cc: far('w2'), g2: { lat: 12.95, lng: 77.55 } },
+        }),
+      ).rejects.toThrow('You are far from the outlet. Please go to the outlet and try again.');
+      expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+    });
+
+    it('audit #6: outlet-master tenant, Window 1 fix at 0,0 → unverifiable (allow + flag), never "far from the outlet"', async () => {
+      outlet('Elite');
+      const res = await service.submitCapture(user, {
+        outletId: 'o1',
+        formValues: { wtk11hn: { key: 'visibility-media/t1/w1.jpg', geo: { lat: 0, lng: 0, accuracy: 5 } } },
+      });
+      expect(res.geoFenceOk).toBeNull();
+      expect(res.flags).toContain('GEO_UNVERIFIABLE');
+      expect(mockPrisma.visibilityCapture.create.mock.calls[0][0].data.distanceMeters).toBeNull();
+    });
+
+    it('audit #6: NON-gated tenant, a 0,0 fix → unchanged (fenced against the KYC board reference → blocked)', async () => {
+      outlet('Elite', false);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5));
+      await expect(
+        service.submitCapture(user, {
+          outletId: 'o1',
+          formValues: { wtk11hn: { key: 'visibility-media/t1/w1.jpg', geo: { lat: 0, lng: 0, accuracy: 5 } } },
+        }),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('NON-gated tenant (Deoleo) → unchanged: the hidden fence slot still reads unverifiable (all fence fields, as before)', async () => {
+      outlet('Elite', false);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5));
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: { wtk11hn: near('w1') } });
+      expect(res.geoFenceOk).toBeNull();
+      expect(res.flags).toContain('GEO_UNVERIFIABLE');
+    });
+  });
+
   // ── First-approved-wins ──────────────────────────────────────────────────────
   it('409s when the window is already satisfied by an APPROVED capture', async () => {
     mockPrisma.visibilityCapture.findFirst.mockResolvedValue({ id: 'approvedCap' });

@@ -22,7 +22,12 @@ import {
   PhotoReview,
   PhotoReviews,
 } from './visibility-form.helper';
-import { evaluatePhotoFence, PhotoFenceStatus } from './geo-fence.helper';
+import {
+  classifyPhotoFence,
+  outletMasterFencePolicy,
+  PhotoFencePolicy,
+  PhotoFenceStatus,
+} from './geo-fence.helper';
 import {
   AdminListCapturesQueryDto,
   VISIBILITY_REJECT_REASON_CODES,
@@ -355,21 +360,16 @@ export class VisibilityReviewService {
     await this.assertEnabled(capture.clientId);
 
     const schema = await this.resolveFormSnapshot(capture.clientId, capture.formVersion);
-    // Per-photo geo-fence: resolve the SAME outlet reference geo the aggregate fence uses
-    // (the outlet owner-partner's latest APPROVED KYC board-photo geo) + the tenant's
-    // current fence radius, so each fence-required photo gets its own inside/outside/
-    // unverifiable status vs that reference. Both are null/default-safe.
+    // Per-photo geo-fence: the SAME policy the capture verdict uses (geo-fence.helper), so a badge can never disagree
+    // with the verdict. Outlet-master tenants (Bajaj, features.outletMasterGeo): outlet-master coordinates (guarded by
+    // isUsableReference), forced 200 m, accuracy buffer. Every other tenant: the outlet owner-partner's latest
+    // APPROVED KYC board-photo geo + the tenant's configured radius, no buffer (exactly as before).
     const config = (await this.tenantSettings.getEffectiveSettings(capture.clientId)).visibilityConfig;
-    const referenceGeo = await this.outletReferenceGeo(capture.clientId, capture.outletId);
+    const fencePolicy = await this.photoFencePolicy(capture.clientId, capture.outletId, config.geoFence.radiusMeters);
     // Per-photo review state (VISIBILITY-PER-PHOTO-APPROVAL) — attach each CAMERA field's
     // review (APPROVED/REJECTED/null=pending) so the FE can render per-photo controls.
     const reviews = readPhotoReviews(capture.photoReviews);
-    const media = this.extractMedia(
-      capture.formValues,
-      schema,
-      referenceGeo,
-      config.geoFence.radiusMeters,
-    ).map((m) => ({ ...m, review: reviews[m.fieldId] ?? null }));
+    const media = this.extractMedia(capture.formValues, schema, fencePolicy).map((m) => ({ ...m, review: reviews[m.fieldId] ?? null }));
     const geo = this.extractGeo(capture.formValues, schema);
 
     const dupMatches = await this.findDuplicateMatches(
@@ -453,8 +453,7 @@ export class VisibilityReviewService {
   private extractMedia(
     formValues: Prisma.JsonValue | null,
     schema: VisibilityFormSchema | null,
-    referenceGeo: { lat: number; lng: number } | null,
-    radiusMeters: number,
+    fencePolicy: PhotoFencePolicy,
   ): Array<{
     fieldId: string;
     label: string;
@@ -498,11 +497,28 @@ export class VisibilityReviewService {
       // Only a fence-required photo gets a status; evaluatePhotoFence returns
       // 'unverifiable' when the photo has no geo OR there is no reference geo.
       if (f.geoFenceRequired === true) {
-        ref.fenceStatus = evaluatePhotoFence(geo ?? null, referenceGeo, radiusMeters);
+        ref.fenceStatus = classifyPhotoFence(geo ?? null, fencePolicy).status;
       }
       out.push(ref);
     }
     return out;
+  }
+
+  /** The per-photo fence policy for this capture's outlet — the capture verdict's own resolution (see above). */
+  private async photoFencePolicy(clientId: string, outletId: string, configRadius: number): Promise<PhotoFencePolicy> {
+    const client = await this.prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
+    if ((client?.features as Record<string, unknown> | null)?.outletMasterGeo === true) {
+      const outlet = await this.prisma.outlet.findFirst({
+        where: { id: outletId, clientId },
+        select: { latitude: true, longitude: true },
+      });
+      return outletMasterFencePolicy(outlet ?? {});
+    }
+    return {
+      reference: await this.outletReferenceGeo(clientId, outletId),
+      radiusMeters: configRadius,
+      accuracyBuffer: false,
+    };
   }
 
   /**

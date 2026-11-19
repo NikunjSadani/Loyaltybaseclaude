@@ -16,7 +16,7 @@
  * it is within 24 h of the server clock (see isFreshFixTime). Returns the message, or null.
  */
 import { fixTimeProblem, isFreshFixTime, isRealFix, LOCATION_REQUIRED_VISIBILITY_MESSAGE } from '../common/location-gate.helper';
-import { parseGpsPoint } from './visibility-form.helper';
+import { applicableCameraFields, evaluateVisibleWhen, parseGpsPoint } from './visibility-form.helper';
 import { readMediaValue, type VisibilityFormSchema } from './visibility-types';
 
 export const VISIBILITY_FORM_HAS_NO_LOCATION_MESSAGE =
@@ -42,13 +42,25 @@ export function visibilityLocationRefusal(
   requestValues: Record<string, unknown> | undefined,
   /** The phone's submit-time fix (optional, new clients). */
   captureGeo?: unknown,
-  opts: { now?: Date; clientNow?: unknown } = {},
+  /**
+   * `evalValues` = the EXACT map submit validation evaluated (raw / merged submitted values + the server outlet
+   * context). When given, only the location-tagged photos that APPLY to this outlet need a fix (visible +
+   * required-or-captured — prod bug 2026-11-19), and only VISIBLE GPS fields count as a fresh fix. The "form has no
+   * location field" decision always looks at the whole form. Without it: every field (previous behaviour).
+   */
+  opts: { now?: Date; clientNow?: unknown; evalValues?: Record<string, unknown> } = {},
 ): string | null {
   const now = opts.now ?? new Date();
   const fresh = (g: unknown) => isFreshFixTime(fixTime(g), now, opts.clientNow);
   const fields = schema.fields ?? [];
-  const tagged = fields.filter((f) => f.type === 'CAMERA' && (f.geoFenceRequired === true || f.geotag === true));
-  const gpsPoints = fields.filter((f) => f.type === 'GPS_POINT');
+  const isTagged = (f: { type: string; geoFenceRequired?: boolean; geotag?: boolean }) =>
+    f.type === 'CAMERA' && (f.geoFenceRequired === true || f.geotag === true);
+  const taggedAll = fields.filter(isTagged);
+  // Which photos need a fix: only the applicable ones (visibility on the validation map, presence on the stored values).
+  const tagged = opts.evalValues ? applicableCameraFields(schema, opts.evalValues, isTagged, values) : taggedAll;
+  const gpsAll = fields.filter((f) => f.type === 'GPS_POINT');
+  // Which GPS fields can supply the fresh fix: only those visible for this outlet (a hidden Geo Tag 2 never counts).
+  const gpsPoints = opts.evalValues ? gpsAll.filter((f) => evaluateVisibleWhen(f, opts.evalValues!)) : gpsAll;
 
   // 1 + 2 — new tagged photos in this request must each carry a real, recent fix.
   const missing: string[] = [];
@@ -86,7 +98,9 @@ export function visibilityLocationRefusal(
   if (freshPhotoFix || freshGps || freshSubmit) return null;
 
   // 4 — name the form problem when the form itself cannot produce a location.
-  if (tagged.length === 0 && gpsPoints.length === 0 && !isRealFix(parseGpsPoint(captureGeo))) {
+  // Rule 4 looks at the WHOLE form (unfiltered): a form that has location fields never gets the "no location field"
+  // message, even when none of them applies to this outlet.
+  if (taggedAll.length === 0 && gpsAll.length === 0 && !isRealFix(parseGpsPoint(captureGeo))) {
     return VISIBILITY_FORM_HAS_NO_LOCATION_MESSAGE;
   }
   return LOCATION_REQUIRED_VISIBILITY_MESSAGE;
