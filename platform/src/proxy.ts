@@ -57,7 +57,12 @@ const PUBLIC_PATHS = [
 // branding images (logo / wordmarks / favicon) that the SIGN-IN page and browser tab render
 // BEFORE login; the backend route is @Public and only ever serves validated `branding/` image
 // keys (api tenant-routing/public-branding-asset.controller.ts), so the edge must not 401 it.
-const PUBLIC_EXACT_PATHS = new Set(['/api/public/branding-assets'])
+// `/api/help/media` (Help & videos) streams one help video/poster authorised SOLELY by its short-lived signed
+// `token` query param (backend @Public, api/src/help/help-media.service.ts). An HTML5 <video> fetches it with plain
+// Range requests that never go through the client's silent-refresh path, so once the ~60 m access cookie lapses
+// mid-video the edge gate would 401 the next range and break playback — it must bypass the gate like the other
+// tokenized viewers. Exact match: nothing else lives under it.
+const PUBLIC_EXACT_PATHS = new Set(['/api/public/branding-assets', '/api/help/media'])
 
 /** Headers only the proxy may set on the forwarded request (any client-sent value is dropped). */
 const INTERNAL_REQUEST_HEADERS = [

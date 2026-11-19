@@ -103,6 +103,10 @@ export interface FeatureFlags {
   // payouts). Display-only; retailers never see it. This IS a gifsy-console toggle (included in FeatureKey).
   // Default OFF; Bajaj ON (owner 2026-11-19); Deoleo stays OFF.
   wholesalerPayoutInclActivation: boolean;
+  // Help & videos: when ON, the sales app Profile and the partner app Profile show a "Help & videos" entry (short
+  // how-to videos + numbered steps authored per tenant in the Gifsy console). This IS a gifsy-console toggle
+  // (included in FeatureKey). Default OFF; Deoleo stays OFF. See platform/docs/plans/HELP-VIDEOS.md.
+  helpVideos: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {

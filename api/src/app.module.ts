@@ -55,6 +55,7 @@ import { OffersModule }       from './offers/offers.module';
 import { SalesImportModule }  from './sales-import/sales-import.module';
 import { ExportsModule }      from './exports/exports.module';
 import { VoucherDispersalModule } from './voucher-dispersal/voucher-dispersal.module';
+import { HelpModule }         from './help/help.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -121,6 +122,8 @@ import { VoucherDispersalModule } from './voucher-dispersal/voucher-dispersal.mo
     WhatsappBroadcastsModule,
     TenantRoutingModule,
     OffersModule,
+    // Help & videos (per-tenant guides; dormant unless features.helpVideos) — platform/docs/plans/HELP-VIDEOS.md.
+    HelpModule,
     // Sales Import (DMS invoice-line file → importer-owned KPI achievements). Dormant: every route
     // 403s unless features.salesImport === true. platform/docs/plans/SALES-IMPORT-PIPELINE-PLAN.md.
     SalesImportModule,
