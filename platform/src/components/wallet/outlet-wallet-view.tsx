@@ -41,6 +41,9 @@ export interface ApiWalletBalance {
   lifetimeRedeemed: number;
   currency?:        string;
   conversionRate?:  number;
+  /** Negative wallets only (owner decision 2, 2026-11-19). */
+  owedPoints?:       number;
+  owedFromReversal?: boolean;
 }
 
 /** A row of GET /api/wallet/statement (the FULL, unpaginated statement) — also the row shape of
@@ -85,6 +88,8 @@ export function mapApiBalance(api: ApiWalletBalance): WalletBalance {
     redeemed:   api.redeemedPoints,
     expired:    api.expiredPoints,
     available:  api.redeemablePoints,
+    ...(api.owedPoints !== undefined ? { owedPoints: api.owedPoints } : {}),
+    ...(api.owedFromReversal !== undefined ? { owedFromReversal: api.owedFromReversal } : {}),
   };
 }
 
@@ -113,6 +118,7 @@ export function mapApiTransaction(t: ApiWalletTransaction): WalletTransaction {
     narration,
     reversedById:   null,
     reversalReason: null,
+    reversalRef:    t.referenceType === 'CREDIT_REVERSAL' ? t.referenceId : null,
     createdAt:      new Date(t.date),
   };
 }
@@ -243,6 +249,8 @@ export interface OutletWalletViewProps {
   loadStatementDoc: (range: { from: string; to: string }) => Promise<StatementDoc>;
   /** Copy for the statement-load error (the partner's own wallet keeps the default "your"). */
   statementErrorMessage?: string;
+  /** Sales / admin views: show the reversal reference under a "Credit reversed" row (owner decision 2, 2026-11-19). */
+  showReversalReference?: boolean;
 }
 
 const DEFAULT_STATEMENT_ERROR = "Couldn't load your statement. Please try again.";
@@ -250,7 +258,7 @@ const DEFAULT_STATEMENT_ERROR = "Couldn't load your statement. Please try again.
 export function OutletWalletView({
   balance, transactions, payouts, statementError,
   showPointsCard, showPayoutCard, inclActivationNote, loyaltyEnabled, outletType, outletCode,
-  loadStatementDoc, statementErrorMessage,
+  loadStatementDoc, statementErrorMessage, showReversalReference = false,
 }: OutletWalletViewProps) {
   /* Earn / Burn filter (points rows only) */
   const [earnBurnFilter, setEarnBurnFilter] = useState<'all' | 'earn' | 'burn'>('all');
@@ -527,7 +535,7 @@ export function OutletWalletView({
           <div className="divide-y divide-gray-50 px-4">
             {displayedRows.map((r) =>
               r.kind === 'points' ? (
-                <TransactionItem key={`pts-${r.tx.id}`} transaction={r.tx} />
+                <TransactionItem key={`pts-${r.tx.id}`} transaction={r.tx} showReversalRef={showReversalReference} />
               ) : (
                 <PayoutStatementRow key={`pay-${r.entry.id}`} entry={r.entry} />
               ),

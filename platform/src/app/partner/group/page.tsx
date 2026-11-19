@@ -41,7 +41,10 @@ interface GroupOutlet {
 }
 
 interface GroupTotals {
+  /** Σ POSITIVE outlet balances (audit item 2, 2026-11-19 — a child in debt never nets against the others). */
   redeemablePoints: number;
+  /** What the group's negative outlets owe, repaid from their future earnings (absent on older APIs → 0). */
+  owedPoints?:      number;
   earnedPoints:     number;
   redeemedPoints:   number;
   expiredPoints:    number;
@@ -167,6 +170,12 @@ function GroupTotalsCard({ totals, conversionRate }: { totals: GroupTotals; conv
         </div>
       </div>
 
+      {(totals.owedPoints ?? 0) > 0 && (
+        <p data-testid="group-owed-points" className="mt-2 text-[11px] leading-snug text-amber-200">
+          Outlets in this group owe {formatPoints(totals.owedPoints ?? 0)} pts — repaid from their next earnings (not counted above).
+        </p>
+      )}
+
       {/* Secondary roll-ups */}
       <div className="grid grid-cols-2 gap-2.5 mt-4">
         <div>
@@ -220,8 +229,18 @@ function OutletRow({ outlet, conversionRate }: { outlet: GroupOutlet; conversion
       <div className="grid grid-cols-3 gap-2 mt-2.5">
         <div>
           <p className="text-[10px] text-gray-400 uppercase tracking-wide">Redeemable</p>
-          <p className="text-sm font-bold text-gray-900">{formatPoints(outlet.redeemablePoints)}</p>
-          <p className="text-[10px] text-gray-400 mt-0.5">≈ {fmtInr(redeemableInr)}</p>
+          {outlet.redeemablePoints < 0 ? (
+            // Owner decision 2 (2026-11-19): a negative balance as it is — no ₹ value
+            <>
+              <p className="text-sm font-bold text-amber-700">−{formatPoints(-outlet.redeemablePoints)}</p>
+              <p data-testid="group-outlet-negative" className="text-[10px] text-amber-700 mt-0.5">Owed — repaid from next earnings</p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-bold text-gray-900">{formatPoints(outlet.redeemablePoints)}</p>
+              <p className="text-[10px] text-gray-400 mt-0.5">≈ {fmtInr(redeemableInr)}</p>
+            </>
+          )}
         </div>
         <div>
           <p className="text-[10px] text-gray-400 uppercase tracking-wide">Earned</p>

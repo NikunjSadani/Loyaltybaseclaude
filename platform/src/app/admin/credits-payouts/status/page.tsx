@@ -16,6 +16,7 @@ import { jsonToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
 import BatchEvidencePanel from './_components/BatchEvidencePanel';
 import ReversalEngineAttentionBanner from './_components/ReversalEngineAttentionBanner';
+import WalletsInDebtSection from './_components/WalletsInDebtSection';
 import { formatInrPaise } from '@/lib/money-format';
 import { ENTRY_STATUS_TEXT } from '@/lib/payout-reversal-copy';
 
@@ -518,6 +519,8 @@ export default function PayoutStatusPage() {
       {engineMode !== null && engineMode !== 'LEGACY' && (
         <ReversalEngineAttentionBanner canLiftPause={session.role === 'GIFSY_ADMIN'} />
       )}
+      {/* Audit item 9 (2026-11-19): every wallet in debt + the reversal(s) behind it (nothing on a LEGACY tenant). */}
+      {engineMode !== null && engineMode !== 'LEGACY' && <WalletsInDebtSection />}
 
       {/* Filter */}
       {periods.length > 1 && (
@@ -857,7 +860,7 @@ export default function PayoutStatusPage() {
                       ? 'Payout reversals cover whole payout entries only: enter the full amount of one or more entries for this outlet and field. Unpaid entries are cancelled; a paid one becomes a receivable to recover off-platform.'
                       : engineMode === 'V2'
                         // Owner decision 2026-11-19 (V2 engine only): an over-reversal becomes wallet debt, never a write-off.
-                        ? 'Points are taken back from the wallet that received the credit. Points it no longer holds (already redeemed or expired) are recorded as debt on that wallet and repaid from its future earnings — nothing is written off. The wallet cannot redeem while it is in debt.'
+                        ? 'Points are taken back from the wallet that received the credit. Points of that credit that already expired count as recovered — nothing is taken for them. Points it no longer holds (already redeemed) are recorded as debt on that wallet and repaid from its future earnings — nothing is written off. The outlet can’t redeem while the balance is below zero.'
                         : 'Points are removed from the outlet’s wallet (never below 0; points already redeemed are reported as a shortfall). While a wallet carries a negative balance, reversals on it are paused — contact Gifsy.'}
                   </p>
                 </div>

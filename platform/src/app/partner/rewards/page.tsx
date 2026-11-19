@@ -215,6 +215,14 @@ function deliveryLabel(category: string): string {
 function fmtInr(n: number) { return `₹${n.toLocaleString('en-IN')}`; }
 
 /**
+ * Owner decision 2 (2026-11-19): a NEGATIVE balance has no ₹ value and no "max" — every redeem screen says this
+ * instead (the balance itself is shown as it is, e.g. "−2,986 pts").
+ */
+const NEGATIVE_BALANCE_TEXT = 'Not available while your balance is negative';
+/** Points with a real minus sign for a negative balance ("−2,986"). */
+function fmtPts(n: number) { return n < 0 ? `−${formatPoints(-n)}` : formatPoints(n); }
+
+/**
  * A FREE_AMOUNT (variable) item: pointsCost 0 with a redemption band (min and/or max set) —
  * the redeemer supplies a ₹ amount and points are computed at the tenant conversion rate.
  * Mirrors `inferVoucherType` (line ~134) and the backend predicate. Used purely to avoid
@@ -561,7 +569,11 @@ function GiftDetailSheet({
                 <p className={`text-2xl font-bold ${canAfford ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`}>
                   {formatPoints(gift.points)} pts
                 </p>
-                {!canAfford && <p className="text-xs text-red-500 mt-0.5 font-semibold">Need {formatPoints(needMore)} more pts</p>}
+                {!canAfford && (
+                  <p className="text-xs text-red-500 mt-0.5 font-semibold">
+                    {myBalance < 0 ? NEGATIVE_BALANCE_TEXT : `Need ${formatPoints(needMore)} more pts`}
+                  </p>
+                )}
                 {canAfford && <p className="text-xs text-emerald-600 mt-0.5 font-medium">{formatPoints(myBalance - gift.points)} pts remaining after</p>}
               </div>
               <div className="text-right">
@@ -771,6 +783,8 @@ function VoucherRedeemSheet({
     ? `Minimum redemption is ${fmtInr(minAmt)}`
     : aboveMax
     ? `Maximum redemption is ${fmtInr(maxAmt ?? 0)}`
+    : !isFixed && freeAmt > 0 && myBalance < 0
+    ? NEGATIVE_BALANCE_TEXT
     : !isFixed && hasRate && freeAmt > 0 && ptsNeeded > myBalance
     ? `Exceeds your balance (max ${fmtInr(maxAffordableInr ?? 0)})`
     : '';
@@ -894,7 +908,13 @@ function VoucherRedeemSheet({
           {/* Balance display */}
           <div className="bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3 flex items-center justify-between">
             <p className="text-xs text-emerald-700 font-medium">Your balance</p>
-            <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {maxAffordableInr !== null ? fmtInr(maxAffordableInr) : '—'}</p>
+            {myBalance < 0 ? (
+              <p data-testid="voucher-balance-negative" className="text-sm font-bold text-amber-700 text-right">
+                {fmtPts(myBalance)} pts · {NEGATIVE_BALANCE_TEXT}
+              </p>
+            ) : (
+              <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {maxAffordableInr !== null ? fmtInr(maxAffordableInr) : '—'}</p>
+            )}
           </div>
 
           {/* Fixed: show points cost */}
@@ -1111,6 +1131,8 @@ function CashPayoutSheet({
     ? ''
     : inrAmt > 0 && inrAmt < minInr
     ? `Minimum redemption is ${fmtInr(minInr)}`
+    : inrAmt > 0 && myBalance < 0
+    ? NEGATIVE_BALANCE_TEXT
     : maxInr !== null && inrAmt > maxInr
     ? `Exceeds balance (max ${fmtInr(maxInr)})`
     : '';
@@ -1203,7 +1225,13 @@ function CashPayoutSheet({
           {/* Balance */}
           <div className="bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3 flex items-center justify-between">
             <p className="text-xs text-emerald-700 font-medium">Available balance</p>
-            <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {maxInr !== null ? fmtInr(maxInr) : '—'}</p>
+            {myBalance < 0 ? (
+              <p data-testid="cash-balance-negative" className="text-sm font-bold text-amber-700 text-right">
+                {fmtPts(myBalance)} pts · {NEGATIVE_BALANCE_TEXT}
+              </p>
+            ) : (
+              <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {maxInr !== null ? fmtInr(maxInr) : '—'}</p>
+            )}
           </div>
 
           {/* Amount input (free-amount) */}
@@ -1900,8 +1928,12 @@ export default function RewardsPage() {
       {/* Balance + wishlist */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1.5">
-          <span className="text-sm font-bold text-[var(--brand-primary)]">{formatPoints(balance)} pts</span>
-          <span className="text-[10px] text-emerald-600 font-medium">= {fmtInr(Math.floor(balance / effectiveRate))}</span>
+          <span data-testid="rewards-balance" className={`text-sm font-bold ${balance < 0 ? 'text-amber-700' : 'text-[var(--brand-primary)]'}`}>{fmtPts(balance)} pts</span>
+          {balance < 0 ? (
+            <span data-testid="rewards-balance-negative" className="text-[10px] text-amber-700 font-medium">{NEGATIVE_BALANCE_TEXT}</span>
+          ) : (
+            <span className="text-[10px] text-emerald-600 font-medium">= {fmtInr(Math.floor(balance / effectiveRate))}</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* Wishlist pill — the ONLY Wishlist control: toggles the ♥ filter on/off and ensures the
@@ -2026,6 +2058,8 @@ export default function RewardsPage() {
                 <Banknote className="h-4 w-4" />
                 {!cashItem
                   ? 'Cash payout unavailable'
+                  : balance < 0
+                  ? NEGATIVE_BALANCE_TEXT
                   : balance < cashMinPoints
                   ? `Need ${formatPoints(cashMinPoints - balance)} more pts`
                   : 'Redeem for Cash'}
@@ -2152,7 +2186,9 @@ export default function RewardsPage() {
                       {!canAfford && (
                         <div className="absolute inset-0 flex items-end justify-center pb-2">
                           <span className="text-[9px] font-bold bg-gray-800/70 text-white px-2 py-0.5 rounded-full">
-                            {`Need ${formatPoints(needPoints - balance)} more${gift.voucherType === 'FREE_AMOUNT' ? '' : ' pts'}`}
+                            {balance < 0
+                              ? NEGATIVE_BALANCE_TEXT
+                              : `Need ${formatPoints(needPoints - balance)} more${gift.voucherType === 'FREE_AMOUNT' ? '' : ' pts'}`}
                           </span>
                         </div>
                       )}

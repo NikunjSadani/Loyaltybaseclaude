@@ -39,6 +39,8 @@ interface FinanceDashboardData {
     conversionRate: number;
     redeemableRupees: number;
     lockedRupees: number;
+    /** Audit item 1 (2026-11-19): Σ debt of negative wallets — reported separately, never netted (absent on older APIs). */
+    owedPoints?: number;
   };
   breakage: {
     period: string;
@@ -259,7 +261,7 @@ export default function AdminFinanceDashboardPage() {
         <StatCard
           label="Redeemable Liability"
           value={fmtRs(liability.redeemableRupees)}
-          sub={`${fmtInt(liability.redeemablePoints)} pts redeemable`}
+          sub={`${fmtInt(liability.redeemablePoints)} pts redeemable${(liability.owedPoints ?? 0) > 0 ? ` · ${fmtInt(liability.owedPoints ?? 0)} pts owed (debt, not netted)` : ''}`}
           icon={Coins} iconBg="bg-emerald-100" iconColor="text-emerald-700" valColor="text-emerald-700"
         />
         <StatCard

@@ -7,11 +7,13 @@ interface TransactionItemProps {
   transaction: WalletTransaction;
   /** Set to true for locked-section rows (LOCK / UNLOCK) */
   isLockedEntry?: boolean;
+  /** Sales / admin views: show "Reversal ref <id>" under a credit-reversal row (owner decision 2, 2026-11-19). */
+  showReversalRef?: boolean;
 }
 
 const MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-export function TransactionItem({ transaction: tx, isLockedEntry = false }: TransactionItemProps) {
+export function TransactionItem({ transaction: tx, isLockedEntry = false, showReversalRef = false }: TransactionItemProps) {
   // IST calendar day/month (istDateKey → "YYYY-MM-DD" in Asia/Kolkata).
   const key   = istDateKey(tx.createdAt);
   const day   = key ? key.slice(8, 10) : '';
@@ -64,6 +66,11 @@ export function TransactionItem({ transaction: tx, isLockedEntry = false }: Tran
         {tx.narration && (
           <p data-testid="transaction-narration" className="text-[10px] text-gray-500 mt-0.5 leading-snug">{tx.narration}</p>
         )}
+        {showReversalRef && tx.reversalRef && (
+          <p data-testid="transaction-reversal-ref" className="text-[10px] text-gray-400 mt-0.5 font-mono break-all">
+            Reversal ref {tx.reversalRef}
+          </p>
+        )}
       </div>
 
       {/* Amount + running balance */}
@@ -76,7 +83,7 @@ export function TransactionItem({ transaction: tx, isLockedEntry = false }: Tran
         </p>
         {!isLockedEntry && (
           <p className="text-[10px] text-gray-400 mt-0.5 whitespace-nowrap">
-            Bal {formatPoints(tx.balanceAfter)}
+            Bal {tx.balanceAfter < 0 ? `−${formatPoints(-tx.balanceAfter)}` : formatPoints(tx.balanceAfter)}
           </p>
         )}
       </div>

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Wallet, Store, Plus, Minus, AlertTriangle } from 'lucide-react';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { TransactionItem } from '@/components/wallet/transaction-item';
+import { formatSignedPoints, negativeBalanceNote } from '@/lib/wallet-negative';
 import { useAdminSession } from '@/lib/admin-session';
 import { formatPoints } from '@/lib/utils';
 import { TransactionType, WalletBucket, type WalletTransaction } from '@/types';
@@ -31,6 +32,9 @@ interface ApiSummary {
     lifetimeExpired:  number;
     currency:         string;
     conversionRate:   number;
+    /** Negative wallets only (owner decision 2, 2026-11-19). */
+    owedPoints?:       number;
+    owedFromReversal?: boolean;
   };
 }
 
@@ -96,6 +100,7 @@ function mapApiTransaction(t: ApiTransaction): WalletTransaction {
     narration,
     reversedById:   null,
     reversalReason: null,
+    reversalRef:    t.referenceType === 'CREDIT_REVERSAL' ? t.referenceId : null,
     createdAt:      new Date(t.date),
   };
 }
@@ -488,14 +493,29 @@ export default function OutletWalletPage() {
               {/* Headline: available-to-redeem + ₹-equivalent */}
               <div className="bg-white rounded-xl border border-gray-200 p-5">
                 <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide">Available to redeem</p>
-                <p className="text-3xl font-bold text-gray-900 mt-1 break-words">
-                  {formatPoints(wallet.redeemablePoints)}{' '}
+                <p
+                  data-testid="admin-available-to-redeem"
+                  className={`text-3xl font-bold mt-1 break-words ${wallet.redeemablePoints < 0 ? 'text-amber-700' : 'text-gray-900'}`}
+                >
+                  {formatSignedPoints(wallet.redeemablePoints)}{' '}
                   <span className="text-base font-medium text-gray-400">pts</span>
                 </p>
-                <p className="text-xs text-gray-500 mt-1">
-                  ≈ {inrEquivalent(wallet.redeemablePoints, wallet.conversionRate)} redeemable value
-                  {wallet.conversionRate > 0 ? ` · ${wallet.conversionRate} pt/₹` : ''}
-                </p>
+                {wallet.redeemablePoints < 0 ? (
+                  // Owner decision 2 (2026-11-19): a negative balance shown as it is, with what it means — never a ₹ value.
+                  <p data-testid="admin-negative-balance-note" className="text-xs text-amber-700 mt-1">
+                    {negativeBalanceNote({
+                      redeemable: wallet.redeemablePoints,
+                      owedPoints: wallet.owedPoints,
+                      owedFromReversal: wallet.owedFromReversal,
+                    })}{' '}
+                    Not available to redeem while the balance is negative.
+                  </p>
+                ) : (
+                  <p className="text-xs text-gray-500 mt-1">
+                    ≈ {inrEquivalent(wallet.redeemablePoints, wallet.conversionRate)} redeemable value
+                    {wallet.conversionRate > 0 ? ` · ${wallet.conversionRate} pt/₹` : ''}
+                  </p>
+                )}
               </div>
 
               {/* Full bucket breakdown */}
@@ -514,7 +534,7 @@ export default function OutletWalletPage() {
                   ] as const).map(([label, value]) => (
                     <div key={label}>
                       <dt className="text-gray-400">{label}</dt>
-                      <dd className="text-sm font-semibold text-gray-800 mt-0.5">{formatPoints(value)} pts</dd>
+                      <dd className="text-sm font-semibold text-gray-800 mt-0.5">{formatSignedPoints(value)} pts</dd>
                     </div>
                   ))}
                 </dl>
@@ -549,7 +569,7 @@ export default function OutletWalletPage() {
               ) : (
                 <div className="divide-y divide-gray-50 px-4">
                   {transactions.map((tx) => (
-                    <TransactionItem key={tx.id} transaction={tx} />
+                    <TransactionItem key={tx.id} transaction={tx} showReversalRef />
                   ))}
                 </div>
               )}
