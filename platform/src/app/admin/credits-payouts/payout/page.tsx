@@ -183,6 +183,8 @@ interface Reversal {
   remarks?:       string | null;
   /** What the requester typed when raising the reversal (D5). */
   requestRemarks?: string | null;
+  /** Approved POINTS reversals only: the server-written plain-words outcome (see PointsOutcome). */
+  pointsOutcome?: PointsOutcome;
   /**
    * WP5 — present only for a PAYOUT reversal raised under the V2 reversal engine (or SHADOW before 2026-11-16): the whole entries it
    * holds (RESERVED while pending) or consumed. Absent for every LEGACY-engine reversal.
@@ -281,6 +283,22 @@ interface PayoutOutcome {
   receivablePaise: number;
   tdsCreditPaise?: number;
   released:        Array<{ entryId: string; amountPaise: number }>;
+}
+
+/**
+ * The plain-words outcome of a POINTS reversal (PATCH response + reversal list `pointsOutcome`, every tenant), written by
+ * the server — shown verbatim. V2 (owner 2026-11-19): what the wallet no longer holds is "recorded as debt, repaid from
+ * future earnings"; LEGACY: it is "not recovered — already spent, written off (settle off-platform)".
+ */
+interface PointsOutcome {
+  headline: string;
+  summary:  string;
+  lines:    string[];
+  reversed: number;
+  recovered: number;
+  debtRestored: number;
+  owed: number;
+  shortfall: number;
 }
 
 const rupees = formatInrPaise;
@@ -755,7 +773,17 @@ function PayoutPageInner() {
         setRevMsg(json?.error ?? `Failed to process reversal (HTTP ${res.status})`);
       } else {
         const o = json.data?.payoutOutcome as PayoutOutcome | undefined;
-        setRevOutcome(o ? describePayoutOutcome(o, actionRev) : null);
+        const po = json.data?.pointsOutcome as PointsOutcome | undefined;
+        setRevOutcome(
+          o
+            ? describePayoutOutcome(o, actionRev)
+            : po && typeof po.headline === 'string'
+              ? {
+                  title: `${po.headline}${actionRev ? ` — ${actionRev.outletName} / ${actionRev.fieldName}` : ''}`,
+                  lines: Array.isArray(po.lines) && po.lines.length > 1 ? po.lines : [],
+                }
+              : null,
+        );
         setRevAction(null);
         setRevAmount('');
         setRevRemarks('');
@@ -1545,7 +1573,8 @@ function PayoutPageInner() {
                   const fmt = (v: number) =>
                     isPayout ? rupees(v) : `${v.toLocaleString('en-IN')} pts`;
                   const entries = rev.payoutEntries ?? [];
-                  const hasDetails = entries.length > 0 || !!rev.requestRemarks || !!rev.remarks;
+                  const outcomeText = !isPayout && typeof rev.pointsOutcome?.summary === 'string' ? rev.pointsOutcome.summary : null;
+                  const hasDetails = entries.length > 0 || !!rev.requestRemarks || !!rev.remarks || !!outcomeText;
                   return (
                     <Fragment key={rev.id}>
                     <tr className={hasDetails ? '' : 'border-b border-gray-100'}>
@@ -1571,6 +1600,11 @@ function PayoutPageInner() {
                     {hasDetails && (
                       <tr className="border-b border-gray-100" data-testid={`processed-details-${rev.id}`}>
                         <td colSpan={7} className="pb-2 pr-3 text-gray-600 space-y-0.5">
+                          {outcomeText && (
+                            <p className="break-words" data-testid={`points-outcome-${rev.id}`}>
+                              <span className="text-gray-400">Outcome:</span> {outcomeText}
+                            </p>
+                          )}
                           {rev.requestRemarks && (
                             <p className="break-words"><span className="text-gray-400">Requester&apos;s note:</span> {rev.requestRemarks}</p>
                           )}

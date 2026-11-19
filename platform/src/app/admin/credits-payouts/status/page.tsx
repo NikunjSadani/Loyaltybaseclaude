@@ -855,7 +855,10 @@ export default function PayoutStatusPage() {
                   <p className="text-xs text-gray-500">
                     {revTarget.awardType === 'PAYOUT'
                       ? 'Payout reversals cover whole payout entries only: enter the full amount of one or more entries for this outlet and field. Unpaid entries are cancelled; a paid one becomes a receivable to recover off-platform.'
-                      : 'Points are removed from the outlet’s wallet (never below 0; points already redeemed are reported as a shortfall). While a wallet carries a negative balance, reversals on it are paused — contact Gifsy.'}
+                      : engineMode === 'V2'
+                        // Owner decision 2026-11-19 (V2 engine only): an over-reversal becomes wallet debt, never a write-off.
+                        ? 'Points are taken back from the wallet that received the credit. Points it no longer holds (already redeemed or expired) are recorded as debt on that wallet and repaid from its future earnings — nothing is written off. The wallet cannot redeem while it is in debt.'
+                        : 'Points are removed from the outlet’s wallet (never below 0; points already redeemed are reported as a shortfall). While a wallet carries a negative balance, reversals on it are paused — contact Gifsy.'}
                   </p>
                 </div>
                 )}
