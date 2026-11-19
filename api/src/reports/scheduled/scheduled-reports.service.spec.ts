@@ -175,7 +175,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
         { id: 'bajaj', internalName: 'bajaj', status: 'ACTIVE', branding: { displayName: 'Bajaj' }, features: { requireLocation: true } },
         { id: 'deoleo', internalName: 'Deoleo', status: 'ACTIVE', branding: {}, features: {} },
       ]);
-      prisma.auditLog.count.mockImplementation(async ({ where }: any) => (where.actor.clientId === 'bajaj' ? 2 : 0));
+      prisma.auditLog.count.mockImplementation(async ({ where }: any) => (where.metadata.equals === 'bajaj' ? 2 : 0));
       setRecipients({ dailyDigest: ['ops@gifsy.in'] });
       await svc.runDailyReports(NOW);
       const html: string = sendEmail.mock.calls[0][0].html;
@@ -184,14 +184,16 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       expect(bajaj).toContain('data-section="Location"');
       expect(bajaj).toContain('blocked outside the 200 m fence <strong style="color:#b45309;">2</strong>');
       expect(deoleo).not.toContain('data-section="Location"');
+      // Loaded ONLY for the switch-on tenant — Deoleo is never queried.
+      expect(prisma.auditLog.count).toHaveBeenCalledTimes(1);
       for (const [arg] of prisma.auditLog.count.mock.calls) {
         expect(arg.where.entityType).toBe('LOCATION_FENCE_BLOCK');
-        expect(['bajaj', 'deoleo']).toContain(arg.where.actor.clientId);
+        expect(arg.where.metadata).toEqual({ path: ['clientId'], equals: 'bajaj' });
       }
       const locKyc = prisma.kycSubmission.count.mock.calls.filter(([a]: any) => a.where?.user?.role);
       expect(locKyc.length).toBeGreaterThan(0);
       for (const [arg] of locKyc) {
-        expect(['bajaj', 'deoleo']).toContain((arg as any).where.user.clientId);
+        expect((arg as any).where.user.clientId).toBe('bajaj');
         expect((arg as any).where.user.role.in).toEqual(expect.arrayContaining(['SALES_ISR', 'SALES_SO']));
       }
     });

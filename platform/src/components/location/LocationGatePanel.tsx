@@ -2,10 +2,12 @@
 
 /**
  * LocationGatePanel — the full-panel "location needed" screen shown INSTEAD of the KYC wizard / visibility capture
- * form while the location gate is blocking (docs/plans/LOCATION-GATE.md). Two states:
- *   • checking — "Checking your location…" (polite live region);
- *   • blocked  — a platform-specific guide (Android Chrome / iPhone Safari / installed iPhone app / computer) with a
- *                "Test again" button. The heading takes focus when the guide appears, so screen-reader users hear it.
+ * form while the location gate is blocking (docs/plans/LOCATION-GATE.md). The flow behind it stays mounted (hidden),
+ * so nothing the rep entered is lost. Two states:
+ *   • checking — "Checking your location…" (polite live region) — first check only;
+ *   • blocked  — a platform-specific guide with a "Test again" button. The heading takes focus when the guide first
+ *                appears; during a re-test the guide STAYS (button reads "Checking…", aria-disabled so focus is kept),
+ *                and each result is announced in a polite live region.
  */
 import { useEffect, useRef } from 'react';
 import { Loader2, MapPinOff, RefreshCw } from 'lucide-react';
@@ -17,19 +19,19 @@ export function LocationGatePanel({
   purpose,
   className = '',
 }: {
-  gate: Pick<LocationGateState, 'status' | 'reason' | 'platform' | 'recheck'>;
+  gate: Pick<LocationGateState, 'status' | 'reason' | 'platform' | 'recheck' | 'testing' | 'attempts'>;
   /** What the rep is trying to do — "start or submit a KYC" / "capture visibility". */
   purpose: string;
   className?: string;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const blocked = gate.status === 'blocked' && gate.reason !== null;
-  const checking = gate.status === 'checking';
+  const testing = gate.testing;
 
-  // Move focus to the guide's heading when it appears (or the reason changes) so it is announced.
+  // Focus the heading when the guide FIRST appears (not on every re-test — the button keeps focus then).
   useEffect(() => {
     if (blocked) headingRef.current?.focus();
-  }, [blocked, gate.reason]);
+  }, [blocked]);
 
   if (!blocked) {
     return (
@@ -49,6 +51,11 @@ export function LocationGatePanel({
   }
 
   const guide = locationGuide(gate.platform, gate.reason!);
+  const announcement = testing
+    ? 'Checking your location…'
+    : gate.attempts > 1
+      ? `Still no location. ${guide.title}.`
+      : '';
   return (
     <section
       data-testid="location-gate-blocked"
@@ -87,15 +94,22 @@ export function LocationGatePanel({
       <button
         type="button"
         data-testid="location-gate-test-again"
-        onClick={() => void gate.recheck()}
-        disabled={checking}
-        className="mt-5 w-full py-3 rounded-xl text-sm font-bold bg-[var(--brand-primary)] text-white disabled:opacity-50 flex items-center justify-center gap-2"
+        onClick={() => {
+          if (!testing) void gate.recheck();
+        }}
+        aria-disabled={testing}
+        className={`mt-5 w-full py-3 rounded-xl text-sm font-bold bg-[var(--brand-primary)] text-white flex items-center justify-center gap-2 ${testing ? 'opacity-60 cursor-wait' : ''}`}
       >
-        {checking ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
-        {checking ? 'Checking…' : 'Test again'}
+        {testing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
+        {testing ? 'Checking…' : 'Test again'}
       </button>
-      <p className="sr-only" role="status" aria-live="polite">
-        {checking ? 'Checking your location…' : ''}
+      {!testing && gate.attempts > 1 && (
+        <p data-testid="location-gate-still-blocked" className="mt-2 text-center text-[11px] text-amber-800">
+          Still no location — check the steps above, then test again.
+        </p>
+      )}
+      <p className="sr-only" role="status" aria-live="polite" data-testid="location-gate-live">
+        {announcement}
       </p>
     </section>
   );

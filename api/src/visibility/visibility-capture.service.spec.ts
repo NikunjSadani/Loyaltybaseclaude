@@ -307,6 +307,16 @@ describe('VisibilityCaptureService', () => {
         expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
       });
 
+      it('ON + no GPS field value but the phone sent a submit-time captureGeo → accepted (fresh fix of this request)', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        const res = await service.submitCapture(user, {
+          outletId: 'o1', formValues: noGeo, captureGeo: { lat: 12.9001, lng: 77.5001, accuracy: 9 },
+        } as never);
+        expect(res.version).toBe(1);
+        expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+      });
+
       it('ON + a valid fix near the outlet → accepted, nothing recorded', async () => {
         requireOn({ outletMasterGeo: true });
         mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));

@@ -84,6 +84,8 @@ export interface TenantFeaturesState {
   features: FeatureFlags;
   /** True until the endpoint resolves OR errors — gate feature-off UI on this. */
   loading: boolean;
+  /** True when the features could NOT be read (non-2xx / network) — `features` are then the conservative defaults. */
+  error?: boolean;
 }
 
 /**
@@ -104,10 +106,10 @@ export function useTenantFeatures(endpoint: string): TenantFeaturesState {
       .then((r) => (r.ok ? r.json() : null))
       .then((res) => {
         if (cancelled) return;
-        setState({ features: normalizeFeatures(res?.data?.features), loading: false });
+        setState({ features: normalizeFeatures(res?.data?.features), loading: false, ...(res ? {} : { error: true }) });
       })
       .catch(() => {
-        if (!cancelled) setState((prev) => ({ ...prev, loading: false }));
+        if (!cancelled) setState((prev) => ({ ...prev, loading: false, error: true }));
       });
     return () => {
       cancelled = true;

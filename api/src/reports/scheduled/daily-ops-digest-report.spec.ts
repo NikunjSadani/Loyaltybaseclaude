@@ -690,16 +690,19 @@ describe('buildDailyOpsDigest', () => {
       expect(buildDailyOpsDigest(input([t])).html).not.toContain('data-section="Location"');
     });
 
-    it('shown with the setting OFF when there were captures — no GPS / poor accuracy counts, no blocked column', () => {
+    it('setting OFF → hidden even with captures (owner review 2026-11-19: Deoleo email unchanged)', () => {
       const t = quietTenant('deoleo', 'Deoleo');
       t.location = loc({ kycs: 12, captures: 3, noGps: 2, poorAccuracy: 4 });
+      expect(buildDailyOpsDigest(input([t])).html).not.toContain('data-section="Location"');
+    });
+
+    it('setting ON with captures → no GPS / poor accuracy counts in amber', () => {
+      const t = quietTenant('bajaj', 'Bajaj');
+      t.location = loc({ requireLocation: true, kycs: 12, captures: 3, noGps: 2, poorAccuracy: 4 });
       const html = buildDailyOpsDigest(input([t])).html;
       expect(html).toContain('data-section="Location"');
       expect(html).toMatch(/without GPS <strong style="color:#b45309;">2<\/strong>/);
       expect(html).toMatch(/accuracy worse than 50 m <strong style="color:#b45309;">4<\/strong>/);
-      expect(html).toContain('accuracy worse than 50 m');
-      expect(html).not.toContain('blocked outside');
-      expect(html).not.toContain('Require location');
     });
 
     it('shown for a tenant with the setting ON even with zero captures, incl. the blocked count', () => {

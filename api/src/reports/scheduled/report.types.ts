@@ -162,8 +162,7 @@ export interface VisibilitySection {
 
 /**
  * Location compliance in the window (LOCATION-GATE.md): sales-rep KYCs (by submittedAt, board-photo fix) and visibility
- * capture submissions (by createdAt). Loaded for every tenant; SHOWN only for a tenant with features.requireLocation ON
- * or with any KYC / capture / block in the window.
+ * capture submissions (by createdAt). Loaded and shown ONLY for tenants with features.requireLocation ON.
  */
 export interface LocationSection {
   /** features.requireLocation for this tenant. */
@@ -317,7 +316,7 @@ export interface TenantDigest {
   messages: SectionResult<MessagesSection>;
   /** Present ONLY for tenants with the visibilityEnabled setting ON. */
   visibility?: SectionResult<VisibilitySection>;
-  /** Loaded for every tenant; shown only with requireLocation ON or any capture in the window. */
+  /** Present ONLY for tenants with features.requireLocation ON. */
   location?: SectionResult<LocationSection>;
   /** Present ONLY for tenants with features.salesImport. */
   salesImport?: SectionResult<SalesImportSection>;

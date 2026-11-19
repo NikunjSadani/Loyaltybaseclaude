@@ -6,6 +6,40 @@ not deployed, not runtime-verified on a phone.
 Report and the Daily Ops Digest "Location" line are ⚠️ PLATFORM-WIDE (every tenant's admins / the internal email) —
 owner-approved 2026-11-18 together with the gate.
 
+## Release-gate review fixes (2026-11-19)
+
+- **KYC wizard stays mounted** behind the guide (hidden), so typed fields, the signature canvas and photos survive a
+  block at submit / a permission change (before: the wizard unmounted, the canvas was destroyed while `hasSigned`
+  stayed true → a BLANK consent signature could be sent). The camera overlay is closed while the guide shows. On gate
+  tenants a submit also checks the signature canvas has ink (`lib/signature-canvas.ts`); an empty pad resets to
+  "Signature required" and nothing is sent. (This canvas check runs only on gate tenants — Deoleo unchanged.)
+- **Visibility server rule** (`visibility-location.helper.ts`): every NEW location-tagged photo in THIS request needs a
+  real fix; carried-forward photos never cause a refusal; the request needs ≥ 1 fresh fix — a new tagged photo's, a
+  GPS_POINT sent in this request, or the phone's submit-time `captureGeo` (new optional field on submit / resubmit,
+  sent by the capture sheet from its submit-time check). No fresh fix + a form with no location field → "This form
+  has no location field — ask Gifsy to add one".
+- **Android app-level block**: geolocation code 1 while the SITE permission reads granted → reason `device` → guide
+  "Settings → Apps → Chrome → Permissions → Location → Allow" + phone Location on (iPhone / desktop equivalents).
+- **Digest**: the Location section is loaded and shown only for switch-on tenants; blocked attempts are counted by
+  `metadata.clientId` (same key as the report).
+- **Re-KYC stale geo**: with the switch on the API refuses a board-photo fix whose `ts` is older than **60 minutes**
+  (or more than 10 min in the future, or missing) — "take a fresh board photo location". The review suggested ~15 min;
+  60 was chosen because a full KYC (address step → bank → signature) often takes longer than 15 min after the board
+  photo, and the target is a pre-filled fix from an EARLIER submission (days old). Tunable: `BOARD_FIX_MAX_AGE_MS`.
+  The phone clears a pre-filled board-photo fix on gate tenants so the rep re-acquires it (Retry location).
+- **Submit-time check UX**: buttons read "Checking location…" (KYC) / a "Checking location…" status line (visibility);
+  the check reuses a browser-cached fix up to 30 s old. "Test again" keeps the guide on screen (button "Checking…",
+  `aria-disabled` so focus stays), announces "Still no location" via a live region, and shows a visible note.
+- **Never-called-back guard**: 20 s request timeout + 25 s while a permission prompt may be open (45 s), + 5 s when the
+  site permission is already granted.
+- **Photo with no fix**: "Couldn't get a location for this photo — move to open sky and retake." The uploaded file is
+  NOT deleted — there is no delete endpoint for sales media (same as today's accuracy-cap rejection); it stays an
+  unreferenced object in the media bucket.
+- **Features fetch failure**: the gate stays open on the phone (the server still refuses), with a small note
+  "Couldn't load this programme's settings…".
+- LOW: 0,0 is never a fix (phone + server); the report's roster reads run inside its statement-timeout transaction; the
+  visibility form's live cameras are closed while the guide shows; Chrome wording "Permissions → turn Location on".
+
 ## Owner decisions (2026-11-18)
 
 1. "No location, no use" applies to **KYC and visibility capture only** (not the rest of the sales app). A rep cannot
@@ -116,8 +150,8 @@ No in-app Help guide: switching it on is one toggle.
 - `scheduled-reports.service.ts` `location()` per tenant (7 indexed counts): sales-rep KYCs + visibility submissions
   in the window, without GPS, accuracy worse than 50 m, and recorded fence blocks. Section **"Location"** shown only
   for a tenant with `requireLocation` ON (then also with zeros, plus a "Require location is ON" note and the blocked
-  count) or with any KYC / capture / block in the window. Amber figures; not an attention bullet. A failed load
-  degrades the run like any section.
+  count). Switch-off tenants (Deoleo) never load it (email unchanged). Blocks counted by `metadata.clientId`. Amber
+  figures; not an attention bullet. A failed load degrades the run like any section.
 
 ## Tests (targeted)
 

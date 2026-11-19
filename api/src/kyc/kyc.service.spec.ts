@@ -1860,6 +1860,31 @@ describe('KycService', () => {
     // ── LOCATION GATE (features.requireLocation — owner 2026-11-18; LOCATION-GATE.md) ──────────
     describe('requireLocation', () => {
       const NO_LOC = /Location is required to submit a KYC/;
+      // Fresh fixes (the gate refuses a board-photo fix older than an hour — re-KYC stale-geo guard).
+      const nearNow = () => ({ ...nearGeo, ts: new Date().toISOString() });
+      const farNow = () => ({ ...farGeo, ts: new Date().toISOString() });
+
+      it('ON + a STALE board-photo fix (pre-filled from an earlier submission) → 400 "take a fresh board photo location"', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        });
+        const old = { ...nearGeo, ts: new Date(Date.now() - 3 * 86_400_000).toISOString() };
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: old } as never)).rejects.toThrow(/take a fresh board photo location/);
+        expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+      });
+
+      it('ON + the 0,0 default fix → 400 (not a real fix)', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        });
+        await expect(
+          service.create(so, { ...baseDto, boardPhotoGeo: { lat: 0, lng: 0, accuracy: 5, ts: new Date().toISOString() } } as never),
+        ).rejects.toThrow(NO_LOC);
+      });
 
       it('ON + sales rep + NO board-photo fix → 400 before any write', async () => {
         mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true, outletMasterGeo: true } });
@@ -1885,7 +1910,7 @@ describe('KycService', () => {
       it('ON + valid fix near the outlet → accepted (OK), nothing recorded as a block', async () => {
         mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true, outletMasterGeo: true } });
         primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
-        await service.create(so, { ...baseDto, boardPhotoGeo: nearGeo } as never);
+        await service.create(so, { ...baseDto, boardPhotoGeo: nearNow() } as never);
         expect(mockTx.kycSubmission.create.mock.calls[0][0].data.geoFenceStatus).toBe('OK');
         expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
       });
@@ -1897,7 +1922,7 @@ describe('KycService', () => {
           id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
           outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK', latitude: 12.9, longitude: 77.5,
         });
-        await expect(service.create(so, { ...baseDto, boardPhotoGeo: farGeo } as never)).rejects.toThrow(BLOCK_MSG);
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: farNow() } as never)).rejects.toThrow(BLOCK_MSG);
         expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
         expect(mockPrisma.auditLog.create.mock.calls[0][0].data).toMatchObject({
           action: 'REJECT', entityType: 'LOCATION_FENCE_BLOCK', entityId: 'outlet-1', actorId: 'so1',
@@ -1911,7 +1936,7 @@ describe('KycService', () => {
           id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
           outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK', latitude: 12.9, longitude: 77.5,
         });
-        await expect(service.create(so, { ...baseDto, boardPhotoGeo: farGeo } as never)).rejects.toThrow(BLOCK_MSG);
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: farNow() } as never)).rejects.toThrow(BLOCK_MSG);
         expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
       });
 

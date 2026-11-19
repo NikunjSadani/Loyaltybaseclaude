@@ -709,11 +709,11 @@ function tenantSections(t: TenantDigest): string {
           ['rejected', intIN(v.rejected)],
         ]) + metricLine('Right now', [['pending review', intIN(v.pending), accentIf(v.pending, 'amber')]]),
     ),
-    // Location compliance (LOCATION-GATE.md): only for a tenant with "Require location" ON or with any capture.
+    // Location compliance (LOCATION-GATE.md): loaded (and shown) only for tenants with "Require location" ON.
     renderSection(
       'Location',
       t.location,
-      (l) => !l.requireLocation && l.kycs === 0 && l.captures === 0 && l.blockedOutside === 0,
+      (l) => !l.requireLocation,
       (l) =>
         (l.requireLocation ? note('"Require location" is ON — reps cannot start or submit a KYC or visibility capture without a location fix.') : '') +
         metricLine('In window', [

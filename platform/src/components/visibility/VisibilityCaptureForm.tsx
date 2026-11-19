@@ -112,11 +112,16 @@ export interface VisibilityCaptureFormProps {
    * gets no fix stops the submit. False/undefined (Deoleo, every other tenant) → unchanged: no fix = saved + flagged.
    */
   requireLocation?: boolean;
+  /** Location gate: while the location guide covers the form, live camera previews are closed (values are kept). */
+  cameraPaused?: boolean;
 }
 
-/** Shown when a photo / submit had no location on a requireLocation tenant. */
+/** Shown when a photo had no location on a requireLocation tenant (the shot is not kept). */
 export const LOCATION_REQUIRED_PHOTO_MESSAGE =
-  'No location was captured — location is required here. Turn on location for this site and the phone, then retake.';
+  "Couldn't get a location for this photo — move to open sky and retake. Location is required here.";
+/** Shown when a submit-time location fill got no fix on a requireLocation tenant. */
+export const LOCATION_REQUIRED_SUBMIT_MESSAGE =
+  "Couldn't get your location — move to open sky and submit again. Location is required here.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Client-side image compression (best-practice #4)
@@ -225,6 +230,7 @@ export function VisibilityCaptureForm({
   preciseGps = false,
   gpsWatch = null,
   requireLocation = false,
+  cameraPaused = false,
 }: VisibilityCaptureFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>(() => ({ ...(initialValues ?? {}) }));
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -375,7 +381,7 @@ export function VisibilityCaptureForm({
         for (const f of gpsToFill) if (working[f.id] == null) working[f.id] = fix;
       } else if (requireLocation && gpsToFill.some((f) => working[f.id] == null)) {
         // Location gate: no fix → nothing is sent (the server would refuse it anyway).
-        setSubmitError(LOCATION_REQUIRED_PHOTO_MESSAGE);
+        setSubmitError(LOCATION_REQUIRED_SUBMIT_MESSAGE);
         return;
       }
     }
@@ -463,6 +469,7 @@ export function VisibilityCaptureForm({
                   captureGps={captureGps}
                   preciseGps={preciseGps}
                   requireLocation={requireLocation}
+                  cameraPaused={cameraPaused}
                 />
               </div>
             );
@@ -481,6 +488,7 @@ export function VisibilityCaptureForm({
             captureGps={captureGps}
             preciseGps={preciseGps}
             requireLocation={requireLocation}
+            cameraPaused={cameraPaused}
           />
         );
       })}
@@ -545,6 +553,8 @@ interface FieldRendererProps {
   preciseGps: boolean;
   /** Location gate: a location-tagged photo without a fix is not kept. */
   requireLocation?: boolean;
+  /** Location gate: the live camera preview is closed while the location guide covers the form. */
+  cameraPaused?: boolean;
 }
 
 function FieldRenderer(props: FieldRendererProps) {
@@ -704,7 +714,7 @@ function Labeled({
 
 // ── Camera field (native rear-camera, instruction + sample thumbnail, D9/D16) ──
 
-function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, requireLocation = false, req }: FieldRendererProps & { req: boolean }) {
+function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, requireLocation = false, cameraPaused = false, req }: FieldRendererProps & { req: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   // Read back through readMediaValue so BOTH a legacy bare-key string and a per-photo
   // `{ key, geo }` value resolve to the same shape (full backward-compat).
@@ -857,6 +867,9 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
             </p>
           ) : null}
         </div>
+      ) : cameraOnly && cameraPaused ? (
+        // Location gate: the guide covers the form — no live camera stream while hidden (it reopens on return).
+        <p data-testid={`camera-${field.id}-paused`} className="text-xs text-gray-500">Camera paused until location is on.</p>
       ) : cameraOnly ? (
         // TRUE in-app live camera (getUserMedia) — the device gallery can NEVER open.
         // The captured File feeds the EXACT same handler the gallery input used.

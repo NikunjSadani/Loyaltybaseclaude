@@ -518,8 +518,9 @@ export class ScheduledReportsService {
         messages: await section('messages', c, () => this.messages(c, window)),
       };
       if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window));
-      // Loaded for every tenant (a few indexed counts); the builder shows it only with the setting ON or any capture.
-      digest.location = await section('location', c, () => this.location(c, window, t.requireLocation));
+      // Only for tenants with "Require location" ON (owner review 2026-11-19: Deoleo's email stays unchanged; a
+      // switch-off tenant never loads it, so it can never degrade their section list).
+      if (t.requireLocation) digest.location = await section('location', c, () => this.location(c, window, t.requireLocation));
       if (t.salesImport) {
         digest.salesImport = await section('salesImport', c, () => this.salesImport(c, window, nowMs));
         digest.billing = await section('billing', c, () => this.billing(c, nowMs));
@@ -876,7 +877,8 @@ export class ScheduledReportsService {
       where: { ...visWhere, captureLat: { not: null }, captureLng: { not: null }, captureAccuracy: { gt: POOR_ACCURACY_M } },
     });
     const blockedOutside = await this.prisma.auditLog.count({
-      where: { entityType: FENCE_BLOCK_ENTITY, createdAt: inWindow, actor: { clientId } },
+      // Same tenant key as the Location Report: the clientId recorded on the refusal.
+      where: { entityType: FENCE_BLOCK_ENTITY, createdAt: inWindow, metadata: { path: ['clientId'], equals: clientId } },
     });
     return {
       requireLocation,

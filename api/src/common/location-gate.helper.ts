@@ -11,6 +11,7 @@
  */
 import { Logger } from '@nestjs/common';
 import type { PrismaService } from '../prisma/prisma.service';
+import { isUsableReference } from '../visibility/geo-fence.helper';
 
 /** The `clients.features` key. */
 export const LOCATION_REQUIRED_FEATURE = 'requireLocation';
@@ -26,6 +27,30 @@ export const LOCATION_REQUIRED_KYC_MESSAGE =
 
 export const LOCATION_REQUIRED_VISIBILITY_MESSAGE =
   'Location is required to submit a visibility capture for this programme. Turn on location for this site and on the phone, retake the photos so their location is captured, then submit again.';
+
+/**
+ * A real GPS fix: finite, in-range lat/lng, and not 0,0 (the "no location" default some devices/bulk paths send).
+ */
+export function isRealFix(g: unknown): g is { lat: number; lng: number } {
+  return !!g && typeof g === 'object' && isUsableReference(g as { lat: number; lng: number });
+}
+
+/** Re-KYC stale-geo guard: a board-photo fix older than this (vs the server clock) is refused when the gate is on. */
+export const BOARD_FIX_MAX_AGE_MS = 60 * 60 * 1000;
+/** Tolerated phone-clock skew into the future for the board-photo fix timestamp. */
+export const BOARD_FIX_FUTURE_SKEW_MS = 10 * 60 * 1000;
+
+export const STALE_BOARD_FIX_MESSAGE =
+  'The store board photo location is too old (or has no time) — take a fresh board photo location at the outlet (tap Retry location), then submit again.';
+
+/** True when the board-photo fix timestamp is within the allowed window of `now`. */
+export function isFreshBoardFix(ts: unknown, now: Date = new Date()): boolean {
+  if (typeof ts !== 'string' || !ts) return false;
+  const t = Date.parse(ts);
+  if (!Number.isFinite(t)) return false;
+  const age = now.getTime() - t;
+  return age <= BOARD_FIX_MAX_AGE_MS && age >= -BOARD_FIX_FUTURE_SKEW_MS;
+}
 
 /** True when the tenant requires location AND the caller is a sales rep (the only gated initiator). */
 export function isLocationRequiredFor(features: unknown, role: string | null | undefined): boolean {

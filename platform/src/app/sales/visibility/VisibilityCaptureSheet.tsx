@@ -72,7 +72,7 @@ export function VisibilityCaptureSheet({
   const [view, setView] = useState<View>('form');
   // Geo-fence tenants (Bajaj, features.outletMasterGeo) use the timed high-accuracy acquire for
   // each photo's GPS fix; every other tenant (Deoleo) keeps the single getCurrentPosition call.
-  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
+  const { features, loading: featuresLoading, error: featuresError } = useTenantFeatures('/api/sales/me');
   const preciseGps = features.outletMasterGeo;
   // LOCATION GATE (features.requireLocation; docs/plans/LOCATION-GATE.md). OFF (Deoleo, every other tenant) → the hook
   // does nothing. ON → the capture form stays hidden behind the location guide until location is allowed AND a fix
@@ -139,13 +139,21 @@ export function VisibilityCaptureSheet({
   const handleSubmit = async (formValues: Record<string, unknown>) => {
     setSubmitting(true);
     try {
-      if (locationGate.enabled && !(await locationGate.recheck({ quiet: true }))) {
-        // The guide replaces the form; this message waits under the form for when the rep comes back.
-        throw new Error('Location is needed to submit. Follow the location steps, then submit again.');
+      // Location gate: a fresh check right before sending; its fix travels as this request's location (captureGeo),
+      // which the server needs when no new location-tagged photo is in the request (e.g. a partial re-capture).
+      let captureGeo: { lat: number; lng: number; accuracy: number; capturedAt: string } | undefined;
+      if (locationGate.enabled) {
+        const fix = await locationGate.recheck({ quiet: true });
+        if (!fix) {
+          // The guide replaces the form; this message waits under the form for when the rep comes back.
+          throw new Error('Location is needed to submit. Follow the location steps, then submit again.');
+        }
+        captureGeo = { lat: fix.lat, lng: fix.lng, accuracy: fix.accuracy, capturedAt: new Date().toISOString() };
       }
+      const geoPart = captureGeo ? { captureGeo } : {};
       const res = isResubmit
-        ? await visibilityApi.resubmitCapture(outlet.captureId as string, { formValues })
-        : await visibilityApi.submitCapture({ outletId: outlet.outletId, formValues });
+        ? await visibilityApi.resubmitCapture(outlet.captureId as string, { formValues, ...geoPart })
+        : await visibilityApi.submitCapture({ outletId: outlet.outletId, formValues, ...geoPart });
       if (!res.success) {
         // Surface the server message verbatim (geo-fence BLOCK, duplicate window,
         // scope/level 403, etc.) — the backend owns the exact wording.
@@ -216,6 +224,16 @@ export function VisibilityCaptureSheet({
             {locationGate.blocking && (
               <LocationGatePanel gate={locationGate} purpose="capture visibility" className="mb-4" />
             )}
+            {locationGate.submitChecking && (
+              <p role="status" aria-live="polite" data-testid="visibility-checking-location" className="mb-3 text-xs font-semibold text-[var(--brand-primary)]">
+                Checking location…
+              </p>
+            )}
+            {featuresError && (
+              <p data-testid="features-load-note" className="mb-3 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                Couldn&apos;t load this programme&apos;s settings. If location is required here, it will be checked when you submit.
+              </p>
+            )}
             <div hidden={locationGate.blocking} data-testid="visibility-form-area">
             {loadError ? (
               // OUTAGE — the load failed. Distinct from "nothing configured": offer a retry.
@@ -268,6 +286,8 @@ export function VisibilityCaptureSheet({
                 gpsWatch={gpsWatch}
                 // Location gate: a photo without a fix is not kept (requireLocation tenants only).
                 requireLocation={locationGate.enabled}
+                // While the guide covers the form, live cameras are closed (no hidden stream); photos already taken stay.
+                cameraPaused={locationGate.blocking}
               />
             )}
             </div>

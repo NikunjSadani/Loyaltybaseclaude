@@ -7,10 +7,12 @@
  *     no permission query, no geolocation call, no listener. Byte-identical page.
  *   enabled=true → checks once on mount (status 'checking' → 'ok' | 'blocked'), re-checks when the browser reports
  *     the permission changed (Permissions API `change`, where available), and exposes:
- *       • recheck()                 — the "Test again" button (shows 'checking' while it runs);
- *       • recheck({ quiet: true })  — the submit-time check: keeps the page as-is while it runs and only switches to
- *                                     'blocked' if location is no longer usable. Resolves true when OK.
- *   `blocking` is true while the page must show the gate panel instead of the flow ('checking' or 'blocked').
+ *       • recheck()                 — the "Test again" button. While BLOCKED it keeps the guide on screen and sets
+ *                                     `testing` (the button shows "Checking…", focus stays on it);
+ *       • recheck({ quiet: true })  — the submit-time check: keeps the page as-is (`submitChecking` drives a
+ *                                     "Checking location…" label) and only switches to 'blocked' if location is no
+ *                                     longer usable. Resolves the fix (truthy) when OK, else null.
+ *   `blocking` is true while the page must show the gate panel instead of the flow.
  *
  * No timers, no network: geolocation and the Permissions API are on-device, so no X-Background tag is involved.
  */
@@ -30,11 +32,17 @@ export interface LocationGateState {
   status: LocationGateStatus;
   reason: LocationBlockReason | null;
   platform: LocationPlatform;
-  /** The fix that last passed the check (informational). */
+  /** The fix that last passed the check. */
   fix: LocationFix | null;
+  /** A "Test again" re-check is running while the guide stays on screen. */
+  testing: boolean;
+  /** A submit-time (quiet) check is running. */
+  submitChecking: boolean;
+  /** How many checks have finished while blocked — lets the panel announce "still blocked" each time. */
+  attempts: number;
   /** True while the page must show the gate panel instead of the flow. */
   blocking: boolean;
-  recheck: (opts?: { quiet?: boolean }) => Promise<boolean>;
+  recheck: (opts?: { quiet?: boolean }) => Promise<LocationFix | null>;
 }
 
 export function useLocationGate(enabled: boolean): LocationGateState {
@@ -42,8 +50,13 @@ export function useLocationGate(enabled: boolean): LocationGateState {
   const [reason, setReason] = useState<LocationBlockReason | null>(null);
   const [fix, setFix] = useState<LocationFix | null>(null);
   const [platform, setPlatform] = useState<LocationPlatform>('desktop');
+  const [testing, setTesting] = useState(false);
+  const [submitChecking, setSubmitChecking] = useState(false);
+  const [attempts, setAttempts] = useState(0);
   const seq = useRef(0);
   const mounted = useRef(true);
+  const statusRef = useRef(status);
+  statusRef.current = status;
 
   useEffect(() => {
     mounted.current = true;
@@ -53,21 +66,28 @@ export function useLocationGate(enabled: boolean): LocationGateState {
   }, []);
 
   const recheck = useCallback(
-    async (opts: { quiet?: boolean } = {}): Promise<boolean> => {
-      if (!enabled) return true;
+    async (opts: { quiet?: boolean } = {}): Promise<LocationFix | null> => {
+      if (!enabled) return null;
       const mine = ++seq.current;
-      if (!opts.quiet) setStatus('checking');
+      const wasBlocked = statusRef.current === 'blocked';
+      if (opts.quiet) setSubmitChecking(true);
+      else if (wasBlocked) setTesting(true); // keep the guide (and focus) on screen while testing
+      else setStatus('checking');
       const r = await checkLocation();
-      if (!mounted.current || mine !== seq.current) return r.ok; // superseded — the newer check owns the state
+      if (!mounted.current) return r.ok ? r.fix : null;
+      if (opts.quiet) setSubmitChecking(false);
+      if (mine !== seq.current) return r.ok ? r.fix : null; // superseded — the newer check owns the state
+      setTesting(false);
       if (r.ok) {
         setFix(r.fix);
         setReason(null);
         setStatus('ok');
-        return true;
+        return r.fix;
       }
       setReason(r.reason);
       setStatus('blocked');
-      return false;
+      setAttempts((n) => n + 1);
+      return null;
     },
     [enabled],
   );
@@ -78,6 +98,7 @@ export function useLocationGate(enabled: boolean): LocationGateState {
       seq.current++;
       setStatus('off');
       setReason(null);
+      setTesting(false);
       return;
     }
     setPlatform(currentLocationPlatform());
@@ -93,8 +114,10 @@ export function useLocationGate(enabled: boolean): LocationGateState {
       if (!ps) return;
       if (ps.state === 'denied') {
         seq.current++;
+        setTesting(false);
         setReason('denied');
         setStatus('blocked');
+        setAttempts((n) => n + 1);
       } else if (ps.state === 'granted') {
         void recheck();
       }
@@ -119,6 +142,9 @@ export function useLocationGate(enabled: boolean): LocationGateState {
     reason,
     platform,
     fix,
+    testing,
+    submitChecking,
+    attempts,
     // While enabled, anything but a passed check blocks — incl. the one render before the first check starts.
     blocking: enabled && status !== 'ok',
     recheck,

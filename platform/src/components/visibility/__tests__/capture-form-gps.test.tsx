@@ -92,7 +92,7 @@ describe('CFG-LG — requireLocation', () => {
       <VisibilityCaptureForm schema={schema} onSubmit={vi.fn()} requireLocation />,
     );
     fireCapture(container);
-    expect(await findByText(/No location was captured — location is required here/)).toBeTruthy();
+    expect(await findByText(/Couldn't get a location for this photo — move to open sky and retake/)).toBeTruthy();
     expect(queryByText('Photo captured')).toBeNull();
   });
 
@@ -114,7 +114,7 @@ describe('CFG-LG — requireLocation', () => {
       <VisibilityCaptureForm schema={gpsSchema} onSubmit={onSubmit} requireLocation />,
     );
     fireEvent.click(getByRole('button', { name: /submit/i }));
-    expect(await findByText(/No location was captured/)).toBeTruthy();
+    expect(await findByText(/Couldn't get your location — move to open sky and submit again/)).toBeTruthy();
     expect(onSubmit).not.toHaveBeenCalled();
   });
 });

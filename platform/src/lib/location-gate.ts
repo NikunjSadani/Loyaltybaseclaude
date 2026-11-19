@@ -15,7 +15,12 @@
  * Used ONLY when the tenant's `features.requireLocation` is ON — Deoleo / every other tenant never calls it.
  */
 
-export type LocationBlockReason = 'unsupported' | 'insecure' | 'denied' | 'unavailable' | 'timeout';
+/**
+ * 'device' = the browser refused (code 1) although the SITE permission reads 'granted' → the block is at the
+ * phone/app level (Android: Chrome's own Location permission is off, or phone Location is off and its system
+ * dialog was declined).
+ */
+export type LocationBlockReason = 'unsupported' | 'insecure' | 'denied' | 'device' | 'unavailable' | 'timeout';
 
 export interface LocationFix {
   lat: number;
@@ -51,7 +56,16 @@ const validFix = (c: GeolocationCoordinates | undefined): boolean =>
   Number.isFinite(c.latitude) &&
   Number.isFinite(c.longitude) &&
   Math.abs(c.latitude) <= 90 &&
-  Math.abs(c.longitude) <= 180;
+  Math.abs(c.longitude) <= 180 &&
+  !(c.latitude === 0 && c.longitude === 0); // 0,0 = a "no location" default, not a fix
+
+/**
+ * Extra time on top of the request timeout before the never-called-back guard fires. When the site permission is
+ * already granted no prompt is shown (short guard); otherwise the rep may still be reading the permission prompt —
+ * the browser's own timeout does not run while it is open — so the guard is long (20 s + 25 s = 45 s).
+ */
+const GUARD_GRANTED_MS = 5_000;
+const GUARD_PROMPT_MS = 25_000;
 
 /**
  * Check that location is usable now: allowed for the site AND a real fix arrives. Never rejects, never hangs
@@ -77,7 +91,10 @@ export async function checkLocation(
       resolve(r);
     };
     // Some browsers never call back while the permission prompt is ignored — don't hang the rep forever.
-    const guard = setTimeout(() => done({ ok: false, reason: 'timeout' }), timeoutMs + 5_000);
+    const guard = setTimeout(
+      () => done({ ok: false, reason: 'timeout' }),
+      timeoutMs + (permission === 'granted' ? GUARD_GRANTED_MS : GUARD_PROMPT_MS),
+    );
     try {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -93,7 +110,9 @@ export async function checkLocation(
         },
         (err) => {
           // 1 PERMISSION_DENIED · 2 POSITION_UNAVAILABLE · 3 TIMEOUT (numeric — the constants are not on every error object).
-          const reason: LocationBlockReason = err?.code === 1 ? 'denied' : err?.code === 3 ? 'timeout' : 'unavailable';
+          // Code 1 while the SITE permission is 'granted' = blocked at the phone/app level, not by the site setting.
+          const reason: LocationBlockReason =
+            err?.code === 1 ? (permission === 'granted' ? 'device' : 'denied') : err?.code === 3 ? 'timeout' : 'unavailable';
           done({ ok: false, reason });
         },
         { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: opts.maximumAgeMs ?? LOCATION_CHECK_MAX_AGE_MS },
@@ -168,6 +187,45 @@ export function locationGuide(platform: LocationPlatform, reason: LocationBlockR
     };
   }
 
+  if (reason === 'device') {
+    switch (platform) {
+      case 'android':
+        return {
+          title: 'Location is blocked on the phone',
+          intro: 'This site is allowed, but the phone is not letting Chrome use location.',
+          steps: [
+            'Open the phone Settings → Apps → Chrome → Permissions → Location → Allow (choose “Allow only while using the app”).',
+            'Pull down from the top of the screen and turn on Location.',
+            'If Chrome asks to turn on device location, tap OK / Turn on.',
+            'Using the installed app? Do the same for the app if it is listed under Apps, then reopen it.',
+          ],
+          footnote: NO_FIX_FOOTNOTE,
+        };
+      case 'ios-safari':
+      case 'ios-app':
+        return {
+          title: 'Location is blocked on the iPhone',
+          intro: 'This site is allowed, but the iPhone is not sharing location with Safari.',
+          steps: [
+            'Open the Settings app → Privacy & Security → Location Services → make sure it is On.',
+            'In the same list, tap Safari Websites → “While Using the App”, and turn on Precise Location.',
+            'Return here and tap Test again.',
+          ],
+          footnote: NO_FIX_FOOTNOTE,
+        };
+      default:
+        return {
+          title: 'Location is blocked on this computer',
+          intro: 'This site is allowed, but the computer is not sharing location with the browser.',
+          steps: [
+            'Windows: Settings → Privacy & security → Location → turn on “Location services” and allow desktop apps / your browser.',
+            'Mac: System Settings → Privacy & Security → Location Services → turn on your browser.',
+          ],
+          footnote: NO_FIX_FOOTNOTE,
+        };
+    }
+  }
+
   if (reason === 'denied') {
     switch (platform) {
       case 'android':
@@ -175,7 +233,7 @@ export function locationGuide(platform: LocationPlatform, reason: LocationBlockR
           title: 'Location is blocked for this site',
           intro: 'Allow location for this site in Chrome, then tap Test again.',
           steps: [
-            'Tap the icon at the left of the address bar (it looks like ⓘ or two sliders), then Permissions → Location → Allow.',
+            'Tap the icon at the left of the address bar, then Permissions, and turn Location on.',
             'Or: Chrome menu ⋮ → Settings → Site settings → Location → find this site → Allow.',
             "Using the installed app? It uses Chrome's setting for this site — change it in Chrome as above, then reopen the app.",
             'Make sure the phone’s own Location is on too: pull down from the top of the screen and turn on Location.',

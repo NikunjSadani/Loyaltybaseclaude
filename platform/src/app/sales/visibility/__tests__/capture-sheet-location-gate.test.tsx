@@ -30,8 +30,8 @@ vi.mock('@/lib/visibility', () => ({
 
 // The form is mocked: it exposes requireLocation and lets the test trigger the sheet's submit handler.
 vi.mock('@/components/visibility/VisibilityCaptureForm', () => ({
-  VisibilityCaptureForm: ({ requireLocation, onSubmit }: { requireLocation?: boolean; onSubmit: (v: unknown) => Promise<void> }) => (
-    <div data-testid="form" data-require={String(!!requireLocation)}>
+  VisibilityCaptureForm: ({ requireLocation, cameraPaused, onSubmit }: { requireLocation?: boolean; cameraPaused?: boolean; onSubmit: (v: unknown) => Promise<void> }) => (
+    <div data-testid="form" data-require={String(!!requireLocation)} data-camera-paused={String(!!cameraPaused)}>
       <button onClick={() => onSubmit({ photo: 'k' }).catch(() => undefined)}>do-submit</button>
     </div>
   ),
@@ -78,11 +78,22 @@ describe('VCS-LG — capture sheet location gate', () => {
     const area = screen.getByTestId('visibility-form-area');
     expect(area.hidden).toBe(true);
     expect((await screen.findByTestId('form')).getAttribute('data-require')).toBe('true'); // mounted while hidden
+    expect(screen.getByTestId('form').getAttribute('data-camera-paused')).toBe('true'); // no hidden camera stream
 
     getCurrentPosition.mockImplementation(fix);
     fireEvent.click(screen.getByTestId('location-gate-test-again'));
     await waitFor(() => expect(screen.getByTestId('visibility-form-area').hidden).toBe(false));
     expect(screen.queryByTestId('location-gate-blocked')).toBeNull();
+  });
+
+  it('REVIEW: ON + fix → the submit carries the fresh fix as captureGeo', async () => {
+    REQUIRE_LOCATION = true;
+    getCurrentPosition.mockImplementation(fix);
+    render(<VisibilityCaptureSheet outlet={outlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('visibility-form-area').hidden).toBe(false));
+    fireEvent.click(await screen.findByText('do-submit'));
+    await waitFor(() => expect(submitCapture).toHaveBeenCalledTimes(1));
+    expect(submitCapture.mock.calls[0][0]).toMatchObject({ outletId: 'o1', captureGeo: { lat: 12.9, lng: 77.5, accuracy: 9 } });
   });
 
   it('VCSLG2: ON + fix → form shown; a submit whose fresh check fails is not sent', async () => {
@@ -105,5 +116,6 @@ describe('VCS-LG — capture sheet location gate', () => {
     expect(getCurrentPosition).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText('do-submit'));
     await waitFor(() => expect(submitCapture).toHaveBeenCalledTimes(1));
+    expect(submitCapture.mock.calls[0][0]).not.toHaveProperty('captureGeo'); // Deoleo request unchanged
   });
 });

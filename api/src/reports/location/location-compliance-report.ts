@@ -258,59 +258,62 @@ export async function buildLocationReport(
   });
   const fenceOn = visibilityFenceOn(features, visCfg?.settingValue ?? null);
 
-  // Reps of THIS tenant (incl. deactivated/deleted — their past captures still count; they appear only with activity).
-  const reps = await prisma.user.findMany({
-    where: { clientId, role: { in: [...SALES_ROLES] } },
-    select: { id: true, name: true, phone: true, role: true, salesUser: { select: { region: true, zone: true } } },
-  });
-  const assignments = await prisma.salesUserAssignment.findMany({
-    where: { unassignedAt: null, salesUser: { clientId } },
-    select: {
-      salesUser: { select: { userId: true } },
-      outlet: { select: { state: true, deletedAt: true, clientId: true } },
-    },
-  });
-
+  type Rep = { id: string; name: string | null; phone: string | null; role: string; salesUser: { region: string | null; zone: string | null } | null };
+  let reps: Rep[] = [];
+  let population: Rep[] = [];
   const regionsBy = new Map<string, Set<string>>();
   const allRegions = new Set<string>();
-  for (const a of assignments) {
-    const uid = a.salesUser?.userId;
-    const st = normText(a.outlet?.state);
-    if (!uid || !st || !a.outlet || a.outlet.deletedAt || a.outlet.clientId !== clientId) continue;
-    if (!regionsBy.has(uid)) regionsBy.set(uid, new Set());
-    regionsBy.get(uid)!.add(st);
-  }
-  for (const u of reps) {
-    const r = normText(u.salesUser?.region) ?? normText(u.salesUser?.zone);
-    if (r) regionsBy.set(u.id, new Set([r])); // employee-record region wins (same rule as the Usage report)
-  }
-  for (const s of regionsBy.values()) for (const r of s) allRegions.add(r);
-
-  const population = reps.filter((u) => {
-    if (p.role && u.role !== p.role) return false;
-    if (p.region && ![...(regionsBy.get(u.id) ?? [])].some((x) => eqCI(x, p.region!))) return false;
-    return true;
-  });
-  const ids = population.map((u) => u.id);
-
   let agg: LocationAggRow[] = [];
-  if (ids.length > 0) {
-    const { start, end } = istBounds(p.from, p.to);
-    try {
-      agg = await prisma.$transaction(
-        async (tx) => {
-          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${USAGE_QUERY_TIMEOUT_MS}`);
-          return tx.$queryRaw<LocationAggRow[]>(locationAggregateSql(clientId, ids, start, end, fenceOn));
-        },
-        { maxWait: 5_000, timeout: USAGE_QUERY_TIMEOUT_MS + 5_000 },
-      );
-    } catch (e) {
-      const mapped = usageQueryError(e);
-      // Same timeout / pool-busy mapping as the Usage report, worded for this report.
-      throw mapped instanceof ServiceUnavailableException && mapped.message === USAGE_TIMEOUT_MESSAGE
-        ? new ServiceUnavailableException(LOCATION_TIMEOUT_MESSAGE)
-        : mapped;
-    }
+  const { start, end } = istBounds(p.from, p.to);
+
+  // The roster reads AND the aggregate run in ONE short transaction under the statement timeout (review LOW: a huge
+  // assignment table can never hang the request either). Sequential inside — one pooled connection.
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${USAGE_QUERY_TIMEOUT_MS}`);
+        // Reps of THIS tenant (incl. deactivated/deleted — their past captures still count; listed only with activity).
+        reps = (await tx.user.findMany({
+          where: { clientId, role: { in: [...SALES_ROLES] } },
+          select: { id: true, name: true, phone: true, role: true, salesUser: { select: { region: true, zone: true } } },
+        })) as Rep[];
+        const assignments = await tx.salesUserAssignment.findMany({
+          where: { unassignedAt: null, salesUser: { clientId } },
+          select: {
+            salesUser: { select: { userId: true } },
+            outlet: { select: { state: true, deletedAt: true, clientId: true } },
+          },
+        });
+        for (const a of assignments) {
+          const uid = a.salesUser?.userId;
+          const st = normText(a.outlet?.state);
+          if (!uid || !st || !a.outlet || a.outlet.deletedAt || a.outlet.clientId !== clientId) continue;
+          if (!regionsBy.has(uid)) regionsBy.set(uid, new Set());
+          regionsBy.get(uid)!.add(st);
+        }
+        for (const u of reps) {
+          const r = normText(u.salesUser?.region) ?? normText(u.salesUser?.zone);
+          if (r) regionsBy.set(u.id, new Set([r])); // employee-record region wins (same rule as the Usage report)
+        }
+        for (const set of regionsBy.values()) for (const r of set) allRegions.add(r);
+        population = reps.filter((u) => {
+          if (p.role && u.role !== p.role) return false;
+          if (p.region && ![...(regionsBy.get(u.id) ?? [])].some((x) => eqCI(x, p.region!))) return false;
+          return true;
+        });
+        const ids = population.map((u) => u.id);
+        if (ids.length > 0) {
+          agg = await tx.$queryRaw<LocationAggRow[]>(locationAggregateSql(clientId, ids, start, end, fenceOn));
+        }
+      },
+      { maxWait: 5_000, timeout: USAGE_QUERY_TIMEOUT_MS + 5_000 },
+    );
+  } catch (e) {
+    const mapped = usageQueryError(e);
+    // Same timeout / pool-busy mapping as the Usage report, worded for this report.
+    throw mapped instanceof ServiceUnavailableException && mapped.message === USAGE_TIMEOUT_MESSAGE
+      ? new ServiceUnavailableException(LOCATION_TIMEOUT_MESSAGE)
+      : mapped;
   }
 
   const byUser = new Map<string, LocationAggRow>();

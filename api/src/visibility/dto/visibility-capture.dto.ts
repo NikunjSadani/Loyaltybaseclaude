@@ -46,6 +46,14 @@ export class SubmitCaptureDto {
   @IsOptional()
   @IsObject()
   formValues?: Record<string, unknown>;
+  /**
+   * Location gate (tenant `features.requireLocation`; LOCATION-GATE.md): the phone's fix taken at SUBMIT time,
+   * `{ lat, lng, accuracy?, capturedAt? }`. Counts as this request's fresh fix (e.g. a partial re-capture of a photo
+   * without a geotag). Ignored for tenants with the switch off. Validated as a real fix in the service.
+   */
+  @IsOptional()
+  @IsObject()
+  captureGeo?: Record<string, unknown>;
 }
 
 /** POST /v1/visibility/captures/:id/resubmit — re-capture after a rejection (D11). */
@@ -53,6 +61,14 @@ export class ResubmitCaptureDto {
   @IsOptional()
   @IsObject()
   formValues?: Record<string, unknown>;
+  /**
+   * Location gate (tenant `features.requireLocation`; LOCATION-GATE.md): the phone's fix taken at SUBMIT time,
+   * `{ lat, lng, accuracy?, capturedAt? }`. Counts as this request's fresh fix (e.g. a partial re-capture of a photo
+   * without a geotag). Ignored for tenants with the switch off. Validated as a real fix in the service.
+   */
+  @IsOptional()
+  @IsObject()
+  captureGeo?: Record<string, unknown>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

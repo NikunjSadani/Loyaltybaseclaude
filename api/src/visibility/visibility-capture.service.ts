@@ -498,7 +498,7 @@ export class VisibilityCaptureService {
     }
 
     const outlet = await this.loadInScopeOutlet(user.clientId, dto.outletId, config);
-    return this.persistCapture(user, config, caller, outlet, dto.formValues, null);
+    return this.persistCapture(user, config, caller, outlet, dto.formValues, null, dto.captureGeo);
   }
 
   /** Re-capture after a rejection (D11) — only a REJECTED capture, re-authorized. */
@@ -541,7 +541,7 @@ export class VisibilityCaptureService {
     }
 
     const outlet = await this.loadInScopeOutlet(user.clientId, capture.outletId, config);
-    return this.persistCapture(user, config, caller, outlet, dto.formValues, capture);
+    return this.persistCapture(user, config, caller, outlet, dto.formValues, capture, dto.captureGeo);
   }
 
   /**
@@ -613,6 +613,8 @@ export class VisibilityCaptureService {
       formValues?: Prisma.JsonValue | null;
       photoReviews?: Prisma.JsonValue | null;
     } | null,
+    /** Location gate: the phone's submit-time fix (requireLocation tenants only; see visibility-location.helper). */
+    captureGeo?: unknown,
   ) {
     const form = await this.prisma.visibilityForm.findUnique({
       where: { clientId: user.clientId },
@@ -724,7 +726,7 @@ export class VisibilityCaptureService {
     // NOW must carry a valid fix (carried-forward approved photos are not re-checked), else 400 before any write.
     const locationRequired = isLocationRequiredFor(geoFeatures, user.role);
     if (locationRequired) {
-      const refusal = visibilityLocationRefusal(schema, values, new Set(Object.keys(carriedReviews)));
+      const refusal = visibilityLocationRefusal(schema, values, new Set(Object.keys(carriedReviews)), cleaned, captureGeo);
       if (refusal) throw new BadRequestException(refusal);
     }
     const recordOutside = (distanceM: number | null, accuracyM: number | null) =>

@@ -90,6 +90,37 @@ describe('checkLocation', () => {
     expect((await checkLocation()).ok).toBe(true);
   });
 
+  it('REVIEW: code 1 while the SITE permission reads granted → "device" (phone/app-level block)', async () => {
+    permissionState = 'granted';
+    installGeo();
+    getCurrentPosition.mockImplementation(fail(1));
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'device' });
+  });
+
+  it('REVIEW: the 0,0 default is not a fix', async () => {
+    getCurrentPosition.mockImplementation((cb: PositionCallback) =>
+      cb({ coords: { latitude: 0, longitude: 0, accuracy: 5 } } as GeolocationPosition),
+    );
+    expect(await checkLocation()).toEqual({ ok: false, reason: 'unavailable' });
+  });
+
+  it('REVIEW: the never-called-back guard waits longer while a permission prompt may be open (45 s), short when granted', async () => {
+    vi.useFakeTimers();
+    try {
+      getCurrentPosition.mockImplementation(() => undefined); // never calls back
+      const p = checkLocation();
+      await vi.advanceTimersByTimeAsync(44_000);
+      let settled = false;
+      void p.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await p).toEqual({ ok: false, reason: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a garbage fix (NaN) is not a fix', async () => {
     getCurrentPosition.mockImplementation((cb: PositionCallback) =>
       cb({ coords: { latitude: NaN, longitude: 77.5, accuracy: 5 } } as GeolocationPosition),
@@ -113,6 +144,9 @@ describe('platform guide', () => {
     expect(locationGuide('ios-safari', 'denied').steps.join(' ')).toMatch(/Safari Websites → choose “While Using the App”/);
     expect(locationGuide('ios-app', 'denied').steps.join(' ')).toMatch(/home screen/);
     expect(locationGuide('desktop', 'denied').steps.join(' ')).toMatch(/address bar/);
+    // REVIEW: an app-level block on Android points at the phone's Chrome app permission.
+    expect(locationGuide('android', 'device').steps.join(' ')).toMatch(/Settings → Apps → Chrome → Permissions → Location → Allow/);
+    expect(locationGuide('android', 'device').steps.join(' ')).toMatch(/turn on Location/);
     // Honest: the page cannot see the phone's Location switch.
     expect(locationGuide('android', 'timeout').footnote).toMatch(/can't tell us whether the phone's Location switch is on/);
   });
@@ -126,7 +160,7 @@ function Harness({ enabled, onSubmit }: { enabled: boolean; onSubmit?: (ok: bool
   return (
     <div>
       <p>THE FLOW</p>
-      <button onClick={async () => onSubmit?.(await gate.recheck({ quiet: true }))}>submit</button>
+      <button onClick={async () => onSubmit?.(Boolean(await gate.recheck({ quiet: true })))}>submit</button>
     </div>
   );
 }
@@ -164,6 +198,27 @@ describe('useLocationGate + LocationGatePanel', () => {
     getCurrentPosition.mockImplementation(fixOk);
     fireEvent.click(screen.getByTestId('location-gate-test-again'));
     expect(await screen.findByText('THE FLOW')).toBeTruthy();
+  });
+
+  it('REVIEW: "Test again" keeps the guide on screen (button "Checking…", focus kept) and announces a repeat failure', async () => {
+    getCurrentPosition.mockImplementation(fail(2));
+    render(<Harness enabled />);
+    await screen.findByTestId('location-gate-blocked');
+    let deliverErr: PositionErrorCallback | null = null;
+    getCurrentPosition.mockImplementation((_ok: PositionCallback, err: PositionErrorCallback) => { deliverErr = err; });
+    const btn = screen.getByTestId('location-gate-test-again');
+    btn.focus();
+    fireEvent.click(btn);
+    await waitFor(() => expect(btn.textContent).toMatch(/Checking…/));
+    expect(screen.getByTestId('location-gate-blocked')).toBeTruthy(); // guide stays
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(btn);
+    expect(screen.getByTestId('location-gate-live').textContent).toMatch(/Checking your location/);
+    await waitFor(() => expect(deliverErr).not.toBeNull());
+    await act(async () => deliverErr!({ code: 2 } as GeolocationPositionError));
+    await waitFor(() => expect(btn.textContent).toMatch(/Test again/));
+    expect(screen.getByTestId('location-gate-still-blocked')).toBeTruthy();
+    expect(screen.getByTestId('location-gate-live').textContent).toMatch(/Still no location/);
   });
 
   it('LG11: submit-time quiet re-check — OK keeps the flow; a lost fix switches to the guide and reports false', async () => {

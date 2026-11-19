@@ -1,4 +1,7 @@
 import {
+  BOARD_FIX_MAX_AGE_MS,
+  isFreshBoardFix,
+  isRealFix,
   FENCE_BLOCK_ENTITY,
   LOCATION_REQUIRED_FEATURE,
   isLocationRequiredFor,
@@ -59,5 +62,26 @@ describe('location-gate.helper', () => {
         }),
       ).resolves.toBeUndefined();
     });
+  });
+});
+
+
+describe('isRealFix / isFreshBoardFix', () => {
+  it('a real fix is finite, in range, and not 0,0', () => {
+    expect(isRealFix({ lat: 12.9, lng: 77.5 })).toBe(true);
+    expect(isRealFix({ lat: 0, lng: 0 })).toBe(false);
+    expect(isRealFix({ lat: 91, lng: 0 })).toBe(false);
+    expect(isRealFix(null)).toBe(false);
+  });
+
+  it('board-photo fix must be recent (server clock), tolerating a little phone-clock skew', () => {
+    const now = new Date();
+    expect(isFreshBoardFix(new Date(now.getTime() - 5 * 60_000).toISOString(), now)).toBe(true);
+    expect(isFreshBoardFix(new Date(now.getTime() - BOARD_FIX_MAX_AGE_MS - 1_000).toISOString(), now)).toBe(false);
+    expect(isFreshBoardFix(new Date(now.getTime() - 3 * 86_400_000).toISOString(), now)).toBe(false); // pre-filled re-KYC geo
+    expect(isFreshBoardFix(new Date(now.getTime() + 5 * 60_000).toISOString(), now)).toBe(true);
+    expect(isFreshBoardFix(new Date(now.getTime() + 60 * 60_000).toISOString(), now)).toBe(false);
+    expect(isFreshBoardFix('garbage', now)).toBe(false);
+    expect(isFreshBoardFix(undefined, now)).toBe(false);
   });
 });
