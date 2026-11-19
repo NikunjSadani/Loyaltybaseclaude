@@ -13,6 +13,21 @@
 > Task 0 (staging DB chain audit) still to be run before the push. No schema change, no migration, no new npm
 > dependency, no font asset.
 
+> ## 🔁 Follow-up 2026-11-19: ONE shared outlet-wallet view (branch `fix/shared-outlet-wallet`, ⚠️ PLATFORM-WIDE, owner-approved incl. Deoleo)
+> The sales ledger drew its own always-on points card and never the payout card, so a payout-only retailer (Bajaj SSS)
+> showed "0 pts" and no Lifetime Payout. Now:
+> - **Backend:** card signals come from ONE helper, `api/src/common/outlet-wallet-activity.helper.ts`
+>   (`resolveOutletWalletActivity`), used by `GET /v1/partner/me` (response unchanged) and `GET /v1/kyc/:id/ledger`.
+>   The ledger `meta` adds `outletType`, `hasPointsActivity`, `hasPayoutActivity`, `loyaltyEnabled`,
+>   `wholesalerPayoutInclActivation` and `walletBalance` (the same fields as `GET /v1/wallet`). The ledger's points rows
+>   are now `statement` (the `GET /v1/wallet/statement` shape, oldest first), which replaces the old `transactions`
+>   array. Access and scoping are unchanged (`resolveLedgerContext` → `assertCanViewSubmission`).
+> - **Frontend:** `platform/src/components/wallet/outlet-wallet-view.tsx` (`OutletWalletView`) holds the cards and the
+>   statement: period picker, KPI filter, chips, rows and error states. `/partner/wallet` and `/sales/kyc/[id]/ledger`
+>   both render it and keep only their own data loading and header. The partner DOM was diffed before and after
+>   across 25 states and is byte-identical. The sales subtitle is now the tenant's `salesApp.ledgerLabel`.
+> - Statement months are bucketed in **IST** on both pages (this matches the download). Viewers in IST see no change.
+
 ---
 
 ## 0. Read this first (zero-context primer)

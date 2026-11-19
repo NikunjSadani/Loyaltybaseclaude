@@ -83,6 +83,7 @@ import {
 } from '../common/kyc-sla-stage';
 import { buildStatementResponse, EMPTY_STATEMENT, StatementApiResponse } from '../common/points-statement.helper';
 import { buildPayoutStatement } from '../common/payout-statement.helper';
+import { resolveOutletWalletActivity } from '../common/outlet-wallet-activity.helper';
 import {
   isPaymentModeAllowed,
   allowedPaymentModes,
@@ -4411,8 +4412,19 @@ export class KycService {
             },
             // The passbook rows are NOT nested here any more (that carried a `take: 200`
             // newest-rows cap). They are read in full by the shared loadPointsStatement.
+            // The balance fields the partner wallet's points card reads (GET /v1/wallet), so the
+            // sales ledger draws the SAME card from the SAME numbers.
             wallets: {
-              select: { id: true, redeemablePoints: true, lifetimeEarned: true, lifetimeRedeemed: true },
+              select: {
+                id: true,
+                earnedPoints: true,
+                lockedPoints: true,
+                redeemablePoints: true,
+                redeemedPoints: true,
+                expiredPoints: true,
+                lifetimeEarned: true,
+                lifetimeRedeemed: true,
+              },
             },
           },
         },
@@ -4476,6 +4488,15 @@ export class KycService {
       ? await buildPayoutStatement(this.prisma, ctx.clientId, submission.partnerId)
       : [];
 
+    // Which wallet cards this outlet gets — from the SAME shared helper as the partner's own
+    // GET /v1/partner/me, so the sales view and the outlet's own wallet draw the same cards.
+    // Scoped to the submission's partner + its tenant; access already gated above.
+    const activity = submission.partnerId
+      ? await resolveOutletWalletActivity(this.prisma, ctx.clientId, submission.partnerId)
+      : { outletType: null, hasPointsActivity: false, hasPayoutActivity: false, loyaltyEnabled: true };
+    // The tenant's "Incl. Activation" note flag (fails SOFT to off), from the OUTLET's tenant.
+    const features = await resolveTenantFeatures(this.tenant, ctx.clientId);
+
     return {
       meta: {
         name: partner?.businessName ?? 'Unknown',
@@ -4484,19 +4505,27 @@ export class KycService {
         balance: wallet?.redeemablePoints ?? 0,
         lifetime: wallet?.lifetimeEarned ?? 0,
         redeemed: wallet?.lifetimeRedeemed ?? 0,
+        // ── Shared-wallet signals (mirror GET /v1/partner/me) ──
+        outletType: activity.outletType,
+        hasPointsActivity: activity.hasPointsActivity,
+        hasPayoutActivity: activity.hasPayoutActivity,
+        loyaltyEnabled: activity.loyaltyEnabled,
+        wholesalerPayoutInclActivation: features.wholesalerPayoutInclActivation === true,
+        // The SAME balance fields GET /v1/wallet returns (zeros when there is no wallet yet).
+        walletBalance: {
+          earnedPoints: wallet?.earnedPoints ?? 0,
+          lockedPoints: wallet?.lockedPoints ?? 0,
+          redeemablePoints: wallet?.redeemablePoints ?? 0,
+          redeemedPoints: wallet?.redeemedPoints ?? 0,
+          expiredPoints: wallet?.expiredPoints ?? 0,
+          lifetimeEarned: wallet?.lifetimeEarned ?? 0,
+          lifetimeRedeemed: wallet?.lifetimeRedeemed ?? 0,
+        },
       },
-      // Existing on-screen contract (unchanged shape): newest first, IST date key.
-      transactions: [...statement.rows].reverse().map((tx) => ({
-        id: tx.id,
-        date: istDateKey(new Date(tx.date)),
-        description: tx.narration ?? '',
-        type: mapTxType(tx.transactionType),
-        points: tx.points,
-        balance: tx.balanceAfter,
-        ref: tx.referenceId ?? undefined,
-        // Credit rows resolve to their batch field name; everything else is null.
-        fieldName: tx.fieldName,
-      })),
+      // The FULL points statement in the SAME shape as GET /v1/wallet/statement (oldest first,
+      // ISO instants, per-type default description) — the sales screen renders it with the
+      // partner wallet's own row mapping, so the two can never drift.
+      statement,
       payouts,
     };
   }
@@ -6725,28 +6754,6 @@ export class KycService {
       ownerPhotoUrl: await sign(byType('SELFIE')),
       chequeUrl: await sign(byType('CANCELLED_CHEQUE')),
     };
-  }
-}
-
-/** Maps a wallet transaction type to the ledger view's coarse type. */
-function mapTxType(type: string): 'earn' | 'redeem' | 'hold' | 'expire' | 'credit' {
-  switch (type) {
-    case 'CREDIT_POINTS_EARNED':
-      return 'earn';
-    case 'CREDIT_BONUS':
-    case 'CREDIT_ADJUSTMENT':
-    case 'CREDIT_REVERSAL':
-    case 'UNLOCK_HOLDING':
-      return 'credit';
-    case 'DEBIT_REDEMPTION':
-    case 'DEBIT_ADJUSTMENT':
-      return 'redeem';
-    case 'DEBIT_EXPIRY':
-      return 'expire';
-    case 'LOCK_HOLDING':
-      return 'hold';
-    default:
-      return 'credit';
   }
 }
 

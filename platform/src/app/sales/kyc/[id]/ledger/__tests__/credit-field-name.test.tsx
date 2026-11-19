@@ -11,6 +11,7 @@
  *   CF2: a blank-narration credit still shows the field-name header (no sub-line)
  *   CF3: the KPI filter lists the distinct field names
  *   CF4: a non-credit row (redeem) keeps its own description header
+ *   CF5: a non-credit row with no narration falls back to the per-type default ("Points expired")
  */
 
 import React, { Suspense, act } from 'react';
@@ -27,13 +28,24 @@ vi.mock('next/link', () => ({
 
 import OutletLedgerPage from '../page';
 
+// The ledger's `statement.rows` — the SAME row shape as GET /api/wallet/statement (oldest first;
+// `description` = narration, else the backend's per-type default; `narration` = the raw note).
+const row = (r: Record<string, unknown>) => ({
+  narration: null, fieldName: null, referenceType: null, referenceId: null, balanceBefore: 0, ...r,
+});
 const TXS = [
   // credit WITH a narration → header = field name, sub-line = narration
-  { id: 't1', date: '2026-01-05', description: 'Extra push for Q1', type: 'credit', points: 300, balance: 300, ref: 'cmr8w205dxyz', fieldName: 'Monthly Scheme' },
+  row({ id: 't1', date: '2026-01-05T06:00:00.000Z', transactionType: 'CREDIT_BONUS', description: 'Extra push for Q1', narration: 'Extra push for Q1',
+    points: 300, balanceAfter: 300, referenceType: 'CREDIT_BATCH', referenceId: 'cmr8w205dxyz', fieldName: 'Monthly Scheme' }),
   // credit with a BLANK narration → header = field name, no sub-line
-  { id: 't2', date: '2026-01-06', description: '', type: 'credit', points: 150, balance: 450, ref: 'cmr8w999abcd', fieldName: 'Visibility' },
+  row({ id: 't2', date: '2026-01-06T06:00:00.000Z', transactionType: 'CREDIT_BONUS', description: '', narration: '',
+    points: 150, balanceAfter: 450, referenceType: 'CREDIT_BATCH', referenceId: 'cmr8w999abcd', fieldName: 'Visibility' }),
   // redeem → keeps its own description as header, fieldName null
-  { id: 't3', date: '2026-01-07', description: 'Bluetooth Speaker', type: 'redeem', points: -100, balance: 350, ref: 'ord-1', fieldName: null },
+  row({ id: 't3', date: '2026-01-07T06:00:00.000Z', transactionType: 'DEBIT_REDEMPTION', description: 'Bluetooth Speaker', narration: 'Bluetooth Speaker',
+    points: -100, balanceAfter: 350, referenceType: 'REDEMPTION_ORDER', referenceId: 'ord-1' }),
+  // expiry with NO narration → the backend's per-type default header (never a blank title)
+  row({ id: 't4', date: '2026-01-08T06:00:00.000Z', transactionType: 'DEBIT_EXPIRY', description: 'Points expired',
+    points: -50, balanceAfter: 300 }),
 ];
 
 function stubLedger() {
@@ -41,8 +53,11 @@ function stubLedger() {
     json: () => Promise.resolve({
       success: true,
       data: {
-        meta: { name: 'Verma Traders', outletCode: 'OUT-2026-00111', mobile: '9876543210', balance: 350, lifetime: 450, redeemed: 100 },
-        transactions: TXS,
+        meta: { name: 'Verma Traders', outletCode: 'OUT-2026-00111', mobile: '9876543210', balance: 350, lifetime: 450, redeemed: 100,
+          // SSS keeps the "Visibility" KPI option (same rule as the partner wallet).
+          outletType: 'SSS', hasPointsActivity: true, hasPayoutActivity: false, loyaltyEnabled: true },
+        statement: { rows: TXS },
+        payouts: [],
       },
     }),
   }));
@@ -89,7 +104,7 @@ describe('CF — sales outlet ledger credit field name', () => {
     await renderLedger('k1');
     const select = await screen.findByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map((o) => o.textContent ?? '');
-    expect(options.some((t) => /all kpi/i.test(t))).toBe(true);
+    expect(options).toContain('All Parameters'); // the partner wallet's label (was "All KPIs")
     expect(options).toContain('Monthly Scheme');
     expect(options).toContain('Visibility');
     // The redeem row (fieldName null) must not appear as a KPI option.
@@ -100,5 +115,11 @@ describe('CF — sales outlet ledger credit field name', () => {
     stubLedger();
     await renderLedger('k1');
     expect(await screen.findByText('Bluetooth Speaker')).toBeInTheDocument();
+  });
+
+  it('CF5: a non-credit row with no narration shows the per-type default title, never blank', async () => {
+    stubLedger();
+    await renderLedger('k1');
+    expect(await screen.findByText('Points expired')).toBeInTheDocument();
   });
 });
