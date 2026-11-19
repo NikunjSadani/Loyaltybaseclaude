@@ -1201,6 +1201,34 @@ describe('policy Q4 — historical clawback that exceeded holdings: "recovered X
   });
 });
 
+describe('audit item 7 — V6b after go-live: negatives from V2 over-reversals are INFO (V6c), never a V6b FAIL', () => {
+  const w = (id: string, B: number, D: number) => ({
+    id, redeemablePoints: B, debtPoints: D, movementSeq: 3, earnedPoints: 0, lifetimeEarned: 0, redeemedPoints: 0,
+    expiredPoints: 0, lifetimeRedeemed: 0, lifetimeExpired: 0, lockedPoints: 0,
+  });
+  const snap = (withV2Debt: boolean) => ({
+    clientId: 'bajaj',
+    wallets: [w('W-OLD', -841, 841), w('W-V2', -2986, 2986)],
+    txs: [],
+    positions: [{ id: 'P1', walletId: 'W-V2', creditTxId: 'c1', amount: 10000, offsetPoints: 0, reversedPoints: 10000, attribution: 'EXACT' }],
+    allocations: [{ positionId: 'P1', creditReversalId: 'R1', requested: 10000, recovered: 7014, owed: 2986, overReversalDebt: withV2Debt }],
+    payoutAllocations: [],
+  });
+
+  it('the cutover negatives still compare exactly; the V2 debt wallet is listed as INFO', () => {
+    const res = runVerifyChecks(snap(true), { neverNegativeTenant: false, expectedNegativeBalances: [-841] });
+    expect(res.find((r) => r.check.startsWith('V6b'))).toMatchObject({ status: 'PASS', ids: ['W-OLD'] });
+    expect(res.find((r) => r.check.startsWith('V6b'))!.detail).toContain('1 other negative wallet(s) from V2 over-reversals left out');
+    expect(res.find((r) => r.check.startsWith('V6c'))).toMatchObject({ status: 'INFO', ids: ['W-V2'] });
+  });
+
+  it('a negative wallet NOT explained by a V2 over-reversal still fails V6b', () => {
+    const res = runVerifyChecks(snap(false), { neverNegativeTenant: false, expectedNegativeBalances: [-841] });
+    expect(res.find((r) => r.check.startsWith('V6b'))!.status).toBe('FAIL');
+    expect(res.find((r) => r.check.startsWith('V6c'))).toBeUndefined();
+  });
+});
+
 // ───────────────────────────── WP5 payout planner wired into the backfill (WP6) ─────────────────────────────
 
 describe('WP6 × WP5 — PAYOUT reversal allocation backfill', () => {

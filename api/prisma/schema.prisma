@@ -3888,8 +3888,9 @@ model WalletCreditPosition {
 
 /// One per (POINTS CreditReversal × position) — §1.2: requested r = debtRestored p + recovered c + owed + shortfall
 /// (SQL CHECK; all ≥ 0, requested > 0). Unique per (reversal, position) → an approval can't double-apply.
-/// V2 engine since owner decision 2026-11-19: owed = r − p − c (booked as debt), shortfall 0. LEGACY on a sequenced
-/// wallet: owed 0, shortfall = r − c (floor 0, written off — unchanged).
+/// V2 engine since owner decisions 2026-11-19: alreadyExpired = q (X's own expired points), owed = r − p − q − c (booked
+/// as debt), shortfall 0. LEGACY on a sequenced wallet: owed 0, alreadyExpired 0, shortfall = r − c (floor 0, written off).
+/// SQL CHECK credit_reversal_allocations_parts_v2_chk: p + c + owed + shortfall + alreadyExpired = requested.
 model CreditReversalAllocation {
   id               String   @id @default(cuid())
   creditReversalId String
@@ -3905,7 +3906,10 @@ model CreditReversalAllocation {
   // true ⇔ `owed` was booked by a live V2 over-reversal (owner 2026-11-19). Every row written before that rule has
   // false — correct, because no engine row had owed > 0 before it.
   overReversalDebt Boolean  @default(false)
-  shortfall        Int // r − p − c − owed (written off: LEGACY floor-0 clawbacks / historical; always 0 for V2)
+  // q — V2 (owner decision 2026-11-19, expired points are not recovered twice): the reversed credit's own points that
+  // had already EXPIRED; counted as already recovered — nothing taken, no debt. 0 for LEGACY / historical rows.
+  alreadyExpired   Int      @default(0)
+  shortfall        Int // r − p − c − owed − alreadyExpired (written off: LEGACY floor-0 clawbacks / historical; always 0 for V2)
   createdAt        DateTime @default(now())
 
   creditReversal CreditReversal       @relation(fields: [creditReversalId], references: [id], onDelete: Restrict)

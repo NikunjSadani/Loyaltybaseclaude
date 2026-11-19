@@ -2,7 +2,7 @@
  * Replays a wallet's COMMITTED v2 history (wallet_transactions in seq order) through the WP0 oracle
  * (api/src/wallet/reversal-model.ts) and compares every figure the engine persisted with what the oracle derives:
  * per-row pointsDelta / balanceAfter, final B / D / movementSeq, every position's O_X / ρ_X, every credit lot's
- * remaining, every reversal allocation's (p, c, owed, shortfall) — WALLET-REVERSAL-ENGINE-DESIGN.md §13 WP7 / §15.
+ * remaining, every reversal allocation's (p, q, c, owed, shortfall) — WALLET-REVERSAL-ENGINE-DESIGN.md §13 WP7 / §15.
  *
  * Whatever order the race produced, the committed seq order is a serial history; the engine is correct iff that
  * history, replayed through the oracle, lands exactly on the stored state.
@@ -19,6 +19,33 @@ import {
   Step,
   WalletModel,
 } from '../../src/wallet/reversal-model';
+
+/**
+ * Audit item 8 (2026-11-19): a V2 allocation approved BEFORE the owner's over-reversal-debt / expired-points rules
+ * (owed 0, alreadyExpired 0, shortfall > 0) was decided by the old rule — B −= p + c, the rest written off. Replay it
+ * by that rule (no expired credit, the over-reversal part back to shortfall) instead of reporting a mismatch. The
+ * position's ε_X is left as it was (the old rule never counted expiry).
+ */
+function preDebtRuleReverse(m: WalletModel, creditId: string, r: number): Step {
+  const pos = m.positions[creditId];
+  const m0: WalletModel = pos
+    ? { ...m, positions: { ...m.positions, [creditId]: { ...pos, expiredCounted: pos.expired ?? 0 } } }
+    : m;
+  const st = oReverse(m0, creditId, r);
+  if (pos && st.model.positions[creditId]) st.model.positions[creditId].expiredCounted = pos.expiredCounted;
+  const s = st.movement.owed;
+  if (s === 0) return st;
+  return {
+    model: { ...st.model, state: { ...st.model.state, B: st.model.state.B + s, D: st.model.state.D - s } },
+    movement: {
+      ...st.movement,
+      owed: 0,
+      shortfall: s,
+      pointsDelta: st.movement.pointsDelta + s,
+      debtDelta: st.movement.debtDelta - s,
+    },
+  };
+}
 
 /** referenceType of the synthetic "backfilled vendor-import debt" row the fixtures seed (see seedDebt). */
 export const SEED_DEBT_REFERENCE = 'WRE_E2E_SEED_DEBT';
@@ -83,7 +110,12 @@ export async function replayWalletThroughOracle(
         });
       } else if (r.reversedCreditTxId) {
         kinds.push('REVERSAL');
-        step = oReverse(m, r.reversedCreditTxId, -r.points);
+        const pos = posByCredit.get(r.reversedCreditTxId);
+        const alloc = allocations.find((a) => a.creditReversalId === r.creditReversalId && a.positionId === pos?.id);
+        const preRule = !!alloc && alloc.owed === 0 && (alloc.alreadyExpired ?? 0) === 0 && alloc.shortfall > 0;
+        step = preRule
+          ? preDebtRuleReverse(m, r.reversedCreditTxId, -r.points)
+          : oReverse(m, r.reversedCreditTxId, -r.points);
       } else if (r.transactionType === 'DEBIT_EXPIRY') {
         kinds.push('EXPIRY');
         const owner = txByLedger.get(r.referenceId ?? '');
@@ -138,11 +170,12 @@ export async function replayWalletThroughOracle(
           alloc.debtRestored !== mv.debtRestored ||
           alloc.recovered !== mv.recovered ||
           alloc.owed !== mv.owed ||
+          (alloc.alreadyExpired ?? 0) !== mv.alreadyExpired ||
           alloc.shortfall !== mv.shortfall
         ) {
           mismatches.push(
-            `allocation ${alloc.id}: db (r ${alloc.requested}, p ${alloc.debtRestored}, c ${alloc.recovered}, owed ${alloc.owed}, sf ${alloc.shortfall}) ` +
-              `oracle (r ${mv.pointsRequested}, p ${mv.debtRestored}, c ${mv.recovered}, owed ${mv.owed}, sf ${mv.shortfall})`,
+            `allocation ${alloc.id}: db (r ${alloc.requested}, p ${alloc.debtRestored}, q ${alloc.alreadyExpired}, c ${alloc.recovered}, owed ${alloc.owed}, sf ${alloc.shortfall}) ` +
+              `oracle (r ${mv.pointsRequested}, p ${mv.debtRestored}, q ${mv.alreadyExpired}, c ${mv.recovered}, owed ${mv.owed}, sf ${mv.shortfall})`,
           );
         }
       }

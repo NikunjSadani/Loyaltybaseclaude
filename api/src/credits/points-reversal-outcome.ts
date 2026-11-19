@@ -6,7 +6,7 @@
  * floors at 0 and what it no longer holds is written off (settled off-platform). The summary says which happened:
  *
  *   V2:     "Approved · 10,000 pts reversed · 7,014 taken from the wallet · 2,986 recorded as debt, repaid from future earnings"
- *   LEGACY: "Approved · 10,000 pts reversed · 7,014 taken from the wallet · 2,986 not recovered — already spent, written off (settle off-platform)"
+ *   LEGACY: "Approved · 10,000 pts reversed · 7,014 taken from the wallet · 2,986 not recovered — already redeemed or expired, written off"
  *
  * The same text is built for the approve response (from what the engine just did) and for the reversal list (from the
  * stored allocation rows, or — for a reversal with none — approvedPaise / shortfallPaise), so the screen never
@@ -23,6 +23,8 @@ export interface PointsReversalSplit {
   debtRestored: number;
   /** s — V2 (owner 2026-11-19): the part the wallet no longer held, booked as debt */
   owed: number;
+  /** q — V2 (owner 2026-11-19): the credit's own points that had already expired — nothing to recover (absent = 0) */
+  alreadyExpired?: number;
   /** written off (LEGACY floor 0 / approvals before 2026-11-19): settled off-platform */
   shortfall: number;
 }
@@ -41,9 +43,11 @@ const pts = (n: number) => new Intl.NumberFormat('en-IN').format(n);
 function parts(s: PointsReversalSplit): string[] {
   const out: string[] = [];
   if (s.recovered > 0) out.push(`${pts(s.recovered)} taken from the wallet`);
+  if ((s.alreadyExpired ?? 0) > 0) out.push(`${pts(s.alreadyExpired ?? 0)} already expired — nothing to recover`);
   if (s.debtRestored > 0) out.push(`${pts(s.debtRestored)} of earlier debt this credit had paid off is owed again`);
   if (s.owed > 0) out.push(`${pts(s.owed)} recorded as debt, repaid from future earnings`);
-  if (s.shortfall > 0) out.push(`${pts(s.shortfall)} not recovered — already spent, written off (settle off-platform)`);
+  // audit item 5: LEGACY's floor-0 write-off covers points redeemed AND points that expired
+  if (s.shortfall > 0) out.push(`${pts(s.shortfall)} not recovered — already redeemed or expired, written off`);
   return out;
 }
 
@@ -59,6 +63,7 @@ export function pointsOutcome(s: PointsReversalSplit, opts: { requested?: number
   const summary = [`${pts(s.reversed)} pts reversed`, ...p].join(' · ');
   return {
     ...s,
+    alreadyExpired: s.alreadyExpired ?? 0,
     headline: `${prefix} · ${summary}`,
     summary,
     lines: p.map((x) => `${x.charAt(0).toUpperCase()}${x.slice(1)}`),
@@ -73,6 +78,7 @@ export function rejectedPointsOutcome(): PointsOutcome {
     recovered: 0,
     debtRestored: 0,
     owed: 0,
+    alreadyExpired: 0,
     shortfall: 0,
     headline: `Rejected · ${summary}`,
     summary,
@@ -87,7 +93,7 @@ export function rejectedPointsOutcome(): PointsOutcome {
  */
 export function storedPointsSplit(
   r: { approvedPaise: bigint | number | null; shortfallPaise: bigint | number | null },
-  allocations: Array<{ requested: number; debtRestored: number; recovered: number; owed: number; shortfall: number }>,
+  allocations: Array<{ requested: number; debtRestored: number; recovered: number; owed: number; shortfall: number; alreadyExpired?: number }>,
 ): PointsReversalSplit {
   const reversed = Number(r.approvedPaise ?? 0);
   const covered = allocations.reduce((n, a) => n + a.requested, 0);
@@ -97,9 +103,10 @@ export function storedPointsSplit(
       recovered: allocations.reduce((n, a) => n + a.recovered, 0),
       debtRestored: allocations.reduce((n, a) => n + a.debtRestored, 0),
       owed: allocations.reduce((n, a) => n + a.owed, 0),
+      alreadyExpired: allocations.reduce((n, a) => n + (a.alreadyExpired ?? 0), 0),
       shortfall: allocations.reduce((n, a) => n + a.shortfall, 0),
     };
   }
   const shortfall = Math.min(reversed, Number(r.shortfallPaise ?? 0));
-  return { reversed, recovered: reversed - shortfall, debtRestored: 0, owed: 0, shortfall };
+  return { reversed, recovered: reversed - shortfall, debtRestored: 0, owed: 0, alreadyExpired: 0, shortfall };
 }

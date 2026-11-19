@@ -207,6 +207,16 @@ describe('FinanceDashboardService', () => {
     expect(mockTds.report194R).toHaveBeenCalledWith('deoleo', '2024-25');
   });
 
+  it('audit item 1: liability = Σ POSITIVE balances only; "points owed" = Σ debtPoints, separate (never netted)', async () => {
+    mockPrisma.wallet.aggregate.mockReset();
+    mockPrisma.wallet.aggregate
+      .mockResolvedValueOnce({ _sum: { lockedPoints: 0, debtPoints: 2_986 } }) // all wallets: locked + owed
+      .mockResolvedValueOnce({ _sum: { redeemablePoints: 50_000 } }); // positive wallets only
+    const out = await service.finance(admin);
+    expect(mockPrisma.wallet.aggregate.mock.calls[1][0].where).toEqual({ partner: { clientId: 'deoleo' }, redeemablePoints: { gt: 0 } });
+    expect(out.liability).toMatchObject({ redeemablePoints: 50_000, owedPoints: 2_986, redeemableRupees: 5_000 });
+  });
+
   it('scopes every wallet/ledger query by the caller tenant (partner.clientId)', async () => {
     await service.finance(admin);
     expect(mockPrisma.wallet.aggregate).toHaveBeenCalledWith(

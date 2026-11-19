@@ -10,6 +10,20 @@ describe('POINTS reversal outcome summary (plain words — owner 2026-11-19)', (
     expect(o.lines).toEqual(['7,014 taken from the wallet', '2,986 recorded as debt, repaid from future earnings']);
   });
 
+  it('V2 with the credit\'s own points already expired (owner 2026-11-19): "X already expired — nothing to recover"', () => {
+    expect(pointsOutcome({ reversed: 10000, recovered: 0, debtRestored: 0, owed: 0, alreadyExpired: 10000, shortfall: 0 }).headline).toBe(
+      'Approved · 10,000 pts reversed · 10,000 already expired — nothing to recover',
+    );
+    expect(pointsOutcome({ reversed: 10000, recovered: 2000, debtRestored: 0, owed: 5000, alreadyExpired: 3000, shortfall: 0 }).headline).toBe(
+      'Approved · 10,000 pts reversed · 2,000 taken from the wallet · 3,000 already expired — nothing to recover · 5,000 recorded as debt, repaid from future earnings',
+    );
+    expect(
+      storedPointsSplit({ approvedPaise: 10000n, shortfallPaise: 0n }, [
+        { requested: 10000, debtRestored: 0, recovered: 2000, owed: 5000, alreadyExpired: 3000, shortfall: 0 },
+      ]),
+    ).toEqual({ reversed: 10000, recovered: 2000, debtRestored: 0, owed: 5000, alreadyExpired: 3000, shortfall: 0 });
+  });
+
   it('V2 fully covered by the wallet: only "taken from the wallet"', () => {
     expect(pointsOutcome({ reversed: 500, recovered: 500, debtRestored: 0, owed: 0, shortfall: 0 }).headline).toBe(
       'Approved · 500 pts reversed · 500 taken from the wallet',
@@ -28,12 +42,12 @@ describe('POINTS reversal outcome summary (plain words — owner 2026-11-19)', (
   it('LEGACY (Deoleo — its own rule): floor 0, the rest written off, never called debt', () => {
     const o = pointsOutcome({ reversed: 10000, recovered: 7014, debtRestored: 0, owed: 0, shortfall: 2986 });
     expect(o.headline).toBe(
-      'Approved · 10,000 pts reversed · 7,014 taken from the wallet · 2,986 not recovered — already spent, written off (settle off-platform)',
+      'Approved · 10,000 pts reversed · 7,014 taken from the wallet · 2,986 not recovered — already redeemed or expired, written off',
     );
     expect(o.headline).not.toMatch(/debt/);
     // nothing left in the wallet at all
     expect(pointsOutcome({ reversed: 300, recovered: 0, debtRestored: 0, owed: 0, shortfall: 300 }).headline).toBe(
-      'Approved · 300 pts reversed · 300 not recovered — already spent, written off (settle off-platform)',
+      'Approved · 300 pts reversed · 300 not recovered — already redeemed or expired, written off',
     );
   });
 
@@ -56,23 +70,23 @@ describe('POINTS reversal outcome summary (plain words — owner 2026-11-19)', (
       storedPointsSplit({ approvedPaise: 10000n, shortfallPaise: 0n }, [
         { requested: 10000, debtRestored: 0, recovered: 7014, owed: 2986, shortfall: 0 },
       ]),
-    ).toEqual({ reversed: 10000, recovered: 7014, debtRestored: 0, owed: 2986, shortfall: 0 });
+    ).toEqual({ reversed: 10000, recovered: 7014, debtRestored: 0, owed: 2986, alreadyExpired: 0, shortfall: 0 });
     // V2 approved BEFORE the rule: its recorded write-off stays a write-off (no history rewrite)
     expect(
       storedPointsSplit({ approvedPaise: 500n, shortfallPaise: 200n }, [
         { requested: 300, debtRestored: 0, recovered: 300, owed: 0, shortfall: 0 },
         { requested: 200, debtRestored: 0, recovered: 0, owed: 0, shortfall: 200 },
       ]),
-    ).toEqual({ reversed: 500, recovered: 300, debtRestored: 0, owed: 0, shortfall: 200 });
+    ).toEqual({ reversed: 500, recovered: 300, debtRestored: 0, owed: 0, alreadyExpired: 0, shortfall: 200 });
     // LEGACY without allocation rows
     expect(storedPointsSplit({ approvedPaise: 500n, shortfallPaise: 400n }, [])).toEqual({
-      reversed: 500, recovered: 100, debtRestored: 0, owed: 0, shortfall: 400,
+      reversed: 500, recovered: 100, debtRestored: 0, owed: 0, alreadyExpired: 0, shortfall: 400,
     });
     // rows that don't cover the approved amount (an un-attributed history) → the reversal's own figures
     expect(
       storedPointsSplit({ approvedPaise: 500n, shortfallPaise: 0n }, [
         { requested: 100, debtRestored: 0, recovered: 100, owed: 0, shortfall: 0 },
       ]),
-    ).toEqual({ reversed: 500, recovered: 500, debtRestored: 0, owed: 0, shortfall: 0 });
+    ).toEqual({ reversed: 500, recovered: 500, debtRestored: 0, owed: 0, alreadyExpired: 0, shortfall: 0 });
   });
 });

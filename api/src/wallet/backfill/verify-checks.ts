@@ -518,16 +518,37 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
           .join('; ')}`,
   });
   if (opts.expectedNegativeBalances) {
+    // Audit item 7 (2026-11-19): once V2 is live, an over-reversal legitimately takes a wallet below 0 (owner decision —
+    // the rest becomes debt). Those wallets (any `overReversalDebt` allocation on their positions) are NOT backfill
+    // regressions: they are reported as INFO and left out of the comparison, so V6b keeps catching a backfill that
+    // changed a pre-existing negative balance (the cutover check it was built for) without failing every later run.
+    const posWallet = new Map(snap.positions.map((p) => [p.id, p.walletId]));
+    const debtWallets = new Set(
+      snap.allocations.filter((a) => a.overReversalDebt).map((a) => posWallet.get(a.positionId)).filter((x): x is string => !!x),
+    );
+    const fromV2 = negatives.filter((w) => debtWallets.has(w.id));
+    const compared = negatives.filter((w) => !debtWallets.has(w.id));
     const want = [...opts.expectedNegativeBalances].sort((a, b) => a - b);
-    const got = negatives.map((w) => w.redeemablePoints).sort((a, b) => a - b);
+    const got = compared.map((w) => w.redeemablePoints).sort((a, b) => a - b);
     const same = want.length === got.length && want.every((v, i) => v === got[i]);
     out.push({
       check: 'V6b expected negative balances unchanged',
       clientId: c,
       status: same ? 'PASS' : 'FAIL',
-      detail: `expected [${want.join(', ')}] (Σ ${want.reduce((s, v) => s + v, 0)}), found [${got.join(', ')}] (Σ ${got.reduce((s, v) => s + v, 0)})`,
-      ids: negatives.map((w) => w.id).slice(0, CAP),
+      detail:
+        `expected [${want.join(', ')}] (Σ ${want.reduce((s, v) => s + v, 0)}), found [${got.join(', ')}] (Σ ${got.reduce((s, v) => s + v, 0)})` +
+        (fromV2.length ? `; ${fromV2.length} other negative wallet(s) from V2 over-reversals left out (see V6c)` : ''),
+      ids: compared.map((w) => w.id).slice(0, CAP),
     });
+    if (fromV2.length) {
+      out.push({
+        check: 'V6c negative wallets from V2 over-reversals (owner 2026-11-19 — debt, repaid from future earnings)',
+        clientId: c,
+        status: 'INFO',
+        detail: `${fromV2.length} wallet(s), Σ balance ${fromV2.reduce((s, w) => s + w.redeemablePoints, 0)}, Σ debt ${fromV2.reduce((s, w) => s + w.debtPoints, 0)}`,
+        ids: fromV2.map((w) => w.id).slice(0, CAP),
+      });
+    }
   }
 
   // V7 — position coverage: every credit-batch POINTS credit has exactly one position on its own wallet; attribution counts.

@@ -158,8 +158,18 @@ export class GroupService {
     ]);
 
     const sum = totalsAgg._sum;
+    // Audit item 2 (2026-11-19): a child wallet in debt (negative balance) must not net against what the other outlets
+    // can redeem — the group's available total counts POSITIVE balances only, and the debt is reported separately as
+    // `owedPoints` (what the negative children must earn back). One extra aggregate over the same group predicate;
+    // 0 / unchanged totals for a group with no negative child.
+    const negAgg = await this.prisma.wallet.aggregate({
+      where: { partner: { outlets: { some: { parentId, clientId, deletedAt: null } } }, redeemablePoints: { lt: 0 } },
+      _sum: { redeemablePoints: true },
+    });
+    const negativeSum = negAgg?._sum?.redeemablePoints ?? 0;
     const totals = {
-      redeemablePoints: sum.redeemablePoints ?? 0,
+      redeemablePoints: (sum.redeemablePoints ?? 0) - negativeSum,
+      owedPoints: negativeSum === 0 ? 0 : -negativeSum,
       earnedPoints: sum.earnedPoints ?? 0,
       redeemedPoints: sum.redeemedPoints ?? 0,
       expiredPoints: sum.expiredPoints ?? 0,

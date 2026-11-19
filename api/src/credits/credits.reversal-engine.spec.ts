@@ -429,7 +429,7 @@ describe('WP4 — LEGACY (default for every tenant) is byte-identical to the pre
       approve1: expect.objectContaining({
         reversed: 500, recovered: 100, debtRestored: 0, owed: 0, shortfall: 400,
         headline:
-          'Approved · 500 pts reversed · 100 taken from the wallet · 400 not recovered — already spent, written off (settle off-platform)',
+          'Approved · 500 pts reversed · 100 taken from the wallet · 400 not recovered — already redeemed or expired, written off',
       }),
       approve2: expect.objectContaining({
         reversed: 120, recovered: 120, owed: 0, shortfall: 0,
@@ -849,7 +849,7 @@ describe('WP4 — SHADOW: LEGACY decides and applies; the v2 result is recorded 
     // the SHADOW approver's summary follows what was APPLIED (LEGACY): written off, never "debt"
     expect((shadow.res as Row).pointsOutcome).toMatchObject({ recovered: 100, owed: 0, shortfall: 350 });
     expect((shadow.res as Row).pointsOutcome.headline).toBe(
-      'Partially approved (500 pts requested) · 450 pts reversed · 100 taken from the wallet · 350 not recovered — already spent, written off (settle off-platform)',
+      'Partially approved (500 pts requested) · 450 pts reversed · 100 taken from the wallet · 350 not recovered — already redeemed or expired, written off',
     );
   });
 

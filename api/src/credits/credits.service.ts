@@ -4079,7 +4079,7 @@ export class CreditsService {
     if (approved.length === 0) return reversals;
     const rows = await this.prisma.creditReversalAllocation.findMany({
       where: { creditReversalId: { in: approved.map((r) => r.id) } },
-      select: { creditReversalId: true, requested: true, debtRestored: true, recovered: true, owed: true, shortfall: true },
+      select: { creditReversalId: true, requested: true, debtRestored: true, recovered: true, owed: true, alreadyExpired: true, shortfall: true },
     });
     const by = new Map<string, typeof rows>();
     for (const a of rows ?? []) by.set(a.creditReversalId, [...(by.get(a.creditReversalId) ?? []), a]);
@@ -4361,6 +4361,8 @@ export class CreditsService {
           points: Number(finalApprovedPaise ?? 0n),
           actorId: user.sub,
           description: `Clawback for reversal ${id} — batch POINTS reversal`,
+          // V2 passbook row (owner decision 2, 2026-11-19): "Credit reversed (Volume · 2026-10) −10,000 · 2,986 owed, …"
+          passbookLabel: `${reversal.fieldName} · ${reversal.period}`,
           mode: pointsEngine,
           legacyTarget: pointsTarget,
         });
@@ -4370,6 +4372,7 @@ export class CreditsService {
           recovered: res.recovered,
           debtRestored: res.debtRestored,
           owed: res.owed,
+          alreadyExpired: res.alreadyExpired,
           shortfall: res.shortfall,
         };
       } else if (pointsTarget) {
@@ -4666,7 +4669,7 @@ export class CreditsService {
       if (!legacyOutcome) {
         // POINTS (every engine — display only, built from what the path above did): "Approved · 10,000 pts reversed ·
         // 7,014 taken from the wallet · 2,986 recorded as debt, repaid from future earnings" (V2, owner 2026-11-19) or
-        // "… · 2,986 not recovered — already spent, written off (settle off-platform)" (LEGACY floor 0).
+        // "… · 2,986 not recovered — already redeemed or expired, written off" (LEGACY floor 0).
         const outcome =
           reversal.awardType !== 'POINTS'
             ? null

@@ -322,3 +322,42 @@ describe('fix round A — L6 target tenant of the GIFSY pause / mode actions', (
     expect(calls['programSetting.upsert'][0].create.clientId).toBe('bajaj');
   });
 });
+
+describe('GET reversal-engine/wallets-in-debt (audit item 9, 2026-11-19 — no silent pass-throughs)', () => {
+  it('lists every negative / in-debt wallet of the tenant with outlets, debt, owed and the reversal(s) behind it', async () => {
+    const calls: Record<string, any[]> = {};
+    const rec = (k: string, ret: unknown) => jest.fn(async (a: any) => ((calls[k] ??= []).push(a), ret));
+    const approvedAt = new Date('2026-11-19T06:00:00Z');
+    const prisma = {
+      wallet: {
+        count: rec('wallet.count', 2),
+        findMany: rec('wallet.findMany', [
+          { id: 'w1', partnerId: 'p1', redeemablePoints: -2986, debtPoints: 2986, partner: { businessName: 'Shop One' } },
+          { id: 'w2', partnerId: 'p2', redeemablePoints: -841, debtPoints: 841, partner: { businessName: 'Shop Two' } },
+        ]),
+      },
+      outlet: { findMany: rec('outlet.findMany', [{ partnerId: 'p1', outletCode: 'O1' }, { partnerId: 'p2', outletCode: 'O2' }]) },
+      creditReversalAllocation: {
+        findMany: rec('alloc.findMany', [
+          {
+            creditReversalId: 'REV1', owed: 2986, debtRestored: 0, overReversalDebt: true, position: { walletId: 'w1' },
+            creditReversal: { approvedAt, fieldName: 'Volume', period: '2026-10', outletId: 'O1' },
+          },
+        ]),
+      },
+    };
+    const svc = new WalletService(prisma as unknown as PrismaService, {} as TenantSettingsService);
+    const res = await svc.walletsInDebt('bajaj');
+    expect(calls['wallet.count'][0].where).toEqual({
+      partner: { clientId: 'bajaj' },
+      OR: [{ redeemablePoints: { lt: 0 } }, { debtPoints: { gt: 0 } }],
+    });
+    expect(calls['alloc.findMany'][0].where).toMatchObject({ creditReversal: { clientId: 'bajaj' } });
+    expect(res.total).toBe(2);
+    expect(res.wallets[0]).toMatchObject({
+      walletId: 'w1', partnerName: 'Shop One', outletCodes: ['O1'], balance: -2986, debtPoints: 2986, owedPoints: 2986, note: null,
+      sources: [{ creditReversalId: 'REV1', kind: 'OVER_REVERSAL', owedPoints: 2986, approvedAt, fieldName: 'Volume', period: '2026-10' }],
+    });
+    expect(res.wallets[1]).toMatchObject({ walletId: 'w2', owedPoints: 841, sources: [], note: expect.stringMatching(/imported/) });
+  });
+});

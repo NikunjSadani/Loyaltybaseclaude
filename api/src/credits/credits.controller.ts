@@ -362,6 +362,15 @@ export class CreditsController {
     return this.wallet.reversalAttention(user.clientId, { limit: query.limit });
   }
 
+  // Audit item 9 (2026-11-19): every wallet of the tenant in debt (negative / recorded debt) with the reversal(s)
+  // behind it — the "Wallets in debt" section of the credits reversal screen (no silent pass-throughs).
+  @Get('reversal-engine/wallets-in-debt')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  walletsInDebt(@CurrentUser() user: JwtPayload, @Query() query: ReversalAttentionQueryDto) {
+    return this.wallet.walletsInDebt(user.clientId, { limit: query.limit });
+  }
+
   // GIFSY lifts (or sets) the POINTS reversal maintenance pause by hand — e.g. after a crashed backfill run.
   @Post('reversal-engine/pause')
   @Roles('GIFSY_ADMIN')

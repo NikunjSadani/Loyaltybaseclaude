@@ -255,10 +255,11 @@ export class ProgramHealthDashboardService {
         _sum: { points: true },
         where: { ...ledgerTenant, transactionType: 'EXPIRE', createdAt: { gte: periodStart, lt: periodEnd } },
       }),
-      // outstanding liability = Σ Wallet.redeemablePoints for this tenant's partners
+      // outstanding liability = Σ POSITIVE Wallet.redeemablePoints for this tenant's partners (audit item 1, 2026-11-19:
+      // a negative wallet's debt never nets against the liability — it is "points owed", reported separately)
       this.prisma.wallet.aggregate({
         _sum: { redeemablePoints: true },
-        where: { partner: { user: { clientId }, ...partnerScope } },
+        where: { partner: { user: { clientId }, ...partnerScope }, redeemablePoints: { gt: 0 } },
       }),
       // expiring in 30d = Σ REMAINING (unspent) points of spendable lots not yet expired
       // whose expiresAt ∈ [now, now+30d]. Mirrors the sweep's own selection exactly
@@ -280,6 +281,12 @@ export class ProgramHealthDashboardService {
     const redeemed = Math.abs(redeemAgg._sum.points ?? 0);
     const expiredInPeriod = Math.abs(expireAgg._sum.points ?? 0);
     const outstandingLiabilityPoints = liabilityAgg._sum.redeemablePoints ?? 0;
+    // "Points owed (debt)" = Σ debtPoints — shown next to the liability, never netted into it.
+    const owedAgg = await this.prisma.wallet.aggregate({
+      _sum: { debtPoints: true },
+      where: { partner: { user: { clientId }, ...partnerScope }, debtPoints: { gt: 0 } },
+    });
+    const owedPoints = owedAgg?._sum?.debtPoints ?? 0;
     const outstandingLiabilityRupees =
       conversionRate > 0
         ? ProgramHealthDashboardService.round1(outstandingLiabilityPoints / conversionRate)
@@ -496,6 +503,7 @@ export class ProgramHealthDashboardService {
         redeemed,
         outstandingLiabilityPoints,
         outstandingLiabilityRupees,
+        owedPoints,
         breakagePct,
         expiringIn30dPoints,
       },
