@@ -37,12 +37,9 @@ import { usePreciseGpsPreWarm } from '@/lib/use-precise-gps';
 import { useLocationGate } from '@/lib/use-location-gate';
 import { LocationGatePanel } from '@/components/location/LocationGatePanel';
 import { isSignatureCanvasBlank } from '@/lib/signature-canvas';
-import { isFixStale } from '@/lib/location-gate';
+import { BOARD_FIX_MESSAGES, fixTimeProblem, isFixStale } from '@/lib/location-gate';
 import { SETTINGS_FAILED_LOCATION_NOTE, useLocationSetting } from '@/lib/use-location-setting';
 
-/** Round-3 #2: shown when a submit finds the board-photo fix older than 55 minutes (server wording matches). */
-const BOARD_FIX_STALE_SUBMIT_MESSAGE =
-  'The store board photo location is older than 55 minutes. Go back to the Address step and tap "Retry location" under the store board photo (at the outlet), then submit again.';
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -432,7 +429,7 @@ export default function NewKYCPage() {
    * self-declaration document — the Address Proof upload itself stays REQUIRED either
    * way. While features load, DEFAULT_FEATURES has the flag OFF → the SAFE default of
    * requiring the self-declaration on a declared mismatch. */
-  const { features, loading: featuresLoading, error: featuresError, serverSkewMs } = useTenantFeatures('/api/sales/me');
+  const { features, loading: featuresLoading, error: featuresError, serverSkewMs, refetchClock } = useTenantFeatures('/api/sales/me', { clock: true });
   /* Tenant name for programme copy (was hard-coded "Deoleo" — showed on Bajaj; owner 2026-11-14). */
   const tenantDisplayName = useClientConfig().branding.displayName;
   const waiverEnabled = features.kycAddressProofWaiver;
@@ -452,7 +449,7 @@ export default function NewKYCPage() {
    * OFF (default — Deoleo, every other tenant): the hook does nothing and the page is byte-identical. ON: the rep
    * cannot START the KYC (the wizard is replaced by a "location needed" guide) until location is allowed AND a
    * real fix arrives, and cannot SUBMIT without passing a fresh check (the API refuses a fix-less KYC too). */
-  const locationGate = useLocationGate(features.requireLocation && !featuresLoading, { serverSkewMs });
+  const locationGate = useLocationGate(features.requireLocation && !featuresLoading, { serverSkewMs, recheckClock: refetchClock });
   // Last-known setting (browser storage): only drives the settings-failure note for reps whose programme required
   // location last time. Deoleo reps (last-known false) never see it.
   const locationSetting = useLocationSetting(features.requireLocation, featuresLoading, featuresError);
@@ -1559,8 +1556,13 @@ export default function NewKYCPage() {
       }
       // Round-3 #2: the board-photo fix stays the PHOTO's own location — never swapped for the submit-time fix. A
       // stale one is refreshed only by the rep's explicit "Retry location" (same timed acquire as the photo).
-      if (!boardPhotoGeo || isFixStale(boardPhotoGeo.ts)) {
-        setSubmitError(BOARD_FIX_STALE_SUBMIT_MESSAGE);
+      if (!boardPhotoGeo) {
+        setSubmitError(BOARD_FIX_MESSAGES.none);
+        return;
+      }
+      const boardTimeProblem = fixTimeProblem(boardPhotoGeo.ts);
+      if (boardTimeProblem) {
+        setSubmitError(boardTimeProblem === 'old' ? BOARD_FIX_MESSAGES.old : BOARD_FIX_MESSAGES.wrongTime);
         return;
       }
       setSubmitting(true);
@@ -3079,19 +3081,23 @@ export default function NewKYCPage() {
               {docs.storeBoardPhoto && (
                 <div className="space-y-2">
                   <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-xs ${
-                    boardPhotoGeo
+                    boardPhotoGeo && !(locationGate.enabled && boardFixStale)
                       ? 'bg-emerald-50 border-emerald-200'
+                      : boardPhotoGeoError
+                      ? 'bg-red-50 border-red-200'
+                      : boardPhotoGeo
+                      ? 'bg-amber-50 border-amber-200'
                       : boardPhotoGeoError
                       ? 'bg-red-50 border-red-200'
                       : 'bg-blue-50 border-blue-200'
                   }`}>
                     {boardPhotoGeoLoading && <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0" />}
-                    {boardPhotoGeo        && <Navigation className="h-4 w-4 text-emerald-600 shrink-0" />}
+                    {boardPhotoGeo && !(locationGate.enabled && boardFixStale) && <Navigation className="h-4 w-4 text-emerald-600 shrink-0" />}
                     {boardPhotoGeoError   && <AlertCircle data-testid="board-photo-geo-error" className="h-4 w-4 text-red-500 shrink-0" />}
                     {!boardPhotoGeoLoading && !boardPhotoGeo && !boardPhotoGeoError && <Navigation className="h-4 w-4 text-blue-500 shrink-0" />}
                     <div className="flex-1 min-w-0">
                       {boardPhotoGeoLoading && <p className="text-blue-700 font-medium">{boardPhotoGeoPrecise ? 'Getting a precise location…' : 'Getting location…'}</p>}
-                      {boardPhotoGeo        && <p className="text-emerald-700 font-medium">Location captured · {boardPhotoGeo.lat.toFixed(5)}, {boardPhotoGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{boardPhotoGeo.accuracy}m)</span></p>}
+                      {boardPhotoGeo && !(locationGate.enabled && boardFixStale) && <p className="text-emerald-700 font-medium">Location captured · {boardPhotoGeo.lat.toFixed(5)}, {boardPhotoGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{boardPhotoGeo.accuracy}m)</span></p>}
                       {boardPhotoGeoError   && (
                         <div>
                           <p data-testid="board-photo-geo-error" className="text-red-700 font-medium">Location required</p>
@@ -3107,7 +3113,9 @@ export default function NewKYCPage() {
                       Disabled for the whole in-flight duration so it can't be double-fired. */}
                   {locationGate.enabled && boardFixStale && !boardPhotoGeoLoading && (
                     <p data-testid="board-photo-geo-stale" role="status" className="text-[11px] font-medium text-amber-700">
-                      This location is older than 55 minutes — tap Retry location.
+                      {boardPhotoGeo && fixTimeProblem(boardPhotoGeo.ts, geoClockMs) === 'old'
+                        ? 'This location is older than 55 minutes — tap Retry location.'
+                        : 'This location has a wrong time — tap Retry location.'}
                     </p>
                   )}
                   {(!boardPhotoGeo || (locationGate.enabled && boardFixStale)) && (

@@ -780,6 +780,8 @@ export class VisibilityCaptureService {
     // `repGeo` = the representative photo used for the map-pin columns (the FIRST
     // fence-required photo that had a fix; legacy path → the single GPS_POINT fix).
     let repGeo: CaptureGeo;
+    // The fence reference, kept for the location-gate STORED location below (switch-on tenants only).
+    let storeReference: { lat: number; lng: number } | null = null;
 
     if (fenceFields.length > 0) {
       // ── NEW PER-PHOTO PATH ──────────────────────────────────────────────────────
@@ -790,6 +792,7 @@ export class VisibilityCaptureService {
         ? outletMasterRef
         : await this.outletReferenceGeo(user.clientId, outlet.partnerId);
       const radius = fenceRadius;
+      storeReference = reference;
 
       let anyInside = false;
       let anyOutside = false;
@@ -901,6 +904,9 @@ export class VisibilityCaptureService {
       distanceMeters = accuracyTooLow ? null : res.distanceMeters;
       geoFenceOk = accuracyTooLow ? null : res.geoFenceOk;
       repGeo = geo;
+      if (locationRequired) {
+        storeReference = outletMasterGeoEnabled ? outletMasterRef : await this.outletReferenceGeo(user.clientId, outlet.partnerId);
+      }
 
       const captureGeoPresent = geo.lat != null && geo.lng != null;
       if (fenceEnabled) {
@@ -940,9 +946,21 @@ export class VisibilityCaptureService {
     // tagged-photo fix, else the phone's submit-time captureGeo, else a GPS field. Only the stored location columns
     // change — the fence verdict (geoFenceOk / distanceMeters) and the flags are untouched, so a poor-accuracy fix is
     // reported as poor accuracy. Switch-off tenants (Deoleo) store exactly what they stored before.
-    if (locationRequired && (repGeo.lat == null || repGeo.lng == null)) {
-      const fallback = this.firstRealFix(schema, values, gateInput.captureGeo, cleaned, new Set(Object.keys(carriedReviews)));
-      if (fallback) repGeo = this.photoToCaptureGeo(fallback);
+    // Round 4 #2: on switch-on tenants the STORED representative location is ALWAYS chosen fresh-first (new photos of
+    // this request → captureGeo → GPS sent now → carried-forward), never the farthest of the MERGED values (which can be
+    // an old carried photo). The fence VERDICT (geoFenceOk, blocking, flags) still uses every photo as before. The stored
+    // distance is recomputed for that same stored fix (pin and distance always describe one fix; null without a
+    // reference or when the fix's own accuracy is worse than the fence radius — the same buffer rule as the fence).
+    if (locationRequired) {
+      const chosen = this.firstRealFix(schema, values, gateInput.captureGeo, cleaned, new Set(Object.keys(carriedReviews)));
+      if (chosen) {
+        repGeo = this.photoToCaptureGeo(chosen);
+        const acc = typeof chosen.accuracy === 'number' && Number.isFinite(chosen.accuracy) ? chosen.accuracy : null;
+        distanceMeters =
+          storeReference && !(acc != null && acc > fenceRadius)
+            ? Math.round(haversineMeters(chosen.lat, chosen.lng, storeReference.lat, storeReference.lng) * 100) / 100
+            : null;
+      }
     }
 
     // Hash the capture photos BEFORE the transaction (network I/O outside the tx).

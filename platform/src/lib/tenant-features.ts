@@ -18,7 +18,7 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { authHeader } from '@/lib/api-client';
 import type { FeatureFlags } from '@/lib/platform/client-config';
 import { DEFAULT_CLIENT_CONFIG } from '@/lib/platform/default-client-config';
@@ -91,6 +91,8 @@ export interface TenantFeaturesState {
    * location gate to notice a phone whose date/time is wrong (LOCATION-GATE.md). Same single request as before.
    */
   serverSkewMs?: number | null;
+  /** Location gate pages: re-read the server clock (no-store) — resolves the new skew. */
+  refetchClock?: () => Promise<number | null>;
 }
 
 /**
@@ -99,7 +101,34 @@ export interface TenantFeaturesState {
  * DEFAULT_FEATURES while loading and on error (settles loading either way, so a
  * consumer that gates on the flags can resolve without hanging).
  */
-export function useTenantFeatures(endpoint: string): TenantFeaturesState {
+/**
+ * Phone clock − server clock (ms) from a response: `Date` header minus any `Age` (a cached response's Date is older
+ * than "now" by Age seconds). null when the header is absent / unreadable. Defensive: a proxy may add or strip either.
+ */
+export function serverSkewFromResponse(r: { headers?: { get?: (h: string) => string | null } } | null | undefined, nowMs: number = Date.now()): number | null {
+  try {
+    const d = Date.parse(r?.headers?.get?.('date') ?? '');
+    if (!Number.isFinite(d)) return null;
+    const ageSec = Number(r?.headers?.get?.('age') ?? '');
+    const age = Number.isFinite(ageSec) && ageSec > 0 ? ageSec * 1000 : 0;
+    return nowMs - (d + age);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the current tenant's features from an authenticated role endpoint (one of
+ * /api/partner/me, /api/sales/me, /api/admin/settings/config). Returns
+ * DEFAULT_FEATURES while loading and on error (settles loading either way, so a
+ * consumer that gates on the flags can resolve without hanging).
+ *
+ * `opts.clock` (location gate pages only — KYC wizard, visibility capture): the request is `cache: 'no-store'` so its
+ * `Date` header is the server's clock now, and `refetchClock()` re-reads it (the clock guide's Test again). Every other
+ * caller is unchanged.
+ */
+export function useTenantFeatures(endpoint: string, opts: { clock?: boolean } = {}): TenantFeaturesState {
+  const clock = opts.clock === true;
   const [state, setState] = useState<TenantFeaturesState>({
     features: DEFAULT_FEATURES,
     loading: true,
@@ -108,14 +137,9 @@ export function useTenantFeatures(endpoint: string): TenantFeaturesState {
   useEffect(() => {
     let cancelled = false;
     let serverSkewMs: number | null = null;
-    fetch(endpoint, { headers: { ...authHeader() } })
+    fetch(endpoint, clock ? { headers: { ...authHeader() }, cache: 'no-store' } : { headers: { ...authHeader() } })
       .then((r) => {
-        try {
-          const d = Date.parse(r.headers?.get?.('date') ?? '');
-          serverSkewMs = Number.isFinite(d) ? Date.now() - d : null;
-        } catch {
-          serverSkewMs = null;
-        }
+        serverSkewMs = clock ? serverSkewFromResponse(r) : null;
         return r.ok ? r.json() : null;
       })
       .then((res) => {
@@ -128,7 +152,19 @@ export function useTenantFeatures(endpoint: string): TenantFeaturesState {
     return () => {
       cancelled = true;
     };
+  }, [endpoint, clock]);
+
+  /** Re-read the server clock (same no-store request) and update `serverSkewMs`; resolves the new skew (or null). */
+  const refetchClock = useCallback(async (): Promise<number | null> => {
+    try {
+      const r = await fetch(endpoint, { headers: { ...authHeader() }, cache: 'no-store' });
+      const skew = serverSkewFromResponse(r);
+      setState((prev) => ({ ...prev, serverSkewMs: skew }));
+      return skew;
+    } catch {
+      return null;
+    }
   }, [endpoint]);
 
-  return state;
+  return { ...state, refetchClock };
 }

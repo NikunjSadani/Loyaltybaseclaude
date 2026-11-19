@@ -133,11 +133,29 @@ export async function checkLocation(
  * the submit-time refresh / Retry location happen before the server would refuse it. Missing / unreadable ts = stale.
  */
 export const FIX_STALE_AFTER_MS = 55 * 60_000;
-export function isFixStale(ts: string | null | undefined, now: number = Date.now()): boolean {
-  if (!ts) return true;
+/** A fix timed more than this ahead of the phone clock is "wrong time" (same 10 min as the server). */
+export const FIX_FUTURE_AFTER_MS = 10 * 60_000;
+
+/** Why a board fix time can't be used (round 4 #1 — mirrors the server): 'missing' | 'future' | 'old' | null. */
+export function fixTimeProblem(ts: string | null | undefined, now: number = Date.now()): 'missing' | 'future' | 'old' | null {
+  if (!ts) return 'missing';
   const t = Date.parse(ts);
-  return !Number.isFinite(t) || now - t > FIX_STALE_AFTER_MS;
+  if (!Number.isFinite(t)) return 'missing';
+  if (now - t > FIX_STALE_AFTER_MS) return 'old';
+  if (t - now > FIX_FUTURE_AFTER_MS) return 'future';
+  return null;
 }
+
+export function isFixStale(ts: string | null | undefined, now: number = Date.now()): boolean {
+  return fixTimeProblem(ts, now) !== null;
+}
+
+/** Phone-side wording, matching the server's refusals. */
+export const BOARD_FIX_MESSAGES = {
+  none: 'No store board location yet — go back to the Address step and tap "Retry location" under the store board photo.',
+  old: 'The store board photo location is older than 55 minutes. Go back to the Address step and tap "Retry location" under the store board photo (at the outlet), then submit again.',
+  wrongTime: 'The store board photo location has a wrong time — go back to the Address step and tap "Retry location" under the store board photo, then submit again.',
+} as const;
 
 // ─── Which guide ──────────────────────────────────────────────────────────────
 
@@ -213,7 +231,7 @@ export function locationGuide(platform: LocationPlatform, reason: LocationBlockR
           : platform === 'ios-safari' || platform === 'ios-app'
             ? 'Open the Settings app → General → Date & Time → turn on “Set Automatically”.'
             : 'Set the computer’s date and time to automatic in its settings.',
-        'Reopen this page, then tap Test again.',
+        'Then tap Test again.',
       ],
     };
   }

@@ -68,17 +68,30 @@ export function isPhoneClockWrong(clientNow: unknown, now: Date = new Date()): b
  * pre-fill from days ago), and the 24 h bound keeps `clientNow` from widening it materially.
  */
 export function isFreshFixTime(ts: unknown, now: Date = new Date(), clientNow?: unknown): boolean {
-  if (typeof ts !== 'string' || !ts) return false;
+  return fixTimeProblem(ts, now, clientNow) === null;
+}
+
+/** Why a fix time fails the window: 'missing' (no / unreadable ts), 'future' (> 10 min ahead), 'old' (> 60 min). */
+export type FixTimeProblem = 'missing' | 'future' | 'old';
+
+export function fixTimeProblem(ts: unknown, now: Date = new Date(), clientNow?: unknown): FixTimeProblem | null {
+  if (typeof ts !== 'string' || !ts) return 'missing';
   const t = Date.parse(ts);
-  if (!Number.isFinite(t)) return false;
+  if (!Number.isFinite(t)) return 'missing';
   let ref = now.getTime();
   if (typeof clientNow === 'string' && clientNow) {
     const c = Date.parse(clientNow);
     if (Number.isFinite(c) && Math.abs(c - ref) <= CLIENT_CLOCK_MAX_SKEW_MS) ref = c;
   }
   const age = ref - t;
-  return age <= BOARD_FIX_MAX_AGE_MS && age >= -BOARD_FIX_FUTURE_SKEW_MS;
+  if (age > BOARD_FIX_MAX_AGE_MS) return 'old';
+  if (age < -BOARD_FIX_FUTURE_SKEW_MS) return 'future';
+  return null;
 }
+
+/** Round 4 #1: the board fix has no time or a time in the future — honest wording (not "older than 55 minutes"). */
+export const WRONG_TIME_BOARD_FIX_MESSAGE =
+  'The store board photo location has a wrong time — go back to the Address step and tap "Retry location" under the store board photo, then submit again.';
 
 /** True when the tenant requires location AND the caller is a sales rep (the only gated initiator). */
 export function isLocationRequiredFor(features: unknown, role: string | null | undefined): boolean {

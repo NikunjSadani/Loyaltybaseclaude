@@ -6,6 +6,32 @@ not deployed, not runtime-verified on a phone.
 line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing new). The code paths are shared
 (KYC / visibility services, reports, digest) — owner-approved 2026-11-18.
 
+## Final-audit fixes (round 4, 2026-11-19, on b2570896) — 7 items, all confirmed (none refuted)
+
+1. **Future-timed / untimed board fix**: the phone's `isFixStale` now matches the server exactly — missing / unreadable
+   `ts`, older than 55 min (phone) / 60 min (server), OR more than 10 min in the future → Retry location shows. The
+   server answers the missing / future case honestly: "The store board photo location has a wrong time — go back to the
+   Address step and tap "Retry location"…" (the phone mirrors it, and its stale line says "has a wrong time").
+2. **Stored visibility location on the fence path** (switch-on only): the stored representative fix is ALWAYS chosen
+   fresh-first (new photos of this request → `captureGeo` → GPS sent now → carried-forward), not the farthest of the
+   merged values; the stored `distanceMeters` is recomputed for that SAME fix (null without a reference or when its
+   accuracy is worse than the fence radius). The fence verdict (`geoFenceOk`, blocking, flags) still uses every photo
+   as before. Switch-off tenants (Deoleo) store the farthest photo exactly as before (test). The Location report reads
+   `captureLat/Lng/Accuracy` only (unchanged); `distanceMeters` is shown to reviewers and now matches the stored pin.
+3. **No board location at submit**: "No store board location yet — go back to the Address step and tap Retry
+   location" (the Retry button shows whenever there is no fix).
+4. **Failed Retry on a stale fix**: the green "Location captured" line / icon / green box are hidden while the fix is
+   stale (amber box + amber stale line + the red error only). Switch-off tenants render exactly as before.
+5. **Clock offset**: on the two gate pages (KYC wizard, visibility capture) the settings request is `cache: 'no-store'`
+   and the offset is `now − (Date + Age)` (defensive: either header may be missing). Every other `useTenantFeatures`
+   caller is unchanged (no cache option, no skew). Only a corrected skew > 24 h blocks. Note: Deoleo reps on those two
+   pages also send that one settings request with `cache: 'no-store'` (same URL / headers; only the browser cache
+   mode differs).
+6. **Clock guide "Test again"** re-reads the server clock (same no-store request) and clears the block when the clock
+   is now right; the guide says "Then tap Test again".
+7. **Wording**: visibility's stale photo message says "older than 60 minutes" (the server limit), and a future /
+   missing photo time says "has a wrong time".
+
 ## Re-audit fixes (round 3, 2026-11-19, on e4696bcf) — 8 findings, all confirmed (none refuted)
 
 1. **Location Report tile for MIS_USER**: the index read `/admin/settings/config` (GIFSY_ADMIN / CLIENT_ADMIN only).

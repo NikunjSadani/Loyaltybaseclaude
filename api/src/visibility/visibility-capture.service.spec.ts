@@ -384,6 +384,53 @@ describe('VisibilityCaptureService', () => {
         expect(data).toMatchObject({ captureLat: 12.9001, captureLng: 77.5001, captureAccuracy: 7 });
       });
 
+      it('ROUND 4 #2: fence path — the STORED fix is the fresh photo of this request, not the farther carried one; verdict unchanged', async () => {
+        requireOn({ outletMasterGeo: true });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+          clientId: 't1', version: 4,
+          formSchema: { fields: [
+            { id: 'a', type: 'CAMERA', label: 'A', required: false, order: 1, geoFenceRequired: true },
+            { id: 'b', type: 'CAMERA', label: 'B', required: false, order: 2, geoFenceRequired: true },
+          ] },
+        });
+        // Carried APPROVED photo ~145 m away (inside 200 m, the farthest); the re-shot photo ~15 m away.
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValueOnce({
+          id: 'cap1', status: 'CHANGES_REQUESTED', currentVersion: 1,
+          formValues: { a: { key: 'visibility-media/t1/a.jpg', geo: { lat: 12.9013, lng: 77.5, accuracy: 8, capturedAt: '2026-01-01T00:00:00.000Z' } }, b: { key: 'visibility-media/t1/b.jpg' } },
+          photoReviews: { a: { status: 'APPROVED' }, b: { status: 'REJECTED' } },
+        });
+        mockPrisma.visibilityCapture.findUnique.mockResolvedValueOnce({ id: 'cap1', status: 'CHANGES_REQUESTED', currentVersion: 1 });
+        const res = await service.submitCapture(user, {
+          outletId: 'o1',
+          formValues: { b: { key: 'visibility-media/t1/b2.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy: 6, capturedAt: new Date().toISOString() } } },
+        } as never);
+        expect(res.geoFenceOk).toBe(true); // verdict from every photo, as before
+        const data = mockPrisma.visibilityCapture.update.mock.calls[0][0].data;
+        expect(data).toMatchObject({ captureLat: 12.9001, captureLng: 77.5001, captureAccuracy: 6 });
+        expect(data.distanceMeters).toBeLessThan(30); // distance of the SAME stored fix (not the carried 145 m)
+      });
+
+      it('ROUND 4 #2: OFF (Deoleo-like, outletMasterGeo only) → the fence path keeps storing the farthest photo as before', async () => {
+        gatedOn();
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+          clientId: 't1', version: 4,
+          formSchema: { fields: [
+            { id: 'a', type: 'CAMERA', label: 'A', required: false, order: 1, geoFenceRequired: true },
+            { id: 'b', type: 'CAMERA', label: 'B', required: false, order: 2, geoFenceRequired: true },
+          ] },
+        });
+        await service.submitCapture(user, {
+          outletId: 'o1',
+          formValues: {
+            a: { key: 'visibility-media/t1/a.jpg', geo: { lat: 12.9013, lng: 77.5, accuracy: 8 } },
+            b: { key: 'visibility-media/t1/b.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy: 6 } },
+          },
+        } as never);
+        expect(mockPrisma.visibilityCapture.create.mock.calls[0][0].data).toMatchObject({ captureLat: 12.9013, captureAccuracy: 8 });
+      });
+
       it('AUDIT #1: OFF (Deoleo) → stored values unchanged (no fallback: NULL location columns as before)', async () => {
         gatedOn();
         mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(null, null));

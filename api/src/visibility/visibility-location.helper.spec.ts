@@ -79,7 +79,11 @@ describe('visibilityLocationRefusal (requireLocation ON)', () => {
   // ── AUDIT #7: freshness (same window as KYC) ──
   it('AUDIT #7: a new photo whose fix is older than an hour → refused naming the photo ("too old")', () => {
     const old = { ...fix, capturedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() };
-    expect(fresh(perPhoto, { p1: { key: 'k1', geo: old } })).toMatch(/"Shelf photo" is too old/);
+    expect(fresh(perPhoto, { p1: { key: 'k1', geo: old } })).toMatch(/"Shelf photo" is older than 60 minutes/);
+    // Round 4: a future / missing time is a WRONG time, not "old".
+    const future = { ...fix, capturedAt: new Date(Date.now() + 30 * 60_000).toISOString() };
+    expect(fresh(perPhoto, { p1: { key: 'k1', geo: future } })).toMatch(/"Shelf photo" has a wrong time/);
+    expect(fresh(perPhoto, { p1: { key: 'k1', geo: { lat: 12.9, lng: 77.5 } } })).toMatch(/has a wrong time/);
   });
 
   it('AUDIT #7: a stale or untimed captureGeo / GPS value is not a fresh fix', () => {

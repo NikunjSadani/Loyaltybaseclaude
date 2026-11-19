@@ -29,7 +29,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import {
-  isFreshFixTime,
+  fixTimeProblem,
   isLocationRequiredFor,
   isPhoneClockWrong,
   isRealFix,
@@ -37,6 +37,7 @@ import {
   PHONE_CLOCK_WRONG_MESSAGE,
   recordFenceBlock,
   STALE_BOARD_FIX_MESSAGE,
+  WRONG_TIME_BOARD_FIX_MESSAGE,
 } from '../common/location-gate.helper';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
@@ -1929,9 +1930,9 @@ export class KycService {
       if (isPhoneClockWrong(dto.clientNow)) throw new BadRequestException(PHONE_CLOCK_WRONG_MESSAGE);
       if (!isRealFix(dto.boardPhotoGeo ?? null)) throw new BadRequestException(LOCATION_REQUIRED_KYC_MESSAGE);
       // Re-KYC stale-geo guard: a board-photo fix pre-filled from an earlier submission (or with no time) is refused.
-      if (!isFreshFixTime(dto.boardPhotoGeo?.ts, new Date(), dto.clientNow)) {
-        throw new BadRequestException(STALE_BOARD_FIX_MESSAGE);
-      }
+      const timeProblem = fixTimeProblem(dto.boardPhotoGeo?.ts, new Date(), dto.clientNow);
+      if (timeProblem === 'old') throw new BadRequestException(STALE_BOARD_FIX_MESSAGE);
+      if (timeProblem) throw new BadRequestException(WRONG_TIME_BOARD_FIX_MESSAGE); // missing / future
     }
     if (outletMasterGeoEnabled) {
       const reference =

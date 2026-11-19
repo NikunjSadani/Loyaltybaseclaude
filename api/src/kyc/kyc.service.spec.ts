@@ -1887,6 +1887,20 @@ describe('KycService', () => {
         expect(res).toMatchObject({ submissionId: 'sub1' });
       });
 
+      it('ROUND 4 #1: a future-timed or untimed board fix → "has a wrong time" (not "older than 55 minutes")', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
+        const outletRow = {
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        };
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce(outletRow);
+        const future = { ...nearGeo, ts: new Date(Date.now() + 30 * 60_000).toISOString() };
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: future } as never)).rejects.toThrow(/has a wrong time/);
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce(outletRow);
+        const untimed = { lat: 12.9001, lng: 77.5001, accuracy: 10 };
+        await expect(service.create(so, { ...baseDto, boardPhotoGeo: untimed } as never)).rejects.toThrow(/has a wrong time/);
+      });
+
       it('ROUND 3 #3: phone clock more than 24 h off → 400 "set date and time to automatic"', async () => {
         mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: true } });
         mockPrisma.outlet.findFirst.mockResolvedValueOnce({

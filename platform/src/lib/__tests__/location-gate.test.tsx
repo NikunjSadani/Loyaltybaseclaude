@@ -130,6 +130,12 @@ describe('checkLocation', () => {
 });
 
 describe('isFixStale (audit #3)', () => {
+  it('ROUND 4 #1: a fix timed more than 10 min in the FUTURE is stale too (mirrors the server)', () => {
+    const now = Date.now();
+    expect(isFixStale(new Date(now + 11 * 60_000).toISOString(), now)).toBe(true);
+    expect(isFixStale(new Date(now + 5 * 60_000).toISOString(), now)).toBe(false);
+  });
+
   it('stale after 55 min on the phone clock, or with no / bad ts', () => {
     const now = Date.now();
     expect(isFixStale(new Date(now - 10 * 60_000).toISOString(), now)).toBe(false);
@@ -164,8 +170,8 @@ describe('platform guide', () => {
 
 // ─── Hook + panel ──────────────────────────────────────────────────────────────
 
-function Harness({ enabled, onSubmit, serverSkewMs }: { enabled: boolean; onSubmit?: (ok: boolean) => void; serverSkewMs?: number | null }) {
-  const gate = useLocationGate(enabled, { serverSkewMs });
+function Harness({ enabled, onSubmit, serverSkewMs, recheckClock }: { enabled: boolean; onSubmit?: (ok: boolean) => void; serverSkewMs?: number | null; recheckClock?: () => Promise<number | null> }) {
+  const gate = useLocationGate(enabled, { serverSkewMs, recheckClock });
   if (gate.blocking) return <LocationGatePanel gate={gate} purpose="start or submit a KYC" />;
   return (
     <div>
@@ -278,6 +284,20 @@ describe('useLocationGate + LocationGatePanel', () => {
     expect(panel.getAttribute('data-reason')).toBe('clock');
     expect(screen.getByRole('heading', { name: /date and time are wrong/ })).toBeTruthy();
     expect(getCurrentPosition).not.toHaveBeenCalled();
+  });
+
+  it('ROUND 4 #6: clock guide "Test again" re-reads the server clock; fixed → the block clears and location is checked', async () => {
+    getCurrentPosition.mockImplementation(fixOk);
+    const recheckClock = vi.fn().mockResolvedValueOnce(3 * 86_400_000).mockResolvedValueOnce(2_000);
+    render(<Harness enabled serverSkewMs={3 * 86_400_000} recheckClock={recheckClock} />);
+    await screen.findByTestId('location-gate-blocked');
+    expect(screen.getByText(/Then tap Test again/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId('location-gate-test-again')); // still wrong
+    await waitFor(() => expect(recheckClock).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId('location-gate-blocked').getAttribute('data-reason')).toBe('clock');
+    fireEvent.click(screen.getByTestId('location-gate-test-again')); // fixed
+    expect(await screen.findByText('THE FLOW')).toBeTruthy();
+    expect(getCurrentPosition).toHaveBeenCalled();
   });
 
   it('LG11: submit-time quiet re-check — OK keeps the flow; a lost fix switches to the guide and reports false', async () => {

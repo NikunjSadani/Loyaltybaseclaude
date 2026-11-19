@@ -15,7 +15,7 @@
  * A "real fix" = finite, in-range lat/lng and not the 0,0 null-island default. Ages use the phone's `clientNow` when
  * it is within 24 h of the server clock (see isFreshFixTime). Returns the message, or null.
  */
-import { isFreshFixTime, isRealFix, LOCATION_REQUIRED_VISIBILITY_MESSAGE } from '../common/location-gate.helper';
+import { fixTimeProblem, isFreshFixTime, isRealFix, LOCATION_REQUIRED_VISIBILITY_MESSAGE } from '../common/location-gate.helper';
 import { parseGpsPoint } from './visibility-form.helper';
 import { readMediaValue, type VisibilityFormSchema } from './visibility-types';
 
@@ -53,20 +53,27 @@ export function visibilityLocationRefusal(
   // 1 + 2 — new tagged photos in this request must each carry a real, recent fix.
   const missing: string[] = [];
   const stale: string[] = [];
+  const wrongTime: string[] = [];
   let freshPhotoFix = false;
   for (const f of tagged) {
     if (carriedFieldIds.has(f.id) || !has(requestValues, f.id) || !has(values, f.id)) continue;
     const media = readMediaValue(values[f.id]);
     if (!media.key) continue; // nothing submitted for it
     if (!isRealFix(media.geo)) missing.push(f.label || f.id);
-    else if (!fresh(media.geo)) stale.push(f.label || f.id);
+    else if (!fresh(media.geo)) {
+      (fixTimeProblem(fixTime(media.geo), now, opts.clientNow) === 'old' ? stale : wrongTime).push(f.label || f.id);
+    }
     else freshPhotoFix = true;
   }
   if (missing.length > 0) {
     return `${LOCATION_REQUIRED_VISIBILITY_MESSAGE} No location on: ${missing.map((m) => `"${m}"`).join(', ')}.`;
   }
   if (stale.length > 0) {
-    return `The location on ${stale.map((m) => `"${m}"`).join(', ')} is too old (more than an hour) — retake ${stale.length === 1 ? 'that photo' : 'those photos'} at the outlet, then submit again.`;
+    // Round 4 #7: same window wording as KYC (the server limit is 60 minutes).
+    return `The location on ${stale.map((m) => `"${m}"`).join(', ')} is older than 60 minutes — retake ${stale.length === 1 ? 'that photo' : 'those photos'} at the outlet, then submit again.`;
+  }
+  if (wrongTime.length > 0) {
+    return `The location on ${wrongTime.map((m) => `"${m}"`).join(', ')} has a wrong time — retake ${wrongTime.length === 1 ? 'that photo' : 'those photos'} at the outlet, then submit again.`;
   }
 
   // 3 — at least one fresh fix from this request.

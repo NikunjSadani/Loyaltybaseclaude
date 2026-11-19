@@ -61,20 +61,47 @@ describe('useLocationSetting', () => {
 });
 
 describe('useTenantFeatures — server clock skew', () => {
-  function F() {
-    const s = useTenantFeatures('/api/sales/me');
+  function F({ clock = true }: { clock?: boolean }) {
+    const s = useTenantFeatures('/api/sales/me', { clock });
     return <p data-testid="f">{s.loading ? 'loading' : `${s.serverSkewMs == null ? 'null' : Math.round(s.serverSkewMs / 3_600_000)}|${String(!!s.error)}`}</p>;
   }
   afterEach(() => vi.unstubAllGlobals());
 
-  it('reads the Date header (phone 48 h ahead → ~48 h skew); a failure sets error', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+  it('reads the Date header (phone 48 h ahead → ~48 h skew) with a no-store request', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       headers: { get: (h: string) => (h.toLowerCase() === 'date' ? new Date(Date.now() - 48 * 3_600_000).toUTCString() : null) },
       json: () => Promise.resolve({ data: { features: {} } }),
-    }));
+    });
+    vi.stubGlobal('fetch', fetchSpy);
     render(<F />);
     await waitFor(() => expect(screen.getByTestId('f').textContent).toBe('48|false'));
+    expect(fetchSpy.mock.calls[0][1]).toMatchObject({ cache: 'no-store' });
+  });
+
+  it('ROUND 4 #5: a cached response (Age header) is corrected — Date 30 h old with Age 30 h → ~0 skew', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      headers: {
+        get: (h: string) =>
+          h.toLowerCase() === 'date' ? new Date(Date.now() - 30 * 3_600_000).toUTCString() : h.toLowerCase() === 'age' ? String(30 * 3600) : null,
+      },
+      json: () => Promise.resolve({ data: { features: {} } }),
+    }));
+    render(<F />);
+    await waitFor(() => expect(screen.getByTestId('f').textContent).toBe('0|false'));
+  });
+
+  it('callers without the clock option are unchanged (no cache option, no skew)', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => new Date(Date.now() - 48 * 3_600_000).toUTCString() },
+      json: () => Promise.resolve({ data: { features: {} } }),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    render(<F clock={false} />);
+    await waitFor(() => expect(screen.getByTestId('f').textContent).toBe('null|false'));
+    expect(fetchSpy.mock.calls[0][1]).not.toHaveProperty('cache');
   });
 
   it('a failed settings load → error true', async () => {

@@ -98,6 +98,18 @@ describe('isRealFix / isFreshFixTime', () => {
   });
 });
 
+describe('fixTimeProblem (round 4 #1)', () => {
+  it('classifies missing / future / old exactly like the window', () => {
+    const { fixTimeProblem } = jest.requireActual('./location-gate.helper') as typeof import('./location-gate.helper');
+    const now = new Date();
+    expect(fixTimeProblem(undefined, now)).toBe('missing');
+    expect(fixTimeProblem('x', now)).toBe('missing');
+    expect(fixTimeProblem(new Date(now.getTime() + 11 * 60_000).toISOString(), now)).toBe('future');
+    expect(fixTimeProblem(new Date(now.getTime() - 61 * 60_000).toISOString(), now)).toBe('old');
+    expect(fixTimeProblem(new Date(now.getTime() - 5 * 60_000).toISOString(), now)).toBeNull();
+  });
+});
+
 describe('isPhoneClockWrong (round 3 #3)', () => {
   it('only a sent clock more than 24 h away from the server clock is "wrong"', () => {
     const { isPhoneClockWrong } = jest.requireActual('./location-gate.helper') as typeof import('./location-gate.helper');

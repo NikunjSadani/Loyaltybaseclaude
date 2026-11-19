@@ -48,8 +48,12 @@ export interface LocationGateState {
 
 export function useLocationGate(
   enabled: boolean,
-  /** Phone clock − server clock (ms) when known (from the settings response): > 24 h off → blocked with reason 'clock'. */
-  opts: { serverSkewMs?: number | null } = {},
+  /**
+   * Phone clock − server clock (ms) when known (from the settings response): > 24 h off → blocked with reason 'clock'.
+   * `recheckClock` re-reads the server clock — "Test again" on the clock guide calls it and clears the block when the
+   * clock is now right (round 4 #6).
+   */
+  opts: { serverSkewMs?: number | null; recheckClock?: () => Promise<number | null> } = {},
 ): LocationGateState {
   const clockWrong =
     typeof opts.serverSkewMs === 'number' && Number.isFinite(opts.serverSkewMs) && Math.abs(opts.serverSkewMs) > PHONE_CLOCK_MAX_SKEW_MS;
@@ -63,6 +67,10 @@ export function useLocationGate(
   const seq = useRef(0);
   // Bumped ONLY by a permission revoke: an in-flight check that started before a revoke returns null (round-3 #7).
   const revokes = useRef(0);
+  const clockWrongRef = useRef(clockWrong);
+  clockWrongRef.current = clockWrong;
+  const recheckClockRef = useRef(opts.recheckClock);
+  recheckClockRef.current = opts.recheckClock;
   const mounted = useRef(true);
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -77,11 +85,19 @@ export function useLocationGate(
   const recheck = useCallback(
     async ({ quiet = false }: { quiet?: boolean } = {}): Promise<LocationFix | null> => {
       if (!enabled) return null;
-      if (clockWrong) {
-        setReason('clock');
-        setStatus('blocked');
-        setAttempts((n) => n + 1);
-        return null;
+      if (clockWrongRef.current) {
+        // "Test again" re-reads the server clock; a fixed phone clock clears the block and the location check runs.
+        const skew = !quiet && statusRef.current === 'blocked' && recheckClockRef.current ? await recheckClockRef.current() : null;
+        const fixed = typeof skew === 'number' && Number.isFinite(skew) && Math.abs(skew) <= PHONE_CLOCK_MAX_SKEW_MS;
+        if (!fixed) {
+          if (!mounted.current) return null;
+          setTesting(false);
+          setReason('clock');
+          setStatus('blocked');
+          setAttempts((n) => n + 1);
+          return null;
+        }
+        clockWrongRef.current = false;
       }
       const mine = ++seq.current;
       const revokesAtStart = revokes.current;
