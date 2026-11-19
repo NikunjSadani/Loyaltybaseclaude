@@ -38,6 +38,11 @@ describe('PushSubscriptionManager', () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
+    // Bajaj confirms the live session (GET /api/auth/me) before auto-asking / reminding.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { user: { id: 'u-1' } } }) })),
+    );
     vi.unstubAllEnvs();
     subscribeToPush.mockClear();
     setPath('/sales');

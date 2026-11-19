@@ -20,7 +20,7 @@ import { useInstallPrompt } from '@/lib/pwa/install-prompt-store';
 import { subscribeToPush, unsubscribeFromPush } from '@/lib/pwa/push';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { currentLocationPlatform } from '@/lib/location-gate';
-import { blockedSteps } from '@/lib/pwa/notification-guide';
+import { blockedSteps, detectAndroidBrowser } from '@/lib/pwa/notification-guide';
 import { pwaAppName } from '@/lib/pwa/manifest';
 
 /**
@@ -40,6 +40,7 @@ function BajajBlockedSteps({ onChanged }: { onChanged: (now: NotificationPermiss
     currentLocationPlatform(),
     typeof window !== 'undefined' ? window.location.host : 'this site',
     `the ${pwaAppName(config, scope)} app`,
+    detectAndroidBrowser(typeof navigator !== 'undefined' ? navigator.userAgent : ''),
   );
 
   const checkAgain = async () => {
@@ -161,6 +162,8 @@ function NotificationsSection({ bajaj = false }: { bajaj?: boolean }) {
   // we've removed the push subscription, so they stop receiving notifications.
   const [pushOff, setPushOff] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Bajaj only: an honest note when permission is granted but the subscription didn't land.
+  const [setupMsg, setSetupMsg] = useState('');
 
   useEffect(() => {
     if (!pushSupported()) {
@@ -203,7 +206,13 @@ function NotificationsSection({ bajaj = false }: { bajaj?: boolean }) {
   const reEnable = async () => {
     setBusy(true);
     try {
-      await subscribeToPush();
+      const result = await subscribeToPush();
+      if (bajaj && result !== 'subscribed') {
+        // Bajaj: never show "On" for a subscription that didn't land.
+        setSetupMsg('We couldn’t finish setting up notifications. Check your connection and tap “Turn on” again.');
+        return;
+      }
+      setSetupMsg('');
       setPushOff(false);
     } catch {
       /* ignore */
@@ -239,14 +248,21 @@ function NotificationsSection({ bajaj = false }: { bajaj?: boolean }) {
     body = (
       <BajajBlockedSteps
         onChanged={async (now) => {
-          setPermission(now);
-          if (now === 'granted') {
-            try {
-              await subscribeToPush();
-            } catch {
-              /* idempotent — the next app open re-syncs */
-            }
+          if (now !== 'granted') {
+            setPermission(now);
+            return;
+          }
+          // subscribeToPush never throws — it reports the outcome. Only 'subscribed' is "On".
+          const result = await subscribeToPush();
+          setPermission('granted');
+          if (result === 'subscribed') {
             setPushOff(false);
+            setSetupMsg('');
+          } else {
+            setPushOff(true); // shows "Notifications: Off" + "Turn on" (retries the subscription)
+            setSetupMsg(
+              'Notifications are allowed, but we couldn’t finish setting them up. Tap “Turn on” to try again.',
+            );
           }
         }}
       />
@@ -275,6 +291,11 @@ function NotificationsSection({ bajaj = false }: { bajaj?: boolean }) {
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium text-gray-900 mb-1">Notifications</p>
         {body}
+        {setupMsg && (
+          <p role="status" data-testid="pwa-notif-setup-msg" className="mt-2 text-xs text-amber-800">
+            {setupMsg}
+          </p>
+        )}
       </div>
     </div>
   );

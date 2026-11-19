@@ -21,15 +21,28 @@ A reminder after login / on app open for users who haven't allowed notifications
   line · denied → numbered Android / iPhone / desktop re-enable steps + "Done — check again" (re-reads
   `Notification.permission`, subscribes if now granted, says "Still blocked" otherwise) · no Push API → one line ·
   granted → nothing (silent re-sync as before).
-- **When:** once per session (`sessionStorage['pwa-notif-reminder']` = signed-in user id; a different user in the
-  same tab sees it again). "Remind me later" = rest of the session; back on the next app open until allowed. The
-  auto-ask at load is kept (skipped on iPhone tabs and once reminded this session).
+- **When:** only after the session is CONFIRMED live (background-tagged `GET /api/auth/me`) — a page about to bounce
+  to login never reminds, auto-asks or uses up the flag. Once per session (`sessionStorage['pwa-notif-reminder']` =
+  the confirmed user id, written when the reminder is actually on screen; a different user in the same tab sees it
+  again). "Remind me later" / × / Escape = rest of the session (a backdrop tap does NOT dismiss); back on the next
+  app open until allowed.
+- **Auto-ask at load:** kept on Android/desktop, raced with an 8 s timeout (Chrome's quiet chip / an ignored bubble
+  never resolves) — on timeout the reminder shows, and a late Allow subscribes + closes it. Skipped on iPhone/iPad
+  (iOS needs a tap → the Enable button). Enable trusts `Notification.permission` over the promise: 'denied' answer
+  but permission still 'default' (Chrome embargo) → "Chrome is blocking the prompt for now…", not the Blocked steps.
+- **Browsers:** Android steps per browser — Chrome (⋮ → Site settings), Samsung Internet (≡ → Settings → Sites and
+  downloads / Site permissions), others generic ("your browser's site settings"). iPhone in Chrome: Share is in the
+  address bar / ••• (iOS 16.4+), Safari as fallback. iPad Home Screen app with an unknown iOS version → neutral line.
+- **No stacked modals:** `InstallPrompt` publishes its open state (`lib/pwa/install-dialog-state.ts`, no UI effect);
+  the reminder waits while the install modal is up and opens after it closes. While open: body scroll locked, rest
+  of the page `inert` + `aria-hidden`.
 - **3-day snooze:** NOT used for Bajaj (neither read nor written) — it would hide the reminder for 3 days, which
   conflicts with "every app open". Non-Bajaj keeps it.
 - **Profile → Notifications** (`PwaAppSettings`): for Bajaj, "blocked" shows the same device steps + "Done — check
-  again" instead of the generic sentence.
-- **Not yet done:** real-device runtime check on Bajaj staging (Android Chrome + iPhone Safari tab + iPhone Home
-  Screen app). If the install modal (`InstallPrompt`) is also open, it sits on top; the reminder is underneath.
+  again" instead of the generic sentence; if permission is granted but the subscription fails it shows "Off" + an
+  honest note (never "On").
+- **Not yet done:** real-device runtime check on Bajaj staging (Android Chrome + Samsung Internet + iPhone Safari tab
+  + iPhone Home Screen app).
 
 ## Status — PWA ROUND COMPLETE + DEVICE-VERIFIED ON STAGING (2026-06-29)
 **2026-06-29:** the PWA round is **DONE on staging** (gate-green api jest 1246 / FE vitest 1694 / tsc 0; audited where security-relevant; runtime-verified incl. a real push delivered to the owner's Android):

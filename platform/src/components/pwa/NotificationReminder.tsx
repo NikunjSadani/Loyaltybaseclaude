@@ -6,8 +6,9 @@
 // Rendered ONLY by PushSubscriptionManager's Bajaj branch (it replaces the old one-line "Enable notifications"
 // bottom bar for Bajaj, so the two can never show together). Every other tenant never mounts it.
 //
-// A modal dialog: heading (focused on open), numbered device-specific steps, focusable buttons, Escape / × /
-// backdrop / "Remind me later" all close it. Content comes from notificationGuide():
+// A modal dialog: heading (focused on open), numbered device-specific steps, focusable buttons; Escape / × /
+// "Remind me later" close it (a backdrop tap does NOT — closing hides it for the session, so it must be explicit).
+// While open: body scroll locked, the rest of the page inert + aria-hidden. Content comes from notificationGuide():
 //   • enable        → "Enable notifications" (requestPermission from THIS tap → subscribe on grant)
 //   • blocked       → numbered re-enable steps + "Done — check again" (re-reads Notification.permission)
 //   • install-first → iPhone browser tab: Add to Home Screen steps, no Enable button
@@ -16,7 +17,12 @@
 // -----------------------------------------------------------------------------
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { subscribeToPush } from '@/lib/pwa/push';
-import { notificationGuide, type NotificationGuideInput, type NotificationState } from '@/lib/pwa/notification-guide';
+import {
+  browserLabel,
+  notificationGuide,
+  type NotificationGuideInput,
+  type NotificationState,
+} from '@/lib/pwa/notification-guide';
 
 const primaryBtn: CSSProperties = {
   width: '100%',
@@ -61,19 +67,6 @@ export default function NotificationReminder({ initialState, onClose, ...guideIn
 
   const guide = notificationGuide({ ...guideInput, state });
 
-  // Focus the heading on open; give focus back to whatever had it when the reminder closes.
-  useEffect(() => {
-    const previous = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
-    headingRef.current?.focus();
-    return () => {
-      try {
-        previous?.focus?.();
-      } catch {
-        /* element gone */
-      }
-    };
-  }, []);
-
   // Escape closes (same as "Remind me later"); Tab stays inside the dialog.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -102,14 +95,45 @@ export default function NotificationReminder({ initialState, onClose, ...guideIn
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Lock the page behind the dialog: no background scroll, and the rest of the page is inert + hidden from
+  // assistive tech while it's open (restored exactly on close).
+  useEffect(() => {
+    const root = cardRef.current?.closest('[data-notif-reminder-root]') ?? null;
+    if (!root) return; // nothing on screen → lock nothing
+    const body = document.body;
+    const prevOverflow = body.style.overflow;
+    body.style.overflow = 'hidden';
+    const touched: Array<{ el: Element; hadInert: boolean; ariaHidden: string | null }> = [];
+    Array.from(body.children).forEach((el) => {
+      if (el === root || el.contains(root) || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') return;
+      touched.push({ el, hadInert: el.hasAttribute('inert'), ariaHidden: el.getAttribute('aria-hidden') });
+      el.setAttribute('inert', '');
+      el.setAttribute('aria-hidden', 'true');
+    });
+    return () => {
+      body.style.overflow = prevOverflow;
+      touched.forEach(({ el, hadInert, ariaHidden }) => {
+        if (!hadInert) el.removeAttribute('inert');
+        if (ariaHidden === null) el.removeAttribute('aria-hidden');
+        else el.setAttribute('aria-hidden', ariaHidden);
+      });
+    };
+  }, []);
+
+  // Focus the heading on open; give focus back to whatever had it when the reminder closes. Declared AFTER the
+  // inert effect so, on close, the page is un-inerted before focus returns to it.
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    headingRef.current?.focus();
+    return () => {
+      previous?.focus?.();
+    };
+  }, []);
+
   // Granted (by Enable or after the user fixed it in Settings) → subscribe, then close (or say why it didn't land).
+  // subscribeToPush never throws — it reports 'subscribed' | 'unavailable' | 'denied' | 'error'.
   const finishGranted = async () => {
-    let result: string;
-    try {
-      result = await subscribeToPush();
-    } catch {
-      result = 'error';
-    }
+    const result = await subscribeToPush();
     if (result === 'subscribed') {
       onClose();
       return;
@@ -130,15 +154,29 @@ export default function NotificationReminder({ initialState, onClose, ...guideIn
       try {
         result = await Notification.requestPermission();
       } catch {
-        result = readPermission() === 'denied' ? 'denied' : 'default';
+        result = 'default';
       }
-      if (result === 'granted') {
+      // Trust the browser's CURRENT state over the promise's answer (as the automatic ask does).
+      const real = readPermission();
+      if (result === 'granted' || real === 'granted') {
         await finishGranted();
         return;
       }
-      if (result === 'denied') {
+      if (real === 'denied') {
         setState('denied');
         setMessage('Notifications were blocked. Follow the steps below to turn them back on.');
+        return;
+      }
+      if (result === 'denied') {
+        // Answer 'denied' but the permission still reads 'default': the browser is holding the prompt back for now
+        // (Chrome's embargo after repeated dismissals) — NOT a block in Site settings, so no Blocked-list steps.
+        const browser = browserLabel(guideInput.platform, guideInput.androidBrowser);
+        const name = browser === 'your browser' ? 'Your browser' : browser;
+        setMessage(
+          `${name} is blocking the prompt for now — try again later, or allow notifications for this site in ${
+            browser === 'Chrome' ? 'Chrome’s Site settings' : 'the browser’s site settings'
+          }.`,
+        );
         return;
       }
       setMessage('The permission request didn’t appear. Tap “Enable notifications” again, or use Profile → Notifications.');
@@ -174,11 +212,14 @@ export default function NotificationReminder({ initialState, onClose, ...guideIn
   if (!guide && !message) return null;
 
   const oneLine = guide && (guide.kind === 'ios-too-old' || guide.kind === 'unsupported');
-  const title = guide ? guide.title : 'Notifications are on';
+  // Granted but the subscription didn't land → say exactly that (never "Notifications are on").
+  const title = guide ? guide.title : 'Notifications allowed — setup not finished';
 
   return (
+    // The backdrop deliberately does NOT dismiss: closing hides the reminder for the whole session, so it takes an
+    // explicit "Remind me later", × or Escape — never a stray tap.
     <div
-      onClick={onClose}
+      data-notif-reminder-root=""
       style={{
         position: 'fixed',
         inset: 0,
@@ -200,7 +241,6 @@ export default function NotificationReminder({ initialState, onClose, ...guideIn
         aria-describedby="notif-reminder-intro"
         data-testid="notif-reminder"
         data-kind={guide?.kind ?? 'granted'}
-        onClick={(e) => e.stopPropagation()}
         style={{
           position: 'relative',
           width: 'min(94vw, 26rem)',

@@ -174,6 +174,33 @@ describe('PwaAppSettings', () => {
     vi.restoreAllMocks();
   });
 
+  it('Bajaj "check again" granted but the subscription FAILS → honest Off + message, never "On"', async () => {
+    vi.stubEnv('NEXT_PUBLIC_PWA_PUSH_ENABLED', 'true');
+    window.history.pushState({}, '', '/sales/profile');
+    const fake = { permission: 'denied' as NotificationPermission, requestPermission: vi.fn() };
+    vi.stubGlobal('Notification', fake);
+    subscribeToPush.mockResolvedValueOnce('error').mockResolvedValueOnce('unavailable');
+    render(
+      <ClientConfigProvider config={{ ...DEFAULT_CLIENT_CONFIG, slug: 'bajaj' }}>
+        <PwaAppSettings />
+      </ClientConfigProvider>,
+    );
+    fake.permission = 'granted';
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Done — check again' }));
+    });
+    expect(screen.queryByText(/Notifications: On/)).toBeNull();
+    expect(screen.getByText(/Notifications: Off/)).toBeTruthy();
+    expect(screen.getByTestId('pwa-notif-setup-msg').textContent).toMatch(/couldn’t finish setting them up/);
+
+    // "Turn on" retry fails too → still Off, still says so.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Turn on' }));
+    });
+    expect(screen.queryByText(/Notifications: On/)).toBeNull();
+    expect(screen.getByTestId('pwa-notif-setup-msg').textContent).toMatch(/couldn’t finish setting up/);
+  });
+
   it('renders "On" + Turn off when permission is "granted"', async () => {
     vi.stubEnv('NEXT_PUBLIC_PWA_PUSH_ENABLED', 'true');
     stubNotification('granted');
