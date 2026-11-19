@@ -180,10 +180,30 @@ export async function refreshSession(): Promise<{ ok: boolean; transient?: boole
   // x-session-refreshed (an internal header the proxy strips from client input), so reuse that
   // pair instead of exchanging the just-issued refresh token again.
   const requestHeaders = await headers();
-  if (requestHeaders.get(SESSION_REFRESHED_HEADER) === '1') return { ok: true };
-
   const cookieStore = await cookies();
   const refreshToken = cookieStore.get('refresh_token')?.value;
+
+  // F5 — never trust the marker alone (a matcher-excluded path would not strip a forged one).
+  // Also require PROOF the proxy rotated in this request: the refresh cookie we now see (cookies()
+  // includes the proxy's merged Set-Cookie) must DIFFER from the one the browser actually sent
+  // (the forwarded `cookie` request header is the original). A forged marker fails this check and
+  // falls through to the normal exchange.
+  if (
+    requestHeaders.get(SESSION_REFRESHED_HEADER) === '1' &&
+    refreshToken &&
+    refreshToken !== readCookie(requestHeaders.get('cookie'), 'refresh_token')
+  ) {
+    return { ok: true };
+  }
+
+  // F3 — the proxy already tried this exact token in this request and failed. Answer from that
+  // (a typed 200 the guard can read) instead of replaying the same token: a DEAD token replayed
+  // would only re-trigger reuse handling; a TRANSIENT failure is reported as such (keep session).
+  // Forging this header can only make the caller's OWN refresh report failure — never succeed.
+  const proxyFailure = requestHeaders.get(SESSION_REFRESH_FAILED_HEADER);
+  if (proxyFailure === 'dead') return { ok: false };
+  if (proxyFailure === 'transient') return { ok: false, transient: true };
+
   if (!refreshToken) return { ok: false };
 
   const outcome = await refreshTokensViaBackend(refreshToken);
@@ -198,8 +218,19 @@ export async function refreshSession(): Promise<{ ok: boolean; transient?: boole
   return { ok: true };
 }
 
-/** Mirror of proxy.ts SESSION_REFRESHED_HEADER (proxy.ts can't be imported into a server action). */
+/** Mirrors of proxy.ts SESSION_REFRESHED_HEADER / SESSION_REFRESH_FAILED_HEADER. */
 const SESSION_REFRESHED_HEADER = 'x-session-refreshed';
+const SESSION_REFRESH_FAILED_HEADER = 'x-session-refresh-failed';
+
+/** Value of one cookie in a raw `Cookie:` header (the ORIGINAL request cookies). */
+function readCookie(cookieHeader: string | null, name: string): string | undefined {
+  if (!cookieHeader) return undefined;
+  for (const part of cookieHeader.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return undefined;
+}
 
 /**
  * Server-truth source for the operator banner: read the httpOnly token cookie, verify

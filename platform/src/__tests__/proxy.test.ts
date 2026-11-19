@@ -528,7 +528,6 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
     ['RSC payload fetch', { rsc: '1' }],
     ['router prefetch', { rsc: '1', 'next-router-prefetch': '1' }],
     ['browser prefetch (Sec-Purpose)', { 'sec-purpose': 'prefetch', 'sec-fetch-dest': 'document' }],
-    ['server action POST', { 'next-action': 'abc123' }],
     ['image sub-resource', { 'sec-fetch-dest': 'image' }],
     ['script sub-resource', { 'sec-fetch-dest': 'script' }],
     ['fetch()/XHR (dest=empty)', { 'sec-fetch-dest': 'empty' }],
@@ -689,6 +688,27 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
     const res = await run(expiredWithRefresh('/admin/users', { 'next-action': 'refreshSessionId' }));
     expect(isNext(res)).toBe(true);
     expect(fwd(res, 'x-session-refreshed')).toBe('1');
+  });
+
+  it.each([
+    ['dead', DEAD],
+    ['transient', TRANSIENT],
+  ])('F3: a SERVER ACTION whose refresh failed (%s) runs UNAUTHENTICATED with the outcome marker — no 401/503, no redirect', async (kind, outcome) => {
+    mockRefresh.mockResolvedValue(outcome);
+    const res = await run(expiredWithRefresh('/admin/users', { 'next-action': 'refreshSessionId' }));
+    expect(isNext(res)).toBe(true);
+    expect(res.headers.get('location')).toBeNull();
+    expect(fwd(res, 'x-session-refresh-failed')).toBe(kind);
+    // nothing authenticates this request at the edge: no Bearer, no identity headers
+    expect(fwd(res, 'authorization')).toBeNull();
+    expect(fwd(res, 'x-user-id')).toBeNull();
+    expect(mockRefresh).toHaveBeenCalledTimes(1); // no proxy retry for a non-document request
+  });
+
+  it('F3: a CLIENT-sent x-session-refresh-failed is stripped', async () => {
+    mockJwt.mockResolvedValue({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
+    const res = await run(makeReq('/admin/users', { cookies: { token: 'valid' }, headers: { 'x-session-refresh-failed': 'dead' } }));
+    expect(fwd(res, 'x-session-refresh-failed')).toBeNull();
   });
 
   it('B1: a CLIENT-sent x-session-refreshed is stripped (cannot fake a proxy rotation)', async () => {

@@ -12,16 +12,18 @@ const refreshSession = vi.fn();
 vi.mock('@/lib/auth-actions', () => ({ refreshSession: () => refreshSession() }));
 
 const assign = vi.fn();
+const reload = vi.fn();
 let realFetch: typeof window.fetch;
 
 beforeEach(() => {
   vi.resetModules();
   refreshSession.mockReset();
   assign.mockReset();
+  reload.mockReset();
   realFetch = window.fetch;
   Object.defineProperty(window, 'location', {
     configurable: true,
-    value: { ...window.location, pathname: '/admin/users', assign },
+    value: { ...window.location, pathname: '/admin/users', assign, reload },
   });
 });
 afterEach(() => {
@@ -57,6 +59,46 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
     await window.fetch('/api/wallet/me');
 
     expect(assign).toHaveBeenCalledWith('/auth/login?expired=1');
+  });
+
+  it('F3: the refresh ACTION call itself throws (proxy 503 / network) → TRANSIENT: original 401, NO login redirect', async () => {
+    refreshSession.mockRejectedValue(new Error('An unexpected response was received from the server.'));
+    await mountWithBackend([401]);
+
+    const res = await window.fetch('/api/wallet/me');
+
+    expect(res.status).toBe(401);
+    expect(assign).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('F3: 3 transient failures IN A ROW → one full page reload (the proxy then decides page vs login), never a blind logout', async () => {
+    refreshSession.mockRejectedValue(new Error('network'));
+    await mountWithBackend([401, 401, 401]);
+
+    await window.fetch('/api/a');
+    await window.fetch('/api/b');
+    expect(reload).not.toHaveBeenCalled();
+    await window.fetch('/api/c');
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it('a success in between resets the transient streak', async () => {
+    refreshSession
+      .mockRejectedValueOnce(new Error('network'))
+      .mockRejectedValueOnce(new Error('network'))
+      .mockResolvedValueOnce({ ok: true })
+      .mockRejectedValueOnce(new Error('network'));
+    await mountWithBackend([401, 401, 401, 200, 401]);
+
+    await window.fetch('/api/a');
+    await window.fetch('/api/b');
+    await window.fetch('/api/c'); // ok → retry 200
+    await window.fetch('/api/d');
+
+    expect(reload).not.toHaveBeenCalled();
   });
 
   it('refresh OK → retries the original request once and returns the retry', async () => {

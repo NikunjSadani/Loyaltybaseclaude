@@ -1,5 +1,5 @@
 import {
-  Controller, Post, Body, HttpCode, HttpStatus, Get, UseGuards,
+  Controller, Post, Body, HttpCode, HttpStatus, Get, UseGuards, Headers,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
@@ -50,8 +50,17 @@ export class AuthController {
   @Throttle({ default: { limit: 1000, ttl: 60_000 } })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  async refresh(@Body() dto: RefreshTokenDto) {
-    return this.authService.refreshToken(dto.refreshToken);
+  async refresh(
+    @Body() dto: RefreshTokenDto,
+    // F1: the caller's give-up deadline (epoch ms). The service never COMMITS a rotation after
+    // min(this, its own receipt + REFRESH_SERVER_BUDGET_MS) — so a client that timed out can never
+    // be left holding a token the server has already rotated. Absent / malformed → server budget only.
+    @Headers('x-refresh-deadline') deadlineHeader?: string,
+  ) {
+    const deadline = Number(deadlineHeader);
+    return this.authService.refreshToken(dto.refreshToken, {
+      clientDeadlineMs: Number.isFinite(deadline) && deadline > 0 ? deadline : undefined,
+    });
   }
 
   /** Verify token is valid and return current user info */

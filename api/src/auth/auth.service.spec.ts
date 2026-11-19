@@ -3,7 +3,7 @@
 // Run: npx jest src/auth/auth.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { ForbiddenException, NotFoundException, BadRequestException, UnauthorizedException, Logger } from '@nestjs/common';
+import { ForbiddenException, NotFoundException, BadRequestException, UnauthorizedException, ServiceUnavailableException, Logger } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { SESSION_TTL_DAYS } from './auth.constants';
 import { PrismaService } from '../prisma/prisma.service';
@@ -48,8 +48,9 @@ const mockPrisma = {
 // auth.service.refresh-race.spec.ts, against a row-lock fake DB). Inside the tx the user row
 // is read FOR SHARE via $queryRaw — default: the user exists with no logout-all stamp.
 const txUserStamp = jest.fn();
+const txExecRaw = jest.fn(); // SET LOCAL lock_timeout (F1)
 mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
-  fn({ ...mockPrisma, $queryRaw: txUserStamp }),
+  fn({ ...mockPrisma, $queryRaw: txUserStamp, $executeRawUnsafe: txExecRaw }),
 );
 
 const gifsyOp = { sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any;
@@ -1185,6 +1186,54 @@ describe('AuthService', () => {
       // The in-tx read is a FOR SHARE lock on the user row.
       const sql = (txUserStamp.mock.calls[0][0] as TemplateStringsArray).join('?');
       expect(sql).toMatch(/FROM "users" WHERE "id" = \? FOR SHARE/);
+    });
+
+    it('F1: the claim transaction FIRST sets a bounded lock_timeout', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue(liveSession);
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.userSession.create.mockResolvedValue({});
+
+      await service.refreshToken('rt');
+
+      expect(txExecRaw).toHaveBeenCalledWith("SET LOCAL lock_timeout = '1s'");
+      expect(txExecRaw.mock.invocationCallOrder[0]).toBeLessThan(txUserStamp.mock.invocationCallOrder[0]);
+    });
+
+    it('F1: a transaction failure (lock timeout 55P03 / tx timeout) → 503 TRANSIENT, never a 401/500', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue(liveSession);
+      txUserStamp.mockRejectedValueOnce(Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }));
+
+      await expect(service.refreshToken('rt')).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+    });
+
+    it('F1: a client deadline already in the past → 503 before the transaction starts', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue(liveSession);
+
+      await expect(service.refreshToken('rt', { clientDeadlineMs: Date.now() - 1 })).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('F4: the winner re-stamps the predecessor revokedAt as the LAST statement (grace runs from commit)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue(liveSession);
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.userSession.create.mockResolvedValue({});
+
+      await service.refreshToken('rt');
+
+      expect(mockPrisma.userSession.update).toHaveBeenCalledWith({ where: { id: 'sess_x' }, data: { revokedAt: expect.any(Date) } });
+      expect(mockPrisma.userSession.update.mock.invocationCallOrder[0]).toBeGreaterThan(
+        mockPrisma.userSession.create.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('grace is 6s: a replay 5.5s after the rotation still converges on the live successor', async () => {
+      mockPrisma.userSession.findFirst
+        .mockResolvedValueOnce({ ...liveSession, revokedAt: new Date(Date.now() - 5_500) })
+        .mockResolvedValueOnce({ id: 'sess_y', token: 'succ.access', refreshToken: 'succ-refresh', revokedAt: null });
+
+      await expect(service.refreshToken('rt')).resolves.toEqual({ accessToken: 'succ.access', refreshToken: 'succ-refresh' });
+      expect(mockPrisma.user.update).not.toHaveBeenCalled();
     });
 
     it('S3: a TRANSIENT gate failure (DB error) does NOT consume the predecessor → a retry can still succeed', async () => {

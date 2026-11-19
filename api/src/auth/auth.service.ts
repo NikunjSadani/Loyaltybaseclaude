@@ -1,7 +1,7 @@
 import {
   Injectable, UnauthorizedException, BadRequestException,
   Logger, ForbiddenException, NotFoundException,
-  HttpException, HttpStatus,
+  HttpException, HttpStatus, ServiceUnavailableException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -43,14 +43,35 @@ import * as crypto from 'crypto';
  * Outside the window, a replay is treated as genuine reuse (→ 401), preserving reuse
  * detection. Kept short so the reuse-detection window stays tight.
  */
-const ROTATION_GRACE_MS = 5_000;
+// 6s (was 5s): measured from the rotation's COMMIT, it must cover the client's give-up (5s) + its
+// one 200ms retry — see the refresh timing budget below. Exported for the timing-invariant tests.
+export const ROTATION_GRACE_MS = 6_000;
 
 /**
- * Interactive-transaction bounds for the refresh claim+mint. The transaction holds the
- * predecessor's row lock only across the claim UPDATE + successor INSERT (a few ms); concurrent
- * refreshes of the same token block on that lock and then see the committed successor.
+ * ── Refresh timing budget (F1, 2026-11-19) — the rule: the server NEVER commits a rotation after
+ * the client has given up on it. All values are kept in lockstep with platform/src/lib/auth-refresh.ts.
+ *
+ *   client starts attempt (t0) ────────────────────────────────────────────────────────────────┐
+ *   server commit DEADLINE  = min(t0 + REFRESH_CLIENT_DEADLINE_MS (client header, 4.0s),         │
+ *                                 server receipt + REFRESH_SERVER_BUDGET_MS (4.0s))               │
+ *     · tx connection wait  ≤ REFRESH_TX_OPTS.maxWait   (1.5s)                                   │
+ *     · each lock wait      ≤ REFRESH_LOCK_TIMEOUT      (1s: FOR SHARE on user, claim on session)│
+ *     · whole tx            ≤ REFRESH_TX_OPTS.timeout   (4s)                                     │
+ *     · deadline re-checked before the tx starts AND as the LAST statement before COMMIT → a     │
+ *       late request rolls back (503, transient) instead of committing                           │
+ *   client gives up         = t0 + REFRESH_TIMEOUT_MS (5.0s)  ≥ deadline + 1s (commit + transit) ┘
+ *   client retry (document) = give-up + 200ms  → arrives ≤ t0 + 5.2s (+ transit)
+ *   grace window            = ROTATION_GRACE_MS (6s) measured from COMMIT time (the predecessor's
+ *                             revokedAt is re-stamped as the last statement in the tx), so the
+ *                             retry of a committed-but-unanswered rotation (commit ≥ t0) is at most
+ *                             ~5.2s + transit old → still handed the successor. A cold start or pool
+ *                             wait before the server sees the request only shrinks the server's
+ *                             remaining budget (the deadline is client-anchored); it can't push a
+ *                             commit past the client's give-up.
  */
-const REFRESH_TX_OPTS = { maxWait: 5_000, timeout: 10_000 } as const;
+export const REFRESH_SERVER_BUDGET_MS = 4_000;
+export const REFRESH_LOCK_TIMEOUT = '1s';
+export const REFRESH_TX_OPTS = { maxWait: 1_500, timeout: 4_000 } as const;
 
 // ─── Business rule constants — single source of truth ─────────────────────────
 // TDS under 194C: ₹30,000 single / ₹1,00,000 annual
@@ -765,7 +786,19 @@ export class AuthService {
 
   // ── Refresh token ────────────────────────────────────────────────────────────
 
-  async refreshToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string }> {
+  async refreshToken(
+    refreshToken: string,
+    opts: { clientDeadlineMs?: number } = {},
+  ): Promise<{ accessToken: string; refreshToken: string }> {
+    // F1 — commit deadline: the earlier of the caller's give-up time and our own budget. Past it
+    // we must not COMMIT a rotation (the caller may already have given up on this response).
+    const deadline = Math.min(opts.clientDeadlineMs ?? Infinity, Date.now() + REFRESH_SERVER_BUDGET_MS);
+    const assertBeforeDeadline = () => {
+      if (Date.now() >= deadline) {
+        throw new ServiceUnavailableException('Session refresh timed out — please retry.');
+      }
+    };
+
     // Read the session (with its user) IGNORING revokedAt, so a JUST-revoked
     // predecessor is visible for the idempotent-rotation grace path below (a slow
     // second tab replaying a token its sibling already rotated). This read alone is
@@ -872,9 +905,20 @@ export class AuthService {
         throw gateError;
       }
 
+      // Too late already (slow gates / pool wait / cold start)? Refuse BEFORE touching any lock.
+      assertBeforeDeadline();
+
       // Claim + mint, atomically, on the transaction's own connection. A transaction failure
-      // (e.g. the INSERT errors) ROLLS BACK the claim, so the predecessor stays live (retryable).
-      const outcome = await this.prisma.$transaction(async (tx) => {
+      // (lock timeout, deadline, the INSERT erroring, …) ROLLS BACK the claim, so the predecessor
+      // stays live and the caller's retry works normally.
+      let outcome: { kind: 'swept' } | { kind: 'lost' } | { kind: 'won'; tokens: { accessToken: string; refreshToken: string } };
+      try {
+      outcome = await this.prisma.$transaction(async (tx) => {
+        // F1/F2 — fail fast: no single lock wait in this tx may exceed REFRESH_LOCK_TIMEOUT
+        // (Postgres raises 55P03 → the tx rolls back → 503 transient). Bounds both the user-row
+        // FOR SHARE behind a long writer and the claim behind a slow sibling.
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${REFRESH_LOCK_TIMEOUT}'`);
+
         // ── logout-all authority INSIDE the lock (S2) ─────────────────────────────────────
         // Take a SHARE lock on the user row FIRST, then read the stamp. Every stamper writes
         // users.sessionsInvalidBefore with an UPDATE (row lock that conflicts with FOR SHARE):
@@ -906,8 +950,22 @@ export class AuthService {
             ? { clientIdOverride: session.clientId, assumed: true, expiresIn: ACCESS_TTL, rotatedFromId: session.id, db: tx }
             : { rotatedFromId: session.id, db: tx },
         );
+
+        // F1 — the LAST statements before COMMIT: (1) refuse to commit past the deadline (the
+        // throw rolls everything back, predecessor stays live); (2) F4 — re-stamp the
+        // predecessor's revokedAt NOW, so the grace window runs from (≈) commit time, not from
+        // the claim, and covers the client's give-up + retry however slow this tx was.
+        assertBeforeDeadline();
+        await tx.userSession.update({ where: { id: session.id }, data: { revokedAt: new Date() } });
         return { kind: 'won' as const, tokens: minted };
       }, REFRESH_TX_OPTS);
+      } catch (txError) {
+        if (txError instanceof HttpException) throw txError; // e.g. the deadline 503
+        // Lock timeout (55P03), tx maxWait/timeout (P2028), connection errors: all transient —
+        // nothing committed, the predecessor is still live, the client should retry.
+        this.logger.warn(`Refresh transaction failed (transient): ${(txError as Error)?.message ?? txError}`);
+        throw new ServiceUnavailableException('Session refresh temporarily unavailable — please retry.');
+      }
 
       if (outcome.kind === 'swept') {
         throw new UnauthorizedException('Session expired — please log in again.');

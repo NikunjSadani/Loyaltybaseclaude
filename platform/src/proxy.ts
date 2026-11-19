@@ -71,6 +71,7 @@ const INTERNAL_REQUEST_HEADERS = [
   'x-user-role',
   'x-partner-id',
   'x-session-refreshed', // SESSION_REFRESHED_HEADER — set only by the proxy's silent refresh
+  'x-session-refresh-failed', // SESSION_REFRESH_FAILED_HEADER — set only by the proxy (F3)
 ] as const
 
 export const ROLE_ROUTES: Record<string, string[]> = {
@@ -265,6 +266,16 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
     }
     // The refresh failed. Do NOT delete the cookies either way (a transient failure leaves the
     // session alive; deleting would strand other tabs).
+    if (request.headers.get('next-action')) {
+      // F3 — a SERVER ACTION (notably refreshSession, fired by SessionExpiryGuard): a 401/503 here
+      // reaches the client only as an opaque thrown error, so the guard could not tell a dead
+      // session from a blip. Let the action run UNAUTHENTICATED instead (no Bearer / x-user-*
+      // injected — every server action authenticates to the backend with its own cookies and the
+      // backend validates them) and tell it what happened, so refreshSession returns a typed
+      // { ok:false[, transient] } with HTTP 200. Internal header — stripped from client input.
+      headers.set(SESSION_REFRESH_FAILED_HEADER, outcome.kind)
+      return NextResponse.next({ request: { headers } })
+    }
     if (!isDocument) {
       // NOT a document (RSC payload / prefetch / server action / asset): never redirect to login
       // from here — one such sub-request failing must not bounce the user. A non-OK response lets
@@ -298,6 +309,12 @@ export const DOCUMENT_REFRESH_RETRY_DELAY_MS = 200
  * this request. `refreshSession` (lib/auth-actions.ts) reads it to avoid a second rotation.
  */
 export const SESSION_REFRESHED_HEADER = 'x-session-refreshed'
+
+/**
+ * Internal request header carrying a FAILED proxy refresh's outcome ('dead' | 'transient') to a
+ * server action (F3). refreshSession uses it to answer without a second backend exchange.
+ */
+export const SESSION_REFRESH_FAILED_HEADER = 'x-session-refresh-failed'
 
 /**
  * Static-asset paths (by file extension or a known public asset folder). A request for one is

@@ -13,8 +13,8 @@
 // row and then RE-CHECKS its WHERE against the committed version (READ COMMITTED semantics).
 // All timestamps are relative to Date.now() — no hardcoded dates.
 
-import { ForbiddenException, Logger, UnauthorizedException } from '@nestjs/common';
-import { AuthService } from './auth.service';
+import { ForbiddenException, Logger, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { AuthService, REFRESH_SERVER_BUDGET_MS, REFRESH_TX_OPTS, ROTATION_GRACE_MS } from './auth.service';
 
 type Row = Record<string, any>;
 
@@ -57,7 +57,12 @@ class FakeDb {
     this.changed = new Promise<void>((r) => (this.signal = r));
   }
 
+  /** Per-transaction `SET LOCAL lock_timeout` (ms), keyed by the tx owner symbol. */
+  private lockTimeouts = new Map<symbol, number>();
+
   private async lock(key: string, mode: 'S' | 'X', owner: symbol) {
+    const timeoutMs = this.lockTimeouts.get(owner);
+    const giveUpAt = timeoutMs ? Date.now() + timeoutMs : Infinity;
     for (;;) {
       const l = this.locks.get(key);
       const onlyMine = !!l && l.owners.size === 1 && l.owners.has(owner);
@@ -74,7 +79,13 @@ class FakeDb {
         return;
       }
       if (l.owners.has(owner) && mode === 'S') return; // already hold a stronger/equal lock
-      await this.changed; // wait for any release, then re-check
+      // Wait for any release, then re-check — bounded by lock_timeout like Postgres (55P03).
+      const remaining = giveUpAt - Date.now();
+      if (remaining <= 0) {
+        throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+      }
+      if (remaining === Infinity) await this.changed;
+      else await Promise.race([this.changed, sleep(remaining)]);
     }
   }
   private unlockAll(owner: symbol) {
@@ -139,6 +150,10 @@ class FakeDb {
         return row ? { ...row } : null;
       },
       updateMany: ({ where, data }: { where: Row; data: Row }) => this.updateSessions(where, data, owner, pending),
+      update: async ({ where, data }: { where: Row; data: Row }) => {
+        await this.updateSessions({ id: where.id }, data, owner, pending);
+        return { ...this.sessions.get(where.id), ...data };
+      },
       create: async ({ data }: { data: Row }) => {
         await tick();
         const row: Row = { revokedAt: null, rotatedFromId: null, createdAt: new Date(), ...data };
@@ -201,6 +216,13 @@ class FakeDb {
         const tx = {
           userSession: this.sessionApi(owner, pending),
           user: this.userApi(() => owner, pending),
+          // `SET LOCAL lock_timeout = '<n>s'` → bound every later lock wait of THIS tx (F1).
+          $executeRawUnsafe: async (sql: string) => {
+            const m = /SET LOCAL lock_timeout = '(\d+)(ms|s)'/.exec(sql);
+            if (!m) throw new Error(`unexpected raw statement: ${sql}`);
+            this.lockTimeouts.set(owner, Number(m[1]) * (m[2] === 's' ? 1000 : 1));
+            return 0;
+          },
           // The only raw query refreshToken issues in its tx:
           //   SELECT "sessionsInvalidBefore" FROM "users" WHERE "id" = $1 FOR SHARE
           $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -219,6 +241,7 @@ class FakeDb {
           pending.forEach((apply) => apply()); // COMMIT
           return result;
         } finally {
+          this.lockTimeouts.delete(owner);
           this.unlockAll(owner); // commit or rollback releases the row locks
         }
       },
@@ -455,5 +478,84 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     await Promise.all([refresh, sweep]);
     // Whatever the refresh returned, NOTHING minted for the pre-stamp lineage is still live.
     expect(db.liveSessions('u1')).toHaveLength(0);
+  });
+
+  // ── F1: the server never commits a rotation after the client gave up; fail fast on locks ─────
+  it('F1: a refresh blocked on a user-row lock rolls back within ~lock_timeout (503), predecessor stays LIVE, a later retry succeeds', async () => {
+    const db = new FakeDb();
+    db.gateLatencyMs = 0;
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' });
+    const { svc } = buildService(db);
+
+    // A long user-row writer (e.g. a slow admin edit) holds the row for 1.6s.
+    const writer = db.client().$transaction(async (tx: any) => {
+      await tx.user.updateMany({ where: { id: { in: ['u1'] } }, data: { name: 'P2' } });
+      await sleep(1_600);
+    });
+    await sleep(5);
+    const started = Date.now();
+    const first = await svc.refreshToken('R0').then(() => 'ok', (e) => e);
+    const took = Date.now() - started;
+
+    expect(first).toBeInstanceOf(ServiceUnavailableException); // transient → the client retries
+    expect(took).toBeLessThan(1_500); // failed fast at lock_timeout (1s), not after the writer
+    expect(db.createCount).toBe(0);
+    expect(db.sessions.get('s0')!.revokedAt).toBeNull(); // claim rolled back — still usable
+
+    await writer;
+    const retry = await svc.refreshToken('R0');
+    expect(retry.refreshToken).toBeTruthy();
+    expect(db.createCount).toBe(1);
+  });
+
+  it('F1: a client deadline already passed → 503 before any lock, nothing committed, predecessor LIVE', async () => {
+    const db = new FakeDb();
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' });
+    const { svc } = buildService(db);
+
+    await expect(svc.refreshToken('R0', { clientDeadlineMs: Date.now() - 1 })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(db.createCount).toBe(0);
+    expect(db.sessions.get('s0')!.revokedAt).toBeNull();
+  });
+
+  it('F1: the deadline passing INSIDE the tx (slow lock path) rolls the whole rotation back — never commits late', async () => {
+    const db = new FakeDb();
+    db.gateLatencyMs = 0;
+    db.shareLockHoldMs = 120; // the tx is slow…
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' });
+    const { svc } = buildService(db);
+
+    // …and the client gives up 60ms from now.
+    await expect(svc.refreshToken('R0', { clientDeadlineMs: Date.now() + 60 })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(db.createCount).toBe(0); // the INSERT was rolled back with the claim
+    expect(db.sessions.get('s0')!.revokedAt).toBeNull();
+  });
+
+  it('F4: the grace window starts at COMMIT — the predecessor revokedAt is re-stamped after the successor INSERT', async () => {
+    const db = new FakeDb();
+    db.gateLatencyMs = 0;
+    db.shareLockHoldMs = 150; // slow tx: claim happens ≥150ms before commit
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' });
+    const { svc } = buildService(db);
+
+    await svc.refreshToken('R0');
+    const successor = [...db.sessions.values()].find((r) => r.rotatedFromId === 's0')!;
+    expect(db.sessions.get('s0')!.revokedAt.getTime()).toBeGreaterThanOrEqual(successor.createdAt.getTime());
+  });
+
+  it('timing budget invariants (mirrors platform/src/lib/auth-refresh.ts: client timeout 5s, retry 200ms, client deadline 4s)', () => {
+    const CLIENT_TIMEOUT_MS = 5_000;
+    const RETRY_DELAY_MS = 200;
+    const CLIENT_DEADLINE_MS = 4_000;
+    // The server's own budget never outlives the client's give-up (1s left for commit + transit).
+    expect(REFRESH_SERVER_BUDGET_MS + 1_000).toBeLessThanOrEqual(CLIENT_TIMEOUT_MS);
+    expect(CLIENT_DEADLINE_MS + 1_000).toBeLessThanOrEqual(CLIENT_TIMEOUT_MS);
+    expect(REFRESH_TX_OPTS.timeout).toBeLessThanOrEqual(REFRESH_SERVER_BUDGET_MS);
+    // A retry of a committed-but-unanswered rotation (commit ≥ attempt start) lands inside grace.
+    expect(CLIENT_TIMEOUT_MS + RETRY_DELAY_MS + 500 /* transit */).toBeLessThanOrEqual(ROTATION_GRACE_MS);
   });
 });

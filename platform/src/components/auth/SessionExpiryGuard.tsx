@@ -59,13 +59,18 @@ let redirecting = false;
 // 'transient' = the refresh could not be completed right now (network / 5xx / proxy 503) but the
 // session may be alive → do NOT bounce to login; the caller gets the original 401 and can retry.
 let refreshing: Promise<'ok' | 'dead' | 'transient'> | null = null;
+/** Transient refresh failures in a row before the guard falls back to a full page reload. */
+export const MAX_CONSECUTIVE_TRANSIENT = 3;
+let consecutiveTransient = 0;
 function refreshOnce(): Promise<'ok' | 'dead' | 'transient'> {
   if (!refreshing) {
     refreshing = refreshSession()
       .then((r) => (r.ok ? 'ok' : r.transient ? 'transient' : 'dead') as 'ok' | 'dead' | 'transient')
-      // The action call itself failed (network, or the proxy answered 401/503 before the action
-      // ran). We can't tell dead from transient here — keep the pre-existing behaviour (dead).
-      .catch(() => 'dead' as const)
+      // F3 — the action call itself failed (network down, a proxy/server 5xx). The proxy no longer
+      // answers a refresh ACTION with 401: on a failed refresh it runs the action, which returns a
+      // typed { ok:false } for a DEFINITE refusal. So a thrown call is never proof of a dead
+      // session → transient: keep the session, no login bounce; the next 401 tries again.
+      .catch(() => 'transient' as const)
       .finally(() => {
         refreshing = null;
       });
@@ -105,9 +110,20 @@ export default function SessionExpiryGuard() {
           // Try a silent refresh before giving up (single-flight across concurrent 401s).
           const refreshed = await refreshOnce();
           if (refreshed === 'transient') {
+            consecutiveTransient += 1;
+            if (consecutiveTransient >= MAX_CONSECUTIVE_TRANSIENT && !redirecting) {
+              // Not a blip any more (or a persistent failure such as a stale action id after a
+              // deploy): hand the decision to a full DOCUMENT load of this page — the proxy then
+              // refreshes server-side (with its own retry) and lands on the page if the session is
+              // alive, or on /auth/login?expired=1 if it is truly dead. Never stuck, never a blind logout.
+              redirecting = true;
+              window.location.reload();
+              return res;
+            }
             // A blip, not a dead session: surface the original 401 to the caller, stay on the page.
             return res;
           }
+          consecutiveTransient = 0;
           if (refreshed === 'ok' && !redirecting) {
             // New cookie is set — retry the original request once (unpatched, so a
             // second 401 can't recurse into another refresh).

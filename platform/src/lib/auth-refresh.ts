@@ -75,14 +75,18 @@ const REFRESH_429_BACKOFF_MS = [300, 900];
 const REFRESH_429_MAX_WAIT_MS = 2_000;
 
 /**
- * Per-attempt timeout for the backend refresh call. Deliberately SHORTER than the backend's
- * rotation grace window (ROTATION_GRACE_MS = 5s in api/src/auth/auth.service.ts): a timed-out
- * refresh may still have been committed server-side, and the caller's single retry presents the
- * SAME (now rotated) token. That retry is only answered with the successor while it lands inside
- * the grace window — past it, a replay of a rotated token is treated as theft (logout everywhere).
- * A normal refresh takes milliseconds; 4s + the 200ms proxy retry delay keeps the retry in grace.
+ * Refresh timing budget (F1) — kept in lockstep with api/src/auth/auth.service.ts:
+ *  - REFRESH_CLIENT_DEADLINE_MS (4s): sent as `x-refresh-deadline` (epoch ms). The backend NEVER
+ *    commits a rotation after it (it rolls back and answers 503 instead), so when we give up we can
+ *    be sure the server didn't rotate behind our back after that point.
+ *  - REFRESH_TIMEOUT_MS (5s): when we give up — ≥ deadline + 1s, so a rotation committed just
+ *    before the deadline still has time to reach us.
+ *  - the proxy's one document retry follows 200ms later (≤ 5.2s after the first attempt started);
+ *    the backend grace (ROTATION_GRACE_MS = 6s, measured from COMMIT) still covers it, so a retry
+ *    of a committed-but-unanswered rotation is handed the successor, never treated as theft.
  */
-export const REFRESH_TIMEOUT_MS = 4_000;
+export const REFRESH_CLIENT_DEADLINE_MS = 4_000;
+export const REFRESH_TIMEOUT_MS = 5_000;
 
 /** Result of one refresh exchange. `dead` = the backend definitively refused; `transient` = retryable. */
 export type RefreshOutcome =
@@ -110,7 +114,11 @@ export async function refreshTokensViaBackend(refreshToken: string): Promise<Ref
     for (let attempt = 0; ; attempt++) {
       const res = await fetch(`${API_URL}/v1/auth/refresh`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // The backend must not commit this rotation after we may have given up on it (F1).
+          'x-refresh-deadline': String(Date.now() + REFRESH_CLIENT_DEADLINE_MS),
+        },
         body: JSON.stringify({ refreshToken }),
         signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
       });

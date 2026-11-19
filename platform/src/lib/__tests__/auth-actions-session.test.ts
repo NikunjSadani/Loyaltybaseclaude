@@ -51,6 +51,8 @@ beforeEach(() => {
   cookieStore.delete.mockClear();
   cookieStore.get.mockClear();
   requestHeaders.delete('x-session-refreshed');
+  requestHeaders.delete('x-session-refresh-failed');
+  requestHeaders.delete('cookie');
 });
 
 describe('refreshSession — B1 no double rotation + B3 transient', () => {
@@ -59,6 +61,7 @@ describe('refreshSession — B1 no double rotation + B3 transient', () => {
     store.set('token', jwtWithExp(nowSecs() + ONE_HOUR));
     store.set('refresh_token', 'r-from-proxy');
     requestHeaders.set('x-session-refreshed', '1');
+    requestHeaders.set('cookie', 'token=old; refresh_token=r-original'); // what the browser SENT
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
@@ -68,6 +71,35 @@ describe('refreshSession — B1 no double rotation + B3 transient', () => {
     expect(fetchMock).not.toHaveBeenCalled(); // the just-issued r-from-proxy is NOT rotated again
     expect(setCalls).toHaveLength(0);
     expect(store.get('refresh_token')).toBe('r-from-proxy');
+  });
+
+  it('F5: a FORGED marker (refresh cookie unchanged from what the browser sent) is ignored → normal exchange', async () => {
+    store.set('refresh_token', 'r-same');
+    requestHeaders.set('x-session-refreshed', '1');
+    requestHeaders.set('cookie', 'refresh_token=r-same');
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ data: { accessToken: jwtWithExp(nowSecs() + ONE_HOUR), refreshToken: 'r-next' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(refreshSession()).resolves.toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // did NOT short-circuit on the header alone
+    expect(setOf('refresh_token')?.value).toBe('r-next');
+  });
+
+  it.each([
+    ['dead', { ok: false }],
+    ['transient', { ok: false, transient: true }],
+  ])('F3: proxy refresh already failed (%s) → answers from that, NO second backend exchange', async (kind, expected) => {
+    store.set('refresh_token', 'r-x');
+    requestHeaders.set('x-session-refresh-failed', kind);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(refreshSession()).resolves.toEqual(expected);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(deleted).toHaveLength(0);
   });
 
   it('without the marker it still rotates normally (one backend call)', async () => {

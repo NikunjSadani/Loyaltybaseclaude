@@ -122,8 +122,20 @@ describe('refreshTokensViaBackend — typed outcome (dead vs transient)', () => 
     await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ kind: 'transient', reason: 'malformed' });
   });
 
-  it('the per-attempt timeout stays BELOW the backend 5s rotation grace (retry of a committed refresh still converges)', async () => {
-    const { REFRESH_TIMEOUT_MS } = await import('@/lib/auth-refresh');
-    expect(REFRESH_TIMEOUT_MS + 200).toBeLessThan(5_000);
+  it('timing budget: deadline < give-up (room to commit + answer), and give-up + retry stays inside the backend 6s grace', async () => {
+    const { REFRESH_TIMEOUT_MS, REFRESH_CLIENT_DEADLINE_MS } = await import('@/lib/auth-refresh');
+    const BACKEND_GRACE_MS = 6_000; // api ROTATION_GRACE_MS (measured from commit)
+    expect(REFRESH_CLIENT_DEADLINE_MS + 1_000).toBeLessThanOrEqual(REFRESH_TIMEOUT_MS);
+    expect(REFRESH_TIMEOUT_MS + 200 /* proxy retry delay */ + 500 /* transit */).toBeLessThanOrEqual(BACKEND_GRACE_MS);
+  });
+
+  it('sends the give-up deadline to the backend as x-refresh-deadline (epoch ms, ~now + 4s)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve({ data: { accessToken: 'a' } }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const before = Date.now();
+    await refreshTokensViaBackend('r1');
+    const sent = Number(fetchMock.mock.calls[0][1].headers['x-refresh-deadline']);
+    expect(sent).toBeGreaterThanOrEqual(before + 4_000);
+    expect(sent).toBeLessThanOrEqual(Date.now() + 4_000);
   });
 });

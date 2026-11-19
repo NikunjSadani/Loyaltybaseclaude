@@ -18,7 +18,7 @@
  * Neither variable set → the whole suite is skipped.
  */
 import { randomBytes } from 'node:crypto';
-import { Logger, UnauthorizedException } from '@nestjs/common';
+import { Logger, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaClient } from '@prisma/client';
 import type { Client } from 'pg';
@@ -128,7 +128,11 @@ d(`AuthService.refreshToken × real Postgres [${MODE ?? 'skipped'}]`, () => {
     await holder!.query(`UPDATE "user_sessions" SET "revokedAt" = now() WHERE "userId" = $1 AND "revokedAt" IS NULL`, [userId]);
     await holder!.query('COMMIT');
 
-    expect(await refresh).toBeInstanceOf(UnauthorizedException);
+    // Refused either way: 401 (it waited, then saw the stamp) or 503 (lock_timeout hit first) —
+    // never a 200, and nothing for the pre-stamp lineage survives.
+    const result = await refresh;
+    expect(result === 'ok').toBe(false);
+    expect([UnauthorizedException, ServiceUnavailableException].some((E) => result instanceof E)).toBe(true);
     expect(await liveSessions(userId)).toBe(0);
   });
 
@@ -153,6 +157,34 @@ d(`AuthService.refreshToken × real Postgres [${MODE ?? 'skipped'}]`, () => {
 
     await Promise.all([refresh, stamper]);
     expect(await liveSessions(userId)).toBe(0); // the successor the refresh minted did NOT survive the sweep
+  });
+
+  itServer('F1: refresh blocked on a user-row lock → rolls back at lock_timeout (~1s, 503), predecessor LIVE, a later retry succeeds', async () => {
+    const { userId, sessionId, refreshToken } = await seedUserWithSession();
+
+    await holder!.query('BEGIN');
+    await holder!.query(`UPDATE "users" SET "name" = 'held' WHERE "id" = $1`, [userId]); // long writer
+    const started = Date.now();
+    const first = await auth.refreshToken(refreshToken).then(() => 'ok' as const, (e: unknown) => e);
+    const took = Date.now() - started;
+    await holder!.query('ROLLBACK');
+
+    expect(first).toBeInstanceOf(ServiceUnavailableException);
+    expect(took).toBeLessThan(2_500);
+    const row = await prisma.userSession.findUniqueOrThrow({ where: { id: sessionId } });
+    expect(row.revokedAt).toBeNull(); // the claim rolled back with the tx
+    expect(await prisma.userSession.count({ where: { rotatedFromId: sessionId } })).toBe(0);
+
+    const retry = await auth.refreshToken(refreshToken);
+    expect(retry.refreshToken).toBeTruthy();
+    expect(await prisma.userSession.count({ where: { rotatedFromId: sessionId } })).toBe(1);
+  });
+
+  it('F1: a client deadline already passed → 503, nothing committed, predecessor LIVE', async () => {
+    const { sessionId, refreshToken } = await seedUserWithSession();
+    await expect(auth.refreshToken(refreshToken, { clientDeadlineMs: Date.now() - 1 })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    const row = await prisma.userSession.findUniqueOrThrow({ where: { id: sessionId } });
+    expect(row.revokedAt).toBeNull();
   });
 
   it('S1: a token rotated hours ago, replayed while its successor is live → reuse kill, nothing handed back', async () => {

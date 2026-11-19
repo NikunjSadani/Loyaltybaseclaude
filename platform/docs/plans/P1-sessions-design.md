@@ -183,3 +183,30 @@ The mechanism (`revokeAllSessionsForUser`) is ready; P2/P3 just call it when the
   `public/guides/*` stays behind auth (admin screenshots), so no matcher change.
 - **B5:** `api/test/auth-refresh-race.e2e-spec.ts` (WP7 disposable-Postgres harness). Server-mode
   (real two-connection) scenarios need `WRE_PG_ADMIN_URL` + a local Postgres — NOT run yet.
+
+#### 2026-11-19 — final round (slow-path false logouts)
+Rule: the server NEVER commits a rotation after the client gave up. Timing budget (api `auth.service.ts`
+header comment ↔ platform `auth-refresh.ts`, pinned by invariant tests on both sides):
+
+| Step | Bound |
+|---|---|
+| client attempt starts | t0 |
+| server commit deadline | min(t0 + 4.0s via `x-refresh-deadline`, receipt + 4.0s) — re-checked before the tx and as the last statement before COMMIT; late → rollback + 503 |
+| tx connection wait | `maxWait` 1.5s |
+| each lock wait | `SET LOCAL lock_timeout = '1s'` (user FOR SHARE, session claim) → 55P03 → rollback + 503 |
+| whole tx | `timeout` 4.0s |
+| client gives up | t0 + 5.0s (≥ deadline + 1s for commit + transit) |
+| document retry | give-up + 200ms (≤ t0 + 5.2s) |
+| rotation grace | **6s (was 5s)**, measured from COMMIT (predecessor `revokedAt` re-stamped as the tx's last statement) |
+
+- Cold start / pool wait before the server sees the request only shrink its remaining budget (the deadline
+  is client-anchored). Any tx failure → 503 (transient), predecessor stays live, retry works.
+- `SessionExpiryGuard`: a thrown refresh-action call = transient (no login bounce); 3 transients in a row →
+  one full page reload (the proxy then decides page vs login). A server action whose proxy refresh failed
+  now runs unauthenticated with `x-session-refresh-failed: dead|transient`, so `refreshSession` returns a
+  typed result with HTTP 200 (no data exposure: no page/layout trusts proxy identity, data stays behind
+  `/api/*`).
+- `refreshSession` trusts `x-session-refreshed` only if the merged refresh cookie differs from the one the
+  browser sent (F5).
+- Not changed: no global pg `connectionTimeoutMillis` (shared pool; would turn queueing in background jobs
+  into hard failures); no `FOR SHARE NOWAIT` (user-row writers are ms-short; 1s lock_timeout instead).
