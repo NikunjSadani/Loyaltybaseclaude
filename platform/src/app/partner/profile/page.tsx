@@ -371,6 +371,10 @@ export default function ProfilePage() {
         ...(showVisibilityInvoices
           ? [{ label: 'Visibility Invoices', href: '/partner/invoices' }]
           : []),
+        // Tenant flag helpVideos — read from the identity this page already loads (no extra request).
+        ...(identity.features?.helpVideos === true
+          ? [{ label: 'Help & videos', href: '/partner/help' }]
+          : []),
         { label: 'Terms & Conditions', href: '#' },
         { label: 'Privacy Policy',     href: '#' },
       ].map((link) => (

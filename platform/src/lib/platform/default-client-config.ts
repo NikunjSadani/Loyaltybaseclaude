@@ -58,6 +58,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     offerTiles: false,
     salesImport: false,
     wholesalerPayoutInclActivation: false,
+    helpVideos: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: false,
