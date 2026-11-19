@@ -12,6 +12,11 @@
  * VISQ8–16 (review layout, 2026-11-19): list Program/Sub-Program column; centred modal with
  *   Program/Sub-Program header; two photos side by side / one large + centred; decision area
  *   below the photos; Escape + focus restore; Tab trap; explicit "Next capture".
+ * VISQ17–29 (audit fix round): 3-photo layout; per-photo reject keeps the review open +
+ *   focus to the next pending photo; decided only when no photo pending; in-place list
+ *   refresh + focus restore (row button / heading); "no more" state; Next when the row
+ *   drops out; Approve-all / Reject-all payloads; no concurrent decisions; Escape/backdrop
+ *   with a typed note; sticky decision bar + height caps; chip contrast.
  */
 
 import React from 'react';
@@ -177,6 +182,7 @@ describe('VISQ — VisibilityCaptureQueue', () => {
   const TWO_PHOTO_DETAIL = {
     ...DETAIL,
     ...PROG,
+    duplicateMatches: [],
     media: [
       { fieldId: 'w1', label: 'Window 1', type: 'CAMERA', key: 'k1', viewPath: '/v1/visibility/captures/media?key=k1', geo: { lat: 12.9, lng: 77.5, accuracy: 10 }, fenceStatus: 'inside' },
       { fieldId: 'w2', label: 'Window 2', type: 'CAMERA', key: 'k2', viewPath: '/v1/visibility/captures/media?key=k2', geo: { lat: 12.95, lng: 77.5, accuracy: 10 }, fenceStatus: 'outside' },
@@ -240,7 +246,8 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     for (const id of ['w1', 'w2']) {
       const img = screen.getByTestId(`photo-img-${id}`);
       expect(img.className).toMatch(/object-contain/);
-      expect(img.className).toMatch(/h-\[45vh\]/);
+      // Capped so header + photos + per-photo controls + decision bar fit the 90vh dialog.
+      expect(img.className).toMatch(/sm:h-\[calc\(90vh-23rem\)\]/);
       expect(img).toHaveAttribute('alt', expect.stringContaining(id === 'w1' ? 'Window 1' : 'Window 2'));
       // Click still opens the full-size photo (auth-gated /api path) in a new tab.
       const link = img.closest('a')!;
@@ -259,7 +266,8 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     const card = within(wrap).getByTestId('photo-card-ph');
     expect(card.className).toMatch(/mx-auto/);
     const img = within(card).getByTestId('photo-img-ph');
-    expect(img.className).toMatch(/h-\[50vh\]/);
+    // The fixture has duplicate matches above the photos → the "tight" cap.
+    expect(img.className).toMatch(/sm:h-\[calc\(90vh-24rem\)\]/);
     expect(img.className).toMatch(/object-contain/);
     expect(img).toHaveAttribute('alt', 'Cooler photo — Sharma Store');
   });
@@ -333,5 +341,214 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     await waitFor(() => expect(getCapture).toHaveBeenCalledWith('cap-2'));
     const header = await screen.findByTestId('capture-review-header');
     await waitFor(() => expect(within(header).getByText('Gupta Mart')).toBeInTheDocument());
+  });
+
+  // ── Audit fix round (2026-11-19) ─────────────────────────────────────────────
+  const photo = (id: string, label: string, review: unknown = null) => ({
+    fieldId: id, label, type: 'CAMERA', key: `k-${id}`, viewPath: `/v1/visibility/captures/media?key=k-${id}`, fenceStatus: 'inside', review,
+  });
+  const THREE_PHOTO_DETAIL = {
+    ...DETAIL, ...PROG, duplicateMatches: [],
+    media: [photo('p1', 'Window 1'), photo('p2', 'Window 2'), photo('p3', 'Counter')],
+  };
+  const ROW2 = { ...ROW, id: 'cap-2', outletCode: 'OUT-2', outletName: 'Gupta Mart' };
+  const list = (captures: unknown[]) => ({ success: true, data: { captures, pagination: { page: 1, limit: 25, total: captures.length, pages: 1 } } });
+
+  it('VISQ17: three photos lay out in three columns on desktop (stacked on narrow)', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: THREE_PHOTO_DETAIL } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const grid = await screen.findByTestId('capture-review-photos');
+    expect(grid.className).toMatch(/md:grid-cols-3/);
+    expect(grid.className).toMatch(/grid-cols-1/);
+    for (const id of ['p1', 'p2', 'p3']) expect(within(grid).getByTestId(`photo-card-${id}`)).toBeInTheDocument();
+  });
+
+  it('VISQ18: rejecting photo 1 of 3 keeps the review open and moves focus to photo 2\'s controls', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: THREE_PHOTO_DETAIL } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const card1 = await screen.findByTestId('photo-card-p1');
+    // After the call the server derives CHANGES_REQUESTED (photo 1 rejected, 2 + 3 pending).
+    getCapture.mockResolvedValue({ success: true, data: { capture: {
+      ...THREE_PHOTO_DETAIL, status: 'CHANGES_REQUESTED',
+      media: [photo('p1', 'Window 1', { status: 'REJECTED', reasonCode: 'BLURRY' }), photo('p2', 'Window 2'), photo('p3', 'Counter')],
+    } } });
+    fireEvent.click(within(card1).getByRole('button', { name: /^Reject$/i }));
+    fireEvent.click(within(card1).getByRole('button', { name: /Reject photo/i }));
+    await waitFor(() => expect(reviewPhoto).toHaveBeenCalledWith('cap-1', expect.objectContaining({ fieldId: 'p1', decision: 'REJECTED' })));
+    await waitFor(() => expect(within(screen.getByTestId('photo-card-p1')).getByText(/Rejected/)).toBeInTheDocument());
+    // Still reviewing: no "Decision saved / Next capture"; focus is on photo 2's first control.
+    expect(screen.queryByTestId('capture-review-next')).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    const card2 = screen.getByTestId('photo-card-p2');
+    await waitFor(() => expect(within(card2).getByRole('button', { name: /^Approve$/i })).toHaveFocus());
+  });
+
+  it('VISQ19: once the LAST pending photo is decided, the review counts as decided', async () => {
+    const twoDone = {
+      ...THREE_PHOTO_DETAIL, status: 'CHANGES_REQUESTED',
+      media: [photo('p1', 'Window 1', { status: 'REJECTED' }), photo('p2', 'Window 2', { status: 'APPROVED' }), photo('p3', 'Counter')],
+    };
+    getCapture.mockResolvedValue({ success: true, data: { capture: twoDone } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const card3 = await screen.findByTestId('photo-card-p3');
+    getCapture.mockResolvedValue({ success: true, data: { capture: {
+      ...twoDone, media: [twoDone.media[0], twoDone.media[1], photo('p3', 'Counter', { status: 'APPROVED' })],
+    } } });
+    fireEvent.click(within(card3).getByRole('button', { name: /^Approve$/i }));
+    expect(await screen.findByTestId('capture-review-next')).toBeInTheDocument();
+  });
+
+  it('VISQ20: a decision refreshes the list in place (rows stay mounted) and Escape returns focus to that row\'s Review button', async () => {
+    render(<VisibilityCaptureQueue />);
+    const reviewBtn = await screen.findByRole('button', { name: /review/i });
+    reviewBtn.focus();
+    fireEvent.click(reviewBtn);
+    await screen.findByTestId('capture-review-header');
+    getCapture.mockResolvedValue({ success: true, data: { capture: { ...DETAIL, status: 'APPROVED' } } });
+    listCaptures.mockResolvedValue(list([{ ...ROW, status: 'APPROVED' }])); // row stays (e.g. "All" filter)
+    fireEvent.click(screen.getByRole('button', { name: /^Approve$/i }));
+    await screen.findByTestId('capture-review-next');
+    await waitFor(() => expect(listCaptures).toHaveBeenCalledTimes(2));
+    expect(reviewBtn.isConnected).toBe(true); // never swapped for the full-list spinner
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(reviewBtn);
+  });
+
+  it('VISQ21: when the decided row drops out of the list, Escape returns focus to the list heading', async () => {
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    await screen.findByTestId('capture-review-header');
+    getCapture.mockResolvedValue({ success: true, data: { capture: { ...DETAIL, status: 'APPROVED' } } });
+    listCaptures.mockResolvedValue(list([])); // Submitted filter → the approved row is gone
+    fireEvent.click(screen.getByRole('button', { name: /^Approve$/i }));
+    await screen.findByTestId('capture-review-next');
+    await waitFor(() => expect(screen.queryByRole('button', { name: /review/i })).not.toBeInTheDocument());
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: /^Captures/ }));
+  });
+
+  it('VISQ22: "No more submitted captures on this page" when nothing is left to review', async () => {
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    await screen.findByTestId('capture-review-header');
+    getCapture.mockResolvedValue({ success: true, data: { capture: { ...DETAIL, status: 'APPROVED' } } });
+    listCaptures.mockResolvedValue(list([]));
+    fireEvent.click(screen.getByRole('button', { name: /^Approve$/i }));
+    const box = await screen.findByTestId('capture-review-next');
+    await waitFor(() => expect(within(box).getByText(/No more submitted captures on this page/i)).toBeInTheDocument());
+    expect(within(box).queryByRole('button', { name: /Next capture/i })).not.toBeInTheDocument();
+  });
+
+  it('VISQ23: "Next capture" still works when the decided row drops out of the Submitted list', async () => {
+    listCaptures.mockResolvedValue(list([ROW, ROW2]));
+    getCapture.mockImplementation((id: string) => Promise.resolve({ success: true, data: { capture: id === 'cap-2' ? { ...DETAIL, ...ROW2 } : DETAIL } }));
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click((await screen.findAllByRole('button', { name: /review/i }))[0]);
+    await screen.findByTestId('capture-review-header');
+    getCapture.mockImplementation((id: string) => Promise.resolve({ success: true, data: { capture: id === 'cap-2' ? { ...DETAIL, ...ROW2 } : { ...DETAIL, status: 'APPROVED' } } }));
+    listCaptures.mockResolvedValue(list([ROW2])); // cap-1 is no longer in the list (idx < 0)
+    fireEvent.click(screen.getByRole('button', { name: /^Approve$/i }));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /review/i })).toHaveLength(1));
+    fireEvent.click(await screen.findByRole('button', { name: /Next capture/i }));
+    await waitFor(() => expect(getCapture).toHaveBeenCalledWith('cap-2'));
+    await waitFor(() => expect(within(screen.getByTestId('capture-review-header')).getByText('Gupta Mart')).toBeInTheDocument());
+  });
+
+  it('VISQ24: "Approve all" / "Reject all" on a multi-photo capture send the whole-capture payloads', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: TWO_PHOTO_DETAIL } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const decision = await screen.findByTestId('capture-review-decision');
+    fireEvent.click(within(decision).getByRole('button', { name: /Approve all/i }));
+    await waitFor(() => expect(approveCapture).toHaveBeenCalledWith('cap-1'));
+    expect(approveCapture).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(decision).getByRole('button', { name: /Reject all/i }));
+    fireEvent.change(within(decision).getByLabelText('Rejection reason code'), { target: { value: 'WRONG_OUTLET' } });
+    fireEvent.change(within(decision).getByLabelText('Rejection detail (optional)'), { target: { value: '  not this shop  ' } });
+    fireEvent.click(within(decision).getByRole('button', { name: /Reject capture/i }));
+    await waitFor(() => expect(rejectCapture).toHaveBeenCalledWith('cap-1', { reasonCode: 'WRONG_OUTLET', reason: 'not this shop' }));
+    expect(reviewPhoto).not.toHaveBeenCalled();
+  });
+
+  it('VISQ25: whole-capture and per-photo decisions cannot run at the same time', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: TWO_PHOTO_DETAIL } });
+    let release!: (v: unknown) => void;
+    reviewPhoto.mockReturnValue(new Promise((r) => { release = r; }));
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const decision = await screen.findByTestId('capture-review-decision');
+    fireEvent.click(within(screen.getByTestId('photo-card-w1')).getByRole('button', { name: /^Approve$/i }));
+    await waitFor(() => expect(within(decision).getByRole('button', { name: /Approve all/i })).toBeDisabled());
+    expect(within(decision).getByRole('button', { name: /Reject all/i })).toBeDisabled();
+    release({ success: true, data: { capture: TWO_PHOTO_DETAIL } });
+    await waitFor(() => expect(within(decision).getByRole('button', { name: /Approve all/i })).not.toBeDisabled());
+
+    // And the reverse: a whole-capture call in flight locks every per-photo control.
+    approveCapture.mockReturnValue(new Promise(() => {}));
+    fireEvent.click(within(decision).getByRole('button', { name: /Approve all/i }));
+    await waitFor(() => {
+      for (const id of ['w1', 'w2']) {
+        for (const b of within(screen.getByTestId(`photo-card-${id}`)).getAllByRole('button')) expect(b).toBeDisabled();
+      }
+    });
+  });
+
+  it('VISQ26: Escape inside a typed reject note closes only the form; the backdrop asks before discarding', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    await screen.findByTestId('capture-review-header');
+    fireEvent.click(screen.getByRole('button', { name: /^Reject$/i }));
+    const note = screen.getByLabelText('Rejection detail (optional)');
+    fireEvent.change(note, { target: { value: 'board missing' } });
+    fireEvent.keyDown(note, { key: 'Escape' });
+    // The dialog stays; only the reject form closed; focus back on "Reject".
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Reject capture/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Reject$/i })).toHaveFocus();
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    // Re-open: the note was kept. Backdrop click with a typed note asks first.
+    fireEvent.click(screen.getByRole('button', { name: /^Reject$/i }));
+    expect(screen.getByLabelText('Rejection detail (optional)')).toHaveValue('board missing');
+    confirmSpy.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByTestId('capture-review-backdrop'));
+    expect(confirmSpy).toHaveBeenCalledWith('Discard the rejection note?');
+    expect(screen.getByRole('dialog')).toBeInTheDocument(); // declined → stays open
+    confirmSpy.mockReturnValueOnce(true);
+    fireEvent.click(screen.getByTestId('capture-review-backdrop'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    confirmSpy.mockRestore();
+  });
+
+  it('VISQ27: the decision bar is sticky at the bottom of the scroll area; photos capped to fit', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: TWO_PHOTO_DETAIL } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const decision = await screen.findByTestId('capture-review-decision');
+    expect(decision.className).toMatch(/sticky/);
+    expect(decision.className).toMatch(/bottom-0/);
+    expect(screen.getByTestId('capture-review-scroll').contains(decision)).toBe(true);
+  });
+
+  it('VISQ28: with duplicate matches shown, two-photo heights use the tighter cap', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: { ...TWO_PHOTO_DETAIL, duplicateMatches: DETAIL.duplicateMatches } } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    expect((await screen.findByTestId('photo-img-w1')).className).toMatch(/sm:h-\[calc\(90vh-28rem\)\]/);
+  });
+
+  it('VISQ29: Program / Sub-Program chip labels use the -700 shades (contrast)', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: { ...DETAIL, ...PROG } } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const prog = await screen.findByTestId('capture-review-program');
+    expect(within(prog).getByText('Program').className).toMatch(/text-indigo-700/);
+    expect(within(prog).getByText('Sub-Program').className).toMatch(/text-violet-700/);
   });
 });

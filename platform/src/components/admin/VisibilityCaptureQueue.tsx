@@ -106,6 +106,37 @@ export function VisibilityCaptureQueue() {
     setLoading(false);
   }, [query]);
 
+  // Quiet refresh after a review decision: the rows stay mounted (an inline "Refreshing…"
+  // shows instead of the full-list spinner) so the row's Review button — the dialog's
+  // focus-restore target — survives. A failed quiet refresh keeps the rows and says so.
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    setRefreshError(null);
+    const res = await visibilityApi.listCaptures(query);
+    if (res.success) {
+      setRows(res.data.captures);
+      setPagination(res.data.pagination ?? null);
+    } else {
+      setRefreshError(res.error);
+    }
+    setRefreshing(false);
+  }, [query]);
+
+  // Focus restore when the review dialog closes and its opener is gone (the reviewed row
+  // dropped out of the filtered list): that row's Review button if still listed, else the
+  // list heading.
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const lastOpenIdRef = useRef<string | null>(null);
+  useEffect(() => { if (openId) lastOpenIdRef.current = openId; }, [openId]);
+  const restoreFocusFallback = useCallback(() => {
+    const id = lastOpenIdRef.current;
+    const btn = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-review-id]'))
+      .find((b) => b.dataset.reviewId === id);
+    (btn ?? headingRef.current)?.focus();
+  }, []);
+
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { setPage(1); }, [status, windowKey, outletCode]);
 
@@ -129,6 +160,24 @@ export function VisibilityCaptureQueue() {
         {hasFilters && (
           <button onClick={() => { setStatus(''); setWindowKey(''); setOutletCode(''); }}
             className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-500 pb-1.5"><X className="w-3.5 h-3.5" /> Clear</button>
+        )}
+      </div>
+
+      {/* List heading (also the focus-restore fallback) + quiet-refresh status */}
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 ref={headingRef} tabIndex={-1} className="text-sm font-semibold text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] rounded">
+          Captures{pagination ? ` (${pagination.total})` : ''}
+        </h2>
+        {refreshing && (
+          <span className="inline-flex items-center gap-1 text-xs text-gray-500" role="status">
+            <Loader2 className="w-3 h-3 animate-spin" /> Refreshing…
+          </span>
+        )}
+        {refreshError && (
+          <span className="inline-flex items-center gap-1 text-xs text-red-600" role="alert">
+            <AlertCircle className="w-3 h-3" /> Couldn&apos;t refresh the list: {refreshError}
+            <button onClick={() => void refresh()} className="ml-1 text-[var(--brand-primary)] hover:underline">Retry</button>
+          </span>
         )}
       </div>
 
@@ -165,7 +214,7 @@ export function VisibilityCaptureQueue() {
                         the same stacked layout as the Outlets list. */}
                     <td className="px-4 py-2.5" data-testid={`row-program-${r.id}`}>
                       <p className="text-xs font-medium text-gray-700">{r.programName || '—'}</p>
-                      <p className="text-[11px] text-gray-400">{r.programCategory || '—'}</p>
+                      <p className="text-[11px] text-gray-500">{r.programCategory || '—'}</p>
                     </td>
                     <td className="px-4 py-2.5 text-xs text-gray-600 font-mono">{r.windowKey}</td>
                     <td className="px-4 py-2.5"><GeoBadge geoFenceOk={r.geoFenceOk} distanceMeters={r.distanceMeters} /></td>
@@ -174,7 +223,7 @@ export function VisibilityCaptureQueue() {
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[r.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(r.status)}{r.currentVersion > 1 ? ` · v${r.currentVersion}` : ''}</span>
                     </td>
                     <td className="px-4 py-2.5 text-right">
-                      <button onClick={() => setOpenId(r.id)} className="text-xs text-[var(--brand-primary)] font-medium hover:underline">Review</button>
+                      <button onClick={() => setOpenId(r.id)} data-review-id={r.id} className="text-xs text-[var(--brand-primary)] font-medium hover:underline">Review</button>
                     </td>
                   </tr>
                 ))}
@@ -194,14 +243,14 @@ export function VisibilityCaptureQueue() {
       )}
 
       {openId && (
-        <ReviewDialog onClose={() => setOpenId(null)}>
+        <ReviewDialog onClose={() => setOpenId(null)} onRestoreFocusFallback={restoreFocusFallback}>
           {/* Keyed by capture so "Next capture" starts a fresh review (state reset) while the
               dialog shell — and its focus-restore target — stays mounted. */}
           <CaptureReview
             key={openId}
             captureId={openId}
             onClose={() => setOpenId(null)}
-            onChanged={load}
+            onChanged={() => { void refresh(); }}
             nextId={nextPendingId(rows, openId)}
             onNext={(id) => setOpenId(id)}
           />
@@ -257,13 +306,36 @@ function PhotoFenceBadge({ status }: { status: PhotoFenceStatus }) {
  * `showReview` is false and the decision lives on the whole-capture Approve/Reject below
  * the photos (identical behaviour to before).
  */
+/**
+ * Photo height, sized so header + photo(s) + caption (+ per-photo controls) + the sticky
+ * decision bar fit inside the 90vh dialog on a 1366×768 laptop (90vh ≈ 691 px):
+ *   - phone (< sm, full-screen dialog, photos stacked): a fixed share of the viewport;
+ *   - sm+: 90vh minus the measured chrome (header ≈ 7.5rem, section title, caption,
+ *     per-photo controls ≈ 3rem, decision bar ≈ 4rem, paddings), with a floor;
+ *   - `tight` (duplicate-match flags or a rejection banner above the photos) takes
+ *     another ~5rem off so the photos still end above the decision bar.
+ * The decision bar is ALSO sticky, so it stays reachable whatever the content height.
+ */
+function photoHeightClass(single: boolean, tight: boolean): string {
+  if (single) {
+    return tight
+      ? 'h-[45vh] sm:h-[calc(90vh-24rem)] min-h-[12rem]'
+      : 'h-[45vh] sm:h-[calc(90vh-19rem)] min-h-[12rem]';
+  }
+  return tight
+    ? 'h-[40vh] sm:h-[calc(90vh-28rem)] min-h-[10rem]'
+    : 'h-[40vh] sm:h-[calc(90vh-23rem)] min-h-[10rem]';
+}
+
 function PhotoCard({
-  media: m, outletName, single, showReview, reviewable, busy, disabled, onReview,
+  media: m, outletName, single, tight, showReview, reviewable, busy, disabled, onReview,
 }: {
   media: VisibilityMediaRef;
   outletName: string;
   /** The only photo on the capture → shown larger and centred. */
   single: boolean;
+  /** Extra content above the photos (duplicates / rejection banner) → shorter photos. */
+  tight: boolean;
   showReview: boolean;
   reviewable: boolean;
   busy: boolean;
@@ -277,7 +349,7 @@ function PhotoCard({
 }) {
   const href = rewriteMediaViewPath(m.viewPath);
   const geo = m.geo;
-  const imgHeight = single ? 'h-[50vh] sm:h-[58vh]' : 'h-[45vh] md:h-[52vh]';
+  const imgHeight = photoHeightClass(single, tight);
   return (
     <figure
       className={`border border-gray-200 rounded-lg overflow-hidden flex flex-col bg-white ${single ? 'w-full max-w-4xl mx-auto' : 'w-full'}`}
@@ -320,7 +392,7 @@ function PhotoCard({
             )}
             {m.fenceStatus && (
               <span className="inline-flex items-center gap-1" data-testid={`photo-fence-${m.fieldId}`}>
-                <span className="text-gray-400">this photo</span>
+                <span className="text-gray-500">this photo</span>
                 <PhotoFenceBadge status={m.fenceStatus} />
               </span>
             )}
@@ -368,6 +440,14 @@ function PhotoReviewControls({
   const status = review?.status ?? null;
   const spin = busy;
 
+  // Closing the reject form (Cancel / Escape) returns focus to its Reject trigger.
+  const rejectBtnRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (wasOpen.current && !rejectOpen) rejectBtnRef.current?.focus();
+    wasOpen.current = rejectOpen;
+  }, [rejectOpen]);
+
   // Current-decision badge (always shown).
   const badge =
     status === 'APPROVED' ? (
@@ -382,7 +462,7 @@ function PhotoReviewControls({
           : ''}
       </span>
     ) : (
-      <span data-testid={`photo-review-${fieldId}`} className="text-[11px] font-medium text-gray-400">Pending</span>
+      <span data-testid={`photo-review-${fieldId}`} className="text-[11px] font-medium text-gray-500">Pending</span>
     );
 
   if (!reviewable) {
@@ -390,7 +470,7 @@ function PhotoReviewControls({
   }
 
   return (
-    <div className="px-2 py-2 border-t border-gray-100 bg-gray-50 space-y-2">
+    <div className="px-2 py-2 border-t border-gray-100 bg-gray-50 space-y-2" data-photo-controls={fieldId}>
       <div className="flex items-center justify-between gap-2">
         {badge}
         {review?.reason && (
@@ -399,7 +479,10 @@ function PhotoReviewControls({
       </div>
 
       {rejectOpen ? (
-        <div className="space-y-1.5">
+        <div className="space-y-1.5"
+          // Escape inside the reject form closes only the form (the typed note is kept) —
+          // never the whole dialog.
+          onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setRejectOpen(false); } }}>
           <select value={reasonCode} onChange={(e) => setReasonCode(e.target.value as VisibilityRejectReasonCode)}
             aria-label={`Reject reason for ${fieldId}`}
             className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-red-400">
@@ -408,13 +491,14 @@ function PhotoReviewControls({
             ))}
           </select>
           <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2}
+            aria-label={`Reject detail for ${fieldId} (optional)`}
             placeholder="Optional detail — the rep re-captures only this photo."
             className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-red-400 resize-none" />
           <div className="flex gap-2 justify-end">
             <button onClick={() => { setRejectOpen(false); }} className="px-2 py-1 text-[11px] border border-gray-200 rounded-lg text-gray-600 hover:bg-white">Cancel</button>
             <button
               onClick={() => { onReview(fieldId, 'REJECTED', reasonCode, reason.trim() || undefined); setRejectOpen(false); setReason(''); }}
-              disabled={spin}
+              disabled={spin || disabled}
               className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-60">
               {spin ? <Loader2 className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3" />} Reject photo
             </button>
@@ -432,6 +516,7 @@ function PhotoReviewControls({
           )}
           {status !== 'REJECTED' && (
             <button
+              ref={rejectBtnRef}
               onClick={() => setRejectOpen(true)}
               disabled={spin || disabled}
               className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium border border-red-200 text-red-600 rounded-lg hover:bg-red-50 disabled:opacity-60">
@@ -450,16 +535,33 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
+ * Guard for closing the dialog while a rejection note is typed (whole-capture or per-photo
+ * reject form): asks "Discard the rejection note?" — true = OK to close.
+ */
+function confirmDiscardNote(): boolean {
+  const dialog = document.querySelector('[data-testid="capture-review-dialog"]');
+  const dirty = !!dialog && Array.from(dialog.querySelectorAll('textarea')).some((t) => t.value.trim() !== '');
+  return !dirty || window.confirm('Discard the rejection note?');
+}
+
+/**
  * The centred review modal: ~90% of the viewport on desktop, full-screen on a phone.
  * Accessibility: role=dialog + aria-modal, focus moves inside on open, Tab/Shift+Tab are
- * trapped inside, Escape closes, and focus returns to the element that opened it (the
- * row's "Review" button). The shell stays mounted across "Next capture" so the restore
+ * trapped inside, Escape closes (an Escape inside an open reject form closes only that
+ * form; closing with a typed rejection note asks first), and focus returns to the element
+ * that opened it (the row's "Review" button) — or, if that row left the list, to
+ * `onRestoreFocusFallback`. The shell stays mounted across "Next capture" so the restore
  * target is the original opener.
  */
-function ReviewDialog({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
+function ReviewDialog({ onClose, onRestoreFocusFallback, children }: {
+  onClose: () => void;
+  onRestoreFocusFallback: () => void;
+  children: React.ReactNode;
+}) {
   const panelRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
-  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+  const fallbackRef = useRef(onRestoreFocusFallback);
+  useEffect(() => { onCloseRef.current = onClose; fallbackRef.current = onRestoreFocusFallback; }, [onClose, onRestoreFocusFallback]);
 
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
@@ -468,14 +570,17 @@ function ReviewDialog({ onClose, children }: { onClose: () => void; children: Re
     document.body.style.overflow = 'hidden';
     return () => {
       document.body.style.overflow = prevOverflow;
-      if (opener && typeof opener.focus === 'function' && document.contains(opener)) opener.focus();
+      if (opener && opener !== document.body && typeof opener.focus === 'function' && document.contains(opener)) opener.focus();
+      else fallbackRef.current();
     };
   }, []);
+
+  const requestClose = () => { if (confirmDiscardNote()) onCloseRef.current(); };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Escape') {
       e.stopPropagation();
-      onCloseRef.current();
+      requestClose();
       return;
     }
     if (e.key !== 'Tab' || !panelRef.current) return;
@@ -496,7 +601,7 @@ function ReviewDialog({ onClose, children }: { onClose: () => void; children: Re
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center sm:p-4">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden data-testid="capture-review-backdrop" />
+      <div className="absolute inset-0 bg-black/50" onClick={requestClose} aria-hidden data-testid="capture-review-backdrop" />
       <div
         ref={panelRef}
         role="dialog"
@@ -536,6 +641,13 @@ function CaptureReview({
   const [rejectOpen, setRejectOpen] = useState(false);
   const [reasonCode, setReasonCode] = useState<VisibilityRejectReasonCode>('BLURRY');
   const [reason, setReason] = useState('');
+  // Closing the whole-capture reject form (Cancel / Escape) returns focus to "Reject".
+  const rejectAllBtnRef = useRef<HTMLButtonElement>(null);
+  const rejectWasOpen = useRef(false);
+  useEffect(() => {
+    if (rejectWasOpen.current && !rejectOpen) rejectAllBtnRef.current?.focus();
+    rejectWasOpen.current = rejectOpen;
+  }, [rejectOpen]);
 
   // The spinner shows only on the first load (this component is keyed per capture); a
   // reload after a decision refreshes in place so focus stays inside the dialog.
@@ -575,11 +687,33 @@ function CaptureReview({
     const res = await visibilityApi.reviewPhoto(captureId, { fieldId, decision, reasonCode, reason });
     setPhotoBusy(null);
     if (res.success) {
+      // Focus target for after the reload: the next still-pending photo's controls.
+      focusAfterPhotoRef.current = fieldId;
       const fresh = await load();
       onChanged();
-      if (fresh && fresh.status !== 'SUBMITTED') setDecided(true);
+      // A per-photo decision completes the review only when NO photo is still pending —
+      // rejecting photo 1 of 3 already derives CHANGES_REQUESTED server-side, but the
+      // reviewer still has photos 2 and 3 to judge, so the review stays open.
+      if (fresh && fresh.media.length > 0 && fresh.media.every((m) => m.review?.status)) setDecided(true);
     } else setActionError(res.error);
   };
+
+  // After a per-photo decision re-renders the cards, move focus to the next pending photo's
+  // first enabled control (in photo order, wrapping) so the reviewer can carry on by keyboard.
+  const focusAfterPhotoRef = useRef<string | null>(null);
+  useEffect(() => {
+    const from = focusAfterPhotoRef.current;
+    if (!from || !detail) return;
+    focusAfterPhotoRef.current = null;
+    const media = detail.media;
+    const idx = media.findIndex((m) => m.fieldId === from);
+    const ordered = [...media.slice(idx + 1), ...media.slice(0, Math.max(idx, 0))];
+    const target = ordered.find((m) => !m.review?.status);
+    if (!target) return; // all decided → the "Next capture" focus effect takes over
+    const box = Array.from(document.querySelectorAll<HTMLElement>('[data-photo-controls]'))
+      .find((n) => n.dataset.photoControls === target.fieldId);
+    box?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus();
+  }, [detail]);
 
   const approve = async () => {
     setBusy(true);
@@ -612,9 +746,12 @@ function CaptureReview({
     (detail?.media ?? []).some((m) => m.review?.status === 'REJECTED');
   const multiPhoto = (detail?.media?.length ?? 0) > 1;
   const reviewable = detail != null && detail.status !== 'APPROVED';
+  // Extra rows above the photos → shorter photos so the decision bar still fits (item: 1366×768).
+  const tight = (detail?.duplicateMatches.length ?? 0) > 0 ||
+    (detail?.status === 'REJECTED' && !!(detail.rejectionReason || detail.rejectionReasonCode));
 
   const closeBtn = (
-    <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)]" aria-label="Close">
+    <button onClick={() => { if (confirmDiscardNote()) onClose(); }} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)]" aria-label="Close">
       <X className="w-5 h-5" />
     </button>
   );
@@ -648,16 +785,16 @@ function CaptureReview({
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <h2 className="text-base sm:text-lg font-bold text-gray-900 truncate">{detail.outletName || 'Outlet'}</h2>
-              <span className="text-xs text-gray-400 font-mono">{detail.outletCode}</span>
+              <span className="text-xs text-gray-500 font-mono">{detail.outletCode}</span>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[detail.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(detail.status)}</span>
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="capture-review-program">
               <span className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 border border-indigo-200 px-2.5 py-1 text-sm">
-                <span className="text-[11px] uppercase tracking-wide text-indigo-500">Program</span>
+                <span className="text-[11px] uppercase tracking-wide font-medium text-indigo-700">Program</span>
                 <strong className="text-indigo-900">{detail.programName || '—'}</strong>
               </span>
               <span className="inline-flex items-center gap-1.5 rounded-lg bg-violet-50 border border-violet-200 px-2.5 py-1 text-sm">
-                <span className="text-[11px] uppercase tracking-wide text-violet-500">Sub-Program</span>
+                <span className="text-[11px] uppercase tracking-wide font-medium text-violet-700">Sub-Program</span>
                 <strong className="text-violet-900">{detail.programCategory || '—'}</strong>
               </span>
             </div>
@@ -667,7 +804,7 @@ function CaptureReview({
               {receivedAt && <span>{receivedAt}</span>}
               <span className="inline-flex items-center gap-1">
                 <GeoBadge geoFenceOk={detail.geoFence.geoFenceOk} distanceMeters={detail.geoFence.distanceMeters} />
-                {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-400">±{Math.round(detail.geoFence.captureAccuracy)} m</span>}
+                {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-500">±{Math.round(detail.geoFence.captureAccuracy)} m</span>}
               </span>
               {detail.duplicateMatches.length > 0 && (
                 <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-700 border border-amber-200 inline-flex items-center gap-1">
@@ -680,7 +817,7 @@ function CaptureReview({
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 space-y-5">
+      <div className="flex-1 overflow-y-auto px-4 sm:px-6 pt-4 space-y-5" data-testid="capture-review-scroll">
         {detail.status === 'REJECTED' && (detail.rejectionReason || detail.rejectionReasonCode) && (
           <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-600">
             <strong>Rejected:</strong> {detail.rejectionReasonCode ? (VISIBILITY_REJECT_REASON_LABELS[detail.rejectionReasonCode as VisibilityRejectReasonCode] ?? detail.rejectionReasonCode) : ''}{detail.rejectionReason ? ` — ${detail.rejectionReason}` : ''}
@@ -708,7 +845,7 @@ function CaptureReview({
           <Section title={`Photos (${detail.media.length})`}>
             <div
               data-testid="capture-review-photos"
-              className={multiPhoto ? 'grid grid-cols-1 md:grid-cols-2 gap-4' : 'flex justify-center'}
+              className={!multiPhoto ? 'flex justify-center' : detail.media.length >= 3 ? 'grid grid-cols-1 md:grid-cols-3 gap-4' : 'grid grid-cols-1 md:grid-cols-2 gap-4'}
             >
               {detail.media.map((m) => (
                 <PhotoCard
@@ -716,10 +853,12 @@ function CaptureReview({
                   media={m}
                   outletName={detail.outletName}
                   single={!multiPhoto}
+                  tight={tight}
                   showReview={multiPhoto}
                   reviewable={reviewable}
                   busy={photoBusy === m.fieldId}
-                  disabled={photoBusy != null && photoBusy !== m.fieldId}
+                  // A whole-capture call in flight (busy) locks every per-photo control too.
+                  disabled={busy || (photoBusy != null && photoBusy !== m.fieldId)}
                   onReview={reviewPhoto}
                 />
               ))}
@@ -727,13 +866,16 @@ function CaptureReview({
           </Section>
         )}
 
-        {/* ── Decision area (below the photos) ── */}
-        <div className="border-t border-gray-100 pt-4 space-y-3" data-testid="capture-review-decision">
+        {/* ── Decision area (below the photos) — STICKY at the bottom of the scroll area so
+            Approve / Reject stay on screen on a 1366×768 laptop whatever the content. ── */}
+        <div className="sticky bottom-0 z-10 bg-white border-t border-gray-200 -mx-4 sm:-mx-6 px-4 sm:px-6 py-3 space-y-3 shadow-[0_-6px_12px_-8px_rgba(0,0,0,0.2)]" data-testid="capture-review-decision">
           {actionError && <p className="text-xs text-red-500 flex items-center gap-1" role="alert"><AlertCircle className="w-3 h-3" />{actionError}</p>}
 
           {detail.status !== 'APPROVED' && (
             rejectOpen ? (
-              <div className="space-y-2 max-w-2xl">
+              <div className="space-y-2 max-w-2xl"
+                // Escape inside the reject form closes only the form (the note is kept).
+                onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setRejectOpen(false); setActionError(null); } }}>
                 <label className="block text-xs font-medium text-gray-700">Rejection reason</label>
                 <select value={reasonCode} onChange={(e) => setReasonCode(e.target.value as VisibilityRejectReasonCode)}
                   aria-label="Rejection reason code"
@@ -748,7 +890,7 @@ function CaptureReview({
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400 resize-none" />
                 <div className="flex gap-2 justify-end">
                   <button onClick={() => { setRejectOpen(false); setActionError(null); }} className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50">Cancel</button>
-                  <button onClick={submitReject} disabled={busy}
+                  <button onClick={submitReject} disabled={busy || photoBusy != null}
                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-60">
                     {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />} Reject capture
                   </button>
@@ -757,12 +899,12 @@ function CaptureReview({
             ) : (
               <div className="space-y-2">
                 <div className="flex flex-col sm:flex-row gap-2 max-w-2xl">
-                  <button onClick={approve} disabled={busy || anyRejected}
+                  <button onClick={approve} disabled={busy || photoBusy != null || anyRejected}
                     title={anyRejected ? 'Re-capture the flagged photos before approving the whole capture.' : undefined}
                     className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
                     {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />} {multiPhoto ? 'Approve all' : 'Approve'}
                   </button>
-                  <button onClick={() => setRejectOpen(true)} disabled={busy}
+                  <button ref={rejectAllBtnRef} onClick={() => setRejectOpen(true)} disabled={busy || photoBusy != null}
                     className="flex-1 flex items-center justify-center gap-2 py-2.5 border border-red-200 text-red-600 rounded-lg text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-60">
                     <XCircle className="w-4 h-4" /> {multiPhoto ? 'Reject all' : 'Reject'}
                   </button>
@@ -796,7 +938,7 @@ function CaptureReview({
         </div>
 
         {/* ── Details (compact, below the decision) ── */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 border-t border-gray-100 pt-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 pt-1 pb-4">
           <Section title="Geo-fence">
             <div className="flex items-center gap-2 mb-2">
               <GeoBadge geoFenceOk={detail.geoFence.geoFenceOk} distanceMeters={detail.geoFence.distanceMeters} />
