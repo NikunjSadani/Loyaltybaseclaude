@@ -135,6 +135,7 @@ function consoleFeatures(features: Record<string, unknown>) {
     captureBankAtRedemption: !!features.captureBankAtRedemption,
     offerTiles: !!features.offerTiles,
     salesImport: !!features.salesImport,
+    wholesalerPayoutInclActivation: !!features.wholesalerPayoutInclActivation,
     // Runtime BEHAVIOUR flags (not console modules) — edited in the console's
     // "Behaviour flags" section through this same PATCH features path.
     outletMasterGeo: !!features.outletMasterGeo,
@@ -158,7 +159,7 @@ const BOOLEAN_FEATURE_KEYS = [
   'referralModule', 'selfEnrollmentAllowed', 'nonKycOutletCampaigns', 'multiLevelApproval', 'rbacEnforcement',
   'hubbleVoucherEnabled', 'rlpBscView', 'catalogueMrpSlash', 'partnerDashboardV2', 'captureBankAtRedemption',
   'offerTiles', 'salesImport', 'outletMasterGeo', 'soDeclarationKyc', 'kycAddressProofWaiver',
-  'allowPayoutWithoutPan', 'gifsyRejectFastTrack', 'requireLocation',
+  'allowPayoutWithoutPan', 'gifsyRejectFastTrack', 'requireLocation', 'wholesalerPayoutInclActivation',
 ] as const;
 
 /**
