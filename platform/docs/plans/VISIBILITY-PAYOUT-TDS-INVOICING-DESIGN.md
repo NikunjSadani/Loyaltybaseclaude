@@ -207,6 +207,16 @@ runbook pre-check below.
   records NO receivable — it reverses the withholding (negative ledger row in the original FY, under the 194R lock) and
   marks the entry REVERSED. A PARTLY withheld PAID entry becomes a receivable of only the NET amount actually released
   (amount − TDS withheld), 194R and 194C alike.
+- **Wallet Reversal Engine (2026-11-19 — WALLET-REVERSAL-ENGINE-DESIGN.md §8.3–8.4):**
+  - *Every tenant (owner D1, ⚠️ platform-wide, approved):* a **194C payout can't be reversed once PAID** — refused with
+    "194C payouts can't be reversed once paid"; 194C figures never move after payment (no credit, no base change).
+  - *V2 tenants only:* a reversed PAID 194R payout is marked `tdsBaseReversedAt` and `collect194RBases` leaves it out
+    of the base (engine + report alike); the withheld TDS it carried — also for a FULLY withheld payout (owner D2: the
+    entry is REVERSED, nothing owed) — becomes a capped, client-scoped `TdsCredit` in the ledger row's FY, created only
+    only when USABLE (current FY, DEDUCT, the retailer's current payee key — otherwise the TDS stays in the ledger:
+    nets on a later withholding of that FY or is flagged excess, said so). The report's excess subtracts only USABLE open
+    credits ("Open TDS Credit"); an unusable one stays excess with a note. A D2 REVERSED payout still shows its row
+    reversal flag (never in the base). No marker / no credit (every LEGACY tenant, Deoleo) → everything above is unchanged.
 - **KYC-held payouts** left out of a download are listed in the result (`heldNote`), the `X-Held-Count/-Note` headers
   and an amber note on the payout screen (owner rule: no silent pass-through).
 

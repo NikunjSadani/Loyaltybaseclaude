@@ -451,4 +451,27 @@ describe('PaymentsReportService', () => {
       expect(mockPrisma.outlet.findMany.mock.calls[0][0].where.outletCode.in).toEqual(['OUT1']);
     });
   });
+
+  describe('fix round B (L1) — reversal / TDS-credit marks on a row', () => {
+    it('a reversed PAID entry is marked (owed back + TDS credit); TDS lowered by a credit is explained; other rows unchanged', async () => {
+      const [e1, e2] = twoStreamEntries();
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        { ...e1, tdsBaseReversedAt: new Date('2026-11-16T05:00:00Z'), reversalAllocations: [{ receivablePaise: 495000n, tdsCreditPaise: 5000n }], tdsCreditApplications: [] },
+        { ...e2, tdsBaseReversedAt: null, reversalAllocations: [], tdsCreditApplications: [{ amountPaise: 2500n, tdsCredit: { clientId: 'bajaj' } }] },
+        { ...e2, id: 'e3', tdsBaseReversedAt: null, reversalAllocations: [], tdsCreditApplications: [] },
+      ]);
+      mockPrisma.creditPayoutEntry.aggregate.mockResolvedValue({ _count: { _all: 3 }, _sum: { amountPaise: 1000000n, tdsDeductedPaise: 0n } });
+      const res = await service.paymentReport({ clientId: 'deoleo' });
+      // still ONE page query (the marks ride on it)
+      expect(mockPrisma.creditPayoutEntry.findMany).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].select).toMatchObject({ tdsBaseReversedAt: true });
+      expect(res.rows[0].reversal).toEqual({
+        receivablePaise: 495000, tdsCreditPaise: 5000, reversedAt: '2026-11-16T05:00:00.000Z',
+        note: 'Reversed on 16 Nov 2026 — ₹4,950.00 owed back (receivable); ₹50.00 TDS credit carried forward',
+      });
+      expect(res.rows[1]).toMatchObject({ tdsCreditPaise: 2500, tdsNote: 'TDS lowered by ₹25.00 adjusted from earlier TDS credit (₹25.00 from another programme)' });
+      expect(res.rows[2]).not.toHaveProperty('reversal');
+      expect(res.rows[2]).not.toHaveProperty('tdsNote');
+    });
+  });
 });

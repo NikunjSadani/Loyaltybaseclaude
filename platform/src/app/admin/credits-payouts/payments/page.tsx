@@ -42,6 +42,7 @@ import {
   type Money,
   PAYMENTS_PAGE_SIZES,
 } from '@/lib/payments-report';
+import { formatInrPaise } from '@/lib/money-format';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
 
@@ -422,6 +423,15 @@ export default function AdminPaymentsReportPage() {
                       <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium ${statusBadge(r.status)}`}>
                         {r.status ?? '—'}
                       </span>
+                      {r.reversal && (
+                        <div data-testid="payment-reversal" className="mt-1 text-left whitespace-normal min-w-[14rem] space-y-0.5">
+                          <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 text-amber-800 border border-amber-200">
+                            Reversed — {formatInrPaise(r.reversal.receivablePaise)} owed back (receivable)
+                            {Number(r.reversal.tdsCreditPaise) > 0 && ` · ${formatInrPaise(r.reversal.tdsCreditPaise)} TDS credit`}
+                          </span>
+                          {r.reversal.note && <p className="text-[11px] text-amber-800">{r.reversal.note}</p>}
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-3 text-gray-600">{r.payoutHeader ?? '—'}</td>
                     <td className="px-3 py-3 text-gray-600">{r.groupType ?? '—'}</td>
@@ -435,6 +445,11 @@ export default function AdminPaymentsReportPage() {
                         <span className="text-red-600 font-medium">{formatInr(r.tdsDeducted)}</span>
                       ) : (
                         <span className="text-gray-400">—</span>
+                      )}
+                      {(r.tdsNote || Number(r.tdsCreditPaise ?? 0) > 0) && (
+                        <span data-testid="payment-tds-note" className="block text-[11px] text-blue-700 whitespace-normal min-w-[12rem]">
+                          {r.tdsNote ?? `${formatInrPaise(r.tdsCreditPaise ?? 0)} covered by TDS credit`}
+                        </span>
                       )}
                     </td>
                     <td className="px-3 py-3 font-mono text-[11px] text-gray-600">{r.invoiceNumber ?? '—'}</td>

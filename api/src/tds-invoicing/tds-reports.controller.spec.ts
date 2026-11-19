@@ -18,6 +18,7 @@ const svc = {
   payoutReport: jest.fn().mockResolvedValue({ rows: [] }),
   unregisteredReport: jest.fn().mockResolvedValue({ rows: [] }),
   recoveryReport: jest.fn().mockResolvedValue({ rows: [] }),
+  creditsOnly: jest.fn().mockResolvedValue({ tdsCredits: null }),
 };
 const exportsSvc = { respond: jest.fn().mockResolvedValue({ exportRequestId: 'x', message: 'm' }) };
 
@@ -46,7 +47,7 @@ describe('TdsReportsController', () => {
   describe('scoping — CLIENT_ADMIN pinned to own tenant', () => {
     it('payouts: CLIENT_ADMIN clientId always their own, even if ?clientId= names another tenant', async () => {
       await controller.payouts(CLIENT, { clientId: 'other-tenant', period: '2026-06' });
-      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: 'deoleo', period: '2026-06' });
+      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: 'deoleo', period: '2026-06' }, { page: 1, limit: 25 });
     });
 
     it('recovery: CLIENT_ADMIN sees only their own recovery liability', async () => {
@@ -56,17 +57,27 @@ describe('TdsReportsController', () => {
 
     it('payouts: GIFSY_ADMIN may scope to any tenant via ?clientId=', async () => {
       await controller.payouts(GIFSY, { clientId: 'deoleo' });
-      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: 'deoleo', period: undefined });
+      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: 'deoleo', period: undefined }, { page: 1, limit: 25 });
     });
 
     it('payouts: GIFSY_ADMIN with no ?clientId= is platform-wide (undefined scope)', async () => {
       await controller.payouts(GIFSY, {});
-      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: undefined, period: undefined });
+      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: undefined, period: undefined }, { page: 1, limit: 25 });
+    });
+
+    it('payouts: the TDS credits panel page is passed through (fix round B #21)', async () => {
+      await controller.payouts(GIFSY, { creditPage: 3, creditLimit: 10 });
+      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: undefined, period: undefined }, { page: 3, limit: 10 });
+    });
+
+    it('payouts?creditsOnly=true: only the credits page, same tenant pinning (fix round B #21)', async () => {
+      await controller.payouts(CLIENT, { clientId: 'other-tenant', creditPage: 2, creditsOnly: 'true' });
+      expect(svc.creditsOnly).toHaveBeenCalledWith({ clientId: 'deoleo', period: undefined }, { page: 2, limit: 25 });
     });
 
     it('payouts: an ASSUMED GIFSY operator is pinned to the assumed tenant (?clientId= ignored)', async () => {
       await controller.payouts(ASSUMED, { clientId: 'other-tenant', period: '2026-06' });
-      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: 'deoleo', period: '2026-06' });
+      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: 'deoleo', period: '2026-06' }, { page: 1, limit: 25 });
     });
 
     it('payouts/export: hands the query to the tds-payouts export kind (which pins the scope the same way)', async () => {

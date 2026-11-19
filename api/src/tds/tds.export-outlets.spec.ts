@@ -97,6 +97,8 @@ const mockPrisma = {
   tdsOffPlatformEntry: { findMany: jest.fn(async () => offPlatform) },
   tdsDeposit: { findMany: jest.fn(async () => deposits) },
   tdsDeductionEntry: { findMany: jest.fn(async () => []) },
+  // WRE (merge decision A): open 194R TDS credits — none here.
+  tdsCredit: { findMany: jest.fn(async () => []) },
 };
 
 function parseSheet(buffer: Buffer, idx = 0) {

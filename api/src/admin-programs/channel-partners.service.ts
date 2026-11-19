@@ -72,7 +72,8 @@ export class ChannelPartnersService {
       where: { id, clientId: user.clientId, isParent: false },
       include: {
         user: { select: { id: true, name: true, phone: true, email: true, status: true } },
-        wallets: true,
+        // Audit B5: the Wallet Reversal Engine's bookkeeping columns stay out of this response (shaped as in 7ba69566).
+        wallets: { omit: { debtPoints: true, movementSeq: true, backfillStatus: true, backfillBlockedReason: true, backfillCheckedAt: true } },
         outlets: true,
         kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1 },
       },

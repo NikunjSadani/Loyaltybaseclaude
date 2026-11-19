@@ -15,7 +15,7 @@ import SessionExpiryGuard from '@/components/auth/SessionExpiryGuard';
 import ClientMediumHeader from '@/components/pwa/ClientMediumHeader';
 import StaleDeploymentGuard from '@/components/StaleDeploymentGuard';
 import PermissionDeniedToast from '@/components/rbac/permission-denied-toast';
-import type { PwaScope } from '@/lib/pwa/manifest';
+import { pwaAppName, type PwaScope } from '@/lib/pwa/manifest';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -113,7 +113,11 @@ export default async function RootLayout({
         <InstallPrompt tenantSlug={config.slug} />
         {/* PWA push opt-in — Bajaj auto-asks at login (gesture-required browsers fall back
             to the in-app Enable prompt); other tenants gate on NEXT_PUBLIC_PWA_PUSH_ENABLED. */}
-        <PushSubscriptionManager tenantSlug={config.slug} />
+        {/* appName = the installed app's name (used only in the Bajaj reminder's phone-Settings steps). */}
+        <PushSubscriptionManager
+          tenantSlug={config.slug}
+          appName={pwaScope ? pwaAppName(config, pwaScope) : config.branding.displayName}
+        />
         {/* PWA install telemetry — Bajaj or NEXT_PUBLIC_PWA_INSTALL_ENABLED; no UI. */}
         <InstallBeacon tenantSlug={config.slug} />
       </body>

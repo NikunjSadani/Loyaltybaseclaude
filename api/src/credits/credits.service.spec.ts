@@ -58,6 +58,8 @@ const mockWalletService = {
   ),
   // Interim POINTS-reversal gate (no debt, exact credit on the receiving wallet); default: allowed.
   assertPointsReversalAllowed: jest.fn(),
+  // Wallet Reversal Engine fix round A (M1/L4): confirmBatch reads the mode once, leniently, inside its tx.
+  movementEngineMode: jest.fn(async () => ({ mode: 'LEGACY' as const })),
 };
 
 // ─── Mock Prisma TX ───────────────────────────────────────────────────────────
@@ -96,6 +98,9 @@ const mockTx = {
   // Visibility-payout TDS read + write targets (atomic with the download / confirm).
   tdsDeductionEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   tdsRecoveryEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  // Policy round B: no TDS credits on these fixtures → every path behaves exactly as before.
+  tdsCredit: { findMany: jest.fn().mockResolvedValue([]) },
+  tdsCreditApplication: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn() },
   autoInvoice: { updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   // 194R whole-year true-up: the SHARED base read (tds-194r.shared collect194RBases) runs on the tx.
   creditField: { findMany: jest.fn().mockResolvedValue([]) },
@@ -103,6 +108,8 @@ const mockTx = {
   tdsOffPlatformEntry: { findMany: jest.fn().mockResolvedValue([]) },
   // FIX-8 advisory lock — pg_advisory_xact_lock(hashtextextended(...)).
   $executeRaw: jest.fn().mockResolvedValue(0),
+  // WP5: engine PAYOUT allocations — none on a LEGACY tenant (approve/reject + download race check read them).
+  payoutReversalAllocation: { findMany: jest.fn().mockResolvedValue([]) },
 };
 
 const mockPrisma = {
@@ -124,6 +131,8 @@ const mockPrisma = {
   autoInvoice: { findMany: jest.fn() },
   // D9: the imported-payouts countFrom read (only for a download carrying 194R entries).
   programSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+  // WP5: listReversals attaches engine PAYOUT allocations — none on a LEGACY tenant.
+  payoutReversalAllocation: { findMany: jest.fn().mockResolvedValue([]) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
@@ -155,6 +164,10 @@ const mockTenantSettings = {
   getEffectiveSettings: jest.fn(async () => ({ creditsPayouts: mockCreditsPayouts })),
   // Per-tenant TDS policy resolved once at confirm + frozen onto each entry (W0-B).
   resolveTdsPolicy: jest.fn(async () => ({ section: 'SEC_194C', methodology: 'GROSS_UP' })),
+  // Reversal engine flag (absent row → LEGACY): every test here exercises today's (LEGACY) behaviour.
+  getReversalEngineModeUncached: jest.fn(async () => 'LEGACY' as const),
+  // Policy round A Q5: POINTS reversal approvals pause switch (absent row → not paused).
+  getPointsReversalPauseUncached: jest.fn(async () => ({ paused: false, since: null, by: null, reason: null })),
 };
 
 // Stream B: SERVICE invoice-at-confirm + gross-up TDS invoice-at-download are delegated here.
@@ -555,6 +568,8 @@ describe('CreditsService', () => {
           description: 'May bonus',
           // Identifies the EXACT credit for a later per-(batch, outlet, field) reversal.
           metadata: { fieldId: 'f1', outletCode: 'O1' },
+          // WP4: the tenant's reversal-engine mode, resolved once per batch (LEGACY = default).
+          reversalEngineMode: 'LEGACY',
         },
         mockTx,   // same tx — atomicity guaranteed
       );
@@ -1533,15 +1548,61 @@ describe('CreditsService', () => {
         expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
       });
 
-      it('race: the entry was PAID meanwhile → recorded as a receivable, not REVERSED, no offset', async () => {
+      it('race: a 194R entry was PAID meanwhile → recorded as a receivable, not REVERSED, no offset', async () => {
         mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
-        mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ ...failedWithStamp, tdsSection: 'SEC_194R' }]);
         mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
         mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'PAID', amountPaise: 2_000_000n, tdsDeductedPaise: 40_000n });
         const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
         expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
         // Receivable = the NET actually released (₹20,000 − ₹400 TDS withheld), not the gross.
         expect(res.clawbackShortfall).toBe(1_960_000);
+      });
+
+      it('final item 5 (Deoleo path, locking only): PDLOCK|client|period BEFORE the selection and row locks; the TDS keys come from the re-read under the row lock', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue({ ...payoutRev(2_000_000), period: '2026-05' });
+        const pendingNoStamp = { ...failedWithStamp, status: 'PENDING', tdsDeductedPaise: 0n, tdsSection: 'SEC_194R' };
+        mockTx.creditPayoutEntry.findMany
+          .mockResolvedValueOnce([pendingNoStamp]) // the selection read (before the row lock): nothing withheld yet
+          .mockResolvedValueOnce([{ id: 'pe1', status: 'PENDING', tdsDeductedPaise: 40_000n }]); // the re-read under the lock
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([
+          { creditPayoutEntryId: 'pe1', panNumber: 'PAN1', section: 'SEC_194R', fyLabel: '2026-27', tdsDeductedThisPaise: 40_000n },
+        ]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        const keys = lockKeysTaken();
+        expect(keys).toContain('PDLOCK|deoleo|2026-05');
+        expect(keys).toContain('R194|deoleo|2026-27'); // only the re-read showed the withholding
+        // order: PDLOCK advisory → entry row lock → R194 advisory
+        const seq: string[] = [];
+        const ex = mockTx.$executeRaw.mock.invocationCallOrder;
+        const qr = mockTx.$queryRaw.mock.invocationCallOrder;
+        mockTx.$executeRaw.mock.calls.forEach((c: unknown[], i: number) => {
+          const v = c[1];
+          const ks = Array.isArray(v) ? (v as string[]) : [];
+          if (ks.some((k) => k.startsWith('PDLOCK|'))) seq.push(`${ex[i]}:PDLOCK`);
+          if (ks.some((k) => k.startsWith('R194|'))) seq.push(`${ex[i]}:R194`);
+        });
+        mockTx.$queryRaw.mock.calls.forEach((c: unknown[], i: number) => {
+          if ((c[0] as string[]).join('?').includes('FROM credit_payout_entries') && (c[0] as string[]).join('?').includes('FOR UPDATE')) seq.push(`${qr[i]}:ROWS`);
+        });
+        const ordered = seq.sort((a, b) => Number(a.split(':')[0]) - Number(b.split(':')[0])).map((s) => s.split(':')[1]);
+        expect(ordered).toEqual(['PDLOCK', 'ROWS', 'R194']);
+        // identical outputs: the entry is reversed and its (re-read) withholding offset once
+        expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1);
+      });
+
+      it('re-audit A3: a 194C entry PAID meanwhile (the retry re-read) is refused with the owner D1 message — nothing written', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(payoutRev(2_000_000));
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([failedWithStamp]); // SEC_194C, FAILED at selection
+        mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
+        mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'PAID', amountPaise: 2_000_000n, tdsDeductedPaise: 40_000n });
+        await expect(service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 })).rejects.toThrow(
+          /^194C payouts can't be reversed once paid .*Reject this reversal request; settle with the retailer off-platform\.$/,
+        );
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+        // the chosen entries were row-locked (ascending id) after the advisory locks — the download takes no batch lock
+        const lockSql = mockTx.$queryRaw.mock.calls.map((c: unknown[]) => (c[0] as string[]).join('?')).find((q: string) => q.includes('FROM credit_payout_entries'));
+        expect(lockSql).toMatch(/ORDER BY id FOR UPDATE/);
       });
 
       it('race: FAILED→(re-read) still FAILED with the stamp cleared by a concurrent UTR apply → reversed once, NO offset', async () => {
@@ -4101,7 +4162,20 @@ describe('CreditsService', () => {
         expect(lockKeysTaken()).toContain(`R194|deoleo|${runFy}`);
       });
 
-      it('A-L4: reversing a fully withheld 194C entry takes its 194C PAN lock (from the original ledger row)', async () => {
+      it('A-L4: reversing a fully withheld 194R entry takes the R194 client+FY lock of its original ledger row', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue({
+          id: 'r1', status: 'PENDING_GIFSY', requestedPaise: 500000n, awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+        });
+        mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 500000 }] });
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'pe1', status: 'PAID', outletId: 'O1', amountPaise: 500000n, tdsDeductedPaise: 500000n, tdsSection: 'SEC_194R', period: '2026-05' },
+        ]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'pe1', panNumber: 'PAN1', section: 'SEC_194R', fyLabel: '2026-27', tdsDeductedThisPaise: 500000n }]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 500000 });
+        expect(lockKeysTaken()).toContain('R194|deoleo|2026-27');
+      });
+
+      it('owner D1 (2026-11-19, every tenant): a PAID 194C entry can not be reversed — refused before any lock or write', async () => {
         mockPrisma.creditReversal.findFirst.mockResolvedValue({
           id: 'r1', status: 'PENDING_GIFSY', requestedPaise: 500000n, awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1', batchId: 'b1',
         });
@@ -4109,9 +4183,11 @@ describe('CreditsService', () => {
         mockTx.creditPayoutEntry.findMany.mockResolvedValue([
           { id: 'pe1', status: 'PAID', outletId: 'O1', amountPaise: 500000n, tdsDeductedPaise: 500000n, tdsSection: 'SEC_194C', period: '2026-05' },
         ]);
-        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'pe1', panNumber: 'PAN1', section: 'SEC_194C', fyLabel: '2026-27', tdsDeductedThisPaise: 500000n }]);
-        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 500000 });
-        expect(lockKeysTaken()).toContain('PAN|PAN1|2026-27');
+        await expect(service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 500000 })).rejects.toThrow(
+          /^194C payouts can't be reversed once paid/,
+        );
+        expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
       });
 
       it('A-L1: the partner scope is ONE exact match on the normalised PAN (PAN_NORMALISE_SQL) for this client (no per-PAN ILIKE OR)', async () => {
@@ -4340,6 +4416,43 @@ describe('CreditsService', () => {
       expect(rev.fyLabel).toBe('2026-27'); // FY of period 2026-05
       expect(rev.creditPayoutEntryId).toBe('e1');
       expect(rev.tdsDeductedThisPaise).toBe(-50000n);
+    });
+
+    it('policy round B: a FAILED payout gives back the TDS credit it used (released once, called out in the result)', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: 5000000n }],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{
+        id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 5000000n,
+        tdsDeductedPaise: 0n, tdsSection: 'SEC_194C', period: '2026-05', // the credit covered the whole TDS
+      }]);
+      // B6: the UTR upload first reads the credit's key (select tdsCredit) to lock it, then releases the application.
+      mockTx.tdsCreditApplication.findMany
+        .mockResolvedValueOnce([{ tdsCredit: { section: 'SEC_194R', panNumber: 'PAN1', fyLabel: '2026-27' } }])
+        .mockResolvedValueOnce([{ id: 'a1', tdsCreditId: 'c1', payoutEntryId: 'e1', amountPaise: 40000n, clientId: 'deoleo' }]);
+      mockTx.tdsCreditApplication.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.$executeRaw.mockResolvedValue(1);
+      const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', '', 'Failure', 'bounced']];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Payout');
+      const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+
+      const res = (await service.uploadUtr(gifsy, 'd1', file, true)) as Record<string, any>;
+
+      expect(mockTx.tdsCreditApplication.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { payoutEntryId: { in: ['e1'] }, releasedAt: null } }),
+      );
+      expect(mockTx.tdsCreditApplication.updateMany).toHaveBeenCalledWith({
+        where: { id: 'a1', releasedAt: null },
+        data: { releasedAt: expect.any(Date), releaseReason: 'PAYOUT_FAILED' },
+      });
+      expect(lockKeysTaken()).toContain('R194|deoleo|2026-27'); // B6 — although e1 carries no withholding
+      expect(res.tdsCreditReleased).toEqual([
+        { entryId: 'e1', amountPaise: 40000, note: expect.stringMatching(/^₹400.00 TDS credit returned to the PAN.s credit balance — this payout failed/) },
+      ]);
     });
 
     // ── Non-success capture: failureReason + attemptedAt + uploaded UTR ──────────────────────────

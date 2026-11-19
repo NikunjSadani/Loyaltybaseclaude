@@ -41,6 +41,7 @@ import { InternalServerErrorException } from '@nestjs/common';
 import type { Prisma, TdsMethodology } from '@prisma/client';
 import {
   effectiveEntrySection,
+  financialYear,
   fyFromLabel,
   grossUpTdsPaise,
   IMPORTED_INCENTIVE_PAYOUT_FIELD_ID,
@@ -266,6 +267,26 @@ export interface Collect194RArgs {
   scope?: { outletCodes: string[]; partnerIds: string[]; pans: string[]; keys?: string[] };
   /** DISPLAY-ONLY sink: deductee key → contributing outlet code (export columns). */
   noteOutlet?: (key: string, outletCode: string) => void;
+  /**
+   * Wallet Reversal Engine D1 (owner 2026-11-16, kept by the 2026-11-19 merge decision A): a PAID payout that a V2
+   * reversal took off the base (`tdsBaseReversedAt` set) is NOT counted — the income was reversed. It is reported
+   * here instead (same key / bucket it would have counted under), for the report's call-outs, the engine's hand-back
+   * explanation and the reversal credit cap. Only V2 reversals set the marker → every other tenant is unchanged.
+   */
+  reversedSink?: (key: string, item: Reversed194RItem) => void;
+}
+
+/** A payout taken off the 194R base by a V2 reversal (D1). */
+export interface Reversed194RItem {
+  entryId: string;
+  hasPan: boolean;
+  bucket: 'visPaise' | 'cashPaise';
+  amountPaise: bigint;
+  reversedAt: Date;
+  period: string;
+  outletCode: string;
+  /** The partner paid (bank-file snapshot) — the retailer whose current key decides "PAN changed". */
+  payeePartnerId?: string | null;
 }
 
 /**
@@ -273,7 +294,7 @@ export interface Collect194RArgs {
  * vis / cash / nonCash. The single source of "what counts" for the engine AND the report.
  */
 export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Promise<Map<string, Bases194R>> {
-  const { clientId, fyLabel, importedCountFrom, scope, noteOutlet } = args;
+  const { clientId, fyLabel, importedCountFrom, scope, noteOutlet, reversedSink } = args;
   const { start, endExclusive } = fyFromLabel(fyLabel);
   const out = new Map<string, Bases194R>();
   const add = (key: string, hasPan: boolean, bucket: keyof Omit<Bases194R, 'hasPan'>, amount: bigint): void => {
@@ -294,7 +315,10 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
   const outletFilter = scope
     ? { OR: [{ payeePan: { in: scopeKeys } }, { payeePan: null, outletId: { in: scope.outletCodes } }] }
     : {};
-  const sel = { id: true, clientId: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, payeePan: true } as const;
+  const sel = {
+    id: true, clientId: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, payeePan: true,
+    period: true, tdsBaseReversedAt: true, status: true, payeePartnerId: true,
+  } as const;
 
   // ── Source 1: payouts. OWNER FY RULE (2026-11-18): a payout that went through a bank file belongs to
   // the FY the BANK FILE was made (download.downloadedAt) — PAID or PROCESSING alike; the UTR /
@@ -338,8 +362,32 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
           select: sel,
         })
       : [];
+  // Re-audit A2: a PAID payout FULLY withheld as TDS that a V2 reversal turned REVERSED (owner D2 — the TDS stays
+  // deposited) is no longer PAID, so the two reads above miss it. It must still REPORT (reversedSink): the row keeps its
+  // reversal flag, "below threshold after reversal", the M2 revise-return warning and the engine's hand-back priorDue.
+  // Never counted in the base (it carries the marker → the loop below sends it to the sink). Only V2 sets the marker.
+  const reversedRetained = reversedSink
+    ? await db.creditPayoutEntry.findMany({
+        where: {
+          clientId,
+          status: 'REVERSED',
+          tdsBaseReversedAt: { not: null },
+          OR: [
+            { download: { downloadedAt: { gte: start, lt: endExclusive } } },
+            { downloadId: null, paidAt: { gte: start, lt: endExclusive } },
+          ],
+          batch: { OR: [{ sourceKind: null }, { sourceKind: { not: 'VENDOR_IMPORT' } }] },
+          ...(scope ? { AND: [outletFilter] } : {}),
+        },
+        select: sel,
+      })
+    : [];
   const byId = new Map<string, (typeof banked)[number]>();
   for (const e of [...banked, ...paidNoFile, ...imported]) if (!byId.has(e.id)) byId.set(e.id, e);
+  // (a REVERSED row without the marker can never count — guarded in JS too)
+  for (const e of reversedRetained ?? []) {
+    if (e.tdsBaseReversedAt && String(e.status) === 'REVERSED' && !byId.has(e.id)) byId.set(e.id, e);
+  }
   const entries = [...byId.values()].filter(
     (e) => (!e.clientId || e.clientId === clientId) && effectiveEntrySection(e.tdsSection, visIds.has(e.fieldId)) === 'SEC_194R',
   );
@@ -361,7 +409,16 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
     const { key, hasPan } = e.payeePan
       ? { key: e.payeePan, hasPan: !isNoPanKey(e.payeePan) }
       : keyOf(pan, partnerId ? noPanPartnerKey(partnerId) : noPanOutletKey(clientId, e.outletId));
-    add(key, hasPan, visIds.has(e.fieldId) ? 'visPaise' : 'cashPaise', e.amountPaise);
+    const bucket = visIds.has(e.fieldId) ? 'visPaise' : 'cashPaise';
+    if (e.tdsBaseReversedAt) {
+      // D1: reversed by the engine → off the base; said instead of counted.
+      reversedSink?.(key, {
+        entryId: e.id, hasPan, bucket, amountPaise: e.amountPaise, reversedAt: new Date(e.tdsBaseReversedAt),
+        period: e.period, outletCode: e.outletId, payeePartnerId: e.payeePartnerId ?? null,
+      });
+      continue;
+    }
+    add(key, hasPan, bucket, e.amountPaise);
     noteOutlet?.(key, e.outletId);
   }
 
@@ -428,6 +485,167 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
     }
   }
   return out;
+}
+
+/**
+ * Wallet Reversal Engine (merge decision A, 2026-11-19) — OPEN 194R TDS credits (amount − applied > 0) of ONE client
+ * for ONE FY, keyed by the retailer key the credit was raised on (the ledger row's own PAN / no-PAN key). A credit is
+ * TDS already in the ledger (`deducted194RByRetailer`) that belongs to reversed income: the report's excess and the
+ * engine's credit explanation subtract it. Credits are strictly per client (194R: the client is the deductor).
+ */
+export async function openCredits194RByRetailer(
+  db: Tds194RDb,
+  a: { clientId: string; fyLabel: string; scope?: { keys: string[] } },
+): Promise<Map<string, bigint>> {
+  const rows = await db.tdsCredit.findMany({
+    where: {
+      clientId: a.clientId,
+      section: 'SEC_194R',
+      fyLabel: a.fyLabel,
+      ...(a.scope ? { panNumber: { in: a.scope.keys } } : {}),
+    },
+    select: { panNumber: true, amountPaise: true, appliedPaise: true },
+  });
+  const out = new Map<string, bigint>();
+  for (const r of rows ?? []) {
+    const open = r.amountPaise - r.appliedPaise;
+    if (open <= 0n || !r.panNumber?.trim()) continue;
+    const key = retailerKeyOfLedgerPan(r.panNumber);
+    out.set(key, (out.get(key) ?? 0n) + open);
+  }
+  return out;
+}
+
+/**
+ * Re-audit A1 (2026-11-19) — the open 194R TDS credits of one client for one FY, split into USABLE and UNUSABLE by the
+ * SAME three conditions under which the payout run draws a credit (credits.service plan194RDeductions loads credits
+ * for the run date's FY and the run's CURRENT payee keys only, and only runs on DEDUCT):
+ *   (a) the credit's FY is the current (open) FY;  (b) the client's current method is DEDUCT;
+ *   (c) the credit's key equals the key this retailer's future payouts use (its source payout's outlet owner today).
+ * The 194R report subtracts only the usable part from "deducted so far" before the excess test; the unusable part
+ * stays counted as excess (owner rule: flag only) and is called out on the row.
+ */
+export interface OpenCredits194R {
+  usable: bigint;
+  unusable: bigint;
+  reasons: string[];
+}
+export async function openCredits194RUsability(
+  db: Tds194RDb,
+  a: { clientId: string; fyLabel: string; methodology: string; now?: Date },
+): Promise<Map<string, OpenCredits194R>> {
+  const rows = await db.tdsCredit.findMany({
+    where: { clientId: a.clientId, section: 'SEC_194R', fyLabel: a.fyLabel },
+    select: { panNumber: true, amountPaise: true, appliedPaise: true, sourcePayoutEntryId: true },
+  });
+  const open = (rows ?? []).filter((r) => r.amountPaise - r.appliedPaise > 0n && r.panNumber?.trim());
+  const out = new Map<string, OpenCredits194R>();
+  if (open.length === 0) return out;
+  const currentFy = financialYear(a.now ?? new Date()).fyLabel;
+  // (c) the retailer the credit belongs to = the payee recorded on its source payout (payeePartnerId snapshot).
+  const src = await db.creditPayoutEntry.findMany({
+    where: { id: { in: open.map((r) => r.sourcePayoutEntryId) } },
+    select: { id: true, payeePartnerId: true },
+  });
+  const payeeOf = new Map((src ?? []).map((e) => [e.id, e.payeePartnerId ?? null]));
+  const keys = open.map((r) => retailerKeyOfLedgerPan(r.panNumber));
+  const nowKeys = await currentRetailerKeys(
+    db,
+    a.clientId,
+    open.map((r, i) => ({ key: keys[i], payeePartnerId: payeeOf.get(r.sourcePayoutEntryId) ?? null })),
+  );
+  open.forEach((r, i) => {
+    const key = keys[i];
+    const reason = creditUnusableReason(
+      { fyLabel: a.fyLabel, key },
+      { currentFy, methodology: a.methodology, currentKey: nowKeys[i] },
+    );
+    const b = out.get(key) ?? { usable: 0n, unusable: 0n, reasons: [] };
+    const amt = r.amountPaise - r.appliedPaise;
+    if (reason) {
+      b.unusable += amt;
+      if (!b.reasons.includes(UNUSABLE_REASON_TEXT[reason])) b.reasons.push(UNUSABLE_REASON_TEXT[reason]);
+    } else {
+      b.usable += amt;
+    }
+    out.set(key, b);
+  });
+  return out;
+}
+
+/** Why a 194R TDS credit (or an automatic ledger hand-back) can not be used — null when it can. */
+export type CreditUnusableReason = 'FY_CLOSED' | 'GROSS_UP' | 'PAN_CHANGED';
+export const UNUSABLE_REASON_TEXT: Record<CreditUnusableReason, string> = {
+  FY_CLOSED: 'later-year reversal / FY closed',
+  GROSS_UP: 'method changed to gross-up',
+  PAN_CHANGED: 'PAN changed',
+};
+
+/**
+ * Final dual-audit (2026-11-19) — the ONE usability rule, shared by credit creation (recordReceivableTds), the hand-back
+ * call-out, the 194R report and the TDS credits register. The payout run draws a credit / nets a ledger surplus only
+ * for (a) the run date's FY, (b) a client on DEDUCT, (c) the retailer's CURRENT payee key — so:
+ */
+export function creditUnusableReason(
+  c: { fyLabel: string; key: string },
+  ctx: { currentFy: string; methodology: string | null | undefined; currentKey: string | null },
+): CreditUnusableReason | null {
+  if (c.fyLabel !== ctx.currentFy) return 'FY_CLOSED';
+  if (ctx.methodology != null && ctx.methodology !== 'DEDUCT') return 'GROSS_UP';
+  if (ctx.currentKey !== retailerKeyOfLedgerPan(c.key)) return 'PAN_CHANGED';
+  return null;
+}
+
+/**
+ * Final dual-audit item 4 — the key the payout run would use TODAY for the RETAILER a ledger key belongs to (not the
+ * source outlet's current owner): the retailer is the partner paid (the payout's `payeePartnerId` snapshot, when known),
+ * else the partner behind a no-PAN owner key, else the client's partner(s) holding that PAN. Its current key is
+ * `payeeKeyFor` of that partner (its PAN today, else its no-PAN key). A PAN no partner of the client holds any more →
+ * null (changed). An owner-less outlet key resolves through the outlet's owner today.
+ */
+export async function currentRetailerKeys(
+  db: Tds194RDb,
+  clientId: string,
+  items: Array<{ key: string; payeePartnerId?: string | null }>,
+): Promise<Array<string | null>> {
+  const OUTLET = `${NO_PAN_KEY}:outlet:${clientId}:`;
+  const partnerIdOf = (it: { key: string; payeePartnerId?: string | null }): string | null => {
+    const k = retailerKeyOfLedgerPan(it.key);
+    if (it.payeePartnerId) return it.payeePartnerId;
+    if (isNoPanKey(k) && !k.startsWith(`${NO_PAN_KEY}:outlet:`) && k.startsWith(`${NO_PAN_KEY}:`)) return k.slice(NO_PAN_KEY.length + 1);
+    return null;
+  };
+  const ids = [...new Set(items.map(partnerIdOf).filter((x): x is string => !!x))];
+  const partners = ids.length
+    ? await db.channelPartner.findMany({ where: { id: { in: ids } }, select: { id: true, panNumber: true } })
+    : [];
+  const byId = new Map((partners ?? []).map((p) => [p.id, p]));
+  const outletCodes = items.map((it) => retailerKeyOfLedgerPan(it.key)).filter((k) => k.startsWith(OUTLET)).map((k) => k.slice(OUTLET.length));
+  const outlets = outletCodes.length
+    ? await db.outlet.findMany({
+        where: { clientId, outletCode: { in: [...new Set(outletCodes)] } },
+        select: { outletCode: true, partner: { select: { id: true, panNumber: true } } },
+      })
+    : [];
+  const ownerOf = new Map((outlets ?? []).map((o) => [o.outletCode, o.partner ?? null]));
+  const needPanHolders = items.some((it) => !partnerIdOf(it) && !isNoPanKey(retailerKeyOfLedgerPan(it.key)));
+  const holders = needPanHolders
+    ? await db.channelPartner.findMany({ where: { clientId }, select: { id: true, panNumber: true } })
+    : [];
+  const heldPans = new Set((holders ?? []).filter((p) => !isNoPanCell(p.panNumber)).map((p) => normalisePan(p.panNumber!)));
+  return items.map((it) => {
+    const k = retailerKeyOfLedgerPan(it.key);
+    const pid = partnerIdOf(it);
+    if (pid) {
+      const p = byId.get(pid);
+      return p ? payeeKeyFor(clientId, null, p) : null;
+    }
+    if (k.startsWith(OUTLET)) {
+      const code = k.slice(OUTLET.length);
+      return payeeKeyFor(clientId, code, ownerOf.get(code) ?? null);
+    }
+    return heldPans.has(k) ? k : null;
+  });
 }
 
 /**
