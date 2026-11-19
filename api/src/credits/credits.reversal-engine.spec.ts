@@ -205,6 +205,9 @@ function world(opts: WorldOpts = {}) {
         T.allocations.push(row);
         return { ...row };
       },
+      // listReversals → withPointsOutcomes: `creditReversalId: { in: [...] }`
+      findMany: async ({ where }: any = {}) =>
+        T.allocations.filter((a) => (where?.creditReversalId?.in ?? []).includes(a.creditReversalId)).map((a) => ({ ...a })),
     },
     auditLog: {
       create: async ({ data }: any) => {
@@ -235,6 +238,7 @@ function world(opts: WorldOpts = {}) {
       },
       updateMany: updateMany(T.reversals),
       update: update(T.reversals, 'creditReversal'),
+      count: async () => T.reversals.length,
     },
     creditField: { findMany: async () => [] },
     creditPayoutEntry: { createMany: async ({ data }: any) => ({ count: data.length }) },
@@ -307,7 +311,7 @@ function world(opts: WorldOpts = {}) {
   const gifsy: JwtPayload = { sub: 'gifsy-admin', role: 'GIFSY_ADMIN', clientId: TENANT, phone: '', name: '' } as JwtPayload;
 
   const api = {
-    T, counts, wallet, credits, models,
+    T, counts, wallet, credits, models, gifsy,
     resetCounts() {
       counts.tx = {};
       counts.out = {};
@@ -397,18 +401,42 @@ async function legacyScenario(mode: ReversalEngineMode | null) {
   out.errors.push(await errorOf(h.create('B1', 'O3', 200)));
   out.confirm2 = await h.confirm('B2', [{ outlet: 'O4', amount: 500 }]);
   out.errors.push(await errorOf(h.create('B2', 'O4', 100)));
+  // The POINTS outcome summary (owner 2026-11-19, every tenant) is DISPLAY ONLY and newer than the golden: it is taken
+  // out of the responses here and asserted on its own, so the golden still proves every write + every other response
+  // field byte-identical to the pre-WP4 code.
+  const outcomes: Record<string, unknown> = {};
+  for (const k of ['approve1', 'approve2', 'reject3']) {
+    const o = out[k] as Row | undefined;
+    if (o && 'pointsOutcome' in o) {
+      outcomes[k] = o.pointsOutcome;
+      delete o.pointsOutcome;
+    }
+  }
   const { settings, settingReads, rawSql, ...tables } = h.T;
-  return { h, snapshot: normalise({ out, tables }) };
+  return { h, snapshot: normalise({ out, tables }), outcomes };
 }
 
 const GOLDEN = path.join(__dirname, '__fixtures__', 'legacy-reversal-golden.json');
 
 describe('WP4 — LEGACY (default for every tenant) is byte-identical to the pre-WP4 code', () => {
   it('golden snapshot of a full legacy reversal history (generated on the pre-WP4 commit 1aa5084e)', async () => {
-    const { snapshot } = await legacyScenario(null);
+    const { snapshot, outcomes } = await legacyScenario(null);
     if (process.env.WP4_WRITE_GOLDEN) fs.writeFileSync(process.env.WP4_WRITE_GOLDEN, JSON.stringify(snapshot, null, 2));
     const golden = JSON.parse(fs.readFileSync(GOLDEN, 'utf8'));
     expect(snapshot).toEqual(golden);
+    // LEGACY keeps its own rule (floor 0, the rest written off) — and the summary says exactly that, never "debt"
+    expect(outcomes).toEqual({
+      approve1: expect.objectContaining({
+        reversed: 500, recovered: 100, debtRestored: 0, owed: 0, shortfall: 400,
+        headline:
+          'Approved · 500 pts reversed · 100 taken from the wallet · 400 not recovered — already spent, written off (settle off-platform)',
+      }),
+      approve2: expect.objectContaining({
+        reversed: 120, recovered: 120, owed: 0, shortfall: 0,
+        headline: 'Partially approved (300 pts requested) · 120 pts reversed · 120 taken from the wallet',
+      }),
+      reject3: expect.objectContaining({ reversed: 0, headline: 'Rejected · nothing was reversed — the wallet is unchanged' }),
+    });
   });
 
   it('an explicit LEGACY row behaves exactly like an absent row', async () => {
@@ -474,7 +502,7 @@ async function driveV2(open: number, prefix: ModelEvent[], finals: ModelEvent[],
 }
 
 async function allOrdersV2(open: number, prefix: ModelEvent[], finals: ModelEvent[]) {
-  const results: { B: number; D: number; sf: number }[] = [];
+  const results: { B: number; D: number; sf: number; owed: number }[] = [];
   for (const order of permutations(finals.map((_, i) => i))) {
     const events = [...openingEvents(open), ...prefix, ...order.map((i) => finals[i])];
     const oracle = run(events);
@@ -498,6 +526,17 @@ async function allOrdersV2(open: number, prefix: ModelEvent[], finals: ModelEven
       expect(allocs.reduce((s, a) => s + a.shortfall, 0)).toBe(oracleRev[k].shortfall);
       expect(allocs.reduce((s, a) => s + a.debtRestored, 0)).toBe(oracleRev[k].debtRestored);
       expect(allocs.reduce((s, a) => s + a.recovered, 0)).toBe(oracleRev[k].recovered);
+      // owner 2026-11-19: what the wallet no longer held is owed (debt) — flagged as such, never written off
+      expect(allocs.reduce((s, a) => s + (a.owed ?? 0), 0)).toBe(oracleRev[k].owed);
+      for (const a of allocs) expect(a.overReversalDebt ?? false).toBe((a.owed ?? 0) > 0);
+      // the approver's plain-words summary carries the same split
+      expect(r.pointsOutcome).toMatchObject({
+        reversed: oracleRev[k].pointsRequested,
+        recovered: oracleRev[k].recovered,
+        debtRestored: oracleRev[k].debtRestored,
+        owed: oracleRev[k].owed,
+        shortfall: 0,
+      });
     });
     // passbook chain exact
     const rows = [...h.T.walletTxns].filter((t) => t.walletId === 'w1').sort((a, b) => a.seq - b.seq);
@@ -510,27 +549,28 @@ async function allOrdersV2(open: number, prefix: ModelEvent[], finals: ModelEven
       B: oracle.model.state.B,
       D: oracle.model.state.D,
       sf: oracle.movements.filter((m) => m.kind === 'REVERSAL').reduce((s, m) => s + m.shortfall, 0),
+      owed: oracle.movements.filter((m) => m.kind === 'REVERSAL').reduce((s, m) => s + m.owed, 0),
     });
   }
   return results;
 }
 
 describe('WP4 — V2 create/approve through the credits endpoints ≡ WP0 oracle (every approval order)', () => {
-  it('T-a: 0, f1 +500, redeem 500, f2 +300; reverse f1, f2 → B 0, Σsf 500 (= today)', async () => {
+  it('T-a: 0, f1 +500, redeem 500, f2 +300; reverse f1, f2 → B −500, D 500, Σowed 500, nothing written off (owner 2026-11-19)', async () => {
     for (const x of await allOrdersV2(0, [cr('f1', 500), sp(500), cr('f2', 300)], [rv('f1', 500), rv('f2', 300)])) {
-      expect(x).toEqual({ B: 0, D: 0, sf: 500 });
+      expect(x).toEqual({ B: -500, D: 500, sf: 0, owed: 500 });
     }
   });
 
   it('T-b: −841, f1 +500, f2 +300; reverse both → B −841, shortfall 0 (R1 — LEGACY refuses this wallet, Q14)', async () => {
     for (const x of await allOrdersV2(-841, [cr('f1', 500), cr('f2', 300)], [rv('f1', 500), rv('f2', 300)])) {
-      expect(x).toEqual({ B: -841, D: 841, sf: 0 });
+      expect(x).toEqual({ B: -841, D: 841, sf: 0, owed: 0 });
     }
   });
 
-  it('T-c: −100, E +500, redeem 400, X +300; reverse E, X → B −100, Σsf 400', async () => {
+  it('T-c: −100, E +500, redeem 400, X +300; reverse E, X → B −500, D 500, Σowed 400', async () => {
     for (const x of await allOrdersV2(-100, [cr('E', 500), sp(400), cr('X', 300)], [rv('E', 500), rv('X', 300)])) {
-      expect(x).toMatchObject({ B: -100, sf: 400 });
+      expect(x).toEqual({ B: -500, D: 500, sf: 0, owed: 400 });
     }
   });
 
@@ -542,17 +582,61 @@ describe('WP4 — V2 create/approve through the credits endpoints ≡ WP0 oracle
     }
   });
 
-  it('T-R2*: −100, X +100, Z +200, redeem 200, Y +200; reverse X, Y, Z (3! orders) → B −100 (Q1)', async () => {
+  it('T-R2*: −100, X +100, Z +200, redeem 200, Y +200; reverse X, Y, Z (3! orders) → B −300, Z\'s spent 200 owed (Q1 + owner 2026-11-19)', async () => {
     for (const x of await allOrdersV2(
       -100, [cr('X', 100), cr('Z', 200), sp(200), cr('Y', 200)], [rv('X', 100), rv('Y', 200), rv('Z', 200)],
     )) {
-      expect(x.B).toBe(-100);
+      expect(x).toEqual({ B: -300, D: 300, sf: 0, owed: 200 });
     }
   });
 
   it('T-g: partial reversals of one credit — approved in sequence, identical B across orders', async () => {
     const res = await allOrdersV2(-300, [cr('X', 400), sp(50), cr('Y', 200), rv('X', 150)], [rv('X', 250), rv('Y', 120)]);
     expect(new Set(res.map((x) => JSON.stringify(x))).size).toBe(1);
+  });
+});
+
+describe('owner decision 2026-11-19 — V2 over-reversal becomes debt, said in plain words (approve response + reversal list)', () => {
+  it('reverse 10,000 from a wallet holding 7,014: balance −2,986, debt 2,986, nothing written off; summary in the approve response and the list', async () => {
+    const h = world({ mode: 'V2', outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1')] });
+    await h.confirm('B1', [{ outlet: 'O1', amount: 10000 }]);
+    await h.redeem('cp1', 2986);
+    const r = await h.create('B1', 'O1', 10000);
+    const done = (await h.approve(r.id)) as Row;
+    expect(done).toMatchObject({ status: 'APPROVED', clawbackShortfall: 0 });
+    expect(Number(done.shortfallPaise ?? 0n)).toBe(0); // nothing written off → nothing "pending" in the report
+    expect(h.w('cp1')).toMatchObject({ redeemablePoints: -2986, debtPoints: 2986 });
+    expect(h.T.allocations).toEqual([
+      expect.objectContaining({ creditReversalId: r.id, requested: 10000, debtRestored: 0, recovered: 7014, owed: 2986, overReversalDebt: true, shortfall: 0 }),
+    ]);
+    expect(done.pointsOutcome).toMatchObject({ reversed: 10000, recovered: 7014, debtRestored: 0, owed: 2986, shortfall: 0 });
+    expect(done.pointsOutcome.headline).toBe(
+      'Approved · 10,000 pts reversed · 7,014 taken from the wallet · 2,986 recorded as debt, repaid from future earnings',
+    );
+    // the reversal list carries the same summary (from the stored allocation rows)
+    const list = await h.credits.listReversals(h.gifsy, {} as any);
+    const row = list.reversals.find((x: Row) => x.id === r.id) as Row;
+    expect(row.pointsOutcome.summary).toBe(
+      '10,000 pts reversed · 7,014 taken from the wallet · 2,986 recorded as debt, repaid from future earnings',
+    );
+    // redemption is refused while the wallet is in debt
+    await expect(h.redeem('cp1', 1)).rejects.toThrow();
+    // the next credit repays the debt first
+    await h.confirm('B2', [{ outlet: 'O1', amount: 5000 }]);
+    expect(h.w('cp1')).toMatchObject({ redeemablePoints: 2014, debtPoints: 0 });
+  });
+
+  it('a V2 reversal the wallet fully covers says only what was taken; a pending / rejected one carries no approved summary in the list', async () => {
+    const h = world({ mode: 'V2', outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1')] });
+    await h.confirm('B1', [{ outlet: 'O1', amount: 500 }, { outlet: 'O1', field: 'G', amount: 300 }]);
+    const r = await h.create('B1', 'O1', 200);
+    const done = (await h.approve(r.id)) as Row;
+    expect(done.pointsOutcome.headline).toBe('Approved · 200 pts reversed · 200 taken from the wallet');
+    const r2 = await h.create('B1', 'O1', 100, 'G');
+    const rej = (await h.reject(r2.id)) as Row;
+    expect(rej.pointsOutcome.headline).toBe('Rejected · nothing was reversed — the wallet is unchanged');
+    const list = await h.credits.listReversals(h.gifsy, {} as any);
+    expect((list.reversals.find((x: Row) => x.id === r2.id) as Row).pointsOutcome).toBeUndefined();
   });
 });
 
@@ -738,7 +822,7 @@ describe('WP4 — SHADOW: LEGACY decides and applies; the v2 result is recorded 
     return { h, r, res };
   };
 
-  it('balances, passbook, reversal row: identical to LEGACY; create + approve diffs written (no diff here)', async () => {
+  it('balances, passbook, reversal row: identical to LEGACY; create + approve diffs written (approve differs: V2 would book the spent 350 as debt — owner 2026-11-19)', async () => {
     const legacy = await run2('LEGACY');
     const shadow = await run2('SHADOW');
     // SHADOW wallets are tracked from their first credit (pristine wallet) — compare the LEGACY-visible fields
@@ -754,14 +838,19 @@ describe('WP4 — SHADOW: LEGACY decides and applies; the v2 result is recorded 
     expect(legacy.h.T.auditLogs).toHaveLength(0);
     expect(shadow.h.T.auditLogs.map((a) => [a.action, a.entityType, a.entityId, a.metadata.differs])).toEqual([
       ['CREATE', 'REVERSAL_ENGINE_SHADOW', shadow.r.id, false],
-      ['UPDATE', 'REVERSAL_ENGINE_SHADOW', shadow.r.id, false],
+      ['UPDATE', 'REVERSAL_ENGINE_SHADOW', shadow.r.id, true],
     ]);
     expect(shadow.h.T.auditLogs[0].metadata).toMatchObject({
       phase: 'CREATE', legacy: { credited: 500, headroom: 500 }, v2: { credited: 500, headroom: 500, pending: 0 },
     });
     expect(shadow.h.T.auditLogs[1].metadata).toMatchObject({
-      requested: 450, legacy: { removed: 100, shortfall: 350 }, v2: { removed: 100, shortfall: 350 },
+      requested: 450, legacy: { removed: 100, shortfall: 350 }, v2: { removed: 450, owed: 350, shortfall: 0 },
     });
+    // the SHADOW approver's summary follows what was APPLIED (LEGACY): written off, never "debt"
+    expect((shadow.res as Row).pointsOutcome).toMatchObject({ recovered: 100, owed: 0, shortfall: 350 });
+    expect((shadow.res as Row).pointsOutcome.headline).toBe(
+      'Partially approved (500 pts requested) · 450 pts reversed · 100 taken from the wallet · 350 not recovered — already spent, written off (settle off-platform)',
+    );
   });
 
   it('a v2 refusal (UNRESOLVED credit of this line, Q5/Q3) is recorded as a diff at create and approve; LEGACY still runs', async () => {

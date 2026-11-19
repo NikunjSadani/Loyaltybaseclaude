@@ -448,7 +448,7 @@ export class PrismaBackfillStore implements BackfillStore {
       }),
       this.prisma.creditReversalAllocation.findMany({
         where: { position: { walletId: { in: ids } } },
-        select: { positionId: true, creditReversalId: true, requested: true, recovered: true, owed: true },
+        select: { positionId: true, creditReversalId: true, requested: true, recovered: true, owed: true, overReversalDebt: true },
       }),
       this.prisma.payoutReversalAllocation.findMany({
         where: { creditReversal: { clientId } },

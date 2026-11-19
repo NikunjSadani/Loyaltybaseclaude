@@ -3888,6 +3888,8 @@ model WalletCreditPosition {
 
 /// One per (POINTS CreditReversal × position) — §1.2: requested r = debtRestored p + recovered c + owed + shortfall
 /// (SQL CHECK; all ≥ 0, requested > 0). Unique per (reversal, position) → an approval can't double-apply.
+/// V2 engine since owner decision 2026-11-19: owed = r − p − c (booked as debt), shortfall 0. LEGACY on a sequenced
+/// wallet: owed 0, shortfall = r − c (floor 0, written off — unchanged).
 model CreditReversalAllocation {
   id               String   @id @default(cuid())
   creditReversalId String
@@ -3895,10 +3897,15 @@ model CreditReversalAllocation {
   requested        Int // r
   debtRestored     Int // p = min(r, O_X)
   recovered        Int // c = min(r − p, H) — points actually taken from what the wallet HELD
-  // owed: a HISTORICAL clawback (backfill, Q13/Q4) that debited more than the wallet held — the excess was booked as
-  // debt ("recovered X, owed Y"), never counted as recovered. Always 0 for engine (v2) reversals.
+  // owed: points a reversal took beyond what the wallet held, booked as wallet DEBT (repaid from future earnings) —
+  // never counted as recovered, never written off. Two sources, told apart by `overReversalDebt`:
+  //  - false: a HISTORICAL clawback the WP6 backfill classified (Q13/Q4, "recovered X, owed Y" — attention banner);
+  //  - true:  a live V2 over-reversal (owner decision 2026-11-19: s = r − p − c becomes debt, nothing written off).
   owed             Int      @default(0)
-  shortfall        Int // r − p − c − owed (points already spent — R4)
+  // true ⇔ `owed` was booked by a live V2 over-reversal (owner 2026-11-19). Every row written before that rule has
+  // false — correct, because no engine row had owed > 0 before it.
+  overReversalDebt Boolean  @default(false)
+  shortfall        Int // r − p − c − owed (written off: LEGACY floor-0 clawbacks / historical; always 0 for V2)
   createdAt        DateTime @default(now())
 
   creditReversal CreditReversal       @relation(fields: [creditReversalId], references: [id], onDelete: Restrict)

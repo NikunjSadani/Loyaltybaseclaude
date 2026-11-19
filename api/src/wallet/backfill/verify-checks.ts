@@ -54,8 +54,10 @@ export interface VAllocation {
   creditReversalId: string;
   requested: number;
   recovered?: number;
-  /** Q4: historical clawback beyond holdings, booked as debt */
+  /** points taken beyond holdings, booked as debt — Q4 historical clawback, or a V2 over-reversal (see below) */
   owed?: number;
+  /** true ⇔ `owed` is a live V2 over-reversal's debt (owner decision 2026-11-19), not a historical clawback */
+  overReversalDebt?: boolean;
 }
 
 export interface VPayoutAllocation {
@@ -552,14 +554,16 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
   const allocSum = new Map<string, number>();
   for (const a of snap.allocations) allocSum.set(a.positionId, (allocSum.get(a.positionId) ?? 0) + a.requested);
   const v8 = snap.positions.filter((p) => p.reversedPoints !== (allocSum.get(p.id) ?? 0) || p.reversedPoints > p.amount).map((p) => p.id);
-  const owed = snap.allocations.reduce((s, a) => s + (a.owed ?? 0), 0);
+  const owed = snap.allocations.reduce((s, a) => s + (a.overReversalDebt ? 0 : a.owed ?? 0), 0);
+  const debtOwed = snap.allocations.reduce((s, a) => s + (a.overReversalDebt ? a.owed ?? 0 : 0), 0);
   const recovered = snap.allocations.reduce((s, a) => s + (a.recovered ?? 0), 0);
   out.push(
     result(
       'V8 reversedPoints = Σ allocations ≤ amount',
       c,
       v8,
-      `${snap.allocations.length} allocation(s) reconcile; recovered ${recovered}, owed ${owed}${owed > 0 ? ' (historical clawbacks beyond holdings, booked as debt — not recovered)' : ''}`,
+      `${snap.allocations.length} allocation(s) reconcile; recovered ${recovered}, owed ${owed}${owed > 0 ? ' (historical clawbacks beyond holdings, booked as debt — not recovered)' : ''}` +
+        (debtOwed > 0 ? `; ${debtOwed} booked as debt by V2 over-reversals (repaid from future earnings — not recovered, not written off)` : ''),
       'position(s) mismatch',
     ),
   );

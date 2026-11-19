@@ -128,6 +128,9 @@ export interface PlannedReversalStep {
   pointsDelta: number;
   debtRestored: number;
   recovered: number;
+  /** s = r − p − c: the part the wallet no longer held — booked as debt (owner decision 2026-11-19) */
+  owed: number;
+  /** always 0 (WP0 reverse() never writes anything off since 2026-11-19) */
   shortfall: number;
   newOffset: number;
   newReversed: number;
@@ -155,7 +158,8 @@ function stateModel(s: WalletState, positions: Record<string, CreditPosition> = 
 /**
  * §6 planner (pure): split a POINTS reversal of r over the credit positions of one (batch, outlet, field),
  * oldest credit first; each step is WP0 reverse() on that position's wallet state (p = min(r_i, O), c = min(r_i − p,
- * H), shortfall = r_i − p − c). `states` is updated in place so two positions on one wallet chain correctly.
+ * H), owed s = r_i − p − c booked as debt — owner decision 2026-11-19; B −= r_i, D += p + s). `states` is updated in
+ * place so two positions on one wallet chain correctly.
  * Throws BadRequest when r exceeds Σ(amount − reversed) (R5 cap).
  */
 export function planV2Reversal(
@@ -198,6 +202,7 @@ export function planV2Reversal(
       pointsDelta: step.movement.pointsDelta,
       debtRestored: step.movement.debtRestored,
       recovered: step.movement.recovered,
+      owed: step.movement.owed,
       shortfall: step.movement.shortfall,
       newOffset: step.model.positions[pos.id].offset,
       newReversed: step.model.positions[pos.id].reversed,
@@ -220,6 +225,11 @@ export function byCreditOrder(a: ReversalPositionRow, b: ReversalPositionRow): n
   const t = a.creditTx.createdAt.getTime() - b.creditTx.createdAt.getTime();
   if (t !== 0) return t;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** LEGACY floor-0 clawback split for the outcome summary: taken from the wallet = r − shortfall; nothing becomes debt. */
+function legacySplit(points: number, shortfall: number) {
+  return { shortfall, recovered: points - shortfall, debtRestored: 0, owed: 0 };
 }
 
 /** A legacy-era wallet read shows history (any balance / counter ≠ 0) → it can never be pristine again. */
@@ -1793,6 +1803,9 @@ export class WalletService {
    * floor-0 clawback did (B-neutral — the balance was already moved by applyMovement). The per-position split is
    * WP0 reverse() run in sequence (the caller guarantees D = 0 and every O_X = 0, where it reduces to exactly the
    * legacy floor: Σc = min(r, max(0, B))); a mismatch aborts the transaction rather than record a wrong split.
+   * Only the plan's split (c) and the positions' ρ_X are used — never its state: LEGACY floors at 0, so the part WP0
+   * books as debt (owed, V2 rule since 2026-11-19) is recorded here as the LEGACY write-off (shortfall = r − c, owed 0),
+   * exactly as before that rule.
    * The caller (clawbackAward) has already REFUSED a clawback the positions can't fully cover (M3, fix round A), so
    * every point of it is allocated here — nothing is skipped or logged-only.
    */
@@ -1831,7 +1844,8 @@ export class WalletService {
           requested: st.requested,
           debtRestored: 0,
           recovered: st.recovered,
-          shortfall: st.shortfall,
+          // LEGACY floor 0: what the wallet no longer held is written off (never debt) — the pre-2026-11-19 value.
+          shortfall: st.requested - st.recovered,
         },
       });
     }
@@ -2060,9 +2074,11 @@ export class WalletService {
    * §6 — apply a POINTS reversal with the v2 engine. The CALLER holds the credit_batches row lock and has flipped
    * the CreditReversal PENDING_GIFSY → APPROVED/PARTIAL (guarded — never twice). For each position of the
    * (batch, outlet, field), oldest credit first: r_i = min(remaining, a − ρ); WP0 reverse() gives p (debt restored),
-   * c (recovered from holdings) and the shortfall; the RECEIVING wallet (Q4 — never the outlet's current partner)
-   * is debited p + c; c is drawn from the credit's OWN lot first, then FIFO (Q7); O_X −= p, ρ_X += r_i; one
-   * CreditReversalAllocation per position (unique (reversal, position) → idempotent).
+   * c (recovered from holdings) and s = r_i − p − c (owed); the RECEIVING wallet (Q4 — never the outlet's current
+   * partner) is debited the WHOLE r_i and its debt grows by p + s (owner decision 2026-11-19: an over-reversal becomes
+   * debt, repaid from future earnings — nothing is written off); c is drawn from the credit's OWN lot first, then FIFO
+   * (Q7); O_X −= p, ρ_X += r_i; one CreditReversalAllocation per position (owed = s, overReversalDebt = s > 0,
+   * shortfall 0; unique (reversal, position) → idempotent).
    */
   async applyCreditReversal(
     tx: Prisma.TransactionClient,
@@ -2071,6 +2087,7 @@ export class WalletService {
     shortfall: number;
     recovered: number;
     debtRestored: number;
+    owed: number;
     steps: PlannedReversalStep[];
     transactionIds: string[];
   }> {
@@ -2079,9 +2096,10 @@ export class WalletService {
     const plan = planV2Reversal(positions, states, a.points);
     const transactionIds: string[] = [];
     for (const st of plan) {
-      const removed = st.debtRestored + st.recovered;
-      let desc = a.description ?? `Clawback: credit batch POINTS reversal`;
-      if (st.shortfall > 0) desc += ` [SHORTFALL: ${st.shortfall} pts already redeemed — owner review required]`;
+      const removed = st.debtRestored + st.recovered + st.owed;
+      if (st.shortfall !== 0) throw new Error('applyCreditReversal: WP0 wrote points off (owner 2026-11-19: never)');
+      // Passbook text: no debt wording (Q8 — partners see their balance, not debt); the admin outcome summary says it.
+      const desc = a.description ?? `Clawback: credit batch POINTS reversal`;
       const written = await this.writeTrackedMovement(tx, {
         walletId: st.position.walletId,
         before: st.before,
@@ -2114,15 +2132,20 @@ export class WalletService {
           requested: st.requested,
           debtRestored: st.debtRestored,
           recovered: st.recovered,
-          shortfall: st.shortfall,
+          owed: st.owed,
+          overReversalDebt: st.owed > 0,
+          shortfall: 0,
         },
       });
-      if (removed !== -st.pointsDelta) throw new Error('applyCreditReversal: p + c ≠ −pointsDelta');
+      if (removed !== st.requested || removed !== -st.pointsDelta) {
+        throw new Error('applyCreditReversal: p + c + owed ≠ r ≠ −pointsDelta');
+      }
     }
     return {
-      shortfall: plan.reduce((s, st) => s + st.shortfall, 0),
+      shortfall: 0,
       recovered: plan.reduce((s, st) => s + st.recovered, 0),
       debtRestored: plan.reduce((s, st) => s + st.debtRestored, 0),
+      owed: plan.reduce((s, st) => s + st.owed, 0),
       steps: plan,
       transactionIds,
     };
@@ -2131,10 +2154,12 @@ export class WalletService {
   /**
    * Per-tenant dispatcher for an APPROVED credit-batch POINTS reversal (flag `reversalEngine`, default LEGACY):
    *  - LEGACY: exactly today's path — assertPointsReversalAllowed (outlet's current partner, exact credit, Q14
-   *    debt refusal) then the floor-0 clawbackAward.
+   *    debt refusal) then the floor-0 clawbackAward (what the wallet no longer holds is written off as shortfall).
    *  - SHADOW: LEGACY is applied; the v2 plan is computed beforehand from the same locked state and the diff is
    *    written to audit_logs (entityType REVERSAL_ENGINE_SHADOW). A v2 refusal is recorded, never raised.
-   *  - V2: applyCreditReversal.
+   *  - V2: applyCreditReversal (what the wallet no longer holds becomes debt — owner decision 2026-11-19).
+   * Returns the split for the approver's outcome summary: recovered (taken from the wallet), debtRestored (debt the
+   * credit had repaid, back on the wallet), owed (V2: booked as new debt), shortfall (LEGACY / SHADOW: written off).
    * The caller holds the credit_batches lock and has flipped the CreditReversal status (guarded).
    * `mode` / `legacyTarget`: already resolved by the caller in this transaction (credits approve resolves the
    * mode once per request and, for LEGACY/SHADOW, runs assertPointsReversalAllowed before the flip) — passed
@@ -2151,14 +2176,28 @@ export class WalletService {
       mode?: ReversalEngineMode;
       legacyTarget?: { partnerId: string; walletId: string } | null;
     },
-  ): Promise<{ mode: ReversalEngineMode; shortfall: number; walletIds: string[] }> {
+  ): Promise<{
+    mode: ReversalEngineMode;
+    shortfall: number;
+    recovered: number;
+    debtRestored: number;
+    owed: number;
+    walletIds: string[];
+  }> {
     // Read through the caller's tx (it holds the credit_batches lock — never a second pool connection meanwhile).
     const mode = a.mode ?? (await this.tenantSettings.getReversalEngineModeUncached(a.clientId, tx));
     const description = a.description ?? `Clawback for reversal ${a.creditReversalId} — batch POINTS reversal`;
 
     if (mode === 'V2') {
       const res = await this.applyCreditReversal(tx, { ...a, description });
-      return { mode, shortfall: res.shortfall, walletIds: [...new Set(res.steps.map((s) => s.position.walletId))] };
+      return {
+        mode,
+        shortfall: res.shortfall,
+        recovered: res.recovered,
+        debtRestored: res.debtRestored,
+        owed: res.owed,
+        walletIds: [...new Set(res.steps.map((s) => s.position.walletId))],
+      };
     }
 
     const legacy = async (target: { partnerId: string; walletId: string }) => {
@@ -2181,7 +2220,7 @@ export class WalletService {
     const target = a.legacyTarget ?? (await this.assertPointsReversalAllowed(tx, a));
     if (mode === 'LEGACY') {
       const cb = await legacy(target);
-      return { mode, shortfall: cb.shortfall, walletIds: [target.walletId] };
+      return { mode, ...legacySplit(a.points, cb.shortfall), walletIds: [target.walletId] };
     }
 
     // SHADOW — compute v2 first (read-only plan on the locked state), then apply LEGACY, then record the diff.
@@ -2199,12 +2238,15 @@ export class WalletService {
           requested: st.requested,
           debtRestored: st.debtRestored,
           recovered: st.recovered,
+          owed: st.owed,
           shortfall: st.shortfall,
           balanceBefore: st.before.B,
           balanceAfter: st.after.B,
         })),
         shortfall: plan.reduce((s, st) => s + st.shortfall, 0),
-        removed: plan.reduce((s, st) => s + st.debtRestored + st.recovered, 0),
+        // V2 books what the wallet no longer holds as debt (owner 2026-11-19): `removed` is the whole balance change
+        owed: plan.reduce((s, st) => s + st.owed, 0),
+        removed: plan.reduce((s, st) => s + st.debtRestored + st.recovered + st.owed, 0),
       };
     } catch (e) {
       if (!(e instanceof BadRequestException || e instanceof ConflictException)) throw e;
@@ -2247,7 +2289,7 @@ export class WalletService {
         } as Prisma.InputJsonValue,
       },
     });
-    return { mode, shortfall: cb.shortfall, walletIds: [target.walletId] };
+    return { mode, ...legacySplit(a.points, cb.shortfall), walletIds: [target.walletId] };
   }
 
   /**
@@ -2621,7 +2663,9 @@ export class WalletService {
    *  - `wallets`: BLOCKED by the backfill (reason), and — on a SHADOW / V2 tenant — wallets with history the backfill
    *    has not processed yet (both keep today's earn/redeem rules; reversals on them are refused — Q1);
    *  - `unmappedCredits`: UNRESOLVED credit positions (reversals of their outlet line refused until mapped — Q3/Q5);
-   *  - `owedClawbacks`: historical clawbacks that took more than the wallet held — "recovered X, owed Y" (Q4).
+   *  - `owedClawbacks`: historical clawbacks that took more than the wallet held — "recovered X, owed Y" (Q4). A live V2
+   *    over-reversal's debt (owner 2026-11-19, `overReversalDebt`) is the engine's normal outcome — said in the
+   *    approver's outcome summary and the reversal report — not a Gifsy attention item, so it is not listed here.
    * Lists are capped at `limit` (default 200); the totals are exact.
    */
   async reversalAttention(clientId: string, opts: { limit?: number } = {}) {
@@ -2710,7 +2754,11 @@ export class WalletService {
         take: limit,
       }),
     ]);
-    const owedWhere: Prisma.CreditReversalAllocationWhereInput = { owed: { gt: 0 }, creditReversal: { clientId } };
+    const owedWhere: Prisma.CreditReversalAllocationWhereInput = {
+      owed: { gt: 0 },
+      overReversalDebt: false,
+      creditReversal: { clientId },
+    };
     const [owedTotal, owed] = await Promise.all([
       this.prisma.creditReversalAllocation.count({ where: owedWhere }),
       this.prisma.creditReversalAllocation.findMany({

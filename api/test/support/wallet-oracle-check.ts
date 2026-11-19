@@ -2,7 +2,7 @@
  * Replays a wallet's COMMITTED v2 history (wallet_transactions in seq order) through the WP0 oracle
  * (api/src/wallet/reversal-model.ts) and compares every figure the engine persisted with what the oracle derives:
  * per-row pointsDelta / balanceAfter, final B / D / movementSeq, every position's O_X / ρ_X, every credit lot's
- * remaining, every reversal allocation's (p, c, shortfall) — WALLET-REVERSAL-ENGINE-DESIGN.md §13 WP7 / §15.
+ * remaining, every reversal allocation's (p, c, owed, shortfall) — WALLET-REVERSAL-ENGINE-DESIGN.md §13 WP7 / §15.
  *
  * Whatever order the race produced, the committed seq order is a serial history; the engine is correct iff that
  * history, replayed through the oracle, lands exactly on the stored state.
@@ -137,11 +137,12 @@ export async function replayWalletThroughOracle(
           alloc.requested !== mv.pointsRequested ||
           alloc.debtRestored !== mv.debtRestored ||
           alloc.recovered !== mv.recovered ||
+          alloc.owed !== mv.owed ||
           alloc.shortfall !== mv.shortfall
         ) {
           mismatches.push(
-            `allocation ${alloc.id}: db (r ${alloc.requested}, p ${alloc.debtRestored}, c ${alloc.recovered}, sf ${alloc.shortfall}) ` +
-              `oracle (r ${mv.pointsRequested}, p ${mv.debtRestored}, c ${mv.recovered}, sf ${mv.shortfall})`,
+            `allocation ${alloc.id}: db (r ${alloc.requested}, p ${alloc.debtRestored}, c ${alloc.recovered}, owed ${alloc.owed}, sf ${alloc.shortfall}) ` +
+              `oracle (r ${mv.pointsRequested}, p ${mv.debtRestored}, c ${mv.recovered}, owed ${mv.owed}, sf ${mv.shortfall})`,
           );
         }
       }

@@ -93,7 +93,9 @@ describe('GET reversal-engine/attention (WalletService.reversalAttention)', () =
     // tenant-scoped queries only (never another tenant's wallets)
     for (const a of calls['wallet.count']) expect(a.where.partner).toEqual({ clientId: 'bajaj' });
     expect(calls['pos.count'][0].where).toEqual({ attribution: 'UNRESOLVED', wallet: { partner: { clientId: 'bajaj' } } });
-    expect(calls['alloc.count'][0].where).toEqual({ owed: { gt: 0 }, creditReversal: { clientId: 'bajaj' } });
+    // owner 2026-11-19: a live V2 over-reversal's debt is the engine's normal outcome, not an attention item —
+    // only HISTORICAL clawbacks (overReversalDebt false) are listed
+    expect(calls['alloc.count'][0].where).toEqual({ owed: { gt: 0 }, overReversalDebt: false, creditReversal: { clientId: 'bajaj' } });
   });
 
   it('LEGACY tenant: un-backfilled wallets are the normal state → not listed (only BLOCKED ones)', async () => {

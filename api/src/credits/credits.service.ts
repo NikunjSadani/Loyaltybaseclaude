@@ -38,6 +38,12 @@ function boundedList(items: string[], max = 20): string {
 
 // The (client, FY) 194R advisory-lock key — shared with the reversal engine's TDS-credit code.
 import { r194LockKey } from './r194-lock';
+import {
+  pointsOutcome,
+  PointsReversalSplit,
+  rejectedPointsOutcome,
+  storedPointsSplit,
+} from './points-reversal-outcome';
 import { assertNoPaid194C, isPaid194C, visibilityFieldIdsOf } from './reversal-194c';
 
 /**
@@ -4055,9 +4061,37 @@ export class CreditsService {
     ]);
 
     return {
-      reversals: await this.withPayoutAllocations(reversals),
+      reversals: await this.withPointsOutcomes(await this.withPayoutAllocations(reversals)),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
+  }
+
+  /**
+   * Attach `pointsOutcome` (plain words — display only) to every APPROVED / PARTIAL POINTS reversal: what was taken from
+   * the wallet, what became debt (V2, owner 2026-11-19) and what was written off (LEGACY floor 0 / approvals before that
+   * rule — kept as recorded). From the allocation rows when they cover the approved amount, else approvedPaise /
+   * shortfallPaise (storedPointsSplit). One query for the page; other reversals come back unchanged.
+   */
+  private async withPointsOutcomes<
+    T extends { id: string; awardType: string; status: string; approvedPaise: bigint | null; shortfallPaise: bigint | null; requestedPaise: bigint },
+  >(reversals: T[]) {
+    const approved = reversals.filter((r) => r.awardType === 'POINTS' && (r.status === 'APPROVED' || r.status === 'PARTIAL'));
+    if (approved.length === 0) return reversals;
+    const rows = await this.prisma.creditReversalAllocation.findMany({
+      where: { creditReversalId: { in: approved.map((r) => r.id) } },
+      select: { creditReversalId: true, requested: true, debtRestored: true, recovered: true, owed: true, shortfall: true },
+    });
+    const by = new Map<string, typeof rows>();
+    for (const a of rows ?? []) by.set(a.creditReversalId, [...(by.get(a.creditReversalId) ?? []), a]);
+    const ids = new Set(approved.map((r) => r.id));
+    return reversals.map((r) =>
+      ids.has(r.id)
+        ? {
+            ...r,
+            pointsOutcome: pointsOutcome(storedPointsSplit(r, by.get(r.id) ?? []), { requested: Number(r.requestedPaise) }),
+          }
+        : r,
+    );
   }
 
   /**
@@ -4311,11 +4345,14 @@ export class CreditsService {
 
       // ── POINTS reversal → wallet clawback (#16 reversal) ─────────────────
       let clawbackShortfall = 0;
+      // What the POINTS reversal did, for the approver's plain-words summary (display only).
+      let pointsSplit: PointsReversalSplit | null = null;
       if (
         (pointsEngine === 'V2' && (finalApprovedPaise ?? 0n) > 0n) ||
         (pointsEngine === 'SHADOW' && pointsTarget)
       ) {
-        // WP4: V2 → the position engine (receiving wallet(s), allocations, own-lot-first, debt restored);
+        // WP4: V2 → the position engine (receiving wallet(s), allocations, own-lot-first, debt restored; owner decision
+        // 2026-11-19: what the wallet no longer holds becomes debt — shortfall 0, nothing written off);
         // SHADOW → LEGACY applied on pointsTarget (already gated above) + the v2 diff written to audit_logs.
         const res = await this.walletService.reverseCreditBatchPoints(tx, {
           ...pointsKey,
@@ -4328,6 +4365,13 @@ export class CreditsService {
           legacyTarget: pointsTarget,
         });
         clawbackShortfall = res.shortfall;
+        pointsSplit = {
+          reversed: Number(finalApprovedPaise ?? 0n),
+          recovered: res.recovered,
+          debtRestored: res.debtRestored,
+          owed: res.owed,
+          shortfall: res.shortfall,
+        };
       } else if (pointsTarget) {
         // LEGACY (default): today's floor-0 clawback on the outlet's current partner's wallet — unchanged.
         // approvedPaise field holds approved whole points for POINTS-type reversals.
@@ -4347,6 +4391,8 @@ export class CreditsService {
           tx,
         );
         clawbackShortfall = cb.shortfall;
+        const reversedPts = Number(finalApprovedPaise ?? 0n);
+        pointsSplit = { reversed: reversedPts, recovered: reversedPts - cb.shortfall, debtRestored: 0, owed: 0, shortfall: cb.shortfall };
       }
 
       // ── GLM-1: PAYOUT reversal → cash clawback ────────────────────────────
@@ -4617,7 +4663,21 @@ export class CreditsService {
       }
 
       const finalReversal = await tx.creditReversal.findFirst({ where: { id } });
-      if (!legacyOutcome) return { ...finalReversal, clawbackShortfall, payoutClawbackNote };
+      if (!legacyOutcome) {
+        // POINTS (every engine — display only, built from what the path above did): "Approved · 10,000 pts reversed ·
+        // 7,014 taken from the wallet · 2,986 recorded as debt, repaid from future earnings" (V2, owner 2026-11-19) or
+        // "… · 2,986 not recovered — already spent, written off (settle off-platform)" (LEGACY floor 0).
+        const outcome =
+          reversal.awardType !== 'POINTS'
+            ? null
+            : action === ReversalAction.reject
+              ? rejectedPointsOutcome()
+              : pointsOutcome(
+                  pointsSplit ?? { reversed: Number(finalApprovedPaise ?? 0n), recovered: 0, debtRestored: 0, owed: 0, shortfall: 0 },
+                  { requested: requestedPaiseNum },
+                );
+        return { ...finalReversal, clawbackShortfall, payoutClawbackNote, ...(outcome ? { pointsOutcome: outcome } : {}) };
+      }
       // Owner decision 3: outcome summary (display only — everything above wrote exactly what it always wrote).
       if (action === ReversalAction.reject) {
         legacyOutcome.headline = 'Rejected · no payout entry was held or changed';

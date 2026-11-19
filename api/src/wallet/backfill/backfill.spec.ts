@@ -1188,6 +1188,16 @@ describe('policy Q4 — historical clawback that exceeded holdings: "recovered X
     const v8 = runVerifyChecks(await s.loadVerifySnapshot('t'), { neverNegativeTenant: false }).find((c) => c.check.startsWith('V8'))!;
     expect(v8.status).toBe('PASS');
     expect(v8.detail).toContain('recovered 100, owed 200');
+    expect(v8.detail).not.toContain('V2 over-reversals');
+
+    // owner 2026-11-19: debt booked by a live V2 over-reversal is named as such — never as a historical clawback
+    const snap = await s.loadVerifySnapshot('t');
+    snap.allocations = snap.allocations.map((a) => ({ ...a, overReversalDebt: true }));
+    const v8b = runVerifyChecks(snap, { neverNegativeTenant: false }).find((c) => c.check.startsWith('V8'))!;
+    expect(v8b.status).toBe('PASS');
+    expect(v8b.detail).toContain('recovered 100, owed 0;');
+    expect(v8b.detail).toContain('200 booked as debt by V2 over-reversals (repaid from future earnings — not recovered, not written off)');
+    expect(v8b.detail).not.toContain('historical clawbacks');
   });
 });
 
