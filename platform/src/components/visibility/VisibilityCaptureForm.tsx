@@ -239,7 +239,21 @@ export function VisibilityCaptureForm({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<string[]>([]);
   const [uploading, setUploading] = useState<Record<string, boolean>>({});
+  // A geotag photo is only stored once BOTH its upload and its GPS fix are done. The upload
+  // usually finishes first, so `uploading` alone re-enabled Submit while the photo was still
+  // unstored → a tap in that gap reported '"<photo>" is required.' (owner, 2026-11-20). Each
+  // CameraField marks itself pending across the whole capture so Submit stays blocked.
+  const [capturePending, setCapturePending] = useState<Record<string, boolean>>({});
+  const capturePendingRef = useRef<Record<string, boolean>>({});
+  const markCapturePending = useCallback((id: string, pending: boolean) => {
+    capturePendingRef.current = { ...capturePendingRef.current, [id]: pending };
+    setCapturePending((p) => ({ ...p, [id]: pending }));
+  }, []);
   const [busy, setBusy] = useState(false);
+  // Latest values, readable after an await inside handleSubmit (the closure's `values` is the
+  // snapshot from the tap; a photo stored while the submit-time GPS fix was pending would be missed).
+  const valuesRef = useRef(values);
+  valuesRef.current = values;
 
   const fields = useMemo(() => orderedFields(schema), [schema]);
 
@@ -280,9 +294,17 @@ export function VisibilityCaptureForm({
       opts?: { store?: boolean },
     ): Promise<string | null> => {
       setUploading((u) => ({ ...u, [fieldId]: true }));
-      const optimised = await imageCompression.compress(file);
-      const res = await visibilityApi.uploadSalesMedia(optimised, `${fieldId}.jpg`);
-      setUploading((u) => ({ ...u, [fieldId]: false }));
+      let res: Awaited<ReturnType<typeof visibilityApi.uploadSalesMedia>>;
+      try {
+        const optimised = await imageCompression.compress(file);
+        res = await visibilityApi.uploadSalesMedia(optimised, `${fieldId}.jpg`);
+      } catch {
+        // A throw (compression / network) must not leave Submit stuck on "Uploading photo…".
+        setSubmitError('The photo could not be uploaded — check your connection and retake it.');
+        return null;
+      } finally {
+        setUploading((u) => ({ ...u, [fieldId]: false }));
+      }
       if (res.success) {
         if (opts?.store !== false) setValue(fieldId, res.data.key);
         return res.data.key;
@@ -375,13 +397,28 @@ export function VisibilityCaptureForm({
     // 1) capture GPS at submit into every empty GPS field. Two triggers fill a single
     //    fix: a field whose own captureTrigger === 'ON_SUBMIT', and the top-level
     //    schema.captureGpsOnSubmit flag (which fills EVERY empty GPS_POINT field).
-    const working: Record<string, unknown> = { ...values };
+    let working: Record<string, unknown> = { ...values };
     const allGps = fields.filter((f) => f.type === 'GPS_POINT');
     const gpsToFill = schema.captureGpsOnSubmit
       ? allGps
       : allGps.filter((f) => (f.captureTrigger ?? 'MANUAL') === 'ON_SUBMIT');
     if (gpsToFill.length > 0) {
-      const fix = await captureGps();
+      // Submit stays disabled ("Submitting…") across the submit-time fix — no double-tap.
+      setBusy(true);
+      let fix: GpsCapture | null;
+      try {
+        fix = await captureGps();
+      } finally {
+        setBusy(false);
+      }
+      // A photo started during that wait is still mid-capture: don't validate a half-stored form.
+      if (Object.values(capturePendingRef.current).some(Boolean)) {
+        setSubmitError('A photo is still being saved — wait for it to finish, then tap Submit again.');
+        return;
+      }
+      // Re-read the form AFTER the await: anything stored meanwhile (e.g. a photo whose own
+      // fix landed during this wait) must count, not the snapshot taken at the tap.
+      working = { ...valuesRef.current };
       if (fix) {
         for (const f of gpsToFill) if (working[f.id] == null) working[f.id] = fix;
       } else if (requireLocation && gpsToFill.some((f) => working[f.id] == null)) {
@@ -429,7 +466,8 @@ export function VisibilityCaptureForm({
   // Block submit while ANY field is still uploading (L2): an optional CAMERA photo mid-
   // upload would otherwise be silently omitted from formValues by a submit that races it.
   const uploadingAny = Object.values(uploading).some(Boolean);
-  const disabled = submitting || busy || uploadingAny;
+  const locatingAny = !uploadingAny && Object.values(capturePending).some(Boolean);
+  const disabled = submitting || busy || uploadingAny || locatingAny;
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -476,6 +514,7 @@ export function VisibilityCaptureForm({
                   requireLocation={requireLocation}
                   cameraPaused={cameraPaused}
                   captureHold={captureHold}
+                  markCapturePending={markCapturePending}
                 />
               </div>
             );
@@ -496,6 +535,7 @@ export function VisibilityCaptureForm({
             requireLocation={requireLocation}
             cameraPaused={cameraPaused}
             captureHold={captureHold}
+            markCapturePending={markCapturePending}
           />
         );
       })}
@@ -516,6 +556,10 @@ export function VisibilityCaptureForm({
         ) : uploadingAny ? (
           <>
             <Loader2 className="h-4 w-4 animate-spin" /> Uploading photo…
+          </>
+        ) : locatingAny ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" /> Getting location…
           </>
         ) : partial ? (
           'Submit re-capture'
@@ -564,6 +608,8 @@ interface FieldRendererProps {
   cameraPaused?: boolean;
   /** Shutter held while the programme settings load. */
   captureHold?: boolean;
+  /** Marks a photo as mid-capture (upload + GPS fix) so the form blocks Submit until it is stored. */
+  markCapturePending?: (fieldId: string, pending: boolean) => void;
 }
 
 function FieldRenderer(props: FieldRendererProps) {
@@ -723,7 +769,7 @@ function Labeled({
 
 // ── Camera field (native rear-camera, instruction + sample thumbnail, D9/D16) ──
 
-function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, requireLocation = false, cameraPaused = false, captureHold = false, req }: FieldRendererProps & { req: boolean }) {
+function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, requireLocation = false, cameraPaused = false, captureHold = false, markCapturePending, req }: FieldRendererProps & { req: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   // Read back through readMediaValue so BOTH a legacy bare-key string and a per-photo
   // `{ key, geo }` value resolve to the same shape (full backward-compat).
@@ -768,6 +814,7 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
       // Per-photo geotag: fetch a GPS fix AT SHUTTER TIME (the moment the photo is taken),
       // concurrently with the upload. `store: false` — this caller owns the stored shape.
       setBusy(true);
+      markCapturePending?.(field.id, true);
       try {
         const [uploadedKey, fix] = await Promise.all([
           uploadFile(field.id, file, { store: false }),
@@ -797,6 +844,7 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
         setPreviewFromFile(file); // show the shot back to the rep
       } finally {
         setBusy(false);
+        markCapturePending?.(field.id, false);
       }
     } else {
       // Non-geotag CAMERA: uploadFile stores the bare key string.
@@ -962,7 +1010,7 @@ function CarriedForwardPhoto({
 
 // ── GPS field ─────────────────────────────────────────────────────────────────
 
-function GpsField({ field, values, setValue, captureGps, req }: FieldRendererProps & { req: boolean }) {
+function GpsField({ field, values, setValue, captureGps, markCapturePending, req }: FieldRendererProps & { req: boolean }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const v = values[field.id] as GpsCapture | undefined;
@@ -971,8 +1019,15 @@ function GpsField({ field, values, setValue, captureGps, req }: FieldRendererPro
   const capture = async () => {
     setLoading(true);
     setError('');
-    const fix = await captureGps();
-    setLoading(false);
+    // Same Submit block as a photo: a manual location still being fetched is not yet stored.
+    markCapturePending?.(field.id, true);
+    let fix: GpsCapture | null = null;
+    try {
+      fix = await captureGps();
+    } finally {
+      setLoading(false);
+      markCapturePending?.(field.id, false);
+    }
     if (fix) setValue(field.id, fix);
     else setError('Could not get location. Please try again.');
   };
