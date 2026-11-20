@@ -143,8 +143,25 @@ and "Last changed by X on date" (audit log) sit under Save. Phone-width: chips w
 - **Partial relay rejection**: `Msg91Service.sendEmail` now takes optional `cc` and returns `{ skipped, accepted,
   rejected }` (nodemailer resolves when ≥1 recipient is accepted and throws when all are refused). Rejected
   addresses are appended to the Gifsy-only note ("The mail relay REJECTED x — they did NOT get this email"), returned
-  as `emailRejected`, and shown with ⚠ in the Gifsy toast. Relay acceptance ≠ inbox delivery: a later bounce is not
+  as `emailRejected`, and shown with ⚠ in the Gifsy toast. If the relay refuses EVERY To address but accepts some CC,
+  the outcome is NOT sent (`emailSent: false`, `emailCcOnlyDelivered: true`, reason "NOT delivered to anyone in To;
+  copied to CC only (…)") — note and toast say exactly that. Relay acceptance ≠ inbox delivery: a later bounce is not
   visible (no DLR for SMTP email).
+- **Email copy for shared readers** (inbox / CC / CC-only): "needs remarks from <asked>", "Asked: <asked or 'your
+  team'>", "If you received this as a Cc, you're copied for information." (when CC is set), "Ask <asked> (or another
+  client admin) to reply in the portal.", button "Open ticket (portal login needed)", status "Awaiting remarks from
+  <asked>". The chosen-admin-with-no-CC email (every tenant's default) keeps its personal copy unchanged.
+- **PUT semantics**: a key that is absent leaves that list unchanged (`{ to }` alone keeps CC and vice versa); `[]`
+  clears it. A `{ cc }` that collides with the stored To → 400 (never silently removed).
+- **Console pre-check** uses `platform/src/lib/ticket-remarks-email-rule.ts`, a verbatim copy of the API's
+  `EMAIL_RE` / `INVISIBLE_RE` / `MAX_LEN`; `src/lib/__tests__/ticket-remarks-email-rule.test.ts` reads the API source and
+  fails if they drift. Pasting past a cap truncates at the cap and names what was not added; an invalid entry stays in
+  the (always editable) draft and Save is disabled with "Fix or remove the highlighted address to save."
+- **Rollback (to a build before 2026-11-21) — what is lost**: the old reader only knows `{ email }`, so (a) only the
+  FIRST To address keeps receiving; extra To addresses and the whole CC list stop receiving immediately; (b) a CC-only
+  config (To blank) is ignored → back to the chosen admin only, and the CC-only fallback (admin has no email) stops;
+  (c) the old console shows only `email`, and saving from it writes `{ email }` — the stored `to` / `cc` lists are
+  dropped for good (re-enter them after rolling forward). Nothing else (tickets, notes, audit) is affected.
 - Not shown to client admins (optional read-only display deliberately not added); the tenant settings payload
   (`GET /v1/admin/settings`) never includes the key.
 - Validation is strict printable ASCII (letters, digits, `. _ % + ' -` in the local part; dotted labels + a 2+
