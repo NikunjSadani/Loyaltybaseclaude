@@ -18,7 +18,7 @@ import { getRole, hasTeamView, type SalesRole } from '@/lib/sales-role';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { visibilityApi } from '@/lib/visibility';
-import { isChangesRequested } from '@/lib/visibility-types';
+import { isChangesRequested, CAPTURE_UI_STATE_LABELS } from '@/lib/visibility-types';
 import type { CaptureUiState, OutletStatusWindow } from '@/lib/visibility-types';
 import { hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags } from '@/lib/rekyc-fields';
 import { SignaturePad, SignatureClearButton, type SignaturePadHandle } from '@/components/signature-pad';
@@ -929,12 +929,13 @@ function ApprovalTimeline({ kyc, slug }: { kyc: KYCDetail; slug: string }) {
 /* ─── Visibility — this period (POSM) card (D13) ──────────────────────────────── */
 
 const VIS_STATE_LABEL: Record<CaptureUiState, { label: string; cls: string }> = {
-  due:      { label: 'Due',       cls: 'bg-amber-50 text-amber-700 border-amber-200' },
-  awaiting: { label: 'In review', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
-  approved: { label: 'Approved',  cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
-  rejected: { label: 'Rejected',  cls: 'bg-red-50 text-red-700 border-red-200' },
-  changes_requested: { label: 'Changes requested', cls: 'bg-orange-50 text-orange-700 border-orange-200' },
-  late:     { label: 'Overdue',   cls: 'bg-orange-50 text-orange-700 border-orange-200' },
+  // Labels = the shared plain status words (CAPTURE_UI_STATE_LABELS).
+  due:      { label: CAPTURE_UI_STATE_LABELS.due,      cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  awaiting: { label: CAPTURE_UI_STATE_LABELS.awaiting, cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+  approved: { label: CAPTURE_UI_STATE_LABELS.approved, cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  rejected: { label: CAPTURE_UI_STATE_LABELS.rejected, cls: 'bg-red-50 text-red-700 border-red-200' },
+  changes_requested: { label: CAPTURE_UI_STATE_LABELS.changes_requested, cls: 'bg-orange-50 text-orange-700 border-orange-200' },
+  late:     { label: CAPTURE_UI_STATE_LABELS.late,     cls: 'bg-orange-50 text-orange-700 border-orange-200' },
 };
 
 const VIS_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];

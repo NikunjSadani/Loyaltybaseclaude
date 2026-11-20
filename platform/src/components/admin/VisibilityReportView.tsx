@@ -16,7 +16,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, Loader2, BarChart3 } from 'lucide-react';
 import { visibilityApi } from '@/lib/visibility';
-import type { VisibilityReport } from '@/lib/visibility-types';
+import { VISIBILITY_STATUS_WORDS, visibilityStatusLabel, type VisibilityReport } from '@/lib/visibility-types';
+
+/** Coverage buckets in the shared plain status words (report `rejected` = Rejected + Needs re-take). */
+const W = {
+  approved: VISIBILITY_STATUS_WORDS.APPROVED,
+  waiting: VISIBILITY_STATUS_WORDS.SUBMITTED,
+  rejected: `${VISIBILITY_STATUS_WORDS.REJECTED} / ${VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED}`,
+};
 import { windowOptions } from '@/lib/visibility-window';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
@@ -37,6 +44,8 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
   const exportAction = useDownloadAction();
 
   const fetcher = variant === 'admin' ? visibilityApi.getReport : visibilityApi.getTenantReport;
+  // No-capture outlets read "Missed" once the window has closed, else "Not captured yet".
+  const missedWord = visibilityStatusLabel(null, { windowClosed: report?.windowClosed === true });
 
   const load = useCallback(async (windowKey?: string) => {
     setLoading(true);
@@ -111,10 +120,10 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
           {/* Coverage tiles */}
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
             <Tile label="In scope" value={report.summary.denominator} />
-            <Tile label="Captured" value={report.summary.captured} tone="green" />
-            <Tile label="Pending" value={report.summary.pending} tone="amber" />
-            <Tile label="Rejected" value={report.summary.rejected} tone="red" />
-            <Tile label="Missed" value={report.summary.missed} tone="red" />
+            <Tile label={W.approved} value={report.summary.captured} tone="green" />
+            <Tile label={W.waiting} value={report.summary.pending} tone="amber" />
+            <Tile label={W.rejected} value={report.summary.rejected} tone="red" />
+            <Tile label={missedWord} value={report.summary.missed} tone="red" />
             <Tile label="Coverage" value={`${report.summary.coveragePct}%`} tone="blue" />
           </div>
 
@@ -125,15 +134,15 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
               <p className="text-xs font-semibold text-gray-700">Coverage — {report.windowKey}</p>
             </div>
             <div className="h-3 bg-gray-100 rounded-full overflow-hidden flex">
-              <div className="h-full bg-green-500" style={{ width: `${pct(report.summary.captured, report.summary.denominator)}%` }} title={`Captured ${report.summary.captured}`} />
-              <div className="h-full bg-amber-400" style={{ width: `${pct(report.summary.pending, report.summary.denominator)}%` }} title={`Pending ${report.summary.pending}`} />
-              <div className="h-full bg-red-400" style={{ width: `${pct(report.summary.rejected, report.summary.denominator)}%` }} title={`Rejected ${report.summary.rejected}`} />
+              <div className="h-full bg-green-500" style={{ width: `${pct(report.summary.captured, report.summary.denominator)}%` }} title={`${W.approved} ${report.summary.captured}`} />
+              <div className="h-full bg-amber-400" style={{ width: `${pct(report.summary.pending, report.summary.denominator)}%` }} title={`${W.waiting} ${report.summary.pending}`} />
+              <div className="h-full bg-red-400" style={{ width: `${pct(report.summary.rejected, report.summary.denominator)}%` }} title={`${W.rejected} ${report.summary.rejected}`} />
             </div>
             <div className="flex items-center gap-4 mt-2 text-[11px] text-gray-500 flex-wrap">
-              <Legend color="bg-green-500" label={`Captured ${report.summary.captured}`} />
-              <Legend color="bg-amber-400" label={`Pending ${report.summary.pending}`} />
-              <Legend color="bg-red-400" label={`Rejected ${report.summary.rejected}`} />
-              <Legend color="bg-gray-200" label={`Missed / not started ${report.summary.missed}`} />
+              <Legend color="bg-green-500" label={`${W.approved} ${report.summary.captured}`} />
+              <Legend color="bg-amber-400" label={`${W.waiting} ${report.summary.pending}`} />
+              <Legend color="bg-red-400" label={`${W.rejected} ${report.summary.rejected}`} />
+              <Legend color="bg-gray-200" label={`${missedWord} ${report.summary.missed}`} />
             </div>
             <p className="text-[11px] text-gray-400 mt-2">
               Scope: {report.outletScope.length ? report.outletScope.join(', ') : '—'}

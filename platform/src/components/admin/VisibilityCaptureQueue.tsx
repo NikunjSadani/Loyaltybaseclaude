@@ -36,7 +36,8 @@ import type {
 import {
   VISIBILITY_REJECT_REASON_CODES,
   VISIBILITY_REJECT_REASON_LABELS,
-  VISIBILITY_CAPTURE_STATUS_LABELS,
+  visibilityStatusLabel,
+  reviewActionLabel,
   hasRejectedPhoto,
   type Pagination,
   type PhotoFenceStatus,
@@ -56,9 +57,9 @@ const STATUS_STYLES: Record<string, string> = {
   CHANGES_REQUESTED: 'bg-orange-100 text-orange-700',
 };
 
-/** Badge label for a capture status (falls back to the raw code for an unknown value). */
+/** Badge label for a capture status — the shared plain words (raw code for an unknown value). */
 function statusLabel(status: string): string {
-  return VISIBILITY_CAPTURE_STATUS_LABELS[status as VisibilityCaptureStatus] ?? status;
+  return visibilityStatusLabel(status);
 }
 
 /**
@@ -165,10 +166,9 @@ export function VisibilityCaptureQueue() {
         <FilterField label="Status">
           <select value={status} onChange={(e) => setStatus(e.target.value as VisibilityCaptureStatus | '')} className={selCls}>
             <option value="">All</option>
-            <option value="SUBMITTED">Submitted</option>
-            <option value="CHANGES_REQUESTED">Changes requested</option>
-            <option value="APPROVED">Approved</option>
-            <option value="REJECTED">Rejected</option>
+            {(['SUBMITTED', 'CHANGES_REQUESTED', 'APPROVED', 'REJECTED'] as const).map((s) => (
+              <option key={s} value={s}>{statusLabel(s)}</option>
+            ))}
           </select>
         </FilterField>
         <FilterField label="Window (YYYY-MM-Pn)"><input value={windowKey} onChange={(e) => setWindowKey(e.target.value)} className={selCls} placeholder={windowPlaceholder} aria-label="Window" /></FilterField>
@@ -472,13 +472,11 @@ function PhotoReviewControls({
       </span>
     ) : status === 'REJECTED' ? (
       <span data-testid={`photo-review-${fieldId}`} className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600">
-        <XCircle className="w-3 h-3" /> Rejected
-        {review?.reasonCode
-          ? ` · ${VISIBILITY_REJECT_REASON_LABELS[review.reasonCode as VisibilityRejectReasonCode] ?? review.reasonCode}`
-          : ''}
+        <XCircle className="w-3 h-3" /> {visibilityStatusLabel('CHANGES_REQUESTED')}
+        {review?.reasonCode ? ` · ${reasonLabel(review.reasonCode)}` : ''}
       </span>
     ) : (
-      <span data-testid={`photo-review-${fieldId}`} className="text-[11px] font-medium text-gray-500">Pending</span>
+      <span data-testid={`photo-review-${fieldId}`} className="text-[11px] font-medium text-gray-500">{visibilityStatusLabel('SUBMITTED')}</span>
     );
 
   if (!reviewable) {
@@ -783,8 +781,13 @@ function CaptureReview({
   const multiPhoto = (detail?.media?.length ?? 0) > 1;
   const reviewable = detail != null && detail.status !== 'APPROVED';
   // Extra rows above the photos → shorter photos so the decision bar still fits (item: 1366×768).
+  // Per-photo re-take remarks (Needs re-take): every photo the reviewer sent back, with its reason.
+  const retakePhotos = detail?.status === 'CHANGES_REQUESTED'
+    ? (detail.media ?? []).filter((m) => m.review?.status === 'REJECTED')
+    : [];
   const tight = (detail?.duplicateMatches.length ?? 0) > 0 ||
-    (detail?.status === 'REJECTED' && !!(detail.rejectionReason || detail.rejectionReasonCode));
+    (detail?.status === 'REJECTED' && !!(detail.rejectionReason || detail.rejectionReasonCode)) ||
+    retakePhotos.length > 0;
 
   const closeBtn = (
     <button onClick={() => { if (confirmDiscardNote()) onClose(); }} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)]" aria-label="Close">
@@ -809,9 +812,8 @@ function CaptureReview({
     );
   }
 
-  const receivedAt = detail.receivedAt
-    ? new Date(detail.receivedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
-    : null;
+  const receivedAt = detail.receivedAt ? formatIst(detail.receivedAt) : null;
+  const reviewedLine = reviewedByLine(detail);
 
   return (
     <>
@@ -848,6 +850,9 @@ function CaptureReview({
                 </span>
               )}
             </p>
+            {reviewedLine && (
+              <p className="mt-1 text-xs text-gray-700" data-testid="capture-reviewed-by">{reviewedLine}</p>
+            )}
           </div>
           {closeBtn}
         </div>
@@ -856,7 +861,23 @@ function CaptureReview({
       <div className="flex-1 overflow-y-auto px-4 sm:px-6 pt-4 space-y-5" data-testid="capture-review-scroll">
         {detail.status === 'REJECTED' && (detail.rejectionReason || detail.rejectionReasonCode) && (
           <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-600">
-            <strong>Rejected:</strong> {detail.rejectionReasonCode ? (VISIBILITY_REJECT_REASON_LABELS[detail.rejectionReasonCode as VisibilityRejectReasonCode] ?? detail.rejectionReasonCode) : ''}{detail.rejectionReason ? ` — ${detail.rejectionReason}` : ''}
+            <strong>Rejected:</strong> {detail.rejectionReasonCode ? reasonLabel(detail.rejectionReasonCode) : ''}{detail.rejectionReason ? ` — ${detail.rejectionReason}` : ''}
+          </div>
+        )}
+
+        {/* Needs re-take: the per-photo remarks (which photo, why) — previously only shown on the card. */}
+        {retakePhotos.length > 0 && (
+          <div className="bg-orange-50 border border-orange-200 rounded-lg px-3 py-2 text-xs text-orange-800" data-testid="capture-retake-remarks">
+            <strong>{visibilityStatusLabel('CHANGES_REQUESTED')}:</strong>
+            <ul className="mt-1 space-y-0.5">
+              {retakePhotos.map((m) => (
+                <li key={m.fieldId}>
+                  <span className="font-medium">{m.label}</span>
+                  {' — '}{m.review?.reasonCode ? reasonLabel(m.review.reasonCode) : 'No reason given'}
+                  {m.review?.reason ? ` — ${m.review.reason}` : ''}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -938,7 +959,33 @@ function CaptureReview({
             )}
           </Section>
 
-          {detail.submissions.length > 0 && (
+          {detail.reviewHistory && detail.reviewHistory.length > 0 ? (
+            <Section title={`Review history (${detail.reviewHistory.length})`}>
+              <ol className="space-y-2" data-testid="capture-review-history">
+                {detail.reviewHistory.map((e) => (
+                  <li key={e.id} className="flex items-start gap-2 text-xs" data-testid={`history-${e.id}`}>
+                    <History className="w-3.5 h-3.5 text-gray-400 mt-0.5 shrink-0" aria-hidden />
+                    <div className="min-w-0">
+                      <p className="text-gray-800">
+                        <span className="font-medium">{e.actorName || 'Unknown user'}</span>
+                        {' · '}{reviewActionLabel(e)}
+                        {e.fieldLabel || e.fieldId ? <> · <span className="font-medium">{e.fieldLabel || e.fieldId}</span></> : null}
+                      </p>
+                      {(e.reasonCode || e.reason) && (
+                        <p className="text-gray-600">
+                          {e.reasonCode ? reasonLabel(e.reasonCode) : ''}{e.reasonCode && e.reason ? ' — ' : ''}{e.reason ?? ''}
+                        </p>
+                      )}
+                      <p className="text-gray-500">
+                        {formatIst(e.createdAt)} · v{e.version}
+                        {e.backfilled && <span title="Rebuilt from records made before the history log existed"> · from earlier records</span>}
+                      </p>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </Section>
+          ) : detail.submissions.length > 0 && (
             <Section title={`Submission history (${detail.submissions.length})`}>
               <ul className="space-y-2">
                 {detail.submissions.map((s) => (
@@ -946,8 +993,8 @@ function CaptureReview({
                     <History className="w-3.5 h-3.5 text-gray-400 mt-0.5 shrink-0" aria-hidden />
                     <div>
                       <span className="font-medium text-gray-700">v{s.version}</span>
-                      <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(s.status)}</span>
-                      <span className="ml-2 text-gray-600">{new Date(s.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
+                      <span className="ml-2 text-gray-700">Submitted</span>
+                      <span className="ml-2 text-gray-600">{formatIst(s.createdAt)}</span>
                     </div>
                   </li>
                 ))}
@@ -1040,6 +1087,28 @@ function CaptureReview({
       )}
     </>
   );
+}
+
+/** A timestamp as date + time in IST ("20/11/2026, 3:05:10 pm IST"). */
+function formatIst(at: string | Date): string {
+  return `${new Date(at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`;
+}
+
+/** Plain label for a reject-reason code (raw code for an unknown one). */
+function reasonLabel(code: string): string {
+  return VISIBILITY_REJECT_REASON_LABELS[code as VisibilityRejectReasonCode] ?? code;
+}
+
+/**
+ * "Reviewed by <name> on <date time IST>" for the CURRENT version — from the permanent history
+ * (lastReview), else the legacy approver columns. null = not reviewed yet (the status badge
+ * already says "Waiting for review"). Never a blank name: an unknown reviewer reads "Unknown user".
+ */
+function reviewedByLine(d: VisibilityCaptureDetail): string | null {
+  if (d.lastReview) return `Reviewed by ${d.lastReview.actorName || 'Unknown user'} on ${formatIst(d.lastReview.at)}`;
+  const at = d.reviewedAt;
+  if (d.status !== 'SUBMITTED' && at) return `Reviewed by ${d.approvedBy?.name || 'Unknown user'} on ${formatIst(at)}`;
+  return null;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

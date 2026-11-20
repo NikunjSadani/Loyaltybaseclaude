@@ -115,7 +115,8 @@ describe('VIS — Sales Visibility list', () => {
     expect(await screen.findByText('Approved Store')).toBeInTheDocument();
     // Two outlets sit in the 'due' window state (o-due + the view-only o-view).
     // Scope to the badge <span>s so the status-filter <option>s of the same text don't count.
-    expect(await screen.findAllByText('Due', { selector: 'span' })).toHaveLength(2);
+    // Plain status words (owner 2026-11-20): "due" reads "Not captured yet".
+    expect(await screen.findAllByText('Not captured yet', { selector: 'span' })).toHaveLength(2);
     expect(await screen.findByText('Approved', { selector: 'span' })).toBeInTheDocument();
   });
 

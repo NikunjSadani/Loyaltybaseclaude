@@ -1,5 +1,5 @@
 import { KYCStatus } from '@/types';
-import { isChangesRequested, type SalesEligibleResponse } from '@/lib/visibility-types';
+import { isChangesRequested, VISIBILITY_STATUS_WORDS, type SalesEligibleResponse } from '@/lib/visibility-types';
 
 /**
  * Shared sales-task derivation — consumed by BOTH the sales dashboard
@@ -90,8 +90,8 @@ export function buildVisibilityTaskItems(
         id:       `vis-${o.id}`,
         title:    o.name,
         subtitle: s === 'UNDER_REVIEW'
-          ? 'Visibility submitted — awaiting approval'
-          : `${o.location} · Visibility capture pending this month`,
+          ? `Visibility · ${VISIBILITY_STATUS_WORDS.SUBMITTED}`
+          : `${o.location} · Visibility ${VISIBILITY_STATUS_WORDS.NOT_CAPTURED.toLowerCase()} this month`,
         href:     '/sales/visibility',
         priority: s === 'UNDER_REVIEW' ? 'medium' : 'high',
       };
@@ -120,13 +120,14 @@ export function buildPhotoCaptureTaskItems(
   return eligible.outlets
     .filter((o) => o.canCapture && (ACTIONABLE.has(o.windowState) || isChangesRequested(o)))
     .map((o) => {
+      // Lead word = the shared plain status words (VISIBILITY_STATUS_WORDS).
       const subtitle = isChangesRequested(o)
-        ? `Some photos flagged — recapture required${o.rejectionReason ? `: ${o.rejectionReason}` : ''}`
+        ? `${VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED} — re-take the flagged photos${o.rejectionReason ? `: ${o.rejectionReason}` : ''}`
         : o.windowState === 'rejected'
-          ? `Capture rejected — recapture required${o.rejectionReason ? `: ${o.rejectionReason}` : ''}`
+          ? `${VISIBILITY_STATUS_WORDS.REJECTED} — re-take the photos${o.rejectionReason ? `: ${o.rejectionReason}` : ''}`
           : o.windowState === 'late'
-            ? 'Visibility capture overdue for this window'
-            : 'Visibility capture due this window';
+            ? `${VISIBILITY_STATUS_WORDS.MISSED} — this period's visibility photos were not approved in time`
+            : `${VISIBILITY_STATUS_WORDS.NOT_CAPTURED} — capture visibility this period`;
       return {
         id:       `vis-${o.outletId}`,
         title:    o.outletName,

@@ -28,6 +28,7 @@ import { visibilityApi } from '@/lib/visibility';
 import {
   isResubmitCapture,
   isChangesRequested,
+  CAPTURE_UI_STATE_LABELS,
   type CaptureUiState, type SalesEligibleOutlet, type SalesEligibleResponse,
 } from '@/lib/visibility-types';
 import { useGifsySettings } from '@/lib/gifsy-settings';
@@ -39,17 +40,18 @@ const STATE_CONFIG: Record<
   CaptureUiState,
   { label: string; badge: string; icon: React.ReactNode }
 > = {
-  due:      { label: 'Due',       badge: 'bg-amber-50 text-amber-700 border-amber-200',
+  // Labels = the shared plain status words (CAPTURE_UI_STATE_LABELS) — never re-typed here.
+  due:      { label: CAPTURE_UI_STATE_LABELS.due,      badge: 'bg-amber-50 text-amber-700 border-amber-200',
              icon: <Clock className="h-3.5 w-3.5 text-amber-500" /> },
-  awaiting: { label: 'In review', badge: 'bg-blue-50 text-blue-700 border-blue-200',
+  awaiting: { label: CAPTURE_UI_STATE_LABELS.awaiting, badge: 'bg-blue-50 text-blue-700 border-blue-200',
              icon: <Eye className="h-3.5 w-3.5 text-blue-500" /> },
-  approved: { label: 'Approved',  badge: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  approved: { label: CAPTURE_UI_STATE_LABELS.approved, badge: 'bg-emerald-50 text-emerald-700 border-emerald-200',
              icon: <CheckCircle className="h-3.5 w-3.5 text-emerald-500" /> },
-  rejected: { label: 'Rejected',  badge: 'bg-red-50 text-red-700 border-red-200',
+  rejected: { label: CAPTURE_UI_STATE_LABELS.rejected, badge: 'bg-red-50 text-red-700 border-red-200',
              icon: <XCircle className="h-3.5 w-3.5 text-red-500" /> },
-  changes_requested: { label: 'Changes requested', badge: 'bg-orange-50 text-orange-700 border-orange-200',
+  changes_requested: { label: CAPTURE_UI_STATE_LABELS.changes_requested, badge: 'bg-orange-50 text-orange-700 border-orange-200',
              icon: <AlertTriangle className="h-3.5 w-3.5 text-orange-500" /> },
-  late:     { label: 'Overdue',   badge: 'bg-orange-50 text-orange-700 border-orange-200',
+  late:     { label: CAPTURE_UI_STATE_LABELS.late,     badge: 'bg-orange-50 text-orange-700 border-orange-200',
              icon: <AlertTriangle className="h-3.5 w-3.5 text-orange-500" /> },
 };
 
