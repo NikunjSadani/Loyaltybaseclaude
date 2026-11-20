@@ -9,8 +9,10 @@
  */
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { VisibilityReviewService, VISIBILITY_REJECT_REASONS } from './visibility-review.service';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { VisibilityReviewService, VISIBILITY_REJECT_REASONS, CAPTURE_CHANGED_MESSAGE } from './visibility-review.service';
+import { IMPORTED_REVIEW_ACTOR_LABEL } from './visibility-review-events';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -507,6 +509,71 @@ describe('VisibilityReviewService', () => {
       expect(res.capture.reviewHistory.map((e: { id: string }) => e.id)).toEqual(['e3', 'e2', 'e1']);
       expect(res.capture.reviewHistory[0].actorName).toBe('Later Name');
       expect(res.capture.lastReview).toMatchObject({ actorName: 'Later Name', action: 'PHOTO_REJECTED' });
+    });
+
+    // ── L2: lost-update guard + idempotent repeat approve ──────────────────────────
+    it('the write is conditional on the row as read (status + version + updatedAt)', async () => {
+      const updatedAt = new Date('2026-11-20T10:00:00.000Z');
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({ ...cap(), updatedAt });
+      await service.reviewPhoto(gifsy, 'cap1', 'front', 'APPROVED');
+      expect(mockPrisma.visibilityCapture.update.mock.calls[0][0].where).toEqual({
+        id: 'cap1', status: 'SUBMITTED', currentVersion: 2, updatedAt,
+      });
+    });
+
+    it('a review that lost the race (row changed meanwhile) → 409 "reload", and NO event is written', async () => {
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({ ...cap(), updatedAt: new Date() });
+      mockPrisma.visibilityCapture.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('No record was found for an update.', { code: 'P2025', clientVersion: 'x' }),
+      );
+      const err = await service.reject(gifsy, 'cap1', 'BLURRY').catch((e) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(err.message).toBe(CAPTURE_CHANGED_MESSAGE);
+      expect(mockPrisma.visibilityReviewEvent.createMany).not.toHaveBeenCalled();
+    });
+
+    it('approving a photo that is ALREADY approved writes nothing (no second event)', async () => {
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue(
+        cap('SUBMITTED', { front: { status: 'APPROVED', reviewedAt: '2026-11-20T09:00:00.000Z', reviewedByUserId: 'admin1' } }),
+      );
+      await service.reviewPhoto(gifsy, 'cap1', 'front', 'APPROVED');
+      expect(mockPrisma.visibilityCapture.update).not.toHaveBeenCalled();
+      expect(mockPrisma.visibilityReviewEvent.createMany).not.toHaveBeenCalled();
+    });
+
+    // ── B1: imported old-app captures never show the importing admin ───────────────
+    it('an imported capture (photo under /vendor-import/) shows the old-app label, never the admin', async () => {
+      mockPrisma.visibilityImageHash.findMany.mockResolvedValue([]);
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({
+        ...cap('APPROVED'),
+        formValues: { front: 'visibility-media/bajaj/vendor-import/prod/b/OUT1/2025-06_v1.jpg' },
+        approvedByUserId: 'admin1',
+        submissions: [], imageHashes: [], submittedBy: null, approvedBy: { id: 'admin1', name: 'Gifsy Admin' },
+      });
+      mockPrisma.visibilityReviewEvent.findMany.mockResolvedValue([
+        // Even a row that names the admin (e.g. written before the fix) is shown as the old app's approval.
+        { id: 'e1', version: 2, action: 'CAPTURE_APPROVED_ALL', statusAfter: 'APPROVED', fieldId: null, fieldLabel: null, reasonCode: null, reason: null, actorUserId: 'admin1', actorName: 'Gifsy Admin', backfilled: true, createdAt: new Date('2025-06-20T06:30:00.000Z') },
+      ]);
+      const res = await service.adminGetCapture(gifsy, 'cap1');
+      expect(res.capture.imported).toBe(true);
+      expect(res.capture.approvedBy).toBeNull();
+      expect(res.capture.approvedByUserId).toBeNull();
+      expect(res.capture.reviewHistory[0]).toMatchObject({ actorName: IMPORTED_REVIEW_ACTOR_LABEL, actorUserId: null });
+      expect(res.capture.lastReview).toMatchObject({ actorName: IMPORTED_REVIEW_ACTOR_LABEL, actorUserId: null });
+      expect(JSON.stringify(res.capture.reviewHistory)).not.toContain('Gifsy Admin');
+    });
+
+    it('same-timestamp events come back in a fixed order (result above the photo decision)', async () => {
+      mockPrisma.visibilityImageHash.findMany.mockResolvedValue([]);
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({
+        ...cap('CHANGES_REQUESTED'), submissions: [], imageHashes: [], submittedBy: null, approvedBy: null,
+      });
+      const t = new Date('2026-11-20T10:00:00.000Z');
+      const ev = (id: string, action: string) => ({ id, version: 2, action, statusAfter: 'CHANGES_REQUESTED', fieldId: null, fieldLabel: null, reasonCode: null, reason: null, actorUserId: 'admin1', actorName: 'Admin', backfilled: false, createdAt: t });
+      // DB order by random id puts the photo decision first; the API must not depend on that.
+      mockPrisma.visibilityReviewEvent.findMany.mockResolvedValue([ev('zzz', 'PHOTO_REJECTED'), ev('aaa', 'CHANGES_REQUESTED_RESULT')]);
+      const res = await service.adminGetCapture(gifsy, 'cap1');
+      expect(res.capture.reviewHistory.map((e: { action: string }) => e.action)).toEqual(['CHANGES_REQUESTED_RESULT', 'PHOTO_REJECTED']);
     });
 
     it('lastReview is null when the current version has not been reviewed yet', async () => {

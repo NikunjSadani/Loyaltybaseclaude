@@ -532,6 +532,7 @@ export class GroupService {
         outletType: { select: { code: true } },
       },
     });
+    // TODO(integration): use visibilityUniverseWhere
     const inScope = (o: (typeof outlets)[number]) =>
       config.outletScope.includes(o.outletType?.code ?? '') &&
       visibilityProgramMatches(config, { program: o.programName, subProgram: o.programCategory });

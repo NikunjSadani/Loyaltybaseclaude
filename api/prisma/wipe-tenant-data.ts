@@ -236,7 +236,18 @@ function buildSteps(clientIds: string[]): Step[] {
     // models (VisibilityProgram/Submission/Approval/FraudLog) are DROPPED. Every
     // model below carries clientId directly, so all scopes are direct — no
     // parent-chain traversal. Order is children-first (hash/submission → capture
-    // → form version → form) to respect the FKs.
+    // → form version → form) to respect the FKs. The review history
+    // (visibility_review_events) has no FK, but it describes the captures, so it
+    // goes first (never left behind pointing at deleted captures).
+    {
+      model: 'VisibilityReviewEvent',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.visibilityReviewEvent.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.visibilityReviewEvent
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
     {
       model: 'VisibilityImageHash',
       scope: 'clientId in tenants (direct)',

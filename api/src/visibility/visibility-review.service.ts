@@ -1,10 +1,11 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, VisibilityCaptureStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -33,7 +34,16 @@ import {
   VISIBILITY_REJECT_REASON_CODES,
 } from './dto/visibility-capture.dto';
 import { isGifsyOperator } from '../common/tenant-scope';
-import { appendReviewEvents, ReviewEventInput } from './visibility-review-events';
+import {
+  appendReviewEvents,
+  compareEventsNewestFirst,
+  IMPORTED_REVIEW_ACTOR_LABEL,
+  isImportedCapture,
+  ReviewEventInput,
+} from './visibility-review-events';
+
+/** 409 text when a review lost a race with another change to the same capture (L2). */
+export const CAPTURE_CHANGED_MESSAGE = 'This visit was just changed by someone else — reload';
 
 /**
  * The controlled reject-reason vocabulary for the Visibility review queue (D12).
@@ -134,12 +144,33 @@ export class VisibilityReviewService {
    * trace. One transaction.
    */
   private async persistReview(
-    capture: { id: string; currentVersion: number },
+    capture: { id: string; currentVersion: number; status: VisibilityCaptureStatus | string; updatedAt?: Date | null },
     data: Prisma.VisibilityCaptureUncheckedUpdateInput,
     events: ReviewEventInput[],
   ) {
     return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.visibilityCapture.update({ where: { id: capture.id }, data });
+      // Lost-update guard: the decision was computed from the row as READ above, so write only if
+      // the row is still exactly that one (same status, version and updatedAt). Postgres re-checks
+      // this WHERE under the row lock, so of two concurrent reviews / a review racing a resubmit only
+      // the first wins; the other gets a clear 409 and writes NO event — history and the live row
+      // can never diverge.
+      let updated;
+      try {
+        updated = await tx.visibilityCapture.update({
+          where: {
+            id: capture.id,
+            status: capture.status as VisibilityCaptureStatus,
+            currentVersion: capture.currentVersion,
+            ...(capture.updatedAt ? { updatedAt: capture.updatedAt } : {}),
+          },
+          data,
+        });
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+          throw new ConflictException(CAPTURE_CHANGED_MESSAGE);
+        }
+        throw e;
+      }
       await tx.visibilityCaptureSubmission.updateMany({
         where: { captureId: capture.id, version: capture.currentVersion },
         data: { photoReviews: data.photoReviews ?? Prisma.JsonNull },
@@ -205,6 +236,10 @@ export class VisibilityReviewService {
     }
     if (!readMediaValue(formValues[fieldId]).key) {
       throw new BadRequestException(`Field "${field.label}" has no submitted photo to review.`);
+    }
+    // Approving a photo that is ALREADY approved changes nothing → no write, no second history event.
+    if (decision === 'APPROVED' && readPhotoReviews(capture.photoReviews)[fieldId]?.status === 'APPROVED') {
+      return { capture };
     }
 
     const now = new Date();
@@ -441,13 +476,24 @@ export class VisibilityReviewService {
       capture.id,
       capture.imageHashes.map((h) => h.hash),
     );
-    const { reviewHistory, lastReview } = await this.loadReviewHistory(capture.clientId, capture.id, capture.currentVersion);
+    // An imported old-app capture (photos under /vendor-import/): its approvedBy is only the admin who ran
+    // the import — the review is shown as the old app's approval, never as that admin's (B1).
+    const imported = isImportedCapture(capture.formValues);
+    const { reviewHistory, lastReview } = await this.loadReviewHistory(
+      capture.clientId,
+      capture.id,
+      capture.currentVersion,
+      imported,
+    );
 
     return {
       capture: {
         ...captureRow,
         // Additive: the outlet's programme / sub-programme for the review header.
         ...outletProgram(captureOutlet),
+        // Imported old-app capture → never expose the importing admin as the approver.
+        imported,
+        ...(imported ? { approvedBy: null, approvedByUserId: null } : {}),
         photoReviews: reviews,
         media,
         geo,
@@ -472,11 +518,19 @@ export class VisibilityReviewService {
    * name is the snapshot taken at the time; a row with no snapshot (backfill without a user match)
    * falls back to the user's CURRENT name, else null (the UI says "Unknown user" — never blank).
    */
-  private async loadReviewHistory(clientId: string, captureId: string, currentVersion: number) {
-    const rows = await this.prisma.visibilityReviewEvent.findMany({
+  private async loadReviewHistory(clientId: string, captureId: string, currentVersion: number, imported = false) {
+    const found = await this.prisma.visibilityReviewEvent.findMany({
       where: { clientId, captureId },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
+    // Deterministic newest-first order, incl. same-timestamp events (see compareEventsNewestFirst).
+    const rows = [...found].sort(compareEventsNewestFirst).map((r) =>
+      // Imported old-app capture: a review event is the old app's approval — no admin name / id, ever
+      // (the backfill already writes it this way; this also covers any row that says otherwise).
+      imported && r.action !== 'SUBMITTED' && r.action !== 'RESUBMITTED'
+        ? { ...r, actorUserId: null, actorName: IMPORTED_REVIEW_ACTOR_LABEL }
+        : r,
+    );
     const missing = [
       ...new Set(rows.filter((r) => !r.actorName && r.actorUserId).map((r) => r.actorUserId as string)),
     ];
