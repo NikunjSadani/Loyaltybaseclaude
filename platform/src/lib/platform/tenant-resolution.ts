@@ -210,6 +210,7 @@ function pickNonEmptyBranding(b: PublicBranding | undefined): Partial<BrandingCo
   const out: Partial<BrandingConfig> = {};
   if (!b) return out;
   if (b.displayName && b.displayName.trim() !== '') out.displayName = b.displayName;
+  if (b.appName && b.appName.trim() !== '') out.appName = b.appName.trim();
   // primaryColor is DB-influenced and feeds a CSS var / the x-tenant-color header —
   // only accept a strict 6-hex value, else keep the registry color (the CSS sink is
   // separately hard-sanitized, but rejecting junk here avoids a broken theme too).
@@ -242,6 +243,8 @@ function synthesizeConfig(slug: string, branding: Partial<BrandingConfig>): Clie
     branding: {
       ...DEFAULT_CLIENT_CONFIG.branding,
       displayName,
+      // Only set when the DB supplied one, so a tenant without it is unchanged.
+      ...(branding.appName ? { appName: branding.appName } : {}),
       primaryColor: branding.primaryColor ?? DEFAULT_CLIENT_CONFIG.branding.primaryColor,
       logoUrl: branding.logoUrl ?? '',
       wordmarkWhiteUrl: branding.wordmarkWhiteUrl,

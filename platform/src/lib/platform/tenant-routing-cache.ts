@@ -44,6 +44,8 @@
 /** Public branding shape returned by the routing endpoint (all fields optional). */
 export interface PublicBranding {
   displayName?: string;
+  /** Optional short app/product name (installed-app label, tab title, headers). */
+  appName?: string;
   primaryColor?: string;
   logoUrl?: string;
   wordmarkWhiteUrl?: string;
@@ -98,6 +100,7 @@ const COLD_FAILURE_BACKOFF_MS = 3_000;
 /** The branding fields we accept from the endpoint (whitelist — no secrets). */
 const BRANDING_FIELDS: (keyof PublicBranding)[] = [
   'displayName',
+  'appName',
   'primaryColor',
   'logoUrl',
   'wordmarkWhiteUrl',

@@ -13,16 +13,18 @@
 
 import type { MetadataRoute } from 'next';
 import type { ClientConfig } from '@/lib/platform/client-config';
+import { appDisplayName } from '@/lib/platform/app-display-name';
 
 export type PwaScope = 'sales' | 'partner';
 
 /**
  * App name shown on the home screen / install prompt, per portal.
- *   sales   → "<displayName> Sales"
- *   partner → "<displayName>"
+ *   sales   → "<app name> Sales"
+ *   partner → "<app name>"
+ * where <app name> = branding.appName when set, else branding.displayName (appDisplayName).
  */
 export function pwaAppName(config: ClientConfig, scope: PwaScope): string {
-  const name = config.branding.displayName;
+  const name = appDisplayName(config.branding);
   return scope === 'sales' ? `${name} Sales` : name;
 }
 

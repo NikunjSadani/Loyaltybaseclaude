@@ -41,6 +41,7 @@ import {
   FolderDown,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { appDisplayName } from '@/lib/platform/app-display-name';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
@@ -360,7 +361,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             <div className="flex items-center gap-2 bg-[#16213E] rounded-lg px-3 py-2">
               <Building2 className="w-4 h-4 text-[var(--brand-primary)]" />
               <div>
-                <div className="text-xs font-semibold text-white">{clientConfig.branding.displayName}</div>
+                <div className="text-xs font-semibold text-white">{appDisplayName(clientConfig.branding)}</div>
                 <div className="text-xs text-slate-400">
                   {adminRoleLabel(adminSession.role)}
                 </div>

@@ -269,6 +269,9 @@ const RESERVED_CLIENT_SLUGS = new Set(['gifsy', 'admin', 'api', 'platform', 'www
  */
 const TENANT_DOMAIN_SUFFIX = '.gifsy.in';
 
+/** Max length of `branding.appName` (installed-app label — short so it fits under the icon). */
+const APP_NAME_MAX_LENGTH = 40;
+
 /**
  * First-label subdomains a tenant may NOT claim — platform infrastructure
  * hostnames (e.g. `api.gifsy.in`, `app.gifsy.in`). Rejecting these stops a tenant
@@ -865,6 +868,7 @@ export class GifsyService {
       status: client.status,
       onboardedAt: client.onboardedAt,
       displayName: branding.displayName,
+      appName: typeof branding.appName === 'string' ? branding.appName : '', // '' = unset/cleared
       primaryColor: branding.primaryColor,
       logoUrl: toServableBrandingUrl(branding.logoUrl),
       supportEmail: branding.supportEmail,
@@ -914,10 +918,21 @@ export class GifsyService {
       'faviconUrl',
       'productBrands',
     ] as const;
-    if (brandingKeys.some((k) => dto[k] !== undefined)) {
+    // appName (the installed-app / tab / header name) is trimmed; blank clears the key so
+    // every app surface falls back to displayName. Validated before any write.
+    // null is treated as "clear" (class-validator's @IsOptional lets null through, so it must not reach .trim()).
+    const appName = dto.appName === undefined ? undefined : dto.appName === null ? '' : String(dto.appName).trim();
+    if (appName !== undefined && appName.length > APP_NAME_MAX_LENGTH) {
+      throw new BadRequestException(`App name must be at most ${APP_NAME_MAX_LENGTH} characters.`);
+    }
+    if (brandingKeys.some((k) => dto[k] !== undefined) || appName !== undefined) {
       const branding = { ...((existing.branding ?? {}) as Record<string, unknown>) };
       for (const k of brandingKeys) {
         if (dto[k] !== undefined) branding[k] = dto[k];
+      }
+      if (appName !== undefined) {
+        if (appName === '') delete branding.appName;
+        else branding.appName = appName;
       }
       data.branding = branding as Prisma.InputJsonValue;
     }
@@ -1044,6 +1059,7 @@ export class GifsyService {
       status: client.status,
       onboardedAt: client.onboardedAt,
       displayName: branding.displayName,
+      appName: typeof branding.appName === 'string' ? branding.appName : '', // '' = unset/cleared
       primaryColor: branding.primaryColor,
       logoUrl: toServableBrandingUrl(branding.logoUrl),
       supportEmail: branding.supportEmail,
@@ -1290,6 +1306,7 @@ export class GifsyService {
 
       branding: {
         displayName: (branding.displayName as string) ?? c.internalName,
+        appName: typeof branding.appName === 'string' ? branding.appName : '',
         primaryColor: (branding.primaryColor as string) ?? '#6b7280',
         logoUrl: toServableBrandingUrl((branding.logoUrl as string) ?? ''),
         wordmarkWhiteUrl: toServableBrandingUrl((branding.wordmarkWhiteUrl as string) ?? ''),

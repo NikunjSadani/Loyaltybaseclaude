@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { SiteFooter } from '@/components/layout/site-footer';
 import { getTenantConfig } from '@/lib/platform/server';
+import { appDisplayName } from '@/lib/platform/app-display-name';
 
 export const metadata: Metadata = {
   title: 'Sign In',
@@ -14,7 +15,8 @@ export default async function AuthLayout({ children }: { children: React.ReactNo
   // same config that was previously hardcoded.
   const config = await getTenantConfig();
   const wordmarkWhiteUrl = config.branding.wordmarkWhiteUrl;
-  const brandName = config.branding.displayName || 'LoyaltyBase';
+  // App name (branding.appName, e.g. "Bajaj Loyalty Club") when set, else the company name.
+  const brandName = appDisplayName(config.branding) || 'LoyaltyBase';
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row">

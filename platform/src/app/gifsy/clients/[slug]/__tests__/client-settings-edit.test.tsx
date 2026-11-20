@@ -70,10 +70,10 @@ const CONFIG = {
 };
 
 /** Build a mock fetch: first call = GET config, later calls = PATCH per `patchImpl`. */
-function mockFetch(patchImpl: (url: string, init: RequestInit) => unknown) {
+function mockFetch(patchImpl: (url: string, init: RequestInit) => unknown, getData: unknown = CONFIG) {
   return vi.fn((url: string, init?: RequestInit) => {
     if (!init || init.method !== 'PATCH') {
-      return Promise.resolve({ status: 200, ok: true, json: async () => ({ success: true, data: CONFIG }) });
+      return Promise.resolve({ status: 200, ok: true, json: async () => ({ success: true, data: getData }) });
     }
     return Promise.resolve(patchImpl(url, init));
   });
@@ -147,6 +147,57 @@ describe('Client settings editor (real PATCH persistence)', () => {
       expect(screen.queryByTestId('activate-client')).not.toBeInTheDocument();
     });
     expect(await screen.findByTestId('client-status-pill')).toHaveTextContent('Active');
+  });
+
+  it('CS4: setting the App name PATCHes only a trimmed appName and keeps it after save', async () => {
+    const patchSpy = vi.fn();
+    vi.stubGlobal('fetch', mockFetch((url, init) => {
+      patchSpy(url, JSON.parse(init.body as string));
+      return {
+        status: 200, ok: true,
+        json: async () => ({
+          success: true,
+          data: { id: '1', internalName: CONFIG.internalName, status: 'ONBOARDING', displayName: 'Onboarding Co', appName: 'Onb Club' },
+        }),
+      };
+    }));
+
+    await renderPage();
+    const input = await screen.findByTestId('app-name-input');
+    expect(input).toHaveValue('');
+    fireEvent.change(input, { target: { value: '  Onb Club ' } });
+    fireEvent.click(screen.getByTestId('client-settings-save'));
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled());
+    expect(patchSpy.mock.calls[0][1]).toEqual({ appName: 'Onb Club' });
+    await waitFor(() => expect(screen.getByTestId('app-name-input')).toHaveValue('Onb Club'));
+    // The company display name is untouched.
+    expect(screen.getByTestId('display-name-input')).toHaveValue('Onboarding Co');
+  });
+
+  it('CS5: clearing the App name PATCHes appName:"" (falls back to the display name)', async () => {
+    const patchSpy = vi.fn();
+    const withApp = { ...CONFIG, branding: { ...CONFIG.branding, appName: 'Onb Club' } };
+    vi.stubGlobal('fetch', mockFetch((url, init) => {
+      patchSpy(url, JSON.parse(init.body as string));
+      return {
+        status: 200, ok: true,
+        json: async () => ({
+          success: true,
+          data: { id: '1', internalName: CONFIG.internalName, status: 'ONBOARDING', displayName: 'Onboarding Co', appName: '' },
+        }),
+      };
+    }, withApp));
+
+    await renderPage();
+    const input = await screen.findByTestId('app-name-input');
+    expect(input).toHaveValue('Onb Club');
+    fireEvent.change(input, { target: { value: '   ' } });
+    fireEvent.click(screen.getByTestId('client-settings-save'));
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled());
+    expect(patchSpy.mock.calls[0][1]).toEqual({ appName: '' });
+    await waitFor(() => expect(screen.getByTestId('app-name-input')).toHaveValue(''));
   });
 
   it('CS3: a failed PATCH surfaces the error message', async () => {

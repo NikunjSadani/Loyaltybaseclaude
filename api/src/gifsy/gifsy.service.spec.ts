@@ -242,6 +242,59 @@ describe('GifsyService', () => {
       expect(mockTenant.invalidateCache).toHaveBeenCalledWith('deoleo');
     });
 
+    describe('appName (installed-app / tab / header name)', () => {
+      const row = (branding: Record<string, unknown>) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'), branding, features: {},
+      });
+      beforeEach(() => {
+        mockPrisma.client.update.mockImplementation(async ({ data }) => row(data.branding));
+      });
+
+      it('stores a trimmed appName in branding, keeping displayName + other keys', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue(row({ displayName: 'Bajaj Consumer Care Ltd', logoUrl: '/l.png' }));
+        const res = await service.updateClient(gifsy, 'bajaj', { appName: '  Bajaj Loyalty Club ' });
+        expect(mockPrisma.client.update.mock.calls[0][0].data.branding).toEqual({
+          displayName: 'Bajaj Consumer Care Ltd', logoUrl: '/l.png', appName: 'Bajaj Loyalty Club',
+        });
+        expect(res.appName).toBe('Bajaj Loyalty Club');
+        expect(res.displayName).toBe('Bajaj Consumer Care Ltd');
+        expect(mockTenant.invalidateCache).toHaveBeenCalledWith('bajaj');
+      });
+
+      it('an empty / whitespace appName CLEARS the key (falls back to displayName)', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue(row({ displayName: 'Bajaj Consumer Care Ltd', appName: 'Old' }));
+        const res = await service.updateClient(gifsy, 'bajaj', { appName: '   ' });
+        const written = mockPrisma.client.update.mock.calls[0][0].data.branding;
+        expect(written).toEqual({ displayName: 'Bajaj Consumer Care Ltd' });
+        expect(written).not.toHaveProperty('appName');
+        expect(res.appName).toBe('');
+      });
+
+      it('appName: null CLEARS the key instead of throwing (no 500)', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue(row({ displayName: 'Bajaj Consumer Care Ltd', appName: 'Old' }));
+        const res = await service.updateClient(gifsy, 'bajaj', { appName: null as unknown as string });
+        const written = mockPrisma.client.update.mock.calls[0][0].data.branding;
+        expect(written).not.toHaveProperty('appName');
+        expect(res.appName).toBe('');
+      });
+
+      it('rejects an appName over 40 chars (after trim) before any write', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue(row({ displayName: 'X' }));
+        await expect(service.updateClient(gifsy, 'bajaj', { appName: 'a'.repeat(41) })).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.client.update).not.toHaveBeenCalled();
+        // exactly 40 (with padding) is fine
+        await service.updateClient(gifsy, 'bajaj', { appName: ` ${'a'.repeat(40)} ` });
+        expect(mockPrisma.client.update).toHaveBeenCalled();
+      });
+
+      it('a PATCH without appName leaves an existing appName untouched', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue(row({ displayName: 'B', appName: 'Keep Me' }));
+        const res = await service.updateClient(gifsy, 'bajaj', { primaryColor: '#430441' });
+        expect(mockPrisma.client.update.mock.calls[0][0].data.branding.appName).toBe('Keep Me');
+        expect(res.appName).toBe('Keep Me');
+      });
+    });
+
     it('projects supportPhone + invoicePrefix from the merged branding (edit form can reflect them)', async () => {
       mockPrisma.client.findFirst.mockResolvedValue({
         id: 'deoleo',
