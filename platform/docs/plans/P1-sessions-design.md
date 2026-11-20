@@ -358,14 +358,17 @@ Today `user_sessions.token` / `refreshToken` hold the live access/refresh tokens
 1. Within 6 s of a handback in this lineage (the replayed token's own `handedBackAt` or a later link's) →
    converge on the live tip's stored pair; audited `AUTH_EVENT REFRESH_HANDOFF_REPEAT` (M-1, LOW2). Checked
    BEFORE the "used" check, like the holder in-grace path.
-2. The replayed token was itself handed back earlier (outside its 6 s) → 401 + this lineage ends +
-   `SECURITY_EVENT refresh_handback_refused / handed_back_token_replayed` (LOW1).
+2. (L1, last round) A replayed token that was itself handed back earlier is NOT special-cased any more: same
+   device + still-unused tip → a normal (capped) handback; a different device → the mismatch path (7).
 3. No live tip → strict reuse kill (all sessions, stamp, `SECURITY_EVENT refresh_token_reuse`).
 4. Any link USED → strict reuse kill (thief detection).
 5. Tip naturally expired → plain 401.
-6. Fingerprint UNKNOWN (no client UA — older frontend, or untrusted header) → plain 401, no alarm, no kill.
+6. Fingerprint UNKNOWN — presented (untrusted call, older frontend, non-browser UA) or stored (no `v3:` prefix,
+   e.g. a row written before this scheme) → plain 401 for this device, no alarm, no kill; an INFO
+   `AUTH_EVENT handback_refused_device_unknown` row + counter, shown in the Daily Ops Digest (L3).
 7. Fingerprint MISMATCH → 401 + THIS lineage ends + `SECURITY_EVENT … device_mismatch` — no all-device kill.
-8. ≥ 5 handbacks in this lineage within 24 h → 401 + this lineage ends + `SECURITY_EVENT … handback_cap_reached`.
+8. ≥ 5 handbacks in the WHOLE lineage within 24 h — ancestors of the replayed token included, so replaying a newer
+   token can't reset the count (L2) → 401 + this lineage ends + `SECURITY_EVENT … handback_cap_reached`.
 9. Otherwise renew forward from the live tip (conditional claim: unused, never handed back). This may repeat
    when the handback REPLY itself was lost (H-A a) — as long as the newest tip is unused and the device matches.
 - "Ends this lineage" = revoke the replayed token's descendants only (the device that presented it must sign in
@@ -373,22 +376,30 @@ Today `user_sessions.token` / `refreshToken` hold the live access/refresh tokens
   have their own lineages and stay signed in.
 - After a COMMITTED handback nothing else runs before the response: audit row, 24 h count and the repeat alarm
   (`SECURITY_EVENT repeated_unused_successor_handoff` at ≥ 5 per user per 24 h) run in the background; a failed
-  write is logged and counted (`handbackAuditFailures`).
+  write is logged as an error, counted (`handbackAuditFailures`) and — best effort, it may fail for the same reason —
+  written as `AUTH_EVENT handback_audit_failed`, which the Daily Ops Digest counts (L4). Note: Cloud Run may
+  throttle the CPU once a response is sent (unless CPU is always allocated), so these background writes can land
+  seconds later — until the instance handles its next request.
 
-**Device fingerprint (M-2):** SHA-256 of browser FAMILY + OS FAMILY + mobile flag (no version numbers) — a
-Chrome / iOS / Android update does not change it. Built from the browser's `x-client-*` headers when our Next
-server forwards them WITH the internal secret; a trusted call without them → UNKNOWN; an untrusted/direct call →
-the request's own User-Agent.
+**Device fingerprint (M-2, M1, L5 — scheme `v3`):** `v3:` + SHA-256 of browser FAMILY + OS GROUP, no version
+numbers and no mobile flag. OS groups: android|linux and ios|macos are one group each, so a browser/OS update or the
+"Request desktop site" toggle (Android Chrome → X11 Linux without "Mobile"; iPhone/iPad Safari → Macintosh) does not
+change it. Only a REAL browser User-Agent (`Mozilla/5.0 (…`) yields a fingerprint. It is built ONLY for a trusted
+call (valid internal secret) from the browser's `x-client-*` headers; every other case — untrusted / drifted secret,
+older frontend without `x-client-user-agent`, a direct caller, a non-browser UA — is UNKNOWN (never a mismatch).
 
 **Server-to-server secret (security MED):** `x-gifsy-no-first-use` and `x-client-*` are honoured by the API only
 with `x-internal-proxy-secret` = env `INTERNAL_PROXY_SECRET` (constant-time compare). Fail-safe while unset:
-first use is always marked; fingerprints come from the request's own UA. The proxy strips all of these headers
-(and the secret header) from client input.
-- ⚠️ Until the secret is configured on BOTH services, browser refreshes reach the API with Node's User-Agent
-  (the Next server's) — every browser then has the SAME fingerprint, so device binding is effectively OFF
-  (handbacks still require an unused tip; strict kill on use is unaffected). Configure it with the deploy.
+first use is always marked; every refresh fingerprint is UNKNOWN. The proxy strips all of these headers (and the
+secret header) from client input. A call carrying `x-client-*` without a valid secret is logged as a WARN (secret
+drift between the services); in production a missing / short secret is an ERROR at API startup and a Daily Ops
+Digest line.
+- ⚠️ While the secret is missing or drifted, no lost-response device can be handed back (UNKNOWN → plain 401 →
+  that device signs in again) — but nobody is ever killed or alarmed for it.
 
-**Required env / secret wiring (owner / coordinator adds; NOT done in this branch):**
+**Required env / secret wiring — DONE in this branch by `9a85c8de` (deploy workflows bind
+`INTERNAL_PROXY_SECRET(_STAGING)` on the API AND frontend services, preflight-checked). Remaining owner steps:
+create the two secrets and grant access (1 and 4 below).**
 1. Create Secret Manager secrets (random, ≥ 32 chars, generated without a trailing newline, e.g.
    `openssl rand -hex 32 | tr -d '\n'`): `INTERNAL_PROXY_SECRET_STAGING` and `INTERNAL_PROXY_SECRET` (prod).
 2. `deploy-staging.yml`: add `INTERNAL_PROXY_SECRET=INTERNAL_PROXY_SECRET_STAGING:latest` to `--set-secrets`
@@ -412,7 +423,8 @@ first use is always marked; fingerprints come from the request's own UA. The pro
 
 **Residual risks (precise):**
 - The fingerprint is a COARSE device class, not a secret: a thief who has the victim's (old) refresh cookie AND
-  uses the same browser family on the same OS family (e.g. Chrome on Android) passes the device check. Such a
+  uses the same browser family on the same OS GROUP passes the device check — and since L5 the groups are wider:
+  Chrome on a Linux desktop matches Chrome on an Android phone; Safari on a Mac matches Safari on an iPhone. Such a
   thief can take over a lineage only while its newest session is UNUSED (the victim lost the response or is
   offline). The victim's next request with the old token then either converges (within 6 s) or finds the tip
   used by the thief → strict kill of every session + alarm. At most 5 handbacks per lineage per day; ≥ 5 per
@@ -424,5 +436,6 @@ first use is always marked; fingerprints come from the request's own UA. The pro
   same device class + thief hasn't used it yet → the victim is renewed forward and the thief's session is
   revoked by that rotation; thief used it → strict kill + alarm; different device class → lineage ends (thief
   cut off) + alarm, victim signs in again on that device.
-- Until `INTERNAL_PROXY_SECRET` is set on both services, device binding is off for browser traffic (see above).
+- While `INTERNAL_PROXY_SECRET` is missing / drifted on either service, every fingerprint is UNKNOWN: no handbacks
+  at all (a lost-response device signs in again), but no false alarms and no kills; WARN / startup ERROR / digest.
 - LOW4 (pre-existing, from the re-audit): acknowledged, no change in this branch.
