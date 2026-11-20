@@ -3,8 +3,8 @@
 /**
  * Tenant read-only Visibility (POSM) coverage report (VISIBILITY-POSM-DESIGN.md D15).
  * CLIENT_ADMIN / MIS_USER cannot configure Visibility or review captures (GIFSY-only),
- * but can view aggregate per-window coverage. Mirrors /admin/scheme-reports: no raw
- * media, no export — that surface lives on the GIFSY Report tab.
+ * but can view aggregate per-window coverage and download their own tenant's Visibility Excel
+ * (owner 2026-11-20; the photo links open via the signed-in /visibility/photo viewer).
  *
  * Reads via visibilityApi.getTenantReport (VisibilityReportView variant="tenant").
  */

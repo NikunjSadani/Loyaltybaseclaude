@@ -4,7 +4,7 @@
  *
  * VISRPT1: admin variant renders the per-window coverage tiles from getReport.
  * VISRPT2: the Export button calls visibilityApi.downloadExport with the window.
- * VISRPT3: tenant variant reads getTenantReport and hides the Export button.
+ * VISRPT3: tenant variant reads getTenantReport and shows the Export button (client admins download own tenant).
  */
 
 import React from 'react';
@@ -81,12 +81,14 @@ describe('VISRPT — VisibilityReportView', () => {
     expect((screen.getByRole('button', { name: /export month/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('VISRPT3: tenant variant uses getTenantReport and hides Export', async () => {
+  it('VISRPT3: tenant variant uses getTenantReport and (owner 2026-11-20) shows Export for the client admin', async () => {
     render(<VisibilityReportView variant="tenant" />);
     await screen.findByText('60%');
     expect(getTenantReport).toHaveBeenCalled();
     expect(getReport).not.toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: /export excel/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /export excel/i }));
+    await waitFor(() => expect(downloadExport).toHaveBeenCalledWith('2026-07-P2'));
+    expect(screen.getByRole('button', { name: /export month/i })).toBeInTheDocument();
   });
 
   const scopeLine = () =>
