@@ -613,8 +613,11 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
       const html = await res.text();
       expect(html).toMatch(/Reconnecting/);
       expect(html).toMatch(/still signed in/);
-      expect(html).toMatch(/location\.reload\(\)/); // retries THIS url — never navigates to /auth/login
-      expect(html).not.toMatch(/auth\/login/);
+      expect(html).toMatch(/location\.reload\(\)/); // retries THIS url
+      // never navigates to login by itself: only an initially HIDDEN "Sign in again" link (shown after ~2 min)
+      expect(html).toMatch(/<a id="signin" href="\/auth\/login" hidden>Sign in again<\/a>/);
+      expect(html).not.toMatch(/location\.(assign|replace)\(|location\.href\s*=/);
+      expect(html).toMatch(/30 \* 60 \* 1000/); // auto-retry stops after 30 min (manual Retry stays)
       // cookies untouched
       expect(res.cookies.get('refresh_token')?.value).toBeUndefined();
     } finally {

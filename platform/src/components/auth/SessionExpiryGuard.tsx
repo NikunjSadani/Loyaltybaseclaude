@@ -71,8 +71,15 @@ function extractUrl(input: RequestInfo | URL): string {
 export const SESSION_REFRESH_PATH = '/auth/session-refresh';
 /** Backoff before each automatic refresh retry while transient (ms); the last value repeats forever. */
 export const RECONNECT_BACKOFF_MS = [2_000, 4_000, 8_000, 16_000, 30_000, 60_000];
-/** Per-attempt timeout for the refresh exchange (H4). */
-export const REFRESH_EXCHANGE_TIMEOUT_MS = 7_000;
+/**
+ * Per-attempt timeout for the refresh exchange (H4 / H-A b). It must cover the WHOLE path — browser → route
+ * handler → API (the Next→API leg gives up at 5 s, and the API never commits later than 4 s after it received
+ * the call) — with margin, so the browser never gives up on a rotation that is still able to commit.
+ */
+export const REFRESH_EXCHANGE_TIMEOUT_MS = 10_000;
+/** Body of the typed TRANSIENT error handed to callers instead of the raw 401 (session alive, unreachable). */
+export const CONNECTION_PROBLEM_MESSAGE = 'Connection problem — please retry.';
+const RECONNECT_SINCE_KEY = 'gifsy:reconnect-since'; // set by the proxy's Reconnecting page
 /** Another tab's refresh newer than this is reused instead of refreshing again (M4). */
 export const CROSS_TAB_FRESH_MS = 5_000;
 const CROSS_TAB_KEY = 'gifsy:session-refreshed-at';
@@ -109,6 +116,28 @@ function isOffline(): boolean {
   return typeof navigator !== 'undefined' && navigator.onLine === false;
 }
 
+/** M-3 — AbortSignal.timeout is missing on older Safari: fall back to an AbortController + timer. */
+export function timeoutSignal(ms: number): AbortSignal | undefined {
+  const AS = typeof AbortSignal !== 'undefined' ? (AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal }) : undefined;
+  if (AS && typeof AS.timeout === 'function') return AS.timeout(ms);
+  if (typeof AbortController === 'undefined') return undefined;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
+/**
+ * The response callers get while the session is alive-but-unreachable: a typed TRANSIENT error (503,
+ * `transient: true`, `x-session-transient: 1`) instead of the raw 401 — so pages say "Connection problem —
+ * retry", never "your session has expired".
+ */
+function transientResponse(): Response {
+  return new Response(JSON.stringify({ success: false, error: CONNECTION_PROBLEM_MESSAGE, transient: true }), {
+    status: 503,
+    headers: { 'content-type': 'application/json', 'x-session-transient': '1' },
+  });
+}
+
 /** One refresh exchange against the route handler (bounded by REFRESH_EXCHANGE_TIMEOUT_MS). */
 async function exchangeOnce(): Promise<Outcome> {
   // M4 — another tab refreshed moments ago: the cookie jar is shared, nothing to do.
@@ -119,7 +148,7 @@ async function exchangeOnce(): Promise<Outcome> {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'x-session-refresh': '1' },
-      signal: AbortSignal.timeout(REFRESH_EXCHANGE_TIMEOUT_MS),
+      signal: timeoutSignal(REFRESH_EXCHANGE_TIMEOUT_MS),
     });
     if (res.status === 200) {
       try {
@@ -260,6 +289,7 @@ export default function SessionExpiryGuard() {
     // A page that loads normally ends any Reconnecting-page backoff cycle (proxy C2 page).
     try {
       window.sessionStorage.removeItem(RECONNECT_PAGE_KEY);
+      window.sessionStorage.removeItem(RECONNECT_SINCE_KEY);
     } catch {
       /* ignore */
     }
@@ -291,9 +321,9 @@ export default function SessionExpiryGuard() {
           // Try a silent refresh before giving up (single-flight across concurrent 401s).
           const refreshed = await refreshOnce();
           if (refreshed === 'unavailable' || refreshed === 'error') {
-            // Not proof of a dead session: keep it, surface the original 401 to the caller; the
-            // banner + background retries take it from here (handled once in refreshOnce).
-            return res;
+            // Not proof of a dead session: keep it, and hand the caller a typed TRANSIENT error (not the
+            // raw 401); the banner + background retries take it from here (handled once in refreshOnce).
+            return transientResponse();
           }
           if (refreshed === 'ok' && !redirecting) {
             // New cookie is set — retry the original request once (unpatched, so a

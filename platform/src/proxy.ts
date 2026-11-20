@@ -342,8 +342,9 @@ export const AUTH_FAILURE_HEADER = 'x-auth-failure'
  * C2 — the "Reconnecting…" page served (503) when a page load's session refresh failed TRANSIENTLY.
  * Self-contained (no app bundle needed while the backend is unreachable). It reloads the SAME URL with
  * backoff — 2, 4, 8, 16, 30 s, then every 60 s — tracked in sessionStorage across reloads (the app's
- * SessionExpiryGuard clears it once a page loads normally); also on "Retry now", when the browser
- * comes back online and when the tab becomes visible again. Never sends the user to the login page.
+ * SessionExpiryGuard clears it once a page loads normally); also on "Retry now", when the browser comes
+ * back online and when the tab becomes visible again. After ~2 minutes it also offers "Sign in again"
+ * (the user's choice, never forced); after 30 minutes it stops retrying on its own (Retry still works).
  */
 export const RECONNECT_PAGE_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -353,17 +354,28 @@ body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;b
 display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
 main{max-width:420px;text-align:center}h1{font-size:20px;margin:0 0 8px}p{font-size:15px;line-height:1.5;margin:0 0 16px;color:#334155}
 button{font:inherit;font-size:15px;padding:10px 20px;border-radius:8px;border:0;background:#0f172a;color:#fff;cursor:pointer}
-@media (prefers-color-scheme:dark){body{background:#0f172a;color:#f1f5f9}p{color:#cbd5e1}button{background:#f1f5f9;color:#0f172a}}
+a{display:block;margin-top:16px;color:#334155;font-size:14px}
+@media (prefers-color-scheme:dark){body{background:#0f172a;color:#f1f5f9}p,a{color:#cbd5e1}button{background:#f1f5f9;color:#0f172a}}
 </style></head>
 <body><main role="status" aria-live="polite">
 <h1>Reconnecting…</h1>
 <p id="msg">We couldn't reach the server just now. You are still signed in — we'll retry automatically.</p>
 <button id="retry" type="button">Retry now</button>
+<a id="signin" href="/auth/login" hidden>Sign in again</a>
 </main>
 <script>
 (function () {
-  var KEY = 'gifsy:reconnect-attempt', STEPS = [2, 4, 8, 16, 30, 60], n = 0;
-  try { n = Number(sessionStorage.getItem(KEY) || 0); sessionStorage.setItem(KEY, String(n + 1)); } catch (e) {}
+  var KEY = 'gifsy:reconnect-attempt', SINCE = 'gifsy:reconnect-since', STEPS = [2, 4, 8, 16, 30, 60], n = 0, since = Date.now();
+  try {
+    n = Number(sessionStorage.getItem(KEY) || 0);
+    sessionStorage.setItem(KEY, String(n + 1));
+    since = Number(sessionStorage.getItem(SINCE) || 0) || Date.now();
+    sessionStorage.setItem(SINCE, String(since));
+  } catch (e) {}
+  var elapsed = Date.now() - since;
+  var link = document.getElementById('signin');
+  link.href = '/auth/login?next=' + encodeURIComponent(location.pathname + location.search);
+  if (elapsed >= 2 * 60 * 1000) link.hidden = false;
   function go() { location.reload(); }
   document.getElementById('retry').addEventListener('click', go);
   window.addEventListener('online', go);
@@ -372,6 +384,11 @@ button{font:inherit;font-size:15px;padding:10px 20px;border-radius:8px;border:0;
     document.getElementById('msg').textContent = 'You are offline. You are still signed in — we will reconnect when you are back online.';
     return;
   }
+  if (elapsed >= 30 * 60 * 1000) {
+    document.getElementById('msg').textContent = 'We still cannot reach the server. You are still signed in — press Retry when you want to try again.';
+    return;
+  }
+  if (elapsed < 2 * 60 * 1000) setTimeout(function () { link.hidden = false; }, 2 * 60 * 1000 - elapsed);
   setTimeout(go, STEPS[Math.min(n, STEPS.length - 1)] * 1000);
 })();
 </script>

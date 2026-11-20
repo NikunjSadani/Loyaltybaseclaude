@@ -83,6 +83,24 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
     expect(banner()).toBeNull();
   });
 
+  it('M-3: timeoutSignal falls back to AbortController + timer when AbortSignal.timeout is missing (older Safari)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    const original = (AbortSignal as unknown as { timeout?: unknown }).timeout;
+    try {
+      Object.defineProperty(AbortSignal, 'timeout', { configurable: true, value: undefined });
+      const signal = mod.timeoutSignal(1_000)!;
+      expect(signal.aborted).toBe(false);
+      vi.advanceTimersByTime(1_000);
+      expect(signal.aborted).toBe(true);
+    } finally {
+      Object.defineProperty(AbortSignal, 'timeout', { configurable: true, value: original });
+    }
+  });
+
+  it('H-A (b): the exchange timeout covers the whole browser → route → API path (10 s)', () => {
+    expect(mod.REFRESH_EXCHANGE_TIMEOUT_MS).toBe(10_000);
+  });
+
   it('the refresh POST carries the CSRF header and a timeout signal (H4)', async () => {
     const { backend } = mountWith({ refresh: [200], api: [401, 200] });
     await window.fetch('/api/wallet/me');
@@ -115,13 +133,15 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
   });
 
   it.each([503, 'network' as const, 'timeout' as const])(
-    'UNAVAILABLE (%s) → original 401 returned, NO redirect, NO reload, "Reconnecting…" banner with Retry',
+    'UNAVAILABLE (%s) → caller gets a TYPED transient 503 "Connection problem" (not the raw 401), NO redirect, NO reload, banner with Retry',
     async (r) => {
       mountWith({ refresh: [r], api: [401] });
 
       const res = await act(() => window.fetch('/api/wallet/me'));
 
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(503);
+      expect(res.headers.get('x-session-transient')).toBe('1');
+      await expect(res.json()).resolves.toMatchObject({ error: 'Connection problem — please retry.', transient: true });
       expect(assign).not.toHaveBeenCalled();
       expect(reload).not.toHaveBeenCalled();
       expect(banner()?.textContent).toMatch(/Reconnecting/);
