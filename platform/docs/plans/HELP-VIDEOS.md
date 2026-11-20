@@ -3,7 +3,7 @@
 Owner-approved 2026-11-19 (Bajaj). **TENANT-SCOPED**: everything is behind the console flag `helpVideos`
 (default OFF; Deoleo stays OFF and byte-identical). ✅ LIVE on prod `1fa2305c` (2026-11-19 night), DORMANT until the
 owner switches `helpVideos` ON for Bajaj prod and OKs loading the content (3 sales training videos recorded). UX fixes
-on `fix/help-videos-ux` (`8f4d3800`) — next release.
+(`fix/help-videos-ux`) shipped in prod `4a48dc0d` (2026-11-20 night).
 
 ## 1. What it is
 

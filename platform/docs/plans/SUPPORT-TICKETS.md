@@ -1,6 +1,7 @@
 # Support tickets — assign, escalate, client remarks, raised-by / outlet
 
-Status: built on `feat/ticket-assign-escalate` (2026-11-19), unmerged. **PLATFORM-WIDE** (all programmes,
+Status: ✅ LIVE on prod `4a48dc0d` (2026-11-20 night release; migrations `20261120110000/110100/110200` applied).
+Built on `feat/ticket-assign-escalate` (2026-11-19). **PLATFORM-WIDE** (all programmes,
 Deoleo included) — owner-approved 2026-11-19.
 
 Code: `api/src/tickets/*` (service, controller, `ticket-submitter.ts`, `ticket-link.ts`) ·

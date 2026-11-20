@@ -5,7 +5,14 @@ Single source of truth for every change **exclusive to, or driven by, the Bajaj 
 Keep Deoleo + all other tenants byte-identical. Update this doc in the SAME pass as any
 Bajaj change. Last updated: 2026-11-16.
 
-> **📍 STATE 2026-11-19 (current).** Prod and staging serve **`1fa2305c`**. New Bajaj switches in this release (owner flips on prod; staging ON): `features.requireLocation` (location gate), `wholesalerPayoutInclActivation` ("Incl. Activation" under Lifetime Payout), `helpVideos` (Help & videos; content load pending owner OK); notification reminder with iOS/Android steps (Bajaj); reversal engine Bajaj staging = V2, prod = LEGACY until backfill + owner go (switch BEFORE any reversal). KYC fast-track `gifsyRejectFastTrack` ON on prod.
+> **📍 STATE 2026-11-21 (current).** Prod serves **`4a48dc0d`** (release 2026-11-20 night). Bajaj-visible: per-client
+> **App name** "Bajaj Loyalty Club" set on prod by the owner and verified live (§15); Visibility Excel redesign +
+> client-admin download; capture-form GPS-pending fix; tickets assign/escalate (Bajaj "Ticket remarks email" — TODO:
+> record the prod value if set). 2026-11-20 evening the Cloudflare Workers free-plan cap (Error 1027) took all tenants
+> down for 7 min — triggered by Bajaj sales-team request volume; see `RESUME.md` §1 / §4 item 10. Current state +
+> owner to-dos: `RESUME.md`.
+>
+> **📍 STATE 2026-11-19 (historical).** Prod and staging serve **`1fa2305c`**. New Bajaj switches in this release (owner flips on prod; staging ON): `features.requireLocation` (location gate), `wholesalerPayoutInclActivation` ("Incl. Activation" under Lifetime Payout), `helpVideos` (Help & videos; content load pending owner OK); notification reminder with iOS/Android steps (Bajaj); reversal engine Bajaj staging = V2, prod = LEGACY until backfill + owner go (switch BEFORE any reversal). KYC fast-track `gifsyRejectFastTrack` ON on prod.
 >
 > **📍 STATE 2026-11-16 (historical).** Prod and staging both serve **`2eb8271d`** (release 2026-11-15). Bajaj is live on
 > prod: branding + logos render on `bajajloyalty.gifsy.in`; Hubble gift cards are LIVE (§1); the v2 partner screens
@@ -337,7 +344,7 @@ and the Performance trend (`GET /partner/targets/trend`).
 - Sales history keeps programme outlets only, 4 months; import files 7 days — the deletion rules ship OFF
   (`SALES_RETENTION_V2`) and are switched on via `SALES-IMPORT-PIPELINE-PLAN.md` §17b. Decision log F15.
 
-## 14. Location gate — flag `requireLocation` (2026-11-18; built on `feat/location-gate`, not deployed)
+## 14. Location gate — flag `requireLocation` (2026-11-18; LIVE on prod since `1fa2305c`, DORMANT until the owner switches it ON)
 - Gifsy console → Clients → Bajaj → **Behaviour flags** → "Require location for KYC and visibility capture" (confirm
   dialog). Default OFF for every tenant; Deoleo OFF. Owner switches it ON for Bajaj (staging first, then prod) after the
   release — Claude does not write the flag.
@@ -346,3 +353,10 @@ and the Performance trend (`GET /partner/targets/trend`).
   refusals are recorded for the Location Report. Independent of `outletMasterGeo` (the 200 m fence).
 - Location Report `/admin/reports/location` + Daily Ops Digest "Location" line — both only for switch-on tenants. Detail:
   `LOCATION-GATE.md`.
+
+## 15. App name — `branding.appName` (per client; LIVE on prod `4a48dc0d`, 2026-11-20)
+- Per-client setting (shared code, per-tenant value): the name used for the **installed app**, the **browser tab
+  title**, the **sign-in** screen and the **headers**. The company `displayName` stays on consent text, PDFs and emails.
+- Bajaj prod: **"Bajaj Loyalty Club"** — set by the owner, verified live. Deoleo: TODO record whether set (unset keeps
+  its current naming).
+- Note: phones that already installed the app may keep the old name until the app is reinstalled — TODO verify.

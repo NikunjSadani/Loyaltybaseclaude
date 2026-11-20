@@ -10,7 +10,8 @@
 > [`archive/RESUME-ARCHIVE-2026-11-15.md`](archive/RESUME-ARCHIVE-2026-11-15.md) (the full chronology up to 2026-11-15,
 > incl. the CUTOVER LEDGER #14–#52). **Never trust a SHA written here over `git log` + the serving image (§7).**
 >
-> Last updated: **2026-11-19 late** (prod release `1fa2305c` — §1, §3, §4, §8).
+> Last updated: **2026-11-21** (prod release `4a48dc0d`; Cloudflare Workers cap outage; next release
+> `release/2026-11-21` — §1, §3, §4, §8).
 
 Multi-tenant FMCG **trade-loyalty** platform. Operator **Gifsy**; live clients **Deoleo** (since July 2026) and
 **Bajaj Consumer Care** (go-live November 2026). Backend `api/` (NestJS + Prisma 7 — owns the DB and ALL business logic)
@@ -19,13 +20,38 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 
 ---
 
-## 1. Where things stand (2026-11-19)
+## 1. Where things stand (2026-11-21)
 
 | | SHA | Since | Notes |
 |---|---|---|---|
-| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import` + `gifsy-migrate`) | **`1fa2305c`** (verified 2026-11-19 ~21:45 IST: api / frontend / worker / migrate images `1fa2305c`; migrate `gifsy-migrate-dhbk7` succeeded 21:15 IST; **45** migrations applied (`20261119120000…124300` reversal engine + `20261120100000_add_help_topics`), 0 failed/rolled back; 0 error logs, 0 429/5xx after deploy; `SALES_RETENTION_V2=on` on api + worker; every tenant's reversal engine = LEGACY (no setting rows)) | 2026-11-19 | `origin/main` = `origin/develop` = `1fa2305c`; pre-release backup `1795096760898` |
-| **Staging** (`*-staging`) | **`1fa2305c`** (tickets assign/escalate push in flight — see §3) | 2026-11-19 | |
-| Previous prod | `7ba69566` → `71df01f7` → `de2f3700` → `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-19 … 11-15 | rollback targets (⚠️ a rollback below `1fa2305c` leaves the 45 additive reversal-engine/help columns+tables in place — harmless to older code) |
+| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import` + `gifsy-migrate`) | **`4a48dc0d`** (deployed by the owner 2026-11-20 night IST; verified 2026-11-21 ~00:20 IST: migrate execution `gifsy-migrate-lnsg2` applied **8** migrations on `gifsy_prod` in 14 s — `20261119124400/124500/124600` (WRE debt), `20261120110000/110100/110200` (tickets), `20261120130000/130100` (auth); api + frontend on `4a48dc0d`; 0 errors / 0 5xx after; both tenants load) | 2026-11-20 | `origin/main` = `4a48dc0d`. TODO: record the pre-release backup id here if one was taken |
+| **Staging** (`*-staging`) | `release/2026-11-21` → `develop` push in progress (2026-11-21) — TODO: record the serving SHA once the deploy finishes (§7) | 2026-11-21 | see §3 |
+| Previous prod | `1fa2305c` → `7ba69566` → `71df01f7` → `de2f3700` → `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-19 … 11-15 | rollback targets (⚠️ a rollback below `4a48dc0d` leaves its 8 migrations in place — tickets rollback trap in `SUPPORT-TICKETS.md`; TODO confirm the WRE/auth ones are harmless to older code; a rollback below `1fa2305c` leaves the 45 additive reversal-engine/help columns+tables — harmless to older code) |
+
+**The 2026-11-20 (night) prod release `4a48dc0d`** (owner-deployed; platform-wide items owner-approved in-session):
+- **Visibility Excel redesign**: per-photo columns grouped by photo label, "Open photo" links to the signed-in
+  `/visibility/photo` viewer page, timestamps, rep/manager, plain statuses; sheets **Visibility / Review history / Not
+  captured / About**; link cap 60k per sheet; old-app windows show "No approved record" / "Not tracked". Client admins
+  get an Excel download button.
+- **Per-client App name** (`branding.appName`): installed-app name, tab title, sign-in and headers; the company
+  `displayName` stays on consent / PDF / emails. Bajaj prod set to **"Bajaj Loyalty Club"** by the owner, verified live.
+  → [`BAJAJ-CUSTOMIZATIONS.md`](BAJAJ-CUSTOMIZATIONS.md) §15
+- **Capture-form fix**: Submit is blocked with "Getting location…" while a photo's GPS fix is pending; no more false
+  `"Window 1" is required`.
+- **Wallet Reversal Engine over-reversal debt** (owner D1/D2) — engine still DORMANT (LEGACY on prod); see §4 item 9.
+- **Support tickets** assign / escalate + per-client ticket remarks email → [`SUPPORT-TICKETS.md`](SUPPORT-TICKETS.md).
+- **Help & Guides UX** fixes; **visibility review polish**.
+- **Login rolling-session refresh race fix**: 6 s grace, handback when the tip is unused, `INTERNAL_PROXY_SECRET`.
+- **Least-privilege deployer** + keyless `gifsy-ops` identity for laptop ops (§7, §8).
+
+**2026-11-20 16:20–16:27 UTC outage (Cloudflare Workers free-plan cap)** — every `*.gifsy.in` tenant returned
+Cloudflare **Error 1027** because the Workers FREE plan's 100k requests/day cap was hit. The owner upgraded to
+**Workers Paid** ($5/mo, 10M requests/mo). Cause (Cloud Run logs): normal ~1–2k req/h jumped to ~30k req/h from
+~17:30 IST with 87 concurrent Bajaj sales users; ~42% of frontend requests were Next.js RSC fetches (prefetch of every
+visible outlet-detail link on `/sales/kyc` and of the bottom-nav pages), plus a per-screen refetch of `/sales/me`,
+`/auth/me`, `/settings`, `/settings/outlet-types`, `/partner/banners`, `/notifications/unread-count`. Proposed fixes
+(**NOT built — owner decision pending**, §4 item 10): disable prefetch on lists/nav, session-cache static data,
+dashboard data reuse.
 
 **The 2026-11-19 (night) prod release `f61aec24` + `1fa2305c`** (all owner-approved; platform-wide items approved in-session; money paths dual-audited; staging-verified with real Bajaj logins):
 - **Wallet Reversal Engine** shipped DORMANT: schema (45 additive migrations), LEGACY/SHADOW/V2 per-tenant flag (no rows on prod → LEGACY everywhere), backfill + verify jobs. Bajaj **staging** = V2 after the §9.1 wallet backfill (2,321 wallets, 0 blocked). Bajaj **prod** = LEGACY until its own backfill + owner go. → `WALLET-REVERSAL-ENGINE-DESIGN.md`
@@ -113,11 +139,7 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 
 | Work | Branch / worktree | State | Read |
 |---|---|---|---|
-| **Reversal engine — over-reversal debt + display** (⚠️ platform-wide, money path) | `fix/wre-overreversal-debt` (worktree `.claude/worktrees/wre-fix2`, HEAD `53afb371`) | **ON STAGING** (batch `d759489a` 2026-11-20 + follow-ups). Owner decisions: over-reversal → debt; negative shown as-is, redemption blocked; reversed credit's own expired part = already recovered; **D1** "owed" = how far below zero, same everywhere; **D2** (platform-wide, approved) liability = Σ positive + separate "points owed", ALL tenants; **D3** not built (switch Bajaj prod to V2 before any reversal). 6 fix rounds + 3 dual audits; WP7 real-Postgres suite GREEN 2026-11-20 (29 passed) after fixing a real concurrent-approval cap double-count (§8.12, independently verified). Bajaj **prod** backfill DRY RUN 2026-11-20: 6,491 wallets, 2,281 planned, 0 blocked, 0 anomalies, 8 debt wallets (−3,549). Next: prod release → backfill APPLY (backup + owner OK) → VERIFY → owner flips Bajaj to V2. | `WALLET-REVERSAL-ENGINE-DESIGN.md` §8.7–§8.12 |
-| **Support tickets — assign / escalate / remarks email** (⚠️ platform-wide, owner-approved; admin bell all tenants approved) | `feat/ticket-assign-escalate` (HEAD `c4fc70c2`) | **ON STAGING.** Runtime-verified on Bajaj staging 2026-11-20 (assign, Gifsy-only note hidden from client admin, 403s, search/filter/cards, request→email→reply). Per-client **"Ticket remarks email"** (owner option 1: if set, email goes ONLY there; Bajaj staging = owner's Gifsy inbox; Deoleo unset). Remarks email redesigned for the recipient (ask, button, ticket, issue, outlet, raised-by + manager, category context, last 3 client-visible messages; phones/emails masked). ⚠️ Rollback trap: see `SUPPORT-TICKETS.md`. | `SUPPORT-TICKETS.md` |
-| **Login renewal race (strict reuse)** | `fix/auth-refresh-race`, worktree `.claude/worktrees/auth-refresh-race` (`95206483`) | Final round built; **owner OK needed** on: grace 5 s → **6 s**; a server action whose refresh failed runs unauthenticated (marked `x-session-refresh-failed`). Then full gates + dual audit + staging. Real two-connection Postgres test not run. | `P1-sessions-design.md` (timing table) |
-| **Help & videos UX fixes** | `fix/help-videos-ux` | **ON STAGING** (batch `d759489a`). | `HELP-VIDEOS.md` |
-| **Visibility review polish** | `fix/visibility-review-polish` | **ON STAGING** (batch `d759489a`). | — |
+| **Release `release/2026-11-21` — visibility integration + report columns + Redemption report** (⚠️ platform-wide items owner-approved: stricter capture in-scope rule 2026-11-20; area columns + Redemption report for all tenants) | `release/2026-11-21` (worktree `.claude/worktrees/rel-1121`) | **Full gates GREEN 2026-11-21** (8,585 api tests, 486 web test files). Push to `develop` in progress; **staging deploy + real-login check pending.** Contents: (1) **Visibility integration** — `visibility_review_events` table + migration `20261120140000` (with backfill); report screen with month / window pickers, tiles, breakdowns, outlet list; Operations funnel with real fraud flags + a Gifsy-only flag list; Daily Ops Digest pending counts across months; "Not approved — window closed"; **stricter capture in-scope rule** (no capture for outlets not KYC-approved / deactivated / Not Interested / Parked); per-window scope for closed windows incl. the KYC approval date; go-live cache. (2) **ASM / Zone / State / City columns** in the App installed-users export and the Usage report. (3) **Redemption report** (Gifsy + client admins; never exports voucher code / PIN, PAN, full phone, address or raw notes). | `USAGE-REPORT.md`; TODO: no design doc yet for the visibility integration or the Redemption report |
 | **MSG91 webhook "Add Condition"** (receive only portal reports) | — | Owner deferred 2026-11-19. ⚠️ Can't simply filter on `crqid`: scheme sends and some untracked paths carry none (their reports would be lost). Needs a design. | this row |
 
 ## 4. What's next / waiting on the owner
@@ -159,9 +181,17 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
    (built, shipped in `1fa2305c`, Bajaj).
 8. **Hubble:** ask which of Ajio / MakeMyTrip / Myntra / Uber are claim-code-only → add product ids to
    `HUBBLE_CLAIM_CODE_PRODUCT_IDS`.
-9. Wallet Reversal Engine rollout: schema + engine are on prod (DORMANT, LEGACY everywhere). Next: ship
-   `fix/wre-overreversal-debt` (§3) → Bajaj prod backfill (dry-run → owner OK → apply) → verify → flip Bajaj to V2.
-   Deoleo stays LEGACY. **Never run points compute for Bajaj imported months (Apr 2025 – Oct 2026).**
+9. Wallet Reversal Engine rollout: schema + engine + over-reversal debt fix (D1/D2) are on prod since `4a48dc0d`
+   (DORMANT, LEGACY everywhere; D3 not built). Bajaj prod backfill DRY RUN 2026-11-20: 6,491 wallets, 2,281 planned,
+   0 blocked, 0 anomalies, 8 debt wallets (−3,549). Next: backfill APPLY (backup + owner OK) → VERIFY → owner flips
+   Bajaj to V2 — **before any credit reversal on Bajaj prod**. Deoleo stays LEGACY. **Never run points compute for
+   Bajaj imported months (Apr 2025 – Oct 2026).** → `WALLET-REVERSAL-ENGINE-DESIGN.md` §8.7–§8.12
+10. **Request volume (Cloudflare Workers outage 2026-11-20, §1)** — owner to decide on the proposed fixes: disable
+    Next.js prefetch on lists / bottom nav (e.g. `/sales/kyc` outlet links), session-cache static data (`/sales/me`,
+    `/auth/me`, `/settings`, `/settings/outlet-types`, `/partner/banners`), reuse dashboard data;
+    `/notifications/unread-count` polling. Not built. Workers Paid is in place (10M req/mo) — TODO: confirm the
+    monthly request budget against the ~30k req/h peak.
+11. **`release/2026-11-21`** (§3): staging deploy + real-login check on Bajaj staging → owner UAT → prod.
 
 ## 5. Owner process rules (adopted — apply to every change)
 
@@ -210,7 +240,7 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
 ## 7. How to verify
 
 - **Serving SHA** (never branch HEAD):
-  `gcloud run services describe gifsy-api --region asia-south1 --project gifsy-platform --account=gifsy-deployer@gifsy-platform.iam.gserviceaccount.com --format='value(spec.template.spec.containers[0].image)'`
+  `gcloud run services describe gifsy-api --region asia-south1 --project gifsy-platform --account=<owner> --impersonate-service-account=gifsy-ops@gifsy-platform.iam.gserviceaccount.com --format='value(spec.template.spec.containers[0].image)'`
   (same for `gifsy-frontend`; staging = `gifsy-api-staging` / `gifsy-frontend-staging`, tag `staging-<sha>`; prod tag = bare `<sha>`).
   Jobs: `gcloud run jobs describe gifsy-exports|gifsy-sales-import …`.
 - Health: API `/health` 200; `deoleo.gifsy.in/auth/login` and `bajajloyalty.gifsy.in/auth/login` render their own branding.
@@ -237,7 +267,7 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
 - Absent `tdsPolicy` → `{SEC_194C, GROSS_UP}`; a malformed one throws (fail-closed).
 - Points and ₹ payouts are credited in **whole units**, rounded half-up once.
 - 8 Bajaj wallets are intentionally negative (sales returns); the interim rule refuses points reversals on wallets with debt.
-- Liability on dashboards (once `fix/wre-overreversal-debt` ships) = Σ **positive** balances; "points owed" = how far
+- Liability on dashboards (since `4a48dc0d`) = Σ **positive** balances; "points owed" = how far
   below zero balances are — never net them (owner D1/D2, 2026-11-19). Bajaj prod's 8 imported negatives = −3,549 pts.
 
 **Webhooks / MSG91**
@@ -276,8 +306,13 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
 - Any new GIFSY-wide read uses `platformWide(user)` (assumed operators are scoped to the tenant).
 - `FIXED_OTP` disables rate limiting on staging — throttling can only be proven on prod.
 - Windows-created secrets can carry a trailing `\r` or a BOM — strip before saving.
-- gcloud on the owner's machine may default to another project/account — always pass
-  `--account=gifsy-deployer@gifsy-platform.iam.gserviceaccount.com --project=gifsy-platform`.
+- gcloud on the owner's machine may default to another project/account — always pass the account + project. Since
+  2026-11-20 `gifsy-deployer` is CI-only (least-privilege); laptop ops use the KEYLESS `gifsy-ops` identity:
+  `--account=<owner> --impersonate-service-account=gifsy-ops@gifsy-platform.iam.gserviceaccount.com --project=gifsy-platform`.
+- **Cloudflare Workers request quota:** every page view, RSC prefetch and API call through `*.gifsy.in` passes the
+  `gifsy-proxy` Worker. On the FREE plan (100k req/day) the cap returned **Error 1027 on every tenant** (2026-11-20,
+  87 concurrent Bajaj reps ≈ 30k req/h). Now on **Workers Paid** (10M req/mo). Any change that adds per-screen fetches,
+  polling or `<Link>` prefetch on long lists multiplies edge requests — count them.
 - A new npm import missing from `package.json` passes gates but crashes at boot (prefer `node:` built-ins).
 - `terraform` config has drifted from live in places — plan first, never blind-apply.
 
@@ -297,6 +332,8 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
 
 **Session/auth model:** access token = httpOnly `token` cookie, 60-minute JWT that slides on activity; refresh =
 httpOnly `refresh_token`, single-use rotating; the edge proxy injects the backend Bearer; refresh-on-401 single-flight.
+Since `4a48dc0d` the refresh race is handled with a 6 s reuse grace + handback when the rotated tip was never used,
+and a new `INTERNAL_PROXY_SECRET` (timing table in `P1-sessions-design.md`).
 Rolling idle window 30 days per device (`SESSION_TTL_DAYS`, `api/src/auth/auth.constants.ts`); an operator's
 assumed-tenant session slides on the same 30-day window (`ASSUMED_SESSION_TTL_HOURS` = 720). Detail: `P1-sessions-design.md`.
 

@@ -69,6 +69,10 @@ Staging serves every tenant under a **single-label** `uat-<slug>.gifsy.in` host 
   tenant in the Gifsy console, its links work immediately with **no cert, no DNS, no worker deploy**:
   prod `https://<slug>.gifsy.in`, staging `https://uat-<slug>.gifsy.in`. (A vanity host ≠ slug needs one `domains`
   entry in the client console; still no infra.)
+- **Cloudflare Workers plan = Paid** ($5/mo, 10M requests/mo) since 2026-11-20. The FREE plan's 100k requests/day cap
+  was hit 2026-11-20 16:20–16:27 UTC → Cloudflare **Error 1027 on every `*.gifsy.in` tenant** (prod and staging hosts
+  share the `gifsy-proxy` Worker). Every page view, Next.js RSC prefetch and `/api` call through a tenant host counts
+  as a Worker request. Detail + proposed request-volume fixes: `RESUME.md` §1 / §4 item 10.
 - Re-deploying the Worker (only if `worker.js`/`wrangler.toml` change again): from `cloudflare-worker/`,
   `CLOUDFLARE_API_TOKEN=<Edit-Cloudflare-Workers token> npx wrangler deploy`. The stored OAuth login does NOT work
   in this split-shell setup (login succeeds but wrangler never persists the token to the config file it reads back —

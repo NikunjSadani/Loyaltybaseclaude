@@ -1,7 +1,7 @@
 # Sales Import Pipeline — Implementation Plan (DMS invoice-line file → monthly KPI achievements)
 
 > **Status (2026-11-16): ✅ LIVE ON PROD** — shipped with #59 (`a18cc932`, 2026-11-12); FOCUS-FROM-TARGETS + the
-> PRODUCT_COUNT ("LINES") measure shipped in `e242b1a1`; prod serves `2eb8271d`. Prod infra exists (§14). `salesImport`
+> PRODUCT_COUNT ("LINES") measure shipped in `e242b1a1`; current prod: see `RESUME.md` §1. Prod infra exists (§14). `salesImport`
 > is ON for Bajaj; **November 2026 applied on prod 2026-11-15 and verified per outlet (6,452 records); the month is OPEN**
 > (points rules for November pending a dedicated rule-engine session — do not close the month or compute points before
 > then). **Read §18 (traps learned on the prod November apply) before configuring KPIs or uploading targets.**

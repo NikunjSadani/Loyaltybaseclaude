@@ -185,7 +185,7 @@ Each Hubble brand is either **FIXED** (Hubble issues only certain face values) o
 7. ✅ **F3:** done — code on prod since #59; the 3 prod secrets created + webhook registered (2026-11-11); Hubble whitelisted the prod egress IP (2026-11-13). Still open: rotate the leaked client secret.
 8. **H1:** no opening-balance / historical ledger import. A net balance via the credits upload is possible but lossy (no dates, no negatives, live notifications).
 9. **H2 / H3 / H4:** payout history, visibility history and the TDS reconcile were scripts on staging (or are still parked).
-10. ✅ **Release dependency:** done — #59 (`a18cc932`, 2026-11-12); current prod `2eb8271d`.
+10. ✅ **Release dependency:** done — #59 (`a18cc932`, 2026-11-12); current prod: see `RESUME.md` §1.
 11. ~~**Sales Import prod worker (owner OK at release)**~~ — ✅ **CLOSED, verified 2026-11-13.** The prod infra is in place: `SALES_IMPORT_DRAIN_SECRET`, Cloud Run job `gifsy-sales-import`, Cloud Scheduler `sales-import-drain` ENABLED (`*/10 * * * *`), `deploy.yml` env `SALES_IMPORT_RUNNER=job` + `SALES_IMPORT_JOB=gifsy-sales-import` + the drain secret binding. **Remaining (config, not infra):** Bajaj's column mapping (`sales_import_profiles` empty) and sales KPI definitions (`sales_kpi_definitions` empty).
 12. **Bajaj points rule:** still open (2026-11-16) — no Bajaj rule in `points_rules` at the last check while `pointsEngine.enabled` is true for Bajaj. November 2026 achievements are applied (Sales Import, 2026-11-15, month OPEN); the November rule (SAMT gate NON ADHO ≥ ₹200 Elite / ≥ ₹400 Privilege …) needs a dedicated rule-engine session (G2). Never compute Apr 2025 – Oct 2026.
 
@@ -222,4 +222,5 @@ Hubble credentials are **platform-level**: one Hubble account serves every tenan
 
 ⚠️ **gcloud trap (2026-11-13):** gcloud on the owner's machine currently defaults to account `nikunj.sadani28@gmail.com`
 and project `gifsy-posm` (changed by another session). Every platform command must pass
-`--account=gifsy-deployer@gifsy-platform.iam.gserviceaccount.com --project=gifsy-platform` explicitly.
+the account + project explicitly. Since 2026-11-20 `gifsy-deployer` is CI-only (least-privilege); laptop commands use
+the keyless ops identity — current flags in `RESUME.md` §8 (Platform / infra).
